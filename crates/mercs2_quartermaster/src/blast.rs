@@ -87,6 +87,12 @@ pub enum Claim {
     /// bank, the language whose copy of the bank it is in. One language's cue does not touch
     /// another's: each language's banks are separate entries (`<bank>.<language>`).
     SoundCue { guid: u32, language: Option<String> },
+    /// A shader store record, keyed on `pandemic_hash_m2(stem)`: the record `<stem>_3.sho` of
+    /// `shader3.bin` and `<stem>_3l.sho` of `shader3Low.bin`. The hash folds case, like the ids.
+    ShaderStem { key: u32 },
+    /// A shader registration name, keyed on `pandemic_hash_m2(name)`: the key the registry files
+    /// it under, first registration winning.
+    ShaderName { key: u32 },
 }
 
 impl Claim {
@@ -150,6 +156,14 @@ impl Claim {
                 (Some(n), None) => format!("sound cue {n} (0x{guid:08X})"),
                 (None, Some(l)) => format!("sound cue 0x{guid:08X} ({l})"),
                 (None, None) => format!("sound cue 0x{guid:08X}"),
+            },
+            Claim::ShaderStem { key } => match name {
+                Some(n) => format!("shader store record {n} (0x{key:08X})"),
+                None => format!("shader store record 0x{key:08X}"),
+            },
+            Claim::ShaderName { key } => match name {
+                Some(n) => format!("shader registration {n} (0x{key:08X})"),
+                None => format!("shader registration 0x{key:08X}"),
             },
         }
     }
@@ -233,6 +247,11 @@ pub fn merge_class(claim: &Claim, access: Access, intent: Intent) -> MergeClass 
         // A replaced cue has one winner in the table the game loads; a second replacement of the
         // same cue cannot also take effect.
         Claim::SoundCue { .. } => MergeClass::Exclusive,
+        // One store record has one blob in the stores `qm link` emits: a second edit of the same
+        // stem cannot also take effect.
+        Claim::ShaderStem { .. } => MergeClass::Exclusive,
+        // The registry keeps the first registration of a key, so a second is silently absent.
+        Claim::ShaderName { .. } => MergeClass::Exclusive,
     }
 }
 
@@ -453,12 +472,23 @@ pub fn claims(manifest: &Manifest) -> Vec<ClaimRecord> {
             Contribution::ReplaceAnimation { target, .. } => {
                 push(Access::Write, Claim::asset(target), Intent::ReplaceExclusive);
             }
-            // Novel shader. New hash, Additive.
-            Contribution::AddShader { name, .. } => {
-                push(Access::Write, Claim::asset(name), Intent::Additive);
+            // New store records and registrations. Classes of one add_shader may share a stem:
+            // one record, claimed once.
+            Contribution::AddShader { classes, .. } => {
+                let mut stems: Vec<u32> = Vec::new();
+                for class in classes {
+                    let key = mercs2_formats::hash::pandemic_hash_m2(&class.stem);
+                    if !stems.contains(&key) {
+                        stems.push(key);
+                        push(Access::Write, (Claim::ShaderStem { key }, Some(class.stem.clone())), Intent::Additive);
+                    }
+                    let key = mercs2_formats::hash::pandemic_hash_m2(&class.name);
+                    push(Access::Write, (Claim::ShaderName { key }, Some(class.name.clone())), Intent::Additive);
+                }
             }
             Contribution::ReplaceShader { target, .. } => {
-                push(Access::Write, Claim::asset(target), Intent::ReplaceExclusive);
+                let key = mercs2_formats::hash::pandemic_hash_m2(target);
+                push(Access::Write, (Claim::ShaderStem { key }, Some(target.clone())), Intent::ReplaceExclusive);
             }
             // Novel particle effect. New hash, Additive.
             Contribution::AddFx { name, .. } => {
