@@ -35,14 +35,32 @@ const RESIDENT_WAVEBANKS: &[&str] = &[
     "amb_shared", "collision_shared", "destruction_shared", "fol_shared", "music",
 ];
 
-/// Pull a `data`-chunk body for `name` of `type_hash` from the WAD (or the raw container for sounddb,
-/// whose body may be the container itself).
-fn bank_body(w: &mut wad::Wad, name: &str, type_hash: u32, raw_ok: bool) -> Option<Vec<u8>> {
-    let c = wad::extract_container_typed(w, m2(name), type_hash).ok()?;
+/// Every ASET `(asset_hash, type_id)` pair in the archive at `path`: a bank is present exactly when
+/// its row is.
+fn aset_rows(path: &str) -> std::collections::HashSet<(u32, u32)> {
+    let mut f = std::fs::File::open(path).unwrap_or_else(|e| panic!("open {path}: {e}"));
+    let size = f.metadata().unwrap_or_else(|e| panic!("stat {path}: {e}")).len();
+    let arch = mercs2_formats::ffcs::load_ffcs_archive(&mut f, size)
+        .unwrap_or_else(|e| panic!("read the FFCS tables of {path}: {e}"));
+    arch.aset.iter().map(|a| (a.asset_hash, a.type_id)).collect()
+}
+
+/// True when the archive's ASET has a row for `name` of `type_hash`.
+fn has_row(rows: &std::collections::HashSet<(u32, u32)>, name: &str, type_hash: u32) -> bool {
+    let type_id = mercs2_formats::aset_type_ids::type_id_for_type_hash(type_hash)
+        .unwrap_or_else(|| panic!("type hash 0x{type_hash:08X} has no ASET type_id"));
+    rows.contains(&(m2(name), type_id))
+}
+
+/// The `data`-chunk body for `name` of `type_hash` from the WAD (or the raw container for sounddb,
+/// whose body may be the container itself). Panics naming the bank when it cannot be extracted.
+fn bank_body(w: &mut wad::Wad, name: &str, type_hash: u32, raw_ok: bool) -> Vec<u8> {
+    let c = wad::extract_container_typed(w, m2(name), type_hash)
+        .unwrap_or_else(|e| panic!("{name} (type 0x{type_hash:08X}): {e}"));
     match mercs2_formats::ucfx::extract_chunk_body(&c, b"data") {
-        Some(b) => Some(b),
-        None if raw_ok => Some(c),
-        None => None,
+        Some(b) => b,
+        None if raw_ok => c,
+        None => panic!("{name} (type 0x{type_hash:08X}): container has no `data` chunk"),
     }
 }
 
@@ -50,6 +68,7 @@ fn bank_body(w: &mut wad::Wad, name: &str, type_hash: u32, raw_ok: bool) -> Opti
 fn resident_audio_extracts_decodes_and_routes_from_vz_wad() {
     let path = vz_wad_path();
     let mut w = wad::open(&path).unwrap_or_else(|e| panic!("open {path}: {e}"));
+    let rows = aset_rows(&path);
 
     // Load every resident wavebank into one engine + merge every per-bank sounddb into one catalog —
     // exactly what the game does at world-load.
@@ -57,28 +76,34 @@ fn resident_audio_extracts_decodes_and_routes_from_vz_wad() {
     let mut catalog = SoundDb::default();
     let mut found_banks = 0usize;
     for name in RESIDENT_WAVEBANKS {
-        if let Some(body) = bank_body(&mut w, name, TYPE_HASH_WAVEBANK, false) {
-            let audible = eng
-                .load_wavebank(&body)
-                .unwrap_or_else(|e| panic!("wavebank {name}: {e}"));
-            found_banks += 1;
-            println!("wavebank {name}: {} bytes -> {audible} audible clips", body.len());
-        } else {
-            println!("wavebank {name}: NOT FOUND");
-        }
-        if let Some(body) = bank_body(&mut w, name, TYPE_HASH_SOUNDBANK, false) {
+        assert!(
+            has_row(&rows, name, TYPE_HASH_WAVEBANK),
+            "resident wavebank {name} (0x{:08X}) has no ASET row in {path}",
+            m2(name)
+        );
+        let body = bank_body(&mut w, name, TYPE_HASH_WAVEBANK, false);
+        let audible = eng
+            .load_wavebank(&body)
+            .unwrap_or_else(|e| panic!("wavebank {name}: {e}"));
+        found_banks += 1;
+        println!("wavebank {name}: {} bytes -> {audible} audible clips", body.len());
+        // A wavebank's soundbank and sounddb are separate assets; each is loaded when its ASET row
+        // exists (`amb_shared` ships only the wavebank).
+        if has_row(&rows, name, TYPE_HASH_SOUNDBANK) {
+            let body = bank_body(&mut w, name, TYPE_HASH_SOUNDBANK, false);
             let cues = eng
                 .load_soundbank(&body)
                 .unwrap_or_else(|e| panic!("soundbank {name}: {e}"));
             println!("  soundbank {name}: {cues} cues");
         }
-        if let Some(body) = bank_body(&mut w, name, SOUNDDB_TYPE, true) {
+        if has_row(&rows, name, SOUNDDB_TYPE) {
+            let body = bank_body(&mut w, name, SOUNDDB_TYPE, true);
             let db = SoundDb::parse(&body).unwrap_or_else(|e| panic!("sounddb {name}: {e}"));
             println!("  sounddb {name}: {} cues (self 0x{:08X})", db.cues.len(), db.self_hash);
             catalog.merge(&db);
         }
     }
-    assert!(found_banks > 0, "no resident wavebank resolved from the WAD by name");
+    assert_eq!(found_banks, RESIDENT_WAVEBANKS.len(), "every resident wavebank loads");
 
     let resolvable = catalog.cues.iter().filter(|c| eng.resolve_cue(c).is_ok()).count();
     println!(
