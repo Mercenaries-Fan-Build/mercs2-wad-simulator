@@ -2084,10 +2084,40 @@ mod sound {
         }
     }
 
-    /// ★ `replace_sound_cue` on `ui_hud`, which `vz.wad` and `shell.wad` both carry: the Shipment ships
-    /// the forked soundbank to the overlay and to the shell patch, and its override wavebank to the
-    /// overlay; only `ui_PDA_Open_01_st` changes; the game's own sounddb routes the cue to a group that
-    /// plays the WAV; and the mod loader loads the wavebank.
+    /// The blocks of the shell patch `report` placed.
+    fn shell_patch_blocks(out: &Path, report: &build::BuildReport) -> Vec<PatchBlock> {
+        let shell = report.placements.iter().find(|p| p.destination == Destination::ShellPatch).expect("a shell patch");
+        blocks_of(out, shell)
+    }
+
+    /// The `shell.wad` beside the configured `vz.wad`, opened on its own.
+    fn shell_wad() -> GameStack {
+        let path = mercs2_quartermaster::sound::sibling_wad(&vz_wad(), "shell.wad").unwrap_or_else(|e| panic!("{e}"));
+        GameStack::open(std::slice::from_ref(&path)).unwrap_or_else(|e| panic!("could not open {}: {e}", path.display()))
+    }
+
+    /// The linked scripts block of `shell.wad` in `blocks`, parsed.
+    fn shell_scripts(blocks: &[PatchBlock]) -> mercs2_formats::scripts_block::ScriptsBlock {
+        let path = mercs2_quartermaster::link::SHELL_SCRIPT_BLOCKS[0].1;
+        let b = blocks.iter().find(|b| b.path_string == path).unwrap_or_else(|| panic!("no block {path}"));
+        let dec = mercs2_formats::sges::decompress_sges(&b.compressed_data).expect("sges");
+        mercs2_formats::scripts_block::ScriptsBlock::parse(&dec).expect("the shell scripts block parses")
+    }
+
+    /// The Lua chunk `name` of `block`.
+    fn chunk(block: &mercs2_formats::scripts_block::ScriptsBlock, name: &str) -> Vec<u8> {
+        block.extract_lua(block.find_script_by_name(name).unwrap_or_else(|| panic!("no script {name}"))).unwrap()
+    }
+
+    fn has(hay: &[u8], needle: &str) -> bool {
+        hay.windows(needle.len()).any(|w| w == needle.as_bytes())
+    }
+
+    /// ★ `replace_sound_cue` on `ui_hud`, which `vz.wad` and `shell.wad` both carry and both levels
+    /// load: the Shipment ships the forked soundbank and its override wavebank to the overlay and to
+    /// the shell patch; only `ui_PDA_Open_01_st` changes; the game's own sounddb routes the cue to a
+    /// group that plays the WAV; each level's loader loads the wavebank; and the shell patch carries
+    /// `shell.wad`'s CSUM row and its scripts block with the front end's loader.
     #[test]
     fn replace_sound_cue_forks_a_vz_and_shell_bank() {
         let dir = scratch("rsc_ui_hud");
@@ -2116,6 +2146,18 @@ mod sound {
 
         let wb_tables = tables_of(block_at(&ob, wavebank));
         assert_eq!((wb_tables[0].0, wb_tables[0].1), (wavebank, TYPE_HASH_WAVEBANK));
+        let shell_blocks = shell_patch_blocks(&out, &report);
+        assert_eq!(tables_of(block_at(&shell_blocks, wavebank)), wb_tables, "the front end's copy of the wavebank");
+        let scripts = shell_scripts(&shell_blocks);
+        assert!(has(&chunk(&scripts, "qm_shell_modloader"), "qm_pda-sound_ui_hud"));
+        assert!(has(&chunk(&scripts, "mrxsound"), "_qm_prev_EnterShellState"));
+        let shell_path = mercs2_quartermaster::sound::sibling_wad(&vz_wad(), "shell.wad").unwrap();
+        let shell_file = out.join(&report.placements.iter().find(|p| p.destination == Destination::ShellPatch).unwrap().name);
+        assert_eq!(
+            mercs2_formats::donor::base_csum(&shell_file).unwrap(),
+            mercs2_formats::donor::base_csum(&shell_path).unwrap(),
+            "the shell patch carries shell.wad's CSUM row"
+        );
 
         let mut eng = AudioEngine::default();
         eng.set_sounddb(SoundDb::parse(&table(&mut game, bank, SOUNDDB_HASH, 13)).unwrap());
@@ -2129,7 +2171,127 @@ mod sound {
         assert_eq!(eng.clip(wavebank, 0).unwrap().samples, samples);
 
         let log = report.log.join("\n");
-        assert!(log.contains("linked qm_modloader"), "the loader is minted: {log}");
+        assert!(log.contains("linked qm_modloader"), "the gameplay loader is minted: {log}");
+        assert!(log.contains("linked qm_shell_modloader"), "the front end's loader is minted: {log}");
+    }
+
+    /// ★ The front end plays the override: an engine holding `shell.wad`'s own `ui_hud` sounddb and the
+    /// shell patch's soundbank and wavebank — what the main menu has loaded once `EnterShellState` and
+    /// the front-end loader have run — resolves `ui_PDA_Open_01_st` to the WAV's samples.
+    #[test]
+    fn the_front_end_resolves_an_overridden_ui_hud_cue_to_the_wav() {
+        let dir = scratch("rsc_front_end");
+        let samples: Vec<i16> = (0..2400).map(|i| (i * 5 - 3000) as i16).collect();
+        let s = cue_override(&dir, "menu-sound", "ui_hud", None, "ui_PDA_Open_01_st", &samples);
+        let mut game = stack_for(&[&s]);
+        let out = dir.join("_build");
+        let report = build::build(&s, Some(&mut game), None, Some(&out), Some(&corpus())).expect("builds");
+        let blocks = shell_patch_blocks(&out, &report);
+        let bank = m2("ui_hud");
+        let wavebank = m2("qm_menu-sound_ui_hud");
+        let sb = tables_of(block_at(&blocks, bank));
+        let wb = tables_of(block_at(&blocks, wavebank));
+        let mut shell = shell_wad();
+        let mut eng = AudioEngine::default();
+        eng.set_sounddb(SoundDb::parse(&table(&mut shell, bank, SOUNDDB_HASH, TYPE_ID_SOUNDDB)).unwrap());
+        eng.load_soundbank(&sb[0].2).unwrap();
+        eng.load_wavebank(&wb[0].2).unwrap();
+        let entry = *eng.sounddb.find_cue_by_name("ui_PDA_Open_01_st").expect("shell.wad's sounddb routes the cue");
+        let resolved = eng.resolve_cue(&entry).expect("resolves");
+        let w: Vec<_> = resolved.waves().collect();
+        assert_eq!((w.len(), w[0].wavebank, w[0].index), (1, wavebank, 0));
+        assert_eq!(eng.clip(wavebank, 0).unwrap().samples, samples);
+    }
+
+    /// ★ `replace_sound_bank` on `ui_shell`, which `vz.wad` and `shell.wad` both carry and only the
+    /// front end loads: its soundbank, sounddb and wavebank ship in the shell patch alone, only the
+    /// front end's loader is linked, and the overlay carries nothing.
+    #[test]
+    fn a_ui_shell_override_ships_to_the_front_end_only() {
+        let dir = scratch("rsb_ui_shell");
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::write(dir.join("src/line.wav"), pcm16_wav(1, 22050, &[9; 300])).unwrap();
+        let s = named_shipment(
+            &dir,
+            "shell-sound",
+            &format!(
+                "  - kind: replace_sound_bank\n    bank: ui_shell\n    category: ui\n    cues:\n{}",
+                sound_cue_yaml("qm_shell_line", "src/line.wav", 0, 0)
+            ),
+        );
+        assert!(GameStack::open(&[vz_wad()]).unwrap().has_asset(m2("ui_shell"), TYPE_ID_SOUNDBANK), "vz.wad carries ui_shell");
+        let mut game = stack_for(&[&s]);
+        let out = dir.join("_build");
+        let report = build::build(&s, Some(&mut game), None, Some(&out), Some(&corpus())).expect("builds");
+        eprintln!("{}", report.log.join("\n"));
+        assert!(report.wad.is_none(), "nothing ships in the overlay");
+        let blocks = shell_patch_blocks(&out, &report);
+        tables_of(block_at(&blocks, m2("ui_shell")));
+        tables_of(block_at(&blocks, m2("qm_shell-sound_ui_shell")));
+        assert!(has(&chunk(&shell_scripts(&blocks), "qm_shell_modloader"), "qm_shell-sound_ui_shell"));
+        let log = report.log.join("\n");
+        assert!(!log.contains("linked qm_modloader"), "no gameplay loader: {log}");
+    }
+
+    /// ★ `add_sound` with `load_in: [front_end]`: the bank's block and the front end's loader ship in
+    /// the shell patch, and nothing in the overlay.
+    #[test]
+    fn a_front_end_add_sound_ships_in_the_shell_patch() {
+        let dir = scratch("add_sound_front_end");
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::write(dir.join("src/a.wav"), pcm16_wav(1, 22050, &[5; 64])).unwrap();
+        let s = named_shipment(
+            &dir,
+            "menu-bank",
+            &format!(
+                "  - kind: add_sound\n    bank: qm_menu_bank\n    category: ui\n    load_in: [front_end]\n    cues:\n{}",
+                sound_cue_yaml("qm_menu_click", "src/a.wav", 0, 0)
+            ),
+        );
+        let mut game = stack_for(&[&s]);
+        let out = dir.join("_build");
+        let report = build::build(&s, Some(&mut game), None, Some(&out), Some(&corpus())).expect("builds");
+        assert!(report.wad.is_none(), "nothing ships in the overlay");
+        let blocks = shell_patch_blocks(&out, &report);
+        let types: Vec<u32> = tables_of(block_at(&blocks, m2("qm_menu_bank"))).iter().map(|t| t.1).collect();
+        assert_eq!(types, vec![TYPE_HASH_SOUNDBANK, SOUNDDB_HASH, TYPE_HASH_WAVEBANK]);
+        let loader = chunk(&shell_scripts(&blocks), "qm_shell_modloader");
+        assert!(has(&loader, "qm_menu_bank") && has(&loader, "LoadSoundBank"));
+    }
+
+    /// ★ Census of the carried soundbanks against the retail load sites: `shell.wad` carries exactly
+    /// the three the front end loads (`sound::FRONT_END_SOUNDBANK_LOADS`); `vz.wad` carries 76, among
+    /// them the 11 `LoadBanks` names (`sound::GAMEPLAY_SOUNDBANK_LOADS`) and `ui_shell`, and the other
+    /// 64 have no literal Lua load site.
+    #[test]
+    fn the_carried_soundbanks_against_the_retail_load_sites() {
+        use mercs2_quartermaster::sound::{FRONT_END_SOUNDBANK_LOADS, GAMEPLAY_SOUNDBANK_LOADS};
+        let hashes = |names: &[&str]| -> BTreeSet<u32> { names.iter().map(|n| m2(n)).collect() };
+        let shell: BTreeSet<u32> = shell_wad().asset_hashes(TYPE_ID_SOUNDBANK).into_iter().collect();
+        assert_eq!(shell, hashes(FRONT_END_SOUNDBANK_LOADS));
+        let vz: BTreeSet<u32> = GameStack::open(&[vz_wad()]).unwrap().asset_hashes(TYPE_ID_SOUNDBANK).into_iter().collect();
+        let mut named = hashes(GAMEPLAY_SOUNDBANK_LOADS);
+        named.insert(m2("ui_shell"));
+        assert_eq!(vz.len(), 76);
+        assert!(named.is_subset(&vz), "every named bank is in vz.wad");
+        assert_eq!(vz.difference(&named).count(), 64);
+    }
+
+    /// ★ Census: the front end's PDA cues. `ui_PDA_Accept`, `ui_PDA_Cancel` and `ui_PDA_Scroll` are each
+    /// routed by exactly one of `shell.wad`'s sounddbs, and that bank is `ui_hud`.
+    #[test]
+    fn the_front_end_routes_the_pda_cues_through_ui_hud() {
+        let mut shell = shell_wad();
+        let banks: Vec<(u32, SoundDb)> = shell
+            .asset_hashes(TYPE_ID_SOUNDDB)
+            .into_iter()
+            .map(|h| (h, SoundDb::parse(&table(&mut shell, h, SOUNDDB_HASH, TYPE_ID_SOUNDDB)).unwrap()))
+            .collect();
+        for cue in ["ui_PDA_Accept", "ui_PDA_Cancel", "ui_PDA_Scroll"] {
+            let routes: Vec<u32> = banks.iter().filter(|(_, db)| db.find_cue_by_name(cue).is_some()).map(|(h, _)| *h).collect();
+            eprintln!("{cue}: {:?}", routes.iter().map(|h| format!("0x{h:08X}")).collect::<Vec<_>>());
+            assert_eq!(routes, vec![m2("ui_hud")], "{cue}");
+        }
     }
 
     /// ★ `replace_sound_bank` on `vo_mattias` in English: the bank's soundbank and sounddb ship under
@@ -2268,7 +2430,20 @@ mod sound {
         let path = format!("blocks\\VZ\\mod_{:08x}.block", m2("ui_hud"));
         assert!(report.plan.link_block_paths.contains(&path), "the plan promises the merged bank");
         let overlay = report.placements.iter().find(|p| p.destination == Destination::Overlay).expect("link overlay");
-        assert!(report.placements.iter().any(|p| p.destination == Destination::ShellPatch), "and its shell patch");
+        let shell_patch = report.placements.iter().find(|p| p.destination == Destination::ShellPatch).expect("and its shell patch");
+        // The link's shell patch: the merged bank and the front end's scripts block, whose loader loads
+        // both Shipments' wavebanks in load order; stamped with shell.wad's CSUM row.
+        let shell_blocks = blocks_of(&out, shell_patch);
+        block_at(&shell_blocks, m2("ui_hud"));
+        let loader = chunk(&shell_scripts(&shell_blocks), "qm_shell_modloader");
+        let at = |needle: &str| loader.windows(needle.len()).position(|w| w == needle.as_bytes()).unwrap_or_else(|| panic!("{needle}"));
+        assert!(at("qm_pda-open_ui_hud") < at("qm_pda-other_ui_hud"), "load order");
+        assert!(report.plan.link_block_paths.contains(&mercs2_quartermaster::link::SHELL_SCRIPT_BLOCKS[0].1.to_string()));
+        let shell_path = mercs2_quartermaster::sound::sibling_wad(&vz_wad(), "shell.wad").unwrap();
+        assert_eq!(
+            mercs2_formats::donor::base_csum(out.join(&shell_patch.name)).unwrap(),
+            mercs2_formats::donor::base_csum(&shell_path).unwrap()
+        );
         let merged = Soundbank::parse(&tables_of(block_at(&blocks_of(&out, overlay), m2("ui_hud")))[0].2).unwrap();
         let mut changed = [a_index, b_index];
         changed.sort();
@@ -2316,7 +2491,7 @@ mod sound {
                 &dir,
                 "adder",
                 &format!(
-                    "  - kind: add_sound\n    bank: qm_adder_bank\n    category: ui\n    cues:\n{}",
+                    "  - kind: add_sound\n    bank: qm_adder_bank\n    category: ui\n    load_in: [gameplay]\n    cues:\n{}",
                     sound_cue_yaml(cue, "src/a.wav", 0, 0)
                 ),
             );
