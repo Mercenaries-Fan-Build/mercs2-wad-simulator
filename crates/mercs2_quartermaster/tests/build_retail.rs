@@ -293,7 +293,7 @@ fn size_mismatch_refused_message_names_both_sizes() {
 ///   `al_hum_boss_ub`         NON-primary, 4-rung streamed  -> M0007 + M0009
 #[test]
 fn streamed_and_shared_targets_are_flagged_and_resident_ones_are_not() {
-    let game = retail_game();
+    let mut game = retail_game();
     use mercs2_formats::hash::pandemic_hash_m2;
     use mercs2_quartermaster::lint::{self, aset_row_is_single_block};
     const TEX: u32 = mercs2_formats::types::TYPE_ID_TEXTURE;
@@ -316,7 +316,7 @@ fn streamed_and_shared_targets_are_flagged_and_resident_ones_are_not() {
         "  - kind: replace_texture\n    target: pmc_hum_mattias_v3_ub\n    image: src/t.png\n",
     );
     assert!(
-        lint::game_checks(&quiet.manifest, &game).is_empty(),
+        lint::game_checks(&quiet.manifest, &mut game).is_empty(),
         "a resident, primary target must not be flagged"
     );
 
@@ -328,7 +328,7 @@ fn streamed_and_shared_targets_are_flagged_and_resident_ones_are_not() {
         &dir2,
         "  - kind: replace_texture\n    target: al_hum_boss_ub\n    image: src/t.png\n",
     );
-    let codes: Vec<&str> = lint::game_checks(&fires.manifest, &game)
+    let codes: Vec<&str> = lint::game_checks(&fires.manifest, &mut game)
         .iter()
         .map(|d| d.rule.code)
         .collect();
@@ -1559,14 +1559,14 @@ fn add_outfit_without_donor_and_unknown_wearer_is_refused() {
 /// because the engine references movies by fixed name and nothing points at a new one.
 #[test]
 fn add_movie_replacement_is_quiet_but_a_novel_name_warns() {
-    let game = retail_game();
+    let mut game = retail_game();
     use mercs2_quartermaster::lint;
 
     // `MINIMAP` is a real cfx_pack in vz.wad (the mounted stack) — replacing it is proven.
     let dir = scratch("m0192_quiet");
     let quiet = shipment(&dir, "  - kind: add_movie\n    name: MINIMAP\n    movie: src/x.gfx\n");
     assert!(
-        !lint::game_checks(&quiet.manifest, &game)
+        !lint::game_checks(&quiet.manifest, &mut game)
             .iter()
             .any(|d| d.rule.code == "M0192"),
         "replacing a shipped movie must not warn"
@@ -1579,7 +1579,7 @@ fn add_movie_replacement_is_quiet_but_a_novel_name_warns() {
         "  - kind: add_movie\n    name: qm_totally_novel_movie\n    movie: src/x.gfx\n",
     );
     assert!(
-        lint::game_checks(&fires.manifest, &game)
+        lint::game_checks(&fires.manifest, &mut game)
             .iter()
             .any(|d| d.rule.code == "M0192"),
         "a novel movie name must warn that nothing references it"
@@ -1594,7 +1594,7 @@ fn add_movie_replacement_is_quiet_but_a_novel_name_warns() {
         "  - kind: add_ui\n    name: qm_totally_novel_movie\n    movie: src/x.gfx\n",
     );
     assert!(
-        !lint::game_checks(&ui.manifest, &game)
+        !lint::game_checks(&ui.manifest, &mut game)
             .iter()
             .any(|d| d.rule.code == "M0192"),
         "add_ui wires its own movie up, so a novel name must NOT warn"
@@ -1607,7 +1607,7 @@ fn add_movie_replacement_is_quiet_but_a_novel_name_warns() {
 /// because `MrxLayerManager.MarkForAddition` keys on the layer NAME and a wrong one reaches nothing.
 #[test]
 fn activate_layer_of_a_real_layer_is_quiet_but_an_unknown_name_warns() {
-    let game = retail_game();
+    let mut game = retail_game();
     use mercs2_quartermaster::lint;
     use mercs2_quartermaster::manifest::asset_hash;
     use mercs2_quartermaster::names::NameTable;
@@ -1631,7 +1631,7 @@ fn activate_layer_of_a_real_layer_is_quiet_but_an_unknown_name_warns() {
     let dir = scratch("m0194_quiet");
     let quiet = shipment(&dir, &format!("  - kind: activate_layer\n    layer: {real_layer}\n"));
     assert!(
-        !lint::game_checks(&quiet.manifest, &game)
+        !lint::game_checks(&quiet.manifest, &mut game)
             .iter()
             .any(|d| d.rule.code == "M0194"),
         "activating a layer the stack ships ({real_layer}) must not warn"
@@ -1644,7 +1644,7 @@ fn activate_layer_of_a_real_layer_is_quiet_but_an_unknown_name_warns() {
         "  - kind: activate_layer\n    layer: vz_state_qm_totally_novel\n",
     );
     assert!(
-        lint::game_checks(&fires.manifest, &game)
+        lint::game_checks(&fires.manifest, &mut game)
             .iter()
             .any(|d| d.rule.code == "M0194"),
         "an unknown layer name must warn that MarkForAddition reaches nothing"
@@ -1659,7 +1659,7 @@ fn activate_layer_of_a_real_layer_is_quiet_but_an_unknown_name_warns() {
         ),
     );
     assert!(
-        lint::game_checks(&repl.manifest, &game)
+        lint::game_checks(&repl.manifest, &mut game)
             .iter()
             .any(|d| d.rule.code == "M0194"),
         "an unknown replaces: name must warn too"
