@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 /// `load-request.json`'s own format number. Unrelated to the manifest format.
 pub const REQUEST_FORMAT: u32 = 1;
 /// `load-plan.json`'s own format number. Unrelated to the manifest format.
-pub const PLAN_FORMAT: u32 = 1;
+pub const PLAN_FORMAT: u32 = 2;
 /// The plan's file name inside `--out`.
 pub const PLAN_FILE: &str = "load-plan.json";
 /// The longest request id, in UTF-8 bytes.
@@ -184,6 +184,10 @@ pub struct LoadPlan {
     /// block, then each merged sound bank's block. A deploy step drops the per-Shipment copies of
     /// exactly these.
     pub link_block_paths: Vec<String>,
+    /// Every game data file `qm link` emits for the set (`data/shader3.bin`, `data/shader3Low.bin`):
+    /// both stores when any Shipment has a shader kind. A deploy step drops the per-Shipment
+    /// `data_file` placements of exactly these and deploys link's.
+    pub link_file_paths: Vec<crate::shader::DataFile>,
     pub findings: Vec<Finding>,
 }
 
@@ -206,6 +210,9 @@ pub struct PlanItem {
     pub plugins: Vec<PluginEntry>,
     pub runtime_dlls: Vec<RuntimeDllEntry>,
     pub placed_files: Vec<PlacedFileEntry>,
+    /// The game data files this Shipment's contributions edit: both shader stores when it has a
+    /// shader kind. Its build reads their originals from `--original-data`.
+    pub data_files: Vec<crate::shader::DataFile>,
 }
 
 /// One `native_hook` that ships a plugin.
