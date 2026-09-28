@@ -2536,19 +2536,20 @@ mod tests {
             let (count, entries) = parse_block_entry_table(&dec);
             let mut pos = 4 + count as usize * 16;
             let mut src_mesh: Option<crate::havok::MeshShape> = None;
-            'outer: for e in &entries {
+            'outer: for (ei, e) in entries.iter().enumerate() {
                 let end = pos + e.chunk_size as usize;
                 if end > dec.len() {
                     break;
                 }
                 if let Some(b) = extract_chunk_body(&dec[pos..end], b"PHY2") {
-                    if let Ok(pf) = parse_phy2_body(&b) {
-                        for s in pf.shapes {
-                            if let Shape::Mesh(m) = s {
-                                if !m.indices.is_empty() && m.vertices.len() <= 65_536 {
-                                    src_mesh = Some(m);
-                                    break 'outer;
-                                }
+                    let pf = parse_phy2_body(&b).unwrap_or_else(|e2| {
+                        panic!("block 767 entry {ei} (0x{:08X}): PHY2 does not parse: {e2}", e.name_hash)
+                    });
+                    for s in pf.shapes {
+                        if let Shape::Mesh(m) = s {
+                            if !m.indices.is_empty() && m.vertices.len() <= 65_536 {
+                                src_mesh = Some(m);
+                                break 'outer;
                             }
                         }
                     }
