@@ -358,15 +358,23 @@ fn resolve_names(explicit: Option<&Path>) -> Option<NameTable> {
 /// Resolve the game stack: an explicit path wins, otherwise host discovery.
 ///
 /// `--game` may name `vz.wad`, the install root or its `data` folder, the same as for
-/// `qm preflight` ([`compat::resolve_vz_wad`]). The manifest is never consulted. A Shipment that
-/// could name its own game folder would be a Shipment that behaves differently on the author's
-/// machine than on anyone else's.
-fn resolve_game(explicit: Option<&Path>) -> Result<GameStack, ExitCode> {
+/// `qm preflight` ([`compat::resolve_vz_wad`]). No manifest names a path: a Shipment that could
+/// name its own game folder would be a Shipment that behaves differently on the author's machine
+/// than on anyone else's. The manifests decide only which language WADs beside `vz.wad` join the
+/// stack ([`compat::game_stack_paths`]).
+fn resolve_game<'a>(
+    explicit: Option<&Path>,
+    manifests: impl IntoIterator<Item = &'a mercs2_quartermaster::Manifest>,
+) -> Result<GameStack, ExitCode> {
     let vz = compat::resolve_vz_wad(explicit).map_err(|e| {
         eprintln!("error: {e}\nnote: `qm lint` needs no game install and will still run.");
         ExitCode::from(EXIT_UNUSABLE)
     })?;
-    GameStack::open(&[vz]).map_err(|e| {
+    let paths = compat::game_stack_paths(&vz, manifests).map_err(|e| {
+        eprintln!("error: {e}");
+        ExitCode::from(EXIT_UNUSABLE)
+    })?;
+    GameStack::open(&paths).map_err(|e| {
         eprintln!("error: {e}");
         ExitCode::from(EXIT_UNUSABLE)
     })
@@ -394,7 +402,7 @@ fn cmd_lint(
     let mut found = lint::lint(&shipment.manifest, Some(&shipment.root), names.as_ref());
 
     if with_game {
-        match resolve_game(game_dir) {
+        match resolve_game(game_dir, [&shipment.manifest]) {
             Ok(mut stack) => found.extend(lint::game_checks(&shipment.manifest, &mut stack)),
             Err(code) => return code,
         }
@@ -614,7 +622,7 @@ fn cmd_build(
             return ExitCode::from(EXIT_UNUSABLE);
         }
     };
-    let mut stack = match resolve_game(game_dir) {
+    let mut stack = match resolve_game(game_dir, [&shipment.manifest]) {
         Ok(s) => s,
         Err(code) => return code,
     };
@@ -653,7 +661,7 @@ fn cmd_build(
 }
 
 fn cmd_extract_states(target: &str, game_dir: Option<&Path>, names_path: Option<&Path>) -> ExitCode {
-    let mut stack = match resolve_game(game_dir) {
+    let mut stack = match resolve_game(game_dir, []) {
         Ok(s) => s,
         Err(code) => return code,
     };
@@ -676,7 +684,7 @@ fn cmd_extract_states(target: &str, game_dir: Option<&Path>, names_path: Option<
 }
 
 fn cmd_extract_world(layer: &str, game_dir: Option<&Path>, names_path: Option<&Path>) -> ExitCode {
-    let mut stack = match resolve_game(game_dir) {
+    let mut stack = match resolve_game(game_dir, []) {
         Ok(s) => s,
         Err(code) => return code,
     };
@@ -888,7 +896,7 @@ fn cmd_link(
         Ok(o) => o,
         Err(code) => return code,
     };
-    let mut stack = match resolve_game(game_dir) {
+    let mut stack = match resolve_game(game_dir, opened.iter().map(|s| &s.manifest)) {
         Ok(s) => s,
         Err(code) => return code,
     };
