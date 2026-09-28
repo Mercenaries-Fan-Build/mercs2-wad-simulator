@@ -255,6 +255,11 @@ pub enum Destination {
     /// folder). No bytes are written to the output directory; [`Placement::sha256`] and
     /// [`Placement::bytes`] describe `from` as the build read it.
     StreamCopy { from: String, to: String },
+    /// A game data file at `relative` (a closed set: `data/shader3.bin`, `data/shader3Low.bin`),
+    /// written under the output directory at the same relative path: the original store from
+    /// `--original-data`, whose sha256 is `base_sha256`, with the Shipment's (or, from `qm link`,
+    /// the installed set's) shader edits applied.
+    DataFile { relative: crate::shader::DataFile, base_sha256: String },
 }
 
 /// One emitted artifact and its digest.
@@ -551,14 +556,15 @@ enum Lowering {
 ///
 /// Fails the build on any blocking finding. That is the whole value: both structural bugs this
 /// crate has shipped were invisible in the manifest and plain in the bytes.
-fn verify_emitted(wad: &[u8]) -> Result<Vec<crate::lint::Diagnostic>, BuildError> {
+fn verify_emitted(wad: &[u8], keys: &crate::shader::ShaderKeys) -> Result<Vec<crate::lint::Diagnostic>, BuildError> {
     let contents =
         mercs2_formats::patch_wad::read_patch_wad(wad).map_err(|m| BuildError::Lower {
             index: 0,
             kind: "verify",
             message: format!("the WAD we just wrote does not read back: {m}"),
         })?;
-    let found = crate::lint::artifact_checks(&contents.blocks);
+    let mut found = crate::lint::artifact_checks(&contents.blocks);
+    found.extend(crate::lint::shader_key_checks(&contents.blocks, &keys.pixel, &keys.vertex));
     if crate::lint::blocks_build(&found) {
         return Err(BuildError::Artifact { diagnostics: found });
     }
@@ -618,6 +624,11 @@ pub enum BuildError {
     },
     /// The plan or a superseded-file probe could not be computed at all.
     Compat(crate::compat::CompatError),
+    /// A shader kind is present and no `--original-data` directory was given: the stores are read
+    /// only from there.
+    OriginalDataRequired { index: usize, kind: &'static str },
+    /// The original stores, or the game's VT and R2VB store pairs, do not read.
+    ShaderData(String),
 }
 
 impl std::fmt::Display for BuildError {
@@ -690,6 +701,13 @@ impl std::fmt::Display for BuildError {
                  first (qm never deletes it)"
             ),
             BuildError::Compat(e) => write!(f, "{e}"),
+            BuildError::OriginalDataRequired { index, kind } => write!(
+                f,
+                "contributions[{index}] ({kind}) edits the shader stores, which are read only from \
+                 the original data directory: pass --original-data <dir> holding the game's own \
+                 shader3.bin and shader3Low.bin"
+            ),
+            BuildError::ShaderData(message) => write!(f, "shader stores: {message}"),
         }
     }
 }
@@ -2046,7 +2064,7 @@ fn lower_skinned(
     // passes `false`.
     single_group: bool,
     log: &mut Vec<String>,
-) -> Result<(Vec<u8>, Vec<PatchBlock>), BuildError> {
+) -> Result<(Vec<u8>, Vec<PatchBlock>, Vec<usize>), BuildError> {
     let lower_err = |m: String| BuildError::Lower {
         index,
         kind,
@@ -2494,7 +2512,7 @@ fn lower_skinned(
         )));
     }
 
-    Ok((out.block, tex_blocks))
+    Ok((out.block, tex_blocks, out.hosts))
 }
 
 /// Re-emit an edited placement LAYER block as an overlay that shadows the base by PTHS path.
@@ -2531,6 +2549,9 @@ fn lower(
     names: Option<&NameTable>,
     // `shipment.name`: an `add_runtime_dll` must be named after it.
     shipment_name: &str,
+    // The whole manifest: `add_model`'s shader import resolves against the Shipment's own
+    // `add_shader` registrations.
+    manifest: &crate::manifest::Manifest,
     log: &mut Vec<String>,
 ) -> Result<Lowering, BuildError> {
     let kind = contribution.kind();
@@ -2658,10 +2679,11 @@ fn lower(
                 // `textures:` is the model's OWN skin. Empty stays the old behaviour — a prop
                 // wears the donor's materials, which is right for a prop and was wrong for a novel
                 // mesh, the case the field was added for.
-                let (new_block, tex_blocks) = lower_skinned(
+                let (mut new_block, tex_blocks, hosts) = lower_skinned(
                     index, kind, name, model, donor_name, rt, root, game, names, textures, false,
                     log,
                 )?;
+                import_shaders(index, kind, name, &root.join(model), &mut new_block, &hosts, manifest, root, log)?;
                 let hash = crate::manifest::asset_hash(name);
                 let aset = AsetEntry::new(hash, 0xFFFF_FFFF, 0x0000_FFFF, TYPE_ID_MODEL);
                 let block = PatchBlock::from_decompressed(
@@ -2815,6 +2837,8 @@ fn lower(
                     regen
                 }
             };
+            let mut new_block = new_block;
+            import_shaders(index, kind, name, &root.join(model), &mut new_block, &[host_group], manifest, root, log)?;
 
             let aset = AsetEntry::new(hash, 0xFFFF_FFFF, 0x0000_FFFF, TYPE_ID_MODEL);
             let block = PatchBlock::from_decompressed(
@@ -2925,7 +2949,7 @@ fn lower(
 
             // SKINNED path — an outfit that animates has to be re-posed onto the donor's rig.
             if let Some(rt) = retarget {
-                let (new_block, tex_blocks) = lower_skinned(
+                let (new_block, tex_blocks, _hosts) = lower_skinned(
                     index, kind, name, model, donor_name, rt, root, game, names, textures,
                     *single_group, log,
                 )?;
@@ -3181,8 +3205,9 @@ fn lower(
                 log,
             )
         }
-        Contribution::AddShader { name, blob } => opaque_new_asset(root, blob, name, TYPE_HASH_MODEL, TYPE_ID_MODEL, index, kind),
-        Contribution::ReplaceShader { target, blob } => opaque_new_asset(root, blob, target, TYPE_HASH_MODEL, TYPE_ID_MODEL, index, kind),
+        // Store edits, not WAD blocks: `build` applies every shader kind of the Shipment to the
+        // original stores together ([`crate::shader::apply_edits`]) and writes `data/shader3*.bin`.
+        Contribution::AddShader { .. } | Contribution::ReplaceShader { .. } => Ok(Lowering::Nothing),
         Contribution::AddFx { name, payload } => opaque_new_asset(root, payload, name, TYPE_HASH_EFFECT, TYPE_ID_EFFECT, index, kind),
         Contribution::ReplaceFx { target, payload } => opaque_new_asset(root, payload, target, TYPE_HASH_EFFECT, TYPE_ID_EFFECT, index, kind),
         Contribution::ReplaceTerrainCell { target, cell } => opaque_new_asset(root, cell, target, TYPE_HASH_TERRAIN_MESH, TYPE_ID_TERRAIN_MESH, index, kind),
@@ -4232,6 +4257,7 @@ pub fn build(
     names: Option<&NameTable>,
     out_dir: Option<&Path>,
     corpus_root: Option<&Path>,
+    original_data: Option<&Path>,
 ) -> Result<BuildReport, BuildError> {
     let mut log = Vec::new();
     let manifest = &shipment.manifest;
@@ -4242,6 +4268,26 @@ pub fn build(
     if let Some(g) = game.as_deref_mut() {
         diagnostics.extend(lint::game_checks(manifest, g));
     }
+    // The shader kinds read the original stores from `--original-data` and the game's VT and R2VB
+    // pairs from its `data` folder, so both are required, never skipped.
+    let shader_kind = manifest
+        .contributions
+        .iter()
+        .enumerate()
+        .find(|(_, c)| matches!(c, Contribution::AddShader { .. } | Contribution::ReplaceShader { .. }));
+    if let Some((index, c)) = shader_kind {
+        let Some(original) = original_data else {
+            return Err(BuildError::OriginalDataRequired { index, kind: c.kind() });
+        };
+        let Some(g) = game.as_deref() else {
+            return Err(BuildError::GameRequired { index, kind: c.kind() });
+        };
+        let data = crate::shader::game_data_dir(g).map_err(BuildError::ShaderData)?;
+        diagnostics.extend(
+            lint::shader_game_checks(manifest, &shipment.root, &data, original).map_err(BuildError::ShaderData)?,
+        );
+    }
+    let shader_keys = crate::shader::ShaderKeys::with(&crate::shader::added(&manifest.shipment.name, manifest));
     if lint::blocks_build(&diagnostics) {
         return Err(BuildError::Blocked(diagnostics));
     }
@@ -4306,6 +4352,7 @@ pub fn build(
             game.as_deref_mut(),
             names,
             &manifest.shipment.name,
+            manifest,
             &mut log,
         )? {
             Lowering::Nothing => {}
@@ -4530,7 +4577,7 @@ pub fn build(
         })?;
         // Self-check BEFORE writing: a WAD that would hang the game should not reach the disk at
         // all, where a later step could mistake its presence for success.
-        let found = verify_emitted(&wad)?;
+        let found = verify_emitted(&wad, &shader_keys)?;
         for d in &found {
             log.push(format!("self-check: {d}"));
         }
@@ -4577,7 +4624,7 @@ pub fn build(
                     message: m,
                 }
             })?;
-        let found = verify_emitted(&wad)?;
+        let found = verify_emitted(&wad, &shader_keys)?;
         for d in &found {
             log.push(format!("self-check ({language}.wad): {d}"));
         }
@@ -4640,6 +4687,7 @@ pub fn build(
             &shell_blocks,
             shell_csum(game, "shell patch")?,
             Destination::ShellPatch,
+            &shader_keys,
             &mut log,
             &mut diagnostics,
         )?);
@@ -4655,6 +4703,7 @@ pub fn build(
                 language: language.token().to_string(),
                 relative: relative.clone(),
             },
+            &shader_keys,
             &mut log,
             &mut diagnostics,
         )?);
@@ -4700,6 +4749,22 @@ pub fn build(
         });
     }
 
+    // The shader stores: the originals with this Shipment's edits applied in contribution order.
+    if let Some(original) = original_data.filter(|_| crate::shader::has_shader_kinds(manifest)) {
+        let game = game.as_deref().ok_or(BuildError::GameRequired { index: 0, kind: "shader stores" })?;
+        let edits = crate::shader::shipment_edits(&manifest.shipment.name, manifest, &shipment.root).map_err(|f| {
+            let first = &f[0];
+            BuildError::Lower { index: first.index, kind: "shader", message: first.message.clone() }
+        })?;
+        placements.extend(write_shader_stores(original, game, &edits, &out_dir, &mut log)?);
+    }
+    if let Some(header) = crate::shader::header(&manifest.shipment.name, manifest) {
+        let name = format!("{}.shaders.h", manifest.shipment.name);
+        let path = out_dir.join(&name);
+        std::fs::write(&path, header).map_err(|e| BuildError::Io { path: path.clone(), message: e.to_string() })?;
+        log.push(format!("wrote {name}: the shader registration tables for the Shipment's ASI"));
+    }
+
     // The placement record: what goes where, each with its digest. Deploy/undo consumes this — a
     // file drop cannot be backed out without it.
     write_placement_record(&out_dir, &placements)?;
@@ -4716,6 +4781,78 @@ pub fn build(
         placements,
         log,
     })
+}
+
+/// `add_model`'s shader import ([`crate::shader_import`]): resolve each host group's vertex shaders
+/// and its materials' pixel shaders from the retail convention or the glTF's `extras`, and write
+/// them into `block`.
+fn import_shaders(
+    index: usize,
+    kind: &'static str,
+    name: &str,
+    model: &Path,
+    block: &mut [u8],
+    hosts: &[usize],
+    manifest: &crate::manifest::Manifest,
+    root: &Path,
+    log: &mut Vec<String>,
+) -> Result<(), BuildError> {
+    let lower = |message: String| BuildError::Lower { index, kind, message };
+    let declared = crate::shader_import::read_declared(model).map_err(lower)?;
+    let added = crate::shader::added(&manifest.shipment.name, manifest);
+    let inputs = crate::shader_import::added_vertex_inputs(manifest, root).map_err(lower)?;
+    for &host in hosts {
+        let done = crate::shader_import::import_into_block(block, host, &declared, &added, &inputs)
+            .map_err(|e| lower(format!("[{}] {name}: {}", e.code, e.message)))?;
+        log.push(format!(
+            "contributions[{index}] {kind} {name}: group {} vertex shader {}, shadow {}, pixel {}",
+            done.group,
+            done.vertex,
+            done.shadow,
+            done.pixels.iter().map(|(m, p)| format!("material {m} {p}")).collect::<Vec<_>>().join(", ")
+        ));
+    }
+    Ok(())
+}
+
+/// Apply `edits` to the original stores in `original` and write both under `out_dir/data/`, each
+/// recorded as a [`Destination::DataFile`] naming the original's sha256.
+fn write_shader_stores(
+    original: &Path,
+    game: &GameStack,
+    edits: &[crate::shader::Edit],
+    out_dir: &Path,
+    log: &mut Vec<String>,
+) -> Result<Vec<Placement>, BuildError> {
+    let originals = crate::shader::read_originals(original).map_err(BuildError::ShaderData)?;
+    let data = crate::shader::game_data_dir(game).map_err(BuildError::ShaderData)?;
+    let extra = crate::shader::read_extra_pairs(&data).map_err(BuildError::ShaderData)?;
+    let stores = crate::shader::apply_edits(&originals, &extra, edits).map_err(|e| match e.at {
+        Some((_, index)) => BuildError::Lower { index, kind: "shader", message: format!("[{}] {}", e.code, e.message) },
+        None => BuildError::ShaderData(e.to_string()),
+    })?;
+    let mut out = Vec::new();
+    for (file, bytes) in stores {
+        let path = out_dir.join(file.relative());
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| BuildError::Io { path: parent.to_path_buf(), message: e.to_string() })?;
+        }
+        std::fs::write(&path, &bytes).map_err(|e| BuildError::Io { path: path.clone(), message: e.to_string() })?;
+        let (written, digest) = sha256_file(&path)?;
+        let base = originals.sha256[&file].clone();
+        let n = edits.iter().filter(|e| e.file == file).count();
+        log.push(format!(
+            "wrote {}: {written} bytes, sha256 {digest}, {n} edit(s) over the original (sha256 {base})",
+            file.relative()
+        ));
+        out.push(Placement {
+            name: file.file_name().to_string(),
+            bytes: written,
+            sha256: digest,
+            destination: Destination::DataFile { relative: file, base_sha256: base },
+        });
+    }
+    Ok(out)
 }
 
 /// The size and sha256 of the file at `path`, read in chunks.
@@ -4745,6 +4882,7 @@ fn write_patch_wad(
     blocks: &[PatchBlock],
     csum: (u32, Option<u32>),
     destination: Destination,
+    keys: &crate::shader::ShaderKeys,
     log: &mut Vec<String>,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Result<Placement, BuildError> {
@@ -4755,7 +4893,7 @@ fn write_patch_wad(
             message: format!("{relative}: {m}"),
         }
     })?;
-    let found = verify_emitted(&wad)?;
+    let found = verify_emitted(&wad, keys)?;
     for d in &found {
         log.push(format!("self-check ({relative}): {d}"));
     }
@@ -5084,6 +5222,7 @@ pub fn link_installed(
     game: &mut GameStack,
     corpus_root: &Path,
     out_dir: &Path,
+    original_data: Option<&Path>,
 ) -> Result<LinkReport, BuildError> {
     // A stale plan must never read as this run's, whatever happens below.
     crate::plan::remove_stale(out_dir).map_err(|message| BuildError::Io {
@@ -5143,6 +5282,96 @@ pub fn link_installed(
         ));
     }
 
+    // The shader stores: every Shipment's edits applied to the originals in load order, one store
+    // per file for the whole set.
+    let mut added = Vec::new();
+    for s in &shipments {
+        added.extend(crate::shader::added(&s.manifest.shipment.name, &s.manifest));
+    }
+    let shader_keys = crate::shader::ShaderKeys::with(&added);
+    // M0235 / M0236 over the set: the shaders each add_model declares must be registered by retail,
+    // by its own Shipment or by one it requires (transitively), since only those load before it.
+    for (si, s) in shipments.iter().enumerate() {
+        let mut providers: Vec<&str> = vec![order_ids[si].as_str()];
+        let mut i = 0;
+        while i < providers.len() {
+            let consumer = providers[i];
+            for e in plan.edges.iter().filter(|e| e.then == consumer) {
+                if !providers.contains(&e.first.as_str()) {
+                    providers.push(e.first.as_str());
+                }
+            }
+            i += 1;
+        }
+        let mut visible = Vec::new();
+        for (sj, t) in shipments.iter().enumerate() {
+            if providers.contains(&order_ids[sj].as_str()) {
+                visible.extend(crate::shader::added(&t.manifest.shipment.name, &t.manifest));
+            }
+        }
+        let keys = crate::shader::ShaderKeys::with(&visible);
+        for (index, c) in s.manifest.contributions.iter().enumerate() {
+            let Contribution::AddModel { model, .. } = c else { continue };
+            let declared = crate::shader_import::read_declared(&s.root.join(model)).map_err(|message| BuildError::Lower {
+                index,
+                kind: "add_model",
+                message: format!("{}: {message}", s.manifest.shipment.name),
+            })?;
+            for (name, set, code, stage) in [
+                (&declared.pixel, &keys.pixel, "M0235", "pixel"),
+                (&declared.vertex, &keys.vertex, "M0236", "vertex"),
+                (&declared.shadow, &keys.vertex, "M0236", "vertex"),
+            ] {
+                if let Some(n) = name {
+                    if !set.contains(&mercs2_formats::hash::pandemic_hash_m2(n)) {
+                        write_plan(&plan)?;
+                        return Err(BuildError::Lower {
+                            index,
+                            kind: "add_model",
+                            message: format!(
+                                "[{code}] {}: the glTF declares {stage} shader {n:?}, which neither retail, \
+                                 this Shipment nor a Shipment it requires registers in every configuration",
+                                s.manifest.shipment.name
+                            ),
+                        });
+                    }
+                }
+            }
+        }
+    }
+    let mut store_placements = Vec::new();
+    let shader_kind = shipments.iter().find_map(|s| {
+        s.manifest
+            .contributions
+            .iter()
+            .enumerate()
+            .find(|(_, c)| matches!(c, Contribution::AddShader { .. } | Contribution::ReplaceShader { .. }))
+            .map(|(index, c)| (index, c.kind()))
+    });
+    if let Some((index, kind)) = shader_kind {
+        let original = original_data.ok_or(BuildError::OriginalDataRequired { index, kind })?;
+        if let Some((a, code, message)) = crate::shader::registration_findings(&added).into_iter().next() {
+            write_plan(&plan)?;
+            return Err(BuildError::Lower {
+                index: a.index,
+                kind: "add_shader",
+                message: format!("[{code}] {}: {message}", a.shipment),
+            });
+        }
+        let mut edits = Vec::new();
+        for s in &shipments {
+            edits.extend(crate::shader::shipment_edits(&s.manifest.shipment.name, &s.manifest, &s.root).map_err(|f| {
+                BuildError::Lower {
+                    index: f[0].index,
+                    kind: "shader",
+                    message: format!("{}: {}", s.manifest.shipment.name, f[0].message),
+                }
+            })?);
+        }
+        std::fs::create_dir_all(out_dir).map_err(|e| BuildError::Io { path: out_dir.to_path_buf(), message: e.to_string() })?;
+        store_placements = write_shader_stores(original, game, &edits, out_dir, &mut log)?;
+    }
+
     let mut ui_regs: Vec<link::UiRegistration> = Vec::new();
     let mut layer_regs: Vec<link::LayerRegistration> = Vec::new();
     let mut support_regs: Vec<link::SupportRegistration> = Vec::new();
@@ -5199,14 +5428,15 @@ pub fn link_installed(
         // nothing — but emitting no RECORD makes that indistinguishable from "link was never run",
         // and deploy has to tell those apart. An empty `placements` array says which one it is.
         write_plan(&plan)?;
-        write_placement_record(out_dir, &[])?;
+        write_placement_record(out_dir, &store_placements)?;
         log.push(format!(
-            "wrote {}, {PLACEMENT_RECORD}: 0 placement(s) — nothing to mount from the link step",
-            crate::plan::PLAN_FILE
+            "wrote {}, {PLACEMENT_RECORD}: {} placement(s), no link overlay",
+            crate::plan::PLAN_FILE,
+            store_placements.len()
         ));
         return Ok(LinkReport {
             wad: None,
-            placements: Vec::new(),
+            placements: store_placements,
             linked: Vec::new(),
             plan,
             log,
@@ -5384,7 +5614,7 @@ pub fn link_installed(
         path: out_dir.to_path_buf(),
         message: e.to_string(),
     })?;
-    let mut placements = Vec::new();
+    let mut placements = store_placements;
     let mut diagnostics = Vec::new();
     if !shell_blocks.is_empty() {
         placements.push(write_patch_wad(
@@ -5393,6 +5623,7 @@ pub fn link_installed(
             &shell_blocks,
             shell_csum(game, "link")?,
             Destination::ShellPatch,
+            &shader_keys,
             &mut log,
             &mut diagnostics,
         )?);
@@ -5408,6 +5639,7 @@ pub fn link_installed(
                 language: language.token().to_string(),
                 relative: relative.clone(),
             },
+            &shader_keys,
             &mut log,
             &mut diagnostics,
         )?);
@@ -5439,7 +5671,7 @@ pub fn link_installed(
 
     // The link WAD is mounted LAST and so wins outright. It gets the same self-check as any other,
     // and for the same reason: nothing downstream would notice a defect here.
-    let self_check = verify_emitted(&wad_bytes)?;
+    let self_check = verify_emitted(&wad_bytes, &shader_keys)?;
 
     let path = out_dir.join(LINK_WAD_NAME);
     std::fs::write(&path, &wad_bytes).map_err(|e| BuildError::Io {
@@ -5489,7 +5721,8 @@ pub fn link_installed(
 pub const PLACEMENT_RECORD: &str = "placement.json";
 
 /// The `placement.json` format this build writes. Its destination kinds are `overlay`,
-/// `game_folder`, `data_wad`, `language_patch`, `shell_patch` and `stream_copy` ([`Destination`]).
+/// `game_folder`, `data_wad`, `language_patch`, `shell_patch`, `stream_copy` and `data_file`
+/// ([`Destination`]).
 pub const PLACEMENT_FORMAT: u32 = 2;
 
 /// Write `placement.json` into `out_dir`, creating it if needed.
@@ -5537,6 +5770,9 @@ fn placement_json(placements: &[Placement]) -> String {
                 Destination::StreamCopy { from, to } => {
                     serde_json::json!({ "kind": "stream_copy", "from": from, "to": to })
                 }
+                Destination::DataFile { relative, base_sha256 } => {
+                    serde_json::json!({ "kind": "data_file", "relative": relative.relative(), "base_sha256": base_sha256 })
+                }
             };
             serde_json::json!({
                 "name": p.name,
@@ -5552,6 +5788,31 @@ fn placement_json(placements: &[Placement]) -> String {
     }))
     .unwrap_or_else(|_| "{}".into())
         + "\n"
+}
+
+#[cfg(test)]
+mod placement_record {
+    use super::*;
+
+    #[test]
+    fn a_data_file_names_its_closed_relative_and_the_originals_sha() {
+        let json: serde_json::Value = serde_json::from_str(&placement_json(&[Placement {
+            name: "shader3Low.bin".into(),
+            bytes: 16,
+            sha256: "ab".into(),
+            destination: Destination::DataFile {
+                relative: crate::shader::DataFile::Shader3Low,
+                base_sha256: "cd".into(),
+            },
+        }]))
+        .unwrap();
+        assert_eq!(json["format"], 2);
+        assert_eq!(
+            json["placements"][0]["destination"],
+            serde_json::json!({ "kind": "data_file", "relative": "data/shader3Low.bin", "base_sha256": "cd" })
+        );
+        assert_eq!(json["placements"][0]["sha256"], "ab");
+    }
 }
 
 #[cfg(test)]
