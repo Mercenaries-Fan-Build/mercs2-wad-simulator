@@ -812,21 +812,29 @@ mod tests {
                 .unwrap_or_else(|e| panic!("{e}"))
         }
 
+        /// The Xbox 360 bake the repo-root `.mercs2-local.toml` names (`xbox_vz_wad`); panics when it
+        /// cannot.
+        fn retail_xbox_vz_wad() -> PathBuf {
+            mercs2_formats::game_paths::local_config_xbox_vz_wad(Path::new(env!("CARGO_MANIFEST_DIR")))
+                .unwrap_or_else(|e| panic!("{e}"))
+        }
+
+        /// The PS3 bake the repo-root `.mercs2-local.toml` names (`ps3_vz_wad`); panics when it cannot.
+        fn retail_ps3_vz_wad() -> PathBuf {
+            mercs2_formats::game_paths::local_config_ps3_vz_wad(Path::new(env!("CARGO_MANIFEST_DIR")))
+                .unwrap_or_else(|e| panic!("{e}"))
+        }
+
         /// A console bake OPENS fine — Shipments are expected to export to every platform, so refusing
         /// to read one would be wrong. Only EMITTING for it is unsupported, and that is the builder's
-        /// call, not this layer's.
+        /// call, not this layer's. Both bakes are required: each is named by its own config key.
         #[test]
         fn a_console_bake_opens_and_reports_its_platform() {
-            let vz = retail_vz_wad();
-            let dir = vz.parent().expect("vz.wad has a parent folder");
-            for name in ["xbox-vz.wad", "ps3-VZ.WAD"] {
-                let candidate = dir.join(name);
-                if !candidate.is_file() {
-                    continue;
-                }
-                let stack = GameStack::open(std::slice::from_ref(&candidate))
-                    .unwrap_or_else(|e| panic!("a console bake must open, not error: {e}"));
-                assert_eq!(stack.platform(), Platform::BigEndianConsole, "{name}");
+            for (key, bake) in [("xbox_vz_wad", retail_xbox_vz_wad()), ("ps3_vz_wad", retail_ps3_vz_wad())] {
+                let stack = GameStack::open(std::slice::from_ref(&bake)).unwrap_or_else(|e| {
+                    panic!("{key} = {}: a console bake must open, not error: {e}", bake.display())
+                });
+                assert_eq!(stack.platform(), Platform::BigEndianConsole, "{key} = {}", bake.display());
             }
         }
 
@@ -835,12 +843,8 @@ mod tests {
         #[test]
         fn a_mixed_platform_stack_is_rejected() {
             let vz = retail_vz_wad();
-            let dir = vz.parent().expect("vz.wad has a parent folder");
-            let console = dir.join("xbox-vz.wad");
-            if !console.is_file() {
-                return;
-            }
-            let err = GameStack::open(&[vz.clone(), console]).unwrap_err();
+            let console = retail_xbox_vz_wad();
+            let err = GameStack::open(&[vz, console]).unwrap_err();
             assert!(err.to_string().contains("mixes PC and console"), "{err}");
         }
     }
