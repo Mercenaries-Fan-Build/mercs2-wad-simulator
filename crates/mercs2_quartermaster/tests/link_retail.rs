@@ -176,8 +176,8 @@ fn add_ui_mints_the_mod_loader_and_trampolines_from_the_resident() {
     let mut loaded = retail_blocks();
     let corpus = corpus();
     let counts: Vec<usize> = loaded.iter().map(|(_, b)| b.entries.len()).collect();
-    // The scripts_vz block is index 0 in SCRIPT_BLOCKS order, and `import` is scripts_vz-only, so the
-    // loader must land there — pin which block we expect to grow.
+    // The scripts_vz block is index 0 in SCRIPT_BLOCKS order, and the loader lands beside its
+    // trampoline host `wifpmcinterior` there — pin which block we expect to grow.
     let vz = 0usize;
     assert!(loaded[vz].0.to_lowercase().contains("scripts_vz"));
     assert!(loaded[vz].1.find_script_by_name("qm_modloader").is_none(), "must start novel");
@@ -201,7 +201,7 @@ fn add_ui_mints_the_mod_loader_and_trampolines_from_the_resident() {
     let host = linked.iter().find(|l| l.target == "wifpmcinterior").expect("trampoline host linked");
     let loader = linked.iter().find(|l| l.target == "qm_modloader").expect("loader minted");
     assert_eq!(host.block, vz, "the trampoline lands in scripts_vz");
-    assert_eq!(loader.block, vz, "the loader lands in scripts_vz (import is scripts_vz-only)");
+    assert_eq!(loader.block, vz, "the loader lands in scripts_vz, beside its host");
     assert_eq!(loader.base_source_bytes, 0, "the loader has no base — it is newly minted");
     assert_eq!(loader.contributors, vec!["hud-mod".to_string()]);
 
@@ -625,4 +625,120 @@ fn dynamic_import_not_flagged() {
     let out = link::link_into_blocks(&mut targets, &corpus, &muts, &[], &[], &[], &[], &[], &[], &order(&["consumer"]))
         .expect("link");
     assert_eq!(out.unresolved_imports, vec![]);
+}
+
+// ---------------------------------------------------------------------------
+// The front end: `shell.wad`'s scripts block
+// ---------------------------------------------------------------------------
+
+/// The `shell.wad` beside the configured `vz.wad`.
+fn shell_wad() -> PathBuf {
+    let vz = mercs2_formats::game_paths::local_config_vz_wad(Path::new(env!("CARGO_MANIFEST_DIR")))
+        .unwrap_or_else(|e| panic!("{e}"));
+    mercs2_quartermaster::sound::sibling_wad(&vz, "shell.wad").unwrap_or_else(|e| panic!("{e}"))
+}
+
+/// The front end's scripts block ([`link::SHELL_SCRIPT_BLOCKS`]), decompressed, from `shell.wad`.
+fn shell_block_bytes() -> Vec<u8> {
+    let wad = shell_wad();
+    let mut file = std::fs::File::open(&wad).unwrap_or_else(|e| panic!("open {}: {e}", wad.display()));
+    let size = file.metadata().unwrap_or_else(|e| panic!("stat {}: {e}", wad.display())).len();
+    let archive = load_ffcs_archive(&mut file, size)
+        .unwrap_or_else(|e| panic!("read the FFCS archive {}: {e:?}", wad.display()));
+    let (needle, path) = link::SHELL_SCRIPT_BLOCKS[0];
+    let hits: Vec<usize> = archive
+        .paths
+        .iter()
+        .enumerate()
+        .filter(|(_, p)| p.to_lowercase().contains(&needle.to_lowercase()))
+        .map(|(i, _)| i)
+        .collect();
+    assert_eq!(hits.len(), 1, "one block matches {needle:?}: {hits:?}");
+    assert!(archive.paths[hits[0]].eq_ignore_ascii_case(path), "{}", archive.paths[hits[0]]);
+    decompress_block(&mut file, &archive.indx, hits[0] as u16)
+        .unwrap_or_else(|e| panic!("decompress {path} of {}: {e:?}", wad.display()))
+}
+
+const SCRIPT_TYPE_HASH: u32 = 0x4249_8680;
+
+/// ★ `shell.wad`'s scripts block parses, carries the front end's 28 Lua chunks (`MrxSound` among
+/// them), every container's CSUM verifies, and an unedited block re-serializes byte for byte.
+#[test]
+fn the_shell_resident_block_round_trips_byte_identically() {
+    let raw = shell_block_bytes();
+    let block = ScriptsBlock::parse(&raw).expect("the shell block parses");
+    let scripts = block.entries.iter().filter(|e| e.type_hash == SCRIPT_TYPE_HASH).count();
+    eprintln!("shell resident block: {} entries, {scripts} of them Lua", block.entries.len());
+    assert_eq!(scripts, 28, "the front end's 28 scripts");
+    assert!(block.find_script_by_name("mrxsound").is_some(), "the trampoline host is in the block");
+    assert!(block.find_script_by_name(link::QM_SHELL_MODLOADER_NAME).is_none(), "the loader is novel");
+    assert_eq!(block.verify_csums().expect("every CSUM verifies as shipped"), block.entries.len());
+    assert_eq!(block.serialize(), raw, "an unedited block re-serializes byte for byte");
+}
+
+/// ★ The front end's loader, linked into the retail shell block: `mrxsound` carries the trampoline
+/// (from the corpus's `shell/mrxsound.lua`), `qm_shell_modloader` is minted beside it under its
+/// name hash, every other entry is byte-identical, and every CSUM verifies. The chunks carry the
+/// banks and the wraps.
+#[test]
+fn the_front_end_loader_links_into_the_shell_block() {
+    use mercs2_quartermaster::manifest::LoadSession;
+    let raw = shell_block_bytes();
+    let original = ScriptsBlock::parse(&raw).unwrap();
+    let mut block = ScriptsBlock::parse(&raw).unwrap();
+    let regs = [
+        link::SoundBankRegistration {
+            shipment: "pda-sound".into(),
+            bank: "qm_pda-sound_ui_hud".into(),
+            soundbank: false,
+            sessions: [LoadSession::FrontEnd, LoadSession::Gameplay].into(),
+        },
+        link::SoundBankRegistration {
+            shipment: "pda-sound".into(),
+            bank: "gameplay_only_bank".into(),
+            soundbank: true,
+            sessions: [LoadSession::Gameplay].into(),
+        },
+    ];
+    let mut targets = [link::TargetBlock { path: link::SHELL_SCRIPT_BLOCKS[0].1.into(), block: &mut block }];
+    let out = link::link_front_end(&mut targets, &corpus(), &regs, &order(&["pda-sound"])).expect("links");
+    let names: Vec<&str> = out.scripts.iter().map(|l| l.target.as_str()).collect();
+    assert_eq!(names, ["mrxsound", link::QM_SHELL_MODLOADER_NAME]);
+    assert!(out.scripts[0].base_source_bytes > 0, "mrxsound's base is the corpus source");
+
+    assert_eq!(block.entries.len(), original.entries.len() + 1);
+    let host = original.find_script_by_name("mrxsound").unwrap();
+    for (i, (a, b)) in original.entries.iter().zip(&block.entries).enumerate() {
+        if i == host {
+            assert_eq!((a.name_hash, a.type_hash), (b.name_hash, b.type_hash));
+            assert_ne!(a.bytes, b.bytes, "mrxsound is edited");
+        } else {
+            assert!(
+                (a.name_hash, a.type_hash, a.field_c, &a.bytes) == (b.name_hash, b.type_hash, b.field_c, &b.bytes),
+                "entry {i} is unchanged"
+            );
+        }
+    }
+    let minted = block.entries.last().unwrap();
+    assert_eq!(minted.name_hash, mercs2_formats::hash::pandemic_hash_m2(link::QM_SHELL_MODLOADER_NAME));
+    assert_eq!(minted.type_hash, SCRIPT_TYPE_HASH);
+    let reparsed = ScriptsBlock::parse(&block.serialize()).expect("re-parses");
+    assert_eq!(reparsed.verify_csums().expect("every CSUM verifies"), reparsed.entries.len());
+
+    let contains = |hay: &[u8], needle: &str| hay.windows(needle.len()).any(|w| w == needle.as_bytes());
+    let loader = reparsed.extract_lua(reparsed.find_script_by_name(link::QM_SHELL_MODLOADER_NAME).unwrap()).unwrap();
+    assert!(loader.starts_with(&mercs2_luac::MERCS2_LUAQ_HEADER));
+    assert!(contains(&loader, "qm_pda-sound_ui_hud") && contains(&loader, "LoadWaveBank"));
+    assert!(!contains(&loader, "gameplay_only_bank"), "a gameplay bank is not the front end's");
+    let tramp = reparsed.extract_lua(reparsed.find_script_by_name("mrxsound").unwrap()).unwrap();
+    for needle in ["_qm_prev_EnterShellState", "_qm_prev_ExitShellState", link::QM_SHELL_MODLOADER_NAME, "_StartShellMusic"] {
+        assert!(contains(&tramp, needle), "mrxsound carries {needle}");
+    }
+
+    // No front-end registration: nothing is linked and the block is untouched.
+    let mut untouched = ScriptsBlock::parse(&raw).unwrap();
+    let mut targets = [link::TargetBlock { path: String::new(), block: &mut untouched }];
+    let none = link::link_front_end(&mut targets, &corpus(), &regs[1..], &order(&["pda-sound"])).unwrap();
+    assert!(none.scripts.is_empty());
+    assert_eq!(untouched.serialize(), raw);
 }
