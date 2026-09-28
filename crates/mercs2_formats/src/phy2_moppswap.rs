@@ -476,24 +476,26 @@ mod retail {
         panic!("no PHY2 carrying a MOPP in block {block} of {}", path.display());
     }
 
-    /// Pick the first MOPP index whose source keys are a perfect contiguous [0..N-1] run (single-subpart
-    /// cell) — the mission's "clean keys" target.
-    fn first_contiguous_mopp(body: &[u8]) -> Option<usize> {
-        for i in 0..count_phy2_mopps(body) {
-            if let Ok(d) = decode_phy2_mopp_keys(body, i) {
-                let (ks, range, missing) = d.key_summary();
-                if !ks.is_empty() && missing.is_empty() && range == Some((0, ks.len() as u32 - 1)) {
-                    return Some(i);
-                }
+    /// The first MOPP index whose source keys are a perfect contiguous [0..N-1] run (single-subpart
+    /// cell) — the mission's "clean keys" target. Every MOPP scanned must decode; panics naming the
+    /// index and the error when one does not, and when none is contiguous.
+    fn first_contiguous_mopp(body: &[u8]) -> usize {
+        let count = count_phy2_mopps(body);
+        for i in 0..count {
+            let d = decode_phy2_mopp_keys(body, i)
+                .unwrap_or_else(|e| panic!("block 767 PHY2 mopp {i} of {count} does not decode: {e}"));
+            let (ks, range, missing) = d.key_summary();
+            if !ks.is_empty() && missing.is_empty() && range == Some((0, ks.len() as u32 - 1)) {
+                return i;
             }
         }
-        None
+        panic!("none of the {count} MOPPs in the block 767 PHY2 has contiguous [0..N-1] keys")
     }
 
     #[test]
     fn identity_swap_is_byte_identical_and_reparses_if_wad_present() {
         let body = load_phy2_with_mopp(767);
-        let idx = first_contiguous_mopp(&body).unwrap_or(0);
+        let idx = first_contiguous_mopp(&body);
         let src = decode_phy2_mopp_keys(&body, idx).unwrap();
         let (src_keys, _, _) = src.key_summary();
 
@@ -516,7 +518,7 @@ mod retail {
     #[test]
     fn return_all_swap_reparses_and_decodes_full_range_if_wad_present() {
         let body = load_phy2_with_mopp(767);
-        let idx = first_contiguous_mopp(&body).unwrap_or(0);
+        let idx = first_contiguous_mopp(&body);
         let (new_body, rep) = swap_phy2_mopp(&body, idx, SwapMode::ReturnAll).expect("return-all swap");
 
         let g = validate_swapped_body(&new_body, idx, SwapMode::ReturnAll, None);
@@ -539,7 +541,7 @@ mod retail {
     #[test]
     fn empty_swap_reparses_and_decodes_to_zero_keys_if_wad_present() {
         let body = load_phy2_with_mopp(767);
-        let idx = first_contiguous_mopp(&body).unwrap_or(0);
+        let idx = first_contiguous_mopp(&body);
         let (new_body, rep) = swap_phy2_mopp(&body, idx, SwapMode::Empty).expect("empty swap");
         // Emit-nothing is a single 0x00 byte (count = 1) → strictly ≤ any real m_data, so it is always
         // an in-place overwrite: zero shift, packfile/prefix/wrapper untouched.
@@ -562,30 +564,45 @@ mod retail {
     #[test]
     fn spatial_swap_reparses_and_roundtrips_if_wad_present() {
         let body = load_phy2_with_mopp(767);
-        // Spatial needs a MOPP paired with a decodable WpMeshShape16 of the same triangle count.
-        let mut done = false;
-        for idx in 0..count_phy2_mopps(&body) {
-            match swap_phy2_mopp(&body, idx, SwapMode::Spatial) {
-                Ok((new_body, rep)) => {
-                    let g = validate_swapped_body(&new_body, idx, SwapMode::Spatial, None);
-                    assert!(g.reparse_ok && g.mopp_present, "spatial must re-parse: {:?}", g.reparse_err);
-                    assert!(g.decode_clean && g.decode_coverage_full, "spatial MOPP must decode clean & covered");
-                    assert!(g.keys_as_expected, "spatial must decode to [0..N-1]");
-                    assert!(g.mesh_still_decodes, "the mesh pool must survive the spatial rewrite");
-                    assert!(rep.info_rewritten, "spatial must rewrite m_info");
-                    if rep.grew {
-                        assert_eq!(u32_le(&new_body, 32) as usize, rep.new_packfile_size);
-                    }
-                    eprintln!(
-                        "spatial[block 767 mopp {idx}]: N={}, buf {}→{} B, packfile {}→{} B (grew={}), m_info rewritten",
-                        rep.source_key_count, rep.old_buf_len, rep.new_buf_len, rep.old_packfile_size, rep.new_packfile_size, rep.grew
-                    );
-                    done = true;
-                    break;
-                }
-                Err(_) => continue, // this MOPP had no same-count mesh; try the next
-            }
+        // Spatial needs a MOPP paired with a decodable WpMeshShape16 of the same triangle count: the
+        // first MOPP whose distinct-key count N equals some mesh's triangle count. That MOPP's swap
+        // must succeed.
+        let (off, _, _) = locate_mopps(&body).expect("block 767 PHY2 locates its MOPPs");
+        let mesh_tri_counts: Vec<usize> = crate::havok::parse_packfile(&body[off..])
+            .expect("block 767 PHY2 packfile parses")
+            .shapes
+            .iter()
+            .filter_map(|s| match s {
+                crate::havok::Shape::Mesh(m) if !m.indices.is_empty() => Some(m.indices.len()),
+                _ => None,
+            })
+            .collect();
+        let count = count_phy2_mopps(&body);
+        let idx = (0..count)
+            .find(|&i| {
+                let d = decode_phy2_mopp_keys(&body, i)
+                    .unwrap_or_else(|e| panic!("block 767 PHY2 mopp {i} of {count} does not decode: {e}"));
+                mesh_tri_counts.contains(&d.key_summary().0.len())
+            })
+            .unwrap_or_else(|| {
+                panic!(
+                    "no MOPP in block 767 has a WpMeshShape16 of the same triangle count (mesh counts {mesh_tri_counts:?})"
+                )
+            });
+        let (new_body, rep) = swap_phy2_mopp(&body, idx, SwapMode::Spatial)
+            .unwrap_or_else(|e| panic!("spatial swap of block 767 mopp {idx}: {e}"));
+        let g = validate_swapped_body(&new_body, idx, SwapMode::Spatial, None);
+        assert!(g.reparse_ok && g.mopp_present, "spatial must re-parse: {:?}", g.reparse_err);
+        assert!(g.decode_clean && g.decode_coverage_full, "spatial MOPP must decode clean & covered");
+        assert!(g.keys_as_expected, "spatial must decode to [0..N-1]");
+        assert!(g.mesh_still_decodes, "the mesh pool must survive the spatial rewrite");
+        assert!(rep.info_rewritten, "spatial must rewrite m_info");
+        if rep.grew {
+            assert_eq!(u32_le(&new_body, 32) as usize, rep.new_packfile_size);
         }
-        assert!(done, "no MOPP in block 767 could be paired with a same-count WpMeshShape16 for spatial");
+        eprintln!(
+            "spatial[block 767 mopp {idx}]: N={}, buf {}→{} B, packfile {}→{} B (grew={}), m_info rewritten",
+            rep.source_key_count, rep.old_buf_len, rep.new_buf_len, rep.old_packfile_size, rep.new_packfile_size, rep.grew
+        );
     }
 }
