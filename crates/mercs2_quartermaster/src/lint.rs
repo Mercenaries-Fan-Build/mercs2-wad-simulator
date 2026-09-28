@@ -340,11 +340,14 @@ pub const M0217_SOUND_LANGUAGE: Rule = Rule {
 };
 
 /// Needs the game stack. The bank a `replace_sound_bank` / `replace_sound_cue` names is not in the
-/// game, no retail Lua call site loads it in a level that carries it
-/// ([`crate::sound::carrier_session`]), or the cue a `replace_sound_cue` names is not in that bank.
+/// game; or no level that carries it loads it ([`crate::sound::carrier_session`]) — `shell.wad`
+/// loads only the banks the front end's Lua loads, and `vz.wad` every bank it carries but the ones
+/// retail Lua loads only in the front end (`ui_shell`), the engine loading the ones no Lua names
+/// ([`crate::sound::BankLoader::Engine`]); or the cue a `replace_sound_cue` names is not in that
+/// bank.
 pub const M0218_SOUND_TARGET_MISSING: Rule = Rule {
     code: "M0218",
-    title: "a sound override's bank or cue is not in the game, or the game never loads the bank",
+    title: "a sound override's bank or cue is not in the game, or no level that carries the bank loads it",
     doc: "docs/modding/manifest_format.md#m0218",
 };
 
