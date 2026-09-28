@@ -50,3 +50,12 @@ mercs2_formats = { workspace = true }
 mercs2_quartermaster = { workspace = true }
 mercs2_bridge = { workspace = true }
 mercs2_destruction = { workspace = true }
+
+[features]
+# Builds the game-gated tests, which read the retail vz.wad named by the repo-root
+# .mercs2-local.toml; run them with `cargo xtask retail-test`.
+retail = []
+
+[[test]]
+name = "anim_export_parity"
+required-features = ["retail"]
