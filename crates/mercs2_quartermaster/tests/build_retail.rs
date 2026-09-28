@@ -682,7 +682,7 @@ fn two_installed_shipments_both_survive_the_deploy_link() {
     let record: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(deploy.join("placement.json")).unwrap())
             .expect("the link step writes a placement record too");
-    assert_eq!(record["format"], 1);
+    assert_eq!(record["format"], build::PLACEMENT_FORMAT);
     let placed = record["placements"].as_array().expect("placements array");
     assert_eq!(placed.len(), 1);
     assert_eq!(placed[0]["name"], build::LINK_WAD_NAME);
@@ -1211,7 +1211,7 @@ fn a_set_with_no_script_mods_emits_no_link_wad() {
     let record: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(out.join("placement.json")).unwrap())
             .expect("a placement record exists even with nothing to place");
-    assert_eq!(record["format"], 1);
+    assert_eq!(record["format"], build::PLACEMENT_FORMAT);
     assert_eq!(
         record["placements"].as_array().map(|a| a.len()),
         Some(0),
