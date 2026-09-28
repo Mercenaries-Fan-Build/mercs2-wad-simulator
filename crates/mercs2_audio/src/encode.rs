@@ -21,7 +21,7 @@
 //! [`retarget_cue`] rewrites one cue of an existing (parsed) soundbank to play a new single-wave
 //! group appended after the bank's groups, whose wave lives in the caller's wavebank; the cue keeps
 //! its index, so the bank's own sounddb still routes to it, and every other cue and group is left
-//! byte-identical. [`RETAIL_CATEGORY_NAMES`] lists the category names cracked so far.
+//! byte-identical. [`RETAIL_CATEGORY_NAMES`] names 14 of the 19 retail categories.
 
 use mercs2_formats::hash::pandemic_hash_m2;
 
@@ -58,8 +58,7 @@ pub const RETAIL_CATEGORIES: [CategoryEntry; 19] = [
     CategoryEntry { category: 0xFA0B_8DBC, parent: 0xD221_DBE8 }, // chatter → vo
 ];
 
-/// The names of the [`RETAIL_CATEGORIES`] whose hash has been matched to a string — 14 of the 19.
-/// The other five are known only by hash.
+/// The names of 14 of the 19 [`RETAIL_CATEGORIES`]; the other five have no known name.
 pub const RETAIL_CATEGORY_NAMES: [&str; 14] = [
     "ambience",
     "chatter",
