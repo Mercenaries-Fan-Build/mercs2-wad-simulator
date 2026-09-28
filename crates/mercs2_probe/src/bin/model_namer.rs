@@ -190,7 +190,7 @@ fn main() {
         };
         // The model's OWN texture set, from its materials.
         let mut texes: BTreeSet<u32> = BTreeSet::new();
-        for mat in mercs2_formats::texture::parse_mtrl(&c) {
+        for mat in mercs2_formats::texture::parse_mtrl(&c, mercs2_formats::texture::MtrlSource::Model).expect("parse the model MTRL") {
             for t in mat.textures {
                 if t != 0 && t != 0xFFFF_FFFF {
                     texes.insert(t);
