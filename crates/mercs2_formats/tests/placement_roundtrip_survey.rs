@@ -20,6 +20,9 @@
 //!    is the exact operation the writer performs, checked to be inert when it should be.
 //!
 //! A pass makes `move_entity` / `reskin_entity` a bounded job; a failure names the field that broke.
+//!
+//! Game-gated: built by the `retail` feature, reads the `vz.wad` named by the repo-root
+//! `.mercs2-local.toml`, and fails if it is absent.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -28,8 +31,9 @@ use mercs2_formats::ffcs::load_ffcs_archive;
 use mercs2_formats::placement::{comp_inventory, load_placements};
 use mercs2_formats::sges::decompress_block;
 
-fn vz_wad() -> Option<PathBuf> {
-    mercs2_formats::game_paths::vz_wad(Path::new(env!("CARGO_MANIFEST_DIR")))
+fn vz_wad() -> PathBuf {
+    mercs2_formats::game_paths::local_config_vz_wad(Path::new(env!("CARGO_MANIFEST_DIR")))
+        .unwrap_or_else(|e| panic!("{e}"))
 }
 
 fn f32_le(b: &[u8], o: usize) -> f32 {
@@ -40,11 +44,11 @@ fn u32_le(b: &[u8], o: usize) -> u32 {
 }
 
 /// Every decompressed placement block (`layers_static` + `vz_state_*`), located by PTHS path.
-fn placement_blocks() -> Option<Vec<(String, Vec<u8>)>> {
-    let wad = vz_wad()?;
-    let mut file = std::fs::File::open(&wad).ok()?;
-    let size = file.metadata().ok()?.len();
-    let archive = load_ffcs_archive(&mut file, size).ok()?;
+fn placement_blocks() -> Vec<(String, Vec<u8>)> {
+    let wad = vz_wad();
+    let mut file = std::fs::File::open(&wad).expect("open vz.wad");
+    let size = file.metadata().expect("stat vz.wad").len();
+    let archive = load_ffcs_archive(&mut file, size).expect("read FFCS");
     let mut out = Vec::new();
     for (idx, path) in archive.paths.iter().enumerate() {
         let p = path.to_lowercase();
@@ -54,7 +58,7 @@ fn placement_blocks() -> Option<Vec<(String, Vec<u8>)>> {
             }
         }
     }
-    Some(out)
+    out
 }
 
 const TRANSFORM_STRIDE: usize = 42;
@@ -81,10 +85,7 @@ struct Census {
 
 #[test]
 fn can_a_placement_layer_be_written_in_place() {
-    let Some(blocks) = placement_blocks() else {
-        eprintln!("SKIPPING: no vz.wad");
-        return;
-    };
+    let blocks = placement_blocks();
     assert!(!blocks.is_empty(), "found no layers_static / vz_state blocks");
 
     let mut c = Census::default();
