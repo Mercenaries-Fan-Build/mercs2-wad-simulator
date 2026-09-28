@@ -1,11 +1,14 @@
-//! Ignored probe: verify the resident audio pipeline against the real installed `vz.wad` — the one
+//! Probe: verify the resident audio pipeline against the real installed `vz.wad` — the one
 //! part of the audio last-mile that can't be proven headlessly. Confirms `extract_container_typed` by
 //! `m2(name)` → `data` chunk → `AudioEngine::load_wavebank` / `load_soundbank` load real banks, and
 //! that the per-bank `sounddb` catalog routes real cues through their soundbank cue and group to
 //! those decoded waves and mixes them to audible PCM.
 //!
+//! Game-gated: built by the `retail` feature, reads the retail `vz.wad` named by the repo-root
+//! `.mercs2-local.toml`, and fails when it is absent.
+//!
 //! ```text
-//! cargo test -p mercs2_probe --test audio_wad_probe -- --nocapture
+//! cargo test -p mercs2_probe --features retail --test audio_wad_probe -- --nocapture
 //! ```
 
 use mercs2_engine::audio::{AudioEngine, CueError, SoundDb};
@@ -15,6 +18,16 @@ use mercs2_formats::types::{TYPE_HASH_SOUNDBANK, TYPE_HASH_WAVEBANK};
 
 /// `sounddb` asset type (`0xE5273C14`, ASET type_id 13).
 const SOUNDDB_TYPE: u32 = 0xE527_3C14;
+
+/// The retail `vz.wad` path, from the repo-root `.mercs2-local.toml` and nowhere else. Panics with the
+/// resolver's message when it is missing, and when the path is not UTF-8 (`wad::open` takes `&str`).
+fn vz_wad_path() -> String {
+    let start = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let path = mercs2_formats::game_paths::local_config_vz_wad(start).unwrap_or_else(|e| panic!("{e}"));
+    path.to_str()
+        .unwrap_or_else(|| panic!("vz.wad path is not UTF-8: {}", path.display()))
+        .to_string()
+}
 
 /// The always-resident gameplay/UI/ambience wavebanks (`MrxSoundBootstrap.LoadBanks`).
 const RESIDENT_WAVEBANKS: &[&str] = &[
@@ -35,12 +48,8 @@ fn bank_body(w: &mut wad::Wad, name: &str, type_hash: u32, raw_ok: bool) -> Opti
 
 #[test]
 fn resident_audio_extracts_decodes_and_routes_from_vz_wad() {
-    let Some(path) = wad::resolve_vz_wad(None) else {
-        return eprintln!(
-            "SKIPPING: no vz.wad discovered. Run `scripts/find-vz-wad.sh --write` or set MERCS2_GAME_DIR."
-        );
-    };
-    let mut w = wad::open(&path).expect("open vz.wad");
+    let path = vz_wad_path();
+    let mut w = wad::open(&path).unwrap_or_else(|e| panic!("open {path}: {e}"));
 
     // Load every resident wavebank into one engine + merge every per-bank sounddb into one catalog —
     // exactly what the game does at world-load.
