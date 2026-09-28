@@ -2303,7 +2303,12 @@ mod sound {
         let dir = root.join("add");
         std::fs::create_dir_all(dir.join("src")).unwrap();
         std::fs::write(dir.join("src/a.wav"), pcm16_wav(1, 22050, &[1; 10])).unwrap();
-        for (cue, fires) in [("ui_PDA_Open_01_st", true), ("qm_brand_new_cue", false)] {
+        // A voice-over cue of English.wad, which the vz.wad-only stack does not hold.
+        let english = mercs2_quartermaster::sound::sibling_wad(&vz_wad(), "english.wad").unwrap();
+        let mut english = GameStack::open(&[english]).unwrap();
+        let mattias = Soundbank::parse(&table(&mut english, m2("vo_mattias.english"), TYPE_HASH_SOUNDBANK, TYPE_ID_SOUNDBANK)).unwrap();
+        let vo_cue = a_mattias_cue(&mattias);
+        for (cue, fires) in [("ui_PDA_Open_01_st", true), (vo_cue.as_str(), true), ("qm_brand_new_cue", false)] {
             let s = named_shipment(
                 &dir,
                 "adder",
