@@ -1453,7 +1453,7 @@ fn add_sound_lowers_to_one_block_the_engine_plays() {
     assert_eq!(sounddb.cues.len(), 2);
 }
 
-/// Two lowerings of one Shipment produce the same bytes, or verify-by-hash means nothing.
+/// Two lowerings of one Shipment produce the same bytes, which verify-by-hash relies on.
 #[test]
 fn add_sound_is_reproducible() {
     use mercs2_quartermaster::manifest::Contribution;
