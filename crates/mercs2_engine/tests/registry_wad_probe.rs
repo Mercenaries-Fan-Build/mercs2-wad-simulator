@@ -1,8 +1,8 @@
 //! Integration probes for the asset layer against the REAL `vz.wad`.
 //!
-//! These need the retail install, and they are deliberately **not** `#[ignore]`d. They discover a
-//! `vz.wad` (`scripts/find-vz-wad.sh --write`, then the `game_paths` resolution) and run
-//! automatically when one is present, skipping loudly when it is not.
+//! These need the retail install, and they are deliberately **not** `#[ignore]`d. They are
+//! game-gated: built by the `retail` feature, they read the retail `vz.wad` named by the repo-root
+//! `.mercs2-local.toml` and fail when it is absent.
 //!
 //! `#[ignore]` was the wrong default: it means the tests that exercise the real format only run when
 //! somebody remembers a flag, and an ignored test that would FAIL is indistinguishable from one that
@@ -25,18 +25,29 @@ const MD500_BLOCK: u16 = 3350;
 const TEX_A: u32 = 0x2210_1D86; // block 2977
 const TEX_B: u32 = 0xFB38_5BF0; // block 2976
 
-fn open_base() -> Option<Vec<wad::Wad>> {
-    let path = wad::resolve_vz_wad(None)?;
-    Some(vec![wad::open(&path).ok()?])
+/// The retail `vz.wad` path, from the repo-root `.mercs2-local.toml` and nowhere else. Panics with the
+/// resolver's message when it is missing, and when the path is not UTF-8 (`wad::open` takes `&str`).
+fn vz_wad_path() -> String {
+    let start = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let path = mercs2_formats::game_paths::local_config_vz_wad(start).unwrap_or_else(|e| panic!("{e}"));
+    path.to_str()
+        .unwrap_or_else(|| panic!("vz.wad path is not UTF-8: {}", path.display()))
+        .to_string()
+}
+
+/// The retail `vz.wad`, opened. Panics when it cannot be found or opened.
+fn open_vz_wad() -> wad::Wad {
+    let path = vz_wad_path();
+    wad::open(&path).unwrap_or_else(|e| panic!("open {path}: {e}"))
+}
+
+fn open_base() -> Vec<wad::Wad> {
+    vec![open_vz_wad()]
 }
 
 #[test]
 fn resolving_a_model_makes_its_block_resident_and_registers_block_mates() {
-    let Some(mut wads) = open_base() else {
-        return eprintln!(
-            "SKIPPING: no vz.wad discovered. Run `scripts/find-vz-wad.sh --write` or set MERCS2_GAME_DIR."
-        );
-    };
+    let mut wads = open_base();
     let mut r = AssetRegistry::default();
 
     let c = r.resolve(&mut wads, TYPE_HASH_MODEL, MD500).expect("md500 model resolves");
@@ -59,11 +70,7 @@ fn resolving_a_model_makes_its_block_resident_and_registers_block_mates() {
 
 #[test]
 fn textures_resolve_from_other_blocks_than_the_model() {
-    let Some(mut wads) = open_base() else {
-        return eprintln!(
-            "SKIPPING: no vz.wad discovered. Run `scripts/find-vz-wad.sh --write` or set MERCS2_GAME_DIR."
-        );
-    };
+    let mut wads = open_base();
     let mut r = AssetRegistry::default();
 
     r.resolve(&mut wads, TYPE_HASH_MODEL, MD500).expect("model");
@@ -84,11 +91,7 @@ fn textures_resolve_from_other_blocks_than_the_model() {
 fn a_resolved_chunk_equals_what_the_old_per_hash_extractor_returned() {
     // The registry must be a drop-in for `wad::extract_container`, byte for byte — otherwise the
     // switchover silently changes what every model loader sees.
-    let Some(mut wads) = open_base() else {
-        return eprintln!(
-            "SKIPPING: no vz.wad discovered. Run `scripts/find-vz-wad.sh --write` or set MERCS2_GAME_DIR."
-        );
-    };
+    let mut wads = open_base();
     let mut r = AssetRegistry::default();
 
     for hash in [MD500, 0xA3C1_FABC /* mattias_v3 */, 0xE540_47D5 /* boat_destroyer */] {
@@ -100,11 +103,7 @@ fn a_resolved_chunk_equals_what_the_old_per_hash_extractor_returned() {
 
 #[test]
 fn eviction_drops_chunks_and_a_later_resolve_streams_them_back() {
-    let Some(mut wads) = open_base() else {
-        return eprintln!(
-            "SKIPPING: no vz.wad discovered. Run `scripts/find-vz-wad.sh --write` or set MERCS2_GAME_DIR."
-        );
-    };
+    let mut wads = open_base();
     let mut r = AssetRegistry::with_capacity(1); // force eviction on the second block
 
     r.resolve(&mut wads, TYPE_HASH_MODEL, MD500).expect("model");
