@@ -38,3 +38,7 @@ retail = []
 [[test]]
 name = "retail_banks"
 required-features = ["retail"]
+
+[[test]]
+name = "retail_fields"
+required-features = ["retail"]
