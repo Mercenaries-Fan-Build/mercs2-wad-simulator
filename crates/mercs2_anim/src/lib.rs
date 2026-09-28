@@ -88,7 +88,9 @@ mod tests {
         #[test]
         fn live_clip_picker_if_wad_present() {
             use mercs2_formats::anim_select::block_has_lookup;
+            use mercs2_formats::aset_type_ids::type_id_for_type_hash;
             use mercs2_formats::ffcs::load_ffcs_archive;
+            use mercs2_formats::hash::pandemic_hash_m2;
             use mercs2_formats::sges::decompress_block;
 
             let path = mercs2_formats::game_paths::local_config_vz_wad(std::path::Path::new(env!("CARGO_MANIFEST_DIR")))
@@ -97,18 +99,34 @@ mod tests {
             let size = f.metadata().unwrap().len();
             let arch = load_ffcs_archive(&mut f, size).expect("ffcs archive");
 
-            // The doc places the tables in resident block 3185; scan nearby as a fallback so a WAD
-            // variant still resolves.
-            let mut resident: Option<Vec<u8>> = None;
-            for blk in std::iter::once(3185u16).chain(3180u16..3200u16) {
-                if let Ok(dec) = decompress_block(&mut f, &arch.indx, blk) {
-                    if block_has_lookup(&dec) {
-                        resident = Some(dec);
-                        break;
-                    }
-                }
-            }
-            let dec = resident.expect("no block in 3180..3200 carries the AnimationLookup table");
+            // The AnimationLookup is an `animationtable` asset whose container name hash is
+            // 0xE00B080C (the value `anim_select`'s `block_has_lookup` matches); its one ASET row names
+            // its block. In retail vz.wad that is row 3055: type_id 11, block 3185, single-block.
+            let lookup_hash: u32 = 0xE00B_080C;
+            let animtable_type = type_id_for_type_hash(pandemic_hash_m2("animationtable"))
+                .expect("animationtable has an ASET type_id");
+            let rows: Vec<_> = arch.aset.iter().filter(|a| a.asset_hash == lookup_hash).collect();
+            assert_eq!(
+                rows.len(),
+                1,
+                "expected exactly one ASET row for AnimationLookup 0x{lookup_hash:08X} in {}, found {}",
+                path.display(),
+                rows.len()
+            );
+            let row = rows[0];
+            assert_eq!(
+                row.type_id, animtable_type,
+                "AnimationLookup 0x{lookup_hash:08X} ASET row has type_id {}, not animationtable",
+                row.type_id
+            );
+            assert!(row.is_single_block(), "AnimationLookup 0x{lookup_hash:08X} spans more than one block");
+            let blk = row.block_index();
+            let dec = decompress_block(&mut f, &arch.indx, blk)
+                .unwrap_or_else(|e| panic!("decompress AnimationLookup block {blk}: {e}"));
+            assert!(
+                block_has_lookup(&dec),
+                "block {blk}, named by the AnimationLookup ASET row, does not carry the AnimationLookup container"
+            );
 
             let mattias = ClipPicker::character_name("mattias");
             let chris = ClipPicker::character_name("chris");
