@@ -313,9 +313,8 @@ pub const M0214_SOUND_WAVE_UNUSABLE: Rule = Rule {
 };
 
 /// A sound name the engine cannot reach: two cues of one bank whose names hash alike (the hash
-/// folds case), a cue whose guid is below `0x401` (FindCue reads such a guid as a direct index,
-/// `FUN_00835a70`), a name written as a bare hash or with surrounding whitespace, a bank with no
-/// cues, or an `add_sound` bank named `vo_*` (retail Lua appends the language to such a name before
+/// folds case), a name written as a bare hash or with surrounding whitespace, a bank with no cues,
+/// or an `add_sound` bank named `vo_*` (retail Lua appends the language to such a name before
 /// loading it, `mrxsoundbanks.lua:80-87`).
 pub const M0215_SOUND_NAME_UNUSABLE: Rule = Rule {
     code: "M0215",
@@ -965,30 +964,6 @@ fn unreachable_hash_checks(blocks: &[mercs2_formats::patch_wad::PatchBlock]) -> 
     out
 }
 
-/// M0190 — an `add_movie` payload carrying ActionScript 3.
-///
-/// **The runtime is AVM1 only.** The embedded middleware is Scaleform GFx **2.0.48**, targeting
-/// Flash 8 / AS2, proven three ways in the unpacked exe: the `gfxVersion` property returns the
-/// literal `"2.0.48"`, the loader carries `incompatible GFX file, version 2.x expected`, and the
-/// builtin class registrar installs the AS2 class table with no AVM2 anywhere. GFx 2.x has no
-/// `DoABC` tag loader at all.
-///
-/// So an AS3 movie does not fail — it **loads**. The tag is unknown, so it is skipped; the shapes,
-/// text and timeline all render, and not one line of the movie's logic ever runs. Nothing is logged,
-/// because from the loader's point of view nothing went wrong. That is the exact silent-no-op class
-/// this linter exists for, which is why it blocks rather than warns.
-///
-/// Retail corroborates the direction: across all 64 `cfx_pack` assets in `vz.wad`, `DoABC` appears
-/// zero times.
-///
-/// A movie that cannot be read at all stays silent HERE on purpose. The lowering refuses it with a
-/// message about what a `.gfx` is supposed to look like, and that is a better place to say so than a
-/// rule about AS3 — a rule that reported "no AS3 found" for a file that is not a movie would be
-/// answering a question nobody asked.
-/// FindCue reads a guid below this as a direct index into the cue list, not as a hash
-/// (`FUN_00835a70`, decomp ~627672).
-pub const DIRECT_INDEX_GUID_LIMIT: u32 = 0x401;
-
 /// Why a bank or cue name cannot be used, or `None`.
 fn sound_name_refusal(what: &str, name: &str) -> Option<String> {
     if name.is_empty() {
@@ -1064,17 +1039,6 @@ fn sound_checks(
             continue;
         }
         let guid = mercs2_formats::hash::pandemic_hash_m2(&cue.name);
-        if guid < DIRECT_INDEX_GUID_LIMIT {
-            push(
-                M0215_SOUND_NAME_UNUSABLE,
-                format!(
-                    "cue {:?} hashes to 0x{guid:08X}; FindCue reads a guid below 0x401 as a cue \
-                     index, not a name (FUN_00835a70), so the cue is unreachable. Rename it.",
-                    cue.name
-                ),
-                None,
-            );
-        }
         if let Some(first) = seen.insert(guid, &cue.name) {
             push(
                 M0215_SOUND_NAME_UNUSABLE,
@@ -1151,6 +1115,26 @@ fn sound_checks(
     out
 }
 
+/// M0190 — an `add_movie` payload carrying ActionScript 3.
+///
+/// **The runtime is AVM1 only.** The embedded middleware is Scaleform GFx **2.0.48**, targeting
+/// Flash 8 / AS2, proven three ways in the unpacked exe: the `gfxVersion` property returns the
+/// literal `"2.0.48"`, the loader carries `incompatible GFX file, version 2.x expected`, and the
+/// builtin class registrar installs the AS2 class table with no AVM2 anywhere. GFx 2.x has no
+/// `DoABC` tag loader at all.
+///
+/// So an AS3 movie does not fail — it **loads**. The tag is unknown, so it is skipped; the shapes,
+/// text and timeline all render, and not one line of the movie's logic ever runs. Nothing is logged,
+/// because from the loader's point of view nothing went wrong. That is the exact silent-no-op class
+/// this linter exists for, which is why it blocks rather than warns.
+///
+/// Retail corroborates the direction: across all 64 `cfx_pack` assets in `vz.wad`, `DoABC` appears
+/// zero times.
+///
+/// A movie that cannot be read at all stays silent HERE on purpose. The lowering refuses it with a
+/// message about what a `.gfx` is supposed to look like, and that is a better place to say so than a
+/// rule about AS3 — a rule that reported "no AS3 found" for a file that is not a movie would be
+/// answering a question nobody asked.
 fn movie_checks(index: usize, name: &str, root: &Path, movie: &Path) -> Vec<Diagnostic> {
     // The message names `movie` as the manifest wrote it, never the joined path: a report must not
     // carry the local machine's absolute path.
