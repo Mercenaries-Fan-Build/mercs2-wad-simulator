@@ -1,20 +1,18 @@
 //! The regression invariant for moving visibility from BUILD time to DRAW time.
 //!
-//! There is nothing to snapshot: the wad is deterministic, versioned input, and a golden capture of
-//! today's output would only enshrine the bug we are fixing (every model with a destruction machine is
-//! *supposed* to change). What we can assert is a property.
+//! There is nothing to snapshot: the wad is deterministic, versioned input, and every model with a
+//! destruction machine is expected to draw differently from a build-time filter. What we can assert
+//! is a property.
 //!
 //! For a container with **no SWIT** (no destruction state machine) clause 3 of the draw gate is
-//! vacuous — every node is enabled — so the new draw-time gate at `view_state = 0x01` must select
-//! exactly the segments the legacy build-time filter `build_indexed_state(c, 0x01)` baked in.
+//! vacuous — every node is enabled — so the draw-time gate at `view_state = 0x01` must select
+//! exactly the segments the build-time filter `build_indexed_state(c, 0x01)` keeps.
 //! All characters are in this class (`pmc_hum_mattias_v3` has no SWIT/NODE at all), as are most props.
 //!
-//! Models *with* SWIT are expected to differ — that is the fix, not a regression.
+//! Models *with* SWIT are expected to differ.
 //!
-//! Needs the retail install, and deliberately **not** `#[ignore]`d — it is game-gated: built by the
-//! `retail` feature, it reads the retail `vz.wad` named by the repo-root `.mercs2-local.toml` and
-//! fails when it is absent. See the note in `registry_wad_probe.rs` for why `#[ignore]` was the wrong
-//! default.
+//! Game-gated: built by the `retail` feature, it reads the retail `vz.wad` named by the repo-root
+//! `.mercs2-local.toml` and fails when it is absent.
 
 use mercs2_engine::render_state::RenderState;
 use mercs2_engine::{mesh, wad};
@@ -50,22 +48,18 @@ fn swit_less_models_gate_identically_at_rung_0() {
     let mut w = open_vz_wad();
     let hashes: Vec<u32> = wad::model_list(&w).into_iter().map(|(h, _)| h).take(SAMPLE).collect();
 
-    let (mut checked, mut skipped_swit, mut skipped_zero_mask, mut load_fail) = (0, 0, 0, 0);
+    let (mut checked, mut skipped_swit, mut skipped_zero_mask) = (0, 0, 0);
     for h in hashes {
-        let Ok(c) = wad::extract_container(&mut w, h) else {
-            load_fail += 1;
-            continue;
-        };
+        let c = wad::extract_container(&mut w, h)
+            .unwrap_or_else(|e| panic!("0x{h:08X}: extract_container: {e}"));
         if mercs2_formats::orchestrator::parse_state_machine(&c).is_some() {
             skipped_swit += 1; // clause 3 is live here; the two builders are SUPPOSED to differ
             continue;
         }
-        let (Ok((_, _, legacy, _)), Ok((_, _, all, _))) =
-            (mesh::build_indexed_state(&c, 0x01), mesh::build_indexed_all(&c))
-        else {
-            load_fail += 1;
-            continue;
-        };
+        let (_, _, legacy, _) = mesh::build_indexed_state(&c, 0x01)
+            .unwrap_or_else(|e| panic!("0x{h:08X}: build_indexed_state(0x01): {e}"));
+        let (_, _, all, _) =
+            mesh::build_indexed_all(&c).unwrap_or_else(|e| panic!("0x{h:08X}: build_indexed_all: {e}"));
         // The legacy builder treats mask == 0 as always-on; the engine's ANY-bit rule never draws it.
         // Those containers legitimately diverge — count them rather than pretend they match.
         if all.iter().any(|d| d.lod_mask == 0) {
@@ -90,7 +84,7 @@ fn swit_less_models_gate_identically_at_rung_0() {
     println!(
         "gate invariant: {checked} SWIT-less models identical; \
          {skipped_swit} have a state machine (expected to differ); \
-         {skipped_zero_mask} carry a mask==0 segment; {load_fail} failed to load"
+         {skipped_zero_mask} carry a mask==0 segment"
     );
     assert!(checked > 20, "sample was too thin to mean anything (checked {checked})");
 }
@@ -107,7 +101,13 @@ fn build_indexed_all_is_a_superset_of_every_rung() {
 
         let mut union = std::collections::HashSet::new();
         for bit in 0..8u8 {
-            let Ok((_, _, tier, _)) = mesh::build_indexed_state(&c, 1 << bit) else { continue };
+            // A tier no segment belongs to (mask 0 or sharing the bit) has nothing to build, and
+            // `build_indexed_state` reports it as an error; every other tier must build.
+            if !all.iter().any(|d| d.lod_mask == 0 || d.lod_mask & (1 << bit) != 0) {
+                continue;
+            }
+            let (_, _, tier, _) = mesh::build_indexed_state(&c, 1 << bit)
+                .unwrap_or_else(|e| panic!("0x{h:08X}: build_indexed_state(1 << {bit}): {e}"));
             for d in &tier {
                 union.insert((d.group_index, d.sub_object));
             }
@@ -157,10 +157,9 @@ fn disabling_a_node_removes_its_segments_at_every_lod_rung() {
 #[test]
 fn a_meshs_segment_record_is_segm_indx_group_not_segm_group() {
     // THE assembly rule, validated against an independent witness. `INDX[group]` is a SEG_ID; the
-    // mesh's record is `SEGM[INDX[group]]`. Reading `SEGM[group]` (what we used to do) picks
-    // unrelated records — a model has far more segments than groups (tank: 130 vs 12) — giving every
-    // mesh the wrong attachment node and the wrong LOD mask. The visible symptom was a tank barrel
-    // rendering on the ground, detached from its turret.
+    // mesh's record is `SEGM[INDX[group]]`. Reading `SEGM[group]` picks unrelated records — a model
+    // has far more segments than groups (tank: 130 vs 12) — giving every mesh the wrong attachment
+    // node and the wrong LOD mask; a tank barrel then renders on the ground, detached from its turret.
     //
     // Witness: the HIER node whose OWN bbox matches the mesh. It must agree with the node the rule
     // yields, and the barrel must land at turret height.
