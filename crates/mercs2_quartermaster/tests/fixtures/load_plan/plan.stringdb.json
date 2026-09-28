@@ -1,5 +1,5 @@
 {
-  "format": 1,
+  "format": 2,
   "producer": "preflight",
   "quartermaster": "3.0.0",
   "ok": true,
@@ -20,7 +20,8 @@
       "provides": [],
       "plugins": [],
       "runtime_dlls": [],
-      "placed_files": []
+      "placed_files": [],
+      "data_files": []
     },
     {
       "id": "shipment:stringdb-b",
@@ -34,7 +35,8 @@
       "provides": [],
       "plugins": [],
       "runtime_dlls": [],
-      "placed_files": []
+      "placed_files": [],
+      "data_files": []
     }
   ],
   "edges": [],
@@ -48,5 +50,6 @@
     "blocks\\Shell\\resident_P000_Q3.block",
     "blocks\\VZ\\mod_b6a13123.block"
   ],
+  "link_file_paths": [],
   "findings": []
 }
