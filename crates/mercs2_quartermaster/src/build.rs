@@ -2966,43 +2966,20 @@ fn lower(
             Ok(Lowering::Block(block))
         }
 
-        // Opaque bytes into a `data`-leaf container. Needs NO game stack, so it exercises the
-        // emission contract hermetically — the shape template CI runs in.
-        Contribution::AddSound { name, bank, sound } => {
-            let path = root.join(bank);
-            let bytes = std::fs::read(&path).map_err(|e| BuildError::Lower {
-                index,
-                kind,
-                message: format!("reading {}: {e}", path.display()),
-            })?;
-            if bytes.is_empty() {
-                return Err(BuildError::Lower {
-                    index,
-                    kind,
-                    message: format!("{} is empty", path.display()),
-                });
-            }
-            let (type_id, type_hash) = sound.ids();
-            let hash = crate::manifest::asset_hash(name);
-            let block_bytes =
-                mercs2_formats::ucfx::build_wrapped_block(hash, type_hash, &bytes);
-            log.push(format!(
-                "contributions[{index}] add_sound {name} 0x{hash:08X} <- {} ({:?}, {} bytes, verbatim)",
-                path.display(),
-                sound,
-                bytes.len()
-            ));
-            // ADDITIVE and PRIMARY. An audio bank has no LOD chain, so both rung halves stay at
-            // their sentinels — `0x0000` in the low 16 is the dangling-rung HANG, not "no rung".
-            let aset = AsetEntry::new(hash, 0xFFFF_FFFF, 0x0000_FFFF, type_id);
-            let block = PatchBlock::from_decompressed(
-                &block_bytes,
-                format!("blocks\\VZ\\mod_{hash:08x}.block"),
-                vec![aset],
-                None,
-            )
-            .map_err(|m| BuildError::Lower { index, kind, message: m })?;
+        // Encoded from the authored cues; needs no game stack. The mod loader loads the bank
+        // (`sound::sound_registrations`, baked by the link step).
+        Contribution::AddSound { bank, category, cues } => {
+            let block = crate::sound::lower_add_sound(bank, category, cues, root, log)
+                .map_err(|message| BuildError::Lower { index, kind, message })?;
             Ok(Lowering::Block(block))
+        }
+        // Lowered together, per bank, after every contribution (`sound::lower_overrides`): several
+        // overrides of one bank share one forked soundbank and one override wavebank.
+        Contribution::ReplaceSoundBank { .. } | Contribution::ReplaceSoundCue { .. } => {
+            if game.is_none() {
+                return Err(BuildError::GameRequired { index, kind });
+            }
+            Ok(Lowering::Nothing)
         }
 
         Contribution::AddMovie { name, movie } => {
@@ -4194,7 +4171,7 @@ pub fn build(
     let mut diagnostics = lint::lint(manifest, Some(&shipment.root), names);
     // Rules that need the retail WADs run only when a stack is configured. They are appended
     // BEFORE the gate so a game-aware Error would still block, even though M0007 is a warning.
-    if let Some(g) = game.as_deref() {
+    if let Some(g) = game.as_deref_mut() {
         diagnostics.extend(lint::game_checks(manifest, g));
     }
     if lint::blocks_build(&diagnostics) {
@@ -4302,6 +4279,29 @@ pub fn build(
         };
         blocks.extend(merge_string_tables(&[shipment], game, StringMerge::Strict, &mut log)?);
     }
+    // Sound overrides: every replace_sound_bank / replace_sound_cue of this Shipment, per bank. The
+    // blocks go where the game carries each bank: the overlay, the shell patch, a language's patch.
+    let mut shell_blocks: Vec<PatchBlock> = Vec::new();
+    let mut language_blocks: std::collections::BTreeMap<crate::manifest::Language, Vec<PatchBlock>> =
+        std::collections::BTreeMap::new();
+    if let Some((index, c)) = manifest.contributions.iter().enumerate().find(|(_, c)| {
+        matches!(c, Contribution::ReplaceSoundBank { .. } | Contribution::ReplaceSoundCue { .. })
+    }) {
+        let Some(game) = game.as_deref_mut() else {
+            return Err(BuildError::GameRequired { index, kind: c.kind() });
+        };
+        let lowered = crate::sound::lower_overrides(
+            &[shipment],
+            game,
+            crate::sound::OverrideScope::Shipment,
+            &mut log,
+        )
+        .map_err(|message| BuildError::Lower { index, kind: c.kind(), message })?;
+        blocks.extend(lowered.overlay);
+        shell_blocks = lowered.shell;
+        language_blocks = lowered.language;
+    }
+    let sound_regs = crate::sound::sound_registrations(manifest);
     let mutations = script_mutations(manifest, &shipment.root)?;
     let ui_regs = ui_registrations(manifest);
     let layer_regs = layer_registrations(manifest);
@@ -4328,6 +4328,7 @@ pub fn build(
         || !ui_regs.is_empty()
         || !layer_regs.is_empty()
         || !support_regs.is_empty()
+        || !sound_regs.is_empty()
         || !additions.is_empty()
         || !replacements.is_empty()
     {
@@ -4366,6 +4367,7 @@ pub fn build(
             &ui_regs,
             &layer_regs,
             &support_regs,
+            &sound_regs,
             &additions,
             &replacements,
             &solo_order,
@@ -4526,6 +4528,36 @@ pub fn build(
         });
     }
 
+    // The shell patch and the language patches: patch WADs a deploy step merges into
+    // `data/shell-patch.wad` and `data/<language>-patch.wad`.
+    if !shell_blocks.is_empty() {
+        let name = format!("{}.shell-patch.wad", manifest.shipment.name);
+        placements.push(write_patch_wad(
+            &out_dir,
+            &name,
+            &shell_blocks,
+            csum,
+            Destination::ShellPatch,
+            &mut log,
+            &mut diagnostics,
+        )?);
+    }
+    for (language, lblocks) in language_blocks {
+        let relative = format!("language_patch/{}.wad", language.token());
+        placements.push(write_patch_wad(
+            &out_dir,
+            &relative,
+            &lblocks,
+            csum,
+            Destination::LanguagePatch {
+                language: language.token().to_string(),
+                relative: relative.clone(),
+            },
+            &mut log,
+            &mut diagnostics,
+        )?);
+    }
+
     // Code-layer artifacts. The build directory MIRRORS the tree these will be copied into, so
     // `destination.relative` names the file both here and in the game folder and a deploy step can
     // copy the tree wholesale. Writing them flat was fine while the only destination was `scripts/`
@@ -4584,6 +4616,57 @@ pub fn build(
     })
 }
 
+/// Assemble `blocks` as a patch WAD at `relative` under `out_dir`, self-check it before it reaches
+/// disk ([`verify_emitted`]), and record it with its digest under `destination`.
+fn write_patch_wad(
+    out_dir: &Path,
+    relative: &str,
+    blocks: &[PatchBlock],
+    csum: (u32, Option<u32>),
+    destination: Destination,
+    log: &mut Vec<String>,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Result<Placement, BuildError> {
+    let wad = build_patch_wad_multi(blocks, csum.0, csum.1, &FFCS_CERT_BLOB).map_err(|m| {
+        BuildError::Lower {
+            index: 0,
+            kind: "assemble",
+            message: format!("{relative}: {m}"),
+        }
+    })?;
+    let found = verify_emitted(&wad)?;
+    for d in &found {
+        log.push(format!("self-check ({relative}): {d}"));
+    }
+    diagnostics.extend(found);
+    let path = out_dir.join(relative);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| BuildError::Io {
+            path: parent.to_path_buf(),
+            message: e.to_string(),
+        })?;
+    }
+    std::fs::write(&path, &wad).map_err(|e| BuildError::Io {
+        path: path.clone(),
+        message: e.to_string(),
+    })?;
+    let digest = sha256_hex(&wad);
+    log.push(format!("wrote {relative}: {} bytes, sha256 {digest}", wad.len()));
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .ok_or_else(|| BuildError::Io {
+            path: path.clone(),
+            message: "the output path has no file name".into(),
+        })?;
+    Ok(Placement {
+        name,
+        bytes: wad.len(),
+        sha256: digest,
+        destination,
+    })
+}
+
 /// The PTHS path of the single-entry block a string table ships in: `blocks\VZ\mod_<hash>.block`.
 ///
 /// One function for both producers of one — a Shipment's own build and the link, both through
@@ -4628,16 +4711,24 @@ pub fn merged_string_tables<'a>(
 }
 
 /// Every block `qm link` re-emits for a set, as the load plan's `link_block_paths` states it: the
-/// scripts blocks ([`link::SCRIPT_BLOCKS`]), then each merged string table's block in hash order.
+/// scripts blocks ([`link::SCRIPT_BLOCKS`]), then each merged string table's block in hash order,
+/// then each merged sound bank's block in entry-hash order ([`crate::sound::linked_sound_entries`];
+/// one path for the bank in every WAD that carries it).
 /// A deploy step drops the per-Shipment copies of exactly these blocks, because the link WAD carries
 /// the set-wide version of each.
 pub fn link_block_paths<'a>(
     manifests: impl IntoIterator<Item = &'a crate::manifest::Manifest>,
 ) -> Vec<String> {
+    let manifests: Vec<&crate::manifest::Manifest> = manifests.into_iter().collect();
     link::SCRIPT_BLOCKS
         .iter()
         .map(|(_, p)| p.to_string())
-        .chain(merged_string_tables(manifests).into_iter().map(stringdb_block_path))
+        .chain(merged_string_tables(manifests.iter().copied()).into_iter().map(stringdb_block_path))
+        .chain(
+            crate::sound::linked_sound_entries(manifests.iter().copied())
+                .into_iter()
+                .map(crate::sound::block_path),
+        )
         .collect()
 }
 
@@ -4827,6 +4918,9 @@ fn merge_string_tables(
 /// The filename of the deploy-time link overlay. Named to sort and read as "last".
 pub const LINK_WAD_NAME: &str = "zz-quartermaster-link.wad";
 
+/// The filename of the link's shell patch: the merged sound banks `shell.wad` carries.
+pub const LINK_SHELL_PATCH_NAME: &str = "zz-quartermaster-link.shell-patch.wad";
+
 /// What a cross-Shipment link produced.
 #[derive(Debug, Clone)]
 pub struct LinkReport {
@@ -4929,7 +5023,9 @@ pub fn link_installed(
     let mut support_regs: Vec<link::SupportRegistration> = Vec::new();
     let mut additions: Vec<link::ScriptAddition> = Vec::new();
     let mut replacements: Vec<link::ScriptReplacement> = Vec::new();
+    let mut sound_regs: Vec<link::SoundBankRegistration> = Vec::new();
     for s in &shipments {
+        sound_regs.extend(crate::sound::sound_registrations(&s.manifest));
         mutations.extend(script_mutations(&s.manifest, &s.root)?);
         ui_regs.extend(ui_registrations(&s.manifest));
         layer_regs.extend(layer_registrations(&s.manifest));
@@ -4937,20 +5033,25 @@ pub fn link_installed(
         additions.extend(script_additions(&s.manifest, &s.root)?);
         replacements.extend(script_replacements(&s.manifest, &s.root)?);
     }
-    // A UI, layer, add_script, or replace_lua mod touches the Script layer too — the first two mint
-    // `qm_modloader` and the trampoline; add_script mints its own fresh scripts_vz entry;
-    // replace_lua swaps a shipped script's bytecode. Any of them needs the script link to run.
+    // A UI, layer, sound-bank, add_script, or replace_lua mod touches the Script layer too — UI,
+    // layer and sound-bank registrations mint `qm_modloader` and the trampoline; add_script mints
+    // its own fresh scripts_vz entry; replace_lua swaps a shipped script's bytecode. Any of them
+    // needs the script link to run.
     let touches_scripts = !(mutations.is_empty()
         && ui_regs.is_empty()
         && layer_regs.is_empty()
         && support_regs.is_empty()
+        && sound_regs.is_empty()
         && additions.is_empty()
         && replacements.is_empty());
     // Every string table any Shipment edits or adds keys to is merged into one link-owned copy.
     let tables = merged_string_tables(shipments.iter().map(|s| &s.manifest));
-    if !touches_scripts && tables.is_empty() {
+    // Every sound bank any Shipment's replace_sound_cue targets, likewise.
+    let sound_entries = crate::sound::linked_sound_entries(shipments.iter().map(|s| &s.manifest));
+    if !touches_scripts && tables.is_empty() && sound_entries.is_empty() {
         log.push(
-            "no installed Shipment touches a script or a string table — nothing to link".into(),
+            "no installed Shipment touches a script, a string table or a sound bank — nothing to link"
+                .into(),
         );
         // Still write the (empty) placement record. Emitting no link WAD is the right call — an
         // overlay that merely restates the base block is a file deploy has to reason about for
@@ -4971,12 +5072,14 @@ pub fn link_installed(
         });
     }
     log.push(format!(
-        "linking {} mutation(s), {} UI and {} layer registration(s) and {} string table(s) from {} \
-         Shipment(s)",
+        "linking {} mutation(s), {} UI, {} layer and {} sound-bank registration(s), {} string \
+         table(s) and {} sound bank(s) from {} Shipment(s)",
         mutations.len(),
         ui_regs.len(),
         layer_regs.len(),
+        sound_regs.len(),
         tables.len(),
+        sound_entries.len(),
         shipments.len()
     ));
 
@@ -4998,6 +5101,7 @@ pub fn link_installed(
             &ui_regs,
             &layer_regs,
             &support_regs,
+            &sound_regs,
             &additions,
             &replacements,
             &order,
@@ -5056,10 +5160,12 @@ pub fn link_installed(
     // The merged string tables. The plan's `link_block_paths` promised exactly these, and a deploy
     // step drops the per-Shipment copies of each on that promise, so a mismatch is an internal error.
     let table_blocks = merge_string_tables(&shipments, game, StringMerge::Upsert, &mut log)?;
+    let sound_paths: std::collections::BTreeSet<String> =
+        sound_entries.iter().map(|&e| crate::sound::block_path(e)).collect();
     let promised: Vec<String> = plan
         .link_block_paths
         .iter()
-        .filter(|p| !link::SCRIPT_BLOCKS.iter().any(|(_, s)| s == p))
+        .filter(|p| !link::SCRIPT_BLOCKS.iter().any(|(_, s)| s == p) && !sound_paths.contains(*p))
         .cloned()
         .collect();
     let emitted: Vec<String> = table_blocks.iter().map(|b| b.path_string.clone()).collect();
@@ -5075,12 +5181,95 @@ pub fn link_installed(
     }
     patches.extend(table_blocks);
 
+    // The merged sound banks: one soundbank per bank a replace_sound_cue targets, carrying every
+    // Shipment's cue overrides, in each WAD that carries the bank.
+    let mut shell_blocks: Vec<PatchBlock> = Vec::new();
+    let mut language_blocks: std::collections::BTreeMap<crate::manifest::Language, Vec<PatchBlock>> =
+        std::collections::BTreeMap::new();
+    if !sound_entries.is_empty() {
+        let lowered = crate::sound::lower_overrides(
+            &shipments,
+            game,
+            crate::sound::OverrideScope::Link,
+            &mut log,
+        )
+        .map_err(|message| BuildError::Lower { index: 0, kind: "link", message })?;
+        let merged: std::collections::BTreeSet<String> = lowered
+            .overlay
+            .iter()
+            .chain(&lowered.shell)
+            .chain(lowered.language.values().flatten())
+            .map(|b| b.path_string.clone())
+            .collect();
+        if merged != sound_paths {
+            return Err(BuildError::Lower {
+                index: 0,
+                kind: "link",
+                message: format!(
+                    "internal error: the plan promised the sound-bank blocks {sound_paths:?}, and \
+                     the link merged {merged:?}"
+                ),
+            });
+        }
+        patches.extend(lowered.overlay);
+        shell_blocks = lowered.shell;
+        language_blocks = lowered.language;
+    }
+
     let csum =
         mercs2_formats::donor::base_csum(game.paths()[0]).map_err(|m| BuildError::Lower {
             index: 0,
             kind: "link",
             message: m,
         })?;
+    std::fs::create_dir_all(out_dir).map_err(|e| BuildError::Io {
+        path: out_dir.to_path_buf(),
+        message: e.to_string(),
+    })?;
+    let mut placements = Vec::new();
+    let mut diagnostics = Vec::new();
+    if !shell_blocks.is_empty() {
+        placements.push(write_patch_wad(
+            out_dir,
+            LINK_SHELL_PATCH_NAME,
+            &shell_blocks,
+            csum,
+            Destination::ShellPatch,
+            &mut log,
+            &mut diagnostics,
+        )?);
+    }
+    for (language, lblocks) in language_blocks {
+        let relative = format!("language_patch/{}.wad", language.token());
+        placements.push(write_patch_wad(
+            out_dir,
+            &relative,
+            &lblocks,
+            csum,
+            Destination::LanguagePatch {
+                language: language.token().to_string(),
+                relative: relative.clone(),
+            },
+            &mut log,
+            &mut diagnostics,
+        )?);
+    }
+    if patches.is_empty() {
+        write_plan(&plan)?;
+        write_placement_record(out_dir, &placements)?;
+        log.push(format!(
+            "wrote {}, {PLACEMENT_RECORD}: {} placement(s), no link overlay",
+            crate::plan::PLAN_FILE,
+            placements.len()
+        ));
+        return Ok(LinkReport {
+            wad: None,
+            placements,
+            linked,
+            plan,
+            log,
+        });
+    }
     let wad_bytes =
         build_patch_wad_multi(&patches, csum.0, csum.1, &FFCS_CERT_BLOB).map_err(|m| {
             BuildError::Lower {
@@ -5094,10 +5283,6 @@ pub fn link_installed(
     // and for the same reason: nothing downstream would notice a defect here.
     let self_check = verify_emitted(&wad_bytes)?;
 
-    std::fs::create_dir_all(out_dir).map_err(|e| BuildError::Io {
-        path: out_dir.to_path_buf(),
-        message: e.to_string(),
-    })?;
     let path = out_dir.join(LINK_WAD_NAME);
     std::fs::write(&path, &wad_bytes).map_err(|e| BuildError::Io {
         path: path.clone(),
@@ -5116,12 +5301,15 @@ pub fn link_installed(
     // it must sit in the mount order is not recoverable from the file itself. The name encodes the
     // intent ("sorts last") but a deploy step reading a directory should not have to infer a
     // contract from a filename — `destination: overlay` in the record is the contract.
-    let placements = vec![Placement {
-        name: LINK_WAD_NAME.to_string(),
-        bytes: wad_bytes.len(),
-        sha256: digest,
-        destination: Destination::Overlay,
-    }];
+    placements.insert(
+        0,
+        Placement {
+            name: LINK_WAD_NAME.to_string(),
+            bytes: wad_bytes.len(),
+            sha256: digest,
+            destination: Destination::Overlay,
+        },
+    );
     write_plan(&plan)?;
     write_placement_record(out_dir, &placements)?;
     log.push(format!(
