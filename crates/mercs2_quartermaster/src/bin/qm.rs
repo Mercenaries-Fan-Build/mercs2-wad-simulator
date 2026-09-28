@@ -358,10 +358,9 @@ fn resolve_names(explicit: Option<&Path>) -> Option<NameTable> {
 /// Resolve the game stack: an explicit path wins, otherwise host discovery.
 ///
 /// `--game` may name `vz.wad`, the install root or its `data` folder, the same as for
-/// `qm preflight` ([`compat::resolve_vz_wad`]). No manifest names a path: a Shipment that could
-/// name its own game folder would be a Shipment that behaves differently on the author's machine
-/// than on anyone else's. The manifests decide only which language WADs beside `vz.wad` join the
-/// stack ([`compat::game_stack_paths`]).
+/// `qm preflight` ([`compat::resolve_vz_wad`]). No manifest names a path, so a Shipment reads the
+/// game from whichever install the host resolves. The manifests decide only which language WADs
+/// beside `vz.wad` join the stack ([`compat::game_stack_paths`]).
 fn resolve_game<'a>(
     explicit: Option<&Path>,
     manifests: impl IntoIterator<Item = &'a mercs2_quartermaster::Manifest>,
