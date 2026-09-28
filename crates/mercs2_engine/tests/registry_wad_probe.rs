@@ -1,13 +1,7 @@
 //! Integration probes for the asset layer against the REAL `vz.wad`.
 //!
-//! These need the retail install, and they are deliberately **not** `#[ignore]`d. They are
-//! game-gated: built by the `retail` feature, they read the retail `vz.wad` named by the repo-root
+//! Game-gated: built by the `retail` feature, they read the retail `vz.wad` named by the repo-root
 //! `.mercs2-local.toml` and fail when it is absent.
-//!
-//! `#[ignore]` was the wrong default: it means the tests that exercise the real format only run when
-//! somebody remembers a flag, and an ignored test that would FAIL is indistinguishable from one that
-//! would pass. That is not hypothetical — `wad_simulator`'s soundbank goldens sat broken behind
-//! `#[ignore]` with a path two directory levels wrong, and nothing reported it.
 //!
 //! What these pin down (measured with `mercs2_probe --bin aset_probe`):
 //! - `oc_veh_helicopter_md500` (`0x9FCAE910`) — model chunk in block **3350**.
