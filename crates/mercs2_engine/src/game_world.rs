@@ -672,12 +672,11 @@ static CLIP_INDEX: std::sync::OnceLock<ClipIndexCache> = std::sync::OnceLock::ne
 
 /// Cached clip index, keyed by the ARCHIVE it was built from.
 ///
-/// This used to be one process-wide `OnceLock` on the premise that "the WAD is fixed per process".
-/// That is false for a WAD STACK: the workshop opens `vz.wad` + `vz-patch.wad`, and lookups walk the
-/// stack in reverse (patch first, the retail last-opened-wins rule). The patch ships no animgroup
-/// blocks, so the first caller built an EMPTY index from it and cached that globally — after which
-/// every model in every archive resolved zero clips, forever. Keying on the archive path fixes it:
-/// each WAD gets its own index, and the base WAD's real one is never shadowed by an overlay's.
+/// Keyed per archive because a WAD STACK holds several: the workshop opens `vz.wad` + `vz-patch.wad`,
+/// and lookups walk the stack in reverse (patch first, the retail last-opened-wins rule). The patch
+/// ships no animgroup blocks, so its index is empty; one process-wide index built from it would
+/// resolve zero clips for every model. Each WAD gets its own index, and the base WAD's is never
+/// shadowed by an overlay's.
 ///
 /// Building scans the ~190 animgroup blocks once per archive (a few seconds); later lookups are cheap
 /// integer comparisons over the flat clip list. Indexes are leaked deliberately — one per open
@@ -1314,8 +1313,8 @@ pub struct StreamingWorld {
     /// [`terrain_field`](Self::terrain_field) — so a terrain wake/hibernate never touches the broadphase.
     collision_ops: Vec<CollisionOp>,
     /// The baked hi-res terrain collision (retail `hkpHeightFieldShape`). Terrain tiles bake their
-    /// surface here ONCE on wake and drop it on hibernate; ground queries sample it O(1). This is where
-    /// the ~270k terrain triangles that used to bloat the collider now live — as a cheap height grid.
+    /// surface here ONCE on wake and drop it on hibernate; ground queries sample it O(1). The ~270k
+    /// terrain triangles live here as a cheap height grid, not in the collider.
     terrain_field: TerrainHeightField,
     /// Cumulative collision-source census over the session: streamed prop/building units that used
     /// AUTHORED PHY2 collision vs those left with NO collision (no complete authored collider —
@@ -1662,9 +1661,9 @@ pub async fn run_game_world(
         None => eprintln!("[boot] spawn = DEFAULT exterior bird's-eye (NO --spawn received)"),
     }
     eprintln!("[boot] {} vz_state overlay layer(s) requested via --overlays", overlays.len());
-    // The free-fly boot is now a `Game` over the unified engine loop (`app::run`); `FreeFlyGame` owns the
+    // The free-fly boot is a `Game` over the unified engine loop (`app::run`); `FreeFlyGame` owns the
     // free-fly camera + the `StreamingWorld`, while the engine owns the window / event loop / loading
-    // screen / render — the machinery this function used to duplicate against `run_scene_world_loading`.
+    // screen / render.
     crate::app::run(FreeFlyGame::new(wadpath, spawn, overlays, populate)).await
 }
 
@@ -2064,10 +2063,10 @@ mod stream_collision_tests {
     #[test]
     fn terrain_tile_bakes_into_heightfield_not_the_collider() {
         let tile = flat_tile(1.0);
-        // The tile's raw triangles are exactly what USED to bloat the collider.
-        assert_eq!(tile.len(), 200, "the tile carries 200 tris that no longer enter the collider");
+        // The tile's raw triangles: none of them enter the collider.
+        assert_eq!(tile.len(), 200, "the tile carries 200 tris that do not enter the collider");
 
-        // Baked into a heightfield instead: the surface is recovered at ~1 m everywhere inside the tile.
+        // Baked into a heightfield: the surface is recovered at ~1 m everywhere inside the tile.
         let mut field = TerrainHeightField::default();
         let grid = TileHeightGrid::bake(&tile).expect("flat tile bakes");
         field.insert(0x00A5_5E77_u32, grid);
@@ -2137,7 +2136,9 @@ mod stream_collision_tests {
                             }
                         }
                         if example.is_none() {
-                            let rt = load_model_by_hash(&mut w, h).map(|(m, _, _)| m.indices.len() / 3).unwrap_or(0);
+                            let rt = load_model_by_hash(&mut w, h)
+                                .map(|(m, _, _)| m.indices.len() / 3)
+                                .unwrap_or_else(|| panic!("render model 0x{h:08X} does not load"));
                             example = Some((h, tris.len(), rt));
                         }
                     }
@@ -2154,12 +2155,10 @@ mod stream_collision_tests {
             eprintln!("example prop 0x{h:08X}: authored hull_tris={hull_tris}, render_tris={render_tris}");
             assert!(hull_tris >= 4, "a convex hull triangulates to >= 4 tris, got {hull_tris}");
             assert!(hull_tris < 5000, "authored hull collision must be LOW-poly, got {hull_tris} tris");
-            if render_tris > 0 {
-                assert!(
-                    hull_tris <= render_tris,
-                    "authored hull collision ({hull_tris}) should not exceed the render mesh ({render_tris})"
-                );
-            }
+            assert!(
+                hull_tris <= render_tris,
+                "authored hull collision ({hull_tris}) should not exceed the render mesh ({render_tris})"
+            );
         }
     }
 }
@@ -2174,9 +2173,9 @@ mod terrain_texture_tests {
 
         /// Live: a real hi-res terrainmesh tile must come back TEXTURED, not white. Loading a tile binds
         /// each draw's PRMG-group representative `terraintextures` detail layer (via `DrawGroup::group_index`
-        /// → `terrain_group_layers`) and resolves those hashes into the tile's texture map. Regression guard
-        /// for the `layers.len() == draws.len()` guard that once silently skipped ALL binding after the
-        /// multi-material sub-strip split, leaving the ground white.
+        /// → `terrain_group_layers`) and resolves those hashes into the tile's texture map. Binding must
+        /// hold across the multi-material sub-strip split, where `layers.len() != draws.len()`, or the
+        /// ground renders white.
         #[test]
         fn live_terrainmesh_tile_is_textured() {
             let mut w = crate::worldutil::schema_wire_tests::retail::open_vz_wad();
@@ -2185,11 +2184,9 @@ mod terrain_texture_tests {
                 .unwrap_or_else(|e| panic!("the retail vz.wad's terrain blocks: {e}"));
             let tiles = mercs2_formats::placement::load_terrain_tiles(&ls)
                 .expect("every TerrainObject has a Transform");
-            let Some(tile) = tiles.into_iter().find(|t| {
-                wad::extract_container_typed(&mut w, t.terrainmesh_hash, TERRAINMESH_TYPE_HASH).is_ok()
-            }) else {
-                panic!("no TerrainObject tile in the retail vz.wad has a loadable terrainmesh container");
-            };
+            let tile = tiles.into_iter().next().expect("the retail vz.wad places at least one TerrainObject tile");
+            wad::extract_container_typed(&mut w, tile.terrainmesh_hash, TERRAINMESH_TYPE_HASH)
+                .unwrap_or_else(|e| panic!("terrainmesh 0x{:08X}: {e}", tile.terrainmesh_hash));
 
             let m = load_terrainmesh_tile(&mut w, tile.terrainmesh_hash, tile.pos)
                 .expect("terrainmesh tile must load");
@@ -2247,9 +2244,9 @@ mod terrain_texture_tests {
             let mut distinct: std::collections::HashSet<[u8; 4]> = std::collections::HashSet::new();
             let mut scanned = 0usize;
             for t in &tiles {
-                let Ok(container) =
+                let container =
                     wad::extract_container_typed(&mut w, t.terrainmesh_hash, TERRAINMESH_TYPE_HASH)
-                else { continue };
+                        .unwrap_or_else(|e| panic!("terrainmesh 0x{:08X}: {e}", t.terrainmesh_hash));
                 let layers = mercs2_formats::texture::terrain_group_layers(&container);
                 let ml = layers.iter().map(|l| l.len()).max().unwrap_or(0);
                 max_len_seen = max_len_seen.max(ml);
@@ -2257,17 +2254,17 @@ mod terrain_texture_tests {
                     let best = layers.iter().max_by_key(|l| l.len()).unwrap().clone();
                     multi_layer_tile = Some((t.terrainmesh_hash, t.pos, best));
                 }
-                if let Ok(meshes) = mercs2_formats::model_cubeize::read_model_meshes(&container) {
-                    for m in &meshes {
-                        for c in &m.colors {
-                            // D3DCOLOR stored B,G,R,A: c[2]=R, c[1]=G, c[0]=B.
-                            let (r, g, b) = (c[2] as u64, c[1] as u64, c[0] as u64);
-                            sum_r += r; sum_g += g; sum_b += b;
-                            let s = (r + g + b) as f32 / 255.0;
-                            if (s - 1.0).abs() < 0.15 { sum_ok += 1; }
-                            distinct.insert(*c);
-                            nverts += 1;
-                        }
+                let meshes = mercs2_formats::model_cubeize::read_model_meshes(&container)
+                    .unwrap_or_else(|e| panic!("terrainmesh 0x{:08X} meshes: {e}", t.terrainmesh_hash));
+                for m in &meshes {
+                    for c in &m.colors {
+                        // D3DCOLOR stored B,G,R,A: c[2]=R, c[1]=G, c[0]=B.
+                        let (r, g, b) = (c[2] as u64, c[1] as u64, c[0] as u64);
+                        sum_r += r; sum_g += g; sum_b += b;
+                        let s = (r + g + b) as f32 / 255.0;
+                        if (s - 1.0).abs() < 0.15 { sum_ok += 1; }
+                        distinct.insert(*c);
+                        nverts += 1;
                     }
                 }
                 scanned += 1;
@@ -2338,12 +2335,9 @@ mod terrain_texture_tests {
                 .unwrap_or_else(|e| panic!("the retail vz.wad's terrain blocks: {e}"));
             let tiles = mercs2_formats::placement::load_terrain_tiles(&ls)
                 .expect("every TerrainObject has a Transform");
-            let Some(tile) = tiles
-                .into_iter()
-                .find(|t| wad::extract_container_typed(&mut w, t.terrainmesh_hash, TERRAINMESH_TYPE_HASH).is_ok())
-            else {
-                panic!("no TerrainObject tile in the retail vz.wad has a loadable terrainmesh container");
-            };
+            let tile = tiles.into_iter().next().expect("the retail vz.wad places at least one TerrainObject tile");
+            wad::extract_container_typed(&mut w, tile.terrainmesh_hash, TERRAINMESH_TYPE_HASH)
+                .unwrap_or_else(|e| panic!("terrainmesh 0x{:08X}: {e}", tile.terrainmesh_hash));
             let m = load_terrainmesh_tile(&mut w, tile.terrainmesh_hash, tile.pos).expect("tile loads");
             let world_tris = extract_local_tris(&m); // already world-space
             let tris_avoided = world_tris.len();
