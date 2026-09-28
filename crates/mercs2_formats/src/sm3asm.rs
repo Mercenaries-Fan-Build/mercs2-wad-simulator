@@ -1546,7 +1546,6 @@ pub fn find_ctab(blob: &[u8]) -> Result<Option<Ctab>, Sm3Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::shader3::{retail_store_for_test, RETAIL_STORES};
 
     fn words(blob: &[u8]) -> Vec<u32> {
         to_tokens(blob).unwrap()
@@ -1705,34 +1704,36 @@ nrm r5.xyz, r0
         assert!(bad(&|t| t[mov] = 0x0200_0045), "not an SM3 opcode");
     }
 
-    /// Every retail record of every store: `assemble(disassemble(blob)) == blob`, byte for byte,
-    /// CTAB included (the disassembler carries the CTAB as a structured `.ctab` block and the
-    /// assembler re-lays it out).
-    #[test]
-    fn retail_round_trip_is_byte_identical() {
-        let mut total = 0usize;
-        let mut failures = Vec::new();
-        let mut present = 0;
-        for name in RETAIL_STORES {
-            let Some(store) = retail_store_for_test(name) else { continue };
-            present += 1;
-            let mut ok = 0;
-            for (i, r) in store.records.iter().enumerate() {
-                let blob = store.blob(r);
-                let result = disassemble(blob).and_then(|text| assemble(&text));
-                match result {
-                    Ok(b) if b == blob => ok += 1,
-                    Ok(_) => failures.push(format!("{name} rec{i}: bytes differ")),
-                    Err(e) => failures.push(format!("{name} rec{i}: {e}")),
+    /// Game-gated: built by the `retail` feature, reads the stores beside the `vz.wad` named by the
+    /// repo-root `.mercs2-local.toml`, and fails if they are absent.
+    #[cfg(feature = "retail")]
+    mod retail {
+        use super::*;
+        use crate::shader3::{retail_store_for_test, RETAIL_STORES};
+
+        /// Every retail record of every store: `assemble(disassemble(blob)) == blob`, byte for byte,
+        /// CTAB included (the disassembler carries the CTAB as a structured `.ctab` block and the
+        /// assembler re-lays it out).
+        #[test]
+        fn retail_round_trip_is_byte_identical() {
+            let mut total = 0usize;
+            let mut failures = Vec::new();
+            for name in RETAIL_STORES {
+                let store = retail_store_for_test(name);
+                let mut ok = 0;
+                for (i, r) in store.records.iter().enumerate() {
+                    let blob = store.blob(r);
+                    let result = disassemble(blob).and_then(|text| assemble(&text));
+                    match result {
+                        Ok(b) if b == blob => ok += 1,
+                        Ok(_) => failures.push(format!("{name} rec{i}: bytes differ")),
+                        Err(e) => failures.push(format!("{name} rec{i}: {e}")),
+                    }
                 }
+                eprintln!("round trip {name}: {ok}/{} byte-identical", store.records.len());
+                total += store.records.len();
             }
-            eprintln!("round trip {name}: {ok}/{} byte-identical", store.records.len());
-            total += store.records.len();
+            assert!(failures.is_empty(), "{} of {total} records failed:\n{}", failures.len(), failures.join("\n"));
         }
-        if present == 0 {
-            return;
-        }
-        assert_eq!(present, RETAIL_STORES.len(), "every retail store must be present once any is");
-        assert!(failures.is_empty(), "{} of {total} records failed:\n{}", failures.len(), failures.join("\n"));
     }
 }
