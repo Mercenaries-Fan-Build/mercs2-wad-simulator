@@ -4,6 +4,8 @@ name: CI
 # (the Release workflow handles tags); add a `push:` block if that changes.
 on:
   pull_request:
+  push:
+  workflow_dispatch:
 
 # One in-flight run per PR branch; a new push cancels the previous run's spend.
 concurrency:
