@@ -28,10 +28,10 @@
 //! [`blocks_build`] is the build gate. `Hang` and `Error` block; `Warning` and `Info` do not. The
 //! standing mandate is that a build is gated on EXIT CODE, never on a printed count.
 
-use crate::blast::{self, MergeClass};
+use crate::blast;
 use crate::discover::{self, SourceIssue};
 use crate::game::GameStack;
-use crate::manifest::{Contribution, Manifest, Requirement, Target};
+use crate::manifest::{Contribution, Manifest, Target};
 use crate::names::{self, NameTable};
 use std::path::Path;
 
@@ -110,11 +110,6 @@ pub const M0140_UNKNOWN_WEARER: Rule = Rule {
     title: "outfit targets a hero the wardrobe has no list for",
     doc: "docs/modding/field_guide.md#trap-15--wardrobe--skins-it-is-pure-lua-and-only-named-models-work",
 };
-pub const M0141_UNMERGEABLE_SCRIPT: Rule = Rule {
-    code: "M0141",
-    title: "patching a script whose composition is not reversed makes the Shipment exclusive",
-    doc: "docs/modding/field_guide.md#trap-15--wardrobe--skins-it-is-pure-lua-and-only-named-models-work",
-};
 pub const M0150_RAW_NO_TOUCHES: Rule = Rule {
     code: "M0150",
     title: "a raw contribution declares no blast radius",
@@ -140,20 +135,31 @@ pub const M0163_COMPANION_NOT_BESIDE_PLUGIN: Rule = Rule {
     title: "a companion file is not in the directory the plugin will look for it in",
     doc: "docs/modding/manifest_format.md#the-code-layer",
 };
-pub const M0170_BAD_DIGEST: Rule = Rule {
-    code: "M0170",
-    title: "an external requirement's sha256 is not a 64-character hex digest",
+/// A plugin or runtime DLL the game could not load: not an i386 PE DLL
+/// ([`crate::pe::pe_dll_load_blocker`]). Needs the file, so it runs only when lint has the Shipment
+/// root.
+pub const M0178_DLL_NOT_LOADABLE: Rule = Rule {
+    code: "M0178",
+    title: "a plugin or runtime DLL is not a loadable i386 PE DLL",
     doc: "docs/modding/manifest_format.md#the-code-layer",
 };
-pub const M0171_INSECURE_URL: Rule = Rule {
-    code: "M0171",
-    title: "an external requirement is fetched over an untrusted transport",
-    doc: "docs/modding/manifest_format.md#the-code-layer",
-};
+/// Reported by validation (`ValidateError::BadRange`).
 pub const M0172_BAD_VERSION_REQ: Rule = Rule {
     code: "M0172",
-    title: "a managed requirement's version is not a valid semver range",
+    title: "a version range is not a valid semver range",
     doc: "docs/modding/manifest_format.md#the-code-layer",
+};
+/// Reported by validation (`ValidateError::SelfReference`).
+pub const M0173_SELF_REFERENCE: Rule = Rule {
+    code: "M0173",
+    title: "load.requires or load.conflicts names the Shipment itself",
+    doc: "docs/modding/manifest_format.md#dependencies",
+};
+/// Reported by validation (`ValidateError::ReservedName`).
+pub const M0211_RESERVED_NAME: Rule = Rule {
+    code: "M0211",
+    title: "shipment.name is a reserved name: the stem of a DLL no Shipment may ship",
+    doc: "docs/modding/manifest_format.md#dependencies",
 };
 pub const M0190_MOVIE_CARRIES_AS3: Rule = Rule {
     code: "M0190",
@@ -210,15 +216,6 @@ pub const M0200_LANGUAGE_NAME_UNUSABLE: Rule = Rule {
     doc: "docs/modding/manifest_format.md#add_language",
 };
 
-/// An `add_language` with no `native_hook` in the same Shipment. PC has no in-game language selector,
-/// so without the language-selector plugin the new language ships but nothing switches the game into
-/// it. Advisory: the plugin MAY be installed separately, which a single manifest cannot see.
-pub const M0201_LANGUAGE_NO_SELECTOR: Rule = Rule {
-    code: "M0201",
-    title: "an add_language ships no selector plugin, so nothing switches the game into it",
-    doc: "docs/modding/manifest_format.md#add_language",
-};
-
 /// `collision: follow_geometry` set alongside `retarget:` on the same `add_model`. `retarget` takes
 /// the SKINNED lowering (character rig → ragdoll/capsule collision), where the rigid static-collision
 /// regeneration never runs — so `follow_geometry` is silently ignored. It is a rigid-path-only option.
@@ -226,6 +223,30 @@ pub const M0202_COLLISION_ON_SKINNED: Rule = Rule {
     code: "M0202",
     title: "collision: follow_geometry is ignored on a skinned (retarget) add_model",
     doc: "docs/modding/manifest_format.md#add_model",
+};
+
+/// An `add_animation` / `replace_animation` whose sources do not belong together: the clip is not a
+/// Havok 5.5 packfile with a readable `hkaAnimation`, the `trnm` is malformed or binds a different
+/// number of tracks than the clip's `numTransformTracks`, or the `events` do not parse or are not
+/// in time order. The rules are [`mercs2_formats::anim_container::clip_pairing_problems`] — the same
+/// check the lowering makes, and one all 4,232 retail clips pass. Needs the files, so it runs only
+/// when lint has the Shipment root.
+pub const M0213_ANIMATION_PAIRING: Rule = Rule {
+    code: "M0213",
+    title: "an animation's clip, trnm and events do not belong together",
+    doc: "docs/modding/manifest_format.md#add_animation",
+};
+
+/// A native_hook `signature_guard` is malformed — a guard for an address the hook does not
+/// `touch`, or a value that is not hex prologue bytes — or, with the game exe in hand, names bytes
+/// that do not match `Mercenaries2.exe` at that address. The guard is a plugin's load-time defence
+/// against patching an exe that has shifted under it; a wrong or missing guard defeats it silently.
+/// The malformed cases are hermetic errors; the exe mismatch is a game-gated warning (the local exe
+/// may be a different build than the hook targets), and an unguarded touch is an advisory.
+pub const M0199_SIGNATURE_GUARD: Rule = Rule {
+    code: "M0199",
+    title: "a native_hook signature guard is malformed, or does not match the exe it names",
+    doc: "docs/modding/manifest_format.md#native_hook",
 };
 
 /// An `add_script` whose Lua registers itself as a mission (its `name` appears as an
@@ -289,19 +310,21 @@ pub const RULES: &[Rule] = &[
     M0120_SELF_CONFLICT,
     M0130_BARE_HASH,
     M0140_UNKNOWN_WEARER,
-    M0141_UNMERGEABLE_SCRIPT,
     M0150_RAW_NO_TOUCHES,
     M0160_ASI_ON_REIMPL,
     M0161_HOOK_DOES_NOTHING,
     M0162_PLACED_FILE_REFUSED,
     M0163_COMPANION_NOT_BESIDE_PLUGIN,
-    M0170_BAD_DIGEST,
-    M0171_INSECURE_URL,
     M0172_BAD_VERSION_REQ,
+    M0173_SELF_REFERENCE,
+    M0178_DLL_NOT_LOADABLE,
     M0190_MOVIE_CARRIES_AS3,
     M0191_SHARED_STRING_TABLE,
+    M0199_SIGNATURE_GUARD,
     M0200_LANGUAGE_NAME_UNUSABLE,
-    M0201_LANGUAGE_NO_SELECTOR,
+    M0202_COLLISION_ON_SKINNED,
+    M0211_RESERVED_NAME,
+    M0213_ANIMATION_PAIRING,
     M0300_MISSION_ADD_SCRIPT_NO_INHERIT,
     M0301_BARE_EVENT_CREATE,
     M0302_GLOBAL_SHADOWING,
@@ -359,11 +382,81 @@ pub fn aset_row_is_single_block(packed_block_ref: u32, secondary_ref: u32) -> bo
     packed_block_ref & 0xFFFF == 0xFFFF && secondary_ref == 0xFFFF_FFFF
 }
 
+/// Parse a signature-guard value — space-separated hex byte pairs like `"55 8B EC"` — into bytes.
+/// `None` if it is empty or any token is not a single hex byte. Shared by the hermetic M0199 check
+/// (validity) and the game-gated one (the bytes to compare against the exe).
+fn parse_prologue_bytes(s: &str) -> Option<Vec<u8>> {
+    let bytes: Option<Vec<u8>> = s
+        .split_whitespace()
+        .map(|tok| (tok.len() <= 2).then(|| u8::from_str_radix(tok, 16).ok()).flatten())
+        .collect();
+    bytes.filter(|b| !b.is_empty())
+}
+
+/// Render bytes back as the guard's own `"55 8B EC"` spelling, for a diagnostic that quotes them.
+fn hex_bytes(b: &[u8]) -> String {
+    b.iter().map(|x| format!("{x:02X}")).collect::<Vec<_>>().join(" ")
+}
+
+/// An absolute `0xHHHHHHHH` address (a native_hook `touches` / guard key) as a u32, or `None`.
+fn parse_address(s: &str) -> Option<u32> {
+    let hex = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X"))?;
+    u32::from_str_radix(hex, 16).ok()
+}
+
 /// Rules that need the retail WADs. Separate from [`lint`] on purpose: everything there runs in CI
 /// with no game, and mixing the two would make the hermetic set impossible to run alone.
 pub fn game_checks(manifest: &Manifest, game: &GameStack) -> Vec<Diagnostic> {
     let mut out = Vec::new();
     for (index, c) in manifest.contributions.iter().enumerate() {
+        // M0199 (game-gated half): compare each declared signature guard against the bytes actually
+        // at that address in `Mercenaries2.exe`. Self-skips when the exe is not beside the install.
+        if let Contribution::NativeHook { touches: _, signature_guard, .. } = c {
+            if !signature_guard.is_empty() {
+                if let Some(exe_path) = game.exe_path() {
+                    if let Ok(exe) = std::fs::read(&exe_path) {
+                        for (addr, sig) in signature_guard {
+                            // Malformed addr/bytes are the hermetic half's job (M0199 error there);
+                            // here we only verify the ones we can actually read.
+                            let (Some(va), Some(expected)) =
+                                (parse_address(addr), parse_prologue_bytes(sig))
+                            else {
+                                continue;
+                            };
+                            match crate::pe::read_at_va(&exe, va, expected.len()) {
+                                Some(actual) if actual == expected => {}
+                                Some(actual) => out.push(Diagnostic {
+                                    rule: M0199_SIGNATURE_GUARD,
+                                    severity: Severity::Warning,
+                                    message: format!(
+                                        "signature_guard for {addr} expects [{}] but {} has [{}] \
+                                         there. The local exe may be a different build than this \
+                                         hook targets — verify against the intended \
+                                         Mercenaries2.exe before shipping.",
+                                        hex_bytes(&expected),
+                                        exe_path.display(),
+                                        hex_bytes(&actual)
+                                    ),
+                                    at: Some(index),
+                                    fix: None,
+                                }),
+                                None => out.push(Diagnostic {
+                                    rule: M0199_SIGNATURE_GUARD,
+                                    severity: Severity::Warning,
+                                    message: format!(
+                                        "signature_guard names {addr}, which maps into no readable \
+                                         code of {} — that address is not part of this exe build.",
+                                        exe_path.display()
+                                    ),
+                                    at: Some(index),
+                                    fix: None,
+                                }),
+                            }
+                        }
+                    }
+                }
+            }
+        }
         if let Contribution::ReplaceTexture { target, .. } = c {
             let hash = crate::manifest::asset_hash(target);
             // Use EVERY row, not just the primary one: a shared texture may have no primary row at
@@ -481,7 +574,7 @@ pub const M0001_DANGLING_RUNG: Rule = Rule {
 pub const M0002_PACKED_FIELD_UNDER_CLAIM: Rule = Rule {
     code: "M0002",
     title: "packed_field under-claims decompressed size — heap overrun",
-    doc: "docs/modding/field_guide.md#trap-8--you-edited-a-block-and-now-the-heap-is-corrupt-the-packedfield-bug",
+    doc: "docs/modding/field_guide.md#trap-8--you-edited-a-block-and-now-the-heap-is-corrupt-the-packed_field-bug",
 };
 
 /// M0003, promoted out of [`PENDING`]. Answerable only against an emitted WAD: the INFO/BODY pair
@@ -728,15 +821,17 @@ fn unreachable_hash_checks(blocks: &[mercs2_formats::patch_wad::PatchBlock]) -> 
 /// message about what a `.gfx` is supposed to look like, and that is a better place to say so than a
 /// rule about AS3 — a rule that reported "no AS3 found" for a file that is not a movie would be
 /// answering a question nobody asked.
-fn movie_checks(index: usize, name: &str, path: &Path) -> Vec<Diagnostic> {
-    let Ok(bytes) = std::fs::read(path) else {
+fn movie_checks(index: usize, name: &str, root: &Path, movie: &Path) -> Vec<Diagnostic> {
+    // The message names `movie` as the manifest wrote it, never the joined path: a report must not
+    // carry the local machine's absolute path.
+    let Ok(bytes) = std::fs::read(root.join(movie)) else {
         // M0110 already reports a missing source; an unreadable one is not this rule's business.
         return Vec::new();
     };
-    let Ok(movie) = mercs2_formats::gfx::GfxMovie::parse(&bytes) else {
+    let Ok(parsed) = mercs2_formats::gfx::GfxMovie::parse(&bytes) else {
         return Vec::new();
     };
-    let features = movie.features();
+    let features = parsed.features();
     if features.do_abc == 0 {
         return Vec::new();
     }
@@ -749,12 +844,59 @@ fn movie_checks(index: usize, name: &str, path: &Path) -> Vec<Diagnostic> {
              movie loads, {name} renders, and none of its script ever runs. Nothing is logged, \
              because as far as the loader is concerned nothing failed. None of the 64 movies retail \
              ships carries AS3. Re-author the logic as AS2 (AVM1).",
-            path.display(),
+            movie.display(),
             features.do_abc
         ),
         at: Some(index),
         fix: None,
     }]
+}
+
+/// M0213 — an animation's clip, `trnm` and `events` read and checked as the triple they ship as.
+///
+/// Error, because the lowering refuses the same triple: the rule only says so earlier, in the
+/// hermetic stage template CI runs. A file that cannot be read is reported here too (the source
+/// checks already passed, so the path exists and resolves inside the Shipment).
+fn animation_checks(
+    index: usize,
+    root: &Path,
+    clip: &Path,
+    trnm: &Path,
+    events: Option<&Path>,
+) -> Vec<Diagnostic> {
+    let finding = |message: String| Diagnostic {
+        rule: M0213_ANIMATION_PAIRING,
+        severity: Severity::Error,
+        message,
+        at: Some(index),
+        fix: None,
+    };
+    let read = |p: &Path| {
+        std::fs::read(root.join(p)).map_err(|e| finding(format!("{}: cannot be read: {e}", p.display())))
+    };
+    let (clip_bytes, trnm_bytes) = match (read(clip), read(trnm)) {
+        (Ok(c), Ok(t)) => (c, t),
+        (c, t) => return c.err().into_iter().chain(t.err()).collect(),
+    };
+    let evnt_bytes = match events.map(read).transpose() {
+        Ok(e) => e,
+        Err(d) => return vec![d],
+    };
+    mercs2_formats::anim_container::clip_pairing_problems(
+        &clip_bytes,
+        &trnm_bytes,
+        evnt_bytes.as_deref(),
+    )
+    .into_iter()
+    .map(|p| {
+        finding(format!(
+            "{} + {}{}: {p}",
+            clip.display(),
+            trnm.display(),
+            events.map(|e| format!(" + {}", e.display())).unwrap_or_default()
+        ))
+    })
+    .collect()
 }
 
 /// One finding.
@@ -767,6 +909,36 @@ pub struct Diagnostic {
     pub at: Option<usize>,
     /// Exact replacement text, when the fix is mechanical.
     pub fix: Option<String>,
+}
+
+impl Diagnostic {
+    /// This diagnostic as the shared finding element, for `lint-report.json`.
+    ///
+    /// `items` is always empty — a lint report covers one manifest and has no request ids — and
+    /// `refs` points into `contributions` when the diagnostic belongs to one.
+    pub fn to_finding(&self) -> crate::plan::Finding {
+        use crate::plan::{Finding, FindingRef, FindingSeverity, Section};
+        Finding {
+            code: self.rule.code,
+            severity: match self.severity {
+                Severity::Info => FindingSeverity::Info,
+                Severity::Warning => FindingSeverity::Warning,
+                Severity::Error => FindingSeverity::Error,
+                Severity::Hang => FindingSeverity::Hang,
+            },
+            message: self.message.clone(),
+            items: Vec::new(),
+            refs: self
+                .at
+                .map(|index| FindingRef {
+                    section: Section::Contributions,
+                    index,
+                })
+                .into_iter()
+                .collect(),
+            fix: self.fix.clone(),
+        }
+    }
 }
 
 impl std::fmt::Display for Diagnostic {
@@ -867,6 +1039,64 @@ fn placed_file_checks(
     out
 }
 
+/// M0162 and M0178 for an `add_runtime_dll`.
+///
+/// **M0162 (Error)** — the name is refused by [`crate::build::runtime_dll_name_refusal`], the same
+/// function the lowering and the load plan call: not a single `.dll` file name, a deny-listed stem,
+/// or not `<shipment.name>.dll`. Needs only the manifest, so it runs with or without a root.
+///
+/// **M0178 (Error)** — the bytes are not a loadable i386 PE DLL
+/// ([`crate::pe::pe_dll_load_blocker`]). Needs the file, so it runs only with a `root`, and not for
+/// a contribution whose source path is already an error (`source_issue_at`).
+fn runtime_dll_checks(
+    index: usize,
+    dll: &Path,
+    shipment_name: &str,
+    root: Option<&Path>,
+    source_issue_at: &[usize],
+) -> Vec<Diagnostic> {
+    let mut out = Vec::new();
+    let Some(name) = dll.file_name().and_then(|n| n.to_str()) else {
+        out.push(Diagnostic {
+            rule: M0162_PLACED_FILE_REFUSED,
+            severity: Severity::Error,
+            message: "the `dll` path has no UTF-8 file name, so it cannot be placed.".into(),
+            at: Some(index),
+            fix: None,
+        });
+        return out;
+    };
+    if let Some(why) = crate::build::runtime_dll_name_refusal(name, shipment_name) {
+        out.push(Diagnostic {
+            rule: M0162_PLACED_FILE_REFUSED,
+            severity: Severity::Error,
+            message: format!("{name} cannot be placed in the game folder: {why}."),
+            at: Some(index),
+            fix: None,
+        });
+    }
+    let Some(root) = root else {
+        return out;
+    };
+    if source_issue_at.contains(&index) {
+        return out;
+    }
+    let why = match std::fs::read(root.join(dll)) {
+        Ok(bytes) => crate::pe::pe_dll_load_blocker(&bytes, "add_runtime_dll"),
+        Err(e) => Some(format!("it cannot be read: {e}")),
+    };
+    if let Some(why) = why {
+        out.push(Diagnostic {
+            rule: M0178_DLL_NOT_LOADABLE,
+            severity: Severity::Error,
+            message: format!("{name} cannot be loaded by the game: {why}."),
+            at: Some(index),
+            fix: None,
+        });
+    }
+    out
+}
+
 /// The game root prints as `<game folder>`; an empty string in a diagnostic reads as a bug.
 fn display_dest(dest: crate::manifest::PlaceIn) -> String {
     match dest.relative_dir() {
@@ -888,8 +1118,15 @@ pub fn lint(
     let mut out = Vec::new();
 
     if let Err(e) = manifest.validate() {
+        // A validation failure with a code of its own is reported under it; the rest are M0100.
+        let rule = match e.code() {
+            None => M0100_MANIFEST_INVALID,
+            Some(code) => *RULES.iter().find(|r| r.code == code).unwrap_or_else(|| {
+                panic!("ValidateError reports {code}, which is not a registered rule in RULES")
+            }),
+        };
         out.push(Diagnostic {
-            rule: M0100_MANIFEST_INVALID,
+            rule,
             severity: Severity::Error,
             message: e.to_string(),
             at: None,
@@ -897,6 +1134,10 @@ pub fn lint(
         });
     }
 
+    // Contributions whose source path is already an error (missing, absolute, escaping, outside
+    // `src/`). A rule that reads the file does not read those: the path is reported, and reading an
+    // escaping path would read outside the Shipment.
+    let mut source_issue_at: Vec<usize> = Vec::new();
     if let Some(root) = root {
         out.extend(lua_source_checks(manifest, root));
 
@@ -914,6 +1155,7 @@ pub fn lint(
                     (M0112_SOURCE_OUTSIDE_SRC, Severity::Warning, *index)
                 }
             };
+            source_issue_at.push(at);
             out.push(Diagnostic {
                 rule,
                 severity,
@@ -985,28 +1227,7 @@ pub fn lint(
             }
             Contribution::AddMovie { name, movie } => {
                 if let Some(root) = root {
-                    out.extend(movie_checks(index, name, &root.join(movie)));
-                }
-            }
-            Contribution::PatchLua { target, .. } => {
-                let claim = blast::Claim::Script {
-                    name: target.clone(),
-                };
-                let class =
-                    blast::merge_class(&claim, blast::Access::Write, blast::Intent::Additive);
-                if class == MergeClass::Exclusive {
-                    out.push(Diagnostic {
-                        rule: M0141_UNMERGEABLE_SCRIPT,
-                        severity: Severity::Warning,
-                        message: format!(
-                            "we have not reversed how {target:?} composes, so this claim is treated \
-                             as exclusive: your Shipment will refuse to install alongside any other \
-                             that patches the same script. This is deliberate — the alternative is \
-                             the two silently annihilating each other."
-                        ),
-                        at: Some(index),
-                        fix: None,
-                    });
+                    out.extend(movie_checks(index, name, root, movie));
                 }
             }
             Contribution::EditStringDb { target, .. } => {
@@ -1021,7 +1242,10 @@ pub fn lint(
                         rule: M0191_SHARED_STRING_TABLE,
                         severity: Severity::Warning,
                         message: format!(
-                            "`{target}` is served from BOTH shell.wad (front end) and vz.wad                              (gameplay). One overlay reaches one mount point, so a shared UI string                              edited here may show in only one. Deploy it to mount last in every                              session, or ship a shell copy too."
+                            "`{target}` is served from BOTH shell.wad (front end) and vz.wad \
+                             (gameplay). One overlay reaches one mount point, so a shared UI string \
+                             edited here may show in only one. Deploy it to mount last in every \
+                             session, or ship a shell copy too."
                         ),
                         at: Some(index),
                         fix: None,
@@ -1047,7 +1271,8 @@ pub fn lint(
                 target,
                 plugin,
                 symbol,
-                ..
+                touches,
+                signature_guard,
             } => {
                 if *target == Target::Reimpl && plugin.is_some() {
                     out.push(Diagnostic {
@@ -1073,9 +1298,71 @@ pub fn lint(
                         fix: None,
                     });
                 }
+                // M0199 (hermetic half). A guard defends a PATCHED address, so it must name one the
+                // hook `touches` and carry real prologue bytes; a touched address with no guard is a
+                // missed defence. The byte-vs-exe check is the game-gated half in `game_checks`.
+                let touched: std::collections::BTreeSet<&str> =
+                    touches.iter().map(|t| t.0.as_str()).collect();
+                for (addr, sig) in signature_guard {
+                    if !touched.contains(addr.as_str()) {
+                        out.push(Diagnostic {
+                            rule: M0199_SIGNATURE_GUARD,
+                            severity: Severity::Error,
+                            message: format!(
+                                "signature_guard names {addr}, which is not in this hook's \
+                                 `touches`. A guard protects a patched address; guarding one the \
+                                 hook never touches is a mistake."
+                            ),
+                            at: Some(index),
+                            fix: None,
+                        });
+                    }
+                    if parse_prologue_bytes(sig).is_none() {
+                        out.push(Diagnostic {
+                            rule: M0199_SIGNATURE_GUARD,
+                            severity: Severity::Error,
+                            message: format!(
+                                "signature_guard for {addr} is not hex prologue bytes ({sig:?}); \
+                                 write space-separated byte pairs like \"55 8B EC\"."
+                            ),
+                            at: Some(index),
+                            fix: None,
+                        });
+                    }
+                }
+                // Guards are opt-in: a hook that declares none is not flagged. But once SOME
+                // addresses are guarded, a touched address left unguarded is almost certainly an
+                // oversight — that partial-coverage gap is the advisory.
+                if !signature_guard.is_empty() {
+                    for t in touches {
+                        if !signature_guard.contains_key(&t.0) {
+                            out.push(Diagnostic {
+                                rule: M0199_SIGNATURE_GUARD,
+                                severity: Severity::Warning,
+                                message: format!(
+                                    "hook touches {} but guards other addresses and not this one, \
+                                     so a plugin cannot tell whether the exe shifted under it here. \
+                                     Record the expected prologue bytes for that address too.",
+                                    t.0
+                                ),
+                                at: Some(index),
+                                fix: None,
+                            });
+                        }
+                    }
+                }
             }
             Contribution::PlaceFile { file, dest } => {
                 out.extend(placed_file_checks(index, file, *dest, &plugin_stems));
+            }
+            Contribution::AddRuntimeDll { dll } => {
+                out.extend(runtime_dll_checks(
+                    index,
+                    dll,
+                    &manifest.shipment.name,
+                    root,
+                    &source_issue_at,
+                ));
             }
             Contribution::AddLanguage { name, .. } => {
                 // The `data/` safety pivot: refuse a name that is not a usable language token or that
@@ -1090,27 +1377,17 @@ pub fn lint(
                         fix: None,
                     });
                 }
-                // Selection is a separate concern — PC chooses its language at boot from OS-locale and
-                // has no in-game selector — so a language with no companion `native_hook` in this
-                // Shipment ships content nothing switches into. Advisory: the selector may be installed
-                // separately, which this manifest cannot see.
-                let has_selector = manifest
-                    .contributions
-                    .iter()
-                    .any(|o| matches!(o, Contribution::NativeHook { .. }));
-                if !has_selector {
-                    out.push(Diagnostic {
-                        rule: M0201_LANGUAGE_NO_SELECTOR,
-                        severity: Severity::Warning,
-                        message: format!(
-                            "add_language {name:?} ships no `native_hook` selector in this Shipment. \
-                             PC has no in-game language selector, so without the language-selector \
-                             plugin the new language ships but nothing switches the game into it — \
-                             ship the selector here, or install it separately."
-                        ),
-                        at: Some(index),
-                        fix: None,
-                    });
+            }
+            Contribution::AddAnimation {
+                clip, trnm, events, ..
+            }
+            | Contribution::ReplaceAnimation {
+                clip, trnm, events, ..
+            } => {
+                if let Some(root) = root {
+                    if !source_issue_at.contains(&index) {
+                        out.extend(animation_checks(index, root, clip, trnm, events.as_deref()));
+                    }
                 }
             }
             Contribution::AddModel {
@@ -1142,54 +1419,6 @@ pub fn lint(
                 }
             }
             _ => {}
-        }
-    }
-
-    for req in &manifest.load.requires {
-        // A managed requirement carries a semver RANGE that resolution compares releases against.
-        // An unparseable range is a hard error: nothing downstream can pick a version from it.
-        if let Requirement::Compatible { name, version } = req {
-            if semver::VersionReq::parse(version).is_err() {
-                out.push(Diagnostic {
-                    rule: M0172_BAD_VERSION_REQ,
-                    severity: Severity::Error,
-                    message: format!(
-                        "requirement {name:?} pins version {version:?}, which is not a valid semver \
-                         range. Use a range resolution can compare against — e.g. \"^0.1\" or \
-                         \">=0.0.3, <1.0.0\"."
-                    ),
-                    at: None,
-                    fix: None,
-                });
-            }
-        }
-        if let Requirement::External { url, sha256 } = req {
-            let looks_like_digest =
-                sha256.len() == 64 && sha256.chars().all(|c| c.is_ascii_hexdigit());
-            if !looks_like_digest {
-                out.push(Diagnostic {
-                    rule: M0170_BAD_DIGEST,
-                    severity: Severity::Error,
-                    message: format!(
-                        "external requirement {url} pins {sha256:?}, which is not a 64-character \
-                         hex sha256. An unusable pin is worse than none: it reads as verified."
-                    ),
-                    at: None,
-                    fix: None,
-                });
-            }
-            if !url.starts_with("https://") {
-                out.push(Diagnostic {
-                    rule: M0171_INSECURE_URL,
-                    severity: Severity::Warning,
-                    message: format!(
-                        "external requirement {url} is not https. The pinned digest still protects \
-                         INTEGRITY, so this is not fatal — but the fetch itself is interceptable."
-                    ),
-                    at: None,
-                    fix: None,
-                });
-            }
         }
     }
 

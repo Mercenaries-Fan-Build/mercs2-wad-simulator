@@ -73,6 +73,25 @@ Binaries land at `target/release/`:
 cargo build --release -p ucfx_byteswap
 ```
 
+## Testing
+
+Tests run across the whole workspace with [cargo-nextest](https://nexte.st/):
+
+```bash
+cargo install cargo-nextest --locked   # once
+cargo nextest run --workspace          # all crates
+cargo test --workspace --doc           # doctests (nextest does not run these)
+```
+
+Tests that need the retail `vz.wad` self-skip when it is absent (they print
+`SKIPPING: no vz.wad discovered` and return). Point `MERCS2_GAME_DIR` at a game
+install — or run `scripts/find-vz-wad.sh --write` — to exercise them.
+
+CI runs on every pull request ([.github/workflows/ci.yml](.github/workflows/ci.yml)):
+it runs the full workspace under nextest plus doctests, and rolls the results up
+into a per-crate pass/fail/skip table in the run's summary so a failure is
+attributable to a specific crate.
+
 ## Crates
 
 - **`mercs2_formats`** — Shared file-format parsing library (WAD, FFCS, ASET, PTHS, UCFX, etc.). Used by all other crates.

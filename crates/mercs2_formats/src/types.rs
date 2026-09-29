@@ -65,43 +65,50 @@ pub const TYPE_HASH_FX_DICTIONARY: u32 = 0xFA46D8A8;
 pub const TYPE_HASH_CFX_PACK: u32 = 0xFE0E8320;
 pub const TYPE_HASH_WATERMAP: u32 = 0x4D7D30C4;
 
-/// All known type_hash → type_id mappings from retail census.
+/// Every `type_hash → type_id` pair, in `type_id` order — a copy of the WAD's own type table (the
+/// `type_hash` u32 array at file offset `0x48`, 36 entries in retail, identical across the shipped
+/// WADs). `tests/type_ids_match_the_wad.rs` pins it against that table.
+///
+/// This list previously held 12 wrong ids from the derived registry doc — `fxdict` sat at 25 (that
+/// is `watermap`), `watermap` and two other types at 0, `worldentity` at 8, `level` at 20 — so
+/// `type_hash_for_type_id(0)` answered `materialtable` for the fxdict row.
 pub const TYPE_HASH_REGISTRY: &[(u32, u32)] = &[
-    (0xF011157A, 27),
-    (0xBCFE6314, 28),
-    (0x5B724250, 19),
-    (0x18166555, 16),
-    (0x600B904E, 12),
-    (0xE6B81A54, 9),
-    (0x42498680, 35),
-    (0x6310807F, 30),
-    (0x7C569307, 32),
-    (0x1602815C, 22),
-    (0x5608BD5A, 29),
-    (0xF753F6D0, 6),
-    (0x665EF13E, 5),
-    (0xE5273C14, 13),
-    (0x9F8BCA10, 21),
-    (0xFE0E8320, 23),
-    (0x1CF649BB, 34),
-    (0xFA0B8DBC, 18),
-    (0x207359C7, 11),
-    (0x8F0A54E2, 3),
-    (0x99E77ACE, 15),
-    (0xDE982D61, 14),
-    (0x39E5E978, 7),
-    (0x59B9DF6A, 0),
-    (0x4D7D30C4, 0),
-    (0x34612F86, 0),
-    (0xACCE47F2, 33),
-    (0xC122545A, 26),
-    (0xE8DF4D87, 4),
-    (0xECE70371, 31),
-    (0xEA4829D5, 20),
-    (0x3B0AABF8, 1),
-    (0x5647C35D, 8),
-    (0x140E8728, 10),
-    (0xFA46D8A8, 25),
+    (0xFA46D8A8, 0),  // fxdict
+    (0x140E8728, 1),  // guidmap
+    (0x7131D39A, 2),
+    (0x8F0A54E2, 3),  // binary
+    (0x3B0AABF8, 4),  // decaltable
+    (0x665EF13E, 5),  // facefxanimationset
+    (0xF753F6D0, 6),  // wavebank
+    (0x39E5E978, 7),  // stringdb
+    (0xC122545A, 8),  // musicstatemap
+    (0xE6B81A54, 9),  // layer
+    (0xE8DF4D87, 10), // musiccue
+    (0x207359C7, 11), // animationtable
+    (0x600B904E, 12), // scrub
+    (0xE5273C14, 13), // sounddb
+    (0xDE982D61, 14), // materialparam
+    (0x99E77ACE, 15), // font
+    (0x18166555, 16), // animation
+    (0x5647C35D, 17), // worldentity
+    (0xFA0B8DBC, 18), // chatter
+    (0x5B724250, 19), // model
+    (0x34612F86, 20),
+    (0x9F8BCA10, 21), // soundbank
+    (0x1602815C, 22), // lowresterrain
+    (0xFE0E8320, 23), // cfx_pack
+    (0xACCE47F2, 24), // sequencetable
+    (0x4D7D30C4, 25), // watermap
+    (0xEA4829D5, 26), // level
+    (0xF011157A, 27), // texture
+    (0xBCFE6314, 28), // path
+    (0x5608BD5A, 29), // effect
+    (0x6310807F, 30), // lineregion
+    (0x59B9DF6A, 31), // materialtable
+    (0x7C569307, 32), // terrainmesh
+    (0xECE70371, 33), // animstatemachine
+    (0x1CF649BB, 34), // facefxactor
+    (0x42498680, 35), // script
 ];
 
 pub fn type_hash_for_type_id(type_id: u32) -> Option<u32> {

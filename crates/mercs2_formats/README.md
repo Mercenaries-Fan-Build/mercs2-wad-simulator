@@ -14,7 +14,8 @@ rendering, no simulation and no I/O policy — just format code:
   (segmented deflate) and also re-compresses one. `ucfx` walks the UCFX descriptor tree inside a
   decompressed block, resolves leaf chunks and verifies the `CSUM` trailer.
 * **Asset decoders.** Model geometry and materials (`texture`, `schema`, `skeleton`), textures
-  incl. the high-mip chain (`texture`, `texsize`), low-res world terrain (`terrain`), world
+  incl. the high-mip chain (`texture`, `texsize`), low-res world terrain (`terrain`), the 400
+  hi-res terrain cells (`terrainmesh`), world
   placements (`placement`), the world block index used by the streaming engine (`world_index`),
   FX dictionaries (`fxdict`), sky/HDR parameters (`atmosphere`), destruction state machines
   (`orchestrator`), Havok 5.5 collision (`havok`) and animation clips (`anim`, `animgroup`,
@@ -102,6 +103,11 @@ cargo run -p mercs2_formats --bin gfx_golden
 
 # conform a novel rigid mesh into a real vehicle/static donor container
 cargo run -p mercs2_formats --bin inject_static -- --help
+
+# assemble SM3 text into a .sho blob, and name the store record a registered .sho lives under
+cargo run -p mercs2_formats --bin shaderforge -- asm magenta.asm magenta.sho --target ps_3_0
+cargo run -p mercs2_formats --bin shaderforge -- store-id PgSkyFP          # 0xc91c0187, shader3.bin
+cargo run -p mercs2_formats --bin shaderforge -- store-id PgSkyFP --low    # 0xa759fdb9, shader3Low.bin
 ```
 
 ## Modules
@@ -110,7 +116,7 @@ cargo run -p mercs2_formats --bin inject_static -- --help
 | --- | --- |
 | `ffcs` | FFCS WAD header + `INDX` / `ASET` / `PTHS` tables; `load_ffcs_archive`. |
 | `sges` | `sges` segmented-deflate block decompression/compression; whole-block and head-only reads. |
-| `ucfx` | UCFX descriptor-tree walk, chunk-body extraction, container `CSUM` verification. |
+| `ucfx` | UCFX descriptor-tree walk, chunk-body extraction, container `CSUM` verification; the strict tree reader/writer `parse_ucfx_tree` / `write_ucfx_tree` (computed `x2`/`x3`, marker rows, contiguous bodies). |
 | `chunk_validate` | Validators for the documented UCFX chunk layouts (retail PC). |
 | `tags` | `ChunkTag` enum for every known UCFX descriptor tag. |
 | `tag_registry` | Every FourCC the engine dispatches on (232), with dispatch address, subsystem and verification status. |
@@ -138,9 +144,13 @@ cargo run -p mercs2_formats --bin inject_static -- --help
 | `world_index` | Layer-1 world block index: class, LOD tier/variant, state overlay, spatial extent of every block. |
 | `world` | World spatial constants used for validation. |
 | `terrain` | Low-resolution world terrain loader. |
+| `terrainmesh` | Hi-res terrain cells (`0x7C569307`): byte-exact decode/encode of all 400, vertical displacement with normal + tangent + bounds recompute, triangle-strip codec, collision rebuild from the render triangles. Retail gates in `tests/terrainmesh_retail.rs`. |
+| `scrub` | Ground cover (`0x600B904E`): byte-exact decode/encode of all 1,026 containers; `follow_ground` keeps instances on a displaced terrain cell. Retail gates in `tests/scrub_retail.rs`. |
 | `atmosphere` | `Graphics.Atmosphere.*` sky / HDR tone-map / bloom parameter model. |
-| `fxdict` | FX cluster: `fxdict` `DICT` + effect-template key chunks. |
+| `fxdict` | FX cluster: the resident `fxdict` (`INFO`/`DICT`) and the typed effect tree — `parse_effect_container` / `write_effect_container`, computed `EFCT`; all 314 retail effects re-encode byte for byte. |
 | `gfx` | Scaleform GFx / SWF tag-stream parser and feature inventory. |
+| `shader3` | The PC shader stores (`shader3*.bin`, `shaderVT*.bin`, `shaderR2VB*.bin`): parse, record ids (`store_id`), `StoreBuilder` (retail-layout rewrite, replace in place, append, loader-limit refusals), the `vs_3_0` instancing splice. |
+| `sm3asm` | D3D9 Shader Model 3 assembler + exact disassembler, CTAB included; `assemble(disassemble(blob)) == blob` for every retail record. |
 | `save` | PC `.profile` save parser (13,404 bytes; zlib Lua payload at `0x468`). |
 | `save_write` | The inverse: rebuild the container and stamp a correct `ProfileHash`. |
 | `patch_wad` | FFCS patch-WAD assembly — the canonical serializer for a PC `vz-patch.wad`. |

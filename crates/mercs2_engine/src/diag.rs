@@ -307,7 +307,7 @@ pub fn terrainmesh_probe(wadpath: &str, block: Option<u16>) -> Result<(), String
     let (hmap, tile_pos) = {
         let (low, ls) = find_terrain_blocks(&mut w)?;
         let tm = mercs2_formats::terrain::load_terrain(&low, &ls)?;
-        let tiles = mercs2_formats::placement::load_terrain_tiles(&ls);
+        let tiles = mercs2_formats::placement::load_terrain_tiles(&ls)?;
         let map: std::collections::HashMap<u32, [f32; 3]> =
             tiles.iter().map(|t| (t.terrainmesh_hash, t.pos)).collect();
         println!("[terrainmesh] TerrainObject tiles parsed: {} (distinct meshes {})", tiles.len(), map.len());
@@ -2231,7 +2231,7 @@ pub fn stream_probe(wadpath: &str) -> Result<(), String> {
     // layers_static (block 29) — the always-loaded base placement layer.
     let (_low, ls) = find_terrain_blocks(&mut w)?;
     let cfg = StreamingConfig::default();
-    let (mut mgr, props, _terrain_tiles) = build_streaming_catalog(&idx, &ls, cfg);
+    let (mut mgr, props, _terrain_tiles) = build_streaming_catalog(&idx, &ls, cfg)?;
     let build_ms = t0.elapsed().as_secs_f64() * 1000.0;
 
     println!("[stream-probe] catalog: {} geometry blocks (per-object, tier-scaled distance), {} per-entity props (of {} keyed spawns)", mgr.block_count(), mgr.entity_count(), props.len());

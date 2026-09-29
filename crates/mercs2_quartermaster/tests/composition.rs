@@ -15,7 +15,7 @@ fn parse(yaml: &str) -> Manifest {
 /// A wardrobe mod: one outfit for one hero.
 fn outfit(shipment: &str, asset: &str, wearer: &str, slug: &str) -> Manifest {
     parse(&format!(
-        "format: 1
+        "format: 2
 shipment: {{ name: {shipment}, version: 1.0.0, target: retail }}
 contributions:
   - kind: add_outfit
@@ -30,7 +30,7 @@ contributions:
 
 fn replace_texture(shipment: &str, target: &str) -> Manifest {
     parse(&format!(
-        "format: 1
+        "format: 2
 shipment: {{ name: {shipment}, version: 1.0.0, target: retail }}
 contributions:
   - kind: replace_texture
@@ -54,32 +54,6 @@ fn two_outfit_mods_for_the_same_hero_coexist() {
 
     let found = blast::conflicts(&[("sean-devlin", &a), ("roze-skin", &b)]);
     assert!(found.is_empty(), "outfit mods must compose, got: {found:?}");
-}
-
-/// A Shipment declaring `load.conflicts: [other]` fires ONLY when `other` is also installed — the
-/// author-asserted incompatibility the claim graph cannot infer.
-#[test]
-fn a_declared_conflict_fires_only_when_the_named_shipment_is_installed() {
-    let hostile = parse(
-        "format: 1
-shipment: { name: hostile, version: 1.0.0, target: retail }
-load: { conflicts: [victim] }
-contributions:
-  - kind: replace_texture
-    target: al_hum_boss_ub
-    image: src/t.png
-",
-    );
-    let victim = replace_texture("victim", "al_veh_boat_ub");
-    let bystander = replace_texture("bystander", "al_veh_car_ub");
-
-    // Fires: victim is installed alongside hostile.
-    let with_victim = blast::declared_conflicts(&[("hostile", &hostile), ("victim", &victim)]);
-    assert_eq!(with_victim, vec![("hostile".to_string(), "victim".to_string())]);
-
-    // Quiet: the named Shipment is not in the set, so there is nothing to clash with.
-    let without = blast::declared_conflicts(&[("hostile", &hostile), ("bystander", &bystander)]);
-    assert!(without.is_empty(), "a declared conflict on an absent Shipment is inert: {without:?}");
 }
 
 /// ...but the same slug on the same hero is a genuine duplicate key.
@@ -123,13 +97,13 @@ fn the_wardrobe_script_is_mergeable_not_exclusive() {
 // Fail closed.
 // ---------------------------------------------------------------------------
 
-/// A script whose composition we have NOT reversed falls to Exclusive. Being wrong here costs a
-/// false conflict (visible, annoying) instead of silent mutual annihilation (invisible, fatal).
+/// An append to ANY script composes: the linker concatenates every Shipment's appends onto
+/// the base source and compiles once, so there is no curated list of scripts that may be patched.
 #[test]
-fn an_unreversed_script_is_exclusive() {
+fn patch_lua_any_script_composes() {
     let mk = |name: &str| {
         parse(&format!(
-            "format: 1
+            "format: 2
 shipment: {{ name: {name}, version: 1.0.0, target: retail }}
 contributions:
   - kind: patch_lua
@@ -140,14 +114,8 @@ contributions:
     };
     let a = mk("mod-a");
     let b = mk("mod-b");
-    let found = blast::conflicts(&[("mod-a", &a), ("mod-b", &b)]);
-    assert_eq!(found.len(), 1, "got {found:?}");
-    assert_eq!(found[0].class, MergeClass::Exclusive);
-    assert!(
-        found[0].to_string().contains("no load order resolves"),
-        "{}",
-        found[0]
-    );
+    assert!(blast::conflicts(&[("mod-a", &a), ("mod-b", &b)]).is_empty());
+    assert_eq!(blast::claims(&a)[0].class, MergeClass::OrderedList);
 }
 
 /// Raw is the open lower bound: we cannot infer anything about the bytes, so the declared blast
@@ -156,7 +124,7 @@ contributions:
 fn two_raw_contributions_touching_one_target_collide() {
     let mk = |name: &str| {
         parse(&format!(
-            "format: 1
+            "format: 2
 shipment: {{ name: {name}, version: 1.0.0, target: retail }}
 contributions:
   - kind: raw
@@ -176,7 +144,7 @@ contributions:
 fn two_native_hooks_on_one_address_collide() {
     let mk = |name: &str, asi: &str| {
         parse(&format!(
-            "format: 1
+            "format: 2
 shipment: {{ name: {name}, version: 1.0.0, target: retail }}
 contributions:
   - kind: native_hook
@@ -199,7 +167,7 @@ contributions:
 fn two_plugins_with_the_same_filename_collide() {
     let mk = |name: &str, at: &str| {
         parse(&format!(
-            "format: 1
+            "format: 2
 shipment: {{ name: {name}, version: 1.0.0, target: retail }}
 contributions:
   - kind: native_hook
@@ -227,7 +195,7 @@ contributions:
 fn two_shipments_writing_one_companion_path_collide() {
     let mk = |name: &str| {
         parse(&format!(
-            "format: 1
+            "format: 2
 shipment: {{ name: {name}, version: 1.0.0, target: retail }}
 contributions:
   - kind: place_file
@@ -252,7 +220,7 @@ contributions:
 fn one_filename_in_two_destinations_does_not_collide() {
     let mk = |name: &str, dest: &str| {
         parse(&format!(
-            "format: 1
+            "format: 2
 shipment: {{ name: {name}, version: 1.0.0, target: retail }}
 contributions:
   - kind: place_file
@@ -271,7 +239,7 @@ contributions:
 #[test]
 fn a_plugin_and_its_companion_are_not_a_self_conflict() {
     let m = parse(
-        "format: 1
+        "format: 2
 shipment: { name: bridge, version: 1.0.0, target: retail }
 contributions:
   - kind: native_hook
@@ -295,8 +263,9 @@ contributions:
         .collect();
     assert_eq!(
         paths,
-        vec!["scripts/lua_bridge_DEV.asi", "scripts/lua_bridge_DEV.ini"],
-        "the plugin and its companion each claim their own path, in the same directory"
+        vec!["scripts/lua_bridge_dev.asi", "scripts/lua_bridge_dev.ini"],
+        "the plugin and its companion each claim their own path, in the same directory, keyed \
+         lowercased"
     );
 }
 
@@ -310,7 +279,7 @@ contributions:
 fn two_shipments_minting_the_same_new_name_collide() {
     let mk = |name: &str| {
         parse(&format!(
-            "format: 1
+            "format: 2
 shipment: {{ name: {name}, version: 1.0.0, target: retail }}
 contributions:
   - kind: add_model
@@ -350,7 +319,7 @@ fn two_texture_replacements_are_load_order_not_conflict() {
 #[test]
 fn a_donor_is_a_read_not_a_write() {
     let m = parse(
-        "format: 1
+        "format: 2
 shipment: { name: s, version: 1.0.0, target: retail }
 contributions:
   - kind: add_model
@@ -379,7 +348,7 @@ contributions:
 fn many_shipments_may_share_one_donor() {
     let mk = |name: &str, asset: &str| {
         parse(&format!(
-            "format: 1
+            "format: 2
 shipment: {{ name: {name}, version: 1.0.0, target: retail }}
 contributions:
   - kind: add_model
@@ -398,7 +367,7 @@ contributions:
 #[test]
 fn an_unprovided_read_is_reported_without_claiming_it_is_missing() {
     let m = parse(
-        "format: 1
+        "format: 2
 shipment: { name: s, version: 1.0.0, target: retail }
 contributions:
   - kind: add_model
@@ -416,7 +385,7 @@ contributions:
 #[test]
 fn a_read_satisfied_by_another_shipment_is_not_reported() {
     let a = parse(
-        "format: 1
+        "format: 2
 shipment: { name: consumer, version: 1.0.0, target: retail }
 contributions:
   - kind: add_model
@@ -426,7 +395,7 @@ contributions:
 ",
     );
     let b = parse(
-        "format: 1
+        "format: 2
 shipment: { name: provider, version: 1.0.0, target: retail }
 contributions:
   - kind: add_model
@@ -450,7 +419,7 @@ contributions:
 #[test]
 fn a_shipment_may_not_claim_one_target_twice() {
     let m = parse(
-        "format: 1
+        "format: 2
 shipment: { name: s, version: 1.0.0, target: retail }
 contributions:
   - kind: replace_texture
@@ -476,7 +445,7 @@ contributions:
 #[test]
 fn one_shipment_may_add_several_outfits() {
     let m = parse(
-        "format: 1
+        "format: 2
 shipment: { name: pack, version: 1.0.0, target: retail }
 contributions:
   - kind: add_outfit
@@ -508,7 +477,7 @@ contributions:
 #[test]
 fn a_bare_hash_touch_and_its_name_are_the_same_claim() {
     let by_name = parse(
-        "format: 1
+        "format: 2
 shipment: { name: a, version: 1.0.0, target: retail }
 contributions:
   - kind: raw
@@ -518,7 +487,7 @@ contributions:
 ",
     );
     let by_hash = parse(
-        "format: 1
+        "format: 2
 shipment: { name: b, version: 1.0.0, target: retail }
 contributions:
   - kind: raw
@@ -542,7 +511,7 @@ contributions:
 /// A support-catalog shop mod adding one crate-delivery item to two vendors.
 fn shop_item(shipment: &str, id: &str, cargo: &str) -> Manifest {
     parse(&format!(
-        "format: 1
+        "format: 2
 shipment: {{ name: {shipment}, version: 1.0.0, target: retail }}
 contributions:
   - kind: add_shop_item
@@ -617,7 +586,7 @@ fn shop_item_lowers_to_catalog_and_reward_appends() {
 #[test]
 fn novel_behaviour_shop_item_skips_the_eager_append() {
     let m = parse(
-        "format: 1
+        "format: 2
 shipment: { name: bomb-mod, version: 1.0.0, target: retail }
 contributions:
   - kind: add_shop_item
@@ -636,4 +605,154 @@ contributions:
         muts.is_empty(),
         "a novel behaviour must not emit a load-time append (it defers to the loader): {muts:?}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Scripts, same-target replacements, and game-folder case.
+// ---------------------------------------------------------------------------
+
+/// One contribution per Shipment, from a YAML block.
+fn one(shipment: &str, contribution: &str) -> Manifest {
+    parse(&format!(
+        "format: 2
+shipment: {{ name: {shipment}, version: 1.0.0, target: retail }}
+contributions:
+{contribution}"
+    ))
+}
+
+/// The single cross-Shipment conflict `a` and `b` produce, which must be Exclusive.
+fn exclusive_conflict(a: &Manifest, b: &Manifest) -> blast::Conflict {
+    let found = blast::conflicts(&[("mod-a", a), ("mod-b", b)]);
+    assert_eq!(found.len(), 1, "got {found:?}");
+    assert_eq!(found[0].class, MergeClass::Exclusive, "{}", found[0]);
+    found.into_iter().next().unwrap()
+}
+
+#[test]
+fn two_replace_lua_conflict() {
+    let c = "  - kind: replace_lua\n    target: wifpmcgarage\n    source: src/g.lua\n";
+    let found = exclusive_conflict(&one("mod-a", c), &one("mod-b", c));
+    assert_eq!(found.claim, Claim::Script { name: "wifpmcgarage".into() });
+}
+
+/// Decided: an append beside a wholesale replacement of the same script is a hard conflict — the
+/// append would be applied to source that is no longer there.
+#[test]
+fn patch_and_replace_lua_conflict() {
+    let a = one("mod-a", "  - kind: patch_lua\n    target: wifpmcgarage\n    append: src/a.lua\n");
+    let b = one("mod-b", "  - kind: replace_lua\n    target: wifpmcgarage\n    source: src/g.lua\n");
+    exclusive_conflict(&a, &b);
+}
+
+/// Every kind that is a hard conflict on the same target, one pair each.
+#[test]
+fn each_newly_exclusive_kind_conflicts_on_the_same_target() {
+    for block in [
+        "  - kind: replace_shader\n    target: s_hero\n    blob: src/b.bin\n",
+        "  - kind: replace_fx\n    target: fx_boom\n    payload: src/p.bin\n",
+        "  - kind: replace_animation\n    target: a_run\n    clip: src/c.bin\n    trnm: src/t.bin\n",
+        "  - kind: replace_phy2\n    target: m_crate\n    phy2: src/p.bin\n",
+        "  - kind: replace_terrain_cell\n    target: cell_0_0\n    cell: src/c.bin\n",
+        "  - kind: edit_state_machine\n    target: al_veh_boat_destroyer\n    states: src/s.yaml\n",
+        "  - kind: edit_world\n    layer: vz_state_pmccon004\n    edits: src/w.yaml\n",
+    ] {
+        exclusive_conflict(&one("mod-a", block), &one("mod-b", block));
+    }
+}
+
+/// `edit_world` edits the whole layer, so an `add_placement` on that layer in another Shipment
+/// cannot compose with it: the stricter class wins.
+#[test]
+fn edit_world_and_add_placement_on_one_layer_conflict() {
+    let a = one("mod-a", "  - kind: edit_world\n    layer: layers_static\n    edits: src/w.yaml\n");
+    let b = one("mod-b", "  - kind: add_placement\n    layer: layers_static\n    entity: src/e.yaml\n");
+    exclusive_conflict(&a, &b);
+}
+
+/// Windows file names are case-insensitive, so two Shipments placing names that differ only in
+/// case write one file.
+#[test]
+fn place_file_names_differing_only_in_case_collide() {
+    let a = one("mod-a", "  - kind: place_file\n    file: src/Config.ini\n    dest: scripts\n");
+    let b = one("mod-b", "  - kind: place_file\n    file: src/config.INI\n    dest: scripts\n");
+    let found = exclusive_conflict(&a, &b);
+    assert_eq!(found.claim, Claim::FileArtifact { path: "scripts/config.ini".into() });
+}
+
+#[test]
+fn native_hook_names_differing_only_in_case_collide() {
+    let a = one("mod-a", "  - kind: native_hook\n    target: retail\n    plugin: src/Bridge.asi\n");
+    let b = one("mod-b", "  - kind: native_hook\n    target: retail\n    plugin: src/bridge.ASI\n");
+    let found = exclusive_conflict(&a, &b);
+    assert_eq!(found.claim, Claim::FileArtifact { path: "scripts/bridge.asi".into() });
+}
+
+/// An `add_runtime_dll` claims its game-root path, lowercased; two Shipments shipping one DLL name
+/// conflict.
+#[test]
+fn runtime_dll_name_case_collides() {
+    let a = one("m2-sdk", "  - kind: add_runtime_dll\n    dll: src/m2-sdk.dll\n");
+    let b = one("dup-runtime", "  - kind: add_runtime_dll\n    dll: src/M2-SDK.DLL\n");
+    let found = blast::conflicts(&[("m2-sdk", &a), ("dup-runtime", &b)]);
+    assert_eq!(found.len(), 1, "got {found:?}");
+    assert_eq!(found[0].claim, Claim::FileArtifact { path: "m2-sdk.dll".into() });
+    assert_eq!(found[0].class, MergeClass::Exclusive);
+}
+
+/// Within ONE Shipment the same rule is a self-conflict (M0120): two placements differing only in
+/// case.
+#[test]
+fn a_case_only_difference_within_one_shipment_is_a_self_conflict() {
+    let m = one(
+        "mod-a",
+        "  - kind: place_file\n    file: src/a/Readme.txt\n    dest: scripts\n  - kind: place_file\n    file: src/b/README.TXT\n    dest: scripts\n",
+    );
+    let found = blast::self_conflicts(&m);
+    assert_eq!(found.len(), 1, "got {found:?}");
+    assert_eq!(found[0].indices, vec![0, 1]);
+}
+
+// ---------------------------------------------------------------------------
+// String tables: every writer to a table composes; an opaque raw block still conflicts.
+// ---------------------------------------------------------------------------
+
+const EDIT_ENGLISH: &str = "  - kind: edit_stringdb\n    target: english\n    strings: src/e.txt\n";
+
+/// Any two Shipments editing one table compose, whatever keys they touch: `qm link` merges them.
+#[test]
+fn edit_stringdb_on_one_table_composes() {
+    let a = one("mod-a", EDIT_ENGLISH);
+    let b = one("mod-b", EDIT_ENGLISH);
+    assert!(blast::conflicts(&[("mod-a", &a), ("mod-b", &b)]).is_empty());
+    assert_eq!(blast::claims(&a)[0].class, MergeClass::OrderedList);
+    // Two edits of one table in ONE Shipment are fine too: both are merged.
+    let both = one("mod-a", &format!("{EDIT_ENGLISH}{EDIT_ENGLISH}"));
+    assert!(blast::self_conflicts(&both).is_empty());
+}
+
+/// `replace_stringdb_text` composes too: the link applies it, in load
+/// order, against the table as merged so far. So it never conflicts with another writer to the
+/// table, across Shipments or inside one.
+#[test]
+fn replace_stringdb_text_composes_with_other_table_writers() {
+    const REPLACE: &str = "  - kind: replace_stringdb_text\n    target: english\n    pairs: src/p.txt\n";
+    let replace = one("mod-b", REPLACE);
+    assert!(blast::conflicts(&[("mod-a", &one("mod-a", EDIT_ENGLISH)), ("mod-b", &replace)]).is_empty());
+    assert!(blast::conflicts(&[("mod-b", &replace), ("mod-c", &one("mod-c", REPLACE))]).is_empty());
+    assert_eq!(blast::claims(&replace)[0].class, MergeClass::OrderedList);
+    // One Shipment may fix a table by key and by text.
+    let both = one("mod-a", &format!("{EDIT_ENGLISH}{REPLACE}"));
+    assert!(blast::self_conflicts(&both).is_empty());
+}
+
+/// The table claim is on the table's asset hash, so an opaque `raw` declaring that table still
+/// fails closed against an editor.
+#[test]
+fn a_raw_block_on_an_edited_table_conflicts() {
+    let raw = one(
+        "mod-b",
+        "  - kind: raw\n    payload: src/x.bin\n    target_layer: data\n    touches: [english]\n",
+    );
+    exclusive_conflict(&one("mod-a", EDIT_ENGLISH), &raw);
 }

@@ -1,31 +1,41 @@
-//! FX cluster parsers — `fxdict` (DICT) + effect-template key chunks.
+//! FX cluster: the resident `fxdict` (`INFO` + `DICT`) and the per-effect UCFX tree.
 //!
-//! Ground truth: `docs/ucfx_tag_registry.md` §7 (FX cluster) + `docs/fxdict_format.md`.
-//! The engine's container loader is `FUN_00491320` (fxdict) and the effect loader is `0x492AF0`;
-//! the per-chunk readers are the addresses noted on each function below. All layouts here are the
-//! **PC little-endian on-disk** forms (the Xbox path byteswaps to this before consumption).
+//! Both are **PC little-endian on-disk** forms. The spec lives in the notes repo:
+//! `docs/effect_container_format.md` (the effect tree), `docs/ucfx_tree_container.md` (the
+//! container), `docs/fxdict_format.md` (the dictionary).
 //!
-//! What is verified vs hypothesised:
-//!   * DICT record = 20 bytes `{u32 name_hash, f32, f32, f32, u32 flags}`, 630 records on retail,
-//!     zero trailing slack — **verified** (registry §7, `chunk_validate::validate_fxdict_chunks`).
-//!   * EMTR = `u16 count + count×4` module refs — **verified** (@0x492402, "reads a u16 count then
-//!     count×4 alloc, overflow-guarded").
-//!   * COLR = fixed 0xC8 (200-byte) age-sampled gradient record — **verified size** (@0x4930e5,
-//!     "stores a fixed 0xC8 record into the effect palette heap"). The *interior* field order of
-//!     those 200 bytes is not in the decomp; we model it as 50 RGBA8 stops (50×4 = 200) sampled by
-//!     normalised age, which is the natural reading for "sampled by particle age" (**hypothesis**).
-//!   * FRCE = `u32 inner_hash` + per-force params — **verified shape** (@0x491c93, "reads a 4-byte
-//!     inner hash then sub-dispatches per force type"). The concrete gravity/drag/vortex hash values
-//!     are not in the decomp; we classify best-effort (ASCII FourCC + computed pandemic hashes) and
-//!     always retain the raw hash + raw params (**force-kind classification = hypothesis**).
-//!   * PTYP = 1 flags byte (bit0→+0x205, bit1→+0x206) — **verified** (@0x491ba9).
-//!   * POFF = vec3 emitter offset (0xC) — **verified** (@0x4a9cf2).
-//!   * TRFM = 16×f32 4×4 row-major matrix — **verified** (FUN_0048cc30, unrolled 16-float read).
-//!   * EFCT header: magic `0x0226` @ +2, sub-component count @ +14 — **verified** (loader 0x492AF0;
-//!     `spatial_hash_crash_analysis.md`).
-//!   * EMIT timing: delegates to FUN_0048cc30; body is float timing data — parsed generically.
+//! # The effect asset (type `0x5608BD5A`, ASET type id 29)
+//!
+//! An effect is ONE UCFX tree rooted at `EFCT`:
+//!
+//! ```text
+//! EFCT (18 B: 9 × u16, computed — see EffectContainer::efct_words)
+//! ├─ EMTR (u16 = number of GEOM children)
+//! │  └─ GEOM × n            u32 k + k × 13 f32   (emitter shapes)
+//! ├─ EMIT (marker)          ┐ one pair per emitter
+//! │  ├─ TRFM (64 B 4×4)     │
+//! │  │  └─ ATRB × 9         │ posx posy posz rotx roty rotz sclx scly sclz
+//! │  └─ GEOM (4 B, opt.)    │ u16 shape index, u16
+//! ├─ PTYP (u32 flags)       │
+//! │  ├─ ATRB × 19           │ fixed hash order (PTYP_ATTRIBUTES_BEFORE_COLR)
+//! │  ├─ COLR (800 B)        │ 100 × {u8×4, binary16, u16 0}
+//! │  ├─ ATRB × 13           │ fixed hash order (PTYP_ATTRIBUTES_AFTER_COLR)
+//! │  └─ TEXT                ┘ u32 n + n × u32 texture hash
+//! └─ FRCE × k               u32 kind hash + kind parameters
+//!    └─ ATRB × (7 + kind extras)
+//! ATRB (12 B) {u32 hash, u32 flags, u32|f32 value} → optional ANIM (u32 = key count) → AKEY × n
+//! AKEY (8 B)  {f32 time, f32 value}
+//! ```
+//!
+//! Every loader address below is in `mercs2_unpacked.exe`: the effect driver `FUN_00491920`
+//! (EFCT/EMTR/FRCE/PTYP/EMIT dispatch), the PTYP-child reader `FUN_00492af0` (ATRB/TEXT/COLR), the
+//! EMIT walker `FUN_0048cc30` (TRFM/GEOM) and the TRFM-channel reader `FUN_00493150`.
+//!
+//! [`parse_effect_container`] and [`write_effect_container`] are exact inverses: every one of the 314
+//! retail effects re-encodes byte-for-byte (`tests/effect_retail_roundtrip.rs`). Neither side
+//! carries a best-effort path — anything outside the measured format is an error that says what.
 
-use crate::hash::{pandemic_hash, pandemic_hash_m2};
+use crate::ucfx::{parse_ucfx_tree, write_ucfx_tree, UcfxNode};
 
 fn read_u16_le(b: &[u8], o: usize) -> u16 {
     u16::from_le_bytes([b[o], b[o + 1]])
@@ -36,9 +46,17 @@ fn read_u32_le(b: &[u8], o: usize) -> u32 {
 fn read_f32_le(b: &[u8], o: usize) -> f32 {
     f32::from_le_bytes([b[o], b[o + 1], b[o + 2], b[o + 3]])
 }
+fn read_vec3(b: &[u8], o: usize) -> [f32; 3] {
+    [read_f32_le(b, o), read_f32_le(b, o + 4), read_f32_le(b, o + 8)]
+}
+fn put_f32s(out: &mut Vec<u8>, v: &[f32]) {
+    for x in v {
+        out.extend_from_slice(&x.to_le_bytes());
+    }
+}
 
 // ------------------------------------------------------------------------------------------------
-// fxdict (DICT) — the resident 630-record effect-parameter namespace.
+// fxdict (INFO + DICT) — the resident 630-record effect-parameter namespace.
 // ------------------------------------------------------------------------------------------------
 
 /// On-disk DICT record stride (verified: 630 × 20 = 12600 bytes, zero slack).
@@ -68,10 +86,7 @@ pub struct FxParam {
 /// Trailing bytes past `count × 20` are ignored (the engine only walks `count`).
 pub fn parse_fxdict(info: &[u8], dict: &[u8]) -> Result<Vec<FxParam>, String> {
     if info.len() < 4 {
-        return Err(format!(
-            "fxdict INFO too short: {} bytes (need 4)",
-            info.len()
-        ));
+        return Err(format!("fxdict INFO too short: {} bytes (need 4)", info.len()));
     }
     let count = read_u32_le(info, 0) as usize;
     let need = count
@@ -100,319 +115,8 @@ pub fn parse_fxdict(info: &[u8], dict: &[u8]) -> Result<Vec<FxParam>, String> {
 /// Look up a parameter's default by name hash (linear scan; the engine indexes a hash map but the
 /// table is small enough that callers wanting a one-off lookup can use this).
 pub fn fxparam_default(params: &[FxParam], name_hash: u32) -> Option<f32> {
-    params
-        .iter()
-        .find(|p| p.name_hash == name_hash)
-        .map(|p| p.default)
+    params.iter().find(|p| p.name_hash == name_hash).map(|p| p.default)
 }
-
-// ------------------------------------------------------------------------------------------------
-// Effect template chunks.
-// ------------------------------------------------------------------------------------------------
-
-/// `EFCT` header (magic `0x0226` @ byte +2, sub-component count @ byte +14). The engine reads these
-/// as u32 words that pack two u16 halves; the count gates the descriptor-array alloc at 0x492AF0.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct EffectHeader {
-    pub magic: u16,
-    pub sub_count: u16,
-}
-
-/// Parse the `EFCT` header. Returns `None` if the body is shorter than the count field (+16).
-pub fn parse_efct(body: &[u8]) -> Option<EffectHeader> {
-    if body.len() < 16 {
-        return None;
-    }
-    Some(EffectHeader {
-        magic: read_u16_le(body, 2),
-        sub_count: read_u16_le(body, 14),
-    })
-}
-
-/// `EMTR` — emitter module table: `u16 count` then `count × u32` module refs.
-#[derive(Debug, Clone, PartialEq, Default)]
-pub struct EmitterTable {
-    pub refs: Vec<u32>,
-}
-
-/// Parse `EMTR`. The count is read as u16; each ref is a u32. Refs that would run past the body are
-/// truncated (the engine's alloc is overflow-guarded — a short/corrupt table yields fewer refs, not
-/// a crash).
-pub fn parse_emtr(body: &[u8]) -> EmitterTable {
-    if body.len() < 2 {
-        return EmitterTable::default();
-    }
-    let count = read_u16_le(body, 0) as usize;
-    let avail = (body.len() - 2) / 4;
-    let n = count.min(avail);
-    let mut refs = Vec::with_capacity(n);
-    for i in 0..n {
-        refs.push(read_u32_le(body, 2 + i * 4));
-    }
-    EmitterTable { refs }
-}
-
-/// `EMIT` — emitter timing. The reader delegates to FUN_0048cc30 (the same float-block reader as
-/// TRFM); the body is a run of f32 timing values. We expose them raw (their exact roles — spawn
-/// delay / burst count / rate — are not pinned in the decomp).
-#[derive(Debug, Clone, PartialEq, Default)]
-pub struct EmitTiming {
-    pub floats: Vec<f32>,
-}
-
-/// Parse `EMIT` timing floats (as many whole f32 as the body holds).
-pub fn parse_emit(body: &[u8]) -> EmitTiming {
-    let n = body.len() / 4;
-    let mut floats = Vec::with_capacity(n);
-    for i in 0..n {
-        floats.push(read_f32_le(body, i * 4));
-    }
-    EmitTiming { floats }
-}
-
-/// `POFF` — emitter local offset (vec3). Returns `None` if the body is < 12 bytes.
-pub fn parse_poff(body: &[u8]) -> Option<[f32; 3]> {
-    if body.len() < 12 {
-        return None;
-    }
-    Some([
-        read_f32_le(body, 0),
-        read_f32_le(body, 4),
-        read_f32_le(body, 8),
-    ])
-}
-
-/// `TRFM` — 4×4 transform, 16 f32 row-major (D3D convention). Returns `None` if the body is < 64 B.
-pub fn parse_trfm(body: &[u8]) -> Option<[[f32; 4]; 4]> {
-    if body.len() < 64 {
-        return None;
-    }
-    let mut m = [[0.0f32; 4]; 4];
-    for r in 0..4 {
-        for c in 0..4 {
-            m[r][c] = read_f32_le(body, (r * 4 + c) * 4);
-        }
-    }
-    Some(m)
-}
-
-/// `PTYP` — particle-type flags byte. `bit0` and `bit1` map to engine fields +0x205 / +0x206.
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
-pub struct ParticleType {
-    pub flags: u8,
-}
-impl ParticleType {
-    /// bit0 → engine +0x205.
-    pub fn bit0(&self) -> bool {
-        self.flags & 0x01 != 0
-    }
-    /// bit1 → engine +0x206.
-    pub fn bit1(&self) -> bool {
-        self.flags & 0x02 != 0
-    }
-}
-
-/// Parse `PTYP` (single flags byte). Returns `None` on an empty body.
-pub fn parse_ptyp(body: &[u8]) -> Option<ParticleType> {
-    body.first().map(|&b| ParticleType { flags: b })
-}
-
-// --- COLR: fixed 200-byte age gradient -----------------------------------------------------------
-
-/// Byte length of a `COLR` record (fixed `0xC8`).
-pub const COLR_BYTES: usize = 0xC8; // 200
-/// Number of RGBA8 stops we model the 200-byte record as (50 × 4 = 200).
-pub const COLR_STOPS: usize = COLR_BYTES / 4;
-
-/// `COLR` — a fixed 200-byte colour-over-life gradient sampled by particle age.
-///
-/// The 200 bytes are modelled as [`COLR_STOPS`] RGBA8 stops evenly distributed across normalised
-/// age 0..1 (**hypothesis** — see module docs; the decomp pins the *size*, not the field order).
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct ColorGradient {
-    pub stops: [[u8; 4]; COLR_STOPS],
-}
-
-impl Default for ColorGradient {
-    fn default() -> Self {
-        ColorGradient {
-            stops: [[255, 255, 255, 255]; COLR_STOPS],
-        }
-    }
-}
-
-impl ColorGradient {
-    /// Sample the gradient at normalised age `t` (0 = spawn, 1 = death), linearly interpolating
-    /// between the two nearest stops. Returns straight (non-premultiplied) RGBA in 0..1.
-    pub fn sample(&self, t: f32) -> [f32; 4] {
-        let t = t.clamp(0.0, 1.0);
-        let scaled = t * (COLR_STOPS - 1) as f32;
-        let i0 = scaled.floor() as usize;
-        let i1 = (i0 + 1).min(COLR_STOPS - 1);
-        let f = scaled - i0 as f32;
-        let a = self.stops[i0];
-        let b = self.stops[i1];
-        let lerp = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * f) / 255.0;
-        [
-            lerp(a[0], b[0]),
-            lerp(a[1], b[1]),
-            lerp(a[2], b[2]),
-            lerp(a[3], b[3]),
-        ]
-    }
-}
-
-/// Parse `COLR`. Requires a full 200-byte body (the engine copies exactly 0xC8 bytes).
-pub fn parse_colr(body: &[u8]) -> Option<ColorGradient> {
-    if body.len() < COLR_BYTES {
-        return None;
-    }
-    let mut stops = [[0u8; 4]; COLR_STOPS];
-    for (i, s) in stops.iter_mut().enumerate() {
-        let o = i * 4;
-        *s = [body[o], body[o + 1], body[o + 2], body[o + 3]];
-    }
-    Some(ColorGradient { stops })
-}
-
-// --- FRCE: force taxonomy ------------------------------------------------------------------------
-
-/// Best-effort classification of a `FRCE` inner hash. The raw hash is always retained; `kind` is a
-/// hypothesis (the concrete gravity/drag/vortex hash constants are not in the decomp).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ForceKind {
-    Gravity,
-    Drag,
-    Vortex,
-    Wind,
-    Unknown,
-}
-
-/// One `FRCE` record: a 4-byte inner hash + up to 4 f32 parameters.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct Force {
-    pub inner_hash: u32,
-    pub kind: ForceKind,
-    /// Raw parameter floats (as many whole f32 as followed the hash, up to 4).
-    pub params: [f32; 4],
-    pub param_count: usize,
-}
-
-/// Classify a `FRCE` inner hash. Accepts either an ASCII FourCC (e.g. `GRAV`/`DRAG`/`VORT`/`WIND`)
-/// or a pandemic name hash (both `pandemic_hash` and `pandemic_hash_m2` of the type name). Any hash
-/// that matches neither is [`ForceKind::Unknown`] (the raw value is preserved by the caller).
-pub fn classify_force(inner_hash: u32) -> ForceKind {
-    // ASCII FourCC form (little-endian tag bytes).
-    let tag = inner_hash.to_le_bytes();
-    match &tag {
-        b"GRAV" | b"grav" => return ForceKind::Gravity,
-        b"DRAG" | b"drag" => return ForceKind::Drag,
-        b"VORT" | b"vort" => return ForceKind::Vortex,
-        b"WIND" | b"wind" => return ForceKind::Wind,
-        _ => {}
-    }
-    // Pandemic name-hash form.
-    for (name, kind) in [
-        ("gravity", ForceKind::Gravity),
-        ("drag", ForceKind::Drag),
-        ("vortex", ForceKind::Vortex),
-        ("wind", ForceKind::Wind),
-    ] {
-        if inner_hash == pandemic_hash(name) || inner_hash == pandemic_hash_m2(name) {
-            return kind;
-        }
-    }
-    ForceKind::Unknown
-}
-
-/// Parse a `FRCE` record: `u32 inner_hash` then up to 4 f32 params. Returns `None` if the body is
-/// shorter than the 4-byte hash. Unknown force types are **kept** (classified `Unknown`), not
-/// rejected — the registry mandates skip-by-size, never abort.
-pub fn parse_frce(body: &[u8]) -> Option<Force> {
-    if body.len() < 4 {
-        return None;
-    }
-    let inner_hash = read_u32_le(body, 0);
-    let mut params = [0.0f32; 4];
-    let avail = (body.len() - 4) / 4;
-    let n = avail.min(4);
-    for (i, p) in params.iter_mut().enumerate().take(n) {
-        *p = read_f32_le(body, 4 + i * 4);
-    }
-    Some(Force {
-        inner_hash,
-        kind: classify_force(inner_hash),
-        params,
-        param_count: n,
-    })
-}
-
-// ------------------------------------------------------------------------------------------------
-// Aggregate effect template.
-// ------------------------------------------------------------------------------------------------
-
-/// A parsed effect template — the union of the key chunks the runtime consumes. Assembled by
-/// feeding `(fourcc, body)` chunk pairs (from the effect's UCFX container) to
-/// [`EffectTemplate::from_chunks`]. Absent chunks stay `None`/empty.
-#[derive(Debug, Clone, Default)]
-pub struct EffectTemplate {
-    pub header: Option<EffectHeader>,
-    pub emitters: EmitterTable,
-    pub emit: EmitTiming,
-    pub gradient: Option<ColorGradient>,
-    pub forces: Vec<Force>,
-    pub ptype: Option<ParticleType>,
-    pub offset: Option<[f32; 3]>,
-    pub transform: Option<[[f32; 4]; 4]>,
-    pub text_refs: Vec<u32>,
-}
-
-impl EffectTemplate {
-    /// Assemble a template from an ordered list of `(fourcc, body)` chunk pairs (as produced by the
-    /// UCFX container walker). Unknown tags are ignored; repeated `FRCE` chunks accumulate.
-    pub fn from_chunks<'a, I>(chunks: I) -> EffectTemplate
-    where
-        I: IntoIterator<Item = (&'a [u8; 4], &'a [u8])>,
-    {
-        let mut t = EffectTemplate::default();
-        for (tag, body) in chunks {
-            match tag {
-                b"EFCT" => t.header = parse_efct(body),
-                b"EMTR" => t.emitters = parse_emtr(body),
-                b"EMIT" => t.emit = parse_emit(body),
-                b"COLR" => t.gradient = parse_colr(body),
-                b"FRCE" => {
-                    if let Some(f) = parse_frce(body) {
-                        t.forces.push(f);
-                    }
-                }
-                b"PTYP" => t.ptype = parse_ptyp(body),
-                b"POFF" => t.offset = parse_poff(body),
-                b"TRFM" => t.transform = parse_trfm(body),
-                b"TEXT" => t.text_refs = parse_text(body),
-                _ => {}
-            }
-        }
-        t
-    }
-}
-
-/// `TEXT` — leading `u32` (count/length) then a list of `u32` asset/param hashes. We read the
-/// leading word as a count but clamp it to the available body so a byte-length-vs-count ambiguity
-/// can't over-read.
-pub fn parse_text(body: &[u8]) -> Vec<u32> {
-    if body.len() < 4 {
-        return Vec::new();
-    }
-    let stated = read_u32_le(body, 0) as usize;
-    let avail = (body.len() - 4) / 4;
-    let n = stated.min(avail);
-    (0..n).map(|i| read_u32_le(body, 4 + i * 4)).collect()
-}
-
-// ------------------------------------------------------------------------------------------------
-// Encoders.
-// ------------------------------------------------------------------------------------------------
 
 pub fn write_fxparam(p: &FxParam) -> [u8; DICT_RECORD_BYTES] {
     let mut out = [0u8; DICT_RECORD_BYTES];
@@ -436,148 +140,1093 @@ pub fn write_fxdict_info(count: u32) -> [u8; 4] {
     count.to_le_bytes()
 }
 
-pub fn write_efct(h: &EffectHeader) -> Vec<u8> {
-    let mut body = vec![0u8; 16];
-    body[2..4].copy_from_slice(&h.magic.to_le_bytes());
-    body[14..16].copy_from_slice(&h.sub_count.to_le_bytes());
-    body
+/// The resident fxdict container: two top-level leaves, `INFO` then `DICT`.
+pub fn write_fxdict_container(params: &[FxParam]) -> Vec<u8> {
+    write_ucfx_tree(&[
+        UcfxNode::leaf(*b"INFO", write_fxdict_info(params.len() as u32).to_vec()),
+        UcfxNode::leaf(*b"DICT", write_fxdict_dict(params)),
+    ])
 }
 
-pub fn write_emtr(t: &EmitterTable) -> Vec<u8> {
-    let mut body = Vec::with_capacity(2 + t.refs.len() * 4);
-    body.extend_from_slice(&(t.refs.len() as u16).to_le_bytes());
-    for r in &t.refs {
-        body.extend_from_slice(&r.to_le_bytes());
-    }
-    body
-}
-
-pub fn write_emit(t: &EmitTiming) -> Vec<u8> {
-    let mut body = Vec::with_capacity(t.floats.len() * 4);
-    for f in &t.floats {
-        body.extend_from_slice(&f.to_le_bytes());
-    }
-    body
-}
-
-pub fn write_poff(v: [f32; 3]) -> Vec<u8> {
-    let mut body = Vec::with_capacity(12);
-    for x in v {
-        body.extend_from_slice(&x.to_le_bytes());
-    }
-    body
-}
-
-pub fn write_trfm(m: &[[f32; 4]; 4]) -> Vec<u8> {
-    let mut body = Vec::with_capacity(64);
-    for row in m {
-        for x in row {
-            body.extend_from_slice(&x.to_le_bytes());
+/// Parse a whole fxdict container. Strict: exactly `INFO` (4 B) then `DICT` (`count × 20` B), no
+/// children, no slack — the shape [`write_fxdict_container`] writes and the retail singleton has.
+pub fn parse_fxdict_container(container: &[u8]) -> Result<Vec<FxParam>, String> {
+    let roots = parse_ucfx_tree(container)?;
+    let [info, dict] = roots.as_slice() else {
+        return Err(format!("fxdict container has {} top-level rows, not INFO + DICT", roots.len()));
+    };
+    for (n, tag) in [(info, b"INFO"), (dict, b"DICT")] {
+        if &n.tag != tag || !n.children.is_empty() || n.body.is_none() {
+            return Err(format!("fxdict row '{}' is not a leaf '{}'", n.tag_str(), String::from_utf8_lossy(tag)));
         }
     }
-    body
-}
-
-pub fn write_ptyp(p: ParticleType) -> Vec<u8> {
-    vec![p.flags]
-}
-
-pub fn write_colr(g: &ColorGradient) -> Vec<u8> {
-    let mut body = Vec::with_capacity(COLR_BYTES);
-    for s in &g.stops {
-        body.extend_from_slice(s);
+    let info_b = info.body.as_deref().unwrap_or_default();
+    let dict_b = dict.body.as_deref().unwrap_or_default();
+    if info_b.len() != 4 {
+        return Err(format!("fxdict INFO is {} bytes, not 4", info_b.len()));
     }
-    body
+    let count = read_u32_le(info_b, 0) as usize;
+    if dict_b.len() != count * DICT_RECORD_BYTES {
+        return Err(format!(
+            "fxdict DICT is {} bytes, not {count} × {DICT_RECORD_BYTES}",
+            dict_b.len()
+        ));
+    }
+    parse_fxdict(info_b, dict_b)
 }
 
-pub fn write_frce(f: &Force) -> Vec<u8> {
-    let n = f.param_count.min(4);
-    let mut body = Vec::with_capacity(4 + n * 4);
-    body.extend_from_slice(&f.inner_hash.to_le_bytes());
-    for x in &f.params[..n] {
-        body.extend_from_slice(&x.to_le_bytes());
-    }
-    body
+// ------------------------------------------------------------------------------------------------
+// Effect container — sizes and constants.
+// ------------------------------------------------------------------------------------------------
+
+/// `EFCT` word 1, read and skipped by `FUN_00491920`; 0x0226 in all 314 retail effects.
+pub const EFCT_MAGIC: u16 = 0x0226;
+/// `EFCT` body: nine u16 words.
+pub const EFCT_BYTES: usize = 18;
+/// `TRFM` body: a 4×4 f32 matrix.
+pub const TRFM_BYTES: usize = 64;
+/// `ATRB` body: `{u32 hash, u32 flags, u32|f32 value}`.
+pub const ATRB_BYTES: usize = 12;
+/// `AKEY` body: `{f32 time, f32 value}`.
+pub const AKEY_BYTES: usize = 8;
+/// f32s in one emitter-shape record (`EMTR/GEOM`): the loader allocates `k × 0x34` and copies 13
+/// words each (`FUN_00491920`, EMTR arm).
+pub const SHAPE_RECORD_FLOATS: usize = 13;
+/// Keys in a `COLR` body.
+pub const COLR_KEYS: usize = 100;
+/// Bytes per `COLR` key.
+pub const COLR_KEY_BYTES: usize = 8;
+/// `COLR` body: `FUN_00492af0` copies exactly 800 bytes (`vtable+0x14(dst, 800, 0)`).
+pub const COLR_BYTES: usize = COLR_KEYS * COLR_KEY_BYTES;
+/// Stream-table words the loader reserves for a `COLR` (`*desc = 200`).
+pub const COLR_STREAM_WORDS: u16 = 200;
+/// Stream-table words `EFCT[8]` reserves for a `TEXT` in every retail effect.
+pub const TEXT_STREAM_WORDS: u16 = 200;
+/// Samples a resampled curve is expanded to (`FUN_00493150`, `*desc = 100`).
+pub const RESAMPLED_CURVE_WORDS: u16 = 100;
+
+/// `ATRB` flag bits. Bits 7-10 are what `FUN_00493150` packs as `b7<<3 | b10<<2 | b8<<1 | b9`.
+pub mod atrb_flag {
+    /// The value word is an f32 (clear: a u32). Derived from [`super::AtrbValue`].
+    pub const FLOAT: u32 = 1 << 0;
+    /// Authored option bit 7 (meaning unproven).
+    pub const BIT7: u32 = 1 << 7;
+    /// Resample the curve to 100 samples (`FUN_00493150`: packed bit 1 → the 100-sample branch).
+    pub const RESAMPLE: u32 = 1 << 8;
+    /// Authored option bit 9 (meaning unproven).
+    pub const BIT9: u32 = 1 << 9;
+    /// The attribute owns an `ANIM` curve. Derived from [`super::Atrb::curve`]; set on all 1,880
+    /// retail ATRBs that have an ANIM child and on no other.
+    pub const CURVE: u32 = 1 << 10;
+    /// The authored option bits — the only bits not derived from the value and the curve.
+    pub const OPTIONS: u32 = BIT7 | RESAMPLE | BIT9;
+    /// Every bit any retail ATRB sets.
+    pub const KNOWN: u32 = FLOAT | OPTIONS | CURVE;
 }
 
-pub fn write_text(hashes: &[u32]) -> Vec<u8> {
-    let mut body = Vec::with_capacity(4 + hashes.len() * 4);
-    body.extend_from_slice(&(hashes.len() as u32).to_le_bytes());
-    for h in hashes {
-        body.extend_from_slice(&h.to_le_bytes());
-    }
-    body
+// ------------------------------------------------------------------------------------------------
+// Attributes (ATRB → ANIM → AKEY).
+// ------------------------------------------------------------------------------------------------
+
+/// An `ATRB` value word.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum AtrbValue {
+    F32(f32),
+    U32(u32),
 }
 
-impl EffectTemplate {
-    pub fn to_chunks(&self) -> Vec<([u8; 4], Vec<u8>)> {
-        let mut out: Vec<([u8; 4], Vec<u8>)> = Vec::new();
-        if let Some(h) = self.header { out.push((*b"EFCT", write_efct(&h))); }
-        if !self.emitters.refs.is_empty() { out.push((*b"EMTR", write_emtr(&self.emitters))); }
-        if !self.emit.floats.is_empty() { out.push((*b"EMIT", write_emit(&self.emit))); }
-        if let Some(v) = self.offset { out.push((*b"POFF", write_poff(v))); }
-        if let Some(m) = &self.transform { out.push((*b"TRFM", write_trfm(m))); }
-        if let Some(p) = self.ptype { out.push((*b"PTYP", write_ptyp(p))); }
-        if let Some(g) = &self.gradient { out.push((*b"COLR", write_colr(g))); }
-        for f in &self.forces { out.push((*b"FRCE", write_frce(f))); }
-        if !self.text_refs.is_empty() { out.push((*b"TEXT", write_text(&self.text_refs))); }
-        out
+/// One `AKEY`: a curve key. Retail times run 0..100.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AnimKey {
+    pub time: f32,
+    pub value: f32,
+}
+
+/// One `ATRB`, with its optional `ANIM` curve.
+///
+/// `flags` is the authored flag word. Bits 0 and 10 are DERIVED (value type, curve presence) and
+/// bits 7/8/9 are authored options; [`Atrb::validate`] rejects a word that disagrees with the value
+/// or the curve rather than writing it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Atrb {
+    pub hash: u32,
+    pub flags: u32,
+    pub value: AtrbValue,
+    pub curve: Option<Vec<AnimKey>>,
+}
+
+impl Atrb {
+    /// An f32 attribute with no curve and no option bits.
+    pub fn f32(hash: u32, value: f32) -> Self {
+        Atrb { hash, flags: atrb_flag::FLOAT, value: AtrbValue::F32(value), curve: None }
+    }
+    /// A u32 attribute (a hash, an enum, a count).
+    pub fn u32(hash: u32, value: u32) -> Self {
+        Atrb { hash, flags: 0, value: AtrbValue::U32(value), curve: None }
+    }
+    /// Attach a curve (sets [`atrb_flag::CURVE`]).
+    pub fn with_curve(mut self, keys: Vec<AnimKey>) -> Self {
+        self.flags |= atrb_flag::CURVE;
+        self.curve = Some(keys);
+        self
+    }
+    /// OR authored option bits into the flag word ([`Atrb::validate`] rejects non-option bits).
+    pub fn with_options(mut self, bits: u32) -> Self {
+        self.flags |= bits;
+        self
+    }
+
+    /// The flag word implied by the value, the curve and the authored option bits.
+    pub fn derived_flags(&self) -> u32 {
+        let mut f = self.flags & atrb_flag::OPTIONS;
+        if matches!(self.value, AtrbValue::F32(_)) {
+            f |= atrb_flag::FLOAT;
+        }
+        if self.curve.is_some() {
+            f |= atrb_flag::CURVE;
+        }
+        f
+    }
+
+    /// Reject a flag word that disagrees with the value type or the curve, unknown flag bits,
+    /// options or a curve on a u32 value (no retail attribute has either), and an empty curve.
+    pub fn validate(&self) -> Result<(), String> {
+        let unknown = self.flags & !atrb_flag::KNOWN;
+        if unknown != 0 {
+            return Err(format!(
+                "ATRB 0x{:08X}: flag bits 0x{unknown:08X} are not ones any retail ATRB sets",
+                self.hash
+            ));
+        }
+        if self.flags != self.derived_flags() {
+            return Err(format!(
+                "ATRB 0x{:08X}: authored flags 0x{:08X} disagree with the value/curve (expected 0x{:08X}: \
+                 bit 0 = f32 value, bit 10 = has curve)",
+                self.hash,
+                self.flags,
+                self.derived_flags()
+            ));
+        }
+        if let AtrbValue::U32(_) = self.value {
+            if self.flags != 0 {
+                return Err(format!(
+                    "ATRB 0x{:08X}: a u32 attribute carries flags 0x{:08X}; no retail u32 attribute has options or a curve",
+                    self.hash, self.flags
+                ));
+            }
+        }
+        if let Some(keys) = &self.curve {
+            if keys.is_empty() {
+                return Err(format!("ATRB 0x{:08X}: an ANIM curve needs at least one key", self.hash));
+            }
+        }
+        Ok(())
+    }
+
+    fn body(&self) -> Vec<u8> {
+        let mut b = Vec::with_capacity(ATRB_BYTES);
+        b.extend_from_slice(&self.hash.to_le_bytes());
+        b.extend_from_slice(&self.flags.to_le_bytes());
+        match self.value {
+            AtrbValue::F32(v) => b.extend_from_slice(&v.to_le_bytes()),
+            AtrbValue::U32(v) => b.extend_from_slice(&v.to_le_bytes()),
+        }
+        b
+    }
+
+    fn to_node(&self) -> UcfxNode {
+        let children = match &self.curve {
+            None => Vec::new(),
+            Some(keys) => vec![UcfxNode::with_children(
+                *b"ANIM",
+                (keys.len() as u32).to_le_bytes().to_vec(),
+                keys.iter()
+                    .map(|k| {
+                        let mut b = Vec::with_capacity(AKEY_BYTES);
+                        put_f32s(&mut b, &[k.time, k.value]);
+                        UcfxNode::leaf(*b"AKEY", b)
+                    })
+                    .collect(),
+            )],
+        };
+        UcfxNode::with_children(*b"ATRB", self.body(), children)
+    }
+
+    fn from_node(n: &UcfxNode) -> Result<Atrb, String> {
+        let b = leaf_body(n, b"ATRB", Some(ATRB_BYTES))?;
+        let hash = read_u32_le(b, 0);
+        let flags = read_u32_le(b, 4);
+        let value = if flags & atrb_flag::FLOAT != 0 {
+            AtrbValue::F32(read_f32_le(b, 8))
+        } else {
+            AtrbValue::U32(read_u32_le(b, 8))
+        };
+        let curve = match n.children.as_slice() {
+            [] => None,
+            [anim] => {
+                let ab = leaf_body(anim, b"ANIM", Some(4))?;
+                let declared = read_u32_le(ab, 0) as usize;
+                if declared != anim.children.len() {
+                    return Err(format!(
+                        "ATRB 0x{hash:08X}: ANIM declares {declared} keys but has {} AKEY rows",
+                        anim.children.len()
+                    ));
+                }
+                let mut keys = Vec::with_capacity(declared);
+                for k in &anim.children {
+                    let kb = leaf_body(k, b"AKEY", Some(AKEY_BYTES))?;
+                    no_children(k)?;
+                    keys.push(AnimKey { time: read_f32_le(kb, 0), value: read_f32_le(kb, 4) });
+                }
+                Some(keys)
+            }
+            more => {
+                return Err(format!("ATRB 0x{hash:08X} has {} children; at most one ANIM", more.len()));
+            }
+        };
+        let a = Atrb { hash, flags, value, curve };
+        a.validate()?;
+        Ok(a)
     }
 }
 
-pub fn write_ucfx_container(chunks: &[([u8; 4], u32, u32, Vec<u8>)]) -> Vec<u8> {
-    let n = chunks.len();
-    let hdr_bytes = 20;
-    let desc_bytes = n * 20;
-    let data_off = (hdr_bytes + desc_bytes) as u32;
-
-    let mut data = Vec::new();
-    let mut placed: Vec<(u32, u32)> = Vec::with_capacity(n);
-    for (_, _, _, body) in chunks {
-        while data.len() % 4 != 0 { data.push(0); }
-        placed.push((data.len() as u32, body.len() as u32));
-        data.extend_from_slice(body);
-    }
-
-    let mut c = Vec::with_capacity(20 + desc_bytes + data.len() + 8);
-    c.extend_from_slice(b"UCFX");
-    for v in [data_off, 0, 0, n as u32] {
-        c.extend_from_slice(&v.to_le_bytes());
-    }
-    for (i, (tag, u2, u3, _)) in chunks.iter().enumerate() {
-        let (rel_off, size) = placed[i];
-        c.extend_from_slice(tag);
-        c.extend_from_slice(&rel_off.to_le_bytes());
-        c.extend_from_slice(&size.to_le_bytes());
-        c.extend_from_slice(&u2.to_le_bytes());
-        c.extend_from_slice(&u3.to_le_bytes());
-    }
-    c.extend_from_slice(&data);
-    let sum = crate::crc32::crc32_mercs2(&c);
-    c.extend_from_slice(b"CSUM");
-    c.extend_from_slice(&sum.to_le_bytes());
-    c
+/// The value type an attribute position takes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ValueKind {
+    F32,
+    U32,
 }
 
-pub fn write_effect_container(t: &EffectTemplate) -> Vec<u8> {
-    let owned = t.to_chunks();
-    let chunks: Vec<([u8; 4], u32, u32, Vec<u8>)> =
-        owned.into_iter().map(|(tag, body)| (tag, 0u32, 0u32, body)).collect();
-    write_ucfx_container(&chunks)
+/// What the loader does with a curve on an attribute position — which decides how the curve is
+/// counted in `EFCT`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CurveUse {
+    /// A TRFM channel (`FUN_00493150`): a linear table entry of `2 × keys` words, or of 100 words
+    /// when [`atrb_flag::RESAMPLE`] is set.
+    Channel,
+    /// Stored as `2 × keys` words in the linear-curve table (`EFCT[3]`/`[4]`). PTYP positions that
+    /// dispatch to the handler at `0x024EEC10`, and the FRCE positions retail puts curves on.
+    Linear,
+    /// Resampled to 100 words in the stream table (`EFCT[7]`/`[8]`) — PTYP positions that dispatch
+    /// to the handler at `0x024E2380` (the size family), whatever the flag bits.
+    Resampled,
+    /// Carried in the file but not counted in `EFCT` — PTYP positions that dispatch to the handler
+    /// at `0x024EEBE0` (the `…var` family). Retail has two such curves (on `speedvar`).
+    Unconsumed,
+    /// No retail effect carries a curve here and the loader's handling of one is not decoded, so
+    /// the writer refuses a curve at this position.
+    Refused,
 }
 
-pub fn write_fxdict_container(params: &[FxParam]) -> Vec<u8> {
-    let info = write_fxdict_info(params.len() as u32).to_vec();
-    let dict = write_fxdict_dict(params);
-    write_ucfx_container(&[
-        (*b"INFO", 0, 0, info),
-        (*b"DICT", 0, 0, dict),
-    ])
+/// One attribute position: its hash, recovered name (FNV inversion of `pandemic_hash_m2`) when one
+/// is known, value type, and curve handling.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AttrDef {
+    pub hash: u32,
+    pub name: Option<&'static str>,
+    pub kind: ValueKind,
+    pub curve: CurveUse,
+}
+
+const fn def(hash: u32, name: Option<&'static str>, kind: ValueKind, curve: CurveUse) -> AttrDef {
+    AttrDef { hash, name, kind, curve }
+}
+use CurveUse::{Channel, Linear, Refused, Resampled, Unconsumed};
+use ValueKind::{F32, U32};
+
+/// The nine `TRFM` channels, in file order. All dispatch through `FUN_0048cc30` → `FUN_00493150`.
+pub const TRFM_CHANNELS: [AttrDef; 9] = [
+    def(0x7D1117EB, Some("posx"), F32, Channel),
+    def(0x9B0F088E, Some("posy"), F32, Channel),
+    def(0xFD165E99, Some("posz"), F32, Channel),
+    def(0xF6B55F38, Some("rotx"), F32, Channel),
+    def(0x20B7DFED, Some("roty"), F32, Channel),
+    def(0x9EB05782, Some("rotz"), F32, Channel),
+    def(0xC5574C5F, Some("sclx"), F32, Channel),
+    def(0xE3553D02, Some("scly"), F32, Channel),
+    def(0x655CC56D, Some("sclz"), F32, Channel),
+];
+
+/// The 19 `PTYP` attributes before `COLR`, in file order (820/820 retail PTYPs).
+pub const PTYP_ATTRIBUTES_BEFORE_COLR: [AttrDef; 19] = [
+    def(0x1DE5C824, Some("name"), U32, Refused),
+    def(0x8C3654C2, Some("size"), F32, Resampled),
+    def(0xC1008E25, Some("sizevar"), F32, Refused),
+    def(0xC3AEB321, Some("mass"), F32, Refused),
+    def(0x47035D90, Some("massvar"), F32, Refused),
+    def(0xD3AE67AF, Some("life"), F32, Linear),
+    def(0xC7CFE6AA, Some("lifevar"), F32, Unconsumed),
+    def(0x497A1895, None, F32, Resampled),
+    def(0x1792B524, None, F32, Refused),
+    def(0x10831673, None, F32, Refused),
+    def(0xB6197EFE, None, F32, Refused),
+    def(0x6CF0BE14, None, F32, Refused),
+    def(0xBE968D3B, None, F32, Refused),
+    def(0xC558C9D8, None, F32, Refused),
+    def(0xD80DF37F, None, F32, Refused),
+    def(0x720F22F8, None, F32, Refused),
+    def(0x4712719F, None, F32, Refused),
+    def(0xB3DBB6C0, None, F32, Refused),
+    def(0x4C49B137, None, F32, Refused),
+];
+
+/// The 13 `PTYP` attributes after `COLR`, in file order (820/820 retail PTYPs).
+pub const PTYP_ATTRIBUTES_AFTER_COLR: [AttrDef; 13] = [
+    def(0xC3592BB7, None, U32, Refused),
+    def(0xEEE1A341, Some("scale"), U32, Refused),
+    def(0x062F0D37, Some("rate"), F32, Linear),
+    def(0x70653182, Some("ratevar"), F32, Refused),
+    def(0x437F66EC, Some("spread"), F32, Linear),
+    def(0xB8A95DE3, Some("spreadvar"), F32, Unconsumed),
+    def(0x15BA509E, Some("speed"), F32, Linear),
+    def(0x9BE62E41, Some("speedvar"), F32, Unconsumed),
+    def(0xB4247BF3, Some("inheritvel"), F32, Linear),
+    def(0xB15ABB7E, Some("inheritvelvar"), F32, Unconsumed),
+    def(0x35ACBAB7, None, F32, Resampled),
+    def(0x1B878602, None, F32, Refused),
+    def(0x270C9E9D, Some("emissiondir"), U32, Refused),
+];
+
+/// The seven attributes every `FRCE` starts with, in file order.
+pub const FRCE_COMMON_ATTRIBUTES: [AttrDef; 7] = [
+    def(0x3DC3D9DF, Some("ampl"), F32, Linear),
+    def(0x7D1117EB, Some("posx"), F32, Linear),
+    def(0x9B0F088E, Some("posy"), F32, Linear),
+    def(0xFD165E99, Some("posz"), F32, Linear),
+    def(0xF6B55F38, Some("rotx"), F32, Refused),
+    def(0x20B7DFED, Some("roty"), F32, Refused),
+    def(0x9EB05782, Some("rotz"), F32, Refused),
+];
+/// `drag`'s extra attribute.
+pub const FRCE_DRAG_ATTRIBUTES: [AttrDef; 1] = [def(0x2F68CD8F, None, F32, Refused)];
+/// `attractor`'s extra attributes.
+pub const FRCE_ATTRACTOR_ATTRIBUTES: [AttrDef; 3] = [
+    def(0x201B5A86, Some("local"), U32, Refused),
+    def(0xE0686A68, Some("range"), F32, Refused),
+    def(0xC2783A55, Some("decay"), F32, Refused),
+];
+/// `vortex`'s extra attributes.
+pub const FRCE_VORTEX_ATTRIBUTES: [AttrDef; 4] = [
+    def(0x201B5A86, Some("local"), U32, Refused),
+    def(0xE0686A68, Some("range"), F32, Refused),
+    def(0xC2783A55, Some("decay"), F32, Refused),
+    def(0xB46F1F0C, Some("radial"), F32, Refused),
+];
+
+/// The name recovered for an attribute hash, from every position table.
+pub fn attribute_name(hash: u32) -> Option<&'static str> {
+    TRFM_CHANNELS
+        .iter()
+        .chain(PTYP_ATTRIBUTES_BEFORE_COLR.iter())
+        .chain(PTYP_ATTRIBUTES_AFTER_COLR.iter())
+        .chain(FRCE_COMMON_ATTRIBUTES.iter())
+        .chain(FRCE_DRAG_ATTRIBUTES.iter())
+        .chain(FRCE_VORTEX_ATTRIBUTES.iter())
+        .find(|d| d.hash == hash)
+        .and_then(|d| d.name)
+}
+
+/// Check a run of attributes against its position table: same count, same hashes in the same
+/// order, the table's value type, a curve only where the table allows one.
+fn check_positions(what: &str, attrs: &[Atrb], defs: &[&[AttrDef]]) -> Result<(), String> {
+    let defs: Vec<&AttrDef> = defs.iter().flat_map(|d| d.iter()).collect();
+    if attrs.len() != defs.len() {
+        return Err(format!("{what}: {} attributes, the format has {}", attrs.len(), defs.len()));
+    }
+    for (i, (a, d)) in attrs.iter().zip(defs).enumerate() {
+        let label = d.name.map(str::to_string).unwrap_or_else(|| format!("0x{:08X}", d.hash));
+        if a.hash != d.hash {
+            return Err(format!(
+                "{what}: attribute {i} is 0x{:08X}; position {i} is {label} (0x{:08X})",
+                a.hash, d.hash
+            ));
+        }
+        a.validate()?;
+        let kind_ok = matches!(
+            (a.value, d.kind),
+            (AtrbValue::F32(_), ValueKind::F32) | (AtrbValue::U32(_), ValueKind::U32)
+        );
+        if !kind_ok {
+            return Err(format!("{what}: {label} takes a {:?} value, got {:?}", d.kind, a.value));
+        }
+        if a.curve.is_some() && d.curve == CurveUse::Refused {
+            return Err(format!(
+                "{what}: {label} carries a curve; no retail effect has one there and the loader's \
+                 handling of it is not decoded"
+            ));
+        }
+    }
+    Ok(())
+}
+
+// ------------------------------------------------------------------------------------------------
+// COLR / TEXT.
+// ------------------------------------------------------------------------------------------------
+
+/// One `COLR` key (8 bytes on disk).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ColrKey {
+    /// Four colour bytes, in file order. The channel order is not proven; the retail keys read as
+    /// three equal-ish bytes plus a fourth that fades to 0 over the 100 keys.
+    pub colour: [u8; 4],
+    /// A binary16 bit pattern (`0x3C00` = 1.0 and `0xBC00` = -1.0 are both in retail). Its role is
+    /// not proven; it is carried verbatim.
+    pub half_bits: u16,
+}
+
+/// `COLR` — 100 keys spread over the particle's life. The trailing u16 of each key is 0 in all
+/// 82,000 retail keys; the reader rejects anything else and the writer writes 0.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Colr {
+    pub keys: [ColrKey; COLR_KEYS],
+}
+
+impl Colr {
+    /// Every key the same.
+    pub fn uniform(colour: [u8; 4], half_bits: u16) -> Self {
+        Colr { keys: [ColrKey { colour, half_bits }; COLR_KEYS] }
+    }
+
+    /// Build from a function of normalised age `t` in 0..=1 (key `i` is at `i / 99`).
+    pub fn from_fn(mut f: impl FnMut(f32) -> ([u8; 4], u16)) -> Self {
+        let mut keys = [ColrKey { colour: [0; 4], half_bits: 0 }; COLR_KEYS];
+        for (i, k) in keys.iter_mut().enumerate() {
+            let (colour, half_bits) = f(i as f32 / (COLR_KEYS - 1) as f32);
+            *k = ColrKey { colour, half_bits };
+        }
+        Colr { keys }
+    }
+
+    /// The four colour bytes at normalised age `t` (0 = spawn, 1 = death), linearly interpolated
+    /// between the two nearest keys and scaled to 0..1. Channel order as stored (unproven).
+    pub fn sample(&self, t: f32) -> [f32; 4] {
+        let scaled = t.clamp(0.0, 1.0) * (COLR_KEYS - 1) as f32;
+        let i0 = scaled.floor() as usize;
+        let i1 = (i0 + 1).min(COLR_KEYS - 1);
+        let f = scaled - i0 as f32;
+        let (a, b) = (self.keys[i0].colour, self.keys[i1].colour);
+        let lerp = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * f) / 255.0;
+        [lerp(a[0], b[0]), lerp(a[1], b[1]), lerp(a[2], b[2]), lerp(a[3], b[3])]
+    }
+
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut b = Vec::with_capacity(COLR_BYTES);
+        for k in &self.keys {
+            b.extend_from_slice(&k.colour);
+            b.extend_from_slice(&k.half_bits.to_le_bytes());
+            b.extend_from_slice(&0u16.to_le_bytes());
+        }
+        b
+    }
+
+    pub fn from_bytes(b: &[u8]) -> Result<Colr, String> {
+        if b.len() != COLR_BYTES {
+            return Err(format!("COLR is {} bytes, not {COLR_BYTES}", b.len()));
+        }
+        let mut keys = [ColrKey { colour: [0; 4], half_bits: 0 }; COLR_KEYS];
+        for (i, k) in keys.iter_mut().enumerate() {
+            let o = i * COLR_KEY_BYTES;
+            let tail = read_u16_le(b, o + 6);
+            if tail != 0 {
+                return Err(format!("COLR key {i}: trailing u16 is 0x{tail:04X}, not 0"));
+            }
+            *k = ColrKey { colour: [b[o], b[o + 1], b[o + 2], b[o + 3]], half_bits: read_u16_le(b, o + 4) };
+        }
+        Ok(Colr { keys })
+    }
+}
+
+/// `TEXT` — the texture frames: `u32 n` then `n` texture asset hashes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Text {
+    pub frames: Vec<u32>,
+}
+
+impl Text {
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut b = Vec::with_capacity(4 + 4 * self.frames.len());
+        b.extend_from_slice(&(self.frames.len() as u32).to_le_bytes());
+        for h in &self.frames {
+            b.extend_from_slice(&h.to_le_bytes());
+        }
+        b
+    }
+
+    pub fn from_bytes(b: &[u8]) -> Result<Text, String> {
+        if b.len() < 4 {
+            return Err(format!("TEXT is {} bytes; needs the u32 frame count", b.len()));
+        }
+        let n = read_u32_le(b, 0) as usize;
+        if b.len() != 4 + 4 * n {
+            return Err(format!("TEXT declares {n} frames but is {} bytes (not 4 + 4·{n})", b.len()));
+        }
+        Ok(Text { frames: (0..n).map(|i| read_u32_le(b, 4 + 4 * i)).collect() })
+    }
+}
+
+// ------------------------------------------------------------------------------------------------
+// FRCE.
+// ------------------------------------------------------------------------------------------------
+
+/// `pandemic_hash_m2("gravity")`.
+pub const FORCE_GRAVITY: u32 = 0x14BD1BBD;
+/// `pandemic_hash_m2("drag")`.
+pub const FORCE_DRAG: u32 = 0xED791C4B;
+/// `pandemic_hash_m2("wind")`.
+pub const FORCE_WIND: u32 = 0xC9F7A9D7;
+/// `pandemic_hash_m2("attractor")`.
+pub const FORCE_ATTRACTOR: u32 = 0xC235456B;
+/// `pandemic_hash_m2("vortex")`.
+pub const FORCE_VORTEX: u32 = 0xF4D85A49;
+
+/// A force and its parameters, read by the `FRCE` arm of `FUN_00491920`. Field names that describe a
+/// meaning (`magnitude`, `direction`) are INFERRED from the retail values; the rest are named by the
+/// runtime offset the loader writes them to.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ForceKind {
+    /// Mode 1: f32 → `+0x12C`, vec3 → `+0x110`.
+    Gravity { magnitude: f32, direction: [f32; 3] },
+    /// Mode 2: f32 → `+0x12C`.
+    Drag { magnitude: f32 },
+    /// Mode 0: f32 → `+0x12C`, vec3 → `+0x110`; also sets effect flag `+0x94 |= 2`.
+    Wind { magnitude: f32, direction: [f32; 3] },
+    /// Mode 3: f32 → `+0x12C`, u32 (read as `!= 0`) → `+0x13C`, f32 → `+0x130`, f32 → `+0x134`,
+    /// vec3 → `+0x104`.
+    Attractor { magnitude: f32, flag_13c: u32, param_130: f32, param_134: f32, vector_104: [f32; 3] },
+    /// Mode 4: as attractor plus f32 → `+0x138`, then three vec3s → `+0x104`, `+0x110`, `+0x11C`
+    /// (the loader builds a basis from the cross product of the last two).
+    Vortex {
+        magnitude: f32,
+        flag_13c: u32,
+        param_130: f32,
+        param_134: f32,
+        param_138: f32,
+        vector_104: [f32; 3],
+        vector_110: [f32; 3],
+        vector_11c: [f32; 3],
+    },
+}
+
+impl ForceKind {
+    pub fn hash(&self) -> u32 {
+        match self {
+            ForceKind::Gravity { .. } => FORCE_GRAVITY,
+            ForceKind::Drag { .. } => FORCE_DRAG,
+            ForceKind::Wind { .. } => FORCE_WIND,
+            ForceKind::Attractor { .. } => FORCE_ATTRACTOR,
+            ForceKind::Vortex { .. } => FORCE_VORTEX,
+        }
+    }
+
+    /// The `FRCE` body size for this kind (8 / 20 / 20 / 32 / 60).
+    pub fn body_len(&self) -> usize {
+        match self {
+            ForceKind::Drag { .. } => 8,
+            ForceKind::Gravity { .. } | ForceKind::Wind { .. } => 20,
+            ForceKind::Attractor { .. } => 32,
+            ForceKind::Vortex { .. } => 60,
+        }
+    }
+
+    /// The attributes after the common seven, for this kind.
+    pub fn extra_attributes(&self) -> &'static [AttrDef] {
+        match self {
+            ForceKind::Gravity { .. } | ForceKind::Wind { .. } => &[],
+            ForceKind::Drag { .. } => &FRCE_DRAG_ATTRIBUTES,
+            ForceKind::Attractor { .. } => &FRCE_ATTRACTOR_ATTRIBUTES,
+            ForceKind::Vortex { .. } => &FRCE_VORTEX_ATTRIBUTES,
+        }
+    }
+
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut b = Vec::with_capacity(self.body_len());
+        b.extend_from_slice(&self.hash().to_le_bytes());
+        match *self {
+            ForceKind::Gravity { magnitude, direction } | ForceKind::Wind { magnitude, direction } => {
+                put_f32s(&mut b, &[magnitude]);
+                put_f32s(&mut b, &direction);
+            }
+            ForceKind::Drag { magnitude } => put_f32s(&mut b, &[magnitude]),
+            ForceKind::Attractor { magnitude, flag_13c, param_130, param_134, vector_104 } => {
+                put_f32s(&mut b, &[magnitude]);
+                b.extend_from_slice(&flag_13c.to_le_bytes());
+                put_f32s(&mut b, &[param_130, param_134]);
+                put_f32s(&mut b, &vector_104);
+            }
+            ForceKind::Vortex {
+                magnitude,
+                flag_13c,
+                param_130,
+                param_134,
+                param_138,
+                vector_104,
+                vector_110,
+                vector_11c,
+            } => {
+                put_f32s(&mut b, &[magnitude]);
+                b.extend_from_slice(&flag_13c.to_le_bytes());
+                put_f32s(&mut b, &[param_130, param_134, param_138]);
+                put_f32s(&mut b, &vector_104);
+                put_f32s(&mut b, &vector_110);
+                put_f32s(&mut b, &vector_11c);
+            }
+        }
+        b
+    }
+
+    pub fn from_bytes(b: &[u8]) -> Result<ForceKind, String> {
+        if b.len() < 4 {
+            return Err(format!("FRCE is {} bytes; needs the u32 kind hash", b.len()));
+        }
+        let hash = read_u32_le(b, 0);
+        let f = |o: usize| read_f32_le(b, o);
+        let (kind, need) = match hash {
+            FORCE_GRAVITY | FORCE_WIND if b.len() == 20 => {
+                let (magnitude, direction) = (f(4), read_vec3(b, 8));
+                let k = if hash == FORCE_GRAVITY {
+                    ForceKind::Gravity { magnitude, direction }
+                } else {
+                    ForceKind::Wind { magnitude, direction }
+                };
+                (k, 20)
+            }
+            FORCE_DRAG if b.len() == 8 => (ForceKind::Drag { magnitude: f(4) }, 8),
+            FORCE_ATTRACTOR if b.len() == 32 => (
+                ForceKind::Attractor {
+                    magnitude: f(4),
+                    flag_13c: read_u32_le(b, 8),
+                    param_130: f(12),
+                    param_134: f(16),
+                    vector_104: read_vec3(b, 20),
+                },
+                32,
+            ),
+            FORCE_VORTEX if b.len() == 60 => (
+                ForceKind::Vortex {
+                    magnitude: f(4),
+                    flag_13c: read_u32_le(b, 8),
+                    param_130: f(12),
+                    param_134: f(16),
+                    param_138: f(20),
+                    vector_104: read_vec3(b, 24),
+                    vector_110: read_vec3(b, 36),
+                    vector_11c: read_vec3(b, 48),
+                },
+                60,
+            ),
+            FORCE_GRAVITY | FORCE_WIND | FORCE_DRAG | FORCE_ATTRACTOR | FORCE_VORTEX => {
+                return Err(format!("FRCE kind 0x{hash:08X} with a {}-byte body (wrong size for the kind)", b.len()));
+            }
+            _ => return Err(format!("FRCE kind 0x{hash:08X} is not one the loader dispatches")),
+        };
+        debug_assert_eq!(need, b.len());
+        Ok(kind)
+    }
+}
+
+/// One `FRCE`: the typed force and its attribute children.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Force {
+    pub kind: ForceKind,
+    /// [`FRCE_COMMON_ATTRIBUTES`] then [`ForceKind::extra_attributes`], in that order.
+    pub attributes: Vec<Atrb>,
+}
+
+// ------------------------------------------------------------------------------------------------
+// Emitters.
+// ------------------------------------------------------------------------------------------------
+
+/// One `EMTR/GEOM`: a table of 13-f32 shape records, referenced by [`EmitterGeom::shape_index`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct EmitterShape {
+    pub records: Vec<[f32; SHAPE_RECORD_FLOATS]>,
+}
+
+/// An emitter's `GEOM` (4 bytes): the first u16 indexes the `EMTR` shape table
+/// (`FUN_0048cc30`: `shapes[u16]`); the second u16 is stored at `+0x00` of the EMIT record,
+/// meaning unproven.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EmitterGeom {
+    pub shape_index: u16,
+    pub word_00: u16,
+}
+
+/// `PTYP` and its children.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ParticleType {
+    /// Bit 0 → emitter `+0x205`, bit 1 → emitter `+0x206` (`FUN_00491920`). No other bit is read.
+    pub flags: u32,
+    /// [`PTYP_ATTRIBUTES_BEFORE_COLR`] then [`PTYP_ATTRIBUTES_AFTER_COLR`] — 32, in that order.
+    pub attributes: Vec<Atrb>,
+    pub colr: Colr,
+    pub text: Text,
+}
+
+/// One emitter: an `EMIT` marker (TRFM + channels + optional GEOM) and the `PTYP` that follows it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Emitter {
+    /// The `TRFM` 4×4, rows as stored.
+    pub transform: [[f32; 4]; 4],
+    /// The nine [`TRFM_CHANNELS`], in order.
+    pub channels: Vec<Atrb>,
+    /// 811 of 820 retail emitters have one.
+    pub geom: Option<EmitterGeom>,
+    pub particle: ParticleType,
+}
+
+/// A whole effect.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EffectContainer {
+    pub shapes: Vec<EmitterShape>,
+    pub emitters: Vec<Emitter>,
+    pub forces: Vec<Force>,
+}
+
+/// PTYP flag bits the loader reads.
+pub const PTYP_KNOWN_FLAGS: u32 = 0b11;
+
+impl EffectContainer {
+    /// Validate everything the writer relies on, naming the first violation.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.emitters.is_empty() {
+            return Err("an effect needs at least one emitter (EFCT[0] = PTYP count)".into());
+        }
+        if self.shapes.is_empty() {
+            return Err("an effect needs at least one EMTR shape (every retail EMTR has one)".into());
+        }
+        for (i, e) in self.emitters.iter().enumerate() {
+            let w = format!("emitter {i}");
+            check_positions(&format!("{w} TRFM"), &e.channels, &[&TRFM_CHANNELS])?;
+            if let Some(g) = e.geom {
+                if g.shape_index as usize >= self.shapes.len() {
+                    return Err(format!(
+                        "{w}: GEOM shape index {} but EMTR has {} shapes",
+                        g.shape_index,
+                        self.shapes.len()
+                    ));
+                }
+            }
+            let p = &e.particle;
+            if p.flags & !PTYP_KNOWN_FLAGS != 0 {
+                return Err(format!("{w}: PTYP flags 0x{:08X} set bits the loader never reads", p.flags));
+            }
+            check_positions(
+                &format!("{w} PTYP"),
+                &p.attributes,
+                &[&PTYP_ATTRIBUTES_BEFORE_COLR, &PTYP_ATTRIBUTES_AFTER_COLR],
+            )?;
+            let n = p.text.frames.len();
+            if n == 0 {
+                return Err(format!("{w}: TEXT has no frames (the loader reads one regardless)"));
+            }
+            // With PTYP bit 1 the loader reserves 2·n stream words for TEXT; EFCT[8] reserves 200.
+            if p.flags & 2 != 0 && 2 * n > TEXT_STREAM_WORDS as usize {
+                return Err(format!(
+                    "{w}: PTYP bit 1 with {n} TEXT frames needs {} stream words; EFCT reserves {TEXT_STREAM_WORDS}",
+                    2 * n
+                ));
+            }
+        }
+        for (i, f) in self.forces.iter().enumerate() {
+            check_positions(
+                &format!("force {i}"),
+                &f.attributes,
+                &[&FRCE_COMMON_ATTRIBUTES, f.kind.extra_attributes()],
+            )?;
+        }
+        Ok(())
+    }
+
+    /// The nine `EFCT` words, computed:
+    ///
+    /// | word | value |
+    /// |---|---|
+    /// | 0 | emitters (PTYP count) |
+    /// | 1 | [`EFCT_MAGIC`] |
+    /// | 2 | forces (FRCE count) |
+    /// | 3 | linear-table curves: TRFM channel curves, PTYP [`CurveUse::Linear`] curves, FRCE curves |
+    /// | 4 | their words: `2 × keys` each, or 100 for a TRFM curve with [`atrb_flag::RESAMPLE`] |
+    /// | 5, 6 | 0 |
+    /// | 7 | stream-table entries: COLR + TEXT per emitter + PTYP [`CurveUse::Resampled`] curves |
+    /// | 8 | their words: 200 per COLR, 200 per TEXT, 100 per resampled curve |
+    ///
+    /// The loader reads the words as three `(count, words)` table reservations (`FUN_00491920`),
+    /// and fills tables 1 and 3 from `FUN_00493150` and `FUN_00492af0`. Equal to the stored words
+    /// in 314/314 retail effects. The TRFM-resample branch has no retail instance; that it lands in
+    /// the linear table follows from `FUN_00493150` using one table pointer for both branches.
+    pub fn efct_words(&self) -> Result<[u16; 9], String> {
+        let mut lin = 0usize;
+        let mut lin_words = 0usize;
+        let mut stream = 0usize;
+        let mut stream_words = 0usize;
+        for e in &self.emitters {
+            for a in &e.channels {
+                if let Some(keys) = &a.curve {
+                    lin += 1;
+                    lin_words += if a.flags & atrb_flag::RESAMPLE != 0 {
+                        RESAMPLED_CURVE_WORDS as usize
+                    } else {
+                        2 * keys.len()
+                    };
+                }
+            }
+            stream += 2;
+            stream_words += (COLR_STREAM_WORDS + TEXT_STREAM_WORDS) as usize;
+            let defs = PTYP_ATTRIBUTES_BEFORE_COLR.iter().chain(PTYP_ATTRIBUTES_AFTER_COLR.iter());
+            for (a, d) in e.particle.attributes.iter().zip(defs) {
+                if let Some(keys) = &a.curve {
+                    match d.curve {
+                        CurveUse::Linear => {
+                            lin += 1;
+                            lin_words += 2 * keys.len();
+                        }
+                        CurveUse::Resampled => {
+                            stream += 1;
+                            stream_words += RESAMPLED_CURVE_WORDS as usize;
+                        }
+                        CurveUse::Unconsumed => {}
+                        CurveUse::Channel | CurveUse::Refused => {
+                            return Err(format!("PTYP attribute 0x{:08X} carries a curve it cannot", a.hash));
+                        }
+                    }
+                }
+            }
+        }
+        for f in &self.forces {
+            for a in &f.attributes {
+                if let Some(keys) = &a.curve {
+                    lin += 1;
+                    lin_words += 2 * keys.len();
+                }
+            }
+        }
+        let w = |v: usize, what: &str| -> Result<u16, String> {
+            if v > i16::MAX as usize {
+                Err(format!("EFCT {what} = {v} exceeds the loader's signed-16-bit read"))
+            } else {
+                Ok(v as u16)
+            }
+        };
+        Ok([
+            w(self.emitters.len(), "emitter count")?,
+            EFCT_MAGIC,
+            w(self.forces.len(), "force count")?,
+            w(lin, "linear-curve count")?,
+            w(lin_words, "linear-curve words")?,
+            0,
+            0,
+            w(stream, "stream-table count")?,
+            w(stream_words, "stream-table words")?,
+        ])
+    }
+
+    /// Build the UCFX tree (validates first).
+    pub fn to_tree(&self) -> Result<UcfxNode, String> {
+        self.validate()?;
+        let efct: Vec<u8> = self.efct_words()?.iter().flat_map(|w| w.to_le_bytes()).collect();
+        let mut kids = Vec::with_capacity(1 + 2 * self.emitters.len() + self.forces.len());
+
+        let shapes = self
+            .shapes
+            .iter()
+            .map(|s| {
+                let mut b = Vec::with_capacity(4 + 4 * SHAPE_RECORD_FLOATS * s.records.len());
+                b.extend_from_slice(&(s.records.len() as u32).to_le_bytes());
+                for r in &s.records {
+                    put_f32s(&mut b, r);
+                }
+                UcfxNode::leaf(*b"GEOM", b)
+            })
+            .collect();
+        kids.push(UcfxNode::with_children(
+            *b"EMTR",
+            (self.shapes.len() as u16).to_le_bytes().to_vec(),
+            shapes,
+        ));
+
+        for e in &self.emitters {
+            let mut trfm = Vec::with_capacity(TRFM_BYTES);
+            for row in &e.transform {
+                put_f32s(&mut trfm, row);
+            }
+            let mut emit = vec![UcfxNode::with_children(
+                *b"TRFM",
+                trfm,
+                e.channels.iter().map(Atrb::to_node).collect(),
+            )];
+            if let Some(g) = e.geom {
+                let mut b = g.shape_index.to_le_bytes().to_vec();
+                b.extend_from_slice(&g.word_00.to_le_bytes());
+                emit.push(UcfxNode::leaf(*b"GEOM", b));
+            }
+            kids.push(UcfxNode::marker(*b"EMIT", emit));
+
+            let p = &e.particle;
+            let split = PTYP_ATTRIBUTES_BEFORE_COLR.len();
+            let mut pk: Vec<UcfxNode> = p.attributes[..split].iter().map(Atrb::to_node).collect();
+            pk.push(UcfxNode::leaf(*b"COLR", p.colr.to_bytes()));
+            pk.extend(p.attributes[split..].iter().map(Atrb::to_node));
+            pk.push(UcfxNode::leaf(*b"TEXT", p.text.to_bytes()));
+            kids.push(UcfxNode::with_children(*b"PTYP", p.flags.to_le_bytes().to_vec(), pk));
+        }
+
+        for f in &self.forces {
+            kids.push(UcfxNode::with_children(
+                *b"FRCE",
+                f.kind.to_bytes(),
+                f.attributes.iter().map(Atrb::to_node).collect(),
+            ));
+        }
+        Ok(UcfxNode::with_children(*b"EFCT", efct, kids))
+    }
+}
+
+/// Encode an effect as its UCFX container (validated, EFCT computed, CSUM appended).
+pub fn write_effect_container(effect: &EffectContainer) -> Result<Vec<u8>, String> {
+    Ok(write_ucfx_tree(&[effect.to_tree()?]))
+}
+
+fn leaf_body<'a>(n: &'a UcfxNode, tag: &[u8; 4], len: Option<usize>) -> Result<&'a [u8], String> {
+    if &n.tag != tag {
+        return Err(format!("expected '{}', found '{}'", String::from_utf8_lossy(tag), n.tag_str()));
+    }
+    let b = n
+        .body
+        .as_deref()
+        .ok_or_else(|| format!("'{}' is a marker row; it must own a body", n.tag_str()))?;
+    if let Some(l) = len {
+        if b.len() != l {
+            return Err(format!("'{}' is {} bytes, not {l}", n.tag_str(), b.len()));
+        }
+    }
+    Ok(b)
+}
+
+fn no_children(n: &UcfxNode) -> Result<(), String> {
+    if n.children.is_empty() {
+        Ok(())
+    } else {
+        Err(format!("'{}' has {} children; it is a leaf", n.tag_str(), n.children.len()))
+    }
+}
+
+fn atrbs(nodes: &[UcfxNode]) -> Result<Vec<Atrb>, String> {
+    nodes.iter().map(Atrb::from_node).collect()
+}
+
+/// Parse an effect container. Strict: the tree must be exactly the shape in the module docs, every
+/// attribute run must match its position table, and the stored `EFCT` must equal
+/// [`EffectContainer::efct_words`].
+pub fn parse_effect_container(container: &[u8]) -> Result<EffectContainer, String> {
+    let roots = parse_ucfx_tree(container)?;
+    let [root] = roots.as_slice() else {
+        return Err(format!("effect container has {} top-level rows, not one EFCT", roots.len()));
+    };
+    let efct = leaf_body(root, b"EFCT", Some(EFCT_BYTES))?;
+    let stored: Vec<u16> = (0..9).map(|i| read_u16_le(efct, 2 * i)).collect();
+    let mut kids = root.children.iter().peekable();
+
+    let emtr = kids.next().ok_or("EFCT has no children")?;
+    let eb = leaf_body(emtr, b"EMTR", Some(2))?;
+    let declared = read_u16_le(eb, 0) as usize;
+    if declared != emtr.children.len() {
+        return Err(format!("EMTR declares {declared} shapes but has {} GEOM rows", emtr.children.len()));
+    }
+    let mut shapes = Vec::with_capacity(declared);
+    for g in &emtr.children {
+        let gb = leaf_body(g, b"GEOM", None)?;
+        no_children(g)?;
+        if gb.len() < 4 {
+            return Err(format!("EMTR GEOM is {} bytes; needs the u32 record count", gb.len()));
+        }
+        let k = read_u32_le(gb, 0) as usize;
+        if gb.len() != 4 + 4 * SHAPE_RECORD_FLOATS * k {
+            return Err(format!("EMTR GEOM declares {k} records but is {} bytes", gb.len()));
+        }
+        let records = (0..k)
+            .map(|r| {
+                let mut rec = [0f32; SHAPE_RECORD_FLOATS];
+                for (j, v) in rec.iter_mut().enumerate() {
+                    *v = read_f32_le(gb, 4 + 4 * (r * SHAPE_RECORD_FLOATS + j));
+                }
+                rec
+            })
+            .collect();
+        shapes.push(EmitterShape { records });
+    }
+
+    let mut emitters = Vec::new();
+    while kids.peek().is_some_and(|n| &n.tag == b"EMIT") {
+        let emit = kids.next().expect("peeked");
+        if emit.body.is_some() {
+            return Err("EMIT must be a marker row".into());
+        }
+        let (trfm_n, geom_n) = match emit.children.as_slice() {
+            [t] => (t, None),
+            [t, g] => (t, Some(g)),
+            other => return Err(format!("EMIT has {} children; TRFM and an optional GEOM", other.len())),
+        };
+        let tb = leaf_body(trfm_n, b"TRFM", Some(TRFM_BYTES))?;
+        let mut transform = [[0f32; 4]; 4];
+        for (r, row) in transform.iter_mut().enumerate() {
+            for (c, v) in row.iter_mut().enumerate() {
+                *v = read_f32_le(tb, 4 * (4 * r + c));
+            }
+        }
+        let channels = atrbs(&trfm_n.children)?;
+        let geom = match geom_n {
+            None => None,
+            Some(g) => {
+                let gb = leaf_body(g, b"GEOM", Some(4))?;
+                no_children(g)?;
+                Some(EmitterGeom { shape_index: read_u16_le(gb, 0), word_00: read_u16_le(gb, 2) })
+            }
+        };
+
+        let ptyp = kids.next().ok_or("EMIT is not followed by a PTYP")?;
+        let pb = leaf_body(ptyp, b"PTYP", Some(4))?;
+        let split = PTYP_ATTRIBUTES_BEFORE_COLR.len();
+        let total = split + PTYP_ATTRIBUTES_AFTER_COLR.len();
+        let pk = &ptyp.children;
+        if pk.len() != total + 2 {
+            return Err(format!("PTYP has {} children, not {total} ATRB + COLR + TEXT", pk.len()));
+        }
+        let colr_n = &pk[split];
+        let text_n = &pk[total + 1];
+        let colr = Colr::from_bytes(leaf_body(colr_n, b"COLR", None)?)?;
+        no_children(colr_n)?;
+        let text = Text::from_bytes(leaf_body(text_n, b"TEXT", None)?)?;
+        no_children(text_n)?;
+        let mut attributes = atrbs(&pk[..split])?;
+        attributes.extend(atrbs(&pk[split + 1..total + 1])?);
+        emitters.push(Emitter {
+            transform,
+            channels,
+            geom,
+            particle: ParticleType { flags: read_u32_le(pb, 0), attributes, colr, text },
+        });
+    }
+
+    let mut forces = Vec::new();
+    for f in kids {
+        let fb = leaf_body(f, b"FRCE", None)?;
+        forces.push(Force { kind: ForceKind::from_bytes(fb)?, attributes: atrbs(&f.children)? });
+    }
+
+    let effect = EffectContainer { shapes, emitters, forces };
+    effect.validate()?;
+    let computed = effect.efct_words()?;
+    if stored != computed {
+        return Err(format!("stored EFCT {stored:?} != computed {computed:?}"));
+    }
+    Ok(effect)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::hash::pandemic_hash_m2;
+    use crate::ucfx::read_ucfx_rows;
 
     fn le(v: u32) -> [u8; 4] {
         v.to_le_bytes()
@@ -587,11 +1236,11 @@ mod tests {
     fn fxdict_single_record() {
         let info = 1u32.to_le_bytes();
         let mut dict = Vec::new();
-        dict.extend_from_slice(&le(0xAABBCCDD)); // name_hash
-        dict.extend_from_slice(&1.5f32.to_le_bytes()); // default
-        dict.extend_from_slice(&0.5f32.to_le_bytes()); // value_b
-        dict.extend_from_slice(&0.03125f32.to_le_bytes()); // value_c (1/32)
-        dict.extend_from_slice(&le(0x3CF40017)); // flags
+        dict.extend_from_slice(&le(0xAABBCCDD));
+        dict.extend_from_slice(&1.5f32.to_le_bytes());
+        dict.extend_from_slice(&0.5f32.to_le_bytes());
+        dict.extend_from_slice(&0.03125f32.to_le_bytes());
+        dict.extend_from_slice(&le(0x3CF40017));
         let params = parse_fxdict(&info, &dict).unwrap();
         assert_eq!(params.len(), 1);
         let p = params[0];
@@ -606,7 +1255,6 @@ mod tests {
 
     #[test]
     fn fxdict_retail_shape() {
-        // 630 zeroed records = 12600 bytes, exactly as the retail resident block.
         let info = (DICT_RETAIL_COUNT as u32).to_le_bytes();
         let dict = vec![0u8; DICT_RETAIL_COUNT * DICT_RECORD_BYTES];
         let params = parse_fxdict(&info, &dict).unwrap();
@@ -617,7 +1265,7 @@ mod tests {
     #[test]
     fn fxdict_ignores_trailing_slack() {
         let info = 2u32.to_le_bytes();
-        let dict = vec![0u8; 2 * DICT_RECORD_BYTES + 7]; // trailing slack
+        let dict = vec![0u8; 2 * DICT_RECORD_BYTES + 7];
         assert_eq!(parse_fxdict(&info, &dict).unwrap().len(), 2);
     }
 
@@ -625,456 +1273,20 @@ mod tests {
     fn fxdict_rejects_short_inputs() {
         assert!(parse_fxdict(&[0, 0], &[]).is_err());
         let info = 3u32.to_le_bytes();
-        assert!(parse_fxdict(&info, &[0u8; 40]).is_err()); // needs 60
-    }
-
-    #[test]
-    fn emtr_reads_count_then_refs() {
-        let mut body = Vec::new();
-        body.extend_from_slice(&2u16.to_le_bytes());
-        body.extend_from_slice(&le(0x11111111));
-        body.extend_from_slice(&le(0x22222222));
-        let t = parse_emtr(&body);
-        assert_eq!(t.refs, vec![0x11111111, 0x22222222]);
-    }
-
-    #[test]
-    fn emtr_truncates_overflowing_count() {
-        // count says 9 but only room for 1 ref — engine's alloc is overflow-guarded.
-        let mut body = Vec::new();
-        body.extend_from_slice(&9u16.to_le_bytes());
-        body.extend_from_slice(&le(0xCAFEBABE));
-        let t = parse_emtr(&body);
-        assert_eq!(t.refs, vec![0xCAFEBABE]);
-    }
-
-    #[test]
-    fn efct_header_offsets() {
-        let mut body = vec![0u8; 18];
-        body[2..4].copy_from_slice(&0x0226u16.to_le_bytes()); // magic @ +2
-        body[14..16].copy_from_slice(&3u16.to_le_bytes()); // sub-count @ +14
-        let h = parse_efct(&body).unwrap();
-        assert_eq!(h.magic, 0x0226);
-        assert_eq!(h.sub_count, 3);
-        assert!(parse_efct(&[0u8; 8]).is_none());
-    }
-
-    #[test]
-    fn poff_and_trfm() {
-        let mut poff = Vec::new();
-        for v in [1.0f32, 2.0, 3.0] {
-            poff.extend_from_slice(&v.to_le_bytes());
-        }
-        assert_eq!(parse_poff(&poff), Some([1.0, 2.0, 3.0]));
-        assert_eq!(parse_poff(&poff[..8]), None);
-
-        // identity matrix
-        let mut trfm = vec![0u8; 64];
-        for i in 0..4 {
-            trfm[(i * 4 + i) * 4..(i * 4 + i) * 4 + 4].copy_from_slice(&1.0f32.to_le_bytes());
-        }
-        let m = parse_trfm(&trfm).unwrap();
-        assert_eq!(m[0][0], 1.0);
-        assert_eq!(m[3][3], 1.0);
-        assert_eq!(m[0][1], 0.0);
-        assert!(parse_trfm(&trfm[..32]).is_none());
-    }
-
-    #[test]
-    fn ptyp_flag_bits() {
-        assert!(parse_ptyp(&[]).is_none());
-        let p = parse_ptyp(&[0x03]).unwrap();
-        assert!(p.bit0());
-        assert!(p.bit1());
-        let p = parse_ptyp(&[0x02]).unwrap();
-        assert!(!p.bit0());
-        assert!(p.bit1());
-    }
-
-    #[test]
-    fn colr_gradient_size_and_sampling() {
-        assert_eq!(COLR_BYTES, 200);
-        assert_eq!(COLR_STOPS, 50);
-        assert!(parse_colr(&[0u8; 100]).is_none());
-        let mut body = vec![0u8; COLR_BYTES];
-        // stop 0 = opaque red, last stop = transparent black.
-        body[0..4].copy_from_slice(&[255, 0, 0, 255]);
-        let last = (COLR_STOPS - 1) * 4;
-        body[last..last + 4].copy_from_slice(&[0, 0, 0, 0]);
-        let g = parse_colr(&body).unwrap();
-        let s0 = g.sample(0.0);
-        assert!((s0[0] - 1.0).abs() < 1e-6 && (s0[3] - 1.0).abs() < 1e-6);
-        let s1 = g.sample(1.0);
-        assert!(s1[3].abs() < 1e-6); // alpha fades to 0 at death
-    }
-
-    #[test]
-    fn frce_parse_and_classify() {
-        // FourCC "GRAV" + one gravity magnitude.
-        let mut body = Vec::new();
-        body.extend_from_slice(b"GRAV");
-        body.extend_from_slice(&(-9.8f32).to_le_bytes());
-        let f = parse_frce(&body).unwrap();
-        assert_eq!(f.kind, ForceKind::Gravity);
-        assert_eq!(f.param_count, 1);
-        assert_eq!(f.params[0], -9.8);
-
-        // pandemic hash of "drag" classifies as Drag.
-        let mut body = Vec::new();
-        body.extend_from_slice(&pandemic_hash_m2("drag").to_le_bytes());
-        body.extend_from_slice(&0.25f32.to_le_bytes());
-        assert_eq!(parse_frce(&body).unwrap().kind, ForceKind::Drag);
-
-        // Unknown hash is retained, not rejected.
-        let mut body = Vec::new();
-        body.extend_from_slice(&le(0xDEADBEEF));
-        let f = parse_frce(&body).unwrap();
-        assert_eq!(f.kind, ForceKind::Unknown);
-        assert_eq!(f.inner_hash, 0xDEADBEEF);
-        assert_eq!(f.param_count, 0);
-
-        assert!(parse_frce(&[0, 0]).is_none());
-    }
-
-    #[test]
-    fn text_refs_clamp_to_body() {
-        let mut body = Vec::new();
-        body.extend_from_slice(&2u32.to_le_bytes());
-        body.extend_from_slice(&le(0x8410A32A));
-        body.extend_from_slice(&le(0x00000001));
-        assert_eq!(parse_text(&body), vec![0x8410A32A, 0x00000001]);
-        // stated count larger than body -> clamp.
-        let mut body = Vec::new();
-        body.extend_from_slice(&999u32.to_le_bytes());
-        body.extend_from_slice(&le(0xAA));
-        assert_eq!(parse_text(&body), vec![0xAA]);
-    }
-
-    #[test]
-    fn effect_template_from_chunks() {
-        let mut emtr = Vec::new();
-        emtr.extend_from_slice(&1u16.to_le_bytes());
-        emtr.extend_from_slice(&le(0x1234));
-        let poff = {
-            let mut v = Vec::new();
-            for x in [0.5f32, 1.0, 1.5] {
-                v.extend_from_slice(&x.to_le_bytes());
-            }
-            v
-        };
-        let ptyp = [0x01u8];
-        let mut frce = Vec::new();
-        frce.extend_from_slice(b"DRAG");
-        frce.extend_from_slice(&0.1f32.to_le_bytes());
-        let chunks: Vec<(&[u8; 4], &[u8])> = vec![
-            (b"EMTR", emtr.as_slice()),
-            (b"POFF", poff.as_slice()),
-            (b"PTYP", ptyp.as_slice()),
-            (b"FRCE", frce.as_slice()),
-        ];
-        let t = EffectTemplate::from_chunks(chunks);
-        assert_eq!(t.emitters.refs, vec![0x1234]);
-        assert_eq!(t.offset, Some([0.5, 1.0, 1.5]));
-        assert_eq!(t.ptype.unwrap().flags, 0x01);
-        assert_eq!(t.forces.len(), 1);
-        assert_eq!(t.forces[0].kind, ForceKind::Drag);
+        assert!(parse_fxdict(&info, &[0u8; 40]).is_err());
     }
 
     #[test]
     fn fxparam_write_roundtrip() {
-        let p = FxParam {
-            name_hash: 0xDEADBEEF,
-            default: 1.25,
-            value_b: 3.5,
-            value_c: 0.03125,
-            flags: 0x12345678,
-        };
+        let p = FxParam { name_hash: 0xDEADBEEF, default: 1.25, value_b: 3.5, value_c: 0.03125, flags: 0x12345678 };
         let bytes = write_fxparam(&p);
         assert_eq!(bytes.len(), DICT_RECORD_BYTES);
-        let info = 1u32.to_le_bytes();
-        let dict = bytes.to_vec();
-        let back = parse_fxdict(&info, &dict).unwrap();
-        assert_eq!(back.len(), 1);
-        assert_eq!(back[0], p);
+        let back = parse_fxdict(&1u32.to_le_bytes(), &bytes).unwrap();
+        assert_eq!(back, vec![p]);
     }
 
     #[test]
-    fn fxdict_bodies_roundtrip_many() {
-        let params: Vec<FxParam> = (0..17)
-            .map(|i| FxParam {
-                name_hash: pandemic_hash_m2(&format!("param{i}")),
-                default: i as f32 * 0.5,
-                value_b: 1.0 + i as f32,
-                value_c: (i as f32).sqrt(),
-                flags: 0xC0DE_0000 | i,
-            })
-            .collect();
-        let info = write_fxdict_info(params.len() as u32);
-        let dict = write_fxdict_dict(&params);
-        assert_eq!(info.len(), 4);
-        assert_eq!(dict.len(), params.len() * DICT_RECORD_BYTES);
-        let back = parse_fxdict(&info, &dict).unwrap();
-        assert_eq!(back, params);
-    }
-
-    #[test]
-    fn efct_write_roundtrip() {
-        let h = EffectHeader { magic: 0x0226, sub_count: 7 };
-        let body = write_efct(&h);
-        assert_eq!(body.len(), 16);
-        assert_eq!(parse_efct(&body), Some(h));
-        assert_eq!(body[0..2], [0, 0]);
-        assert_eq!(body[4..14], [0u8; 10]);
-    }
-
-    #[test]
-    fn emtr_write_roundtrip() {
-        let t = EmitterTable { refs: vec![0xAAAA, 0xBBBB, 0xCCCC] };
-        let body = write_emtr(&t);
-        assert_eq!(&body[0..2], &(3u16).to_le_bytes());
-        assert_eq!(body.len(), 2 + 3 * 4);
-        assert_eq!(parse_emtr(&body), t);
-
-        let empty = EmitterTable::default();
-        let body = write_emtr(&empty);
-        assert_eq!(body.len(), 2);
-        assert_eq!(parse_emtr(&body), empty);
-    }
-
-    #[test]
-    fn emit_write_roundtrip() {
-        let t = EmitTiming { floats: vec![0.0, 1.5, -3.25, 100.0] };
-        let body = write_emit(&t);
-        assert_eq!(body.len(), 16);
-        assert_eq!(parse_emit(&body), t);
-    }
-
-    #[test]
-    fn poff_write_roundtrip() {
-        let v = [1.5f32, -2.0, 0.25];
-        let body = write_poff(v);
-        assert_eq!(body.len(), 12);
-        assert_eq!(parse_poff(&body), Some(v));
-    }
-
-    #[test]
-    fn trfm_write_roundtrip() {
-        let m = [
-            [1.0, 2.0, 3.0, 4.0],
-            [5.0, 6.0, 7.0, 8.0],
-            [9.0, 10.0, 11.0, 12.0],
-            [13.0, 14.0, 15.0, 16.0],
-        ];
-        let body = write_trfm(&m);
-        assert_eq!(body.len(), 64);
-        assert_eq!(parse_trfm(&body), Some(m));
-    }
-
-    #[test]
-    fn ptyp_write_roundtrip() {
-        for flags in [0x00u8, 0x01, 0x02, 0x03, 0xFF] {
-            let body = write_ptyp(ParticleType { flags });
-            assert_eq!(body, vec![flags]);
-            assert_eq!(parse_ptyp(&body).unwrap().flags, flags);
-        }
-    }
-
-    #[test]
-    fn colr_write_roundtrip() {
-        let mut g = ColorGradient::default();
-        for (i, s) in g.stops.iter_mut().enumerate() {
-            *s = [i as u8, (i * 2) as u8, (i * 3) as u8, (i * 5) as u8];
-        }
-        let body = write_colr(&g);
-        assert_eq!(body.len(), COLR_BYTES);
-        assert_eq!(parse_colr(&body), Some(g));
-    }
-
-    #[test]
-    fn frce_write_roundtrip() {
-        let f = Force {
-            inner_hash: u32::from_le_bytes(*b"DRAG"),
-            kind: ForceKind::Drag,
-            params: [0.25, 0.5, 0.75, 0.0],
-            param_count: 3,
-        };
-        let body = write_frce(&f);
-        assert_eq!(body.len(), 4 + 3 * 4);
-        let back = parse_frce(&body).unwrap();
-        assert_eq!(back.inner_hash, f.inner_hash);
-        assert_eq!(back.kind, ForceKind::Drag);
-        assert_eq!(back.param_count, 3);
-        assert_eq!(&back.params[..3], &[0.25, 0.5, 0.75]);
-
-        let f = Force {
-            inner_hash: 0xDEADBEEF,
-            kind: ForceKind::Unknown,
-            params: [0.0; 4],
-            param_count: 0,
-        };
-        let body = write_frce(&f);
-        assert_eq!(body.len(), 4);
-        assert_eq!(parse_frce(&body).unwrap().param_count, 0);
-
-        let f = Force {
-            inner_hash: u32::from_le_bytes(*b"GRAV"),
-            kind: ForceKind::Gravity,
-            params: [1.0, 2.0, 3.0, 4.0],
-            param_count: 4,
-        };
-        let body = write_frce(&f);
-        assert_eq!(body.len(), 4 + 4 * 4);
-        let back = parse_frce(&body).unwrap();
-        assert_eq!(back.param_count, 4);
-        assert_eq!(back.params, [1.0, 2.0, 3.0, 4.0]);
-    }
-
-    #[test]
-    fn text_write_roundtrip() {
-        let hashes = vec![0x1111_2222u32, 0x3333_4444, 0x5555_6666];
-        let body = write_text(&hashes);
-        assert_eq!(body.len(), 4 + hashes.len() * 4);
-        assert_eq!(parse_text(&body), hashes);
-
-        let body = write_text(&[]);
-        assert_eq!(body.len(), 4);
-        assert_eq!(parse_text(&body), Vec::<u32>::new());
-    }
-
-    #[test]
-    fn effect_template_to_from_chunks_roundtrip() {
-        let mut gradient = ColorGradient::default();
-        for (i, s) in gradient.stops.iter_mut().enumerate() {
-            *s = [255, i as u8, (255 - i) as u8, 128];
-        }
-        let template = EffectTemplate {
-            header: Some(EffectHeader { magic: 0x0226, sub_count: 2 }),
-            emitters: EmitterTable { refs: vec![0xAAAA, 0xBBBB] },
-            emit: EmitTiming { floats: vec![0.1, 0.2, 0.3] },
-            gradient: Some(gradient),
-            forces: vec![
-                Force {
-                    inner_hash: u32::from_le_bytes(*b"GRAV"),
-                    kind: ForceKind::Gravity,
-                    params: [0.0, -9.8, 0.0, 0.0],
-                    param_count: 3,
-                },
-                Force {
-                    inner_hash: u32::from_le_bytes(*b"DRAG"),
-                    kind: ForceKind::Drag,
-                    params: [0.15, 0.0, 0.0, 0.0],
-                    param_count: 1,
-                },
-            ],
-            ptype: Some(ParticleType { flags: 0x03 }),
-            offset: Some([0.5, 1.0, 1.5]),
-            transform: Some([
-                [1.0, 0.0, 0.0, 0.0],
-                [0.0, 1.0, 0.0, 0.0],
-                [0.0, 0.0, 1.0, 0.0],
-                [10.0, 20.0, 30.0, 1.0],
-            ]),
-            text_refs: vec![0xF00D_BEEF, 0xCAFE_D00D],
-        };
-
-        let emitted = template.to_chunks();
-        // Round-trip through the from_chunks side.
-        let borrowed: Vec<(&[u8; 4], &[u8])> =
-            emitted.iter().map(|(tag, body)| (tag, body.as_slice())).collect();
-        let back = EffectTemplate::from_chunks(borrowed);
-
-        assert_eq!(back.header, template.header);
-        assert_eq!(back.emitters, template.emitters);
-        assert_eq!(back.emit, template.emit);
-        assert_eq!(back.gradient, template.gradient);
-        assert_eq!(back.ptype, template.ptype);
-        assert_eq!(back.offset, template.offset);
-        assert_eq!(back.transform, template.transform);
-        assert_eq!(back.text_refs, template.text_refs);
-        assert_eq!(back.forces.len(), template.forces.len());
-        for (a, b) in back.forces.iter().zip(template.forces.iter()) {
-            assert_eq!(a.inner_hash, b.inner_hash);
-            assert_eq!(a.param_count, b.param_count);
-            assert_eq!(a.params[..a.param_count], b.params[..b.param_count]);
-        }
-    }
-
-    #[test]
-    fn write_ucfx_container_shape_and_csum() {
-        let a = vec![0x11u8, 0x22, 0x33];
-        let b = vec![0x44u8, 0x55, 0x66, 0x77, 0x88, 0x99];
-        let chunks = vec![
-            (*b"AAAA", 0u32, 0u32, a.clone()),
-            (*b"BBBB", 0u32, 0u32, b.clone()),
-        ];
-        let container = write_ucfx_container(&chunks);
-
-        assert_eq!(&container[0..4], b"UCFX");
-        let data_off = u32::from_le_bytes(container[4..8].try_into().unwrap());
-        let n_desc = u32::from_le_bytes(container[16..20].try_into().unwrap());
-        assert_eq!(n_desc, 2);
-        assert_eq!(data_off as usize, 20 + 2 * 20);
-
-        let tail = &container[container.len() - 8..];
-        assert_eq!(&tail[0..4], b"CSUM");
-        let stored = u32::from_le_bytes(tail[4..8].try_into().unwrap());
-        let recomputed = crate::crc32::crc32_mercs2(&container[..container.len() - 8]);
-        assert_eq!(stored, recomputed);
-
-        let issues = crate::ucfx::verify_ucfx_container(&container, "test", 0);
-        assert!(issues.is_none(), "unexpected issues: {issues:?}");
-
-        assert_eq!(crate::ucfx::extract_chunk_body(&container, b"AAAA"), Some(a));
-        assert_eq!(crate::ucfx::extract_chunk_body(&container, b"BBBB"), Some(b));
-    }
-
-    #[test]
-    fn write_effect_container_roundtrip_via_walker() {
-        let template = EffectTemplate {
-            header: Some(EffectHeader { magic: 0x0226, sub_count: 1 }),
-            emitters: EmitterTable { refs: vec![0x9999_AAAA] },
-            emit: EmitTiming { floats: vec![0.5, 1.0] },
-            gradient: None,
-            forces: vec![Force {
-                inner_hash: u32::from_le_bytes(*b"GRAV"),
-                kind: ForceKind::Gravity,
-                params: [0.0, -9.8, 0.0, 0.0],
-                param_count: 2,
-            }],
-            ptype: Some(ParticleType { flags: 0x01 }),
-            offset: Some([0.0, 1.0, 2.0]),
-            transform: None,
-            text_refs: vec![0x1234_5678],
-        };
-        let container = write_effect_container(&template);
-        assert!(crate::ucfx::verify_ucfx_container(&container, "eff", 0).is_none());
-        let tags: &[&[u8; 4]] = &[b"EFCT", b"EMTR", b"EMIT", b"POFF", b"PTYP", b"FRCE", b"TEXT"];
-        let mut pairs: Vec<(&[u8; 4], Vec<u8>)> = Vec::new();
-        for tag in tags {
-            if let Some(body) = crate::ucfx::extract_chunk_body(&container, tag) {
-                pairs.push((*tag, body));
-            }
-        }
-        let borrowed: Vec<(&[u8; 4], &[u8])> =
-            pairs.iter().map(|(tag, body)| (*tag, body.as_slice())).collect();
-        let back = EffectTemplate::from_chunks(borrowed);
-        assert_eq!(back.header, template.header);
-        assert_eq!(back.emitters, template.emitters);
-        assert_eq!(back.emit, template.emit);
-        assert_eq!(back.ptype, template.ptype);
-        assert_eq!(back.offset, template.offset);
-        assert_eq!(back.text_refs, template.text_refs);
-        assert_eq!(back.forces.len(), 1);
-        assert_eq!(back.forces[0].inner_hash, template.forces[0].inner_hash);
-        assert_eq!(back.forces[0].param_count, template.forces[0].param_count);
-        assert_eq!(
-            back.forces[0].params[..2],
-            template.forces[0].params[..2]
-        );
-    }
-
-    #[test]
-    fn write_fxdict_container_roundtrip_via_walker() {
+    fn fxdict_container_is_info_then_dict_and_round_trips() {
         let params: Vec<FxParam> = (0..8)
             .map(|i| FxParam {
                 name_hash: 0x1000 + i,
@@ -1084,13 +1296,313 @@ mod tests {
                 flags: 0xF000_0000 | i,
             })
             .collect();
-        let container = write_fxdict_container(&params);
-        assert!(crate::ucfx::verify_ucfx_container(&container, "fxd", 0).is_none());
-        let info = crate::ucfx::extract_chunk_body(&container, b"INFO").expect("INFO present");
-        let dict = crate::ucfx::extract_chunk_body(&container, b"DICT").expect("DICT present");
-        assert_eq!(info.len(), 4);
-        assert_eq!(dict.len(), params.len() * DICT_RECORD_BYTES);
-        let back = parse_fxdict(&info, &dict).unwrap();
-        assert_eq!(back, params);
+        let c = write_fxdict_container(&params);
+        assert!(crate::ucfx::verify_ucfx_container(&c, "fxd", 0).is_none());
+        let rows = read_ucfx_rows(&c).unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!((&rows[0].tag, rows[0].rel_off, rows[0].size, rows[0].x2, rows[0].x3), (b"INFO", 0, 4, 1, 0));
+        assert_eq!((&rows[1].tag, rows[1].rel_off, rows[1].size, rows[1].x2, rows[1].x3), (b"DICT", 4, 160, 0, 0));
+        assert_eq!(parse_fxdict_container(&c).unwrap(), params);
+    }
+
+    // ---- effect -------------------------------------------------------------------------------
+
+    fn channels() -> Vec<Atrb> {
+        TRFM_CHANNELS
+            .iter()
+            .enumerate()
+            .map(|(i, d)| Atrb::f32(d.hash, if i >= 6 { 1.0 } else { 0.0 }))
+            .collect()
+    }
+
+    fn force_attrs(kind: &ForceKind) -> Vec<Atrb> {
+        FRCE_COMMON_ATTRIBUTES
+            .iter()
+            .chain(kind.extra_attributes())
+            .map(|d| match d.kind {
+                ValueKind::F32 => Atrb::f32(d.hash, 0.0),
+                ValueKind::U32 => Atrb::u32(d.hash, 0),
+            })
+            .collect()
+    }
+
+    /// Every attribute position given an explicit authored value.
+    fn ptyp_attrs(set: &[(u32, Atrb)]) -> Vec<Atrb> {
+        PTYP_ATTRIBUTES_BEFORE_COLR
+            .iter()
+            .chain(PTYP_ATTRIBUTES_AFTER_COLR.iter())
+            .map(|d| match set.iter().find(|(h, _)| *h == d.hash) {
+                Some((_, a)) => a.clone(),
+                None => match d.kind {
+                    ValueKind::F32 => Atrb::f32(d.hash, 0.0),
+                    ValueKind::U32 => Atrb::u32(d.hash, 0),
+                },
+            })
+            .collect()
+    }
+
+    const MAGENTA: [u8; 4] = [0xFF, 0x00, 0xFF, 0xFF];
+
+    /// A one-emitter burst: magenta over its whole life, one texture, `life` ≈ 1.0 s, `spread`
+    /// 180° (the widest retail value; a half-angle of 180° covers the sphere — INFERRED).
+    fn magenta_burst(texture: u32) -> EffectContainer {
+        let h = pandemic_hash_m2;
+        let set = [
+            (h("name"), Atrb::u32(h("name"), h("magenta_burst"))),
+            (h("size"), Atrb::f32(h("size"), 0.5)),
+            (h("life"), Atrb::f32(h("life"), 1.0)),
+            (h("rate"), Atrb::f32(h("rate"), 100.0)),
+            (h("spread"), Atrb::f32(h("spread"), 180.0)),
+            (h("speed"), Atrb::f32(h("speed"), 3.0)),
+            (h("scale"), Atrb::u32(h("scale"), 1)),
+            (0xC3592BB7, Atrb::u32(0xC3592BB7, 2)),
+        ];
+        EffectContainer {
+            shapes: vec![EmitterShape { records: vec![[0.0; SHAPE_RECORD_FLOATS]] }],
+            emitters: vec![Emitter {
+                transform: [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0]],
+                channels: channels(),
+                geom: Some(EmitterGeom { shape_index: 0, word_00: 16 }),
+                particle: ParticleType {
+                    flags: 1,
+                    attributes: ptyp_attrs(&set),
+                    colr: Colr::uniform(MAGENTA, 0x3C00),
+                    text: Text { frames: vec![texture] },
+                },
+            }],
+            forces: vec![],
+        }
+    }
+
+    /// Independent tree check over raw rows: `x3` = the rows of the subtree, `x2` = siblings after.
+    fn check_tree_rules(rows: &[crate::ucfx::UcfxRow]) {
+        fn level(rows: &[crate::ucfx::UcfxRow], start: usize, end: usize) {
+            let mut starts = Vec::new();
+            let mut i = start;
+            while i < end {
+                starts.push(i);
+                i += rows[i].x3 as usize + 1;
+            }
+            assert_eq!(i, end, "subtree overruns its parent");
+            for (k, &s) in starts.iter().enumerate() {
+                assert_eq!(rows[s].x2 as usize, starts.len() - 1 - k, "row {s} x2");
+                level(rows, s + 1, s + 1 + rows[s].x3 as usize);
+            }
+        }
+        level(rows, 0, rows.len());
+    }
+
+    #[test]
+    fn magenta_burst_writes_reparses_and_follows_the_tree_rules() {
+        let texture = 0xB73157C0;
+        let fx = magenta_burst(texture);
+        let bytes = write_effect_container(&fx).unwrap();
+        assert!(crate::ucfx::verify_ucfx_container(&bytes, "magenta", crate::types::TYPE_HASH_EFFECT).is_none());
+        let back = parse_effect_container(&bytes).unwrap();
+        assert_eq!(back, fx);
+        assert_eq!(write_effect_container(&back).unwrap(), bytes);
+
+        let rows = read_ucfx_rows(&bytes).unwrap();
+        check_tree_rules(&rows);
+        let tags: Vec<&[u8; 4]> = rows.iter().map(|r| &r.tag).collect();
+        // EFCT, EMTR, GEOM, EMIT, TRFM, 9 ATRB, GEOM, PTYP, 19 ATRB, COLR, 13 ATRB, TEXT.
+        assert_eq!(rows.len(), 3 + 1 + 1 + 9 + 1 + 1 + 19 + 1 + 13 + 1);
+        assert_eq!((tags[0], rows[0].x2, rows[0].x3), (b"EFCT", 0, rows.len() as u32 - 1));
+        assert_eq!((tags[1], rows[1].x2, rows[1].x3), (b"EMTR", 2, 1));
+        assert_eq!((tags[3], rows[3].rel_off, rows[3].size, rows[3].x2, rows[3].x3), (b"EMIT", 0xFFFF_FFFF, 0, 1, 11));
+        let ptyp = rows.iter().position(|r| &r.tag == b"PTYP").unwrap();
+        assert_eq!((rows[ptyp].x2, rows[ptyp].x3), (0, 34));
+        let last = rows.last().unwrap();
+        assert_eq!((&last.tag, last.x2, last.x3), (b"TEXT", 0, 0));
+
+        let p = &back.emitters[0].particle;
+        assert!(p.colr.keys.iter().all(|k| k.colour == MAGENTA));
+        assert_eq!(p.text.frames, vec![texture]);
+        let life = p.attributes.iter().find(|a| a.hash == pandemic_hash_m2("life")).unwrap();
+        assert_eq!(life.value, AtrbValue::F32(1.0));
+        let spread = p.attributes.iter().find(|a| a.hash == pandemic_hash_m2("spread")).unwrap();
+        assert_eq!(spread.value, AtrbValue::F32(180.0));
+        // One emitter, no curves: EFCT = [1, magic, 0, 0, 0, 0, 0, 2 (COLR+TEXT), 400].
+        assert_eq!(back.efct_words().unwrap(), [1, EFCT_MAGIC, 0, 0, 0, 0, 0, 2, 400]);
+    }
+
+    #[test]
+    fn colr_is_800_bytes_of_100_keys() {
+        let c = Colr::from_fn(|t| ([(t * 255.0) as u8, 1, 2, 3], 0x3C00));
+        let b = c.to_bytes();
+        assert_eq!(b.len(), 800);
+        assert_eq!(&b[8..16], &[2, 1, 2, 3, 0x00, 0x3C, 0, 0]);
+        assert_eq!(Colr::from_bytes(&b).unwrap(), c);
+        assert!(Colr::from_bytes(&b[..200]).is_err());
+        let mut bad = b.clone();
+        bad[7] = 1;
+        assert!(Colr::from_bytes(&bad).unwrap_err().contains("trailing"));
+        assert!((c.sample(1.0)[0] - 1.0).abs() < 1e-6);
+        assert_eq!(c.sample(0.0)[0], 0.0);
+    }
+
+    #[test]
+    fn each_force_kind_has_its_measured_size_and_hash() {
+        let v = [1.0, 2.0, 3.0];
+        let kinds = [
+            (ForceKind::Gravity { magnitude: 17.0, direction: [0.0, -1.0, 0.0] }, 20, "gravity"),
+            (ForceKind::Drag { magnitude: 0.5 }, 8, "drag"),
+            (ForceKind::Wind { magnitude: 2.0, direction: v }, 20, "wind"),
+            (
+                ForceKind::Attractor { magnitude: 1.0, flag_13c: 1, param_130: 2.0, param_134: 3.0, vector_104: v },
+                32,
+                "attractor",
+            ),
+            (
+                ForceKind::Vortex {
+                    magnitude: 1.0,
+                    flag_13c: 0,
+                    param_130: 2.0,
+                    param_134: 3.0,
+                    param_138: 4.0,
+                    vector_104: v,
+                    vector_110: [0.0, 1.0, 0.0],
+                    vector_11c: [1.0, 0.0, 0.0],
+                },
+                60,
+                "vortex",
+            ),
+        ];
+        for (k, len, name) in kinds {
+            assert_eq!(k.hash(), pandemic_hash_m2(name), "{name}");
+            let b = k.to_bytes();
+            assert_eq!(b.len(), len, "{name}");
+            assert_eq!(k.body_len(), len);
+            assert_eq!(ForceKind::from_bytes(&b).unwrap(), k);
+            assert!(ForceKind::from_bytes(&b[..len - 4]).is_err(), "{name} short body");
+        }
+        assert!(ForceKind::from_bytes(b"GRAV\0\0\0\0").unwrap_err().contains("not one the loader"));
+    }
+
+    #[test]
+    fn forces_write_with_their_attributes_and_count_in_efct() {
+        let mut fx = magenta_burst(1);
+        for kind in [ForceKind::Gravity { magnitude: 9.8, direction: [0.0, -1.0, 0.0] }, ForceKind::Drag { magnitude: 0.3 }] {
+            fx.forces.push(Force { attributes: force_attrs(&kind), kind });
+        }
+        // A linear curve on the force's `ampl` (retail puts curves there).
+        fx.forces[0].attributes[0] = Atrb::f32(pandemic_hash_m2("ampl"), 1.0)
+            .with_curve(vec![AnimKey { time: 0.0, value: 1.0 }, AnimKey { time: 100.0, value: 0.0 }]);
+        let bytes = write_effect_container(&fx).unwrap();
+        let back = parse_effect_container(&bytes).unwrap();
+        assert_eq!(back, fx);
+        assert_eq!(back.efct_words().unwrap(), [1, EFCT_MAGIC, 2, 1, 4, 0, 0, 2, 400]);
+    }
+
+    #[test]
+    fn curves_count_by_the_handler_their_position_dispatches_to() {
+        let mut fx = magenta_burst(1);
+        let keys = |n: usize| (0..n).map(|i| AnimKey { time: i as f32, value: 0.0 }).collect::<Vec<_>>();
+        let set = |fx: &mut EffectContainer, name: &str, a: Atrb| {
+            let at = fx.emitters[0].particle.attributes.iter().position(|x| x.hash == pandemic_hash_m2(name)).unwrap();
+            fx.emitters[0].particle.attributes[at] = a;
+        };
+        // size → resampled (stream table, 100 words) whatever the flags.
+        set(&mut fx, "size", Atrb::f32(pandemic_hash_m2("size"), 1.0).with_curve(keys(3)));
+        // life → linear table, 2 × keys.
+        set(&mut fx, "life", Atrb::f32(pandemic_hash_m2("life"), 1.0).with_curve(keys(4)));
+        // speedvar → carried, not counted.
+        set(&mut fx, "speedvar", Atrb::f32(pandemic_hash_m2("speedvar"), 1.0).with_curve(keys(2)));
+        // A TRFM channel curve: linear; with RESAMPLE it reserves 100 words in the same table.
+        fx.emitters[0].channels[0] = Atrb::f32(TRFM_CHANNELS[0].hash, 0.0).with_curve(keys(2));
+        fx.emitters[0].channels[1] =
+            Atrb::f32(TRFM_CHANNELS[1].hash, 0.0).with_options(atrb_flag::RESAMPLE).with_curve(keys(2));
+        assert_eq!(fx.efct_words().unwrap(), [1, EFCT_MAGIC, 0, 3, 8 + 4 + 100, 0, 0, 3, 500]);
+        let bytes = write_effect_container(&fx).unwrap();
+        assert_eq!(parse_effect_container(&bytes).unwrap(), fx);
+    }
+
+    #[test]
+    fn authored_flags_that_disagree_are_rejected() {
+        let h = pandemic_hash_m2("life");
+        // Curve bit without a curve.
+        let a = Atrb { hash: h, flags: atrb_flag::FLOAT | atrb_flag::CURVE, value: AtrbValue::F32(1.0), curve: None };
+        assert!(a.validate().unwrap_err().contains("disagree"));
+        // Float bit on a u32 value.
+        let a = Atrb { hash: h, flags: atrb_flag::FLOAT, value: AtrbValue::U32(1), curve: None };
+        assert!(a.validate().unwrap_err().contains("disagree"));
+        // A curve without the curve bit.
+        let a = Atrb { hash: h, flags: atrb_flag::FLOAT, value: AtrbValue::F32(1.0), curve: Some(vec![AnimKey { time: 0.0, value: 0.0 }]) };
+        assert!(a.validate().unwrap_err().contains("disagree"));
+        // A bit no retail ATRB sets.
+        assert!(Atrb::f32(h, 1.0).with_options(1 << 3).validate().unwrap_err().contains("not ones"));
+        // An empty curve.
+        assert!(Atrb::f32(h, 1.0).with_curve(vec![]).validate().unwrap_err().contains("at least one key"));
+
+        // Through the writer: a disagreeing word anywhere refuses the whole effect.
+        let mut fx = magenta_burst(1);
+        fx.emitters[0].particle.attributes[5].flags |= atrb_flag::CURVE;
+        assert!(write_effect_container(&fx).unwrap_err().contains("disagree"));
+    }
+
+    #[test]
+    fn positions_value_kinds_and_refused_curves_are_enforced() {
+        let mut fx = magenta_burst(1);
+        fx.emitters[0].particle.attributes.swap(1, 2);
+        assert!(write_effect_container(&fx).unwrap_err().contains("position 1"));
+
+        let mut fx = magenta_burst(1);
+        fx.emitters[0].particle.attributes[0] = Atrb::f32(pandemic_hash_m2("name"), 1.0);
+        assert!(write_effect_container(&fx).unwrap_err().contains("takes a U32"));
+
+        let mut fx = magenta_burst(1);
+        let at = fx.emitters[0].particle.attributes.iter().position(|a| a.hash == pandemic_hash_m2("mass")).unwrap();
+        fx.emitters[0].particle.attributes[at] =
+            Atrb::f32(pandemic_hash_m2("mass"), 1.0).with_curve(vec![AnimKey { time: 0.0, value: 1.0 }]);
+        assert!(write_effect_container(&fx).unwrap_err().contains("not decoded"));
+
+        let mut fx = magenta_burst(1);
+        fx.emitters[0].geom = Some(EmitterGeom { shape_index: 1, word_00: 0 });
+        assert!(write_effect_container(&fx).unwrap_err().contains("shape index"));
+
+        let mut fx = magenta_burst(1);
+        fx.emitters[0].particle.flags = 4;
+        assert!(write_effect_container(&fx).unwrap_err().contains("never reads"));
+
+        let mut fx = magenta_burst(1);
+        fx.emitters[0].particle.text.frames.clear();
+        assert!(write_effect_container(&fx).unwrap_err().contains("no frames"));
+
+        let mut fx = magenta_burst(1);
+        fx.emitters[0].particle.flags = 3;
+        fx.emitters[0].particle.text.frames = vec![7; 101];
+        assert!(write_effect_container(&fx).unwrap_err().contains("stream words"));
+    }
+
+    #[test]
+    fn a_tampered_efct_is_refused_on_parse() {
+        let bytes = write_effect_container(&magenta_burst(1)).unwrap();
+        let rows = read_ucfx_rows(&bytes).unwrap();
+        let data = 20 + 20 * rows.len();
+        let mut bad = bytes.clone();
+        bad[data + 16] ^= 1; // EFCT word 8
+        let at = bad.len() - 8;
+        let sum = crate::crc32::crc32_mercs2(&bad[..at]);
+        bad[at + 4..].copy_from_slice(&sum.to_le_bytes());
+        assert!(parse_effect_container(&bad).unwrap_err().contains("stored EFCT"));
+    }
+
+    #[test]
+    fn every_recovered_name_hashes_to_its_position() {
+        for d in TRFM_CHANNELS
+            .iter()
+            .chain(PTYP_ATTRIBUTES_BEFORE_COLR.iter())
+            .chain(PTYP_ATTRIBUTES_AFTER_COLR.iter())
+            .chain(FRCE_COMMON_ATTRIBUTES.iter())
+            .chain(FRCE_DRAG_ATTRIBUTES.iter())
+            .chain(FRCE_ATTRACTOR_ATTRIBUTES.iter())
+            .chain(FRCE_VORTEX_ATTRIBUTES.iter())
+        {
+            if let Some(n) = d.name {
+                assert_eq!(pandemic_hash_m2(n), d.hash, "{n}");
+            }
+        }
+        assert_eq!(attribute_name(0x9BE62E41), Some("speedvar"));
+        assert_eq!(attribute_name(0x10831673), None);
     }
 }

@@ -1,0 +1,9 @@
+{
+  "format": 1,
+  "items": [
+    {
+      "id": "shipment:url-sha256",
+      "path": "shipments/url-sha256"
+    }
+  ]
+}

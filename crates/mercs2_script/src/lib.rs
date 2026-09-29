@@ -690,9 +690,10 @@ pub trait EngineHost {
     }
 
     // ===== Sound / music / VO (the real host forwards to `mercs2_audio::AudioEngine`). =====
-    /// `Sound.CueSound` → voice id (0 = failed → nil).
-    fn sound_cue(&mut self, cue: &str) -> u64 {
-        let _ = cue;
+    /// `Sound.CueSound(emitter, cue)` → cue id (0 = failed → nil). `emitter` is the object guid the
+    /// cue plays on — its emitter follows the object — and 0 plays it 2D.
+    fn sound_cue(&mut self, emitter: u64, cue: &str) -> u64 {
+        let _ = (emitter, cue);
         0
     }
     /// `Sound.StopSound`.

@@ -1,0 +1,9 @@
+{
+  "format": 1,
+  "items": [
+    {
+      "id": "shipment:format-1",
+      "path": "shipments/format-1"
+    }
+  ]
+}

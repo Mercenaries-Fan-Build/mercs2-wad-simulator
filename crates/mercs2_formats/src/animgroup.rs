@@ -445,6 +445,33 @@ fn read_anim_header(packfile: &[u8]) -> Option<AnimHeader> {
     None
 }
 
+/// The `hkaAnimation` base fields of a clip's Havok packfile — what a writer needs to check a
+/// packfile against the `trnm` and `evnt` chunks that travel with it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ClipHeader {
+    /// Compression class of the animation object.
+    pub class: ClipClass,
+    /// `hkaAnimation::duration`, seconds.
+    pub duration: f32,
+    /// `hkaAnimation::numTransformTracks` — the count a paired `trnm` must carry.
+    pub num_transform_tracks: u32,
+    /// `hkaAnimation::numFloatTracks`.
+    pub num_float_tracks: u32,
+}
+
+/// Read the `hkaAnimation` base header out of a clip's Havok packfile (the `data` chunk body).
+///
+/// `None` when the packfile carries no `hka*Animation` object this reader recognises, or when the
+/// section table does not walk. The same walk [`parse_animgroup`] uses for every retail clip.
+pub fn read_clip_header(packfile: &[u8]) -> Option<ClipHeader> {
+    read_anim_header(packfile).map(|h| ClipHeader {
+        class: h.class,
+        duration: h.duration,
+        num_transform_tracks: h.num_transform_tracks,
+        num_float_tracks: h.num_float_tracks,
+    })
+}
+
 fn find_sub(hay: &[u8], needle: &[u8]) -> Option<usize> {
     if needle.is_empty() || hay.len() < needle.len() {
         return None;

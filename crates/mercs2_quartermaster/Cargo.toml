@@ -1,6 +1,6 @@
 [package]
 name = "mercs2_quartermaster"
-version = "2.3.0"
+version = "3.1.0"
 edition = "2021"
 description = "Mercenaries 2 Shipment format: reads a manifest.yaml/.json/.toml, lints it against the engine's HANG-class traps, and builds it into an overlay WAD. Ships the `qm` CLI."
 license.workspace = true
@@ -43,9 +43,10 @@ png = "0.17"  # decode source images for texture lowering (same version the work
 # not reintroduce the mlua/`mercs2_luac` symbol collision warned about above.
 wad_simulator = { workspace = true }
 clap = { version = "4", features = ["derive"] }
-# Managed dependencies (`load.requires` → `Requirement::Compatible`) carry a semver RANGE, resolved
-# like a package manager. The same crate Cargo itself parses version requirements with, so the range
-# semantics a modder expects (`^0.1`, `>=0.0.3, <1.0.0`) are exactly what they get.
+# `shipment.version` is a semver version, and `{ shipment, version }` requirements, ranged
+# `conflicts` and `shipment.quartermaster` are semver RANGES, checked by `qm preflight` / `qm link`.
+# The same crate Cargo itself parses version requirements with, so the range semantics a modder
+# expects (`^1.0.0`, `>=0.7, <1`) are exactly what they get.
 semver = "1"
 
 [dev-dependencies]

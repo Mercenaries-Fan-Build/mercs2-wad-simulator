@@ -1,0 +1,21 @@
+# cargo-nextest configuration.
+#
+# The `ci` profile is what .github/workflows/ci.yml runs (`cargo nextest run
+# --profile ci`). It exists to make every crate's tests attributable: nextest
+# writes a JUnit report whose <testsuite> names are `crate-name::binary`, and
+# scripts/ci/nextest_summary.py rolls that up into a per-crate table in the PR's
+# checks summary.
+[profile.ci]
+# Do not stop at the first failing test binary. The CI contract is that all 40
+# crates are exercised on every run, so one crate's failure must not hide
+# another's. (nextest runs every test before reporting regardless; this states
+# the intent and survives any change to the built-in default.)
+fail-fast = false
+
+[profile.ci.junit]
+# Written to target/nextest/ci/junit.xml (path is relative to the profile's
+# store dir). The workflow reads it from there.
+path = "junit.xml"
+# Include ignored/skipped tests in the report so the per-crate table reflects
+# them instead of silently dropping them.
+report-skipped = "all"

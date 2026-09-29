@@ -125,3 +125,68 @@ fn the_type_hash_to_id_map_matches_the_wads_own_table() {
         wrong.join("\n  ")
     );
 }
+
+/// `types::TYPE_HASH_REGISTRY` is the table `type_hash_for_type_id` / `type_id_for_type_hash`
+/// answer from, so it must BE the WAD's table: every pair, no extras.
+#[test]
+fn the_type_hash_registry_is_the_wads_own_table() {
+    let Some(wad) = vz_wad() else {
+        eprintln!("SKIPPING: no vz.wad");
+        return;
+    };
+    let table = wad_type_table(&wad);
+    let mut registry = mercs2_formats::types::TYPE_HASH_REGISTRY.to_vec();
+    registry.sort_by_key(|&(_, id)| id);
+    let wad_pairs: Vec<(u32, u32)> = table.iter().enumerate().map(|(id, h)| (*h, id as u32)).collect();
+    assert_eq!(registry, wad_pairs, "TYPE_HASH_REGISTRY != the WAD's type table at 0x48");
+}
+
+/// The fxdict type id, from both directions: the WAD's type table puts `0xFA46D8A8` at 0, and every
+/// ASET row with type id 0 names an fxdict container in its block — and no fxdict container is
+/// registered under any other type id.
+#[test]
+fn every_fxdict_aset_row_uses_type_id_0() {
+    use mercs2_formats::types::{TYPE_HASH_FX_DICTIONARY, TYPE_ID_FX_DICTIONARY};
+    let Some(wad) = vz_wad() else {
+        eprintln!("SKIPPING: no vz.wad");
+        return;
+    };
+    let table = wad_type_table(&wad);
+    assert_eq!(table[TYPE_ID_FX_DICTIONARY as usize], TYPE_HASH_FX_DICTIONARY);
+    assert_eq!(mercs2_formats::types::type_id_for_type_hash(TYPE_HASH_FX_DICTIONARY), Some(0));
+    assert_eq!(mercs2_formats::aset_type_ids::type_id_for_type_hash(TYPE_HASH_FX_DICTIONARY), Some(0));
+
+    let mut f = std::fs::File::open(&wad).expect("open wad");
+    let size = f.metadata().expect("stat").len();
+    let archive = mercs2_formats::ffcs::load_ffcs_archive(&mut f, size).expect("read FFCS");
+    let rows: Vec<_> = archive.aset.iter().filter(|a| a.type_id == TYPE_ID_FX_DICTIONARY).collect();
+    assert!(!rows.is_empty(), "no ASET row carries the fxdict type id");
+
+    // Each row's block holds its fxdict container, and every fxdict container there is registered
+    // under type id 0.
+    let row_blocks: Vec<u16> = rows.iter().flat_map(|a| a.lod_chain()).collect();
+    for row in &rows {
+        let bi = row.block_index();
+        let dec = mercs2_formats::sges::decompress_block(&mut f, &archive.indx, bi).expect("block");
+        let (_n, entries) = mercs2_formats::ucfx::parse_block_entry_table(&dec);
+        assert!(
+            entries.iter().any(|e| e.name_hash == row.asset_hash && e.type_hash == TYPE_HASH_FX_DICTIONARY),
+            "ASET row 0x{:08X} (type id 0) has no fxdict container in block {bi}",
+            row.asset_hash
+        );
+        for e in entries.iter().filter(|e| e.type_hash == TYPE_HASH_FX_DICTIONARY) {
+            let ids: Vec<u32> = archive
+                .aset
+                .iter()
+                .filter(|a| a.asset_hash == e.name_hash && a.lod_chain().contains(&bi))
+                .map(|a| a.type_id)
+                .collect();
+            assert!(
+                ids.contains(&TYPE_ID_FX_DICTIONARY),
+                "fxdict container 0x{:08X} in block {bi} is registered under type ids {ids:?}, not 0",
+                e.name_hash
+            );
+        }
+    }
+    eprintln!("fxdict ASET rows with type id 0: {} (blocks {row_blocks:?})", rows.len());
+}

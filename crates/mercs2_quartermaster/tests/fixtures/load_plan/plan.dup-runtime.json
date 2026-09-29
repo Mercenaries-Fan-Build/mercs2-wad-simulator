@@ -1,0 +1,116 @@
+{
+  "format": 1,
+  "producer": "preflight",
+  "quartermaster": "3.0.0",
+  "ok": false,
+  "order": [
+    "shipment:m2-sdk",
+    "shipment:dup-runtime"
+  ],
+  "items": [
+    {
+      "id": "shipment:m2-sdk",
+      "requested": 0,
+      "resolved": 0,
+      "held_back_by": null,
+      "name": "m2-sdk",
+      "version": "0.1.1",
+      "manifest_format": 2,
+      "quartermaster_range": null,
+      "provides": [],
+      "plugins": [],
+      "runtime_dlls": [
+        {
+          "contribution": 0,
+          "file_name": "m2-sdk.dll",
+          "source": "m2-sdk.dll",
+          "relative": "m2-sdk.dll",
+          "sha256": "361406ebf38f9d1f98b49545cc61ab88b8f0ebd5cbea8435bddb7df6b73b6aa4"
+        }
+      ],
+      "placed_files": []
+    },
+    {
+      "id": "shipment:dup-runtime",
+      "requested": 1,
+      "resolved": 1,
+      "held_back_by": null,
+      "name": "dup-runtime",
+      "version": "1.0.0",
+      "manifest_format": 2,
+      "quartermaster_range": null,
+      "provides": [],
+      "plugins": [],
+      "runtime_dlls": [
+        {
+          "contribution": 0,
+          "file_name": "m2-sdk.dll",
+          "source": "m2-sdk.dll",
+          "relative": "m2-sdk.dll",
+          "sha256": "361406ebf38f9d1f98b49545cc61ab88b8f0ebd5cbea8435bddb7df6b73b6aa4"
+        }
+      ],
+      "placed_files": []
+    }
+  ],
+  "edges": [],
+  "requirements": [],
+  "capabilities": [],
+  "conflicts": [
+    {
+      "source": "claims",
+      "claim": "file artifact m2-sdk.dll",
+      "class": "exclusive",
+      "claimants": [
+        {
+          "item": "shipment:m2-sdk",
+          "contribution": 0,
+          "kind": "add_runtime_dll"
+        },
+        {
+          "item": "shipment:dup-runtime",
+          "contribution": 0,
+          "kind": "add_runtime_dll"
+        }
+      ]
+    }
+  ],
+  "supersedes": [],
+  "link_block_paths": [
+    "blocks\\VZ\\scripts_vz_P000_Q3.block",
+    "blocks\\VZ\\resident_P000_Q3.block"
+  ],
+  "findings": [
+    {
+      "code": "M0162",
+      "severity": "error",
+      "message": "contributions[0]: m2-sdk.dll cannot be placed in the game folder: a runtime DLL must be named after its Shipment, `dup-runtime.dll` (compared case-insensitively), so that one runtime Shipment ships exactly one DLL and two Shipments can never ship one name",
+      "items": [
+        "shipment:dup-runtime"
+      ],
+      "refs": [
+        {
+          "section": "items",
+          "index": 1
+        }
+      ],
+      "fix": null
+    },
+    {
+      "code": "M0207",
+      "severity": "error",
+      "message": "file artifact m2-sdk.dll claimed by m2-sdk[0], dup-runtime[0] — only one Shipment may claim it, and no load order resolves this",
+      "items": [
+        "shipment:m2-sdk",
+        "shipment:dup-runtime"
+      ],
+      "refs": [
+        {
+          "section": "conflicts",
+          "index": 0
+        }
+      ],
+      "fix": null
+    }
+  ]
+}

@@ -828,16 +828,21 @@ pub fn placed_spot_lights_to_gpu(
 ///
 /// The effect template name is the placement name with `"particle_"` removed (verified:
 /// `global_particle_env_godray2` → `global_env_godray2`, m2 `0xDB331999`, in the `effects` block).
-/// Falls back to the reversed retail constants if the effect can't be resolved.
-pub fn glow_card_for_effect(w: &mut wad::Wad, placement_name: &str, pos: [f32; 3]) -> crate::particles::GlowCard {
-    let (scale, color, alpha) = env_shaft_effect_params(w, placement_name)
+/// Falls back to the reversed retail constants if the effect can't be found; an effect that is
+/// found but does not parse is an error.
+pub fn glow_card_for_effect(
+    w: &mut wad::Wad,
+    placement_name: &str,
+    pos: [f32; 3],
+) -> Result<crate::particles::GlowCard, String> {
+    let (scale, color, alpha) = env_shaft_effect_params(w, placement_name)?
         .unwrap_or(([2.892, 0.805, 2.892], [0.25, 0.24, 0.20], 0.16));
     let footprint = 0.5 * (scale[0].abs() + scale[2].abs()); // ~2.89
     // The retail COLR is dim (~0.25 white, alpha ~0.16); lift into an additive/HDR-friendly tint so
     // the soft glow is visible and blooms, without washing out (clamped).
     let boost = (alpha * 4.0 + 0.6).clamp(0.8, 2.5);
     let a = (alpha * 3.5).clamp(0.25, 0.85);
-    crate::particles::GlowCard {
+    Ok(crate::particles::GlowCard {
         pos,
         size: (footprint * 3.0).clamp(4.0, 24.0),
         color: [
@@ -846,142 +851,88 @@ pub fn glow_card_for_effect(w: &mut wad::Wad, placement_name: &str, pos: [f32; 3
             (color[2] * boost).min(1.5),
             a,
         ],
-    }
+    })
 }
 
-/// Load a full [`EffectTemplate`](mercs2_formats::fxdict::EffectTemplate) from the `effects` block by
-/// effect name-hash, parsing every UCFX child chunk (EFCT/EMTR/EMIT/COLR/FRCE/PTYP/POFF/TRFM/TEXT).
-/// The general form of [`env_shaft_effect_params`] (which only reads TRFM/COLR); feeds
-/// [`EmitterDesc::from_effect_template`](crate::particles::EmitterDesc::from_effect_template) so
-/// authored fire/smoke/steam effects drive the particle sim with real params. `None` if the block or
-/// effect isn't found.
-pub fn load_effect_template(
+/// Load and parse an effect by name-hash
+/// ([`parse_effect_container`](mercs2_formats::fxdict::parse_effect_container)). Feeds
+/// [`EmitterDesc::from_effect`](crate::particles::EmitterDesc::from_effect) so authored
+/// fire/smoke/steam effects drive the particle sim with real params.
+///
+/// The block comes from the effect's own ASET row (`asset_hash == name_hash`,
+/// `type_id == TYPE_ID_EFFECT`) — the WAD's index of where the asset lives — not from a block path.
+/// Picking "the first path containing `effect`" landed on `text_effect_P000_Q3` (block 3117, which
+/// sorts before `effects_P000_Q3`, block 3459), so no effect ever loaded.
+///
+/// `Ok(None)` when the WAD has no effect row for the name; `Err` when it has one but the named
+/// block does not hold the container, or the container does not parse.
+pub fn load_effect(
     w: &mut wad::Wad,
     name_hash: u32,
-) -> Option<mercs2_formats::fxdict::EffectTemplate> {
-    use mercs2_formats::types::TYPE_HASH_EFFECT;
-    let paths: Vec<String> = wad::block_paths(w).to_vec();
-    let blk = paths.iter().position(|p| p.to_ascii_lowercase().contains("effect"))? as u16;
-    let dec = wad::decompress_block_index(w, blk).ok()?;
-    let (count, entries) = mercs2_formats::ucfx::parse_block_entry_table(&dec);
-    let mut pos = 4 + count as usize * 16;
-    for e in &entries {
-        let end = pos + e.chunk_size as usize;
-        if e.type_hash == TYPE_HASH_EFFECT && e.name_hash == name_hash && end <= dec.len() {
-            let c = &dec[pos..end];
-            // (tag, body) pairs; tags owned so they outlive the from_chunks borrow.
-            let owned: Vec<([u8; 4], &[u8])> =
-                ucfx_child_chunks(c).into_iter().map(|(tag, s, en)| (tag, &c[s..en])).collect();
-            return Some(mercs2_formats::fxdict::EffectTemplate::from_chunks(
-                owned.iter().map(|(t, b)| (t, *b)),
-            ));
-        }
-        pos = end;
+) -> Result<Option<mercs2_formats::fxdict::EffectContainer>, String> {
+    use mercs2_formats::types::{TYPE_HASH_EFFECT, TYPE_ID_EFFECT};
+    let mut blocks: Vec<u16> = {
+        let (archive, _) = wad::archive_and_file(w);
+        archive
+            .aset
+            .iter()
+            .filter(|a| a.asset_hash == name_hash && a.type_id == TYPE_ID_EFFECT)
+            .flat_map(|a| a.lod_chain())
+            .filter(|&b| b != 0xFFFF)
+            .collect()
+    };
+    blocks.sort_unstable();
+    blocks.dedup();
+    if blocks.is_empty() {
+        return Ok(None);
     }
-    None
-}
-
-/// Read an environmental light-shaft effect template and recover `(TRFM scale, COLR peak RGB, COLR
-/// peak alpha)`. Returns `None` if the `effects` block or the effect can't be found.
-fn env_shaft_effect_params(w: &mut wad::Wad, placement_name: &str) -> Option<([f32; 3], [f32; 3], f32)> {
-    use mercs2_formats::hash::pandemic_hash_m2;
-    use mercs2_formats::types::TYPE_HASH_EFFECT;
-
-    let effect_name = placement_name.replace("particle_", "");
-    let want = pandemic_hash_m2(&effect_name);
-    let paths: Vec<String> = wad::block_paths(w).to_vec();
-    let blk = paths.iter().position(|p| p.to_ascii_lowercase().contains("effect"))? as u16;
-    let dec = wad::decompress_block_index(w, blk).ok()?;
-    let (count, entries) = mercs2_formats::ucfx::parse_block_entry_table(&dec);
-    let mut pos = 4 + count as usize * 16;
-    for e in &entries {
-        let end = pos + e.chunk_size as usize;
-        if e.type_hash == TYPE_HASH_EFFECT && e.name_hash == want && end <= dec.len() {
-            let c = &dec[pos..end];
-            let mut scale = [1.0f32, 1.0, 1.0];
-            let mut color = [0.25f32, 0.24, 0.20];
-            let mut alpha = 0.16f32;
-            for (tag, s, en) in ucfx_child_chunks(c) {
-                let body = &c[s..en];
-                match &tag {
-                    b"TRFM" if body.len() >= 64 => {
-                        scale = [rf32le(body, 0), rf32le(body, 20), rf32le(body, 40)];
-                    }
-                    b"COLR" => {
-                        if let Some((rgb, a)) = colr_peak_bc(body) {
-                            if rgb.iter().any(|&v| v > 0.02) {
-                                color = rgb;
-                            }
-                            alpha = a;
-                        }
-                    }
-                    _ => {}
-                }
+    for &blk in &blocks {
+        let dec = wad::decompress_block_index(w, blk)?;
+        let (count, entries) = mercs2_formats::ucfx::parse_block_entry_table(&dec);
+        let mut pos = 4 + count as usize * 16;
+        for e in &entries {
+            let end = pos + e.chunk_size as usize;
+            if e.type_hash == TYPE_HASH_EFFECT && e.name_hash == name_hash {
+                let c = dec
+                    .get(pos..end)
+                    .ok_or_else(|| format!("effect 0x{name_hash:08X} runs past block {blk}"))?;
+                return mercs2_formats::fxdict::parse_effect_container(c)
+                    .map(Some)
+                    .map_err(|err| format!("effect 0x{name_hash:08X}: {err}"));
             }
-            return Some((scale, color, alpha));
+            pos = end;
         }
-        pos = end;
     }
-    None
+    Err(format!(
+        "the ASET row for effect 0x{name_hash:08X} names blocks {blocks:?}, and none holds the container"
+    ))
 }
 
-fn rf32le(b: &[u8], o: usize) -> f32 {
-    f32::from_le_bytes([b[o], b[o + 1], b[o + 2], b[o + 3]])
+/// Read an environmental light-shaft effect and recover `(TRFM scale, COLR peak colour, COLR peak
+/// fourth byte)` from its first emitter: the scale is the TRFM diagonal, the peak is the `COLR` key
+/// with the largest sum of its first three colour bytes. `Ok(None)` if the effect isn't found.
+fn env_shaft_effect_params(w: &mut wad::Wad, placement_name: &str) -> Result<Option<([f32; 3], [f32; 3], f32)>, String> {
+    let want = mercs2_formats::hash::pandemic_hash_m2(&placement_name.replace("particle_", ""));
+    let Some(effect) = load_effect(w, want)? else {
+        return Ok(None);
+    };
+    let e = effect.emitters.first().ok_or_else(|| format!("effect 0x{want:08X} has no emitter"))?;
+    let m = e.transform;
+    let (rgb, a) = colr_peak(&e.particle.colr);
+    Ok(Some(([m[0][0], m[1][1], m[2][2]], rgb, a)))
 }
 
-/// Walk a UCFX container's descriptor rows → `(tag, start, end)` for each child body (data-relative
-/// offsets; `u0 == 0xFFFFFFFF` = container sentinel, skipped).
-fn ucfx_child_chunks(c: &[u8]) -> Vec<([u8; 4], usize, usize)> {
-    let mut out = Vec::new();
-    if c.len() < 20 || &c[0..4] != b"UCFX" {
-        return out;
-    }
-    let dao = u32::from_le_bytes([c[4], c[5], c[6], c[7]]) as usize;
-    let n = u32::from_le_bytes([c[16], c[17], c[18], c[19]]) as usize;
-    for i in 0..n {
-        let row = 20 + i * 20;
-        if row + 20 > c.len() {
-            break;
-        }
-        let mut tag = [0u8; 4];
-        tag.copy_from_slice(&c[row..row + 4]);
-        let u0 = u32::from_le_bytes([c[row + 4], c[row + 5], c[row + 6], c[row + 7]]);
-        if u0 == 0xFFFF_FFFF {
-            continue;
-        }
-        let size = u32::from_le_bytes([c[row + 8], c[row + 9], c[row + 10], c[row + 11]]) as usize;
-        let start = if dao > 0 { dao + u0 as usize } else { 8 + u0 as usize };
-        let end = start + size;
-        if end <= c.len() {
-            out.push((tag, start, end));
+/// The first `COLR` key with the greatest `c[0] + c[1] + c[2]`, as `([c0, c1, c2] / 255, c3 / 255)`.
+fn colr_peak(colr: &mercs2_formats::fxdict::Colr) -> ([f32; 3], f32) {
+    let lum = |c: [u8; 4]| c[0] as u32 + c[1] as u32 + c[2] as u32;
+    let mut best = colr.keys[0].colour;
+    for k in &colr.keys[1..] {
+        if lum(k.colour) > lum(best) {
+            best = k.colour;
         }
     }
-    out
-}
-
-/// Decode the `global_env_godray2` `COLR` peak tint. Layout (reversed this session): 8-byte-stride
-/// records `[0xBC, 0, 0, R, G, B, A, 0]` (RGBA8). Returns the greatest-luminance stop, or `None` if
-/// the body isn't that shape.
-fn colr_peak_bc(body: &[u8]) -> Option<([f32; 3], f32)> {
-    if body.len() < 8 {
-        return None;
-    }
-    let mut best = None;
-    let mut best_lum = -1.0f32;
-    let mut i = 0;
-    while i + 8 <= body.len() {
-        if body[i] != 0xBC {
-            return None; // not the observed stop format — don't misread
-        }
-        let (r, g, b, a) = (body[i + 3], body[i + 4], body[i + 5], body[i + 6]);
-        let lum = r as f32 + g as f32 + b as f32;
-        if lum > best_lum {
-            best_lum = lum;
-            best = Some(([r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0], a as f32 / 255.0));
-        }
-        i += 8;
-    }
-    best
+    let c = best.map(|v| v as f32 / 255.0);
+    ([c[0], c[1], c[2]], c[3])
 }
 
 /// Load the streaming world off-thread: open the WAD, merge the base terrain, build the world block
@@ -1040,7 +991,7 @@ pub fn load_streaming_world_data(
         mercs2_formats::world_index::WorldIndex::build(archive, file)
     };
     progress.step("world index");
-    let (mut manager, mut props, terrain_tiles) = build_streaming_catalog(&idx, &ls, cfg);
+    let (mut manager, mut props, terrain_tiles) = build_streaming_catalog(&idx, &ls, cfg)?;
     let base_props = props.len();
 
     // Dynamic lights: harvest LightObject COMPs (joined to their entity Transform for a world
@@ -1960,42 +1911,20 @@ mod glow_card_tests {
     use super::*;
 
     #[test]
-    fn colr_peak_bc_picks_brightest_and_guards_format() {
-        // Two 0xBC-tagged RGBA8 stops: dim then bright.
-        let mut body = Vec::new();
-        body.extend_from_slice(&[0xBC, 0, 0, 10, 10, 10, 5, 0]);
-        body.extend_from_slice(&[0xBC, 0, 0, 63, 63, 60, 40, 0]);
-        let (rgb, a) = colr_peak_bc(&body).unwrap();
-        assert!((rgb[0] - 63.0 / 255.0).abs() < 1e-4);
-        assert!((a - 40.0 / 255.0).abs() < 1e-4);
-        // A body that isn't the 0xBC stop layout must not be misread.
-        assert!(colr_peak_bc(&[0u8; 16]).is_none());
-        assert!(colr_peak_bc(&[0xBC, 0]).is_none());
-    }
-
-    #[test]
-    fn ucfx_child_chunks_walks_descriptor_rows() {
-        // Minimal UCFX: header (dao=0 → abs = 8 + u0), 1 descriptor "TRFM" at u0=0, size=4.
-        let mut c = Vec::new();
-        c.extend_from_slice(b"UCFX");
-        c.extend_from_slice(&0u32.to_le_bytes()); // data_area_off
-        c.extend_from_slice(&0u32.to_le_bytes());
-        c.extend_from_slice(&0u32.to_le_bytes());
-        c.extend_from_slice(&1u32.to_le_bytes()); // n_desc
-        c.extend_from_slice(b"TRFM");
-        c.extend_from_slice(&0u32.to_le_bytes()); // u0 (rel offset into 8-based body)
-        c.extend_from_slice(&4u32.to_le_bytes()); // size
-        c.extend_from_slice(&0u32.to_le_bytes());
-        c.extend_from_slice(&0u32.to_le_bytes());
-        // Body region begins at abs = 8; push 8 bytes of padding then the 4-byte payload.
-        while c.len() < 8 {
-            c.push(0);
-        }
-        // Ensure at least 8+4 bytes exist from the 8-based origin.
-        c.resize(c.len().max(12), 0xAB);
-        let out = ucfx_child_chunks(&c);
-        assert_eq!(out.len(), 1);
-        assert_eq!(&out[0].0, b"TRFM");
+    fn colr_peak_picks_the_first_brightest_key() {
+        use mercs2_formats::fxdict::Colr;
+        // The retail god-ray COLR shape: dark ends, a flat bright middle with a rising fourth byte.
+        let colr = Colr::from_fn(|t| {
+            if (0.2..=0.8).contains(&t) {
+                ([0x3f, 0x3f, 0x3f, (0x26 as f32 + 6.0 * t) as u8], 0xBC00)
+            } else {
+                ([2, 2, 2, 1], 0xBC00)
+            }
+        });
+        let (rgb, a) = colr_peak(&colr);
+        assert_eq!(rgb, [63.0 / 255.0; 3]);
+        let first = colr.keys.iter().find(|k| k.colour[0] == 0x3f).unwrap();
+        assert_eq!(a, first.colour[3] as f32 / 255.0);
     }
 }
 
@@ -2259,7 +2188,8 @@ mod terrain_texture_tests {
         let Ok((_low, ls)) = find_terrain_blocks(&mut w) else {
             return eprintln!("skip: terrain blocks not found");
         };
-        let tiles = mercs2_formats::placement::load_terrain_tiles(&ls);
+        let tiles = mercs2_formats::placement::load_terrain_tiles(&ls)
+            .expect("every TerrainObject has a Transform");
         let Some(tile) = tiles.into_iter().find(|t| {
             wad::extract_container_typed(&mut w, t.terrainmesh_hash, TERRAINMESH_TYPE_HASH).is_ok()
         }) else {
@@ -2314,7 +2244,8 @@ mod terrain_texture_tests {
         let Ok((_low, ls)) = find_terrain_blocks(&mut w) else {
             return eprintln!("skip: terrain blocks not found");
         };
-        let tiles = mercs2_formats::placement::load_terrain_tiles(&ls);
+        let tiles = mercs2_formats::placement::load_terrain_tiles(&ls)
+            .expect("every TerrainObject has a Transform");
 
         // (a) Find a tile whose material set carries >=2 blendable detail diffuses beyond base0 +
         // the global 3B030C8A constant — i.e. a group layerset of len >= 4 — while AGGREGATING the
@@ -2420,7 +2351,8 @@ mod terrain_texture_tests {
         let Ok((_low, ls)) = find_terrain_blocks(&mut w) else {
             return eprintln!("skip: terrain blocks not found");
         };
-        let tiles = mercs2_formats::placement::load_terrain_tiles(&ls);
+        let tiles = mercs2_formats::placement::load_terrain_tiles(&ls)
+            .expect("every TerrainObject has a Transform");
         let Some(tile) = tiles
             .into_iter()
             .find(|t| wad::extract_container_typed(&mut w, t.terrainmesh_hash, TERRAINMESH_TYPE_HASH).is_ok())

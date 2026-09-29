@@ -320,20 +320,22 @@ impl Contribution {
             Contribution::ReplacePhy2 { phy2, .. } => out.push(("phy2", phy2.as_path())),
             Contribution::AddPlacement { entity, .. } => out.push(("entity", entity.as_path())),
             Contribution::AddLayer { entities, .. } => out.push(("entities", entities.as_path())),
-            Contribution::AddAnimation { clip, trnm, .. } => {
-                out.push(("clip", clip.as_path()));
-                out.push(("trnm", trnm.as_path()));
+            Contribution::AddAnimation {
+                clip, trnm, events, ..
             }
-            Contribution::ReplaceAnimation { clip, trnm, .. } => {
+            | Contribution::ReplaceAnimation {
+                clip, trnm, events, ..
+            } => {
                 out.push(("clip", clip.as_path()));
                 out.push(("trnm", trnm.as_path()));
+                if let Some(e) = events {
+                    out.push(("events", e.as_path()));
+                }
             }
             Contribution::AddShader { blob, .. } => out.push(("blob", blob.as_path())),
             Contribution::ReplaceShader { blob, .. } => out.push(("blob", blob.as_path())),
             Contribution::AddFx { payload, .. } => out.push(("payload", payload.as_path())),
             Contribution::ReplaceFx { payload, .. } => out.push(("payload", payload.as_path())),
-            Contribution::AddSchema { schm, .. } => out.push(("schm", schm.as_path())),
-            Contribution::AddAiSquadTemplate { config, .. } => out.push(("config", config.as_path())),
             Contribution::ReplaceTerrainCell { cell, .. } => out.push(("cell", cell.as_path())),
             Contribution::EditStateMachine { states, .. } => out.push(("states", states.as_path())),
             Contribution::EditWorld { edits, .. } => out.push(("edits", edits.as_path())),
@@ -357,10 +359,14 @@ impl Contribution {
             // `../../etc/passwd`, `/etc/passwd` and a symlink pointing out of the Shipment M0111
             // errors rather than a bespoke rule that could drift from this one.
             Contribution::PlaceFile { file, .. } => out.push(("file", file.as_path())),
-            // No `src/` artifact: every field is inline data (ids, tokens, faction keys, the
-            // behaviour MODULE name). A novel behaviour subclass would ship a script, but that path
-            // is not offered yet — see the kind's doc.
-            Contribution::AddShopItem { .. } => {}
+            Contribution::AddRuntimeDll { dll } => out.push(("dll", dll.as_path())),
+            // Every other field is inline data (ids, tokens, faction keys, the behaviour MODULE
+            // name). A NOVEL behaviour ships its Lua source, which is a `src/` file like any other.
+            Contribution::AddShopItem { behaviour, .. } => {
+                if let Some(p) = behaviour.as_ref().and_then(|b| b.script.as_ref()) {
+                    out.push(("behaviour.script", p.as_path()));
+                }
+            }
             Contribution::Raw { payload, .. } => out.push(("payload", payload.as_path())),
         }
         out

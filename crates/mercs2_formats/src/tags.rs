@@ -73,11 +73,14 @@ pub enum ChunkTag {
     Bshi,      // "BSHI"
     Bshp,      // "BSHP"
     Char,      // "CHAR" (renderable sub-chunk; consumer FUN_004ac8e0)
+    Anim,      // "ANIM" (ATRB curve: u32 key count)
+    Akey,      // "AKEY" (curve key: f32 time, f32 value)
     Colr,      // "COLR"
     Damg,      // "DAMG"
     DataUpper, // "DATA"
     Debr,      // "DEBR"
     DeclUpper, // "DECL"
+    Efct,      // "EFCT" (effect root; nine u16, read by FUN_00491920)
     Emit,      // "EMIT"
     Emtr,      // "EMTR"
     Frce,      // "FRCE"
@@ -165,6 +168,9 @@ impl ChunkTag {
             b"DATA" => Self::DataUpper,
             b"DEBR" => Self::Debr,
             b"DECL" => Self::DeclUpper,
+            b"EFCT" => Self::Efct,
+            b"ANIM" => Self::Anim,
+            b"AKEY" => Self::Akey,
             b"EMIT" => Self::Emit,
             b"EMTR" => Self::Emtr,
             b"FRCE" => Self::Frce,
@@ -256,6 +262,9 @@ impl ChunkTag {
             Self::DataUpper => *b"DATA",
             Self::Debr => *b"DEBR",
             Self::DeclUpper => *b"DECL",
+            Self::Efct => *b"EFCT",
+            Self::Anim => *b"ANIM",
+            Self::Akey => *b"AKEY",
             Self::Emit => *b"EMIT",
             Self::Emtr => *b"EMTR",
             Self::Frce => *b"FRCE",

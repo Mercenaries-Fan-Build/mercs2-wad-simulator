@@ -1,47 +1,62 @@
-//! Wavebank decode — turn a `LoadWaveBank` body into resident PCM clips for the mixer.
+//! Wavebank codec + decode — the `wavebank` table (`0xF753F6D0`, `Sound.LoadWaveBank` `FUN_005e26b0`)
+//! as exact bytes ([`WavebankFile`]) and as resident PCM clips for the mixer ([`Wavebank`]).
 //!
-//! **Oracle (audio_code_map.md §4.3, §7):** a `wavebank` asset (`0xF753F6D0`, `Sound.LoadWaveBank`
-//! `FUN_005e26b0`) is a 24-byte header + N × 36-byte clip records.
-//!
-//! ## Clip record layout (corrected against the shipped data)
+//! ## Layout (measured on every wavebank in retail `vz.wad`, `English.wad` and `shell.wad`)
 //!
 //! ```text
-//!   +00 clip_hash
-//!   +04 format dword, RAW bytes: [_, channels, bytes_per_sample, _]
-//!   +08 sample_rate
-//!   +12 data_size    (BYTES)
-//!   +16 sample_count
-//!   +32 data_offset  (body-relative)
+//! header (little-endian)
+//!   +0x00 u32  table version, 0x1D (the value every audio table carries — NOT a record count)
+//!   +0x04 u32  bank hash = m2(bank name)
+//!   +0x08 u16  record count
+//!   +0x0A u16  0 = embedded bank; 1 = streamed bank (the records address a named .pws file)
+//!   +0x0C u32  the bank hash again
+//!   +0x10 u32  records offset: 24 for an embedded bank, 40 for a streamed bank
+//!   +0x14 u32  0
+//!   +0x18      streamed banks only: the .pws file name, NUL-padded to 16 bytes
+//! record (36 bytes each, in index order)
+//!   +0x00 u32  clip hash
+//!   +0x04 u8x4 [0, channels, format, 0]; format = bytes per sample (2) when embedded, 4 when streamed
+//!   +0x08 u32  sample rate
+//!   +0x0C u32  data size in bytes
+//!   +0x10 u32  frame count (samples per channel)
+//!   +0x14      8 zero bytes
+//!   +0x1C u32  0 when embedded; a per-record value of unknown meaning when streamed
+//!   +0x20 u32  data offset — RELATIVE TO THE RECORD'S OWN START when embedded; the byte offset into
+//!              the .pws file when streamed
+//! embedded blob area
+//!   each record's samples, in record order, each blob starting on a 16-byte boundary of the body
+//!   (the first one at the first boundary at or after the end of the record table); every gap and
+//!   the tail up to the next 16-byte boundary is zero-filled — the body length is itself a multiple
+//!   of 16 (this is the "trailing padding" a body shows when its last blob does not end on a
+//!   boundary)
 //! ```
 //!
-//! This crate previously read `data_offset` @+12 and `data_size` @+16, and treated the format byte
-//! as a codec id (`0x02` = IMA ADPCM). Both were wrong, and the shipped data says so unambiguously:
+//! Proof: with `+0x20` read record-relative, every one of the 1,943 mono + 100 stereo embedded clips
+//! in `vz.wad` starts exactly at the 16-aligned end of its predecessor and every body ends at
+//! `align16(last blob end)`; read body-relative, the offsets land inside the record table. `+0x0C`
+//! equals `frames × channels × 2` on every embedded record, i.e. the payload is interleaved PCM16.
+//! The byte-identical re-encode of every retail wavebank ([`WavebankFile::to_bytes`], exercised by
+//! `tests/retail_banks.rs`) is the executable form of this proof.
 //!
-//! * Sorting the clips by **+32** makes each consecutive delta equal **+12** for
-//!   **1174/1174** clips in `vz.wad` and **1071/1071** in `English.wad` — i.e. the blobs are packed
-//!   and +32/+12 is the (offset, size) pair. Sorting by +12 scores 0%.
-//! * `+12 == 2 * +16` on essentially every clip — the bytes↔samples ratio of **16-bit PCM**. IMA
-//!   packs 2 samples *per byte*, which is the inverse ratio, so the payload cannot be IMA.
-//! * Hence the format byte's `0x02` is a sample WIDTH of 2 bytes, not a codec id.
+//! Anything outside this measured layout is a hard [`WaveError`], never a best-effort partial decode.
 //!
-//! Consequence: embedded clips are decoded as PCM16. `0x04` still means the audio is streamed from
-//! an external `.pws` and the record carries no embedded samples. (Verified end-to-end: decoding
-//! all 1,142 `English.wad` VO clips this way yields sample counts matching each record exactly.)
-//!
-//! This is the **engine-crate home** of the IMA decoder + wavebank record parser that was proven
-//! against retail in `crates/wad_simulator/src/audio/{ima,wavebank}.rs` (verified on `ui_hud` and the
-//! streaming bank `0x7871F925`). It is ported here — rather than depended on — because that decoder
-//! lives in the *tooling* binary crate, which the `mercs2_audio` engine crate cannot pull in. The
-//! decode math is identical (same INDEX/STEP tables, same block layout), so both stay byte-faithful.
-//!
-//! The [`AudioEngine`](crate::AudioEngine) calls [`Wavebank::parse`] on a bank body and holds the
-//! decoded clips resident; [`crate::AudioEngine::cue_sound`] then binds a clip's samples to the voice as
-//! a [`PcmSource`](crate::mixer::PcmSource) so the cue is actually audible.
+//! The IMA ADPCM decoders below are not on the embedded PC path (every embedded clip is PCM16); they
+//! stay `pub` because the console converter and the VO stream tools use them.
 
-/// One 36-byte clip record's fixed size (`FUN_00603110` record stride).
+use crate::le::{align16, put_u16, put_u32, u16_at, u32_at, u8_at};
+
+/// The table version every audio table (wavebank, soundbank, sounddb) carries at `+0x00`.
+pub const TABLE_VERSION: u32 = 0x1D;
+/// One clip record's fixed size (`FUN_00603110` record stride).
 pub const RECORD_SIZE: usize = 36;
-/// Wavebank body header size (count / self_hash / populated / records_offset).
+/// Header size of an embedded bank — where its record table starts.
 pub const HEADER_SIZE: usize = 24;
+/// Size of the NUL-padded `.pws` file-name field a streamed bank carries at `+0x18`.
+pub const STREAM_NAME_FIELD: usize = 16;
+/// Header size of a streamed bank (header + file-name field) — where its record table starts.
+pub const STREAM_HEADER_SIZE: usize = HEADER_SIZE + STREAM_NAME_FIELD;
+/// Every embedded blob starts on, and the body ends on, a multiple of this.
+pub const BLOB_ALIGN: usize = 16;
 
 /// Format byte `0x02` — **2 bytes per sample**, i.e. interleaved little-endian PCM16. This is what
 /// every embedded clip in retail `vz.wad` / `English.wad` / `shell.wad` carries.
@@ -52,7 +67,7 @@ pub const BYTES_PER_SAMPLE_PCM16: u8 = 0x02;
 pub const CODEC_IMA: u8 = 0x02;
 /// Format byte `0x00` — raw signed-16 PCM, embedded.
 pub const CODEC_PCM: u8 = 0x00;
-/// Codec `0x04` — streamed: samples live in an external `.pws`, not in the bank body.
+/// Format byte `0x04` — every record of a streamed bank carries it; its samples live in the `.pws`.
 pub const CODEC_STREAM: u8 = 0x04;
 /// Codec `0x01` / `0x69` — XMA (Xbox); not decodable on the PC path.
 pub const CODEC_XMA: u8 = 0x01;
@@ -174,7 +189,7 @@ pub fn decode_ima_stereo(data: &[u8]) -> Vec<i16> {
 /// it as a [`PcmSource`](crate::mixer::PcmSource) at the correct pitch.
 #[derive(Clone, Debug, PartialEq)]
 pub struct DecodedClip {
-    /// m2 clip hash — how a cue's wave is looked up.
+    /// m2 clip hash.
     pub clip_hash: u32,
     /// Channel count (1 mono / 2 stereo).
     pub channels: u8,
@@ -182,13 +197,9 @@ pub struct DecodedClip {
     pub sample_rate: u32,
     /// Interleaved int16 PCM (empty when the clip streams from an external `.pws`).
     pub samples: Vec<i16>,
-    /// True when the clip's samples are NOT in this bank body — they live in an external `.pws`.
-    ///
-    /// Decided by residency, not by the codec byte: the record declares a size but its data does
-    /// not land inside the body (sentinel offset `0xFFFFFFFF`, or a range running past the end).
-    /// `CODEC_STREAM` is the byte such records usually carry, but it is not what makes the audio
-    /// external — a record pointing outside the body has no embedded samples whatever it claims to
-    /// be encoded as.
+    /// True when the clip belongs to a streamed bank: its samples live in the bank's `.pws` file, not
+    /// in the bank body. Decided by the bank header (`+0x0A` = 1 and a `.pws` name), which is the
+    /// only thing that makes a record's offset point outside the body.
     pub streaming: bool,
 }
 
@@ -203,135 +214,423 @@ impl DecodedClip {
     }
 }
 
-/// A parsed wavebank: its self-hash + the index-ordered clips (the order a cue's `wave_index` indexes).
+/// Everything that can be wrong with a wavebank body. Each is a hard error: a body outside the
+/// measured layout is refused whole rather than partially decoded.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum WaveError {
+    /// A field ran past the end of the body.
+    Truncated { field: &'static str, offset: usize, len: usize },
+    /// `+0x00` was not [`TABLE_VERSION`].
+    BadVersion(u32),
+    /// `+0x0C` did not repeat the bank hash at `+0x04`.
+    HashMismatch { at_4: u32, at_c: u32 },
+    /// `+0x0A` was neither 0 (embedded) nor 1 (streamed).
+    UnknownBankKind(u16),
+    /// `+0x10` was not the records offset the bank kind implies.
+    BadRecordsOffset { found: u32, expected: u32 },
+    /// A field every retail bank carries as zero was not zero.
+    NonZeroReserved { field: &'static str, offset: usize },
+    /// The bank holds no records (no retail bank does; the layout of an empty one is unmeasured).
+    Empty,
+    /// More records than the `u16` count can hold.
+    TooManyRecords(usize),
+    /// The streamed bank's `.pws` name field was not ASCII followed by NUL padding.
+    BadStreamName,
+    /// A `.pws` name too long for the 16-byte field (which always ends in at least one NUL).
+    StreamNameTooLong(String),
+    /// A record's channel count is not 1 or 2.
+    UnsupportedChannels { record: usize, channels: u8 },
+    /// A record's format byte is not the one its bank kind carries (2 embedded, 4 streamed).
+    UnsupportedFormat { record: usize, format: u8 },
+    /// An embedded record's size is not `frames × channels × bytes per sample`.
+    SizeMismatch { record: usize, size: u32, frames: u32, channels: u8, format: u8 },
+    /// An embedded blob does not start at the 16-aligned end of the previous one.
+    Misplaced { record: usize, found: usize, expected: usize },
+    /// A padding byte between or after the blobs was not zero.
+    NonZeroPadding { offset: usize },
+    /// The body does not end at the 16-aligned end of its last blob.
+    BadLength { found: usize, expected: usize },
+    /// A record's data kind does not match its bank (embedded data in a streamed bank or vice versa).
+    DataKindMismatch { record: usize },
+    /// A number did not fit its on-disk field.
+    FieldOverflow { field: &'static str, value: usize },
+}
+
+impl std::fmt::Display for WaveError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            WaveError::Truncated { field, offset, len } => {
+                write!(f, "wavebank: {field} at +0x{offset:X} runs past the {len}-byte body")
+            }
+            WaveError::BadVersion(v) => write!(f, "wavebank: version 0x{v:X}, expected 0x1D"),
+            WaveError::HashMismatch { at_4, at_c } => {
+                write!(f, "wavebank: hash +0x04 0x{at_4:08X} != +0x0C 0x{at_c:08X}")
+            }
+            WaveError::UnknownBankKind(k) => write!(f, "wavebank: +0x0A = {k}, expected 0 or 1"),
+            WaveError::BadRecordsOffset { found, expected } => {
+                write!(f, "wavebank: records offset {found}, expected {expected}")
+            }
+            WaveError::NonZeroReserved { field, offset } => {
+                write!(f, "wavebank: reserved {field} at +0x{offset:X} is not zero")
+            }
+            WaveError::Empty => write!(f, "wavebank: no records (an empty bank's layout is unmeasured)"),
+            WaveError::TooManyRecords(n) => write!(f, "wavebank: {n} records exceed the u16 count"),
+            WaveError::BadStreamName => write!(f, "wavebank: .pws name field is not ASCII + NUL padding"),
+            WaveError::StreamNameTooLong(n) => {
+                write!(f, "wavebank: .pws name {n:?} does not fit the 16-byte NUL-terminated field")
+            }
+            WaveError::UnsupportedChannels { record, channels } => {
+                write!(f, "wavebank: record {record} has {channels} channels, expected 1 or 2")
+            }
+            WaveError::UnsupportedFormat { record, format } => {
+                write!(f, "wavebank: record {record} format byte 0x{format:02X} is not the bank kind's")
+            }
+            WaveError::SizeMismatch { record, size, frames, channels, format } => write!(
+                f,
+                "wavebank: record {record} size {size} != {frames} frames x {channels} ch x {format} B"
+            ),
+            WaveError::Misplaced { record, found, expected } => write!(
+                f,
+                "wavebank: record {record} blob at +0x{found:X}, expected the aligned +0x{expected:X}"
+            ),
+            WaveError::NonZeroPadding { offset } => {
+                write!(f, "wavebank: padding byte at +0x{offset:X} is not zero")
+            }
+            WaveError::BadLength { found, expected } => {
+                write!(f, "wavebank: body is {found} bytes, the layout implies {expected}")
+            }
+            WaveError::DataKindMismatch { record } => {
+                write!(f, "wavebank: record {record}'s data kind does not match the bank kind")
+            }
+            WaveError::FieldOverflow { field, value } => {
+                write!(f, "wavebank: {field} = {value} does not fit its on-disk field")
+            }
+        }
+    }
+}
+
+impl std::error::Error for WaveError {}
+
+/// Where a record's samples are.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum WaveData {
+    /// Interleaved little-endian samples carried in the bank body.
+    Embedded(Vec<u8>),
+    /// Samples in the bank's `.pws` file.
+    Streamed {
+        /// Byte offset into the `.pws` file (`+0x20`).
+        offset: u32,
+        /// Byte size in the `.pws` file (`+0x0C`).
+        size: u32,
+        /// `+0x1C`, of unknown meaning (zero in some records, not in others).
+        word_1c: u32,
+    },
+}
+
+/// One 36-byte clip record plus its data.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WaveRecord {
+    /// `+0x00` clip hash.
+    pub clip_hash: u32,
+    /// `+0x05` channel count (1 or 2).
+    pub channels: u8,
+    /// `+0x06` format byte: bytes per sample (2) when embedded, 4 when streamed.
+    pub format: u8,
+    /// `+0x08` sample rate.
+    pub sample_rate: u32,
+    /// `+0x10` frame count (samples per channel).
+    pub frames: u32,
+    /// The samples, embedded or streamed.
+    pub data: WaveData,
+}
+
+/// A wavebank table exactly as it sits in the `data` chunk: [`parse`](Self::parse) and
+/// [`to_bytes`](Self::to_bytes) are inverses over every body the measured layout admits.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WavebankFile {
+    /// `+0x04` / `+0x0C` bank hash (m2 of the bank name).
+    pub bank_hash: u32,
+    /// The `.pws` file a streamed bank's records address; `None` for an embedded bank.
+    pub stream_name: Option<String>,
+    /// The records, in index order.
+    pub records: Vec<WaveRecord>,
+}
+
+fn rd32(b: &[u8], off: usize, field: &'static str) -> Result<u32, WaveError> {
+    u32_at(b, off).ok_or(WaveError::Truncated { field, offset: off, len: b.len() })
+}
+fn rd16(b: &[u8], off: usize, field: &'static str) -> Result<u16, WaveError> {
+    u16_at(b, off).ok_or(WaveError::Truncated { field, offset: off, len: b.len() })
+}
+fn rd8(b: &[u8], off: usize, field: &'static str) -> Result<u8, WaveError> {
+    u8_at(b, off).ok_or(WaveError::Truncated { field, offset: off, len: b.len() })
+}
+fn zero(b: &[u8], off: usize, n: usize, field: &'static str) -> Result<(), WaveError> {
+    let s = b.get(off..off + n).ok_or(WaveError::Truncated { field, offset: off, len: b.len() })?;
+    if s.iter().any(|&x| x != 0) {
+        return Err(WaveError::NonZeroReserved { field, offset: off });
+    }
+    Ok(())
+}
+
+impl WavebankFile {
+    /// Parse a decompressed wavebank body. Refuses anything outside the measured layout.
+    pub fn parse(body: &[u8]) -> Result<WavebankFile, WaveError> {
+        let version = rd32(body, 0x00, "version")?;
+        if version != TABLE_VERSION {
+            return Err(WaveError::BadVersion(version));
+        }
+        let bank_hash = rd32(body, 0x04, "bank hash")?;
+        let count = rd16(body, 0x08, "record count")? as usize;
+        let kind = rd16(body, 0x0A, "bank kind")?;
+        let at_c = rd32(body, 0x0C, "bank hash (repeat)")?;
+        if at_c != bank_hash {
+            return Err(WaveError::HashMismatch { at_4: bank_hash, at_c });
+        }
+        let records_off = rd32(body, 0x10, "records offset")?;
+        zero(body, 0x14, 4, "header +0x14")?;
+        let streamed = match kind {
+            0 => false,
+            1 => true,
+            k => return Err(WaveError::UnknownBankKind(k)),
+        };
+        let expected_off = if streamed { STREAM_HEADER_SIZE } else { HEADER_SIZE } as u32;
+        if records_off != expected_off {
+            return Err(WaveError::BadRecordsOffset { found: records_off, expected: expected_off });
+        }
+        if count == 0 {
+            return Err(WaveError::Empty);
+        }
+        let stream_name = if streamed {
+            let field = body
+                .get(HEADER_SIZE..STREAM_HEADER_SIZE)
+                .ok_or(WaveError::Truncated { field: ".pws name", offset: HEADER_SIZE, len: body.len() })?;
+            let n = field.iter().position(|&c| c == 0).ok_or(WaveError::BadStreamName)?;
+            if n == 0 || !field[..n].is_ascii() || field[n..].iter().any(|&c| c != 0) {
+                return Err(WaveError::BadStreamName);
+            }
+            Some(String::from_utf8(field[..n].to_vec()).map_err(|_| WaveError::BadStreamName)?)
+        } else {
+            None
+        };
+
+        let format_expected = if streamed { CODEC_STREAM } else { BYTES_PER_SAMPLE_PCM16 };
+        let table_end = records_off as usize + count * RECORD_SIZE;
+        let mut cursor = table_end; // end of the previous blob (embedded banks)
+        let mut records = Vec::with_capacity(count);
+        for i in 0..count {
+            let r = records_off as usize + i * RECORD_SIZE;
+            let clip_hash = rd32(body, r, "clip hash")?;
+            if rd8(body, r + 4, "format[0]")? != 0 {
+                return Err(WaveError::NonZeroReserved { field: "format[0]", offset: r + 4 });
+            }
+            let channels = rd8(body, r + 5, "channels")?;
+            let format = rd8(body, r + 6, "format")?;
+            if rd8(body, r + 7, "format[3]")? != 0 {
+                return Err(WaveError::NonZeroReserved { field: "format[3]", offset: r + 7 });
+            }
+            if channels != 1 && channels != 2 {
+                return Err(WaveError::UnsupportedChannels { record: i, channels });
+            }
+            if format != format_expected {
+                return Err(WaveError::UnsupportedFormat { record: i, format });
+            }
+            let sample_rate = rd32(body, r + 8, "sample rate")?;
+            let size = rd32(body, r + 12, "data size")?;
+            let frames = rd32(body, r + 16, "frames")?;
+            zero(body, r + 20, 8, "record +0x14")?;
+            let word_1c = rd32(body, r + 28, "record +0x1C")?;
+            let offset = rd32(body, r + 32, "data offset")?;
+            let data = if streamed {
+                WaveData::Streamed { offset, size, word_1c }
+            } else {
+                if word_1c != 0 {
+                    return Err(WaveError::NonZeroReserved { field: "record +0x1C", offset: r + 28 });
+                }
+                let want = frames as u64 * channels as u64 * format as u64;
+                if want != size as u64 {
+                    return Err(WaveError::SizeMismatch { record: i, size, frames, channels, format });
+                }
+                let start = r + offset as usize;
+                let expected = align16(cursor);
+                if start != expected {
+                    return Err(WaveError::Misplaced { record: i, found: start, expected });
+                }
+                check_padding(body, cursor, start)?;
+                let end = start + size as usize;
+                let blob = body
+                    .get(start..end)
+                    .ok_or(WaveError::Truncated { field: "clip data", offset: start, len: body.len() })?;
+                cursor = end;
+                WaveData::Embedded(blob.to_vec())
+            };
+            records.push(WaveRecord { clip_hash, channels, format, sample_rate, frames, data });
+        }
+
+        let expected_len = if streamed { table_end } else { align16(cursor) };
+        if body.len() != expected_len {
+            return Err(WaveError::BadLength { found: body.len(), expected: expected_len });
+        }
+        if !streamed {
+            check_padding(body, cursor, expected_len)?;
+        }
+        Ok(WavebankFile { bank_hash, stream_name, records })
+    }
+
+    /// Serialize to the exact on-disk layout (see the module docs).
+    pub fn to_bytes(&self) -> Result<Vec<u8>, WaveError> {
+        let count = self.records.len();
+        if count == 0 {
+            return Err(WaveError::Empty);
+        }
+        if count > u16::MAX as usize {
+            return Err(WaveError::TooManyRecords(count));
+        }
+        let streamed = self.stream_name.is_some();
+        let records_off = if streamed { STREAM_HEADER_SIZE } else { HEADER_SIZE };
+        let table_end = records_off + count * RECORD_SIZE;
+
+        // Place every embedded blob first: record i's data offset is relative to record i's start.
+        let mut placements = Vec::with_capacity(count);
+        let mut cursor = table_end;
+        for (i, rec) in self.records.iter().enumerate() {
+            if rec.channels != 1 && rec.channels != 2 {
+                return Err(WaveError::UnsupportedChannels { record: i, channels: rec.channels });
+            }
+            match (&rec.data, streamed) {
+                (WaveData::Embedded(bytes), false) => {
+                    if rec.format != BYTES_PER_SAMPLE_PCM16 {
+                        return Err(WaveError::UnsupportedFormat { record: i, format: rec.format });
+                    }
+                    let want = rec.frames as u64 * rec.channels as u64 * rec.format as u64;
+                    if want != bytes.len() as u64 {
+                        return Err(WaveError::SizeMismatch {
+                            record: i,
+                            size: u32::try_from(bytes.len()).unwrap_or(u32::MAX),
+                            frames: rec.frames,
+                            channels: rec.channels,
+                            format: rec.format,
+                        });
+                    }
+                    let start = align16(cursor);
+                    placements.push(start);
+                    cursor = start + bytes.len();
+                }
+                (WaveData::Streamed { .. }, true) => {
+                    if rec.format != CODEC_STREAM {
+                        return Err(WaveError::UnsupportedFormat { record: i, format: rec.format });
+                    }
+                    placements.push(0);
+                }
+                _ => return Err(WaveError::DataKindMismatch { record: i }),
+            }
+        }
+        let total = if streamed { table_end } else { align16(cursor) };
+        if u32::try_from(total).is_err() {
+            return Err(WaveError::FieldOverflow { field: "body length", value: total });
+        }
+
+        let mut out = Vec::with_capacity(total);
+        put_u32(&mut out, TABLE_VERSION);
+        put_u32(&mut out, self.bank_hash);
+        put_u16(&mut out, count as u16);
+        put_u16(&mut out, u16::from(streamed));
+        put_u32(&mut out, self.bank_hash);
+        put_u32(&mut out, records_off as u32);
+        put_u32(&mut out, 0);
+        if let Some(name) = &self.stream_name {
+            if name.is_empty() || !name.is_ascii() || name.as_bytes().contains(&0) {
+                return Err(WaveError::BadStreamName);
+            }
+            if name.len() >= STREAM_NAME_FIELD {
+                return Err(WaveError::StreamNameTooLong(name.clone()));
+            }
+            out.extend_from_slice(name.as_bytes());
+            out.resize(STREAM_HEADER_SIZE, 0);
+        }
+        for (i, rec) in self.records.iter().enumerate() {
+            let r = out.len();
+            put_u32(&mut out, rec.clip_hash);
+            out.extend_from_slice(&[0, rec.channels, rec.format, 0]);
+            put_u32(&mut out, rec.sample_rate);
+            let (size, word_1c, offset) = match &rec.data {
+                WaveData::Embedded(bytes) => (bytes.len() as u32, 0, (placements[i] - r) as u32),
+                WaveData::Streamed { offset, size, word_1c } => (*size, *word_1c, *offset),
+            };
+            put_u32(&mut out, size);
+            put_u32(&mut out, rec.frames);
+            out.extend_from_slice(&[0u8; 8]);
+            put_u32(&mut out, word_1c);
+            put_u32(&mut out, offset);
+        }
+        for (i, rec) in self.records.iter().enumerate() {
+            if let WaveData::Embedded(bytes) = &rec.data {
+                out.resize(placements[i], 0);
+                out.extend_from_slice(bytes);
+            }
+        }
+        out.resize(total, 0);
+        Ok(out)
+    }
+}
+
+fn check_padding(body: &[u8], from: usize, to: usize) -> Result<(), WaveError> {
+    let pad = body
+        .get(from..to)
+        .ok_or(WaveError::Truncated { field: "padding", offset: from, len: body.len() })?;
+    match pad.iter().position(|&x| x != 0) {
+        Some(p) => Err(WaveError::NonZeroPadding { offset: from + p }),
+        None => Ok(()),
+    }
+}
+
+/// A parsed wavebank as resident clips: its hash + the clips in record order (the order a group's
+/// wave index addresses).
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Wavebank {
-    /// The bank's own hash (`+4` in the body).
+    /// The bank's own hash (`+0x04` in the body).
     pub self_hash: u32,
-    /// Clips in record order (index = the cue record's `wave_index`).
+    /// Clips in record order (index = a soundbank group's wave index).
     pub clips: Vec<DecodedClip>,
 }
 
 impl Wavebank {
-    /// Parse a decompressed wavebank body (`FUN_00603110` layout), decoding every embedded IMA/PCM clip.
-    /// Streaming (codec `0x04`) and Xbox-only codecs yield a clip record with empty samples (faithful:
-    /// the slot exists, the audio is elsewhere), never a hard error — a partial bank is still useful.
-    pub fn parse(body: &[u8]) -> Wavebank {
-        let mut bank = Wavebank::default();
-        if body.len() < HEADER_SIZE {
-            return bank;
-        }
-        bank.self_hash = rd_u32(body, 4);
-        let populated = rd_u16(body, 8) as usize;
-        let records_off = rd_u32(body, 16) as usize;
+    /// Parse a decompressed wavebank body and decode every embedded clip to PCM16. A streamed bank's
+    /// clips carry no samples and `streaming: true` (the audio is in the bank's `.pws`).
+    pub fn parse(body: &[u8]) -> Result<Wavebank, WaveError> {
+        Ok(Wavebank::from_file(&WavebankFile::parse(body)?))
+    }
 
-        // ★ `+8` (`populated`) IS the record count. The word at `+0` is NOT a capacity and must not
-        // clamp it: on `vo_stream.english` it reads 29 while the bank actually holds **12,988**
-        // waves, so the old `min(populated, count)` truncated the game's entire streamed VO — every
-        // Mattias / Jennifer / Chris / Fiona line — down to 29 clips.
-        //
-        // The header proves the count arithmetically: records_offset(40) + 12,988 x 36 = 467,608,
-        // which is exactly the body length. (That bank's header also carries its stream filename,
-        // "vo_stream.pws", at +24 — which is why its records start at 40 rather than 24.)
-        //
-        // Bound by what the body can actually hold instead, so a corrupt header can still never
-        // walk us off the end.
-        let max_fit = body.len().saturating_sub(records_off) / RECORD_SIZE;
-        let n = populated.min(max_fit);
-
-        for i in 0..n {
-            let roff = records_off + i * RECORD_SIZE;
-            if roff + RECORD_SIZE > body.len() {
-                break;
-            }
-            let clip_hash = rd_u32(body, roff);
-            // 4-byte format field at +4: [?, channels, bytes_per_sample, ?].
-            let channels = {
-                let c = body[roff + 5];
-                if c == 0 { 1 } else { c }
-            };
-            let codec = body[roff + 6];
-            let sample_rate = rd_u32(body, roff + 8);
-            let data_size = rd_u32(body, roff + 12) as usize;
-            let sample_count = rd_u32(body, roff + 16) as usize;
-            let data_offset = rd_u32(body, roff + 32) as usize;
-
-            // Empty padding record.
-            if clip_hash == 0 && sample_rate == 0 && data_size == 0 {
-                continue;
-            }
-
-            let mut samples = Vec::new();
-            let mut streaming = false;
-            let end = data_offset.saturating_add(data_size);
-            let embedded = data_size > 0 && data_offset != 0xFFFF_FFFF && end <= body.len();
-
-            if embedded {
-                let blob = &body[data_offset..end];
-                match codec {
-                    // The format byte is BYTES PER SAMPLE, not a codec id: `2` means interleaved
-                    // little-endian PCM16. Every embedded clip in retail vz/English/shell.wad
-                    // ships `2`, so this is the whole PC decode path.
-                    BYTES_PER_SAMPLE_PCM16 | CODEC_PCM => {
-                        samples = blob
-                            .chunks_exact(2)
-                            .map(|c| i16::from_le_bytes([c[0], c[1]]))
-                            .collect();
-                        // `+16` is the FRAME count (samples per channel), so a mono clip has
-                        // data_size == 2*frames and a stereo one data_size == 4*frames. Checking
-                        // frames rather than raw samples holds for both, and a wrong (offset,size)
-                        // map cannot satisfy it. Verified live across every embedded clip in
-                        // vz.wad + English.wad + shell.wad.
-                        let frames = samples.len() / channels.max(1) as usize;
-                        debug_assert!(
-                            sample_count == 0 || frames.abs_diff(sample_count) <= 2,
-                            "clip 0x{clip_hash:08X}: decoded {frames} frames ({} samples, {channels}ch), \
-                             record declares {sample_count}",
-                            samples.len()
-                        );
-                    }
-                    // XMA / Xbox-ADPCM are console codecs, not on the PC decode path; leave the
-                    // slot present with no samples. (The IMA decoders below stay `pub` — the
-                    // console converter still needs them — they are simply never hit on PC.)
-                    _ => {}
+    /// Decode an already-parsed [`WavebankFile`].
+    pub fn from_file(file: &WavebankFile) -> Wavebank {
+        let clips = file
+            .records
+            .iter()
+            .map(|rec| {
+                let (samples, streaming) = match &rec.data {
+                    // WavebankFile::parse admits embedded data only at 2 bytes per sample.
+                    WaveData::Embedded(bytes) => (
+                        bytes.chunks_exact(2).map(|c| i16::from_le_bytes([c[0], c[1]])).collect(),
+                        false,
+                    ),
+                    WaveData::Streamed { .. } => (Vec::new(), true),
+                };
+                DecodedClip {
+                    clip_hash: rec.clip_hash,
+                    channels: rec.channels,
+                    sample_rate: rec.sample_rate,
+                    samples,
+                    streaming,
                 }
-            } else if data_size > 0 {
-                // The record declares a size, but `embedded` above already established the data is
-                // not in this body — sentinel offset, or a range past the end. So the samples are
-                // external and the slot stands with none decoded.
-                //
-                // NOT gated on `codec == CODEC_STREAM`. Residency is what makes the audio external:
-                // a record pointing outside the body has nothing to decode whatever its codec byte
-                // claims, and reporting `streaming: false` there would hand back a clip with no
-                // samples and no reason — indistinguishable from a decoded silent one.
-                streaming = true;
-            }
-
-            bank.clips.push(DecodedClip {
-                clip_hash,
-                channels,
-                sample_rate,
-                samples,
-                streaming,
-            });
-        }
-        bank
+            })
+            .collect();
+        Wavebank { self_hash: file.bank_hash, clips }
     }
 
     /// Find a resident clip by its hash.
     pub fn clip_by_hash(&self, hash: u32) -> Option<&DecodedClip> {
         self.clips.iter().find(|c| c.clip_hash == hash)
     }
-}
-
-// --- little-endian readers (wavebank bodies are LE on PC) --------------------------------------------
-#[inline]
-fn rd_u16(b: &[u8], o: usize) -> u16 {
-    u16::from_le_bytes([b[o], b[o + 1]])
-}
-#[inline]
-fn rd_u32(b: &[u8], o: usize) -> u32 {
-    u32::from_le_bytes([b[o], b[o + 1], b[o + 2], b[o + 3]])
 }
 
 #[cfg(test)]
@@ -360,122 +659,169 @@ mod tests {
         assert!(s.iter().all(|&x| (x - 1000).abs() < 40), "near-constant run");
     }
 
-    #[test]
-    fn wavebank_parses_and_decodes_an_embedded_pcm16_clip() {
-        // One mono PCM16 clip: [24B header][1 record][audio blob], with the record written in the
-        // REAL layout — size @+12, sample_count @+16, offset @+32. The previous version of this
-        // test hard-coded the old, wrong map, so it could never have caught the bug.
-        let pcm: Vec<i16> = (0..64).map(|i| (i * 100) as i16).collect();
-        let audio: Vec<u8> = pcm.iter().flat_map(|s| s.to_le_bytes()).collect();
-        let records_off = HEADER_SIZE;
-        let data_off = records_off + RECORD_SIZE;
+    fn pcm_bytes(samples: &[i16]) -> Vec<u8> {
+        samples.iter().flat_map(|s| s.to_le_bytes()).collect()
+    }
 
-        let mut body = vec![0u8; data_off + audio.len()];
-        body[0..4].copy_from_slice(&1u32.to_le_bytes()); // count (capacity)
-        body[4..8].copy_from_slice(&0xABCD_1234u32.to_le_bytes()); // self_hash
-        body[8..10].copy_from_slice(&1u16.to_le_bytes()); // populated
-        body[16..20].copy_from_slice(&(records_off as u32).to_le_bytes()); // records_offset
+    fn embedded(clip_hash: u32, channels: u8, samples: &[i16]) -> WaveRecord {
+        WaveRecord {
+            clip_hash,
+            channels,
+            format: BYTES_PER_SAMPLE_PCM16,
+            sample_rate: 22050,
+            frames: (samples.len() / channels as usize) as u32,
+            data: WaveData::Embedded(pcm_bytes(samples)),
+        }
+    }
 
-        let roff = records_off;
-        body[roff..roff + 4].copy_from_slice(&0x5FBA_3915u32.to_le_bytes()); // clip_hash
-        body[roff + 5] = 1; // channels
-        body[roff + 6] = BYTES_PER_SAMPLE_PCM16; // 2 bytes per sample
-        body[roff + 8..roff + 12].copy_from_slice(&22050u32.to_le_bytes()); // sample_rate
-        body[roff + 12..roff + 16].copy_from_slice(&(audio.len() as u32).to_le_bytes()); // data_size
-        body[roff + 16..roff + 20].copy_from_slice(&(pcm.len() as u32).to_le_bytes()); // sample_count
-        body[roff + 32..roff + 36].copy_from_slice(&(data_off as u32).to_le_bytes()); // data_offset
-        body[data_off..].copy_from_slice(&audio);
-
-        let bank = Wavebank::parse(&body);
-        assert_eq!(bank.self_hash, 0xABCD_1234);
-        assert_eq!(bank.clips.len(), 1);
-        let clip = &bank.clips[0];
-        assert_eq!(clip.clip_hash, 0x5FBA_3915);
-        assert_eq!(clip.channels, 1);
-        assert_eq!(clip.sample_rate, 22050);
-        assert!(!clip.streaming);
-        // Decode must reproduce the samples verbatim, and match the count the record declares.
-        assert_eq!(clip.samples, pcm, "PCM16 decoded verbatim");
-        assert_eq!(clip.frames(), pcm.len());
-        assert!(bank.clip_by_hash(0x5FBA_3915).is_some());
+    /// A two-clip bank, hand-assembled byte by byte from the measured layout, so the codec is checked
+    /// against the layout rather than against itself.
+    fn hand_built_two_clip_bank() -> Vec<u8> {
+        let a: Vec<i16> = (0..5).collect(); // 10 bytes
+        let b: Vec<i16> = (100..106).collect(); // stereo, 3 frames, 12 bytes
+        let mut body = Vec::new();
+        body.extend_from_slice(&0x1Du32.to_le_bytes());
+        body.extend_from_slice(&0xABCD_1234u32.to_le_bytes());
+        body.extend_from_slice(&2u16.to_le_bytes());
+        body.extend_from_slice(&0u16.to_le_bytes());
+        body.extend_from_slice(&0xABCD_1234u32.to_le_bytes());
+        body.extend_from_slice(&24u32.to_le_bytes());
+        body.extend_from_slice(&0u32.to_le_bytes());
+        // table ends at 24 + 72 = 96 (already 16-aligned): blob a at 96..106, blob b at 112..124,
+        // body ends at 128.
+        for (r, hash, ch, n, frames, start) in
+            [(24usize, 0x1111u32, 1u8, 10u32, 5u32, 96usize), (60, 0x2222, 2, 12, 3, 112)]
+        {
+            body.extend_from_slice(&hash.to_le_bytes());
+            body.extend_from_slice(&[0, ch, 2, 0]);
+            body.extend_from_slice(&22050u32.to_le_bytes());
+            body.extend_from_slice(&n.to_le_bytes());
+            body.extend_from_slice(&frames.to_le_bytes());
+            body.extend_from_slice(&[0u8; 12]);
+            body.extend_from_slice(&((start - r) as u32).to_le_bytes()); // record-relative
+        }
+        assert_eq!(body.len(), 96);
+        body.extend_from_slice(&pcm_bytes(&a));
+        body.resize(112, 0);
+        body.extend_from_slice(&pcm_bytes(&b));
+        body.resize(128, 0);
+        body
     }
 
     #[test]
-    fn streaming_clip_has_no_embedded_samples() {
-        // A record whose (offset @+32, size @+12) points outside the body → external stream.
-        let records_off = HEADER_SIZE;
-        let mut body = vec![0u8; records_off + RECORD_SIZE];
-        body[0..4].copy_from_slice(&1u32.to_le_bytes());
-        body[8..10].copy_from_slice(&1u16.to_le_bytes());
-        body[16..20].copy_from_slice(&(records_off as u32).to_le_bytes());
-        let roff = records_off;
-        body[roff..roff + 4].copy_from_slice(&0x1111_2222u32.to_le_bytes());
-        body[roff + 5] = 2; // stereo
-        body[roff + 6] = CODEC_STREAM;
-        body[roff + 8..roff + 12].copy_from_slice(&44100u32.to_le_bytes()); // sample_rate
-        body[roff + 12..roff + 16].copy_from_slice(&0x0020_0000u32.to_le_bytes()); // big size @+12
-        body[roff + 32..roff + 36].copy_from_slice(&0x0010_0000u32.to_le_bytes()); // far offset @+32
+    fn parses_the_measured_layout_with_record_relative_offsets() {
+        let body = hand_built_two_clip_bank();
+        let file = WavebankFile::parse(&body).expect("hand-built bank parses");
+        assert_eq!(file.bank_hash, 0xABCD_1234);
+        assert_eq!(file.stream_name, None);
+        assert_eq!(file.records.len(), 2);
+        assert_eq!(file.records[1].channels, 2);
+        assert_eq!(file.records[1].frames, 3);
 
-        let bank = Wavebank::parse(&body);
-        assert_eq!(bank.clips.len(), 1);
+        let bank = Wavebank::from_file(&file);
+        assert_eq!(bank.clips[0].samples, (0..5).collect::<Vec<i16>>(), "PCM16 decoded verbatim");
+        assert_eq!(bank.clips[1].samples, (100..106).collect::<Vec<i16>>());
+        assert_eq!(bank.clips[1].frames(), 3);
+        assert!(!bank.clips[0].streaming);
+        assert!(bank.clip_by_hash(0x2222).is_some());
+
+        assert_eq!(file.to_bytes().expect("encodes"), body, "the encoder reproduces the hand layout");
+    }
+
+    #[test]
+    fn a_body_relative_offset_is_refused() {
+        // Rewrite record 0's +0x20 as the BODY-relative 96 instead of the record-relative 72.
+        let mut body = hand_built_two_clip_bank();
+        body[24 + 32..24 + 36].copy_from_slice(&96u32.to_le_bytes());
+        assert!(matches!(WavebankFile::parse(&body), Err(WaveError::Misplaced { record: 0, .. })));
+    }
+
+    #[test]
+    fn plus_zero_is_the_version_not_a_count() {
+        let mut body = hand_built_two_clip_bank();
+        body[0..4].copy_from_slice(&2u32.to_le_bytes()); // what a "count" reading would expect
+        assert_eq!(WavebankFile::parse(&body), Err(WaveError::BadVersion(2)));
+    }
+
+    #[test]
+    fn padding_and_tail_are_exact() {
+        let body = hand_built_two_clip_bank();
+        let mut dirty = body.clone();
+        dirty[106] = 1; // gap between blob a and blob b
+        assert_eq!(WavebankFile::parse(&dirty), Err(WaveError::NonZeroPadding { offset: 106 }));
+        let mut short = body.clone();
+        short.truncate(124); // drop the tail padding
+        assert!(matches!(WavebankFile::parse(&short), Err(WaveError::BadLength { .. })));
+        let mut long = body;
+        long.extend_from_slice(&[0u8; 16]);
+        assert!(matches!(WavebankFile::parse(&long), Err(WaveError::BadLength { .. })));
+    }
+
+    #[test]
+    fn embedded_round_trip_with_odd_sizes() {
+        let file = WavebankFile {
+            bank_hash: 0x5FBA_3915,
+            stream_name: None,
+            records: vec![
+                embedded(1, 1, &[1, 2, 3]),
+                embedded(2, 2, &[4, 5, 6, 7, 8, 9, 10, 11]),
+                embedded(3, 1, &[12]),
+            ],
+        };
+        let bytes = file.to_bytes().expect("encodes");
+        assert_eq!(bytes.len() % BLOB_ALIGN, 0);
+        assert_eq!(WavebankFile::parse(&bytes).expect("parses"), file);
+    }
+
+    #[test]
+    fn streamed_bank_round_trips_and_decodes_no_samples() {
+        let file = WavebankFile {
+            bank_hash: 0x7871_F925,
+            stream_name: Some("ambience.pws".to_string()),
+            records: vec![WaveRecord {
+                clip_hash: 0x54FF_867B,
+                channels: 2,
+                format: CODEC_STREAM,
+                sample_rate: 44100,
+                frames: 0x008A_3344,
+                data: WaveData::Streamed { offset: 0, size: 0x0026_DEA0, word_1c: 0x0002_43C0 },
+            }],
+        };
+        let bytes = file.to_bytes().expect("encodes");
+        assert_eq!(bytes.len(), STREAM_HEADER_SIZE + RECORD_SIZE);
+        assert_eq!(&bytes[24..37], b"ambience.pws\0");
+        assert_eq!(WavebankFile::parse(&bytes).expect("parses"), file);
+        let bank = Wavebank::parse(&bytes).expect("decodes");
         assert!(bank.clips[0].streaming);
         assert!(bank.clips[0].samples.is_empty());
     }
 
-    /// A record pointing outside the body is external EVEN WITH AN EMBEDDED CODEC BYTE.
-    ///
-    /// The sibling test above sets `CODEC_STREAM`, so it passes whether `streaming` is decided by
-    /// residency or by the codec byte — which is exactly how `streaming = codec == CODEC_STREAM ||
-    /// true` survived: the `|| true` made the comparison dead, and no test could tell.
-    ///
-    /// This one uses `CODEC_PCM` with an out-of-range offset, so it fails if the codec byte is ever
-    /// allowed to decide again. There is nothing to decode at that offset regardless of what the
-    /// record claims to be encoded as.
     #[test]
-    fn an_out_of_range_record_is_streaming_whatever_its_codec_byte_says() {
-        let records_off = HEADER_SIZE;
-        let mut body = vec![0u8; records_off + RECORD_SIZE];
-        body[0..4].copy_from_slice(&1u32.to_le_bytes());
-        body[8..10].copy_from_slice(&1u16.to_le_bytes());
-        body[16..20].copy_from_slice(&(records_off as u32).to_le_bytes());
-        let roff = records_off;
-        body[roff..roff + 4].copy_from_slice(&0x3333_4444u32.to_le_bytes());
-        body[roff + 5] = 1; // mono
-        body[roff + 6] = CODEC_PCM; // an EMBEDDED codec, not CODEC_STREAM
-        body[roff + 8..roff + 12].copy_from_slice(&22050u32.to_le_bytes());
-        body[roff + 12..roff + 16].copy_from_slice(&0x0020_0000u32.to_le_bytes()); // size @+12
-        body[roff + 32..roff + 36].copy_from_slice(&0x0010_0000u32.to_le_bytes()); // offset past end
-
-        let bank = Wavebank::parse(&body);
-        assert_eq!(bank.clips.len(), 1);
-        assert!(
-            bank.clips[0].streaming,
-            "samples are not in the body, so the clip is external no matter the codec byte"
-        );
-        assert!(bank.clips[0].samples.is_empty());
-    }
-
-    /// The counterpart: a record whose data IS inside the body is not streaming. Without this, the
-    /// pair above would be satisfied by hard-coding `streaming = true` everywhere.
-    #[test]
-    fn an_embedded_record_is_not_streaming() {
-        let records_off = HEADER_SIZE;
-        let pcm_bytes = 8usize;
-        let mut body = vec![0u8; records_off + RECORD_SIZE + pcm_bytes];
-        body[0..4].copy_from_slice(&1u32.to_le_bytes());
-        body[8..10].copy_from_slice(&1u16.to_le_bytes());
-        body[16..20].copy_from_slice(&(records_off as u32).to_le_bytes());
-        let roff = records_off;
-        let data_off = records_off + RECORD_SIZE;
-        body[roff..roff + 4].copy_from_slice(&0x5555_6666u32.to_le_bytes());
-        body[roff + 5] = 1;
-        body[roff + 6] = CODEC_PCM;
-        body[roff + 8..roff + 12].copy_from_slice(&22050u32.to_le_bytes());
-        body[roff + 12..roff + 16].copy_from_slice(&(pcm_bytes as u32).to_le_bytes());
-        body[roff + 32..roff + 36].copy_from_slice(&(data_off as u32).to_le_bytes());
-
-        let bank = Wavebank::parse(&body);
-        assert_eq!(bank.clips.len(), 1);
-        assert!(!bank.clips[0].streaming, "the data is inside the body");
+    fn the_encoder_refuses_what_it_cannot_lay_out() {
+        let none = WavebankFile { bank_hash: 1, stream_name: None, records: vec![] };
+        assert_eq!(none.to_bytes(), Err(WaveError::Empty));
+        let long = WavebankFile {
+            bank_hash: 1,
+            stream_name: Some("sixteen_chars.pw".to_string()),
+            records: vec![WaveRecord {
+                clip_hash: 1,
+                channels: 1,
+                format: CODEC_STREAM,
+                sample_rate: 1,
+                frames: 1,
+                data: WaveData::Streamed { offset: 0, size: 1, word_1c: 0 },
+            }],
+        };
+        assert!(matches!(long.to_bytes(), Err(WaveError::StreamNameTooLong(_))));
+        let mixed = WavebankFile {
+            bank_hash: 1,
+            stream_name: Some("x.pws".to_string()),
+            records: vec![embedded(1, 1, &[0])],
+        };
+        assert_eq!(mixed.to_bytes(), Err(WaveError::DataKindMismatch { record: 0 }));
+        let mut wrong = embedded(1, 1, &[0, 1]);
+        wrong.frames = 5;
+        let bad = WavebankFile { bank_hash: 1, stream_name: None, records: vec![wrong] };
+        assert!(matches!(bad.to_bytes(), Err(WaveError::SizeMismatch { .. })));
     }
 }

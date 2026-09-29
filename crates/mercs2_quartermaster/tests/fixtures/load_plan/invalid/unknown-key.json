@@ -1,0 +1,10 @@
+{
+  "format": 1,
+  "items": [
+    {
+      "id": "shipment:my-mod",
+      "kind": "shipment",
+      "path": "../shipments/my-mod"
+    }
+  ]
+}

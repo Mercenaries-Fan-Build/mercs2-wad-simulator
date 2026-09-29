@@ -174,12 +174,11 @@ pub struct WorldData {
     /// — the PMC hall god rays descending from the dome). Position/size/tint are data-driven from the
     /// placement + the effect's `TRFM`/`COLR` (see `mercs2_engine::game_world::glow_card_for_effect`).
     glow_cards: Vec<mercs2_engine::particles::GlowCard>,
-    /// Resident audio, read off the load thread: decompressed `wavebank` bodies (the audio engine
-    /// decodes each to PCM) + per-bank `sounddb` bodies (the cue→wave routing catalog). Sourced from the
-    /// always-resident banks (`MrxSoundBootstrap.LoadBanks`); applied to the shared `AudioEngine` when
-    /// the load completes so scripted `Sound.*` cues play real decoded waves. Empty for interior-only.
-    wavebank_bodies: Vec<Vec<u8>>,
-    sounddb_bodies: Vec<Vec<u8>>,
+    /// Resident audio, read off the load thread: the always-resident banks' (`MrxSoundBootstrap.LoadBanks`)
+    /// `wavebank`, `soundbank` and `sounddb` bodies. Installed into the shared `AudioEngine` when the load
+    /// completes so scripted `Sound.*` cues resolve (sounddb → soundbank cue → group → wave) and play
+    /// real decoded waves. Empty for interior-only.
+    resident_audio: mercs2_engine::asset::ResidentAudio,
     /// The streaming-world runtime (K2 unification): block index + Layer-2 streaming catalog + WAD
     /// handle, built on this load thread (it is `Send`). REPLACES the static exterior-props + c3-cell
     /// preload — `setup` uploads its terrain and takes ownership of the [`StreamingWorld`] executor.
@@ -594,16 +593,20 @@ pub(crate) fn load_world_data(
                     continue;
                 }
                 if is_light_shaft_fx(name) {
-                    glow_cards.push(mercs2_engine::game_world::glow_card_for_effect(assets.base_mut(), name, p.pos));
+                    glow_cards.push(mercs2_engine::game_world::glow_card_for_effect(assets.base_mut(), name, p.pos)?);
                 } else if let Some(base) = classify_particle(name) {
-                    // Real authored effect params (COLR/FRCE/PTYP) if the template resolves; else the
-                    // name-heuristic base shape. Resolved here where the WAD is open, once at load.
+                    // Real authored effect params (COLR/FRCE/PTYP), one desc per emitter, if the
+                    // effect resolves; else the name-heuristic base shape. Resolved here where the WAD
+                    // is open, once at load. An effect that resolves but does not parse fails the load.
                     let hash = mercs2_formats::hash::pandemic_hash_m2(&name.replace("particle_", ""));
-                    let desc = match mercs2_engine::game_world::load_effect_template(assets.base_mut(), hash) {
-                        Some(t) => mercs2_engine::particles::EmitterDesc::from_effect_template(&t, base),
-                        None => base,
-                    };
-                    particle_fx.push((desc, p.pos));
+                    match mercs2_engine::game_world::load_effect(assets.base_mut(), hash)? {
+                        Some(effect) => {
+                            for desc in mercs2_engine::particles::EmitterDesc::from_effect(&effect, &base) {
+                                particle_fx.push((desc, p.pos));
+                            }
+                        }
+                        None => particle_fx.push((base, p.pos)),
+                    }
                 }
             }
         }
@@ -632,14 +635,15 @@ pub(crate) fn load_world_data(
     }
     progress.step("watermap");
 
-    // Resident audio: the always-loaded gameplay/UI/ambience wavebanks + their cue-routing sounddbs.
-    // (Reads + decompresses ~12 wavebanks + 11 sounddbs — real, slow load work, now counted.)
-    let (wavebank_bodies, sounddb_bodies) =
-        mercs2_engine::asset::load_resident_audio(assets.base_mut());
+    // Resident audio: the always-loaded gameplay/UI/ambience banks' wavebanks, soundbanks and
+    // sounddbs. (Reads + decompresses 12 wavebanks + 11 soundbanks + 11 sounddbs — real, slow load
+    // work, now counted.)
+    let resident_audio = mercs2_engine::asset::load_resident_audio(assets.base_mut());
     println!(
-        "[world] resident audio: {} wavebanks + {} sounddbs read from WAD",
-        wavebank_bodies.len(),
-        sounddb_bodies.len()
+        "[world] resident audio: {} wavebanks + {} soundbanks + {} sounddbs read from WAD",
+        resident_audio.wavebanks.len(),
+        resident_audio.soundbanks.len(),
+        resident_audio.sounddbs.len()
     );
     progress.step("resident audio");
 
@@ -681,7 +685,7 @@ pub(crate) fn load_world_data(
     };
     let streaming = mercs2_engine::game_world::load_streaming_world_data(wadpath, stream_cfg, overlays, progress)?;
 
-    Ok(WorldData { terrain, player, player_swim_clip, weapon, weapon_hand_bone, cells, placements, named_locations, landing_zones, layer_index, pmc_models, interior, props, interior_props, hmap, watermap, interior_spawn, lights, spot_lights, particle_fx, glow_cards, wavebank_bodies, sounddb_bodies, streaming, population_block: ls, npc_templates })
+    Ok(WorldData { terrain, player, player_swim_clip, weapon, weapon_hand_bone, cells, placements, named_locations, landing_zones, layer_index, pmc_models, interior, props, interior_props, hmap, watermap, interior_spawn, lights, spot_lights, particle_fx, glow_cards, resident_audio, streaming, population_block: ls, npc_templates })
 }
 
 /// Whether a `global_particle_*` name is a static environmental light-shaft ("god ray") FX. These are
@@ -1792,22 +1796,21 @@ impl mercs2_engine::app::Game for Mercs2Game {
             self.runtime.water.set_watermap(wm.clone());
         }
 
-        // Resident audio: decode wavebanks + merge sounddbs into one cue catalog.
-        if !data.wavebank_bodies.is_empty() {
+        // Resident audio: hold the banks resident and install the merged cue catalog.
+        if !data.resident_audio.is_empty() {
             let mut a = self.audio.borrow_mut();
-            let mut audible = 0usize;
-            for body in &data.wavebank_bodies {
-                audible += a.load_wavebank(body);
-            }
-            let mut catalog = mercs2_engine::audio::SoundDb::default();
-            for body in &data.sounddb_bodies {
-                if let Ok(db) = mercs2_engine::audio::SoundDb::parse(body) {
-                    catalog.merge(&db);
-                }
-            }
-            let cues = catalog.cues.len();
-            a.set_sounddb(catalog);
-            println!("[audio] resident: {} clips ({audible} audible), {cues} cues in catalog", a.resident_wave_count());
+            let stats = data
+                .resident_audio
+                .install(&mut a)
+                .unwrap_or_else(|e| panic!("[audio] {e}"));
+            let resolvable = a.sounddb.cues.iter().filter(|c| a.resolve_cue(c).is_ok()).count();
+            println!(
+                "[audio] resident: {} clips ({} audible), {} soundbank cues, {} cues in catalog ({resolvable} resolve to a wave)",
+                a.resident_wave_count(),
+                stats.audible_clips,
+                stats.soundbank_cues,
+                stats.catalog_cues
+            );
         }
 
         // Translucent water surface (render-graph node).
@@ -2220,6 +2223,9 @@ impl mercs2_engine::app::Game for Mercs2Game {
         // mission-Lua pump below takes its own.
         {
             let mut host = self.script_host.borrow_mut();
+            // Sound emitters follow their objects before the audio tick inside `runtime.tick`, as
+            // `PgSoundPlayer::Update` runs `FUN_006034B0` before the Pal update `FUN_0082EE60`.
+            host.update_sound_emitters(ctx.time.fixed_dt);
             self.runtime.tick(&mut ctx.world.borrow_mut(), host.player_mut(), ctx.time.fixed_dt);
         }
         self.runtime.tick_population(&mut ctx.world.borrow_mut(), ctx.time.fixed_dt, self.player.pos);

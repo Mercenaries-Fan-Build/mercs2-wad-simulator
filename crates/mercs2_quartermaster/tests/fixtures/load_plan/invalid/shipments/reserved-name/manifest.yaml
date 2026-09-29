@@ -1,0 +1,6 @@
+format: 2
+shipment:
+  name: cruise
+  version: 1.0.0
+  target: retail
+contributions: []

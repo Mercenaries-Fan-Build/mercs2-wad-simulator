@@ -1,0 +1,13 @@
+format: 2
+shipment:
+  name: stringdb-a
+  version: 1.0.0
+  target: retail
+contributions:
+  - kind: edit_stringdb
+    target: english
+    strings: src/english.txt
+  # Fixes the same table by text too: merged by qm link like the key edits, so no self-conflict.
+  - kind: replace_stringdb_text
+    target: english
+    pairs: src/english-pairs.txt

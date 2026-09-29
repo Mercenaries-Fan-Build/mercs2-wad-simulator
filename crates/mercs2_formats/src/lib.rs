@@ -46,11 +46,18 @@
 //! - [`skeleton`], [`havok`], [`anim`], [`animgroup`], [`anim_select`] — `HIER` rest pose; the
 //!   little-endian Havok 5.5 packfile reader (`PHY2` collision); `hkaAnimation` clip decode; the
 //!   `animation` block; the engine's data-driven clip picker.
+//! - [`anim_container`] — the `animation` asset container, read and written byte-identically:
+//!   `info`/`data`/`trnm`/`evnt` Havok clips and `MANM`/`MINF`/`TRCK` keyframe animations.
 //! - [`terrain`], [`placement`], [`world_index`], [`world`] — low-res terrain; `layers_static`
 //!   placements; the Layer-1 world block index that feeds streaming; world spatial constants.
+//! - [`terrainmesh`] — the 400 hi-res terrain cells (`0x7C569307`): byte-exact decode/encode,
+//!   vertical displacement with normal/tangent/bounds recompute, triangle-strip codec, collision
+//!   rebuild; [`scrub`] — the ground-cover instances beside them, kept on the edited ground.
 //! - [`orchestrator`], [`fxdict`], [`atmosphere`], [`gfx`] — destruction state machines; FX
 //!   dictionaries; the `Graphics.Atmosphere.*` sky/HDR parameter model; Scaleform GFx/SWF.
 //! - [`save`], [`save_write`] — the PC `.profile` save (13,404 bytes, zlib Lua payload at `0x468`).
+//! - [`shader3`], [`sm3asm`] — the PC shader stores (parse, record ids, retail-layout writer) and the
+//!   Shader Model 3 assembler/exact disassembler.
 //!
 //! **Authoring / write side**
 //! - [`model_build`] — author a static model container from scratch (no donor).
@@ -79,6 +86,7 @@
 //! x32dbg capture.
 
 pub mod anim;
+pub mod anim_container;
 pub mod anim_select;
 pub mod animgroup;
 pub mod aset_type_ids;
@@ -123,13 +131,16 @@ pub mod save;
 pub mod save_write;
 pub mod schema;
 pub mod scripts_block;
+pub mod scrub;
 pub mod shader3;
+pub mod sm3asm;
 pub mod sges;
 pub mod skeleton;
 pub mod stringdb;
 pub mod tag_registry;
 pub mod tags;
 pub mod terrain;
+pub mod terrainmesh;
 pub mod texsize;
 pub mod texture;
 pub mod texture_encode;

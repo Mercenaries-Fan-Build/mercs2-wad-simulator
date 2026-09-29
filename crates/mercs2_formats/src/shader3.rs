@@ -6,10 +6,22 @@
 //! [u32 count][count × Record{ id:u32, blob_off:u32, blob_size:u32, kind:u32 }][blobs]
 //! ```
 //! `kind` 1 = `vs_3_0` (blob begins `0xfffe0300`), 0 = `ps_3_0` (`0xffff0300`).
-//! Retail `game-files/shader3.bin` = 556 records (151 VS + 405 PS). The engine
-//! loads each blob into `CreateVertexShader`/`CreatePixelShader` and files the
-//! resulting D3D handle by `id` into a `%0x1200` table (`FUN_0085b810`). NOTE:
-//! `id` is **not** `FNV(name)` — do not assume a name→blob map here.
+//! Retail `shader3.bin` = 556 records (151 VS + 405 PS). The engine copies each
+//! blob into one 0x8000-byte scratch buffer (so [`MAX_BLOB`] is a hard cap), hands
+//! it to `CreateVertexShader`/`CreatePixelShader`, and files the D3D handle by `id`
+//! into a `%0x1200` open-addressed table (`FUN_0085b810`, [`TABLE_SLOTS`]).
+//!
+//! ## Record ids
+//! `id = pandemic_hash_m2(stem + "_3.sho")` in `shader3.bin` and
+//! `pandemic_hash_m2(stem + "_3l.sho")` in `shader3Low.bin`, where `stem` is the
+//! registered `.sho` file name without `.sho` (`FUN_0085b6f0` cuts four characters
+//! and appends the suffix). See [`store_id`]. A lookup probes from `id % 0x1200` and
+//! takes the first match, so when two records share an id the first loaded wins.
+//!
+//! ## Writing a store
+//! [`StoreBuilder`] rewrites a store in the retail layout (blobs 16-byte aligned,
+//! zero padding, file padded to 16, record order = blob order), replaces one record
+//! in place or appends one, and refuses anything the loader cannot take.
 //!
 //! ## Why this exists — the M4 shader crux, resolved
 //! Every static-mesh VS delivers its per-object transform as the constant block
@@ -27,10 +39,29 @@
 //! insertion, preserving the CTAB (its offsets are self-relative, so it stays
 //! valid) and every other instruction.
 
-pub const VS_3_0: u32 = 0xfffe_0300;
-pub const PS_3_0: u32 = 0xffff_0300;
-const END_TOKEN: u32 = 0x0000_ffff;
+pub use crate::sm3asm::{END_TOKEN, PS_3_0, VS_3_0};
+use crate::hash::pandemic_hash_m2;
+use crate::sm3asm::Sm3Error;
+
 const COMMENT_OPCODE: u16 = 0xfffe;
+
+/// Largest blob the loader accepts: `FUN_0085b3f0` `memcpy`s every record into one 0x8000-byte
+/// scratch buffer with no size check.
+pub const MAX_BLOB: usize = 0x8000;
+/// Slots in the engine's id → shader table (`FUN_0085b810`, `id % 0x1200`, linear probe). The
+/// insert probe never gives up, so every store loaded together must hold fewer records than this.
+pub const TABLE_SLOTS: usize = 0x1200;
+/// The retail PC shader stores, as shipped in the game's `data` folder.
+pub const RETAIL_STORES: [&str; 6] = [
+    "shader3.bin",
+    "shader3Low.bin",
+    "shaderVT.bin",
+    "shaderVTLow.bin",
+    "shaderR2VB.bin",
+    "shaderR2VBLow.bin",
+];
+/// Blob alignment (and whole-file padding) in the retail stores.
+const STORE_ALIGN: usize = 16;
 const OP_DCL: u16 = 0x1f;
 const OP_DEF: u16 = 0x51;
 const OP_DEFI: u16 = 0x30;
@@ -43,7 +74,7 @@ pub const REG_CONST: u32 = 2;
 
 const PARAM_TOKEN_BIT: u32 = 0x8000_0000;
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ShaderKind {
     Vertex,
     Pixel,
@@ -81,6 +112,26 @@ pub enum Error {
     NotFourRegisters { name: String, count: u16 },
     NoFreeInputs,
     Structure(&'static str),
+    /// The SM3 codec refused the blob (malformed, or not exactly expressible).
+    Sm3(Sm3Error),
+    /// A blob larger than the loader's 0x8000-byte scratch buffer.
+    BlobTooLarge { size: usize },
+    /// A blob whose version token does not match the record kind.
+    VersionMismatch { kind: ShaderKind, found: u32 },
+    /// `replace_in_place` of an id the store does not hold.
+    MissingTarget(u32),
+    /// The id already exists: `store` is `None` for this store, `Some(i)` for `others[i]`.
+    IdCollision { id: u32, store: Option<usize> },
+    /// The stores loaded together would hold this many records; the table has [`TABLE_SLOTS`].
+    TooManyRecords { total: usize },
+    /// A `store_id` stem that is empty or still ends in `.sho`.
+    BadStem(String),
+}
+
+impl From<Sm3Error> for Error {
+    fn from(e: Sm3Error) -> Self {
+        Error::Sm3(e)
+    }
 }
 
 impl std::fmt::Display for Error {
@@ -96,6 +147,30 @@ impl std::fmt::Display for Error {
             }
             Error::NoFreeInputs => write!(f, "no 4 free contiguous input registers/semantics"),
             Error::Structure(w) => write!(f, "malformed shader bytecode: {w}"),
+            Error::Sm3(e) => write!(f, "SM3 bytecode: {e}"),
+            Error::BlobTooLarge { size } => {
+                write!(f, "blob is {size} bytes; the loader copies every blob into a {MAX_BLOB}-byte buffer")
+            }
+            Error::VersionMismatch { kind, found } => {
+                let want = match kind {
+                    ShaderKind::Vertex => VS_3_0,
+                    ShaderKind::Pixel => PS_3_0,
+                };
+                write!(f, "{kind:?} record needs version token 0x{want:08x}, the blob starts 0x{found:08x}")
+            }
+            Error::MissingTarget(id) => write!(f, "no record with id 0x{id:08x} to replace"),
+            Error::IdCollision { id, store: None } => {
+                write!(f, "id 0x{id:08x} is already in this store; the first loaded record would win")
+            }
+            Error::IdCollision { id, store: Some(i) } => write!(
+                f,
+                "id 0x{id:08x} is also in the other store #{i}; which record the engine binds depends on load order"
+            ),
+            Error::TooManyRecords { total } => write!(
+                f,
+                "{total} records across the stores loaded together; the engine's id table has {TABLE_SLOTS} slots and must keep one free"
+            ),
+            Error::BadStem(s) => write!(f, "store_id stem {s:?} must be non-empty and exclude the .sho extension"),
         }
     }
 }
@@ -104,11 +179,6 @@ impl std::error::Error for Error {}
 fn rd_u32(b: &[u8], off: usize) -> Result<u32, Error> {
     let s = b.get(off..off + 4).ok_or(Error::Truncated("u32"))?;
     Ok(u32::from_le_bytes([s[0], s[1], s[2], s[3]]))
-}
-
-fn rd_u16(b: &[u8], off: usize) -> Result<u16, Error> {
-    let s = b.get(off..off + 2).ok_or(Error::Truncated("u16"))?;
-    Ok(u16::from_le_bytes([s[0], s[1]]))
 }
 
 impl Store {
@@ -148,39 +218,21 @@ impl Store {
     }
 }
 
-/// Read the length-prefixed constant table (`CTAB`) a Pangea `.sho` blob carries
-/// verbatim in its first comment block. Returns (creator, constants).
+/// Read the constant table (`CTAB`) a `.sho` blob carries in its first `CTAB` comment block.
+/// Returns (creator, constants). Decoding is [`crate::sm3asm::Ctab::decode`].
 pub fn parse_ctab(blob: &[u8]) -> Result<(String, Vec<Constant>), Error> {
-    let p = find_ctab(blob).ok_or(Error::NoCtab)?;
-    let base = p + 4; // header begins right after the "CTAB" fourcc
-    let creator_off = rd_u32(blob, base + 4)? as usize;
-    let constants = rd_u32(blob, base + 12)? as usize;
-    let cinfo_off = rd_u32(blob, base + 16)? as usize;
-    let creator = cstr(blob, base + creator_off);
-    let mut out = Vec::with_capacity(constants);
-    for i in 0..constants {
-        let o = base + cinfo_off + i * 20;
-        let name_off = rd_u32(blob, o)? as usize;
-        out.push(Constant {
-            name: cstr(blob, base + name_off),
-            register_set: rd_u16(blob, o + 4)?,
-            register_index: rd_u16(blob, o + 6)?,
-            register_count: rd_u16(blob, o + 8)?,
-        });
-    }
-    Ok((creator, out))
-}
-
-fn find_ctab(blob: &[u8]) -> Option<usize> {
-    blob.windows(4).position(|w| w == b"CTAB")
-}
-
-fn cstr(b: &[u8], off: usize) -> String {
-    if off >= b.len() {
-        return String::new();
-    }
-    let end = b[off..].iter().position(|&c| c == 0).map(|e| off + e).unwrap_or(b.len());
-    String::from_utf8_lossy(&b[off..end]).into_owned()
+    let ctab = crate::sm3asm::find_ctab(blob)?.ok_or(Error::NoCtab)?;
+    let consts = ctab
+        .constants
+        .iter()
+        .map(|c| Constant {
+            name: c.name.clone(),
+            register_set: c.register_set,
+            register_index: c.register_index,
+            register_count: c.register_count,
+        })
+        .collect();
+    Ok((ctab.creator, consts))
 }
 
 // ── SM3 token stream ────────────────────────────────────────────────────────
@@ -471,7 +523,7 @@ pub fn verify_splice(spliced: &[u8], report: &SpliceReport) -> Result<(), Error>
     if tokens.first() != Some(&VS_3_0) {
         return Err(Error::NotVertexShader);
     }
-    if find_ctab(spliced).is_none() {
+    if crate::sm3asm::find_ctab(spliced)?.is_none() {
         return Err(Error::NoCtab);
     }
     let (_he, instrs) = walk(&tokens)?;
@@ -520,170 +572,23 @@ pub fn verify_splice(spliced: &[u8], report: &SpliceReport) -> Result<(), Error>
 // NOT Xenon microcode (that is the Xbox `.updb`/`ucode` path). Recovery toward WGSL therefore means:
 // disassemble the SM3 token stream, and identify WHICH logical `Pg*` shader a record is.
 //
-// **The identification wall (honest):** the record `id` is NOT `FNV(name)` — proven by hash inversion
-// against 344 known names (`density_upgrade_state.md`), and the store carries no name column. The
-// `.rdata` registry `FUN_0084f130` names the shaders (`PgSkyFP`, `PgDecalVP`, …) but binds them to
-// `.sho` blobs by FNV handle, and the `id → blob` map is a stripped `%0x1200` table. So mapping
-// "record N == PgSkyFP" is **confirm-live** (find the `%0x1200` reader, or bp the loader). What IS
-// static is every blob's intact CTAB → constant **names + register layout**, which lets us classify a
-// record by its constant *signature* (the only static handle on identity) and disassemble its body.
+// **Identity:** a record's `id` is `pandemic_hash_m2(<stem>_3.sho)` (`<stem>_3l.sho` in the Low store)
+// — see [`store_id`]. The registry `FUN_0084f130` pairs each logical name with its `.sho` file name, so
+// a record is named by hashing the registered `.sho` names. Every blob also keeps its intact CTAB →
+// constant **names + register layout**, which [`classify_role`] reads as a constant *signature*.
 
-/// SM3.0 register file (the merged 5-bit `D3DSHADER_PARAM_REGISTER_TYPE`). Only the members the
-/// disassembler labels are named; the rest fall through to a numbered form.
-fn regtype_name(ty: u32) -> &'static str {
-    match ty {
-        0 => "r",      // temp
-        1 => "v",      // input
-        2 => "c",      // float const
-        3 => "t",      // texture coord (ps) / addr (vs a0)
-        4 => "oPos",   // rasterizer out (vs)
-        5 => "oD",     // attribute out (vs color)
-        6 => "o",      // output (vs texcoord out / ps color pre-SM3 quirk)
-        7 => "i",      // int const
-        8 => "oC",     // colour out (ps)
-        9 => "oDepth", // depth out (ps)
-        10 => "s",     // sampler
-        15 => "aL",    // loop counter / label
-        16 => "p",     // predicate
-        17 => "b",     // bool const
-        _ => "x",
-    }
-}
-
-const SWIZ: [char; 4] = ['x', 'y', 'z', 'w'];
-
-/// Format a destination operand token (`reg + write mask`).
-fn fmt_dst(tok: u32) -> String {
-    let base = format!("{}{}", regtype_name(regtype(tok)), regnum(tok));
-    let mask = (tok >> 16) & 0xf;
-    if mask == 0xf || mask == 0 {
-        return base; // full write (or a form with no mask, e.g. dcl dst)
-    }
-    let mut s = String::from(".");
-    for (i, c) in SWIZ.iter().enumerate() {
-        if mask & (1 << i) != 0 {
-            s.push(*c);
-        }
-    }
-    base + &s
-}
-
-/// Format a source operand token (`reg + swizzle + modifier`), noting relative addressing.
-fn fmt_src(tok: u32) -> String {
-    let mut base = format!("{}{}", regtype_name(regtype(tok)), regnum(tok));
-    if tok & (1 << 13) != 0 {
-        base.push_str("[aL]"); // relative-addressed (const/palette array)
-    }
-    // swizzle: 2 bits per component in bits 16..23.
-    let sw = (tok >> 16) & 0xff;
-    let swz: Vec<char> = (0..4).map(|i| SWIZ[((sw >> (i * 2)) & 3) as usize]).collect();
-    let swizzle = if swz == ['x', 'y', 'z', 'w'] {
-        String::new()
-    } else if swz[0] == swz[1] && swz[1] == swz[2] && swz[2] == swz[3] {
-        format!(".{}", swz[0]) // replicate (e.g. .x)
-    } else {
-        format!(".{}{}{}{}", swz[0], swz[1], swz[2], swz[3])
-    };
-    // source modifier in bits 24..27 (0 none, 1 negate, common subset).
-    let modn = (tok >> 24) & 0xf;
-    let (pre, post) = match modn {
-        1 => ("-", ""),   // negate
-        2 => ("", "_bias"),
-        3 => ("", "_x2"),
-        11 => ("", "_abs"),
-        _ => ("", ""),
-    };
-    format!("{pre}{base}{swizzle}{post}")
-}
-
-/// Human-readable mnemonic for an SM3 opcode (the subset the retail Pg* shaders use; others print
-/// as `op_0xNN`). Enough to read a sky/decal/mesh body and hand-translate it to WGSL.
-fn opcode_name(op: u16) -> &'static str {
-    match op {
-        0x00 => "nop", 0x01 => "mov", 0x02 => "add", 0x03 => "sub", 0x04 => "mad",
-        0x05 => "mul", 0x06 => "rcp", 0x07 => "rsq", 0x08 => "dp3", 0x09 => "dp4",
-        0x0a => "min", 0x0b => "max", 0x0c => "slt", 0x0d => "sge", 0x0e => "exp",
-        0x0f => "log", 0x10 => "lit", 0x11 => "dst", 0x12 => "lrp", 0x13 => "frc",
-        0x14 => "m4x4", 0x15 => "m4x3", 0x16 => "m3x4", 0x17 => "m3x3", 0x18 => "m3x2",
-        0x19 => "call", 0x1a => "callnz", 0x1b => "loop", 0x1c => "ret", 0x1d => "endloop",
-        0x1e => "label", 0x1f => "dcl", 0x20 => "pow", 0x21 => "crs", 0x22 => "sgn",
-        0x23 => "abs", 0x24 => "nrm", 0x25 => "sincos", 0x26 => "rep", 0x27 => "endrep",
-        0x28 => "if", 0x29 => "ifc", 0x2a => "else", 0x2b => "endif", 0x2c => "break",
-        0x2d => "breakc", 0x2e => "mova", 0x2f => "defb", 0x30 => "defi",
-        0x40 => "texcoord", 0x41 => "texkill", 0x42 => "texld", 0x43 => "texbem",
-        0x48 => "texm3x3pad", 0x4a => "texm3x3tex", 0x51 => "def", 0x58 => "cmp",
-        0x5a => "bem", 0x5b => "dp2add", 0x5c => "dsx", 0x5d => "dsy", 0x5e => "texldd",
-        0x5f => "setp", 0x60 => "texldl", 0x61 => "breakp",
-        _ => "op",
-    }
-}
-
-/// Disassemble one `vs_3_0`/`ps_3_0` blob to readable SM3 assembly (one instruction per line). This
-/// is the recovery surface the WGSL translation reads off; it reuses the WIP token walker
-/// ([`walk`]) so it stays in lock-step with the splice's structural model. `dcl`/`def` operands are
-/// printed raw (semantic / immediate), executable operands are decoded (reg + mask/swizzle/mod).
+/// Disassemble one `vs_3_0`/`ps_3_0` blob, one statement per line. The text is exact: [`crate::sm3asm::assemble`]
+/// turns it back into the same bytes (CTAB included). This is the recovery surface a WGSL
+/// translation reads off.
 pub fn disassemble(blob: &[u8]) -> Result<Vec<String>, Error> {
-    if blob.len() < 4 || blob.len() % 4 != 0 {
-        return Err(Error::Structure("blob length not a whole number of tokens"));
-    }
-    let tokens: Vec<u32> = blob
-        .chunks_exact(4)
-        .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
-        .collect();
-    let version = tokens[0];
-    let kind = match version {
-        VS_3_0 => "vs_3_0",
-        PS_3_0 => "ps_3_0",
-        _ => return Err(Error::NotVertexShader),
-    };
-    let (_he, instrs) = walk(&tokens)?;
-    let mut out = vec![format!("{kind}")];
-    for ins in &instrs {
-        let name = opcode_name(ins.opcode);
-        let mnem = if name == "op" { format!("op_0x{:02x}", ins.opcode) } else { name.to_string() };
-        if matches!(ins.opcode, OP_DEF | OP_DEFI | OP_DEFB) {
-            // def cN, f,f,f,f — dst reg then 4 raw immediate tokens.
-            let dst = fmt_dst(tokens[ins.at + 1]);
-            let mut vals = Vec::new();
-            for p in 1..ins.nparams {
-                let raw = tokens[ins.at + 1 + p];
-                vals.push(if ins.opcode == OP_DEF {
-                    format!("{:.4}", f32::from_bits(raw))
-                } else {
-                    format!("0x{raw:08x}")
-                });
-            }
-            out.push(format!("{mnem} {dst}, {}", vals.join(", ")));
-        } else if ins.opcode == OP_DCL {
-            // dcl usage_reg — first token is the usage/semantic, second the register.
-            let usage = tokens[ins.at + 1];
-            let reg = fmt_dst(tokens[ins.at + 2]);
-            let u = usage & 0xf;
-            let uidx = (usage >> 16) & 0xf;
-            let uname = match u {
-                0 => "position", 1 => "blendweight", 2 => "blendindices", 3 => "normal",
-                4 => "psize", 5 => "texcoord", 6 => "tangent", 7 => "binormal",
-                10 => "color", _ => "usage",
-            };
-            out.push(format!("dcl_{uname}{uidx} {reg}"));
-        } else {
-            let mut ops: Vec<String> = Vec::new();
-            for p in 0..ins.nparams {
-                let tok = tokens[ins.at + 1 + p];
-                ops.push(if p == 0 { fmt_dst(tok) } else { fmt_src(tok) });
-            }
-            out.push(format!("{mnem} {}", ops.join(", ")));
-        }
-    }
-    Ok(out)
+    Ok(crate::sm3asm::disassemble(blob)?.lines().map(str::to_string).collect())
 }
 
-/// A recovered role bucket for a shader record, assigned from its CTAB constant **signature** — the
-/// only static identity handle (record `id != FNV(name)`; see the module note). These are *candidate*
-/// classes, not proven `Pg*` names: e.g. a VS whose only constants are the view/projection block and
-/// carries no `objectData`/`BoneMatrixArray` is a **fullscreen/far-plane** shader — the class the sky,
-/// sun, moon, cloud and post-process shaders all fall into — so it narrows the search but does not by
-/// itself say "this is `PgSkyFP`". Mapping a bucket member to its exact name is confirm-live.
+/// A role bucket for a shader record, assigned from its CTAB constant **signature**. These are
+/// *candidate* classes, not `Pg*` names: e.g. a VS whose only constants are the view/projection block
+/// and carries no `objectData`/`BoneMatrixArray` is a **fullscreen/far-plane** shader — the class the
+/// sky, sun, moon, cloud and post-process shaders all fall into. A record's exact name comes from its
+/// id instead (see [`store_id`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ShaderRole {
     /// VS reading `BoneMatrixArray` — a skinned character/vehicle mesh vertex shader.
@@ -754,6 +659,168 @@ pub fn classify_role(kind: &ShaderKind, consts: &[Constant]) -> ShaderRole {
     }
 }
 
+// ── store writer ─────────────────────────────────────────────────────────────────────────────────
+
+/// The record id the engine files a registered `.sho` under: `pandemic_hash_m2(stem + "_3.sho")`, or
+/// `stem + "_3l.sho"` for the Low store. `stem` is the registered `.sho` file name without `.sho`
+/// (`PgMeshVP.sho` → `PgMeshVP`); `FUN_0085b6f0` cuts those four characters and appends the suffix.
+pub fn store_id(stem: &str, low: bool) -> Result<u32, Error> {
+    if stem.is_empty() || stem.to_ascii_lowercase().ends_with(".sho") {
+        return Err(Error::BadStem(stem.to_string()));
+    }
+    let suffix = if low { "_3l.sho" } else { "_3.sho" };
+    Ok(pandemic_hash_m2(&format!("{stem}{suffix}")))
+}
+
+/// One record of a store being written.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoreEntry {
+    pub id: u32,
+    pub kind: ShaderKind,
+    pub blob: Vec<u8>,
+}
+
+/// Refuse a blob the loader cannot take for a record of `kind`.
+fn check_blob(kind: ShaderKind, blob: &[u8]) -> Result<(), Error> {
+    if blob.len() > MAX_BLOB {
+        return Err(Error::BlobTooLarge { size: blob.len() });
+    }
+    if blob.len() < 8 || !blob.len().is_multiple_of(4) {
+        return Err(Error::Structure("blob is not a whole token stream of at least version + end"));
+    }
+    let first = rd_u32(blob, 0)?;
+    let want = match kind {
+        ShaderKind::Vertex => VS_3_0,
+        ShaderKind::Pixel => PS_3_0,
+    };
+    if first != want {
+        return Err(Error::VersionMismatch { kind, found: first });
+    }
+    if rd_u32(blob, blob.len() - 4)? != END_TOKEN {
+        return Err(Error::Structure("blob does not end with the end token"));
+    }
+    Ok(())
+}
+
+fn align_up(n: usize) -> usize {
+    n.div_ceil(STORE_ALIGN) * STORE_ALIGN
+}
+
+/// Rebuilds a shader store in the retail layout. The `others` a mutation takes are every other
+/// store the engine loads alongside this one: their ids share the engine's one id table.
+/// `FUN_0084f130` always loads `shader3.bin` and `shader3Low.bin`, then either `shaderVT.bin` +
+/// `shaderVTLow.bin` (caps bit 2) or `shaderR2VB.bin` + `shaderR2VBLow.bin` (bit 3), never both.
+#[derive(Debug, Clone, Default)]
+pub struct StoreBuilder {
+    entries: Vec<StoreEntry>,
+}
+
+impl StoreBuilder {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Every record of `store`, in record order, blobs copied verbatim.
+    pub fn from_store(store: &Store) -> Self {
+        let entries = store
+            .records
+            .iter()
+            .map(|r| StoreEntry { id: r.id, kind: r.kind, blob: store.blob(r).to_vec() })
+            .collect();
+        StoreBuilder { entries }
+    }
+
+    pub fn entries(&self) -> &[StoreEntry] {
+        &self.entries
+    }
+
+    fn check_others(id: u32, others: &[&Store]) -> Result<(), Error> {
+        match others.iter().position(|s| s.records.iter().any(|r| r.id == id)) {
+            Some(i) => Err(Error::IdCollision { id, store: Some(i) }),
+            None => Ok(()),
+        }
+    }
+
+    /// Swap the blob of the one record with `id`, keeping its position and kind.
+    pub fn replace_in_place(&mut self, id: u32, blob: Vec<u8>, others: &[&Store]) -> Result<(), Error> {
+        let hits: Vec<usize> = (0..self.entries.len()).filter(|&i| self.entries[i].id == id).collect();
+        let at = match hits[..] {
+            [] => return Err(Error::MissingTarget(id)),
+            [one] => one,
+            _ => return Err(Error::IdCollision { id, store: None }),
+        };
+        Self::check_others(id, others)?;
+        check_blob(self.entries[at].kind, &blob)?;
+        self.entries[at].blob = blob;
+        Ok(())
+    }
+
+    /// Append a new record.
+    pub fn add(&mut self, id: u32, kind: ShaderKind, blob: Vec<u8>, others: &[&Store]) -> Result<(), Error> {
+        if self.entries.iter().any(|e| e.id == id) {
+            return Err(Error::IdCollision { id, store: None });
+        }
+        Self::check_others(id, others)?;
+        check_blob(kind, &blob)?;
+        let total = self.entries.len() + 1 + others.iter().map(|s| s.records.len()).sum::<usize>();
+        if total >= TABLE_SLOTS {
+            return Err(Error::TooManyRecords { total });
+        }
+        self.entries.push(StoreEntry { id, kind, blob });
+        Ok(())
+    }
+
+    /// Serialize: `[count][records][blobs]`, each blob at a 16-byte-aligned offset in record order,
+    /// zero padding between blobs, the file padded to 16.
+    pub fn to_bytes(&self) -> Result<Vec<u8>, Error> {
+        let n = self.entries.len();
+        if n == 0 {
+            return Err(Error::BadCount(0));
+        }
+        if n >= TABLE_SLOTS {
+            return Err(Error::TooManyRecords { total: n });
+        }
+        let mut offsets = Vec::with_capacity(n);
+        let mut at = align_up(4 + 16 * n);
+        for e in &self.entries {
+            offsets.push(at);
+            at = align_up(at + e.blob.len());
+        }
+        let mut out = vec![0u8; at];
+        out[0..4].copy_from_slice(&(n as u32).to_le_bytes());
+        for (i, (e, &off)) in self.entries.iter().zip(&offsets).enumerate() {
+            let kind: u32 = match e.kind {
+                ShaderKind::Vertex => 1,
+                ShaderKind::Pixel => 0,
+            };
+            let r = 4 + 16 * i;
+            for (k, v) in [e.id, off as u32, e.blob.len() as u32, kind].iter().enumerate() {
+                out[r + 4 * k..r + 4 * k + 4].copy_from_slice(&v.to_le_bytes());
+            }
+            out[off..off + e.blob.len()].copy_from_slice(&e.blob);
+        }
+        Ok(out)
+    }
+}
+
+/// A retail store for a game-gated test, found through `MERCS2_GAME_DIR` (install root or its `data`
+/// folder) or the dev checkout's `.mercs2-local.toml`. `None` — after a loud SKIP line — when absent.
+#[cfg(test)]
+pub(crate) fn retail_store_for_test(name: &str) -> Option<Store> {
+    let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let path = crate::game_paths::wad_from_env(name).or_else(|| {
+        crate::game_paths::wad_from_local_config(manifest)
+            .and_then(|vz| vz.parent().map(|d| d.join(name)))
+            .filter(|p| p.is_file())
+    });
+    let Some(path) = path else {
+        eprintln!("SKIP (retail data absent): {name} — set MERCS2_GAME_DIR to the install or its data folder");
+        return None;
+    };
+    let bytes = std::fs::read(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+    Some(Store::parse(bytes).unwrap_or_else(|e| panic!("{}: {e}", path.display())))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -800,47 +867,26 @@ mod tests {
         t.iter().flat_map(|w| w.to_le_bytes()).collect()
     }
 
+    /// A CTAB declaring viewContextData[c0:3] + objectData[c4:7] as float4x4, laid out by the
+    /// same encoder the assembler uses.
     fn build_ctab() -> Vec<u8> {
-        // header(28) + 2 constinfo(20 each) + name strings.
-        let mut b = Vec::new();
-        let put = |b: &mut Vec<u8>, v: u32| b.extend_from_slice(&v.to_le_bytes());
-        let header = 28u32;
-        let cinfo_off = header;
-        let names_off = header + 40;
-        let name_view = names_off; // "viewContextData\0"
-        let name_obj = names_off + 16; // "objectData\0"
-        let creator_off = name_obj + 11;
-        put(&mut b, header); // Size
-        put(&mut b, creator_off); // Creator
-        put(&mut b, VS_3_0); // Version
-        put(&mut b, 2); // Constants
-        put(&mut b, cinfo_off); // ConstantInfo
-        put(&mut b, 0); // Flags
-        put(&mut b, 0); // Target
-        // constinfo[0] = viewContextData c0..3
-        put(&mut b, name_view);
-        b.extend_from_slice(&2u16.to_le_bytes()); // regset c
-        b.extend_from_slice(&0u16.to_le_bytes()); // index 0
-        b.extend_from_slice(&4u16.to_le_bytes()); // count 4
-        b.extend_from_slice(&0u16.to_le_bytes());
-        put(&mut b, 0);
-        put(&mut b, 0);
-        // constinfo[1] = objectData c4..7
-        put(&mut b, name_obj);
-        b.extend_from_slice(&2u16.to_le_bytes());
-        b.extend_from_slice(&4u16.to_le_bytes());
-        b.extend_from_slice(&4u16.to_le_bytes());
-        b.extend_from_slice(&0u16.to_le_bytes());
-        put(&mut b, 0);
-        put(&mut b, 0);
-        // names
-        b.extend_from_slice(b"viewContextData\0");
-        b.extend_from_slice(b"objectData\0");
-        b.extend_from_slice(b"x\0"); // creator (placeholder)
-        while b.len() % 4 != 0 {
-            b.push(0);
+        use crate::sm3asm::{Ctab, CtabConstant, CtabType};
+        let matrix = CtabType { class: 3, ty: 3, rows: 4, columns: 4, elements: 1, members: vec![] };
+        let constant = |name: &str, register_index: u16| CtabConstant {
+            name: name.into(),
+            register_set: 2,
+            register_index,
+            register_count: 4,
+            reserved: 0,
+            ty: matrix.clone(),
+        };
+        Ctab {
+            creator: "test".into(),
+            target: "vs_3_0".into(),
+            flags: 0,
+            constants: vec![constant("viewContextData", 0), constant("objectData", 4)],
         }
-        b
+        .encode(VS_3_0)
     }
 
     #[test]
@@ -912,15 +958,7 @@ mod tests {
 
     #[test]
     fn parse_real_store_if_present() {
-        let path = concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../../../game-files/shader3.bin"
-        );
-        let Ok(bytes) = std::fs::read(path) else {
-            eprintln!("SKIP: {path} not present");
-            return;
-        };
-        let store = Store::parse(bytes).unwrap();
+        let Some(store) = retail_store_for_test("shader3.bin") else { return };
         let vs = store.records.iter().filter(|r| matches!(r.kind, ShaderKind::Vertex)).count();
         let ps = store.records.len() - vs;
         assert_eq!(store.records.len(), 556);
@@ -982,5 +1020,148 @@ mod tests {
             classify_role(&ShaderKind::Pixel, &[mk("diffuseMap", 3)]),
             ShaderRole::TexturedPs
         );
+    }
+
+    // ── store writer ──
+
+    fn magenta_ps() -> Vec<u8> {
+        crate::sm3asm::assemble("ps_3_0\ndef c0, 1, 0, 1, 1\nmov oC0, c0").unwrap()
+    }
+    fn passthrough_vs() -> Vec<u8> {
+        crate::sm3asm::assemble("vs_3_0\ndcl_position v0\ndcl_position o0\nmov o0, v0").unwrap()
+    }
+    fn small_store(ids: &[u32]) -> Store {
+        let mut b = StoreBuilder::new();
+        for &id in ids {
+            b.add(id, ShaderKind::Pixel, magenta_ps(), &[]).unwrap();
+        }
+        Store::parse(b.to_bytes().unwrap()).unwrap()
+    }
+
+    #[test]
+    fn store_id_matches_the_known_records() {
+        assert_eq!(store_id("PgMeshVP", false).unwrap(), 0x2af7_398f);
+        assert_eq!(store_id("PgSkyFP", false).unwrap(), 0xc91c_0187);
+        assert_eq!(store_id("PgMeshVP", true).unwrap(), 0x9b0d_5961);
+        assert_eq!(store_id("PgSkyFP", true).unwrap(), 0xa759_fdb9);
+        assert!(matches!(store_id("", false), Err(Error::BadStem(_))));
+        assert!(matches!(store_id("PgMeshVP.sho", false), Err(Error::BadStem(_))));
+        // Materials name their pixel shader by the logical name, a different key space.
+        assert_eq!(pandemic_hash_m2("PgDiffSpecNormFP"), 0xcaef_e1fe);
+        assert_eq!(pandemic_hash_m2("PgDiffSpecReflNormAmbOccRimFP"), 0x322f_cd56);
+    }
+
+    #[test]
+    fn store_ids_are_present_in_the_retail_stores() {
+        let (Some(high), Some(low)) = (retail_store_for_test("shader3.bin"), retail_store_for_test("shader3Low.bin")) else {
+            return;
+        };
+        let has = |s: &Store, id: u32, kind: ShaderKind| s.records.iter().any(|r| r.id == id && r.kind == kind);
+        for (stem, kind) in [("PgMeshVP", ShaderKind::Vertex), ("PgSkyFP", ShaderKind::Pixel), ("PgBlurHFP", ShaderKind::Pixel)] {
+            assert!(has(&high, store_id(stem, false).unwrap(), kind), "{stem} in shader3.bin");
+            assert!(has(&low, store_id(stem, true).unwrap(), kind), "{stem} in shader3Low.bin");
+            assert!(!has(&high, store_id(stem, true).unwrap(), kind), "{stem} Low id not in shader3.bin");
+        }
+    }
+
+    #[test]
+    fn retail_stores_rewrite_byte_identically() {
+        let mut present = 0;
+        for name in RETAIL_STORES {
+            let Some(store) = retail_store_for_test(name) else { continue };
+            present += 1;
+            let out = StoreBuilder::from_store(&store).to_bytes().unwrap();
+            assert!(out == store.bytes, "{name}: rewrite differs from retail");
+        }
+        assert!(present == 0 || present == RETAIL_STORES.len(), "every retail store must be present once any is");
+    }
+
+    #[test]
+    fn replace_changes_exactly_one_record() {
+        let Some(store) = retail_store_for_test("shader3.bin") else { return };
+        let id = store_id("PgSkyFP", false).unwrap();
+        let mut b = StoreBuilder::from_store(&store);
+        b.replace_in_place(id, magenta_ps(), &[]).unwrap();
+        let out = Store::parse(b.to_bytes().unwrap()).unwrap();
+        assert_eq!(out.records.len(), store.records.len());
+        let mut changed = 0;
+        for (old, new) in store.records.iter().zip(&out.records) {
+            assert_eq!((old.id, old.kind), (new.id, new.kind), "record order and kinds are kept");
+            assert_eq!(new.blob_off as usize % 16, 0);
+            if new.id == id {
+                assert_eq!(out.blob(new), &magenta_ps()[..]);
+                changed += 1;
+            } else {
+                assert_eq!(out.blob(new), store.blob(old), "record 0x{:08x} must be untouched", old.id);
+            }
+        }
+        assert_eq!(changed, 1);
+        assert_eq!(out.bytes.len() % 16, 0);
+    }
+
+    #[test]
+    fn add_appends_a_record() {
+        let Some(store) = retail_store_for_test("shader3.bin") else { return };
+        let id = store_id("SmMagentaFP", false).unwrap();
+        let mut b = StoreBuilder::from_store(&store);
+        b.add(id, ShaderKind::Pixel, magenta_ps(), &[]).unwrap();
+        let out = Store::parse(b.to_bytes().unwrap()).unwrap();
+        assert_eq!(out.records.len(), store.records.len() + 1);
+        let last = out.records.last().unwrap();
+        assert_eq!((last.id, last.kind), (id, ShaderKind::Pixel));
+        assert_eq!(out.blob(last), &magenta_ps()[..]);
+        let prev = &out.records[out.records.len() - 2];
+        assert_eq!(
+            last.blob_off as usize,
+            ((prev.blob_off + prev.blob_size) as usize).div_ceil(16) * 16,
+            "appended at the next 16-byte boundary"
+        );
+        for (old, new) in store.records.iter().zip(&out.records) {
+            assert_eq!((old.id, old.kind), (new.id, new.kind));
+            assert_eq!(out.blob(new), store.blob(old));
+        }
+        assert_eq!(out.bytes.len() % 16, 0);
+    }
+
+    #[test]
+    fn store_writer_refusals() {
+        let other = small_store(&[0x1111_1111]);
+        let mut b = StoreBuilder::from_store(&small_store(&[0xaaaa_aaaa, 0xbbbb_bbbb]));
+
+        // blob larger than the loader's 0x8000 scratch buffer
+        let mut big = magenta_ps();
+        let end = big.len() - 4;
+        big.splice(end..end, std::iter::repeat_n(0u8, MAX_BLOB)); // pads before the end token
+        assert!(matches!(b.add(0x2, ShaderKind::Pixel, big.clone(), &[]), Err(Error::BlobTooLarge { .. })));
+        assert!(matches!(b.replace_in_place(0xaaaa_aaaa, big, &[]), Err(Error::BlobTooLarge { .. })));
+        // version token vs kind
+        assert!(matches!(b.add(0x2, ShaderKind::Vertex, magenta_ps(), &[]), Err(Error::VersionMismatch { .. })));
+        assert!(matches!(b.add(0x2, ShaderKind::Pixel, passthrough_vs(), &[]), Err(Error::VersionMismatch { .. })));
+        assert!(matches!(b.replace_in_place(0xaaaa_aaaa, passthrough_vs(), &[]), Err(Error::VersionMismatch { .. })));
+        // missing replace target
+        assert!(matches!(b.replace_in_place(0x3, magenta_ps(), &[]), Err(Error::MissingTarget(0x3))));
+        // collisions: this store, another store
+        assert!(matches!(b.add(0xaaaa_aaaa, ShaderKind::Pixel, magenta_ps(), &[]), Err(Error::IdCollision { store: None, .. })));
+        assert!(matches!(
+            b.add(0x1111_1111, ShaderKind::Pixel, magenta_ps(), &[&other]),
+            Err(Error::IdCollision { store: Some(0), .. })
+        ));
+        let shared = small_store(&[0xaaaa_aaaa]);
+        assert!(matches!(
+            b.replace_in_place(0xaaaa_aaaa, magenta_ps(), &[&other, &shared]),
+            Err(Error::IdCollision { store: Some(1), .. })
+        ));
+        // the engine's id table: every store loaded together must stay under 0x1200 records
+        let crowd_ids: Vec<u32> = (0..(TABLE_SLOTS as u32 - 3)).map(|i| 0x5000_0000 + i).collect();
+        let crowd = small_store(&crowd_ids);
+        assert!(matches!(
+            b.add(0x2, ShaderKind::Pixel, magenta_ps(), &[&crowd]),
+            Err(Error::TooManyRecords { total }) if total == TABLE_SLOTS
+        ));
+        // …and one fewer is fine
+        let crowd = small_store(&crowd_ids[1..]);
+        b.add(0x2, ShaderKind::Pixel, magenta_ps(), &[&crowd]).unwrap();
+        // nothing refused above changed the store
+        assert_eq!(b.entries().iter().map(|e| e.id).collect::<Vec<_>>(), [0xaaaa_aaaa, 0xbbbb_bbbb, 0x2]);
     }
 }

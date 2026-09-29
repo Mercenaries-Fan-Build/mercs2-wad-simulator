@@ -303,11 +303,11 @@ pub fn build_streaming_catalog(
     _idx: &mercs2_formats::world_index::WorldIndex,
     layers_static: &[u8],
     cfg: mercs2_core::streaming::StreamingConfig,
-) -> (
+) -> Result<(
     mercs2_core::streaming::StreamingManager,
     std::collections::HashMap<u32, PropSpawn>,
     std::collections::HashMap<u32, (u32, [f32; 3])>,
-) {
+), String> {
     use mercs2_core::streaming::{EntityUnit, StreamingManager};
 
     let mut mgr = StreamingManager::new(cfg);
@@ -360,7 +360,7 @@ pub fn build_streaming_catalog(
     // double-added with a smaller stream-out — that double-add made the manager emit conflicting
     // wake(d<1000)/hibernate(d>400) for the same key each tick, flickering the low-res hide/show.
     let mut terrain_tiles: std::collections::HashMap<u32, (u32, [f32; 3])> = std::collections::HashMap::new();
-    for t in mercs2_formats::placement::load_terrain_tiles(layers_static) {
+    for t in mercs2_formats::placement::load_terrain_tiles(layers_static)? {
         mgr.add_entity(EntityUnit { key: t.key, pos: t.pos, dist: [1000, 160, 60, 20] });
         terrain_tiles.insert(t.key, (t.terrainmesh_hash, t.pos));
     }
@@ -398,7 +398,7 @@ pub fn build_streaming_catalog(
         println!("[stream] region cache (seam B): {n_regions} PopulationDensity anchors registered");
     }
 
-    (mgr, props, terrain_tiles)
+    Ok((mgr, props, terrain_tiles))
 }
 
 /// Fold one `vz_state` OVERLAY block's placements into an existing streaming catalog, using the SAME

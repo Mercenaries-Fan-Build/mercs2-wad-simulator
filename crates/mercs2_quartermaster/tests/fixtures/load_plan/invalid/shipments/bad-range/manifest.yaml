@@ -1,0 +1,9 @@
+format: 2
+shipment:
+  name: bad-range
+  version: 1.0.0
+  target: retail
+load:
+  requires:
+    - { shipment: lua-bridge, version: "not a range" }
+contributions: []

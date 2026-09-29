@@ -2,6 +2,10 @@
 name = "densify"
 version = "0.1.0"
 edition = "2021"
+# Density-injection tooling: a workspace-local binary, never released to crates.io. Marking it here
+# (rather than in a publisher-side allowlist) makes its non-publishable status a property of the
+# crate that cargo and `cargo xtask publish` both honor.
+publish = false
 description = "Mercenaries 2 vegetation densifier — authors NOVEL canopy+understory scatter placements around existing treed areas (ground-snapped, water/road/slope/building aware) and emits a deployable overlay WAD + coverage report. Base vz.wad stays pristine."
 license.workspace = true
 repository.workspace = true

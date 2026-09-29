@@ -10,6 +10,7 @@
 //! precisely the ones that caught every structural bug so far.
 
 use mercs2_quartermaster::build::{self, BuildError, Destination};
+use mercs2_quartermaster::compat::PlanInput;
 use mercs2_quartermaster::discover;
 use std::path::{Path, PathBuf};
 
@@ -24,7 +25,7 @@ fn shipment(dir: &Path, contributions: &str) -> discover::LoadedShipment {
     std::fs::write(
         dir.join("manifest.yaml"),
         format!(
-            "format: 1
+            "format: 2
 shipment: {{ name: test-shipment, version: 1.0.0, target: retail }}
 contributions:
 {contributions}"
@@ -59,7 +60,7 @@ fn a_blocking_diagnostic_fails_the_build() {
         other => panic!("expected Blocked, got {other:?}"),
     }
     assert!(
-        !dir.join("build").join("test-shipment.wad").exists(),
+        !dir.join("_build").join("test-shipment.wad").exists(),
         "nothing may be emitted"
     );
 }
@@ -240,8 +241,8 @@ fn an_empty_shipment_still_emits_a_record_and_a_log() {
     let report = build::build(&s, None, None, None, None).expect("empty shipment builds");
     assert!(report.wad.is_none(), "nothing to put in a WAD");
     assert!(report.placements.is_empty());
-    assert!(dir.join("build/placement.json").is_file());
-    assert!(dir.join("build/build.log").is_file());
+    assert!(dir.join("_build/placement.json").is_file());
+    assert!(dir.join("_build/build.log").is_file());
 }
 
 #[test]
@@ -251,7 +252,7 @@ fn the_output_directory_can_be_redirected() {
     let s = shipment(&dir, "  []\n");
     build::build(&s, None, None, Some(&out), None).expect("build");
     assert!(out.join("placement.json").is_file());
-    assert!(!dir.join("build").exists());
+    assert!(!dir.join("_build").exists());
 }
 
 /// Known SHA-256 vectors — the mandate is verify-BY-HASH, so a wrong digest silently defeats every
@@ -273,7 +274,7 @@ fn the_placement_record_is_well_formed_json() {
     let dir = scratch("record");
     let s = shipment(&dir, "  []\n");
     build::build(&s, None, None, None, None).expect("build");
-    let text = std::fs::read_to_string(dir.join("build/placement.json")).unwrap();
+    let text = std::fs::read_to_string(dir.join("_build/placement.json")).unwrap();
     let doc: serde_json::Value = serde_json::from_str(&text).expect("valid JSON");
     assert_eq!(doc["format"], 1);
     assert!(doc["placements"].is_array());
@@ -429,6 +430,39 @@ fn solid_png(width: u32, height: u32) -> Vec<u8> {
         writer.write_image_data(&data).unwrap();
     }
     out
+}
+
+/// Nobody resizes a texture. An image whose size differs from the shipped texture is a
+/// hard error, and the message names BOTH sizes — the image's and the target's — so the author knows
+/// what to export at without looking it up.
+#[test]
+fn size_mismatch_refused_message_names_both_sizes() {
+    let Some(mut game) = discovered_game() else {
+        return;
+    };
+    let hash = mercs2_formats::hash::pandemic_hash_m2("al_hum_boss_ub");
+    let existing = game.texture(hash).expect("al_hum_boss_ub must exist in vz.wad");
+    let (w, h) = (existing.width, existing.height);
+    // Half the width, same height: a different size, and still a multiple of 4.
+    let (iw, ih) = (w / 2, h);
+    assert_ne!((iw, ih), (w, h));
+
+    let dir = scratch("size_mismatch");
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::write(dir.join("src/t.png"), solid_png(iw, ih)).unwrap();
+    let s = shipment(
+        &dir,
+        "  - kind: replace_texture\n    target: al_hum_boss_ub\n    image: src/t.png\n",
+    );
+    match build::build(&s, Some(&mut game), None, None, None) {
+        Err(e @ BuildError::Lower { .. }) => {
+            let m = e.to_string();
+            assert!(m.contains(&format!("{iw}x{ih}")), "names the image size: {m}");
+            assert!(m.contains(&format!("{w}x{h}")), "names the target size: {m}");
+        }
+        other => panic!("expected a Lower refusal, got {other:?}"),
+    }
+    assert!(!dir.join("_build/test-shipment.wad").exists(), "nothing is written");
 }
 
 /// M0007/M0009 against real ASET rows, in both directions.
@@ -768,7 +802,8 @@ fn the_availability_lift_is_emitted_exactly_once() {
         target: "wifpmcinterior".into(),
         append: link::outfit_row_append("mattias", "Two", "m_two", "Two"),
     };
-    let (src, _) = link::linked_source("base\n", &[&a, &b], &[]);
+    let (src, _) = link::linked_source("base\n", &[&a, &b], &["a".into(), "b".into()])
+        .expect("both contributors are in the order");
     let epilogue = link::derived_epilogue("wifpmcinterior").unwrap();
     let full = format!("{src}{epilogue}");
     assert_eq!(
@@ -828,7 +863,7 @@ fn outfit_shipment(dir: &Path, name: &str, asset: &str, slug: &str) -> discover:
     std::fs::write(
         dir.join("manifest.yaml"),
         format!(
-            "format: 1\nshipment: {{ name: {name}, version: 1.0.0, target: retail }}\n\
+            "format: 2\nshipment: {{ name: {name}, version: 1.0.0, target: retail }}\n\
              contributions:\n  - kind: add_outfit\n    name: {asset}\n    slug: {slug}\n\
              \x20   display: {slug}\n    wearer: mattias\n    model: src/m.glb\n\
              \x20   donor: pmc_hum_mattias\n"
@@ -836,6 +871,20 @@ fn outfit_shipment(dir: &Path, name: &str, asset: &str, slug: &str) -> discover:
     )
     .unwrap();
     discover::open(dir).expect("open")
+}
+
+/// A request over opened Shipments, with `arg:<n>` ids in the given order — what `qm link` builds
+/// from positional directories.
+fn request<'a>(shipments: &[&'a discover::LoadedShipment], ids: &'a [String]) -> Vec<PlanInput<'a>> {
+    shipments
+        .iter()
+        .zip(ids)
+        .map(|(s, id)| PlanInput { id, shipment: s })
+        .collect()
+}
+
+fn arg_ids(n: usize) -> Vec<String> {
+    (1..=n).map(|i| format!("arg:{i}")).collect()
 }
 
 /// ★ The deploy-side failure this design exists to prevent.
@@ -868,7 +917,8 @@ fn two_installed_shipments_both_survive_the_deploy_link() {
     }
 
     let deploy = root.join("deploy");
-    let report = build::link_installed(&[&a, &b], &mut game, &corpus, &deploy)
+    let ids = arg_ids(2);
+    let report = build::link_installed(&request(&[&a, &b], &ids), &mut game, &corpus, &deploy)
         .expect("deploy link");
     eprintln!("{}", report.log.join("\n"));
 
@@ -898,9 +948,11 @@ fn two_installed_shipments_both_survive_the_deploy_link() {
     );
     assert_eq!(
         report.linked[0].contributors,
-        vec!["roze-skin", "sean-devlin"],
-        "sorted by Shipment name so the bytes do not depend on install order"
+        vec!["sean-devlin", "roze-skin"],
+        "neither requires the other, so the request order is the load order"
     );
+    // The plan the link followed is written beside the placement record.
+    assert!(deploy.join("load-plan.json").is_file(), "the link writes its load plan");
 
     // The emitted overlay must carry BOTH rows.
     let wad = report.wad.expect("a link WAD");
@@ -970,7 +1022,7 @@ fn a_resident_patch_lua_builds_into_a_valid_overlay() {
     .unwrap();
     std::fs::write(
         root.join("manifest.yaml"),
-        "format: 1\nshipment: { name: resident-lua, version: 1.0.0, target: retail }\n\
+        "format: 2\nshipment: { name: resident-lua, version: 1.0.0, target: retail }\n\
          contributions:\n  - kind: patch_lua\n    target: mrxplayer\n    append: src/append.lua\n",
     )
     .unwrap();
@@ -1037,10 +1089,10 @@ fn a_resident_patch_lua_builds_into_a_valid_overlay() {
     );
 }
 
-/// Deploy order must not change the bytes, or verify-by-hash is meaningless and a saved costume
-/// index can shift under a player between deploys.
+/// The request order is the tie-break: with no `requires` between two Shipments, reversing the
+/// request reverses the link order, and the same request always gives the same bytes.
 #[test]
-fn the_deploy_link_is_order_independent() {
+fn the_deploy_link_follows_the_request_order() {
     let Some(mut game) = discovered_game() else {
         return;
     };
@@ -1050,13 +1102,384 @@ fn the_deploy_link_is_order_independent() {
     let root = scratch("deploy_order");
     let a = outfit_shipment(&root.join("a"), "aaa-mod", "qm_a", "Aaa");
     let b = outfit_shipment(&root.join("b"), "zzz-mod", "qm_b", "Zzz");
+    let ids = arg_ids(2);
 
-    let one = build::link_installed(&[&a, &b], &mut game, &corpus, &root.join("one")).unwrap();
-    let two = build::link_installed(&[&b, &a], &mut game, &corpus, &root.join("two")).unwrap();
+    let one = build::link_installed(&request(&[&a, &b], &ids), &mut game, &corpus, &root.join("one"))
+        .unwrap();
+    let again = build::link_installed(&request(&[&a, &b], &ids), &mut game, &corpus, &root.join("again"))
+        .unwrap();
+    let two = build::link_installed(&request(&[&b, &a], &ids), &mut game, &corpus, &root.join("two"))
+        .unwrap();
     assert_eq!(
-        one.placements[0].sha256, two.placements[0].sha256,
-        "install order must not change the linked bytes"
+        one.placements[0].sha256, again.placements[0].sha256,
+        "one request must always link to the same bytes"
     );
+    assert_eq!(one.linked[0].contributors, vec!["aaa-mod", "zzz-mod"]);
+    assert_eq!(
+        two.linked[0].contributors,
+        vec!["zzz-mod", "aaa-mod"],
+        "reversing the request reverses the order"
+    );
+}
+
+/// M0209 reaches the plan: `qm link` appends a warning per unresolved literal import to the plan's
+/// findings, on the item whose source carries it, and the plan stays ok.
+#[test]
+fn an_unresolved_literal_import_is_a_warning_in_the_link_plan() {
+    let Some(mut game) = discovered_game() else {
+        return;
+    };
+    let Some(corpus) = corpus_for_tests() else {
+        return;
+    };
+    let root = scratch("deploy_m0209");
+    std::fs::create_dir_all(root.join("mod/src")).unwrap();
+    std::fs::write(
+        root.join("mod/src/probe.lua"),
+        "local lib = import(\"qm_no_such_module\")\nreturn {}\n",
+    )
+    .unwrap();
+    let s = shipment(
+        &root.join("mod"),
+        "  - kind: add_script\n    name: qm_m0209_probe\n    source: src/probe.lua\n",
+    );
+    let out = root.join("out");
+    let ids = arg_ids(1);
+    let report = build::link_installed(&request(&[&s], &ids), &mut game, &corpus, &out)
+        .expect("an unresolved import is a warning, not a refusal");
+    assert!(report.plan.ok);
+    let m0209: Vec<_> = report.plan.findings.iter().filter(|f| f.code == "M0209").collect();
+    assert_eq!(m0209.len(), 1, "{:?}", report.plan.findings);
+    assert_eq!(m0209[0].items, vec!["arg:1".to_string()]);
+    assert!(m0209[0].message.contains("qm_no_such_module"), "{}", m0209[0].message);
+    let written: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(out.join("load-plan.json")).unwrap()).unwrap();
+    assert_eq!(written["ok"], true);
+    assert_eq!(written["findings"][0]["code"], "M0209");
+    assert_eq!(written["findings"][0]["severity"], "warning");
+    assert_eq!(
+        written["findings"][0]["refs"],
+        serde_json::json!([{ "section": "items", "index": 0 }])
+    );
+}
+
+/// `(key hash, text)` for every entry of a stringdb container, read through the codec.
+fn string_entries(container: &[u8]) -> Vec<(u32, String)> {
+    let mut out = Vec::new();
+    mercs2_formats::stringdb::apply_container(container, |db| {
+        out = db.entries.iter().map(|e| (e.key_hash, e.text.clone())).collect();
+        Ok(())
+    })
+    .expect("a readable stringdb container");
+    out
+}
+
+/// A Shipment that edits `english` with `edits` and adds `adds` to it (one `0xKEY = text` each).
+fn english_editor(
+    dir: &Path,
+    name: &str,
+    edits: &[String],
+    adds: &[String],
+) -> discover::LoadedShipment {
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::write(dir.join("src/english.txt"), edits.join("\n") + "\n").unwrap();
+    std::fs::write(dir.join("src/english-new.txt"), adds.join("\n") + "\n").unwrap();
+    std::fs::write(
+        dir.join("manifest.yaml"),
+        format!(
+            "format: 2\nshipment: {{ name: {name}, version: 1.0.0, target: retail }}\n\
+             contributions:\n  - kind: edit_stringdb\n    target: english\n    strings: src/english.txt\n\
+             \x20 - kind: add_stringdb_keys\n    target: english\n    strings: src/english-new.txt\n"
+        ),
+    )
+    .unwrap();
+    discover::open(dir).expect("open")
+}
+
+/// Each `edit_stringdb` Shipment's own overlay carries a WHOLE edited copy of the
+/// table, so installed together the last mounted would silently drop the other's edits. The link
+/// merges every Shipment's edits into ONE table: disjoint keys both survive, and a key both edit
+/// takes the text of the later Shipment in the load order — for an edited key and for a key both
+/// add alike.
+#[test]
+fn disjoint_stringdb_edits_both_survive_link() {
+    let Some(mut game) = discovered_game() else {
+        return;
+    };
+    let Some(corpus) = corpus_for_tests() else {
+        return;
+    };
+    use mercs2_formats::types::{TYPE_HASH_STRINGDB, TYPE_ID_STRINGDB};
+    let english = mercs2_formats::hash::pandemic_hash_m2("english");
+    let base = game
+        .container_for_asset(english, TYPE_HASH_STRINGDB, TYPE_ID_STRINGDB)
+        .expect("retail vz.wad must carry the english string table");
+    let keys: Vec<u32> = string_entries(&base).iter().map(|(k, _)| *k).take(3).collect();
+    let [only_a, both, only_b] = [keys[0], keys[1], keys[2]];
+    let added = mercs2_formats::stringdb::key_hash("[QmMergeTest.Added]");
+    assert!(!keys.contains(&added) && string_entries(&base).iter().all(|(k, _)| *k != added));
+
+    let root = scratch("deploy_stringdb");
+    let a = english_editor(
+        &root.join("a"),
+        "strings-a",
+        &[format!("0x{only_a:08X} = QM A ONLY"), format!("0x{both:08X} = QM A BOTH")],
+        &["[QmMergeTest.Added] = QM A ADDED".to_string()],
+    );
+    let b = english_editor(
+        &root.join("b"),
+        "strings-b",
+        &[format!("0x{both:08X} = QM B BOTH"), format!("0x{only_b:08X} = QM B ONLY")],
+        &["[QmMergeTest.Added] = QM B ADDED".to_string()],
+    );
+    let table_path = build::stringdb_block_path(english);
+
+    let merged_text = |out: &Path, key: u32| -> String {
+        let wad = std::fs::read(out.join(build::LINK_WAD_NAME)).expect("a link WAD");
+        let contents = mercs2_formats::patch_wad::read_patch_wad(&wad).expect("re-read");
+        let blocks: Vec<_> = contents.blocks.iter().filter(|b| b.path_string == table_path).collect();
+        assert_eq!(blocks.len(), 1, "exactly one merged english table in the link WAD");
+        let dec = mercs2_formats::sges::decompress_sges(&blocks[0].compressed_data).expect("sges");
+        string_entries(&dec[20..])
+            .into_iter()
+            .find(|(k, _)| *k == key)
+            .map(|(_, t)| t)
+            .expect("key present")
+    };
+
+    let forward = root.join("forward");
+    let ids = arg_ids(2);
+    let report = build::link_installed(&request(&[&a, &b], &ids), &mut game, &corpus, &forward)
+        .expect("link");
+    assert!(report.plan.ok, "{:?}", report.plan.findings);
+    assert!(report.plan.link_block_paths.contains(&table_path));
+    assert_eq!(merged_text(&forward, only_a), "QM A ONLY");
+    assert_eq!(merged_text(&forward, only_b), "QM B ONLY");
+    assert_eq!(merged_text(&forward, both), "QM B BOTH", "the later Shipment in the order wins");
+    assert_eq!(merged_text(&forward, added), "QM B ADDED", "an added key merges the same way");
+
+    let reverse = root.join("reverse");
+    build::link_installed(&request(&[&b, &a], &ids), &mut game, &corpus, &reverse).expect("link");
+    assert_eq!(merged_text(&reverse, both), "QM A BOTH", "reversed order, reversed winner");
+    assert_eq!(merged_text(&reverse, added), "QM A ADDED");
+    assert_eq!(merged_text(&reverse, only_b), "QM B ONLY");
+}
+
+/// `replace_stringdb_text` in the merge: a text replacement resolves
+/// against the table AS MERGED SO FAR in load order, and one that matches nothing is an error.
+/// Shipment `setter` sets a key's text to a free-text marker; `replacer` replaces that text. Setter
+/// first: the replacement sees the marker and wins. Replacer first: it runs against the base, where
+/// no entry has that text, and the link fails naming the Shipment, the table and the text.
+#[test]
+fn a_text_replacement_resolves_against_the_table_merged_so_far() {
+    let Some(mut game) = discovered_game() else {
+        return;
+    };
+    let Some(corpus) = corpus_for_tests() else {
+        return;
+    };
+    use mercs2_formats::types::{TYPE_HASH_STRINGDB, TYPE_ID_STRINGDB};
+    let english = mercs2_formats::hash::pandemic_hash_m2("english");
+    let base = game
+        .container_for_asset(english, TYPE_HASH_STRINGDB, TYPE_ID_STRINGDB)
+        .expect("retail vz.wad must carry the english string table");
+    let entries = string_entries(&base);
+    let key = entries[0].0;
+    // Free text, with the characters a key-based parser would have choked on.
+    let marker = "QM merge marker: set by text-setter = 100%";
+    assert!(entries.iter().all(|(_, t)| t != marker));
+
+    let root = scratch("deploy_replace_text");
+    let setter = english_editor(&root.join("setter"), "text-setter", &[format!("0x{key:08X} = {marker}")], &[]);
+    let rdir = root.join("replacer");
+    std::fs::create_dir_all(rdir.join("src")).unwrap();
+    std::fs::write(rdir.join("src/pairs.txt"), format!("# the setter's text\n{marker}\tQM REPLACED\n")).unwrap();
+    std::fs::write(
+        rdir.join("manifest.yaml"),
+        "format: 2\nshipment: { name: text-replacer, version: 1.0.0, target: retail }\n\
+         contributions:\n  - kind: replace_stringdb_text\n    target: english\n    pairs: src/pairs.txt\n",
+    )
+    .unwrap();
+    let replacer = discover::open(&rdir).expect("open");
+
+    let table_path = build::stringdb_block_path(english);
+    let ids = arg_ids(2);
+
+    let forward = root.join("forward");
+    let report = build::link_installed(&request(&[&setter, &replacer], &ids), &mut game, &corpus, &forward)
+        .expect("link");
+    assert!(report.plan.ok, "{:?}", report.plan.findings);
+    let wad = std::fs::read(forward.join(build::LINK_WAD_NAME)).expect("a link WAD");
+    let contents = mercs2_formats::patch_wad::read_patch_wad(&wad).expect("re-read");
+    let block = contents.blocks.iter().find(|b| b.path_string == table_path).expect("table");
+    let dec = mercs2_formats::sges::decompress_sges(&block.compressed_data).expect("sges");
+    let text = string_entries(&dec[20..]).into_iter().find(|(k, _)| *k == key).map(|(_, t)| t);
+    assert_eq!(text.as_deref(), Some("QM REPLACED"), "the replacement sees the earlier write");
+
+    let reverse = root.join("reverse");
+    match build::link_installed(&request(&[&replacer, &setter], &ids), &mut game, &corpus, &reverse) {
+        Err(e @ BuildError::Lower { .. }) => {
+            let m = e.to_string();
+            assert!(m.contains("text-replacer"), "names the Shipment: {m}");
+            assert!(m.contains("english"), "names the table: {m}");
+            assert!(m.contains(marker), "names the unmatched text: {m}");
+        }
+        other => panic!("run first, the replacement matches nothing and must fail, got {other:?}"),
+    }
+    assert!(!reverse.join(build::LINK_WAD_NAME).exists(), "nothing is linked");
+}
+
+/// The kind's own lowering applies the same rule: a pair whose old text no entry of the shipped
+/// table has is refused, naming the Shipment, the table and the text.
+#[test]
+fn a_text_replacement_that_matches_nothing_fails_the_build() {
+    let Some(mut game) = discovered_game() else {
+        return;
+    };
+    let dir = scratch("replace_text_miss");
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::write(dir.join("src/pairs.txt"), "No retail string reads like this: qm-miss\tX\n").unwrap();
+    let s = shipment(&dir, "  - kind: replace_stringdb_text\n    target: english\n    pairs: src/pairs.txt\n");
+    match build::build(&s, Some(&mut game), None, None, None) {
+        Err(e @ BuildError::Lower { .. }) => {
+            let m = e.to_string();
+            assert!(m.contains("test-shipment") && m.contains("english"), "{m}");
+            assert!(m.contains("No retail string reads like this: qm-miss"), "{m}");
+        }
+        other => panic!("expected a Lower refusal, got {other:?}"),
+    }
+}
+
+/// A Shipment's own `qm build` applies its string contributions in contribution order, against the
+/// table as edited so far — the same code as `qm link`. So a text
+/// replacement of the text the Shipment's own earlier `edit_stringdb` wrote builds, into ONE
+/// block for the table; in the reverse order the replacement runs first, matches nothing, and the
+/// build fails naming the Shipment, the table and the text.
+#[test]
+fn a_shipment_build_applies_its_string_writes_in_order() {
+    let Some(mut game) = discovered_game() else {
+        return;
+    };
+    use mercs2_formats::types::{TYPE_HASH_STRINGDB, TYPE_ID_STRINGDB};
+    let english = mercs2_formats::hash::pandemic_hash_m2("english");
+    let base = game
+        .container_for_asset(english, TYPE_HASH_STRINGDB, TYPE_ID_STRINGDB)
+        .expect("retail vz.wad must carry the english string table");
+    let entries = string_entries(&base);
+    let key = entries[0].0;
+    let marker = "QM own-build marker: written by edit_stringdb = step 1";
+    assert!(entries.iter().all(|(_, t)| t != marker));
+
+    let make = |label: &str, edit_first: bool| {
+        let dir = scratch(label);
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::write(dir.join("src/english.txt"), format!("0x{key:08X} = {marker}\n")).unwrap();
+        std::fs::write(dir.join("src/pairs.txt"), format!("{marker}\tQM OWN BUILD REPLACED\n")).unwrap();
+        let edit = "  - kind: edit_stringdb\n    target: english\n    strings: src/english.txt\n";
+        let replace = "  - kind: replace_stringdb_text\n    target: english\n    pairs: src/pairs.txt\n";
+        let body = if edit_first { format!("{edit}{replace}") } else { format!("{replace}{edit}") };
+        (dir.clone(), shipment(&dir, &body))
+    };
+
+    let (dir, s) = make("own_order_ok", true);
+    let report = build::build(&s, Some(&mut game), None, None, None).expect("edit then replace builds");
+    let wad = std::fs::read(report.wad.expect("a WAD")).unwrap();
+    let contents = mercs2_formats::patch_wad::read_patch_wad(&wad).expect("re-read");
+    let table_path = build::stringdb_block_path(english);
+    let tables: Vec<_> = contents.blocks.iter().filter(|b| b.path_string == table_path).collect();
+    assert_eq!(tables.len(), 1, "ONE block for the table, carrying both contributions");
+    assert_eq!(contents.blocks.len(), 1);
+    let dec = mercs2_formats::sges::decompress_sges(&tables[0].compressed_data).expect("sges");
+    let text = string_entries(&dec[20..]).into_iter().find(|(k, _)| *k == key).map(|(_, t)| t);
+    assert_eq!(text.as_deref(), Some("QM OWN BUILD REPLACED"));
+    assert!(dir.join("_build/test-shipment.wad").is_file());
+
+    let (_, s) = make("own_order_reversed", false);
+    match build::build(&s, Some(&mut game), None, None, None) {
+        Err(e @ BuildError::Lower { .. }) => {
+            let m = e.to_string();
+            assert!(m.contains("test-shipment") && m.contains("english") && m.contains(marker), "{m}");
+        }
+        other => panic!("replace before edit must fail with the no-match error, got {other:?}"),
+    }
+}
+
+/// A plan that is not ok links nothing: the plan is written as the explanation, and no link WAD or
+/// placement record appears.
+#[test]
+fn an_unsatisfied_requirement_refuses_the_link() {
+    let Some(mut game) = discovered_game() else {
+        return;
+    };
+    let Some(corpus) = corpus_for_tests() else {
+        return;
+    };
+    let root = scratch("deploy_refused");
+    let a = outfit_shipment(&root.join("a"), "needs-ess", "qm_a", "Aaa");
+    std::fs::write(
+        root.join("a/manifest.yaml"),
+        std::fs::read_to_string(root.join("a/manifest.yaml"))
+            .unwrap()
+            .replace("contributions:", "load: { requires: [ess] }\ncontributions:"),
+    )
+    .unwrap();
+    let a = discover::open(&a.root).expect("reopen");
+    let out = root.join("out");
+    let ids = arg_ids(1);
+    match build::link_installed(&request(&[&a], &ids), &mut game, &corpus, &out) {
+        Err(BuildError::Plan(plan)) => {
+            assert!(!plan.ok);
+            assert!(plan.findings.iter().any(|f| f.code == "M0204"), "{:?}", plan.findings);
+        }
+        other => panic!("expected BuildError::Plan, got {other:?}"),
+    }
+    assert!(out.join("load-plan.json").is_file(), "the refused plan is written");
+    assert!(!out.join(build::LINK_WAD_NAME).exists(), "nothing is linked");
+    assert!(!out.join("placement.json").exists(), "nothing is placed");
+}
+
+/// `qm build` refuses while a superseded file is in the game folder. The probe is read-only, so this
+/// names a file every game folder has — the `data` directory `vz.wad` sits in — rather than writing
+/// anything into the real install.
+#[test]
+fn build_refuses_a_superseded_file() {
+    let Some(mut game) = discovered_game() else {
+        return;
+    };
+    let dir = scratch("superseded");
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::write(
+        dir.join("manifest.yaml"),
+        "format: 2\nshipment: { name: sup, version: 1.0.0, target: retail }\n\
+         supersedes:\n  - { dest: game_root, file: DATA }\ncontributions: []\n",
+    )
+    .unwrap();
+    let s = discover::open(&dir).expect("open");
+    match build::build(&s, Some(&mut game), None, None, None) {
+        Err(BuildError::Superseded { shipment, relative }) => {
+            assert_eq!(shipment, "sup");
+            assert_eq!(relative, "DATA");
+        }
+        other => panic!("expected BuildError::Superseded, got {other:?}"),
+    }
+}
+
+/// With no game, a Shipment that declares `supersedes` cannot be checked, so it does not build.
+#[test]
+fn build_with_supersedes_and_no_game_is_refused() {
+    let dir = scratch("superseded_nogame");
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::write(
+        dir.join("manifest.yaml"),
+        "format: 2\nshipment: { name: sup, version: 1.0.0, target: retail }\n\
+         supersedes:\n  - { dest: on_load, file: 1_Sup.lua }\ncontributions: []\n",
+    )
+    .unwrap();
+    let s = discover::open(&dir).expect("open");
+    match build::build(&s, None, None, None, None) {
+        Err(BuildError::Compat(e)) => assert!(e.to_string().contains("supersedes"), "{e}"),
+        other => panic!("expected a refusal, got {other:?}"),
+    }
 }
 
 /// Nothing to link means no overlay — an overlay that merely restates the base block is noise a
@@ -1077,7 +1500,8 @@ fn a_set_with_no_script_mods_emits_no_link_wad() {
         "  - kind: replace_texture\n    target: al_hum_boss_ub\n    image: src/t.png\n",
     );
     let out = root.join("out");
-    let report = build::link_installed(&[&s], &mut game, &corpus, &out).expect("link");
+    let ids = arg_ids(1);
+    let report = build::link_installed(&request(&[&s], &ids), &mut game, &corpus, &out).expect("link");
     assert!(report.wad.is_none());
     assert!(report.linked.is_empty());
 
@@ -1398,7 +1822,7 @@ fn a_retail_block_survives_being_carried_through_raw() {
 
 /// A PE image carrying only the headers the loadability check reads.
 ///
-/// Deliberately header-only. `asi_load_blocker` inspects exactly four things — `MZ`, `e_lfanew`,
+/// Deliberately header-only. `pe::pe_dll_load_blocker` inspects exactly four things — `MZ`, `e_lfanew`,
 /// the `PE\0\0` signature, and the COFF `Machine`/`Characteristics` words — so a fixture with a
 /// real body would add bytes no assertion depends on. The offsets are pinned against the real
 /// `pmc_bb.dll` v3.0.0, which reads `e_lfanew=0x80, machine=0x014C, characteristics=0x230E`.
@@ -1464,7 +1888,7 @@ fn a_native_hook_places_a_file_and_records_its_digest() {
     // Verified BY HASH against what is on disk, not against the buffer the builder held. The output
     // directory MIRRORS the tree this is copied into, so the same relative path names it in both.
     let written = std::fs::read(
-        dir.join("build")
+        dir.join("_build")
             .join(format!("{}/mybridge.asi", build::ASI_SUBDIR)),
     )
     .expect("the .asi must be emitted");
@@ -1474,7 +1898,7 @@ fn a_native_hook_places_a_file_and_records_its_digest() {
 
     // The record deploy consumes has to carry all three, or an undo cannot verify what it removes.
     let doc: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(dir.join("build/placement.json")).unwrap())
+        serde_json::from_str(&std::fs::read_to_string(dir.join("_build/placement.json")).unwrap())
             .unwrap();
     let entry = &doc["placements"][0];
     assert_eq!(entry["name"], "mybridge.asi");
@@ -1560,6 +1984,172 @@ fn a_plugin_the_game_cannot_load_is_refused() {
     }
 }
 
+// ---------------------------------------------------------------------------
+// add_runtime_dll — a runtime DLL in the game root, named after its Shipment
+// ---------------------------------------------------------------------------
+
+/// A Shipment (`test-shipment`) whose contributions are one `add_runtime_dll` per `(path, bytes)`.
+fn runtime_shipment(dir: &Path, dlls: &[(&str, Vec<u8>)]) -> discover::LoadedShipment {
+    let mut contributions = String::new();
+    for (path, bytes) in dlls {
+        let file = dir.join(path);
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(&file, bytes).unwrap();
+        contributions.push_str(&format!("  - kind: add_runtime_dll\n    dll: {path}\n"));
+    }
+    shipment(dir, &contributions)
+}
+
+/// The lint findings a build was blocked by, or a panic naming what happened instead.
+fn blocked_codes(result: Result<build::BuildReport, BuildError>) -> Vec<(String, String)> {
+    match result {
+        Err(BuildError::Blocked(d)) => d
+            .iter()
+            .map(|x| (x.rule.code.to_string(), x.message.clone()))
+            .collect(),
+        other => panic!("expected Blocked, got {other:?}"),
+    }
+}
+
+/// ★ The DLL lands in the game root — the directory Windows searches first for a plugin's imports —
+/// under its own name, recorded with its digest like every other game-folder file.
+#[test]
+fn add_runtime_dll_places_in_game_root_with_placement_record() {
+    let dir = scratch("rtdll_ok");
+    let dll = loadable_asi();
+    let s = runtime_shipment(&dir, &[("src/test-shipment.dll", dll.clone())]);
+    let report = build::build(&s, None, None, None, None).expect("add_runtime_dll must build");
+    assert!(report.wad.is_none(), "a runtime DLL contributes nothing to a WAD");
+    assert_eq!(report.placements.len(), 1);
+    let p = &report.placements[0];
+    assert_eq!(p.name, "test-shipment.dll");
+    assert_eq!(
+        p.destination,
+        Destination::GameFolder {
+            relative: "test-shipment.dll".into()
+        },
+        "the game root: no directory in the relative path"
+    );
+    let written = std::fs::read(dir.join("_build/test-shipment.dll")).expect("emitted");
+    assert_eq!(written, dll);
+    assert_eq!(p.sha256, build::sha256_hex(&written));
+    let doc: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(dir.join("_build/placement.json")).unwrap())
+            .unwrap();
+    assert_eq!(doc["placements"][0]["destination"]["kind"], "game_folder");
+    assert_eq!(doc["placements"][0]["destination"]["relative"], "test-shipment.dll");
+    assert!(report.log.join("\n").contains("UNRESTRICTED NATIVE CODE"));
+}
+
+#[test]
+fn add_runtime_dll_refuses_non_dll() {
+    let dir = scratch("rtdll_ext");
+    let s = runtime_shipment(&dir, &[("src/test-shipment.asi", loadable_asi())]);
+    let found = blocked_codes(build::build(&s, None, None, None, None));
+    assert!(
+        found.iter().any(|(c, m)| c == "M0162" && m.contains("not a `.dll`")),
+        "{found:?}"
+    );
+}
+
+/// A runtime DLL is named `<shipment.name>.dll`, so one runtime Shipment ships one DLL.
+#[test]
+fn add_runtime_dll_refuses_name_not_equal_to_shipment_name() {
+    let dir = scratch("rtdll_name");
+    let s = runtime_shipment(&dir, &[("src/m2-sdk.dll", loadable_asi())]);
+    let found = blocked_codes(build::build(&s, None, None, None, None));
+    assert!(
+        found
+            .iter()
+            .any(|(c, m)| c == "M0162" && m.contains("`test-shipment.dll`")),
+        "{found:?}"
+    );
+}
+
+/// The name is compared lowercased, and the file keeps the spelling the author gave it.
+#[test]
+fn add_runtime_dll_accepts_name_differing_only_in_case() {
+    let dir = scratch("rtdll_case");
+    let s = runtime_shipment(&dir, &[("src/Test-Shipment.DLL", loadable_asi())]);
+    let report = build::build(&s, None, None, None, None).expect("case differs only");
+    assert_eq!(
+        report.placements[0].destination,
+        Destination::GameFolder {
+            relative: "Test-Shipment.DLL".into()
+        }
+    );
+}
+
+/// A second `add_runtime_dll` in one Shipment would need the same name, and the Exclusive
+/// FileArtifact claim refuses that within one Shipment (M0120).
+#[test]
+fn add_runtime_dll_refuses_second_runtime_dll_in_one_shipment() {
+    let dir = scratch("rtdll_two");
+    let s = runtime_shipment(
+        &dir,
+        &[
+            ("src/a/test-shipment.dll", loadable_asi()),
+            ("src/b/TEST-SHIPMENT.dll", loadable_asi()),
+        ],
+    );
+    let found = blocked_codes(build::build(&s, None, None, None, None));
+    assert!(
+        found
+            .iter()
+            .any(|(c, m)| c == "M0120" && m.contains("file artifact test-shipment.dll")),
+        "{found:?}"
+    );
+}
+
+/// The deny list: the loader, its sidecar and the DLLs the loader reports, in any case.
+#[test]
+fn add_runtime_dll_refuses_deny_listed_dlls() {
+    for file in ["pmc_bb.dll", "cruise.dll", "dxwrapper.dll", "binkw32.dll", "BinkW32.DLL"] {
+        let dir = scratch("rtdll_deny");
+        let path = format!("src/{file}");
+        let s = runtime_shipment(&dir, &[(path.as_str(), loadable_asi())]);
+        let found = blocked_codes(build::build(&s, None, None, None, None));
+        assert!(
+            found
+                .iter()
+                .any(|(c, m)| c == "M0162" && m.contains("is a DLL no Shipment may ship")),
+            "{file}: {found:?}"
+        );
+    }
+}
+
+#[test]
+fn add_runtime_dll_refuses_amd64() {
+    let dir = scratch("rtdll_amd64");
+    let s = runtime_shipment(&dir, &[("src/test-shipment.dll", fake_asi(0x8664, 0x230E))]);
+    let found = blocked_codes(build::build(&s, None, None, None, None));
+    assert!(
+        found
+            .iter()
+            .any(|(c, m)| c == "M0178" && m.contains("32-bit process")),
+        "{found:?}"
+    );
+}
+
+/// `add_runtime_dll` is the one route for a DLL; `place_file` still refuses one.
+#[test]
+fn place_file_still_refuses_dll() {
+    let dir = scratch("placefile_dll");
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::write(dir.join("src/test-shipment.dll"), loadable_asi()).unwrap();
+    let s = shipment(
+        &dir,
+        "  - kind: place_file\n    file: src/test-shipment.dll\n    dest: game_root\n",
+    );
+    let found = blocked_codes(build::build(&s, None, None, None, None));
+    assert!(
+        found
+            .iter()
+            .any(|(c, m)| c == "M0162" && m.contains("add_runtime_dll")),
+        "the refusal names the route that does exist: {found:?}"
+    );
+}
+
 /// A `symbol` with no payload asks the Quartermaster to produce native code, which it does not do.
 /// The reason has to point at both real options rather than just refusing.
 #[test]
@@ -1597,7 +2187,7 @@ fn an_asi_on_a_reimpl_target_never_reaches_lowering() {
         other => panic!("expected Blocked, got {other:?}"),
     }
     assert!(
-        !dir.join("build")
+        !dir.join("_build")
             .join(format!("{}/mybridge.asi", build::ASI_SUBDIR))
             .exists(),
         "nothing may be placed"
@@ -1686,14 +2276,14 @@ fn a_place_file_places_a_companion_and_records_its_digest() {
 
     // The digest must match the bytes actually on disk, not the buffer the builder held — a digest
     // of the intended bytes would still verify after a truncated write.
-    let written = std::fs::read(dir.join("build/scripts/quiet_freeplay_vo.ini"))
+    let written = std::fs::read(dir.join("_build/scripts/quiet_freeplay_vo.ini"))
         .expect("the companion must be emitted, mirroring the tree it is copied into");
     assert_eq!(written, ini, "the companion is copied verbatim");
     assert_eq!(p.sha256, build::sha256_hex(&written));
     assert_eq!(p.bytes, written.len());
 
     let doc: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(dir.join("build/placement.json")).unwrap())
+        serde_json::from_str(&std::fs::read_to_string(dir.join("_build/placement.json")).unwrap())
             .unwrap();
     let entry = &doc["placements"][0];
     assert_eq!(entry["name"], "quiet_freeplay_vo.ini");
@@ -1746,7 +2336,7 @@ fn every_destination_stays_inside_the_game_folder() {
         assert!(!relative.contains(':'), "{relative}");
         assert!(!relative.contains('\\'), "{relative}");
         // And the file really lands there, under the build directory that mirrors the game folder.
-        assert!(dir.join("build").join(relative).is_file(), "{relative}");
+        assert!(dir.join("_build").join(relative).is_file(), "{relative}");
     }
 }
 
@@ -1771,7 +2361,7 @@ fn a_destination_that_is_a_path_does_not_parse() {
         std::fs::write(
             dir.join("manifest.yaml"),
             format!(
-                "format: 1
+                "format: 2
 shipment: {{ name: test-shipment, version: 1.0.0, target: retail }}
 contributions:
   - kind: place_file
@@ -1977,11 +2567,11 @@ fn one_filename_in_two_destinations_is_two_files() {
         "each record must describe its own file"
     );
     assert_eq!(
-        std::fs::read(dir.join("build/scripts/OnBoot/init.lua")).unwrap(),
+        std::fs::read(dir.join("_build/scripts/OnBoot/init.lua")).unwrap(),
         b"-- boot\n"
     );
     assert_eq!(
-        std::fs::read(dir.join("build/scripts/OnLoad/init.lua")).unwrap(),
+        std::fs::read(dir.join("_build/scripts/OnLoad/init.lua")).unwrap(),
         b"-- load\n"
     );
 }
@@ -2731,7 +3321,7 @@ fn activate_layer_builds_the_layer_marks_into_the_mod_loader() {
     std::fs::create_dir_all(&root).unwrap();
     std::fs::write(
         root.join("manifest.yaml"),
-        "format: 1\nshipment: { name: layer-mod, version: 1.0.0, target: retail }\n\
+        "format: 2\nshipment: { name: layer-mod, version: 1.0.0, target: retail }\n\
          contributions:\n  - kind: activate_layer\n    layer: vz_state_pmccon004_destroyed\n\
          \x20   replaces:\n      - vz_state_pmccon004_pristine\n",
     )
@@ -2892,4 +3482,249 @@ fn edit_world_builds_an_overlay_that_moves_an_entity() {
             assert_eq!(a.pos, b.pos, "a non-target entity moved");
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// add_animation / replace_animation — the retail clip container
+// ---------------------------------------------------------------------------
+
+/// A real Havok 5.5 clip, shared with `mercs2_formats`' own tests.
+const ANIM_CLIP: &[u8] = include_bytes!("../../mercs2_formats/tests/fixtures/anim_ks750_le.bin");
+
+fn anim_trnm(count: u32) -> Vec<u8> {
+    let mut t = count.to_le_bytes().to_vec();
+    t.extend_from_slice(&0u32.to_le_bytes());
+    for k in 0..count {
+        t.extend_from_slice(&(0x2000 + k).to_le_bytes());
+    }
+    t
+}
+
+fn anim_tracks() -> u32 {
+    mercs2_formats::animgroup::read_clip_header(ANIM_CLIP)
+        .expect("fixture carries an hkaAnimation")
+        .num_transform_tracks
+}
+
+/// Read the one animation block back out of a built WAD: its ASET row and its container's chunks.
+fn read_back_animation(wad: &[u8]) -> (mercs2_formats::patch_wad::AsetEntry, u32, Vec<mercs2_formats::anim_container::Chunk>) {
+    use mercs2_formats::types::{TYPE_HASH_ANIMATION, TYPE_ID_ANIMATION};
+    let contents = mercs2_formats::patch_wad::read_patch_wad(wad).expect("re-read the WAD");
+    assert_eq!(contents.blocks.len(), 1);
+    let block = &contents.blocks[0];
+    assert_eq!(block.aset_entries.len(), 1);
+    let row = block.aset_entries[0].clone();
+    assert_eq!(row.u32_1, 0xFFFF_FFFF, "no LOD rungs");
+    assert_eq!(row.u32_2 & 0xFFFF, 0xFFFF, "primary");
+    assert_eq!(row.u32_3, TYPE_ID_ANIMATION);
+    let dec = mercs2_formats::sges::decompress_sges(&block.compressed_data).expect("sges");
+    let (count, entries) = mercs2_formats::ucfx::parse_block_entry_table(&dec);
+    assert_eq!(count, 1);
+    assert_eq!(entries[0].type_hash, TYPE_HASH_ANIMATION);
+    assert_eq!(entries[0].name_hash, row.asset_hash);
+    let chunks = mercs2_formats::anim_container::parse_container(&dec[20..])
+        .expect("the container is the strict retail shape");
+    (row, entries[0].name_hash, chunks)
+}
+
+/// A new clip needs nothing from retail, so it builds hermetically — into the container every
+/// retail clip uses, with the three sources verbatim and `info` = `01 00`.
+#[test]
+fn add_animation_builds_the_retail_clip_container_without_a_game() {
+    use mercs2_formats::anim_container::{build_evnt, AnimEvent};
+    let dir = scratch("add_animation");
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    let trnm = anim_trnm(anim_tracks());
+    let evnt = build_evnt(&[AnimEvent { time: 0.1, name: "ahj_foot_contact".into(), category: "sound".into() }])
+        .unwrap();
+    std::fs::write(dir.join("src/c.hkx"), ANIM_CLIP).unwrap();
+    std::fs::write(dir.join("src/c.trnm"), &trnm).unwrap();
+    std::fs::write(dir.join("src/c.evnt"), &evnt).unwrap();
+    let s = shipment(
+        &dir,
+        "  - kind: add_animation\n    name: qm_test_clip\n    clip: src/c.hkx\n    trnm: src/c.trnm\n    \
+         events: src/c.evnt\n",
+    );
+    let report = build::build(&s, None, None, None, None).expect("add_animation builds with no game");
+    let on_disk = std::fs::read(report.wad.expect("a WAD")).unwrap();
+    let (_, hash, chunks) = read_back_animation(&on_disk);
+    assert_eq!(hash, mercs2_formats::hash::pandemic_hash_m2("qm_test_clip"));
+    let tags: Vec<&[u8; 4]> = chunks.iter().map(|c| &c.tag).collect();
+    assert_eq!(tags, [b"info", b"data", b"trnm", b"evnt"]);
+    assert_eq!(chunks[0].body, [0x01, 0x00]);
+    assert_eq!(chunks[1].body, ANIM_CLIP);
+    assert_eq!(chunks[2].body, trnm);
+    assert_eq!(chunks[3].body, evnt);
+}
+
+/// Without `events` there is no `evnt` chunk — the other retail clip shape.
+#[test]
+fn add_animation_without_events_ships_no_evnt() {
+    let dir = scratch("add_animation_plain");
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::write(dir.join("src/c.hkx"), ANIM_CLIP).unwrap();
+    std::fs::write(dir.join("src/c.trnm"), anim_trnm(anim_tracks())).unwrap();
+    let s = shipment(&dir, "  - kind: add_animation\n    name: qm_test_clip2\n    clip: src/c.hkx\n    trnm: src/c.trnm\n");
+    let report = build::build(&s, None, None, None, None).expect("builds");
+    let (_, _, chunks) = read_back_animation(&std::fs::read(report.wad.unwrap()).unwrap());
+    let tags: Vec<&[u8; 4]> = chunks.iter().map(|c| &c.tag).collect();
+    assert_eq!(tags, [b"info", b"data", b"trnm"]);
+}
+
+/// A trnm that binds a different number of tracks than the clip has is refused before lowering —
+/// M0213 blocks the build.
+#[test]
+fn add_animation_with_a_mismatched_trnm_is_blocked_by_m0213() {
+    let dir = scratch("add_animation_bad");
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::write(dir.join("src/c.hkx"), ANIM_CLIP).unwrap();
+    std::fs::write(dir.join("src/c.trnm"), anim_trnm(anim_tracks() + 1)).unwrap();
+    let s = shipment(&dir, "  - kind: add_animation\n    name: qm_bad\n    clip: src/c.hkx\n    trnm: src/c.trnm\n");
+    match build::build(&s, None, None, None, None) {
+        Err(BuildError::Blocked(d)) => assert!(d.iter().any(|x| x.rule.code == "M0213"), "{d:?}"),
+        other => panic!("expected Blocked by M0213, got {other:?}"),
+    }
+}
+
+/// A replace needs the game stack: it must check its target is a Havok clip.
+#[test]
+fn replace_animation_without_a_game_says_so() {
+    let dir = scratch("replace_animation_nogame");
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::write(dir.join("src/c.hkx"), ANIM_CLIP).unwrap();
+    std::fs::write(dir.join("src/c.trnm"), anim_trnm(anim_tracks())).unwrap();
+    let s = shipment(&dir, "  - kind: replace_animation\n    target: x\n    clip: src/c.hkx\n    trnm: src/c.trnm\n");
+    assert!(matches!(
+        build::build(&s, None, None, None, None),
+        Err(BuildError::GameRequired { kind: "replace_animation", .. })
+    ));
+}
+
+/// Against retail: a replace of a shipped Havok clip builds under the target's own hash, and a
+/// replace of a MANM keyframe animation is refused by kind rather than overwritten with a clip.
+#[test]
+fn replace_animation_replaces_a_clip_and_refuses_a_keyframe_animation() {
+    use mercs2_formats::anim_container::{classify, parse_container, AnimContainerKind};
+    use mercs2_formats::types::{TYPE_HASH_ANIMATION, TYPE_ID_ANIMATION};
+    let Some(mut game) = discovered_game() else {
+        return;
+    };
+    let (mut clip_target, mut keyframe_target) = (None, None);
+    for h in game.asset_hashes(TYPE_ID_ANIMATION) {
+        let c = game
+            .container_for_asset(h, TYPE_HASH_ANIMATION, TYPE_ID_ANIMATION)
+            .expect("every animation row resolves to a container");
+        match classify(&parse_container(&c).expect("retail container reads")).expect("known kind") {
+            AnimContainerKind::HavokClip { .. } if clip_target.is_none() => clip_target = Some(h),
+            AnimContainerKind::Keyframe if keyframe_target.is_none() => keyframe_target = Some(h),
+            _ => {}
+        }
+        if clip_target.is_some() && keyframe_target.is_some() {
+            break;
+        }
+    }
+    let clip_target = clip_target.expect("retail ships Havok clips");
+    let keyframe_target = keyframe_target.expect("retail ships 29 MANM keyframe animations");
+
+    let dir = scratch("replace_animation");
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::write(dir.join("src/c.hkx"), ANIM_CLIP).unwrap();
+    std::fs::write(dir.join("src/c.trnm"), anim_trnm(anim_tracks())).unwrap();
+    let s = shipment(
+        &dir,
+        &format!("  - kind: replace_animation\n    target: \"0x{clip_target:08X}\"\n    clip: src/c.hkx\n    trnm: src/c.trnm\n"),
+    );
+    let report = build::build(&s, Some(&mut game), None, None, None).expect("a clip replace builds");
+    let (_, hash, chunks) = read_back_animation(&std::fs::read(report.wad.unwrap()).unwrap());
+    assert_eq!(hash, clip_target, "same hash");
+    assert_eq!(chunks[1].body, ANIM_CLIP);
+
+    let dir = scratch("replace_animation_manm");
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::write(dir.join("src/c.hkx"), ANIM_CLIP).unwrap();
+    std::fs::write(dir.join("src/c.trnm"), anim_trnm(anim_tracks())).unwrap();
+    let s = shipment(
+        &dir,
+        &format!("  - kind: replace_animation\n    target: \"0x{keyframe_target:08X}\"\n    clip: src/c.hkx\n    trnm: src/c.trnm\n"),
+    );
+    match build::build(&s, Some(&mut game), None, None, None) {
+        Err(BuildError::Lower { message, .. }) => assert!(message.contains("MANM"), "{message}"),
+        other => panic!("a MANM target must be refused, got {other:?}"),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// add_model (rigid) with `textures:`
+// ---------------------------------------------------------------------------
+
+/// Against retail: a rigid `add_model` with a diffuse map ships the map as its own texture block and
+/// repoints the HOST group's material at it. Asserted in the emitted MTRL itself: the host material's
+/// diffuse slot names the new texture's hash.
+#[test]
+fn a_rigid_add_model_with_textures_repoints_the_host_material() {
+    let Some(mut game) = discovered_game() else {
+        return;
+    };
+    let donor = "oc_veh_helicopter_md500";
+    let paths: Vec<PathBuf> = game.paths().iter().map(|p| p.to_path_buf()).collect();
+    let donor_blk = mercs2_formats::donor::donor_block(&paths, mercs2_formats::hash::pandemic_hash_m2(donor))
+        .expect("donor block");
+    let n = u32::from_le_bytes(donor_blk[16..20].try_into().unwrap()) as usize;
+    let ucfx = &donor_blk[20..20 + n];
+    let groups = mercs2_formats::texture::group_prmt_material_indices(ucfx);
+    let mats = mercs2_formats::texture::parse_mtrl(ucfx);
+    // A host whose every material samples a texture and names a diffuse.
+    let host = groups
+        .iter()
+        .position(|ms| {
+            !ms.is_empty()
+                && ms.iter().all(|&m| {
+                    mats.get(m).is_some_and(|x| {
+                        x.flags & build::MTRL_TEXTURED != 0 && x.textures.first().is_some_and(|&h| h != 0)
+                    })
+                })
+        })
+        .expect("the donor has a textured group");
+    let host_mat = groups[host][0];
+
+    let dir = scratch("add_model_textures");
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::write(dir.join("src/prop.glb"), cube_glb()).unwrap();
+    std::fs::write(dir.join("src/prop_d.png"), solid_png(64, 64)).unwrap();
+    let s = shipment(
+        &dir,
+        &format!(
+            "  - kind: add_model\n    name: qm_test_tex_prop\n    model: src/prop.glb\n    donor: {donor}\n    \
+             group: {host}\n    textures:\n      diffuse: src/prop_d.png\n"
+        ),
+    );
+    let report = build::build(&s, Some(&mut game), None, None, None).expect("a textured rigid prop builds");
+    let on_disk = std::fs::read(report.wad.expect("a WAD")).unwrap();
+    let contents = mercs2_formats::patch_wad::read_patch_wad(&on_disk).expect("re-read");
+    let want = mercs2_formats::hash::pandemic_hash_m2("qm_test_tex_prop_dm");
+    let model = mercs2_formats::hash::pandemic_hash_m2("qm_test_tex_prop");
+
+    let mut seen_model = false;
+    let mut seen_texture = false;
+    for block in &contents.blocks {
+        let dec = mercs2_formats::sges::decompress_sges(&block.compressed_data).expect("sges");
+        let (_, entries) = mercs2_formats::ucfx::parse_block_entry_table(&dec);
+        if entries[0].name_hash == want {
+            assert_eq!(entries[0].type_hash, mercs2_formats::types::TYPE_HASH_TEXTURE);
+            seen_texture = true;
+        }
+        if entries[0].name_hash == model {
+            let emitted = mercs2_formats::texture::parse_mtrl(&dec[20..]);
+            assert_eq!(
+                emitted[host_mat].textures[0], want,
+                "the host material's diffuse must name the new texture"
+            );
+            let emitted_groups = mercs2_formats::texture::group_prmt_material_indices(&dec[20..]);
+            assert_eq!(emitted_groups[host][0], host_mat, "the host keeps its material record");
+            seen_model = true;
+        }
+    }
+    assert!(seen_model && seen_texture, "model {seen_model}, texture {seen_texture}");
+    let log = report.log.join("\n");
+    assert!(log.contains("qm_test_tex_prop_dm"), "{log}");
 }

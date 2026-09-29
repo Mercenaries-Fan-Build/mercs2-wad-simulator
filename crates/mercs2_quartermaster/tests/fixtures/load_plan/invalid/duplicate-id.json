@@ -1,0 +1,13 @@
+{
+  "format": 1,
+  "items": [
+    {
+      "id": "shipment:a",
+      "path": "../shipments/my-mod"
+    },
+    {
+      "id": "shipment:a",
+      "path": "../shipments/lua-bridge"
+    }
+  ]
+}

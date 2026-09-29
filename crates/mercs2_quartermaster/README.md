@@ -28,10 +28,18 @@ health, which is worse than no linter.
 ## The `qm` CLI
 
 ```
-qm lint  [DIR]                     check a Shipment — no game install needed
-qm build [DIR] --out DIR           lower it into an overlay WAD
-qm link  DIR... --out DIR          link several installed Shipments' Lua into one WAD
-qm rules                           what is checked, what is not, and where each is documented
+qm lint  [DIR] [--report FILE]           check a Shipment — no game install needed; --report also
+                                         writes the findings as lint-report.json
+qm build [DIR] [--out DIR]               lower it into an overlay WAD (default out: DIR/_build)
+qm preflight DIR... --out DIR            check a set before building: requirements, versions,
+                                         conflicts, superseded files, load order → load-plan.json
+qm link  DIR... --out DIR                link the set's Lua and string tables into one WAD, mounted last
+qm check-range --report FILE -- RANGE... check version ranges with qm's semver grammar (M0172)
+qm compile-lua FILE... [--out-dir DIR]   compile Lua with the game's compiler and check the header
+qm manifest-info FILE                    print a manifest's name and version as JSON
+qm rules                                 what is checked, what is not, and where each is documented
+qm kinds [--json]                        every contribution kind this qm reads, one per line; --json
+                                         prints {"format":2,"kinds":[...]} — the authoritative list
 ```
 
 Prebuilt binaries are attached to each release, so nothing here requires a Rust toolchain. Modkit
@@ -84,7 +92,16 @@ cannot be reasoned about is treated as exclusive rather than assumed safe.
 Lua is the case that forced the design. Scripts load from a *block*, not per-hash, so editing one
 script means re-emitting every script in that block — and two script-touching Shipments cannot both
 win. `qm link` therefore composes the installed set's declared source-appends onto the base script,
-compiles once, and emits a single WAD mounted last.
+compiles once, and emits a single WAD mounted last. Appends to any script compose; a wholesale
+`replace_lua` conflicts with any other writer to that script.
+
+String tables work the same way. A Shipment's own build applies its `edit_stringdb` /
+`add_stringdb_keys` / `replace_stringdb_text` contributions to a table in contribution order and
+ships ONE edited copy of that table, so installed together the last mounted would drop the others'
+edits. `qm link` merges every Shipment's writes to one table into one
+link-owned table in load order, the later write winning: key edits by key hash, text replacements
+against the table as merged so far. The load plan's `link_block_paths` names every
+block the link re-emits, so a deploy step drops the per-Shipment copies of exactly those.
 
 `patch_lua` reaches **two** blocks: `scripts_vz` (114 content scripts — contracts, jobs, tutorials)
 and `resident` (~240 always-loaded framework modules, `Mrx*` and the world-entity scripts). A target
@@ -104,14 +121,17 @@ Every kind lowers end-to-end against retail WADs except `edit_state_machine`, wh
 produces a WAD that looks fine and does nothing. (`raw` and `native_hook` used to be in that
 sentence too; both lower now.)
 
-The Code layer is two kinds, and the split is about who chooses the destination. `native_hook`
-places one `.asi` and chooses the directory itself; `place_file` places the companions that `.asi`
+The Code layer is three kinds, and the split is about who chooses the destination. `native_hook`
+places one `.asi` and chooses the directory itself; `add_runtime_dll` places one runtime DLL in the
+game root, named `<shipment.name>.dll` and never a deny-listed name (`pmc_bb`, `cruise`, `dxwrapper`,
+`binkw32`); `place_file` places the companions that `.asi`
 reads — the `.ini` beside it, a Lua framework's `.lua` files — and lets the author pick a
 destination **name** from a closed set (`game_root`, `scripts`, `plugins`, `update`, `on_boot`,
 `on_load`, `on_key`). Neither takes a path, so `Mercenaries2.exe` and `data/vz.wad` stay unreachable
 by construction rather than by a rule that could be suppressed: a path-shaped `dest:` does not
 parse, and the filename comes from the source file, with `.wad`, `.exe`, `.dll` and the loader's own
-reserved name refused outright. Both need no game stack, so both lower in template CI.
+reserved name refused outright (a `.dll` only through `add_runtime_dll`). None needs a game stack,
+so all three lower in template CI.
 
 `add_movie` is the odd one out in a useful way: it is the only Data kind that needs no game stack.
 A Scaleform GFx movie is self-contained — no donor to borrow a rig from, no target whose dimensions

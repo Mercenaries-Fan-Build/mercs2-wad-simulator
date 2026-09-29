@@ -15,7 +15,7 @@ fn scratch(label: &str) -> PathBuf {
 }
 
 const MINIMAL_YAML: &str = "\
-format: 1
+format: 2
 shipment:
   name: boss-reskin
   version: 1.0.0
@@ -26,7 +26,7 @@ contributions:
     image: src/boss_ub.png
 ";
 
-const MINIMAL_JSON: &str = r#"{"format":1,"shipment":{"name":"boss-reskin","version":"1.0.0","target":"retail"},"contributions":[]}"#;
+const MINIMAL_JSON: &str = r#"{"format":2,"shipment":{"name":"boss-reskin","version":"1.0.0","target":"retail"},"contributions":[]}"#;
 
 fn write(dir: &Path, name: &str, body: &str) {
     std::fs::write(dir.join(name), body).expect("write fixture");
@@ -137,10 +137,23 @@ fn open_surfaces_validation_failures() {
     write(
         &dir,
         "manifest.yaml",
-        &MINIMAL_YAML.replace("format: 1", "format: 99"),
+        &MINIMAL_YAML.replace("format: 2", "format: 99"),
     );
     let err = discover::open(&dir).expect_err("future format");
     assert!(err.to_string().contains("refusing to guess"), "{err}");
+}
+
+/// Format 1 no longer exists: an older format is refused through the same check as a newer one.
+#[test]
+fn open_refuses_format_1() {
+    let dir = scratch("open_format_1");
+    write(
+        &dir,
+        "manifest.yaml",
+        &MINIMAL_YAML.replace("format: 2", "format: 1"),
+    );
+    let err = discover::open(&dir).expect_err("format 1");
+    assert!(err.to_string().contains("the only manifest format is 2"), "{err}");
 }
 
 // ---------------------------------------------------------------------------
@@ -150,7 +163,7 @@ fn open_surfaces_validation_failures() {
 #[test]
 fn every_referenced_path_is_collected_with_its_field() {
     let text = "\
-format: 1
+format: 2
 shipment: { name: s, version: 1.0.0, target: retail }
 contributions:
   - kind: add_outfit
@@ -301,7 +314,7 @@ fn a_source_outside_src_is_reported_separately() {
 #[test]
 fn checking_does_not_short_circuit() {
     let text = "\
-format: 1
+format: 2
 shipment: { name: s, version: 1.0.0, target: retail }
 contributions:
   - kind: replace_texture
@@ -325,4 +338,84 @@ contributions:
         issues[2],
         SourceIssue::EscapesRoot { index: 2, .. }
     ));
+}
+
+// ---------------------------------------------------------------------------
+// add_shop_item behaviour.script — a source like any other
+// ---------------------------------------------------------------------------
+
+fn novel_shop_item(script: &str) -> String {
+    format!(
+        "\
+format: 2
+shipment: {{ name: s, version: 1.0.0, target: retail }}
+contributions:
+  - kind: add_shop_item
+    id: my_strike
+    name: My Strike
+    icon: strike
+    shops: [pmc]
+    type: airstrike
+    behaviour:
+      module: mymodstrike
+      script: {script}
+"
+    )
+}
+
+/// A novel behaviour's Lua is read and compiled into the Shipment, so it is collected with its field
+/// name like every other `src/` path.
+#[test]
+fn a_shop_behaviour_script_is_collected() {
+    let m = mercs2_quartermaster::from_str(&novel_shop_item("src/lua/mymodstrike.lua"), Format::Yaml)
+        .unwrap();
+    let refs = discover::source_refs(&m);
+    let fields: Vec<_> = refs.iter().map(|r| (r.index, r.kind, r.field)).collect();
+    assert_eq!(fields, vec![(0, "add_shop_item", "behaviour.script")]);
+    assert_eq!(refs[0].path, Path::new("src/lua/mymodstrike.lua"));
+}
+
+/// A shop item that references a resident module ships no file, so it has no source.
+#[test]
+fn a_shop_item_without_a_script_has_no_source() {
+    let text = novel_shop_item("x").replace("      script: x\n", "");
+    let m = mercs2_quartermaster::from_str(&text, Format::Yaml).unwrap();
+    assert!(discover::source_refs(&m).is_empty());
+}
+
+/// Through `qm lint`: a missing script is M0110, and one that climbs out of the Shipment is M0111.
+#[test]
+fn a_shop_behaviour_script_gets_the_source_rules() {
+    use mercs2_quartermaster::lint;
+    let dir = scratch("shop_script");
+    let m = mercs2_quartermaster::from_str(&novel_shop_item("src/lua/missing.lua"), Format::Yaml)
+        .unwrap();
+    let codes: Vec<&str> = lint::lint(&m, Some(&dir), None).iter().map(|d| d.rule.code).collect();
+    assert_eq!(codes, vec!["M0110"]);
+
+    let m = mercs2_quartermaster::from_str(&novel_shop_item("../x.lua"), Format::Yaml).unwrap();
+    let codes: Vec<&str> = lint::lint(&m, Some(&dir), None).iter().map(|d| d.rule.code).collect();
+    assert_eq!(codes, vec!["M0111"]);
+}
+
+/// An animation's optional `events` file is a source too, collected only when given.
+#[test]
+fn animation_sources_include_events_only_when_given() {
+    let base = "\
+format: 2
+shipment: { name: s, version: 1.0.0, target: retail }
+contributions:
+  - kind: add_animation
+    name: c
+    clip: src/c.hkx
+    trnm: src/c.trnm
+";
+    let m = mercs2_quartermaster::from_str(base, Format::Yaml).unwrap();
+    let fields: Vec<_> = discover::source_refs(&m).iter().map(|r| r.field).collect();
+    assert_eq!(fields, vec!["clip", "trnm"]);
+
+    let with = format!("{base}    events: src/c.evnt\n");
+    let m = mercs2_quartermaster::from_str(&with, Format::Yaml).unwrap();
+    let fields: Vec<_> = discover::source_refs(&m).iter().map(|r| r.field).collect();
+    assert_eq!(fields, vec!["clip", "trnm", "events"]);
 }

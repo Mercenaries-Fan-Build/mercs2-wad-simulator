@@ -22,12 +22,15 @@
 
 pub mod blast;
 pub mod build;
+pub mod compat;
 pub mod discover;
 pub mod game;
 pub mod link;
 pub mod lint;
 pub mod manifest;
 pub mod names;
+pub mod pe;
+pub mod plan;
 pub mod states;
 pub mod world;
 
@@ -43,8 +46,9 @@ pub use discover::{
 pub use game::{GameStack, GameStackError};
 pub use lint::{blocks_build, lint, Diagnostic, Rule, Severity};
 pub use manifest::{
-    Contribution, Layer, Load, Manifest, PlaceIn, Requirement, Retarget, Shipment, Target,
-    Textures, Touch, ValidateError, FORMAT_VERSION, MAX_NAME_LEN,
+    CapabilityReq, CompatibleReq, ConflictDecl, Contribution, Layer, Load, Manifest, PlaceIn,
+    Requirement, Retarget, Shipment, ShipmentReq, Superseded, Target, Textures, Touch,
+    ValidateError, DENY_LISTED_DLL_STEMS, FORMAT_VERSION, MAX_NAME_LEN,
 };
 pub use names::{bare_hash_suggestions, BareHashSuggestion, NameTable};
 
@@ -77,6 +81,13 @@ impl Format {
 #[derive(Debug)]
 pub enum ReadError {
     Parse { format: Format, message: String },
+    /// `contributions[index]` names a kind the format no longer has
+    /// ([`Contribution::REMOVED_KINDS`]).
+    RemovedKind {
+        index: usize,
+        kind: &'static str,
+        reason: &'static str,
+    },
     Validate(ValidateError),
 }
 
@@ -86,6 +97,14 @@ impl std::fmt::Display for ReadError {
             ReadError::Parse { format, message } => {
                 write!(f, "parsing manifest as {format:?}: {message}")
             }
+            ReadError::RemovedKind {
+                index,
+                kind,
+                reason,
+            } => write!(
+                f,
+                "contributions[{index}]: kind `{kind}` has been removed from the format: {reason}"
+            ),
             ReadError::Validate(e) => write!(f, "{e}"),
         }
     }
@@ -97,22 +116,46 @@ impl std::error::Error for ReadError {}
 ///
 /// One `serde` model backs all three formats; this function is only the format dispatch.
 pub fn from_str(text: &str, format: Format) -> Result<Manifest, ReadError> {
-    let manifest: Manifest = match format {
-        Format::Yaml => serde_norway::from_str(text).map_err(|e| ReadError::Parse {
-            format,
-            message: e.to_string(),
-        })?,
-        Format::Json => serde_json::from_str(text).map_err(|e| ReadError::Parse {
-            format,
-            message: e.to_string(),
-        })?,
-        Format::Toml => toml::from_str(text).map_err(|e| ReadError::Parse {
-            format,
-            message: e.to_string(),
-        })?,
+    let parsed: Result<Manifest, String> = match format {
+        Format::Yaml => serde_norway::from_str(text).map_err(|e| e.to_string()),
+        Format::Json => serde_json::from_str(text).map_err(|e| e.to_string()),
+        Format::Toml => toml::from_str(text).map_err(|e| e.to_string()),
+    };
+    let manifest = match parsed {
+        Ok(m) => m,
+        Err(message) => {
+            // A removed kind can only ever fail the typed parse, so it is looked for only then —
+            // and reported in place of serde's "unknown variant", which reads like a typo.
+            if let Some((index, kind, reason)) = removed_kind(text, format) {
+                return Err(ReadError::RemovedKind {
+                    index,
+                    kind,
+                    reason,
+                });
+            }
+            return Err(ReadError::Parse { format, message });
+        }
     };
     manifest.validate().map_err(ReadError::Validate)?;
     Ok(manifest)
+}
+
+/// The first contribution whose `kind` is in [`Contribution::REMOVED_KINDS`], read from the text
+/// as an untyped document. `None` when the text does not parse even untyped, or names none.
+fn removed_kind(text: &str, format: Format) -> Option<(usize, &'static str, &'static str)> {
+    let doc: serde_json::Value = match format {
+        Format::Yaml => serde_norway::from_str(text).ok()?,
+        Format::Json => serde_json::from_str(text).ok()?,
+        Format::Toml => toml::from_str(text).ok()?,
+    };
+    let contributions = doc.get("contributions")?.as_array()?;
+    contributions.iter().enumerate().find_map(|(index, c)| {
+        let kind = c.get("kind")?.as_str()?;
+        Contribution::REMOVED_KINDS
+            .iter()
+            .find(|(k, _)| *k == kind)
+            .map(|(k, reason)| (index, *k, *reason))
+    })
 }
 
 /// Serialize a manifest as YAML — the one format the Quartermaster WRITES.

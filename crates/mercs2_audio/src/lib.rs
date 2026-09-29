@@ -13,13 +13,31 @@
 //! buffer (see [`backend`]).
 //!
 //! ## Modules
-//! * [`sounddb`] — the `'\x1d'`-tagged sound/cue catalog parser (`FUN_00835b80`). Layout CALIBRATED
-//!   against shipped blocks: 28-B header + 12-B `{guid, bank_hash, wave_index}` entries.
-//! * [`wave`] — `wavebank` record parser + PCM16 / IMA-ADPCM decoders → resident [`DecodedClip`]s.
+//! * [`sounddb`] — the `'\x1d'`-tagged cue catalog (`FUN_00835b80`): 28-B header + 12-B
+//!   `{guid, soundbank hash, soundbank cue index}` entries (+ the global catalog's category tree).
+//! * [`soundbank`] — the `soundbank` table: sound groups (which wave(s) a sound plays) and cues.
+//! * [`multitrack`] — the multi-track cue body: tracks of timed sounds and their automation.
+//! * [`select`] — the engine's weighted wave / entry selection and its random generator.
+//! * [`route`] — which cues can play which waves, from the tables alone (for tools).
+//! * [`wave`] — the `wavebank` table + PCM16 / IMA-ADPCM decoders → resident [`DecodedClip`]s.
+//! * [`automation`] — a track's or cue's automation evaluated as the engine does (`FUN_0083b4a0`):
+//!   volume / pitch ramps, LFOs and parameter curves, output-channel multipliers (kind 4) and child
+//!   cues (kind 7); its sine table, and pitch → playback rate.
+//! * [`playback`] — a started cue's per-frame state: instance start draws, track and cue composition,
+//!   track and cue loops, sound firing and instance update.
+//! * [`duration`] — a cue's `+0x0C` length (what `Sound.GetMaxDuration` returns), as retail carries it.
+//! * [`encode`] — builds a bank's wavebank + soundbank + sounddb: named PCM16 cues, or waves, groups
+//!   (single- and multi-wave) and cues (single- and multi-track) authored table by table.
 //! * [`voice`] — voice pool, priority-steal, the 16-state instance FSM (`FUN_00836c70`).
-//! * [`mixer`] — the software mixer (`FUN_00836610`): int32 accumulate → saturate int16, headless.
-//!   Per-voice resampling (clip rate → mixer rate) via [`PcmSource`].
-//! * [`spatial`] — 4 listeners, distance attenuation, stereo pan, Doppler, start-delay.
+//! * [`mixer`] — the software mixer (`FUN_00836610`), headless: per source a 6-channel int32 scratch
+//!   the waves mix into (the wave kernel's gains and 32.32 step, [`PcmSource`]), each wave's filter
+//!   run over it, the commit into the accumulator, then saturation to int16.
+//! * [`filter`] — the kind-9 biquad low-pass filter a wave carries (`FUN_0083f2d0`).
+//! * [`spatial`] — 4 listeners; an emitter source's speaker gains, distance volume and Doppler as the
+//!   mix computes them against listener 0; start delay.
+//! * [`emitter`] — an emitter's source holder (position, velocity) and the per-frame update that
+//!   moves it with its object (`FUN_006036C0`): a jitter drawn from the game's global random state
+//!   and the finite-difference velocity the Doppler factor reads.
 //! * [`categories`] — per-category volume/pitch fades + ref-counted master duck.
 //! * [`music`] — the dual-deck crossfading music state machine (`FUN_0082d7a0`).
 //! * [`banks`] — the 65-slot sound/wave bank load state machine.
@@ -30,13 +48,25 @@
 //!   binding-wiring seam (see its module docs).
 //!
 //! ## Cue → audible PCM (the whole path)
-//! [`AudioEngine::set_sounddb`] installs the catalog; [`AudioEngine::load_wavebank`] decodes a
-//! `wavebank` body and holds its clips resident; [`AudioEngine::cue_sound`] resolves the cue, allocates
-//! a voice (priority-steal if the pool is full), auto-binds the resident wave it routes to, and applies
-//! 3D gains against the closest listener. [`AudioEngine::tick`] advances the FSMs/fades;
-//! [`AudioEngine::render`] mixes int16 frames, and [`AudioEngine::pump`] feeds them to the device at
-//! wall-clock rate (a no-op when headless). Verified end-to-end on retail data —
-//! `mercs2_game/tests/audio_wad_probe.rs`.
+//! [`AudioEngine::set_sounddb`] installs the catalog; [`AudioEngine::load_soundbank`] and
+//! [`AudioEngine::load_wavebank`] hold a bank's soundbank and decoded clips resident.
+//! [`AudioEngine::resolve_cue`] follows a cue through everything it can play — sounddb entry →
+//! soundbank cue → every track's sounds ([`multitrack`]) → every group they can pick → every wave →
+//! the resident clip. [`AudioEngine::cue_sound`] refuses what it cannot play faithfully ([`CueError`]:
+//! unset curve parameters, a filter scan past the event table, a refused child cue) and otherwise
+//! starts a playback ([`playback`]). Each [`AudioEngine::tick`] advances it the way the engine
+//! advances a cue: sounds fire at their start times, pick their groups and waves ([`select`]), draw
+//! their base volume, pitch and start delay, follow the cue's and track's automation
+//! ([`automation`]), loop their tracks and the cue, and start child cues when they finish — one voice
+//! per sound instance (priority-steal if the pool is full), positional ones through their emitter's
+//! source (speaker gains, distance volume and Doppler against listener 0).
+//! [`AudioEngine::cue_sound_on_object`] is `Sound.CueSound(emitter, cue)`: the cue plays through its
+//! object's emitter, which [`AudioEngine::update_object_emitters`] moves with the object every frame
+//! ([`emitter`]), so a moving object's cues are Doppler-shifted.
+//! [`AudioEngine::stop_sound`] releases a cue the engine's way (tail child cues start).
+//! [`AudioEngine::tick`] also advances the FSMs/fades; [`AudioEngine::render`] mixes int16 frames, and
+//! [`AudioEngine::pump`] feeds them to the device at wall-clock rate (a no-op when headless). Retail
+//! coverage: `tests/retail_banks.rs` here and `mercs2_probe/tests/audio_wad_probe.rs`.
 //!
 //! ## Features
 //! `device` (**on by default**) links `cpal` for [`backend::CpalSink`]. No audio *behaviour* is gated
@@ -46,15 +76,26 @@
 //! which breaks the 32-bit cross build.
 //!
 //! Parity gaps that are *not* faithfulness blockers (EAX reverb, `.pws` stream voices, per-region music
-//! machines, surround channel-gain matrices) are enumerated in `DEFERRED.md`.
+//! machines, the device fold-down) are enumerated in `DEFERRED.md`.
 
 pub mod backend;
+pub mod automation;
 pub mod banks;
 pub mod categories;
+pub mod filter;
 pub mod components;
+pub mod duration;
+pub mod emitter;
+pub mod encode;
 pub mod engine;
+mod le;
 pub mod mixer;
+pub mod multitrack;
+pub mod playback;
 pub mod music;
+pub mod route;
+pub mod select;
+pub mod soundbank;
 pub mod sounddb;
 pub mod spatial;
 pub mod vo;
@@ -62,30 +103,33 @@ pub mod voice;
 pub mod wave;
 
 pub use components::{AudioListener, SoundEmitter};
-pub use engine::{AudioEngine, SOUND_LIB_VERSION};
+pub use encode::{encode_bank, BankSpec, CueSpec, EncodedBank, EncodeError, Pcm16};
+pub use emitter::Holder;
+pub use engine::{AudioEngine, CueError, CueHandle, EmitterId, ResolveError, ResolvedCue, SOUND_LIB_VERSION};
 pub use mixer::{Mixer, MixerConfig, PcmSource, SampleSource, ToneSource};
 pub use music::{DeckState, MusicStateMachine};
-pub use sounddb::{CueEntry, SoundDb, SoundDbError, SOUNDDB_TAG};
+pub use soundbank::{Soundbank, SoundbankError};
+pub use sounddb::{CategoryEntry, CueEntry, SoundDb, SoundDbError, SOUNDDB_TAG};
 pub use spatial::{Listener, ListenerSet, MAX_LISTENERS};
 pub use vo::{VoManager, VoPriority};
 pub use voice::{InstanceState, Voice, VoiceId, VoicePool, VoiceRequest};
-pub use wave::{DecodedClip, Wavebank};
+pub use wave::{DecodedClip, WaveError, Wavebank, WavebankFile};
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use mercs2_core::glam::Vec3;
+    use mercs2_formats::hash::pandemic_hash_m2 as m2;
 
-    /// Build a small synthetic sounddb: a direct-index cue plus a hashed positional cue.
+    /// Build a small synthetic sounddb: a direct-index cue plus a hashed cue.
     fn sample_db() -> SoundDb {
         let cues = vec![
             CueEntry {
                 guid: 0x0000_0001,
                 bank_hash: 0,
-                wave_index: 0,
+                cue_index: 0,
                 priority: 100,
                 category: 0,
-                flags: 0,
                 default_gain: 1.0,
                 min_dist: 0.0,
                 max_dist: 0.0,
@@ -93,10 +137,9 @@ mod tests {
             CueEntry {
                 guid: mercs2_formats::hash::pandemic_hash_m2("sfx_explosion"),
                 bank_hash: 0,
-                wave_index: 3,
+                cue_index: 3,
                 priority: 200,
                 category: 1,
-                flags: 0x2, // positional
                 default_gain: 0.75,
                 min_dist: 0.0,
                 max_dist: 0.0,
@@ -135,7 +178,7 @@ mod tests {
                 CueEntry::routed(0x00AA_BB01, 0xBEEF, 3),
             ],
         );
-        let bytes = routed.to_bytes();
+        let bytes = routed.to_bytes().expect("sorted table encodes");
         assert_eq!(bytes[0], SOUNDDB_TAG, "first byte is the 0x1D node tag");
         assert_eq!(SoundDb::parse(&bytes).expect("parse synthesized block"), routed);
 
@@ -143,8 +186,7 @@ mod tests {
         let db = sample_db();
         assert_eq!(db.find_cue(0).expect("cue index 0").guid, 0x0000_0001); // direct index (< 0x401)
         let hashed = db.find_cue_by_name("sfx_explosion").expect("hashed cue resolves"); // id >= 0x401
-        assert!(hashed.is_positional());
-        assert_eq!(hashed.wave_index, 3);
+        assert_eq!(hashed.cue_index, 3);
 
         // A non-0x1D buffer is rejected.
         let mut bad = bytes.clone();
@@ -223,50 +265,38 @@ mod tests {
         assert_eq!(m.inactive_deck().gain, 0.0);
     }
 
-    // ---- 4. 3D attenuation falls off with distance ----------------------------------------------
+    // ---- 4. a positional source takes its emitter's speaker gains ---------------------------------
 
     #[test]
-    fn attenuation_falls_off_with_distance() {
-        // Unit-level: monotonic non-increasing, full inside min, silent past max.
-        assert_eq!(spatial::distance_attenuation(0.5, 1.0, 10.0), 1.0);
-        let near = spatial::distance_attenuation(2.0, 1.0, 10.0);
-        let far = spatial::distance_attenuation(8.0, 1.0, 10.0);
-        assert!(near > far, "closer is louder ({near} > {far})");
-        assert!(far > 0.0);
-        assert_eq!(spatial::distance_attenuation(20.0, 1.0, 10.0), 0.0, "past max = silent");
-
-        // End-to-end: a positional cue at two distances must render quieter when farther, through the
-        // real voice→mixer path.
-        let mut eng = AudioEngine::new(MixerConfig { sample_rate: 44100, channels: 2 });
-        // An active listener at the origin, facing +Z (Listener::default() is inactive).
-        eng.set_listener(0, Listener { active: true, ..Listener::default() });
-        eng.set_sounddb(sample_db());
-
-        let render_at = |eng: &mut AudioEngine, dist: f32| -> f32 {
-            eng.pool = VoicePool::new(8); // fresh pool
-            eng.mixer = Mixer::new(MixerConfig { sample_rate: 44100, channels: 2 });
+    fn a_positional_source_takes_its_emitters_speaker_gains() {
+        // Listener 0 at the origin with the identity basis; the source straight along +X. The speaker
+        // gains (FUN_0083d090) are then clamp01(v.x): 0.7 for front left and back left (channels 0
+        // and 4), 0 elsewhere; channel 3 (LFE) is the source constructor's 0.0.
+        let render_at = |dist: f32| -> Vec<i16> {
+            let mut eng = AudioEngine::new(MixerConfig { sample_rate: 44100, channels: 6 });
+            eng.set_listener(0, Listener { active: true, ..Listener::default() });
+            eng.set_sounddb(sample_db());
             let src = Box::new(ToneSource::new(440.0, 44100, 12000, 8192));
-            // place the source off to the +X side at `dist`
-            let pos = Vec3::new(dist, 0.0, 0.0);
-            let id = eng
-                .cue_sound_by_name("sfx_explosion", Some(pos), Some(src))
+            let handle = eng
+                .cue_sound_with_source(m2("sfx_explosion"), Some(Vec3::new(dist, 0.0, 0.0)), src)
                 .expect("cue allocates");
-            // advance the FSM out of start-delay/starting into Playing
+            let id = eng.cue_voices(handle)[0];
             for _ in 0..8 {
                 eng.tick(0.05);
             }
             assert!(eng.pool.get(id).unwrap().state.is_audible());
-            let buf = eng.render(2048);
-            mixer::rms_i16(&buf)
+            eng.render(2048)
         };
-
-        let close = render_at(&mut eng, 3.0);
-        let distant = render_at(&mut eng, 60.0);
-        assert!(close > 0.0, "a nearby cue produces sound ({close})");
-        assert!(
-            distant < close,
-            "a distant cue is attenuated: distant {distant} < close {close}"
-        );
+        let near = render_at(3.0);
+        let channel = |buf: &[i16], c: usize| buf.iter().skip(c).step_by(6).copied().collect::<Vec<i16>>();
+        for c in [1, 2, 3, 5] {
+            assert!(channel(&near, c).iter().all(|&s| s == 0), "channel {c} is silent");
+        }
+        assert!(mixer::rms_i16(&channel(&near, 0)) > 0.0, "front left carries the source");
+        assert_eq!(channel(&near, 0), channel(&near, 4), "back left takes the same gain");
+        // An explicit source has no group, so no 3D parameters: no distance volume (FUN_00839ae0 calls
+        // FUN_0083d3a0 only for a wave whose +0x5C is set).
+        assert_eq!(render_at(60.0), near, "no distance volume without a group");
     }
 
     // ---- 5. facade smoke: banks, categories, VO, lib version ------------------------------------
@@ -306,50 +336,75 @@ mod tests {
         assert_eq!(eng.categories.master_volume(), 1.0, "restored when last ref released");
     }
 
-    // ---- 6. a cue binds its resident wave and mixes to audible PCM (the last-mile wire) ----------
+    // ---- 6. a synthetic bank's cue name resolves through the full chain to its PCM --------------
 
     #[test]
-    fn cue_binds_resident_wave_and_mixes_audible() {
+    fn synthetic_bank_cue_name_resolves_to_its_pcm_and_mixes_audible() {
+        use crate::encode::{encode_bank, CueSpec, Pcm16, UI_PDA_OPEN_CUE, UI_PDA_OPEN_GROUP};
+        use mercs2_formats::hash::pandemic_hash_m2 as m2;
+
+        let tone: Vec<i16> = (0..6000).map(|i| if i % 50 < 25 { 8000 } else { -8000 }).collect();
+        let other: Vec<i16> = vec![-3000; 2 * 400];
+        let spec = BankSpec {
+            name: "mod_chain_bank".to_string(),
+            cues: vec![
+                CueSpec {
+                    name: "mod_other".to_string(),
+                    category: "sfx".to_string(),
+                    sound_id: m2("mod_other"),
+                    clip_hash: m2("mod_other"),
+                    pcm: Pcm16 { channels: 2, sample_rate: 44100, samples: other.clone() },
+                    group: UI_PDA_OPEN_GROUP,
+                    cue: UI_PDA_OPEN_CUE,
+                },
+                CueSpec {
+                    name: "mod_tone".to_string(),
+                    category: "ui".to_string(),
+                    sound_id: m2("mod_tone"),
+                    clip_hash: m2("mod_tone"),
+                    pcm: Pcm16 { channels: 1, sample_rate: 22050, samples: tone.clone() },
+                    group: UI_PDA_OPEN_GROUP,
+                    cue: UI_PDA_OPEN_CUE,
+                },
+            ],
+        };
+        let enc = encode_bank(&spec).expect("encodes");
+
         let mut eng = AudioEngine::new(MixerConfig { sample_rate: 44100, channels: 2 });
-        let hash = 0x5FBA_3915u32; // >= 0x401 → resolves via the hashed FindCue path
+        eng.set_sounddb(SoundDb::parse(&enc.sounddb).expect("sounddb parses"));
+        assert_eq!(eng.load_soundbank(&enc.soundbank).expect("soundbank parses"), 2);
+        assert_eq!(eng.load_wavebank(&enc.wavebank).expect("wavebank parses"), 2);
 
-        // A resident, loud, constant mono clip under `hash` (as LoadWaveBank would leave it).
-        eng.add_wave(DecodedClip {
-            clip_hash: hash,
-            channels: 1,
-            sample_rate: 22050, // native rate ≠ mixer rate → exercises the resampler
-            samples: vec![8000i16; 6000],
-            streaming: false,
-        });
-        assert_eq!(eng.resident_wave_count(), 1);
+        // The name hash is all the caller supplies; the chain does the rest.
+        for (name, pcm, ch) in [("mod_tone", &tone, 1u8), ("mod_other", &other, 2)] {
+            let entry = *eng.sounddb.find_cue_by_name(name).expect("sounddb routes the name");
+            let resolved = eng.resolve_cue(&entry).expect("chain resolves");
+            let waves: Vec<_> = resolved.waves().collect();
+            assert_eq!(waves.len(), 1, "{name}: one sound, one single-wave group");
+            let clip = eng.clip(waves[0].wavebank, waves[0].index).expect("resident");
+            assert_eq!(&clip.samples, pcm, "{name} resolves to its own PCM");
+            assert_eq!(clip.channels, ch);
+        }
 
-        // A sounddb whose single cue's guid == the clip hash (the one-shot-SFX fallback the cue path
-        // binds on when no bank routing resolves). No explicit source is passed — the engine must
-        // auto-bind the resident wave.
-        let cue = CueEntry::routed(hash, 0, 0);
-        eng.set_sounddb(SoundDb::from_cues(SOUNDDB_TAG, vec![cue]));
-
-        let id = eng.cue_sound(hash, None, None).expect("cue allocates a voice");
-        // Advance the voice FSM out of start/ready into Playing.
+        let handle = eng.cue_sound_by_name("mod_tone", None).expect("the cue starts");
+        assert!(eng.cue_voices(handle).is_empty(), "a cue's sounds fire on the next frame");
         for _ in 0..8 {
             eng.tick(0.02);
         }
+        let id = eng.cue_voices(handle)[0];
         assert!(eng.pool.get(id).unwrap().state.is_audible(), "voice reached a playing state");
-
         let buf = eng.render(2048);
-        assert!(
-            mixer::rms_i16(&buf) > 0.0,
-            "a cue's resident wave produced audible PCM through the real mixer path"
-        );
+        assert!(mixer::rms_i16(&buf) > 0.0, "the resolved clip mixed to audible PCM");
 
-        // A cue whose wave is NOT resident allocates a (silent) voice but binds no source — faithful to
-        // the exe allocating a voice before its wave streams in.
-        let other = 0x1234_5678u32;
-        eng.set_sounddb(SoundDb::from_cues(
-            SOUNDDB_TAG,
-            vec![CueEntry { guid: other, ..cue }],
-        ));
-        assert!(eng.cue_sound(other, None, None).is_some(), "still allocates a voice");
+        // Without the soundbank resident the chain stops at its first hop, with the reason.
+        let mut bare = AudioEngine::default();
+        bare.set_sounddb(SoundDb::parse(&enc.sounddb).expect("sounddb parses"));
+        bare.load_wavebank(&enc.wavebank).expect("wavebank parses");
+        let entry = *bare.sounddb.find_cue_by_name("mod_tone").unwrap();
+        assert_eq!(
+            bare.resolve_cue(&entry).map(|_| ()),
+            Err(ResolveError::SoundbankNotResident(m2("mod_chain_bank")))
+        );
     }
 
     #[test]

@@ -5,9 +5,10 @@
 //! - **A modder's machine**, where the retail WADs exist and `qm build` can lower for real.
 //! - **A template repo's CI**, where they never will. `qm lint` is hermetic on purpose — manifest
 //!   text plus the Shipment directory, no game, no network — so a public runner can gate every push.
-//! - **A deploy step**, which needs `qm link` across the whole installed set, because Lua scripts
-//!   load from a block rather than per-hash and two script-touching Shipments would otherwise
-//!   silently annihilate each other.
+//! - **A deploy step**, which runs `qm preflight` over the whole installed set (requirements,
+//!   versions, conflicts, superseded files and the load order, written to `load-plan.json`), then
+//!   `qm link` across it, because Lua scripts load from a block rather than per-hash and two
+//!   script-touching Shipments would otherwise silently annihilate each other.
 //!
 //! ## Exit codes
 //!
@@ -24,9 +25,12 @@
 //! misconfigured", and a single nonzero code conflates a real finding with a missing game folder.
 
 use clap::{Parser, Subcommand};
+use mercs2_quartermaster::compat::{self, PlanInput};
+use mercs2_quartermaster::discover::{DiscoverError, OpenError};
+use mercs2_quartermaster::plan::{self, FindingSeverity, LoadPlan, Producer, RequestItem};
 use mercs2_quartermaster::{
-    build, game, lint, open_shipment, BuildError, Diagnostic, GameStack, LoadedShipment, NameTable,
-    Severity,
+    build, lint, open_shipment, BuildError, Diagnostic, GameStack, LoadedShipment, NameTable,
+    ReadError, Severity,
 };
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -67,6 +71,53 @@ enum Command {
         /// hash → name lookup, for M0130. Defaults to the workspace's data/production_names.json.
         #[arg(long, value_name = "FILE")]
         names: Option<PathBuf>,
+        /// Also write the findings as JSON (lint-report.json) to this file. Any older file there is
+        /// removed first; when lint cannot run (exit 2), no report is written.
+        #[arg(long, value_name = "FILE")]
+        report: Option<PathBuf>,
+    },
+    /// Check version ranges with the same semver grammar qm applies to manifest ranges (M0172).
+    /// Hermetic: no Shipment, no game, no network.
+    ///
+    /// Put the ranges after `--`, so that no range can be read as an option. Exit 0: every range
+    /// parses. Exit 1: at least one does not (the report has one M0172 finding per bad range).
+    /// Exit 2: nothing was checked (no ranges, or the report could not be written), and no report
+    /// is left behind.
+    CheckRange {
+        /// Where to write range-report.json. Any older file there is removed first.
+        #[arg(long, value_name = "FILE")]
+        report: PathBuf,
+        /// The ranges, e.g. ">=0.7, <1" "^1.0.0".
+        ranges: Vec<String>,
+    },
+    /// Print a manifest's Shipment name and version as one JSON object. Hermetic: parses and
+    /// validates the manifest file alone — no source files, no game.
+    ///
+    /// Exit 0: stdout is exactly `{"name": "<shipment.name>", "version": "<shipment.version>"}`.
+    /// Exit 2: the file cannot be read, has no manifest extension (yaml, yml, json, toml), does not
+    /// parse, or fails validation; the reason goes to stderr and stdout is empty.
+    ManifestInfo {
+        /// The manifest file.
+        manifest: PathBuf,
+    },
+    /// Compile Lua files with the game's Lua compiler and check each chunk's LuaQ header.
+    ///
+    /// Each file is compiled under a bare chunk name: --chunk-name, or the file stem. With --out-dir
+    /// the bytecode is written to <dir>/<chunk>.luac, read back and its header checked. Prints
+    /// `ok <file> <bytes> <sha256>` per file. Exit 0: all compiled and verified. Exit 1: a syntax
+    /// error, or a name that is not a bare chunk name. Exit 2: could not run (a file missing,
+    /// unreadable or not UTF-8, --chunk-name with several files, an unwritable output, or a header
+    /// mismatch, which is a toolchain defect).
+    CompileLua {
+        /// The `.lua` files.
+        #[arg(required = true)]
+        files: Vec<PathBuf>,
+        /// The chunk name, instead of the file stem. Only with exactly one file.
+        #[arg(long, value_name = "NAME")]
+        chunk_name: Option<String>,
+        /// Write each chunk to <dir>/<chunk>.luac and verify it from disk.
+        #[arg(long, value_name = "DIR")]
+        out_dir: Option<PathBuf>,
     },
     /// Build a Shipment into an overlay WAD. Needs the retail WADs.
     Build {
@@ -76,7 +127,7 @@ enum Command {
         /// Where the game is installed. Defaults to host discovery.
         #[arg(long, value_name = "DIR")]
         game: Option<PathBuf>,
-        /// Output directory. Defaults to <shipment>/build.
+        /// Output directory. Defaults to <shipment>/_build.
         #[arg(long, value_name = "DIR")]
         out: Option<PathBuf>,
         /// The decompiled Lua corpus root, for script-touching contributions.
@@ -90,15 +141,40 @@ enum Command {
         #[arg(long, value_name = "FILE")]
         names: Option<PathBuf>,
     },
+    /// Check a set of Shipments before building: requirements, versions, conflicts, superseded
+    /// legacy files and the load order. Writes <out>/load-plan.json. No WAD is opened.
+    ///
+    /// Exit 0: the plan is ok. Exit 1: the plan has error findings (it is still written, with the
+    /// load order unless the requirements form a cycle). Exit 2: nothing could be checked, and no
+    /// plan is written.
+    Preflight {
+        /// Every Shipment directory, in request order (the tie-break). Each gets the id `arg:<n>`.
+        /// Give either these or --request.
+        shipments: Vec<PathBuf>,
+        /// A load-request.json naming the Shipments and their ids, in request order.
+        #[arg(long, value_name = "FILE")]
+        request: Option<PathBuf>,
+        /// Where to write load-plan.json.
+        #[arg(long, value_name = "DIR")]
+        out: PathBuf,
+        /// Where the game is installed: vz.wad, the install root or its data folder. Defaults to
+        /// host discovery. Needed only when a Shipment declares `supersedes`; resolved whenever
+        /// given.
+        #[arg(long, value_name = "PATH")]
+        game: Option<PathBuf>,
+    },
     /// Link the Lua of several installed Shipments into one WAD, mounted last.
     ///
     /// Scripts load from the block, not per-hash, so a Shipment's own overlay is only valid
-    /// standalone. This is what makes two script-touching Shipments coexist.
+    /// standalone. This is what makes two script-touching Shipments coexist. The set's load plan
+    /// is computed first and written beside the output; a plan that is not ok links nothing.
     Link {
-        /// Every installed Shipment directory.
-        #[arg(required = true)]
+        /// Every installed Shipment directory, in request order. Give either these or --request.
         shipments: Vec<PathBuf>,
-        #[arg(long, value_name = "DIR")]
+        /// A load-request.json naming the Shipments and their ids, in request order.
+        #[arg(long, value_name = "FILE")]
+        request: Option<PathBuf>,
+        #[arg(long, value_name = "PATH")]
         game: Option<PathBuf>,
         /// Where to write the link WAD. Required — it is not any one Shipment's output.
         #[arg(long, value_name = "DIR")]
@@ -142,6 +218,16 @@ enum Command {
     },
     /// List every rule: what is checked, what is known-but-unchecked, and where each is documented.
     Rules,
+    /// List every contribution kind this qm reads — the authoritative list. Hermetic: no Shipment,
+    /// no game, no network.
+    ///
+    /// Prints one kind per line. With --json, prints `{"format":<manifest format>,"kinds":[...]}`
+    /// instead. Exit 0.
+    Kinds {
+        /// Print one JSON object instead of one kind per line.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 fn main() -> ExitCode {
@@ -151,7 +237,21 @@ fn main() -> ExitCode {
             with_game,
             game,
             names,
-        } => cmd_lint(&shipment, with_game, game.as_deref(), names.as_deref()),
+            report,
+        } => cmd_lint(
+            &shipment,
+            with_game,
+            game.as_deref(),
+            names.as_deref(),
+            report.as_deref(),
+        ),
+        Command::CheckRange { report, ranges } => cmd_check_range(&report, &ranges),
+        Command::ManifestInfo { manifest } => cmd_manifest_info(&manifest),
+        Command::CompileLua {
+            files,
+            chunk_name,
+            out_dir,
+        } => cmd_compile_lua(&files, chunk_name.as_deref(), out_dir.as_deref()),
         Command::Build {
             shipment,
             game,
@@ -167,14 +267,22 @@ fn main() -> ExitCode {
             workshop_data.as_deref(),
             names.as_deref(),
         ),
+        Command::Preflight {
+            shipments,
+            request,
+            out,
+            game,
+        } => cmd_preflight(&shipments, request.as_deref(), &out, game.as_deref()),
         Command::Link {
             shipments,
+            request,
             game,
             out,
             corpus,
             workshop_data,
         } => cmd_link(
             &shipments,
+            request.as_deref(),
             game.as_deref(),
             &out,
             corpus.as_deref(),
@@ -191,6 +299,7 @@ fn main() -> ExitCode {
             names,
         } => cmd_extract_world(&layer, game.as_deref(), names.as_deref()),
         Command::Rules => cmd_rules(),
+        Command::Kinds { json } => cmd_kinds(json),
     }
 }
 
@@ -248,24 +357,16 @@ fn resolve_names(explicit: Option<&Path>) -> Option<NameTable> {
 
 /// Resolve the game stack: an explicit path wins, otherwise host discovery.
 ///
-/// The manifest is never consulted. A Shipment that could name its own game folder would be a
-/// Shipment that behaves differently on the author's machine than on anyone else's.
+/// `--game` may name `vz.wad`, the install root or its `data` folder, the same as for
+/// `qm preflight` ([`compat::resolve_vz_wad`]). The manifest is never consulted. A Shipment that
+/// could name its own game folder would be a Shipment that behaves differently on the author's
+/// machine than on anyone else's.
 fn resolve_game(explicit: Option<&Path>) -> Result<GameStack, ExitCode> {
-    let paths = match explicit {
-        Some(dir) => vec![dir.to_path_buf()],
-        None => match game::discover() {
-            Some(found) => vec![found.path],
-            None => {
-                eprintln!(
-                    "error: no game install found. Pass --game <dir>, or run \
-                     scripts/find-vz-wad.sh --write.\n\
-                     note: `qm lint` needs no game install and will still run."
-                );
-                return Err(ExitCode::from(EXIT_UNUSABLE));
-            }
-        },
-    };
-    GameStack::open(&paths).map_err(|e| {
+    let vz = compat::resolve_vz_wad(explicit).map_err(|e| {
+        eprintln!("error: {e}\nnote: `qm lint` needs no game install and will still run.");
+        ExitCode::from(EXIT_UNUSABLE)
+    })?;
+    GameStack::open(&[vz]).map_err(|e| {
         eprintln!("error: {e}");
         ExitCode::from(EXIT_UNUSABLE)
     })
@@ -276,7 +377,15 @@ fn cmd_lint(
     with_game: bool,
     game_dir: Option<&Path>,
     names_path: Option<&Path>,
+    report_file: Option<&Path>,
 ) -> ExitCode {
+    // The stale report goes first, so every exit-2 path below leaves no report behind.
+    if let Some(file) = report_file {
+        if let Err(e) = plan::remove_stale_file(file) {
+            eprintln!("error: {e}");
+            return ExitCode::from(EXIT_UNUSABLE);
+        }
+    }
     let shipment = match load(root) {
         Ok(s) => s,
         Err(code) => return code,
@@ -291,11 +400,195 @@ fn cmd_lint(
         }
     }
 
+    let blocked = lint::blocks_build(&found);
+    if let Some(file) = report_file {
+        let mut findings: Vec<plan::Finding> = found.iter().map(Diagnostic::to_finding).collect();
+        plan::sort_findings(&mut findings, |_| None);
+        let lint_report = plan::LintReport {
+            format: plan::REPORT_FORMAT,
+            producer: "lint",
+            quartermaster: compat::QUARTERMASTER_VERSION,
+            ok: !blocked,
+            manifest: &shipment.manifest,
+            findings,
+        };
+        if let Err(e) = plan::write_json(file, &lint_report, "the lint report") {
+            eprintln!("error: {e}");
+            return ExitCode::from(EXIT_UNUSABLE);
+        }
+    }
+
     report(&shipment.manifest.shipment.name, &found);
-    if lint::blocks_build(&found) {
+    if blocked {
         ExitCode::from(EXIT_FINDINGS)
     } else {
         ExitCode::SUCCESS
+    }
+}
+
+fn cmd_manifest_info(path: &Path) -> ExitCode {
+    let unusable = |message: String| {
+        eprintln!("error: {}: {message}", path.display());
+        ExitCode::from(EXIT_UNUSABLE)
+    };
+    let Some(format) = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .and_then(mercs2_quartermaster::Format::from_extension)
+    else {
+        return unusable("-: not a manifest file — expected a .yaml, .yml, .json or .toml".into());
+    };
+    let text = match std::fs::read_to_string(path) {
+        Ok(t) => t,
+        Err(e) => return unusable(format!("-: reading the manifest: {e}")),
+    };
+    let manifest = match mercs2_quartermaster::from_str(&text, format) {
+        Ok(m) => m,
+        Err(ReadError::Validate(v)) => return unusable(format!("{}: {v}", v.code().unwrap_or("-"))),
+        Err(e @ (ReadError::Parse { .. } | ReadError::RemovedKind { .. })) => {
+            return unusable(format!("-: {e}"))
+        }
+    };
+    println!(
+        "{}",
+        serde_json::json!({
+            "name": manifest.shipment.name,
+            "version": manifest.shipment.version,
+        })
+    );
+    ExitCode::SUCCESS
+}
+
+/// Compile each file; the exit code is the worst outcome across them, so every file is reported.
+fn cmd_compile_lua(files: &[PathBuf], chunk_name: Option<&str>, out_dir: Option<&Path>) -> ExitCode {
+    if chunk_name.is_some() && files.len() != 1 {
+        eprintln!(
+            "error: --chunk-name names one chunk, but {} files were given",
+            files.len()
+        );
+        return ExitCode::from(EXIT_UNUSABLE);
+    }
+    let mut worst: u8 = 0;
+    for file in files {
+        let outcome = compile_one(file, chunk_name, out_dir);
+        match outcome {
+            Ok(line) => println!("{line}"),
+            Err((code, message)) => {
+                eprintln!("error: {}: {message}", file.display());
+                worst = worst.max(code);
+            }
+        }
+    }
+    ExitCode::from(worst)
+}
+
+/// One file: `Ok(the stdout line)` or `Err((exit code, message))`.
+fn compile_one(
+    file: &Path,
+    chunk_name: Option<&str>,
+    out_dir: Option<&Path>,
+) -> Result<String, (u8, String)> {
+    let bytes = std::fs::read(file).map_err(|e| (EXIT_UNUSABLE, format!("reading: {e}")))?;
+    let source = String::from_utf8(bytes)
+        .map_err(|e| (EXIT_UNUSABLE, format!("the file is not UTF-8: {e}")))?;
+    let chunk = match chunk_name {
+        Some(name) => name.to_string(),
+        None => file
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .map(str::to_string)
+            .ok_or_else(|| {
+                (
+                    EXIT_FINDINGS,
+                    "the file stem is not UTF-8, so it cannot be a chunk name".to_string(),
+                )
+            })?,
+    };
+    if let Some(why) = mercs2_quartermaster::link::chunk_name_refusal(&chunk) {
+        return Err((
+            EXIT_FINDINGS,
+            format!("{chunk:?} is not a bare chunk name: {why}"),
+        ));
+    }
+    let bytecode = mercs2_luac::compile(&source, &chunk).map_err(|e| match e {
+        mercs2_luac::CompileError::Syntax(m) => (EXIT_FINDINGS, m),
+        other => (EXIT_UNUSABLE, other.to_string()),
+    })?;
+    if let Some(dir) = out_dir {
+        std::fs::create_dir_all(dir)
+            .map_err(|e| (EXIT_UNUSABLE, format!("creating {}: {e}", dir.display())))?;
+        let path = dir.join(format!("{chunk}.luac"));
+        std::fs::write(&path, &bytecode)
+            .map_err(|e| (EXIT_UNUSABLE, format!("writing {}: {e}", path.display())))?;
+        let on_disk = std::fs::read(&path)
+            .map_err(|e| (EXIT_UNUSABLE, format!("reading back {}: {e}", path.display())))?;
+        mercs2_luac::check_header(&on_disk)
+            .map_err(|e| (EXIT_UNUSABLE, format!("{}: {e}", path.display())))?;
+        if on_disk != bytecode {
+            return Err((
+                EXIT_UNUSABLE,
+                format!("{} does not read back as the bytes written", path.display()),
+            ));
+        }
+    }
+    Ok(format!(
+        "ok {} {} {}",
+        file.display(),
+        bytecode.len(),
+        build::sha256_hex(&bytecode)
+    ))
+}
+
+fn cmd_check_range(report_file: &Path, ranges: &[String]) -> ExitCode {
+    // The stale report goes first, so every exit-2 path below leaves no report behind.
+    if let Err(e) = plan::remove_stale_file(report_file) {
+        eprintln!("error: {e}");
+        return ExitCode::from(EXIT_UNUSABLE);
+    }
+    if ranges.is_empty() {
+        eprintln!("error: give at least one range to check, after `--`");
+        return ExitCode::from(EXIT_UNUSABLE);
+    }
+    let findings: Vec<plan::Finding> = ranges
+        .iter()
+        .enumerate()
+        .filter_map(|(index, range)| {
+            mercs2_quartermaster::manifest::parse_range(range)
+                .err()
+                .map(|message| plan::Finding {
+                    code: lint::M0172_BAD_VERSION_REQ.code,
+                    severity: FindingSeverity::Error,
+                    message,
+                    items: Vec::new(),
+                    refs: vec![plan::FindingRef {
+                        section: plan::Section::Ranges,
+                        index,
+                    }],
+                    fix: None,
+                })
+        })
+        .collect();
+    for f in &findings {
+        let index = f.refs[0].index;
+        eprintln!("[{}] error: ranges[{index}] {:?}: {}", f.code, ranges[index], f.message);
+    }
+    let ok = findings.is_empty();
+    let range_report = plan::RangeReport {
+        format: plan::REPORT_FORMAT,
+        producer: "check-range",
+        quartermaster: compat::QUARTERMASTER_VERSION,
+        ok,
+        findings,
+    };
+    if let Err(e) = plan::write_json(report_file, &range_report, "the range report") {
+        eprintln!("error: {e}");
+        return ExitCode::from(EXIT_UNUSABLE);
+    }
+    if ok {
+        eprintln!("{} range(s): all valid", ranges.len());
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(EXIT_FINDINGS)
     }
 }
 
@@ -348,7 +641,9 @@ fn cmd_build(
             // `Blocked` is a finding, not a misconfiguration; everything else means we could not
             // run. CI wants to tell those apart.
             let code = match e {
-                BuildError::Blocked(_) | BuildError::Artifact { .. } => EXIT_FINDINGS,
+                BuildError::Blocked(_)
+                | BuildError::Artifact { .. }
+                | BuildError::Superseded { .. } => EXIT_FINDINGS,
                 _ => EXIT_UNUSABLE,
             };
             eprintln!("error: {e}");
@@ -421,20 +716,178 @@ fn cmd_extract_world(layer: &str, game_dir: Option<&Path>, names_path: Option<&P
     ExitCode::SUCCESS
 }
 
+/// The request items: from `--request`, or `arg:<n>` for each positional directory. Exactly one of
+/// the two must be given.
+fn request_items(dirs: &[PathBuf], request: Option<&Path>) -> Result<Vec<RequestItem>, ExitCode> {
+    match (request, dirs.is_empty()) {
+        (Some(file), true) => plan::read_request(file).map_err(|e| {
+            eprintln!("error: {e}");
+            ExitCode::from(EXIT_UNUSABLE)
+        }),
+        (None, false) => Ok(plan::request_from_dirs(dirs)),
+        (Some(_), false) => {
+            eprintln!("error: give either --request or Shipment directories, not both");
+            Err(ExitCode::from(EXIT_UNUSABLE))
+        }
+        (None, true) => {
+            eprintln!("error: give --request <load-request.json> or at least one Shipment directory");
+            Err(ExitCode::from(EXIT_UNUSABLE))
+        }
+    }
+}
+
+/// Why an item's manifest could not be opened, as `<code or ->: <message>` — never naming the
+/// item's path, which the caller maps back through the id.
+fn open_failure(e: &OpenError) -> String {
+    match e {
+        OpenError::Discover(DiscoverError::NotADirectory(_)) => "-: the path is not a directory".into(),
+        OpenError::Discover(DiscoverError::NoManifest { .. }) => {
+            "-: no manifest in the directory — expected one of manifest.yaml, manifest.yml, \
+             manifest.json, manifest.toml"
+                .into()
+        }
+        OpenError::Discover(DiscoverError::Ambiguous { found, .. }) => {
+            let names: Vec<String> = found
+                .iter()
+                .filter_map(|p| p.file_name())
+                .map(|n| n.to_string_lossy().into_owned())
+                .collect();
+            format!(
+                "-: the directory holds {} manifests ({}) — keep exactly one",
+                found.len(),
+                names.join(", ")
+            )
+        }
+        OpenError::Discover(DiscoverError::Io { message, .. }) => {
+            format!("-: reading the manifest: {message}")
+        }
+        OpenError::Read(ReadError::Validate(v)) => format!("{}: {v}", v.code().unwrap_or("-")),
+        OpenError::Read(r @ (ReadError::Parse { .. } | ReadError::RemovedKind { .. })) => {
+            format!("-: {r}")
+        }
+    }
+}
+
+/// Open every item's Shipment, reporting EVERY failure (one line each) before giving up.
+fn open_items(items: &[RequestItem]) -> Result<Vec<LoadedShipment>, ExitCode> {
+    let mut opened = Vec::with_capacity(items.len());
+    let mut failed = false;
+    for item in items {
+        match open_shipment(&item.path) {
+            Ok(s) => opened.push(s),
+            Err(e) => {
+                eprintln!("error: {}: {}", item.id, open_failure(&e));
+                failed = true;
+            }
+        }
+    }
+    if failed {
+        Err(ExitCode::from(EXIT_UNUSABLE))
+    } else {
+        Ok(opened)
+    }
+}
+
+/// Print a plan's findings, then a one-line verdict naming the file.
+fn report_plan(plan_: &LoadPlan, out: &Path) {
+    for f in &plan_.findings {
+        eprintln!(
+            "[{}] {}: {}: {}",
+            f.code,
+            f.severity.as_str(),
+            f.items.join(", "),
+            f.message
+        );
+    }
+    eprintln!(
+        "load plan {}: {} finding(s) → {}",
+        if plan_.ok { "ok" } else { "NOT ok" },
+        plan_.findings.len(),
+        out.join(plan::PLAN_FILE).display()
+    );
+}
+
+fn cmd_preflight(
+    dirs: &[PathBuf],
+    request: Option<&Path>,
+    out: &Path,
+    game_path: Option<&Path>,
+) -> ExitCode {
+    // The stale plan goes first, so every exit-2 path below leaves no plan behind.
+    if let Err(e) = plan::remove_stale(out) {
+        eprintln!("error: {e}");
+        return ExitCode::from(EXIT_UNUSABLE);
+    }
+    let items = match request_items(dirs, request) {
+        Ok(i) => i,
+        Err(code) => return code,
+    };
+    let opened = match open_items(&items) {
+        Ok(o) => o,
+        Err(code) => return code,
+    };
+    // The game folder is derived only when something needs probing — but a --game that was given
+    // is always resolved, so a wrong one never passes silently.
+    let root = if game_path.is_some() || compat::needs_game_root(opened.iter().map(|s| &s.manifest)) {
+        let derived = compat::resolve_vz_wad(game_path).and_then(|vz| compat::game_root_of(&vz));
+        match derived {
+            Ok(r) => Some(r),
+            Err(e) => {
+                eprintln!("error: {e}");
+                return ExitCode::from(EXIT_UNUSABLE);
+            }
+        }
+    } else {
+        None
+    };
+    let inputs: Vec<PlanInput<'_>> = items
+        .iter()
+        .zip(&opened)
+        .map(|(item, shipment)| PlanInput {
+            id: &item.id,
+            shipment,
+        })
+        .collect();
+    let plan_ = match compat::plan(&inputs, Producer::Preflight, root.as_deref()) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return ExitCode::from(EXIT_UNUSABLE);
+        }
+    };
+    if let Err(e) = plan::write_plan(out, &plan_) {
+        eprintln!("error: {e}");
+        return ExitCode::from(EXIT_UNUSABLE);
+    }
+    report_plan(&plan_, out);
+    if plan_.ok {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(EXIT_FINDINGS)
+    }
+}
+
 fn cmd_link(
-    roots: &[PathBuf],
+    dirs: &[PathBuf],
+    request: Option<&Path>,
     game_dir: Option<&Path>,
     out: &Path,
     corpus: Option<&Path>,
     workshop_data: Option<&Path>,
 ) -> ExitCode {
-    let mut loaded = Vec::new();
-    for root in roots {
-        match load(root) {
-            Ok(s) => loaded.push(s),
-            Err(code) => return code,
-        }
+    // The stale plan goes first, so every exit-2 path below leaves no plan behind.
+    if let Err(e) = plan::remove_stale(out) {
+        eprintln!("error: {e}");
+        return ExitCode::from(EXIT_UNUSABLE);
     }
+    let items = match request_items(dirs, request) {
+        Ok(i) => i,
+        Err(code) => return code,
+    };
+    let opened = match open_items(&items) {
+        Ok(o) => o,
+        Err(code) => return code,
+    };
     let mut stack = match resolve_game(game_dir) {
         Ok(s) => s,
         Err(code) => return code,
@@ -456,8 +909,15 @@ fn cmd_link(
         }
     };
 
-    let refs: Vec<&LoadedShipment> = loaded.iter().collect();
-    match build::link_installed(&refs, &mut stack, &corpus, out) {
+    let inputs: Vec<PlanInput<'_>> = items
+        .iter()
+        .zip(&opened)
+        .map(|(item, shipment)| PlanInput {
+            id: &item.id,
+            shipment,
+        })
+        .collect();
+    match build::link_installed(&inputs, &mut stack, &corpus, out) {
         Ok(report_) => {
             for line in &report_.log {
                 println!("{line}");
@@ -468,23 +928,17 @@ fn cmd_link(
                 // emitting an empty one would be a file deploy has to reason about for nothing.
                 None => println!(
                     "no script mutations across {} Shipment(s); nothing to link",
-                    refs.len()
+                    inputs.len()
                 ),
             }
-            // Cross-Shipment conflicts are findings, not a hard failure: the WAD emitted, but two
-            // Shipments fight over a target no load order resolves, so exit non-zero so CI notices.
-            if report_.conflicts.is_empty() {
-                ExitCode::SUCCESS
-            } else {
-                eprintln!(
-                    "\n{} cross-Shipment conflict(s) — the install is not clean:",
-                    report_.conflicts.len()
-                );
-                for c in &report_.conflicts {
-                    eprintln!("  {c}");
-                }
-                ExitCode::from(EXIT_FINDINGS)
-            }
+            report_plan(&report_.plan, out);
+            ExitCode::SUCCESS
+        }
+        Err(BuildError::Plan(plan_)) => {
+            // The plan was written; it is the explanation. Nothing was linked.
+            report_plan(&plan_, out);
+            eprintln!("error: the load plan is not ok, so nothing was linked");
+            ExitCode::from(EXIT_FINDINGS)
         }
         Err(e) => {
             eprintln!("error: {e}");
@@ -556,6 +1010,25 @@ fn cmd_rules() -> ExitCode {
     println!("\nKNOWN AND NOT YET CHECKED — these can still hang the game:");
     for r in lint::PENDING {
         println!("  {}  {}\n      {}", r.code, r.title, r.url());
+    }
+    ExitCode::SUCCESS
+}
+
+/// Every kind in `Contribution::ALL_KINDS`, in that order, to stdout.
+fn cmd_kinds(json: bool) -> ExitCode {
+    let kinds = mercs2_quartermaster::Contribution::ALL_KINDS;
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "format": mercs2_quartermaster::FORMAT_VERSION,
+                "kinds": kinds,
+            })
+        );
+    } else {
+        for k in kinds {
+            println!("{k}");
+        }
     }
     ExitCode::SUCCESS
 }
