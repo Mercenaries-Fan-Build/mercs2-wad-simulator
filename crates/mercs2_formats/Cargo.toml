@@ -25,7 +25,7 @@ cmac = "0.7"
 # `char_skin::automap` classifies every source bone BY NAME to map it onto the Mercenaries rig.
 # Without it the whole skinned path degrades to anonymous joints. It only retains the name strings
 # the file already carries — no extra dependencies.
-gltf = { version = "1", default-features = false, features = ["utils", "names"] }
+gltf = { version = "1", default-features = false, features = ["utils", "names", "extras"] }
 
 [dev-dependencies]
 serde_json = "1"
