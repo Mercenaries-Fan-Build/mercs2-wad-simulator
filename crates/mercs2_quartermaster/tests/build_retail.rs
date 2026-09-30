@@ -346,17 +346,16 @@ fn streamed_and_shared_targets_are_flagged_and_resident_ones_are_not() {
 // add_model
 // ---------------------------------------------------------------------------
 
-/// Build a minimal, self-contained binary glTF holding one axis-aligned cube.
-///
-/// Written by hand rather than committed as a binary fixture: it keeps the repo free of an opaque
-/// blob, and it exercises the reader against a file whose every byte is accounted for here.
-///
-/// Its one material declares `extras.pixel_shader: PgDiffSpecNormFP` and its mesh
-/// `extras.shadow_vertex_shader: PgMeshShadowVP`: retail uses several pixel shaders for a material
-/// with diffuse, specular and normal maps, and both shadow shaders for an opaque `PgMeshNoColorVP`
-/// group, so an imported model says which.
-fn cube_glb() -> Vec<u8> {
-    // 6 faces x 4 verts. Positions/normals/uvs are generated so the data stays inspectable.
+/// The cube's vertices, 6 faces x 4 corners, and its triangle indices.
+struct Cube {
+    pos: Vec<[f32; 3]>,
+    nrm: Vec<[f32; 3]>,
+    uv: Vec<[f32; 2]>,
+    idx: Vec<u16>,
+}
+
+/// The cube, generated so the data stays inspectable.
+fn cube_vertices() -> Cube {
     const FACES: [([f32; 3], [f32; 3], [f32; 3]); 6] = [
         ([0.0, 0.0, 1.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]), // +Z
         ([0.0, 0.0, -1.0], [-1.0, 0.0, 0.0], [0.0, 1.0, 0.0]), // -Z
@@ -382,6 +381,29 @@ fn cube_glb() -> Vec<u8> {
         }
         idx.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
     }
+    Cube { pos, nrm, uv, idx }
+}
+
+fn cube_positions() -> Vec<[f32; 3]> {
+    cube_vertices().pos
+}
+
+/// Build a minimal, self-contained binary glTF holding one axis-aligned cube.
+///
+/// Written by hand rather than committed as a binary fixture: it keeps the repo free of an opaque
+/// blob, and it exercises the reader against a file whose every byte is accounted for here.
+///
+/// Its one material declares `extras.pixel_shader: PgDiffSpecNormFP`: retail uses several pixel
+/// shaders for a material with diffuse, specular and normal maps, so an imported model says which.
+fn cube_glb() -> Vec<u8> {
+    cube_glb_with("PgDiffSpecNormFP", &[])
+}
+
+/// The cube, its material declaring `pixel` and its primitive carrying `custom` vertex attributes:
+/// `(name, glTF componentType, one value per vertex as little-endian bytes)`. The 24 vertices are
+/// the six faces' four corners, face by face (+Z, -Z, +X, -X, +Y, -Y).
+fn cube_glb_with(pixel: &str, custom: &[(&str, u32, Vec<u8>)]) -> Vec<u8> {
+    let Cube { pos, nrm, uv, idx } = cube_vertices();
 
     let mut bin: Vec<u8> = Vec::new();
     for p in &pos {
@@ -408,6 +430,21 @@ fn cube_glb() -> Vec<u8> {
     while !bin.len().is_multiple_of(4) {
         bin.push(0);
     }
+    let (mut extra_attrs, mut extra_accessors, mut extra_views) = (String::new(), String::new(), String::new());
+    for (k, (name, component, bytes)) in custom.iter().enumerate() {
+        let at = bin.len();
+        bin.extend_from_slice(bytes);
+        while !bin.len().is_multiple_of(4) {
+            bin.push(0);
+        }
+        extra_attrs.push_str(&format!(r#","{name}":{}"#, 4 + k));
+        extra_accessors.push_str(&format!(
+            r#",{{"bufferView":{},"componentType":{component},"count":{},"type":"SCALAR"}}"#,
+            4 + k,
+            pos.len()
+        ));
+        extra_views.push_str(&format!(r#",{{"buffer":0,"byteOffset":{at},"byteLength":{}}}"#, bytes.len()));
+    }
 
     let (mut lo, mut hi) = ([f32::MAX; 3], [f32::MIN; 3]);
     for p in &pos {
@@ -419,18 +456,18 @@ fn cube_glb() -> Vec<u8> {
     let vcount = pos.len();
     let json = format!(
         r#"{{"asset":{{"version":"2.0"}},"scene":0,"scenes":[{{"nodes":[0]}}],"nodes":[{{"mesh":0}}],
-"meshes":[{{"extras":{{"shadow_vertex_shader":"PgMeshShadowVP"}},"primitives":[{{"attributes":{{"POSITION":0,"NORMAL":1,"TEXCOORD_0":2}},"indices":3,"mode":4,"material":0}}]}}],
-"materials":[{{"extras":{{"pixel_shader":"PgDiffSpecNormFP"}}}}],
+"meshes":[{{"primitives":[{{"attributes":{{"POSITION":0,"NORMAL":1,"TEXCOORD_0":2{extra_attrs}}},"indices":3,"mode":4,"material":0}}]}}],
+"materials":[{{"extras":{{"pixel_shader":"{pixel}"}}}}],
 "accessors":[
 {{"bufferView":0,"componentType":5126,"count":{vcount},"type":"VEC3","min":[{},{},{}],"max":[{},{},{}]}},
 {{"bufferView":1,"componentType":5126,"count":{vcount},"type":"VEC3"}},
 {{"bufferView":2,"componentType":5126,"count":{vcount},"type":"VEC2"}},
-{{"bufferView":3,"componentType":5123,"count":{},"type":"SCALAR"}}],
+{{"bufferView":3,"componentType":5123,"count":{},"type":"SCALAR"}}{extra_accessors}],
 "bufferViews":[
 {{"buffer":0,"byteOffset":0,"byteLength":{}}},
 {{"buffer":0,"byteOffset":{n_off},"byteLength":{}}},
 {{"buffer":0,"byteOffset":{t_off},"byteLength":{}}},
-{{"buffer":0,"byteOffset":{i_off},"byteLength":{}}}],
+{{"buffer":0,"byteOffset":{i_off},"byteLength":{}}}{extra_views}],
 "buffers":[{{"byteLength":{}}}]}}"#,
         lo[0],
         lo[1],
@@ -517,6 +554,118 @@ fn add_model_builds_end_to_end() {
     let vs = mercs2_quartermaster::shader::retail_name(host.vertex).expect("a registered vertex shader");
     let shadow = mercs2_quartermaster::shader::retail_name(host.shadow).expect("a registered shadow shader");
     assert!(log.contains(&format!("vertex shader {vs}, shadow {shadow}")), "{log}");
+}
+
+/// The lowered model's group `group`, and the `POSITION.w` of each of its vertices.
+fn built_group(report: &build::BuildReport, name: &str, group: usize) -> (mercs2_quartermaster::shader_import::Group, Vec<f32>) {
+    let on_disk = std::fs::read(report.wad.as_ref().expect("a WAD")).unwrap();
+    let contents = mercs2_formats::patch_wad::read_patch_wad(&on_disk).expect("re-read");
+    let want = mercs2_formats::hash::pandemic_hash_m2(name);
+    for block in &contents.blocks {
+        let dec = mercs2_formats::sges::decompress_sges(&block.compressed_data).expect("sges");
+        let (_, entries) = mercs2_formats::ucfx::parse_block_entry_table(&dec);
+        if entries.first().map(|e| e.name_hash) != Some(want) {
+            continue;
+        }
+        let container = &dec[20..20 + entries[0].chunk_size as usize];
+        let (groups, _) = mercs2_quartermaster::shader_import::read_model(container).expect("model");
+        let g = groups.into_iter().find(|g| g.ordinal == group).expect("the host group");
+        let (off, ty) = g.position.expect("a POSITION");
+        assert_eq!(ty, 16, "POSITION is FLOAT16_4");
+        let w = (0..g.vertex_count)
+            .map(|i| mercs2_formats::model_inject::read_f16_le(container, g.stream_at + i * g.stride + off + 6))
+            .collect();
+        return (g, w);
+    }
+    panic!("no block holds model {name}");
+}
+
+/// A retail model whose group 0 is drawn by `PgMeshVPFastAmbientWind` (a foliage prop).
+const WIND_DONOR: &str = "0x4C36FE4D";
+
+/// `add_model` onto an AmbientWind host keeps its vertex shader and writes each vertex's
+/// `_SWAY_WEIGHT` into `POSITION.w`; without the attribute the build stops naming it.
+#[test]
+fn add_model_onto_a_wind_host_writes_the_sway_weights() {
+    let mut game = retail_game();
+    let wind = mercs2_formats::hash::pandemic_hash_m2("PgMeshVPFastAmbientWind");
+    let donor = mercs2_formats::donor::donor_block(
+        &game.paths().iter().map(|p| p.to_path_buf()).collect::<Vec<_>>(),
+        mercs2_quartermaster::manifest::asset_hash(WIND_DONOR),
+    )
+    .expect("the wind donor");
+    let (groups, _) = mercs2_quartermaster::shader_import::read_model(&donor[20..]).expect("donor model");
+    assert_eq!(groups[0].vertex, wind, "{WIND_DONOR} group 0 is drawn by PgMeshVPFastAmbientWind");
+
+    // Sway 0 at the base (y = -1) and 1 at the top (y = +1), face by face.
+    let sway: Vec<f32> = cube_positions().iter().map(|p| (p[1] + 1.0) * 0.5).collect();
+    let bytes: Vec<u8> = sway.iter().flat_map(|w| w.to_le_bytes()).collect();
+    let dir = scratch("add_model_wind");
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::write(dir.join("src/bush.glb"), cube_glb_with("PgFastFP", &[("_SWAY_WEIGHT", 5126, bytes)])).unwrap();
+    let s = shipment(
+        &dir,
+        &format!("  - kind: add_model\n    name: qm_test_bush\n    model: src/bush.glb\n    donor: \"{WIND_DONOR}\"\n    group: 0\n"),
+    );
+    let report = build::build(&s, Some(&mut game), None, None, None, None).expect("a wind prop builds");
+    let (g, w) = built_group(&report, "qm_test_bush", 0);
+    assert_eq!(g.vertex, wind, "the wind host keeps its vertex shader");
+    assert_eq!(w, sway, "POSITION.w holds each vertex's sway weight");
+    assert!(report.log.join("\n").contains("POSITION.w the _SWAY_WEIGHT of each vertex"));
+
+    let bare = scratch("add_model_wind_bare");
+    std::fs::create_dir_all(bare.join("src")).unwrap();
+    std::fs::write(bare.join("src/bush.glb"), cube_glb_with("PgFastFP", &[])).unwrap();
+    let s = shipment(
+        &bare,
+        &format!("  - kind: add_model\n    name: qm_test_bush\n    model: src/bush.glb\n    donor: \"{WIND_DONOR}\"\n    group: 0\n"),
+    );
+    let e = build::build(&s, Some(&mut game), None, None, None, None).unwrap_err().to_string();
+    assert!(e.contains("M0238") && e.contains("_SWAY_WEIGHT"), "{e}");
+}
+
+/// A retail `TINY` far-LOD container whose group 0 is drawn by `PgMeshTinyVP`, with two world
+/// objects in its id list.
+const TINY_DONOR: &str = "0x7DC53857";
+
+/// `add_model` onto a `TINY` host keeps its vertex shader and writes each vertex's `_TINY_SLOT`
+/// into `POSITION.w`; without the attribute the build stops naming it and the host's slots.
+#[test]
+fn add_model_onto_a_tiny_host_keeps_its_role_and_writes_the_slots() {
+    let mut game = retail_game();
+    let tiny = mercs2_formats::hash::pandemic_hash_m2("PgMeshTinyVP");
+    let donor = mercs2_formats::donor::donor_block(
+        &game.paths().iter().map(|p| p.to_path_buf()).collect::<Vec<_>>(),
+        mercs2_quartermaster::manifest::asset_hash(TINY_DONOR),
+    )
+    .expect("the TINY donor");
+    let (groups, _) = mercs2_quartermaster::shader_import::read_model(&donor[20..]).expect("donor model");
+    assert_eq!((groups[0].kind.as_str(), groups[0].vertex), ("TINY", tiny));
+    assert_eq!(mercs2_quartermaster::shader_import::tiny_slots(&donor), Ok(2));
+
+    // Faces alternate between the two world objects; a face's four corners share one.
+    let slots: Vec<u8> = (0..24u8).map(|v| (v / 4) % 2).collect();
+    let dir = scratch("add_model_tiny");
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::write(dir.join("src/far.glb"), cube_glb_with("PgDiffFP", &[("_TINY_SLOT", 5121, slots.clone())])).unwrap();
+    let s = shipment(
+        &dir,
+        &format!("  - kind: add_model\n    name: qm_test_far\n    model: src/far.glb\n    donor: \"{TINY_DONOR}\"\n    group: 0\n"),
+    );
+    let report = build::build(&s, Some(&mut game), None, None, None, None).expect("a TINY prop builds");
+    let (g, w) = built_group(&report, "qm_test_far", 0);
+    assert_eq!(g.vertex, tiny, "the TINY host keeps its vertex shader");
+    assert_eq!(w, slots.iter().map(|&s| s as f32).collect::<Vec<_>>(), "POSITION.w holds each vertex's slot");
+
+    let bare = scratch("add_model_tiny_bare");
+    std::fs::create_dir_all(bare.join("src")).unwrap();
+    std::fs::write(bare.join("src/far.glb"), cube_glb_with("PgDiffFP", &[])).unwrap();
+    let s = shipment(
+        &bare,
+        &format!("  - kind: add_model\n    name: qm_test_far\n    model: src/far.glb\n    donor: \"{TINY_DONOR}\"\n    group: 0\n"),
+    );
+    let e = build::build(&s, Some(&mut game), None, None, None, None).unwrap_err().to_string();
+    assert!(e.contains("M0238") && e.contains("_TINY_SLOT") && e.contains("0..1"), "{e}");
 }
 
 /// Auto-pick is not implemented, so an omitted donor must ASK rather than guess — a wrong host
