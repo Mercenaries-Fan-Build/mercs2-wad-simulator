@@ -858,6 +858,84 @@ end
     assert!(lint::blocks_build(&diags));
 }
 
+/// Colon-syntax methods (`function X:Y(...)`) have `self` implicitly, so the M0301 fix
+/// (`self:_CreateEvent`) is applicable and the rule must fire.
+#[test]
+fn m0301_fires_on_colon_method_form() {
+    let body = "\
+inherit(\"MrxTaskContract\")
+function MyMission:Activated()
+  Event.Create(Event.TimerRelative, {5}, DoStuff, {self})
+end
+";
+    let root = scratch("m0301_colon", &[("src/mission.lua", body)]);
+    let m = shipment_with(
+        "  - kind: add_script
+    name: MyMission
+    source: src/mission.lua
+",
+    );
+    let diags = lint::lint(&m, Some(&root), None);
+    assert_eq!(
+        diags.iter().filter(|d| d.rule.code == "M0301").count(),
+        1,
+        "colon method has implicit self: {diags:?}"
+    );
+}
+
+/// A `patch_lua` of engine code — `MrxPlayer.LoadSingleton` and friends — has no MrxTask context;
+/// there is no `self`. The engine itself uses `Event.Create` in these functions (this is why
+/// `bug_006_heroswap_save_restore.lua` in unofficial-patch preserves them verbatim: "Body is
+/// retail's + the clip restore"). The rule's suggested fix cannot apply — refusing this build
+/// would be a false positive.
+#[test]
+fn m0301_is_quiet_on_patch_lua_of_engine_code_with_no_self() {
+    let body = "\
+function LoadSingleton(tSaveData)
+  for i, uCharGuid in ipairs(GetPlayers()) do
+    function _RestoreEquipment(uGuid, tSavedEquipment)
+      Event.Create(Event.ObjectHibernation, {uGuid, 'a'}, _QmRestoreAmmo, {uGuid})
+    end
+    Event.Create(Event.ObjectHibernation, {uCharGuid, 'a'}, _RestoreEquipment, {uCharGuid})
+  end
+end
+";
+    let root = scratch("m0301_patch_lua_no_self", &[("src/patch.lua", body)]);
+    let m = shipment_with(
+        "  - kind: patch_lua
+    target: mrxplayer
+    append: src/patch.lua
+",
+    );
+    let diags = lint::lint(&m, Some(&root), None);
+    assert!(
+        !diags.iter().any(|d| d.rule.code == "M0301"),
+        "engine-code patch has no MrxTask context, self:_CreateEvent doesn't apply: {diags:?}"
+    );
+}
+
+/// An Event.Create at file scope, with no enclosing function at all, has no `self` — the fix
+/// cannot apply, so the rule must not fire.
+#[test]
+fn m0301_is_quiet_at_top_level() {
+    let body = "\
+inherit(\"MrxTaskContract\")
+Event.Create(Event.TimerRelative, {5}, DoStuff, {})
+";
+    let root = scratch("m0301_top_level", &[("src/mission.lua", body)]);
+    let m = shipment_with(
+        "  - kind: add_script
+    name: MyMission
+    source: src/mission.lua
+",
+    );
+    let diags = lint::lint(&m, Some(&root), None);
+    assert!(
+        !diags.iter().any(|d| d.rule.code == "M0301"),
+        "top-level call has no enclosing self: {diags:?}"
+    );
+}
+
 /// The safe form — `self:_CreateEvent(…)` / `self:_CreatePersistentEvent(…)` — is not caught,
 /// because `_CreateEvent` is a method on `MrxTask` and inserts the handle into `self._tEvents`
 /// before returning it. Every retail contract / job uses this form; a rule that flagged it would
