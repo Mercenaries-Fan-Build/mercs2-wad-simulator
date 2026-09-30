@@ -423,7 +423,8 @@ pub const M0234_SHADER_CLASSES: Rule = Rule {
 };
 
 /// A material (`MTRL`) whose pixel-shader key is not a pixel shader registered in every
-/// configuration: `Mtrl_Parse` looks it up and reads the null entry at `0x00858DB8`.
+/// configuration: `Mtrl_Parse` looks it up, gets the registry's null entry (`DAT_01977a3c`, 0), and
+/// the read at `0x00858DB8` through it is an access violation.
 pub const M0235_MTRL_KEY_UNREGISTERED: Rule = Rule {
     code: "M0235",
     title: "a material's pixel-shader key is not registered in every configuration",
@@ -431,7 +432,13 @@ pub const M0235_MTRL_KEY_UNREGISTERED: Rule = Rule {
 };
 
 /// A primitive group whose `INFO` vertex-shader word (`+0x0C` main, `+0x10` shadow) is not a
-/// registered vertex shader: the loader's lookup in the vertex registry misses.
+/// registered vertex shader: the loader's lookup in the vertex registry misses and stores the
+/// registry's null entry (`DAT_0197da44`, 0) as the group's record (`FUN_00478270`: group `+0` at
+/// `0x00478677`, `+4` at `0x00478696`). Every pass that draws the group reads the record with no
+/// null test, an access violation: the mesh main pass at `0x00478906`, its shadow pass at
+/// `0x00478d48` (which reads the main record first) and its Z pass at `0x004790a8`; the skin passes
+/// at `0x00479a14`, `0x00479dc5` and `0x0047a178`; the TINY passes at `0x0047a6fb`, `0x0047a89c`
+/// and `0x0047aa5c`. A model that is loaded and never drawn does not reach them.
 pub const M0236_PRMG_VS_UNREGISTERED: Rule = Rule {
     code: "M0236",
     title: "a primitive group's vertex-shader key is not a registered vertex shader",
