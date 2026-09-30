@@ -10,7 +10,8 @@ use mercs2_formats::sm3asm;
 use mercs2_quartermaster::build::{self, BuildError};
 use mercs2_quartermaster::lint::{self, Diagnostic};
 use mercs2_quartermaster::shader::{self, DataFile, Stage};
-use mercs2_quartermaster::shader_import::{self, Declared};
+use mercs2_formats::mesh_import::CustomAttributes;
+use mercs2_quartermaster::shader_import::{self, Declared, Geometry, PositionW};
 use mercs2_quartermaster::{discover, LoadedShipment};
 
 const VS_ASM: &str = "vs_3_0\ndcl_position v0\ndcl_position o0\nmov o0, v0\n";
@@ -443,16 +444,35 @@ fn the_header_lists_exactly_the_declared_registrations() {
 
 // ── the add_model import on a synthetic model ──────────────────────────────────────────────────
 
+/// How a synthetic model's one group is built.
+struct Host {
+    /// The sub-object kind: `MESH` or `TINY`.
+    kind: [u8; 4],
+    flags: u16,
+    /// The group's `INFO` vertex-shader words.
+    vertex: &'static str,
+    shadow: &'static str,
+    /// The top-level `TINY` id list, for a far-LOD container.
+    tiny_ids: Option<Vec<u32>>,
+}
+
+impl Host {
+    fn mesh(flags: u16) -> Host {
+        Host { kind: *b"MESH", flags, vertex: "PgMeshNoColorVP", shadow: "PgMeshShadowVP", tiny_ids: None }
+    }
+}
+
 /// A one-group static model: a 72-byte top `INFO` naming one material, `MTRL` with that material
-/// (three textures, `flags`), and `GEOM → MESH → PRMG` with a 60-byte `INFO`, a `STRM` whose decl is
-/// `POSITION, TEXCOORD0, NORMAL, TANGENT`, and one `PRMT` record naming material 0. Wrapped as the
-/// single-entry block a lowering produces.
-fn model_block(flags: u16) -> Vec<u8> {
+/// (three textures, `host.flags`), and `GEOM → <kind> → PRMG` with a 60-byte `INFO` carrying the
+/// host's vertex-shader words, a `STRM` of three vertices whose decl is
+/// `POSITION (FLOAT16_4), TEXCOORD0, NORMAL, TANGENT`, and one `PRMT` record naming material 0.
+/// Wrapped as the single-entry block a lowering produces.
+fn model_block_of(host: &Host) -> Vec<u8> {
     use mercs2_formats::ucfx::{write_ucfx_tree, UcfxNode};
     let mut top_info = vec![0u8; 72];
     top_info[0x24..0x28].copy_from_slice(&1u32.to_le_bytes());
     let mut mtrl = vec![0u8; 104];
-    mtrl.extend_from_slice(&flags.to_le_bytes());
+    mtrl.extend_from_slice(&host.flags.to_le_bytes());
     mtrl.extend_from_slice(&3u16.to_le_bytes());
     for h in [1u32, 2, 3, 0xDEAD_BEEF, 0] {
         mtrl.extend_from_slice(&h.to_le_bytes());
@@ -467,37 +487,44 @@ fn model_block(flags: u16) -> Vec<u8> {
     .concat();
     let mut prmt = vec![0u8; 16];
     prmt[8] = 3;
-    let tree = vec![
-        UcfxNode::leaf(*b"INFO", top_info),
-        UcfxNode::leaf(*b"MTRL", mtrl),
-        UcfxNode::marker(
-            *b"GEOM",
-            vec![
-                UcfxNode::leaf(*b"INFO", 1u32.to_le_bytes().to_vec()),
-                UcfxNode::marker(
-                    *b"MESH",
-                    vec![
-                        UcfxNode::leaf(*b"INFO", 1u32.to_le_bytes().to_vec()),
-                        UcfxNode::marker(
-                            *b"PRMG",
-                            vec![
-                                UcfxNode::leaf(*b"INFO", vec![0u8; 60]),
-                                UcfxNode::marker(
-                                    *b"STRM",
-                                    vec![
-                                        UcfxNode::leaf(*b"info", [4u32, 28, 3].iter().flat_map(|v| v.to_le_bytes()).collect()),
-                                        UcfxNode::leaf(*b"decl", decl),
-                                        UcfxNode::leaf(*b"data", vec![0u8; 84]),
-                                    ],
-                                ),
-                                UcfxNode::leaf(*b"PRMT", prmt),
-                            ],
-                        ),
-                    ],
-                ),
-            ],
-        ),
-    ];
+    let mut group_info = vec![0u8; 60];
+    group_info[0x0C..0x10].copy_from_slice(&pandemic_hash_m2(host.vertex).to_le_bytes());
+    group_info[0x10..0x14].copy_from_slice(&pandemic_hash_m2(host.shadow).to_le_bytes());
+    let mut tree = vec![UcfxNode::leaf(*b"INFO", top_info), UcfxNode::leaf(*b"MTRL", mtrl)];
+    if let Some(ids) = &host.tiny_ids {
+        let mut body = (ids.len() as u32).to_le_bytes().to_vec();
+        for id in ids {
+            body.extend_from_slice(&id.to_le_bytes());
+        }
+        tree.push(UcfxNode::leaf(*b"TINY", body));
+    }
+    tree.push(UcfxNode::marker(
+        *b"GEOM",
+        vec![
+            UcfxNode::leaf(*b"INFO", 1u32.to_le_bytes().to_vec()),
+            UcfxNode::marker(
+                host.kind,
+                vec![
+                    UcfxNode::leaf(*b"INFO", 1u32.to_le_bytes().to_vec()),
+                    UcfxNode::marker(
+                        *b"PRMG",
+                        vec![
+                            UcfxNode::leaf(*b"INFO", group_info),
+                            UcfxNode::marker(
+                                *b"STRM",
+                                vec![
+                                    UcfxNode::leaf(*b"info", [4u32, 28, 3].iter().flat_map(|v| v.to_le_bytes()).collect()),
+                                    UcfxNode::leaf(*b"decl", decl),
+                                    UcfxNode::leaf(*b"data", vec![0u8; 84]),
+                                ],
+                            ),
+                            UcfxNode::leaf(*b"PRMT", prmt),
+                        ],
+                    ),
+                ],
+            ),
+        ],
+    ));
     let container = write_ucfx_tree(&tree);
     let mut block = Vec::new();
     for v in [1u32, 0x1234, mercs2_formats::types::TYPE_HASH_MODEL, 0, container.len() as u32] {
@@ -507,70 +534,115 @@ fn model_block(flags: u16) -> Vec<u8> {
     block
 }
 
+fn model_block(flags: u16) -> Vec<u8> {
+    model_block_of(&Host::mesh(flags))
+}
+
 fn declared(pixel: Option<&str>, vertex: Option<&str>, shadow: Option<&str>) -> Declared {
     Declared { pixel: pixel.map(str::to_string), vertex: vertex.map(str::to_string), shadow: shadow.map(str::to_string) }
+}
+
+/// The injected geometry a lowering hands the import: three source vertices streamed into group 0
+/// in `order`, one triangle, and the glTF's custom attributes.
+struct Injected {
+    sources: Vec<(usize, Vec<u32>)>,
+    custom: CustomAttributes,
+    tris: Vec<[u32; 3]>,
+    donor: Vec<u8>,
+}
+
+impl Injected {
+    fn new(donor: &[u8], order: [u32; 3], custom: CustomAttributes) -> Injected {
+        Injected { sources: vec![(0, order.to_vec())], custom, tris: vec![[0, 1, 2]], donor: donor.to_vec() }
+    }
+
+    fn plain(donor: &[u8]) -> Injected {
+        Injected::new(donor, [0, 1, 2], CustomAttributes::default())
+    }
+
+    fn geometry(&self) -> Geometry<'_> {
+        Geometry { vertex_sources: &self.sources, custom: &self.custom, source_tris: &self.tris, donor: &self.donor }
+    }
+}
+
+fn import(block: &mut [u8], d: &Declared, injected: &Injected) -> Result<shader_import::Imported, shader_import::ImportError> {
+    shader_import::import_into_block(block, 0, d, &[], &BTreeMap::new(), injected.geometry())
+}
+
+/// `POSITION.w` of the three vertices of the group in `block`.
+fn position_w(block: &[u8]) -> Vec<f32> {
+    let container = &block[20..];
+    let (groups, _) = shader_import::read_model(container).unwrap();
+    let g = &groups[0];
+    (0..3).map(|i| mercs2_formats::model_inject::read_f16_le(container, g.stream_at + i * g.stride + 6)).collect()
 }
 
 #[test]
 fn the_import_writes_the_declared_and_derived_words() {
     let mut block = model_block(0x0088);
-    let done = shader_import::import_into_block(&mut block, 0, &declared(Some("PgDiffSpecNormFP"), None, None), &[], &BTreeMap::new())
-        .expect("imports");
+    let injected = Injected::plain(&block);
+    let done = import(&mut block, &declared(Some("PgDiffSpecNormFP"), None, None), &injected).expect("imports");
     // The declaration names the pixel shader; with it, retail names one main and one shadow shader
     // for an alpha-tested MESH group with this declaration.
     assert_eq!(done.vertex, "PgMeshNoColorVP");
     assert_eq!(done.shadow, "PgMeshTexShadowVP");
+    assert_eq!(done.position_w, PositionW::One);
     let container = &block[20..];
     let (groups, materials) = shader_import::read_model(container).unwrap();
     assert_eq!(groups[0].vertex, pandemic_hash_m2("PgMeshNoColorVP"));
     assert_eq!(groups[0].shadow, pandemic_hash_m2("PgMeshTexShadowVP"));
     assert_eq!(materials[0].key, pandemic_hash_m2("PgDiffSpecNormFP"));
+    assert_eq!(position_w(&block), vec![1.0; 3]);
     // The CSUM was rewritten over the new bytes.
     assert!(mercs2_formats::ucfx::parse_ucfx_tree(container).is_ok());
 }
 
 #[test]
-fn the_import_asks_for_a_declaration_when_retail_is_ambiguous() {
+fn an_ambiguous_pixel_shader_must_be_declared_and_the_error_names_the_material_and_choices() {
     let mut block = model_block(0x0080);
-    let e = shader_import::import_into_block(&mut block, 0, &declared(None, None, None), &[], &BTreeMap::new()).unwrap_err();
+    let injected = Injected::plain(&block);
+    let e = import(&mut block, &declared(None, None, None), &injected).unwrap_err();
     assert_eq!(e.code, "M0235");
-    assert!(e.message.contains("extras.pixel_shader") && e.message.contains("PgDiffSpecNormFP"), "{}", e.message);
-    // An opaque group of this shape has two retail shadow shaders.
-    let e = shader_import::import_into_block(&mut block, 0, &declared(Some("PgDiffSpecNormFP"), None, None), &[], &BTreeMap::new())
-        .unwrap_err();
-    assert_eq!(e.code, "M0236");
-    assert!(e.message.contains("extras.shadow_vertex_shader"), "{}", e.message);
+    for want in ["host material 0", "3:111", "PgDiffSpecNormFP", "PgDiffSpecReflNormFP", "extras.pixel_shader"] {
+        assert!(e.message.contains(want), "{want}: {}", e.message);
+    }
+}
+
+#[test]
+fn the_shadow_shader_is_textured_when_any_material_has_a_flag_in_0x0b() {
+    assert_eq!(shader_import::ALPHA_FLAGS, 0x0B);
+    for (flags, shadow) in [
+        (0x0001u16, "PgMeshTexShadowVP"),
+        (0x0002, "PgMeshTexShadowVP"),
+        (0x0008, "PgMeshTexShadowVP"),
+        (0x008B, "PgMeshTexShadowVP"),
+        (0x0004, "PgMeshShadowVP"),
+        (0x0080, "PgMeshShadowVP"),
+        (0x0040, "PgMeshShadowVP"),
+    ] {
+        let mut block = model_block(flags);
+        let injected = Injected::plain(&block);
+        let done = import(&mut block, &declared(Some("PgDiffSpecNormFP"), None, None), &injected).expect("imports");
+        assert_eq!(done.shadow, shadow, "flags 0x{flags:04X}");
+    }
 }
 
 #[test]
 fn a_declared_name_must_be_registered() {
     let mut block = model_block(0x0088);
-    let e = shader_import::import_into_block(&mut block, 0, &declared(Some("NoSuchFP"), None, None), &[], &BTreeMap::new())
-        .unwrap_err();
+    let injected = Injected::plain(&block);
+    let e = import(&mut block, &declared(Some("NoSuchFP"), None, None), &injected).unwrap_err();
     assert_eq!(e.code, "M0235");
-    let e = shader_import::import_into_block(
-        &mut block,
-        0,
-        &declared(Some("PgDiffSpecNormFP"), Some("PgDiffSpecNormFP"), None),
-        &[],
-        &BTreeMap::new(),
-    )
-    .unwrap_err();
+    let e = import(&mut block, &declared(Some("PgDiffSpecNormFP"), Some("PgDiffSpecNormFP"), None), &injected).unwrap_err();
     assert_eq!(e.code, "M0236", "a pixel shader named as the vertex shader");
 }
 
 #[test]
 fn m0238_fires_for_a_vertex_shader_reading_an_input_the_declaration_lacks() {
     let mut block = model_block(0x0088);
+    let injected = Injected::plain(&block);
     // PgMeshVP reads COLOR (usage 10), which this group's declaration does not carry.
-    let e = shader_import::import_into_block(
-        &mut block,
-        0,
-        &declared(Some("PgDiffSpecNormFP"), Some("PgMeshVP"), None),
-        &[],
-        &BTreeMap::new(),
-    )
-    .unwrap_err();
+    let e = import(&mut block, &declared(Some("PgDiffSpecNormFP"), Some("PgMeshVP"), None), &injected).unwrap_err();
     assert_eq!(e.code, "M0238");
     assert!(e.message.contains("10.0"), "{}", e.message);
 }
@@ -581,18 +653,114 @@ fn an_added_vertex_shader_is_registered_for_the_import_with_its_own_inputs() {
     write_sources(&dir);
     let s = shipment(&dir, true, &add_vertex("MyVP", "MyVP"));
     let added = shader::added("shader-test", &s.manifest);
-    let inputs = shader_import::added_vertex_inputs(&s.manifest, &s.root).unwrap();
-    assert_eq!(inputs[&pandemic_hash_m2("MyVP")], vec![vec![(0, 0)], vec![(0, 0)]]);
+    let vertex = shader_import::added_vertex_shaders(&s.manifest, &s.root).unwrap();
+    assert_eq!(vertex[&pandemic_hash_m2("MyVP")].inputs, vec![vec![(0, 0)], vec![(0, 0)]]);
+    assert!(!shader_import::is_wind("MyVP", &vertex));
     let mut block = model_block(0x0088);
+    let injected = Injected::plain(&block);
     let done = shader_import::import_into_block(
         &mut block,
         0,
         &declared(Some("PgDiffSpecNormFP"), Some("MyVP"), Some("PgMeshTexShadowVP")),
         &added,
-        &inputs,
+        &vertex,
+        injected.geometry(),
     )
     .expect("imports");
     assert_eq!(done.vertex, "MyVP");
+}
+
+// ── AmbientWind hosts ──────────────────────────────────────────────────────────────────────────
+
+fn wind_host() -> Host {
+    Host { vertex: "PgMeshNoColorAmbientWindVP", shadow: "PgMeshTexAmbientWindShadowVP", ..Host::mesh(0x0088) }
+}
+
+#[test]
+fn a_wind_host_keeps_its_shader_and_takes_each_vertexs_sway_weight() {
+    assert!(shader_import::is_wind("PgMeshNoColorAmbientWindVP", &BTreeMap::new()));
+    assert!(!shader_import::is_wind("PgMeshNoColorVP", &BTreeMap::new()));
+    let d = declared(Some("PgDiffSpecNormFP"), None, Some("PgMeshTexAmbientWindShadowVP"));
+    let mut block = model_block_of(&wind_host());
+    // The stream holds the source vertices in reverse, so each weight lands by its source.
+    let custom = CustomAttributes { sway: Some(vec![0.0, 0.5, 1.0]), tiny_slot: None };
+    let injected = Injected::new(&block, [2, 1, 0], custom);
+    let done = import(&mut block, &d, &injected).expect("imports");
+    assert_eq!(done.vertex, "PgMeshNoColorAmbientWindVP");
+    assert_eq!(done.position_w, PositionW::Sway);
+    assert_eq!(position_w(&block), vec![1.0, 0.5, 0.0]);
+}
+
+#[test]
+fn a_wind_shader_without_sway_weights_is_refused_naming_the_attribute() {
+    let d = declared(Some("PgDiffSpecNormFP"), None, Some("PgMeshTexAmbientWindShadowVP"));
+    let mut block = model_block_of(&wind_host());
+    let injected = Injected::plain(&block);
+    let e = import(&mut block, &d, &injected).unwrap_err();
+    assert_eq!(e.code, "M0238");
+    assert!(e.message.contains("_SWAY_WEIGHT") && e.message.contains("AmbientWind"), "{}", e.message);
+}
+
+#[test]
+fn a_declared_non_wind_shader_on_a_wind_host_writes_w_one() {
+    let mut block = model_block_of(&wind_host());
+    let custom = CustomAttributes { sway: Some(vec![0.0, 0.5, 1.0]), tiny_slot: None };
+    let injected = Injected::new(&block, [0, 1, 2], custom);
+    let done = import(&mut block, &declared(Some("PgDiffSpecNormFP"), Some("PgMeshNoColorVP"), None), &injected).expect("imports");
+    assert_eq!(done.vertex, "PgMeshNoColorVP");
+    assert_eq!(done.position_w, PositionW::One);
+    assert_eq!(position_w(&block), vec![1.0; 3]);
+}
+
+// ── TINY far-LOD hosts ─────────────────────────────────────────────────────────────────────────
+
+fn tiny_host() -> Host {
+    Host {
+        kind: *b"TINY",
+        flags: 0x0080,
+        vertex: "PgMeshTinyVP_Ruin",
+        shadow: "PgMeshTinyShadowVP_Ruin",
+        tiny_ids: Some(vec![0x0012_2F7C, 0x0012_2F80, 0x0012_2F90]),
+    }
+}
+
+fn slots(s: [u32; 3]) -> CustomAttributes {
+    CustomAttributes { sway: None, tiny_slot: Some(s.to_vec()) }
+}
+
+#[test]
+fn a_tiny_host_keeps_its_role_and_takes_each_vertexs_slot() {
+    let mut block = model_block_of(&tiny_host());
+    let injected = Injected::new(&block, [0, 1, 2], slots([2, 2, 2]));
+    let done = import(&mut block, &declared(Some("PgDiffFP"), None, None), &injected).expect("imports");
+    assert_eq!(done.vertex, "PgMeshTinyVP_Ruin", "the ruined role is kept");
+    assert_eq!(done.shadow, "PgMeshTinyShadowVP_Ruin");
+    assert_eq!(done.position_w, PositionW::TinySlot);
+    assert_eq!(position_w(&block), vec![2.0; 3]);
+    assert_eq!(shader_import::tiny_slots(&block).unwrap(), 3);
+}
+
+#[test]
+fn a_tiny_host_refuses_a_different_vertex_shader() {
+    let mut block = model_block_of(&tiny_host());
+    let injected = Injected::new(&block, [0, 1, 2], slots([0, 0, 0]));
+    let e = import(&mut block, &declared(Some("PgDiffFP"), Some("PgMeshTinyVP"), None), &injected).unwrap_err();
+    assert_eq!(e.code, "M0236");
+    assert!(e.message.contains("TINY") && e.message.contains("PgMeshTinyVP_Ruin"), "{}", e.message);
+}
+
+#[test]
+fn a_tiny_host_needs_a_valid_slot_uniform_per_triangle() {
+    let d = declared(Some("PgDiffFP"), None, None);
+    let donor = model_block_of(&tiny_host());
+    let mut block = donor.clone();
+    let e = import(&mut block, &d, &Injected::plain(&donor)).unwrap_err();
+    assert_eq!(e.code, "M0238");
+    assert!(e.message.contains("_TINY_SLOT") && e.message.contains("0..2"), "{}", e.message);
+    let e = import(&mut block, &d, &Injected::new(&donor, [0, 1, 2], slots([3, 3, 3]))).unwrap_err();
+    assert!(e.message.contains("_TINY_SLOT 3"), "{}", e.message);
+    let e = import(&mut block, &d, &Injected::new(&donor, [0, 1, 2], slots([0, 1, 1]))).unwrap_err();
+    assert!(e.message.contains("triangle 0"), "{}", e.message);
 }
 
 #[test]
