@@ -1717,14 +1717,22 @@ fn regenerate_prop_collision(
 /// from the FULL mesh separately, so the visible LOD drops while the collider stays geometry-tight.
 ///
 /// Returns the mesh unchanged when its strip already fits (the common case), else the finest
-/// decimation that fits — plus the (verts, tris) it landed on, for the build log.
+/// decimation that fits — plus the (verts, tris) it landed on, for the build log. The glTF's
+/// custom vertex attributes come back for the returned mesh's vertices: a decimated vertex takes
+/// the mean `_SWAY_WEIGHT` of the vertices it merges (its position is their mean), and only
+/// vertices sharing a `_TINY_SLOT` merge.
 fn fit_render_mesh_to_u16_strip(
     mesh: &mercs2_formats::model_inject::ExternalMesh,
-) -> (mercs2_formats::model_inject::ExternalMesh, Option<(usize, usize)>) {
+    custom: &mercs2_formats::mesh_import::CustomAttributes,
+) -> (
+    mercs2_formats::model_inject::ExternalMesh,
+    mercs2_formats::mesh_import::CustomAttributes,
+    Option<(usize, usize)>,
+) {
     use mercs2_formats::model_inject::to_strip_connected;
     const U16_STRIP_MAX: usize = 65534;
     if to_strip_connected(&mesh.tris).len() <= U16_STRIP_MAX {
-        return (mesh.clone(), None);
+        return (mesh.clone(), custom.clone(), None);
     }
     let (mut lo, mut hi) = ([f32::INFINITY; 3], [f32::NEG_INFINITY; 3]);
     for p in &mesh.positions {
@@ -1736,12 +1744,12 @@ fn fit_render_mesh_to_u16_strip(
     let diag = ((hi[0] - lo[0]).powi(2) + (hi[1] - lo[1]).powi(2) + (hi[2] - lo[2]).powi(2)).sqrt();
     let mut cell_lo = diag / 8192.0; // fine   -> many verts
     let mut cell_hi = diag / 2.0; // coarse -> few verts
-    let mut best = cluster_decimate_ext(mesh, cell_hi);
+    let mut best = cluster_decimate_ext(mesh, cell_hi, custom);
     // Smallest cell (most detail) whose connected strip still fits.
     for _ in 0..48 {
         let mid = (cell_lo * cell_hi).sqrt();
-        let d = cluster_decimate_ext(mesh, mid);
-        if to_strip_connected(&d.tris).len() <= U16_STRIP_MAX {
+        let d = cluster_decimate_ext(mesh, mid, custom);
+        if to_strip_connected(&d.0.tris).len() <= U16_STRIP_MAX {
             best = d;
             cell_hi = mid;
         } else {
@@ -1751,8 +1759,8 @@ fn fit_render_mesh_to_u16_strip(
             break;
         }
     }
-    let n = (best.positions.len(), best.tris.len());
-    (best, Some(n))
+    let n = (best.0.positions.len(), best.0.tris.len());
+    (best.0, best.1, Some(n))
 }
 
 /// Vertex-cluster decimation on an [`mercs2_formats::model_inject::ExternalMesh`]: quantise positions
@@ -1762,22 +1770,26 @@ fn fit_render_mesh_to_u16_strip(
 fn cluster_decimate_ext(
     m: &mercs2_formats::model_inject::ExternalMesh,
     cell: f32,
-) -> mercs2_formats::model_inject::ExternalMesh {
+    custom: &mercs2_formats::mesh_import::CustomAttributes,
+) -> (mercs2_formats::model_inject::ExternalMesh, mercs2_formats::mesh_import::CustomAttributes) {
     use std::collections::HashMap;
     let inv = 1.0 / cell;
-    let key = |p: &[f32; 3]| {
+    // A `_TINY_SLOT` names the world object a vertex belongs to, so vertices of different slots
+    // never merge.
+    let key = |v: usize, p: &[f32; 3]| {
         (
             (p[0] * inv).floor() as i64,
             (p[1] * inv).floor() as i64,
             (p[2] * inv).floor() as i64,
+            custom.tiny_slot.as_ref().map(|s| s[v]),
         )
     };
-    let mut cells: HashMap<(i64, i64, i64), u32> = HashMap::new();
+    let mut cells: HashMap<(i64, i64, i64, Option<u32>), u32> = HashMap::new();
     let mut sum: Vec<[f64; 3]> = Vec::new();
     let mut cnt: Vec<u32> = Vec::new();
     let mut remap: Vec<u32> = Vec::with_capacity(m.positions.len());
-    for p in &m.positions {
-        let k = key(p);
+    for (v, p) in m.positions.iter().enumerate() {
+        let k = key(v, p);
         let idx = *cells.entry(k).or_insert_with(|| {
             sum.push([0.0; 3]);
             cnt.push(0);
@@ -1848,14 +1860,29 @@ fn cluster_decimate_ext(
         }
     }
     let uvs = vec![[0.0f32; 2]; positions.len()];
-    mercs2_formats::model_inject::ExternalMesh {
+    let sway = custom.sway.as_ref().map(|w| {
+        let mut total = vec![0.0f64; positions.len()];
+        for (v, &cluster) in remap.iter().enumerate() {
+            total[cluster as usize] += w[v] as f64;
+        }
+        total.iter().zip(&cnt).map(|(t, &c)| (t / c.max(1) as f64) as f32).collect()
+    });
+    let tiny_slot = custom.tiny_slot.as_ref().map(|s| {
+        let mut out = vec![0u32; positions.len()];
+        for (v, &cluster) in remap.iter().enumerate() {
+            out[cluster as usize] = s[v];
+        }
+        out
+    });
+    let mesh = mercs2_formats::model_inject::ExternalMesh {
         positions,
         normals,
         uvs,
         tris,
         joints: Vec::new(),
         weights: Vec::new(),
-    }
+    };
+    (mesh, mercs2_formats::mesh_import::CustomAttributes { sway, tiny_slot })
 }
 
 /// Lower a rigged `.glb` onto a donor — the SKINNED path, shared by `add_model` and `add_outfit`.
@@ -2064,7 +2091,7 @@ fn lower_skinned(
     // passes `false`.
     single_group: bool,
     log: &mut Vec<String>,
-) -> Result<(Vec<u8>, Vec<PatchBlock>, Vec<usize>), BuildError> {
+) -> Result<Skinned, BuildError> {
     let lower_err = |m: String| BuildError::Lower {
         index,
         kind,
@@ -2512,7 +2539,33 @@ fn lower_skinned(
         )));
     }
 
-    Ok((out.block, tex_blocks, out.hosts))
+    Ok(Skinned {
+        block: out.block,
+        tex_blocks,
+        hosts: out.hosts,
+        vertex_sources: out.stats.vertex_sources,
+        custom: glb.custom,
+        source_tris: glb.tris,
+        donor: donor_blk,
+    })
+}
+
+/// What [`lower_skinned`] produced.
+struct Skinned {
+    /// The lowered model block.
+    block: Vec<u8>,
+    /// The author's texture blocks, which ship with it.
+    tex_blocks: Vec<PatchBlock>,
+    /// Every donor group the mesh was split across.
+    hosts: Vec<usize>,
+    /// The injector's source vertex per written vertex, per host group.
+    vertex_sources: Vec<(usize, Vec<u32>)>,
+    /// The glTF's custom vertex attributes per source vertex.
+    custom: mercs2_formats::mesh_import::CustomAttributes,
+    /// The source triangles, indexing those vertices.
+    source_tris: Vec<[u32; 3]>,
+    /// The donor block before injection.
+    donor: Vec<u8>,
 }
 
 /// Re-emit an edited placement LAYER block as an overlay that shadows the base by PTHS path.
@@ -2679,11 +2732,18 @@ fn lower(
                 // `textures:` is the model's OWN skin. Empty stays the old behaviour — a prop
                 // wears the donor's materials, which is right for a prop and was wrong for a novel
                 // mesh, the case the field was added for.
-                let (mut new_block, tex_blocks, hosts) = lower_skinned(
+                let skinned = lower_skinned(
                     index, kind, name, model, donor_name, rt, root, game, names, textures, false,
                     log,
                 )?;
-                import_shaders(index, kind, name, &root.join(model), &mut new_block, &hosts, manifest, root, log)?;
+                let (mut new_block, tex_blocks) = (skinned.block, skinned.tex_blocks);
+                let geometry = crate::shader_import::Geometry {
+                    vertex_sources: &skinned.vertex_sources,
+                    custom: &skinned.custom,
+                    source_tris: &skinned.source_tris,
+                    donor: &skinned.donor,
+                };
+                import_shaders(index, kind, name, &root.join(model), &mut new_block, &skinned.hosts, geometry, manifest, root, log)?;
                 let hash = crate::manifest::asset_hash(name);
                 let aset = AsetEntry::new(hash, 0xFFFF_FFFF, 0x0000_FFFF, TYPE_ID_MODEL);
                 let block = PatchBlock::from_decompressed(
@@ -2733,7 +2793,12 @@ fn lower(
             // exceed 65 534. Fit a RENDER copy to that budget; `follow_geometry` regenerates collision
             // from the FULL `mesh` below, so the collider stays geometry-tight while the visible LOD
             // drops. A mesh that already fits is returned unchanged (`render_decim` = None).
-            let (render_mesh, render_decim) = fit_render_mesh_to_u16_strip(&mesh);
+            let custom = mesh_import::custom_attributes_from_gltf(&root.join(model)).map_err(|m| BuildError::Lower {
+                index,
+                kind,
+                message: m,
+            })?;
+            let (render_mesh, render_custom, render_decim) = fit_render_mesh_to_u16_strip(&mesh, &custom);
 
             // The model's OWN skin. On the rigid path the host group keeps the donor's material
             // records (the PRMT material index is preserved), so a supplied map replaces the
@@ -2838,7 +2903,13 @@ fn lower(
                 }
             };
             let mut new_block = new_block;
-            import_shaders(index, kind, name, &root.join(model), &mut new_block, &[host_group], manifest, root, log)?;
+            let geometry = crate::shader_import::Geometry {
+                vertex_sources: &stats.vertex_sources,
+                custom: &render_custom,
+                source_tris: &render_mesh.tris,
+                donor: &donor_blk,
+            };
+            import_shaders(index, kind, name, &root.join(model), &mut new_block, &[host_group], geometry, manifest, root, log)?;
 
             let aset = AsetEntry::new(hash, 0xFFFF_FFFF, 0x0000_FFFF, TYPE_ID_MODEL);
             let block = PatchBlock::from_decompressed(
@@ -2949,10 +3020,11 @@ fn lower(
 
             // SKINNED path — an outfit that animates has to be re-posed onto the donor's rig.
             if let Some(rt) = retarget {
-                let (new_block, tex_blocks, _hosts) = lower_skinned(
+                let skinned = lower_skinned(
                     index, kind, name, model, donor_name, rt, root, game, names, textures,
                     *single_group, log,
                 )?;
+                let (new_block, tex_blocks) = (skinned.block, skinned.tex_blocks);
                 let hash = crate::manifest::asset_hash(name);
                 let aset = AsetEntry::new(hash, 0xFFFF_FFFF, 0x0000_FFFF, TYPE_ID_MODEL);
                 let block = PatchBlock::from_decompressed(
@@ -4793,6 +4865,7 @@ fn import_shaders(
     model: &Path,
     block: &mut [u8],
     hosts: &[usize],
+    geometry: crate::shader_import::Geometry,
     manifest: &crate::manifest::Manifest,
     root: &Path,
     log: &mut Vec<String>,
@@ -4800,12 +4873,17 @@ fn import_shaders(
     let lower = |message: String| BuildError::Lower { index, kind, message };
     let declared = crate::shader_import::read_declared(model).map_err(lower)?;
     let added = crate::shader::added(&manifest.shipment.name, manifest);
-    let inputs = crate::shader_import::added_vertex_inputs(manifest, root).map_err(lower)?;
+    let added_vertex = crate::shader_import::added_vertex_shaders(manifest, root).map_err(lower)?;
     for &host in hosts {
-        let done = crate::shader_import::import_into_block(block, host, &declared, &added, &inputs)
+        let done = crate::shader_import::import_into_block(block, host, &declared, &added, &added_vertex, geometry)
             .map_err(|e| lower(format!("[{}] {name}: {}", e.code, e.message)))?;
+        let w = match done.position_w {
+            crate::shader_import::PositionW::One => "1".to_string(),
+            crate::shader_import::PositionW::Sway => "the _SWAY_WEIGHT of each vertex".to_string(),
+            crate::shader_import::PositionW::TinySlot => "the _TINY_SLOT of each vertex".to_string(),
+        };
         log.push(format!(
-            "contributions[{index}] {kind} {name}: group {} vertex shader {}, shadow {}, pixel {}",
+            "contributions[{index}] {kind} {name}: group {} vertex shader {}, shadow {}, pixel {}, POSITION.w {w}",
             done.group,
             done.vertex,
             done.shadow,
