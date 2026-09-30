@@ -102,9 +102,10 @@ environment variable is consulted. The file holds one `key = "path"` per line:
 | `vz_wad` | the PC base archive | every game-gated test |
 | `xbox_vz_wad` | an Xbox 360 bake (`SCFF` magic) | the qm console-bake tests |
 | `ps3_vz_wad` | a PS3 bake (`SCFF` magic) | the qm console-bake tests |
+| `unpacked_exe` | the SecuROM-unpacked executable (`mercs2_unpacked.exe`) | the qm shader-registry disassembly test |
 
 `scripts/find-vz-wad.sh --write` writes `vz_wad` only, and rewrites the whole file, so
-the console keys are added by hand after it runs. When the file, a key a test needs,
+the console keys and `unpacked_exe` are added by hand after it runs. When the file, a key a test needs,
 or the file that key names is missing, the test fails with a message naming the file
 and the key.
 Two shapes exist: integration test targets declared
