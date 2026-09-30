@@ -176,6 +176,8 @@ pub fn load_char_glb(path: &Path) -> Result<CharGlbData, String> {
     // the way retail authors one: primitive → draw group, each with its own bone palette and
     // exactly one material.
     let mut parts: Vec<MeshPart> = Vec::new();
+    // Each primitive's `_SWAY_WEIGHT`, in the order the primitives are appended.
+    let mut sway: Vec<Option<Vec<f32>>> = Vec::new();
 
     for mesh in doc.meshes() {
         for prim in mesh.primitives() {
@@ -218,6 +220,7 @@ pub fn load_char_glb(path: &Path) -> Result<CharGlbData, String> {
                 .into_f32()
                 .map(|w| [w[0] as f64, w[1] as f64, w[2] as f64, w[3] as f64])
                 .collect();
+            sway.push(crate::mesh_import::primitive_sway(&prim, &buffers, m)?);
             positions.extend(ps);
             normals.extend(nm);
             uvs.extend(uv);
@@ -312,6 +315,7 @@ pub fn load_char_glb(path: &Path) -> Result<CharGlbData, String> {
                     .read_tex_coords(0)
                     .map(|tc| tc.into_f32().collect())
                     .unwrap_or_else(|| vec![[0.0, 0.0]; m]);
+                sway.push(crate::mesh_import::primitive_sway(&prim, &buffers, m)?);
                 positions.extend(ps);
                 normals.extend(nm);
                 uvs.extend(uv);
@@ -336,8 +340,10 @@ pub fn load_char_glb(path: &Path) -> Result<CharGlbData, String> {
         return Err("glb has no skinned mesh primitive".into());
     }
     let tris: Vec<[u32; 3]> = indices.chunks_exact(3).map(|t| [t[0], t[1], t[2]]).collect();
+    let sway = crate::mesh_import::join_sway(path, sway)?;
 
     Ok(CharGlbData {
+        sway,
         positions,
         parts,
         normals,
