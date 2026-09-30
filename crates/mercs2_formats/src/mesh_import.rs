@@ -79,6 +79,13 @@ pub const SWAY_WEIGHT_ATTRIBUTE: &str = "_SWAY_WEIGHT";
 /// not a float scalar or a value outside 0..1: each names the attribute.
 pub fn sway_weights_from_gltf(path: &Path) -> Result<Option<Vec<f32>>, String> {
     let (_, per_primitive) = read_gltf(path)?;
+    join_sway(path, per_primitive)
+}
+
+/// Per-primitive sway weights joined into per-vertex ones, by the rules of
+/// [`sway_weights_from_gltf`]. Shared with [`crate::char_import`], which reads its primitives in
+/// its own order.
+pub(crate) fn join_sway(path: &Path, per_primitive: Vec<Option<Vec<f32>>>) -> Result<Option<Vec<f32>>, String> {
     if per_primitive.iter().all(|p| p.is_none()) {
         return Ok(None);
     }
@@ -161,6 +168,35 @@ fn read_gltf(path: &Path) -> Result<Read, String> {
     ))
 }
 
+/// One primitive's [`SWAY_WEIGHT_ATTRIBUTE`] values, or `None` when it has none. `vertices` is the
+/// primitive's vertex count; the attribute must have one value per vertex.
+pub(crate) fn primitive_sway(
+    prim: &gltf::Primitive,
+    buffers: &[Vec<u8>],
+    vertices: usize,
+) -> Result<Option<Vec<f32>>, String> {
+    let semantic = gltf::Semantic::Extras(SWAY_WEIGHT_ATTRIBUTE[1..].to_string());
+    let Some(acc) = prim.get(&semantic) else {
+        return Ok(None);
+    };
+    if acc.dimensions() != gltf::accessor::Dimensions::Scalar
+        || acc.data_type() != gltf::accessor::DataType::F32
+    {
+        return Err(format!(
+            "{SWAY_WEIGHT_ATTRIBUTE} is {:?} {:?}; it is a float scalar",
+            acc.dimensions(),
+            acc.data_type()
+        ));
+    }
+    let values: Vec<f32> = gltf::accessor::Iter::<f32>::new(acc, |b| buffers.get(b.index()).map(|d| &d[..]))
+        .ok_or_else(|| format!("{SWAY_WEIGHT_ATTRIBUTE}: its accessor has no buffer data"))?
+        .collect();
+    if values.len() != vertices {
+        return Err(format!("{SWAY_WEIGHT_ATTRIBUTE} has {} values for {vertices} vertices", values.len()));
+    }
+    Ok(Some(values))
+}
+
 type Mat4 = [[f32; 4]; 4];
 
 fn mul(a: Mat4, b: Mat4) -> Mat4 {
@@ -229,32 +265,7 @@ fn visit(
             }
             let added = positions.len() as u32 - base;
 
-            let semantic = gltf::Semantic::Extras(SWAY_WEIGHT_ATTRIBUTE[1..].to_string());
-            match prim.get(&semantic) {
-                None => sway.push(None),
-                Some(acc) => {
-                    if acc.dimensions() != gltf::accessor::Dimensions::Scalar
-                        || acc.data_type() != gltf::accessor::DataType::F32
-                    {
-                        return Err(format!(
-                            "{SWAY_WEIGHT_ATTRIBUTE} is {:?} {:?}; it is a float scalar",
-                            acc.dimensions(),
-                            acc.data_type()
-                        ));
-                    }
-                    let values: Vec<f32> =
-                        gltf::accessor::Iter::<f32>::new(acc, |b| buffers.get(b.index()).map(|d| &d[..]))
-                            .ok_or_else(|| format!("{SWAY_WEIGHT_ATTRIBUTE}: its accessor has no buffer data"))?
-                            .collect();
-                    if values.len() != added as usize {
-                        return Err(format!(
-                            "{SWAY_WEIGHT_ATTRIBUTE} has {} values for {added} vertices",
-                            values.len()
-                        ));
-                    }
-                    sway.push(Some(values));
-                }
-            }
+            sway.push(primitive_sway(&prim, buffers, added as usize)?);
 
             if let Some(n) = reader.read_normals() {
                 for v in n {
