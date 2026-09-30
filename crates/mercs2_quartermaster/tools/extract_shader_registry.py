@@ -1,24 +1,29 @@
 #!/usr/bin/env python3
 """Extract the retail shader registry into the two committed TSVs qm reads.
 
-    extract_shader_registry.py --exe <unwrapped mercs2 exe> --data <game data dir> --out <dir>
+    extract_shader_registry.py --exe <SecuROM-unpacked mercs2 exe> --data <game data dir> --out <dir>
 
 Writes `<out>/shader_families.tsv` and `<out>/registered_shaders.tsv`.
 
-The exe is the SecuROM-unwrapped image (`mercs2_unpacked.exe`); `--data` is the game's `data`
-folder holding the six `shader*.bin` stores. Needs `pefile` and `unicorn`.
+The exe is the SecuROM-unpacked image (`mercs2_unpacked.exe`, the runtime dump in `securom_dump/`);
+`--data` is the game's `data` folder holding the six `shader*.bin` stores. Needs `pefile` and
+`unicorn`.
 
 `registered_shaders.tsv`'s `inputs` column lists, for a vertex shader, each store holding a record
-for its `.sho` stem and the `(usage.index)` of every input the record's bytecode declares.
+for its `.sho` stem and the `(usage.index)` of every input the record's bytecode declares. Its
+`constants` column lists, for the same records, the names of the constants the record's CTAB
+declares (`-` for a pixel shader, as for `inputs`).
 
 What it does, and why this way
 ------------------------------
 The registry is `FUN_0084f130`. Every registration is `mov ecx, <static record>; call
 FUN_0085ac90(name, sho, class)`, and the record's vtable decides the registry (vertex or pixel) and
-the family. Several registrations sit in SecuROM islands reached through `jmp [stub]` and
-`push <continuation>; push FUN_0085ac90; ret` chains (`FUN_02475bc0`, `FUN_005726e0`,
-`FUN_006188b0`, `FUN_02485980`), so the call list is read by EXECUTING the registry, not by reading
-it:
+the family. Several registrations sit in islands reached through `jmp [stub]` (`FUN_02475bc0`,
+`FUN_005726e0`, `FUN_006188b0`, `FUN_02485980`). The islands are relocated plaintext joined by
+`push <continuation>; push FUN_0085ac90; ret`, readable by disassembly. The registry is executed
+because each row's `.sho` depends on the caps bits, the ShaderLevel byte and the `_li` handle tests,
+and because six call sites (and one in the water registrar) take the `.sho` from two or three
+branches:
 
 1. Every record object is constructed by emulating the static initializer that names it
    (`mov r32, <record>` then the base constructor `FUN_0085ace0` / `FUN_0085ade0`, directly or in an
@@ -34,6 +39,16 @@ it:
 
 A configuration is `vt`, `r2vb` or `none` (the resident extra store pair: caps bit 2 set; bit 2
 clear and bit 3 set; neither), crossed with ShaderLevel `0` / `1`.
+
+`PgCompositeFP` registers outside `FUN_0084f130`, in the composite pass constructor (vtable
+`0x00BAAE9C`, relocated body at `0x0246A383`), once per process behind the byte `0x011759C0`. Its
+site is decoded statically (`composite_registration`): `push "PgCompositeFP"` at `0x0246A443`,
+`mov ecx, 0x0127CB58`, then `push <continuation>; push FUN_0085ac90; ret`. The `.sho` pointer is
+`[0x0245A8C4] ^ [0x007295B6]` (`0x0246A433`). The class argument is the result of
+`push 0x024581EE; call eax` with `eax = 0xE842355F ^ [0x02460160]` (`0x0246A40E`), a SecuROM call
+whose target the dump does not hold, so the row's class is `-`. Between the run-once test
+(`0x0246A3E4`) and the call nothing reads the caps word or the ShaderLevel byte, and the row lists
+every configuration.
 """
 import argparse
 import os
@@ -57,6 +72,8 @@ BIND_ONE = 0x0085AC40
 ATEXIT = 0x009EE331
 CAPS_PTR = 0x01176288
 SHADERLEVEL = 0x00DFC345
+COMPOSITE = dict(sho_a=0x0246A433, sho_b=0x0246A439, name=0x0246A443, rec=0x0246A448,
+                 cont=0x0246A44D, target=0x0246A452, ret=0x0246A457)
 HANDLE_FIELD = {VS_LOAD: 0x110, PS_LOAD: 0xF8}
 BASE_SIZE = {VS_LOAD: 0x114, PS_LOAD: 0xFC}
 STAGE = {VS_LOAD: 'vertex', PS_LOAD: 'pixel'}
@@ -184,6 +201,47 @@ def vertex_inputs(blob):
                 out.append((usage_tok & 0xF, (usage_tok >> 16) & 0xF))
         i += 1 + nparams
     return out
+
+
+def ctab_constants(blob):
+    """The names of the constants a shader's CTAB comment declares, in table order."""
+    tokens = struct.unpack(f'<{len(blob) // 4}I', blob)
+    i = 1
+    while i < len(tokens):
+        tok = tokens[i]
+        if tok == 0x0000FFFF:
+            break
+        if tok & 0xFFFF == 0xFFFE:
+            n = (tok >> 16) & 0x7FFF
+            body = blob[4 * (i + 1):4 * (i + 1 + n)]
+            if body[:4] == b'CTAB':
+                t = body[4:]
+                count, info = struct.unpack_from('<II', t, 12)
+                names = []
+                for k in range(count):
+                    name_off = struct.unpack_from('<I', t, info + 20 * k)[0]
+                    names.append(t[name_off:t.index(b'\0', name_off)].decode('latin1'))
+                return names
+            i += 1 + n
+            continue
+        i += 1 + ((tok >> 24) & 0xF)
+    raise SystemExit('ctab_constants of a blob with no CTAB')
+
+
+def composite_registration(img):
+    """`(record, name, sho)` of the `PgCompositeFP` site, decoded from its bytes."""
+    c = COMPOSITE
+    want = [(c['sho_a'], b'\x8b\x0d'), (c['sho_b'], b'\x33\x0d'), (c['name'], b'\x68'),
+            (c['rec'], b'\xb9'), (c['cont'], b'\x68'),
+            (c['target'], b'\x68' + struct.pack('<I', REGISTER)), (c['ret'], b'\xc3')]
+    for va, prefix in want:
+        if img.read(va, len(prefix)) != prefix:
+            raise SystemExit(f'the PgCompositeFP site at {va:#010x} is not {prefix.hex()}')
+    sho = img.cstr(img.u32(img.u32(c['sho_a'] + 2)) ^ img.u32(img.u32(c['sho_b'] + 2)))
+    name = img.cstr(img.u32(c['name'] + 1))
+    if not sho.lower().endswith('.sho'):
+        raise SystemExit(f'the PgCompositeFP site decodes the file {sho!r}, not a .sho')
+    return img.u32(c['rec'] + 1), name, sho
 
 
 def pop_return(mu, arg_bytes):
@@ -364,7 +422,8 @@ def main():
     records = {s: store_records(os.path.join(a.data, s)) for s in STORES}
     stores = {s: set(r) for s, r in records.items()}
 
-    objs = registry_objects(img, stores)
+    composite = composite_registration(img)
+    objs = sorted(set(registry_objects(img, stores)) | {composite[0]})
     vtables, extents = construct_records(img, objs)
 
     fams = {}
@@ -387,6 +446,7 @@ def main():
             for rec, name, sho, cls in run_registry(img, bit2, bit3, level, stores, vtables):
                 key = (rec, name, sho, cls)
                 rows.setdefault(key, set()).add(f'{cfg}{level}')
+    rows[composite + ('-',)] = {f'{cfg}{level}' for cfg, _, _ in CONFIGS for level in (0, 1)}
 
     fam_order = sorted(fams.values(), key=lambda f: (f['stage'] != 'pixel', f['name'] != f['stage'], f['name']))
     with open(os.path.join(a.out, 'shader_families.tsv'), 'w', newline='\n') as f:
@@ -396,20 +456,22 @@ def main():
             f.write(f"{fam['name']}\t{fam['stage']}\t0x{vt:08X}\t0x{fam['size']:X}\t{','.join(fam['consts'])}\n")
     order = {'none0': 0, 'none1': 1, 'r2vb0': 2, 'r2vb1': 3, 'vt0': 4, 'vt1': 5}
     with open(os.path.join(a.out, 'registered_shaders.tsv'), 'w', newline='\n') as f:
-        f.write('name\tkey\tsho\tstage\tfamily\tclass\tconfigs\tinputs\n')
-        for (rec, name, sho, cls), cfgs in sorted(rows.items(), key=lambda kv: (kv[0][1].lower(), kv[0][2].lower(), kv[0][3])):
+        f.write('name\tkey\tsho\tstage\tfamily\tclass\tconfigs\tinputs\tconstants\n')
+        for (rec, name, sho, cls), cfgs in sorted(rows.items(), key=lambda kv: (kv[0][1].lower(), kv[0][2].lower(), str(kv[0][3]))):
             fam = fams[vtables[rec]]
-            inputs = '-'
+            inputs, constants = '-', '-'
             if fam['stage'] == 'vertex':
-                held = []
+                held, declared = [], []
                 for store in STORES:
                     rid = pandemic_hash_m2(sho[:-4] + ('_3l.sho' if 'Low' in store else '_3.sho'))
                     if rid in records[store]:
                         dcl = '+'.join(f'{u}.{i}' for u, i in vertex_inputs(records[store][rid]))
                         held.append(f'{store}={dcl}')
+                        declared.append(f"{store}={'+'.join(ctab_constants(records[store][rid]))}")
                 inputs = ';'.join(held) if held else '-'
+                constants = ';'.join(declared) if declared else '-'
             f.write(f"{name}\t0x{pandemic_hash_m2(name):08X}\t{sho}\t{fam['stage']}\t{fam['name']}\t{cls}\t"
-                    f"{','.join(sorted(cfgs, key=order.get))}\t{inputs}\n")
+                    f"{','.join(sorted(cfgs, key=order.get))}\t{inputs}\t{constants}\n")
     print(f'{len(fams)} families, {len(rows)} registrations', file=sys.stderr)
 
 
