@@ -65,9 +65,11 @@ pub fn vz_wad_from_env() -> Option<PathBuf> {
 ///   tests that need a console bake ([`local_config_xbox_vz_wad`]).
 /// * `ps3_vz_wad` — a PS3 bake (`SCFF` magic, big-endian). Read only by the tests that need it
 ///   ([`local_config_ps3_vz_wad`]).
+/// * `unpacked_exe` — the SecuROM-unpacked game executable (`mercs2_unpacked.exe`, a runtime dump).
+///   Read only by the tests that disassemble the engine ([`local_config_unpacked_exe`]).
 ///
-/// The console keys are never inferred from `vz_wad`'s folder: a console bake lives wherever it is
-/// kept, and a test that needs one fails naming the missing key.
+/// The console keys and `unpacked_exe` are never inferred from `vz_wad`'s folder: each file lives
+/// wherever it is kept, and a test that needs one fails naming the missing key.
 pub const LOCAL_CONFIG: &str = ".mercs2-local.toml";
 
 /// Every [`LOCAL_CONFIG`] from `start` upward, nearest first, each with its text.
@@ -84,6 +86,8 @@ pub const VZ_WAD_KEY: &str = "vz_wad";
 pub const XBOX_VZ_WAD_KEY: &str = "xbox_vz_wad";
 /// The `ps3_vz_wad` key of [`LOCAL_CONFIG`]: a PS3 bake.
 pub const PS3_VZ_WAD_KEY: &str = "ps3_vz_wad";
+/// The `unpacked_exe` key of [`LOCAL_CONFIG`]: the SecuROM-unpacked game executable.
+pub const UNPACKED_EXE_KEY: &str = "unpacked_exe";
 
 /// The `<key> = "…"` value in one [`LOCAL_CONFIG`]'s text, or `None` when the key is absent.
 ///
@@ -140,6 +144,19 @@ pub fn local_config_ps3_vz_wad(start: &Path) -> Result<PathBuf, String> {
         start,
         PS3_VZ_WAD_KEY,
         "write `ps3_vz_wad = \"/path/to/ps3-VZ.WAD\"` into it by hand",
+    )
+}
+
+/// The SecuROM-unpacked executable for a **game-gated test**: `unpacked_exe` in the nearest
+/// [`LOCAL_CONFIG`].
+///
+/// Same rules and the same three distinct errors as [`local_config_vz_wad`]. No script writes this
+/// key; it names a runtime dump kept by hand.
+pub fn local_config_unpacked_exe(start: &Path) -> Result<PathBuf, String> {
+    local_config_file(
+        start,
+        UNPACKED_EXE_KEY,
+        "write `unpacked_exe = \"/path/to/mercs2_unpacked.exe\"` into it by hand",
     )
 }
 
@@ -355,6 +372,36 @@ mod tests {
         std::fs::write(&ps3, b"x").unwrap();
         std::fs::write(&config, format!("ps3_vz_wad = \"{}\"\n", ps3.display())).unwrap();
         assert_eq!(local_config_ps3_vz_wad(&deep), Ok(ps3));
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// `unpacked_exe` reports the three failures under its own key and matches it exactly.
+    #[test]
+    fn the_unpacked_exe_resolver_matches_its_key_exactly_and_reports_each_failure() {
+        let root = std::env::temp_dir().join("mercs2_formats_local_config_unpacked_exe");
+        std::fs::remove_dir_all(&root).ok();
+        let deep = root.join("a");
+        std::fs::create_dir_all(&deep).unwrap();
+
+        let e = local_config_unpacked_exe(&deep).unwrap_err();
+        assert!(e.contains("no .mercs2-local.toml found"), "{e}");
+        assert!(e.contains("unpacked_exe = "), "{e}");
+
+        let (exe, pc) = (root.join("mercs2_unpacked.exe"), root.join("vz.wad"));
+        let config = root.join(LOCAL_CONFIG);
+        std::fs::write(&pc, b"x").unwrap();
+        std::fs::write(&config, format!("vz_wad = \"{}\"\n", pc.display())).unwrap();
+        let e = local_config_unpacked_exe(&deep).unwrap_err();
+        assert!(e.contains("has no `unpacked_exe` key"), "{e}");
+
+        std::fs::write(&config, format!("vz_wad = \"{}\"\nunpacked_exe = \"{}\"\n", pc.display(), exe.display())).unwrap();
+        let e = local_config_unpacked_exe(&deep).unwrap_err();
+        assert!(e.contains("names unpacked_exe = ") && e.contains("which is not a file"), "{e}");
+
+        std::fs::write(&exe, b"MZ").unwrap();
+        assert_eq!(local_config_unpacked_exe(&deep), Ok(exe));
+        assert_eq!(local_config_vz_wad(&deep), Ok(pc));
 
         std::fs::remove_dir_all(&root).ok();
     }
