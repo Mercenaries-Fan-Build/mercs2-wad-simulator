@@ -1544,37 +1544,78 @@ fn line_col(source: &str, byte_offset: usize) -> (usize, usize) {
 }
 
 /// Every occurrence of `Event.Create(` or `Event.CreatePersistent(` in a Lua source, returning
-/// (line, col, kind) for each. Matches greedily on the literal form the shipped scripts use —
-/// `Event . Create ( ... )` with arbitrary whitespace is uncommon in retail (0 hits across the
-/// decompiled corpus) but if a modder writes it that way we deliberately do not catch it: the
-/// rule targets the readable form, and a workaround that goes out of its way to hide from the
-/// linter is on the author, not us.
-fn scan_event_create(source: &str) -> Vec<(usize, usize, &'static str)> {
+/// (line, col, byte-offset, kind) for each. Matches greedily on the literal form the shipped
+/// scripts use — `Event . Create ( ... )` with arbitrary whitespace is uncommon in retail (0
+/// hits across the decompiled corpus) but if a modder writes it that way we deliberately do
+/// not catch it: the rule targets the readable form, and a workaround that goes out of its way
+/// to hide from the linter is on the author, not us.
+fn scan_event_create(source: &str) -> Vec<(usize, usize, usize, &'static str)> {
     let mut out = Vec::new();
     for needle in ["Event.CreatePersistent(", "Event.Create("] {
         let mut start = 0;
         while let Some(off) = source[start..].find(needle) {
             let abs = start + off;
-            // Deduplicate: `Event.CreatePersistent(` also matches `Event.Create(` as a prefix,
-            // so once we record it for the persistent match, skip past it before falling through
-            // to the shorter needle.
             let (line, col) = line_col(source, abs);
             let kind = if needle.starts_with("Event.CreatePersistent") {
                 "Event.CreatePersistent"
             } else {
                 // Refuse to double-report the SAME byte offset the persistent scan already reported.
-                if out.iter().any(|(l, c, _)| *l == line && *c == col) {
+                if out.iter().any(|(l, c, _, _)| *l == line && *c == col) {
                     start = abs + needle.len();
                     continue;
                 }
                 "Event.Create"
             };
-            out.push((line, col, kind));
+            out.push((line, col, abs, kind));
             start = abs + needle.len();
         }
     }
     out.sort();
     out
+}
+
+/// Is `at` inside a function whose signature makes `self` a valid identifier?
+///
+/// A colon-syntax method (`function X:Y(...)`) or an explicit-self first parameter (`function
+/// X.Y(self, ...)`, `function X(self, ...)`) both make `self:_CreateEvent(...)` a fixable
+/// suggestion. Anywhere else — top-level, a plain function without a self param, a helper
+/// nested in a method that doesn't itself take self — the M0301 fix does not apply, so the
+/// rule should not fire.
+///
+/// Walks backward line by line, stripping `--` line comments, and reads the nearest enclosing
+/// `function` signature. A signature that spans lines gets classified as no-self (conservative).
+fn enclosing_function_has_self(source: &str, at: usize) -> bool {
+    let prefix = &source[..at];
+    let mut line_starts: Vec<usize> = std::iter::once(0)
+        .chain(prefix.match_indices('\n').map(|(i, _)| i + 1))
+        .collect();
+    while let Some(line_start) = line_starts.pop() {
+        let line_end = source[line_start..]
+            .find('\n')
+            .map(|n| line_start + n)
+            .unwrap_or(source.len());
+        let line = &source[line_start..line_end];
+        let code = line.split("--").next().unwrap_or("");
+        let Some(fn_at) = code.find("function") else { continue };
+        let ok_before = fn_at == 0 || {
+            let c = code.as_bytes()[fn_at - 1];
+            !(c.is_ascii_alphanumeric() || c == b'_')
+        };
+        if !ok_before {
+            continue;
+        }
+        let after = code[fn_at + "function".len()..].trim_start();
+        let Some(open) = after.find('(') else { return false };
+        let Some(close_rel) = after[open + 1..].find(')') else { return false };
+        let name_part = &after[..open];
+        let params = &after[open + 1..open + 1 + close_rel];
+        if name_part.contains(':') {
+            return true;
+        }
+        let first = params.split(',').next().unwrap_or("").trim();
+        return first == "self";
+    }
+    false
 }
 
 /// Every top-level write to `_G.<name>`, `_MODULES.<name>`, or `_MODULES[<expr>]` in a Lua
@@ -1750,7 +1791,10 @@ fn lua_source_checks(manifest: &Manifest, root: &Path) -> Vec<Diagnostic> {
             continue;
         };
 
-        for (line, col, kind) in scan_event_create(&src) {
+        for (line, col, at, kind) in scan_event_create(&src) {
+            if !enclosing_function_has_self(&src, at) {
+                continue;
+            }
             out.push(Diagnostic {
                 rule: M0301_BARE_EVENT_CREATE,
                 severity: Severity::Error,
