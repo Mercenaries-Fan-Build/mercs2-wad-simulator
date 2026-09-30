@@ -2,14 +2,17 @@
 //! `add_shader` adds new store records plus the registration tables an author's ASI hands the
 //! m2-sdk `shader-registry` API.
 //!
-//! Two committed tables, written by `tools/extract_shader_registry.py` from the unwrapped exe and
+//! Two committed tables, written by `tools/extract_shader_registry.py` from the unpacked exe and
 //! the retail stores, carry what the engine does:
 //!
 //! * `data/shader_families.tsv` — one row per shader record vtable: its stage (the load handler at
 //!   vtable `+8` is `FUN_0085af00` for a vertex shader, `FUN_0085b1a0` for a pixel shader), its
 //!   record size, and the constant names its binder (vtable `+0x10`) resolves.
 //! * `data/registered_shaders.tsv` — every registration `FUN_0084f130` and its sub-registrars make,
-//!   with the configurations (resident store pair × ShaderLevel) it is made in.
+//!   with the configurations (resident store pair × ShaderLevel) it is made in, plus `PgCompositeFP`,
+//!   which the composite pass constructor registers outside `FUN_0084f130` (site `0x0246A443`; its
+//!   class argument comes from a SecuROM call, so the row's class is `-`). A vertex shader's row
+//!   also lists, per store holding its record, the inputs and the CTAB constants the record declares.
 //!
 //! The stores themselves are read only from the `--original-data` directory, never from the game
 //! folder: the game's copy is whatever the last deploy left there.
@@ -28,12 +31,17 @@ use crate::manifest::{Contribution, Manifest, ShaderSource};
 /// The capability an `add_shader` Shipment requires: the m2-sdk registers the shaders at runtime.
 pub const CAPABILITY: &str = "shader-registry";
 
-/// Names the pixel registry holds: `FUN_0085ab70` indexes `0x0197ba40[0x800]` and its probe
-/// (`FUN_0085b7c0`, `& 0x7ff`) never gives up on a full table.
+/// Names the pixel registry holds: `FUN_0085ab70` indexes `0x0197ba40[0x800]` and its insert
+/// (`FUN_0085b7c0`, a linear probe for a free slot, `& 0x7ff`) never gives up on a full table.
 pub const PIXEL_CAPACITY: usize = 0x800;
-/// Names the vertex registry holds: `FUN_0085abd0` indexes `0x0197e248[0x100]` and its probe
-/// (`FUN_00632250`, `& 0xff`) never gives up on a full table.
+/// Names the vertex registry holds: `FUN_0085abd0` indexes `0x0197e248[0x100]` and its insert
+/// (`FUN_00632250`, a linear probe for a free slot, `& 0xff`) never gives up on a full table.
 pub const VERTEX_CAPACITY: usize = 0x100;
+
+/// The vertex-family constant an AmbientWind shader reads: `PgMeshVPAmbientWind_3.sho` builds its
+/// sway from `WindMatrix` and scales it by `POSITION.w` (`mad r0, v0.w, r0, r2`), so a group drawn
+/// by a shader declaring it takes its per-vertex sway weight from `POSITION.w`.
+pub const WIND_CONSTANT: &str = "WindMatrix";
 
 const FAMILIES_TSV: &str = include_str!("../data/shader_families.tsv");
 const REGISTERED_TSV: &str = include_str!("../data/registered_shaders.tsv");
@@ -282,27 +290,36 @@ pub struct Registered {
     pub sho: String,
     pub stage: Stage,
     pub family: String,
-    pub class: u32,
+    /// The class argument of the registration call. `None` for `PgCompositeFP`, whose class a
+    /// SecuROM call computes.
+    pub class: Option<u32>,
     pub configs: BTreeSet<Config>,
     /// For a vertex shader: each store holding a record for its stem, with the `(usage, index)` of
     /// every input that record's bytecode declares.
     pub inputs: Vec<(String, Vec<(u8, u8)>)>,
+    /// For a vertex shader: each store holding a record for its stem, with the constant names that
+    /// record's CTAB declares.
+    pub constants: Vec<(String, Vec<String>)>,
 }
 
 /// Every retail registration.
 pub fn registered() -> &'static [Registered] {
     static R: OnceLock<Vec<Registered>> = OnceLock::new();
     R.get_or_init(|| {
-        tsv_rows(REGISTERED_TSV, &["name", "key", "sho", "stage", "family", "class", "configs", "inputs"])
+        tsv_rows(REGISTERED_TSV, &["name", "key", "sho", "stage", "family", "class", "configs", "inputs", "constants"])
             .map(|f| Registered {
                 name: f[0].to_string(),
                 key: parse_hex(f[1]),
                 sho: f[2].to_string(),
                 stage: parse_stage(f[3]),
                 family: f[4].to_string(),
-                class: f[5].parse().unwrap_or_else(|_| panic!("registered_shaders.tsv class {:?}", f[5])),
+                class: match f[5] {
+                    "-" => None,
+                    c => Some(c.parse().unwrap_or_else(|_| panic!("registered_shaders.tsv class {c:?}"))),
+                },
                 configs: f[6].split(',').map(Config::parse).collect(),
                 inputs: parse_inputs(f[7]),
+                constants: parse_constants(f[8]),
             })
             .collect()
     })
@@ -317,6 +334,16 @@ pub fn retail_keys_everywhere(stage: Stage) -> BTreeSet<u32> {
         by_key.entry(r.key).or_default().extend(r.configs.iter().copied());
     }
     by_key.into_iter().filter(|(_, c)| c.len() == Config::ALL.len()).map(|(k, _)| k).collect()
+}
+
+/// Whether the retail vertex shader `key` declares `constant` in the CTAB of its record in any
+/// store, in any configuration.
+pub fn retail_vertex_declares(key: u32, constant: &str) -> bool {
+    registered()
+        .iter()
+        .filter(|r| r.key == key && r.stage == Stage::Vertex)
+        .flat_map(|r| r.constants.iter())
+        .any(|(_, names)| names.iter().any(|n| n == constant))
 }
 
 /// The retail registration name for `key`, when there is one.
@@ -383,6 +410,19 @@ fn parse_inputs(s: &str) -> Vec<(String, Vec<(u8, u8)>)> {
                 })
                 .collect();
             (store.to_string(), inputs)
+        })
+        .collect()
+}
+
+/// `-`, or `<store>=<name>+…` per store, `;`-separated.
+fn parse_constants(s: &str) -> Vec<(String, Vec<String>)> {
+    if s == "-" {
+        return Vec::new();
+    }
+    s.split(';')
+        .map(|entry| {
+            let (store, list) = entry.split_once('=').unwrap_or_else(|| panic!("registered_shaders.tsv constants {entry:?}"));
+            (store.to_string(), list.split('+').filter(|x| !x.is_empty()).map(str::to_string).collect())
         })
         .collect()
 }
@@ -1057,10 +1097,13 @@ mod tests {
 
     #[test]
     fn the_retail_registry_matches_the_live_counts_at_shader_level_one() {
-        // The dumped registry's live counts, ShaderLevel 1: pixel 0xf2, vertex 0x81.
+        // The dumped registry's live counts, ShaderLevel 1: pixel 0xf2, vertex 0x81. The dump holds
+        // every registration FUN_0084f130 makes and not PgCompositeFP, which the composite pass
+        // constructor registers afterwards: its record at 0x0127CB58 holds key 0 in the dump and
+        // the run-once byte 0x011759C0 is 0.
         for extra in [ExtraStores::None, ExtraStores::R2vb, ExtraStores::Vt] {
             let c = Config { extra, shader_level: true };
-            assert_eq!(retail_count(c, Stage::Pixel), 0xf2);
+            assert_eq!(retail_count(c, Stage::Pixel), 0xf2 + 1);
             assert_eq!(retail_count(c, Stage::Vertex), 0x81);
         }
     }
