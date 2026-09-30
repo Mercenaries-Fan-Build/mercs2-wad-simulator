@@ -4,20 +4,32 @@
 //! lowered block.
 //!
 //! The convention is measured, not assumed: `data/shader_import_rules.tsv` is the census of every
-//! retail model (`census_container` over each `model` container of `vz.wad`; the game-gated test
-//! `shader_import_census` recomputes it and compares). Each rule maps an input to the set of shaders
-//! retail uses for it:
+//! retail model (`census_container` over each `model` container of `vz.wad`, a finer LOD rung read
+//! against its resident container's materials; the game-gated test `shader_import_census`
+//! recomputes it and compares). Each rule maps an input to the set of shaders retail uses for it:
 //!
 //! * `pixel`: a material's texture count and which slots are non-zero (`3:111`) → its pixel shader.
 //! * `vertex`: the group's sub-object kind (`MESH`, `SKIN`, `TINY`), its vertex declaration's
 //!   `usage.index` elements in order, and its materials' one pixel shader → its main vertex shader.
-//! * `shadow`: the kind, the main vertex shader, and whether the materials' flags carry `0x08`
-//!   (`alpha`) or none do (`opaque`) → its shadow vertex shader.
+//! * `shadow`: the kind, the main vertex shader, and whether any of the group's materials has an
+//!   on-disk flag in [`ALPHA_FLAGS`] (`alpha`) or none has (`opaque`) → its shadow vertex shader.
 //!
 //! An input with one choice resolves to it. An input with several, or none, has no answer in retail,
 //! so the author declares the shader in the glTF: `extras.pixel_shader` on a material,
 //! `extras.vertex_shader` / `extras.shadow_vertex_shader` on a mesh or primitive. A declared name
 //! must be a registered shader of the right stage.
+//!
+//! Two host roles are kept:
+//!
+//! * A host group drawn by an AmbientWind vertex shader (one whose CTAB declares
+//!   [`shader::WIND_CONSTANT`]) keeps it. The shader scales each vertex's sway by `POSITION.w`, so
+//!   every vertex takes its weight from the glTF's `_SWAY_WEIGHT` attribute; a wind shader with no
+//!   such attribute is an error. A declared non-wind `vertex_shader` writes `POSITION.w = 1`.
+//! * A `TINY` far-LOD host group keeps its vertex shader (`PgMeshTinyVP` intact,
+//!   `PgMeshTinyVP_Ruin` ruined). Those shaders read `POSITION.w` as the slot of the world object
+//!   the vertex belongs to (an index into the container's top-level `TINY` id list, and into
+//!   `ObjectIDScaleArray`), so every vertex takes its slot from the glTF's `_TINY_SLOT` attribute:
+//!   a slot the host container lists, the same on the three vertices of a triangle.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -108,6 +120,13 @@ pub fn to_tsv(tables: &Tables) -> String {
     s
 }
 
+/// The on-disk material flag bits whose presence on any of a group's materials gives the group
+/// the textured (alpha-tested) shadow vertex shader. Measured over every retail model group whose
+/// materials are present (57,083 groups, LOD rungs read against their resident container's
+/// materials): the shadow shader is a `Tex` one exactly when some material of the group has
+/// `flags & 0x0B`, and each `(kind, main vertex shader, alpha)` input has one shadow shader.
+pub const ALPHA_FLAGS: u16 = 0x0B;
+
 /// A material's pixel rule input: `<tex_count>:<slot mask>`, `1` for a non-zero hash.
 pub fn pixel_input(textures: &[u32]) -> String {
     let mask: String = textures.iter().map(|&h| if h == 0 { '0' } else { '1' }).collect();
@@ -124,6 +143,14 @@ pub fn decl_usages(decl: &[u8]) -> String {
         out.push(format!("{}.{}", e[6], e[7]));
     }
     out.join("+")
+}
+
+/// `POSITION`'s `(offset, D3DDECLTYPE)` in a vertex declaration, when it has one.
+pub fn decl_position(decl: &[u8]) -> Option<(usize, u8)> {
+    decl.chunks_exact(8)
+        .take_while(|e| u16::from_le_bytes([e[0], e[1]]) != 0xff)
+        .find(|e| e[6] == 0 && e[7] == 0)
+        .map(|e| (u16::from_le_bytes([e[2], e[3]]) as usize, e[4]))
 }
 
 pub fn vertex_input(kind: &str, usages: &str, pixel: &str) -> String {
@@ -233,6 +260,12 @@ pub struct Group {
     pub info_at: usize,
     pub vertex: u32,
     pub shadow: u32,
+    /// Absolute offset of the `STRM data` body in the container, the stride, and the vertex count.
+    pub stream_at: usize,
+    pub stride: usize,
+    pub vertex_count: usize,
+    /// `POSITION`'s offset in a vertex and its `D3DDECLTYPE`, from the group's declaration.
+    pub position: Option<(usize, u8)>,
 }
 
 /// One material record, with the absolute offset of its pixel-shader key.
@@ -286,6 +319,22 @@ pub fn read_model(container: &[u8]) -> Result<(Vec<Group>, Vec<Material>), Strin
         let strm = r.child(p, b"STRM").ok_or_else(|| format!("PRMG {ordinal} has no STRM"))?;
         let decl = r.child(strm, b"decl").ok_or_else(|| format!("PRMG {ordinal} STRM has no decl"))?;
         let usages = decl_usages(r.body(decl)?);
+        let position = decl_position(r.body(decl)?);
+        let sinfo = r.child(strm, b"info").ok_or_else(|| format!("PRMG {ordinal} STRM has no info"))?;
+        let sinfo = r.body(sinfo)?;
+        if sinfo.len() < 12 {
+            return Err(format!("PRMG {ordinal} STRM info is {} bytes, short of stride and count", sinfo.len()));
+        }
+        let stride = u32::from_le_bytes(sinfo[4..8].try_into().expect("4 bytes")) as usize;
+        let vertex_count = u32::from_le_bytes(sinfo[8..12].try_into().expect("4 bytes")) as usize;
+        let sdata = r.child(strm, b"data").ok_or_else(|| format!("PRMG {ordinal} STRM has no data"))?;
+        let (stream_at, stream_end) = r.span(sdata)?;
+        if stream_end - stream_at < stride * vertex_count {
+            return Err(format!(
+                "PRMG {ordinal} STRM data is {} bytes, short of {vertex_count} vertices of stride {stride}",
+                stream_end - stream_at
+            ));
+        }
         let materials_of = match r.child(p, b"PRMT") {
             Some(t) => r
                 .body(t)?
@@ -302,21 +351,40 @@ pub fn read_model(container: &[u8]) -> Result<(Vec<Group>, Vec<Material>), Strin
             info_at,
             vertex: word(0x0C),
             shadow: word(0x10),
+            stream_at,
+            stride,
+            vertex_count,
+            position,
         });
     }
     Ok((groups, materials))
 }
 
 /// The census of one retail model container: `(rule, input, the shader retail names)` for every
-/// material, and for every group whose materials are all in the container and agree on the input.
-pub fn census_container(container: &[u8]) -> Result<Vec<(Rule, String, String)>, String> {
-    let (groups, materials) = read_model(container)?;
+/// material, and for every group whose materials all exist and whose materials agree on the input.
+///
+/// A finer LOD rung (`_P001`…`_P003`) carries groups and no `MTRL`; its `PRMT` records index the
+/// materials of the model's resident container, which `resident` names. A rung contributes group
+/// observations only, since its materials are the resident's.
+pub fn census_container(container: &[u8], resident: Option<&[u8]>) -> Result<Vec<(Rule, String, String)>, String> {
+    let (groups, own) = read_model(container)?;
+    let materials = match resident {
+        None => own,
+        Some(res) => {
+            if !own.is_empty() {
+                return Err(format!("a LOD rung with {} materials of its own", own.len()));
+            }
+            read_model(res).map_err(|e| format!("its resident container: {e}"))?.1
+        }
+    };
     let name = |key: u32| -> Result<String, String> {
         shader::retail_name(key).map(str::to_string).ok_or_else(|| format!("key 0x{key:08X} is not a retail registration"))
     };
     let mut out = Vec::new();
-    for m in &materials {
-        out.push((Rule::Pixel, pixel_input(&m.textures), name(m.key)?));
+    if resident.is_none() {
+        for m in &materials {
+            out.push((Rule::Pixel, pixel_input(&m.textures), name(m.key)?));
+        }
     }
     for g in &groups {
         let mats: Option<Vec<&Material>> = g.materials.iter().map(|&i| materials.get(i)).collect();
@@ -326,10 +394,8 @@ pub fn census_container(container: &[u8]) -> Result<Vec<(Rule, String, String)>,
         if let [one] = pixels.into_iter().collect::<Vec<_>>()[..] {
             out.push((Rule::Vertex, vertex_input(&g.kind, &g.usages, &name(one)?), vs.clone()));
         }
-        let alpha: BTreeSet<bool> = mats.iter().map(|m| m.flags & 0x08 != 0).collect();
-        if let [one] = alpha.into_iter().collect::<Vec<_>>()[..] {
-            out.push((Rule::Shadow, shadow_input(&g.kind, &vs, one), name(g.shadow)?));
-        }
+        let alpha = mats.iter().any(|m| m.flags & ALPHA_FLAGS != 0);
+        out.push((Rule::Shadow, shadow_input(&g.kind, &vs, alpha), name(g.shadow)?));
     }
     Ok(out)
 }
@@ -392,9 +458,17 @@ pub fn read_declared(path: &Path) -> Result<Declared, String> {
     Ok(Declared { pixel: one("pixel_shader")?, vertex: one("vertex_shader")?, shadow: one("shadow_vertex_shader")? })
 }
 
-/// The inputs each of a manifest's added vertex shaders declares, in `shader` and `shader_low`,
-/// keyed by registration key.
-pub fn added_vertex_inputs(manifest: &crate::manifest::Manifest, root: &Path) -> Result<BTreeMap<u32, Vec<Vec<(u8, u8)>>>, String> {
+/// What a manifest's added vertex shader declares, per source (`shader`, then `shader_low`).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct AddedVertex {
+    /// The `(usage, index)` of every input.
+    pub inputs: Vec<Vec<(u8, u8)>>,
+    /// The CTAB constant names.
+    pub constants: Vec<Vec<String>>,
+}
+
+/// Each of a manifest's added vertex shaders, keyed by registration key.
+pub fn added_vertex_shaders(manifest: &crate::manifest::Manifest, root: &Path) -> Result<BTreeMap<u32, AddedVertex>, String> {
     let mut out = BTreeMap::new();
     for c in &manifest.contributions {
         if let crate::manifest::Contribution::AddShader { family, classes } = c {
@@ -402,16 +476,51 @@ pub fn added_vertex_inputs(manifest: &crate::manifest::Manifest, root: &Path) ->
                 continue;
             }
             for class in classes {
-                let mut per_store = Vec::new();
+                let mut added = AddedVertex::default();
                 for src in [&class.shader, &class.shader_low] {
                     let code = shader::load_source(root, src)?;
-                    per_store.push(mercs2_formats::shader3::vertex_inputs(&code.blob).map_err(|e| e.to_string())?);
+                    added.inputs.push(mercs2_formats::shader3::vertex_inputs(&code.blob).map_err(|e| e.to_string())?);
+                    added.constants.push(code.constants);
                 }
-                out.insert(pandemic_hash_m2(&class.name), per_store);
+                out.insert(pandemic_hash_m2(&class.name), added);
             }
         }
     }
     Ok(out)
+}
+
+/// Whether vertex shader `name` is an AmbientWind shader: its CTAB (a retail record's in any store,
+/// or an added source's) declares [`shader::WIND_CONSTANT`].
+pub fn is_wind(name: &str, added: &BTreeMap<u32, AddedVertex>) -> bool {
+    let key = pandemic_hash_m2(name);
+    match added.get(&key) {
+        Some(a) => a.constants.iter().flatten().any(|c| c == shader::WIND_CONSTANT),
+        None => shader::retail_vertex_declares(key, shader::WIND_CONSTANT),
+    }
+}
+
+/// Where the import reads each written vertex's `POSITION.w` from.
+#[derive(Debug, Clone, Copy)]
+pub struct Geometry<'a> {
+    /// The injector's `(group ordinal, source vertex of each STRM vertex)` ([`InjectStats::vertex_sources`](mercs2_formats::model_inject::InjectStats::vertex_sources)).
+    pub vertex_sources: &'a [(usize, Vec<u32>)],
+    /// The glTF's custom vertex attributes per source vertex.
+    pub custom: &'a mercs2_formats::mesh_import::CustomAttributes,
+    /// The source triangles, indexing the source vertices.
+    pub source_tris: &'a [[u32; 3]],
+    /// The host's block before injection: a `TINY` host's id list is read from it.
+    pub donor: &'a [u8],
+}
+
+/// What a group's `POSITION.w` holds after the import.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PositionW {
+    /// `1`: the vertex shader does not read it.
+    One,
+    /// Each vertex's `_SWAY_WEIGHT`, for an AmbientWind vertex shader.
+    Sway,
+    /// Each vertex's `_TINY_SLOT`, for a `TINY` group's shader.
+    TinySlot,
 }
 
 /// What the import wrote.
@@ -422,6 +531,7 @@ pub struct Imported {
     pub shadow: String,
     /// `(material index, pixel shader)` for each host material.
     pub pixels: Vec<(usize, String)>,
+    pub position_w: PositionW,
 }
 
 /// A failed import, with the rule it is reported under.
@@ -436,30 +546,34 @@ fn err(code: &'static str, message: String) -> ImportError {
 }
 
 /// The inputs a vertex shader declares, per store holding it: retail's from the committed table,
-/// an added one's from its source bytecode (`added_inputs`).
-fn vertex_inputs_of(name: &str, added_inputs: &BTreeMap<u32, Vec<Vec<(u8, u8)>>>) -> Option<Vec<Vec<(u8, u8)>>> {
+/// an added one's from its source bytecode.
+fn vertex_inputs_of(name: &str, added: &BTreeMap<u32, AddedVertex>) -> Option<Vec<Vec<(u8, u8)>>> {
     let key = pandemic_hash_m2(name);
-    if let Some(i) = added_inputs.get(&key) {
-        return Some(i.clone());
+    if let Some(a) = added.get(&key) {
+        return Some(a.inputs.clone());
     }
     shader::registered().iter().find(|r| r.key == key && r.stage == Stage::Vertex).map(|r| r.inputs.iter().map(|(_, v)| v.clone()).collect())
 }
 
+const DECLTYPE_FLOAT4: u8 = 3;
+const DECLTYPE_FLOAT16_4: u8 = 16;
+
 /// Resolve and write the shaders of primitive group `host` of the model container inside `block`
 /// (a single-entry block: `[count][name][type][field][size]` then the container): the group's
-/// `INFO` vertex-shader words and each of its materials' pixel-shader key, then the container's
-/// `CSUM`.
+/// `INFO` vertex-shader words, each of its materials' pixel-shader key and each vertex's
+/// `POSITION.w`, then the container's `CSUM`.
 ///
-/// `added` are the Shipment's `add_shader` registrations and `added_inputs` the declared inputs of
-/// its vertex shaders, one list per store ([`added_vertex_inputs`]). A declared or derived name must be registered in every configuration (M0235 for
-/// a pixel shader, M0236 for a vertex shader); the main vertex shader's inputs must all be in the
-/// group's declaration (M0238).
+/// `added` are the Shipment's `add_shader` registrations and `added_vertex` its vertex shaders'
+/// declarations ([`added_vertex_shaders`]). A declared or derived name must be registered in every
+/// configuration (M0235 for a pixel shader, M0236 for a vertex shader); the main vertex shader's
+/// inputs, `POSITION.w` included, must all be supplied (M0238).
 pub fn import_into_block(
     block: &mut [u8],
     host: usize,
     declared: &Declared,
     added: &[Added],
-    added_inputs: &BTreeMap<u32, Vec<Vec<(u8, u8)>>>,
+    added_vertex: &BTreeMap<u32, AddedVertex>,
+    geometry: Geometry,
 ) -> Result<Imported, ImportError> {
     if block.len() < 20 {
         return Err(err("M0236", "the lowered block is shorter than its entry header".into()));
@@ -487,6 +601,11 @@ pub fn import_into_block(
             Err(err(code, format!("{name:?} is not a {stage} shader registered in every configuration")))
         }
     };
+    let host_vertex = || -> Result<String, ImportError> {
+        shader::retail_name(g.vertex).map(str::to_string).ok_or_else(|| {
+            err("M0236", format!("group {host}'s vertex shader key 0x{:08X} is not a retail registration", g.vertex))
+        })
+    };
 
     let mut pixels = Vec::new();
     for &mi in &g.materials {
@@ -494,17 +613,35 @@ pub fn import_into_block(
             .get(mi)
             .ok_or_else(|| err("M0235", format!("group {host} names material {mi}; the model has {}", materials.len())))?;
         let ps = resolve(Rule::Pixel, &pixel_input(&m.textures), declared.pixel.as_deref())
-            .map_err(|e| err("M0235", format!("material {mi}: {e}")))?;
+            .map_err(|e| err("M0235", format!("host material {mi} of group {host}: {e}")))?;
         check(Rule::Pixel, &ps)?;
         if !pixels.iter().any(|(i, _)| *i == mi) {
             pixels.push((mi, ps));
         }
     }
-    let distinct: BTreeSet<&str> = pixels.iter().map(|(_, p)| p.as_str()).collect();
-    let pixel_for_vs = match distinct.into_iter().collect::<Vec<_>>()[..] {
-        [one] => one.to_string(),
-        ref several => {
-            if declared.vertex.is_none() {
+
+    let tiny = g.kind == "TINY";
+    let vertex = if tiny {
+        let kept = host_vertex()?;
+        if let Some(d) = declared.vertex.as_deref().filter(|d| *d != kept) {
+            return Err(err(
+                "M0236",
+                format!(
+                    "group {host} is a TINY far-LOD group drawn by {kept}, and a TINY host keeps its \
+                     vertex shader (its intact or ruined role); `extras.vertex_shader` names {d}"
+                ),
+            ));
+        }
+        kept
+    } else if let Some(d) = &declared.vertex {
+        d.clone()
+    } else if is_wind(&host_vertex()?, added_vertex) {
+        host_vertex()?
+    } else {
+        let distinct: BTreeSet<&str> = pixels.iter().map(|(_, p)| p.as_str()).collect();
+        let pixel_for_vs = match distinct.into_iter().collect::<Vec<_>>()[..] {
+            [one] => one.to_string(),
+            ref several => {
                 return Err(err(
                     "M0236",
                     format!(
@@ -514,30 +651,20 @@ pub fn import_into_block(
                     ),
                 ));
             }
-            String::new()
-        }
+        };
+        resolve(Rule::Vertex, &vertex_input(&g.kind, &g.usages, &pixel_for_vs), None)
+            .map_err(|e| err("M0236", format!("group {host}: {e}")))?
     };
-    let vertex = resolve(Rule::Vertex, &vertex_input(&g.kind, &g.usages, &pixel_for_vs), declared.vertex.as_deref())
-        .map_err(|e| err("M0236", format!("group {host}: {e}")))?;
     check(Rule::Vertex, &vertex)?;
-    let alpha: BTreeSet<bool> = g.materials.iter().filter_map(|&i| materials.get(i)).map(|m| m.flags & 0x08 != 0).collect();
-    let shadow = match alpha.into_iter().collect::<Vec<_>>()[..] {
-        [one] => resolve(Rule::Shadow, &shadow_input(&g.kind, &vertex, one), declared.shadow.as_deref()),
-        _ => match &declared.shadow {
-            Some(d) => Ok(d.clone()),
-            None => Err(format!(
-                "group {host}'s materials disagree on flag 0x08 (alpha), so no retail convention names \
-                 its shadow vertex shader. Declare one with `extras.shadow_vertex_shader`"
-            )),
-        },
-    }
-    .map_err(|e| err("M0236", format!("group {host}: {e}")))?;
+    let alpha = g.materials.iter().filter_map(|&i| materials.get(i)).any(|m| m.flags & ALPHA_FLAGS != 0);
+    let shadow = resolve(Rule::Shadow, &shadow_input(&g.kind, &vertex, alpha), declared.shadow.as_deref())
+        .map_err(|e| err("M0236", format!("group {host}: {e}")))?;
     check(Rule::Shadow, &shadow)?;
 
     // M0238: every input the main vertex shader declares, in every store holding it, is an element
     // of the group's declaration.
     let supplied: BTreeSet<&str> = g.usages.split('+').collect();
-    let inputs = vertex_inputs_of(&vertex, added_inputs)
+    let inputs = vertex_inputs_of(&vertex, added_vertex)
         .ok_or_else(|| err("M0238", format!("{vertex:?} has no bytecode to read its inputs from")))?;
     for per_store in inputs {
         let missing: Vec<String> = per_store
@@ -558,6 +685,91 @@ pub fn import_into_block(
         }
     }
 
+    // POSITION.w: the sway weight for a wind shader, the slot for a TINY group, else 1.
+    let sway = geometry.custom.sway.as_deref();
+    let tiny_slot = geometry.custom.tiny_slot.as_deref();
+    let position_w = if is_wind(&vertex, added_vertex) {
+        if sway.is_none() {
+            return Err(err(
+                "M0238",
+                format!(
+                    "{vertex:?} is an AmbientWind shader: it scales each vertex's sway by POSITION.w, \
+                     and the glTF has no `{}` attribute. Give every primitive a `{}` (float, 0 to 1)",
+                    mercs2_formats::mesh_import::SWAY_WEIGHT_ATTRIBUTE,
+                    mercs2_formats::mesh_import::SWAY_WEIGHT_ATTRIBUTE
+                ),
+            ));
+        }
+        PositionW::Sway
+    } else if tiny {
+        let slots = tiny_slots(geometry.donor).map_err(|m| err("M0238", format!("the TINY host: {m}")))?;
+        let attr = mercs2_formats::mesh_import::TINY_SLOT_ATTRIBUTE;
+        let valid = format!("0..{} (its TINY id list holds {} world objects)", slots.saturating_sub(1), slots);
+        let values = tiny_slot.ok_or_else(|| {
+            err(
+                "M0238",
+                format!(
+                    "group {host} is a TINY far-LOD group: {vertex:?} reads POSITION.w as the slot of \
+                     the world object each vertex belongs to, and the glTF has no `{attr}` attribute. \
+                     Give every primitive a `{attr}` (unsigned integer); the host's slots are {valid}"
+                ),
+            )
+        })?;
+        if let Some((v, s)) = values.iter().enumerate().find(|(_, s)| **s >= slots) {
+            return Err(err("M0238", format!("vertex {v} has {attr} {s}; the TINY host's slots are {valid}")));
+        }
+        if let Some((t, tri)) = geometry
+            .source_tris
+            .iter()
+            .enumerate()
+            .find(|(_, t)| values[t[0] as usize] != values[t[1] as usize] || values[t[0] as usize] != values[t[2] as usize])
+        {
+            return Err(err(
+                "M0238",
+                format!(
+                    "triangle {t} spans {attr} {}, {} and {}; a TINY triangle belongs to one world object",
+                    values[tri[0] as usize], values[tri[1] as usize], values[tri[2] as usize]
+                ),
+            ));
+        }
+        PositionW::TinySlot
+    } else {
+        PositionW::One
+    };
+    let sources = &geometry
+        .vertex_sources
+        .iter()
+        .find(|(o, _)| *o == host)
+        .ok_or_else(|| err("M0236", format!("the lowering wrote no geometry into group {host}")))?
+        .1;
+    if sources.len() != g.vertex_count {
+        return Err(err(
+            "M0236",
+            format!("group {host} streams {} vertices and the lowering reports {}", g.vertex_count, sources.len()),
+        ));
+    }
+    let (pos_off, pos_ty) = g.position.ok_or_else(|| err("M0238", format!("group {host} has no POSITION element")))?;
+    if position_w != PositionW::One && !matches!(pos_ty, DECLTYPE_FLOAT16_4 | DECLTYPE_FLOAT4) {
+        return Err(err(
+            "M0238",
+            format!("{vertex:?} reads POSITION.w, and group {host}'s POSITION is D3DDECLTYPE {pos_ty}, which has no w"),
+        ));
+    }
+    for (i, &src) in sources.iter().enumerate() {
+        let past = |what: &str| err("M0238", format!("group {host} vertex {i} comes from source vertex {src}, past the {what}"));
+        let w = match position_w {
+            PositionW::One => 1.0,
+            PositionW::Sway => *sway.expect("checked above").get(src as usize).ok_or_else(|| past("sway weights"))?,
+            PositionW::TinySlot => *tiny_slot.expect("checked above").get(src as usize).ok_or_else(|| past("TINY slots"))? as f32,
+        };
+        let at = 20 + g.stream_at + i * g.stride + pos_off;
+        match pos_ty {
+            DECLTYPE_FLOAT16_4 => block[at + 6..at + 8].copy_from_slice(&mercs2_formats::model_inject::f16_le(w)),
+            DECLTYPE_FLOAT4 => block[at + 12..at + 16].copy_from_slice(&w.to_le_bytes()),
+            _ => {}
+        }
+    }
+
     let put = |b: &mut [u8], at: usize, v: u32| b[20 + at..20 + at + 4].copy_from_slice(&v.to_le_bytes());
     put(block, g.info_at + 0x0C, pandemic_hash_m2(&vertex));
     put(block, g.info_at + 0x10, pandemic_hash_m2(&shadow));
@@ -571,7 +783,34 @@ pub fn import_into_block(
     }
     let crc = mercs2_formats::crc32::crc32_mercs2(&container[..csum_at]);
     container[csum_at + 4..csum_at + 8].copy_from_slice(&crc.to_le_bytes());
-    Ok(Imported { group: host, vertex, shadow, pixels })
+    Ok(Imported { group: host, vertex, shadow, pixels, position_w })
+}
+
+/// The number of world objects in the top-level `TINY` id list (`u32 N`, then `N` GUIDs) of the
+/// model container inside block `donor`: a `TINY` vertex's slot is below it.
+pub fn tiny_slots(donor: &[u8]) -> Result<u32, String> {
+    if donor.len() < 20 {
+        return Err("the block is shorter than its entry header".into());
+    }
+    let size = u32::from_le_bytes(donor[16..20].try_into().expect("4 bytes")) as usize;
+    let container = donor.get(20..20 + size).ok_or("the block's container runs past it")?;
+    let r = Rows::new(container)?;
+    let mut top = Vec::new();
+    let mut j = 0;
+    while j < r.rows.len() {
+        top.push(j);
+        j += 1 + r.rows[j].x3 as usize;
+    }
+    let i = top
+        .into_iter()
+        .find(|&i| &r.rows[i].tag == b"TINY" && !r.is_marker(i))
+        .ok_or("the container has no top-level TINY id list")?;
+    let body = r.body(i)?;
+    let n = body.get(0..4).map(|b| u32::from_le_bytes(b.try_into().expect("4 bytes"))).ok_or("the TINY id list has no count")?;
+    if body.len() < 4 + 4 * n as usize {
+        return Err(format!("the TINY id list counts {n} ids in {} bytes", body.len()));
+    }
+    Ok(n)
 }
 
 #[cfg(test)]
