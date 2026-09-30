@@ -59,6 +59,9 @@ mercs2_audio = { path = "../mercs2_audio", version = "1.2.3", default-features =
 # needs a real zlib stream, not a plausible-looking one. Nothing in `src/` compresses a movie; that
 # is the whole point of the test.
 flate2 = "1"
+# The game-gated shader registry test disassembles every FUN_0085ac90 site in the unpacked exe to
+# check registered_shaders.tsv against the code. Pure Rust, no native dependencies.
+iced-x86 = { version = "1", default-features = false, features = ["std", "decoder", "instr_info"] }
 
 [[bin]]
 name = "qm"
