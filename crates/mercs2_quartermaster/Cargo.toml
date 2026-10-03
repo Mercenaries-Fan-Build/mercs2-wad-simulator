@@ -87,3 +87,7 @@ required-features = ["retail"]
 [[test]]
 name = "shader_retail"
 required-features = ["retail"]
+
+[[test]]
+name = "tiny_retail"
+required-features = ["retail"]
