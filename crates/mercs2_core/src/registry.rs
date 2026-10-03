@@ -30,28 +30,32 @@ pub const DEFAULT_POOL_BUDGET: u32 = 0x100;
 /// codes. The byte-level decode lives at the asset boundary (`mercs2_formats::schema::SchemaFieldType`
 /// + its `CopyFromStream` analog); this crate stays asset-agnostic and re-declares only the small tag
 /// it needs to describe a class's record layout. Codes match the on-disk `schm` type codes exactly
-/// (1/2/4/5/6/7/8/9/10/11; there is no code 3), so a loader can translate one to the other by value.
+/// (1–11), so a loader can translate one to the other by value. The widths are the ones the engine's
+/// field readers consume (`FUN_00656210`, `FUN_00656320`, `FUN_00656610`, `FUN_0065644a`); see
+/// `SchemaFieldType` for the evidence.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FieldKind {
-    /// Type 1 — one packed bit (see [`FieldLayout::bit_index`]).
-    Bit,
-    /// Type 2 — `u8`.
+    /// Code 1 — one byte.
+    Byte,
+    /// Code 2 — one byte.
     U8,
-    /// Type 4 — `u16`.
+    /// Code 3 — two bytes.
+    Short,
+    /// Code 4 — two bytes.
     U16,
-    /// Type 5 — `f32`.
+    /// Code 5 — 4-byte integer.
+    Int,
+    /// Code 6 — 32-bit hash/id.
+    Hash,
+    /// Code 7 — `f32`.
     F32,
-    /// Type 6 — 32-bit hash/id.
-    U32,
-    /// Type 7 — 32-bit reference.
-    Ref,
-    /// Type 8 — 32-bit / inline string reference.
+    /// Code 8 — inline string (`Name`).
     StringRef,
-    /// Type 9 — 32-bit flags word.
-    Flags,
-    /// Type 10 — `[f32; 3]`.
+    /// Code 9 — 32-bit enum-value hash.
+    Enum,
+    /// Code 10 — `[f32; 3]`.
     Vec3,
-    /// Type 11 — 32-byte composite (8×`f32`, e.g. a Transform pos+quat blob).
+    /// Code 11 — 32-byte composite (8×`f32`, e.g. a Transform pos+quat blob).
     Blob32,
 }
 
@@ -59,27 +63,27 @@ impl FieldKind {
     /// Map an on-disk `schm` type code to a [`FieldKind`] (the same code set the exe uses).
     pub fn from_type_code(code: u32) -> Option<Self> {
         Some(match code {
-            1 => Self::Bit,
+            1 => Self::Byte,
             2 => Self::U8,
+            3 => Self::Short,
             4 => Self::U16,
-            5 => Self::F32,
-            6 => Self::U32,
-            7 => Self::Ref,
+            5 => Self::Int,
+            6 => Self::Hash,
+            7 => Self::F32,
             8 => Self::StringRef,
-            9 => Self::Flags,
+            9 => Self::Enum,
             10 => Self::Vec3,
             11 => Self::Blob32,
             _ => return None,
         })
     }
 
-    /// Serialized width in bytes (a `Bit` occupies no bytes of its own — it shares a byte).
+    /// Width in bytes of the storage unit the field occupies.
     pub fn byte_width(self) -> usize {
         match self {
-            Self::Bit => 0,
-            Self::U8 => 1,
-            Self::U16 => 2,
-            Self::F32 | Self::U32 | Self::Ref | Self::StringRef | Self::Flags => 4,
+            Self::Byte | Self::U8 => 1,
+            Self::Short | Self::U16 => 2,
+            Self::Int | Self::Hash | Self::F32 | Self::StringRef | Self::Enum => 4,
             Self::Vec3 => 12,
             Self::Blob32 => 32,
         }
@@ -97,8 +101,10 @@ pub struct FieldLayout {
     pub name_hash: u32,
     /// Byte offset of the field inside the serialized payload record.
     pub byte_offset: u16,
-    /// For [`FieldKind::Bit`], the bit position within `byte_offset`'s byte; 0 otherwise.
-    pub bit_index: u8,
+    /// The lowest bit of a bit field inside the storage unit at `byte_offset`.
+    pub bit_start: u8,
+    /// The width of a bit field in bits; 0 for a field that is its whole storage unit.
+    pub bit_width: u8,
     pub kind: FieldKind,
 }
 
@@ -292,12 +298,14 @@ _CarPhysicsV2 768
 
     #[test]
     fn field_kind_matches_schm_type_codes() {
-        assert_eq!(FieldKind::from_type_code(1), Some(FieldKind::Bit));
+        assert_eq!(FieldKind::from_type_code(1), Some(FieldKind::Byte));
+        assert_eq!(FieldKind::from_type_code(3), Some(FieldKind::Short));
         assert_eq!(FieldKind::from_type_code(4), Some(FieldKind::U16));
+        assert_eq!(FieldKind::from_type_code(7), Some(FieldKind::F32));
         assert_eq!(FieldKind::from_type_code(11), Some(FieldKind::Blob32));
-        assert_eq!(FieldKind::from_type_code(3), None); // there is no code 3
         assert_eq!(FieldKind::from_type_code(0), None);
-        assert_eq!(FieldKind::Bit.byte_width(), 0);
+        assert_eq!(FieldKind::from_type_code(12), None);
+        assert_eq!(FieldKind::Byte.byte_width(), 1);
         assert_eq!(FieldKind::U16.byte_width(), 2);
         assert_eq!(FieldKind::Vec3.byte_width(), 12);
         assert_eq!(FieldKind::Blob32.byte_width(), 32);
@@ -310,14 +318,14 @@ _CarPhysicsV2 768
     fn register_with_real_hibernation_field_layout() {
         // Ground-truth from retail vz.wad HibernationControl schm (payload stride 6):
         //   0xcbe8ed58 u16@0 · 0x74e63261 u8@2 · 0xdea888ce u8@3 · 0x2332033f u8@4
-        //   0x3ce51772 bit@5(idx0) · 0x3f1da641 bit@5(idx1)
+        //   0x3ce51772 code-1 bit 0 of byte 5 · 0x3f1da641 code-1 bit 1 of byte 5
         let fields = vec![
-            FieldLayout { name_hash: 0xcbe8_ed58, byte_offset: 0, bit_index: 0, kind: FieldKind::U16 },
-            FieldLayout { name_hash: 0x74e6_3261, byte_offset: 2, bit_index: 0, kind: FieldKind::U8 },
-            FieldLayout { name_hash: 0xdea8_88ce, byte_offset: 3, bit_index: 0, kind: FieldKind::U8 },
-            FieldLayout { name_hash: 0x2332_033f, byte_offset: 4, bit_index: 0, kind: FieldKind::U8 },
-            FieldLayout { name_hash: 0x3ce5_1772, byte_offset: 5, bit_index: 0, kind: FieldKind::Bit },
-            FieldLayout { name_hash: 0x3f1d_a641, byte_offset: 5, bit_index: 1, kind: FieldKind::Bit },
+            FieldLayout { name_hash: 0xcbe8_ed58, byte_offset: 0, bit_start: 0, bit_width: 0, kind: FieldKind::U16 },
+            FieldLayout { name_hash: 0x74e6_3261, byte_offset: 2, bit_start: 0, bit_width: 0, kind: FieldKind::U8 },
+            FieldLayout { name_hash: 0xdea8_88ce, byte_offset: 3, bit_start: 0, bit_width: 0, kind: FieldKind::U8 },
+            FieldLayout { name_hash: 0x2332_033f, byte_offset: 4, bit_start: 0, bit_width: 0, kind: FieldKind::U8 },
+            FieldLayout { name_hash: 0x3ce5_1772, byte_offset: 5, bit_start: 0, bit_width: 1, kind: FieldKind::Byte },
+            FieldLayout { name_hash: 0x3f1d_a641, byte_offset: 5, bit_start: 1, bit_width: 1, kind: FieldKind::Byte },
         ];
         let mut reg = ComponentRegistry::new();
         reg.load_budgets("[presize]\nHibernationControl 14080\n");
@@ -331,9 +339,9 @@ _CarPhysicsV2 768
         let dist0 = d.field(0xcbe8_ed58).expect("dist0 field");
         assert_eq!(dist0.byte_offset, 0);
         assert_eq!(dist0.kind, FieldKind::U16);
-        // The two bit fields share byte 5 but differ by bit index.
-        assert_eq!(d.field(0x3ce5_1772).unwrap().bit_index, 0);
-        assert_eq!(d.field(0x3f1d_a641).unwrap().bit_index, 1);
+        // The two bit fields share byte 5 but differ by bit start.
+        assert_eq!(d.field(0x3ce5_1772).unwrap().bit_start, 0);
+        assert_eq!(d.field(0x3f1d_a641).unwrap().bit_start, 1);
         assert!(d.field(0xDEAD_BEEF).is_none());
         // Lookup by hash returns the same descriptor (fields included in equality).
         assert_eq!(reg.get(0x1234_5678), Some(&d));
