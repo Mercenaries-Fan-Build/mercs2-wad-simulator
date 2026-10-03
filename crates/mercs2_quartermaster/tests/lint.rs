@@ -1019,6 +1019,69 @@ local uHandle = self:_CreateEvent(Event.TimerRelative, {1}, F, {self})
     );
 }
 
+/// A `tMissionData` row whose key is off the engine's `<Faction3><Con|Job><NN+>` shape wedges
+/// the briefing-dialog teardown at `mrxbriefing.lua:2849` the instant the player picks it (F12).
+/// The scanner catches literal-string and dot-access assignments; the shape check lets anything
+/// 7+ bytes long that is 3 chars + `Con|Job` + pure digits pass.
+#[test]
+fn m0303_fires_on_unparseable_mission_id() {
+    let body = "\
+WifMissionData.tMissionData[\"AbTest_C_Visible\"] = { sFactionId = \"Pmc\" }
+WifMissionData.tMissionData.Pmc01Repeat = { sFactionId = \"Pmc\" }
+WifMissionData.tMissionData[\"PmcCon001\"] = { sFactionId = \"Pmc\" }
+WifMissionData.tMissionData.AbtJob017 = { sFactionId = \"All\" }
+";
+    let root = scratch("m0303_fires", &[("src/append.lua", body)]);
+    let m = shipment_with(
+        "  - kind: patch_lua
+    target: wifpmcinterior
+    append: src/append.lua
+",
+    );
+    let diags = lint::lint(&m, Some(&root), None);
+    let found: Vec<_> = diags.iter().filter(|d| d.rule.code == "M0303").collect();
+    assert_eq!(
+        found.len(),
+        2,
+        "two bad keys; the shipped-shape ones must stay silent: {diags:?}"
+    );
+    assert!(
+        found.iter().any(|d| d.message.contains("AbTest_C_Visible")),
+        "literal-string key is surfaced: {found:?}"
+    );
+    assert!(
+        found.iter().any(|d| d.message.contains("Pmc01Repeat")),
+        "dot-ident key is surfaced: {found:?}"
+    );
+    assert!(lint::blocks_build(&diags));
+}
+
+/// Dynamic keys (`tMissionData[e.name] = ...` inside a loop) are invisible to the static scan
+/// by design — M0303 is best-effort for the common literal-key pattern. Equality comparisons
+/// (`if tMissionData.X == nil then`) and reads do not fire either.
+#[test]
+fn m0303_is_quiet_on_dynamic_keys_and_reads() {
+    let body = "\
+for _, e in ipairs(entries) do
+  WifMissionData.tMissionData[e.name] = e.row
+end
+if WifMissionData.tMissionData[\"BadNameX\"] == nil then return end
+local row = WifMissionData.tMissionData.BadNameX
+";
+    let root = scratch("m0303_quiet", &[("src/append.lua", body)]);
+    let m = shipment_with(
+        "  - kind: patch_lua
+    target: wifpmcinterior
+    append: src/append.lua
+",
+    );
+    let diags = lint::lint(&m, Some(&root), None);
+    assert!(
+        !diags.iter().any(|d| d.rule.code == "M0303"),
+        "dynamic keys and reads must stay silent: {diags:?}"
+    );
+}
+
 /// Every new rule is registered, so `qm rules` can list them.
 #[test]
 fn the_lua_source_rules_are_registered() {

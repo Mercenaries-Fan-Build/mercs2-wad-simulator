@@ -287,6 +287,21 @@ pub const M0302_GLOBAL_SHADOWING: Rule = Rule {
     doc: "docs/modding/lua_engine_seam_hardening.md",
 };
 
+/// A Shipment writes a row into `WifMissionData.tMissionData` whose key does not match the shipped
+/// `<Faction3><Con|Job><NN+>` naming shape (e.g. `PmcCon001`, `OilJob004`). The instant the player
+/// selects such a briefing from a starter root menu, `MrxUtil.ExplodeMissionName` returns
+/// `nNumber=nil`, and `GetSpielFileName` at
+/// [`mrxbriefing.lua:2849`](../../tools/wad_simulator/workshop_data/lua/resident/mrxbriefing.lua#L2849)
+/// unconditionally does `string.format("%02d", nil)` → runtime error. The error propagates out of
+/// the dialog-selection handler before `_End` reaches `_Fade(false, _EndBegin)`; the UI tears
+/// down partially (`_ClientMenuBox` stays `true`, briefing camera stays locked). See F12 in
+/// `docs/modding/lua_engine_seam_hardening.md`.
+pub const M0303_MISSION_ID_UNPARSEABLE: Rule = Rule {
+    code: "M0303",
+    title: "tMissionData row key is not in the <Faction3><Con|Job><NN+> shape",
+    doc: "docs/modding/lua_engine_seam_hardening.md",
+};
+
 /// Needs the game stack — see [`game_checks`], not [`lint`].
 pub const M0007_MULTI_RUNG_REPLACE: Rule = Rule {
     code: "M0007",
@@ -328,6 +343,7 @@ pub const RULES: &[Rule] = &[
     M0300_MISSION_ADD_SCRIPT_NO_INHERIT,
     M0301_BARE_EVENT_CREATE,
     M0302_GLOBAL_SHADOWING,
+    M0303_MISSION_ID_UNPARSEABLE,
 ];
 
 // --- Known, NOT yet implemented -------------------------------------------
@@ -1837,9 +1853,152 @@ fn lua_source_checks(manifest: &Manifest, root: &Path) -> Vec<Diagnostic> {
                 fix: None,
             });
         }
+
+        for (line, col, id) in scan_mission_data_assigns(&src) {
+            if is_parseable_mission_id(&id) {
+                continue;
+            }
+            out.push(Diagnostic {
+                rule: M0303_MISSION_ID_UNPARSEABLE,
+                severity: Severity::Error,
+                message: format!(
+                    "`WifMissionData.tMissionData` row with key `{id}` at {rel}:{line}:{col} in \
+                     this {kind_label} contribution. The briefing dispatcher parses mission ids \
+                     via `MrxUtil.ExplodeMissionName` as `<Faction3><Con|Job><NN+digits>` — a key \
+                     that does not match this shape wedges the briefing-dialog teardown the \
+                     instant the player selects it from a starter root menu (`GetSpielFileName` \
+                     at `mrxbriefing.lua:2849` throws on `string.format(\"%02d\", nil)`). \
+                     Rename the row to a parseable id (e.g. `AbtCon001`, `MyJob017`) and keep \
+                     the human-readable label in `sTitle`.",
+                    rel = rel.display(),
+                ),
+                at: Some(index),
+                fix: None,
+            });
+        }
     }
 
     out
+}
+
+/// Find every statically-visible `WifMissionData.tMissionData[<literal>] = ` or
+/// `WifMissionData.tMissionData.<ident> = ` assignment and return `(line, col, mission_id)` for
+/// each. Dynamic keys (`tMissionData[e.name] = ...` inside a loop over a table of names) are
+/// invisible to this scan — it is a best-effort catch of the common literal-key pattern.
+fn scan_mission_data_assigns(source: &str) -> Vec<(usize, usize, String)> {
+    const PREFIX: &[u8] = b"WifMissionData.tMissionData";
+    let mut out = Vec::new();
+    let bytes = source.as_bytes();
+    let mut i = 0;
+    while i + PREFIX.len() < bytes.len() {
+        if &bytes[i..i + PREFIX.len()] != PREFIX {
+            i += 1;
+            continue;
+        }
+        // Prior byte must not continue an identifier.
+        if i > 0 {
+            let prev = bytes[i - 1];
+            if prev == b'_' || prev.is_ascii_alphanumeric() {
+                i += 1;
+                continue;
+            }
+        }
+        let mut j = i + PREFIX.len();
+        // Skip whitespace between `tMissionData` and the index/accessor.
+        while j < bytes.len() && matches!(bytes[j], b' ' | b'\t') {
+            j += 1;
+        }
+        let (id_opt, key_end) = match bytes.get(j) {
+            Some(b'[') => extract_literal_bracket_key(bytes, j + 1),
+            Some(b'.') => extract_dot_ident_key(bytes, j + 1),
+            _ => {
+                i = j.max(i + 1);
+                continue;
+            }
+        };
+        let Some(id) = id_opt else {
+            i = j.max(i + 1);
+            continue;
+        };
+        // After the key, skip whitespace and require a bare `=` (not `==`).
+        let mut k = key_end;
+        while k < bytes.len() && matches!(bytes[k], b' ' | b'\t') {
+            k += 1;
+        }
+        if k < bytes.len() && bytes[k] == b'=' && bytes.get(k + 1) != Some(&b'=') {
+            let (line, col) = line_col(source, i);
+            out.push((line, col, id));
+        }
+        i = k.max(i + 1);
+    }
+    out
+}
+
+/// After the opening `[`, pull a single quoted string literal (`"id"` or `'id'`) and return the
+/// unquoted body plus the index just after the closing `]`. Returns `(None, idx)` if the bracket
+/// contains anything that is not a plain quoted string.
+fn extract_literal_bracket_key(bytes: &[u8], start: usize) -> (Option<String>, usize) {
+    let mut j = start;
+    while j < bytes.len() && matches!(bytes[j], b' ' | b'\t') {
+        j += 1;
+    }
+    let quote = match bytes.get(j) {
+        Some(&q) if q == b'"' || q == b'\'' => q,
+        _ => return (None, j),
+    };
+    j += 1;
+    let id_start = j;
+    while j < bytes.len() && bytes[j] != quote {
+        if bytes[j] == b'\\' {
+            // Any escape disqualifies — we are only interested in plain names.
+            return (None, j);
+        }
+        j += 1;
+    }
+    if j >= bytes.len() {
+        return (None, j);
+    }
+    let id = std::str::from_utf8(&bytes[id_start..j]).ok().map(String::from);
+    j += 1; // past closing quote
+    while j < bytes.len() && matches!(bytes[j], b' ' | b'\t') {
+        j += 1;
+    }
+    if bytes.get(j) != Some(&b']') {
+        return (None, j);
+    }
+    (id, j + 1)
+}
+
+/// After the `.`, pull a Lua identifier and return it plus the index just after it.
+fn extract_dot_ident_key(bytes: &[u8], start: usize) -> (Option<String>, usize) {
+    let mut j = start;
+    while j < bytes.len() && (bytes[j] == b'_' || bytes[j].is_ascii_alphanumeric()) {
+        j += 1;
+    }
+    if j == start {
+        return (None, j);
+    }
+    (
+        std::str::from_utf8(&bytes[start..j]).ok().map(String::from),
+        j,
+    )
+}
+
+/// Does this mission id parse through `MrxUtil.ExplodeMissionName` into a numeric index? The
+/// engine takes bytes 1–3 as the faction, 4–6 as `Con`|`Job`, 7–end as the index — which must
+/// be convertible via `tonumber`. For the strict literal patterns this scanner surfaces, that is
+/// 3 arbitrary chars + exactly `Con` or `Job` + 1+ ascii digits.
+fn is_parseable_mission_id(id: &str) -> bool {
+    let b = id.as_bytes();
+    if b.len() < 7 {
+        return false;
+    }
+    let kind = &b[3..6];
+    if kind != b"Con" && kind != b"Job" {
+        return false;
+    }
+    let tail = &b[6..];
+    !tail.is_empty() && tail.iter().all(|c| c.is_ascii_digit())
 }
 
 /// Cheap edit-distance-1-ish suggestion for a misspelled key. Deliberately conservative: it only
