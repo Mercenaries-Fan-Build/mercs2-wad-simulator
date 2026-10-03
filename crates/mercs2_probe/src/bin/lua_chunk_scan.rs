@@ -76,6 +76,13 @@ fn main() {
             data.len(),
             hits.len()
         );
+        let dump_raw = args.iter().any(|a| a == "--dump-raw");
+        if dump_raw {
+            let fname = format!("block_{:05}_raw.bin", bi);
+            let path = dir.join(&fname);
+            std::fs::write(&path, &data).expect("write raw");
+            eprintln!("  wrote {} ({} B)", fname, data.len());
+        }
         for (idx, h) in hits.iter().enumerate() {
             let end = hits.get(idx + 1).map(|n| n.offset).unwrap_or(data.len());
             let bytes = &data[h.offset..end];
