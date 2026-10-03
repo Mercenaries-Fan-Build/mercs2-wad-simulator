@@ -1,10 +1,13 @@
-//! Xbox 360 wavebank → PC wavebank transcoder.
+//! Console (Xbox 360 / PS3) wavebank → PC wavebank transcoder.
 //!
-//! See `docs/_xbox_wavebank_container.md` for the Xbox body layout and
-//! `mercs2_audio::wave` for the PC embedded wavebank layout. Embedded PC
-//! clips are interleaved little-endian PCM16 with `format = 0x02` and
-//! `data_size = frames × channels × 2`; XMA/XMA2 are decoded by `ffmpeg`,
-//! Xbox-PCM is a BE→LE byte swap.
+//! See `docs/_wavebank_container.md` for the console-side body layout
+//! (both platforms share the same wavebank structure; the codec byte at
+//! record `+0x06` picks the clip format) and `mercs2_audio::wave` for
+//! the PC embedded wavebank layout. Embedded PC clips are interleaved
+//! little-endian PCM16 with `format = 0x02` and
+//! `data_size = frames × channels × 2`. XMA (`0x01`), XMA2 (`0x05`,
+//! Xbox) and MP3 (`0x0C`, PS3) are decoded by ffmpeg; PCM (`0x00`) is a
+//! BE→LE byte swap.
 
 use std::process::Command;
 
@@ -31,6 +34,16 @@ pub const TABLE_VERSION: u32 = 0x1D;
 pub const CODEC_PCM: u8 = 0x00;
 pub const CODEC_XMA: u8 = 0x01;
 pub const CODEC_XMA2: u8 = 0x05;
+/// PS3 embedded wavebank codec byte: raw MP3 (MPEG-1 / MPEG-2.5 Layer III)
+/// bitstream. PROVEN by byte-level inspection of two retail PS3 `vz.wad`
+/// wavebanks (`wpn_designator_flare` block 4243, `wpn_sniperrifle` block
+/// 2561): every record whose `+0x06` byte equals `0x0C` begins its clip
+/// blob with a valid 11-bit MPEG frame sync (`0x7FF`), Layer-III header,
+/// and the frame-count arithmetic `n_frames * 1152 == decoded_samples`
+/// holds exactly (49 / 46 frames for the two `0x9996B5A6` clips, 12/12
+/// for the sniper bank). ffmpeg's native `mp3float` decoder consumes
+/// the raw blob with no RIFF wrapper (see `transcode_mp3_raw_to_pcm16`).
+pub const CODEC_MP3: u8 = 0x0C;
 
 /// PC embedded wavebank record `+0x06` byte: 2 bytes per PCM16 sample.
 pub const PC_FORMAT_PCM16: u8 = 0x02;
@@ -403,10 +416,10 @@ pub fn transcode_xma_to_pcm16(xma: &[u8], channels: usize) -> Result<Vec<u8>, Au
 }
 
 /// Wrap a raw XMA2 bytestream (packed 2048-byte packets, no RIFF — the shape
-/// retail Xbox wavebanks carry; see `docs/_xbox_wavebank_container.md` §6
+/// retail Xbox wavebanks carry; see `docs/_wavebank_container.md` §6
 /// and §8) in a RIFF / `XMA2WAVEFORMATEX` container that ffmpeg accepts.
 ///
-/// Field choices follow the recipe in `_xbox_wavebank_container.md` §8:
+/// Field choices follow the recipe in `_wavebank_container.md` §8:
 /// `wFormatTag = 0x0166`, `nBlockAlign = 2048`, `cbSize = 34` with the
 /// 34-byte `XMA2WAVEFORMATEX` tail (`NumStreams = 1`, `ChannelMask` =
 /// `SPEAKER_FRONT_CENTER` for mono / `FL|FR` for stereo, `SamplesEncoded =
@@ -493,15 +506,38 @@ pub fn transcode_xma2_raw_to_pcm16(
     ffmpeg_decode_to_pcm16(&riff, channels, "input.xma")
 }
 
-/// Common ffmpeg invocation: write the wrapped bytestream to a temp file,
-/// decode to PCM16 LE WAV, return the raw interleaved PCM16 bytes (what
-/// the PC embedded wavebank path writes). Shared by XMA (0x01) and XMA2
-/// (0x05). Uses [`find_ffmpeg`] to locate the binary.
+/// Decode a raw MP3 bytestream (as retail PS3 wavebanks ship it) to
+/// interleaved little-endian PCM16 bytes.
+///
+/// MP3 is self-describing — every frame carries its own sample-rate,
+/// bitrate and channel-mode header — so no RIFF/WAVEFORMATEX wrapper is
+/// built; the raw blob is handed straight to ffmpeg via
+/// [`ffmpeg_decode_to_pcm16`]. Fails loudly if ffmpeg cannot be
+/// resolved — never writes a silent-partial clip. The record's
+/// `decoded_samples` and `sample_rate` are forwarded only so the caller
+/// can trim/pad the result to the PC parser's exact
+/// `frames * channels * 2` size relation; they do not influence the
+/// decode itself.
+pub fn transcode_mp3_raw_to_pcm16(
+    mp3_raw: &[u8],
+    channels: usize,
+    _sample_rate: u32,
+    _decoded_samples_per_channel: u32,
+) -> Result<Vec<u8>, AudioError> {
+    ffmpeg_decode_to_pcm16(mp3_raw, channels, "input.mp3")
+}
+
+/// Common ffmpeg invocation: write the bytestream to a temp file whose
+/// name hints at the container (`in_name` — ffmpeg auto-detects from the
+/// extension), decode to PCM16 LE WAV, return the raw interleaved PCM16
+/// bytes (what the PC embedded wavebank path writes). Shared by XMA
+/// (0x01, raw), XMA2 (0x05, in a caller-built RIFF container) and MP3
+/// (0x0C, raw). Uses [`find_ffmpeg`] to locate the binary.
 fn ffmpeg_decode_to_pcm16(bytes: &[u8], channels: usize, in_name: &str) -> Result<Vec<u8>, AudioError> {
     let ffmpeg = find_ffmpeg()?;
     static CTR: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let n = CTR.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let dir = std::env::temp_dir().join(format!("mercs2_xma_{}_{n}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("mercs2_ffmpeg_{}_{n}", std::process::id()));
     std::fs::create_dir_all(&dir).map_err(|e| AudioError(e.to_string()))?;
     let inp = dir.join(in_name);
     let wav_out = dir.join("decoded.wav");
@@ -528,7 +564,7 @@ fn ffmpeg_decode_to_pcm16(bytes: &[u8], channels: usize, in_name: &str) -> Resul
         Ok(o) => {
             let err = String::from_utf8_lossy(if o.stderr.is_empty() { &o.stdout } else { &o.stderr });
             return Err(AudioError(format!(
-                "ffmpeg XMA decode failed (exit {:?}, ffmpeg={}): {}",
+                "ffmpeg decode failed (in={in_name}, exit {:?}, ffmpeg={}): {}",
                 o.status.code(),
                 ffmpeg.display(),
                 err.chars().take(500).collect::<String>()
@@ -612,6 +648,7 @@ pub fn normalize_embedded_wavebank_clip(
         CODEC_PCM => Ok(swap_pcm16_be_to_le(clip)),
         CODEC_XMA => transcode_xma_to_pcm16(clip, ch),
         CODEC_XMA2 => transcode_xma2_raw_to_pcm16(clip, ch, sample_rate, decoded_samples_per_channel),
+        CODEC_MP3 => transcode_mp3_raw_to_pcm16(clip, ch, sample_rate, decoded_samples_per_channel),
         other => Err(AudioError(format!(
             "no embedded clip transcode for codec 0x{other:02X} ({} bytes)",
             clip.len()
@@ -658,7 +695,7 @@ fn read_u32_le(b: &[u8], off: usize) -> u32 {
 }
 
 /// One 36-byte Xbox wavebank record (BE), per
-/// `docs/_xbox_wavebank_container.md` §"Record layout".
+/// `docs/_wavebank_container.md` §"Record layout".
 ///
 /// ```text
 /// +0x00  u32 BE   clip_hash
@@ -714,7 +751,7 @@ impl WbRecord {
 
 /// Convert a wavebank body from Xbox BE to the PC LE layout.
 ///
-/// Byte layout per `docs/_xbox_wavebank_container.md` §"Wavebank body":
+/// Byte layout per `docs/_wavebank_container.md` §"Wavebank body":
 /// * `+0x00 u32 LE` version (`TABLE_VERSION` = 0x1D).
 /// * `+0x04 u32 BE` bank_hash.
 /// * `+0x08 u16 BE` record count.
@@ -1102,6 +1139,126 @@ mod tests {
         let expected = [
             (0x8E16_4121u32, 55_296u32),
             (0x0C0E_B8B6u32, 51_968u32),
+        ];
+        for (rec, (xclip, xframes)) in file.records.iter().zip(expected.iter()) {
+            assert_eq!(rec.clip_hash, *xclip);
+            assert_eq!(rec.channels, 1);
+            assert_eq!(rec.format, mercs2_audio::wave::BYTES_PER_SAMPLE_PCM16);
+            assert_eq!(rec.sample_rate, 44100);
+            assert_eq!(rec.frames, *xframes);
+            let bytes = match &rec.data {
+                mercs2_audio::wave::WaveData::Embedded(b) => b,
+                mercs2_audio::wave::WaveData::Streamed { .. } => {
+                    panic!("embedded fixture produced a streamed record")
+                }
+            };
+            assert_eq!(bytes.len(), *xframes as usize * 2);
+            assert!(
+                bytes.iter().any(|&b| b != 0),
+                "ffmpeg-decoded PCM16 should not be all-zero"
+            );
+        }
+    }
+
+    const RETAIL_FIXTURE_PS3: &[u8] =
+        include_bytes!("../../tests/fixtures/ps3_wavebank_emb_block4243_be.bin");
+    const RETAIL_FIXTURE_PS3_SHA256: &str =
+        "e9d8967c91c953700a327d9e307eacf7b994cc5f093ebd6b7937cae075fc66a1";
+
+    fn assert_fixture_provenance_ps3() {
+        assert_eq!(sha256_hex(RETAIL_FIXTURE_PS3), RETAIL_FIXTURE_PS3_SHA256);
+        assert_eq!(RETAIL_FIXTURE_PS3.len(), 0x6F80);
+    }
+
+    /// Parse the retail-PS3 `0x9996B5A6` wavebank body (block 4243 of
+    /// `game-files/ps3-VZ.WAD`, same bank name as the Xbox block 3322
+    /// fixture, 2 MP3 mono clips at 44100 Hz, 0x6F80 bytes) and confirm
+    /// every header + record field decodes to its retail value. The two
+    /// embedded blobs are 4-byte-aligned raw MP3 bitstreams (no 2048-byte
+    /// XMA2 alignment on PS3) and their first 4 bytes carry a valid MPEG
+    /// Layer-III frame sync (`0x7FF`, Layer III, protection = 0).
+    #[test]
+    fn retail_ps3_wavebank_block_4243_parses() {
+        assert_fixture_provenance_ps3();
+        let b = RETAIL_FIXTURE_PS3;
+
+        assert_eq!(read_u32_le(b, 0), TABLE_VERSION);
+        assert_eq!(read_u32_be(b, 4), 0x9996_B5A6);
+        assert_eq!(read_u16_be(b, 8), 2);
+        assert_eq!(b[0x0A], 0);
+        assert_eq!(read_u32_be(b, 12), 0x9996_B5A6);
+        let records_off = read_u32_be(b, 16) as usize;
+        assert_eq!(records_off, 24);
+
+        // (clip_hash, data_size, decoded_samples, data_offset, abs_blob_start)
+        let expected = [
+            (0x8E16_4121u32, 0x373Du32, 56_448u32, 0x68u32, 0x80usize),
+            (0x0C0E_B8B6u32, 0x3706u32, 52_992u32, 0x37C4u32, 0x3800usize),
+        ];
+        for (i, (xclip, xsize, xframes, xdoff, xabs)) in expected.iter().enumerate() {
+            let rec_abs = records_off + i * WAVEBANK_RECORD_SIZE;
+            let rec = WbRecord::read(b, rec_abs).unwrap();
+            assert_eq!(rec.clip_hash, *xclip);
+            assert_eq!(rec.channels(), 1);
+            assert_eq!(rec.codec(), CODEC_MP3);
+            assert_eq!(rec.sample_rate, 44100);
+            assert_eq!(rec.data_size, *xsize);
+            assert_eq!(rec.decoded_samples, *xframes);
+            assert_eq!(rec.word_1c, 0);
+            assert_eq!(rec.data_offset, *xdoff);
+            let blob_abs = rec_abs + rec.data_offset as usize;
+            assert_eq!(blob_abs, *xabs);
+            assert!(blob_abs + rec.data_size as usize <= b.len());
+            // MP3 blobs are only 4-byte aligned on PS3 (no 2048 packet alignment).
+            assert_eq!(blob_abs % 4, 0);
+
+            // First 4 bytes = MPEG Layer-III frame header: 11-bit sync, Layer III, mono.
+            let hdr = read_u32_be(b, blob_abs);
+            let sync = (hdr >> 21) & 0x7FF;
+            let layer = (hdr >> 17) & 0x3;
+            let crc_bit = (hdr >> 16) & 0x1;
+            let channel_mode = (hdr >> 6) & 0x3;
+            assert_eq!(sync, 0x7FF, "clip {i}: not an MPEG frame");
+            assert_eq!(layer, 1, "clip {i}: not Layer III");
+            assert_eq!(crc_bit, 0, "clip {i}: CRC-protection bit expected 0");
+            assert_eq!(channel_mode, 3, "clip {i}: expected mono (channel_mode 3)");
+        }
+    }
+
+    /// End-to-end: `convert_wavebank_data` on the retail PS3 fixture must
+    /// produce a PC body that `mercs2_audio::wave::WavebankFile::parse`
+    /// accepts, with the two clips’ sample counts preserved and
+    /// non-silent PCM16 payloads from ffmpeg’s native MP3 decoder.
+    #[test]
+    fn retail_ps3_wavebank_block_4243_roundtrips_through_pc_parser() {
+        assert_fixture_provenance_ps3();
+        if find_ffmpeg().is_err() {
+            panic!(
+                "ffmpeg not resolvable — set MERCS2_FFMPEG or install under tools/ffmpeg/bin/"
+            );
+        }
+
+        let pc = convert_wavebank_data(RETAIL_FIXTURE_PS3).expect("PS3→PC convert succeeds");
+
+        assert_eq!(pc.len() % mercs2_audio::wave::BLOB_ALIGN, 0);
+        assert_eq!(
+            u32::from_le_bytes(pc[0..4].try_into().unwrap()),
+            mercs2_audio::wave::TABLE_VERSION
+        );
+        assert_eq!(
+            u32::from_le_bytes(pc[4..8].try_into().unwrap()),
+            0x9996_B5A6
+        );
+        assert_eq!(u16::from_le_bytes(pc[8..10].try_into().unwrap()), 2);
+        assert_eq!(u16::from_le_bytes(pc[10..12].try_into().unwrap()), 0);
+
+        let file = mercs2_audio::wave::WavebankFile::parse(&pc).expect("PC parse accepts output");
+        assert_eq!(file.bank_hash, 0x9996_B5A6);
+        assert_eq!(file.records.len(), 2);
+
+        let expected = [
+            (0x8E16_4121u32, 56_448u32),
+            (0x0C0E_B8B6u32, 52_992u32),
         ];
         for (rec, (xclip, xframes)) in file.records.iter().zip(expected.iter()) {
             assert_eq!(rec.clip_hash, *xclip);
