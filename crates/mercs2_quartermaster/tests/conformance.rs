@@ -139,6 +139,13 @@ contributions:
     layer: vz_state_pmccon004
     edits: src/world.yaml
 
+  - kind: add_tiny_geometry
+    layer: vz_state_mar_city_pristine
+    cell: { row: 28, col: 32 }
+    key: 1327103
+    objects: ["0x00097FF3", mar_city_tower]
+    model: src/tiny/tgr28_tgc32.glb
+
   - kind: activate_layer
     layer: vz_state_pmccon004_destroyed
     replaces:
@@ -351,6 +358,14 @@ const JSON: &str = r#"
       "kind": "edit_world",
       "layer": "vz_state_pmccon004",
       "edits": "src/world.yaml"
+    },
+    {
+      "kind": "add_tiny_geometry",
+      "layer": "vz_state_mar_city_pristine",
+      "cell": { "row": 28, "col": 32 },
+      "key": 1327103,
+      "objects": ["0x00097FF3", "mar_city_tower"],
+      "model": "src/tiny/tgr28_tgc32.glb"
     },
     {
       "kind": "activate_layer",
@@ -598,6 +613,14 @@ layer = "vz_state_pmccon004"
 edits = "src/world.yaml"
 
 [[contributions]]
+kind = "add_tiny_geometry"
+layer = "vz_state_mar_city_pristine"
+cell = { row = 28, col = 32 }
+key = 1327103
+objects = ["0x00097FF3", "mar_city_tower"]
+model = "src/tiny/tgr28_tgc32.glb"
+
+[[contributions]]
 kind = "activate_layer"
 layer = "vz_state_pmccon004_destroyed"
 replaces = ["vz_state_pmccon004_pristine"]
@@ -772,6 +795,7 @@ fn toml_carries_the_kind_tag_for_every_v1_kind() {
             "replace_sound_cue",
             "edit_state_machine",
             "edit_world",
+            "add_tiny_geometry",
             "activate_layer",
             "edit_stringdb",
             "add_language",
