@@ -974,11 +974,39 @@ impl WorldEntity {
         bits
     }
 
+    /// The group a new record of `class` goes in: its first group. `FUN_00654940` reads every
+    /// group with the deserializer its class name selects and inserts each key with the upsert
+    /// `FUN_0064A600`, so the group a record sits in does not change what the engine builds. Every
+    /// group of the class must carry the same schema.
+    pub fn append_group(&self, class: &str) -> Res<usize> {
+        let idx: Vec<usize> = self
+            .components
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| c.class == class)
+            .map(|(i, _)| i)
+            .collect();
+        let first = *idx
+            .first()
+            .ok_or_else(|| format!("class {class} has no component group in the container"))?;
+        let schm = self.components[first].schema.to_schm_body();
+        for &i in &idx[1..] {
+            let c = &self.components[i];
+            if c.schema.to_schm_body() != schm || c.version != self.components[first].version {
+                return Err(format!(
+                    "class {class}: its component groups differ in schema or version"
+                ));
+            }
+        }
+        Ok(first)
+    }
+
     /// Append one template. Its key must carry the template bit and be unused, its name must not
-    /// hash like an existing name, every class must exist exactly once in the container (and not be
-    /// `Name`), and every value must be declared. The template gets a `Name` record, one new record
-    /// per component at the end of its class, its key in `UNIQ`, and the `flgs` bits its classes
-    /// derive.
+    /// hash like an existing name, every class must exist in the container (and not be `Name`),
+    /// and every value must be declared. A class may be declared more than once, one record each,
+    /// as retail templates hold several records of one class (`Label`). The template gets a `Name`
+    /// record, one new record per declared component at the end of its class's first group
+    /// ([`Self::append_group`]), its key in `UNIQ`, and the `flgs` bits its classes derive.
     pub fn append_template(&mut self, t: &TemplateDecl) -> Res<()> {
         if t.key & TEMPLATE_KEY_BIT == 0 {
             return Err(format!(
@@ -1006,31 +1034,9 @@ impl WorldEntity {
         if !self.flags.windows(2).all(|w| w[0].key < w[1].key) {
             return Err("flgs is not strictly ascending by key".into());
         }
-        let mut seen = std::collections::BTreeSet::new();
         let mut planned = Vec::new();
         for d in &t.components {
-            if !seen.insert(d.class.as_str()) {
-                return Err(format!("class {} is declared twice", d.class));
-            }
-            let idx: Vec<usize> = self
-                .components
-                .iter()
-                .enumerate()
-                .filter(|(_, c)| c.class == d.class)
-                .map(|(i, _)| i)
-                .collect();
-            let i = match idx.as_slice() {
-                [i] => *i,
-                [] => return Err(format!("class {} has no component group in the container", d.class)),
-                _ => {
-                    return Err(format!(
-                        "class {} has {} component groups; which one a new record belongs in is \
-                         not established",
-                        d.class,
-                        idx.len()
-                    ))
-                }
-            };
+            let i = self.append_group(&d.class)?;
             if self.components[i].layout == Layout::Name {
                 return Err("Name is written from the template name, not declared".into());
             }
@@ -1241,6 +1247,32 @@ mod tests {
         assert!(we.append_template(&t).unwrap_err().contains("no component group"));
         t.key = 0x0000_0010;
         assert!(we.append_template(&t).unwrap_err().contains("bit 31"));
+    }
+
+    #[test]
+    fn a_class_declared_twice_appends_two_records() {
+        let mut we = WorldEntity::parse(&sample()).unwrap();
+        let rec = |hp: f32| ComponentDecl {
+            class: "Health".into(),
+            values: vec![
+                Value::Field(FieldValue::F32(hp)),
+                Value::Field(FieldValue::Bits(0)),
+                Value::Field(FieldValue::Bits(0)),
+                Value::Field(FieldValue::Bits(0)),
+            ],
+        };
+        let t = TemplateDecl {
+            name: "two".into(),
+            key: 0x8000_0020,
+            name_flag: 0,
+            components: vec![rec(1.0), rec(2.0)],
+        };
+        we.append_template(&t).unwrap();
+        let back = WorldEntity::parse(&we.write().unwrap()).unwrap();
+        let mine: Vec<_> =
+            back.components[0].records.iter().filter(|r| r.keys == [0x8000_0020]).collect();
+        assert_eq!(mine.len(), 2);
+        assert_eq!(back.flags.iter().find(|f| f.key == 0x8000_0020).unwrap().bits, vec![0]);
     }
 
     #[test]
