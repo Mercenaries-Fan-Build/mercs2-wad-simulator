@@ -68,6 +68,10 @@ name = "placement_writer"
 required-features = ["retail"]
 
 [[test]]
+name = "placement_in_place_retail"
+required-features = ["retail"]
+
+[[test]]
 name = "scripts_block_survey"
 required-features = ["retail"]
 
