@@ -734,6 +734,15 @@ pub struct ShaderClass {
     pub shader_low: ShaderSource,
 }
 
+/// A cell of the 40 × 40 grid of 200 m cells TINY stand-ins are placed on: `col` =
+/// `floor((x + 4000) / 200)`, `row` = `floor((z + 4000) / 200)`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TinyCell {
+    pub row: u32,
+    pub col: u32,
+}
+
 /// One ordered, internally-tagged list. Cross-kind apply order within a Shipment is preserved.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
@@ -1143,6 +1152,26 @@ pub enum Contribution {
     /// `qm extract-world`). Emitted as an overlay that shadows the base layer block; the
     /// `placement::patch_*` writer is proven byte-identical on a no-op across 747 retail layers.
     EditWorld { layer: String, edits: PathBuf },
+    /// Data. A TINY far-distance stand-in: one model drawn in place of the world objects of one
+    /// 200 m grid cell, each object's part drawn while the object is intact (role `intact`) or
+    /// ruined (role `ruined`), and the `TinyGeometryObject` placement that loads it.
+    ///
+    /// The model is named `<layer>_tinygeometry_tgr<row>_tgc<col>_0x<key>`; the placement, keyed
+    /// `key`, goes into `layer` at the cell's centre. Every primitive of `model` declares
+    /// `extras.tiny_role` and every vertex a `_TINY_SLOT`, an index into `objects`.
+    AddTinyGeometry {
+        /// The layer the placement goes into, by name (`vz_state_mar_city_pristine`).
+        layer: String,
+        /// The 200 m grid cell: `row` from z, `col` from x, each 0..40.
+        cell: TinyCell,
+        /// The placement's entity key (GUID). No layer of the game may already use it.
+        key: u32,
+        /// The world objects the stand-in draws, each a bare `0xGUID` or the name of a placement in
+        /// `layer`. `_TINY_SLOT` indexes this list.
+        objects: Vec<String>,
+        /// `src/`-relative `.glb` / `.gltf`.
+        model: PathBuf,
+    },
     /// Script. Turn a normally-hidden world-state layer ON — the PERMANENT, whole-mission
     /// counterpart to [`Contribution::EditWorld`]'s in-place placement edits.
     ///
@@ -1418,6 +1447,7 @@ impl Contribution {
         "replace_terrain_cell",
         "edit_state_machine",
         "edit_world",
+        "add_tiny_geometry",
         "activate_layer",
         "edit_stringdb",
         "add_stringdb_keys",
@@ -1475,6 +1505,7 @@ impl Contribution {
             Contribution::ReplaceTerrainCell { .. } => "replace_terrain_cell",
             Contribution::EditStateMachine { .. } => "edit_state_machine",
             Contribution::EditWorld { .. } => "edit_world",
+            Contribution::AddTinyGeometry { .. } => "add_tiny_geometry",
             Contribution::ActivateLayer { .. } => "activate_layer",
             Contribution::EditStringDb { .. } => "edit_stringdb",
             Contribution::AddStringDbKeys { .. } => "add_stringdb_keys",
