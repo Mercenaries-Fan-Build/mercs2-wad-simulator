@@ -53,6 +53,8 @@
 //! - [`terrainmesh`] — the 400 hi-res terrain cells (`0x7C569307`): byte-exact decode/encode,
 //!   vertical displacement with normal/tangent/bounds recompute, triangle-strip codec, collision
 //!   rebuild; [`scrub`] — the ground-cover instances beside them, kept on the edited ground.
+//! - [`tiny_model`] — the TINY far-distance stand-in model container: full decode, byte-identical
+//!   encode.
 //! - [`orchestrator`], [`fxdict`], [`atmosphere`], [`gfx`] — destruction state machines; FX
 //!   dictionaries; the `Graphics.Atmosphere.*` sky/HDR parameter model; Scaleform GFx/SWF.
 //! - [`save`], [`save_write`] — the PC `.profile` save (13,404 bytes, zlib Lua payload at `0x468`).
@@ -144,6 +146,7 @@ pub mod terrainmesh;
 pub mod texsize;
 pub mod texture;
 pub mod texture_encode;
+pub mod tiny_model;
 pub mod be_to_le;
 pub mod lua_scan;
 pub mod lzx;
