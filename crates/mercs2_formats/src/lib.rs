@@ -158,3 +158,4 @@ pub mod ucfx;
 pub mod veg;
 pub mod world;
 pub mod world_index;
+pub mod worldentity;
