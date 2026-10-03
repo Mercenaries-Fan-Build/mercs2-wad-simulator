@@ -291,8 +291,8 @@ pub struct SourcePrimitive {
 /// material, for a model built without a donor (the TINY far-distance stand-in).
 ///
 /// Positions take their node's transform. That transform must be a rigid motion (a rotation and a
-/// translation): normals are rotated with it and stay the vectors the file stores, so a scale is
-/// refused rather than applied to positions alone. A primitive of any other mode is an error.
+/// translation): normals turn with it and keep the lengths the file stores, which a scale would
+/// change. A transform with a scale or shear is an error, as is a primitive of any other mode.
 pub fn source_from_gltf(path: &Path) -> Result<(Vec<SourcePrimitive>, Vec<SourceMaterial>), String> {
     let (doc, buffers) = open_gltf(path)?;
     let materials = doc
