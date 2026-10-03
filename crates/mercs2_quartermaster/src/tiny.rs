@@ -13,7 +13,7 @@
 //! `≡ 3 (mod 4)` is kept only when twice its own state minus the state of the slot two below is 1
 //! (intact) or 3 (ruined), so it disappears or shows in the wrong role whenever the two objects'
 //! states differ. [`plan_slots`] gives the objects the other slots and fills each skipped one with
-//! a GUID no object has.
+//! a GUID none of the stand-in's objects has.
 //!
 //! **The list is searched.** The engine finds an object's slot by binary search over the list
 //! (`0x004ADF40`, `0x00515BA0`, the relocated bodies of `0x0050F530` and `0x0050F590`), so it is
@@ -161,10 +161,115 @@ pub struct SlotPlan {
     pub slot_of: Vec<u16>,
 }
 
+/// One slot of a layout being planned.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Slot {
+    Object(u32),
+    /// A filler with a GUID of its own, strictly between `lo` (the object before it, if any) and
+    /// `hi` (the object after it).
+    Between { lo: Option<u32>, hi: u32 },
+    /// A filler between two consecutive GUIDs: it repeats one of them.
+    Repeat { left: u32, right: u32 },
+}
+
+/// The slots the search for slot `target` of a list of `n` probes before it, by index: the slots
+/// above it in the search's tree. Of two neighbouring slots holding one GUID, the search for that
+/// GUID stops at the one it probes first, the one above the other.
+fn probes(n: usize, target: usize) -> Vec<usize> {
+    let (mut lo, mut hi) = (0i64, n as i64 - 1);
+    let mut out = Vec::new();
+    while lo <= hi {
+        let mid = ((lo + hi) >> 1) as usize;
+        if mid == target {
+            break;
+        }
+        out.push(mid);
+        if mid > target {
+            hi = mid as i64 - 1;
+        } else {
+            lo = mid as i64 + 1;
+        }
+    }
+    out
+}
+
+/// A run placed: where it starts after its fillers, where it ends, and which neighbour each of its
+/// repeats repeats (`true` for the one before it).
+#[derive(Debug, Clone)]
+struct Placed {
+    start: usize,
+    end: usize,
+    repeats: Vec<(usize, bool)>,
+}
+
+/// Run `run` placed after `pad` fillers from slot `at` in a list of `n`: `None` when its fillers
+/// do not fit in the `room` GUIDs before it, it runs past `n`, it holds a repeat and `repeats` is
+/// false, or one of its repeats sits above both neighbours in the search's tree.
+fn place(run: &[u32], at: usize, pad: usize, room: u64, n: usize, repeats_allowed: bool) -> Option<Placed> {
+    let mut start = at + pad;
+    if start % 4 == 3 {
+        start += 1;
+    }
+    if (start - at) as u64 > room {
+        return None;
+    }
+    let mut pos = start;
+    let mut repeats = Vec::new();
+    for _ in run {
+        if pos % 4 == 3 {
+            if !repeats_allowed || pos + 1 >= n {
+                return None;
+            }
+            let path = probes(n, pos);
+            let left = path.contains(&(pos - 1));
+            if !left && !path.contains(&(pos + 1)) {
+                return None;
+            }
+            repeats.push((pos, left));
+            pos += 1;
+        }
+        pos += 1;
+    }
+    (pos <= n).then_some(Placed { start, end: pos, repeats })
+}
+
+/// Give each `Between` filler a GUID of its own: the first ones between its neighbours that
+/// `taken` does not hold, else the first ones there. `None` when a gap has fewer GUIDs than fillers.
+fn fill_between(slots: &[Slot], taken: &dyn Fn(u32) -> bool) -> Option<Vec<u32>> {
+    let mut out: Vec<u32> = slots.iter().map(|s| if let Slot::Object(g) = s { *g } else { 0 }).collect();
+    let mut i = 0;
+    while i < slots.len() {
+        let Slot::Between { lo, hi } = slots[i] else {
+            i += 1;
+            continue;
+        };
+        let mut j = i;
+        while j < slots.len() && slots[j] == (Slot::Between { lo, hi }) {
+            j += 1;
+        }
+        let first = lo.map_or(0, |l| l + 1);
+        let need = j - i;
+        if (hi as u64) < first as u64 + need as u64 {
+            return None;
+        }
+        let mut chosen: Vec<u32> = (first..hi).take(4096).filter(|&v| !taken(v)).take(need).collect();
+        if chosen.len() < need {
+            chosen = (first..hi).take(need).collect();
+        }
+        out[i..j].copy_from_slice(&chosen);
+        i = j;
+    }
+    Some(out)
+}
+
 /// Lay `objects` (GUIDs, in manifest order) out in a slot list: ascending, never at a slot
-/// `≡ 3 (mod 4)`. Each skipped slot holds a filler: the first GUID between its neighbours that
-/// `taken` does not hold, or, where there is none, a repeat of a neighbour that leaves
-/// [`engine_slot`] finding every object at its own slot.
+/// `≡ 3 (mod 4)`. Each skipped slot holds a filler between its neighbours: a GUID of its own, the
+/// first there that `taken` does not hold (else the first there: another placement's GUID, whose
+/// state changes land in a slot no vertex reads). A run of consecutive GUIDs has no GUID of its own
+/// between its objects, so it starts after enough fillers to keep every slot `≡ 3` out of it; a run
+/// longer than three holds a filler that repeats a neighbour, and the fillers before each run and
+/// after the last object are chosen so that [`engine_slot`] reaches each repeated object before
+/// its repeat, finding every object at its own slot.
 pub fn plan_slots(objects: &[u32], taken: &dyn Fn(u32) -> bool) -> Result<SlotPlan, String> {
     if objects.is_empty() {
         return Err("a stand-in draws at least one object".into());
@@ -180,62 +285,97 @@ pub fn plan_slots(objects: &[u32], taken: &dyn Fn(u32) -> bool) -> Result<SlotPl
             objects.len()
         ));
     }
-    let sorted: Vec<u32> = unique.into_iter().collect();
-    // Slots: objects at the slots not ≡ 3; a filler at each ≡ 3 slot that has an object after it.
-    let mut list: Vec<Option<u32>> = Vec::new();
-    for &g in &sorted {
-        if list.len() % 4 == 3 {
-            list.push(None);
-        }
-        list.push(Some(g));
-    }
-    let mut choices: Vec<(usize, Vec<u32>)> = Vec::new();
-    for p in 0..list.len() {
-        if list[p].is_some() {
-            continue;
-        }
-        let left = list[p - 1].expect("an object before a filler");
-        let right = list[p + 1].expect("an object after a filler");
-        let free = (left.saturating_add(1)..right).take(4096).find(|&v| !taken(v));
-        let options = match free {
-            Some(v) => vec![v],
-            None => vec![left, right],
-        };
-        choices.push((p, options));
-    }
-    // Repeats are tried left neighbour first, each choice kept when every object is still found.
-    let mut out: Vec<u32> = list.iter().map(|s| s.unwrap_or(0)).collect();
-    for (p, options) in &choices {
-        out[*p] = options[0];
-    }
-    let finds_all = |l: &[u32]| {
-        list.iter().enumerate().all(|(i, s)| s.is_none_or(|g| engine_slot(l, g) == Some(i)))
-    };
-    for (p, options) in &choices {
-        if options.len() == 1 {
-            continue;
-        }
-        let ok = options.iter().any(|&v| {
-            out[*p] = v;
-            finds_all(&out)
-        });
-        if !ok {
-            return Err(format!(
-                "no filler at slot {p} between 0x{:08X} and 0x{:08X} lets the engine's search find \
-                 every object at its slot",
-                out[p - 1],
-                out[p + 1]
-            ));
+    let mut runs: Vec<Vec<u32>> = Vec::new();
+    for g in unique {
+        match runs.last_mut() {
+            Some(r) if r.last().is_some_and(|&l| l.checked_add(1) == Some(g)) => r.push(g),
+            _ => runs.push(vec![g]),
         }
     }
-    if !finds_all(&out) {
-        return Err("the engine's search does not find every object at its slot".into());
-    }
-    let slot_of = objects
-        .iter()
-        .map(|g| list.iter().position(|s| *s == Some(*g)).expect("every object is laid out") as u16)
+    let rooms: Vec<u64> = (0..runs.len())
+        .map(|r| match r {
+            0 => runs[0][0] as u64,
+            _ => (runs[r][0] - runs[r - 1].last().copied().expect("a run is not empty") - 1) as u64,
+        })
         .collect();
-    Ok(SlotPlan { list: out, slot_of })
+    let shortest: usize = runs.iter().map(Vec::len).sum::<usize>() * 4 / 3;
+    // First a list with no repeat, the shortest; then, by length, one whose repeats each sit below
+    // the object they repeat: each run placed after the fewest fillers that work.
+    let passes = std::iter::once((MAX_SLOTS, false)).chain((shortest.min(MAX_SLOTS)..=MAX_SLOTS).map(|n| (n, true)));
+    for (n, repeats_allowed) in passes {
+        // reach[r][at]: run r's placement ending at `at`, and where run r - 1 ended.
+        let mut reach: Vec<BTreeMap<usize, (Placed, usize)>> = vec![BTreeMap::new(); runs.len()];
+        let mut from: BTreeMap<usize, ()> = BTreeMap::new();
+        from.insert(0, ());
+        for r in 0..runs.len() {
+            for &at in from.keys() {
+                for pad in 0..8 {
+                    if let Some(p) = place(&runs[r], at, pad, rooms[r], n, repeats_allowed) {
+                        reach[r].entry(p.end).or_insert((p, at));
+                    }
+                }
+            }
+            from = reach[r].keys().map(|&k| (k, ())).collect();
+        }
+        let Some((&end, _)) = reach[runs.len() - 1].iter().next() else { continue };
+        // Walk back to each run's placement, then lay the slots out.
+        let mut placed: Vec<Placed> = Vec::with_capacity(runs.len());
+        let mut at = end;
+        for r in (0..runs.len()).rev() {
+            let (p, prev) = reach[r][&at].clone();
+            placed.push(p);
+            at = prev;
+        }
+        placed.reverse();
+        let mut slots: Vec<Slot> = Vec::with_capacity(n);
+        let mut prev: Option<u32> = None;
+        let mut sides: BTreeMap<usize, bool> = BTreeMap::new();
+        for (run, p) in runs.iter().zip(&placed) {
+            while slots.len() < p.start {
+                slots.push(Slot::Between { lo: prev, hi: run[0] });
+            }
+            let mut k = 0;
+            while k < run.len() {
+                if slots.len() % 4 == 3 {
+                    slots.push(Slot::Repeat { left: run[k - 1], right: run[k] });
+                    continue;
+                }
+                slots.push(Slot::Object(run[k]));
+                k += 1;
+            }
+            sides.extend(p.repeats.iter().copied());
+            prev = run.last().copied();
+        }
+        if repeats_allowed {
+            while slots.len() < n {
+                slots.push(Slot::Between { lo: prev, hi: u32::MAX });
+            }
+        }
+        let Some(mut list) = fill_between(&slots, taken) else { continue };
+        for (i, s) in slots.iter().enumerate() {
+            if let Slot::Repeat { left, right } = *s {
+                list[i] = if sides[&i] { left } else { right };
+            }
+        }
+        let found = slots
+            .iter()
+            .enumerate()
+            .all(|(i, s)| !matches!(s, Slot::Object(g) if engine_slot(&list, *g) != Some(i)));
+        if !found {
+            return Err("a planned slot list does not let the engine's search find every object".into());
+        }
+        let slot_of = objects
+            .iter()
+            .map(|g| slots.iter().position(|s| *s == Slot::Object(*g)).expect("every object is laid out") as u16)
+            .collect();
+        return Ok(SlotPlan { list, slot_of });
+    }
+    let long = runs.iter().filter(|r| r.len() > 3).count();
+    Err(format!(
+        "no slot list of at most {MAX_SLOTS} keeps every object off the slots ≡ 3 (mod 4) with each \
+         repeated GUID found at its object; the objects hold {long} run(s) of more than three \
+         consecutive GUIDs"
+    ))
 }
 
 // ── the source ──────────────────────────────────────────────────────────────────────────────────
@@ -683,8 +823,12 @@ impl World {
     pub fn read(layers: &BTreeMap<u32, Vec<u8>>) -> Result<World, String> {
         let mut w = World::default();
         for (&layer, c) in layers {
-            let places = mercs2_formats::placement::load_placements(c)
-                .map_err(|e| format!("layer 0x{layer:08X}: {e}"))?;
+            // A layer with no Transform records places nothing.
+            let places = match mercs2_formats::placement::load_placements(c) {
+                Ok(p) => p,
+                Err(e) if e.starts_with("no Transform COMP records found") => Vec::new(),
+                Err(e) => return Err(format!("layer 0x{layer:08X}: {e}")),
+            };
             for p in places {
                 w.placed.entry(p.key).or_default().push((layer, p.pos));
                 if let Some(n) = &p.name {
@@ -898,7 +1042,9 @@ pub fn game_problems(manifest: &crate::manifest::Manifest, game: &mut crate::gam
                 }
             };
             if let Some(first) = seen.insert(guid, i) {
-                if crate::manifest::bare_hash(o).is_none() {
+                // Two spellings of one reference are the hermetic rule's to report.
+                let spelled = |r: &str| crate::manifest::bare_hash(r).unwrap_or_else(|| pandemic_hash_m2(r));
+                if spelled(o) != spelled(&c.objects[first]) {
                     out.push((c.index, Problem {
                         code: "M0241",
                         message: format!("objects[{i}] {o:?} is 0x{guid:08X}, which objects[{first}] names"),
@@ -1210,6 +1356,13 @@ mod tests {
         // a free GUID skips the taken ones
         let plan = plan_slots(&objects, &|g| g == 301 || g == 302).unwrap();
         assert_eq!(plan.list[3], 303);
+        // where every GUID between the neighbours is taken, the first of them
+        let plan = plan_slots(&[1, 2, 3, 6, 7], &|_| true).unwrap();
+        assert_eq!(plan.list, vec![1, 2, 3, 4, 6, 7]);
+        // a run of consecutive GUIDs starts after enough fillers to keep slot 3 out of it
+        let plan = plan_slots(&[10, 20, 40, 41, 42], &|_| false).unwrap();
+        assert_eq!(plan.list, vec![10, 20, 21, 22, 40, 41, 42]);
+        assert_eq!(plan.slot_of, vec![0, 1, 4, 5, 6]);
     }
 
     #[test]
