@@ -95,6 +95,8 @@ pub const MATERIAL_TRAILING: &str = "ANY";
 pub const GROUP_HEADER: [u32; 3] = [1, 1, 0];
 /// A group's `STRM` `info` flag word.
 pub const STREAM_FLAG: u32 = 4;
+/// Every vertex's `NORMAL.w`: half-float 1.0.
+pub const NORMAL_W: u16 = 0x3c00;
 
 /// The name a material's first word hashes: `tinygeometry_tgr<row>_tgc<col>_opaque` or
 /// `…_alphatest`, two digits each.
