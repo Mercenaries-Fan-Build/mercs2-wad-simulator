@@ -607,6 +607,79 @@ impl GameStack {
         None
     }
 
+    /// The block holding the layer NAMED `name` (its sub-block's entry is `m2(name)`, type
+    /// `0xE6B81A54`), last-mounted-wins, with what an overlay of that block needs, and the index of
+    /// the layer's entry in it. Found through the layer's ASET row, so a layer that shares a block
+    /// with others (`vz_merida_tiny` in `layers_static`) is found by its own name.
+    pub fn layer_by_name(&mut self, name: &str) -> Result<Option<(LayerEditInputs, usize)>, String> {
+        use mercs2_formats::types::{TYPE_HASH_LAYER, TYPE_ID_LAYER};
+        let hash = crate::manifest::asset_hash(name);
+        for wad in self.wads.iter_mut().rev() {
+            let Some(row) = wad.archive.aset.iter().find(|e| e.asset_hash == hash && e.type_id == TYPE_ID_LAYER)
+            else {
+                continue;
+            };
+            let idx = row.block_index() as usize;
+            let dec = mercs2_formats::sges::decompress_block(&mut wad.file, &wad.archive.indx, idx as u16)
+                .map_err(|e| format!("{}: block {idx}, which holds layer {name}: {e}", wad.path.display()))?;
+            let (entry, _) = mercs2_formats::placement_build::find_entry(&dec, hash, TYPE_HASH_LAYER).ok_or_else(|| {
+                format!(
+                    "{}: the ASET row of layer {name} names block {idx}, which has no layer entry 0x{hash:08X}",
+                    wad.path.display()
+                )
+            })?;
+            let rows = wad
+                .archive
+                .aset
+                .iter()
+                .filter(|e| e.block_index() as usize == idx)
+                .map(|e| AsetRow {
+                    asset_hash: e.asset_hash,
+                    packed_block_ref: e.packed_block_ref,
+                    secondary_ref: e.secondary_ref,
+                    type_id: e.type_id,
+                })
+                .collect();
+            return Ok(Some((
+                LayerEditInputs { block: dec, path: wad.archive.paths[idx].clone(), block_index: idx as u32, rows },
+                entry,
+            )));
+        }
+        Ok(None)
+    }
+
+    /// Every layer sub-block of the stack, by name hash, last-mounted-wins: each block an ASET layer
+    /// row points at is read once, and each of its `0xE6B81A54` entries taken.
+    pub fn layer_containers(&mut self) -> Result<std::collections::BTreeMap<u32, Vec<u8>>, String> {
+        use mercs2_formats::types::{TYPE_HASH_LAYER, TYPE_ID_LAYER};
+        let mut out = std::collections::BTreeMap::new();
+        for wad in self.wads.iter_mut().rev() {
+            let blocks: std::collections::BTreeSet<u16> = wad
+                .archive
+                .aset
+                .iter()
+                .filter(|e| e.type_id == TYPE_ID_LAYER)
+                .map(|e| e.block_index())
+                .collect();
+            for b in blocks {
+                let dec = mercs2_formats::sges::decompress_block(&mut wad.file, &wad.archive.indx, b)
+                    .map_err(|e| format!("{}: layer block {b}: {e}", wad.path.display()))?;
+                let (count, entries) = mercs2_formats::ucfx::parse_block_entry_table(&dec);
+                let mut at = 4 + count as usize * 16;
+                for e in &entries {
+                    let end = at + e.chunk_size as usize;
+                    if e.type_hash == TYPE_HASH_LAYER {
+                        if let Some(c) = dec.get(at..end) {
+                            out.entry(e.name_hash).or_insert_with(|| c.to_vec());
+                        }
+                    }
+                    at = end;
+                }
+            }
+        }
+        Ok(out)
+    }
+
     /// Everything an in-place MODEL-container edit (`edit_state_machine`) needs to re-emit the model
     /// as its OWN minimal block without shadowing its block-mates.
     ///
