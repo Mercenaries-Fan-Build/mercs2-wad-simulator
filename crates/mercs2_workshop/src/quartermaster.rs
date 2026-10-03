@@ -748,6 +748,9 @@ fn contribution_name(c: &Contribution) -> String {
         | Contribution::EditStateMachine { target, .. }
         | Contribution::EditStringDb { target, .. } => target.clone(),
         Contribution::EditWorld { layer, .. } => layer.clone(),
+        Contribution::AddTinyGeometry { layer, cell, key, .. } => {
+            mercs2_quartermaster::tiny::model_name(layer, cell.row, cell.col, *key)
+        }
         Contribution::ActivateLayer { layer, .. } => layer.clone(),
         // `NativeHook.target` is the ENGINE, not an asset — so name it by what it actually is.
         Contribution::NativeHook { plugin, symbol, .. } => plugin
@@ -882,6 +885,7 @@ pub const KINDS: &[(&str, &[(&str, &str)])] = &[
             ("replace_texture", "Replace a shipped texture, same hash"),
             ("edit_state_machine", "Rewrite a destructible's states"),
             ("edit_world", "Move / rotate / re-model a layer's placed entities"),
+            ("add_tiny_geometry", "A far-distance stand-in for one 200 m cell of a layer"),
             ("edit_stringdb", "Correct or localise UI text"),
             ("replace_phy2", "Swap a shipped model's collision (PHY2), same hash"),
             ("add_placement", "Add one entity to an existing layer"),
@@ -1045,6 +1049,14 @@ fn stub(kind: &str, n: usize) -> Option<Contribution> {
         "activate_layer" => Contribution::ActivateLayer {
             layer: "vz_state_pmccon004_destroyed".into(),
             replaces: vec!["vz_state_pmccon004_pristine".into()],
+        },
+        // The objects and the key are the author's: an empty list fails M0240 until they are named.
+        "add_tiny_geometry" => Contribution::AddTinyGeometry {
+            layer: "vz_state_mar_city_pristine".into(),
+            cell: mercs2_quartermaster::manifest::TinyCell { row: 28, col: 32 },
+            key: 0,
+            objects: Vec::new(),
+            model: PathBuf::from("src/tiny.glb"),
         },
         "edit_stringdb" => Contribution::EditStringDb {
             target: "english".into(),
@@ -2364,6 +2376,39 @@ fn contribution_form(
                 "per-entity pos / quat / model. Extract a baseline: `qm extract-world <layer>`",
             );
         }
+        Contribution::AddTinyGeometry { layer, cell, key, objects, model } => {
+            commit |= text_row(ui, "Layer", layer, "vz_state_mar_city_pristine", true);
+            theme::field_note(ui, theme::FieldState::Neutral, "a layer NAME; the placement goes into it");
+            commit |= number_row(ui, "Cell row", &mut cell.row, "0..39, from z", |v| v.to_string(), |t| parse_whole(t, 39));
+            commit |= number_row(ui, "Cell col", &mut cell.col, "0..39, from x", |v| v.to_string(), |t| parse_whole(t, 39));
+            commit |= number_row(ui, "Key", key, "the placement's GUID", |v| format!("0x{v:08X}"), |t| parse_whole(t, u32::MAX as u64));
+            let mut remove: Option<usize> = None;
+            for (i, o) in objects.iter_mut().enumerate() {
+                ui.horizontal(|ui| {
+                    let state = if o.trim().is_empty() { theme::FieldState::Bad } else { theme::FieldState::Neutral };
+                    let r = theme::text_field(ui, &format!("object {i}"), o, "0xGUID or placement name", state);
+                    commit |= r.lost_focus();
+                    if ui.small_button("✕").clicked() {
+                        remove = Some(i);
+                    }
+                });
+            }
+            if let Some(i) = remove {
+                objects.remove(i);
+                commit = true;
+            }
+            if ui.button("+ object").clicked() {
+                objects.push(String::new());
+                commit = true;
+            }
+            commit |= source_row(ui, "Model", model, root, &["glb", "gltf"]);
+            theme::field_note(
+                ui,
+                theme::FieldState::Neutral,
+                "each primitive declares extras.tiny_role (intact / ruined); each vertex a _TINY_SLOT \
+                 into the objects. Extract one: `qm extract-tiny <model>`",
+            );
+        }
         Contribution::ActivateLayer { layer, replaces } => {
             commit |= text_row(ui, "Layer", layer, "vz_state_pmccon004_destroyed", true);
             theme::field_note(
@@ -3117,6 +3162,14 @@ fn blast_rows(c: &Contribution) -> Vec<(String, String)> {
         Contribution::EditWorld { layer, .. } => vec![
             ("Writes".to_string(), format!("placement layer {layer}")),
             ("Merge".to_string(), "last-wins \u{2014} the later overlay's edits win".to_string()),
+        ],
+        Contribution::AddTinyGeometry { layer, cell, key, .. } => vec![
+            (
+                "Adds".to_string(),
+                format!("model {}", mercs2_quartermaster::tiny::model_name(layer, cell.row, cell.col, *key)),
+            ),
+            ("Writes".to_string(), format!("placement layer {layer}, cell (row {}, col {})", cell.row, cell.col)),
+            ("Merge".to_string(), "one stand-in per cell; another Shipment's write to the layer conflicts".to_string()),
         ],
         Contribution::ActivateLayer { layer, .. } => vec![
             ("Activates".to_string(), format!("world layer {layer}")),
