@@ -91,3 +91,7 @@ required-features = ["retail"]
 [[test]]
 name = "tiny_retail"
 required-features = ["retail"]
+
+[[test]]
+name = "template_retail"
+required-features = ["retail"]
