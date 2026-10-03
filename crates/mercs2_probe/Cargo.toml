@@ -13,6 +13,9 @@ path = "src/main.rs"
 
 [dependencies]
 png = "0.17" # decode the source glTF's embedded PNG atlases for tex_build
+# `lua_chunk_scan` inflates console (`segs`, big-endian) WAD blocks itself — the format crate's
+# `decompress_sges` is LE-only and silently returns raw bytes for a console block.
+flate2 = "1"
 # The diagnostics + shared world helpers live in the engine library.
 mercs2_engine = { workspace = true }
 mercs2_formats = { workspace = true }
