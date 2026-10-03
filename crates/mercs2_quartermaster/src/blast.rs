@@ -93,6 +93,9 @@ pub enum Claim {
     /// A shader registration name, keyed on `pandemic_hash_m2(name)`: the key the registry files
     /// it under, first registration winning.
     ShaderName { key: u32 },
+    /// The TINY stand-in of one 200 m cell of one layer (`m2(layer)`): two would draw the cell's
+    /// objects twice.
+    TinyCell { layer: u32, row: u32, col: u32 },
 }
 
 impl Claim {
@@ -164,6 +167,10 @@ impl Claim {
             Claim::ShaderName { key } => match name {
                 Some(n) => format!("shader registration {n} (0x{key:08X})"),
                 None => format!("shader registration 0x{key:08X}"),
+            },
+            Claim::TinyCell { layer, row, col } => match name {
+                Some(n) => format!("TINY stand-in of {n}"),
+                None => format!("TINY stand-in of layer 0x{layer:08X} cell (row {row}, col {col})"),
             },
         }
     }
@@ -252,6 +259,8 @@ pub fn merge_class(claim: &Claim, access: Access, intent: Intent) -> MergeClass 
         Claim::ShaderStem { .. } => MergeClass::Exclusive,
         // The registry keeps the first registration of a key, so a second is silently absent.
         Claim::ShaderName { .. } => MergeClass::Exclusive,
+        // One stand-in per cell of a layer: a second draws the same objects again.
+        Claim::TinyCell { .. } => MergeClass::Exclusive,
     }
 }
 
@@ -535,6 +544,31 @@ pub fn claims(manifest: &Manifest) -> Vec<ClaimRecord> {
             // wins).
             Contribution::EditWorld { layer, .. } => {
                 push(Access::Write, Claim::asset(layer), Intent::ReplaceExclusive);
+            }
+            // The stand-in's model (a new hash), the cell it stands in for, and the layer block its
+            // placement goes into. The build carries all of one Shipment's placements in a layer in
+            // one overlay of its block, so the layer is claimed once per Shipment, by the first
+            // stand-in that names it; another Shipment's write to the layer is a conflict.
+            Contribution::AddTinyGeometry { layer, cell, key, .. } => {
+                push(
+                    Access::Write,
+                    Claim::asset(&crate::tiny::model_name(layer, cell.row, cell.col, *key)),
+                    Intent::Additive,
+                );
+                push(
+                    Access::Write,
+                    (
+                        Claim::TinyCell { layer: crate::manifest::asset_hash(layer), row: cell.row, col: cell.col },
+                        Some(format!("{layer} cell (row {}, col {})", cell.row, cell.col)),
+                    ),
+                    Intent::Additive,
+                );
+                let earlier = manifest.contributions[..index]
+                    .iter()
+                    .any(|c| matches!(c, Contribution::AddTinyGeometry { layer: l, .. } if l == layer));
+                if !earlier {
+                    push(Access::Write, Claim::asset(layer), Intent::Additive);
+                }
             }
             // No Data half — its whole effect is a registration baked into `qm_modloader`, reached by
             // the same one-line trampoline `add_ui` appends to `wifpmcinterior`. Additive, so N layer
