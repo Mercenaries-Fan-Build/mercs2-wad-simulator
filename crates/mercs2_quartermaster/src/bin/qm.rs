@@ -227,6 +227,23 @@ enum Command {
         #[arg(long, value_name = "FILE")]
         names: Option<PathBuf>,
     },
+    /// Take a TINY stand-in apart into an `add_tiny_geometry` contribution and its model.
+    ///
+    /// Writes the model to `<out>/src/<model>.glb` and prints the contribution that rebuilds it: the
+    /// layer, cell and key read from the model's name, the objects from its slot list. The
+    /// stand-in's `TinyGeometryObject` placement must be in its layer.
+    ExtractTiny {
+        /// The stand-in model, by name: `<layer>_tinygeometry_tgr<row>_tgc<col>_0x<key>`.
+        model: String,
+        /// The Shipment directory the model is written under (`src/`).
+        #[arg(long, value_name = "DIR")]
+        out: PathBuf,
+        #[arg(long, value_name = "DIR")]
+        game: Option<PathBuf>,
+        /// hash → name lookup, so a texture reads by name. Defaults to the workspace's names.
+        #[arg(long, value_name = "FILE")]
+        names: Option<PathBuf>,
+    },
     /// List every rule: what is checked, what is known-but-unchecked, and where each is documented.
     Rules,
     /// List every contribution kind this qm reads — the authoritative list. Hermetic: no Shipment,
@@ -315,6 +332,12 @@ fn main() -> ExitCode {
             game,
             names,
         } => cmd_extract_world(&layer, game.as_deref(), names.as_deref()),
+        Command::ExtractTiny {
+            model,
+            out,
+            game,
+            names,
+        } => cmd_extract_tiny(&model, &out, game.as_deref(), names.as_deref()),
         Command::Rules => cmd_rules(),
         Command::Kinds { json } => cmd_kinds(json),
     }
@@ -759,6 +782,63 @@ fn cmd_extract_world(layer: &str, game_dir: Option<&Path>, names_path: Option<&P
     let names = resolve_names(names_path);
     let model_name = |h: u32| names.as_ref().and_then(|n| n.reverse(h)).map(|s| s.to_string());
     print!("{}", mercs2_quartermaster::world::extract(&dumped, model_name));
+    ExitCode::SUCCESS
+}
+
+fn cmd_extract_tiny(model: &str, out: &Path, game_dir: Option<&Path>, names_path: Option<&Path>) -> ExitCode {
+    use mercs2_quartermaster::tiny;
+    let fail = |m: String| {
+        eprintln!("error: {m}");
+        ExitCode::from(EXIT_UNUSABLE)
+    };
+    let Some((layer, row, col, key)) = tiny::parse_model_name(model) else {
+        return fail(format!(
+            "{model:?} is not a stand-in name: <layer>_tinygeometry_tgr<row>_tgc<col>_0x<key>"
+        ));
+    };
+    let mut stack = match resolve_game(game_dir, []) {
+        Ok(s) => s,
+        Err(code) => return code,
+    };
+    let hash = mercs2_quartermaster::manifest::asset_hash(model);
+    let Some(inputs) = stack.model_container_for_edit(hash) else {
+        return fail(format!("{model:?} (0x{hash:08X}) is not a model in the game stack"));
+    };
+    let decoded = match mercs2_formats::tiny_model::TinyModel::decode(&inputs.container) {
+        Ok(m) => m,
+        Err(e) => return fail(format!("{model:?} is not a TINY container: {e}")),
+    };
+    let layer_c = match stack.layer_by_name(&layer) {
+        Ok(Some((li, entry))) => {
+            let (_, entries) = mercs2_formats::ucfx::parse_block_entry_table(&li.block);
+            mercs2_formats::placement_build::find_entry(&li.block, entries[entry].name_hash, entries[entry].type_hash)
+                .map(|(_, c)| c.to_vec())
+        }
+        Ok(None) => None,
+        Err(e) => return fail(e),
+    };
+    let Some(layer_c) = layer_c else {
+        return fail(format!("layer {layer:?} is not in the game stack"));
+    };
+    let records = match mercs2_formats::placement_build::read_layer_records(&layer_c) {
+        Ok(r) => r,
+        Err(e) => return fail(format!("layer {layer:?}: {e}")),
+    };
+    if !records.models.iter().any(|(k, h)| *k == key && *h == hash) {
+        return fail(format!("layer {layer:?} has no placement 0x{key:08X} of {model:?}"));
+    }
+    let names = resolve_names(names_path);
+    let texture_name = |h: u32| names.as_ref().and_then(|n| n.reverse(h)).map(|s| s.to_string());
+    let d = match tiny::decompose(&decoded, row, col, &texture_name) {
+        Ok(d) => d,
+        Err(e) => return fail(format!("{model:?}: {e}")),
+    };
+    let rel = format!("src/{model}.glb");
+    let path = out.join(&rel);
+    if let Err(e) = std::fs::create_dir_all(out.join("src")).and_then(|_| std::fs::write(&path, &d.glb)) {
+        return fail(format!("{}: {e}", path.display()));
+    }
+    print!("{}", tiny::contribution_yaml(&layer, row, col, key, &d.objects, &rel));
     ExitCode::SUCCESS
 }
 
