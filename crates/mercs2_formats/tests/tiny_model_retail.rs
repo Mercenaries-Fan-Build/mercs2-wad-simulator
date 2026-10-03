@@ -150,6 +150,9 @@ fn every_retail_tiny_container_round_trips_and_follows_the_conventions() {
                         break;
                     }
                 }
+                if g.vertices.iter().any(|v| v.normal[3] != tiny::NORMAL_W) {
+                    bad("a vertex's NORMAL.w is not NORMAL_W");
+                }
                 if g.vertices.iter().any(|v| {
                     let w = f16(v.position[3]);
                     w.fract() != 0.0 || w < 0.0 || w as usize >= m.slots.len()
