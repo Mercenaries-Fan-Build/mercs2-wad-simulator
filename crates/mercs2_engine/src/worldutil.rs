@@ -490,14 +490,15 @@ fn field_kind_of(t: mercs2_formats::schema::SchemaFieldType) -> mercs2_core::reg
     use mercs2_core::registry::FieldKind as K;
     use mercs2_formats::schema::SchemaFieldType as T;
     match t {
-        T::Bit => K::Bit,
+        T::Byte => K::Byte,
         T::U8 => K::U8,
+        T::Short => K::Short,
         T::U16 => K::U16,
+        T::Int => K::Int,
+        T::Hash => K::Hash,
         T::F32 => K::F32,
-        T::U32 => K::U32,
-        T::Ref => K::Ref,
         T::StringRef => K::StringRef,
-        T::Flags => K::Flags,
+        T::Enum => K::Enum,
         T::Vec3 => K::Vec3,
         T::Blob32 => K::Blob32,
     }
@@ -557,7 +558,8 @@ pub fn load_schema_components(block: &[u8]) -> (mercs2_core::ComponentRegistry, 
             .map(|f| FieldLayout {
                 name_hash: f.name_hash,
                 byte_offset: f.byte_offset,
-                bit_index: f.bit_index,
+                bit_start: f.bit_start,
+                bit_width: f.bit_width,
                 kind: field_kind_of(f.field_type),
             })
             .collect();
