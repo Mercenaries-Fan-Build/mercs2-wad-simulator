@@ -985,3 +985,69 @@ fn a_bank_replaced_twice_conflicts() {
     assert!(found.iter().any(|c| c.claim == Claim::Asset { hash: entry } && c.class == MergeClass::Exclusive), "{found:?}");
     assert!(blast::conflicts(&[("a", &a), ("f", &bank("f", "french", "line_b"))]).is_empty());
 }
+
+// ---------------------------------------------------------------------------
+// add_tiny_geometry
+// ---------------------------------------------------------------------------
+
+fn tiny(layer: &str, row: u32, col: u32, key: u32) -> String {
+    format!(
+        "  - kind: add_tiny_geometry\n    layer: {layer}\n    cell: {{ row: {row}, col: {col} }}\n    key: {key}\n    \
+         objects: [\"0x00097FF3\"]\n    model: src/t.glb\n"
+    )
+}
+
+/// A stand-in claims its model (a new name), its cell of its layer, and the layer block.
+#[test]
+fn a_stand_in_claims_its_model_its_cell_and_its_layer() {
+    let m = one("mod-a", &tiny("vz_state_mar_city_pristine", 28, 32, 0x143fff));
+    let claims = blast::claims(&m);
+    let model = mercs2_formats::hash::pandemic_hash_m2("vz_state_mar_city_pristine_tinygeometry_tgr28_tgc32_0x00143fff");
+    let layer = mercs2_formats::hash::pandemic_hash_m2("vz_state_mar_city_pristine");
+    let got: Vec<(Claim, MergeClass)> = claims.iter().map(|c| (c.claim.clone(), c.class)).collect();
+    assert_eq!(
+        got,
+        vec![
+            (Claim::Asset { hash: model }, MergeClass::KeyedSet),
+            (Claim::TinyCell { layer, row: 28, col: 32 }, MergeClass::Exclusive),
+            (Claim::Asset { hash: layer }, MergeClass::KeyedSet),
+        ]
+    );
+    assert!(claims.iter().all(|c| c.access == Access::Write));
+}
+
+/// Two Shipments' stand-ins of one cell conflict, as do any two writes to one layer block.
+#[test]
+fn two_stand_ins_of_one_cell_or_layer_in_two_shipments_conflict() {
+    let a = one("mod-a", &tiny("vz_state_mar_city_pristine", 28, 32, 0x143fff));
+    let b = one("mod-b", &tiny("vz_state_mar_city_pristine", 28, 32, 0x143ffe));
+    let found = blast::conflicts(&[("mod-a", &a), ("mod-b", &b)]);
+    let layer = mercs2_formats::hash::pandemic_hash_m2("vz_state_mar_city_pristine");
+    assert!(found.iter().any(|c| c.claim == Claim::TinyCell { layer, row: 28, col: 32 }), "{found:?}");
+    let c = one("mod-b", &tiny("vz_state_mar_city_pristine", 27, 32, 0x143ffe));
+    let found = blast::conflicts(&[("mod-a", &a), ("mod-b", &c)]);
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert_eq!(found[0].claim, Claim::Asset { hash: layer });
+    let e = one("mod-b", "  - kind: edit_world\n    layer: vz_state_mar_city_pristine\n    edits: src/w.yaml\n");
+    assert!(!blast::conflicts(&[("mod-a", &a), ("mod-b", &e)]).is_empty());
+}
+
+/// One Shipment's stand-ins of several cells of one layer share its one layer overlay; two of one
+/// cell are a self-conflict.
+#[test]
+fn one_shipment_adds_stand_ins_to_several_cells_of_a_layer() {
+    let both = format!(
+        "{}{}",
+        tiny("vz_state_mar_city_pristine", 28, 32, 0x143fff),
+        tiny("vz_state_mar_city_pristine", 27, 32, 0x143ffe)
+    );
+    assert!(blast::self_conflicts(&one("mod-a", &both)).is_empty());
+    let same = format!(
+        "{}{}",
+        tiny("vz_state_mar_city_pristine", 28, 32, 0x143fff),
+        tiny("vz_state_mar_city_pristine", 28, 32, 0x143ffe)
+    );
+    let sc = blast::self_conflicts(&one("mod-a", &same));
+    assert_eq!(sc.len(), 1, "{sc:?}");
+    assert!(matches!(sc[0].claim, Claim::TinyCell { row: 28, col: 32, .. }));
+}
