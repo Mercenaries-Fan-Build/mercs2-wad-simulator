@@ -732,6 +732,19 @@ pub fn import_into_block(
                 ),
             ));
         }
+        // The TINY shaders read a slot ≡ 3 (mod 4) as `2·.w − .y` of its register, so such a vertex
+        // shows only while its object's state and that of the slot two below agree.
+        if let Some((v, s)) = values.iter().enumerate().find(|(_, s)| **s % 4 == 3) {
+            return Err(err(
+                "M0248",
+                format!(
+                    "vertex {v} has {attr} {s}, a slot ≡ 3 (mod 4): the TINY shaders read it as twice \
+                     its state minus the state of slot {}, so it draws in the wrong role whenever the \
+                     two objects' states differ",
+                    s - 2
+                ),
+            ));
+        }
         PositionW::TinySlot
     } else {
         PositionW::One
