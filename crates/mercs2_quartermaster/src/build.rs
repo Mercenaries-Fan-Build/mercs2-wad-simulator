@@ -997,7 +997,7 @@ fn opaque_new_asset(
 /// Wrap an already-produced container as a single-entry mod block. Split from
 /// [`opaque_new_asset`] so the `replace_phy2` codepath (which produces `edited` in-Rust rather
 /// than reading a file) can share the block-emit half.
-fn opaque_container_block(
+pub(crate) fn opaque_container_block(
     hash: u32,
     type_hash: u32,
     type_id: u32,
@@ -4025,6 +4025,10 @@ fn lower(
             })?))
         }
 
+        // Stand-ins are lowered after the loop, all of a Shipment's placements in one layer block
+        // together ([`crate::tiny::lower_shipment`]).
+        Contribution::AddTinyGeometry { .. } => Ok(Lowering::Nothing),
+
         // String tables are lowered after the loop, all of a Shipment's writes to one table
         // together and in contribution order ([`merge_string_tables`], strict), so a later
         // contribution sees an earlier one's edits and each table ships as ONE block.
@@ -4442,6 +4446,17 @@ pub fn build(
                 bytes,
             } => files.push((name, relative, bytes)),
         }
+    }
+    // Stand-ins: each add_tiny_geometry's model, and one overlay per layer block carrying every
+    // placement this Shipment adds to it.
+    if let Some(c) = crate::tiny::contributions(manifest).first() {
+        let Some(game) = game.as_deref_mut() else {
+            return Err(BuildError::GameRequired { index: c.index, kind: "add_tiny_geometry" });
+        };
+        blocks.extend(
+            crate::tiny::lower_shipment(manifest, &shipment.root, game, &mut log)
+                .map_err(|(index, message)| BuildError::Lower { index, kind: "add_tiny_geometry", message })?,
+        );
     }
     // String tables: every edit_stringdb / add_stringdb_keys / replace_stringdb_text of this
     // Shipment, per table, in contribution order — the same code `qm link` merges a set with.
