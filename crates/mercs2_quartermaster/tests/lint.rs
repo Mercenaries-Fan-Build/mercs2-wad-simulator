@@ -1492,3 +1492,140 @@ fn the_sound_rules_are_registered() {
         assert!(lint::GAME_RULES.iter().any(|r| r.code == code), "{code}");
     }
 }
+
+// ---------------------------------------------------------------------------
+// add_tiny_geometry: M0240–M0244, M0249, M0251
+// ---------------------------------------------------------------------------
+
+/// A `.gltf` with one triangle primitive per `(role, slots)`, each drawing material 0, whose extras
+/// are `material_extras`.
+fn tiny_gltf(dir: &std::path::Path, prims: &[(Option<&str>, [u8; 3])], material_extras: &str) {
+    let mut bin: Vec<u8> = Vec::new();
+    for c in [0.0f32, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0] {
+        bin.extend_from_slice(&c.to_le_bytes());
+    }
+    for _ in 0..3 {
+        for c in [0.0f32, 1.0, 0.0] {
+            bin.extend_from_slice(&c.to_le_bytes());
+        }
+    }
+    for c in [0.0f32, 0.0, 1.0, 0.0, 0.0, 1.0] {
+        bin.extend_from_slice(&c.to_le_bytes());
+    }
+    let (mut views, mut accessors, mut out) = (Vec::new(), Vec::new(), Vec::new());
+    views.push(r#"{"buffer":0,"byteOffset":0,"byteLength":36}"#.to_string());
+    views.push(r#"{"buffer":0,"byteOffset":36,"byteLength":36}"#.to_string());
+    views.push(r#"{"buffer":0,"byteOffset":72,"byteLength":24}"#.to_string());
+    accessors.push(r#"{"bufferView":0,"componentType":5126,"count":3,"type":"VEC3","min":[0,0,0],"max":[1,1,0]}"#.to_string());
+    accessors.push(r#"{"bufferView":1,"componentType":5126,"count":3,"type":"VEC3"}"#.to_string());
+    accessors.push(r#"{"bufferView":2,"componentType":5126,"count":3,"type":"VEC2"}"#.to_string());
+    for (role, slots) in prims {
+        let at = bin.len();
+        bin.extend_from_slice(slots);
+        bin.push(0);
+        views.push(format!(r#"{{"buffer":0,"byteOffset":{at},"byteLength":3}}"#));
+        accessors.push(format!(r#"{{"bufferView":{},"componentType":5121,"count":3,"type":"SCALAR"}}"#, views.len() - 1));
+        let extras = match role {
+            Some(r) => format!(r#","extras":{{"tiny_role":"{r}"}}"#),
+            None => String::new(),
+        };
+        out.push(format!(
+            r#"{{"attributes":{{"POSITION":0,"NORMAL":1,"TEXCOORD_0":2,"_TINY_SLOT":{}}},"mode":4,"material":0{extras}}}"#,
+            accessors.len() - 1
+        ));
+    }
+    std::fs::write(dir.join("t.bin"), &bin).unwrap();
+    let json = format!(
+        r#"{{"asset":{{"version":"2.0"}},"scene":0,"scenes":[{{"nodes":[0]}}],"nodes":[{{"mesh":0}}],
+"meshes":[{{"primitives":[{}]}}],"materials":[{{"alphaMode":"MASK","extras":{material_extras}}}],
+"buffers":[{{"uri":"t.bin","byteLength":{}}}],"bufferViews":[{}],"accessors":[{}]}}"#,
+        out.join(","),
+        bin.len(),
+        views.join(","),
+        accessors.join(",")
+    );
+    std::fs::write(dir.join("t.gltf"), json).unwrap();
+}
+
+const TINY_MATERIAL: &str = r#"{"texture":"0x80B55C14","pixel_shader":"PgDiffFP"}"#;
+
+/// Lint an `add_tiny_geometry` of `objects` in cell `(row, col)` whose model is [`tiny_gltf`].
+fn lint_tiny(label: &str, objects: &[String], row: u32, prims: &[(Option<&str>, [u8; 3])], material: &str) -> Vec<lint::Diagnostic> {
+    let root = std::env::temp_dir().join(format!("qm_lint_tiny_{}_{label}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    tiny_gltf(&root.join("src"), prims, material);
+    let objects = objects.iter().map(|o| format!("\"{o}\"")).collect::<Vec<_>>().join(", ");
+    let yaml = format!(
+        "  - kind: add_tiny_geometry\n    layer: vz_state_mar_city_pristine\n    cell: {{ row: {row}, col: 32 }}\n    \
+         key: 1327103\n    objects: [{objects}]\n    model: src/t.gltf\n"
+    );
+    lint::lint(&shipment_with(&yaml), Some(&root), None)
+}
+
+fn guids(n: u32) -> Vec<String> {
+    (0..n).map(|k| format!("0x{:08X}", 0x97000 + k)).collect()
+}
+
+#[test]
+fn add_tiny_geometry_is_quiet_on_a_sound_stand_in() {
+    let d = lint_tiny("ok", &guids(2), 28, &[(Some("intact"), [0, 0, 0]), (Some("ruined"), [1, 1, 1])], TINY_MATERIAL);
+    assert!(d.is_empty(), "{d:?}");
+}
+
+#[test]
+fn m0240_fires_past_192_objects_and_on_none() {
+    let d = lint_tiny("m0240", &guids(193), 28, &[(Some("intact"), [0, 0, 0])], TINY_MATERIAL);
+    assert_eq!(codes(&d), vec!["M0240"], "{d:?}");
+    assert!(d[0].message.contains("at most 192"), "{}", d[0].message);
+    assert!(lint::blocks_build(&d));
+    let d = lint_tiny("m0240_none", &[], 28, &[(Some("intact"), [0, 0, 0])], TINY_MATERIAL);
+    assert!(codes(&d).contains(&"M0240"), "{d:?}");
+    // 192 is the most a stand-in draws
+    let d = lint_tiny("m0240_192", &guids(192), 28, &[(Some("intact"), [0, 0, 0])], TINY_MATERIAL);
+    assert!(d.is_empty(), "{d:?}");
+}
+
+#[test]
+fn m0241_fires_on_an_object_named_twice() {
+    let mut objects = guids(2);
+    objects.push(objects[0].to_lowercase());
+    let d = lint_tiny("m0241", &objects, 28, &[(Some("intact"), [0, 0, 0])], TINY_MATERIAL);
+    assert_eq!(codes(&d), vec!["M0241"], "{d:?}");
+}
+
+#[test]
+fn m0242_fires_on_a_slot_past_the_objects() {
+    let d = lint_tiny("m0242", &guids(2), 28, &[(Some("intact"), [2, 2, 2])], TINY_MATERIAL);
+    assert_eq!(codes(&d), vec!["M0242"], "{d:?}");
+    assert!(d[0].message.contains("slot 2"), "{}", d[0].message);
+}
+
+#[test]
+fn m0243_fires_on_a_triangle_spanning_two_slots() {
+    let d = lint_tiny("m0243", &guids(2), 28, &[(Some("intact"), [0, 1, 1])], TINY_MATERIAL);
+    assert_eq!(codes(&d), vec!["M0243"], "{d:?}");
+}
+
+#[test]
+fn m0244_fires_on_a_primitive_without_a_role() {
+    let d = lint_tiny("m0244", &guids(2), 28, &[(None, [0, 0, 0]), (Some("destroyed"), [1, 1, 1])], TINY_MATERIAL);
+    assert_eq!(codes(&d), vec!["M0244", "M0244"], "{d:?}");
+}
+
+#[test]
+fn m0249_fires_on_a_cell_outside_the_grid() {
+    let d = lint_tiny("m0249", &guids(1), 40, &[(Some("intact"), [0, 0, 0])], TINY_MATERIAL);
+    assert_eq!(codes(&d), vec!["M0249"], "{d:?}");
+}
+
+#[test]
+fn m0251_fires_on_a_material_without_a_texture_or_a_pixel_shader() {
+    let d = lint_tiny("m0251", &guids(1), 28, &[(Some("intact"), [0, 0, 0])], r#"{"pixel_shader":"PgDiffFP"}"#);
+    assert_eq!(codes(&d), vec!["M0251"], "{d:?}");
+    assert!(d[0].message.contains("extras.texture"), "{}", d[0].message);
+    // a material with one texture has several retail pixel shaders, so it declares one
+    let d = lint_tiny("m0251_pixel", &guids(1), 28, &[(Some("intact"), [0, 0, 0])], r#"{"texture":"t"}"#);
+    assert_eq!(codes(&d), vec!["M0251"], "{d:?}");
+    assert!(d[0].message.contains("pixel_shader"), "{}", d[0].message);
+}
