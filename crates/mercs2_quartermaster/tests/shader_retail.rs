@@ -588,12 +588,13 @@ fn group_strips(container: &[u8]) -> Vec<Vec<u32>> {
 
 /// Every retail `TINY` group, imported onto itself with its own `POSITION.w` as `_TINY_SLOT` and
 /// its materials' pixel shader declared, keeps its vertex shader (its intact or ruined role) and
-/// its shadow shader, and the container comes back byte for byte.
+/// its shadow shader, and the container comes back byte for byte; a group with a slot ≡ 3 (mod 4)
+/// is refused (M0248).
 #[test]
 fn every_retail_tiny_group_keeps_its_role_and_its_slots() {
     use mercs2_formats::mesh_import::CustomAttributes;
     use mercs2_quartermaster::shader_import::{Declared, Geometry, PositionW};
-    let (mut groups_seen, mut ruined) = (0usize, 0usize);
+    let (mut groups_seen, mut ruined, mut slot_three) = (0usize, 0usize, 0usize);
     for h in retail().1.iter().filter(|h| h.type_hash == TYPE_HASH_MODEL) {
         let (groups, materials) = shader_import::read_model(&h.container).expect("a retail model reads");
         if !groups.iter().any(|g| g.kind == "TINY") {
@@ -621,8 +622,17 @@ fn every_retail_tiny_group_keeps_its_role_and_its_slots() {
             let tris = mercs2_formats::model_inject::strip_to_tris(&strips[g.ordinal]);
             let geometry = Geometry { vertex_sources: &sources, custom: &custom, source_tris: &tris, donor: &block };
             let mut out = block.clone();
-            let done = shader_import::import_into_block(&mut out, g.ordinal, &declared, &[], &Default::default(), geometry)
-                .unwrap_or_else(|e| panic!("TINY group {} of 0x{:08X}: [{}] {}", g.ordinal, h.name_hash, e.code, e.message));
+            let result = shader_import::import_into_block(&mut out, g.ordinal, &declared, &[], &Default::default(), geometry);
+            // A group with a vertex at a slot ≡ 3 (mod 4) is refused: the shaders read that slot as
+            // 2·.w − .y of its register (M0248).
+            if w.iter().any(|&s| s % 4 == 3) {
+                let e = result.expect_err("a slot ≡ 3 is refused");
+                assert_eq!(e.code, "M0248", "TINY group {} of 0x{:08X}: {}", g.ordinal, h.name_hash, e.message);
+                slot_three += 1;
+                continue;
+            }
+            let done =
+                result.unwrap_or_else(|e| panic!("TINY group {} of 0x{:08X}: [{}] {}", g.ordinal, h.name_hash, e.code, e.message));
             assert_eq!(Some(done.vertex.as_str()), shader::retail_name(g.vertex));
             assert_eq!(Some(done.shadow.as_str()), shader::retail_name(g.shadow));
             assert_eq!(done.position_w, PositionW::TinySlot);
@@ -632,6 +642,7 @@ fn every_retail_tiny_group_keeps_its_role_and_its_slots() {
             ruined += usize::from(done.vertex.ends_with("_Ruin"));
         }
     }
-    eprintln!("{groups_seen} TINY groups ({ruined} ruined) keep their role and slots");
-    assert!(groups_seen > 2000 && ruined > 1000, "{groups_seen} TINY groups, {ruined} ruined");
+    eprintln!("{groups_seen} TINY groups ({ruined} ruined) keep their role and slots; {slot_three} hold a slot ≡ 3 and are refused");
+    assert_eq!(groups_seen + slot_three, 2547, "every retail TINY group");
+    assert!(groups_seen > 1000 && ruined > 400 && slot_three > 0, "{groups_seen} TINY groups, {ruined} ruined, {slot_three} refused");
 }
