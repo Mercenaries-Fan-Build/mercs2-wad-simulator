@@ -92,5 +92,9 @@ name = "terrainmesh_retail"
 required-features = ["retail"]
 
 [[test]]
+name = "tiny_model_retail"
+required-features = ["retail"]
+
+[[test]]
 name = "type_ids_match_the_wad"
 required-features = ["retail"]
