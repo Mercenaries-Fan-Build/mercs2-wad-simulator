@@ -252,6 +252,175 @@ pub(crate) fn primitive_custom(
     Ok(out)
 }
 
+/// A glTF material's `alphaMode`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AlphaMode {
+    Opaque,
+    Mask,
+    Blend,
+}
+
+/// One glTF material as the TINY reader takes it: its alpha mode and its `extras`, as raw JSON.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SourceMaterial {
+    pub alpha_mode: AlphaMode,
+    pub extras: Option<String>,
+}
+
+/// One triangle or triangle-strip primitive, kept apart from the others, with its vertices as the
+/// file stores them.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SourcePrimitive {
+    /// `(mesh index, primitive index)`, for messages.
+    pub at: (usize, usize),
+    /// The primitive's `extras`, as raw JSON.
+    pub extras: Option<String>,
+    pub material: Option<usize>,
+    /// `true` for `TRIANGLE_STRIP`, `false` for `TRIANGLES`.
+    pub strip: bool,
+    /// The index list, or `0..n` for an un-indexed primitive.
+    pub indices: Vec<u32>,
+    pub positions: Vec<[f32; 3]>,
+    pub normals: Option<Vec<[f32; 3]>>,
+    pub uvs: Option<Vec<[f32; 2]>>,
+    /// [`TINY_SLOT_ATTRIBUTE`].
+    pub slots: Option<Vec<u32>>,
+}
+
+/// Every triangle and triangle-strip primitive of a `.glb`/`.gltf`, each kept apart, and every
+/// material, for a model built without a donor (the TINY far-distance stand-in).
+///
+/// Positions take their node's transform. That transform must be a rigid motion (a rotation and a
+/// translation): normals are rotated with it and stay the vectors the file stores, so a scale is
+/// refused rather than applied to positions alone. A primitive of any other mode is an error.
+pub fn source_from_gltf(path: &Path) -> Result<(Vec<SourcePrimitive>, Vec<SourceMaterial>), String> {
+    let (doc, buffers) = open_gltf(path)?;
+    let materials = doc
+        .materials()
+        .map(|m| SourceMaterial {
+            alpha_mode: match m.alpha_mode() {
+                gltf::material::AlphaMode::Opaque => AlphaMode::Opaque,
+                gltf::material::AlphaMode::Mask => AlphaMode::Mask,
+                gltf::material::AlphaMode::Blend => AlphaMode::Blend,
+            },
+            extras: m.extras().as_ref().map(|r| r.get().to_string()),
+        })
+        .collect();
+    let mut out = Vec::new();
+    const IDENTITY: Mat4 = [
+        [1.0, 0.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0, 0.0],
+        [0.0, 0.0, 1.0, 0.0],
+        [0.0, 0.0, 0.0, 1.0],
+    ];
+    for scene in doc.scenes() {
+        for node in scene.nodes() {
+            visit_source(path, &node, IDENTITY, &buffers, &mut out)?;
+        }
+    }
+    if out.is_empty() {
+        return Err(format!("{}: no mesh primitives found", path.display()));
+    }
+    Ok((out, materials))
+}
+
+/// Whether `m` is a rotation and a translation: its 3×3 part orthonormal with determinant 1.
+fn is_rigid(m: &Mat4) -> bool {
+    let col = |c: usize| [m[c][0], m[c][1], m[c][2]];
+    let dot = |a: [f32; 3], b: [f32; 3]| a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+    let (x, y, z) = (col(0), col(1), col(2));
+    let close = |v: f32, w: f32| (v - w).abs() < 1e-5;
+    let cross = [x[1] * y[2] - x[2] * y[1], x[2] * y[0] - x[0] * y[2], x[0] * y[1] - x[1] * y[0]];
+    close(dot(x, x), 1.0)
+        && close(dot(y, y), 1.0)
+        && close(dot(z, z), 1.0)
+        && close(dot(x, y), 0.0)
+        && close(dot(x, z), 0.0)
+        && close(dot(y, z), 0.0)
+        && close(dot(cross, z), 1.0)
+        && m[0][3] == 0.0
+        && m[1][3] == 0.0
+        && m[2][3] == 0.0
+        && m[3][3] == 1.0
+}
+
+/// A direction under a rigid transform's rotation, not renormalised.
+fn rotate(m: &Mat4, d: [f32; 3]) -> [f32; 3] {
+    [
+        m[0][0] * d[0] + m[1][0] * d[1] + m[2][0] * d[2],
+        m[0][1] * d[0] + m[1][1] * d[1] + m[2][1] * d[2],
+        m[0][2] * d[0] + m[1][2] * d[1] + m[2][2] * d[2],
+    ]
+}
+
+fn visit_source(
+    path: &Path,
+    node: &gltf::Node,
+    parent: Mat4,
+    buffers: &[Vec<u8>],
+    out: &mut Vec<SourcePrimitive>,
+) -> Result<(), String> {
+    let world = mul(parent, node.transform().matrix());
+    if let Some(mesh) = node.mesh() {
+        if !is_rigid(&world) {
+            return Err(format!(
+                "{}: mesh {} sits under a node transform with a scale or shear; apply it to the \
+                 vertices, so the stored normals stay the ones the file means",
+                path.display(),
+                mesh.index()
+            ));
+        }
+        let identity = world == [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0]];
+        for prim in mesh.primitives() {
+            let at = (mesh.index(), prim.index());
+            let strip = match prim.mode() {
+                gltf::mesh::Mode::Triangles => false,
+                gltf::mesh::Mode::TriangleStrip => true,
+                other => {
+                    return Err(format!(
+                        "{}: mesh {} primitive {} is {other:?}; a TINY model takes TRIANGLES or \
+                         TRIANGLE_STRIP",
+                        path.display(),
+                        at.0,
+                        at.1
+                    ));
+                }
+            };
+            let reader = prim.reader(|b| buffers.get(b.index()).map(|d| &d[..]));
+            let positions: Vec<[f32; 3]> = reader
+                .read_positions()
+                .ok_or_else(|| format!("{}: mesh {} primitive {} has no POSITION", path.display(), at.0, at.1))?
+                .map(|p| if identity { p } else { transform_point(&world, p) })
+                .collect();
+            let normals = reader
+                .read_normals()
+                .map(|n| n.map(|v| if identity { v } else { rotate(&world, v) }).collect());
+            let uvs = reader.read_tex_coords(0).map(|t| t.into_f32().collect());
+            let indices: Vec<u32> = match reader.read_indices() {
+                Some(i) => i.into_u32().collect(),
+                None => (0..positions.len() as u32).collect(),
+            };
+            let custom = primitive_custom(&prim, buffers, positions.len())
+                .map_err(|e| format!("{}: mesh {} primitive {}: {e}", path.display(), at.0, at.1))?;
+            out.push(SourcePrimitive {
+                at,
+                extras: prim.extras().as_ref().map(|r| r.get().to_string()),
+                material: prim.material().index(),
+                strip,
+                indices,
+                positions,
+                normals,
+                uvs,
+                slots: custom.tiny_slot,
+            });
+        }
+    }
+    for child in node.children() {
+        visit_source(path, &child, world, buffers, out)?;
+    }
+    Ok(())
+}
+
 type Mat4 = [[f32; 4]; 4];
 
 fn mul(a: Mat4, b: Mat4) -> Mat4 {
@@ -505,6 +674,94 @@ mod tests {
         let path = gltf_with(&dir, &[vec![("_TINY_SLOT", 5126, [1.0f32; 3].iter().flat_map(|x| x.to_le_bytes()).collect())]]);
         let e = custom_attributes_from_gltf(&path).unwrap_err();
         assert!(e.contains("_TINY_SLOT") && e.contains("unsigned integer"), "{e}");
+    }
+
+    /// A `.gltf` with one primitive of `mode` (four vertices, a normal and a uv each, a `_TINY_SLOT`)
+    /// on a node with `matrix`, and two materials.
+    fn source_gltf(dir: &Path, mode: u32, matrix: Option<[f32; 16]>) -> std::path::PathBuf {
+        let mut bin: Vec<u8> = Vec::new();
+        let pos = [[0.0f32, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [1.0, 1.0, 0.0]];
+        for v in pos {
+            for c in v {
+                bin.extend_from_slice(&c.to_le_bytes());
+            }
+        }
+        for _ in 0..4 {
+            for c in [0.0f32, 0.6, 0.8] {
+                bin.extend_from_slice(&c.to_le_bytes());
+            }
+        }
+        for k in 0..4 {
+            for c in [k as f32 * 0.25, 0.5] {
+                bin.extend_from_slice(&c.to_le_bytes());
+            }
+        }
+        bin.extend_from_slice(&[3, 3, 3, 3]);
+        let node = match matrix {
+            Some(m) => format!(
+                r#"{{"mesh":0,"matrix":[{}]}}"#,
+                m.iter().map(|x| x.to_string()).collect::<Vec<_>>().join(",")
+            ),
+            None => r#"{"mesh":0}"#.to_string(),
+        };
+        let json = format!(
+            r#"{{"asset":{{"version":"2.0"}},"scene":0,"scenes":[{{"nodes":[0]}}],"nodes":[{node}],
+"meshes":[{{"primitives":[{{"attributes":{{"POSITION":0,"NORMAL":1,"TEXCOORD_0":2,"_TINY_SLOT":3}},"mode":{mode},"material":1,"extras":{{"tiny_role":"ruined"}}}}]}}],
+"materials":[{{"alphaMode":"OPAQUE"}},{{"alphaMode":"MASK","extras":{{"texture":"t"}}}}],
+"accessors":[
+{{"bufferView":0,"componentType":5126,"count":4,"type":"VEC3","min":[0,0,0],"max":[1,1,0]}},
+{{"bufferView":1,"componentType":5126,"count":4,"type":"VEC3"}},
+{{"bufferView":2,"componentType":5126,"count":4,"type":"VEC2"}},
+{{"bufferView":3,"componentType":5121,"count":4,"type":"SCALAR"}}],
+"bufferViews":[{{"buffer":0,"byteOffset":0,"byteLength":48}},{{"buffer":0,"byteOffset":48,"byteLength":48}},
+{{"buffer":0,"byteOffset":96,"byteLength":32}},{{"buffer":0,"byteOffset":128,"byteLength":4}}],
+"buffers":[{{"uri":"s.bin","byteLength":{}}}]}}"#,
+            bin.len()
+        );
+        std::fs::write(dir.join("s.bin"), &bin).unwrap();
+        let path = dir.join("s.gltf");
+        std::fs::write(&path, json).unwrap();
+        path
+    }
+
+    #[test]
+    fn a_source_primitive_keeps_its_mode_vertices_material_and_extras() {
+        let dir = scratch("source_strip");
+        let (prims, mats) = source_from_gltf(&source_gltf(&dir, 5, None)).unwrap();
+        assert_eq!(prims.len(), 1);
+        let p = &prims[0];
+        assert!(p.strip);
+        assert_eq!(p.indices, vec![0, 1, 2, 3]);
+        assert_eq!(p.material, Some(1));
+        assert_eq!(p.positions[3], [1.0, 1.0, 0.0]);
+        assert_eq!(p.normals.as_ref().unwrap()[0], [0.0, 0.6, 0.8]);
+        assert_eq!(p.uvs.as_ref().unwrap()[2], [0.5, 0.5]);
+        assert_eq!(p.slots, Some(vec![3, 3, 3, 3]));
+        assert_eq!(p.extras.as_deref(), Some(r#"{"tiny_role":"ruined"}"#));
+        assert_eq!(mats[0], SourceMaterial { alpha_mode: AlphaMode::Opaque, extras: None });
+        assert_eq!(mats[1].alpha_mode, AlphaMode::Mask);
+        assert_eq!(mats[1].extras.as_deref(), Some(r#"{"texture":"t"}"#));
+    }
+
+    #[test]
+    fn a_rigid_node_moves_positions_and_rotates_normals_and_a_scale_is_refused() {
+        let dir = scratch("source_rigid");
+        // a quarter turn about +X, then a translation of (10, 0, 0)
+        let m = [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, -1.0, 0.0, 0.0, 10.0, 0.0, 0.0, 1.0];
+        let (prims, _) = source_from_gltf(&source_gltf(&dir, 4, Some(m))).unwrap();
+        assert!(!prims[0].strip);
+        assert_eq!(prims[0].positions[2], [10.0, 0.0, 1.0]);
+        let n = prims[0].normals.as_ref().unwrap()[0];
+        assert!((n[0]).abs() < 1e-6 && (n[1] + 0.8).abs() < 1e-6 && (n[2] - 0.6).abs() < 1e-6, "{n:?}");
+
+        let dir = scratch("source_scaled");
+        let s = [2.0, 0.0, 0.0, 0.0, 0.0, 2.0, 0.0, 0.0, 0.0, 0.0, 2.0, 0.0, 0.0, 0.0, 0.0, 1.0];
+        let e = source_from_gltf(&source_gltf(&dir, 4, Some(s))).unwrap_err();
+        assert!(e.contains("scale"), "{e}");
+
+        let dir = scratch("source_points");
+        let e = source_from_gltf(&source_gltf(&dir, 0, None)).unwrap_err();
+        assert!(e.contains("TRIANGLES or TRIANGLE_STRIP"), "{e}");
     }
 
     #[test]
