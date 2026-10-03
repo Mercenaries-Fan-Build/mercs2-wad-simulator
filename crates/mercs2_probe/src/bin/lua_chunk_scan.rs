@@ -39,6 +39,15 @@ fn main() {
         .position(|a| a == "--out")
         .and_then(|i| args.get(i + 1).cloned())
         .map(PathBuf::from);
+    let extract_block: Option<usize> = args
+        .iter()
+        .position(|a| a == "--extract-block")
+        .and_then(|i| args.get(i + 1).and_then(|s| s.parse().ok()));
+    let extract_dir: Option<PathBuf> = args
+        .iter()
+        .position(|a| a == "--extract-dir")
+        .and_then(|i| args.get(i + 1).cloned())
+        .map(PathBuf::from);
 
     let mut w = wad::open(&wadpath).expect("open wad");
     let (indx, endian): (Vec<IndxEntry>, Endian) = {
@@ -55,6 +64,28 @@ fn main() {
 
     // Re-open the file; we'll read raw block bytes ourselves for console decompression.
     let mut file = File::open(&wadpath).expect("reopen wad");
+
+    if let (Some(bi), Some(dir)) = (extract_block, extract_dir.as_ref()) {
+        let data = decompress_any(&mut file, &indx, bi, endian).expect("decompress block");
+        let hits = scan_block(&data);
+        std::fs::create_dir_all(dir).expect("mkdir");
+        eprintln!(
+            "[extract] block={} path={} decomp_size={} chunks={}",
+            bi,
+            paths[bi],
+            data.len(),
+            hits.len()
+        );
+        for (idx, h) in hits.iter().enumerate() {
+            let end = hits.get(idx + 1).map(|n| n.offset).unwrap_or(data.len());
+            let bytes = &data[h.offset..end];
+            let fname = format!("chunk_{:04}_@{:X}.luac", idx, h.offset);
+            let path = dir.join(&fname);
+            std::fs::write(&path, bytes).expect("write chunk");
+            eprintln!("  wrote {} ({} B)", fname, bytes.len());
+        }
+        return;
+    }
 
     let mut tsv = String::new();
     tsv.push_str("block_index\tblock_path\tdecomp_size\tluac_count\tchunk_names\n");
