@@ -36,6 +36,7 @@ pub mod shader;
 pub mod shader_import;
 pub mod sound;
 pub mod states;
+pub mod tiny;
 pub mod world;
 
 pub use blast::{
