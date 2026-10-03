@@ -102,3 +102,7 @@ required-features = ["retail"]
 [[test]]
 name = "type_ids_match_the_wad"
 required-features = ["retail"]
+
+[[test]]
+name = "worldentity_retail"
+required-features = ["retail"]
