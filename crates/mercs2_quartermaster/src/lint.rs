@@ -471,6 +471,126 @@ pub const M0239_SHADER_CAPACITY: Rule = Rule {
     doc: "docs/modding/manifest_format.md#m0239",
 };
 
+/// An `add_tiny_geometry` that lists more objects than a stand-in draws, or none. The slot list's
+/// count is a byte (`0x0050F42B`) and every slot `≡ 3 (mod 4)` is skipped ([`M0248_TINY_SLOT_THREE`]),
+/// so 192 of its 255 slots hold objects.
+pub const M0240_TINY_OBJECT_COUNT: Rule = Rule {
+    code: "M0240",
+    title: "an add_tiny_geometry lists more than 192 objects, or none",
+    doc: "docs/modding/manifest_format.md#m0240",
+};
+
+/// An `add_tiny_geometry` that names one object twice. The slot list is searched by GUID, so a
+/// second slot for an object is never reached.
+pub const M0241_TINY_OBJECT_TWICE: Rule = Rule {
+    code: "M0241",
+    title: "an add_tiny_geometry names one object twice",
+    doc: "docs/modding/manifest_format.md#m0241",
+};
+
+/// A stand-in vertex with no `_TINY_SLOT`, or a slot past the `objects` list: the shader reads a
+/// state no object of the stand-in sets.
+pub const M0242_TINY_SLOT_RANGE: Rule = Rule {
+    code: "M0242",
+    title: "a stand-in vertex has no slot, or a slot past the objects",
+    doc: "docs/modding/manifest_format.md#m0242",
+};
+
+/// A stand-in triangle whose vertices name two slots: the shader keeps or drops each vertex by its
+/// own object's state, so the triangle tears when the states differ.
+pub const M0243_TINY_TRIANGLE_SLOTS: Rule = Rule {
+    code: "M0243",
+    title: "a stand-in triangle spans two slots",
+    doc: "docs/modding/manifest_format.md#m0243",
+};
+
+/// A stand-in primitive whose `extras.tiny_role` is missing or not `intact` / `ruined`: nothing says
+/// which shader draws it.
+pub const M0244_TINY_ROLE: Rule = Rule {
+    code: "M0244",
+    title: "a stand-in primitive declares no role",
+    doc: "docs/modding/manifest_format.md#m0244",
+};
+
+/// Needs the game stack. An `add_tiny_geometry` object that does not resolve, or is not placed in
+/// the stand-in's cell (in its layer, or, for an object of another layer, there), or a layer the
+/// game lacks. The engine finds the stand-ins of an object's state change through the cell of the
+/// object's position (`0x0050F730`, `0x0050F7E0`), so an object elsewhere never updates its slot.
+pub const M0245_TINY_OBJECT_PLACE: Rule = Rule {
+    code: "M0245",
+    title: "a stand-in object is not placed in the stand-in's cell",
+    doc: "docs/modding/manifest_format.md#m0245",
+};
+
+/// Needs the game stack. More stand-ins than the slot-list registry holds: it takes 1,400
+/// (`0x0050F1BE`) and drops a list past that (`0x0050F26C`), leaving the stand-in's slots unset.
+/// The count is every stand-in the game places plus the Shipment's.
+pub const M0246_TINY_CAPACITY: Rule = Rule {
+    code: "M0246",
+    title: "the stand-ins exceed the 1,400 slot lists the registry holds",
+    doc: "docs/modding/manifest_format.md#m0246",
+};
+
+/// Needs the game stack. The layer already has a stand-in for the cell.
+pub const M0247_TINY_CELL_TAKEN: Rule = Rule {
+    code: "M0247",
+    title: "the layer already has a stand-in for the cell",
+    doc: "docs/modding/manifest_format.md#m0247",
+};
+
+/// Reported by the `add_model` lowering on a TINY host. A `_TINY_SLOT` `≡ 3 (mod 4)`: the TINY
+/// shaders compute component 3 of a register as `2·.w − .y`, so the vertex is kept only while its
+/// object's state and that of the slot two below agree.
+pub const M0248_TINY_SLOT_THREE: Rule = Rule {
+    code: "M0248",
+    title: "a TINY vertex slot is ≡ 3 (mod 4)",
+    doc: "docs/modding/manifest_format.md#m0248",
+};
+
+/// An `add_tiny_geometry` cell outside the 40 × 40 grid.
+pub const M0249_TINY_CELL_GRID: Rule = Rule {
+    code: "M0249",
+    title: "an add_tiny_geometry cell is outside the 40 × 40 grid",
+    doc: "docs/modding/manifest_format.md#m0249",
+};
+
+/// Needs the game stack. An `add_tiny_geometry` key the game or another stand-in of the Shipment
+/// already uses: entity keys are the GUIDs the engine finds placements by.
+pub const M0250_TINY_KEY_TAKEN: Rule = Rule {
+    code: "M0250",
+    title: "an add_tiny_geometry key is already a placement",
+    doc: "docs/modding/manifest_format.md#m0250",
+};
+
+/// A stand-in's model that does not read as one: a primitive without a material, `NORMAL` or
+/// `TEXCOORD_0`, a material no primitive draws, an alpha-blended one, one without
+/// `extras.texture`, or one whose pixel shader the convention cannot name and the file does not
+/// declare; or a file that does not read.
+pub const M0251_TINY_SOURCE: Rule = Rule {
+    code: "M0251",
+    title: "a stand-in's model does not read as a TINY source",
+    doc: "docs/modding/manifest_format.md#m0251",
+};
+
+/// The `add_tiny_geometry` rule a [`crate::tiny::Problem`] code names.
+fn tiny_rule(code: &str) -> Rule {
+    match code {
+        "M0240" => M0240_TINY_OBJECT_COUNT,
+        "M0241" => M0241_TINY_OBJECT_TWICE,
+        "M0242" => M0242_TINY_SLOT_RANGE,
+        "M0243" => M0243_TINY_TRIANGLE_SLOTS,
+        "M0244" => M0244_TINY_ROLE,
+        "M0245" => M0245_TINY_OBJECT_PLACE,
+        "M0246" => M0246_TINY_CAPACITY,
+        "M0247" => M0247_TINY_CELL_TAKEN,
+        "M0248" => M0248_TINY_SLOT_THREE,
+        "M0249" => M0249_TINY_CELL_GRID,
+        "M0250" => M0250_TINY_KEY_TAKEN,
+        "M0251" => M0251_TINY_SOURCE,
+        other => panic!("crate::tiny reported {other}, which is not an add_tiny_geometry rule"),
+    }
+}
+
 /// Needs the game stack — see [`game_checks`], not [`lint`].
 pub const M0007_MULTI_RUNG_REPLACE: Rule = Rule {
     code: "M0007",
@@ -521,6 +641,13 @@ pub const RULES: &[Rule] = &[
     M0230_SHADER_SOURCE,
     M0231_SHADER_CAPABILITY,
     M0234_SHADER_CLASSES,
+    M0240_TINY_OBJECT_COUNT,
+    M0241_TINY_OBJECT_TWICE,
+    M0242_TINY_SLOT_RANGE,
+    M0243_TINY_TRIANGLE_SLOTS,
+    M0244_TINY_ROLE,
+    M0249_TINY_CELL_GRID,
+    M0251_TINY_SOURCE,
 ];
 
 /// Every rule [`game_checks`] (or a lowering that holds the game stack) reports.
@@ -538,6 +665,11 @@ pub const GAME_RULES: &[Rule] = &[
     M0237_SHADER_CONSTANT_UNBOUND,
     M0238_VS_INPUT_UNSUPPLIED,
     M0239_SHADER_CAPACITY,
+    M0245_TINY_OBJECT_PLACE,
+    M0246_TINY_CAPACITY,
+    M0247_TINY_CELL_TAKEN,
+    M0248_TINY_SLOT_THREE,
+    M0250_TINY_KEY_TAKEN,
 ];
 
 // --- Known, NOT yet implemented -------------------------------------------
@@ -618,6 +750,11 @@ fn parse_address(s: &str) -> Option<u32> {
 /// with no game, and mixing the two would make the hermetic set impossible to run alone.
 pub fn game_checks(manifest: &Manifest, game: &mut GameStack) -> Vec<Diagnostic> {
     let mut out = Vec::new();
+
+    // M0241, M0245–M0247, M0250: each add_tiny_geometry against the game's layers.
+    for (index, p) in crate::tiny::game_problems(manifest, game) {
+        out.push(Diagnostic { rule: tiny_rule(p.code), severity: Severity::Error, message: p.message, at: Some(index), fix: None });
+    }
 
     // M0218: a sound override's bank or cue that is not in the game.
     for (index, message) in crate::sound::override_target_problems(manifest, game) {
@@ -2014,6 +2151,11 @@ pub fn lint(
             }
             _ => {}
         }
+    }
+
+    // M0240–M0244, M0249, M0251: each add_tiny_geometry's cell, objects and model.
+    for (index, p) in crate::tiny::hermetic_problems(manifest, root, &source_issue_at) {
+        out.push(Diagnostic { rule: tiny_rule(p.code), severity: Severity::Error, message: p.message, at: Some(index), fix: None });
     }
 
     // M0231: the shaders an add_shader declares register at runtime, through the m2-sdk.
