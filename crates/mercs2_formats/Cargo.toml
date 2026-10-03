@@ -29,3 +29,4 @@ gltf = { version = "1", default-features = false, features = ["utils", "names"] 
 
 [dev-dependencies]
 serde_json = "1"
+mercs2_audio = { path = "../mercs2_audio" }
