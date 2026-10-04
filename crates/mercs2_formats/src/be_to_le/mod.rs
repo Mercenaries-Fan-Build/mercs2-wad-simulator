@@ -16,5 +16,6 @@ pub mod audio;
 pub mod convert;
 pub mod havok;
 pub mod lua;
+pub mod ps3_native;
 pub mod report;
 pub mod validate;

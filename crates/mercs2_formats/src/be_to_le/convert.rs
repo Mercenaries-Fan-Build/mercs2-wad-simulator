@@ -272,6 +272,15 @@ fn convert_container(
         });
     }
 
+    // PS3 1-to-1 terrain / lowres native path: short-circuit the entire
+    // Xbox-tuned pipeline (generic sweep + apply_decl_translate + apply_
+    // terrainmesh_reencode) because the PS3 stride and attribute offsets
+    // differ from Xbox. The native path produces PC-ready bytes directly
+    // from the raw BE container; see be_to_le::ps3_native.
+    if is_be && super::ps3_native::classify_container(container, type_hash).is_some() {
+        return super::ps3_native::convert_container_ps3(container, entry_idx, type_hash);
+    }
+
     // Build output container
     let mut out = Vec::with_capacity(container.len());
 
@@ -4842,4 +4851,140 @@ mod tests {
         assert_eq!(u16::from_le_bytes([be[PB + 2], be[PB + 3]]), 1);
         assert_eq!(&be[PB + 4..PB + 8], &[0x04, 0x03, 0x02, 0x01]);
     }
+}
+
+
+// -------------------------------------------------------------------------
+//  PS3 native path -- helper surface
+//
+//  These `pub(super)` wrappers let `ps3_native` reuse the Xbox-fetch-decl
+//  translation, the DEC3N -> F16x4 decoder, and the per-tag body swap arms,
+//  so the native path stays byte-identical to the Xbox-DOH -> PC output.
+// -------------------------------------------------------------------------
+
+/// Run the Xbox-fetch-decl -> PC D3DVERTEXELEMENT9 translation on `xbox_bytes`.
+/// Infallible for the hard-coded Xbox decl bytes carried by `ps3_native::PATTERNS`
+/// (every entry is a known-good Xbox fetch-decl); panics only on a programming
+/// error (a catalogue entry with malformed Xbox bytes).
+pub(super) fn ps3_native_translate_xbox_decl(xbox_bytes: &[u8]) -> Vec<u8> {
+    convert_decl(xbox_bytes).expect("ps3_native: catalogue xbox_decl must translate")
+}
+
+/// Public wrapper over the Xbox DEC3N -> PC FLOAT16_4 decoder so ps3_native can
+/// use the same bit-split rules (HEND3N 11-11-10 for NORMAL, DEC3N 10-10-10
+/// for TANGENT/BINORMAL) as the Xbox path.
+pub(super) fn ps3_native_dec3n_to_half4_le(u: u32, ten_ten_ten: bool) -> [u8; 8] {
+    dec3n_to_half4_le(u, ten_ten_ten)
+}
+
+/// Per-tag body translator for the PS3 native path.
+///
+/// Called for every non-STRM-handled descriptor body in a PS3 terrain / lowres
+/// container. Produces PC-ready LE bytes from the raw BE body, dispatching on
+/// (`tag`, `group_tag`, `type_hash`) with the same per-tag arms as
+/// `convert_generic_bodies` -- so for the shared bodies (IBUF info/data,
+/// PRMG/PRMT, MTRL, CHDR, PRMG, PHY2, HIER, etc.) PS3 and Xbox paths produce
+/// the same PC bytes.
+pub(super) fn ps3_native_translate_body(
+    be_body: &[u8],
+    tag: ChunkTag,
+    tag_le: [u8; 4],
+    group_tag: ChunkTag,
+    type_hash: u32,
+) -> Result<Vec<u8>, String> {
+    let _ = tag_le; // reserved for future tag-byte-sensitive arms
+    let mut body = be_body.to_vec();
+    // Mirror the per-tag arms from `convert_generic_bodies`. We only reach this
+    // function for non-STRM descriptors in a PS3 terrain / lowres container,
+    // so the ECS-only arms (`convert_ecs_bodies`) are not needed.
+    match tag {
+        ChunkTag::Syek | ChunkTag::Srts => { /* native BE on all platforms */ }
+        _ if is_string_tag(tag) => { /* string data */ }
+        ChunkTag::Prmt => {
+            if !walk_records(&mut body, &PRMT_WALKER) {
+                swap_u16_array(&mut body);
+            }
+        }
+        ChunkTag::Trns => { /* keep raw */ }
+        ChunkTag::Unknown(b) if b == *b"SEGM" => {
+            let mut o = 0;
+            while o + 4 <= body.len() {
+                body.swap(o, o + 1);
+                o += 4;
+            }
+        }
+        ChunkTag::Inst | ChunkTag::Bshi => swap_u16_array(&mut body),
+        ChunkTag::Hier => {
+            if !convert_hier_inplace(&mut body) {
+                swap_u32_array(&mut body);
+            }
+        }
+        ChunkTag::Trck => convert_trck_inplace(&mut body),
+        ChunkTag::Ptms => {
+            if !walk_records(&mut body, &PTMS_WALKER) {
+                swap_u32_array(&mut body);
+            }
+        }
+        ChunkTag::Ptch => {
+            if !convert_ptch_inplace(&mut body) {
+                swap_u32_array(&mut body);
+            }
+        }
+        ChunkTag::Mtrl => convert_mtrl(&mut body),
+        ChunkTag::Enum => convert_enum_body_inplace(&mut body),
+        ChunkTag::Ibuf => swap_u16_array(&mut body),
+        ChunkTag::Indx => swap_u16_array(&mut body),
+        ChunkTag::Info if type_hash == types::TYPE_HASH_ANIMATION => swap_u16_array(&mut body),
+        ChunkTag::Info => convert_info_body_inplace(&mut body),
+        ChunkTag::InfoUpper if type_hash == types::TYPE_HASH_STANCE => swap_u16_array(&mut body),
+        ChunkTag::Type if type_hash == types::TYPE_HASH_STANCE => {
+            convert_stance_type_names_inplace(&mut body)
+        }
+        ChunkTag::Schm | ChunkTag::Flgs => swap_u32_array(&mut body),
+        ChunkTag::Decl => {
+            // STRM decl bodies are already handled by the STRM pass before this
+            // function is called. A bare `decl` outside a STRM group is unexpected
+            // for terrain / lowres -- leave the body raw so a reader can see it.
+        }
+        ChunkTag::Chdr => {
+            if type_hash == types::TYPE_HASH_MODEL {
+                swap_u32_array(&mut body);
+            } else {
+                convert_chdr_body_inplace(&mut body);
+            }
+        }
+        ChunkTag::Deps => {
+            if body.len() > 1 {
+                swap_u32_array(&mut body[1..]);
+            }
+        }
+        ChunkTag::Efct => convert_efct_header_inplace(&mut body),
+        ChunkTag::Emtr => swap_u16_array(&mut body),
+        ChunkTag::Binn => { /* leave raw -- apply_binn_transcode handles elsewhere */ }
+        ChunkTag::Minf => {
+            if body.len() >= 6 {
+                swap_u32(&mut body, 0);
+                swap_u16_array(&mut body[4..]);
+            } else {
+                swap_u16_array(&mut body);
+            }
+        }
+        ChunkTag::Unknown(b) if b == *b"evnt" => convert_evnt_inplace(&mut body),
+        ChunkTag::Unknown(b) if b == *b"trnm" => convert_trnm_inplace(&mut body),
+        ChunkTag::Phy2 => {
+            let conv = havok::convert_phy2_be_to_le(&body)
+                .map_err(|e| format!("ps3_native PHY2 Havok convert: {e}"))?;
+            if conv.len() != body.len() {
+                return Err(format!(
+                    "ps3_native PHY2 size change {} -> {}",
+                    body.len(),
+                    conv.len()
+                ));
+            }
+            body = conv;
+        }
+        ChunkTag::Data if group_tag == ChunkTag::Ibuf => swap_u16_array(&mut body),
+        _ => swap_u32_array(&mut body),
+    }
+    Ok(body)
 }
