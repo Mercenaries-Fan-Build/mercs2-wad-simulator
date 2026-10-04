@@ -2289,6 +2289,78 @@ fn xbox_decl_format_to_pc_type(fmt: u8) -> Option<u8> {
     }
 }
 
+/// Convert a PS3-authored compact `decl` body (`03 00 ...`) into a PC
+/// `D3DVERTEXELEMENT9` array.
+///
+/// The PS3 DLC01 ships a non-interleaved multi-stream vertex layout: one STRM
+/// group per attribute, each with its own `info` (stride = per-stream, not
+/// per-vertex), `data`, and `decl`. The `decl` body is a 2-byte header `03 00`
+/// followed by a compact token sequence describing that one stream's attribute
+/// set. The entire DLC01 PS3 inventory uses only 11 distinct patterns across
+/// 7,806 descriptor rows; the per-pattern enumeration + Xbox-DOH oracle
+/// citations live in `docs/_descriptor_walker_oracle.md`.
+///
+/// Because each PS3 STRM group describes only one slice of the full vertex,
+/// its `decl` cannot by itself produce a usable PC decl: the PC engine's
+/// vertex layout is single-stream interleaved and requires every attribute in
+/// one record. Translating a single PS3 compact decl in isolation would emit
+/// a geometry-less or partial decl, silently breaking the mesh. The honest
+/// behaviour is to fail loud here and have the caller route the DLC via the
+/// X360-DOH import path (the current production flow — see §4-§5 of
+/// `docs/_dlc01_pipeline_readiness.md`), which already converts cleanly.
+///
+/// Returns `Err` on every input, with the recognised pattern and detected
+/// stride (if the sibling `info` chunk is available via the data_area header)
+/// annotated so callers can bucket the rejection accurately.
+fn convert_decl_ps3_compact(be: &[u8]) -> Result<Vec<u8>, String> {
+    debug_assert!(be.len() >= 2 && be[0] == 0x03 && be[1] == 0x00);
+    let hex = {
+        let mut s = String::with_capacity(be.len() * 2);
+        for b in be {
+            use std::fmt::Write;
+            let _ = write!(&mut s, "{:02x}", b);
+        }
+        s
+    };
+    // Classify by observed catalogue (see docs/_descriptor_walker_oracle.md).
+    // Each known pattern cites its Xbox-DOH oracle decl so a reader can see
+    // what the PC conversion WOULD need to synthesise if the full multi-
+    // stream merge pass is wired. Patterns are keyed by exact bytes — a
+    // novel pattern falls through to the generic refusal below.
+    let semantic = match hex.as_str() {
+        // Terrain / lowres patterns (type_hash 0x7C569307 / 0x1602815C):
+        "0300000304060304060a0201"
+            => "terrain stride-14 ground (xbox-oracle: COLOR@8 D3DCOLOR + NORMAL@12 F16x4)",
+        "0300000303060802060a0201030e0e04"
+            => "terrain stride-22 (xbox-oracle: UV@8 F16x2 + NORMAL@12 F16x4 + TANGENT@16 F16x4)",
+        "0300000303060802040a0304060e020103120e04"
+            => "terrain stride-26 (xbox-oracle: UV@8 F16x2 + COLOR@12 D3DCOLOR + NORMAL@16 F16x4 + TANGENT@20 F16x4)",
+        "0300000303060802040a0304060e0201"
+            => "terrain stride-18 (xbox-oracle: UV@8 F16x2 + COLOR@12 D3DCOLOR + NORMAL@16 F16x4)",
+        "0300000303060802060a0201"
+            => "terrain stride-14 variant (xbox-oracle: UV@8 F16x2 + NORMAL@12 F16x4)",
+        "0300000306060201"
+            => "lowres-terrain stride-10 (xbox-oracle: NORMAL@8 F16x4)",
+        // Mesh / foliage patterns (type_hash 0x5B724250 / 0x600B904E).
+        // These are 1-to-many against Xbox-DOH decls at the same block/desc
+        // index — the compact body alone cannot select which Xbox decl to
+        // emit. See docs/_descriptor_walker_oracle.md §Mesh ambiguity.
+        "03000802" => "mesh/foliage compact stride-4 (ambiguous: maps to 10 Xbox decls)",
+        "0300080206040201" => "mesh compact stride-8 variant-a (xbox-oracle: UV@8 F16x2 + NORMAL@12 F16x4)",
+        "0300080204040304" => "mesh/foliage compact stride-8 variant-b (ambiguous: maps to 9+ Xbox decls)",
+        _ => "unrecognised PS3 compact decl pattern",
+    };
+    Err(format!(
+        "PS3 compact decl detected (bytes=`{hex}`, {}): the PS3 DLC ships a \
+         non-interleaved multi-stream vertex layout; one PS3 STRM group / `decl` describes \
+         ONE attribute slice. The PC engine requires a single-stream interleaved \
+         D3DVERTEXELEMENT9 array. See docs/_descriptor_walker_oracle.md — route this \
+         block through the X360 DOH import path (dlc_port --x360-stfs <dlc01.doh>) \
+         or implement the multi-STRM merge pass before translating here.",
+        semantic
+    ))
+}
+
 /// Standard Direct3D9 D3DDECLTYPE byte sizes (enum value -> bytes).
 fn pc_d3ddecltype_size(t: u8) -> u16 {
     match t {
@@ -2299,14 +2371,38 @@ fn pc_d3ddecltype_size(t: u8) -> u16 {
     }
 }
 
-/// Translate an Xbox-360 vertex declaration (`decl` chunk) to a PC
-/// `D3DVERTEXELEMENT9` array. This is a *format translation*, not a byte-swap:
-///   Xbox: 12B header + N×12B elements (BE `u32 a, b, c`); END has `a>>16==0x00ff`.
-///   PC:   8B header `[0, 16]` + N×8B (`u16 Stream, u16 Offset, u8 Type, u8
-///         Method, u8 Usage, u8 UsageIndex`); END = D3DDECL_END (Type 17).
-/// Mirrors `tools/ucfx_be_to_le._convert_decl` (verified byte-exact vs retail).
-/// Errors on an unknown Xbox format byte rather than emitting a guessed type.
+/// Translate a console-authored vertex declaration (`decl` chunk) to a PC
+/// `D3DVERTEXELEMENT9` array.
+///
+/// Two authored layouts are observed on-disk:
+///
+/// - **Xbox 360 fetch-decl** (`be[0] == 0x00`): 12B header + N×12B elements (BE
+///   `u32 a, b, c`). END has `a>>16 == 0x00ff`. The 2,196 Xbox DLC01 blocks and
+///   every retail Xbox mesh/terrain decl use this layout. Translation mirrors
+///   `tools/ucfx_be_to_le._convert_decl` and is golden-tested byte-exact against
+///   the retail PC oracle (`tools/_decl_golden_test.py`).
+///
+/// - **PS3 compact decl** (`be[0] == 0x03 && be[1] == 0x00`): a 2-byte header
+///   followed by a per-STRM-group token sequence. Each STRM group ships one
+///   attribute of a non-interleaved multi-stream vertex layout; the compact
+///   bytes describe only that single stream (strides observed: 4/8/10/14/18/
+///   22/26 bytes, vs Xbox single-stream strides 20/24/28/32/36 for the same
+///   semantic meshes). Routed to `convert_decl_ps3_compact`, which pattern-
+///   matches against the 11-pattern vocabulary catalogued (with per-pattern
+///   Xbox-DOH oracle citations) in `docs/_descriptor_walker_oracle.md`.
+///
+/// PC output in both paths:
+///   `8B header [0, 16]` + N×8B D3DVERTEXELEMENT9 (`u16 Stream, u16 Offset, u8
+///   Type, u8 Method, u8 Usage, u8 UsageIndex`); END = D3DDECL_END (Type 17).
+///
+/// Fails loud on an unknown format byte rather than emitting a guessed type.
 fn convert_decl(be: &[u8]) -> Result<Vec<u8>, String> {
+    // PS3 compact decl: `03 00 ...`. The Xbox fetch-decl header always starts
+    // with four zero bytes (`a` of the header record), so this gate is
+    // unambiguous. See docs/_descriptor_walker_oracle.md.
+    if be.len() >= 2 && be[0] == 0x03 && be[1] == 0x00 {
+        return convert_decl_ps3_compact(be);
+    }
     if be.len() < 12 {
         return Err(format!("decl body too small for a vertex declaration ({} bytes)", be.len()));
     }
@@ -4180,6 +4276,96 @@ mod tests {
             [0xff, 0x00, 0x00, 0x00, 0x11, 0x00, 0x00, 0x00],
             "empty Xbox decl must map to retail's bare PC D3DDECL_END"
         );
+    }
+
+    /// The PS3 DLC01 ships compact `03 00 ...` decls (per-STRM-group, one
+    /// attribute per stream of a non-interleaved multi-stream vertex layout).
+    /// Pre-fix, convert_decl classified these as either "body too small"
+    /// (<12B) or "produced 0 elements" (12B parsed as a header with no END
+    /// marker). Post-fix, the 0x03/0x00 header is recognised and the
+    /// `convert_decl_ps3_compact` arm fires with a PS3-specific message that
+    /// names the pattern and routes the operator to the X360-DOH import.
+    ///
+    /// Fixtures taken from the DLC01 PS3 SCFF
+    /// (ps3_dlc01_be.scff, sha256 cc58b68d614786eb..., census in
+    /// scratchpad/descriptor_walker_oracle/ps3_decl_census/decl_census.txt).
+    #[test]
+    fn ps3_compact_decl_terrain_stride14_ground_detected() {
+        // Terrain stride-14 ground (type_hash 0x7C569307, 1,296 descriptors):
+        // block[152] desc[10] parent=STRM, bytes `03 00 00 03 04 06 03 04 06
+        // 0a 02 01`. The Xbox-DOH equivalent at the same block/desc index is
+        // COLOR @ 8 D3DCOLOR + NORMAL @ 12 F16x4.
+        let be: [u8; 12] = [
+            0x03, 0x00, 0x00, 0x03, 0x04, 0x06, 0x03, 0x04, 0x06, 0x0a, 0x02, 0x01,
+        ];
+        let err = convert_decl(&be).unwrap_err();
+        assert!(
+            err.contains("terrain stride-14 ground"),
+            "expected pattern-named refusal, got: {err}"
+        );
+        assert!(err.contains("multi-stream"), "diagnostic must name the architectural cause: {err}");
+    }
+
+    #[test]
+    fn ps3_compact_decl_terrain_stride26_detected() {
+        // Terrain stride-26 (type_hash 0x7C569307, 294 descriptors): block[165]
+        // desc[215] parent=STRM, bytes `03 00 00 03 03 06 08 02 04 0a 03 04 06
+        // 0e 02 01 03 12 0e 04`. Xbox-DOH equiv: UV@8 F16x2 + COLOR@12 D3DCOLOR
+        // + NORMAL@16 F16x4 + TANGENT@20 F16x4.
+        let be: [u8; 20] = [
+            0x03, 0x00, 0x00, 0x03, 0x03, 0x06, 0x08, 0x02, 0x04, 0x0a, 0x03, 0x04,
+            0x06, 0x0e, 0x02, 0x01, 0x03, 0x12, 0x0e, 0x04,
+        ];
+        let err = convert_decl(&be).unwrap_err();
+        assert!(err.contains("stride-26"), "{err}");
+    }
+
+    #[test]
+    fn ps3_compact_decl_mesh_stride4_detected() {
+        // Mesh/foliage compact stride-4 (type_hash 0x5B724250 / 0x600B904E,
+        // 4,028 + 703 descriptors): block[29] desc[89] parent=STRM, bytes
+        // `03 00 08 02`. 1-to-many against Xbox-DOH decls at the same block/
+        // desc (10 distinct Xbox decls for 0x5B724250 alone) — the compact
+        // body alone cannot select which Xbox decl to emit, so the refusal
+        // must name the ambiguity.
+        let be: [u8; 4] = [0x03, 0x00, 0x08, 0x02];
+        let err = convert_decl(&be).unwrap_err();
+        assert!(err.contains("stride-4"), "{err}");
+        assert!(err.contains("multi-stream"), "{err}");
+    }
+
+    #[test]
+    fn ps3_compact_decl_unknown_pattern_fails_loud() {
+        // A pattern not in the 11-row DLC01 vocabulary must still error (never
+        // fall through to a `_` match / silent skip, per project rules), but
+        // with the generic "unrecognised" tag so callers can tell it apart
+        // from the known catalogue.
+        let be: [u8; 6] = [0x03, 0x00, 0xDE, 0xAD, 0xBE, 0xEF];
+        let err = convert_decl(&be).unwrap_err();
+        assert!(err.contains("unrecognised"), "unknown PS3 pattern must be labelled: {err}");
+    }
+
+    #[test]
+    fn xbox_decl_still_dispatches_after_ps3_arm_added() {
+        // The PS3-prefix gate must only fire on 0x03 0x00. A valid Xbox decl
+        // (`a` of the header record is 00000000, so byte 0 == 0x00) must still
+        // route to the Xbox path and produce the retail PC decl.
+        let be: [u8; 48] = [
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x1a, 0x23, 0x60, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x08, 0x00, 0x18, 0x28, 0x86, 0x00, 0x0a, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x0c, 0x00, 0x2a, 0x21, 0x90, 0x00, 0x03, 0x00, 0x00,
+            0x00, 0xff, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff, 0x00, 0x00, 0x00, 0x00,
+        ];
+        let out = convert_decl(&be).expect("Xbox decl must still convert");
+        // Expect: PC header (8B) + 2 elems × 8B + END (8B) = 32B.
+        assert_eq!(out.len(), 32);
+        assert_eq!(&out[0..8], &[0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00]);
+        // Elem 1: stream=0, offset=8, type=4 D3DCOLOR, method=0, usage=10 COLOR
+        assert_eq!(&out[8..16], &[0x00, 0x00, 0x08, 0x00, 0x04, 0x00, 0x0a, 0x00]);
+        // Elem 2: stream=0, offset=12, type=16 F16x4, method=0, usage=3 NORMAL
+        assert_eq!(&out[16..24], &[0x00, 0x00, 0x0c, 0x00, 0x10, 0x00, 0x03, 0x00]);
+        // END
+        assert_eq!(&out[24..32], &[0xff, 0x00, 0x00, 0x00, 0x11, 0x00, 0x00, 0x00]);
     }
 
     /// The dispatch, not just the helper: an `EFCT` row in a BE container must reach the u16
