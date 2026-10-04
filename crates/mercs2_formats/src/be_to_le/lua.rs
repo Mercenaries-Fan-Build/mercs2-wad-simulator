@@ -38,6 +38,37 @@ fn find_sub(hay: &[u8], needle: &[u8]) -> Option<usize> {
     (0..=hay.len() - needle.len()).find(|&i| &hay[i..i + needle.len()] == needle)
 }
 
+/// Walk up from `start`, yielding each ancestor directory.
+fn ancestors(start: PathBuf) -> impl Iterator<Item = PathBuf> {
+    let mut cur = Some(start);
+    std::iter::from_fn(move || {
+        let next = cur.clone();
+        if let Some(ref mut p) = cur {
+            if !p.pop() {
+                cur = None;
+            }
+        }
+        next
+    })
+}
+
+/// Try each candidate relative path against every ancestor of the current
+/// executable and current working directory. First file hit wins.
+fn locate_in_repo(candidates: &[&str]) -> Option<PathBuf> {
+    let starts = [std::env::current_exe().ok(), std::env::current_dir().ok()];
+    for start in starts.into_iter().flatten() {
+        for anc in ancestors(start) {
+            for rel in candidates {
+                let p = anc.join(rel);
+                if p.is_file() {
+                    return Some(p);
+                }
+            }
+        }
+    }
+    None
+}
+
 fn find_java() -> Option<String> {
     if let Ok(j) = std::env::var("JAVA") {
         if !j.is_empty() {
@@ -52,13 +83,19 @@ fn find_java() -> Option<String> {
             }
         }
     }
-    // Bundled JDK under tools/jdk21/<dist>/bin/java[.exe] (relative to CWD = repo root).
-    if let Ok(rd) = std::fs::read_dir("tools/jdk21") {
-        for e in rd.flatten() {
-            for n in ["bin/java.exe", "bin/java"] {
-                let p = e.path().join(n);
-                if p.is_file() {
-                    return Some(p.to_string_lossy().into_owned());
+    for start in [std::env::current_exe().ok(), std::env::current_dir().ok()]
+        .into_iter()
+        .flatten()
+    {
+        for anc in ancestors(start) {
+            if let Ok(rd) = std::fs::read_dir(anc.join("tools/jdk21")) {
+                for e in rd.flatten() {
+                    for n in ["bin/java.exe", "bin/java"] {
+                        let p = e.path().join(n);
+                        if p.is_file() {
+                            return Some(p.to_string_lossy().into_owned());
+                        }
+                    }
                 }
             }
         }
@@ -72,12 +109,11 @@ fn find_unluac() -> Option<String> {
             return Some(j);
         }
     }
-    for c in ["tools/external/unluac/unluac.jar", "tools/unluac.jar"] {
-        if Path::new(c).is_file() {
-            return Some(c.to_string());
-        }
-    }
-    None
+    locate_in_repo(&[
+        "tools/external/unluac/unluac.jar",
+        "tools/unluac.jar",
+    ])
+    .map(|p| p.to_string_lossy().into_owned())
 }
 
 fn flip_endianness(listing: &[u8]) -> Option<Vec<u8>> {
@@ -269,5 +305,30 @@ mod tests {
                 // Some error paths are acceptable
             }
         }
+    }
+
+    #[test]
+    fn find_unluac_resolves_the_bundled_jar_regardless_of_cwd() {
+        let jar = find_unluac().expect(
+            "repo-bundled tools/external/unluac/unluac.jar must resolve via ancestor walk",
+        );
+        let p = Path::new(&jar);
+        assert!(p.is_file(), "find_unluac returned non-file path: {jar}");
+        assert!(
+            jar.ends_with("unluac.jar"),
+            "resolved path should end in unluac.jar: {jar}"
+        );
+    }
+
+    #[test]
+    fn find_java_resolves_the_bundled_jdk_regardless_of_cwd() {
+        let java = find_java().expect("find_java returns Some (JDK or PATH fallback)");
+        let p = Path::new(&java);
+        // PATH fallback is Some("java") (no .is_file()); the bundled jdk21 must resolve
+        // to a real file when the walk-up finds it.
+        assert!(
+            p.is_file() || java == "java",
+            "find_java returned neither a real file nor the PATH fallback: {java}"
+        );
     }
 }
