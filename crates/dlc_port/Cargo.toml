@@ -5,6 +5,10 @@ publish = false                # excluded from the crates.io release set
 edition = "2021"
 readme = "README.md"
 
+[lib]
+name = "dlc_port"
+path = "src/lib.rs"
+
 [[bin]]
 name = "dlc_port"
 path = "src/main.rs"

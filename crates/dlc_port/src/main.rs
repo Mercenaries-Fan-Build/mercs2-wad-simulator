@@ -1,4 +1,4 @@
-//! All-Rust DLC porter: Xbox 360 DLC RAR/STFS → PC `vz-patch.wad`.
+//! All-Rust DLC porter: Xbox 360 DLC RAR/STFS / PS3 BE SCFF → PC `vz-patch.wad`.
 //!
 //! Reimplements the core of `tools/dlc_port.py::port_x360_dlc` using the Rust
 //! pipeline: STFS extract → BE FFCS parse → per-block (BE-sges decompress or
@@ -23,6 +23,15 @@
 //!
 //! Run `--list-blocks` to dump the block table without converting anything;
 //! `--start-block` / `--max-blocks` narrow the converted range while iterating.
+//!
+//! `--xbox-doh-oracle <path>` opts into the Xbox-DOH side-oracle resolution for
+//! PS3 blocks the UCFX descriptor walker refuses with the `PS3 compact decl
+//! detected` class (see `docs/_dlc_port_xbox_doh_side_oracle.md`). When the
+//! oracle is supplied, the main input must be a PS3 BE SCFF (via `--x360-stfs`;
+//! the same loader accepts a raw BE SCFF). A rejected PS3 block's primary
+//! `name_hash` is resolved against the Xbox DOH's indexed primary name_hashes;
+//! an unresolved hash fails the whole run with a message naming the hash and
+//! both container paths.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -44,13 +53,15 @@ use mercs2_formats::sges::{compress_sges, decompress_sges};
 use mercs2_formats::ucfx::parse_block_entry_table;
 use ucfx_byteswap::convert::{convert_block, QUIET};
 
+use dlc_port::xbox_doh_oracle::{is_ps3_compact_decl_rejection, primary_name_hash_be, XboxDohOracle};
+
 #[derive(Parser)]
-#[command(name = "dlc_port", about = "Port Xbox 360 DLC to a PC vz-patch.wad (all-Rust)")]
+#[command(name = "dlc_port", about = "Port Xbox 360 / PS3 DLC to a PC vz-patch.wad (all-Rust)")]
 struct Cli {
     /// Xbox 360 DLC RAR archive
     #[arg(long)]
     x360_rar: Option<PathBuf>,
-    /// STFS container or raw DLC01.doh file
+    /// STFS container, raw DLC01.doh, or PS3 BE SCFF file
     #[arg(long)]
     x360_stfs: Option<PathBuf>,
     /// Output vz-patch.wad path
@@ -65,12 +76,44 @@ struct Cli {
     /// Start at block N
     #[arg(long, default_value_t = 0)]
     start_block: usize,
+    /// Xbox 360 DOH side oracle: when the main input is a PS3 SCFF, the
+    /// descriptor walker refuses blocks that ship PS3's non-interleaved
+    /// multi-stream vertex layout (`PS3 compact decl detected` class, see
+    /// `docs/_descriptor_walker_oracle.md`). With this flag set, each such
+    /// block is resolved against the Xbox DOH at matching primary
+    /// `name_hash` and the Xbox-DOH LE body is used in its place. The output
+    /// WAD then carries 100 % of the DLC01 content with no silent drops.
+    ///
+    /// Loud-fail contract: if the Xbox DOH does not hold a PS3-rejected
+    /// block's primary `name_hash`, the whole run fails with a message
+    /// naming the hash and both container paths. No silent fallback.
+    #[arg(long, value_name = "XBOX_DOH_PATH")]
+    xbox_doh_oracle: Option<PathBuf>,
     #[arg(short, long)]
     verbose: bool,
 }
 
 fn strip_xbox_sub_entry(u2: u32) -> u32 {
     (u2 & 0xFFFF_0000) | 0xFFFF
+}
+
+/// Per-block decode result the main loop then recompresses + verifies +
+/// stores in a `PatchBlock`. Separating the dispatch from the output
+/// assembly keeps the loop readable and makes the side-oracle a pure
+/// routing decision.
+enum BlockDecode {
+    /// PS3 BE→LE walker converted the block directly.
+    Ps3Direct(Vec<u8>),
+    /// PS3 walker refused the block with the `PS3 compact decl detected`
+    /// class; the Xbox-DOH oracle resolved it. The `Vec<u8>` is the
+    /// Xbox-DOH LE body already produced by `convert_block` at oracle-
+    /// load time. `xbox_path` is the Xbox DOH's PTHS entry for the block;
+    /// `name_hash` is the primary name_hash used as the lookup key.
+    XboxDohSideOracle {
+        le_bytes: Vec<u8>,
+        xbox_path: String,
+        name_hash: u32,
+    },
 }
 
 fn run() -> Result<(), String> {
@@ -91,6 +134,20 @@ fn run() -> Result<(), String> {
         doh
     } else {
         return Err("Provide --x360-rar or --x360-stfs".into());
+    };
+
+    // ── Step 1b: optionally load the Xbox-DOH side oracle ──
+    //
+    // Loaded eagerly so a bad path fails before block conversion starts
+    // rather than halfway through. The oracle also sets QUIET on
+    // ucfx_byteswap so its own BE→LE pass is silent; the main loop
+    // re-asserts QUIET below anyway for the same reason.
+    let xbox_doh_oracle: Option<XboxDohOracle> = match &cli.xbox_doh_oracle {
+        Some(p) => {
+            println!("Step 1b: Loading Xbox-DOH side oracle from {}...", p.display());
+            Some(XboxDohOracle::load(p)?)
+        }
+        None => None,
     };
 
     // ── Step 2: parse BE FFCS ──
@@ -138,6 +195,8 @@ fn run() -> Result<(), String> {
     let end = num_blocks.min(cli.start_block + cli.max_blocks.unwrap_or(num_blocks));
     let mut converted: Vec<PatchBlock> = Vec::new();
     let mut skipped = 0usize;
+    let mut ps3_direct_count = 0usize;
+    let mut xbox_doh_sourced_count = 0usize;
     let total = end - cli.start_block;
 
     for blk_idx in cli.start_block..end {
@@ -182,14 +241,82 @@ fn run() -> Result<(), String> {
             continue;
         };
 
-        // Convert BE→LE.
-        let swapped = match convert_block(&decompressed, false, None) {
-            Ok(s) => s,
-            Err(_) => {
-                skipped += 1;
-                continue;
+        // Convert BE→LE, routing a PS3-compact-decl rejection through the
+        // optional Xbox-DOH side oracle. Anything the oracle cannot resolve
+        // fails the whole run — no silent fallback — so the output WAD is
+        // either 100 % resolved or does not exist.
+        let decode = match convert_block(&decompressed, false, None) {
+            Ok(s) => BlockDecode::Ps3Direct(s),
+            Err(err) => {
+                if is_ps3_compact_decl_rejection(&err) {
+                    match &xbox_doh_oracle {
+                        Some(oracle) => {
+                            let Some(name_hash) = primary_name_hash_be(&decompressed) else {
+                                return Err(format!(
+                                    "block {blk_idx} ({path}): descriptor-walker refused as \
+                                     PS3-compact-decl but the BE entry table is unreadable, so \
+                                     no primary name_hash is available to look up in the Xbox \
+                                     DOH oracle at {}. convert_block error: {err}",
+                                    oracle.source_path.display()
+                                ));
+                            };
+                            match oracle.lookup(name_hash) {
+                                Some(ob) => BlockDecode::XboxDohSideOracle {
+                                    le_bytes: ob.le_decompressed.clone(),
+                                    xbox_path: ob.xbox_path.clone(),
+                                    name_hash,
+                                },
+                                None => {
+                                    return Err(format!(
+                                        "Xbox-DOH side-oracle miss: PS3 block [{blk_idx}] {path} \
+                                         primary name_hash=0x{name_hash:08X} is not in the Xbox \
+                                         DOH container at {}. The side oracle must resolve EVERY \
+                                         PS3-compact-decl rejection or the output WAD is \
+                                         incomplete; silent fallback is forbidden. convert_block \
+                                         error: {err}",
+                                        oracle.source_path.display()
+                                    ));
+                                }
+                            }
+                        }
+                        None => {
+                            // No oracle supplied: keep the historical skip
+                            // behaviour so running without `--xbox-doh-oracle`
+                            // is identical to the pre-change build.
+                            skipped += 1;
+                            continue;
+                        }
+                    }
+                } else {
+                    // A non-PS3-compact-decl rejection (wavebank schema, unluac,
+                    // truncated UCFX…) is shared between PS3 and Xbox DOH inputs
+                    // on the DLC01 corpus and is out of scope for the oracle.
+                    // Keep the historical skip path for parity with pre-change.
+                    skipped += 1;
+                    continue;
+                }
             }
         };
+
+        let (swapped, oracle_hit): (Vec<u8>, Option<(String, u32)>) = match decode {
+            BlockDecode::Ps3Direct(s) => {
+                ps3_direct_count += 1;
+                (s, None)
+            }
+            BlockDecode::XboxDohSideOracle { le_bytes, xbox_path, name_hash } => {
+                xbox_doh_sourced_count += 1;
+                (le_bytes, Some((xbox_path, name_hash)))
+            }
+        };
+
+        if let Some((xbox_path, name_hash)) = oracle_hit {
+            // Light trace: one line per side-oracle hit, cheap at the 470-block
+            // DLC01 scale. The caller can grep logs for `oracle-hit:` to audit.
+            eprintln!(
+                "  oracle-hit: ps3=[{blk_idx}] {path} ← xbox={xbox_path} \
+                 (name_hash=0x{name_hash:08X})"
+            );
+        }
 
         // Recompress + round-trip verify.
         let pc_sges = compress_sges(&swapped)?;
@@ -199,6 +326,12 @@ fn run() -> Result<(), String> {
         }
 
         // Recompute packed_field: (xbox_tier << 24) | ceil(size / PAGE_SIZE).
+        //
+        // The tier byte is inherited from the PS3 INDX entry even on an Xbox-DOH
+        // side-oracle hit: the output WAD lives in the PS3 output's address
+        // space, so the INDX layout (and the tier byte that lives in it) tracks
+        // the PS3 side. The DECOMPRESSED SIZE is of course the Xbox-DOH LE
+        // body's size, since that is what the engine will actually inflate.
         let xbox_tier = (e.packed_field >> 24) & 0xFF;
         let pages = ((swapped.len() + 0x7FFF) / 0x8000) as u32;
         let recomputed_packed = (xbox_tier << 24) | pages;
@@ -216,13 +349,22 @@ fn run() -> Result<(), String> {
             println!("  [{}/{total}] converting...", converted.len() + skipped);
         }
     }
-    println!("  Converted: {}, Skipped: {skipped}", converted.len());
+    println!(
+        "  Converted: {} (ps3-direct: {}, xbox-doh-side-oracle: {}), Skipped: {skipped}",
+        converted.len(),
+        ps3_direct_count,
+        xbox_doh_sourced_count
+    );
     if converted.is_empty() {
         return Err("No blocks converted".into());
     }
 
     // ── ASET resolution: route every row to the block that actually owns its hash ──
     // Owner map + the owning entry's type_hash, built once from the converted blocks.
+    // Xbox-DOH-sourced blocks contribute their entries' name_hashes here the same
+    // way PS3-direct blocks do: the LE entry table is already in `compressed_data`
+    // on both paths, so the PS3-side ASET rows for assets that lived in a rejected
+    // PS3 block still route correctly against the Xbox-DOH-sourced body.
     let mut hash_owner: HashMap<u32, (usize, u32)> = HashMap::new();
     for (i, blk) in converted.iter().enumerate() {
         if let Ok(raw) = decompress_sges(&blk.compressed_data) {
@@ -295,11 +437,13 @@ fn run() -> Result<(), String> {
     }
     std::fs::write(&output, &wad).map_err(|e| format!("write: {e}"))?;
     println!(
-        "  Output: {} ({} bytes / {:.1} MB), {} blocks",
+        "  Output: {} ({} bytes / {:.1} MB), {} blocks (ps3-direct {}, xbox-doh-side-oracle {})",
         output.display(),
         wad.len(),
         wad.len() as f64 / 1024.0 / 1024.0,
-        converted.len()
+        converted.len(),
+        ps3_direct_count,
+        xbox_doh_sourced_count
     );
     Ok(())
 }
