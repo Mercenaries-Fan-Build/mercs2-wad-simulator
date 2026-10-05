@@ -349,8 +349,8 @@ impl Contribution {
                     out.push(("shader_low", low.path()));
                 }
             }
-            Contribution::AddFx { payload, .. } => out.push(("payload", payload.as_path())),
-            Contribution::ReplaceFx { payload, .. } => out.push(("payload", payload.as_path())),
+            Contribution::AddFx { effect, .. } => out.push(("effect", effect.as_path())),
+            Contribution::ReplaceFx { edits, .. } => out.push(("edits", edits.as_path())),
             Contribution::ReplaceTerrainCell { cell, .. } => out.push(("cell", cell.as_path())),
             Contribution::EditStateMachine { states, .. } => out.push(("states", states.as_path())),
             Contribution::EditWorld { edits, .. } => out.push(("edits", edits.as_path())),
