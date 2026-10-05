@@ -1,0 +1,6 @@
+# Every emitter of global_explosion_c4 magenta; each COLR key keeps its fourth byte and its half.
+edits:
+  - { op: colour_rgb, emitter: 0, rgb: [255, 0, 255] }
+  - { op: colour_rgb, emitter: 1, rgb: [255, 0, 255] }
+  - { op: colour_rgb, emitter: 2, rgb: [255, 0, 255] }
+  - { op: colour_rgb, emitter: 3, rgb: [255, 0, 255] }
