@@ -572,6 +572,112 @@ pub const M0251_TINY_SOURCE: Rule = Rule {
     doc: "docs/modding/manifest_format.md#m0251",
 };
 
+/// An `add_fx` effect form that is missing, does not parse, or does not lower: a position not
+/// declared, a value its position cannot take, a curve where the loader takes none, or a rule of
+/// the effect writer broken.
+pub const M0252_EFFECT_FORM: Rule = Rule {
+    code: "M0252",
+    title: "an add_fx effect form does not read as an effect",
+    doc: "docs/modding/manifest_format.md#m0252",
+};
+
+/// An `add_fx` template name the engine's string reader cannot hold: empty, longer than 0x7F
+/// bytes, or carrying a NUL.
+pub const M0253_TEMPLATE_NAME: Rule = Rule {
+    code: "M0253",
+    title: "an add_fx template name is empty, too long, or carries a NUL",
+    doc: "docs/modding/manifest_format.md#m0253",
+};
+
+/// A `replace_fx` edits form that is missing, does not parse, or lists no edit.
+pub const M0254_EDITS_FORM: Rule = Rule {
+    code: "M0254",
+    title: "a replace_fx edits form does not read, or is empty",
+    doc: "docs/modding/manifest_format.md#m0254",
+};
+
+/// An `add_fx` template without exactly one `RedEffectComponent`: the record whose `name` names the
+/// effect the template starts.
+pub const M0255_TEMPLATE_EFFECT_COMPONENT: Rule = Rule {
+    code: "M0255",
+    title: "an add_fx template does not declare exactly one RedEffectComponent",
+    doc: "docs/modding/manifest_format.md#m0255",
+};
+
+/// Needs the game. An `add_fx` template that does not lower against the worldentity's own schemas:
+/// a class the container has no group for, a field not declared, a value its field cannot hold.
+pub const M0256_TEMPLATE_SCHEMA: Rule = Rule {
+    code: "M0256",
+    title: "an add_fx template does not lower against the game's component schemas",
+    doc: "docs/modding/manifest_format.md#m0256",
+};
+
+/// Needs the game. An `add_fx` template whose name hash or derived key is already in the
+/// worldentity, or is another added template's.
+pub const M0257_TEMPLATE_TAKEN: Rule = Rule {
+    code: "M0257",
+    title: "an add_fx template's name or derived key is already taken",
+    doc: "docs/modding/manifest_format.md#m0257",
+};
+
+/// Needs the game. An `add_fx` name the game already has an effect under.
+pub const M0258_EFFECT_TAKEN: Rule = Rule {
+    code: "M0258",
+    title: "an add_fx name is an effect the game already has",
+    doc: "docs/modding/manifest_format.md#m0258",
+};
+
+/// Needs the game. A `TEXT` frame that is not a record of the game's `fxdict`, where the loader
+/// looks each frame up; or an `add_fx` template whose `RedEffectComponent` names an effect neither
+/// the game nor the Shipment has. Checked again by `qm link`.
+pub const M0259_FX_REFERENCE_MISSING: Rule = Rule {
+    code: "M0259",
+    title: "an effect frame or a template's effect names nothing",
+    doc: "docs/modding/manifest_format.md#m0259",
+};
+
+/// Needs the game. A `replace_fx` target that resolves to no effect: no such effect or template,
+/// a template without exactly one `RedEffectComponent`, or another Shipment's addition when this
+/// Shipment does not require that Shipment.
+pub const M0260_FX_TARGET: Rule = Rule {
+    code: "M0260",
+    title: "a replace_fx target does not resolve to an effect",
+    doc: "docs/modding/manifest_format.md#m0260",
+};
+
+/// Needs the game. A `replace_fx` edit that addresses a node the effect does not have, or leaves
+/// the effect breaking a rule of the effect writer.
+pub const M0261_FX_EDIT: Rule = Rule {
+    code: "M0261",
+    title: "a replace_fx edit addresses a missing node or breaks a writer rule",
+    doc: "docs/modding/manifest_format.md#m0261",
+};
+
+/// A `raw` payload that carries an effect (type `0x5608BD5A`) or the worldentity. Effects and
+/// templates ship only through `add_fx` and `replace_fx`, which `qm link` merges across the set.
+pub const M0262_RAW_FX: Rule = Rule {
+    code: "M0262",
+    title: "a raw payload carries an effect or the worldentity",
+    doc: "docs/modding/manifest_format.md#m0262",
+};
+
+/// The rule a [`crate::fx::Problem`] code names.
+fn fx_rule(code: &str) -> Rule {
+    match code {
+        "M0252" => M0252_EFFECT_FORM,
+        "M0253" => M0253_TEMPLATE_NAME,
+        "M0254" => M0254_EDITS_FORM,
+        "M0255" => M0255_TEMPLATE_EFFECT_COMPONENT,
+        "M0256" => M0256_TEMPLATE_SCHEMA,
+        "M0257" => M0257_TEMPLATE_TAKEN,
+        "M0258" => M0258_EFFECT_TAKEN,
+        "M0259" => M0259_FX_REFERENCE_MISSING,
+        "M0260" => M0260_FX_TARGET,
+        "M0261" => M0261_FX_EDIT,
+        other => panic!("crate::fx reported {other}, which is not an fx rule"),
+    }
+}
+
 /// The `add_tiny_geometry` rule a [`crate::tiny::Problem`] code names.
 fn tiny_rule(code: &str) -> Rule {
     match code {
@@ -648,6 +754,11 @@ pub const RULES: &[Rule] = &[
     M0244_TINY_ROLE,
     M0249_TINY_CELL_GRID,
     M0251_TINY_SOURCE,
+    M0252_EFFECT_FORM,
+    M0253_TEMPLATE_NAME,
+    M0254_EDITS_FORM,
+    M0255_TEMPLATE_EFFECT_COMPONENT,
+    M0262_RAW_FX,
 ];
 
 /// Every rule [`game_checks`] (or a lowering that holds the game stack) reports.
@@ -670,6 +781,12 @@ pub const GAME_RULES: &[Rule] = &[
     M0247_TINY_CELL_TAKEN,
     M0248_TINY_SLOT_THREE,
     M0250_TINY_KEY_TAKEN,
+    M0256_TEMPLATE_SCHEMA,
+    M0257_TEMPLATE_TAKEN,
+    M0258_EFFECT_TAKEN,
+    M0259_FX_REFERENCE_MISSING,
+    M0260_FX_TARGET,
+    M0261_FX_EDIT,
 ];
 
 // --- Known, NOT yet implemented -------------------------------------------
@@ -1794,6 +1911,115 @@ fn display_dest(dest: crate::manifest::PlaceIn) -> String {
     }
 }
 
+/// M0252, M0253 and M0255 for one `add_fx`: the effect form lowers, the template name is one the
+/// engine's string reader holds, and the template declares exactly one `RedEffectComponent`. The
+/// effect form is read only with a `root`, and not when its path is already an error.
+fn add_fx_checks(
+    index: usize,
+    effect: &Path,
+    template: &crate::template::TemplateForm,
+    root: Option<&Path>,
+    source_issue_at: &[usize],
+) -> Vec<Diagnostic> {
+    let mut out = Vec::new();
+    let mut push = |rule: Rule, message: String| {
+        out.push(Diagnostic { rule, severity: Severity::Error, message, at: Some(index), fix: None })
+    };
+    let name = &template.name;
+    let max = mercs2_formats::worldentity::MAX_STRING_BYTES;
+    if name.is_empty() {
+        push(M0253_TEMPLATE_NAME, "the template name is empty; Pg.Spawn and StartEmitter look a template up by name".into());
+    } else if name.len() > max {
+        push(
+            M0253_TEMPLATE_NAME,
+            format!("template name {name:?} is {} bytes; the engine's string reader holds {max}", name.len()),
+        );
+    } else if name.contains('\0') {
+        push(M0253_TEMPLATE_NAME, format!("template name {name:?} carries a NUL, which ends the string the engine reads"));
+    }
+    let reds = match template.components.get(crate::fx::RED_EFFECT_CLASS) {
+        None => 0,
+        Some(crate::template::Records::One(_)) => 1,
+        Some(crate::template::Records::Many(v)) => v.len(),
+    };
+    if reds != 1 {
+        push(
+            M0255_TEMPLATE_EFFECT_COMPONENT,
+            format!(
+                "template {name:?} declares {reds} {} records; it needs exactly one, whose `name` names \
+                 the effect the template starts",
+                crate::fx::RED_EFFECT_CLASS
+            ),
+        );
+    }
+    if let Some(root) = root.filter(|_| !source_issue_at.contains(&index)) {
+        if let Err(e) = crate::effect::read(&root.join(effect)).and_then(|f| f.lower()) {
+            push(M0252_EFFECT_FORM, e);
+        }
+    }
+    out
+}
+
+/// M0262: why a `raw` payload may not ship, when it carries an effect or the worldentity. `None`
+/// when it carries neither, or does not read (the lowering reports that).
+fn raw_fx_refusal(payload: &Path) -> Option<String> {
+    use mercs2_formats::worldentity::{RETAIL_WORLDENTITY_NAME_HASH, WORLDENTITY_TYPE_HASH};
+    let bytes = std::fs::read(payload).ok()?;
+    let (parsed, _) = mercs2_formats::ucfx::walk_decompressed_block(&bytes, "raw payload");
+    let hits: Vec<String> = parsed
+        .entries
+        .iter()
+        .filter_map(|e| {
+            if e.type_hash == mercs2_formats::types::TYPE_HASH_EFFECT {
+                Some(format!("effect 0x{:08X}", e.name_hash))
+            } else if e.type_hash == WORLDENTITY_TYPE_HASH || e.name_hash == RETAIL_WORLDENTITY_NAME_HASH {
+                Some(format!("worldentity 0x{:08X}", e.name_hash))
+            } else {
+                None
+            }
+        })
+        .collect();
+    (!hits.is_empty()).then(|| {
+        format!(
+            "the payload carries {}. Effects and templates ship through add_fx (a new effect and its \
+             template) and replace_fx (an edit of an effect the game ships), which `qm link` merges \
+             into the game's effects block and worldentity",
+            hits.join(", ")
+        )
+    })
+}
+
+/// M0256–M0261 for a Shipment's `add_fx` and `replace_fx`, against the game's effects block and
+/// worldentity: [`crate::fx::merge`] of this Shipment alone ([`crate::fx::Scope::Build`]). Two
+/// `replace_fx` of the Shipment that resolve to one effect are M0120. The hermetic M0252–M0255 are
+/// [`lint`]'s and are not repeated.
+///
+/// `Err` when the game's effects block or worldentity cannot be read.
+pub fn fx_game_checks(manifest: &Manifest, root: &Path, game: &mut GameStack) -> Result<Vec<Diagnostic>, String> {
+    let mut out = Vec::new();
+    if !crate::fx::has_fx(manifest) {
+        return Ok(out);
+    }
+    let base = crate::fx::GameFx::read(game)?;
+    let fx_base = crate::fx::FxBase { effects: &base.effects.entries, worldentity: &base.worldentity, frames: &base.frames };
+    let set = [crate::fx::FxShipment { manifest, root }];
+    if let Err(f) = crate::fx::merge(&fx_base, &set, crate::fx::Scope::Build) {
+        for p in f.problems.into_iter().filter(|p| !matches!(p.code, "M0252" | "M0253" | "M0254" | "M0255")) {
+            out.push(Diagnostic { rule: fx_rule(p.code), severity: Severity::Error, message: p.message, at: Some(p.index), fix: None });
+        }
+        for c in f.conflicts {
+            out.push(Diagnostic {
+                rule: M0120_SELF_CONFLICT,
+                severity: Severity::Error,
+                message: c.to_string(),
+                at: c.claimants.first().map(|c| c.index),
+                fix: None,
+            });
+        }
+    }
+    Ok(out)
+}
+
 /// Run every hermetic rule.
 ///
 /// `root` enables the source-file checks; pass `None` to lint manifest text alone. `names` enables
@@ -1941,7 +2167,22 @@ pub fn lint(
                     });
                 }
             }
-            Contribution::Raw { touches, .. } => {
+            Contribution::AddFx { effect, template, .. } => {
+                out.extend(add_fx_checks(index, effect, template, root, &source_issue_at));
+            }
+            Contribution::ReplaceFx { edits, .. } => {
+                if let Some(root) = root.filter(|_| !source_issue_at.contains(&index)) {
+                    if let Err(message) = crate::fx::read_edits(&root.join(edits)) {
+                        out.push(Diagnostic { rule: M0254_EDITS_FORM, severity: Severity::Error, message, at: Some(index), fix: None });
+                    }
+                }
+            }
+            Contribution::Raw { touches, payload, .. } => {
+                if let Some(root) = root.filter(|_| !source_issue_at.contains(&index)) {
+                    if let Some(message) = raw_fx_refusal(&root.join(payload)) {
+                        out.push(Diagnostic { rule: M0262_RAW_FX, severity: Severity::Error, message, at: Some(index), fix: None });
+                    }
+                }
                 if touches.is_empty() {
                     out.push(Diagnostic {
                         rule: M0150_RAW_NO_TOUCHES,
