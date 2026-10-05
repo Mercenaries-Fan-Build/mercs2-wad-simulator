@@ -6,10 +6,14 @@ shipment:
   version: 1.0.0
   target: retail
   description: >-
-    A new cyan effect qm_fx_cyan_burst and the template qm_cyan_burst that starts it, and the retail
-    C4 explosion recoloured magenta.
+    A new sprite qm_fx_a_ring, a new cyan effect qm_fx_cyan_burst that draws it and the template
+    qm_cyan_burst that starts the effect, and the retail C4 explosion recoloured magenta.
 
 contributions:
+  - kind: add_fx_sprite
+    name: qm_fx_a_ring
+    image: src/qm_fx_a_ring.png
+
   - kind: add_fx
     name: qm_fx_cyan_burst
     effect: src/qm_fx_cyan_burst.yaml
