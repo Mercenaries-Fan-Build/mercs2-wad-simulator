@@ -961,6 +961,10 @@ pub enum Contribution {
     },
     /// Data, same-hash, FULLY RESIDENT. Non-destructive means the base WAD is never modified — not
     /// that the asset's appearance is preserved.
+    ///
+    /// A `target` of the `vfx` atlas `0x89E211AF` repaints the atlas the effects draw from: the
+    /// repaint is the base `qm link` packs every installed Shipment's `add_fx_sprite` on top of
+    /// ([`crate::sprite`]), written into the resident block, and one Shipment of a set repaints it.
     ReplaceTexture { target: String, image: PathBuf },
     /// Script. A DECLARED MUTATION, not a finished block: the Quartermaster links `scripts_vz`
     /// across the installed set at deploy, so two Shipments patching Lua do not annihilate.
@@ -1153,6 +1157,18 @@ pub enum Contribution {
         effect: PathBuf,
         /// The template, declared field by field.
         template: crate::template::TemplateForm,
+    },
+    /// Data. A NEW sprite frame for effects: `image`, a PNG whose width and height are each a power
+    /// of two from 4 to 512, drawn into the free square of the `vfx` atlas `0x89E211AF`, and an
+    /// `fxdict` record under `pandemic_hash_m2(name)` that names its rectangle. An effect's `TEXT`
+    /// names the sprite by `name` as a frame. `qm link` packs every installed Shipment's sprites into
+    /// the one atlas and the one `fxdict` ([`crate::sprite`]). A Shipment names another Shipment's
+    /// sprite as a frame only when it requires that Shipment.
+    AddFxSprite {
+        /// The sprite name; its hash is the frame key.
+        name: String,
+        /// The sprite image, `src/`-relative: a PNG with straight (unpremultiplied) alpha.
+        image: PathBuf,
     },
     /// Data, SAME-HASH. Edit an effect the game ships, in place: `target` names the effect, directly
     /// or through a template that starts it, and `edits` is the edits form file
@@ -1474,6 +1490,7 @@ impl Contribution {
         "replace_shader",
         "add_fx",
         "replace_fx",
+        "add_fx_sprite",
         "replace_terrain_cell",
         "edit_state_machine",
         "edit_world",
@@ -1532,6 +1549,7 @@ impl Contribution {
             Contribution::ReplaceShader { .. } => "replace_shader",
             Contribution::AddFx { .. } => "add_fx",
             Contribution::ReplaceFx { .. } => "replace_fx",
+            Contribution::AddFxSprite { .. } => "add_fx_sprite",
             Contribution::ReplaceTerrainCell { .. } => "replace_terrain_cell",
             Contribution::EditStateMachine { .. } => "edit_state_machine",
             Contribution::EditWorld { .. } => "edit_world",
