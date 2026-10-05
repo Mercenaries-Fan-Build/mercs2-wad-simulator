@@ -33,7 +33,8 @@ qm lint  [DIR] [--report FILE]           check a Shipment — no game install ne
 qm build [DIR] [--out DIR]               lower it into an overlay WAD (default out: DIR/_build)
 qm preflight DIR... --out DIR            check a set before building: requirements, versions,
                                          conflicts, superseded files, load order → load-plan.json
-qm link  DIR... --out DIR                link the set's Lua and string tables into one WAD, mounted last
+qm link  DIR... --out DIR                link the set's Lua, string tables, effects and templates into
+                                         one WAD, mounted last
 qm check-range --report FILE -- RANGE... check version ranges with qm's semver grammar (M0172)
 qm compile-lua FILE... [--out-dir DIR]   compile Lua with the game's compiler and check the header
 qm manifest-info FILE                    print a manifest's name and version as JSON
@@ -102,6 +103,15 @@ edits. `qm link` merges every Shipment's writes to one table into one
 link-owned table in load order, the later write winning: key edits by key hash, text replacements
 against the table as merged so far. The load plan's `link_block_paths` names every
 block the link re-emits, so a deploy step drops the per-Shipment copies of exactly those.
+
+Effects and templates work the same way. The game ships every effect in one block,
+`blocks\VZ\effects_P000_Q3.block`, and every world template in one container, the `worldentity` in
+the resident block. `add_fx` appends a new effect to the first and its template to the second;
+`replace_fx` edits an effect in place, named directly or through a template that starts it. A
+Shipment's own build re-emits both blocks at their own paths, and `qm link` applies every Shipment's
+`add_fx` and `replace_fx` in load order into one effects block and one resident block — the same
+resident block that carries the linked scripts. Two `replace_fx` that resolve to one effect, by name
+or through a template, conflict.
 
 `patch_lua` reaches **two** blocks: `scripts_vz` (114 content scripts — contracts, jobs, tutorials)
 and `resident` (~240 always-loaded framework modules, `Mrx*` and the world-entity scripts). A target
