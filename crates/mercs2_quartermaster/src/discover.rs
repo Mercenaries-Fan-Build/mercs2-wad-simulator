@@ -350,6 +350,7 @@ impl Contribution {
                 }
             }
             Contribution::AddFx { effect, .. } => out.push(("effect", effect.as_path())),
+            Contribution::AddFxSprite { image, .. } => out.push(("image", image.as_path())),
             Contribution::ReplaceFx { edits, .. } => out.push(("edits", edits.as_path())),
             Contribution::ReplaceTerrainCell { cell, .. } => out.push(("cell", cell.as_path())),
             Contribution::EditStateMachine { states, .. } => out.push(("states", states.as_path())),
