@@ -627,9 +627,10 @@ pub const M0258_EFFECT_TAKEN: Rule = Rule {
     doc: "docs/modding/manifest_format.md#m0258",
 };
 
-/// Needs the game. A `TEXT` frame that is not a record of the game's `fxdict`, where the loader
-/// looks each frame up; or an `add_fx` template whose `RedEffectComponent` names an effect neither
-/// the game nor the Shipment has. Checked again by `qm link`.
+/// Needs the game. A `TEXT` frame that is neither a record of the game's `fxdict`, where the loader
+/// looks each frame up, nor an `add_fx_sprite` of the Shipment or of a Shipment it requires; or an
+/// `add_fx` template whose `RedEffectComponent` names an effect neither the game nor the Shipment
+/// has. Checked again by `qm link`, which resolves the frames `qm build` leaves to it.
 pub const M0259_FX_REFERENCE_MISSING: Rule = Rule {
     code: "M0259",
     title: "an effect frame or a template's effect names nothing",
@@ -661,6 +662,47 @@ pub const M0262_RAW_FX: Rule = Rule {
     doc: "docs/modding/manifest_format.md#m0262",
 };
 
+/// An `add_fx_sprite` image that is missing, is not a PNG, does not decode, or whose width or height
+/// is not a power of two from 4 to 512.
+pub const M0304_SPRITE_IMAGE: Rule = Rule {
+    code: "M0304",
+    title: "an add_fx_sprite image does not read as a sprite",
+    doc: "docs/modding/manifest_format.md#m0304",
+};
+
+/// An `add_fx_sprite` name that is empty or written as `0xHHHHHHHH`: the frame key is the name's
+/// hash, and a frame written as a hash names that hash itself.
+pub const M0305_SPRITE_NAME: Rule = Rule {
+    code: "M0305",
+    title: "an add_fx_sprite name is empty or written as a hash",
+    doc: "docs/modding/manifest_format.md#m0305",
+};
+
+/// Needs the game. An `add_fx_sprite` whose key is already a record of the game's `fxdict`, or the
+/// key of a sprite another Shipment of the set adds.
+pub const M0306_SPRITE_KEY_TAKEN: Rule = Rule {
+    code: "M0306",
+    title: "an add_fx_sprite key is already an fxdict record",
+    doc: "docs/modding/manifest_format.md#m0306",
+};
+
+/// Needs the game. A set's sprites that do not fit the free square of the base atlas the set
+/// provides (its `vfx` repaint, else the game's), or a base atlas with no free square.
+pub const M0307_SPRITES_DO_NOT_FIT: Rule = Rule {
+    code: "M0307",
+    title: "the sprites do not fit the free square of the base atlas",
+    doc: "docs/modding/manifest_format.md#m0307",
+};
+
+/// A `raw` payload that carries the `fxdict` (type `0xFA46D8A8`) or the `vfx` atlas `0x89E211AF`.
+/// Sprites ship through `add_fx_sprite` and the atlas through `replace_texture`, which `qm link`
+/// merges across the set.
+pub const M0308_RAW_SPRITES: Rule = Rule {
+    code: "M0308",
+    title: "a raw payload carries the fxdict or the vfx atlas",
+    doc: "docs/modding/manifest_format.md#m0308",
+};
+
 /// The rule a [`crate::fx::Problem`] code names.
 fn fx_rule(code: &str) -> Rule {
     match code {
@@ -674,6 +716,10 @@ fn fx_rule(code: &str) -> Rule {
         "M0259" => M0259_FX_REFERENCE_MISSING,
         "M0260" => M0260_FX_TARGET,
         "M0261" => M0261_FX_EDIT,
+        "M0304" => M0304_SPRITE_IMAGE,
+        "M0305" => M0305_SPRITE_NAME,
+        "M0306" => M0306_SPRITE_KEY_TAKEN,
+        "M0307" => M0307_SPRITES_DO_NOT_FIT,
         other => panic!("crate::fx reported {other}, which is not an fx rule"),
     }
 }
@@ -759,6 +805,9 @@ pub const RULES: &[Rule] = &[
     M0254_EDITS_FORM,
     M0255_TEMPLATE_EFFECT_COMPONENT,
     M0262_RAW_FX,
+    M0304_SPRITE_IMAGE,
+    M0305_SPRITE_NAME,
+    M0308_RAW_SPRITES,
 ];
 
 /// Every rule [`game_checks`] (or a lowering that holds the game stack) reports.
@@ -787,6 +836,8 @@ pub const GAME_RULES: &[Rule] = &[
     M0259_FX_REFERENCE_MISSING,
     M0260_FX_TARGET,
     M0261_FX_EDIT,
+    M0306_SPRITE_KEY_TAKEN,
+    M0307_SPRITES_DO_NOT_FIT,
 ];
 
 // --- Known, NOT yet implemented -------------------------------------------
@@ -1960,6 +2011,33 @@ fn add_fx_checks(
     out
 }
 
+/// M0308: why a `raw` payload may not ship, when it carries the `fxdict` or the `vfx` atlas. `None`
+/// when it carries neither, or does not read (the lowering reports that).
+fn raw_sprites_refusal(payload: &Path) -> Option<String> {
+    let bytes = std::fs::read(payload).ok()?;
+    let (parsed, _) = mercs2_formats::ucfx::walk_decompressed_block(&bytes, "raw payload");
+    let hits: Vec<String> = parsed
+        .entries
+        .iter()
+        .filter_map(|e| {
+            if e.type_hash == mercs2_formats::types::TYPE_HASH_FX_DICTIONARY {
+                Some(format!("the fxdict 0x{:08X}", e.name_hash))
+            } else if e.name_hash == crate::sprite::VFX_ATLAS {
+                Some(format!("the vfx atlas 0x{:08X}", e.name_hash))
+            } else {
+                None
+            }
+        })
+        .collect();
+    (!hits.is_empty()).then(|| {
+        format!(
+            "the payload carries {}. Sprites ship through add_fx_sprite and the atlas through \
+             replace_texture of vfx, which `qm link` merges into the game's fxdict and atlas",
+            hits.join(", ")
+        )
+    })
+}
+
 /// M0262: why a `raw` payload may not ship, when it carries an effect or the worldentity. `None`
 /// when it carries neither, or does not read (the lowering reports that).
 fn raw_fx_refusal(payload: &Path) -> Option<String> {
@@ -1989,22 +2067,35 @@ fn raw_fx_refusal(payload: &Path) -> Option<String> {
     })
 }
 
-/// M0256–M0261 for a Shipment's `add_fx` and `replace_fx`, against the game's effects block and
-/// worldentity: [`crate::fx::merge`] of this Shipment alone ([`crate::fx::Scope::Build`]). Two
-/// `replace_fx` of the Shipment that resolve to one effect are M0120. The hermetic M0252–M0255 are
+/// M0256–M0261, M0306 and M0307 for a Shipment's `add_fx_sprite`, `add_fx` and `replace_fx`, against
+/// the game's effects block, worldentity, fxdict and atlas (repainted when the Shipment repaints it):
+/// [`crate::fx::merge`] of this Shipment alone ([`crate::fx::Scope::Build`]). Two `replace_fx` of
+/// the Shipment that resolve to one effect are M0120. The hermetic M0252–M0255, M0304 and M0305 are
 /// [`lint`]'s and are not repeated.
 ///
-/// `Err` when the game's effects block or worldentity cannot be read.
+/// `Err` when the game's effects block, worldentity, fxdict or atlas cannot be read, or the
+/// Shipment's repaint of the atlas does not encode.
 pub fn fx_game_checks(manifest: &Manifest, root: &Path, game: &mut GameStack) -> Result<Vec<Diagnostic>, String> {
     let mut out = Vec::new();
-    if !crate::fx::has_fx(manifest) {
+    if !crate::fx::merges_fx(manifest) {
         return Ok(out);
     }
     let base = crate::fx::GameFx::read(game)?;
-    let fx_base = crate::fx::FxBase { effects: &base.effects.entries, worldentity: &base.worldentity, frames: &base.frames };
     let set = [crate::fx::FxShipment { manifest, root }];
+    let (atlas, repainted) = crate::fx::base_atlas(&base.atlas, &set)?;
+    let fx_base = crate::fx::FxBase {
+        effects: &base.effects.entries,
+        worldentity: &base.worldentity,
+        fxdict: &base.fxdict,
+        atlas: &atlas,
+        repainted,
+    };
     if let Err(f) = crate::fx::merge(&fx_base, &set, crate::fx::Scope::Build) {
-        for p in f.problems.into_iter().filter(|p| !matches!(p.code, "M0252" | "M0253" | "M0254" | "M0255")) {
+        for p in f
+            .problems
+            .into_iter()
+            .filter(|p| !matches!(p.code, "M0252" | "M0253" | "M0254" | "M0255" | "M0304" | "M0305"))
+        {
             out.push(Diagnostic { rule: fx_rule(p.code), severity: Severity::Error, message: p.message, at: Some(p.index), fix: None });
         }
         for c in f.conflicts {
@@ -2177,10 +2268,23 @@ pub fn lint(
                     }
                 }
             }
+            Contribution::AddFxSprite { name, image } => {
+                if let Some(message) = crate::sprite::name_refusal(name) {
+                    out.push(Diagnostic { rule: M0305_SPRITE_NAME, severity: Severity::Error, message, at: Some(index), fix: None });
+                }
+                if let Some(root) = root.filter(|_| !source_issue_at.contains(&index)) {
+                    if let Err(message) = crate::sprite::read_sprite(&root.join(image)) {
+                        out.push(Diagnostic { rule: M0304_SPRITE_IMAGE, severity: Severity::Error, message, at: Some(index), fix: None });
+                    }
+                }
+            }
             Contribution::Raw { touches, payload, .. } => {
                 if let Some(root) = root.filter(|_| !source_issue_at.contains(&index)) {
                     if let Some(message) = raw_fx_refusal(&root.join(payload)) {
                         out.push(Diagnostic { rule: M0262_RAW_FX, severity: Severity::Error, message, at: Some(index), fix: None });
+                    }
+                    if let Some(message) = raw_sprites_refusal(&root.join(payload)) {
+                        out.push(Diagnostic { rule: M0308_RAW_SPRITES, severity: Severity::Error, message, at: Some(index), fix: None });
                     }
                 }
                 if touches.is_empty() {
