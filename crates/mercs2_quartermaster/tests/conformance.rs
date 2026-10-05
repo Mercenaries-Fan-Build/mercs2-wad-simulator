@@ -262,6 +262,10 @@ contributions:
     target: { template: global_particle_explosion_c4 }
     edits: src/fx/c4.yaml
 
+  - kind: add_fx_sprite
+    name: my_sprite
+    image: src/fx/my_sprite.png
+
   - kind: replace_terrain_cell
     target: shipped_cell
     cell: src/terrain/new_cell.bin
@@ -512,6 +516,11 @@ const JSON: &str = r#"
       "kind": "replace_fx",
       "target": {"template": "global_particle_explosion_c4"},
       "edits": "src/fx/c4.yaml"
+    },
+    {
+      "kind": "add_fx_sprite",
+      "name": "my_sprite",
+      "image": "src/fx/my_sprite.png"
     },
     {
       "kind": "replace_terrain_cell",
@@ -780,6 +789,11 @@ target = { template = "global_particle_explosion_c4" }
 edits = "src/fx/c4.yaml"
 
 [[contributions]]
+kind = "add_fx_sprite"
+name = "my_sprite"
+image = "src/fx/my_sprite.png"
+
+[[contributions]]
 kind = "replace_terrain_cell"
 target = "shipped_cell"
 cell = "src/terrain/new_cell.bin"
@@ -851,6 +865,7 @@ fn toml_carries_the_kind_tag_for_every_v1_kind() {
             "replace_shader",
             "add_fx",
             "replace_fx",
+            "add_fx_sprite",
             "replace_terrain_cell",
             "add_stringdb_keys",
             "replace_stringdb_text",
