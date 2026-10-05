@@ -1629,3 +1629,155 @@ fn m0251_fires_on_a_material_without_a_texture_or_a_pixel_shader() {
     assert_eq!(codes(&d), vec!["M0251"], "{d:?}");
     assert!(d[0].message.contains("pixel_shader"), "{}", d[0].message);
 }
+
+// ---------------------------------------------------------------------------
+// M0252–M0255, M0262 — the fx kinds and raw effects
+// ---------------------------------------------------------------------------
+
+/// A one-emitter effect with every position at 0 (u32 positions 1), frame 7.
+fn fx_effect() -> mercs2_formats::fxdict::EffectContainer {
+    use mercs2_formats::fxdict::*;
+    use mercs2_quartermaster::effect;
+    let attrs = |defs: Vec<&AttrDef>| -> Vec<Atrb> {
+        defs.iter()
+            .map(|d| match d.kind {
+                ValueKind::F32 => Atrb::f32(d.hash, 0.0),
+                ValueKind::U32 => Atrb::u32(d.hash, 1),
+            })
+            .collect()
+    };
+    EffectContainer {
+        shapes: vec![EmitterShape { records: vec![[0.0; SHAPE_RECORD_FLOATS]] }],
+        emitters: vec![Emitter {
+            transform: [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0]],
+            channels: attrs(effect::channel_defs()),
+            geom: None,
+            particle: ParticleType {
+                flags: 0,
+                attributes: attrs(effect::particle_defs()),
+                colr: Colr::uniform([0, 255, 255, 255], 0x3C00),
+                text: Text { frames: vec![7] },
+            },
+        }],
+        forces: vec![],
+    }
+}
+
+/// A Shipment directory with `files` under `src/`, linted with its root.
+fn lint_fx(label: &str, contributions: &str, files: &[(&str, Vec<u8>)]) -> Vec<lint::Diagnostic> {
+    let root = std::env::temp_dir().join(format!("qm_lint_fx_{}_{label}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    for (f, bytes) in files {
+        std::fs::write(root.join("src").join(f), bytes).unwrap();
+    }
+    let m = shipment_with(contributions);
+    lint::lint(&m, Some(&root), None)
+}
+
+fn add_fx_yaml(template: &str, reds: &str) -> String {
+    format!(
+        "  - kind: add_fx\n    name: qm_fx\n    effect: src/fx.yaml\n    template:\n      name: \"{template}\"\n      \
+         name_flag: 1\n      components:\n{reds}"
+    )
+}
+
+const ONE_RED: &str = "        RedEffectComponent: { name: qm_fx }\n";
+
+fn effect_yaml() -> Vec<u8> {
+    use mercs2_quartermaster::effect::{self, EffectForm};
+    effect::to_string(&EffectForm::express(&fx_effect()), Format::Yaml).unwrap().into_bytes()
+}
+
+#[test]
+fn add_fx_is_quiet_on_a_sound_effect_and_template() {
+    let d = lint_fx("quiet", &add_fx_yaml("qm_tpl", ONE_RED), &[("fx.yaml", effect_yaml())]);
+    assert!(d.is_empty(), "{d:?}");
+}
+
+#[test]
+fn m0252_fires_on_an_effect_form_that_does_not_lower() {
+    let text = String::from_utf8(effect_yaml()).unwrap().replacen("posx:", "posq:", 1);
+    let d = lint_fx("m0252", &add_fx_yaml("qm_tpl", ONE_RED), &[("fx.yaml", text.into_bytes())]);
+    assert_eq!(codes(&d), vec!["M0252"], "{d:?}");
+    assert!(d[0].message.contains("posq"), "{}", d[0].message);
+    let d = lint_fx("m0252-ext", &add_fx_yaml("qm_tpl", ONE_RED).replace("fx.yaml", "fx.bin"), &[("fx.bin", effect_yaml())]);
+    assert_eq!(codes(&d), vec!["M0252"], "{d:?}");
+}
+
+#[test]
+fn m0253_fires_on_an_unusable_template_name() {
+    for (name, label) in [(String::new(), "empty"), ("x".repeat(0x80), "long")] {
+        let d = lint_fx(&format!("m0253-{label}"), &add_fx_yaml(&name, ONE_RED), &[("fx.yaml", effect_yaml())]);
+        assert_eq!(codes(&d), vec!["M0253"], "{label}: {d:?}");
+    }
+    let d = lint_fx("m0253-max", &add_fx_yaml(&"x".repeat(0x7F), ONE_RED), &[("fx.yaml", effect_yaml())]);
+    assert!(d.is_empty(), "{d:?}");
+}
+
+#[test]
+fn m0254_fires_on_a_missing_bad_or_empty_edits_form() {
+    let c = "  - kind: replace_fx\n    target: { effect: global_explosion_c4 }\n    edits: src/e.yaml\n";
+    let d = lint_fx("m0254-quiet", c, &[("e.yaml", b"edits:\n  - { op: colour_rgb, emitter: 0, rgb: [1, 2, 3] }\n".to_vec())]);
+    assert!(d.is_empty(), "{d:?}");
+    let d = lint_fx("m0254-empty", c, &[("e.yaml", b"edits: []\n".to_vec())]);
+    assert_eq!(codes(&d), vec!["M0254"], "{d:?}");
+    let d = lint_fx("m0254-bad", c, &[("e.yaml", b"edits:\n  - { op: paint }\n".to_vec())]);
+    assert_eq!(codes(&d), vec!["M0254"], "{d:?}");
+    let d = lint_fx("m0254-missing", c, &[]);
+    assert_eq!(codes(&d), vec!["M0110"], "a missing file is the source rule, and is not read: {d:?}");
+}
+
+#[test]
+fn m0255_fires_without_exactly_one_red_effect_component() {
+    for (reds, label) in [
+        ("        HibernationControl: { a: 1 }\n", "none"),
+        ("        RedEffectComponent:\n          - { name: qm_fx }\n          - { name: qm_fx }\n", "two"),
+    ] {
+        let d = lint_fx(&format!("m0255-{label}"), &add_fx_yaml("qm_tpl", reds), &[("fx.yaml", effect_yaml())]);
+        assert_eq!(codes(&d), vec!["M0255"], "{label}: {d:?}");
+    }
+    let one_in_a_list = "        RedEffectComponent:\n          - { name: qm_fx }\n";
+    assert!(lint_fx("m0255-list", &add_fx_yaml("qm_tpl", one_in_a_list), &[("fx.yaml", effect_yaml())]).is_empty());
+}
+
+fn raw_block(entries: &[(u32, u32)]) -> Vec<u8> {
+    let mut b = (entries.len() as u32).to_le_bytes().to_vec();
+    let body = mercs2_formats::fxdict::write_effect_container(&fx_effect()).unwrap();
+    for (n, t) in entries {
+        for w in [*n, *t, 0, body.len() as u32] {
+            b.extend_from_slice(&w.to_le_bytes());
+        }
+    }
+    for _ in entries {
+        b.extend_from_slice(&body);
+    }
+    b
+}
+
+#[test]
+fn m0262_fires_on_a_raw_effect_or_worldentity() {
+    let raw = |hash: u32| {
+        format!("  - kind: raw\n    payload: src/p.block\n    target_layer: data\n    touches: [\"0x{hash:08X}\"]\n")
+    };
+    let effect = mercs2_formats::types::TYPE_HASH_EFFECT;
+    let d = lint_fx("m0262-fx", &raw(0x41B4_326E), &[("p.block", raw_block(&[(0x41B4_326E, effect)]))]);
+    assert_eq!(codes(&d), vec!["M0262"], "{d:?}");
+    assert!(d[0].message.contains("effect 0x41B4326E"), "{}", d[0].message);
+    let we = mercs2_formats::worldentity::WORLDENTITY_TYPE_HASH;
+    let d = lint_fx("m0262-we", &raw(0x5007_5B3B), &[("p.block", raw_block(&[(0x5007_5B3B, we)]))]);
+    assert_eq!(codes(&d), vec!["M0262"], "{d:?}");
+    let model = mercs2_formats::types::TYPE_HASH_MODEL;
+    let d = lint_fx("m0262-quiet", &raw(0x1234_5678), &[("p.block", raw_block(&[(0x1234_5678, model)]))]);
+    assert!(d.is_empty(), "{d:?}");
+}
+
+#[test]
+fn the_fx_rules_are_registered() {
+    for code in ["M0252", "M0253", "M0254", "M0255", "M0262"] {
+        assert!(lint::RULES.iter().any(|r| r.code == code), "{code} hermetic");
+    }
+    for code in ["M0256", "M0257", "M0258", "M0259", "M0260", "M0261"] {
+        assert!(lint::GAME_RULES.iter().any(|r| r.code == code), "{code} game");
+    }
+}
