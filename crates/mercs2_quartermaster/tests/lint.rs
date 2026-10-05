@@ -1781,3 +1781,77 @@ fn the_fx_rules_are_registered() {
         assert!(lint::GAME_RULES.iter().any(|r| r.code == code), "{code} game");
     }
 }
+
+// ---------------------------------------------------------------------------
+// M0304, M0305, M0308 — sprites and raw sprite data
+// ---------------------------------------------------------------------------
+
+/// A `w × h` RGBA PNG, every texel white and opaque.
+fn sprite_png(w: u32, h: u32) -> Vec<u8> {
+    let mut out = Vec::new();
+    let mut e = png::Encoder::new(&mut out, w, h);
+    e.set_color(png::ColorType::Rgba);
+    e.set_depth(png::BitDepth::Eight);
+    e.write_header().unwrap().write_image_data(&vec![255u8; (w * h * 4) as usize]).unwrap();
+    out
+}
+
+fn add_fx_sprite_yaml(name: &str) -> String {
+    format!("  - kind: add_fx_sprite\n    name: \"{name}\"\n    image: src/s.png\n")
+}
+
+#[test]
+fn add_fx_sprite_is_quiet_on_a_power_of_two_png() {
+    for (w, h) in [(4, 4), (64, 8), (512, 512)] {
+        let d = lint_fx(&format!("sprite-{w}x{h}"), &add_fx_sprite_yaml("qm_ring"), &[("s.png", sprite_png(w, h))]);
+        assert!(d.is_empty(), "{w}x{h}: {d:?}");
+    }
+}
+
+#[test]
+fn m0304_fires_on_an_image_that_is_not_a_sprite() {
+    for (w, h, label) in [(48, 64, "not-pow2"), (2, 4, "small"), (1024, 4, "large")] {
+        let d = lint_fx(&format!("m0304-{label}"), &add_fx_sprite_yaml("qm_ring"), &[("s.png", sprite_png(w, h))]);
+        assert_eq!(codes(&d), vec!["M0304"], "{label}: {d:?}");
+        assert!(d[0].message.contains("a power of two from 4 to 512"), "{}", d[0].message);
+    }
+    let d = lint_fx("m0304-not-png", &add_fx_sprite_yaml("qm_ring"), &[("s.png", b"not a png".to_vec())]);
+    assert_eq!(codes(&d), vec!["M0304"], "{d:?}");
+    let d = lint_fx("m0304-missing", &add_fx_sprite_yaml("qm_ring"), &[]);
+    assert_eq!(codes(&d), vec!["M0110"], "a missing file is the source rule, and is not read: {d:?}");
+}
+
+#[test]
+fn m0305_fires_on_an_empty_name_or_one_written_as_a_hash() {
+    for (name, label) in [("", "empty"), ("0x1234ABCD", "hash"), ("0Xdeadbeef", "upper-x")] {
+        let d = lint_fx(&format!("m0305-{label}"), &add_fx_sprite_yaml(name), &[("s.png", sprite_png(8, 8))]);
+        assert_eq!(codes(&d), vec!["M0305"], "{label}: {d:?}");
+    }
+}
+
+#[test]
+fn m0308_fires_on_a_raw_fxdict_or_vfx_atlas() {
+    let raw = |hash: u32| {
+        format!("  - kind: raw\n    payload: src/p.block\n    target_layer: data\n    touches: [\"0x{hash:08X}\"]\n")
+    };
+    let fxdict = mercs2_formats::types::TYPE_HASH_FX_DICTIONARY;
+    let d = lint_fx("m0308-fxdict", &raw(0x86BF_6C5B), &[("p.block", raw_block(&[(0x86BF_6C5B, fxdict)]))]);
+    assert_eq!(codes(&d), vec!["M0308"], "{d:?}");
+    assert!(d[0].message.contains("the fxdict 0x86BF6C5B"), "{}", d[0].message);
+    let texture = mercs2_formats::types::TYPE_HASH_TEXTURE;
+    let d = lint_fx("m0308-vfx", &raw(0x89E2_11AF), &[("p.block", raw_block(&[(0x89E2_11AF, texture)]))]);
+    assert_eq!(codes(&d), vec!["M0308"], "{d:?}");
+    assert!(d[0].message.contains("the vfx atlas 0x89E211AF"), "{}", d[0].message);
+    let d = lint_fx("m0308-quiet", &raw(0x1234_5678), &[("p.block", raw_block(&[(0x1234_5678, texture)]))]);
+    assert!(d.is_empty(), "{d:?}");
+}
+
+#[test]
+fn the_sprite_rules_are_registered() {
+    for code in ["M0304", "M0305", "M0308"] {
+        assert!(lint::RULES.iter().any(|r| r.code == code), "{code} hermetic");
+    }
+    for code in ["M0306", "M0307"] {
+        assert!(lint::GAME_RULES.iter().any(|r| r.code == code), "{code} game");
+    }
+}
