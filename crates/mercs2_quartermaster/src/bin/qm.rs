@@ -447,6 +447,13 @@ fn cmd_lint(
             Err(code) => return code,
         };
         found.extend(lint::game_checks(&shipment.manifest, &mut stack));
+        match lint::fx_game_checks(&shipment.manifest, &shipment.root, &mut stack) {
+            Ok(d) => found.extend(d),
+            Err(e) => {
+                eprintln!("error: effects: {e}");
+                return ExitCode::from(EXIT_UNUSABLE);
+            }
+        }
         if mercs2_quartermaster::shader::has_shader_kinds(&shipment.manifest) {
             let Some(original) = original_data else {
                 eprintln!(
