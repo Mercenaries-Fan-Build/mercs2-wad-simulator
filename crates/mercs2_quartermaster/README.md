@@ -113,6 +113,15 @@ Shipment's own build re-emits both blocks at their own paths, and `qm link` appl
 resident block that carries the linked scripts. Two `replace_fx` that resolve to one effect, by name
 or through a template, conflict.
 
+Sprites too. Every particle samples one texture, the `vfx` atlas in the resident block, inside the
+rectangle the resident `fxdict` record of its frame gives. `add_fx_sprite` draws a PNG into the
+atlas's free square — the largest transparent square no record lies over, 512² at (1536, 0) on the
+game's atlas — and adds the record that names it; an effect draws its own Shipment's sprites and
+those of the Shipments it requires. `qm link` packs every Shipment's sprites together, the same bytes
+in any load order, and writes one `fxdict` and one atlas into its one resident block. A
+`replace_texture` of `vfx` repaints the atlas the sprites are drawn on: one Shipment of a set
+repaints it, and two conflict.
+
 `patch_lua` reaches **two** blocks: `scripts_vz` (114 content scripts — contracts, jobs, tutorials)
 and `resident` (~240 always-loaded framework modules, `Mrx*` and the world-entity scripts). A target
 is resolved against both, and only the block it lands in is republished.
