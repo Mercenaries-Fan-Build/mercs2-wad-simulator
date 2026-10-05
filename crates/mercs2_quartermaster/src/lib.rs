@@ -37,6 +37,7 @@ pub mod plan;
 pub mod shader;
 pub mod shader_import;
 pub mod sound;
+pub mod sprite;
 pub mod states;
 pub mod template;
 pub mod tiny;
