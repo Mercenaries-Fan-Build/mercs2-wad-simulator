@@ -894,8 +894,8 @@ pub const KINDS: &[(&str, &[(&str, &str)])] = &[
             ("replace_animation", "Replace a shipped animation, same hash"),
             ("add_shader", "Register new shaders and add them to the shader stores"),
             ("replace_shader", "Replace a shipped shader's bytecode in the shader stores"),
-            ("add_fx", "Add a particle effect"),
-            ("replace_fx", "Replace a shipped fx, same hash"),
+            ("add_fx", "Add a particle effect and the template that starts it"),
+            ("replace_fx", "Edit a shipped effect in place"),
             ("replace_terrain_cell", "Replace a terrain cell, same hash"),
             ("add_stringdb_keys", "Add brand-new string-table keys"),
             ("replace_stringdb_text", "Rewrite strings by exact text match"),
@@ -1154,13 +1154,20 @@ fn stub(kind: &str, n: usize) -> Option<Contribution> {
             shader: mercs2_quartermaster::manifest::ShaderSource::asm("src/shader.asm"),
             shader_low: Some(mercs2_quartermaster::manifest::ShaderSource::asm("src/shader_low.asm")),
         },
+        // The template starts with no component: M0255 fires until it declares its one
+        // RedEffectComponent, and every other component the template carries.
         "add_fx" => Contribution::AddFx {
+            template: mercs2_quartermaster::template::TemplateForm {
+                name: name.clone(),
+                name_flag: 1,
+                components: Default::default(),
+            },
             name,
-            payload: PathBuf::from("src/effect.fxdict"),
+            effect: PathBuf::from("src/effect.yaml"),
         },
         "replace_fx" => Contribution::ReplaceFx {
-            target: "shipped_fx".into(),
-            payload: PathBuf::from("src/effect.fxdict"),
+            target: mercs2_quartermaster::manifest::FxTarget::Effect { effect: "shipped_fx".into() },
+            edits: PathBuf::from("src/edits.yaml"),
         },
         "replace_terrain_cell" => Contribution::ReplaceTerrainCell {
             target: "shipped_cell".into(),
