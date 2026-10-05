@@ -1,4 +1,4 @@
-//! RGBA → BC1/BC3 + the fully-resident UCFX texture container the engine reads inline.
+//! RGBA → BC1/BC3 and back, and the fully-resident UCFX texture container the engine reads inline.
 //!
 //! A faithful port of `tools/dds_to_ucfx_texture.py`, which is the encoder that has actually
 //! produced working game textures. `mercs2_workshop::texenc` is NOT that encoder — its own header
@@ -214,6 +214,77 @@ pub fn encode_bc3(w: usize, h: usize, rgba: &[f32]) -> Vec<u8> {
     out
 }
 
+/// A 565 colour expanded to 8-bit channels, rounding each to the nearest of 0..=255.
+fn expand565(v: u16) -> [u8; 3] {
+    let r = ((v >> 11) & 0x1F) as u32;
+    let g = ((v >> 5) & 0x3F) as u32;
+    let b = (v & 0x1F) as u32;
+    [((r * 255 + 15) / 31) as u8, ((g * 255 + 31) / 63) as u8, ((b * 255 + 15) / 31) as u8]
+}
+
+/// 8-byte BC1 colour block → 16 RGBA texels, row-major. `allow_1bit_alpha`: BC1's `c0 <= c1`
+/// punch-through mode (BC3's embedded colour block is always 4-colour).
+pub fn decode_bc1_block(b: &[u8], allow_1bit_alpha: bool) -> [[u8; 4]; 16] {
+    let c0 = u16::from_le_bytes([b[0], b[1]]);
+    let c1 = u16::from_le_bytes([b[2], b[3]]);
+    let p0 = expand565(c0);
+    let p1 = expand565(c1);
+    let mut pal = [[0u8; 4]; 4];
+    pal[0] = [p0[0], p0[1], p0[2], 255];
+    pal[1] = [p1[0], p1[1], p1[2], 255];
+    if c0 > c1 || !allow_1bit_alpha {
+        for k in 0..3 {
+            pal[2][k] = ((2 * p0[k] as u32 + p1[k] as u32) / 3) as u8;
+            pal[3][k] = ((p0[k] as u32 + 2 * p1[k] as u32) / 3) as u8;
+        }
+        pal[2][3] = 255;
+        pal[3][3] = 255;
+    } else {
+        for k in 0..3 {
+            pal[2][k] = ((p0[k] as u32 + p1[k] as u32) / 2) as u8;
+        }
+        pal[2][3] = 255;
+        pal[3] = [0, 0, 0, 0];
+    }
+    let idx = u32::from_le_bytes([b[4], b[5], b[6], b[7]]);
+    let mut out = [[0u8; 4]; 16];
+    for (t, texel) in out.iter_mut().enumerate() {
+        *texel = pal[((idx >> (t * 2)) & 3) as usize];
+    }
+    out
+}
+
+/// 16-byte BC3 block → 16 RGBA texels, row-major: 8 bytes of interpolated alpha, then an
+/// always-4-colour BC1 colour block.
+pub fn decode_bc3_block(b: &[u8]) -> [[u8; 4]; 16] {
+    let a0 = b[0] as u32;
+    let a1 = b[1] as u32;
+    let mut apal = [0u8; 8];
+    apal[0] = a0 as u8;
+    apal[1] = a1 as u8;
+    if a0 > a1 {
+        for k in 1..7u32 {
+            apal[(k + 1) as usize] = (((7 - k) * a0 + k * a1) / 7) as u8;
+        }
+    } else {
+        for k in 1..5u32 {
+            apal[(k + 1) as usize] = (((5 - k) * a0 + k * a1) / 5) as u8;
+        }
+        apal[6] = 0;
+        apal[7] = 255;
+    }
+    // 48-bit little-endian index stream, 3 bits per texel.
+    let mut abits = 0u64;
+    for (i, &byte) in b[2..8].iter().enumerate() {
+        abits |= (byte as u64) << (8 * i);
+    }
+    let mut out = decode_bc1_block(&b[8..16], false);
+    for (t, texel) in out.iter_mut().enumerate() {
+        texel[3] = apal[((abits >> (t * 3)) & 7) as usize];
+    }
+    out
+}
+
 /// Box-downsample by 2x, `ch` channels interleaved.
 pub fn box_down(w: usize, h: usize, ch: usize, px: &[f32]) -> (usize, usize, Vec<f32>) {
     let (nw, nh) = ((w / 2).max(1), (h / 2).max(1));
@@ -372,6 +443,25 @@ mod tests {
         let px = vec![128.0f32; 512 * 512 * 4];
         let body = mip_chain(512, 512, 4, &px, |w, h, p| encode_bc3(w, h, p));
         assert_eq!(body.len(), 349_520);
+    }
+
+    #[test]
+    fn a_bc3_block_decodes_its_encoded_alpha_and_colour() {
+        let mut px = [0.0f32; 64];
+        for (i, t) in px.chunks_exact_mut(4).enumerate() {
+            t.copy_from_slice(&[255.0, 255.0, 255.0, if i < 8 { 0.0 } else { 255.0 }]);
+        }
+        let block = encode_bc3(4, 4, &px);
+        let texels = decode_bc3_block(&block);
+        for (i, t) in texels.iter().enumerate() {
+            assert_eq!(*t, [255, 255, 255, if i < 8 { 0 } else { 255 }], "texel {i}");
+        }
+    }
+
+    #[test]
+    fn a_flat_bc1_block_decodes_to_its_colour() {
+        let block = bc1_block(&[[0.0, 255.0, 255.0]; 16]);
+        assert!(decode_bc1_block(&block, true).iter().all(|t| *t == [0, 255, 255, 255]));
     }
 
     #[test]
