@@ -743,6 +743,24 @@ pub struct TinyCell {
     pub col: u32,
 }
 
+/// What a `replace_fx` edits: `{effect: <name or 0xHHHHHHHH>}`, or `{template: <name>}` for the
+/// effect a template starts.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged, deny_unknown_fields)]
+pub enum FxTarget {
+    Effect { effect: String },
+    Template { template: String },
+}
+
+impl std::fmt::Display for FxTarget {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            FxTarget::Effect { effect } => write!(f, "effect {effect}"),
+            FxTarget::Template { template } => write!(f, "template {template}"),
+        }
+    }
+}
+
 /// One ordered, internally-tagged list. Cross-kind apply order within a Shipment is preserved.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
@@ -1118,20 +1136,32 @@ pub enum Contribution {
         #[serde(default)]
         shader_low: Option<ShaderSource>,
     },
-    /// Data. Add a NEW particle-effect entry to the fxdict, callable by its name from Lua and
-    /// engine spawn sites. Pre-encoded `fxdict` payload (the sequence of tagged sub-chunks:
-    /// `efct` / `emtr` / `emit` / `poff` / `trfm` / `ptyp` / `colr` / `frce` / `text` — see
-    /// `mercs2_formats::fxdict`).
+    /// Data. A NEW particle effect and the world template that starts it.
+    ///
+    /// The effect is declared whole in the effect form (`effect`, [`crate::effect::EffectForm`]) and
+    /// appended to the game's effects block under `pandemic_hash_m2(name)`. The template is declared
+    /// inline ([`crate::template::TemplateForm`]): every component, field and value, with exactly one
+    /// `RedEffectComponent` whose `name` names the effect. It is appended to the game's
+    /// `worldentity` under the key its name derives
+    /// (`mercs2_formats::worldentity::derived_template_key`), so `Pg.Spawn` and
+    /// `ObjectState.StartEmitter` find it by name. Both containers are merged across the installed
+    /// set by `qm link` ([`crate::fx`]).
     AddFx {
-        /// The effect name.
+        /// The effect name; its hash is the effect's asset hash.
         name: String,
-        /// The pre-encoded fxdict entry blob.
-        payload: PathBuf,
+        /// The effect form file, `src/`-relative (`.yaml`, `.yml`, `.json` or `.toml`).
+        effect: PathBuf,
+        /// The template, declared field by field.
+        template: crate::template::TemplateForm,
     },
-    /// Data, SAME-HASH. Wholesale REPLACE a shipped fx entry with a new fxdict payload.
+    /// Data, SAME-HASH. Edit an effect the game ships, in place: `target` names the effect, directly
+    /// or through a template that starts it, and `edits` is the edits form file
+    /// ([`crate::fx::EditsForm`]), applied in order. An effect or template another Shipment's
+    /// `add_fx` adds is a target only when this Shipment requires that Shipment.
     ReplaceFx {
-        target: String,
-        payload: PathBuf,
+        target: FxTarget,
+        /// The edits form file, `src/`-relative (`.yaml`, `.yml`, `.json` or `.toml`).
+        edits: PathBuf,
     },
     /// Data, SAME-HASH. REPLACE a single shipped terrain cell (heightmap / texturing / MOPP
     /// collision) with pre-encoded bytes. The heightmap format + MOPP-baked collision codec are
