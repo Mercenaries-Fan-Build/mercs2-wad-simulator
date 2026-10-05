@@ -769,6 +769,7 @@ fn qm_kinds_prints_every_kind_one_per_line() {
     let text = String::from_utf8(out.stdout).unwrap();
     let lines: Vec<&str> = text.lines().collect();
     assert_eq!(lines, mercs2_quartermaster::Contribution::ALL_KINDS);
+    assert!(lines.contains(&"add_fx_sprite"), "{lines:?}");
 }
 
 #[test]
