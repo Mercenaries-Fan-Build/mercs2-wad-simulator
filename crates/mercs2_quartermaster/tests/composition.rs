@@ -1225,8 +1225,10 @@ fn one_effect_replaced_twice_conflicts_by_name_and_through_a_template() {
             bytes: Vec::new(),
         })
         .collect();
-    let frames = std::collections::BTreeSet::new();
-    let base = fx::FxBase { effects: &effects, worldentity: &we, frames: &frames };
+    use mercs2_formats::texture_encode::{encode_bc3, mip_chain, ucfx_texture};
+    let atlas = mercs2_quartermaster::sprite::Atlas::parse(&ucfx_texture("vfx", 4, 4, b"DXT5", &mip_chain(4, 4, 4, &[0.0; 64], encode_bc3)))
+        .expect("the stand-in atlas parses");
+    let base = fx::FxBase { effects: &effects, worldentity: &we, fxdict: &[], atlas: &atlas, repainted: false };
     let root = std::path::Path::new("/nonexistent");
     let set = [fx::FxShipment { manifest: &direct, root }, fx::FxShipment { manifest: &via, root }];
     let found = fx::conflicts(&base, &set);
@@ -1234,4 +1236,93 @@ fn one_effect_replaced_twice_conflicts_by_name_and_through_a_template() {
     assert_eq!(found[0].effect, h("fx_one"));
     let other = one("mod-b", &replace_fx("{ effect: fx_two }"));
     assert!(fx::conflicts(&base, &[set[0], fx::FxShipment { manifest: &other, root }]).is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// Sprites and the vfx atlas.
+// ---------------------------------------------------------------------------
+
+fn add_fx_sprite(name: &str) -> String {
+    format!("  - kind: add_fx_sprite\n    name: {name}\n    image: src/{name}.png\n")
+}
+
+const VFX: u32 = 0x89E2_11AF;
+const FXDICT: u32 = 0x86BF_6C5B;
+
+/// A sprite claims its frame key, keyed, and the fxdict and the atlas, both merged.
+#[test]
+fn a_sprite_claims_its_key_and_the_merged_fxdict_and_atlas() {
+    let claims: Vec<(Claim, MergeClass)> =
+        blast::claims(&one("mod-a", &add_fx_sprite("qm_ring"))).into_iter().map(|r| (r.claim, r.class)).collect();
+    assert_eq!(
+        claims,
+        vec![
+            (Claim::FxFrame { key: mercs2_formats::hash::pandemic_hash_m2("qm_ring") }, MergeClass::KeyedSet),
+            (Claim::Asset { hash: FXDICT }, MergeClass::OrderedList),
+            (Claim::Asset { hash: VFX }, MergeClass::OrderedList),
+        ]
+    );
+}
+
+#[test]
+fn sprites_of_different_names_compose_and_one_name_twice_collides() {
+    let found = blast::conflicts(&[
+        ("mod-a", &one("mod-a", &add_fx_sprite("qm_ring"))),
+        ("mod-b", &one("mod-b", &add_fx_sprite("qm_star"))),
+    ]);
+    assert!(found.is_empty(), "{found:?}");
+    let found = blast::conflicts(&[
+        ("mod-a", &one("mod-a", &add_fx_sprite("qm_same"))),
+        ("mod-b", &one("mod-b", &add_fx_sprite("qm_same"))),
+    ]);
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert_eq!(found[0].claim, Claim::FxFrame { key: mercs2_formats::hash::pandemic_hash_m2("qm_same") });
+    assert_eq!(found[0].class, MergeClass::KeyedSet);
+}
+
+/// A repaint of `vfx` claims the merged atlas and the repaint itself: sprites compose with it, and a
+/// second repaint conflicts, by name or by hash. A replacement of any other texture is unchanged.
+#[test]
+fn a_repaint_composes_with_sprites_and_two_repaints_conflict() {
+    let repaint = replace_texture("mod-a", "vfx");
+    let claims: Vec<(Claim, MergeClass)> = blast::claims(&repaint).into_iter().map(|r| (r.claim, r.class)).collect();
+    assert_eq!(
+        claims,
+        vec![(Claim::Asset { hash: VFX }, MergeClass::OrderedList), (Claim::AtlasRepaint, MergeClass::Exclusive)]
+    );
+    assert!(blast::conflicts(&[("mod-a", &repaint), ("mod-b", &one("mod-b", &add_fx_sprite("qm_ring")))]).is_empty());
+    let found = exclusive_conflict(&repaint, &replace_texture("mod-b", "\"0x89E211AF\""));
+    assert_eq!(found.claim, Claim::AtlasRepaint);
+    let other = blast::claims(&replace_texture("mod-a", "some_texture"));
+    assert_eq!(other.len(), 1);
+    assert_eq!(other[0].class, MergeClass::LastWins);
+}
+
+/// Claimants of one target that disagree about its class take the strictest, in either order: a
+/// new texture minted under the atlas's name collides with a sprite, and a raw payload touching
+/// the atlas is exclusive.
+#[test]
+fn mixed_classes_on_the_atlas_take_the_strictest_in_either_order() {
+    let minted = one("mod-a", "  - kind: add_texture\n    name: vfx\n    image: src/t.png\n");
+    let sprite = one("mod-b", &add_fx_sprite("qm_ring"));
+    for set in [[("mod-a", &minted), ("mod-b", &sprite)], [("mod-b", &sprite), ("mod-a", &minted)]] {
+        let found = blast::conflicts(&set);
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!((&found[0].claim, found[0].class), (&Claim::Asset { hash: VFX }, MergeClass::KeyedSet));
+    }
+    let raw = one("mod-a", "  - kind: raw\n    payload: src/p.block\n    target_layer: data\n    touches: [vfx]\n");
+    for set in [[("mod-a", &raw), ("mod-b", &sprite)], [("mod-b", &sprite), ("mod-a", &raw)]] {
+        let found = blast::conflicts(&set);
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!((&found[0].claim, found[0].class), (&Claim::Asset { hash: VFX }, MergeClass::Exclusive));
+    }
+    // In one Shipment, a sprite beside a repaint composes; two repaints do not.
+    let both = one("mod-a", &format!("{}  - kind: replace_texture\n    target: vfx\n    image: src/v.png\n", add_fx_sprite("qm_ring")));
+    assert!(blast::self_conflicts(&both).is_empty());
+    let twice = one(
+        "mod-a",
+        "  - kind: replace_texture\n    target: vfx\n    image: src/v.png\n  - kind: replace_texture\n    target: vfx\n    image: src/w.png\n",
+    );
+    let sc = blast::self_conflicts(&twice);
+    assert!(sc.iter().any(|c| c.claim == Claim::AtlasRepaint && c.indices == vec![0, 1]), "{sc:?}");
 }
