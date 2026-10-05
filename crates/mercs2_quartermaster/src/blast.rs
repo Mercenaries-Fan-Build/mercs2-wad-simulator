@@ -96,6 +96,12 @@ pub enum Claim {
     /// The TINY stand-in of one 200 m cell of one layer (`m2(layer)`): two would draw the cell's
     /// objects twice.
     TinyCell { layer: u32, row: u32, col: u32 },
+    /// A world template's name, keyed on `pandemic_hash_m2(name)`: the name registry answers a
+    /// lookup with one key, so two templates of one name leave one unreachable.
+    Template { name_hash: u32 },
+    /// A world template's key (`worldentity::derived_template_key`): two templates under one key
+    /// overwrite each other's records.
+    TemplateKey { key: u32 },
 }
 
 impl Claim {
@@ -171,6 +177,14 @@ impl Claim {
             Claim::TinyCell { layer, row, col } => match name {
                 Some(n) => format!("TINY stand-in of {n}"),
                 None => format!("TINY stand-in of layer 0x{layer:08X} cell (row {row}, col {col})"),
+            },
+            Claim::Template { name_hash } => match name {
+                Some(n) => format!("template name {n} (0x{name_hash:08X})"),
+                None => format!("template name 0x{name_hash:08X}"),
+            },
+            Claim::TemplateKey { key } => match name {
+                Some(n) => format!("template key 0x{key:08X} (derived from {n})"),
+                None => format!("template key 0x{key:08X}"),
             },
         }
     }
@@ -261,6 +275,10 @@ pub fn merge_class(claim: &Claim, access: Access, intent: Intent) -> MergeClass 
         Claim::ShaderName { .. } => MergeClass::Exclusive,
         // One stand-in per cell of a layer: a second draws the same objects again.
         Claim::TinyCell { .. } => MergeClass::Exclusive,
+        // A new template's name and key are keys across the installed set: two Shipments adding
+        // one name, or two names deriving one key, leave one template unreachable.
+        Claim::Template { .. } | Claim::TemplateKey { .. } if intent == Intent::Additive => MergeClass::KeyedSet,
+        Claim::Template { .. } | Claim::TemplateKey { .. } => MergeClass::Exclusive,
     }
 }
 
@@ -499,12 +517,44 @@ pub fn claims(manifest: &Manifest) -> Vec<ClaimRecord> {
                 let key = mercs2_formats::hash::pandemic_hash_m2(target);
                 push(Access::Write, (Claim::ShaderStem { key }, Some(target.clone())), Intent::ReplaceExclusive);
             }
-            // Novel particle effect. New hash, Additive.
-            Contribution::AddFx { name, .. } => {
+            // A new effect (a new hash in the effects block) and its template: the template's name
+            // and derived key are each a key across the set, and the worldentity they are appended
+            // to is merged by `qm link`, every Shipment's templates in load order.
+            Contribution::AddFx { name, template, .. } => {
                 push(Access::Write, Claim::asset(name), Intent::Additive);
+                push(
+                    Access::Write,
+                    (
+                        Claim::Template { name_hash: mercs2_formats::hash::pandemic_hash_m2(&template.name) },
+                        Some(template.name.clone()),
+                    ),
+                    Intent::Additive,
+                );
+                push(
+                    Access::Write,
+                    (
+                        Claim::TemplateKey { key: mercs2_formats::worldentity::derived_template_key(&template.name) },
+                        Some(template.name.clone()),
+                    ),
+                    Intent::Additive,
+                );
+                push(
+                    Access::Write,
+                    (
+                        Claim::Asset { hash: mercs2_formats::worldentity::RETAIL_WORLDENTITY_NAME_HASH },
+                        Some("worldentity".into()),
+                    ),
+                    Intent::Merged,
+                );
             }
+            // An edit of one effect: a second Shipment editing it is a hard conflict. A target
+            // written as a template resolves to its effect only against the game's worldentity, so
+            // `qm link` makes that claim ([`crate::fx::conflicts`]); here the effect named directly
+            // is claimed.
             Contribution::ReplaceFx { target, .. } => {
-                push(Access::Write, Claim::asset(target), Intent::ReplaceExclusive);
+                if let crate::manifest::FxTarget::Effect { effect } = target {
+                    push(Access::Write, Claim::asset(effect), Intent::ReplaceExclusive);
+                }
             }
             // Terrain cell wholesale replace. Same-hash; two replacements are a hard conflict.
             Contribution::ReplaceTerrainCell { target, .. } => {
@@ -784,33 +834,52 @@ impl std::fmt::Display for Conflict {
 /// outfit claim different `OutfitSlot`s and share an `OrderedList` script, so they compose. Two
 /// Shipments replacing the same texture are `LastWins` — the user picks with load order.
 pub fn conflicts(shipments: &[(&str, &Manifest)]) -> Vec<Conflict> {
-    let mut by_claim: BTreeMap<Claim, (MergeClass, Vec<Claimant>, Option<String>)> =
-        BTreeMap::new();
+    let mut by_claim: BTreeMap<Claim, Vec<(ClaimRecord, String)>> = BTreeMap::new();
     for (name, manifest) in shipments {
         for r in claims(manifest)
             .into_iter()
             .filter(|r| r.access == Access::Write)
         {
-            let entry = by_claim
-                .entry(r.claim)
-                .or_insert_with(|| (r.class, Vec::new(), r.name.clone()));
-            // Fail closed: if two contributions disagree about a target's class, take the stricter.
-            // This is what stops a `raw` block laundering an asset into permissive semantics by
-            // declaring a target some typed contribution also claims.
-            if r.class == MergeClass::Exclusive {
-                entry.0 = MergeClass::Exclusive;
-            }
-            if entry.2.is_none() {
-                entry.2 = r.name.clone();
-            }
-            entry.1.push(Claimant {
-                shipment: (*name).to_string(),
-                index: r.index,
-            });
+            by_claim.entry(r.claim.clone()).or_default().push((r, (*name).to_string()));
         }
     }
+    let requires = |shipment: &str| -> Vec<String> {
+        shipments
+            .iter()
+            .filter(|(n, _)| *n == shipment)
+            .flat_map(|(_, m)| crate::fx::required_shipments(m))
+            .map(str::to_string)
+            .collect()
+    };
     by_claim
         .into_iter()
+        .map(|(claim, mut records)| {
+            // A `replace_fx` of an effect another Shipment's `add_fx` adds is applied after that
+            // Shipment, and is allowed exactly when it requires that Shipment: the adder then drops
+            // out, and only the replacements are weighed against each other.
+            let adders: Vec<&String> =
+                records.iter().filter(|(r, _)| r.kind == "add_fx").map(|(_, s)| s).collect();
+            if let [adder] = adders.as_slice() {
+                let adder = (*adder).clone();
+                let replacers: Vec<&String> =
+                    records.iter().filter(|(r, _)| r.kind != "add_fx").map(|(_, s)| s).collect();
+                if !replacers.is_empty()
+                    && records.iter().all(|(r, s)| r.kind == "add_fx" || (r.kind == "replace_fx" && requires(s).contains(&adder)))
+                {
+                    records.retain(|(r, _)| r.kind != "add_fx");
+                }
+            }
+            // Fail closed: if two contributions disagree about a target's class, take the stricter.
+            let class = if records.iter().any(|(r, _)| r.class == MergeClass::Exclusive) {
+                MergeClass::Exclusive
+            } else {
+                records[0].0.class
+            };
+            let name = records.iter().find_map(|(r, _)| r.name.clone());
+            let claimants: Vec<Claimant> =
+                records.into_iter().map(|(r, shipment)| Claimant { shipment, index: r.index }).collect();
+            (claim, (class, claimants, name))
+        })
         .filter_map(|(claim, (class, claimants, name))| {
             let distinct: std::collections::BTreeSet<&str> =
                 claimants.iter().map(|c| c.shipment.as_str()).collect();
