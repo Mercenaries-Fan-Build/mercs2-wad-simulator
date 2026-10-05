@@ -1,13 +1,20 @@
-//! Effects and templates: the `replace_fx` edits form, target resolution, and the one merge `qm
-//! build` and `qm link` both run.
+//! Effects, templates and sprites: the `replace_fx` edits form, target resolution, and the one
+//! merge `qm build` and `qm link` both run.
 //!
 //! The game ships every effect in ONE block, `blocks\VZ\effects_P000_Q3.block` (314 effects and
 //! the 46 models they draw), and every template in ONE container, the `worldentity` `0x50075B3B` in
-//! `blocks\VZ\resident_P000_Q3.block`. [`merge`] applies a set of Shipments' `add_fx` and
-//! `replace_fx` to the game's copies, and the builder re-emits the effects block at its own path and
-//! the worldentity inside the resident block.
+//! `blocks\VZ\resident_P000_Q3.block`; the resident block also carries the `vfx` atlas every
+//! particle samples and the `fxdict` that names its sprite rectangles ([`crate::sprite`]). [`merge`]
+//! applies a set of Shipments' `add_fx_sprite`, `add_fx` and `replace_fx` to the game's copies, and
+//! the builder re-emits the effects block at its own path and the worldentity, the `fxdict` and the
+//! atlas inside the resident block.
 //!
-//! The merge, Shipment by Shipment in the order given (`qm link`: the load plan's order, in which a
+//! First, every Shipment's `add_fx_sprite` is packed into the base atlas ([`base_atlas`]: the set's
+//! `replace_texture` of `vfx` when it has one, else the game's) with [`crate::sprite::pack`], and
+//! each sprite's record joins the `fxdict`. A sprite whose name hashes to a key the `fxdict` already
+//! has, or another sprite's, is refused.
+//!
+//! Then, Shipment by Shipment in the order given (`qm link`: the load plan's order, in which a
 //! Shipment comes after the Shipments it requires):
 //!
 //! 1. each `replace_fx`, in contribution order: its target is resolved ([`FxTarget`]) — an effect by
@@ -21,6 +28,10 @@
 //!
 //! Two `replace_fx` that resolve to one effect are a [`Conflict`], whether either names the effect
 //! directly or through a template.
+//!
+//! Every frame a Shipment gives an effect is a record of the game's `fxdict`, a sprite of the
+//! Shipment, or a sprite of a Shipment it requires. `qm build` of a Shipment that requires others
+//! leaves a frame it finds in none of these to `qm link`, which has the Shipments it requires.
 //!
 //! The edits form is a document with one key, `edits`, an ordered list of operations, each tagged
 //! by `op`:
@@ -52,7 +63,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::Path;
 
-use mercs2_formats::fxdict::{parse_effect_container, write_effect_container, EffectContainer};
+use mercs2_formats::fxdict::{parse_effect_container, write_effect_container, write_fxdict_container, EffectContainer, FxRect};
 use mercs2_formats::hash::pandemic_hash_m2;
 use mercs2_formats::schema::FieldValue;
 use mercs2_formats::scripts_block::{Entry, ScriptsBlock};
@@ -66,6 +77,7 @@ use crate::effect::{
     self, ColourKeyForm, CurveForm, EmitterForm, ForceForm, ForceParamsForm, GeomForm, ShapeForm, ValueInput,
 };
 use crate::manifest::{Contribution, FxTarget, Manifest, Requirement};
+use crate::sprite::{self, Atlas, Placed, Square};
 use crate::Format;
 
 /// The effects block, as `(PTHS needle, PTHS path)`. The needle is anchored on its folder, as the
@@ -403,6 +415,23 @@ pub fn has_fx(manifest: &Manifest) -> bool {
         .any(|c| matches!(c, Contribution::AddFx { .. } | Contribution::ReplaceFx { .. }))
 }
 
+/// Whether a contribution is a `replace_texture` of the `vfx` atlas: its target resolves to
+/// [`sprite::VFX_ATLAS`] ([`crate::manifest::asset_hash`], so the name `vfx` and `0x89E211AF` both do).
+pub fn repaints_atlas(c: &Contribution) -> bool {
+    matches!(c, Contribution::ReplaceTexture { target, .. } if crate::manifest::asset_hash(target) == sprite::VFX_ATLAS)
+}
+
+/// Whether a manifest has an `add_fx_sprite`.
+pub fn has_sprites(manifest: &Manifest) -> bool {
+    manifest.contributions.iter().any(|c| matches!(c, Contribution::AddFxSprite { .. }))
+}
+
+/// Whether a manifest has a contribution [`merge`] applies: an `add_fx`, a `replace_fx`, an
+/// `add_fx_sprite` or a `replace_texture` of the `vfx` atlas.
+pub fn merges_fx(manifest: &Manifest) -> bool {
+    has_fx(manifest) || has_sprites(manifest) || manifest.contributions.iter().any(repaints_atlas)
+}
+
 /// Whether a manifest has an `add_fx`.
 pub fn adds_templates(manifest: &Manifest) -> bool {
     manifest.contributions.iter().any(|c| matches!(c, Contribution::AddFx { .. }))
@@ -492,31 +521,83 @@ pub fn worldentity_entry(block: &ScriptsBlock) -> Result<usize, String> {
 /// The `fxdict` asset: the one record table a `TEXT` frame is looked up in.
 pub const FXDICT_NAME_HASH: u32 = 0x86BF_6C5B;
 
-/// The record keys of the `fxdict` in a block (the resident block carries it).
-pub fn fxdict_entry(block: &ScriptsBlock) -> Result<BTreeSet<u32>, String> {
-    let at: Vec<&Entry> = block
+/// The index of the one entry of `name_hash` and `type_hash` among a block's entries.
+fn entry_of(block: &ScriptsBlock, name_hash: u32, type_hash: u32, what: &str) -> Result<usize, String> {
+    let at: Vec<usize> = block
         .entries
         .iter()
-        .filter(|e| e.name_hash == FXDICT_NAME_HASH && e.type_hash == mercs2_formats::types::TYPE_HASH_FX_DICTIONARY)
+        .enumerate()
+        .filter(|(_, e)| e.name_hash == name_hash && e.type_hash == type_hash)
+        .map(|(i, _)| i)
         .collect();
-    let [e] = at.as_slice() else {
-        return Err(format!("the resident block carries {} fxdict 0x{FXDICT_NAME_HASH:08X} entries; it has one", at.len()));
-    };
-    Ok(mercs2_formats::fxdict::parse_fxdict_container(&e.bytes)?.iter().map(|p| p.name_hash).collect())
+    match at.as_slice() {
+        [i] => Ok(*i),
+        _ => Err(format!("the resident block carries {} {what} 0x{name_hash:08X} entries; it has one", at.len())),
+    }
 }
 
-/// The game's effects block, with the ASET rows it publishes, its worldentity and its fxdict keys.
+/// The index of the `fxdict` among a block's entries (the resident block carries it).
+pub fn fxdict_entry(block: &ScriptsBlock) -> Result<usize, String> {
+    entry_of(block, FXDICT_NAME_HASH, mercs2_formats::types::TYPE_HASH_FX_DICTIONARY, "fxdict")
+}
+
+/// The index of the `vfx` atlas among a block's entries (the resident block carries it).
+pub fn atlas_entry(block: &ScriptsBlock) -> Result<usize, String> {
+    entry_of(block, sprite::VFX_ATLAS, mercs2_formats::types::TYPE_HASH_TEXTURE, "vfx atlas")
+}
+
+/// The `fxdict` records and the `vfx` atlas of a block (the resident block carries both).
+pub fn sprites_of(block: &ScriptsBlock) -> Result<(Vec<FxRect>, Atlas), String> {
+    let records = mercs2_formats::fxdict::parse_fxdict_container(&block.entries[fxdict_entry(block)?].bytes)
+        .map_err(|e| format!("the fxdict: {e}"))?;
+    let atlas = Atlas::parse(&block.entries[atlas_entry(block)?].bytes)?;
+    Ok((records, atlas))
+}
+
+/// The atlas a set's sprites are drawn into, and whether a Shipment of the set repaints it: the
+/// set's one `replace_texture` of `vfx` ([`repaints_atlas`]), encoded whole over `game`, or `game`.
+/// Two repaints in a set are an error naming both: one Shipment of a set repaints the atlas.
+pub fn base_atlas(game: &Atlas, set: &[FxShipment<'_>]) -> Result<(Atlas, bool), String> {
+    let mut repaints = Vec::new();
+    for s in set {
+        for (index, c) in s.manifest.contributions.iter().enumerate() {
+            if let (true, Contribution::ReplaceTexture { image, .. }) = (repaints_atlas(c), c) {
+                repaints.push((s, index, image));
+            }
+        }
+    }
+    match repaints.as_slice() {
+        [] => Ok((game.clone(), false)),
+        [(s, index, image)] => {
+            let what = format!("{} contributions[{index}] replace_texture of vfx", s.manifest.shipment.name);
+            let image = sprite::read_png(&s.root.join(image)).map_err(|e| format!("{what}: {e}"))?;
+            Ok((game.repaint(&image).map_err(|e| format!("{what}: {e}"))?, true))
+        }
+        many => Err(format!(
+            "[M0207] the vfx atlas 0x{:08X} is repainted by {}; one Shipment of a set repaints it",
+            sprite::VFX_ATLAS,
+            many.iter()
+                .map(|(s, i, _)| format!("{} contributions[{i}]", s.manifest.shipment.name))
+                .collect::<Vec<_>>()
+                .join(" and ")
+        )),
+    }
+}
+
+/// The game's effects block, with the ASET rows it publishes, its worldentity, its fxdict records
+/// and its `vfx` atlas.
 pub struct GameFx {
     pub effects: ScriptsBlock,
     /// `asset_hash -> (packed_block_ref, secondary_ref, type_id)`, as the game has them.
     pub effects_rows: HashMap<u32, (u32, u32, u32)>,
     pub worldentity: WorldEntity,
-    pub frames: BTreeSet<u32>,
+    pub fxdict: Vec<FxRect>,
+    pub atlas: Atlas,
 }
 
 impl GameFx {
-    /// Read both out of the game stack: the effects block by its path ([`EFFECTS_BLOCK`]), the
-    /// worldentity out of the resident block ([`crate::link::SCRIPT_BLOCKS`]).
+    /// Read them out of the game stack: the effects block by its path ([`EFFECTS_BLOCK`]), the
+    /// worldentity, the fxdict and the atlas out of the resident block ([`crate::link::SCRIPT_BLOCKS`]).
     pub fn read(game: &mut crate::game::GameStack) -> Result<GameFx, String> {
         let (raw, effects_rows) = game
             .block_and_rows_by_path(EFFECTS_BLOCK.0)
@@ -527,8 +608,8 @@ impl GameFx {
         let resident = ScriptsBlock::parse(&raw).map_err(|e| format!("{path}: {e}"))?;
         let worldentity = WorldEntity::parse(&resident.entries[worldentity_entry(&resident)?].bytes)
             .map_err(|e| format!("the worldentity in {path}: {e}"))?;
-        let frames = fxdict_entry(&resident).map_err(|e| format!("{path}: {e}"))?;
-        Ok(GameFx { effects, effects_rows, worldentity, frames })
+        let (fxdict, atlas) = sprites_of(&resident).map_err(|e| format!("{path}: {e}"))?;
+        Ok(GameFx { effects, effects_rows, worldentity, fxdict, atlas })
     }
 }
 
@@ -538,8 +619,13 @@ pub struct FxBase<'a> {
     pub effects: &'a [Entry],
     /// The game's worldentity.
     pub worldentity: &'a WorldEntity,
-    /// The record keys of the game's `fxdict`: what a `TEXT` frame names ([`fxdict_entry`]).
-    pub frames: &'a BTreeSet<u32>,
+    /// The game's `fxdict` records: what a `TEXT` frame names.
+    pub fxdict: &'a [FxRect],
+    /// The atlas the set's sprites are drawn into ([`base_atlas`]).
+    pub atlas: &'a Atlas,
+    /// Whether a Shipment of the set repaints the atlas. A repainted atlas is written whether or not
+    /// the set adds a sprite.
+    pub repainted: bool,
 }
 
 /// One Shipment of the set.
@@ -566,7 +652,7 @@ pub enum Scope {
 pub struct Problem {
     pub shipment: String,
     pub index: usize,
-    /// The lint code: M0252–M0261.
+    /// The lint code: M0252–M0261 or M0304–M0307.
     pub code: &'static str,
     pub message: String,
 }
@@ -638,10 +724,20 @@ pub struct Merged {
     pub added: Vec<u32>,
     /// The worldentity with every added template, when the set adds one.
     pub worldentity: Option<WorldEntity>,
+    /// The `fxdict` container with every sprite's record, when the set adds a sprite.
+    pub fxdict: Option<Vec<u8>>,
+    /// The `vfx` atlas container with every sprite drawn, when the set adds a sprite or repaints it.
+    pub atlas: Option<Vec<u8>>,
+    /// The free square the sprites went into, when the set adds one.
+    pub square: Option<Square>,
+    /// Where each sprite went.
+    pub placed: Vec<Placed>,
     /// Each `replace_fx` and the effect it resolved to.
     pub resolved: Vec<(Claimant, u32)>,
     /// `replace_fx` targets left for `qm link` ([`Scope::Build`]).
     pub deferred: Vec<Claimant>,
+    /// Frames left for `qm link` ([`Scope::Build`]): who gave them, and the frame.
+    pub deferred_frames: Vec<(Claimant, u32)>,
     pub log: Vec<String>,
 }
 
@@ -659,11 +755,34 @@ struct State<'a> {
     we: WorldEntity,
     added_effects: HashMap<u32, Origin>,
     added_templates: HashMap<u32, (Origin, String)>,
+    /// Each sprite's key and who added it.
+    sprites: HashMap<u32, Origin>,
+    /// The record keys of the game's `fxdict`.
+    game_frames: BTreeSet<u32>,
+    deferred_frames: Vec<(Claimant, u32)>,
+    log: Vec<String>,
     edited: BTreeMap<u32, Vec<Claimant>>,
     problems: Vec<Problem>,
 }
 
-impl State<'_> {
+impl<'a> State<'a> {
+    fn new(base: &FxBase<'_>, set: &'a [FxShipment<'a>], scope: Scope) -> State<'a> {
+        State {
+            set,
+            scope,
+            effects: base.effects.to_vec(),
+            we: base.worldentity.clone(),
+            added_effects: HashMap::new(),
+            added_templates: HashMap::new(),
+            sprites: HashMap::new(),
+            game_frames: base.fxdict.iter().map(|r| r.key).collect(),
+            deferred_frames: Vec::new(),
+            log: Vec::new(),
+            edited: BTreeMap::new(),
+            problems: Vec::new(),
+        }
+    }
+
     fn name(&self, si: usize) -> &str {
         &self.set[si].manifest.shipment.name
     }
@@ -737,28 +856,121 @@ impl State<'_> {
     }
 
     /// M0259: every frame the Shipment gives an effect (one `before` did not have) is a record of
-    /// the game's `fxdict`.
-    fn check_frames(&mut self, si: usize, index: usize, base: &FxBase<'_>, fx: &EffectContainer, before: &BTreeSet<u32>) {
+    /// the game's `fxdict`, a sprite of the Shipment, or a sprite of a Shipment it requires. In
+    /// [`Scope::Build`], a Shipment that requires others leaves the frames found in none of these to
+    /// `qm link`.
+    fn check_frames(&mut self, si: usize, index: usize, fx: &EffectContainer, before: &BTreeSet<u32>) {
         let mut missing: Vec<u32> = fx
             .emitters
             .iter()
             .flat_map(|e| e.particle.text.frames.iter().copied())
-            .filter(|h| !before.contains(h) && !base.frames.contains(h))
+            .filter(|h| !before.contains(h) && !self.game_frames.contains(h))
+            .filter(|h| self.sprites.get(h).is_none_or(|&o| o.shipment != si && self.may_use(si, o).is_err()))
             .collect();
         missing.sort_unstable();
         missing.dedup();
-        if !missing.is_empty() {
-            self.problem(
-                si,
-                index,
-                "M0259",
-                format!(
-                    "TEXT frame(s) {} are not records of the game's fxdict (0x{FXDICT_NAME_HASH:08X}); the \
-                     loader resolves each frame there (FUN_004911a0 -> FUN_00491510), and a frame it \
-                     does not find draws the dictionary's default rectangle",
-                    missing.iter().map(|h| format!("0x{h:08X}")).collect::<Vec<_>>().join(", ")
-                ),
-            );
+        if missing.is_empty() {
+            return;
+        }
+        let requires = !required_shipments(self.set[si].manifest).is_empty();
+        if self.scope == Scope::Build && requires {
+            let claimant = Claimant { shipment: self.name(si).to_string(), index, via: "frame".into() };
+            for h in missing {
+                self.log.push(format!(
+                    "{} contributions[{index}] frame 0x{h:08X}: not in the game's fxdict or this Shipment's \
+                     sprites; resolved by qm link against the Shipments it requires",
+                    self.name(si)
+                ));
+                self.deferred_frames.push((claimant.clone(), h));
+            }
+            return;
+        }
+        let listed: Vec<String> = missing
+            .iter()
+            .map(|h| match self.sprites.get(h) {
+                Some(&o) => format!("0x{h:08X} ({})", self.may_use(si, o).unwrap_err()),
+                None => format!("0x{h:08X}"),
+            })
+            .collect();
+        self.problem(
+            si,
+            index,
+            "M0259",
+            format!(
+                "TEXT frame(s) {} are neither records of the game's fxdict (0x{FXDICT_NAME_HASH:08X}) nor \
+                 sprites of this Shipment or of one it requires; the loader resolves each frame in the \
+                 fxdict (FUN_004911a0 -> FUN_00491510), and a frame it does not find draws the whole \
+                 vfx atlas",
+                listed.join(", ")
+            ),
+        );
+    }
+
+    /// Every `add_fx_sprite` of the set, packed into `base.atlas` ([`crate::sprite::pack`]). `None`
+    /// when the set adds no sprite that reads.
+    fn sprites(&mut self, base: &FxBase<'_>) -> Option<sprite::Packed> {
+        let mut images: Vec<(usize, usize, String, u32, sprite::Image)> = Vec::new();
+        let set = self.set;
+        for (si, s) in set.iter().enumerate() {
+            for (index, c) in s.manifest.contributions.iter().enumerate() {
+                let Contribution::AddFxSprite { name, image } = c else { continue };
+                if let Some(m) = sprite::name_refusal(name) {
+                    self.problem(si, index, "M0305", m);
+                    continue;
+                }
+                let key = pandemic_hash_m2(name);
+                if self.game_frames.contains(&key) {
+                    self.problem(
+                        si,
+                        index,
+                        "M0306",
+                        format!(
+                            "sprite {name:?} hashes to 0x{key:08X}, a record of the game's fxdict \
+                             (0x{FXDICT_NAME_HASH:08X}); a frame names one record, so rename the sprite"
+                        ),
+                    );
+                    continue;
+                }
+                if let Some(&o) = self.sprites.get(&key) {
+                    let by = self.name(o.shipment).to_string();
+                    self.problem(
+                        si,
+                        index,
+                        "M0306",
+                        format!("sprite {name:?} (0x{key:08X}) is already added by {by} contributions[{}]", o.index),
+                    );
+                    continue;
+                }
+                self.sprites.insert(key, Origin { shipment: si, index });
+                match sprite::read_sprite(&s.root.join(image)) {
+                    Ok(img) => images.push((si, index, format!("{} {name}", s.manifest.shipment.name), key, img)),
+                    Err(e) => self.problem(si, index, "M0304", e),
+                }
+            }
+        }
+        if images.is_empty() {
+            return None;
+        }
+        let wanted: Vec<sprite::Sprite<'_>> =
+            images.iter().map(|(_, _, label, key, img)| sprite::Sprite { key: *key, label: label.clone(), image: img }).collect();
+        match sprite::pack(base.atlas, base.fxdict, &wanted) {
+            Ok(packed) => {
+                for p in &packed.placed {
+                    let (_, _, label, _, _) = images.iter().find(|i| i.3 == p.key).expect("a placed sprite was wanted");
+                    self.log.push(format!(
+                        "sprite {label} 0x{:08X}: {}x{} at ({}, {}) in the free square {}",
+                        p.key, p.width, p.height, p.x, p.y, packed.square
+                    ));
+                }
+                Some(packed)
+            }
+            Err(e) => {
+                let message = e.to_string();
+                for (si, index, _, _, _) in &images {
+                    self.problem(*si, *index, "M0307", message.clone());
+                }
+                None
+            }
         }
     }
 }
@@ -772,21 +984,15 @@ fn frames_of(fx: &EffectContainer) -> BTreeSet<u32> {
 /// Shipment by Shipment in `set` order (module docs). Every problem is collected; any problem or
 /// conflict fails the merge.
 pub fn merge(base: &FxBase<'_>, set: &[FxShipment<'_>], scope: Scope) -> Result<Merged, Failure> {
-    let mut st = State {
-        set,
-        scope,
-        effects: base.effects.to_vec(),
-        we: base.worldentity.clone(),
-        added_effects: HashMap::new(),
-        added_templates: HashMap::new(),
-        edited: BTreeMap::new(),
-        problems: Vec::new(),
-    };
+    let mut st = State::new(base, set, scope);
     let mut added = Vec::new();
     let mut resolved = Vec::new();
     let mut deferred = Vec::new();
     let mut log = Vec::new();
     let mut templates = false;
+
+    // 0. Sprites, every Shipment's, into one atlas and one fxdict.
+    let packed = st.sprites(base);
 
     for (si, s) in set.iter().enumerate() {
         let name = s.manifest.shipment.name.clone();
@@ -836,7 +1042,7 @@ pub fn merge(base: &FxBase<'_>, set: &[FxShipment<'_>], scope: Scope) -> Result<
                 st.problem(si, index, "M0261", format!("replace_fx {via} (0x{h:08X}): {e}"));
                 continue;
             }
-            st.check_frames(si, index, base, &fx, &before);
+            st.check_frames(si, index, &fx, &before);
             match write_effect_container(&fx) {
                 Ok(bytes) => {
                     log.push(format!(
@@ -887,7 +1093,7 @@ pub fn merge(base: &FxBase<'_>, set: &[FxShipment<'_>], scope: Scope) -> Result<
             } else {
                 match effect::read(&s.root.join(effect_path)).and_then(|f| f.lower()) {
                     Ok(fx) => {
-                        st.check_frames(si, index, base, &fx, &BTreeSet::new());
+                        st.check_frames(si, index, &fx, &BTreeSet::new());
                         match write_effect_container(&fx) {
                             Ok(bytes) => {
                                 log.push(format!(
@@ -988,13 +1194,31 @@ pub fn merge(base: &FxBase<'_>, set: &[FxShipment<'_>], scope: Scope) -> Result<
     if !st.problems.is_empty() || !conflicts.is_empty() {
         return Err(Failure { problems: st.problems, conflicts });
     }
+    // `Atlas::parse` checked that the container takes a body of this length back.
+    let (fxdict, atlas, square, placed) = match packed {
+        Some(p) => {
+            let atlas = p.atlas.container().expect("the atlas container takes back a body of its own length");
+            (Some(write_fxdict_container(&p.records)), Some(atlas), Some(p.square), p.placed)
+        }
+        None if base.repainted => {
+            (None, Some(base.atlas.container().expect("the atlas container takes back a body of its own length")), None, Vec::new())
+        }
+        None => (None, None, None, Vec::new()),
+    };
+    let mut all_log = std::mem::take(&mut st.log);
+    all_log.extend(log);
     Ok(Merged {
         effects: st.effects,
         added,
         worldentity: templates.then_some(st.we),
+        fxdict,
+        atlas,
+        square,
+        placed,
         resolved,
         deferred,
-        log,
+        deferred_frames: st.deferred_frames,
+        log: all_log,
     })
 }
 
@@ -1002,16 +1226,7 @@ pub fn merge(base: &FxBase<'_>, set: &[FxShipment<'_>], scope: Scope) -> Result<
 /// template. Reads no file: only the targets are resolved, against the game plus each Shipment's
 /// additions in `set` order. Resolution problems are not conflicts and are left to [`merge`].
 pub fn conflicts(base: &FxBase<'_>, set: &[FxShipment<'_>]) -> Vec<Conflict> {
-    let mut st = State {
-        set,
-        scope: Scope::Link,
-        effects: base.effects.to_vec(),
-        we: base.worldentity.clone(),
-        added_effects: HashMap::new(),
-        added_templates: HashMap::new(),
-        edited: BTreeMap::new(),
-        problems: Vec::new(),
-    };
+    let mut st = State::new(base, set, Scope::Link);
     for (si, s) in set.iter().enumerate() {
         for (index, c) in s.manifest.contributions.iter().enumerate() {
             let Contribution::ReplaceFx { target, .. } = c else { continue };
@@ -1389,10 +1604,22 @@ mod tests {
 
     const MAGENTA: &str = "edits:\n  - { op: colour_rgb, emitter: 0, rgb: [255, 0, 255] }\n";
 
+    /// A transparent 64² atlas.
+    fn atlas() -> Atlas {
+        let px = vec![0f32; 64 * 64 * 4];
+        let body = mercs2_formats::texture_encode::mip_chain(64, 64, 4, &px, mercs2_formats::texture_encode::encode_bc3);
+        Atlas::parse(&mercs2_formats::texture_encode::ucfx_texture("vfx", 64, 64, b"DXT5", &body)).unwrap()
+    }
+
+    /// The game's fxdict: the frame [`TEXTURE`], a 4² rectangle at the atlas's bottom-left corner.
+    fn records() -> Vec<FxRect> {
+        vec![FxRect { key: TEXTURE, u: 0.0, v: 0.0, w: 0.0625, h: 0.0625 }]
+    }
+
     fn run(ships: &[&Ship], scope: Scope) -> Result<Merged, Failure> {
         let (effects, we) = game();
-        let frames: BTreeSet<u32> = [TEXTURE].into();
-        let base = FxBase { effects: &effects, worldentity: &we, frames: &frames };
+        let (records, atlas) = (records(), atlas());
+        let base = FxBase { effects: &effects, worldentity: &we, fxdict: &records, atlas: &atlas, repainted: false };
         let set: Vec<FxShipment<'_>> = ships.iter().map(|s| FxShipment { manifest: &s.manifest, root: &s.root }).collect();
         merge(&base, &set, scope)
     }
@@ -1481,8 +1708,8 @@ mod tests {
         assert_eq!(f.conflicts.len(), 1);
         assert_eq!(f.conflicts[0].effect, pandemic_hash_m2("fx_one"));
         let (effects, we) = game();
-        let frames = BTreeSet::new();
-        let base = FxBase { effects: &effects, worldentity: &we, frames: &frames };
+        let atlas = atlas();
+        let base = FxBase { effects: &effects, worldentity: &we, fxdict: &[], atlas: &atlas, repainted: false };
         let set = [FxShipment { manifest: &a.manifest, root: &a.root }, FxShipment { manifest: &b.manifest, root: &b.root }];
         let c = conflicts(&base, &set);
         assert_eq!(c, f.conflicts);
@@ -1525,5 +1752,113 @@ mod tests {
             "edits:\n  - { op: frames, emitter: 0, frames: [\"0x00000007\", \"0x0BAD0BAD\"] }\n".into(),
         )]);
         assert_eq!(codes(&run(&[&s], Scope::Build).err().unwrap()), vec!["M0259"]);
+    }
+    // ---- sprites --------------------------------------------------------------------------------
+
+    /// An 8² PNG, every texel white with alpha `a`.
+    fn png(a: u8) -> Vec<u8> {
+        let mut out = Vec::new();
+        let mut e = png::Encoder::new(&mut out, 8, 8);
+        e.set_color(png::ColorType::Rgba);
+        e.set_depth(png::BitDepth::Eight);
+        e.write_header().unwrap().write_image_data(&[255, 255, 255, a].repeat(64)).unwrap();
+        out
+    }
+
+    /// `add_fx_sprite` of `name` from `src/<name>.png`.
+    fn sprite(name: &str) -> String {
+        format!("  - kind: add_fx_sprite\n    name: {name}\n    image: src/{name}.png\n")
+    }
+
+    /// An effect whose one frame is `frame`.
+    fn framed(frame: &str) -> String {
+        let mut fx = effect();
+        fx.emitters[0].particle.text.frames = vec![pandemic_hash_m2(frame)];
+        effect::to_string(&EffectForm::express(&fx), Format::Yaml).unwrap()
+    }
+
+    fn ship_files(label: &str, name: &str, requires: &[&str], contributions: &str, text: &[(&str, String)], pngs: &[&str]) -> Ship {
+        let s = ship(label, name, requires, contributions, text);
+        for p in pngs {
+            std::fs::write(s.root.join("src").join(format!("{p}.png")), png(255)).unwrap();
+        }
+        s
+    }
+
+    #[test]
+    fn a_shipments_own_sprite_is_a_frame_and_joins_the_fxdict_and_the_atlas() {
+        let s = ship_files(
+            "own",
+            "mod-a",
+            &[],
+            &(sprite("qm_ring") + &add_fx("fx_a", "tpl_a", "fx_a")),
+            &[("fx_a.yaml", framed("qm_ring"))],
+            &["qm_ring"],
+        );
+        let m = run(&[&s], Scope::Build).unwrap_or_else(|f| panic!("{f}"));
+        let records = mercs2_formats::fxdict::parse_fxdict_container(m.fxdict.as_ref().unwrap()).unwrap();
+        let ring = pandemic_hash_m2("qm_ring");
+        assert_eq!(records.len(), 2);
+        assert!(records.iter().any(|r| r.key == ring));
+        assert_eq!(m.placed.len(), 1);
+        assert_eq!(m.square, Some(Square { x: 0, y: 0, side: 32 }));
+        assert!(m.atlas.is_some());
+        // Effects alone leave both untouched.
+        let e = ship("own-none", "mod-b", &[], &add_fx("fx_b", "tpl_b", "fx_b"), &[("fx_b.yaml", effect_file())]);
+        let m = run(&[&e], Scope::Build).unwrap();
+        assert!(m.fxdict.is_none() && m.atlas.is_none());
+    }
+
+    #[test]
+    fn another_shipments_sprite_is_a_frame_only_through_requires() {
+        let a = ship_files("sreq", "mod-a", &[], &sprite("qm_star"), &[], &["qm_star"]);
+        let b = ship("sreq", "mod-b", &[], &add_fx("fx_b", "tpl_b", "fx_b"), &[("fx_b.yaml", framed("qm_star"))]);
+        let f = run(&[&a, &b], Scope::Link).err().unwrap();
+        assert_eq!(codes(&f), vec!["M0259"]);
+        assert!(f.problems[0].message.contains("does not require"), "{}", f.problems[0].message);
+        let b = ship("sreq-ok", "mod-b", &["mod-a"], &add_fx("fx_b", "tpl_b", "fx_b"), &[("fx_b.yaml", framed("qm_star"))]);
+        assert!(run(&[&a, &b], Scope::Link).is_ok());
+        // Built alone, the requiring Shipment leaves the frame to the link.
+        let m = run(&[&b], Scope::Build).unwrap();
+        assert_eq!(m.deferred_frames.len(), 1);
+        assert_eq!(m.deferred_frames[0].1, pandemic_hash_m2("qm_star"));
+        // A Shipment that requires nothing resolves every frame itself.
+        let c = ship("sreq-none", "mod-c", &[], &add_fx("fx_c", "tpl_c", "fx_c"), &[("fx_c.yaml", framed("qm_star"))]);
+        assert_eq!(codes(&run(&[&c], Scope::Build).err().unwrap()), vec!["M0259"]);
+    }
+
+    #[test]
+    fn a_sprite_key_the_fxdict_or_another_sprite_has_is_refused() {
+        // A name another Shipment already added is M0306; a name written as a hash is M0305.
+        let a = ship_files("sprite-taken", "mod-a", &[], &sprite("qm_same"), &[], &["qm_same"]);
+        let b = ship_files("sprite-taken", "mod-b", &[], &sprite("qm_same"), &[], &["qm_same"]);
+        let f = run(&[&a, &b], Scope::Link).err().unwrap();
+        assert_eq!(codes(&f), vec!["M0306"]);
+        assert!(f.problems[0].message.contains("already added by mod-a"), "{}", f.problems[0].message);
+        let h = ship_files("hash", "mod-h", &[], "  - kind: add_fx_sprite\n    name: \"0x00000007\"\n    image: src/x.png\n", &[], &["x"]);
+        assert_eq!(codes(&run(&[&h], Scope::Build).err().unwrap()), vec!["M0305"]);
+    }
+
+    #[test]
+    fn the_set_packs_the_same_whatever_order_its_shipments_come_in() {
+        let a = ship_files("order-s", "mod-a", &[], &(sprite("qm_one") + &sprite("qm_two")), &[], &["qm_one", "qm_two"]);
+        let b = ship_files("order-s", "mod-b", &[], &sprite("qm_three"), &[], &["qm_three"]);
+        let ab = run(&[&a, &b], Scope::Link).unwrap();
+        let ba = run(&[&b, &a], Scope::Link).unwrap();
+        assert_eq!(ab.fxdict, ba.fxdict);
+        assert_eq!(ab.atlas, ba.atlas);
+        assert_eq!(ab.placed.len(), 3);
+    }
+
+    #[test]
+    fn sprites_that_do_not_fit_are_m0307_on_every_sprite() {
+        // The free square of the test atlas is 32²: seventeen 8² sprites need 1,088 texels of its 1,024.
+        let names: Vec<String> = (0..17).map(|i| format!("qm_s{i}")).collect();
+        let contributions: String = names.iter().map(|n| sprite(n)).collect();
+        let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+        let s = ship_files("full", "mod-a", &[], &contributions, &[], &refs);
+        let f = run(&[&s], Scope::Build).err().unwrap();
+        assert_eq!(codes(&f), vec!["M0307"; 17]);
+        assert!(f.problems[0].message.contains("need 1088 texels"), "{}", f.problems[0].message);
     }
 }
