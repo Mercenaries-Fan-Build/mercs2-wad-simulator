@@ -450,7 +450,7 @@ fn cmd_lint(
         match lint::fx_game_checks(&shipment.manifest, &shipment.root, &mut stack) {
             Ok(d) => found.extend(d),
             Err(e) => {
-                eprintln!("error: effects: {e}");
+                eprintln!("error: effects and sprites: {e}");
                 return ExitCode::from(EXIT_UNUSABLE);
             }
         }
