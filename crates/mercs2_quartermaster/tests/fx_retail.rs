@@ -8,6 +8,15 @@
 //!   resident block with both Shipments' effects and templates; with a third Shipment that patches a
 //!   resident script, the one resident block carries the script and both templates.
 //! * The game-gated rules M0257–M0261 fire on what they describe.
+//! * The fixtures' effects take the retail per-position mode at every unresolved `PTYP` position, the
+//!   retail mode of the `COLR` binary16, and the retail rule that a gravity's `ampl` is its
+//!   magnitude.
+//! * Sprites: the retail free square is 512² at (1536, 0); `qm-fx-a`'s ring joins the fxdict and is
+//!   drawn there, the atlas changing only in the square's blocks; both orders of `qm-fx-a` and
+//!   `qm-fx-b` give the same fxdict and atlas bytes; a frame of another Shipment's sprite needs
+//!   `requires`, `qm build` leaving it to `qm link`; a sprites-only Shipment emits no effects block;
+//!   M0306 and M0307 fire; a repaint of `vfx` is the base the sprites are drawn on, a repaint that
+//!   fills the free square leaves the sprites M0307, and two repaints conflict.
 //!
 //! Game-gated: built by the `retail` feature, reads the `vz.wad` named by the repo-root
 //! `.mercs2-local.toml`, and fails if it is absent.
@@ -19,7 +28,9 @@ mod common {
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use mercs2_formats::fxdict::{parse_effect_container, write_effect_container, EffectContainer};
+use mercs2_formats::fxdict::{parse_effect_container, parse_fxdict_container, write_effect_container, EffectContainer, FxRect};
+use mercs2_formats::texture::parse_texture_container;
+use mercs2_formats::texture_encode::{decode_bc3_block, encode_bc3, mip_chain};
 use mercs2_formats::hash::pandemic_hash_m2;
 use mercs2_formats::patch_wad::{read_patch_wad, PatchBlock};
 use mercs2_formats::scripts_block::ScriptsBlock;
@@ -30,6 +41,7 @@ use mercs2_quartermaster::compat::PlanInput;
 use mercs2_quartermaster::effect::{self, EffectForm};
 use mercs2_quartermaster::fx::{self, GameFx};
 use mercs2_quartermaster::lint;
+use mercs2_quartermaster::sprite::{self, Square};
 use mercs2_quartermaster::template::TemplateForm;
 use mercs2_quartermaster::{build, discover, Contribution, Format, GameStack, LoadedShipment};
 
@@ -100,6 +112,55 @@ fn template_of(s: &LoadedShipment, name: &str) -> TemplateForm {
         .expect("the template")
 }
 
+/// The 2048² DXT5 body's texel `(x, y)` at mip `level`.
+fn texel(body: &[u8], level: usize, x: usize, y: usize) -> [u8; 4] {
+    let offset: usize = (0..level).map(|l| (2048 >> l) * (2048 >> l)).sum();
+    let bw = (2048 >> level) / 4;
+    let o = offset + ((y / 4) * bw + x / 4) * 16;
+    decode_bc3_block(&body[o..o + 16])[(y % 4) * 4 + x % 4]
+}
+
+/// The blocks, as `(mip, bx, by)`, in which two 2048² DXT5 bodies of 10 mips differ.
+fn changed_blocks(a: &[u8], b: &[u8]) -> Vec<(usize, usize, usize)> {
+    assert_eq!(a.len(), b.len());
+    let mut out = Vec::new();
+    let mut offset = 0;
+    for level in 0..10 {
+        let bw = (2048 >> level) / 4;
+        for by in 0..bw {
+            for bx in 0..bw {
+                let o = offset + (by * bw + bx) * 16;
+                if a[o..o + 16] != b[o..o + 16] {
+                    out.push((level, bx, by));
+                }
+            }
+        }
+        offset += bw * bw * 16;
+    }
+    out
+}
+
+/// Whether block `(bx, by)` of mip `level` holds a texel of `square`.
+fn in_square(square: Square, level: usize, bx: usize, by: usize) -> bool {
+    let (x0, y0, side) = (square.x >> level, square.y >> level, (square.side >> level).max(1));
+    bx * 4 < x0 + side && x0 < bx * 4 + 4 && by * 4 < y0 + side && y0 < by * 4 + 4
+}
+
+/// Write an 8-bit RGBA PNG of `w × h` whose texel `(x, y)` is `f(x, y)`.
+fn write_png(path: &Path, w: usize, h: usize, f: impl Fn(usize, usize) -> [u8; 4]) {
+    let mut data = Vec::with_capacity(w * h * 4);
+    for y in 0..h {
+        for x in 0..w {
+            data.extend_from_slice(&f(x, y));
+        }
+    }
+    let file = std::fs::File::create(path).unwrap();
+    let mut e = png::Encoder::new(std::io::BufWriter::new(file), w as u32, h as u32);
+    e.set_color(png::ColorType::Rgba);
+    e.set_depth(png::BitDepth::Eight);
+    e.write_header().unwrap().write_image_data(&data).unwrap();
+}
+
 #[test]
 fn the_effects_block_and_every_effect_re_encode_through_the_form() {
     let mut game = game();
@@ -132,9 +193,10 @@ fn retail_frames_are_fxdict_records() {
             frames.extend(em.particle.text.frames);
         }
     }
-    let records = frames.iter().filter(|h| base.frames.contains(h)).count();
+    let keys: std::collections::BTreeSet<u32> = base.fxdict.iter().map(|r| r.key).collect();
+    let records = frames.iter().filter(|h| keys.contains(h)).count();
     let textures = frames.iter().filter(|&&h| game.has_asset(h, mercs2_formats::types::TYPE_ID_TEXTURE)).count();
-    assert_eq!((frames.len(), records, textures, base.frames.len()), (566, 546, 0, 630));
+    assert_eq!((frames.len(), records, textures, keys.len()), (566, 546, 0, 630));
 }
 
 #[test]
@@ -179,17 +241,35 @@ fn building_qm_fx_a_emits_the_effects_and_resident_blocks_with_its_edits_and_add
     }
     assert_eq!(eb.aset_entries.len(), effects.entries.len());
 
-    // The resident block: the game's, with the template appended to the worldentity.
+    // The resident block: the game's, with the template appended to the worldentity, the ring's
+    // record in the fxdict and the ring drawn into the atlas.
     let (raw, _) = &blocks[RESIDENT];
     let resident = ScriptsBlock::parse(raw).unwrap();
     let (game_resident, _) = game.block_and_rows_by_path(r"\VZ\resident_P000_Q3.block").unwrap();
     let game_resident = ScriptsBlock::parse(&game_resident).unwrap();
     let at = fx::worldentity_entry(&resident).unwrap();
+    let (fxdict_at, atlas_at) = (fx::fxdict_entry(&resident).unwrap(), fx::atlas_entry(&resident).unwrap());
     for (i, (e, b)) in resident.entries.iter().zip(&game_resident.entries).enumerate() {
-        if i != at {
+        if ![at, fxdict_at, atlas_at].contains(&i) {
             assert!(e.bytes == b.bytes && e.name_hash == b.name_hash, "resident entry {i} is the game's");
         }
     }
+    let ring = pandemic_hash_m2("qm_fx_a_ring");
+    let records = parse_fxdict_container(&resident.entries[fxdict_at].bytes).unwrap();
+    assert_eq!(records.len(), 631);
+    let mut want_records = base.fxdict.clone();
+    want_records.push(FxRect { key: ring, u: 0.75, v: 1.0 - 64.0 / 2048.0, w: 64.0 / 2048.0, h: 64.0 / 2048.0 });
+    mercs2_formats::fxdict::sort_fxdict(&mut want_records).unwrap();
+    assert_eq!(records, want_records, "the game's records and the ring's, at (1536, 0) 64²");
+    let built = parse_texture_container(&resident.entries[atlas_at].bytes).unwrap().all_mips;
+    let game_body = &base.atlas.body;
+    let square = Square { x: 1536, y: 0, side: 512 };
+    for (level, bx, by) in changed_blocks(game_body, &built) {
+        assert!(in_square(square, level, bx, by), "mip {level} block ({bx}, {by}) lies outside the square");
+    }
+    // The ring: alpha on the circle of radius 24 about its centre, none at the centre.
+    assert!(texel(&built, 0, 1536 + 56, 32)[3] > 200);
+    assert_eq!(texel(&built, 0, 1536 + 32, 32)[3], 0);
     assert_eq!(resident.entries.len(), game_resident.entries.len());
     let tpl = template_of(&s, "qm_cyan_burst");
     let key = derived_template_key("qm_cyan_burst");
@@ -239,9 +319,20 @@ fn linking_qm_fx_a_and_qm_fx_b_merges_both_in_either_order() {
             templates.insert(t, TemplateForm::express(&we, key).unwrap());
         }
         let by_hash: BTreeMap<u32, Vec<u8>> = effects.entries.iter().map(|e| (e.name_hash, e.bytes.clone())).collect();
-        contents.push((by_hash, templates, we.instances.clone()));
+        let resident = ScriptsBlock::parse(&blocks[RESIDENT].0).unwrap();
+        let fxdict = resident.entries[fx::fxdict_entry(&resident).unwrap()].bytes.clone();
+        let atlas = resident.entries[fx::atlas_entry(&resident).unwrap()].bytes.clone();
+        let records = parse_fxdict_container(&fxdict).unwrap();
+        assert_eq!(records.len(), 632, "{label}: the game's 630 and the two sprites'");
+        // The ring's key (0x10BC3021) is below the star's (0xB0EF64D6): the ring takes the free
+        // square's first 64² cell, (1536, 0), and the star the next, (1600, 0).
+        for (sp, x) in [("qm_fx_a_ring", 1536.0), ("qm_fx_b_star", 1600.0)] {
+            let r = records.iter().find(|r| r.key == pandemic_hash_m2(sp)).unwrap_or_else(|| panic!("{label} {sp}"));
+            assert_eq!((r.u * 2048.0, r.top() * 2048.0, r.w * 2048.0, r.h * 2048.0), (x, 0.0, 64.0, 64.0), "{label} {sp}");
+        }
+        contents.push((by_hash, templates, we.instances.clone(), fxdict, atlas));
     }
-    assert!(contents[0] == contents[1], "both load orders merge the same effects and templates");
+    assert!(contents[0] == contents[1], "both load orders merge the same effects, templates, fxdict and atlas bytes");
 }
 
 #[test]
@@ -309,8 +400,10 @@ fn game_codes(s: &LoadedShipment) -> Vec<&'static str> {
 
 #[test]
 fn the_fx_game_rules_fire_on_what_they_describe() {
-    // Quiet: a new effect drawing the fixture's frames (fxdict records), and a C4 edit.
-    let drawn = std::fs::read_to_string(fixture("qm-fx-a/src/qm_fx_cyan_burst.yaml")).unwrap();
+    // Quiet: a new effect drawing a frame of the game's fxdict, and a C4 edit.
+    let mut drawn = effect::read(&fixture("qm-fx-a/src/qm_fx_cyan_burst.yaml")).unwrap();
+    drawn.emitters[0].particle.frames = vec![format!("0x{:08X}", GameFx::read(&mut game()).unwrap().fxdict[0].key)];
+    let drawn = effect::to_string(&drawn, Format::Yaml).unwrap();
     let mut unknown = effect::read(&fixture("qm-fx-a/src/qm_fx_cyan_burst.yaml")).unwrap();
     unknown.emitters[0].particle.frames = vec!["qm_no_such_frame".into()];
     let unknown = effect::to_string(&unknown, Format::Yaml).unwrap();
@@ -354,4 +447,246 @@ fn the_fx_game_rules_fire_on_what_they_describe() {
         "edits:\n  - { op: colour_rgb, emitter: 9, rgb: [255, 0, 255] }\n",
     );
     assert_eq!(game_codes(&s), vec!["M0261"]);
+}
+
+/// The fixtures' effects are authored; where a value has no name to author it by, it is retail's
+/// commonest: each of the 15 unresolved `PTYP` positions takes the mode of the 820 retail emitters
+/// (value, flags and curve together), and every `COLR` key takes the commonest binary16 of the
+/// 82,000 retail keys. A gravity's `ampl` is its magnitude, as in all 225 retail gravities.
+#[test]
+fn the_fixture_effects_take_retails_commonest_value_where_nothing_names_one() {
+    let mut game = game();
+    let base = GameFx::read(&mut game).unwrap();
+    let defs: Vec<&mercs2_formats::fxdict::AttrDef> = mercs2_formats::fxdict::PTYP_ATTRIBUTES_BEFORE_COLR
+        .iter()
+        .chain(mercs2_formats::fxdict::PTYP_ATTRIBUTES_AFTER_COLR.iter())
+        .collect();
+    let mut counts: Vec<BTreeMap<String, (usize, mercs2_formats::fxdict::Atrb)>> = vec![BTreeMap::new(); defs.len()];
+    let mut halves: BTreeMap<u16, usize> = BTreeMap::new();
+    let (mut emitters, mut gravities, mut ampl_is_magnitude) = (0, 0, 0);
+    for e in base.effects.entries.iter().filter(|e| e.type_hash == TYPE_HASH_EFFECT) {
+        let fx = parse_effect_container(&e.bytes).unwrap();
+        for em in &fx.emitters {
+            emitters += 1;
+            for (i, a) in em.particle.attributes.iter().enumerate() {
+                counts[i].entry(format!("{a:?}")).or_insert((0, a.clone())).0 += 1;
+            }
+            for k in em.particle.colr.keys.iter() {
+                *halves.entry(k.half_bits).or_default() += 1;
+            }
+        }
+        for f in &fx.forces {
+            if let mercs2_formats::fxdict::ForceKind::Gravity { magnitude, .. } = f.kind {
+                gravities += 1;
+                ampl_is_magnitude += usize::from(f.attributes[0].value == mercs2_formats::fxdict::AtrbValue::F32(magnitude));
+            }
+        }
+    }
+    assert_eq!((emitters, gravities, ampl_is_magnitude), (820, 225, 225));
+    let (half, n) = halves.iter().max_by_key(|(_, n)| **n).map(|(h, n)| (*h, *n)).unwrap();
+    assert_eq!((half, n), (0x3C00, 46_104));
+    let unresolved: Vec<usize> = (0..defs.len()).filter(|&i| defs[i].name.is_none()).collect();
+    assert_eq!(unresolved.len(), 15);
+    for f in ["qm-fx-a/src/qm_fx_cyan_burst.yaml", "qm-fx-b/src/qm_fx_green_burst.yaml"] {
+        let fx = effect::read(&fixture(f)).unwrap().lower().unwrap();
+        let p = &fx.emitters[0].particle;
+        for &i in &unresolved {
+            let modes: Vec<&(usize, mercs2_formats::fxdict::Atrb)> = counts[i].values().collect();
+            let top = modes.iter().map(|(n, _)| *n).max().unwrap();
+            let at_top: Vec<_> = modes.iter().filter(|(n, _)| *n == top).collect();
+            assert_eq!(at_top.len(), 1, "position {i} has one mode");
+            assert_eq!(p.attributes[i], at_top[0].1, "{f}: position {i} (0x{:08X})", defs[i].hash);
+        }
+        assert!(p.colr.keys.iter().all(|k| k.half_bits == half), "{f}");
+        for force in &fx.forces {
+            if let mercs2_formats::fxdict::ForceKind::Gravity { magnitude, .. } = force.kind {
+                assert_eq!(force.attributes[0].value, mercs2_formats::fxdict::AtrbValue::F32(magnitude), "{f}");
+            }
+        }
+    }
+}
+
+#[test]
+fn the_retail_free_square_is_512_at_1536_0() {
+    let base = GameFx::read(&mut game()).unwrap();
+    assert_eq!(sprite::free_square(&base.atlas, &base.fxdict), Some(Square { x: 1536, y: 0, side: 512 }));
+}
+
+/// A Shipment named `name` at a scratch directory: `contributions`, `files` under `src/`, and
+/// `requires`.
+fn shipment_named(label: &str, name: &str, requires: &[&str], contributions: &str, files: &[(&str, Vec<u8>)]) -> LoadedShipment {
+    let dir = scratch(label);
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    for (f, bytes) in files {
+        std::fs::write(dir.join("src").join(f), bytes).unwrap();
+    }
+    let load = if requires.is_empty() { String::new() } else { format!("load: {{ requires: [{}] }}\n", requires.join(", ")) };
+    std::fs::write(
+        dir.join("manifest.yaml"),
+        format!("format: 2\nshipment: {{ name: {name}, version: 1.0.0, target: retail }}\n{load}contributions:\n{contributions}"),
+    )
+    .unwrap();
+    open(&dir)
+}
+
+/// An `add_fx` of `qm_fx_user` whose effect draws `frame`, with the template `qm_user_tpl`.
+fn user_of(frame: &str) -> (String, Vec<u8>) {
+    let mut form = effect::read(&fixture("qm-fx-a/src/qm_fx_cyan_burst.yaml")).unwrap();
+    form.emitters[0].particle.frames = vec![frame.into()];
+    (
+        add_fx("qm_fx_user", "qm_user_tpl", "qm_fx_user"),
+        effect::to_string(&form, Format::Yaml).unwrap().into_bytes(),
+    )
+}
+
+#[test]
+fn a_frame_of_another_shipments_sprite_needs_requires_and_build_leaves_it_to_link() {
+    let a = open(&fixture("qm-fx-a"));
+    let (contribution, text) = user_of("qm_fx_a_ring");
+    let c = shipment_named("user-free", "qm-fx-user", &[], &contribution, &[("fx.yaml", text.clone())]);
+    let mut g = game();
+    let ids = ["shipment:qm-fx-a".to_string(), "shipment:qm-fx-user".to_string()];
+    let inputs = [PlanInput { id: &ids[0], shipment: &a }, PlanInput { id: &ids[1], shipment: &c }];
+    let corpus = common::corpus::corpus_root().expect("the vendored Lua corpus");
+    let e = build::link_installed(&inputs, &mut g, &corpus, &scratch("user-free-link"), None).err().expect("refused");
+    let message = e.to_string();
+    assert!(message.contains("[M0259]") && message.contains("does not require"), "{message}");
+
+    let c = shipment_named("user-req", "qm-fx-user", &["qm-fx-a"], &contribution, &[("fx.yaml", text)]);
+    let rep = build::build(&c, Some(&mut game()), None, Some(&scratch("user-req-build")), None, None).unwrap_or_else(|e| panic!("{e}"));
+    assert!(rep.log.iter().any(|l| l.contains("resolved by qm link")), "{:?}", rep.log);
+    let (blocks, _) = link("user-req-link", &[&a, &c]);
+    assert!(blocks.contains_key(fx::EFFECTS_BLOCK.1));
+}
+
+#[test]
+fn a_sprites_only_shipment_emits_no_effects_block() {
+    let ring = std::fs::read(fixture("qm-fx-a/src/qm_fx_a_ring.png")).unwrap();
+    let s = shipment_named(
+        "sprites-only",
+        "qm-fx-sprites",
+        &[],
+        "  - kind: add_fx_sprite\n    name: qm_only_ring\n    image: src/ring.png\n",
+        &[("ring.png", ring)],
+    );
+    let rep = build::build(&s, Some(&mut game()), None, Some(&scratch("sprites-only-build")), None, None).unwrap_or_else(|e| panic!("{e}"));
+    let blocks = blocks_of(rep.wad.as_ref().expect("an overlay"));
+    assert_eq!(blocks.keys().collect::<Vec<_>>(), vec![RESIDENT]);
+    let (blocks, promised) = link("sprites-only-link", &[&s]);
+    assert_eq!(blocks.keys().collect::<Vec<_>>(), vec![RESIDENT]);
+    assert!(!promised.iter().any(|p| p == fx::EFFECTS_BLOCK.1), "{promised:?}");
+}
+
+#[test]
+fn the_sprite_game_rules_fire_on_what_they_describe() {
+    let base = GameFx::read(&mut game()).unwrap();
+    // M0306: a name hashing to a record of the game's fxdict.
+    let keys: std::collections::BTreeSet<u32> = base.fxdict.iter().map(|r| r.key).collect();
+    let taken = (0u64..).map(|i| format!("qm_frame_{i}")).find(|n| keys.contains(&pandemic_hash_m2(n))).unwrap();
+    let ring = std::fs::read(fixture("qm-fx-a/src/qm_fx_a_ring.png")).unwrap();
+    let s = shipment_named(
+        "m0306",
+        "qm-fx-m0306",
+        &[],
+        &format!("  - kind: add_fx_sprite\n    name: {taken}\n    image: src/ring.png\n"),
+        &[("ring.png", ring)],
+    );
+    let codes = |s: &LoadedShipment| lint::fx_game_checks(&s.manifest, &s.root, &mut game()).unwrap();
+    let d = codes(&s);
+    assert_eq!(d.iter().map(|d| d.rule.code).collect::<Vec<_>>(), vec!["M0306"], "{taken}");
+
+    // M0307: two 512² sprites need twice the free square.
+    let dir = scratch("m0307-images");
+    write_png(&dir.join("big.png"), 512, 512, |_, _| [255, 255, 255, 255]);
+    let big = std::fs::read(dir.join("big.png")).unwrap();
+    let s = shipment_named(
+        "m0307",
+        "qm-fx-m0307",
+        &[],
+        "  - kind: add_fx_sprite\n    name: qm_big_one\n    image: src/big.png\n  - kind: add_fx_sprite\n    name: qm_big_two\n    image: src/big.png\n",
+        &[("big.png", big)],
+    );
+    let d = codes(&s);
+    assert_eq!(d.iter().map(|d| d.rule.code).collect::<Vec<_>>(), vec!["M0307", "M0307"]);
+    assert!(d[0].message.contains("need 524288 texels") && d[0].message.contains("512x512 at (1536, 0)"), "{}", d[0].message);
+}
+
+/// The repaint: a gradient, opaque, but for the transparent 512² square at (1536, 0).
+fn repaint_texel(x: usize, y: usize) -> [u8; 4] {
+    if x >= 1536 && y < 512 {
+        [0, 0, 0, 0]
+    } else {
+        [(x / 8) as u8, (y / 8) as u8, 128, 255]
+    }
+}
+
+#[test]
+fn a_repaint_is_the_base_the_sprites_are_drawn_on_and_two_repaints_conflict() {
+    let dir = scratch("repaint-images");
+    write_png(&dir.join("vfx.png"), 2048, 2048, repaint_texel);
+    let painted = std::fs::read(dir.join("vfx.png")).unwrap();
+    let ring = std::fs::read(fixture("qm-fx-a/src/qm_fx_a_ring.png")).unwrap();
+    let s = shipment_named(
+        "repaint",
+        "qm-fx-repaint",
+        &[],
+        "  - kind: replace_texture\n    target: vfx\n    image: src/vfx.png\n  - kind: add_fx_sprite\n    name: qm_painted_ring\n    image: src/ring.png\n",
+        &[("vfx.png", painted.clone()), ("ring.png", ring)],
+    );
+    let rep = build::build(&s, Some(&mut game()), None, Some(&scratch("repaint-build")), None, None).unwrap_or_else(|e| panic!("{e}"));
+    let blocks = blocks_of(rep.wad.as_ref().expect("an overlay"));
+    assert_eq!(blocks.keys().collect::<Vec<_>>(), vec![RESIDENT], "the repaint goes into the resident block");
+    let resident = ScriptsBlock::parse(&blocks[RESIDENT].0).unwrap();
+    let built = parse_texture_container(&resident.entries[fx::atlas_entry(&resident).unwrap()].bytes).unwrap().all_mips;
+    let px: Vec<f32> = (0..2048 * 2048).flat_map(|i| repaint_texel(i % 2048, i / 2048)).map(|v| v as f32).collect();
+    let painted_body = mip_chain(2048, 2048, 4, &px, encode_bc3);
+    let square = Square { x: 1536, y: 0, side: 512 };
+    let changed = changed_blocks(&painted_body, &built);
+    assert!(!changed.is_empty(), "the ring is drawn");
+    for (level, bx, by) in changed {
+        assert!(in_square(square, level, bx, by), "mip {level} block ({bx}, {by}) differs from the repaint outside the square");
+    }
+    assert!(texel(&built, 0, 1536 + 56, 32)[3] > 200, "the ring sits on the repaint");
+    assert_eq!(texel(&built, 0, 0, 0), texel(&painted_body, 0, 0, 0), "outside the square, the repaint's texels");
+    assert_eq!(texel(&built, 0, 0, 0)[3], 255);
+
+    // A second Shipment repainting the atlas conflicts with the first.
+    let t = shipment_named(
+        "repaint-two",
+        "qm-fx-repaint-two",
+        &[],
+        "  - kind: replace_texture\n    target: \"0x89E211AF\"\n    image: src/vfx.png\n",
+        &[("vfx.png", painted)],
+    );
+    let mut g = game();
+    let ids = ["shipment:qm-fx-repaint".to_string(), "shipment:qm-fx-repaint-two".to_string()];
+    let inputs = [PlanInput { id: &ids[0], shipment: &s }, PlanInput { id: &ids[1], shipment: &t }];
+    let corpus = common::corpus::corpus_root().expect("the vendored Lua corpus");
+    match build::link_installed(&inputs, &mut g, &corpus, &scratch("repaint-two-link"), None) {
+        Err(build::BuildError::Plan(plan)) => assert!(
+            plan.findings.iter().any(|f| f.code == "M0207" && f.message.contains("the repaint of the vfx atlas")),
+            "{:?}",
+            plan.findings
+        ),
+        other => panic!("two repaints link: {:?}", other.map(|r| r.log)),
+    }
+}
+
+#[test]
+fn a_repaint_that_fills_the_free_square_leaves_the_sprites_m0307() {
+    let dir = scratch("repaint-full-images");
+    write_png(&dir.join("vfx.png"), 2048, 2048, |x, y| [(x / 8) as u8, (y / 8) as u8, 128, 255]);
+    let painted = std::fs::read(dir.join("vfx.png")).unwrap();
+    let ring = std::fs::read(fixture("qm-fx-a/src/qm_fx_a_ring.png")).unwrap();
+    let s = shipment_named(
+        "repaint-full",
+        "qm-fx-repaint-full",
+        &[],
+        "  - kind: replace_texture\n    target: vfx\n    image: src/vfx.png\n  - kind: add_fx_sprite\n    name: qm_lost_ring\n    image: src/ring.png\n",
+        &[("vfx.png", painted), ("ring.png", ring)],
+    );
+    let d = lint::fx_game_checks(&s.manifest, &s.root, &mut game()).unwrap();
+    assert_eq!(d.iter().map(|d| d.rule.code).collect::<Vec<_>>(), vec!["M0307"]);
+    assert!(d[0].message.contains("has no free square"), "{}", d[0].message);
+    assert_eq!(d[0].at, Some(1));
 }
