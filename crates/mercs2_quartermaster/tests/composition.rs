@@ -1225,8 +1225,8 @@ fn one_effect_replaced_twice_conflicts_by_name_and_through_a_template() {
             bytes: Vec::new(),
         })
         .collect();
-    let texture = |_: u32| true;
-    let base = fx::FxBase { effects: &effects, worldentity: &we, texture: &texture };
+    let frames = std::collections::BTreeSet::new();
+    let base = fx::FxBase { effects: &effects, worldentity: &we, frames: &frames };
     let root = std::path::Path::new("/nonexistent");
     let set = [fx::FxShipment { manifest: &direct, root }, fx::FxShipment { manifest: &via, root }];
     let found = fx::conflicts(&base, &set);
