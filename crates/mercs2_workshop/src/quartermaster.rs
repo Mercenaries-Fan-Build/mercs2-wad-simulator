@@ -896,6 +896,7 @@ pub const KINDS: &[(&str, &[(&str, &str)])] = &[
             ("replace_shader", "Replace a shipped shader's bytecode in the shader stores"),
             ("add_fx", "Add a particle effect and the template that starts it"),
             ("replace_fx", "Edit a shipped effect in place"),
+            ("add_fx_sprite", "A sprite frame for effects, drawn into the vfx atlas"),
             ("replace_terrain_cell", "Replace a terrain cell, same hash"),
             ("add_stringdb_keys", "Add brand-new string-table keys"),
             ("replace_stringdb_text", "Rewrite strings by exact text match"),
@@ -1164,6 +1165,10 @@ fn stub(kind: &str, n: usize) -> Option<Contribution> {
             },
             name,
             effect: PathBuf::from("src/effect.yaml"),
+        },
+        "add_fx_sprite" => Contribution::AddFxSprite {
+            name,
+            image: PathBuf::from("src/sprite.png"),
         },
         "replace_fx" => Contribution::ReplaceFx {
             target: mercs2_quartermaster::manifest::FxTarget::Effect { effect: "shipped_fx".into() },
