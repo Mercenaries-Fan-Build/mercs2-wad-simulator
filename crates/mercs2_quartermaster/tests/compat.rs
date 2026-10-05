@@ -935,3 +935,46 @@ contributions:
     }
     assert_eq!(with_fx.last().unwrap(), mercs2_quartermaster::fx::EFFECTS_BLOCK.1);
 }
+
+/// A set whose only fx contributions are sprites and a repaint of the `vfx` atlas: the link writes
+/// them into the resident block, already listed, and lists no effects block. Two Shipments' sprites
+/// compose with one repaint; two repaints are a conflict.
+#[test]
+fn link_block_paths_of_a_sprites_only_set_list_no_effects_block() {
+    let root = scratch("lbp-sprites");
+    let sprites = |name: &str, sprite: &str| {
+        shipment_at(
+            &root.join(name),
+            &format!(
+                "shipment: {{ name: {name}, version: 1.0.0, target: retail }}
+contributions:
+  - kind: add_fx_sprite
+    name: {sprite}
+    image: src/s.png
+"
+            ),
+        )
+    };
+    let repaint = |name: &str| {
+        shipment_at(
+            &root.join(name),
+            &format!(
+                "shipment: {{ name: {name}, version: 1.0.0, target: retail }}
+contributions:
+  - kind: replace_texture
+    target: vfx
+    image: src/vfx.png
+"
+            ),
+        )
+    };
+    let (a, b, painted) = (sprites("ring", "qm_ring"), sprites("star", "qm_star"), repaint("painted"));
+    let scripts: Vec<String> =
+        link::SCRIPT_BLOCKS.iter().chain(link::SHELL_SCRIPT_BLOCKS).map(|(_, p)| p.to_string()).collect();
+    let p = plan_of(&[&a, &b, &painted], None);
+    assert!(p.ok, "{:?}", p.findings);
+    assert_eq!(p.link_block_paths, scripts);
+    let p = plan_of(&[&painted, &repaint("painted-again")], None);
+    assert!(!p.ok);
+    assert!(p.findings.iter().any(|f| f.code == "M0207" && f.message.contains("the repaint of the vfx atlas")), "{:?}", p.findings);
+}
