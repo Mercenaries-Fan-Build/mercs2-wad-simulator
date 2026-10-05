@@ -1,4 +1,5 @@
-//! FX cluster: the resident `fxdict` (`INFO` + `DICT`) and the per-effect UCFX tree.
+//! FX cluster: the resident `fxdict` (`INFO` + `DICT`, the sprite rectangles of the `vfx` atlas) and
+//! the per-effect UCFX tree.
 //!
 //! Both are **PC little-endian on-disk** forms. The spec lives in the notes repo:
 //! `docs/effect_container_format.md` (the effect tree), `docs/ucfx_tree_container.md` (the
@@ -20,7 +21,7 @@
 //! │  ├─ ATRB × 19           │ fixed hash order (PTYP_ATTRIBUTES_BEFORE_COLR)
 //! │  ├─ COLR (800 B)        │ 100 × {u8×4, binary16, u16 0}
 //! │  ├─ ATRB × 13           │ fixed hash order (PTYP_ATTRIBUTES_AFTER_COLR)
-//! │  └─ TEXT                ┘ u32 n + n × u32 texture hash
+//! │  └─ TEXT                ┘ u32 n + n × u32 fxdict frame key
 //! └─ FRCE × k               u32 kind hash + kind parameters
 //!    └─ ATRB × (7 + kind extras)
 //! ATRB (12 B) {u32 hash, u32 flags, u32|f32 value} → optional ANIM (u32 = key count) → AKEY × n
@@ -56,35 +57,49 @@ fn put_f32s(out: &mut Vec<u8>, v: &[f32]) {
 }
 
 // ------------------------------------------------------------------------------------------------
-// fxdict (INFO + DICT) — the resident 630-record effect-parameter namespace.
+// fxdict (INFO + DICT) — the sprite rectangles of the `vfx` atlas, one per frame key.
 // ------------------------------------------------------------------------------------------------
 
-/// On-disk DICT record stride (verified: 630 × 20 = 12600 bytes, zero slack).
+/// On-disk DICT record stride (630 × 20 = 12600 bytes in retail, zero slack).
 pub const DICT_RECORD_BYTES: usize = 20;
-/// Retail fxdict record count (`resident_P000_Q3`, 2026-05-30 probe).
+/// Retail fxdict record count (`resident_P000_Q3`).
 pub const DICT_RETAIL_COUNT: usize = 630;
 
-/// One fxdict parameter record (20 bytes on disk).
+/// One fxdict record (20 bytes on disk): the rectangle of one sprite frame in the `vfx` atlas
+/// `0x89E211AF`, in atlas-normalised units.
+///
+/// `v` is measured from the BOTTOM of the atlas: the record's top edge is at `1 − v − h` from the
+/// top. The loader `FUN_00491320` expands each record to 32 bytes, `(key, u, 1 − v − h, w, h)`, and
+/// the lookup `FUN_00491510` binary-searches the keys with a signed `i32` compare, so the records
+/// are sorted by `key as i32` and a key appears once. A key the search misses draws `(0, 0, 1, 1)`,
+/// the whole atlas.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct FxParam {
-    /// Parameter key hash; shared namespace with effect `TEXT` chunks.
-    pub name_hash: u32,
-    /// Default scalar value (+0x04).
-    pub default: f32,
-    /// Second scalar (+0x08) — hypothesised **max** bound.
-    pub value_b: f32,
-    /// Third scalar (+0x0C) — hypothesised **min** bound (often 1/32).
-    pub value_c: f32,
-    /// Flags dword (+0x10) — semantics unknown.
-    pub flags: u32,
+pub struct FxRect {
+    /// The frame key: the hash an effect's `TEXT` names.
+    pub key: u32,
+    /// Left edge.
+    pub u: f32,
+    /// Bottom edge, measured up from the atlas's bottom.
+    pub v: f32,
+    /// Width.
+    pub w: f32,
+    /// Height.
+    pub h: f32,
+}
+
+impl FxRect {
+    /// The top edge measured down from the atlas's top: `1 − v − h`, the value the loader stores.
+    pub fn top(&self) -> f32 {
+        1.0 - self.v - self.h
+    }
 }
 
 /// Parse the fxdict from its container `INFO` (`u32 entry_count`) and `DICT` body
-/// (`entry_count × 20` bytes). Returns one [`FxParam`] per record.
+/// (`entry_count × 20` bytes). Returns one [`FxRect`] per record, in file order.
 ///
 /// Faithful to the loader: the count comes from INFO, records are read at a fixed 20-byte stride.
 /// Trailing bytes past `count × 20` are ignored (the engine only walks `count`).
-pub fn parse_fxdict(info: &[u8], dict: &[u8]) -> Result<Vec<FxParam>, String> {
+pub fn parse_fxdict(info: &[u8], dict: &[u8]) -> Result<Vec<FxRect>, String> {
     if info.len() < 4 {
         return Err(format!("fxdict INFO too short: {} bytes (need 4)", info.len()));
     }
@@ -101,37 +116,31 @@ pub fn parse_fxdict(info: &[u8], dict: &[u8]) -> Result<Vec<FxParam>, String> {
     let mut out = Vec::with_capacity(count);
     for i in 0..count {
         let o = i * DICT_RECORD_BYTES;
-        out.push(FxParam {
-            name_hash: read_u32_le(dict, o),
-            default: read_f32_le(dict, o + 4),
-            value_b: read_f32_le(dict, o + 8),
-            value_c: read_f32_le(dict, o + 12),
-            flags: read_u32_le(dict, o + 16),
+        out.push(FxRect {
+            key: read_u32_le(dict, o),
+            u: read_f32_le(dict, o + 4),
+            v: read_f32_le(dict, o + 8),
+            w: read_f32_le(dict, o + 12),
+            h: read_f32_le(dict, o + 16),
         });
     }
     Ok(out)
 }
 
-/// Look up a parameter's default by name hash (linear scan; the engine indexes a hash map but the
-/// table is small enough that callers wanting a one-off lookup can use this).
-pub fn fxparam_default(params: &[FxParam], name_hash: u32) -> Option<f32> {
-    params.iter().find(|p| p.name_hash == name_hash).map(|p| p.default)
-}
-
-pub fn write_fxparam(p: &FxParam) -> [u8; DICT_RECORD_BYTES] {
+pub fn write_fxrect(r: &FxRect) -> [u8; DICT_RECORD_BYTES] {
     let mut out = [0u8; DICT_RECORD_BYTES];
-    out[0..4].copy_from_slice(&p.name_hash.to_le_bytes());
-    out[4..8].copy_from_slice(&p.default.to_le_bytes());
-    out[8..12].copy_from_slice(&p.value_b.to_le_bytes());
-    out[12..16].copy_from_slice(&p.value_c.to_le_bytes());
-    out[16..20].copy_from_slice(&p.flags.to_le_bytes());
+    out[0..4].copy_from_slice(&r.key.to_le_bytes());
+    out[4..8].copy_from_slice(&r.u.to_le_bytes());
+    out[8..12].copy_from_slice(&r.v.to_le_bytes());
+    out[12..16].copy_from_slice(&r.w.to_le_bytes());
+    out[16..20].copy_from_slice(&r.h.to_le_bytes());
     out
 }
 
-pub fn write_fxdict_dict(params: &[FxParam]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(params.len() * DICT_RECORD_BYTES);
-    for p in params {
-        out.extend_from_slice(&write_fxparam(p));
+pub fn write_fxdict_dict(records: &[FxRect]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(records.len() * DICT_RECORD_BYTES);
+    for r in records {
+        out.extend_from_slice(&write_fxrect(r));
     }
     out
 }
@@ -140,17 +149,27 @@ pub fn write_fxdict_info(count: u32) -> [u8; 4] {
     count.to_le_bytes()
 }
 
+/// Sort records the way the lookup `FUN_00491510` searches them: by `key as i32`. Two records of
+/// one key are an error, naming the key: the search would find either.
+pub fn sort_fxdict(records: &mut [FxRect]) -> Result<(), String> {
+    records.sort_by_key(|r| r.key as i32);
+    if let Some(pair) = records.windows(2).find(|p| p[0].key == p[1].key) {
+        return Err(format!("fxdict carries key 0x{:08X} twice", pair[0].key));
+    }
+    Ok(())
+}
+
 /// The resident fxdict container: two top-level leaves, `INFO` then `DICT`.
-pub fn write_fxdict_container(params: &[FxParam]) -> Vec<u8> {
+pub fn write_fxdict_container(records: &[FxRect]) -> Vec<u8> {
     write_ucfx_tree(&[
-        UcfxNode::leaf(*b"INFO", write_fxdict_info(params.len() as u32).to_vec()),
-        UcfxNode::leaf(*b"DICT", write_fxdict_dict(params)),
+        UcfxNode::leaf(*b"INFO", write_fxdict_info(records.len() as u32).to_vec()),
+        UcfxNode::leaf(*b"DICT", write_fxdict_dict(records)),
     ])
 }
 
 /// Parse a whole fxdict container. Strict: exactly `INFO` (4 B) then `DICT` (`count × 20` B), no
 /// children, no slack — the shape [`write_fxdict_container`] writes and the retail singleton has.
-pub fn parse_fxdict_container(container: &[u8]) -> Result<Vec<FxParam>, String> {
+pub fn parse_fxdict_container(container: &[u8]) -> Result<Vec<FxRect>, String> {
     let roots = parse_ucfx_tree(container)?;
     let [info, dict] = roots.as_slice() else {
         return Err(format!("fxdict container has {} top-level rows, not INFO + DICT", roots.len()));
@@ -636,7 +655,8 @@ impl Colr {
     }
 }
 
-/// `TEXT` — the texture frames: `u32 n` then `n` texture asset hashes.
+/// `TEXT` — the sprite frames: `u32 n` then `n` frame keys, each the key of an fxdict record
+/// ([`FxRect`]), a rectangle of the `vfx` atlas.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Text {
     pub frames: Vec<u32>,
@@ -1232,33 +1252,29 @@ mod tests {
         v.to_le_bytes()
     }
 
-    #[test]
-    fn fxdict_single_record() {
-        let info = 1u32.to_le_bytes();
-        let mut dict = Vec::new();
-        dict.extend_from_slice(&le(0xAABBCCDD));
-        dict.extend_from_slice(&1.5f32.to_le_bytes());
-        dict.extend_from_slice(&0.5f32.to_le_bytes());
-        dict.extend_from_slice(&0.03125f32.to_le_bytes());
-        dict.extend_from_slice(&le(0x3CF40017));
-        let params = parse_fxdict(&info, &dict).unwrap();
-        assert_eq!(params.len(), 1);
-        let p = params[0];
-        assert_eq!(p.name_hash, 0xAABBCCDD);
-        assert_eq!(p.default, 1.5);
-        assert_eq!(p.value_b, 0.5);
-        assert_eq!(p.value_c, 0.03125);
-        assert_eq!(p.flags, 0x3CF40017);
-        assert_eq!(fxparam_default(&params, 0xAABBCCDD), Some(1.5));
-        assert_eq!(fxparam_default(&params, 0xDEAD), None);
+    fn rect_bytes(key: u32, u: f32, v: f32, w: f32, h: f32) -> Vec<u8> {
+        let mut b = le(key).to_vec();
+        for f in [u, v, w, h] {
+            b.extend_from_slice(&f.to_le_bytes());
+        }
+        b
     }
 
     #[test]
-    fn fxdict_retail_shape() {
+    fn a_record_reads_as_key_u_v_w_h_and_its_top_is_one_minus_v_minus_h() {
+        let info = 1u32.to_le_bytes();
+        let dict = rect_bytes(0xAABBCCDD, 0.75, 0.5, 0.125, 0.25);
+        let records = parse_fxdict(&info, &dict).unwrap();
+        assert_eq!(records, vec![FxRect { key: 0xAABBCCDD, u: 0.75, v: 0.5, w: 0.125, h: 0.25 }]);
+        assert_eq!(records[0].top(), 0.25);
+    }
+
+    #[test]
+    fn the_retail_count_reads_from_a_zeroed_dict() {
         let info = (DICT_RETAIL_COUNT as u32).to_le_bytes();
         let dict = vec![0u8; DICT_RETAIL_COUNT * DICT_RECORD_BYTES];
-        let params = parse_fxdict(&info, &dict).unwrap();
-        assert_eq!(params.len(), 630);
+        let records = parse_fxdict(&info, &dict).unwrap();
+        assert_eq!(records.len(), 630);
         assert_eq!(dict.len(), 12600);
     }
 
@@ -1277,32 +1293,37 @@ mod tests {
     }
 
     #[test]
-    fn fxparam_write_roundtrip() {
-        let p = FxParam { name_hash: 0xDEADBEEF, default: 1.25, value_b: 3.5, value_c: 0.03125, flags: 0x12345678 };
-        let bytes = write_fxparam(&p);
-        assert_eq!(bytes.len(), DICT_RECORD_BYTES);
+    fn a_record_writes_and_reads_back() {
+        let r = FxRect { key: 0xDEADBEEF, u: 0.25, v: 0.5, w: 0.03125, h: 0.0625 };
+        let bytes = write_fxrect(&r);
+        assert_eq!(bytes.to_vec(), rect_bytes(0xDEADBEEF, 0.25, 0.5, 0.03125, 0.0625));
         let back = parse_fxdict(&1u32.to_le_bytes(), &bytes).unwrap();
-        assert_eq!(back, vec![p]);
+        assert_eq!(back, vec![r]);
+    }
+
+    #[test]
+    fn records_sort_by_signed_key_and_a_repeated_key_is_refused() {
+        let at = |key: u32| FxRect { key, u: 0.0, v: 0.0, w: 0.0, h: 0.0 };
+        let mut records = vec![at(0x0000_0002), at(0x8000_0000), at(0xFFFF_FFFF), at(0x7FFF_FFFF), at(0x0000_0001)];
+        sort_fxdict(&mut records).unwrap();
+        let keys: Vec<u32> = records.iter().map(|r| r.key).collect();
+        assert_eq!(keys, vec![0x8000_0000, 0xFFFF_FFFF, 0x0000_0001, 0x0000_0002, 0x7FFF_FFFF]);
+        let mut twice = vec![at(5), at(9), at(5)];
+        assert_eq!(sort_fxdict(&mut twice).unwrap_err(), "fxdict carries key 0x00000005 twice");
     }
 
     #[test]
     fn fxdict_container_is_info_then_dict_and_round_trips() {
-        let params: Vec<FxParam> = (0..8)
-            .map(|i| FxParam {
-                name_hash: 0x1000 + i,
-                default: i as f32,
-                value_b: 2.0 * i as f32,
-                value_c: 0.5 * i as f32,
-                flags: 0xF000_0000 | i,
-            })
+        let records: Vec<FxRect> = (0..8)
+            .map(|i| FxRect { key: 0x1000 + i, u: i as f32 / 8.0, v: 0.5, w: 1.0 / 8.0, h: 1.0 / 16.0 })
             .collect();
-        let c = write_fxdict_container(&params);
+        let c = write_fxdict_container(&records);
         assert!(crate::ucfx::verify_ucfx_container(&c, "fxd", 0).is_none());
         let rows = read_ucfx_rows(&c).unwrap();
         assert_eq!(rows.len(), 2);
         assert_eq!((&rows[0].tag, rows[0].rel_off, rows[0].size, rows[0].x2, rows[0].x3), (b"INFO", 0, 4, 1, 0));
         assert_eq!((&rows[1].tag, rows[1].rel_off, rows[1].size, rows[1].x2, rows[1].x3), (b"DICT", 4, 160, 0, 0));
-        assert_eq!(parse_fxdict_container(&c).unwrap(), params);
+        assert_eq!(parse_fxdict_container(&c).unwrap(), records);
     }
 
     // ---- effect -------------------------------------------------------------------------------
