@@ -6,10 +6,14 @@ shipment:
   version: 1.0.0
   target: retail
   description: >-
-    A new green effect qm_fx_green_burst and the template qm_green_burst that starts it, and the
-    car-hood fire turned yellow through its template.
+    A new sprite qm_fx_b_star, a new green effect qm_fx_green_burst that draws it and the template
+    qm_green_burst that starts the effect, and the car-hood fire turned yellow through its template.
 
 contributions:
+  - kind: add_fx_sprite
+    name: qm_fx_b_star
+    image: src/qm_fx_b_star.png
+
   - kind: add_fx
     name: qm_fx_green_burst
     effect: src/qm_fx_green_burst.yaml
