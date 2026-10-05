@@ -1,0 +1,11 @@
+# Every emitter of the effect the template global_particle_fire_carhood starts, yellow; each COLR
+# key keeps its fourth byte and its half.
+edits:
+  - { op: colour_rgb, emitter: 0, rgb: [255, 255, 0] }
+  - { op: colour_rgb, emitter: 1, rgb: [255, 255, 0] }
+  - { op: colour_rgb, emitter: 2, rgb: [255, 255, 0] }
+  - { op: colour_rgb, emitter: 3, rgb: [255, 255, 0] }
+  - { op: colour_rgb, emitter: 4, rgb: [255, 255, 0] }
+  - { op: colour_rgb, emitter: 5, rgb: [255, 255, 0] }
+  - { op: colour_rgb, emitter: 6, rgb: [255, 255, 0] }
+  - { op: colour_rgb, emitter: 7, rgb: [255, 255, 0] }
