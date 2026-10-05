@@ -245,11 +245,22 @@ contributions:
 
   - kind: add_fx
     name: my_fx
-    payload: src/fx/my_fx.fxdict
+    effect: src/fx/my_fx.yaml
+    template:
+      name: my_fx_template
+      name_flag: 1
+      components:
+        RedEffectComponent:
+          name: my_fx
+          "0x4D7D459B": 1.0
+          "0x87519019": 30
+        Label:
+          - { "0xFD084CCE": "0x3B5C3BAF" }
+          - { "0xFD084CCE": "0x9A1C21F3" }
 
   - kind: replace_fx
-    target: shipped_fx
-    payload: src/fx/new_fx.fxdict
+    target: { template: global_particle_explosion_c4 }
+    edits: src/fx/c4.yaml
 
   - kind: replace_terrain_cell
     target: shipped_cell
@@ -487,12 +498,20 @@ const JSON: &str = r#"
     {
       "kind": "add_fx",
       "name": "my_fx",
-      "payload": "src/fx/my_fx.fxdict"
+      "effect": "src/fx/my_fx.yaml",
+      "template": {
+        "name": "my_fx_template",
+        "name_flag": 1,
+        "components": {
+          "RedEffectComponent": {"name": "my_fx", "0x4D7D459B": 1.0, "0x87519019": 30},
+          "Label": [{"0xFD084CCE": "0x3B5C3BAF"}, {"0xFD084CCE": "0x9A1C21F3"}]
+        }
+      }
     },
     {
       "kind": "replace_fx",
-      "target": "shipped_fx",
-      "payload": "src/fx/new_fx.fxdict"
+      "target": {"template": "global_particle_explosion_c4"},
+      "edits": "src/fx/c4.yaml"
     },
     {
       "kind": "replace_terrain_cell",
@@ -738,12 +757,27 @@ shader_low = { asm = "src/shaders/mesh_vp_low.asm" }
 [[contributions]]
 kind = "add_fx"
 name = "my_fx"
-payload = "src/fx/my_fx.fxdict"
+effect = "src/fx/my_fx.yaml"
+
+[contributions.template]
+name = "my_fx_template"
+name_flag = 1
+
+[contributions.template.components.RedEffectComponent]
+name = "my_fx"
+"0x4D7D459B" = 1.0
+"0x87519019" = 30
+
+[[contributions.template.components.Label]]
+"0xFD084CCE" = "0x3B5C3BAF"
+
+[[contributions.template.components.Label]]
+"0xFD084CCE" = "0x9A1C21F3"
 
 [[contributions]]
 kind = "replace_fx"
-target = "shipped_fx"
-payload = "src/fx/new_fx.fxdict"
+target = { template = "global_particle_explosion_c4" }
+edits = "src/fx/c4.yaml"
 
 [[contributions]]
 kind = "replace_terrain_cell"
@@ -1425,4 +1459,54 @@ fn a_removed_kind_is_refused_by_name_in_every_format() {
         }
         assert!(!Contribution::ALL_KINDS.contains(kind), "{kind} is still in ALL_KINDS");
     }
+}
+
+/// A `replace_fx` target is an effect (a name or `0xHHHHHHHH`) or a template, spelled the same way in
+/// all three formats; any other key is refused.
+#[test]
+fn fx_targets_spell_the_same_in_all_three_formats() {
+    let head = "\"format\":2,\"shipment\":{\"name\":\"s\",\"version\":\"1.0.0\",\"target\":\"retail\"}";
+    for (key, value, expected) in [
+        ("effect", "0x41B4326E", FxTarget::Effect { effect: "0x41B4326E".into() }),
+        ("effect", "global_explosion_c4", FxTarget::Effect { effect: "global_explosion_c4".into() }),
+        ("template", "global_particle_fire_carhood", FxTarget::Template { template: "global_particle_fire_carhood".into() }),
+    ] {
+        let cases = [
+            (
+                format!(
+                    "format: 2\nshipment: {{ name: s, version: 1.0.0, target: retail }}\n\
+                     contributions:\n  - kind: replace_fx\n    target: {{ {key}: \"{value}\" }}\n    edits: src/e.yaml\n"
+                ),
+                Format::Yaml,
+            ),
+            (
+                format!(
+                    "{{{head},\"contributions\":[{{\"kind\":\"replace_fx\",\
+                     \"target\":{{\"{key}\":\"{value}\"}},\"edits\":\"src/e.yaml\"}}]}}"
+                ),
+                Format::Json,
+            ),
+            (
+                format!(
+                    "format = 2\n[shipment]\nname = \"s\"\nversion = \"1.0.0\"\ntarget = \"retail\"\n\
+                     [[contributions]]\nkind = \"replace_fx\"\ntarget = {{ {key} = \"{value}\" }}\n\
+                     edits = \"src/e.yaml\"\n"
+                ),
+                Format::Toml,
+            ),
+        ];
+        for (text, fmt) in cases {
+            let m = from_str(&text, fmt).unwrap_or_else(|e| panic!("{fmt:?} {key}: {e}\n{text}"));
+            match &m.contributions[0] {
+                Contribution::ReplaceFx { target, .. } => assert_eq!(*target, expected, "{fmt:?}"),
+                other => panic!("{fmt:?}: expected replace_fx, got {other:?}"),
+            }
+        }
+    }
+    let bad = "format: 2\nshipment: { name: s, version: 1.0.0, target: retail }\n\
+               contributions:\n  - kind: replace_fx\n    target: { asset: x }\n    edits: src/e.yaml\n";
+    assert!(from_str(bad, Format::Yaml).is_err());
+    let plain = "format: 2\nshipment: { name: s, version: 1.0.0, target: retail }\n\
+                 contributions:\n  - kind: replace_fx\n    target: x\n    edits: src/e.yaml\n";
+    assert!(from_str(plain, Format::Yaml).is_err(), "a bare string says neither effect nor template");
 }
