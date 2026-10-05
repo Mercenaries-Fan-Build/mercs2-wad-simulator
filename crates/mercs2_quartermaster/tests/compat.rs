@@ -889,3 +889,49 @@ fn link_block_paths_without_string_tables_are_the_script_blocks() {
     assert_eq!(p.link_block_paths, scripts);
     assert_eq!(scripts[2], "blocks\\Shell\\resident_P000_Q3.block");
 }
+
+/// A set with an `add_fx` or a `replace_fx`: `link_block_paths` ends with the effects block, which
+/// the link re-emits with every Shipment's effects; the resident block, already listed, carries
+/// their templates. A set without one does not list it.
+#[test]
+fn link_block_paths_list_the_effects_block_exactly_when_a_shipment_has_an_fx_kind() {
+    let root = scratch("lbp-fx");
+    let plain = ship(&root, "plain", "1.0.0", "");
+    let add = shipment_at(
+        &root.join("adds"),
+        "shipment: { name: adds, version: 1.0.0, target: retail }
+contributions:
+  - kind: add_fx
+    \
+         name: qm_fx
+    effect: src/fx.yaml
+    template:
+      name: qm_tpl
+      name_flag: 1
+      \
+         components:
+        RedEffectComponent: { name: qm_fx }
+",
+    );
+    let edit = shipment_at(
+        &root.join("edits"),
+        "shipment: { name: edits, version: 1.0.0, target: retail }
+contributions:
+  - kind: replace_fx
+    \
+         target: { template: global_particle_fire_carhood }
+    edits: src/e.yaml
+",
+    );
+    let scripts: Vec<String> =
+        link::SCRIPT_BLOCKS.iter().chain(link::SHELL_SCRIPT_BLOCKS).map(|(_, p)| p.to_string()).collect();
+    assert_eq!(plan_of(&[&plain], None).link_block_paths, scripts);
+    let mut with_fx = scripts.clone();
+    with_fx.push("blocks\\VZ\\effects_P000_Q3.block".to_string());
+    for set in [vec![&add], vec![&edit], vec![&plain, &add, &edit]] {
+        let p = plan_of(&set, None);
+        assert!(p.ok, "{:?}", p.findings);
+        assert_eq!(p.link_block_paths, with_fx);
+    }
+    assert_eq!(with_fx.last().unwrap(), mercs2_quartermaster::fx::EFFECTS_BLOCK.1);
+}
