@@ -59,7 +59,7 @@ use mercs2_formats::scripts_block::ScriptsBlock;
 use mercs2_formats::texture::{build_texture_block, TexFormat, TextureData};
 use mercs2_formats::texture_encode::{self, encode_bc1, encode_bc3, mip_chain};
 use mercs2_formats::types::{
-    TYPE_HASH_ANIMATION, TYPE_HASH_EFFECT, TYPE_HASH_LAYER, TYPE_HASH_MODEL, TYPE_HASH_STRINGDB,
+    TYPE_HASH_ANIMATION, TYPE_HASH_LAYER, TYPE_HASH_MODEL, TYPE_HASH_STRINGDB,
     TYPE_HASH_TERRAIN_MESH, TYPE_ID_ANIMATION, TYPE_ID_CFX_PACK, TYPE_ID_EFFECT, TYPE_ID_LAYER,
     TYPE_ID_MODEL, TYPE_ID_SCRIPT, TYPE_ID_STRINGDB, TYPE_ID_TERRAIN_MESH, TYPE_ID_TEXTURE,
 };
@@ -117,7 +117,9 @@ fn load_script_blocks(
     Ok(out)
 }
 
-/// Emit a `PatchBlock` for each scripts block the link actually spliced.
+/// Emit a `PatchBlock` for each loaded block in `touched` (indices into `loaded`): the scripts blocks
+/// the link spliced, and the resident block when its worldentity carries added templates
+/// ([`lower_fx`]).
 ///
 /// **Only the touched blocks.** Re-emitting an untouched block would shadow the base with a
 /// byte-identical copy — harmless in isolation, but it puts the whole ~7,000-entry resident block
@@ -140,12 +142,11 @@ fn load_script_blocks(
 /// beats the M0004 hang of no row at all.
 fn script_patch_blocks(
     loaded: &[LoadedScriptBlock],
-    linked: &[link::LinkedScript],
+    touched: &std::collections::BTreeSet<usize>,
     kind: &'static str,
 ) -> Result<Vec<PatchBlock>, BuildError> {
-    let touched: std::collections::BTreeSet<usize> = linked.iter().map(|l| l.block).collect();
     let mut out = Vec::new();
-    for bi in touched {
+    for &bi in touched {
         let lb = &loaded[bi];
         let aset: Vec<AsetEntry> = lb
             .block
@@ -200,7 +201,84 @@ fn link_shell_loader(
             l.target, loaded[l.block].path, l.base_source_bytes, l.linked_source_bytes, l.bytecode_bytes, l.contributors
         ));
     }
-    script_patch_blocks(&loaded, &linked.scripts, kind)
+    script_patch_blocks(&loaded, &linked.scripts.iter().map(|l| l.block).collect(), kind)
+}
+
+/// `add_fx` and `replace_fx` of `shipments`, in order ([`crate::fx::merge`]): the game's effects
+/// block with every edit and addition, at its own path, and — when the set adds a template — the
+/// game's worldentity with every added template, written into the resident block of `loaded`.
+///
+/// Returns the effects block and the index into `loaded` of the resident block when its
+/// worldentity was rewritten. The effects block carries every row the game gives its entries,
+/// copied, and a primary row with sentinel rungs for each added effect.
+fn lower_fx(
+    shipments: &[&LoadedShipment],
+    game: &mut GameStack,
+    loaded: &mut [LoadedScriptBlock],
+    scope: crate::fx::Scope,
+    kind: &'static str,
+    log: &mut Vec<String>,
+) -> Result<(PatchBlock, Option<usize>), BuildError> {
+    let fail = |index: usize, message: String| BuildError::Lower { index, kind, message };
+    let (_, resident_path) = link::SCRIPT_BLOCKS[1];
+    let resident = loaded
+        .iter()
+        .position(|lb| lb.path == resident_path)
+        .ok_or_else(|| fail(0, format!("the game stack has no {resident_path}, which holds the worldentity")))?;
+    let we_at = crate::fx::worldentity_entry(&loaded[resident].block).map_err(|m| fail(0, m))?;
+    let we = mercs2_formats::worldentity::WorldEntity::parse(&loaded[resident].block.entries[we_at].bytes)
+        .map_err(|m| fail(0, format!("the worldentity in {resident_path}: {m}")))?;
+    let (needle, effects_path) = crate::fx::EFFECTS_BLOCK;
+    let (raw, rows) = game
+        .block_and_rows_by_path(needle)
+        .ok_or_else(|| fail(0, format!("the game stack has no {effects_path}")))?;
+    let effects = ScriptsBlock::parse(&raw).map_err(|m| fail(0, format!("{effects_path}: {m}")))?;
+    let frames = crate::fx::fxdict_entry(&loaded[resident].block).map_err(|m| fail(0, format!("{resident_path}: {m}")))?;
+    let base = crate::fx::FxBase { effects: &effects.entries, worldentity: &we, frames: &frames };
+    let set: Vec<crate::fx::FxShipment<'_>> =
+        shipments.iter().map(|s| crate::fx::FxShipment { manifest: &s.manifest, root: &s.root }).collect();
+    let merged = crate::fx::merge(&base, &set, scope).map_err(|f| {
+        let index = f.problems.first().map(|p| p.index).or_else(|| f.conflicts.first().map(|c| c.claimants[0].index));
+        fail(index.unwrap_or(0), f.to_string())
+    })?;
+    log.extend(merged.log.iter().cloned());
+
+    let mut aset = Vec::with_capacity(merged.effects.len());
+    for e in &merged.effects {
+        aset.push(if merged.added.contains(&e.name_hash) {
+            AsetEntry::new(e.name_hash, 0xFFFF_FFFF, 0x0000_FFFF, TYPE_ID_EFFECT)
+        } else {
+            let &(packed, secondary, type_id) = rows.get(&e.name_hash).ok_or_else(|| {
+                fail(0, format!("{effects_path} entry 0x{:08X} has no ASET row in the game", e.name_hash))
+            })?;
+            AsetEntry::new(e.name_hash, secondary, packed, type_id)
+        });
+    }
+    let block = ScriptsBlock { entries: merged.effects }.serialize();
+    log.push(format!(
+        "{effects_path}: {} entries ({} added), {} bytes",
+        aset.len(),
+        merged.added.len(),
+        block.len()
+    ));
+    let effects_block =
+        PatchBlock::from_decompressed(&block, effects_path.to_string(), aset, None).map_err(|m| fail(0, m))?;
+    let rewritten = match merged.worldentity {
+        Some(we) => {
+            let bytes = we.write().map_err(|m| fail(0, format!("writing the worldentity: {m}")))?;
+            log.push(format!(
+                "{resident_path}: worldentity 0x{:08X} {} -> {} bytes, {} templates",
+                mercs2_formats::worldentity::RETAIL_WORLDENTITY_NAME_HASH,
+                loaded[resident].block.entries[we_at].bytes.len(),
+                bytes.len(),
+                we.instances.len()
+            ));
+            loaded[resident].block.entries[we_at].bytes = bytes;
+            Some(resident)
+        }
+        None => None,
+    };
+    Ok((effects_block, rewritten))
 }
 
 /// The loader self-check ([`crate::sound::check_loader_banks`]): every bank the gameplay loader
@@ -3280,8 +3358,9 @@ fn lower(
         // Store edits, not WAD blocks: `build` applies every shader kind of the Shipment to the
         // original stores together ([`crate::shader::apply_edits`]) and writes `data/shader3*.bin`.
         Contribution::AddShader { .. } | Contribution::ReplaceShader { .. } => Ok(Lowering::Nothing),
-        Contribution::AddFx { name, payload } => opaque_new_asset(root, payload, name, TYPE_HASH_EFFECT, TYPE_ID_EFFECT, index, kind),
-        Contribution::ReplaceFx { target, payload } => opaque_new_asset(root, payload, target, TYPE_HASH_EFFECT, TYPE_ID_EFFECT, index, kind),
+        // `build` applies every add_fx and replace_fx of the Shipment to the game's effects block
+        // and worldentity together ([`lower_fx`]).
+        Contribution::AddFx { .. } | Contribution::ReplaceFx { .. } => Ok(Lowering::Nothing),
         Contribution::ReplaceTerrainCell { target, cell } => opaque_new_asset(root, cell, target, TYPE_HASH_TERRAIN_MESH, TYPE_ID_TERRAIN_MESH, index, kind),
 
         // No Data half: a shop item is pure Script-layer catalog + reward appends (see
@@ -4343,6 +4422,10 @@ pub fn build(
     // BEFORE the gate so a game-aware Error would still block, even though M0007 is a warning.
     if let Some(g) = game.as_deref_mut() {
         diagnostics.extend(lint::game_checks(manifest, g));
+        diagnostics.extend(
+            lint::fx_game_checks(manifest, &shipment.root, g)
+                .map_err(|message| BuildError::Lower { index: 0, kind: "fx", message })?,
+        );
     }
     // The shader kinds read the original stores from `--original-data` and the game's VT and R2VB
     // pairs from its `data` folder, so both are required, never skipped.
@@ -4511,76 +4594,98 @@ pub fn build(
     // mints the loader trampoline, mints a fresh scripts_vz entry). So a non-empty of any of them
     // must trigger the link even when `mutations` is empty. A bank the front end loads links into
     // `shell.wad`'s scripts block (below).
-    if !mutations.is_empty()
+    //
+    // `add_fx` and `replace_fx` share the load: an `add_fx` template goes into the worldentity the
+    // resident block carries, and the block is emitted once, with every script and template.
+    let touches_scripts = !mutations.is_empty()
         || !ui_regs.is_empty()
         || !layer_regs.is_empty()
         || !support_regs.is_empty()
         || gameplay_sounds
         || !additions.is_empty()
-        || !replacements.is_empty()
-    {
+        || !replacements.is_empty();
+    let fx_kind = manifest
+        .contributions
+        .iter()
+        .enumerate()
+        .find(|(_, c)| matches!(c, Contribution::AddFx { .. } | Contribution::ReplaceFx { .. }));
+    if touches_scripts || fx_kind.is_some() {
         let Some(game) = game.as_deref_mut() else {
-            return Err(BuildError::GameRequired {
-                index: 0,
-                kind: "patch_lua",
-            });
-        };
-        let Some(corpus) = corpus_root else {
-            return Err(BuildError::Lower {
-                index: 0,
-                kind: "patch_lua",
-                message:
-                    "linking Lua needs the decompiled corpus (the base source to append to). It \
-                          ships in the reference bundle as workshop_data/lua; for `qm`, pass \
-                          --corpus <dir> or --workshop-data <dir> (env MERCS2_WORKSHOP_DATA)."
-                        .into(),
+            return Err(match fx_kind {
+                Some((index, c)) => BuildError::GameRequired { index, kind: c.kind() },
+                None => BuildError::GameRequired { index: 0, kind: "patch_lua" },
             });
         };
         let mut loaded = load_script_blocks(game, link::SCRIPT_BLOCKS, "patch_lua")?;
-        let mut targets: Vec<link::TargetBlock<'_>> = loaded
-            .iter_mut()
-            .map(|lb| link::TargetBlock {
-                path: lb.path.clone(),
-                block: &mut lb.block,
-            })
-            .collect();
-        // A single Shipment has nothing to order against, so the resolved order is itself.
-        // Cross-Shipment order is `link_installed`'s job.
-        let solo_order = [manifest.shipment.name.clone()];
-        let linked = link::link_into_blocks(
-            &mut targets,
-            corpus,
-            &mutations,
-            &ui_regs,
-            &layer_regs,
-            &support_regs,
-            &sound_regs,
-            &additions,
-            &replacements,
-            &solo_order,
-        )
-        .map_err(|e| BuildError::Lower {
-            index: 0,
-            kind: "patch_lua",
-            message: e.to_string(),
-        })?;
-        drop(targets);
-        // M0209 is a load-plan finding, and a single-Shipment build writes no plan; the warning goes
-        // to the build log, where `qm link` over the installed set reports it again as a finding.
-        for u in &linked.unresolved_imports {
-            log.push(format!("warning [M0209]: {u}"));
+        let mut touched = std::collections::BTreeSet::new();
+        if touches_scripts {
+            let Some(corpus) = corpus_root else {
+                return Err(BuildError::Lower {
+                    index: 0,
+                    kind: "patch_lua",
+                    message:
+                        "linking Lua needs the decompiled corpus (the base source to append to). It \
+                              ships in the reference bundle as workshop_data/lua; for `qm`, pass \
+                              --corpus <dir> or --workshop-data <dir> (env MERCS2_WORKSHOP_DATA)."
+                            .into(),
+                });
+            };
+            let mut targets: Vec<link::TargetBlock<'_>> = loaded
+                .iter_mut()
+                .map(|lb| link::TargetBlock {
+                    path: lb.path.clone(),
+                    block: &mut lb.block,
+                })
+                .collect();
+            // A single Shipment has nothing to order against, so the resolved order is itself.
+            // Cross-Shipment order is `link_installed`'s job.
+            let solo_order = [manifest.shipment.name.clone()];
+            let linked = link::link_into_blocks(
+                &mut targets,
+                corpus,
+                &mutations,
+                &ui_regs,
+                &layer_regs,
+                &support_regs,
+                &sound_regs,
+                &additions,
+                &replacements,
+                &solo_order,
+            )
+            .map_err(|e| BuildError::Lower {
+                index: 0,
+                kind: "patch_lua",
+                message: e.to_string(),
+            })?;
+            drop(targets);
+            // M0209 is a load-plan finding, and a single-Shipment build writes no plan; the warning
+            // goes to the build log, where `qm link` over the installed set reports it again as a
+            // finding.
+            for u in &linked.unresolved_imports {
+                log.push(format!("warning [M0209]: {u}"));
+            }
+            for l in &linked.scripts {
+                log.push(format!(
+                    "linked {} in {}: {} → {} B source, {} B bytecode, from {:?}",
+                    l.target,
+                    loaded[l.block].path,
+                    l.base_source_bytes,
+                    l.linked_source_bytes,
+                    l.bytecode_bytes,
+                    l.contributors
+                ));
+                touched.insert(l.block);
+            }
         }
-        let linked = linked.scripts;
-        for l in &linked {
-            log.push(format!(
-                "linked {} in {}: {} → {} B source, {} B bytecode, from {:?}",
-                l.target,
-                loaded[l.block].path,
-                l.base_source_bytes,
-                l.linked_source_bytes,
-                l.bytecode_bytes,
-                l.contributors
-            ));
+        if let Some((index, c)) = fx_kind {
+            let (effects, resident) =
+                lower_fx(&[shipment], game, &mut loaded, crate::fx::Scope::Build, c.kind(), &mut log)
+                    .map_err(|e| match e {
+                        BuildError::Lower { index: 0, kind, message } => BuildError::Lower { index, kind, message },
+                        other => other,
+                    })?;
+            blocks.push(effects);
+            touched.extend(resident);
         }
         // Say what shipping a scripts block COSTS, because the number is not obvious and the
         // failure surfaces far away.
@@ -4590,7 +4695,7 @@ pub fn build(
         // all of them, and neither contains the other — Modkit reports it as a half-applied mod,
         // and without that check it is the silent mutual annihilation the linter exists for.
         // `qm link` across the installed set is the fix; a standalone overlay cannot be.
-        let script_blocks = script_patch_blocks(&loaded, &linked, "patch_lua")?;
+        let script_blocks = script_patch_blocks(&loaded, &touched, "patch_lua")?;
         let carried: usize = script_blocks.iter().map(|b| b.aset_entries.len()).sum();
         if carried > 1 {
             log.push(format!(
@@ -5067,13 +5172,15 @@ pub fn merged_string_tables<'a>(
 /// ([`link::SHELL_SCRIPT_BLOCKS`]), then each merged string table's block in hash order, then each
 /// merged sound bank's block in entry-hash order ([`crate::sound::linked_sound_entries`]; one path
 /// for the bank in every WAD that carries it; for a bank the engine loads, the block carries its
-/// sounddb and wavebank too).
+/// sounddb and wavebank too), then — when any Shipment has an `add_fx` or a `replace_fx` — the
+/// effects block ([`crate::fx::EFFECTS_BLOCK`]).
 /// A deploy step drops the per-Shipment copies of exactly these blocks, because the link WAD carries
 /// the set-wide version of each.
 pub fn link_block_paths<'a>(
     manifests: impl IntoIterator<Item = &'a crate::manifest::Manifest>,
 ) -> Vec<String> {
     let manifests: Vec<&crate::manifest::Manifest> = manifests.into_iter().collect();
+    let fx = manifests.iter().any(|m| crate::fx::has_fx(m));
     link::SCRIPT_BLOCKS
         .iter()
         .chain(link::SHELL_SCRIPT_BLOCKS)
@@ -5084,6 +5191,7 @@ pub fn link_block_paths<'a>(
                 .into_iter()
                 .map(crate::sound::block_path),
         )
+        .chain(fx.then(|| crate::fx::EFFECTS_BLOCK.1.to_string()))
         .collect()
 }
 
@@ -5375,6 +5483,64 @@ pub fn link_installed(
         ));
     }
 
+    // Two `replace_fx` that resolve to one effect are a claim conflict even when either names the
+    // effect through a template, and only the game's worldentity resolves a template: each target is
+    // resolved here, against the game plus the set's additions in load order, and a collision refuses
+    // the link as M0207, beside the conflicts the plan found by name.
+    if shipments.iter().any(|s| crate::fx::has_fx(&s.manifest)) {
+        let fail = |message: String| BuildError::Lower { index: 0, kind: "link", message };
+        let base = crate::fx::GameFx::read(game).map_err(fail)?;
+        let fx_base =
+            crate::fx::FxBase { effects: &base.effects.entries, worldentity: &base.worldentity, frames: &base.frames };
+        let set: Vec<crate::fx::FxShipment<'_>> =
+            shipments.iter().map(|s| crate::fx::FxShipment { manifest: &s.manifest, root: &s.root }).collect();
+        let found = crate::fx::conflicts(&fx_base, &set);
+        if !found.is_empty() {
+            use crate::plan::{
+                ClaimClass, ClaimConflictRow, ClaimantEntry, ConflictRow, ConflictSource, Finding, FindingRef,
+                FindingSeverity, Section,
+            };
+            for c in found {
+                let mut who: Vec<usize> = Vec::new();
+                let mut claimants = Vec::new();
+                for cl in &c.claimants {
+                    let at = inputs
+                        .iter()
+                        .position(|i| i.shipment.manifest.shipment.name == cl.shipment)
+                        .ok_or_else(|| fail(format!("internal error: {} is not in the request", cl.shipment)))?;
+                    if !who.contains(&at) {
+                        who.push(at);
+                    }
+                    claimants.push(ClaimantEntry {
+                        item: inputs[at].id.to_string(),
+                        contribution: cl.index,
+                        kind: "replace_fx".into(),
+                    });
+                }
+                who.sort_unstable();
+                let row = plan.conflicts.len();
+                plan.findings.push(Finding {
+                    code: "M0207",
+                    severity: FindingSeverity::Error,
+                    message: c.to_string(),
+                    items: who.iter().map(|&i| inputs[i].id.to_string()).collect(),
+                    refs: vec![FindingRef { section: Section::Conflicts, index: row }],
+                    fix: None,
+                });
+                plan.conflicts.push(ConflictRow::Claims(ClaimConflictRow {
+                    source: ConflictSource::Claims,
+                    claim: format!("effect 0x{:08X}", c.effect),
+                    class: ClaimClass::Exclusive,
+                    claimants,
+                }));
+            }
+            crate::plan::sort_findings(&mut plan.findings, |item| inputs.iter().position(|p| p.id == item));
+            plan.ok = false;
+            write_plan(&plan)?;
+            return Err(BuildError::Plan(Box::new(plan)));
+        }
+    }
+
     // The shader stores: every Shipment's edits applied to the originals in load order, one store
     // per file for the whole set.
     let mut added = Vec::new();
@@ -5511,9 +5677,12 @@ pub fn link_installed(
     let tables = merged_string_tables(shipments.iter().map(|s| &s.manifest));
     // Every sound bank any Shipment's replace_sound_cue targets, likewise.
     let sound_entries = crate::sound::linked_sound_entries(shipments.iter().map(|s| &s.manifest));
-    if !touches_scripts && !front_end_sounds && tables.is_empty() && sound_entries.is_empty() {
+    // Every effect and template, into one effects block and one worldentity.
+    let fx = shipments.iter().any(|s| crate::fx::has_fx(&s.manifest));
+    if !touches_scripts && !front_end_sounds && tables.is_empty() && sound_entries.is_empty() && !fx {
         log.push(
-            "no installed Shipment touches a script, a string table or a sound bank — nothing to link"
+            "no installed Shipment touches a script, a string table, a sound bank or an effect — \
+             nothing to link"
                 .into(),
         );
         // Still write the (empty) placement record. Emitting no link WAD is the right call — an
@@ -5537,89 +5706,117 @@ pub fn link_installed(
     }
     log.push(format!(
         "linking {} mutation(s), {} UI, {} layer and {} sound-bank registration(s), {} string \
-         table(s) and {} sound bank(s) from {} Shipment(s)",
+         table(s), {} sound bank(s) and {} effects from {} Shipment(s)",
         mutations.len(),
         ui_regs.len(),
         layer_regs.len(),
         sound_regs.len(),
         tables.len(),
         sound_entries.len(),
+        if fx { "the set's" } else { "no" },
         shipments.len()
     ));
 
     let mut patches: Vec<PatchBlock> = Vec::new();
     let mut linked: Vec<link::LinkedScript> = Vec::new();
-    if touches_scripts {
+    let mut effects_block = None;
+    if touches_scripts || fx {
         let mut loaded = load_script_blocks(game, link::SCRIPT_BLOCKS, "link")?;
-        let mut targets: Vec<link::TargetBlock<'_>> = loaded
-            .iter_mut()
-            .map(|lb| link::TargetBlock {
-                path: lb.path.clone(),
-                block: &mut lb.block,
-            })
-            .collect();
-        let linked_out = link::link_into_blocks(
-            &mut targets,
-            corpus_root,
-            &mutations,
-            &ui_regs,
-            &layer_regs,
-            &support_regs,
-            &sound_regs,
-            &additions,
-            &replacements,
-            &order,
-        )
-        .map_err(|e| BuildError::Lower {
+        let mut touched = std::collections::BTreeSet::new();
+        if touches_scripts {
+            let mut targets: Vec<link::TargetBlock<'_>> = loaded
+                .iter_mut()
+                .map(|lb| link::TargetBlock {
+                    path: lb.path.clone(),
+                    block: &mut lb.block,
+                })
+                .collect();
+            let linked_out = link::link_into_blocks(
+                &mut targets,
+                corpus_root,
+                &mutations,
+                &ui_regs,
+                &layer_regs,
+                &support_regs,
+                &sound_regs,
+                &additions,
+                &replacements,
+                &order,
+            )
+            .map_err(|e| BuildError::Lower {
+                index: 0,
+                kind: "link",
+                message: e.to_string(),
+            })?;
+            drop(targets);
+            // M0209: literal imports nothing in the link provides. Warnings — `ok` does not change —
+            // placed on the item whose source carries them. An ok plan has one item per name (no
+            // M0203).
+            for u in &linked_out.unresolved_imports {
+                let requested = inputs
+                    .iter()
+                    .position(|i| i.shipment.manifest.shipment.name == u.shipment)
+                    .ok_or_else(|| BuildError::Lower {
+                        index: 0,
+                        kind: "link",
+                        message: format!(
+                            "internal error: {} carries an import but is not in the request",
+                            u.shipment
+                        ),
+                    })?;
+                plan.findings.push(crate::plan::Finding {
+                    code: "M0209",
+                    severity: crate::plan::FindingSeverity::Warning,
+                    message: u.to_string(),
+                    items: vec![inputs[requested].id.to_string()],
+                    refs: vec![crate::plan::FindingRef {
+                        section: crate::plan::Section::Items,
+                        index: requested,
+                    }],
+                    fix: None,
+                });
+                log.push(format!("warning [M0209]: {u}"));
+            }
+            crate::plan::sort_findings(&mut plan.findings, |item| {
+                inputs.iter().position(|p| p.id == item)
+            });
+            linked = linked_out.scripts;
+            for l in &linked {
+                log.push(format!(
+                    "linked {} in {}: {} → {} B source, {} B bytecode, from {:?}",
+                    l.target,
+                    loaded[l.block].path,
+                    l.base_source_bytes,
+                    l.linked_source_bytes,
+                    l.bytecode_bytes,
+                    l.contributors
+                ));
+                touched.insert(l.block);
+            }
+        }
+        // The set's effects and templates, merged in load order: the effects block, and the
+        // templates in the same resident block the scripts above were linked into.
+        if fx {
+            let (effects, resident) = lower_fx(&shipments, game, &mut loaded, crate::fx::Scope::Link, "link", &mut log)?;
+            effects_block = Some(effects);
+            touched.extend(resident);
+        }
+        patches.extend(script_patch_blocks(&loaded, &touched, "link")?);
+    }
+    // The plan promised the effects block exactly when a Shipment has an fx kind.
+    let effects_promised = plan.link_block_paths.iter().any(|p| p == crate::fx::EFFECTS_BLOCK.1);
+    if effects_promised != effects_block.is_some() {
+        return Err(BuildError::Lower {
             index: 0,
             kind: "link",
-            message: e.to_string(),
-        })?;
-        drop(targets);
-        // M0209: literal imports nothing in the link provides. Warnings — `ok` does not change —
-        // placed on the item whose source carries them. An ok plan has one item per name (no M0203).
-        for u in &linked_out.unresolved_imports {
-            let requested = inputs
-                .iter()
-                .position(|i| i.shipment.manifest.shipment.name == u.shipment)
-                .ok_or_else(|| BuildError::Lower {
-                    index: 0,
-                    kind: "link",
-                    message: format!(
-                        "internal error: {} carries an import but is not in the request",
-                        u.shipment
-                    ),
-                })?;
-            plan.findings.push(crate::plan::Finding {
-                code: "M0209",
-                severity: crate::plan::FindingSeverity::Warning,
-                message: u.to_string(),
-                items: vec![inputs[requested].id.to_string()],
-                refs: vec![crate::plan::FindingRef {
-                    section: crate::plan::Section::Items,
-                    index: requested,
-                }],
-                fix: None,
-            });
-            log.push(format!("warning [M0209]: {u}"));
-        }
-        crate::plan::sort_findings(&mut plan.findings, |item| {
-            inputs.iter().position(|p| p.id == item)
+            message: format!(
+                "internal error: the plan {} the effects block and the link {} it",
+                if effects_promised { "promised" } else { "did not promise" },
+                if effects_block.is_some() { "merged" } else { "did not merge" }
+            ),
         });
-        linked = linked_out.scripts;
-        for l in &linked {
-            log.push(format!(
-                "linked {} in {}: {} → {} B source, {} B bytecode, from {:?}",
-                l.target,
-                loaded[l.block].path,
-                l.base_source_bytes,
-                l.linked_source_bytes,
-                l.bytecode_bytes,
-                l.contributors
-            ));
-        }
-        patches.extend(script_patch_blocks(&loaded, &linked, "link")?);
     }
+    patches.extend(effects_block);
 
     // The merged string tables. The plan's `link_block_paths` promised exactly these, and a deploy
     // step drops the per-Shipment copies of each on that promise, so a mismatch is an internal error.
@@ -5630,7 +5827,9 @@ pub fn link_installed(
         .link_block_paths
         .iter()
         .filter(|p| {
-            !link::SCRIPT_BLOCKS.iter().chain(link::SHELL_SCRIPT_BLOCKS).any(|(_, s)| s == p) && !sound_paths.contains(*p)
+            !link::SCRIPT_BLOCKS.iter().chain(link::SHELL_SCRIPT_BLOCKS).any(|(_, s)| s == p)
+                && !sound_paths.contains(*p)
+                && *p != crate::fx::EFFECTS_BLOCK.1
         })
         .cloned()
         .collect();
