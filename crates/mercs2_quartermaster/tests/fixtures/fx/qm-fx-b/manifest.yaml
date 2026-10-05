@@ -1,0 +1,55 @@
+format: 2
+
+shipment:
+  name: qm-fx-b
+  title: "FX fixture B"
+  version: 1.0.0
+  target: retail
+  description: >-
+    A new green effect qm_fx_green_burst and the template qm_green_burst that starts it, and the
+    car-hood fire turned yellow through its template.
+
+contributions:
+  - kind: add_fx
+    name: qm_fx_green_burst
+    effect: src/qm_fx_green_burst.yaml
+    template:
+      name: qm_green_burst
+      name_flag: 1
+      components:
+        EffectTemplate:
+          "0xB9D95A23": "0x00000000"
+        HibernationControl:
+          "0xCBE8ED58": 500
+          "0x74E63261": 160
+          "0xDEA888CE": 60
+          "0x2332033F": 20
+          "0x3CE51772": true
+          "0x3F1DA641": false
+        RedEffectComponent:
+          name: qm_fx_green_burst
+          "0x4D7D459B": 1.0
+          "0x62C7746E": 0.0
+          "0xE8DABAE6": 1.0
+          "0x216E8465": 10.0
+          "0x3902F594": 0.0
+          "0xE351CA81": "0x00000001"
+          "0xB9BA2DFE": 0.0
+          "0xF88C32BA": "0x00000001"
+          "0x95323A93": "0x00000000"
+          "0xE8764CF8": "0x00000000"
+          "0xA87B6266": -2.0
+          "0x4E4CCD85": 10.0
+          "0x87519019": 30
+        SoundEffect:
+          "0x2EB62242": "0x56B83982"
+          "0xC43322C3": 0
+          "0x29F15442": 1
+          "0x4E97DE03": 1.0
+          "0x14A67FA6": "0x00000000"
+          "0xD932985B": 0
+          "0x11957817": 50.0
+
+  - kind: replace_fx
+    target: { template: global_particle_fire_carhood }
+    edits: src/global_particle_fire_carhood.edits.yaml
