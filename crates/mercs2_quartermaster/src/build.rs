@@ -204,13 +204,17 @@ fn link_shell_loader(
     script_patch_blocks(&loaded, &linked.scripts.iter().map(|l| l.block).collect(), kind)
 }
 
-/// `add_fx` and `replace_fx` of `shipments`, in order ([`crate::fx::merge`]): the game's effects
-/// block with every edit and addition, at its own path, and — when the set adds a template — the
-/// game's worldentity with every added template, written into the resident block of `loaded`.
+/// `add_fx_sprite`, `add_fx` and `replace_fx` of `shipments`, in order, and the set's
+/// `replace_texture` of the `vfx` atlas ([`crate::fx::merge`]): the game's effects block with every
+/// edit and addition, at its own path, when the set has an `add_fx` or a `replace_fx`; and, written
+/// into the resident block of `loaded`, the game's worldentity with every added template when the
+/// set adds one, the `fxdict` with every sprite's record when the set adds a sprite, and the atlas
+/// with every sprite drawn on the base when the set adds a sprite or repaints it.
 ///
-/// Returns the effects block and the index into `loaded` of the resident block when its
-/// worldentity was rewritten. The effects block carries every row the game gives its entries,
-/// copied, and a primary row with sentinel rungs for each added effect.
+/// Returns the effects block and the index into `loaded` of the resident block when any of its
+/// entries was rewritten. The effects block carries every row the game gives its entries, copied,
+/// and a primary row with sentinel rungs for each added effect; the resident block's rows are
+/// copied from the game by [`script_patch_blocks`].
 fn lower_fx(
     shipments: &[&LoadedShipment],
     game: &mut GameStack,
@@ -218,7 +222,7 @@ fn lower_fx(
     scope: crate::fx::Scope,
     kind: &'static str,
     log: &mut Vec<String>,
-) -> Result<(PatchBlock, Option<usize>), BuildError> {
+) -> Result<(Option<PatchBlock>, Option<usize>), BuildError> {
     let fail = |index: usize, message: String| BuildError::Lower { index, kind, message };
     let (_, resident_path) = link::SCRIPT_BLOCKS[1];
     let resident = loaded
@@ -228,57 +232,89 @@ fn lower_fx(
     let we_at = crate::fx::worldentity_entry(&loaded[resident].block).map_err(|m| fail(0, m))?;
     let we = mercs2_formats::worldentity::WorldEntity::parse(&loaded[resident].block.entries[we_at].bytes)
         .map_err(|m| fail(0, format!("the worldentity in {resident_path}: {m}")))?;
+    let fxdict_at = crate::fx::fxdict_entry(&loaded[resident].block).map_err(|m| fail(0, format!("{resident_path}: {m}")))?;
+    let atlas_at = crate::fx::atlas_entry(&loaded[resident].block).map_err(|m| fail(0, format!("{resident_path}: {m}")))?;
+    let (records, game_atlas) =
+        crate::fx::sprites_of(&loaded[resident].block).map_err(|m| fail(0, format!("{resident_path}: {m}")))?;
     let (needle, effects_path) = crate::fx::EFFECTS_BLOCK;
     let (raw, rows) = game
         .block_and_rows_by_path(needle)
         .ok_or_else(|| fail(0, format!("the game stack has no {effects_path}")))?;
     let effects = ScriptsBlock::parse(&raw).map_err(|m| fail(0, format!("{effects_path}: {m}")))?;
-    let frames = crate::fx::fxdict_entry(&loaded[resident].block).map_err(|m| fail(0, format!("{resident_path}: {m}")))?;
-    let base = crate::fx::FxBase { effects: &effects.entries, worldentity: &we, frames: &frames };
     let set: Vec<crate::fx::FxShipment<'_>> =
         shipments.iter().map(|s| crate::fx::FxShipment { manifest: &s.manifest, root: &s.root }).collect();
+    let (atlas, repainted) = crate::fx::base_atlas(&game_atlas, &set).map_err(|m| fail(0, m))?;
+    if repainted {
+        log.push(format!("{resident_path}: the vfx atlas 0x{:08X} is repainted", crate::sprite::VFX_ATLAS));
+    }
+    let base = crate::fx::FxBase { effects: &effects.entries, worldentity: &we, fxdict: &records, atlas: &atlas, repainted };
     let merged = crate::fx::merge(&base, &set, scope).map_err(|f| {
         let index = f.problems.first().map(|p| p.index).or_else(|| f.conflicts.first().map(|c| c.claimants[0].index));
         fail(index.unwrap_or(0), f.to_string())
     })?;
     log.extend(merged.log.iter().cloned());
 
-    let mut aset = Vec::with_capacity(merged.effects.len());
-    for e in &merged.effects {
-        aset.push(if merged.added.contains(&e.name_hash) {
-            AsetEntry::new(e.name_hash, 0xFFFF_FFFF, 0x0000_FFFF, TYPE_ID_EFFECT)
-        } else {
-            let &(packed, secondary, type_id) = rows.get(&e.name_hash).ok_or_else(|| {
-                fail(0, format!("{effects_path} entry 0x{:08X} has no ASET row in the game", e.name_hash))
-            })?;
-            AsetEntry::new(e.name_hash, secondary, packed, type_id)
-        });
-    }
-    let block = ScriptsBlock { entries: merged.effects }.serialize();
-    log.push(format!(
-        "{effects_path}: {} entries ({} added), {} bytes",
-        aset.len(),
-        merged.added.len(),
-        block.len()
-    ));
-    let effects_block =
-        PatchBlock::from_decompressed(&block, effects_path.to_string(), aset, None).map_err(|m| fail(0, m))?;
-    let rewritten = match merged.worldentity {
-        Some(we) => {
-            let bytes = we.write().map_err(|m| fail(0, format!("writing the worldentity: {m}")))?;
-            log.push(format!(
-                "{resident_path}: worldentity 0x{:08X} {} -> {} bytes, {} templates",
-                mercs2_formats::worldentity::RETAIL_WORLDENTITY_NAME_HASH,
-                loaded[resident].block.entries[we_at].bytes.len(),
-                bytes.len(),
-                we.instances.len()
-            ));
-            loaded[resident].block.entries[we_at].bytes = bytes;
-            Some(resident)
+    let effects_block = if shipments.iter().any(|s| crate::fx::has_fx(&s.manifest)) {
+        let mut aset = Vec::with_capacity(merged.effects.len());
+        for e in &merged.effects {
+            aset.push(if merged.added.contains(&e.name_hash) {
+                AsetEntry::new(e.name_hash, 0xFFFF_FFFF, 0x0000_FFFF, TYPE_ID_EFFECT)
+            } else {
+                let &(packed, secondary, type_id) = rows.get(&e.name_hash).ok_or_else(|| {
+                    fail(0, format!("{effects_path} entry 0x{:08X} has no ASET row in the game", e.name_hash))
+                })?;
+                AsetEntry::new(e.name_hash, secondary, packed, type_id)
+            });
         }
-        None => None,
+        let block = ScriptsBlock { entries: merged.effects }.serialize();
+        log.push(format!(
+            "{effects_path}: {} entries ({} added), {} bytes",
+            aset.len(),
+            merged.added.len(),
+            block.len()
+        ));
+        Some(PatchBlock::from_decompressed(&block, effects_path.to_string(), aset, None).map_err(|m| fail(0, m))?)
+    } else {
+        None
     };
-    Ok((effects_block, rewritten))
+    let mut rewritten = false;
+    if let Some(we) = merged.worldentity {
+        let bytes = we.write().map_err(|m| fail(0, format!("writing the worldentity: {m}")))?;
+        log.push(format!(
+            "{resident_path}: worldentity 0x{:08X} {} -> {} bytes, {} templates",
+            mercs2_formats::worldentity::RETAIL_WORLDENTITY_NAME_HASH,
+            loaded[resident].block.entries[we_at].bytes.len(),
+            bytes.len(),
+            we.instances.len()
+        ));
+        loaded[resident].block.entries[we_at].bytes = bytes;
+        rewritten = true;
+    }
+    if let Some(bytes) = merged.fxdict {
+        log.push(format!(
+            "{resident_path}: fxdict 0x{:08X} {} -> {} bytes, {} sprite(s) added",
+            crate::fx::FXDICT_NAME_HASH,
+            loaded[resident].block.entries[fxdict_at].bytes.len(),
+            bytes.len(),
+            merged.placed.len()
+        ));
+        loaded[resident].block.entries[fxdict_at].bytes = bytes;
+        rewritten = true;
+    }
+    if let Some(bytes) = merged.atlas {
+        log.push(format!(
+            "{resident_path}: vfx atlas 0x{:08X}, {} bytes{}",
+            crate::sprite::VFX_ATLAS,
+            bytes.len(),
+            match merged.square {
+                Some(sq) => format!(", sprites drawn into the free square {sq}"),
+                None => String::new(),
+            }
+        ));
+        loaded[resident].block.entries[atlas_at].bytes = bytes;
+        rewritten = true;
+    }
+    Ok((effects_block, rewritten.then_some(resident)))
 }
 
 /// The loader self-check ([`crate::sound::check_loader_banks`]): every bank the gameplay loader
@@ -2687,6 +2723,9 @@ fn lower(
 ) -> Result<Lowering, BuildError> {
     let kind = contribution.kind();
     match contribution {
+        // A repaint of the `vfx` atlas is the base every sprite of the set is drawn on: `build` and
+        // `link` write it into the resident block with the sprites ([`lower_fx`]).
+        Contribution::ReplaceTexture { .. } if crate::fx::repaints_atlas(contribution) => Ok(Lowering::Nothing),
         Contribution::ReplaceTexture { target, image } => {
             let Some(game) = game else {
                 return Err(BuildError::GameRequired { index, kind });
@@ -3358,9 +3397,11 @@ fn lower(
         // Store edits, not WAD blocks: `build` applies every shader kind of the Shipment to the
         // original stores together ([`crate::shader::apply_edits`]) and writes `data/shader3*.bin`.
         Contribution::AddShader { .. } | Contribution::ReplaceShader { .. } => Ok(Lowering::Nothing),
-        // `build` applies every add_fx and replace_fx of the Shipment to the game's effects block
-        // and worldentity together ([`lower_fx`]).
-        Contribution::AddFx { .. } | Contribution::ReplaceFx { .. } => Ok(Lowering::Nothing),
+        // `build` applies every add_fx_sprite, add_fx and replace_fx of the Shipment to the game's
+        // fxdict, atlas, effects block and worldentity together ([`lower_fx`]).
+        Contribution::AddFx { .. } | Contribution::ReplaceFx { .. } | Contribution::AddFxSprite { .. } => {
+            Ok(Lowering::Nothing)
+        }
         Contribution::ReplaceTerrainCell { target, cell } => opaque_new_asset(root, cell, target, TYPE_HASH_TERRAIN_MESH, TYPE_ID_TERRAIN_MESH, index, kind),
 
         // No Data half: a shop item is pure Script-layer catalog + reward appends (see
@@ -4336,14 +4377,14 @@ pub(crate) fn parse_text_pairs(text: &str, file: &str) -> Result<Vec<(String, St
     Ok(out)
 }
 
-struct Rgba {
-    width: usize,
-    height: usize,
+pub(crate) struct Rgba {
+    pub(crate) width: usize,
+    pub(crate) height: usize,
     /// Straight RGBA as `f32` in 0..=255, the shape `texture_encode` expects.
-    pixels: Vec<f32>,
+    pub(crate) pixels: Vec<f32>,
 }
 
-fn read_png_rgba(path: &Path) -> Result<Rgba, String> {
+pub(crate) fn read_png_rgba(path: &Path) -> Result<Rgba, String> {
     let file = std::fs::File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
     read_png_rgba_from(file, &path.display().to_string())
 }
@@ -4595,8 +4636,9 @@ pub fn build(
     // must trigger the link even when `mutations` is empty. A bank the front end loads links into
     // `shell.wad`'s scripts block (below).
     //
-    // `add_fx` and `replace_fx` share the load: an `add_fx` template goes into the worldentity the
-    // resident block carries, and the block is emitted once, with every script and template.
+    // `add_fx_sprite`, `add_fx`, `replace_fx` and a `replace_texture` of the `vfx` atlas share the
+    // load: a template, a sprite's record and the atlas go into the resident block, and the block is
+    // emitted once, with every script, template, record and the atlas.
     let touches_scripts = !mutations.is_empty()
         || !ui_regs.is_empty()
         || !layer_regs.is_empty()
@@ -4604,11 +4646,10 @@ pub fn build(
         || gameplay_sounds
         || !additions.is_empty()
         || !replacements.is_empty();
-    let fx_kind = manifest
-        .contributions
-        .iter()
-        .enumerate()
-        .find(|(_, c)| matches!(c, Contribution::AddFx { .. } | Contribution::ReplaceFx { .. }));
+    let fx_kind = manifest.contributions.iter().enumerate().find(|(_, c)| {
+        matches!(c, Contribution::AddFx { .. } | Contribution::ReplaceFx { .. } | Contribution::AddFxSprite { .. })
+            || crate::fx::repaints_atlas(c)
+    });
     if touches_scripts || fx_kind.is_some() {
         let Some(game) = game.as_deref_mut() else {
             return Err(match fx_kind {
@@ -4684,7 +4725,7 @@ pub fn build(
                         BuildError::Lower { index: 0, kind, message } => BuildError::Lower { index, kind, message },
                         other => other,
                     })?;
-            blocks.push(effects);
+            blocks.extend(effects);
             touched.extend(resident);
         }
         // Say what shipping a scripts block COSTS, because the number is not obvious and the
@@ -5490,8 +5531,13 @@ pub fn link_installed(
     if shipments.iter().any(|s| crate::fx::has_fx(&s.manifest)) {
         let fail = |message: String| BuildError::Lower { index: 0, kind: "link", message };
         let base = crate::fx::GameFx::read(game).map_err(fail)?;
-        let fx_base =
-            crate::fx::FxBase { effects: &base.effects.entries, worldentity: &base.worldentity, frames: &base.frames };
+        let fx_base = crate::fx::FxBase {
+            effects: &base.effects.entries,
+            worldentity: &base.worldentity,
+            fxdict: &base.fxdict,
+            atlas: &base.atlas,
+            repainted: false,
+        };
         let set: Vec<crate::fx::FxShipment<'_>> =
             shipments.iter().map(|s| crate::fx::FxShipment { manifest: &s.manifest, root: &s.root }).collect();
         let found = crate::fx::conflicts(&fx_base, &set);
@@ -5677,12 +5723,13 @@ pub fn link_installed(
     let tables = merged_string_tables(shipments.iter().map(|s| &s.manifest));
     // Every sound bank any Shipment's replace_sound_cue targets, likewise.
     let sound_entries = crate::sound::linked_sound_entries(shipments.iter().map(|s| &s.manifest));
-    // Every effect and template, into one effects block and one worldentity.
-    let fx = shipments.iter().any(|s| crate::fx::has_fx(&s.manifest));
+    // Every effect, template and sprite, into one effects block, one worldentity, one fxdict and
+    // one atlas.
+    let fx = shipments.iter().any(|s| crate::fx::merges_fx(&s.manifest));
     if !touches_scripts && !front_end_sounds && tables.is_empty() && sound_entries.is_empty() && !fx {
         log.push(
-            "no installed Shipment touches a script, a string table, a sound bank or an effect — \
-             nothing to link"
+            "no installed Shipment touches a script, a string table, a sound bank, an effect, a \
+             sprite or the vfx atlas — nothing to link"
                 .into(),
         );
         // Still write the (empty) placement record. Emitting no link WAD is the right call — an
@@ -5794,11 +5841,12 @@ pub fn link_installed(
                 touched.insert(l.block);
             }
         }
-        // The set's effects and templates, merged in load order: the effects block, and the
-        // templates in the same resident block the scripts above were linked into.
+        // The set's sprites, effects and templates, merged in load order: the effects block, and
+        // the templates, the fxdict and the atlas in the same resident block the scripts above were
+        // linked into.
         if fx {
             let (effects, resident) = lower_fx(&shipments, game, &mut loaded, crate::fx::Scope::Link, "link", &mut log)?;
-            effects_block = Some(effects);
+            effects_block = effects;
             touched.extend(resident);
         }
         patches.extend(script_patch_blocks(&loaded, &touched, "link")?);
