@@ -102,6 +102,12 @@ pub enum Claim {
     /// A world template's key (`worldentity::derived_template_key`): two templates under one key
     /// overwrite each other's records.
     TemplateKey { key: u32 },
+    /// An effect frame: the `fxdict` record key a sprite is filed under (`pandemic_hash_m2(name)`).
+    /// The lookup finds one record per key, so two sprites of one key leave one unreachable.
+    FxFrame { key: u32 },
+    /// The repaint of the `vfx` atlas: the base every Shipment's sprites are drawn on top of. A set
+    /// has one; a second repaint's texels would be absent.
+    AtlasRepaint,
 }
 
 impl Claim {
@@ -186,6 +192,11 @@ impl Claim {
                 Some(n) => format!("template key 0x{key:08X} (derived from {n})"),
                 None => format!("template key 0x{key:08X}"),
             },
+            Claim::FxFrame { key } => match name {
+                Some(n) => format!("effect frame {n} (0x{key:08X})"),
+                None => format!("effect frame 0x{key:08X}"),
+            },
+            Claim::AtlasRepaint => "the repaint of the vfx atlas".into(),
         }
     }
 
@@ -279,6 +290,23 @@ pub fn merge_class(claim: &Claim, access: Access, intent: Intent) -> MergeClass 
         // one name, or two names deriving one key, leave one template unreachable.
         Claim::Template { .. } | Claim::TemplateKey { .. } if intent == Intent::Additive => MergeClass::KeyedSet,
         Claim::Template { .. } | Claim::TemplateKey { .. } => MergeClass::Exclusive,
+        // A sprite's key is a key across the installed set: the fxdict carries one record per key.
+        Claim::FxFrame { .. } if intent == Intent::Additive => MergeClass::KeyedSet,
+        Claim::FxFrame { .. } => MergeClass::Exclusive,
+        // The set's sprites are drawn on top of one repaint.
+        Claim::AtlasRepaint => MergeClass::Exclusive,
+    }
+}
+
+/// How strict a class is when claimants of one target disagree: `Exclusive`, then `KeyedSet`, then
+/// `LastWins`, then `OrderedList`. The strictest claimant's class is the target's, whatever order
+/// the claimants come in.
+fn strictness(class: MergeClass) -> u8 {
+    match class {
+        MergeClass::Exclusive => 3,
+        MergeClass::KeyedSet => 2,
+        MergeClass::LastWins => 1,
+        MergeClass::OrderedList => 0,
     }
 }
 
@@ -441,6 +469,12 @@ pub fn claims(manifest: &Manifest) -> Vec<ClaimRecord> {
                     push(Access::Read, Claim::asset(d), Intent::Replace);
                 }
             }
+            // A repaint of the `vfx` atlas is the base `qm link` draws every Shipment's sprites on:
+            // the atlas is merged, and the repaint itself has one claimant.
+            Contribution::ReplaceTexture { target, .. } if crate::fx::repaints_atlas(c) => {
+                push(Access::Write, Claim::asset(target), Intent::Merged);
+                push(Access::Write, bare(Claim::AtlasRepaint), Intent::ReplaceExclusive);
+            }
             Contribution::ReplaceTexture { target, .. } => {
                 // Same hash as the shipped asset — a replacement, not an addition.
                 push(Access::Write, Claim::asset(target), Intent::Replace);
@@ -544,6 +578,26 @@ pub fn claims(manifest: &Manifest) -> Vec<ClaimRecord> {
                         Claim::Asset { hash: mercs2_formats::worldentity::RETAIL_WORLDENTITY_NAME_HASH },
                         Some("worldentity".into()),
                     ),
+                    Intent::Merged,
+                );
+            }
+            // A sprite: its frame key is a key across the set, and the fxdict its record joins and the
+            // atlas its texels are drawn into are merged by `qm link`, every Shipment's sprites
+            // together.
+            Contribution::AddFxSprite { name, .. } => {
+                push(
+                    Access::Write,
+                    (Claim::FxFrame { key: mercs2_formats::hash::pandemic_hash_m2(name) }, Some(name.clone())),
+                    Intent::Additive,
+                );
+                push(
+                    Access::Write,
+                    (Claim::Asset { hash: crate::fx::FXDICT_NAME_HASH }, Some("fxdict".into())),
+                    Intent::Merged,
+                );
+                push(
+                    Access::Write,
+                    (Claim::Asset { hash: crate::sprite::VFX_ATLAS }, Some("vfx".into())),
                     Intent::Merged,
                 );
             }
@@ -767,8 +821,8 @@ pub fn self_conflicts(manifest: &Manifest) -> Vec<SelfConflict> {
         let entry = by_claim
             .entry(r.claim)
             .or_insert_with(|| (r.class, Vec::new(), r.name.clone()));
-        if r.class == MergeClass::Exclusive {
-            entry.0 = MergeClass::Exclusive;
+        if strictness(r.class) > strictness(entry.0) {
+            entry.0 = r.class;
         }
         if entry.2.is_none() {
             entry.2 = r.name.clone();
@@ -869,12 +923,13 @@ pub fn conflicts(shipments: &[(&str, &Manifest)]) -> Vec<Conflict> {
                     records.retain(|(r, _)| r.kind != "add_fx");
                 }
             }
-            // Fail closed: if two contributions disagree about a target's class, take the stricter.
-            let class = if records.iter().any(|(r, _)| r.class == MergeClass::Exclusive) {
-                MergeClass::Exclusive
-            } else {
-                records[0].0.class
-            };
+            // Fail closed: if two contributions disagree about a target's class, take the strictest
+            // ([`strictness`]), whatever order they come in.
+            let class = records
+                .iter()
+                .map(|(r, _)| r.class)
+                .max_by_key(|c| strictness(*c))
+                .expect("a claim has a claimant");
             let name = records.iter().find_map(|(r, _)| r.name.clone());
             let claimants: Vec<Claimant> =
                 records.into_iter().map(|(r, shipment)| Claimant { shipment, index: r.index }).collect();
