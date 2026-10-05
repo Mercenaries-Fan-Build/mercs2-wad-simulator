@@ -651,7 +651,7 @@ fn patch_and_replace_lua_conflict() {
 fn each_newly_exclusive_kind_conflicts_on_the_same_target() {
     for block in [
         "  - kind: replace_shader\n    target: PgMeshVP\n    shader: {asm: src/b.asm}\n",
-        "  - kind: replace_fx\n    target: fx_boom\n    payload: src/p.bin\n",
+        "  - kind: replace_fx\n    target: { effect: fx_boom }\n    edits: src/e.yaml\n",
         "  - kind: replace_animation\n    target: a_run\n    clip: src/c.bin\n    trnm: src/t.bin\n",
         "  - kind: replace_phy2\n    target: m_crate\n    phy2: src/p.bin\n",
         "  - kind: replace_terrain_cell\n    target: cell_0_0\n    cell: src/c.bin\n",
@@ -1050,4 +1050,188 @@ fn one_shipment_adds_stand_ins_to_several_cells_of_a_layer() {
     let sc = blast::self_conflicts(&one("mod-a", &same));
     assert_eq!(sc.len(), 1, "{sc:?}");
     assert!(matches!(sc[0].claim, Claim::TinyCell { row: 28, col: 32, .. }));
+}
+
+// ---------------------------------------------------------------------------
+// Effects and templates.
+// ---------------------------------------------------------------------------
+
+/// An `add_fx` of effect `fx` with template `template`.
+fn add_fx(fx: &str, template: &str) -> String {
+    format!(
+        "  - kind: add_fx\n    name: {fx}\n    effect: src/{fx}.yaml\n    template:\n      name: {template}\n      \
+         name_flag: 1\n      components:\n        RedEffectComponent: {{ name: {fx} }}\n"
+    )
+}
+
+fn replace_fx(target: &str) -> String {
+    format!("  - kind: replace_fx\n    target: {target}\n    edits: src/e.yaml\n")
+}
+
+fn requiring(shipment: &str, requires: &str, contribution: &str) -> Manifest {
+    parse(&format!(
+        "format: 2
+shipment: {{ name: {shipment}, version: 1.0.0, target: retail }}
+load: {{ requires: [{requires}] }}
+contributions:
+{contribution}"
+    ))
+}
+
+#[test]
+fn two_templates_of_one_name_collide() {
+    let found = blast::conflicts(&[
+        ("mod-a", &one("mod-a", &add_fx("fx_a", "qm_same"))),
+        ("mod-b", &one("mod-b", &add_fx("fx_b", "qm_same"))),
+    ]);
+    let h = mercs2_formats::hash::pandemic_hash_m2("qm_same");
+    let key = mercs2_formats::worldentity::derived_template_key("qm_same");
+    let claims: Vec<&Claim> = found.iter().map(|c| &c.claim).collect();
+    assert_eq!(claims, vec![&Claim::Template { name_hash: h }, &Claim::TemplateKey { key }], "{found:?}");
+    assert!(found.iter().all(|c| c.class == MergeClass::KeyedSet));
+}
+
+/// Two different names whose derived keys collide, found at runtime: the key keeps 28 bits of the
+/// name hash, so a birthday search over generated names finds a pair within ~2^14 tries.
+#[test]
+fn two_template_names_deriving_one_key_collide() {
+    use mercs2_formats::worldentity::derived_template_key;
+    let mut seen: std::collections::HashMap<u32, String> = std::collections::HashMap::new();
+    let (a, b) = (0u32..)
+        .map(|i| format!("qm_birthday_{i}"))
+        .find_map(|n| match seen.insert(derived_template_key(&n), n.clone()) {
+            Some(prev) => Some((prev, n)),
+            None => None,
+        })
+        .expect("a collision exists");
+    assert_ne!(mercs2_formats::hash::pandemic_hash_m2(&a), mercs2_formats::hash::pandemic_hash_m2(&b));
+    let found = blast::conflicts(&[
+        ("mod-a", &one("mod-a", &add_fx("fx_a", &a))),
+        ("mod-b", &one("mod-b", &add_fx("fx_b", &b))),
+    ]);
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert_eq!(found[0].claim, Claim::TemplateKey { key: derived_template_key(&a) });
+    assert_eq!(found[0].class, MergeClass::KeyedSet);
+}
+
+#[test]
+fn two_effects_of_one_name_collide() {
+    let found = blast::conflicts(&[
+        ("mod-a", &one("mod-a", &add_fx("fx_same", "qm_a"))),
+        ("mod-b", &one("mod-b", &add_fx("fx_same", "qm_b"))),
+    ]);
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert_eq!(found[0].claim, Claim::Asset { hash: mercs2_formats::hash::pandemic_hash_m2("fx_same") });
+    assert_eq!(found[0].class, MergeClass::KeyedSet);
+}
+
+/// Every add_fx writes the one worldentity, which `qm link` merges: many compose.
+#[test]
+fn templates_of_different_names_compose() {
+    let found = blast::conflicts(&[
+        ("mod-a", &one("mod-a", &add_fx("fx_a", "qm_a"))),
+        ("mod-b", &one("mod-b", &add_fx("fx_b", "qm_b"))),
+    ]);
+    assert!(found.is_empty(), "{found:?}");
+}
+
+#[test]
+fn a_raw_worldentity_conflicts_with_an_add_fx() {
+    let raw = "  - kind: raw\n    payload: src/p.block\n    target_layer: data\n    touches: [\"0x50075B3B\"]\n";
+    let found = exclusive_conflict(&one("mod-a", raw), &one("mod-b", &add_fx("fx_a", "qm_a")));
+    assert_eq!(found.claim, Claim::Asset { hash: 0x5007_5B3B });
+}
+
+#[test]
+fn replacements_of_different_effects_compose() {
+    let found = blast::conflicts(&[
+        ("mod-a", &one("mod-a", &replace_fx("{ effect: fx_one }"))),
+        ("mod-b", &one("mod-b", &replace_fx("{ effect: fx_two }"))),
+    ]);
+    assert!(found.is_empty(), "{found:?}");
+}
+
+/// A replacement of another Shipment's added effect composes with the addition exactly when it
+/// requires that Shipment; two such replacements still conflict.
+#[test]
+fn a_replacement_of_an_added_effect_composes_only_through_requires() {
+    let a = one("mod-a", &add_fx("fx_a", "qm_a"));
+    let found = blast::conflicts(&[("mod-a", &a), ("mod-b", &one("mod-b", &replace_fx("{ effect: fx_a }")))]);
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert_eq!(found[0].class, MergeClass::Exclusive);
+    let b = requiring("mod-b", "mod-a", &replace_fx("{ effect: fx_a }"));
+    assert!(blast::conflicts(&[("mod-a", &a), ("mod-b", &b)]).is_empty());
+    let c = requiring("mod-c", "mod-a", &replace_fx("{ effect: fx_a }"));
+    let found = blast::conflicts(&[("mod-a", &a), ("mod-b", &b), ("mod-c", &c)]);
+    assert_eq!(found.len(), 1, "{found:?}");
+    let who: Vec<&str> = found[0].claimants.iter().map(|c| c.shipment.as_str()).collect();
+    assert_eq!(who, vec!["mod-b", "mod-c"]);
+}
+
+/// The same effect replaced by two Shipments conflicts by name, and through a template too: the
+/// template target resolves against the game's worldentity (here a one-template stand-in), which is
+/// what `qm link` does before it links.
+#[test]
+fn one_effect_replaced_twice_conflicts_by_name_and_through_a_template() {
+    use mercs2_formats::hash::pandemic_hash_m2 as h;
+    use mercs2_formats::ucfx::{write_ucfx_tree, UcfxNode};
+    use mercs2_quartermaster::fx;
+
+    let direct = one("mod-a", &replace_fx("{ effect: fx_one }"));
+    exclusive_conflict(&direct, &one("mod-b", &replace_fx("{ effect: fx_one }")));
+    let via = one("mod-b", &replace_fx("{ template: qm_fx_one }"));
+    assert!(blast::conflicts(&[("mod-a", &direct), ("mod-b", &via)]).is_empty(), "a template resolves only against the game");
+
+    let le = |w: &[u32]| -> Vec<u8> { w.iter().flat_map(|x| x.to_le_bytes()).collect() };
+    let comp = |class: &str, fields: Vec<u8>, n: u32, stride: u32, data: Vec<u8>| {
+        let mut info = class.as_bytes().to_vec();
+        info.push(0);
+        info.extend(le(&[h(class), if class == "Name" { 1 } else { 0x57 }, 1, 0]));
+        let mut schm = le(&[n, stride]);
+        schm.extend(fields);
+        UcfxNode::marker(*b"COMP", vec![UcfxNode::leaf(*b"info", info), UcfxNode::leaf(*b"schm", schm), UcfxNode::leaf(*b"data", data)])
+    };
+    let mut red_field = le(&[6, fx::RED_EFFECT_NAME_FIELD, 0]);
+    red_field.extend([0, 0, 0, 0]);
+    let mut name_fields = le(&[8, 0x1DE5_C824, 0]);
+    name_fields.extend([0, 0, 0, 0]);
+    name_fields.extend(le(&[1, 0x12AF_A0B8, 0]));
+    name_fields.extend([4, 0, 0, 0]);
+    let mut names = le(&[1, 0x8000_0002]);
+    names.extend(b"qm_fx_one\0\x01");
+    let mut flgt = le(&[1, h(fx::RED_EFFECT_CLASS)]);
+    flgt.extend(b"RedEffectComponent\0");
+    flgt.extend(le(&[0]));
+    let mut flgs = le(&[1, 0x8000_0002, 1]);
+    flgs.extend([0; 28]);
+    let mut chdr = vec![0, 0, 0x33, 0];
+    chdr.extend(le(&[1]));
+    let we = mercs2_formats::worldentity::WorldEntity::parse(&write_ucfx_tree(&[
+        UcfxNode::leaf(*b"CHDR", chdr),
+        UcfxNode::leaf(*b"enum", le(&[0])),
+        UcfxNode::leaf(*b"UNIQ", le(&[1, 0x8000_0002])),
+        comp(fx::RED_EFFECT_CLASS, red_field, 1, 4, le(&[1, 0x8000_0002, h("fx_one")])),
+        comp("Name", name_fields, 2, 5, names),
+        UcfxNode::leaf(*b"flgt", flgt),
+        UcfxNode::leaf(*b"flgs", flgs),
+    ]))
+    .expect("the stand-in worldentity parses");
+    let effects: Vec<mercs2_formats::scripts_block::Entry> = ["fx_one", "fx_two"]
+        .iter()
+        .map(|n| mercs2_formats::scripts_block::Entry {
+            name_hash: h(n),
+            type_hash: mercs2_formats::types::TYPE_HASH_EFFECT,
+            field_c: 0,
+            bytes: Vec::new(),
+        })
+        .collect();
+    let texture = |_: u32| true;
+    let base = fx::FxBase { effects: &effects, worldentity: &we, texture: &texture };
+    let root = std::path::Path::new("/nonexistent");
+    let set = [fx::FxShipment { manifest: &direct, root }, fx::FxShipment { manifest: &via, root }];
+    let found = fx::conflicts(&base, &set);
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert_eq!(found[0].effect, h("fx_one"));
+    let other = one("mod-b", &replace_fx("{ effect: fx_two }"));
+    assert!(fx::conflicts(&base, &[set[0], fx::FxShipment { manifest: &other, root }]).is_empty());
 }
