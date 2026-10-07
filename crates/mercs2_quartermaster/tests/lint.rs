@@ -1706,6 +1706,37 @@ fn m0252_fires_on_an_effect_form_that_does_not_lower() {
 }
 
 #[test]
+fn m0309_fires_on_an_emitter_the_engine_cannot_spawn_from() {
+    use mercs2_formats::fxdict::{AtrbValue, EmitterGeom};
+    use mercs2_quartermaster::effect::{self, EffectForm};
+    let yaml = |fx: &mercs2_formats::fxdict::EffectContainer| effect::to_string(&EffectForm::express(fx), Format::Yaml).unwrap().into_bytes();
+    let rate = effect::particle_defs().iter().position(|d| d.name == Some("rate")).unwrap();
+    let mut cases = Vec::new();
+    for (geom, label) in [
+        (Some(EmitterGeom { shape_index: 1, word_00: 1 }), "index"),
+        (Some(EmitterGeom { shape_index: 0, word_00: 0 }), "zero"),
+        (Some(EmitterGeom { shape_index: 0, word_00: 2 }), "past"),
+    ] {
+        let mut fx = fx_effect();
+        fx.emitters[0].geom = geom;
+        cases.push((label, fx));
+    }
+    let mut fx = fx_effect();
+    fx.emitters[0].particle.attributes[rate].value = AtrbValue::F32(30.0);
+    cases.push(("spawning", fx));
+    for (label, fx) in cases {
+        let d = lint_fx(&format!("m0309-{label}"), &add_fx_yaml("qm_tpl", ONE_RED), &[("fx.yaml", yaml(&fx))]);
+        assert_eq!(codes(&d), vec!["M0309"], "{label}: {d:?}");
+    }
+    // `fx_effect` has no GEOM, a rate of 0 and a ratevar of 0: it spawns nothing, and is quiet.
+    assert!(fx_effect().emitters[0].geom.is_none());
+    let mut fx = fx_effect();
+    fx.emitters[0].geom = Some(EmitterGeom { shape_index: 0, word_00: 1 });
+    fx.emitters[0].particle.attributes[rate].value = AtrbValue::F32(30.0);
+    assert!(lint_fx("m0309-quiet", &add_fx_yaml("qm_tpl", ONE_RED), &[("fx.yaml", yaml(&fx))]).is_empty());
+}
+
+#[test]
 fn m0253_fires_on_an_unusable_template_name() {
     for (name, label) in [(String::new(), "empty"), ("x".repeat(0x80), "long")] {
         let d = lint_fx(&format!("m0253-{label}"), &add_fx_yaml(&name, ONE_RED), &[("fx.yaml", effect_yaml())]);
@@ -1774,7 +1805,7 @@ fn m0262_fires_on_a_raw_effect_or_worldentity() {
 
 #[test]
 fn the_fx_rules_are_registered() {
-    for code in ["M0252", "M0253", "M0254", "M0255", "M0262"] {
+    for code in ["M0252", "M0253", "M0254", "M0255", "M0262", "M0309"] {
         assert!(lint::RULES.iter().any(|r| r.code == code), "{code} hermetic");
     }
     for code in ["M0256", "M0257", "M0258", "M0259", "M0260", "M0261"] {
