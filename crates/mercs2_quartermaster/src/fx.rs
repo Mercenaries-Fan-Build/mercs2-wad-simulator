@@ -58,7 +58,13 @@
 //!
 //! In an attribute edit, an absent `value`, `curve` or `options` keeps the attribute's own; `curve:
 //! none` removes its curve. After the last operation the effect is checked against every rule the
-//! effect writer enforces.
+//! effect writer enforces: the node rules (M0261) and the emitter-shape rules
+//! ([`EffectContainer::check_emitter_shapes`], M0309).
+//!
+//! An effect with an emitter without `GEOM` is started only by templates whose `RedEffectComponent`
+//! per-distance factor ([`RED_EFFECT_DISTANCE_FIELD`]) is 0 (M0309): an `add_fx` template that starts
+//! one with another factor, and a `replace_fx` that leaves an emitter without `GEOM` in an effect
+//! such a template starts, are refused.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::Path;
@@ -89,6 +95,15 @@ pub const RED_EFFECT_CLASS: &str = "RedEffectComponent";
 
 /// `RedEffectComponent`'s `name` field (`pandemic_hash_m2("name")`, schm code 6, offset 0).
 pub const RED_EFFECT_NAME_FIELD: u32 = 0x1DE5_C824;
+
+/// `RedEffectComponent`'s per-distance factor (`0x62C7746E`, schm code 7, offset 8). The spawner
+/// `FUN_00488d70` copies the component's `+0x08` to the effect instance's `+0x7F4`, and on each update
+/// `FUN_0048f4f0` adds the instance's displacement since the last update times it to every
+/// emitter's spawn count. That the runtime component's `+0x08` is this schm field is INFERRED from
+/// the schm offsets. An emitter without `GEOM` divides by zero on its first particle
+/// ([`EffectContainer::check_emitter_shapes`]), so a template that starts an effect with one has
+/// this factor at 0, as all 20 retail `RedEffectComponent` records that name such an effect do.
+pub const RED_EFFECT_DISTANCE_FIELD: u32 = 0x62C7_746E;
 
 /// The entry-table `field_c` of an effect: 0 in all 314 retail effects.
 pub const EFFECT_FIELD_C: u32 = 0;
@@ -261,14 +276,16 @@ fn insert_at(what: &str, at: usize, len: usize, noun: &str) -> Result<usize, Str
     }
 }
 
-/// Apply edits in order to an effect, then check it against the writer's rules. Errors name the
-/// edit (`edits[i] (op)`) and the node it addresses.
+/// Apply edits in order to an effect, then check it against the writer's node rules
+/// ([`EffectContainer::validate_nodes`]); the emitter-shape rules are
+/// [`EffectContainer::check_emitter_shapes`]'s. Errors name the edit (`edits[i] (op)`) and the
+/// node it addresses.
 pub fn apply_edits(fx: &mut EffectContainer, edits: &[Edit]) -> Result<(), String> {
     for (i, e) in edits.iter().enumerate() {
         let what = format!("edits[{i}] ({})", e.op());
         apply_edit(fx, e, &what)?;
     }
-    fx.validate().map_err(|e| format!("after the edits, the effect breaks a writer rule: {e}"))
+    fx.validate_nodes().map_err(|e| format!("after the edits, the effect breaks a writer rule: {e}"))
 }
 
 fn apply_edit(fx: &mut EffectContainer, e: &Edit, what: &str) -> Result<(), String> {
@@ -499,6 +516,89 @@ fn declared_effect(we: &WorldEntity, decl: &mercs2_formats::worldentity::Templat
     }
 }
 
+/// The index of a `RedEffectComponent` field in the worldentity's schema.
+fn red_effect_field(we: &WorldEntity, field: u32) -> Result<usize, String> {
+    let group = &we.components[we.append_group(RED_EFFECT_CLASS)?];
+    group
+        .schema
+        .fields
+        .iter()
+        .position(|f| f.name_hash == field)
+        .ok_or_else(|| format!("{RED_EFFECT_CLASS} has no field 0x{field:08X}"))
+}
+
+/// The per-distance factor ([`RED_EFFECT_DISTANCE_FIELD`]) among a `RedEffectComponent`'s values.
+fn distance_factor(we: &WorldEntity, values: &[Value]) -> Result<f32, String> {
+    match values.get(red_effect_field(we, RED_EFFECT_DISTANCE_FIELD)?) {
+        Some(Value::Field(FieldValue::F32(x))) => Ok(*x),
+        other => Err(format!("{RED_EFFECT_CLASS}.0x{RED_EFFECT_DISTANCE_FIELD:08X} reads {other:?}")),
+    }
+}
+
+/// The emitters of an effect that have no `GEOM`, by index.
+fn geomless_emitters(fx: &EffectContainer) -> Vec<usize> {
+    fx.emitters.iter().enumerate().filter(|(_, e)| e.geom.is_none()).map(|(i, _)| i).collect()
+}
+
+/// A template may start the effect `bytes` unless the effect has an emitter without `GEOM` and the
+/// template's per-distance factor ([`RED_EFFECT_DISTANCE_FIELD`]) is not 0; `Err` says why not.
+fn template_moves_geomless(
+    we: &WorldEntity,
+    decl: &mercs2_formats::worldentity::TemplateDecl,
+    bytes: &[u8],
+) -> Result<(), String> {
+    let fx = parse_effect_container(bytes)?;
+    let without = geomless_emitters(&fx);
+    if without.is_empty() {
+        return Ok(());
+    }
+    let red = decl
+        .components
+        .iter()
+        .find(|c| c.class == RED_EFFECT_CLASS)
+        .ok_or_else(|| format!("the template declares no {RED_EFFECT_CLASS}"))?;
+    let factor = distance_factor(we, &red.values)?;
+    if factor == 0.0 {
+        return Ok(());
+    }
+    Err(format!(
+        "its {RED_EFFECT_CLASS} per-distance factor 0x{RED_EFFECT_DISTANCE_FIELD:08X} is {factor}, and the \
+         effect's emitter(s) {without:?} have no GEOM; once the effect moves, the factor spawns particles \
+         on those emitters and the engine divides by zero picking their spawn record. Give the factor 0, \
+         or give each of those emitters a GEOM"
+    ))
+}
+
+/// Effect `h`, with the content `fx`, may stand unless `fx` has an emitter without `GEOM` and a
+/// template of the worldentity starts it with a non-zero per-distance factor
+/// ([`RED_EFFECT_DISTANCE_FIELD`]); `Err` names those templates by key.
+fn moving_starters(we: &WorldEntity, h: u32, fx: &EffectContainer) -> Result<(), String> {
+    let without = geomless_emitters(fx);
+    if without.is_empty() {
+        return Ok(());
+    }
+    let name_at = red_effect_field(we, RED_EFFECT_NAME_FIELD)?;
+    let mut keys = Vec::new();
+    for group in we.groups_of(RED_EFFECT_CLASS) {
+        for r in &group.records {
+            let values = group.decode(&r.payload)?;
+            if values.get(name_at) == Some(&Value::Field(FieldValue::U32(h))) && distance_factor(we, &values)? != 0.0 {
+                keys.extend(r.keys.iter().map(|k| format!("0x{k:08X}")));
+            }
+        }
+    }
+    if keys.is_empty() {
+        return Ok(());
+    }
+    Err(format!(
+        "the effect's emitter(s) {without:?} have no GEOM, and the template(s) {} start it with a non-zero \
+         {RED_EFFECT_CLASS} per-distance factor 0x{RED_EFFECT_DISTANCE_FIELD:08X}; once the effect moves, \
+         the factor spawns particles on those emitters and the engine divides by zero picking their spawn \
+         record. Give each of those emitters a GEOM",
+        keys.join(", ")
+    ))
+}
+
 /// The index of the worldentity `0x50075B3B` among a block's entries, found by its name hash and
 /// type hash.
 pub fn worldentity_entry(block: &ScriptsBlock) -> Result<usize, String> {
@@ -652,10 +752,15 @@ pub enum Scope {
 pub struct Problem {
     pub shipment: String,
     pub index: usize,
-    /// The lint code: M0252–M0261 or M0304–M0307.
+    /// The lint code: M0252–M0261, M0304–M0307 or M0309.
     pub code: &'static str,
     pub message: String,
+    /// The hermetic lint ([`crate::lint::lint`]) reports this finding as well.
+    pub hermetic: bool,
 }
+
+/// The codes whose every finding the hermetic lint reports as well.
+const HERMETIC_CODES: [&str; 6] = ["M0252", "M0253", "M0254", "M0255", "M0304", "M0305"];
 
 impl std::fmt::Display for Problem {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -788,8 +893,18 @@ impl<'a> State<'a> {
     }
 
     fn problem(&mut self, si: usize, index: usize, code: &'static str, message: String) {
+        let hermetic = HERMETIC_CODES.contains(&code);
+        self.push_problem(si, index, code, message, hermetic);
+    }
+
+    /// A finding the hermetic lint reports as well, under a code whose other findings it does not.
+    fn hermetic_problem(&mut self, si: usize, index: usize, code: &'static str, message: String) {
+        self.push_problem(si, index, code, message, true);
+    }
+
+    fn push_problem(&mut self, si: usize, index: usize, code: &'static str, message: String, hermetic: bool) {
         let shipment = self.name(si).to_string();
-        self.problems.push(Problem { shipment, index, code, message });
+        self.problems.push(Problem { shipment, index, code, message, hermetic });
     }
 
     /// Whether Shipment `si` may target something Shipment `origin` added: it requires it.
@@ -1042,6 +1157,10 @@ pub fn merge(base: &FxBase<'_>, set: &[FxShipment<'_>], scope: Scope) -> Result<
                 st.problem(si, index, "M0261", format!("replace_fx {via} (0x{h:08X}): {e}"));
                 continue;
             }
+            if let Err(e) = fx.check_emitter_shapes().and_then(|()| moving_starters(&st.we, h, &fx)) {
+                st.problem(si, index, "M0309", format!("replace_fx {via} (0x{h:08X}): {e}"));
+                continue;
+            }
             st.check_frames(si, index, &fx, &before);
             match write_effect_container(&fx) {
                 Ok(bytes) => {
@@ -1091,7 +1210,11 @@ pub fn merge(base: &FxBase<'_>, set: &[FxShipment<'_>], scope: Scope) -> Result<
                     ),
                 );
             } else {
-                match effect::read(&s.root.join(effect_path)).and_then(|f| f.lower()) {
+                match effect::read(&s.root.join(effect_path)).and_then(|f| f.build()) {
+                    Ok(fx) if fx.check_emitter_shapes().is_err() => {
+                        let e = fx.check_emitter_shapes().unwrap_err();
+                        st.hermetic_problem(si, index, "M0309", format!("add_fx {fx_name:?}: {e}"));
+                    }
                     Ok(fx) => {
                         st.check_frames(si, index, &fx, &BTreeSet::new());
                         match write_effect_container(&fx) {
@@ -1157,7 +1280,12 @@ pub fn merge(base: &FxBase<'_>, set: &[FxShipment<'_>], scope: Scope) -> Result<
                 }
             };
             match declared_effect(&st.we, &decl) {
-                Ok(e) if st.effect_at(e).is_some() && (st.added_effects.get(&e).is_none_or(|o| o.shipment == si)) => {}
+                Ok(e) if st.effect_at(e).is_some() && (st.added_effects.get(&e).is_none_or(|o| o.shipment == si)) => {
+                    let at = st.effect_at(e).expect("the guard found it");
+                    if let Err(m) = template_moves_geomless(&st.we, &decl, &st.effects[at].bytes) {
+                        st.problem(si, index, "M0309", format!("template {:?}: {m}", template.name));
+                    }
+                }
                 Ok(e) if own.contains(&e) => {}
                 Ok(e) => st.problem(
                     si,
@@ -1292,7 +1420,7 @@ mod tests {
             emitters: vec![Emitter {
                 transform: [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0]],
                 channels: attrs(&effect::channel_defs()),
-                geom: Some(EmitterGeom { shape_index: 0, word_00: 16 }),
+                geom: Some(EmitterGeom { shape_index: 0, word_00: 1 }),
                 particle: ParticleType {
                     flags: 1,
                     attributes: attrs(&effect::particle_defs()),
@@ -1464,7 +1592,6 @@ mod tests {
             ("  - { op: remove_force, force: 1 }\n", "force 1 does not exist"),
             ("  - { op: remove_emitter, emitter: 0 }\n", "at least one emitter"),
             ("  - { op: add_shape, at: 3, records: [] }\n", "past the 1 shape"),
-            ("  - { op: geom, emitter: 0, geom: { shape: 2, word: 0 } }\n", "shape index"),
             ("  - { op: frames, emitter: 0, frames: [] }\n", "at least one frame"),
             ("  - { op: flags, emitter: 0, flags: 8 }\n", "never reads"),
         ] {
@@ -1514,16 +1641,18 @@ mod tests {
     }
 
     /// The game: effects `fx_one` and `fx_two`; templates `tpl_one` (one RedEffectComponent naming
-    /// `fx_one`), `tpl_none` (none) and `tpl_two` (two).
+    /// `fx_one`, per-distance factor 1), `tpl_none` (none) and `tpl_two` (two, naming `fx_one` and
+    /// `fx_two`, per-distance factor 0).
     fn game() -> (Vec<Entry>, WorldEntity) {
-        let red = |key: u32, fx: &str| {
+        let red = |key: u32, fx: &str, distance: f32| {
             let mut d = le(&[1, key, pandemic_hash_m2(fx)]);
             d.extend_from_slice(&1f32.to_le_bytes());
+            d.extend_from_slice(&distance.to_le_bytes());
             d
         };
-        let mut reds = red(0x8000_0002, "fx_one");
-        reds.extend(red(0x8000_0004, "fx_one"));
-        reds.extend(red(0x8000_0004, "fx_two"));
+        let mut reds = red(0x8000_0002, "fx_one", 1.0);
+        reds.extend(red(0x8000_0004, "fx_one", 0.0));
+        reds.extend(red(0x8000_0004, "fx_two", 0.0));
         let mut names = Vec::new();
         for (k, n) in [(0x8000_0002u32, "tpl_one"), (0x8000_0003, "tpl_none"), (0x8000_0004, "tpl_two")] {
             names.extend(le(&[1, k]));
@@ -1543,7 +1672,14 @@ mod tests {
             UcfxNode::leaf(*b"CHDR", chdr),
             UcfxNode::leaf(*b"enum", le(&[0])),
             UcfxNode::leaf(*b"UNIQ", le(&[3, 0x8000_0002, 0x8000_0003, 0x8000_0004])),
-            comp(RED_EFFECT_CLASS, 0x57, 3, &[field(6, RED_EFFECT_NAME_FIELD, 0), field(7, RED_F32, 4)], 8, reds),
+            comp(
+                RED_EFFECT_CLASS,
+                0x57,
+                3,
+                &[field(6, RED_EFFECT_NAME_FIELD, 0), field(7, RED_F32, 4), field(7, RED_EFFECT_DISTANCE_FIELD, 8)],
+                12,
+                reds,
+            ),
             comp("Name", 1, 3, &[field(8, 0x1DE5_C824, 0), field(1, 0x12AF_A0B8, 4)], 5, names),
             UcfxNode::leaf(*b"flgt", flgt),
             UcfxNode::leaf(*b"flgs", flgs),
@@ -1592,9 +1728,15 @@ mod tests {
     }
 
     fn add_fx(fx: &str, template: &str, red: &str) -> String {
+        add_fx_moving(fx, template, red, 0.0)
+    }
+
+    /// An `add_fx` whose template's per-distance factor is `distance`.
+    fn add_fx_moving(fx: &str, template: &str, red: &str, distance: f32) -> String {
         format!(
             "  - kind: add_fx\n    name: {fx}\n    effect: src/{fx}.yaml\n    template:\n      name: {template}\n      \
-             name_flag: 1\n      components:\n        RedEffectComponent: {{ name: {red}, \"0x11110001\": 2.0 }}\n"
+             name_flag: 1\n      components:\n        RedEffectComponent: {{ name: {red}, \"0x11110001\": 2.0, \
+             \"0x62C7746E\": {distance:?} }}\n"
         )
     }
 
@@ -1696,6 +1838,66 @@ mod tests {
             let f = run(&[&s], Scope::Build).err().unwrap();
             assert_eq!(codes(&f), vec!["M0260"], "{t}");
             assert!(f.problems[0].message.contains(want), "{t}: {}", f.problems[0].message);
+        }
+    }
+
+    #[test]
+    fn an_emitter_the_engine_cannot_spawn_from_is_m0309() {
+        // An edit that leaves a GEOM sampling past its shape, or an emitter that spawns without one.
+        for (yaml, want) in [
+            ("  - { op: geom, emitter: 0, geom: { shape: 2, word: 1 } }\n", "shape index 2"),
+            ("  - { op: geom, emitter: 0, geom: { shape: 0, word: 0 } }\n", "divides by zero"),
+            ("  - { op: geom, emitter: 0, geom: { shape: 0, word: 2 } }\n", "which has 1"),
+            ("  - { op: shape, shape: 0, records: [] }\n", "has no records"),
+            (
+                "  - { op: geom, emitter: 0, geom: none }\n  - { op: attribute, emitter: 0, attribute: rate, value: 30.0 }\n",
+                "has no GEOM",
+            ),
+        ] {
+            assert!(applied(yaml).check_emitter_shapes().is_err(), "{yaml}");
+            let s = ship("m0309-edit", "mod-a", &[], &replace("{ effect: fx_two }", "g.yaml"), &[("g.yaml", format!("edits:\n{yaml}"))]);
+            let f = run(&[&s], Scope::Build).err().unwrap();
+            assert_eq!(codes(&f), vec!["M0309"], "{yaml}");
+            assert!(f.problems[0].message.contains(want), "{yaml}: {}", f.problems[0].message);
+            assert!(!f.problems[0].hermetic);
+        }
+        // An emitter without GEOM at rate 0 stands while every template that starts its effect has a
+        // per-distance factor of 0: `fx_two`'s has, one of `fx_one`'s (0x80000002) has 1.
+        let none = "edits:\n  - { op: geom, emitter: 0, geom: none }\n";
+        let s = ship("m0309-still", "mod-a", &[], &replace("{ effect: fx_two }", "g.yaml"), &[("g.yaml", none.into())]);
+        assert!(run(&[&s], Scope::Build).is_ok());
+        let s = ship("m0309-moving", "mod-a", &[], &replace("{ effect: fx_one }", "g.yaml"), &[("g.yaml", none.into())]);
+        let f = run(&[&s], Scope::Build).err().unwrap();
+        assert_eq!(codes(&f), vec!["M0309"]);
+        assert!(f.problems[0].message.contains("0x80000002") && !f.problems[0].message.contains("0x80000004"), "{}", f.problems[0].message);
+
+        // An added effect: the form's emitter-shape findings are the hermetic lint's as well.
+        let mut fx = effect();
+        fx.emitters[0].geom = Some(EmitterGeom { shape_index: 0, word_00: 0 });
+        let zero = effect::to_string(&EffectForm::express(&fx), Format::Yaml).unwrap();
+        let s = ship("m0309-add", "mod-a", &[], &add_fx("fx_new", "tpl_new", "fx_new"), &[("fx_new.yaml", zero)]);
+        let f = run(&[&s], Scope::Build).err().unwrap();
+        assert_eq!(codes(&f), vec!["M0309"]);
+        assert!(f.problems[0].hermetic && f.problems[0].message.contains("divides by zero"), "{:?}", f.problems[0]);
+        // An added template that starts an effect with an emitter without GEOM, by its factor.
+        fx.emitters[0].geom = None;
+        let still = effect::to_string(&EffectForm::express(&fx), Format::Yaml).unwrap();
+        for (distance, ok) in [(0.0, true), (2.0, false)] {
+            let s = ship(
+                "m0309-template",
+                "mod-a",
+                &[],
+                &add_fx_moving("fx_new", "tpl_new", "fx_new", distance),
+                &[("fx_new.yaml", still.clone())],
+            );
+            match run(&[&s], Scope::Build) {
+                Ok(_) => assert!(ok, "factor {distance}"),
+                Err(f) => {
+                    assert!(!ok, "factor {distance}: {f}");
+                    assert_eq!(codes(&f), vec!["M0309"]);
+                    assert!(f.problems[0].message.contains("per-distance factor") && !f.problems[0].hermetic, "{f}");
+                }
+            }
         }
     }
 
