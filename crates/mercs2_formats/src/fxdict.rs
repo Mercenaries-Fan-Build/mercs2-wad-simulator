@@ -19,7 +19,7 @@
 //! │  └─ GEOM (4 B, opt.)    │ u16 shape index, u16 sampled record count
 //! ├─ PTYP (u32 flags)       │
 //! │  ├─ ATRB × 19           │ fixed hash order (PTYP_ATTRIBUTES_BEFORE_COLR)
-//! │  ├─ COLR (800 B)        │ 100 × {u8×4, binary16, u16 0}
+//! │  ├─ COLR (800 B)        │ 100 × {u8 B, G, R, A, binary16, u16 0}
 //! │  ├─ ATRB × 13           │ fixed hash order (PTYP_ATTRIBUTES_AFTER_COLR)
 //! │  └─ TEXT                ┘ u32 n + n × u32 fxdict frame key
 //! └─ FRCE × k               u32 kind hash + kind parameters
@@ -582,12 +582,13 @@ fn check_positions(what: &str, attrs: &[Atrb], defs: &[&[AttrDef]]) -> Result<()
 // COLR / TEXT.
 // ------------------------------------------------------------------------------------------------
 
-/// One `COLR` key (8 bytes on disk).
+/// One `COLR` key (8 bytes on disk: blue, green, red, alpha, binary16, u16 0).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ColrKey {
-    /// Four colour bytes, in file order. The channel order is not proven; the retail keys read as
-    /// three equal-ish bytes plus a fourth that fades to 0 over the 100 keys.
-    pub colour: [u8; 4],
+    /// Red, green, blue, alpha. The file stores them blue, green, red, alpha; [`Colr::to_bytes`] and
+    /// [`Colr::from_bytes`] are the one place that order is mapped. In game, a key stored `00 FF FF`
+    /// draws yellow and a key stored `FF FF 00` draws cyan.
+    pub rgba: [u8; 4],
     /// A binary16 bit pattern (`0x3C00` = 1.0 and `0xBC00` = -1.0 are both in retail). Its role is
     /// not proven; it is carried verbatim.
     pub half_bits: u16,
@@ -601,55 +602,59 @@ pub struct Colr {
 }
 
 impl Colr {
-    /// Every key the same.
-    pub fn uniform(colour: [u8; 4], half_bits: u16) -> Self {
-        Colr { keys: [ColrKey { colour, half_bits }; COLR_KEYS] }
+    /// Every key the same red, green, blue, alpha.
+    pub fn uniform(rgba: [u8; 4], half_bits: u16) -> Self {
+        Colr { keys: [ColrKey { rgba, half_bits }; COLR_KEYS] }
     }
 
-    /// Build from a function of normalised age `t` in 0..=1 (key `i` is at `i / 99`).
+    /// Build from a function of normalised age `t` in 0..=1 (key `i` is at `i / 99`) that returns
+    /// red, green, blue, alpha and the binary16 bits.
     pub fn from_fn(mut f: impl FnMut(f32) -> ([u8; 4], u16)) -> Self {
-        let mut keys = [ColrKey { colour: [0; 4], half_bits: 0 }; COLR_KEYS];
+        let mut keys = [ColrKey { rgba: [0; 4], half_bits: 0 }; COLR_KEYS];
         for (i, k) in keys.iter_mut().enumerate() {
-            let (colour, half_bits) = f(i as f32 / (COLR_KEYS - 1) as f32);
-            *k = ColrKey { colour, half_bits };
+            let (rgba, half_bits) = f(i as f32 / (COLR_KEYS - 1) as f32);
+            *k = ColrKey { rgba, half_bits };
         }
         Colr { keys }
     }
 
-    /// The four colour bytes at normalised age `t` (0 = spawn, 1 = death), linearly interpolated
-    /// between the two nearest keys and scaled to 0..1. Channel order as stored (unproven).
+    /// Red, green, blue, alpha at normalised age `t` (0 = spawn, 1 = death), linearly interpolated
+    /// between the two nearest keys and scaled to 0..1.
     pub fn sample(&self, t: f32) -> [f32; 4] {
         let scaled = t.clamp(0.0, 1.0) * (COLR_KEYS - 1) as f32;
         let i0 = scaled.floor() as usize;
         let i1 = (i0 + 1).min(COLR_KEYS - 1);
         let f = scaled - i0 as f32;
-        let (a, b) = (self.keys[i0].colour, self.keys[i1].colour);
+        let (a, b) = (self.keys[i0].rgba, self.keys[i1].rgba);
         let lerp = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * f) / 255.0;
         [lerp(a[0], b[0]), lerp(a[1], b[1]), lerp(a[2], b[2]), lerp(a[3], b[3])]
     }
 
+    /// The 800-byte body; each key's colour is written blue, green, red, alpha.
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut b = Vec::with_capacity(COLR_BYTES);
         for k in &self.keys {
-            b.extend_from_slice(&k.colour);
+            let [red, green, blue, alpha] = k.rgba;
+            b.extend_from_slice(&[blue, green, red, alpha]);
             b.extend_from_slice(&k.half_bits.to_le_bytes());
             b.extend_from_slice(&0u16.to_le_bytes());
         }
         b
     }
 
+    /// Read the 800-byte body; each key's colour is stored blue, green, red, alpha.
     pub fn from_bytes(b: &[u8]) -> Result<Colr, String> {
         if b.len() != COLR_BYTES {
             return Err(format!("COLR is {} bytes, not {COLR_BYTES}", b.len()));
         }
-        let mut keys = [ColrKey { colour: [0; 4], half_bits: 0 }; COLR_KEYS];
+        let mut keys = [ColrKey { rgba: [0; 4], half_bits: 0 }; COLR_KEYS];
         for (i, k) in keys.iter_mut().enumerate() {
             let o = i * COLR_KEY_BYTES;
             let tail = read_u16_le(b, o + 6);
             if tail != 0 {
                 return Err(format!("COLR key {i}: trailing u16 is 0x{tail:04X}, not 0"));
             }
-            *k = ColrKey { colour: [b[o], b[o + 1], b[o + 2], b[o + 3]], half_bits: read_u16_le(b, o + 4) };
+            *k = ColrKey { rgba: [b[o + 2], b[o + 1], b[o], b[o + 3]], half_bits: read_u16_le(b, o + 4) };
         }
         Ok(Colr { keys })
     }
@@ -1535,7 +1540,7 @@ mod tests {
         assert_eq!((&last.tag, last.x2, last.x3), (b"TEXT", 0, 0));
 
         let p = &back.emitters[0].particle;
-        assert!(p.colr.keys.iter().all(|k| k.colour == MAGENTA));
+        assert!(p.colr.keys.iter().all(|k| k.rgba == MAGENTA));
         assert_eq!(p.text.frames, vec![texture]);
         let life = p.attributes.iter().find(|a| a.hash == pandemic_hash_m2("life")).unwrap();
         assert_eq!(life.value, AtrbValue::F32(1.0));
@@ -1547,10 +1552,11 @@ mod tests {
 
     #[test]
     fn colr_is_800_bytes_of_100_keys() {
-        let c = Colr::from_fn(|t| ([(t * 255.0) as u8, 1, 2, 3], 0x3C00));
+        let c = Colr::from_fn(|t| ([(t * 255.0) as u8, 1, 9, 3], 0x3C00));
         let b = c.to_bytes();
         assert_eq!(b.len(), 800);
-        assert_eq!(&b[8..16], &[2, 1, 2, 3, 0x00, 0x3C, 0, 0]);
+        // Key 1 is red 2, green 1, blue 9, alpha 3, stored blue, green, red, alpha.
+        assert_eq!(&b[8..16], &[9, 1, 2, 3, 0x00, 0x3C, 0, 0]);
         assert_eq!(Colr::from_bytes(&b).unwrap(), c);
         assert!(Colr::from_bytes(&b[..200]).is_err());
         let mut bad = b.clone();
@@ -1558,6 +1564,17 @@ mod tests {
         assert!(Colr::from_bytes(&bad).unwrap_err().contains("trailing"));
         assert!((c.sample(1.0)[0] - 1.0).abs() < 1e-6);
         assert_eq!(c.sample(0.0)[0], 0.0);
+    }
+
+    #[test]
+    fn colr_keys_are_red_green_blue_alpha_stored_blue_green_red_alpha() {
+        let cyan = Colr::uniform([0, 255, 255, 255], 0x3C00);
+        let b = cyan.to_bytes();
+        assert_eq!(&b[..8], &[0xFF, 0xFF, 0x00, 0xFF, 0x00, 0x3C, 0, 0]);
+        assert_eq!(Colr::from_bytes(&b).unwrap().keys[0].rgba, [0, 255, 255, 255]);
+        let yellow = Colr::uniform([255, 255, 0, 128], 0x3C00);
+        assert_eq!(&yellow.to_bytes()[..4], &[0x00, 0xFF, 0xFF, 0x80]);
+        assert_eq!(cyan.sample(0.5), [0.0, 1.0, 1.0, 1.0]);
     }
 
     #[test]
