@@ -17,6 +17,10 @@
 //!   `requires`, `qm build` leaving it to `qm link`; a sprites-only Shipment emits no effects block;
 //!   M0306 and M0307 fire; a repaint of `vfx` is the base the sprites are drawn on, a repaint that
 //!   fills the free square leaves the sprites M0307, and two repaints conflict.
+//! * Emitter shapes: every retail emitter passes the emitter-shape rules (M0309) and every retail
+//!   shape record is a triangle of one layout; every retail template that starts an effect with an
+//!   emitter without `GEOM` has a per-distance factor of 0; the fixtures' emitters spawn on shapes
+//!   of their own.
 //!
 //! Game-gated: built by the `retail` feature, reads the `vz.wad` named by the repo-root
 //! `.mercs2-local.toml`, and fails if it is absent.
@@ -28,7 +32,7 @@ mod common {
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use mercs2_formats::fxdict::{parse_effect_container, parse_fxdict_container, write_effect_container, EffectContainer, FxRect};
+use mercs2_formats::fxdict::{parse_effect_container, parse_fxdict_container, write_effect_container, AtrbValue, EffectContainer, FxRect};
 use mercs2_formats::texture::parse_texture_container;
 use mercs2_formats::texture_encode::{decode_bc3_block, encode_bc3, mip_chain};
 use mercs2_formats::hash::pandemic_hash_m2;
@@ -689,4 +693,108 @@ fn a_repaint_that_fills_the_free_square_leaves_the_sprites_m0307() {
     assert_eq!(d.iter().map(|d| d.rule.code).collect::<Vec<_>>(), vec!["M0307"]);
     assert!(d[0].message.contains("has no free square"), "{}", d[0].message);
     assert_eq!(d[0].at, Some(1));
+}
+
+/// The cross product `a × b`.
+fn cross(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
+    [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]]
+}
+
+fn length(v: [f32; 3]) -> f32 {
+    (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt()
+}
+
+/// A shape record as every retail one is: floats 1–3 a unit vector along `±(A × B)` and float 0
+/// `|A × B|`, with `A` at floats 7–9 and `B` at 10–12.
+fn retail_shaped(r: &[f32; 13]) -> bool {
+    let n = [r[1], r[2], r[3]];
+    let c = cross([r[7], r[8], r[9]], [r[10], r[11], r[12]]);
+    let (nl, cl) = (length(n), length(c));
+    let dot = (n[0] * c[0] + n[1] * c[1] + n[2] * c[2]) / (nl * cl);
+    (nl - 1.0).abs() < 1e-3 && dot.abs() > 0.999 && (r[0] - cl).abs() <= 1e-3 * cl
+}
+
+/// Every retail emitter passes the emitter-shape rules: the 811 with a `GEOM` sample exactly their
+/// shape's record count, no shape is empty, and the 9 without a `GEOM` have a constant rate of 0
+/// and a ratevar of 0. All 13,148 shape records are triangles of the one layout.
+#[test]
+fn every_retail_emitter_has_a_shape_table_it_samples_within() {
+    let mut game = game();
+    let base = GameFx::read(&mut game).unwrap();
+    let (rate, ratevar) = (pandemic_hash_m2("rate"), pandemic_hash_m2("ratevar"));
+    let (mut emitters, mut sampled, mut without, mut records, mut shaped) = (0, 0, 0, 0, 0);
+    for e in base.effects.entries.iter().filter(|e| e.type_hash == TYPE_HASH_EFFECT) {
+        let fx = parse_effect_container(&e.bytes).unwrap();
+        fx.check_emitter_shapes().unwrap_or_else(|m| panic!("0x{:08X}: {m}", e.name_hash));
+        for s in &fx.shapes {
+            assert!(!s.records.is_empty(), "0x{:08X}", e.name_hash);
+            records += s.records.len();
+            shaped += s.records.iter().filter(|r| retail_shaped(r)).count();
+        }
+        for em in &fx.emitters {
+            emitters += 1;
+            let at = |h: u32| em.particle.attributes.iter().find(|a| a.hash == h).unwrap();
+            match em.geom {
+                Some(g) => {
+                    sampled += usize::from(g.word_00 as usize == fx.shapes[g.shape_index as usize].records.len());
+                }
+                None => {
+                    without += 1;
+                    assert_eq!((at(rate).value, at(rate).curve.is_none()), (AtrbValue::F32(0.0), true), "0x{:08X}", e.name_hash);
+                    assert_eq!(at(ratevar).value, AtrbValue::F32(0.0), "0x{:08X}", e.name_hash);
+                }
+            }
+        }
+    }
+    assert_eq!((emitters, sampled, without), (820, 811, 9));
+    assert_eq!((records, shaped), (13_148, 13_148));
+}
+
+/// `RedEffectComponent`'s field at offset 8 is `0x62C7746E`, the per-distance factor the spawner
+/// copies to the effect instance; every retail template that starts an effect with an emitter
+/// without `GEOM` (20 records, 9 effects) has it at 0, so the game's own templates pass M0309.
+#[test]
+fn every_retail_template_that_starts_an_emitter_without_geom_has_no_per_distance_factor() {
+    use mercs2_formats::schema::FieldValue;
+    use mercs2_formats::worldentity::Value;
+    let mut game = game();
+    let base = GameFx::read(&mut game).unwrap();
+    let without: std::collections::BTreeSet<u32> = base
+        .effects
+        .entries
+        .iter()
+        .filter(|e| e.type_hash == TYPE_HASH_EFFECT)
+        .filter(|e| parse_effect_container(&e.bytes).unwrap().emitters.iter().any(|m| m.geom.is_none()))
+        .map(|e| e.name_hash)
+        .collect();
+    assert_eq!(without.len(), 9);
+    let (mut starters, mut started) = (0, std::collections::BTreeSet::new());
+    for c in base.worldentity.groups_of(fx::RED_EFFECT_CLASS) {
+        let distance = c.schema.fields.iter().position(|f| f.name_hash == fx::RED_EFFECT_DISTANCE_FIELD).unwrap();
+        assert_eq!(c.schema.fields[distance].byte_offset, 8);
+        let name = c.schema.fields.iter().position(|f| f.name_hash == fx::RED_EFFECT_NAME_FIELD).unwrap();
+        for r in &c.records {
+            let v = c.decode(&r.payload).unwrap();
+            let Value::Field(FieldValue::U32(h)) = v[name] else { panic!("{:?}", v[name]) };
+            if without.contains(&h) {
+                starters += 1;
+                started.insert(h);
+                assert_eq!(v[distance], Value::Field(FieldValue::F32(0.0)), "0x{h:08X}");
+            }
+        }
+    }
+    assert_eq!((starters, started.len()), (20, 9));
+}
+
+/// The fixtures' emitters sample every record of a shape of their own, each record a triangle of
+/// the retail layout.
+#[test]
+fn the_fixture_effects_spawn_on_shapes_of_their_own() {
+    for (f, records) in [("qm-fx-a/src/qm_fx_cyan_burst.yaml", 8), ("qm-fx-b/src/qm_fx_green_burst.yaml", 2)] {
+        let fx = effect::read(&fixture(f)).unwrap().lower().unwrap();
+        let g = fx.emitters[0].geom.unwrap_or_else(|| panic!("{f}: no GEOM"));
+        let shape = &fx.shapes[g.shape_index as usize];
+        assert_eq!((g.word_00 as usize, shape.records.len()), (records, records), "{f}");
+        assert!(shape.records.iter().all(retail_shaped), "{f}");
+    }
 }
