@@ -16,7 +16,7 @@
 //! ├─ EMIT (marker)          ┐ one pair per emitter
 //! │  ├─ TRFM (64 B 4×4)     │
 //! │  │  └─ ATRB × 9         │ posx posy posz rotx roty rotz sclx scly sclz
-//! │  └─ GEOM (4 B, opt.)    │ u16 shape index, u16
+//! │  └─ GEOM (4 B, opt.)    │ u16 shape index, u16 sampled record count
 //! ├─ PTYP (u32 flags)       │
 //! │  ├─ ATRB × 19           │ fixed hash order (PTYP_ATTRIBUTES_BEFORE_COLR)
 //! │  ├─ COLR (800 B)        │ 100 × {u8×4, binary16, u16 0}
@@ -857,19 +857,31 @@ pub struct Force {
 // ------------------------------------------------------------------------------------------------
 
 /// One `EMTR/GEOM`: a table of 13-f32 shape records, referenced by [`EmitterGeom::shape_index`].
+///
+/// A record is a triangle the emitter spawns particles on. `FUN_00488770` reads three of its
+/// vectors: the vertex `P` (floats 4–6), and the edges `A` (7–9) and `B` (10–12); a particle starts
+/// at `P + u·A + v·B` with `u` uniform in `[0, 1)` and `v` uniform in `[0, 1 − u)`, and the vector at
+/// floats 1–3 is copied out beside it. In all 13,148 retail records floats 1–3 are a unit vector
+/// along `±(A × B)` and float 0 is `|A × B|`; `FUN_00488770` does not read float 0.
 #[derive(Debug, Clone, PartialEq)]
 pub struct EmitterShape {
     pub records: Vec<[f32; SHAPE_RECORD_FLOATS]>,
 }
 
-/// An emitter's `GEOM` (4 bytes): the first u16 indexes the `EMTR` shape table
-/// (`FUN_0048cc30`: `shapes[u16]`); the second u16 is stored at `+0x00` of the EMIT record,
-/// meaning unproven.
+/// An emitter's `GEOM` (4 bytes). `FUN_0048cc30` stores `shapes[shape_index]` at `+0x04` of the
+/// EMIT record and `word_00`, sign-extended, at `+0x00`. `FUN_0048ae80` draws each particle's record
+/// as `random % word_00` (an unsigned divide) from the table at `+0x04`: `word_00` is the number
+/// of records the emitter samples, the record count of its shape in all 811 retail `GEOM`s.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EmitterGeom {
     pub shape_index: u16,
     pub word_00: u16,
 }
+
+/// The largest `GEOM` record count the engine samples within its table: `FUN_0048cc30` stores the
+/// word as `(int)(short)`, so a word of `0x8000` or above is a negative count, and the unsigned
+/// divide in `FUN_0048ae80` then yields an index past the table.
+pub const GEOM_MAX_SAMPLED_RECORDS: u16 = 0x7FFF;
 
 /// `PTYP` and its children.
 #[derive(Debug, Clone, PartialEq)]
@@ -889,7 +901,8 @@ pub struct Emitter {
     pub transform: [[f32; 4]; 4],
     /// The nine [`TRFM_CHANNELS`], in order.
     pub channels: Vec<Atrb>,
-    /// 811 of 820 retail emitters have one.
+    /// 811 of 820 retail emitters have one; [`EffectContainer::check_emitter_shapes`] says when an
+    /// emitter may go without.
     pub geom: Option<EmitterGeom>,
     pub particle: ParticleType,
 }
@@ -906,8 +919,16 @@ pub struct EffectContainer {
 pub const PTYP_KNOWN_FLAGS: u32 = 0b11;
 
 impl EffectContainer {
-    /// Validate everything the writer relies on, naming the first violation.
+    /// Validate everything the writer relies on, naming the first violation: the node rules
+    /// ([`Self::validate_nodes`]), then the emitter-shape rules ([`Self::check_emitter_shapes`]).
     pub fn validate(&self) -> Result<(), String> {
+        self.validate_nodes()?;
+        self.check_emitter_shapes()
+    }
+
+    /// The node rules: at least one emitter and one shape, every attribute run against its position
+    /// table, the PTYP flags and the TEXT frames.
+    pub fn validate_nodes(&self) -> Result<(), String> {
         if self.emitters.is_empty() {
             return Err("an effect needs at least one emitter (EFCT[0] = PTYP count)".into());
         }
@@ -917,15 +938,6 @@ impl EffectContainer {
         for (i, e) in self.emitters.iter().enumerate() {
             let w = format!("emitter {i}");
             check_positions(&format!("{w} TRFM"), &e.channels, &[&TRFM_CHANNELS])?;
-            if let Some(g) = e.geom {
-                if g.shape_index as usize >= self.shapes.len() {
-                    return Err(format!(
-                        "{w}: GEOM shape index {} but EMTR has {} shapes",
-                        g.shape_index,
-                        self.shapes.len()
-                    ));
-                }
-            }
             let p = &e.particle;
             if p.flags & !PTYP_KNOWN_FLAGS != 0 {
                 return Err(format!("{w}: PTYP flags 0x{:08X} set bits the loader never reads", p.flags));
@@ -953,6 +965,92 @@ impl EffectContainer {
                 &f.attributes,
                 &[&FRCE_COMMON_ATTRIBUTES, f.kind.extra_attributes()],
             )?;
+        }
+        Ok(())
+    }
+
+    /// The emitter-shape rules: every emitter the engine can spawn a particle from has a shape table
+    /// it samples within.
+    ///
+    /// A spawned effect starts in mode 0 (`FUN_00488d70` zeroes the instance's `+0x770`), and in
+    /// mode 0 `FUN_0048ae80` draws each new particle's spawn record as `random % count` from the
+    /// table its `GEOM` set ([`EmitterGeom`]). So:
+    ///
+    /// * a `GEOM` names a shape of the `EMTR` table;
+    /// * its `word_00` is at least 1 (0 divides by zero), at most the named shape's record count
+    ///   (beyond it the engine reads past the table), and at most [`GEOM_MAX_SAMPLED_RECORDS`];
+    /// * an emitter without `GEOM` has a count of 0, so it divides by zero on its first particle; it
+    ///   is accepted only when its `rate` can spawn none: `FUN_0048f4f0` adds
+    ///   `max(rate + (1 − 2u)·ratevar, 0)` (`u` uniform in `[0, 1)`, `FUN_00490960`) to the emitter's
+    ///   spawn count each frame, so `rate` is a constant at or below 0 (no curve) and `ratevar` is 0.
+    ///   The 9 retail emitters without `GEOM` are of this kind. Every template that starts such an
+    ///   effect also has a zero per-distance factor (`RedEffectComponent` `0x62C7746E`), the other
+    ///   term of the spawn count; that is the template's rule, checked where templates are.
+    pub fn check_emitter_shapes(&self) -> Result<(), String> {
+        let rate = PTYP_ATTRIBUTES_AFTER_COLR[2].hash;
+        let ratevar = PTYP_ATTRIBUTES_AFTER_COLR[3].hash;
+        for (i, e) in self.emitters.iter().enumerate() {
+            let w = format!("emitter {i}");
+            match e.geom {
+                Some(g) => {
+                    let s = g.shape_index as usize;
+                    let Some(shape) = self.shapes.get(s) else {
+                        return Err(format!(
+                            "{w}: GEOM shape index {s} but EMTR has {} shapes; the engine would take the \
+                             emitter's shape table from past the EMTR table",
+                            self.shapes.len()
+                        ));
+                    };
+                    let n = shape.records.len();
+                    let k = g.word_00;
+                    if n == 0 {
+                        return Err(format!(
+                            "{w}: GEOM names shape {s}, which has no records; the engine picks every \
+                             particle's spawn record from the shape, as random % count, and a shape \
+                             without records has none to pick"
+                        ));
+                    }
+                    if k == 0 {
+                        return Err(format!(
+                            "{w}: GEOM samples 0 records of shape {s}; the engine picks every particle's \
+                             spawn record as random % count, so a count of 0 divides by zero. Give the \
+                             shape's record count, {n}"
+                        ));
+                    }
+                    if k as usize > n {
+                        return Err(format!(
+                            "{w}: GEOM samples {k} records of shape {s}, which has {n}; the engine picks \
+                             each spawn record as random % {k} and reads past the shape's records"
+                        ));
+                    }
+                    if k > GEOM_MAX_SAMPLED_RECORDS {
+                        return Err(format!(
+                            "{w}: GEOM samples {k} records; the engine reads the count as a signed 16-bit \
+                             number, so a count above {GEOM_MAX_SAMPLED_RECORDS} is negative and picks \
+                             records past the shape"
+                        ));
+                    }
+                }
+                None => {
+                    let at = |h: u32| e.particle.attributes.iter().find(|a| a.hash == h);
+                    let spawns_none = match (at(rate), at(ratevar)) {
+                        (Some(r), Some(v)) => {
+                            r.curve.is_none()
+                                && matches!(r.value, AtrbValue::F32(x) if x <= 0.0)
+                                && v.value == AtrbValue::F32(0.0)
+                        }
+                        _ => false,
+                    };
+                    if !spawns_none {
+                        return Err(format!(
+                            "{w} has no GEOM, so its shape table has 0 records, and the engine divides by \
+                             zero picking the spawn record of its first particle (random % 0). Give it a \
+                             GEOM naming a shape. An emitter without GEOM spawns no particle only with a \
+                             constant rate at or below 0 and a ratevar of 0"
+                        ));
+                    }
+                }
+            }
         }
         Ok(())
     }
@@ -1383,7 +1481,7 @@ mod tests {
             emitters: vec![Emitter {
                 transform: [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0]],
                 channels: channels(),
-                geom: Some(EmitterGeom { shape_index: 0, word_00: 16 }),
+                geom: Some(EmitterGeom { shape_index: 0, word_00: 1 }),
                 particle: ParticleType {
                     flags: 1,
                     attributes: ptyp_attrs(&set),
@@ -1593,6 +1691,59 @@ mod tests {
         fx.emitters[0].particle.flags = 3;
         fx.emitters[0].particle.text.frames = vec![7; 101];
         assert!(write_effect_container(&fx).unwrap_err().contains("stream words"));
+    }
+
+    #[test]
+    fn an_emitter_needs_a_shape_table_it_samples_within() {
+        let refused = |edit: &dyn Fn(&mut EffectContainer)| {
+            let mut fx = magenta_burst(1);
+            edit(&mut fx);
+            assert!(fx.validate_nodes().is_ok());
+            let e = fx.check_emitter_shapes().unwrap_err();
+            assert_eq!(write_effect_container(&fx).unwrap_err(), e);
+            e
+        };
+        let e = refused(&|fx| fx.emitters[0].geom = Some(EmitterGeom { shape_index: 1, word_00: 1 }));
+        assert!(e.contains("shape index 1"), "{e}");
+        let e = refused(&|fx| fx.emitters[0].geom = Some(EmitterGeom { shape_index: 0, word_00: 0 }));
+        assert!(e.contains("samples 0 records") && e.contains("divides by zero"), "{e}");
+        let e = refused(&|fx| fx.emitters[0].geom = Some(EmitterGeom { shape_index: 0, word_00: 2 }));
+        assert!(e.contains("samples 2 records of shape 0, which has 1"), "{e}");
+        let e = refused(&|fx| fx.shapes[0].records.clear());
+        assert!(e.contains("has no records"), "{e}");
+        let e = refused(&|fx| {
+            fx.shapes[0].records = vec![[0.0; SHAPE_RECORD_FLOATS]; 0x8000];
+            fx.emitters[0].geom = Some(EmitterGeom { shape_index: 0, word_00: 0x8000 });
+        });
+        assert!(e.contains("signed 16-bit"), "{e}");
+        // `magenta_burst` has rate 100: without GEOM it spawns from a 0-record table.
+        let e = refused(&|fx| fx.emitters[0].geom = None);
+        assert!(e.contains("has no GEOM") && e.contains("divides by zero"), "{e}");
+
+        let at = |fx: &EffectContainer, name: &str| {
+            fx.emitters[0].particle.attributes.iter().position(|a| a.hash == pandemic_hash_m2(name)).unwrap()
+        };
+        let without_geom = |rate: Atrb, ratevar: f32| {
+            let mut fx = magenta_burst(1);
+            fx.emitters[0].geom = None;
+            let (r, v) = (at(&fx, "rate"), at(&fx, "ratevar"));
+            fx.emitters[0].particle.attributes[r] = rate;
+            fx.emitters[0].particle.attributes[v] = Atrb::f32(pandemic_hash_m2("ratevar"), ratevar);
+            fx
+        };
+        let rate = |v: f32| Atrb::f32(pandemic_hash_m2("rate"), v);
+        // A constant rate at or below 0 with ratevar 0 spawns nothing: accepted, as retail's 9.
+        for r in [0.0, -1.0] {
+            let fx = without_geom(rate(r), 0.0);
+            assert_eq!(parse_effect_container(&write_effect_container(&fx).unwrap()).unwrap(), fx);
+        }
+        assert!(without_geom(rate(0.0), 1.0).check_emitter_shapes().unwrap_err().contains("has no GEOM"));
+        let curve = rate(0.0).with_curve(vec![AnimKey { time: 0.0, value: 0.0 }, AnimKey { time: 100.0, value: 5.0 }]);
+        assert!(without_geom(curve, 0.0).check_emitter_shapes().unwrap_err().contains("has no GEOM"));
+        // A count below the shape's record count samples the first records only.
+        let mut fx = magenta_burst(1);
+        fx.shapes[0].records.push([1.0; SHAPE_RECORD_FLOATS]);
+        assert!(fx.check_emitter_shapes().is_ok());
     }
 
     #[test]
