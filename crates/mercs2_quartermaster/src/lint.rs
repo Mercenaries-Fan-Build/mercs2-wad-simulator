@@ -703,6 +703,18 @@ pub const M0308_RAW_SPRITES: Rule = Rule {
     doc: "docs/modding/manifest_format.md#m0308",
 };
 
+/// An effect emitter the engine cannot spawn particles from: a `GEOM` that names no shape or a
+/// shape without records, or samples 0 records, more records than its shape has, or more than
+/// 32,767; an emitter without `GEOM` whose `rate` can spawn a particle; or, needing the game, an
+/// effect with an emitter without `GEOM` started by a template whose `RedEffectComponent`
+/// per-distance factor is not 0. Each divides by zero or reads past the shape table when the effect
+/// spawns ([`mercs2_formats::fxdict::EffectContainer::check_emitter_shapes`]).
+pub const M0309_EMITTER_SHAPE: Rule = Rule {
+    code: "M0309",
+    title: "an effect emitter has no shape table the engine can sample",
+    doc: "docs/modding/manifest_format.md#m0309",
+};
+
 /// The rule a [`crate::fx::Problem`] code names.
 fn fx_rule(code: &str) -> Rule {
     match code {
@@ -720,6 +732,7 @@ fn fx_rule(code: &str) -> Rule {
         "M0305" => M0305_SPRITE_NAME,
         "M0306" => M0306_SPRITE_KEY_TAKEN,
         "M0307" => M0307_SPRITES_DO_NOT_FIT,
+        "M0309" => M0309_EMITTER_SHAPE,
         other => panic!("crate::fx reported {other}, which is not an fx rule"),
     }
 }
@@ -808,6 +821,7 @@ pub const RULES: &[Rule] = &[
     M0304_SPRITE_IMAGE,
     M0305_SPRITE_NAME,
     M0308_RAW_SPRITES,
+    M0309_EMITTER_SHAPE,
 ];
 
 /// Every rule [`game_checks`] (or a lowering that holds the game stack) reports.
@@ -2004,8 +2018,13 @@ fn add_fx_checks(
         );
     }
     if let Some(root) = root.filter(|_| !source_issue_at.contains(&index)) {
-        if let Err(e) = crate::effect::read(&root.join(effect)).and_then(|f| f.lower()) {
-            push(M0252_EFFECT_FORM, e);
+        match crate::effect::read(&root.join(effect)).and_then(|f| f.build()) {
+            Err(e) => push(M0252_EFFECT_FORM, e),
+            Ok(fx) => {
+                if let Err(e) = fx.check_emitter_shapes() {
+                    push(M0309_EMITTER_SHAPE, e);
+                }
+            }
         }
     }
     out
@@ -2067,11 +2086,11 @@ fn raw_fx_refusal(payload: &Path) -> Option<String> {
     })
 }
 
-/// M0256–M0261, M0306 and M0307 for a Shipment's `add_fx_sprite`, `add_fx` and `replace_fx`, against
-/// the game's effects block, worldentity, fxdict and atlas (repainted when the Shipment repaints it):
-/// [`crate::fx::merge`] of this Shipment alone ([`crate::fx::Scope::Build`]). Two `replace_fx` of
-/// the Shipment that resolve to one effect are M0120. The hermetic M0252–M0255, M0304 and M0305 are
-/// [`lint`]'s and are not repeated.
+/// M0256–M0261, M0306, M0307 and M0309 for a Shipment's `add_fx_sprite`, `add_fx` and `replace_fx`,
+/// against the game's effects block, worldentity, fxdict and atlas (repainted when the Shipment
+/// repaints it): [`crate::fx::merge`] of this Shipment alone ([`crate::fx::Scope::Build`]). Two
+/// `replace_fx` of the Shipment that resolve to one effect are M0120. The findings [`lint`] reports
+/// as well (M0252–M0255, M0304, M0305, and M0309 for an `add_fx` effect form) are not repeated.
 ///
 /// `Err` when the game's effects block, worldentity, fxdict or atlas cannot be read, or the
 /// Shipment's repaint of the atlas does not encode.
@@ -2094,7 +2113,7 @@ pub fn fx_game_checks(manifest: &Manifest, root: &Path, game: &mut GameStack) ->
         for p in f
             .problems
             .into_iter()
-            .filter(|p| !matches!(p.code, "M0252" | "M0253" | "M0254" | "M0255" | "M0304" | "M0305"))
+            .filter(|p| !p.hermetic)
         {
             out.push(Diagnostic { rule: fx_rule(p.code), severity: Severity::Error, message: p.message, at: Some(p.index), fix: None });
         }
