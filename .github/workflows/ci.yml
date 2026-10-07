@@ -33,6 +33,30 @@ jobs:
       - name: Install engine system libraries
         run: sudo apt-get update && sudo apt-get install -y pkg-config libudev-dev libasound2-dev
 
+      # mercs2_formats' be_to_le converter decodes Xbox XMA/XMA2 and PS3 MP3 sound with
+      # ffmpeg (be_to_le/audio.rs) and round-trips console Lua bytecode with Java + unluac
+      # (be_to_le/lua.rs). Its tests resolve ffmpeg on PATH and unluac at
+      # tools/external/unluac/unluac.jar; Java is on the runner image.
+      - name: Install ffmpeg
+        run: |
+          set -euo pipefail
+          sudo apt-get install -y ffmpeg
+          ffmpeg -hide_banner -decoders > "$RUNNER_TEMP/ffmpeg-decoders.txt"
+          for d in xma1 xma2 mp3; do
+            grep -E " $d " "$RUNNER_TEMP/ffmpeg-decoders.txt" || { echo "::error::ffmpeg has no $d decoder"; exit 1; }
+          done
+
+      - name: Download unluac (pinned)
+        env:
+          UNLUAC_URL: https://sourceforge.net/projects/unluac/files/Unstable/unluac_2025_12_23.jar/download
+          UNLUAC_SHA256: 98be0fa84ac73ca66dce2842a2e4512226f4c611b6500dc96415571fc5538fcc
+        run: |
+          set -euo pipefail
+          mkdir -p tools/external/unluac
+          curl -fsSL -o tools/external/unluac/unluac.jar "$UNLUAC_URL"
+          echo "$UNLUAC_SHA256  tools/external/unluac/unluac.jar" | sha256sum -c -
+          java -jar tools/external/unluac/unluac.jar --help
+
       # Cache the registry, git deps and target dir keyed on the lockfile + toolchain.
       - uses: Swatinem/rust-cache@v2
 
@@ -46,11 +70,11 @@ jobs:
       # first failure, so all 40 crates are exercised in a single run. Results are
       # written to target/nextest/ci/junit.xml for the per-crate rollup below.
       #
-      # NOTE: tests that need the retail vz.wad self-skip (they print "SKIPPING: no
-      # vz.wad discovered" and return early) because that asset cannot be committed.
-      # In CI those cases run and pass without asserting — they are exercised but do
-      # not verify game-data behaviour. Set MERCS2_GAME_DIR on a self-hosted runner to
-      # exercise them for real.
+      # Tests that read the retail vz.wad are not built here: that asset cannot be
+      # committed, so they sit behind each crate's `retail` cargo feature, which this
+      # run does not enable. They run locally with `cargo xtask retail-test`, against
+      # the vz.wad named by the git-ignored .mercs2-local.toml, and fail when it is
+      # missing. See README.md, "Game-gated tests".
       - name: Run workspace tests (nextest)
         run: cargo nextest run --workspace --profile ci
 

@@ -150,6 +150,8 @@ engine owns the window, loop and render; you supply the config, the loader, and 
 - `Post::new` returns `Option` — on failure the caller renders straight to the swapchain rather than
   breaking.
 - **Tests:** `shader_validation` parses + validates every WGSL with `naga` (no GPU needed);
-  `registry_wad_probe` and `gate_invariant_probe` need the retail install and run automatically when
-  one is discoverable (`scripts/find-vz-wad.sh --write`), skipping loudly otherwise —
-  `cargo test -p mercs2_engine --test registry_wad_probe -- --nocapture`.
+  `registry_wad_probe` and `gate_invariant_probe` need the retail install. They are game-gated: built
+  only by the `retail` feature, they read the `vz.wad` named by the repo-root `.mercs2-local.toml`
+  (`scripts/find-vz-wad.sh --write`) and fail when it is missing —
+  `cargo xtask retail-test`, or
+  `cargo test -p mercs2_engine --features retail --test registry_wad_probe -- --nocapture`.

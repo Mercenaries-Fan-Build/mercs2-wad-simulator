@@ -19,6 +19,7 @@
 //! * [`multitrack`] — the multi-track cue body: tracks of timed sounds and their automation.
 //! * [`select`] — the engine's weighted wave / entry selection and its random generator.
 //! * [`route`] — which cues can play which waves, from the tables alone (for tools).
+//! * [`wav`] — the strict PCM16 WAV reader an authored wave comes in through.
 //! * [`wave`] — the `wavebank` table + PCM16 / IMA-ADPCM decoders → resident [`DecodedClip`]s.
 //! * [`automation`] — a track's or cue's automation evaluated as the engine does (`FUN_0083b4a0`):
 //!   volume / pitch ramps, LFOs and parameter curves, output-channel multipliers (kind 4) and child
@@ -100,6 +101,7 @@ pub mod sounddb;
 pub mod spatial;
 pub mod vo;
 pub mod voice;
+pub mod wav;
 pub mod wave;
 
 pub use components::{AudioListener, SoundEmitter};

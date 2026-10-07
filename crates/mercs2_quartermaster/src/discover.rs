@@ -310,7 +310,12 @@ impl Contribution {
                 }
             }
             Contribution::AddTexture { image, .. } => out.push(("image", image.as_path())),
-            Contribution::AddSound { bank, .. } => out.push(("bank", bank.as_path())),
+            Contribution::AddSound { cues, .. } | Contribution::ReplaceSoundBank { cues, .. } => {
+                for c in cues {
+                    out.push(("cues[].wave", c.wave.as_path()));
+                }
+            }
+            Contribution::ReplaceSoundCue { cue, .. } => out.push(("cue.wave", cue.wave.as_path())),
             Contribution::AddMovie { movie, .. } => out.push(("movie", movie.as_path())),
             Contribution::AddUi { movie, .. } => out.push(("movie", movie.as_path())),
             Contribution::ReplaceTexture { image, .. } => out.push(("image", image.as_path())),
@@ -332,13 +337,25 @@ impl Contribution {
                     out.push(("events", e.as_path()));
                 }
             }
-            Contribution::AddShader { blob, .. } => out.push(("blob", blob.as_path())),
-            Contribution::ReplaceShader { blob, .. } => out.push(("blob", blob.as_path())),
-            Contribution::AddFx { payload, .. } => out.push(("payload", payload.as_path())),
-            Contribution::ReplaceFx { payload, .. } => out.push(("payload", payload.as_path())),
+            Contribution::AddShader { classes, .. } => {
+                for class in classes {
+                    out.push(("shader", class.shader.path()));
+                    out.push(("shader_low", class.shader_low.path()));
+                }
+            }
+            Contribution::ReplaceShader { shader, shader_low, .. } => {
+                out.push(("shader", shader.path()));
+                if let Some(low) = shader_low {
+                    out.push(("shader_low", low.path()));
+                }
+            }
+            Contribution::AddFx { effect, .. } => out.push(("effect", effect.as_path())),
+            Contribution::AddFxSprite { image, .. } => out.push(("image", image.as_path())),
+            Contribution::ReplaceFx { edits, .. } => out.push(("edits", edits.as_path())),
             Contribution::ReplaceTerrainCell { cell, .. } => out.push(("cell", cell.as_path())),
             Contribution::EditStateMachine { states, .. } => out.push(("states", states.as_path())),
             Contribution::EditWorld { edits, .. } => out.push(("edits", edits.as_path())),
+            Contribution::AddTinyGeometry { model, .. } => out.push(("model", model.as_path())),
             // No `src/` artifact: `layer` / `replaces` are layer NAMES the loader marks at runtime,
             // not files to pack.
             Contribution::ActivateLayer { .. } => {}

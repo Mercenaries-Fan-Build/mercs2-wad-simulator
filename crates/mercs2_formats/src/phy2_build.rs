@@ -2157,69 +2157,6 @@ mod tests {
         assert!(ndiff > 0, "the bytecode must actually change somewhere");
     }
 
-    /// ★ REAL-FLOOR controlled-diff proof: decode the retail PMC-HQ floor `0x39AF17DC` (block 2612, the
-    /// 4-shape STAND surface), author its PHY2 both ways, and prove the return-all build differs from the
-    /// spatial build ONLY in the 4 MOPP `m_data` blocks — m_info, the 4 quantized meshes, and the merged
-    /// 2N−1 BV-tree wrapper are byte-identical. This is the exact controlled-test invariant behind the
-    /// floor4-returnall overlay. SKIPS (stays green) when `vz.wad` is absent.
-    #[test]
-    fn returnall_floor_only_changes_mopp_mdata_if_present() {
-        use crate::ffcs::load_ffcs_archive;
-        use crate::sges::decompress_block;
-        use crate::ucfx::{extract_chunk_body, parse_block_entry_table};
-        let Some(path) = crate::game_paths::vz_wad_from_env()
-            .or_else(|| crate::game_paths::wad_from_local_config(std::path::Path::new(".")))
-        else {
-            return eprintln!("SKIPPING returnall_floor: vz.wad not found");
-        };
-        let mut f = std::fs::File::open(&path).unwrap();
-        let size = f.metadata().unwrap().len();
-        let arch = load_ffcs_archive(&mut f, size).expect("ffcs");
-        let dec = decompress_block(&mut f, &arch.indx, 2612).expect("block 2612");
-        let (count, entries) = parse_block_entry_table(&dec);
-        let mut pos = 4 + count as usize * 16;
-        let mut floor: Option<Vec<u8>> = None;
-        for e in &entries {
-            let end = pos + e.chunk_size as usize;
-            if end > dec.len() {
-                break;
-            }
-            if e.name_hash == 0x39AF_17DC {
-                floor = extract_chunk_body(&dec[pos..end], b"PHY2");
-                if floor.is_some() {
-                    break;
-                }
-            }
-            pos = end;
-        }
-        let Some(body) = floor else {
-            return eprintln!("SKIPPING returnall_floor: floor 0x39AF17DC not found in block 2612");
-        };
-        let pf = parse_phy2_body(&body).expect("parse floor PHY2");
-        let meshes: Vec<MeshSoup> = pf
-            .shapes
-            .iter()
-            .filter_map(|s| match s {
-                Shape::Mesh(m) if !m.indices.is_empty() => Some((
-                    m.indices.iter().map(|t| [t[0] as u32, t[1] as u32, t[2] as u32]).collect(),
-                    m.vertices.clone(),
-                )),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(meshes.len(), 4, "floor 0x39AF17DC decodes to 4 collision meshes");
-
-        let spatial = build_phy2_multi_kind("floor", &meshes, MoppKind::Spatial).expect("spatial");
-        let returnall = build_phy2_multi_kind("floor", &meshes, MoppKind::ReturnAll).expect("returnall");
-        let ndiff = assert_only_mopp_differs(&spatial, &returnall, &meshes);
-        eprintln!(
-            "REAL FLOOR 0x39AF17DC: spatial vs return-all authored PHY2 = {} B each; {} byte(s) differ, \
-             ALL inside the 4 MOPP m_data blocks (m_info + 4 meshes + merged BV-tree wrapper byte-identical)",
-            spatial.len(),
-            ndiff
-        );
-    }
-
     /// ★ DEPLOYED-ARTIFACT byte-diff: the spatial-fixed floor overlay vs the deployed return-all STAND
     /// build differ ONLY in (a) the 4 MOPP `m_data` bytecode blocks and (b) the 4 `m_info` lane-3 scale
     /// words (`hkpMoppCode obj+28`) — the frame correction the shift-16 fix REQUIRES (`scale` goes from a
@@ -2336,236 +2273,278 @@ mod tests {
         );
     }
 
-    /// ★ SPATIAL-MOPP NO-MISS + PRUNE GATE (the fall-through fix's offline judge). For the retail floor
-    /// `0x39AF17DC`, author the SHARED-POOL spatial MOPPs exactly as the forge does (bake over each sub's
-    /// compacted local geometry), then query each MOPP in the SAME space the engine queries — the
-    /// COMMON-FRAME-DEQUANTIZED shape-local positions the mesh verts actually resolve to at load. Asserts,
-    /// per subpart: (1) the MOPP decodes to `[0..ntris_i)`; (2) **0 misses** — a query at every triangle's
-    /// world AABB returns that triangle's key; (3) **real pruning** — a box far outside the mesh returns
-    /// ZERO candidates (not a degenerate return-all). This is what `ROOT_SHIFT=16` buys: at the old shift 8
-    /// the RIGHT-child planes landed 256× out and a far box could not be pruned / near tris were missed.
-    /// SKIPS (stays green) when `vz.wad` is absent.
-    #[test]
-    fn spatial_mopp_no_miss_and_prunes_in_common_frame_if_present() {
-        use crate::ffcs::load_ffcs_archive;
-        use crate::sges::decompress_block;
-        use crate::ucfx::{extract_chunk_body, parse_block_entry_table};
-        let Some(path) = crate::game_paths::vz_wad_from_env()
-            .or_else(|| crate::game_paths::wad_from_local_config(std::path::Path::new(".")))
-        else {
-            return eprintln!("SKIPPING spatial_mopp_no_miss: vz.wad not found");
-        };
-        let mut f = std::fs::File::open(&path).unwrap();
-        let size = f.metadata().unwrap().len();
-        let arch = load_ffcs_archive(&mut f, size).expect("ffcs");
-        let dec = decompress_block(&mut f, &arch.indx, 2612).expect("block 2612");
-        let (count, entries) = parse_block_entry_table(&dec);
-        let mut pos = 4 + count as usize * 16;
-        let mut floor: Option<Vec<u8>> = None;
-        for e in &entries {
-            let end = pos + e.chunk_size as usize;
-            if end > dec.len() {
-                break;
-            }
-            if e.name_hash == 0x39AF_17DC {
-                floor = extract_chunk_body(&dec[pos..end], b"PHY2");
-                if floor.is_some() {
+
+    /// Game-gated retail validation: built by the `retail` feature, reads the `vz.wad` named by the
+    /// repo-root `.mercs2-local.toml`, and fails if it is absent.
+    #[cfg(feature = "retail")]
+    mod retail {
+        use super::*;
+
+        /// The retail `vz.wad`, opened, with its FFCS tables.
+        fn open_vz_wad() -> (std::fs::File, crate::ffcs::FfcsArchive) {
+            let path = crate::game_paths::local_config_vz_wad(std::path::Path::new(env!("CARGO_MANIFEST_DIR")))
+                .unwrap_or_else(|e| panic!("{e}"));
+            let mut f = std::fs::File::open(&path).unwrap_or_else(|e| panic!("open {}: {e}", path.display()));
+            let size = f.metadata().expect("stat vz.wad").len();
+            let arch = crate::ffcs::load_ffcs_archive(&mut f, size).expect("ffcs");
+            (f, arch)
+        }
+
+        /// ★ REAL-FLOOR controlled-diff proof: decode the retail PMC-HQ floor `0x39AF17DC` (block 2612, the
+        /// 4-shape STAND surface), author its PHY2 both ways, and prove the return-all build differs from the
+        /// spatial build ONLY in the 4 MOPP `m_data` blocks — m_info, the 4 quantized meshes, and the merged
+        /// 2N−1 BV-tree wrapper are byte-identical. This is the exact controlled-test invariant behind the
+        /// floor4-returnall overlay. Fails when `vz.wad` is absent.
+        #[test]
+        fn returnall_floor_only_changes_mopp_mdata_if_present() {
+            use crate::sges::decompress_block;
+            use crate::ucfx::{extract_chunk_body, parse_block_entry_table};
+            let (mut f, arch) = open_vz_wad();
+            let dec = decompress_block(&mut f, &arch.indx, 2612).expect("block 2612");
+            let (count, entries) = parse_block_entry_table(&dec);
+            let mut pos = 4 + count as usize * 16;
+            let mut floor: Option<Vec<u8>> = None;
+            for e in &entries {
+                let end = pos + e.chunk_size as usize;
+                if end > dec.len() {
                     break;
                 }
-            }
-            pos = end;
-        }
-        let Some(body) = floor else {
-            return eprintln!("SKIPPING spatial_mopp_no_miss: floor not found");
-        };
-        let pf = parse_phy2_body(&body).expect("parse floor");
-        let meshes: Vec<MeshSoup> = pf
-            .shapes
-            .iter()
-            .filter_map(|s| match s {
-                Shape::Mesh(m) if !m.indices.is_empty() => Some((
-                    m.indices.iter().map(|t| [t[0] as u32, t[1] as u32, t[2] as u32]).collect(),
-                    m.vertices.clone(),
-                )),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(meshes.len(), 4, "floor decodes to 4 meshes");
-
-        let sms = build_shared_mesh_set(&meshes).expect("shared mesh set");
-        // Common-frame dequant of a GLOBAL pool index — the exact world-local position the engine sees.
-        let deq = |g: usize| -> [f32; 3] {
-            [
-                sms.min[0] + sms.pool[g][0] as f32 * sms.scale[0],
-                sms.min[1] + sms.pool[g][1] as f32 * sms.scale[1],
-                sms.min[2] + sms.pool[g][2] as f32 * sms.scale[2],
-            ]
-        };
-        let mut total_prune_hits = 0usize;
-        for (i, sub) in sms.subs.iter().enumerate() {
-            let (info, code, _cnt) = bake_shape_mopp(&sub.local_tris, &sub.local_verts, MoppKind::Spatial);
-            // (1) decodes to [0..ntris_i)
-            let d = mopp::decode(&code);
-            let (ks, range, missing) = d.key_summary();
-            let ntris = sub.tris_global.len();
-            assert_eq!(ks.len(), ntris, "sub {i}: one key per triangle");
-            assert_eq!(range, Some((0, ntris as u32 - 1)), "sub {i}: keys [0..ntris)");
-            assert!(missing.is_empty(), "sub {i}: contiguous keys");
-
-            // Per-triangle common-frame world AABB + the whole-sub AABB.
-            let (mut wlo, mut whi) = ([f32::MAX; 3], [f32::MIN; 3]);
-            let tri_box = |t: usize| -> ([f32; 3], [f32; 3]) {
-                let (mut lo, mut hi) = ([f32::MAX; 3], [f32::MIN; 3]);
-                for &g in &sub.tris_global[t] {
-                    let v = deq(g as usize);
-                    for k in 0..3 {
-                        lo[k] = lo[k].min(v[k]);
-                        hi[k] = hi[k].max(v[k]);
+                if e.name_hash == 0x39AF_17DC {
+                    floor = extract_chunk_body(&dec[pos..end], b"PHY2");
+                    if floor.is_some() {
+                        break;
                     }
                 }
-                (lo, hi)
-            };
-            // (2) 0 misses over every triangle, in common-frame space.
-            let mut miss = 0usize;
-            for t in 0..ntris {
-                let (lo, hi) = tri_box(t);
-                for k in 0..3 {
-                    wlo[k] = wlo[k].min(lo[k]);
-                    whi[k] = whi[k].max(hi[k]);
-                }
-                if !mopp::query_aabb(&code, &info, lo, hi).contains(&(t as u32)) {
-                    miss += 1;
-                }
+                pos = end;
             }
-            assert_eq!(miss, 0, "sub {i}: {miss}/{ntris} triangles MISSED by their own spatial MOPP query");
+            let body = floor.expect("floor 0x39AF17DC not found in block 2612");
+            let pf = parse_phy2_body(&body).expect("parse floor PHY2");
+            let meshes: Vec<MeshSoup> = pf
+                .shapes
+                .iter()
+                .filter_map(|s| match s {
+                    Shape::Mesh(m) if !m.indices.is_empty() => Some((
+                        m.indices.iter().map(|t| [t[0] as u32, t[1] as u32, t[2] as u32]).collect(),
+                        m.vertices.clone(),
+                    )),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(meshes.len(), 4, "floor 0x39AF17DC decodes to 4 collision meshes");
 
-            // (3) real pruning (NOT degenerate return-all): a box far outside the mesh must return
-            // STRICTLY FEWER candidates than the return-all MOPP of the same triangles (which returns
-            // ALL ntris under any box). A CUT-less BIH still over-includes on the unbounded (max) side of
-            // the offset child — that is benign conservatism (the narrowphase rejects extras; it never
-            // drops the floor). What must hold is that the spatial tree discriminates space at all.
-            let ext = [whi[0] - wlo[0], whi[1] - wlo[1], whi[2] - wlo[2]];
-            let em = ext.iter().cloned().fold(0.0f32, f32::max).max(1.0);
-            let far_lo = [whi[0] + em + 50.0, wlo[1], wlo[2]];
-            let far_hi = [whi[0] + em + 60.0, whi[1], whi[2]];
-            // Positive discrimination: a query overlapping ONLY triangle 0's tiny box must return far
-            // fewer than every triangle (a degenerate all-visit tree would return all ntris).
-            let (t0lo, t0hi) = tri_box(0);
-            let near0 = mopp::query_aabb(&code, &info, t0lo, t0hi).len();
-            let far_spatial = mopp::query_aabb(&code, &info, far_lo, far_hi).len();
-            assert!(
-                far_spatial < ntris && near0 < ntris,
-                "sub {i}: no pruning — far={far_spatial}/{ntris}, near0={near0}/{ntris} (degenerate all-visit)"
-            );
-            total_prune_hits += 1;
+            let spatial = build_phy2_multi_kind("floor", &meshes, MoppKind::Spatial).expect("spatial");
+            let returnall = build_phy2_multi_kind("floor", &meshes, MoppKind::ReturnAll).expect("returnall");
+            let ndiff = assert_only_mopp_differs(&spatial, &returnall, &meshes);
             eprintln!(
-                "  sub {i}: {ntris} tris — 0 misses; near-tri0 cands={near0}, far box cands={far_spatial} \
-                 (far pruned {:.0}%)",
-                100.0 * (1.0 - far_spatial as f32 / ntris as f32)
+                "REAL FLOOR 0x39AF17DC: spatial vs return-all authored PHY2 = {} B each; {} byte(s) differ, \
+                 ALL inside the 4 MOPP m_data blocks (m_info + 4 meshes + merged BV-tree wrapper byte-identical)",
+                spatial.len(),
+                ndiff
             );
         }
-        assert_eq!(total_prune_hits, 4, "all 4 subparts must pass no-miss + prune");
-        eprintln!(
-            "SPATIAL-MOPP GATE (ROOT_SHIFT=16): floor 0x39AF17DC — all 4 subparts no-miss over their own \
-             triangles in common-frame-dequantized space AND prune a far box below return-all."
-        );
-    }
 
-    /// ★ RETAIL CROSS-CHECK for the distinct-shape binding gate: decode the retail PMC-HQ floor
-    /// `0x39AF17DC` (block 2612), and prove (a) RETAIL's own packfile binds 4 DISTINCT shapes
-    /// (`WpArray → 4 distinct bvtrees → 4 distinct moppcodes + 4 distinct meshes` — i.e. `record[i] →
-    /// shape[i]`, the invariant our authored floor must match), and (b) our re-authored floor from the same
-    /// 4 meshes ALSO passes the gate. This is the offline form of the live A/B x32dbg comparison.
-    /// SKIPS (stays green) when `vz.wad` is absent.
-    #[test]
-    fn retail_floor_binds_four_distinct_shapes_and_reauthor_matches() {
-        use crate::ffcs::load_ffcs_archive;
-        use crate::sges::decompress_block;
-        use crate::ucfx::{extract_chunk_body, parse_block_entry_table};
-        let Some(path) = crate::game_paths::vz_wad_from_env()
-            .or_else(|| crate::game_paths::wad_from_local_config(std::path::Path::new(".")))
-        else {
-            return eprintln!("SKIPPING retail_floor_binds: vz.wad not found");
-        };
-        let mut f = std::fs::File::open(&path).unwrap();
-        let size = f.metadata().unwrap().len();
-        let arch = load_ffcs_archive(&mut f, size).expect("ffcs");
-        let dec = decompress_block(&mut f, &arch.indx, 2612).expect("block 2612");
-        let (count, entries) = parse_block_entry_table(&dec);
-        let mut pos = 4 + count as usize * 16;
-        let mut floor: Option<Vec<u8>> = None;
-        for e in &entries {
-            let end = pos + e.chunk_size as usize;
-            if end > dec.len() {
-                break;
-            }
-            if e.name_hash == 0x39AF_17DC {
-                floor = extract_chunk_body(&dec[pos..end], b"PHY2");
-                if floor.is_some() {
+        /// ★ SPATIAL-MOPP NO-MISS + PRUNE GATE (the fall-through fix's offline judge). For the retail floor
+        /// `0x39AF17DC`, author the SHARED-POOL spatial MOPPs exactly as the forge does (bake over each sub's
+        /// compacted local geometry), then query each MOPP in the SAME space the engine queries — the
+        /// COMMON-FRAME-DEQUANTIZED shape-local positions the mesh verts actually resolve to at load. Asserts,
+        /// per subpart: (1) the MOPP decodes to `[0..ntris_i)`; (2) **0 misses** — a query at every triangle's
+        /// world AABB returns that triangle's key; (3) **real pruning** — a box far outside the mesh returns
+        /// ZERO candidates (not a degenerate return-all). This is what `ROOT_SHIFT=16` buys: at the old shift 8
+        /// the RIGHT-child planes landed 256× out and a far box could not be pruned / near tris were missed.
+        /// Fails when `vz.wad` is absent.
+        #[test]
+        fn spatial_mopp_no_miss_and_prunes_in_common_frame_if_present() {
+            use crate::sges::decompress_block;
+            use crate::ucfx::{extract_chunk_body, parse_block_entry_table};
+            let (mut f, arch) = open_vz_wad();
+            let dec = decompress_block(&mut f, &arch.indx, 2612).expect("block 2612");
+            let (count, entries) = parse_block_entry_table(&dec);
+            let mut pos = 4 + count as usize * 16;
+            let mut floor: Option<Vec<u8>> = None;
+            for e in &entries {
+                let end = pos + e.chunk_size as usize;
+                if end > dec.len() {
                     break;
                 }
+                if e.name_hash == 0x39AF_17DC {
+                    floor = extract_chunk_body(&dec[pos..end], b"PHY2");
+                    if floor.is_some() {
+                        break;
+                    }
+                }
+                pos = end;
             }
-            pos = end;
+            let body = floor.expect("floor 0x39AF17DC not found in block 2612");
+            let pf = parse_phy2_body(&body).expect("parse floor");
+            let meshes: Vec<MeshSoup> = pf
+                .shapes
+                .iter()
+                .filter_map(|s| match s {
+                    Shape::Mesh(m) if !m.indices.is_empty() => Some((
+                        m.indices.iter().map(|t| [t[0] as u32, t[1] as u32, t[2] as u32]).collect(),
+                        m.vertices.clone(),
+                    )),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(meshes.len(), 4, "floor decodes to 4 meshes");
+
+            let sms = build_shared_mesh_set(&meshes).expect("shared mesh set");
+            // Common-frame dequant of a GLOBAL pool index — the exact world-local position the engine sees.
+            let deq = |g: usize| -> [f32; 3] {
+                [
+                    sms.min[0] + sms.pool[g][0] as f32 * sms.scale[0],
+                    sms.min[1] + sms.pool[g][1] as f32 * sms.scale[1],
+                    sms.min[2] + sms.pool[g][2] as f32 * sms.scale[2],
+                ]
+            };
+            let mut total_prune_hits = 0usize;
+            for (i, sub) in sms.subs.iter().enumerate() {
+                let (info, code, _cnt) = bake_shape_mopp(&sub.local_tris, &sub.local_verts, MoppKind::Spatial);
+                // (1) decodes to [0..ntris_i)
+                let d = mopp::decode(&code);
+                let (ks, range, missing) = d.key_summary();
+                let ntris = sub.tris_global.len();
+                assert_eq!(ks.len(), ntris, "sub {i}: one key per triangle");
+                assert_eq!(range, Some((0, ntris as u32 - 1)), "sub {i}: keys [0..ntris)");
+                assert!(missing.is_empty(), "sub {i}: contiguous keys");
+
+                // Per-triangle common-frame world AABB + the whole-sub AABB.
+                let (mut wlo, mut whi) = ([f32::MAX; 3], [f32::MIN; 3]);
+                let tri_box = |t: usize| -> ([f32; 3], [f32; 3]) {
+                    let (mut lo, mut hi) = ([f32::MAX; 3], [f32::MIN; 3]);
+                    for &g in &sub.tris_global[t] {
+                        let v = deq(g as usize);
+                        for k in 0..3 {
+                            lo[k] = lo[k].min(v[k]);
+                            hi[k] = hi[k].max(v[k]);
+                        }
+                    }
+                    (lo, hi)
+                };
+                // (2) 0 misses over every triangle, in common-frame space.
+                let mut miss = 0usize;
+                for t in 0..ntris {
+                    let (lo, hi) = tri_box(t);
+                    for k in 0..3 {
+                        wlo[k] = wlo[k].min(lo[k]);
+                        whi[k] = whi[k].max(hi[k]);
+                    }
+                    if !mopp::query_aabb(&code, &info, lo, hi).contains(&(t as u32)) {
+                        miss += 1;
+                    }
+                }
+                assert_eq!(miss, 0, "sub {i}: {miss}/{ntris} triangles MISSED by their own spatial MOPP query");
+
+                // (3) real pruning (NOT degenerate return-all): a box far outside the mesh must return
+                // STRICTLY FEWER candidates than the return-all MOPP of the same triangles (which returns
+                // ALL ntris under any box). A CUT-less BIH still over-includes on the unbounded (max) side of
+                // the offset child — that is benign conservatism (the narrowphase rejects extras; it never
+                // drops the floor). What must hold is that the spatial tree discriminates space at all.
+                let ext = [whi[0] - wlo[0], whi[1] - wlo[1], whi[2] - wlo[2]];
+                let em = ext.iter().cloned().fold(0.0f32, f32::max).max(1.0);
+                let far_lo = [whi[0] + em + 50.0, wlo[1], wlo[2]];
+                let far_hi = [whi[0] + em + 60.0, whi[1], whi[2]];
+                // Positive discrimination: a query overlapping ONLY triangle 0's tiny box must return far
+                // fewer than every triangle (a degenerate all-visit tree would return all ntris).
+                let (t0lo, t0hi) = tri_box(0);
+                let near0 = mopp::query_aabb(&code, &info, t0lo, t0hi).len();
+                let far_spatial = mopp::query_aabb(&code, &info, far_lo, far_hi).len();
+                assert!(
+                    far_spatial < ntris && near0 < ntris,
+                    "sub {i}: no pruning — far={far_spatial}/{ntris}, near0={near0}/{ntris} (degenerate all-visit)"
+                );
+                total_prune_hits += 1;
+                eprintln!(
+                    "  sub {i}: {ntris} tris — 0 misses; near-tri0 cands={near0}, far box cands={far_spatial} \
+                     (far pruned {:.0}%)",
+                    100.0 * (1.0 - far_spatial as f32 / ntris as f32)
+                );
+            }
+            assert_eq!(total_prune_hits, 4, "all 4 subparts must pass no-miss + prune");
+            eprintln!(
+                "SPATIAL-MOPP GATE (ROOT_SHIFT=16): floor 0x39AF17DC — all 4 subparts no-miss over their own \
+                 triangles in common-frame-dequantized space AND prune a far box below return-all."
+            );
         }
-        let Some(body) = floor else {
-            return eprintln!("SKIPPING retail_floor_binds: floor not found");
-        };
 
-        // (a) RETAIL binds 4 distinct shapes — record[i] → shape[i], never collapsed.
-        validate_multi_shape_binding(&body, 4)
-            .expect("RETAIL floor 0x39AF17DC must bind 4 DISTINCT shapes (record[i]→shape[i])");
-
-        // (b) Our re-author from the same 4 decoded meshes also binds 4 distinct shapes.
-        let pf = parse_phy2_body(&body).expect("parse floor");
-        let soup: Vec<MeshSoup> = pf
-            .shapes
-            .iter()
-            .filter_map(|s| match s {
-                Shape::Mesh(m) if !m.indices.is_empty() => Some((
-                    m.indices.iter().map(|t| [t[0] as u32, t[1] as u32, t[2] as u32]).collect(),
-                    m.vertices.clone(),
-                )),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(soup.len(), 4, "floor decodes to 4 meshes");
-        let authored = build_phy2_multi("floor", &soup).expect("re-author floor");
-        validate_multi_shape_binding(&authored, 4)
-            .expect("re-authored floor must bind 4 DISTINCT shapes");
-        eprintln!("retail floor + re-authored floor BOTH bind 4 distinct shapes (record[i]→shape[i])");
-    }
-
-    /// REAL-BUILDING validation: take a genuine single-subpart `WpMeshShape16` out of retail `vz.wad`,
-    /// decode it, re-author a PHY2 from those exact tris/verts, and prove the re-authored body decodes
-    /// back to the SAME triangle indices + a functional MOPP. Reports structural deltas vs the original.
-    /// SKIPS (stays green) when `vz.wad` is absent.
-    #[test]
-    fn reauthor_real_building_from_vz_wad_if_present() {
-        use crate::ffcs::load_ffcs_archive;
-        use crate::sges::decompress_block;
-        use crate::ucfx::{extract_chunk_body, parse_block_entry_table};
-        let Some(path) = crate::game_paths::vz_wad_from_env()
-            .or_else(|| crate::game_paths::wad_from_local_config(std::path::Path::new(".")))
-        else {
-            return eprintln!("SKIPPING reauthor_real_building: vz.wad not found");
-        };
-        let Ok(mut f) = std::fs::File::open(&path) else {
-            return eprintln!("SKIPPING reauthor_real_building: vz.wad not readable");
-        };
-        let size = f.metadata().unwrap().len();
-        let arch = load_ffcs_archive(&mut f, size).expect("ffcs");
-        // Block 767 = small building colliders; find a decoded single-mesh with a recovered pool.
-        let dec = decompress_block(&mut f, &arch.indx, 767).expect("block 767");
-        let (count, entries) = parse_block_entry_table(&dec);
-        let mut pos = 4 + count as usize * 16;
-        let mut src_mesh: Option<crate::havok::MeshShape> = None;
-        'outer: for e in &entries {
-            let end = pos + e.chunk_size as usize;
-            if end > dec.len() {
-                break;
+        /// ★ RETAIL CROSS-CHECK for the distinct-shape binding gate: decode the retail PMC-HQ floor
+        /// `0x39AF17DC` (block 2612), and prove (a) RETAIL's own packfile binds 4 DISTINCT shapes
+        /// (`WpArray → 4 distinct bvtrees → 4 distinct moppcodes + 4 distinct meshes` — i.e. `record[i] →
+        /// shape[i]`, the invariant our authored floor must match), and (b) our re-authored floor from the same
+        /// 4 meshes ALSO passes the gate. This is the offline form of the live A/B x32dbg comparison.
+        /// Fails when `vz.wad` is absent.
+        #[test]
+        fn retail_floor_binds_four_distinct_shapes_and_reauthor_matches() {
+            use crate::sges::decompress_block;
+            use crate::ucfx::{extract_chunk_body, parse_block_entry_table};
+            let (mut f, arch) = open_vz_wad();
+            let dec = decompress_block(&mut f, &arch.indx, 2612).expect("block 2612");
+            let (count, entries) = parse_block_entry_table(&dec);
+            let mut pos = 4 + count as usize * 16;
+            let mut floor: Option<Vec<u8>> = None;
+            for e in &entries {
+                let end = pos + e.chunk_size as usize;
+                if end > dec.len() {
+                    break;
+                }
+                if e.name_hash == 0x39AF_17DC {
+                    floor = extract_chunk_body(&dec[pos..end], b"PHY2");
+                    if floor.is_some() {
+                        break;
+                    }
+                }
+                pos = end;
             }
-            if let Some(b) = extract_chunk_body(&dec[pos..end], b"PHY2") {
-                if let Ok(pf) = parse_phy2_body(&b) {
+            let body = floor.expect("floor 0x39AF17DC not found in block 2612");
+
+            // (a) RETAIL binds 4 distinct shapes — record[i] → shape[i], never collapsed.
+            validate_multi_shape_binding(&body, 4)
+                .expect("RETAIL floor 0x39AF17DC must bind 4 DISTINCT shapes (record[i]→shape[i])");
+
+            // (b) Our re-author from the same 4 decoded meshes also binds 4 distinct shapes.
+            let pf = parse_phy2_body(&body).expect("parse floor");
+            let soup: Vec<MeshSoup> = pf
+                .shapes
+                .iter()
+                .filter_map(|s| match s {
+                    Shape::Mesh(m) if !m.indices.is_empty() => Some((
+                        m.indices.iter().map(|t| [t[0] as u32, t[1] as u32, t[2] as u32]).collect(),
+                        m.vertices.clone(),
+                    )),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(soup.len(), 4, "floor decodes to 4 meshes");
+            let authored = build_phy2_multi("floor", &soup).expect("re-author floor");
+            validate_multi_shape_binding(&authored, 4)
+                .expect("re-authored floor must bind 4 DISTINCT shapes");
+            eprintln!("retail floor + re-authored floor BOTH bind 4 distinct shapes (record[i]→shape[i])");
+        }
+
+        /// REAL-BUILDING validation: take a genuine single-subpart `WpMeshShape16` out of retail `vz.wad`,
+        /// decode it, re-author a PHY2 from those exact tris/verts, and prove the re-authored body decodes
+        /// back to the SAME triangle indices + a functional MOPP. Reports structural deltas vs the original.
+        /// Fails when `vz.wad` is absent.
+        #[test]
+        fn reauthor_real_building_from_vz_wad_if_present() {
+            use crate::sges::decompress_block;
+            use crate::ucfx::{extract_chunk_body, parse_block_entry_table};
+            let (mut f, arch) = open_vz_wad();
+            // Block 767 = small building colliders; find a decoded single-mesh with a recovered pool.
+            let dec = decompress_block(&mut f, &arch.indx, 767).expect("block 767");
+            let (count, entries) = parse_block_entry_table(&dec);
+            let mut pos = 4 + count as usize * 16;
+            let mut src_mesh: Option<crate::havok::MeshShape> = None;
+            'outer: for (ei, e) in entries.iter().enumerate() {
+                let end = pos + e.chunk_size as usize;
+                if end > dec.len() {
+                    break;
+                }
+                if let Some(b) = extract_chunk_body(&dec[pos..end], b"PHY2") {
+                    let pf = parse_phy2_body(&b).unwrap_or_else(|e2| {
+                        panic!("block 767 entry {ei} (0x{:08X}): PHY2 does not parse: {e2}", e.name_hash)
+                    });
                     for s in pf.shapes {
                         if let Shape::Mesh(m) = s {
                             if !m.indices.is_empty() && m.vertices.len() <= 65_536 {
@@ -2575,43 +2554,41 @@ mod tests {
                         }
                     }
                 }
+                pos = end;
             }
-            pos = end;
-        }
-        let Some(src) = src_mesh else {
-            return eprintln!("SKIPPING reauthor_real_building: no decodable WpMeshShape16 in block 767");
-        };
+            let src = src_mesh.expect("no decodable WpMeshShape16 in block 767");
 
-        let verts: Vec<[f32; 3]> = src.vertices.clone();
-        let tris: Vec<[u32; 3]> =
-            src.indices.iter().map(|t| [t[0] as u32, t[1] as u32, t[2] as u32]).collect();
+            let verts: Vec<[f32; 3]> = src.vertices.clone();
+            let tris: Vec<[u32; 3]> =
+                src.indices.iter().map(|t| [t[0] as u32, t[1] as u32, t[2] as u32]).collect();
 
-        let body = build_phy2("reauthored_building", &tris, &verts).expect("build");
-        let pf = parse_phy2_body(&body).expect("re-parse authored building");
-        for class in ["WpMeshShape16", "hkpMoppBvTreeShape", "hkpMoppCode"] {
-            assert!(pf.class_counts.get(class).copied().unwrap_or(0) >= 1, "authored missing {class}");
-        }
-        let re = decoded_mesh(&body);
-        assert_eq!(re.indices, src.indices, "re-authored mesh must decode to the SAME triangle indices");
-        // vertices within quant error of the source (source is itself quantized, so tolerance is loose).
-        let maxidx = *src.indices.iter().flat_map(|t| t.iter()).max().unwrap() as usize;
-        for i in 0..=maxidx {
-            let d = edge(re.vertices[i], src.vertices[i]);
-            assert!(d < 0.05, "vertex {i} re-quant error {d}");
-        }
-        // functional MOPP: decodes to [0..ntris)
-        let mopps = mopp::extract_mopp_with_info(&body);
-        let dec2 = mopp::decode(&mopps[0].0);
-        let (ks, range, _) = dec2.key_summary();
-        assert_eq!(ks.len(), tris.len());
-        assert_eq!(range, Some((0, tris.len() as u32 - 1)));
+            let body = build_phy2("reauthored_building", &tris, &verts).expect("build");
+            let pf = parse_phy2_body(&body).expect("re-parse authored building");
+            for class in ["WpMeshShape16", "hkpMoppBvTreeShape", "hkpMoppCode"] {
+                assert!(pf.class_counts.get(class).copied().unwrap_or(0) >= 1, "authored missing {class}");
+            }
+            let re = decoded_mesh(&body);
+            assert_eq!(re.indices, src.indices, "re-authored mesh must decode to the SAME triangle indices");
+            // vertices within quant error of the source (source is itself quantized, so tolerance is loose).
+            let maxidx = *src.indices.iter().flat_map(|t| t.iter()).max().unwrap() as usize;
+            for i in 0..=maxidx {
+                let d = edge(re.vertices[i], src.vertices[i]);
+                assert!(d < 0.05, "vertex {i} re-quant error {d}");
+            }
+            // functional MOPP: decodes to [0..ntris)
+            let mopps = mopp::extract_mopp_with_info(&body);
+            let dec2 = mopp::decode(&mopps[0].0);
+            let (ks, range, _) = dec2.key_summary();
+            assert_eq!(ks.len(), tris.len());
+            assert_eq!(range, Some((0, tris.len() as u32 - 1)));
 
-        eprintln!(
-            "reauthored real building: {} tris, {} verts → PHY2 {} B (packfile+wrapper); classes {:?}",
-            tris.len(),
-            verts.len(),
-            body.len(),
-            pf.class_counts
-        );
+            eprintln!(
+                "reauthored real building: {} tris, {} verts → PHY2 {} B (packfile+wrapper); classes {:?}",
+                tris.len(),
+                verts.len(),
+                body.len(),
+                pf.class_counts
+            );
+        }
     }
 }

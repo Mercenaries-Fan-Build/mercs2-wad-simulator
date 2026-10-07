@@ -63,9 +63,10 @@ impl MergeClass {
 pub enum Claim {
     /// A Data-layer asset, identified by hash.
     Asset { hash: u32 },
-    /// A Lua script. The unit of replacement is the containing block, so claiming a script is
-    /// claiming a share of that block.
-    Script { name: String },
+    /// A Lua script of one level's WAD. The unit of replacement is the containing block, so
+    /// claiming a script is claiming a share of that block. The front end's `mrxsound` (in
+    /// `shell.wad`) and gameplay's (in `vz.wad`) are two scripts: each level runs its own copy.
+    Script { name: String, level: crate::link::Level },
     /// A row in the wardrobe. Key is `(wearer, slug)` — NOT slug alone: retail reuses `Original`
     /// and `ChickenSuit` across all three heroes.
     OutfitSlot { wearer: String, slug: String },
@@ -82,6 +83,31 @@ pub enum Claim {
     /// other. Keying on the bare name would have called the first pair a conflict and been right
     /// about the second by accident.
     FileArtifact { path: String },
+    /// A sound cue, keyed on its guid (`pandemic_hash_m2` of its name) and, for a cue of a `vo_*`
+    /// bank, the language whose copy of the bank it is in. One language's cue does not touch
+    /// another's: each language's banks are separate entries (`<bank>.<language>`).
+    SoundCue { guid: u32, language: Option<String> },
+    /// A shader store record, keyed on `pandemic_hash_m2(stem)`: the record `<stem>_3.sho` of
+    /// `shader3.bin` and `<stem>_3l.sho` of `shader3Low.bin`. The hash folds case, like the ids.
+    ShaderStem { key: u32 },
+    /// A shader registration name, keyed on `pandemic_hash_m2(name)`: the key the registry files
+    /// it under, first registration winning.
+    ShaderName { key: u32 },
+    /// The TINY stand-in of one 200 m cell of one layer (`m2(layer)`): two would draw the cell's
+    /// objects twice.
+    TinyCell { layer: u32, row: u32, col: u32 },
+    /// A world template's name, keyed on `pandemic_hash_m2(name)`: the name registry answers a
+    /// lookup with one key, so two templates of one name leave one unreachable.
+    Template { name_hash: u32 },
+    /// A world template's key (`worldentity::derived_template_key`): two templates under one key
+    /// overwrite each other's records.
+    TemplateKey { key: u32 },
+    /// An effect frame: the `fxdict` record key a sprite is filed under (`pandemic_hash_m2(name)`).
+    /// The lookup finds one record per key, so two sprites of one key leave one unreachable.
+    FxFrame { key: u32 },
+    /// The repaint of the `vfx` atlas: the base every Shipment's sprites are drawn on top of. A set
+    /// has one; a second repaint's texels would be absent.
+    AtlasRepaint,
 }
 
 impl Claim {
@@ -98,6 +124,17 @@ impl Claim {
         (
             Claim::Asset {
                 hash: crate::manifest::asset_hash(name),
+            },
+            Some(name.to_string()),
+        )
+    }
+
+    /// `(claim, display name)` for a sound cue.
+    fn sound_cue(name: &str, language: Option<crate::manifest::Language>) -> (Claim, Option<String>) {
+        (
+            Claim::SoundCue {
+                guid: crate::manifest::asset_hash(name),
+                language: language.map(|l| l.token().to_string()),
             },
             Some(name.to_string()),
         )
@@ -122,10 +159,44 @@ impl Claim {
                 Some(n) => format!("asset {n} (0x{hash:08X})"),
                 None => format!("asset 0x{hash:08X}"),
             },
-            Claim::Script { name } => format!("script {name}"),
+            Claim::Script { name, level } => match level {
+                crate::link::Level::Vz => format!("script {name}"),
+                crate::link::Level::Shell => format!("front-end script {name} (shell.wad)"),
+            },
             Claim::OutfitSlot { wearer, slug } => format!("outfit {wearer}/{slug}"),
             Claim::NativeHook { at } => format!("native hook at {at}"),
             Claim::FileArtifact { path } => format!("file artifact {path}"),
+            Claim::SoundCue { guid, language } => match (name, language) {
+                (Some(n), Some(l)) => format!("sound cue {n} (0x{guid:08X}, {l})"),
+                (Some(n), None) => format!("sound cue {n} (0x{guid:08X})"),
+                (None, Some(l)) => format!("sound cue 0x{guid:08X} ({l})"),
+                (None, None) => format!("sound cue 0x{guid:08X}"),
+            },
+            Claim::ShaderStem { key } => match name {
+                Some(n) => format!("shader store record {n} (0x{key:08X})"),
+                None => format!("shader store record 0x{key:08X}"),
+            },
+            Claim::ShaderName { key } => match name {
+                Some(n) => format!("shader registration {n} (0x{key:08X})"),
+                None => format!("shader registration 0x{key:08X}"),
+            },
+            Claim::TinyCell { layer, row, col } => match name {
+                Some(n) => format!("TINY stand-in of {n}"),
+                None => format!("TINY stand-in of layer 0x{layer:08X} cell (row {row}, col {col})"),
+            },
+            Claim::Template { name_hash } => match name {
+                Some(n) => format!("template name {n} (0x{name_hash:08X})"),
+                None => format!("template name 0x{name_hash:08X}"),
+            },
+            Claim::TemplateKey { key } => match name {
+                Some(n) => format!("template key 0x{key:08X} (derived from {n})"),
+                None => format!("template key 0x{key:08X}"),
+            },
+            Claim::FxFrame { key } => match name {
+                Some(n) => format!("effect frame {n} (0x{key:08X})"),
+                None => format!("effect frame 0x{key:08X}"),
+            },
+            Claim::AtlasRepaint => "the repaint of the vfx atlas".into(),
         }
     }
 
@@ -201,6 +272,41 @@ pub fn merge_class(claim: &Claim, access: Access, intent: Intent) -> MergeClass 
         // And it is not `KeyedSet`, because there is no key: the bytes are opaque, so there is
         // nothing to union on. Same reasoning as `raw`, reached from the other direction.
         Claim::FileArtifact { .. } => MergeClass::Exclusive,
+        // An added cue's name is a key across the installed set: FindCue answers with the first
+        // loaded table that has the guid (`FUN_00835a70`), so two Shipments adding one cue name
+        // leave one of them silent.
+        Claim::SoundCue { .. } if intent == Intent::Additive => MergeClass::KeyedSet,
+        // A replaced cue has one winner in the table the game loads; a second replacement of the
+        // same cue cannot also take effect.
+        Claim::SoundCue { .. } => MergeClass::Exclusive,
+        // One store record has one blob in the stores `qm link` emits: a second edit of the same
+        // stem cannot also take effect.
+        Claim::ShaderStem { .. } => MergeClass::Exclusive,
+        // The registry keeps the first registration of a key, so a second is silently absent.
+        Claim::ShaderName { .. } => MergeClass::Exclusive,
+        // One stand-in per cell of a layer: a second draws the same objects again.
+        Claim::TinyCell { .. } => MergeClass::Exclusive,
+        // A new template's name and key are keys across the installed set: two Shipments adding
+        // one name, or two names deriving one key, leave one template unreachable.
+        Claim::Template { .. } | Claim::TemplateKey { .. } if intent == Intent::Additive => MergeClass::KeyedSet,
+        Claim::Template { .. } | Claim::TemplateKey { .. } => MergeClass::Exclusive,
+        // A sprite's key is a key across the installed set: the fxdict carries one record per key.
+        Claim::FxFrame { .. } if intent == Intent::Additive => MergeClass::KeyedSet,
+        Claim::FxFrame { .. } => MergeClass::Exclusive,
+        // The set's sprites are drawn on top of one repaint.
+        Claim::AtlasRepaint => MergeClass::Exclusive,
+    }
+}
+
+/// How strict a class is when claimants of one target disagree: `Exclusive`, then `KeyedSet`, then
+/// `LastWins`, then `OrderedList`. The strictest claimant's class is the target's, whatever order
+/// the claimants come in.
+fn strictness(class: MergeClass) -> u8 {
+    match class {
+        MergeClass::Exclusive => 3,
+        MergeClass::KeyedSet => 2,
+        MergeClass::LastWins => 1,
+        MergeClass::OrderedList => 0,
     }
 }
 
@@ -215,6 +321,28 @@ pub struct ClaimRecord {
     /// The name the author wrote, when there was one. Diagnostics only — deliberately NOT part of
     /// [`Claim`] identity (see the type's docs).
     pub name: Option<String>,
+}
+
+/// The scripts a sound loader lives in, for the `sessions` a bank loads in: gameplay's trampoline
+/// hosts `wifpmcinterior` (the loads) and `mrxsoundbootstrap` (the unloads after `ExitGame`) in
+/// `vz.wad`; the front end's loader `qm_shell_modloader` and its trampoline host `mrxsound` in
+/// `shell.wad`. A sound kind claims them `Additive`: N loaders fold into one, and a `replace_lua` of
+/// a host is a conflict.
+pub fn loader_scripts(sessions: &std::collections::BTreeSet<crate::manifest::LoadSession>) -> Vec<Claim> {
+    use crate::link::Level;
+    use crate::manifest::LoadSession;
+    let mut out = Vec::new();
+    if sessions.contains(&LoadSession::Gameplay) {
+        for name in ["wifpmcinterior", "mrxsoundbootstrap"] {
+            out.push(Claim::Script { name: name.into(), level: Level::Vz });
+        }
+    }
+    if sessions.contains(&LoadSession::FrontEnd) {
+        for name in [crate::link::QM_SHELL_MODLOADER_NAME, "mrxsound"] {
+            out.push(Claim::Script { name: name.into(), level: Level::Shell });
+        }
+    }
+    out
 }
 
 /// Compute the blast radius of a manifest — COMPUTED for typed kinds, DECLARED only for `raw`.
@@ -261,6 +389,7 @@ pub fn claims(manifest: &Manifest) -> Vec<ClaimRecord> {
                     Access::Write,
                     bare(Claim::Script {
                         name: "wifpmcinterior".into(),
+                        level: crate::link::Level::Vz,
                     }),
                     Intent::Additive,
                 );
@@ -275,9 +404,37 @@ pub fn claims(manifest: &Manifest) -> Vec<ClaimRecord> {
             Contribution::AddTexture { name, .. } => {
                 push(Access::Write, Claim::asset(name), Intent::Additive);
             }
-            // Same shape as a movie or a texture: one new hash, nothing borrowed.
-            Contribution::AddSound { name, .. } => {
-                push(Access::Write, Claim::asset(name), Intent::Additive);
+            // A new bank: its entry hash, and each cue's name, which the cue guid is the hash of;
+            // and the scripts each `load_in` session's loader lives in ([`loader_scripts`]).
+            Contribution::AddSound { bank, cues, load_in, .. } => {
+                push(Access::Write, Claim::asset(bank), Intent::Additive);
+                for c in cues {
+                    push(Access::Write, Claim::sound_cue(&c.name, None), Intent::Additive);
+                }
+                let sessions: std::collections::BTreeSet<_> = load_in.iter().copied().collect();
+                for script in loader_scripts(&sessions) {
+                    push(Access::Write, bare(script), Intent::Additive);
+                }
+            }
+            // The bank's entry (`<bank>` or `<bank>.<language>`) and every cue the replacement
+            // declares: each has one winner in the table the game loads. The override wavebank of a
+            // bank retail Lua loads loads in each session retail loads the bank in; the engine loads
+            // any other bank itself, through no loader ([`crate::sound::loader_sessions`]).
+            Contribution::ReplaceSoundBank { bank, language, cues, .. } => {
+                let entry = crate::sound::entry_name(bank, *language);
+                push(Access::Write, Claim::asset(&entry), Intent::ReplaceExclusive);
+                for c in cues {
+                    push(Access::Write, Claim::sound_cue(&c.name, *language), Intent::ReplaceExclusive);
+                }
+                for script in loader_scripts(&crate::sound::loader_sessions(bank, *language)) {
+                    push(Access::Write, bare(script), Intent::Additive);
+                }
+            }
+            Contribution::ReplaceSoundCue { bank, language, cue, .. } => {
+                push(Access::Write, Claim::sound_cue(&cue.name, *language), Intent::ReplaceExclusive);
+                for script in loader_scripts(&crate::sound::loader_sessions(bank, *language)) {
+                    push(Access::Write, bare(script), Intent::Additive);
+                }
             }
             // A movie mints a new hash and borrows nothing — one write claim, no read claim. The
             // `Additive` intent is what makes two Shipments choosing the same movie name a hard
@@ -297,6 +454,7 @@ pub fn claims(manifest: &Manifest) -> Vec<ClaimRecord> {
                     Access::Write,
                     bare(Claim::Script {
                         name: "wifpmcinterior".into(),
+                        level: crate::link::Level::Vz,
                     }),
                     Intent::Additive,
                 );
@@ -311,6 +469,12 @@ pub fn claims(manifest: &Manifest) -> Vec<ClaimRecord> {
                     push(Access::Read, Claim::asset(d), Intent::Replace);
                 }
             }
+            // A repaint of the `vfx` atlas is the base `qm link` draws every Shipment's sprites on:
+            // the atlas is merged, and the repaint itself has one claimant.
+            Contribution::ReplaceTexture { target, .. } if crate::fx::repaints_atlas(c) => {
+                push(Access::Write, Claim::asset(target), Intent::Merged);
+                push(Access::Write, bare(Claim::AtlasRepaint), Intent::ReplaceExclusive);
+            }
             Contribution::ReplaceTexture { target, .. } => {
                 // Same hash as the shipped asset — a replacement, not an addition.
                 push(Access::Write, Claim::asset(target), Intent::Replace);
@@ -320,6 +484,7 @@ pub fn claims(manifest: &Manifest) -> Vec<ClaimRecord> {
                     Access::Write,
                     bare(Claim::Script {
                         name: target.clone(),
+                        level: crate::link::Level::Vz,
                     }),
                     Intent::Additive,
                 );
@@ -339,6 +504,7 @@ pub fn claims(manifest: &Manifest) -> Vec<ClaimRecord> {
                     Access::Write,
                     bare(Claim::Script {
                         name: target.clone(),
+                        level: crate::link::Level::Vz,
                     }),
                     Intent::Replace,
                 );
@@ -367,19 +533,82 @@ pub fn claims(manifest: &Manifest) -> Vec<ClaimRecord> {
             Contribution::ReplaceAnimation { target, .. } => {
                 push(Access::Write, Claim::asset(target), Intent::ReplaceExclusive);
             }
-            // Novel shader. New hash, Additive.
-            Contribution::AddShader { name, .. } => {
-                push(Access::Write, Claim::asset(name), Intent::Additive);
+            // New store records and registrations. Classes of one add_shader may share a stem:
+            // one record, claimed once.
+            Contribution::AddShader { classes, .. } => {
+                let mut stems: Vec<u32> = Vec::new();
+                for class in classes {
+                    let key = mercs2_formats::hash::pandemic_hash_m2(&class.stem);
+                    if !stems.contains(&key) {
+                        stems.push(key);
+                        push(Access::Write, (Claim::ShaderStem { key }, Some(class.stem.clone())), Intent::Additive);
+                    }
+                    let key = mercs2_formats::hash::pandemic_hash_m2(&class.name);
+                    push(Access::Write, (Claim::ShaderName { key }, Some(class.name.clone())), Intent::Additive);
+                }
             }
             Contribution::ReplaceShader { target, .. } => {
-                push(Access::Write, Claim::asset(target), Intent::ReplaceExclusive);
+                let key = mercs2_formats::hash::pandemic_hash_m2(target);
+                push(Access::Write, (Claim::ShaderStem { key }, Some(target.clone())), Intent::ReplaceExclusive);
             }
-            // Novel particle effect. New hash, Additive.
-            Contribution::AddFx { name, .. } => {
+            // A new effect (a new hash in the effects block) and its template: the template's name
+            // and derived key are each a key across the set, and the worldentity they are appended
+            // to is merged by `qm link`, every Shipment's templates in load order.
+            Contribution::AddFx { name, template, .. } => {
                 push(Access::Write, Claim::asset(name), Intent::Additive);
+                push(
+                    Access::Write,
+                    (
+                        Claim::Template { name_hash: mercs2_formats::hash::pandemic_hash_m2(&template.name) },
+                        Some(template.name.clone()),
+                    ),
+                    Intent::Additive,
+                );
+                push(
+                    Access::Write,
+                    (
+                        Claim::TemplateKey { key: mercs2_formats::worldentity::derived_template_key(&template.name) },
+                        Some(template.name.clone()),
+                    ),
+                    Intent::Additive,
+                );
+                push(
+                    Access::Write,
+                    (
+                        Claim::Asset { hash: mercs2_formats::worldentity::RETAIL_WORLDENTITY_NAME_HASH },
+                        Some("worldentity".into()),
+                    ),
+                    Intent::Merged,
+                );
             }
+            // A sprite: its frame key is a key across the set, and the fxdict its record joins and the
+            // atlas its texels are drawn into are merged by `qm link`, every Shipment's sprites
+            // together.
+            Contribution::AddFxSprite { name, .. } => {
+                push(
+                    Access::Write,
+                    (Claim::FxFrame { key: mercs2_formats::hash::pandemic_hash_m2(name) }, Some(name.clone())),
+                    Intent::Additive,
+                );
+                push(
+                    Access::Write,
+                    (Claim::Asset { hash: crate::fx::FXDICT_NAME_HASH }, Some("fxdict".into())),
+                    Intent::Merged,
+                );
+                push(
+                    Access::Write,
+                    (Claim::Asset { hash: crate::sprite::VFX_ATLAS }, Some("vfx".into())),
+                    Intent::Merged,
+                );
+            }
+            // An edit of one effect: a second Shipment editing it is a hard conflict. A target
+            // written as a template resolves to its effect only against the game's worldentity, so
+            // `qm link` makes that claim ([`crate::fx::conflicts`]); here the effect named directly
+            // is claimed.
             Contribution::ReplaceFx { target, .. } => {
-                push(Access::Write, Claim::asset(target), Intent::ReplaceExclusive);
+                if let crate::manifest::FxTarget::Effect { effect } = target {
+                    push(Access::Write, Claim::asset(effect), Intent::ReplaceExclusive);
+                }
             }
             // Terrain cell wholesale replace. Same-hash; two replacements are a hard conflict.
             Contribution::ReplaceTerrainCell { target, .. } => {
@@ -397,6 +626,7 @@ pub fn claims(manifest: &Manifest) -> Vec<ClaimRecord> {
                     Access::Write,
                     bare(Claim::Script {
                         name: catalog_script.into(),
+                        level: crate::link::Level::Vz,
                     }),
                     Intent::Additive,
                 );
@@ -404,6 +634,7 @@ pub fn claims(manifest: &Manifest) -> Vec<ClaimRecord> {
                     Access::Write,
                     bare(Claim::Script {
                         name: "mrxrewarddata".into(),
+                        level: crate::link::Level::Vz,
                     }),
                     Intent::Additive,
                 );
@@ -418,6 +649,31 @@ pub fn claims(manifest: &Manifest) -> Vec<ClaimRecord> {
             Contribution::EditWorld { layer, .. } => {
                 push(Access::Write, Claim::asset(layer), Intent::ReplaceExclusive);
             }
+            // The stand-in's model (a new hash), the cell it stands in for, and the layer block its
+            // placement goes into. The build carries all of one Shipment's placements in a layer in
+            // one overlay of its block, so the layer is claimed once per Shipment, by the first
+            // stand-in that names it; another Shipment's write to the layer is a conflict.
+            Contribution::AddTinyGeometry { layer, cell, key, .. } => {
+                push(
+                    Access::Write,
+                    Claim::asset(&crate::tiny::model_name(layer, cell.row, cell.col, *key)),
+                    Intent::Additive,
+                );
+                push(
+                    Access::Write,
+                    (
+                        Claim::TinyCell { layer: crate::manifest::asset_hash(layer), row: cell.row, col: cell.col },
+                        Some(format!("{layer} cell (row {}, col {})", cell.row, cell.col)),
+                    ),
+                    Intent::Additive,
+                );
+                let earlier = manifest.contributions[..index]
+                    .iter()
+                    .any(|c| matches!(c, Contribution::AddTinyGeometry { layer: l, .. } if l == layer));
+                if !earlier {
+                    push(Access::Write, Claim::asset(layer), Intent::Additive);
+                }
+            }
             // No Data half — its whole effect is a registration baked into `qm_modloader`, reached by
             // the same one-line trampoline `add_ui` appends to `wifpmcinterior`. Additive, so N layer
             // mods (and UI mods) fold to one trampoline and one loader rather than conflicting.
@@ -426,6 +682,7 @@ pub fn claims(manifest: &Manifest) -> Vec<ClaimRecord> {
                     Access::Write,
                     bare(Claim::Script {
                         name: "wifpmcinterior".into(),
+                        level: crate::link::Level::Vz,
                     }),
                     Intent::Additive,
                 );
@@ -564,8 +821,8 @@ pub fn self_conflicts(manifest: &Manifest) -> Vec<SelfConflict> {
         let entry = by_claim
             .entry(r.claim)
             .or_insert_with(|| (r.class, Vec::new(), r.name.clone()));
-        if r.class == MergeClass::Exclusive {
-            entry.0 = MergeClass::Exclusive;
+        if strictness(r.class) > strictness(entry.0) {
+            entry.0 = r.class;
         }
         if entry.2.is_none() {
             entry.2 = r.name.clone();
@@ -631,33 +888,53 @@ impl std::fmt::Display for Conflict {
 /// outfit claim different `OutfitSlot`s and share an `OrderedList` script, so they compose. Two
 /// Shipments replacing the same texture are `LastWins` — the user picks with load order.
 pub fn conflicts(shipments: &[(&str, &Manifest)]) -> Vec<Conflict> {
-    let mut by_claim: BTreeMap<Claim, (MergeClass, Vec<Claimant>, Option<String>)> =
-        BTreeMap::new();
+    let mut by_claim: BTreeMap<Claim, Vec<(ClaimRecord, String)>> = BTreeMap::new();
     for (name, manifest) in shipments {
         for r in claims(manifest)
             .into_iter()
             .filter(|r| r.access == Access::Write)
         {
-            let entry = by_claim
-                .entry(r.claim)
-                .or_insert_with(|| (r.class, Vec::new(), r.name.clone()));
-            // Fail closed: if two contributions disagree about a target's class, take the stricter.
-            // This is what stops a `raw` block laundering an asset into permissive semantics by
-            // declaring a target some typed contribution also claims.
-            if r.class == MergeClass::Exclusive {
-                entry.0 = MergeClass::Exclusive;
-            }
-            if entry.2.is_none() {
-                entry.2 = r.name.clone();
-            }
-            entry.1.push(Claimant {
-                shipment: (*name).to_string(),
-                index: r.index,
-            });
+            by_claim.entry(r.claim.clone()).or_default().push((r, (*name).to_string()));
         }
     }
+    let requires = |shipment: &str| -> Vec<String> {
+        shipments
+            .iter()
+            .filter(|(n, _)| *n == shipment)
+            .flat_map(|(_, m)| crate::fx::required_shipments(m))
+            .map(str::to_string)
+            .collect()
+    };
     by_claim
         .into_iter()
+        .map(|(claim, mut records)| {
+            // A `replace_fx` of an effect another Shipment's `add_fx` adds is applied after that
+            // Shipment, and is allowed exactly when it requires that Shipment: the adder then drops
+            // out, and only the replacements are weighed against each other.
+            let adders: Vec<&String> =
+                records.iter().filter(|(r, _)| r.kind == "add_fx").map(|(_, s)| s).collect();
+            if let [adder] = adders.as_slice() {
+                let adder = (*adder).clone();
+                let replacers: Vec<&String> =
+                    records.iter().filter(|(r, _)| r.kind != "add_fx").map(|(_, s)| s).collect();
+                if !replacers.is_empty()
+                    && records.iter().all(|(r, s)| r.kind == "add_fx" || (r.kind == "replace_fx" && requires(s).contains(&adder)))
+                {
+                    records.retain(|(r, _)| r.kind != "add_fx");
+                }
+            }
+            // Fail closed: if two contributions disagree about a target's class, take the strictest
+            // ([`strictness`]), whatever order they come in.
+            let class = records
+                .iter()
+                .map(|(r, _)| r.class)
+                .max_by_key(|c| strictness(*c))
+                .expect("a claim has a claimant");
+            let name = records.iter().find_map(|(r, _)| r.name.clone());
+            let claimants: Vec<Claimant> =
+                records.into_iter().map(|(r, shipment)| Claimant { shipment, index: r.index }).collect();
+            (claim, (class, claimants, name))
+        })
         .filter_map(|(claim, (class, claimants, name))| {
             let distinct: std::collections::BTreeSet<&str> =
                 claimants.iter().map(|c| c.shipment.as_str()).collect();

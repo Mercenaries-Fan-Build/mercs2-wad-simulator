@@ -74,7 +74,10 @@ enum Command {
         /// Also write the findings as JSON (lint-report.json) to this file. Any older file there is
         /// removed first; when lint cannot run (exit 2), no report is written.
         #[arg(long, value_name = "FILE")]
-        report: Option<PathBuf>,
+        report: Option<PathBuf>,        /// The directory holding the game's original shader3.bin and shader3Low.bin. The shader
+        /// kinds read the stores only from here; required when any is present.
+        #[arg(long, value_name = "DIR")]
+        original_data: Option<PathBuf>,
     },
     /// Check version ranges with the same semver grammar qm applies to manifest ranges (M0172).
     /// Hermetic: no Shipment, no game, no network.
@@ -140,6 +143,10 @@ enum Command {
         /// hash → name lookup, for M0130. Defaults to the workspace's data/production_names.json.
         #[arg(long, value_name = "FILE")]
         names: Option<PathBuf>,
+        /// The directory holding the game's original shader3.bin and shader3Low.bin. The shader
+        /// kinds read the stores only from here; required when any is present.
+        #[arg(long, value_name = "DIR")]
+        original_data: Option<PathBuf>,
     },
     /// Check a set of Shipments before building: requirements, versions, conflicts, superseded
     /// legacy files and the load order. Writes <out>/load-plan.json. No WAD is opened.
@@ -185,6 +192,10 @@ enum Command {
         /// ships it). Used only when --corpus is absent. Env: MERCS2_WORKSHOP_DATA.
         #[arg(long, value_name = "DIR")]
         workshop_data: Option<PathBuf>,
+        /// The directory holding the game's original shader3.bin and shader3Low.bin. The shader
+        /// kinds read the stores only from here; required when any is present.
+        #[arg(long, value_name = "DIR")]
+        original_data: Option<PathBuf>,
     },
     /// Extract a destructible's state machine as an editable `states:` file.
     ///
@@ -216,6 +227,23 @@ enum Command {
         #[arg(long, value_name = "FILE")]
         names: Option<PathBuf>,
     },
+    /// Take a TINY stand-in apart into an `add_tiny_geometry` contribution and its model.
+    ///
+    /// Writes the model to `<out>/src/<model>.glb` and prints the contribution that rebuilds it: the
+    /// layer, cell and key read from the model's name, the objects from its slot list. The
+    /// stand-in's `TinyGeometryObject` placement must be in its layer.
+    ExtractTiny {
+        /// The stand-in model, by name: `<layer>_tinygeometry_tgr<row>_tgc<col>_0x<key>`.
+        model: String,
+        /// The Shipment directory the model is written under (`src/`).
+        #[arg(long, value_name = "DIR")]
+        out: PathBuf,
+        #[arg(long, value_name = "DIR")]
+        game: Option<PathBuf>,
+        /// hash → name lookup, so a texture reads by name. Defaults to the workspace's names.
+        #[arg(long, value_name = "FILE")]
+        names: Option<PathBuf>,
+    },
     /// List every rule: what is checked, what is known-but-unchecked, and where each is documented.
     Rules,
     /// List every contribution kind this qm reads — the authoritative list. Hermetic: no Shipment,
@@ -238,12 +266,14 @@ fn main() -> ExitCode {
             game,
             names,
             report,
+            original_data,
         } => cmd_lint(
             &shipment,
             with_game,
             game.as_deref(),
             names.as_deref(),
             report.as_deref(),
+            original_data.as_deref(),
         ),
         Command::CheckRange { report, ranges } => cmd_check_range(&report, &ranges),
         Command::ManifestInfo { manifest } => cmd_manifest_info(&manifest),
@@ -259,6 +289,7 @@ fn main() -> ExitCode {
             corpus,
             workshop_data,
             names,
+            original_data,
         } => cmd_build(
             &shipment,
             game.as_deref(),
@@ -266,6 +297,7 @@ fn main() -> ExitCode {
             corpus.as_deref(),
             workshop_data.as_deref(),
             names.as_deref(),
+            original_data.as_deref(),
         ),
         Command::Preflight {
             shipments,
@@ -280,6 +312,7 @@ fn main() -> ExitCode {
             out,
             corpus,
             workshop_data,
+            original_data,
         } => cmd_link(
             &shipments,
             request.as_deref(),
@@ -287,6 +320,7 @@ fn main() -> ExitCode {
             &out,
             corpus.as_deref(),
             workshop_data.as_deref(),
+            original_data.as_deref(),
         ),
         Command::ExtractStates {
             target,
@@ -298,6 +332,12 @@ fn main() -> ExitCode {
             game,
             names,
         } => cmd_extract_world(&layer, game.as_deref(), names.as_deref()),
+        Command::ExtractTiny {
+            model,
+            out,
+            game,
+            names,
+        } => cmd_extract_tiny(&model, &out, game.as_deref(), names.as_deref()),
         Command::Rules => cmd_rules(),
         Command::Kinds { json } => cmd_kinds(json),
     }
@@ -358,15 +398,22 @@ fn resolve_names(explicit: Option<&Path>) -> Option<NameTable> {
 /// Resolve the game stack: an explicit path wins, otherwise host discovery.
 ///
 /// `--game` may name `vz.wad`, the install root or its `data` folder, the same as for
-/// `qm preflight` ([`compat::resolve_vz_wad`]). The manifest is never consulted. A Shipment that
-/// could name its own game folder would be a Shipment that behaves differently on the author's
-/// machine than on anyone else's.
-fn resolve_game(explicit: Option<&Path>) -> Result<GameStack, ExitCode> {
+/// `qm preflight` ([`compat::resolve_vz_wad`]). No manifest names a path, so a Shipment reads the
+/// game from whichever install the host resolves. The manifests decide only which language WADs
+/// beside `vz.wad` join the stack ([`compat::game_stack_paths`]).
+fn resolve_game<'a>(
+    explicit: Option<&Path>,
+    manifests: impl IntoIterator<Item = &'a mercs2_quartermaster::Manifest>,
+) -> Result<GameStack, ExitCode> {
     let vz = compat::resolve_vz_wad(explicit).map_err(|e| {
         eprintln!("error: {e}\nnote: `qm lint` needs no game install and will still run.");
         ExitCode::from(EXIT_UNUSABLE)
     })?;
-    GameStack::open(&[vz]).map_err(|e| {
+    let paths = compat::game_stack_paths(&vz, manifests).map_err(|e| {
+        eprintln!("error: {e}");
+        ExitCode::from(EXIT_UNUSABLE)
+    })?;
+    GameStack::open(&paths).map_err(|e| {
         eprintln!("error: {e}");
         ExitCode::from(EXIT_UNUSABLE)
     })
@@ -378,6 +425,7 @@ fn cmd_lint(
     game_dir: Option<&Path>,
     names_path: Option<&Path>,
     report_file: Option<&Path>,
+    original_data: Option<&Path>,
 ) -> ExitCode {
     // The stale report goes first, so every exit-2 path below leaves no report behind.
     if let Some(file) = report_file {
@@ -394,9 +442,35 @@ fn cmd_lint(
     let mut found = lint::lint(&shipment.manifest, Some(&shipment.root), names.as_ref());
 
     if with_game {
-        match resolve_game(game_dir) {
-            Ok(stack) => found.extend(lint::game_checks(&shipment.manifest, &stack)),
+        let mut stack = match resolve_game(game_dir, [&shipment.manifest]) {
+            Ok(stack) => stack,
             Err(code) => return code,
+        };
+        found.extend(lint::game_checks(&shipment.manifest, &mut stack));
+        match lint::fx_game_checks(&shipment.manifest, &shipment.root, &mut stack) {
+            Ok(d) => found.extend(d),
+            Err(e) => {
+                eprintln!("error: effects and sprites: {e}");
+                return ExitCode::from(EXIT_UNUSABLE);
+            }
+        }
+        if mercs2_quartermaster::shader::has_shader_kinds(&shipment.manifest) {
+            let Some(original) = original_data else {
+                eprintln!(
+                    "error: the shader kinds read shader3.bin and shader3Low.bin only from the \
+                     original data directory: pass --original-data <dir>"
+                );
+                return ExitCode::from(EXIT_UNUSABLE);
+            };
+            let checked = mercs2_quartermaster::shader::game_data_dir(&stack)
+                .and_then(|data| lint::shader_game_checks(&shipment.manifest, &shipment.root, &data, original));
+            match checked {
+                Ok(d) => found.extend(d),
+                Err(e) => {
+                    eprintln!("error: shader stores: {e}");
+                    return ExitCode::from(EXIT_UNUSABLE);
+                }
+            }
         }
     }
 
@@ -599,6 +673,7 @@ fn cmd_build(
     corpus: Option<&Path>,
     workshop_data: Option<&Path>,
     names_path: Option<&Path>,
+    original_data: Option<&Path>,
 ) -> ExitCode {
     let shipment = match load(root) {
         Ok(s) => s,
@@ -614,7 +689,7 @@ fn cmd_build(
             return ExitCode::from(EXIT_UNUSABLE);
         }
     };
-    let mut stack = match resolve_game(game_dir) {
+    let mut stack = match resolve_game(game_dir, [&shipment.manifest]) {
         Ok(s) => s,
         Err(code) => return code,
     };
@@ -626,6 +701,7 @@ fn cmd_build(
         names.as_ref(),
         out,
         corpus.as_deref(),
+        original_data,
     ) {
         Ok(report_) => {
             for line in &report_.log {
@@ -653,7 +729,7 @@ fn cmd_build(
 }
 
 fn cmd_extract_states(target: &str, game_dir: Option<&Path>, names_path: Option<&Path>) -> ExitCode {
-    let mut stack = match resolve_game(game_dir) {
+    let mut stack = match resolve_game(game_dir, []) {
         Ok(s) => s,
         Err(code) => return code,
     };
@@ -676,7 +752,7 @@ fn cmd_extract_states(target: &str, game_dir: Option<&Path>, names_path: Option<
 }
 
 fn cmd_extract_world(layer: &str, game_dir: Option<&Path>, names_path: Option<&Path>) -> ExitCode {
-    let mut stack = match resolve_game(game_dir) {
+    let mut stack = match resolve_game(game_dir, []) {
         Ok(s) => s,
         Err(code) => return code,
     };
@@ -713,6 +789,63 @@ fn cmd_extract_world(layer: &str, game_dir: Option<&Path>, names_path: Option<&P
     let names = resolve_names(names_path);
     let model_name = |h: u32| names.as_ref().and_then(|n| n.reverse(h)).map(|s| s.to_string());
     print!("{}", mercs2_quartermaster::world::extract(&dumped, model_name));
+    ExitCode::SUCCESS
+}
+
+fn cmd_extract_tiny(model: &str, out: &Path, game_dir: Option<&Path>, names_path: Option<&Path>) -> ExitCode {
+    use mercs2_quartermaster::tiny;
+    let fail = |m: String| {
+        eprintln!("error: {m}");
+        ExitCode::from(EXIT_UNUSABLE)
+    };
+    let Some((layer, row, col, key)) = tiny::parse_model_name(model) else {
+        return fail(format!(
+            "{model:?} is not a stand-in name: <layer>_tinygeometry_tgr<row>_tgc<col>_0x<key>"
+        ));
+    };
+    let mut stack = match resolve_game(game_dir, []) {
+        Ok(s) => s,
+        Err(code) => return code,
+    };
+    let hash = mercs2_quartermaster::manifest::asset_hash(model);
+    let Some(inputs) = stack.model_container_for_edit(hash) else {
+        return fail(format!("{model:?} (0x{hash:08X}) is not a model in the game stack"));
+    };
+    let decoded = match mercs2_formats::tiny_model::TinyModel::decode(&inputs.container) {
+        Ok(m) => m,
+        Err(e) => return fail(format!("{model:?} is not a TINY container: {e}")),
+    };
+    let layer_c = match stack.layer_by_name(&layer) {
+        Ok(Some((li, entry))) => {
+            let (_, entries) = mercs2_formats::ucfx::parse_block_entry_table(&li.block);
+            mercs2_formats::placement_build::find_entry(&li.block, entries[entry].name_hash, entries[entry].type_hash)
+                .map(|(_, c)| c.to_vec())
+        }
+        Ok(None) => None,
+        Err(e) => return fail(e),
+    };
+    let Some(layer_c) = layer_c else {
+        return fail(format!("layer {layer:?} is not in the game stack"));
+    };
+    let records = match mercs2_formats::placement_build::read_layer_records(&layer_c) {
+        Ok(r) => r,
+        Err(e) => return fail(format!("layer {layer:?}: {e}")),
+    };
+    if !records.models.iter().any(|(k, h)| *k == key && *h == hash) {
+        return fail(format!("layer {layer:?} has no placement 0x{key:08X} of {model:?}"));
+    }
+    let names = resolve_names(names_path);
+    let texture_name = |h: u32| names.as_ref().and_then(|n| n.reverse(h)).map(|s| s.to_string());
+    let d = match tiny::decompose(&decoded, row, col, &texture_name) {
+        Ok(d) => d,
+        Err(e) => return fail(format!("{model:?}: {e}")),
+    };
+    let rel = format!("src/{model}.glb");
+    let path = out.join(&rel);
+    if let Err(e) = std::fs::create_dir_all(out.join("src")).and_then(|_| std::fs::write(&path, &d.glb)) {
+        return fail(format!("{}: {e}", path.display()));
+    }
+    print!("{}", tiny::contribution_yaml(&layer, row, col, key, &d.objects, &rel));
     ExitCode::SUCCESS
 }
 
@@ -874,6 +1007,7 @@ fn cmd_link(
     out: &Path,
     corpus: Option<&Path>,
     workshop_data: Option<&Path>,
+    original_data: Option<&Path>,
 ) -> ExitCode {
     // The stale plan goes first, so every exit-2 path below leaves no plan behind.
     if let Err(e) = plan::remove_stale(out) {
@@ -888,7 +1022,7 @@ fn cmd_link(
         Ok(o) => o,
         Err(code) => return code,
     };
-    let mut stack = match resolve_game(game_dir) {
+    let mut stack = match resolve_game(game_dir, opened.iter().map(|s| &s.manifest)) {
         Ok(s) => s,
         Err(code) => return code,
     };
@@ -917,7 +1051,7 @@ fn cmd_link(
             shipment,
         })
         .collect();
-    match build::link_installed(&inputs, &mut stack, &corpus, out) {
+    match build::link_installed(&inputs, &mut stack, &corpus, out, original_data) {
         Ok(report_) => {
             for line in &report_.log {
                 println!("{line}");
@@ -998,7 +1132,7 @@ fn cmd_rules() -> ExitCode {
         println!("  {}  {}\n      {}", r.code, r.title, r.url());
     }
     println!("\nNeed the retail WADs — `qm lint --with-game`, and always during `qm build`:");
-    for r in [lint::M0007_MULTI_RUNG_REPLACE, lint::M0009_NO_PRIMARY_ROW, lint::M0192_MOVIE_UNREFERENCED, lint::M0193_STATE_OFF_VOCABULARY] {
+    for r in lint::GAME_RULES {
         println!("  {}  {}\n      {}", r.code, r.title, r.url());
     }
     println!("\nChecked against the WAD the builder emits, before it reaches disk:");

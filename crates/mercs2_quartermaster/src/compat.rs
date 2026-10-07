@@ -86,6 +86,47 @@ pub fn resolve_vz_wad(explicit: Option<&Path>) -> Result<PathBuf, String> {
     }
 }
 
+/// The languages whose WADs a set of Shipments reads: the language of every sound override that
+/// declares one, and English for an `add_language`, whose voice-over tables fork `English.wad`'s.
+pub fn declared_languages<'a>(
+    manifests: impl IntoIterator<Item = &'a Manifest>,
+) -> std::collections::BTreeSet<crate::manifest::Language> {
+    let mut out = std::collections::BTreeSet::new();
+    for c in manifests.into_iter().flat_map(|m| m.contributions.iter()) {
+        match c {
+            crate::manifest::Contribution::ReplaceSoundBank { language: Some(l), .. }
+            | crate::manifest::Contribution::ReplaceSoundCue { language: Some(l), .. } => {
+                out.insert(*l);
+            }
+            crate::manifest::Contribution::AddLanguage { .. } => {
+                out.insert(crate::manifest::Language::English);
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+/// The WADs to open for `manifests`, in mount order: `vz_wad`, then the WAD of each declared
+/// language ([`declared_languages`]) from the same folder, `<token>.wad` matched
+/// case-insensitively. The engine mounts the language WAD above the level WAD
+/// (`docs/fixpack/wad_duplicate_inventory.md` §B.2), and [`crate::game::GameStack`] resolves the
+/// last-opened WAD first, so the stack reads as the game does. A declared language whose WAD is not
+/// there is an error.
+pub fn game_stack_paths<'a>(
+    vz_wad: &Path,
+    manifests: impl IntoIterator<Item = &'a Manifest>,
+) -> Result<Vec<PathBuf>, String> {
+    let mut paths = vec![vz_wad.to_path_buf()];
+    for language in declared_languages(manifests) {
+        let file = format!("{}.wad", language.token());
+        paths.push(crate::sound::sibling_wad(vz_wad, &file).map_err(|e| {
+            format!("a contribution reads the {} WAD: {e}", language.token())
+        })?);
+    }
+    Ok(paths)
+}
+
 /// The game folder: the parent of the `data` directory holding `vz.wad`.
 ///
 /// The directory holding `vz.wad` must be named `data` (compared case-insensitively). Anything
@@ -238,6 +279,7 @@ pub fn plan(
             plugins,
             runtime_dlls,
             placed_files,
+            data_files: crate::shader::data_files(m),
         });
     }
 
@@ -654,6 +696,11 @@ pub fn plan(
         conflicts,
         supersedes,
         link_block_paths: build::link_block_paths(inputs.iter().map(|i| &i.shipment.manifest)),
+        link_file_paths: if inputs.iter().any(|i| crate::shader::has_shader_kinds(&i.shipment.manifest)) {
+            crate::shader::DataFile::ALL.to_vec()
+        } else {
+            Vec::new()
+        },
         findings,
     })
 }

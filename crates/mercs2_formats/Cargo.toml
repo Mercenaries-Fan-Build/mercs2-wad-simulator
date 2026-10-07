@@ -25,8 +25,88 @@ cmac = "0.7"
 # `char_skin::automap` classifies every source bone BY NAME to map it onto the Mercenaries rig.
 # Without it the whole skinned path degrades to anonymous joints. It only retains the name strings
 # the file already carries — no extra dependencies.
-gltf = { version = "1", default-features = false, features = ["utils", "names"] }
+#
+# `extras` parses the underscore-prefixed custom vertex attributes (`mesh_import` reads
+# `_SWAY_WEIGHT`); without it the validator rejects any file that carries one.
+gltf ={ version = "1", default-features = false, features = ["utils", "names", "extras"] }
 
 [dev-dependencies]
 serde_json = "1"
 mercs2_audio = { path = "../mercs2_audio" }
+
+[features]
+# Builds the game-gated tests, which read the retail vz.wad named by the repo-root .mercs2-local.toml;
+# run them with `cargo xtask retail-test`.
+retail = []
+
+[[test]]
+name = "anim_container_roundtrip"
+required-features = ["retail"]
+
+[[test]]
+name = "char_lowering"
+required-features = ["retail"]
+
+[[test]]
+name = "effect_retail_roundtrip"
+required-features = ["retail"]
+
+[[test]]
+name = "fxdict_atlas_retail"
+required-features = ["retail"]
+
+[[test]]
+name = "mtrl_retail"
+required-features = ["retail"]
+
+[[test]]
+name = "novel_asset_shape_survey"
+required-features = ["retail"]
+
+[[test]]
+name = "placement_roundtrip_survey"
+required-features = ["retail"]
+
+[[test]]
+name = "placement_writer"
+required-features = ["retail"]
+
+[[test]]
+name = "placement_in_place_retail"
+required-features = ["retail"]
+
+[[test]]
+name = "scripts_block_survey"
+required-features = ["retail"]
+
+[[test]]
+name = "scrub_retail"
+required-features = ["retail"]
+
+[[test]]
+name = "state_machine_layout_survey"
+required-features = ["retail"]
+
+[[test]]
+name = "state_machine_roundtrip_survey"
+required-features = ["retail"]
+
+[[test]]
+name = "state_machine_writer"
+required-features = ["retail"]
+
+[[test]]
+name = "terrainmesh_retail"
+required-features = ["retail"]
+
+[[test]]
+name = "tiny_model_retail"
+required-features = ["retail"]
+
+[[test]]
+name = "type_ids_match_the_wad"
+required-features = ["retail"]
+
+[[test]]
+name = "worldentity_retail"
+required-features = ["retail"]

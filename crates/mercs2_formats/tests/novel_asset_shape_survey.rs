@@ -43,6 +43,9 @@
 //! **Video is not an ASET type at all.** There is no Bink/video row in the registry — retail ships
 //! movies as loose files under `data/Movies`, so "a new movie clip" is either a Scaleform
 //! `cfx_pack` (already expressible via `add_movie`) or a file placement, never a new WAD kind.
+//!
+//! Game-gated: built by the `retail` feature, reads the `vz.wad` named by the repo-root
+//! `.mercs2-local.toml`, and fails if it is absent.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -51,8 +54,9 @@ use mercs2_formats::ffcs::load_ffcs_archive;
 use mercs2_formats::sges::decompress_block;
 use mercs2_formats::ucfx::parse_block_entry_table;
 
-fn vz_wad() -> Option<PathBuf> {
-    mercs2_formats::game_paths::vz_wad(Path::new(env!("CARGO_MANIFEST_DIR")))
+fn vz_wad() -> PathBuf {
+    mercs2_formats::game_paths::local_config_vz_wad(Path::new(env!("CARGO_MANIFEST_DIR")))
+        .unwrap_or_else(|e| panic!("{e}"))
 }
 
 fn u32_le(b: &[u8], o: usize) -> u32 {
@@ -141,10 +145,7 @@ struct TypeCensus {
 
 #[test]
 fn which_asset_types_are_opaque_wrappers() {
-    let Some(wad) = vz_wad() else {
-        eprintln!("SKIPPING: no vz.wad (set MERCS2_GAME_DIR or .mercs2-local.toml)");
-        return;
-    };
+    let wad = vz_wad();
     let mut file = std::fs::File::open(&wad).expect("open vz.wad");
     let size = file.metadata().expect("stat").len();
     let archive = load_ffcs_archive(&mut file, size).expect("read FFCS");
@@ -177,16 +178,18 @@ fn which_asset_types_are_opaque_wrappers() {
     }
 
     for bi in blocks {
-        let Ok(dec) = decompress_block(&mut file, &archive.indx, bi) else {
-            continue;
-        };
+        let dec = decompress_block(&mut file, &archive.indx, bi)
+            .unwrap_or_else(|e| panic!("decompress block {bi}: {e}"));
         let (_n, entries) = parse_block_entry_table(&dec);
         let mut pos = 4 + entries.len() * 16;
-        for e in &entries {
-            let end = (pos + e.chunk_size as usize).min(dec.len());
-            if pos >= end {
-                break;
-            }
+        for (ei, e) in entries.iter().enumerate() {
+            let end = pos + e.chunk_size as usize;
+            assert!(
+                end <= dec.len(),
+                "block {bi}: entry {ei} (0x{:08X}) runs past the {}-byte block",
+                e.name_hash,
+                dec.len()
+            );
             let container = &dec[pos..end];
             pos = end;
             let Some(&tid) = type_of.get(&e.name_hash) else { continue };
@@ -283,10 +286,7 @@ fn which_asset_types_are_opaque_wrappers() {
 /// being hardcoded English.
 #[test]
 fn retail_string_tables_survive_a_parse_build_round_trip() {
-    let Some(wad) = vz_wad() else {
-        eprintln!("SKIPPING: no vz.wad");
-        return;
-    };
+    let wad = vz_wad();
     let mut file = std::fs::File::open(&wad).expect("open vz.wad");
     let size = file.metadata().expect("stat").len();
     let archive = load_ffcs_archive(&mut file, size).expect("read FFCS");
@@ -311,34 +311,36 @@ fn retail_string_tables_survive_a_parse_build_round_trip() {
     let mut differed: Vec<String> = Vec::new();
 
     for bi in blocks {
-        let Ok(dec) = decompress_block(&mut file, &archive.indx, bi) else {
-            continue;
-        };
+        let dec = decompress_block(&mut file, &archive.indx, bi)
+            .unwrap_or_else(|e| panic!("decompress block {bi}: {e}"));
         let (_n, entries) = parse_block_entry_table(&dec);
         let mut pos = 4 + entries.len() * 16;
-        for e in &entries {
-            let end = (pos + e.chunk_size as usize).min(dec.len());
-            if pos >= end {
-                break;
-            }
+        for (ei, e) in entries.iter().enumerate() {
+            let end = pos + e.chunk_size as usize;
+            assert!(
+                end <= dec.len(),
+                "block {bi}: entry {ei} (0x{:08X}) runs past the {}-byte block",
+                e.name_hash,
+                dec.len()
+            );
             let container = &dec[pos..end];
             pos = end;
             if !stringdbs.contains(&e.name_hash) {
                 continue;
             }
-            let Some(syek) = mercs2_formats::ucfx::extract_chunk_body(container, b"KEYS") else {
-                continue;
-            };
-            let Some(srts) = mercs2_formats::ucfx::extract_chunk_body(container, b"STRS") else {
-                continue;
-            };
+            let syek = mercs2_formats::ucfx::extract_chunk_body(container, b"KEYS").unwrap_or_else(|| {
+                panic!("block {bi}: stringdb 0x{:08X} has no KEYS chunk", e.name_hash)
+            });
+            let srts = mercs2_formats::ucfx::extract_chunk_body(container, b"STRS").unwrap_or_else(|| {
+                panic!("block {bi}: stringdb 0x{:08X} has no STRS chunk", e.name_hash)
+            });
             checked += 1;
             match mercs2_formats::stringdb::parse(&syek, &srts) {
                 Ok(db) => {
                     let (k2, s2) = mercs2_formats::stringdb::build(&db);
                     if k2 == syek && s2 == srts {
                         identical += 1;
-                    } else if differed.len() < 10 {
+                    } else {
                         differed.push(format!(
                             "0x{:08X}: keys {}→{} strings {}→{}",
                             e.name_hash,
@@ -349,11 +351,7 @@ fn retail_string_tables_survive_a_parse_build_round_trip() {
                         ));
                     }
                 }
-                Err(m) => {
-                    if differed.len() < 10 {
-                        differed.push(format!("0x{:08X}: parse failed: {m}", e.name_hash));
-                    }
-                }
+                Err(m) => differed.push(format!("0x{:08X}: parse failed: {m}", e.name_hash)),
             }
         }
     }
@@ -364,4 +362,12 @@ fn retail_string_tables_survive_a_parse_build_round_trip() {
         eprintln!("    {d}");
     }
     eprintln!("═════════════════════════════\n");
+    assert!(checked > 0, "no stringdb container found for the {} stringdb ASET assets", stringdbs.len());
+    assert!(
+        differed.is_empty(),
+        "{} of {checked} stringdb tables do not survive parse→build byte-identically:\n{}",
+        differed.len(),
+        differed.join("\n")
+    );
+    assert_eq!(identical, checked);
 }

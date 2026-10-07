@@ -67,9 +67,69 @@ contributions:
     normal_map: false
 
   - kind: add_sound
-    name: amb_myjungle
-    bank: src/audio/myjungle.bnk
-    sound: soundbank
+    bank: my_jungle
+    category: ambience
+    load_in: [gameplay, front_end]
+    cues:
+      - name: my_jungle_birds
+        wave: src/audio/birds.wav
+        group_gain_db: -4.0
+        cue_gain_db: -6.0
+        pitch_semitones: 0.0
+        positional: false
+        min_distance: 10.0
+        max_distance: 1000.0
+        distance_exponent: 1.0
+        doppler_scale: 1.0
+        start_limit: 0
+        sound_id: 0x0
+        priority: 0.95
+        group_20: 1.0
+        cue_16: 0
+        clip_hash: 0x0
+
+  - kind: replace_sound_bank
+    bank: vo_mattias
+    language: english
+    category: vo
+    cues:
+      - name: my_mattias_line
+        wave: src/audio/line.wav
+        group_gain_db: -4.0
+        cue_gain_db: -6.0
+        pitch_semitones: 0.0
+        positional: false
+        min_distance: 10.0
+        max_distance: 1000.0
+        distance_exponent: 1.0
+        doppler_scale: 1.0
+        start_limit: 0
+        sound_id: 0x0
+        priority: 0.95
+        group_20: 1.0
+        cue_16: 0
+        clip_hash: 0x0
+
+  - kind: replace_sound_cue
+    bank: ui_hud
+    category: ui
+    cue:
+      name: ui_PDA_Open_01_st
+      wave: src/audio/pda.wav
+      group_gain_db: -4.0
+      cue_gain_db: -6.0
+      pitch_semitones: 0.0
+      positional: false
+      min_distance: 10.0
+      max_distance: 1000.0
+      distance_exponent: 1.0
+      doppler_scale: 1.0
+      start_limit: 0
+      sound_id: 0x0
+      priority: 0.95
+      group_20: 1.0
+      cue_16: 0
+      clip_hash: 0x0
 
   - kind: edit_state_machine
     target: al_veh_boat_destroyer
@@ -78,6 +138,13 @@ contributions:
   - kind: edit_world
     layer: vz_state_pmccon004
     edits: src/world.yaml
+
+  - kind: add_tiny_geometry
+    layer: vz_state_mar_city_pristine
+    cell: { row: 28, col: 32 }
+    key: 1327103
+    objects: ["0x00097FF3", mar_city_tower]
+    model: src/tiny/tgr28_tgc32.glb
 
   - kind: activate_layer
     layer: vz_state_pmccon004_destroyed
@@ -164,20 +231,40 @@ contributions:
     trnm: src/anim/new_clip.trnm
 
   - kind: add_shader
-    name: my_shader
-    blob: src/shaders/my_shader.bin
+    family: vertex
+    classes:
+      - name: MyShaderVP
+        stem: MyShaderVP
+        shader: {asm: src/shaders/my_shader.asm}
+        shader_low: {blob: src/shaders/my_shader_low.bin}
 
   - kind: replace_shader
-    target: shipped_shader
-    blob: src/shaders/new_shader.bin
+    target: PgMeshVP
+    shader: {asm: src/shaders/mesh_vp.asm}
+    shader_low: {asm: src/shaders/mesh_vp_low.asm}
 
   - kind: add_fx
     name: my_fx
-    payload: src/fx/my_fx.fxdict
+    effect: src/fx/my_fx.yaml
+    template:
+      name: my_fx_template
+      name_flag: 1
+      components:
+        RedEffectComponent:
+          name: my_fx
+          "0x4D7D459B": 1.0
+          "0x87519019": 30
+        Label:
+          - { "0xFD084CCE": "0x3B5C3BAF" }
+          - { "0xFD084CCE": "0x9A1C21F3" }
 
   - kind: replace_fx
-    target: shipped_fx
-    payload: src/fx/new_fx.fxdict
+    target: { template: global_particle_explosion_c4 }
+    edits: src/fx/c4.yaml
+
+  - kind: add_fx_sprite
+    name: my_sprite
+    image: src/fx/my_sprite.png
 
   - kind: replace_terrain_cell
     target: shipped_cell
@@ -259,9 +346,23 @@ const JSON: &str = r#"
     },
     {
       "kind": "add_sound",
-      "name": "amb_myjungle",
-      "bank": "src/audio/myjungle.bnk",
-      "sound": "soundbank"
+      "bank": "my_jungle",
+      "category": "ambience",
+      "load_in": ["gameplay", "front_end"],
+      "cues": [{ "name": "my_jungle_birds", "wave": "src/audio/birds.wav", "group_gain_db": -4.0, "cue_gain_db": -6.0, "pitch_semitones": 0.0, "positional": false, "min_distance": 10.0, "max_distance": 1000.0, "distance_exponent": 1.0, "doppler_scale": 1.0, "start_limit": 0, "sound_id": 0, "priority": 0.95, "group_20": 1.0, "cue_16": 0, "clip_hash": 0 }]
+    },
+    {
+      "kind": "replace_sound_bank",
+      "bank": "vo_mattias",
+      "language": "english",
+      "category": "vo",
+      "cues": [{ "name": "my_mattias_line", "wave": "src/audio/line.wav", "group_gain_db": -4.0, "cue_gain_db": -6.0, "pitch_semitones": 0.0, "positional": false, "min_distance": 10.0, "max_distance": 1000.0, "distance_exponent": 1.0, "doppler_scale": 1.0, "start_limit": 0, "sound_id": 0, "priority": 0.95, "group_20": 1.0, "cue_16": 0, "clip_hash": 0 }]
+    },
+    {
+      "kind": "replace_sound_cue",
+      "bank": "ui_hud",
+      "category": "ui",
+      "cue": { "name": "ui_PDA_Open_01_st", "wave": "src/audio/pda.wav", "group_gain_db": -4.0, "cue_gain_db": -6.0, "pitch_semitones": 0.0, "positional": false, "min_distance": 10.0, "max_distance": 1000.0, "distance_exponent": 1.0, "doppler_scale": 1.0, "start_limit": 0, "sound_id": 0, "priority": 0.95, "group_20": 1.0, "cue_16": 0, "clip_hash": 0 }
     },
     {
       "kind": "edit_state_machine",
@@ -272,6 +373,14 @@ const JSON: &str = r#"
       "kind": "edit_world",
       "layer": "vz_state_pmccon004",
       "edits": "src/world.yaml"
+    },
+    {
+      "kind": "add_tiny_geometry",
+      "layer": "vz_state_mar_city_pristine",
+      "cell": { "row": 28, "col": 32 },
+      "key": 1327103,
+      "objects": ["0x00097FF3", "mar_city_tower"],
+      "model": "src/tiny/tgr28_tgc32.glb"
     },
     {
       "kind": "activate_layer",
@@ -374,23 +483,44 @@ const JSON: &str = r#"
     },
     {
       "kind": "add_shader",
-      "name": "my_shader",
-      "blob": "src/shaders/my_shader.bin"
+      "family": "vertex",
+      "classes": [
+        {
+          "name": "MyShaderVP",
+          "stem": "MyShaderVP",
+          "shader": {"asm": "src/shaders/my_shader.asm"},
+          "shader_low": {"blob": "src/shaders/my_shader_low.bin"}
+        }
+      ]
     },
     {
       "kind": "replace_shader",
-      "target": "shipped_shader",
-      "blob": "src/shaders/new_shader.bin"
+      "target": "PgMeshVP",
+      "shader": {"asm": "src/shaders/mesh_vp.asm"},
+      "shader_low": {"asm": "src/shaders/mesh_vp_low.asm"}
     },
     {
       "kind": "add_fx",
       "name": "my_fx",
-      "payload": "src/fx/my_fx.fxdict"
+      "effect": "src/fx/my_fx.yaml",
+      "template": {
+        "name": "my_fx_template",
+        "name_flag": 1,
+        "components": {
+          "RedEffectComponent": {"name": "my_fx", "0x4D7D459B": 1.0, "0x87519019": 30},
+          "Label": [{"0xFD084CCE": "0x3B5C3BAF"}, {"0xFD084CCE": "0x9A1C21F3"}]
+        }
+      }
     },
     {
       "kind": "replace_fx",
-      "target": "shipped_fx",
-      "payload": "src/fx/new_fx.fxdict"
+      "target": {"template": "global_particle_explosion_c4"},
+      "edits": "src/fx/c4.yaml"
+    },
+    {
+      "kind": "add_fx_sprite",
+      "name": "my_sprite",
+      "image": "src/fx/my_sprite.png"
     },
     {
       "kind": "replace_terrain_cell",
@@ -482,9 +612,23 @@ normal_map = false
 
 [[contributions]]
 kind = "add_sound"
-name = "amb_myjungle"
-bank = "src/audio/myjungle.bnk"
-sound = "soundbank"
+bank = "my_jungle"
+category = "ambience"
+load_in = ["gameplay", "front_end"]
+cues = [{ name = "my_jungle_birds", wave = "src/audio/birds.wav", group_gain_db = -4.0, cue_gain_db = -6.0, pitch_semitones = 0.0, positional = false, min_distance = 10.0, max_distance = 1000.0, distance_exponent = 1.0, doppler_scale = 1.0, start_limit = 0, sound_id = 0, priority = 0.95, group_20 = 1.0, cue_16 = 0, clip_hash = 0 }]
+
+[[contributions]]
+kind = "replace_sound_bank"
+bank = "vo_mattias"
+language = "english"
+category = "vo"
+cues = [{ name = "my_mattias_line", wave = "src/audio/line.wav", group_gain_db = -4.0, cue_gain_db = -6.0, pitch_semitones = 0.0, positional = false, min_distance = 10.0, max_distance = 1000.0, distance_exponent = 1.0, doppler_scale = 1.0, start_limit = 0, sound_id = 0, priority = 0.95, group_20 = 1.0, cue_16 = 0, clip_hash = 0 }]
+
+[[contributions]]
+kind = "replace_sound_cue"
+bank = "ui_hud"
+category = "ui"
+cue = { name = "ui_PDA_Open_01_st", wave = "src/audio/pda.wav", group_gain_db = -4.0, cue_gain_db = -6.0, pitch_semitones = 0.0, positional = false, min_distance = 10.0, max_distance = 1000.0, distance_exponent = 1.0, doppler_scale = 1.0, start_limit = 0, sound_id = 0, priority = 0.95, group_20 = 1.0, cue_16 = 0, clip_hash = 0 }
 
 [[contributions]]
 kind = "edit_state_machine"
@@ -495,6 +639,14 @@ states = "src/destroyer/states.yaml"
 kind = "edit_world"
 layer = "vz_state_pmccon004"
 edits = "src/world.yaml"
+
+[[contributions]]
+kind = "add_tiny_geometry"
+layer = "vz_state_mar_city_pristine"
+cell = { row = 28, col = 32 }
+key = 1327103
+objects = ["0x00097FF3", "mar_city_tower"]
+model = "src/tiny/tgr28_tgc32.glb"
 
 [[contributions]]
 kind = "activate_layer"
@@ -597,23 +749,49 @@ trnm = "src/anim/new_clip.trnm"
 
 [[contributions]]
 kind = "add_shader"
-name = "my_shader"
-blob = "src/shaders/my_shader.bin"
+family = "vertex"
+
+[[contributions.classes]]
+name = "MyShaderVP"
+stem = "MyShaderVP"
+shader = { asm = "src/shaders/my_shader.asm" }
+shader_low = { blob = "src/shaders/my_shader_low.bin" }
 
 [[contributions]]
 kind = "replace_shader"
-target = "shipped_shader"
-blob = "src/shaders/new_shader.bin"
+target = "PgMeshVP"
+shader = { asm = "src/shaders/mesh_vp.asm" }
+shader_low = { asm = "src/shaders/mesh_vp_low.asm" }
 
 [[contributions]]
 kind = "add_fx"
 name = "my_fx"
-payload = "src/fx/my_fx.fxdict"
+effect = "src/fx/my_fx.yaml"
+
+[contributions.template]
+name = "my_fx_template"
+name_flag = 1
+
+[contributions.template.components.RedEffectComponent]
+name = "my_fx"
+"0x4D7D459B" = 1.0
+"0x87519019" = 30
+
+[[contributions.template.components.Label]]
+"0xFD084CCE" = "0x3B5C3BAF"
+
+[[contributions.template.components.Label]]
+"0xFD084CCE" = "0x9A1C21F3"
 
 [[contributions]]
 kind = "replace_fx"
-target = "shipped_fx"
-payload = "src/fx/new_fx.fxdict"
+target = { template = "global_particle_explosion_c4" }
+edits = "src/fx/c4.yaml"
+
+[[contributions]]
+kind = "add_fx_sprite"
+name = "my_sprite"
+image = "src/fx/my_sprite.png"
 
 [[contributions]]
 kind = "replace_terrain_cell"
@@ -661,8 +839,11 @@ fn toml_carries_the_kind_tag_for_every_v1_kind() {
             "add_model",
             "add_texture",
             "add_sound",
+            "replace_sound_bank",
+            "replace_sound_cue",
             "edit_state_machine",
             "edit_world",
+            "add_tiny_geometry",
             "activate_layer",
             "edit_stringdb",
             "add_language",
@@ -684,6 +865,7 @@ fn toml_carries_the_kind_tag_for_every_v1_kind() {
             "replace_shader",
             "add_fx",
             "replace_fx",
+            "add_fx_sprite",
             "replace_terrain_cell",
             "add_stringdb_keys",
             "replace_stringdb_text",
@@ -1292,4 +1474,54 @@ fn a_removed_kind_is_refused_by_name_in_every_format() {
         }
         assert!(!Contribution::ALL_KINDS.contains(kind), "{kind} is still in ALL_KINDS");
     }
+}
+
+/// A `replace_fx` target is an effect (a name or `0xHHHHHHHH`) or a template, spelled the same way in
+/// all three formats; any other key is refused.
+#[test]
+fn fx_targets_spell_the_same_in_all_three_formats() {
+    let head = "\"format\":2,\"shipment\":{\"name\":\"s\",\"version\":\"1.0.0\",\"target\":\"retail\"}";
+    for (key, value, expected) in [
+        ("effect", "0x41B4326E", FxTarget::Effect { effect: "0x41B4326E".into() }),
+        ("effect", "global_explosion_c4", FxTarget::Effect { effect: "global_explosion_c4".into() }),
+        ("template", "global_particle_fire_carhood", FxTarget::Template { template: "global_particle_fire_carhood".into() }),
+    ] {
+        let cases = [
+            (
+                format!(
+                    "format: 2\nshipment: {{ name: s, version: 1.0.0, target: retail }}\n\
+                     contributions:\n  - kind: replace_fx\n    target: {{ {key}: \"{value}\" }}\n    edits: src/e.yaml\n"
+                ),
+                Format::Yaml,
+            ),
+            (
+                format!(
+                    "{{{head},\"contributions\":[{{\"kind\":\"replace_fx\",\
+                     \"target\":{{\"{key}\":\"{value}\"}},\"edits\":\"src/e.yaml\"}}]}}"
+                ),
+                Format::Json,
+            ),
+            (
+                format!(
+                    "format = 2\n[shipment]\nname = \"s\"\nversion = \"1.0.0\"\ntarget = \"retail\"\n\
+                     [[contributions]]\nkind = \"replace_fx\"\ntarget = {{ {key} = \"{value}\" }}\n\
+                     edits = \"src/e.yaml\"\n"
+                ),
+                Format::Toml,
+            ),
+        ];
+        for (text, fmt) in cases {
+            let m = from_str(&text, fmt).unwrap_or_else(|e| panic!("{fmt:?} {key}: {e}\n{text}"));
+            match &m.contributions[0] {
+                Contribution::ReplaceFx { target, .. } => assert_eq!(*target, expected, "{fmt:?}"),
+                other => panic!("{fmt:?}: expected replace_fx, got {other:?}"),
+            }
+        }
+    }
+    let bad = "format: 2\nshipment: { name: s, version: 1.0.0, target: retail }\n\
+               contributions:\n  - kind: replace_fx\n    target: { asset: x }\n    edits: src/e.yaml\n";
+    assert!(from_str(bad, Format::Yaml).is_err());
+    let plain = "format: 2\nshipment: { name: s, version: 1.0.0, target: retail }\n\
+                 contributions:\n  - kind: replace_fx\n    target: x\n    edits: src/e.yaml\n";
+    assert!(from_str(plain, Format::Yaml).is_err(), "a bare string says neither effect nor template");
 }

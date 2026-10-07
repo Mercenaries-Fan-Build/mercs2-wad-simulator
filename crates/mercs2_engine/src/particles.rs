@@ -63,9 +63,8 @@ pub struct EmitterDesc {
     /// Size (world units) at spawn and at death (linear curve).
     pub start_size: f32,
     pub end_size: f32,
-    /// Colour-over-life (from `COLR`), sampled by normalised age. The sim reads the four colour
-    /// bytes as RGBA — the channel order is not proven (see `fxdict::ColrKey`) — and ignores
-    /// `half_bits`.
+    /// Colour-over-life (from `COLR`), sampled by normalised age as red, green, blue, alpha (see
+    /// `fxdict::ColrKey`). The sim ignores `half_bits`.
     pub gradient: Colr,
     /// Multiplier applied to every gradient sample (tint / HDR-ish brightness for additive).
     pub color_scale: Vec4,

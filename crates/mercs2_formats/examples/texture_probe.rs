@@ -9,6 +9,7 @@
 use mercs2_formats::ffcs::load_ffcs_archive;
 use mercs2_formats::texture::{
     extract_model, extract_texture, extract_texture_name, group_prmt_material_indices, parse_mtrl,
+    MtrlSource,
 };
 use std::fs::File;
 
@@ -28,7 +29,7 @@ fn main() {
     let model = extract_model(&mut file, &archive, hash).expect("extract model container");
     println!("model 0x{hash:08X}: {} byte UCFX container", model.len());
 
-    let materials = parse_mtrl(&model);
+    let materials = parse_mtrl(&model, MtrlSource::Model).expect("parse the model's MTRL");
     println!("\n=== {} materials (MTRL) ===", materials.len());
     for (mi, m) in materials.iter().enumerate() {
         let d = m.diffuse().unwrap_or(0);

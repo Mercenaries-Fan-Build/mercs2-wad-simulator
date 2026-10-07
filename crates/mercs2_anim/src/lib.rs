@@ -73,70 +73,85 @@ mod tests {
         assert_eq!(ClipPicker::character_name("jennifer"), 0xF314_4C8E);
     }
 
-    /// Live end-to-end gate against retail `vz.wad`: parse the resident animation tables, resolve the
-    /// three mercs' idles through the data-driven picker, and confirm the live-captured Chris idle
-    /// clip (`0xED37BC56`) is reachable for Chris. SKIPS (stays green) when the WAD is absent, so CI
-    /// without the retail data passes.
-    ///
-    /// Run with `MERCS2_GAME_DIR=<install> cargo test -p mercs2_anim` (or `VZ_WAD`); either takes the
-    /// install root, its `data` folder, or the file. This is a leaf crate and cannot reach
-    /// `mercs2_engine::paths` (the carve rule), so discovery comes from `mercs2_formats` — the crate
-    /// both already depend on. The previous hardcoded Windows install path meant this test silently
-    /// never ran off Windows.
-    #[test]
-    fn live_clip_picker_if_wad_present() {
-        use mercs2_formats::anim_select::block_has_lookup;
-        use mercs2_formats::ffcs::load_ffcs_archive;
-        use mercs2_formats::sges::decompress_block;
+    #[cfg(feature = "retail")]
+    mod retail {
+        use super::*;
 
-        let Some(path) = mercs2_formats::game_paths::vz_wad_from_env() else {
-            return eprintln!("skip: vz.wad not found (set MERCS2_GAME_DIR or VZ_WAD)");
-        };
-        let Ok(mut f) = std::fs::File::open(&path) else {
-            return eprintln!("skip: vz.wad not readable at {}", path.display());
-        };
-        let size = f.metadata().unwrap().len();
-        let arch = load_ffcs_archive(&mut f, size).expect("ffcs archive");
+        /// Live end-to-end gate against retail `vz.wad`: parse the resident animation tables, resolve the
+        /// three mercs' idles through the data-driven picker, and confirm the live-captured Chris idle
+        /// clip (`0xED37BC56`) is reachable for Chris.
+        ///
+        /// Game-gated, built by the `retail` feature: reads the `vz.wad` named by the repo-root
+        /// `.mercs2-local.toml` and fails if it is absent. Run with `cargo xtask retail-test`. This is a
+        /// leaf crate and cannot reach `mercs2_engine::paths` (the carve rule), so discovery comes from
+        /// `mercs2_formats` — the crate both already depend on.
+        #[test]
+        fn live_clip_picker_if_wad_present() {
+            use mercs2_formats::anim_select::block_has_lookup;
+            use mercs2_formats::aset_type_ids::type_id_for_type_hash;
+            use mercs2_formats::ffcs::load_ffcs_archive;
+            use mercs2_formats::hash::pandemic_hash_m2;
+            use mercs2_formats::sges::decompress_block;
 
-        // The doc places the tables in resident block 3185; scan nearby as a fallback so a WAD
-        // variant still resolves.
-        let mut resident: Option<Vec<u8>> = None;
-        for blk in std::iter::once(3185u16).chain(3180u16..3200u16) {
-            if let Ok(dec) = decompress_block(&mut f, &arch.indx, blk) {
-                if block_has_lookup(&dec) {
-                    resident = Some(dec);
-                    break;
-                }
-            }
+            let path = mercs2_formats::game_paths::local_config_vz_wad(std::path::Path::new(env!("CARGO_MANIFEST_DIR")))
+                .unwrap_or_else(|e| panic!("{e}"));
+            let mut f = std::fs::File::open(&path).unwrap_or_else(|e| panic!("open {}: {e}", path.display()));
+            let size = f.metadata().unwrap().len();
+            let arch = load_ffcs_archive(&mut f, size).expect("ffcs archive");
+
+            // The AnimationLookup is an `animationtable` asset whose container name hash is
+            // 0xE00B080C (the value `anim_select`'s `block_has_lookup` matches); its one ASET row names
+            // its block. In retail vz.wad that is row 3055: type_id 11, block 3185, single-block.
+            let lookup_hash: u32 = 0xE00B_080C;
+            let animtable_type = type_id_for_type_hash(pandemic_hash_m2("animationtable"))
+                .expect("animationtable has an ASET type_id");
+            let rows: Vec<_> = arch.aset.iter().filter(|a| a.asset_hash == lookup_hash).collect();
+            assert_eq!(
+                rows.len(),
+                1,
+                "expected exactly one ASET row for AnimationLookup 0x{lookup_hash:08X} in {}, found {}",
+                path.display(),
+                rows.len()
+            );
+            let row = rows[0];
+            assert_eq!(
+                row.type_id, animtable_type,
+                "AnimationLookup 0x{lookup_hash:08X} ASET row has type_id {}, not animationtable",
+                row.type_id
+            );
+            assert!(row.is_single_block(), "AnimationLookup 0x{lookup_hash:08X} spans more than one block");
+            let blk = row.block_index();
+            let dec = decompress_block(&mut f, &arch.indx, blk)
+                .unwrap_or_else(|e| panic!("decompress AnimationLookup block {blk}: {e}"));
+            assert!(
+                block_has_lookup(&dec),
+                "block {blk}, named by the AnimationLookup ASET row, does not carry the AnimationLookup container"
+            );
+
+            let mattias = ClipPicker::character_name("mattias");
+            let chris = ClipPicker::character_name("chris");
+            let jennifer = ClipPicker::character_name("jennifer");
+            let picker = ClipPicker::from_resident_block(&dec, &[mattias, chris, jennifer])
+                .expect("resident block carries the AnimationLookup");
+
+            // Per-merc idle is data-driven — each merc idles on its OWN clip (engine-path values,
+            // human_animation_selection.md §10). The old hardcoded engine used Jennifer's for all.
+            assert_eq!(picker.idle(mattias), Some(0x6EA8_8E00), "mattias idle");
+            assert_eq!(picker.idle(chris), Some(0x835D_A06A), "chris idle");
+            assert_eq!(picker.idle(jennifer), Some(0x24F8_C8E6), "jennifer idle");
+
+            // The forward resolver maps the standing idle state to a clip for Chris.
+            let r = picker
+                .resolve_indexed(chris, StateKey::idle())
+                .expect("Upright+Fidget resolves for chris");
+            assert_ne!(r.clip, 0);
+
+            // The live x32dbg-captured Chris idle clip is reachable through the data for Chris.
+            let chris_clips = picker.selector().character_clips(chris);
+            assert!(
+                chris_clips.iter().any(|c| c.clip == 0xED37_BC56),
+                "live-captured Chris idle 0xED37BC56 must be in Chris's resolved clip set"
+            );
         }
-        let Some(dec) = resident else {
-            eprintln!("skip: no AnimationLookup block found (WAD variant?)");
-            return;
-        };
-
-        let mattias = ClipPicker::character_name("mattias");
-        let chris = ClipPicker::character_name("chris");
-        let jennifer = ClipPicker::character_name("jennifer");
-        let picker = ClipPicker::from_resident_block(&dec, &[mattias, chris, jennifer])
-            .expect("resident block carries the AnimationLookup");
-
-        // Per-merc idle is data-driven — each merc idles on its OWN clip (engine-path values,
-        // human_animation_selection.md §10). The old hardcoded engine used Jennifer's for all.
-        assert_eq!(picker.idle(mattias), Some(0x6EA8_8E00), "mattias idle");
-        assert_eq!(picker.idle(chris), Some(0x835D_A06A), "chris idle");
-        assert_eq!(picker.idle(jennifer), Some(0x24F8_C8E6), "jennifer idle");
-
-        // The forward resolver maps the standing idle state to a clip for Chris.
-        let r = picker
-            .resolve_indexed(chris, StateKey::idle())
-            .expect("Upright+Fidget resolves for chris");
-        assert_ne!(r.clip, 0);
-
-        // The live x32dbg-captured Chris idle clip is reachable through the data for Chris.
-        let chris_clips = picker.selector().character_clips(chris);
-        assert!(
-            chris_clips.iter().any(|c| c.clip == 0xED37_BC56),
-            "live-captured Chris idle 0xED37BC56 must be in Chris's resolved clip set"
-        );
     }
 }

@@ -8,6 +8,9 @@
 //! said it need not; an edit that shifts an unrelated leaf would corrupt the container.
 //!
 //! Scanning mirrors the survey so the two cover the same 1,311 families.
+//!
+//! Game-gated: built by the `retail` feature, reads the `vz.wad` named by the repo-root
+//! `.mercs2-local.toml`, and fails if it is absent.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -18,16 +21,17 @@ use mercs2_formats::sges::decompress_block;
 use mercs2_formats::types::TYPE_ID_MODEL;
 use mercs2_formats::ucfx::parse_block_entry_table;
 
-fn vz_wad() -> Option<PathBuf> {
-    mercs2_formats::game_paths::vz_wad(Path::new(env!("CARGO_MANIFEST_DIR")))
+fn vz_wad() -> PathBuf {
+    mercs2_formats::game_paths::local_config_vz_wad(Path::new(env!("CARGO_MANIFEST_DIR")))
+        .unwrap_or_else(|e| panic!("{e}"))
 }
 
 /// Every model container in the WAD that carries a destruction family, as raw container bytes.
-fn family_containers() -> Option<Vec<(String, Vec<u8>)>> {
-    let wad = vz_wad()?;
-    let mut file = std::fs::File::open(&wad).ok()?;
-    let size = file.metadata().ok()?.len();
-    let archive = load_ffcs_archive(&mut file, size).ok()?;
+fn family_containers() -> Vec<(String, Vec<u8>)> {
+    let wad = vz_wad();
+    let mut file = std::fs::File::open(&wad).expect("open vz.wad");
+    let size = file.metadata().expect("stat vz.wad").len();
+    let archive = load_ffcs_archive(&mut file, size).expect("read FFCS");
 
     let mut blocks: BTreeSet<u16> = BTreeSet::new();
     for a in archive.aset.iter().filter(|a| a.type_id == TYPE_ID_MODEL) {
@@ -40,16 +44,18 @@ fn family_containers() -> Option<Vec<(String, Vec<u8>)>> {
 
     let mut out = Vec::new();
     for bi in blocks {
-        let Ok(dec) = decompress_block(&mut file, &archive.indx, bi) else {
-            continue;
-        };
+        let dec = decompress_block(&mut file, &archive.indx, bi)
+            .unwrap_or_else(|e| panic!("decompress block {bi}: {e}"));
         let (_n, entries) = parse_block_entry_table(&dec);
         let mut pos = 4 + entries.len() * 16;
         for (ei, e) in entries.iter().enumerate() {
-            let end = (pos + e.chunk_size as usize).min(dec.len());
-            if pos >= end {
-                break;
-            }
+            let end = pos + e.chunk_size as usize;
+            assert!(
+                end <= dec.len(),
+                "blk{bi}/entry{ei}/0x{:08X}: runs past the {}-byte block",
+                e.name_hash,
+                dec.len()
+            );
             let container = dec[pos..end].to_vec();
             pos = end;
             if parse_state_machine(&container).is_some() {
@@ -57,7 +63,7 @@ fn family_containers() -> Option<Vec<(String, Vec<u8>)>> {
             }
         }
     }
-    Some(out)
+    out
 }
 
 /// ★ The decisive test: re-emitting an UNEDITED family reproduces the container exactly, for every
@@ -65,10 +71,7 @@ fn family_containers() -> Option<Vec<(String, Vec<u8>)>> {
 /// touches one field leaves every other byte where it was.
 #[test]
 fn every_retail_family_round_trips_byte_identically() {
-    let Some(families) = family_containers() else {
-        eprintln!("SKIPPING: no vz.wad");
-        return;
-    };
+    let families = family_containers();
     assert!(families.len() > 1000, "expected ~1311 families, found {}", families.len());
 
     let mut checked = 0usize;
@@ -91,18 +94,12 @@ fn every_retail_family_round_trips_byte_identically() {
 /// fixed-width), still parses, and reads back as the new name — while every sibling is untouched.
 #[test]
 fn renaming_a_state_changes_only_that_field() {
-    let Some(families) = family_containers() else {
-        eprintln!("SKIPPING: no vz.wad");
-        return;
-    };
+    let families = family_containers();
     // Pick the first family that has a node with at least one state to rename.
-    let Some((label, original)) = families
+    let (label, original) = families
         .into_iter()
         .find(|(_, c)| parse_state_machine(c).is_some_and(|sm| sm.nodes.iter().any(|n| !n.states.is_empty())))
-    else {
-        eprintln!("SKIPPING: no family with a state");
-        return;
-    };
+        .expect("retail has no family with a state");
 
     let mut sm = parse_state_machine(&original).expect("parse");
     let ni = sm.nodes.iter().position(|n| !n.states.is_empty()).unwrap();
@@ -128,17 +125,11 @@ fn renaming_a_state_changes_only_that_field() {
 /// new list, with the CSUM recomputed so the container still verifies.
 #[test]
 fn rewriting_a_command_list_resizes_and_round_trips() {
-    let Some(families) = family_containers() else {
-        eprintln!("SKIPPING: no vz.wad");
-        return;
-    };
-    let Some((label, original)) = families
+    let families = family_containers();
+    let (label, original) = families
         .into_iter()
         .find(|(_, c)| parse_state_machine(c).is_some_and(|sm| sm.nodes.iter().any(|n| n.states.iter().any(|s| !s.enter.is_empty()))))
-    else {
-        eprintln!("SKIPPING: no family with an Enter list");
-        return;
-    };
+        .expect("retail has no family with an Enter list");
 
     let mut sm = parse_state_machine(&original).expect("parse");
     let (ni, sj) = sm
@@ -167,17 +158,11 @@ fn rewriting_a_command_list_resizes_and_round_trips() {
 /// container-subtree splice the full regenerator does on every write.
 #[test]
 fn adding_a_state_grows_the_family_and_round_trips() {
-    let Some(families) = family_containers() else {
-        eprintln!("SKIPPING: no vz.wad");
-        return;
-    };
-    let Some((label, original)) = families
+    let families = family_containers();
+    let (label, original) = families
         .into_iter()
         .find(|(_, c)| parse_state_machine(c).is_some_and(|sm| !sm.nodes.is_empty()))
-    else {
-        eprintln!("SKIPPING: no family with a node");
-        return;
-    };
+        .expect("retail has no family with a node");
     let mut sm = parse_state_machine(&original).expect("parse");
     let before_states: usize = sm.nodes.iter().map(|n| n.states.len()).sum();
     // Add a new state (using a REAL vocabulary hash so it is a meaningful edit) with a short script.
@@ -202,17 +187,11 @@ fn adding_a_state_grows_the_family_and_round_trips() {
 /// Removing a state shrinks the family and re-parses with one fewer.
 #[test]
 fn removing_a_state_shrinks_the_family_and_round_trips() {
-    let Some(families) = family_containers() else {
-        eprintln!("SKIPPING: no vz.wad");
-        return;
-    };
-    let Some((label, original)) = families
+    let families = family_containers();
+    let (label, original) = families
         .into_iter()
         .find(|(_, c)| parse_state_machine(c).is_some_and(|sm| sm.nodes.iter().any(|n| n.states.len() >= 2)))
-    else {
-        eprintln!("SKIPPING: no node with two states");
-        return;
-    };
+        .expect("retail has no node with two states");
     let mut sm = parse_state_machine(&original).expect("parse");
     let ni = sm.nodes.iter().position(|n| n.states.len() >= 2).unwrap();
     let removed = sm.nodes[ni].states.pop().unwrap();

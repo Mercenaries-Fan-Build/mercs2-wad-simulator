@@ -1,55 +1,76 @@
-/// ECS COMP schema field type codes, reverse-engineered from schm entries.
-/// See docs/schm_type_codes.md for derivation.
+/// ECS COMP schema field type codes — the `+0` word of a 16-byte `schm` field entry.
+///
+/// The meaning of each code is read from the engine's per-field stream readers in
+/// `mercs2_unpacked.exe`, which look a field up by name hash in the class's `schm`, seek to its
+/// byte offset and then dispatch on this code:
+///
+/// * `FUN_00656210` (int reader) and `FUN_00656320` (float reader): codes 1 and 2 read one byte
+///   (`char`), 3 and 4 read two bytes (`short`), 5, 6 and 9 read a 4-byte `int`, and 7 reads an
+///   `f32` (the int reader converts it, the float reader passes it through).
+/// * `FUN_00656720` (enum reader): code 9 reads a u32 and resolves it through the enum-name table
+///   (`FUN_00655ea0`); codes 1–6 read as above.
+/// * `FUN_00656610` (vec3 reader): code 10 reads three dwords.
+/// * `FUN_0065644a` (transform reader): code 11 reads eight dwords.
+/// * Code 8 is the `Name` class's string field; its native deserializer `FUN_006569B0` reads an
+///   inline NUL-terminated string.
+///
+/// The engine reads codes 1 and 2 identically, and 3 and 4 identically; what distinguishes the two
+/// members of each pair is not established, so each keeps its own variant.
+///
+/// Retail check (PC `vz.wad`, `worldentity`): `Health`'s code-7 field holds `100.0f`, and its three
+/// code-5 fields are bits 0, 1 and 2 of one u32 (see [`SchemaField::bit_width`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u32)]
 pub enum SchemaFieldType {
-    /// Type 1: Sub-byte bit field. No swap needed.
-    Bit = 1,
-    /// Type 2: Single byte (u8). No swap needed.
+    /// Code 1: one byte.
+    Byte = 1,
+    /// Code 2: one byte.
     U8 = 2,
-    /// Type 4: Two bytes (u16). Swap 2 bytes.
+    /// Code 3: two bytes.
+    Short = 3,
+    /// Code 4: two bytes.
     U16 = 4,
-    /// Type 5: Four bytes float (f32). Swap 4 bytes.
-    F32 = 5,
-    /// Type 6: Four bytes unsigned (u32/hash). Swap 4 bytes.
-    U32 = 6,
-    /// Type 7: Four bytes reference (u32). Swap 4 bytes.
-    Ref = 7,
-    /// Type 8: Four bytes string reference. Swap 4 bytes.
+    /// Code 5: a 4-byte integer.
+    Int = 5,
+    /// Code 6: a 4-byte word holding a `pandemic_hash_m2` name hash or a raw value.
+    Hash = 6,
+    /// Code 7: `f32`.
+    F32 = 7,
+    /// Code 8: an inline NUL-terminated string (`Name`).
     StringRef = 8,
-    /// Type 9: Four bytes flags/bitfield stored as u32. Swap 4 bytes.
-    Flags = 9,
-    /// Type 10: 12 bytes Vec3 (3 × f32). Swap as 3 × 4 bytes.
+    /// Code 9: a 4-byte word the enum reader resolves as the hash of an enum value name.
+    Enum = 9,
+    /// Code 10: three `f32`.
     Vec3 = 10,
-    /// Type 11: 32 bytes composite (8 × f32, e.g. Transform pos+quat blob). Swap as 8 × 4 bytes.
+    /// Code 11: eight dwords (32 bytes).
     Blob32 = 11,
 }
 
 impl SchemaFieldType {
-    /// Try to parse a raw type code from schm entry.
+    /// Parse a raw type code from a schm entry.
     pub fn from_code(code: u32) -> Option<Self> {
         match code {
-            1 => Some(Self::Bit),
+            1 => Some(Self::Byte),
             2 => Some(Self::U8),
+            3 => Some(Self::Short),
             4 => Some(Self::U16),
-            5 => Some(Self::F32),
-            6 => Some(Self::U32),
-            7 => Some(Self::Ref),
+            5 => Some(Self::Int),
+            6 => Some(Self::Hash),
+            7 => Some(Self::F32),
             8 => Some(Self::StringRef),
-            9 => Some(Self::Flags),
+            9 => Some(Self::Enum),
             10 => Some(Self::Vec3),
             11 => Some(Self::Blob32),
             _ => None,
         }
     }
 
-    /// Total byte width of this field type.
+    /// Byte width of the storage unit the engine reads for this code.
     pub fn byte_width(&self) -> usize {
         match self {
-            Self::Bit => 0,
-            Self::U8 => 1,
-            Self::U16 => 2,
-            Self::F32 | Self::U32 | Self::Ref | Self::StringRef | Self::Flags => 4,
+            Self::Byte | Self::U8 => 1,
+            Self::Short | Self::U16 => 2,
+            Self::Int | Self::Hash | Self::F32 | Self::StringRef | Self::Enum => 4,
             Self::Vec3 => 12,
             Self::Blob32 => 32,
         }
@@ -57,18 +78,15 @@ impl SchemaFieldType {
 
     /// Whether this field needs byte-swapping for BE→LE conversion.
     pub fn needs_swap(&self) -> bool {
-        match self {
-            Self::Bit | Self::U8 => false,
-            _ => true,
-        }
+        !matches!(self, Self::Byte | Self::U8)
     }
 
     /// The atomic swap unit size (bytes per swap operation).
     /// Vec3 and Blob32 are swapped as multiple 4-byte units.
     pub fn swap_unit(&self) -> usize {
         match self {
-            Self::Bit | Self::U8 => 0,
-            Self::U16 => 2,
+            Self::Byte | Self::U8 => 0,
+            Self::Short | Self::U16 => 2,
             _ => 4,
         }
     }
@@ -76,9 +94,9 @@ impl SchemaFieldType {
     /// Number of swap operations needed for this field.
     pub fn swap_count(&self) -> usize {
         match self {
-            Self::Bit | Self::U8 => 0,
-            Self::U16 => 1,
-            Self::F32 | Self::U32 | Self::Ref | Self::StringRef | Self::Flags => 1,
+            Self::Byte | Self::U8 => 0,
+            Self::Short | Self::U16 => 1,
+            Self::Int | Self::Hash | Self::F32 | Self::StringRef | Self::Enum => 1,
             Self::Vec3 => 3,
             Self::Blob32 => 8,
         }
@@ -91,7 +109,7 @@ impl SchemaFieldType {
 ///   +0  u32 type_code      (SchemaFieldType)
 ///   +4  u32 name_hash      (pandemic_hash_m2 of the field name)
 ///   +8  u32 unk            (0 in every retail record observed)
-///   +12 offset_word        { u16 byte_offset ; u8 bit_index ; u8 meta_hi }
+///   +12 offset_word        { u16 byte_offset ; u8 bit_start ; u8 bit_width }
 /// ```
 ///
 /// **`byte_offset` is the LOW 16 bits of the offset word** — verified against retail
@@ -99,23 +117,24 @@ impl SchemaFieldType {
 /// RoadIntersection 0,4,…,120 (all monotonic, matching type widths). This is the field's
 /// location inside the deserialized payload record.
 ///
-/// The two high bytes are per-field metadata that do **not** move the field:
-/// `bit_index` (offset_word[2]) selects the bit inside the byte for a [`SchemaFieldType::Bit`]
-/// field (HibernationControl packs two bits at byte 5: idx 0 and idx 1); `meta_hi`
-/// (offset_word[3]) is a property/version tag (`1` for most authored non-bit fields, `0` for
-/// the first field). See `docs/spatial_hash_crash_analysis.md` (the RCA that established the
-/// low-16 convention) and `docs/schm_type_codes.md` (derived from *converted* DLC data, which
-/// carried the byte-offset-in-high-16 converter bug — do not use its offset-encoding note).
+/// The two high bytes place a **bit field** inside the storage unit at `byte_offset`: `bit_start`
+/// is its lowest bit and `bit_width` its width; `bit_width == 0` means the field is the whole unit.
+/// Retail: `HibernationControl` packs two 1-bit fields in byte 5 (starts 0 and 1), `Health` three
+/// 1-bit fields in the u32 at 4, `HumanInventory` fields of widths 1/7/8/8/8 at starts 0/1/8/16/24
+/// in the u32 at 20. Over every bit-field unit of the retail `worldentity`, no bit outside the
+/// declared fields is set. See `docs/spatial_hash_crash_analysis.md` (the RCA that established the
+/// low-16 convention) and `docs/schm_type_codes.md`.
 #[derive(Debug, Clone)]
 pub struct SchemaField {
     pub field_type: SchemaFieldType,
     pub name_hash: u32,
-    /// Location of the field inside the payload record (LOW 16 bits of the offset word).
+    /// Location of the field's storage unit inside the payload record (LOW 16 bits of the offset
+    /// word).
     pub byte_offset: u16,
-    /// offset_word[2]: bit position within `byte_offset`'s byte for a [`SchemaFieldType::Bit`].
-    pub bit_index: u8,
-    /// offset_word[3]: property/version metadata; not needed to place the field.
-    pub meta_hi: u8,
+    /// offset_word[2]: the lowest bit of a bit field inside its storage unit.
+    pub bit_start: u8,
+    /// offset_word[3]: the width of a bit field in bits; 0 for a field that is its whole unit.
+    pub bit_width: u8,
     /// The schm entry's `+8` word — 0 in all observed retail data; retained for fidelity.
     pub unk: u32,
 }
@@ -173,10 +192,10 @@ impl ComponentSchema {
             let type_code = rd_u32(off);
             let name_hash = rd_u32(off + 4);
             let unk = rd_u32(off + 8);
-            // offset_word = { u16 byte_offset ; u8 bit_index ; u8 meta_hi }
+            // offset_word = { u16 byte_offset ; u8 bit_start ; u8 bit_width }
             let byte_offset = rd_u16(off + 12);
-            let bit_index = body[off + 14];
-            let meta_hi = body[off + 15];
+            let bit_start = body[off + 14];
+            let bit_width = body[off + 15];
 
             let field_type = SchemaFieldType::from_code(type_code)?;
 
@@ -184,8 +203,8 @@ impl ComponentSchema {
                 field_type,
                 name_hash,
                 byte_offset,
-                bit_index,
-                meta_hi,
+                bit_start,
+                bit_width,
                 unk,
             });
         }
@@ -194,6 +213,29 @@ impl ComponentSchema {
             payload_stride,
             fields,
         })
+    }
+
+    /// Write this schema as a PC (little-endian) `schm` body — the inverse of
+    /// [`Self::from_schm_body`] with `big_endian = false`.
+    pub fn to_schm_body(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(8 + 16 * self.fields.len());
+        out.extend_from_slice(&(self.fields.len() as u32).to_le_bytes());
+        out.extend_from_slice(&self.payload_stride.to_le_bytes());
+        for f in &self.fields {
+            out.extend_from_slice(&(f.field_type as u32).to_le_bytes());
+            out.extend_from_slice(&f.name_hash.to_le_bytes());
+            out.extend_from_slice(&f.unk.to_le_bytes());
+            out.extend_from_slice(&f.byte_offset.to_le_bytes());
+            out.push(f.bit_start);
+            out.push(f.bit_width);
+        }
+        out
+    }
+
+    /// Read one field of a payload record (PC/LE) at its byte offset, applying its bit field.
+    /// `None` if the field runs past the payload.
+    pub fn read_field(field: &SchemaField, payload: &[u8]) -> Option<FieldValue> {
+        read_field(field, payload)
     }
 
     /// On-disk `data`-record stride = `4` (the leading `u32` entity key) + [`Self::payload_stride`].
@@ -252,20 +294,20 @@ impl ComponentSchema {
 /// A single deserialized field value, typed by the schema's [`SchemaFieldType`].
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum FieldValue {
-    /// Type 1 — one packed bit (selected by [`SchemaField::bit_index`]).
-    Bit(bool),
-    /// Type 2 — `u8`.
+    /// A bit field ([`SchemaField::bit_width`] > 0): its bits, shifted down to bit 0.
+    Bits(u32),
+    /// Codes 1/2 — one byte.
     U8(u8),
-    /// Type 4 — `u16`.
+    /// Codes 3/4 — two bytes.
     U16(u16),
-    /// Type 5 — `f32`.
+    /// Code 7 — `f32`.
     F32(f32),
-    /// Types 6/7/8/9 — a 32-bit word (hash / ref / string-ref / flags). Kept as raw `u32`; the
-    /// distinction is the field's [`SchemaFieldType`], preserved separately if needed.
+    /// Codes 5/6/8/9 — a 32-bit word. Kept raw; the distinction is the field's
+    /// [`SchemaFieldType`].
     U32(u32),
-    /// Type 10 — `[f32; 3]`.
+    /// Code 10 — `[f32; 3]`.
     Vec3([f32; 3]),
-    /// Type 11 — `[f32; 8]` (e.g. a Transform pos+quat blob).
+    /// Code 11 — `[f32; 8]` (e.g. a Transform pos+quat blob).
     Blob32([f32; 8]),
 }
 
@@ -305,18 +347,23 @@ fn rd_f32le(b: &[u8], o: usize) -> Option<f32> {
 /// Read one field from a payload record slice (PC/LE). Returns `None` if it would run past the end.
 fn read_field(f: &SchemaField, payload: &[u8]) -> Option<FieldValue> {
     let o = f.byte_offset as usize;
-    Some(match f.field_type {
-        SchemaFieldType::Bit => {
-            let byte = *payload.get(o)?;
-            FieldValue::Bit((byte >> (f.bit_index & 7)) & 1 != 0)
+    if f.bit_width > 0 {
+        let w = f.field_type.byte_width();
+        let mut unit = 0u64;
+        for i in 0..w.min(4) {
+            unit |= (*payload.get(o + i)? as u64) << (8 * i);
         }
-        SchemaFieldType::U8 => FieldValue::U8(*payload.get(o)?),
-        SchemaFieldType::U16 => FieldValue::U16(rd_u16le(payload, o)?),
+        let mask = (1u64 << f.bit_width) - 1;
+        return Some(FieldValue::Bits(((unit >> f.bit_start) & mask) as u32));
+    }
+    Some(match f.field_type {
+        SchemaFieldType::Byte | SchemaFieldType::U8 => FieldValue::U8(*payload.get(o)?),
+        SchemaFieldType::Short | SchemaFieldType::U16 => FieldValue::U16(rd_u16le(payload, o)?),
         SchemaFieldType::F32 => FieldValue::F32(rd_f32le(payload, o)?),
-        SchemaFieldType::U32
-        | SchemaFieldType::Ref
+        SchemaFieldType::Int
+        | SchemaFieldType::Hash
         | SchemaFieldType::StringRef
-        | SchemaFieldType::Flags => FieldValue::U32(rd_u32le(payload, o)?),
+        | SchemaFieldType::Enum => FieldValue::U32(rd_u32le(payload, o)?),
         SchemaFieldType::Vec3 => FieldValue::Vec3([
             rd_f32le(payload, o)?,
             rd_f32le(payload, o + 4)?,
@@ -454,62 +501,67 @@ mod tests {
 
     #[test]
     fn field_type_from_code_all_valid() {
-        assert_eq!(SchemaFieldType::from_code(1), Some(SchemaFieldType::Bit));
-        assert_eq!(SchemaFieldType::from_code(2), Some(SchemaFieldType::U8));
-        assert_eq!(SchemaFieldType::from_code(4), Some(SchemaFieldType::U16));
-        assert_eq!(SchemaFieldType::from_code(5), Some(SchemaFieldType::F32));
-        assert_eq!(SchemaFieldType::from_code(6), Some(SchemaFieldType::U32));
-        assert_eq!(SchemaFieldType::from_code(7), Some(SchemaFieldType::Ref));
-        assert_eq!(
-            SchemaFieldType::from_code(8),
-            Some(SchemaFieldType::StringRef)
-        );
-        assert_eq!(SchemaFieldType::from_code(9), Some(SchemaFieldType::Flags));
-        assert_eq!(SchemaFieldType::from_code(10), Some(SchemaFieldType::Vec3));
-        assert_eq!(
-            SchemaFieldType::from_code(11),
-            Some(SchemaFieldType::Blob32)
-        );
+        let all = [
+            (1, SchemaFieldType::Byte),
+            (2, SchemaFieldType::U8),
+            (3, SchemaFieldType::Short),
+            (4, SchemaFieldType::U16),
+            (5, SchemaFieldType::Int),
+            (6, SchemaFieldType::Hash),
+            (7, SchemaFieldType::F32),
+            (8, SchemaFieldType::StringRef),
+            (9, SchemaFieldType::Enum),
+            (10, SchemaFieldType::Vec3),
+            (11, SchemaFieldType::Blob32),
+        ];
+        for (code, t) in all {
+            assert_eq!(SchemaFieldType::from_code(code), Some(t));
+            assert_eq!(t as u32, code);
+        }
     }
 
     #[test]
     fn field_type_from_code_invalid() {
         assert_eq!(SchemaFieldType::from_code(0), None);
-        assert_eq!(SchemaFieldType::from_code(3), None);
         assert_eq!(SchemaFieldType::from_code(12), None);
         assert_eq!(SchemaFieldType::from_code(0xFFFFFFFF), None);
     }
 
+    /// The widths the engine's readers consume (`FUN_00656210`: 1/2 → 1 byte, 3/4 → 2, 5/6/9 → 4,
+    /// 7 → f32; `FUN_00656610` → 12; `FUN_0065644a` → 32).
     #[test]
     fn field_type_byte_width() {
-        assert_eq!(SchemaFieldType::Bit.byte_width(), 0);
+        assert_eq!(SchemaFieldType::Byte.byte_width(), 1);
         assert_eq!(SchemaFieldType::U8.byte_width(), 1);
+        assert_eq!(SchemaFieldType::Short.byte_width(), 2);
         assert_eq!(SchemaFieldType::U16.byte_width(), 2);
+        assert_eq!(SchemaFieldType::Int.byte_width(), 4);
+        assert_eq!(SchemaFieldType::Hash.byte_width(), 4);
         assert_eq!(SchemaFieldType::F32.byte_width(), 4);
-        assert_eq!(SchemaFieldType::U32.byte_width(), 4);
-        assert_eq!(SchemaFieldType::Ref.byte_width(), 4);
         assert_eq!(SchemaFieldType::StringRef.byte_width(), 4);
-        assert_eq!(SchemaFieldType::Flags.byte_width(), 4);
+        assert_eq!(SchemaFieldType::Enum.byte_width(), 4);
         assert_eq!(SchemaFieldType::Vec3.byte_width(), 12);
         assert_eq!(SchemaFieldType::Blob32.byte_width(), 32);
     }
 
     #[test]
     fn field_type_needs_swap() {
-        assert!(!SchemaFieldType::Bit.needs_swap());
+        assert!(!SchemaFieldType::Byte.needs_swap());
         assert!(!SchemaFieldType::U8.needs_swap());
+        assert!(SchemaFieldType::Short.needs_swap());
         assert!(SchemaFieldType::U16.needs_swap());
         assert!(SchemaFieldType::F32.needs_swap());
-        assert!(SchemaFieldType::U32.needs_swap());
+        assert!(SchemaFieldType::Hash.needs_swap());
         assert!(SchemaFieldType::Vec3.needs_swap());
         assert!(SchemaFieldType::Blob32.needs_swap());
     }
 
     #[test]
     fn field_type_swap_unit() {
+        assert_eq!(SchemaFieldType::Short.swap_unit(), 2);
         assert_eq!(SchemaFieldType::U16.swap_unit(), 2);
         assert_eq!(SchemaFieldType::F32.swap_unit(), 4);
-        assert_eq!(SchemaFieldType::U32.swap_unit(), 4);
+        assert_eq!(SchemaFieldType::Int.swap_unit(), 4);
         assert_eq!(SchemaFieldType::Vec3.swap_unit(), 4);
     }
 
@@ -519,6 +571,17 @@ mod tests {
         assert_eq!(SchemaFieldType::F32.swap_count(), 1);
         assert_eq!(SchemaFieldType::Vec3.swap_count(), 3);
         assert_eq!(SchemaFieldType::Blob32.swap_count(), 8);
+    }
+
+    #[test]
+    fn to_schm_body_inverts_from_schm_body() {
+        let mut body = vec![2u8, 0, 0, 0, 8, 0, 0, 0];
+        body.extend_from_slice(&[7, 0, 0, 0, 0x9d, 0x91, 0x22, 0xd1, 0, 0, 0, 0, 0, 0, 0, 0]);
+        body.extend_from_slice(&[5, 0, 0, 0, 0x72, 0xfd, 0xa0, 0x8c, 0, 0, 0, 0, 4, 0, 2, 1]);
+        let s = ComponentSchema::from_schm_body(&body, false).unwrap();
+        assert_eq!(s.fields[1].bit_start, 2);
+        assert_eq!(s.fields[1].bit_width, 1);
+        assert_eq!(s.to_schm_body(), body);
     }
 
     #[test]
@@ -563,25 +626,25 @@ mod tests {
 
     #[test]
     fn from_schm_body_le() {
-        // Retail PC (LE): offset_word = { u16 byte_offset ; u8 bit_index ; u8 meta_hi }.
-        // byte_offset is the LOW 16 bits — bytes [10,0] => 10; bit_index=5, meta_hi=1.
+        // Retail PC (LE): offset_word = { u16 byte_offset ; u8 bit_start ; u8 bit_width }.
+        // byte_offset is the LOW 16 bits — bytes [10,0] => 10; bit_start=5, bit_width=1.
         let body = [
             1, 0, 0, 0, // n_fields = 1
             100, 0, 0, 0, // payload_stride = 100
-            6, 0, 0, 0, // type_code = 6 (U32)
+            6, 0, 0, 0, // type_code = 6 (Hash)
             0x78, 0x56, 0x34, 0x12, // name_hash = 0x12345678
             0, 0, 0, 0, // unk
-            10, 0, 5, 1, // offset_word: byte_offset=10, bit_index=5, meta_hi=1
+            10, 0, 5, 1, // offset_word: byte_offset=10, bit_start=5, bit_width=1
         ];
         let schema = ComponentSchema::from_schm_body(&body, false).unwrap();
         assert_eq!(schema.payload_stride, 100);
         assert_eq!(schema.fields.len(), 1);
         let field = &schema.fields[0];
-        assert_eq!(field.field_type, SchemaFieldType::U32);
+        assert_eq!(field.field_type, SchemaFieldType::Hash);
         assert_eq!(field.name_hash, 0x12345678);
         assert_eq!(field.byte_offset, 10);
-        assert_eq!(field.bit_index, 5);
-        assert_eq!(field.meta_hi, 1);
+        assert_eq!(field.bit_start, 5);
+        assert_eq!(field.bit_width, 1);
     }
 
     /// The offset word's byte_offset lives in the source endianness's first two bytes: BE reads
@@ -596,7 +659,7 @@ mod tests {
             let mut b = Vec::new();
             b.extend_from_slice(&w(1)); // n_fields
             b.extend_from_slice(&w(8)); // payload_stride
-            b.extend_from_slice(&w(6)); // type_code = 6 (U32)
+            b.extend_from_slice(&w(6)); // type_code = 6 (Hash)
             b.extend_from_slice(&w(0)); // name_hash
             b.extend_from_slice(&w(0)); // unk
             b.extend_from_slice(&ow); // offset_word (raw bytes)
@@ -614,23 +677,23 @@ mod tests {
     /// deserialize one `[u32 key][payload:6]` record. Grounds the deserializer without the WAD.
     #[test]
     fn deserialize_hibernation_shaped_record() {
-        // fields: u16@0, u8@2, u8@3, u8@4, bit@5(idx0), bit@5(idx1); payload_stride = 6.
+        // fields: u16@0, u8@2, u8@3, u8@4, 1-bit@5 start 0, 1-bit@5 start 1; payload_stride = 6.
         let mut schm = vec![6u8, 0, 0, 0, /*stride*/ 6, 0, 0, 0];
-        let field = |tc: u8, nh: u32, off: u16, bit: u8| {
+        let field = |tc: u8, nh: u32, off: u16, start: u8, width: u8| {
             let mut e = vec![tc, 0, 0, 0];
             e.extend_from_slice(&nh.to_le_bytes());
             e.extend_from_slice(&0u32.to_le_bytes());
             e.extend_from_slice(&off.to_le_bytes());
-            e.push(bit);
-            e.push(1);
+            e.push(start);
+            e.push(width);
             e
         };
-        schm.extend(field(4, 0xAAAA_0000, 0, 0)); // u16 dist0
-        schm.extend(field(2, 0xAAAA_0001, 2, 0)); // u8 dist1
-        schm.extend(field(2, 0xAAAA_0002, 3, 0)); // u8 dist2
-        schm.extend(field(2, 0xAAAA_0003, 4, 0)); // u8 dist3
-        schm.extend(field(1, 0xAAAA_0004, 5, 0)); // bit0
-        schm.extend(field(1, 0xAAAA_0005, 5, 1)); // bit1
+        schm.extend(field(4, 0xAAAA_0000, 0, 0, 0)); // u16 dist0
+        schm.extend(field(2, 0xAAAA_0001, 2, 0, 0)); // u8 dist1
+        schm.extend(field(2, 0xAAAA_0002, 3, 0, 0)); // u8 dist2
+        schm.extend(field(2, 0xAAAA_0003, 4, 0, 0)); // u8 dist3
+        schm.extend(field(1, 0xAAAA_0004, 5, 0, 1)); // bit 0 of byte 5
+        schm.extend(field(1, 0xAAAA_0005, 5, 1, 1)); // bit 1 of byte 5
 
         let s = ComponentSchema::from_schm_body(&schm, false).unwrap();
         assert_eq!(s.payload_stride, 6);
@@ -647,8 +710,8 @@ mod tests {
         assert_eq!(r.get(0xAAAA_0000), Some(FieldValue::U16(590)));
         assert_eq!(r.get(0xAAAA_0001), Some(FieldValue::U8(160)));
         assert_eq!(r.get(0xAAAA_0003), Some(FieldValue::U8(20)));
-        assert_eq!(r.get(0xAAAA_0004), Some(FieldValue::Bit(false))); // bit 0 of 0b10
-        assert_eq!(r.get(0xAAAA_0005), Some(FieldValue::Bit(true))); // bit 1 of 0b10
+        assert_eq!(r.get(0xAAAA_0004), Some(FieldValue::Bits(0))); // bit 0 of 0b10
+        assert_eq!(r.get(0xAAAA_0005), Some(FieldValue::Bits(1))); // bit 1 of 0b10
     }
 
     #[test]
@@ -729,207 +792,218 @@ mod tests {
         assert_eq!(recs[0].get(0x5b72_4250), Some(FieldValue::U32(0xdad8_a613)));
     }
 
-    // -----------------------------------------------------------------------
-    // Live end-to-end test against retail vz.wad. SKIPS (passes) when the WAD is
-    // absent so CI stays green, matching the existing live tests in this crate.
-    // Walks real blocks, finds representative components (HibernationControl,
-    // ModelName, FactionMarker, Road, Transform), and deserializes them through
-    // the schema, asserting concrete field values / invariants.
-    // -----------------------------------------------------------------------
-    #[test]
-    fn live_deserialize_representative_components_if_wad_present() {
-        use crate::ffcs::load_ffcs_archive;
-        use crate::sges::decompress_block;
+    #[cfg(feature = "retail")]
+    mod retail {
+        use super::*;
 
-        let Some(path) = crate::game_paths::vz_wad_from_env() else {
-            eprintln!("skip: vz.wad not found (set MERCS2_GAME_DIR or VZ_WAD)");
-            return;
-        };
-        let Ok(mut f) = std::fs::File::open(&path) else {
-            eprintln!("skip: vz.wad not readable at {}", path.display());
-            return;
-        };
-        let size = f.metadata().unwrap().len();
-        let arch = load_ffcs_archive(&mut f, size).expect("ffcs");
+        // -----------------------------------------------------------------------
+        // Live end-to-end test against retail vz.wad. Game-gated: built by the `retail`
+        // feature, reads the vz.wad named by the repo-root .mercs2-local.toml, and fails
+        // if it is absent.
+        // Walks real blocks, finds representative components (HibernationControl,
+        // ModelName, FactionMarker, Road, Transform), and deserializes them through
+        // the schema, asserting concrete field values / invariants.
+        // -----------------------------------------------------------------------
+        #[test]
+        fn live_deserialize_representative_components_if_wad_present() {
+            use crate::ffcs::load_ffcs_archive;
+            use crate::sges::decompress_block;
 
-        // Collect the first COMP group (with schm+data) for each target class name.
-        let targets = [
-            "HibernationControl",
-            "ModelName",
-            "FactionMarker",
-            "Road",
-            "Transform",
-        ];
-        let mut found: std::collections::HashMap<String, CompGroup> =
-            std::collections::HashMap::new();
+            let path =
+                crate::game_paths::local_config_vz_wad(std::path::Path::new(env!("CARGO_MANIFEST_DIR")))
+                    .unwrap_or_else(|e| panic!("{e}"));
+            let mut f = std::fs::File::open(&path)
+                .unwrap_or_else(|e| panic!("open {}: {e}", path.display()));
+            let size = f.metadata().unwrap().len();
+            let arch = load_ffcs_archive(&mut f, size).expect("ffcs");
 
-        'outer: for bi in 0..arch.indx.len() {
-            if found.len() == targets.len() {
-                break;
-            }
-            let Ok(dec) = decompress_block(&mut f, &arch.indx, bi as u16) else {
-                continue;
-            };
-            if dec.len() < 4 {
-                continue;
-            }
-            let count = u32::from_le_bytes([dec[0], dec[1], dec[2], dec[3]]) as usize;
-            let mut pos = 4 + count * 16;
-            for ei in 0..count {
-                let base = 4 + ei * 16;
-                if base + 16 > dec.len() {
+            // Collect the first COMP group (with schm+data) for each target class name.
+            let targets = [
+                "HibernationControl",
+                "ModelName",
+                "FactionMarker",
+                "Road",
+                "Transform",
+            ];
+            let mut found: std::collections::HashMap<String, CompGroup> =
+                std::collections::HashMap::new();
+
+            'outer: for bi in 0..arch.indx.len() {
+                if found.len() == targets.len() {
                     break;
                 }
-                let chunk_size = u32::from_le_bytes([
-                    dec[base + 12],
-                    dec[base + 13],
-                    dec[base + 14],
-                    dec[base + 15],
-                ]) as usize;
-                if pos + chunk_size > dec.len() {
-                    break;
-                }
-                let container = &dec[pos..pos + chunk_size];
-                pos += chunk_size;
-                for g in parse_comp_groups(container) {
-                    if let Some(name) = g.name.clone() {
-                        if targets.contains(&name.as_str())
-                            && g.schm.is_some()
-                            && g.data.as_ref().is_some_and(|d| !d.is_empty())
-                            && !found.contains_key(&name)
-                        {
-                            found.insert(name, g);
-                            if found.len() == targets.len() {
-                                break 'outer;
+                let dec = decompress_block(&mut f, &arch.indx, bi as u16)
+                    .unwrap_or_else(|e| panic!("decompress block {bi}: {e}"));
+                assert!(dec.len() >= 4, "block {bi}: {} bytes, too short for an entry count", dec.len());
+                let count = u32::from_le_bytes([dec[0], dec[1], dec[2], dec[3]]) as usize;
+                let mut pos = 4 + count * 16;
+                for ei in 0..count {
+                    let base = 4 + ei * 16;
+                    assert!(
+                        base + 16 <= dec.len(),
+                        "block {bi}: entry {ei} of {count} runs past the {}-byte block",
+                        dec.len()
+                    );
+                    let chunk_size = u32::from_le_bytes([
+                        dec[base + 12],
+                        dec[base + 13],
+                        dec[base + 14],
+                        dec[base + 15],
+                    ]) as usize;
+                    assert!(
+                        pos + chunk_size <= dec.len(),
+                        "block {bi}: entry {ei} container ({chunk_size} bytes at {pos}) runs past the {}-byte block",
+                        dec.len()
+                    );
+                    let container = &dec[pos..pos + chunk_size];
+                    pos += chunk_size;
+                    for g in parse_comp_groups(container) {
+                        if let Some(name) = g.name.clone() {
+                            if targets.contains(&name.as_str())
+                                && g.schm.is_some()
+                                && g.data.as_ref().is_some_and(|d| !d.is_empty())
+                                && !found.contains_key(&name)
+                            {
+                                found.insert(name, g);
+                                if found.len() == targets.len() {
+                                    break 'outer;
+                                }
                             }
                         }
                     }
                 }
             }
-        }
 
-        // HibernationControl: stride 6, fields u16@0,u8@2,u8@3,u8@4,bit@5,bit@5 (world_streaming spec).
-        if let Some(g) = found.get("HibernationControl") {
-            let s = g.schema().expect("hib schema");
-            assert_eq!(
-                s.payload_stride, 6,
-                "HibernationControl descriptor stride is 6"
-            );
-            assert_eq!(s.record_stride(), 10);
-            assert_eq!(s.fields.len(), 6);
-            assert_eq!(s.fields[0].field_type, SchemaFieldType::U16);
-            assert_eq!(s.fields[0].byte_offset, 0);
-            assert_eq!(s.fields[4].field_type, SchemaFieldType::Bit);
-            assert_eq!(s.fields[4].byte_offset, 5);
-            assert_eq!(s.fields[5].byte_offset, 5);
-            assert_ne!(
-                s.fields[4].bit_index, s.fields[5].bit_index,
-                "two bits packed in byte 5"
-            );
-            let recs = s
-                .deserialize_records(g.data.as_ref().unwrap())
-                .expect("hib records");
-            assert!(!recs.is_empty());
-            // Every record must yield all 6 typed fields.
-            for r in &recs {
-                assert_eq!(r.fields.len(), 6);
-                assert!(matches!(
-                    r.get(s.fields[0].name_hash),
-                    Some(FieldValue::U16(_))
-                ));
-                assert!(matches!(
-                    r.get(s.fields[4].name_hash),
-                    Some(FieldValue::Bit(_))
-                ));
-            }
-        } else {
-            panic!("HibernationControl not found in retail vz.wad");
-        }
-
-        // ModelName: single u32 hash field named 0x5b724250 (== Model), stride 4.
-        if let Some(g) = found.get("ModelName") {
-            let s = g.schema().expect("modelname schema");
-            assert_eq!(s.payload_stride, 4);
-            assert_eq!(s.fields.len(), 1);
-            assert_eq!(s.fields[0].field_type, SchemaFieldType::U32);
-            assert_eq!(s.fields[0].name_hash, 0x5b72_4250);
-            let recs = s
-                .deserialize_records(g.data.as_ref().unwrap())
-                .expect("modelname records");
-            assert!(!recs.is_empty());
-            // Each record's model hash is a non-zero u32.
-            for r in &recs {
-                match r.get(0x5b72_4250) {
-                    Some(FieldValue::U32(h)) => assert_ne!(h, 0),
-                    other => panic!("expected model hash u32, got {other:?}"),
+            // HibernationControl: stride 6, fields u16@0,u8@2,u8@3,u8@4,bit@5,bit@5 (world_streaming spec).
+            if let Some(g) = found.get("HibernationControl") {
+                let s = g.schema().expect("hib schema");
+                assert_eq!(
+                    s.payload_stride, 6,
+                    "HibernationControl descriptor stride is 6"
+                );
+                assert_eq!(s.record_stride(), 10);
+                assert_eq!(s.fields.len(), 6);
+                assert_eq!(s.fields[0].field_type, SchemaFieldType::U16);
+                assert_eq!(s.fields[0].byte_offset, 0);
+                assert_eq!(s.fields[4].field_type, SchemaFieldType::Byte);
+                assert_eq!((s.fields[4].bit_width, s.fields[5].bit_width), (1, 1));
+                assert_eq!(s.fields[4].byte_offset, 5);
+                assert_eq!(s.fields[5].byte_offset, 5);
+                assert_ne!(
+                    s.fields[4].bit_start, s.fields[5].bit_start,
+                    "two bits packed in byte 5"
+                );
+                let recs = s
+                    .deserialize_records(g.data.as_ref().unwrap())
+                    .expect("hib records");
+                assert!(!recs.is_empty());
+                // Every record must yield all 6 typed fields.
+                for r in &recs {
+                    assert_eq!(r.fields.len(), 6);
+                    assert!(matches!(
+                        r.get(s.fields[0].name_hash),
+                        Some(FieldValue::U16(_))
+                    ));
+                    assert!(matches!(
+                        r.get(s.fields[4].name_hash),
+                        Some(FieldValue::Bits(_))
+                    ));
                 }
+            } else {
+                panic!("HibernationControl not found in retail vz.wad");
             }
-        } else {
-            panic!("ModelName not found in retail vz.wad");
-        }
 
-        // FactionMarker: single u32 field, stride 4 (matches the descriptor stride in the code map).
-        if let Some(g) = found.get("FactionMarker") {
-            let s = g.schema().expect("factionmarker schema");
-            assert_eq!(s.payload_stride, 4, "FactionMarker descriptor stride is 4");
-            assert_eq!(s.fields.len(), 1);
-            let recs = s
-                .deserialize_records(g.data.as_ref().unwrap())
-                .expect("faction records");
-            assert!(!recs.is_empty());
-            assert!(matches!(
-                recs[0].get(s.fields[0].name_hash),
-                Some(FieldValue::U32(_))
-            ));
-        }
+            // ModelName: single u32 hash field named 0x5b724250 (== Model), stride 4.
+            if let Some(g) = found.get("ModelName") {
+                let s = g.schema().expect("modelname schema");
+                assert_eq!(s.payload_stride, 4);
+                assert_eq!(s.fields.len(), 1);
+                assert_eq!(s.fields[0].field_type, SchemaFieldType::Hash);
+                assert_eq!(s.fields[0].name_hash, 0x5b72_4250);
+                let recs = s
+                    .deserialize_records(g.data.as_ref().unwrap())
+                    .expect("modelname records");
+                assert!(!recs.is_empty());
+                // Each record's model hash is a non-zero u32.
+                for r in &recs {
+                    match r.get(0x5b72_4250) {
+                        Some(FieldValue::U32(h)) => assert_ne!(h, 0),
+                        other => panic!("expected model hash u32, got {other:?}"),
+                    }
+                }
+            } else {
+                panic!("ModelName not found in retail vz.wad");
+            }
 
-        // Road: 4×u32 + 2×vec3, stride 40; the vec3 fields must decode to finite floats.
-        if let Some(g) = found.get("Road") {
-            let s = g.schema().expect("road schema");
-            assert_eq!(s.payload_stride, 40, "Road stride 40 (4×u32 + 2×vec3)");
-            assert_eq!(
-                s.fields
+            // FactionMarker: single u32 field, stride 4 (matches the descriptor stride in the code map).
+            if let Some(g) = found.get("FactionMarker") {
+                let s = g.schema().expect("factionmarker schema");
+                assert_eq!(s.payload_stride, 4, "FactionMarker descriptor stride is 4");
+                assert_eq!(s.fields.len(), 1);
+                let recs = s
+                    .deserialize_records(g.data.as_ref().unwrap())
+                    .expect("faction records");
+                assert!(!recs.is_empty());
+                assert!(matches!(
+                    recs[0].get(s.fields[0].name_hash),
+                    Some(FieldValue::U32(_))
+                ));
+            } else {
+                panic!("FactionMarker not found in retail vz.wad");
+            }
+
+            // Road: 4×u32 + 2×vec3, stride 40; the vec3 fields must decode to finite floats.
+            if let Some(g) = found.get("Road") {
+                let s = g.schema().expect("road schema");
+                assert_eq!(s.payload_stride, 40, "Road stride 40 (4×u32 + 2×vec3)");
+                assert_eq!(
+                    s.fields
+                        .iter()
+                        .filter(|f| f.field_type == SchemaFieldType::Vec3)
+                        .count(),
+                    2
+                );
+                let recs = s
+                    .deserialize_records(g.data.as_ref().unwrap())
+                    .expect("road records");
+                assert!(!recs.is_empty());
+                for f in s
+                    .fields
                     .iter()
                     .filter(|f| f.field_type == SchemaFieldType::Vec3)
-                    .count(),
-                2
-            );
-            let recs = s
-                .deserialize_records(g.data.as_ref().unwrap())
-                .expect("road records");
-            assert!(!recs.is_empty());
-            for f in s
-                .fields
-                .iter()
-                .filter(|f| f.field_type == SchemaFieldType::Vec3)
-            {
-                if let Some(FieldValue::Vec3(v)) = recs[0].get(f.name_hash) {
-                    assert!(v.iter().all(|c| c.is_finite()), "road vec3 finite");
-                } else {
-                    panic!("road vec3 field missing");
+                {
+                    if let Some(FieldValue::Vec3(v)) = recs[0].get(f.name_hash) {
+                        assert!(v.iter().all(|c| c.is_finite()), "road vec3 finite");
+                    } else {
+                        panic!("road vec3 field missing");
+                    }
                 }
+            } else {
+                panic!("Road not found in retail vz.wad");
             }
-        }
 
-        // Transform: type11 blob@0 (32B) + f32@32 + 8×u16@36..50 — assert the SCHEMA layout only.
-        // Transform's on-disk `data` record is written by a special CHDR-gated builder (0x0063D7C0),
-        // not the generic [key][payload] path, so its record stride is validated live (confirm-live),
-        // not asserted here.
-        if let Some(g) = found.get("Transform") {
-            let s = g.schema().expect("transform schema");
-            assert_eq!(s.fields[0].field_type, SchemaFieldType::Blob32);
-            assert_eq!(s.fields[0].byte_offset, 0);
-            assert_eq!(s.fields[1].field_type, SchemaFieldType::F32);
-            assert_eq!(s.fields[1].byte_offset, 32);
-            // The u16 tail is strictly monotonically increasing by 2 (36,38,…) — proves LOW-16 offsets.
-            let u16s: Vec<u16> = s
-                .fields
-                .iter()
-                .filter(|f| f.field_type == SchemaFieldType::U16)
-                .map(|f| f.byte_offset)
-                .collect();
-            for w in u16s.windows(2) {
-                assert_eq!(w[1] - w[0], 2, "Transform u16 fields are 2 bytes apart");
+            // Transform: type11 blob@0 (32B) + code-5 int@32 + 8×u16@36..50 — assert the SCHEMA layout only.
+            // Transform's on-disk `data` record is written by a special CHDR-gated builder (0x0063D7C0),
+            // not the generic [key][payload] path, so its record stride is validated live (confirm-live),
+            // not asserted here.
+            if let Some(g) = found.get("Transform") {
+                let s = g.schema().expect("transform schema");
+                assert_eq!(s.fields[0].field_type, SchemaFieldType::Blob32);
+                assert_eq!(s.fields[0].byte_offset, 0);
+                assert_eq!(s.fields[1].field_type, SchemaFieldType::Int);
+                assert_eq!(s.fields[1].byte_offset, 32);
+                // The u16 tail is strictly monotonically increasing by 2 (36,38,…) — proves LOW-16 offsets.
+                let u16s: Vec<u16> = s
+                    .fields
+                    .iter()
+                    .filter(|f| f.field_type == SchemaFieldType::U16)
+                    .map(|f| f.byte_offset)
+                    .collect();
+                for w in u16s.windows(2) {
+                    assert_eq!(w[1] - w[0], 2, "Transform u16 fields are 2 bytes apart");
+                }
+            } else {
+                panic!("Transform not found in retail vz.wad");
             }
         }
     }

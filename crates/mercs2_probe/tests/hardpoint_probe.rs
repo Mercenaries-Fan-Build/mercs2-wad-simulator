@@ -1,10 +1,13 @@
-//! Ignored probe: confirm the PMC HQ interior hall mesh carries the `hp_playerA_enter` hardpoint in
+//! Probe: confirm the PMC HQ interior hall mesh carries the `hp_playerA_enter` hardpoint in
 //! its HIER, and that (actor origin {3750,450,-3840}) + (hardpoint local) reproduces the vanilla
 //! `_TeleportHero` target (3794.04, 450.75, -3911.03) — so the interior spawn can be DERIVED from data
 //! (actor pos + mesh hardpoint) instead of a baked constant.
 //!
+//! Game-gated: built by the `retail` feature, reads the retail `vz.wad` named by the repo-root
+//! `.mercs2-local.toml`, and fails when it is absent.
+//!
 //! ```text
-//! cargo test -p mercs2_probe --test hardpoint_probe -- --nocapture
+//! cargo test -p mercs2_probe --features retail --test hardpoint_probe -- --nocapture
 //! ```
 
 use mercs2_engine::wad;
@@ -12,22 +15,28 @@ use mercs2_formats::hash::pandemic_hash_m2 as m2;
 
 const ACTOR_ORIGIN: [f32; 3] = [3750.0, 450.0, -3840.0];
 
+/// The retail `vz.wad` path, from the repo-root `.mercs2-local.toml` and nowhere else. Panics with the
+/// resolver's message when it is missing, and when the path is not UTF-8 (`wad::open` takes `&str`).
+fn vz_wad_path() -> String {
+    let start = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let path = mercs2_formats::game_paths::local_config_vz_wad(start).unwrap_or_else(|e| panic!("{e}"));
+    path.to_str()
+        .unwrap_or_else(|| panic!("vz.wad path is not UTF-8: {}", path.display()))
+        .to_string()
+}
+
 #[test]
 fn interior_hardpoint_derives_the_spawn() {
-    let Some(path) = wad::resolve_vz_wad(None) else {
-        return eprintln!(
-            "SKIPPING: no vz.wad discovered. Run `scripts/find-vz-wad.sh --write` or set MERCS2_GAME_DIR."
-        );
-    };
-    let mut w = wad::open(&path).expect("open vz.wad");
+    let path = vz_wad_path();
+    let mut w = wad::open(&path).unwrap_or_else(|e| panic!("open {path}: {e}"));
 
-    // The ornate main hall the player teleports onto (the "HqInterior" actor mesh).
+    // The ornate main hall the player teleports onto (the "HqInterior" actor mesh). The second mesh is
+    // printed for comparison only; the main hall's hardpoint is the one asserted, and it must be found.
+    let mut hq_checked = false;
     for mesh_name in ["pmcoutpost_interior_hq", "proutpost_interior_job"] {
         let hash = m2(mesh_name);
-        let Ok(container) = wad::extract_container(&mut w, hash) else {
-            println!("{mesh_name} (0x{hash:08X}): container not found");
-            continue;
-        };
+        let container = wad::extract_container(&mut w, hash)
+            .unwrap_or_else(|e| panic!("{mesh_name} (0x{hash:08X}): extract_container: {e}"));
         let hier = mercs2_formats::orchestrator::parse_hier(&container);
         println!("\n{mesh_name} (0x{hash:08X}): {} HIER nodes", hier.len());
 
@@ -48,11 +57,16 @@ fn interior_hardpoint_derives_the_spawn() {
                 // SpawnActor anchors the actor by a hardpoint, not by origin — so exact vanilla
                 // reproduction needs that anchor offset too. This probe confirms the DATA is present.
                 assert!((world[0] - 3794.04).abs() < 2.0, "hp_playerA_enter X derives from mesh data");
+                hq_checked = true;
             }
         } else {
             println!("  hp_playerA_enter NOT in this mesh's HIER");
         }
     }
+    assert!(
+        hq_checked,
+        "pmcoutpost_interior_hq's HIER carries no hp_playerA_enter hardpoint in the retail vz.wad"
+    );
 }
 
 /// Root-relative transform of HIER node `idx` = local · parent.local · … · root.local (row-major).

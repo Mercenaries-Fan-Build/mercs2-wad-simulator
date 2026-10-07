@@ -9,8 +9,8 @@
 //! * the resident fxdict container re-encodes identically too;
 //! * the C4 explosion's effect asset resolves by name hash.
 //!
-//! Game-gated: they need `vz.wad` (`MERCS2_GAME_DIR`, `VZ_WAD` or `.mercs2-local.toml`). Without it
-//! each test prints `SKIPPING` and returns — it cannot assert anything about retail it cannot read.
+//! Game-gated: built by the `retail` feature, reads the `vz.wad` named by the repo-root
+//! `.mercs2-local.toml`, and fails if it is absent.
 
 use std::collections::BTreeMap;
 use std::fs::File;
@@ -29,19 +29,17 @@ use mercs2_formats::types::{
 };
 use mercs2_formats::ucfx::parse_block_entry_table;
 
-fn vz_wad() -> Option<PathBuf> {
-    mercs2_formats::game_paths::vz_wad(Path::new(env!("CARGO_MANIFEST_DIR")))
+fn vz_wad() -> PathBuf {
+    mercs2_formats::game_paths::local_config_vz_wad(Path::new(env!("CARGO_MANIFEST_DIR")))
+        .unwrap_or_else(|e| panic!("{e}"))
 }
 
-fn open() -> Option<(File, FfcsArchive)> {
-    let Some(wad) = vz_wad() else {
-        eprintln!("SKIPPING: no vz.wad (set MERCS2_GAME_DIR, VZ_WAD or .mercs2-local.toml)");
-        return None;
-    };
+fn open() -> (File, FfcsArchive) {
+    let wad = vz_wad();
     let mut f = File::open(&wad).expect("open vz.wad");
     let size = f.metadata().expect("stat vz.wad").len();
     let archive = load_ffcs_archive(&mut f, size).expect("read FFCS");
-    Some((f, archive))
+    (f, archive)
 }
 
 /// Every container of `type_hash` in the given blocks, by name hash. A name that appears twice
@@ -92,7 +90,7 @@ fn retail_effects(f: &mut File, archive: &FfcsArchive) -> BTreeMap<u32, Vec<u8>>
 
 #[test]
 fn every_retail_effect_reencodes_byte_identically_with_a_computed_efct() {
-    let Some((mut f, archive)) = open() else { return };
+    let (mut f, archive) = open();
     let fx = retail_effects(&mut f, &archive);
     assert_eq!(fx.len(), 314, "retail vz.wad ships 314 effects");
 
@@ -138,7 +136,7 @@ fn every_retail_effect_reencodes_byte_identically_with_a_computed_efct() {
 
 #[test]
 fn the_retail_fxdict_container_reencodes_byte_identically() {
-    let Some((mut f, archive)) = open() else { return };
+    let (mut f, archive) = open();
     let fx = pandemic_hash_m2("fx");
     let blocks = blocks_of(&archive, |a| a.asset_hash == fx);
     let found = containers(&mut f, &archive, &blocks, TYPE_HASH_FX_DICTIONARY);
@@ -159,7 +157,7 @@ fn the_retail_fxdict_container_reencodes_byte_identically() {
 /// `docs/data/spawnable_templates.csv`) carries `0x41B4326E` in its `name` (`0x1DE5C824`) field.
 #[test]
 fn the_c4_explosion_effect_resolves_by_name_hash() {
-    let Some((mut f, archive)) = open() else { return };
+    let (mut f, archive) = open();
     let fx = retail_effects(&mut f, &archive);
 
     let candidates = [

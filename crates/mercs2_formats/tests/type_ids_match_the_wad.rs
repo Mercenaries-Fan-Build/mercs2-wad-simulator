@@ -18,11 +18,15 @@
 //!
 //! So this test does not encode a table of its own — it reads the game's. A hand-kept mapping that
 //! nothing checks is a mapping that drifts, which is precisely how the last one did.
+//!
+//! Game-gated: built by the `retail` feature, reads the `vz.wad` named by the repo-root
+//! `.mercs2-local.toml`, and fails if it is absent.
 
 use std::path::{Path, PathBuf};
 
-fn vz_wad() -> Option<PathBuf> {
-    mercs2_formats::game_paths::vz_wad(Path::new(env!("CARGO_MANIFEST_DIR")))
+fn vz_wad() -> PathBuf {
+    mercs2_formats::game_paths::local_config_vz_wad(Path::new(env!("CARGO_MANIFEST_DIR")))
+        .unwrap_or_else(|e| panic!("{e}"))
 }
 
 fn u32_at(b: &[u8], o: usize) -> u32 {
@@ -49,10 +53,7 @@ fn wad_type_table(wad: &Path) -> Vec<u32> {
 
 #[test]
 fn every_type_id_constant_matches_the_wads_own_table() {
-    let Some(wad) = vz_wad() else {
-        eprintln!("SKIPPING: no vz.wad (set MERCS2_GAME_DIR or .mercs2-local.toml)");
-        return;
-    };
+    let wad = vz_wad();
     let table = wad_type_table(&wad);
     let id_of = |h: u32| table.iter().position(|t| *t == h);
 
@@ -104,10 +105,7 @@ fn every_type_id_constant_matches_the_wads_own_table() {
 
 #[test]
 fn the_type_hash_to_id_map_matches_the_wads_own_table() {
-    let Some(wad) = vz_wad() else {
-        eprintln!("SKIPPING: no vz.wad");
-        return;
-    };
+    let wad = vz_wad();
     let table = wad_type_table(&wad);
 
     // Forward: every entry in the WAD's table must map back to its own index.
@@ -130,10 +128,7 @@ fn the_type_hash_to_id_map_matches_the_wads_own_table() {
 /// answer from, so it must BE the WAD's table: every pair, no extras.
 #[test]
 fn the_type_hash_registry_is_the_wads_own_table() {
-    let Some(wad) = vz_wad() else {
-        eprintln!("SKIPPING: no vz.wad");
-        return;
-    };
+    let wad = vz_wad();
     let table = wad_type_table(&wad);
     let mut registry = mercs2_formats::types::TYPE_HASH_REGISTRY.to_vec();
     registry.sort_by_key(|&(_, id)| id);
@@ -147,10 +142,7 @@ fn the_type_hash_registry_is_the_wads_own_table() {
 #[test]
 fn every_fxdict_aset_row_uses_type_id_0() {
     use mercs2_formats::types::{TYPE_HASH_FX_DICTIONARY, TYPE_ID_FX_DICTIONARY};
-    let Some(wad) = vz_wad() else {
-        eprintln!("SKIPPING: no vz.wad");
-        return;
-    };
+    let wad = vz_wad();
     let table = wad_type_table(&wad);
     assert_eq!(table[TYPE_ID_FX_DICTIONARY as usize], TYPE_HASH_FX_DICTIONARY);
     assert_eq!(mercs2_formats::types::type_id_for_type_hash(TYPE_HASH_FX_DICTIONARY), Some(0));

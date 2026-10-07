@@ -1,4 +1,5 @@
-//! FX cluster: the resident `fxdict` (`INFO` + `DICT`) and the per-effect UCFX tree.
+//! FX cluster: the resident `fxdict` (`INFO` + `DICT`, the sprite rectangles of the `vfx` atlas) and
+//! the per-effect UCFX tree.
 //!
 //! Both are **PC little-endian on-disk** forms. The spec lives in the notes repo:
 //! `docs/effect_container_format.md` (the effect tree), `docs/ucfx_tree_container.md` (the
@@ -15,12 +16,12 @@
 //! ├─ EMIT (marker)          ┐ one pair per emitter
 //! │  ├─ TRFM (64 B 4×4)     │
 //! │  │  └─ ATRB × 9         │ posx posy posz rotx roty rotz sclx scly sclz
-//! │  └─ GEOM (4 B, opt.)    │ u16 shape index, u16
+//! │  └─ GEOM (4 B, opt.)    │ u16 shape index, u16 sampled record count
 //! ├─ PTYP (u32 flags)       │
 //! │  ├─ ATRB × 19           │ fixed hash order (PTYP_ATTRIBUTES_BEFORE_COLR)
-//! │  ├─ COLR (800 B)        │ 100 × {u8×4, binary16, u16 0}
+//! │  ├─ COLR (800 B)        │ 100 × {u8 B, G, R, A, binary16, u16 0}
 //! │  ├─ ATRB × 13           │ fixed hash order (PTYP_ATTRIBUTES_AFTER_COLR)
-//! │  └─ TEXT                ┘ u32 n + n × u32 texture hash
+//! │  └─ TEXT                ┘ u32 n + n × u32 fxdict frame key
 //! └─ FRCE × k               u32 kind hash + kind parameters
 //!    └─ ATRB × (7 + kind extras)
 //! ATRB (12 B) {u32 hash, u32 flags, u32|f32 value} → optional ANIM (u32 = key count) → AKEY × n
@@ -56,35 +57,49 @@ fn put_f32s(out: &mut Vec<u8>, v: &[f32]) {
 }
 
 // ------------------------------------------------------------------------------------------------
-// fxdict (INFO + DICT) — the resident 630-record effect-parameter namespace.
+// fxdict (INFO + DICT) — the sprite rectangles of the `vfx` atlas, one per frame key.
 // ------------------------------------------------------------------------------------------------
 
-/// On-disk DICT record stride (verified: 630 × 20 = 12600 bytes, zero slack).
+/// On-disk DICT record stride (630 × 20 = 12600 bytes in retail, zero slack).
 pub const DICT_RECORD_BYTES: usize = 20;
-/// Retail fxdict record count (`resident_P000_Q3`, 2026-05-30 probe).
+/// Retail fxdict record count (`resident_P000_Q3`).
 pub const DICT_RETAIL_COUNT: usize = 630;
 
-/// One fxdict parameter record (20 bytes on disk).
+/// One fxdict record (20 bytes on disk): the rectangle of one sprite frame in the `vfx` atlas
+/// `0x89E211AF`, in atlas-normalised units.
+///
+/// `v` is measured from the BOTTOM of the atlas: the record's top edge is at `1 − v − h` from the
+/// top. The loader `FUN_00491320` expands each record to 32 bytes, `(key, u, 1 − v − h, w, h)`, and
+/// the lookup `FUN_00491510` binary-searches the keys with a signed `i32` compare, so the records
+/// are sorted by `key as i32` and a key appears once. A key the search misses draws `(0, 0, 1, 1)`,
+/// the whole atlas.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct FxParam {
-    /// Parameter key hash; shared namespace with effect `TEXT` chunks.
-    pub name_hash: u32,
-    /// Default scalar value (+0x04).
-    pub default: f32,
-    /// Second scalar (+0x08) — hypothesised **max** bound.
-    pub value_b: f32,
-    /// Third scalar (+0x0C) — hypothesised **min** bound (often 1/32).
-    pub value_c: f32,
-    /// Flags dword (+0x10) — semantics unknown.
-    pub flags: u32,
+pub struct FxRect {
+    /// The frame key: the hash an effect's `TEXT` names.
+    pub key: u32,
+    /// Left edge.
+    pub u: f32,
+    /// Bottom edge, measured up from the atlas's bottom.
+    pub v: f32,
+    /// Width.
+    pub w: f32,
+    /// Height.
+    pub h: f32,
+}
+
+impl FxRect {
+    /// The top edge measured down from the atlas's top: `1 − v − h`, the value the loader stores.
+    pub fn top(&self) -> f32 {
+        1.0 - self.v - self.h
+    }
 }
 
 /// Parse the fxdict from its container `INFO` (`u32 entry_count`) and `DICT` body
-/// (`entry_count × 20` bytes). Returns one [`FxParam`] per record.
+/// (`entry_count × 20` bytes). Returns one [`FxRect`] per record, in file order.
 ///
 /// Faithful to the loader: the count comes from INFO, records are read at a fixed 20-byte stride.
 /// Trailing bytes past `count × 20` are ignored (the engine only walks `count`).
-pub fn parse_fxdict(info: &[u8], dict: &[u8]) -> Result<Vec<FxParam>, String> {
+pub fn parse_fxdict(info: &[u8], dict: &[u8]) -> Result<Vec<FxRect>, String> {
     if info.len() < 4 {
         return Err(format!("fxdict INFO too short: {} bytes (need 4)", info.len()));
     }
@@ -101,37 +116,31 @@ pub fn parse_fxdict(info: &[u8], dict: &[u8]) -> Result<Vec<FxParam>, String> {
     let mut out = Vec::with_capacity(count);
     for i in 0..count {
         let o = i * DICT_RECORD_BYTES;
-        out.push(FxParam {
-            name_hash: read_u32_le(dict, o),
-            default: read_f32_le(dict, o + 4),
-            value_b: read_f32_le(dict, o + 8),
-            value_c: read_f32_le(dict, o + 12),
-            flags: read_u32_le(dict, o + 16),
+        out.push(FxRect {
+            key: read_u32_le(dict, o),
+            u: read_f32_le(dict, o + 4),
+            v: read_f32_le(dict, o + 8),
+            w: read_f32_le(dict, o + 12),
+            h: read_f32_le(dict, o + 16),
         });
     }
     Ok(out)
 }
 
-/// Look up a parameter's default by name hash (linear scan; the engine indexes a hash map but the
-/// table is small enough that callers wanting a one-off lookup can use this).
-pub fn fxparam_default(params: &[FxParam], name_hash: u32) -> Option<f32> {
-    params.iter().find(|p| p.name_hash == name_hash).map(|p| p.default)
-}
-
-pub fn write_fxparam(p: &FxParam) -> [u8; DICT_RECORD_BYTES] {
+pub fn write_fxrect(r: &FxRect) -> [u8; DICT_RECORD_BYTES] {
     let mut out = [0u8; DICT_RECORD_BYTES];
-    out[0..4].copy_from_slice(&p.name_hash.to_le_bytes());
-    out[4..8].copy_from_slice(&p.default.to_le_bytes());
-    out[8..12].copy_from_slice(&p.value_b.to_le_bytes());
-    out[12..16].copy_from_slice(&p.value_c.to_le_bytes());
-    out[16..20].copy_from_slice(&p.flags.to_le_bytes());
+    out[0..4].copy_from_slice(&r.key.to_le_bytes());
+    out[4..8].copy_from_slice(&r.u.to_le_bytes());
+    out[8..12].copy_from_slice(&r.v.to_le_bytes());
+    out[12..16].copy_from_slice(&r.w.to_le_bytes());
+    out[16..20].copy_from_slice(&r.h.to_le_bytes());
     out
 }
 
-pub fn write_fxdict_dict(params: &[FxParam]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(params.len() * DICT_RECORD_BYTES);
-    for p in params {
-        out.extend_from_slice(&write_fxparam(p));
+pub fn write_fxdict_dict(records: &[FxRect]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(records.len() * DICT_RECORD_BYTES);
+    for r in records {
+        out.extend_from_slice(&write_fxrect(r));
     }
     out
 }
@@ -140,17 +149,27 @@ pub fn write_fxdict_info(count: u32) -> [u8; 4] {
     count.to_le_bytes()
 }
 
+/// Sort records the way the lookup `FUN_00491510` searches them: by `key as i32`. Two records of
+/// one key are an error, naming the key: the search would find either.
+pub fn sort_fxdict(records: &mut [FxRect]) -> Result<(), String> {
+    records.sort_by_key(|r| r.key as i32);
+    if let Some(pair) = records.windows(2).find(|p| p[0].key == p[1].key) {
+        return Err(format!("fxdict carries key 0x{:08X} twice", pair[0].key));
+    }
+    Ok(())
+}
+
 /// The resident fxdict container: two top-level leaves, `INFO` then `DICT`.
-pub fn write_fxdict_container(params: &[FxParam]) -> Vec<u8> {
+pub fn write_fxdict_container(records: &[FxRect]) -> Vec<u8> {
     write_ucfx_tree(&[
-        UcfxNode::leaf(*b"INFO", write_fxdict_info(params.len() as u32).to_vec()),
-        UcfxNode::leaf(*b"DICT", write_fxdict_dict(params)),
+        UcfxNode::leaf(*b"INFO", write_fxdict_info(records.len() as u32).to_vec()),
+        UcfxNode::leaf(*b"DICT", write_fxdict_dict(records)),
     ])
 }
 
 /// Parse a whole fxdict container. Strict: exactly `INFO` (4 B) then `DICT` (`count × 20` B), no
 /// children, no slack — the shape [`write_fxdict_container`] writes and the retail singleton has.
-pub fn parse_fxdict_container(container: &[u8]) -> Result<Vec<FxParam>, String> {
+pub fn parse_fxdict_container(container: &[u8]) -> Result<Vec<FxRect>, String> {
     let roots = parse_ucfx_tree(container)?;
     let [info, dict] = roots.as_slice() else {
         return Err(format!("fxdict container has {} top-level rows, not INFO + DICT", roots.len()));
@@ -563,12 +582,13 @@ fn check_positions(what: &str, attrs: &[Atrb], defs: &[&[AttrDef]]) -> Result<()
 // COLR / TEXT.
 // ------------------------------------------------------------------------------------------------
 
-/// One `COLR` key (8 bytes on disk).
+/// One `COLR` key (8 bytes on disk: blue, green, red, alpha, binary16, u16 0).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ColrKey {
-    /// Four colour bytes, in file order. The channel order is not proven; the retail keys read as
-    /// three equal-ish bytes plus a fourth that fades to 0 over the 100 keys.
-    pub colour: [u8; 4],
+    /// Red, green, blue, alpha. The file stores them blue, green, red, alpha; [`Colr::to_bytes`] and
+    /// [`Colr::from_bytes`] are the one place that order is mapped. In game, a key stored `00 FF FF`
+    /// draws yellow and a key stored `FF FF 00` draws cyan.
+    pub rgba: [u8; 4],
     /// A binary16 bit pattern (`0x3C00` = 1.0 and `0xBC00` = -1.0 are both in retail). Its role is
     /// not proven; it is carried verbatim.
     pub half_bits: u16,
@@ -582,61 +602,66 @@ pub struct Colr {
 }
 
 impl Colr {
-    /// Every key the same.
-    pub fn uniform(colour: [u8; 4], half_bits: u16) -> Self {
-        Colr { keys: [ColrKey { colour, half_bits }; COLR_KEYS] }
+    /// Every key the same red, green, blue, alpha.
+    pub fn uniform(rgba: [u8; 4], half_bits: u16) -> Self {
+        Colr { keys: [ColrKey { rgba, half_bits }; COLR_KEYS] }
     }
 
-    /// Build from a function of normalised age `t` in 0..=1 (key `i` is at `i / 99`).
+    /// Build from a function of normalised age `t` in 0..=1 (key `i` is at `i / 99`) that returns
+    /// red, green, blue, alpha and the binary16 bits.
     pub fn from_fn(mut f: impl FnMut(f32) -> ([u8; 4], u16)) -> Self {
-        let mut keys = [ColrKey { colour: [0; 4], half_bits: 0 }; COLR_KEYS];
+        let mut keys = [ColrKey { rgba: [0; 4], half_bits: 0 }; COLR_KEYS];
         for (i, k) in keys.iter_mut().enumerate() {
-            let (colour, half_bits) = f(i as f32 / (COLR_KEYS - 1) as f32);
-            *k = ColrKey { colour, half_bits };
+            let (rgba, half_bits) = f(i as f32 / (COLR_KEYS - 1) as f32);
+            *k = ColrKey { rgba, half_bits };
         }
         Colr { keys }
     }
 
-    /// The four colour bytes at normalised age `t` (0 = spawn, 1 = death), linearly interpolated
-    /// between the two nearest keys and scaled to 0..1. Channel order as stored (unproven).
+    /// Red, green, blue, alpha at normalised age `t` (0 = spawn, 1 = death), linearly interpolated
+    /// between the two nearest keys and scaled to 0..1.
     pub fn sample(&self, t: f32) -> [f32; 4] {
         let scaled = t.clamp(0.0, 1.0) * (COLR_KEYS - 1) as f32;
         let i0 = scaled.floor() as usize;
         let i1 = (i0 + 1).min(COLR_KEYS - 1);
         let f = scaled - i0 as f32;
-        let (a, b) = (self.keys[i0].colour, self.keys[i1].colour);
+        let (a, b) = (self.keys[i0].rgba, self.keys[i1].rgba);
         let lerp = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * f) / 255.0;
         [lerp(a[0], b[0]), lerp(a[1], b[1]), lerp(a[2], b[2]), lerp(a[3], b[3])]
     }
 
+    /// The 800-byte body; each key's colour is written blue, green, red, alpha.
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut b = Vec::with_capacity(COLR_BYTES);
         for k in &self.keys {
-            b.extend_from_slice(&k.colour);
+            let [red, green, blue, alpha] = k.rgba;
+            b.extend_from_slice(&[blue, green, red, alpha]);
             b.extend_from_slice(&k.half_bits.to_le_bytes());
             b.extend_from_slice(&0u16.to_le_bytes());
         }
         b
     }
 
+    /// Read the 800-byte body; each key's colour is stored blue, green, red, alpha.
     pub fn from_bytes(b: &[u8]) -> Result<Colr, String> {
         if b.len() != COLR_BYTES {
             return Err(format!("COLR is {} bytes, not {COLR_BYTES}", b.len()));
         }
-        let mut keys = [ColrKey { colour: [0; 4], half_bits: 0 }; COLR_KEYS];
+        let mut keys = [ColrKey { rgba: [0; 4], half_bits: 0 }; COLR_KEYS];
         for (i, k) in keys.iter_mut().enumerate() {
             let o = i * COLR_KEY_BYTES;
             let tail = read_u16_le(b, o + 6);
             if tail != 0 {
                 return Err(format!("COLR key {i}: trailing u16 is 0x{tail:04X}, not 0"));
             }
-            *k = ColrKey { colour: [b[o], b[o + 1], b[o + 2], b[o + 3]], half_bits: read_u16_le(b, o + 4) };
+            *k = ColrKey { rgba: [b[o + 2], b[o + 1], b[o], b[o + 3]], half_bits: read_u16_le(b, o + 4) };
         }
         Ok(Colr { keys })
     }
 }
 
-/// `TEXT` — the texture frames: `u32 n` then `n` texture asset hashes.
+/// `TEXT` — the sprite frames: `u32 n` then `n` frame keys, each the key of an fxdict record
+/// ([`FxRect`]), a rectangle of the `vfx` atlas.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Text {
     pub frames: Vec<u32>,
@@ -837,19 +862,31 @@ pub struct Force {
 // ------------------------------------------------------------------------------------------------
 
 /// One `EMTR/GEOM`: a table of 13-f32 shape records, referenced by [`EmitterGeom::shape_index`].
+///
+/// A record is a triangle the emitter spawns particles on. `FUN_00488770` reads three of its
+/// vectors: the vertex `P` (floats 4–6), and the edges `A` (7–9) and `B` (10–12); a particle starts
+/// at `P + u·A + v·B` with `u` uniform in `[0, 1)` and `v` uniform in `[0, 1 − u)`, and the vector at
+/// floats 1–3 is copied out beside it. In all 13,148 retail records floats 1–3 are a unit vector
+/// along `±(A × B)` and float 0 is `|A × B|`; `FUN_00488770` does not read float 0.
 #[derive(Debug, Clone, PartialEq)]
 pub struct EmitterShape {
     pub records: Vec<[f32; SHAPE_RECORD_FLOATS]>,
 }
 
-/// An emitter's `GEOM` (4 bytes): the first u16 indexes the `EMTR` shape table
-/// (`FUN_0048cc30`: `shapes[u16]`); the second u16 is stored at `+0x00` of the EMIT record,
-/// meaning unproven.
+/// An emitter's `GEOM` (4 bytes). `FUN_0048cc30` stores `shapes[shape_index]` at `+0x04` of the
+/// EMIT record and `word_00`, sign-extended, at `+0x00`. `FUN_0048ae80` draws each particle's record
+/// as `random % word_00` (an unsigned divide) from the table at `+0x04`: `word_00` is the number
+/// of records the emitter samples, the record count of its shape in all 811 retail `GEOM`s.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EmitterGeom {
     pub shape_index: u16,
     pub word_00: u16,
 }
+
+/// The largest `GEOM` record count the engine samples within its table: `FUN_0048cc30` stores the
+/// word as `(int)(short)`, so a word of `0x8000` or above is a negative count, and the unsigned
+/// divide in `FUN_0048ae80` then yields an index past the table.
+pub const GEOM_MAX_SAMPLED_RECORDS: u16 = 0x7FFF;
 
 /// `PTYP` and its children.
 #[derive(Debug, Clone, PartialEq)]
@@ -869,7 +906,8 @@ pub struct Emitter {
     pub transform: [[f32; 4]; 4],
     /// The nine [`TRFM_CHANNELS`], in order.
     pub channels: Vec<Atrb>,
-    /// 811 of 820 retail emitters have one.
+    /// 811 of 820 retail emitters have one; [`EffectContainer::check_emitter_shapes`] says when an
+    /// emitter may go without.
     pub geom: Option<EmitterGeom>,
     pub particle: ParticleType,
 }
@@ -886,8 +924,16 @@ pub struct EffectContainer {
 pub const PTYP_KNOWN_FLAGS: u32 = 0b11;
 
 impl EffectContainer {
-    /// Validate everything the writer relies on, naming the first violation.
+    /// Validate everything the writer relies on, naming the first violation: the node rules
+    /// ([`Self::validate_nodes`]), then the emitter-shape rules ([`Self::check_emitter_shapes`]).
     pub fn validate(&self) -> Result<(), String> {
+        self.validate_nodes()?;
+        self.check_emitter_shapes()
+    }
+
+    /// The node rules: at least one emitter and one shape, every attribute run against its position
+    /// table, the PTYP flags and the TEXT frames.
+    pub fn validate_nodes(&self) -> Result<(), String> {
         if self.emitters.is_empty() {
             return Err("an effect needs at least one emitter (EFCT[0] = PTYP count)".into());
         }
@@ -897,15 +943,6 @@ impl EffectContainer {
         for (i, e) in self.emitters.iter().enumerate() {
             let w = format!("emitter {i}");
             check_positions(&format!("{w} TRFM"), &e.channels, &[&TRFM_CHANNELS])?;
-            if let Some(g) = e.geom {
-                if g.shape_index as usize >= self.shapes.len() {
-                    return Err(format!(
-                        "{w}: GEOM shape index {} but EMTR has {} shapes",
-                        g.shape_index,
-                        self.shapes.len()
-                    ));
-                }
-            }
             let p = &e.particle;
             if p.flags & !PTYP_KNOWN_FLAGS != 0 {
                 return Err(format!("{w}: PTYP flags 0x{:08X} set bits the loader never reads", p.flags));
@@ -933,6 +970,92 @@ impl EffectContainer {
                 &f.attributes,
                 &[&FRCE_COMMON_ATTRIBUTES, f.kind.extra_attributes()],
             )?;
+        }
+        Ok(())
+    }
+
+    /// The emitter-shape rules: every emitter the engine can spawn a particle from has a shape table
+    /// it samples within.
+    ///
+    /// A spawned effect starts in mode 0 (`FUN_00488d70` zeroes the instance's `+0x770`), and in
+    /// mode 0 `FUN_0048ae80` draws each new particle's spawn record as `random % count` from the
+    /// table its `GEOM` set ([`EmitterGeom`]). So:
+    ///
+    /// * a `GEOM` names a shape of the `EMTR` table;
+    /// * its `word_00` is at least 1 (0 divides by zero), at most the named shape's record count
+    ///   (beyond it the engine reads past the table), and at most [`GEOM_MAX_SAMPLED_RECORDS`];
+    /// * an emitter without `GEOM` has a count of 0, so it divides by zero on its first particle; it
+    ///   is accepted only when its `rate` can spawn none: `FUN_0048f4f0` adds
+    ///   `max(rate + (1 − 2u)·ratevar, 0)` (`u` uniform in `[0, 1)`, `FUN_00490960`) to the emitter's
+    ///   spawn count each frame, so `rate` is a constant at or below 0 (no curve) and `ratevar` is 0.
+    ///   The 9 retail emitters without `GEOM` are of this kind. Every template that starts such an
+    ///   effect also has a zero per-distance factor (`RedEffectComponent` `0x62C7746E`), the other
+    ///   term of the spawn count; that is the template's rule, checked where templates are.
+    pub fn check_emitter_shapes(&self) -> Result<(), String> {
+        let rate = PTYP_ATTRIBUTES_AFTER_COLR[2].hash;
+        let ratevar = PTYP_ATTRIBUTES_AFTER_COLR[3].hash;
+        for (i, e) in self.emitters.iter().enumerate() {
+            let w = format!("emitter {i}");
+            match e.geom {
+                Some(g) => {
+                    let s = g.shape_index as usize;
+                    let Some(shape) = self.shapes.get(s) else {
+                        return Err(format!(
+                            "{w}: GEOM shape index {s} but EMTR has {} shapes; the engine would take the \
+                             emitter's shape table from past the EMTR table",
+                            self.shapes.len()
+                        ));
+                    };
+                    let n = shape.records.len();
+                    let k = g.word_00;
+                    if n == 0 {
+                        return Err(format!(
+                            "{w}: GEOM names shape {s}, which has no records; the engine picks every \
+                             particle's spawn record from the shape, as random % count, and a shape \
+                             without records has none to pick"
+                        ));
+                    }
+                    if k == 0 {
+                        return Err(format!(
+                            "{w}: GEOM samples 0 records of shape {s}; the engine picks every particle's \
+                             spawn record as random % count, so a count of 0 divides by zero. Give the \
+                             shape's record count, {n}"
+                        ));
+                    }
+                    if k as usize > n {
+                        return Err(format!(
+                            "{w}: GEOM samples {k} records of shape {s}, which has {n}; the engine picks \
+                             each spawn record as random % {k} and reads past the shape's records"
+                        ));
+                    }
+                    if k > GEOM_MAX_SAMPLED_RECORDS {
+                        return Err(format!(
+                            "{w}: GEOM samples {k} records; the engine reads the count as a signed 16-bit \
+                             number, so a count above {GEOM_MAX_SAMPLED_RECORDS} is negative and picks \
+                             records past the shape"
+                        ));
+                    }
+                }
+                None => {
+                    let at = |h: u32| e.particle.attributes.iter().find(|a| a.hash == h);
+                    let spawns_none = match (at(rate), at(ratevar)) {
+                        (Some(r), Some(v)) => {
+                            r.curve.is_none()
+                                && matches!(r.value, AtrbValue::F32(x) if x <= 0.0)
+                                && v.value == AtrbValue::F32(0.0)
+                        }
+                        _ => false,
+                    };
+                    if !spawns_none {
+                        return Err(format!(
+                            "{w} has no GEOM, so its shape table has 0 records, and the engine divides by \
+                             zero picking the spawn record of its first particle (random % 0). Give it a \
+                             GEOM naming a shape. An emitter without GEOM spawns no particle only with a \
+                             constant rate at or below 0 and a ratevar of 0"
+                        ));
+                    }
+                }
+            }
         }
         Ok(())
     }
@@ -1232,33 +1355,29 @@ mod tests {
         v.to_le_bytes()
     }
 
-    #[test]
-    fn fxdict_single_record() {
-        let info = 1u32.to_le_bytes();
-        let mut dict = Vec::new();
-        dict.extend_from_slice(&le(0xAABBCCDD));
-        dict.extend_from_slice(&1.5f32.to_le_bytes());
-        dict.extend_from_slice(&0.5f32.to_le_bytes());
-        dict.extend_from_slice(&0.03125f32.to_le_bytes());
-        dict.extend_from_slice(&le(0x3CF40017));
-        let params = parse_fxdict(&info, &dict).unwrap();
-        assert_eq!(params.len(), 1);
-        let p = params[0];
-        assert_eq!(p.name_hash, 0xAABBCCDD);
-        assert_eq!(p.default, 1.5);
-        assert_eq!(p.value_b, 0.5);
-        assert_eq!(p.value_c, 0.03125);
-        assert_eq!(p.flags, 0x3CF40017);
-        assert_eq!(fxparam_default(&params, 0xAABBCCDD), Some(1.5));
-        assert_eq!(fxparam_default(&params, 0xDEAD), None);
+    fn rect_bytes(key: u32, u: f32, v: f32, w: f32, h: f32) -> Vec<u8> {
+        let mut b = le(key).to_vec();
+        for f in [u, v, w, h] {
+            b.extend_from_slice(&f.to_le_bytes());
+        }
+        b
     }
 
     #[test]
-    fn fxdict_retail_shape() {
+    fn a_record_reads_as_key_u_v_w_h_and_its_top_is_one_minus_v_minus_h() {
+        let info = 1u32.to_le_bytes();
+        let dict = rect_bytes(0xAABBCCDD, 0.75, 0.5, 0.125, 0.25);
+        let records = parse_fxdict(&info, &dict).unwrap();
+        assert_eq!(records, vec![FxRect { key: 0xAABBCCDD, u: 0.75, v: 0.5, w: 0.125, h: 0.25 }]);
+        assert_eq!(records[0].top(), 0.25);
+    }
+
+    #[test]
+    fn the_retail_count_reads_from_a_zeroed_dict() {
         let info = (DICT_RETAIL_COUNT as u32).to_le_bytes();
         let dict = vec![0u8; DICT_RETAIL_COUNT * DICT_RECORD_BYTES];
-        let params = parse_fxdict(&info, &dict).unwrap();
-        assert_eq!(params.len(), 630);
+        let records = parse_fxdict(&info, &dict).unwrap();
+        assert_eq!(records.len(), 630);
         assert_eq!(dict.len(), 12600);
     }
 
@@ -1277,32 +1396,37 @@ mod tests {
     }
 
     #[test]
-    fn fxparam_write_roundtrip() {
-        let p = FxParam { name_hash: 0xDEADBEEF, default: 1.25, value_b: 3.5, value_c: 0.03125, flags: 0x12345678 };
-        let bytes = write_fxparam(&p);
-        assert_eq!(bytes.len(), DICT_RECORD_BYTES);
+    fn a_record_writes_and_reads_back() {
+        let r = FxRect { key: 0xDEADBEEF, u: 0.25, v: 0.5, w: 0.03125, h: 0.0625 };
+        let bytes = write_fxrect(&r);
+        assert_eq!(bytes.to_vec(), rect_bytes(0xDEADBEEF, 0.25, 0.5, 0.03125, 0.0625));
         let back = parse_fxdict(&1u32.to_le_bytes(), &bytes).unwrap();
-        assert_eq!(back, vec![p]);
+        assert_eq!(back, vec![r]);
+    }
+
+    #[test]
+    fn records_sort_by_signed_key_and_a_repeated_key_is_refused() {
+        let at = |key: u32| FxRect { key, u: 0.0, v: 0.0, w: 0.0, h: 0.0 };
+        let mut records = vec![at(0x0000_0002), at(0x8000_0000), at(0xFFFF_FFFF), at(0x7FFF_FFFF), at(0x0000_0001)];
+        sort_fxdict(&mut records).unwrap();
+        let keys: Vec<u32> = records.iter().map(|r| r.key).collect();
+        assert_eq!(keys, vec![0x8000_0000, 0xFFFF_FFFF, 0x0000_0001, 0x0000_0002, 0x7FFF_FFFF]);
+        let mut twice = vec![at(5), at(9), at(5)];
+        assert_eq!(sort_fxdict(&mut twice).unwrap_err(), "fxdict carries key 0x00000005 twice");
     }
 
     #[test]
     fn fxdict_container_is_info_then_dict_and_round_trips() {
-        let params: Vec<FxParam> = (0..8)
-            .map(|i| FxParam {
-                name_hash: 0x1000 + i,
-                default: i as f32,
-                value_b: 2.0 * i as f32,
-                value_c: 0.5 * i as f32,
-                flags: 0xF000_0000 | i,
-            })
+        let records: Vec<FxRect> = (0..8)
+            .map(|i| FxRect { key: 0x1000 + i, u: i as f32 / 8.0, v: 0.5, w: 1.0 / 8.0, h: 1.0 / 16.0 })
             .collect();
-        let c = write_fxdict_container(&params);
+        let c = write_fxdict_container(&records);
         assert!(crate::ucfx::verify_ucfx_container(&c, "fxd", 0).is_none());
         let rows = read_ucfx_rows(&c).unwrap();
         assert_eq!(rows.len(), 2);
         assert_eq!((&rows[0].tag, rows[0].rel_off, rows[0].size, rows[0].x2, rows[0].x3), (b"INFO", 0, 4, 1, 0));
         assert_eq!((&rows[1].tag, rows[1].rel_off, rows[1].size, rows[1].x2, rows[1].x3), (b"DICT", 4, 160, 0, 0));
-        assert_eq!(parse_fxdict_container(&c).unwrap(), params);
+        assert_eq!(parse_fxdict_container(&c).unwrap(), records);
     }
 
     // ---- effect -------------------------------------------------------------------------------
@@ -1362,7 +1486,7 @@ mod tests {
             emitters: vec![Emitter {
                 transform: [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0]],
                 channels: channels(),
-                geom: Some(EmitterGeom { shape_index: 0, word_00: 16 }),
+                geom: Some(EmitterGeom { shape_index: 0, word_00: 1 }),
                 particle: ParticleType {
                     flags: 1,
                     attributes: ptyp_attrs(&set),
@@ -1416,7 +1540,7 @@ mod tests {
         assert_eq!((&last.tag, last.x2, last.x3), (b"TEXT", 0, 0));
 
         let p = &back.emitters[0].particle;
-        assert!(p.colr.keys.iter().all(|k| k.colour == MAGENTA));
+        assert!(p.colr.keys.iter().all(|k| k.rgba == MAGENTA));
         assert_eq!(p.text.frames, vec![texture]);
         let life = p.attributes.iter().find(|a| a.hash == pandemic_hash_m2("life")).unwrap();
         assert_eq!(life.value, AtrbValue::F32(1.0));
@@ -1428,10 +1552,11 @@ mod tests {
 
     #[test]
     fn colr_is_800_bytes_of_100_keys() {
-        let c = Colr::from_fn(|t| ([(t * 255.0) as u8, 1, 2, 3], 0x3C00));
+        let c = Colr::from_fn(|t| ([(t * 255.0) as u8, 1, 9, 3], 0x3C00));
         let b = c.to_bytes();
         assert_eq!(b.len(), 800);
-        assert_eq!(&b[8..16], &[2, 1, 2, 3, 0x00, 0x3C, 0, 0]);
+        // Key 1 is red 2, green 1, blue 9, alpha 3, stored blue, green, red, alpha.
+        assert_eq!(&b[8..16], &[9, 1, 2, 3, 0x00, 0x3C, 0, 0]);
         assert_eq!(Colr::from_bytes(&b).unwrap(), c);
         assert!(Colr::from_bytes(&b[..200]).is_err());
         let mut bad = b.clone();
@@ -1439,6 +1564,17 @@ mod tests {
         assert!(Colr::from_bytes(&bad).unwrap_err().contains("trailing"));
         assert!((c.sample(1.0)[0] - 1.0).abs() < 1e-6);
         assert_eq!(c.sample(0.0)[0], 0.0);
+    }
+
+    #[test]
+    fn colr_keys_are_red_green_blue_alpha_stored_blue_green_red_alpha() {
+        let cyan = Colr::uniform([0, 255, 255, 255], 0x3C00);
+        let b = cyan.to_bytes();
+        assert_eq!(&b[..8], &[0xFF, 0xFF, 0x00, 0xFF, 0x00, 0x3C, 0, 0]);
+        assert_eq!(Colr::from_bytes(&b).unwrap().keys[0].rgba, [0, 255, 255, 255]);
+        let yellow = Colr::uniform([255, 255, 0, 128], 0x3C00);
+        assert_eq!(&yellow.to_bytes()[..4], &[0x00, 0xFF, 0xFF, 0x80]);
+        assert_eq!(cyan.sample(0.5), [0.0, 1.0, 1.0, 1.0]);
     }
 
     #[test]
@@ -1572,6 +1708,59 @@ mod tests {
         fx.emitters[0].particle.flags = 3;
         fx.emitters[0].particle.text.frames = vec![7; 101];
         assert!(write_effect_container(&fx).unwrap_err().contains("stream words"));
+    }
+
+    #[test]
+    fn an_emitter_needs_a_shape_table_it_samples_within() {
+        let refused = |edit: &dyn Fn(&mut EffectContainer)| {
+            let mut fx = magenta_burst(1);
+            edit(&mut fx);
+            assert!(fx.validate_nodes().is_ok());
+            let e = fx.check_emitter_shapes().unwrap_err();
+            assert_eq!(write_effect_container(&fx).unwrap_err(), e);
+            e
+        };
+        let e = refused(&|fx| fx.emitters[0].geom = Some(EmitterGeom { shape_index: 1, word_00: 1 }));
+        assert!(e.contains("shape index 1"), "{e}");
+        let e = refused(&|fx| fx.emitters[0].geom = Some(EmitterGeom { shape_index: 0, word_00: 0 }));
+        assert!(e.contains("samples 0 records") && e.contains("divides by zero"), "{e}");
+        let e = refused(&|fx| fx.emitters[0].geom = Some(EmitterGeom { shape_index: 0, word_00: 2 }));
+        assert!(e.contains("samples 2 records of shape 0, which has 1"), "{e}");
+        let e = refused(&|fx| fx.shapes[0].records.clear());
+        assert!(e.contains("has no records"), "{e}");
+        let e = refused(&|fx| {
+            fx.shapes[0].records = vec![[0.0; SHAPE_RECORD_FLOATS]; 0x8000];
+            fx.emitters[0].geom = Some(EmitterGeom { shape_index: 0, word_00: 0x8000 });
+        });
+        assert!(e.contains("signed 16-bit"), "{e}");
+        // `magenta_burst` has rate 100: without GEOM it spawns from a 0-record table.
+        let e = refused(&|fx| fx.emitters[0].geom = None);
+        assert!(e.contains("has no GEOM") && e.contains("divides by zero"), "{e}");
+
+        let at = |fx: &EffectContainer, name: &str| {
+            fx.emitters[0].particle.attributes.iter().position(|a| a.hash == pandemic_hash_m2(name)).unwrap()
+        };
+        let without_geom = |rate: Atrb, ratevar: f32| {
+            let mut fx = magenta_burst(1);
+            fx.emitters[0].geom = None;
+            let (r, v) = (at(&fx, "rate"), at(&fx, "ratevar"));
+            fx.emitters[0].particle.attributes[r] = rate;
+            fx.emitters[0].particle.attributes[v] = Atrb::f32(pandemic_hash_m2("ratevar"), ratevar);
+            fx
+        };
+        let rate = |v: f32| Atrb::f32(pandemic_hash_m2("rate"), v);
+        // A constant rate at or below 0 with ratevar 0 spawns nothing: accepted, as retail's 9.
+        for r in [0.0, -1.0] {
+            let fx = without_geom(rate(r), 0.0);
+            assert_eq!(parse_effect_container(&write_effect_container(&fx).unwrap()).unwrap(), fx);
+        }
+        assert!(without_geom(rate(0.0), 1.0).check_emitter_shapes().unwrap_err().contains("has no GEOM"));
+        let curve = rate(0.0).with_curve(vec![AnimKey { time: 0.0, value: 0.0 }, AnimKey { time: 100.0, value: 5.0 }]);
+        assert!(without_geom(curve, 0.0).check_emitter_shapes().unwrap_err().contains("has no GEOM"));
+        // A count below the shape's record count samples the first records only.
+        let mut fx = magenta_burst(1);
+        fx.shapes[0].records.push([1.0; SHAPE_RECORD_FLOATS]);
+        assert!(fx.check_emitter_shapes().is_ok());
     }
 
     #[test]

@@ -1,0 +1,173 @@
+# An authored effect: one emitter drawing the sprite qm_fx_a_ring, one gravity force.
+# The emitter spawns on shape 0, the eight faces of an octahedron of radius 0.25 about the origin.
+# Each record is one face: |A x B|, the outward unit normal, the vertex P on the x axis, and the
+# edges A and B from P to the face's vertices on the y and z axes.
+shapes:
+- - [0.10825317, 0.57735026, 0.57735026, 0.57735026, 0.25, 0.0, 0.0, -0.25, 0.25, 0.0, -0.25, 0.0, 0.25]
+  - [0.10825317, 0.57735026, 0.57735026, -0.57735026, 0.25, 0.0, 0.0, -0.25, 0.0, -0.25, -0.25, 0.25, 0.0]
+  - [0.10825317, 0.57735026, -0.57735026, 0.57735026, 0.25, 0.0, 0.0, -0.25, 0.0, 0.25, -0.25, -0.25, 0.0]
+  - [0.10825317, 0.57735026, -0.57735026, -0.57735026, 0.25, 0.0, 0.0, -0.25, -0.25, 0.0, -0.25, 0.0, -0.25]
+  - [0.10825317, -0.57735026, 0.57735026, 0.57735026, -0.25, 0.0, 0.0, 0.25, 0.0, 0.25, 0.25, 0.25, 0.0]
+  - [0.10825317, -0.57735026, 0.57735026, -0.57735026, -0.25, 0.0, 0.0, 0.25, 0.25, 0.0, 0.25, 0.0, -0.25]
+  - [0.10825317, -0.57735026, -0.57735026, 0.57735026, -0.25, 0.0, 0.0, 0.25, -0.25, 0.0, 0.25, 0.0, 0.25]
+  - [0.10825317, -0.57735026, -0.57735026, -0.57735026, -0.25, 0.0, 0.0, 0.25, 0.0, -0.25, 0.25, -0.25, 0.0]
+emitters:
+- transform: [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0]]
+  channels:
+    posx: { value: 0.0, curve: none, options: [] }
+    posy: { value: 0.0, curve: none, options: [] }
+    posz: { value: 0.0, curve: none, options: [] }
+    rotx: { value: 0.0, curve: none, options: [] }
+    roty: { value: 0.0, curve: none, options: [] }
+    rotz: { value: 0.0, curve: none, options: [] }
+    sclx: { value: 1.0, curve: none, options: [] }
+    scly: { value: 1.0, curve: none, options: [] }
+    sclz: { value: 1.0, curve: none, options: [] }
+  geom: { shape: 0, word: 8 }
+  particle:
+    flags: 0
+    attributes:
+      name: { value: qm_fx_cyan_burst, curve: none, options: [] }
+      size: { value: 0.6, curve: none, options: [] }
+      sizevar: { value: 0.1, curve: none, options: [] }
+      mass: { value: 1.0, curve: none, options: [] }
+      massvar: { value: 0.0, curve: none, options: [] }
+      life: { value: 1.5, curve: none, options: [] }
+      lifevar: { value: 0.3, curve: none, options: [] }
+      scale: { value: 1, curve: none, options: [] }
+      rate: { value: 30.0, curve: none, options: [] }
+      ratevar: { value: 0.0, curve: none, options: [] }
+      spread: { value: 30.0, curve: none, options: [] }
+      spreadvar: { value: 0.0, curve: none, options: [] }
+      speed: { value: 4.0, curve: none, options: [] }
+      speedvar: { value: 0.0, curve: none, options: [] }
+      inheritvel: { value: 0.0, curve: none, options: [] }
+      inheritvelvar: { value: 0.0, curve: none, options: [] }
+      emissiondir: { value: 0, curve: none, options: [] }
+      '0x497A1895': { value: 0.0, curve: none, options: [] }
+      '0x1792B524': { value: 0.0, curve: none, options: [] }
+      '0x10831673': { value: 1.0, curve: none, options: [] }
+      '0xB6197EFE': { value: 0.0, curve: none, options: [] }
+      '0x6CF0BE14': { value: 1.0, curve: none, options: [] }
+      '0xBE968D3B': { value: 0.0, curve: none, options: [] }
+      '0xC558C9D8': { value: 1.0, curve: none, options: [] }
+      '0xD80DF37F': { value: 0.0, curve: none, options: [] }
+      '0x720F22F8': { value: 1.0, curve: none, options: [] }
+      '0x4712719F': { value: 0.0, curve: none, options: [] }
+      '0xB3DBB6C0': { value: 1.0, curve: none, options: [] }
+      '0x4C49B137': { value: 0.0, curve: none, options: [] }
+      '0xC3592BB7': { value: 2, curve: none, options: [] }
+      '0x35ACBAB7': { value: 0.0, curve: none, options: [] }
+      '0x1B878602': { value: 360.0, curve: none, options: [] }
+    colour:
+    - { rgba: [0, 255, 255, 255], half: '0x3C00' }
+    - { rgba: [0, 255, 255, 252], half: '0x3C00' }
+    - { rgba: [0, 255, 255, 250], half: '0x3C00' }
+    - { rgba: [0, 255, 255, 247], half: '0x3C00' }
+    - { rgba: [0, 255, 255, 245], half: '0x3C00' }
+    - { rgba: [0, 255, 255, 242], half: '0x3C00' }
+    - { rgba: [0, 255, 255, 240], half: '0x3C00' }
+    - { rgba: [0, 255, 255, 237], half: '0x3C00' }
+    - { rgba: [0, 255, 255, 234], half: '0x3C00' }
+    - { rgba: [0, 255, 255, 232], half: '0x3C00' }
+    - { rgba: [0, 255, 255, 229], half: '0x3C00' }
+    - { rgba: [0, 255, 255, 227], half: '0x3C00' }
+    - { rgba: [0, 255, 255, 224], half: '0x3C00' }
+    - { rgba: [0, 255, 255, 222], half: '0x3C00' }
+    - { rgba: [0, 255, 255, 219], half: '0x3C00' }
+    - { rgba: [0, 255, 255, 216], half: '0x3C00' }
+    - { rgba: [0, 255, 255, 214], half: '0x3C00' }
+    - { rgba: [0, 255, 255, 211], half: '0x3C00' }
+    - { rgba: [0, 255, 255, 209], half: '0x3C00' }
+    - { rgba: [0, 255, 255, 206], half: '0x3C00' }
+    - { rgba: [0, 255, 255, 203], half: '0x3C00' }
+    - { rgba: [0, 255, 255, 201], half: '0x3C00' }
+    - { rgba: [0, 255, 255, 198], half: '0x3C00' }
+    - { rgba: [0, 255, 255, 196], half: '0x3C00' }
+    - { rgba: [0, 255, 255, 193], half: '0x3C00' }
+    - { rgba: [0, 255, 255, 191], half: '0x3C00' }
+    - { rgba: [0, 255, 255, 188], half: '0x3C00' }
+    - { rgba: [0, 255, 255, 185], half: '0x3C00' }
+    - { rgba: [0, 255, 255, 183], half: '0x3C00' }
+    - { rgba: [0, 255, 255, 180], half: '0x3C00' }
+    - { rgba: [0, 255, 255, 178], half: '0x3C00' }
+    - { rgba: [0, 255, 255, 175], half: '0x3C00' }
+    - { rgba: [0, 255, 255, 173], half: '0x3C00' }
+    - { rgba: [0, 255, 255, 170], half: '0x3C00' }
+    - { rgba: [0, 255, 255, 167], half: '0x3C00' }
+    - { rgba: [0, 255, 255, 165], half: '0x3C00' }
+    - { rgba: [0, 255, 255, 162], half: '0x3C00' }
+    - { rgba: [0, 255, 255, 160], half: '0x3C00' }
+    - { rgba: [0, 255, 255, 157], half: '0x3C00' }
+    - { rgba: [0, 255, 255, 155], half: '0x3C00' }
+    - { rgba: [0, 255, 255, 152], half: '0x3C00' }
+    - { rgba: [0, 255, 255, 149], half: '0x3C00' }
+    - { rgba: [0, 255, 255, 147], half: '0x3C00' }
+    - { rgba: [0, 255, 255, 144], half: '0x3C00' }
+    - { rgba: [0, 255, 255, 142], half: '0x3C00' }
+    - { rgba: [0, 255, 255, 139], half: '0x3C00' }
+    - { rgba: [0, 255, 255, 137], half: '0x3C00' }
+    - { rgba: [0, 255, 255, 134], half: '0x3C00' }
+    - { rgba: [0, 255, 255, 131], half: '0x3C00' }
+    - { rgba: [0, 255, 255, 129], half: '0x3C00' }
+    - { rgba: [0, 255, 255, 126], half: '0x3C00' }
+    - { rgba: [0, 255, 255, 124], half: '0x3C00' }
+    - { rgba: [0, 255, 255, 121], half: '0x3C00' }
+    - { rgba: [0, 255, 255, 118], half: '0x3C00' }
+    - { rgba: [0, 255, 255, 116], half: '0x3C00' }
+    - { rgba: [0, 255, 255, 113], half: '0x3C00' }
+    - { rgba: [0, 255, 255, 111], half: '0x3C00' }
+    - { rgba: [0, 255, 255, 108], half: '0x3C00' }
+    - { rgba: [0, 255, 255, 106], half: '0x3C00' }
+    - { rgba: [0, 255, 255, 103], half: '0x3C00' }
+    - { rgba: [0, 255, 255, 100], half: '0x3C00' }
+    - { rgba: [0, 255, 255, 98], half: '0x3C00' }
+    - { rgba: [0, 255, 255, 95], half: '0x3C00' }
+    - { rgba: [0, 255, 255, 93], half: '0x3C00' }
+    - { rgba: [0, 255, 255, 90], half: '0x3C00' }
+    - { rgba: [0, 255, 255, 88], half: '0x3C00' }
+    - { rgba: [0, 255, 255, 85], half: '0x3C00' }
+    - { rgba: [0, 255, 255, 82], half: '0x3C00' }
+    - { rgba: [0, 255, 255, 80], half: '0x3C00' }
+    - { rgba: [0, 255, 255, 77], half: '0x3C00' }
+    - { rgba: [0, 255, 255, 75], half: '0x3C00' }
+    - { rgba: [0, 255, 255, 72], half: '0x3C00' }
+    - { rgba: [0, 255, 255, 70], half: '0x3C00' }
+    - { rgba: [0, 255, 255, 67], half: '0x3C00' }
+    - { rgba: [0, 255, 255, 64], half: '0x3C00' }
+    - { rgba: [0, 255, 255, 62], half: '0x3C00' }
+    - { rgba: [0, 255, 255, 59], half: '0x3C00' }
+    - { rgba: [0, 255, 255, 57], half: '0x3C00' }
+    - { rgba: [0, 255, 255, 54], half: '0x3C00' }
+    - { rgba: [0, 255, 255, 52], half: '0x3C00' }
+    - { rgba: [0, 255, 255, 49], half: '0x3C00' }
+    - { rgba: [0, 255, 255, 46], half: '0x3C00' }
+    - { rgba: [0, 255, 255, 44], half: '0x3C00' }
+    - { rgba: [0, 255, 255, 41], half: '0x3C00' }
+    - { rgba: [0, 255, 255, 39], half: '0x3C00' }
+    - { rgba: [0, 255, 255, 36], half: '0x3C00' }
+    - { rgba: [0, 255, 255, 33], half: '0x3C00' }
+    - { rgba: [0, 255, 255, 31], half: '0x3C00' }
+    - { rgba: [0, 255, 255, 28], half: '0x3C00' }
+    - { rgba: [0, 255, 255, 26], half: '0x3C00' }
+    - { rgba: [0, 255, 255, 23], half: '0x3C00' }
+    - { rgba: [0, 255, 255, 21], half: '0x3C00' }
+    - { rgba: [0, 255, 255, 18], half: '0x3C00' }
+    - { rgba: [0, 255, 255, 15], half: '0x3C00' }
+    - { rgba: [0, 255, 255, 13], half: '0x3C00' }
+    - { rgba: [0, 255, 255, 10], half: '0x3C00' }
+    - { rgba: [0, 255, 255, 8], half: '0x3C00' }
+    - { rgba: [0, 255, 255, 5], half: '0x3C00' }
+    - { rgba: [0, 255, 255, 3], half: '0x3C00' }
+    - { rgba: [0, 255, 255, 0], half: '0x3C00' }
+    frames: [qm_fx_a_ring]
+forces:
+- params: { kind: gravity, magnitude: 9.8, direction: [0.0, -1.0, 0.0] }
+  attributes:
+    ampl: { value: 9.8, curve: none, options: [] }
+    posx: { value: 0.0, curve: none, options: [] }
+    posy: { value: 0.0, curve: none, options: [] }
+    posz: { value: 0.0, curve: none, options: [] }
+    rotx: { value: 0.0, curve: none, options: [] }
+    roty: { value: 0.0, curve: none, options: [] }
+    rotz: { value: 0.0, curve: none, options: [] }

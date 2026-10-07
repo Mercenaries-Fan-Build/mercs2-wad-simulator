@@ -1,0 +1,3323 @@
+//! Builder behaviour against the retail WADs.
+//!
+//! Game-gated: built by the `retail` feature (`cargo xtask retail-test`), these read the retail
+//! vz.wad named by the repo-root `.mercs2-local.toml` and fail if it is absent. The hermetic builder
+//! tests are in `build.rs`.
+
+mod common {
+    pub mod build;
+}
+
+use common::build::{
+    anim_tracks, anim_trnm, fake_png, raw_shipment, read_back_animation, read_back_movie, scratch,
+    shipment, solid_png, tiny_gfx_movie, ANIM_CLIP,
+};
+use mercs2_quartermaster::build::{self, BuildError, Destination};
+use mercs2_quartermaster::compat::PlanInput;
+use mercs2_quartermaster::discover;
+use std::path::{Path, PathBuf};
+
+// ---------------------------------------------------------------------------
+// edit_state_machine — the destruction writer, end to end
+// ---------------------------------------------------------------------------
+
+/// The FIRST destructible model in the stack — scanned by hash so the test never depends on knowing
+/// a retail name. Returns a `0x…` target (the manifest accepts a bare hash anywhere a name goes) and
+/// the model's edit inputs. Panics when the stack carries none.
+fn a_destructible(game: &mut mercs2_quartermaster::GameStack) -> (String, mercs2_quartermaster::game::ModelEditInputs) {
+    use mercs2_formats::types::TYPE_ID_MODEL;
+    for hash in game.asset_hashes(TYPE_ID_MODEL) {
+        if let Some(inputs) = game.model_container_for_edit(hash) {
+            if mercs2_formats::orchestrator::parse_state_machine(&inputs.container).is_some() {
+                return (format!("0x{hash:08X}"), inputs);
+            }
+        }
+    }
+    panic!("no model in the retail stack carries a state machine")
+}
+
+/// ★ edit_state_machine, end to end against retail: a NO-OP edit (extract the machine, change
+/// nothing, rebuild) must produce an overlay whose model container is BYTE-IDENTICAL to the base,
+/// carried as a single-model block with a primary ASET row — no block-mate shadowed, no dangling
+/// rung. This is the whole "recompute the row, don't shadow everything" claim, checked on real bytes.
+#[test]
+fn edit_state_machine_noop_ships_a_byte_identical_single_model_block() {
+    let mut game = retail_game();
+    let (target, inputs) = a_destructible(&mut game);
+    let hash = mercs2_quartermaster::manifest::asset_hash(&target);
+
+    // Extract the machine to the `states:` baseline and ship it UNCHANGED — the no-op.
+    let sm = mercs2_formats::orchestrator::parse_state_machine(&inputs.container).unwrap();
+    let yaml = mercs2_quartermaster::states::extract(&sm, |_| None);
+
+    let dir = scratch("esm_noop");
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::write(dir.join("src/states.yaml"), &yaml).unwrap();
+    let s = shipment(
+        &dir,
+        &format!("  - kind: edit_state_machine\n    target: \"{target}\"\n    states: src/states.yaml\n"),
+    );
+
+    let report = build::build(&s, Some(&mut game), None, None, None, None).expect("edit_state_machine must build");
+    let wad_path = report.wad.expect("a WAD must be emitted");
+    let on_disk = std::fs::read(&wad_path).unwrap();
+    let contents = mercs2_formats::patch_wad::read_patch_wad(&on_disk).expect("re-read the WAD");
+    assert_eq!(contents.blocks.len(), 1, "one model, one block — nothing else shadowed");
+    let block = &contents.blocks[0];
+
+    // The ASET row: primary rung re-pointed to our block, every finer rung sentinelled to coarse
+    // tier (we carry only the primary), so nothing dangles.
+    let row = &block.aset_entries[0];
+    assert_eq!(row.asset_hash, hash);
+    assert_eq!(row.u32_2 & 0xFFFF, 0xFFFF, "_P001 must sentinel — the rung is not carried");
+    assert_eq!(row.u32_1, 0xFFFF_FFFF, "_P002/_P003 must sentinel — not dangle");
+
+    // The block is a proper single-entry table carrying the MODEL container with its original
+    // field_c, and — this is the no-op claim — the container is byte-identical to the base.
+    let dec = mercs2_formats::sges::decompress_sges(&block.compressed_data).expect("sges");
+    let (count, entries) = mercs2_formats::ucfx::parse_block_entry_table(&dec);
+    assert_eq!(count, 1);
+    assert_eq!(entries[0].name_hash, hash);
+    assert_eq!(entries[0].field_c, inputs.field_c, "field_c must be preserved, not guessed");
+    let pos = 4 + entries.len() * 16;
+    let container = &dec[pos..pos + entries[0].chunk_size as usize];
+    assert_eq!(container, inputs.container.as_slice(), "a no-op edit must reproduce the base container");
+}
+
+/// A real edit — rename a state — lands in the shipped container and still parses, while every other
+/// byte of the container stays put (same length, only the one hash changed).
+#[test]
+fn edit_state_machine_renames_a_state_end_to_end() {
+    let mut game = retail_game();
+    let (target, inputs) = a_destructible(&mut game);
+    let sm = mercs2_formats::orchestrator::parse_state_machine(&inputs.container).unwrap();
+    let (ni, si) = sm
+        .nodes
+        .iter()
+        .enumerate()
+        .find_map(|(i, n)| (!n.states.is_empty()).then_some((i, 0)))
+        .expect("a node with a state");
+
+    // Extract, rename one state to a NOVEL name, ship it. Extract shows a state by its vocabulary
+    // name where one exists, else hex — replace whichever token it used.
+    let mut yaml = mercs2_quartermaster::states::extract(&sm, |_| None);
+    let old_token = mercs2_formats::orchestrator::state_name(sm.nodes[ni].states[si].name_hash)
+        .map(String::from)
+        .unwrap_or_else(|| format!("0x{:08X}", sm.nodes[ni].states[si].name_hash));
+    assert!(yaml.contains(&old_token), "extract should show the state token: {yaml}");
+    yaml = yaml.replacen(&old_token, "qm_test_renamed_state", 1);
+
+    let dir = scratch("esm_rename");
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::write(dir.join("src/states.yaml"), &yaml).unwrap();
+    let s = shipment(
+        &dir,
+        &format!("  - kind: edit_state_machine\n    target: \"{target}\"\n    states: src/states.yaml\n"),
+    );
+    let report = build::build(&s, Some(&mut game), None, None, None, None).expect("build the rename");
+    // Renaming to a novel hash decouples the state from the engine's SetState — M0193 must warn.
+    assert!(
+        report.log.iter().any(|l| l.contains("M0193")),
+        "renaming a state off-vocabulary must warn (M0193): {:?}",
+        report.log
+    );
+    let on_disk = std::fs::read(report.wad.unwrap()).unwrap();
+    let contents = mercs2_formats::patch_wad::read_patch_wad(&on_disk).expect("re-read");
+    let dec = mercs2_formats::sges::decompress_sges(&contents.blocks[0].compressed_data).unwrap();
+    let (_c, entries) = mercs2_formats::ucfx::parse_block_entry_table(&dec);
+    let pos = 4 + entries.len() * 16;
+    let container = &dec[pos..pos + entries[0].chunk_size as usize];
+
+    // A hash is fixed-width, so a rename does not resize the container.
+    assert_eq!(container.len(), inputs.container.len(), "a rename must not resize the container");
+    // The shipped machine reads back with the new name and nothing else moved.
+    let reparsed = mercs2_formats::orchestrator::parse_state_machine(container).expect("re-parse");
+    assert_eq!(
+        reparsed.nodes[ni].states[si].name_hash,
+        mercs2_formats::hash::pandemic_hash_m2("qm_test_renamed_state"),
+    );
+    assert_eq!(reparsed.nodes.len(), sm.nodes.len());
+}
+
+// ---------------------------------------------------------------------------
+// Emission
+// ---------------------------------------------------------------------------
+
+/// The retail game stack, opened from the vz.wad the repo-root `.mercs2-local.toml` names. Panics
+/// when the config, the archive, or the stack cannot be had.
+fn retail_game() -> mercs2_quartermaster::GameStack {
+    let vz = mercs2_formats::game_paths::local_config_vz_wad(Path::new(env!("CARGO_MANIFEST_DIR")))
+        .unwrap_or_else(|e| panic!("{e}"));
+    eprintln!("game stack: {}", vz.display());
+    mercs2_quartermaster::GameStack::open(std::slice::from_ref(&vz))
+        .unwrap_or_else(|e| panic!("could not open the game stack {}: {e}", vz.display()))
+}
+
+// ---------------------------------------------------------------------------
+// Against the real game
+// ---------------------------------------------------------------------------
+
+/// End-to-end texture replacement against the retail WADs.
+#[test]
+fn a_texture_replacement_builds_end_to_end() {
+    let mut game = retail_game();
+
+    // Read the target's real dimensions so the fixture matches; a replacement is same-hash and
+    // fully resident, so mismatched dimensions are a legitimate hard error.
+    let hash = mercs2_formats::hash::pandemic_hash_m2("al_hum_boss_ub");
+    let existing = game
+        .texture(hash)
+        .expect("al_hum_boss_ub must exist in vz.wad");
+
+    let dir = scratch("real");
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::write(
+        dir.join("src/t.png"),
+        solid_png(existing.width, existing.height),
+    )
+    .unwrap();
+    let s = shipment(
+        &dir,
+        "  - kind: replace_texture
+    target: al_hum_boss_ub
+    image: src/t.png
+",
+    );
+
+    let report = build::build(&s, Some(&mut game), None, None, None, None).expect("build");
+
+    // This target turns out to be a 4-rung STREAMED texture with no primary row of its own, so the
+    // game-aware rules fire — and the build still completes, because they are warnings. That pairing
+    // is the point: the author is told what changed without being blocked from shipping it.
+    let codes: Vec<&str> = report.diagnostics.iter().map(|d| d.rule.code).collect();
+    assert!(
+        codes.contains(&"M0007") && codes.contains(&"M0009"),
+        "{codes:?}"
+    );
+    assert!(report
+        .diagnostics
+        .iter()
+        .all(|d| d.severity < mercs2_quartermaster::Severity::Error));
+
+    let wad_path = report.wad.expect("a WAD must be emitted");
+    assert!(wad_path.is_file());
+
+    let placement = &report.placements[0];
+    assert_eq!(placement.destination, Destination::Overlay);
+    // Verified BY HASH: the recorded digest must be the digest of what is on disk.
+    let on_disk = std::fs::read(&wad_path).unwrap();
+    assert_eq!(placement.sha256, build::sha256_hex(&on_disk));
+
+    // --- structural regressions, both found by wad_simulator and invisible to any digest check ---
+    let contents = mercs2_formats::patch_wad::read_patch_wad(&on_disk).expect("re-read the WAD");
+    assert_eq!(contents.blocks.len(), 1);
+    let block = &contents.blocks[0];
+
+    // (1) The ASET row must be PRIMARY. `is_primary()` tests low-16 == 0xFFFF; any other value
+    // names a `_P001` LOD block one level finer, and a row pointing at a rung that does not exist
+    // is the dangling-LOD-rung trap — a 549 GB buffer request and an open-world stream HANG.
+    // NOTE `patch_wad::AsetEntry` is a different type from `ffcs::AsetEntry` and names its fields
+    // positionally; `u32_2` is the `packed_block_ref` the reader side calls it.
+    let row = &block.aset_entries[0];
+    assert_eq!(
+        row.u32_2 & 0xFFFF,
+        0xFFFF,
+        "a replacement must register as primary, not as a dangling LOD rung"
+    );
+
+    // (2) A patch block is `[entry table][containers…]`, NOT a bare container. Handing over a raw
+    // container makes the loader read the `UCFX` magic as an entry-table field — the WAD hashes
+    // fine and is structurally nonsense.
+    let decompressed = mercs2_formats::sges::decompress_sges(&block.compressed_data).expect("sges");
+    let (count, entries) = mercs2_formats::ucfx::parse_block_entry_table(&decompressed);
+    assert_eq!(count, 1, "expected a single-entry block table");
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].name_hash, hash);
+    assert_eq!(
+        &decompressed[20..24],
+        b"UCFX",
+        "the container must start AFTER the 20-byte entry table"
+    );
+
+    // Full structural validation is `wad_simulator`, which is what caught both of the above:
+    //   cargo run --bin wad_simulator -- --wad <out.wad> --base-wad <vz.wad> --skip-audio
+    // Expect "UCFX / FORMAT" to be absent and the verdict to report no violations.
+
+    // Determinism: the mandate only means something if two builds agree byte for byte.
+    let again = build::build(&s, Some(&mut game), None, Some(&dir.join("second")), None, None)
+        .expect("second build");
+    assert_eq!(
+        placement.sha256, again.placements[0].sha256,
+        "two builds of one Shipment must be byte-identical"
+    );
+}
+
+// --- fixtures --------------------------------------------------------------
+
+/// Nobody resizes a texture. An image whose size differs from the shipped texture is a
+/// hard error, and the message names BOTH sizes — the image's and the target's — so the author knows
+/// what to export at without looking it up.
+#[test]
+fn size_mismatch_refused_message_names_both_sizes() {
+    let mut game = retail_game();
+    let hash = mercs2_formats::hash::pandemic_hash_m2("al_hum_boss_ub");
+    let existing = game.texture(hash).expect("al_hum_boss_ub must exist in vz.wad");
+    let (w, h) = (existing.width, existing.height);
+    // Half the width, same height: a different size, and still a multiple of 4.
+    let (iw, ih) = (w / 2, h);
+    assert_ne!((iw, ih), (w, h));
+
+    let dir = scratch("size_mismatch");
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::write(dir.join("src/t.png"), solid_png(iw, ih)).unwrap();
+    let s = shipment(
+        &dir,
+        "  - kind: replace_texture\n    target: al_hum_boss_ub\n    image: src/t.png\n",
+    );
+    match build::build(&s, Some(&mut game), None, None, None, None) {
+        Err(e @ BuildError::Lower { .. }) => {
+            let m = e.to_string();
+            assert!(m.contains(&format!("{iw}x{ih}")), "names the image size: {m}");
+            assert!(m.contains(&format!("{w}x{h}")), "names the target size: {m}");
+        }
+        other => panic!("expected a Lower refusal, got {other:?}"),
+    }
+    assert!(!dir.join("_build/test-shipment.wad").exists(), "nothing is written");
+}
+
+/// M0007/M0009 against real ASET rows, in both directions.
+///
+/// The classes are the opposite of what "character texture" intuition suggests, which is exactly
+/// why this is measured rather than assumed:
+///   `pmc_hum_mattias_v3_ub`  primary, single-block         -> silent
+///   `al_hum_boss_ub`         NON-primary, 4-rung streamed  -> M0007 + M0009
+#[test]
+fn streamed_and_shared_targets_are_flagged_and_resident_ones_are_not() {
+    let mut game = retail_game();
+    use mercs2_formats::hash::pandemic_hash_m2;
+    use mercs2_quartermaster::lint::{self, aset_row_is_single_block};
+    const TEX: u32 = mercs2_formats::types::TYPE_ID_TEXTURE;
+
+    // A hero texture really is single-block AND primary — replacing it changes no residency.
+    let (p, s, primary) = *game
+        .aset_rows(pandemic_hash_m2("pmc_hum_mattias_v3_ub"), TEX)
+        .first()
+        .expect("mattias_v3_ub row");
+    assert!(
+        primary && aset_row_is_single_block(p, s),
+        "packed 0x{p:08X} secondary 0x{s:08X}"
+    );
+
+    let dir = scratch("m0007_quiet");
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::write(dir.join("src/t.png"), solid_png(4, 4)).unwrap();
+    let quiet = shipment(
+        &dir,
+        "  - kind: replace_texture\n    target: pmc_hum_mattias_v3_ub\n    image: src/t.png\n",
+    );
+    assert!(
+        lint::game_checks(&quiet.manifest, &mut game).is_empty(),
+        "a resident, primary target must not be flagged"
+    );
+
+    // al_hum_boss_ub is neither: four rungs, and no primary row of its own.
+    let dir2 = scratch("m0007_fires");
+    std::fs::create_dir_all(dir2.join("src")).unwrap();
+    std::fs::write(dir2.join("src/t.png"), solid_png(4, 4)).unwrap();
+    let fires = shipment(
+        &dir2,
+        "  - kind: replace_texture\n    target: al_hum_boss_ub\n    image: src/t.png\n",
+    );
+    let codes: Vec<&str> = lint::game_checks(&fires.manifest, &mut game)
+        .iter()
+        .map(|d| d.rule.code)
+        .collect();
+    assert!(
+        codes.contains(&"M0007"),
+        "streamed target must warn: {codes:?}"
+    );
+    assert!(
+        codes.contains(&"M0009"),
+        "shared target must warn: {codes:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// add_model
+// ---------------------------------------------------------------------------
+
+/// The cube's vertices, 6 faces x 4 corners, and its triangle indices.
+struct Cube {
+    pos: Vec<[f32; 3]>,
+    nrm: Vec<[f32; 3]>,
+    uv: Vec<[f32; 2]>,
+    idx: Vec<u16>,
+}
+
+/// The cube, generated so the data stays inspectable.
+fn cube_vertices() -> Cube {
+    const FACES: [([f32; 3], [f32; 3], [f32; 3]); 6] = [
+        ([0.0, 0.0, 1.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]), // +Z
+        ([0.0, 0.0, -1.0], [-1.0, 0.0, 0.0], [0.0, 1.0, 0.0]), // -Z
+        ([1.0, 0.0, 0.0], [0.0, 0.0, -1.0], [0.0, 1.0, 0.0]), // +X
+        ([-1.0, 0.0, 0.0], [0.0, 0.0, 1.0], [0.0, 1.0, 0.0]), // -X
+        ([0.0, 1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, -1.0]), // +Y
+        ([0.0, -1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]), // -Y
+    ];
+    let mut pos: Vec<[f32; 3]> = Vec::new();
+    let mut nrm: Vec<[f32; 3]> = Vec::new();
+    let mut uv: Vec<[f32; 2]> = Vec::new();
+    let mut idx: Vec<u16> = Vec::new();
+    for (n, u, v) in FACES {
+        let base = pos.len() as u16;
+        for (su, sv) in [(-1.0f32, -1.0f32), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)] {
+            pos.push([
+                n[0] + u[0] * su + v[0] * sv,
+                n[1] + u[1] * su + v[1] * sv,
+                n[2] + u[2] * su + v[2] * sv,
+            ]);
+            nrm.push(n);
+            uv.push([(su + 1.0) * 0.5, (sv + 1.0) * 0.5]);
+        }
+        idx.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+    }
+    Cube { pos, nrm, uv, idx }
+}
+
+fn cube_positions() -> Vec<[f32; 3]> {
+    cube_vertices().pos
+}
+
+/// Build a minimal, self-contained binary glTF holding one axis-aligned cube.
+///
+/// Written by hand rather than committed as a binary fixture: it keeps the repo free of an opaque
+/// blob, and it exercises the reader against a file whose every byte is accounted for here.
+///
+/// Its one material declares `extras.pixel_shader: PgDiffSpecNormFP`: retail uses several pixel
+/// shaders for a material with diffuse, specular and normal maps, so an imported model says which.
+fn cube_glb() -> Vec<u8> {
+    cube_glb_with("PgDiffSpecNormFP", &[])
+}
+
+/// The cube, its material declaring `pixel` and its primitive carrying `custom` vertex attributes:
+/// `(name, glTF componentType, one value per vertex as little-endian bytes)`. The 24 vertices are
+/// the six faces' four corners, face by face (+Z, -Z, +X, -X, +Y, -Y).
+fn cube_glb_with(pixel: &str, custom: &[(&str, u32, Vec<u8>)]) -> Vec<u8> {
+    let Cube { pos, nrm, uv, idx } = cube_vertices();
+
+    let mut bin: Vec<u8> = Vec::new();
+    for p in &pos {
+        for c in p {
+            bin.extend_from_slice(&c.to_le_bytes());
+        }
+    }
+    let n_off = bin.len();
+    for p in &nrm {
+        for c in p {
+            bin.extend_from_slice(&c.to_le_bytes());
+        }
+    }
+    let t_off = bin.len();
+    for p in &uv {
+        for c in p {
+            bin.extend_from_slice(&c.to_le_bytes());
+        }
+    }
+    let i_off = bin.len();
+    for i in &idx {
+        bin.extend_from_slice(&i.to_le_bytes());
+    }
+    while !bin.len().is_multiple_of(4) {
+        bin.push(0);
+    }
+    let (mut extra_attrs, mut extra_accessors, mut extra_views) = (String::new(), String::new(), String::new());
+    for (k, (name, component, bytes)) in custom.iter().enumerate() {
+        let at = bin.len();
+        bin.extend_from_slice(bytes);
+        while !bin.len().is_multiple_of(4) {
+            bin.push(0);
+        }
+        extra_attrs.push_str(&format!(r#","{name}":{}"#, 4 + k));
+        extra_accessors.push_str(&format!(
+            r#",{{"bufferView":{},"componentType":{component},"count":{},"type":"SCALAR"}}"#,
+            4 + k,
+            pos.len()
+        ));
+        extra_views.push_str(&format!(r#",{{"buffer":0,"byteOffset":{at},"byteLength":{}}}"#, bytes.len()));
+    }
+
+    let (mut lo, mut hi) = ([f32::MAX; 3], [f32::MIN; 3]);
+    for p in &pos {
+        for c in 0..3 {
+            lo[c] = lo[c].min(p[c]);
+            hi[c] = hi[c].max(p[c]);
+        }
+    }
+    let vcount = pos.len();
+    let json = format!(
+        r#"{{"asset":{{"version":"2.0"}},"scene":0,"scenes":[{{"nodes":[0]}}],"nodes":[{{"mesh":0}}],
+"meshes":[{{"primitives":[{{"attributes":{{"POSITION":0,"NORMAL":1,"TEXCOORD_0":2{extra_attrs}}},"indices":3,"mode":4,"material":0}}]}}],
+"materials":[{{"extras":{{"pixel_shader":"{pixel}"}}}}],
+"accessors":[
+{{"bufferView":0,"componentType":5126,"count":{vcount},"type":"VEC3","min":[{},{},{}],"max":[{},{},{}]}},
+{{"bufferView":1,"componentType":5126,"count":{vcount},"type":"VEC3"}},
+{{"bufferView":2,"componentType":5126,"count":{vcount},"type":"VEC2"}},
+{{"bufferView":3,"componentType":5123,"count":{},"type":"SCALAR"}}{extra_accessors}],
+"bufferViews":[
+{{"buffer":0,"byteOffset":0,"byteLength":{}}},
+{{"buffer":0,"byteOffset":{n_off},"byteLength":{}}},
+{{"buffer":0,"byteOffset":{t_off},"byteLength":{}}},
+{{"buffer":0,"byteOffset":{i_off},"byteLength":{}}}{extra_views}],
+"buffers":[{{"byteLength":{}}}]}}"#,
+        lo[0],
+        lo[1],
+        lo[2],
+        hi[0],
+        hi[1],
+        hi[2],
+        idx.len(),
+        n_off,
+        t_off - n_off,
+        i_off - t_off,
+        idx.len() * 2,
+        bin.len()
+    );
+    let mut json = json.into_bytes();
+    while !json.len().is_multiple_of(4) {
+        json.push(b' ');
+    }
+
+    let mut glb = Vec::new();
+    glb.extend_from_slice(b"glTF");
+    glb.extend_from_slice(&2u32.to_le_bytes());
+    glb.extend_from_slice(&((12 + 8 + json.len() + 8 + bin.len()) as u32).to_le_bytes());
+    glb.extend_from_slice(&(json.len() as u32).to_le_bytes());
+    glb.extend_from_slice(b"JSON");
+    glb.extend_from_slice(&json);
+    glb.extend_from_slice(&(bin.len() as u32).to_le_bytes());
+    glb.extend_from_slice(&[b'B', b'I', b'N', 0]);
+    glb.extend_from_slice(&bin);
+    glb
+}
+
+/// `add_model` end to end: glTF in, donor resolved from the real WAD, overlay out.
+#[test]
+fn add_model_builds_end_to_end() {
+    let mut game = retail_game();
+    let dir = scratch("add_model");
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::write(dir.join("src/prop.glb"), cube_glb()).unwrap();
+    // NOT `deliverycrate` — Plan 04's example donor has NO ASET row of any type in vz.wad, so it
+    // cannot host anything. `oc_veh_helicopter_md500` is a real model (type_id 19).
+    let s = shipment(
+        &dir,
+        "  - kind: add_model\n    name: qm_test_prop\n    model: src/prop.glb\n    donor: oc_veh_helicopter_md500\n",
+    );
+
+    let report = build::build(&s, Some(&mut game), None, None, None, None).expect("add_model must build");
+    let wad_path = report.wad.expect("a WAD must be emitted");
+    let on_disk = std::fs::read(&wad_path).unwrap();
+    assert_eq!(report.placements[0].sha256, build::sha256_hex(&on_disk));
+
+    // The same two structural properties the texture path has to hold.
+    let contents = mercs2_formats::patch_wad::read_patch_wad(&on_disk).expect("re-read");
+    let block = &contents.blocks[0];
+    assert_eq!(
+        block.aset_entries[0].u32_2 & 0xFFFF,
+        0xFFFF,
+        "must register as primary"
+    );
+    let dec = mercs2_formats::sges::decompress_sges(&block.compressed_data).expect("sges");
+    let (count, entries) = mercs2_formats::ucfx::parse_block_entry_table(&dec);
+    assert_eq!(count, 1);
+    assert_eq!(
+        entries[0].name_hash,
+        mercs2_formats::hash::pandemic_hash_m2("qm_test_prop")
+    );
+
+    // The log records what was injected, so a silently-empty mesh cannot pass unnoticed.
+    let log = report.log.join("\n");
+    assert!(log.contains("add_model qm_test_prop"), "{log}");
+    assert!(
+        !log.contains("0 verts"),
+        "geometry must have survived the import: {log}"
+    );
+
+    // The shader import wrote the declared pixel shader into the host group's materials and the
+    // convention's vertex shaders into its INFO.
+    let container = &dec[20..20 + entries[0].chunk_size as usize];
+    let (groups, materials) = mercs2_quartermaster::shader_import::read_model(container).expect("model");
+    let host = groups.iter().find(|g| log.contains(&format!("group {} vertex shader", g.ordinal))).expect("the logged host group");
+    for &m in &host.materials {
+        assert_eq!(materials[m].key, mercs2_formats::hash::pandemic_hash_m2("PgDiffSpecNormFP"));
+    }
+    let vs = mercs2_quartermaster::shader::retail_name(host.vertex).expect("a registered vertex shader");
+    let shadow = mercs2_quartermaster::shader::retail_name(host.shadow).expect("a registered shadow shader");
+    assert!(log.contains(&format!("vertex shader {vs}, shadow {shadow}")), "{log}");
+}
+
+/// The lowered model's group `group`, and the `POSITION.w` of each of its vertices.
+fn built_group(report: &build::BuildReport, name: &str, group: usize) -> (mercs2_quartermaster::shader_import::Group, Vec<f32>) {
+    let on_disk = std::fs::read(report.wad.as_ref().expect("a WAD")).unwrap();
+    let contents = mercs2_formats::patch_wad::read_patch_wad(&on_disk).expect("re-read");
+    let want = mercs2_formats::hash::pandemic_hash_m2(name);
+    for block in &contents.blocks {
+        let dec = mercs2_formats::sges::decompress_sges(&block.compressed_data).expect("sges");
+        let (_, entries) = mercs2_formats::ucfx::parse_block_entry_table(&dec);
+        if entries.first().map(|e| e.name_hash) != Some(want) {
+            continue;
+        }
+        let container = &dec[20..20 + entries[0].chunk_size as usize];
+        let (groups, _) = mercs2_quartermaster::shader_import::read_model(container).expect("model");
+        let g = groups.into_iter().find(|g| g.ordinal == group).expect("the host group");
+        let (off, ty) = g.position.expect("a POSITION");
+        assert_eq!(ty, 16, "POSITION is FLOAT16_4");
+        let w = (0..g.vertex_count)
+            .map(|i| mercs2_formats::model_inject::read_f16_le(container, g.stream_at + i * g.stride + off + 6))
+            .collect();
+        return (g, w);
+    }
+    panic!("no block holds model {name}");
+}
+
+/// A retail model whose group 0 is drawn by `PgMeshVPFastAmbientWind` (a foliage prop).
+const WIND_DONOR: &str = "0x4C36FE4D";
+
+/// `add_model` onto an AmbientWind host keeps its vertex shader and writes each vertex's
+/// `_SWAY_WEIGHT` into `POSITION.w`; without the attribute the build stops naming it.
+#[test]
+fn add_model_onto_a_wind_host_writes_the_sway_weights() {
+    let mut game = retail_game();
+    let wind = mercs2_formats::hash::pandemic_hash_m2("PgMeshVPFastAmbientWind");
+    let donor = mercs2_formats::donor::donor_block(
+        &game.paths().iter().map(|p| p.to_path_buf()).collect::<Vec<_>>(),
+        mercs2_quartermaster::manifest::asset_hash(WIND_DONOR),
+    )
+    .expect("the wind donor");
+    let (groups, _) = mercs2_quartermaster::shader_import::read_model(&donor[20..]).expect("donor model");
+    assert_eq!(groups[0].vertex, wind, "{WIND_DONOR} group 0 is drawn by PgMeshVPFastAmbientWind");
+
+    // Sway 0 at the base (y = -1) and 1 at the top (y = +1), face by face.
+    let sway: Vec<f32> = cube_positions().iter().map(|p| (p[1] + 1.0) * 0.5).collect();
+    let bytes: Vec<u8> = sway.iter().flat_map(|w| w.to_le_bytes()).collect();
+    let dir = scratch("add_model_wind");
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::write(dir.join("src/bush.glb"), cube_glb_with("PgFastFP", &[("_SWAY_WEIGHT", 5126, bytes)])).unwrap();
+    let s = shipment(
+        &dir,
+        &format!("  - kind: add_model\n    name: qm_test_bush\n    model: src/bush.glb\n    donor: \"{WIND_DONOR}\"\n    group: 0\n"),
+    );
+    let report = build::build(&s, Some(&mut game), None, None, None, None).expect("a wind prop builds");
+    let (g, w) = built_group(&report, "qm_test_bush", 0);
+    assert_eq!(g.vertex, wind, "the wind host keeps its vertex shader");
+    assert_eq!(w, sway, "POSITION.w holds each vertex's sway weight");
+    assert!(report.log.join("\n").contains("POSITION.w the _SWAY_WEIGHT of each vertex"));
+
+    let bare = scratch("add_model_wind_bare");
+    std::fs::create_dir_all(bare.join("src")).unwrap();
+    std::fs::write(bare.join("src/bush.glb"), cube_glb_with("PgFastFP", &[])).unwrap();
+    let s = shipment(
+        &bare,
+        &format!("  - kind: add_model\n    name: qm_test_bush\n    model: src/bush.glb\n    donor: \"{WIND_DONOR}\"\n    group: 0\n"),
+    );
+    let e = build::build(&s, Some(&mut game), None, None, None, None).unwrap_err().to_string();
+    assert!(e.contains("M0238") && e.contains("_SWAY_WEIGHT"), "{e}");
+}
+
+/// A retail `TINY` far-LOD container whose group 0 is drawn by `PgMeshTinyVP`, with two world
+/// objects in its id list.
+const TINY_DONOR: &str = "0x7DC53857";
+
+/// `add_model` onto a `TINY` host keeps its vertex shader and writes each vertex's `_TINY_SLOT`
+/// into `POSITION.w`; without the attribute the build stops naming it and the host's slots.
+#[test]
+fn add_model_onto_a_tiny_host_keeps_its_role_and_writes_the_slots() {
+    let mut game = retail_game();
+    let tiny = mercs2_formats::hash::pandemic_hash_m2("PgMeshTinyVP");
+    let donor = mercs2_formats::donor::donor_block(
+        &game.paths().iter().map(|p| p.to_path_buf()).collect::<Vec<_>>(),
+        mercs2_quartermaster::manifest::asset_hash(TINY_DONOR),
+    )
+    .expect("the TINY donor");
+    let (groups, _) = mercs2_quartermaster::shader_import::read_model(&donor[20..]).expect("donor model");
+    assert_eq!((groups[0].kind.as_str(), groups[0].vertex), ("TINY", tiny));
+    assert_eq!(mercs2_quartermaster::shader_import::tiny_slots(&donor), Ok(2));
+
+    // Faces alternate between the two world objects; a face's four corners share one.
+    let slots: Vec<u8> = (0..24u8).map(|v| (v / 4) % 2).collect();
+    let dir = scratch("add_model_tiny");
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::write(dir.join("src/far.glb"), cube_glb_with("PgDiffFP", &[("_TINY_SLOT", 5121, slots.clone())])).unwrap();
+    let s = shipment(
+        &dir,
+        &format!("  - kind: add_model\n    name: qm_test_far\n    model: src/far.glb\n    donor: \"{TINY_DONOR}\"\n    group: 0\n"),
+    );
+    let report = build::build(&s, Some(&mut game), None, None, None, None).expect("a TINY prop builds");
+    let (g, w) = built_group(&report, "qm_test_far", 0);
+    assert_eq!(g.vertex, tiny, "the TINY host keeps its vertex shader");
+    assert_eq!(w, slots.iter().map(|&s| s as f32).collect::<Vec<_>>(), "POSITION.w holds each vertex's slot");
+
+    let bare = scratch("add_model_tiny_bare");
+    std::fs::create_dir_all(bare.join("src")).unwrap();
+    std::fs::write(bare.join("src/far.glb"), cube_glb_with("PgDiffFP", &[])).unwrap();
+    let s = shipment(
+        &bare,
+        &format!("  - kind: add_model\n    name: qm_test_far\n    model: src/far.glb\n    donor: \"{TINY_DONOR}\"\n    group: 0\n"),
+    );
+    let e = build::build(&s, Some(&mut game), None, None, None, None).unwrap_err().to_string();
+    assert!(e.contains("M0238") && e.contains("_TINY_SLOT") && e.contains("0..1"), "{e}");
+}
+
+/// Auto-pick is not implemented, so an omitted donor must ASK rather than guess — a wrong host
+/// silently produces a prop with the wrong rig and materials.
+#[test]
+fn add_model_without_a_donor_asks_rather_than_guessing() {
+    let mut game = retail_game();
+    let dir = scratch("add_model_nodonor");
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::write(dir.join("src/prop.glb"), cube_glb()).unwrap();
+    let s = shipment(
+        &dir,
+        "  - kind: add_model\n    name: qm_x\n    model: src/prop.glb\n",
+    );
+    match build::build(&s, Some(&mut game), None, None, None, None) {
+        Err(e @ BuildError::Unsupported { .. }) => {
+            assert!(e.to_string().contains("auto-pick"), "{e}");
+        }
+        other => panic!("expected Unsupported, got {other:?}"),
+    }
+}
+
+/// ★ `add_outfit` end to end — the recipe from the mod-model plan (`workshop-mods-rebuild-01-mod-model.md`).
+///
+/// It is the composed case: a Data half (the model, injected into a hero-rigged donor) and a Script
+/// half (the `_tOutfits` row), and the Script half only works because it goes through the linker
+/// rather than shipping its own block.
+#[test]
+fn add_outfit_builds_model_and_wardrobe_row_together() {
+    let mut game = retail_game();
+    let corpus = corpus_for_tests();
+    let dir = scratch("add_outfit");
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::write(dir.join("src/sean.glb"), cube_glb()).unwrap();
+    let s = shipment(
+        &dir,
+        "  - kind: add_outfit\n    name: qm_sean_devlin\n    slug: SeanDevlin\n\
+         \x20   display: Sean Devlin\n    wearer: mattias\n    model: src/sean.glb\n\
+         \x20   donor: pmc_hum_mattias\n",
+    );
+
+    let report = build::build(&s, Some(&mut game), None, None, Some(&corpus), None)
+        .expect("add_outfit must build");
+    let log = report.log.join("\n");
+    eprintln!("{log}");
+
+    // Both halves must appear: the model injected, and the wardrobe script linked.
+    assert!(log.contains("add_outfit qm_sean_devlin"), "{log}");
+    assert!(log.contains("wardrobe row mattias/SeanDevlin"), "{log}");
+    assert!(
+        log.contains("linked wifpmcinterior"),
+        "the Script half must go through the linker: {log}"
+    );
+
+    // The overlay carries BOTH blocks — the model and the relinked scripts_vz.
+    let on_disk = std::fs::read(report.wad.expect("a WAD")).unwrap();
+    let contents = mercs2_formats::patch_wad::read_patch_wad(&on_disk).expect("re-read");
+    assert_eq!(
+        contents.blocks.len(),
+        2,
+        "expected a model block and a scripts_vz block"
+    );
+
+    // And the linked script really contains our row plus the derived availability lift.
+    let script_blk = contents
+        .blocks
+        .iter()
+        .find(|b| b.path_string.to_lowercase().contains("scripts_vz"))
+        .expect("a scripts_vz block");
+    let dec = mercs2_formats::sges::decompress_sges(&script_blk.compressed_data).expect("sges");
+    let parsed = mercs2_formats::scripts_block::ScriptsBlock::parse(&dec).expect("parse");
+    parsed.verify_csums().expect("CSUMs must verify");
+    let idx = parsed
+        .find_by_name("wifpmcinterior")
+        .expect("wifpmcinterior present");
+    let luaq = parsed.extract_lua(idx).expect("extract");
+    assert!(
+        luaq.starts_with(&mercs2_luac::MERCS2_LUAQ_HEADER),
+        "game dialect"
+    );
+
+    // The strings we appended survive into the compiled chunk's constant table.
+    let hay = String::from_utf8_lossy(&luaq);
+    assert!(
+        hay.contains("SeanDevlin"),
+        "the outfit Name must be in the constants"
+    );
+    assert!(
+        hay.contains("qm_sean_devlin"),
+        "the Model name must be in the constants"
+    );
+    assert!(
+        hay.contains("GetAvailableCostumes"),
+        "the derived availability lift must be present, or the outfit is unreachable"
+    );
+}
+
+/// The vendored Lua corpus. Panics when the corpus is missing.
+fn corpus_for_tests() -> PathBuf {
+    let mut dir: Option<&Path> = Some(Path::new(env!("CARGO_MANIFEST_DIR")));
+    while let Some(d) = dir {
+        let c = d.join("crates/mercs2_script/corpus/mercs2-luacd/src");
+        if c.is_dir() {
+            return c;
+        }
+        dir = d.parent();
+    }
+    panic!("the vendored Lua corpus crates/mercs2_script/corpus/mercs2-luacd/src is missing")
+}
+
+// ---------------------------------------------------------------------------
+// Cross-Shipment link (deploy)
+// ---------------------------------------------------------------------------
+
+fn outfit_shipment(dir: &Path, name: &str, asset: &str, slug: &str) -> discover::LoadedShipment {
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::write(dir.join("src/m.glb"), cube_glb()).unwrap();
+    std::fs::write(
+        dir.join("manifest.yaml"),
+        format!(
+            "format: 2\nshipment: {{ name: {name}, version: 1.0.0, target: retail }}\n\
+             contributions:\n  - kind: add_outfit\n    name: {asset}\n    slug: {slug}\n\
+             \x20   display: {slug}\n    wearer: mattias\n    model: src/m.glb\n\
+             \x20   donor: pmc_hum_mattias\n"
+        ),
+    )
+    .unwrap();
+    discover::open(dir).expect("open")
+}
+
+/// A request over opened Shipments, with `arg:<n>` ids in the given order — what `qm link` builds
+/// from positional directories.
+fn request<'a>(shipments: &[&'a discover::LoadedShipment], ids: &'a [String]) -> Vec<PlanInput<'a>> {
+    shipments
+        .iter()
+        .zip(ids)
+        .map(|(s, id)| PlanInput { id, shipment: s })
+        .collect()
+}
+
+fn arg_ids(n: usize) -> Vec<String> {
+    (1..=n).map(|i| format!("arg:{i}")).collect()
+}
+
+/// ★ The deploy-side failure this design exists to prevent.
+///
+/// Each Shipment's own overlay carries a `scripts_vz` linked from ITS mutations only. WAD
+/// resolution is last-mounted-wins, so installing two of them means one Shipment's Lua disappears
+/// silently. `link_installed` sees all of them at once and emits one overlay that supersedes both.
+#[test]
+fn two_installed_shipments_both_survive_the_deploy_link() {
+    let mut game = retail_game();
+    let corpus = corpus_for_tests();
+    let root = scratch("deploy_link");
+
+    let a = outfit_shipment(&root.join("sean"), "sean-devlin", "qm_sean", "SeanDevlin");
+    let b = outfit_shipment(&root.join("roze"), "roze-skin", "qm_roze", "Roze");
+
+    // Each on its own links only its own row — the standalone-valid case, and the trap.
+    for (s, mine, theirs) in [(&a, "SeanDevlin", "Roze"), (&b, "Roze", "SeanDevlin")] {
+        let muts = build::script_mutations(&s.manifest, &s.root).expect("mutations");
+        assert_eq!(muts.len(), 1);
+        assert!(muts[0].append.contains(mine));
+        assert!(
+            !muts[0].append.contains(theirs),
+            "a Shipment must not know about the other"
+        );
+    }
+
+    let deploy = root.join("deploy");
+    let ids = arg_ids(2);
+    let report = build::link_installed(&request(&[&a, &b], &ids), &mut game, &corpus, &deploy, None)
+        .expect("deploy link");
+    eprintln!("{}", report.log.join("\n"));
+
+    // ONE contract for locating outputs. `build` has always written a placement record; the link
+    // step wrote a bare `zz-quartermaster-link.wad` and nothing else, so a deploy tool had to
+    // special-case a filename for this directory and read the record for every other one. A second
+    // undocumented output path is how a deploy step ends up guessing which files to mount — and a
+    // wrong guess there does not fail loudly, it mounts the wrong set and the game boots.
+    let record: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(deploy.join("placement.json")).unwrap())
+            .expect("the link step writes a placement record too");
+    assert_eq!(record["format"], build::PLACEMENT_FORMAT);
+    let placed = record["placements"].as_array().expect("placements array");
+    assert_eq!(placed.len(), 1);
+    assert_eq!(placed[0]["name"], build::LINK_WAD_NAME);
+    assert_eq!(
+        placed[0]["destination"]["kind"], "overlay",
+        "the mount instruction has to be IN the record — 'zz-' sorting last is a convention a \
+         reader would have to know, not a contract it can read"
+    );
+    assert_eq!(placed[0]["sha256"], report.placements[0].sha256);
+
+    assert_eq!(
+        report.linked.len(),
+        1,
+        "one target, compiled once for both Shipments"
+    );
+    assert_eq!(
+        report.linked[0].contributors,
+        vec!["sean-devlin", "roze-skin"],
+        "neither requires the other, so the request order is the load order"
+    );
+    // The plan the link followed is written beside the placement record.
+    assert!(deploy.join("load-plan.json").is_file(), "the link writes its load plan");
+
+    // The emitted overlay must carry BOTH rows.
+    let wad = report.wad.expect("a link WAD");
+    assert!(
+        wad.ends_with(build::LINK_WAD_NAME),
+        "must be named to mount last: {}",
+        wad.display()
+    );
+    let bytes = std::fs::read(&wad).unwrap();
+    assert_eq!(report.placements[0].sha256, build::sha256_hex(&bytes));
+
+    let contents = mercs2_formats::patch_wad::read_patch_wad(&bytes).expect("re-read");
+    let blk = contents
+        .blocks
+        .iter()
+        .find(|b| b.path_string.contains("scripts_vz"))
+        .expect("block");
+    let dec = mercs2_formats::sges::decompress_sges(&blk.compressed_data).expect("sges");
+    let parsed = mercs2_formats::scripts_block::ScriptsBlock::parse(&dec).expect("parse");
+    parsed.verify_csums().expect("CSUMs");
+    let idx = parsed.find_by_name("wifpmcinterior").unwrap();
+    let luaq = parsed.extract_lua(idx).unwrap();
+    let hay = String::from_utf8_lossy(&luaq);
+
+    assert!(
+        hay.contains("SeanDevlin"),
+        "the first Shipment's outfit must survive"
+    );
+    assert!(
+        hay.contains("Roze"),
+        "the SECOND Shipment's outfit must survive — this is the bug"
+    );
+    assert!(
+        hay.contains("qm_sean") && hay.contains("qm_roze"),
+        "both models must be referenced"
+    );
+}
+
+/// ★ A `patch_lua` on a RESIDENT module builds end-to-end into a valid overlay.
+///
+/// Every script the fix pack needs (`mrxplayer`, `mrxguipda`, `mrxtaskjobcollecttype`) lives in the
+/// resident block, which the linker could not reach at all before. This drives the whole path:
+/// discover the block, splice, emit, and re-read the emitted WAD.
+///
+/// It also pins the two properties that make the resident case different from `scripts_vz`:
+/// **only the touched block is republished**, and **only SCRIPT rows are claimed** — the resident
+/// block's ~6,800 non-script entries must not get sentinel-rung ASET rows, which would republish
+/// streaming assets as single-block and stop them streaming.
+#[test]
+fn a_resident_patch_lua_builds_into_a_valid_overlay() {
+    const TYPE_ID_SCRIPT: u32 = 35;
+
+    let mut game = retail_game();
+    let corpus = corpus_for_tests();
+    let root = scratch("resident_lua");
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    // A string LITERAL, not a comment: comments do not survive compilation, so a `-- marker` append
+    // would leave nothing to assert on in the emitted bytecode.
+    std::fs::write(
+        root.join("src/append.lua"),
+        "_QM_RESIDENT_MARKER = \"fixpack-resident-marker\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("manifest.yaml"),
+        "format: 2\nshipment: { name: resident-lua, version: 1.0.0, target: retail }\n\
+         contributions:\n  - kind: patch_lua\n    target: mrxplayer\n    append: src/append.lua\n",
+    )
+    .unwrap();
+    let s = discover::open(&root).expect("open shipment");
+
+    let out = root.join("build");
+    let report =
+        build::build(&s, Some(&mut game), None, Some(&out), Some(&corpus), None).expect("build");
+    eprintln!("{}", report.log.join("\n"));
+
+    let bytes = std::fs::read(report.wad.as_ref().expect("a wad")).unwrap();
+    let contents = mercs2_formats::patch_wad::read_patch_wad(&bytes).expect("re-read");
+
+    // Only the resident block is republished — patching a resident script must not drag
+    // `scripts_vz` along.
+    assert_eq!(
+        contents.blocks.len(),
+        1,
+        "expected only the touched block, got {:?}",
+        contents
+            .blocks
+            .iter()
+            .map(|b| b.path_string.clone())
+            .collect::<Vec<_>>()
+    );
+    let blk = &contents.blocks[0];
+    assert!(
+        blk.path_string.to_lowercase().contains(r"\resident_p000_q3.block"),
+        "wrong block: {}",
+        blk.path_string
+    );
+
+    // ★ A row for EVERY entry. Claiming only the scripts is the M0004 HANG: an asset carried in a
+    // block with no row naming it cannot be resolved by hash, and the world load silently never
+    // completes. The build refuses that shape, so this assertion is what keeps it refused.
+    let dec = mercs2_formats::sges::decompress_sges(&blk.compressed_data).expect("sges");
+    let parsed = mercs2_formats::scripts_block::ScriptsBlock::parse(&dec).expect("parse");
+    parsed.verify_csums().expect("CSUMs");
+    assert_eq!(
+        blk.aset_entries.len(),
+        parsed.entries.len(),
+        "every entry the block carries needs a row, or the loader wedges (M0004)"
+    );
+
+    // And the rows are the BASE WAD's, not synthesised: a mixed block must carry mixed type ids.
+    // All-script here would mean we had guessed, and a wrong type_id dispatches the wrong loader.
+    let script_rows = blk
+        .aset_entries
+        .iter()
+        .filter(|e| e.u32_3 == TYPE_ID_SCRIPT)
+        .count();
+    assert!(
+        script_rows > 0 && script_rows < blk.aset_entries.len(),
+        "expected mixed type ids from the base WAD, got {script_rows}/{} script rows",
+        blk.aset_entries.len()
+    );
+
+    // And the payload really is our append, compiled.
+    let idx = parsed.find_script_by_name("mrxplayer").expect("mrxplayer present");
+    let luaq = parsed.extract_lua(idx).unwrap();
+    assert!(
+        String::from_utf8_lossy(&luaq).contains("fixpack-resident-marker"),
+        "the appended source must be in the compiled chunk"
+    );
+}
+
+/// The request order is the tie-break: with no `requires` between two Shipments, reversing the
+/// request reverses the link order, and the same request always gives the same bytes.
+#[test]
+fn the_deploy_link_follows_the_request_order() {
+    let mut game = retail_game();
+    let corpus = corpus_for_tests();
+    let root = scratch("deploy_order");
+    let a = outfit_shipment(&root.join("a"), "aaa-mod", "qm_a", "Aaa");
+    let b = outfit_shipment(&root.join("b"), "zzz-mod", "qm_b", "Zzz");
+    let ids = arg_ids(2);
+
+    let one = build::link_installed(&request(&[&a, &b], &ids), &mut game, &corpus, &root.join("one"), None)
+        .unwrap();
+    let again = build::link_installed(&request(&[&a, &b], &ids), &mut game, &corpus, &root.join("again"), None)
+        .unwrap();
+    let two = build::link_installed(&request(&[&b, &a], &ids), &mut game, &corpus, &root.join("two"), None)
+        .unwrap();
+    assert_eq!(
+        one.placements[0].sha256, again.placements[0].sha256,
+        "one request must always link to the same bytes"
+    );
+    assert_eq!(one.linked[0].contributors, vec!["aaa-mod", "zzz-mod"]);
+    assert_eq!(
+        two.linked[0].contributors,
+        vec!["zzz-mod", "aaa-mod"],
+        "reversing the request reverses the order"
+    );
+}
+
+/// M0209 reaches the plan: `qm link` appends a warning per unresolved literal import to the plan's
+/// findings, on the item whose source carries it, and the plan stays ok.
+#[test]
+fn an_unresolved_literal_import_is_a_warning_in_the_link_plan() {
+    let mut game = retail_game();
+    let corpus = corpus_for_tests();
+    let root = scratch("deploy_m0209");
+    std::fs::create_dir_all(root.join("mod/src")).unwrap();
+    std::fs::write(
+        root.join("mod/src/probe.lua"),
+        "local lib = import(\"qm_no_such_module\")\nreturn {}\n",
+    )
+    .unwrap();
+    let s = shipment(
+        &root.join("mod"),
+        "  - kind: add_script\n    name: qm_m0209_probe\n    source: src/probe.lua\n",
+    );
+    let out = root.join("out");
+    let ids = arg_ids(1);
+    let report = build::link_installed(&request(&[&s], &ids), &mut game, &corpus, &out, None)
+        .expect("an unresolved import is a warning, not a refusal");
+    assert!(report.plan.ok);
+    let m0209: Vec<_> = report.plan.findings.iter().filter(|f| f.code == "M0209").collect();
+    assert_eq!(m0209.len(), 1, "{:?}", report.plan.findings);
+    assert_eq!(m0209[0].items, vec!["arg:1".to_string()]);
+    assert!(m0209[0].message.contains("qm_no_such_module"), "{}", m0209[0].message);
+    let written: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(out.join("load-plan.json")).unwrap()).unwrap();
+    assert_eq!(written["ok"], true);
+    assert_eq!(written["findings"][0]["code"], "M0209");
+    assert_eq!(written["findings"][0]["severity"], "warning");
+    assert_eq!(
+        written["findings"][0]["refs"],
+        serde_json::json!([{ "section": "items", "index": 0 }])
+    );
+}
+
+/// `(key hash, text)` for every entry of a stringdb container, read through the codec.
+fn string_entries(container: &[u8]) -> Vec<(u32, String)> {
+    let mut out = Vec::new();
+    mercs2_formats::stringdb::apply_container(container, |db| {
+        out = db.entries.iter().map(|e| (e.key_hash, e.text.clone())).collect();
+        Ok(())
+    })
+    .expect("a readable stringdb container");
+    out
+}
+
+/// A Shipment that edits `english` with `edits` and adds `adds` to it (one `0xKEY = text` each).
+fn english_editor(
+    dir: &Path,
+    name: &str,
+    edits: &[String],
+    adds: &[String],
+) -> discover::LoadedShipment {
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::write(dir.join("src/english.txt"), edits.join("\n") + "\n").unwrap();
+    std::fs::write(dir.join("src/english-new.txt"), adds.join("\n") + "\n").unwrap();
+    std::fs::write(
+        dir.join("manifest.yaml"),
+        format!(
+            "format: 2\nshipment: {{ name: {name}, version: 1.0.0, target: retail }}\n\
+             contributions:\n  - kind: edit_stringdb\n    target: english\n    strings: src/english.txt\n\
+             \x20 - kind: add_stringdb_keys\n    target: english\n    strings: src/english-new.txt\n"
+        ),
+    )
+    .unwrap();
+    discover::open(dir).expect("open")
+}
+
+/// Each `edit_stringdb` Shipment's own overlay carries a WHOLE edited copy of the
+/// table, so installed together the last mounted would silently drop the other's edits. The link
+/// merges every Shipment's edits into ONE table: disjoint keys both survive, and a key both edit
+/// takes the text of the later Shipment in the load order — for an edited key and for a key both
+/// add alike.
+#[test]
+fn disjoint_stringdb_edits_both_survive_link() {
+    let mut game = retail_game();
+    let corpus = corpus_for_tests();
+    use mercs2_formats::types::{TYPE_HASH_STRINGDB, TYPE_ID_STRINGDB};
+    let english = mercs2_formats::hash::pandemic_hash_m2("english");
+    let base = game
+        .container_for_asset(english, TYPE_HASH_STRINGDB, TYPE_ID_STRINGDB)
+        .expect("retail vz.wad must carry the english string table");
+    let keys: Vec<u32> = string_entries(&base).iter().map(|(k, _)| *k).take(3).collect();
+    let [only_a, both, only_b] = [keys[0], keys[1], keys[2]];
+    let added = mercs2_formats::stringdb::key_hash("[QmMergeTest.Added]");
+    assert!(!keys.contains(&added) && string_entries(&base).iter().all(|(k, _)| *k != added));
+
+    let root = scratch("deploy_stringdb");
+    let a = english_editor(
+        &root.join("a"),
+        "strings-a",
+        &[format!("0x{only_a:08X} = QM A ONLY"), format!("0x{both:08X} = QM A BOTH")],
+        &["[QmMergeTest.Added] = QM A ADDED".to_string()],
+    );
+    let b = english_editor(
+        &root.join("b"),
+        "strings-b",
+        &[format!("0x{both:08X} = QM B BOTH"), format!("0x{only_b:08X} = QM B ONLY")],
+        &["[QmMergeTest.Added] = QM B ADDED".to_string()],
+    );
+    let table_path = build::stringdb_block_path(english);
+
+    let merged_text = |out: &Path, key: u32| -> String {
+        let wad = std::fs::read(out.join(build::LINK_WAD_NAME)).expect("a link WAD");
+        let contents = mercs2_formats::patch_wad::read_patch_wad(&wad).expect("re-read");
+        let blocks: Vec<_> = contents.blocks.iter().filter(|b| b.path_string == table_path).collect();
+        assert_eq!(blocks.len(), 1, "exactly one merged english table in the link WAD");
+        let dec = mercs2_formats::sges::decompress_sges(&blocks[0].compressed_data).expect("sges");
+        string_entries(&dec[20..])
+            .into_iter()
+            .find(|(k, _)| *k == key)
+            .map(|(_, t)| t)
+            .expect("key present")
+    };
+
+    let forward = root.join("forward");
+    let ids = arg_ids(2);
+    let report = build::link_installed(&request(&[&a, &b], &ids), &mut game, &corpus, &forward, None)
+        .expect("link");
+    assert!(report.plan.ok, "{:?}", report.plan.findings);
+    assert!(report.plan.link_block_paths.contains(&table_path));
+    assert_eq!(merged_text(&forward, only_a), "QM A ONLY");
+    assert_eq!(merged_text(&forward, only_b), "QM B ONLY");
+    assert_eq!(merged_text(&forward, both), "QM B BOTH", "the later Shipment in the order wins");
+    assert_eq!(merged_text(&forward, added), "QM B ADDED", "an added key merges the same way");
+
+    let reverse = root.join("reverse");
+    build::link_installed(&request(&[&b, &a], &ids), &mut game, &corpus, &reverse, None).expect("link");
+    assert_eq!(merged_text(&reverse, both), "QM A BOTH", "reversed order, reversed winner");
+    assert_eq!(merged_text(&reverse, added), "QM A ADDED");
+    assert_eq!(merged_text(&reverse, only_b), "QM B ONLY");
+}
+
+/// `replace_stringdb_text` in the merge: a text replacement resolves
+/// against the table AS MERGED SO FAR in load order, and one that matches nothing is an error.
+/// Shipment `setter` sets a key's text to a free-text marker; `replacer` replaces that text. Setter
+/// first: the replacement sees the marker and wins. Replacer first: it runs against the base, where
+/// no entry has that text, and the link fails naming the Shipment, the table and the text.
+#[test]
+fn a_text_replacement_resolves_against_the_table_merged_so_far() {
+    let mut game = retail_game();
+    let corpus = corpus_for_tests();
+    use mercs2_formats::types::{TYPE_HASH_STRINGDB, TYPE_ID_STRINGDB};
+    let english = mercs2_formats::hash::pandemic_hash_m2("english");
+    let base = game
+        .container_for_asset(english, TYPE_HASH_STRINGDB, TYPE_ID_STRINGDB)
+        .expect("retail vz.wad must carry the english string table");
+    let entries = string_entries(&base);
+    let key = entries[0].0;
+    // Free text, with the characters a key-based parser would have choked on.
+    let marker = "QM merge marker: set by text-setter = 100%";
+    assert!(entries.iter().all(|(_, t)| t != marker));
+
+    let root = scratch("deploy_replace_text");
+    let setter = english_editor(&root.join("setter"), "text-setter", &[format!("0x{key:08X} = {marker}")], &[]);
+    let rdir = root.join("replacer");
+    std::fs::create_dir_all(rdir.join("src")).unwrap();
+    std::fs::write(rdir.join("src/pairs.txt"), format!("# the setter's text\n{marker}\tQM REPLACED\n")).unwrap();
+    std::fs::write(
+        rdir.join("manifest.yaml"),
+        "format: 2\nshipment: { name: text-replacer, version: 1.0.0, target: retail }\n\
+         contributions:\n  - kind: replace_stringdb_text\n    target: english\n    pairs: src/pairs.txt\n",
+    )
+    .unwrap();
+    let replacer = discover::open(&rdir).expect("open");
+
+    let table_path = build::stringdb_block_path(english);
+    let ids = arg_ids(2);
+
+    let forward = root.join("forward");
+    let report = build::link_installed(&request(&[&setter, &replacer], &ids), &mut game, &corpus, &forward, None)
+        .expect("link");
+    assert!(report.plan.ok, "{:?}", report.plan.findings);
+    let wad = std::fs::read(forward.join(build::LINK_WAD_NAME)).expect("a link WAD");
+    let contents = mercs2_formats::patch_wad::read_patch_wad(&wad).expect("re-read");
+    let block = contents.blocks.iter().find(|b| b.path_string == table_path).expect("table");
+    let dec = mercs2_formats::sges::decompress_sges(&block.compressed_data).expect("sges");
+    let text = string_entries(&dec[20..]).into_iter().find(|(k, _)| *k == key).map(|(_, t)| t);
+    assert_eq!(text.as_deref(), Some("QM REPLACED"), "the replacement sees the earlier write");
+
+    let reverse = root.join("reverse");
+    match build::link_installed(&request(&[&replacer, &setter], &ids), &mut game, &corpus, &reverse, None) {
+        Err(e @ BuildError::Lower { .. }) => {
+            let m = e.to_string();
+            assert!(m.contains("text-replacer"), "names the Shipment: {m}");
+            assert!(m.contains("english"), "names the table: {m}");
+            assert!(m.contains(marker), "names the unmatched text: {m}");
+        }
+        other => panic!("run first, the replacement matches nothing and must fail, got {other:?}"),
+    }
+    assert!(!reverse.join(build::LINK_WAD_NAME).exists(), "nothing is linked");
+}
+
+/// The kind's own lowering applies the same rule: a pair whose old text no entry of the shipped
+/// table has is refused, naming the Shipment, the table and the text.
+#[test]
+fn a_text_replacement_that_matches_nothing_fails_the_build() {
+    let mut game = retail_game();
+    let dir = scratch("replace_text_miss");
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::write(dir.join("src/pairs.txt"), "No retail string reads like this: qm-miss\tX\n").unwrap();
+    let s = shipment(&dir, "  - kind: replace_stringdb_text\n    target: english\n    pairs: src/pairs.txt\n");
+    match build::build(&s, Some(&mut game), None, None, None, None) {
+        Err(e @ BuildError::Lower { .. }) => {
+            let m = e.to_string();
+            assert!(m.contains("test-shipment") && m.contains("english"), "{m}");
+            assert!(m.contains("No retail string reads like this: qm-miss"), "{m}");
+        }
+        other => panic!("expected a Lower refusal, got {other:?}"),
+    }
+}
+
+/// A Shipment's own `qm build` applies its string contributions in contribution order, against the
+/// table as edited so far — the same code as `qm link`. So a text
+/// replacement of the text the Shipment's own earlier `edit_stringdb` wrote builds, into ONE
+/// block for the table; in the reverse order the replacement runs first, matches nothing, and the
+/// build fails naming the Shipment, the table and the text.
+#[test]
+fn a_shipment_build_applies_its_string_writes_in_order() {
+    let mut game = retail_game();
+    use mercs2_formats::types::{TYPE_HASH_STRINGDB, TYPE_ID_STRINGDB};
+    let english = mercs2_formats::hash::pandemic_hash_m2("english");
+    let base = game
+        .container_for_asset(english, TYPE_HASH_STRINGDB, TYPE_ID_STRINGDB)
+        .expect("retail vz.wad must carry the english string table");
+    let entries = string_entries(&base);
+    let key = entries[0].0;
+    let marker = "QM own-build marker: written by edit_stringdb = step 1";
+    assert!(entries.iter().all(|(_, t)| t != marker));
+
+    let make = |label: &str, edit_first: bool| {
+        let dir = scratch(label);
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::write(dir.join("src/english.txt"), format!("0x{key:08X} = {marker}\n")).unwrap();
+        std::fs::write(dir.join("src/pairs.txt"), format!("{marker}\tQM OWN BUILD REPLACED\n")).unwrap();
+        let edit = "  - kind: edit_stringdb\n    target: english\n    strings: src/english.txt\n";
+        let replace = "  - kind: replace_stringdb_text\n    target: english\n    pairs: src/pairs.txt\n";
+        let body = if edit_first { format!("{edit}{replace}") } else { format!("{replace}{edit}") };
+        (dir.clone(), shipment(&dir, &body))
+    };
+
+    let (dir, s) = make("own_order_ok", true);
+    let report = build::build(&s, Some(&mut game), None, None, None, None).expect("edit then replace builds");
+    let wad = std::fs::read(report.wad.expect("a WAD")).unwrap();
+    let contents = mercs2_formats::patch_wad::read_patch_wad(&wad).expect("re-read");
+    let table_path = build::stringdb_block_path(english);
+    let tables: Vec<_> = contents.blocks.iter().filter(|b| b.path_string == table_path).collect();
+    assert_eq!(tables.len(), 1, "ONE block for the table, carrying both contributions");
+    assert_eq!(contents.blocks.len(), 1);
+    let dec = mercs2_formats::sges::decompress_sges(&tables[0].compressed_data).expect("sges");
+    let text = string_entries(&dec[20..]).into_iter().find(|(k, _)| *k == key).map(|(_, t)| t);
+    assert_eq!(text.as_deref(), Some("QM OWN BUILD REPLACED"));
+    assert!(dir.join("_build/test-shipment.wad").is_file());
+
+    let (_, s) = make("own_order_reversed", false);
+    match build::build(&s, Some(&mut game), None, None, None, None) {
+        Err(e @ BuildError::Lower { .. }) => {
+            let m = e.to_string();
+            assert!(m.contains("test-shipment") && m.contains("english") && m.contains(marker), "{m}");
+        }
+        other => panic!("replace before edit must fail with the no-match error, got {other:?}"),
+    }
+}
+
+/// A plan that is not ok links nothing: the plan is written as the explanation, and no link WAD or
+/// placement record appears.
+#[test]
+fn an_unsatisfied_requirement_refuses_the_link() {
+    let mut game = retail_game();
+    let corpus = corpus_for_tests();
+    let root = scratch("deploy_refused");
+    let a = outfit_shipment(&root.join("a"), "needs-ess", "qm_a", "Aaa");
+    std::fs::write(
+        root.join("a/manifest.yaml"),
+        std::fs::read_to_string(root.join("a/manifest.yaml"))
+            .unwrap()
+            .replace("contributions:", "load: { requires: [ess] }\ncontributions:"),
+    )
+    .unwrap();
+    let a = discover::open(&a.root).expect("reopen");
+    let out = root.join("out");
+    let ids = arg_ids(1);
+    match build::link_installed(&request(&[&a], &ids), &mut game, &corpus, &out, None) {
+        Err(BuildError::Plan(plan)) => {
+            assert!(!plan.ok);
+            assert!(plan.findings.iter().any(|f| f.code == "M0204"), "{:?}", plan.findings);
+        }
+        other => panic!("expected BuildError::Plan, got {other:?}"),
+    }
+    assert!(out.join("load-plan.json").is_file(), "the refused plan is written");
+    assert!(!out.join(build::LINK_WAD_NAME).exists(), "nothing is linked");
+    assert!(!out.join("placement.json").exists(), "nothing is placed");
+}
+
+/// `qm build` refuses while a superseded file is in the game folder. The probe is read-only, so this
+/// names a file every game folder has — the `data` directory `vz.wad` sits in — rather than writing
+/// anything into the real install.
+#[test]
+fn build_refuses_a_superseded_file() {
+    let mut game = retail_game();
+    let dir = scratch("superseded");
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::write(
+        dir.join("manifest.yaml"),
+        "format: 2\nshipment: { name: sup, version: 1.0.0, target: retail }\n\
+         supersedes:\n  - { dest: game_root, file: DATA }\ncontributions: []\n",
+    )
+    .unwrap();
+    let s = discover::open(&dir).expect("open");
+    match build::build(&s, Some(&mut game), None, None, None, None) {
+        Err(BuildError::Superseded { shipment, relative }) => {
+            assert_eq!(shipment, "sup");
+            assert_eq!(relative, "DATA");
+        }
+        other => panic!("expected BuildError::Superseded, got {other:?}"),
+    }
+}
+
+/// Nothing to link means no overlay — an overlay that merely restates the base block is noise a
+/// user would have to reason about. It does NOT mean no placement record.
+#[test]
+fn a_set_with_no_script_mods_emits_no_link_wad() {
+    let mut game = retail_game();
+    let corpus = corpus_for_tests();
+    let root = scratch("deploy_none");
+    std::fs::create_dir_all(root.join("tex/src")).unwrap();
+    std::fs::write(root.join("tex/src/t.png"), fake_png()).unwrap();
+    let s = shipment(
+        &root.join("tex"),
+        "  - kind: replace_texture\n    target: al_hum_boss_ub\n    image: src/t.png\n",
+    );
+    let out = root.join("out");
+    let ids = arg_ids(1);
+    let report = build::link_installed(&request(&[&s], &ids), &mut game, &corpus, &out, None).expect("link");
+    assert!(report.wad.is_none());
+    assert!(report.linked.is_empty());
+
+    // …but the RECORD is still written. "No overlay to mount" and "link never ran" are opposite
+    // facts a deploy step must act on differently, and an absent file cannot tell them apart. The
+    // empty array says which one it is.
+    let record: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(out.join("placement.json")).unwrap())
+            .expect("a placement record exists even with nothing to place");
+    assert_eq!(record["format"], build::PLACEMENT_FORMAT);
+    assert_eq!(
+        record["placements"].as_array().map(|a| a.len()),
+        Some(0),
+        "nothing to place, stated rather than implied"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// raw — the open lower bound
+// ---------------------------------------------------------------------------
+//
+// `raw` is the only kind with no encoder behind it, so its tests are mostly about REFUSALS. The
+// declared `touches` is the sole source of the ASET rows, which is why it has to agree with the
+// payload's own entry table in both directions — and why each disagreement gets its own fixture.
+
+/// ★ A real retail block carried through `raw` verbatim, against the real `vz.wad`.
+///
+/// The synthetic fixtures above prove the checks; this proves the passthrough on bytes we did not
+/// author. A donor block is the right subject because it is a shape the engine demonstrably loads,
+/// so anything the lowering breaks shows up as a difference from something known-good.
+#[test]
+fn a_retail_block_survives_being_carried_through_raw() {
+    let game = retail_game();
+    let paths: Vec<PathBuf> = game.paths().iter().map(|p| p.to_path_buf()).collect();
+    let hash = mercs2_formats::hash::pandemic_hash_m2("oc_veh_helicopter_md500");
+    let donor = mercs2_formats::donor::donor_block(&paths, hash).expect("donor block");
+
+    let (count, entries) = mercs2_formats::ucfx::parse_block_entry_table(&donor);
+    assert!(count >= 1);
+    let touches = entries
+        .iter()
+        .map(|e| format!("\"0x{:08X}\"", e.name_hash))
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    let dir = scratch("raw_retail");
+    let s = raw_shipment(&dir, &donor, &touches, "data");
+    let report = build::build(&s, None, None, None, None, None).expect("a retail block must carry");
+    eprintln!("{}", report.log.join("\n"));
+
+    let wad = report.wad.expect("a WAD");
+    let on_disk = std::fs::read(&wad).unwrap();
+    let contents = mercs2_formats::patch_wad::read_patch_wad(&on_disk).expect("re-read");
+    let block = &contents.blocks[0];
+    assert_eq!(block.aset_entries.len(), entries.len());
+    assert!(block
+        .aset_entries
+        .iter()
+        .all(|r| r.u32_2 & 0xFFFF == 0xFFFF));
+
+    let dec = mercs2_formats::sges::decompress_sges(&block.compressed_data).expect("sges");
+    assert_eq!(dec, donor, "retail bytes must survive verbatim");
+
+    // The self-check must be clean on our own output, and `verify_emitted` already required it
+    // before the write — this asserts the same thing from outside, so a regression in that call
+    // site is visible here too.
+    assert_eq!(
+        mercs2_quartermaster::lint::artifact_checks(&contents.blocks),
+        vec![]
+    );
+    eprintln!(
+        "wad_simulator subject: cargo run --bin wad_simulator -- --wad {} --base-wad {} \
+         --skip-audio",
+        wad.display(),
+        paths[0].display()
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The emitted-artifact self-check
+// ---------------------------------------------------------------------------
+
+/// Every WAD the builder writes must have been read back and checked first.
+///
+/// This asserts the WIRING, which is the part that can silently rot: `artifact_checks` has its own
+/// unit tests, but a self-check nobody calls is worth nothing. A real build's log must therefore
+/// show the WAD came back out of `read_patch_wad` cleanly.
+#[test]
+fn a_built_wad_is_read_back_and_self_checked() {
+    let mut game = retail_game();
+
+    let hash = mercs2_formats::hash::pandemic_hash_m2("al_hum_boss_ub");
+    let existing = game
+        .texture(hash)
+        .expect("al_hum_boss_ub must exist in vz.wad");
+    let dir = scratch("selfcheck");
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::write(
+        dir.join("src/t.png"),
+        solid_png(existing.width, existing.height),
+    )
+    .unwrap();
+    let s = shipment(
+        &dir,
+        "  - kind: replace_texture
+    target: al_hum_boss_ub
+    image: src/t.png
+",
+    );
+
+    let report = build::build(&s, Some(&mut game), None, None, None, None).expect("build");
+    let wad = report.wad.expect("a WAD must be emitted");
+    let contents = mercs2_formats::patch_wad::read_patch_wad(&std::fs::read(&wad).unwrap())
+        .expect("the WAD we wrote must read back — verify_emitted already required this");
+
+    // The self-check must be CLEAN on our own output. A finding here is a builder bug: this is the
+    // exact shape (single-entry block, sentinel rungs, honest packed_field) our lowering emits.
+    let found = mercs2_quartermaster::lint::artifact_checks(&contents.blocks);
+    assert_eq!(
+        found,
+        vec![],
+        "our own lowering must not trip the artifact rules"
+    );
+
+    // And the build recorded that it ran, so a future refactor that drops the call is visible.
+    assert!(
+        report.log.iter().any(|l| l.contains("wrote")),
+        "the build log must record the emit it verified: {:?}",
+        report.log
+    );
+}
+
+// ---------------------------------------------------------------------------
+// add_movie
+// ---------------------------------------------------------------------------
+
+/// ★ `add_movie` end to end against the retail WADs — the injector the Scaleform work was missing.
+#[test]
+fn add_movie_builds_end_to_end() {
+    let mut game = retail_game();
+    let dir = scratch("add_movie");
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    let movie = tiny_gfx_movie();
+    std::fs::write(dir.join("src/ui.gfx"), &movie).unwrap();
+    let s = shipment(
+        &dir,
+        "  - kind: add_movie\n    name: qm_test_hud\n    movie: src/ui.gfx\n",
+    );
+
+    let report = build::build(&s, Some(&mut game), None, None, None, None).expect("add_movie must build");
+    assert!(
+        report
+            .diagnostics
+            .iter()
+            .all(|d| d.severity < mercs2_quartermaster::Severity::Error),
+        "{:?}",
+        report.diagnostics
+    );
+
+    let wad_path = report.wad.expect("a WAD must be emitted");
+    let on_disk = std::fs::read(&wad_path).unwrap();
+    assert_eq!(report.placements[0].sha256, build::sha256_hex(&on_disk));
+
+    let (hash, carried) = read_back_movie(&on_disk);
+    assert_eq!(
+        hash,
+        mercs2_formats::hash::pandemic_hash_m2("qm_test_hud"),
+        "the asset must be reachable under the name the author wrote"
+    );
+
+    // (3) The movie survives verbatim. Not "the same length" — the same bytes, and still a movie:
+    // an injector that mangled the payload would still produce a WAD that loads and a container
+    // that checksums, and the only symptom would be `GFxLoader read failed` in-game.
+    assert_eq!(carried, movie, "the movie must be carried byte for byte");
+    let reparsed = mercs2_formats::gfx::GfxMovie::parse(&carried).expect("still a movie");
+    assert_eq!(&reparsed.magic, b"GFX");
+    assert_eq!(reparsed.version, 8, "retail movies are all version 8");
+
+    // The log records the tag census, so a movie that arrived empty cannot pass unnoticed.
+    let log = report.log.join("\n");
+    assert!(log.contains("add_movie qm_test_hud"), "{log}");
+    assert!(log.contains("4 tag(s)"), "{log}");
+
+    // Determinism: the verify-by-hash mandate only means something if two builds agree byte for byte.
+    let again = build::build(&s, Some(&mut game), None, Some(&dir.join("second")), None, None)
+        .expect("second build");
+    assert_eq!(
+        report.placements[0].sha256, again.placements[0].sha256,
+        "two builds of one Shipment must be byte-identical"
+    );
+}
+
+// ──────────────────────────────────────────────────────────────────────────── edit_stringdb
+
+/// ★ `edit_stringdb` end to end against retail vz.wad, then re-read.
+///
+/// The corpus already proved the CODEC byte-identical against all six retail language tables; this
+/// proves the CONTRIBUTION — reading the base table from the game stack, splicing the edit into a
+/// same-hash block, and re-reading it out of the emitted WAD. Edits a key by its HASH (read live
+/// from the table it is about to edit) so the test does not depend on knowing a bracket-key name.
+#[test]
+fn edit_stringdb_builds_end_to_end() {
+    let mut game = retail_game();
+    use mercs2_formats::types::{TYPE_HASH_STRINGDB, TYPE_ID_STRINGDB};
+    let english = mercs2_formats::hash::pandemic_hash_m2("english");
+
+    // Read the base table and pick a real key + its shipped text, live.
+    let base = game
+        .container_for_asset(english, TYPE_HASH_STRINGDB, TYPE_ID_STRINGDB)
+        .expect("retail vz.wad must carry the english string table");
+    let (ks, kl) = {
+        // Re-extract KEYS to read a real key hash.
+        let find = |tag: &[u8; 4]| -> (usize, usize) {
+            let le = |o: usize| u32::from_le_bytes([base[o], base[o + 1], base[o + 2], base[o + 3]]) as usize;
+            let data = le(4);
+            for i in 0..le(16) {
+                let row = 20 + i * 20;
+                if &base[row..row + 4] == tag {
+                    return (data + le(row + 4), le(row + 8));
+                }
+            }
+            panic!("no {tag:?} chunk");
+        };
+        find(b"KEYS")
+    };
+    let key_hash = u32::from_le_bytes([base[ks + 4], base[ks + 5], base[ks + 6], base[ks + 7]]);
+    let _ = kl;
+
+    let dir = scratch("edit_stringdb_e2e");
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    // The new text is longer than most single strings, exercising the resize path.
+    std::fs::write(
+        dir.join("src/english.txt"),
+        format!("0x{key_hash:08X} = QUARTERMASTER EDIT — a deliberately long replacement string\n"),
+    )
+    .unwrap();
+    let s = shipment(
+        &dir,
+        "  - kind: edit_stringdb\n    target: english\n    strings: src/english.txt\n",
+    );
+
+    let report = build::build(&s, Some(&mut game), None, None, None, None).expect("must build");
+    let on_disk = std::fs::read(report.wad.expect("a WAD")).unwrap();
+
+    // Re-read the emitted overlay and confirm the ONE key changed and the table still parses.
+    let contents = mercs2_formats::patch_wad::read_patch_wad(&on_disk).expect("re-read");
+    assert_eq!(contents.blocks.len(), 1);
+    let block = &contents.blocks[0];
+    let row = &block.aset_entries[0];
+    assert_eq!(row.asset_hash, english, "the row must name the english table");
+    assert_eq!(row.u32_3, TYPE_ID_STRINGDB, "type id must dispatch to the stringdb loader");
+    assert_eq!(row.u32_2 & 0xFFFF, 0xFFFF, "a string table has no LOD rung; must be primary");
+
+    let dec = mercs2_formats::sges::decompress_sges(&block.compressed_data).expect("sges");
+    let container = &dec[20..]; // past the single-entry block table
+    let ex = |tag: &[u8; 4]| {
+        let le = |o: usize| u32::from_le_bytes([container[o], container[o + 1], container[o + 2], container[o + 3]]) as usize;
+        let data = le(4);
+        for i in 0..le(16) {
+            let r = 20 + i * 20;
+            if &container[r..r + 4] == tag {
+                return container[data + le(r + 4)..data + le(r + 4) + le(r + 8)].to_vec();
+            }
+        }
+        panic!("no {tag:?}");
+    };
+    let db = mercs2_formats::stringdb::parse(&ex(b"KEYS"), &ex(b"STRS")).expect("parse edited table");
+    let edited = db.entries.iter().find(|e| e.key_hash == key_hash).expect("key present");
+    assert!(
+        edited.text.contains("QUARTERMASTER EDIT"),
+        "the edited key must carry the new text, got {:?}",
+        edited.text
+    );
+}
+
+/// A key that is not in the table is refused BY NAME rather than silently dropped — a dropped
+/// correction is the exact failure the SYEK/KEYS tag confusion once produced.
+#[test]
+fn edit_stringdb_refuses_an_unknown_key() {
+    let mut game = retail_game();
+    let dir = scratch("edit_stringdb_unknown");
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::write(dir.join("src/english.txt"), "[No.Such.Key.At.All] = x\n").unwrap();
+    let s = shipment(
+        &dir,
+        "  - kind: edit_stringdb\n    target: english\n    strings: src/english.txt\n",
+    );
+    match build::build(&s, Some(&mut game), None, None, None, None) {
+        Err(e) => assert!(format!("{e:?}").contains("No.Such.Key"), "must name the key: {e:?}"),
+        Ok(_) => panic!("an unknown key must not build"),
+    }
+}
+
+// ──────────────────────────────────────────────────────────────────────────── donor auto-pick
+
+/// Omitting `donor:` on an add_outfit picks the wearer's hero model and proceeds. With a placeholder model the build then fails at model
+/// IMPORT, which is exactly the proof: auto-pick ran and handed off.
+#[test]
+fn add_outfit_without_donor_auto_picks_and_proceeds() {
+    let mut game = retail_game();
+    let dir = scratch("auto_donor");
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    // Not a real glTF — enough to prove control reached the importer past auto-pick.
+    std::fs::write(dir.join("src/model.glb"), b"not a real glb").unwrap();
+    let s = shipment(
+        &dir,
+        "  - kind: add_outfit\n    name: pmc_hum_auto\n    slug: AutoFit\n    \
+         display: Auto\n    wearer: mattias\n    model: src/model.glb\n",
+    );
+
+    match build::build(&s, Some(&mut game), None, None, None, None) {
+        Err(e) => {
+            let m = format!("{e:?}");
+            assert!(
+                !m.contains("auto-pick"),
+                "auto-pick should have run, not refused: {m}"
+            );
+            // It got as far as trying to read the (bogus) model — the importer, past donor.
+            assert!(
+                m.to_lowercase().contains("glb")
+                    || m.to_lowercase().contains("gltf")
+                    || m.to_lowercase().contains("model")
+                    || m.to_lowercase().contains("import"),
+                "expected a model-import failure after auto-pick, got: {m}"
+            );
+        }
+        Ok(_) => panic!("a bogus model should not build"),
+    }
+}
+
+/// A wearer the auto-pick does not know is refused clearly rather than silently hosting on nothing.
+#[test]
+fn add_outfit_without_donor_and_unknown_wearer_is_refused() {
+    let mut game = retail_game();
+    let dir = scratch("auto_donor_bad");
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::write(dir.join("src/model.glb"), b"x").unwrap();
+    let s = shipment(
+        &dir,
+        "  - kind: add_outfit\n    name: pmc_hum_x\n    slug: X\n    display: X\n    \
+         wearer: bulldog\n    model: src/model.glb\n",
+    );
+    match build::build(&s, Some(&mut game), None, None, None, None) {
+        Err(e) => assert!(
+            format!("{e:?}").contains("bulldog"),
+            "the refusal should name the unknown wearer: {e:?}"
+        ),
+        Ok(_) => panic!("an unknown wearer with no donor must not build"),
+    }
+}
+
+// ──────────────────────────────────────────────────────────────────────── M0192 (add_movie)
+
+/// M0192: a movie under a name retail ships is a REPLACEMENT and stays quiet; a novel name warns,
+/// because the engine references movies by fixed name and nothing points at a new one.
+#[test]
+fn add_movie_replacement_is_quiet_but_a_novel_name_warns() {
+    let mut game = retail_game();
+    use mercs2_quartermaster::lint;
+
+    // `MINIMAP` is a real cfx_pack in vz.wad (the mounted stack) — replacing it is proven.
+    let dir = scratch("m0192_quiet");
+    let quiet = shipment(&dir, "  - kind: add_movie\n    name: MINIMAP\n    movie: src/x.gfx\n");
+    assert!(
+        !lint::game_checks(&quiet.manifest, &mut game)
+            .iter()
+            .any(|d| d.rule.code == "M0192"),
+        "replacing a shipped movie must not warn"
+    );
+
+    // A name retail does not ship: the movie would sit in the WAD, referenced by nothing.
+    let dir2 = scratch("m0192_fires");
+    let fires = shipment(
+        &dir2,
+        "  - kind: add_movie\n    name: qm_totally_novel_movie\n    movie: src/x.gfx\n",
+    );
+    assert!(
+        lint::game_checks(&fires.manifest, &mut game)
+            .iter()
+            .any(|d| d.rule.code == "M0192"),
+        "a novel movie name must warn that nothing references it"
+    );
+
+    // ★ The SAME novel name via `add_ui` must stay quiet — add_ui bakes the FlashWidget that plays
+    // it, so the movie IS referenced. This is exactly the gap M0192 exists to catch, now closed by a
+    // typed kind rather than a hand-written patch_lua.
+    let dir3 = scratch("m0192_add_ui_quiet");
+    let ui = shipment(
+        &dir3,
+        "  - kind: add_ui\n    name: qm_totally_novel_movie\n    movie: src/x.gfx\n",
+    );
+    assert!(
+        !lint::game_checks(&ui.manifest, &mut game)
+            .iter()
+            .any(|d| d.rule.code == "M0192"),
+        "add_ui wires its own movie up, so a novel name must NOT warn"
+    );
+}
+
+// ──────────────────────────────────────────────────────────────────────── M0194 (activate_layer)
+
+/// M0194: activating a layer retail actually ships stays quiet; a name no layer carries warns,
+/// because `MrxLayerManager.MarkForAddition` keys on the layer NAME and a wrong one reaches nothing.
+#[test]
+fn activate_layer_of_a_real_layer_is_quiet_but_an_unknown_name_warns() {
+    let mut game = retail_game();
+    use mercs2_quartermaster::lint;
+    use mercs2_quartermaster::manifest::asset_hash;
+    use mercs2_quartermaster::names::NameTable;
+
+    // Reverse a real layer hash to the name that produced it, so the quiet fixture names a layer the
+    // stack genuinely carries — verified by re-hashing (the name→hash→row round-trip M0194 walks).
+    let names = NameTable::load(
+        &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data/production_names.json"),
+    )
+    .expect("the vendored name table must load");
+    let layer_type = mercs2_formats::types::TYPE_ID_LAYER;
+    let real_layer = game
+        .asset_hashes(layer_type)
+        .into_iter()
+        .find_map(|h| {
+            let n = names.reverse(h)?;
+            (n.starts_with("vz_state") && asset_hash(n) == h).then(|| n.to_string())
+        })
+        .expect("at least one vz_state layer hash must reverse to its name");
+
+    let dir = scratch("m0194_quiet");
+    let quiet = shipment(&dir, &format!("  - kind: activate_layer\n    layer: {real_layer}\n"));
+    assert!(
+        !lint::game_checks(&quiet.manifest, &mut game)
+            .iter()
+            .any(|d| d.rule.code == "M0194"),
+        "activating a layer the stack ships ({real_layer}) must not warn"
+    );
+
+    // A name no layer carries — MarkForAddition would reach nothing at runtime.
+    let dir2 = scratch("m0194_fires");
+    let fires = shipment(
+        &dir2,
+        "  - kind: activate_layer\n    layer: vz_state_qm_totally_novel\n",
+    );
+    assert!(
+        lint::game_checks(&fires.manifest, &mut game)
+            .iter()
+            .any(|d| d.rule.code == "M0194"),
+        "an unknown layer name must warn that MarkForAddition reaches nothing"
+    );
+
+    // The warning also covers `replaces:` names — a typo in the layer being removed is just as dead.
+    let dir3 = scratch("m0194_replaces");
+    let repl = shipment(
+        &dir3,
+        &format!(
+            "  - kind: activate_layer\n    layer: {real_layer}\n    replaces:\n      - vz_state_qm_no_such_layer\n"
+        ),
+    );
+    assert!(
+        lint::game_checks(&repl.manifest, &mut game)
+            .iter()
+            .any(|d| d.rule.code == "M0194"),
+        "an unknown replaces: name must warn too"
+    );
+}
+
+/// ★ activate_layer end to end: a Shipment with no Data half builds into the same `qm_modloader`
+/// script `add_ui` mints, whose compiled bytecode carries the `MrxLayerManager` marks — the layer to
+/// add and the one it replaces — reached by the one-line trampoline on `wifpmcinterior`.
+#[test]
+fn activate_layer_builds_the_layer_marks_into_the_mod_loader() {
+    let mut game = retail_game();
+    let corpus = corpus_for_tests();
+    let root = scratch("activate_layer_e2e");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(
+        root.join("manifest.yaml"),
+        "format: 2\nshipment: { name: layer-mod, version: 1.0.0, target: retail }\n\
+         contributions:\n  - kind: activate_layer\n    layer: vz_state_pmccon004_destroyed\n\
+         \x20   replaces:\n      - vz_state_pmccon004_pristine\n",
+    )
+    .unwrap();
+    let s = discover::open(&root).expect("open shipment");
+
+    let out = root.join("build");
+    let report =
+        build::build(&s, Some(&mut game), None, Some(&out), Some(&corpus), None).expect("build");
+    eprintln!("{}", report.log.join("\n"));
+
+    let bytes = std::fs::read(report.wad.as_ref().expect("a wad")).unwrap();
+    let contents = mercs2_formats::patch_wad::read_patch_wad(&bytes).expect("re-read");
+
+    // The block carrying `wifpmcinterior` (scripts_vz) is republished, now with `qm_modloader`.
+    let mut found = false;
+    for blk in &contents.blocks {
+        let dec = mercs2_formats::sges::decompress_sges(&blk.compressed_data).expect("sges");
+        let Ok(parsed) = mercs2_formats::scripts_block::ScriptsBlock::parse(&dec) else {
+            continue;
+        };
+        parsed.verify_csums().expect("CSUMs");
+        let Some(idx) = parsed.find_script_by_name("qm_modloader") else {
+            continue;
+        };
+        found = true;
+        let luaq = parsed.extract_lua(idx).unwrap();
+        // Lua 5.1 keeps string constants in the clear, so the marks and layer names are in the bytes.
+        let text = String::from_utf8_lossy(&luaq);
+        for needle in [
+            "MrxLayerManager",
+            "MarkForAddition",
+            "vz_state_pmccon004_destroyed",
+            "MarkForRemoval",
+            "vz_state_pmccon004_pristine",
+        ] {
+            assert!(text.contains(needle), "qm_modloader bytecode missing {needle:?}");
+        }
+        // The resident still gets the one-line trampoline that imports and runs it.
+        let ti = parsed
+            .find_script_by_name("wifpmcinterior")
+            .expect("wifpmcinterior present in the same block");
+        let tramp = String::from_utf8_lossy(&parsed.extract_lua(ti).unwrap()).to_string();
+        assert!(tramp.contains("qm_modloader"), "the trampoline must import qm_modloader");
+    }
+    assert!(found, "the build must mint a qm_modloader script");
+}
+
+// ---------------------------------------------------------------------------
+// edit_world — the placement-layer overlay (vz_state / layers_static)
+// ---------------------------------------------------------------------------
+
+/// ★ Editing a placement layer, end to end: load a real vz_state block, move one entity in place,
+/// and emit an overlay that shadows the base by PTHS path — the edited placement reads back moved,
+/// and a NO-OP emit reproduces the layer's decoded bytes exactly.
+#[test]
+fn edit_world_emits_a_shadowing_layer_overlay_and_no_op_round_trips() {
+    let mut game = retail_game();
+    // A vz_state block is small and carries placements; find one.
+    let mut inputs = None;
+    for needle in ["vz_state_pmccon004", "vz_state_pmc", "vz_state"] {
+        if let Some(i) = game.layer_block_for_edit(needle) {
+            if mercs2_formats::placement::load_placements(&i.block).map(|v| !v.is_empty()).unwrap_or(false) {
+                inputs = Some(i);
+                break;
+            }
+        }
+    }
+    let inputs = inputs.expect(
+        "no vz_state block with placements in the retail stack (tried vz_state_pmccon004, vz_state_pmc, vz_state)",
+    );
+
+    let places = mercs2_formats::placement::load_placements(&inputs.block).expect("parse");
+    let target = places[0].clone();
+
+    // Move it, emit the overlay.
+    let mut edited = inputs.block.clone();
+    let new_pos = [target.pos[0] + 40.0, target.pos[1], target.pos[2] - 15.0];
+    let moved_n = mercs2_formats::placement::patch_transform(&mut edited, target.key, Some(new_pos), None);
+    assert!(moved_n >= 1);
+    let block = build::emit_edited_layer(&inputs, &edited).expect("emit the overlay");
+
+    // The overlay shadows the base block at its own PTHS path, and restates its ASET rows.
+    assert_eq!(block.path_string, inputs.path, "the overlay must carry the base's path to shadow it");
+    assert_eq!(block.aset_entries.len(), inputs.rows.len(), "every ASET row must be restated");
+
+    // The emitted block decodes to the edited content, and the moved entity reads back.
+    let decoded = mercs2_formats::sges::decompress_sges(&block.compressed_data).expect("sges");
+    assert_eq!(decoded, edited, "the overlay must carry exactly the edited block");
+    let after = mercs2_formats::placement::load_placements(&decoded).expect("re-parse");
+    let m = after.iter().find(|p| p.key == target.key).expect("entity present");
+    assert_eq!(m.pos, new_pos, "the moved entity must read back at the new position");
+
+    // NO-OP: emitting the unedited layer decodes byte-for-byte to the base.
+    let noop = build::emit_edited_layer(&inputs, &inputs.block).expect("emit no-op");
+    let noop_decoded = mercs2_formats::sges::decompress_sges(&noop.compressed_data).expect("sges");
+    assert_eq!(noop_decoded, inputs.block, "a no-op layer edit must reproduce the block's decoded bytes");
+}
+
+/// ★ edit_world end to end: a Shipment that moves one entity in a real layer builds into an overlay
+/// that shadows the base layer and reads the entity back at its new position.
+#[test]
+fn edit_world_builds_an_overlay_that_moves_an_entity() {
+    let mut game = retail_game();
+    // Find a layer needle that resolves to a block with placements.
+    let mut found = None;
+    for needle in ["vz_state_pmccon004", "vz_state_pmc", "vz_state"] {
+        if let Some(inp) = game.layer_block_for_edit(needle) {
+            if let Ok(p) = mercs2_formats::placement::load_placements(&inp.block) {
+                if !p.is_empty() {
+                    found = Some((needle.to_string(), inp.block.clone(), p[0].clone(), inp.path.clone()));
+                    break;
+                }
+            }
+        }
+    }
+    let (needle, base_block, target, base_path) = found.expect(
+        "no vz_state layer with placements in the retail stack (tried vz_state_pmccon004, vz_state_pmc, vz_state)",
+    );
+    let new_pos = [target.pos[0] + 55.0, target.pos[1], target.pos[2] - 10.0];
+
+    let dir = scratch("edit_world");
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::write(
+        dir.join("src/world.yaml"),
+        format!(
+            "edits:\n  - entity: \"0x{:08X}\"\n    pos: [{}, {}, {}]\n",
+            target.key, new_pos[0], new_pos[1], new_pos[2]
+        ),
+    )
+    .unwrap();
+    let s = shipment(
+        &dir,
+        &format!("  - kind: edit_world\n    layer: \"{needle}\"\n    edits: src/world.yaml\n"),
+    );
+
+    let report = build::build(&s, Some(&mut game), None, None, None, None).expect("edit_world must build");
+    let on_disk = std::fs::read(report.wad.expect("a WAD")).unwrap();
+    let contents = mercs2_formats::patch_wad::read_patch_wad(&on_disk).expect("re-read");
+    // The overlay shadows the base layer block at its PTHS path.
+    let block = contents.blocks.iter().find(|b| b.path_string == base_path).expect("layer overlay present");
+    let decoded = mercs2_formats::sges::decompress_sges(&block.compressed_data).expect("sges");
+    let after = mercs2_formats::placement::load_placements(&decoded).expect("re-parse");
+    let moved = after.iter().find(|p| p.key == target.key).expect("entity present");
+    assert_eq!(moved.pos, new_pos, "the entity must read back at the new position");
+    // Every other entity is where it was.
+    let before = mercs2_formats::placement::load_placements(&base_block).unwrap();
+    for (a, b) in before.iter().zip(&after) {
+        if a.key != target.key {
+            assert_eq!(a.pos, b.pos, "a non-target entity moved");
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// add_animation / replace_animation — the retail clip container
+// ---------------------------------------------------------------------------
+
+/// Against retail: a replace of a shipped Havok clip builds under the target's own hash, and a
+/// replace of a MANM keyframe animation is refused by kind rather than overwritten with a clip.
+#[test]
+fn replace_animation_replaces_a_clip_and_refuses_a_keyframe_animation() {
+    use mercs2_formats::anim_container::{classify, parse_container, AnimContainerKind};
+    use mercs2_formats::types::{TYPE_HASH_ANIMATION, TYPE_ID_ANIMATION};
+    let mut game = retail_game();
+    let (mut clip_target, mut keyframe_target) = (None, None);
+    for h in game.asset_hashes(TYPE_ID_ANIMATION) {
+        let c = game
+            .container_for_asset(h, TYPE_HASH_ANIMATION, TYPE_ID_ANIMATION)
+            .expect("every animation row resolves to a container");
+        match classify(&parse_container(&c).expect("retail container reads")).expect("known kind") {
+            AnimContainerKind::HavokClip { .. } if clip_target.is_none() => clip_target = Some(h),
+            AnimContainerKind::Keyframe if keyframe_target.is_none() => keyframe_target = Some(h),
+            _ => {}
+        }
+        if clip_target.is_some() && keyframe_target.is_some() {
+            break;
+        }
+    }
+    let clip_target = clip_target.expect("retail ships Havok clips");
+    let keyframe_target = keyframe_target.expect("retail ships 29 MANM keyframe animations");
+
+    let dir = scratch("replace_animation");
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::write(dir.join("src/c.hkx"), ANIM_CLIP).unwrap();
+    std::fs::write(dir.join("src/c.trnm"), anim_trnm(anim_tracks())).unwrap();
+    let s = shipment(
+        &dir,
+        &format!("  - kind: replace_animation\n    target: \"0x{clip_target:08X}\"\n    clip: src/c.hkx\n    trnm: src/c.trnm\n"),
+    );
+    let report = build::build(&s, Some(&mut game), None, None, None, None).expect("a clip replace builds");
+    let (_, hash, chunks) = read_back_animation(&std::fs::read(report.wad.unwrap()).unwrap());
+    assert_eq!(hash, clip_target, "same hash");
+    assert_eq!(chunks[1].body, ANIM_CLIP);
+
+    let dir = scratch("replace_animation_manm");
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::write(dir.join("src/c.hkx"), ANIM_CLIP).unwrap();
+    std::fs::write(dir.join("src/c.trnm"), anim_trnm(anim_tracks())).unwrap();
+    let s = shipment(
+        &dir,
+        &format!("  - kind: replace_animation\n    target: \"0x{keyframe_target:08X}\"\n    clip: src/c.hkx\n    trnm: src/c.trnm\n"),
+    );
+    match build::build(&s, Some(&mut game), None, None, None, None) {
+        Err(BuildError::Lower { message, .. }) => assert!(message.contains("MANM"), "{message}"),
+        other => panic!("a MANM target must be refused, got {other:?}"),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// add_model (rigid) with `textures:`
+// ---------------------------------------------------------------------------
+
+/// Against retail: a rigid `add_model` with a diffuse map ships the map as its own texture block and
+/// repoints the HOST group's material at it. Asserted in the emitted MTRL itself: the host material's
+/// diffuse slot names the new texture's hash.
+#[test]
+fn a_rigid_add_model_with_textures_repoints_the_host_material() {
+    let mut game = retail_game();
+    let donor = "oc_veh_helicopter_md500";
+    let paths: Vec<PathBuf> = game.paths().iter().map(|p| p.to_path_buf()).collect();
+    let donor_blk = mercs2_formats::donor::donor_block(&paths, mercs2_formats::hash::pandemic_hash_m2(donor))
+        .expect("donor block");
+    let n = u32::from_le_bytes(donor_blk[16..20].try_into().unwrap()) as usize;
+    let ucfx = &donor_blk[20..20 + n];
+    let groups = mercs2_formats::texture::group_prmt_material_indices(ucfx);
+    let mats = mercs2_formats::texture::parse_mtrl(ucfx, mercs2_formats::texture::MtrlSource::Model)
+        .expect("parse the donor MTRL");
+    // A host whose every material samples a texture and names a diffuse.
+    let host = groups
+        .iter()
+        .position(|ms| {
+            !ms.is_empty()
+                && ms.iter().all(|&m| {
+                    mats.get(m).is_some_and(|x| {
+                        x.flags & build::MTRL_TEXTURED != 0 && x.textures.first().is_some_and(|&h| h != 0)
+                    })
+                })
+        })
+        .expect("the donor has a textured group");
+    let host_mat = groups[host][0];
+
+    let dir = scratch("add_model_textures");
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::write(dir.join("src/prop.glb"), cube_glb()).unwrap();
+    std::fs::write(dir.join("src/prop_d.png"), solid_png(64, 64)).unwrap();
+    let s = shipment(
+        &dir,
+        &format!(
+            "  - kind: add_model\n    name: qm_test_tex_prop\n    model: src/prop.glb\n    donor: {donor}\n    \
+             group: {host}\n    textures:\n      diffuse: src/prop_d.png\n"
+        ),
+    );
+    let report = build::build(&s, Some(&mut game), None, None, None, None).expect("a textured rigid prop builds");
+    let on_disk = std::fs::read(report.wad.expect("a WAD")).unwrap();
+    let contents = mercs2_formats::patch_wad::read_patch_wad(&on_disk).expect("re-read");
+    let want = mercs2_formats::hash::pandemic_hash_m2("qm_test_tex_prop_dm");
+    let model = mercs2_formats::hash::pandemic_hash_m2("qm_test_tex_prop");
+
+    let mut seen_model = false;
+    let mut seen_texture = false;
+    for block in &contents.blocks {
+        let dec = mercs2_formats::sges::decompress_sges(&block.compressed_data).expect("sges");
+        let (_, entries) = mercs2_formats::ucfx::parse_block_entry_table(&dec);
+        if entries[0].name_hash == want {
+            assert_eq!(entries[0].type_hash, mercs2_formats::types::TYPE_HASH_TEXTURE);
+            seen_texture = true;
+        }
+        if entries[0].name_hash == model {
+            let emitted = mercs2_formats::texture::parse_mtrl(&dec[20..], mercs2_formats::texture::MtrlSource::Model)
+                .expect("parse the emitted MTRL");
+            assert_eq!(
+                emitted[host_mat].textures[0], want,
+                "the host material's diffuse must name the new texture"
+            );
+            let emitted_groups = mercs2_formats::texture::group_prmt_material_indices(&dec[20..]);
+            assert_eq!(emitted_groups[host][0], host_mat, "the host keeps its material record");
+            seen_model = true;
+        }
+    }
+    assert!(seen_model && seen_texture, "model {seen_model}, texture {seen_texture}");
+    let log = report.log.join("\n");
+    assert!(log.contains("qm_test_tex_prop_dm"), "{log}");
+}
+
+// ---------------------------------------------------------------------------
+// Sound banks and add_language
+// ---------------------------------------------------------------------------
+
+/// The sound kinds and `add_language` against the game. The stack is `vz.wad` plus the language
+/// WADs a manifest declares, beside it (`compat::game_stack_paths`); `shell.wad` and `English.wad`
+/// are read from the same folder.
+mod sound {
+    use super::common::build::{named_shipment, pcm16_wav, scratch, sound_cue_fields, sound_cue_yaml};
+    use mercs2_audio::soundbank::{CueBody, GroupForm, Soundbank};
+    use mercs2_audio::sounddb::SoundDb;
+    use mercs2_audio::wave::WaveData;
+    use mercs2_audio::{AudioEngine, WavebankFile};
+    use mercs2_formats::hash::{pandemic_hash_m2 as m2, pandemic_hash_m2_extend};
+    use mercs2_formats::patch_wad::{read_patch_wad, PatchBlock};
+    use mercs2_formats::types::{TYPE_HASH_SOUNDBANK, TYPE_HASH_WAVEBANK, TYPE_ID_SOUNDBANK, TYPE_ID_WAVEBANK};
+    use mercs2_formats::ucfx::{extract_data_chunk, walk_decompressed_block};
+    use mercs2_quartermaster::build::{self, Destination};
+    use mercs2_quartermaster::compat::PlanInput;
+    use mercs2_quartermaster::discover::LoadedShipment;
+    use mercs2_quartermaster::{lint, GameStack};
+    use std::collections::{BTreeMap, BTreeSet};
+    use std::path::{Path, PathBuf};
+
+    const SOUNDDB_HASH: u32 = 0xE527_3C14;
+    const TYPE_ID_SOUNDDB: u32 = 13;
+
+    fn vz_wad() -> PathBuf {
+        mercs2_formats::game_paths::local_config_vz_wad(Path::new(env!("CARGO_MANIFEST_DIR"))).unwrap_or_else(|e| panic!("{e}"))
+    }
+
+    /// The stack a build of `shipments` reads: `vz.wad` plus their declared languages' WADs.
+    fn stack_for(shipments: &[&LoadedShipment]) -> GameStack {
+        let paths = mercs2_quartermaster::compat::game_stack_paths(&vz_wad(), shipments.iter().map(|s| &s.manifest))
+            .unwrap_or_else(|e| panic!("{e}"));
+        GameStack::open(&paths).unwrap_or_else(|e| panic!("could not open {paths:?}: {e}"))
+    }
+
+    /// The vendored Lua corpus the mod loader links against. Panics when it is missing.
+    fn corpus() -> PathBuf {
+        let mut dir: Option<&Path> = Some(Path::new(env!("CARGO_MANIFEST_DIR")));
+        while let Some(d) = dir {
+            let c = d.join("crates/mercs2_script/corpus/mercs2-luacd/src");
+            if c.is_dir() {
+                return c;
+            }
+            dir = d.parent();
+        }
+        panic!("the vendored Lua corpus crates/mercs2_script/corpus/mercs2-luacd/src is missing")
+    }
+
+    /// A retail table body, `(entry hash, type)`, from `stack`.
+    fn table(stack: &mut GameStack, entry: u32, type_hash: u32, type_id: u32) -> Vec<u8> {
+        let c = stack
+            .container_for_asset(entry, type_hash, type_id)
+            .unwrap_or_else(|| panic!("0x{entry:08X} / 0x{type_hash:08X} is not in the stack"));
+        extract_data_chunk(&c).expect("data leaf")
+    }
+
+    /// Every `(name hash, type hash, container)` of `block`.
+    fn entries_of(block: &PatchBlock) -> Vec<(u32, u32, Vec<u8>)> {
+        let dec = mercs2_formats::sges::decompress_sges(&block.compressed_data).expect("sges");
+        let (parsed, issues) = walk_decompressed_block(&dec, &block.path_string);
+        assert!(issues.is_empty(), "{:?}", issues.iter().map(|i| &i.detail).collect::<Vec<_>>());
+        parsed.entries.iter().zip(parsed.containers).map(|(e, c)| (e.name_hash, e.type_hash, c)).collect()
+    }
+
+    /// Every `(name hash, type hash, data body)` of a block of bank tables.
+    fn tables_of(block: &PatchBlock) -> Vec<(u32, u32, Vec<u8>)> {
+        entries_of(block)
+            .into_iter()
+            .map(|(n, t, c)| (n, t, extract_data_chunk(&c).expect("data leaf")))
+            .collect()
+    }
+
+    /// The blocks of the WAD a placement names.
+    fn blocks_of(out: &Path, placement: &build::Placement) -> Vec<PatchBlock> {
+        let path = match &placement.destination {
+            Destination::LanguagePatch { relative, .. } | Destination::DataWad { relative, .. } => out.join(relative),
+            _ => out.join(&placement.name),
+        };
+        read_patch_wad(&std::fs::read(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display())))
+            .expect("re-read the WAD")
+            .blocks
+    }
+
+    fn block_at(blocks: &[PatchBlock], hash: u32) -> &PatchBlock {
+        let path = format!("blocks\\VZ\\mod_{hash:08x}.block");
+        blocks.iter().find(|b| b.path_string == path).unwrap_or_else(|| panic!("no block {path}"))
+    }
+
+    /// A one-cue `replace_sound_cue` Shipment named `name` replacing `cue` of `bank`.
+    fn cue_override(dir: &Path, name: &str, bank: &str, language: Option<&str>, cue: &str, samples: &[i16]) -> LoadedShipment {
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::write(dir.join("src/new.wav"), pcm16_wav(1, 22050, samples)).unwrap();
+        let language = language.map(|l| format!("    language: {l}\n")).unwrap_or_default();
+        named_shipment(
+            dir,
+            name,
+            &format!(
+                "  - kind: replace_sound_cue\n    bank: {bank}\n{language}    category: ui\n    cue:\n{}",
+                sound_cue_fields("      ", cue, "src/new.wav", 7, 8)
+            ),
+        )
+    }
+
+    /// Everything but `changed` of `forked` is `retail`'s: the same groups at the same indices, one
+    /// group appended, and every other cue unchanged.
+    fn assert_only_cue_changed(retail: &Soundbank, forked: &Soundbank, changed: &[usize]) {
+        assert_eq!(forked.bank_hash, retail.bank_hash);
+        assert_eq!(forked.groups.len(), retail.groups.len() + changed.len());
+        assert_eq!(&forked.groups[..retail.groups.len()], &retail.groups[..], "the game's groups stay as they are");
+        assert_eq!(forked.cues.len(), retail.cues.len());
+        for (i, (a, b)) in retail.cues.iter().zip(&forked.cues).enumerate() {
+            if changed.contains(&i) {
+                assert_eq!(a.guid, b.guid, "cue {i} keeps its guid");
+                assert_ne!(a, b, "cue {i} is rewritten");
+            } else {
+                assert_eq!(a, b, "cue {i} stays as it is");
+            }
+        }
+    }
+
+    /// The blocks of the shell patch `report` placed.
+    fn shell_patch_blocks(out: &Path, report: &build::BuildReport) -> Vec<PatchBlock> {
+        let shell = report.placements.iter().find(|p| p.destination == Destination::ShellPatch).expect("a shell patch");
+        blocks_of(out, shell)
+    }
+
+    /// The `shell.wad` beside the configured `vz.wad`, opened on its own.
+    fn shell_wad() -> GameStack {
+        let path = mercs2_quartermaster::sound::sibling_wad(&vz_wad(), "shell.wad").unwrap_or_else(|e| panic!("{e}"));
+        GameStack::open(std::slice::from_ref(&path)).unwrap_or_else(|e| panic!("could not open {}: {e}", path.display()))
+    }
+
+    /// The linked scripts block of `shell.wad` in `blocks`, parsed.
+    fn shell_scripts(blocks: &[PatchBlock]) -> mercs2_formats::scripts_block::ScriptsBlock {
+        let path = mercs2_quartermaster::link::SHELL_SCRIPT_BLOCKS[0].1;
+        let b = blocks.iter().find(|b| b.path_string == path).unwrap_or_else(|| panic!("no block {path}"));
+        let dec = mercs2_formats::sges::decompress_sges(&b.compressed_data).expect("sges");
+        mercs2_formats::scripts_block::ScriptsBlock::parse(&dec).expect("the shell scripts block parses")
+    }
+
+    /// The Lua chunk `name` of `block`.
+    fn chunk(block: &mercs2_formats::scripts_block::ScriptsBlock, name: &str) -> Vec<u8> {
+        block.extract_lua(block.find_script_by_name(name).unwrap_or_else(|| panic!("no script {name}"))).unwrap()
+    }
+
+    fn has(hay: &[u8], needle: &str) -> bool {
+        hay.windows(needle.len()).any(|w| w == needle.as_bytes())
+    }
+
+    /// ★ `replace_sound_cue` on `ui_hud`, which `vz.wad` and `shell.wad` both carry and both levels
+    /// load: the Shipment ships the forked soundbank and its override wavebank to the overlay and to
+    /// the shell patch; only `ui_PDA_Open_01_st` changes; the game's own sounddb routes the cue to a
+    /// group that plays the WAV; each level's loader loads the wavebank; and the shell patch carries
+    /// `shell.wad`'s CSUM row and its scripts block with the front end's loader.
+    #[test]
+    fn replace_sound_cue_forks_a_vz_and_shell_bank() {
+        let dir = scratch("rsc_ui_hud");
+        let samples: Vec<i16> = (0..3000).map(|i| (i * 11) as i16).collect();
+        let s = cue_override(&dir, "pda-sound", "ui_hud", None, "ui_PDA_Open_01_st", &samples);
+        let mut game = stack_for(&[&s]);
+        let out = dir.join("_build");
+        let report = build::build(&s, Some(&mut game), None, Some(&out), Some(&corpus()), None).expect("builds");
+        eprintln!("{}", report.log.join("\n"));
+
+        let bank = m2("ui_hud");
+        let wavebank = m2("qm_pda-sound_ui_hud");
+        let retail_sb = Soundbank::parse(&table(&mut game, bank, TYPE_HASH_SOUNDBANK, TYPE_ID_SOUNDBANK)).unwrap();
+        let cue_index = retail_sb.cues.iter().position(|c| c.guid == m2("ui_PDA_Open_01_st")).expect("the cue is in ui_hud");
+
+        let overlay = report.placements.iter().find(|p| p.destination == Destination::Overlay).expect("an overlay");
+        let shell = report.placements.iter().find(|p| p.destination == Destination::ShellPatch).expect("a shell patch");
+        let ob = blocks_of(&out, overlay);
+        let sb_tables = tables_of(block_at(&ob, bank));
+        assert_eq!(sb_tables.len(), 1, "the soundbank alone: the game's sounddb still routes the cue");
+        assert_eq!((sb_tables[0].0, sb_tables[0].1), (bank, TYPE_HASH_SOUNDBANK));
+        let forked = Soundbank::parse(&sb_tables[0].2).unwrap();
+        assert_only_cue_changed(&retail_sb, &forked, &[cue_index]);
+        let shell_tables = tables_of(block_at(&blocks_of(&out, shell), bank));
+        assert_eq!(shell_tables, sb_tables, "shell.wad's ui_hud is vz.wad's, so the fork is the same");
+
+        let wb_tables = tables_of(block_at(&ob, wavebank));
+        assert_eq!((wb_tables[0].0, wb_tables[0].1), (wavebank, TYPE_HASH_WAVEBANK));
+        let shell_blocks = shell_patch_blocks(&out, &report);
+        assert_eq!(tables_of(block_at(&shell_blocks, wavebank)), wb_tables, "the front end's copy of the wavebank");
+        let scripts = shell_scripts(&shell_blocks);
+        assert!(has(&chunk(&scripts, "qm_shell_modloader"), "qm_pda-sound_ui_hud"));
+        assert!(has(&chunk(&scripts, "mrxsound"), "_qm_prev_EnterShellState"));
+        let shell_path = mercs2_quartermaster::sound::sibling_wad(&vz_wad(), "shell.wad").unwrap();
+        let shell_file = out.join(&report.placements.iter().find(|p| p.destination == Destination::ShellPatch).unwrap().name);
+        assert_eq!(
+            mercs2_formats::donor::base_csum(&shell_file).unwrap(),
+            mercs2_formats::donor::base_csum(&shell_path).unwrap(),
+            "the shell patch carries shell.wad's CSUM row"
+        );
+
+        let mut eng = AudioEngine::default();
+        eng.set_sounddb(SoundDb::parse(&table(&mut game, bank, SOUNDDB_HASH, 13)).unwrap());
+        eng.load_soundbank(&sb_tables[0].2).unwrap();
+        eng.load_wavebank(&wb_tables[0].2).unwrap();
+        let entry = *eng.sounddb.find_cue_by_name("ui_PDA_Open_01_st").expect("routes");
+        assert_eq!(entry.cue_index as usize, cue_index);
+        let resolved = eng.resolve_cue(&entry).expect("resolves");
+        let w: Vec<_> = resolved.waves().collect();
+        assert_eq!((w.len(), w[0].wavebank, w[0].index), (1, wavebank, 0));
+        assert_eq!(eng.clip(wavebank, 0).unwrap().samples, samples);
+
+        let log = report.log.join("\n");
+        assert!(log.contains("linked qm_modloader"), "the gameplay loader is minted: {log}");
+        assert!(log.contains("linked qm_shell_modloader"), "the front end's loader is minted: {log}");
+    }
+
+    /// ★ The front end plays the override: an engine holding `shell.wad`'s own `ui_hud` sounddb and the
+    /// shell patch's soundbank and wavebank — what the main menu has loaded once `EnterShellState` and
+    /// the front-end loader have run — resolves `ui_PDA_Open_01_st` to the WAV's samples.
+    #[test]
+    fn the_front_end_resolves_an_overridden_ui_hud_cue_to_the_wav() {
+        let dir = scratch("rsc_front_end");
+        let samples: Vec<i16> = (0..2400).map(|i| (i * 5 - 3000) as i16).collect();
+        let s = cue_override(&dir, "menu-sound", "ui_hud", None, "ui_PDA_Open_01_st", &samples);
+        let mut game = stack_for(&[&s]);
+        let out = dir.join("_build");
+        let report = build::build(&s, Some(&mut game), None, Some(&out), Some(&corpus()), None).expect("builds");
+        let blocks = shell_patch_blocks(&out, &report);
+        let bank = m2("ui_hud");
+        let wavebank = m2("qm_menu-sound_ui_hud");
+        let sb = tables_of(block_at(&blocks, bank));
+        let wb = tables_of(block_at(&blocks, wavebank));
+        let mut shell = shell_wad();
+        let mut eng = AudioEngine::default();
+        eng.set_sounddb(SoundDb::parse(&table(&mut shell, bank, SOUNDDB_HASH, TYPE_ID_SOUNDDB)).unwrap());
+        eng.load_soundbank(&sb[0].2).unwrap();
+        eng.load_wavebank(&wb[0].2).unwrap();
+        let entry = *eng.sounddb.find_cue_by_name("ui_PDA_Open_01_st").expect("shell.wad's sounddb routes the cue");
+        let resolved = eng.resolve_cue(&entry).expect("resolves");
+        let w: Vec<_> = resolved.waves().collect();
+        assert_eq!((w.len(), w[0].wavebank, w[0].index), (1, wavebank, 0));
+        assert_eq!(eng.clip(wavebank, 0).unwrap().samples, samples);
+    }
+
+    /// ★ `replace_sound_bank` on `ui_shell`, which `vz.wad` and `shell.wad` both carry and only the
+    /// front end loads: its soundbank, sounddb and wavebank ship in the shell patch alone, only the
+    /// front end's loader is linked, and the overlay carries nothing.
+    #[test]
+    fn a_ui_shell_override_ships_to_the_front_end_only() {
+        let dir = scratch("rsb_ui_shell");
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::write(dir.join("src/line.wav"), pcm16_wav(1, 22050, &[9; 300])).unwrap();
+        let s = named_shipment(
+            &dir,
+            "shell-sound",
+            &format!(
+                "  - kind: replace_sound_bank\n    bank: ui_shell\n    category: ui\n    cues:\n{}",
+                sound_cue_yaml("qm_shell_line", "src/line.wav", 0, 0)
+            ),
+        );
+        assert!(GameStack::open(&[vz_wad()]).unwrap().has_asset(m2("ui_shell"), TYPE_ID_SOUNDBANK), "vz.wad carries ui_shell");
+        let mut game = stack_for(&[&s]);
+        let out = dir.join("_build");
+        let report = build::build(&s, Some(&mut game), None, Some(&out), Some(&corpus()), None).expect("builds");
+        eprintln!("{}", report.log.join("\n"));
+        assert!(report.wad.is_none(), "nothing ships in the overlay");
+        let blocks = shell_patch_blocks(&out, &report);
+        tables_of(block_at(&blocks, m2("ui_shell")));
+        tables_of(block_at(&blocks, m2("qm_shell-sound_ui_shell")));
+        assert!(has(&chunk(&shell_scripts(&blocks), "qm_shell_modloader"), "qm_shell-sound_ui_shell"));
+        let log = report.log.join("\n");
+        assert!(!log.contains("linked qm_modloader"), "no gameplay loader: {log}");
+    }
+
+    /// ★ `add_sound` with `load_in: [front_end]`: the bank's block and the front end's loader ship in
+    /// the shell patch, and nothing in the overlay.
+    #[test]
+    fn a_front_end_add_sound_ships_in_the_shell_patch() {
+        let dir = scratch("add_sound_front_end");
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::write(dir.join("src/a.wav"), pcm16_wav(1, 22050, &[5; 64])).unwrap();
+        let s = named_shipment(
+            &dir,
+            "menu-bank",
+            &format!(
+                "  - kind: add_sound\n    bank: qm_menu_bank\n    category: ui\n    load_in: [front_end]\n    cues:\n{}",
+                sound_cue_yaml("qm_menu_click", "src/a.wav", 0, 0)
+            ),
+        );
+        let mut game = stack_for(&[&s]);
+        let out = dir.join("_build");
+        let report = build::build(&s, Some(&mut game), None, Some(&out), Some(&corpus()), None).expect("builds");
+        assert!(report.wad.is_none(), "nothing ships in the overlay");
+        let blocks = shell_patch_blocks(&out, &report);
+        let types: Vec<u32> = tables_of(block_at(&blocks, m2("qm_menu_bank"))).iter().map(|t| t.1).collect();
+        assert_eq!(types, vec![TYPE_HASH_SOUNDBANK, SOUNDDB_HASH, TYPE_HASH_WAVEBANK]);
+        let loader = chunk(&shell_scripts(&blocks), "qm_shell_modloader");
+        assert!(has(&loader, "qm_menu_bank") && has(&loader, "LoadSoundBank"));
+    }
+
+    /// ★ Census of the carried soundbanks against the retail load sites: `shell.wad` carries exactly
+    /// the three the front end loads (`sound::FRONT_END_SOUNDBANK_LOADS`); `vz.wad` carries 76, among
+    /// them the 11 `LoadBanks` names (`sound::GAMEPLAY_SOUNDBANK_LOADS`) and `ui_shell`, and the other
+    /// 64 have no literal Lua load site.
+    #[test]
+    fn the_carried_soundbanks_against_the_retail_load_sites() {
+        use mercs2_quartermaster::sound::{FRONT_END_SOUNDBANK_LOADS, GAMEPLAY_SOUNDBANK_LOADS};
+        let hashes = |names: &[&str]| -> BTreeSet<u32> { names.iter().map(|n| m2(n)).collect() };
+        let shell: BTreeSet<u32> = shell_wad().asset_hashes(TYPE_ID_SOUNDBANK).into_iter().collect();
+        assert_eq!(shell, hashes(FRONT_END_SOUNDBANK_LOADS));
+        let vz: BTreeSet<u32> = GameStack::open(&[vz_wad()]).unwrap().asset_hashes(TYPE_ID_SOUNDBANK).into_iter().collect();
+        let mut named = hashes(GAMEPLAY_SOUNDBANK_LOADS);
+        named.insert(m2("ui_shell"));
+        assert_eq!(vz.len(), 76);
+        assert!(named.is_subset(&vz), "every named bank is in vz.wad");
+        assert_eq!(vz.difference(&named).count(), 64);
+    }
+
+    /// The soundbanks `vz.wad` carries that no retail load site names: the banks the engine loads
+    /// (`sound::BankLoader::Engine`).
+    fn engine_banks(vz: &mut GameStack) -> BTreeSet<u32> {
+        use mercs2_quartermaster::sound::{BankLoader, FRONT_END_SOUNDBANK_LOADS, GAMEPLAY_SOUNDBANK_LOADS};
+        let lua: BTreeSet<u32> = FRONT_END_SOUNDBANK_LOADS.iter().chain(GAMEPLAY_SOUNDBANK_LOADS).map(|n| m2(n)).collect();
+        let engine: BTreeSet<u32> = vz.asset_hashes(TYPE_ID_SOUNDBANK).into_iter().filter(|h| !lua.contains(h)).collect();
+        assert_eq!(
+            mercs2_quartermaster::sound::bank_loader("wpn_grapplegun", &mercs2_quartermaster::sound::RETAIL_LUA_LOAD_SITES),
+            BankLoader::Engine
+        );
+        assert!(engine.contains(&m2("wpn_grapplegun")));
+        engine
+    }
+
+    /// The `SoundEffect` component (`0xB40954F5`) of every world-entity container of `vz.wad`,
+    /// decoded as `[u32 n][n entity keys][payload]` groups: the payloads, and the group and key
+    /// counts. The layout MUST consume the data exactly.
+    fn sound_effect_payloads(vz: &mut GameStack) -> (Vec<Vec<u32>>, usize, usize, usize) {
+        use mercs2_formats::types::{TYPE_HASH_WORLD_ENTITY_DATA, TYPE_ID_WORLD_ENTITY_DATA};
+        let (mut payloads, mut groups, mut keys, mut words_total) = (Vec::new(), 0, 0, 0);
+        let mut components = 0;
+        for h in vz.asset_hashes(TYPE_ID_WORLD_ENTITY_DATA) {
+            let container = vz
+                .container_for_asset(h, TYPE_HASH_WORLD_ENTITY_DATA, TYPE_ID_WORLD_ENTITY_DATA)
+                .unwrap_or_else(|| panic!("world-entity container 0x{h:08X} does not read"));
+            for g in mercs2_formats::schema::parse_comp_groups(&container) {
+                if g.type_hash != Some(m2("SoundEffect")) {
+                    continue;
+                }
+                components += 1;
+                let schema = g.schema().expect("SoundEffect has a schema");
+                assert_eq!(schema.payload_stride, 0x1C, "seven words");
+                let bank = schema.fields.iter().find(|f| f.name_hash == 0x14A6_7FA6).expect("the bank field");
+                assert_eq!(bank.byte_offset, 0x10, "the bank is payload word 4");
+                let cue = schema.fields.iter().find(|f| f.name_hash == 0x2EB6_2242).expect("the cue field");
+                assert_eq!(cue.byte_offset, 0, "the cue hash is payload word 0");
+                let data = g.data.expect("SoundEffect data");
+                let w: Vec<u32> = data.chunks_exact(4).map(|c| u32::from_le_bytes(c.try_into().unwrap())).collect();
+                assert_eq!(data.len() % 4, 0);
+                let mut i = 0;
+                while i < w.len() {
+                    let n = w[i] as usize;
+                    assert!(n > 0 && i + 1 + n + 7 <= w.len(), "a group of {n} keys at word {i} of {}", w.len());
+                    payloads.push(w[i + 1 + n..i + 1 + n + 7].to_vec());
+                    groups += 1;
+                    keys += n;
+                    i += 1 + n + 7;
+                }
+                assert_eq!(i, w.len(), "the groups consume the data exactly");
+                words_total += w.len();
+            }
+        }
+        assert_eq!(components, 1, "one world-entity container carries SoundEffect");
+        (payloads, groups, keys, words_total)
+    }
+
+    /// ★ Census of the banks `SoundEffect` names: its data is 1,080 groups over 2,754 entity keys in
+    /// 11,394 words, and payload word 4 names 63 of the 64 banks the engine loads — every one but
+    /// `wpn_grapplegun` — and no bank retail Lua loads; three payloads' word 4 is no soundbank. Each of the 64 has one soundbank, sounddb and
+    /// wavebank row, all three naming one block, and every one of their wavebanks embeds its waves.
+    #[test]
+    fn sound_effect_names_the_engine_loaded_banks() {
+        let mut vz = GameStack::open(&[vz_wad()]).unwrap();
+        let engine = engine_banks(&mut vz);
+        assert_eq!(engine.len(), 64);
+        let (payloads, groups, keys, words) = sound_effect_payloads(&mut vz);
+        assert_eq!((groups, keys, words), (1080, 2754, 11394));
+        let soundbanks: BTreeSet<u32> = vz.asset_hashes(TYPE_ID_SOUNDBANK).into_iter().collect();
+        let named: BTreeSet<u32> = payloads.iter().map(|p| p[4]).filter(|b| soundbanks.contains(b)).collect();
+        let others: BTreeSet<u32> = payloads.iter().map(|p| p[4]).filter(|b| *b != 0 && !soundbanks.contains(b)).collect();
+        eprintln!("SoundEffect names {} soundbanks; {} other non-zero bank words", named.len(), others.len());
+        // Three payloads carry a bank word no soundbank of vz.wad has: one is the hash of the cue name
+        // `wpn_heavyatmissile_fire` (the AT Missile templates), the other two name nothing known.
+        assert_eq!(others, BTreeSet::from([0x07ED_495F, m2("wpn_heavyatmissile_fire"), 0xF3B8_1041]));
+        assert_eq!(named.len(), 63);
+        assert!(named.is_subset(&engine), "no Lua-loaded bank is named: {:08X?}", named.difference(&engine).collect::<Vec<_>>());
+        assert_eq!(engine.difference(&named).copied().collect::<Vec<_>>(), vec![m2("wpn_grapplegun")]);
+
+        for bank in &engine {
+            let refs: Vec<(u32, u32)> = [TYPE_ID_SOUNDBANK, TYPE_ID_SOUNDDB, TYPE_ID_WAVEBANK]
+                .iter()
+                .map(|t| {
+                    let rows = vz.aset_rows(*bank, *t);
+                    assert_eq!(rows.len(), 1, "0x{bank:08X} type {t}: one row");
+                    (rows[0].0, rows[0].1)
+                })
+                .collect();
+            assert!(refs.windows(2).all(|w| w[0] == w[1]), "0x{bank:08X}: the three rows name one block: {refs:08X?}");
+            let wb = WavebankFile::parse(&table(&mut vz, *bank, TYPE_HASH_WAVEBANK, TYPE_ID_WAVEBANK)).unwrap();
+            assert_eq!((wb.bank_hash, wb.stream_name.as_deref()), (*bank, None), "0x{bank:08X} embeds its waves");
+        }
+    }
+
+    /// ★ Census of the waves the engine-loaded banks' wavebanks give to other banks, over every group
+    /// of every soundbank in `vz.wad`, `shell.wad` and `English.wad`: `veh_largedieselold` and
+    /// `veh_largedieselnew` play waves of `veh_largegasold`'s wavebank, and no other soundbank plays
+    /// a wave of another bank's of the 64. So the retail waves of an engine-loaded bank stay at
+    /// their indices when an override appends its own.
+    #[test]
+    fn no_other_soundbank_plays_an_engine_loaded_banks_waves() {
+        let mut vz = GameStack::open(&[vz_wad()]).unwrap();
+        let engine = engine_banks(&mut vz);
+        let mut foreign: BTreeSet<(u32, u32)> = BTreeSet::new();
+        for stack in [&mut vz, &mut shell_wad(), &mut english_wad()] {
+            for h in stack.asset_hashes(TYPE_ID_SOUNDBANK) {
+                let sb = Soundbank::parse(&table(stack, h, TYPE_HASH_SOUNDBANK, TYPE_ID_SOUNDBANK)).unwrap();
+                for g in &sb.groups {
+                    for w in g.waves() {
+                        if engine.contains(&w.wavebank) && w.wavebank != sb.bank_hash {
+                            foreign.insert((sb.bank_hash, w.wavebank));
+                        }
+                    }
+                }
+            }
+        }
+        eprintln!("groups of other soundbanks playing an engine-loaded bank's waves: {foreign:08X?}");
+        let gas_old = m2("veh_largegasold");
+        assert_eq!(foreign, BTreeSet::from([(m2("veh_largedieselold"), gas_old), (m2("veh_largedieselnew"), gas_old)]));
+    }
+
+    /// The cues `db` routes that `eng` resolves, but `except`.
+    fn resolving_cues(eng: &AudioEngine, db: &SoundDb, except: u32) -> Vec<mercs2_audio::CueEntry> {
+        db.cues.iter().filter(|c| c.guid != except && eng.resolve_cue(c).is_ok()).copied().collect()
+    }
+
+    /// ★ `replace_sound_cue` on `wpn_shotgun`, a bank the engine loads: the overlay carries one block
+    /// under `m2("wpn_shotgun")` with its soundbank, sounddb and wavebank; every retail wave is at its
+    /// own index, the WAV's appended; no loader is linked and no override wavebank ships. An engine
+    /// holding every table of `vz.wad` with the shipped three in place of the game's resolves the
+    /// cue to the WAV and every other cue of the bank as the game's tables do, and M0218 does not
+    /// fire.
+    #[test]
+    fn replace_sound_cue_on_an_engine_loaded_bank_ships_the_retail_named_tables() {
+        let dir = scratch("rsc_wpn_shotgun");
+        let samples: Vec<i16> = (0..1800).map(|i| (i * 13 - 9000) as i16).collect();
+        let cue = "wpn_shotgun_fire";
+        let s = cue_override(&dir, "shotgun-sound", "wpn_shotgun", None, cue, &samples);
+        let mut game = stack_for(&[&s]);
+        assert!(!lint::game_checks(&s.manifest, &mut game).iter().any(|d| d.rule.code == "M0218"));
+        let out = dir.join("_build");
+        let report = build::build(&s, Some(&mut game), None, Some(&out), Some(&corpus()), None).expect("builds");
+        eprintln!("{}", report.log.join("\n"));
+
+        let bank = m2("wpn_shotgun");
+        let retail_sb_body = table(&mut game, bank, TYPE_HASH_SOUNDBANK, TYPE_ID_SOUNDBANK);
+        let retail_db_body = table(&mut game, bank, SOUNDDB_HASH, TYPE_ID_SOUNDDB);
+        let retail_wb_body = table(&mut game, bank, TYPE_HASH_WAVEBANK, TYPE_ID_WAVEBANK);
+        let retail_sb = Soundbank::parse(&retail_sb_body).unwrap();
+        let retail_wb = WavebankFile::parse(&retail_wb_body).unwrap();
+        let cue_index = retail_sb.cues.iter().position(|c| c.guid == m2(cue)).expect("the cue is in wpn_shotgun");
+
+        assert!(!report.placements.iter().any(|p| p.destination == Destination::ShellPatch), "no shell patch");
+        let overlay = report.placements.iter().find(|p| p.destination == Destination::Overlay).expect("an overlay");
+        let ob = blocks_of(&out, overlay);
+        let tables = tables_of(block_at(&ob, bank));
+        let types: Vec<(u32, u32)> = tables.iter().map(|t| (t.0, t.1)).collect();
+        assert_eq!(types, vec![(bank, TYPE_HASH_SOUNDBANK), (bank, SOUNDDB_HASH), (bank, TYPE_HASH_WAVEBANK)]);
+        assert!(!ob.iter().any(|b| b.path_string == format!("blocks\\VZ\\mod_{:08x}.block", m2("qm_shotgun-sound_wpn_shotgun"))));
+        let forked = Soundbank::parse(&tables[0].2).unwrap();
+        assert_only_cue_changed(&retail_sb, &forked, &[cue_index]);
+        assert_eq!(tables[1].2, retail_db_body, "the game's sounddb");
+        let wb = WavebankFile::parse(&tables[2].2).unwrap();
+        assert_eq!(wb.bank_hash, bank);
+        assert_eq!(wb.records.len(), retail_wb.records.len() + 1);
+        assert_eq!(&wb.records[..retail_wb.records.len()], &retail_wb.records[..], "every retail wave at its own index");
+        let log = report.log.join("\n");
+        assert!(!log.contains("linked qm_modloader"), "no loader: {log}");
+
+        // Every table of vz.wad, and the same with wpn_shotgun's three replaced by the shipped ones.
+        let all = audio_tables(&mut GameStack::open(&[vz_wad()]).unwrap());
+        let mut with_override: Vec<(u32, u32, Vec<u8>)> = all.iter().filter(|t| t.0 != bank).cloned().collect();
+        with_override.extend(tables.iter().cloned());
+        let retail = engine_of(&all);
+        let shipped = engine_of(&with_override);
+
+        let entry = *shipped.sounddb.find_cue_by_name(cue).expect("routes");
+        assert_eq!(entry.cue_index as usize, cue_index);
+        let resolved = shipped.resolve_cue(&entry).expect("resolves");
+        let w: Vec<_> = resolved.waves().collect();
+        assert_eq!((w.len(), w[0].wavebank, w[0].index as usize), (1, bank, retail_wb.records.len()));
+        assert_eq!(shipped.clip(bank, w[0].index).unwrap().samples, samples);
+
+        let untouched: Vec<_> = resolving_cues(&retail, &retail.sounddb, m2(cue)).into_iter().filter(|c| c.bank_hash == bank).collect();
+        assert!(!untouched.is_empty(), "wpn_shotgun has another cue that resolves");
+        for c in &untouched {
+            let a = shipped.resolve_cue(c).unwrap_or_else(|e| panic!("cue 0x{:08X}: {e:?}", c.guid));
+            assert_eq!(a, retail.resolve_cue(c).unwrap(), "cue 0x{:08X} resolves as retail", c.guid);
+            for w in a.waves() {
+                assert_eq!(shipped.clip(w.wavebank, w.index).unwrap(), retail.clip(w.wavebank, w.index).unwrap());
+            }
+        }
+    }
+
+    /// ★ Two Shipments overriding different cues of `wpn_smg`, a bank the engine loads: `qm link`
+    /// merges them into one link-owned block at the path the plan promises, with the game's
+    /// sounddb, the retail waves at their own indices and each Shipment's wave after them in load
+    /// order, each cue playing its own; and each Shipment's own build ships its copy at that path.
+    #[test]
+    fn the_link_merges_engine_loaded_bank_overrides_in_load_order() {
+        let root = scratch("rsc_link_wpn_smg");
+        let mut game = GameStack::open(&[vz_wad()]).unwrap();
+        let bank = m2("wpn_smg");
+        let retail_sb = Soundbank::parse(&table(&mut game, bank, TYPE_HASH_SOUNDBANK, TYPE_ID_SOUNDBANK)).unwrap();
+        let retail_db = table(&mut game, bank, SOUNDDB_HASH, TYPE_ID_SOUNDDB);
+        let retail_wb = WavebankFile::parse(&table(&mut game, bank, TYPE_HASH_WAVEBANK, TYPE_ID_WAVEBANK)).unwrap();
+        let (a_cue, b_cue) = ("wpn_smg_reload", "wpn_smg_fire");
+        let index_of = |name: &str| retail_sb.cues.iter().position(|c| c.guid == m2(name)).unwrap_or_else(|| panic!("{name}"));
+
+        let a = cue_override(&root.join("a"), "zz-smg-reload", "wpn_smg", None, a_cue, &[11; 90]);
+        let b = cue_override(&root.join("b"), "aa-smg-fire", "wpn_smg", None, b_cue, &[22; 70]);
+        let path = format!("blocks\\VZ\\mod_{bank:08x}.block");
+        for s in [&a, &b] {
+            let out = root.join(format!("build_{}", s.manifest.shipment.name));
+            let report = build::build(s, Some(&mut game), None, Some(&out), Some(&corpus()), None).expect("builds");
+            let overlay = report.placements.iter().find(|p| p.destination == Destination::Overlay).expect("an overlay");
+            assert!(blocks_of(&out, overlay).iter().any(|b| b.path_string == path), "the Shipment's own copy");
+        }
+        let ids: Vec<String> = vec!["arg:1".into(), "arg:2".into()];
+        let inputs = vec![PlanInput { id: &ids[0], shipment: &a }, PlanInput { id: &ids[1], shipment: &b }];
+        let out = root.join("link");
+        let report = build::link_installed(&inputs, &mut game, &corpus(), &out, None).expect("links");
+        eprintln!("{}", report.log.join("\n"));
+        assert!(report.plan.link_block_paths.contains(&path), "the plan promises the merged bank");
+        assert!(!report.placements.iter().any(|p| p.destination == Destination::ShellPatch));
+        let overlay = report.placements.iter().find(|p| p.destination == Destination::Overlay).expect("link overlay");
+        let tables = tables_of(block_at(&blocks_of(&out, overlay), bank));
+        let types: Vec<(u32, u32)> = tables.iter().map(|t| (t.0, t.1)).collect();
+        assert_eq!(types, vec![(bank, TYPE_HASH_SOUNDBANK), (bank, SOUNDDB_HASH), (bank, TYPE_HASH_WAVEBANK)]);
+        assert_eq!(tables[1].2, retail_db);
+        let merged = Soundbank::parse(&tables[0].2).unwrap();
+        let mut changed = [index_of(a_cue), index_of(b_cue)];
+        changed.sort();
+        assert_only_cue_changed(&retail_sb, &merged, &changed);
+        let wb = WavebankFile::parse(&tables[2].2).unwrap();
+        let n = retail_wb.records.len();
+        assert_eq!(&wb.records[..n], &retail_wb.records[..]);
+        assert_eq!(wb.records.len(), n + 2);
+        let wave_of = |index: usize| {
+            let CueBody::SingleTrack { group_index, .. } = merged.cues[index].body else { panic!("single-track") };
+            let GroupForm::Single { wave, .. } = &merged.groups[group_index as usize].form else { panic!("single-wave") };
+            (wave.wavebank, wave.index as usize)
+        };
+        assert_eq!(wave_of(index_of(a_cue)), (bank, n), "the first Shipment in load order");
+        assert_eq!(wave_of(index_of(b_cue)), (bank, n + 1), "then the second");
+        let mut eng = AudioEngine::default();
+        eng.load_wavebank(&tables[2].2).unwrap();
+        assert_eq!(eng.clip(bank, n as u32).unwrap().samples, vec![11; 90]);
+        assert_eq!(eng.clip(bank, (n + 1) as u32).unwrap().samples, vec![22; 70]);
+    }
+
+    /// ★ `replace_sound_bank` on `wpn_grapplegun`, a bank the engine loads: one block under its retail
+    /// name with the replacement's soundbank and sounddb and the retail wavebank with the
+    /// replacement's waves appended; each declared cue routes to its WAV.
+    #[test]
+    fn replace_sound_bank_on_an_engine_loaded_bank_keeps_the_retail_waves() {
+        let dir = scratch("rsb_wpn_grapplegun");
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        let lines = [("qm_grapple_fire", 700i16), ("qm_grapple_reel", -900)];
+        let mut cues = String::new();
+        for (i, (name, v)) in lines.iter().enumerate() {
+            std::fs::write(dir.join(format!("src/{name}.wav")), pcm16_wav(1, 22050, &[*v; 300])).unwrap();
+            cues.push_str(&sound_cue_yaml(name, &format!("src/{name}.wav"), i as u32, i as u32));
+        }
+        let s = named_shipment(
+            &dir,
+            "grapple-sounds",
+            &format!("  - kind: replace_sound_bank\n    bank: wpn_grapplegun\n    category: ui\n    cues:\n{cues}"),
+        );
+        let mut game = stack_for(&[&s]);
+        assert!(!lint::game_checks(&s.manifest, &mut game).iter().any(|d| d.rule.code == "M0218"));
+        let out = dir.join("_build");
+        let report = build::build(&s, Some(&mut game), None, Some(&out), Some(&corpus()), None).expect("builds");
+        eprintln!("{}", report.log.join("\n"));
+        let bank = m2("wpn_grapplegun");
+        let retail_wb = WavebankFile::parse(&table(&mut game, bank, TYPE_HASH_WAVEBANK, TYPE_ID_WAVEBANK)).unwrap();
+        let overlay = report.placements.iter().find(|p| p.destination == Destination::Overlay).expect("an overlay");
+        let tables = tables_of(block_at(&blocks_of(&out, overlay), bank));
+        let types: Vec<(u32, u32)> = tables.iter().map(|t| (t.0, t.1)).collect();
+        assert_eq!(types, vec![(bank, TYPE_HASH_SOUNDBANK), (bank, SOUNDDB_HASH), (bank, TYPE_HASH_WAVEBANK)]);
+        let wb = WavebankFile::parse(&tables[2].2).unwrap();
+        let n = retail_wb.records.len();
+        assert_eq!(&wb.records[..n], &retail_wb.records[..], "every retail wave at its own index");
+        assert_eq!(wb.records.len(), n + lines.len());
+        assert!(!report.log.join("\n").contains("linked qm_modloader"));
+
+        let mut eng = AudioEngine::default();
+        eng.set_sounddb(SoundDb::parse(&tables[1].2).unwrap());
+        eng.load_soundbank(&tables[0].2).unwrap();
+        eng.load_wavebank(&tables[2].2).unwrap();
+        for (i, (name, v)) in lines.iter().enumerate() {
+            let e = *eng.sounddb.find_cue_by_name(name).expect("routes");
+            let resolved = eng.resolve_cue(&e).expect("resolves");
+            let w = resolved.waves().next().expect("a wave");
+            assert_eq!((w.wavebank, w.index as usize), (bank, n + i));
+            assert_eq!(eng.clip(w.wavebank, w.index).unwrap().samples, vec![*v; 300], "{name}");
+        }
+    }
+
+    /// ★ Census: the front end's PDA cues. `ui_PDA_Accept`, `ui_PDA_Cancel` and `ui_PDA_Scroll` are each
+    /// routed by exactly one of `shell.wad`'s sounddbs, and that bank is `ui_hud`.
+    #[test]
+    fn the_front_end_routes_the_pda_cues_through_ui_hud() {
+        let mut shell = shell_wad();
+        let banks: Vec<(u32, SoundDb)> = shell
+            .asset_hashes(TYPE_ID_SOUNDDB)
+            .into_iter()
+            .map(|h| (h, SoundDb::parse(&table(&mut shell, h, SOUNDDB_HASH, TYPE_ID_SOUNDDB)).unwrap()))
+            .collect();
+        for cue in ["ui_PDA_Accept", "ui_PDA_Cancel", "ui_PDA_Scroll"] {
+            let routes: Vec<u32> = banks.iter().filter(|(_, db)| db.find_cue_by_name(cue).is_some()).map(|(h, _)| *h).collect();
+            eprintln!("{cue}: {:?}", routes.iter().map(|h| format!("0x{h:08X}")).collect::<Vec<_>>());
+            assert_eq!(routes, vec![m2("ui_hud")], "{cue}");
+        }
+    }
+
+    /// ★ `replace_sound_bank` on `vo_mattias` in English: the bank's soundbank and sounddb ship under
+    /// `m2("vo_mattias.english")` in the English patch, its waves in an override wavebank in the overlay,
+    /// and every declared cue routes to its WAV.
+    #[test]
+    fn replace_sound_bank_on_a_voice_over_bank_ships_to_its_language() {
+        let dir = scratch("rsb_vo_mattias");
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        let lines = [("qm_mattias_line_a", 500i16), ("qm_mattias_line_b", -700)];
+        let mut cues = String::new();
+        for (i, (name, v)) in lines.iter().enumerate() {
+            std::fs::write(dir.join(format!("src/{name}.wav")), pcm16_wav(1, 22050, &[*v; 400])).unwrap();
+            cues.push_str(&sound_cue_yaml(name, &format!("src/{name}.wav"), i as u32, i as u32));
+        }
+        let s = named_shipment(
+            &dir,
+            "mattias-lines",
+            &format!("  - kind: replace_sound_bank\n    bank: vo_mattias\n    language: english\n    category: vo\n    cues:\n{cues}"),
+        );
+        let mut game = stack_for(&[&s]);
+        let out = dir.join("_build");
+        let report = build::build(&s, Some(&mut game), None, Some(&out), Some(&corpus()), None).expect("builds");
+        eprintln!("{}", report.log.join("\n"));
+
+        let entry = m2("vo_mattias.english");
+        assert!(game.has_asset(entry, TYPE_ID_SOUNDBANK), "English.wad carries vo_mattias.english");
+        let english = report
+            .placements
+            .iter()
+            .find(|p| matches!(&p.destination, Destination::LanguagePatch { language, .. } if language == "english"))
+            .expect("an English patch");
+        assert!(!report.placements.iter().any(|p| p.destination == Destination::ShellPatch));
+        let tables = tables_of(block_at(&blocks_of(&out, english), entry));
+        let types: Vec<(u32, u32)> = tables.iter().map(|t| (t.0, t.1)).collect();
+        assert_eq!(types, vec![(entry, TYPE_HASH_SOUNDBANK), (entry, SOUNDDB_HASH)]);
+        let sb = Soundbank::parse(&tables[0].2).unwrap();
+        assert_eq!(sb.bank_hash, m2("vo_mattias"), "the tables carry the bank hash, not the entry's");
+
+        let wavebank = m2("qm_mattias-lines_vo_mattias.english");
+        let overlay = report.placements.iter().find(|p| p.destination == Destination::Overlay).expect("an overlay");
+        let wb = &tables_of(block_at(&blocks_of(&out, overlay), wavebank))[0].2;
+        let mut eng = AudioEngine::default();
+        eng.set_sounddb(SoundDb::parse(&tables[1].2).unwrap());
+        eng.load_soundbank(&tables[0].2).unwrap();
+        eng.load_wavebank(wb).unwrap();
+        for (name, v) in lines {
+            let e = *eng.sounddb.find_cue_by_name(name).expect("routes");
+            let r = eng.resolve_cue(&e).expect("resolves");
+            let w = r.waves().next().expect("a wave");
+            assert_eq!(w.wavebank, wavebank);
+            assert_eq!(eng.clip(w.wavebank, w.index).unwrap().samples, vec![v; 400], "{name}");
+        }
+    }
+
+    /// A cue name of `vo_mattias` in English, taken from the captioned inventory's contexts: the first
+    /// one whose hash is a cue of the bank.
+    fn a_mattias_cue(sb: &Soundbank) -> String {
+        let manifest = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../workshop_data/audio_manifest.json");
+        let doc: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&manifest).unwrap_or_else(|e| panic!("{}: {e}", manifest.display())))
+                .expect("the inventory parses");
+        let guids: std::collections::BTreeSet<u32> = sb.cues.iter().map(|c| c.guid).collect();
+        doc["entries"]
+            .as_array()
+            .expect("entries")
+            .iter()
+            .filter(|e| e["bank"] == "vo_mattias")
+            .filter_map(|e| e["context"].as_str())
+            .find(|c| !c.is_empty() && guids.contains(&m2(c)))
+            .unwrap_or_else(|| panic!("no vo_mattias context in {} names a cue of the bank", manifest.display()))
+            .to_string()
+    }
+
+    /// ★ `replace_sound_cue` on `vo_mattias` in English: the forked soundbank ships in the English patch
+    /// and only the named cue changes.
+    #[test]
+    fn replace_sound_cue_on_a_voice_over_bank() {
+        let entry = m2("vo_mattias.english");
+        let probe = named_shipment(
+            &scratch("rsc_vo_probe"),
+            "probe",
+            "  - kind: replace_sound_cue\n    bank: vo_mattias\n    language: english\n    category: vo\n    cue:\n      name: x\n      wave: src/x.wav\n      group_gain_db: 0\n      cue_gain_db: 0\n      pitch_semitones: 0\n      positional: false\n      min_distance: 1\n      max_distance: 2\n      distance_exponent: 1\n      doppler_scale: 1\n      start_limit: 0\n      sound_id: 0\n      priority: 1\n      group_20: 1\n      cue_16: 0\n      clip_hash: 0\n",
+        );
+        let mut game = stack_for(&[&probe]);
+        let retail = Soundbank::parse(&table(&mut game, entry, TYPE_HASH_SOUNDBANK, TYPE_ID_SOUNDBANK)).unwrap();
+        let cue = a_mattias_cue(&retail);
+        let cue_index = retail.cues.iter().position(|c| c.guid == m2(&cue)).unwrap();
+
+        let dir = scratch("rsc_vo");
+        let s = cue_override(&dir, "mattias-cue", "vo_mattias", Some("english"), &cue, &[3; 800]);
+        let out = dir.join("_build");
+        let report = build::build(&s, Some(&mut game), None, Some(&out), Some(&corpus()), None).expect("builds");
+        let english = report
+            .placements
+            .iter()
+            .find(|p| matches!(&p.destination, Destination::LanguagePatch { language, .. } if language == "english"))
+            .expect("an English patch");
+        let tables = tables_of(block_at(&blocks_of(&out, english), entry));
+        assert_eq!(tables.len(), 1, "the soundbank alone");
+        let forked = Soundbank::parse(&tables[0].2).unwrap();
+        assert_only_cue_changed(&retail, &forked, &[cue_index]);
+        let CueBody::SingleTrack { soundbank, group_index, .. } = forked.cues[cue_index].body else {
+            panic!("the rewritten cue is single-track")
+        };
+        assert_eq!((soundbank, group_index as usize), (m2("vo_mattias"), retail.groups.len()));
+        let GroupForm::Single { wave, .. } = &forked.groups[group_index as usize].form else { panic!("single-wave") };
+        assert_eq!(wave.wavebank, m2("qm_mattias-cue_vo_mattias.english"));
+    }
+
+    /// ★ Two Shipments overriding different cues of one bank: `qm link` merges both into one soundbank
+    /// per carrier at the path the plan promises, each cue playing its own Shipment's wavebank; and the
+    /// same cue in both is a conflict the plan refuses.
+    #[test]
+    fn the_link_merges_cue_overrides_of_one_bank() {
+        let root = scratch("rsc_link");
+        let mut game = GameStack::open(&[vz_wad()]).unwrap();
+        let retail = Soundbank::parse(&table(&mut game, m2("ui_hud"), TYPE_HASH_SOUNDBANK, TYPE_ID_SOUNDBANK)).unwrap();
+        let a_cue = "ui_PDA_Open_01_st";
+        let a_index = retail.cues.iter().position(|c| c.guid == m2(a_cue)).unwrap();
+        // A second cue of ui_hud, by a name retail Lua cues (`Sound.CueSound("ui_PDA_Close_01_st")`).
+        let names = ["ui_PDA_Close_01_st", "ui_PDA_Accept", "ui_PDA_Cancel", "ui_PDA_Scroll"];
+        let b_cue = names
+            .iter()
+            .find(|n| retail.cues.iter().any(|c| c.guid == m2(n)))
+            .unwrap_or_else(|| panic!("none of {names:?} is a cue of ui_hud"));
+        let b_index = retail.cues.iter().position(|c| c.guid == m2(b_cue)).unwrap();
+
+        let a = cue_override(&root.join("a"), "pda-open", "ui_hud", None, a_cue, &[1; 100]);
+        let b = cue_override(&root.join("b"), "pda-other", "ui_hud", None, b_cue, &[2; 100]);
+        let ids: Vec<String> = vec!["arg:1".into(), "arg:2".into()];
+        let inputs = vec![PlanInput { id: &ids[0], shipment: &a }, PlanInput { id: &ids[1], shipment: &b }];
+        let out = root.join("link");
+        let report = build::link_installed(&inputs, &mut game, &corpus(), &out, None).expect("links");
+        eprintln!("{}", report.log.join("\n"));
+        let path = format!("blocks\\VZ\\mod_{:08x}.block", m2("ui_hud"));
+        assert!(report.plan.link_block_paths.contains(&path), "the plan promises the merged bank");
+        let overlay = report.placements.iter().find(|p| p.destination == Destination::Overlay).expect("link overlay");
+        let shell_patch = report.placements.iter().find(|p| p.destination == Destination::ShellPatch).expect("and its shell patch");
+        // The link's shell patch: the merged bank and the front end's scripts block, whose loader loads
+        // both Shipments' wavebanks in load order; stamped with shell.wad's CSUM row.
+        let shell_blocks = blocks_of(&out, shell_patch);
+        block_at(&shell_blocks, m2("ui_hud"));
+        let loader = chunk(&shell_scripts(&shell_blocks), "qm_shell_modloader");
+        let at = |needle: &str| loader.windows(needle.len()).position(|w| w == needle.as_bytes()).unwrap_or_else(|| panic!("{needle}"));
+        assert!(at("qm_pda-open_ui_hud") < at("qm_pda-other_ui_hud"), "load order");
+        assert!(report.plan.link_block_paths.contains(&mercs2_quartermaster::link::SHELL_SCRIPT_BLOCKS[0].1.to_string()));
+        let shell_path = mercs2_quartermaster::sound::sibling_wad(&vz_wad(), "shell.wad").unwrap();
+        assert_eq!(
+            mercs2_formats::donor::base_csum(out.join(&shell_patch.name)).unwrap(),
+            mercs2_formats::donor::base_csum(&shell_path).unwrap()
+        );
+        let merged = Soundbank::parse(&tables_of(block_at(&blocks_of(&out, overlay), m2("ui_hud")))[0].2).unwrap();
+        let mut changed = [a_index, b_index];
+        changed.sort();
+        assert_only_cue_changed(&retail, &merged, &changed);
+        for (index, shipment) in [(a_index, "pda-open"), (b_index, "pda-other")] {
+            let CueBody::SingleTrack { group_index, .. } = merged.cues[index].body else { panic!("single-track") };
+            let GroupForm::Single { wave, .. } = &merged.groups[group_index as usize].form else { panic!("single-wave") };
+            assert_eq!(wave.wavebank, m2(&format!("qm_{shipment}_ui_hud")));
+        }
+
+        let c = cue_override(&root.join("c"), "pda-open-too", "ui_hud", None, a_cue, &[3; 100]);
+        let inputs = vec![PlanInput { id: &ids[0], shipment: &a }, PlanInput { id: &ids[1], shipment: &c }];
+        match build::link_installed(&inputs, &mut game, &corpus(), &root.join("conflict"), None) {
+            Err(build::BuildError::Plan(plan)) => assert!(!plan.ok),
+            other => panic!("one cue replaced twice must refuse the link, got {other:?}"),
+        }
+    }
+
+    /// M0218 and M0220 against the game: an override of a bank or a cue the game does not have, and an
+    /// added cue named like one it has — and none of them for real targets and a new name.
+    #[test]
+    fn sound_game_checks_fire_on_missing_targets_and_shadowed_names() {
+        let root = scratch("sound_game_checks");
+        let good = cue_override(&root.join("good"), "good", "ui_hud", None, "ui_PDA_Open_01_st", &[1; 10]);
+        let no_cue = cue_override(&root.join("nocue"), "nocue", "ui_hud", None, "qm_not_a_cue_of_ui_hud", &[1; 10]);
+        let no_bank = cue_override(&root.join("nobank"), "nobank", "qm_not_a_bank", None, "ui_PDA_Open_01_st", &[1; 10]);
+        let mut game = GameStack::open(&[vz_wad()]).unwrap();
+        let codes = |s: &LoadedShipment, game: &mut GameStack| -> Vec<&'static str> {
+            lint::game_checks(&s.manifest, game).iter().map(|d| d.rule.code).collect()
+        };
+        assert!(!codes(&good, &mut game).contains(&"M0218"));
+        assert!(codes(&no_cue, &mut game).contains(&"M0218"));
+        assert!(codes(&no_bank, &mut game).contains(&"M0218"));
+
+        let dir = root.join("add");
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::write(dir.join("src/a.wav"), pcm16_wav(1, 22050, &[1; 10])).unwrap();
+        // A voice-over cue of English.wad, which the vz.wad-only stack does not hold.
+        let english = mercs2_quartermaster::sound::sibling_wad(&vz_wad(), "english.wad").unwrap();
+        let mut english = GameStack::open(&[english]).unwrap();
+        let mattias = Soundbank::parse(&table(&mut english, m2("vo_mattias.english"), TYPE_HASH_SOUNDBANK, TYPE_ID_SOUNDBANK)).unwrap();
+        let vo_cue = a_mattias_cue(&mattias);
+        for (cue, fires) in [("ui_PDA_Open_01_st", true), (vo_cue.as_str(), true), ("qm_brand_new_cue", false)] {
+            let s = named_shipment(
+                &dir,
+                "adder",
+                &format!(
+                    "  - kind: add_sound\n    bank: qm_adder_bank\n    category: ui\n    load_in: [gameplay]\n    cues:\n{}",
+                    sound_cue_yaml(cue, "src/a.wav", 0, 0)
+                ),
+            );
+            assert_eq!(codes(&s, &mut game).contains(&"M0220"), fires, "{cue}");
+        }
+    }
+
+    /// ★ `add_language`: `data/<name>.wad` carries the string table, the fonts forked with their atlas
+    /// repointed, the atlases, and English's voice-over tables re-keyed to `<bank>.<name>` (streamed
+    /// and embedded wavebanks both); nothing ships in an overlay; and the record copies the
+    /// English voice stream with the digest of the file read.
+    #[test]
+    fn add_language_ships_strings_fonts_and_voice_over_tables() {
+        let dir = scratch("add_language");
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        let s = named_shipment(
+            &dir,
+            "polski",
+            "  - kind: add_language\n    name: polski\n    display: Polski\n    strings: src/strings.txt\n",
+        );
+        let mut game = stack_for(&[&s]);
+        // A key the english table has, written as its hash.
+        let english = game
+            .container_for_asset(m2("english"), mercs2_formats::types::TYPE_HASH_STRINGDB, mercs2_formats::types::TYPE_ID_STRINGDB)
+            .expect("the english string table");
+        let key = super::string_entries(&english)[0].0;
+        std::fs::write(dir.join("src/strings.txt"), format!("0x{key:08X} = Anuluj\n")).unwrap();
+        let out = dir.join("_build");
+        let report = build::build(&s, Some(&mut game), None, Some(&out), None, None).expect("builds");
+        eprintln!("{}", report.log.join("\n"));
+        assert!(report.wad.is_none(), "nothing ships in an overlay");
+
+        let data = report
+            .placements
+            .iter()
+            .find(|p| matches!(&p.destination, Destination::DataWad { relative, display } if relative == "data/polski.wad" && display == "Polski"))
+            .expect("the language WAD");
+        let blocks = blocks_of(&out, data);
+        let main = blocks.iter().find(|b| b.path_string == "blocks\\polski\\polski.block").expect("the main block");
+        let main_entries = entries_of(main);
+        let names: Vec<u32> = main_entries.iter().map(|t| t.0).collect();
+        assert_eq!(
+            names,
+            vec![m2("polski"), m2("polski_18"), m2("polski_18_main"), m2("polski_20"), m2("polski_20_main")]
+        );
+        let dec = mercs2_formats::sges::decompress_sges(&main.compressed_data).unwrap();
+        let (parsed, _) = walk_decompressed_block(&dec, "main");
+        for (font, old_atlas, new_atlas) in
+            [(1usize, "english_18_main", "polski_18_main"), (3, "english_20_main", "polski_20_main")]
+        {
+            let tree = mercs2_formats::ucfx::parse_ucfx_tree(&parsed.containers[font]).unwrap();
+            let mtrl = tree.iter().find(|n| &n.tag == b"MTRL").and_then(|n| n.body.clone()).expect("MTRL");
+            let has = |h: u32| mtrl.windows(4).any(|w| w == h.to_le_bytes());
+            assert!(has(m2(new_atlas)) && !has(m2(old_atlas)), "font {font} names {new_atlas}");
+        }
+
+        let vo: Vec<(u32, u32)> = blocks
+            .iter()
+            .filter(|b| b.path_string.starts_with("blocks\\polski\\vo_"))
+            .flat_map(|b| entries_of(b).into_iter().map(|t| (t.0, t.1)))
+            .collect();
+        let ext = |bank: &str| mercs2_formats::hash::pandemic_hash_m2_extend(m2(bank), ".polski");
+        assert!(vo.contains(&(ext("vo_mattias"), TYPE_HASH_SOUNDBANK)), "vo_mattias.polski soundbank");
+        assert!(vo.contains(&(ext("vo_mattias"), SOUNDDB_HASH)), "vo_mattias.polski sounddb");
+        assert!(vo.contains(&(ext("vo_stream"), TYPE_HASH_WAVEBANK)), "the streamed vo_stream.polski wavebank");
+        assert!(vo.contains(&(ext("vo_solanoahj"), TYPE_HASH_WAVEBANK)), "the embedded vo_solanoahj.polski wavebank");
+        assert_eq!(ext("vo_stream"), m2("vo_stream.polski"));
+
+        let copy = report
+            .placements
+            .iter()
+            .find(|p| matches!(&p.destination, Destination::StreamCopy { .. }))
+            .expect("the voice stream copy");
+        assert_eq!(
+            copy.destination,
+            Destination::StreamCopy {
+                from: "data/Audios/vo_stream.english.pws".into(),
+                to: "data/Audios/vo_stream.polski.pws".into()
+            }
+        );
+        let source = vz_wad().parent().unwrap().join("Audios/vo_stream.english.pws");
+        assert_eq!(copy.bytes as u64, std::fs::metadata(&source).unwrap().len());
+        let record: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(out.join("placement.json")).unwrap()).unwrap();
+        assert!(record["placements"].as_array().unwrap().iter().any(|p| p["destination"]["kind"] == "stream_copy"));
+    }
+
+    /// The wavebanks of `English.wad` that carry their waves' audio in the table, by bank name: every
+    /// wavebank `English.wad` registers but the streamed `vo_stream`.
+    const EMBEDDED_VO_WAVEBANKS: [&str; 42] = [
+        "vo_allCon001",
+        "vo_allCon002",
+        "vo_allCon004",
+        "vo_chinCon001",
+        "vo_chinCon002",
+        "vo_chinCon004",
+        "vo_gurCon001",
+        "vo_gurCon002",
+        "vo_helirec001",
+        "vo_jetRec001",
+        "vo_job_all_Conrad",
+        "vo_job_all_gonzalez",
+        "vo_job_all_Lo",
+        "vo_job_all_Nicholas",
+        "vo_job_all_Patterson",
+        "vo_job_chin_Chan",
+        "vo_job_chin_Chu",
+        "vo_job_chin_Lee",
+        "vo_job_chin_Sun",
+        "vo_job_chin_wu",
+        "vo_job_gur_Diaz",
+        "vo_job_gur_Huang",
+        "vo_job_gur_rojas",
+        "vo_job_gur_Vargas",
+        "vo_job_gur_Vega",
+        "vo_job_heros",
+        "vo_job_pir_boyakasha",
+        "vo_job_pir_Devilbwoy",
+        "vo_job_pir_Jane",
+        "vo_job_pir_Stoosh",
+        "vo_job_pmc",
+        "vo_job_up_Kresge",
+        "vo_job_up_Marlowe",
+        "vo_job_up_McKinney",
+        "vo_job_up_Wahlquist",
+        "vo_mechRec001",
+        "vo_oilCon001",
+        "vo_oilCon002",
+        "vo_oilCon021",
+        "vo_pmcCon002",
+        "vo_pmcCon003",
+        "vo_solanoahj",
+    ];
+
+    /// `English.wad`, beside the configured `vz.wad`, opened on its own.
+    fn english_wad() -> GameStack {
+        let path = mercs2_quartermaster::sound::sibling_wad(&vz_wad(), "english.wad").unwrap_or_else(|e| panic!("{e}"));
+        GameStack::open(std::slice::from_ref(&path)).unwrap_or_else(|e| panic!("could not open {}: {e}", path.display()))
+    }
+
+    /// Every table of `wad` of the three audio types, as `(entry hash, type hash, data body)`.
+    fn audio_tables(wad: &mut GameStack) -> Vec<(u32, u32, Vec<u8>)> {
+        let mut out = Vec::new();
+        for (type_id, type_hash) in
+            [(TYPE_ID_SOUNDBANK, TYPE_HASH_SOUNDBANK), (TYPE_ID_SOUNDDB, SOUNDDB_HASH), (TYPE_ID_WAVEBANK, TYPE_HASH_WAVEBANK)]
+        {
+            for h in wad.asset_hashes(type_id) {
+                out.push((h, type_hash, table(wad, h, type_hash, type_id)));
+            }
+        }
+        out
+    }
+
+    /// The bank hash of every embedded wavebank among `tables`.
+    fn embedded_wavebanks(tables: &[(u32, u32, Vec<u8>)]) -> BTreeSet<u32> {
+        tables
+            .iter()
+            .filter(|t| t.1 == TYPE_HASH_WAVEBANK)
+            .map(|t| WavebankFile::parse(&t.2).unwrap_or_else(|e| panic!("wavebank 0x{:08X}: {e}", t.0)))
+            .filter(|w| w.stream_name.is_none())
+            .map(|w| w.bank_hash)
+            .collect()
+    }
+
+    /// An engine holding every soundbank and wavebank of `tables`, routing every cue their sounddbs
+    /// route.
+    fn engine_of(tables: &[(u32, u32, Vec<u8>)]) -> AudioEngine {
+        let mut eng = AudioEngine::default();
+        let mut catalog = SoundDb::default();
+        for (entry, type_hash, body) in tables {
+            match *type_hash {
+                TYPE_HASH_SOUNDBANK => {
+                    eng.load_soundbank(body).unwrap_or_else(|e| panic!("soundbank 0x{entry:08X}: {e:?}"));
+                }
+                TYPE_HASH_WAVEBANK => {
+                    eng.load_wavebank(body).unwrap_or_else(|e| panic!("wavebank 0x{entry:08X}: {e:?}"));
+                }
+                SOUNDDB_HASH => catalog.merge(&SoundDb::parse(body).unwrap_or_else(|e| panic!("sounddb 0x{entry:08X}: {e:?}"))),
+                other => panic!("0x{entry:08X} has type 0x{other:08X}, which is no audio table"),
+            }
+        }
+        eng.set_sounddb(catalog);
+        eng
+    }
+
+    /// Every wavebank a cue can reach, read from the soundbanks: the group of a single-track cue, the
+    /// group of every entry of every sound of every track of a multi-track cue.
+    fn reached_wavebanks(banks: &BTreeMap<u32, Soundbank>, cue: &mercs2_audio::CueEntry) -> BTreeSet<u32> {
+        let group = |soundbank: u32, index: u16| {
+            let sb = banks.get(&soundbank).unwrap_or_else(|| panic!("cue 0x{:08X} names soundbank 0x{soundbank:08X}", cue.guid));
+            sb.groups[index as usize].waves().iter().map(|w| w.wavebank).collect::<Vec<_>>()
+        };
+        let sb = &banks[&cue.bank_hash];
+        match &sb.cues[cue.cue_index as usize].body {
+            CueBody::SingleTrack { soundbank, group_index, .. } => group(*soundbank, *group_index).into_iter().collect(),
+            CueBody::MultiTrack(m) => m
+                .tracks
+                .iter()
+                .flat_map(|t| t.sounds.iter().flat_map(|s| s.entries.iter()))
+                .flat_map(|e| group(e.soundbank, e.group_index))
+                .collect(),
+        }
+    }
+
+    /// Start `guid` with the engine's picks at `seed`, run it two seconds in 1/60 s frames, and return
+    /// every sample it mixed.
+    fn render_cue(eng: &mut AudioEngine, guid: u32, seed: u32) -> Vec<i16> {
+        eng.stop_and_flush_all_sounds();
+        eng.set_rng_seed(seed);
+        eng.cue_sound(guid, None).unwrap_or_else(|e| panic!("cue 0x{guid:08X} refused at start: {e:?}"));
+        let mut out = Vec::new();
+        for _ in 0..120 {
+            eng.tick(1.0 / 60.0);
+            out.extend(eng.render(735));
+        }
+        eng.stop_and_flush_all_sounds();
+        out
+    }
+
+    /// ★ Census of `English.wad`'s wavebanks: one streams, `vo_stream`, whose waves play from
+    /// `vo_stream.pws`; the 42 [`EMBEDDED_VO_WAVEBANKS`] carry 1,498 waves' audio in their tables.
+    /// Each is registered as `<bank>.english`. The 26 waves of `vo_job_all_gonzalez` are all-zero
+    /// samples; every other embedded wave carries a non-zero byte.
+    #[test]
+    fn english_wad_embedded_voice_over_wavebank_census() {
+        let mut english = english_wad();
+        let (mut streamed, mut embedded, mut waves) = (Vec::new(), BTreeSet::new(), 0usize);
+        let mut silent: BTreeMap<u32, (usize, usize)> = BTreeMap::new();
+        for entry in english.asset_hashes(TYPE_ID_WAVEBANK) {
+            let body = table(&mut english, entry, TYPE_HASH_WAVEBANK, TYPE_ID_WAVEBANK);
+            let file = WavebankFile::parse(&body).unwrap_or_else(|e| panic!("wavebank 0x{entry:08X}: {e}"));
+            assert_eq!(entry, pandemic_hash_m2_extend(file.bank_hash, ".english"), "0x{entry:08X} is <bank>.english");
+            match file.stream_name {
+                Some(stream) => streamed.push((file.bank_hash, stream)),
+                None => {
+                    assert!(file.records.iter().all(|r| matches!(r.data, WaveData::Embedded(_))), "0x{entry:08X}: every wave is in the table");
+                    waves += file.records.len();
+                    embedded.insert(file.bank_hash);
+                    let zero = file
+                        .records
+                        .iter()
+                        .filter(|r| matches!(&r.data, WaveData::Embedded(b) if b.iter().all(|&x| x == 0)))
+                        .count();
+                    if zero > 0 {
+                        silent.insert(file.bank_hash, (zero, file.records.len()));
+                    }
+                }
+            }
+        }
+        assert_eq!(streamed, vec![(m2("vo_stream"), "vo_stream.pws".to_string())]);
+        let named: BTreeSet<u32> = EMBEDDED_VO_WAVEBANKS.iter().map(|n| m2(n)).collect();
+        assert_eq!(named.len(), EMBEDDED_VO_WAVEBANKS.len(), "the names hash apart");
+        assert_eq!(embedded, named);
+        assert_eq!(waves, 1498);
+        assert_eq!(silent, BTreeMap::from([(m2("vo_job_all_gonzalez"), (26, 26))]), "the waves whose samples are all zero");
+    }
+
+    /// ★ `add_language` ships every audio table of `English.wad` under `<bank>.<name>`, byte for byte,
+    /// the 42 embedded voice-over wavebanks among them; and each of the 1,492 English cues that reach
+    /// an embedded wave plays under the new language's tables: it resolves to the same waves with
+    /// English's decoded samples, and rendered through the engine it mixes the same PCM as under
+    /// English's tables, audible for every cue but the 26 of `vo_job_all_gonzalez`, whose waves are
+    /// all-zero samples.
+    #[test]
+    fn add_language_embedded_voice_over_cues_play_under_the_new_language() {
+        let dir = scratch("add_language_embedded");
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        let s = named_shipment(
+            &dir,
+            "polski",
+            "  - kind: add_language\n    name: polski\n    display: Polski\n    strings: src/strings.txt\n",
+        );
+        let mut game = stack_for(&[&s]);
+        let english_strings = game
+            .container_for_asset(m2("english"), mercs2_formats::types::TYPE_HASH_STRINGDB, mercs2_formats::types::TYPE_ID_STRINGDB)
+            .expect("the english string table");
+        let key = super::string_entries(&english_strings)[0].0;
+        std::fs::write(dir.join("src/strings.txt"), format!("0x{key:08X} = Anuluj\n")).unwrap();
+        let out = dir.join("_build");
+        let report = build::build(&s, Some(&mut game), None, Some(&out), None, None).expect("builds");
+        let data = report
+            .placements
+            .iter()
+            .find(|p| matches!(&p.destination, Destination::DataWad { relative, .. } if relative == "data/polski.wad"))
+            .expect("the language WAD");
+        let polski: Vec<(u32, u32, Vec<u8>)> = blocks_of(&out, data)
+            .iter()
+            .filter(|b| b.path_string.starts_with("blocks\\polski\\vo_"))
+            .flat_map(tables_of)
+            .collect();
+
+        let english = audio_tables(&mut english_wad());
+        let embedded = embedded_wavebanks(&english);
+        assert_eq!(embedded.len(), EMBEDDED_VO_WAVEBANKS.len());
+        assert_eq!(embedded_wavebanks(&polski), embedded, "the new language carries every embedded wavebank");
+        for (entry, type_hash, body) in &english {
+            let bank = u32::from_le_bytes(body[4..8].try_into().unwrap());
+            let rekeyed = pandemic_hash_m2_extend(bank, ".polski");
+            let shipped: Vec<&Vec<u8>> = polski.iter().filter(|t| (t.0, t.1) == (rekeyed, *type_hash)).map(|t| &t.2).collect();
+            assert_eq!(shipped, vec![body], "English 0x{entry:08X} ships once, unchanged, as 0x{rekeyed:08X}");
+        }
+
+        let soundbanks = |tables: &[(u32, u32, Vec<u8>)]| -> BTreeMap<u32, Soundbank> {
+            tables
+                .iter()
+                .filter(|t| t.1 == TYPE_HASH_SOUNDBANK)
+                .map(|t| Soundbank::parse(&t.2).unwrap_or_else(|e| panic!("soundbank 0x{:08X}: {e:?}", t.0)))
+                .map(|sb| (sb.bank_hash, sb))
+                .collect()
+        };
+        let english_banks = soundbanks(&english);
+        let mut english_eng = engine_of(&english);
+        let mut polski_eng = engine_of(&polski);
+        let cues: Vec<mercs2_audio::CueEntry> = english
+            .iter()
+            .filter(|t| t.1 == SOUNDDB_HASH)
+            .flat_map(|t| SoundDb::parse(&t.2).unwrap().cues)
+            .filter(|c| !reached_wavebanks(&english_banks, c).is_disjoint(&embedded))
+            .collect();
+        assert_eq!(cues.len(), 1492, "the English cues that reach an embedded wavebank");
+
+        let mut silent = Vec::new();
+        for (i, cue) in cues.iter().enumerate() {
+            let routed = *polski_eng.sounddb.find_cue(cue.guid).unwrap_or_else(|| panic!("cue 0x{:08X} is routed", cue.guid));
+            assert_eq!(routed, *cue);
+            let resolved = polski_eng.resolve_cue(cue).unwrap_or_else(|e| panic!("cue 0x{:08X} resolves: {e:?}", cue.guid));
+            assert_eq!(resolved, english_eng.resolve_cue(cue).unwrap(), "cue 0x{:08X} resolves as in English", cue.guid);
+            for w in resolved.waves() {
+                let clip = polski_eng.clip(w.wavebank, w.index).unwrap();
+                assert!(!clip.samples.is_empty(), "cue 0x{:08X} wave 0x{:08X}/{} carries samples", cue.guid, w.wavebank, w.index);
+                assert_eq!(clip, english_eng.clip(w.wavebank, w.index).unwrap(), "cue 0x{:08X}", cue.guid);
+            }
+            let seed = 0x5EED_0000 + i as u32;
+            let played = render_cue(&mut polski_eng, cue.guid, seed);
+            let audible = resolved.waves().any(|w| polski_eng.clip(w.wavebank, w.index).unwrap().samples.iter().any(|&v| v != 0));
+            if !audible {
+                silent.push(cue.guid);
+            }
+            assert_eq!(played.iter().any(|&v| v != 0), audible, "cue 0x{:08X} mixes audible samples exactly when its waves carry them", cue.guid);
+            assert_eq!(played, render_cue(&mut english_eng, cue.guid, seed), "cue 0x{:08X} mixes as in English", cue.guid);
+        }
+        assert_eq!(silent.len(), 26, "the cues of vo_job_all_gonzalez, whose waves are all-zero samples");
+        assert!(silent.iter().all(|g| cues.iter().any(|c| c.guid == *g && c.bank_hash == m2("vo_job_all_gonzalez"))));
+    }
+
+    /// M0219: a base language with no fonts to fork (only English ships them), and none for English.
+    #[test]
+    fn m0219_fires_for_a_base_without_fonts() {
+        let dir = scratch("m0219");
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::write(dir.join("src/strings.txt"), "0x00000001 = x\n").unwrap();
+        for (base, fires) in [("english", false), ("french", true)] {
+            let s = named_shipment(
+                &dir,
+                "lang",
+                &format!("  - kind: add_language\n    name: qmlang\n    display: Q\n    strings: src/strings.txt\n    base: {base}\n"),
+            );
+            let mut game = stack_for(&[&s]);
+            let codes: Vec<&str> = lint::game_checks(&s.manifest, &mut game).iter().map(|d| d.rule.code).collect();
+            assert_eq!(codes.contains(&"M0219"), fires, "{base}: {codes:?}");
+        }
+    }
+}

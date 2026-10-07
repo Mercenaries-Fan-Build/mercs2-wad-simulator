@@ -768,8 +768,9 @@ pub struct TileProbe {
 /// for every decoded tile, parse its `MTRL` chunk (reusing the verified
 /// [`crate::texture::parse_mtrl`]) and characterise the `@12` per-vertex f16
 /// scalar. Produces the numbers the shader stages are gated on — it does NOT
-/// build a mesh and applies no coordinate transforms.
-pub fn probe_terrain(low_res_block: &[u8]) -> Vec<TileProbe> {
+/// build a mesh and applies no coordinate transforms. A tile whose `MTRL` does not parse is an
+/// error.
+pub fn probe_terrain(low_res_block: &[u8]) -> Result<Vec<TileProbe>, crate::texture::MtrlError> {
     let containers = iter_ucfx_containers(low_res_block);
     let mut out = Vec::new();
     for c in &containers {
@@ -781,10 +782,13 @@ pub fn probe_terrain(low_res_block: &[u8]) -> Vec<TileProbe> {
         };
         // MTRL: reuse the verified packed-record parser on this container's slice
         // (offsets in parse_mtrl are resolved relative to the UCFX magic).
-        let materials: Vec<u32> = crate::texture::parse_mtrl(&low_res_block[c.ucfx_off..])
-            .into_iter()
-            .flat_map(|m| m.textures)
-            .collect();
+        let materials: Vec<u32> = crate::texture::parse_mtrl(
+            &low_res_block[c.ucfx_off..],
+            crate::texture::MtrlSource::LowResTerrain,
+        )?
+        .into_iter()
+        .flat_map(|m| m.textures)
+        .collect();
 
         // Walk the vertex buffer to characterise the @12 scalar + the two 1.0 lanes.
         let vb_abs = c.data_base + sub.vb_off;
@@ -849,7 +853,7 @@ pub fn probe_terrain(low_res_block: &[u8]) -> Vec<TileProbe> {
             unit_normal_verts: unit_normal,
         });
     }
-    out
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -1145,10 +1149,14 @@ pub fn merge_tiles(block: &[u8]) -> Result<MergedTerrain, String> {
             };
             // MTRL is resolved relative to the UCFX magic (parse_mtrl uses UcfxView),
             // so pass this container's slice — matches probe_terrain.
-            let materials: Vec<u32> = crate::texture::parse_mtrl(&block[c.ucfx_off..])
-                .into_iter()
-                .flat_map(|m| m.textures)
-                .collect();
+            let materials: Vec<u32> = crate::texture::parse_mtrl(
+                &block[c.ucfx_off..],
+                crate::texture::MtrlSource::LowResTerrain,
+            )
+            .map_err(|e| format!("tile container at {:#x}: {e}", c.ucfx_off))?
+            .into_iter()
+            .flat_map(|m| m.textures)
+            .collect();
             let (mut lo, mut hi) = (f32::INFINITY, f32::NEG_INFINITY);
             for p in &positions {
                 if p[1] < lo {

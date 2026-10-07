@@ -1,7 +1,7 @@
 //! Retail proof of the three bank codecs, against the installed `vz.wad`.
 //!
-//! Gated on the game: set `MERCS2_GAME_DIR` (the install root, its `data` folder, or `vz.wad` itself).
-//! Without it every test here prints `SKIPPING` and returns — loudly, never silently green.
+//! Game-gated, built by the `retail` feature: every test reads the `vz.wad` named by the repo-root
+//! `.mercs2-local.toml`, and `English.wad` from the same `data` folder, and fails if either is absent.
 //!
 //! What this proves, over EVERY audio table in `vz.wad` (95 wavebanks, 76 soundbanks, 77 sounddbs):
 //! * each `data` body re-encodes byte-identically from its parsed records — the header framing, the
@@ -14,7 +14,7 @@
 //! * how many retail cues the corrected chain resolves, and why the rest do not.
 //!
 //! ```text
-//! MERCS2_GAME_DIR=/path/to/game cargo test -p mercs2_audio --test retail_banks -- --nocapture
+//! cargo xtask retail-test
 //! ```
 
 use std::collections::{BTreeMap, HashMap};
@@ -28,7 +28,7 @@ use mercs2_audio::sounddb::SoundDb;
 use mercs2_audio::wave::{WaveData, WavebankFile};
 use mercs2_audio::{AudioEngine, ResolveError};
 use mercs2_formats::ffcs::load_ffcs_archive;
-use mercs2_formats::game_paths::vz_wad_from_env;
+use mercs2_formats::game_paths::local_config_vz_wad;
 use mercs2_formats::hash::pandemic_hash_m2 as m2;
 use mercs2_formats::sges::decompress_block;
 use mercs2_formats::types::{TYPE_HASH_SOUNDBANK, TYPE_HASH_WAVEBANK, TYPE_ID_SOUNDBANK, TYPE_ID_WAVEBANK};
@@ -45,18 +45,31 @@ struct Table {
     body: Vec<u8>,
 }
 
+/// The `vz.wad` named by the repo-root `.mercs2-local.toml`; panics with the resolver's message when
+/// it is not configured.
+fn vz_wad() -> std::path::PathBuf {
+    local_config_vz_wad(std::path::Path::new(env!("CARGO_MANIFEST_DIR"))).unwrap_or_else(|e| panic!("{e}"))
+}
+
 /// Every wavebank / soundbank / sounddb entry of every block the ASET table registers one in, read
-/// once per test binary. `None` (after a loud SKIPPING line) when the game is not configured.
-fn retail_tables() -> Option<&'static [Table]> {
-    static TABLES: OnceLock<Option<Vec<Table>>> = OnceLock::new();
-    let tables = TABLES.get_or_init(|| {
-        let path = vz_wad_from_env()?;
-        Some(read_tables(&path))
-    });
-    if tables.is_none() {
-        eprintln!("SKIPPING: set MERCS2_GAME_DIR to the Mercenaries 2 install to run the retail bank tests");
-    }
-    tables.as_deref()
+/// once per test binary.
+fn retail_tables() -> &'static [Table] {
+    static TABLES: OnceLock<Vec<Table>> = OnceLock::new();
+    TABLES.get_or_init(|| read_tables(&vz_wad()))
+}
+
+/// The audio tables of `English.wad`, the language archive in the same `data` folder as `vz.wad`.
+/// Panics when that file is absent.
+fn english_tables() -> Vec<Table> {
+    let vz = vz_wad();
+    let data = vz.parent().unwrap_or_else(|| panic!("{} has no parent folder", vz.display()));
+    let english = data.join("English.wad");
+    assert!(
+        english.is_file(),
+        "English.wad not found beside vz.wad at {}; nine vz.wad cues play its waves",
+        english.display()
+    );
+    read_tables(&english)
 }
 
 /// Pull the audio tables out of `path`, checking every container against `build_wrapped_block` on
@@ -105,7 +118,7 @@ fn of_type(tables: &[Table], type_hash: u32) -> impl Iterator<Item = &Table> {
 
 #[test]
 fn every_retail_table_re_encodes_byte_identically() {
-    let Some(tables) = retail_tables() else { return };
+    let tables = retail_tables();
 
     // ---- wavebanks ------------------------------------------------------------------------------
     let (mut wavebanks, mut streamed, mut padded, mut clips) = (0, 0, 0, 0);
@@ -243,7 +256,7 @@ fn embedded_end(file: &WavebankFile) -> usize {
 
 #[test]
 fn ui_pda_open_group_and_cue_values_match_the_presets() {
-    let Some(tables) = retail_tables() else { return };
+    let tables = retail_tables();
     let ui_hud = m2("ui_hud");
     let body = |ty| &tables.iter().find(|t| t.name_hash == ui_hud && t.type_hash == ty).expect("ui_hud table").body;
     let db = SoundDb::parse(body(TYPE_HASH_SOUNDDB)).expect("sounddb");
@@ -320,10 +333,8 @@ const LENGTH_EXCEPTIONS: [(u32, usize); 16] = [
 
 #[test]
 fn cue_length_rule_reproduces_every_retail_cue_but_sixteen() {
-    let Some(tables) = retail_tables() else { return };
-    let Some(english) = mercs2_formats::game_paths::wad_from_env("English.wad").map(|p| read_tables(&p)) else {
-        return eprintln!("SKIPPING: English.wad not found beside vz.wad; nine vz.wad cues play its waves");
-    };
+    let tables = retail_tables();
+    let english = english_tables();
     let wavebanks: HashMap<u32, WavebankFile> = of_type(tables, TYPE_HASH_WAVEBANK)
         .chain(of_type(&english, TYPE_HASH_WAVEBANK))
         .map(|t| {
@@ -372,8 +383,8 @@ fn cue_length_rule_reproduces_every_retail_cue_but_sixteen() {
 /// cue is then started once through the engine's own picks (fixed seed).
 #[test]
 fn every_retail_cue_resolves_but_the_streamed_and_absent_ones() {
-    let Some(tables) = retail_tables() else { return };
-    let english = mercs2_formats::game_paths::wad_from_env("English.wad").map(|p| read_tables(&p));
+    let tables = retail_tables();
+    let english = english_tables();
 
     let mut eng = AudioEngine::default();
     eng.set_rng_seed(0x5EED_0001);
@@ -399,9 +410,6 @@ fn every_retail_cue_resolves_but_the_streamed_and_absent_ones() {
     assert_eq!(vz_only.played, vz_only.resolved);
     assert_eq!(vz_only.played, 1012);
 
-    let Some(english) = english else {
-        return eprintln!("SKIPPING the English.wad pass: English.wad not found beside vz.wad");
-    };
     for t in of_type(&english, TYPE_HASH_WAVEBANK) {
         eng.load_wavebank(&t.body).expect("English.wad wavebank loads");
     }
@@ -615,7 +623,7 @@ fn play_once(
 #[test]
 fn a_retail_fade_reaches_the_voices() {
     use mercs2_audio::multitrack::{Automation, Target};
-    let Some(tables) = retail_tables() else { return };
+    let tables = retail_tables();
     let mut eng = AudioEngine::default();
     eng.set_rng_seed(3);
     for t in of_type(tables, TYPE_HASH_WAVEBANK) {
@@ -666,7 +674,7 @@ fn a_retail_fade_reaches_the_voices() {
 /// group a positional voice and instances of a `+0x14` = 0 group a 2D one.
 #[test]
 fn group_plus_0x14_decides_whether_an_instance_is_positional() {
-    let Some(tables) = retail_tables() else { return };
+    let tables = retail_tables();
     let mut eng = AudioEngine::default();
     eng.set_rng_seed(9);
     let (mut set, mut clear) = (0, 0);

@@ -14,7 +14,7 @@ path = "src/lib.rs"
 cc = "1"
 
 [dev-dependencies]
-# `tests/parity.rs` diffs our output against the bytecode retail actually shipped, which means
+# `tests/parity_retail.rs` diffs our output against the bytecode retail actually shipped, which means
 # reading `scripts_vz` out of a WAD.
 #
 # Historically this could NOT be `mercs2_script` — that crate linked mlua's vendored Lua 5.4 while
@@ -25,3 +25,16 @@ cc = "1"
 # `mercs2_script` now runs THIS crate's VM, so the hazard is gone. The corpus is still reached by
 # path, which keeps this compiler test buildable without the engine's binding surface.
 mercs2_formats = { workspace = true }
+
+[features]
+# Builds the game-gated tests, which read the retail vz.wad named by the repo-root .mercs2-local.toml;
+# run them with `cargo xtask retail-test`.
+retail = []
+
+[[test]]
+name = "parity_retail"
+required-features = ["retail"]
+
+[[test]]
+name = "retail_bytecode_retail"
+required-features = ["retail"]

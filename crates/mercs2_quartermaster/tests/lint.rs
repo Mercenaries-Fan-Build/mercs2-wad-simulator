@@ -1324,3 +1324,565 @@ fn m0199_is_quiet_with_no_guards_or_full_valid_coverage() {
         "full valid coverage must be silent"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Sound kinds (M0214–M0217)
+// ---------------------------------------------------------------------------
+
+/// Every field of one SoundCue, YAML at `indent`.
+fn cue_fields(indent: &str, name: &str, wave: &str) -> String {
+    [
+        format!("name: {name}"),
+        format!("wave: {wave}"),
+        "group_gain_db: -4.0".into(),
+        "cue_gain_db: -6.0".into(),
+        "pitch_semitones: 0.0".into(),
+        "positional: false".into(),
+        "min_distance: 10.0".into(),
+        "max_distance: 1000.0".into(),
+        "distance_exponent: 1.0".into(),
+        "doppler_scale: 1.0".into(),
+        "start_limit: 0".into(),
+        "sound_id: 0".into(),
+        "priority: 0.95".into(),
+        "group_20: 1.0".into(),
+        "cue_16: 0".into(),
+        "clip_hash: 0".into(),
+    ]
+    .iter()
+    .map(|l| format!("{indent}{l}\n"))
+    .collect()
+}
+
+/// An `add_sound` bank with one cue per name, all of category `category`, loaded in gameplay.
+fn add_sound(bank: &str, category: &str, cues: &[&str]) -> Manifest {
+    add_sound_in(bank, category, cues, "[gameplay]")
+}
+
+/// An `add_sound` bank as [`add_sound`], with `load_in` as written.
+fn add_sound_in(bank: &str, category: &str, cues: &[&str], load_in: &str) -> Manifest {
+    let mut list = String::new();
+    for c in cues {
+        let f = cue_fields("        ", c, "src/a.wav");
+        list.push_str(&format!("      - {}", &f[8..]));
+    }
+    let cues = if cues.is_empty() { "    cues: []\n".to_string() } else { format!("    cues:\n{list}") };
+    shipment_with(&format!(
+        "  - kind: add_sound\n    bank: {bank}\n    category: {category}\n    load_in: {load_in}\n{cues}"
+    ))
+}
+
+/// A `replace_sound_cue` of `bank`, with `language` when given.
+fn replace_cue(bank: &str, language: Option<&str>) -> Manifest {
+    let language = language.map(|l| format!("    language: {l}\n")).unwrap_or_default();
+    shipment_with(&format!(
+        "  - kind: replace_sound_cue\n    bank: {bank}\n{language}    category: ui\n    cue:\n{}",
+        cue_fields("      ", "ui_PDA_Open_01_st", "src/a.wav")
+    ))
+}
+
+#[test]
+fn a_well_formed_sound_bank_lints_clean() {
+    let diags = lint::lint(&add_sound("mod_sounds", "ui", &["mod_click", "mod_whoosh"]), None, None);
+    assert!(diags.is_empty(), "{diags:?}");
+    assert!(lint::lint(&replace_cue("ui_hud", None), None, None).is_empty());
+    assert!(lint::lint(&replace_cue("vo_mattias", Some("english")), None, None).is_empty());
+}
+
+/// M0214: a WAV the strict reader refuses blocks; a PCM16 one does not.
+#[test]
+fn m0214_fires_on_a_wav_the_reader_refuses() {
+    let root = std::env::temp_dir().join(format!("qm_lint_m0214_{}", std::process::id()));
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    let wav = |bits: u16| {
+        let mut w = Vec::new();
+        w.extend_from_slice(b"RIFF");
+        w.extend_from_slice(&40u32.to_le_bytes());
+        w.extend_from_slice(b"WAVEfmt ");
+        w.extend_from_slice(&16u32.to_le_bytes());
+        w.extend_from_slice(&1u16.to_le_bytes());
+        w.extend_from_slice(&1u16.to_le_bytes());
+        w.extend_from_slice(&22050u32.to_le_bytes());
+        w.extend_from_slice(&(22050u32 * u32::from(bits / 8)).to_le_bytes());
+        w.extend_from_slice(&(bits / 8).to_le_bytes());
+        w.extend_from_slice(&bits.to_le_bytes());
+        w.extend_from_slice(b"data");
+        w.extend_from_slice(&4u32.to_le_bytes());
+        w.extend_from_slice(&[1, 2, 3, 4]);
+        w
+    };
+    let m = add_sound("mod_sounds", "ui", &["mod_click"]);
+    std::fs::write(root.join("src/a.wav"), wav(8)).unwrap();
+    let diags = lint::lint(&m, Some(&root), None);
+    assert!(codes(&diags).contains(&"M0214"), "{diags:?}");
+    assert!(lint::blocks_build(&diags));
+    std::fs::write(root.join("src/a.wav"), wav(16)).unwrap();
+    assert!(!codes(&lint::lint(&m, Some(&root), None)).contains(&"M0214"));
+}
+
+/// M0215: names the engine cannot reach — and none for usable ones.
+#[test]
+fn m0215_fires_on_unusable_sound_names() {
+    // Two names that differ only in case hash alike.
+    assert!(codes(&lint::lint(&add_sound("mod_sounds", "ui", &["Mod_Click", "mod_click"]), None, None)).contains(&"M0215"));
+    // A bare hash, a padded name.
+    assert!(codes(&lint::lint(&add_sound("mod_sounds", "ui", &["\"0x1234ABCD\""]), None, None)).contains(&"M0215"));
+    assert!(codes(&lint::lint(&add_sound("mod_sounds", "ui", &["\" mod_click\""]), None, None)).contains(&"M0215"));
+    assert!(codes(&lint::lint(&add_sound("\"0xDEADBEEF\"", "ui", &["mod_click"]), None, None)).contains(&"M0215"));
+    // No cues, and an add_sound bank the loader would localize.
+    assert!(codes(&lint::lint(&add_sound("mod_sounds", "ui", &[]), None, None)).contains(&"M0215"));
+    assert!(codes(&lint::lint(&add_sound("vo_mine", "ui", &["mod_click"]), None, None)).contains(&"M0215"));
+    // A usable bank is quiet.
+    assert!(!codes(&lint::lint(&add_sound("mod_sounds", "ui", &["mod_click"]), None, None)).contains(&"M0215"));
+}
+
+/// M0216: a category outside the tree, with the nearest named one offered.
+#[test]
+fn m0216_fires_on_an_unknown_category_and_suggests_one() {
+    let diags = lint::lint(&add_sound("mod_sounds", "weapn", &["mod_click"]), None, None);
+    let d = diags.iter().find(|d| d.rule.code == "M0216").expect("M0216 fires");
+    assert_eq!(d.fix.as_deref(), Some("weapon"));
+    for name in mercs2_audio::encode::RETAIL_CATEGORY_NAMES {
+        assert!(!codes(&lint::lint(&add_sound("mod_sounds", name, &["mod_click"]), None, None)).contains(&"M0216"), "{name}");
+    }
+}
+
+/// M0217: a language on a bank that is not vo_*, or none on one that is.
+#[test]
+fn m0217_fires_when_the_language_does_not_match_the_bank() {
+    assert!(codes(&lint::lint(&replace_cue("ui_hud", Some("english")), None, None)).contains(&"M0217"));
+    assert!(codes(&lint::lint(&replace_cue("vo_mattias", None), None, None)).contains(&"M0217"));
+    assert!(!codes(&lint::lint(&replace_cue("vo_mattias", Some("french")), None, None)).contains(&"M0217"));
+}
+
+/// M0221: an `add_sound` whose `load_in` is empty or lists a session twice; each session alone
+/// and both together are quiet. A `load_in` that is absent, or names no session, does not parse.
+#[test]
+fn m0221_fires_on_an_empty_or_repeated_load_in() {
+    let fires = |load_in: &str| codes(&lint::lint(&add_sound_in("mod_sounds", "ui", &["mod_click"], load_in), None, None)).contains(&"M0221");
+    assert!(fires("[]"));
+    assert!(fires("[gameplay, gameplay]"));
+    assert!(fires("[front_end, gameplay, front_end]"));
+    for quiet in ["[gameplay]", "[front_end]", "[gameplay, front_end]", "[front_end, gameplay]"] {
+        assert!(!fires(quiet), "{quiet}");
+    }
+    let d = lint::lint(&add_sound_in("mod_sounds", "ui", &["mod_click"], "[]"), None, None);
+    assert!(lint::blocks_build(&d), "{d:?}");
+    let parse = |text: &str| {
+        mercs2_quartermaster::from_str(
+            &format!(
+                "format: 2\nshipment: {{ name: s, version: 1.0.0, target: retail }}\ncontributions:\n  - kind: add_sound\n    bank: b\n    category: ui\n{text}    cues: []\n"
+            ),
+            mercs2_quartermaster::Format::Yaml,
+        )
+    };
+    assert!(parse("").is_err(), "load_in is required");
+    assert!(parse("    load_in: [menu]\n").is_err(), "a session the format does not name");
+    assert!(parse("    load_in: [front_end]\n").is_ok());
+}
+
+/// The sound rules are registered with their doc anchors; the game-gated ones in GAME_RULES.
+#[test]
+fn the_sound_rules_are_registered() {
+    for code in ["M0214", "M0215", "M0216", "M0217", "M0221"] {
+        let r = lint::RULES.iter().find(|r| r.code == code).unwrap_or_else(|| panic!("{code}"));
+        assert_eq!(r.doc, format!("docs/modding/manifest_format.md#{}", code.to_lowercase()));
+    }
+    for code in ["M0218", "M0219", "M0220"] {
+        assert!(lint::GAME_RULES.iter().any(|r| r.code == code), "{code}");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// add_tiny_geometry: M0240–M0244, M0249, M0251
+// ---------------------------------------------------------------------------
+
+/// A `.gltf` with one triangle primitive per `(role, slots)`, each drawing material 0, whose extras
+/// are `material_extras`.
+fn tiny_gltf(dir: &std::path::Path, prims: &[(Option<&str>, [u8; 3])], material_extras: &str) {
+    let mut bin: Vec<u8> = Vec::new();
+    for c in [0.0f32, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0] {
+        bin.extend_from_slice(&c.to_le_bytes());
+    }
+    for _ in 0..3 {
+        for c in [0.0f32, 1.0, 0.0] {
+            bin.extend_from_slice(&c.to_le_bytes());
+        }
+    }
+    for c in [0.0f32, 0.0, 1.0, 0.0, 0.0, 1.0] {
+        bin.extend_from_slice(&c.to_le_bytes());
+    }
+    let (mut views, mut accessors, mut out) = (Vec::new(), Vec::new(), Vec::new());
+    views.push(r#"{"buffer":0,"byteOffset":0,"byteLength":36}"#.to_string());
+    views.push(r#"{"buffer":0,"byteOffset":36,"byteLength":36}"#.to_string());
+    views.push(r#"{"buffer":0,"byteOffset":72,"byteLength":24}"#.to_string());
+    accessors.push(r#"{"bufferView":0,"componentType":5126,"count":3,"type":"VEC3","min":[0,0,0],"max":[1,1,0]}"#.to_string());
+    accessors.push(r#"{"bufferView":1,"componentType":5126,"count":3,"type":"VEC3"}"#.to_string());
+    accessors.push(r#"{"bufferView":2,"componentType":5126,"count":3,"type":"VEC2"}"#.to_string());
+    for (role, slots) in prims {
+        let at = bin.len();
+        bin.extend_from_slice(slots);
+        bin.push(0);
+        views.push(format!(r#"{{"buffer":0,"byteOffset":{at},"byteLength":3}}"#));
+        accessors.push(format!(r#"{{"bufferView":{},"componentType":5121,"count":3,"type":"SCALAR"}}"#, views.len() - 1));
+        let extras = match role {
+            Some(r) => format!(r#","extras":{{"tiny_role":"{r}"}}"#),
+            None => String::new(),
+        };
+        out.push(format!(
+            r#"{{"attributes":{{"POSITION":0,"NORMAL":1,"TEXCOORD_0":2,"_TINY_SLOT":{}}},"mode":4,"material":0{extras}}}"#,
+            accessors.len() - 1
+        ));
+    }
+    std::fs::write(dir.join("t.bin"), &bin).unwrap();
+    let json = format!(
+        r#"{{"asset":{{"version":"2.0"}},"scene":0,"scenes":[{{"nodes":[0]}}],"nodes":[{{"mesh":0}}],
+"meshes":[{{"primitives":[{}]}}],"materials":[{{"alphaMode":"MASK","extras":{material_extras}}}],
+"buffers":[{{"uri":"t.bin","byteLength":{}}}],"bufferViews":[{}],"accessors":[{}]}}"#,
+        out.join(","),
+        bin.len(),
+        views.join(","),
+        accessors.join(",")
+    );
+    std::fs::write(dir.join("t.gltf"), json).unwrap();
+}
+
+const TINY_MATERIAL: &str = r#"{"texture":"0x80B55C14","pixel_shader":"PgDiffFP"}"#;
+
+/// Lint an `add_tiny_geometry` of `objects` in cell `(row, col)` whose model is [`tiny_gltf`].
+fn lint_tiny(label: &str, objects: &[String], row: u32, prims: &[(Option<&str>, [u8; 3])], material: &str) -> Vec<lint::Diagnostic> {
+    let root = std::env::temp_dir().join(format!("qm_lint_tiny_{}_{label}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    tiny_gltf(&root.join("src"), prims, material);
+    let objects = objects.iter().map(|o| format!("\"{o}\"")).collect::<Vec<_>>().join(", ");
+    let yaml = format!(
+        "  - kind: add_tiny_geometry\n    layer: vz_state_mar_city_pristine\n    cell: {{ row: {row}, col: 32 }}\n    \
+         key: 1327103\n    objects: [{objects}]\n    model: src/t.gltf\n"
+    );
+    lint::lint(&shipment_with(&yaml), Some(&root), None)
+}
+
+fn guids(n: u32) -> Vec<String> {
+    (0..n).map(|k| format!("0x{:08X}", 0x97000 + k)).collect()
+}
+
+#[test]
+fn add_tiny_geometry_is_quiet_on_a_sound_stand_in() {
+    let d = lint_tiny("ok", &guids(2), 28, &[(Some("intact"), [0, 0, 0]), (Some("ruined"), [1, 1, 1])], TINY_MATERIAL);
+    assert!(d.is_empty(), "{d:?}");
+}
+
+#[test]
+fn m0240_fires_past_192_objects_and_on_none() {
+    let d = lint_tiny("m0240", &guids(193), 28, &[(Some("intact"), [0, 0, 0])], TINY_MATERIAL);
+    assert_eq!(codes(&d), vec!["M0240"], "{d:?}");
+    assert!(d[0].message.contains("at most 192"), "{}", d[0].message);
+    assert!(lint::blocks_build(&d));
+    let d = lint_tiny("m0240_none", &[], 28, &[(Some("intact"), [0, 0, 0])], TINY_MATERIAL);
+    assert!(codes(&d).contains(&"M0240"), "{d:?}");
+    // 192 is the most a stand-in draws
+    let d = lint_tiny("m0240_192", &guids(192), 28, &[(Some("intact"), [0, 0, 0])], TINY_MATERIAL);
+    assert!(d.is_empty(), "{d:?}");
+}
+
+#[test]
+fn m0241_fires_on_an_object_named_twice() {
+    let mut objects = guids(2);
+    objects.push(objects[0].to_lowercase());
+    let d = lint_tiny("m0241", &objects, 28, &[(Some("intact"), [0, 0, 0])], TINY_MATERIAL);
+    assert_eq!(codes(&d), vec!["M0241"], "{d:?}");
+}
+
+#[test]
+fn m0242_fires_on_a_slot_past_the_objects() {
+    let d = lint_tiny("m0242", &guids(2), 28, &[(Some("intact"), [2, 2, 2])], TINY_MATERIAL);
+    assert_eq!(codes(&d), vec!["M0242"], "{d:?}");
+    assert!(d[0].message.contains("slot 2"), "{}", d[0].message);
+}
+
+#[test]
+fn m0243_fires_on_a_triangle_spanning_two_slots() {
+    let d = lint_tiny("m0243", &guids(2), 28, &[(Some("intact"), [0, 1, 1])], TINY_MATERIAL);
+    assert_eq!(codes(&d), vec!["M0243"], "{d:?}");
+}
+
+#[test]
+fn m0244_fires_on_a_primitive_without_a_role() {
+    let d = lint_tiny("m0244", &guids(2), 28, &[(None, [0, 0, 0]), (Some("destroyed"), [1, 1, 1])], TINY_MATERIAL);
+    assert_eq!(codes(&d), vec!["M0244", "M0244"], "{d:?}");
+}
+
+#[test]
+fn m0249_fires_on_a_cell_outside_the_grid() {
+    let d = lint_tiny("m0249", &guids(1), 40, &[(Some("intact"), [0, 0, 0])], TINY_MATERIAL);
+    assert_eq!(codes(&d), vec!["M0249"], "{d:?}");
+}
+
+#[test]
+fn m0251_fires_on_a_material_without_a_texture_or_a_pixel_shader() {
+    let d = lint_tiny("m0251", &guids(1), 28, &[(Some("intact"), [0, 0, 0])], r#"{"pixel_shader":"PgDiffFP"}"#);
+    assert_eq!(codes(&d), vec!["M0251"], "{d:?}");
+    assert!(d[0].message.contains("extras.texture"), "{}", d[0].message);
+    // a material with one texture has several retail pixel shaders, so it declares one
+    let d = lint_tiny("m0251_pixel", &guids(1), 28, &[(Some("intact"), [0, 0, 0])], r#"{"texture":"t"}"#);
+    assert_eq!(codes(&d), vec!["M0251"], "{d:?}");
+    assert!(d[0].message.contains("pixel_shader"), "{}", d[0].message);
+}
+
+// ---------------------------------------------------------------------------
+// M0252–M0255, M0262 — the fx kinds and raw effects
+// ---------------------------------------------------------------------------
+
+/// A one-emitter effect with every position at 0 (u32 positions 1), frame 7.
+fn fx_effect() -> mercs2_formats::fxdict::EffectContainer {
+    use mercs2_formats::fxdict::*;
+    use mercs2_quartermaster::effect;
+    let attrs = |defs: Vec<&AttrDef>| -> Vec<Atrb> {
+        defs.iter()
+            .map(|d| match d.kind {
+                ValueKind::F32 => Atrb::f32(d.hash, 0.0),
+                ValueKind::U32 => Atrb::u32(d.hash, 1),
+            })
+            .collect()
+    };
+    EffectContainer {
+        shapes: vec![EmitterShape { records: vec![[0.0; SHAPE_RECORD_FLOATS]] }],
+        emitters: vec![Emitter {
+            transform: [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0]],
+            channels: attrs(effect::channel_defs()),
+            geom: None,
+            particle: ParticleType {
+                flags: 0,
+                attributes: attrs(effect::particle_defs()),
+                colr: Colr::uniform([0, 255, 255, 255], 0x3C00),
+                text: Text { frames: vec![7] },
+            },
+        }],
+        forces: vec![],
+    }
+}
+
+/// A Shipment directory with `files` under `src/`, linted with its root.
+fn lint_fx(label: &str, contributions: &str, files: &[(&str, Vec<u8>)]) -> Vec<lint::Diagnostic> {
+    let root = std::env::temp_dir().join(format!("qm_lint_fx_{}_{label}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    for (f, bytes) in files {
+        std::fs::write(root.join("src").join(f), bytes).unwrap();
+    }
+    let m = shipment_with(contributions);
+    lint::lint(&m, Some(&root), None)
+}
+
+fn add_fx_yaml(template: &str, reds: &str) -> String {
+    format!(
+        "  - kind: add_fx\n    name: qm_fx\n    effect: src/fx.yaml\n    template:\n      name: \"{template}\"\n      \
+         name_flag: 1\n      components:\n{reds}"
+    )
+}
+
+const ONE_RED: &str = "        RedEffectComponent: { name: qm_fx }\n";
+
+fn effect_yaml() -> Vec<u8> {
+    use mercs2_quartermaster::effect::{self, EffectForm};
+    effect::to_string(&EffectForm::express(&fx_effect()), Format::Yaml).unwrap().into_bytes()
+}
+
+#[test]
+fn add_fx_is_quiet_on_a_sound_effect_and_template() {
+    let d = lint_fx("quiet", &add_fx_yaml("qm_tpl", ONE_RED), &[("fx.yaml", effect_yaml())]);
+    assert!(d.is_empty(), "{d:?}");
+}
+
+#[test]
+fn m0252_fires_on_an_effect_form_that_does_not_lower() {
+    let text = String::from_utf8(effect_yaml()).unwrap().replacen("posx:", "posq:", 1);
+    let d = lint_fx("m0252", &add_fx_yaml("qm_tpl", ONE_RED), &[("fx.yaml", text.into_bytes())]);
+    assert_eq!(codes(&d), vec!["M0252"], "{d:?}");
+    assert!(d[0].message.contains("posq"), "{}", d[0].message);
+    let d = lint_fx("m0252-ext", &add_fx_yaml("qm_tpl", ONE_RED).replace("fx.yaml", "fx.bin"), &[("fx.bin", effect_yaml())]);
+    assert_eq!(codes(&d), vec!["M0252"], "{d:?}");
+}
+
+#[test]
+fn m0309_fires_on_an_emitter_the_engine_cannot_spawn_from() {
+    use mercs2_formats::fxdict::{AtrbValue, EmitterGeom};
+    use mercs2_quartermaster::effect::{self, EffectForm};
+    let yaml = |fx: &mercs2_formats::fxdict::EffectContainer| effect::to_string(&EffectForm::express(fx), Format::Yaml).unwrap().into_bytes();
+    let rate = effect::particle_defs().iter().position(|d| d.name == Some("rate")).unwrap();
+    let mut cases = Vec::new();
+    for (geom, label) in [
+        (Some(EmitterGeom { shape_index: 1, word_00: 1 }), "index"),
+        (Some(EmitterGeom { shape_index: 0, word_00: 0 }), "zero"),
+        (Some(EmitterGeom { shape_index: 0, word_00: 2 }), "past"),
+    ] {
+        let mut fx = fx_effect();
+        fx.emitters[0].geom = geom;
+        cases.push((label, fx));
+    }
+    let mut fx = fx_effect();
+    fx.emitters[0].particle.attributes[rate].value = AtrbValue::F32(30.0);
+    cases.push(("spawning", fx));
+    for (label, fx) in cases {
+        let d = lint_fx(&format!("m0309-{label}"), &add_fx_yaml("qm_tpl", ONE_RED), &[("fx.yaml", yaml(&fx))]);
+        assert_eq!(codes(&d), vec!["M0309"], "{label}: {d:?}");
+    }
+    // `fx_effect` has no GEOM, a rate of 0 and a ratevar of 0: it spawns nothing, and is quiet.
+    assert!(fx_effect().emitters[0].geom.is_none());
+    let mut fx = fx_effect();
+    fx.emitters[0].geom = Some(EmitterGeom { shape_index: 0, word_00: 1 });
+    fx.emitters[0].particle.attributes[rate].value = AtrbValue::F32(30.0);
+    assert!(lint_fx("m0309-quiet", &add_fx_yaml("qm_tpl", ONE_RED), &[("fx.yaml", yaml(&fx))]).is_empty());
+}
+
+#[test]
+fn m0253_fires_on_an_unusable_template_name() {
+    for (name, label) in [(String::new(), "empty"), ("x".repeat(0x80), "long")] {
+        let d = lint_fx(&format!("m0253-{label}"), &add_fx_yaml(&name, ONE_RED), &[("fx.yaml", effect_yaml())]);
+        assert_eq!(codes(&d), vec!["M0253"], "{label}: {d:?}");
+    }
+    let d = lint_fx("m0253-max", &add_fx_yaml(&"x".repeat(0x7F), ONE_RED), &[("fx.yaml", effect_yaml())]);
+    assert!(d.is_empty(), "{d:?}");
+}
+
+#[test]
+fn m0254_fires_on_a_missing_bad_or_empty_edits_form() {
+    let c = "  - kind: replace_fx\n    target: { effect: global_explosion_c4 }\n    edits: src/e.yaml\n";
+    let d = lint_fx("m0254-quiet", c, &[("e.yaml", b"edits:\n  - { op: colour_rgb, emitter: 0, rgb: [1, 2, 3] }\n".to_vec())]);
+    assert!(d.is_empty(), "{d:?}");
+    let d = lint_fx("m0254-empty", c, &[("e.yaml", b"edits: []\n".to_vec())]);
+    assert_eq!(codes(&d), vec!["M0254"], "{d:?}");
+    let d = lint_fx("m0254-bad", c, &[("e.yaml", b"edits:\n  - { op: paint }\n".to_vec())]);
+    assert_eq!(codes(&d), vec!["M0254"], "{d:?}");
+    let d = lint_fx("m0254-missing", c, &[]);
+    assert_eq!(codes(&d), vec!["M0110"], "a missing file is the source rule, and is not read: {d:?}");
+}
+
+#[test]
+fn m0255_fires_without_exactly_one_red_effect_component() {
+    for (reds, label) in [
+        ("        HibernationControl: { a: 1 }\n", "none"),
+        ("        RedEffectComponent:\n          - { name: qm_fx }\n          - { name: qm_fx }\n", "two"),
+    ] {
+        let d = lint_fx(&format!("m0255-{label}"), &add_fx_yaml("qm_tpl", reds), &[("fx.yaml", effect_yaml())]);
+        assert_eq!(codes(&d), vec!["M0255"], "{label}: {d:?}");
+    }
+    let one_in_a_list = "        RedEffectComponent:\n          - { name: qm_fx }\n";
+    assert!(lint_fx("m0255-list", &add_fx_yaml("qm_tpl", one_in_a_list), &[("fx.yaml", effect_yaml())]).is_empty());
+}
+
+fn raw_block(entries: &[(u32, u32)]) -> Vec<u8> {
+    let mut b = (entries.len() as u32).to_le_bytes().to_vec();
+    let body = mercs2_formats::fxdict::write_effect_container(&fx_effect()).unwrap();
+    for (n, t) in entries {
+        for w in [*n, *t, 0, body.len() as u32] {
+            b.extend_from_slice(&w.to_le_bytes());
+        }
+    }
+    for _ in entries {
+        b.extend_from_slice(&body);
+    }
+    b
+}
+
+#[test]
+fn m0262_fires_on_a_raw_effect_or_worldentity() {
+    let raw = |hash: u32| {
+        format!("  - kind: raw\n    payload: src/p.block\n    target_layer: data\n    touches: [\"0x{hash:08X}\"]\n")
+    };
+    let effect = mercs2_formats::types::TYPE_HASH_EFFECT;
+    let d = lint_fx("m0262-fx", &raw(0x41B4_326E), &[("p.block", raw_block(&[(0x41B4_326E, effect)]))]);
+    assert_eq!(codes(&d), vec!["M0262"], "{d:?}");
+    assert!(d[0].message.contains("effect 0x41B4326E"), "{}", d[0].message);
+    let we = mercs2_formats::worldentity::WORLDENTITY_TYPE_HASH;
+    let d = lint_fx("m0262-we", &raw(0x5007_5B3B), &[("p.block", raw_block(&[(0x5007_5B3B, we)]))]);
+    assert_eq!(codes(&d), vec!["M0262"], "{d:?}");
+    let model = mercs2_formats::types::TYPE_HASH_MODEL;
+    let d = lint_fx("m0262-quiet", &raw(0x1234_5678), &[("p.block", raw_block(&[(0x1234_5678, model)]))]);
+    assert!(d.is_empty(), "{d:?}");
+}
+
+#[test]
+fn the_fx_rules_are_registered() {
+    for code in ["M0252", "M0253", "M0254", "M0255", "M0262", "M0309"] {
+        assert!(lint::RULES.iter().any(|r| r.code == code), "{code} hermetic");
+    }
+    for code in ["M0256", "M0257", "M0258", "M0259", "M0260", "M0261"] {
+        assert!(lint::GAME_RULES.iter().any(|r| r.code == code), "{code} game");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// M0304, M0305, M0308 — sprites and raw sprite data
+// ---------------------------------------------------------------------------
+
+/// A `w × h` RGBA PNG, every texel white and opaque.
+fn sprite_png(w: u32, h: u32) -> Vec<u8> {
+    let mut out = Vec::new();
+    let mut e = png::Encoder::new(&mut out, w, h);
+    e.set_color(png::ColorType::Rgba);
+    e.set_depth(png::BitDepth::Eight);
+    e.write_header().unwrap().write_image_data(&vec![255u8; (w * h * 4) as usize]).unwrap();
+    out
+}
+
+fn add_fx_sprite_yaml(name: &str) -> String {
+    format!("  - kind: add_fx_sprite\n    name: \"{name}\"\n    image: src/s.png\n")
+}
+
+#[test]
+fn add_fx_sprite_is_quiet_on_a_power_of_two_png() {
+    for (w, h) in [(4, 4), (64, 8), (512, 512)] {
+        let d = lint_fx(&format!("sprite-{w}x{h}"), &add_fx_sprite_yaml("qm_ring"), &[("s.png", sprite_png(w, h))]);
+        assert!(d.is_empty(), "{w}x{h}: {d:?}");
+    }
+}
+
+#[test]
+fn m0304_fires_on_an_image_that_is_not_a_sprite() {
+    for (w, h, label) in [(48, 64, "not-pow2"), (2, 4, "small"), (1024, 4, "large")] {
+        let d = lint_fx(&format!("m0304-{label}"), &add_fx_sprite_yaml("qm_ring"), &[("s.png", sprite_png(w, h))]);
+        assert_eq!(codes(&d), vec!["M0304"], "{label}: {d:?}");
+        assert!(d[0].message.contains("a power of two from 4 to 512"), "{}", d[0].message);
+    }
+    let d = lint_fx("m0304-not-png", &add_fx_sprite_yaml("qm_ring"), &[("s.png", b"not a png".to_vec())]);
+    assert_eq!(codes(&d), vec!["M0304"], "{d:?}");
+    let d = lint_fx("m0304-missing", &add_fx_sprite_yaml("qm_ring"), &[]);
+    assert_eq!(codes(&d), vec!["M0110"], "a missing file is the source rule, and is not read: {d:?}");
+}
+
+#[test]
+fn m0305_fires_on_an_empty_name_or_one_written_as_a_hash() {
+    for (name, label) in [("", "empty"), ("0x1234ABCD", "hash"), ("0Xdeadbeef", "upper-x")] {
+        let d = lint_fx(&format!("m0305-{label}"), &add_fx_sprite_yaml(name), &[("s.png", sprite_png(8, 8))]);
+        assert_eq!(codes(&d), vec!["M0305"], "{label}: {d:?}");
+    }
+}
+
+#[test]
+fn m0308_fires_on_a_raw_fxdict_or_vfx_atlas() {
+    let raw = |hash: u32| {
+        format!("  - kind: raw\n    payload: src/p.block\n    target_layer: data\n    touches: [\"0x{hash:08X}\"]\n")
+    };
+    let fxdict = mercs2_formats::types::TYPE_HASH_FX_DICTIONARY;
+    let d = lint_fx("m0308-fxdict", &raw(0x86BF_6C5B), &[("p.block", raw_block(&[(0x86BF_6C5B, fxdict)]))]);
+    assert_eq!(codes(&d), vec!["M0308"], "{d:?}");
+    assert!(d[0].message.contains("the fxdict 0x86BF6C5B"), "{}", d[0].message);
+    let texture = mercs2_formats::types::TYPE_HASH_TEXTURE;
+    let d = lint_fx("m0308-vfx", &raw(0x89E2_11AF), &[("p.block", raw_block(&[(0x89E2_11AF, texture)]))]);
+    assert_eq!(codes(&d), vec!["M0308"], "{d:?}");
+    assert!(d[0].message.contains("the vfx atlas 0x89E211AF"), "{}", d[0].message);
+    let d = lint_fx("m0308-quiet", &raw(0x1234_5678), &[("p.block", raw_block(&[(0x1234_5678, texture)]))]);
+    assert!(d.is_empty(), "{d:?}");
+}
+
+#[test]
+fn the_sprite_rules_are_registered() {
+    for code in ["M0304", "M0305", "M0308"] {
+        assert!(lint::RULES.iter().any(|r| r.code == code), "{code} hermetic");
+    }
+    for code in ["M0306", "M0307"] {
+        assert!(lint::GAME_RULES.iter().any(|r| r.code == code), "{code} game");
+    }
+}

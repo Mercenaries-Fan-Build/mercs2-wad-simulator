@@ -12,6 +12,9 @@
 //! If those hold across all 1,311 destructibles, a generator that emits that exact layout
 //! reproduces any retail family byte-for-byte, and adding a state is just emitting one more of the
 //! per-state group. Whatever it finds is recorded here so the generator can rely on it.
+//!
+//! Game-gated: built by the `retail` feature, reads the `vz.wad` named by the repo-root
+//! `.mercs2-local.toml`, and fails if it is absent.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -22,8 +25,9 @@ use mercs2_formats::sges::decompress_block;
 use mercs2_formats::types::TYPE_ID_MODEL;
 use mercs2_formats::ucfx::parse_block_entry_table;
 
-fn vz_wad() -> Option<PathBuf> {
-    mercs2_formats::game_paths::vz_wad(Path::new(env!("CARGO_MANIFEST_DIR")))
+fn vz_wad() -> PathBuf {
+    mercs2_formats::game_paths::local_config_vz_wad(Path::new(env!("CARGO_MANIFEST_DIR")))
+        .unwrap_or_else(|e| panic!("{e}"))
 }
 
 fn u32_le(b: &[u8], o: usize) -> u32 {
@@ -108,10 +112,7 @@ struct Census {
 
 #[test]
 fn how_canonical_is_the_family_layout() {
-    let Some(wad) = vz_wad() else {
-        eprintln!("SKIPPING: no vz.wad");
-        return;
-    };
+    let wad = vz_wad();
     let mut file = std::fs::File::open(&wad).expect("open");
     let size = file.metadata().unwrap().len();
     let archive = load_ffcs_archive(&mut file, size).expect("ffcs");
@@ -126,15 +127,15 @@ fn how_canonical_is_the_family_layout() {
 
     let mut c = Census::default();
     for bi in blocks {
-        let Ok(dec) = decompress_block(&mut file, &archive.indx, bi) else { continue };
+        let dec = decompress_block(&mut file, &archive.indx, bi)
+            .unwrap_or_else(|e| panic!("decompress block {bi}: {e}"));
         let (_n, entries) = parse_block_entry_table(&dec);
         let mut pos = 4 + entries.len() * 16;
-        for e in &entries {
-            let end = (pos + e.chunk_size as usize).min(dec.len());
-            if pos >= end {
-                break;
-            }
-            survey(&dec[pos..end], &mut c);
+        for (ei, e) in entries.iter().enumerate() {
+            let end = pos + e.chunk_size as usize;
+            let label = format!("blk{bi}/entry{ei}/0x{:08X}", e.name_hash);
+            assert!(end <= dec.len(), "{label}: runs past the {}-byte block", dec.len());
+            survey(&dec[pos..end], &label, &mut c);
             pos = end;
         }
     }
@@ -159,13 +160,14 @@ fn how_canonical_is_the_family_layout() {
     eprintln!("═══════════════════════════════════\n");
 }
 
-fn survey(container: &[u8], c: &mut Census) {
+fn survey(container: &[u8], label: &str, c: &mut Census) {
     let (data_off, rows) = rows_of(container);
     if rows.is_empty() {
         return;
     }
     let Some(parent) = family_parent(&rows) else { return };
-    let Some(sm) = mercs2_formats::orchestrator::parse_state_machine(container) else { return };
+    let sm = mercs2_formats::orchestrator::parse_state_machine(container)
+        .unwrap_or_else(|| panic!("{label}: carries a destruction family that parse_state_machine rejects"));
     c.families += 1;
     let kids = children_of(&rows, parent);
     let leaf = |r: &Row| -> &[u8] {

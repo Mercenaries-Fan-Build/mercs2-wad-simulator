@@ -1,5 +1,5 @@
 {
-  "format": 1,
+  "format": 2,
   "producer": "preflight",
   "quartermaster": "3.0.0",
   "ok": false,
@@ -28,7 +28,8 @@
           "sha256": "361406ebf38f9d1f98b49545cc61ab88b8f0ebd5cbea8435bddb7df6b73b6aa4"
         }
       ],
-      "placed_files": []
+      "placed_files": [],
+      "data_files": []
     },
     {
       "id": "shipment:dup-runtime",
@@ -50,7 +51,8 @@
           "sha256": "361406ebf38f9d1f98b49545cc61ab88b8f0ebd5cbea8435bddb7df6b73b6aa4"
         }
       ],
-      "placed_files": []
+      "placed_files": [],
+      "data_files": []
     }
   ],
   "edges": [],
@@ -78,8 +80,10 @@
   "supersedes": [],
   "link_block_paths": [
     "blocks\\VZ\\scripts_vz_P000_Q3.block",
-    "blocks\\VZ\\resident_P000_Q3.block"
+    "blocks\\VZ\\resident_P000_Q3.block",
+    "blocks\\Shell\\resident_P000_Q3.block"
   ],
+  "link_file_paths": [],
   "findings": [
     {
       "code": "M0162",

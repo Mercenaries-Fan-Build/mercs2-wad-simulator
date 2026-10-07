@@ -30,7 +30,7 @@ use mercs2_quartermaster::build::{self, BuildError, BuildReport};
 use mercs2_quartermaster::discover::{self, LoadedShipment};
 use mercs2_quartermaster::lint::{Diagnostic, Severity};
 use mercs2_quartermaster::manifest::{
-    CapabilityReq, ConflictDecl, Contribution, Requirement, ShipmentReq, Touch,
+    CapabilityReq, ConflictDecl, Contribution, Requirement, ShipmentReq, SoundCue, Touch,
 };
 use mercs2_quartermaster::names::NameTable;
 
@@ -730,16 +730,27 @@ fn contribution_name(c: &Contribution) -> String {
         Contribution::AddOutfit { name, .. }
         | Contribution::AddModel { name, .. }
         | Contribution::AddTexture { name, .. }
-        | Contribution::AddSound { name, .. }
         | Contribution::AddMovie { name, .. }
         | Contribution::AddLanguage { name, .. }
         | Contribution::AddUi { name, .. } => name.clone(),
         Contribution::AddShopItem { id, .. } => id.clone(),
+        Contribution::AddSound { bank, .. } => bank.clone(),
+        Contribution::ReplaceSoundBank { bank, language, .. } => {
+            mercs2_quartermaster::sound::entry_name(bank, *language)
+        }
+        Contribution::ReplaceSoundCue { bank, language, cue, .. } => format!(
+            "{} {}",
+            mercs2_quartermaster::sound::entry_name(bank, *language),
+            cue.name
+        ),
         Contribution::ReplaceTexture { target, .. }
         | Contribution::PatchLua { target, .. }
         | Contribution::EditStateMachine { target, .. }
         | Contribution::EditStringDb { target, .. } => target.clone(),
         Contribution::EditWorld { layer, .. } => layer.clone(),
+        Contribution::AddTinyGeometry { layer, cell, key, .. } => {
+            mercs2_quartermaster::tiny::model_name(layer, cell.row, cell.col, *key)
+        }
         Contribution::ActivateLayer { layer, .. } => layer.clone(),
         // `NativeHook.target` is the ENGINE, not an asset — so name it by what it actually is.
         Contribution::NativeHook { plugin, symbol, .. } => plugin
@@ -866,22 +877,26 @@ pub const KINDS: &[(&str, &[(&str, &str)])] = &[
             ("add_outfit", "A wearable outfit — model plus a wardrobe row"),
             ("add_model", "A new model on a donor's rig"),
             ("add_texture", "A new texture under a name you choose"),
-            ("add_sound", "A new audio bank (wavebank / soundbank / sounddb)"),
+            ("add_sound", "A new sound bank encoded from WAV cues, loaded by the mod loader"),
+            ("replace_sound_bank", "Replace every cue of a shipped sound bank, same entry name"),
+            ("replace_sound_cue", "Replace one cue of a shipped sound bank with a new WAV"),
             ("add_movie", "A Scaleform movie"),
             ("add_ui", "A Scaleform movie, wired up so it appears on screen"),
             ("replace_texture", "Replace a shipped texture, same hash"),
             ("edit_state_machine", "Rewrite a destructible's states"),
             ("edit_world", "Move / rotate / re-model a layer's placed entities"),
+            ("add_tiny_geometry", "A far-distance stand-in for one 200 m cell of a layer"),
             ("edit_stringdb", "Correct or localise UI text"),
             ("replace_phy2", "Swap a shipped model's collision (PHY2), same hash"),
             ("add_placement", "Add one entity to an existing layer"),
             ("add_layer", "Mint a whole new placement layer"),
             ("add_animation", "Add a new animation clip"),
             ("replace_animation", "Replace a shipped animation, same hash"),
-            ("add_shader", "Add a compiled SM3 shader"),
-            ("replace_shader", "Replace a shipped shader, same hash"),
-            ("add_fx", "Add a particle effect"),
-            ("replace_fx", "Replace a shipped fx, same hash"),
+            ("add_shader", "Register new shaders and add them to the shader stores"),
+            ("replace_shader", "Replace a shipped shader's bytecode in the shader stores"),
+            ("add_fx", "Add a particle effect and the template that starts it"),
+            ("replace_fx", "Edit a shipped effect in place"),
+            ("add_fx_sprite", "A sprite frame for effects, drawn into the vfx atlas"),
             ("replace_terrain_cell", "Replace a terrain cell, same hash"),
             ("add_stringdb_keys", "Add brand-new string-table keys"),
             ("replace_stringdb_text", "Rewrite strings by exact text match"),
@@ -948,8 +963,8 @@ pub fn seeded(kind: &str, asset: &str, n: usize) -> Option<Contribution> {
             *layer = asset.to_string()
         }
         // A script routed from the Missions / Systems domain, or a table from anywhere: `asset` is the
-        // script / table name, so it becomes the patch target. (`add_sound` is deliberately NOT seeded
-        // from an existing bank — it ADDS a new one from a file, so a blank scaffold is correct.)
+        // script / table name, so it becomes the patch target. The sound kinds take no seed: the
+        // Audio domain routes a script's name, which is not a bank.
         Contribution::PatchLua { target, .. } | Contribution::EditStringDb { target, .. } => {
             *target = asset.to_string()
         }
@@ -1003,10 +1018,26 @@ fn stub(kind: &str, n: usize) -> Option<Contribution> {
             image: PathBuf::from("src/texture.png"),
             normal_map: false,
         },
+        // The category, the cues and the sessions are the author's: an empty category fails M0216,
+        // an empty cue list M0215 and an empty `load_in` M0221 until they are chosen.
         "add_sound" => Contribution::AddSound {
-            name,
-            bank: PathBuf::from("src/bank.bin"),
-            sound: mercs2_quartermaster::manifest::SoundKind::Soundbank,
+            bank: name,
+            category: String::new(),
+            cues: Vec::new(),
+            load_in: Vec::new(),
+        },
+        // The bank names a bank the game ships, so it starts empty (M0215) until it is entered.
+        "replace_sound_bank" => Contribution::ReplaceSoundBank {
+            bank: String::new(),
+            language: None,
+            category: String::new(),
+            cues: Vec::new(),
+        },
+        "replace_sound_cue" => Contribution::ReplaceSoundCue {
+            bank: String::new(),
+            language: None,
+            category: String::new(),
+            cue: unset_cue(),
         },
         "edit_state_machine" => Contribution::EditStateMachine {
             target: "al_veh_boat_destroyer".into(),
@@ -1019,6 +1050,14 @@ fn stub(kind: &str, n: usize) -> Option<Contribution> {
         "activate_layer" => Contribution::ActivateLayer {
             layer: "vz_state_pmccon004_destroyed".into(),
             replaces: vec!["vz_state_pmccon004_pristine".into()],
+        },
+        // The objects and the key are the author's: an empty list fails M0240 until they are named.
+        "add_tiny_geometry" => Contribution::AddTinyGeometry {
+            layer: "vz_state_mar_city_pristine".into(),
+            cell: mercs2_quartermaster::manifest::TinyCell { row: 28, col: 32 },
+            key: 0,
+            objects: Vec::new(),
+            model: PathBuf::from("src/tiny.glb"),
         },
         "edit_stringdb" => Contribution::EditStringDb {
             target: "english".into(),
@@ -1096,21 +1135,44 @@ fn stub(kind: &str, n: usize) -> Option<Contribution> {
             trnm: PathBuf::from("src/clip.trnm"),
             events: None,
         },
+        // A pixel family takes the four light classes, which may share one stem and one source.
+        // The shaders register through the m2-sdk, so M0231 fires until the Shipment requires the
+        // `shader-registry` capability.
         "add_shader" => Contribution::AddShader {
-            name,
-            blob: PathBuf::from("src/shader.bin"),
+            family: mercs2_quartermaster::shader::ShaderFamily::Pixel,
+            classes: ["", "_pl", "_sl", "_pl_sl"]
+                .iter()
+                .map(|suffix| mercs2_quartermaster::manifest::ShaderClass {
+                    name: format!("{name}{suffix}"),
+                    stem: name.clone(),
+                    shader: mercs2_quartermaster::manifest::ShaderSource::asm("src/shader.asm"),
+                    shader_low: mercs2_quartermaster::manifest::ShaderSource::asm("src/shader_low.asm"),
+                })
+                .collect(),
         },
         "replace_shader" => Contribution::ReplaceShader {
-            target: "shipped_shader".into(),
-            blob: PathBuf::from("src/shader.bin"),
+            target: "PgMeshVP".into(),
+            shader: mercs2_quartermaster::manifest::ShaderSource::asm("src/shader.asm"),
+            shader_low: Some(mercs2_quartermaster::manifest::ShaderSource::asm("src/shader_low.asm")),
         },
+        // The template starts with no component: M0255 fires until it declares its one
+        // RedEffectComponent, and every other component the template carries.
         "add_fx" => Contribution::AddFx {
+            template: mercs2_quartermaster::template::TemplateForm {
+                name: name.clone(),
+                name_flag: 1,
+                components: Default::default(),
+            },
             name,
-            payload: PathBuf::from("src/effect.fxdict"),
+            effect: PathBuf::from("src/effect.yaml"),
+        },
+        "add_fx_sprite" => Contribution::AddFxSprite {
+            name,
+            image: PathBuf::from("src/sprite.png"),
         },
         "replace_fx" => Contribution::ReplaceFx {
-            target: "shipped_fx".into(),
-            payload: PathBuf::from("src/effect.fxdict"),
+            target: mercs2_quartermaster::manifest::FxTarget::Effect { effect: "shipped_fx".into() },
+            edits: PathBuf::from("src/edits.yaml"),
         },
         "replace_terrain_cell" => Contribution::ReplaceTerrainCell {
             target: "shipped_cell".into(),
@@ -1622,6 +1684,420 @@ fn touches_editor(ui: &mut egui::Ui, touches: &mut Vec<Touch>, required: bool) -
     commit
 }
 
+// ---- sound: add_sound / replace_sound_bank / replace_sound_cue --------------------------------
+
+/// What the cue form says about its values. Every [`SoundCue`] field is required and none has a
+/// default, so the values a new cue starts with ([`unset_cue`]) are placeholders to set.
+const NEW_CUE_NOTE: &str = "every field is required and none has a default: a new cue starts with \
+                            no name, no wave, 0 in every number and positional off \u{2014} set \
+                            each one to the value this cue needs";
+
+/// A cue with every field unset: no name and no wave, which the linter reports, 0 in every number
+/// and positional off. [`NEW_CUE_NOTE`] tells the author these are theirs to set.
+fn unset_cue() -> SoundCue {
+    SoundCue {
+        name: String::new(),
+        wave: PathBuf::new(),
+        group_gain_db: 0.0,
+        cue_gain_db: 0.0,
+        pitch_semitones: 0.0,
+        positional: false,
+        min_distance: 0.0,
+        max_distance: 0.0,
+        distance_exponent: 0.0,
+        doppler_scale: 0.0,
+        start_limit: 0,
+        sound_id: 0,
+        priority: 0.0,
+        group_20: 0.0,
+        cue_16: 0,
+        clip_hash: 0,
+    }
+}
+
+/// A whole number written in decimal, or in hex after `0x`, that fits in `0..=max`.
+fn parse_whole<T: TryFrom<u64>>(text: &str, max: u64) -> Result<T, String> {
+    let text = text.trim();
+    if text.is_empty() {
+        return Err("required".into());
+    }
+    let parsed = match text.strip_prefix("0x").or_else(|| text.strip_prefix("0X")) {
+        Some(hex) => u64::from_str_radix(hex, 16),
+        None => text.parse::<u64>(),
+    };
+    let v = parsed.map_err(|_| {
+        format!("{text:?} is not a whole number: write it in decimal, or in hex after 0x")
+    })?;
+    if v > max {
+        return Err(format!("{text} is out of range: this field holds 0 to {max}"));
+    }
+    T::try_from(v).map_err(|_| format!("{text} is out of range: this field holds 0 to {max}"))
+}
+
+/// A finite `f32`.
+fn parse_f32(text: &str) -> Result<f32, String> {
+    let text = text.trim();
+    if text.is_empty() {
+        return Err("required".into());
+    }
+    let v: f32 = text.parse().map_err(|_| format!("{text:?} is not a number"))?;
+    if !v.is_finite() {
+        return Err(format!("{text} is not a finite 32-bit float: write a finite number"));
+    }
+    Ok(v)
+}
+
+/// A finite `f64`.
+fn parse_f64(text: &str) -> Result<f64, String> {
+    let text = text.trim();
+    if text.is_empty() {
+        return Err("required".into());
+    }
+    let v: f64 = text.parse().map_err(|_| format!("{text:?} is not a number"))?;
+    if !v.is_finite() {
+        return Err(format!("{text} is not a finite number: write a finite number"));
+    }
+    Ok(v)
+}
+
+/// The text of a [`number_row`] as it is typed, and the value it was started from: a draft whose
+/// value changed underneath it (another edit, another contribution) is dropped.
+#[derive(Clone)]
+struct HeldNumber<T: Clone> {
+    origin: T,
+    text: String,
+}
+
+/// A number row. The text is held in egui memory while it is typed and written when the field
+/// loses focus and `parse` accepts it; text `parse` refuses stays in the field with the reason.
+fn number_row<T: Copy + PartialEq + Send + Sync + 'static>(
+    ui: &mut egui::Ui,
+    label: &str,
+    value: &mut T,
+    hint: &str,
+    show: impl Fn(T) -> String,
+    parse: impl Fn(&str) -> Result<T, String>,
+) -> bool {
+    let id = ui.make_persistent_id(("number_row", label));
+    let mut held = ui
+        .data_mut(|d| d.get_temp::<HeldNumber<T>>(id))
+        .filter(|h| h.origin == *value)
+        .unwrap_or_else(|| HeldNumber { origin: *value, text: show(*value) });
+    let state = if parse(&held.text).is_ok() {
+        theme::FieldState::Neutral
+    } else {
+        theme::FieldState::Bad
+    };
+    let r = theme::text_field(ui, label, &mut held.text, hint, state);
+    let parsed = parse(&held.text);
+    if let Err(why) = &parsed {
+        theme::field_note(ui, theme::FieldState::Bad, why);
+    }
+    if r.lost_focus() {
+        if let Ok(v) = parsed {
+            ui.data_mut(|d| d.remove::<HeldNumber<T>>(id));
+            if v != *value {
+                *value = v;
+                return true;
+            }
+            return false;
+        }
+    }
+    ui.data_mut(|d| d.insert_temp(id, held));
+    false
+}
+
+/// The category combo over the named categories of the game's tree
+/// (`mercs2_audio::encode::RETAIL_CATEGORY_NAMES`). A category that is not one of them shows as
+/// unchosen, with M0216.
+fn sound_category_row(ui: &mut egui::Ui, category: &mut String, what: &str) -> bool {
+    use mercs2_audio::encode::RETAIL_CATEGORY_NAMES;
+    let options: Vec<(&str, &str)> = RETAIL_CATEGORY_NAMES.iter().map(|n| (*n, *n)).collect();
+    let mut pick: &str = RETAIL_CATEGORY_NAMES
+        .iter()
+        .copied()
+        .find(|n| *n == category.as_str())
+        .unwrap_or("");
+    let state = if pick.is_empty() { theme::FieldState::Bad } else { theme::FieldState::Neutral };
+    let changed = theme::combo_field(ui, "Category", &mut pick, &options, state);
+    if changed {
+        *category = pick.to_string();
+    }
+    if category.is_empty() {
+        theme::field_note(ui, theme::FieldState::Bad, &format!("required \u{2014} {what}"));
+    } else if pick.is_empty() {
+        theme::field_note(
+            ui,
+            theme::FieldState::Bad,
+            &format!("M0216 \u{2014} {category:?} is not a category of the game's tree; pick one"),
+        );
+    } else {
+        theme::field_note(ui, theme::FieldState::Neutral, what);
+    }
+    changed
+}
+
+/// The preview's `Script` rows for a bank that loads in `sessions`: each session's loader and the
+/// scripts it lives in, as `blast::loader_scripts` claims them.
+fn sound_loader_rows(
+    sessions: &std::collections::BTreeSet<mercs2_quartermaster::manifest::LoadSession>,
+    what: &str,
+) -> Vec<(String, String)> {
+    use mercs2_quartermaster::manifest::LoadSession;
+    if sessions.is_empty() {
+        return vec![("Script".to_string(), format!("no session loads {what}"))];
+    }
+    sessions
+        .iter()
+        .map(|s| {
+            let text = match s {
+                LoadSession::Gameplay => format!(
+                    "gameplay: qm_modloader loads {what}; trampolines in wifpmcinterior and mrxsoundbootstrap"
+                ),
+                LoadSession::FrontEnd => format!(
+                    "front end: qm_shell_modloader loads {what}; a trampoline in shell.wad's mrxsound"
+                ),
+            };
+            ("Script".to_string(), text)
+        })
+        .collect()
+}
+
+/// The preview's `Script` rows for an override of `bank`: each session's loader of its wavebank for a
+/// bank retail Lua loads ([`sound_loader_rows`]); for a bank the engine loads, that the engine loads
+/// it by its retail name, through no loader (`sound::loader_sessions`).
+fn override_loader_rows(bank: &str, language: Option<mercs2_quartermaster::manifest::Language>) -> Vec<(String, String)> {
+    use mercs2_quartermaster::sound::{bank_loader, loader_sessions, BankLoader, RETAIL_LUA_LOAD_SITES};
+    match bank_loader(bank, &RETAIL_LUA_LOAD_SITES) {
+        BankLoader::Lua => sound_loader_rows(&loader_sessions(bank, language), "its wavebank"),
+        BankLoader::Engine => vec![(
+            "Script".to_string(),
+            format!("none: the engine loads {bank} by its retail name, the override waves appended to its wavebank"),
+        )],
+    }
+}
+
+/// The sessions an `add_sound` bank loads in: one pill per session, on or off, in manifest order
+/// (`LoadSession::ALL`). None on is M0221.
+fn sound_load_in_row(ui: &mut egui::Ui, load_in: &mut Vec<mercs2_quartermaster::manifest::LoadSession>) -> bool {
+    use mercs2_quartermaster::manifest::LoadSession;
+    let mut commit = false;
+    ui.horizontal(|ui| {
+        let lw = theme::field_label_w(ui.available_width());
+        ui.add_sized([lw, 18.0], egui::Label::new("Load in"));
+        for session in LoadSession::ALL {
+            let on = load_in.contains(&session);
+            if theme::pill(ui, session.token(), on).clicked() {
+                if on {
+                    load_in.retain(|s| *s != session);
+                } else {
+                    load_in.push(session);
+                    load_in.sort();
+                }
+                commit = true;
+            }
+        }
+    });
+    if load_in.is_empty() {
+        theme::field_note(
+            ui,
+            theme::FieldState::Bad,
+            "M0221 \u{2014} pick where the bank loads: gameplay (the overlay) or the front end (the shell patch)",
+        );
+    } else {
+        theme::field_note(
+            ui,
+            theme::FieldState::Neutral,
+            "each session's mod loader loads the bank; its block ships to that session's WAD",
+        );
+    }
+    commit
+}
+
+/// The bank a sound override targets, and the language of a `vo_*` bank's copy. The language row
+/// is shown for a bank that starts with `vo_` (`sound::is_vo_bank`, the rule retail Lua localizes
+/// by); committing a bank that does not clears the language.
+fn sound_bank_row(
+    ui: &mut egui::Ui,
+    bank: &mut String,
+    language: &mut Option<mercs2_quartermaster::manifest::Language>,
+) -> bool {
+    use mercs2_quartermaster::manifest::Language;
+    use mercs2_quartermaster::sound::{entry_name, is_vo_bank};
+    let mut commit = false;
+    if text_row(ui, "Bank", bank, "ui_hud", true) {
+        commit = true;
+        if !is_vo_bank(bank) {
+            *language = None;
+        }
+    }
+    theme::field_note(ui, theme::FieldState::Neutral, "a bank the game ships, as its Lua loads it");
+    if is_vo_bank(bank) {
+        let options: Vec<(Option<Language>, &str)> =
+            Language::ALL.iter().map(|l| (Some(*l), l.token())).collect();
+        let state = if language.is_none() { theme::FieldState::Bad } else { theme::FieldState::Neutral };
+        commit |= theme::combo_field(ui, "Language", language, &options, state);
+        match language {
+            None => theme::field_note(
+                ui,
+                theme::FieldState::Bad,
+                "M0217 \u{2014} a `vo_` bank has one copy per language; pick the copy this replaces",
+            ),
+            Some(l) => theme::field_note(
+                ui,
+                theme::FieldState::Neutral,
+                &format!("replaces the entry {}", entry_name(bank, Some(*l))),
+            ),
+        }
+    } else if let Some(l) = *language {
+        theme::field_note(
+            ui,
+            theme::FieldState::Bad,
+            &format!(
+                "M0217 \u{2014} {bank:?} is not a `vo_` bank, so it has one copy for every \
+                 language; `language: {}` does not apply",
+                l.token()
+            ),
+        );
+        if ui.button("Clear language").clicked() {
+            *language = None;
+            commit = true;
+        }
+    }
+    commit
+}
+
+/// Every field of one cue, one row each.
+fn sound_cue_fields(ui: &mut egui::Ui, cue: &mut SoundCue, root: &Path) -> bool {
+    let mut commit = false;
+    theme::field_note(ui, theme::FieldState::Neutral, NEW_CUE_NOTE);
+    commit |= text_row(ui, "Name", &mut cue.name, "ui_my_click", true);
+    if !cue.name.is_empty() {
+        theme::field_note(
+            ui,
+            theme::FieldState::Neutral,
+            &format!(
+                "0x{:08X} \u{2014} the guid Sound.CueSound looks up",
+                mercs2_formats::hash::pandemic_hash_m2(&cue.name)
+            ),
+        );
+    }
+    commit |= source_row(ui, "Wave", &mut cue.wave, root, &["wav"]);
+    theme::field_note(
+        ui,
+        theme::FieldState::Neutral,
+        "uncompressed 16-bit PCM, mono or stereo",
+    );
+    let float = |v: f32| v.to_string();
+    let double = |v: f64| v.to_string();
+    let hex = |v: u32| format!("0x{v:08X}");
+    commit |= number_row(ui, "Group gain dB", &mut cue.group_gain_db, "dB", double, parse_f64);
+    theme::field_note(ui, theme::FieldState::Neutral, "the sound instance's base volume, in dB");
+    commit |= number_row(ui, "Cue gain dB", &mut cue.cue_gain_db, "dB", double, parse_f64);
+    theme::field_note(ui, theme::FieldState::Neutral, "the cue's gain, in dB");
+    commit |= number_row(ui, "Pitch", &mut cue.pitch_semitones, "semitones", float, parse_f32);
+    theme::field_note(ui, theme::FieldState::Neutral, "the base pitch, in semitones");
+    ui.horizontal(|ui| {
+        theme::field_label(ui, "Positional");
+        commit |= ui.checkbox(&mut cue.positional, "").changed();
+    });
+    theme::field_note(
+        ui,
+        theme::FieldState::Neutral,
+        if cue.positional {
+            "plays from its emitter's own source, positioned, when it has one"
+        } else {
+            "plays from the shared 2D source"
+        },
+    );
+    commit |= number_row(ui, "Min distance", &mut cue.min_distance, "full volume up to", float, parse_f32);
+    commit |= number_row(ui, "Max distance", &mut cue.max_distance, "silent from", float, parse_f32);
+    commit |= number_row(
+        ui,
+        "Distance exp.",
+        &mut cue.distance_exponent,
+        "fall-off exponent",
+        float,
+        parse_f32,
+    );
+    commit |= number_row(ui, "Doppler scale", &mut cue.doppler_scale, "0..", float, parse_f32);
+    commit |= number_row(
+        ui,
+        "Start limit",
+        &mut cue.start_limit,
+        "0 starts every time",
+        |v: u8| v.to_string(),
+        |t| parse_whole(t, u64::from(u8::MAX)),
+    );
+    theme::field_note(
+        ui,
+        theme::FieldState::Neutral,
+        "starts only while fewer than this many instances play; 0 starts it every time",
+    );
+    commit |= number_row(
+        ui,
+        "Sound id",
+        &mut cue.sound_id,
+        "0x… or decimal",
+        hex,
+        |t| parse_whole(t, u64::from(u32::MAX)),
+    );
+    commit |= number_row(ui, "Priority", &mut cue.priority, "voice priority", float, parse_f32);
+    commit |= number_row(ui, "Group +0x20", &mut cue.group_20, "carried as written", float, parse_f32);
+    commit |= number_row(
+        ui,
+        "Cue +0x16",
+        &mut cue.cue_16,
+        "carried as written",
+        |v: u16| v.to_string(),
+        |t| parse_whole(t, u64::from(u16::MAX)),
+    );
+    commit |= number_row(
+        ui,
+        "Clip hash",
+        &mut cue.clip_hash,
+        "0x… or decimal",
+        hex,
+        |t| parse_whole(t, u64::from(u32::MAX)),
+    );
+    commit
+}
+
+/// The cues of a bank, each with its fields and a remove button, and a button that appends an
+/// [`unset_cue`].
+fn sound_cue_list(ui: &mut egui::Ui, cues: &mut Vec<SoundCue>, root: &Path) -> bool {
+    let mut commit = false;
+    let mut remove: Option<usize> = None;
+    if cues.is_empty() {
+        theme::field_note(
+            ui,
+            theme::FieldState::Bad,
+            "M0215 \u{2014} a bank declares at least one cue",
+        );
+    }
+    for (i, cue) in cues.iter_mut().enumerate() {
+        ui.push_id(("sound_cue", i), |ui| {
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                theme::eyebrow(ui, &format!("Cue {i}"));
+                if ui.small_button("\u{2715}").on_hover_text("Remove this cue").clicked() {
+                    remove = Some(i);
+                }
+            });
+            commit |= sound_cue_fields(ui, cue, root);
+        });
+    }
+    if let Some(i) = remove {
+        cues.remove(i);
+        commit = true;
+    }
+    if ui.button("+ cue").clicked() {
+        cues.push(unset_cue());
+        commit = true;
+    }
+    commit
+}
+
 /// Edit every field of one contribution. Returns true when a change should be written back.
 ///
 /// The caller passes a CLONE; this mutates it, and the caller compares and emits `Act::Edit`.
@@ -1816,26 +2292,46 @@ fn contribution_form(
                 },
             );
         }
-        Contribution::AddSound { name, bank, sound } => {
-            use mercs2_quartermaster::manifest::SoundKind;
-            commit |= text_row(ui, "Asset name", name, "amb_myjungle", true);
-            commit |= source_row(ui, "Bank", bank, root, &[]);
-            commit |= theme::combo_field(
-                ui,
-                "Table",
-                sound,
-                &[
-                    (SoundKind::Wavebank, "wavebank"),
-                    (SoundKind::Soundbank, "soundbank"),
-                    (SoundKind::Sounddb, "sounddb"),
-                ],
-                theme::FieldState::Neutral,
-            );
+        Contribution::AddSound { bank, category, cues, load_in } => {
+            commit |= text_row(ui, "Bank", bank, "my_sounds", true);
+            if mercs2_quartermaster::sound::is_vo_bank(bank) {
+                theme::field_note(
+                    ui,
+                    theme::FieldState::Bad,
+                    "M0215 — retail Lua appends the language to a `vo_` bank's name before loading \
+                     it; name the bank without `vo_`",
+                );
+            } else {
+                theme::field_note(
+                    ui,
+                    theme::FieldState::Neutral,
+                    &format!(
+                        "0x{:08X} — the entry of its soundbank, sounddb and wavebank, and the name \
+                         the mod loader loads",
+                        mercs2_quartermaster::manifest::asset_hash(bank)
+                    ),
+                );
+            }
+            commit |= sound_category_row(ui, category, "the category every cue's group is in");
+            commit |= sound_load_in_row(ui, load_in);
+            commit |= sound_cue_list(ui, cues, root);
+        }
+        Contribution::ReplaceSoundBank { bank, language, category, cues } => {
+            commit |= sound_bank_row(ui, bank, language);
+            commit |= sound_category_row(ui, category, "the category every cue's group is in");
             theme::field_note(
                 ui,
                 theme::FieldState::Neutral,
-                "the bytes ship verbatim — nothing here encodes audio, so the bank must already                  be one the game accepts",
+                "the bank's soundbank and sounddb are encoded from these cues; a cue of the game's \
+                 bank not declared here is gone",
             );
+            commit |= sound_cue_list(ui, cues, root);
+        }
+        Contribution::ReplaceSoundCue { bank, language, category, cue } => {
+            commit |= sound_bank_row(ui, bank, language);
+            commit |= sound_category_row(ui, category, "the category of the cue's new group");
+            theme::eyebrow(ui, "Cue — its name is the game's cue it replaces");
+            commit |= sound_cue_fields(ui, cue, root);
         }
         Contribution::AddMovie { name, movie } => {
             commit |= text_row(ui, "Asset name", name, "my_menu", true);
@@ -1890,6 +2386,39 @@ fn contribution_form(
                 ui,
                 theme::FieldState::Neutral,
                 "per-entity pos / quat / model. Extract a baseline: `qm extract-world <layer>`",
+            );
+        }
+        Contribution::AddTinyGeometry { layer, cell, key, objects, model } => {
+            commit |= text_row(ui, "Layer", layer, "vz_state_mar_city_pristine", true);
+            theme::field_note(ui, theme::FieldState::Neutral, "a layer NAME; the placement goes into it");
+            commit |= number_row(ui, "Cell row", &mut cell.row, "0..39, from z", |v| v.to_string(), |t| parse_whole(t, 39));
+            commit |= number_row(ui, "Cell col", &mut cell.col, "0..39, from x", |v| v.to_string(), |t| parse_whole(t, 39));
+            commit |= number_row(ui, "Key", key, "the placement's GUID", |v| format!("0x{v:08X}"), |t| parse_whole(t, u32::MAX as u64));
+            let mut remove: Option<usize> = None;
+            for (i, o) in objects.iter_mut().enumerate() {
+                ui.horizontal(|ui| {
+                    let state = if o.trim().is_empty() { theme::FieldState::Bad } else { theme::FieldState::Neutral };
+                    let r = theme::text_field(ui, &format!("object {i}"), o, "0xGUID or placement name", state);
+                    commit |= r.lost_focus();
+                    if ui.small_button("✕").clicked() {
+                        remove = Some(i);
+                    }
+                });
+            }
+            if let Some(i) = remove {
+                objects.remove(i);
+                commit = true;
+            }
+            if ui.button("+ object").clicked() {
+                objects.push(String::new());
+                commit = true;
+            }
+            commit |= source_row(ui, "Model", model, root, &["glb", "gltf"]);
+            theme::field_note(
+                ui,
+                theme::FieldState::Neutral,
+                "each primitive declares extras.tiny_role (intact / ruined); each vertex a _TINY_SLOT \
+                 into the objects. Extract one: `qm extract-tiny <model>`",
             );
         }
         Contribution::ActivateLayer { layer, replaces } => {
@@ -2590,10 +3119,41 @@ fn blast_rows(c: &Contribution) -> Vec<(String, String)> {
         Contribution::AddTexture { name, .. } => {
             vec![("Writes".to_string(), format!("texture {name}  (new hash)"))]
         }
-        Contribution::AddSound { name, sound, .. } => vec![(
-            "Writes".to_string(),
-            format!("{} {name}  (new hash)", format!("{sound:?}").to_lowercase()),
-        )],
+        // The same claims `blast::claims` makes: the bank's entry, each cue's guid, and the loader
+        // scripts of each session it loads in.
+        Contribution::AddSound { bank, cues, load_in, .. } => {
+            let mut rows = vec![("Writes".to_string(), format!("sound bank {bank}  (new hash)"))];
+            rows.extend(sound_loader_rows(&load_in.iter().copied().collect(), "the bank"));
+            rows.extend(cues.iter().map(|c| {
+                ("Writes".to_string(), format!("sound cue {}  (new guid)", c.name))
+            }));
+            rows.push((
+                "Merge".to_string(),
+                "keyed on cue name \u{2014} FindCue answers with the first loaded table".to_string(),
+            ));
+            rows
+        }
+        Contribution::ReplaceSoundBank { bank, language, cues, .. } => {
+            let entry = mercs2_quartermaster::sound::entry_name(bank, *language);
+            let mut rows = vec![("Writes".to_string(), format!("sound bank {entry}  \u{2014} EXCLUSIVE"))];
+            rows.extend(override_loader_rows(bank, *language));
+            rows.extend(cues.iter().map(|c| {
+                ("Writes".to_string(), format!("sound cue {}  \u{2014} EXCLUSIVE", c.name))
+            }));
+            rows
+        }
+        Contribution::ReplaceSoundCue { bank, language, cue, .. } => {
+            let mut rows = vec![(
+                "Writes".to_string(),
+                format!(
+                    "sound cue {} in {}  \u{2014} EXCLUSIVE",
+                    cue.name,
+                    mercs2_quartermaster::sound::entry_name(bank, *language)
+                ),
+            )];
+            rows.extend(override_loader_rows(bank, *language));
+            rows
+        }
         Contribution::ReplaceTexture { target, .. } => vec![
             ("Writes".to_string(), format!("texture {target}")),
             (
@@ -2614,6 +3174,14 @@ fn blast_rows(c: &Contribution) -> Vec<(String, String)> {
         Contribution::EditWorld { layer, .. } => vec![
             ("Writes".to_string(), format!("placement layer {layer}")),
             ("Merge".to_string(), "last-wins \u{2014} the later overlay's edits win".to_string()),
+        ],
+        Contribution::AddTinyGeometry { layer, cell, key, .. } => vec![
+            (
+                "Adds".to_string(),
+                format!("model {}", mercs2_quartermaster::tiny::model_name(layer, cell.row, cell.col, *key)),
+            ),
+            ("Writes".to_string(), format!("placement layer {layer}, cell (row {}, col {})", cell.row, cell.col)),
+            ("Merge".to_string(), "one stand-in per cell; another Shipment's write to the layer conflicts".to_string()),
         ],
         Contribution::ActivateLayer { layer, .. } => vec![
             ("Activates".to_string(), format!("world layer {layer}")),
@@ -2702,6 +3270,19 @@ pub fn inspector(ui: &mut egui::Ui, p: &Panel, wad_stack: &[String], has_game: b
         }
         for (i, w) in wad_stack.iter().enumerate() {
             row(ui, if i == 0 { "base" } else { "overlay" }, &leaf(Path::new(w)), theme::DIM);
+        }
+        // The language WADs the open Shipment reads: the build opens them after the rows above.
+        if let (Some(s), false) = (&p.shipment, wad_stack.is_empty()) {
+            match build_stack_paths(wad_stack, &s.manifest) {
+                Ok(paths) => {
+                    for w in &paths[wad_stack.len()..] {
+                        row(ui, "language", &leaf(w), theme::DIM);
+                    }
+                }
+                Err(e) => {
+                    ui.label(egui::RichText::new(e).size(11.0).color(theme::BAD));
+                }
+            }
         }
     });
 
@@ -2851,6 +3432,26 @@ pub fn corpus_root() -> Option<PathBuf> {
     lua.is_dir().then_some(lua)
 }
 
+/// The WADs a build of `manifest` opens, in open order: the configured stack (`vz.wad`, then
+/// `vz-patch.wad` and each `--overlay`), then the WAD of each language the Shipment reads — the
+/// entries [`mercs2_quartermaster::compat::game_stack_paths`] lists after `vz.wad`. `GameStack`
+/// resolves the last-opened WAD first, so a language's copy of an entry is read over the base's.
+pub fn build_stack_paths(
+    wad_stack: &[String],
+    manifest: &mercs2_quartermaster::manifest::Manifest,
+) -> Result<Vec<PathBuf>, String> {
+    let Some(vz) = wad_stack.first() else {
+        return Err(
+            "build needs the game's vz.wad: none is configured \u{2014} set it in Settings".into(),
+        );
+    };
+    let game = mercs2_quartermaster::compat::game_stack_paths(Path::new(vz), [manifest])
+        .map_err(|e| format!("build needs the game stack: {e}"))?;
+    let mut paths: Vec<PathBuf> = wad_stack.iter().map(PathBuf::from).collect();
+    paths.extend(game.into_iter().skip(1));
+    Ok(paths)
+}
+
 /// Execute one queued action.
 pub fn apply(
     act: Act,
@@ -2960,18 +3561,22 @@ pub fn apply(
             // WADs, linting and linking Lua takes seconds; doing it inline froze the frame (and any
             // "Building…" spinner with it), which is the whole bug. The game stack is opened ON the
             // worker for the same reason — `GameStack::open` decompresses index tables.
-            let paths: Vec<PathBuf> = wad_stack.iter().map(PathBuf::from).collect();
+            // The stack is [`build_stack_paths`]: the one the inspector lists.
+            let paths = build_stack_paths(wad_stack, &s.manifest);
             let names = names.cloned();
             let corpus = corpus.map(Path::to_path_buf);
             let (tx, rx) = std::sync::mpsc::channel();
             let spawned = std::thread::Builder::new()
                 .name("qm-build".into())
                 .spawn(move || {
-                    let outcome = match mercs2_quartermaster::game::GameStack::open(&paths) {
-                        Ok(mut g) => {
+                    let outcome = match paths.map(|p| mercs2_quartermaster::game::GameStack::open(&p)) {
+                        Ok(Ok(mut g)) => {
                             run_build_outcome(&s, Some(&mut g), names.as_ref(), corpus.as_deref())
                         }
-                        Err(e) => BuildOutcome::Failed(format!("build needs a readable game stack: {e:?}")),
+                        Ok(Err(e)) => {
+                            BuildOutcome::Failed(format!("build needs a readable game stack: {e:?}"))
+                        }
+                        Err(e) => BuildOutcome::Failed(e),
                     };
                     // A send error just means the panel was dropped (app closing) — nothing to do.
                     let _ = tx.send(outcome);
@@ -3030,7 +3635,7 @@ fn run_build_outcome(
     names: Option<&NameTable>,
     corpus: Option<&Path>,
 ) -> BuildOutcome {
-    match build::build(s, game, names, None, corpus) {
+    match build::build(s, game, names, None, corpus, None) {
         Ok(r) => BuildOutcome::Report(r),
         Err(BuildError::Blocked(ds)) => BuildOutcome::Blocked(ds),
         Err(e) => BuildOutcome::Failed(format!("{e:?}")),
@@ -3531,6 +4136,156 @@ mod tests {
         for k in &offered {
             let c = stub(k, 1).unwrap_or_else(|| panic!("`{k}` is offered but has no stub"));
             assert_eq!(&c.kind(), k, "stub for `{k}` produced a {} instead", c.kind());
+        }
+    }
+
+    /// Every name the category combo offers is a category of the game's tree: the encoder refuses a
+    /// group whose category hash is not in `RETAIL_CATEGORIES`.
+    #[test]
+    fn every_offered_sound_category_hashes_into_the_tree() {
+        use mercs2_audio::encode::{RETAIL_CATEGORIES, RETAIL_CATEGORY_NAMES};
+        for name in RETAIL_CATEGORY_NAMES {
+            let h = mercs2_formats::hash::pandemic_hash_m2(name);
+            assert!(
+                RETAIL_CATEGORIES.iter().any(|c| c.category == h),
+                "{name} = 0x{h:08X} is not in RETAIL_CATEGORIES"
+            );
+        }
+    }
+
+    /// Each sound stub is written by the page's own `mutate` and reopens unchanged, with the
+    /// linter reporting what the author still has to enter.
+    #[test]
+    fn sound_stubs_are_written_and_reopen() {
+        for kind in ["add_sound", "replace_sound_bank", "replace_sound_cue"] {
+            let d = tmp(&format!("sound_stub_{kind}"));
+            let mut p = Panel::default();
+            p.scaffold(&d, None).expect("scaffold");
+            let c = stub(kind, 1).expect("stub");
+            p.mutate(None, |m| m.contributions.push(c.clone())).expect("write");
+            let s = p.shipment.as_ref().expect("the Shipment reopens");
+            assert_eq!(s.manifest.contributions, vec![c], "{kind} changed across the round trip");
+            let codes: Vec<&str> = p.findings_for(0).map(|d| d.rule.code).collect();
+            assert!(codes.contains(&"M0216"), "{kind}: the unchosen category is not reported: {codes:?}");
+            assert!(codes.contains(&"M0215"), "{kind}: the missing name or cues are not reported: {codes:?}");
+            assert_eq!(codes.contains(&"M0221"), kind == "add_sound", "{kind}: the unchosen load_in: {codes:?}");
+        }
+    }
+
+    /// The preview names each session's loader for a sound kind: an `add_sound` its `load_in`, an
+    /// override the sessions retail Lua loads its bank in (`ui_shell`: the front end only; `ui_hud`:
+    /// both), and none for a bank the engine loads (`veh_jeep`).
+    #[test]
+    fn sound_previews_name_each_sessions_loader() {
+        use mercs2_quartermaster::manifest::LoadSession;
+        let scripts = |c: &Contribution| -> Vec<String> {
+            blast_rows(c).into_iter().filter(|(k, _)| k == "Script").map(|(_, v)| v).collect()
+        };
+        let Contribution::AddSound { bank, category, cues, .. } = stub("add_sound", 1).unwrap() else {
+            panic!("the add_sound stub")
+        };
+        let added = |load_in: Vec<LoadSession>| Contribution::AddSound {
+            bank: bank.clone(),
+            category: category.clone(),
+            cues: cues.clone(),
+            load_in,
+        };
+        let front = scripts(&added(vec![LoadSession::FrontEnd]));
+        assert_eq!(front.len(), 1);
+        assert!(front[0].starts_with("front end: qm_shell_modloader"), "{front:?}");
+        assert_eq!(scripts(&added(LoadSession::ALL.to_vec())).len(), 2);
+        assert_eq!(scripts(&added(Vec::new())), vec!["no session loads the bank".to_string()]);
+
+        let cue = |bank: &str| {
+            let Contribution::ReplaceSoundCue { category, cue, .. } = stub("replace_sound_cue", 1).unwrap() else {
+                panic!("the replace_sound_cue stub")
+            };
+            Contribution::ReplaceSoundCue { bank: bank.into(), language: None, category, cue }
+        };
+        let shell = scripts(&cue("ui_shell"));
+        assert_eq!(shell.len(), 1, "{shell:?}");
+        assert!(shell[0].starts_with("front end:"), "{shell:?}");
+        assert_eq!(scripts(&cue("ui_hud")).len(), 2);
+        let engine = scripts(&cue("veh_jeep"));
+        assert_eq!(engine.len(), 1, "{engine:?}");
+        assert!(engine[0].starts_with("none: the engine loads veh_jeep"), "{engine:?}");
+    }
+
+    /// A whole-number field takes decimal or `0x` hex and refuses a value its type cannot hold.
+    #[test]
+    fn whole_number_fields_take_decimal_or_hex() {
+        assert_eq!(parse_whole::<u32>("0xEA1343AA", u64::from(u32::MAX)), Ok(0xEA13_43AA));
+        assert_eq!(parse_whole::<u32>("0XEA1343AA", u64::from(u32::MAX)), Ok(0xEA13_43AA));
+        assert_eq!(parse_whole::<u32>(" 1024 ", u64::from(u32::MAX)), Ok(1024));
+        assert_eq!(parse_whole::<u8>("255", u64::from(u8::MAX)), Ok(255));
+        assert!(parse_whole::<u8>("256", u64::from(u8::MAX)).unwrap_err().contains("out of range"));
+        assert!(parse_whole::<u16>("0x10000", u64::from(u16::MAX)).unwrap_err().contains("out of range"));
+        assert_eq!(parse_whole::<u32>("", u64::from(u32::MAX)), Err("required".to_string()));
+        assert!(parse_whole::<u32>("-1", u64::from(u32::MAX)).is_err());
+        assert!(parse_whole::<u32>("0xZZ", u64::from(u32::MAX)).is_err());
+    }
+
+    /// A float field takes a finite number only: the builder refuses a non-finite cue field.
+    #[test]
+    fn float_fields_take_finite_numbers_only() {
+        assert_eq!(parse_f32("-6.5"), Ok(-6.5));
+        assert_eq!(parse_f64("-6.02"), Ok(-6.02));
+        assert!(parse_f32("1e40").is_err(), "overflows f32 to infinity");
+        assert!(parse_f32("NaN").is_err());
+        assert!(parse_f64("inf").is_err());
+        assert_eq!(parse_f64(""), Err("required".to_string()));
+    }
+
+    /// The build keeps the configured stack in its order (base, patch, overlays) and opens the WAD
+    /// of each language the Shipment reads after it; with no language, it is the configured stack.
+    #[test]
+    fn the_build_stack_is_the_configured_stack_then_the_language_wads() {
+        use mercs2_quartermaster::manifest::Language;
+        let data = tmp("build_stack").join("data");
+        std::fs::create_dir_all(&data).unwrap();
+        for f in ["vz.wad", "vz-patch.wad", "French.wad"] {
+            std::fs::write(data.join(f), b"").unwrap();
+        }
+        let overlay = tmp("build_stack_overlay").join("mine.wad");
+        std::fs::write(&overlay, b"").unwrap();
+        let stack: Vec<String> = [data.join("vz.wad"), data.join("vz-patch.wad"), overlay.clone()]
+            .iter()
+            .map(|p| p.to_string_lossy().into_owned())
+            .collect();
+
+        let d = tmp("build_stack_shipment");
+        let mut p = Panel::default();
+        p.scaffold(&d, None).expect("scaffold");
+        let plain = p.shipment.as_ref().unwrap().manifest.clone();
+        assert_eq!(
+            build_stack_paths(&stack, &plain).unwrap(),
+            stack.iter().map(PathBuf::from).collect::<Vec<_>>()
+        );
+
+        let mut c = stub("replace_sound_bank", 1).unwrap();
+        if let Contribution::ReplaceSoundBank { bank, language, .. } = &mut c {
+            *bank = "vo_mattias".into();
+            *language = Some(Language::French);
+        }
+        p.mutate(None, |m| m.contributions.push(c)).expect("write");
+        let french = p.shipment.as_ref().unwrap().manifest.clone();
+        assert_eq!(
+            build_stack_paths(&stack, &french).unwrap(),
+            vec![data.join("vz.wad"), data.join("vz-patch.wad"), overlay, data.join("French.wad")]
+        );
+
+        assert!(build_stack_paths(&[], &plain).unwrap_err().contains("vz.wad"));
+        std::fs::remove_file(data.join("French.wad")).unwrap();
+        assert!(build_stack_paths(&stack, &french).unwrap_err().contains("french"));
+    }
+
+    /// Every kind a domain offers under "Add to Shipment" has a stub for its button to add.
+    #[test]
+    fn every_domain_kind_has_a_stub() {
+        for d in crate::domain::Domain::ALL {
+            for k in d.kinds() {
+                assert!(stub(k, 1).is_some(), "{k} is offered by a domain but has no stub");
+            }
         }
     }
 

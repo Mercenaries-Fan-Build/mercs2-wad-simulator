@@ -163,7 +163,7 @@ fn main() {
         FieldValue::F32(x) => format!("0x{h:08X}={x}"),
         FieldValue::U16(x) => format!("0x{h:08X}={x}"),
         FieldValue::U8(x) => format!("0x{h:08X}={x}"),
-        FieldValue::Bit(x) => format!("0x{h:08X}={x}"),
+        FieldValue::Bits(x) => format!("0x{h:08X}={x}"),
         other => format!("0x{h:08X}={other:?}"),
     };
 

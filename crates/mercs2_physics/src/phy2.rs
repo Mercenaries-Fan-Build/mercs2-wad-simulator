@@ -424,81 +424,84 @@ mod tests {
         assert!(!ragdoll.is_complete());
     }
 
-    /// Live: a REAL retail building whose `hkpConvexVerticesShape` planes carry the 0.05 m convex-radius
-    /// shell. Block 789's c3 model container holds a single 83-vertex / 52-plane hull that the old
-    /// on-plane-against-zero test triangulated to ZERO tris (→ render-mesh fallback). Decoding its PHY2
-    /// end-to-end (block → `model` chunk → `PHY2` sub-chunk → parse → `authored_collision`) must now yield
-    /// a non-empty, sane, COMPLETE authored collider. SKIPS (stays green) when `vz.wad` is absent.
-    #[test]
-    fn convex_radius_building_hull_triangulates_live_from_vz_wad_if_present() {
-        use mercs2_formats::ffcs::load_ffcs_archive;
-        use mercs2_formats::havok::parse_phy2_body;
-        use mercs2_formats::sges::decompress_block;
-        use mercs2_formats::ucfx::{extract_chunk_body, parse_block_entry_table};
+    #[cfg(feature = "retail")]
+    mod retail {
+        use super::*;
 
-        const MODEL_TYPE_HASH: u32 = 0x5B72_4250; // pandemic_hash_m2("model")
+        /// Live: a REAL retail building whose `hkpConvexVerticesShape` planes carry the 0.05 m convex-radius
+        /// shell. Block 789's c3 model container holds a single 83-vertex / 52-plane hull that the old
+        /// on-plane-against-zero test triangulated to ZERO tris (→ render-mesh fallback). Decoding its PHY2
+        /// end-to-end (block → `model` chunk → `PHY2` sub-chunk → parse → `authored_collision`) must now yield
+        /// a non-empty, sane, COMPLETE authored collider.
+        ///
+        /// Game-gated, built by the `retail` feature: reads the `vz.wad` named by the repo-root
+        /// `.mercs2-local.toml` and fails if it is absent. Run with `cargo xtask retail-test`.
+        #[test]
+        fn convex_radius_building_hull_triangulates_live_from_vz_wad_if_present() {
+            use mercs2_formats::ffcs::load_ffcs_archive;
+            use mercs2_formats::havok::parse_phy2_body;
+            use mercs2_formats::sges::decompress_block;
+            use mercs2_formats::ucfx::{extract_chunk_body, parse_block_entry_table};
 
-        let Some(path) = mercs2_formats::game_paths::vz_wad_from_env()
-            .or_else(|| mercs2_formats::game_paths::wad_from_local_config(std::path::Path::new(".")))
-        else {
-            return eprintln!("skip: vz.wad not found");
-        };
-        let Ok(mut f) = std::fs::File::open(&path) else {
-            return eprintln!("skip: vz.wad not readable");
-        };
-        let size = f.metadata().unwrap().len();
-        let arch = load_ffcs_archive(&mut f, size).expect("ffcs archive");
-        let dec = decompress_block(&mut f, &arch.indx, 789).expect("decompress block 789");
+            const MODEL_TYPE_HASH: u32 = 0x5B72_4250; // pandemic_hash_m2("model")
 
-        // Slice the `model` container out of the block, then pull its `PHY2` sub-chunk.
-        let (count, entries) = parse_block_entry_table(&dec);
-        let mut pos = 4 + count as usize * 16;
-        let mut model: Option<(usize, usize)> = None;
-        for e in &entries {
-            let end = pos + e.chunk_size as usize;
-            if e.type_hash == MODEL_TYPE_HASH && end <= dec.len() {
-                model = Some((pos, end));
-                break;
+            let path = mercs2_formats::game_paths::local_config_vz_wad(std::path::Path::new(env!("CARGO_MANIFEST_DIR")))
+                .unwrap_or_else(|e| panic!("{e}"));
+            let mut f = std::fs::File::open(&path).unwrap_or_else(|e| panic!("open {}: {e}", path.display()));
+            let size = f.metadata().unwrap().len();
+            let arch = load_ffcs_archive(&mut f, size).expect("ffcs archive");
+            let dec = decompress_block(&mut f, &arch.indx, 789).expect("decompress block 789");
+
+            // Slice the `model` container out of the block, then pull its `PHY2` sub-chunk.
+            let (count, entries) = parse_block_entry_table(&dec);
+            let mut pos = 4 + count as usize * 16;
+            let mut model: Option<(usize, usize)> = None;
+            for e in &entries {
+                let end = pos + e.chunk_size as usize;
+                if e.type_hash == MODEL_TYPE_HASH && end <= dec.len() {
+                    model = Some((pos, end));
+                    break;
+                }
+                pos = end;
             }
-            pos = end;
-        }
-        let (s0, s1) = model.expect("block 789 has a model container");
-        let body = extract_chunk_body(&dec[s0..s1], b"PHY2").expect("model 789 carries a PHY2 chunk");
-        let pf = parse_phy2_body(&body).expect("parse PHY2");
+            let (s0, s1) = model.expect("block 789 has a model container");
+            let body = extract_chunk_body(&dec[s0..s1], b"PHY2").expect("model 789 carries a PHY2 chunk");
+            let pf = parse_phy2_body(&body).expect("parse PHY2");
 
-        // The body is a single convex hull carrying the convex-radius shell.
-        let n_hulls = pf.shapes.iter().filter(|s| matches!(s, Shape::Convex(_))).count();
-        assert!(n_hulls >= 1, "block 789 PHY2 must carry a convex hull, got shapes {:?}", pf.shapes.len());
+            // The body is a single convex hull carrying the convex-radius shell.
+            let n_hulls = pf.shapes.iter().filter(|s| matches!(s, Shape::Convex(_))).count();
+            assert!(n_hulls >= 1, "block 789 PHY2 must carry a convex hull, got shapes {:?}", pf.shapes.len());
 
-        let ac = authored_collision(&pf.shapes);
-        assert!(!ac.tris.is_empty(), "convex-radius hull must now triangulate (was 0 tris → fallback)");
-        assert!(ac.is_complete(), "a pure-convex building body is a COMPLETE authored collider");
+            let ac = authored_collision(&pf.shapes);
+            assert!(!ac.tris.is_empty(), "convex-radius hull must now triangulate (was 0 tris → fallback)");
+            assert!(ac.is_complete(), "a pure-convex building body is a COMPLETE authored collider");
 
-        // Every tri vertex is finite and within the hull's own (building-scale) bbox — sane geometry.
-        let mut lo = Vec3::splat(f32::MAX);
-        let mut hi = Vec3::splat(f32::MIN);
-        for s in &pf.shapes {
-            if let Shape::Convex(h) = s {
-                for v in &h.vertices {
-                    lo = lo.min(Vec3::from(*v));
-                    hi = hi.max(Vec3::from(*v));
+            // Every tri vertex is finite and within the hull's own (building-scale) bbox — sane geometry.
+            let mut lo = Vec3::splat(f32::MAX);
+            let mut hi = Vec3::splat(f32::MIN);
+            for s in &pf.shapes {
+                if let Shape::Convex(h) = s {
+                    for v in &h.vertices {
+                        lo = lo.min(Vec3::from(*v));
+                        hi = hi.max(Vec3::from(*v));
+                    }
                 }
             }
-        }
-        for t in &ac.tris {
-            for p in t {
-                assert!(p.is_finite(), "non-finite authored tri vertex {p:?}");
-                assert!(
-                    p.x >= lo.x - 1e-3 && p.x <= hi.x + 1e-3
-                        && p.y >= lo.y - 1e-3 && p.y <= hi.y + 1e-3
-                        && p.z >= lo.z - 1e-3 && p.z <= hi.z + 1e-3,
-                    "tri vertex {p:?} outside hull bbox {lo:?}..{hi:?}"
-                );
+            for t in &ac.tris {
+                for p in t {
+                    assert!(p.is_finite(), "non-finite authored tri vertex {p:?}");
+                    assert!(
+                        p.x >= lo.x - 1e-3 && p.x <= hi.x + 1e-3
+                            && p.y >= lo.y - 1e-3 && p.y <= hi.y + 1e-3
+                            && p.z >= lo.z - 1e-3 && p.z <= hi.z + 1e-3,
+                        "tri vertex {p:?} outside hull bbox {lo:?}..{hi:?}"
+                    );
+                }
             }
+            eprintln!(
+                "block 789 convex-radius building hull: {} hull(s) → {} authored tris (bbox {lo:?}..{hi:?})",
+                n_hulls, ac.tris.len()
+            );
         }
-        eprintln!(
-            "block 789 convex-radius building hull: {} hull(s) → {} authored tris (bbox {lo:?}..{hi:?})",
-            n_hulls, ac.tris.len()
-        );
     }
 }

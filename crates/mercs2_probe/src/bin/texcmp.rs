@@ -42,7 +42,7 @@ fn main() {
     let mut w = wad::resolve_vz_wad(None).and_then(|p| wad::open(&p).ok()).expect("open vz.wad");
 
     let container = wad::extract_container(&mut w, mhash).expect("extract container");
-    let mats = mercs2_formats::texture::parse_mtrl(&container);
+    let mats = mercs2_formats::texture::parse_mtrl(&container, mercs2_formats::texture::MtrlSource::Model).expect("parse the model MTRL");
     let mut texs: std::collections::BTreeSet<u32> = std::collections::BTreeSet::new();
     for m in &mats {
         for &h in &m.textures {

@@ -490,14 +490,15 @@ fn field_kind_of(t: mercs2_formats::schema::SchemaFieldType) -> mercs2_core::reg
     use mercs2_core::registry::FieldKind as K;
     use mercs2_formats::schema::SchemaFieldType as T;
     match t {
-        T::Bit => K::Bit,
+        T::Byte => K::Byte,
         T::U8 => K::U8,
+        T::Short => K::Short,
         T::U16 => K::U16,
+        T::Int => K::Int,
+        T::Hash => K::Hash,
         T::F32 => K::F32,
-        T::U32 => K::U32,
-        T::Ref => K::Ref,
         T::StringRef => K::StringRef,
-        T::Flags => K::Flags,
+        T::Enum => K::Enum,
         T::Vec3 => K::Vec3,
         T::Blob32 => K::Blob32,
     }
@@ -557,7 +558,8 @@ pub fn load_schema_components(block: &[u8]) -> (mercs2_core::ComponentRegistry, 
             .map(|f| FieldLayout {
                 name_hash: f.name_hash,
                 byte_offset: f.byte_offset,
-                bit_index: f.bit_index,
+                bit_start: f.bit_start,
+                bit_width: f.bit_width,
                 kind: field_kind_of(f.field_type),
             })
             .collect();
@@ -1376,8 +1378,9 @@ pub fn world_name_index(
 /// only references to it (a zone number, a name to resolve). A test host with the corpus and no
 /// archive therefore cannot get past `MrxTransit.Reset`. See the file header for full provenance.
 ///
-/// [`landing_zone_pads_match_the_vendored_table`](self::schema_wire_tests) re-derives the table from
-/// the WAD whenever one is present and fails on any drift, so it cannot silently diverge.
+/// [`landing_zone_pads_match_the_vendored_table`](self::schema_wire_tests) (game-gated, built by the
+/// `retail` feature) re-derives the table from the WAD and fails on any drift, so it cannot silently
+/// diverge.
 #[cfg(test)]
 pub fn retail_landing_zone_pads() -> Vec<LandingZonePad> {
     let mut out: Vec<LandingZonePad> = include_str!("../data/retail_landing_zones.tsv")
@@ -1453,245 +1456,6 @@ pub const PMC_INTERIOR_ENTITIES: &[(u32, &str)] = &[
 pub(crate) mod schema_wire_tests {
     use super::*;
 
-    /// The retail `layers_static` block, or `None` when the game data isn't on this machine (CI).
-    /// Shared by the live tests below; `VZ_WAD` overrides the default install path.
-    pub(crate) fn retail_layers_static() -> Option<Vec<u8>> {
-        let path = crate::wad::resolve_vz_wad(None)?;
-        if std::fs::metadata(&path).is_err() {
-            return None;
-        }
-        let mut w = crate::wad::open(&path).ok()?;
-        find_terrain_blocks(&mut w).ok().map(|(_low, ls)| ls)
-    }
-
-    /// TASK-B confirm: `PopulationSimpleSpawner` is a plain keyed COMP in the retail `layers_static`
-    /// block and the content loader feeds real spawner instances (at joined-Transform anchors, with the
-    /// recovered SpawnerGroup) into an empty `SimpleSpawnerManager`. SKIPS (passes) when vz.wad absent.
-    #[test]
-    fn live_register_population_spawners_from_layers_static() {
-        let Some(ls) = retail_layers_static() else {
-            return eprintln!("[skip] vz.wad not present — population-spawner loader test skipped");
-        };
-        // The COMP must parse as plain-keyed (stride 4+112) and produce records — the probe result.
-        let mut pss_groups = 0usize;
-        for g in walk_comp_groups(&ls) {
-            if g.name.as_deref() != Some("PopulationSimpleSpawner") {
-                continue;
-            }
-            pss_groups += 1;
-            let schema = g.schema().expect("PopulationSimpleSpawner carries a schm");
-            assert_eq!(schema.payload_stride, 112, "recovered PSS stride is 112 (0x70)");
-            assert!(!schema.is_variable_length(), "PSS is fixed-stride, not variable/bucketed");
-            if let Some(data) = g.data.as_ref() {
-                assert_eq!(data.len() % (4 + 112), 0, "PSS data divides exactly by the 116-B record");
-                assert!(schema.deserialize_records(data).is_some(), "PSS deserializes as plain keyed");
-            }
-        }
-        assert!(pss_groups > 0, "layers_static must carry PopulationSimpleSpawner COMPs");
-
-        // The loader feeds real spawners into a fresh (empty) manager.
-        let mut mgr = crate::population::SimpleSpawnerManager::new();
-        assert_eq!(mgr.spawners().len(), 0, "starts empty (the bug this fixes)");
-        let n = register_population_spawners(&ls, &mut mgr);
-        assert!(n >= 1, "must register at least one spawner from world data");
-        assert_eq!(mgr.spawners().len(), n, "every registered spawner lands in the pool");
-        // Every registered spawner sits at a real (non-origin) world anchor and a valid group.
-        for sp in mgr.spawners() {
-            assert!(sp.group < crate::population::SPAWNER_GROUP_COUNT, "group index in range");
-            assert!(
-                sp.transform.translation != mercs2_core::glam::Vec3::ZERO,
-                "spawner anchored at its joined Transform, not the identity Position blob"
-            );
-        }
-        eprintln!("[task-b] registered {n} PopulationSimpleSpawner instances from layers_static");
-    }
-
-    /// The transit landing pads read out of the REAL retail `LandingZone` COMP. SKIPS (passes) when
-    /// vz.wad is absent.
-    ///
-    /// Every number here is measured from the shipped block, and each is separately corroborated by the
-    /// vendored Lua, which is what makes them assertable rather than merely observed:
-    /// - 46 records = 23 zones × 2 co-op player slots.
-    /// - The zone set `1..8, 12, 15..18, 20..25, 27..30` is exactly the set `vz/wifhqdata.lua`'s
-    ///   `nLandingZone`/`nAltLandingZone` fields reference (`docs/mercs2-luacd/04_tutorials_wifdata.md`
-    ///   §2.5); the seven gaps appear nowhere in the corpus.
-    /// - 45 of 46 pads carry a `Name` of the form `<zone>_<faction>_<site>_lz_player{one,two}` — the
-    ///   names the shipped Lua also resolves by hand (`resident/mrxsupport.lua:606-610`,
-    ///   `vz/wifpmcinterior.lua:2108`). Zone 12 slot 1 ships without one.
-    /// The world name index spans **streamed-layer blocks**, not just `layers_static`.
-    ///
-    /// The regression this pins: `Pg.GetGuidByName("VzaCon001_StartingBoat")` returned nil, which
-    /// parked the boot forever — `VzaCon001` gates `AssetsLoaded` on an `ObjectHibernation` event for
-    /// that boat (`corpus/mercs2-luacd/src/vz/vzacon001.lua:66-119`). The name was in the archive the
-    /// whole time, in block 179; we were only ever reading block 29.
-    ///
-    /// SKIPS (passes) when vz.wad is absent.
-    #[test]
-    fn live_world_name_index_spans_streamed_layers() {
-        let Some(path) = crate::wad::resolve_vz_wad(None) else {
-            return eprintln!("[skip] vz.wad not present — name-index test skipped");
-        };
-        let Ok(mut w) = crate::wad::open(&path) else {
-            return eprintln!("[skip] vz.wad would not open");
-        };
-        let Some(ls) = retail_layers_static() else { return };
-        let index = world_name_index(&mut w, &ls);
-
-        // Keys are case-folded the way `pandemic_hash_m2` folds them, so the authored spelling misses
-        // and the lowercase form hits. Pinning both directions keeps the contract from drifting.
-        assert!(index.get("VzaCon001_StartingBoat").is_none(), "keys are lowercased, not as-authored");
-
-        // A `layers_static` name still resolves — the streamed blocks must not displace the resident set.
-        let start = index.get("vzacon001_start1").copied();
-        assert!(start.is_some(), "layers_static names survive the merge");
-
-        // ...and the streamed-layer name that was stalling the boot now resolves, at its authored spot.
-        let boat = index
-            .get("vzacon001_startingboat")
-            .copied()
-            .expect("VzaCon001_StartingBoat lives in block 179 and must be indexed");
-        assert!(
-            (boat[0] - -1726.98).abs() < 1.0
-                && (boat[1] - -36.35).abs() < 1.0
-                && (boat[2] - 2068.80).abs() < 1.0,
-            "the boat's authored position, not a placeholder; got {boat:?}"
-        );
-
-        // The boat sits beside the mission's own start marker — a sanity check that the two blocks'
-        // coordinates share one space rather than being independently plausible.
-        let start = start.unwrap();
-        let d = ((boat[0] - start[0]).powi(2) + (boat[2] - start[2]).powi(2)).sqrt();
-        assert!(d < 50.0, "boat and VzaCon001_Start1 should be adjacent; {d} m apart");
-
-        // Strictly richer than `layers_static` alone. Compare UNIQUE NAMES to unique names: the census
-        // figures (62,143 named placements in block 29, 100,535 across all 749) count *placements*, and
-        // world names repeat heavily across blocks — the merged index is ~10k distinct names, not 100k.
-        let static_only: std::collections::HashSet<String> =
-            mercs2_formats::placement::load_placements(&ls)
-                .unwrap_or_default()
-                .into_iter()
-                .filter_map(|p| p.name.map(|n| n.to_ascii_lowercase()))
-                .collect();
-        assert!(
-            index.len() > static_only.len(),
-            "merged index ({}) must exceed layers_static alone ({})",
-            index.len(),
-            static_only.len()
-        );
-        assert!(
-            !static_only.contains("vzacon001_startingboat"),
-            "the boat must NOT be in layers_static — that is the whole point of scanning further"
-        );
-    }
-
-    #[test]
-    fn live_landing_zone_pads_if_wad_present() {
-        let Some(ls) = retail_layers_static() else {
-            return eprintln!("skip: vz.wad not present — landing-zone pad test skipped");
-        };
-        let pads = landing_zone_pads(&ls);
-        assert_eq!(pads.len(), 46, "retail vz authors 23 landing zones × 2 player slots");
-
-        let zones: Vec<u32> = {
-            let mut z: Vec<u32> = pads.iter().map(|p| p.zone).collect();
-            z.dedup();
-            z
-        };
-        assert_eq!(
-            zones,
-            vec![1, 2, 3, 4, 5, 6, 7, 8, 12, 15, 16, 17, 18, 20, 21, 22, 23, 24, 25, 27, 28, 29, 30],
-            "the sparse zone set the shipped Lua indexes by absolute number"
-        );
-
-        // Exactly one pad per (zone, slot); slots are only ever 1 or 2.
-        for z in &zones {
-            let mut slots: Vec<u32> = pads.iter().filter(|p| p.zone == *z).map(|p| p.slot).collect();
-            slots.sort_unstable();
-            assert_eq!(slots, vec![1, 2], "zone {z} must have one pad per player slot");
-        }
-
-        // The name convention, where a name exists: `<zone>_…_lz_player{one,two}`.
-        let named = pads.iter().filter(|p| p.name.is_some()).count();
-        assert_eq!(named, 45, "45 of the 46 retail pads carry a Name COMP");
-        for p in pads.iter().filter(|p| p.name.is_some()) {
-            let n = p.name.as_deref().unwrap();
-            let want_slot = if p.slot == 1 { "_playerone" } else { "_playertwo" };
-            assert!(
-                n.starts_with(&format!("{:02}_", p.zone)),
-                "pad name {n:?} must be prefixed with its zone number ({})",
-                p.zone
-            );
-            // Only the `player{one,two}` tail is asserted: zone 3 slot 1 ships as
-            // `03_mar_airport_llz_playerone` — a typo in the retail data, reproduced not repaired.
-            assert!(n.ends_with(want_slot), "pad name {n:?} must end with {want_slot}");
-        }
-
-        // Every pad has a distinct authored position (they are physical touchdown spots).
-        let mut seen = std::collections::HashSet::new();
-        for p in &pads {
-            let key = (p.pos[0].to_bits(), p.pos[1].to_bits(), p.pos[2].to_bits());
-            assert!(seen.insert(key), "two pads share a position: {p:?}");
-        }
-    }
-
-    /// The landing zones a LIVE RETAIL RUN reports, transcribed from the PMC Blackbox capture
-    /// `game-files/pmc_blackbox-mattias-save-end-game.log` (an ASI loader hooking the shipped build's
-    /// stripped `Debug.Printf`). Each line is `MrxTransit.LoadSingleton` replaying the SAVE's transit
-    /// blob — `mrxtransit.lua:399` in the vendored corpus:
-    ///
-    /// ```text
-    /// [lua] Landing zone 28 affiliated with Pir (nil)  @mrxtransit:669
-    /// ```
-    ///
-    /// so this is the end-game save's faction ownership, not authored world data. It is transcribed
-    /// rather than parsed at test time because the capture is a 500 KB machine-local artifact; the
-    /// zone/faction pairs are the whole of what it contributes.
-    const RETAIL_CAPTURE_AFFILIATIONS: [(u32, &str); 22] = [
-        (1, "Pmc"), (2, "Oil"), (3, "Oil"), (4, "Gur"), (5, "Gur"), (7, "All"), (8, "Pir"),
-        (12, "Chi"), (15, "Oil"), (16, "Oil"), (17, "Gur"), (18, "Gur"), (20, "All"), (21, "All"),
-        (22, "All"), (23, "Chi"), (24, "Chi"), (25, "Chi"), (27, "Pir"), (28, "Pir"), (29, "Oil"),
-        (30, "Chi"),
-    ];
-
-    /// **The vendored pad table is byte-for-byte what the archive holds.**
-    ///
-    /// `retail_landing_zone_pads()` exists so a checkout without vz.wad still boots against REAL
-    /// world data. That is only true while the file actually matches the archive, so this re-derives
-    /// it from the WAD and compares every field of every record — zone, slot, entity key, name and
-    /// authored position. Any drift (a re-extraction, a hand edit, a change in
-    /// `load_landing_zones`) fails here rather than silently turning the vendored copy into fiction.
-    ///
-    /// SKIPS (passes) when vz.wad is absent — which is exactly the situation the table is for.
-    #[test]
-    fn landing_zone_pads_match_the_vendored_table() {
-        let Some(ls) = retail_layers_static() else {
-            return eprintln!("skip: vz.wad not present — vendored landing-zone parity skipped");
-        };
-        let from_wad = landing_zone_pads(&ls);
-        let vendored = retail_landing_zone_pads();
-        assert_eq!(
-            vendored.len(),
-            from_wad.len(),
-            "vendored table has {} pads, the archive has {}",
-            vendored.len(),
-            from_wad.len()
-        );
-        for (v, w) in vendored.iter().zip(from_wad.iter()) {
-            assert_eq!((v.zone, v.slot), (w.zone, w.slot), "pad identity drifted");
-            assert_eq!(v.key, w.key, "zone {} slot {}: entity key drifted", v.zone, v.slot);
-            assert_eq!(v.name, w.name, "zone {} slot {}: name drifted", v.zone, v.slot);
-            // Positions round-trip through 7 significant digits in the TSV, so compare at that
-            // precision rather than demanding exact bit equality of a reparsed float.
-            for k in 0..3 {
-                assert!(
-                    (v.pos[k] - w.pos[k]).abs() <= w.pos[k].abs() * 1e-6 + 1e-3,
-                    "zone {} slot {}: axis {k} drifted ({} vs {})",
-                    v.zone, v.slot, v.pos[k], w.pos[k]
-                );
-            }
-        }
-    }
-
     /// The vendored table stands on its own without a WAD: it really is the full retail set.
     ///
     /// Runs everywhere — this is the invariant the corpus-only boot depends on.
@@ -1726,147 +1490,378 @@ pub(crate) mod schema_wire_tests {
         }
     }
 
-    /// **Cross-check of the `LandingZone` COMP against a live retail run.**
-    ///
-    /// `live_landing_zone_pads_if_wad_present` above proves what the shipped WORLD DATA authors. This
-    /// proves the same set is what the shipped GAME actually enumerates at runtime, from a completely
-    /// independent source: a hooked-log capture of retail play. Two sources that could disagree and
-    /// do not.
-    ///
-    /// The one difference is the interesting part. The capture affiliates 22 zones; the COMP authors
-    /// 23. The missing one is zone **6**, and `mrxtransit.lua`'s `Reset` singles out exactly that zone:
-    ///
-    /// ```lua
-    /// if _tLandingZones[6] then
-    ///   _tLandingZones[6].bFake = true
-    /// end
-    /// ```
-    ///
-    /// A fake pad is never faction-affiliated, so it never reaches the `LoadSingleton` print. The
-    /// capture and the shipped script therefore corroborate each other on the one zone where the two
-    /// enumerations differ, which is what makes 23-vs-22 evidence rather than a discrepancy.
-    ///
-    /// SKIPS (passes) when vz.wad is absent.
-    #[test]
-    fn retail_capture_corroborates_the_authored_landing_zone_set() {
-        let Some(ls) = retail_layers_static() else {
-            return eprintln!("skip: vz.wad not present — retail-capture cross-check skipped");
-        };
-        let authored: std::collections::BTreeSet<u32> =
-            landing_zone_pads(&ls).iter().map(|p| p.zone).collect();
-        let captured: std::collections::BTreeSet<u32> =
-            RETAIL_CAPTURE_AFFILIATIONS.iter().map(|(z, _)| *z).collect();
+    /// The game-gated tests: built by the `retail` feature, they read the retail `vz.wad` named by the
+    /// repo-root `.mercs2-local.toml` and fail when it is absent. `pub(crate)` because
+    /// `script_host`'s game-gated tests share its helpers.
+    #[cfg(feature = "retail")]
+    pub(crate) mod retail {
+        use super::*;
 
-        const FAKE_ZONE: u32 = 6; // mrxtransit.lua Reset(): `_tLandingZones[6].bFake = true`
-        assert!(
-            !captured.contains(&FAKE_ZONE),
-            "zone {FAKE_ZONE} is the bFake pad; a live run must never affiliate it"
-        );
-        assert_eq!(
-            authored.difference(&captured).copied().collect::<Vec<u32>>(),
-            vec![FAKE_ZONE],
-            "the ONLY authored zone a live run does not affiliate is the fake one"
-        );
-        assert!(
-            captured.is_subset(&authored),
-            "every zone the live game enumerated must exist in the authored COMP; strays: {:?}",
-            captured.difference(&authored).collect::<Vec<_>>()
-        );
-
-        // The affiliations name real factions — the abbreviations `MrxFactionManager.GetFactionAbbrevs`
-        // returns, which the same capture lists as it arms each one's attitude events.
-        const FACTIONS: [&str; 8] = ["All", "Chi", "Civ", "Gur", "Oil", "Pir", "Pmc", "Vza"];
-        for (zone, faction) in RETAIL_CAPTURE_AFFILIATIONS {
-            assert!(FACTIONS.contains(&faction), "zone {zone}: unknown faction {faction:?}");
+        /// The retail `vz.wad` path, from the repo-root `.mercs2-local.toml` and nowhere else. Panics
+        /// with the resolver's message when the file, its `vz_wad` key, or the archive is missing, and
+        /// when the path is not UTF-8 (`wad::open` takes `&str`).
+        pub(crate) fn vz_wad_path() -> String {
+            let start = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+            let path =
+                mercs2_formats::game_paths::local_config_vz_wad(start).unwrap_or_else(|e| panic!("{e}"));
+            path.to_str()
+                .unwrap_or_else(|| panic!("vz.wad path is not UTF-8: {}", path.display()))
+                .to_string()
         }
-    }
 
-    /// Live end-to-end proof that the E1 schema deserializer is wired into the world-load path and
-    /// that the RegionCache is populated. SKIPS (passes) when vz.wad is absent so CI
-    /// stays green — matching the other live tests in this workspace.
-    ///
-    /// Asserts, against the real retail `layers_static` block:
-    ///   1. the schema path deserializes many generic COMP records (≥ 2000) across many classes,
-    ///   2. every value it reads for HibernationControl dist0 + ModelName hash AGREES with the bespoke
-    ///      `placement` oracle (no drift on the overlap),
-    ///   3. ≥ 1 population region registers into the streaming manager's RegionCache, and driving
-    ///      `update_regions` at a region's anchor caches that region IN.
-    #[test]
-    fn live_schema_and_region_wire_if_wad_present() {
-        // Resolved, never hardcoded: `$VZ_WAD` (a folder or the file) then the registry key. The old
-        // literal install path could not resolve off Windows, so this test silently never ran there.
-        let Some(path) = crate::wad::resolve_vz_wad(None) else {
-            return eprintln!("skip: vz.wad not found (set VZ_WAD to the install folder or the file)");
-        };
-        if std::fs::metadata(&path).is_err() {
-            eprintln!("skip: vz.wad not present at {path}");
-            return;
+        /// The retail `vz.wad`, opened. Panics when it cannot be found or opened.
+        pub(crate) fn open_vz_wad() -> crate::wad::Wad {
+            let path = vz_wad_path();
+            crate::wad::open(&path).unwrap_or_else(|e| panic!("open {path}: {e}"))
         }
-        let mut w = crate::wad::open(&path).expect("open vz.wad");
-        let (_low, ls) = find_terrain_blocks(&mut w).expect("terrain blocks");
 
-        // Seam A — schema-driven generic COMP deserialize + oracle agreement.
-        let (reg, stats) = load_schema_components(&ls);
-        println!(
-            "[schema-test] classes={} generic_groups={} generic_records={} | HibernationControl {}/{} agree, ModelName {}/{} agree | pool_budget_total={}",
-            stats.classes, stats.generic_groups, stats.generic_records,
-            stats.hib_agree, stats.hib_checked, stats.model_agree, stats.model_checked, reg.total_budget()
-        );
-        assert!(stats.classes >= 10, "expected many registered classes, got {}", stats.classes);
-        assert!(
-            stats.generic_records >= 2000,
-            "expected ≥2000 generic COMP records deserialized, got {}",
-            stats.generic_records
-        );
-        // The schema path must agree with the oracle exactly where they overlap.
-        assert!(stats.hib_checked > 0 && stats.hib_agree == stats.hib_checked,
-            "HibernationControl dist0 disagreed with oracle: {}/{}", stats.hib_agree, stats.hib_checked);
-        assert!(stats.model_checked > 0 && stats.model_agree == stats.model_checked,
-            "ModelName hash disagreed with oracle: {}/{}", stats.model_agree, stats.model_checked);
-
-        // Descriptor lookups resolve real classes registered from schm.
-        assert!(reg.get_by_name("HibernationControl").is_some(), "HibernationControl not registered");
-        assert!(reg.get_by_name("PopulationDensity").is_some(), "PopulationDensity not registered");
-
-        // Seam B — region cache populated from PopulationDensity anchors, and actually driven.
-        let mut mgr = mercs2_core::streaming::StreamingManager::new(
-            mercs2_core::streaming::StreamingConfig::default(),
-        );
-        let n_regions = register_population_regions(&ls, &mut mgr);
-        println!("[schema-test] region cache: {n_regions} PopulationDensity anchors registered");
-        assert!(n_regions >= 1, "expected ≥1 population region registered");
-        assert_eq!(mgr.region_count(), n_regions);
-
-        // Drive the decision layer at an anchor: it must cache that region IN.
-        let anchor = first_population_anchor(&ls).expect("a population anchor");
-        let diff = mgr.update_regions(anchor);
-        assert!(
-            !diff.cache_in.is_empty() || mgr.cached_region_count() >= 1,
-            "driving update_regions at an anchor should cache ≥1 region in"
-        );
-        println!("[schema-test] update_regions@anchor -> cached {}/{}", mgr.cached_region_count(), mgr.region_count());
-    }
-
-    /// The world position of the first `PopulationDensity` region's authored Transform anchor.
-    fn first_population_anchor(block: &[u8]) -> Option<[f32; 3]> {
-        let mut centers: std::collections::HashMap<u32, [f32; 3]> = std::collections::HashMap::new();
-        for p in mercs2_formats::placement::load_placements(block).unwrap_or_default() {
-            centers.entry(p.key).or_insert(p.pos);
+        /// The retail `layers_static` block. Shared by the game-gated tests here and in `script_host`.
+        pub(crate) fn retail_layers_static() -> Vec<u8> {
+            let mut w = open_vz_wad();
+            find_terrain_blocks(&mut w)
+                .unwrap_or_else(|e| panic!("the retail vz.wad's terrain blocks: {e}"))
+                .1
         }
-        for g in walk_comp_groups(block) {
-            if g.name.as_deref() != Some("PopulationDensity") {
-                continue;
+
+        /// TASK-B confirm: `PopulationSimpleSpawner` is a plain keyed COMP in the retail `layers_static`
+        /// block and the content loader feeds real spawner instances (at joined-Transform anchors, with the
+        /// recovered SpawnerGroup) into an empty `SimpleSpawnerManager`.
+        #[test]
+        fn live_register_population_spawners_from_layers_static() {
+            let ls = retail_layers_static();
+            // The COMP must parse as plain-keyed (stride 4+112) and produce records — the probe result.
+            let mut pss_groups = 0usize;
+            for g in walk_comp_groups(&ls) {
+                if g.name.as_deref() != Some("PopulationSimpleSpawner") {
+                    continue;
+                }
+                pss_groups += 1;
+                let schema = g.schema().expect("PopulationSimpleSpawner carries a schm");
+                assert_eq!(schema.payload_stride, 112, "recovered PSS stride is 112 (0x70)");
+                assert!(!schema.is_variable_length(), "PSS is fixed-stride, not variable/bucketed");
+                if let Some(data) = g.data.as_ref() {
+                    assert_eq!(data.len() % (4 + 112), 0, "PSS data divides exactly by the 116-B record");
+                    assert!(schema.deserialize_records(data).is_some(), "PSS deserializes as plain keyed");
+                }
             }
-            let schema = g.schema()?;
-            let data = g.data.as_ref()?;
-            let recs = schema.deserialize_records(data)?;
-            for r in &recs {
-                if let Some(c) = centers.get(&r.entity_key) {
-                    return Some(*c);
+            assert!(pss_groups > 0, "layers_static must carry PopulationSimpleSpawner COMPs");
+
+            // The loader feeds real spawners into a fresh (empty) manager.
+            let mut mgr = crate::population::SimpleSpawnerManager::new();
+            assert_eq!(mgr.spawners().len(), 0, "starts empty (the bug this fixes)");
+            let n = register_population_spawners(&ls, &mut mgr);
+            assert!(n >= 1, "must register at least one spawner from world data");
+            assert_eq!(mgr.spawners().len(), n, "every registered spawner lands in the pool");
+            // Every registered spawner sits at a real (non-origin) world anchor and a valid group.
+            for sp in mgr.spawners() {
+                assert!(sp.group < crate::population::SPAWNER_GROUP_COUNT, "group index in range");
+                assert!(
+                    sp.transform.translation != mercs2_core::glam::Vec3::ZERO,
+                    "spawner anchored at its joined Transform, not the identity Position blob"
+                );
+            }
+            eprintln!("[task-b] registered {n} PopulationSimpleSpawner instances from layers_static");
+        }
+
+        /// The transit landing pads read out of the REAL retail `LandingZone` COMP.
+        ///
+        /// Every number here is measured from the shipped block, and each is separately corroborated by the
+        /// vendored Lua, which is what makes them assertable rather than merely observed:
+        /// - 46 records = 23 zones × 2 co-op player slots.
+        /// - The zone set `1..8, 12, 15..18, 20..25, 27..30` is exactly the set `vz/wifhqdata.lua`'s
+        ///   `nLandingZone`/`nAltLandingZone` fields reference (`docs/mercs2-luacd/04_tutorials_wifdata.md`
+        ///   §2.5); the seven gaps appear nowhere in the corpus.
+        /// - 45 of 46 pads carry a `Name` of the form `<zone>_<faction>_<site>_lz_player{one,two}` — the
+        ///   names the shipped Lua also resolves by hand (`resident/mrxsupport.lua:606-610`,
+        ///   `vz/wifpmcinterior.lua:2108`). Zone 12 slot 1 ships without one.
+        /// The world name index spans **streamed-layer blocks**, not just `layers_static`.
+        ///
+        /// The regression this pins: `Pg.GetGuidByName("VzaCon001_StartingBoat")` returned nil, which
+        /// parked the boot forever — `VzaCon001` gates `AssetsLoaded` on an `ObjectHibernation` event for
+        /// that boat (`corpus/mercs2-luacd/src/vz/vzacon001.lua:66-119`). The name was in the archive the
+        /// whole time, in block 179; we were only ever reading block 29.
+        #[test]
+        fn live_world_name_index_spans_streamed_layers() {
+            let mut w = open_vz_wad();
+            let ls = retail_layers_static();
+            let index = world_name_index(&mut w, &ls);
+
+            // Keys are case-folded the way `pandemic_hash_m2` folds them, so the authored spelling misses
+            // and the lowercase form hits. Pinning both directions keeps the contract from drifting.
+            assert!(index.get("VzaCon001_StartingBoat").is_none(), "keys are lowercased, not as-authored");
+
+            // A `layers_static` name still resolves — the streamed blocks must not displace the resident set.
+            let start = index.get("vzacon001_start1").copied();
+            assert!(start.is_some(), "layers_static names survive the merge");
+
+            // ...and the streamed-layer name that was stalling the boot now resolves, at its authored spot.
+            let boat = index
+                .get("vzacon001_startingboat")
+                .copied()
+                .expect("VzaCon001_StartingBoat lives in block 179 and must be indexed");
+            assert!(
+                (boat[0] - -1726.98).abs() < 1.0
+                    && (boat[1] - -36.35).abs() < 1.0
+                    && (boat[2] - 2068.80).abs() < 1.0,
+                "the boat's authored position, not a placeholder; got {boat:?}"
+            );
+
+            // The boat sits beside the mission's own start marker — a sanity check that the two blocks'
+            // coordinates share one space rather than being independently plausible.
+            let start = start.unwrap();
+            let d = ((boat[0] - start[0]).powi(2) + (boat[2] - start[2]).powi(2)).sqrt();
+            assert!(d < 50.0, "boat and VzaCon001_Start1 should be adjacent; {d} m apart");
+
+            // Strictly richer than `layers_static` alone. Compare UNIQUE NAMES to unique names: the census
+            // figures (62,143 named placements in block 29, 100,535 across all 749) count *placements*, and
+            // world names repeat heavily across blocks — the merged index is ~10k distinct names, not 100k.
+            let static_only: std::collections::HashSet<String> =
+                mercs2_formats::placement::load_placements(&ls)
+                    .unwrap_or_else(|e| panic!("layers_static placements: {e}"))
+                    .into_iter()
+                    .filter_map(|p| p.name.map(|n| n.to_ascii_lowercase()))
+                    .collect();
+            assert!(
+                index.len() > static_only.len(),
+                "merged index ({}) must exceed layers_static alone ({})",
+                index.len(),
+                static_only.len()
+            );
+            assert!(
+                !static_only.contains("vzacon001_startingboat"),
+                "the boat must NOT be in layers_static — that is the whole point of scanning further"
+            );
+        }
+
+        #[test]
+        fn live_landing_zone_pads_if_wad_present() {
+            let ls = retail_layers_static();
+            let pads = landing_zone_pads(&ls);
+            assert_eq!(pads.len(), 46, "retail vz authors 23 landing zones × 2 player slots");
+
+            let zones: Vec<u32> = {
+                let mut z: Vec<u32> = pads.iter().map(|p| p.zone).collect();
+                z.dedup();
+                z
+            };
+            assert_eq!(
+                zones,
+                vec![1, 2, 3, 4, 5, 6, 7, 8, 12, 15, 16, 17, 18, 20, 21, 22, 23, 24, 25, 27, 28, 29, 30],
+                "the sparse zone set the shipped Lua indexes by absolute number"
+            );
+
+            // Exactly one pad per (zone, slot); slots are only ever 1 or 2.
+            for z in &zones {
+                let mut slots: Vec<u32> = pads.iter().filter(|p| p.zone == *z).map(|p| p.slot).collect();
+                slots.sort_unstable();
+                assert_eq!(slots, vec![1, 2], "zone {z} must have one pad per player slot");
+            }
+
+            // The name convention, where a name exists: `<zone>_…_lz_player{one,two}`.
+            let named = pads.iter().filter(|p| p.name.is_some()).count();
+            assert_eq!(named, 45, "45 of the 46 retail pads carry a Name COMP");
+            for p in pads.iter().filter(|p| p.name.is_some()) {
+                let n = p.name.as_deref().unwrap();
+                let want_slot = if p.slot == 1 { "_playerone" } else { "_playertwo" };
+                assert!(
+                    n.starts_with(&format!("{:02}_", p.zone)),
+                    "pad name {n:?} must be prefixed with its zone number ({})",
+                    p.zone
+                );
+                // Only the `player{one,two}` tail is asserted: zone 3 slot 1 ships as
+                // `03_mar_airport_llz_playerone` — a typo in the retail data, reproduced not repaired.
+                assert!(n.ends_with(want_slot), "pad name {n:?} must end with {want_slot}");
+            }
+
+            // Every pad has a distinct authored position (they are physical touchdown spots).
+            let mut seen = std::collections::HashSet::new();
+            for p in &pads {
+                let key = (p.pos[0].to_bits(), p.pos[1].to_bits(), p.pos[2].to_bits());
+                assert!(seen.insert(key), "two pads share a position: {p:?}");
+            }
+        }
+
+        /// The landing zones a LIVE RETAIL RUN reports, transcribed from the PMC Blackbox capture
+        /// `game-files/pmc_blackbox-mattias-save-end-game.log` (an ASI loader hooking the shipped build's
+        /// stripped `Debug.Printf`). Each line is `MrxTransit.LoadSingleton` replaying the SAVE's transit
+        /// blob — `mrxtransit.lua:399` in the vendored corpus:
+        ///
+        /// ```text
+        /// [lua] Landing zone 28 affiliated with Pir (nil)  @mrxtransit:669
+        /// ```
+        ///
+        /// so this is the end-game save's faction ownership, not authored world data. It is transcribed
+        /// rather than parsed at test time because the capture is a 500 KB machine-local artifact; the
+        /// zone/faction pairs are the whole of what it contributes.
+        const RETAIL_CAPTURE_AFFILIATIONS: [(u32, &str); 22] = [
+            (1, "Pmc"), (2, "Oil"), (3, "Oil"), (4, "Gur"), (5, "Gur"), (7, "All"), (8, "Pir"),
+            (12, "Chi"), (15, "Oil"), (16, "Oil"), (17, "Gur"), (18, "Gur"), (20, "All"), (21, "All"),
+            (22, "All"), (23, "Chi"), (24, "Chi"), (25, "Chi"), (27, "Pir"), (28, "Pir"), (29, "Oil"),
+            (30, "Chi"),
+        ];
+
+        /// **The vendored pad table is byte-for-byte what the archive holds.**
+        ///
+        /// `retail_landing_zone_pads()` exists so a checkout without vz.wad still boots against REAL
+        /// world data. That is only true while the file actually matches the archive, so this re-derives
+        /// it from the WAD and compares every field of every record — zone, slot, entity key, name and
+        /// authored position. Any drift (a re-extraction, a hand edit, a change in
+        /// `load_landing_zones`) fails here rather than silently turning the vendored copy into fiction.
+        #[test]
+        fn landing_zone_pads_match_the_vendored_table() {
+            let ls = retail_layers_static();
+            let from_wad = landing_zone_pads(&ls);
+            let vendored = retail_landing_zone_pads();
+            assert_eq!(
+                vendored.len(),
+                from_wad.len(),
+                "vendored table has {} pads, the archive has {}",
+                vendored.len(),
+                from_wad.len()
+            );
+            for (v, w) in vendored.iter().zip(from_wad.iter()) {
+                assert_eq!((v.zone, v.slot), (w.zone, w.slot), "pad identity drifted");
+                assert_eq!(v.key, w.key, "zone {} slot {}: entity key drifted", v.zone, v.slot);
+                assert_eq!(v.name, w.name, "zone {} slot {}: name drifted", v.zone, v.slot);
+                // Positions round-trip through 7 significant digits in the TSV, so compare at that
+                // precision rather than demanding exact bit equality of a reparsed float.
+                for k in 0..3 {
+                    assert!(
+                        (v.pos[k] - w.pos[k]).abs() <= w.pos[k].abs() * 1e-6 + 1e-3,
+                        "zone {} slot {}: axis {k} drifted ({} vs {})",
+                        v.zone, v.slot, v.pos[k], w.pos[k]
+                    );
                 }
             }
         }
-        None
+
+        /// **Cross-check of the `LandingZone` COMP against a live retail run.**
+        ///
+        /// `live_landing_zone_pads_if_wad_present` above proves what the shipped WORLD DATA authors. This
+        /// proves the same set is what the shipped GAME actually enumerates at runtime, from a completely
+        /// independent source: a hooked-log capture of retail play. Two sources that could disagree and
+        /// do not.
+        ///
+        /// The one difference is the interesting part. The capture affiliates 22 zones; the COMP authors
+        /// 23. The missing one is zone **6**, and `mrxtransit.lua`'s `Reset` singles out exactly that zone:
+        ///
+        /// ```lua
+        /// if _tLandingZones[6] then
+        ///   _tLandingZones[6].bFake = true
+        /// end
+        /// ```
+        ///
+        /// A fake pad is never faction-affiliated, so it never reaches the `LoadSingleton` print. The
+        /// capture and the shipped script therefore corroborate each other on the one zone where the two
+        /// enumerations differ, which is what makes 23-vs-22 evidence rather than a discrepancy.
+        #[test]
+        fn retail_capture_corroborates_the_authored_landing_zone_set() {
+            let ls = retail_layers_static();
+            let authored: std::collections::BTreeSet<u32> =
+                landing_zone_pads(&ls).iter().map(|p| p.zone).collect();
+            let captured: std::collections::BTreeSet<u32> =
+                RETAIL_CAPTURE_AFFILIATIONS.iter().map(|(z, _)| *z).collect();
+
+            const FAKE_ZONE: u32 = 6; // mrxtransit.lua Reset(): `_tLandingZones[6].bFake = true`
+            assert!(
+                !captured.contains(&FAKE_ZONE),
+                "zone {FAKE_ZONE} is the bFake pad; a live run must never affiliate it"
+            );
+            assert_eq!(
+                authored.difference(&captured).copied().collect::<Vec<u32>>(),
+                vec![FAKE_ZONE],
+                "the ONLY authored zone a live run does not affiliate is the fake one"
+            );
+            assert!(
+                captured.is_subset(&authored),
+                "every zone the live game enumerated must exist in the authored COMP; strays: {:?}",
+                captured.difference(&authored).collect::<Vec<_>>()
+            );
+
+            // The affiliations name real factions — the abbreviations `MrxFactionManager.GetFactionAbbrevs`
+            // returns, which the same capture lists as it arms each one's attitude events.
+            const FACTIONS: [&str; 8] = ["All", "Chi", "Civ", "Gur", "Oil", "Pir", "Pmc", "Vza"];
+            for (zone, faction) in RETAIL_CAPTURE_AFFILIATIONS {
+                assert!(FACTIONS.contains(&faction), "zone {zone}: unknown faction {faction:?}");
+            }
+        }
+
+        /// Live end-to-end proof that the E1 schema deserializer is wired into the world-load path and
+        /// that the RegionCache is populated.
+        ///
+        /// Asserts, against the real retail `layers_static` block:
+        ///   1. the schema path deserializes many generic COMP records (≥ 2000) across many classes,
+        ///   2. every value it reads for HibernationControl dist0 + ModelName hash AGREES with the bespoke
+        ///      `placement` oracle (no drift on the overlap),
+        ///   3. ≥ 1 population region registers into the streaming manager's RegionCache, and driving
+        ///      `update_regions` at a region's anchor caches that region IN.
+        #[test]
+        fn live_schema_and_region_wire_if_wad_present() {
+            let ls = retail_layers_static();
+
+            // Seam A — schema-driven generic COMP deserialize + oracle agreement.
+            let (reg, stats) = load_schema_components(&ls);
+            println!(
+                "[schema-test] classes={} generic_groups={} generic_records={} | HibernationControl {}/{} agree, ModelName {}/{} agree | pool_budget_total={}",
+                stats.classes, stats.generic_groups, stats.generic_records,
+                stats.hib_agree, stats.hib_checked, stats.model_agree, stats.model_checked, reg.total_budget()
+            );
+            assert!(stats.classes >= 10, "expected many registered classes, got {}", stats.classes);
+            assert!(
+                stats.generic_records >= 2000,
+                "expected ≥2000 generic COMP records deserialized, got {}",
+                stats.generic_records
+            );
+            // The schema path must agree with the oracle exactly where they overlap.
+            assert!(stats.hib_checked > 0 && stats.hib_agree == stats.hib_checked,
+                "HibernationControl dist0 disagreed with oracle: {}/{}", stats.hib_agree, stats.hib_checked);
+            assert!(stats.model_checked > 0 && stats.model_agree == stats.model_checked,
+                "ModelName hash disagreed with oracle: {}/{}", stats.model_agree, stats.model_checked);
+
+            // Descriptor lookups resolve real classes registered from schm.
+            assert!(reg.get_by_name("HibernationControl").is_some(), "HibernationControl not registered");
+            assert!(reg.get_by_name("PopulationDensity").is_some(), "PopulationDensity not registered");
+
+            // Seam B — region cache populated from PopulationDensity anchors, and actually driven.
+            let mut mgr = mercs2_core::streaming::StreamingManager::new(
+                mercs2_core::streaming::StreamingConfig::default(),
+            );
+            let n_regions = register_population_regions(&ls, &mut mgr);
+            println!("[schema-test] region cache: {n_regions} PopulationDensity anchors registered");
+            assert!(n_regions >= 1, "expected ≥1 population region registered");
+            assert_eq!(mgr.region_count(), n_regions);
+
+            // Drive the decision layer at an anchor: it must cache that region IN.
+            let anchor = first_population_anchor(&ls).expect("a population anchor");
+            let diff = mgr.update_regions(anchor);
+            assert!(
+                !diff.cache_in.is_empty() || mgr.cached_region_count() >= 1,
+                "driving update_regions at an anchor should cache ≥1 region in"
+            );
+            println!("[schema-test] update_regions@anchor -> cached {}/{}", mgr.cached_region_count(), mgr.region_count());
+        }
+
+        /// The world position of the first `PopulationDensity` region's authored Transform anchor.
+        fn first_population_anchor(block: &[u8]) -> Option<[f32; 3]> {
+            let mut centers: std::collections::HashMap<u32, [f32; 3]> = std::collections::HashMap::new();
+            for p in mercs2_formats::placement::load_placements(block).unwrap_or_default() {
+                centers.entry(p.key).or_insert(p.pos);
+            }
+            for g in walk_comp_groups(block) {
+                if g.name.as_deref() != Some("PopulationDensity") {
+                    continue;
+                }
+                let schema = g.schema()?;
+                let data = g.data.as_ref()?;
+                let recs = schema.deserialize_records(data)?;
+                for r in &recs {
+                    if let Some(c) = centers.get(&r.entity_key) {
+                        return Some(*c);
+                    }
+                }
+            }
+            None
+        }
     }
 }
 

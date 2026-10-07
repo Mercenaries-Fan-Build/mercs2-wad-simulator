@@ -719,58 +719,6 @@ mod tests {
         assert!(parse_animgroup(&[0, 0, 0, 0]).is_err());
     }
 
-    /// Live smoke test against retail vz.wad — SKIPS (passes) when the WAD is
-    /// absent (CI), so `cargo test -p mercs2_formats` stays green. Runnable in
-    /// full via the `animgroup_dump` example. Verifies the known human rig
-    /// (block 3315): 16 wavelet clips, ~105-track primary binding, no hkaSkeleton.
-    #[test]
-    fn live_human_animgroup_if_wad_present() {
-        use crate::ffcs::load_ffcs_archive;
-        use crate::sges::decompress_block;
-        let Some(path) = crate::game_paths::vz_wad_from_env() else {
-            eprintln!("skip: vz.wad not found (set MERCS2_GAME_DIR or VZ_WAD)");
-            return;
-        };
-        let Ok(mut f) = std::fs::File::open(&path) else {
-            eprintln!("skip: vz.wad not readable at {}", path.display());
-            return;
-        };
-        let size = f.metadata().unwrap().len();
-        let arch = load_ffcs_archive(&mut f, size).expect("ffcs");
-        let data = decompress_block(&mut f, &arch.indx, 3315).expect("decompress 3315");
-        let ag = parse_animgroup(&data).expect("parse animgroup 3315");
-
-        assert!(
-            ag.clips.len() >= 8,
-            "expected multiple clips, got {}",
-            ag.clips.len()
-        );
-        assert!(
-            ag.clips.iter().all(|c| c.class == "wavelet"),
-            "all shipped clips wavelet"
-        );
-        let binding = ag.binding.as_ref().expect("primary binding");
-        assert!(
-            binding.track_to_bone_hash.len() >= 60,
-            "human rig ≥60 tracks"
-        );
-        // Confirmed absent in retail: no hkaSkeleton / hkaAnimationBinding instances.
-        assert!(!ag.class_census.contains_key("hkaSkeleton"));
-        assert!(!ag.class_census.contains_key("hkaAnimationBinding"));
-        assert!(ag.class_census.contains_key("hkaWaveletSkeletalAnimation"));
-        // trnm track count == animation numTransformTracks for the widest clip.
-        let widest = ag
-            .clips
-            .iter()
-            .max_by_key(|c| c.binding.track_to_bone_hash.len())
-            .unwrap();
-        assert_eq!(
-            widest.binding.track_to_bone_hash.len(),
-            widest.num_transform_tracks as usize,
-            "trnm count must equal numTransformTracks"
-        );
-    }
-
     #[test]
     fn clip_class_keys() {
         assert_eq!(
@@ -787,5 +735,59 @@ mod tests {
         );
         assert_eq!(ClipClass::from_class_name("hkaAnimationContainer"), None);
         assert_eq!(ClipClass::from_class_name("hkaAnimationBinding"), None);
+    }
+
+    #[cfg(feature = "retail")]
+    mod retail {
+        use super::*;
+
+        /// Live smoke test against retail vz.wad. Game-gated: built by the `retail`
+        /// feature, reads the vz.wad named by the repo-root `.mercs2-local.toml`, and
+        /// fails if it is absent. Runnable in full via the `animgroup_dump` example. Verifies the known human rig
+        /// (block 3315): 16 wavelet clips, ~105-track primary binding, no hkaSkeleton.
+        #[test]
+        fn live_human_animgroup_if_wad_present() {
+            use crate::ffcs::load_ffcs_archive;
+            use crate::sges::decompress_block;
+            let path =
+                crate::game_paths::local_config_vz_wad(std::path::Path::new(env!("CARGO_MANIFEST_DIR")))
+                    .unwrap_or_else(|e| panic!("{e}"));
+            let mut f = std::fs::File::open(&path)
+                .unwrap_or_else(|e| panic!("open {}: {e}", path.display()));
+            let size = f.metadata().unwrap().len();
+            let arch = load_ffcs_archive(&mut f, size).expect("ffcs");
+            let data = decompress_block(&mut f, &arch.indx, 3315).expect("decompress 3315");
+            let ag = parse_animgroup(&data).expect("parse animgroup 3315");
+
+            assert!(
+                ag.clips.len() >= 8,
+                "expected multiple clips, got {}",
+                ag.clips.len()
+            );
+            assert!(
+                ag.clips.iter().all(|c| c.class == "wavelet"),
+                "all shipped clips wavelet"
+            );
+            let binding = ag.binding.as_ref().expect("primary binding");
+            assert!(
+                binding.track_to_bone_hash.len() >= 60,
+                "human rig ≥60 tracks"
+            );
+            // Confirmed absent in retail: no hkaSkeleton / hkaAnimationBinding instances.
+            assert!(!ag.class_census.contains_key("hkaSkeleton"));
+            assert!(!ag.class_census.contains_key("hkaAnimationBinding"));
+            assert!(ag.class_census.contains_key("hkaWaveletSkeletalAnimation"));
+            // trnm track count == animation numTransformTracks for the widest clip.
+            let widest = ag
+                .clips
+                .iter()
+                .max_by_key(|c| c.binding.track_to_bone_hash.len())
+                .unwrap();
+            assert_eq!(
+                widest.binding.track_to_bone_hash.len(),
+                widest.num_transform_tracks as usize,
+                "trnm count must equal numTransformTracks"
+            );
+        }
     }
 }

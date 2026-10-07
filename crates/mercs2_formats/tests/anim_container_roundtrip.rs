@@ -7,7 +7,8 @@
 //! clip / `trnm` / `evnt` pairing rules the Quartermaster's lint enforces, so a rule that retail
 //! itself breaks cannot be shipped as an error.
 //!
-//! Self-skips without a game (set `MERCS2_GAME_DIR`), so the hermetic suite stays hermetic.
+//! Game-gated: built by the `retail` feature, reads the `vz.wad` named by the repo-root
+//! `.mercs2-local.toml`, and fails if it is absent. The hermetic suite never builds it.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -23,10 +24,8 @@ use mercs2_formats::ucfx::parse_block_entry_table;
 
 #[test]
 fn every_retail_animation_container_rebuilds_byte_identically() {
-    let Some(wad) = mercs2_formats::game_paths::vz_wad(Path::new(env!("CARGO_MANIFEST_DIR"))) else {
-        eprintln!("SKIPPING: no vz.wad (set MERCS2_GAME_DIR)");
-        return;
-    };
+    let wad = mercs2_formats::game_paths::local_config_vz_wad(Path::new(env!("CARGO_MANIFEST_DIR")))
+        .unwrap_or_else(|e| panic!("{e}"));
     let mut file = std::fs::File::open(&wad).expect("open vz.wad");
     let size = file.metadata().expect("stat").len();
     let archive = load_ffcs_archive(&mut file, size).expect("read FFCS");

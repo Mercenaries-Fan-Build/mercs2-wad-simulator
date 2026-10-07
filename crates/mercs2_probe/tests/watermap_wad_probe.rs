@@ -1,4 +1,4 @@
-//! Ignored probe: verify the static watermap against the real installed `vz.wad`. Two things it
+//! Probe: verify the static watermap against the real installed `vz.wad`. Two things it
 //! pins that a synthetic fixture cannot:
 //!
 //! 1. **The lookup resolves at all.** `watr` is a singleton — its ASET row is named for the resident
@@ -13,8 +13,11 @@
 //!    end up on the wrong side of the waterline. The invariant below — a cell is wet **iff** its
 //!    height is not the dry sentinel — is what catches that, and it holds for all 66,049 cells.
 //!
+//! Game-gated: built by the `retail` feature, reads the retail `vz.wad` named by the repo-root
+//! `.mercs2-local.toml`, and fails when it is absent.
+//!
 //! ```text
-//! cargo test -p mercs2_probe --test watermap_wad_probe -- --nocapture
+//! cargo test -p mercs2_probe --features retail --test watermap_wad_probe -- --nocapture
 //! ```
 
 use mercs2_engine::asset::AssetSource;
@@ -25,13 +28,19 @@ use mercs2_formats::types::TYPE_HASH_WATERMAP;
 const RETAIL_WATR_LEN: usize = 495_669;
 const RETAIL_WET_CELLS: usize = 38_078;
 
+/// The retail `vz.wad` path, from the repo-root `.mercs2-local.toml` and nowhere else. Panics with the
+/// resolver's message when it is missing, and when the path is not UTF-8 (`wad::open` takes `&str`).
+fn vz_wad_path() -> String {
+    let start = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let path = mercs2_formats::game_paths::local_config_vz_wad(start).unwrap_or_else(|e| panic!("{e}"));
+    path.to_str()
+        .unwrap_or_else(|| panic!("vz.wad path is not UTF-8: {}", path.display()))
+        .to_string()
+}
+
 #[test]
 fn watermap_resolves_by_type_and_parses_aligned_from_vz_wad() {
-    let Some(path) = mercs2_engine::wad::resolve_vz_wad(None) else {
-        return eprintln!(
-            "SKIPPING: no vz.wad discovered. Run `scripts/find-vz-wad.sh --write` or set MERCS2_GAME_DIR."
-        );
-    };
+    let path = vz_wad_path();
     let mut assets = AssetSource::discover(&path, &[]).expect("mount the WAD stack");
 
     // (1) The type hash is `pandemic_hash_m2("watermap")` — a TYPE, never an asset name.

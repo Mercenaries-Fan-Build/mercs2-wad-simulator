@@ -34,7 +34,7 @@ pub const MAX_NAME_LEN: usize = 64;
 /// for. Compared lowercased.
 pub const DENY_LISTED_DLL_STEMS: &[&str] = &["pmc_bb", "cruise", "dxwrapper", "binkw32"];
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Manifest {
     pub format: u32,
@@ -393,36 +393,144 @@ pub struct Textures {
     pub specular: Option<PathBuf>,
 }
 
-/// Which audio table a bank is.
+/// A language the engine can run in: an entry of its language table.
 ///
-/// A closed set of three, because the ASET type id decides which loader the engine dispatches
-/// and there is nothing safe to guess. All three are opaque `data` wrappers in retail —
-/// `soundbank` 98/98, `sounddb` 58/58, `wavebank` 92/93 — measured in
-/// `mercs2_formats/tests/novel_asset_shape_survey.rs`.
-///
-/// The bytes are copied VERBATIM: this crate has no encoder for any of them, and swapping an
-/// author's working bank for one nobody has run is the kind of helpfulness that produces a WAD
-/// which looks fine and does nothing.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// The table (`0x00CF281C`, nine pointers, bounded by `FUN_00826a10`) reads english, spanish,
+/// italian, french, german, japanese, english_uk, allcaps, russian; `*DAT_01176018` indexes it. The
+/// engine opens `.\Data\<entry>.wad` and `.\Data\<entry>-patch.wad` by the entry
+/// (`FUN_004BFE20`, `FUN_004BFEF0`), and retail Lua appends the same entry to every `vo_*` bank
+/// name before loading it (`_GetLocalizedName` with `Gui.GetLanguageName`,
+/// `mrxsoundbanks.lua:80-87`), so the token names both a language's WADs and its voice-over banks.
+/// `english_uk` and `allcaps` are selectable only from the command line (option `0xC13F3DE2`,
+/// `FUN_00826a10`); the OS-locale map (`FUN_00826a90`) never picks them, and the `GetLanguage` Lua
+/// binding (`0x005E6420`) reports both as English.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum SoundKind {
-    Wavebank,
-    Soundbank,
-    Sounddb,
+pub enum Language {
+    English,
+    Spanish,
+    Italian,
+    French,
+    German,
+    Japanese,
+    Russian,
 }
 
-impl SoundKind {
-    /// The ASET `type_id` and UCFX `type_hash` the engine dispatches on.
-    pub fn ids(self) -> (u32, u32) {
-        use mercs2_formats::types::*;
+impl Language {
+    /// Every language, in table order.
+    pub const ALL: [Language; 7] = [
+        Language::English,
+        Language::Spanish,
+        Language::Italian,
+        Language::French,
+        Language::German,
+        Language::Japanese,
+        Language::Russian,
+    ];
+
+    /// The table's entry: the base name of `.\Data\<token>.wad`, and the suffix of a `vo_*` bank's
+    /// entry name.
+    pub const fn token(self) -> &'static str {
         match self {
-            SoundKind::Wavebank => (TYPE_ID_WAVEBANK, TYPE_HASH_WAVEBANK),
-            SoundKind::Soundbank => (TYPE_ID_SOUNDBANK, TYPE_HASH_SOUNDBANK),
-            // No constant for sounddb in `types`; the pair comes from `aset_type_ids`, which is
-            // the registry the rest of the workspace reads.
-            SoundKind::Sounddb => (13, 0xE527_3C14),
+            Language::English => "english",
+            Language::Spanish => "spanish",
+            Language::Italian => "italian",
+            Language::French => "french",
+            Language::German => "german",
+            Language::Japanese => "japanese",
+            Language::Russian => "russian",
         }
     }
+}
+
+/// A session of the game that loads sound banks from Lua, and so a place a mod loader loads a bank.
+///
+/// Each session is one level WAD's Lua VM (the VM is closed and recreated on every level swap,
+/// `scripting_host_binding_code_map.md`):
+///
+/// * `gameplay` — the `vz` level. Retail loads its banks in `MrxSoundBootstrap.LoadBanks`
+///   (`resident/mrxsoundbootstrap.lua:192-246`) and unloads them in `ExitGame` (`:188-190`); the
+///   mod loader loads in `wifpmcinterior._OnEnter` and unloads after `ExitGame`. Its blocks ship in
+///   the Shipment overlay.
+/// * `front_end` — the `shell` level (the main menu). Retail loads its banks in
+///   `MrxSound.EnterShellState` (`shell/mrxsound.lua:5-15`) and unloads them in `ExitShellState`
+///   (`:17-27`); the front-end loader runs after each. Its blocks ship in the shell patch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LoadSession {
+    Gameplay,
+    FrontEnd,
+}
+
+impl LoadSession {
+    /// Both sessions, in this order.
+    pub const ALL: [LoadSession; 2] = [LoadSession::Gameplay, LoadSession::FrontEnd];
+
+    /// The manifest spelling.
+    pub const fn token(self) -> &'static str {
+        match self {
+            LoadSession::Gameplay => "gameplay",
+            LoadSession::FrontEnd => "front_end",
+        }
+    }
+}
+
+/// One cue of an authored sound bank: a PCM16 WAV played by one single-wave group through one
+/// single-track cue — the shape of retail `ui_PDA_Open_01_st` (`audio_code_map.md` §11.6). Every
+/// field is a field of that group or cue, named for what the engine does with it, at the offset it
+/// is written to (§11.4); all are required.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SoundCue {
+    /// The name `Sound.CueSound` is given. The cue guid is `pandemic_hash_m2(name)`.
+    pub name: String,
+    /// The `src/`-relative WAV: uncompressed 16-bit PCM, mono or stereo, at any rate above zero.
+    pub wave: PathBuf,
+    /// Group `+0x2C`: the sound instance's base volume, in dB (`FUN_0083d770`), written as the
+    /// linear gain `10^(dB/20)`.
+    pub group_gain_db: f64,
+    /// Cue `+0x08`: the cue's gain, in dB (`FUN_00835060` multiplies the cue's volume by it each
+    /// frame), written as the linear gain `10^(dB/20)`.
+    pub cue_gain_db: f64,
+    /// Group `+0x30`: the sound instance's base pitch, in semitones (`FUN_0083d700`).
+    pub pitch_semitones: f32,
+    /// Group `+0x14`: `true` plays the cue from its emitter's own source, positioned, when it has
+    /// one; `false` plays it from the shared 2D source (`FUN_00837830`, `0x008378A9`).
+    pub positional: bool,
+    /// Group `+0x18`: full volume up to this distance from the listener (`FUN_0083d3a0`).
+    pub min_distance: f32,
+    /// Group `+0x1C`: silent from this distance (`FUN_0083d3a0`).
+    pub max_distance: f32,
+    /// Group `+0x24`: the exponent of the fall-off between the two distances (`FUN_0083d3a0`).
+    pub distance_exponent: f32,
+    /// Group `+0x28`: how much of the Doppler shift applies (`FUN_0083b120`).
+    pub doppler_scale: f32,
+    /// Cue `+0x06`, the start limit: the cue starts only while fewer than this many instances of it
+    /// are playing, and 0 starts it every time (`FUN_00834ad0` compares it with a count in the cue's
+    /// runtime record that `FUN_008354e0` raises when an instance plays and `FUN_00835850` lowers
+    /// when one finishes).
+    pub start_limit: u8,
+    /// Group `+0x00`, the sound id. Its one reader is `FUN_008369e0`, which refuses to start a
+    /// group whose id is `0xEA1343AA`, `0xC05D8686` or `0xBB8AE67D` unless the game runs in English;
+    /// in retail it equals the guid of a cue that plays the group in 411 of `vz.wad`'s 1,776 groups
+    /// and differs in 1,278.
+    pub sound_id: u32,
+    /// Group `+0x10`, the priority: `GetWavePriority` returns it times the wave's distance volume
+    /// (`0x00837EDF`), and with every voice busy a new instance takes the voice of the lowest-priority
+    /// wave only when its own priority is higher (`FUN_00837830`).
+    pub priority: f32,
+    /// Group `+0x20`, carried as written. No engine reader is known: it is copied into the wave
+    /// (`0x00838F70`, wave `+0x68`), whose getter (wave vtable `+0x44`, `0x00838F30`) has no call
+    /// site. 1.0 in every retail group but one.
+    pub group_20: f32,
+    /// Single-track cue `+0x16`, carried as written. No engine reader is known: the cue's `{soundbank,
+    /// group}` reference is read at `+0x10` and `+0x14` only (`FUN_0082e7d0`, `FUN_0083d410`). 0 in
+    /// most retail cues; a bank that carries a non-zero value carries the same one in every
+    /// single-track cue.
+    pub cue_16: u16,
+    /// The wave record's `+0x00` clip hash, carried as written. No engine reader is known:
+    /// `FUN_00837830` reads the record at `+0x05`..`+0x20` and not `+0x00`.
+    pub clip_hash: u32,
 }
 
 /// Which faction vendor a shop item is offered at (`add_shop_item`). Six shops key off
@@ -571,8 +679,90 @@ pub enum CollisionSource {
     FollowGeometry,
 }
 
-/// One ordered, internally-tagged list. Cross-kind apply order within a Shipment is preserved.
+/// Where a shader's bytecode comes from: `{asm: <path>}`, SM3 assembly text (`sm3asm` syntax) the
+/// builder assembles, or `{blob: <path>}`, a compiled `vs_3_0` / `ps_3_0` blob. Both paths are
+/// `src/`-relative.
+///
+/// Untagged over one-key structs, so it is the same one-key map in YAML, JSON and TOML, and a map
+/// with both keys, or neither, matches no form.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum ShaderSource {
+    Asm(AsmSource),
+    Blob(BlobSource),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AsmSource {
+    pub asm: PathBuf,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BlobSource {
+    pub blob: PathBuf,
+}
+
+impl ShaderSource {
+    pub fn asm(path: impl Into<PathBuf>) -> ShaderSource {
+        ShaderSource::Asm(AsmSource { asm: path.into() })
+    }
+
+    pub fn blob(path: impl Into<PathBuf>) -> ShaderSource {
+        ShaderSource::Blob(BlobSource { blob: path.into() })
+    }
+
+    pub fn path(&self) -> &std::path::Path {
+        match self {
+            ShaderSource::Asm(a) => &a.asm,
+            ShaderSource::Blob(b) => &b.blob,
+        }
+    }
+}
+
+/// One registration of an `add_shader`: the `name` the engine keys it by (`pandemic_hash_m2`), and
+/// the store `stem` it loads (`<stem>.sho`, whose record ids are `<stem>_3.sho` in `shader3.bin` and
+/// `<stem>_3l.sho` in `shader3Low.bin`). `shader_low` is the `shader3Low.bin` bytecode, which the
+/// engine loads when the ShaderLevel setting is off.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ShaderClass {
+    pub name: String,
+    pub stem: String,
+    pub shader: ShaderSource,
+    pub shader_low: ShaderSource,
+}
+
+/// A cell of the 40 × 40 grid of 200 m cells TINY stand-ins are placed on: `col` =
+/// `floor((x + 4000) / 200)`, `row` = `floor((z + 4000) / 200)`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TinyCell {
+    pub row: u32,
+    pub col: u32,
+}
+
+/// What a `replace_fx` edits: `{effect: <name or 0xHHHHHHHH>}`, or `{template: <name>}` for the
+/// effect a template starts.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged, deny_unknown_fields)]
+pub enum FxTarget {
+    Effect { effect: String },
+    Template { template: String },
+}
+
+impl std::fmt::Display for FxTarget {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            FxTarget::Effect { effect } => write!(f, "effect {effect}"),
+            FxTarget::Template { template } => write!(f, "template {template}"),
+        }
+    }
+}
+
+/// One ordered, internally-tagged list. Cross-kind apply order within a Shipment is preserved.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Contribution {
     /// A wardrobe outfit. **Two sides of one coin, decided by whether a `model` FILE is supplied:**
@@ -678,23 +868,53 @@ pub enum Contribution {
         #[serde(default)]
         normal_map: bool,
     },
-    /// Data, new-hash additive. An audio bank under a name the author chooses.
-    ///
-    /// Expressible because the container turned out to be an opaque `data` wrapper — the same shape
-    /// `add_movie` already shipped — rather than because anything here understands audio. The
-    /// survey measured it across the whole archive: `soundbank` 98/98, `sounddb` 58/58 and
-    /// `wavebank` 92/93 are bare `data`, which is 248 assets and ~366 MB of retail content that had
-    /// no way into a Shipment at all.
-    ///
-    /// The bytes ship VERBATIM; nothing here encodes or validates them, so `bank` must already be a
-    /// table the game accepts.
+    /// Data + Script. A new sound bank: its soundbank, sounddb and wavebank, encoded from the
+    /// authored cues (`mercs2_audio::encode`) and shipped as one block of three entries under
+    /// `pandemic_hash_m2(bank)`, the shape of every retail bank (`audio_code_map.md` §11.1). The mod
+    /// loader of each session in `load_in` loads it (`MrxSoundBanks.LoadWaveBank` /
+    /// `LoadSoundBank`), since a cue plays only once its bank is loaded.
     AddSound {
-        /// ASSET identity → `pandemic_hash_m2`.
-        name: String,
-        bank: PathBuf,
-        /// Which table this is. Not inferable from the bytes, and the type id decides which loader
-        /// runs, so the author declares it.
-        sound: SoundKind,
+        /// The bank name: the entry name hash of all three tables and the name the loader loads.
+        bank: String,
+        /// The category every cue's group is in: a name of the game's category tree
+        /// (`mercs2_audio::encode::RETAIL_CATEGORY_NAMES`).
+        category: String,
+        /// The cues, in bank order.
+        cues: Vec<SoundCue>,
+        /// The sessions whose loader loads the bank: at least one, each at most once
+        /// ([`LoadSession`]). The bank's block ships to each listed session's WAD.
+        load_in: Vec<LoadSession>,
+    },
+    /// Data, SAME-HASH. Replace a bank the game ships: its soundbank and sounddb are encoded from
+    /// the authored cues and shipped under the bank's own entry name, which the game's own load of
+    /// the bank reads. The cues' waves ship in a wavebank of their own, which the mod loader loads.
+    /// A cue of the game's bank the replacement does not declare is gone.
+    ReplaceSoundBank {
+        /// The bank name, as the game's Lua loads it (`ui_hud`, `vo_mattias`).
+        bank: String,
+        /// For a `vo_*` bank, the language whose copy is replaced: the entry is
+        /// `<bank>.<language>`. Absent for any other bank.
+        #[serde(default)]
+        language: Option<Language>,
+        /// As [`Contribution::AddSound::category`].
+        category: String,
+        /// The bank's cues, in bank order.
+        cues: Vec<SoundCue>,
+    },
+    /// Data, SAME-HASH. Replace one cue of a bank the game ships: the bank's soundbank is forked,
+    /// a new single-wave group is appended, and the cue is rewritten to play it. The cue keeps its
+    /// index, so the bank's own sounddb still routes to it; every other cue and group is left as
+    /// the game has it. The wave ships in a wavebank of its own, which the mod loader loads.
+    ReplaceSoundCue {
+        /// The bank the cue is in, as the game's Lua loads it.
+        bank: String,
+        /// As [`Contribution::ReplaceSoundBank::language`].
+        #[serde(default)]
+        language: Option<Language>,
+        /// The category of the new group.
+        category: String,
+        /// The cue: `name` is the cue it replaces.
+        cue: SoundCue,
     },
     /// Data, new-hash additive. A Scaleform GFx movie (`cfx_pack`, type_id 23) added as a WAD asset,
     /// so Lua can point `SetSwfFile` at it.
@@ -741,6 +961,10 @@ pub enum Contribution {
     },
     /// Data, same-hash, FULLY RESIDENT. Non-destructive means the base WAD is never modified — not
     /// that the asset's appearance is preserved.
+    ///
+    /// A `target` of the `vfx` atlas `0x89E211AF` repaints the atlas the effects draw from: the
+    /// repaint is the base `qm link` packs every installed Shipment's `add_fx_sprite` on top of
+    /// ([`crate::sprite`]), written into the resident block, and one Shipment of a set repaints it.
     ReplaceTexture { target: String, image: PathBuf },
     /// Script. A DECLARED MUTATION, not a finished block: the Quartermaster links `scripts_vz`
     /// across the installed set at deploy, so two Shipments patching Lua do not annihilate.
@@ -888,36 +1112,72 @@ pub enum Contribution {
         #[serde(default)]
         events: Option<PathBuf>,
     },
-    /// Data. Add a NEW compiled shader (SM3 blob) to `shader3.bin`. Author is responsible for
-    /// producing the binary via an external SM3 compiler (fxc `/T vs_3_0` or `ps_3_0`).
-    /// The engine indexes shaders by their name hash, so a bind-by-name in a material picks up
-    /// the added shader transparently.
+    /// Data + Code. Register NEW shaders in the engine's shader registry and add their bytecode to
+    /// the shader stores.
+    ///
+    /// `family` is the record family the engine constructs for the shader: one vtable, which
+    /// decides the registry (vertex or pixel), the constants the engine binds, and the draw code
+    /// that reaches it. `classes` is exactly 4 entries for a pixel family, in the engine's
+    /// light-class order (base, `_pl`, `_sl`, `_pl_sl`: the material's index plus the light class
+    /// selects the pixel shader), or exactly 1 for a vertex family. Entries that share a `stem`
+    /// share one store record, and their sources must assemble to the same bytes.
+    ///
+    /// The registration itself happens at runtime: the author's ASI calls the m2-sdk
+    /// `shader-registry` API with the tables `qm build` writes to `<shipment>.shaders.h`, so the
+    /// Shipment must `load.requires: [{capability: shader-registry}]` (M0231).
     AddShader {
-        /// The shader name (hashed to become the ASET key).
-        name: String,
-        /// The compiled SM3 shader bytes.
-        blob: PathBuf,
+        family: crate::shader::ShaderFamily,
+        classes: Vec<ShaderClass>,
     },
-    /// Data, SAME-HASH. Wholesale REPLACE the compiled bytes of a shipped shader, keeping the
-    /// name. Same-hash swap; every material bind picks up the new shader.
+    /// Data. Replace the bytecode of a shipped shader in the stores, in place: `target` is the
+    /// registered `.sho` stem (`PgMeshVP` for `PgMeshVP.sho`). `shader` replaces its record in
+    /// `shader3.bin`; `shader_low` replaces its record in `shader3Low.bin`, and is required exactly
+    /// when the stem has one there. The stage comes from each source's version token and must be
+    /// the record's.
     ReplaceShader {
         target: String,
-        blob: PathBuf,
+        shader: ShaderSource,
+        #[serde(default)]
+        shader_low: Option<ShaderSource>,
     },
-    /// Data. Add a NEW particle-effect entry to the fxdict, callable by its name from Lua and
-    /// engine spawn sites. Pre-encoded `fxdict` payload (the sequence of tagged sub-chunks:
-    /// `efct` / `emtr` / `emit` / `poff` / `trfm` / `ptyp` / `colr` / `frce` / `text` — see
-    /// `mercs2_formats::fxdict`).
+    /// Data. A NEW particle effect and the world template that starts it.
+    ///
+    /// The effect is declared whole in the effect form (`effect`, [`crate::effect::EffectForm`]) and
+    /// appended to the game's effects block under `pandemic_hash_m2(name)`. The template is declared
+    /// inline ([`crate::template::TemplateForm`]): every component, field and value, with exactly one
+    /// `RedEffectComponent` whose `name` names the effect. It is appended to the game's
+    /// `worldentity` under the key its name derives
+    /// (`mercs2_formats::worldentity::derived_template_key`), so `Pg.Spawn` and
+    /// `ObjectState.StartEmitter` find it by name. Both containers are merged across the installed
+    /// set by `qm link` ([`crate::fx`]).
     AddFx {
-        /// The effect name.
+        /// The effect name; its hash is the effect's asset hash.
         name: String,
-        /// The pre-encoded fxdict entry blob.
-        payload: PathBuf,
+        /// The effect form file, `src/`-relative (`.yaml`, `.yml`, `.json` or `.toml`).
+        effect: PathBuf,
+        /// The template, declared field by field.
+        template: crate::template::TemplateForm,
     },
-    /// Data, SAME-HASH. Wholesale REPLACE a shipped fx entry with a new fxdict payload.
+    /// Data. A NEW sprite frame for effects: `image`, a PNG whose width and height are each a power
+    /// of two from 4 to 512, drawn into the free square of the `vfx` atlas `0x89E211AF`, and an
+    /// `fxdict` record under `pandemic_hash_m2(name)` that names its rectangle. An effect's `TEXT`
+    /// names the sprite by `name` as a frame. `qm link` packs every installed Shipment's sprites into
+    /// the one atlas and the one `fxdict` ([`crate::sprite`]). A Shipment names another Shipment's
+    /// sprite as a frame only when it requires that Shipment.
+    AddFxSprite {
+        /// The sprite name; its hash is the frame key.
+        name: String,
+        /// The sprite image, `src/`-relative: a PNG with straight (unpremultiplied) alpha.
+        image: PathBuf,
+    },
+    /// Data, SAME-HASH. Edit an effect the game ships, in place: `target` names the effect, directly
+    /// or through a template that starts it, and `edits` is the edits form file
+    /// ([`crate::fx::EditsForm`]), applied in order. An effect or template another Shipment's
+    /// `add_fx` adds is a target only when this Shipment requires that Shipment.
     ReplaceFx {
-        target: String,
-        payload: PathBuf,
+        target: FxTarget,
+        /// The edits form file, `src/`-relative (`.yaml`, `.yml`, `.json` or `.toml`).
+        edits: PathBuf,
     },
     /// Data, SAME-HASH. REPLACE a single shipped terrain cell (heightmap / texturing / MOPP
     /// collision) with pre-encoded bytes. The heightmap format + MOPP-baked collision codec are
@@ -938,6 +1198,26 @@ pub enum Contribution {
     /// `qm extract-world`). Emitted as an overlay that shadows the base layer block; the
     /// `placement::patch_*` writer is proven byte-identical on a no-op across 747 retail layers.
     EditWorld { layer: String, edits: PathBuf },
+    /// Data. A TINY far-distance stand-in: one model drawn in place of the world objects of one
+    /// 200 m grid cell, each object's part drawn while the object is intact (role `intact`) or
+    /// ruined (role `ruined`), and the `TinyGeometryObject` placement that loads it.
+    ///
+    /// The model is named `<layer>_tinygeometry_tgr<row>_tgc<col>_0x<key>`; the placement, keyed
+    /// `key`, goes into `layer` at the cell's centre. Every primitive of `model` declares
+    /// `extras.tiny_role` and every vertex a `_TINY_SLOT`, an index into `objects`.
+    AddTinyGeometry {
+        /// The layer the placement goes into, by name (`vz_state_mar_city_pristine`).
+        layer: String,
+        /// The 200 m grid cell: `row` from z, `col` from x, each 0..40.
+        cell: TinyCell,
+        /// The placement's entity key (GUID). No layer of the game may already use it.
+        key: u32,
+        /// The world objects the stand-in draws, each a bare `0xGUID` or the name of a placement in
+        /// `layer`. `_TINY_SLOT` indexes this list.
+        objects: Vec<String>,
+        /// `src/`-relative `.glb` / `.gltf`.
+        model: PathBuf,
+    },
     /// Script. Turn a normally-hidden world-state layer ON — the PERMANENT, whole-mission
     /// counterpart to [`Contribution::EditWorld`]'s in-place placement edits.
     ///
@@ -1193,6 +1473,8 @@ impl Contribution {
         "add_model",
         "add_texture",
         "add_sound",
+        "replace_sound_bank",
+        "replace_sound_cue",
         "add_movie",
         "add_ui",
         "replace_texture",
@@ -1208,9 +1490,11 @@ impl Contribution {
         "replace_shader",
         "add_fx",
         "replace_fx",
+        "add_fx_sprite",
         "replace_terrain_cell",
         "edit_state_machine",
         "edit_world",
+        "add_tiny_geometry",
         "activate_layer",
         "edit_stringdb",
         "add_stringdb_keys",
@@ -1248,6 +1532,8 @@ impl Contribution {
             Contribution::AddModel { .. } => "add_model",
             Contribution::AddTexture { .. } => "add_texture",
             Contribution::AddSound { .. } => "add_sound",
+            Contribution::ReplaceSoundBank { .. } => "replace_sound_bank",
+            Contribution::ReplaceSoundCue { .. } => "replace_sound_cue",
             Contribution::AddMovie { .. } => "add_movie",
             Contribution::AddUi { .. } => "add_ui",
             Contribution::ReplaceTexture { .. } => "replace_texture",
@@ -1263,9 +1549,11 @@ impl Contribution {
             Contribution::ReplaceShader { .. } => "replace_shader",
             Contribution::AddFx { .. } => "add_fx",
             Contribution::ReplaceFx { .. } => "replace_fx",
+            Contribution::AddFxSprite { .. } => "add_fx_sprite",
             Contribution::ReplaceTerrainCell { .. } => "replace_terrain_cell",
             Contribution::EditStateMachine { .. } => "edit_state_machine",
             Contribution::EditWorld { .. } => "edit_world",
+            Contribution::AddTinyGeometry { .. } => "add_tiny_geometry",
             Contribution::ActivateLayer { .. } => "activate_layer",
             Contribution::EditStringDb { .. } => "edit_stringdb",
             Contribution::AddStringDbKeys { .. } => "add_stringdb_keys",

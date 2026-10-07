@@ -59,7 +59,7 @@ use mercs2_formats::scripts_block::ScriptsBlock;
 use mercs2_formats::texture::{build_texture_block, TexFormat, TextureData};
 use mercs2_formats::texture_encode::{self, encode_bc1, encode_bc3, mip_chain};
 use mercs2_formats::types::{
-    TYPE_HASH_ANIMATION, TYPE_HASH_EFFECT, TYPE_HASH_LAYER, TYPE_HASH_MODEL, TYPE_HASH_STRINGDB,
+    TYPE_HASH_ANIMATION, TYPE_HASH_LAYER, TYPE_HASH_MODEL, TYPE_HASH_STRINGDB,
     TYPE_HASH_TERRAIN_MESH, TYPE_ID_ANIMATION, TYPE_ID_CFX_PACK, TYPE_ID_EFFECT, TYPE_ID_LAYER,
     TYPE_ID_MODEL, TYPE_ID_SCRIPT, TYPE_ID_STRINGDB, TYPE_ID_TERRAIN_MESH, TYPE_ID_TEXTURE,
 };
@@ -75,19 +75,21 @@ struct LoadedScriptBlock {
     rows: std::collections::HashMap<u32, (u32, u32, u32)>,
 }
 
-/// Load every scripts block a `patch_lua` target could live in.
+/// Load each of `blocks` (`(PTHS needle, PTHS path)`, [`link::SCRIPT_BLOCKS`] or
+/// [`link::SHELL_SCRIPT_BLOCKS`]) from `stack`.
 ///
 /// A block missing from the stack is **skipped, not fatal**. A synthetic or overlay-only stack may
 /// carry `scripts_vz` and nothing else, and if a mutation actually needed the absent block the
 /// linker already reports `UnknownScript` naming the target — which tells the author what to fix,
-/// where "no resident block in the game stack" would not.
+/// where "no resident block in the game stack" would not. A stack with none of them is an error.
 fn load_script_blocks(
-    game: &mut GameStack,
+    stack: &mut GameStack,
+    blocks: &[(&str, &str)],
     kind: &'static str,
 ) -> Result<Vec<LoadedScriptBlock>, BuildError> {
     let mut out = Vec::new();
-    for (needle, path) in link::SCRIPT_BLOCKS {
-        let Some((raw, rows)) = game.block_and_rows_by_path(needle) else {
+    for (needle, path) in blocks {
+        let Some((raw, rows)) = stack.block_and_rows_by_path(needle) else {
             continue;
         };
         let block = ScriptsBlock::parse(&raw).map_err(|m| BuildError::Lower {
@@ -105,13 +107,19 @@ fn load_script_blocks(
         return Err(BuildError::Lower {
             index: 0,
             kind,
-            message: "no scripts block in the configured game stack".into(),
+            message: format!(
+                "none of the scripts blocks {:?} is in {}",
+                blocks.iter().map(|(_, p)| *p).collect::<Vec<_>>(),
+                stack.paths().iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join(", ")
+            ),
         });
     }
     Ok(out)
 }
 
-/// Emit a `PatchBlock` for each scripts block the link actually spliced.
+/// Emit a `PatchBlock` for each loaded block in `touched` (indices into `loaded`): the scripts blocks
+/// the link spliced, and the resident block when its worldentity carries added templates
+/// ([`lower_fx`]).
 ///
 /// **Only the touched blocks.** Re-emitting an untouched block would shadow the base with a
 /// byte-identical copy — harmless in isolation, but it puts the whole ~7,000-entry resident block
@@ -134,12 +142,11 @@ fn load_script_blocks(
 /// beats the M0004 hang of no row at all.
 fn script_patch_blocks(
     loaded: &[LoadedScriptBlock],
-    linked: &[link::LinkedScript],
+    touched: &std::collections::BTreeSet<usize>,
     kind: &'static str,
 ) -> Result<Vec<PatchBlock>, BuildError> {
-    let touched: std::collections::BTreeSet<usize> = linked.iter().map(|l| l.block).collect();
     let mut out = Vec::new();
-    for bi in touched {
+    for &bi in touched {
         let lb = &loaded[bi];
         let aset: Vec<AsetEntry> = lb
             .block
@@ -164,6 +171,178 @@ fn script_patch_blocks(
     Ok(out)
 }
 
+/// Link the front end's sound loader ([`link::link_front_end`]) into `shell.wad`'s scripts block,
+/// read from the `shell.wad` beside `game`'s base WAD ([`GameStack::open_sibling`]), and return the
+/// block to ship in the shell patch — every row copied from `shell.wad` ([`script_patch_blocks`]).
+/// Empty when no registration loads a bank in the front end. A missing `shell.wad` is an error.
+fn link_shell_loader(
+    game: &GameStack,
+    corpus: &Path,
+    sound_regs: &[link::SoundBankRegistration],
+    order: &[String],
+    kind: &'static str,
+    log: &mut Vec<String>,
+) -> Result<Vec<PatchBlock>, BuildError> {
+    if !sound_regs.iter().any(|r| r.sessions.contains(&crate::manifest::LoadSession::FrontEnd)) {
+        return Ok(Vec::new());
+    }
+    let fail = |message: String| BuildError::Lower { index: 0, kind, message };
+    let mut shell = game.open_sibling("shell.wad").map_err(fail)?;
+    let mut loaded = load_script_blocks(&mut shell, link::SHELL_SCRIPT_BLOCKS, kind)?;
+    let mut targets: Vec<link::TargetBlock<'_>> = loaded
+        .iter_mut()
+        .map(|lb| link::TargetBlock { path: lb.path.clone(), block: &mut lb.block })
+        .collect();
+    let linked = link::link_front_end(&mut targets, corpus, sound_regs, order).map_err(|e| fail(e.to_string()))?;
+    drop(targets);
+    for l in &linked.scripts {
+        log.push(format!(
+            "linked {} in {} (shell.wad): {} → {} B source, {} B bytecode, from {:?}",
+            l.target, loaded[l.block].path, l.base_source_bytes, l.linked_source_bytes, l.bytecode_bytes, l.contributors
+        ));
+    }
+    script_patch_blocks(&loaded, &linked.scripts.iter().map(|l| l.block).collect(), kind)
+}
+
+/// `add_fx_sprite`, `add_fx` and `replace_fx` of `shipments`, in order, and the set's
+/// `replace_texture` of the `vfx` atlas ([`crate::fx::merge`]): the game's effects block with every
+/// edit and addition, at its own path, when the set has an `add_fx` or a `replace_fx`; and, written
+/// into the resident block of `loaded`, the game's worldentity with every added template when the
+/// set adds one, the `fxdict` with every sprite's record when the set adds a sprite, and the atlas
+/// with every sprite drawn on the base when the set adds a sprite or repaints it.
+///
+/// Returns the effects block and the index into `loaded` of the resident block when any of its
+/// entries was rewritten. The effects block carries every row the game gives its entries, copied,
+/// and a primary row with sentinel rungs for each added effect; the resident block's rows are
+/// copied from the game by [`script_patch_blocks`].
+fn lower_fx(
+    shipments: &[&LoadedShipment],
+    game: &mut GameStack,
+    loaded: &mut [LoadedScriptBlock],
+    scope: crate::fx::Scope,
+    kind: &'static str,
+    log: &mut Vec<String>,
+) -> Result<(Option<PatchBlock>, Option<usize>), BuildError> {
+    let fail = |index: usize, message: String| BuildError::Lower { index, kind, message };
+    let (_, resident_path) = link::SCRIPT_BLOCKS[1];
+    let resident = loaded
+        .iter()
+        .position(|lb| lb.path == resident_path)
+        .ok_or_else(|| fail(0, format!("the game stack has no {resident_path}, which holds the worldentity")))?;
+    let we_at = crate::fx::worldentity_entry(&loaded[resident].block).map_err(|m| fail(0, m))?;
+    let we = mercs2_formats::worldentity::WorldEntity::parse(&loaded[resident].block.entries[we_at].bytes)
+        .map_err(|m| fail(0, format!("the worldentity in {resident_path}: {m}")))?;
+    let fxdict_at = crate::fx::fxdict_entry(&loaded[resident].block).map_err(|m| fail(0, format!("{resident_path}: {m}")))?;
+    let atlas_at = crate::fx::atlas_entry(&loaded[resident].block).map_err(|m| fail(0, format!("{resident_path}: {m}")))?;
+    let (records, game_atlas) =
+        crate::fx::sprites_of(&loaded[resident].block).map_err(|m| fail(0, format!("{resident_path}: {m}")))?;
+    let (needle, effects_path) = crate::fx::EFFECTS_BLOCK;
+    let (raw, rows) = game
+        .block_and_rows_by_path(needle)
+        .ok_or_else(|| fail(0, format!("the game stack has no {effects_path}")))?;
+    let effects = ScriptsBlock::parse(&raw).map_err(|m| fail(0, format!("{effects_path}: {m}")))?;
+    let set: Vec<crate::fx::FxShipment<'_>> =
+        shipments.iter().map(|s| crate::fx::FxShipment { manifest: &s.manifest, root: &s.root }).collect();
+    let (atlas, repainted) = crate::fx::base_atlas(&game_atlas, &set).map_err(|m| fail(0, m))?;
+    if repainted {
+        log.push(format!("{resident_path}: the vfx atlas 0x{:08X} is repainted", crate::sprite::VFX_ATLAS));
+    }
+    let base = crate::fx::FxBase { effects: &effects.entries, worldentity: &we, fxdict: &records, atlas: &atlas, repainted };
+    let merged = crate::fx::merge(&base, &set, scope).map_err(|f| {
+        let index = f.problems.first().map(|p| p.index).or_else(|| f.conflicts.first().map(|c| c.claimants[0].index));
+        fail(index.unwrap_or(0), f.to_string())
+    })?;
+    log.extend(merged.log.iter().cloned());
+
+    let effects_block = if shipments.iter().any(|s| crate::fx::has_fx(&s.manifest)) {
+        let mut aset = Vec::with_capacity(merged.effects.len());
+        for e in &merged.effects {
+            aset.push(if merged.added.contains(&e.name_hash) {
+                AsetEntry::new(e.name_hash, 0xFFFF_FFFF, 0x0000_FFFF, TYPE_ID_EFFECT)
+            } else {
+                let &(packed, secondary, type_id) = rows.get(&e.name_hash).ok_or_else(|| {
+                    fail(0, format!("{effects_path} entry 0x{:08X} has no ASET row in the game", e.name_hash))
+                })?;
+                AsetEntry::new(e.name_hash, secondary, packed, type_id)
+            });
+        }
+        let block = ScriptsBlock { entries: merged.effects }.serialize();
+        log.push(format!(
+            "{effects_path}: {} entries ({} added), {} bytes",
+            aset.len(),
+            merged.added.len(),
+            block.len()
+        ));
+        Some(PatchBlock::from_decompressed(&block, effects_path.to_string(), aset, None).map_err(|m| fail(0, m))?)
+    } else {
+        None
+    };
+    let mut rewritten = false;
+    if let Some(we) = merged.worldentity {
+        let bytes = we.write().map_err(|m| fail(0, format!("writing the worldentity: {m}")))?;
+        log.push(format!(
+            "{resident_path}: worldentity 0x{:08X} {} -> {} bytes, {} templates",
+            mercs2_formats::worldentity::RETAIL_WORLDENTITY_NAME_HASH,
+            loaded[resident].block.entries[we_at].bytes.len(),
+            bytes.len(),
+            we.instances.len()
+        ));
+        loaded[resident].block.entries[we_at].bytes = bytes;
+        rewritten = true;
+    }
+    if let Some(bytes) = merged.fxdict {
+        log.push(format!(
+            "{resident_path}: fxdict 0x{:08X} {} -> {} bytes, {} sprite(s) added",
+            crate::fx::FXDICT_NAME_HASH,
+            loaded[resident].block.entries[fxdict_at].bytes.len(),
+            bytes.len(),
+            merged.placed.len()
+        ));
+        loaded[resident].block.entries[fxdict_at].bytes = bytes;
+        rewritten = true;
+    }
+    if let Some(bytes) = merged.atlas {
+        log.push(format!(
+            "{resident_path}: vfx atlas 0x{:08X}, {} bytes{}",
+            crate::sprite::VFX_ATLAS,
+            bytes.len(),
+            match merged.square {
+                Some(sq) => format!(", sprites drawn into the free square {sq}"),
+                None => String::new(),
+            }
+        ));
+        loaded[resident].block.entries[atlas_at].bytes = bytes;
+        rewritten = true;
+    }
+    Ok((effects_block, rewritten.then_some(resident)))
+}
+
+/// The loader self-check ([`crate::sound::check_loader_banks`]): every bank the gameplay loader
+/// loads has its wavebank in `overlay`, and every bank the front-end loader loads has its wavebank
+/// in `shell`.
+fn check_sound_loaders(
+    sound_regs: &[link::SoundBankRegistration],
+    overlay: &[&PatchBlock],
+    shell: &[&PatchBlock],
+    kind: &'static str,
+) -> Result<(), BuildError> {
+    use crate::manifest::LoadSession;
+    for (session, blocks) in [(LoadSession::Gameplay, overlay), (LoadSession::FrontEnd, shell)] {
+        let banks: Vec<&str> = sound_regs.iter().filter(|r| r.sessions.contains(&session)).map(|r| r.bank.as_str()).collect();
+        crate::sound::check_loader_banks(link::Level::of(session), &banks, blocks)
+            .map_err(|message| BuildError::Lower { index: 0, kind, message })?;
+    }
+    Ok(())
+}
+
+/// The CSUM row of the `shell.wad` beside `game`'s base WAD, which a shell patch is stamped with.
+fn shell_csum(game: &GameStack, kind: &'static str) -> Result<(u32, Option<u32>), BuildError> {
+    let fail = |message: String| BuildError::Lower { index: 0, kind, message };
+    let base = game.paths().first().map(|p| p.to_path_buf()).ok_or_else(|| fail("the game stack is empty".into()))?;
+    let shell = crate::sound::sibling_wad(&base, "shell.wad").map_err(fail)?;
+    mercs2_formats::donor::base_csum(&shell).map_err(fail)
+}
+
 /// Where a built artifact has to end up.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Destination {
@@ -174,7 +353,27 @@ pub enum Destination {
     GameFolder { relative: String },
     /// A NEW base WAD in `data/`, at this path relative to the game folder (`data/<name>.wad`). Only
     /// `add_language` produces one; it is ADDITIVE and collision-checked, never over a shipped WAD.
-    DataWad { relative: String },
+    /// `display` is the label a language selector shows for it.
+    DataWad { relative: String, display: String },
+    /// A patch WAD, at `relative` under the output directory, whose blocks a deploy step merges —
+    /// with every other installed Shipment's for the same `language`, a link output last — into
+    /// `data/<language>-patch.wad`, which the engine mounts directly above `data/<language>.wad`
+    /// (`FUN_004BFEF0`: `%s\%s-patch.wad` with the language table's name).
+    LanguagePatch { language: String, relative: String },
+    /// A patch WAD, named by [`Placement::name`] in the output directory, whose blocks a deploy step
+    /// merges — with every other installed Shipment's, a link output last — into
+    /// `data/shell-patch.wad`, which the engine mounts directly above `shell.wad` in the front end
+    /// (`FUN_004BFDA0`: `%s\%s-patch.wad` with the level name `FUN_004C1280` sets to `shell`).
+    ShellPatch,
+    /// A copy, made by the deploy step, of the game file at `from` to `to` (both relative to the game
+    /// folder). No bytes are written to the output directory; [`Placement::sha256`] and
+    /// [`Placement::bytes`] describe `from` as the build read it.
+    StreamCopy { from: String, to: String },
+    /// A game data file at `relative` (a closed set: `data/shader3.bin`, `data/shader3Low.bin`),
+    /// written under the output directory at the same relative path: the original store from
+    /// `--original-data`, whose sha256 is `base_sha256`, with the Shipment's (or, from `qm link`,
+    /// the installed set's) shader edits applied.
+    DataFile { relative: crate::shader::DataFile, base_sha256: String },
 }
 
 /// One emitted artifact and its digest.
@@ -443,15 +642,15 @@ enum Lowering {
     /// block plus one `TYPE_ID_TEXTURE` block per supplied map, and they have to travel together —
     /// the model's MTRL repoints name hashes that only resolve if these ship alongside it.
     Blocks(Vec<PatchBlock>),
-    /// A NEW base WAD placed in `data/`, plus the stringdb block that belongs in the Shipment overlay.
-    /// `add_language` is the only producer. The base WAD is opened by name (the mount-check target);
-    /// the `overlay` blocks ride the always-mounted Shipment overlay, because the engine resolves a
-    /// language's stringdb from the MOUNTED registry — every retail language stringdb lives in
-    /// shell.wad/vz.wad, never in the on-demand `.\Data\<lang>.wad`.
+    /// A NEW base WAD placed in `data/`: `add_language` is the only producer. The engine mounts
+    /// `.\Data\<language>.wad` in its language slot, above the level WAD (`FUN_004BFE20`), so its
+    /// string table, fonts and voice-over tables resolve from there. `stream_copy` is the voice
+    /// stream the language plays from, as `(from, to)` under the game folder.
     LanguageWad {
         language: String,
+        display: String,
         blocks: Vec<PatchBlock>,
-        overlay: Vec<PatchBlock>,
+        stream_copy: (String, String),
     },
     /// A file placed in the game folder. Carries its bytes so the caller writes them exactly once,
     /// next to the digest it records for them.
@@ -471,14 +670,15 @@ enum Lowering {
 ///
 /// Fails the build on any blocking finding. That is the whole value: both structural bugs this
 /// crate has shipped were invisible in the manifest and plain in the bytes.
-fn verify_emitted(wad: &[u8]) -> Result<Vec<crate::lint::Diagnostic>, BuildError> {
+fn verify_emitted(wad: &[u8], keys: &crate::shader::ShaderKeys) -> Result<Vec<crate::lint::Diagnostic>, BuildError> {
     let contents =
         mercs2_formats::patch_wad::read_patch_wad(wad).map_err(|m| BuildError::Lower {
             index: 0,
             kind: "verify",
             message: format!("the WAD we just wrote does not read back: {m}"),
         })?;
-    let found = crate::lint::artifact_checks(&contents.blocks);
+    let mut found = crate::lint::artifact_checks(&contents.blocks);
+    found.extend(crate::lint::shader_key_checks(&contents.blocks, &keys.pixel, &keys.vertex));
     if crate::lint::blocks_build(&found) {
         return Err(BuildError::Artifact { diagnostics: found });
     }
@@ -538,6 +738,11 @@ pub enum BuildError {
     },
     /// The plan or a superseded-file probe could not be computed at all.
     Compat(crate::compat::CompatError),
+    /// A shader kind is present and no `--original-data` directory was given: the stores are read
+    /// only from there.
+    OriginalDataRequired { index: usize, kind: &'static str },
+    /// The original stores, or the game's VT and R2VB store pairs, do not read.
+    ShaderData(String),
 }
 
 impl std::fmt::Display for BuildError {
@@ -610,6 +815,13 @@ impl std::fmt::Display for BuildError {
                  first (qm never deletes it)"
             ),
             BuildError::Compat(e) => write!(f, "{e}"),
+            BuildError::OriginalDataRequired { index, kind } => write!(
+                f,
+                "contributions[{index}] ({kind}) edits the shader stores, which are read only from \
+                 the original data directory: pass --original-data <dir> holding the game's own \
+                 shader3.bin and shader3Low.bin"
+            ),
+            BuildError::ShaderData(message) => write!(f, "shader stores: {message}"),
         }
     }
 }
@@ -899,7 +1111,7 @@ fn opaque_new_asset(
 /// Wrap an already-produced container as a single-entry mod block. Split from
 /// [`opaque_new_asset`] so the `replace_phy2` codepath (which produces `edited` in-Rust rather
 /// than reading a file) can share the block-emit half.
-fn opaque_container_block(
+pub(crate) fn opaque_container_block(
     hash: u32,
     type_hash: u32,
     type_id: u32,
@@ -1619,14 +1831,22 @@ fn regenerate_prop_collision(
 /// from the FULL mesh separately, so the visible LOD drops while the collider stays geometry-tight.
 ///
 /// Returns the mesh unchanged when its strip already fits (the common case), else the finest
-/// decimation that fits — plus the (verts, tris) it landed on, for the build log.
+/// decimation that fits — plus the (verts, tris) it landed on, for the build log. The glTF's
+/// custom vertex attributes come back for the returned mesh's vertices: a decimated vertex takes
+/// the mean `_SWAY_WEIGHT` of the vertices it merges (its position is their mean), and only
+/// vertices sharing a `_TINY_SLOT` merge.
 fn fit_render_mesh_to_u16_strip(
     mesh: &mercs2_formats::model_inject::ExternalMesh,
-) -> (mercs2_formats::model_inject::ExternalMesh, Option<(usize, usize)>) {
+    custom: &mercs2_formats::mesh_import::CustomAttributes,
+) -> (
+    mercs2_formats::model_inject::ExternalMesh,
+    mercs2_formats::mesh_import::CustomAttributes,
+    Option<(usize, usize)>,
+) {
     use mercs2_formats::model_inject::to_strip_connected;
     const U16_STRIP_MAX: usize = 65534;
     if to_strip_connected(&mesh.tris).len() <= U16_STRIP_MAX {
-        return (mesh.clone(), None);
+        return (mesh.clone(), custom.clone(), None);
     }
     let (mut lo, mut hi) = ([f32::INFINITY; 3], [f32::NEG_INFINITY; 3]);
     for p in &mesh.positions {
@@ -1638,12 +1858,12 @@ fn fit_render_mesh_to_u16_strip(
     let diag = ((hi[0] - lo[0]).powi(2) + (hi[1] - lo[1]).powi(2) + (hi[2] - lo[2]).powi(2)).sqrt();
     let mut cell_lo = diag / 8192.0; // fine   -> many verts
     let mut cell_hi = diag / 2.0; // coarse -> few verts
-    let mut best = cluster_decimate_ext(mesh, cell_hi);
+    let mut best = cluster_decimate_ext(mesh, cell_hi, custom);
     // Smallest cell (most detail) whose connected strip still fits.
     for _ in 0..48 {
         let mid = (cell_lo * cell_hi).sqrt();
-        let d = cluster_decimate_ext(mesh, mid);
-        if to_strip_connected(&d.tris).len() <= U16_STRIP_MAX {
+        let d = cluster_decimate_ext(mesh, mid, custom);
+        if to_strip_connected(&d.0.tris).len() <= U16_STRIP_MAX {
             best = d;
             cell_hi = mid;
         } else {
@@ -1653,8 +1873,8 @@ fn fit_render_mesh_to_u16_strip(
             break;
         }
     }
-    let n = (best.positions.len(), best.tris.len());
-    (best, Some(n))
+    let n = (best.0.positions.len(), best.0.tris.len());
+    (best.0, best.1, Some(n))
 }
 
 /// Vertex-cluster decimation on an [`mercs2_formats::model_inject::ExternalMesh`]: quantise positions
@@ -1664,22 +1884,26 @@ fn fit_render_mesh_to_u16_strip(
 fn cluster_decimate_ext(
     m: &mercs2_formats::model_inject::ExternalMesh,
     cell: f32,
-) -> mercs2_formats::model_inject::ExternalMesh {
+    custom: &mercs2_formats::mesh_import::CustomAttributes,
+) -> (mercs2_formats::model_inject::ExternalMesh, mercs2_formats::mesh_import::CustomAttributes) {
     use std::collections::HashMap;
     let inv = 1.0 / cell;
-    let key = |p: &[f32; 3]| {
+    // A `_TINY_SLOT` names the world object a vertex belongs to, so vertices of different slots
+    // never merge.
+    let key = |v: usize, p: &[f32; 3]| {
         (
             (p[0] * inv).floor() as i64,
             (p[1] * inv).floor() as i64,
             (p[2] * inv).floor() as i64,
+            custom.tiny_slot.as_ref().map(|s| s[v]),
         )
     };
-    let mut cells: HashMap<(i64, i64, i64), u32> = HashMap::new();
+    let mut cells: HashMap<(i64, i64, i64, Option<u32>), u32> = HashMap::new();
     let mut sum: Vec<[f64; 3]> = Vec::new();
     let mut cnt: Vec<u32> = Vec::new();
     let mut remap: Vec<u32> = Vec::with_capacity(m.positions.len());
-    for p in &m.positions {
-        let k = key(p);
+    for (v, p) in m.positions.iter().enumerate() {
+        let k = key(v, p);
         let idx = *cells.entry(k).or_insert_with(|| {
             sum.push([0.0; 3]);
             cnt.push(0);
@@ -1750,14 +1974,29 @@ fn cluster_decimate_ext(
         }
     }
     let uvs = vec![[0.0f32; 2]; positions.len()];
-    mercs2_formats::model_inject::ExternalMesh {
+    let sway = custom.sway.as_ref().map(|w| {
+        let mut total = vec![0.0f64; positions.len()];
+        for (v, &cluster) in remap.iter().enumerate() {
+            total[cluster as usize] += w[v] as f64;
+        }
+        total.iter().zip(&cnt).map(|(t, &c)| (t / c.max(1) as f64) as f32).collect()
+    });
+    let tiny_slot = custom.tiny_slot.as_ref().map(|s| {
+        let mut out = vec![0u32; positions.len()];
+        for (v, &cluster) in remap.iter().enumerate() {
+            out[cluster as usize] = s[v];
+        }
+        out
+    });
+    let mesh = mercs2_formats::model_inject::ExternalMesh {
         positions,
         normals,
         uvs,
         tris,
         joints: Vec::new(),
         weights: Vec::new(),
-    }
+    };
+    (mesh, mercs2_formats::mesh_import::CustomAttributes { sway, tiny_slot })
 }
 
 /// Lower a rigged `.glb` onto a donor — the SKINNED path, shared by `add_model` and `add_outfit`.
@@ -1868,7 +2107,12 @@ fn rigid_texture_repoints(
         return Ok((Vec::new(), Vec::new()));
     }
     let groups = mercs2_formats::texture::group_prmt_material_indices(donor_ucfx);
-    let mats = mercs2_formats::texture::parse_mtrl(donor_ucfx);
+    let mats = mercs2_formats::texture::parse_mtrl(donor_ucfx, mercs2_formats::texture::MtrlSource::Model)
+        .map_err(|e| BuildError::Lower {
+            index,
+            kind,
+            message: format!("donor {donor_name} MTRL: {e}"),
+        })?;
     let froms = rigid_slot_froms(host_group, &groups, &mats, &slots).map_err(|m| {
         BuildError::Lower {
             index,
@@ -1961,7 +2205,7 @@ fn lower_skinned(
     // passes `false`.
     single_group: bool,
     log: &mut Vec<String>,
-) -> Result<(Vec<u8>, Vec<PatchBlock>), BuildError> {
+) -> Result<Skinned, BuildError> {
     let lower_err = |m: String| BuildError::Lower {
         index,
         kind,
@@ -2129,12 +2373,20 @@ fn lower_skinned(
     // hosts are chosen inside the lowering, after this has to run. Repointing all of them is also
     // the honest reading of one `textures:` block for one outfit, and non-hosts are neutralised.
     let donor_ucfx = donor_container(&donor_blk);
+    let donor_slots: Vec<Vec<u32>> = (0..3)
+        .map(|slot| mercs2_formats::texture::material_slot_hashes(donor_ucfx, slot))
+        .collect::<Result<_, _>>()
+        .map_err(|e| BuildError::Lower {
+            index,
+            kind,
+            message: format!("donor {donor_name} MTRL: {e}"),
+        })?;
     let (mut tex_blocks, mut repoints) = author_texture_repoints(
         index,
         kind,
         ModelSkin { name, textures, root },
         &format!("any material of donor {donor_name}"),
-        |slot| mercs2_formats::texture::material_slot_hashes(donor_ucfx, slot),
+        |slot| donor_slots[slot].clone(),
         log,
     )?;
 
@@ -2252,7 +2504,7 @@ fn lower_skinned(
                     &format!("{name}_dm atlas"),
                 ) {
                     Ok((block, to)) => {
-                        let froms = mercs2_formats::texture::material_slot_hashes(donor_ucfx, 0);
+                        let froms = donor_slots[0].clone();
                         for from in froms {
                             repoints.push(mercs2_formats::model_inject::MtrlRepoint { from, to });
                         }
@@ -2274,7 +2526,7 @@ fn lower_skinned(
                             None,
                             "matte spec",
                         ) {
-                            for from in mercs2_formats::texture::material_slot_hashes(donor_ucfx, 1) {
+                            for from in donor_slots[1].clone() {
                                 repoints.push(mercs2_formats::model_inject::MtrlRepoint {
                                     from,
                                     to: sto,
@@ -2305,7 +2557,7 @@ fn lower_skinned(
                             None,
                             "flat normal",
                         ) {
-                            for from in mercs2_formats::texture::material_slot_hashes(donor_ucfx, 2) {
+                            for from in donor_slots[2].clone() {
                                 repoints.push(mercs2_formats::model_inject::MtrlRepoint {
                                     from,
                                     to: nto,
@@ -2401,7 +2653,33 @@ fn lower_skinned(
         )));
     }
 
-    Ok((out.block, tex_blocks))
+    Ok(Skinned {
+        block: out.block,
+        tex_blocks,
+        hosts: out.hosts,
+        vertex_sources: out.stats.vertex_sources,
+        custom: glb.custom,
+        source_tris: glb.tris,
+        donor: donor_blk,
+    })
+}
+
+/// What [`lower_skinned`] produced.
+struct Skinned {
+    /// The lowered model block.
+    block: Vec<u8>,
+    /// The author's texture blocks, which ship with it.
+    tex_blocks: Vec<PatchBlock>,
+    /// Every donor group the mesh was split across.
+    hosts: Vec<usize>,
+    /// The injector's source vertex per written vertex, per host group.
+    vertex_sources: Vec<(usize, Vec<u32>)>,
+    /// The glTF's custom vertex attributes per source vertex.
+    custom: mercs2_formats::mesh_import::CustomAttributes,
+    /// The source triangles, indexing those vertices.
+    source_tris: Vec<[u32; 3]>,
+    /// The donor block before injection.
+    donor: Vec<u8>,
 }
 
 /// Re-emit an edited placement LAYER block as an overlay that shadows the base by PTHS path.
@@ -2438,10 +2716,16 @@ fn lower(
     names: Option<&NameTable>,
     // `shipment.name`: an `add_runtime_dll` must be named after it.
     shipment_name: &str,
+    // The whole manifest: `add_model`'s shader import resolves against the Shipment's own
+    // `add_shader` registrations.
+    manifest: &crate::manifest::Manifest,
     log: &mut Vec<String>,
 ) -> Result<Lowering, BuildError> {
     let kind = contribution.kind();
     match contribution {
+        // A repaint of the `vfx` atlas is the base every sprite of the set is drawn on: `build` and
+        // `link` write it into the resident block with the sprites ([`lower_fx`]).
+        Contribution::ReplaceTexture { .. } if crate::fx::repaints_atlas(contribution) => Ok(Lowering::Nothing),
         Contribution::ReplaceTexture { target, image } => {
             let Some(game) = game else {
                 return Err(BuildError::GameRequired { index, kind });
@@ -2565,10 +2849,18 @@ fn lower(
                 // `textures:` is the model's OWN skin. Empty stays the old behaviour — a prop
                 // wears the donor's materials, which is right for a prop and was wrong for a novel
                 // mesh, the case the field was added for.
-                let (new_block, tex_blocks) = lower_skinned(
+                let skinned = lower_skinned(
                     index, kind, name, model, donor_name, rt, root, game, names, textures, false,
                     log,
                 )?;
+                let (mut new_block, tex_blocks) = (skinned.block, skinned.tex_blocks);
+                let geometry = crate::shader_import::Geometry {
+                    vertex_sources: &skinned.vertex_sources,
+                    custom: &skinned.custom,
+                    source_tris: &skinned.source_tris,
+                    donor: &skinned.donor,
+                };
+                import_shaders(index, kind, name, &root.join(model), &mut new_block, &skinned.hosts, geometry, manifest, root, log)?;
                 let hash = crate::manifest::asset_hash(name);
                 let aset = AsetEntry::new(hash, 0xFFFF_FFFF, 0x0000_FFFF, TYPE_ID_MODEL);
                 let block = PatchBlock::from_decompressed(
@@ -2618,7 +2910,12 @@ fn lower(
             // exceed 65 534. Fit a RENDER copy to that budget; `follow_geometry` regenerates collision
             // from the FULL `mesh` below, so the collider stays geometry-tight while the visible LOD
             // drops. A mesh that already fits is returned unchanged (`render_decim` = None).
-            let (render_mesh, render_decim) = fit_render_mesh_to_u16_strip(&mesh);
+            let custom = mesh_import::custom_attributes_from_gltf(&root.join(model)).map_err(|m| BuildError::Lower {
+                index,
+                kind,
+                message: m,
+            })?;
+            let (render_mesh, render_custom, render_decim) = fit_render_mesh_to_u16_strip(&mesh, &custom);
 
             // The model's OWN skin. On the rigid path the host group keeps the donor's material
             // records (the PRMT material index is preserved), so a supplied map replaces the
@@ -2722,6 +3019,14 @@ fn lower(
                     regen
                 }
             };
+            let mut new_block = new_block;
+            let geometry = crate::shader_import::Geometry {
+                vertex_sources: &stats.vertex_sources,
+                custom: &render_custom,
+                source_tris: &render_mesh.tris,
+                donor: &donor_blk,
+            };
+            import_shaders(index, kind, name, &root.join(model), &mut new_block, &[host_group], geometry, manifest, root, log)?;
 
             let aset = AsetEntry::new(hash, 0xFFFF_FFFF, 0x0000_FFFF, TYPE_ID_MODEL);
             let block = PatchBlock::from_decompressed(
@@ -2832,10 +3137,11 @@ fn lower(
 
             // SKINNED path — an outfit that animates has to be re-posed onto the donor's rig.
             if let Some(rt) = retarget {
-                let (new_block, tex_blocks) = lower_skinned(
+                let skinned = lower_skinned(
                     index, kind, name, model, donor_name, rt, root, game, names, textures,
                     *single_group, log,
                 )?;
+                let (new_block, tex_blocks) = (skinned.block, skinned.tex_blocks);
                 let hash = crate::manifest::asset_hash(name);
                 let aset = AsetEntry::new(hash, 0xFFFF_FFFF, 0x0000_FFFF, TYPE_ID_MODEL);
                 let block = PatchBlock::from_decompressed(
@@ -2950,43 +3256,17 @@ fn lower(
             Ok(Lowering::Block(block))
         }
 
-        // Opaque bytes into a `data`-leaf container. Needs NO game stack, so it exercises the
-        // emission contract hermetically — the shape template CI runs in.
-        Contribution::AddSound { name, bank, sound } => {
-            let path = root.join(bank);
-            let bytes = std::fs::read(&path).map_err(|e| BuildError::Lower {
-                index,
-                kind,
-                message: format!("reading {}: {e}", path.display()),
-            })?;
-            if bytes.is_empty() {
-                return Err(BuildError::Lower {
-                    index,
-                    kind,
-                    message: format!("{} is empty", path.display()),
-                });
+        // Encoded from the authored cues with the Shipment's other sound, after every contribution
+        // (`sound::lower_shipment_sound`): the block ships to each `load_in` session's WAD, and that
+        // session's loader loads it.
+        Contribution::AddSound { .. } => Ok(Lowering::Nothing),
+        // Lowered together, per bank, after every contribution (`sound::lower_overrides`): several
+        // overrides of one bank share one forked soundbank and one override wavebank.
+        Contribution::ReplaceSoundBank { .. } | Contribution::ReplaceSoundCue { .. } => {
+            if game.is_none() {
+                return Err(BuildError::GameRequired { index, kind });
             }
-            let (type_id, type_hash) = sound.ids();
-            let hash = crate::manifest::asset_hash(name);
-            let block_bytes =
-                mercs2_formats::ucfx::build_wrapped_block(hash, type_hash, &bytes);
-            log.push(format!(
-                "contributions[{index}] add_sound {name} 0x{hash:08X} <- {} ({:?}, {} bytes, verbatim)",
-                path.display(),
-                sound,
-                bytes.len()
-            ));
-            // ADDITIVE and PRIMARY. An audio bank has no LOD chain, so both rung halves stay at
-            // their sentinels — `0x0000` in the low 16 is the dangling-rung HANG, not "no rung".
-            let aset = AsetEntry::new(hash, 0xFFFF_FFFF, 0x0000_FFFF, type_id);
-            let block = PatchBlock::from_decompressed(
-                &block_bytes,
-                format!("blocks\\VZ\\mod_{hash:08x}.block"),
-                vec![aset],
-                None,
-            )
-            .map_err(|m| BuildError::Lower { index, kind, message: m })?;
-            Ok(Lowering::Block(block))
+            Ok(Lowering::Nothing)
         }
 
         Contribution::AddMovie { name, movie } => {
@@ -3114,10 +3394,14 @@ fn lower(
                 log,
             )
         }
-        Contribution::AddShader { name, blob } => opaque_new_asset(root, blob, name, TYPE_HASH_MODEL, TYPE_ID_MODEL, index, kind),
-        Contribution::ReplaceShader { target, blob } => opaque_new_asset(root, blob, target, TYPE_HASH_MODEL, TYPE_ID_MODEL, index, kind),
-        Contribution::AddFx { name, payload } => opaque_new_asset(root, payload, name, TYPE_HASH_EFFECT, TYPE_ID_EFFECT, index, kind),
-        Contribution::ReplaceFx { target, payload } => opaque_new_asset(root, payload, target, TYPE_HASH_EFFECT, TYPE_ID_EFFECT, index, kind),
+        // Store edits, not WAD blocks: `build` applies every shader kind of the Shipment to the
+        // original stores together ([`crate::shader::apply_edits`]) and writes `data/shader3*.bin`.
+        Contribution::AddShader { .. } | Contribution::ReplaceShader { .. } => Ok(Lowering::Nothing),
+        // `build` applies every add_fx_sprite, add_fx and replace_fx of the Shipment to the game's
+        // fxdict, atlas, effects block and worldentity together ([`lower_fx`]).
+        Contribution::AddFx { .. } | Contribution::ReplaceFx { .. } | Contribution::AddFxSprite { .. } => {
+            Ok(Lowering::Nothing)
+        }
         Contribution::ReplaceTerrainCell { target, cell } => opaque_new_asset(root, cell, target, TYPE_HASH_TERRAIN_MESH, TYPE_ID_TERRAIN_MESH, index, kind),
 
         // No Data half: a shop item is pure Script-layer catalog + reward appends (see
@@ -3861,6 +4145,10 @@ fn lower(
             })?))
         }
 
+        // Stand-ins are lowered after the loop, all of a Shipment's placements in one layer block
+        // together ([`crate::tiny::lower_shipment`]).
+        Contribution::AddTinyGeometry { .. } => Ok(Lowering::Nothing),
+
         // String tables are lowered after the loop, all of a Shipment's writes to one table
         // together and in contribution order ([`merge_string_tables`], strict), so a later
         // contribution sees an earlier one's edits and each table ships as ONE block.
@@ -3868,20 +4156,13 @@ fn lower(
         | Contribution::AddStringDbKeys { .. }
         | Contribution::ReplaceStringDbText { .. } => Ok(Lowering::Nothing),
 
-        // A NEW language. Forks the base string table out of the stack (like edit_stringdb reads a
-        // table), applies the translation, and RE-KEYS the container under the new language's own hash
-        // so the engine resolves it as `<name>`'s table.
-        //
-        // ⚠ The stringdb is emitted into the ALWAYS-MOUNTED Shipment overlay, NOT the base
-        // `.\Data\<name>.wad`. The engine requests `(pandemic_hash_m2("<name>"), stringdb)` from the
-        // MOUNTED registry — every retail language stringdb lives in shell.wad/vz.wad, and
-        // `English.wad` (the `.\Data\English.wad`) carries none. A stringdb in an on-demand base WAD
-        // opened by name never registers there, so the menu falls back to raw `[0x…]` keys. The base
-        // WAD is still emitted (a missing `.\Data\<name>.wad` is a hard exit(1)) — it just carries no
-        // stringdb the engine reads.
+        // A NEW language: `data/<name>.wad` carries its string table (the base table forked, the
+        // translation applied, re-keyed to `m2(name)`), its fonts and atlases (forked from the
+        // base's, `language::fork_fonts`) and English's voice-over tables re-keyed to
+        // `<bank>.<name>` (`language::fork_vo_tables`). The voice stream is copied at deploy.
         Contribution::AddLanguage {
             name,
-            display: _,
+            display,
             strings,
             base,
         } => {
@@ -3932,49 +4213,51 @@ fn lower(
             }
             let edited = mercs2_formats::stringdb::edit_container(&container, &edits)
                 .map_err(|m| BuildError::Lower { index, kind, message: m })?;
-
-            // Re-key the forked container under the NEW language's hash so the engine resolves it as
-            // `<name>`'s table, not `base`'s. Same single-entry stringdb block shape edit_stringdb
-            // emits — INFO/KEYS/STRS spliced straight in, PRIMARY, sentinel LOD (a string table has no
-            // LOD chain, so anything but the sentinel would dangle, M0001).
             let hash = crate::manifest::asset_hash(name);
+            let fail = |message: String| BuildError::Lower { index, kind, message };
+
+            let mut assets = vec![crate::language::Asset {
+                name_hash: hash,
+                type_hash: TYPE_HASH_STRINGDB,
+                type_id: TYPE_ID_STRINGDB,
+                container: edited,
+            }];
+            let fonts = crate::language::fork_fonts(game, base_name, name).map_err(fail)?;
+            assets.extend(fonts);
+            let main = crate::language::assets_block(format!("blocks\\{name}\\{name}.block"), &assets)
+                .map_err(fail)?;
+
+            // English's voice-over tables, one block per re-keyed entry name.
+            let vo = crate::language::fork_vo_tables(game, name).map_err(fail)?;
+            let mut by_name: std::collections::BTreeMap<u32, Vec<crate::language::Asset>> =
+                std::collections::BTreeMap::new();
+            for a in vo {
+                by_name.entry(a.name_hash).or_default().push(a);
+            }
+            let mut blocks = vec![main];
+            let vo_tables: usize = by_name.values().map(Vec::len).sum();
+            for (entry, tables) in &by_name {
+                blocks.push(
+                    crate::language::assets_block(format!("blocks\\{name}\\vo_{entry:08x}.block"), tables)
+                        .map_err(fail)?,
+                );
+            }
             log.push(format!(
                 "contributions[{index}] add_language {name} 0x{hash:08X} ← fork {base_name} \
-                 0x{base_hash:08X}: {} key(s) translated, container {} -> {} bytes → .\\Data\\{name}.wad",
+                 0x{base_hash:08X}: {} key(s) translated, fonts and atlases {}_18/_20, {vo_tables} \
+                 voice-over table(s) under {} name(s) → .\\Data\\{name}.wad",
                 edits.len(),
-                container.len(),
-                edited.len()
+                name,
+                by_name.len(),
             ));
-            let mut block_data = Vec::new();
-            block_data.extend_from_slice(&1u32.to_le_bytes());
-            block_data.extend_from_slice(&hash.to_le_bytes());
-            block_data.extend_from_slice(&TYPE_HASH_STRINGDB.to_le_bytes());
-            block_data.extend_from_slice(&0u32.to_le_bytes());
-            block_data.extend_from_slice(&(edited.len() as u32).to_le_bytes());
-            block_data.extend_from_slice(&edited);
-            // Base `.\Data\<name>.wad`: exists only to satisfy the mount check. It carries the same
-            // stringdb bytes (harmless, and keeps the base a valid non-empty WAD), but the engine
-            // never reads a stringdb from here — see the note above.
-            let base_block = PatchBlock::from_decompressed(
-                &block_data,
-                format!("blocks\\{name}\\{name}_stringdb.block"),
-                vec![AsetEntry::new(hash, 0xFFFF_FFFF, 0x0000_FFFF, TYPE_ID_STRINGDB)],
-                None,
-            )
-            .map_err(|m| BuildError::Lower { index, kind, message: m })?;
-            // The stringdb the engine actually resolves — in the always-mounted Shipment overlay, in
-            // the same single-entry `blocks\VZ\mod_<hash>.block` shape edit_stringdb uses.
-            let overlay_block = PatchBlock::from_decompressed(
-                &block_data,
-                format!("blocks\\VZ\\mod_{hash:08x}.block"),
-                vec![AsetEntry::new(hash, 0xFFFF_FFFF, 0x0000_FFFF, TYPE_ID_STRINGDB)],
-                None,
-            )
-            .map_err(|m| BuildError::Lower { index, kind, message: m })?;
             Ok(Lowering::LanguageWad {
                 language: name.clone(),
-                blocks: vec![base_block],
-                overlay: vec![overlay_block],
+                display: display.clone(),
+                blocks,
+                stream_copy: (
+                    crate::language::VO_STREAM_FROM.to_string(),
+                    crate::language::vo_stream_to(name),
+                ),
             })
         }
     }
@@ -4094,14 +4377,14 @@ pub(crate) fn parse_text_pairs(text: &str, file: &str) -> Result<Vec<(String, St
     Ok(out)
 }
 
-struct Rgba {
-    width: usize,
-    height: usize,
+pub(crate) struct Rgba {
+    pub(crate) width: usize,
+    pub(crate) height: usize,
     /// Straight RGBA as `f32` in 0..=255, the shape `texture_encode` expects.
-    pixels: Vec<f32>,
+    pub(crate) pixels: Vec<f32>,
 }
 
-fn read_png_rgba(path: &Path) -> Result<Rgba, String> {
+pub(crate) fn read_png_rgba(path: &Path) -> Result<Rgba, String> {
     let file = std::fs::File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
     read_png_rgba_from(file, &path.display().to_string())
 }
@@ -4170,6 +4453,7 @@ pub fn build(
     names: Option<&NameTable>,
     out_dir: Option<&Path>,
     corpus_root: Option<&Path>,
+    original_data: Option<&Path>,
 ) -> Result<BuildReport, BuildError> {
     let mut log = Vec::new();
     let manifest = &shipment.manifest;
@@ -4177,9 +4461,33 @@ pub fn build(
     let mut diagnostics = lint::lint(manifest, Some(&shipment.root), names);
     // Rules that need the retail WADs run only when a stack is configured. They are appended
     // BEFORE the gate so a game-aware Error would still block, even though M0007 is a warning.
-    if let Some(g) = game.as_deref() {
+    if let Some(g) = game.as_deref_mut() {
         diagnostics.extend(lint::game_checks(manifest, g));
+        diagnostics.extend(
+            lint::fx_game_checks(manifest, &shipment.root, g)
+                .map_err(|message| BuildError::Lower { index: 0, kind: "fx", message })?,
+        );
     }
+    // The shader kinds read the original stores from `--original-data` and the game's VT and R2VB
+    // pairs from its `data` folder, so both are required, never skipped.
+    let shader_kind = manifest
+        .contributions
+        .iter()
+        .enumerate()
+        .find(|(_, c)| matches!(c, Contribution::AddShader { .. } | Contribution::ReplaceShader { .. }));
+    if let Some((index, c)) = shader_kind {
+        let Some(original) = original_data else {
+            return Err(BuildError::OriginalDataRequired { index, kind: c.kind() });
+        };
+        let Some(g) = game.as_deref() else {
+            return Err(BuildError::GameRequired { index, kind: c.kind() });
+        };
+        let data = crate::shader::game_data_dir(g).map_err(BuildError::ShaderData)?;
+        diagnostics.extend(
+            lint::shader_game_checks(manifest, &shipment.root, &data, original).map_err(BuildError::ShaderData)?,
+        );
+    }
+    let shader_keys = crate::shader::ShaderKeys::with(&crate::shader::added(&manifest.shipment.name, manifest));
     if lint::blocks_build(&diagnostics) {
         return Err(BuildError::Blocked(diagnostics));
     }
@@ -4235,7 +4543,7 @@ pub fn build(
 
     let mut blocks = Vec::new();
     let mut files = Vec::new();
-    let mut lang_wads: Vec<(String, Vec<PatchBlock>)> = Vec::new();
+    let mut lang_wads: Vec<(String, String, Vec<PatchBlock>, (String, String))> = Vec::new();
     for (index, c) in manifest.contributions.iter().enumerate() {
         match lower(
             index,
@@ -4244,6 +4552,7 @@ pub fn build(
             game.as_deref_mut(),
             names,
             &manifest.shipment.name,
+            manifest,
             &mut log,
         )? {
             Lowering::Nothing => {}
@@ -4251,20 +4560,27 @@ pub fn build(
             Lowering::Blocks(bs) => blocks.extend(bs),
             Lowering::LanguageWad {
                 language,
+                display,
                 blocks: bs,
-                overlay,
-            } => {
-                // The stringdb goes into the always-mounted Shipment overlay (vz-patch); the base WAD
-                // is emitted separately below, opened by name only to satisfy the mount check.
-                blocks.extend(overlay);
-                lang_wads.push((language, bs));
-            }
+                stream_copy,
+            } => lang_wads.push((language, display, bs, stream_copy)),
             Lowering::File {
                 name,
                 relative,
                 bytes,
             } => files.push((name, relative, bytes)),
         }
+    }
+    // Stand-ins: each add_tiny_geometry's model, and one overlay per layer block carrying every
+    // placement this Shipment adds to it.
+    if let Some(c) = crate::tiny::contributions(manifest).first() {
+        let Some(game) = game.as_deref_mut() else {
+            return Err(BuildError::GameRequired { index: c.index, kind: "add_tiny_geometry" });
+        };
+        blocks.extend(
+            crate::tiny::lower_shipment(manifest, &shipment.root, game, &mut log)
+                .map_err(|(index, message)| BuildError::Lower { index, kind: "add_tiny_geometry", message })?,
+        );
     }
     // String tables: every edit_stringdb / add_stringdb_keys / replace_stringdb_text of this
     // Shipment, per table, in contribution order — the same code `qm link` merges a set with.
@@ -4284,6 +4600,18 @@ pub fn build(
         };
         blocks.extend(merge_string_tables(&[shipment], game, StringMerge::Strict, &mut log)?);
     }
+    // Sound: every add_sound, replace_sound_bank and replace_sound_cue of this Shipment
+    // (`sound::lower_shipment_sound`). The blocks go to the level of each session that loads them —
+    // the overlay for gameplay, the shell patch for the front end — and a language's `vo_*` banks to
+    // its patch; each session's loader loads the registrations.
+    let lowered = crate::sound::lower_shipment_sound(shipment, game.as_deref_mut(), &mut log)
+        .map_err(|(index, kind, message)| BuildError::Lower { index, kind, message })?;
+    let engine_banks = lowered.engine_banks;
+    blocks.extend(lowered.overlay);
+    let mut shell_blocks: Vec<PatchBlock> = lowered.shell;
+    let language_blocks = lowered.language;
+    let sound_regs = lowered.registrations;
+    let gameplay_sounds = sound_regs.iter().any(|r| r.sessions.contains(&crate::manifest::LoadSession::Gameplay));
     let mutations = script_mutations(manifest, &shipment.root)?;
     let ui_regs = ui_registrations(manifest);
     let layer_regs = layer_registrations(manifest);
@@ -4305,75 +4633,100 @@ pub fn build(
     // `ui_regs` / `layer_regs` / `additions` count too: an add_ui / activate_layer / add_script with
     // no other script edit still needs the linker to run (respectively: mints the loader trampoline,
     // mints the loader trampoline, mints a fresh scripts_vz entry). So a non-empty of any of them
-    // must trigger the link even when `mutations` is empty.
-    if !mutations.is_empty()
+    // must trigger the link even when `mutations` is empty. A bank the front end loads links into
+    // `shell.wad`'s scripts block (below).
+    //
+    // `add_fx_sprite`, `add_fx`, `replace_fx` and a `replace_texture` of the `vfx` atlas share the
+    // load: a template, a sprite's record and the atlas go into the resident block, and the block is
+    // emitted once, with every script, template, record and the atlas.
+    let touches_scripts = !mutations.is_empty()
         || !ui_regs.is_empty()
         || !layer_regs.is_empty()
         || !support_regs.is_empty()
+        || gameplay_sounds
         || !additions.is_empty()
-        || !replacements.is_empty()
-    {
+        || !replacements.is_empty();
+    let fx_kind = manifest.contributions.iter().enumerate().find(|(_, c)| {
+        matches!(c, Contribution::AddFx { .. } | Contribution::ReplaceFx { .. } | Contribution::AddFxSprite { .. })
+            || crate::fx::repaints_atlas(c)
+    });
+    if touches_scripts || fx_kind.is_some() {
         let Some(game) = game.as_deref_mut() else {
-            return Err(BuildError::GameRequired {
-                index: 0,
-                kind: "patch_lua",
+            return Err(match fx_kind {
+                Some((index, c)) => BuildError::GameRequired { index, kind: c.kind() },
+                None => BuildError::GameRequired { index: 0, kind: "patch_lua" },
             });
         };
-        let Some(corpus) = corpus_root else {
-            return Err(BuildError::Lower {
+        let mut loaded = load_script_blocks(game, link::SCRIPT_BLOCKS, "patch_lua")?;
+        let mut touched = std::collections::BTreeSet::new();
+        if touches_scripts {
+            let Some(corpus) = corpus_root else {
+                return Err(BuildError::Lower {
+                    index: 0,
+                    kind: "patch_lua",
+                    message:
+                        "linking Lua needs the decompiled corpus (the base source to append to). It \
+                              ships in the reference bundle as workshop_data/lua; for `qm`, pass \
+                              --corpus <dir> or --workshop-data <dir> (env MERCS2_WORKSHOP_DATA)."
+                            .into(),
+                });
+            };
+            let mut targets: Vec<link::TargetBlock<'_>> = loaded
+                .iter_mut()
+                .map(|lb| link::TargetBlock {
+                    path: lb.path.clone(),
+                    block: &mut lb.block,
+                })
+                .collect();
+            // A single Shipment has nothing to order against, so the resolved order is itself.
+            // Cross-Shipment order is `link_installed`'s job.
+            let solo_order = [manifest.shipment.name.clone()];
+            let linked = link::link_into_blocks(
+                &mut targets,
+                corpus,
+                &mutations,
+                &ui_regs,
+                &layer_regs,
+                &support_regs,
+                &sound_regs,
+                &additions,
+                &replacements,
+                &solo_order,
+            )
+            .map_err(|e| BuildError::Lower {
                 index: 0,
                 kind: "patch_lua",
-                message:
-                    "linking Lua needs the decompiled corpus (the base source to append to). It \
-                          ships in the reference bundle as workshop_data/lua; for `qm`, pass \
-                          --corpus <dir> or --workshop-data <dir> (env MERCS2_WORKSHOP_DATA)."
-                        .into(),
-            });
-        };
-        let mut loaded = load_script_blocks(game, "patch_lua")?;
-        let mut targets: Vec<link::TargetBlock<'_>> = loaded
-            .iter_mut()
-            .map(|lb| link::TargetBlock {
-                path: lb.path.clone(),
-                block: &mut lb.block,
-            })
-            .collect();
-        // A single Shipment has nothing to order against, so the resolved order is itself.
-        // Cross-Shipment order is `link_installed`'s job.
-        let solo_order = [manifest.shipment.name.clone()];
-        let linked = link::link_into_blocks(
-            &mut targets,
-            corpus,
-            &mutations,
-            &ui_regs,
-            &layer_regs,
-            &support_regs,
-            &additions,
-            &replacements,
-            &solo_order,
-        )
-        .map_err(|e| BuildError::Lower {
-            index: 0,
-            kind: "patch_lua",
-            message: e.to_string(),
-        })?;
-        drop(targets);
-        // M0209 is a load-plan finding, and a single-Shipment build writes no plan; the warning goes
-        // to the build log, where `qm link` over the installed set reports it again as a finding.
-        for u in &linked.unresolved_imports {
-            log.push(format!("warning [M0209]: {u}"));
+                message: e.to_string(),
+            })?;
+            drop(targets);
+            // M0209 is a load-plan finding, and a single-Shipment build writes no plan; the warning
+            // goes to the build log, where `qm link` over the installed set reports it again as a
+            // finding.
+            for u in &linked.unresolved_imports {
+                log.push(format!("warning [M0209]: {u}"));
+            }
+            for l in &linked.scripts {
+                log.push(format!(
+                    "linked {} in {}: {} → {} B source, {} B bytecode, from {:?}",
+                    l.target,
+                    loaded[l.block].path,
+                    l.base_source_bytes,
+                    l.linked_source_bytes,
+                    l.bytecode_bytes,
+                    l.contributors
+                ));
+                touched.insert(l.block);
+            }
         }
-        let linked = linked.scripts;
-        for l in &linked {
-            log.push(format!(
-                "linked {} in {}: {} → {} B source, {} B bytecode, from {:?}",
-                l.target,
-                loaded[l.block].path,
-                l.base_source_bytes,
-                l.linked_source_bytes,
-                l.bytecode_bytes,
-                l.contributors
-            ));
+        if let Some((index, c)) = fx_kind {
+            let (effects, resident) =
+                lower_fx(&[shipment], game, &mut loaded, crate::fx::Scope::Build, c.kind(), &mut log)
+                    .map_err(|e| match e {
+                        BuildError::Lower { index: 0, kind, message } => BuildError::Lower { index, kind, message },
+                        other => other,
+                    })?;
+            blocks.extend(effects);
+            touched.extend(resident);
         }
         // Say what shipping a scripts block COSTS, because the number is not obvious and the
         // failure surfaces far away.
@@ -4383,7 +4736,7 @@ pub fn build(
         // all of them, and neither contains the other — Modkit reports it as a half-applied mod,
         // and without that check it is the silent mutual annihilation the linter exists for.
         // `qm link` across the installed set is the fix; a standalone overlay cannot be.
-        let script_blocks = script_patch_blocks(&loaded, &linked, "patch_lua")?;
+        let script_blocks = script_patch_blocks(&loaded, &touched, "patch_lua")?;
         let carried: usize = script_blocks.iter().map(|b| b.aset_entries.len()).sum();
         if carried > 1 {
             log.push(format!(
@@ -4394,6 +4747,33 @@ pub fn build(
         }
         blocks.extend(script_blocks);
     }
+
+    // The front end's loader, linked into `shell.wad`'s scripts block and shipped in the shell patch.
+    if sound_regs.iter().any(|r| r.sessions.contains(&crate::manifest::LoadSession::FrontEnd)) {
+        let Some(game) = game.as_deref() else {
+            return Err(BuildError::GameRequired { index: 0, kind: "front-end loader" });
+        };
+        let Some(corpus) = corpus_root else {
+            return Err(BuildError::Lower {
+                index: 0,
+                kind: "front-end loader",
+                message: "linking the front end's sound loader needs the decompiled corpus (the base \
+                          source of `mrxsound`); for `qm`, pass --corpus <dir> or --workshop-data <dir>"
+                    .into(),
+            });
+        };
+        let solo_order = [manifest.shipment.name.clone()];
+        shell_blocks.extend(link_shell_loader(game, corpus, &sound_regs, &solo_order, "front-end loader", &mut log)?);
+    }
+    check_sound_loaders(
+        &sound_regs,
+        &blocks.iter().collect::<Vec<_>>(),
+        &shell_blocks.iter().collect::<Vec<_>>(),
+        "sound loader",
+    )?;
+    // Every bank the engine loads ships its three tables in one block of the overlay.
+    crate::sound::check_engine_banks(&engine_banks, &blocks.iter().collect::<Vec<_>>())
+        .map_err(|message| BuildError::Lower { index: 0, kind: "sound", message })?;
 
     // Mirror the base WAD's CSUM value/meta into the overlay, as the proven publish path does. I
     // previously passed 0/None here, which is a gratuitous divergence from output shapes that are
@@ -4430,7 +4810,7 @@ pub fn build(
         })?;
         // Self-check BEFORE writing: a WAD that would hang the game should not reach the disk at
         // all, where a later step could mistake its presence for success.
-        let found = verify_emitted(&wad)?;
+        let found = verify_emitted(&wad, &shader_keys)?;
         for d in &found {
             log.push(format!("self-check: {d}"));
         }
@@ -4468,7 +4848,7 @@ pub fn build(
     // because the engine opens it by name. Assembled with the same machinery, self-checked before it
     // reaches disk, and recorded as a `Destination::DataWad` so deploy places it in `data/` — the one
     // place a Shipment writes a WAD, earned only by the collision-checked name (`language_name_refusal`).
-    for (language, lang_blocks) in lang_wads {
+    for (language, display, lang_blocks, (from, to)) in lang_wads {
         let wad =
             build_patch_wad_multi(&lang_blocks, csum.0, csum.1, &FFCS_CERT_BLOB).map_err(|m| {
                 BuildError::Lower {
@@ -4477,7 +4857,7 @@ pub fn build(
                     message: m,
                 }
             })?;
-        let found = verify_emitted(&wad)?;
+        let found = verify_emitted(&wad, &shader_keys)?;
         for d in &found {
             log.push(format!("self-check ({language}.wad): {d}"));
         }
@@ -4504,8 +4884,62 @@ pub fn build(
             name: format!("{language}.wad"),
             bytes: wad.len(),
             sha256: digest,
-            destination: Destination::DataWad { relative },
+            destination: Destination::DataWad { relative, display },
         });
+
+        // The voice stream the language plays its voice-over from: a copy of English's, made at
+        // deploy. Its record carries the digest of the source as read here.
+        let vz = game
+            .as_deref()
+            .and_then(|g| g.paths().first().map(|p| p.to_path_buf()))
+            .ok_or(BuildError::GameRequired { index: 0, kind: "add_language" })?;
+        let game_root = crate::compat::game_root_of(&vz)
+            .map_err(|message| BuildError::Compat(crate::compat::CompatError::GameRoot { message }))?;
+        let source = game_root.join(&from);
+        let (bytes, sha256) = sha256_file(&source)?;
+        log.push(format!(
+            "{to} ← copy of {from} at deploy: {bytes} bytes, sha256 {sha256}"
+        ));
+        placements.push(Placement {
+            name: to.rsplit('/').next().unwrap_or(&to).to_string(),
+            bytes,
+            sha256,
+            destination: Destination::StreamCopy { from, to },
+        });
+    }
+
+    // The shell patch and the language patches: patch WADs a deploy step merges into
+    // `data/shell-patch.wad` and `data/<language>-patch.wad`. The shell patch mounts above
+    // `shell.wad`, so it carries `shell.wad`'s CSUM row.
+    if !shell_blocks.is_empty() {
+        let name = format!("{}.shell-patch.wad", manifest.shipment.name);
+        let game = game.as_deref().ok_or(BuildError::GameRequired { index: 0, kind: "shell patch" })?;
+        placements.push(write_patch_wad(
+            &out_dir,
+            &name,
+            &shell_blocks,
+            shell_csum(game, "shell patch")?,
+            Destination::ShellPatch,
+            &shader_keys,
+            &mut log,
+            &mut diagnostics,
+        )?);
+    }
+    for (language, lblocks) in language_blocks {
+        let relative = format!("language_patch/{}.wad", language.token());
+        placements.push(write_patch_wad(
+            &out_dir,
+            &relative,
+            &lblocks,
+            csum,
+            Destination::LanguagePatch {
+                language: language.token().to_string(),
+                relative: relative.clone(),
+            },
+            &shader_keys,
+            &mut log,
+            &mut diagnostics,
+        )?);
     }
 
     // Code-layer artifacts. The build directory MIRRORS the tree these will be copied into, so
@@ -4548,6 +4982,22 @@ pub fn build(
         });
     }
 
+    // The shader stores: the originals with this Shipment's edits applied in contribution order.
+    if let Some(original) = original_data.filter(|_| crate::shader::has_shader_kinds(manifest)) {
+        let game = game.as_deref().ok_or(BuildError::GameRequired { index: 0, kind: "shader stores" })?;
+        let edits = crate::shader::shipment_edits(&manifest.shipment.name, manifest, &shipment.root).map_err(|f| {
+            let first = &f[0];
+            BuildError::Lower { index: first.index, kind: "shader", message: first.message.clone() }
+        })?;
+        placements.extend(write_shader_stores(original, game, &edits, &out_dir, &mut log)?);
+    }
+    if let Some(header) = crate::shader::header(&manifest.shipment.name, manifest) {
+        let name = format!("{}.shaders.h", manifest.shipment.name);
+        let path = out_dir.join(&name);
+        std::fs::write(&path, header).map_err(|e| BuildError::Io { path: path.clone(), message: e.to_string() })?;
+        log.push(format!("wrote {name}: the shader registration tables for the Shipment's ASI"));
+    }
+
     // The placement record: what goes where, each with its digest. Deploy/undo consumes this — a
     // file drop cannot be backed out without it.
     write_placement_record(&out_dir, &placements)?;
@@ -4563,6 +5013,155 @@ pub fn build(
         wad: wad_path,
         placements,
         log,
+    })
+}
+
+/// `add_model`'s shader import ([`crate::shader_import`]): resolve each host group's vertex shaders
+/// and its materials' pixel shaders from the retail convention or the glTF's `extras`, and write
+/// them into `block`.
+fn import_shaders(
+    index: usize,
+    kind: &'static str,
+    name: &str,
+    model: &Path,
+    block: &mut [u8],
+    hosts: &[usize],
+    geometry: crate::shader_import::Geometry,
+    manifest: &crate::manifest::Manifest,
+    root: &Path,
+    log: &mut Vec<String>,
+) -> Result<(), BuildError> {
+    let lower = |message: String| BuildError::Lower { index, kind, message };
+    let declared = crate::shader_import::read_declared(model).map_err(lower)?;
+    let added = crate::shader::added(&manifest.shipment.name, manifest);
+    let added_vertex = crate::shader_import::added_vertex_shaders(manifest, root).map_err(lower)?;
+    for &host in hosts {
+        let done = crate::shader_import::import_into_block(block, host, &declared, &added, &added_vertex, geometry)
+            .map_err(|e| lower(format!("[{}] {name}: {}", e.code, e.message)))?;
+        let w = match done.position_w {
+            crate::shader_import::PositionW::One => "1".to_string(),
+            crate::shader_import::PositionW::Sway => "the _SWAY_WEIGHT of each vertex".to_string(),
+            crate::shader_import::PositionW::TinySlot => "the _TINY_SLOT of each vertex".to_string(),
+        };
+        log.push(format!(
+            "contributions[{index}] {kind} {name}: group {} vertex shader {}, shadow {}, pixel {}, POSITION.w {w}",
+            done.group,
+            done.vertex,
+            done.shadow,
+            done.pixels.iter().map(|(m, p)| format!("material {m} {p}")).collect::<Vec<_>>().join(", ")
+        ));
+    }
+    Ok(())
+}
+
+/// Apply `edits` to the original stores in `original` and write both under `out_dir/data/`, each
+/// recorded as a [`Destination::DataFile`] naming the original's sha256.
+fn write_shader_stores(
+    original: &Path,
+    game: &GameStack,
+    edits: &[crate::shader::Edit],
+    out_dir: &Path,
+    log: &mut Vec<String>,
+) -> Result<Vec<Placement>, BuildError> {
+    let originals = crate::shader::read_originals(original).map_err(BuildError::ShaderData)?;
+    let data = crate::shader::game_data_dir(game).map_err(BuildError::ShaderData)?;
+    let extra = crate::shader::read_extra_pairs(&data).map_err(BuildError::ShaderData)?;
+    let stores = crate::shader::apply_edits(&originals, &extra, edits).map_err(|e| match e.at {
+        Some((_, index)) => BuildError::Lower { index, kind: "shader", message: format!("[{}] {}", e.code, e.message) },
+        None => BuildError::ShaderData(e.to_string()),
+    })?;
+    let mut out = Vec::new();
+    for (file, bytes) in stores {
+        let path = out_dir.join(file.relative());
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| BuildError::Io { path: parent.to_path_buf(), message: e.to_string() })?;
+        }
+        std::fs::write(&path, &bytes).map_err(|e| BuildError::Io { path: path.clone(), message: e.to_string() })?;
+        let (written, digest) = sha256_file(&path)?;
+        let base = originals.sha256[&file].clone();
+        let n = edits.iter().filter(|e| e.file == file).count();
+        log.push(format!(
+            "wrote {}: {written} bytes, sha256 {digest}, {n} edit(s) over the original (sha256 {base})",
+            file.relative()
+        ));
+        out.push(Placement {
+            name: file.file_name().to_string(),
+            bytes: written,
+            sha256: digest,
+            destination: Destination::DataFile { relative: file, base_sha256: base },
+        });
+    }
+    Ok(out)
+}
+
+/// The size and sha256 of the file at `path`, read in chunks.
+fn sha256_file(path: &Path) -> Result<(usize, String), BuildError> {
+    use std::io::Read;
+    let io = |e: std::io::Error| BuildError::Io { path: path.to_path_buf(), message: e.to_string() };
+    let mut f = std::fs::File::open(path).map_err(io)?;
+    let mut hasher = Sha256::new();
+    let mut buf = vec![0u8; 1 << 20];
+    let mut total = 0usize;
+    loop {
+        let n = f.read(&mut buf).map_err(io)?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+        total += n;
+    }
+    Ok((total, hasher.finalize().iter().map(|b| format!("{b:02x}")).collect()))
+}
+
+/// Assemble `blocks` as a patch WAD at `relative` under `out_dir`, self-check it before it reaches
+/// disk ([`verify_emitted`]), and record it with its digest under `destination`.
+fn write_patch_wad(
+    out_dir: &Path,
+    relative: &str,
+    blocks: &[PatchBlock],
+    csum: (u32, Option<u32>),
+    destination: Destination,
+    keys: &crate::shader::ShaderKeys,
+    log: &mut Vec<String>,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Result<Placement, BuildError> {
+    let wad = build_patch_wad_multi(blocks, csum.0, csum.1, &FFCS_CERT_BLOB).map_err(|m| {
+        BuildError::Lower {
+            index: 0,
+            kind: "assemble",
+            message: format!("{relative}: {m}"),
+        }
+    })?;
+    let found = verify_emitted(&wad, keys)?;
+    for d in &found {
+        log.push(format!("self-check ({relative}): {d}"));
+    }
+    diagnostics.extend(found);
+    let path = out_dir.join(relative);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| BuildError::Io {
+            path: parent.to_path_buf(),
+            message: e.to_string(),
+        })?;
+    }
+    std::fs::write(&path, &wad).map_err(|e| BuildError::Io {
+        path: path.clone(),
+        message: e.to_string(),
+    })?;
+    let digest = sha256_hex(&wad);
+    log.push(format!("wrote {relative}: {} bytes, sha256 {digest}", wad.len()));
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .ok_or_else(|| BuildError::Io {
+            path: path.clone(),
+            message: "the output path has no file name".into(),
+        })?;
+    Ok(Placement {
+        name,
+        bytes: wad.len(),
+        sha256: digest,
+        destination,
     })
 }
 
@@ -4610,16 +5209,30 @@ pub fn merged_string_tables<'a>(
 }
 
 /// Every block `qm link` re-emits for a set, as the load plan's `link_block_paths` states it: the
-/// scripts blocks ([`link::SCRIPT_BLOCKS`]), then each merged string table's block in hash order.
+/// `vz.wad` scripts blocks ([`link::SCRIPT_BLOCKS`]), the `shell.wad` scripts block
+/// ([`link::SHELL_SCRIPT_BLOCKS`]), then each merged string table's block in hash order, then each
+/// merged sound bank's block in entry-hash order ([`crate::sound::linked_sound_entries`]; one path
+/// for the bank in every WAD that carries it; for a bank the engine loads, the block carries its
+/// sounddb and wavebank too), then — when any Shipment has an `add_fx` or a `replace_fx` — the
+/// effects block ([`crate::fx::EFFECTS_BLOCK`]).
 /// A deploy step drops the per-Shipment copies of exactly these blocks, because the link WAD carries
 /// the set-wide version of each.
 pub fn link_block_paths<'a>(
     manifests: impl IntoIterator<Item = &'a crate::manifest::Manifest>,
 ) -> Vec<String> {
+    let manifests: Vec<&crate::manifest::Manifest> = manifests.into_iter().collect();
+    let fx = manifests.iter().any(|m| crate::fx::has_fx(m));
     link::SCRIPT_BLOCKS
         .iter()
+        .chain(link::SHELL_SCRIPT_BLOCKS)
         .map(|(_, p)| p.to_string())
-        .chain(merged_string_tables(manifests).into_iter().map(stringdb_block_path))
+        .chain(merged_string_tables(manifests.iter().copied()).into_iter().map(stringdb_block_path))
+        .chain(
+            crate::sound::linked_sound_entries(manifests.iter().copied())
+                .into_iter()
+                .map(crate::sound::block_path),
+        )
+        .chain(fx.then(|| crate::fx::EFFECTS_BLOCK.1.to_string()))
         .collect()
 }
 
@@ -4809,6 +5422,10 @@ fn merge_string_tables(
 /// The filename of the deploy-time link overlay. Named to sort and read as "last".
 pub const LINK_WAD_NAME: &str = "zz-quartermaster-link.wad";
 
+/// The filename of the link's shell patch: the merged sound banks `shell.wad` carries and the
+/// front end's scripts block with the set's front-end loader.
+pub const LINK_SHELL_PATCH_NAME: &str = "zz-quartermaster-link.shell-patch.wad";
+
 /// What a cross-Shipment link produced.
 #[derive(Debug, Clone)]
 pub struct LinkReport {
@@ -4847,6 +5464,7 @@ pub fn link_installed(
     game: &mut GameStack,
     corpus_root: &Path,
     out_dir: &Path,
+    original_data: Option<&Path>,
 ) -> Result<LinkReport, BuildError> {
     // A stale plan must never read as this run's, whatever happens below.
     crate::plan::remove_stale(out_dir).map_err(|message| BuildError::Io {
@@ -4906,12 +5524,181 @@ pub fn link_installed(
         ));
     }
 
+    // Two `replace_fx` that resolve to one effect are a claim conflict even when either names the
+    // effect through a template, and only the game's worldentity resolves a template: each target is
+    // resolved here, against the game plus the set's additions in load order, and a collision refuses
+    // the link as M0207, beside the conflicts the plan found by name.
+    if shipments.iter().any(|s| crate::fx::has_fx(&s.manifest)) {
+        let fail = |message: String| BuildError::Lower { index: 0, kind: "link", message };
+        let base = crate::fx::GameFx::read(game).map_err(fail)?;
+        let fx_base = crate::fx::FxBase {
+            effects: &base.effects.entries,
+            worldentity: &base.worldentity,
+            fxdict: &base.fxdict,
+            atlas: &base.atlas,
+            repainted: false,
+        };
+        let set: Vec<crate::fx::FxShipment<'_>> =
+            shipments.iter().map(|s| crate::fx::FxShipment { manifest: &s.manifest, root: &s.root }).collect();
+        let found = crate::fx::conflicts(&fx_base, &set);
+        if !found.is_empty() {
+            use crate::plan::{
+                ClaimClass, ClaimConflictRow, ClaimantEntry, ConflictRow, ConflictSource, Finding, FindingRef,
+                FindingSeverity, Section,
+            };
+            for c in found {
+                let mut who: Vec<usize> = Vec::new();
+                let mut claimants = Vec::new();
+                for cl in &c.claimants {
+                    let at = inputs
+                        .iter()
+                        .position(|i| i.shipment.manifest.shipment.name == cl.shipment)
+                        .ok_or_else(|| fail(format!("internal error: {} is not in the request", cl.shipment)))?;
+                    if !who.contains(&at) {
+                        who.push(at);
+                    }
+                    claimants.push(ClaimantEntry {
+                        item: inputs[at].id.to_string(),
+                        contribution: cl.index,
+                        kind: "replace_fx".into(),
+                    });
+                }
+                who.sort_unstable();
+                let row = plan.conflicts.len();
+                plan.findings.push(Finding {
+                    code: "M0207",
+                    severity: FindingSeverity::Error,
+                    message: c.to_string(),
+                    items: who.iter().map(|&i| inputs[i].id.to_string()).collect(),
+                    refs: vec![FindingRef { section: Section::Conflicts, index: row }],
+                    fix: None,
+                });
+                plan.conflicts.push(ConflictRow::Claims(ClaimConflictRow {
+                    source: ConflictSource::Claims,
+                    claim: format!("effect 0x{:08X}", c.effect),
+                    class: ClaimClass::Exclusive,
+                    claimants,
+                }));
+            }
+            crate::plan::sort_findings(&mut plan.findings, |item| inputs.iter().position(|p| p.id == item));
+            plan.ok = false;
+            write_plan(&plan)?;
+            return Err(BuildError::Plan(Box::new(plan)));
+        }
+    }
+
+    // The shader stores: every Shipment's edits applied to the originals in load order, one store
+    // per file for the whole set.
+    let mut added = Vec::new();
+    for s in &shipments {
+        added.extend(crate::shader::added(&s.manifest.shipment.name, &s.manifest));
+    }
+    let shader_keys = crate::shader::ShaderKeys::with(&added);
+    // M0235 / M0236 over the set: the shaders each add_model declares must be registered by retail,
+    // by its own Shipment or by one it requires (transitively), since only those load before it.
+    for (si, s) in shipments.iter().enumerate() {
+        let mut providers: Vec<&str> = vec![order_ids[si].as_str()];
+        let mut i = 0;
+        while i < providers.len() {
+            let consumer = providers[i];
+            for e in plan.edges.iter().filter(|e| e.then == consumer) {
+                if !providers.contains(&e.first.as_str()) {
+                    providers.push(e.first.as_str());
+                }
+            }
+            i += 1;
+        }
+        let mut visible = Vec::new();
+        for (sj, t) in shipments.iter().enumerate() {
+            if providers.contains(&order_ids[sj].as_str()) {
+                visible.extend(crate::shader::added(&t.manifest.shipment.name, &t.manifest));
+            }
+        }
+        let keys = crate::shader::ShaderKeys::with(&visible);
+        for (index, c) in s.manifest.contributions.iter().enumerate() {
+            let Contribution::AddModel { model, .. } = c else { continue };
+            let declared = crate::shader_import::read_declared(&s.root.join(model)).map_err(|message| BuildError::Lower {
+                index,
+                kind: "add_model",
+                message: format!("{}: {message}", s.manifest.shipment.name),
+            })?;
+            for (name, set, code, stage) in [
+                (&declared.pixel, &keys.pixel, "M0235", "pixel"),
+                (&declared.vertex, &keys.vertex, "M0236", "vertex"),
+                (&declared.shadow, &keys.vertex, "M0236", "vertex"),
+            ] {
+                if let Some(n) = name {
+                    if !set.contains(&mercs2_formats::hash::pandemic_hash_m2(n)) {
+                        write_plan(&plan)?;
+                        return Err(BuildError::Lower {
+                            index,
+                            kind: "add_model",
+                            message: format!(
+                                "[{code}] {}: the glTF declares {stage} shader {n:?}, which neither retail, \
+                                 this Shipment nor a Shipment it requires registers in every configuration",
+                                s.manifest.shipment.name
+                            ),
+                        });
+                    }
+                }
+            }
+        }
+    }
+    let mut store_placements = Vec::new();
+    let shader_kind = shipments.iter().find_map(|s| {
+        s.manifest
+            .contributions
+            .iter()
+            .enumerate()
+            .find(|(_, c)| matches!(c, Contribution::AddShader { .. } | Contribution::ReplaceShader { .. }))
+            .map(|(index, c)| (index, c.kind()))
+    });
+    if let Some((index, kind)) = shader_kind {
+        let original = original_data.ok_or(BuildError::OriginalDataRequired { index, kind })?;
+        if let Some((a, code, message)) = crate::shader::registration_findings(&added).into_iter().next() {
+            write_plan(&plan)?;
+            return Err(BuildError::Lower {
+                index: a.index,
+                kind: "add_shader",
+                message: format!("[{code}] {}: {message}", a.shipment),
+            });
+        }
+        let mut edits = Vec::new();
+        for s in &shipments {
+            edits.extend(crate::shader::shipment_edits(&s.manifest.shipment.name, &s.manifest, &s.root).map_err(|f| {
+                BuildError::Lower {
+                    index: f[0].index,
+                    kind: "shader",
+                    message: format!("{}: {}", s.manifest.shipment.name, f[0].message),
+                }
+            })?);
+        }
+        std::fs::create_dir_all(out_dir).map_err(|e| BuildError::Io { path: out_dir.to_path_buf(), message: e.to_string() })?;
+        store_placements = write_shader_stores(original, game, &edits, out_dir, &mut log)?;
+    }
+
     let mut ui_regs: Vec<link::UiRegistration> = Vec::new();
     let mut layer_regs: Vec<link::LayerRegistration> = Vec::new();
     let mut support_regs: Vec<link::SupportRegistration> = Vec::new();
     let mut additions: Vec<link::ScriptAddition> = Vec::new();
     let mut replacements: Vec<link::ScriptReplacement> = Vec::new();
+    let mut sound_regs: Vec<link::SoundBankRegistration> = Vec::new();
+    // What each Shipment's own build ships for sound, by level: the loaders' self-check below reads
+    // it. Lowered through the one function `qm build` ships with (`sound::lower_shipment_sound`).
+    let mut shipped_overlay: Vec<PatchBlock> = Vec::new();
+    let mut shipped_shell: Vec<PatchBlock> = Vec::new();
     for s in &shipments {
+        let mut sound_log = Vec::new();
+        let sound = crate::sound::lower_shipment_sound(s, Some(&mut *game), &mut sound_log).map_err(|(index, kind, message)| {
+            BuildError::Lower {
+                index,
+                kind,
+                message: format!("{}: {message}", s.manifest.shipment.name),
+            }
+        })?;
+        sound_regs.extend(sound.registrations);
+        shipped_overlay.extend(sound.overlay);
+        shipped_shell.extend(sound.shell);
         mutations.extend(script_mutations(&s.manifest, &s.root)?);
         ui_regs.extend(ui_registrations(&s.manifest));
         layer_regs.extend(layer_registrations(&s.manifest));
@@ -4919,129 +5706,179 @@ pub fn link_installed(
         additions.extend(script_additions(&s.manifest, &s.root)?);
         replacements.extend(script_replacements(&s.manifest, &s.root)?);
     }
-    // A UI, layer, add_script, or replace_lua mod touches the Script layer too — the first two mint
-    // `qm_modloader` and the trampoline; add_script mints its own fresh scripts_vz entry;
-    // replace_lua swaps a shipped script's bytecode. Any of them needs the script link to run.
+    // A UI, layer, sound-bank, add_script, or replace_lua mod touches the Script layer too — UI,
+    // layer and sound-bank registrations mint `qm_modloader` and the trampoline; add_script mints
+    // its own fresh scripts_vz entry; replace_lua swaps a shipped script's bytecode. Any of them
+    // needs the script link to run.
+    let gameplay_sounds = sound_regs.iter().any(|r| r.sessions.contains(&crate::manifest::LoadSession::Gameplay));
+    let front_end_sounds = sound_regs.iter().any(|r| r.sessions.contains(&crate::manifest::LoadSession::FrontEnd));
     let touches_scripts = !(mutations.is_empty()
         && ui_regs.is_empty()
         && layer_regs.is_empty()
         && support_regs.is_empty()
+        && !gameplay_sounds
         && additions.is_empty()
         && replacements.is_empty());
     // Every string table any Shipment edits or adds keys to is merged into one link-owned copy.
     let tables = merged_string_tables(shipments.iter().map(|s| &s.manifest));
-    if !touches_scripts && tables.is_empty() {
+    // Every sound bank any Shipment's replace_sound_cue targets, likewise.
+    let sound_entries = crate::sound::linked_sound_entries(shipments.iter().map(|s| &s.manifest));
+    // Every effect, template and sprite, into one effects block, one worldentity, one fxdict and
+    // one atlas.
+    let fx = shipments.iter().any(|s| crate::fx::merges_fx(&s.manifest));
+    if !touches_scripts && !front_end_sounds && tables.is_empty() && sound_entries.is_empty() && !fx {
         log.push(
-            "no installed Shipment touches a script or a string table — nothing to link".into(),
+            "no installed Shipment touches a script, a string table, a sound bank, an effect, a \
+             sprite or the vfx atlas — nothing to link"
+                .into(),
         );
         // Still write the (empty) placement record. Emitting no link WAD is the right call — an
         // overlay that merely restates the base block is a file deploy has to reason about for
         // nothing — but emitting no RECORD makes that indistinguishable from "link was never run",
         // and deploy has to tell those apart. An empty `placements` array says which one it is.
         write_plan(&plan)?;
-        write_placement_record(out_dir, &[])?;
+        write_placement_record(out_dir, &store_placements)?;
         log.push(format!(
-            "wrote {}, {PLACEMENT_RECORD}: 0 placement(s) — nothing to mount from the link step",
-            crate::plan::PLAN_FILE
+            "wrote {}, {PLACEMENT_RECORD}: {} placement(s), no link overlay",
+            crate::plan::PLAN_FILE,
+            store_placements.len()
         ));
         return Ok(LinkReport {
             wad: None,
-            placements: Vec::new(),
+            placements: store_placements,
             linked: Vec::new(),
             plan,
             log,
         });
     }
     log.push(format!(
-        "linking {} mutation(s), {} UI and {} layer registration(s) and {} string table(s) from {} \
-         Shipment(s)",
+        "linking {} mutation(s), {} UI, {} layer and {} sound-bank registration(s), {} string \
+         table(s), {} sound bank(s) and {} effects from {} Shipment(s)",
         mutations.len(),
         ui_regs.len(),
         layer_regs.len(),
+        sound_regs.len(),
         tables.len(),
+        sound_entries.len(),
+        if fx { "the set's" } else { "no" },
         shipments.len()
     ));
 
     let mut patches: Vec<PatchBlock> = Vec::new();
     let mut linked: Vec<link::LinkedScript> = Vec::new();
-    if touches_scripts {
-        let mut loaded = load_script_blocks(game, "link")?;
-        let mut targets: Vec<link::TargetBlock<'_>> = loaded
-            .iter_mut()
-            .map(|lb| link::TargetBlock {
-                path: lb.path.clone(),
-                block: &mut lb.block,
-            })
-            .collect();
-        let linked_out = link::link_into_blocks(
-            &mut targets,
-            corpus_root,
-            &mutations,
-            &ui_regs,
-            &layer_regs,
-            &support_regs,
-            &additions,
-            &replacements,
-            &order,
-        )
-        .map_err(|e| BuildError::Lower {
+    let mut effects_block = None;
+    if touches_scripts || fx {
+        let mut loaded = load_script_blocks(game, link::SCRIPT_BLOCKS, "link")?;
+        let mut touched = std::collections::BTreeSet::new();
+        if touches_scripts {
+            let mut targets: Vec<link::TargetBlock<'_>> = loaded
+                .iter_mut()
+                .map(|lb| link::TargetBlock {
+                    path: lb.path.clone(),
+                    block: &mut lb.block,
+                })
+                .collect();
+            let linked_out = link::link_into_blocks(
+                &mut targets,
+                corpus_root,
+                &mutations,
+                &ui_regs,
+                &layer_regs,
+                &support_regs,
+                &sound_regs,
+                &additions,
+                &replacements,
+                &order,
+            )
+            .map_err(|e| BuildError::Lower {
+                index: 0,
+                kind: "link",
+                message: e.to_string(),
+            })?;
+            drop(targets);
+            // M0209: literal imports nothing in the link provides. Warnings — `ok` does not change —
+            // placed on the item whose source carries them. An ok plan has one item per name (no
+            // M0203).
+            for u in &linked_out.unresolved_imports {
+                let requested = inputs
+                    .iter()
+                    .position(|i| i.shipment.manifest.shipment.name == u.shipment)
+                    .ok_or_else(|| BuildError::Lower {
+                        index: 0,
+                        kind: "link",
+                        message: format!(
+                            "internal error: {} carries an import but is not in the request",
+                            u.shipment
+                        ),
+                    })?;
+                plan.findings.push(crate::plan::Finding {
+                    code: "M0209",
+                    severity: crate::plan::FindingSeverity::Warning,
+                    message: u.to_string(),
+                    items: vec![inputs[requested].id.to_string()],
+                    refs: vec![crate::plan::FindingRef {
+                        section: crate::plan::Section::Items,
+                        index: requested,
+                    }],
+                    fix: None,
+                });
+                log.push(format!("warning [M0209]: {u}"));
+            }
+            crate::plan::sort_findings(&mut plan.findings, |item| {
+                inputs.iter().position(|p| p.id == item)
+            });
+            linked = linked_out.scripts;
+            for l in &linked {
+                log.push(format!(
+                    "linked {} in {}: {} → {} B source, {} B bytecode, from {:?}",
+                    l.target,
+                    loaded[l.block].path,
+                    l.base_source_bytes,
+                    l.linked_source_bytes,
+                    l.bytecode_bytes,
+                    l.contributors
+                ));
+                touched.insert(l.block);
+            }
+        }
+        // The set's sprites, effects and templates, merged in load order: the effects block, and
+        // the templates, the fxdict and the atlas in the same resident block the scripts above were
+        // linked into.
+        if fx {
+            let (effects, resident) = lower_fx(&shipments, game, &mut loaded, crate::fx::Scope::Link, "link", &mut log)?;
+            effects_block = effects;
+            touched.extend(resident);
+        }
+        patches.extend(script_patch_blocks(&loaded, &touched, "link")?);
+    }
+    // The plan promised the effects block exactly when a Shipment has an fx kind.
+    let effects_promised = plan.link_block_paths.iter().any(|p| p == crate::fx::EFFECTS_BLOCK.1);
+    if effects_promised != effects_block.is_some() {
+        return Err(BuildError::Lower {
             index: 0,
             kind: "link",
-            message: e.to_string(),
-        })?;
-        drop(targets);
-        // M0209: literal imports nothing in the link provides. Warnings — `ok` does not change —
-        // placed on the item whose source carries them. An ok plan has one item per name (no M0203).
-        for u in &linked_out.unresolved_imports {
-            let requested = inputs
-                .iter()
-                .position(|i| i.shipment.manifest.shipment.name == u.shipment)
-                .ok_or_else(|| BuildError::Lower {
-                    index: 0,
-                    kind: "link",
-                    message: format!(
-                        "internal error: {} carries an import but is not in the request",
-                        u.shipment
-                    ),
-                })?;
-            plan.findings.push(crate::plan::Finding {
-                code: "M0209",
-                severity: crate::plan::FindingSeverity::Warning,
-                message: u.to_string(),
-                items: vec![inputs[requested].id.to_string()],
-                refs: vec![crate::plan::FindingRef {
-                    section: crate::plan::Section::Items,
-                    index: requested,
-                }],
-                fix: None,
-            });
-            log.push(format!("warning [M0209]: {u}"));
-        }
-        crate::plan::sort_findings(&mut plan.findings, |item| {
-            inputs.iter().position(|p| p.id == item)
+            message: format!(
+                "internal error: the plan {} the effects block and the link {} it",
+                if effects_promised { "promised" } else { "did not promise" },
+                if effects_block.is_some() { "merged" } else { "did not merge" }
+            ),
         });
-        linked = linked_out.scripts;
-        for l in &linked {
-            log.push(format!(
-                "linked {} in {}: {} → {} B source, {} B bytecode, from {:?}",
-                l.target,
-                loaded[l.block].path,
-                l.base_source_bytes,
-                l.linked_source_bytes,
-                l.bytecode_bytes,
-                l.contributors
-            ));
-        }
-        patches.extend(script_patch_blocks(&loaded, &linked, "link")?);
     }
+    patches.extend(effects_block);
 
     // The merged string tables. The plan's `link_block_paths` promised exactly these, and a deploy
     // step drops the per-Shipment copies of each on that promise, so a mismatch is an internal error.
     let table_blocks = merge_string_tables(&shipments, game, StringMerge::Upsert, &mut log)?;
+    let sound_paths: std::collections::BTreeSet<String> =
+        sound_entries.iter().map(|&e| crate::sound::block_path(e)).collect();
     let promised: Vec<String> = plan
         .link_block_paths
         .iter()
-        .filter(|p| !link::SCRIPT_BLOCKS.iter().any(|(_, s)| s == p))
+        .filter(|p| {
+            !link::SCRIPT_BLOCKS.iter().chain(link::SHELL_SCRIPT_BLOCKS).any(|(_, s)| s == p)
+                && !sound_paths.contains(*p)
+                && *p != crate::fx::EFFECTS_BLOCK.1
+        })
         .cloned()
         .collect();
     let emitted: Vec<String> = table_blocks.iter().map(|b| b.path_string.clone()).collect();
@@ -5057,12 +5894,112 @@ pub fn link_installed(
     }
     patches.extend(table_blocks);
 
+    // The merged sound banks: one soundbank per bank a replace_sound_cue targets, carrying every
+    // Shipment's cue overrides, in each WAD that carries the bank; for a bank the engine loads, with
+    // its sounddb and the one wavebank of every Shipment's override waves, in load order.
+    let mut shell_blocks: Vec<PatchBlock> = Vec::new();
+    let mut language_blocks: std::collections::BTreeMap<crate::manifest::Language, Vec<PatchBlock>> =
+        std::collections::BTreeMap::new();
+    if !sound_entries.is_empty() {
+        let lowered = crate::sound::lower_overrides(
+            &shipments,
+            game,
+            crate::sound::OverrideScope::Link,
+            &mut log,
+        )
+        .map_err(|message| BuildError::Lower { index: 0, kind: "link", message })?;
+        let merged: std::collections::BTreeSet<String> = lowered
+            .overlay
+            .iter()
+            .chain(&lowered.shell)
+            .chain(lowered.language.values().flatten())
+            .map(|b| b.path_string.clone())
+            .collect();
+        if merged != sound_paths {
+            return Err(BuildError::Lower {
+                index: 0,
+                kind: "link",
+                message: format!(
+                    "internal error: the plan promised the sound-bank blocks {sound_paths:?}, and \
+                     the link merged {merged:?}"
+                ),
+            });
+        }
+        patches.extend(lowered.overlay);
+        // Every bank the engine loads ships its three tables in one block of the link WAD.
+        crate::sound::check_engine_banks(&lowered.engine_banks, &patches.iter().collect::<Vec<_>>())
+            .map_err(|message| BuildError::Lower { index: 0, kind: "link", message })?;
+        shell_blocks = lowered.shell;
+        language_blocks = lowered.language;
+    }
+
+    // The front end's loader: every Shipment's front-end banks in one `qm_shell_modloader`, linked
+    // into `shell.wad`'s scripts block and shipped in the link's shell patch.
+    shell_blocks.extend(link_shell_loader(game, corpus_root, &sound_regs, &order, "link", &mut log)?);
+    // The loaders load only what the set's builds ship, level by level.
+    check_sound_loaders(
+        &sound_regs,
+        &shipped_overlay.iter().collect::<Vec<_>>(),
+        &shipped_shell.iter().collect::<Vec<_>>(),
+        "link",
+    )?;
+
     let csum =
         mercs2_formats::donor::base_csum(game.paths()[0]).map_err(|m| BuildError::Lower {
             index: 0,
             kind: "link",
             message: m,
         })?;
+    std::fs::create_dir_all(out_dir).map_err(|e| BuildError::Io {
+        path: out_dir.to_path_buf(),
+        message: e.to_string(),
+    })?;
+    let mut placements = store_placements;
+    let mut diagnostics = Vec::new();
+    if !shell_blocks.is_empty() {
+        placements.push(write_patch_wad(
+            out_dir,
+            LINK_SHELL_PATCH_NAME,
+            &shell_blocks,
+            shell_csum(game, "link")?,
+            Destination::ShellPatch,
+            &shader_keys,
+            &mut log,
+            &mut diagnostics,
+        )?);
+    }
+    for (language, lblocks) in language_blocks {
+        let relative = format!("language_patch/{}.wad", language.token());
+        placements.push(write_patch_wad(
+            out_dir,
+            &relative,
+            &lblocks,
+            csum,
+            Destination::LanguagePatch {
+                language: language.token().to_string(),
+                relative: relative.clone(),
+            },
+            &shader_keys,
+            &mut log,
+            &mut diagnostics,
+        )?);
+    }
+    if patches.is_empty() {
+        write_plan(&plan)?;
+        write_placement_record(out_dir, &placements)?;
+        log.push(format!(
+            "wrote {}, {PLACEMENT_RECORD}: {} placement(s), no link overlay",
+            crate::plan::PLAN_FILE,
+            placements.len()
+        ));
+        return Ok(LinkReport {
+            wad: None,
+            placements,
+            linked,
+            plan,
+            log,
+        });
+    }
     let wad_bytes =
         build_patch_wad_multi(&patches, csum.0, csum.1, &FFCS_CERT_BLOB).map_err(|m| {
             BuildError::Lower {
@@ -5074,12 +6011,8 @@ pub fn link_installed(
 
     // The link WAD is mounted LAST and so wins outright. It gets the same self-check as any other,
     // and for the same reason: nothing downstream would notice a defect here.
-    let self_check = verify_emitted(&wad_bytes)?;
+    let self_check = verify_emitted(&wad_bytes, &shader_keys)?;
 
-    std::fs::create_dir_all(out_dir).map_err(|e| BuildError::Io {
-        path: out_dir.to_path_buf(),
-        message: e.to_string(),
-    })?;
     let path = out_dir.join(LINK_WAD_NAME);
     std::fs::write(&path, &wad_bytes).map_err(|e| BuildError::Io {
         path: path.clone(),
@@ -5098,12 +6031,15 @@ pub fn link_installed(
     // it must sit in the mount order is not recoverable from the file itself. The name encodes the
     // intent ("sorts last") but a deploy step reading a directory should not have to infer a
     // contract from a filename — `destination: overlay` in the record is the contract.
-    let placements = vec![Placement {
-        name: LINK_WAD_NAME.to_string(),
-        bytes: wad_bytes.len(),
-        sha256: digest,
-        destination: Destination::Overlay,
-    }];
+    placements.insert(
+        0,
+        Placement {
+            name: LINK_WAD_NAME.to_string(),
+            bytes: wad_bytes.len(),
+            sha256: digest,
+            destination: Destination::Overlay,
+        },
+    );
     write_plan(&plan)?;
     write_placement_record(out_dir, &placements)?;
     log.push(format!(
@@ -5123,6 +6059,11 @@ pub fn link_installed(
 
 /// The file name every `qm` output directory carries. There is exactly one.
 pub const PLACEMENT_RECORD: &str = "placement.json";
+
+/// The `placement.json` format this build writes. Its destination kinds are `overlay`,
+/// `game_folder`, `data_wad`, `language_patch`, `shell_patch`, `stream_copy` and `data_file`
+/// ([`Destination`]).
+pub const PLACEMENT_FORMAT: u32 = 2;
 
 /// Write `placement.json` into `out_dir`, creating it if needed.
 ///
@@ -5159,8 +6100,18 @@ fn placement_json(placements: &[Placement]) -> String {
                 Destination::GameFolder { relative } => {
                     serde_json::json!({ "kind": "game_folder", "relative": relative })
                 }
-                Destination::DataWad { relative } => {
-                    serde_json::json!({ "kind": "data_wad", "relative": relative })
+                Destination::DataWad { relative, display } => {
+                    serde_json::json!({ "kind": "data_wad", "relative": relative, "display": display })
+                }
+                Destination::LanguagePatch { language, relative } => {
+                    serde_json::json!({ "kind": "language_patch", "language": language, "relative": relative })
+                }
+                Destination::ShellPatch => serde_json::json!({ "kind": "shell_patch" }),
+                Destination::StreamCopy { from, to } => {
+                    serde_json::json!({ "kind": "stream_copy", "from": from, "to": to })
+                }
+                Destination::DataFile { relative, base_sha256 } => {
+                    serde_json::json!({ "kind": "data_file", "relative": relative.relative(), "base_sha256": base_sha256 })
                 }
             };
             serde_json::json!({
@@ -5172,11 +6123,36 @@ fn placement_json(placements: &[Placement]) -> String {
         })
         .collect();
     serde_json::to_string_pretty(&serde_json::json!({
-        "format": 1,
+        "format": PLACEMENT_FORMAT,
         "placements": entries,
     }))
     .unwrap_or_else(|_| "{}".into())
         + "\n"
+}
+
+#[cfg(test)]
+mod placement_record {
+    use super::*;
+
+    #[test]
+    fn a_data_file_names_its_closed_relative_and_the_originals_sha() {
+        let json: serde_json::Value = serde_json::from_str(&placement_json(&[Placement {
+            name: "shader3Low.bin".into(),
+            bytes: 16,
+            sha256: "ab".into(),
+            destination: Destination::DataFile {
+                relative: crate::shader::DataFile::Shader3Low,
+                base_sha256: "cd".into(),
+            },
+        }]))
+        .unwrap();
+        assert_eq!(json["format"], 2);
+        assert_eq!(
+            json["placements"][0]["destination"],
+            serde_json::json!({ "kind": "data_file", "relative": "data/shader3Low.bin", "base_sha256": "cd" })
+        );
+        assert_eq!(json["placements"][0]["sha256"], "ab");
+    }
 }
 
 #[cfg(test)]
@@ -5277,6 +6253,7 @@ mod rigid_texture_tests {
             textures: textures.to_vec(),
             flags,
             preamble: Vec::new(),
+            shader_key: 0,
         }
     }
 

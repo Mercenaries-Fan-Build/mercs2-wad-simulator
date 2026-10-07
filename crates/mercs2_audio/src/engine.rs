@@ -1302,9 +1302,10 @@ impl AudioEngine {
     pub fn get_audio_dir(&self) -> &str {
         &self.audio_dir
     }
-    /// `Sound.OpenStreamFile(name)` (`FUN_005e4020` → `thunk_FUN_035f0000`).
-    /// // CONFIRM-LIVE: stream open is SecuROM-thunked; here it records intent (the WAD-streaming system
-    /// binds the actual `.pws` stream). Returns a stream handle id.
+    /// `Sound.OpenStreamFile(name)` (`FUN_005e4020` → `thunk_FUN_035f0000`, plaintext relocated into
+    /// `.securom`, its blocks joined by `push <ret>; push <target>; ret`).
+    /// // CONFIRM-LIVE: here it records intent (the WAD-streaming system binds the actual `.pws`
+    /// stream). Returns a stream handle id.
     pub fn open_stream_file(&mut self, _name: &str) -> u32 {
         0 // CONFIRM-LIVE: real handle comes from the stream I/O mgr (DAT_011763f4)
     }

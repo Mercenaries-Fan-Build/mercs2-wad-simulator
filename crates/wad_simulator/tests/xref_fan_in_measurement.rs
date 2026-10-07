@@ -9,21 +9,18 @@
 //! reports the distribution so the M0006-vs-M0009 decision rests on numbers. It also guards the
 //! mechanism the fix depends on: that the map keeps EVERY referrer (the old code kept only the
 //! first, which would report a fan-in of 1 for everything and make the measurement meaningless).
+//!
+//! Game-gated, built by the `retail` feature: reads the `vz.wad` named by the repo-root
+//! `.mercs2-local.toml` and fails if it is absent. Run with `cargo xtask retail-test`.
 
 use std::path::Path;
 
 use wad_simulator::simulate::run_simulate;
 
-fn vz_wad() -> Option<std::path::PathBuf> {
-    mercs2_formats::game_paths::vz_wad(Path::new(env!("CARGO_MANIFEST_DIR")))
-}
-
 #[test]
 fn texture_fan_in_is_measured_over_retail() {
-    let Some(wad) = vz_wad() else {
-        eprintln!("SKIPPING: no vz.wad");
-        return;
-    };
+    let wad = mercs2_formats::game_paths::local_config_vz_wad(Path::new(env!("CARGO_MANIFEST_DIR")))
+        .unwrap_or_else(|e| panic!("{e}"));
     let report = run_simulate(Some(&wad), None).expect("simulate retail");
 
     // The map must be populated and must keep MULTIPLE referrers — the whole point of the change.

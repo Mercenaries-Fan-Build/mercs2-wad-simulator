@@ -554,99 +554,98 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Integration: the game's resident-audio path — `load_resident_audio` then `install` — resolves
-    /// resident cues through sounddb → soundbank cue → every track's sounds → group → wavebank to
-    /// decoded PCM. Without the soundbanks the same catalog resolves nothing (the first hop is the
-    /// soundbank).
-    #[test]
-    fn resident_audio_path_resolves_cues_through_the_soundbank() {
-        let Some(path) = wad::resolve_vz_wad(None) else {
-            return eprintln!(
-                "SKIPPING: no vz.wad discovered. Run `scripts/find-vz-wad.sh --write` or set MERCS2_GAME_DIR."
-            );
-        };
-        let mut w = wad::open(&path).expect("open vz.wad");
-        let res = load_resident_audio(&mut w);
-        println!(
-            "[audio] {} wavebanks, {} soundbanks, {} sounddbs",
-            res.wavebanks.len(),
-            res.soundbanks.len(),
-            res.sounddbs.len()
-        );
-        assert_eq!(res.wavebanks.len(), 12);
-        assert_eq!(res.soundbanks.len(), 11, "every resident bank but amb_shared has a soundbank");
-        assert_eq!(res.sounddbs.len(), 11);
+    /// Game-gated: built by the `retail` feature, these read the retail `vz.wad` named by the repo-root
+    /// `.mercs2-local.toml` and fail when it is absent.
+    #[cfg(feature = "retail")]
+    mod retail {
+        use super::*;
 
-        // Every catalog cue either resolves through the full chain, or stops at a wave that streams
-        // from a .pws or a wavebank outside the resident set — never at a structural fault.
-        let tally = |r: &ResidentAudio| {
-            let mut eng = crate::audio::AudioEngine::default();
-            let stats = r.install(&mut eng).expect("resident tables install");
-            let (mut ok, mut streamed, mut elsewhere, mut no_soundbank) = (0, 0, 0, 0);
-            for c in &eng.sounddb.cues {
-                match eng.resolve_cue(c) {
-                    Ok(_) => ok += 1,
-                    Err(crate::audio::ResolveError::Streamed { .. }) => streamed += 1,
-                    Err(crate::audio::ResolveError::WavebankNotResident(_)) => elsewhere += 1,
-                    Err(crate::audio::ResolveError::SoundbankNotResident(_)) => no_soundbank += 1,
-                    Err(e) => panic!("cue 0x{:08X}: {e}", c.guid),
+        /// Integration: the game's resident-audio path — `load_resident_audio` then `install` — resolves
+        /// resident cues through sounddb → soundbank cue → every track's sounds → group → wavebank to
+        /// decoded PCM. Without the soundbanks the same catalog resolves nothing (the first hop is the
+        /// soundbank).
+        #[test]
+        fn resident_audio_path_resolves_cues_through_the_soundbank() {
+            let mut w = crate::worldutil::schema_wire_tests::retail::open_vz_wad();
+            let res = load_resident_audio(&mut w);
+            println!(
+                "[audio] {} wavebanks, {} soundbanks, {} sounddbs",
+                res.wavebanks.len(),
+                res.soundbanks.len(),
+                res.sounddbs.len()
+            );
+            assert_eq!(res.wavebanks.len(), 12);
+            assert_eq!(res.soundbanks.len(), 11, "every resident bank but amb_shared has a soundbank");
+            assert_eq!(res.sounddbs.len(), 11);
+
+            // Every catalog cue either resolves through the full chain, or stops at a wave that streams
+            // from a .pws or a wavebank outside the resident set — never at a structural fault.
+            let tally = |r: &ResidentAudio| {
+                let mut eng = crate::audio::AudioEngine::default();
+                let stats = r.install(&mut eng).expect("resident tables install");
+                let (mut ok, mut streamed, mut elsewhere, mut no_soundbank) = (0, 0, 0, 0);
+                for c in &eng.sounddb.cues {
+                    match eng.resolve_cue(c) {
+                        Ok(_) => ok += 1,
+                        Err(crate::audio::ResolveError::Streamed { .. }) => streamed += 1,
+                        Err(crate::audio::ResolveError::WavebankNotResident(_)) => elsewhere += 1,
+                        Err(crate::audio::ResolveError::SoundbankNotResident(_)) => no_soundbank += 1,
+                        Err(e) => panic!("cue 0x{:08X}: {e}", c.guid),
+                    }
                 }
-            }
-            (stats, ok, streamed, elsewhere, no_soundbank)
-        };
-        let (stats, with, streamed, elsewhere, _) = tally(&res);
-        let (_, without, _, _, no_soundbank) = tally(&ResidentAudio { soundbanks: Vec::new(), ..res.clone() });
-        println!(
-            "[audio] {} catalog cues: {with} resolve through every path; {streamed} reach a .pws-streamed \
-             wave, {elsewhere} a wavebank outside the resident set; without soundbanks {without} resolve",
-            stats.catalog_cues
-        );
-        assert_eq!(stats.catalog_cues, 807);
-        assert_eq!(with + streamed + elsewhere, 807);
-        assert_eq!(with, 605);
-        assert_eq!((without, no_soundbank), (0, 807));
-
-        // A resolved cue plays audibly through the engine's mixer.
-        let mut eng = crate::audio::AudioEngine::default();
-        res.install(&mut eng).expect("resident tables install");
-        let guid = mercs2_formats::hash::pandemic_hash_m2("ui_PDA_Open_01_st");
-        eng.cue_sound(guid, None).expect("ui_PDA_Open_01_st starts");
-        for _ in 0..8 {
-            eng.tick(0.02);
-        }
-        assert!(crate::audio::mixer::rms_i16(&eng.render(4096)) > 0.0, "ui_PDA_Open_01_st is audible");
-    }
-
-    /// Integration: mount the real shipped stack and assert the documented order + that `base()` still
-    /// means the LEVEL archive rather than `Loading.wad`, which now sits beneath it.
-    ///
-    /// Not `#[ignore]`d: it discovers the install and runs whenever one is present, skipping loudly
-    /// otherwise.
-    #[test]
-    fn real_wad_stack_mounts_in_the_documented_order() {
-        let Some(path) = wad::resolve_vz_wad(None) else {
-            return eprintln!(
-                "SKIPPING: no vz.wad discovered. Run `scripts/find-vz-wad.sh --write` or set MERCS2_GAME_DIR."
+                (stats, ok, streamed, elsewhere, no_soundbank)
+            };
+            let (stats, with, streamed, elsewhere, _) = tally(&res);
+            let (_, without, _, _, no_soundbank) = tally(&ResidentAudio { soundbanks: Vec::new(), ..res.clone() });
+            println!(
+                "[audio] {} catalog cues: {with} resolve through every path; {streamed} reach a .pws-streamed \
+                 wave, {elsewhere} a wavebank outside the resident set; without soundbanks {without} resolve",
+                stats.catalog_cues
             );
-        };
-        let src = AssetSource::discover(&path, &[]).expect("mount the stack");
-        println!("[stack] {:?}", src.slots());
+            assert_eq!(stats.catalog_cues, 807);
+            assert_eq!(with + streamed + elsewhere, 807);
+            assert_eq!(with, 605);
+            assert_eq!((without, no_soundbank), (0, 807));
 
-        // Mounted slots must be a subsequence of the canonical order — never reordered.
-        let ranks: Vec<usize> =
-            src.slots().iter().map(|s| MOUNT_ORDER.iter().position(|x| x == s).unwrap()).collect();
-        assert!(ranks.windows(2).all(|w| w[0] < w[1]), "mount order must be strictly ascending: {ranks:?}");
+            // A resolved cue plays audibly through the engine's mixer.
+            let mut eng = crate::audio::AudioEngine::default();
+            res.install(&mut eng).expect("resident tables install");
+            let guid = mercs2_formats::hash::pandemic_hash_m2("ui_PDA_Open_01_st");
+            eng.cue_sound(guid, None).expect("ui_PDA_Open_01_st starts");
+            for _ in 0..8 {
+                eng.tick(0.02);
+            }
+            assert!(crate::audio::mixer::rms_i16(&eng.render(4096)) > 0.0, "ui_PDA_Open_01_st is audible");
+        }
 
-        // The level archive is the world, not the 8-block boot archive.
-        let level = src.index_of(MountSlot::Level).expect("the level WAD is required");
-        assert_eq!(level, src.level, "base() must follow the Level slot");
-        assert!(
-            wad::block_paths(src.base()).len() > 1000,
-            "base() must be the level archive (11,370 blocks), not Loading.wad (8)"
-        );
+        /// Integration: mount the real shipped stack and assert the documented order + that `base()` still
+        /// means the LEVEL archive rather than `Loading.wad`, which now sits beneath it.
+        ///
+        /// English.wad ships beside vz.wad in a retail install, so it must mount, and must outrank the level.
+        #[test]
+        fn real_wad_stack_mounts_in_the_documented_order() {
+            let path = crate::worldutil::schema_wire_tests::retail::vz_wad_path();
+            let src = AssetSource::discover(&path, &[]).expect("mount the stack");
+            println!("[stack] {:?}", src.slots());
 
-        // English.wad ships next to vz.wad in a retail install; if it mounted, it must outrank the level.
-        if let Some(lang) = src.index_of(MountSlot::Language) {
+            // Mounted slots must be a subsequence of the canonical order — never reordered.
+            let ranks: Vec<usize> =
+                src.slots().iter().map(|s| MOUNT_ORDER.iter().position(|x| x == s).unwrap()).collect();
+            assert!(ranks.windows(2).all(|w| w[0] < w[1]), "mount order must be strictly ascending: {ranks:?}");
+
+            // The level archive is the world, not the 8-block boot archive.
+            let level = src.index_of(MountSlot::Level).expect("the level WAD is required");
+            assert_eq!(level, src.level, "base() must follow the Level slot");
+            assert!(
+                wad::block_paths(src.base()).len() > 1000,
+                "base() must be the level archive (11,370 blocks), not Loading.wad (8)"
+            );
+
+            // English.wad ships next to vz.wad in a retail install, so it must have mounted, and it must
+            // outrank the level.
+            let lang = src.index_of(MountSlot::Language).unwrap_or_else(|| {
+                panic!("English.wad did not mount from the retail install beside {path}")
+            });
             assert!(lang > level, "English.wad must outrank the level WAD (§B.3)");
         }
     }

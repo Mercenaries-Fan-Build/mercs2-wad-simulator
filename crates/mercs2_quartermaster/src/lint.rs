@@ -302,6 +302,460 @@ pub const M0303_MISSION_ID_UNPARSEABLE: Rule = Rule {
     doc: "docs/modding/lua_engine_seam_hardening.md",
 };
 
+/// A sound cue's `wave` is not a WAV a wavebank record can embed: the strict reader
+/// ([`mercs2_audio::wav::read_pcm16_wav`]) refuses it — not RIFF/WAVE, not uncompressed 16-bit PCM,
+/// not mono or stereo, rate 0, or an empty or partial-frame data chunk. The lowering reads the file
+/// through the same reader. Needs the file, so it runs only when lint has the Shipment root.
+pub const M0214_SOUND_WAVE_UNUSABLE: Rule = Rule {
+    code: "M0214",
+    title: "a sound cue's WAV is not uncompressed 16-bit mono or stereo PCM",
+    doc: "docs/modding/manifest_format.md#m0214",
+};
+
+/// A sound name the engine cannot reach: two cues of one bank whose names hash alike (the hash
+/// folds case), a name written as a bare hash or with surrounding whitespace, a bank with no cues,
+/// or an `add_sound` bank named `vo_*` (retail Lua appends the language to such a name before
+/// loading it, `mrxsoundbanks.lua:80-87`).
+pub const M0215_SOUND_NAME_UNUSABLE: Rule = Rule {
+    code: "M0215",
+    title: "a sound bank or cue name the engine cannot reach",
+    doc: "docs/modding/manifest_format.md#m0215",
+};
+
+/// A sound bank's `category` is not one of the global category tree's names
+/// ([`mercs2_audio::encode::RETAIL_CATEGORY_NAMES`]); the group's category hash must be one of the
+/// tree's (`audio_code_map.md` §11.3).
+pub const M0216_SOUND_CATEGORY_UNKNOWN: Rule = Rule {
+    code: "M0216",
+    title: "a sound bank's category is not a category of the game's tree",
+    doc: "docs/modding/manifest_format.md#m0216",
+};
+
+/// `language` on a sound override whose bank is not `vo_*` (the engine never localizes it), or no
+/// `language` on one whose bank is (the entry is `<bank>.<language>`).
+pub const M0217_SOUND_LANGUAGE: Rule = Rule {
+    code: "M0217",
+    title: "a sound override's language does not match its bank",
+    doc: "docs/modding/manifest_format.md#m0217",
+};
+
+/// Needs the game stack. The bank a `replace_sound_bank` / `replace_sound_cue` names is not in the
+/// game; or no level that carries it loads it ([`crate::sound::carrier_session`]) — `shell.wad`
+/// loads only the banks the front end's Lua loads, and `vz.wad` every bank it carries but the ones
+/// retail Lua loads only in the front end (`ui_shell`), the engine loading the ones no Lua names
+/// ([`crate::sound::BankLoader::Engine`]); or the cue a `replace_sound_cue` names is not in that
+/// bank.
+pub const M0218_SOUND_TARGET_MISSING: Rule = Rule {
+    code: "M0218",
+    title: "a sound override's bank or cue is not in the game, or no level that carries the bank loads it",
+    doc: "docs/modding/manifest_format.md#m0218",
+};
+
+/// Needs the game stack. The `base` table of an `add_language` has no fonts `<base>_18` /
+/// `<base>_20` or atlases `<base>_18_main` / `<base>_20_main` to fork for the new language.
+pub const M0219_LANGUAGE_BASE_INCOMPLETE: Rule = Rule {
+    code: "M0219",
+    title: "an add_language base has no fonts or font atlases to fork",
+    doc: "docs/modding/manifest_format.md#m0219",
+};
+
+/// Needs the game stack. An `add_sound` cue named like a cue the game already has, in `vz.wad` or
+/// any installed language's voice-over: FindCue walks the loaded sound tables from the first loaded
+/// (`FUN_00835a70`), so the game's own cue answers and the added one never plays.
+pub const M0220_SOUND_CUE_SHADOWED: Rule = Rule {
+    code: "M0220",
+    title: "an add_sound cue has the name of a cue the game already has",
+    doc: "docs/modding/manifest_format.md#m0220",
+};
+
+/// An `add_sound` whose `load_in` lists no session, or one session twice: the bank would load
+/// nowhere, or the list says something other than what ships.
+pub const M0221_SOUND_LOAD_IN: Rule = Rule {
+    code: "M0221",
+    title: "an add_sound's load_in is empty or lists a session twice",
+    doc: "docs/modding/manifest_format.md#m0221",
+};
+
+/// A shader source that does not load: `asm` that does not assemble, a `blob` whose disassembly
+/// does not assemble back to the same bytes, a blob `check_blob` refuses (over 0x8000 bytes, a
+/// version token other than its stage's, no end token), no `CTAB` (the engine reads constants by
+/// name through `D3DXGetShaderConstantTable`), a stage that disagrees with the family or the
+/// replaced record, or `add_shader` classes sharing a stem with different bytes.
+pub const M0230_SHADER_SOURCE: Rule = Rule {
+    code: "M0230",
+    title: "a shader source does not load, or its stage is not the one it replaces or registers",
+    doc: "docs/modding/manifest_format.md#m0230",
+};
+
+/// An `add_shader` in a Shipment that does not `load.requires: [{capability: shader-registry}]`:
+/// nothing registers the shaders, so a material keyed to one crashes at `0x00858DB8`.
+pub const M0231_SHADER_CAPABILITY: Rule = Rule {
+    code: "M0231",
+    title: "add_shader without the shader-registry capability",
+    doc: "docs/modding/manifest_format.md#m0231",
+};
+
+/// Needs the game stack and `--original-data`. A `replace_shader` whose stem has no record of the
+/// source's stage in `shader3.bin` (or in `shader3Low.bin` for `shader_low`), that no retail
+/// registration loads, or whose `shader_low` presence disagrees with `shader3Low.bin`.
+pub const M0232_SHADER_TARGET: Rule = Rule {
+    code: "M0232",
+    title: "a replace_shader target is not a registered store record of that stage",
+    doc: "docs/modding/manifest_format.md#m0232",
+};
+
+/// Needs the game stack and `--original-data`. An added store id some resident store already
+/// holds, an added name whose key a retail or added registration already has (the registry keeps
+/// the first), or resident stores reaching the 0x1200-slot id table.
+pub const M0233_SHADER_COLLISION: Rule = Rule {
+    code: "M0233",
+    title: "a shader store id or registration name collides, or the stores fill the id table",
+    doc: "docs/modding/manifest_format.md#m0233",
+};
+
+/// An `add_shader`'s classes are not the family's shape: 4 for a pixel family (base, `_pl`, `_sl`,
+/// `_pl_sl`), 1 for a vertex family; a name that is empty or repeated (the key folds case); or a
+/// stem that is not a `.sho` file name.
+pub const M0234_SHADER_CLASSES: Rule = Rule {
+    code: "M0234",
+    title: "an add_shader's classes are malformed for its family",
+    doc: "docs/modding/manifest_format.md#m0234",
+};
+
+/// A material (`MTRL`) whose pixel-shader key is not a pixel shader registered in every
+/// configuration: `Mtrl_Parse` looks it up, gets the registry's null entry (`DAT_01977a3c`, 0), and
+/// the read at `0x00858DB8` through it is an access violation.
+pub const M0235_MTRL_KEY_UNREGISTERED: Rule = Rule {
+    code: "M0235",
+    title: "a material's pixel-shader key is not registered in every configuration",
+    doc: "docs/modding/manifest_format.md#m0235",
+};
+
+/// A primitive group whose `INFO` vertex-shader word (`+0x0C` main, `+0x10` shadow) is not a
+/// registered vertex shader: the loader's lookup in the vertex registry misses and stores the
+/// registry's null entry (`DAT_0197da44`, 0) as the group's record (`FUN_00478270`: group `+0` at
+/// `0x00478677`, `+4` at `0x00478696`). Every pass that draws the group reads the record with no
+/// null test, an access violation: the mesh main pass at `0x00478906`, its shadow pass at
+/// `0x00478d48` (which reads the main record first) and its Z pass at `0x004790a8`; the skin passes
+/// at `0x00479a14`, `0x00479dc5` and `0x0047a178`; the TINY passes at `0x0047a6fb`, `0x0047a89c`
+/// and `0x0047aa5c`. A model that is loaded and never drawn does not reach them.
+pub const M0236_PRMG_VS_UNREGISTERED: Rule = Rule {
+    code: "M0236",
+    title: "a primitive group's vertex-shader key is not a registered vertex shader",
+    doc: "docs/modding/manifest_format.md#m0236",
+};
+
+/// Needs the game stack. A shader's `CTAB` names a constant its family's binder does not resolve.
+/// The engine sets a shader's constants through the handles its binder resolves; a constant outside
+/// that list is set only by code that addresses it directly, which a new shader has none of. A
+/// `replace_shader` may keep the constants its retail record declares.
+pub const M0237_SHADER_CONSTANT_UNBOUND: Rule = Rule {
+    code: "M0237",
+    title: "a shader constant its family never binds",
+    doc: "docs/modding/manifest_format.md#m0237",
+};
+
+/// Reported by the `add_model` lowering. The vertex shader a group resolves to declares an input
+/// (`dcl_*` usage and index) the group's vertex declaration does not supply.
+pub const M0238_VS_INPUT_UNSUPPLIED: Rule = Rule {
+    code: "M0238",
+    title: "a vertex shader reads an input the group's vertex declaration does not supply",
+    doc: "docs/modding/manifest_format.md#m0238",
+};
+
+/// Needs the game stack. A configuration's registrations exceed a registry: 0x800 pixel names or
+/// 0x100 vertex names. The inserts' probes never give up on a full table.
+pub const M0239_SHADER_CAPACITY: Rule = Rule {
+    code: "M0239",
+    title: "the shader registry's capacity is exceeded",
+    doc: "docs/modding/manifest_format.md#m0239",
+};
+
+/// An `add_tiny_geometry` that lists more objects than a stand-in draws, or none. The slot list's
+/// count is a byte (`0x0050F42B`) and every slot `≡ 3 (mod 4)` is skipped ([`M0248_TINY_SLOT_THREE`]),
+/// so 192 of its 255 slots hold objects.
+pub const M0240_TINY_OBJECT_COUNT: Rule = Rule {
+    code: "M0240",
+    title: "an add_tiny_geometry lists more than 192 objects, or none",
+    doc: "docs/modding/manifest_format.md#m0240",
+};
+
+/// An `add_tiny_geometry` that names one object twice. The slot list is searched by GUID, so a
+/// second slot for an object is never reached.
+pub const M0241_TINY_OBJECT_TWICE: Rule = Rule {
+    code: "M0241",
+    title: "an add_tiny_geometry names one object twice",
+    doc: "docs/modding/manifest_format.md#m0241",
+};
+
+/// A stand-in vertex with no `_TINY_SLOT`, or a slot past the `objects` list: the shader reads a
+/// state no object of the stand-in sets.
+pub const M0242_TINY_SLOT_RANGE: Rule = Rule {
+    code: "M0242",
+    title: "a stand-in vertex has no slot, or a slot past the objects",
+    doc: "docs/modding/manifest_format.md#m0242",
+};
+
+/// A stand-in triangle whose vertices name two slots: the shader keeps or drops each vertex by its
+/// own object's state, so the triangle tears when the states differ.
+pub const M0243_TINY_TRIANGLE_SLOTS: Rule = Rule {
+    code: "M0243",
+    title: "a stand-in triangle spans two slots",
+    doc: "docs/modding/manifest_format.md#m0243",
+};
+
+/// A stand-in primitive whose `extras.tiny_role` is missing or not `intact` / `ruined`: nothing says
+/// which shader draws it.
+pub const M0244_TINY_ROLE: Rule = Rule {
+    code: "M0244",
+    title: "a stand-in primitive declares no role",
+    doc: "docs/modding/manifest_format.md#m0244",
+};
+
+/// Needs the game stack. An `add_tiny_geometry` object that does not resolve, or is not placed in
+/// the stand-in's cell (in its layer, or, for an object of another layer, there), or a layer the
+/// game lacks. The engine finds the stand-ins of an object's state change through the cell of the
+/// object's position (`0x0050F730`, `0x0050F7E0`), so an object elsewhere never updates its slot.
+pub const M0245_TINY_OBJECT_PLACE: Rule = Rule {
+    code: "M0245",
+    title: "a stand-in object is not placed in the stand-in's cell",
+    doc: "docs/modding/manifest_format.md#m0245",
+};
+
+/// Needs the game stack. More stand-ins than the slot-list registry holds: it takes 1,400
+/// (`0x0050F1BE`) and drops a list past that (`0x0050F26C`), leaving the stand-in's slots unset.
+/// The count is every stand-in the game places plus the Shipment's.
+pub const M0246_TINY_CAPACITY: Rule = Rule {
+    code: "M0246",
+    title: "the stand-ins exceed the 1,400 slot lists the registry holds",
+    doc: "docs/modding/manifest_format.md#m0246",
+};
+
+/// Needs the game stack. The layer already has a stand-in for the cell.
+pub const M0247_TINY_CELL_TAKEN: Rule = Rule {
+    code: "M0247",
+    title: "the layer already has a stand-in for the cell",
+    doc: "docs/modding/manifest_format.md#m0247",
+};
+
+/// Reported by the `add_model` lowering on a TINY host. A `_TINY_SLOT` `≡ 3 (mod 4)`: the TINY
+/// shaders compute component 3 of a register as `2·.w − .y`, so the vertex is kept only while its
+/// object's state and that of the slot two below agree.
+pub const M0248_TINY_SLOT_THREE: Rule = Rule {
+    code: "M0248",
+    title: "a TINY vertex slot is ≡ 3 (mod 4)",
+    doc: "docs/modding/manifest_format.md#m0248",
+};
+
+/// An `add_tiny_geometry` cell outside the 40 × 40 grid.
+pub const M0249_TINY_CELL_GRID: Rule = Rule {
+    code: "M0249",
+    title: "an add_tiny_geometry cell is outside the 40 × 40 grid",
+    doc: "docs/modding/manifest_format.md#m0249",
+};
+
+/// Needs the game stack. An `add_tiny_geometry` key the game or another stand-in of the Shipment
+/// already uses: entity keys are the GUIDs the engine finds placements by.
+pub const M0250_TINY_KEY_TAKEN: Rule = Rule {
+    code: "M0250",
+    title: "an add_tiny_geometry key is already a placement",
+    doc: "docs/modding/manifest_format.md#m0250",
+};
+
+/// A stand-in's model that does not read as one: a primitive without a material, `NORMAL` or
+/// `TEXCOORD_0`, a material no primitive draws, an alpha-blended one, one without
+/// `extras.texture`, or one whose pixel shader the convention cannot name and the file does not
+/// declare; or a file that does not read.
+pub const M0251_TINY_SOURCE: Rule = Rule {
+    code: "M0251",
+    title: "a stand-in's model does not read as a TINY source",
+    doc: "docs/modding/manifest_format.md#m0251",
+};
+
+/// An `add_fx` effect form that is missing, does not parse, or does not lower: a position not
+/// declared, a value its position cannot take, a curve where the loader takes none, or a rule of
+/// the effect writer broken.
+pub const M0252_EFFECT_FORM: Rule = Rule {
+    code: "M0252",
+    title: "an add_fx effect form does not read as an effect",
+    doc: "docs/modding/manifest_format.md#m0252",
+};
+
+/// An `add_fx` template name the engine's string reader cannot hold: empty, longer than 0x7F
+/// bytes, or carrying a NUL.
+pub const M0253_TEMPLATE_NAME: Rule = Rule {
+    code: "M0253",
+    title: "an add_fx template name is empty, too long, or carries a NUL",
+    doc: "docs/modding/manifest_format.md#m0253",
+};
+
+/// A `replace_fx` edits form that is missing, does not parse, or lists no edit.
+pub const M0254_EDITS_FORM: Rule = Rule {
+    code: "M0254",
+    title: "a replace_fx edits form does not read, or is empty",
+    doc: "docs/modding/manifest_format.md#m0254",
+};
+
+/// An `add_fx` template without exactly one `RedEffectComponent`: the record whose `name` names the
+/// effect the template starts.
+pub const M0255_TEMPLATE_EFFECT_COMPONENT: Rule = Rule {
+    code: "M0255",
+    title: "an add_fx template does not declare exactly one RedEffectComponent",
+    doc: "docs/modding/manifest_format.md#m0255",
+};
+
+/// Needs the game. An `add_fx` template that does not lower against the worldentity's own schemas:
+/// a class the container has no group for, a field not declared, a value its field cannot hold.
+pub const M0256_TEMPLATE_SCHEMA: Rule = Rule {
+    code: "M0256",
+    title: "an add_fx template does not lower against the game's component schemas",
+    doc: "docs/modding/manifest_format.md#m0256",
+};
+
+/// Needs the game. An `add_fx` template whose name hash or derived key is already in the
+/// worldentity, or is another added template's.
+pub const M0257_TEMPLATE_TAKEN: Rule = Rule {
+    code: "M0257",
+    title: "an add_fx template's name or derived key is already taken",
+    doc: "docs/modding/manifest_format.md#m0257",
+};
+
+/// Needs the game. An `add_fx` name the game already has an effect under.
+pub const M0258_EFFECT_TAKEN: Rule = Rule {
+    code: "M0258",
+    title: "an add_fx name is an effect the game already has",
+    doc: "docs/modding/manifest_format.md#m0258",
+};
+
+/// Needs the game. A `TEXT` frame that is neither a record of the game's `fxdict`, where the loader
+/// looks each frame up, nor an `add_fx_sprite` of the Shipment or of a Shipment it requires; or an
+/// `add_fx` template whose `RedEffectComponent` names an effect neither the game nor the Shipment
+/// has. Checked again by `qm link`, which resolves the frames `qm build` leaves to it.
+pub const M0259_FX_REFERENCE_MISSING: Rule = Rule {
+    code: "M0259",
+    title: "an effect frame or a template's effect names nothing",
+    doc: "docs/modding/manifest_format.md#m0259",
+};
+
+/// Needs the game. A `replace_fx` target that resolves to no effect: no such effect or template,
+/// a template without exactly one `RedEffectComponent`, or another Shipment's addition when this
+/// Shipment does not require that Shipment.
+pub const M0260_FX_TARGET: Rule = Rule {
+    code: "M0260",
+    title: "a replace_fx target does not resolve to an effect",
+    doc: "docs/modding/manifest_format.md#m0260",
+};
+
+/// Needs the game. A `replace_fx` edit that addresses a node the effect does not have, or leaves
+/// the effect breaking a rule of the effect writer.
+pub const M0261_FX_EDIT: Rule = Rule {
+    code: "M0261",
+    title: "a replace_fx edit addresses a missing node or breaks a writer rule",
+    doc: "docs/modding/manifest_format.md#m0261",
+};
+
+/// A `raw` payload that carries an effect (type `0x5608BD5A`) or the worldentity. Effects and
+/// templates ship only through `add_fx` and `replace_fx`, which `qm link` merges across the set.
+pub const M0262_RAW_FX: Rule = Rule {
+    code: "M0262",
+    title: "a raw payload carries an effect or the worldentity",
+    doc: "docs/modding/manifest_format.md#m0262",
+};
+
+/// An `add_fx_sprite` image that is missing, is not a PNG, does not decode, or whose width or height
+/// is not a power of two from 4 to 512.
+pub const M0304_SPRITE_IMAGE: Rule = Rule {
+    code: "M0304",
+    title: "an add_fx_sprite image does not read as a sprite",
+    doc: "docs/modding/manifest_format.md#m0304",
+};
+
+/// An `add_fx_sprite` name that is empty or written as `0xHHHHHHHH`: the frame key is the name's
+/// hash, and a frame written as a hash names that hash itself.
+pub const M0305_SPRITE_NAME: Rule = Rule {
+    code: "M0305",
+    title: "an add_fx_sprite name is empty or written as a hash",
+    doc: "docs/modding/manifest_format.md#m0305",
+};
+
+/// Needs the game. An `add_fx_sprite` whose key is already a record of the game's `fxdict`, or the
+/// key of a sprite another Shipment of the set adds.
+pub const M0306_SPRITE_KEY_TAKEN: Rule = Rule {
+    code: "M0306",
+    title: "an add_fx_sprite key is already an fxdict record",
+    doc: "docs/modding/manifest_format.md#m0306",
+};
+
+/// Needs the game. A set's sprites that do not fit the free square of the base atlas the set
+/// provides (its `vfx` repaint, else the game's), or a base atlas with no free square.
+pub const M0307_SPRITES_DO_NOT_FIT: Rule = Rule {
+    code: "M0307",
+    title: "the sprites do not fit the free square of the base atlas",
+    doc: "docs/modding/manifest_format.md#m0307",
+};
+
+/// A `raw` payload that carries the `fxdict` (type `0xFA46D8A8`) or the `vfx` atlas `0x89E211AF`.
+/// Sprites ship through `add_fx_sprite` and the atlas through `replace_texture`, which `qm link`
+/// merges across the set.
+pub const M0308_RAW_SPRITES: Rule = Rule {
+    code: "M0308",
+    title: "a raw payload carries the fxdict or the vfx atlas",
+    doc: "docs/modding/manifest_format.md#m0308",
+};
+
+/// An effect emitter the engine cannot spawn particles from: a `GEOM` that names no shape or a
+/// shape without records, or samples 0 records, more records than its shape has, or more than
+/// 32,767; an emitter without `GEOM` whose `rate` can spawn a particle; or, needing the game, an
+/// effect with an emitter without `GEOM` started by a template whose `RedEffectComponent`
+/// per-distance factor is not 0. Each divides by zero or reads past the shape table when the effect
+/// spawns ([`mercs2_formats::fxdict::EffectContainer::check_emitter_shapes`]).
+pub const M0309_EMITTER_SHAPE: Rule = Rule {
+    code: "M0309",
+    title: "an effect emitter has no shape table the engine can sample",
+    doc: "docs/modding/manifest_format.md#m0309",
+};
+
+/// The rule a [`crate::fx::Problem`] code names.
+fn fx_rule(code: &str) -> Rule {
+    match code {
+        "M0252" => M0252_EFFECT_FORM,
+        "M0253" => M0253_TEMPLATE_NAME,
+        "M0254" => M0254_EDITS_FORM,
+        "M0255" => M0255_TEMPLATE_EFFECT_COMPONENT,
+        "M0256" => M0256_TEMPLATE_SCHEMA,
+        "M0257" => M0257_TEMPLATE_TAKEN,
+        "M0258" => M0258_EFFECT_TAKEN,
+        "M0259" => M0259_FX_REFERENCE_MISSING,
+        "M0260" => M0260_FX_TARGET,
+        "M0261" => M0261_FX_EDIT,
+        "M0304" => M0304_SPRITE_IMAGE,
+        "M0305" => M0305_SPRITE_NAME,
+        "M0306" => M0306_SPRITE_KEY_TAKEN,
+        "M0307" => M0307_SPRITES_DO_NOT_FIT,
+        "M0309" => M0309_EMITTER_SHAPE,
+        other => panic!("crate::fx reported {other}, which is not an fx rule"),
+    }
+}
+
+/// The `add_tiny_geometry` rule a [`crate::tiny::Problem`] code names.
+fn tiny_rule(code: &str) -> Rule {
+    match code {
+        "M0240" => M0240_TINY_OBJECT_COUNT,
+        "M0241" => M0241_TINY_OBJECT_TWICE,
+        "M0242" => M0242_TINY_SLOT_RANGE,
+        "M0243" => M0243_TINY_TRIANGLE_SLOTS,
+        "M0244" => M0244_TINY_ROLE,
+        "M0245" => M0245_TINY_OBJECT_PLACE,
+        "M0246" => M0246_TINY_CAPACITY,
+        "M0247" => M0247_TINY_CELL_TAKEN,
+        "M0248" => M0248_TINY_SLOT_THREE,
+        "M0249" => M0249_TINY_CELL_GRID,
+        "M0250" => M0250_TINY_KEY_TAKEN,
+        "M0251" => M0251_TINY_SOURCE,
+        other => panic!("crate::tiny reported {other}, which is not an add_tiny_geometry rule"),
+    }
+}
+
 /// Needs the game stack — see [`game_checks`], not [`lint`].
 pub const M0007_MULTI_RUNG_REPLACE: Rule = Rule {
     code: "M0007",
@@ -344,6 +798,60 @@ pub const RULES: &[Rule] = &[
     M0301_BARE_EVENT_CREATE,
     M0302_GLOBAL_SHADOWING,
     M0303_MISSION_ID_UNPARSEABLE,
+    M0214_SOUND_WAVE_UNUSABLE,
+    M0215_SOUND_NAME_UNUSABLE,
+    M0216_SOUND_CATEGORY_UNKNOWN,
+    M0217_SOUND_LANGUAGE,
+    M0221_SOUND_LOAD_IN,
+    M0230_SHADER_SOURCE,
+    M0231_SHADER_CAPABILITY,
+    M0234_SHADER_CLASSES,
+    M0240_TINY_OBJECT_COUNT,
+    M0241_TINY_OBJECT_TWICE,
+    M0242_TINY_SLOT_RANGE,
+    M0243_TINY_TRIANGLE_SLOTS,
+    M0244_TINY_ROLE,
+    M0249_TINY_CELL_GRID,
+    M0251_TINY_SOURCE,
+    M0252_EFFECT_FORM,
+    M0253_TEMPLATE_NAME,
+    M0254_EDITS_FORM,
+    M0255_TEMPLATE_EFFECT_COMPONENT,
+    M0262_RAW_FX,
+    M0304_SPRITE_IMAGE,
+    M0305_SPRITE_NAME,
+    M0308_RAW_SPRITES,
+    M0309_EMITTER_SHAPE,
+];
+
+/// Every rule [`game_checks`] (or a lowering that holds the game stack) reports.
+pub const GAME_RULES: &[Rule] = &[
+    M0007_MULTI_RUNG_REPLACE,
+    M0009_NO_PRIMARY_ROW,
+    M0192_MOVIE_UNREFERENCED,
+    M0193_STATE_OFF_VOCABULARY,
+    M0194_LAYER_UNKNOWN,
+    M0218_SOUND_TARGET_MISSING,
+    M0219_LANGUAGE_BASE_INCOMPLETE,
+    M0220_SOUND_CUE_SHADOWED,
+    M0232_SHADER_TARGET,
+    M0233_SHADER_COLLISION,
+    M0237_SHADER_CONSTANT_UNBOUND,
+    M0238_VS_INPUT_UNSUPPLIED,
+    M0239_SHADER_CAPACITY,
+    M0245_TINY_OBJECT_PLACE,
+    M0246_TINY_CAPACITY,
+    M0247_TINY_CELL_TAKEN,
+    M0248_TINY_SLOT_THREE,
+    M0250_TINY_KEY_TAKEN,
+    M0256_TEMPLATE_SCHEMA,
+    M0257_TEMPLATE_TAKEN,
+    M0258_EFFECT_TAKEN,
+    M0259_FX_REFERENCE_MISSING,
+    M0260_FX_TARGET,
+    M0261_FX_EDIT,
+    M0306_SPRITE_KEY_TAKEN,
+    M0307_SPRITES_DO_NOT_FIT,
 ];
 
 // --- Known, NOT yet implemented -------------------------------------------
@@ -422,8 +930,82 @@ fn parse_address(s: &str) -> Option<u32> {
 
 /// Rules that need the retail WADs. Separate from [`lint`] on purpose: everything there runs in CI
 /// with no game, and mixing the two would make the hermetic set impossible to run alone.
-pub fn game_checks(manifest: &Manifest, game: &GameStack) -> Vec<Diagnostic> {
+pub fn game_checks(manifest: &Manifest, game: &mut GameStack) -> Vec<Diagnostic> {
     let mut out = Vec::new();
+
+    // M0241, M0245–M0247, M0250: each add_tiny_geometry against the game's layers.
+    for (index, p) in crate::tiny::game_problems(manifest, game) {
+        out.push(Diagnostic { rule: tiny_rule(p.code), severity: Severity::Error, message: p.message, at: Some(index), fix: None });
+    }
+
+    // M0218: a sound override's bank or cue that is not in the game.
+    for (index, message) in crate::sound::override_target_problems(manifest, game) {
+        out.push(Diagnostic {
+            rule: M0218_SOUND_TARGET_MISSING,
+            severity: Severity::Error,
+            message,
+            at: Some(index),
+            fix: None,
+        });
+    }
+    // M0219: an add_language base with no fonts or atlases to fork.
+    for (index, c) in manifest.contributions.iter().enumerate() {
+        let Contribution::AddLanguage { base, .. } = c else { continue };
+        let base = base.as_deref().unwrap_or("english");
+        let problems = match crate::language::font_problems(game, base) {
+            Ok(p) => p,
+            Err(e) => vec![format!("the fonts could not be looked up: {e}")],
+        };
+        for p in problems {
+            out.push(Diagnostic {
+                rule: M0219_LANGUAGE_BASE_INCOMPLETE,
+                severity: Severity::Error,
+                message: format!(
+                    "add_language base {base:?}: {p}. A new language forks its base's fonts \
+                     {base}_18 / {base}_20 and their atlases; pick a base the game has them for."
+                ),
+                at: Some(index),
+                fix: None,
+            });
+        }
+    }
+    // M0220: an added cue named like a cue the game routes. FindCue answers with the first loaded
+    // table that has the guid (`FUN_00835a70`), so the game's cue plays and the added one never does.
+    if manifest.contributions.iter().any(|c| matches!(c, Contribution::AddSound { .. })) {
+        match crate::sound::installed_cue_guids(game) {
+            Ok(guids) => {
+                for (index, c) in manifest.contributions.iter().enumerate() {
+                    let Contribution::AddSound { cues, .. } = c else { continue };
+                    for cue in cues {
+                        let guid = mercs2_formats::hash::pandemic_hash_m2(&cue.name);
+                        if guids.contains(&guid) {
+                            out.push(Diagnostic {
+                                rule: M0220_SOUND_CUE_SHADOWED,
+                                severity: Severity::Error,
+                                message: format!(
+                                    "cue {:?} (0x{guid:08X}) is a cue the game already has. FindCue \
+                                     answers with the first loaded table that has it, so this one \
+                                     would never play. To change the game's cue, use \
+                                     replace_sound_cue; to add a cue, give it a new name.",
+                                    cue.name
+                                ),
+                                at: Some(index),
+                                fix: None,
+                            });
+                        }
+                    }
+                }
+            }
+            Err(e) => out.push(Diagnostic {
+                rule: M0220_SOUND_CUE_SHADOWED,
+                severity: Severity::Error,
+                message: format!("the game's cue names could not be read to check the added cues: {e}"),
+                at: None,
+                fix: None,
+            }),
+        }
+    }
+
     for (index, c) in manifest.contributions.iter().enumerate() {
         // M0199 (game-gated half): compare each declared signature guard against the bytes actually
         // at that address in `Mercenaries2.exe`. Self-skips when the exe is not beside the install.
@@ -640,6 +1222,8 @@ pub const ARTIFACT_RULES: &[Rule] = &[
     M0180_DUPLICATE_PRIMARY,
     M0181_HEADER_OVERFLOW,
     M0182_BLOCK_UNREADABLE,
+    M0235_MTRL_KEY_UNREGISTERED,
+    M0236_PRMG_VS_UNREGISTERED,
 ];
 
 /// Rules that can only be answered against the WAD the builder just emitted.
@@ -713,6 +1297,108 @@ fn coherent_block(raw: &[u8], label: &str) -> Option<mercs2_formats::ucfx::Parse
     let complete = parsed.entries.len() == parsed.entry_count as usize
         && parsed.containers.len() == parsed.entries.len();
     complete.then_some(parsed)
+}
+
+/// The container types whose loaders parse `MTRL` with `Mtrl_Parse`, and each one's count source.
+fn mtrl_source(type_hash: u32) -> Option<mercs2_formats::texture::MtrlSource> {
+    use mercs2_formats::texture::MtrlSource;
+    use mercs2_formats::types::{
+        TYPE_HASH_FONT, TYPE_HASH_LOWRES_TERRAIN, TYPE_HASH_MODEL, TYPE_HASH_TERRAIN_MESH,
+    };
+    match type_hash {
+        TYPE_HASH_MODEL => Some(MtrlSource::Model),
+        TYPE_HASH_TERRAIN_MESH => Some(MtrlSource::TerrainMesh),
+        TYPE_HASH_FONT => Some(MtrlSource::Font),
+        TYPE_HASH_LOWRES_TERRAIN => Some(MtrlSource::LowResTerrain),
+        mercs2_formats::scrub::TYPE_HASH => Some(MtrlSource::Scrub),
+        _ => None,
+    }
+}
+
+/// M0235 and M0236 over emitted blocks: every material's pixel-shader key is in `pixel`, and every
+/// model primitive group's `INFO` vertex-shader words (`+0x0C` main, `+0x10` shadow; `MESH` and
+/// `TINY` groups carry a 60-byte `INFO`, `SKIN` groups a 56-byte one) are in `vertex`. The key sets
+/// are the registrations made in every configuration ([`crate::shader::keys_everywhere`]).
+pub fn shader_key_checks(
+    blocks: &[mercs2_formats::patch_wad::PatchBlock],
+    pixel: &std::collections::BTreeSet<u32>,
+    vertex: &std::collections::BTreeSet<u32>,
+) -> Vec<Diagnostic> {
+    let mut out = Vec::new();
+    let hang = |rule: Rule, message: String| Diagnostic { rule, severity: Severity::Hang, message, at: None, fix: None };
+    let name = |key: u32| crate::shader::retail_name(key).map(|n| format!(" ({n})")).unwrap_or_default();
+    for blk in blocks {
+        let Some(raw) = inflated(blk) else { continue };
+        let Some(parsed) = coherent_block(&raw, &blk.path_string) else { continue };
+        for (entry, container) in parsed.entries.iter().zip(parsed.containers.iter()) {
+            let Some(source) = mtrl_source(entry.type_hash) else { continue };
+            let label = format!("{} asset 0x{:08X}", blk.path_string, entry.name_hash);
+            match mercs2_formats::texture::parse_mtrl(container, source) {
+                Ok(materials) => {
+                    for (mi, m) in materials.iter().enumerate() {
+                        if !pixel.contains(&m.shader_key) {
+                            out.push(hang(
+                                M0235_MTRL_KEY_UNREGISTERED,
+                                format!(
+                                    "{label}: material {mi}'s pixel-shader key 0x{:08X}{} is not a pixel \
+                                     shader registered in every configuration; Mtrl_Parse reads the \
+                                     null entry at 0x00858DB8",
+                                    m.shader_key,
+                                    name(m.shader_key)
+                                ),
+                            ));
+                        }
+                    }
+                }
+                Err(e) => out.push(hang(M0235_MTRL_KEY_UNREGISTERED, format!("{label}: its MTRL does not parse: {e}"))),
+            }
+            if entry.type_hash != mercs2_formats::types::TYPE_HASH_MODEL {
+                continue;
+            }
+            let tree = match mercs2_formats::ucfx::parse_ucfx_tree(container) {
+                Ok(t) => t,
+                Err(e) => {
+                    out.push(hang(M0236_PRMG_VS_UNREGISTERED, format!("{label}: the model does not parse: {e}")));
+                    continue;
+                }
+            };
+            for geom in tree.iter().filter(|n| &n.tag == b"GEOM") {
+                for (si, sub) in geom.children.iter().enumerate() {
+                    if !matches!(&sub.tag, b"MESH" | b"SKIN" | b"TINY") {
+                        continue;
+                    }
+                    for (gi, prmg) in sub.children.iter().filter(|n| &n.tag == b"PRMG").enumerate() {
+                        let Some(info) = prmg.children.iter().find(|n| &n.tag == b"INFO").and_then(|n| n.body.as_ref())
+                        else {
+                            out.push(hang(M0236_PRMG_VS_UNREGISTERED, format!("{label}: sub-object {si} group {gi} has no INFO")));
+                            continue;
+                        };
+                        if info.len() < 0x14 {
+                            out.push(hang(
+                                M0236_PRMG_VS_UNREGISTERED,
+                                format!("{label}: sub-object {si} group {gi} INFO is {} bytes, short of the vertex-shader words", info.len()),
+                            ));
+                            continue;
+                        }
+                        for (at, which) in [(0x0C, "main"), (0x10, "shadow")] {
+                            let key = u32::from_le_bytes([info[at], info[at + 1], info[at + 2], info[at + 3]]);
+                            if !vertex.contains(&key) {
+                                out.push(hang(
+                                    M0236_PRMG_VS_UNREGISTERED,
+                                    format!(
+                                        "{label}: sub-object {si} group {gi}'s {which} vertex-shader key \
+                                         0x{key:08X}{} is not a vertex shader registered in every configuration",
+                                        name(key)
+                                    ),
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    out
 }
 
 /// M0003 — a texture BODY shorter than the mip chain the engine will read out of it.
@@ -812,6 +1498,175 @@ fn unreachable_hash_checks(blocks: &[mercs2_formats::patch_wad::PatchBlock]) -> 
                 at: None,
                 fix: None,
             });
+        }
+    }
+    out
+}
+
+/// Why a bank or cue name cannot be used, or `None`.
+fn sound_name_refusal(what: &str, name: &str) -> Option<String> {
+    if name.is_empty() {
+        return Some(format!("the {what} name is empty"));
+    }
+    if name.trim() != name {
+        return Some(format!(
+            "the {what} name {name:?} has surrounding whitespace, which is hashed with it — trim it"
+        ));
+    }
+    if crate::manifest::bare_hash(name).is_some() {
+        return Some(format!(
+            "the {what} name {name:?} is a bare hash; a sound {what} is authored by name, and the \
+             name is what its guid is the hash of"
+        ));
+    }
+    None
+}
+
+/// Why an `add_sound`'s `load_in` cannot be shipped as written (M0221), or `None`: it must list at
+/// least one session, each once.
+fn load_in_refusal(load_in: &[crate::manifest::LoadSession]) -> Option<String> {
+    let all = crate::manifest::LoadSession::ALL.map(|s| s.token()).join(", ");
+    if load_in.is_empty() {
+        return Some(format!(
+            "load_in lists no session, so no loader would load the bank. List where it plays: {all}."
+        ));
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    for s in load_in {
+        if !seen.insert(*s) {
+            return Some(format!("load_in lists {} twice. List each session once ({all}).", s.token()));
+        }
+    }
+    None
+}
+
+/// The fields of one sound contribution [`sound_checks`] reads.
+struct SoundFields<'a> {
+    kind: &'a str,
+    bank: &'a str,
+    /// `None` for `add_sound`, which has no `language` field.
+    language: Option<Option<crate::manifest::Language>>,
+    category: &'a str,
+    cues: Vec<&'a crate::manifest::SoundCue>,
+}
+
+/// M0214, M0215, M0216 and M0217 for one sound contribution: the bank name, the cues' names and
+/// WAVs, the category, and the language.
+fn sound_checks(
+    index: usize,
+    fields: &SoundFields<'_>,
+    root: Option<&Path>,
+    source_issue_at: &[usize],
+) -> Vec<Diagnostic> {
+    let SoundFields { kind, bank, language, category, cues } = fields;
+    let (kind, bank, category, language) = (*kind, *bank, *category, *language);
+    let mut out = Vec::new();
+    let mut push = |rule: Rule, message: String, fix: Option<String>| {
+        out.push(Diagnostic {
+            rule,
+            severity: Severity::Error,
+            message,
+            at: Some(index),
+            fix,
+        })
+    };
+
+    if let Some(why) = sound_name_refusal("bank", bank) {
+        push(M0215_SOUND_NAME_UNUSABLE, format!("{kind}: {why}."), None);
+    }
+    if kind == "add_sound" && crate::sound::is_vo_bank(bank) {
+        push(
+            M0215_SOUND_NAME_UNUSABLE,
+            format!(
+                "add_sound bank {bank:?} starts with `vo_`: retail Lua appends the language to such a \
+                 name before loading it (`_GetLocalizedName`, mrxsoundbanks.lua:80-87), so the loader \
+                 would ask for `{bank}.<language>` and find nothing. Name the bank without the \
+                 `vo_` prefix."
+            ),
+            None,
+        );
+    }
+    if cues.is_empty() {
+        push(M0215_SOUND_NAME_UNUSABLE, format!("{kind} bank {bank:?} declares no cues."), None);
+    }
+    let mut seen: std::collections::BTreeMap<u32, &str> = std::collections::BTreeMap::new();
+    for cue in cues {
+        if let Some(why) = sound_name_refusal("cue", &cue.name) {
+            push(M0215_SOUND_NAME_UNUSABLE, format!("{kind}: {why}."), None);
+            continue;
+        }
+        let guid = mercs2_formats::hash::pandemic_hash_m2(&cue.name);
+        if let Some(first) = seen.insert(guid, &cue.name) {
+            push(
+                M0215_SOUND_NAME_UNUSABLE,
+                format!(
+                    "cues {first:?} and {:?} hash to the same guid 0x{guid:08X} (the hash folds \
+                     case), so only one of them can be looked up. Rename one.",
+                    cue.name
+                ),
+                None,
+            );
+        }
+    }
+
+    let hash = mercs2_formats::hash::pandemic_hash_m2(category);
+    if !mercs2_audio::encode::RETAIL_CATEGORIES.iter().any(|c| c.category == hash) {
+        let names = mercs2_audio::encode::RETAIL_CATEGORY_NAMES;
+        push(
+            M0216_SOUND_CATEGORY_UNKNOWN,
+            format!(
+                "category {category:?} (0x{hash:08X}) is not a category of the game's tree; the \
+                 named ones are {}.",
+                names.join(", ")
+            ),
+            closest(category, &names).map(str::to_string),
+        );
+    }
+
+    if let Some(language) = language {
+        match (crate::sound::is_vo_bank(bank), language) {
+            (true, None) => push(
+                M0217_SOUND_LANGUAGE,
+                format!(
+                    "bank {bank:?} is a `vo_*` bank: each language has its own copy \
+                     (`{bank}.<language>`), so the override must name the language it replaces."
+                ),
+                None,
+            ),
+            (false, Some(l)) => push(
+                M0217_SOUND_LANGUAGE,
+                format!(
+                    "bank {bank:?} is not a `vo_*` bank, so it has one copy for every language; \
+                     remove `language: {}`.",
+                    l.token()
+                ),
+                None,
+            ),
+            _ => {}
+        }
+    }
+
+    if let Some(root) = root {
+        if !source_issue_at.contains(&index) {
+            for cue in cues {
+                let path = root.join(&cue.wave);
+                let why = match std::fs::read(&path) {
+                    Ok(bytes) => mercs2_audio::wav::read_pcm16_wav(&bytes).err().map(|e| e.to_string()),
+                    Err(e) => Some(format!("it cannot be read: {e}")),
+                };
+                if let Some(why) = why {
+                    push(
+                        M0214_SOUND_WAVE_UNUSABLE,
+                        format!(
+                            "cue {:?}: {} is not usable: {why}. Export it as uncompressed 16-bit PCM, \
+                             mono or stereo.",
+                            cue.name,
+                            cue.wave.display()
+                        ),
+                        None,
+                    );
+                }
+            }
         }
     }
     out
@@ -1121,6 +1976,160 @@ fn display_dest(dest: crate::manifest::PlaceIn) -> String {
     }
 }
 
+/// M0252, M0253 and M0255 for one `add_fx`: the effect form lowers, the template name is one the
+/// engine's string reader holds, and the template declares exactly one `RedEffectComponent`. The
+/// effect form is read only with a `root`, and not when its path is already an error.
+fn add_fx_checks(
+    index: usize,
+    effect: &Path,
+    template: &crate::template::TemplateForm,
+    root: Option<&Path>,
+    source_issue_at: &[usize],
+) -> Vec<Diagnostic> {
+    let mut out = Vec::new();
+    let mut push = |rule: Rule, message: String| {
+        out.push(Diagnostic { rule, severity: Severity::Error, message, at: Some(index), fix: None })
+    };
+    let name = &template.name;
+    let max = mercs2_formats::worldentity::MAX_STRING_BYTES;
+    if name.is_empty() {
+        push(M0253_TEMPLATE_NAME, "the template name is empty; Pg.Spawn and StartEmitter look a template up by name".into());
+    } else if name.len() > max {
+        push(
+            M0253_TEMPLATE_NAME,
+            format!("template name {name:?} is {} bytes; the engine's string reader holds {max}", name.len()),
+        );
+    } else if name.contains('\0') {
+        push(M0253_TEMPLATE_NAME, format!("template name {name:?} carries a NUL, which ends the string the engine reads"));
+    }
+    let reds = match template.components.get(crate::fx::RED_EFFECT_CLASS) {
+        None => 0,
+        Some(crate::template::Records::One(_)) => 1,
+        Some(crate::template::Records::Many(v)) => v.len(),
+    };
+    if reds != 1 {
+        push(
+            M0255_TEMPLATE_EFFECT_COMPONENT,
+            format!(
+                "template {name:?} declares {reds} {} records; it needs exactly one, whose `name` names \
+                 the effect the template starts",
+                crate::fx::RED_EFFECT_CLASS
+            ),
+        );
+    }
+    if let Some(root) = root.filter(|_| !source_issue_at.contains(&index)) {
+        match crate::effect::read(&root.join(effect)).and_then(|f| f.build()) {
+            Err(e) => push(M0252_EFFECT_FORM, e),
+            Ok(fx) => {
+                if let Err(e) = fx.check_emitter_shapes() {
+                    push(M0309_EMITTER_SHAPE, e);
+                }
+            }
+        }
+    }
+    out
+}
+
+/// M0308: why a `raw` payload may not ship, when it carries the `fxdict` or the `vfx` atlas. `None`
+/// when it carries neither, or does not read (the lowering reports that).
+fn raw_sprites_refusal(payload: &Path) -> Option<String> {
+    let bytes = std::fs::read(payload).ok()?;
+    let (parsed, _) = mercs2_formats::ucfx::walk_decompressed_block(&bytes, "raw payload");
+    let hits: Vec<String> = parsed
+        .entries
+        .iter()
+        .filter_map(|e| {
+            if e.type_hash == mercs2_formats::types::TYPE_HASH_FX_DICTIONARY {
+                Some(format!("the fxdict 0x{:08X}", e.name_hash))
+            } else if e.name_hash == crate::sprite::VFX_ATLAS {
+                Some(format!("the vfx atlas 0x{:08X}", e.name_hash))
+            } else {
+                None
+            }
+        })
+        .collect();
+    (!hits.is_empty()).then(|| {
+        format!(
+            "the payload carries {}. Sprites ship through add_fx_sprite and the atlas through \
+             replace_texture of vfx, which `qm link` merges into the game's fxdict and atlas",
+            hits.join(", ")
+        )
+    })
+}
+
+/// M0262: why a `raw` payload may not ship, when it carries an effect or the worldentity. `None`
+/// when it carries neither, or does not read (the lowering reports that).
+fn raw_fx_refusal(payload: &Path) -> Option<String> {
+    use mercs2_formats::worldentity::{RETAIL_WORLDENTITY_NAME_HASH, WORLDENTITY_TYPE_HASH};
+    let bytes = std::fs::read(payload).ok()?;
+    let (parsed, _) = mercs2_formats::ucfx::walk_decompressed_block(&bytes, "raw payload");
+    let hits: Vec<String> = parsed
+        .entries
+        .iter()
+        .filter_map(|e| {
+            if e.type_hash == mercs2_formats::types::TYPE_HASH_EFFECT {
+                Some(format!("effect 0x{:08X}", e.name_hash))
+            } else if e.type_hash == WORLDENTITY_TYPE_HASH || e.name_hash == RETAIL_WORLDENTITY_NAME_HASH {
+                Some(format!("worldentity 0x{:08X}", e.name_hash))
+            } else {
+                None
+            }
+        })
+        .collect();
+    (!hits.is_empty()).then(|| {
+        format!(
+            "the payload carries {}. Effects and templates ship through add_fx (a new effect and its \
+             template) and replace_fx (an edit of an effect the game ships), which `qm link` merges \
+             into the game's effects block and worldentity",
+            hits.join(", ")
+        )
+    })
+}
+
+/// M0256–M0261, M0306, M0307 and M0309 for a Shipment's `add_fx_sprite`, `add_fx` and `replace_fx`,
+/// against the game's effects block, worldentity, fxdict and atlas (repainted when the Shipment
+/// repaints it): [`crate::fx::merge`] of this Shipment alone ([`crate::fx::Scope::Build`]). Two
+/// `replace_fx` of the Shipment that resolve to one effect are M0120. The findings [`lint`] reports
+/// as well (M0252–M0255, M0304, M0305, and M0309 for an `add_fx` effect form) are not repeated.
+///
+/// `Err` when the game's effects block, worldentity, fxdict or atlas cannot be read, or the
+/// Shipment's repaint of the atlas does not encode.
+pub fn fx_game_checks(manifest: &Manifest, root: &Path, game: &mut GameStack) -> Result<Vec<Diagnostic>, String> {
+    let mut out = Vec::new();
+    if !crate::fx::merges_fx(manifest) {
+        return Ok(out);
+    }
+    let base = crate::fx::GameFx::read(game)?;
+    let set = [crate::fx::FxShipment { manifest, root }];
+    let (atlas, repainted) = crate::fx::base_atlas(&base.atlas, &set)?;
+    let fx_base = crate::fx::FxBase {
+        effects: &base.effects.entries,
+        worldentity: &base.worldentity,
+        fxdict: &base.fxdict,
+        atlas: &atlas,
+        repainted,
+    };
+    if let Err(f) = crate::fx::merge(&fx_base, &set, crate::fx::Scope::Build) {
+        for p in f
+            .problems
+            .into_iter()
+            .filter(|p| !p.hermetic)
+        {
+            out.push(Diagnostic { rule: fx_rule(p.code), severity: Severity::Error, message: p.message, at: Some(p.index), fix: None });
+        }
+        for c in f.conflicts {
+            out.push(Diagnostic {
+                rule: M0120_SELF_CONFLICT,
+                severity: Severity::Error,
+                message: c.to_string(),
+                at: c.claimants.first().map(|c| c.index),
+                fix: None,
+            });
+        }
+    }
+    Ok(out)
+}
+
 /// Run every hermetic rule.
 ///
 /// `root` enables the source-file checks; pass `None` to lint manifest text alone. `names` enables
@@ -1268,7 +2277,35 @@ pub fn lint(
                     });
                 }
             }
-            Contribution::Raw { touches, .. } => {
+            Contribution::AddFx { effect, template, .. } => {
+                out.extend(add_fx_checks(index, effect, template, root, &source_issue_at));
+            }
+            Contribution::ReplaceFx { edits, .. } => {
+                if let Some(root) = root.filter(|_| !source_issue_at.contains(&index)) {
+                    if let Err(message) = crate::fx::read_edits(&root.join(edits)) {
+                        out.push(Diagnostic { rule: M0254_EDITS_FORM, severity: Severity::Error, message, at: Some(index), fix: None });
+                    }
+                }
+            }
+            Contribution::AddFxSprite { name, image } => {
+                if let Some(message) = crate::sprite::name_refusal(name) {
+                    out.push(Diagnostic { rule: M0305_SPRITE_NAME, severity: Severity::Error, message, at: Some(index), fix: None });
+                }
+                if let Some(root) = root.filter(|_| !source_issue_at.contains(&index)) {
+                    if let Err(message) = crate::sprite::read_sprite(&root.join(image)) {
+                        out.push(Diagnostic { rule: M0304_SPRITE_IMAGE, severity: Severity::Error, message, at: Some(index), fix: None });
+                    }
+                }
+            }
+            Contribution::Raw { touches, payload, .. } => {
+                if let Some(root) = root.filter(|_| !source_issue_at.contains(&index)) {
+                    if let Some(message) = raw_fx_refusal(&root.join(payload)) {
+                        out.push(Diagnostic { rule: M0262_RAW_FX, severity: Severity::Error, message, at: Some(index), fix: None });
+                    }
+                    if let Some(message) = raw_sprites_refusal(&root.join(payload)) {
+                        out.push(Diagnostic { rule: M0308_RAW_SPRITES, severity: Severity::Error, message, at: Some(index), fix: None });
+                    }
+                }
                 if touches.is_empty() {
                     out.push(Diagnostic {
                         rule: M0150_RAW_NO_TOUCHES,
@@ -1380,6 +2417,45 @@ pub fn lint(
                     &source_issue_at,
                 ));
             }
+            Contribution::AddSound { bank, category, cues, load_in } => {
+                let fields = SoundFields {
+                    kind: c.kind(),
+                    bank,
+                    language: None,
+                    category,
+                    cues: cues.iter().collect(),
+                };
+                out.extend(sound_checks(index, &fields, root, &source_issue_at));
+                if let Some(message) = load_in_refusal(load_in) {
+                    out.push(Diagnostic {
+                        rule: M0221_SOUND_LOAD_IN,
+                        severity: Severity::Error,
+                        message: format!("add_sound bank {bank:?}: {message}"),
+                        at: Some(index),
+                        fix: None,
+                    });
+                }
+            }
+            Contribution::ReplaceSoundBank { bank, language, category, cues } => {
+                let fields = SoundFields {
+                    kind: c.kind(),
+                    bank,
+                    language: Some(*language),
+                    category,
+                    cues: cues.iter().collect(),
+                };
+                out.extend(sound_checks(index, &fields, root, &source_issue_at));
+            }
+            Contribution::ReplaceSoundCue { bank, language, category, cue } => {
+                let fields = SoundFields {
+                    kind: c.kind(),
+                    bank,
+                    language: Some(*language),
+                    category,
+                    cues: vec![cue],
+                };
+                out.extend(sound_checks(index, &fields, root, &source_issue_at));
+            }
             Contribution::AddLanguage { name, .. } => {
                 // The `data/` safety pivot: refuse a name that is not a usable language token or that
                 // collides with a WAD the game already ships. Error, and the SAME refusal the lowering
@@ -1405,6 +2481,9 @@ pub fn lint(
                         out.extend(animation_checks(index, root, clip, trnm, events.as_deref()));
                     }
                 }
+            }
+            Contribution::AddShader { family, classes } => {
+                out.extend(shader_class_checks(index, *family, classes));
             }
             Contribution::AddModel {
                 name,
@@ -1438,7 +2517,222 @@ pub fn lint(
         }
     }
 
+    // M0240–M0244, M0249, M0251: each add_tiny_geometry's cell, objects and model.
+    for (index, p) in crate::tiny::hermetic_problems(manifest, root, &source_issue_at) {
+        out.push(Diagnostic { rule: tiny_rule(p.code), severity: Severity::Error, message: p.message, at: Some(index), fix: None });
+    }
+
+    // M0231: the shaders an add_shader declares register at runtime, through the m2-sdk.
+    let adds_shaders = manifest.contributions.iter().position(|c| matches!(c, Contribution::AddShader { .. }));
+    let has_capability = manifest.load.requires.iter().any(|r| {
+        matches!(r, crate::manifest::Requirement::Capability(c) if c.capability == crate::shader::CAPABILITY)
+    });
+    if let (Some(index), false) = (adds_shaders, has_capability) {
+        out.push(Diagnostic {
+            rule: M0231_SHADER_CAPABILITY,
+            severity: Severity::Error,
+            message: format!(
+                "add_shader needs `load.requires: [{{capability: {}}}]`: the m2-sdk registers the \
+                 shaders from the author's ASI, and without it nothing registers them",
+                crate::shader::CAPABILITY
+            ),
+            at: Some(index),
+            fix: None,
+        });
+    }
+
+    // M0230: every shader source loads, with the stage its family or target needs.
+    if let Some(root) = root {
+        if crate::shader::has_shader_kinds(manifest) {
+            if let Err(findings) = crate::shader::shipment_edits(&manifest.shipment.name, manifest, root) {
+                for f in findings.into_iter().filter(|f| !source_issue_at.contains(&f.index)) {
+                    out.push(Diagnostic {
+                        rule: M0230_SHADER_SOURCE,
+                        severity: Severity::Error,
+                        message: f.message,
+                        at: Some(f.index),
+                        fix: None,
+                    });
+                }
+            }
+        }
+    }
+
     out
+}
+
+/// M0234 for one `add_shader`: the class count its family's stage takes, names that are non-empty
+/// and distinct by key, and `.sho` stems.
+fn shader_class_checks(
+    index: usize,
+    family: crate::shader::ShaderFamily,
+    classes: &[crate::manifest::ShaderClass],
+) -> Vec<Diagnostic> {
+    let mut out = Vec::new();
+    let mut push = |message: String| {
+        out.push(Diagnostic { rule: M0234_SHADER_CLASSES, severity: Severity::Error, message, at: Some(index), fix: None })
+    };
+    let want = family.class_count();
+    if classes.len() != want {
+        push(match family.stage() {
+            crate::shader::Stage::Pixel => format!(
+                "family {} is a pixel family: classes must be exactly 4, in light-class order (base, \
+                 _pl, _sl, _pl_sl), because the material's index plus the light class selects the \
+                 pixel shader; this has {}",
+                family.name(),
+                classes.len()
+            ),
+            crate::shader::Stage::Vertex => format!(
+                "family {} is a vertex family: classes must be exactly 1; this has {}",
+                family.name(),
+                classes.len()
+            ),
+        });
+    }
+    let mut keys: Vec<(u32, &str)> = Vec::new();
+    for (ci, class) in classes.iter().enumerate() {
+        if class.name.trim().is_empty() || class.name.trim() != class.name {
+            push(format!("classes[{ci}].name {:?} is empty or has surrounding whitespace", class.name));
+        }
+        let key = mercs2_formats::hash::pandemic_hash_m2(&class.name);
+        if let Some((_, first)) = keys.iter().find(|(k, _)| *k == key) {
+            push(format!(
+                "classes[{ci}].name {:?} has the key of {first:?} (the hash folds case); each class \
+                 is its own registration",
+                class.name
+            ));
+        } else {
+            keys.push((key, &class.name));
+        }
+        if let Some(why) = crate::shader::stem_refusal(&class.stem) {
+            push(format!("classes[{ci}].stem {:?}: {why}", class.stem));
+        }
+    }
+    out
+}
+
+/// The checks of the shader kinds that need the game and `--original-data`: M0232 and M0233 by
+/// applying the Shipment's edits to the original stores beside the VT and R2VB pairs of the game's
+/// `data` folder (`game_data`), M0233
+/// and M0239 over the registry, and M0237 over each source's constants.
+///
+/// `Err` when the environment cannot answer: the original stores or the game's store pairs do not
+/// read. Sources that do not load are M0230, reported by [`lint`], and are not repeated here.
+pub fn shader_game_checks(
+    manifest: &Manifest,
+    root: &Path,
+    game_data: &Path,
+    original_data: &Path,
+) -> Result<Vec<Diagnostic>, String> {
+    use crate::shader;
+    let mut out = Vec::new();
+    if !shader::has_shader_kinds(manifest) {
+        return Ok(out);
+    }
+    let name = &manifest.shipment.name;
+    let Ok(edits) = shader::shipment_edits(name, manifest, root) else {
+        return Ok(out);
+    };
+    let originals = shader::read_originals(original_data)?;
+    let extra = shader::read_extra_pairs(game_data)?;
+    let diag = |rule: Rule, severity: Severity, message: String, at: usize| Diagnostic {
+        rule,
+        severity,
+        message,
+        at: Some(at),
+        fix: None,
+    };
+    if let Err(e) = shader::apply_edits(&originals, &extra, &edits) {
+        let rule = if e.code == "M0232" { M0232_SHADER_TARGET } else { M0233_SHADER_COLLISION };
+        match e.at {
+            Some((_, index)) => out.push(diag(rule, Severity::Error, e.message, index)),
+            None => return Err(e.to_string()),
+        }
+    }
+    let added = shader::added(name, manifest);
+    for (a, code, message) in shader::registration_findings(&added) {
+        let (rule, severity) = if code == "M0239" {
+            (M0239_SHADER_CAPACITY, Severity::Hang)
+        } else {
+            (M0233_SHADER_COLLISION, Severity::Error)
+        };
+        out.push(diag(rule, severity, message, a.index));
+    }
+    for (index, c) in manifest.contributions.iter().enumerate() {
+        match c {
+            Contribution::ReplaceShader { target, .. } => {
+                let fams = shader::retail_families_of_stem(target);
+                if fams.is_empty() {
+                    out.push(diag(
+                        M0232_SHADER_TARGET,
+                        Severity::Error,
+                        format!(
+                            "no retail registration loads {target}.sho, so the engine never reads the \
+                             record replace_shader edits"
+                        ),
+                        index,
+                    ));
+                    continue;
+                }
+                for e in edits.iter().filter(|e| e.index == index) {
+                    // A constant the replaced record already declares is set the way retail sets it:
+                    // three retail shaders declare one their family's binder does not resolve
+                    // (PgColorFPConst `color`, PgLtiDebugZPassFP `depthRange`, PgLtiTerrainShadowVP
+                    // `PositionOffset`).
+                    let store = &originals.stores[&e.file];
+                    let retail: Vec<String> = store
+                        .records
+                        .iter()
+                        .find(|r| r.id == e.id())
+                        .and_then(|r| shader::bytecode(store.blob(r)).ok())
+                        .map(|b| b.constants)
+                        .unwrap_or_default();
+                    for fam in &fams {
+                        let info = shader::families().iter().find(|f| f.name == *fam).expect("a registered family");
+                        let unbound: Vec<String> = shader::unbound_constants(info, &e.code)
+                            .into_iter()
+                            .filter(|c| !retail.contains(c))
+                            .collect();
+                        if !unbound.is_empty() {
+                            out.push(diag(
+                                M0237_SHADER_CONSTANT_UNBOUND,
+                                Severity::Error,
+                                format!(
+                                    "{target} ({}) names constant(s) {unbound:?} that family {fam}'s \
+                                     binder does not resolve and the retail record does not declare, so \
+                                     nothing sets them",
+                                    e.file.file_name()
+                                ),
+                                index,
+                            ));
+                        }
+                    }
+                }
+            }
+            Contribution::AddShader { family, .. } => {
+                for e in edits.iter().filter(|e| e.index == index) {
+                    let unbound = shader::unbound_constants(family.info(), &e.code);
+                    if !unbound.is_empty() {
+                        out.push(diag(
+                            M0237_SHADER_CONSTANT_UNBOUND,
+                            Severity::Error,
+                            format!(
+                                "stem {} ({}) names constant(s) {unbound:?} that family {}'s binder \
+                                 does not resolve; the engine sets a new shader's constants only \
+                                 through its family's binder, so nothing sets them",
+                                e.stem,
+                                e.file.file_name(),
+                                family.name()
+                            ),
+                            index,
+                        ));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(out)
 }
 
 /// The build gate. `Hang` and `Error` block; warnings do not.
@@ -2030,6 +3324,7 @@ mod tests {
             .iter()
             .chain(PENDING.iter())
             .chain(ARTIFACT_RULES.iter())
+            .chain(GAME_RULES.iter())
         {
             assert!(seen.insert(r.code), "duplicate rule code {}", r.code);
         }

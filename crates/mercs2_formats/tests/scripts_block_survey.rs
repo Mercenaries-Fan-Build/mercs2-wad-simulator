@@ -10,6 +10,9 @@
 //! the linker cannot relink that script and the plan needs a branch for it; if none does, the
 //! restriction is theoretical and the approach is clear. That is a cheap question with an expensive
 //! wrong answer, so it is measured here rather than assumed.
+//!
+//! Game-gated: built by the `retail` feature, reads the `vz.wad` named by the repo-root
+//! `.mercs2-local.toml`, and fails if it is absent.
 
 use std::path::{Path, PathBuf};
 
@@ -18,8 +21,9 @@ use mercs2_formats::scripts_block::{parse_container, ScriptsBlock};
 use mercs2_formats::sges::decompress_block;
 use mercs2_formats::types::TYPE_HASH_SCRIPT;
 
-fn vz_wad() -> Option<PathBuf> {
-    mercs2_formats::game_paths::vz_wad(Path::new(env!("CARGO_MANIFEST_DIR")))
+fn vz_wad() -> PathBuf {
+    mercs2_formats::game_paths::local_config_vz_wad(Path::new(env!("CARGO_MANIFEST_DIR")))
+        .unwrap_or_else(|e| panic!("{e}"))
 }
 
 /// Every block whose PTHS path names a script block, decompressed.
@@ -41,12 +45,7 @@ fn script_blocks(wad: &Path) -> Result<Vec<(String, Vec<u8>)>, String> {
 
 #[test]
 fn no_retail_script_container_carries_metadata_after_its_bytecode() {
-    let Some(wad) = vz_wad() else {
-        eprintln!(
-            "SKIPPING: no vz.wad (set MERCS2_GAME_DIR or run scripts/find-vz-wad.sh --write)"
-        );
-        return;
-    };
+    let wad = vz_wad();
     let blocks = script_blocks(&wad).expect("read the script blocks");
     assert!(!blocks.is_empty(), "no scripts_vz block found in the WAD");
 
@@ -115,10 +114,7 @@ fn no_retail_script_container_carries_metadata_after_its_bytecode() {
 /// reproduce the block byte for byte, or the rebuild is losing something before any mod is involved.
 #[test]
 fn replacing_bytecode_with_itself_round_trips_the_block() {
-    let Some(wad) = vz_wad() else {
-        eprintln!("SKIPPING: no vz.wad");
-        return;
-    };
+    let wad = vz_wad();
     let blocks = script_blocks(&wad).expect("read the script blocks");
     for (path, dec) in &blocks {
         let mut block = ScriptsBlock::parse(dec).expect("parse");
@@ -159,10 +155,7 @@ fn replacing_bytecode_with_itself_round_trips_the_block() {
 /// new payload so the test needs no compiler.
 #[test]
 fn adding_a_new_script_round_trips_and_leaves_the_others_intact() {
-    let Some(wad) = vz_wad() else {
-        eprintln!("SKIPPING: no vz.wad");
-        return;
-    };
+    let wad = vz_wad();
     let blocks = script_blocks(&wad).expect("read the script blocks");
     let (_, dec) = blocks.into_iter().next().expect("a scripts_vz block");
 

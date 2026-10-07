@@ -281,6 +281,24 @@ pub fn build_indexed_rung(
     resident: Option<&[u8]>,
     lod_filter: Option<u8>,
 ) -> Result<(Vec<Vertex>, Vec<u32>, Vec<DrawGroup>, ModelStats), String> {
+    build_indexed_source(container, resident, lod_filter, mercs2_formats::texture::MtrlSource::Model)
+}
+
+/// Build a hi-res terrain cell (`terrainmesh`, `0x7C569307`) the way
+/// [`build_indexed_from_container`] builds a model: tier bit `0x01`, with the cell's `MTRL` read by
+/// the terrainmesh loader's count.
+pub fn build_indexed_from_terrainmesh(
+    container: &[u8],
+) -> Result<(Vec<Vertex>, Vec<u32>, Vec<DrawGroup>, ModelStats), String> {
+    build_indexed_source(container, None, Some(0x01), mercs2_formats::texture::MtrlSource::TerrainMesh)
+}
+
+fn build_indexed_source(
+    container: &[u8],
+    resident: Option<&[u8]>,
+    lod_filter: Option<u8>,
+    mtrl_source: mercs2_formats::texture::MtrlSource,
+) -> Result<(Vec<Vertex>, Vec<u32>, Vec<DrawGroup>, ModelStats), String> {
     use mercs2_formats::model_cubeize::{read_model_meshes_segm, ModelMesh};
     use mercs2_formats::skeleton::{
         affine_inverse, mat4_mul, transform_dir, transform_point, Skeleton,
@@ -288,7 +306,8 @@ pub fn build_indexed_rung(
 
     let res_segm = resident.map(mercs2_formats::model_cubeize::parse_segm);
     let meshes = read_model_meshes_segm(container, res_segm.as_deref())?;
-    let materials = mercs2_formats::texture::parse_mtrl(resident.unwrap_or(container));
+    let materials = mercs2_formats::texture::parse_mtrl(resident.unwrap_or(container), mtrl_source)
+        .map_err(|e| format!("MTRL: {e}"))?;
     let group_mat = mercs2_formats::texture::group_material_indices(container);
 
     // Skeleton world-rest per bone, for placing rigid MESH accessories. from_block wants a

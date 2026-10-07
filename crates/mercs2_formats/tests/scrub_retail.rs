@@ -1,7 +1,8 @@
 //! Retail gates for [`mercs2_formats::scrub`]: every ground-cover container in `vz.wad`, the frame its
 //! placement puts it in, and the PMC HQ pyramid edit carrying its ground cover along.
 //!
-//! Needs the game: set `MERCS2_GAME_DIR`. Without it every test prints `SKIPPING` and returns.
+//! Game-gated: built by the `retail` feature, reads the `vz.wad` named by the repo-root
+//! `.mercs2-local.toml`, and fails if it is absent.
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
@@ -36,91 +37,75 @@ struct Retail {
 }
 
 /// Read once per test binary.
-fn retail() -> Option<&'static Retail> {
-    static RETAIL: OnceLock<Option<Retail>> = OnceLock::new();
-    RETAIL
-        .get_or_init(|| {
-            let wad = mercs2_formats::game_paths::vz_wad(Path::new(env!("CARGO_MANIFEST_DIR")))?;
-            let mut f = std::fs::File::open(&wad).expect("open vz.wad");
-            let size = f.metadata().expect("stat vz.wad").len();
-            let archive = load_ffcs_archive(&mut f, size).expect("read FFCS tables");
-            let mut wanted: BTreeMap<u16, Vec<(u32, u32)>> = BTreeMap::new();
-            for row in archive.aset.iter() {
-                let th = match row.type_id {
-                    TYPE_ID_SCRUB => TYPE_HASH,
-                    TYPE_ID_TERRAIN_MESH => terrainmesh::TYPE_HASH,
-                    _ => continue,
-                };
-                wanted
-                    .entry(row.block_index())
-                    .or_default()
-                    .push((row.asset_hash, th));
-            }
-            let mut r = Retail {
-                scrubs: BTreeMap::new(),
-                cells: HashMap::new(),
-                tiles: HashMap::new(),
-                placements: Vec::new(),
+fn retail() -> &'static Retail {
+    static RETAIL: OnceLock<Retail> = OnceLock::new();
+    RETAIL.get_or_init(|| {
+        let wad =
+            mercs2_formats::game_paths::local_config_vz_wad(Path::new(env!("CARGO_MANIFEST_DIR")))
+                .unwrap_or_else(|e| panic!("{e}"));
+        let mut f = std::fs::File::open(&wad).expect("open vz.wad");
+        let size = f.metadata().expect("stat vz.wad").len();
+        let archive = load_ffcs_archive(&mut f, size).expect("read FFCS tables");
+        let mut wanted: BTreeMap<u16, Vec<(u32, u32)>> = BTreeMap::new();
+        for row in archive.aset.iter() {
+            let th = match row.type_id {
+                TYPE_ID_SCRUB => TYPE_HASH,
+                TYPE_ID_TERRAIN_MESH => terrainmesh::TYPE_HASH,
+                _ => continue,
             };
-            for (&block, rows) in &wanted {
-                let dec = decompress_block(&mut f, &archive.indx, block).expect("decompress");
-                let (parsed, issues) = walk_decompressed_block(&dec, "block");
-                assert!(
-                    issues.is_empty(),
-                    "block {block}: {:?}",
-                    issues.iter().map(|i| &i.detail).collect::<Vec<_>>()
-                );
-                let path = archive
-                    .paths
-                    .get(block as usize)
-                    .cloned()
-                    .unwrap_or_default();
-                for &(hash, th) in rows {
-                    let i = parsed
-                        .entries
-                        .iter()
-                        .position(|e| e.name_hash == hash && e.type_hash == th)
-                        .unwrap_or_else(|| panic!("{hash:#010X} not in its block {path}"));
-                    let c = parsed.containers[i].clone();
-                    if th == TYPE_HASH {
-                        r.scrubs.insert(hash, (path.clone(), c));
-                    } else {
-                        r.cells.insert(hash, c);
-                    }
+            wanted
+                .entry(row.block_index())
+                .or_default()
+                .push((row.asset_hash, th));
+        }
+        let mut r = Retail {
+            scrubs: BTreeMap::new(),
+            cells: HashMap::new(),
+            tiles: HashMap::new(),
+            placements: Vec::new(),
+        };
+        for (&block, rows) in &wanted {
+            let dec = decompress_block(&mut f, &archive.indx, block).expect("decompress");
+            let (parsed, issues) = walk_decompressed_block(&dec, "block");
+            assert!(
+                issues.is_empty(),
+                "block {block}: {:?}",
+                issues.iter().map(|i| &i.detail).collect::<Vec<_>>()
+            );
+            let path = archive
+                .paths
+                .get(block as usize)
+                .cloned()
+                .unwrap_or_default();
+            for &(hash, th) in rows {
+                let i = parsed
+                    .entries
+                    .iter()
+                    .position(|e| e.name_hash == hash && e.type_hash == th)
+                    .unwrap_or_else(|| panic!("{hash:#010X} not in its block {path}"));
+                let c = parsed.containers[i].clone();
+                if th == TYPE_HASH {
+                    r.scrubs.insert(hash, (path.clone(), c));
+                } else {
+                    r.cells.insert(hash, c);
                 }
-            }
-            for (i, path) in archive.paths.iter().enumerate() {
-                let p = path.to_lowercase();
-                if !(p.contains("layers_static") || p.contains("vz_state")) {
-                    continue;
-                }
-                let dec =
-                    decompress_block(&mut f, &archive.indx, i as u16).expect("decompress layer");
-                for t in load_terrain_tiles(&dec).unwrap_or_else(|e| panic!("{path}: {e}")) {
-                    r.tiles.insert(t.terrainmesh_hash, t.pos);
-                }
-                let placed = load_scrub_placements(&dec).unwrap_or_else(|e| panic!("{path}: {e}"));
-                r.placements
-                    .extend(placed.into_iter().map(|s| (path.clone(), s)));
-            }
-            Some(r)
-        })
-        .as_ref()
-}
-
-macro_rules! retail_or_skip {
-    () => {
-        match retail() {
-            Some(r) => r,
-            None => {
-                eprintln!(
-                    "SKIPPING {}: no vz.wad (set MERCS2_GAME_DIR)",
-                    module_path!()
-                );
-                return;
             }
         }
-    };
+        for (i, path) in archive.paths.iter().enumerate() {
+            let p = path.to_lowercase();
+            if !(p.contains("layers_static") || p.contains("vz_state")) {
+                continue;
+            }
+            let dec = decompress_block(&mut f, &archive.indx, i as u16).expect("decompress layer");
+            for t in load_terrain_tiles(&dec).unwrap_or_else(|e| panic!("{path}: {e}")) {
+                r.tiles.insert(t.terrainmesh_hash, t.pos);
+            }
+            let placed = load_scrub_placements(&dec).unwrap_or_else(|e| panic!("{path}: {e}"));
+            r.placements
+                .extend(placed.into_iter().map(|s| (path.clone(), s)));
+        }
+        r
+    })
 }
 
 /// The terrain cell a scrub placement covers: the tile at the very same world position.
@@ -130,7 +115,7 @@ fn cell_at(r: &Retail, pos: [f32; 3]) -> Option<u32> {
 
 #[test]
 fn every_retail_scrub_decodes_and_re_encodes_byte_identically() {
-    let r = retail_or_skip!();
+    let r = retail();
     let (mut empty, mut patches, mut instances) = (0, 0usize, 0usize);
     let (mut worst_box, mut worst_centre, mut worst_radius) = (0f32, 0f32, 0f32);
     for (hash, (path, bytes)) in &r.scrubs {
@@ -185,7 +170,7 @@ fn every_retail_scrub_decodes_and_re_encodes_byte_identically() {
 /// stand on that cell's render surface, cell-local — the frame [`ScrubPack::follow_ground`] relies on.
 #[test]
 fn every_placed_scrub_sits_on_the_cell_at_its_placement() {
-    let r = retail_or_skip!();
+    let r = retail();
     let mut placed: HashMap<u32, Vec<u32>> = HashMap::new();
     let (mut offsets, mut outside) = (Vec::new(), 0usize);
     let mut absent = Vec::new();
@@ -266,7 +251,7 @@ fn every_placed_scrub_sits_on_the_cell_at_its_placement() {
 /// The pyramid on the PMC HQ cell carries every ground-cover container placed over that cell.
 #[test]
 fn hq_ground_cover_follows_the_pyramid() {
-    let r = retail_or_skip!();
+    let r = retail();
     let before = TerrainCell::decode(&r.cells[&HQ_CELL]).unwrap();
     let mut after = before.clone();
     after.displace(pyramid).unwrap();

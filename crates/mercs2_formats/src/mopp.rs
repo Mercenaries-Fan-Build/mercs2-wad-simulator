@@ -600,8 +600,9 @@ fn push_split(out: &mut Vec<u8>, axis: u8, lmax: u8, rmin: u8, first: &[u8], sec
 /// real-MOPP semantics gate: a query placed inside a leaf's own box must reach that leaf (a
 /// pruning-correctness theorem — every ancestor box encloses the leaf box, so the walk cannot prune
 /// it). Exercises the real reanchor/cut/26-DOP opcodes the encoder never emits. Boxes are in the frame
-/// implied by `info` + `root_shift`. Test-only support for the real-MOPP semantics gate.
-#[cfg(test)]
+/// implied by `info` + `root_shift`. Test-only support for the real-MOPP semantics gate, so it is
+/// built with the game-gated tests (the `retail` feature).
+#[cfg(all(test, feature = "retail"))]
 pub(crate) fn leaf_boxes(
     code: &[u8],
     info: &MoppInfo,
@@ -1252,141 +1253,6 @@ mod tests {
         }
     }
 
-    // ── WAD-gated live validation (SKIPS LOUD when vz.wad is absent) ──
-
-    /// Extract several REAL `hkpMoppCode` buffers from retail `vz.wad` terrain/building blocks and
-    /// decode each: 100 % byte coverage, 0 errors, keys contiguous-ish and in range. Every terrain
-    /// cell ships a baked MOPP wrapping its `WpMeshShape16`, so these blocks are dense with them.
-    #[test]
-    fn real_mopp_buffers_decode_clean_from_vz_wad_if_present() {
-        use crate::ffcs::load_ffcs_archive;
-        use crate::sges::decompress_block;
-        let Some(path) = crate::game_paths::vz_wad(std::path::Path::new(".")) else {
-            return eprintln!("SKIPPING real_mopp_buffers: vz.wad not found (set MERCS2_GAME_DIR or .mercs2-local.toml)");
-        };
-        let Ok(mut f) = std::fs::File::open(&path) else {
-            return eprintln!("SKIPPING real_mopp_buffers: vz.wad not readable at {path:?}");
-        };
-        let size = f.metadata().unwrap().len();
-        let arch = load_ffcs_archive(&mut f, size).expect("ffcs archive");
-
-        let mut total_buffers = 0usize;
-        let mut total_keys = 0usize;
-        let mut contiguous = 0usize; // buffers whose keys are a single perfect [0..N-1] run
-        for &blk in &[767u16, 826, 3185] {
-            let Ok(dec) = decompress_block(&mut f, &arch.indx, blk) else {
-                continue;
-            };
-            let buffers = extract_mopp_buffers(&dec);
-            for (i, code) in buffers.iter().enumerate() {
-                let d = decode(code);
-                // The two rock-solid structural proofs, true for EVERY real MOPP: the whole tree is
-                // reachable and every opcode is valid.
-                assert!(
-                    d.error.is_none(),
-                    "block {blk} mopp[{i}] ({} B) decode error: {:?}",
-                    code.len(),
-                    d.error
-                );
-                assert_eq!(
-                    d.consumed,
-                    code.len(),
-                    "block {blk} mopp[{i}]: {}/{} bytes covered (tree must be fully walked)",
-                    d.consumed,
-                    code.len()
-                );
-                assert!(!d.keys.is_empty(), "block {blk} mopp[{i}]: no leaf keys");
-                // A well-formed BV-tree visits each leaf exactly once → all shape keys distinct.
-                let (ks, range, missing) = d.key_summary();
-                assert_eq!(
-                    ks.len(),
-                    d.keys.len(),
-                    "block {blk} mopp[{i}]: {} leaves but only {} distinct keys (duplicate leaf visit)",
-                    d.keys.len(),
-                    ks.len()
-                );
-                // Single-subpart meshes (buildings) yield a perfect contiguous triangle range
-                // [0..N-1]; multi-subpart terrain cells offset each subpart's keys by a per-subpart
-                // base (Havok `subpartBase + triIndex`), so they are dense per-subpart, not globally.
-                let (lo, _hi) = range.unwrap();
-                assert_eq!(lo, 0, "block {blk} mopp[{i}]: shape keys must be zero-based, start at {lo}");
-                if missing.is_empty() {
-                    contiguous += 1;
-                }
-                total_keys += ks.len();
-            }
-            total_buffers += buffers.len();
-        }
-        assert!(
-            total_buffers > 0,
-            "vz.wad present but no hkpMoppCode buffers extracted from blocks 767/826/3185"
-        );
-        // The strong "contiguous in-range keys" proof: the single-subpart building MOPPs decode to a
-        // clean [0..N-1] triangle range. Retail block 767 alone carries dozens.
-        assert!(
-            contiguous >= 20,
-            "expected many single-subpart MOPPs to decode to a contiguous [0..N-1] range, got {contiguous}"
-        );
-        eprintln!(
-            "real MOPP validation: {total_buffers} buffers decoded clean (100% coverage, distinct keys), \
-             {contiguous} perfectly contiguous [0..N-1], {total_keys} total shape keys"
-        );
-    }
-
-    /// Take a REAL `WpMeshShape16`'s triangles, encode a fresh MOPP over them, and decode it back:
-    /// every source triangle index appears exactly once, 100 % byte coverage. Closes the loop the
-    /// native encoder exists for. SKIPS LOUD when `vz.wad` is absent.
-    #[test]
-    fn encode_real_wpmesh16_triangles_roundtrips_from_vz_wad_if_present() {
-        use crate::ffcs::load_ffcs_archive;
-        use crate::havok::{find_packfiles, MeshShape, Shape};
-        use crate::sges::decompress_block;
-        let Some(path) = crate::game_paths::vz_wad(std::path::Path::new(".")) else {
-            return eprintln!("SKIPPING encode_real_wpmesh16: vz.wad not found");
-        };
-        let Ok(mut f) = std::fs::File::open(&path) else {
-            return eprintln!("SKIPPING encode_real_wpmesh16: vz.wad not readable");
-        };
-        let size = f.metadata().unwrap().len();
-        let arch = load_ffcs_archive(&mut f, size).expect("ffcs archive");
-        let dec = decompress_block(&mut f, &arch.indx, 767).expect("decompress block 767");
-
-        // Smallest non-trivial decoded mesh in the block — keeps the tree modest and the test fast.
-        let mesh: MeshShape = find_packfiles(&dec)
-            .into_iter()
-            .flat_map(|(_off, pf)| pf.shapes.into_iter())
-            .filter_map(|s| match s {
-                Shape::Mesh(m) if !m.indices.is_empty() => Some(m),
-                _ => None,
-            })
-            .min_by_key(|m| m.indices.len())
-            .expect("block 767 must carry a decoded WpMeshShape16");
-
-        let verts: Vec<[f32; 3]> = mesh.vertices.clone();
-        let tris: Vec<[u32; 3]> = mesh
-            .indices
-            .iter()
-            .map(|t| [t[0] as u32, t[1] as u32, t[2] as u32])
-            .collect();
-
-        let (code, info) = encode(&tris, &verts);
-        assert!(info.scale > 0.0);
-        let d = decode(&code);
-        assert!(d.error.is_none(), "encoded real-mesh MOPP decode error: {:?}", d.error);
-        assert_eq!(d.consumed, code.len(), "encoded real-mesh MOPP must be 100% covered");
-
-        let mut got = d.keys.clone();
-        got.sort_unstable();
-        let want: Vec<u32> = (0..tris.len() as u32).collect();
-        assert_eq!(got, want, "every source triangle index recovered exactly once");
-        eprintln!(
-            "encode_real_wpmesh16: {} tris → {} B MOPP, decoded back to {} keys",
-            tris.len(),
-            code.len(),
-            d.keys.len()
-        );
-    }
-
     // ── GEOMETRIC QUERY GATES (P3.5): conservative, no-miss, semantics cross-check ──
 
     /// A tiny xorshift PRNG for reproducible query generation.
@@ -1582,159 +1448,6 @@ mod tests {
         let _ = ratio;
     }
 
-    /// WAD-gated: encode a MOPP over a REAL `WpMeshShape16` and prove `query_aabb` never misses an
-    /// overlapping triangle across many random query AABBs. SKIPS LOUD when `vz.wad` is absent.
-    #[test]
-    fn query_no_miss_real_wpmesh16_from_vz_wad_if_present() {
-        use crate::ffcs::load_ffcs_archive;
-        use crate::havok::{find_packfiles, Shape};
-        use crate::sges::decompress_block;
-        let Some(path) = crate::game_paths::vz_wad(std::path::Path::new(".")) else {
-            return eprintln!("SKIPPING query_no_miss_real_wpmesh16: vz.wad not found");
-        };
-        let Ok(mut f) = std::fs::File::open(&path) else {
-            return eprintln!("SKIPPING query_no_miss_real_wpmesh16: vz.wad not readable");
-        };
-        let size = f.metadata().unwrap().len();
-        let arch = load_ffcs_archive(&mut f, size).expect("ffcs archive");
-        let dec = decompress_block(&mut f, &arch.indx, 767).expect("decompress block 767");
-
-        // A handful of the smaller decoded meshes — enough to exercise real geometry, fast.
-        let mut meshes: Vec<_> = find_packfiles(&dec)
-            .into_iter()
-            .flat_map(|(_o, pf)| pf.shapes.into_iter())
-            .filter_map(|s| match s {
-                Shape::Mesh(m) if m.indices.len() >= 4 => Some(m),
-                _ => None,
-            })
-            .collect();
-        meshes.sort_by_key(|m| m.indices.len());
-        assert!(!meshes.is_empty(), "block 767 must carry a decoded WpMeshShape16");
-
-        let mut checked = 0usize;
-        for m in meshes.iter().take(5) {
-            let verts = m.vertices.clone();
-            let tris: Vec<[u32; 3]> =
-                m.indices.iter().map(|t| [t[0] as u32, t[1] as u32, t[2] as u32]).collect();
-            no_miss_gate(&tris, &verts, 0xD0 + checked as u64, 1500, "real-wpmesh16");
-            checked += 1;
-        }
-        assert!(checked > 0, "no real meshes exercised");
-    }
-
-    /// WAD-gated SEMANTICS CROSS-CHECK (part 1 — FindAll equivalence). Walk each REAL `hkpMoppCode`
-    /// from `vz.wad` with [`query_aabb`] under an ALL-SPACE query (`[-∞, +∞]`): nothing can be pruned,
-    /// so it must return EXACTLY the same shape-key multiset as the independently-proven [`decode`]
-    /// (which is validated against the 76-key retail reference). This proves `query_aabb`'s traversal —
-    /// its handling of REANCHOR (`0x01–0x04`), JUMPs, CUTs, and the 26-DOP splits (`0x13–0x1c`) that
-    /// the encoder never emits — is byte-correct on real bytecode. SKIPS LOUD when `vz.wad` is absent.
-    #[test]
-    fn query_aabb_matches_decode_findall_on_real_mopps_if_present() {
-        use crate::ffcs::load_ffcs_archive;
-        use crate::sges::decompress_block;
-        let Some(path) = crate::game_paths::vz_wad(std::path::Path::new(".")) else {
-            return eprintln!("SKIPPING query_aabb_findall: vz.wad not found (set MERCS2_GAME_DIR)");
-        };
-        let Ok(mut f) = std::fs::File::open(&path) else {
-            return eprintln!("SKIPPING query_aabb_findall: vz.wad not readable");
-        };
-        let size = f.metadata().unwrap().len();
-        let arch = load_ffcs_archive(&mut f, size).expect("ffcs archive");
-        let inf = f32::INFINITY;
-        let mut checked = 0usize;
-        for &blk in &[767u16, 826, 3185] {
-            let Ok(dec) = decompress_block(&mut f, &arch.indx, blk) else {
-                continue;
-            };
-            for (code, info) in extract_mopp_with_info(&dec) {
-                let mut want = decode(&code).keys;
-                want.sort_unstable();
-                let mut got = query_aabb(&code, &info, [-inf; 3], [inf; 3]);
-                got.sort_unstable();
-                assert_eq!(
-                    got, want,
-                    "block {blk}: query_aabb(all-space) must equal decode() FindAll on real bytecode \
-                     ({} B, {} keys)",
-                    code.len(),
-                    want.len()
-                );
-                checked += 1;
-            }
-        }
-        assert!(checked > 0, "vz.wad present but no real MOPP buffers found for FindAll check");
-        eprintln!("query_aabb_findall: {checked} real MOPPs — all-space walk == decode() FindAll");
-    }
-
-    /// WAD-gated SEMANTICS CROSS-CHECK (part 2 — pruning correctness on real geometry). For each REAL
-    /// MOPP, reconstruct every leaf's node box from the real bytecode ([`leaf_boxes`]) and, for the
-    /// fully-bounded leaves, query with a point deep inside that box: [`query_aabb`] MUST return that
-    /// leaf's key. This is the pruning theorem — every ancestor box encloses the leaf box, so a query
-    /// inside the leaf box can never be pruned — verified against Havok's OWN cut/split/reanchor stream
-    /// (not our encoder's). A MISS would mean a node box that fails to nest (a non-conservative
-    /// prune). SKIPS LOUD when `vz.wad` is absent.
-    #[test]
-    fn query_aabb_reaches_every_leaf_box_on_real_mopps_if_present() {
-        use crate::ffcs::load_ffcs_archive;
-        use crate::sges::decompress_block;
-        let Some(path) = crate::game_paths::vz_wad(std::path::Path::new(".")) else {
-            return eprintln!("SKIPPING query_aabb_leafbox: vz.wad not found");
-        };
-        let Ok(mut f) = std::fs::File::open(&path) else {
-            return eprintln!("SKIPPING query_aabb_leafbox: vz.wad not readable");
-        };
-        let size = f.metadata().unwrap().len();
-        let arch = load_ffcs_archive(&mut f, size).expect("ffcs archive");
-        let mut mopps = 0usize;
-        let mut leaves_tested = 0usize;
-        for &blk in &[767u16, 826, 3185] {
-            let Ok(dec) = decompress_block(&mut f, &arch.indx, blk) else {
-                continue;
-            };
-            for (code, info) in extract_mopp_with_info(&dec) {
-                if !info.scale.is_finite() || info.scale == 0.0 {
-                    continue;
-                }
-                let boxes = leaf_boxes(&code, &info, ROOT_SHIFT);
-                let mut this_mopp_tested = 0usize;
-                for (key, blo, bhi) in &boxes {
-                    // Only fully-bounded, non-degenerate leaf boxes make a decisive query.
-                    if !(0..3).all(|k| blo[k].is_finite() && bhi[k].is_finite() && bhi[k] > blo[k]) {
-                        continue;
-                    }
-                    // A point at the box centre (a hair of extent) — must land inside the leaf box.
-                    let c = [
-                        0.5 * (blo[0] + bhi[0]),
-                        0.5 * (blo[1] + bhi[1]),
-                        0.5 * (blo[2] + bhi[2]),
-                    ];
-                    let cand: std::collections::HashSet<u32> =
-                        query_aabb(&code, &info, c, c).into_iter().collect();
-                    assert!(
-                        cand.contains(key),
-                        "block {blk}: leaf key {key} unreachable by a query at its own box centre \
-                         {c:?} (box [{blo:?},{bhi:?}]) — pruning drops a leaf it must keep",
-                    );
-                    leaves_tested += 1;
-                    this_mopp_tested += 1;
-                    if this_mopp_tested >= 64 {
-                        break; // cap per-MOPP work; the property is uniform across leaves
-                    }
-                }
-                if this_mopp_tested > 0 {
-                    mopps += 1;
-                }
-            }
-        }
-        assert!(
-            leaves_tested > 0,
-            "vz.wad present but no fully-bounded real MOPP leaf boxes found to test reachability"
-        );
-        eprintln!(
-            "query_aabb_leafbox: {leaves_tested} real leaf boxes across {mopps} MOPPs — every leaf \
-             reachable inside its own reconstructed box (pruning is nesting-correct)"
-        );
-    }
-
     /// DIAGNOSTIC (retail oracle): for the retail PMC-HQ floor 0x39AF17DC, for each of its 4 MOPPs,
     /// sweep the root operand shift and report — over the sub-mesh's REAL triangles in common-frame
     /// world-local space — the no-miss count and a far-box prune count at each shift. The shift where
@@ -1812,6 +1525,268 @@ mod tests {
                     eprintln!("    shift={shift:2}: misses={miss:5}/{nkeys}  far_box_cands={far}");
                 }
             }
+        }
+    }
+
+    /// Game-gated live validation: built by the `retail` feature, reads the `vz.wad` named by the
+    /// repo-root `.mercs2-local.toml`, and fails if it is absent.
+    #[cfg(feature = "retail")]
+    mod retail {
+        use super::*;
+
+        /// The retail `vz.wad`, opened, with its FFCS tables.
+        fn open_vz_wad() -> (std::fs::File, crate::ffcs::FfcsArchive) {
+            let path = crate::game_paths::local_config_vz_wad(std::path::Path::new(env!("CARGO_MANIFEST_DIR")))
+                .unwrap_or_else(|e| panic!("{e}"));
+            let mut f = std::fs::File::open(&path).unwrap_or_else(|e| panic!("open {}: {e}", path.display()));
+            let size = f.metadata().expect("stat vz.wad").len();
+            let arch = crate::ffcs::load_ffcs_archive(&mut f, size).expect("ffcs archive");
+            (f, arch)
+        }
+
+        /// Extract several REAL `hkpMoppCode` buffers from retail `vz.wad` terrain/building blocks and
+        /// decode each: 100 % byte coverage, 0 errors, keys contiguous-ish and in range. Every terrain
+        /// cell ships a baked MOPP wrapping its `WpMeshShape16`, so these blocks are dense with them.
+        #[test]
+        fn real_mopp_buffers_decode_clean_from_vz_wad_if_present() {
+            use crate::sges::decompress_block;
+            let (mut f, arch) = open_vz_wad();
+
+            let mut total_buffers = 0usize;
+            let mut total_keys = 0usize;
+            let mut contiguous = 0usize; // buffers whose keys are a single perfect [0..N-1] run
+            for &blk in &[767u16, 826, 3185] {
+                let dec = decompress_block(&mut f, &arch.indx, blk)
+                    .unwrap_or_else(|e| panic!("decompress block {blk}: {e}"));
+                let buffers = extract_mopp_buffers(&dec);
+                for (i, code) in buffers.iter().enumerate() {
+                    let d = decode(code);
+                    // The two rock-solid structural proofs, true for EVERY real MOPP: the whole tree is
+                    // reachable and every opcode is valid.
+                    assert!(
+                        d.error.is_none(),
+                        "block {blk} mopp[{i}] ({} B) decode error: {:?}",
+                        code.len(),
+                        d.error
+                    );
+                    assert_eq!(
+                        d.consumed,
+                        code.len(),
+                        "block {blk} mopp[{i}]: {}/{} bytes covered (tree must be fully walked)",
+                        d.consumed,
+                        code.len()
+                    );
+                    assert!(!d.keys.is_empty(), "block {blk} mopp[{i}]: no leaf keys");
+                    // A well-formed BV-tree visits each leaf exactly once → all shape keys distinct.
+                    let (ks, range, missing) = d.key_summary();
+                    assert_eq!(
+                        ks.len(),
+                        d.keys.len(),
+                        "block {blk} mopp[{i}]: {} leaves but only {} distinct keys (duplicate leaf visit)",
+                        d.keys.len(),
+                        ks.len()
+                    );
+                    // Single-subpart meshes (buildings) yield a perfect contiguous triangle range
+                    // [0..N-1]; multi-subpart terrain cells offset each subpart's keys by a per-subpart
+                    // base (Havok `subpartBase + triIndex`), so they are dense per-subpart, not globally.
+                    let (lo, _hi) = range.unwrap();
+                    assert_eq!(lo, 0, "block {blk} mopp[{i}]: shape keys must be zero-based, start at {lo}");
+                    if missing.is_empty() {
+                        contiguous += 1;
+                    }
+                    total_keys += ks.len();
+                }
+                total_buffers += buffers.len();
+            }
+            assert!(
+                total_buffers > 0,
+                "vz.wad present but no hkpMoppCode buffers extracted from blocks 767/826/3185"
+            );
+            // The strong "contiguous in-range keys" proof: the single-subpart building MOPPs decode to a
+            // clean [0..N-1] triangle range. Retail block 767 alone carries dozens.
+            assert!(
+                contiguous >= 20,
+                "expected many single-subpart MOPPs to decode to a contiguous [0..N-1] range, got {contiguous}"
+            );
+            eprintln!(
+                "real MOPP validation: {total_buffers} buffers decoded clean (100% coverage, distinct keys), \
+                 {contiguous} perfectly contiguous [0..N-1], {total_keys} total shape keys"
+            );
+        }
+
+        /// Take a REAL `WpMeshShape16`'s triangles, encode a fresh MOPP over them, and decode it back:
+        /// every source triangle index appears exactly once, 100 % byte coverage. Closes the loop the
+        /// native encoder exists for. Fails when `vz.wad` is absent.
+        #[test]
+        fn encode_real_wpmesh16_triangles_roundtrips_from_vz_wad_if_present() {
+            use crate::havok::{find_packfiles, MeshShape, Shape};
+            use crate::sges::decompress_block;
+            let (mut f, arch) = open_vz_wad();
+            let dec = decompress_block(&mut f, &arch.indx, 767).expect("decompress block 767");
+
+            // Smallest non-trivial decoded mesh in the block — keeps the tree modest and the test fast.
+            let mesh: MeshShape = find_packfiles(&dec)
+                .into_iter()
+                .flat_map(|(_off, pf)| pf.shapes.into_iter())
+                .filter_map(|s| match s {
+                    Shape::Mesh(m) if !m.indices.is_empty() => Some(m),
+                    _ => None,
+                })
+                .min_by_key(|m| m.indices.len())
+                .expect("block 767 must carry a decoded WpMeshShape16");
+
+            let verts: Vec<[f32; 3]> = mesh.vertices.clone();
+            let tris: Vec<[u32; 3]> = mesh
+                .indices
+                .iter()
+                .map(|t| [t[0] as u32, t[1] as u32, t[2] as u32])
+                .collect();
+
+            let (code, info) = encode(&tris, &verts);
+            assert!(info.scale > 0.0);
+            let d = decode(&code);
+            assert!(d.error.is_none(), "encoded real-mesh MOPP decode error: {:?}", d.error);
+            assert_eq!(d.consumed, code.len(), "encoded real-mesh MOPP must be 100% covered");
+
+            let mut got = d.keys.clone();
+            got.sort_unstable();
+            let want: Vec<u32> = (0..tris.len() as u32).collect();
+            assert_eq!(got, want, "every source triangle index recovered exactly once");
+            eprintln!(
+                "encode_real_wpmesh16: {} tris → {} B MOPP, decoded back to {} keys",
+                tris.len(),
+                code.len(),
+                d.keys.len()
+            );
+        }
+
+        /// WAD-gated: encode a MOPP over a REAL `WpMeshShape16` and prove `query_aabb` never misses an
+        /// overlapping triangle across many random query AABBs. Fails when `vz.wad` is absent.
+        #[test]
+        fn query_no_miss_real_wpmesh16_from_vz_wad_if_present() {
+            use crate::havok::{find_packfiles, Shape};
+            use crate::sges::decompress_block;
+            let (mut f, arch) = open_vz_wad();
+            let dec = decompress_block(&mut f, &arch.indx, 767).expect("decompress block 767");
+
+            // A handful of the smaller decoded meshes — enough to exercise real geometry, fast.
+            let mut meshes: Vec<_> = find_packfiles(&dec)
+                .into_iter()
+                .flat_map(|(_o, pf)| pf.shapes.into_iter())
+                .filter_map(|s| match s {
+                    Shape::Mesh(m) if m.indices.len() >= 4 => Some(m),
+                    _ => None,
+                })
+                .collect();
+            meshes.sort_by_key(|m| m.indices.len());
+            assert!(!meshes.is_empty(), "block 767 must carry a decoded WpMeshShape16");
+
+            let mut checked = 0usize;
+            for m in meshes.iter().take(5) {
+                let verts = m.vertices.clone();
+                let tris: Vec<[u32; 3]> =
+                    m.indices.iter().map(|t| [t[0] as u32, t[1] as u32, t[2] as u32]).collect();
+                no_miss_gate(&tris, &verts, 0xD0 + checked as u64, 1500, "real-wpmesh16");
+                checked += 1;
+            }
+            assert!(checked > 0, "no real meshes exercised");
+        }
+
+        /// WAD-gated SEMANTICS CROSS-CHECK (part 1 — FindAll equivalence). Walk each REAL `hkpMoppCode`
+        /// from `vz.wad` with [`query_aabb`] under an ALL-SPACE query (`[-∞, +∞]`): nothing can be pruned,
+        /// so it must return EXACTLY the same shape-key multiset as the independently-proven [`decode`]
+        /// (which is validated against the 76-key retail reference). This proves `query_aabb`'s traversal —
+        /// its handling of REANCHOR (`0x01–0x04`), JUMPs, CUTs, and the 26-DOP splits (`0x13–0x1c`) that
+        /// the encoder never emits — is byte-correct on real bytecode. Fails when `vz.wad` is absent.
+        #[test]
+        fn query_aabb_matches_decode_findall_on_real_mopps_if_present() {
+            use crate::sges::decompress_block;
+            let (mut f, arch) = open_vz_wad();
+            let inf = f32::INFINITY;
+            let mut checked = 0usize;
+            for &blk in &[767u16, 826, 3185] {
+                let dec = decompress_block(&mut f, &arch.indx, blk)
+                    .unwrap_or_else(|e| panic!("decompress block {blk}: {e}"));
+                for (code, info) in extract_mopp_with_info(&dec) {
+                    let mut want = decode(&code).keys;
+                    want.sort_unstable();
+                    let mut got = query_aabb(&code, &info, [-inf; 3], [inf; 3]);
+                    got.sort_unstable();
+                    assert_eq!(
+                        got, want,
+                        "block {blk}: query_aabb(all-space) must equal decode() FindAll on real bytecode \
+                         ({} B, {} keys)",
+                        code.len(),
+                        want.len()
+                    );
+                    checked += 1;
+                }
+            }
+            assert!(checked > 0, "vz.wad present but no real MOPP buffers found for FindAll check");
+            eprintln!("query_aabb_findall: {checked} real MOPPs — all-space walk == decode() FindAll");
+        }
+
+        /// WAD-gated SEMANTICS CROSS-CHECK (part 2 — pruning correctness on real geometry). For each REAL
+        /// MOPP, reconstruct every leaf's node box from the real bytecode ([`leaf_boxes`]) and, for the
+        /// fully-bounded leaves, query with a point deep inside that box: [`query_aabb`] MUST return that
+        /// leaf's key. This is the pruning theorem — every ancestor box encloses the leaf box, so a query
+        /// inside the leaf box can never be pruned — verified against Havok's OWN cut/split/reanchor stream
+        /// (not our encoder's). A MISS would mean a node box that fails to nest (a non-conservative
+        /// prune). Fails when `vz.wad` is absent.
+        #[test]
+        fn query_aabb_reaches_every_leaf_box_on_real_mopps_if_present() {
+            use crate::sges::decompress_block;
+            let (mut f, arch) = open_vz_wad();
+            let mut mopps = 0usize;
+            let mut leaves_tested = 0usize;
+            for &blk in &[767u16, 826, 3185] {
+                let dec = decompress_block(&mut f, &arch.indx, blk)
+                    .unwrap_or_else(|e| panic!("decompress block {blk}: {e}"));
+                for (mi, (code, info)) in extract_mopp_with_info(&dec).into_iter().enumerate() {
+                    assert!(
+                        info.scale.is_finite() && info.scale != 0.0,
+                        "block {blk} mopp[{mi}]: m_info scale {} is not a usable quantization scale",
+                        info.scale
+                    );
+                    let boxes = leaf_boxes(&code, &info, ROOT_SHIFT);
+                    let mut this_mopp_tested = 0usize;
+                    for (key, blo, bhi) in &boxes {
+                        // Only fully-bounded, non-degenerate leaf boxes make a decisive query.
+                        if !(0..3).all(|k| blo[k].is_finite() && bhi[k].is_finite() && bhi[k] > blo[k]) {
+                            continue;
+                        }
+                        // A point at the box centre (a hair of extent) — must land inside the leaf box.
+                        let c = [
+                            0.5 * (blo[0] + bhi[0]),
+                            0.5 * (blo[1] + bhi[1]),
+                            0.5 * (blo[2] + bhi[2]),
+                        ];
+                        let cand: std::collections::HashSet<u32> =
+                            query_aabb(&code, &info, c, c).into_iter().collect();
+                        assert!(
+                            cand.contains(key),
+                            "block {blk}: leaf key {key} unreachable by a query at its own box centre \
+                             {c:?} (box [{blo:?},{bhi:?}]) — pruning drops a leaf it must keep",
+                        );
+                        leaves_tested += 1;
+                        this_mopp_tested += 1;
+                        if this_mopp_tested >= 64 {
+                            break; // cap per-MOPP work; the property is uniform across leaves
+                        }
+                    }
+                    if this_mopp_tested > 0 {
+                        mopps += 1;
+                    }
+                }
+            }
+            assert!(
+                leaves_tested > 0,
+                "vz.wad present but no fully-bounded real MOPP leaf boxes found to test reachability"
+            );
+            eprintln!(
+                "query_aabb_leafbox: {leaves_tested} real leaf boxes across {mopps} MOPPs — every leaf \
+                 reachable inside its own reconstructed box (pruning is nesting-correct)"
+            );
         }
     }
 }

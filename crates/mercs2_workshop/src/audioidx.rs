@@ -1,8 +1,11 @@
 //! The captioned audio inventory — the Audio domain's real content.
 //!
 //! The WAD's own audio catalogue (`index::Kind::Audio`) is the ~97 wavebank / soundbank / sound-table
-//! *assets* — the things `add_sound` replaces. This is the complementary view: a per-CLIP inventory
-//! (12,988 voiceover lines, most captioned) with speaker, bank, caption text and duration, so the
+//! *assets*. `add_sound` adds a new bank beside them, encoded from authored WAV cues;
+//! `replace_sound_bank` replaces the cues of a bank the game ships, under that bank's own entry
+//! name; `replace_sound_cue` replaces one cue of such a bank. This is the complementary view: a
+//! per-CLIP inventory (12,988 voiceover lines, most captioned) with speaker, bank, caption text and
+//! duration, so the
 //! Audio domain browses what the game actually *says*, grouped and searchable, rather than a handful
 //! of opaque bank hashes.
 //!

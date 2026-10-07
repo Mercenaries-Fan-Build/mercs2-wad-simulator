@@ -97,6 +97,14 @@ pub struct InjectStats {
     /// the first hides whether the rest were done at all — which is how the multi path shipped with
     /// no SEGM handling whatsoever and nothing noticed.
     pub unbound_segs: Vec<usize>,
+    /// Every group that received geometry from the one mesh handed to
+    /// [`inject_static_into_donor_block`], [`inject_character_into_donor_block`],
+    /// [`inject_multi_into_donor_block`] or [`inject_character_multi_into_donor_block`], with the
+    /// source vertex of each vertex written into its `STRM`, in stream order:
+    /// `(group ordinal, [index into that mesh's vertices])`. A caller writing per-vertex data the
+    /// mesh does not carry (`POSITION.w`) maps it through this. [`inject_parts_into_donor_block`]
+    /// takes several meshes and leaves it empty.
+    pub vertex_sources: Vec<(usize, Vec<u32>)>,
 }
 
 // --------------------------------------------------------------------- f16
@@ -1755,6 +1763,7 @@ fn inject_multi_into_donor_block_ex(
         new_bodies.insert(g.strm_data, vb);
         new_bodies.insert(g.ibuf_info, ic.to_le_bytes().to_vec());
         new_bodies.insert(g.ibuf_data, ib);
+        stats.vertex_sources.push((*gi, order.iter().map(|&(_, gvid)| gvid).collect()));
         // PRMT: one strip record per existing donor record slot
         let prmt_old = leaf(ucfx, data_off, &rows[g.prmt]);
         let nrec = prmt_old.len() / 16;
@@ -2347,6 +2356,7 @@ fn inject_into_donor_block_impl(
     new_bodies.insert(g.strm_data, vb);
     new_bodies.insert(g.ibuf_info, ic.to_le_bytes().to_vec());
     new_bodies.insert(g.ibuf_data, ib);
+    stats.vertex_sources.push((target_gi, (0..vc).collect()));
     // PRMT: one strip draw record per existing donor record slot (keep count)
     let prmt_old = leaf(ucfx, data_off, &rows[g.prmt]);
     let nrec = prmt_old.len() / 16;
@@ -2878,6 +2888,7 @@ pub fn inject_static_into_donor_block(
         new_bodies.insert(g.strm_data, vb);
         new_bodies.insert(g.ibuf_info, ic.to_le_bytes().to_vec());
         new_bodies.insert(g.ibuf_data, ib.clone());
+        stats.vertex_sources.push((tgi, (0..vc).collect()));
         // PRMT: preserve field[0] — the MATERIAL INDEX (registry §3, ★RESOLVED 2026-07-30).
         let prmt_old = leaf(ucfx, data_off, &rows[g.prmt]);
         let nrec = (prmt_old.len() / 16).max(1);
@@ -3297,6 +3308,7 @@ mod tests {
         assert_eq!(stats.target_group, 0);
         assert_eq!(stats.vertex_count, 3);
         assert_eq!(stats.emptied_groups, vec![1]);
+        assert_eq!(stats.vertex_sources, vec![(0, vec![0, 1, 2])], "group 0 streams the mesh in order");
         assert_eq!(stats.mtrl_repoints[0].2, 1, "one MTRL repoint");
         assert!((stats.avg_normal_len - 1.0).abs() < 0.01);
         assert!((stats.avg_tangent_len - 1.0).abs() < 0.01);
@@ -3424,6 +3436,8 @@ mod tests {
         // both triangles placed
         assert_eq!(audits.iter().map(|a| a.triangles).sum::<usize>(), 2);
         assert!(stats.emptied_groups.is_empty(), "no extra groups to empty");
+        // Each group's stream names the mesh vertices it took, in stream order.
+        assert_eq!(stats.vertex_sources, vec![(0, vec![0, 1, 2]), (1, vec![1, 2, 3])]);
 
         // CSUM verifies + both groups draw
         let ulen = read_u32_le(&out, 16) as usize;

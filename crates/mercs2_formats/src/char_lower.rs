@@ -345,7 +345,8 @@ pub fn character_into_donor(
     } else {
         let ucfx_len = u32::from_le_bytes(donor_block.get(16..20).and_then(|s| s.try_into().ok()).unwrap_or([0; 4])) as usize;
         let donor_ucfx = donor_block.get(20..20 + ucfx_len).unwrap_or(&[]);
-        let donor_mtrls = crate::texture::parse_mtrl(donor_ucfx);
+        let donor_mtrls = crate::texture::parse_mtrl(donor_ucfx, crate::texture::MtrlSource::Model)
+            .map_err(|e| format!("donor model MTRL: {e}"))?;
         let gmi = crate::texture::group_material_indices(donor_ucfx);
         let mut rp = opts.repoints.clone();
         // A repoint is a GLOBAL 4-byte hash swap, so a donor material hash can be repointed only ONCE.

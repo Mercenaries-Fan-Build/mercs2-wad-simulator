@@ -317,6 +317,27 @@ fn used_inputs(tokens: &[u32], instrs: &[Instr]) -> (Vec<u32>, Vec<u32>) {
     (regs, texcoord_idx)
 }
 
+/// The `(usage, usage index)` of every input register (`v#`) a vertex shader declares with `dcl`,
+/// in declaration order: the vertex elements (`D3DDECLUSAGE`, index) the shader reads, which the
+/// bound vertex declaration must supply.
+pub fn vertex_inputs(blob: &[u8]) -> Result<Vec<(u8, u8)>, Error> {
+    let tokens = crate::sm3asm::to_tokens(blob)?;
+    if tokens.first() != Some(&VS_3_0) {
+        return Err(Error::NotVertexShader);
+    }
+    let (_, instrs) = walk(&tokens)?;
+    let mut out = Vec::new();
+    for ins in &instrs {
+        if ins.opcode == OP_DCL && ins.nparams >= 2 {
+            let usage_tok = tokens[ins.at + 1];
+            if regtype(tokens[ins.at + 2]) == REG_INPUT {
+                out.push(((usage_tok & 0xf) as u8, ((usage_tok >> 16) & 0xf) as u8));
+            }
+        }
+    }
+    Ok(out)
+}
+
 /// Result of a splice, with an audit trail for the offline verification gate.
 #[derive(Debug)]
 pub struct SpliceReport {
@@ -680,8 +701,9 @@ pub struct StoreEntry {
     pub blob: Vec<u8>,
 }
 
-/// Refuse a blob the loader cannot take for a record of `kind`.
-fn check_blob(kind: ShaderKind, blob: &[u8]) -> Result<(), Error> {
+/// Refuse a blob the loader cannot take for a record of `kind`: over [`MAX_BLOB`] bytes, not a whole
+/// token stream, a version token other than `kind`'s, or no end token.
+pub fn check_blob(kind: ShaderKind, blob: &[u8]) -> Result<(), Error> {
     if blob.len() > MAX_BLOB {
         return Err(Error::BlobTooLarge { size: blob.len() });
     }
@@ -803,27 +825,42 @@ impl StoreBuilder {
     }
 }
 
-/// A retail store for a game-gated test, found through `MERCS2_GAME_DIR` (install root or its `data`
-/// folder) or the dev checkout's `.mercs2-local.toml`. `None` — after a loud SKIP line — when absent.
-#[cfg(test)]
-pub(crate) fn retail_store_for_test(name: &str) -> Option<Store> {
-    let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-    let path = crate::game_paths::wad_from_env(name).or_else(|| {
-        crate::game_paths::wad_from_local_config(manifest)
-            .and_then(|vz| vz.parent().map(|d| d.join(name)))
-            .filter(|p| p.is_file())
-    });
-    let Some(path) = path else {
-        eprintln!("SKIP (retail data absent): {name} — set MERCS2_GAME_DIR to the install or its data folder");
-        return None;
-    };
+/// A retail store for a game-gated test, read from the `data` folder that holds the `vz.wad` named by
+/// the repo-root `.mercs2-local.toml`. Built by the `retail` feature; fails if the config, the
+/// archive, or the store is absent.
+#[cfg(all(test, feature = "retail"))]
+pub(crate) fn retail_store_for_test(name: &str) -> Store {
+    let vz = crate::game_paths::local_config_vz_wad(std::path::Path::new(env!("CARGO_MANIFEST_DIR")))
+        .unwrap_or_else(|e| panic!("{e}"));
+    let data = vz
+        .parent()
+        .unwrap_or_else(|| panic!("{} has no parent folder", vz.display()));
+    let path = data.join(name);
     let bytes = std::fs::read(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
-    Some(Store::parse(bytes).unwrap_or_else(|e| panic!("{}: {e}", path.display())))
+    Store::parse(bytes).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn vertex_inputs_lists_each_input_dcl_in_order() {
+        let blob = crate::sm3asm::assemble(
+            "vs_3_0\ndcl_position v0\ndcl_texcoord3 v1\ndcl_normal v2\ndcl_texcoord o3.xy\nmov o3.xy, v1\n",
+        )
+        .unwrap();
+        assert_eq!(vertex_inputs(&blob).unwrap(), vec![(0, 0), (5, 3), (3, 0)]);
+        let ps = crate::sm3asm::assemble("ps_3_0\ndcl_texcoord v0\nmov oC0, v0\n").unwrap();
+        assert!(matches!(vertex_inputs(&ps), Err(Error::NotVertexShader)));
+    }
+
+    #[test]
+    fn check_blob_refuses_a_version_token_of_the_other_stage() {
+        let ps = crate::sm3asm::assemble("ps_3_0\nmov oC0, c0\n").unwrap();
+        assert!(check_blob(ShaderKind::Pixel, &ps).is_ok());
+        assert!(matches!(check_blob(ShaderKind::Vertex, &ps), Err(Error::VersionMismatch { .. })));
+    }
 
     // A hand-built minimal vs_3_0 mirroring rec419 (the simplest static-mesh VS):
     //   dcl_position v0 ; dcl_position o0
@@ -957,27 +994,6 @@ mod tests {
     }
 
     #[test]
-    fn parse_real_store_if_present() {
-        let Some(store) = retail_store_for_test("shader3.bin") else { return };
-        let vs = store.records.iter().filter(|r| matches!(r.kind, ShaderKind::Vertex)).count();
-        let ps = store.records.len() - vs;
-        assert_eq!(store.records.len(), 556);
-        assert_eq!((vs, ps), (151, 405));
-        // every VS blob must carry a CTAB and parse; and every record (VS+PS) must disassemble +
-        // classify (the recovery surface must not choke on any real retail blob).
-        for r in &store.records {
-            let blob = store.blob(r);
-            let (_c, consts) = parse_ctab(blob).unwrap();
-            let asm = disassemble(blob).unwrap();
-            assert!(asm.len() >= 2, "a real shader disassembles to >=1 instruction");
-            let _role = classify_role(&r.kind, &consts);
-            if matches!(r.kind, ShaderKind::Vertex) {
-                assert_eq!(u32::from_le_bytes([blob[0], blob[1], blob[2], blob[3]]), VS_3_0);
-            }
-        }
-    }
-
-    #[test]
     fn disassembles_the_min_vs_body() {
         let blob = build_min_vs();
         let asm = disassemble(&blob).unwrap();
@@ -1052,78 +1068,6 @@ mod tests {
     }
 
     #[test]
-    fn store_ids_are_present_in_the_retail_stores() {
-        let (Some(high), Some(low)) = (retail_store_for_test("shader3.bin"), retail_store_for_test("shader3Low.bin")) else {
-            return;
-        };
-        let has = |s: &Store, id: u32, kind: ShaderKind| s.records.iter().any(|r| r.id == id && r.kind == kind);
-        for (stem, kind) in [("PgMeshVP", ShaderKind::Vertex), ("PgSkyFP", ShaderKind::Pixel), ("PgBlurHFP", ShaderKind::Pixel)] {
-            assert!(has(&high, store_id(stem, false).unwrap(), kind), "{stem} in shader3.bin");
-            assert!(has(&low, store_id(stem, true).unwrap(), kind), "{stem} in shader3Low.bin");
-            assert!(!has(&high, store_id(stem, true).unwrap(), kind), "{stem} Low id not in shader3.bin");
-        }
-    }
-
-    #[test]
-    fn retail_stores_rewrite_byte_identically() {
-        let mut present = 0;
-        for name in RETAIL_STORES {
-            let Some(store) = retail_store_for_test(name) else { continue };
-            present += 1;
-            let out = StoreBuilder::from_store(&store).to_bytes().unwrap();
-            assert!(out == store.bytes, "{name}: rewrite differs from retail");
-        }
-        assert!(present == 0 || present == RETAIL_STORES.len(), "every retail store must be present once any is");
-    }
-
-    #[test]
-    fn replace_changes_exactly_one_record() {
-        let Some(store) = retail_store_for_test("shader3.bin") else { return };
-        let id = store_id("PgSkyFP", false).unwrap();
-        let mut b = StoreBuilder::from_store(&store);
-        b.replace_in_place(id, magenta_ps(), &[]).unwrap();
-        let out = Store::parse(b.to_bytes().unwrap()).unwrap();
-        assert_eq!(out.records.len(), store.records.len());
-        let mut changed = 0;
-        for (old, new) in store.records.iter().zip(&out.records) {
-            assert_eq!((old.id, old.kind), (new.id, new.kind), "record order and kinds are kept");
-            assert_eq!(new.blob_off as usize % 16, 0);
-            if new.id == id {
-                assert_eq!(out.blob(new), &magenta_ps()[..]);
-                changed += 1;
-            } else {
-                assert_eq!(out.blob(new), store.blob(old), "record 0x{:08x} must be untouched", old.id);
-            }
-        }
-        assert_eq!(changed, 1);
-        assert_eq!(out.bytes.len() % 16, 0);
-    }
-
-    #[test]
-    fn add_appends_a_record() {
-        let Some(store) = retail_store_for_test("shader3.bin") else { return };
-        let id = store_id("SmMagentaFP", false).unwrap();
-        let mut b = StoreBuilder::from_store(&store);
-        b.add(id, ShaderKind::Pixel, magenta_ps(), &[]).unwrap();
-        let out = Store::parse(b.to_bytes().unwrap()).unwrap();
-        assert_eq!(out.records.len(), store.records.len() + 1);
-        let last = out.records.last().unwrap();
-        assert_eq!((last.id, last.kind), (id, ShaderKind::Pixel));
-        assert_eq!(out.blob(last), &magenta_ps()[..]);
-        let prev = &out.records[out.records.len() - 2];
-        assert_eq!(
-            last.blob_off as usize,
-            ((prev.blob_off + prev.blob_size) as usize).div_ceil(16) * 16,
-            "appended at the next 16-byte boundary"
-        );
-        for (old, new) in store.records.iter().zip(&out.records) {
-            assert_eq!((old.id, old.kind), (new.id, new.kind));
-            assert_eq!(out.blob(new), store.blob(old));
-        }
-        assert_eq!(out.bytes.len() % 16, 0);
-    }
-
-    #[test]
     fn store_writer_refusals() {
         let other = small_store(&[0x1111_1111]);
         let mut b = StoreBuilder::from_store(&small_store(&[0xaaaa_aaaa, 0xbbbb_bbbb]));
@@ -1163,5 +1107,100 @@ mod tests {
         b.add(0x2, ShaderKind::Pixel, magenta_ps(), &[&crowd]).unwrap();
         // nothing refused above changed the store
         assert_eq!(b.entries().iter().map(|e| e.id).collect::<Vec<_>>(), [0xaaaa_aaaa, 0xbbbb_bbbb, 0x2]);
+    }
+
+    /// Game-gated: built by the `retail` feature, reads the stores beside the `vz.wad` named by the
+    /// repo-root `.mercs2-local.toml`, and fails if they are absent.
+    #[cfg(feature = "retail")]
+    mod retail {
+        use super::*;
+
+        #[test]
+        fn parse_real_store_if_present() {
+            let store = retail_store_for_test("shader3.bin");
+            let vs = store.records.iter().filter(|r| matches!(r.kind, ShaderKind::Vertex)).count();
+            let ps = store.records.len() - vs;
+            assert_eq!(store.records.len(), 556);
+            assert_eq!((vs, ps), (151, 405));
+            // every VS blob must carry a CTAB and parse; and every record (VS+PS) must disassemble +
+            // classify (the recovery surface must not choke on any real retail blob).
+            for r in &store.records {
+                let blob = store.blob(r);
+                let (_c, consts) = parse_ctab(blob).unwrap();
+                let asm = disassemble(blob).unwrap();
+                assert!(asm.len() >= 2, "a real shader disassembles to >=1 instruction");
+                let _role = classify_role(&r.kind, &consts);
+                if matches!(r.kind, ShaderKind::Vertex) {
+                    assert_eq!(u32::from_le_bytes([blob[0], blob[1], blob[2], blob[3]]), VS_3_0);
+                }
+            }
+        }
+
+        #[test]
+        fn store_ids_are_present_in_the_retail_stores() {
+            let (high, low) = (retail_store_for_test("shader3.bin"), retail_store_for_test("shader3Low.bin"));
+            let has = |s: &Store, id: u32, kind: ShaderKind| s.records.iter().any(|r| r.id == id && r.kind == kind);
+            for (stem, kind) in [("PgMeshVP", ShaderKind::Vertex), ("PgSkyFP", ShaderKind::Pixel), ("PgBlurHFP", ShaderKind::Pixel)] {
+                assert!(has(&high, store_id(stem, false).unwrap(), kind), "{stem} in shader3.bin");
+                assert!(has(&low, store_id(stem, true).unwrap(), kind), "{stem} in shader3Low.bin");
+                assert!(!has(&high, store_id(stem, true).unwrap(), kind), "{stem} Low id not in shader3.bin");
+            }
+        }
+
+        #[test]
+        fn retail_stores_rewrite_byte_identically() {
+            for name in RETAIL_STORES {
+                let store = retail_store_for_test(name);
+                let out = StoreBuilder::from_store(&store).to_bytes().unwrap();
+                assert!(out == store.bytes, "{name}: rewrite differs from retail");
+            }
+        }
+
+        #[test]
+        fn replace_changes_exactly_one_record() {
+            let store = retail_store_for_test("shader3.bin");
+            let id = store_id("PgSkyFP", false).unwrap();
+            let mut b = StoreBuilder::from_store(&store);
+            b.replace_in_place(id, magenta_ps(), &[]).unwrap();
+            let out = Store::parse(b.to_bytes().unwrap()).unwrap();
+            assert_eq!(out.records.len(), store.records.len());
+            let mut changed = 0;
+            for (old, new) in store.records.iter().zip(&out.records) {
+                assert_eq!((old.id, old.kind), (new.id, new.kind), "record order and kinds are kept");
+                assert_eq!(new.blob_off as usize % 16, 0);
+                if new.id == id {
+                    assert_eq!(out.blob(new), &magenta_ps()[..]);
+                    changed += 1;
+                } else {
+                    assert_eq!(out.blob(new), store.blob(old), "record 0x{:08x} must be untouched", old.id);
+                }
+            }
+            assert_eq!(changed, 1);
+            assert_eq!(out.bytes.len() % 16, 0);
+        }
+
+        #[test]
+        fn add_appends_a_record() {
+            let store = retail_store_for_test("shader3.bin");
+            let id = store_id("SmMagentaFP", false).unwrap();
+            let mut b = StoreBuilder::from_store(&store);
+            b.add(id, ShaderKind::Pixel, magenta_ps(), &[]).unwrap();
+            let out = Store::parse(b.to_bytes().unwrap()).unwrap();
+            assert_eq!(out.records.len(), store.records.len() + 1);
+            let last = out.records.last().unwrap();
+            assert_eq!((last.id, last.kind), (id, ShaderKind::Pixel));
+            assert_eq!(out.blob(last), &magenta_ps()[..]);
+            let prev = &out.records[out.records.len() - 2];
+            assert_eq!(
+                last.blob_off as usize,
+                ((prev.blob_off + prev.blob_size) as usize).div_ceil(16) * 16,
+                "appended at the next 16-byte boundary"
+            );
+            for (old, new) in store.records.iter().zip(&out.records) {
+                assert_eq!((old.id, old.kind), (new.id, new.kind));
+                assert_eq!(out.blob(new), store.blob(old));
+            }
+            assert_eq!(out.bytes.len() % 16, 0);
+        }
     }
 }

@@ -1,23 +1,32 @@
-//! Ignored probe: what spawn markers actually exist in the shipped `vz.wad`, and which of the hero-
+//! Probe: what spawn markers actually exist in the shipped `vz.wad`, and which of the hero-
 //! spawn candidates resolve. Verifies (against real data) why the hero lands where it does. Mirrors the
 //! game's resolution: `load_placements(layers_static)` → lowercased name→pos → the candidate lookup the
 //! world loop + boot Lua flow use.
 //!
+//! Game-gated: built by the `retail` feature, reads the retail `vz.wad` named by the repo-root
+//! `.mercs2-local.toml`, and fails when it is absent.
+//!
 //! ```text
-//! cargo test -p mercs2_probe --test spawn_marker_probe -- --nocapture
+//! cargo test -p mercs2_probe --features retail --test spawn_marker_probe -- --nocapture
 //! ```
 
 use mercs2_engine::wad;
 use mercs2_engine::worldutil::find_terrain_blocks;
 
+/// The retail `vz.wad` path, from the repo-root `.mercs2-local.toml` and nowhere else. Panics with the
+/// resolver's message when it is missing, and when the path is not UTF-8 (`wad::open` takes `&str`).
+fn vz_wad_path() -> String {
+    let start = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let path = mercs2_formats::game_paths::local_config_vz_wad(start).unwrap_or_else(|e| panic!("{e}"));
+    path.to_str()
+        .unwrap_or_else(|| panic!("vz.wad path is not UTF-8: {}", path.display()))
+        .to_string()
+}
+
 #[test]
 fn spawn_markers_present_in_vz_wad() {
-    let Some(path) = wad::resolve_vz_wad(None) else {
-        return eprintln!(
-            "SKIPPING: no vz.wad discovered. Run `scripts/find-vz-wad.sh --write` or set MERCS2_GAME_DIR."
-        );
-    };
-    let mut w = wad::open(&path).expect("open vz.wad");
+    let path = vz_wad_path();
+    let mut w = wad::open(&path).unwrap_or_else(|e| panic!("open {path}: {e}"));
     let (_low, ls) = find_terrain_blocks(&mut w).expect("find layers_static");
     let placements = mercs2_formats::placement::load_placements(&ls).expect("load placements");
 

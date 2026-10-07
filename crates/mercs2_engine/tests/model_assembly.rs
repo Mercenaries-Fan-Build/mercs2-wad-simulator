@@ -6,15 +6,28 @@
 //! its low-poly far-LOD proxy — a 371-triangle tank wearing a `_lod_dm` skin. These tests fail if we
 //! ever go back to loading a single container.
 //!
-//! Skipped when vz.wad isn't installed.
+//! Game-gated: built by the `retail` feature, reads the retail `vz.wad` named by the repo-root
+//! `.mercs2-local.toml`, and fails when it is absent.
 
 use mercs2_engine::model::Model;
 use mercs2_engine::render_state::RenderState;
 use mercs2_engine::wad;
 use mercs2_formats::orchestrator as orch;
 
-fn open_wad() -> Option<wad::Wad> {
-    wad::resolve_vz_wad(None).and_then(|p| wad::open(&p).ok())
+/// The retail `vz.wad` path, from the repo-root `.mercs2-local.toml` and nowhere else. Panics with the
+/// resolver's message when it is missing, and when the path is not UTF-8 (`wad::open` takes `&str`).
+fn vz_wad_path() -> String {
+    let start = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let path = mercs2_formats::game_paths::local_config_vz_wad(start).unwrap_or_else(|e| panic!("{e}"));
+    path.to_str()
+        .unwrap_or_else(|| panic!("vz.wad path is not UTF-8: {}", path.display()))
+        .to_string()
+}
+
+/// The retail `vz.wad`, opened. Panics when it cannot be found or opened.
+fn open_vz_wad() -> wad::Wad {
+    let path = vz_wad_path();
+    wad::open(&path).unwrap_or_else(|e| panic!("open {path}: {e}"))
 }
 
 /// Triangles the full three-clause gate admits at a LOD rung, at a given health.
@@ -32,7 +45,7 @@ fn tris_at(m: &Model, rung: u8, health: f32) -> u32 {
 
 #[test]
 fn tank_assembles_across_its_lod_block_chain() {
-    let Some(mut w) = open_wad() else { return };
+    let mut w = open_vz_wad();
     let hash = mercs2_formats::hash::pandemic_hash_m2("ch_veh_tank_ztz98");
     let m = Model::load(&mut w, hash).expect("tank assembles");
 
@@ -54,7 +67,7 @@ fn tank_assembles_across_its_lod_block_chain() {
 
 #[test]
 fn wrecking_a_vehicle_swaps_geometry_rather_than_adding_it() {
-    let Some(mut w) = open_wad() else { return };
+    let mut w = open_vz_wad();
     // The machine SHOWs the intact body in PristineState and the wreck in DestroyedState. If both
     // draw at once we're piling a wreck on top of an intact hull — the original "MD500 drawn with
     // its wreck overlapping" bug.
@@ -93,7 +106,7 @@ fn wrecking_a_vehicle_swaps_geometry_rather_than_adding_it() {
 
 #[test]
 fn rungs_refine_each_other_instead_of_double_drawing() {
-    let Some(mut w) = open_wad() else { return };
+    let mut w = open_vz_wad();
     // The resident block is a COMPLETE low-detail model spanning every tier; the finer blocks
     // re-author some of its nodes. Pooling them draws the same part twice at two detail levels — on
     // the car van that was 11,604 of 19,107 triangles. `apply_supersede` clears the coarser block's
@@ -123,7 +136,7 @@ fn rungs_refine_each_other_instead_of_double_drawing() {
 
 #[test]
 fn a_character_has_no_lod_chain() {
-    let Some(mut w) = open_wad() else { return };
+    let mut w = open_vz_wad();
     let hash = mercs2_formats::hash::pandemic_hash_m2("pmc_hum_mattias_v3");
     let m = Model::load(&mut w, hash).expect("mattias assembles");
     assert_eq!(m.rungs.len(), 1, "characters ship a single resident block, no chain");
@@ -139,7 +152,7 @@ fn a_character_has_no_lod_chain() {
 /// the air at three of its four tiers.
 #[test]
 fn indx_is_keyed_by_sub_object_not_by_prmg_group() {
-    let Some(mut w) = open_wad() else { return };
+    let mut w = open_vz_wad();
     for name in [
         "pmc_hum_mattias_v3",       // 24 INDX = 7 MESH + 17 SKIN  (29 PRMG)
         "ch_veh_tank_ztz98",
@@ -178,7 +191,7 @@ fn indx_is_keyed_by_sub_object_not_by_prmg_group() {
 
 #[test]
 fn lod_masks_partition_the_tiers_across_the_chain() {
-    let Some(mut w) = open_wad() else { return };
+    let mut w = open_vz_wad();
     let hash = mercs2_formats::hash::pandemic_hash_m2("ch_veh_tank_ztz98");
     let m = Model::load(&mut w, hash).expect("tank assembles");
 

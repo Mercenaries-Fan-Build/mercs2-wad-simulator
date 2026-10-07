@@ -1,6 +1,6 @@
 [package]
 name = "mercs2_quartermaster"
-version = "3.1.0"
+version = "4.0.0"
 edition = "2021"
 description = "Mercenaries 2 Shipment format: reads a manifest.yaml/.json/.toml, lints it against the engine's HANG-class traps, and builds it into an overlay WAD. Ships the `qm` CLI."
 license.workspace = true
@@ -48,6 +48,10 @@ clap = { version = "4", features = ["derive"] }
 # The same crate Cargo itself parses version requirements with, so the range semantics a modder
 # expects (`^1.0.0`, `>=0.7, <1`) are exactly what they get.
 semver = "1"
+# The sound kinds encode and fork bank tables (`encode_bank`, `retarget_cue`) and read authored
+# WAVs (`wav::read_pcm16_wav`) with the codecs that re-encode every retail bank byte-identically.
+# Decode/encode side only: no device output, so no `cpal` / ALSA in the CLI.
+mercs2_audio = { path = "../mercs2_audio", version = "1.2.3", default-features = false }
 
 [dev-dependencies]
 # Only to BUILD a compressed `CFX` movie fixture. The `add_movie` lowering must accept one and ship
@@ -55,7 +59,43 @@ semver = "1"
 # needs a real zlib stream, not a plausible-looking one. Nothing in `src/` compresses a movie; that
 # is the whole point of the test.
 flate2 = "1"
+# The game-gated shader registry test disassembles every FUN_0085ac90 site in the unpacked exe to
+# check registered_shaders.tsv against the code. Pure Rust, no native dependencies.
+iced-x86 = { version = "1", default-features = false, features = ["std", "decoder", "instr_info"] }
 
 [[bin]]
 name = "qm"
 path = "src/bin/qm.rs"
+
+[features]
+# Builds the game-gated tests, which read the retail vz.wad named by the repo-root
+# .mercs2-local.toml; run them with `cargo xtask retail-test`.
+retail = []
+
+[[test]]
+name = "build_retail"
+required-features = ["retail"]
+
+[[test]]
+name = "cli_retail"
+required-features = ["retail"]
+
+[[test]]
+name = "link_retail"
+required-features = ["retail"]
+
+[[test]]
+name = "shader_retail"
+required-features = ["retail"]
+
+[[test]]
+name = "tiny_retail"
+required-features = ["retail"]
+
+[[test]]
+name = "template_retail"
+required-features = ["retail"]
+
+[[test]]
+name = "fx_retail"
+required-features = ["retail"]

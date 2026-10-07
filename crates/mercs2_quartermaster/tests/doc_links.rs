@@ -61,8 +61,8 @@ fn every_rule() -> Vec<lint::Rule> {
         .iter()
         .chain(lint::PENDING)
         .chain(lint::ARTIFACT_RULES)
+        .chain(lint::GAME_RULES)
         .copied()
-        .chain([lint::M0007_MULTI_RUNG_REPLACE, lint::M0009_NO_PRIMARY_ROW, lint::M0192_MOVIE_UNREFERENCED])
         .collect()
 }
 

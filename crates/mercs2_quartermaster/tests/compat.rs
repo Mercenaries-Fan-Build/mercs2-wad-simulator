@@ -764,7 +764,7 @@ fn a_consumer_listed_before_ess_is_baked_after_it() {
             movie: "ess_ui".into(),
         },
     ];
-    let bake = link::qm_modloader_source(&regs, &[], &[], &names).unwrap();
+    let bake = link::qm_modloader_source(&regs, &[], &[], &[], &names).unwrap();
     assert!(
         bake.find("ess_ui").unwrap() < bake.find("consumer_hud").unwrap(),
         "{bake}"
@@ -857,7 +857,8 @@ fn a_missing_runtime_dll_is_an_error() {
 
 /// Two Shipments editing the SAME key of one table: not a conflict — `qm link` merges both into one
 /// table in load order and the later one's text wins. The plan names that merged table's block in
-/// `link_block_paths`, after the scripts blocks, so a deploy step drops the per-Shipment copies.
+/// `link_block_paths`, after the `vz.wad` and `shell.wad` scripts blocks, so a deploy step drops the
+/// per-Shipment copies.
 #[test]
 fn stringdb_editors_of_one_table_compose() {
     let p = fixture_plan("request.stringdb.json", "game-clean");
@@ -869,18 +870,111 @@ fn stringdb_editors_of_one_table_compose() {
         vec![
             link::SCRIPT_BLOCKS[0].1.to_string(),
             link::SCRIPT_BLOCKS[1].1.to_string(),
+            link::SHELL_SCRIPT_BLOCKS[0].1.to_string(),
             format!("blocks\\VZ\\mod_{english:08x}.block"),
         ]
     );
     assert_golden(&p, "plan.stringdb.json");
 }
 
-/// A set that edits no string table: `link_block_paths` is the scripts blocks alone.
+/// A set that edits no string table: `link_block_paths` is the scripts blocks alone — `vz.wad`'s
+/// two, then `shell.wad`'s, which the link re-emits with the front end's sound loader.
 #[test]
 fn link_block_paths_without_string_tables_are_the_script_blocks() {
     let root = scratch("lbp-none");
     let a = ship(&root, "plain", "1.0.0", "");
     let p = plan_of(&[&a], None);
-    let scripts: Vec<String> = link::SCRIPT_BLOCKS.iter().map(|(_, p)| p.to_string()).collect();
+    let scripts: Vec<String> =
+        link::SCRIPT_BLOCKS.iter().chain(link::SHELL_SCRIPT_BLOCKS).map(|(_, p)| p.to_string()).collect();
     assert_eq!(p.link_block_paths, scripts);
+    assert_eq!(scripts[2], "blocks\\Shell\\resident_P000_Q3.block");
+}
+
+/// A set with an `add_fx` or a `replace_fx`: `link_block_paths` ends with the effects block, which
+/// the link re-emits with every Shipment's effects; the resident block, already listed, carries
+/// their templates. A set without one does not list it.
+#[test]
+fn link_block_paths_list_the_effects_block_exactly_when_a_shipment_has_an_fx_kind() {
+    let root = scratch("lbp-fx");
+    let plain = ship(&root, "plain", "1.0.0", "");
+    let add = shipment_at(
+        &root.join("adds"),
+        "shipment: { name: adds, version: 1.0.0, target: retail }
+contributions:
+  - kind: add_fx
+    \
+         name: qm_fx
+    effect: src/fx.yaml
+    template:
+      name: qm_tpl
+      name_flag: 1
+      \
+         components:
+        RedEffectComponent: { name: qm_fx }
+",
+    );
+    let edit = shipment_at(
+        &root.join("edits"),
+        "shipment: { name: edits, version: 1.0.0, target: retail }
+contributions:
+  - kind: replace_fx
+    \
+         target: { template: global_particle_fire_carhood }
+    edits: src/e.yaml
+",
+    );
+    let scripts: Vec<String> =
+        link::SCRIPT_BLOCKS.iter().chain(link::SHELL_SCRIPT_BLOCKS).map(|(_, p)| p.to_string()).collect();
+    assert_eq!(plan_of(&[&plain], None).link_block_paths, scripts);
+    let mut with_fx = scripts.clone();
+    with_fx.push("blocks\\VZ\\effects_P000_Q3.block".to_string());
+    for set in [vec![&add], vec![&edit], vec![&plain, &add, &edit]] {
+        let p = plan_of(&set, None);
+        assert!(p.ok, "{:?}", p.findings);
+        assert_eq!(p.link_block_paths, with_fx);
+    }
+    assert_eq!(with_fx.last().unwrap(), mercs2_quartermaster::fx::EFFECTS_BLOCK.1);
+}
+
+/// A set whose only fx contributions are sprites and a repaint of the `vfx` atlas: the link writes
+/// them into the resident block, already listed, and lists no effects block. Two Shipments' sprites
+/// compose with one repaint; two repaints are a conflict.
+#[test]
+fn link_block_paths_of_a_sprites_only_set_list_no_effects_block() {
+    let root = scratch("lbp-sprites");
+    let sprites = |name: &str, sprite: &str| {
+        shipment_at(
+            &root.join(name),
+            &format!(
+                "shipment: {{ name: {name}, version: 1.0.0, target: retail }}
+contributions:
+  - kind: add_fx_sprite
+    name: {sprite}
+    image: src/s.png
+"
+            ),
+        )
+    };
+    let repaint = |name: &str| {
+        shipment_at(
+            &root.join(name),
+            &format!(
+                "shipment: {{ name: {name}, version: 1.0.0, target: retail }}
+contributions:
+  - kind: replace_texture
+    target: vfx
+    image: src/vfx.png
+"
+            ),
+        )
+    };
+    let (a, b, painted) = (sprites("ring", "qm_ring"), sprites("star", "qm_star"), repaint("painted"));
+    let scripts: Vec<String> =
+        link::SCRIPT_BLOCKS.iter().chain(link::SHELL_SCRIPT_BLOCKS).map(|(_, p)| p.to_string()).collect();
+    let p = plan_of(&[&a, &b, &painted], None);
+    assert!(p.ok, "{:?}", p.findings);
+    assert_eq!(p.link_block_paths, scripts);
+    let p = plan_of(&[&painted, &repaint("painted-again")], None);
+    assert!(!p.ok);
+    assert!(p.findings.iter().any(|f| f.code == "M0207" && f.message.contains("the repaint of the vfx atlas")), "{:?}", p.findings);
 }

@@ -401,6 +401,16 @@ impl GameStack {
         exe.is_file().then_some(exe)
     }
 
+    /// The game WAD `file` beside this stack's base WAD (`shell.wad`, `English.wad`, matched
+    /// case-insensitively, [`crate::sound::sibling_wad`]), opened as a stack of its own and never
+    /// merged into this one: `shell.wad` and `vz.wad` never share a mount slot
+    /// (`fixpack/wad_duplicate_inventory.md` §B.5). A missing or unreadable file is an error.
+    pub fn open_sibling(&self, file: &str) -> Result<GameStack, String> {
+        let base = self.wads.first().map(|w| w.path.as_path()).ok_or("the game stack is empty")?;
+        let path = crate::sound::sibling_wad(base, file)?;
+        GameStack::open(std::slice::from_ref(&path)).map_err(|e| e.to_string())
+    }
+
     /// The stack as configured, base first. Shown in the UI so "which install was it reading" is
     /// never a mystery.
     pub fn paths(&self) -> Vec<&Path> {
@@ -595,6 +605,79 @@ impl GameStack {
             });
         }
         None
+    }
+
+    /// The block holding the layer NAMED `name` (its sub-block's entry is `m2(name)`, type
+    /// `0xE6B81A54`), last-mounted-wins, with what an overlay of that block needs, and the index of
+    /// the layer's entry in it. Found through the layer's ASET row, so a layer that shares a block
+    /// with others (`vz_merida_tiny` in `layers_static`) is found by its own name.
+    pub fn layer_by_name(&mut self, name: &str) -> Result<Option<(LayerEditInputs, usize)>, String> {
+        use mercs2_formats::types::{TYPE_HASH_LAYER, TYPE_ID_LAYER};
+        let hash = crate::manifest::asset_hash(name);
+        for wad in self.wads.iter_mut().rev() {
+            let Some(row) = wad.archive.aset.iter().find(|e| e.asset_hash == hash && e.type_id == TYPE_ID_LAYER)
+            else {
+                continue;
+            };
+            let idx = row.block_index() as usize;
+            let dec = mercs2_formats::sges::decompress_block(&mut wad.file, &wad.archive.indx, idx as u16)
+                .map_err(|e| format!("{}: block {idx}, which holds layer {name}: {e}", wad.path.display()))?;
+            let (entry, _) = mercs2_formats::placement_build::find_entry(&dec, hash, TYPE_HASH_LAYER).ok_or_else(|| {
+                format!(
+                    "{}: the ASET row of layer {name} names block {idx}, which has no layer entry 0x{hash:08X}",
+                    wad.path.display()
+                )
+            })?;
+            let rows = wad
+                .archive
+                .aset
+                .iter()
+                .filter(|e| e.block_index() as usize == idx)
+                .map(|e| AsetRow {
+                    asset_hash: e.asset_hash,
+                    packed_block_ref: e.packed_block_ref,
+                    secondary_ref: e.secondary_ref,
+                    type_id: e.type_id,
+                })
+                .collect();
+            return Ok(Some((
+                LayerEditInputs { block: dec, path: wad.archive.paths[idx].clone(), block_index: idx as u32, rows },
+                entry,
+            )));
+        }
+        Ok(None)
+    }
+
+    /// Every layer sub-block of the stack, by name hash, last-mounted-wins: each block an ASET layer
+    /// row points at is read once, and each of its `0xE6B81A54` entries taken.
+    pub fn layer_containers(&mut self) -> Result<std::collections::BTreeMap<u32, Vec<u8>>, String> {
+        use mercs2_formats::types::{TYPE_HASH_LAYER, TYPE_ID_LAYER};
+        let mut out = std::collections::BTreeMap::new();
+        for wad in self.wads.iter_mut().rev() {
+            let blocks: std::collections::BTreeSet<u16> = wad
+                .archive
+                .aset
+                .iter()
+                .filter(|e| e.type_id == TYPE_ID_LAYER)
+                .map(|e| e.block_index())
+                .collect();
+            for b in blocks {
+                let dec = mercs2_formats::sges::decompress_block(&mut wad.file, &wad.archive.indx, b)
+                    .map_err(|e| format!("{}: layer block {b}: {e}", wad.path.display()))?;
+                let (count, entries) = mercs2_formats::ucfx::parse_block_entry_table(&dec);
+                let mut at = 4 + count as usize * 16;
+                for e in &entries {
+                    let end = at + e.chunk_size as usize;
+                    if e.type_hash == TYPE_HASH_LAYER {
+                        if let Some(c) = dec.get(at..end) {
+                            out.entry(e.name_hash).or_insert_with(|| c.to_vec());
+                        }
+                    }
+                    at = end;
+                }
+            }
+        }
+        Ok(out)
     }
 
     /// Everything an in-place MODEL-container edit (`edit_state_machine`) needs to re-emit the model
@@ -800,44 +883,53 @@ mod tests {
         }
     }
 
-    /// A console bake OPENS fine — Shipments are expected to export to every platform, so refusing
-    /// to read one would be wrong. Only EMITTING for it is unsupported, and that is the builder's
-    /// call, not this layer's.
-    #[test]
-    fn a_console_bake_opens_and_reports_its_platform() {
-        let Some(found) = discover() else { return };
-        let dir = found
-            .path
-            .parent()
-            .map(|p| p.to_path_buf())
-            .unwrap_or_default();
-        for name in ["xbox-vz.wad", "ps3-VZ.WAD"] {
-            let candidate = dir.join(name);
-            if !candidate.is_file() {
-                continue;
-            }
-            let stack = GameStack::open(std::slice::from_ref(&candidate))
-                .unwrap_or_else(|e| panic!("a console bake must open, not error: {e}"));
-            assert_eq!(stack.platform(), Platform::BigEndianConsole, "{name}");
-        }
-    }
+    /// Game-gated: built by the `retail` feature, reads the vz.wad named by the repo-root
+    /// `.mercs2-local.toml`, and fails if it is absent.
+    #[cfg(feature = "retail")]
+    mod retail {
+        use super::*;
 
-    /// Mixing platforms in one stack IS an error: resolution walks the whole stack, so it would read
-    /// structures of the wrong endianness.
-    #[test]
-    fn a_mixed_platform_stack_is_rejected() {
-        let Some(found) = discover() else { return };
-        let dir = found
-            .path
-            .parent()
-            .map(|p| p.to_path_buf())
-            .unwrap_or_default();
-        let console = dir.join("xbox-vz.wad");
-        if !console.is_file() {
-            return;
+        /// The retail `vz.wad` the repo-root `.mercs2-local.toml` names; panics when it cannot.
+        fn retail_vz_wad() -> PathBuf {
+            mercs2_formats::game_paths::local_config_vz_wad(Path::new(env!("CARGO_MANIFEST_DIR")))
+                .unwrap_or_else(|e| panic!("{e}"))
         }
-        let err = GameStack::open(&[found.path.clone(), console]).unwrap_err();
-        assert!(err.to_string().contains("mixes PC and console"), "{err}");
+
+        /// The Xbox 360 bake the repo-root `.mercs2-local.toml` names (`xbox_vz_wad`); panics when it
+        /// cannot.
+        fn retail_xbox_vz_wad() -> PathBuf {
+            mercs2_formats::game_paths::local_config_xbox_vz_wad(Path::new(env!("CARGO_MANIFEST_DIR")))
+                .unwrap_or_else(|e| panic!("{e}"))
+        }
+
+        /// The PS3 bake the repo-root `.mercs2-local.toml` names (`ps3_vz_wad`); panics when it cannot.
+        fn retail_ps3_vz_wad() -> PathBuf {
+            mercs2_formats::game_paths::local_config_ps3_vz_wad(Path::new(env!("CARGO_MANIFEST_DIR")))
+                .unwrap_or_else(|e| panic!("{e}"))
+        }
+
+        /// A console bake OPENS fine — Shipments are expected to export to every platform, so refusing
+        /// to read one would be wrong. Only EMITTING for it is unsupported, and that is the builder's
+        /// call, not this layer's. Both bakes are required: each is named by its own config key.
+        #[test]
+        fn a_console_bake_opens_and_reports_its_platform() {
+            for (key, bake) in [("xbox_vz_wad", retail_xbox_vz_wad()), ("ps3_vz_wad", retail_ps3_vz_wad())] {
+                let stack = GameStack::open(std::slice::from_ref(&bake)).unwrap_or_else(|e| {
+                    panic!("{key} = {}: a console bake must open, not error: {e}", bake.display())
+                });
+                assert_eq!(stack.platform(), Platform::BigEndianConsole, "{key} = {}", bake.display());
+            }
+        }
+
+        /// Mixing platforms in one stack IS an error: resolution walks the whole stack, so it would read
+        /// structures of the wrong endianness.
+        #[test]
+        fn a_mixed_platform_stack_is_rejected() {
+            let vz = retail_vz_wad();
+            let console = retail_xbox_vz_wad();
+            let err = GameStack::open(&[vz, console]).unwrap_err();
+            assert!(err.to_string().contains("mixes PC and console"), "{err}");
+        }
     }
 
     #[test]

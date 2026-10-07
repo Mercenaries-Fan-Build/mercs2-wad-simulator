@@ -208,6 +208,9 @@ pub struct CharGlbData {
     /// 1:1, so each group's palette covers only its region's bones and each group carries exactly
     /// one material (which is what MTRL repointing needs).
     pub parts: Vec<MeshPart>,
+    /// Every vertex's custom attributes (`_SWAY_WEIGHT`, `_TINY_SLOT`), index-parallel with
+    /// `positions`. See [`crate::mesh_import::custom_attributes_from_gltf`].
+    pub custom: crate::mesh_import::CustomAttributes,
 }
 
 /// One source sub-object: a contiguous run of `CharGlbData::tris`, with its material.

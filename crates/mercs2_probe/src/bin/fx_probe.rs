@@ -274,10 +274,10 @@ fn dump_typed(c: &[u8], name: &str) {
         let colr: Vec<String> = (0..8)
             .map(|k| {
                 let key = e.particle.colr.keys[k * 99 / 7];
-                format!("{:02X?}/{:04X}", key.colour, key.half_bits)
+                format!("{:02X?}/{:04X}", key.rgba, key.half_bits)
             })
             .collect();
-        println!("    COLR (8 of 100 keys): {colr:?}");
+        println!("    COLR (8 of 100 keys, rgba/half): {colr:?}");
         println!("    TEXT frames: {:08X?}", e.particle.text.frames);
     }
     for (i, f) in fx.forces.iter().enumerate() {

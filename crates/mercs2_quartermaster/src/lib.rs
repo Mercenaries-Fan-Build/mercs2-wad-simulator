@@ -24,14 +24,23 @@ pub mod blast;
 pub mod build;
 pub mod compat;
 pub mod discover;
+pub mod effect;
+pub mod fx;
 pub mod game;
+pub mod language;
 pub mod link;
 pub mod lint;
 pub mod manifest;
 pub mod names;
 pub mod pe;
 pub mod plan;
+pub mod shader;
+pub mod shader_import;
+pub mod sound;
+pub mod sprite;
 pub mod states;
+pub mod template;
+pub mod tiny;
 pub mod world;
 
 pub use blast::{

@@ -4,6 +4,9 @@
 //! writer it justified: `patch_transform` / `patch_model` must change precisely the targeted field
 //! of the targeted entity, leave every other byte alone (pad, tail, sibling records), read back
 //! through `load_placements` as the new value, and restore byte-for-byte when reverted.
+//!
+//! Game-gated: built by the `retail` feature, reads the `vz.wad` named by the repo-root
+//! `.mercs2-local.toml`, and fails if it is absent.
 
 use std::path::{Path, PathBuf};
 
@@ -11,37 +14,37 @@ use mercs2_formats::ffcs::load_ffcs_archive;
 use mercs2_formats::placement::{comp_inventory, load_placements, patch_model, patch_transform};
 use mercs2_formats::sges::decompress_block;
 
-fn vz_wad() -> Option<PathBuf> {
-    mercs2_formats::game_paths::vz_wad(Path::new(env!("CARGO_MANIFEST_DIR")))
+fn vz_wad() -> PathBuf {
+    mercs2_formats::game_paths::local_config_vz_wad(Path::new(env!("CARGO_MANIFEST_DIR")))
+        .unwrap_or_else(|e| panic!("{e}"))
 }
 
 /// The first placement block that carries a Transform (and, for the model test, a ModelName).
-fn a_placement_block() -> Option<Vec<u8>> {
-    let wad = vz_wad()?;
-    let mut file = std::fs::File::open(&wad).ok()?;
-    let size = file.metadata().ok()?.len();
-    let archive = load_ffcs_archive(&mut file, size).ok()?;
+fn a_placement_block() -> Vec<u8> {
+    let wad = vz_wad();
+    let mut file = std::fs::File::open(&wad).expect("open vz.wad");
+    let size = file.metadata().expect("stat vz.wad").len();
+    let archive = load_ffcs_archive(&mut file, size).expect("read FFCS");
     for (idx, path) in archive.paths.iter().enumerate() {
         let p = path.to_lowercase();
         if p.contains("layers_static") || p.contains("vz_state") {
-            if let Ok(dec) = decompress_block(&mut file, &archive.indx, idx as u16) {
-                if load_placements(&dec).map(|v| !v.is_empty()).unwrap_or(false) {
-                    return Some(dec);
-                }
+            let dec = decompress_block(&mut file, &archive.indx, idx as u16)
+                .unwrap_or_else(|e| panic!("decompress block {idx} ({path}): {e}"));
+            // `load_placements` errs only when a layer has no UCFX sub-block or no Transform
+            // record, i.e. when nothing is placed in it.
+            if load_placements(&dec).map(|v| !v.is_empty()).unwrap_or(false) {
+                return dec;
             }
         }
     }
-    None
+    panic!("no layers_static / vz_state block in {} carries a placement", wad.display());
 }
 
 /// ★ Move an entity: `patch_transform` changes its pos, reads back as the new value, and reverting
 /// restores the block byte-for-byte — so an edit is exactly one field, nothing more.
 #[test]
 fn patch_transform_moves_one_entity_and_reverts_byte_identically() {
-    let Some(original) = a_placement_block() else {
-        eprintln!("SKIPPING: no vz.wad / no placement block");
-        return;
-    };
+    let original = a_placement_block();
     let places = load_placements(&original).expect("parse");
     // Pick a placement with a resolvable key and note its pos/quat.
     let target = places[0].clone();
@@ -74,16 +77,13 @@ fn patch_transform_moves_one_entity_and_reverts_byte_identically() {
 /// ★ Reskin an entity: `patch_model` repoints a ModelName record, and reverting restores the bytes.
 #[test]
 fn patch_model_repoints_one_entity_and_reverts() {
-    let Some(original) = a_placement_block() else {
-        eprintln!("SKIPPING: no vz.wad");
-        return;
-    };
+    let original = a_placement_block();
     // Find a ModelName record's key + current hash by reading its data span directly.
     let comps = comp_inventory(&original);
-    let Some(mn) = comps.iter().find(|c| c.info_name.as_deref() == Some("ModelName") && c.data_size.unwrap_or(0) >= 8) else {
-        eprintln!("SKIPPING: no ModelName COMP in this block");
-        return;
-    };
+    let mn = comps
+        .iter()
+        .find(|c| c.info_name.as_deref() == Some("ModelName") && c.data_size.unwrap_or(0) >= 8)
+        .expect("the placement block carries no ModelName COMP of at least 8 bytes");
     let off = mn.data_off.unwrap();
     let key = u32::from_le_bytes(original[off..off + 4].try_into().unwrap());
     let old_hash = u32::from_le_bytes(original[off + 4..off + 8].try_into().unwrap());
@@ -107,10 +107,7 @@ fn patch_model_repoints_one_entity_and_reverts() {
 /// A key that names no placement patches nothing and leaves the block untouched.
 #[test]
 fn an_unknown_key_patches_nothing() {
-    let Some(original) = a_placement_block() else {
-        eprintln!("SKIPPING: no vz.wad");
-        return;
-    };
+    let original = a_placement_block();
     let mut edited = original.clone();
     let n = patch_transform(&mut edited, 0xFFFF_FFFE, Some([1.0, 2.0, 3.0]), None);
     assert_eq!(n, 0, "a nonexistent key must match no record");

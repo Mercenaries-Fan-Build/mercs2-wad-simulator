@@ -463,215 +463,6 @@ mod tests {
         assert_eq!(t.codec(), AudioCodec::Rdft);
     }
 
-    /// **Every shipped movie parses, and the set is uniform enough to scope the decoders.**
-    ///
-    /// This is what turns "write a Bink decoder" into a bounded job. It parses all 45 files against
-    /// the real container and asserts the properties the decoder design leans on — one revision, no
-    /// alpha plane, a self-consistent frame table. If a future asset (a DLC movie, a different
-    /// install) breaks one of those, this fails rather than letting the decoder read garbage.
-    ///
-    /// It also PRINTS the audio-variant spread, which is the input to scoping the audio decoder:
-    /// Bink audio has two bitstreams (RDFT and DCT) and we only have to write the ones in use.
-    ///
-    /// SKIPS (passes) without a configured game directory.
-    #[test]
-    fn the_shipped_movie_set_is_uniform() {
-        let Some(dir) = movies_dir() else {
-            return eprintln!("[skip] no game dir configured — shipped-movie scan skipped");
-        };
-        let mut files: Vec<std::path::PathBuf> = std::fs::read_dir(&dir)
-            .unwrap_or_else(|e| panic!("read {}: {e}", dir.display()))
-            .filter_map(|e| e.ok().map(|e| e.path()))
-            .filter(|p| p.extension().is_some_and(|x| x.eq_ignore_ascii_case("bik")))
-            .collect();
-        files.sort();
-        assert!(!files.is_empty(), "no .bik files under {}", dir.display());
-
-        let mut revisions = std::collections::BTreeSet::new();
-        let mut variants: std::collections::BTreeMap<String, usize> = Default::default();
-        let mut resolutions: std::collections::BTreeMap<String, usize> = Default::default();
-        let mut trackless = 0usize;
-        let mut total_secs = 0.0;
-
-        for path in &files {
-            let f = parse_file(path).unwrap_or_else(|e| panic!("{e}"));
-            revisions.insert(f.revision as char);
-            *resolutions
-                .entry(format!("{}x{} @{:.2}fps", f.width, f.height, f.fps()))
-                .or_default() += 1;
-            total_secs += f.duration_secs();
-
-            // Self-consistency: frames tile the file in order and none overflows the declared
-            // largest-frame bound the decoder sizes its buffer from.
-            let mut prev_end = 0u64;
-            for (i, fr) in f.frames.iter().enumerate() {
-                assert!(
-                    fr.offset >= prev_end,
-                    "{}: frame {i} overlaps the previous one",
-                    path.display()
-                );
-                assert!(
-                    fr.length <= f.largest_frame as u64,
-                    "{}: frame {i} is {} bytes, over the declared largest {}",
-                    path.display(),
-                    fr.length,
-                    f.largest_frame
-                );
-                prev_end = fr.offset + fr.length;
-            }
-            assert!(
-                f.frames.first().is_some_and(|fr| fr.keyframe),
-                "{}: the first frame must be a keyframe",
-                path.display()
-            );
-            assert_eq!(
-                f.video_flags,
-                0,
-                "{}: alpha/extended video flags are unsupported",
-                path.display()
-            );
-
-            if f.audio_tracks.is_empty() {
-                trackless += 1;
-            }
-            for t in &f.audio_tracks {
-                *variants
-                    .entry(format!(
-                        "{:?} {}ch {}Hz",
-                        t.codec(),
-                        t.channels(),
-                        t.sample_rate
-                    ))
-                    .or_default() += 1;
-            }
-        }
-
-        println!(
-            "[bink] {} files, {:.1} min total",
-            files.len(),
-            total_secs / 60.0
-        );
-        println!("[bink] revisions: {revisions:?}");
-        for (r, n) in &resolutions {
-            println!("[bink] {r}  x{n}");
-        }
-        println!("[bink] {trackless} file(s) carry no audio track");
-        for (v, n) in &variants {
-            println!("[bink] audio variant: {v}  x{n}");
-        }
-
-        // The scoping claim the decoder work rests on.
-        assert_eq!(
-            revisions.len(),
-            1,
-            "the decoder is written for ONE revision; found {revisions:?}"
-        );
-        assert!(
-            revisions.contains(&'i'),
-            "expected revision 'i', found {revisions:?}"
-        );
-    }
-
-    /// **The frame layout is exact on every frame of every shipped movie.**
-    ///
-    /// This is the check that makes [`split_frame`] trustworthy rather than plausible. The claimed
-    /// layout — a size-prefixed audio packet per track, then video for the remainder — has to
-    /// account for each frame's bytes *precisely*. A wrong reading (packet sizes including their own
-    /// header, tracks in a different order, an extra field) would leave a residue or run past the
-    /// end, and it would have to do so consistently across ~72 000 frames to slip through.
-    ///
-    /// It also asserts the video remainder is non-empty on keyframes: a keyframe with no video data
-    /// would mean the audio packets swallowed the frame, which is the most likely failure shape.
-    ///
-    /// SKIPS (passes) without a configured game directory.
-    #[test]
-    fn the_frame_layout_holds_across_every_shipped_frame() {
-        let Some(dir) = movies_dir() else {
-            return eprintln!("[skip] no game dir configured — frame-layout scan skipped");
-        };
-        let mut files: Vec<std::path::PathBuf> = std::fs::read_dir(&dir)
-            .unwrap_or_else(|e| panic!("read {}: {e}", dir.display()))
-            .filter_map(|e| e.ok().map(|e| e.path()))
-            .filter(|p| p.extension().is_some_and(|x| x.eq_ignore_ascii_case("bik")))
-            .collect();
-        files.sort();
-
-        let (mut total_frames, mut total_audio, mut total_video, mut silent_packets) =
-            (0usize, 0u64, 0u64, 0usize);
-
-        for path in &files {
-            let bytes =
-                std::fs::read(path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
-            let f = parse(&bytes).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
-
-            for (i, fr) in f.frames.iter().enumerate() {
-                let p = split_frame(&f, fr, &bytes)
-                    .unwrap_or_else(|e| panic!("{} frame {i}: {e}", path.display()));
-
-                assert_eq!(
-                    p.audio.len(),
-                    f.audio_tracks.len(),
-                    "{} frame {i}: one packet slot per declared track",
-                    path.display()
-                );
-
-                // The accounting identity: 4-byte size word per track, plus each packet's bytes,
-                // plus the video remainder, equals the frame exactly.
-                let audio_bytes: usize = p.audio.iter().map(|a| a.map_or(0, |s| s.len())).sum();
-                let accounted = f.audio_tracks.len() * 4 + audio_bytes + p.video.len();
-                assert_eq!(
-                    accounted as u64,
-                    fr.length,
-                    "{} frame {i}: layout accounts for {accounted} bytes of a {}-byte frame",
-                    path.display(),
-                    fr.length
-                );
-
-                if fr.keyframe {
-                    assert!(
-                        !p.video.is_empty(),
-                        "{} frame {i}: a keyframe must carry video data",
-                        path.display()
-                    );
-                }
-                // A non-empty packet always has room for its own leading sample-count word.
-                for (t, a) in p.audio.iter().enumerate() {
-                    if let Some(s) = a {
-                        assert!(
-                            s.len() >= 4,
-                            "{} frame {i} track {t}: {}-byte packet is too small for its \
-                             sample-count header",
-                            path.display(),
-                            s.len()
-                        );
-                    } else {
-                        silent_packets += 1;
-                    }
-                }
-
-                total_frames += 1;
-                total_audio += audio_bytes as u64;
-                total_video += p.video.len() as u64;
-            }
-        }
-
-        println!(
-            "[bink] {total_frames} frames across {} files: {:.1} MB video, {:.1} MB audio, \
-             {silent_packets} silent track-frames",
-            files.len(),
-            total_video as f64 / 1e6,
-            total_audio as f64 / 1e6,
-        );
-        assert!(
-            total_frames > 10_000,
-            "expected the full shipped set; got {total_frames} frames"
-        );
-        assert!(
-            total_video > 0 && total_audio > 0,
-            "both streams must carry data"
-        );
-    }
-
     /// Structural invariants are enforced, so a misread surfaces at parse rather than as bad frames.
     #[test]
     fn rejects_malformed_containers() {
@@ -695,5 +486,226 @@ mod tests {
             e.contains("file length"),
             "declared-size mismatch must be named: {e}"
         );
+    }
+
+    /// Game-gated: built by the `retail` feature, reads the `Movies` folder beside the `vz.wad` named
+    /// by the repo-root `.mercs2-local.toml`, and fails if either is absent.
+    #[cfg(feature = "retail")]
+    mod retail {
+        use super::*;
+
+        /// `<the vz.wad folder>/Movies`, the shipped movie set of the configured install.
+        fn shipped_movies_dir() -> std::path::PathBuf {
+            let vz = crate::game_paths::local_config_vz_wad(std::path::Path::new(env!("CARGO_MANIFEST_DIR")))
+                .unwrap_or_else(|e| panic!("{e}"));
+            let dir = vz
+                .parent()
+                .unwrap_or_else(|| panic!("{} has no parent folder", vz.display()))
+                .join("Movies");
+            assert!(dir.is_dir(), "no Movies folder beside {}: {} is not a directory", vz.display(), dir.display());
+            dir
+        }
+
+        /// **Every shipped movie parses, and the set is uniform enough to scope the decoders.**
+        ///
+        /// This is what turns "write a Bink decoder" into a bounded job. It parses all 45 files against
+        /// the real container and asserts the properties the decoder design leans on — one revision, no
+        /// alpha plane, a self-consistent frame table. If a future asset (a DLC movie, a different
+        /// install) breaks one of those, this fails rather than letting the decoder read garbage.
+        ///
+        /// It also PRINTS the audio-variant spread, which is the input to scoping the audio decoder:
+        /// Bink audio has two bitstreams (RDFT and DCT) and we only have to write the ones in use.
+        #[test]
+        fn the_shipped_movie_set_is_uniform() {
+            let dir = shipped_movies_dir();
+            let mut files: Vec<std::path::PathBuf> = std::fs::read_dir(&dir)
+                .unwrap_or_else(|e| panic!("read {}: {e}", dir.display()))
+                .map(|e| e.unwrap_or_else(|e| panic!("read an entry of {}: {e}", dir.display())).path())
+                .filter(|p| p.extension().is_some_and(|x| x.eq_ignore_ascii_case("bik")))
+                .collect();
+            files.sort();
+            assert!(!files.is_empty(), "no .bik files under {}", dir.display());
+
+            let mut revisions = std::collections::BTreeSet::new();
+            let mut variants: std::collections::BTreeMap<String, usize> = Default::default();
+            let mut resolutions: std::collections::BTreeMap<String, usize> = Default::default();
+            let mut trackless = 0usize;
+            let mut total_secs = 0.0;
+
+            for path in &files {
+                let f = parse_file(path).unwrap_or_else(|e| panic!("{e}"));
+                revisions.insert(f.revision as char);
+                *resolutions
+                    .entry(format!("{}x{} @{:.2}fps", f.width, f.height, f.fps()))
+                    .or_default() += 1;
+                total_secs += f.duration_secs();
+
+                // Self-consistency: frames tile the file in order and none overflows the declared
+                // largest-frame bound the decoder sizes its buffer from.
+                let mut prev_end = 0u64;
+                for (i, fr) in f.frames.iter().enumerate() {
+                    assert!(
+                        fr.offset >= prev_end,
+                        "{}: frame {i} overlaps the previous one",
+                        path.display()
+                    );
+                    assert!(
+                        fr.length <= f.largest_frame as u64,
+                        "{}: frame {i} is {} bytes, over the declared largest {}",
+                        path.display(),
+                        fr.length,
+                        f.largest_frame
+                    );
+                    prev_end = fr.offset + fr.length;
+                }
+                assert!(
+                    f.frames.first().is_some_and(|fr| fr.keyframe),
+                    "{}: the first frame must be a keyframe",
+                    path.display()
+                );
+                assert_eq!(
+                    f.video_flags,
+                    0,
+                    "{}: alpha/extended video flags are unsupported",
+                    path.display()
+                );
+
+                if f.audio_tracks.is_empty() {
+                    trackless += 1;
+                }
+                for t in &f.audio_tracks {
+                    *variants
+                        .entry(format!(
+                            "{:?} {}ch {}Hz",
+                            t.codec(),
+                            t.channels(),
+                            t.sample_rate
+                        ))
+                        .or_default() += 1;
+                }
+            }
+
+            println!(
+                "[bink] {} files, {:.1} min total",
+                files.len(),
+                total_secs / 60.0
+            );
+            println!("[bink] revisions: {revisions:?}");
+            for (r, n) in &resolutions {
+                println!("[bink] {r}  x{n}");
+            }
+            println!("[bink] {trackless} file(s) carry no audio track");
+            for (v, n) in &variants {
+                println!("[bink] audio variant: {v}  x{n}");
+            }
+
+            // The scoping claim the decoder work rests on.
+            assert_eq!(
+                revisions.len(),
+                1,
+                "the decoder is written for ONE revision; found {revisions:?}"
+            );
+            assert!(
+                revisions.contains(&'i'),
+                "expected revision 'i', found {revisions:?}"
+            );
+        }
+
+        /// **The frame layout is exact on every frame of every shipped movie.**
+        ///
+        /// This is the check that makes [`split_frame`] trustworthy rather than plausible. The claimed
+        /// layout — a size-prefixed audio packet per track, then video for the remainder — has to
+        /// account for each frame's bytes *precisely*. A wrong reading (packet sizes including their own
+        /// header, tracks in a different order, an extra field) would leave a residue or run past the
+        /// end, and it would have to do so consistently across ~72 000 frames to slip through.
+        ///
+        /// It also asserts the video remainder is non-empty on keyframes: a keyframe with no video data
+        /// would mean the audio packets swallowed the frame, which is the most likely failure shape.
+        #[test]
+        fn the_frame_layout_holds_across_every_shipped_frame() {
+            let dir = shipped_movies_dir();
+            let mut files: Vec<std::path::PathBuf> = std::fs::read_dir(&dir)
+                .unwrap_or_else(|e| panic!("read {}: {e}", dir.display()))
+                .map(|e| e.unwrap_or_else(|e| panic!("read an entry of {}: {e}", dir.display())).path())
+                .filter(|p| p.extension().is_some_and(|x| x.eq_ignore_ascii_case("bik")))
+                .collect();
+            files.sort();
+            assert!(!files.is_empty(), "no .bik files under {}", dir.display());
+
+            let (mut total_frames, mut total_audio, mut total_video, mut silent_packets) =
+                (0usize, 0u64, 0u64, 0usize);
+
+            for path in &files {
+                let bytes =
+                    std::fs::read(path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+                let f = parse(&bytes).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+
+                for (i, fr) in f.frames.iter().enumerate() {
+                    let p = split_frame(&f, fr, &bytes)
+                        .unwrap_or_else(|e| panic!("{} frame {i}: {e}", path.display()));
+
+                    assert_eq!(
+                        p.audio.len(),
+                        f.audio_tracks.len(),
+                        "{} frame {i}: one packet slot per declared track",
+                        path.display()
+                    );
+
+                    // The accounting identity: 4-byte size word per track, plus each packet's bytes,
+                    // plus the video remainder, equals the frame exactly.
+                    let audio_bytes: usize = p.audio.iter().map(|a| a.map_or(0, |s| s.len())).sum();
+                    let accounted = f.audio_tracks.len() * 4 + audio_bytes + p.video.len();
+                    assert_eq!(
+                        accounted as u64,
+                        fr.length,
+                        "{} frame {i}: layout accounts for {accounted} bytes of a {}-byte frame",
+                        path.display(),
+                        fr.length
+                    );
+
+                    if fr.keyframe {
+                        assert!(
+                            !p.video.is_empty(),
+                            "{} frame {i}: a keyframe must carry video data",
+                            path.display()
+                        );
+                    }
+                    // A non-empty packet always has room for its own leading sample-count word.
+                    for (t, a) in p.audio.iter().enumerate() {
+                        if let Some(s) = a {
+                            assert!(
+                                s.len() >= 4,
+                                "{} frame {i} track {t}: {}-byte packet is too small for its \
+                                 sample-count header",
+                                path.display(),
+                                s.len()
+                            );
+                        } else {
+                            silent_packets += 1;
+                        }
+                    }
+
+                    total_frames += 1;
+                    total_audio += audio_bytes as u64;
+                    total_video += p.video.len() as u64;
+                }
+            }
+
+            println!(
+                "[bink] {total_frames} frames across {} files: {:.1} MB video, {:.1} MB audio, \
+                 {silent_packets} silent track-frames",
+                files.len(),
+                total_video as f64 / 1e6,
+                total_audio as f64 / 1e6,
+            );
+            assert!(
+                total_frames > 10_000,
+                "expected the full shipped set; got {total_frames} frames"
+            );
+            assert!(
+                total_video > 0 && total_audio > 0,
+                "both streams must carry data"
+            );
+        }
     }
 }
