@@ -32,8 +32,9 @@
 //!   `options` (a list of `bit7`, `resample`, `bit9`; empty for none);
 //! * an f32 position takes a finite number; a u32 position takes an integer, `0xHHHHHHHH`, or a
 //!   name (hashed with `pandemic_hash_m2`);
-//! * `geom` is `{shape, word}` or `none`; `colour` has exactly 100 keys, each `rgba` and `half`
-//!   (an integer or `0xHHHH`); `frames` names at least one sprite frame, a record of the game's
+//! * `geom` is `{shape, word}` or `none`; `colour` has exactly 100 keys, each `rgba` (red, green,
+//!   blue, alpha; the container stores each key blue, green, red, alpha) and `half` (an integer or
+//!   `0xHHHH`); `frames` names at least one sprite frame, a record of the game's
 //!   `fxdict` (`crate::fx`).
 //! * A shape record is a triangle particles spawn on ([`mercs2_formats::fxdict::EmitterShape`]):
 //!   float 0 is `|A × B|`, floats 1–3 a unit vector along `±(A × B)`, floats 4–6 the vertex `P`,
@@ -125,7 +126,7 @@ pub struct ParticleForm {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ColourKeyForm {
-    /// The four colour bytes, in file order.
+    /// Red, green, blue, alpha ([`ColrKey::rgba`]).
     pub rgba: [u8; 4],
     /// The binary16 bit pattern carried with the key.
     pub half: WordInput,
@@ -450,9 +451,9 @@ pub(crate) fn lower_colour(what: &str, keys: &[ColourKeyForm]) -> Result<Colr, S
     if keys.len() != COLR_KEYS {
         return Err(format!("{what}: {} keys; COLR has exactly {COLR_KEYS}", keys.len()));
     }
-    let mut out = [ColrKey { colour: [0; 4], half_bits: 0 }; COLR_KEYS];
+    let mut out = [ColrKey { rgba: [0; 4], half_bits: 0 }; COLR_KEYS];
     for (i, (o, k)) in out.iter_mut().zip(keys).enumerate() {
-        *o = ColrKey { colour: k.rgba, half_bits: word(&format!("{what}[{i}].half"), &k.half, u16::MAX as u64)? as u16 };
+        *o = ColrKey { rgba: k.rgba, half_bits: word(&format!("{what}[{i}].half"), &k.half, u16::MAX as u64)? as u16 };
     }
     Ok(Colr { keys: out })
 }
@@ -525,7 +526,7 @@ impl EmitterForm {
                     .colr
                     .keys
                     .iter()
-                    .map(|k| ColourKeyForm { rgba: k.colour, half: WordInput::Text(format!("0x{:04X}", k.half_bits)) })
+                    .map(|k| ColourKeyForm { rgba: k.rgba, half: WordInput::Text(format!("0x{:04X}", k.half_bits)) })
                     .collect(),
                 frames: e.particle.text.frames.iter().map(|&f| hex(f)).collect(),
             },
@@ -788,6 +789,19 @@ mod tests {
         assert_eq!(fx.forces.len(), 2);
         let back = EffectForm::express(&fx);
         assert_eq!(back.encode().unwrap(), bytes);
+    }
+
+    #[test]
+    fn an_authored_rgba_key_is_stored_blue_green_red_alpha() {
+        // Key 0 of the form is cyan: red 0, green 255, blue 255, alpha 255.
+        let f = form();
+        assert_eq!(f.emitters[0].particle.colour[0].rgba, [0, 255, 255, 255]);
+        let bytes = f.encode().unwrap();
+        let stored: [u8; 8] = [0xFF, 0xFF, 0x00, 0xFF, 0x00, 0x3C, 0x00, 0x00];
+        assert_eq!(bytes.windows(8).filter(|w| *w == stored).count(), 1);
+        assert!(!bytes.windows(8).any(|w| w == [0x00, 0xFF, 0xFF, 0xFF, 0x00, 0x3C, 0x00, 0x00]));
+        let back = EffectForm::express(&parse_effect_container(&bytes).unwrap());
+        assert_eq!(back.emitters[0].particle.colour, f.emitters[0].particle.colour);
     }
 
     #[test]
