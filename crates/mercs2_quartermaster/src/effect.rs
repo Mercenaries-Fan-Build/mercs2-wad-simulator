@@ -3,13 +3,13 @@
 //!
 //! ```yaml
 //! shapes:                                   # the EMTR shape tables: each a list of 13-f32 records
-//!   - - [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+//!   - - [1.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, -1.0]
 //! emitters:
 //!   - transform: [[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]]
 //!     channels:                             # the nine TRFM channels, by name
 //!       posx: { value: 0.0, curve: none, options: [] }
 //!       ...
-//!     geom: { shape: 0, word: 16 }          # or `none`
+//!     geom: { shape: 0, word: 1 }           # the shape and how many of its records are sampled
 //!     particle:
 //!       flags: 1
 //!       attributes:                         # all 32 PTYP attributes, by name or 0xHHHHHHHH
@@ -35,11 +35,20 @@
 //! * `geom` is `{shape, word}` or `none`; `colour` has exactly 100 keys, each `rgba` and `half`
 //!   (an integer or `0xHHHH`); `frames` names at least one sprite frame, a record of the game's
 //!   `fxdict` (`crate::fx`).
+//! * A shape record is a triangle particles spawn on ([`mercs2_formats::fxdict::EmitterShape`]):
+//!   float 0 is `|A × B|`, floats 1–3 a unit vector along `±(A × B)`, floats 4–6 the vertex `P`,
+//!   floats 7–9 the edge `A` and floats 10–12 the edge `B`.
+//! * An emitter's `geom` names a shape with at least one record, and `word`, the number of its
+//!   records the engine samples, is from 1 to that record count. An emitter with `geom: none` is
+//!   one whose `rate` is a constant at or below 0 and whose `ratevar` is 0: the engine samples a
+//!   0-record table for each particle such an emitter spawns, and divides by zero
+//!   ([`EffectContainer::check_emitter_shapes`]).
 //!
-//! [`EffectForm::lower`] checks every value against its position and builds the container, which
-//! the effect writer validates again ([`EffectContainer::validate`]); [`EffectForm::express`] writes
-//! any container as a form. Every one of the 314 retail effects expresses, reads back from YAML and
-//! re-encodes to its own bytes (`tests/fx_retail.rs`).
+//! [`EffectForm::build`] checks every value against its position and builds the container against
+//! the writer's node rules ([`EffectContainer::validate_nodes`]); [`EffectForm::lower`] also checks
+//! the emitter-shape rules, as the effect writer does ([`EffectContainer::validate`]);
+//! [`EffectForm::express`] writes any container as a form. Every one of the 314 retail effects
+//! expresses, reads back from YAML and re-encodes to its own bytes (`tests/fx_retail.rs`).
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -89,8 +98,8 @@ pub enum GeomForm {
     None(String),
 }
 
-/// `GEOM`: `shape` indexes [`EffectForm::shapes`]; `word` is the second u16 (stored at `+0x00` of
-/// the emitter record; its meaning is not established).
+/// `GEOM`: `shape` indexes [`EffectForm::shapes`]; `word` is the number of the shape's records the
+/// engine samples ([`mercs2_formats::fxdict::EmitterGeom`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GeomRef {
@@ -641,8 +650,17 @@ pub(crate) fn edit_attr(
 
 impl EffectForm {
     /// The effect container, every node checked against its position tables and then against the
-    /// writer's own rules ([`EffectContainer::validate`]).
+    /// writer's own rules ([`EffectContainer::validate`]): [`Self::build`], then the emitter-shape
+    /// rules ([`EffectContainer::check_emitter_shapes`]).
     pub fn lower(&self) -> Result<EffectContainer, String> {
+        let fx = self.build()?;
+        fx.check_emitter_shapes()?;
+        Ok(fx)
+    }
+
+    /// The effect container, every node checked against its position tables and the writer's node
+    /// rules ([`EffectContainer::validate_nodes`]); the emitter-shape rules are [`Self::lower`]'s.
+    pub fn build(&self) -> Result<EffectContainer, String> {
         let shapes = self
             .shapes
             .iter()
@@ -662,7 +680,7 @@ impl EffectForm {
             .map(|(i, f)| f.lower(&format!("forces[{i}]")))
             .collect::<Result<Vec<_>, String>>()?;
         let fx = EffectContainer { shapes, emitters, forces };
-        fx.validate()?;
+        fx.validate_nodes()?;
         Ok(fx)
     }
 
@@ -728,7 +746,7 @@ mod tests {
             emitters: vec![EmitterForm {
                 transform: [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0]],
                 channels,
-                geom: GeomForm::Some(GeomRef { shape: 0, word: 16 }),
+                geom: GeomForm::Some(GeomRef { shape: 0, word: 1 }),
                 particle: ParticleForm {
                     flags: 1,
                     attributes,
@@ -848,6 +866,17 @@ mod tests {
         assert!(e.contains("shape index"), "{e}");
         let e = lower_err(|f| f.emitters[0].geom = GeomForm::None("nothing".into()));
         assert!(e.contains("neither `none`"), "{e}");
+        let e = lower_err(|f| f.emitters[0].geom = GeomForm::Some(GeomRef { shape: 0, word: 0 }));
+        assert!(e.contains("divides by zero"), "{e}");
+        let e = lower_err(|f| f.emitters[0].geom = GeomForm::Some(GeomRef { shape: 0, word: 2 }));
+        assert!(e.contains("which has 1"), "{e}");
+        let e = lower_err(|f| f.shapes[0].clear());
+        assert!(e.contains("has no records"), "{e}");
+        let e = lower_err(|f| {
+            f.emitters[0].geom = GeomForm::None(NONE.into());
+            f.emitters[0].particle.attributes.insert("rate".into(), attr(ValueInput::Float(30.0)));
+        });
+        assert!(e.contains("has no GEOM") && e.contains("divides by zero"), "{e}");
         let e = lower_err(|f| f.emitters[0].particle.flags = 4);
         assert!(e.contains("never reads"), "{e}");
         let e = lower_err(|f| f.emitters.clear());
@@ -858,6 +887,18 @@ mod tests {
         assert!(e.contains("radial") && e.contains("not declared"), "{e}");
         let e = lower_err(|f| f.emitters[0].transform[0][0] = f32::INFINITY);
         assert!(e.contains("finite"), "{e}");
+    }
+
+    #[test]
+    fn build_leaves_the_emitter_shape_rules_to_lower() {
+        let mut f = form();
+        f.emitters[0].geom = GeomForm::Some(GeomRef { shape: 0, word: 0 });
+        let fx = f.build().unwrap();
+        assert_eq!(fx.check_emitter_shapes().unwrap_err(), f.lower().unwrap_err());
+        // An emitter without GEOM whose constant rate is 0 and ratevar 0 spawns nothing.
+        let mut f = form();
+        f.emitters[0].geom = GeomForm::None(NONE.into());
+        assert_eq!(f.lower().unwrap().emitters[0].geom, None);
     }
 
     #[test]
