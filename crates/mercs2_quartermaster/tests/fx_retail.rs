@@ -88,13 +88,13 @@ fn effect_of(block: &ScriptsBlock, h: u32) -> EffectContainer {
     parse_effect_container(&e.bytes).expect("the effect parses")
 }
 
-/// Every emitter of `fx` is `base`'s with the first three bytes of each colour key `rgb`, and nothing
-/// else differs.
+/// Every emitter of `fx` is `base`'s with the red, green and blue of each colour key `rgb`, and
+/// nothing else differs.
 fn recoloured(fx: &EffectContainer, base: &EffectContainer, rgb: [u8; 3]) {
     let mut want = base.clone();
     for e in want.emitters.iter_mut() {
         for k in e.particle.colr.keys.iter_mut() {
-            k.colour = [rgb[0], rgb[1], rgb[2], k.colour[3]];
+            k.rgba = [rgb[0], rgb[1], rgb[2], k.rgba[3]];
         }
     }
     assert_eq!(fx, &want);
