@@ -50,10 +50,10 @@ fn the_godray_glow_card_uses_the_real_colr() {
     let fx = load_effect(&mut w, pandemic_hash_m2("global_env_godray2")).expect("parse").expect("godray loads");
     let colr = &fx.emitters[0].particle.colr;
     let lum = |c: [u8; 4]| c[0] as u32 + c[1] as u32 + c[2] as u32;
-    let mut peak = colr.keys[0].colour;
+    let mut peak = colr.keys[0].rgba;
     for k in &colr.keys[1..] {
-        if lum(k.colour) > lum(peak) {
-            peak = k.colour;
+        if lum(k.rgba) > lum(peak) {
+            peak = k.rgba;
         }
     }
     assert_eq!(&peak[..3], &[0x3f, 0x3f, 0x3f], "retail god-ray peak colour");
