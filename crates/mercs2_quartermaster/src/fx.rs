@@ -40,8 +40,8 @@
 //! |---|---|---|
 //! | `attribute` | `emitter`, `attribute`, and any of `value`, `curve`, `options` | edit one `PTYP` attribute |
 //! | `channel` | `emitter`, `channel`, and any of `value`, `curve`, `options` | edit one `TRFM` channel |
-//! | `colour_rgb` | `emitter`, `rgb` | set the first three bytes of all 100 `COLR` keys, keeping each key's fourth byte and `half` |
-//! | `colour_keys` | `emitter`, `keys` (100 `{rgba, half}`) | replace the `COLR` keys |
+//! | `colour_rgb` | `emitter`, `rgb` (red, green, blue) | set the red, green and blue of all 100 `COLR` keys, keeping each key's alpha and `half` |
+//! | `colour_keys` | `emitter`, `keys` (100 `{rgba, half}`, `rgba` red, green, blue, alpha) | replace the `COLR` keys |
 //! | `frames` | `emitter`, `frames` | replace the `TEXT` frames |
 //! | `transform` | `emitter`, `transform` | replace the `TRFM` 4×4 |
 //! | `flags` | `emitter`, `flags` | replace the `PTYP` flags |
@@ -310,7 +310,7 @@ fn apply_edit(fx: &mut EffectContainer, e: &Edit, what: &str) -> Result<(), Stri
         Edit::ColourRgb { emitter, rgb } => {
             let em = &mut fx.emitters[index_of(what, *emitter, emitters, "emitter")?];
             for k in em.particle.colr.keys.iter_mut() {
-                k.colour = [rgb[0], rgb[1], rgb[2], k.colour[3]];
+                k.rgba = [rgb[0], rgb[1], rgb[2], k.rgba[3]];
             }
         }
         Edit::ColourKeys { emitter, keys } => {
@@ -1489,12 +1489,26 @@ mod tests {
         let before = effect();
         let fx = applied("  - { op: colour_rgb, emitter: 0, rgb: [255, 0, 255] }\n");
         for (k, b) in fx.emitters[0].particle.colr.keys.iter().zip(before.emitters[0].particle.colr.keys.iter()) {
-            assert_eq!(k.colour, [255, 0, 255, b.colour[3]]);
+            assert_eq!(k.rgba, [255, 0, 255, b.rgba[3]]);
             assert_eq!(k.half_bits, b.half_bits);
         }
         let keys: Vec<String> = (0..100).map(|_| "{ rgba: [1, 2, 3, 4], half: 15360 }".to_string()).collect();
         let fx = applied(&format!("  - {{ op: colour_keys, emitter: 0, keys: [{}] }}\n", keys.join(", ")));
-        assert!(fx.emitters[0].particle.colr.keys.iter().all(|k| k.colour == [1, 2, 3, 4] && k.half_bits == 0x3C00));
+        assert!(fx.emitters[0].particle.colr.keys.iter().all(|k| k.rgba == [1, 2, 3, 4] && k.half_bits == 0x3C00));
+    }
+
+    #[test]
+    fn colour_rgb_is_red_green_blue_and_is_stored_blue_green_red() {
+        let before = effect();
+        let fx = applied("  - { op: colour_rgb, emitter: 0, rgb: [255, 255, 0] }\n");
+        let bytes = fx.emitters[0].particle.colr.to_bytes();
+        for (i, b) in before.emitters[0].particle.colr.keys.iter().enumerate() {
+            let o = i * 8;
+            assert_eq!(&bytes[o..o + 4], &[0x00, 0xFF, 0xFF, b.rgba[3]], "key {i}");
+        }
+        let written = write_effect_container(&fx).unwrap();
+        let back = parse_effect_container(&written).unwrap();
+        assert!(back.emitters[0].particle.colr.keys.iter().all(|k| k.rgba[..3] == [255, 255, 0]));
     }
 
     #[test]
@@ -1825,7 +1839,7 @@ mod tests {
         assert!(m.worldentity.is_none(), "replacements add no template");
         for e in &m.effects {
             let fx = parse_effect_container(&e.bytes).unwrap();
-            assert!(fx.emitters[0].particle.colr.keys.iter().all(|k| k.colour[..3] == [255, 0, 255]));
+            assert!(fx.emitters[0].particle.colr.keys.iter().all(|k| k.rgba[..3] == [255, 0, 255]));
         }
         assert_eq!(m.resolved.iter().map(|(_, h)| *h).collect::<Vec<_>>(), vec![pandemic_hash_m2("fx_one"), pandemic_hash_m2("fx_two")]);
         for (t, want) in [
@@ -1930,7 +1944,7 @@ mod tests {
         let m = run(&[&a, &b], Scope::Link).unwrap();
         let fa = m.effects.iter().find(|e| e.name_hash == pandemic_hash_m2("fx_a")).unwrap();
         let fx = parse_effect_container(&fa.bytes).unwrap();
-        assert!(fx.emitters[0].particle.colr.keys.iter().all(|k| k.colour[..3] == [255, 0, 255]));
+        assert!(fx.emitters[0].particle.colr.keys.iter().all(|k| k.rgba[..3] == [255, 0, 255]));
         // Built alone, the requiring Shipment leaves the target to the link.
         let m = run(&[&b], Scope::Build).unwrap();
         assert_eq!(m.deferred.len(), 1);
