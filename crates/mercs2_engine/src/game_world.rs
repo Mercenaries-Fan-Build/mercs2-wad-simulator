@@ -924,10 +924,10 @@ fn env_shaft_effect_params(w: &mut wad::Wad, placement_name: &str) -> Result<Opt
 /// The first `COLR` key with the greatest `c[0] + c[1] + c[2]`, as `([c0, c1, c2] / 255, c3 / 255)`.
 fn colr_peak(colr: &mercs2_formats::fxdict::Colr) -> ([f32; 3], f32) {
     let lum = |c: [u8; 4]| c[0] as u32 + c[1] as u32 + c[2] as u32;
-    let mut best = colr.keys[0].colour;
+    let mut best = colr.keys[0].rgba;
     for k in &colr.keys[1..] {
-        if lum(k.colour) > lum(best) {
-            best = k.colour;
+        if lum(k.rgba) > lum(best) {
+            best = k.rgba;
         }
     }
     let c = best.map(|v| v as f32 / 255.0);
@@ -1922,8 +1922,8 @@ mod glow_card_tests {
         });
         let (rgb, a) = colr_peak(&colr);
         assert_eq!(rgb, [63.0 / 255.0; 3]);
-        let first = colr.keys.iter().find(|k| k.colour[0] == 0x3f).unwrap();
-        assert_eq!(a, first.colour[3] as f32 / 255.0);
+        let first = colr.keys.iter().find(|k| k.rgba[0] == 0x3f).unwrap();
+        assert_eq!(a, first.rgba[3] as f32 / 255.0);
     }
 }
 
