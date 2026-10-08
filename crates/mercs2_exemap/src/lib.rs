@@ -2,14 +2,23 @@
 //!
 //! Every known `Mercenaries2.exe` build (and every process-image dump taken from one) is a row of
 //! `data/builds.tsv`, identified by sha256 alone. Builds fall into two code layouts, each named by
-//! the PE timestamp it was compiled with and pinned to one reference build in `data/layouts.tsv`:
+//! the PE timestamp it was compiled with and pinned to one reference build in `data/layouts.tsv`.
+//! Each layout is one code version of the game, recorded per build in the `code_version` column:
 //!
-//! * `U` — timestamp `0x48a370c7`, reference `v11-cracked-pmcbb`;
-//! * `E` — timestamp `0x48cae190`, reference `v11-patched-securom`.
+//! * `U` — timestamp `0x48a370c7`, reference `v10-cracked-pmcbb`, code version 1.0;
+//! * `E` — timestamp `0x48cae190`, reference `v11-official-unwrapped`, code version 1.1.
+//!
+//! The official v1.1 patcher (sha256 `b27fedc2…`, the same file in all four regions) turns
+//! `v10-unsigned` (U) into `v11-official-securom` (E), which ties U to 1.0 and E to 1.1. Every
+//! cracked, DRM-free and SecuROM-unwrapped build in the U layout runs v1.0 code.
 //!
 //! A build belongs to its layout when every byte that differs from the reference is accounted for by
 //! one of the build's rows in `data/overlays.tsv`. [`membership`] checks exactly that and fails on
 //! anything else; [`membership::runs`] documents how differences are found.
+//!
+//! `data/aliases.tsv` maps other names for a build (ids Modkit uses among them) to its canonical
+//! id, with the reason the alias is not canonical. [`identify`] returns the canonical id;
+//! [`Catalogue::build`] and [`Catalogue::canonical_id`] accept an alias wherever they accept an id.
 //!
 //! The tables are compiled in; [`Catalogue::embedded`] parses and cross-checks them.
 
@@ -20,7 +29,7 @@ pub mod membership;
 use md5::Md5;
 use sha2::{Digest, Sha256};
 
-pub use catalogue::{Build, Catalogue, Kind, Layout, Overlay, Space};
+pub use catalogue::{Alias, Build, Catalogue, CodeVersion, Kind, Layout, Overlay, Space};
 
 /// Every failure in this crate: a message saying what was not handled and why.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -67,7 +76,7 @@ pub fn identify_in<'c>(catalogue: &'c Catalogue, bytes: &[u8]) -> Result<&'c Bui
     Ok(b)
 }
 
-/// The build id of `bytes`, against the embedded catalogue.
+/// The canonical build id of `bytes`, against the embedded catalogue.
 pub fn identify(bytes: &[u8]) -> Result<String, Error> {
     let c = Catalogue::embedded()?;
     identify_in(&c, bytes).map(|b| b.id.clone())
