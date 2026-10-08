@@ -31,7 +31,8 @@ mercs2_formats = { workspace = true }
 
 [features]
 # Builds the game-gated tests, which read the executables named by the repo-root
-# .mercs2-local.toml (exe_corpus, exe_dumps, drmfree_exe); run them with `cargo xtask retail-test`.
+# .mercs2-local.toml (exe_corpus, exe_dumps, drmfree_exe) and run the official v1.1 patcher under
+# Wine (v11_patcher_exe, wine_binary); run them with `cargo xtask retail-test`.
 retail = []
 
 [[test]]
