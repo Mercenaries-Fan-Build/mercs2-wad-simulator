@@ -50,6 +50,14 @@ that differs from the layout's reference build must be a catalogued overlay
 (`crates/mercs2_exemap/data/*.tsv`). Exit status 0 on a member, 1 on an unknown build or an
 unlisted difference, 2 when a file cannot be read.
 
+The two code layouts are the two code versions of the game. `U` (PE timestamp `0x48a370c7`) is
+v1.0: the retail `v10-unsigned` build and every cracked, DRM-free and SecuROM-unwrapped build
+in the catalogue. `E` (PE timestamp `0x48cae190`) is v1.1: `v11-official-securom`, which the
+official v1.1 patcher (sha256 `b27fedc2…`, one file for all four regions) writes from
+`v10-unsigned`, and `v11-official-unwrapped`, the same code with the SecuROM wrapper removed.
+`builds.tsv` records each build's `code_version`; `aliases.tsv` maps other ids for a build,
+including the ones Modkit uses, to its canonical id, and `identify` prints the canonical id.
+
 ```bash
 exemap identify Mercenaries2.exe
 exemap check Mercenaries2.exe --reference <layout-reference.exe>
@@ -117,10 +125,12 @@ environment variable is consulted. The file holds one `key = "path"` per line:
 | `unpacked_exe` | the SecuROM-unpacked executable (`mercs2_unpacked.exe`) | the qm shader-registry disassembly test |
 | `exe_corpus` | a directory of retail `Mercenaries2.exe` builds (`game-files/exe_sha256`) | the `mercs2_exemap` corpus tests |
 | `exe_dumps` | a directory of derived executables and process-image dumps (`output/_ghidra/securom_dump`) | the `mercs2_exemap` corpus tests |
-| `drmfree_exe` | the DRM-free v1.1 executable (`mercs2_nodrm_v3.exe`) | the `mercs2_exemap` corpus tests |
+| `drmfree_exe` | the DRM-free executable (`mercs2_nodrm_v3.exe`, v1.0 code) | the `mercs2_exemap` corpus tests |
+| `v11_patcher_exe` | the official v1.1 patcher (`Mercs2 WiF v1.1 Patch/mercenaries2_patch1_na.exe`) | the `mercs2_exemap` official-patcher test |
+| `wine_binary` | the `wine64` binary that runs the patcher (Modkit's `…/Wine-Crossover-23.7.1-1/Contents/Resources/wine/bin/wine64`) | the `mercs2_exemap` official-patcher test |
 
 `scripts/find-vz-wad.sh --write` writes `vz_wad` only, and rewrites the whole file, so
-the console keys, `unpacked_exe` and the three executable keys are added by hand after it runs. When the file, a key a test needs,
+the console keys, `unpacked_exe`, the three executable keys and the patcher keys are added by hand after it runs. When the file, a key a test needs,
 or the file that key names is missing, the test fails with a message naming the file
 and the key.
 Two shapes exist: integration test targets declared
@@ -128,6 +138,15 @@ Two shapes exist: integration test targets declared
 kept in src/ inside a `#[cfg(feature = "retail")] mod retail`. `cargo xtask
 retail-test` selects both from `cargo metadata`; extra arguments go to
 `cargo nextest run` (e.g. `cargo xtask retail-test --no-capture`).
+
+The official-patcher test reproduces the `v11-official-securom` recipe: it copies
+`v10-unsigned` from `exe_corpus` into a temporary install folder, creates a throwaway
+`WINEPREFIX` in the system temp dir, imports the one registry value the patcher reads
+(`HKLM\SOFTWARE\WOW6432Node\EA Games\Mercenaries 2 World in Flames\Install Dir` = the
+install folder) with `wine64 reg import`, runs the patcher with the install folder as its
+working directory, and requires the patched `Mercenaries2.exe` to be `v11-official-securom`
+and `BACKUP\Mercenaries2.A###.exe` to be the input. It stops the prefix's `wineserver` and
+removes the folder and prefix afterwards.
 
 CI runs on every pull request ([.github/workflows/ci.yml](.github/workflows/ci.yml)):
 it runs the full workspace under nextest plus doctests (without the `retail` feature,
