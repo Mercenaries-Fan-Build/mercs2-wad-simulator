@@ -63,6 +63,24 @@ exemap identify Mercenaries2.exe
 exemap check Mercenaries2.exe --reference <layout-reference.exe>
 ```
 
+It also takes in the console executables for disassembly:
+
+- `exemap xex <xex> --key retail|devkit --out <pe>` recovers the PE image from an Xbox 360 XEX2
+  file: it unwraps the session key with the named key-encryption key, decrypts the basefile and
+  undoes its compression (LZX through `mercs2_formats::lzx`). A key that does not fit the file is
+  an error naming the key.
+- `exemap ghidra-pe <pe> --out <pe>` rewrites an Xbox 360 image's section headers to its RVA
+  layout, which Ghidra's PE loader needs.
+- `exemap starts <image> --out <list>` writes one hex VA per line: the `.pdata` starts of an Xbox
+  360 PE (every executable section, `.text` and `BINK`), or the `.opd` descriptor code addresses of
+  a PS3 PPU ELF (found from the entry descriptor). The list seeds Ghidra's `CreateFunctions.java`.
+
+```bash
+exemap xex mercs2_xenon_p_EN_FR.xex --key devkit --out profile.pe
+exemap ghidra-pe profile.pe --out profile.pe_ghidra
+exemap starts profile.pe_ghidra --out profile.starts
+```
+
 ### `dlc_port`
 Incomplete Rust reimplementation of the Python DLC porter. Converts Xbox 360 DLC (RAR/STFS) to PC `vz-patch.wad`. Currently a work-in-progress; the Python version is still authoritative.
 
