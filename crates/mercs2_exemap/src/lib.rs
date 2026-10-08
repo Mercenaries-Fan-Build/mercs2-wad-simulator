@@ -14,8 +14,8 @@
 //! The tables are compiled in; [`Catalogue::embedded`] parses and cross-checks them.
 
 pub mod catalogue;
+pub mod image;
 pub mod membership;
-pub mod pe;
 
 use md5::Md5;
 use sha2::{Digest, Sha256};
