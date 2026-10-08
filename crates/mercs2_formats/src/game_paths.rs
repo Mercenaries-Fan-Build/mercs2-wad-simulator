@@ -71,8 +71,12 @@ pub fn vz_wad_from_env() -> Option<PathBuf> {
 ///   tests ([`local_config_exe_corpus`]).
 /// * `exe_dumps` — a **directory** of executables and process-image dumps derived from them. Read
 ///   only by the exe-map tests ([`local_config_exe_dumps`]).
-/// * `drmfree_exe` — the DRM-free v1.1 executable. Read only by the exe-map tests
-///   ([`local_config_drmfree_exe`]).
+/// * `drmfree_exe` — the DRM-free executable (`mercs2_nodrm_v3.exe`, v1.0 code). Read only by the
+///   exe-map tests ([`local_config_drmfree_exe`]).
+/// * `v11_patcher_exe` — the official v1.1 patcher (`mercenaries2_patch1_*.exe`). Read only by the
+///   exe-map patcher test ([`local_config_v11_patcher_exe`]).
+/// * `wine_binary` — the `wine64` binary that runs the patcher. Read only by the exe-map patcher
+///   test ([`local_config_wine_binary`]).
 ///
 /// The console keys and the executable keys are never inferred from `vz_wad`'s folder: each lives
 /// wherever it is kept, and a test that needs one fails naming the missing key.
@@ -98,8 +102,12 @@ pub const UNPACKED_EXE_KEY: &str = "unpacked_exe";
 pub const EXE_CORPUS_KEY: &str = "exe_corpus";
 /// The `exe_dumps` key of [`LOCAL_CONFIG`]: a directory of derived executables and image dumps.
 pub const EXE_DUMPS_KEY: &str = "exe_dumps";
-/// The `drmfree_exe` key of [`LOCAL_CONFIG`]: the DRM-free v1.1 executable.
+/// The `drmfree_exe` key of [`LOCAL_CONFIG`]: the DRM-free executable.
 pub const DRMFREE_EXE_KEY: &str = "drmfree_exe";
+/// The `v11_patcher_exe` key of [`LOCAL_CONFIG`]: the official v1.1 patcher.
+pub const V11_PATCHER_EXE_KEY: &str = "v11_patcher_exe";
+/// The `wine_binary` key of [`LOCAL_CONFIG`]: the `wine64` binary.
+pub const WINE_BINARY_KEY: &str = "wine_binary";
 
 /// The `<key> = "…"` value in one [`LOCAL_CONFIG`]'s text, or `None` when the key is absent.
 ///
@@ -200,7 +208,7 @@ pub fn local_config_exe_dumps(start: &Path) -> Result<PathBuf, String> {
     )
 }
 
-/// The DRM-free v1.1 executable for a **game-gated test**: `drmfree_exe` in the nearest
+/// The DRM-free executable for a **game-gated test**: `drmfree_exe` in the nearest
 /// [`LOCAL_CONFIG`].
 ///
 /// Same rules and the same three distinct errors as [`local_config_vz_wad`]. No script writes this
@@ -210,6 +218,31 @@ pub fn local_config_drmfree_exe(start: &Path) -> Result<PathBuf, String> {
         start,
         DRMFREE_EXE_KEY,
         "write `drmfree_exe = \"/path/to/mercs2_nodrm_v3.exe\"` into it by hand",
+    )
+}
+
+/// The official v1.1 patcher for a **game-gated test**: `v11_patcher_exe` in the nearest
+/// [`LOCAL_CONFIG`].
+///
+/// Same rules and the same three distinct errors as [`local_config_vz_wad`]. No script writes this
+/// key.
+pub fn local_config_v11_patcher_exe(start: &Path) -> Result<PathBuf, String> {
+    local_config_file(
+        start,
+        V11_PATCHER_EXE_KEY,
+        "write `v11_patcher_exe = \"/path/to/mercenaries2_patch1_na.exe\"` into it by hand",
+    )
+}
+
+/// The `wine64` binary for a **game-gated test**: `wine_binary` in the nearest [`LOCAL_CONFIG`].
+///
+/// Same rules and the same three distinct errors as [`local_config_vz_wad`]. No script writes this
+/// key.
+pub fn local_config_wine_binary(start: &Path) -> Result<PathBuf, String> {
+    local_config_file(
+        start,
+        WINE_BINARY_KEY,
+        "write `wine_binary = \"/path/to/wine/bin/wine64\"` into it by hand",
     )
 }
 
@@ -475,7 +508,7 @@ mod tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
-    /// The exe-map keys: the two directory keys reject a file, the file key rejects a directory, and
+    /// The exe-map keys: the two directory keys reject a file, the file keys reject a directory, and
     /// each matches its key exactly.
     #[test]
     fn the_exe_map_resolvers_require_their_kind_of_path() {
@@ -518,7 +551,20 @@ mod tests {
             format!("exe_corpus = \"{}\"\ndrmfree_exe = \"{}\"\n", corpus.display(), exe.display()),
         )
         .unwrap();
-        assert_eq!(local_config_drmfree_exe(&deep), Ok(exe));
+        assert_eq!(local_config_drmfree_exe(&deep), Ok(exe.clone()));
+        let e = local_config_v11_patcher_exe(&deep).unwrap_err();
+        assert!(e.contains("has no `v11_patcher_exe` key"), "{e}");
+        let e = local_config_wine_binary(&deep).unwrap_err();
+        assert!(e.contains("has no `wine_binary` key"), "{e}");
+
+        std::fs::write(
+            &config,
+            format!("v11_patcher_exe = \"{}\"\nwine_binary = \"{}\"\n", exe.display(), corpus.display()),
+        )
+        .unwrap();
+        assert_eq!(local_config_v11_patcher_exe(&deep), Ok(exe));
+        let e = local_config_wine_binary(&deep).unwrap_err();
+        assert!(e.contains("which is not a file"), "{e}");
 
         std::fs::remove_dir_all(&root).ok();
     }
