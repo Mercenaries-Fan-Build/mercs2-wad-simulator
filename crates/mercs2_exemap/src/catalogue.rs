@@ -1,5 +1,5 @@
-//! The build catalogue: `data/builds.tsv`, `data/layouts.tsv` and `data/overlays.tsv`, parsed and
-//! cross-checked.
+//! The build catalogue: `data/builds.tsv`, `data/layouts.tsv`, `data/overlays.tsv` and
+//! `data/aliases.tsv`, parsed and cross-checked.
 //!
 //! Every table is tab-separated with one header line that must match exactly, rows sorted, and no
 //! blank lines. Integers are `0x`-prefixed hex except `size`, `runs` and `diff_bytes`, which are
@@ -11,11 +11,39 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::Error;
 
 const BUILDS_HEADER: &str =
-    "build_id\tsha256\tmd5\tsize\tpe_timestamp\tlayout\trecipe_from\trecipe_step\toverlay_set";
+    "build_id\tsha256\tmd5\tsize\tpe_timestamp\tlayout\tcode_version\trecipe_from\trecipe_step\toverlay_set";
 const LAYOUTS_HEADER: &str = "layout_id\tpe_timestamp\treference_sha256\timage_base\tsection_alignment\t\
 size_of_headers\tsection\trva\tvirtual_size\traw_offset\traw_size";
 const OVERLAYS_HEADER: &str =
     "overlay_set\tsection\tspace\tstart\tend\tkind\truns\tdiff_bytes\tsha256\tdetail";
+const ALIASES_HEADER: &str = "alias\tbuild_id\treason";
+
+/// The game code a build runs. Every build of a layout runs the same code version: `U` is 1.0 and
+/// `E` is 1.1, proven by the official v1.1 patcher turning `v10-unsigned` (U) into
+/// `v11-official-securom` (E).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum CodeVersion {
+    /// The game as released, version 1.0.
+    V1_0,
+    /// The game after the official v1.1 patch.
+    V1_1,
+}
+
+impl CodeVersion {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            CodeVersion::V1_0 => "1.0",
+            CodeVersion::V1_1 => "1.1",
+        }
+    }
+    fn parse(s: &str) -> Option<CodeVersion> {
+        match s {
+            "1.0" => Some(CodeVersion::V1_0),
+            "1.1" => Some(CodeVersion::V1_1),
+            _ => None,
+        }
+    }
+}
 
 /// One way to produce a build from another catalogued build.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -35,6 +63,8 @@ pub struct Build {
     pub size: u64,
     pub pe_timestamp: u32,
     pub layout: String,
+    /// The code version the build runs, the same for every build of its layout.
+    pub code_version: CodeVersion,
     pub recipes: Vec<Recipe>,
     /// The overlay set holding this build's differences from its layout reference. `None` for a
     /// layout reference itself, which differs from itself nowhere.
@@ -100,8 +130,8 @@ pub enum Kind {
     BypassStub,
     /// Slots inside the import address table range `0x705000+0x69c`.
     Iat,
-    /// A difference between the v1.0 and v1.1 files of one compile lineage whose role in the code is
-    /// not established.
+    /// A difference between a SecuROM-wrapped retail file and its layout reference, an unwrapped file
+    /// of the same code version, whose role in the code is not established.
     Lineage,
     /// A difference in a build taken from, or built from, a running process image.
     Runtime,
@@ -171,12 +201,23 @@ pub struct Overlay {
     pub detail: String,
 }
 
-/// The three tables, parsed and cross-checked.
+/// One row of `aliases.tsv`: another name for a build, accepted wherever a build id is.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Alias {
+    pub alias: String,
+    /// The canonical id the alias resolves to, a `builds.tsv` row.
+    pub build_id: String,
+    /// Why the alias is not the canonical id.
+    pub reason: String,
+}
+
+/// The four tables, parsed and cross-checked.
 #[derive(Clone, Debug)]
 pub struct Catalogue {
     pub builds: Vec<Build>,
     pub layouts: Vec<Layout>,
     pub overlays: Vec<Overlay>,
+    pub aliases: Vec<Alias>,
 }
 
 fn rows<'t>(table: &str, text: &'t str, header: &str) -> Result<Vec<(usize, Vec<&'t str>)>, Error> {
@@ -240,15 +281,17 @@ impl Catalogue {
             include_str!("../data/builds.tsv"),
             include_str!("../data/layouts.tsv"),
             include_str!("../data/overlays.tsv"),
+            include_str!("../data/aliases.tsv"),
         )
     }
 
-    /// Parse and cross-check three table texts.
-    pub fn parse(builds: &str, layouts: &str, overlays: &str) -> Result<Catalogue, Error> {
+    /// Parse and cross-check four table texts.
+    pub fn parse(builds: &str, layouts: &str, overlays: &str, aliases: &str) -> Result<Catalogue, Error> {
         let builds = parse_builds(builds)?;
         let layouts = parse_layouts(layouts)?;
         let overlays = parse_overlays(overlays)?;
-        let c = Catalogue { builds, layouts, overlays };
+        let aliases = parse_aliases(aliases)?;
+        let c = Catalogue { builds, layouts, overlays, aliases };
         c.cross_check()?;
         Ok(c)
     }
@@ -258,9 +301,19 @@ impl Catalogue {
         self.builds.iter().find(|b| b.sha256 == sha256)
     }
 
-    /// The build with this id.
+    /// The build with this id or alias.
     pub fn build(&self, id: &str) -> Option<&Build> {
-        self.builds.iter().find(|b| b.id == id)
+        let canonical = self.canonical_id(id)?;
+        self.builds.iter().find(|b| b.id == canonical)
+    }
+
+    /// The canonical build id that `id` names: `id` itself when it is a `builds.tsv` id, the
+    /// alias's build id when it is an `aliases.tsv` alias, `None` otherwise.
+    pub fn canonical_id<'a>(&'a self, id: &'a str) -> Option<&'a str> {
+        if self.builds.iter().any(|b| b.id == id) {
+            return Some(id);
+        }
+        self.aliases.iter().find(|a| a.alias == id).map(|a| a.build_id.as_str())
     }
 
     /// The layout with this id.
@@ -331,6 +384,31 @@ impl Catalogue {
         if let Some(orphan) = sets.iter().find(|s| !referenced.contains(*s)) {
             return Err(Error::new(format!("overlays.tsv has rows for set {orphan}, which no build names")));
         }
+        for b in &self.builds {
+            let layout = self.layout(&b.layout).expect("checked above");
+            let reference = self.build_by_sha(&layout.reference_sha256).expect("checked above");
+            if b.code_version != reference.code_version {
+                return Err(Error::new(format!(
+                    "build {} has code version {}, its layout {} reference {} has {}",
+                    b.id,
+                    b.code_version.as_str(),
+                    layout.id,
+                    reference.id,
+                    reference.code_version.as_str()
+                )));
+            }
+        }
+        for a in &self.aliases {
+            if self.builds.iter().any(|b| b.id == a.alias) {
+                return Err(Error::new(format!("aliases.tsv: alias {} is a builds.tsv build id", a.alias)));
+            }
+            if !self.builds.iter().any(|b| b.id == a.build_id) {
+                return Err(Error::new(format!(
+                    "aliases.tsv: alias {} names build {}, which builds.tsv does not list",
+                    a.alias, a.build_id
+                )));
+            }
+        }
         Ok(())
     }
 }
@@ -345,8 +423,11 @@ fn parse_builds(text: &str) -> Result<Vec<Build>, Error> {
                 return Err(Error::new(format!("{T} line {n}: build_id {id} is not after {}", prev.id)));
             }
         }
-        let froms: Vec<&str> = if f[6].is_empty() { Vec::new() } else { f[6].split(';').collect() };
-        let steps: Vec<&str> = if f[7].is_empty() { Vec::new() } else { f[7].split(';').collect() };
+        let code_version = CodeVersion::parse(f[6]).ok_or_else(|| {
+            Error::new(format!("{T} line {n}: code_version {:?} is not 1.0 or 1.1", f[6]))
+        })?;
+        let froms: Vec<&str> = if f[7].is_empty() { Vec::new() } else { f[7].split(';').collect() };
+        let steps: Vec<&str> = if f[8].is_empty() { Vec::new() } else { f[8].split(';').collect() };
         if froms.len() != steps.len() {
             return Err(Error::new(format!(
                 "{T} line {n}: {} recipe_from entries but {} recipe_step entries",
@@ -368,8 +449,9 @@ fn parse_builds(text: &str) -> Result<Vec<Build>, Error> {
             size: dec(T, n, "size", f[3])?,
             pe_timestamp: hex32(T, n, "pe_timestamp", f[4])?,
             layout: nonempty(T, n, "layout", f[5])?.to_string(),
+            code_version,
             recipes,
-            overlay_set: if f[8].is_empty() { None } else { Some(f[8].to_string()) },
+            overlay_set: if f[9].is_empty() { None } else { Some(f[9].to_string()) },
         });
     }
     Ok(out)
@@ -470,6 +552,25 @@ fn parse_overlays(text: &str) -> Result<Vec<Overlay>, Error> {
     Ok(out)
 }
 
+fn parse_aliases(text: &str) -> Result<Vec<Alias>, Error> {
+    const T: &str = "aliases.tsv";
+    let mut out: Vec<Alias> = Vec::new();
+    for (n, f) in rows(T, text, ALIASES_HEADER)? {
+        let a = Alias {
+            alias: nonempty(T, n, "alias", f[0])?.to_string(),
+            build_id: nonempty(T, n, "build_id", f[1])?.to_string(),
+            reason: nonempty(T, n, "reason", f[2])?.to_string(),
+        };
+        if let Some(prev) = out.last() {
+            if prev.alias >= a.alias {
+                return Err(Error::new(format!("{T} line {n}: alias {} is not after {}", a.alias, prev.alias)));
+            }
+        }
+        out.push(a);
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -483,6 +584,64 @@ mod tests {
             let r = c.build_by_sha(&l.reference_sha256).unwrap();
             assert_eq!(r.overlay_set, None);
         }
+    }
+
+    #[test]
+    fn every_alias_resolves_to_its_build_and_no_alias_is_a_build_id() {
+        let c = Catalogue::embedded().unwrap();
+        assert!(!c.aliases.is_empty());
+        for a in &c.aliases {
+            assert!(c.builds.iter().all(|b| b.id != a.alias), "alias {} is a build id", a.alias);
+            assert_eq!(c.canonical_id(&a.alias), Some(a.build_id.as_str()), "{}", a.alias);
+            assert_eq!(c.build(&a.alias).map(|b| b.id.as_str()), Some(a.build_id.as_str()), "{}", a.alias);
+        }
+        for b in &c.builds {
+            assert_eq!(c.canonical_id(&b.id), Some(b.id.as_str()));
+        }
+        assert_eq!(c.canonical_id("not-a-build"), None);
+    }
+
+    #[test]
+    fn code_version_agrees_with_layout() {
+        let c = Catalogue::embedded().unwrap();
+        for b in &c.builds {
+            let want = match b.layout.as_str() {
+                "U" => CodeVersion::V1_0,
+                "E" => CodeVersion::V1_1,
+                other => panic!("build {} has layout {other}, which this test does not map to a code version", b.id),
+            };
+            assert_eq!(b.code_version, want, "{}", b.id);
+        }
+    }
+
+    fn one_build_tables(code_version: &str) -> (String, String) {
+        let sha = "a".repeat(64);
+        let builds = format!("{BUILDS_HEADER}\nb\t{sha}\t{}\t1\t0x00000011\tL\t{code_version}\t\t\t\n", "b".repeat(32));
+        let layouts = format!(
+            "{LAYOUTS_HEADER}\nL\t0x00000011\t{sha}\t0x00400000\t0x1000\t0x200\t.text\t0x00001000\t0x00000100\t0x00000200\t0x00000100\n"
+        );
+        (builds, layouts)
+    }
+
+    #[test]
+    fn an_alias_that_is_a_build_id_or_names_no_build_is_rejected() {
+        let (builds, layouts) = one_build_tables("1.0");
+        let ok = Catalogue::parse(&builds, &layouts, &format!("{OVERLAYS_HEADER}\n"), &format!("{ALIASES_HEADER}\nold\tb\twhy\n"))
+            .unwrap();
+        assert_eq!(ok.build("old").map(|b| b.id.as_str()), Some("b"));
+        let e = Catalogue::parse(&builds, &layouts, &format!("{OVERLAYS_HEADER}\n"), &format!("{ALIASES_HEADER}\nb\tb\twhy\n"))
+            .unwrap_err();
+        assert!(e.to_string().contains("is a builds.tsv build id"), "{e}");
+        let e = Catalogue::parse(&builds, &layouts, &format!("{OVERLAYS_HEADER}\n"), &format!("{ALIASES_HEADER}\nold\tnone\twhy\n"))
+            .unwrap_err();
+        assert!(e.to_string().contains("does not list"), "{e}");
+    }
+
+    #[test]
+    fn an_unknown_code_version_is_rejected() {
+        let (builds, layouts) = one_build_tables("1.2");
+        let e = Catalogue::parse(&builds, &layouts, &format!("{OVERLAYS_HEADER}\n"), &format!("{ALIASES_HEADER}\n")).unwrap_err();
+        assert!(e.to_string().contains("code_version \"1.2\""), "{e}");
     }
 
     #[test]
