@@ -159,6 +159,7 @@ pub mod pws;
 pub mod types;
 pub mod watermap_codec;
 pub mod ucfx;
+mod ucfx_codec;
 pub mod veg;
 pub mod world;
 pub mod world_index;
