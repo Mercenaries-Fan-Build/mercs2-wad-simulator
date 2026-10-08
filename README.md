@@ -44,6 +44,17 @@ Analyzes `pmc_blackbox.log` from game runs to quantify world-load progress and c
 loadprobe /path/to/pmc_blackbox.log
 ```
 
+### `exemap`
+Identifies a `Mercenaries2.exe` build by sha256 and checks it against its code layout: every byte
+that differs from the layout's reference build must be a catalogued overlay
+(`crates/mercs2_exemap/data/*.tsv`). Exit status 0 on a member, 1 on an unknown build or an
+unlisted difference, 2 when a file cannot be read.
+
+```bash
+exemap identify Mercenaries2.exe
+exemap check Mercenaries2.exe --reference <layout-reference.exe>
+```
+
 ### `dlc_port`
 Incomplete Rust reimplementation of the Python DLC porter. Converts Xbox 360 DLC (RAR/STFS) to PC `vz-patch.wad`. Currently a work-in-progress; the Python version is still authoritative.
 
@@ -67,6 +78,7 @@ Binaries land at `target/release/`:
 - `ucfx_byteswap` / `ucfx_byteswap.exe`
 - `loadprobe` / `loadprobe.exe`
 - `dlc_port` / `dlc_port.exe`
+- `exemap` / `exemap.exe`
 
 ### Build a single binary
 ```bash
@@ -103,9 +115,12 @@ environment variable is consulted. The file holds one `key = "path"` per line:
 | `xbox_vz_wad` | an Xbox 360 bake (`SCFF` magic) | the qm console-bake tests |
 | `ps3_vz_wad` | a PS3 bake (`SCFF` magic) | the qm console-bake tests |
 | `unpacked_exe` | the SecuROM-unpacked executable (`mercs2_unpacked.exe`) | the qm shader-registry disassembly test |
+| `exe_corpus` | a directory of retail `Mercenaries2.exe` builds (`game-files/exe_sha256`) | the `mercs2_exemap` corpus tests |
+| `exe_dumps` | a directory of derived executables and process-image dumps (`output/_ghidra/securom_dump`) | the `mercs2_exemap` corpus tests |
+| `drmfree_exe` | the DRM-free v1.1 executable (`mercs2_nodrm_v3.exe`) | the `mercs2_exemap` corpus tests |
 
 `scripts/find-vz-wad.sh --write` writes `vz_wad` only, and rewrites the whole file, so
-the console keys and `unpacked_exe` are added by hand after it runs. When the file, a key a test needs,
+the console keys, `unpacked_exe` and the three executable keys are added by hand after it runs. When the file, a key a test needs,
 or the file that key names is missing, the test fails with a message naming the file
 and the key.
 Two shapes exist: integration test targets declared
@@ -127,6 +142,7 @@ attributable to a specific crate.
 - **`ucfx_byteswap`** — Xbox BE→PC LE converter (binary + library).
 - **`dlc_port`** — DLC porter binary (work-in-progress).
 - **`loadprobe`** — Log analyzer binary.
+- **`mercs2_exemap`** — The cross-build exe map: the catalogue of known `Mercenaries2.exe` builds and dumps, their two code layouts, the byte overlays that separate each build from its layout reference, and the `exemap` binary.
 
 ## See also
 
