@@ -6,7 +6,7 @@
 //! 1. **Headers.** RVA `[0, SizeOfHeaders)` of both images, byte for byte. The two must declare the
 //!    same `SizeOfHeaders` and `ImageBase`.
 //! 2. **Reference sections.** For each reference section, its whole mapped extent against the build's
-//!    image at the same RVAs ([`crate::pe`] defines the image). A byte the build does not map is a
+//!    image at the same RVAs ([`crate::image`] defines the image). A byte the build does not map is a
 //!    difference; a run never mixes mapped and unmapped bytes.
 //! 3. **Build-only extents.** Build RVAs that the reference maps nowhere, labelled with the build's
 //!    section name; every such byte is a difference.
@@ -25,7 +25,7 @@ use std::ops::Range;
 use sha2::{Digest, Sha256};
 
 use crate::catalogue::{Catalogue, Kind, Overlay, Space};
-use crate::pe::Pe;
+use crate::image::Image;
 use crate::Error;
 
 /// Label of the header pseudo-section.
@@ -82,26 +82,27 @@ fn merge(mut ranges: Vec<Range<u64>>) -> Vec<Range<u64>> {
 }
 
 /// Every run of differing bytes between `build` and `reference`, in pass order.
-pub fn runs(reference: &Pe, build: &Pe) -> Result<Vec<Run>, Error> {
-    if build.size_of_headers != reference.size_of_headers {
+pub fn runs(reference: &Image, build: &Image) -> Result<Vec<Run>, Error> {
+    let (rp, bp) = (&reference.pe, &build.pe);
+    if bp.size_of_headers != rp.size_of_headers {
         return Err(Error::new(format!(
             "SizeOfHeaders differs: build 0x{:x}, reference 0x{:x}",
-            build.size_of_headers, reference.size_of_headers
+            bp.size_of_headers, rp.size_of_headers
         )));
     }
-    if build.image_base != reference.image_base {
+    if bp.image_base != rp.image_base {
         return Err(Error::new(format!(
             "ImageBase differs: build 0x{:x}, reference 0x{:x}",
-            build.image_base, reference.image_base
+            bp.image_base, rp.image_base
         )));
     }
-    let base = reference.image_base as u64;
+    let base = rp.image_base as u64;
     let mut out = Vec::new();
 
-    let soh = reference.size_of_headers as usize;
+    let soh = rp.size_of_headers as usize;
     push_diff_runs(&reference.bytes()[..soh], &build.bytes()[..soh], base, HEADERS, &mut out);
 
-    for (i, s) in reference.sections.iter().enumerate() {
+    for (i, s) in rp.sections.iter().enumerate() {
         let extent = reference.section_extent(i);
         let want = reference.mapped(extent.clone())?;
         for piece in build.view(extent.clone()) {
@@ -120,7 +121,7 @@ pub fn runs(reference: &Pe, build: &Pe) -> Result<Vec<Run>, Error> {
         }
     }
 
-    for (i, s) in build.sections.iter().enumerate() {
+    for (i, s) in bp.sections.iter().enumerate() {
         for piece in reference.view(build.section_extent(i)) {
             if piece.bytes.is_none() {
                 out.push(Run {
@@ -161,7 +162,7 @@ pub fn runs(reference: &Pe, build: &Pe) -> Result<Vec<Run>, Error> {
 }
 
 /// sha256 of the build's bytes over an overlay range, lowercase hex.
-fn range_sha256(build: &Pe, space: Space, start: u64, end: u64) -> Result<String, Error> {
+fn range_sha256(build: &Image, space: Space, start: u64, end: u64) -> Result<String, Error> {
     let bytes = match space {
         Space::File => build
             .bytes()
@@ -169,7 +170,7 @@ fn range_sha256(build: &Pe, space: Space, start: u64, end: u64) -> Result<String
             .ok_or_else(|| Error::new(format!("file range 0x{start:x}..0x{end:x} is past the end of the build")))?
             .to_vec(),
         Space::Va => {
-            let base = build.image_base as u64;
+            let base = build.pe.image_base as u64;
             if start < base || end - base > u32::MAX as u64 {
                 return Err(Error::new(format!("VA range 0x{start:x}..0x{end:x} is outside the image")));
             }
@@ -205,8 +206,9 @@ pub fn check<'c>(catalogue: &'c Catalogue, build: &[u8], reference: &[u8]) -> Re
         )));
     }
 
-    let rp = Pe::parse(reference)?;
-    let bp = Pe::parse(build)?;
+    let ri = Image::parse(reference)?;
+    let bi = Image::parse(build)?;
+    let (rp, bp) = (&ri.pe, &bi.pe);
     let table: Vec<_> = layout
         .sections
         .iter()
@@ -215,7 +217,7 @@ pub fn check<'c>(catalogue: &'c Catalogue, build: &[u8], reference: &[u8]) -> Re
     let parsed: Vec<_> = rp
         .sections
         .iter()
-        .map(|s| (s.name.as_str(), s.rva, s.virtual_size, s.raw_offset, s.raw_size))
+        .map(|s| (s.name.as_str(), s.vaddr, s.vsize, s.raw_ptr, s.raw_size))
         .collect();
     if table != parsed
         || rp.timestamp != layout.pe_timestamp
@@ -232,7 +234,7 @@ pub fn check<'c>(catalogue: &'c Catalogue, build: &[u8], reference: &[u8]) -> Re
         )));
     }
 
-    let found = runs(&rp, &bp)?;
+    let found = runs(&ri, &bi)?;
     let rows: Vec<&Overlay> = match &b.overlay_set {
         None => Vec::new(),
         Some(set) => catalogue.overlay_set(set),
@@ -295,7 +297,7 @@ pub fn check<'c>(catalogue: &'c Catalogue, build: &[u8], reference: &[u8]) -> Re
             (Kind::Unmapped, _, true) => {}
             (Kind::Unmapped, _, false) => return Err(Error::new(format!("{label}: the build maps bytes inside it"))),
             (_, true, _) => {
-                let got = range_sha256(&bp, o.space, o.start, o.end)?;
+                let got = range_sha256(&bi, o.space, o.start, o.end)?;
                 if Some(&got) != o.sha256.as_ref() {
                     return Err(Error::new(format!(
                         "{label}: sha256 {got}, the table says {}",
@@ -312,7 +314,7 @@ pub fn check<'c>(catalogue: &'c Catalogue, build: &[u8], reference: &[u8]) -> Re
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pe::synth::{pe, Sec};
+    use crate::image::synth::{pe, Sec};
 
     fn sha(b: &[u8]) -> String {
         format!("{:x}", Sha256::digest(b))
@@ -373,14 +375,14 @@ mod tests {
     #[test]
     fn identical_images_have_no_runs() {
         let r = reference();
-        let p = Pe::parse(&r).unwrap();
+        let p = Image::parse(&r).unwrap();
         assert!(runs(&p, &p).unwrap().is_empty());
     }
 
     #[test]
     fn runs_cover_changed_bytes_tail_and_unmapped_sections() {
         let (r, m) = (reference(), member());
-        let got = runs(&Pe::parse(&r).unwrap(), &Pe::parse(&m).unwrap()).unwrap();
+        let got = runs(&Image::parse(&r).unwrap(), &Image::parse(&m).unwrap()).unwrap();
         assert_eq!(
             got,
             vec![
@@ -390,7 +392,7 @@ mod tests {
         );
 
         let short = pe(0x11, &[Sec { name: ".text", rva: 0x1000, virtual_size: 0x100, raw_offset: 0x200, raw: (0..=255u8).collect() }], b"");
-        let got = runs(&Pe::parse(&r).unwrap(), &Pe::parse(&short).unwrap()).unwrap();
+        let got = runs(&Image::parse(&r).unwrap(), &Image::parse(&short).unwrap()).unwrap();
         assert!(got.iter().any(|x| x.section == ".data" && !x.mapped && x.start == 0x402000 && x.end == 0x403000), "{got:?}");
         assert!(got.iter().any(|x| x.section == HEADERS), "NumberOfSections differs: {got:?}");
     }
