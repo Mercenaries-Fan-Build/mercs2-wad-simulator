@@ -81,6 +81,20 @@ exemap ghidra-pe profile.pe --out profile.pe_ghidra
 exemap starts profile.pe_ghidra --out profile.starts
 ```
 
+`crates/mercs2_exemap/data/images.tsv` lists the images the function map spans on every platform,
+each with the Ghidra language and load base it is analysed with. The PC rows are the two layout
+references' SecuROM-unwrapped dumps, named by build id. Each console row carries the chain that
+rebuilds it from its original container (a file from the Xbox disc, `xex`, `ghidra-pe`; a PSN
+package entry, `unself`), and `exemap derive` replays it, checking every sha256 on the way. A
+regional build whose executable sections and function starts match another image byte for byte
+names that image as its `code_image` (the PS3 v1.03 EU and DE EBOOTs share the NA code and differ
+only in their embedded region config).
+
+```bash
+exemap derive x360-profile --from "Mercenaries 2 Preview X360 (Jul 11 2008).iso" --out profile.pe_ghidra
+exemap derive ps3-v103-na --from "UP0006-BLUS30056_00-MERCS2PATCHNA103-A0103-V0100-PE.pkg" --out eboot103.elf
+```
+
 ### `dlc_port`
 Incomplete Rust reimplementation of the Python DLC porter. Converts Xbox 360 DLC (RAR/STFS) to PC `vz-patch.wad`. Currently a work-in-progress; the Python version is still authoritative.
 
@@ -146,9 +160,12 @@ environment variable is consulted. The file holds one `key = "path"` per line:
 | `drmfree_exe` | the DRM-free executable (`mercs2_nodrm_v3.exe`, v1.0 code) | the `mercs2_exemap` corpus tests |
 | `v11_patcher_exe` | the official v1.1 patcher (`Mercs2 WiF v1.1 Patch/mercenaries2_patch1_na.exe`) | the `mercs2_exemap` official-patcher test |
 | `wine_binary` | the `wine64` binary that runs the patcher (Modkit's `…/Wine-Crossover-23.7.1-1/Contents/Resources/wine/bin/wine64`) | the `mercs2_exemap` official-patcher test |
+| `x360_devkit_iso` | the Jul 11 2008 Xbox 360 preview disc image (`Mercenaries 2 Preview X360 (Jul 11 2008).iso`) | the `mercs2_exemap` console-image test |
+| `ps3_eboot_bin` | the PS3 disc's `EBOOT.BIN` (BLUS30056) | the `mercs2_exemap` console-image test |
+| `ps3_update_pkgs` | a directory of the PS3 v1.03 update `.pkg` files (NA, EU, DE) | the `mercs2_exemap` console-image test |
 
 `scripts/find-vz-wad.sh --write` writes `vz_wad` only, and rewrites the whole file, so
-the console keys, `unpacked_exe`, the three executable keys and the patcher keys are added by hand after it runs. When the file, a key a test needs,
+the console keys, `unpacked_exe`, the three executable keys, the patcher keys and the console-image keys are added by hand after it runs. When the file, a key a test needs,
 or the file that key names is missing, the test fails with a message naming the file
 and the key.
 Two shapes exist: integration test targets declared
