@@ -351,9 +351,9 @@ mod tests {
             r = sha(reference)
         );
         let builds = format!(
-            "build_id\tsha256\tmd5\tsize\tpe_timestamp\tlayout\trecipe_from\trecipe_step\toverlay_set\n\
-             member\t{}\t{}\t{}\t0x00000011\tL\t\t\tmember\n\
-             ref\t{}\t{}\t{}\t0x00000011\tL\t\t\t\n",
+            "build_id\tsha256\tmd5\tsize\tpe_timestamp\tlayout\tcode_version\trecipe_from\trecipe_step\toverlay_set\n\
+             member\t{}\t{}\t{}\t0x00000011\tL\t1.0\t\t\tmember\n\
+             ref\t{}\t{}\t{}\t0x00000011\tL\t1.0\t\t\t\n",
             sha(member),
             md5(member),
             member.len(),
@@ -361,7 +361,7 @@ mod tests {
             md5(reference),
             reference.len()
         );
-        Catalogue::parse(&builds, &layouts, overlays).unwrap()
+        Catalogue::parse(&builds, &layouts, overlays, "alias\tbuild_id\treason\n").unwrap()
     }
 
     fn overlays(text_sha: &str, tail_sha: &str) -> String {
