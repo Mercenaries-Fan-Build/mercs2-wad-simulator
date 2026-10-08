@@ -22,14 +22,19 @@
 //!
 //! The tables are compiled in; [`Catalogue::embedded`] parses and cross-checks them.
 //!
-//! Console executables come in through [`xbox`] (XEX2 → PE image, and the PE layout Ghidra's loader
-//! reads) and [`starts`] (function starts from Xbox `.pdata` or PS3 `.opd`).
+//! `data/images.tsv` lists the images the function map spans on every platform ([`images`]): the
+//! PC layout references by build id, and each console image with the chain that rebuilds it from
+//! its original container. Console executables come in through [`xdvdfs`] (a file from an Xbox
+//! disc image), [`xbox`] (XEX2 → PE image, and the PE layout Ghidra's loader reads) and [`starts`]
+//! (function starts from Xbox `.pdata` or PS3 `.opd`).
 
 pub mod catalogue;
 pub mod image;
+pub mod images;
 pub mod membership;
 pub mod starts;
 pub mod xbox;
+pub mod xdvdfs;
 
 use md5::Md5;
 use sha2::{Digest, Sha256};
