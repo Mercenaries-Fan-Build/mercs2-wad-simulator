@@ -56,6 +56,10 @@ name = "fxdict_atlas_retail"
 required-features = ["retail"]
 
 [[test]]
+name = "model_retail"
+required-features = ["retail"]
+
+[[test]]
 name = "mtrl_retail"
 required-features = ["retail"]
 
