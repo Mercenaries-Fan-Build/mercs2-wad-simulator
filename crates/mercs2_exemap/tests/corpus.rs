@@ -3,18 +3,25 @@
 //! Game-gated: built by the `retail` feature, run with `cargo xtask retail-test`. The executables are
 //! found only through the repo-root `.mercs2-local.toml` keys `exe_corpus` (directory of retail
 //! builds), `exe_dumps` (directory of derived builds and process-image dumps) and `drmfree_exe` (the
-//! DRM-free v1.1 executable); a missing file, key or path fails the test naming it.
+//! DRM-free executable, v1.0 code); a missing file, key or path fails the test naming it. The
+//! official-patcher test also reads `v11_patcher_exe` (the official v1.1 patcher) and `wine_binary`
+//! (the `wine64` that runs it).
 //!
 //! In both directories every file that starts with `MZ` is an executable under test; the other files
 //! (the corpus's checksum list, raw memory scratch) are not executables.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 use mercs2_exemap::membership::check;
 use mercs2_exemap::image::Image;
 use mercs2_exemap::{identify_in, sha256_hex, Catalogue, Space};
-use mercs2_formats::game_paths::{local_config_drmfree_exe, local_config_exe_corpus, local_config_exe_dumps};
+use mercs2_formats::game_paths::{
+    local_config_drmfree_exe, local_config_exe_corpus, local_config_exe_dumps, local_config_v11_patcher_exe,
+    local_config_wine_binary,
+};
 
 /// The `securom_unwrap::unwrap` options a builds.tsv recipe step names, or `None` when the step is
 /// not a `securom_unwrap` transform. A `securom_unwrap` step this does not know fails the test.
@@ -112,11 +119,11 @@ fn every_dumps_executable_identifies_to_its_row() {
 }
 
 #[test]
-fn the_drmfree_executable_is_v11_patched_drmfree() {
+fn the_drmfree_executable_is_v10_drmfree_laa() {
     let c = catalogue();
     let p = drmfree_exe();
     let b = identify_in(&c, &read(&p)).unwrap_or_else(|e| panic!("{}: {e}", p.display()));
-    assert_eq!(b.id, "v11-patched-drmfree");
+    assert_eq!(b.id, "v10-drmfree-laa");
 }
 
 /// Every catalogued build is present, and its membership overlays are exactly its overlays.tsv rows.
@@ -137,20 +144,21 @@ fn every_build_membership_equals_its_overlay_rows() {
     }
 }
 
-/// The v1.0 builds and their layout references differ only inside the documented overlays. Checked
-/// byte by byte over the mapped image and the file slack, apart from the run machinery: each byte
-/// outside every overlay range must be present in the build and equal to the reference's.
+/// The two SecuROM-wrapped retail builds and their layout references (unwrapped files of the same
+/// code version) differ only inside the documented overlays. Checked byte by byte over the mapped
+/// image and the file slack, apart from the run machinery: each byte outside every overlay range
+/// must be present in the build and equal to the reference's.
 #[test]
 fn the_same_lineage_pairs_are_identity_outside_the_documented_overlays() {
     let c = catalogue();
     let files = by_sha();
-    for id in ["v10-unsigned", "v10-ea-signed"] {
+    for id in ["v10-unsigned", "v11-official-securom"] {
         let b = c.build(id).unwrap_or_else(|| panic!("{id} is not catalogued"));
         let layout = c.layout(&b.layout).expect("cross-checked at load");
         let bytes = bytes_of(&files, &b.sha256, id);
         let refb = bytes_of(&files, &layout.reference_sha256, "reference");
         let (bp, rp) = (Image::parse(&bytes).unwrap(), Image::parse(&refb).unwrap());
-        let rows = c.overlay_set(b.overlay_set.as_deref().expect("a v1.0 build has overlays"));
+        let rows = c.overlay_set(b.overlay_set.as_deref().expect("a wrapped retail build has overlays"));
         let covered = |space: Space, at: u64| rows.iter().any(|o| o.space == space && o.start <= at && at < o.end);
         let base = rp.pe.image_base as u64;
 
@@ -184,8 +192,8 @@ fn the_same_lineage_pairs_are_identity_outside_the_documented_overlays() {
 }
 
 /// Every build whose recipe is a `securom_unwrap::unwrap` call is reproduced, byte for byte, by
-/// running that call on the recipe's input. This covers `v11-securom-unwrap` (default options) and
-/// `v11-patched-drmfree` (`large_address_aware`).
+/// running that call on the recipe's input. This covers `v10-securom-unwrap` (default options) and
+/// `v10-drmfree-laa` (`large_address_aware`).
 #[test]
 fn securom_unwrap_recipes_reproduce_their_builds() {
     let c = catalogue();
@@ -202,5 +210,170 @@ fn securom_unwrap_recipes_reproduce_their_builds() {
         }
     }
     reproduced.sort();
-    assert_eq!(reproduced, ["v11-patched-drmfree", "v11-securom-unwrap"]);
+    assert_eq!(reproduced, ["v10-drmfree-laa", "v10-securom-unwrap"]);
+}
+
+/// sha256 of the official v1.1 patcher. The four regional patcher executables are this one file.
+const PATCHER_SHA256: &str = "b27fedc2834022dc78dece1fef4374f75691fc176807372806a4aab5dc93be92";
+/// The registry key the patcher reads its install folder from, as a 64-bit Wine prefix stores the
+/// 32-bit view, and the one value it reads there.
+const INSTALL_KEY: &str = r"HKEY_LOCAL_MACHINE\SOFTWARE\WOW6432Node\EA Games\Mercenaries 2 World in Flames";
+const INSTALL_VALUE: &str = "Install Dir";
+/// Names of the install folder and of the game executable inside it.
+const INSTALL_FOLDER: &str = "Mercenaries 2 World in Flames";
+const GAME_EXE: &str = "Mercenaries2.exe";
+/// Longest the patcher may run before the test fails.
+const PATCHER_TIMEOUT: Duration = Duration::from_secs(600);
+
+/// The builds.tsv recipe step this test reproduces.
+fn patcher_step() -> String {
+    format!(
+        "official v1.1 patcher {} (Wine, HKLM{}\\{INSTALL_VALUE} = install folder)",
+        &PATCHER_SHA256[..8],
+        INSTALL_KEY.strip_prefix("HKEY_LOCAL_MACHINE").expect("INSTALL_KEY is under HKLM")
+    )
+}
+
+/// `path` as a Wine `Z:` path. Wine maps `Z:` to the host root.
+fn z_path(path: &Path) -> String {
+    let s = path.to_str().unwrap_or_else(|| panic!("{} is not UTF-8", path.display()));
+    format!("Z:{}", s.replace('/', "\\"))
+}
+
+/// A throwaway install folder and Wine prefix under the system temp dir. Dropping it stops the
+/// prefix's wineserver and removes both.
+struct Scratch {
+    root: PathBuf,
+    prefix: PathBuf,
+    wineserver: PathBuf,
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let killed = Command::new(&self.wineserver).arg("-k").env("WINEPREFIX", &self.prefix).status();
+        let waited = Command::new(&self.wineserver).arg("-w").env("WINEPREFIX", &self.prefix).status();
+        let removed = std::fs::remove_dir_all(&self.root);
+        if std::thread::panicking() {
+            return;
+        }
+        killed.unwrap_or_else(|e| panic!("{} -k: {e}", self.wineserver.display()));
+        waited.unwrap_or_else(|e| panic!("{} -w: {e}", self.wineserver.display()));
+        removed.unwrap_or_else(|e| panic!("remove {}: {e}", self.root.display()));
+    }
+}
+
+/// Run `cmd` to completion within `timeout`, with stdout and stderr captured to `log`. Fails on a
+/// timeout or a non-zero exit, quoting the log.
+fn run_logged(mut cmd: Command, log: &Path, timeout: Duration, what: &str) {
+    let out = std::fs::File::create(log).unwrap_or_else(|e| panic!("create {}: {e}", log.display()));
+    let err = out.try_clone().unwrap_or_else(|e| panic!("{}: {e}", log.display()));
+    let mut child = cmd
+        .stdin(Stdio::null())
+        .stdout(out)
+        .stderr(err)
+        .spawn()
+        .unwrap_or_else(|e| panic!("{what}: spawn: {e}"));
+    let deadline = Instant::now() + timeout;
+    let status = loop {
+        if let Some(s) = child.try_wait().unwrap_or_else(|e| panic!("{what}: wait: {e}")) {
+            break s;
+        }
+        if Instant::now() >= deadline {
+            child.kill().unwrap_or_else(|e| panic!("{what}: kill after timeout: {e}"));
+            child.wait().unwrap_or_else(|e| panic!("{what}: wait after kill: {e}"));
+            panic!(
+                "{what}: still running after {timeout:?}; log:\n{}",
+                std::fs::read_to_string(log).unwrap_or_default()
+            );
+        }
+        std::thread::sleep(Duration::from_millis(250));
+    };
+    assert!(status.success(), "{what}: exited with {status}; log:\n{}", std::fs::read_to_string(log).unwrap_or_default());
+}
+
+/// The official v1.1 patcher, run under Wine on the recipe's input, writes the catalogued build and
+/// backs the input up, byte for byte. The input is copied into a fresh install folder, the one
+/// registry value the patcher reads is imported into a fresh prefix, and the patcher runs with the
+/// install folder as its working directory.
+#[test]
+fn the_official_patcher_recipe_reproduces_its_build() {
+    let c = catalogue();
+    let step = patcher_step();
+    let targets: Vec<_> = c
+        .builds
+        .iter()
+        .flat_map(|b| b.recipes.iter().filter(|r| r.step == step).map(move |r| (b, r)))
+        .collect();
+    assert_eq!(targets.len(), 1, "builds.tsv must hold exactly one recipe with step {step:?}");
+    let (target, recipe) = targets[0];
+
+    let start = start();
+    let patcher = local_config_v11_patcher_exe(start).unwrap_or_else(|e| panic!("{e}"));
+    let wine = local_config_wine_binary(start).unwrap_or_else(|e| panic!("{e}"));
+    let wineserver = wine.with_file_name("wineserver");
+    assert!(wineserver.is_file(), "{} has no wineserver beside it", wine.display());
+    let patcher_bytes = read(&patcher);
+    assert_eq!(sha256_hex(&patcher_bytes), PATCHER_SHA256, "{} is not the official v1.1 patcher", patcher.display());
+
+    let corpus = corpus_dir();
+    let input_path = executables(&corpus)
+        .into_iter()
+        .find(|p| sha256_hex(&read(p)) == recipe.from_sha256)
+        .unwrap_or_else(|| panic!("{} recipe input sha256 {} is not in {}", target.id, recipe.from_sha256, corpus.display()));
+    let input = read(&input_path);
+
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).expect("clock after 1970").as_nanos();
+    let root = std::env::temp_dir().join(format!("mercs2_exemap_patcher_{}_{nanos}", std::process::id()));
+    std::fs::create_dir_all(&root).unwrap_or_else(|e| panic!("create {}: {e}", root.display()));
+    let root = root.canonicalize().unwrap_or_else(|e| panic!("canonicalize {}: {e}", root.display()));
+    let scratch = Scratch { prefix: root.join("prefix"), root: root.clone(), wineserver };
+    let install = root.join(INSTALL_FOLDER);
+    std::fs::create_dir_all(&install).unwrap_or_else(|e| panic!("create {}: {e}", install.display()));
+    std::fs::write(install.join(GAME_EXE), &input).unwrap_or_else(|e| panic!("write {GAME_EXE}: {e}"));
+    let patcher_copy = root.join(patcher.file_name().expect("a file has a name"));
+    std::fs::write(&patcher_copy, &patcher_bytes).unwrap_or_else(|e| panic!("write {}: {e}", patcher_copy.display()));
+
+    let reg = root.join("install.reg");
+    let install_dir = format!("{}\\", z_path(&install)).replace('\\', "\\\\");
+    std::fs::write(
+        &reg,
+        format!("Windows Registry Editor Version 5.00\r\n\r\n[{INSTALL_KEY}]\r\n\"{INSTALL_VALUE}\"=\"{install_dir}\"\r\n"),
+    )
+    .unwrap_or_else(|e| panic!("write {}: {e}", reg.display()));
+
+    let wine_cmd = || {
+        let mut cmd = Command::new(&wine);
+        cmd.env("WINEPREFIX", &scratch.prefix).env("WINEDEBUG", "-all");
+        cmd
+    };
+    let mut import = wine_cmd();
+    import.args(["reg", "import"]).arg(z_path(&reg));
+    run_logged(import, &root.join("reg-import.log"), PATCHER_TIMEOUT, "wine64 reg import");
+
+    let mut patch = wine_cmd();
+    patch.arg(&patcher_copy).current_dir(&install);
+    run_logged(patch, &root.join("patcher.log"), PATCHER_TIMEOUT, "wine64 patcher");
+
+    let output = read(&install.join(GAME_EXE));
+    assert_eq!(sha256_hex(&output), target.sha256, "patcher output is not {}", target.id);
+    assert_eq!(identify_in(&c, &output).map(|b| b.id.as_str()), Ok(target.id.as_str()));
+
+    let backup = install.join("BACKUP");
+    let mut names: Vec<String> = std::fs::read_dir(&backup)
+        .unwrap_or_else(|e| panic!("list {}: {e}", backup.display()))
+        .map(|e| e.unwrap_or_else(|e| panic!("list {}: {e}", backup.display())).file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    assert_eq!(names.len(), 2, "BACKUP holds {names:?}, expected one Mercenaries2.A###.exe and unpatch.bak");
+    assert_eq!(names[1], "unpatch.bak", "BACKUP holds {names:?}");
+    let copy = &names[0];
+    let digits = copy.strip_prefix("Mercenaries2.A").and_then(|r| r.strip_suffix(".exe"));
+    assert!(
+        digits.is_some_and(|d| d.len() == 3 && d.bytes().all(|b| b.is_ascii_digit())),
+        "BACKUP copy {copy:?} is not Mercenaries2.A###.exe"
+    );
+    assert_eq!(sha256_hex(&read(&backup.join(copy))), recipe.from_sha256, "BACKUP\\{copy} is not the input");
+
+    drop(scratch);
+    assert!(!root.exists(), "{} survived cleanup", root.display());
 }
