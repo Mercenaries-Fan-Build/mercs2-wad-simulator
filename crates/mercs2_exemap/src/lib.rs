@@ -21,10 +21,15 @@
 //! [`Catalogue::build`] and [`Catalogue::canonical_id`] accept an alias wherever they accept an id.
 //!
 //! The tables are compiled in; [`Catalogue::embedded`] parses and cross-checks them.
+//!
+//! Console executables come in through [`xbox`] (XEX2 → PE image, and the PE layout Ghidra's loader
+//! reads) and [`starts`] (function starts from Xbox `.pdata` or PS3 `.opd`).
 
 pub mod catalogue;
 pub mod image;
 pub mod membership;
+pub mod starts;
+pub mod xbox;
 
 use md5::Md5;
 use sha2::{Digest, Sha256};
