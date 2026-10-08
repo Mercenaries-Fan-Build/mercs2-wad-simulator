@@ -86,6 +86,8 @@ pub struct Section {
     pub vsize: u32,
     pub raw_ptr: u32,
     pub raw_size: u32,
+    /// `IMAGE_SECTION_HEADER.Characteristics` (e.g. `0x20000000` = executable).
+    pub characteristics: u32,
 }
 
 /// Read-only PE32 view: the file and optional header fields, the section table,
@@ -94,6 +96,8 @@ pub struct Pe<'a> {
     data: &'a [u8],
     pe_off: usize,
     opt_off: usize,
+    /// `FileHeader.Machine` (`0x14c` x86, `0x1f2` Xbox 360 PowerPC).
+    pub machine: u16,
     /// `FileHeader.TimeDateStamp`.
     pub timestamp: u32,
     /// `FileHeader.Characteristics`.
@@ -119,6 +123,7 @@ impl<'a> Pe<'a> {
         if rd_u16(data, opt_off)? != 0x10b {
             return Err(Error::NotPe); // not PE32 (this crate targets 32-bit)
         }
+        let machine = rd_u16(data, pe_off + 4)?;
         let num_sec = rd_u16(data, pe_off + 6)? as usize;
         let timestamp = rd_u32(data, pe_off + 8)?;
         let size_opt = rd_u16(data, pe_off + 20)? as usize;
@@ -142,12 +147,14 @@ impl<'a> Pe<'a> {
                 vaddr: rd_u32(data, so + 12)?,
                 raw_size: rd_u32(data, so + 16)?,
                 raw_ptr: rd_u32(data, so + 20)?,
+                characteristics: rd_u32(data, so + 36)?,
             });
         }
         Ok(Pe {
             data,
             pe_off,
             opt_off,
+            machine,
             timestamp,
             characteristics,
             image_base,
