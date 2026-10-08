@@ -6,6 +6,7 @@
 //! exemap xex <xex> --key retail|devkit --out <pe>
 //! exemap ghidra-pe <pe> --out <pe>
 //! exemap starts <image> --out <list>
+//! exemap derive <image_id> --from <container> --out <image>
 //! ```
 //!
 //! Exit status: 0 on success; 1 on an unknown build, an unexpected difference, or an input the
@@ -55,6 +56,15 @@ enum Command {
     /// Write the function starts of an Xbox 360 PE (.pdata) or PS3 ELF (.opd), one hex VA per line.
     Starts {
         image: PathBuf,
+        #[arg(long)]
+        out: PathBuf,
+    },
+    /// Rebuild a console image from its original container (images.tsv chain), checking every sha256.
+    Derive {
+        image_id: String,
+        /// The first file of the image's chain: a disc image, XEX, SELF or PSN package.
+        #[arg(long)]
+        from: PathBuf,
         #[arg(long)]
         out: PathBuf,
     },
@@ -154,6 +164,27 @@ fn run(cli: Cli) -> Result<(), ExitCode> {
                 }
             }
             println!("starts     {} -> {}", starts.len(), out.display());
+        }
+        Command::Derive { image_id, from, out } => {
+            let images = mercs2_exemap::images::Images::embedded(&catalogue).map_err(|e| {
+                eprintln!("error: the embedded images table is invalid: {e}");
+                ExitCode::from(2)
+            })?;
+            let image = images.image(&image_id).ok_or_else(|| {
+                eprintln!("error: images.tsv has no image {image_id}");
+                ExitCode::from(1)
+            })?;
+            let mut file = std::fs::File::open(&from).map_err(|e| {
+                eprintln!("error: cannot read {}: {e}", from.display());
+                ExitCode::from(2)
+            })?;
+            let bytes = mercs2_exemap::images::derive(image, &mut file).map_err(|e| {
+                eprintln!("error: {e}");
+                ExitCode::from(1)
+            })?;
+            write(&out, &bytes)?;
+            println!("image      {} ({} bytes) -> {}", image.id, bytes.len(), out.display());
+            println!("sha256     {}", image.sha256);
         }
     }
     Ok(())
