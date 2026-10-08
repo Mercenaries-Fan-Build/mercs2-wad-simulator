@@ -3,16 +3,20 @@
 //! ```text
 //! exemap identify <exe>
 //! exemap check <exe> --reference <layout-reference-exe>
+//! exemap xex <xex> --key retail|devkit --out <pe>
+//! exemap ghidra-pe <pe> --out <pe>
+//! exemap starts <image> --out <list>
 //! ```
 //!
-//! Exit status: 0 when the build is catalogued (and, for `check`, every difference from the layout
-//! reference is a listed overlay); 1 on an unknown build or an unexpected difference; 2 when a file
-//! cannot be read.
+//! Exit status: 0 on success; 1 on an unknown build, an unexpected difference, or an input the
+//! command cannot handle; 2 when a file cannot be read or written.
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
+use mercs2_exemap::starts::{function_starts, Source};
+use mercs2_exemap::xbox::{ghidra_pe, unpack_xex, XexKey};
 use mercs2_exemap::{identify_in, membership, Catalogue};
 
 #[derive(Parser)]
@@ -33,6 +37,34 @@ enum Command {
         #[arg(long)]
         reference: PathBuf,
     },
+    /// Recover the PE image from an Xbox 360 XEX2 file.
+    Xex {
+        xex: PathBuf,
+        /// Key-encryption key that wraps the session key: retail or devkit.
+        #[arg(long)]
+        key: XexKey,
+        #[arg(long)]
+        out: PathBuf,
+    },
+    /// Rewrite an Xbox 360 PE image's section headers to its RVA layout, for Ghidra's PE loader.
+    GhidraPe {
+        pe: PathBuf,
+        #[arg(long)]
+        out: PathBuf,
+    },
+    /// Write the function starts of an Xbox 360 PE (.pdata) or PS3 ELF (.opd), one hex VA per line.
+    Starts {
+        image: PathBuf,
+        #[arg(long)]
+        out: PathBuf,
+    },
+}
+
+fn write(path: &Path, bytes: &[u8]) -> Result<(), ExitCode> {
+    std::fs::write(path, bytes).map_err(|e| {
+        eprintln!("error: cannot write {}: {e}", path.display());
+        ExitCode::from(2)
+    })
 }
 
 fn read(path: &Path) -> Result<Vec<u8>, ExitCode> {
@@ -81,6 +113,47 @@ fn run(cli: Cli) -> Result<(), ExitCode> {
                     o.detail
                 );
             }
+        }
+        Command::Xex { xex, key, out } => {
+            let bytes = read(&xex)?;
+            let (pe, info) = unpack_xex(&bytes, key).map_err(|e| {
+                eprintln!("error: {}: {e}", xex.display());
+                ExitCode::from(1)
+            })?;
+            write(&out, &pe)?;
+            println!("key        {}", key.as_str());
+            println!("encrypted  {}", info.encrypted);
+            println!("compression {}", info.compression);
+            if info.compression == 2 {
+                println!("lzx        window 0x{:x}, {} blocks, {} stream bytes", info.window_size, info.blocks, info.stream_len);
+            }
+            println!("image      {} bytes -> {}", pe.len(), out.display());
+            println!("sha256     {}", mercs2_exemap::sha256_hex(&pe));
+        }
+        Command::GhidraPe { pe, out } => {
+            let bytes = read(&pe)?;
+            let fixed = ghidra_pe(&bytes).map_err(|e| {
+                eprintln!("error: {}: {e}", pe.display());
+                ExitCode::from(1)
+            })?;
+            write(&out, &fixed)?;
+            println!("sha256     {}", mercs2_exemap::sha256_hex(&fixed));
+        }
+        Command::Starts { image, out } => {
+            let bytes = read(&image)?;
+            let (starts, source) = function_starts(&bytes).map_err(|e| {
+                eprintln!("error: {}: {e}", image.display());
+                ExitCode::from(1)
+            })?;
+            let text: String = starts.iter().map(|v| format!("{v:08x}\n")).collect();
+            write(&out, text.as_bytes())?;
+            match source {
+                Source::Pdata { va, records } => println!(".pdata     0x{va:08x}, {records} records"),
+                Source::Opd { va, descriptors, toc } => {
+                    println!(".opd       0x{va:08x}, {descriptors} descriptors, entry TOC 0x{toc:08x}")
+                }
+            }
+            println!("starts     {} -> {}", starts.len(), out.display());
         }
     }
     Ok(())
