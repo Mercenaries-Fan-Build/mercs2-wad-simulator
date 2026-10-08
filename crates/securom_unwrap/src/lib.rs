@@ -64,6 +64,9 @@ impl std::error::Error for Error {}
 
 type Result<T> = std::result::Result<T, Error>;
 
+/// `FileHeader.Characteristics` bit: the image can handle addresses above 2 GiB.
+pub const IMAGE_FILE_LARGE_ADDRESS_AWARE: u16 = 0x0020;
+
 fn rd_u16(d: &[u8], o: usize) -> Result<u16> {
     d.get(o..o + 2)
         .map(|b| u16::from_le_bytes([b[0], b[1]]))
@@ -85,13 +88,21 @@ pub struct Section {
     pub raw_size: u32,
 }
 
-/// Minimal read-only PE32 view: just enough to find the entry, sections,
-/// data directories, and to map RVAs to file offsets.
+/// Read-only PE32 view: the file and optional header fields, the section table,
+/// data directories, and RVA-to-file-offset mapping.
 pub struct Pe<'a> {
     data: &'a [u8],
+    pe_off: usize,
     opt_off: usize,
+    /// `FileHeader.TimeDateStamp`.
+    pub timestamp: u32,
+    /// `FileHeader.Characteristics`.
+    pub characteristics: u16,
     pub image_base: u32,
     pub entry: u32,
+    pub section_alignment: u32,
+    pub file_alignment: u32,
+    pub size_of_headers: u32,
     pub sections: Vec<Section>,
 }
 
@@ -109,9 +120,14 @@ impl<'a> Pe<'a> {
             return Err(Error::NotPe); // not PE32 (this crate targets 32-bit)
         }
         let num_sec = rd_u16(data, pe_off + 6)? as usize;
+        let timestamp = rd_u32(data, pe_off + 8)?;
         let size_opt = rd_u16(data, pe_off + 20)? as usize;
+        let characteristics = rd_u16(data, pe_off + 22)?;
         let entry = rd_u32(data, opt_off + 16)?;
         let image_base = rd_u32(data, opt_off + 28)?;
+        let section_alignment = rd_u32(data, opt_off + 32)?;
+        let file_alignment = rd_u32(data, opt_off + 36)?;
+        let size_of_headers = rd_u32(data, opt_off + 60)?;
         let sec_table = pe_off + 24 + size_opt;
         let mut sections = Vec::with_capacity(num_sec);
         for i in 0..num_sec {
@@ -128,7 +144,24 @@ impl<'a> Pe<'a> {
                 raw_ptr: rd_u32(data, so + 20)?,
             });
         }
-        Ok(Pe { data, opt_off, image_base, entry, sections })
+        Ok(Pe {
+            data,
+            pe_off,
+            opt_off,
+            timestamp,
+            characteristics,
+            image_base,
+            entry,
+            section_alignment,
+            file_alignment,
+            size_of_headers,
+            sections,
+        })
+    }
+
+    /// The whole file.
+    pub fn data(&self) -> &'a [u8] {
+        self.data
     }
 
     /// Map an RVA to a file offset (handles both header and section regions).
@@ -207,6 +240,8 @@ pub struct Options {
     pub oep: Option<u32>,
     /// Section names (lowercased) whose imports are SecuROM's and get dropped.
     pub securom_sections: Vec<String>,
+    /// Set `IMAGE_FILE_LARGE_ADDRESS_AWARE` (0x0020) in `FileHeader.Characteristics`.
+    pub large_address_aware: bool,
 }
 
 impl Default for Options {
@@ -214,6 +249,7 @@ impl Default for Options {
         Options {
             oep: None,
             securom_sections: DEFAULT_SECUROM_SECTIONS.iter().map(|s| s.to_string()).collect(),
+            large_address_aware: false,
         }
     }
 }
@@ -271,7 +307,9 @@ pub fn derive_oep(pe: &Pe) -> Result<u32> {
 /// Produce a SecuROM-free copy of `data`. Returns the new image bytes and a
 /// [`Report`]. The transform is purely a set of in-place header/directory edits
 /// (entry point, import & IAT data directories, checksum, import-table
-/// truncation), so the output keeps the input's section layout byte-for-byte.
+/// truncation, and with [`Options::large_address_aware`] the
+/// `IMAGE_FILE_LARGE_ADDRESS_AWARE` characteristic), so the output keeps the
+/// input's section layout byte-for-byte.
 pub fn unwrap(data: &[u8], opts: &Options) -> Result<(Vec<u8>, Report)> {
     let pe = Pe::parse(data)?;
     let sr: HashSet<String> = opts.securom_sections.iter().map(|s| s.to_lowercase()).collect();
@@ -340,6 +378,10 @@ pub fn unwrap(data: &[u8], opts: &Options) -> Result<(Vec<u8>, Report)> {
     put(&mut out, pe.opt_off + 96 + 12 * 8 + 4, iat_size); // IAT dir size
     for b in out[imp_off + kept_count * 20..imp_off + kept_count * 20 + 20].iter_mut() {
         *b = 0; // null-terminate the descriptor array after the kept imports
+    }
+    if opts.large_address_aware {
+        let c = pe.characteristics | IMAGE_FILE_LARGE_ADDRESS_AWARE;
+        out[pe.pe_off + 22..pe.pe_off + 24].copy_from_slice(&c.to_le_bytes());
     }
 
     Ok((out, Report { original_entry: pe.entry, oep, kept, dropped, iat_rva, iat_size }))
@@ -418,6 +460,27 @@ mod tests {
         assert_eq!(rep.dropped.len(), 1);
         assert_eq!(rep.dropped[0].dll, "sr.dll");
         assert!(rep.dropped[0].is_securom);
+    }
+
+    #[test]
+    fn parses_the_header_fields() {
+        let d = synth();
+        let pe = Pe::parse(&d).unwrap();
+        assert_eq!((pe.timestamp, pe.characteristics, pe.image_base), (0, 0, 0x400000));
+        assert_eq!((pe.section_alignment, pe.file_alignment, pe.size_of_headers), (0, 0, 0));
+        assert_eq!(pe.data().len(), d.len());
+    }
+
+    #[test]
+    fn large_address_aware_sets_only_that_characteristic() {
+        let mut d = synth();
+        d[0x80 + 22..0x80 + 24].copy_from_slice(&0x0103u16.to_le_bytes());
+        let (plain, _) = unwrap(&d, &Options::default()).unwrap();
+        let (laa, _) = unwrap(&d, &Options { large_address_aware: true, ..Options::default() }).unwrap();
+        assert_eq!(rd_u16(&plain, 0x80 + 22).unwrap(), 0x0103, "default leaves Characteristics alone");
+        assert_eq!(rd_u16(&laa, 0x80 + 22).unwrap(), 0x0123);
+        let differing: Vec<usize> = (0..plain.len()).filter(|&i| plain[i] != laa[i]).collect();
+        assert_eq!(differing, vec![0x80 + 22]);
     }
 
     #[test]
