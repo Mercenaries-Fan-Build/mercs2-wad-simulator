@@ -22,12 +22,12 @@ clap = { version = "4", features = ["derive"] }
 # Builds are identified by sha256; builds.tsv also carries md5, checked on every identification.
 sha2 = "0.10"
 md-5 = "0.10"
+# The one PE32 parser in the workspace; this crate lays its mapped-image view over it.
+securom_unwrap = { path = "../securom_unwrap" }
 
 [dev-dependencies]
 # The game-gated tests find the corpus through the repo-root .mercs2-local.toml resolvers.
 mercs2_formats = { workspace = true }
-# The game-gated recipe test reruns the transform a builds.tsv row names.
-securom_unwrap = { path = "../securom_unwrap" }
 
 [features]
 # Builds the game-gated tests, which read the executables named by the repo-root
