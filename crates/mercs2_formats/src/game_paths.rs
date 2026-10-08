@@ -67,8 +67,14 @@ pub fn vz_wad_from_env() -> Option<PathBuf> {
 ///   ([`local_config_ps3_vz_wad`]).
 /// * `unpacked_exe` — the SecuROM-unpacked game executable (`mercs2_unpacked.exe`, a runtime dump).
 ///   Read only by the tests that disassemble the engine ([`local_config_unpacked_exe`]).
+/// * `exe_corpus` — a **directory** of retail `Mercenaries2.exe` builds. Read only by the exe-map
+///   tests ([`local_config_exe_corpus`]).
+/// * `exe_dumps` — a **directory** of executables and process-image dumps derived from them. Read
+///   only by the exe-map tests ([`local_config_exe_dumps`]).
+/// * `drmfree_exe` — the DRM-free v1.1 executable. Read only by the exe-map tests
+///   ([`local_config_drmfree_exe`]).
 ///
-/// The console keys and `unpacked_exe` are never inferred from `vz_wad`'s folder: each file lives
+/// The console keys and the executable keys are never inferred from `vz_wad`'s folder: each lives
 /// wherever it is kept, and a test that needs one fails naming the missing key.
 pub const LOCAL_CONFIG: &str = ".mercs2-local.toml";
 
@@ -88,6 +94,12 @@ pub const XBOX_VZ_WAD_KEY: &str = "xbox_vz_wad";
 pub const PS3_VZ_WAD_KEY: &str = "ps3_vz_wad";
 /// The `unpacked_exe` key of [`LOCAL_CONFIG`]: the SecuROM-unpacked game executable.
 pub const UNPACKED_EXE_KEY: &str = "unpacked_exe";
+/// The `exe_corpus` key of [`LOCAL_CONFIG`]: a directory of retail executables.
+pub const EXE_CORPUS_KEY: &str = "exe_corpus";
+/// The `exe_dumps` key of [`LOCAL_CONFIG`]: a directory of derived executables and image dumps.
+pub const EXE_DUMPS_KEY: &str = "exe_dumps";
+/// The `drmfree_exe` key of [`LOCAL_CONFIG`]: the DRM-free v1.1 executable.
+pub const DRMFREE_EXE_KEY: &str = "drmfree_exe";
 
 /// The `<key> = "…"` value in one [`LOCAL_CONFIG`]'s text, or `None` when the key is absent.
 ///
@@ -160,9 +172,62 @@ pub fn local_config_unpacked_exe(start: &Path) -> Result<PathBuf, String> {
     )
 }
 
+/// The retail executable directory for a **game-gated test**: `exe_corpus` in the nearest
+/// [`LOCAL_CONFIG`].
+///
+/// Same rules and the same three distinct errors as [`local_config_vz_wad`], except that the path
+/// must be a directory. No script writes this key.
+pub fn local_config_exe_corpus(start: &Path) -> Result<PathBuf, String> {
+    local_config_path(
+        start,
+        EXE_CORPUS_KEY,
+        Want::Dir,
+        "write `exe_corpus = \"/path/to/exe_sha256\"` into it by hand",
+    )
+}
+
+/// The derived-executable directory for a **game-gated test**: `exe_dumps` in the nearest
+/// [`LOCAL_CONFIG`].
+///
+/// Same rules and the same three distinct errors as [`local_config_vz_wad`], except that the path
+/// must be a directory. No script writes this key.
+pub fn local_config_exe_dumps(start: &Path) -> Result<PathBuf, String> {
+    local_config_path(
+        start,
+        EXE_DUMPS_KEY,
+        Want::Dir,
+        "write `exe_dumps = \"/path/to/securom_dump\"` into it by hand",
+    )
+}
+
+/// The DRM-free v1.1 executable for a **game-gated test**: `drmfree_exe` in the nearest
+/// [`LOCAL_CONFIG`].
+///
+/// Same rules and the same three distinct errors as [`local_config_vz_wad`]. No script writes this
+/// key.
+pub fn local_config_drmfree_exe(start: &Path) -> Result<PathBuf, String> {
+    local_config_file(
+        start,
+        DRMFREE_EXE_KEY,
+        "write `drmfree_exe = \"/path/to/mercs2_nodrm_v3.exe\"` into it by hand",
+    )
+}
+
+/// What a [`LOCAL_CONFIG`] key must name.
+#[derive(Clone, Copy)]
+enum Want {
+    File,
+    Dir,
+}
+
 /// The file `key` names in the nearest [`LOCAL_CONFIG`] above `start`, or an error saying which of
 /// the three things is wrong — no config, no `key`, or a path that is not a file — ending in `fix`.
 fn local_config_file(start: &Path, key: &str, fix: &str) -> Result<PathBuf, String> {
+    local_config_path(start, key, Want::File, fix)
+}
+
+/// The path `key` names in the nearest [`LOCAL_CONFIG`] above `start`, which must be `want`.
+fn local_config_path(start: &Path, key: &str, want: Want, fix: &str) -> Result<PathBuf, String> {
     let Some((file, text)) = local_configs(start).next() else {
         return Err(format!(
             "game-gated test: no {LOCAL_CONFIG} found in {} or any folder above it; {fix}",
@@ -172,9 +237,13 @@ fn local_config_file(start: &Path, key: &str, fix: &str) -> Result<PathBuf, Stri
     let Some(path) = config_value(&text, key) else {
         return Err(format!("game-gated test: {} has no `{key}` key; {fix}", file.display()));
     };
-    if !path.is_file() {
+    let (ok, noun) = match want {
+        Want::File => (path.is_file(), "a file"),
+        Want::Dir => (path.is_dir(), "a directory"),
+    };
+    if !ok {
         return Err(format!(
-            "game-gated test: {} names {key} = {}, which is not a file; {fix}",
+            "game-gated test: {} names {key} = {}, which is not {noun}; {fix}",
             file.display(),
             path.display()
         ));
@@ -402,6 +471,54 @@ mod tests {
         std::fs::write(&exe, b"MZ").unwrap();
         assert_eq!(local_config_unpacked_exe(&deep), Ok(exe));
         assert_eq!(local_config_vz_wad(&deep), Ok(pc));
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// The exe-map keys: the two directory keys reject a file, the file key rejects a directory, and
+    /// each matches its key exactly.
+    #[test]
+    fn the_exe_map_resolvers_require_their_kind_of_path() {
+        let root = std::env::temp_dir().join("mercs2_formats_local_config_exe_map");
+        std::fs::remove_dir_all(&root).ok();
+        let deep = root.join("a");
+        std::fs::create_dir_all(&deep).unwrap();
+
+        let e = local_config_exe_corpus(&deep).unwrap_err();
+        assert!(e.contains("no .mercs2-local.toml found") && e.contains("exe_corpus = "), "{e}");
+
+        let (corpus, dumps, exe) = (root.join("corpus"), root.join("dumps"), root.join("nodrm.exe"));
+        std::fs::create_dir_all(&corpus).unwrap();
+        std::fs::create_dir_all(&dumps).unwrap();
+        std::fs::write(&exe, b"MZ").unwrap();
+        let config = root.join(LOCAL_CONFIG);
+        std::fs::write(&config, format!("exe_corpus = \"{}\"\n", exe.display())).unwrap();
+        let e = local_config_exe_corpus(&deep).unwrap_err();
+        assert!(e.contains("which is not a directory"), "{e}");
+        let e = local_config_exe_dumps(&deep).unwrap_err();
+        assert!(e.contains("has no `exe_dumps` key"), "{e}");
+
+        std::fs::write(
+            &config,
+            format!(
+                "exe_corpus = \"{}\"\nexe_dumps = \"{}\"\ndrmfree_exe = \"{}\"\n",
+                corpus.display(),
+                dumps.display(),
+                dumps.display()
+            ),
+        )
+        .unwrap();
+        assert_eq!(local_config_exe_corpus(&deep), Ok(corpus.clone()));
+        assert_eq!(local_config_exe_dumps(&deep), Ok(dumps.clone()));
+        let e = local_config_drmfree_exe(&deep).unwrap_err();
+        assert!(e.contains("which is not a file"), "{e}");
+
+        std::fs::write(
+            &config,
+            format!("exe_corpus = \"{}\"\ndrmfree_exe = \"{}\"\n", corpus.display(), exe.display()),
+        )
+        .unwrap();
+        assert_eq!(local_config_drmfree_exe(&deep), Ok(exe));
 
         std::fs::remove_dir_all(&root).ok();
     }
