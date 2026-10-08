@@ -77,6 +77,12 @@ pub fn vz_wad_from_env() -> Option<PathBuf> {
 ///   exe-map patcher test ([`local_config_v11_patcher_exe`]).
 /// * `wine_binary` — the `wine64` binary that runs the patcher. Read only by the exe-map patcher
 ///   test ([`local_config_wine_binary`]).
+/// * `x360_devkit_iso` — the Jul 11 2008 Xbox 360 preview disc image. Read only by the exe-map
+///   console-image tests ([`local_config_x360_devkit_iso`]).
+/// * `ps3_eboot_bin` — the PS3 disc's `EBOOT.BIN` (BLUS30056). Read only by the exe-map
+///   console-image tests ([`local_config_ps3_eboot_bin`]).
+/// * `ps3_update_pkgs` — a **directory** holding the PS3 v1.03 update `.pkg` files. Read only by
+///   the exe-map console-image tests ([`local_config_ps3_update_pkgs`]).
 ///
 /// The console keys and the executable keys are never inferred from `vz_wad`'s folder: each lives
 /// wherever it is kept, and a test that needs one fails naming the missing key.
@@ -108,6 +114,12 @@ pub const DRMFREE_EXE_KEY: &str = "drmfree_exe";
 pub const V11_PATCHER_EXE_KEY: &str = "v11_patcher_exe";
 /// The `wine_binary` key of [`LOCAL_CONFIG`]: the `wine64` binary.
 pub const WINE_BINARY_KEY: &str = "wine_binary";
+/// The `x360_devkit_iso` key of [`LOCAL_CONFIG`]: the Xbox 360 preview disc image.
+pub const X360_DEVKIT_ISO_KEY: &str = "x360_devkit_iso";
+/// The `ps3_eboot_bin` key of [`LOCAL_CONFIG`]: the PS3 disc `EBOOT.BIN`.
+pub const PS3_EBOOT_BIN_KEY: &str = "ps3_eboot_bin";
+/// The `ps3_update_pkgs` key of [`LOCAL_CONFIG`]: a directory of PS3 update packages.
+pub const PS3_UPDATE_PKGS_KEY: &str = "ps3_update_pkgs";
 
 /// The `<key> = "…"` value in one [`LOCAL_CONFIG`]'s text, or `None` when the key is absent.
 ///
@@ -243,6 +255,46 @@ pub fn local_config_wine_binary(start: &Path) -> Result<PathBuf, String> {
         start,
         WINE_BINARY_KEY,
         "write `wine_binary = \"/path/to/wine/bin/wine64\"` into it by hand",
+    )
+}
+
+/// The Xbox 360 preview disc image for a **game-gated test**: `x360_devkit_iso` in the nearest
+/// [`LOCAL_CONFIG`].
+///
+/// Same rules and the same three distinct errors as [`local_config_vz_wad`]. No script writes this
+/// key.
+pub fn local_config_x360_devkit_iso(start: &Path) -> Result<PathBuf, String> {
+    local_config_file(
+        start,
+        X360_DEVKIT_ISO_KEY,
+        "write `x360_devkit_iso = \"/path/to/Mercenaries 2 Preview X360 (Jul 11 2008).iso\"` into it by hand",
+    )
+}
+
+/// The PS3 disc `EBOOT.BIN` for a **game-gated test**: `ps3_eboot_bin` in the nearest
+/// [`LOCAL_CONFIG`].
+///
+/// Same rules and the same three distinct errors as [`local_config_vz_wad`]. No script writes this
+/// key.
+pub fn local_config_ps3_eboot_bin(start: &Path) -> Result<PathBuf, String> {
+    local_config_file(
+        start,
+        PS3_EBOOT_BIN_KEY,
+        "write `ps3_eboot_bin = \"/path/to/EBOOT.BIN\"` into it by hand",
+    )
+}
+
+/// The PS3 update package directory for a **game-gated test**: `ps3_update_pkgs` in the nearest
+/// [`LOCAL_CONFIG`].
+///
+/// Same rules and the same three distinct errors as [`local_config_vz_wad`], except that the path
+/// must be a directory. No script writes this key.
+pub fn local_config_ps3_update_pkgs(start: &Path) -> Result<PathBuf, String> {
+    local_config_path(
+        start,
+        PS3_UPDATE_PKGS_KEY,
+        Want::Dir,
+        "write `ps3_update_pkgs = \"/path/to/updates\"` into it by hand",
     )
 }
 
@@ -565,6 +617,46 @@ mod tests {
         assert_eq!(local_config_v11_patcher_exe(&deep), Ok(exe));
         let e = local_config_wine_binary(&deep).unwrap_err();
         assert!(e.contains("which is not a file"), "{e}");
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// The console-image keys: the disc image and EBOOT are files, the update packages a directory.
+    #[test]
+    fn the_console_image_resolvers_require_their_kind_of_path() {
+        let root = std::env::temp_dir().join("mercs2_formats_local_config_console_images");
+        std::fs::remove_dir_all(&root).ok();
+        let deep = root.join("a");
+        std::fs::create_dir_all(&deep).unwrap();
+        let (iso, eboot, pkgs) = (root.join("preview.iso"), root.join("EBOOT.BIN"), root.join("updates"));
+        std::fs::write(&iso, b"iso").unwrap();
+        std::fs::write(&eboot, b"SCE").unwrap();
+        std::fs::create_dir_all(&pkgs).unwrap();
+        let config = root.join(LOCAL_CONFIG);
+
+        std::fs::write(&config, format!("ps3_update_pkgs = \"{}\"\n", eboot.display())).unwrap();
+        let e = local_config_ps3_update_pkgs(&deep).unwrap_err();
+        assert!(e.contains("which is not a directory"), "{e}");
+        let e = local_config_x360_devkit_iso(&deep).unwrap_err();
+        assert!(e.contains("has no `x360_devkit_iso` key"), "{e}");
+
+        std::fs::write(
+            &config,
+            format!(
+                "x360_devkit_iso = \"{}\"\nps3_eboot_bin = \"{}\"\nps3_update_pkgs = \"{}\"\n",
+                iso.display(),
+                pkgs.display(),
+                pkgs.display()
+            ),
+        )
+        .unwrap();
+        assert_eq!(local_config_x360_devkit_iso(&deep), Ok(iso));
+        assert_eq!(local_config_ps3_update_pkgs(&deep), Ok(pkgs.clone()));
+        let e = local_config_ps3_eboot_bin(&deep).unwrap_err();
+        assert!(e.contains("which is not a file"), "{e}");
+
+        std::fs::write(&config, format!("ps3_eboot_bin = \"{}\"\n", eboot.display())).unwrap();
+        assert_eq!(local_config_ps3_eboot_bin(&deep), Ok(eboot));
 
         std::fs::remove_dir_all(&root).ok();
     }
