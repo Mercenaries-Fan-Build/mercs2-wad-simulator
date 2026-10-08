@@ -1,0 +1,39 @@
+[package]
+name = "mercs2_exemap"
+version = "0.1.0"
+edition = "2021"
+description = "Mercenaries 2 modernization — cross-build exe map: the catalogue of known Mercenaries2.exe builds, their code layouts, and a per-section layout-membership checker."
+license.workspace = true
+repository.workspace = true
+# Kept out of the crates.io release set: its tables describe retail executables and are consumed
+# from this workspace only.
+publish = false
+
+[lib]
+name = "mercs2_exemap"
+path = "src/lib.rs"
+
+[[bin]]
+name = "exemap"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+# Builds are identified by sha256; builds.tsv also carries md5, checked on every identification.
+sha2 = "0.10"
+md-5 = "0.10"
+
+[dev-dependencies]
+# The game-gated tests find the corpus through the repo-root .mercs2-local.toml resolvers.
+mercs2_formats = { workspace = true }
+# The game-gated recipe test reruns the transform a builds.tsv row names.
+securom_unwrap = { path = "../securom_unwrap" }
+
+[features]
+# Builds the game-gated tests, which read the executables named by the repo-root
+# .mercs2-local.toml (exe_corpus, exe_dumps, drmfree_exe); run them with `cargo xtask retail-test`.
+retail = []
+
+[[test]]
+name = "corpus"
+required-features = ["retail"]
