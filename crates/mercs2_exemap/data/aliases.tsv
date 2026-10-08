@@ -1,0 +1,11 @@
+alias	build_id	reason
+dump-v11-pmcbb-image	dump-v10-pmcbb-image	names v1.1; the dump is U layout, v1.0 code
+dump-v11-pmcbb-unpacked	dump-v10-pmcbb-unpacked	names v1.1; the dump is U layout, v1.0 code
+history-drmfree-v1	history-v10-drmfree-v1	names no code version; the build is U layout, v1.0 code
+history-drmfree-v2	history-v10-drmfree-v2	names no code version; the build is U layout, v1.0 code
+v10-ea-signed	v11-official-securom	names v1.0; the build is the official v1.1 patcher output, E layout, v1.1 code
+v11-cracked-cruise	v10-cracked-cruise	names v1.1; the build is U layout, v1.0 code
+v11-cracked-pmcbb	v10-cracked-pmcbb	names v1.1; the build is U layout, v1.0 code
+v11-patched-drmfree	v10-drmfree-laa	names v1.1; the build is U layout, v1.0 code
+v11-patched-securom	v11-official-unwrapped	names a patched build; the build is the official v1.1 code with the SecuROM wrapper removed, E layout
+v11-securom-unwrap	v10-securom-unwrap	names v1.1; the build is U layout, v1.0 code
