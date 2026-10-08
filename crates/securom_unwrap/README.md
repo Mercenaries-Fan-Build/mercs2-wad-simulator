@@ -43,6 +43,9 @@ securom_unwrap in.exe out.exe --oep 0x5ee71c
 
 # Treat extra section name(s) as SecuROM's (repeatable):
 securom_unwrap in.exe out.exe --securom-section .myprot
+
+# Also set IMAGE_FILE_LARGE_ADDRESS_AWARE (0x0020) in FileHeader.Characteristics:
+securom_unwrap in.exe out.exe --large-address-aware
 ```
 
 Library:
