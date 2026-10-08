@@ -12,12 +12,23 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use mercs2_exemap::membership::check;
-use mercs2_exemap::pe::Pe;
+use mercs2_exemap::image::Image;
 use mercs2_exemap::{identify_in, sha256_hex, Catalogue, Space};
 use mercs2_formats::game_paths::{local_config_drmfree_exe, local_config_exe_corpus, local_config_exe_dumps};
 
-/// The recipe step that names `securom_unwrap::unwrap` with default options.
-const UNWRAP_STEP: &str = "securom_unwrap::unwrap(Options::default())";
+/// The `securom_unwrap::unwrap` options a builds.tsv recipe step names, or `None` when the step is
+/// not a `securom_unwrap` transform. A `securom_unwrap` step this does not know fails the test.
+fn unwrap_options(step: &str) -> Option<securom_unwrap::Options> {
+    use securom_unwrap::Options;
+    match step {
+        "securom_unwrap::unwrap(Options::default())" => Some(Options::default()),
+        "securom_unwrap::unwrap(Options { large_address_aware: true, .. })" => {
+            Some(Options { large_address_aware: true, ..Options::default() })
+        }
+        s if s.starts_with("securom_unwrap") => panic!("recipe step {s:?} names securom_unwrap options this test does not know"),
+        _ => None,
+    }
+}
 
 fn start() -> &'static Path {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -138,13 +149,13 @@ fn the_same_lineage_pairs_are_identity_outside_the_documented_overlays() {
         let layout = c.layout(&b.layout).expect("cross-checked at load");
         let bytes = bytes_of(&files, &b.sha256, id);
         let refb = bytes_of(&files, &layout.reference_sha256, "reference");
-        let (bp, rp) = (Pe::parse(&bytes).unwrap(), Pe::parse(&refb).unwrap());
+        let (bp, rp) = (Image::parse(&bytes).unwrap(), Image::parse(&refb).unwrap());
         let rows = c.overlay_set(b.overlay_set.as_deref().expect("a v1.0 build has overlays"));
         let covered = |space: Space, at: u64| rows.iter().any(|o| o.space == space && o.start <= at && at < o.end);
-        let base = rp.image_base as u64;
+        let base = rp.pe.image_base as u64;
 
         let extents: Vec<_> =
-            std::iter::once(0..rp.size_of_headers).chain((0..rp.sections.len()).map(|i| rp.section_extent(i))).collect();
+            std::iter::once(0..rp.pe.size_of_headers).chain((0..rp.pe.sections.len()).map(|i| rp.section_extent(i))).collect();
         let mut checked = 0u64;
         for ext in extents {
             let want = rp.mapped(ext.clone()).unwrap();
@@ -172,21 +183,24 @@ fn the_same_lineage_pairs_are_identity_outside_the_documented_overlays() {
     }
 }
 
-/// Every build whose recipe is `securom_unwrap::unwrap` with default options is reproduced, byte for
-/// byte, by running that function on the recipe's input.
+/// Every build whose recipe is a `securom_unwrap::unwrap` call is reproduced, byte for byte, by
+/// running that call on the recipe's input. This covers `v11-securom-unwrap` (default options) and
+/// `v11-patched-drmfree` (`large_address_aware`).
 #[test]
 fn securom_unwrap_recipes_reproduce_their_builds() {
     let c = catalogue();
     let files = by_sha();
-    let mut ran = 0;
+    let mut reproduced = Vec::new();
     for b in &c.builds {
-        for r in b.recipes.iter().filter(|r| r.step == UNWRAP_STEP) {
+        for r in &b.recipes {
+            let Some(opts) = unwrap_options(&r.step) else { continue };
             let input = bytes_of(&files, &r.from_sha256, &format!("{} recipe input", b.id));
-            let (out, _) = securom_unwrap::unwrap(&input, &securom_unwrap::Options::default())
+            let (out, _) = securom_unwrap::unwrap(&input, &opts)
                 .unwrap_or_else(|e| panic!("{}: securom_unwrap::unwrap: {e}", b.id));
-            assert_eq!(sha256_hex(&out), b.sha256, "{}: securom_unwrap output", b.id);
-            ran += 1;
+            assert_eq!(sha256_hex(&out), b.sha256, "{}: {}", b.id, r.step);
+            reproduced.push(b.id.as_str());
         }
     }
-    assert!(ran > 0, "no builds.tsv recipe names {UNWRAP_STEP}");
+    reproduced.sort();
+    assert_eq!(reproduced, ["v11-patched-drmfree", "v11-securom-unwrap"]);
 }
