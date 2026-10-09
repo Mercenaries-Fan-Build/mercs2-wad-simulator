@@ -87,8 +87,10 @@ pub fn vz_wad_from_env() -> Option<PathBuf> {
 ///   the exe-map console-image tests ([`local_config_ps3_update_pkgs`]).
 /// * `pc_demo_zip` — the public PC demo, `Mercs2_Demo_Setup.zip`. Read only by the exe-map Lua
 ///   corpus tests ([`local_config_pc_demo_zip`]).
-/// * `pc_install_dir` — a **directory**: the canonical clean PC install (every language, English
-///   last). Read only by the exe-map Lua corpus tests ([`local_config_pc_install_dir`]).
+/// * `pc_official_install_dir` — a **directory**: the official PC release as EA's download manager
+///   installs it. Read only by the exe-map Lua corpus tests ([`local_config_pc_official_install_dir`]).
+/// * `pc_repack_install_dir` — a **directory**: the ElAmigos repack, installed once per language,
+///   English last. Read only by the exe-map Lua corpus tests ([`local_config_pc_repack_install_dir`]).
 ///
 /// The console keys and the executable keys are never inferred from `vz_wad`'s folder: each lives
 /// wherever it is kept, and a test that needs one fails naming the missing key.
@@ -130,8 +132,10 @@ pub const PS3_EBOOT_BIN_KEY: &str = "ps3_eboot_bin";
 pub const PS3_UPDATE_PKGS_KEY: &str = "ps3_update_pkgs";
 /// The `pc_demo_zip` key of [`LOCAL_CONFIG`]: the public PC demo archive.
 pub const PC_DEMO_ZIP_KEY: &str = "pc_demo_zip";
-/// The `pc_install_dir` key of [`LOCAL_CONFIG`]: the canonical clean PC install.
-pub const PC_INSTALL_DIR_KEY: &str = "pc_install_dir";
+/// The `pc_official_install_dir` key of [`LOCAL_CONFIG`]: the official PC install.
+pub const PC_OFFICIAL_INSTALL_DIR_KEY: &str = "pc_official_install_dir";
+/// The `pc_repack_install_dir` key of [`LOCAL_CONFIG`]: the ElAmigos repack install.
+pub const PC_REPACK_INSTALL_DIR_KEY: &str = "pc_repack_install_dir";
 
 /// The `<key> = "…"` value in one [`LOCAL_CONFIG`]'s text, or `None` when the key is absent.
 ///
@@ -322,17 +326,31 @@ pub fn local_config_pc_demo_zip(start: &Path) -> Result<PathBuf, String> {
     )
 }
 
-/// The canonical clean PC install for a **game-gated test**: `pc_install_dir` in the nearest
+/// The official PC install for a **game-gated test**: `pc_official_install_dir` in the nearest
 /// [`LOCAL_CONFIG`].
 ///
 /// Same rules and the same three distinct errors as [`local_config_vz_wad`], except that the path
 /// must be a directory. No script writes this key.
-pub fn local_config_pc_install_dir(start: &Path) -> Result<PathBuf, String> {
+pub fn local_config_pc_official_install_dir(start: &Path) -> Result<PathBuf, String> {
     local_config_path(
         start,
-        PC_INSTALL_DIR_KEY,
+        PC_OFFICIAL_INSTALL_DIR_KEY,
         Want::Dir,
-        "write `pc_install_dir = \"/path/to/Mercenaries 2 World in Flames\"` into it by hand",
+        "write `pc_official_install_dir = \"/path/to/Mercenaries 2 World in Flames\"` into it by hand",
+    )
+}
+
+/// The ElAmigos repack install for a **game-gated test**: `pc_repack_install_dir` in the nearest
+/// [`LOCAL_CONFIG`].
+///
+/// Same rules and the same three distinct errors as [`local_config_vz_wad`], except that the path
+/// must be a directory. No script writes this key.
+pub fn local_config_pc_repack_install_dir(start: &Path) -> Result<PathBuf, String> {
+    local_config_path(
+        start,
+        PC_REPACK_INSTALL_DIR_KEY,
+        Want::Dir,
+        "write `pc_repack_install_dir = \"/path/to/Mercenaries 2 World in Flames\"` into it by hand",
     )
 }
 
@@ -715,12 +733,15 @@ mod tests {
         assert_eq!(local_config_x360_retail_xex(&deep), Ok(eboot.clone()));
         let e = local_config_pc_demo_zip(&deep).unwrap_err();
         assert!(e.contains("has no `pc_demo_zip` key"), "{e}");
-        std::fs::write(&config, format!("pc_demo_zip = \"{}\"\npc_install_dir = \"{}\"\n", eboot.display(), eboot.display())).unwrap();
+        std::fs::write(&config, format!("pc_demo_zip = \"{}\"\npc_official_install_dir = \"{}\"\n", eboot.display(), eboot.display())).unwrap();
         assert_eq!(local_config_pc_demo_zip(&deep), Ok(eboot));
-        let e = local_config_pc_install_dir(&deep).unwrap_err();
+        let e = local_config_pc_official_install_dir(&deep).unwrap_err();
         assert!(e.contains("which is not a directory"), "{e}");
-        std::fs::write(&config, format!("pc_install_dir = \"{}\"\n", pkgs.display())).unwrap();
-        assert_eq!(local_config_pc_install_dir(&deep), Ok(pkgs));
+        let e = local_config_pc_repack_install_dir(&deep).unwrap_err();
+        assert!(e.contains("has no `pc_repack_install_dir` key"), "{e}");
+        std::fs::write(&config, format!("pc_official_install_dir = \"{}\"\npc_repack_install_dir = \"{}\"\n", pkgs.display(), pkgs.display())).unwrap();
+        assert_eq!(local_config_pc_official_install_dir(&deep), Ok(pkgs.clone()));
+        assert_eq!(local_config_pc_repack_install_dir(&deep), Ok(pkgs));
 
         std::fs::remove_dir_all(&root).ok();
     }
