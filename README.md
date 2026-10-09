@@ -118,9 +118,12 @@ chain that rebuilds it from the original file: `zip:<entry>`, `wine-sfx:<path>` 
 installer run silently under Wine) and `wine-extrac32:<entry>` (a cabinet extracted by Wine).
 `exemap corpus-derive` replays one chain, checking every sha256; the PC demo corpus rebuilds from
 `Mercs2_Demo_Setup.zip` this way, and its executable is build `demo-official-securom`, layout `D`.
-A WAD with an empty chain is catalogued from a canonical install: the PC retail corpus is the eight
-WADs of a clean install from the PC installer ISO, run once per language with English last, which
-also installs the unwrapped v1.1 executable `v11-official-unwrapped`.
+A WAD with an empty chain is catalogued from an install: the PC retail corpus is the four WADs of
+the official release as EA's download manager installs it (English only, with the SecuROM v1.1
+executable `v11-official-securom`), and `base-pc-elamigos` is the ElAmigos repack (not official
+media) installed once per language with English last: eight WADs, of which English, shell and vz
+are byte-identical to the official ones and Loading.wad is not, and the unwrapped v1.1 executable
+`v11-official-unwrapped`.
 
 ```bash
 exemap corpus-derive base-pc-demo vz.wad --from Mercs2_Demo_Setup.zip --work /tmp/demo --wine <wine64>
@@ -217,7 +220,8 @@ environment variable is consulted. The file holds one `key = "path"` per line:
 | `ps3_eboot_bin` | the PS3 disc's `EBOOT.BIN` (BLUS30056) | the `mercs2_exemap` console-image test |
 | `ps3_update_pkgs` | a directory of the PS3 v1.03 update `.pkg` files (NA, EU, DE) | the `mercs2_exemap` console-image test |
 | `pc_demo_zip` | the public PC demo, `Mercs2_Demo_Setup.zip` (sha256 `9d32195d…`) | the `mercs2_exemap` Lua corpus test |
-| `pc_install_dir` | the canonical clean PC install directory (every language, English last) | the `mercs2_exemap` Lua corpus test |
+| `pc_official_install_dir` | the official PC install directory, as EA's download manager installs it | the `mercs2_exemap` Lua corpus test |
+| `pc_repack_install_dir` | the ElAmigos repack install directory (every language, English last) | the `mercs2_exemap` Lua corpus test |
 
 `scripts/find-vz-wad.sh --write` writes `vz_wad` only, and rewrites the whole file, so
 the console keys, `unpacked_exe`, the three executable keys, the patcher keys, the console-image keys and the corpus keys are added by hand after it runs. When the file, a key a test needs,
