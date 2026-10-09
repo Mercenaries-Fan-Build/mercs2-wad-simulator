@@ -90,7 +90,11 @@ rebuilds it from its original container (a file from the Xbox disc, `xex`, `ghid
 package entry, `unself`), and `exemap derive` replays it, checking every sha256 on the way. A
 regional build whose executable sections and function starts match another image byte for byte
 names that image as its `code_image` (the PS3 v1.03 EU and DE EBOOTs share the NA code and differ
-only in their embedded region config).
+only in their embedded region config). The PS3 regional disc EBOOTs are mapped too: `ps3-v100-jp`
+(BLJM60101, APP_VER 01.00, its own code), and `ps3-v101-eu` (BLES00323, APP_VER 01.01) with
+`ps3-v101-de` (BLES00328), which shares its code byte for byte. Each is rebuilt with `unself:app`
+from `<disc dir>/PS3_GAME/USRDIR/EBOOT.BIN`, found through the `ps3_jp_disc_dir`, `ps3_eu_disc_dir`
+and `ps3_de_disc_dir` keys.
 
 `exemap rtti <image> --out <tsv>` recovers vtables from an image's own C++ type information and
 writes one row per slot (ABI, decorated name, `Foo::Bar` class name, vtable address, subobject
@@ -106,10 +110,16 @@ two slots, so a PS3 vtable of the same class has one slot more.
 `exemap luareg <image> --out <tsv>` recovers the Lua C-function registration tables (`luaL_Reg`
 arrays of `{name, function}` ended by `{NULL, NULL}`) and writes one row per entry. The game's
 tables nest groups with marker entries, `{name, 0xFFFFFFFF}` to open and `{name, 0xFFFFFFFE}` to
-close, so `Graphics` holds `Camera.SetNearFar`. A table's namespace comes from a `{name, table}`
-registry row: the PC images name 31 namespaces holding 1,081 bindings, the Xbox 360 Final and
-retail images 30. The Xbox 360 Profile image and the PS3 images register their game namespaces
-another way, so their game tables carry no namespace.
+close, so `Graphics` holds `Camera.SetNearFar`. A table's namespace is the identifier in the word
+before a pointer to it, the `name` of a `{name, table, init}` registry row. The PC images name 31
+namespaces holding 1,081 bindings, and the Xbox 360 Final and retail images 30, as data. The Xbox
+360 Profile image and the PS3 images leave each row's name zero and fill it in a static initializer
+(PS3 `0x0050a8e8`, Profile `0x829eba98`) that copies each library's `const char*` name into the
+row; on PowerPC images `luareg` evaluates every function's constant-address `stw` stores over its
+control flow and takes the name from such a store, so those images name the same 30 game
+namespaces. The PS3 images name 35: those 30, the Lua libraries `coroutine`, `_G`, `string` and
+`table`, and `available` for the table `{addCallback, call}` at `0xf7adb0`, which is not a registry
+row but two adjacent TOC entries (the pointer at `0xfd0bf8` follows one to the string "available").
 
 `crates/mercs2_exemap/data/corpora.tsv` catalogues the Lua corpus by product (`base`, `demo`,
 `patch`, `dlc:<name>`), platform and build, a patch or DLC naming the corpus it applies to, so
@@ -191,9 +201,13 @@ function), `ambiguous` (several), `unregistered-in-native-namespace` (the namesp
 natively, the name is not — mostly event ids, constants and sub-tables) or `lua-namespace` (no
 native table carries that namespace: a table the scripts build themselves). The last class is only
 as complete as the export's namespace names, so the command prints how many the export names and
-refuses an export that names none. The PC and Xbox 360 exports name 31 and 30 namespaces; the PS3
-exports name 5 and the Xbox 360 preview Profile export none, so their lookups cannot yet be told
-apart from Lua-built tables.
+refuses an export that names none. Each retail script set resolves about 660–680 distinct lookups
+to native functions (PC 719 against `pc-v11`, Xbox 360 664, the PS3 discs 676–677).
+
+`cargo xtask retail-test` locks these results in: `tests/lua_corpus.rs` indexes every catalogued
+corpus (every chunk decodes and re-encodes), checks each corpus's function and script counts, the
+pairing counts of the same-lineage corpora, and the PC and Xbox 360 retail lookup links computed
+from the `pc-v11` and `x360-retail` images' registration tables.
 
 `exemap match <image_a> <image_b> --exports <dir> --evidence <list> --out <tsv> --conflicts <tsv>`
 pairs the functions of two `images.tsv` images from their exports in `<dir>` (`<id>.rtti.tsv`,
@@ -215,6 +229,28 @@ and fails when an accepted pair contradicts one.
 exemap derive x360-preview-profile --from "Mercenaries 2 Preview X360 (Jul 11 2008).iso" --out profile.pe_ghidra
 exemap derive ps3-v103-na --from "UP0006-BLUS30056_00-MERCS2PATCHNA103-A0103-V0100-PE.pkg" --out eboot103.elf
 ```
+
+`exemap translate <image> <address> --to <image> --matches <dir>` translates a function address
+between two images through a directory of `match` outputs. Each pairs file (header
+`<image_a>	<image_b>	evidence`) is an edge of the match graph, usable in both directions; a conflicts
+file names no images and is not read, an image pair may have only one pairs file, and any other file
+in the directory is an error. The address is mapped along every simple path between the two images
+(the direct edge is one of them); a path answers when every hop has a pair, and stops at the first
+function with none. The command prints every path and what it gives, then the answer when every
+answering path agrees. It fails, listing each answer with its paths, when two paths disagree, and
+fails as untranslatable when no path answers or no path exists.
+
+`exemap coverage --matches <dir> --out <tsv> --contradictions <tsv>` translates every function of
+every image in the graph (every function some pairs file names) to every other image. `--out` has
+one row per image pair: functions, translated, direct (answered by the direct pair),
+direct_confirmed (and by at least one composed path), composed_only, contradicted,
+contradicted_direct and untranslated. `--contradictions` lists every contradicted translation with
+each answer and the paths that gave it; two functions that compose to the same function along
+different paths show up as a contradiction on the way back. The command fails when there is any
+contradiction. Across the ten PC/Xbox 360 match outputs, 84,972 direct pairs are confirmed by a
+composed path, and 10 contradictions come from one inconsistency: a PC function paired with the
+preview Profile by the string `start`, which only that function references in each image, while the
+Profile function is the analogue of a different preview Final/retail function.
 
 ### `dlc_port`
 Incomplete Rust reimplementation of the Python DLC porter. Converts Xbox 360 DLC (RAR/STFS) to PC `vz-patch.wad`. Currently a work-in-progress; the Python version is still authoritative.
