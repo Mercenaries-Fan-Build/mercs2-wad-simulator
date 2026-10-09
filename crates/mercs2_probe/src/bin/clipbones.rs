@@ -28,6 +28,11 @@ fn main() {
         std::process::exit(1)
     });
     let mut w = wad::open(&path).expect("open vz.wad");
+    let table = mercs2_formats::game_paths::local_config_rainbow_table(std::path::Path::new(env!("CARGO_MANIFEST_DIR")))
+        .unwrap_or_else(|e| panic!("{e}"));
+    let rainbow_names = |hashes: &std::collections::BTreeSet<u32>| {
+        mercs2_engine::worldutil::rainbow_names(&table, hashes).unwrap_or_else(|e| panic!("{e}"))
+    };
 
     // `--order 0xCLIP`: dump that clip's ENTIRE track->bone binding IN TRACK ORDER.
     // Track order follows the authored skeleton, so an unnamed bone is pinned
@@ -43,7 +48,7 @@ fn main() {
             let Some(c) = ag.clips.iter().find(|c| c.name_hash == clip) else { continue };
             let all: std::collections::BTreeSet<u32> =
                 c.binding.track_to_bone_hash.iter().copied().collect();
-            let nm = mercs2_engine::worldutil::rainbow_names(&all);
+            let nm = rainbow_names(&all);
             println!("clip 0x{clip:08X} in block {blk}: {} tracks", c.binding.track_to_bone_hash.len());
             for (t, h) in c.binding.track_to_bone_hash.iter().enumerate() {
                 let n = nm.get(h).map(|s| s.as_str()).unwrap_or("******** UNNAMED ********");
@@ -57,7 +62,7 @@ fn main() {
 
     let names = {
         let set: std::collections::BTreeSet<u32> = targets.iter().copied().collect();
-        mercs2_engine::worldutil::rainbow_names(&set)
+        rainbow_names(&set)
     };
 
     for blk in wad::animgroup_blocks(&w) {
@@ -81,7 +86,7 @@ fn main() {
                 any = true;
             }
             let clip_set: std::collections::BTreeSet<u32> = std::iter::once(c.name_hash).collect();
-            let cn = mercs2_engine::worldutil::rainbow_names(&clip_set);
+            let cn = rainbow_names(&clip_set);
             let cname = cn.get(&c.name_hash).cloned().unwrap_or_else(|| "?".into());
             println!(
                 "  clip 0x{:08X} {:<34} tracks={:<4} class={:?}  binds {} of the targets:",
