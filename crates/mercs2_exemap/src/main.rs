@@ -573,10 +573,21 @@ fn run(cli: Cli) -> Result<(), ExitCode> {
                     .collect();
                 ctext.push_str(&format!("{}\t0x{:08x}\t{}\n", c.side, c.function, cands.join(" ")));
             }
+            // A sole candidate that is not corroborated: side `uncorroborated`, the image_a function,
+            // and its one image_b candidate.
+            for p in &o.uncorroborated {
+                let es: Vec<&str> = p.evidence.iter().map(|e| e.as_str()).collect();
+                ctext.push_str(&format!("uncorroborated\t0x{:08x}\t0x{:08x}({})\n", p.a, p.b, es.join("+")));
+            }
             write(&conflicts, ctext.as_bytes())?;
             println!("pairs      {} -> {}", o.pairs.len(), out.display());
             println!("evidence   {:?}", by_kind);
-            println!("conflicts  {} -> {}", o.conflicts.len(), conflicts.display());
+            println!(
+                "conflicts  {} (+ {} uncorroborated sole candidates) -> {}",
+                o.conflicts.len(),
+                o.uncorroborated.len(),
+                conflicts.display()
+            );
             let anchors = mercs2_exemap::matcher::anchors(&images).map_err(fail)?;
             let chk = mercs2_exemap::matcher::check_anchors(&image_a, &image_b, &o, &anchors);
             println!("anchors    {} agree, {} unmatched, {} contradicted", chk.agreeing, chk.unmatched, chk.contradicted.len());
