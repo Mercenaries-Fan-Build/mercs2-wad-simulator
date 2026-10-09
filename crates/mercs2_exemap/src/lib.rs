@@ -1,12 +1,14 @@
 //! `mercs2_exemap` — the cross-build map of Mercenaries 2 PC executables.
 //!
 //! Every known `Mercenaries2.exe` build (and every process-image dump taken from one) is a row of
-//! `data/builds.tsv`, identified by sha256 alone. Builds fall into two code layouts, each named by
+//! `data/builds.tsv`, identified by sha256 alone. Builds fall into three code layouts, each named by
 //! the PE timestamp it was compiled with and pinned to one reference build in `data/layouts.tsv`.
 //! Each layout is one code version of the game, recorded per build in the `code_version` column:
 //!
 //! * `U` — timestamp `0x48a370c7`, reference `v10-cracked-pmcbb`, code version 1.0;
-//! * `E` — timestamp `0x48cae190`, reference `v11-official-unwrapped`, code version 1.1.
+//! * `E` — timestamp `0x48cae190`, reference `v11-official-unwrapped`, code version 1.1;
+//! * `D` — timestamp `0x48cb59e8`, reference `demo-official-securom` (the PC demo's
+//!   `Merc2-Demo.exe` as its installer ships it), code version `demo`.
 //!
 //! The official v1.1 patcher (sha256 `b27fedc2…`, the same file in all four regions) turns
 //! `v10-unsigned` (U) into `v11-official-securom` (E), which ties U to 1.0 and E to 1.1. Every
