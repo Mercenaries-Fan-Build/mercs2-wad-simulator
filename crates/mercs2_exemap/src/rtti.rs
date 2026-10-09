@@ -25,10 +25,7 @@
 //! decorated name is a plain or nested class name; template and operator names keep only their raw
 //! form.
 
-use securom_unwrap::Pe;
-
-use crate::starts::{elf_sections, opd_section, SHF_EXECINSTR, SHT_PROGBITS};
-use crate::xbox::MACHINE_XENON;
+use crate::mem::Mem;
 use crate::Error;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -63,47 +60,6 @@ pub struct Vtable {
     pub slots: Vec<u32>,
 }
 
-/// One mapped range of the image.
-struct Range {
-    lo: u32,
-    hi: u32,
-    off: usize,
-    exec: bool,
-}
-
-/// The image's mapped ranges and byte order.
-struct Mem<'a> {
-    d: &'a [u8],
-    big: bool,
-    ranges: Vec<Range>,
-}
-
-impl<'a> Mem<'a> {
-    fn off(&self, va: u32) -> Option<usize> {
-        self.ranges.iter().find(|r| va >= r.lo && va < r.hi).map(|r| r.off + (va - r.lo) as usize)
-    }
-    fn word_at(&self, off: usize) -> Option<u32> {
-        let b: [u8; 4] = self.d.get(off..off + 4)?.try_into().ok()?;
-        Some(if self.big { u32::from_be_bytes(b) } else { u32::from_le_bytes(b) })
-    }
-    fn word(&self, va: u32) -> Option<u32> {
-        self.word_at(self.off(va)?)
-    }
-    fn exec(&self, va: u32) -> bool {
-        self.ranges.iter().any(|r| r.exec && va >= r.lo && va < r.hi)
-    }
-    /// Every 4-aligned word of the non-executable ranges, as (va, value).
-    fn data_words(&self) -> impl Iterator<Item = (u32, u32)> + '_ {
-        self.ranges.iter().filter(|r| !r.exec).flat_map(move |r| {
-            let n = (r.hi - r.lo) as usize / 4;
-            (0..n).filter_map(move |i| {
-                let va = r.lo + (i * 4) as u32;
-                self.word_at(r.off + i * 4).map(|w| (va, w))
-            })
-        })
-    }
-}
-
 /// The vtables of a PE (MSVC) or PS3 ELF (Itanium) image.
 pub fn vtables(image: &[u8]) -> Result<Vec<Vtable>, Error> {
     if image.starts_with(b"MZ") {
@@ -113,26 +69,6 @@ pub fn vtables(image: &[u8]) -> Result<Vec<Vtable>, Error> {
     } else {
         Err(Error::new("not a PE (MZ) or ELF image"))
     }
-}
-
-fn pe_mem(image: &[u8]) -> Result<Mem<'_>, Error> {
-    let pe = Pe::parse(image).map_err(|e| Error::new(format!("PE parse: {e}")))?;
-    let big = match pe.machine {
-        0x14c => false,
-        MACHINE_XENON => true,
-        m => return Err(Error::new(format!("PE machine 0x{m:x} has no RTTI layout this reader knows"))),
-    };
-    let mut ranges = Vec::new();
-    for s in &pe.sections {
-        let off = s.raw_ptr as usize;
-        if off >= image.len() || s.raw_size == 0 {
-            continue;
-        }
-        let len = (s.vsize.max(s.raw_size) as usize).min(s.raw_size as usize).min(image.len() - off);
-        let lo = pe.image_base + s.vaddr;
-        ranges.push(Range { lo, hi: lo + len as u32, off, exec: s.characteristics & 0x2000_0000 != 0 });
-    }
-    Ok(Mem { d: image, big, ranges })
 }
 
 /// `Foo::Bar` from `.?AVBar@Foo@@`; `None` for template, operator and other special names.
@@ -149,7 +85,7 @@ fn msvc_class(raw: &str) -> Option<String> {
 }
 
 fn msvc(image: &[u8]) -> Result<Vec<Vtable>, Error> {
-    let mem = pe_mem(image)?;
+    let mem = Mem::of(image)?;
     // Type descriptors: `.?A[UV]…@@` names in the data ranges; the descriptor starts 8 bytes before.
     let mut tds = std::collections::BTreeMap::new();
     for r in mem.ranges.iter().filter(|r| !r.exec) {
@@ -262,19 +198,7 @@ const CXXABI_TYPEINFOS: [&str; 3] = [
 ];
 
 fn itanium(image: &[u8]) -> Result<Vec<Vtable>, Error> {
-    let (entry, secs) = elf_sections(image)?;
-    let opd = opd_section(entry, &secs)?;
-    let (opd_lo, opd_hi) = (opd.addr as u32, (opd.addr + opd.size) as u32);
-    let mut ranges = Vec::new();
-    for s in secs.iter().filter(|s| s.kind == SHT_PROGBITS && s.size > 0 && s.addr != 0) {
-        ranges.push(Range {
-            lo: s.addr as u32,
-            hi: (s.addr + s.size) as u32,
-            off: s.offset as usize,
-            exec: s.flags & SHF_EXECINSTR != 0,
-        });
-    }
-    let mem = Mem { d: image, big: true, ranges };
+    let mem = Mem::of(image)?;
 
     // Class-name strings: NUL-preceded, NUL-terminated, parsing as an Itanium class name.
     let mut names = std::collections::BTreeMap::new();
@@ -343,17 +267,7 @@ fn itanium(image: &[u8]) -> Result<Vec<Vtable>, Error> {
         let first = va + 4;
         let mut slots = Vec::new();
         let mut s = first;
-        while let Some(p) = mem.word(s) {
-            let code = if p >= opd_lo && p < opd_hi && (p - opd_lo) % 8 == 0 {
-                match mem.word(p) {
-                    Some(c) if mem.exec(c) => c,
-                    _ => break,
-                }
-            } else if mem.exec(p) {
-                p
-            } else {
-                break;
-            };
+        while let Some(code) = mem.word(s).and_then(|p| mem.function(p)) {
             slots.push(code);
             s += 4;
         }
@@ -377,6 +291,7 @@ fn itanium(image: &[u8]) -> Result<Vec<Vtable>, Error> {
 mod tests {
     use super::*;
     use crate::starts::tests::pe_image;
+    use crate::xbox::MACHINE_XENON;
 
     #[test]
     fn msvc_names_normalise_to_qualified_class_names() {
