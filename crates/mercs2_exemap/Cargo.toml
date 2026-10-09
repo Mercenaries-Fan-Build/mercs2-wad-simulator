@@ -24,6 +24,8 @@ sha2 = "0.10"
 md-5 = "0.10"
 # The one PE32 parser in the workspace; this crate lays its mapped-image view over it.
 securom_unwrap = { path = "../securom_unwrap" }
+# The FnMnemonicSig exports the matcher reads are JSON.
+serde_json = "1"
 # XEX2 session-key unwrap and basefile decryption (AES-128 ECB/CBC).
 aes = "0.8"
 # The LZX decoder for compressed XEX basefiles; the game-gated tests also find the corpus through
