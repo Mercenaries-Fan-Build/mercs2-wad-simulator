@@ -1029,13 +1029,13 @@ pub fn run(opts: Options) {
                     names,
                     lua,
                     // The Ess / engine API reference the console autocompletes against.
-                    ess_api: crate::essapi::ApiIndex::load(&home),
+                    ess_api: crate::essapi::ApiIndex::load(&home)?,
                     // The native ECS component-class registry — the *typed* half of the reference
                     // (what a live entity is made of), searched alongside the callables.
-                    ecs_reg: crate::ecsreg::EcsRegistry::load(&home),
+                    ecs_reg: crate::ecsreg::EcsRegistry::load(&home)?,
                     // The captioned audio inventory — the Audio domain browses this (banks → clips
                     // with captions).
-                    audio_idx: crate::audioidx::AudioIndex::load(&home),
+                    audio_idx: crate::audioidx::AudioIndex::load(&home)?,
                     secs: t0.elapsed().as_secs_f32(),
                 })
             };
