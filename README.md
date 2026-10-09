@@ -111,6 +111,18 @@ registry row: the PC images name 31 namespaces holding 1,081 bindings, the Xbox 
 retail images 30. The Xbox 360 Profile image and the PS3 images register their game namespaces
 another way, so their game tables carry no namespace.
 
+`crates/mercs2_exemap/data/corpora.tsv` catalogues the Lua corpus by product (`base`, `demo`,
+`patch`, `dlc:<name>`), platform and build, a patch or DLC naming the corpus it applies to, so
+scripts are only compared within one product. `wads.tsv` lists each corpus WAD by sha256 with the
+chain that rebuilds it from the original file: `zip:<entry>`, `wine-sfx:<path>` (a self-extracting
+installer run silently under Wine) and `wine-extrac32:<entry>` (a cabinet extracted by Wine).
+`exemap corpus-derive` replays one chain, checking every sha256; the PC demo corpus rebuilds from
+`Mercs2_Demo_Setup.zip` this way, and its executable is build `demo-official-securom`, layout `D`.
+
+```bash
+exemap corpus-derive base-pc-demo vz.wad --from Mercs2_Demo_Setup.zip --work /tmp/demo --wine <wine64>
+```
+
 `exemap match <image_a> <image_b> --exports <dir> --evidence <list> --out <tsv> --conflicts <tsv>`
 pairs the functions of two `images.tsv` images from their exports in `<dir>` (`<id>.rtti.tsv`,
 `<id>.luareg.tsv`, and `<id>.fnsig.json` from `FnMnemonicSig.java` for the signature evidence).
@@ -201,9 +213,10 @@ environment variable is consulted. The file holds one `key = "path"` per line:
 | `x360_retail_xex` | the Xbox 360 retail `default.xex` (NTSC-U/J, sha256 `d5b646e7…`) | the `mercs2_exemap` console-image test |
 | `ps3_eboot_bin` | the PS3 disc's `EBOOT.BIN` (BLUS30056) | the `mercs2_exemap` console-image test |
 | `ps3_update_pkgs` | a directory of the PS3 v1.03 update `.pkg` files (NA, EU, DE) | the `mercs2_exemap` console-image test |
+| `pc_demo_zip` | the public PC demo, `Mercs2_Demo_Setup.zip` (sha256 `9d32195d…`) | the `mercs2_exemap` Lua corpus test |
 
 `scripts/find-vz-wad.sh --write` writes `vz_wad` only, and rewrites the whole file, so
-the console keys, `unpacked_exe`, the three executable keys, the patcher keys and the console-image keys are added by hand after it runs. When the file, a key a test needs,
+the console keys, `unpacked_exe`, the three executable keys, the patcher keys, the console-image keys and the corpus keys are added by hand after it runs. When the file, a key a test needs,
 or the file that key names is missing, the test fails with a message naming the file
 and the key.
 Two shapes exist: integration test targets declared
