@@ -149,14 +149,17 @@ to the official ones, its Loading.wad differs from the official one (and the dem
 exemap corpus-derive base-pc-demo data/vz.wad --from Mercs2_Demo_Setup.zip --work /tmp/demo --wine <wine64>
 ```
 
-`exemap lua-scripts <wad>` lists every Lua script container of a WAD on any platform, one row per
-container: its block, entry, name hash, block path and each descriptor's tag and size. Scripts are
-found by their entry type in every block, so no block is named in advance. Each container's
-checksum is verified; the one exception is the last container of a block stored uncompressed (every
-block of the Japanese PS3 disc), whose trailer is eight zero bytes. Console script chunks carry no
-`source` name (their debug information is stripped); the name lives in the container's INFO
-record. The retail counts are 645 (vz) + 28 (shell) on PC and 643 + 26 on Xbox 360 and every PS3
-disc.
+`exemap lua-scripts <wad> [--dump <dir>]` lists every Lua script container of a WAD on any platform,
+one row per container: its block, entry, name hash, script name (from the INFO record), function and
+instruction counts, whether the chunk keeps debug information, block path, and each descriptor's tag
+and size; `--dump` also writes each descriptor body to a file. Scripts are found by their entry
+type in every block, so no block is named in advance. Each container's checksum is verified; the
+one exception is the last container of a block stored uncompressed (every block of the Japanese PS3
+disc), whose trailer is eight zero bytes. Every chunk is decoded (`luachunk`: Lua 5.1, little-endian
+on PC, big-endian on console) and must re-encode to its exact bytes, or the command fails. The
+retail counts are 645 (vz) + 28 (shell) scripts on PC and 643 + 26 on Xbox 360 and every PS3 disc.
+PC and the Japanese PS3 disc keep their debug information (line info, local and upvalue names); the
+Xbox 360 and the European and German PS3 discs strip it.
 
 `exemap match <image_a> <image_b> --exports <dir> --evidence <list> --out <tsv> --conflicts <tsv>`
 pairs the functions of two `images.tsv` images from their exports in `<dir>` (`<id>.rtti.tsv`,
