@@ -169,6 +169,19 @@ level), its line range, parameter/vararg/upvalue/stack shape, code, constant and
 counts, and two platform-neutral fingerprints: `code_hash` (SHA-256 of the instruction words,
 little-endian) and `constants_hash`; `debug` says whether it keeps debug information.
 
+`exemap lua-pair <a.tsv> <b.tsv> --out <tsv>` pairs the functions of two `lua-index` exports by
+content. Scripts pair by name hash (a script that several WADs of one corpus carry with the same
+code counts once). Inside a script the two main functions pair, then every function whose code and
+constants fingerprints are unique on both sides, then the nested functions of each pair are aligned
+in order along a longest common subsequence of their code fingerprints, so an inserted or removed
+function does not shift its siblings; equal-length runs between aligned children pair in order.
+Each pair is `identical`, `identical-debug-differs` (one side strips debug information),
+`constants-differ` or `code-differs`; every other function is `only-a`/`only-b` and every other
+script `script-only-a`/`script-only-b`. Across the retail builds, the PC and Japanese PS3 scripts
+are one revision (6,221 functions identical, 57 with different code) and the Xbox 360, European and
+German PS3 scripts another (6,297 identical between Xbox 360 and Europe, one different); the two
+revisions differ in about 1,000 functions.
+
 `exemap match <image_a> <image_b> --exports <dir> --evidence <list> --out <tsv> --conflicts <tsv>`
 pairs the functions of two `images.tsv` images from their exports in `<dir>` (`<id>.rtti.tsv`,
 `<id>.luareg.tsv`, and `<id>.fnsig.json` from `FnMnemonicSig.java` for the signature evidence).
