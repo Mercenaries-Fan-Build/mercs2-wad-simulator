@@ -58,7 +58,7 @@ fn test_havok_phy2_resident2_round_trip() {
 #[test]
 fn test_min_block_too_small() {
     let tiny = vec![0u8; 2];
-    let result = ucfx_byteswap::convert::convert_block(&tiny, false, None);
+    let result = ucfx_byteswap::convert::convert_block(&tiny, false, None, None);
     assert!(result.is_err(), "Should reject block too small");
 }
 
@@ -69,7 +69,7 @@ fn test_min_block_with_one_entry_zero_size() {
     // entry_count = 1 (LE)
     data[0] = 1u8;
 
-    let result = ucfx_byteswap::convert::convert_block(&data, false, None);
+    let result = ucfx_byteswap::convert::convert_block(&data, false, None, None);
     // Should either succeed or fail gracefully (container size 0 edge case)
     // The converter validates entry.chunk_size, which is 0 here.
     let _ = result; // Accept either result for this edge case
