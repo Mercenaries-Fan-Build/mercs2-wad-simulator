@@ -23,7 +23,7 @@
 //!      packed_field); `build_patch_wad_multi` (auto-sentinels dangling LOD rungs -> no 549GB wedge).
 //!   6. `aset_refcheck` the written WAD separately as the deploy gate.
 //!
-//! Usage:
+//! Usage (`--out` is required except with `--report`):
 //!   mopp_overlay_forge --block 2612 --report
 //!   mopp_overlay_forge --block 2612 --mode return-all --out .../vz-patch-mopp-returnall.wad \
 //!       --merge-into .../live-vz-patch.wad --merge-out .../...-MERGED.wad
@@ -378,6 +378,12 @@ fn run() -> Result<(), String> {
     let model_hash: Option<u32> = arg(&args, "--model")
         .and_then(|s| u32::from_str_radix(s.trim_start_matches("0x"), 16).ok());
     let report = has(&args, "--report");
+    // Every run except `--report` writes the overlay WAD named by `--out`; checked before the WAD loads.
+    const OUT_REQUIRED: &str = "--out <file.wad> is required (the standalone overlay WAD to write)";
+    let out = arg(&args, "--out");
+    if out.is_none() && !report {
+        return Err(OUT_REQUIRED.into());
+    }
     let all_mopps = has(&args, "--all-mopps");
     // `authored` is a whole-PHY2 re-authoring mode (not a MOPP swap): decode the target container's
     // mesh(es), re-author a fully-authored PHY2 (WpMeshShape16 + engine-faithful descriptor-chain wrapper
@@ -404,24 +410,6 @@ fn run() -> Result<(), String> {
             }
         }
     };
-    let default_out = format!(
-        "C:/Users/Shadow/AppData/Local/Temp/hunt/mopp/overlay/vz-patch-mopp-{}.wad",
-        if authored {
-            match mopp_kind {
-                MoppKind::ReturnAll => "authored-returnall",
-                MoppKind::Spatial => "authored",
-            }
-        } else {
-            match mode {
-                SwapMode::Identity => "identity",
-                SwapMode::ReturnAll => "returnall",
-                SwapMode::Empty => "empty",
-                SwapMode::Spatial => "spatial",
-            }
-        }
-    );
-    let out = arg(&args, "--out").unwrap_or(default_out);
-
     let vz = game_paths::vz_wad(Path::new("."))
         .ok_or("vz.wad not found — set MERCS2_GAME_DIR or .mercs2-local.toml")?;
     let mut f = std::fs::File::open(&vz).map_err(|e| format!("open {vz:?}: {e}"))?;
@@ -449,6 +437,7 @@ fn run() -> Result<(), String> {
         print_report(&parsed, block);
         return Ok(());
     }
+    let out = out.ok_or(OUT_REQUIRED)?;
 
     let authored_label = match mopp_kind {
         MoppKind::ReturnAll => "authored/return-all",
