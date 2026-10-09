@@ -94,9 +94,9 @@ fn entries(table: &[u8]) -> Result<Vec<Entry>, Error> {
     Ok(out)
 }
 
-/// The bytes of the file at `path` (components separated by `/`, matched case-insensitively as
-/// XDVDFS does) in the disc image `r`.
-pub fn read_file<R: Read + Seek>(r: &mut R, path: &str) -> Result<Vec<u8>, Error> {
+/// The partition-relative location of the file at `path` (components separated by `/`, matched
+/// case-insensitively as XDVDFS does) in the disc image `r`: (absolute byte offset, size).
+pub fn locate<R: Read + Seek>(r: &mut R, path: &str) -> Result<(u64, u64), Error> {
     let base = partition(r)?;
     let root = read_at(r, base + 0x10000 + 0x14, 8, "root directory")?;
     let mut sector = u32::from_le_bytes(root[0..4].try_into().unwrap());
@@ -121,7 +121,13 @@ pub fn read_file<R: Read + Seek>(r: &mut R, path: &str) -> Result<Vec<u8>, Error
         sector = found.sector;
         size = found.size;
     }
-    read_at(r, base + sector as u64 * SECTOR, size as usize, path)
+    Ok((base + sector as u64 * SECTOR, size as u64))
+}
+
+/// The bytes of the file at `path` in the disc image `r` (see [`locate`]).
+pub fn read_file<R: Read + Seek>(r: &mut R, path: &str) -> Result<Vec<u8>, Error> {
+    let (off, size) = locate(r, path)?;
+    read_at(r, off, size as usize, path)
 }
 
 #[cfg(test)]
