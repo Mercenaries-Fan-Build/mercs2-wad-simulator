@@ -110,16 +110,19 @@ two slots, so a PS3 vtable of the same class has one slot more.
 `exemap luareg <image> --out <tsv>` recovers the Lua C-function registration tables (`luaL_Reg`
 arrays of `{name, function}` ended by `{NULL, NULL}`) and writes one row per entry. The game's
 tables nest groups with marker entries, `{name, 0xFFFFFFFF}` to open and `{name, 0xFFFFFFFE}` to
-close, so `Graphics` holds `Camera.SetNearFar`. A table's namespace is the identifier in the word
-before a pointer to it, the `name` of a `{name, table, init}` registry row. The PC images name 31
-namespaces holding 1,081 bindings, and the Xbox 360 Final and retail images 30, as data. The Xbox
-360 Profile image and the PS3 images leave each row's name zero and fill it in a static initializer
-(PS3 `0x0050a8e8`, Profile `0x829eba98`) that copies each library's `const char*` name into the
-row; on PowerPC images `luareg` evaluates every function's constant-address `stw` stores over its
-control flow and takes the name from such a store, so those images name the same 30 game
-namespaces. The PS3 images name 35: those 30, the Lua libraries `coroutine`, `_G`, `string` and
-`table`, and `available` for the table `{addCallback, call}` at `0xf7adb0`, which is not a registry
-row but two adjacent TOC entries (the pointer at `0xfd0bf8` follows one to the string "available").
+close, so `Graphics` holds `Camera.SetNearFar`. A table's namespace is the `name` of the registry
+row that points at it. The registry is an array of 12-byte rows `{const char* name, luaL_Reg*
+table, const char* init}`: each row's `table` word points at a recovered table, its `name` word
+holds an identifier, and its `init` word is 0 or points at NUL-terminated text. Only rows in a run
+of at least two consecutive rows name a table; a lone `{name, table}` word pair names nothing. The
+PC images name 31 namespaces holding 1,081 bindings, and the Xbox 360 Final and retail images 30,
+as data. The Xbox 360 Profile image and the PS3 images leave each row's `name` and `init` words zero
+in their bytes and write them from code: a static initializer (PS3 `0x0050a8e8`, Profile
+`0x829eba98`) copies each library's `const char*` name into its row. On PowerPC images `luareg`
+evaluates every function's constant-address `stw` stores over its control flow and takes the words
+from those stores, so those images name the same 30 game namespaces. No image has a registry row
+for the Lua libraries (`_G`, `coroutine`, `string`, `table`), so those tables are unnamed on every
+platform.
 
 `crates/mercs2_exemap/data/corpora.tsv` catalogues the Lua corpus by product (`base`, `demo`,
 `patch`, `dlc:<name>`), platform and build, a patch or DLC naming the corpus it applies to, so
@@ -220,8 +223,14 @@ binding, or a binding name unique in each image), `bytes` (a masked-bytes hash u
 image), `string` (a string referenced by exactly one function in each image) and `callee`
 (positional callees of accepted pairs whose call lists agree with every accepted pair). `bytes`
 and `callee` apply only between images analysed with the same Ghidra language: across compilers,
-inlining shifts call lists. A pair is accepted only when neither function has another candidate;
-every other candidate is written to the conflicts file, unresolved. `data/anchors.tsv` holds pairs
+inlining shifts call lists. `callee` pairs only direct callees that are function starts (keys of
+each image's fnsig export); an import (`ext:<library>!<name>` — the export names each call into
+an imported function) is never paired, and two aligned imports agree only when their names are
+equal; indirect entries (`*0x…`, `?`) agree only with indirect entries. A pair is accepted only
+when neither function has another candidate and it is corroborated: a pair whose only evidence is
+`string` needs a second distinct such string, or any of `vtable`, `lua`, `bytes`, `callee`. Every
+other candidate is written to the conflicts file, unresolved; a sole candidate that is not
+corroborated is written there too, as an `uncorroborated` row. `data/anchors.tsv` holds pairs
 verified by reading both decompiles; `match` reports how the anchors between its two images fared
 and fails when an accepted pair contradicts one.
 
@@ -247,10 +256,9 @@ direct_confirmed (and by at least one composed path), composed_only, contradicte
 contradicted_direct and untranslated. `--contradictions` lists every contradicted translation with
 each answer and the paths that gave it; two functions that compose to the same function along
 different paths show up as a contradiction on the way back. The command fails when there is any
-contradiction. Across the ten PC/Xbox 360 match outputs, 84,972 direct pairs are confirmed by a
-composed path, and 10 contradictions come from one inconsistency: a PC function paired with the
-preview Profile by the string `start`, which only that function references in each image, while the
-Profile function is the analogue of a different preview Final/retail function.
+contradiction. Across the ten PC/Xbox 360 match outputs there is no contradiction: PC v1.0 and
+v1.1 translate 23,688 functions directly, PC and every Xbox 360 image about 2,420–2,500 (nearly all
+also confirmed through another image), and the Xbox 360 images 7,300–10,060 between each other.
 
 ### `dlc_port`
 Incomplete Rust reimplementation of the Python DLC porter. Converts Xbox 360 DLC (RAR/STFS) to PC `vz-patch.wad`. Currently a work-in-progress; the Python version is still authoritative.
