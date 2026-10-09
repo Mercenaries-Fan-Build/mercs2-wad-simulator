@@ -127,9 +127,12 @@ preview disc, the retail disc dump, and the Blow It Up Again Pack (retail, the N
 archive being its `.doh`. The PS3 corpora are the North American disc BLUS30056 (a community-assembled ISO
 whose primary and Joliet trees both list VZ.WAD's final extent out of order; see the `iso9660`
 module), its v1.03 update (`VZ-PATCH.WAD` and `SHELL-PATCH.WAD`), and the Blow It Up Again Pack
-(`DLC01.EDAT`, decrypted with the klicensee recovered from the v1.03 EBOOT). The Japanese disc BLJM60101 and the German
-disc BLES00328 (application version 01.01) are decrypted folder dumps, their five WADs each checked
-in place; the German disc's v1.03 update ships the same patch WADs as the North American one.
+(`DLC01.EDAT`, decrypted with the klicensee recovered from the v1.03 EBOOT). The Japanese disc BLJM60101, the German disc
+BLES00328 and the European disc BLES00323 (both application version 01.01) are decrypted folder
+dumps, their WADs checked in place; the European disc shares its English, German, Loading, shell
+and vz WADs with the German one. Each of the three v1.03 updates is catalogued against its own
+region's disc; the German update ships the same patch WADs as the North American one, the European
+update its own.
 `exemap corpus-derive` replays one chain, checking every sha256; the PC demo corpus rebuilds from
 `Mercs2_Demo_Setup.zip` this way, and its executable is build `demo-official-securom`, layout `D`.
 A WAD with an empty chain is catalogued from an install, named in its `install` column by the
@@ -246,6 +249,7 @@ environment variable is consulted. The file holds one `key = "path"` per line:
 | `ps3_dlc_biua_pkg` | the PS3 Blow It Up Again Pack package (`UP0006-BLUS30056_00-MERCS2WIFDLC01NA`, sha256 `d62081de…`) | the `mercs2_exemap` Lua corpus test |
 | `ps3_jp_disc_dir` | the PS3 Japanese disc dump directory, the folder holding `PS3_GAME` (`Mercenaries 2 - World in Flames (Japan) [BLJM60101]`) | the `mercs2_exemap` Lua corpus test |
 | `ps3_de_disc_dir` | the PS3 German disc dump directory, the folder holding `PS3_GAME` (`Mercenaries 2 - World in Flames (Germany) (En,De) [BLES00328]`) | the `mercs2_exemap` Lua corpus test |
+| `ps3_eu_disc_dir` | the PS3 European disc dump directory, the folder holding `PS3_GAME` (`Mercenaries 2 - World in Flames (Europe) (En,Fr,De,Es,It,Ru) [BLES00323]`) | the `mercs2_exemap` Lua corpus test |
 
 `scripts/find-vz-wad.sh --write` writes `vz_wad` only, and rewrites the whole file, so
 the console keys, `unpacked_exe`, the three executable keys, the patcher keys, the console-image keys and the corpus keys are added by hand after it runs. When the file, a key a test needs,
