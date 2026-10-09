@@ -9,6 +9,7 @@
 //! exemap derive <image_id> --from <container> --out <image>
 //! exemap rtti <image> --out <tsv>
 //! exemap luareg <image> --out <tsv>
+//! exemap match <image_a> <image_b> --exports <dir> --evidence <list> --out <tsv> --conflicts <tsv>
 //! ```
 //!
 //! Exit status: 0 on success; 1 on an unknown build, an unexpected difference, or an input the
@@ -82,6 +83,21 @@ enum Command {
         image: PathBuf,
         #[arg(long)]
         out: PathBuf,
+    },
+    /// Match the functions of two images.tsv images from their exports (<id>.rtti.tsv,
+    /// <id>.luareg.tsv and, for bytes/string/callee evidence, <id>.fnsig.json).
+    Match {
+        image_a: String,
+        image_b: String,
+        #[arg(long)]
+        exports: PathBuf,
+        /// Comma-separated: vtable, lua, bytes, string, callee.
+        #[arg(long)]
+        evidence: String,
+        #[arg(long)]
+        out: PathBuf,
+        #[arg(long)]
+        conflicts: PathBuf,
     },
 }
 
@@ -252,6 +268,55 @@ fn run(cli: Cli) -> Result<(), ExitCode> {
             write(&out, text.as_bytes())?;
             let named = tables.iter().filter(|t| t.namespace.is_some()).count();
             println!("tables     {} ({} named by a registry, {} entries) -> {}", tables.len(), named, entries, out.display());
+        }
+        Command::Match { image_a, image_b, exports, evidence, out, conflicts } => {
+            use mercs2_exemap::matcher::{match_images, Evidence, Exports};
+            let fail = |e: mercs2_exemap::Error| {
+                eprintln!("error: {e}");
+                ExitCode::from(1)
+            };
+            let images = mercs2_exemap::images::Images::embedded(&catalogue).map_err(fail)?;
+            let lookup = |id: &str| {
+                images.image(id).ok_or_else(|| {
+                    eprintln!("error: images.tsv has no image {id}");
+                    ExitCode::from(1)
+                })
+            };
+            let (ia, ib) = (lookup(&image_a)?, lookup(&image_b)?);
+            let mut ev = std::collections::BTreeSet::new();
+            for e in evidence.split(',') {
+                ev.insert(Evidence::parse(e).ok_or_else(|| {
+                    eprintln!("error: unknown evidence {e:?}; expected vtable, lua, bytes, string or callee");
+                    ExitCode::from(1)
+                })?);
+            }
+            let sigs = ev.iter().any(|e| matches!(e, Evidence::Bytes | Evidence::String | Evidence::Callee));
+            let a = Exports::load(&exports, &image_a, sigs).map_err(fail)?;
+            let b = Exports::load(&exports, &image_b, sigs).map_err(fail)?;
+            let o = match_images(&a, &b, ia.ghidra_language == ib.ghidra_language, &ev).map_err(fail)?;
+            let mut text = format!("{image_a}\t{image_b}\tevidence\n");
+            let mut by_kind = std::collections::BTreeMap::new();
+            for p in &o.pairs {
+                let es: Vec<&str> = p.evidence.iter().map(|e| e.as_str()).collect();
+                for e in &es {
+                    *by_kind.entry(*e).or_insert(0usize) += 1;
+                }
+                text.push_str(&format!("0x{:08x}\t0x{:08x}\t{}\n", p.a, p.b, es.join(",")));
+            }
+            write(&out, text.as_bytes())?;
+            let mut ctext = String::from("side\tfunction\tcandidates\n");
+            for c in &o.conflicts {
+                let cands: Vec<String> = c
+                    .candidates
+                    .iter()
+                    .map(|(f, es)| format!("0x{f:08x}({})", es.iter().map(|e| e.as_str()).collect::<Vec<_>>().join("+")))
+                    .collect();
+                ctext.push_str(&format!("{}\t0x{:08x}\t{}\n", c.side, c.function, cands.join(" ")));
+            }
+            write(&conflicts, ctext.as_bytes())?;
+            println!("pairs      {} -> {}", o.pairs.len(), out.display());
+            println!("evidence   {:?}", by_kind);
+            println!("conflicts  {} -> {}", o.conflicts.len(), conflicts.display());
         }
     }
     Ok(())
