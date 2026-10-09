@@ -13,6 +13,7 @@
 //! exemap lua-scripts <wad> [--dump <dir>]
 //! exemap lua-index <corpus_id> --wad <file>... --out <tsv>
 //! exemap lua-pair <a.tsv> <b.tsv> --out <tsv>
+//! exemap lua-link <index.tsv> <image.luareg.tsv> --out <tsv>
 //! exemap match <image_a> <image_b> --exports <dir> --evidence <list> --out <tsv> --conflicts <tsv>
 //! ```
 //!
@@ -124,6 +125,14 @@ enum Command {
     LuaPair {
         a: PathBuf,
         b: PathBuf,
+        #[arg(long)]
+        out: PathBuf,
+    },
+    /// Link every Namespace.Name lookup of a lua-index export to the native function the image's
+    /// luareg export registers under that name, one row per lookup.
+    LuaLink {
+        index: PathBuf,
+        luareg: PathBuf,
         #[arg(long)]
         out: PathBuf,
     },
@@ -453,6 +462,49 @@ fn run(cli: Cli) -> Result<(), ExitCode> {
             write(&out, text.as_bytes())?;
             let summary: Vec<String> = counts.iter().map(|(k, n)| format!("{k}={n}")).collect();
             println!("pairs      {} -> {}", summary.join(" "), out.display());
+        }
+        Command::LuaLink { index, luareg, out } => {
+            use mercs2_exemap::lualink::{link, parse_luareg, Link};
+            let read = |p: &Path| {
+                std::fs::read_to_string(p).map_err(|e| {
+                    eprintln!("error: read {}: {e}", p.display());
+                    ExitCode::from(2)
+                })
+            };
+            let fail = |e: mercs2_exemap::Error| {
+                eprintln!("error: {e}");
+                ExitCode::from(1)
+            };
+            let rows = mercs2_exemap::luapair::parse_index(&read(&index)?).map_err(fail)?;
+            let reg = parse_luareg(&read(&luareg)?).map_err(fail)?;
+            let links = link(&rows, &reg).map_err(fail)?;
+            let mut text = String::from("script\tpath\tlookup\tstatus\tfunction\n");
+            let mut distinct: std::collections::BTreeMap<&str, (&str, String)> = std::collections::BTreeMap::new();
+            for l in &links {
+                let (status, f) = match &l.link {
+                    Link::Resolved(a) => ("resolved", format!("0x{a:08x}")),
+                    Link::Ambiguous(v) => ("ambiguous", v.iter().map(|a| format!("0x{a:08x}")).collect::<Vec<_>>().join(";")),
+                    Link::UnregisteredInNativeNamespace => ("unregistered-in-native-namespace", String::new()),
+                    Link::LuaNamespace => ("lua-namespace", String::new()),
+                };
+                text.push_str(&format!("{}\t{}\t{}\t{status}\t{f}\n", l.script, l.path, l.lookup));
+                distinct.insert(l.lookup.as_str(), (status, f));
+            }
+            write(&out, text.as_bytes())?;
+            let count = |s: &str| distinct.values().filter(|(st, _)| *st == s).count();
+            let namespaces: std::collections::BTreeSet<&str> =
+                reg.keys().map(|(ns, _)| ns.as_str()).filter(|ns| !ns.is_empty()).collect();
+            println!("namespaces {} named by the luareg export", namespaces.len());
+            println!(
+                "lookups    {} sites, {} distinct: {} resolved, {} ambiguous, {} unregistered in a native namespace, {} in a Lua namespace -> {}",
+                links.len(),
+                distinct.len(),
+                count("resolved"),
+                count("ambiguous"),
+                count("unregistered-in-native-namespace"),
+                count("lua-namespace"),
+                out.display()
+            );
         }
         Command::Match { image_a, image_b, exports, evidence, out, conflicts } => {
             use mercs2_exemap::matcher::{match_images, Evidence, Exports};
