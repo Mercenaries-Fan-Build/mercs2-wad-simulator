@@ -317,6 +317,18 @@ fn run(cli: Cli) -> Result<(), ExitCode> {
             println!("pairs      {} -> {}", o.pairs.len(), out.display());
             println!("evidence   {:?}", by_kind);
             println!("conflicts  {} -> {}", o.conflicts.len(), conflicts.display());
+            let anchors = mercs2_exemap::matcher::anchors(&images).map_err(fail)?;
+            let chk = mercs2_exemap::matcher::check_anchors(&image_a, &image_b, &o, &anchors);
+            println!("anchors    {} agree, {} unmatched, {} contradicted", chk.agreeing, chk.unmatched, chk.contradicted.len());
+            if !chk.contradicted.is_empty() {
+                for (an, p) in &chk.contradicted {
+                    eprintln!(
+                        "error: anchor {} 0x{:08x} <-> {} 0x{:08x} ({}) is contradicted by the accepted pair 0x{:08x} <-> 0x{:08x}",
+                        an.image_a, an.va_a, an.image_b, an.va_b, an.verified_by, p.a, p.b
+                    );
+                }
+                return Err(ExitCode::from(1));
+            }
         }
     }
     Ok(())
