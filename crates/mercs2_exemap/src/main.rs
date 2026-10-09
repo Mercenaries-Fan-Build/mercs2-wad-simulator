@@ -11,6 +11,7 @@
 //! exemap luareg <image> --out <tsv>
 //! exemap corpus-derive <corpus_id> <wad> --from <container> --work <dir> [--wine <wine64>]
 //! exemap lua-scripts <wad> [--dump <dir>]
+//! exemap lua-index <corpus_id> --wad <file>... --out <tsv>
 //! exemap match <image_a> <image_b> --exports <dir> --evidence <list> --out <tsv> --conflicts <tsv>
 //! ```
 //!
@@ -107,6 +108,15 @@ enum Command {
         /// Also write each descriptor body to `<dir>/<block>_<entry>_<name_hash>.<tag>`.
         #[arg(long)]
         dump: Option<PathBuf>,
+    },
+    /// Write one row per Lua function of a corpora.tsv corpus, from its WAD files (each matched
+    /// to wads.tsv by sha256; every WAD of the corpus must be given).
+    LuaIndex {
+        corpus_id: String,
+        #[arg(long = "wad", required = true)]
+        wads: Vec<PathBuf>,
+        #[arg(long)]
+        out: PathBuf,
     },
     /// Match the functions of two images.tsv images from their exports (<id>.rtti.tsv,
     /// <id>.luareg.tsv and, for bytes/string/callee evidence, <id>.fnsig.json).
@@ -379,6 +389,27 @@ fn run(cli: Cli) -> Result<(), ExitCode> {
                 ws.scripts.len(),
                 ws.endian
             );
+        }
+        Command::LuaIndex { corpus_id, wads, out } => {
+            use mercs2_exemap::corpus::Corpora;
+            use mercs2_exemap::luaindex::{index, HEADER};
+            let corpora = Corpora::embedded().map_err(|e| {
+                eprintln!("error: the embedded corpus tables are invalid: {e}");
+                ExitCode::from(2)
+            })?;
+            let rows = index(&corpora, &corpus_id, &wads).map_err(|e| {
+                eprintln!("error: {e}");
+                ExitCode::from(1)
+            })?;
+            let mut text = String::from(HEADER);
+            text.push('\n');
+            for r in &rows {
+                text.push_str(&r.tsv());
+                text.push('\n');
+            }
+            write(&out, text.as_bytes())?;
+            let scripts: std::collections::BTreeSet<(&str, u32)> = rows.iter().map(|r| (r.wad.as_str(), r.name_hash)).collect();
+            println!("functions  {} in {} scripts -> {}", rows.len(), scripts.len(), out.display());
         }
         Command::Match { image_a, image_b, exports, evidence, out, conflicts } => {
             use mercs2_exemap::matcher::{match_images, Evidence, Exports};
