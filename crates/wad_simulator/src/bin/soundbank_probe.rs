@@ -34,10 +34,10 @@ const TH_SOUNDBANK: u32 = 0x9F8B_CA10;
 
 #[derive(Parser)]
 struct Cli {
-    #[arg(long, default_value = r"C:\Users\Shadow\Desktop\Mercenaries 2 World in Flames\data\English.wad")]
+    #[arg(long)]
     wad: PathBuf,
     /// The .pws the waves should live in.
-    #[arg(long, default_value = r"C:\Users\Shadow\Desktop\Mercenaries 2 World in Flames\data\Audios\vo_stream.english.pws")]
+    #[arg(long)]
     pws: PathBuf,
     /// Bank name hashes to inspect (default: the four main characters, localized).
     #[arg(long)]
