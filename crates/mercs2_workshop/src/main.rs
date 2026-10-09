@@ -2113,47 +2113,85 @@ fn referenced_hashes_one(wadpath: &str) -> std::collections::HashSet<u32> {
     set
 }
 
-/// The committed production lookup: `data/production_names.json` (curated, hash-verified node/asset
-/// names), found by walking up from the CWD and then from the exe. This is the authoritative,
-/// bundleable name source — it lives in THIS repo, so it needs neither the rainbow table nor the
-/// WAD. `Ok(None)` when no candidate exists; an error when the file found cannot be read or parsed.
-fn load_production_names() -> Result<Option<std::collections::HashMap<u32, String>>, String> {
-    let mut roots = Vec::new();
-    if let Ok(cwd) = std::env::current_dir() {
-        roots.push(cwd);
+/// The checkout this binary was built from (the workspace root, two levels above this crate's
+/// manifest). `--pack-data` reads its in-repo sources here and nowhere else.
+fn repo_root() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
+}
+
+/// The reference files committed in the repo's `workshop_data/` that `--pack-data` copies into
+/// every bundle: the Ess API, natives and node catalogue (`essapi`), the ECS component registry
+/// (`ecsreg`) and the captioned audio inventory (`audioidx`).
+const REPO_BUNDLE_FILES: [&str; 5] =
+    ["ess_api.json", "ess_natives.json", "ess_nodes.json", "ecs_registry.tsv", "audio_manifest.json"];
+
+/// The committed production lookup: `<repo>/data/production_names.json` (curated, hash-verified
+/// node/asset names), where `<repo>` is the checkout this binary was built from ([`repo_root`]).
+/// This is the authoritative, bundleable name source — it lives in THIS repo, so it needs neither
+/// the rainbow table nor the WAD. `Ok(None)` when that path is not a file; an error when it is a
+/// file that cannot be read or parsed.
+fn load_production_names(
+    repo: &std::path::Path,
+) -> Result<Option<std::collections::HashMap<u32, String>>, String> {
+    let cand = repo.join("data/production_names.json");
+    if !cand.is_file() {
+        return Ok(None);
     }
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(d) = exe.parent() {
-            roots.push(d.to_path_buf());
+    let txt = std::fs::read_to_string(&cand).map_err(|e| format!("{}: {e}", cand.display()))?;
+    let v: serde_json::Value =
+        serde_json::from_str(&txt).map_err(|e| format!("{}: bad JSON: {e}", cand.display()))?;
+    let map = v
+        .get("pandemic_hash_m2")
+        .and_then(|m| m.as_object())
+        .ok_or_else(|| format!("{}: no `pandemic_hash_m2` object", cand.display()))?;
+    let mut out = std::collections::HashMap::with_capacity(map.len());
+    for (k, name) in map {
+        if let (Ok(h), Some(n)) = (u32::from_str_radix(k.trim_start_matches("0x"), 16), name.as_str()) {
+            out.insert(h, n.to_string());
         }
     }
-    for root in roots {
-        for dir in root.ancestors() {
-            let cand = dir.join("data/production_names.json");
-            if !cand.is_file() {
-                continue;
-            }
-            let txt =
-                std::fs::read_to_string(&cand).map_err(|e| format!("{}: {e}", cand.display()))?;
-            let v: serde_json::Value = serde_json::from_str(&txt)
-                .map_err(|e| format!("{}: bad JSON: {e}", cand.display()))?;
-            let map = v
-                .get("pandemic_hash_m2")
-                .and_then(|m| m.as_object())
-                .ok_or_else(|| format!("{}: no `pandemic_hash_m2` object", cand.display()))?;
-            let mut out = std::collections::HashMap::with_capacity(map.len());
-            for (k, name) in map {
-                if let (Ok(h), Some(n)) =
-                    (u32::from_str_radix(k.trim_start_matches("0x"), 16), name.as_str())
-                {
-                    out.insert(h, n.to_string());
-                }
-            }
-            eprintln!("[pack] names source: {}", cand.display());
-            return Ok(Some(out));
-        }
+    eprintln!("[pack] names source: {}", cand.display());
+    Ok(Some(out))
+}
+
+/// Whether `src` and `dst` are the same file on disk. `dst` not existing is `false`. On Unix this
+/// compares device and inode, so a hard link or a differently spelled path to the same file counts;
+/// elsewhere it compares the canonicalized paths.
+fn same_file(src: &std::path::Path, dst: &std::path::Path) -> Result<bool, String> {
+    if !dst.exists() {
+        return Ok(false);
     }
-    Ok(None)
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let a = std::fs::metadata(src).map_err(|e| format!("{}: {e}", src.display()))?;
+        let b = std::fs::metadata(dst).map_err(|e| format!("{}: {e}", dst.display()))?;
+        Ok(a.dev() == b.dev() && a.ino() == b.ino())
+    }
+    #[cfg(not(unix))]
+    {
+        let a = std::fs::canonicalize(src).map_err(|e| format!("{}: {e}", src.display()))?;
+        let b = std::fs::canonicalize(dst).map_err(|e| format!("{}: {e}", dst.display()))?;
+        Ok(a == b)
+    }
+}
+
+/// Copy each of [`REPO_BUNDLE_FILES`] from `src_dir` into `out`. A file whose destination already
+/// IS the source (`out` is the repo's own `workshop_data/`, as in the release workflow) is left in
+/// place: `std::fs::copy` onto itself truncates it to zero bytes. The caller checks every source
+/// exists before anything is written.
+fn copy_repo_bundle_files(src_dir: &std::path::Path, out: &std::path::Path) -> Result<(), String> {
+    for name in REPO_BUNDLE_FILES {
+        let src = src_dir.join(name);
+        let dst = out.join(name);
+        if same_file(&src, &dst)? {
+            eprintln!("[pack] {name}: already in place at {}", dst.display());
+            continue;
+        }
+        std::fs::copy(&src, &dst).map_err(|e| format!("{} -> {}: {e}", src.display(), dst.display()))?;
+        eprintln!("[pack] {name} <- {}", src.display());
+    }
+    Ok(())
 }
 
 /// `--pack-data <dir>`: assemble the reference bundle into `out`, a portable directory.
@@ -2167,6 +2205,11 @@ fn load_production_names() -> Result<Option<std::collections::HashMap<u32, Strin
 ///   [`load_production_names`]). Only when that file is absent are they merged from the raw corpora
 ///   ([`index::load_all_names_raw`]), which also reads the `jul08_strings` and `rainbow_table` keys
 ///   and the name corpora in `notes_docs_dir`'s `data/`.
+///
+/// In-repo sources are read from the checkout this binary was built from ([`repo_root`]), never
+/// from the CWD: `data/production_names.json` and the [`REPO_BUNDLE_FILES`] committed in
+/// `workshop_data/`, which are copied into the bundle. A missing one of those files is an error
+/// naming it, raised before anything is written.
 ///
 /// `manifest.json` is written LAST: its presence is what makes `out` a complete bundle for
 /// [`index::data_home`], so an existing one is removed before anything else is written.
@@ -2202,6 +2245,18 @@ fn pack_data(
         }
         trees.push((src, dest));
     }
+    let repo = repo_root();
+    let repo_bundle = repo.join("workshop_data");
+    for name in REPO_BUNDLE_FILES {
+        let src = repo_bundle.join(name);
+        if !src.is_file() {
+            return Err(format!(
+                "{} is not a file (committed in this repo's workshop_data/, the checkout {} was built from)",
+                src.display(),
+                env!("CARGO_PKG_NAME")
+            ));
+        }
+    }
 
     std::fs::create_dir_all(out).map_err(|e| format!("{}: {e}", out.display()))?;
     let manifest_path = out.join(index::BUNDLE_MANIFEST);
@@ -2214,7 +2269,7 @@ fn pack_data(
     // IN this repo. When it is present the pack is fully self-contained — no rainbow table and no
     // game WAD needed, so any machine can rebuild the bundle. The raw corpora + WAD-trim path runs
     // only when the production file is absent (i.e. when regenerating it).
-    let (names, full) = match load_production_names()? {
+    let (names, full) = match load_production_names(&repo)? {
         Some(p) => {
             eprintln!("[pack] names.bin: from committed data/production_names.json ({} names)", p.len());
             let n = p.len();
@@ -2262,10 +2317,13 @@ fn pack_data(
         let n = copy_tree(&src, &out.join(dest))?;
         eprintln!("[pack] {dest}/: {n} files <- {}", src.display());
     }
+    // 3. The reference files committed in this repo's `workshop_data/`.
+    copy_repo_bundle_files(&repo_bundle, out)?;
 
-    // 3. Manifest (provenance + counts, for the app's About/diagnostics) — written last.
+    // 4. Manifest (provenance + counts, for the app's About/diagnostics) — written last.
+    let repo_contents: String = REPO_BUNDLE_FILES.iter().map(|f| format!(", \"{f}\"")).collect();
     let manifest = format!(
-        "{{\n  \"format\": 1,\n  \"names\": {},\n  \"sources\": [\"bone_name_candidates\", \"rainbow_table\", \"live_registry\"],\n  \"contents\": [\"names.bin\", \"live_registry_hashes.csv\", \"spawnable_templates.csv\", \"ecs_schemas/\", \"lua/\", \"lua_dlc/\"]\n}}\n",
+        "{{\n  \"format\": 1,\n  \"names\": {},\n  \"sources\": [\"bone_name_candidates\", \"rainbow_table\", \"live_registry\"],\n  \"contents\": [\"names.bin\", \"live_registry_hashes.csv\", \"spawnable_templates.csv\", \"ecs_schemas/\", \"lua/\", \"lua_dlc/\"{repo_contents}]\n}}\n",
         names.len()
     );
     std::fs::write(&manifest_path, manifest)
@@ -2290,4 +2348,66 @@ fn copy_tree(src: &std::path::Path, dst: &std::path::Path) -> Result<usize, Stri
         }
     }
     Ok(n)
+}
+
+#[cfg(test)]
+mod pack_tests {
+    use super::*;
+
+    /// A scratch directory holding every [`REPO_BUNDLE_FILES`] entry, each with distinct content.
+    fn source_dir(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("m2ws_pack_{tag}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for name in REPO_BUNDLE_FILES {
+            std::fs::write(dir.join(name), format!("content of {name}")).unwrap();
+        }
+        dir
+    }
+
+    #[test]
+    fn repo_bundle_files_are_copied_into_the_bundle() {
+        let src = source_dir("copy_src");
+        let out = std::env::temp_dir().join("m2ws_pack_copy_out");
+        let _ = std::fs::remove_dir_all(&out);
+        std::fs::create_dir_all(&out).unwrap();
+        copy_repo_bundle_files(&src, &out).unwrap();
+        for name in REPO_BUNDLE_FILES {
+            assert_eq!(std::fs::read_to_string(out.join(name)).unwrap(), format!("content of {name}"));
+        }
+        let _ = std::fs::remove_dir_all(&src);
+        let _ = std::fs::remove_dir_all(&out);
+    }
+
+    /// The release workflow packs INTO the repo's own `workshop_data/`, so every source is also its
+    /// destination. `std::fs::copy` of a file onto itself truncates it; the files must come through
+    /// byte-for-byte.
+    #[test]
+    fn packing_into_the_source_folder_leaves_the_files_intact() {
+        let src = source_dir("self");
+        copy_repo_bundle_files(&src, &src).unwrap();
+        for name in REPO_BUNDLE_FILES {
+            assert_eq!(
+                std::fs::read_to_string(src.join(name)).unwrap(),
+                format!("content of {name}"),
+                "{name} was altered by copying onto itself"
+            );
+        }
+        // The same folder reached through a different spelling of its path.
+        let dotted = src.join(".");
+        copy_repo_bundle_files(&src, &dotted).unwrap();
+        for name in REPO_BUNDLE_FILES {
+            assert_eq!(std::fs::read_to_string(src.join(name)).unwrap(), format!("content of {name}"));
+        }
+        let _ = std::fs::remove_dir_all(&src);
+    }
+
+    /// The committed sources `--pack-data` reads exist in the checkout this binary is built from.
+    #[test]
+    fn the_repo_holds_every_committed_bundle_file() {
+        let dir = repo_root().join("workshop_data");
+        for name in REPO_BUNDLE_FILES {
+            assert!(dir.join(name).is_file(), "{} is missing", dir.join(name).display());
+        }
+    }
 }
