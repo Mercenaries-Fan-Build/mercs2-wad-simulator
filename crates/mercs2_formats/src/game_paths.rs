@@ -97,6 +97,10 @@ pub fn vz_wad_from_env() -> Option<PathBuf> {
 ///   the exe-map Lua corpus tests ([`local_config_x360_dlc_biua_stfs`]).
 /// * `x360_dlc_prototypes_dir` — a **directory** of zipped Xbox 360 DLC prototype packages. Read
 ///   only by the exe-map Lua corpus tests ([`local_config_x360_dlc_prototypes_dir`]).
+/// * `ps3_disc_iso` — the PS3 NA disc image (BLUS30056, ISO-9660). Read only by the exe-map Lua
+///   corpus tests ([`local_config_ps3_disc_iso`]).
+/// * `ps3_dlc_biua_pkg` — the PS3 NA Blow It Up Again Pack PSN package. Read only by the exe-map
+///   Lua corpus tests ([`local_config_ps3_dlc_biua_pkg`]).
 ///
 /// The console keys and the executable keys are never inferred from `vz_wad`'s folder: each lives
 /// wherever it is kept, and a test that needs one fails naming the missing key.
@@ -148,6 +152,10 @@ pub const X360_RETAIL_DIR_KEY: &str = "x360_retail_dir";
 pub const X360_DLC_BIUA_STFS_KEY: &str = "x360_dlc_biua_stfs";
 /// The `x360_dlc_prototypes_dir` key of [`LOCAL_CONFIG`]: a directory of zipped DLC prototypes.
 pub const X360_DLC_PROTOTYPES_DIR_KEY: &str = "x360_dlc_prototypes_dir";
+/// The `ps3_disc_iso` key of [`LOCAL_CONFIG`]: the PS3 NA disc image.
+pub const PS3_DISC_ISO_KEY: &str = "ps3_disc_iso";
+/// The `ps3_dlc_biua_pkg` key of [`LOCAL_CONFIG`]: the PS3 NA Blow It Up Again Pack package.
+pub const PS3_DLC_BIUA_PKG_KEY: &str = "ps3_dlc_biua_pkg";
 
 /// The `<key> = "…"` value in one [`LOCAL_CONFIG`]'s text, or `None` when the key is absent.
 ///
@@ -414,6 +422,23 @@ pub fn local_config_ps3_update_pkgs(start: &Path) -> Result<PathBuf, String> {
         Want::Dir,
         "write `ps3_update_pkgs = \"/path/to/updates\"` into it by hand",
     )
+}
+
+/// The PS3 NA disc image for a **game-gated test**: `ps3_disc_iso` in the nearest [`LOCAL_CONFIG`].
+///
+/// Same rules and the same three distinct errors as [`local_config_vz_wad`]. No script writes this
+/// key.
+pub fn local_config_ps3_disc_iso(start: &Path) -> Result<PathBuf, String> {
+    local_config_file(start, PS3_DISC_ISO_KEY, "write `ps3_disc_iso = \"/path/to/<BLUS30056 disc>.iso\"` into it by hand")
+}
+
+/// The PS3 NA Blow It Up Again Pack package for a **game-gated test**: `ps3_dlc_biua_pkg` in the
+/// nearest [`LOCAL_CONFIG`].
+///
+/// Same rules and the same three distinct errors as [`local_config_vz_wad`]. No script writes this
+/// key.
+pub fn local_config_ps3_dlc_biua_pkg(start: &Path) -> Result<PathBuf, String> {
+    local_config_file(start, PS3_DLC_BIUA_PKG_KEY, "write `ps3_dlc_biua_pkg = \"/path/to/<package>.pkg\"` into it by hand")
 }
 
 /// What a [`LOCAL_CONFIG`] key must name.
@@ -782,7 +807,7 @@ mod tests {
         let e = local_config_pc_demo_zip(&deep).unwrap_err();
         assert!(e.contains("has no `pc_demo_zip` key"), "{e}");
         std::fs::write(&config, format!("pc_demo_zip = \"{}\"\npc_official_install_dir = \"{}\"\n", eboot.display(), eboot.display())).unwrap();
-        assert_eq!(local_config_pc_demo_zip(&deep), Ok(eboot));
+        assert_eq!(local_config_pc_demo_zip(&deep), Ok(eboot.clone()));
         let e = local_config_pc_official_install_dir(&deep).unwrap_err();
         assert!(e.contains("which is not a directory"), "{e}");
         let e = local_config_pc_repack_install_dir(&deep).unwrap_err();
@@ -802,7 +827,12 @@ mod tests {
         .unwrap();
         assert_eq!(local_config_x360_retail_dir(&deep), Ok(pkgs.clone()));
         assert!(local_config_x360_dlc_biua_stfs(&deep).unwrap_err().contains("which is not a file"));
-        assert_eq!(local_config_x360_dlc_prototypes_dir(&deep), Ok(pkgs));
+        assert_eq!(local_config_x360_dlc_prototypes_dir(&deep), Ok(pkgs.clone()));
+        let e = local_config_ps3_disc_iso(&deep).unwrap_err();
+        assert!(e.contains("has no `ps3_disc_iso` key"), "{e}");
+        std::fs::write(&config, format!("ps3_disc_iso = \"{}\"\nps3_dlc_biua_pkg = \"{}\"\n", eboot.display(), pkgs.display())).unwrap();
+        assert_eq!(local_config_ps3_disc_iso(&deep), Ok(eboot.clone()));
+        assert!(local_config_ps3_dlc_biua_pkg(&deep).unwrap_err().contains("which is not a file"));
 
         std::fs::remove_dir_all(&root).ok();
     }
