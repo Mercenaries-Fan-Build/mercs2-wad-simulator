@@ -116,7 +116,9 @@ image), `string` (a string referenced by exactly one function in each image) and
 (positional callees of accepted pairs whose call lists agree with every accepted pair). `bytes`
 and `callee` apply only between images analysed with the same Ghidra language: across compilers,
 inlining shifts call lists. A pair is accepted only when neither function has another candidate;
-every other candidate is written to the conflicts file, unresolved.
+every other candidate is written to the conflicts file, unresolved. `data/anchors.tsv` holds pairs
+verified by reading both decompiles; `match` reports how the anchors between its two images fared
+and fails when an accepted pair contradicts one.
 
 ```bash
 exemap derive x360-profile --from "Mercenaries 2 Preview X360 (Jul 11 2008).iso" --out profile.pe_ghidra
