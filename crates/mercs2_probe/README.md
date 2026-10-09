@@ -15,7 +15,7 @@ set, exactly as matched in `main()`:
 |---|---|
 | `c3-meta <out.ndjson>` | `diag::c3_meta` |
 | `placement-hashes <out.json>` | `diag::placement_hashes` |
-| `export-c3-obj [outdir]` | `diag::export_c3_obj` |
+| `export-c3-obj <outdir>` | `diag::export_c3_obj` |
 | `terrainmesh-probe [block]` | `diag::terrainmesh_probe` |
 | `terrain-probe` / `terrain-consumer` | `diag::terrain_probe` / `diag::terrain_consumer_scan` |
 | `wad-list` | `diag::wad_list` |
@@ -29,7 +29,9 @@ set, exactly as matched in `main()`:
 | `block-grep <needle>` | `diag::block_grep` |
 | `scan-hash <0xH ...>` / `find-ref <0xH ...>` | `diag::scan_hash` / `diag::find_ref` |
 | `block-probe <index>` | `diag::block_probe` |
-| `gfx-extract [outdir]` | `diag::gfx_extract` — dumps the Scaleform movies (default `output/gfx_movies`) |
+| `veg-census <out.json>` | `diag::veg_census` — understory coverage; writes the vegetation tag-set JSON to `out.json` |
+| `tree-census <out.json>` | `diag::tree_census` — c3-cell canopy trees; writes the per-instance list JSON to `out.json` |
+| `gfx-extract <outdir>` | `diag::gfx_extract` — dumps the Scaleform movies into `outdir` |
 | `extract --model 0xHASH [out.bin]` | `wad::extract_container` → file |
 | `dump-block <index> [out.bin]` | `wad::decompress_block_index` → file |
 | `find-placement <name-substring>` | scans blocks `0..6000`, prints every placement whose name matches |
@@ -128,7 +130,7 @@ cargo run -p mercs2_probe -- save-dump "C:/.../save0.profile" cash
 cargo run -p mercs2_probe -- overlays "C:/.../save0.profile"
 
 # Scaleform movies out of the WAD
-cargo run -p mercs2_probe -- gfx-extract
+cargo run -p mercs2_probe -- gfx-extract output/gfx_movies
 
 # explicit WAD
 cargo run -p mercs2_probe -- --wad D:/game/data/vz.wad comp-probe
