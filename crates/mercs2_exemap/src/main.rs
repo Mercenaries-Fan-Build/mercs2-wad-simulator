@@ -9,6 +9,7 @@
 //! exemap derive <image_id> --from <container> --out <image>
 //! exemap rtti <image> --out <tsv>
 //! exemap luareg <image> --out <tsv>
+//! exemap corpus-derive <corpus_id> <wad> --from <container> --work <dir> [--wine <wine64>]
 //! exemap match <image_a> <image_b> --exports <dir> --evidence <list> --out <tsv> --conflicts <tsv>
 //! ```
 //!
@@ -83,6 +84,20 @@ enum Command {
         image: PathBuf,
         #[arg(long)]
         out: PathBuf,
+    },
+    /// Rebuild one wads.tsv WAD from its original container, checking every sha256.
+    CorpusDerive {
+        corpus_id: String,
+        wad: String,
+        /// The first file of the WAD's chain (an archive, installer or disc image).
+        #[arg(long)]
+        from: PathBuf,
+        /// Work directory for the files each step writes; the WAD is left in it.
+        #[arg(long)]
+        work: PathBuf,
+        /// The wine64 binary, for chains with Wine steps.
+        #[arg(long)]
+        wine: Option<PathBuf>,
     },
     /// Match the functions of two images.tsv images from their exports (<id>.rtti.tsv,
     /// <id>.luareg.tsv and, for bytes/string/callee evidence, <id>.fnsig.json).
@@ -269,6 +284,23 @@ fn run(cli: Cli) -> Result<(), ExitCode> {
             write(&out, text.as_bytes())?;
             let named = tables.iter().filter(|t| t.namespace.is_some()).count();
             println!("tables     {} ({} named by a registry, {} entries) -> {}", tables.len(), named, entries, out.display());
+        }
+        Command::CorpusDerive { corpus_id, wad, from, work, wine } => {
+            use mercs2_exemap::corpus::{derive, Corpora, Env};
+            let corpora = Corpora::embedded().map_err(|e| {
+                eprintln!("error: the embedded corpus tables are invalid: {e}");
+                ExitCode::from(2)
+            })?;
+            let w = corpora.wads_of(&corpus_id).find(|w| w.name == wad).ok_or_else(|| {
+                eprintln!("error: wads.tsv has no {wad} in corpus {corpus_id}");
+                ExitCode::from(1)
+            })?;
+            let path = derive(w, &from, &Env { wine, work }).map_err(|e| {
+                eprintln!("error: {e}");
+                ExitCode::from(1)
+            })?;
+            println!("wad        {corpus_id} {wad} -> {}", path.display());
+            println!("sha256     {}", w.sha256);
         }
         Command::Match { image_a, image_b, exports, evidence, out, conflicts } => {
             use mercs2_exemap::matcher::{match_images, Evidence, Exports};
