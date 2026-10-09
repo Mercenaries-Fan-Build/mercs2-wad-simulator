@@ -160,23 +160,24 @@ fn write_wav(path: &std::path::Path, pcm: &[i16], channels: u16, rate: u32) -> s
     Ok(())
 }
 
-fn rainbow(extra: &[PathBuf]) -> RainbowTable {
-    let mut tables: Vec<PathBuf> = [
-        "tools/rainbow_table.json",
-        "docs/data/aset_discovered_names.json",
-        "docs/data/aset_block_strings.json",
-    ]
-    .iter()
-    .map(PathBuf::from)
-    .filter(|p| p.exists())
-    .collect();
-    tables.extend(extra.iter().filter(|p| p.exists()).cloned());
-    RainbowTable::load_many(&tables).unwrap_or_default()
+/// `rainbow_table` from `.mercs2-local.toml`, the `data/aset_discovered_names.json` and
+/// `data/aset_block_strings.json` fragments under its `notes_docs_dir`, then `extra`. Every table
+/// must load.
+fn rainbow(extra: &[PathBuf]) -> Result<RainbowTable, String> {
+    let start = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let data = mercs2_formats::game_paths::local_config_notes_docs_dir(start)?.join("data");
+    let mut tables: Vec<PathBuf> = vec![
+        mercs2_formats::game_paths::local_config_rainbow_table(start)?,
+        data.join("aset_discovered_names.json"),
+        data.join("aset_block_strings.json"),
+    ];
+    tables.extend(extra.iter().cloned());
+    RainbowTable::load_many(&tables).map_err(|e| format!("load rainbow tables {tables:?}: {e}"))
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
-    let rb = rainbow(&cli.names);
+    let rb = rainbow(&cli.names)?;
     eprintln!("rainbow: {} names", rb.len());
 
     let mut f = File::open(&cli.wad)?;
