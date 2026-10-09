@@ -35,8 +35,14 @@ jobs:
 
       # mercs2_formats' be_to_le converter decodes Xbox XMA/XMA2 and PS3 MP3 sound with
       # ffmpeg (be_to_le/audio.rs) and round-trips console Lua bytecode with Java + unluac
-      # (be_to_le/lua.rs). Its tests resolve ffmpeg on PATH and unluac at
-      # tools/external/unluac/unluac.jar; Java is on the runner image.
+      # (be_to_le/lua.rs). Its tests resolve ffmpeg on PATH; Java and unluac are named by the
+      # `java_binary` and `unluac_jar` keys of the .mercs2-local.toml written below.
+      # The JDK is Temurin 21, the same JDK the developer machines use.
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
       - name: Install ffmpeg
         run: |
           set -euo pipefail
@@ -55,7 +61,32 @@ jobs:
           mkdir -p tools/external/unluac
           curl -fsSL -o tools/external/unluac/unluac.jar "$UNLUAC_URL"
           echo "$UNLUAC_SHA256  tools/external/unluac/unluac.jar" | sha256sum -c -
-          java -jar tools/external/unluac/unluac.jar --help
+          "$JAVA_HOME/bin/java" -jar tools/external/unluac/unluac.jar --help
+
+      # mercs2_luac's vendor-integrity test compares the vendored Lua against pristine upstream
+      # Lua 5.1.5 `src/`, byte-identical to the developer machines' copy.
+      - name: Download Lua 5.1.5 source (pinned)
+        env:
+          LUA_URL: https://www.lua.org/ftp/lua-5.1.5.tar.gz
+          LUA_SHA256: 2640fc56a795f29d28ef15e13c34a47e223960b0240e8cb0a82d9b0738695333
+        run: |
+          set -euo pipefail
+          curl -fsSL -o "$RUNNER_TEMP/lua-5.1.5.tar.gz" "$LUA_URL"
+          echo "$LUA_SHA256  $RUNNER_TEMP/lua-5.1.5.tar.gz" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/lua-5.1.5.tar.gz" -C "$RUNNER_TEMP"
+          test -f "$RUNNER_TEMP/lua-5.1.5/src/lua.h"
+
+      # Tests find tools that live outside this repository through the repo-root
+      # .mercs2-local.toml (README.md, "Game-gated tests"); CI writes the keys its tests read.
+      - name: Write .mercs2-local.toml
+        run: |
+          set -euo pipefail
+          cat > .mercs2-local.toml <<EOF
+          java_binary = "$JAVA_HOME/bin/java"
+          unluac_jar = "$GITHUB_WORKSPACE/tools/external/unluac/unluac.jar"
+          lua51_src_dir = "$RUNNER_TEMP/lua-5.1.5/src"
+          EOF
+          cat .mercs2-local.toml
 
       # Cache the registry, git deps and target dir keyed on the lockfile + toolchain.
       - uses: Swatinem/rust-cache@v2
