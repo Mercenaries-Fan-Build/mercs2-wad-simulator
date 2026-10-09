@@ -1,6 +1,8 @@
 //! Asset catalog for the workshop: every browsable asset in the open WAD, with names resolved
-//! through the live registry dump (`docs/data/live_registry_hashes.csv`, 82k names captured from
-//! the running game's name-hash table — see memory `name-registry-spawn-by-hash`).
+//! through the reference bundle's name pack (`workshop_data/names.bin`) overlaid by the ASET
+//! dictionary compiled into the binary. The bundle is found (or downloaded) by
+//! [`require_data_home`]; the raw corpora the pack is built from are read only by `--pack-data`
+//! ([`load_all_names_raw`]).
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -359,92 +361,118 @@ impl AssetIndex {
 /// ECS schemas, the decompiled-Lua corpus. Built by `--pack-data`, resolved here so the app runs
 /// self-contained (no repo checkout needed). Resolution: `MERCS2_WORKSHOP_DATA` env, then
 /// the saved setting, then `workshop_data/` next to the exe, then a `workshop_data/` walk-up from
-/// the CWD. The env var stays FIRST so a dev can point one run at a scratch bundle without
-/// disturbing the saved configuration; the setting sits above the positional guesses because it is
-/// the only step in the chain the user actually chose.
+/// the CWD, then the copy [`crate::fetch`] installs. The env var stays FIRST so a dev can point one
+/// run at a scratch bundle without disturbing the saved configuration; the setting sits above the
+/// positional guesses because it is the only step in the chain the user actually chose.
+///
+/// A candidate counts only when it is a COMPLETE bundle: it holds [`BUNDLE_MANIFEST`], which
+/// `--pack-data` writes after every other file. A repo checkout carries a committed, partial
+/// `workshop_data/` (the Ess API, ECS registry and audio manifests, no `names.bin`) that the CWD
+/// walk-up reaches; without the manifest test that folder would be taken for the bundle.
+///
+/// This is the lookup alone; [`require_data_home`] adds the automatic download.
 pub fn data_home() -> Option<PathBuf> {
     if let Ok(p) = std::env::var("MERCS2_WORKSHOP_DATA") {
         let p = PathBuf::from(p);
-        if p.is_dir() {
+        if is_complete_bundle(&p) {
             return Some(p);
         }
     }
     if let Some(p) = crate::settings::load().data_dir {
-        if p.is_dir() {
+        if is_complete_bundle(&p) {
             return Some(p);
         }
     }
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
             let cand = dir.join("workshop_data");
-            if cand.is_dir() {
+            if is_complete_bundle(&cand) {
                 return Some(cand);
             }
         }
     }
-    let mut dir = std::env::current_dir().ok()?;
-    loop {
-        let cand = dir.join("workshop_data");
-        if cand.is_dir() {
-            return Some(cand);
-        }
-        if !dir.pop() {
-            break;
+    if let Ok(cwd) = std::env::current_dir() {
+        for dir in cwd.ancestors() {
+            let cand = dir.join("workshop_data");
+            if is_complete_bundle(&cand) {
+                return Some(cand);
+            }
         }
     }
     // LAST: a bundle this tool downloaded for itself (see `fetch`). Deliberately behind every other
     // step — a bundle the user installed or pointed Settings at must always beat a fetched copy.
-    crate::fetch::installed_dir().filter(|p| p.is_dir())
+    crate::fetch::installed_dir().filter(|p| is_complete_bundle(p))
 }
 
-/// Load EVERY name corpus, merged lowest→highest priority: bone-name candidates (141k, HIER
-/// bones), the rainbow table (733k m2 preimages — most asset/clip hashes), then the live
-/// registry dump (ground truth from the running game). Prefers the bundled binary pack
-/// (`workshop_data/names.bin`, sub-second) and falls back to the raw repo corpora (~8 s).
-pub fn load_all_names(names_csv: Option<PathBuf>) -> HashMap<u32, String> {
-    load_all_names_staged(names_csv, |_, _| {})
+/// The file `--pack-data` writes last into a bundle; its presence is what makes a folder a
+/// complete bundle for [`data_home`].
+pub const BUNDLE_MANIFEST: &str = "manifest.json";
+
+/// Whether `dir` is a complete reference bundle (holds [`BUNDLE_MANIFEST`]).
+fn is_complete_bundle(dir: &Path) -> bool {
+    dir.join(BUNDLE_MANIFEST).is_file()
+}
+
+/// The reference bundle, found through [`data_home`] or, when none is found, downloaded and
+/// installed through [`crate::fetch::install`]. An error when both fail, carrying where to
+/// download the bundle by hand and where to put it. `report` receives the download's stage for the
+/// boot loading screen.
+pub fn require_data_home(report: &mut impl FnMut(f32, &'static str)) -> Result<PathBuf, String> {
+    if let Some(home) = data_home() {
+        return Ok(home);
+    }
+    report(0.02, "reference data (downloading workshop_data)");
+    eprintln!(
+        "[data] no complete workshop_data bundle found — downloading {} from {}",
+        crate::fetch::ASSET,
+        crate::fetch::release_page()
+    );
+    let installed = crate::fetch::install(&mut |e| {
+        if let crate::fetch::Event::Progress(m) = e {
+            eprintln!("[data] {m}");
+        }
+    })
+    .map_err(|e| {
+        format!(
+            "no complete workshop_data reference bundle found (a folder holding {BUNDLE_MANIFEST}; \
+             searched MERCS2_WORKSHOP_DATA, the Settings data folder, workshop_data next to the \
+             executable, workshop_data in the working directory and its parents, and the downloaded \
+             copy), and downloading it failed: {e}. {}",
+            crate::fetch::manual_install_help()
+        )
+    })?;
+    eprintln!("[data] installed workshop_data to {}", installed.display());
+    Ok(installed)
+}
+
+/// The full name map: the bundle's name pack (`workshop_data/names.bin`) overlaid by the embedded
+/// ASET dictionary. An error when the bundle cannot be found or downloaded, or its pack is
+/// missing or unreadable.
+pub fn load_all_names() -> Result<HashMap<u32, String>, String> {
+    load_all_names_staged(|_, _| {})
 }
 
 /// [`load_all_names`] with per-stage progress reporting (`fraction 0..1`, stage label) — drives
-/// the app's boot loading screen. Fractions are stage START marks weighted by observed timings
-/// (the rainbow table dominates the slow path).
+/// the app's boot loading screen.
 pub fn load_all_names_staged(
-    names_csv: Option<PathBuf>,
     mut report: impl FnMut(f32, &'static str),
-) -> HashMap<u32, String> {
-    // The speculative corpora (rainbow table, bone-name candidates) are found by walking up for a
-    // repo checkout. A RELEASED binary — downloaded on its own, run anywhere — finds none of them,
-    // so it showed every asset as a bare `0x…`. That is the state the published workshop shipped in.
-    //
-    // So the CURATED ASET dictionary is embedded (~750 KB): every name is a VERIFIED preimage of a
-    // real asset, which is all the public needs — not the 733k rainbow-table guesses. It is applied
-    // LAST so it OVERRIDES the speculative corpora rather than being overwritten by them: a
-    // brute-forced candidate must never shadow a name we actually cracked.
-    let mut names = HashMap::new();
-
-    let mut have_pack = false;
-    if let Some(home) = data_home() {
-        let pack = home.join("names.bin");
-        if pack.is_file() {
-            report(0.10, "bundled name pack");
-            match load_names_pack(&pack) {
-                Some(pack_names) => {
-                    names = pack_names;
-                    have_pack = true;
-                }
-                None => eprintln!(
-                    "[names] {} unreadable — falling back to raw corpora",
-                    pack.display()
-                ),
-            }
-        }
+) -> Result<HashMap<u32, String>, String> {
+    let home = require_data_home(&mut report)?;
+    let pack = home.join("names.bin");
+    if !pack.is_file() {
+        return Err(format!(
+            "the reference bundle {} has no names.bin. {}",
+            home.display(),
+            crate::fetch::manual_install_help()
+        ));
     }
-    if !have_pack {
-        names.extend(load_all_names_raw(names_csv, report));
-    }
-
+    report(0.10, "bundled name pack");
+    let mut names = load_names_pack(&pack)?;
+    // The CURATED ASET dictionary is applied LAST so it OVERRIDES the pack: every entry is a
+    // verified preimage of a real asset, and a brute-forced candidate in the pack must never shadow
+    // a name we actually cracked.
     names.extend(embedded_aset_names());
-    names
+    Ok(names)
 }
 
 /// The curated ASET hash→name dictionary (every name we have actually CRACKED), compiled into the
@@ -466,44 +494,46 @@ pub fn embedded_aset_names() -> HashMap<u32, String> {
     out
 }
 
-/// The RAW corpora merge (no `names.bin` fast path) — `--pack-data` uses this so rebuilding the
-/// pack can never circularly read the stale pack it is replacing.
-pub fn load_all_names_raw(
-    names_csv: Option<PathBuf>,
-    mut report: impl FnMut(f32, &'static str),
-) -> HashMap<u32, String> {
-    report(0.02, "devkit strings (Jul-08 prototype)");
+/// The RAW corpora merge behind `--pack-data` when the repo's `data/production_names.json` is
+/// absent, merged lowest→highest priority: the Jul-08 devkit strings, the bone-name candidates,
+/// the rainbow table, the ASET-derived name fragments, then the live registry dump. Every source
+/// is a dev-machine file named by `.mercs2-local.toml` (searched upward from `start`): the
+/// `jul08_strings` and `rainbow_table` keys, and the `data/` folder under `notes_docs_dir`. A
+/// missing key or file is an error naming it.
+pub fn load_all_names_raw(start: &Path) -> Result<HashMap<u32, String>, String> {
+    use mercs2_formats::game_paths;
     // 57k authored strings from the devkit Xbox build — resolves engine command/message names
     // (SetStateOnMsg, KillObjectsLinkedToHP, …) that the retail exe strips.
-    let mut names = repo_walk_up("output/jul08_prototype/mercs2_xenon_p.pe_full_strings.txt")
-        .map(load_name_lines)
-        .unwrap_or_default();
-    report(0.08, "bone-name candidates");
-    for (h, n) in default_bone_candidates().map(load_name_lines).unwrap_or_default() {
-        names.insert(h, n);
-    }
-    report(0.15, "rainbow table (733k hashes)");
-    for (h, n) in default_rainbow_json().map(load_rainbow_json).unwrap_or_default() {
-        names.insert(h, n);
-    }
-    report(0.88, "ASET-derived names");
+    let mut names = load_name_lines(&game_paths::local_config_jul08_strings(start)?)?;
+    let notes_docs = game_paths::local_config_notes_docs_dir(start)?;
+    names.extend(load_name_lines(&notes_data_file(&notes_docs, "bone_name_candidates.txt")?)?);
+    names.extend(load_rainbow_json(&game_paths::local_config_rainbow_table(start)?)?);
     // Names cracked from the WAD's own naming convention rather than a wordlist: a texture
     // `X_dm`/`X_nm`/`X_sm` names its own model `X`, so a named texture yields its model's exact
     // preimage. Textures resolve ~95% but models only ~46%, so this closes a gap the rainbow
     // table structurally cannot — it is what makes most unnamed vehicle/prop models (the whole
     // aircraft roster: A-10, AC-130, C-130, Predator, Pave Low, AH-1Z, MiG-27, …) browsable.
     // Produced by `wad_simulator --bin asset_gap_probe --emit`; every entry is a verified preimage.
-    for p in discovered_name_fragments() {
-        for (h, n) in load_rainbow_json(p) {
-            names.insert(h, n);
-        }
+    for f in ASET_NAME_FRAGMENTS {
+        names.extend(load_rainbow_json(&notes_data_file(&notes_docs, f)?)?);
     }
-    report(0.92, "live registry names");
-    for (h, n) in names_csv.map(load_names_csv).unwrap_or_default() {
-        names.insert(h, n);
+    names.extend(load_names_csv(&notes_data_file(&notes_docs, "live_registry_hashes.csv")?)?);
+    Ok(names)
+}
+
+/// `<notes_docs_dir>/data/<name>`, or an error naming the `notes_docs_dir` key and the missing file.
+pub fn notes_data_file(notes_docs: &Path, name: &str) -> Result<PathBuf, String> {
+    let p = notes_docs.join("data").join(name);
+    if p.is_file() {
+        Ok(p)
+    } else {
+        Err(format!(
+            "{} is not a file (`notes_docs_dir` in {} names {})",
+            p.display(),
+            mercs2_formats::game_paths::LOCAL_CONFIG,
+            notes_docs.display()
+        ))
     }
-    report(1.0, "done");
-    names
 }
 
 // ── names.bin: the merged hash→name map in a load-fast binary layout. ──
@@ -544,26 +574,38 @@ pub fn names_pack_count(path: &Path) -> Option<u32> {
     Some(u32::from_le_bytes(head[8..12].try_into().ok()?))
 }
 
-/// Load `names.bin`; `None` on any structural mismatch (caller falls back to raw corpora).
-pub fn load_names_pack(path: &Path) -> Option<HashMap<u32, String>> {
+/// Load `names.bin`; an error naming the file when it cannot be read or is not a well-formed pack.
+pub fn load_names_pack(path: &Path) -> Result<HashMap<u32, String>, String> {
     let t0 = std::time::Instant::now();
-    let data = std::fs::read(path).ok()?;
+    let data = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let bad = |what: &str| format!("{} is not a readable name pack: {what}", path.display());
     if data.len() < 16 || &data[0..8] != NAMES_PACK_MAGIC {
-        return None;
+        return Err(bad("no M2NAMES1 header"));
     }
-    let count = u32::from_le_bytes(data[8..12].try_into().ok()?) as usize;
+    let count = u32::from_le_bytes([data[8], data[9], data[10], data[11]]) as usize;
     let table_end = 12 + count * 8;
     if data.len() < table_end + 4 {
-        return None;
+        return Err(bad("truncated entry table"));
     }
-    let blob_len = u32::from_le_bytes(data[table_end..table_end + 4].try_into().ok()?) as usize;
-    let blob = data.get(table_end + 4..table_end + 4 + blob_len)?;
+    let blob_len = u32::from_le_bytes([
+        data[table_end],
+        data[table_end + 1],
+        data[table_end + 2],
+        data[table_end + 3],
+    ]) as usize;
+    let blob = data
+        .get(table_end + 4..table_end + 4 + blob_len)
+        .ok_or_else(|| bad("truncated string blob"))?;
     let mut names = HashMap::with_capacity(count);
     for i in 0..count {
         let e = 12 + i * 8;
-        let hash = u32::from_le_bytes(data[e..e + 4].try_into().ok()?);
-        let off = u32::from_le_bytes(data[e + 4..e + 8].try_into().ok()?) as usize;
-        let end = blob[off..].iter().position(|&b| b == 0)? + off;
+        let hash = u32::from_le_bytes([data[e], data[e + 1], data[e + 2], data[e + 3]]);
+        let off = u32::from_le_bytes([data[e + 4], data[e + 5], data[e + 6], data[e + 7]]) as usize;
+        let end = blob
+            .get(off..)
+            .and_then(|s| s.iter().position(|&b| b == 0))
+            .ok_or_else(|| bad(&format!("entry {i} has no NUL-terminated name")))?
+            + off;
         names.insert(hash, String::from_utf8_lossy(&blob[off..end]).into_owned());
     }
     eprintln!(
@@ -572,30 +614,11 @@ pub fn load_names_pack(path: &Path) -> Option<HashMap<u32, String>> {
         path.display(),
         t0.elapsed().as_secs_f32()
     );
-    Some(names)
+    Ok(names)
 }
 
-/// Find a repo-relative file by walking up from the CWD.
-fn repo_walk_up(rel: &str) -> Option<PathBuf> {
-    let mut dir = std::env::current_dir().ok()?;
-    loop {
-        let cand = dir.join(rel);
-        if cand.is_file() {
-            return Some(cand);
-        }
-        if !dir.pop() {
-            return None;
-        }
-    }
-}
-
-/// Find `docs/data/bone_name_candidates.txt` by walking up from the CWD.
-fn default_bone_candidates() -> Option<PathBuf> {
-    repo_walk_up("docs/data/bone_name_candidates.txt")
-}
-
-/// The ASET-derived name fragments (same JSON shape as the rainbow table), each a set of
-/// preimages cracked from the WAD itself rather than from a wordlist:
+/// The ASET-derived name fragments under `<notes_docs_dir>/data/` (same JSON shape as the rainbow
+/// table), each a set of preimages cracked from the WAD itself rather than from a wordlist:
 ///   `aset_discovered_names` — texture-base -> model naming convention (`X_dm` names `X`)
 ///   `aset_block_strings`    — identifiers mined out of decompressed block payloads
 ///   `aset_expanded_names`   — slot-grammar expansion of the above (road/clip/atlas families)
@@ -608,67 +631,34 @@ fn default_bone_candidates() -> Option<PathBuf> {
 ///                             order-preserving token SUBSEQUENCE of one of its texture names, which
 ///                             catches the middle-token case (`civ_hum_casualfemale_ub_c` ->
 ///                             `civ_hum_casualfemale_c`) that no suffix-strip can reach.
-/// A bundled copy wins over the repo copy so a packaged workshop stays self-contained.
-fn discovered_name_fragments() -> Vec<PathBuf> {
-    [
-        "aset_discovered_names.json",
-        "aset_block_strings.json",
-        "aset_expanded_names.json",
-        "aset_model_names.json",
-        "aset_external_names.json",
-        "aset_roster_names.json",
-    ]
-    .iter()
-    .filter_map(|f| {
-        if let Some(home) = data_home() {
-            let p = home.join(f);
-            if p.is_file() {
-                return Some(p);
-            }
-        }
-        repo_walk_up(&format!("docs/data/{f}"))
-    })
-    .collect()
-}
+const ASET_NAME_FRAGMENTS: [&str; 6] = [
+    "aset_discovered_names.json",
+    "aset_block_strings.json",
+    "aset_expanded_names.json",
+    "aset_model_names.json",
+    "aset_external_names.json",
+    "aset_roster_names.json",
+];
 
-/// Load the decompiled-Lua corpus for reference search: `(display path, content, lowercased)`.
-/// Bundled `workshop_data/lua[_dlc]` preferred; repo corpora as dev fallback. ~7 MB total.
-pub fn load_lua_corpus() -> Vec<(String, String, String)> {
-    let mut roots: Vec<(String, PathBuf)> = Vec::new();
-    if let Some(home) = data_home() {
-        for (tag, sub) in [("lua", "lua"), ("dlc", "lua_dlc")] {
-            let d = home.join(sub);
-            if d.is_dir() {
-                roots.push((tag.into(), d));
-            }
-        }
-    }
-    if roots.is_empty() {
-        for (tag, rel) in [("lua", "docs/mercs2-luacd/src"), ("dlc", "docs/mercs2-dlc-luacd/src")] {
-            if let Some(d) = repo_walk_up_dir(rel) {
-                roots.push((tag.into(), d));
-            }
-        }
-    }
+/// Load the decompiled-Lua corpus for reference search: `(display path, content, lowercased)`,
+/// from the reference bundle's `lua/` and `lua_dlc/` (~7 MB total). An error when the bundle
+/// cannot be found or downloaded, or lacks either folder.
+pub fn load_lua_corpus() -> Result<Vec<(String, String, String)>, String> {
+    let home = require_data_home(&mut |_, _| {})?;
     let mut out = Vec::new();
-    for (tag, root) in roots {
-        collect_lua(&root, &tag, &mut out);
+    for (tag, sub) in [("lua", "lua"), ("dlc", "lua_dlc")] {
+        let d = home.join(sub);
+        if !d.is_dir() {
+            return Err(format!(
+                "the reference bundle {} has no {sub}/ folder. {}",
+                home.display(),
+                crate::fetch::manual_install_help()
+            ));
+        }
+        collect_lua(&d, tag, &mut out);
     }
     eprintln!("[lua] reference corpus: {} scripts", out.len());
-    out
-}
-
-fn repo_walk_up_dir(rel: &str) -> Option<PathBuf> {
-    let mut dir = std::env::current_dir().ok()?;
-    loop {
-        let cand = dir.join(rel);
-        if cand.is_dir() {
-            return Some(cand);
-        }
-        if !dir.pop() {
-            return None;
-        }
-    }
+    Ok(out)
 }
 
 fn collect_lua(dir: &Path, tag: &str, out: &mut Vec<(String, String, String)>) {
@@ -687,11 +677,9 @@ fn collect_lua(dir: &Path, tag: &str, out: &mut Vec<(String, String, String)>) {
     }
 }
 
-/// Hash a plain name-per-line list (bone-name candidates) into hash → name.
-fn load_name_lines(path: PathBuf) -> HashMap<u32, String> {
-    let Ok(text) = std::fs::read_to_string(&path) else {
-        return HashMap::new();
-    };
+/// Hash a plain name-per-line list (bone-name candidates, devkit strings) into hash → name.
+fn load_name_lines(path: &Path) -> Result<HashMap<u32, String>, String> {
+    let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
     let mut map = HashMap::new();
     for line in text.lines() {
         let n = line.trim();
@@ -700,68 +688,24 @@ fn load_name_lines(path: PathBuf) -> HashMap<u32, String> {
         }
     }
     eprintln!("[names] {} name-per-line entries from {}", map.len(), path.display());
-    map
-}
-
-/// Find `docs/data/live_registry_hashes.csv` by walking up from the CWD (works from the repo root
-/// and from `tools/wad_simulator`); `MERCS2_NAMES` overrides.
-pub fn default_names_csv() -> Option<PathBuf> {
-    if let Ok(p) = std::env::var("MERCS2_NAMES") {
-        let p = PathBuf::from(p);
-        if p.is_file() {
-            return Some(p);
-        }
-    }
-    let mut dir = std::env::current_dir().ok()?;
-    loop {
-        let cand = dir.join("docs/data/live_registry_hashes.csv");
-        if cand.is_file() {
-            return Some(cand);
-        }
-        if !dir.pop() {
-            return None;
-        }
-    }
-}
-
-/// Find `tools/rainbow_table.json` by walking up from the CWD; `MERCS2_RAINBOW` overrides.
-pub fn default_rainbow_json() -> Option<PathBuf> {
-    if let Ok(p) = std::env::var("MERCS2_RAINBOW") {
-        let p = PathBuf::from(p);
-        if p.is_file() {
-            return Some(p);
-        }
-    }
-    let mut dir = std::env::current_dir().ok()?;
-    loop {
-        let cand = dir.join("tools/rainbow_table.json");
-        if cand.is_file() {
-            return Some(cand);
-        }
-        if !dir.pop() {
-            return None;
-        }
-    }
+    Ok(map)
 }
 
 /// Parse the rainbow table (`{"pandemic_hash_m2": {"0xHEX": ["name", …]}}`) into hash → first name.
-fn load_rainbow_json(path: PathBuf) -> HashMap<u32, String> {
+fn load_rainbow_json(path: &Path) -> Result<HashMap<u32, String>, String> {
     let t0 = std::time::Instant::now();
-    let Ok(text) = std::fs::read_to_string(&path) else {
-        eprintln!("[names] unreadable: {}", path.display());
-        return HashMap::new();
-    };
-    let Ok(root) = serde_json::from_str::<serde_json::Value>(&text) else {
-        eprintln!("[names] bad JSON: {}", path.display());
-        return HashMap::new();
-    };
+    let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let root = serde_json::from_str::<serde_json::Value>(&text)
+        .map_err(|e| format!("{}: bad JSON: {e}", path.display()))?;
+    let obj = root
+        .get("pandemic_hash_m2")
+        .and_then(|v| v.as_object())
+        .ok_or_else(|| format!("{}: no `pandemic_hash_m2` object", path.display()))?;
     let mut map = HashMap::new();
-    if let Some(obj) = root.get("pandemic_hash_m2").and_then(|v| v.as_object()) {
-        for (hex, names) in obj {
-            let Ok(h) = u32::from_str_radix(hex.trim_start_matches("0x"), 16) else { continue };
-            if let Some(n) = names.as_array().and_then(|a| a.first()).and_then(|v| v.as_str()) {
-                map.insert(h, n.to_string());
-            }
+    for (hex, names) in obj {
+        let Ok(h) = u32::from_str_radix(hex.trim_start_matches("0x"), 16) else { continue };
+        if let Some(n) = names.as_array().and_then(|a| a.first()).and_then(|v| v.as_str()) {
+            map.insert(h, n.to_string());
         }
     }
     eprintln!(
@@ -770,15 +714,12 @@ fn load_rainbow_json(path: PathBuf) -> HashMap<u32, String> {
         path.display(),
         t0.elapsed().as_secs_f32()
     );
-    map
+    Ok(map)
 }
 
 /// Parse the registry dump (`name,pandemic_hash_m2_hex,…`) into hash → name.
-fn load_names_csv(path: PathBuf) -> HashMap<u32, String> {
-    let Ok(text) = std::fs::read_to_string(&path) else {
-        eprintln!("[names] unreadable: {}", path.display());
-        return HashMap::new();
-    };
+fn load_names_csv(path: &Path) -> Result<HashMap<u32, String>, String> {
+    let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
     let mut map = HashMap::new();
     for line in text.lines().skip(1) {
         let mut cols = line.split(',');
@@ -789,5 +730,5 @@ fn load_names_csv(path: PathBuf) -> HashMap<u32, String> {
         map.entry(h).or_insert_with(|| name.to_string());
     }
     eprintln!("[names] {} registry names from {}", map.len(), path.display());
-    map
+    Ok(map)
 }
