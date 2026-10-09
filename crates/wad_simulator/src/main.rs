@@ -206,18 +206,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     println!();
 
-    let rainbow = cli.rainbow_table.as_ref().and_then(|p| {
-        match names::RainbowTable::load(p) {
-            Ok(rt) => {
-                println!("Rainbow table: {} entries from {}", rt.len(), p.display());
-                Some(rt)
-            }
-            Err(e) => {
-                eprintln!("WARNING: failed to load rainbow table: {e}");
-                None
-            }
+    let rainbow = match cli.rainbow_table.as_ref() {
+        Some(p) => {
+            let rt = names::RainbowTable::load(p)
+                .map_err(|e| format!("rainbow table {}: {e}", p.display()))?;
+            println!("Rainbow table: {} entries from {}", rt.len(), p.display());
+            Some(rt)
         }
-    });
+        None => None,
+    };
 
     let mut exit_code = 0i32;
 
