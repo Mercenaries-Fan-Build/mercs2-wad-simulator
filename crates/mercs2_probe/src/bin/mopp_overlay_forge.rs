@@ -583,7 +583,7 @@ fn run() -> Result<(), String> {
     );
 
     if let Some(parent) = Path::new(&out).parent() {
-        let _ = std::fs::create_dir_all(parent);
+        std::fs::create_dir_all(parent).map_err(|e| format!("create {}: {e}", parent.display()))?;
     }
     let wad = build_patch_wad_multi(std::slice::from_ref(&pblk), 0, None, &FFCS_CERT_BLOB)?;
     std::fs::write(&out, &wad).map_err(|e| format!("write {out}: {e}"))?;
