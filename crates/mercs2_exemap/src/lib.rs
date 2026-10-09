@@ -32,6 +32,7 @@ pub mod catalogue;
 pub mod image;
 pub mod images;
 pub mod membership;
+pub mod rtti;
 pub mod starts;
 pub mod xbox;
 pub mod xdvdfs;
