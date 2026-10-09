@@ -90,6 +90,7 @@ pub fn parse_index(text: &str) -> Result<Vec<FnRow>, Error> {
                 "stripped" => false,
                 v => return Err(bad(&format!("debug {v:?}"))),
             },
+            lookups: if f[17].is_empty() { Vec::new() } else { f[17].split(';').map(str::to_string).collect() },
         });
     }
     Ok(out)
@@ -292,6 +293,7 @@ mod tests {
             code_hash: code.into(),
             constants_hash: consts.into(),
             debug,
+            lookups: vec!["Ns.Fn".into(), "Ns.Other".into()],
         }
     }
 
