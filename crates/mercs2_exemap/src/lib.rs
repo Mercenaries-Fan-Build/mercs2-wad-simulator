@@ -44,6 +44,7 @@ pub mod images;
 pub mod iso9660;
 pub mod luachunk;
 pub mod luaindex;
+pub mod lualink;
 pub mod luapair;
 pub mod luareg;
 pub mod matcher;
