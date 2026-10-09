@@ -48,9 +48,7 @@ const EXE_SYMBOLS_ENV: &str = "MERCS2_EXE_SYMBOLS";
 
 /// The game's `pmc_blackbox.log`, which retail writes into the install folder.
 ///
-/// Derived from the resolved install (`--game-dir`/`MERCS2_GAME_DIR`/`VZ_WAD`/registry) rather than a
-/// literal `C:/Users/Shadow/Desktop/...`, which named one developer's machine and could not resolve
-/// anywhere else.
+/// Derived from the resolved install (`--game-dir`/`MERCS2_GAME_DIR`/`VZ_WAD`/registry).
 /// Mirrors `mercs2_formats::game_paths::GAME_DIR_VARS`, reproduced locally rather than depended upon —
 /// this is a small standalone log tool and pulling in the format crate for three lines of path probing
 /// would be the tail wagging the dog. Keep the variable names in step.
