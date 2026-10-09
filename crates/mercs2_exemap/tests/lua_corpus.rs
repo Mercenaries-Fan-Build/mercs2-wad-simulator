@@ -2,16 +2,17 @@
 //!
 //! Game-gated: built by the `retail` feature, run with `cargo xtask retail-test`. The originals are
 //! found only through the repo-root `.mercs2-local.toml` keys `pc_demo_zip` (the public PC demo
-//! archive) and `wine_binary` (the `wine64` that runs its installer); a missing key or path fails the
-//! test naming it.
+//! archive), `wine_binary` (the `wine64` that runs its installer) and `pc_install_dir` (the
+//! canonical clean PC install); a missing key or path fails the test naming it.
 //!
 //! Every WAD of the PC demo corpus is rebuilt from the demo archive, with every intermediate sha256
-//! checked, in a fresh work directory under the system temp directory.
+//! checked, in a fresh work directory under the system temp directory; every WAD of the PC retail
+//! corpus is checked in place in the canonical install.
 
 use std::path::Path;
 
-use mercs2_exemap::corpus::{derive, Corpora, Env};
-use mercs2_formats::game_paths::{local_config_pc_demo_zip, local_config_wine_binary};
+use mercs2_exemap::corpus::{check_installed, derive, Corpora, Env};
+use mercs2_formats::game_paths::{local_config_pc_demo_zip, local_config_pc_install_dir, local_config_wine_binary};
 
 fn start() -> &'static Path {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -32,4 +33,16 @@ fn every_pc_demo_wad_rebuilds_from_the_demo_archive() {
     }
     assert_eq!(n, 4, "base-pc-demo lists four WADs");
     std::fs::remove_dir_all(&work).ok();
+}
+
+#[test]
+fn every_pc_retail_wad_is_in_the_canonical_install() {
+    let corpora = Corpora::embedded().unwrap_or_else(|e| panic!("embedded corpus tables: {e}"));
+    let install = local_config_pc_install_dir(start()).unwrap_or_else(|e| panic!("{e}"));
+    let mut n = 0;
+    for wad in corpora.wads_of("base-pc-retail") {
+        check_installed(wad, &install).unwrap_or_else(|e| panic!("{e}"));
+        n += 1;
+    }
+    assert_eq!(n, 8, "base-pc-retail lists eight WADs");
 }
