@@ -16,13 +16,15 @@
 
 use std::collections::BTreeMap;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use mercs2_formats::be_to_le::convert::{convert_block, QUIET};
+use mercs2_formats::be_to_le::lua::LuaTools;
 use mercs2_formats::dlc_input::{
     decompress_be_sges, parse_be_ffcs, parse_be_indx, parse_be_pths, PAGE_SIZE,
 };
 use mercs2_formats::dlc_stfs::load_stfs_or_doh;
+use mercs2_formats::game_paths::{local_config_java_binary, local_config_unluac_jar};
 
 fn arg_str(args: &[String], key: &str) -> Option<String> {
     args.iter()
@@ -73,6 +75,16 @@ fn classify(err: &str) -> String {
     bracket_stripped.trim().to_string()
 }
 
+/// The java + unluac pair from the `java_binary` and `unluac_jar` keys of `.mercs2-local.toml`.
+/// Panics naming the missing key when either is absent.
+fn lua_tools() -> LuaTools {
+    let start = Path::new(env!("CARGO_MANIFEST_DIR"));
+    LuaTools {
+        java: local_config_java_binary(start).unwrap_or_else(|e| panic!("{e}")),
+        unluac: local_config_unluac_jar(start).unwrap_or_else(|e| panic!("{e}")),
+    }
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let scff = arg_str(&args, "--scff").unwrap_or_else(|| {
@@ -87,6 +99,7 @@ fn main() {
     }
 
     QUIET.store(true, std::sync::atomic::Ordering::Relaxed);
+    let lua_tools = lua_tools();
 
     let scff_path = PathBuf::from(&scff);
     let (doh, src) = load_stfs_or_doh(&scff_path).expect("load scff");
@@ -152,7 +165,7 @@ fn main() {
             continue;
         }
 
-        match convert_block(&decompressed, false, None) {
+        match convert_block(&decompressed, false, None, Some(&lua_tools)) {
             Ok(_) => {
                 converted += 1;
                 per_block_tsv.push_str(&format!(
