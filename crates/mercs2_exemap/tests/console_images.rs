@@ -2,22 +2,26 @@
 //!
 //! Game-gated: built by the `retail` feature, run with `cargo xtask retail-test`. The containers are
 //! found only through the repo-root `.mercs2-local.toml` keys `x360_devkit_iso` (the Jul 11 2008
-//! Xbox 360 preview disc), `x360_retail_xex` (the Xbox 360 retail `default.xex`), `ps3_eboot_bin` (the PS3 disc `EBOOT.BIN`) and `ps3_update_pkgs` (the
-//! directory of PS3 v1.03 update packages); a missing key or path fails the test naming it.
+//! Xbox 360 preview disc), `x360_retail_xex` (the Xbox 360 retail `default.xex`), `ps3_eboot_bin` (the PS3 disc `EBOOT.BIN`), `ps3_update_pkgs` (the
+//! directory of PS3 v1.03 update packages), and `ps3_jp_disc_dir`, `ps3_de_disc_dir` and
+//! `ps3_eu_disc_dir` (the PS3 Japanese, German and European disc dumps, each read at
+//! `PS3_GAME/USRDIR/EBOOT.BIN`); a missing key or path fails the test naming it.
 //!
 //! Every console image is rebuilt from the container whose sha256 starts its chain, with every
 //! intermediate sha256 checked; every `code_image` claim is checked byte for byte; and every
 //! analysed image yields function starts and vtables (on PS3, every vtable slot an `.opd` function).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use mercs2_exemap::images::{derive, shared_code, stream_sha256, Images, Platform};
+use mercs2_exemap::luareg::tables;
 use mercs2_exemap::rtti::vtables;
 use mercs2_exemap::starts::function_starts;
 use mercs2_exemap::Catalogue;
 use mercs2_formats::game_paths::{
-    local_config_ps3_eboot_bin, local_config_ps3_update_pkgs, local_config_x360_devkit_iso,
+    local_config_ps3_de_disc_dir, local_config_ps3_eboot_bin, local_config_ps3_eu_disc_dir,
+    local_config_ps3_jp_disc_dir, local_config_ps3_update_pkgs, local_config_x360_devkit_iso,
     local_config_x360_retail_xex,
 };
 
@@ -25,14 +29,18 @@ fn start() -> &'static Path {
     Path::new(env!("CARGO_MANIFEST_DIR"))
 }
 
-/// Every container the keys name, by sha256: the disc image, the retail XEX, the EBOOT, and each `.pkg` in the
-/// update directory.
+/// Every container the keys name, by sha256: the disc image, the retail XEX, the EBOOT, the
+/// `EBOOT.BIN` of each regional disc dump, and each `.pkg` in the update directory.
 fn containers() -> BTreeMap<String, PathBuf> {
     let mut files = vec![
         local_config_x360_devkit_iso(start()).unwrap_or_else(|e| panic!("{e}")),
         local_config_x360_retail_xex(start()).unwrap_or_else(|e| panic!("{e}")),
         local_config_ps3_eboot_bin(start()).unwrap_or_else(|e| panic!("{e}")),
     ];
+    for disc in [local_config_ps3_jp_disc_dir, local_config_ps3_de_disc_dir, local_config_ps3_eu_disc_dir] {
+        let dir = disc(start()).unwrap_or_else(|e| panic!("{e}"));
+        files.push(dir.join("PS3_GAME").join("USRDIR").join("EBOOT.BIN"));
+    }
     let dir = local_config_ps3_update_pkgs(start()).unwrap_or_else(|e| panic!("{e}"));
     for entry in std::fs::read_dir(&dir).unwrap_or_else(|e| panic!("list {}: {e}", dir.display())) {
         let p = entry.unwrap_or_else(|e| panic!("list {}: {e}", dir.display())).path();
@@ -60,7 +68,7 @@ fn every_console_image_rebuilds_from_its_container_and_shares_the_code_it_claims
         let head = &m.chain[0].from_sha256;
         let path = containers.get(head).unwrap_or_else(|| {
             panic!(
-                "image {}: no container with sha256 {head} among the files the x360_devkit_iso, x360_retail_xex, ps3_eboot_bin and ps3_update_pkgs keys name",
+                "image {}: no container with sha256 {head} among the files the x360_devkit_iso, x360_retail_xex, ps3_eboot_bin, ps3_update_pkgs, ps3_jp_disc_dir, ps3_de_disc_dir and ps3_eu_disc_dir keys name",
                 m.id
             )
         });
@@ -89,5 +97,31 @@ fn every_console_image_rebuilds_from_its_container_and_shares_the_code_it_claims
                 }
             }
         }
+    }
+}
+
+/// The Xbox 360 retail image carries its Lua registry names as data; every other analysed console
+/// image (the PS3 images and the Xbox 360 Profile image fill their registry names from code) names
+/// at least those namespaces.
+#[test]
+fn every_analysed_console_image_names_the_retail_lua_namespaces() {
+    let catalogue = Catalogue::embedded().unwrap_or_else(|e| panic!("embedded catalogue: {e}"));
+    let images = Images::embedded(&catalogue).unwrap_or_else(|e| panic!("embedded images: {e}"));
+    let containers = containers();
+    let namespaces = |id: &str| -> BTreeSet<String> {
+        let m = images.images.iter().find(|m| m.id == id).unwrap_or_else(|| panic!("no image {id} in images.tsv"));
+        let head = &m.chain[0].from_sha256;
+        let path = containers.get(head).unwrap_or_else(|| panic!("image {id}: no container with sha256 {head}"));
+        let mut f = std::fs::File::open(path).unwrap_or_else(|e| panic!("open {}: {e}", path.display()));
+        let bytes = derive(m, &mut f).unwrap_or_else(|e| panic!("{e}"));
+        let t = tables(&bytes).unwrap_or_else(|e| panic!("image {id}: {e}"));
+        t.into_iter().filter_map(|t| t.namespace).collect()
+    };
+    let retail = namespaces("x360-retail");
+    assert!(!retail.is_empty(), "x360-retail names no Lua namespace");
+    for m in images.images.iter().filter(|m| m.platform != Platform::Pc && m.code_image.is_none() && m.id != "x360-retail") {
+        let got = namespaces(&m.id);
+        let missing: Vec<&String> = retail.difference(&got).collect();
+        assert!(missing.is_empty(), "image {} does not name the retail Lua namespaces {missing:?}", m.id);
     }
 }
