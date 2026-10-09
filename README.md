@@ -161,6 +161,14 @@ retail counts are 645 (vz) + 28 (shell) scripts on PC and 643 + 26 on Xbox 360 a
 PC and the Japanese PS3 disc keep their debug information (line info, local and upvalue names); the
 Xbox 360 and the European and German PS3 discs strip it.
 
+`exemap lua-index <corpus_id> --wad <file>... --out <tsv>` writes one row per Lua function of a
+corpus. Each file must match a `wads.tsv` WAD of that corpus by sha256, and every WAD of the corpus
+must be given; a WAD rebuilt from a container comes from `exemap corpus-derive`. A row carries the
+WAD, script name and name hash, the function's `path` in its script (`main`, then `/<i>` per nesting
+level), its line range, parameter/vararg/upvalue/stack shape, code, constant and nested-function
+counts, and two platform-neutral fingerprints: `code_hash` (SHA-256 of the instruction words,
+little-endian) and `constants_hash`; `debug` says whether it keeps debug information.
+
 `exemap match <image_a> <image_b> --exports <dir> --evidence <list> --out <tsv> --conflicts <tsv>`
 pairs the functions of two `images.tsv` images from their exports in `<dir>` (`<id>.rtti.tsv`,
 `<id>.luareg.tsv`, and `<id>.fnsig.json` from `FnMnemonicSig.java` for the signature evidence).
