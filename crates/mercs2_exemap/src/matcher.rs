@@ -16,6 +16,9 @@
 //! Every other candidate is a **conflict** and is reported with all its candidates; nothing is
 //! chosen among them. `callee` candidates come from accepted pairs, and the rules run to a
 //! fixpoint: the candidate set only grows, so acceptance is recomputed until it stops changing.
+//!
+//! `data/anchors.tsv` lists pairs verified by reading both decompiles; [`check_anchors`] reports
+//! every accepted pair that contradicts one.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::Path;
@@ -383,6 +386,81 @@ pub fn match_images(a: &Exports, b: &Exports, same_language: bool, evidence: &BT
     Ok(out)
 }
 
+/// One row of `data/anchors.tsv`: a pair verified by reading both functions.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Anchor {
+    pub image_a: String,
+    pub va_a: u32,
+    pub image_b: String,
+    pub va_b: u32,
+    pub verified_by: String,
+}
+
+/// The anchors compiled into this crate, with every image id checked against `images`.
+pub fn anchors(images: &crate::images::Images) -> Result<Vec<Anchor>, Error> {
+    parse_anchors(include_str!("../data/anchors.tsv"), images)
+}
+
+pub fn parse_anchors(text: &str, images: &crate::images::Images) -> Result<Vec<Anchor>, Error> {
+    const HEADER: &str = "image_a\tva_a\timage_b\tva_b\tverified_by";
+    let mut lines = text.lines();
+    if lines.next() != Some(HEADER) {
+        return Err(Error::new(format!("anchors.tsv: header is not {HEADER:?}")));
+    }
+    let mut out = Vec::new();
+    for (i, l) in lines.enumerate() {
+        let f: Vec<&str> = l.split('\t').collect();
+        if f.len() != 5 || f[4].is_empty() {
+            return Err(Error::new(format!("anchors.tsv line {}: expected 5 fields with verified_by set", i + 2)));
+        }
+        for id in [f[0], f[2]] {
+            if images.image(id).is_none() {
+                return Err(Error::new(format!("anchors.tsv line {}: image {id} is not in images.tsv", i + 2)));
+            }
+        }
+        out.push(Anchor {
+            image_a: f[0].to_string(),
+            va_a: hex32(f[1], "va_a")?,
+            image_b: f[2].to_string(),
+            va_b: hex32(f[3], "va_b")?,
+            verified_by: f[4].to_string(),
+        });
+    }
+    Ok(out)
+}
+
+/// How the anchors that concern images `a` and `b` fared in `outcome`.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct AnchorCheck {
+    pub agreeing: usize,
+    /// Anchors neither of whose functions the outcome pairs.
+    pub unmatched: usize,
+    /// Anchors the outcome contradicts, with the pair it accepted instead.
+    pub contradicted: Vec<(Anchor, Pair)>,
+}
+
+/// Check `outcome` (pairs of image `a` to image `b`) against every anchor between the two images,
+/// in either orientation.
+pub fn check_anchors(a: &str, b: &str, outcome: &Outcome, anchors: &[Anchor]) -> AnchorCheck {
+    let mut r = AnchorCheck::default();
+    for an in anchors {
+        let (fa, fb) = if an.image_a == a && an.image_b == b {
+            (an.va_a, an.va_b)
+        } else if an.image_a == b && an.image_b == a {
+            (an.va_b, an.va_a)
+        } else {
+            continue;
+        };
+        let hit = outcome.pairs.iter().find(|p| p.a == fa || p.b == fb);
+        match hit {
+            Some(p) if p.a == fa && p.b == fb => r.agreeing += 1,
+            Some(p) => r.contradicted.push((an.clone(), p.clone())),
+            None => r.unmatched += 1,
+        }
+    }
+    r
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -447,6 +525,25 @@ mod tests {
         let o = match_images(&a, &b, true, &ev(&[Evidence::Lua, Evidence::Callee])).unwrap();
         let pairs: Vec<(u32, u32)> = o.pairs.iter().map(|p| (p.a, p.b)).collect();
         assert_eq!(pairs, vec![(1, 11), (2, 12)], "position 0 maps 2 to 13, contradicting the accepted 2<->12");
+    }
+
+    #[test]
+    fn anchors_report_agreement_absence_and_contradiction() {
+        let an = |a: u32, b: u32| Anchor { image_a: "x".into(), va_a: a, image_b: "y".into(), va_b: b, verified_by: "read".into() };
+        let pair = |a: u32, b: u32| Pair { a, b, evidence: BTreeSet::new() };
+        let o = Outcome { pairs: vec![pair(1, 11), pair(2, 99)], conflicts: vec![] };
+        let r = check_anchors("x", "y", &o, &[an(1, 11), an(2, 12), an(3, 13)]);
+        assert_eq!((r.agreeing, r.unmatched, r.contradicted.len()), (1, 1, 1));
+        // The same anchors read in the other orientation.
+        let o = Outcome { pairs: vec![pair(11, 1)], conflicts: vec![] };
+        assert_eq!(check_anchors("y", "x", &o, &[an(1, 11)]).agreeing, 1);
+    }
+
+    #[test]
+    fn the_embedded_anchors_name_known_images() {
+        let c = crate::Catalogue::embedded().unwrap();
+        let images = crate::images::Images::embedded(&c).unwrap();
+        assert!(!anchors(&images).unwrap().is_empty());
     }
 
     #[test]
