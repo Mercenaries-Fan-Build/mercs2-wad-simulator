@@ -290,15 +290,23 @@ pub enum RarExtractor {
 
 /// Extract an STFS container from a RAR archive and return a reader.
 ///
-/// Runs `extractor` into `work_dir/stfs`, then picks the largest extracted file whose magic is
-/// LIVE/PIRS/CON. Errors when the extractor's path is not a file or the program cannot be run.
+/// Empties `work_dir/stfs` (removing what a previous extraction left there), runs `extractor`
+/// into it, then selects the container with [`select_stfs_container`]: the archive must extract
+/// exactly one file whose first four bytes are an STFS magic (`LIVE`/`PIRS`/`CON `). Errors when
+/// the extractor's path is not a file, the program cannot be run or exits unsuccessfully, or the
+/// selection fails.
 pub fn extract_stfs_from_rar(
     rar_path: &Path,
     work_dir: &Path,
     extractor: &RarExtractor,
 ) -> Result<StfsReader, String> {
     let stfs_dir = work_dir.join("stfs");
-    std::fs::create_dir_all(&stfs_dir).map_err(|e| format!("mkdir: {e}"))?;
+    if stfs_dir.exists() {
+        std::fs::remove_dir_all(&stfs_dir)
+            .map_err(|e| format!("remove previous extraction {}: {e}", stfs_dir.display()))?;
+    }
+    std::fs::create_dir_all(&stfs_dir)
+        .map_err(|e| format!("mkdir {}: {e}", stfs_dir.display()))?;
 
     let status = match extractor {
         RarExtractor::UnRar(unrar) => {
@@ -334,41 +342,102 @@ pub fn extract_stfs_from_rar(
         ));
     }
 
-    // Largest file with an STFS magic.
-    let mut candidates: Vec<(u64, PathBuf)> = Vec::new();
-    collect_files(&stfs_dir, &mut candidates);
-    candidates.sort_by(|a, b| b.0.cmp(&a.0));
-    for (size, path) in candidates {
-        if size < 1_000_000 {
-            continue;
-        }
-        let mut magic = [0u8; 4];
-        if let Ok(mut f) = std::fs::File::open(&path) {
-            use std::io::Read;
-            if f.read_exact(&mut magic).is_ok()
-                && (&magic == STFS_MAGIC_CON
-                    || &magic == STFS_MAGIC_LIVE
-                    || &magic == STFS_MAGIC_PIRS)
-            {
-                let data = std::fs::read(&path).map_err(|e| format!("read stfs: {e}"))?;
-                return Ok(StfsReader::new(data));
-            }
-        }
-    }
-    Err("Could not find STFS container in archive".into())
+    let path = select_stfs_container(&stfs_dir)?;
+    let data = std::fs::read(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
+    Ok(StfsReader::new(data))
 }
 
-fn collect_files(dir: &Path, out: &mut Vec<(u64, PathBuf)>) {
-    if let Ok(rd) = std::fs::read_dir(dir) {
-        for e in rd.flatten() {
-            let p = e.path();
-            if p.is_dir() {
-                collect_files(&p, out);
-            } else if let Ok(m) = e.metadata() {
-                out.push((m.len(), p));
-            }
+/// One regular file found under an extraction directory.
+#[derive(Debug)]
+struct ExtractedFile {
+    path: PathBuf,
+    size: u64,
+    /// The file's first four bytes; `None` when the file is shorter than four bytes.
+    magic: Option<[u8; 4]>,
+}
+
+impl ExtractedFile {
+    fn is_stfs(&self) -> bool {
+        matches!(&self.magic, Some(m) if m == STFS_MAGIC_LIVE || m == STFS_MAGIC_PIRS || m == STFS_MAGIC_CON)
+    }
+
+    fn describe(&self) -> String {
+        let magic = match &self.magic {
+            Some(m) => format!("magic {:?}", String::from_utf8_lossy(m)),
+            None => "shorter than 4 bytes".to_string(),
+        };
+        format!("{} ({} bytes, {magic})", self.path.display(), self.size)
+    }
+}
+
+/// The single STFS container among the files under `dir` (searched recursively).
+///
+/// Every regular file is opened and its first four bytes compared with the STFS magics
+/// `LIVE`/`PIRS`/`CON `. Exactly one file must match; no match or several matches is an error
+/// listing every file found with its size and magic. A directory or file that cannot be read, and
+/// any entry that is neither a directory nor a regular file (symlinks included), is an error
+/// naming it.
+pub fn select_stfs_container(dir: &Path) -> Result<PathBuf, String> {
+    let mut files = Vec::new();
+    collect_extracted_files(dir, &mut files)?;
+    files.sort_by(|a, b| a.path.cmp(&b.path));
+
+    let stfs: Vec<&ExtractedFile> = files.iter().filter(|f| f.is_stfs()).collect();
+    match stfs.as_slice() {
+        [one] => Ok(one.path.clone()),
+        _ => {
+            let listing = if files.is_empty() {
+                "  (no files)".to_string()
+            } else {
+                files
+                    .iter()
+                    .map(|f| format!("  {}", f.describe()))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            };
+            let problem = if stfs.is_empty() {
+                "no file has an STFS magic (LIVE/PIRS/CON )".to_string()
+            } else {
+                format!("{} files have an STFS magic (LIVE/PIRS/CON ); exactly one is required", stfs.len())
+            };
+            Err(format!("{}: {problem}; files found:\n{listing}", dir.display()))
         }
     }
+}
+
+fn collect_extracted_files(dir: &Path, out: &mut Vec<ExtractedFile>) -> Result<(), String> {
+    use std::io::Read;
+    let rd = std::fs::read_dir(dir).map_err(|e| format!("read dir {}: {e}", dir.display()))?;
+    for entry in rd {
+        let entry = entry.map_err(|e| format!("read dir {}: {e}", dir.display()))?;
+        let path = entry.path();
+        let ft = entry
+            .file_type()
+            .map_err(|e| format!("file type of {}: {e}", path.display()))?;
+        if ft.is_dir() {
+            collect_extracted_files(&path, out)?;
+        } else if ft.is_file() {
+            let mut f = std::fs::File::open(&path)
+                .map_err(|e| format!("open {}: {e}", path.display()))?;
+            let size = f
+                .metadata()
+                .map_err(|e| format!("metadata of {}: {e}", path.display()))?
+                .len();
+            let mut head = Vec::with_capacity(4);
+            (&mut f)
+                .take(4)
+                .read_to_end(&mut head)
+                .map_err(|e| format!("read {}: {e}", path.display()))?;
+            let magic = <[u8; 4]>::try_from(head.as_slice()).ok();
+            out.push(ExtractedFile { path, size, magic });
+        } else {
+            return Err(format!(
+                "{} is neither a directory nor a regular file ({ft:?})",
+                path.display()
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Load an STFS container or a raw DOH file → (doh_bytes, source_type).
@@ -405,29 +474,129 @@ mod tests {
         assert_eq!(get_l0_hash_table_phys_block(5, 0, 0), -1);
     }
 
+    /// A fresh, empty directory unique to `label` under the system temp dir.
+    fn fresh_dir(label: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "mercs2_formats_select_stfs_{}_{label}",
+            std::process::id()
+        ));
+        if dir.exists() {
+            std::fs::remove_dir_all(&dir).expect("clear test dir");
+        }
+        std::fs::create_dir_all(&dir).expect("create test dir");
+        dir
+    }
+
+    fn write(path: &Path, bytes: &[u8]) {
+        std::fs::create_dir_all(path.parent().expect("parent")).expect("mkdir");
+        std::fs::write(path, bytes).expect("write");
+    }
+
     #[test]
-    fn real_stfs_read_doh_matches_python() {
-        // Cross-check the full STFS reader against Python's output on the real
-        // container. Reads a cached raw STFS and asserts the recovered DOH equals
-        // the cached Python-produced dlc01.doh. Skips if either is absent.
-        let stfs_path = concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../../../output/_scratch/dlc01.stfs"
+    fn select_stfs_picks_the_only_stfs_file_of_any_size() {
+        let dir = fresh_dir("one");
+        // A small STFS file is selected over a larger non-STFS file: size plays no part.
+        let stfs = dir.join("45410828/00000002/PKG");
+        write(&stfs, b"LIVE");
+        write(&dir.join("readme.nfo"), &[b'x'; 4096]);
+        write(&dir.join("tiny"), b"ab");
+        assert_eq!(select_stfs_container(&dir).expect("select"), stfs);
+    }
+
+    #[test]
+    fn select_stfs_accepts_each_magic() {
+        for (label, magic) in [("live", STFS_MAGIC_LIVE), ("pirs", STFS_MAGIC_PIRS), ("con", STFS_MAGIC_CON)] {
+            let dir = fresh_dir(label);
+            let path = dir.join("pkg");
+            let mut bytes = magic.to_vec();
+            bytes.extend_from_slice(&[0u8; 16]);
+            write(&path, &bytes);
+            assert_eq!(select_stfs_container(&dir).expect(label), path);
+        }
+    }
+
+    #[test]
+    fn select_stfs_errors_when_none_and_lists_files() {
+        let dir = fresh_dir("none");
+        write(&dir.join("a.bin"), b"SCFFxxxx");
+        write(&dir.join("sub/b"), b"C");
+        let err = select_stfs_container(&dir).expect_err("no STFS must be an error");
+        assert!(err.contains("no file has an STFS magic"), "{err}");
+        assert!(err.contains("a.bin (8 bytes, magic \"SCFF\")"), "{err}");
+        assert!(err.contains("b (1 bytes, shorter than 4 bytes)"), "{err}");
+    }
+
+    #[test]
+    fn select_stfs_errors_on_empty_directory() {
+        let dir = fresh_dir("empty");
+        let err = select_stfs_container(&dir).expect_err("empty dir must be an error");
+        assert!(err.contains("no file has an STFS magic"), "{err}");
+        assert!(err.contains("(no files)"), "{err}");
+    }
+
+    #[test]
+    fn select_stfs_errors_when_several_and_lists_them() {
+        let dir = fresh_dir("several");
+        write(&dir.join("one"), b"LIVE....");
+        write(&dir.join("two"), b"CON ");
+        let err = select_stfs_container(&dir).expect_err("two STFS files must be an error");
+        assert!(err.contains("2 files have an STFS magic"), "{err}");
+        assert!(err.contains("one (8 bytes, magic \"LIVE\")"), "{err}");
+        assert!(err.contains("two (4 bytes, magic \"CON \")"), "{err}");
+    }
+
+    #[test]
+    fn select_stfs_errors_on_missing_directory() {
+        let dir = fresh_dir("missing").join("absent");
+        let err = select_stfs_container(&dir).expect_err("missing dir must be an error");
+        assert!(err.contains("read dir"), "{err}");
+        assert!(err.contains("absent"), "{err}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn select_stfs_errors_on_symlink() {
+        let dir = fresh_dir("symlink");
+        write(&dir.join("pkg"), b"LIVE");
+        std::os::unix::fs::symlink(dir.join("pkg"), dir.join("link")).expect("symlink");
+        let err = select_stfs_container(&dir).expect_err("a symlink must be an error");
+        assert!(err.contains("link is neither a directory nor a regular file"), "{err}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn select_stfs_errors_on_unreadable_file() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = fresh_dir("unreadable");
+        let path = dir.join("locked");
+        write(&path, b"LIVE");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).expect("chmod");
+        if std::fs::File::open(&path).is_ok() {
+            // Running as root: permission bits do not deny the open, so the case cannot be built.
+            panic!("cannot build an unreadable file as this user; run the test as a non-root user");
+        }
+        let err = select_stfs_container(&dir).expect_err("an unreadable file must be an error");
+        assert!(err.contains("open"), "{err}");
+        assert!(err.contains("locked"), "{err}");
+    }
+
+    /// The retail Xbox LIVE Blow It Up Again Pack, named by the `x360_dlc_biua_stfs` key of
+    /// `.mercs2-local.toml`, yields the `DLC01.doh` the exe-map Lua corpus catalogues
+    /// (`crates/mercs2_exemap/data/wads.tsv`, corpus `dlc-biua-x360-retail`): 251,953,152 bytes,
+    /// sha256 `5b0c222d…`. A missing key or file fails the test naming it.
+    #[cfg(feature = "retail")]
+    #[test]
+    fn retail_biua_package_yields_the_catalogued_doh() {
+        use sha2::{Digest, Sha256};
+        let path = crate::game_paths::local_config_x360_dlc_biua_stfs(Path::new(env!("CARGO_MANIFEST_DIR")))
+            .unwrap_or_else(|e| panic!("{e}"));
+        let stfs = std::fs::read(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+        let doh = StfsReader::new(stfs).read_doh().expect("read_doh");
+        assert_eq!(doh.len(), 251_953_152, "DOH length");
+        assert_eq!(
+            format!("{:x}", Sha256::digest(&doh)),
+            "5b0c222d925e8c85000a925262e2b789fbf8c3e476d3d89e5935c7c018deb3ae",
+            "DOH sha256"
         );
-        let doh_path = concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../../../output/_scratch/dlc01.doh"
-        );
-        let (stfs, doh_golden) = match (std::fs::read(stfs_path), std::fs::read(doh_path)) {
-            (Ok(a), Ok(b)) => (a, b),
-            _ => {
-                eprintln!("SKIP real_stfs_read_doh_matches_python: cached STFS/DOH not present");
-                return;
-            }
-        };
-        let reader = StfsReader::new(stfs);
-        let doh = reader.read_doh().expect("read_doh");
-        assert_eq!(doh.len(), doh_golden.len(), "DOH length mismatch");
-        assert!(doh == doh_golden, "DOH bytes differ from Python golden");
     }
 }
