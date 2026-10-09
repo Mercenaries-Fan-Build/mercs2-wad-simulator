@@ -8,7 +8,8 @@
 //! from the original file it ships in. `from_sha256` and `step` are `;`-separated lists of equal
 //! length; step *i* turns the file with `from_sha256[i]` into the next file of the chain, and the
 //! last step yields the WAD. [`derive`] replays a chain on files in a work directory and checks
-//! every sha256 on the way.
+//! every sha256 on the way. A WAD with an empty chain is catalogued from a canonical install, where
+//! [`check_installed`] finds it by name.
 //!
 //! | step | input → output |
 //! |---|---|
@@ -179,8 +180,8 @@ impl Corpora {
             }
             let froms: Vec<&str> = if f[4].is_empty() { Vec::new() } else { f[4].split(';').collect() };
             let steps: Vec<&str> = if f[5].is_empty() { Vec::new() } else { f[5].split(';').collect() };
-            if froms.is_empty() || froms.len() != steps.len() {
-                return Err(err(W, n, format!("{} from_sha256 entries and {} steps; a WAD needs a chain", froms.len(), steps.len())));
+            if froms.len() != steps.len() {
+                return Err(err(W, n, format!("{} from_sha256 entries but {} steps", froms.len(), steps.len())));
             }
             let mut chain = Vec::new();
             for (from, step) in froms.into_iter().zip(steps) {
@@ -342,7 +343,9 @@ fn apply(step: &Step, input: &Path, input_sha: &str, env: &Env) -> Result<PathBu
 /// Rebuild `wad` from `container`, the first file of its chain, checking every sha256; returns the
 /// path of the rebuilt WAD inside `env.work`.
 pub fn derive(wad: &Wad, container: &Path, env: &Env) -> Result<PathBuf, Error> {
-    let first = &wad.chain[0];
+    let first = wad.chain.first().ok_or_else(|| {
+        Error::new(format!("{} {}: no chain; the WAD is catalogued from its install (check_installed)", wad.corpus, wad.name))
+    })?;
     let got = file_sha256(container)?;
     if got != first.from_sha256 {
         return Err(Error::new(format!(
@@ -378,6 +381,24 @@ pub fn derive(wad: &Wad, container: &Path, env: &Env) -> Result<PathBuf, Error> 
     Ok(path)
 }
 
+/// Check that the WAD at `<install>/data/<name>` has the catalogued sha256 and size.
+pub fn check_installed(wad: &Wad, install: &Path) -> Result<PathBuf, Error> {
+    let path = install.join("data").join(&wad.name);
+    let size = std::fs::metadata(&path).map_err(|e| Error::new(format!("{} {}: {}: {e}", wad.corpus, wad.name, path.display())))?.len();
+    let s = file_sha256(&path)?;
+    if s != wad.sha256 || size != wad.size {
+        return Err(Error::new(format!(
+            "{} {}: {} has sha256 {s} ({size} bytes), wads.tsv says {} ({} bytes)",
+            wad.corpus,
+            wad.name,
+            path.display(),
+            wad.sha256,
+            wad.size
+        )));
+    }
+    Ok(path)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -397,6 +418,8 @@ mod tests {
         let c = Corpora::embedded().unwrap();
         assert!(c.corpus("base-pc-demo").is_some());
         assert_eq!(c.wads_of("base-pc-demo").count(), 4);
+        assert_eq!(c.wads_of("base-pc-retail").count(), 8);
+        assert!(c.wads_of("base-pc-retail").all(|w| w.chain.is_empty()));
     }
 
     #[test]
@@ -453,6 +476,15 @@ mod tests {
         let env = Env { wine: None, work: work.join("work") };
         let out = derive(&wad, &zpath, &env).unwrap();
         assert_eq!(file_sha256(&out).unwrap(), wsha);
+        // An installed WAD is checked in place; deriving it is an error.
+        let inst = work.join("install");
+        std::fs::create_dir_all(inst.join("data")).unwrap();
+        std::fs::write(inst.join("data/x.wad"), b"FFCS wad bytes").unwrap();
+        let installed = Wad { chain: vec![], ..wad.clone() };
+        assert_eq!(check_installed(&installed, &inst).unwrap(), inst.join("data/x.wad"));
+        assert!(derive(&installed, &zpath, &env).unwrap_err().to_string().contains("no chain"));
+        std::fs::write(inst.join("data/x.wad"), b"other").unwrap();
+        assert!(check_installed(&installed, &inst).unwrap_err().to_string().contains("wads.tsv says"));
         // A Wine step without a wine binary is an error naming the step.
         let wine_wad = Wad { chain: vec![Link { from_sha256: wad.chain[0].from_sha256.clone(), step: Step::WineSfx("x".into()) }], ..wad.clone() };
         let e = derive(&wine_wad, &zpath, &env).unwrap_err().to_string();
