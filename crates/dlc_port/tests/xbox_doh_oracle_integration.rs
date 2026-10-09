@@ -75,7 +75,7 @@ fn other_convert_block_rejections_are_left_on_the_skip_path() {
         "convert_block: wavebank transcode: wavebank records_offset 56, expected 40"
     ));
     assert!(!is_ps3_compact_decl_rejection(
-        "convert_block: unluac.jar not found"
+        "convert_block: block holds BINN (Lua bytecode) chunks; converting them needs java and unluac (LuaTools)"
     ));
     assert!(!is_ps3_compact_decl_rejection("Block too small"));
     assert!(!is_ps3_compact_decl_rejection(
