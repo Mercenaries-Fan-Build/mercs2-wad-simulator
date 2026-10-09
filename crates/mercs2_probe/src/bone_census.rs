@@ -254,7 +254,7 @@ pub fn bone_census(
     let mut resolved: HashMap<u32, Resolved> = HashMap::new();
 
     // (a) rainbow table — one pass, not one scan per hash.
-    let rb = load_rainbow(&all);
+    let rb = load_rainbow(&all)?;
     for (h, names) in rb {
         resolved.insert(h, Resolved { names, source: "rainbow" });
     }
@@ -394,18 +394,21 @@ pub fn bone_census(
     Ok(())
 }
 
-/// Load `tools/rainbow_table.json` ONCE and pull the `pandemic_hash_m2` entries for `want`.
+/// Load the rainbow table named by `rainbow_table` in `.mercs2-local.toml` ONCE and pull the
+/// `pandemic_hash_m2` entries for `want`. A missing key, an unreadable or unparsable table, or a
+/// table without a `pandemic_hash_m2` object is an error.
 /// (`worldutil::rainbow_names` re-scans the 70 MB text per hash — fine for one model's 100 nodes,
 /// quadratic for a whole-stack census.)
-fn load_rainbow(want: &BTreeSet<u32>) -> HashMap<u32, Vec<String>> {
+fn load_rainbow(want: &BTreeSet<u32>) -> Result<HashMap<u32, Vec<String>>, String> {
     let mut out = HashMap::new();
-    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../../rainbow_table.json");
-    let Ok(text) = std::fs::read_to_string(path) else {
-        eprintln!("[bone-census] no rainbow table at {path} — names will be blank");
-        return out;
-    };
-    let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else { return out };
-    let Some(map) = v.get("pandemic_hash_m2").and_then(|m| m.as_object()) else { return out };
+    let path = mercs2_formats::game_paths::local_config_rainbow_table(std::path::Path::new(env!("CARGO_MANIFEST_DIR")))?;
+    let text = std::fs::read_to_string(&path)
+        .map_err(|e| format!("[bone-census] read rainbow table {}: {e}", path.display()))?;
+    let v = serde_json::from_str::<serde_json::Value>(&text)
+        .map_err(|e| format!("[bone-census] parse rainbow table {}: {e}", path.display()))?;
+    let map = v.get("pandemic_hash_m2").and_then(|m| m.as_object()).ok_or_else(|| {
+        format!("[bone-census] rainbow table {} has no `pandemic_hash_m2` object", path.display())
+    })?;
     for (k, val) in map {
         let Some(h) = k.strip_prefix("0x").and_then(|s| u32::from_str_radix(s, 16).ok()) else {
             continue;
@@ -424,5 +427,5 @@ fn load_rainbow(want: &BTreeSet<u32>) -> HashMap<u32, Vec<String>> {
             out.insert(h, names);
         }
     }
-    out
+    Ok(out)
 }
