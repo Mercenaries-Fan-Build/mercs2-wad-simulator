@@ -102,11 +102,14 @@ pub fn vz_wad_from_env() -> Option<PathBuf> {
 /// * `ps3_dlc_biua_pkg` — the PS3 NA Blow It Up Again Pack PSN package. Read only by the exe-map
 ///   Lua corpus tests ([`local_config_ps3_dlc_biua_pkg`]).
 /// * `ps3_jp_disc_dir` — a **directory**: the PS3 Japanese disc dump (BLJM60101), the folder that
-///   holds `PS3_GAME`. Read only by the exe-map Lua corpus tests ([`local_config_ps3_jp_disc_dir`]).
+///   holds `PS3_GAME`. Read only by the exe-map Lua corpus and console-image tests
+///   ([`local_config_ps3_jp_disc_dir`]).
 /// * `ps3_de_disc_dir` — a **directory**: the PS3 German disc dump (BLES00328), the folder that
-///   holds `PS3_GAME`. Read only by the exe-map Lua corpus tests ([`local_config_ps3_de_disc_dir`]).
+///   holds `PS3_GAME`. Read only by the exe-map Lua corpus and console-image tests
+///   ([`local_config_ps3_de_disc_dir`]).
 /// * `ps3_eu_disc_dir` — a **directory**: the PS3 European disc dump (BLES00323), the folder that
-///   holds `PS3_GAME`. Read only by the exe-map Lua corpus tests ([`local_config_ps3_eu_disc_dir`]).
+///   holds `PS3_GAME`. Read only by the exe-map Lua corpus and console-image tests
+///   ([`local_config_ps3_eu_disc_dir`]).
 /// * `rainbow_table` — the hash rainbow table, `rainbow_table.json`. Read only by dev tools that
 ///   label hashes (`--pack-data`, the engine diag commands, the name-mining bins and probes)
 ///   ([`local_config_rainbow_table`]).
