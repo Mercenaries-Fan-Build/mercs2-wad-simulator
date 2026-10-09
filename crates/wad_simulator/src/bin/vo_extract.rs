@@ -139,7 +139,7 @@ const VO_BANKS: &[&str] = &[
 #[derive(Parser)]
 #[command(about = "Extract spoken VO to named .wav files")]
 struct Cli {
-    #[arg(long, default_value = r"C:\Users\Shadow\Desktop\Mercenaries 2 World in Flames\data\vz.wad")]
+    #[arg(long)]
     wad: String,
 
     /// English.wad also carries VO blocks (vo_*.english).
@@ -147,7 +147,7 @@ struct Cli {
     extra_wad: Vec<String>,
 
     /// Directory holding the .pws streams.
-    #[arg(long, default_value = r"C:\Users\Shadow\Desktop\Mercenaries 2 World in Flames\data\Audios")]
+    #[arg(long)]
     audios: PathBuf,
 
     #[arg(long, default_value = "vo_stream.english.pws")]
