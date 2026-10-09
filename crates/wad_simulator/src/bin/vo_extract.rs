@@ -170,18 +170,19 @@ struct Cli {
     limit: usize,
 }
 
-fn rainbow() -> RainbowTable {
-    let tables: Vec<PathBuf> = [
-        "tools/rainbow_table.json",
-        "docs/data/aset_discovered_names.json",
-        "docs/data/aset_block_strings.json",
-        "docs/data/aset_expanded_names.json",
-    ]
-    .iter()
-    .map(PathBuf::from)
-    .filter(|p| p.exists())
-    .collect();
-    RainbowTable::load_many(&tables).unwrap_or_default()
+/// `rainbow_table` from `.mercs2-local.toml` and the `data/aset_discovered_names.json`,
+/// `data/aset_block_strings.json` and `data/aset_expanded_names.json` fragments under its
+/// `notes_docs_dir`. Every table must load.
+fn rainbow() -> Result<RainbowTable, String> {
+    let start = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let data = mercs2_formats::game_paths::local_config_notes_docs_dir(start)?.join("data");
+    let tables: Vec<PathBuf> = vec![
+        mercs2_formats::game_paths::local_config_rainbow_table(start)?,
+        data.join("aset_discovered_names.json"),
+        data.join("aset_block_strings.json"),
+        data.join("aset_expanded_names.json"),
+    ];
+    RainbowTable::load_many(&tables).map_err(|e| format!("load rainbow tables {tables:?}: {e}"))
 }
 
 /// Sanitize a cue name into a filename.
@@ -227,7 +228,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut sources = vec![cli.wad.clone()];
     sources.extend(cli.extra_wad.iter().cloned());
 
-    let rb = rainbow();
+    let rb = rainbow()?;
     eprintln!("rainbow: {} names", rb.len());
 
     // ── 1. routing: (wavebank, wave index) -> the cues that play it ─
