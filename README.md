@@ -167,7 +167,10 @@ must be given; a WAD rebuilt from a container comes from `exemap corpus-derive`.
 WAD, script name and name hash, the function's `path` in its script (`main`, then `/<i>` per nesting
 level), its line range, parameter/vararg/upvalue/stack shape, code, constant and nested-function
 counts, and two platform-neutral fingerprints: `code_hash` (SHA-256 of the instruction words,
-little-endian) and `constants_hash`; `debug` says whether it keeps debug information.
+little-endian) and `constants_hash`; `debug` says whether it keeps debug information; `lookups`
+lists every `Namespace.Name` the function reads the way Lua 5.1 compiles it (`GETGLOBAL` immediately
+followed by `GETTABLE` with a string-constant key) — a function about to be called, or any other
+field such as an event id or a sub-table.
 
 `exemap lua-pair <a.tsv> <b.tsv> --out <tsv>` pairs the functions of two `lua-index` exports by
 content. Scripts pair by name hash (a script that several WADs of one corpus carry with the same
@@ -181,6 +184,16 @@ script `script-only-a`/`script-only-b`. Across the retail builds, the PC and Jap
 are one revision (6,221 functions identical, 57 with different code) and the Xbox 360, European and
 German PS3 scripts another (6,297 identical between Xbox 360 and Europe, one different); the two
 revisions differ in about 1,000 functions.
+
+`exemap lua-link <index.tsv> <image.luareg.tsv> --out <tsv>` resolves every lookup of a `lua-index`
+export through an image's `luareg` export, by namespace and entry name: `resolved` (one native
+function), `ambiguous` (several), `unregistered-in-native-namespace` (the namespace is registered
+natively, the name is not — mostly event ids, constants and sub-tables) or `lua-namespace` (no
+native table carries that namespace: a table the scripts build themselves). The last class is only
+as complete as the export's namespace names, so the command prints how many the export names and
+refuses an export that names none. The PC and Xbox 360 exports name 31 and 30 namespaces; the PS3
+exports name 5 and the Xbox 360 preview Profile export none, so their lookups cannot yet be told
+apart from Lua-built tables.
 
 `exemap match <image_a> <image_b> --exports <dir> --evidence <list> --out <tsv> --conflicts <tsv>`
 pairs the functions of two `images.tsv` images from their exports in `<dir>` (`<id>.rtti.tsv`,
