@@ -1,4 +1,5 @@
 build_id	sha256	md5	size	pe_timestamp	layout	code_version	recipe_from	recipe_step	overlay_set
+demo-official-securom	9da26832f1f8628d364282d092f85ec1a0ee19a2b9b5c85ea52ba8a6f31e7295	243033811d4951725e9ad6f1e0382802	17118472	0x48cb59e8	D	demo			
 dump-v10-pmcbb-image	c70806b9b3e2385e39c24a268982bb516e3863b0bf1240f5e6d9942e2769fc06	f7115290c0144fae729ce63e2dbc549d	53485568	0x48a370c7	U	1.0			dump-v10-pmcbb-image
 dump-v10-pmcbb-unpacked	8c179a99d7fad88bab288826db19a579b53512801d8e0d1c1a761bbc30ebc7ba	29112d9a6a301cc28321ba5d3e03e975	53485568	0x48a370c7	U	1.0			dump-v10-pmcbb-unpacked
 dump-v11-securom-module	c996df06040fa6436cc25f1d92728c3ed8abea49d3c3ef34e7ab1e75b88c7ef7	a576290fecab38d154c0eca2c01f4e4c	53944320	0x48cae190	E	1.1			dump-v11-securom-module
