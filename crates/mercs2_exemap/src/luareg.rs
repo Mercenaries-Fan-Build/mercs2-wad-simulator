@@ -6,15 +6,20 @@
 //! groups: `{name, 0xFFFFFFFF}` opens group `name` and `{name, 0xFFFFFFFE}` closes it, and an entry
 //! inside a group is named `group.entry` (`Graphics` holds `Camera.GetYaw`). Markers must balance.
 //!
-//! A table's **namespace** is the identifier in the word before a pointer to the table — the
-//! `name` of a `{const char* name, luaL_Reg* table, ...}` registry row. That word comes from the
-//! image's bytes, or, in a PowerPC image (Xbox 360 or PS3), from a store instruction whose address
-//! and value the code fixes. The PC, Xbox 360 Final and Xbox 360 retail game registries carry their
-//! names as data. The PS3 images and the Xbox 360 Profile image leave each game row's name word zero
-//! and fill it in a static initializer that copies the library's `const char*` name variable into
-//! the row (PS3 `0x0050a8e8`, Profile `0x829eba98`), so on those images the name comes from that
-//! store. Tables of at least two entries are kept, and a one-entry table when a registry row names
-//! it. A table that two or more rows or stores name with different identifiers is an error.
+//! A table's **namespace** is the `name` of the registry row that points at it. The registry is an
+//! array of 12-byte rows `{const char* name, luaL_Reg* table, const char* init}`: a row is three
+//! words whose `table` word (in the image's bytes) points at a recovered table, whose `name` word
+//! holds an identifier, and whose `init` word is 0 or points at text ended by a NUL (printable
+//! ASCII, tab, newline, carriage return; possibly empty) in a non-executable section. A `name` or
+//! `init` word's value is the image's bytes there or, in a PowerPC image (Xbox 360 or PS3), any value
+//! a store instruction whose address and value the code fixes writes there; every value of an `init`
+//! word must qualify. Only rows in a run of at least two consecutive rows at the 12-byte stride name
+//! a table; a lone `{name, table}` word pair names nothing. The PC, Xbox 360 Final and Xbox 360 retail game registries carry their names as data.
+//! The PS3 images and the Xbox 360 Profile image leave each game row's `name` and `init` words zero
+//! in their bytes and write them from code: a static initializer copies each library's `const char*`
+//! name variable into its row (PS3 `0x0050a8e8`, Profile `0x829eba98`), so on those images the
+//! words come from code stores. Tables of at least two entries are kept, and a one-entry table when a registry row names
+//! it. A table that registry rows or stores name with different identifiers is an error.
 //!
 //! **Code stores.** Each function from [`crate::starts::function_starts`] is evaluated over its
 //! control flow (to the next start) with the register values that are the same constant on every
@@ -41,8 +46,8 @@ use crate::Error;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Table {
     pub va: u32,
-    /// The identifier a registry row (in the image's bytes or written by a code store) gives this
-    /// table.
+    /// The identifier a registry row (its `name` word in the image's bytes or written by a code
+    /// store) gives this table.
     pub namespace: Option<String>,
     /// (name, function code address), in table order; a name inside a group is `group.entry`.
     pub entries: Vec<(String, u32)>,
@@ -57,6 +62,26 @@ fn identifier(mem: &Mem<'_>, va: u32) -> Option<String> {
         && (s[0].is_ascii_alphabetic() || s[0] == b'_')
         && s.iter().all(|b| b.is_ascii_alphanumeric() || *b == b'_');
     ok.then(|| String::from_utf8_lossy(s).into_owned())
+}
+
+/// The size of a registry row `{const char* name, luaL_Reg* table, const char* init}`.
+const ROW: u32 = 12;
+
+/// The fewest consecutive rows that make a registry array. A registry is an array, so it has at
+/// least two rows; a lone `{name, table}` word pair is two adjacent pointers, not a row.
+const MIN_REGISTRY_ROWS: usize = 2;
+
+/// Whether `va` points at text ended by a NUL inside one non-executable section: printable ASCII,
+/// tab, newline and carriage return, possibly no bytes before the NUL.
+fn text(mem: &Mem<'_>, va: u32) -> bool {
+    let Some(r) = mem.ranges.iter().find(|r| !r.exec && va >= r.lo && va < r.hi) else { return false };
+    let lo = r.off + (va - r.lo) as usize;
+    let hi = (r.off + (r.hi - r.lo) as usize).min(mem.d.len());
+    let Some(bytes) = mem.d.get(lo..hi) else { return false };
+    match bytes.iter().position(|&b| b == 0) {
+        Some(n) => bytes[..n].iter().all(|&b| matches!(b, b'\t' | b'\n' | b'\r' | 0x20..=0x7e)),
+        None => false,
+    }
 }
 
 /// Every `luaL_Reg` table in a PE or PS3 ELF image, by address.
@@ -108,23 +133,46 @@ pub fn tables(image: &[u8]) -> Result<Vec<Table>, Error> {
     }
 
     let stores = if mem.big { code_stores(image, &mem)? } else { BTreeMap::new() };
-    let mut names: BTreeMap<u32, String> = BTreeMap::new();
+    // Every word a row field holds: the image's bytes there, then each value a code store writes.
+    let values = |at: u32| mem.word(at).into_iter().chain(stores.get(&at).into_iter().flatten().copied());
+    // Candidate rows by address: (table, the identifiers its name word holds).
+    let mut rows: BTreeMap<u32, (u32, BTreeSet<String>)> = BTreeMap::new();
     for (va, w) in mem.data_words() {
         if !found.contains_key(&w) || va < 4 {
             continue;
         }
         let slot = va - 4;
-        let written = stores.get(&slot).into_iter().flatten().copied();
-        for ns in mem.word(slot).into_iter().chain(written).filter_map(|n| identifier(&mem, n)) {
-            if let Some(prev) = names.get(&w) {
-                if *prev != ns {
-                    return Err(Error::new(format!(
-                        "luaL_Reg table 0x{w:08x} is named both {prev} and {ns} by registry rows or code stores"
-                    )));
+        let names: BTreeSet<String> = values(slot).filter_map(|n| identifier(&mem, n)).collect();
+        let init = mem.word(slot + 8).is_some() && values(slot + 8).all(|v| v == 0 || text(&mem, v));
+        if !names.is_empty() && init {
+            rows.insert(slot, (w, names));
+        }
+    }
+
+    let mut names: BTreeMap<u32, String> = BTreeMap::new();
+    let mut run: Vec<u32> = Vec::new();
+    let slots: Vec<u32> = rows.keys().copied().collect();
+    for (i, &slot) in slots.iter().enumerate() {
+        run.push(slot);
+        if slots.get(i + 1) == Some(&(slot + ROW)) {
+            continue;
+        }
+        if run.len() >= MIN_REGISTRY_ROWS {
+            for r in &run {
+                let (w, row_names) = &rows[r];
+                for ns in row_names {
+                    if let Some(prev) = names.get(w) {
+                        if prev != ns {
+                            return Err(Error::new(format!(
+                                "luaL_Reg table 0x{w:08x} is named both {prev} and {ns} by registry rows or code stores"
+                            )));
+                        }
+                    }
+                    names.insert(*w, ns.clone());
                 }
             }
-            names.insert(w, ns);
         }
+        run.clear();
     }
 
     Ok(found
@@ -514,41 +562,86 @@ mod tests {
     use super::*;
     use crate::starts::tests::pe_image;
 
-    /// An x86 image: a two-entry table, a one-entry table (too short), and a registry row naming
-    /// the first.
-    fn image(conflict: bool) -> Vec<u8> {
-        let base = 0x0040_0000u32;
+    const BASE: u32 = 0x0040_0000;
+
+    /// The address of `.rdata` offset `o` in [`image`].
+    fn s(o: u32) -> u32 {
+        BASE + 0x1000 + o
+    }
+
+    /// An x86 image whose `.rdata` holds the strings "Player" (+0x00), "GetName" (+0x08), "GetSeat"
+    /// (+0x10), "Other" (+0x18) and "Lone" (+0x20), a two-entry table at +0x40, one-entry tables at
+    /// +0x60 and +0x70, and `{name, table, init}` rows at the given offsets.
+    fn image(rows: &[(u32, [u32; 3])]) -> Vec<u8> {
         let le = |v: u32| v.to_le_bytes();
         let mut data = vec![0u8; 0x200];
         data[0x00..0x08].copy_from_slice(b"Player\0\0");
         data[0x08..0x18].copy_from_slice(b"GetName\0GetSeat\0");
         data[0x18..0x20].copy_from_slice(b"Other\0\0\0");
-        let s = |o: u32| base + 0x1000 + o;
+        data[0x20..0x28].copy_from_slice(b"Lone\0\0\0\0");
         // table at +0x40: {GetName, f1}, {GetSeat, f2}, {0, 0}
         data[0x40..0x44].copy_from_slice(&le(s(0x08)));
-        data[0x44..0x48].copy_from_slice(&le(base + 0x2010));
+        data[0x44..0x48].copy_from_slice(&le(BASE + 0x2010));
         data[0x48..0x4c].copy_from_slice(&le(s(0x10)));
-        data[0x4c..0x50].copy_from_slice(&le(base + 0x2020));
-        // one-entry table at +0x60
+        data[0x4c..0x50].copy_from_slice(&le(BASE + 0x2020));
+        // one-entry tables at +0x60 {GetName, f3} and +0x70 {GetSeat, f4}
         data[0x60..0x64].copy_from_slice(&le(s(0x08)));
-        data[0x64..0x68].copy_from_slice(&le(base + 0x2030));
-        // registry rows at +0x80
-        data[0x80..0x84].copy_from_slice(&le(s(0x00)));
-        data[0x84..0x88].copy_from_slice(&le(s(0x40)));
-        if conflict {
-            data[0x90..0x94].copy_from_slice(&le(s(0x18)));
-            data[0x94..0x98].copy_from_slice(&le(s(0x40)));
+        data[0x64..0x68].copy_from_slice(&le(BASE + 0x2030));
+        data[0x70..0x74].copy_from_slice(&le(s(0x10)));
+        data[0x74..0x78].copy_from_slice(&le(BASE + 0x2040));
+        for (o, row) in rows {
+            for (i, w) in row.iter().enumerate() {
+                let at = (*o as usize) + 4 * i;
+                data[at..at + 4].copy_from_slice(&le(*w));
+            }
         }
-        pe_image(0x14c, base, &[(".rdata", 0x1000, 0x200, 0x4000_0040, &data), (".text", 0x2000, 0x100, 0x6000_0020, &[])])
+        pe_image(0x14c, BASE, &[(".rdata", 0x1000, 0x200, 0x4000_0040, &data), (".text", 0x2000, 0x100, 0x6000_0020, &[])])
+    }
+
+    /// A two-row registry at +0x80: `Player` for the two-entry table, `Other` for the one-entry
+    /// table at +0x70, the second row's `init` pointing at `second_init`.
+    fn registry(second_init: u32) -> Vec<(u32, [u32; 3])> {
+        vec![(0x80, [s(0x00), s(0x40), 0]), (0x8c, [s(0x18), s(0x70), second_init])]
+    }
+
+    fn named(t: &[Table]) -> Vec<(u32, Option<&str>)> {
+        t.iter().map(|t| (t.va, t.namespace.as_deref())).collect()
     }
 
     #[test]
     fn tables_are_found_with_their_registry_namespace() {
-        let t = tables(&image(false)).unwrap();
-        assert_eq!(t.len(), 1);
-        assert_eq!(t[0].va, 0x0040_1040);
-        assert_eq!(t[0].namespace.as_deref(), Some("Player"));
-        assert_eq!(t[0].entries, vec![("GetName".to_string(), 0x0040_2010), ("GetSeat".to_string(), 0x0040_2020)]);
+        let t = tables(&image(&registry(0))).unwrap();
+        // The unnamed one-entry table at +0x60 is dropped; the named one at +0x70 is kept.
+        assert_eq!(named(&t), vec![(s(0x40), Some("Player")), (s(0x70), Some("Other"))]);
+        assert_eq!(t[0].entries, vec![("GetName".to_string(), BASE + 0x2010), ("GetSeat".to_string(), BASE + 0x2020)]);
+        assert_eq!(t[1].entries, vec![("GetSeat".to_string(), BASE + 0x2040)]);
+        // An init word pointing at text, including empty text, keeps the row.
+        let t = tables(&image(&registry(s(0x08)))).unwrap();
+        assert_eq!(named(&t), vec![(s(0x40), Some("Player")), (s(0x70), Some("Other"))]);
+        let t = tables(&image(&registry(s(0x06)))).unwrap();
+        assert_eq!(named(&t), vec![(s(0x40), Some("Player")), (s(0x70), Some("Other"))]);
+    }
+
+    #[test]
+    fn a_lone_name_table_pair_names_nothing() {
+        // One row: no run.
+        let t = tables(&image(&[(0xc0, [s(0x20), s(0x40), 0])])).unwrap();
+        assert_eq!(named(&t), vec![(s(0x40), None)]);
+        // Two rows 16 bytes apart: not consecutive at the 12-byte stride.
+        let t = tables(&image(&[(0x80, [s(0x00), s(0x40), 0]), (0x90, [s(0x18), s(0x70), 0])])).unwrap();
+        assert_eq!(named(&t), vec![(s(0x40), None)]);
+    }
+
+    #[test]
+    fn a_row_whose_init_is_not_text_ends_the_run() {
+        // The second row's init points at the table's own pointer bytes, which are not text.
+        let t = tables(&image(&registry(s(0x40)))).unwrap();
+        assert_eq!(named(&t), vec![(s(0x40), None)]);
+        // A third row after it starts a run of one.
+        let mut rows = registry(s(0x40));
+        rows.push((0x98, [s(0x20), s(0x60), 0]));
+        let t = tables(&image(&rows)).unwrap();
+        assert_eq!(named(&t), vec![(s(0x40), None)]);
     }
 
     #[test]
@@ -578,7 +671,9 @@ mod tests {
 
     #[test]
     fn a_table_named_twice_differently_is_an_error() {
-        let e = tables(&image(true)).unwrap_err().to_string();
+        let mut rows = registry(0);
+        rows.push((0x98, [s(0x18), s(0x40), 0]));
+        let e = tables(&image(&rows)).unwrap_err().to_string();
         assert!(e.contains("named both"), "{e}");
     }
 
@@ -615,8 +710,9 @@ mod tests {
 
     /// An Xbox 360 image with one function (`code`, at `.text` 0x82001000) and `.rdata` holding
     /// the strings "Player" (0x82000600), "GetName", "GetSeat", "Other" (0x82000618), a name
-    /// variable at 0x82000620 holding the "Player" pointer, a two-entry table at 0x82000640, and a
-    /// registry row `{name, table, 0}` at 0x82000680 whose name word is `row_name`.
+    /// variable at 0x82000620 holding the "Player" pointer, a two-entry table at 0x82000640, a
+    /// one-entry table at 0x82000660, and a two-row registry: `{name, table, 0}` at 0x82000680 whose
+    /// name word is `row_name`, then `{"Other", 0x82000660, 0}`.
     fn xbox(code: &[u32], row_name: u32) -> Vec<u8> {
         let be = |v: u32| v.to_be_bytes();
         let mut rdata = vec![0u8; 0x200];
@@ -629,8 +725,12 @@ mod tests {
         rdata[0x44..0x48].copy_from_slice(&be(XBASE + 0x1080));
         rdata[0x48..0x4c].copy_from_slice(&be(s(0x10)));
         rdata[0x4c..0x50].copy_from_slice(&be(XBASE + 0x1084));
+        rdata[0x60..0x64].copy_from_slice(&be(s(0x10)));
+        rdata[0x64..0x68].copy_from_slice(&be(XBASE + 0x1088));
         rdata[0x80..0x84].copy_from_slice(&be(row_name));
         rdata[0x84..0x88].copy_from_slice(&be(s(0x40)));
+        rdata[0x8c..0x90].copy_from_slice(&be(s(0x18)));
+        rdata[0x90..0x94].copy_from_slice(&be(s(0x60)));
         let mut pdata = vec![0u8; 0x40];
         pdata[0..4].copy_from_slice(&be(XBASE + 0x1000));
         pdata[4..8].copy_from_slice(&be(1));
@@ -647,22 +747,47 @@ mod tests {
     }
 
     /// `r9 = &row.name`.
-    const ROW: [u32; 2] = [15 << 26 | R9 << 21 | 0x8200, 14 << 26 | R9 << 21 | R9 << 16 | 0x680];
+    const SET_ROW: [u32; 2] = [15 << 26 | R9 << 21 | 0x8200, 14 << 26 | R9 << 21 | R9 << 16 | 0x680];
 
+    /// The namespace of the two-entry table at 0x82000640.
     fn namespace_of(img: &[u8]) -> Option<String> {
         let t = tables(img).unwrap();
-        assert_eq!(t.len(), 1);
-        assert_eq!(t[0].va, XBASE + 0x640);
-        t[0].namespace.clone()
+        let t = t.iter().find(|t| t.va == XBASE + 0x640).expect("the two-entry table");
+        t.namespace.clone()
     }
 
     #[test]
     fn a_powerpc_code_store_names_the_row_its_data_leaves_empty() {
         // r11 = *(0x82000620) = "Player"; row.name = r11
-        let code = [lis(R11, 0x8200), lwz(R11, R11, 0x620), ROW[0], ROW[1], stw(R11, R9, 0), BLR];
-        assert_eq!(namespace_of(&xbox(&code, 0)).as_deref(), Some("Player"));
-        // Without the store the row is unnamed.
-        assert_eq!(namespace_of(&xbox(&[BLR], 0)), None);
+        let code = [lis(R11, 0x8200), lwz(R11, R11, 0x620), SET_ROW[0], SET_ROW[1], stw(R11, R9, 0), BLR];
+        let t = tables(&xbox(&code, 0)).unwrap();
+        let named: Vec<(u32, Option<&str>)> = t.iter().map(|t| (t.va, t.namespace.as_deref())).collect();
+        assert_eq!(named, vec![(XBASE + 0x640, Some("Player")), (XBASE + 0x660, Some("Other"))]);
+        // Without the store the first row has no name, so the second is a lone row and names nothing.
+        let t = tables(&xbox(&[BLR], 0)).unwrap();
+        let named: Vec<(u32, Option<&str>)> = t.iter().map(|t| (t.va, t.namespace.as_deref())).collect();
+        assert_eq!(named, vec![(XBASE + 0x640, None)]);
+    }
+
+    #[test]
+    fn a_powerpc_code_store_to_the_init_word_must_be_text() {
+        let code = |init: i16| {
+            [
+                lis(R11, 0x8200),
+                lwz(R11, R11, 0x620),
+                SET_ROW[0],
+                SET_ROW[1],
+                stw(R11, R9, 0),
+                lis(R10, 0x8200),
+                addi(R10, R10, init),
+                stw(R10, R9, 8),
+                BLR,
+            ]
+        };
+        // init = "GetName"
+        assert_eq!(namespace_of(&xbox(&code(0x608), 0)).as_deref(), Some("Player"));
+        // init = the two-entry table, whose bytes are pointers, not text
+        assert_eq!(namespace_of(&xbox(&code(0x640), 0)), None);
     }
 
     #[test]
@@ -674,8 +799,8 @@ mod tests {
             stw(R11, R1, 8),
             lis(R11, 0),
             lwz(R10, R1, 8),
-            ROW[0],
-            ROW[1],
+            SET_ROW[0],
+            SET_ROW[1],
             stw(R10, R9, 0),
             BLR,
         ];
@@ -695,8 +820,8 @@ mod tests {
                 beq(12),
                 lis(R11, 0x8200),
                 addi(R11, R11, other as i16),
-                ROW[0],
-                ROW[1],
+                SET_ROW[0],
+                SET_ROW[1],
                 stw(R11, R9, 0),
                 BLR,
             ]
@@ -707,7 +832,7 @@ mod tests {
 
     #[test]
     fn a_code_store_that_contradicts_the_data_row_is_an_error() {
-        let code = [lis(R11, 0x8200), lwz(R11, R11, 0x620), ROW[0], ROW[1], stw(R11, R9, 0), BLR];
+        let code = [lis(R11, 0x8200), lwz(R11, R11, 0x620), SET_ROW[0], SET_ROW[1], stw(R11, R9, 0), BLR];
         let e = tables(&xbox(&code, XBASE + 0x618)).unwrap_err().to_string();
         assert!(e.contains("named both"), "{e}");
     }
