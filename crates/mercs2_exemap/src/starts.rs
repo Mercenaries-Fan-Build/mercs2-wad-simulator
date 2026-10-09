@@ -103,16 +103,16 @@ fn pdata_starts(image: &[u8]) -> Result<(Vec<u32>, Source), Error> {
     Ok((starts, Source::Pdata { va: pe.image_base + pdata.vaddr, records }))
 }
 
-struct ElfSection {
-    flags: u64,
-    addr: u64,
-    offset: u64,
-    size: u64,
-    kind: u32,
+pub(crate) struct ElfSection {
+    pub(crate) flags: u64,
+    pub(crate) addr: u64,
+    pub(crate) offset: u64,
+    pub(crate) size: u64,
+    pub(crate) kind: u32,
 }
 
-const SHF_EXECINSTR: u64 = 0x4;
-const SHT_PROGBITS: u32 = 1;
+pub(crate) const SHF_EXECINSTR: u64 = 0x4;
+pub(crate) const SHT_PROGBITS: u32 = 1;
 
 fn be_u16(d: &[u8], o: usize) -> Result<u16, Error> {
     d.get(o..o + 2)
@@ -130,7 +130,8 @@ fn be_u64(d: &[u8], o: usize) -> Result<u64, Error> {
         .ok_or_else(|| Error::new(format!("ELF truncated at 0x{o:x}")))
 }
 
-fn opd_starts(image: &[u8]) -> Result<(Vec<u32>, Source), Error> {
+/// The entry point and section headers of a 64-bit big-endian (PS3 PPU) ELF.
+pub(crate) fn elf_sections(image: &[u8]) -> Result<(u64, Vec<ElfSection>), Error> {
     // e_ident: class 2 (64-bit), data 2 (big-endian).
     if image.get(4) != Some(&2) || image.get(5) != Some(&2) {
         return Err(Error::new("ELF is not 64-bit big-endian (PS3 PPU)"));
@@ -153,6 +154,11 @@ fn opd_starts(image: &[u8]) -> Result<(Vec<u32>, Source), Error> {
             size: be_u64(image, o + 32)?,
         });
     }
+    Ok((entry, secs))
+}
+
+/// The `.opd` section: the PROGBITS, non-executable section that holds the entry descriptor.
+pub(crate) fn opd_section(entry: u64, secs: &[ElfSection]) -> Result<&ElfSection, Error> {
     let opd = secs
         .iter()
         .find(|s| s.kind == SHT_PROGBITS && s.size > 0 && entry >= s.addr && entry < s.addr + s.size)
@@ -165,6 +171,12 @@ fn opd_starts(image: &[u8]) -> Result<(Vec<u32>, Source), Error> {
     if opd.size % 8 != 0 {
         return Err(Error::new(format!(".opd size 0x{:x} is not a multiple of 8-byte descriptors", opd.size)));
     }
+    Ok(opd)
+}
+
+fn opd_starts(image: &[u8]) -> Result<(Vec<u32>, Source), Error> {
+    let (entry, secs) = elf_sections(image)?;
+    let opd = opd_section(entry, &secs)?;
     let table = image
         .get(opd.offset as usize..(opd.offset + opd.size) as usize)
         .ok_or_else(|| Error::new(".opd runs past the file"))?;
