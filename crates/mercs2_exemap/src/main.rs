@@ -10,7 +10,7 @@
 //! exemap rtti <image> --out <tsv>
 //! exemap luareg <image> --out <tsv>
 //! exemap corpus-derive <corpus_id> <wad> --from <container> --work <dir> [--wine <wine64>]
-//! exemap lua-scripts <wad>
+//! exemap lua-scripts <wad> [--dump <dir>]
 //! exemap match <image_a> <image_b> --exports <dir> --evidence <list> --out <tsv> --conflicts <tsv>
 //! ```
 //!
@@ -102,7 +102,12 @@ enum Command {
     },
     /// List every Lua script container of a WAD (PC, Xbox 360 or PS3): block, entry, name hash and
     /// each descriptor's tag and size, one row per container.
-    LuaScripts { wad: PathBuf },
+    LuaScripts {
+        wad: PathBuf,
+        /// Also write each descriptor body to `<dir>/<block>_<entry>_<name_hash>.<tag>`.
+        #[arg(long)]
+        dump: Option<PathBuf>,
+    },
     /// Match the functions of two images.tsv images from their exports (<id>.rtti.tsv,
     /// <id>.luareg.tsv and, for bytes/string/callee evidence, <id>.fnsig.json).
     Match {
@@ -306,18 +311,74 @@ fn run(cli: Cli) -> Result<(), ExitCode> {
             println!("wad        {corpus_id} {wad} -> {}", path.display());
             println!("sha256     {}", w.sha256);
         }
-        Command::LuaScripts { wad } => {
+        Command::LuaScripts { wad, dump } => {
             let ws = mercs2_exemap::wadscripts::scripts(&wad).map_err(|e| {
                 eprintln!("error: {e}");
                 ExitCode::from(1)
             })?;
-            println!("block\tentry\tname_hash\tblock_path\tchunks");
+            if let Some(dir) = &dump {
+                std::fs::create_dir_all(dir).map_err(|e| {
+                    eprintln!("error: create {}: {e}", dir.display());
+                    ExitCode::from(2)
+                })?;
+                for s in &ws.scripts {
+                    for c in &s.chunks {
+                        let name = format!("{}_{}_{:08x}.{}", s.block, s.entry, s.name_hash, String::from_utf8_lossy(&c.tag));
+                        write(&dir.join(name), &c.body)?;
+                    }
+                }
+            }
+            use mercs2_exemap::luachunk::{decode, decode_info, encode, Proto};
+            fn walk(p: &Proto, f: &mut impl FnMut(&Proto)) {
+                f(p);
+                for q in &p.protos {
+                    walk(q, f);
+                }
+            }
+            println!("block\tentry\tname_hash\tname\tfunctions\tinstructions\tdebug\tblock_path\tchunks");
+            let (mut functions_total, mut instructions_total) = (0usize, 0usize);
             for s in &ws.scripts {
+                let what = format!("block {} entry {} (0x{:08x})", s.block, s.entry, s.name_hash);
+                let fail = |m: String| {
+                    eprintln!("error: {what}: {m}");
+                    ExitCode::from(1)
+                };
+                let info = s.chunk(b"INFO").ok_or_else(|| fail("no INFO descriptor".into()))?;
+                let info = decode_info(info, ws.endian).map_err(|e| fail(e.to_string()))?;
+                let binn = s.chunk(b"BINN").ok_or_else(|| fail("no BINN descriptor".into()))?;
+                let chunk = decode(binn).map_err(|e| fail(e.to_string()))?;
+                if chunk.endian != ws.endian {
+                    return Err(fail(format!("a {:?} chunk in a {:?} WAD", chunk.endian, ws.endian)));
+                }
+                if encode(&chunk) != binn {
+                    return Err(fail("the decoded chunk does not re-encode to its bytes".into()));
+                }
+                let (mut functions, mut instructions, mut debug) = (0usize, 0usize, false);
+                walk(&chunk.main, &mut |p| {
+                    functions += 1;
+                    instructions += p.code.len();
+                    debug |= p.source.is_some() || !p.line_info.is_empty() || !p.loc_vars.is_empty() || !p.upvalues.is_empty();
+                });
+                functions_total += functions;
+                instructions_total += instructions;
                 let chunks: Vec<String> =
                     s.chunks.iter().map(|c| format!("{}:{}", String::from_utf8_lossy(&c.tag), c.body.len())).collect();
-                println!("{}\t{}\t0x{:08x}\t{}\t{}", s.block, s.entry, s.name_hash, s.block_path, chunks.join(","));
+                println!(
+                    "{}\t{}\t0x{:08x}\t{}\t{functions}\t{instructions}\t{}\t{}\t{}",
+                    s.block,
+                    s.entry,
+                    s.name_hash,
+                    info.name,
+                    if debug { "yes" } else { "stripped" },
+                    s.block_path,
+                    chunks.join(",")
+                );
             }
-            eprintln!("scripts    {} ({:?})", ws.scripts.len(), ws.endian);
+            eprintln!(
+                "scripts    {} ({:?}), {functions_total} functions, {instructions_total} instructions, every chunk decoded and re-encoded byte for byte",
+                ws.scripts.len(),
+                ws.endian
+            );
         }
         Command::Match { image_a, image_b, exports, evidence, out, conflicts } => {
             use mercs2_exemap::matcher::{match_images, Evidence, Exports};
