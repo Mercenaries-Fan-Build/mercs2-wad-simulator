@@ -15,6 +15,8 @@
 //! exemap lua-pair <a.tsv> <b.tsv> --out <tsv>
 //! exemap lua-link <index.tsv> <image.luareg.tsv> --out <tsv>
 //! exemap match <image_a> <image_b> --exports <dir> --evidence <list> --out <tsv> --conflicts <tsv>
+//! exemap translate <image> <address> --to <image> --matches <dir>
+//! exemap coverage --matches <dir> --out <tsv> --contradictions <tsv>
 //! ```
 //!
 //! Exit status: 0 on success; 1 on an unknown build, an unexpected difference, or an input the
@@ -150,6 +152,27 @@ enum Command {
         out: PathBuf,
         #[arg(long)]
         conflicts: PathBuf,
+    },
+    /// Translate a function address of one image to another along every path of the match graph
+    /// (a directory of `match` outputs); fails when the paths disagree or none answers.
+    Translate {
+        image: String,
+        /// 0x-prefixed hex function address in `image`.
+        address: String,
+        #[arg(long)]
+        to: String,
+        #[arg(long)]
+        matches: PathBuf,
+    },
+    /// Translate every function of every image in the match graph to every other image: counts per
+    /// image pair, and every contradiction; fails when there is a contradiction.
+    Coverage {
+        #[arg(long)]
+        matches: PathBuf,
+        #[arg(long)]
+        out: PathBuf,
+        #[arg(long)]
+        contradictions: PathBuf,
     },
 }
 
@@ -564,6 +587,102 @@ fn run(cli: Cli) -> Result<(), ExitCode> {
                         an.image_a, an.va_a, an.image_b, an.va_b, an.verified_by, p.a, p.b
                     );
                 }
+                return Err(ExitCode::from(1));
+            }
+        }
+        Command::Translate { image, address, to, matches } => {
+            use mercs2_exemap::xmap::{load_dir, parse_address, path_str, Graph, Verdict, Walk};
+            let fail = |e: mercs2_exemap::Error| {
+                eprintln!("error: {e}");
+                ExitCode::from(1)
+            };
+            let images = mercs2_exemap::images::Images::embedded(&catalogue).map_err(fail)?;
+            for id in [&image, &to] {
+                if images.image(id).is_none() {
+                    eprintln!("error: images.tsv has no image {id}");
+                    return Err(ExitCode::from(1));
+                }
+            }
+            if image == to {
+                eprintln!("error: {image} is both the source and the target image");
+                return Err(ExitCode::from(1));
+            }
+            let f = parse_address(&address).map_err(fail)?;
+            let dir = load_dir(&matches, &images).map_err(fail)?;
+            let g = Graph::new(&dir.pairs).map_err(fail)?;
+            let t = g.translate(&image, f, &to);
+            for (p, w) in &t.paths {
+                match w {
+                    Walk::Answer(r) => println!("path       {:<70} 0x{r:08x}", path_str(p)),
+                    Walk::Stops { at, function } => println!(
+                        "path       {:<70} stops: {} 0x{function:08x} has no pair with {}",
+                        path_str(p),
+                        p[*at],
+                        p[*at + 1]
+                    ),
+                }
+            }
+            match t.verdict() {
+                Verdict::Agreed(r) => {
+                    let answering = t.paths.iter().filter(|(_, w)| matches!(w, Walk::Answer(_))).count();
+                    println!("{to} 0x{r:08x} ({answering} of {} paths answer, all agree)", t.paths.len());
+                }
+                Verdict::NoPath => {
+                    eprintln!("error: {image} 0x{f:08x} is untranslatable: the match graph has no path from {image} to {to}");
+                    return Err(ExitCode::from(1));
+                }
+                Verdict::Untranslated => {
+                    eprintln!("error: {image} 0x{f:08x} is untranslatable: every one of the {} paths to {to} stops", t.paths.len());
+                    return Err(ExitCode::from(1));
+                }
+                Verdict::Contradicted(answers) => {
+                    eprintln!("error: {image} 0x{f:08x} -> {to}: the paths disagree");
+                    for (r, idx) in &answers {
+                        let ps: Vec<String> = idx.iter().map(|i| path_str(&t.paths[*i].0)).collect();
+                        eprintln!("  0x{r:08x} via {}", ps.join(", "));
+                    }
+                    return Err(ExitCode::from(1));
+                }
+            }
+        }
+        Command::Coverage { matches, out, contradictions } => {
+            use mercs2_exemap::xmap::{load_dir, Graph, CONTRADICTIONS_HEADER, COVERAGE_HEADER};
+            let fail = |e: mercs2_exemap::Error| {
+                eprintln!("error: {e}");
+                ExitCode::from(1)
+            };
+            let images = mercs2_exemap::images::Images::embedded(&catalogue).map_err(fail)?;
+            let dir = load_dir(&matches, &images).map_err(fail)?;
+            let g = Graph::new(&dir.pairs).map_err(fail)?;
+            let (rows, cs) = g.coverage();
+            let mut text = format!("{COVERAGE_HEADER}\n");
+            for r in &rows {
+                text.push_str(&r.tsv());
+                text.push('\n');
+            }
+            write(&out, text.as_bytes())?;
+            let mut ctext = format!("{CONTRADICTIONS_HEADER}\n");
+            for c in &cs {
+                ctext.push_str(&c.tsv());
+                ctext.push('\n');
+            }
+            write(&contradictions, ctext.as_bytes())?;
+            println!(
+                "graph      {} images, {} pairs files ({} conflicts files not read: they name no images)",
+                g.images().count(),
+                dir.pairs.len(),
+                dir.conflicts_files
+            );
+            for r in &rows {
+                println!(
+                    "{:<22} -> {:<22} {:>6} functions: {:>6} translated ({:>6} direct, {:>6} confirmed by a composed path, {:>6} composed only), {:>4} contradicted ({:>4} against a direct pair), {:>6} untranslated",
+                    r.image, r.to, r.functions, r.translated, r.direct, r.direct_confirmed, r.composed_only, r.contradicted, r.contradicted_direct, r.untranslated
+                );
+            }
+            println!("coverage   -> {}", out.display());
+            println!("contradictions {} -> {}", cs.len(), contradictions.display());
+            if !cs.is_empty() {
+                eprintln!("error: {} translations are contradicted by the match graph", cs.len());
                 return Err(ExitCode::from(1));
             }
         }
