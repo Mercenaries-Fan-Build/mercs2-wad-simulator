@@ -96,7 +96,10 @@ offset, slot index, function address): MSVC locators in the PC and Xbox 360 PEs 
 GCC/Itanium typeinfo in the PS3 ELFs, where each slot is an `.opd` descriptor resolved to its code.
 The PC and Xbox images carry type information for about 270 classes (mostly Havok); the PS3 images
 for about 1,290, game classes included. Xbox 360 `.pdata` omits leaf functions, so about half of
-the Xbox slots point at functions that have no `.pdata` entry.
+the Xbox slots point at functions that have no `.pdata` entry. Each MSVC row also names its vtable's
+destructor slot, the one slot whose function tests the deleting-destructor flag (PowerPC: `r4 & 1`;
+x86: the first stack argument `& 1`, followed through the stack depth); GCC gives that destructor
+two slots, so a PS3 vtable of the same class has one slot more.
 
 `exemap luareg <image> --out <tsv>` recovers the Lua C-function registration tables (`luaL_Reg`
 arrays of `{name, function}` ended by `{NULL, NULL}`) and writes one row per entry. The game's
@@ -110,7 +113,9 @@ another way, so their game tables carry no namespace.
 pairs the functions of two `images.tsv` images from their exports in `<dir>` (`<id>.rtti.tsv`,
 `<id>.luareg.tsv`, and `<id>.fnsig.json` from `FnMnemonicSig.java` for the signature evidence).
 Every rule is an identity or uniqueness test: `vtable` (same class, vtable ordinal and slot, only
-where both images give the class the same vtable and slot counts), `lua` (same namespace and
+where both images give the class the same vtable count and each vtable pair the same slot count, or
+an MSVC vtable with a recognised destructor slot against a GCC one with one slot more, aligned
+around the destructor, which itself stays unpaired), `lua` (same namespace and
 binding, or a binding name unique in each image), `bytes` (a masked-bytes hash unique in each
 image), `string` (a string referenced by exactly one function in each image) and `callee`
 (positional callees of accepted pairs whose call lists agree with every accepted pair). `bytes`
