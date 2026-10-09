@@ -3140,8 +3140,8 @@ pub fn gfx_extract(wadpath: &str, outdir: &str) -> Result<(), String> {
 /// Vegetation census (foliage instancing, `docs/reverse_engineer/foliage_instancing_plan.md`). Classifies every named `layers_static`
 /// placement with `mercs2_formats::veg`, then reports: coverage %, per-class + per-species counts,
 /// name-hash resolution, and a coarse 500 m XZ density grid (the "treed areas" for the density
-/// stretch goal). Emits the `pandemic_hash_m2` tag-set to `output/foliage/veg_tagset.json`.
-pub fn veg_census(wadpath: &str) {
+/// stretch goal). Emits the `pandemic_hash_m2` tag-set JSON to `out_path`.
+pub fn veg_census(wadpath: &str, out_path: &str) {
     use mercs2_formats::veg::{classify, VegClass};
     use std::collections::{HashMap, HashSet};
 
@@ -3244,7 +3244,6 @@ pub fn veg_census(wadpath: &str) {
     }
 
     // Emit the tag-set JSON (the instancing pass consumes this: name -> {hash, class, count, imposter, resolves}).
-    let out_path = "c:/Users/Shadow/Desktop/notes-on-the-released-game/output/foliage/veg_tagset.json";
     let n_species = species.len();
     let mut json = String::new();
     json.push_str("{\n");
@@ -3277,9 +3276,9 @@ pub fn veg_census(wadpath: &str) {
 /// c3 cells, resolves each cell's model hashes to names (rainbow table), keeps the vegetation ones
 /// (`mercs2_formats::veg`), and reports the real tree count by species/region — counting instances at
 /// the near (P000) tier only so LOD variants aren't double-counted — plus how many cells also carry
-/// coarse imposter tiers (the resident-horizon potential). Emits per-instance transforms to
-/// `output/foliage/tree_instances.json`.
-pub fn tree_census(wadpath: &str) -> Result<(), String> {
+/// coarse imposter tiers (the resident-horizon potential). Emits per-instance transforms as JSON to
+/// `out_path`.
+pub fn tree_census(wadpath: &str, out_path: &str) -> Result<(), String> {
     use mercs2_formats::veg::{classify, VegClass};
     use mercs2_formats::world_index::{c3_cell_centre, BlockClass, WorldIndex};
     use std::collections::{BTreeSet, HashMap, HashSet};
@@ -3436,7 +3435,6 @@ pub fn tree_census(wadpath: &str) -> Result<(), String> {
     }
 
     // Emit per-instance transforms (the instancing pass consumes this).
-    let out_path = "c:/Users/Shadow/Desktop/notes-on-the-released-game/output/foliage/tree_instances.json";
     let mut json = String::new();
     json.push_str("{\n");
     json.push_str(&format!(
