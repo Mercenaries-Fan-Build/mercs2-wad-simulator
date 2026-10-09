@@ -1,3 +1,4 @@
 corpus_id	product	platform	build	applies_to	description
 base-pc-demo	demo	pc	2008-09-13		The public PC demo: Mercs2_Demo_Setup.zip (Sep 2008), a RAR self-extracting installer whose data folder holds the demo WADs
-base-pc-retail	base	pc	retail (1.0 and 1.1 share these WADs; the v1.1 patch changes only the executable)		The canonical clean install: the archive.org PC installer ISO run once per language, English last, installing the unwrapped v1.1 executable v11-official-unwrapped
+base-pc-elamigos	base	pc	ElAmigos repack (not official media)		The ElAmigos repack (Inno Setup installer over FreeArc archives, hosted on archive.org), installed once per language with English last: all five language WADs, and the unwrapped v1.1 executable v11-official-unwrapped
+base-pc-retail	base	pc	retail (1.0 and 1.1 share these WADs; the v1.1 patch changes only the executable)		The official PC release as EA's download manager installs it (English only), with the official SecuROM v1.1 executable v11-official-securom
