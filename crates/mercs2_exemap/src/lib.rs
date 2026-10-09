@@ -33,13 +33,15 @@
 //! [`matcher`] pairs the functions of two images from those exports.
 //!
 //! `data/corpora.tsv` and `data/wads.tsv` catalogue the Lua corpus by product, platform and build,
-//! each WAD with the chain that rebuilds it from its original file ([`corpus`]).
+//! each WAD with the chain that rebuilds it from its original file ([`corpus`]); PS3 disc images are
+//! read through [`iso9660`].
 
 pub mod catalogue;
 pub mod corpus;
 mod dtor;
 pub mod image;
 pub mod images;
+pub mod iso9660;
 pub mod luareg;
 pub mod matcher;
 pub mod membership;
