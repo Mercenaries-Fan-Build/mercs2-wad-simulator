@@ -223,19 +223,20 @@ fn run(cli: Cli) -> Result<(), ExitCode> {
                 eprintln!("error: {}: {e}", image.display());
                 ExitCode::from(1)
             })?;
-            let mut text = String::from("abi\traw_name\tclass\tvtable\tsubobject_offset\tslot\tfunction\n");
+            let mut text = String::from("abi\traw_name\tclass\tvtable\tsubobject_offset\tslot\tfunction\tdeleting_destructor\n");
             let mut slots = 0usize;
             for v in &vts {
                 for (i, f) in v.slots.iter().enumerate() {
                     text.push_str(&format!(
-                        "{}\t{}\t{}\t0x{:08x}\t{}\t{}\t0x{:08x}\n",
+                        "{}\t{}\t{}\t0x{:08x}\t{}\t{}\t0x{:08x}\t{}\n",
                         v.abi.as_str(),
                         v.raw_name,
                         v.class.as_deref().unwrap_or(""),
                         v.va,
                         v.subobject_offset,
                         i,
-                        f
+                        f,
+                        v.deleting_destructor.map(|k| k.to_string()).unwrap_or_default()
                     ));
                     slots += 1;
                 }
