@@ -106,6 +106,18 @@ registry row: the PC images name 31 namespaces holding 1,081 bindings, the Xbox 
 retail images 30. The Xbox 360 Profile image and the PS3 images register their game namespaces
 another way, so their game tables carry no namespace.
 
+`exemap match <image_a> <image_b> --exports <dir> --evidence <list> --out <tsv> --conflicts <tsv>`
+pairs the functions of two `images.tsv` images from their exports in `<dir>` (`<id>.rtti.tsv`,
+`<id>.luareg.tsv`, and `<id>.fnsig.json` from `FnMnemonicSig.java` for the signature evidence).
+Every rule is an identity or uniqueness test: `vtable` (same class, vtable ordinal and slot, only
+where both images give the class the same vtable and slot counts), `lua` (same namespace and
+binding, or a binding name unique in each image), `bytes` (a masked-bytes hash unique in each
+image), `string` (a string referenced by exactly one function in each image) and `callee`
+(positional callees of accepted pairs whose call lists agree with every accepted pair). `bytes`
+and `callee` apply only between images analysed with the same Ghidra language: across compilers,
+inlining shifts call lists. A pair is accepted only when neither function has another candidate;
+every other candidate is written to the conflicts file, unresolved.
+
 ```bash
 exemap derive x360-profile --from "Mercenaries 2 Preview X360 (Jul 11 2008).iso" --out profile.pe_ghidra
 exemap derive ps3-v103-na --from "UP0006-BLUS30056_00-MERCS2PATCHNA103-A0103-V0100-PE.pkg" --out eboot103.elf
