@@ -7,6 +7,7 @@
 //! exemap ghidra-pe <pe> --out <pe>
 //! exemap starts <image> --out <list>
 //! exemap derive <image_id> --from <container> --out <image>
+//! exemap rtti <image> --out <tsv>
 //! ```
 //!
 //! Exit status: 0 on success; 1 on an unknown build, an unexpected difference, or an input the
@@ -65,6 +66,13 @@ enum Command {
         /// The first file of the image's chain: a disc image, XEX, SELF or PSN package.
         #[arg(long)]
         from: PathBuf,
+        #[arg(long)]
+        out: PathBuf,
+    },
+    /// Write the vtables recovered from the image's C++ type information (MSVC or Itanium), one
+    /// row per slot.
+    Rtti {
+        image: PathBuf,
         #[arg(long)]
         out: PathBuf,
     },
@@ -185,6 +193,33 @@ fn run(cli: Cli) -> Result<(), ExitCode> {
             write(&out, &bytes)?;
             println!("image      {} ({} bytes) -> {}", image.id, bytes.len(), out.display());
             println!("sha256     {}", image.sha256);
+        }
+        Command::Rtti { image, out } => {
+            let bytes = read(&image)?;
+            let vts = mercs2_exemap::rtti::vtables(&bytes).map_err(|e| {
+                eprintln!("error: {}: {e}", image.display());
+                ExitCode::from(1)
+            })?;
+            let mut text = String::from("abi\traw_name\tclass\tvtable\tsubobject_offset\tslot\tfunction\n");
+            let mut slots = 0usize;
+            for v in &vts {
+                for (i, f) in v.slots.iter().enumerate() {
+                    text.push_str(&format!(
+                        "{}\t{}\t{}\t0x{:08x}\t{}\t{}\t0x{:08x}\n",
+                        v.abi.as_str(),
+                        v.raw_name,
+                        v.class.as_deref().unwrap_or(""),
+                        v.va,
+                        v.subobject_offset,
+                        i,
+                        f
+                    ));
+                    slots += 1;
+                }
+            }
+            write(&out, text.as_bytes())?;
+            let classes: std::collections::BTreeSet<&str> = vts.iter().map(|v| v.raw_name.as_str()).collect();
+            println!("vtables    {} ({} classes, {} slots) -> {}", vts.len(), classes.len(), slots, out.display());
         }
     }
     Ok(())
