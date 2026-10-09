@@ -416,7 +416,7 @@ fn main() {
         },
         "placement-names" => diag::placement_names(&wadpath),
         "veg-census" => match first_positional(&args) {
-            Some(out) => diag::veg_census(&wadpath, &out),
+            Some(out) => run(diag::veg_census(&wadpath, &out)),
             None => {
                 eprintln!("veg-census: usage: mercs2_probe veg-census <veg_tagset.json>");
                 std::process::exit(2);
