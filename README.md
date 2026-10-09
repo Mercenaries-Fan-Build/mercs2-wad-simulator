@@ -126,7 +126,7 @@ verified by reading both decompiles; `match` reports how the anchors between its
 and fails when an accepted pair contradicts one.
 
 ```bash
-exemap derive x360-profile --from "Mercenaries 2 Preview X360 (Jul 11 2008).iso" --out profile.pe_ghidra
+exemap derive x360-preview-profile --from "Mercenaries 2 Preview X360 (Jul 11 2008).iso" --out profile.pe_ghidra
 exemap derive ps3-v103-na --from "UP0006-BLUS30056_00-MERCS2PATCHNA103-A0103-V0100-PE.pkg" --out eboot103.elf
 ```
 
