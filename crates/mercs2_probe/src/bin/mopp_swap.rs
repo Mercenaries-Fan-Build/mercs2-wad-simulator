@@ -13,12 +13,12 @@
 //!   --block <N>          a different vz.wad block (826 = terrain)
 //!   --mopp <IDX>         a specific hkpMoppCode index within the chosen container
 //!   --body <FILE>        a raw PHY2 body dumped to disk (skips vz.wad)
-//!   --out <DIR>          write the patched bodies here (default: the scratch hunt/mopp dir)
+//!   --out <DIR>          write the patched bodies here (required)
 //!
 //! Usage:
-//!   cargo run -p mercs2_probe --bin mopp_swap
-//!   cargo run -p mercs2_probe --bin mopp_swap -- --block 767 --return-all --out C:/tmp
-//!   cargo run -p mercs2_probe --bin mopp_swap -- --body cell.phy2
+//!   cargo run -p mercs2_probe --bin mopp_swap -- --out out/mopp
+//!   cargo run -p mercs2_probe --bin mopp_swap -- --block 767 --return-all --out out/mopp
+//!   cargo run -p mercs2_probe --bin mopp_swap -- --body cell.phy2 --out out/mopp
 
 use mercs2_formats::ffcs::load_ffcs_archive;
 use mercs2_formats::game_paths;
@@ -168,9 +168,10 @@ fn run_mode(
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
 
-    let out_dir: PathBuf = arg_val(&args, "--out")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("C:/Users/Shadow/AppData/Local/Temp/hunt/mopp"));
+    let Some(out_dir) = arg_val(&args, "--out").map(PathBuf::from) else {
+        eprintln!("mopp_swap: usage: mopp_swap --out <DIR> [--block <N> | --body <FILE>] [--mopp <IDX>] [--identity] [--return-all] [--empty] [--spatial]");
+        std::process::exit(2);
+    };
     let _ = std::fs::create_dir_all(&out_dir);
 
     // Source body.
