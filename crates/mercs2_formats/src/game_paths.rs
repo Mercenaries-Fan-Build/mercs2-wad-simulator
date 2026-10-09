@@ -91,6 +91,12 @@ pub fn vz_wad_from_env() -> Option<PathBuf> {
 ///   installs it. Read only by the exe-map Lua corpus tests ([`local_config_pc_official_install_dir`]).
 /// * `pc_repack_install_dir` — a **directory**: the ElAmigos repack, installed once per language,
 ///   English last. Read only by the exe-map Lua corpus tests ([`local_config_pc_repack_install_dir`]).
+/// * `x360_retail_dir` — a **directory**: the Xbox 360 retail disc dump (JTAG rip). Read only by
+///   the exe-map Lua corpus tests ([`local_config_x360_retail_dir`]).
+/// * `x360_dlc_biua_stfs` — the retail Xbox LIVE Blow It Up Again Pack STFS package. Read only by
+///   the exe-map Lua corpus tests ([`local_config_x360_dlc_biua_stfs`]).
+/// * `x360_dlc_prototypes_dir` — a **directory** of zipped Xbox 360 DLC prototype packages. Read
+///   only by the exe-map Lua corpus tests ([`local_config_x360_dlc_prototypes_dir`]).
 ///
 /// The console keys and the executable keys are never inferred from `vz_wad`'s folder: each lives
 /// wherever it is kept, and a test that needs one fails naming the missing key.
@@ -136,6 +142,12 @@ pub const PC_DEMO_ZIP_KEY: &str = "pc_demo_zip";
 pub const PC_OFFICIAL_INSTALL_DIR_KEY: &str = "pc_official_install_dir";
 /// The `pc_repack_install_dir` key of [`LOCAL_CONFIG`]: the ElAmigos repack install.
 pub const PC_REPACK_INSTALL_DIR_KEY: &str = "pc_repack_install_dir";
+/// The `x360_retail_dir` key of [`LOCAL_CONFIG`]: the Xbox 360 retail disc dump.
+pub const X360_RETAIL_DIR_KEY: &str = "x360_retail_dir";
+/// The `x360_dlc_biua_stfs` key of [`LOCAL_CONFIG`]: the retail Blow It Up Again Pack package.
+pub const X360_DLC_BIUA_STFS_KEY: &str = "x360_dlc_biua_stfs";
+/// The `x360_dlc_prototypes_dir` key of [`LOCAL_CONFIG`]: a directory of zipped DLC prototypes.
+pub const X360_DLC_PROTOTYPES_DIR_KEY: &str = "x360_dlc_prototypes_dir";
 
 /// The `<key> = "…"` value in one [`LOCAL_CONFIG`]'s text, or `None` when the key is absent.
 ///
@@ -351,6 +363,42 @@ pub fn local_config_pc_repack_install_dir(start: &Path) -> Result<PathBuf, Strin
         PC_REPACK_INSTALL_DIR_KEY,
         Want::Dir,
         "write `pc_repack_install_dir = \"/path/to/Mercenaries 2 World in Flames\"` into it by hand",
+    )
+}
+
+/// The Xbox 360 retail disc dump for a **game-gated test**: `x360_retail_dir` in the nearest
+/// [`LOCAL_CONFIG`].
+///
+/// Same rules and the same three distinct errors as [`local_config_vz_wad`], except that the path
+/// must be a directory. No script writes this key.
+pub fn local_config_x360_retail_dir(start: &Path) -> Result<PathBuf, String> {
+    local_config_path(start, X360_RETAIL_DIR_KEY, Want::Dir, "write `x360_retail_dir = \"/path/to/JTAGRip\"` into it by hand")
+}
+
+/// The retail Blow It Up Again Pack package for a **game-gated test**: `x360_dlc_biua_stfs` in the
+/// nearest [`LOCAL_CONFIG`].
+///
+/// Same rules and the same three distinct errors as [`local_config_vz_wad`]. No script writes this
+/// key.
+pub fn local_config_x360_dlc_biua_stfs(start: &Path) -> Result<PathBuf, String> {
+    local_config_file(
+        start,
+        X360_DLC_BIUA_STFS_KEY,
+        "write `x360_dlc_biua_stfs = \"/path/to/45410828/00000002/<package>\"` into it by hand",
+    )
+}
+
+/// The zipped Xbox 360 DLC prototypes for a **game-gated test**: `x360_dlc_prototypes_dir` in the
+/// nearest [`LOCAL_CONFIG`].
+///
+/// Same rules and the same three distinct errors as [`local_config_vz_wad`], except that the path
+/// must be a directory. No script writes this key.
+pub fn local_config_x360_dlc_prototypes_dir(start: &Path) -> Result<PathBuf, String> {
+    local_config_path(
+        start,
+        X360_DLC_PROTOTYPES_DIR_KEY,
+        Want::Dir,
+        "write `x360_dlc_prototypes_dir = \"/path/to/DLC prototypes\"` into it by hand",
     )
 }
 
@@ -741,7 +789,20 @@ mod tests {
         assert!(e.contains("has no `pc_repack_install_dir` key"), "{e}");
         std::fs::write(&config, format!("pc_official_install_dir = \"{}\"\npc_repack_install_dir = \"{}\"\n", pkgs.display(), pkgs.display())).unwrap();
         assert_eq!(local_config_pc_official_install_dir(&deep), Ok(pkgs.clone()));
-        assert_eq!(local_config_pc_repack_install_dir(&deep), Ok(pkgs));
+        assert_eq!(local_config_pc_repack_install_dir(&deep), Ok(pkgs.clone()));
+        std::fs::write(
+            &config,
+            format!(
+                "x360_retail_dir = \"{}\"\nx360_dlc_biua_stfs = \"{}\"\nx360_dlc_prototypes_dir = \"{}\"\n",
+                pkgs.display(),
+                pkgs.display(),
+                pkgs.display()
+            ),
+        )
+        .unwrap();
+        assert_eq!(local_config_x360_retail_dir(&deep), Ok(pkgs.clone()));
+        assert!(local_config_x360_dlc_biua_stfs(&deep).unwrap_err().contains("which is not a file"));
+        assert_eq!(local_config_x360_dlc_prototypes_dir(&deep), Ok(pkgs));
 
         std::fs::remove_dir_all(&root).ok();
     }
