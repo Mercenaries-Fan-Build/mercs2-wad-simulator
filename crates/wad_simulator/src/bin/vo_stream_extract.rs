@@ -66,9 +66,9 @@ const VO_BANKS: &[&str] = &[
 
 #[derive(Parser)]
 struct Cli {
-    #[arg(long, default_value = r"C:\Users\Shadow\Desktop\Mercenaries 2 World in Flames\data\English.wad")]
+    #[arg(long)]
     wad: PathBuf,
-    #[arg(long, default_value = r"C:\Users\Shadow\Desktop\Mercenaries 2 World in Flames\data\Audios\vo_stream.english.pws")]
+    #[arg(long)]
     pws: PathBuf,
     #[arg(long, default_value = "output/vo_stream")]
     out: PathBuf,
