@@ -2,7 +2,8 @@
 //!
 //! Port of the STFS half of `tools/x360_dlc_io.py` (py360-derived block
 //! mapping). Walks the interleaved hash-table/data-block layout to read logical
-//! file data (here: the DLC `.doh`). RAR extraction shells out to `UnRAR.exe`,
+//! file data (here: the DLC `.doh`). RAR extraction shells out to the extractor
+//! the caller names ([`RarExtractor`]: `UnRAR.exe` or `bsdtar` at an explicit path),
 //! mirroring the ffmpeg/java subprocess pattern elsewhere in this workspace.
 
 use std::path::{Path, PathBuf};
@@ -277,46 +278,54 @@ impl StfsReader {
     }
 }
 
-fn find_unrar() -> Option<PathBuf> {
-    if let Ok(p) = std::env::var("UNRAR") {
-        let pb = PathBuf::from(p);
-        if pb.exists() {
-            return Some(pb);
-        }
-    }
-    // tools/unrar/UnRAR.exe relative to this crate.
-    let rel = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../unrar/UnRAR.exe");
-    if rel.exists() {
-        return Some(rel);
-    }
-    None
+/// The program that unpacks a RAR'd DLC download, with the path of its executable. The caller
+/// names both; [`extract_stfs_from_rar`] runs exactly that program.
+#[derive(Clone, Debug)]
+pub enum RarExtractor {
+    /// `UnRAR.exe`, run as `<path> x -o+ -y <rar> <out_dir>\`.
+    UnRar(PathBuf),
+    /// `bsdtar`, run as `<path> -xf <rar> -C <out_dir>`.
+    Bsdtar(PathBuf),
 }
 
 /// Extract an STFS container from a RAR archive and return a reader.
 ///
-/// Uses `UnRAR.exe` when available (Windows), else `bsdtar`/`tar`. Picks the
-/// largest extracted file whose magic is LIVE/PIRS/CON.
-pub fn extract_stfs_from_rar(rar_path: &Path, work_dir: &Path) -> Result<StfsReader, String> {
+/// Runs `extractor` into `work_dir/stfs`, then picks the largest extracted file whose magic is
+/// LIVE/PIRS/CON. Errors when the extractor's path is not a file or the program cannot be run.
+pub fn extract_stfs_from_rar(
+    rar_path: &Path,
+    work_dir: &Path,
+    extractor: &RarExtractor,
+) -> Result<StfsReader, String> {
     let stfs_dir = work_dir.join("stfs");
     std::fs::create_dir_all(&stfs_dir).map_err(|e| format!("mkdir: {e}"))?;
 
-    let status = if let Some(unrar) = find_unrar() {
-        Command::new(unrar)
-            .arg("x")
-            .arg("-o+")
-            .arg("-y")
-            .arg(rar_path)
-            .arg(format!("{}\\", stfs_dir.display()))
-            .output()
-            .map_err(|e| format!("UnRAR spawn failed: {e}"))?
-    } else {
-        Command::new("bsdtar")
-            .arg("-xf")
-            .arg(rar_path)
-            .arg("-C")
-            .arg(&stfs_dir)
-            .output()
-            .map_err(|e| format!("bsdtar spawn failed: {e}"))?
+    let status = match extractor {
+        RarExtractor::UnRar(unrar) => {
+            if !unrar.is_file() {
+                return Err(format!("UnRAR executable {} is not a file", unrar.display()));
+            }
+            Command::new(unrar)
+                .arg("x")
+                .arg("-o+")
+                .arg("-y")
+                .arg(rar_path)
+                .arg(format!("{}\\", stfs_dir.display()))
+                .output()
+                .map_err(|e| format!("UnRAR {} spawn failed: {e}", unrar.display()))?
+        }
+        RarExtractor::Bsdtar(bsdtar) => {
+            if !bsdtar.is_file() {
+                return Err(format!("bsdtar executable {} is not a file", bsdtar.display()));
+            }
+            Command::new(bsdtar)
+                .arg("-xf")
+                .arg(rar_path)
+                .arg("-C")
+                .arg(&stfs_dir)
+                .output()
+                .map_err(|e| format!("bsdtar {} spawn failed: {e}", bsdtar.display()))?
+        }
     };
     if !status.status.success() {
         return Err(format!(
