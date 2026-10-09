@@ -6,7 +6,7 @@
 //!
 //! | evidence | rule |
 //! |---|---|
-//! | `vtable` | the same class (`Foo::Bar`, or the decorated name when the ABIs agree), the same vtable ordinal within the class, the same slot — used only when the class has as many vtables, and the vtable as many slots, in both images |
+//! | `vtable` | the same class (`Foo::Bar`, or the decorated name when the ABIs agree), the same vtable ordinal within the class, the same slot — used only when the class has as many vtables in both images, and each vtable pair either has as many slots, or is an MSVC vtable with a recognised destructor slot `k` against an Itanium vtable with one slot more: MSVC slot `i < k` pairs with Itanium slot `i`, `i > k` with `i + 1`, and the destructor itself (one MSVC slot for two Itanium ones) is not paired |
 //! | `lua` | the same Lua binding: the same namespace and name when both tables are named, or a name that occurs once among all bindings of each image |
 //! | `bytes` | the same masked-bytes hash (`mhash`), occurring once in each image (same Ghidra language only) |
 //! | `string` | the same referenced string, referenced by exactly one function in each image |
@@ -59,12 +59,15 @@ impl Evidence {
 /// One `exemap rtti` row.
 #[derive(Clone, Debug)]
 pub struct VtableSlot {
+    pub abi: crate::rtti::Abi,
     pub raw_name: String,
     pub class: String,
     pub vtable: u32,
     pub subobject_offset: i64,
     pub slot: usize,
     pub function: u32,
+    /// The vtable's MSVC deleting-destructor slot, when recognised.
+    pub deleting_destructor: Option<usize>,
 }
 
 /// One `exemap luareg` row.
@@ -122,14 +125,28 @@ impl Exports {
     /// `<dir>/<id>.fnsig.json`. A missing file is an error naming it.
     pub fn load(dir: &Path, id: &str, signatures: bool) -> Result<Exports, Error> {
         let mut vtables = Vec::new();
-        for f in tsv(&dir.join(format!("{id}.rtti.tsv")), "abi\traw_name\tclass\tvtable\tsubobject_offset\tslot\tfunction")? {
+        for f in tsv(
+            &dir.join(format!("{id}.rtti.tsv")),
+            "abi\traw_name\tclass\tvtable\tsubobject_offset\tslot\tfunction\tdeleting_destructor",
+        )? {
+            let abi = match f[0].as_str() {
+                "msvc" => crate::rtti::Abi::Msvc,
+                "itanium" => crate::rtti::Abi::Itanium,
+                other => return Err(Error::new(format!("rtti abi {other:?} is neither msvc nor itanium"))),
+            };
             vtables.push(VtableSlot {
+                abi,
                 raw_name: f[1].clone(),
                 class: f[2].clone(),
                 vtable: hex32(&f[3], "vtable")?,
                 subobject_offset: f[4].parse().map_err(|e| Error::new(format!("subobject_offset {:?}: {e}", f[4])))?,
                 slot: f[5].parse().map_err(|e| Error::new(format!("slot {:?}: {e}", f[5])))?,
                 function: hex32(&f[6], "function")?,
+                deleting_destructor: if f[7].is_empty() {
+                    None
+                } else {
+                    Some(f[7].parse().map_err(|e| Error::new(format!("deleting_destructor {:?}: {e}", f[7])))?)
+                },
             });
         }
         let mut bindings = Vec::new();
@@ -198,17 +215,45 @@ fn add(c: &mut Candidates, a: u32, b: u32, e: Evidence) -> bool {
     c.entry((a, b)).or_default().insert(e)
 }
 
+/// One vtable of a class: its ABI, MSVC destructor slot, and slot functions.
+struct Vt {
+    abi: crate::rtti::Abi,
+    dtor: Option<usize>,
+    slots: Vec<u32>,
+}
+
+/// Slot index pairs (MSVC or Itanium slot `i` with the other vtable's slot `j`) for two vtables of
+/// the same class, or `None` when their shapes do not determine an alignment.
+fn align(a: &Vt, b: &Vt) -> Option<Vec<(usize, usize)>> {
+    use crate::rtti::Abi;
+    if a.slots.len() == b.slots.len() && a.abi == b.abi {
+        return Some((0..a.slots.len()).map(|i| (i, i)).collect());
+    }
+    let shifted = |m: &Vt, n: &Vt| -> Option<Vec<(usize, usize)>> {
+        let k = m.dtor?;
+        if m.abi != Abi::Msvc || n.abi != Abi::Itanium || n.slots.len() != m.slots.len() + 1 {
+            return None;
+        }
+        Some((0..m.slots.len()).filter(|i| *i != k).map(|i| (i, if i < k { i } else { i + 1 })).collect())
+    };
+    if let Some(v) = shifted(a, b) {
+        return Some(v);
+    }
+    shifted(b, a).map(|v| v.into_iter().map(|(i, j)| (j, i)).collect())
+}
+
 fn vtable_candidates(a: &Exports, b: &Exports, c: &mut Candidates) {
-    // class key -> vtables (by subobject offset, then address) -> slots
-    fn index(v: &[VtableSlot]) -> HashMap<String, Vec<Vec<u32>>> {
-        let mut by_class: HashMap<String, BTreeMap<(i64, u32), BTreeMap<usize, u32>>> = HashMap::new();
+    // class key -> vtables (by subobject offset, then address)
+    fn index(v: &[VtableSlot]) -> HashMap<String, Vec<Vt>> {
+        let mut by_class: HashMap<String, BTreeMap<(i64, u32), (crate::rtti::Abi, Option<usize>, BTreeMap<usize, u32>)>> = HashMap::new();
         for s in v {
             let key = if s.class.is_empty() { s.raw_name.clone() } else { s.class.clone() };
-            by_class.entry(key).or_default().entry((s.subobject_offset, s.vtable)).or_default().insert(s.slot, s.function);
+            let e = by_class.entry(key).or_default().entry((s.subobject_offset, s.vtable)).or_insert((s.abi, s.deleting_destructor, BTreeMap::new()));
+            e.2.insert(s.slot, s.function);
         }
         by_class
             .into_iter()
-            .map(|(k, vts)| (k, vts.into_values().map(|slots| slots.into_values().collect()).collect()))
+            .map(|(k, vts)| (k, vts.into_values().map(|(abi, dtor, slots)| Vt { abi, dtor, slots: slots.into_values().collect() }).collect()))
             .collect()
     }
     let ia = index(&a.vtables);
@@ -218,12 +263,10 @@ fn vtable_candidates(a: &Exports, b: &Exports, c: &mut Candidates) {
         if va.len() != vb.len() {
             continue;
         }
-        for (sa, sb) in va.iter().zip(vb) {
-            if sa.len() != sb.len() {
-                continue;
-            }
-            for (fa, fb) in sa.iter().zip(sb) {
-                add(c, *fa, *fb, Evidence::Vtable);
+        for (x, y) in va.iter().zip(vb) {
+            let Some(pairs) = align(x, y) else { continue };
+            for (i, j) in pairs {
+                add(c, x.slots[i], y.slots[j], Evidence::Vtable);
             }
         }
     }
@@ -470,7 +513,16 @@ mod tests {
     }
 
     fn slot(class: &str, vt: u32, off: i64, slot: usize, f: u32) -> VtableSlot {
-        VtableSlot { raw_name: class.into(), class: class.into(), vtable: vt, subobject_offset: off, slot, function: f }
+        VtableSlot {
+            abi: crate::rtti::Abi::Msvc,
+            raw_name: class.into(),
+            class: class.into(),
+            vtable: vt,
+            subobject_offset: off,
+            slot,
+            function: f,
+            deleting_destructor: None,
+        }
     }
 
     #[test]
@@ -483,6 +535,26 @@ mod tests {
         let o = match_images(&a, &b, false, &ev(&[Evidence::Vtable])).unwrap();
         let pairs: Vec<(u32, u32)> = o.pairs.iter().map(|p| (p.a, p.b)).collect();
         assert_eq!(pairs, vec![(10, 20), (11, 21)], "D has 1 slot in a and 2 in b, so it is not used");
+    }
+
+    #[test]
+    fn msvc_and_itanium_vtables_align_around_the_destructor() {
+        use crate::rtti::Abi;
+        let m = |i: usize, f: u32| VtableSlot { deleting_destructor: Some(1), ..slot("C", 1, 0, i, f) };
+        let it = |i: usize, f: u32| VtableSlot { abi: Abi::Itanium, ..slot("C", 9, 0, i, f) };
+        // MSVC [m0, dtor, m2] against Itanium [i0, D1, D0, i2].
+        let a = Exports { vtables: vec![m(0, 10), m(1, 11), m(2, 12)], ..Default::default() };
+        let b = Exports { vtables: vec![it(0, 20), it(1, 21), it(2, 22), it(3, 23)], ..Default::default() };
+        let o = match_images(&a, &b, false, &ev(&[Evidence::Vtable])).unwrap();
+        let pairs: Vec<(u32, u32)> = o.pairs.iter().map(|p| (p.a, p.b)).collect();
+        assert_eq!(pairs, vec![(10, 20), (12, 23)]);
+        // The same pair the other way round.
+        let o = match_images(&b, &a, false, &ev(&[Evidence::Vtable])).unwrap();
+        let pairs: Vec<(u32, u32)> = o.pairs.iter().map(|p| (p.a, p.b)).collect();
+        assert_eq!(pairs, vec![(20, 10), (23, 12)]);
+        // Without a recognised destructor there is no alignment.
+        let a = Exports { vtables: vec![slot("C", 1, 0, 0, 10), slot("C", 1, 0, 1, 11), slot("C", 1, 0, 2, 12)], ..Default::default() };
+        assert!(match_images(&a, &b, false, &ev(&[Evidence::Vtable])).unwrap().pairs.is_empty());
     }
 
     #[test]
