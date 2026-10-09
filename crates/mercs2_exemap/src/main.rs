@@ -8,6 +8,7 @@
 //! exemap starts <image> --out <list>
 //! exemap derive <image_id> --from <container> --out <image>
 //! exemap rtti <image> --out <tsv>
+//! exemap luareg <image> --out <tsv>
 //! ```
 //!
 //! Exit status: 0 on success; 1 on an unknown build, an unexpected difference, or an input the
@@ -72,6 +73,12 @@ enum Command {
     /// Write the vtables recovered from the image's C++ type information (MSVC or Itanium), one
     /// row per slot.
     Rtti {
+        image: PathBuf,
+        #[arg(long)]
+        out: PathBuf,
+    },
+    /// Write the Lua C-function registration tables (luaL_Reg), one row per entry.
+    Luareg {
         image: PathBuf,
         #[arg(long)]
         out: PathBuf,
@@ -220,6 +227,31 @@ fn run(cli: Cli) -> Result<(), ExitCode> {
             write(&out, text.as_bytes())?;
             let classes: std::collections::BTreeSet<&str> = vts.iter().map(|v| v.raw_name.as_str()).collect();
             println!("vtables    {} ({} classes, {} slots) -> {}", vts.len(), classes.len(), slots, out.display());
+        }
+        Command::Luareg { image, out } => {
+            let bytes = read(&image)?;
+            let tables = mercs2_exemap::luareg::tables(&bytes).map_err(|e| {
+                eprintln!("error: {}: {e}", image.display());
+                ExitCode::from(1)
+            })?;
+            let mut text = String::from("table\tnamespace\tindex\tname\tfunction\n");
+            let mut entries = 0usize;
+            for t in &tables {
+                for (i, (name, f)) in t.entries.iter().enumerate() {
+                    text.push_str(&format!(
+                        "0x{:08x}\t{}\t{}\t{}\t0x{:08x}\n",
+                        t.va,
+                        t.namespace.as_deref().unwrap_or(""),
+                        i,
+                        name,
+                        f
+                    ));
+                    entries += 1;
+                }
+            }
+            write(&out, text.as_bytes())?;
+            let named = tables.iter().filter(|t| t.namespace.is_some()).count();
+            println!("tables     {} ({} named by a registry, {} entries) -> {}", tables.len(), named, entries, out.display());
         }
     }
     Ok(())
