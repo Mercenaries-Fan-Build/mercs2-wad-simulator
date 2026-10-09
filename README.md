@@ -90,6 +90,14 @@ regional build whose executable sections and function starts match another image
 names that image as its `code_image` (the PS3 v1.03 EU and DE EBOOTs share the NA code and differ
 only in their embedded region config).
 
+`exemap rtti <image> --out <tsv>` recovers vtables from an image's own C++ type information and
+writes one row per slot (ABI, decorated name, `Foo::Bar` class name, vtable address, subobject
+offset, slot index, function address): MSVC locators in the PC and Xbox 360 PEs (both byte orders),
+GCC/Itanium typeinfo in the PS3 ELFs, where each slot is an `.opd` descriptor resolved to its code.
+The PC and Xbox images carry type information for about 270 classes (mostly Havok); the PS3 images
+for about 1,290, game classes included. Xbox 360 `.pdata` omits leaf functions, so about half of
+the Xbox slots point at functions that have no `.pdata` entry.
+
 ```bash
 exemap derive x360-profile --from "Mercenaries 2 Preview X360 (Jul 11 2008).iso" --out profile.pe_ghidra
 exemap derive ps3-v103-na --from "UP0006-BLUS30056_00-MERCS2PATCHNA103-A0103-V0100-PE.pkg" --out eboot103.elf
