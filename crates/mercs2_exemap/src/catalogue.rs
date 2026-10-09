@@ -20,13 +20,16 @@ const ALIASES_HEADER: &str = "alias\tbuild_id\treason";
 
 /// The game code a build runs. Every build of a layout runs the same code version: `U` is 1.0 and
 /// `E` is 1.1, proven by the official v1.1 patcher turning `v10-unsigned` (U) into
-/// `v11-official-securom` (E).
+/// `v11-official-securom` (E); `D` is the PC demo.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum CodeVersion {
     /// The game as released, version 1.0.
     V1_0,
     /// The game after the official v1.1 patch.
     V1_1,
+    /// The Sep 13 2008 PC demo build (PE timestamp `0x48cb59e8`). How its code relates to 1.0 and
+    /// 1.1 is not established.
+    Demo,
 }
 
 impl CodeVersion {
@@ -34,12 +37,14 @@ impl CodeVersion {
         match self {
             CodeVersion::V1_0 => "1.0",
             CodeVersion::V1_1 => "1.1",
+            CodeVersion::Demo => "demo",
         }
     }
     fn parse(s: &str) -> Option<CodeVersion> {
         match s {
             "1.0" => Some(CodeVersion::V1_0),
             "1.1" => Some(CodeVersion::V1_1),
+            "demo" => Some(CodeVersion::Demo),
             _ => None,
         }
     }
@@ -424,7 +429,7 @@ fn parse_builds(text: &str) -> Result<Vec<Build>, Error> {
             }
         }
         let code_version = CodeVersion::parse(f[6]).ok_or_else(|| {
-            Error::new(format!("{T} line {n}: code_version {:?} is not 1.0 or 1.1", f[6]))
+            Error::new(format!("{T} line {n}: code_version {:?} is not 1.0, 1.1 or demo", f[6]))
         })?;
         let froms: Vec<&str> = if f[7].is_empty() { Vec::new() } else { f[7].split(';').collect() };
         let steps: Vec<&str> = if f[8].is_empty() { Vec::new() } else { f[8].split(';').collect() };
@@ -579,7 +584,7 @@ mod tests {
     fn the_embedded_tables_parse_and_cross_check() {
         let c = Catalogue::embedded().unwrap();
         assert!(!c.builds.is_empty());
-        assert_eq!(c.layouts.len(), 2);
+        assert_eq!(c.layouts.len(), 3);
         for l in &c.layouts {
             let r = c.build_by_sha(&l.reference_sha256).unwrap();
             assert_eq!(r.overlay_set, None);
@@ -608,6 +613,7 @@ mod tests {
             let want = match b.layout.as_str() {
                 "U" => CodeVersion::V1_0,
                 "E" => CodeVersion::V1_1,
+                "D" => CodeVersion::Demo,
                 other => panic!("build {} has layout {other}, which this test does not map to a code version", b.id),
             };
             assert_eq!(b.code_version, want, "{}", b.id);
