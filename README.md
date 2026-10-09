@@ -118,11 +118,14 @@ chain that rebuilds it from the original file: `zip:<entry>`, `wine-sfx:<path>` 
 installer run silently under Wine) and `wine-extrac32:<entry>` (a cabinet extracted by Wine).
 `exemap corpus-derive` replays one chain, checking every sha256; the PC demo corpus rebuilds from
 `Mercs2_Demo_Setup.zip` this way, and its executable is build `demo-official-securom`, layout `D`.
-A WAD with an empty chain is catalogued from an install: the PC retail corpus is the four WADs of
-the official release as EA's download manager installs it (English only, with the SecuROM v1.1
-executable `v11-official-securom`), and `base-pc-elamigos` is the ElAmigos repack (not official
-media) installed once per language with English last: eight WADs, of which English, shell and vz
-are byte-identical to the official ones and Loading.wad is not, and the unwrapped v1.1 executable
+A WAD with an empty chain is catalogued from an install, named in its `install` column by the
+local-config key of the install directory. The PC retail corpus is English, Loading, shell and vz
+from the official release as EA's download manager installs it (English for a North American
+download; the SecuROM v1.1 executable `v11-official-securom`), plus French, German, Italian and
+Spanish from the ElAmigos repack install. `base-pc-elamigos` is the repack itself (not official
+media), installed once per language with English last: its English, shell and vz are byte-identical
+to the official ones, its Loading.wad differs from the official one (and the demo's) only in a
+20-byte identifier string at `0x8271`, and it ships the unwrapped v1.1 executable
 `v11-official-unwrapped`.
 
 ```bash
