@@ -21,6 +21,10 @@
 //!   `.opd` function descriptor (resolved to the descriptor's code address) or a direct pointer into
 //!   an executable section.
 //!
+//! An MSVC vtable's destructor slot is the one slot whose function tests the deleting-destructor
+//! flag ([`crate::dtor`]); the Itanium ABI gives the same destructor two consecutive slots
+//! (complete-object, then deleting), so an Itanium vtable of the same class has one slot more.
+//!
 //! [`Vtable::class`] is the qualified class name both ABIs agree on (`Foo::Bar`), present when the
 //! decorated name is a plain or nested class name; template and operator names keep only their raw
 //! form.
@@ -58,6 +62,9 @@ pub struct Vtable {
     pub subobject_offset: i64,
     /// Function entry address of each slot, in slot order.
     pub slots: Vec<u32>,
+    /// MSVC: the one slot whose function tests the deleting-destructor flag
+    /// ([`crate::dtor`]), when exactly one does. Itanium: `None`.
+    pub deleting_destructor: Option<usize>,
 }
 
 /// The vtables of a PE (MSVC) or PS3 ELF (Itanium) image.
@@ -135,6 +142,7 @@ fn msvc(image: &[u8]) -> Result<Vec<Vtable>, Error> {
         }
     }
     let mut out = Vec::new();
+    let mut flag_cache: std::collections::HashMap<u32, bool> = std::collections::HashMap::new();
     for (va, w) in mem.data_words() {
         let Some(&(td, offset)) = cols.get(&w) else { continue };
         let first = va + 4;
@@ -151,6 +159,12 @@ fn msvc(image: &[u8]) -> Result<Vec<Vtable>, Error> {
             continue;
         }
         let raw = tds[&td].clone();
+        let flagged: Vec<usize> = slots
+            .iter()
+            .enumerate()
+            .filter(|(_, f)| *flag_cache.entry(**f).or_insert_with(|| crate::dtor::tests_delete_flag(&mem, **f)))
+            .map(|(i, _)| i)
+            .collect();
         out.push(Vtable {
             abi: Abi::Msvc,
             class: msvc_class(&raw),
@@ -158,6 +172,7 @@ fn msvc(image: &[u8]) -> Result<Vec<Vtable>, Error> {
             va: first,
             subobject_offset: offset as i64,
             slots,
+            deleting_destructor: (flagged.len() == 1).then(|| flagged[0]),
         });
     }
     Ok(out)
@@ -282,6 +297,7 @@ fn itanium(image: &[u8]) -> Result<Vec<Vtable>, Error> {
             va: first,
             subobject_offset: -(ott as i64),
             slots,
+            deleting_destructor: None,
         });
     }
     Ok(out)
