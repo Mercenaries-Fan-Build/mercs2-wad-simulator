@@ -9,13 +9,27 @@
 //! | `vtable` | the same class (`Foo::Bar`, or the decorated name when the ABIs agree), the same vtable ordinal within the class, the same slot — used only when the class has as many vtables in both images, and each vtable pair either has as many slots, or is an MSVC vtable with a recognised destructor slot `k` against an Itanium vtable with one slot more: MSVC slot `i < k` pairs with Itanium slot `i`, `i > k` with `i + 1`, and the destructor itself (one MSVC slot for two Itanium ones) is not paired |
 //! | `lua` | the same Lua binding: the same namespace and name when both tables are named, or a name that occurs once among all bindings of each image |
 //! | `bytes` | the same masked-bytes hash (`mhash`), occurring once in each image (same Ghidra language only) |
-//! | `string` | the same referenced string, referenced by exactly one function in each image |
-//! | `callee` | the direct callees at the same position of an accepted pair whose call lists (direct and indirect, in order) have the same length, and where every position whose callees are both already accepted agrees with those pairs (same Ghidra language only: across compilers, inlining shifts call lists, so equal length is no alignment) |
+//! | `string` | the same referenced string, referenced by exactly one function in each image; on its own it does not accept a pair (see **corroborated** below) |
+//! | `callee` | the direct callees at the same position of an accepted pair whose call lists (in order) have the same length and agree at every position, where only two direct callees that are both function starts (keys of their image's fnsig export) form a candidate (same Ghidra language only: across compilers, inlining shifts call lists, so equal length is no alignment) |
 //!
-//! A pair is **accepted** when its `a` has no other candidate and its `b` has no other candidate.
-//! Every other candidate is a **conflict** and is reported with all its candidates; nothing is
-//! chosen among them. `callee` candidates come from accepted pairs, and the rules run to a
-//! fixpoint: the candidate set only grows, so acceptance is recomputed until it stops changing.
+//! Call-list entries are direct callees (`0x…`), imported functions (`ext:<library>!<name>`), and
+//! indirect calls (`*0x…`, a call through a memory slot, `?`, a computed target, and every other
+//! entry). Two aligned entries agree when both are indirect; when both are imports with the same
+//! `<name>`; or when both are direct and neither is half of an accepted pair whose other half is
+//! not the aligned entry. Any other combination disagrees. An import is never a candidate, and
+//! neither is a direct callee that is not a function start in its image (Ghidra writes an import
+//! it cannot name as a small `0x…` number, which is no function start).
+//!
+//! A pair is **corroborated** when it has evidence other than `string`, or when two or more
+//! distinct strings each give it `string` evidence. A pair is **accepted** when its `a` has no
+//! other candidate, its `b` has no other candidate, and it is corroborated. An uncorroborated
+//! candidate is still a candidate: it makes a **conflict** with every other candidate of its
+//! functions, and when it is the only candidate of both its functions it is reported as
+//! **uncorroborated**. Every conflict is reported with all its candidates; nothing is chosen among
+//! them. `callee` candidates come from accepted pairs only (an uncorroborated pair neither proposes
+//! callees nor constrains the call-list agreement), and the rules run to a fixpoint: the candidate
+//! set and each candidate's evidence only grow, so acceptance is recomputed until it stops
+//! changing; `callee` evidence that lands on an uncorroborated `string` candidate corroborates it.
 //!
 //! `data/anchors.tsv` lists pairs verified by reading both decompiles; [`check_anchors`] reports
 //! every accepted pair that contradicts one.
@@ -78,12 +92,40 @@ pub struct Binding {
     pub function: u32,
 }
 
+/// One entry of a `FnMnemonicSig` call list.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Callee {
+    /// `0x…`: the target of a direct call.
+    Direct(u32),
+    /// `ext:<library>!<name>`: an imported function.
+    Import { library: String, name: String },
+    /// `*0x…` (a call through a memory slot), `?` (a computed target), or any other entry.
+    Indirect,
+}
+
+impl Callee {
+    pub fn parse(s: &str) -> Result<Callee, Error> {
+        if let Some(rest) = s.strip_prefix("ext:") {
+            let (library, name) =
+                rest.split_once('!').ok_or_else(|| Error::new(format!("callee {s:?} is not ext:<library>!<name>")))?;
+            if library.is_empty() || name.is_empty() {
+                return Err(Error::new(format!("callee {s:?} has an empty library or name")));
+            }
+            Ok(Callee::Import { library: library.to_string(), name: name.to_string() })
+        } else if s.starts_with("0x") {
+            Ok(Callee::Direct(hex32(s, "callee")?))
+        } else {
+            Ok(Callee::Indirect)
+        }
+    }
+}
+
 /// The parts of one `FnMnemonicSig` record the rules read.
 #[derive(Clone, Debug, Default)]
 pub struct Signature {
     pub mhash: String,
-    /// Callees in call order: the target of a direct call, `None` for an indirect one.
-    pub callees: Vec<Option<u32>>,
+    /// Callees in call order.
+    pub callees: Vec<Callee>,
     /// Referenced strings (raw bytes as hex).
     pub strs: Vec<String>,
 }
@@ -168,7 +210,10 @@ impl Exports {
                         .map(|a| a.iter().filter_map(|s| s.as_str().map(str::to_string)).collect())
                         .unwrap_or_default()
                 };
-                let callees = strs("callees").into_iter().map(|c| if c.starts_with("0x") { hex32(&c, "callee").ok() } else { None }).collect();
+                let callees = strs("callees")
+                    .iter()
+                    .map(|c| Callee::parse(c).map_err(|e| Error::new(format!("{} {k}: {e}", path.display()))))
+                    .collect::<Result<Vec<_>, _>>()?;
                 m.insert(
                     addr,
                     Signature {
@@ -207,12 +252,35 @@ pub struct Conflict {
 pub struct Outcome {
     pub pairs: Vec<Pair>,
     pub conflicts: Vec<Conflict>,
+    /// Candidates that are the only candidate of both their functions but are not corroborated.
+    pub uncorroborated: Vec<Pair>,
 }
 
-type Candidates = BTreeMap<(u32, u32), BTreeSet<Evidence>>;
+/// The evidence behind one candidate pair, and how many distinct strings gave it `string`.
+#[derive(Clone, Debug, Default)]
+struct Support {
+    evidence: BTreeSet<Evidence>,
+    strings: usize,
+}
 
+impl Support {
+    fn corroborated(&self) -> bool {
+        self.evidence.iter().any(|e| *e != Evidence::String) || self.strings >= 2
+    }
+}
+
+type Candidates = BTreeMap<(u32, u32), Support>;
+
+/// Record `e` for `(a, b)`; true when the pair did not have `e` before.
 fn add(c: &mut Candidates, a: u32, b: u32, e: Evidence) -> bool {
-    c.entry((a, b)).or_default().insert(e)
+    c.entry((a, b)).or_default().evidence.insert(e)
+}
+
+/// Record one more distinct string that gives `(a, b)` `string` evidence.
+fn add_string(c: &mut Candidates, a: u32, b: u32) {
+    let s = c.entry((a, b)).or_default();
+    s.evidence.insert(Evidence::String);
+    s.strings += 1;
 }
 
 /// One vtable of a class: its ABI, MSVC destructor slot, and slot functions.
@@ -315,14 +383,19 @@ fn unique_by<'a, F: Fn(&'a Signature) -> Vec<&'a str>>(s: &'a HashMap<u32, Signa
     m.into_iter().filter(|(_, v)| v.len() == 1).map(|(k, v)| (k, v[0])).collect()
 }
 
-fn signature_candidates(sa: &HashMap<u32, Signature>, sb: &HashMap<u32, Signature>, same_isa: bool, c: &mut Candidates) {
-    if same_isa {
+/// `bytes` and `string` candidates; `bytes` is set only when it is chosen and the images share a
+/// Ghidra language.
+fn signature_candidates(sa: &HashMap<u32, Signature>, sb: &HashMap<u32, Signature>, bytes: bool, string: bool, c: &mut Candidates) {
+    if bytes {
         let (ua, ub) = (unique_by(sa, |s| vec![s.mhash.as_str()]), unique_by(sb, |s| vec![s.mhash.as_str()]));
         for (h, fa) in &ua {
             if let Some(fb) = ub.get(h) {
                 add(c, *fa, *fb, Evidence::Bytes);
             }
         }
+    }
+    if !string {
+        return;
     }
     let strs = |s: &HashMap<u32, Signature>| -> HashMap<String, u32> {
         let mut m: HashMap<&str, BTreeSet<u32>> = HashMap::new();
@@ -334,9 +407,10 @@ fn signature_candidates(sa: &HashMap<u32, Signature>, sb: &HashMap<u32, Signatur
         m.into_iter().filter(|(_, v)| v.len() == 1).map(|(k, v)| (k.to_string(), *v.iter().next().unwrap())).collect()
     };
     let (ua, ub) = (strs(sa), strs(sb));
+    // Each key of `ua` is a distinct string, so each call counts one more string for its pair.
     for (k, fa) in &ua {
         if let Some(fb) = ub.get(k) {
-            add(c, *fa, *fb, Evidence::String);
+            add_string(c, *fa, *fb);
         }
     }
 }
@@ -344,14 +418,19 @@ fn signature_candidates(sa: &HashMap<u32, Signature>, sb: &HashMap<u32, Signatur
 fn resolve(c: &Candidates) -> Outcome {
     let mut by_a: BTreeMap<u32, Vec<(u32, BTreeSet<Evidence>)>> = BTreeMap::new();
     let mut by_b: BTreeMap<u32, Vec<(u32, BTreeSet<Evidence>)>> = BTreeMap::new();
-    for ((a, b), e) in c {
-        by_a.entry(*a).or_default().push((*b, e.clone()));
-        by_b.entry(*b).or_default().push((*a, e.clone()));
+    for ((a, b), s) in c {
+        by_a.entry(*a).or_default().push((*b, s.evidence.clone()));
+        by_b.entry(*b).or_default().push((*a, s.evidence.clone()));
     }
     let mut out = Outcome::default();
-    for ((a, b), e) in c {
+    for ((a, b), s) in c {
         if by_a[a].len() == 1 && by_b[b].len() == 1 {
-            out.pairs.push(Pair { a: *a, b: *b, evidence: e.clone() });
+            let p = Pair { a: *a, b: *b, evidence: s.evidence.clone() };
+            if s.corroborated() {
+                out.pairs.push(p);
+            } else {
+                out.uncorroborated.push(p);
+            }
         }
     }
     for (f, cands) in by_a.into_iter().filter(|(_, v)| v.len() > 1) {
@@ -383,15 +462,8 @@ pub fn match_images(a: &Exports, b: &Exports, same_language: bool, evidence: &BT
         return Err(Error::new("bytes, string and callee evidence need the fnsig export of both images"));
     }
     if let Some((sa, sb)) = sigs {
-        if evidence.contains(&Evidence::Bytes) || evidence.contains(&Evidence::String) {
-            let mut sc = Candidates::new();
-            signature_candidates(sa, sb, same_language, &mut sc);
-            for ((x, y), es) in sc {
-                for e in es.into_iter().filter(|e| evidence.contains(e)) {
-                    add(&mut c, x, y, e);
-                }
-            }
-        }
+        let bytes = same_language && evidence.contains(&Evidence::Bytes);
+        signature_candidates(sa, sb, bytes, evidence.contains(&Evidence::String), &mut c);
     }
     let mut out = resolve(&c);
     if let (Some((sa, sb)), true, true) = (sigs, evidence.contains(&Evidence::Callee), same_language) {
@@ -405,18 +477,21 @@ pub fn match_images(a: &Exports, b: &Exports, same_language: bool, evidence: &BT
                     continue;
                 }
                 let consistent = x.callees.iter().zip(&y.callees).all(|(ca, cb)| match (ca, cb) {
-                    (Some(ca), Some(cb)) => {
+                    (Callee::Direct(ca), Callee::Direct(cb)) => {
                         fwd.get(ca).is_none_or(|v| v == cb) && back.get(cb).is_none_or(|v| v == ca)
                     }
-                    (None, None) => true,
+                    (Callee::Import { name: na, .. }, Callee::Import { name: nb, .. }) => na == nb,
+                    (Callee::Indirect, Callee::Indirect) => true,
                     _ => false,
                 });
                 if !consistent {
                     continue;
                 }
                 for (ca, cb) in x.callees.iter().zip(&y.callees) {
-                    if let (Some(ca), Some(cb)) = (ca, cb) {
-                        grew |= add(&mut c, *ca, *cb, Evidence::Callee);
+                    if let (Callee::Direct(ca), Callee::Direct(cb)) = (ca, cb) {
+                        if sa.contains_key(ca) && sb.contains_key(cb) {
+                            grew |= add(&mut c, *ca, *cb, Evidence::Callee);
+                        }
                     }
                 }
             }
@@ -571,7 +646,7 @@ mod tests {
 
     #[test]
     fn callees_propagate_from_accepted_pairs_to_a_fixpoint() {
-        let sig = |callees: Vec<u32>| Signature { mhash: String::new(), callees: callees.into_iter().map(Some).collect(), strs: vec![] };
+        let sig = |callees: Vec<u32>| Signature { mhash: String::new(), callees: callees.into_iter().map(Callee::Direct).collect(), strs: vec![] };
         let bind = |n: &str, f: u32| Binding { namespace: String::new(), name: n.into(), function: f };
         let sa: HashMap<u32, Signature> = [(1, sig(vec![2])), (2, sig(vec![3])), (3, sig(vec![]))].into();
         let sb: HashMap<u32, Signature> = [(11, sig(vec![12])), (12, sig(vec![13])), (13, sig(vec![]))].into();
@@ -587,11 +662,12 @@ mod tests {
 
     #[test]
     fn a_call_list_that_contradicts_accepted_pairs_does_not_propagate() {
-        let sig = |callees: Vec<Option<u32>>| Signature { mhash: String::new(), callees, strs: vec![] };
+        let sig = |callees: Vec<Callee>| Signature { mhash: String::new(), callees, strs: vec![] };
         let bind = |n: &str, f: u32| Binding { namespace: String::new(), name: n.into(), function: f };
         // Root calls [X, Y]; in b the order is [Y', X'], and X<->X' is accepted by its own binding.
-        let sa: HashMap<u32, Signature> = [(1, sig(vec![Some(2), Some(3)])), (2, sig(vec![])), (3, sig(vec![]))].into();
-        let sb: HashMap<u32, Signature> = [(11, sig(vec![Some(13), Some(12)])), (12, sig(vec![])), (13, sig(vec![]))].into();
+        let d = Callee::Direct;
+        let sa: HashMap<u32, Signature> = [(1, sig(vec![d(2), d(3)])), (2, sig(vec![])), (3, sig(vec![]))].into();
+        let sb: HashMap<u32, Signature> = [(11, sig(vec![d(13), d(12)])), (12, sig(vec![])), (13, sig(vec![]))].into();
         let a = Exports { bindings: vec![bind("Root", 1), bind("X", 2)], signatures: Some(sa), ..Default::default() };
         let b = Exports { bindings: vec![bind("Root", 11), bind("X", 12)], signatures: Some(sb), ..Default::default() };
         let o = match_images(&a, &b, true, &ev(&[Evidence::Lua, Evidence::Callee])).unwrap();
@@ -599,15 +675,133 @@ mod tests {
         assert_eq!(pairs, vec![(1, 11), (2, 12)], "position 0 maps 2 to 13, contradicting the accepted 2<->12");
     }
 
+    fn strs_sig(strs: &[&str]) -> Signature {
+        Signature { mhash: String::new(), callees: vec![], strs: strs.iter().map(|s| s.to_string()).collect() }
+    }
+
+    fn pairs_of(o: &Outcome) -> Vec<(u32, u32)> {
+        o.pairs.iter().map(|p| (p.a, p.b)).collect()
+    }
+
+    #[test]
+    fn a_pair_whose_only_evidence_is_one_string_is_not_accepted() {
+        let a = Exports { signatures: Some([(1, strs_sig(&["7374617274"]))].into()), ..Default::default() };
+        let b = Exports { signatures: Some([(11, strs_sig(&["7374617274"]))].into()), ..Default::default() };
+        let o = match_images(&a, &b, false, &ev(&[Evidence::String])).unwrap();
+        assert!(o.pairs.is_empty());
+        assert!(o.conflicts.is_empty());
+        assert_eq!(o.uncorroborated, vec![Pair { a: 1, b: 11, evidence: ev(&[Evidence::String]) }]);
+    }
+
+    #[test]
+    fn a_second_distinct_unique_string_corroborates_a_string_pair() {
+        let a = Exports { signatures: Some([(1, strs_sig(&["aa", "bb"]))].into()), ..Default::default() };
+        let b = Exports { signatures: Some([(11, strs_sig(&["aa", "bb"]))].into()), ..Default::default() };
+        let o = match_images(&a, &b, false, &ev(&[Evidence::String])).unwrap();
+        assert_eq!(pairs_of(&o), vec![(1, 11)]);
+        assert!(o.uncorroborated.is_empty());
+        // A second string that another function of `b` also references is not unique, so it does
+        // not count.
+        let b = Exports { signatures: Some([(11, strs_sig(&["aa", "bb"])), (12, strs_sig(&["bb"]))].into()), ..Default::default() };
+        let o = match_images(&a, &b, false, &ev(&[Evidence::String])).unwrap();
+        assert!(o.pairs.is_empty());
+        assert_eq!(o.uncorroborated.len(), 1);
+    }
+
+    #[test]
+    fn a_string_pair_with_other_evidence_is_accepted() {
+        let bind = |n: &str, f: u32| Binding { namespace: String::new(), name: n.into(), function: f };
+        let a = Exports { bindings: vec![bind("F", 1)], signatures: Some([(1, strs_sig(&["aa"]))].into()), ..Default::default() };
+        let b = Exports { bindings: vec![bind("F", 11)], signatures: Some([(11, strs_sig(&["aa"]))].into()), ..Default::default() };
+        let o = match_images(&a, &b, false, &ev(&[Evidence::Lua, Evidence::String])).unwrap();
+        assert_eq!(o.pairs, vec![Pair { a: 1, b: 11, evidence: ev(&[Evidence::Lua, Evidence::String]) }]);
+    }
+
+    #[test]
+    fn callee_evidence_corroborates_a_string_pair_at_the_fixpoint() {
+        let sig = |callees: Vec<Callee>, strs: &[&str]| Signature { callees, ..strs_sig(strs) };
+        let bind = |n: &str, f: u32| Binding { namespace: String::new(), name: n.into(), function: f };
+        let sa: HashMap<u32, Signature> = [(1, sig(vec![Callee::Direct(2)], &[])), (2, sig(vec![], &["aa"]))].into();
+        let sb: HashMap<u32, Signature> = [(11, sig(vec![Callee::Direct(12)], &[])), (12, sig(vec![], &["aa"]))].into();
+        let a = Exports { bindings: vec![bind("Root", 1)], signatures: Some(sa), ..Default::default() };
+        let b = Exports { bindings: vec![bind("Root", 11)], signatures: Some(sb), ..Default::default() };
+        let o = match_images(&a, &b, true, &ev(&[Evidence::Lua, Evidence::String, Evidence::Callee])).unwrap();
+        assert_eq!(o.pairs[1], Pair { a: 2, b: 12, evidence: ev(&[Evidence::String, Evidence::Callee]) });
+        assert!(o.uncorroborated.is_empty());
+    }
+
+    #[test]
+    fn an_uncorroborated_string_candidate_still_conflicts() {
+        let bind = |n: &str, f: u32| Binding { namespace: String::new(), name: n.into(), function: f };
+        let a = Exports { bindings: vec![bind("F", 1)], signatures: Some([(1, strs_sig(&["aa"]))].into()), ..Default::default() };
+        let b = Exports {
+            bindings: vec![bind("F", 11)],
+            signatures: Some([(11, strs_sig(&[])), (12, strs_sig(&["aa"]))].into()),
+            ..Default::default()
+        };
+        let o = match_images(&a, &b, false, &ev(&[Evidence::Lua, Evidence::String])).unwrap();
+        assert!(o.pairs.is_empty());
+        assert_eq!(o.conflicts.len(), 1);
+        assert_eq!((o.conflicts[0].side, o.conflicts[0].function), ('a', 1));
+    }
+
+    #[test]
+    fn a_callee_that_is_not_a_function_start_is_never_paired() {
+        let sig = |callees: Vec<Callee>| Signature { mhash: String::new(), callees, strs: vec![] };
+        let bind = |n: &str, f: u32| Binding { namespace: String::new(), name: n.into(), function: f };
+        let d = Callee::Direct;
+        // 0x6c is an import written as an EXTERNAL-space index; 500 and 600 are in-image targets
+        // that are no function starts; 2 and 12 are function starts.
+        let sa: HashMap<u32, Signature> = [(1, sig(vec![d(0x6c), d(500), d(2)])), (2, sig(vec![]))].into();
+        let sb: HashMap<u32, Signature> = [(11, sig(vec![d(0x6c), d(600), d(12)])), (12, sig(vec![]))].into();
+        let a = Exports { bindings: vec![bind("Root", 1)], signatures: Some(sa), ..Default::default() };
+        let b = Exports { bindings: vec![bind("Root", 11)], signatures: Some(sb), ..Default::default() };
+        let o = match_images(&a, &b, true, &ev(&[Evidence::Lua, Evidence::Callee])).unwrap();
+        assert_eq!(pairs_of(&o), vec![(1, 11), (2, 12)]);
+        assert!(o.conflicts.is_empty() && o.uncorroborated.is_empty());
+    }
+
+    #[test]
+    fn aligned_imports_agree_only_when_their_names_are_equal() {
+        let sig = |callees: Vec<Callee>| Signature { mhash: String::new(), callees, strs: vec![] };
+        let bind = |n: &str, f: u32| Binding { namespace: String::new(), name: n.into(), function: f };
+        let imp = |n: &str| Callee::Import { library: "KERNEL32.DLL".into(), name: n.into() };
+        let run = |ia: Callee, ib: Callee| {
+            let sa: HashMap<u32, Signature> = [(1, sig(vec![ia, Callee::Direct(2)])), (2, sig(vec![]))].into();
+            let sb: HashMap<u32, Signature> = [(11, sig(vec![ib, Callee::Direct(12)])), (12, sig(vec![]))].into();
+            let a = Exports { bindings: vec![bind("Root", 1)], signatures: Some(sa), ..Default::default() };
+            let b = Exports { bindings: vec![bind("Root", 11)], signatures: Some(sb), ..Default::default() };
+            pairs_of(&match_images(&a, &b, true, &ev(&[Evidence::Lua, Evidence::Callee])).unwrap())
+        };
+        assert_eq!(run(imp("Sleep"), imp("Sleep")), vec![(1, 11), (2, 12)]);
+        assert_eq!(run(imp("Sleep"), imp("ExitProcess")), vec![(1, 11)], "different imports at position 0");
+        assert_eq!(run(imp("Sleep"), Callee::Indirect), vec![(1, 11)], "an import against an indirect call");
+        assert_eq!(run(Callee::Indirect, Callee::Indirect), vec![(1, 11), (2, 12)]);
+    }
+
+    #[test]
+    fn callee_entries_parse_by_form() {
+        assert_eq!(Callee::parse("0x00401fb0").unwrap(), Callee::Direct(0x00401fb0));
+        assert_eq!(
+            Callee::parse("ext:KERNEL32.DLL!Sleep").unwrap(),
+            Callee::Import { library: "KERNEL32.DLL".into(), name: "Sleep".into() }
+        );
+        assert_eq!(Callee::parse("*0x00000008").unwrap(), Callee::Indirect);
+        assert_eq!(Callee::parse("?").unwrap(), Callee::Indirect);
+        assert!(Callee::parse("ext:Sleep").is_err());
+        assert!(Callee::parse("ext:KERNEL32.DLL!").is_err());
+        assert!(Callee::parse("0xzz").is_err());
+    }
+
     #[test]
     fn anchors_report_agreement_absence_and_contradiction() {
         let an = |a: u32, b: u32| Anchor { image_a: "x".into(), va_a: a, image_b: "y".into(), va_b: b, verified_by: "read".into() };
         let pair = |a: u32, b: u32| Pair { a, b, evidence: BTreeSet::new() };
-        let o = Outcome { pairs: vec![pair(1, 11), pair(2, 99)], conflicts: vec![] };
+        let o = Outcome { pairs: vec![pair(1, 11), pair(2, 99)], ..Default::default() };
         let r = check_anchors("x", "y", &o, &[an(1, 11), an(2, 12), an(3, 13)]);
         assert_eq!((r.agreeing, r.unmatched, r.contradicted.len()), (1, 1, 1));
         // The same anchors read in the other orientation.
-        let o = Outcome { pairs: vec![pair(11, 1)], conflicts: vec![] };
+        let o = Outcome { pairs: vec![pair(11, 1)], ..Default::default() };
         assert_eq!(check_anchors("y", "x", &o, &[an(1, 11)]).agreeing, 1);
     }
 
