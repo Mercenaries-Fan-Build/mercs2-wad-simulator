@@ -26,12 +26,15 @@
 //! PC layout references by build id, and each console image with the chain that rebuilds it from
 //! its original container. Console executables come in through [`xdvdfs`] (a file from an Xbox
 //! disc image), [`xbox`] (XEX2 → PE image, and the PE layout Ghidra's loader reads) and [`starts`]
-//! (function starts from Xbox `.pdata` or PS3 `.opd`).
+//! (function starts from Xbox `.pdata` or PS3 `.opd`). [`rtti`] recovers vtables from C++ type
+//! information and [`luareg`] the Lua C-function registration tables, on every platform.
 
 pub mod catalogue;
 pub mod image;
 pub mod images;
+pub mod luareg;
 pub mod membership;
+mod mem;
 pub mod rtti;
 pub mod starts;
 pub mod xbox;
