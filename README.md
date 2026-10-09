@@ -169,6 +169,7 @@ environment variable is consulted. The file holds one `key = "path"` per line:
 | `v11_patcher_exe` | the official v1.1 patcher (`Mercs2 WiF v1.1 Patch/mercenaries2_patch1_na.exe`) | the `mercs2_exemap` official-patcher test |
 | `wine_binary` | the `wine64` binary that runs the patcher (Modkit's `…/Wine-Crossover-23.7.1-1/Contents/Resources/wine/bin/wine64`) | the `mercs2_exemap` official-patcher test |
 | `x360_devkit_iso` | the Jul 11 2008 Xbox 360 preview disc image (`Mercenaries 2 Preview X360 (Jul 11 2008).iso`) | the `mercs2_exemap` console-image test |
+| `x360_retail_xex` | the Xbox 360 retail `default.xex` (NTSC-U/J, sha256 `d5b646e7…`) | the `mercs2_exemap` console-image test |
 | `ps3_eboot_bin` | the PS3 disc's `EBOOT.BIN` (BLUS30056) | the `mercs2_exemap` console-image test |
 | `ps3_update_pkgs` | a directory of the PS3 v1.03 update `.pkg` files (NA, EU, DE) | the `mercs2_exemap` console-image test |
 
