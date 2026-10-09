@@ -12,6 +12,7 @@
 //! exemap corpus-derive <corpus_id> <wad> --from <container> --work <dir> [--wine <wine64>]
 //! exemap lua-scripts <wad> [--dump <dir>]
 //! exemap lua-index <corpus_id> --wad <file>... --out <tsv>
+//! exemap lua-pair <a.tsv> <b.tsv> --out <tsv>
 //! exemap match <image_a> <image_b> --exports <dir> --evidence <list> --out <tsv> --conflicts <tsv>
 //! ```
 //!
@@ -115,6 +116,14 @@ enum Command {
         corpus_id: String,
         #[arg(long = "wad", required = true)]
         wads: Vec<PathBuf>,
+        #[arg(long)]
+        out: PathBuf,
+    },
+    /// Pair the Lua functions of two lua-index exports by content, one row per pair or unpaired
+    /// function, with a count per class.
+    LuaPair {
+        a: PathBuf,
+        b: PathBuf,
         #[arg(long)]
         out: PathBuf,
     },
@@ -410,6 +419,40 @@ fn run(cli: Cli) -> Result<(), ExitCode> {
             write(&out, text.as_bytes())?;
             let scripts: std::collections::BTreeSet<(&str, u32)> = rows.iter().map(|r| (r.wad.as_str(), r.name_hash)).collect();
             println!("functions  {} in {} scripts -> {}", rows.len(), scripts.len(), out.display());
+        }
+        Command::LuaPair { a, b, out } => {
+            use mercs2_exemap::luapair::{pair, parse_index, Pairing};
+            let load = |p: &Path| {
+                let text = std::fs::read_to_string(p).map_err(|e| {
+                    eprintln!("error: read {}: {e}", p.display());
+                    ExitCode::from(2)
+                })?;
+                parse_index(&text).map_err(|e| {
+                    eprintln!("error: {}: {e}", p.display());
+                    ExitCode::from(1)
+                })
+            };
+            let (ra, rb) = (load(&a)?, load(&b)?);
+            let pairs = pair(&ra, &rb).map_err(|e| {
+                eprintln!("error: {e}");
+                ExitCode::from(1)
+            })?;
+            let mut text = String::from("kind\tscript\tpath_a\tpath_b\n");
+            let mut counts: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
+            for p in &pairs {
+                let (kind, script, pa, pb) = match p {
+                    Pairing::Pair { script, a, b, class } => (class.name(), script.as_str(), a.as_str(), b.as_str()),
+                    Pairing::OnlyA { script, path } => ("only-a", script.as_str(), path.as_str(), ""),
+                    Pairing::OnlyB { script, path } => ("only-b", script.as_str(), "", path.as_str()),
+                    Pairing::ScriptOnlyA { script } => ("script-only-a", script.as_str(), "", ""),
+                    Pairing::ScriptOnlyB { script } => ("script-only-b", script.as_str(), "", ""),
+                };
+                *counts.entry(kind).or_default() += 1;
+                text.push_str(&format!("{kind}\t{script}\t{pa}\t{pb}\n"));
+            }
+            write(&out, text.as_bytes())?;
+            let summary: Vec<String> = counts.iter().map(|(k, n)| format!("{k}={n}")).collect();
+            println!("pairs      {} -> {}", summary.join(" "), out.display());
         }
         Command::Match { image_a, image_b, exports, evidence, out, conflicts } => {
             use mercs2_exemap::matcher::{match_images, Evidence, Exports};
