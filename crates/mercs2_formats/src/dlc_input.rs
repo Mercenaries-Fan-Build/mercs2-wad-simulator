@@ -3,15 +3,10 @@
 //! `segs` (sges) decompressor. The STFS container reader + RAR extraction
 //! live in `dlc_stfs.rs`.
 
-use flate2::{Decompress, FlushDecompress};
-
 pub const PAGE_SIZE: usize = 0x8000; // 32 KB (FFCS page)
 pub const SCFF_MAGIC: &[u8; 4] = b"SCFF";
 pub const SEGS_MAGIC: &[u8; 4] = b"segs";
 
-fn read_u16_be(data: &[u8], off: usize) -> u16 {
-    u16::from_be_bytes([data[off], data[off + 1]])
-}
 fn read_u32_be(data: &[u8], off: usize) -> u32 {
     u32::from_be_bytes([data[off], data[off + 1], data[off + 2], data[off + 3]])
 }
@@ -136,72 +131,15 @@ pub fn parse_be_pths(doh: &[u8], pths_offset: usize, count: usize) -> Vec<String
     paths
 }
 
-/// Decompress a big-endian Xbox 360 `segs` block.
-///
-/// Layout: `segs` magic, BE u16 version @4, BE u16 segment_count @6,
-/// BE u32 total_decompressed @8, BE u32 total_compressed @12, then an N×8 segment
-/// table (BE u16 comp_size, BE u16 decomp_size [0 = 64 KB], u32 offset unused).
-/// Payload begins after the 16-byte-aligned header; segment starts are 16-byte aligned.
+/// Decompress the big-endian `segs` block that starts at `offset` in `data` and spans at most
+/// `max_size` bytes, with [`crate::sges::decompress_sges`] (the segment-stream layout is documented
+/// there).
 pub fn decompress_be_sges(data: &[u8], offset: usize, max_size: usize) -> Result<Vec<u8>, String> {
     if data.len() < offset + 16 || &data[offset..offset + 4] != SEGS_MAGIC {
         return Err(format!("Expected segs magic at 0x{offset:X}"));
     }
-    let seg_count = read_u16_be(data, offset + 6) as usize;
-    let decomp_total = read_u32_be(data, offset + 8) as usize;
-
-    let mut seg_table: Vec<(usize, usize)> = Vec::with_capacity(seg_count);
-    for si in 0..seg_count {
-        let so = offset + 16 + si * 8;
-        let csz = read_u16_be(data, so) as usize;
-        let dsz = read_u16_be(data, so + 2) as usize;
-        seg_table.push((csz, dsz));
-    }
-
-    let seg_table_bytes = seg_count * 8;
-    let header_size = if seg_count > 0 {
-        16 + ((seg_table_bytes + 15) & !15)
-    } else {
-        16
-    };
-    let payload_start = offset + header_size;
-    let payload_end = (offset + max_size).min(data.len());
-    if payload_start > payload_end {
-        return Err("segs payload start beyond block".into());
-    }
-    let payload = &data[payload_start..payload_end];
-
-    let mut result: Vec<u8> = Vec::with_capacity(decomp_total);
-    let mut pos = 0usize;
-    for (csz, dsz) in seg_table {
-        let is_raw = csz > 0 && csz == dsz;
-        if is_raw {
-            let end = (pos + csz).min(payload.len());
-            result.extend_from_slice(&payload[pos..end]);
-            pos = end;
-        } else {
-            let out_cap = if dsz == 0 { 65536 } else { dsz };
-            let mut buf = vec![0u8; out_cap];
-            let mut dc = Decompress::new(false); // raw deflate
-            let input = &payload[pos..];
-            dc.decompress(input, &mut buf, FlushDecompress::Finish)
-                .map_err(|e| format!("be sges inflate error: {e}"))?;
-            let produced = dc.total_out() as usize;
-            let consumed = dc.total_in() as usize;
-            buf.truncate(produced);
-            result.extend_from_slice(&buf);
-            pos += consumed;
-        }
-        pos = (pos + 15) & !15;
-    }
-
-    if result.len() != decomp_total {
-        return Err(format!(
-            "Decompressed {} bytes but expected {}",
-            result.len(),
-            decomp_total
-        ));
-    }
-    Ok(result)
+    let end = (offset + max_size).min(data.len());
+    crate::sges::decompress_sges(&data[offset..end])
 }
 
 #[cfg(test)]
@@ -264,7 +202,8 @@ mod tests {
 
     #[test]
     fn be_sges_raw_segment() {
-        // segs header + one raw segment (csz == dsz) of 10 bytes.
+        // segs header + one stored segment of 10 bytes at offset 32 (header + one table row,
+        // 16-byte aligned), bit 0 of the offset clear.
         let body = b"0123456789";
         let mut d = vec![0u8; 16 + 8];
         d[0..4].copy_from_slice(SEGS_MAGIC);
@@ -272,9 +211,9 @@ mod tests {
         d[6..8].copy_from_slice(&1u16.to_be_bytes()); // seg_count
         d[8..12].copy_from_slice(&(body.len() as u32).to_be_bytes());
         d[12..16].copy_from_slice(&0u32.to_be_bytes());
-        d[16..18].copy_from_slice(&(body.len() as u16).to_be_bytes()); // csz
-        d[18..20].copy_from_slice(&(body.len() as u16).to_be_bytes()); // dsz == csz -> raw
-                                                                       // header_size = 16 + align16(8) = 32
+        d[16..18].copy_from_slice(&(body.len() as u16).to_be_bytes()); // comp_size
+        d[18..20].copy_from_slice(&(body.len() as u16).to_be_bytes()); // uncomp_size
+        d[20..24].copy_from_slice(&32u32.to_be_bytes()); // offset 32, stored
         d.resize(32, 0);
         d.extend_from_slice(body);
         let out = decompress_be_sges(&d, 0, d.len()).unwrap();
@@ -282,21 +221,30 @@ mod tests {
     }
 
     #[test]
+    fn be_sges_full_size_stored_segment() {
+        // A 64 KB stored segment records both sizes as 0 (= 65536), the case retail console
+        // blocks carry (e.g. Xbox shell.wad block 16, segment 2).
+        let body: Vec<u8> = (0..65536u32).map(|i| (i * 13) as u8).collect();
+        let mut d = vec![0u8; 32];
+        d[0..4].copy_from_slice(SEGS_MAGIC);
+        d[4..6].copy_from_slice(&4u16.to_be_bytes());
+        d[6..8].copy_from_slice(&1u16.to_be_bytes());
+        d[8..12].copy_from_slice(&65536u32.to_be_bytes());
+        d[20..24].copy_from_slice(&32u32.to_be_bytes()); // offset 32, stored; sizes 0/0
+        d.extend_from_slice(&body);
+        assert_eq!(decompress_be_sges(&d, 0, d.len()).unwrap(), body);
+    }
+
+    /// The retail Blow It Up Again Pack's `DLC01.doh`, read out of the STFS package named by the
+    /// `x360_dlc_biua_stfs` key of `.mercs2-local.toml`, against values captured from
+    /// `tools/x360_dlc_io.py` on the same file. A missing key or file fails the test naming it.
+    #[cfg(feature = "retail")]
+    #[test]
     fn real_doh_matches_python_golden() {
-        // Cross-check against tools/x360_dlc_io.py on the REAL DLC .doh.
-        // Golden captured from Python (output/_scratch/dlc_be_golden.json).
-        // Skips cleanly if the cached .doh isn't present on this machine.
-        let path = concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../../../output/_scratch/dlc01.doh"
-        );
-        let doh = match std::fs::read(path) {
-            Ok(b) => b,
-            Err(_) => {
-                eprintln!("SKIP real_doh_matches_python_golden: {path} not found");
-                return;
-            }
-        };
+        let path = crate::game_paths::local_config_x360_dlc_biua_stfs(std::path::Path::new(env!("CARGO_MANIFEST_DIR")))
+            .unwrap_or_else(|e| panic!("{e}"));
+        let stfs = std::fs::read(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+        let doh = crate::dlc_stfs::StfsReader::new(stfs).read_doh().expect("read_doh");
 
         let (ver, rows) = parse_be_ffcs(&doh).unwrap();
         assert_eq!(ver, 2);
@@ -376,9 +324,9 @@ mod tests {
         d[6..8].copy_from_slice(&1u16.to_be_bytes());
         d[8..12].copy_from_slice(&(body.len() as u32).to_be_bytes());
         d[12..16].copy_from_slice(&0u32.to_be_bytes());
-        // csz != dsz -> compressed; dsz = decompressed size
         d[16..18].copy_from_slice(&(deflated.len() as u16).to_be_bytes());
         d[18..20].copy_from_slice(&(body.len() as u16).to_be_bytes());
+        d[20..24].copy_from_slice(&33u32.to_be_bytes()); // offset 32, bit 0 set: deflate
         d.extend_from_slice(&deflated);
         let out = decompress_be_sges(&d, 0, d.len()).unwrap();
         assert_eq!(out, body);
