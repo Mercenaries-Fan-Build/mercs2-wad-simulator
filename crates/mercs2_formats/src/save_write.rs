@@ -21,15 +21,11 @@
 //! | xorout | `0xFFFFFFFF` |
 //! | covered range | `[4:]` (13,400 bytes) |
 //!
-//! Verified **byte-exact against all 8 retail `.profile` files**, now vendored at
+//! Verified **byte-exact against all 8 retail `.profile` files**, vendored at
 //! `fixtures/saves` (e.g. `auto_6A447BF8` → `0xCA2F06BE`). Matching eight
 //! independent 32-bit values makes a coincidental fit ~`2^-256`, so this is a
-//! conclusive derivation, not a guess.
-//!
-//! That verification runs on **every** test run now. It previously read the saves
-//! from a hardcoded `C:/Users/Shadow/Documents/...` via `.ok()`, so on any other
-//! machine each test looped zero times and passed while asserting nothing — the
-//! claim above was true when written and unchecked from then on.
+//! conclusive derivation, not a guess. That verification runs on every test run,
+//! against the committed fixtures.
 //!
 //! The earlier "not crc32" ruling in `SAVE_FORMAT.md` tested only the
 //! **reflected** CRC-32/ISO-HDLC (zlib) model. The **non-reflected** variant is
@@ -196,11 +192,8 @@ mod tests {
     /// The same eight vendored fixtures the reader uses — see `crate::save`'s `ALL_SAVES` and
     /// `fixtures/saves/README.md`.
     ///
-    /// The module header claims the `ProfileHash` derivation is "verified byte-exact against all 8
-    /// retail `.profile` files". Until these were vendored that verification ran on exactly one
-    /// machine: the loader was `.ok()` over a hardcoded `C:/Users/Shadow/Documents/...`, so everywhere
-    /// else each test looped zero times and **passed while asserting nothing**. The header's claim was
-    /// true when written and unchecked ever since. It is now checked on every run.
+    /// The module header's claim that the `ProfileHash` derivation is "verified byte-exact against all
+    /// 8 retail `.profile` files" is checked against these on every run.
     use crate::game_paths::SAVE_FIXTURES as ALL_SAVES;
 
     /// Load a vendored fixture. Panics if absent: the files are committed, so a missing one is a broken
