@@ -31,6 +31,7 @@
 //! [`matcher`] pairs the functions of two images from those exports.
 
 pub mod catalogue;
+mod dtor;
 pub mod image;
 pub mod images;
 pub mod luareg;
