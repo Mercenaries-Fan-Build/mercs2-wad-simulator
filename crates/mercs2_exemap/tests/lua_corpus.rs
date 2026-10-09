@@ -6,13 +6,13 @@
 //! official PC install), `pc_repack_install_dir` (the ElAmigos repack install), `x360_devkit_iso`
 //! (the Xbox 360 preview disc), `x360_retail_dir` (the Xbox 360 retail disc dump),
 //! `x360_dlc_biua_stfs` (the retail Blow It Up Again Pack), `x360_dlc_prototypes_dir` (the zipped
-//! DLC prototypes), `ps3_disc_iso` (the PS3 NA disc image), `ps3_jp_disc_dir` (the PS3 Japanese disc dump), `ps3_de_disc_dir` (the PS3 German disc dump), `ps3_update_pkgs` (the folder of PS3
+//! DLC prototypes), `ps3_disc_iso` (the PS3 NA disc image), `ps3_jp_disc_dir` (the PS3 Japanese disc dump), `ps3_de_disc_dir` (the PS3 German disc dump), `ps3_eu_disc_dir` (the PS3 European disc dump), `ps3_update_pkgs` (the folder of PS3
 //! update packages) and `ps3_dlc_biua_pkg` (the PS3 NA Blow It Up Again Pack); a missing key or path
 //! fails the test naming it.
 //!
 //! Every WAD of the PC demo corpus is rebuilt from the demo archive, with every intermediate sha256
 //! checked, in a fresh work directory under the system temp directory; every WAD with an `install`
-//! column (the PC retail and repack corpora, the Xbox 360 retail dump, the PS3 Japanese and German dumps) is
+//! column (the PC retail and repack corpora, the Xbox 360 retail dump, the PS3 Japanese, German and European dumps) is
 //! checked in place in the install that column names.
 
 use std::path::Path;
@@ -23,7 +23,7 @@ use std::path::PathBuf;
 use mercs2_exemap::corpus::{check_installed, derive, file_sha256, Corpora, Corpus, Env};
 use mercs2_formats::game_paths::{
     local_config_pc_demo_zip, local_config_pc_official_install_dir, local_config_pc_repack_install_dir,
-    local_config_ps3_de_disc_dir, local_config_ps3_disc_iso, local_config_ps3_dlc_biua_pkg, local_config_ps3_jp_disc_dir, local_config_ps3_update_pkgs, local_config_wine_binary, local_config_x360_devkit_iso, local_config_x360_dlc_biua_stfs,
+    local_config_ps3_de_disc_dir, local_config_ps3_disc_iso, local_config_ps3_dlc_biua_pkg, local_config_ps3_eu_disc_dir, local_config_ps3_jp_disc_dir, local_config_ps3_update_pkgs, local_config_wine_binary, local_config_x360_devkit_iso, local_config_x360_dlc_biua_stfs,
     local_config_x360_dlc_prototypes_dir, local_config_x360_retail_dir,
 };
 
@@ -55,6 +55,7 @@ fn install_dir(key: &str) -> std::path::PathBuf {
         "x360_retail_dir" => local_config_x360_retail_dir(start()),
         "ps3_jp_disc_dir" => local_config_ps3_jp_disc_dir(start()),
         "ps3_de_disc_dir" => local_config_ps3_de_disc_dir(start()),
+        "ps3_eu_disc_dir" => local_config_ps3_eu_disc_dir(start()),
         other => panic!("wads.tsv names install key {other}, which this test does not resolve"),
     };
     r.unwrap_or_else(|e| panic!("{e}"))
@@ -94,6 +95,11 @@ fn every_ps3_jp_wad_is_in_the_jp_disc_dump() {
 #[test]
 fn every_ps3_de_wad_is_in_the_de_disc_dump() {
     check_corpus("base-ps3-retail-de", 5);
+}
+
+#[test]
+fn every_ps3_eu_wad_is_in_the_eu_disc_dump() {
+    check_corpus("base-ps3-retail-eu", 9);
 }
 
 /// Rebuild every WAD of the corpora `select` picks (named `what` in messages) from the containers
@@ -155,7 +161,7 @@ fn every_ps3_update_wad_rebuilds_from_its_package() {
             containers.push(p);
         }
     }
-    derive_all("ps3-patch", |c| c.platform == "ps3" && c.product == "patch", containers, 4);
+    derive_all("ps3-patch", |c| c.platform == "ps3" && c.product == "patch", containers, 6);
 }
 
 #[test]
