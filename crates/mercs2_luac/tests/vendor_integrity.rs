@@ -19,11 +19,11 @@
 
 use std::path::{Path, PathBuf};
 
-/// Upstream lives outside the crate, so a published `.crate` tarball will not contain it. Tests
-/// only ever run in-tree, but skip loudly rather than fail if it is genuinely absent.
-fn upstream_dir() -> Option<PathBuf> {
-    let d = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../lua51-src/src");
-    d.is_dir().then(|| d)
+/// Upstream lives outside the crate: `lua51_src_dir` in `.mercs2-local.toml` names it. A missing
+/// config, a missing key, or a path that is not a directory fails the test with the key's name.
+fn upstream_dir() -> PathBuf {
+    mercs2_formats::game_paths::local_config_lua51_src_dir(Path::new(env!("CARGO_MANIFEST_DIR")))
+        .unwrap_or_else(|e| panic!("{e}"))
 }
 
 fn vendor_dir() -> PathBuf {
@@ -41,10 +41,7 @@ const PATCHED: [&str; 3] = ["luaconf.h", "ldump.c", "lundump.c"];
 
 #[test]
 fn vendor_is_upstream_plus_exactly_the_three_patched_files() {
-    let Some(upstream) = upstream_dir() else {
-        eprintln!("skipping: tools/lua51-src/src not present");
-        return;
-    };
+    let upstream = upstream_dir();
     let vendor = vendor_dir();
 
     let mut checked = 0usize;
