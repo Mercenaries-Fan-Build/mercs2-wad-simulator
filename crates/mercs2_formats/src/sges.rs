@@ -188,6 +188,10 @@ pub fn decompress_sges(block_data: &[u8]) -> Result<Vec<u8>, String> {
     Ok(output)
 }
 
+/// Read block `block_index` of an opened WAD and inflate it: a little-endian `sges` stream (the PC
+/// bake) through [`decompress_sges`], a big-endian `segs` stream (the Xbox 360 and PS3 bakes)
+/// through [`crate::dlc_input::decompress_be_sges`]. A block that starts with anything else is an
+/// error.
 pub fn decompress_block(
     file: &mut File,
     indx_entries: &[IndxEntry],
@@ -211,18 +215,13 @@ pub fn decompress_block(
     file.read_exact(&mut compressed_data)
         .map_err(|e| format!("read error: {e}"))?;
 
-    if compressed_data.len() >= 4 && &compressed_data[0..4] == b"sges" {
-        decompress_sges(&compressed_data)
-    } else if compressed_data.len() >= 4 && &compressed_data[0..4] == b"UCFX" {
-        let decomp_pages = indx.decompressed_page_count();
-        let decomp_size = decomp_pages as usize * PAGE_SIZE as usize;
-        compressed_data.truncate(decomp_size);
-        Ok(compressed_data)
-    } else {
-        let decomp_pages = indx.decompressed_page_count();
-        let decomp_size = decomp_pages as usize * PAGE_SIZE as usize;
-        compressed_data.truncate(decomp_size);
-        Ok(compressed_data)
+    match compressed_data.get(0..4) {
+        Some(b"sges") => decompress_sges(&compressed_data),
+        Some(b"segs") => crate::dlc_input::decompress_be_sges(&compressed_data, 0, compressed_data.len()),
+        _ => Err(format!(
+            "block {idx} starts with {:02x?}, which is neither a little-endian `sges` nor a big-endian `segs` stream",
+            &compressed_data[..compressed_data.len().min(4)]
+        )),
     }
 }
 
@@ -448,6 +447,44 @@ mod tests {
         assert_eq!(&block[0..4], b"sges");
         let back = decompress_sges(&block).expect("decompress");
         assert_eq!(back, data, "round-trip mismatch for {} bytes", data.len());
+    }
+
+    /// A big-endian `segs` stream holding `payload` as one stored segment.
+    fn segs_stored(payload: &[u8]) -> Vec<u8> {
+        let n = payload.len() as u16;
+        let mut b = Vec::new();
+        b.extend_from_slice(b"segs");
+        b.extend_from_slice(&1u16.to_be_bytes());
+        b.extend_from_slice(&1u16.to_be_bytes());
+        b.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+        b.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+        b.extend_from_slice(&n.to_be_bytes());
+        b.extend_from_slice(&n.to_be_bytes());
+        b.extend_from_slice(&0u32.to_be_bytes());
+        b.resize(32, 0);
+        b.extend_from_slice(payload);
+        b
+    }
+
+    #[test]
+    fn decompress_block_inflates_both_byte_orders_and_refuses_anything_else() {
+        let page = PAGE_SIZE as usize;
+        let le = compress_sges(b"little-endian block").unwrap();
+        let be = segs_stored(b"big-endian block");
+        let mut file = vec![0u8; 3 * page];
+        file[..le.len()].copy_from_slice(&le);
+        file[page..page + be.len()].copy_from_slice(&be);
+        file[2 * page..2 * page + 4].copy_from_slice(b"UCFX");
+        let path = std::env::temp_dir().join(format!("sges_decompress_block_{}.bin", std::process::id()));
+        std::fs::write(&path, &file).unwrap();
+        let entry = |page_index: u32| IndxEntry { page_index, packed_field: 1, flags_and_page_count: 1 };
+        let indx = [entry(0), entry(1), entry(2)];
+        let mut f = File::open(&path).unwrap();
+        assert_eq!(decompress_block(&mut f, &indx, 0).unwrap(), b"little-endian block");
+        assert_eq!(decompress_block(&mut f, &indx, 1).unwrap(), b"big-endian block");
+        let e = decompress_block(&mut f, &indx, 2).unwrap_err();
+        assert!(e.contains("neither a little-endian `sges` nor a big-endian `segs`"), "{e}");
+        std::fs::remove_file(&path).ok();
     }
 
     #[test]
