@@ -60,7 +60,9 @@ fn main() {
             }
         }
     }
-    let state_names = mercs2_engine::worldutil::rainbow_names(&state_hashes);
+    let table = mercs2_formats::game_paths::local_config_rainbow_table(std::path::Path::new(env!("CARGO_MANIFEST_DIR")))
+        .unwrap_or_else(|e| panic!("{e}"));
+    let state_names = mercs2_engine::worldutil::rainbow_names(&table, &state_hashes).unwrap_or_else(|e| panic!("{e}"));
     for want in [b"SWIT", b"STAT"] {
         let mut seen: std::collections::BTreeSet<Vec<u32>> = std::collections::BTreeSet::new();
         for (tag, marker, start, size) in &rs {
