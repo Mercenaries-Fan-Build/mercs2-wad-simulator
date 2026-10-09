@@ -98,6 +98,14 @@ The PC and Xbox images carry type information for about 270 classes (mostly Havo
 for about 1,290, game classes included. Xbox 360 `.pdata` omits leaf functions, so about half of
 the Xbox slots point at functions that have no `.pdata` entry.
 
+`exemap luareg <image> --out <tsv>` recovers the Lua C-function registration tables (`luaL_Reg`
+arrays of `{name, function}` ended by `{NULL, NULL}`) and writes one row per entry. The game's
+tables nest groups with marker entries, `{name, 0xFFFFFFFF}` to open and `{name, 0xFFFFFFFE}` to
+close, so `Graphics` holds `Camera.SetNearFar`. A table's namespace comes from a `{name, table}`
+registry row: the PC images name 31 namespaces holding 1,081 bindings, the Xbox 360 Final and
+retail images 30. The Xbox 360 Profile image and the PS3 images register their game namespaces
+another way, so their game tables carry no namespace.
+
 ```bash
 exemap derive x360-profile --from "Mercenaries 2 Preview X360 (Jul 11 2008).iso" --out profile.pe_ghidra
 exemap derive ps3-v103-na --from "UP0006-BLUS30056_00-MERCS2PATCHNA103-A0103-V0100-PE.pkg" --out eboot103.elf
