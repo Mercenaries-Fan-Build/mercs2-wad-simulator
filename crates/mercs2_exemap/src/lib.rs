@@ -55,6 +55,7 @@ pub mod starts;
 pub mod wadscripts;
 pub mod xbox;
 pub mod xdvdfs;
+pub mod xmap;
 
 use md5::Md5;
 use sha2::{Digest, Sha256};
