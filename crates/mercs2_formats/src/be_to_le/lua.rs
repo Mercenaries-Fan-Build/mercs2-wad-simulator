@@ -8,11 +8,10 @@
 //! emits Lua 5.2+ `goto`/labels on complex control flow that the 5.1 compiler
 //! rejects) — the bytecode-level disassemble/assemble avoids that.
 //!
-//! Toolchain (located at runtime): a JRE (`$JAVA` / `$JAVA_HOME/bin/java` /
-//! bundled `tools/jdk21/*/bin/java` / `java` on PATH) + unluac (`$UNLUAC_JAR` /
-//! `tools/external/unluac/unluac.jar`). See memory: lua-bytecode-disassemble-reassemble.
+//! Toolchain: a `java` executable and the unluac jar, both passed in by the caller as a
+//! [`LuaTools`]. See memory: lua-bytecode-disassemble-reassemble.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::Command;
 
 const LUAQ_SIG: &[u8; 4] = b"\x1bLua";
@@ -38,82 +37,15 @@ fn find_sub(hay: &[u8], needle: &[u8]) -> Option<usize> {
     (0..=hay.len() - needle.len()).find(|&i| &hay[i..i + needle.len()] == needle)
 }
 
-/// Walk up from `start`, yielding each ancestor directory.
-fn ancestors(start: PathBuf) -> impl Iterator<Item = PathBuf> {
-    let mut cur = Some(start);
-    std::iter::from_fn(move || {
-        let next = cur.clone();
-        if let Some(ref mut p) = cur {
-            if !p.pop() {
-                cur = None;
-            }
-        }
-        next
-    })
-}
-
-/// Try each candidate relative path against every ancestor of the current
-/// executable and current working directory. First file hit wins.
-fn locate_in_repo(candidates: &[&str]) -> Option<PathBuf> {
-    let starts = [std::env::current_exe().ok(), std::env::current_dir().ok()];
-    for start in starts.into_iter().flatten() {
-        for anc in ancestors(start) {
-            for rel in candidates {
-                let p = anc.join(rel);
-                if p.is_file() {
-                    return Some(p);
-                }
-            }
-        }
-    }
-    None
-}
-
-fn find_java() -> Option<String> {
-    if let Ok(j) = std::env::var("JAVA") {
-        if !j.is_empty() {
-            return Some(j);
-        }
-    }
-    if let Ok(jh) = std::env::var("JAVA_HOME") {
-        for n in ["bin/java", "bin/java.exe"] {
-            let p = Path::new(&jh).join(n);
-            if p.is_file() {
-                return Some(p.to_string_lossy().into_owned());
-            }
-        }
-    }
-    for start in [std::env::current_exe().ok(), std::env::current_dir().ok()]
-        .into_iter()
-        .flatten()
-    {
-        for anc in ancestors(start) {
-            if let Ok(rd) = std::fs::read_dir(anc.join("tools/jdk21")) {
-                for e in rd.flatten() {
-                    for n in ["bin/java.exe", "bin/java"] {
-                        let p = e.path().join(n);
-                        if p.is_file() {
-                            return Some(p.to_string_lossy().into_owned());
-                        }
-                    }
-                }
-            }
-        }
-    }
-    Some("java".to_string()) // PATH fallback
-}
-
-fn find_unluac() -> Option<String> {
-    if let Ok(j) = std::env::var("UNLUAC_JAR") {
-        if !j.is_empty() && Path::new(&j).is_file() {
-            return Some(j);
-        }
-    }
-    locate_in_repo(&[
-        "tools/external/unluac/unluac.jar",
-        "tools/unluac.jar",
-    ])
-    .map(|p| p.to_string_lossy().into_owned())
+/// The external programs that round-trip console Lua bytecode: the `java` executable and the
+/// unluac jar it runs (`java -jar <unluac> --disassemble` / `--assemble`). The caller supplies
+/// both paths; [`convert_binn_be_to_le`] runs exactly these.
+#[derive(Debug, Clone)]
+pub struct LuaTools {
+    /// The `java` executable.
+    pub java: PathBuf,
+    /// The unluac jar.
+    pub unluac: PathBuf,
 }
 
 fn flip_endianness(listing: &[u8]) -> Option<Vec<u8>> {
@@ -133,13 +65,18 @@ fn flip_endianness(listing: &[u8]) -> Option<Vec<u8>> {
 }
 
 /// Round-trip one standalone BE LuaQ bytecode chunk to PC LE via unluac.
-fn luaq_be_to_le(be_luaq: &[u8]) -> Result<Vec<u8>, String> {
+fn luaq_be_to_le(be_luaq: &[u8], tools: &LuaTools) -> Result<Vec<u8>, String> {
     if be_luaq.len() < 12 || &be_luaq[0..4] != LUAQ_SIG {
         return Err("not a LuaQ chunk (missing \\x1bLua signature)".into());
     }
-    let java = find_java().ok_or("no Java runtime (set JAVA/JAVA_HOME or put java on PATH)")?;
-    let jar = find_unluac()
-        .ok_or("unluac.jar not found (set UNLUAC_JAR or tools/external/unluac/unluac.jar)")?;
+    if !tools.java.is_file() {
+        return Err(format!("java executable {} is not a file", tools.java.display()));
+    }
+    if !tools.unluac.is_file() {
+        return Err(format!("unluac jar {} is not a file", tools.unluac.display()));
+    }
+    let java = &tools.java;
+    let jar = &tools.unluac;
 
     let dir = std::env::temp_dir().join(format!(
         "mercs2_lua_{}_{}",
@@ -227,8 +164,9 @@ fn convert_binn_pre_luaq(head: &mut [u8]) {
 /// record) from Xbox BE to PC LE. The LuaQ bytecode is converted via the unluac
 /// round-trip; the BINN framing/metadata is per-field swapped. A script-ref
 /// (no LuaQ) just byte-swaps its leading u32. Mirrors
-/// `tools/ucfx_be_to_le.py::_convert_lua_be_to_le`.
-pub fn convert_binn_be_to_le(be: &[u8]) -> Result<Vec<u8>, String> {
+/// `tools/ucfx_be_to_le.py::_convert_lua_be_to_le`. Only a body holding LuaQ bytecode runs
+/// `tools`.
+pub fn convert_binn_be_to_le(be: &[u8], tools: &LuaTools) -> Result<Vec<u8>, String> {
     let scan_end = be.len().saturating_sub(4).min(256);
     let mut luaq_off = None;
     for s in 0..scan_end {
@@ -252,7 +190,7 @@ pub fn convert_binn_be_to_le(be: &[u8]) -> Result<Vec<u8>, String> {
     if luaq_off > 0 {
         convert_binn_pre_luaq(&mut head);
     }
-    let le_luaq = luaq_be_to_le(&be[luaq_off..])?;
+    let le_luaq = luaq_be_to_le(&be[luaq_off..], tools)?;
     head.extend_from_slice(&le_luaq);
     Ok(head)
 }
@@ -260,21 +198,42 @@ pub fn convert_binn_be_to_le(be: &[u8]) -> Result<Vec<u8>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::game_paths::{local_config_java_binary, local_config_unluac_jar};
+    use std::path::Path;
+
+    /// The `java_binary` and `unluac_jar` keys of `.mercs2-local.toml`. Panics naming the missing
+    /// key when either is absent.
+    fn local_tools() -> LuaTools {
+        let start = Path::new(env!("CARGO_MANIFEST_DIR"));
+        LuaTools {
+            java: local_config_java_binary(start).unwrap_or_else(|e| panic!("{e}")),
+            unluac: local_config_unluac_jar(start).unwrap_or_else(|e| panic!("{e}")),
+        }
+    }
+
+    /// Tool paths that do not exist. A body without a LuaQ signature returns from
+    /// `convert_binn_be_to_le` before `luaq_be_to_le` checks or runs the tools, so these
+    /// paths are never touched; a conversion that did reach them would fail on the
+    /// "is not a file" check.
+    fn absent_tools() -> LuaTools {
+        LuaTools {
+            java: PathBuf::from("absent/java"),
+            unluac: PathBuf::from("absent/unluac.jar"),
+        }
+    }
 
     #[test]
     fn test_empty_binn_body() {
         let empty = vec![];
-        let result = convert_binn_be_to_le(&empty);
-        // Empty body: might succeed or fail depending on implementation
-        let _ = result;
+        let result = convert_binn_be_to_le(&empty, &absent_tools());
+        assert_eq!(result, Ok(Vec::new()));
     }
 
     #[test]
     fn test_short_binn_body() {
         let short = vec![0u8; 2];
-        let result = convert_binn_be_to_le(&short);
-        // Short body: might succeed (fallback to header-only swap) or fail
-        let _ = result;
+        let result = convert_binn_be_to_le(&short, &absent_tools());
+        assert_eq!(result, Ok(short));
     }
 
     #[test]
@@ -283,52 +242,32 @@ mod tests {
         let mut data = vec![0u8; 100];
         // Insert Lua signature at offset 50
         data[50..54].copy_from_slice(b"\x1bLua");
-        // This should attempt to process the bytecode via unluac
-        // but will likely fail due to missing Java/unluac
-        let result = convert_binn_be_to_le(&data);
-        // We just check it doesn't crash; the actual conversion depends on environment
+        // This runs the bytecode through unluac with the configured tools.
+        let result = convert_binn_be_to_le(&data, &local_tools());
+        // We just check it doesn't crash; the junk chunk's conversion outcome is unluac's.
         let _ = result;
     }
 
     #[test]
     fn test_no_luaq_signature_skips_java() {
-        // Body without Lua signature (all zeros)
-        let data = vec![0u8; 100];
-        let result = convert_binn_be_to_le(&data);
-        // Without signature, should just byte-swap the leading u32 and return
-        match result {
-            Ok(output) => {
-                // Output should be similar length or shorter (no Java processing)
-                assert!(output.len() <= data.len());
-            }
-            Err(_) => {
-                // Some error paths are acceptable
-            }
-        }
+        // Body without Lua signature: only the leading u32 is byte-swapped, no tool runs.
+        let mut data = vec![0u8; 100];
+        data[0..4].copy_from_slice(&[1, 2, 3, 4]);
+        let output = convert_binn_be_to_le(&data, &absent_tools())
+            .expect("a body without a LuaQ signature must convert without the tools");
+        let mut want = data.clone();
+        want[0..4].copy_from_slice(&[4, 3, 2, 1]);
+        assert_eq!(output, want);
     }
 
     #[test]
-    fn find_unluac_resolves_the_bundled_jar_regardless_of_cwd() {
-        let jar = find_unluac().expect(
-            "repo-bundled tools/external/unluac/unluac.jar must resolve via ancestor walk",
-        );
-        let p = Path::new(&jar);
-        assert!(p.is_file(), "find_unluac returned non-file path: {jar}");
-        assert!(
-            jar.ends_with("unluac.jar"),
-            "resolved path should end in unluac.jar: {jar}"
-        );
-    }
-
-    #[test]
-    fn find_java_resolves_the_bundled_jdk_regardless_of_cwd() {
-        let java = find_java().expect("find_java returns Some (JDK or PATH fallback)");
-        let p = Path::new(&java);
-        // PATH fallback is Some("java") (no .is_file()); the bundled jdk21 must resolve
-        // to a real file when the walk-up finds it.
-        assert!(
-            p.is_file() || java == "java",
-            "find_java returned neither a real file nor the PATH fallback: {java}"
-        );
+    fn a_luaq_body_with_a_missing_tool_names_the_path() {
+        let mut data = vec![0u8; 100];
+        data[0..4].copy_from_slice(LUAQ_SIG);
+        let e = convert_binn_be_to_le(&data, &absent_tools()).unwrap_err();
+        assert!(e.contains("absent/java"), "{e}");
+        let tools = LuaTools { unluac: PathBuf::from("absent/unluac.jar"), ..local_tools() };
+        let e = convert_binn_be_to_le(&data, &tools).unwrap_err();
+        assert!(e.contains("absent/unluac.jar"), "{e}");
     }
 }
