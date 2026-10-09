@@ -211,9 +211,11 @@ impl Corpora {
                 return Err(Error::new(format!("corpus {} has no WADs in wads.tsv", c.id)));
             }
         }
-        let shas: BTreeSet<&str> = ws.iter().map(|w| w.sha256.as_str()).collect();
-        if shas.len() != ws.len() {
-            return Err(Error::new("wads.tsv lists one sha256 twice"));
+        // The same file may ship in several corpora (the official install and a repack share WADs),
+        // but never twice within one.
+        let pairs: BTreeSet<(&str, &str)> = ws.iter().map(|w| (w.corpus.as_str(), w.sha256.as_str())).collect();
+        if pairs.len() != ws.len() {
+            return Err(Error::new("wads.tsv lists one sha256 twice within a corpus"));
         }
         Ok(Corpora { corpora: cs, wads: ws })
     }
@@ -418,8 +420,9 @@ mod tests {
         let c = Corpora::embedded().unwrap();
         assert!(c.corpus("base-pc-demo").is_some());
         assert_eq!(c.wads_of("base-pc-demo").count(), 4);
-        assert_eq!(c.wads_of("base-pc-retail").count(), 8);
-        assert!(c.wads_of("base-pc-retail").all(|w| w.chain.is_empty()));
+        assert_eq!(c.wads_of("base-pc-retail").count(), 4);
+        assert_eq!(c.wads_of("base-pc-elamigos").count(), 8);
+        assert!(c.wads_of("base-pc-retail").chain(c.wads_of("base-pc-elamigos")).all(|w| w.chain.is_empty()));
     }
 
     #[test]
@@ -446,6 +449,9 @@ mod tests {
         // A corpus with no WADs.
         let e = Corpora::parse(&corpora(&[base, "c\tdemo\tpc\tdemo\t\tdemo"]), &wads(&[&wad("b")])).unwrap_err().to_string();
         assert!(e.contains("has no WADs"), "{e}");
+        // One file twice within a corpus.
+        let e = Corpora::parse(&corpora(&[base]), &wads(&[&wad("b"), &wad("b").replace("vz.wad", "zz.wad")])).unwrap_err().to_string();
+        assert!(e.contains("twice within a corpus"), "{e}");
         // An unknown product.
         let e = Corpora::parse(&corpora(&["b\tmod\tpc\tretail\t\tx"]), &wads(&[&wad("b")])).unwrap_err().to_string();
         assert!(e.contains("product"), "{e}");
