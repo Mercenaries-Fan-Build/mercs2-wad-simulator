@@ -172,7 +172,10 @@ fn main() {
         eprintln!("mopp_swap: usage: mopp_swap --out <DIR> [--block <N> | --body <FILE>] [--mopp <IDX>] [--identity] [--return-all] [--empty] [--spatial]");
         std::process::exit(2);
     };
-    let _ = std::fs::create_dir_all(&out_dir);
+    if let Err(e) = std::fs::create_dir_all(&out_dir) {
+        eprintln!("create {}: {e}", out_dir.display());
+        std::process::exit(1);
+    }
 
     // Source body.
     let (body, tag): (Vec<u8>, String) = if let Some(bf) = arg_val(&args, "--body") {
