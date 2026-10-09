@@ -8,8 +8,9 @@
 //! from the original file it ships in. `from_sha256` and `step` are `;`-separated lists of equal
 //! length; step *i* turns the file with `from_sha256[i]` into the next file of the chain, and the
 //! last step yields the WAD. [`derive`] replays a chain on files in a work directory and checks
-//! every sha256 on the way. A WAD with an empty chain is catalogued from a canonical install, where
-//! [`check_installed`] finds it by name.
+//! every sha256 on the way. A WAD with an empty chain is catalogued from an install instead: its
+//! `install` column names the local-config key of that install directory, where [`check_installed`]
+//! finds it by name; a WAD with a chain names no install.
 //!
 //! | step | input → output |
 //! |---|---|
@@ -31,7 +32,7 @@ use sha2::{Digest, Sha256};
 use crate::Error;
 
 pub const CORPORA_HEADER: &str = "corpus_id\tproduct\tplatform\tbuild\tapplies_to\tdescription";
-pub const WADS_HEADER: &str = "corpus_id\twad\tsha256\tsize\tfrom_sha256\tstep";
+pub const WADS_HEADER: &str = "corpus_id\twad\tsha256\tsize\tfrom_sha256\tstep\tinstall";
 
 /// One row of `corpora.tsv`.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -86,6 +87,8 @@ pub struct Wad {
     pub sha256: String,
     pub size: u64,
     pub chain: Vec<Link>,
+    /// For a WAD with no chain, the local-config key of the install directory it is found in.
+    pub install: Option<String>,
 }
 
 /// Both tables, parsed and cross-checked.
@@ -190,7 +193,12 @@ impl Corpora {
                     step: Step::parse(step).ok_or_else(|| err(W, n, format!("step {step:?} is not a known step")))?,
                 });
             }
+            let install = (!f[6].is_empty()).then(|| f[6].to_string());
+            if chain.is_empty() != install.is_some() {
+                return Err(err(W, n, "a WAD has either a chain or an install key, not both and not neither"));
+            }
             ws.push(Wad {
+                install,
                 corpus: f[0].to_string(),
                 name: f[1].to_string(),
                 sha256: sha(W, n, "sha256", f[2])?,
@@ -420,7 +428,7 @@ mod tests {
         let c = Corpora::embedded().unwrap();
         assert!(c.corpus("base-pc-demo").is_some());
         assert_eq!(c.wads_of("base-pc-demo").count(), 4);
-        assert_eq!(c.wads_of("base-pc-retail").count(), 4);
+        assert_eq!(c.wads_of("base-pc-retail").count(), 8);
         assert_eq!(c.wads_of("base-pc-elamigos").count(), 8);
         assert!(c.wads_of("base-pc-retail").chain(c.wads_of("base-pc-elamigos")).all(|w| w.chain.is_empty()));
     }
@@ -437,7 +445,7 @@ mod tests {
     #[test]
     fn rows_that_break_the_rules_are_rejected() {
         let base = "b\tbase\tpc\tretail\t\tthe game";
-        let wad = |c: &str| format!("{c}\tvz.wad\t{SHA_A}\t1\t{SHA_B}\tzip:x");
+        let wad = |c: &str| format!("{c}\tvz.wad\t{SHA_A}\t1\t{SHA_B}\tzip:x\t");
         // A DLC must name the base it applies to.
         let e = Corpora::parse(&corpora(&[base, "d\tdlc:x\tpc\tretail\t\tdlc"]), &wads(&[&wad("b"), &wad("d").replace(SHA_A, SHA_B)]))
             .unwrap_err()
@@ -449,6 +457,11 @@ mod tests {
         // A corpus with no WADs.
         let e = Corpora::parse(&corpora(&[base, "c\tdemo\tpc\tdemo\t\tdemo"]), &wads(&[&wad("b")])).unwrap_err().to_string();
         assert!(e.contains("has no WADs"), "{e}");
+        // A chained WAD naming an install, and an installed WAD naming none.
+        let e = Corpora::parse(&corpora(&[base]), &wads(&[&format!("{}k", wad("b"))])).unwrap_err().to_string();
+        assert!(e.contains("either a chain or an install key"), "{e}");
+        let e = Corpora::parse(&corpora(&[base]), &wads(&[&format!("b\tvz.wad\t{SHA_A}\t1\t\t\t")])).unwrap_err().to_string();
+        assert!(e.contains("either a chain or an install key"), "{e}");
         // One file twice within a corpus.
         let e = Corpora::parse(&corpora(&[base]), &wads(&[&wad("b"), &wad("b").replace("vz.wad", "zz.wad")])).unwrap_err().to_string();
         assert!(e.contains("twice within a corpus"), "{e}");
@@ -473,6 +486,7 @@ mod tests {
         let zsha = file_sha256(&zpath).unwrap();
         let wsha = format!("{:x}", Sha256::digest(b"FFCS wad bytes"));
         let wad = Wad {
+            install: None,
             corpus: "c".into(),
             name: "x.wad".into(),
             sha256: wsha.clone(),
@@ -486,7 +500,7 @@ mod tests {
         let inst = work.join("install");
         std::fs::create_dir_all(inst.join("data")).unwrap();
         std::fs::write(inst.join("data/x.wad"), b"FFCS wad bytes").unwrap();
-        let installed = Wad { chain: vec![], ..wad.clone() };
+        let installed = Wad { chain: vec![], install: Some("k".into()), ..wad.clone() };
         assert_eq!(check_installed(&installed, &inst).unwrap(), inst.join("data/x.wad"));
         assert!(derive(&installed, &zpath, &env).unwrap_err().to_string().contains("no chain"));
         std::fs::write(inst.join("data/x.wad"), b"other").unwrap();
