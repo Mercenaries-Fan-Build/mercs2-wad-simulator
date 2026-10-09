@@ -53,8 +53,8 @@ use ucfx_byteswap::{convert, validate};
 
 let be_block: Vec<u8> = std::fs::read("block_be.bin")?;
 
-// dry_run = false, no coverage report
-let le_block = convert::convert_block(&be_block, false, None)?;
+// dry_run = false, no coverage report, no Lua tools (a block holding BINN errors)
+let le_block = convert::convert_block(&be_block, false, None, None)?;
 
 for err in validate::validate_converted_block(&le_block) {
     eprintln!("{:?}", err);
@@ -68,7 +68,7 @@ With a schema coverage report (printed to stderr):
 use ucfx_byteswap::{convert, report::SchemaCoverageReport};
 
 let mut rpt = SchemaCoverageReport::default();
-let le_block = convert::convert_block(&be_block, false, Some(&mut rpt))?;
+let le_block = convert::convert_block(&be_block, false, Some(&mut rpt), None)?;
 rpt.print_report();
 ```
 
@@ -94,7 +94,10 @@ ucfx_byteswap::convert::QUIET.store(true, std::sync::atomic::Ordering::Relaxed);
 ### CLI
 
 ```bash
-# convert one decompressed BE block
+# convert one decompressed BE block (--java/--unluac are required when it holds Lua bytecode)
+ucfx_byteswap block_be.bin --output block_le.bin --java /path/to/java --unluac /path/to/unluac.jar
+
+# convert one decompressed BE block that holds no Lua bytecode
 ucfx_byteswap block_be.bin --output block_le.bin
 
 # pipe mode
@@ -131,14 +134,14 @@ ucfx_byteswap --stdin --aset-recompute < aset_protocol.bin > updated_u32_2.bin
 | `validate` | Post-conversion checks on an LE block; returns `Vec<ValidationError>`. |
 | `havok` | Havok 5.5.0-r1 (HK550) packfile conversion: `convert_havok_be_to_le`, `convert_phy2_be_to_le`, `validate_phy2`. |
 | `audio` | Xbox wavebank → PC IMA ADPCM: `convert_wavebank_data`, `transcode_pws_xbox_to_pc`, `transcode_xma_to_pc_ima`, `normalize_embedded_wavebank_clip`. |
-| `lua` | Lua 5.1 `BINN` bytecode BE→LE via the unluac disassemble/reassemble round-trip: `convert_binn_be_to_le`. |
+| `lua` | Lua 5.1 `BINN` bytecode BE→LE via the unluac disassemble/reassemble round-trip: `convert_binn_be_to_le`, run with the caller's `LuaTools` (java + unluac paths). |
 | `aset` | ASET `packed_block_ref` sub-entry computation: `recompute_block_aset_subs`, `strip_xbox_sub_entry`, `AsetEntry`, `RecomputeCounts`. |
 | `report` | `SchemaCoverageReport` — per-component schema field coverage, unknown type codes, fallback/`needs-investigation` tags. |
 
 ## Notes / gotchas
 
 - **Input must already be decompressed.** The crate takes raw UCFX block bytes; WAD-level decompression is somebody else's job.
-- **External toolchain.** `lua.rs` needs a JRE (`$JAVA`, `$JAVA_HOME/bin/java`, a bundled `tools/jdk21/*/bin/java`, or `java` on PATH) plus unluac (`$UNLUAC_JAR` or `tools/external/unluac/unluac.jar`). `audio.rs` needs `ffmpeg` on PATH for the XMA path only; the ADPCM/IMA paths are pure Rust.
+- **External toolchain.** `lua.rs` runs the `java` executable and unluac jar named by the caller's `LuaTools` (the CLI's `--java` / `--unluac`); `convert_block` errors on a block holding `BINN` when it gets no `LuaTools`. `audio.rs` needs `ffmpeg` on PATH for the XMA path only; the ADPCM/IMA paths are pure Rust.
 - **Decompile-to-source is deliberately not used for Lua.** unluac emits Lua 5.2+ `goto`/labels on complex control flow, which the 5.1 compiler rejects. The bytecode-level disassemble/assemble avoids that.
 - **ASET field order is inverted between platforms.** PC/LE packs `{ block_index : hi16, sub : lo16 }`; the Xbox/BE source is `{ sub : hi16, block : lo16 }`. The Python pipeline mislabels these, which is the root of the recurring sub-field bugs — `aset.rs` keeps the distinction explicit.
 - **`aset.rs` reproduces a known Python bug on purpose.** Per the porting plan it is STEP 1: byte-parity with the current Python output first (so the emitted WAD can be diffed), fix in STEP 3. The bug: the faithful BE sub is not preserved — primaries got the physical index, then body-less stubs were forced to `0xFFFF`, clobbering real sub-offsets.
