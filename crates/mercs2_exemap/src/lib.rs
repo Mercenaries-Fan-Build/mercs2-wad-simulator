@@ -27,12 +27,14 @@
 //! its original container. Console executables come in through [`xdvdfs`] (a file from an Xbox
 //! disc image), [`xbox`] (XEX2 → PE image, and the PE layout Ghidra's loader reads) and [`starts`]
 //! (function starts from Xbox `.pdata` or PS3 `.opd`). [`rtti`] recovers vtables from C++ type
-//! information and [`luareg`] the Lua C-function registration tables, on every platform.
+//! information and [`luareg`] the Lua C-function registration tables, on every platform;
+//! [`matcher`] pairs the functions of two images from those exports.
 
 pub mod catalogue;
 pub mod image;
 pub mod images;
 pub mod luareg;
+pub mod matcher;
 pub mod membership;
 mod mem;
 pub mod rtti;
