@@ -41,8 +41,9 @@ mercs2_formats = { workspace = true }
 # .mercs2-local.toml (exe_corpus, exe_dumps, drmfree_exe), run the official v1.1 patcher under
 # Wine (v11_patcher_exe, wine_binary), and rebuild the console images from their containers
 # (x360_devkit_iso, x360_retail_xex, ps3_eboot_bin, ps3_update_pkgs), and rebuild the Lua corpus
-# WADs from their originals (pc_demo_zip, wine_binary) or check them in place (pc_official_install_dir,
-# pc_repack_install_dir); run
+# WADs from their originals (pc_demo_zip, wine_binary, x360_devkit_iso, x360_dlc_biua_stfs,
+# x360_dlc_prototypes_dir) or check them in place (pc_official_install_dir, pc_repack_install_dir,
+# x360_retail_dir); run
 # them with `cargo xtask retail-test`.
 retail = []
 
