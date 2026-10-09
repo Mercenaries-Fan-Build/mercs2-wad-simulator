@@ -80,8 +80,10 @@ struct Cli {
 
     /// rainbow_table.json (pandemic_hash_m2 -> [names]). Repeatable: later tables
     /// supply names for hashes the earlier ones missed (e.g. the fragment emitted
-    /// by `asset_gap_probe --emit`). Defaults to the main table + the discovered-
-    /// names fragment.
+    /// by `asset_gap_probe --emit`). When given, these tables are exactly the set
+    /// loaded. When absent, the set is `rainbow_table` from `.mercs2-local.toml`
+    /// plus the `data/aset_*_names.json` / `data/aset_block_strings.json`
+    /// fragments under its `notes_docs_dir`. Every table in the set must load.
     #[arg(long)]
     rainbow: Vec<PathBuf>,
 
@@ -134,42 +136,34 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map(|&(id, name, hash)| (id, (name, hash)))
         .collect();
 
-    let requested: Vec<PathBuf> = if cli.rainbow.is_empty() {
+    let tables: Vec<PathBuf> = if cli.rainbow.is_empty() {
+        let start = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let data = mercs2_formats::game_paths::local_config_notes_docs_dir(start)?.join("data");
         vec![
-            PathBuf::from("tools/rainbow_table.json"),
+            mercs2_formats::game_paths::local_config_rainbow_table(start)?,
             // Fragments cracked from the WAD itself, each a set of verified preimages:
             //   asset_gap_probe      — texture-base -> model convention
             //   block_string_harvest — identifiers mined from decompressed block payloads
             //   name_expand          — slot-grammar expansion of the above
             //   aset_external_mine   — block-path stems mined from the CONSOLE WADs, which
             //                          ship an uncompressed name table the PC bake strips
-            PathBuf::from("docs/data/aset_discovered_names.json"),
-            PathBuf::from("docs/data/aset_block_strings.json"),
-            PathBuf::from("docs/data/aset_expanded_names.json"),
-            PathBuf::from("docs/data/aset_external_names.json"),
+            data.join("aset_discovered_names.json"),
+            data.join("aset_block_strings.json"),
+            data.join("aset_expanded_names.json"),
+            data.join("aset_external_names.json"),
             // aset_roster_names — model roots named by crossing the game vehicle/weapon roster with
             // the authored `<faction>_veh_<class>_<name>` grammar (aset_external_mine --roster).
-            PathBuf::from("docs/data/aset_roster_names.json"),
+            data.join("aset_roster_names.json"),
             // aset_variant_names — models that are a DECORATED VARIANT of a named asset
             // (`vz_veh_tank_amx30_base`), found per-model against its own hash (T=1).
-            PathBuf::from("docs/data/aset_variant_names.json"),
+            data.join("aset_variant_names.json"),
         ]
     } else {
         cli.rainbow.clone()
     };
-    let tables: Vec<PathBuf> = requested
-        .iter()
-        .filter(|p| {
-            let ok = p.exists();
-            if !ok {
-                eprintln!("  (skipping absent rainbow table {})", p.display());
-            }
-            ok
-        })
-        .cloned()
-        .collect();
     eprintln!("Loading {} rainbow table(s) ...", tables.len());
-    let rainbow = RainbowTable::load_many(&tables)?;
+    let rainbow = RainbowTable::load_many(&tables)
+        .map_err(|e| format!("load rainbow tables {tables:?}: {e}"))?;
     eprintln!("  {} m2 hashes loaded", rainbow.len());
 
     if let Some(dir) = cli.out.parent() {
