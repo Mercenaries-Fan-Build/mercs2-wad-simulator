@@ -3141,18 +3141,13 @@ pub fn gfx_extract(wadpath: &str, outdir: &str) -> Result<(), String> {
 /// placement with `mercs2_formats::veg`, then reports: coverage %, per-class + per-species counts,
 /// name-hash resolution, and a coarse 500 m XZ density grid (the "treed areas" for the density
 /// stretch goal). Emits the `pandemic_hash_m2` tag-set JSON to `out_path`.
-pub fn veg_census(wadpath: &str, out_path: &str) {
+pub fn veg_census(wadpath: &str, out_path: &str) -> Result<(), String> {
     use mercs2_formats::veg::{classify, VegClass};
     use std::collections::{HashMap, HashSet};
 
-    let Ok(mut w) = wad::open(wadpath) else {
-        eprintln!("[veg] cannot open {wadpath}");
-        return;
-    };
-    let Ok((_low, ls)) = find_terrain_blocks(&mut w) else {
-        eprintln!("[veg] no terrain blocks in {wadpath}");
-        return;
-    };
+    let mut w = wad::open(wadpath).map_err(|e| format!("[veg] cannot open {wadpath}: {e}"))?;
+    let (_low, ls) = find_terrain_blocks(&mut w)
+        .map_err(|e| format!("[veg] no terrain blocks in {wadpath}: {e}"))?;
     let places = mercs2_formats::placement::load_placements(&ls).unwrap_or_default();
 
     const CELL: f32 = 500.0; // density-grid cell size, metres
@@ -3262,12 +3257,12 @@ pub fn veg_census(wadpath: &str, out_path: &str) {
     }
     json.push_str("  }\n}\n");
     if let Some(parent) = std::path::Path::new(out_path).parent() {
-        let _ = std::fs::create_dir_all(parent);
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("[veg] could not create {}: {e}", parent.display()))?;
     }
-    match std::fs::write(out_path, &json) {
-        Ok(()) => println!("[veg] tag-set written: {out_path}"),
-        Err(e) => eprintln!("[veg] could not write {out_path}: {e}"),
-    }
+    std::fs::write(out_path, &json).map_err(|e| format!("[veg] could not write {out_path}: {e}"))?;
+    println!("[veg] tag-set written: {out_path}");
+    Ok(())
 }
 
 /// Tree census (foliage instancing, the CANOPY layer). The trees are NOT placement records —
@@ -3453,7 +3448,8 @@ pub fn tree_census(wadpath: &str, out_path: &str) -> Result<(), String> {
     }
     json.push_str("  ]\n}\n");
     if let Some(parent) = std::path::Path::new(out_path).parent() {
-        let _ = std::fs::create_dir_all(parent);
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("[tree] could not create {}: {e}", parent.display()))?;
     }
     std::fs::write(out_path, &json).map_err(|e| format!("[tree] could not write {out_path}: {e}"))?;
     println!("[tree] instance list written: {out_path} ({n} instances)");
