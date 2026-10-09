@@ -1226,7 +1226,8 @@ pub fn trackmap(wadpath: &str, model: Option<String>, index: Option<String>, wan
     if hits.is_empty() {
         return Err(format!("clip 0x{clip_hash:08X} not found in any animgroup"));
     }
-    let names = rainbow_names(&wanted);
+    let table = mercs2_formats::game_paths::local_config_rainbow_table(std::path::Path::new(env!("CARGO_MANIFEST_DIR")))?;
+    let names = rainbow_names(&table, &wanted)?;
     let nm = |h: u32| names.get(&h).map(String::as_str).unwrap_or("?");
 
     println!("model 0x{hash:08X}: {} HIER bones", s.rig.len());
@@ -3087,7 +3088,8 @@ pub fn gfx_extract(wadpath: &str, outdir: &str) -> Result<(), String> {
             pos = end;
         }
     }
-    let names = rainbow_names(&hashes);
+    let table = mercs2_formats::game_paths::local_config_rainbow_table(std::path::Path::new(env!("CARGO_MANIFEST_DIR")))?;
+    let names = rainbow_names(&table, &hashes)?;
     let mut written = 0usize;
     let mut skipped_dup = 0usize;
     let mut no_magic = 0usize;
@@ -3277,15 +3279,12 @@ pub fn veg_census(wadpath: &str) {
 /// the near (P000) tier only so LOD variants aren't double-counted — plus how many cells also carry
 /// coarse imposter tiers (the resident-horizon potential). Emits per-instance transforms to
 /// `output/foliage/tree_instances.json`.
-pub fn tree_census(wadpath: &str) {
+pub fn tree_census(wadpath: &str) -> Result<(), String> {
     use mercs2_formats::veg::{classify, VegClass};
     use mercs2_formats::world_index::{c3_cell_centre, BlockClass, WorldIndex};
     use std::collections::{BTreeSet, HashMap, HashSet};
 
-    let Ok(mut w) = wad::open(wadpath) else {
-        eprintln!("[tree] cannot open {wadpath}");
-        return;
-    };
+    let mut w = wad::open(wadpath).map_err(|e| format!("[tree] cannot open {wadpath}: {e}"))?;
     let idx = {
         let (archive, file) = wad::archive_and_file(&mut w);
         WorldIndex::build(archive, file)
@@ -3351,7 +3350,8 @@ pub fn tree_census(wadpath: &str) {
         cell_hash.len()
     );
 
-    let names = crate::worldutil::rainbow_names(&all_hashes);
+    let table = mercs2_formats::game_paths::local_config_rainbow_table(std::path::Path::new(env!("CARGO_MANIFEST_DIR")))?;
+    let names = crate::worldutil::rainbow_names(&table, &all_hashes)?;
     println!(
         "[tree] {} of {} model hashes name-resolved via rainbow table",
         names.len(),
@@ -3457,8 +3457,7 @@ pub fn tree_census(wadpath: &str) {
     if let Some(parent) = std::path::Path::new(out_path).parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    match std::fs::write(out_path, &json) {
-        Ok(()) => println!("[tree] instance list written: {out_path} ({n} instances)"),
-        Err(e) => eprintln!("[tree] could not write {out_path}: {e}"),
-    }
+    std::fs::write(out_path, &json).map_err(|e| format!("[tree] could not write {out_path}: {e}"))?;
+    println!("[tree] instance list written: {out_path} ({n} instances)");
+    Ok(())
 }
