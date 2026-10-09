@@ -31,8 +31,12 @@
 //! (function starts from Xbox `.pdata` or PS3 `.opd`). [`rtti`] recovers vtables from C++ type
 //! information and [`luareg`] the Lua C-function registration tables, on every platform;
 //! [`matcher`] pairs the functions of two images from those exports.
+//!
+//! `data/corpora.tsv` and `data/wads.tsv` catalogue the Lua corpus by product, platform and build,
+//! each WAD with the chain that rebuilds it from its original file ([`corpus`]).
 
 pub mod catalogue;
+pub mod corpus;
 mod dtor;
 pub mod image;
 pub mod images;
