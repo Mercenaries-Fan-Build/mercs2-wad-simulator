@@ -15,6 +15,12 @@
 //!   length (u32 little-endian) and bytes.
 //!
 //! Line numbers are those the chunk records (0 when its debug information is stripped).
+//!
+//! `lookups` lists, in order of first use and without repeats, every `Namespace.Name` the function
+//! reads the way Lua 5.1 compiles that expression: `GETGLOBAL r, "Namespace"` (opcode 5)
+//! immediately followed by `GETTABLE r, r, "Name"` (opcode 6) with a string-constant key. A lookup
+//! may be a function about to be called or any other field (an event id, a constant, a sub-table);
+//! lookups compiled any other way are not listed.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -27,7 +33,10 @@ use crate::luachunk::{decode, decode_info, encode, Constant, Proto};
 use crate::wadscripts::scripts;
 use crate::Error;
 
-pub const HEADER: &str = "corpus\twad\tscript\tname_hash\tpath\tline_defined\tlast_line_defined\tnum_params\tis_vararg\tnups\tmax_stack\tcode_len\tconstants\tfunctions\tcode_hash\tconstants_hash\tdebug";
+pub const HEADER: &str = "corpus\twad\tscript\tname_hash\tpath\tline_defined\tlast_line_defined\tnum_params\tis_vararg\tnups\tmax_stack\tcode_len\tconstants\tfunctions\tcode_hash\tconstants_hash\tdebug\tlookups";
+
+const OP_GETGLOBAL: u32 = 5;
+const OP_GETTABLE: u32 = 6;
 
 /// One function of a corpus.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -52,12 +61,14 @@ pub struct FnRow {
     pub constants_hash: String,
     /// Whether this function carries line info, local or upvalue names, or a source name.
     pub debug: bool,
+    /// `Namespace.Name` lookups, in order of first use (see the module docs).
+    pub lookups: Vec<String>,
 }
 
 impl FnRow {
     pub fn tsv(&self) -> String {
         format!(
-            "{}\t{}\t{}\t0x{:08x}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+            "{}\t{}\t{}\t0x{:08x}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
             self.corpus,
             self.wad,
             self.script,
@@ -74,9 +85,37 @@ impl FnRow {
             self.functions,
             self.code_hash,
             self.constants_hash,
-            if self.debug { "yes" } else { "stripped" }
+            if self.debug { "yes" } else { "stripped" },
+            self.lookups.join(";")
         )
     }
+}
+
+/// The function's `Namespace.Name` lookups (see the module docs).
+pub fn lookups(p: &Proto) -> Vec<String> {
+    let k = |i: u32| match p.constants.get(i as usize) {
+        Some(Constant::String(s)) => Some(String::from_utf8_lossy(s).into_owned()),
+        _ => None,
+    };
+    let mut out: Vec<String> = Vec::new();
+    for w in p.code.windows(2) {
+        let (g, t) = (w[0], w[1]);
+        if g & 0x3f != OP_GETGLOBAL || t & 0x3f != OP_GETTABLE {
+            continue;
+        }
+        let reg = (g >> 6) & 0xff;
+        let (ta, tb, tc) = ((t >> 6) & 0xff, (t >> 23) & 0x1ff, (t >> 14) & 0x1ff);
+        if ta != reg || tb != reg || tc & 0x100 == 0 {
+            continue;
+        }
+        if let (Some(ns), Some(name)) = (k(g >> 14), k(tc & 0xff)) {
+            let lookup = format!("{ns}.{name}");
+            if !out.contains(&lookup) {
+                out.push(lookup);
+            }
+        }
+    }
+    out
 }
 
 fn short(h: Sha256) -> String {
@@ -126,6 +165,7 @@ fn rows(p: &Proto, path: String, base: &FnRow, out: &mut Vec<FnRow>) {
         code_hash: code_hash(p),
         constants_hash: constants_hash(p),
         debug: p.source.is_some() || !p.line_info.is_empty() || !p.loc_vars.is_empty() || !p.upvalues.is_empty(),
+        lookups: lookups(p),
         ..base.clone()
     });
     for (i, q) in p.protos.iter().enumerate() {
@@ -197,6 +237,7 @@ pub fn index(corpora: &Corpora, corpus_id: &str, wads: &[PathBuf]) -> Result<Vec
                 code_hash: String::new(),
                 constants_hash: String::new(),
                 debug: false,
+                lookups: Vec::new(),
             };
             rows(&chunk.main, "main".into(), &base, &mut out);
         }
@@ -256,6 +297,7 @@ mod tests {
             code_hash: String::new(),
             constants_hash: String::new(),
             debug: false,
+            lookups: Vec::new(),
         };
         let mut out = Vec::new();
         rows(&tree, "main".into(), &base, &mut out);
@@ -263,5 +305,33 @@ mod tests {
         assert_eq!(paths, ["main", "main/0", "main/0/0", "main/1"]);
         assert_eq!(out[0].functions, 2);
         assert!(!out[3].debug);
+    }
+
+    #[test]
+    fn lookups_are_adjacent_getglobal_gettable_pairs_with_a_constant_key() {
+        // K: 0 "Ns", 1 "Fn", 2 "Other".
+        let getglobal = |a: u32, bx: u32| OP_GETGLOBAL | (a << 6) | (bx << 14);
+        let gettable = |a: u32, b: u32, c: u32| OP_GETTABLE | (a << 6) | (c << 14) | (b << 23);
+        let k = vec![
+            Constant::String(b"Ns".to_vec()),
+            Constant::String(b"Fn".to_vec()),
+            Constant::String(b"Other".to_vec()),
+        ];
+        let code = vec![
+            getglobal(0, 0),
+            gettable(0, 0, 0x101), // Ns.Fn
+            getglobal(1, 0),
+            gettable(1, 1, 0x101), // Ns.Fn again: listed once
+            getglobal(2, 0),
+            gettable(2, 2, 3),     // key from a register, not a constant
+            getglobal(3, 0),
+            gettable(4, 3, 0x102), // result in another register: not this pattern
+            getglobal(5, 0),
+            0x1e,
+            gettable(5, 5, 0x102), // not adjacent
+            getglobal(6, 0),
+            gettable(6, 6, 0x102), // Ns.Other
+        ];
+        assert_eq!(lookups(&proto(code, k, vec![])), ["Ns.Fn", "Ns.Other"]);
     }
 }
