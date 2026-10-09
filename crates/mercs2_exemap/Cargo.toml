@@ -26,6 +26,8 @@ md-5 = "0.10"
 securom_unwrap = { path = "../securom_unwrap" }
 # The FnMnemonicSig exports the matcher reads are JSON.
 serde_json = "1"
+# x86 decoding, to recognise MSVC deleting destructors in the PC images.
+iced-x86 = { version = "1", default-features = false, features = ["std", "decoder", "instr_info"] }
 # XEX2 session-key unwrap and basefile decryption (AES-128 ECB/CBC).
 aes = "0.8"
 # The LZX decoder for compressed XEX basefiles; the game-gated tests also find the corpus through
