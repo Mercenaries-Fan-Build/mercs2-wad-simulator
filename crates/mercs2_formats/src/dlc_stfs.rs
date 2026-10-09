@@ -262,6 +262,16 @@ impl StfsReader {
         let entry = self
             .doh_entry()
             .ok_or("No DOH file found in STFS file table")?;
+        self.read_entry(entry)
+    }
+
+    /// The file-table entry whose name is exactly `name` (STFS names are case-sensitive).
+    pub fn entry(&self, name: &str) -> Option<&FileTableEntry> {
+        self.file_table.iter().find(|e| !e.is_dir && e.name == name)
+    }
+
+    /// Read a whole file by walking its hash chain.
+    pub fn read_entry(&self, entry: &FileTableEntry) -> Result<Vec<u8>, String> {
         let chain = self.build_chain(entry.first_block, entry.alloc_blocks);
         self.read_with_chain(&chain, 0, entry.file_size as usize)
     }
