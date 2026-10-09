@@ -17,6 +17,8 @@
 //! | `zip:<entry>` | a zip archive → its entry |
 //! | `wine-sfx:<path>` | a self-extracting Windows installer run silently under Wine (`-s2 -d<dir>`) → the file it extracts at `<path>` |
 //! | `wine-extrac32:<entry>` | a Microsoft cabinet, extracted with Wine's `extrac32` → its entry |
+//! | `xdvdfs:<path>` | an Xbox disc image → the file at `<path>` ([`crate::xdvdfs`]) |
+//! | `stfs:<name>` | an Xbox 360 STFS package (LIVE/PIRS/CON) → the file `<name>` in it |
 //!
 //! The Wine steps need the `wine64` binary ([`Env::wine`]); a chain that reaches one without it is
 //! an error naming the step.
@@ -54,6 +56,8 @@ pub enum Step {
     Zip(String),
     WineSfx(String),
     WineExtrac32(String),
+    Xdvdfs(String),
+    Stfs(String),
 }
 
 impl Step {
@@ -66,6 +70,8 @@ impl Step {
             "zip" => Some(Step::Zip(arg.to_string())),
             "wine-sfx" => Some(Step::WineSfx(arg.to_string())),
             "wine-extrac32" => Some(Step::WineExtrac32(arg.to_string())),
+            "xdvdfs" => Some(Step::Xdvdfs(arg.to_string())),
+            "stfs" => Some(Step::Stfs(arg.to_string())),
             _ => None,
         }
     }
@@ -82,7 +88,8 @@ pub struct Link {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Wad {
     pub corpus: String,
-    /// The WAD's file name as the game installs it.
+    /// The WAD's path relative to the game's install or disc root (`data/vz.wad` on PC, `vz.wad` on
+    /// Xbox 360), or its name inside its package for a DLC.
     pub name: String,
     pub sha256: String,
     pub size: u64,
@@ -327,6 +334,38 @@ fn apply(step: &Step, input: &Path, input_sha: &str, env: &Env) -> Result<PathBu
             }
             Ok(out)
         }
+        Step::Xdvdfs(member) => {
+            let out = dir.join("xdvdfs").join(member);
+            if !out.is_file() {
+                use std::io::{Seek, SeekFrom};
+                let mut f = File::open(input).map_err(|e| Error::new(format!("open {}: {e}", input.display())))?;
+                let (off, size) = crate::xdvdfs::locate(&mut f, member)?;
+                f.seek(SeekFrom::Start(off)).map_err(|e| Error::new(format!("seek {}: {e}", input.display())))?;
+                std::fs::create_dir_all(out.parent().unwrap()).map_err(|e| Error::new(format!("create dir: {e}")))?;
+                let mut o = File::create(&out).map_err(|e| Error::new(format!("create {}: {e}", out.display())))?;
+                let copied = std::io::copy(&mut f.take(size), &mut o).map_err(|e| Error::new(format!("copy {member}: {e}")))?;
+                if copied != size {
+                    return Err(Error::new(format!("xdvdfs: {member}: {copied} of {size} bytes before the image ended")));
+                }
+            }
+            Ok(out)
+        }
+        Step::Stfs(name) => {
+            let out = dir.join("stfs").join(name);
+            if !out.is_file() {
+                let data = std::fs::read(input).map_err(|e| Error::new(format!("read {}: {e}", input.display())))?;
+                let magic = data.get(0..4).unwrap_or_default();
+                if magic != b"LIVE" && magic != b"PIRS" && magic != b"CON " {
+                    return Err(Error::new(format!("stfs: {} is not an STFS package (magic {magic:?})", input.display())));
+                }
+                let r = mercs2_formats::dlc_stfs::StfsReader::new(data);
+                let e = r.entry(name).ok_or_else(|| Error::new(format!("stfs: {} holds no {name}", input.display())))?;
+                let bytes = r.read_entry(e).map_err(|e| Error::new(format!("stfs: {name}: {e}")))?;
+                std::fs::create_dir_all(out.parent().unwrap()).map_err(|e| Error::new(format!("create dir: {e}")))?;
+                std::fs::write(&out, bytes).map_err(|e| Error::new(format!("write {}: {e}", out.display())))?;
+            }
+            Ok(out)
+        }
         Step::WineExtrac32(entry) => {
             let out_dir = dir.join("cab");
             if !out_dir.is_dir() {
@@ -391,9 +430,9 @@ pub fn derive(wad: &Wad, container: &Path, env: &Env) -> Result<PathBuf, Error> 
     Ok(path)
 }
 
-/// Check that the WAD at `<install>/data/<name>` has the catalogued sha256 and size.
+/// Check that the WAD at `<install>/<name>` has the catalogued sha256 and size.
 pub fn check_installed(wad: &Wad, install: &Path) -> Result<PathBuf, Error> {
-    let path = install.join("data").join(&wad.name);
+    let path = install.join(&wad.name);
     let size = std::fs::metadata(&path).map_err(|e| Error::new(format!("{} {}: {}: {e}", wad.corpus, wad.name, path.display())))?.len();
     let s = file_sha256(&path)?;
     if s != wad.sha256 || size != wad.size {
@@ -438,6 +477,8 @@ mod tests {
         assert_eq!(Step::parse("zip:a.exe"), Some(Step::Zip("a.exe".into())));
         assert_eq!(Step::parse("wine-sfx:data/vz.wad"), Some(Step::WineSfx("data/vz.wad".into())));
         assert_eq!(Step::parse("wine-extrac32:x"), Some(Step::WineExtrac32("x".into())));
+        assert_eq!(Step::parse("xdvdfs:vz.wad"), Some(Step::Xdvdfs("vz.wad".into())));
+        assert_eq!(Step::parse("stfs:DLC01.doh"), Some(Step::Stfs("DLC01.doh".into())));
         assert_eq!(Step::parse("zip:"), None);
         assert_eq!(Step::parse("unrar:x"), None);
     }
@@ -500,7 +541,7 @@ mod tests {
         let inst = work.join("install");
         std::fs::create_dir_all(inst.join("data")).unwrap();
         std::fs::write(inst.join("data/x.wad"), b"FFCS wad bytes").unwrap();
-        let installed = Wad { chain: vec![], install: Some("k".into()), ..wad.clone() };
+        let installed = Wad { chain: vec![], install: Some("k".into()), name: "data/x.wad".into(), ..wad.clone() };
         assert_eq!(check_installed(&installed, &inst).unwrap(), inst.join("data/x.wad"));
         assert!(derive(&installed, &zpath, &env).unwrap_err().to_string().contains("no chain"));
         std::fs::write(inst.join("data/x.wad"), b"other").unwrap();
