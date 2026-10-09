@@ -7,12 +7,13 @@
 //!
 //! Every console image is rebuilt from the container whose sha256 starts its chain, with every
 //! intermediate sha256 checked; every `code_image` claim is checked byte for byte; and every
-//! analysed image yields function starts.
+//! analysed image yields function starts and vtables (on PS3, every vtable slot an `.opd` function).
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use mercs2_exemap::images::{derive, shared_code, stream_sha256, Images, Platform};
+use mercs2_exemap::rtti::vtables;
 use mercs2_exemap::starts::function_starts;
 use mercs2_exemap::Catalogue;
 use mercs2_formats::game_paths::{
@@ -73,6 +74,17 @@ fn every_console_image_rebuilds_from_its_container_and_shares_the_code_it_claims
             None => {
                 let (starts, _) = function_starts(bytes).unwrap_or_else(|e| panic!("image {}: {e}", m.id));
                 assert!(!starts.is_empty(), "image {} has no function starts", m.id);
+                let vts = vtables(bytes).unwrap_or_else(|e| panic!("image {}: {e}", m.id));
+                assert!(!vts.is_empty(), "image {} has no vtables", m.id);
+                // A PS3 vtable slot is an .opd descriptor's code; Xbox .pdata omits leaf functions,
+                // so only the PS3 slots are all function starts.
+                if m.platform == Platform::Ps3 {
+                    for v in &vts {
+                        for f in &v.slots {
+                            assert!(starts.binary_search(f).is_ok(), "image {}: {} slot 0x{f:08x} is not an .opd function", m.id, v.raw_name);
+                        }
+                    }
+                }
             }
         }
     }
