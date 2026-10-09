@@ -1,17 +1,53 @@
 //! sges block compression and decompression.
+//!
+//! A WAD block is a segment stream. The PC bake writes it little-endian under the magic `sges`;
+//! the Xbox 360 and PS3 bakes write the same layout with every field big-endian, under the magic
+//! `segs`:
+//!
+//! ```text
+//! +0x00 magic       `sges` (little-endian fields) or `segs` (big-endian fields)
+//! +0x04 u16 version
+//! +0x06 u16 segment_count
+//! +0x08 u32 total_uncompressed
+//! +0x0c u32 total_compressed   (16-byte-aligned end of the last segment)
+//! +0x10 segment_count × { u16 comp_size, u16 uncomp_size (0 = 65536), u32 offset_with_flag }
+//! ```
+//!
+//! `offset_with_flag` is the segment's byte offset from the start of the stream with bit 0 set
+//! when the segment is raw deflate; a segment with bit 0 clear is stored, `comp_size` bytes long
+//! (0 = `uncomp_size`).
 
 use flate2::write::DeflateEncoder;
 use flate2::{Compression, Decompress};
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
 
-use crate::ffcs::{read_u32_le, IndxEntry, PAGE_SIZE};
+use crate::ffcs::{Endian, IndxEntry, PAGE_SIZE};
 
 const DEFAULT_SEGMENT_SIZE: usize = 65536;
 const DEFAULT_LEVEL: u32 = 6;
 
 fn read_u16_le(data: &[u8], offset: usize) -> u16 {
     u16::from_le_bytes([data[offset], data[offset + 1]])
+}
+
+fn read_u16(e: Endian, data: &[u8], offset: usize) -> u16 {
+    match e {
+        Endian::Little => read_u16_le(data, offset),
+        Endian::Big => u16::from_be_bytes([data[offset], data[offset + 1]]),
+    }
+}
+
+/// The byte order a segment stream's magic declares: `sges` little-endian, `segs` big-endian.
+fn stream_endian(block_data: &[u8]) -> Result<Endian, String> {
+    match block_data.get(0..4) {
+        Some(b"sges") => Ok(Endian::Little),
+        Some(b"segs") => Ok(Endian::Big),
+        other => Err(format!(
+            "segment stream starts with {:02x?}, neither `sges` nor `segs`",
+            other.unwrap_or(block_data)
+        )),
+    }
 }
 
 /// Exact byte length of the `sges` stream at the start of `block_data`.
@@ -28,7 +64,7 @@ fn read_u16_le(data: &[u8], offset: usize) -> u16 {
 /// the inflater actually stopped (`total_in`), since the per-segment u16 `compressed_size`
 /// is unreliable for large/incompressible segments.
 pub fn compressed_len(block_data: &[u8]) -> Result<usize, String> {
-    let segments = parse_segment_table(block_data)?;
+    let (endian, segments) = parse_segment_table(block_data)?;
     let end = block_data.len();
     let mut max_end = 16 + segments.len() * 8; // header + segment table
 
@@ -71,7 +107,7 @@ pub fn compressed_len(block_data: &[u8]) -> Result<usize, String> {
 
     // `total_c` @ +12 is the writer's own record of that value. Prefer it, but only if it
     // agrees with the walk (>= it, and in bounds) — never let a bogus header over-read.
-    let declared = read_u32_le(block_data, 12) as usize;
+    let declared = endian.u32(block_data, 12) as usize;
     if declared >= walked && declared <= end {
         return Ok(declared);
     }
@@ -85,19 +121,15 @@ struct Segment {
     is_compressed: bool,
 }
 
-/// Parse the `sges` header + segment table (shared by `decompress_sges` / `compressed_len`).
-fn parse_segment_table(block_data: &[u8]) -> Result<Vec<Segment>, String> {
+/// Parse the header + segment table of an `sges` or `segs` stream (shared by `decompress_sges` /
+/// `compressed_len`), with the byte order its magic declares.
+fn parse_segment_table(block_data: &[u8]) -> Result<(Endian, Vec<Segment>), String> {
     if block_data.len() < 16 {
-        return Err("Block too small for sges header".into());
+        return Err("Block too small for a segment-stream header".into());
     }
-    if &block_data[0..4] != b"sges" {
-        return Err(format!(
-            "Bad sges magic: {:02X} {:02X} {:02X} {:02X}",
-            block_data[0], block_data[1], block_data[2], block_data[3]
-        ));
-    }
+    let e = stream_endian(block_data)?;
 
-    let segment_count = read_u16_le(block_data, 6) as usize;
+    let segment_count = read_u16(e, block_data, 6) as usize;
     let table_start = 16usize;
     let table_size = segment_count * 8;
     if block_data.len() < table_start + table_size {
@@ -107,14 +139,14 @@ fn parse_segment_table(block_data: &[u8]) -> Result<Vec<Segment>, String> {
     let mut segments = Vec::with_capacity(segment_count);
     for i in 0..segment_count {
         let base = table_start + i * 8;
-        let compressed_size = read_u16_le(block_data, base) as usize;
-        let raw_uncomp = read_u16_le(block_data, base + 2) as usize;
+        let compressed_size = read_u16(e, block_data, base) as usize;
+        let raw_uncomp = read_u16(e, block_data, base + 2) as usize;
         let uncompressed_size = if raw_uncomp == 0 {
             DEFAULT_SEGMENT_SIZE
         } else {
             raw_uncomp
         };
-        let offset_with_flag = read_u32_le(block_data, base + 4);
+        let offset_with_flag = e.u32(block_data, base + 4);
         segments.push(Segment {
             compressed_size,
             uncompressed_size,
@@ -122,28 +154,25 @@ fn parse_segment_table(block_data: &[u8]) -> Result<Vec<Segment>, String> {
             is_compressed: (offset_with_flag & 1) != 0,
         });
     }
-    Ok(segments)
+    Ok((e, segments))
 }
 
+/// Inflate a whole `sges` (little-endian) or `segs` (big-endian) segment stream.
+///
+/// Every segment must decode to exactly its `uncomp_size`, and the segments together to exactly
+/// the header's `total_uncompressed`; anything else is an error naming the segment. The per-segment
+/// u16 `comp_size` is unreliable for deflate segments (it can wrap or be 0), so a deflate segment is
+/// fed the bytes from its offset up to the next segment's offset (capped at 128 KB) and the
+/// inflater consumes exactly its stream.
 pub fn decompress_sges(block_data: &[u8]) -> Result<Vec<u8>, String> {
-    let segments = parse_segment_table(block_data)?;
-    let total_uncompressed = read_u32_le(block_data, 8) as usize;
-
-    // Mirror tools/sges_decompress.py: the per-segment u16 `compressed_size` is
-    // unreliable for incompressible/large segments (it can wrap or be 0), so for
-    // COMPRESSED segments we feed the inflater the byte span from this segment's
-    // offset up to the next segment's offset (capped at 128 KB) and let it consume
-    // exactly the deflate stream. Output is capped at the header's total_uncompressed.
-    let target = total_uncompressed;
+    let (e, segments) = parse_segment_table(block_data)?;
+    let target = e.u32(block_data, 8) as usize;
     let end = block_data.len();
-    let mut output = Vec::with_capacity(total_uncompressed);
+    let mut output = Vec::with_capacity(target);
     for (i, seg) in segments.iter().enumerate() {
-        if output.len() >= target {
-            break;
-        }
         let pos = seg.data_offset;
         if pos >= end {
-            break;
+            return Err(format!("segment {i}: offset 0x{pos:x} is past the {end}-byte stream"));
         }
         if seg.is_compressed {
             let next_off = if i + 1 < segments.len() {
@@ -153,45 +182,76 @@ pub fn decompress_sges(block_data: &[u8]) -> Result<Vec<u8>, String> {
             };
             let read_end = next_off.min(pos + 131072).min(end);
             if read_end <= pos {
-                break;
+                return Err(format!("segment {i}: no bytes between offset 0x{pos:x} and the next segment"));
             }
-            let chunk = &block_data[pos..read_end];
             let mut decompressor = Decompress::new(false);
             let mut buf = vec![0u8; seg.uncompressed_size];
-            match decompressor.decompress(chunk, &mut buf, flate2::FlushDecompress::Finish) {
-                Ok(_) => {
-                    let written = decompressor.total_out() as usize;
-                    buf.truncate(written);
-                    output.extend_from_slice(&buf);
-                }
-                // Match the Python reference: stop on a corrupt stream rather than
-                // failing the whole block (the page_count check flags truncation).
-                Err(_) => break,
+            decompressor
+                .decompress(&block_data[pos..read_end], &mut buf, flate2::FlushDecompress::Finish)
+                .map_err(|err| format!("segment {i}: inflate at 0x{pos:x}: {err}"))?;
+            let written = decompressor.total_out() as usize;
+            if written != seg.uncompressed_size {
+                return Err(format!(
+                    "segment {i}: inflated {written} bytes, the table says {}",
+                    seg.uncompressed_size
+                ));
             }
+            output.extend_from_slice(&buf);
         } else {
-            let actual_sz = if seg.compressed_size > 0 {
+            let size = if seg.compressed_size > 0 {
                 seg.compressed_size
             } else {
                 seg.uncompressed_size
             };
-            let remaining = target - output.len();
-            let read_sz = actual_sz.min(remaining);
-            let read_end = (pos + read_sz).min(end);
-            if read_end > pos {
-                output.extend_from_slice(&block_data[pos..read_end]);
+            if size != seg.uncompressed_size {
+                return Err(format!(
+                    "segment {i}: stored segment of {size} bytes, the table says {} uncompressed",
+                    seg.uncompressed_size
+                ));
             }
+            if pos + size > end {
+                return Err(format!("segment {i}: stored bytes 0x{pos:x}+{size} run past the {end}-byte stream"));
+            }
+            output.extend_from_slice(&block_data[pos..pos + size]);
         }
     }
-    if output.len() > target {
-        output.truncate(target);
+    if output.len() != target {
+        return Err(format!(
+            "segments decode to {} bytes, the header says {target}",
+            output.len()
+        ));
     }
     Ok(output)
 }
 
-/// Read block `block_index` of an opened WAD and inflate it: a little-endian `sges` stream (the PC
-/// bake) through [`decompress_sges`], a big-endian `segs` stream (the Xbox 360 and PS3 bakes)
-/// through [`crate::dlc_input::decompress_be_sges`]. A block that starts with anything else is an
-/// error.
+/// Whether INDX entry `idx` is consistent with the stored bytes it points at, which start with
+/// `head`: a block flagged compressed ([`IndxEntry::is_compressed`]) is an `sges`/`segs` stream; a
+/// block that is not is stored as-is in exactly its decompressed page count and is not a stream.
+fn check_storage(indx: &IndxEntry, idx: usize, head: &[u8]) -> Result<(), String> {
+    let stream = matches!(head.get(0..4), Some(b"sges") | Some(b"segs"));
+    match (indx.is_compressed(), stream) {
+        (true, true) => Ok(()),
+        (true, false) => Err(format!(
+            "block {idx} is flagged compressed but starts with {:02x?}, neither `sges` nor `segs`",
+            &head[..head.len().min(4)]
+        )),
+        (false, true) => Err(format!(
+            "block {idx} is flagged stored but starts with a segment-stream magic {:02x?}",
+            &head[..4]
+        )),
+        (false, false) if indx.compressed_page_count() != indx.decompressed_page_count() => Err(format!(
+            "block {idx} is flagged stored but occupies {} pages for {} decompressed pages",
+            indx.compressed_page_count(),
+            indx.decompressed_page_count()
+        )),
+        (false, false) => Ok(()),
+    }
+}
+
+/// Read block `block_index` of an opened WAD. A block flagged compressed is inflated with
+/// [`decompress_sges`] (a little-endian `sges` stream on PC, a big-endian `segs` stream on Xbox 360
+/// and PS3); a block flagged stored is returned as stored, its whole page count. A block whose bytes
+/// contradict its flag is an error.
 pub fn decompress_block(
     file: &mut File,
     indx_entries: &[IndxEntry],
@@ -215,19 +275,17 @@ pub fn decompress_block(
     file.read_exact(&mut compressed_data)
         .map_err(|e| format!("read error: {e}"))?;
 
-    match compressed_data.get(0..4) {
-        Some(b"sges") => decompress_sges(&compressed_data),
-        Some(b"segs") => crate::dlc_input::decompress_be_sges(&compressed_data, 0, compressed_data.len()),
-        _ => Err(format!(
-            "block {idx} starts with {:02x?}, which is neither a little-endian `sges` nor a big-endian `segs` stream",
-            &compressed_data[..compressed_data.len().min(4)]
-        )),
+    check_storage(indx, idx, &compressed_data)?;
+    if !indx.is_compressed() {
+        return Ok(compressed_data);
     }
+    decompress_sges(&compressed_data).map_err(|e| format!("block {idx}: {e}"))
 }
 
 /// Decompress only the HEAD of a block (first ≤ `max_out` bytes) — enough to read the
-/// block entry table without inflating a whole multi-MB block. Reads at most the header,
-/// segment table and first segment; non-sges blocks return their leading bytes directly.
+/// block entry table without inflating a whole multi-MB block. A compressed block reads at most
+/// the header, segment table and first segment of its `sges`/`segs` stream; a stored block returns
+/// its leading bytes. A block whose bytes contradict its INDX flag is an error.
 pub fn decompress_block_head(
     file: &mut File,
     indx_entries: &[IndxEntry],
@@ -252,23 +310,28 @@ pub fn decompress_block_head(
     file.read_exact(&mut head)
         .map_err(|e| format!("read error: {e}"))?;
 
-    if head.len() < 24 || &head[0..4] != b"sges" {
+    check_storage(indx, idx, &head)?;
+    if !indx.is_compressed() {
         head.truncate(max_out);
         return Ok(head);
     }
-    let segment_count = read_u16_le(&head, 6) as usize;
+    if head.len() < 24 {
+        return Err(format!("block {idx}: {} bytes, too small for a segment stream", head.len()));
+    }
+    let e = stream_endian(&head).map_err(|m| format!("block {idx}: {m}"))?;
+    let segment_count = read_u16(e, &head, 6) as usize;
     if segment_count == 0 {
-        return Err("sges head: no segments".into());
+        return Err("segment stream head: no segments".into());
     }
     // First segment table row @0x10 (same decode as `decompress_sges`).
-    let compressed_size0 = read_u16_le(&head, 16) as usize;
-    let raw_uncomp = read_u16_le(&head, 18) as usize;
+    let compressed_size0 = read_u16(e, &head, 16) as usize;
+    let raw_uncomp = read_u16(e, &head, 18) as usize;
     let uncompressed_size = if raw_uncomp == 0 {
         DEFAULT_SEGMENT_SIZE
     } else {
         raw_uncomp
     };
-    let offset_with_flag = read_u32_le(&head, 20);
+    let offset_with_flag = e.u32(&head, 20);
     let is_compressed = (offset_with_flag & 1) != 0;
     let data_offset = (offset_with_flag & 0xFFFFFFFE) as usize;
     if data_offset >= head.len() {
@@ -460,30 +523,41 @@ mod tests {
         b.extend_from_slice(&(payload.len() as u32).to_be_bytes());
         b.extend_from_slice(&n.to_be_bytes());
         b.extend_from_slice(&n.to_be_bytes());
-        b.extend_from_slice(&0u32.to_be_bytes());
+        // Offset 32 (header + one table row, 16-byte aligned), bit 0 clear: stored.
+        b.extend_from_slice(&32u32.to_be_bytes());
         b.resize(32, 0);
         b.extend_from_slice(payload);
         b
     }
 
     #[test]
-    fn decompress_block_inflates_both_byte_orders_and_refuses_anything_else() {
+    fn decompress_block_follows_the_indx_compressed_flag() {
         let page = PAGE_SIZE as usize;
         let le = compress_sges(b"little-endian block").unwrap();
         let be = segs_stored(b"big-endian block");
-        let mut file = vec![0u8; 3 * page];
+        let mut file = vec![0u8; 4 * page];
         file[..le.len()].copy_from_slice(&le);
         file[page..page + be.len()].copy_from_slice(&be);
-        file[2 * page..2 * page + 4].copy_from_slice(b"UCFX");
+        file[2 * page..2 * page + 8].copy_from_slice(&[0, 0, 0, 1, b'U', b'C', b'F', b'X']);
         let path = std::env::temp_dir().join(format!("sges_decompress_block_{}.bin", std::process::id()));
         std::fs::write(&path, &file).unwrap();
-        let entry = |page_index: u32| IndxEntry { page_index, packed_field: 1, flags_and_page_count: 1 };
-        let indx = [entry(0), entry(1), entry(2)];
+        let compressed = |page_index: u32| IndxEntry { page_index, packed_field: 1, flags_and_page_count: 0x8000_0001 };
+        let stored = |page_index: u32, pages: u32| IndxEntry { page_index, packed_field: 1, flags_and_page_count: pages };
         let mut f = File::open(&path).unwrap();
+        let indx = [compressed(0), compressed(1), stored(2, 1)];
         assert_eq!(decompress_block(&mut f, &indx, 0).unwrap(), b"little-endian block");
         assert_eq!(decompress_block(&mut f, &indx, 1).unwrap(), b"big-endian block");
-        let e = decompress_block(&mut f, &indx, 2).unwrap_err();
-        assert!(e.contains("neither a little-endian `sges` nor a big-endian `segs`"), "{e}");
+        // A stored block is returned as stored, its whole page.
+        let raw = decompress_block(&mut f, &indx, 2).unwrap();
+        assert_eq!(raw.len(), page);
+        assert_eq!(&raw[..8], &[0, 0, 0, 1, b'U', b'C', b'F', b'X']);
+        // Bytes that contradict the flag.
+        let e = decompress_block(&mut f, &[compressed(2)], 0).unwrap_err();
+        assert!(e.contains("flagged compressed but starts with"), "{e}");
+        let e = decompress_block(&mut f, &[stored(0, 1)], 0).unwrap_err();
+        assert!(e.contains("flagged stored but starts with a segment-stream magic"), "{e}");
+        let e = decompress_block(&mut f, &[stored(2, 2)], 0).unwrap_err();
+        assert!(e.contains("occupies 2 pages for 1 decompressed pages"), "{e}");
         std::fs::remove_file(&path).ok();
     }
 
