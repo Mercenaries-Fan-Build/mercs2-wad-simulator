@@ -12,7 +12,7 @@
 //! Examples:
 //!   mercs2_probe c3-meta out.ndjson
 //!   mercs2_probe placement-hashes out.json
-//!   mercs2_probe export-c3-obj [outdir]
+//!   mercs2_probe export-c3-obj <outdir>
 //!   mercs2_probe terrainmesh-probe [block]
 //!   mercs2_probe wad-meshes --model 0x1234ABCD
 //!   mercs2_probe trackmap --model 0x.. --index 0 --clip 0x..
@@ -47,7 +47,7 @@ fn usage() -> ! {
     eprintln!(
         "usage: mercs2_probe <subcommand> [args] [--wad <path>]\n\
          subcommands:\n\
-         \x20 c3-meta <out.ndjson>          placement-hashes <out.json>   export-c3-obj [outdir]\n\
+         \x20 c3-meta <out.ndjson>          placement-hashes <out.json>   export-c3-obj <outdir>\n\
          \x20 terrainmesh-probe [block]     terrain-probe                 terrain-consumer\n\
          \x20 wad-list                      wad-meshes [--model H]        placement-probe\n\
          \x20 world-index                   stream-probe                  lod is engine-only\n\
@@ -55,10 +55,10 @@ fn usage() -> ! {
          \x20 entity-find [0xKEY ...]       comp-probe                    comp-dump [Name]\n\
          \x20 block-grep <needle>           scan-hash <0xH ...>           find-ref <0xH ...>\n\
          \x20 block-probe <index>           placement-names               hier --model H [names.txt] [--csv P]\n\
-         \x20 veg-census                    (foliage instancing: understory coverage + tag-set)\n\
-         \x20 tree-census                   (foliage instancing: c3-cell canopy trees + instance list)\n\
+         \x20 veg-census <out.json>         (foliage instancing: understory coverage + tag-set)\n\
+         \x20 tree-census <out.json>        (foliage instancing: c3-cell canopy trees + instance list)\n\
          \x20 bone-census [names.txt] [--csv P] [--wads a.wad,b.wad]      (every HIER node in every model)\n\
-         \x20 gfx-extract [outdir]          (Scaleform movies -> output/gfx_movies)\n\
+         \x20 gfx-extract <outdir>          (Scaleform movies -> outdir)\n\
          \x20 extract --model H <out.bin>   dump-block <index> <out.bin>  find-placement <substring>\n\
          \x20 save-dump <profile> [needle]  overlays <profile>\n\
          (vz.wad auto-discovers from the registry; override with --wad <path>)"
@@ -376,11 +376,13 @@ fn main() {
             let out = first_positional(&args).unwrap_or_else(|| "placement_hashes.json".to_string());
             run(diag::placement_hashes(&wadpath, &out));
         }
-        "export-c3-obj" => {
-            let out = first_positional(&args)
-                .unwrap_or_else(|| "c:/Users/Shadow/Desktop/notes-on-the-released-game/output/review".into());
-            run(diag::export_c3_obj(&wadpath, &out));
-        }
+        "export-c3-obj" => match first_positional(&args) {
+            Some(out) => run(diag::export_c3_obj(&wadpath, &out)),
+            None => {
+                eprintln!("export-c3-obj: usage: mercs2_probe export-c3-obj <outdir>");
+                std::process::exit(2);
+            }
+        },
         "terrainmesh-probe" => {
             let block = first_positional(&args).and_then(|s| s.parse::<u16>().ok());
             run(diag::terrainmesh_probe(&wadpath, block));
@@ -413,14 +415,27 @@ fn main() {
             }
         },
         "placement-names" => diag::placement_names(&wadpath),
-        "veg-census" => diag::veg_census(&wadpath),
-        "tree-census" => run(diag::tree_census(&wadpath)),
-        "gfx-extract" => {
-            let out = first_positional(&args).unwrap_or_else(|| {
-                "c:/Users/Shadow/Desktop/notes-on-the-released-game/output/gfx_movies".into()
-            });
-            run(diag::gfx_extract(&wadpath, &out));
-        }
+        "veg-census" => match first_positional(&args) {
+            Some(out) => diag::veg_census(&wadpath, &out),
+            None => {
+                eprintln!("veg-census: usage: mercs2_probe veg-census <veg_tagset.json>");
+                std::process::exit(2);
+            }
+        },
+        "tree-census" => match first_positional(&args) {
+            Some(out) => run(diag::tree_census(&wadpath, &out)),
+            None => {
+                eprintln!("tree-census: usage: mercs2_probe tree-census <tree_instances.json>");
+                std::process::exit(2);
+            }
+        },
+        "gfx-extract" => match first_positional(&args) {
+            Some(out) => run(diag::gfx_extract(&wadpath, &out)),
+            None => {
+                eprintln!("gfx-extract: usage: mercs2_probe gfx-extract <outdir>");
+                std::process::exit(2);
+            }
+        },
         "extract" => {
             let mh = model.as_deref().and_then(parse_hash).unwrap_or_else(|| {
                 eprintln!("extract: usage: mercs2_probe extract --model 0xHASH <out.bin>");
