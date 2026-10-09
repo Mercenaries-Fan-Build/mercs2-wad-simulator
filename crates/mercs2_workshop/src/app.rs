@@ -50,7 +50,6 @@ pub struct Options {
     /// Overlay WADs opened ON TOP of the base, in load order — the game's own patch mechanism
     /// (`data/vz-patch.wad`): a later archive's asset wins over an earlier one's.
     pub overlays: Vec<String>,
-    pub names_csv: Option<PathBuf>,
     /// A Shipment folder to open in the Quartermaster dock at startup.
     ///
     /// The dock is otherwise only reachable by clicking, which makes it unverifiable from a script —
@@ -932,93 +931,14 @@ fn ui_ctx_interact(ctx: &egui::Context, rect: egui::Rect) -> egui::Response {
         .inner
 }
 
-/// The name map a RELEASED build can always reach: the bundled `workshop_data/names.bin` (found
-/// through the full [`crate::index::data_home`] chain, so a bundle the user installed, pointed
-/// Settings at, or let the tool fetch for itself all count) overlaid by the ASET dictionary
-/// compiled into the binary. Loaded once, lazily — only the pack, never the multi-second raw
-/// corpora merge, because those are the dev-only fallbacks in `resolve_node_names` steps 3-4 and
-/// paying 8 s for them on the UI thread would be worse than the hashes they replace.
-fn bundled_names() -> &'static std::collections::HashMap<u32, String> {
-    static NAMES: std::sync::OnceLock<std::collections::HashMap<u32, String>> =
-        std::sync::OnceLock::new();
-    NAMES.get_or_init(|| {
-        let mut m = crate::index::data_home()
-            .map(|h| h.join("names.bin"))
-            .filter(|p| p.is_file())
-            .and_then(|p| crate::index::load_names_pack(&p))
-            .unwrap_or_default();
-        // Applied LAST so it wins, matching `load_all_names_staged`: every entry here is a name we
-        // actually cracked, and needs no bundle at all.
-        m.extend(crate::index::embedded_aset_names());
-        m
-    })
-}
-
-/// Group the catalog's vehicle models by class for the workbench inventory.
-/// Resolve HIER node-name hashes to names. Sources in priority order: the caller's already-loaded
-/// map, the shipped reference bundle, the rainbow table (VERIFIED cracks — the human/vehicle rigs,
-/// `hp_seat_*`, `bone_wheel_*`, `bone_ub`, …), and last the generated
-/// `docs/data/bone_name_candidates.txt` grammar file, so an unverified brute-force guess can never
-/// shadow a real name.
-///
-/// The first two sources exist because the last two are DEV-ONLY and fail SILENTLY in a release:
-/// `rainbow_names` reads `env!("CARGO_MANIFEST_DIR")/../../../rainbow_table.json`, an absolute path
-/// baked in at COMPILE time that resolves only on the machine that built the binary (and in CI
-/// points above the repo root, at a file that repo does not even carry), while the candidates file
-/// is looked up relative to the CWD. A downloaded workshop found neither, so every target bone on
-/// the Skeleton page read `0x…` and name-based auto-map had nothing to match on — no matter which
-/// reference bundle the user installed, because this path never consulted one.
+/// Resolve HIER node-name hashes to names from `names` — the full map [`crate::index::load_all_names`]
+/// returns (the GUI's `AssetIndex::names`, or the headless modes' own load). A hash the map does
+/// not hold is absent from the result.
 fn resolve_node_names(
     hashes: &[u32],
-    preloaded: Option<&std::collections::HashMap<u32, String>>,
+    names: &std::collections::HashMap<u32, String>,
 ) -> std::collections::HashMap<u32, String> {
-    use mercs2_formats::hash::pandemic_hash_m2;
-    let want_set: std::collections::BTreeSet<u32> = hashes.iter().copied().collect();
-    let mut out: std::collections::HashMap<u32, String> = std::collections::HashMap::new();
-    // 1. What the caller already holds (the GUI's `AssetIndex::names`) — free, and the same content
-    //    `bundled_names` would load, so passing it keeps that load off the UI thread entirely.
-    if let Some(m) = preloaded {
-        for &h in &want_set {
-            if let Some(n) = m.get(&h) {
-                out.insert(h, n.clone());
-            }
-        }
-    }
-    // 2. The shipped bundle. This is what makes a DOWNLOADED workshop resolve bone names at all —
-    //    and it also covers the GUI's boot window, while the background name load is still running.
-    if out.len() < want_set.len() {
-        for &h in &want_set {
-            if !out.contains_key(&h) {
-                if let Some(n) = bundled_names().get(&h) {
-                    out.insert(h, n.clone());
-                }
-            }
-        }
-    }
-    // 3. Dev checkout only: the rainbow table's verified cracks.
-    if out.len() < want_set.len() {
-        for (h, n) in mercs2_engine::worldutil::rainbow_names(&want_set) {
-            out.entry(h).or_insert(n);
-        }
-    }
-    // 4. Dev checkout only: fill the remaining gaps from the candidate grammar (unverified).
-    if out.len() < want_set.len() {
-        for root in ["docs/data/bone_name_candidates.txt", "../../docs/data/bone_name_candidates.txt"] {
-            let Ok(txt) = std::fs::read_to_string(root) else { continue };
-            for line in txt.lines() {
-                let c = line.trim();
-                if c.len() < 2 {
-                    continue;
-                }
-                let h = pandemic_hash_m2(c);
-                if want_set.contains(&h) {
-                    out.entry(h).or_insert_with(|| c.to_string());
-                }
-            }
-            break;
-        }
-    }
-    out
+    hashes.iter().filter_map(|h| names.get(h).map(|n| (*h, n.clone()))).collect()
 }
 
 /// The donor pool: EVERY named model, grouped by the Library's category — not just vehicles.
@@ -1062,9 +982,9 @@ pub fn run(opts: Options) {
             return;
         }
     };
-    // Catalog NOW (instant, hashes only); the name corpora (rainbow table + bone candidates +
-    // registry, ~7s) load on a background thread and land via `apply_names` — the window opens
-    // immediately instead of stalling on 70 MB of JSON.
+    // Catalog NOW (instant, hashes only); the reference bundle (found, or downloaded when none is
+    // installed — see `index::require_data_home`) loads on a background thread and lands via
+    // `apply_names`, so the window opens immediately and shows the boot screen meanwhile.
     let mut index = AssetIndex::build(&w.wads, HashMap::new());
     eprintln!(
         "[workshop] catalog: {} models, {} textures ({} wad(s))",
@@ -1078,27 +998,59 @@ pub fn run(opts: Options) {
     if anim_sel.is_none() {
         eprintln!("[workshop] AnimationLookup not found — character-specific clips unavailable");
     }
+    /// Everything the boot thread loads from the reference bundle.
+    struct BootData {
+        names: HashMap<u32, String>,
+        lua: Vec<(String, String, String)>,
+        ess_api: crate::essapi::ApiIndex,
+        ecs_reg: crate::ecsreg::EcsRegistry,
+        audio_idx: crate::audioidx::AudioIndex,
+        secs: f32,
+    }
     enum Boot {
         Prog(f32, &'static str),
-        Done(HashMap<u32, String>, Vec<(String, String, String)>, f32),
+        Done(Box<BootData>),
+        /// The reference bundle could not be found, downloaded or read; the boot screen shows this.
+        Failed(String),
     }
     let (ntx, nrx) = std::sync::mpsc::channel::<Boot>();
     {
-        let csv = opts.names_csv.clone();
         let tx = ntx.clone();
         std::thread::spawn(move || {
             let t0 = std::time::Instant::now();
-            let names = crate::index::load_all_names_staged(csv, |f, stage| {
-                let _ = tx.send(Boot::Prog(f, stage));
+            let load = || -> Result<BootData, String> {
+                let names = crate::index::load_all_names_staged(|f, stage| {
+                    let _ = tx.send(Boot::Prog(f, stage));
+                })?;
+                let _ = tx.send(Boot::Prog(0.97, "Lua reference corpus"));
+                let lua = crate::index::load_lua_corpus()?;
+                let home = crate::index::require_data_home(&mut |_, _| {})?;
+                Ok(BootData {
+                    names,
+                    lua,
+                    // The Ess / engine API reference the console autocompletes against.
+                    ess_api: crate::essapi::ApiIndex::load(&home),
+                    // The native ECS component-class registry — the *typed* half of the reference
+                    // (what a live entity is made of), searched alongside the callables.
+                    ecs_reg: crate::ecsreg::EcsRegistry::load(&home),
+                    // The captioned audio inventory — the Audio domain browses this (banks → clips
+                    // with captions).
+                    audio_idx: crate::audioidx::AudioIndex::load(&home),
+                    secs: t0.elapsed().as_secs_f32(),
+                })
+            };
+            let _ = ntx.send(match load() {
+                Ok(data) => Boot::Done(Box::new(data)),
+                Err(e) => Boot::Failed(e),
             });
-            let _ = tx.send(Boot::Prog(0.97, "Lua reference corpus"));
-            let lua = crate::index::load_lua_corpus();
-            let _ = ntx.send(Boot::Done(names, lua, t0.elapsed().as_secs_f32()));
         });
     }
     // Boot loading screen state: the app renders the engine's loading path (shell plate +
-    // spinner + progress bar) until the name corpora are in, then drops into the browser.
+    // spinner + progress bar) until the reference bundle is in, then drops into the browser.
     let mut names_pending = true;
+    // Set when the boot thread fails: the boot screen shows it in place of the loading stage and
+    // the app goes no further (Esc quits).
+    let mut boot_error: Option<String> = None;
     // Decompiled-Lua reference corpus (path, content, lowercased) — loaded on the boot thread.
     let mut lua_corpus: Vec<(String, String, String)> = Vec::new();
     let mut boot_target = 0.02f32; // stage-start fraction from the loader thread
@@ -1257,19 +1209,11 @@ pub fn run(opts: Options) {
     // The live Lua console (Craft ▸ Console). `None` until the author connects; a worker thread holds
     // the socket so the frame loop never blocks on the game.
     let mut live_console: Option<crate::console::LiveConsole> = None;
-    // The Ess / engine API reference the console autocompletes against, loaded once from the pack.
-    let ess_api = crate::essapi::ApiIndex::load(
-        &crate::index::data_home().unwrap_or_default(),
-    );
-    // The native ECS component-class registry — the *typed* half of the reference (what a live entity
-    // is made of), searched alongside the callables.
-    let ecs_reg = crate::ecsreg::EcsRegistry::load(
-        &crate::index::data_home().unwrap_or_default(),
-    );
-    // The captioned audio inventory — the Audio domain browses this (banks → clips with captions).
-    let audio_idx = crate::audioidx::AudioIndex::load(
-        &crate::index::data_home().unwrap_or_default(),
-    );
+    // The Ess / engine API reference, the ECS component registry and the captioned audio inventory,
+    // loaded from the reference bundle on the boot thread (`BootData`) and set when it finishes.
+    let mut ess_api = crate::essapi::ApiIndex::default();
+    let mut ecs_reg = crate::ecsreg::EcsRegistry::default();
+    let mut audio_idx = crate::audioidx::AudioIndex::default();
     // VO playback, both opened LAZILY on the first ▶ (English.wad + the output device are heavy, and
     // most sessions never touch audio). `vo_stream` is the record index; `vo_player` the device.
     let mut vo_stream: Option<crate::vostream::VoStream> = None;
@@ -1283,9 +1227,9 @@ pub fn run(opts: Options) {
     let mut destruct_node = String::new();
     let mut destruct_state = 0usize;
     let destruct_states = mercs2_destruction::live::states();
-    // In-flight reference-data download: the receiver while it runs, plus the latest progress line.
-    // Never started automatically — only from the Settings button, so the tool never reaches out to
-    // the network on its own.
+    // In-flight reference-data download from the Settings button (which replaces the downloaded
+    // copy with the latest release's): the receiver while it runs, plus the latest progress line.
+    // The automatic download when no bundle is found runs on the boot thread instead.
     let mut fetch_rx: Option<std::sync::mpsc::Receiver<crate::fetch::Event>> = None;
     let mut fetch_msg = String::new();
     // Persist the user's dragged panel widths ourselves — feeding the remembered width back as
@@ -1610,7 +1554,8 @@ pub fn run(opts: Options) {
                     }
 
                     // ── Boot loading screen: engine loading path (shell plate + spinner + bar)
-                    // until the name corpora are in, then fall through into the browser. ──
+                    // until the reference bundle is in, then fall through into the browser. When
+                    // the boot thread fails, the screen shows its error and stays (Esc quits). ──
                     if names_pending {
                         loop {
                             match nrx.try_recv() {
@@ -1618,9 +1563,13 @@ pub fn run(opts: Options) {
                                     boot_target = f;
                                     boot_stage = stage;
                                 }
-                                Ok(Boot::Done(names, lua, secs)) => {
+                                Ok(Boot::Done(data)) => {
+                                    let BootData { names, lua, ess_api: api, ecs_reg: ecs, audio_idx: audio, secs } = *data;
                                     index.apply_names(names);
                                     lua_corpus = lua;
+                                    ess_api = api;
+                                    ecs_reg = ecs;
+                                    audio_idx = audio;
                                     filtered = refilter(&index, kind, &filter);
                                     inventory_dirty = true; // names now resolve → build the vehicle inventory
                                     sel = sel.min(filtered.len().saturating_sub(1));
@@ -1637,7 +1586,19 @@ pub fn run(opts: Options) {
                                         lua_corpus.len()
                                     );
                                 }
-                                Err(_) => break,
+                                Ok(Boot::Failed(e)) => {
+                                    eprintln!("workshop: {e}");
+                                    boot_error = Some(e);
+                                }
+                                Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                                    if boot_error.is_none() {
+                                        let e = "the reference-data loader stopped without a result".to_string();
+                                        eprintln!("workshop: {e}");
+                                        boot_error = Some(e);
+                                    }
+                                    break;
+                                }
                             }
                         }
                         if names_pending {
@@ -1647,14 +1608,43 @@ pub fn run(opts: Options) {
                             // "Loading" at the lower right (gently breathing like the game's).
                             const TIP_GREEN: [f32; 4] = [0.76, 0.80, 0.44, 1.0];
                             const LOAD_ORANGE: [f32; 4] = [1.0, 0.62, 0.12, 1.0];
-                            let stage = format!("loading {boot_stage}");
-                            let sw = stage.len() as f32 * 8.0 * UI_S;
-                            text_sh(&mut scene, (wpx - sw) * 0.5, hpx * 0.66, UI_S, TIP_GREEN, &stage);
-                            let ls = UI_S * 1.5; // 24px — the retail "Loading" is large + bold
-                            let mut oc = LOAD_ORANGE;
-                            oc[3] = 0.75 + 0.25 * (t * 2.0).sin();
-                            let lw = "Loading".len() as f32 * 8.0 * ls;
-                            text_sh(&mut scene, wpx - lw - 56.0, hpx * 0.84, ls, oc, "Loading");
+                            const BOOT_ERROR: [f32; 4] = [1.0, 0.38, 0.32, 1.0];
+                            if let Some(err) = &boot_error {
+                                // The error, word-wrapped to the window, then how to leave.
+                                let glyph = 8.0 * UI_S;
+                                let cols = (((wpx - 96.0) / glyph).floor() as usize).max(20);
+                                let mut lines: Vec<String> = Vec::new();
+                                let mut line = String::new();
+                                for word in err.split_whitespace() {
+                                    if !line.is_empty() && line.chars().count() + 1 + word.chars().count() > cols {
+                                        lines.push(std::mem::take(&mut line));
+                                    }
+                                    if !line.is_empty() {
+                                        line.push(' ');
+                                    }
+                                    line.push_str(word);
+                                }
+                                if !line.is_empty() {
+                                    lines.push(line);
+                                }
+                                lines.push(String::new());
+                                lines.push("Press Esc to quit.".to_string());
+                                let lh = glyph * 1.4;
+                                let mut y = (hpx - lines.len() as f32 * lh).max(0.0) * 0.5;
+                                for l in &lines {
+                                    text_sh(&mut scene, 48.0, y, UI_S, BOOT_ERROR, l);
+                                    y += lh;
+                                }
+                            } else {
+                                let stage = format!("loading {boot_stage}");
+                                let sw = stage.len() as f32 * 8.0 * UI_S;
+                                text_sh(&mut scene, (wpx - sw) * 0.5, hpx * 0.66, UI_S, TIP_GREEN, &stage);
+                                let ls = UI_S * 1.5; // 24px — the retail "Loading" is large + bold
+                                let mut oc = LOAD_ORANGE;
+                                oc[3] = 0.75 + 0.25 * (t * 2.0).sin();
+                                let lw = "Loading".len() as f32 * 8.0 * ls;
+                                text_sh(&mut scene, wpx - lw - 56.0, hpx * 0.84, ls, oc, "Loading");
+                            }
                             match scene.render_boot(t, boot_shown.min(0.98)) {
                                 Ok(())
                                 | Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {}
@@ -3692,7 +3682,7 @@ pub fn run(opts: Options) {
                                                 .on_hover_text("green = positioned attach node (rotor/skid/seat/tail/hardpoint) · grey = structural");
                                             if hp_names.is_empty() {
                                                 let hashes: Vec<u32> = p.rig.iter().map(|b| b.name_hash).collect();
-                                                hp_names = resolve_node_names(&hashes, Some(&index.names));
+                                                hp_names = resolve_node_names(&hashes, &index.names);
                                             }
                                             let mut hps: Vec<(usize, String, [f32; 3])> = Vec::new();
                                             for (i, b) in p.rig.iter().enumerate() {
@@ -4680,7 +4670,7 @@ pub fn run(opts: Options) {
                                             let shown = match (cfg.data_dir.as_deref(), home.as_deref()) {
                                                 (Some(p), _) => tail(p),
                                                 (None, Some(h)) => tail(h),
-                                                (None, None) => "none — embedded names only".to_string(),
+                                                (None, None) => "none found".to_string(),
                                             };
                                             path_chip(
                                                 ui,
@@ -4691,7 +4681,7 @@ pub fn run(opts: Options) {
                                                         "In use: {}\n\nThe workshop_data bundle: hash to name for every asset and bone.",
                                                         h.display()
                                                     ),
-                                                    None => "No bundle found — only the names compiled into the app, so most assets and bones show as bare 0x… hashes.\n\nShips with the release as mercs2-workshop-data.zip.".to_string(),
+                                                    None => "No complete bundle found (a workshop_data folder holding manifest.json).\n\nShips with the release as mercs2-workshop-data.zip.".to_string(),
                                                 },
                                             );
                                             ui.horizontal(|ui| {
@@ -4716,9 +4706,9 @@ pub fn run(opts: Options) {
                                                             .map_err(|e| format!("Could not save: {e}")),
                                                     );
                                                 }
-                                                // Self-service: fetch the bundle from the release rather than
-                                                // asking someone to find a zip and unpack it to the right
-                                                // place. Explicit — the tool never downloads unprompted.
+                                                // Fetch the latest release's bundle into the download cache
+                                                // (`fetch::installed_dir`), replacing the copy there. The boot
+                                                // thread runs the same install when no bundle is found.
                                                 let busy = fetch_rx.is_some();
                                                 let label = if busy { "Downloading…" } else { "Download" };
                                                 if ui
@@ -4841,7 +4831,7 @@ pub fn run(opts: Options) {
                                                             egui::RichText::new(
                                                                 crate::index::data_home()
                                                                     .map(|h| h.display().to_string())
-                                                                    .unwrap_or_else(|| "embedded only".into()),
+                                                                    .unwrap_or_else(|| "none found".into()),
                                                             ),
                                                         );
                                                         theme::kv(ui, "models", egui::RichText::new(commafy(index.models().len())));
@@ -5315,7 +5305,7 @@ pub fn run(opts: Options) {
                             Act::RetargetSetTarget(hash, label) => {
                                 retarget_target = Some((hash, label.clone()));
                                 if let Some(r) = &retarget {
-                                    let (names, pos, parents) = target_bone_info(&mut w, hash, Some(&index.names));
+                                    let (names, pos, parents) = target_bone_info(&mut w, hash, &index.names);
                                     let nr = crate::retarget::Retarget::build_full(
                                         r.source_bones.clone(), r.source_pos.clone(),
                                         r.source_ibm.clone(), r.source_parents.clone(), names, pos, parents,
@@ -5332,7 +5322,7 @@ pub fn run(opts: Options) {
                             }
                             Act::RetargetRemap => match (&retarget, &retarget_target) {
                                 (Some(r), Some((hash, _))) => {
-                                    let (names, pos, parents) = target_bone_info(&mut w, *hash, Some(&index.names));
+                                    let (names, pos, parents) = target_bone_info(&mut w, *hash, &index.names);
                                     let nr = crate::retarget::Retarget::build_full(
                                         r.source_bones.clone(), r.source_pos.clone(),
                                         r.source_ibm.clone(), r.source_parents.clone(), names, pos, parents,
@@ -7203,14 +7193,13 @@ pub(crate) fn faithful_char_skin(
 pub(crate) fn target_bone_info(
     w: &mut WadStack,
     hash: u32,
-    // The caller's loaded name map when it has one (the GUI); `None` on the headless paths, which
-    // then read the bundled pack directly. Never let this fall back to the dev-only corpora alone —
-    // that is what made every released Skeleton page show `0x…` for its target bones.
-    preloaded: Option<&std::collections::HashMap<u32, String>>,
+    // The full name map (`crate::index::load_all_names`): the GUI's `AssetIndex::names`, or the
+    // headless mode's own load.
+    all_names: &std::collections::HashMap<u32, String>,
 ) -> (Vec<String>, Vec<[f32; 3]>, Vec<i32>) {
     let Ok(md) = load_model_data(w, hash) else { return (Vec::new(), Vec::new(), Vec::new()) };
     let hashes: Vec<u32> = md.skin.rig.iter().map(|b| b.name_hash).collect();
-    let names_map = resolve_node_names(&hashes, preloaded);
+    let names_map = resolve_node_names(&hashes, all_names);
     let names = md
         .skin
         .rig
@@ -7732,7 +7721,7 @@ fn import_file(
     } else {
         let (target_names, target_pos, target_parents) = retarget_target
             .as_ref()
-            .map(|(h, _)| target_bone_info(w, *h, Some(&index.names)))
+            .map(|(h, _)| target_bone_info(w, *h, &index.names))
             .unwrap_or_default();
         let r = crate::retarget::Retarget::build_full(
             src_joints, src_pos, src_ibm, src_parents, target_names, target_pos, target_parents,
