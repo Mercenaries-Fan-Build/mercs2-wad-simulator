@@ -10,6 +10,7 @@
 //! exemap rtti <image> --out <tsv>
 //! exemap luareg <image> --out <tsv>
 //! exemap corpus-derive <corpus_id> <wad> --from <container> --work <dir> [--wine <wine64>]
+//! exemap lua-scripts <wad>
 //! exemap match <image_a> <image_b> --exports <dir> --evidence <list> --out <tsv> --conflicts <tsv>
 //! ```
 //!
@@ -99,6 +100,9 @@ enum Command {
         #[arg(long)]
         wine: Option<PathBuf>,
     },
+    /// List every Lua script container of a WAD (PC, Xbox 360 or PS3): block, entry, name hash and
+    /// each descriptor's tag and size, one row per container.
+    LuaScripts { wad: PathBuf },
     /// Match the functions of two images.tsv images from their exports (<id>.rtti.tsv,
     /// <id>.luareg.tsv and, for bytes/string/callee evidence, <id>.fnsig.json).
     Match {
@@ -301,6 +305,19 @@ fn run(cli: Cli) -> Result<(), ExitCode> {
             })?;
             println!("wad        {corpus_id} {wad} -> {}", path.display());
             println!("sha256     {}", w.sha256);
+        }
+        Command::LuaScripts { wad } => {
+            let ws = mercs2_exemap::wadscripts::scripts(&wad).map_err(|e| {
+                eprintln!("error: {e}");
+                ExitCode::from(1)
+            })?;
+            println!("block\tentry\tname_hash\tblock_path\tchunks");
+            for s in &ws.scripts {
+                let chunks: Vec<String> =
+                    s.chunks.iter().map(|c| format!("{}:{}", String::from_utf8_lossy(&c.tag), c.body.len())).collect();
+                println!("{}\t{}\t0x{:08x}\t{}\t{}", s.block, s.entry, s.name_hash, s.block_path, chunks.join(","));
+            }
+            eprintln!("scripts    {} ({:?})", ws.scripts.len(), ws.endian);
         }
         Command::Match { image_a, image_b, exports, evidence, out, conflicts } => {
             use mercs2_exemap::matcher::{match_images, Evidence, Exports};
