@@ -107,6 +107,25 @@ pub fn vz_wad_from_env() -> Option<PathBuf> {
 ///   holds `PS3_GAME`. Read only by the exe-map Lua corpus tests ([`local_config_ps3_de_disc_dir`]).
 /// * `ps3_eu_disc_dir` — a **directory**: the PS3 European disc dump (BLES00323), the folder that
 ///   holds `PS3_GAME`. Read only by the exe-map Lua corpus tests ([`local_config_ps3_eu_disc_dir`]).
+/// * `rainbow_table` — the hash rainbow table, `rainbow_table.json`. Read only by dev tools that
+///   label hashes (`--pack-data`, the engine diag commands, the name-mining bins and probes)
+///   ([`local_config_rainbow_table`]).
+/// * `jul08_strings` — the Jul-08 Xbox 360 devkit strings dump,
+///   `mercs2_xenon_p.pe_full_strings.txt`. Read only by `mercs2_workshop --pack-data`
+///   ([`local_config_jul08_strings`]).
+/// * `notes_docs_dir` — a **directory**: the `docs` folder of the notes repo
+///   (notes-on-the-released-game), holding `data/`, `mercs2-ecs/`, `mercs2-luacd/` and
+///   `mercs2-dlc-luacd/`. Read only by `mercs2_workshop --pack-data`
+///   ([`local_config_notes_docs_dir`]).
+/// * `unluac_jar` — the unluac jar that disassembles and reassembles console Lua bytecode. Read
+///   only by dev tools and tests that convert console Lua bytecode ([`local_config_unluac_jar`]).
+/// * `java_binary` — the `java` executable that runs unluac. Read only by dev tools and tests
+///   that convert console Lua bytecode ([`local_config_java_binary`]).
+/// * `unrar_binary` — the `UnRAR.exe` that unpacks RAR'd Xbox 360 DLC. Read only by tests of the
+///   RAR'd DLC path ([`local_config_unrar_binary`]).
+/// * `lua51_src_dir` — a **directory**: the pristine Lua 5.1 `src` tree the vendored copy is
+///   checked against. Read only by the `mercs2_luac` vendor-integrity test
+///   ([`local_config_lua51_src_dir`]).
 ///
 /// The console keys and the executable keys are never inferred from `vz_wad`'s folder: each lives
 /// wherever it is kept, and a test that needs one fails naming the missing key.
@@ -168,6 +187,20 @@ pub const PS3_JP_DISC_DIR_KEY: &str = "ps3_jp_disc_dir";
 pub const PS3_DE_DISC_DIR_KEY: &str = "ps3_de_disc_dir";
 /// The `ps3_eu_disc_dir` key of [`LOCAL_CONFIG`]: the PS3 European disc dump directory.
 pub const PS3_EU_DISC_DIR_KEY: &str = "ps3_eu_disc_dir";
+/// The `rainbow_table` key of [`LOCAL_CONFIG`]: the rainbow table.
+pub const RAINBOW_TABLE_KEY: &str = "rainbow_table";
+/// The `jul08_strings` key of [`LOCAL_CONFIG`]: the devkit strings dump.
+pub const JUL08_STRINGS_KEY: &str = "jul08_strings";
+/// The `notes_docs_dir` key of [`LOCAL_CONFIG`]: the notes repo docs folder.
+pub const NOTES_DOCS_DIR_KEY: &str = "notes_docs_dir";
+/// The `unluac_jar` key of [`LOCAL_CONFIG`]: the unluac jar.
+pub const UNLUAC_JAR_KEY: &str = "unluac_jar";
+/// The `java_binary` key of [`LOCAL_CONFIG`]: the java executable.
+pub const JAVA_BINARY_KEY: &str = "java_binary";
+/// The `unrar_binary` key of [`LOCAL_CONFIG`]: UnRAR.exe.
+pub const UNRAR_BINARY_KEY: &str = "unrar_binary";
+/// The `lua51_src_dir` key of [`LOCAL_CONFIG`]: the Lua 5.1 source tree.
+pub const LUA51_SRC_DIR_KEY: &str = "lua51_src_dir";
 
 /// The `<key> = "…"` value in one [`LOCAL_CONFIG`]'s text, or `None` when the key is absent.
 ///
@@ -478,6 +511,57 @@ pub fn local_config_ps3_de_disc_dir(start: &Path) -> Result<PathBuf, String> {
 /// must be a directory. No script writes this key.
 pub fn local_config_ps3_eu_disc_dir(start: &Path) -> Result<PathBuf, String> {
     local_config_path(start, PS3_EU_DISC_DIR_KEY, Want::Dir, "write `ps3_eu_disc_dir = \"/path/to/<BLES00323 dump>\"` into it by hand")
+}
+
+/// The rainbow table for a **dev tool or game-gated test**: `rainbow_table` in the nearest [`LOCAL_CONFIG`].
+///
+/// Same rules and the same three distinct errors as [`local_config_vz_wad`]. No script writes this key.
+pub fn local_config_rainbow_table(start: &Path) -> Result<PathBuf, String> {
+    local_config_file(start, RAINBOW_TABLE_KEY, "write `rainbow_table = \"/path/to/tools/rainbow_table.json\"` into it by hand")
+}
+
+/// The devkit strings dump for a **dev tool or game-gated test**: `jul08_strings` in the nearest [`LOCAL_CONFIG`].
+///
+/// Same rules and the same three distinct errors as [`local_config_vz_wad`]. No script writes this key.
+pub fn local_config_jul08_strings(start: &Path) -> Result<PathBuf, String> {
+    local_config_file(start, JUL08_STRINGS_KEY, "write `jul08_strings = \"/path/to/output/jul08_prototype/mercs2_xenon_p.pe_full_strings.txt\"` into it by hand")
+}
+
+/// The notes repo docs folder for a **dev tool or game-gated test**: `notes_docs_dir` in the nearest [`LOCAL_CONFIG`].
+///
+/// Same rules and the same three distinct errors as [`local_config_vz_wad`], except that the path
+/// must be a directory. No script writes this key.
+pub fn local_config_notes_docs_dir(start: &Path) -> Result<PathBuf, String> {
+    local_config_path(start, NOTES_DOCS_DIR_KEY, Want::Dir, "write `notes_docs_dir = \"/path/to/notes-on-the-released-game/docs\"` into it by hand")
+}
+
+/// The unluac jar for a **dev tool or game-gated test**: `unluac_jar` in the nearest [`LOCAL_CONFIG`].
+///
+/// Same rules and the same three distinct errors as [`local_config_vz_wad`]. No script writes this key.
+pub fn local_config_unluac_jar(start: &Path) -> Result<PathBuf, String> {
+    local_config_file(start, UNLUAC_JAR_KEY, "write `unluac_jar = \"/path/to/tools/external/unluac/unluac.jar\"` into it by hand")
+}
+
+/// The java executable for a **dev tool or game-gated test**: `java_binary` in the nearest [`LOCAL_CONFIG`].
+///
+/// Same rules and the same three distinct errors as [`local_config_vz_wad`]. No script writes this key.
+pub fn local_config_java_binary(start: &Path) -> Result<PathBuf, String> {
+    local_config_file(start, JAVA_BINARY_KEY, "write `java_binary = \"/path/to/jdk/bin/java\"` into it by hand")
+}
+
+/// UnRAR.exe for a **dev tool or game-gated test**: `unrar_binary` in the nearest [`LOCAL_CONFIG`].
+///
+/// Same rules and the same three distinct errors as [`local_config_vz_wad`]. No script writes this key.
+pub fn local_config_unrar_binary(start: &Path) -> Result<PathBuf, String> {
+    local_config_file(start, UNRAR_BINARY_KEY, "write `unrar_binary = \"/path/to/tools/unrar/UnRAR.exe\"` into it by hand")
+}
+
+/// The Lua 5.1 source tree for a **dev tool or game-gated test**: `lua51_src_dir` in the nearest [`LOCAL_CONFIG`].
+///
+/// Same rules and the same three distinct errors as [`local_config_vz_wad`], except that the path
+/// must be a directory. No script writes this key.
+pub fn local_config_lua51_src_dir(start: &Path) -> Result<PathBuf, String> {
+    local_config_path(start, LUA51_SRC_DIR_KEY, Want::Dir, "write `lua51_src_dir = \"/path/to/tools/lua51-src/src\"` into it by hand")
 }
 
 /// What a [`LOCAL_CONFIG`] key must name.
@@ -882,6 +966,34 @@ mod tests {
         assert!(e.contains("has no `ps3_eu_disc_dir` key"), "{e}");
         std::fs::write(&config, format!("ps3_eu_disc_dir = \"{}\"\n", pkgs.display())).unwrap();
         assert_eq!(local_config_ps3_eu_disc_dir(&deep), Ok(pkgs.clone()));
+        let e = local_config_rainbow_table(&deep).unwrap_err();
+        assert!(e.contains("has no `rainbow_table` key"), "{e}");
+        std::fs::write(&config, format!("rainbow_table = \"{}\"\n", eboot.display())).unwrap();
+        assert_eq!(local_config_rainbow_table(&deep), Ok(eboot.clone()));
+        let e = local_config_jul08_strings(&deep).unwrap_err();
+        assert!(e.contains("has no `jul08_strings` key"), "{e}");
+        std::fs::write(&config, format!("jul08_strings = \"{}\"\n", eboot.display())).unwrap();
+        assert_eq!(local_config_jul08_strings(&deep), Ok(eboot.clone()));
+        let e = local_config_notes_docs_dir(&deep).unwrap_err();
+        assert!(e.contains("has no `notes_docs_dir` key"), "{e}");
+        std::fs::write(&config, format!("notes_docs_dir = \"{}\"\n", pkgs.display())).unwrap();
+        assert_eq!(local_config_notes_docs_dir(&deep), Ok(pkgs.clone()));
+        let e = local_config_unluac_jar(&deep).unwrap_err();
+        assert!(e.contains("has no `unluac_jar` key"), "{e}");
+        std::fs::write(&config, format!("unluac_jar = \"{}\"\n", eboot.display())).unwrap();
+        assert_eq!(local_config_unluac_jar(&deep), Ok(eboot.clone()));
+        let e = local_config_java_binary(&deep).unwrap_err();
+        assert!(e.contains("has no `java_binary` key"), "{e}");
+        std::fs::write(&config, format!("java_binary = \"{}\"\n", eboot.display())).unwrap();
+        assert_eq!(local_config_java_binary(&deep), Ok(eboot.clone()));
+        let e = local_config_unrar_binary(&deep).unwrap_err();
+        assert!(e.contains("has no `unrar_binary` key"), "{e}");
+        std::fs::write(&config, format!("unrar_binary = \"{}\"\n", eboot.display())).unwrap();
+        assert_eq!(local_config_unrar_binary(&deep), Ok(eboot.clone()));
+        let e = local_config_lua51_src_dir(&deep).unwrap_err();
+        assert!(e.contains("has no `lua51_src_dir` key"), "{e}");
+        std::fs::write(&config, format!("lua51_src_dir = \"{}\"\n", pkgs.display())).unwrap();
+        assert_eq!(local_config_lua51_src_dir(&deep), Ok(pkgs.clone()));
 
         std::fs::remove_dir_all(&root).ok();
     }
