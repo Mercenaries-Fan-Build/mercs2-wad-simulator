@@ -402,7 +402,7 @@ mod tests {
     #[test]
     fn the_embedded_table_parses_and_cross_checks() {
         let t = Images::embedded(&cat()).unwrap();
-        assert!(t.image("x360-profile").is_some());
+        assert!(t.image("x360-preview-profile").is_some());
         assert_eq!(t.image("ps3-v103-de").unwrap().code_image.as_deref(), Some("ps3-v103-na"));
         assert!(t.code_images().all(|m| m.code_image.is_none()));
     }
