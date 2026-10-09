@@ -116,12 +116,18 @@ another way, so their game tables carry no namespace.
 scripts are only compared within one product. `wads.tsv` lists each corpus WAD by sha256 with the
 chain that rebuilds it from the original file: `zip:<entry>`, `wine-sfx:<path>` (a self-extracting
 installer run silently under Wine), `wine-extrac32:<entry>` (a cabinet extracted by Wine),
-`xdvdfs:<path>` (a file from an Xbox disc image) and `stfs:<name>` (a file from an Xbox 360 STFS
-package). A WAD's name is its path from the install or disc root (`data/vz.wad` on PC, `vz.wad`
-on Xbox 360), or its name in its package for a DLC. The Xbox 360 corpora are the Jul 11 2008
+`xdvdfs:<path>` (a file from an Xbox disc image), `stfs:<name>` (a file from an Xbox 360 STFS
+package), `iso9660:<path>` (a file from an ISO-9660 disc image, read through its Joliet tree),
+`pkg:<path>` (an entry of a PSN `.pkg`) and `edat:<klicensee>` (an NPDRM EDAT's payload, decrypted
+with the 32-hex-digit title klicensee once it validates against the EDAT header). A WAD's name is
+its path from the install or disc root (`data/vz.wad` on PC, `vz.wad` on Xbox 360,
+`PS3_GAME/USRDIR/VZ.WAD` on PS3), or its path in its package for a patch or DLC. The Xbox 360 corpora are the Jul 11 2008
 preview disc, the retail disc dump, and the Blow It Up Again Pack (retail, the Nov 6 and Nov 25
 2008 prototypes, and the Pack B prototype) and Amazon Pack prototype packages, each DLC's script
-archive being its `.doh`.
+archive being its `.doh`. The PS3 corpora are the North American disc BLUS30056 (a community-assembled ISO
+whose primary and Joliet trees both list VZ.WAD's final extent out of order; see the `iso9660`
+module), its v1.03 update (`VZ-PATCH.WAD` and `SHELL-PATCH.WAD`), and the Blow It Up Again Pack
+(`DLC01.EDAT`, decrypted with the klicensee recovered from the v1.03 EBOOT).
 `exemap corpus-derive` replays one chain, checking every sha256; the PC demo corpus rebuilds from
 `Mercs2_Demo_Setup.zip` this way, and its executable is build `demo-official-securom`, layout `D`.
 A WAD with an empty chain is catalogued from an install, named in its `install` column by the
@@ -227,13 +233,15 @@ environment variable is consulted. The file holds one `key = "path"` per line:
 | `x360_devkit_iso` | the Jul 11 2008 Xbox 360 preview disc image (`Mercenaries 2 Preview X360 (Jul 11 2008).iso`) | the `mercs2_exemap` console-image test |
 | `x360_retail_xex` | the Xbox 360 retail `default.xex` (NTSC-U/J, sha256 `d5b646e7…`) | the `mercs2_exemap` console-image test |
 | `ps3_eboot_bin` | the PS3 disc's `EBOOT.BIN` (BLUS30056) | the `mercs2_exemap` console-image test |
-| `ps3_update_pkgs` | a directory of the PS3 v1.03 update `.pkg` files (NA, EU, DE) | the `mercs2_exemap` console-image test |
+| `ps3_update_pkgs` | a directory of the PS3 v1.03 update `.pkg` files (NA, EU, DE) | the `mercs2_exemap` console-image test and Lua corpus test |
 | `pc_demo_zip` | the public PC demo, `Mercs2_Demo_Setup.zip` (sha256 `9d32195d…`) | the `mercs2_exemap` Lua corpus test |
 | `pc_official_install_dir` | the official PC install directory, as EA's download manager installs it | the `mercs2_exemap` Lua corpus test |
 | `pc_repack_install_dir` | the ElAmigos repack install directory (every language, English last) | the `mercs2_exemap` Lua corpus test |
 | `x360_retail_dir` | the Xbox 360 retail disc dump directory (`…(NTSCU)[NTSCJ) (JTAGRip)`) | the `mercs2_exemap` Lua corpus test |
 | `x360_dlc_biua_stfs` | the retail Xbox LIVE Blow It Up Again Pack package (`45410828/00000002/86ABF01D…`) | the `mercs2_exemap` Lua corpus test |
 | `x360_dlc_prototypes_dir` | the directory of zipped Xbox 360 DLC prototype packages | the `mercs2_exemap` Lua corpus test |
+| `ps3_disc_iso` | the PS3 North American disc image, `Mercenaries 2 World in Flames [BLUS30056].iso` (sha256 `95ccff0f…`) | the `mercs2_exemap` Lua corpus test |
+| `ps3_dlc_biua_pkg` | the PS3 Blow It Up Again Pack package (`UP0006-BLUS30056_00-MERCS2WIFDLC01NA`, sha256 `d62081de…`) | the `mercs2_exemap` Lua corpus test |
 
 `scripts/find-vz-wad.sh --write` writes `vz_wad` only, and rewrites the whole file, so
 the console keys, `unpacked_exe`, the three executable keys, the patcher keys, the console-image keys and the corpus keys are added by hand after it runs. When the file, a key a test needs,
