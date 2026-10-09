@@ -48,6 +48,7 @@ pub mod membership;
 mod mem;
 pub mod rtti;
 pub mod starts;
+pub mod wadscripts;
 pub mod xbox;
 pub mod xdvdfs;
 
