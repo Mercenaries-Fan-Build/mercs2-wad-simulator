@@ -19,6 +19,9 @@
 //! | `wine-extrac32:<entry>` | a Microsoft cabinet, extracted with Wine's `extrac32` → its entry |
 //! | `xdvdfs:<path>` | an Xbox disc image → the file at `<path>` ([`crate::xdvdfs`]) |
 //! | `stfs:<name>` | an Xbox 360 STFS package (LIVE/PIRS/CON) → the file `<name>` in it |
+//! | `iso9660:<path>` | an ISO-9660 disc image → the file at `<path>` ([`crate::iso9660`]) |
+//! | `pkg:<path>` | a PSN `.pkg` → its entry at `<path>` (`mercs2_formats::ps3_pkg`) |
+//! | `edat:<klicensee>` | an NPDRM EDAT → its payload, decrypted with the 32-hex-digit title klicensee, which must validate against the EDAT header first (`mercs2_formats::ps3_edat`, `ps3_klic`) |
 //!
 //! The Wine steps need the `wine64` binary ([`Env::wine`]); a chain that reaches one without it is
 //! an error naming the step.
@@ -58,6 +61,9 @@ pub enum Step {
     WineExtrac32(String),
     Xdvdfs(String),
     Stfs(String),
+    Iso9660(String),
+    Pkg(String),
+    Edat([u8; 16]),
 }
 
 impl Step {
@@ -72,9 +78,24 @@ impl Step {
             "wine-extrac32" => Some(Step::WineExtrac32(arg.to_string())),
             "xdvdfs" => Some(Step::Xdvdfs(arg.to_string())),
             "stfs" => Some(Step::Stfs(arg.to_string())),
+            "iso9660" => Some(Step::Iso9660(arg.to_string())),
+            "pkg" => Some(Step::Pkg(arg.to_string())),
+            "edat" => klicensee(arg).map(Step::Edat),
             _ => None,
         }
     }
+}
+
+/// A klicensee written as exactly 32 hex digits.
+fn klicensee(s: &str) -> Option<[u8; 16]> {
+    if s.len() != 32 || !s.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    let mut k = [0u8; 16];
+    for (i, b) in k.iter_mut().enumerate() {
+        *b = u8::from_str_radix(&s[2 * i..2 * i + 2], 16).ok()?;
+    }
+    Some(k)
 }
 
 /// One link of a chain: the input file's sha256 and the step applied to it.
@@ -89,7 +110,7 @@ pub struct Link {
 pub struct Wad {
     pub corpus: String,
     /// The WAD's path relative to the game's install or disc root (`data/vz.wad` on PC, `vz.wad` on
-    /// Xbox 360), or its name inside its package for a DLC.
+    /// Xbox 360, `PS3_GAME/USRDIR/VZ.WAD` on PS3), or its path inside its package for a patch or DLC.
     pub name: String,
     pub sha256: String,
     pub size: u64,
@@ -366,6 +387,51 @@ fn apply(step: &Step, input: &Path, input_sha: &str, env: &Env) -> Result<PathBu
             }
             Ok(out)
         }
+        Step::Iso9660(member) => {
+            let out = dir.join("iso9660").join(member);
+            if !out.is_file() {
+                use std::io::{Seek, SeekFrom};
+                let mut f = File::open(input).map_err(|e| Error::new(format!("open {}: {e}", input.display())))?;
+                let extents = crate::iso9660::locate(&mut f, member)?;
+                std::fs::create_dir_all(out.parent().unwrap()).map_err(|e| Error::new(format!("create dir: {e}")))?;
+                let mut o = File::create(&out).map_err(|e| Error::new(format!("create {}: {e}", out.display())))?;
+                for (off, size) in extents {
+                    f.seek(SeekFrom::Start(off)).map_err(|e| Error::new(format!("seek {}: {e}", input.display())))?;
+                    let copied = std::io::copy(&mut (&mut f).take(size), &mut o).map_err(|e| Error::new(format!("copy {member}: {e}")))?;
+                    if copied != size {
+                        return Err(Error::new(format!("iso9660: {member}: {copied} of {size} bytes before the image ended")));
+                    }
+                }
+            }
+            Ok(out)
+        }
+        Step::Pkg(entry) => {
+            let out = dir.join("pkg").join(entry);
+            if !out.is_file() {
+                let data = std::fs::read(input).map_err(|e| Error::new(format!("read {}: {e}", input.display())))?;
+                let pkg = mercs2_formats::ps3_pkg::parse_pkg(&data).map_err(|e| Error::new(format!("pkg {}: {e}", input.display())))?;
+                let bytes = pkg
+                    .file_bytes(entry)
+                    .ok_or_else(|| Error::new(format!("pkg {} ({}) has no entry {entry}", input.display(), pkg.content_id)))?;
+                std::fs::create_dir_all(out.parent().unwrap()).map_err(|e| Error::new(format!("create dir: {e}")))?;
+                std::fs::write(&out, bytes).map_err(|e| Error::new(format!("write {}: {e}", out.display())))?;
+            }
+            Ok(out)
+        }
+        Step::Edat(klic) => {
+            let out = dir.join("edat").join("payload");
+            if !out.is_file() {
+                let data = std::fs::read(input).map_err(|e| Error::new(format!("read {}: {e}", input.display())))?;
+                if !mercs2_formats::ps3_klic::validate_klicensee(&data, klic) {
+                    return Err(Error::new(format!("edat: the klicensee does not validate against the header of {}", input.display())));
+                }
+                let bytes = mercs2_formats::ps3_edat::decrypt_edat(&data, klic)
+                    .map_err(|e| Error::new(format!("edat {}: {e}", input.display())))?;
+                std::fs::create_dir_all(out.parent().unwrap()).map_err(|e| Error::new(format!("create dir: {e}")))?;
+                std::fs::write(&out, bytes).map_err(|e| Error::new(format!("write {}: {e}", out.display())))?;
+            }
+            Ok(out)
+        }
         Step::WineExtrac32(entry) => {
             let out_dir = dir.join("cab");
             if !out_dir.is_dir() {
@@ -479,6 +545,14 @@ mod tests {
         assert_eq!(Step::parse("wine-extrac32:x"), Some(Step::WineExtrac32("x".into())));
         assert_eq!(Step::parse("xdvdfs:vz.wad"), Some(Step::Xdvdfs("vz.wad".into())));
         assert_eq!(Step::parse("stfs:DLC01.doh"), Some(Step::Stfs("DLC01.doh".into())));
+        assert_eq!(Step::parse("iso9660:A/VZ.WAD"), Some(Step::Iso9660("A/VZ.WAD".into())));
+        assert_eq!(Step::parse("pkg:USRDIR/VZ-PATCH.WAD"), Some(Step::Pkg("USRDIR/VZ-PATCH.WAD".into())));
+        assert_eq!(
+            Step::parse("edat:000102030405060708090a0b0c0d0e0f"),
+            Some(Step::Edat([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]))
+        );
+        assert_eq!(Step::parse("edat:0001"), None);
+        assert_eq!(Step::parse("edat:zz0102030405060708090a0b0c0d0e0f"), None);
         assert_eq!(Step::parse("zip:"), None);
         assert_eq!(Step::parse("unrar:x"), None);
     }
