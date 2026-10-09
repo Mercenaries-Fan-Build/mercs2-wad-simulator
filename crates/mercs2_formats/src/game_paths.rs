@@ -79,6 +79,8 @@ pub fn vz_wad_from_env() -> Option<PathBuf> {
 ///   test ([`local_config_wine_binary`]).
 /// * `x360_devkit_iso` — the Jul 11 2008 Xbox 360 preview disc image. Read only by the exe-map
 ///   console-image tests ([`local_config_x360_devkit_iso`]).
+/// * `x360_retail_xex` — the Xbox 360 retail `default.xex` (NTSC-U/J). Read only by the exe-map
+///   console-image tests ([`local_config_x360_retail_xex`]).
 /// * `ps3_eboot_bin` — the PS3 disc's `EBOOT.BIN` (BLUS30056). Read only by the exe-map
 ///   console-image tests ([`local_config_ps3_eboot_bin`]).
 /// * `ps3_update_pkgs` — a **directory** holding the PS3 v1.03 update `.pkg` files. Read only by
@@ -116,6 +118,8 @@ pub const V11_PATCHER_EXE_KEY: &str = "v11_patcher_exe";
 pub const WINE_BINARY_KEY: &str = "wine_binary";
 /// The `x360_devkit_iso` key of [`LOCAL_CONFIG`]: the Xbox 360 preview disc image.
 pub const X360_DEVKIT_ISO_KEY: &str = "x360_devkit_iso";
+/// The `x360_retail_xex` key of [`LOCAL_CONFIG`]: the Xbox 360 retail `default.xex`.
+pub const X360_RETAIL_XEX_KEY: &str = "x360_retail_xex";
 /// The `ps3_eboot_bin` key of [`LOCAL_CONFIG`]: the PS3 disc `EBOOT.BIN`.
 pub const PS3_EBOOT_BIN_KEY: &str = "ps3_eboot_bin";
 /// The `ps3_update_pkgs` key of [`LOCAL_CONFIG`]: a directory of PS3 update packages.
@@ -268,6 +272,19 @@ pub fn local_config_x360_devkit_iso(start: &Path) -> Result<PathBuf, String> {
         start,
         X360_DEVKIT_ISO_KEY,
         "write `x360_devkit_iso = \"/path/to/Mercenaries 2 Preview X360 (Jul 11 2008).iso\"` into it by hand",
+    )
+}
+
+/// The Xbox 360 retail `default.xex` for a **game-gated test**: `x360_retail_xex` in the nearest
+/// [`LOCAL_CONFIG`].
+///
+/// Same rules and the same three distinct errors as [`local_config_vz_wad`]. No script writes this
+/// key.
+pub fn local_config_x360_retail_xex(start: &Path) -> Result<PathBuf, String> {
+    local_config_file(
+        start,
+        X360_RETAIL_XEX_KEY,
+        "write `x360_retail_xex = \"/path/to/default.xex\"` into it by hand",
     )
 }
 
@@ -655,8 +672,12 @@ mod tests {
         let e = local_config_ps3_eboot_bin(&deep).unwrap_err();
         assert!(e.contains("which is not a file"), "{e}");
 
-        std::fs::write(&config, format!("ps3_eboot_bin = \"{}\"\n", eboot.display())).unwrap();
-        assert_eq!(local_config_ps3_eboot_bin(&deep), Ok(eboot));
+        std::fs::write(&config, format!("ps3_eboot_bin = \"{}\"\nx360_retail_xex = \"{}\"\n", eboot.display(), pkgs.display())).unwrap();
+        assert_eq!(local_config_ps3_eboot_bin(&deep), Ok(eboot.clone()));
+        let e = local_config_x360_retail_xex(&deep).unwrap_err();
+        assert!(e.contains("which is not a file"), "{e}");
+        std::fs::write(&config, format!("x360_retail_xex = \"{}\"\n", eboot.display())).unwrap();
+        assert_eq!(local_config_x360_retail_xex(&deep), Ok(eboot));
 
         std::fs::remove_dir_all(&root).ok();
     }
