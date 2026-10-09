@@ -250,9 +250,19 @@ environment variable is consulted. The file holds one `key = "path"` per line:
 | `ps3_jp_disc_dir` | the PS3 Japanese disc dump directory, the folder holding `PS3_GAME` (`Mercenaries 2 - World in Flames (Japan) [BLJM60101]`) | the `mercs2_exemap` Lua corpus test |
 | `ps3_de_disc_dir` | the PS3 German disc dump directory, the folder holding `PS3_GAME` (`Mercenaries 2 - World in Flames (Germany) (En,De) [BLES00328]`) | the `mercs2_exemap` Lua corpus test |
 | `ps3_eu_disc_dir` | the PS3 European disc dump directory, the folder holding `PS3_GAME` (`Mercenaries 2 - World in Flames (Europe) (En,Fr,De,Es,It,Ru) [BLES00323]`) | the `mercs2_exemap` Lua corpus test |
+| `rainbow_table` | the hash rainbow table, `rainbow_table.json` (in the parent `mercenaries-game/tools/`) | `mercs2_workshop --pack-data` (raw-names path), the engine diag commands, the name-mining `wad_simulator` bins and `mercs2_probe` probes |
+| `jul08_strings` | the Jul-08 Xbox 360 devkit strings dump, `mercs2_xenon_p.pe_full_strings.txt` | `mercs2_workshop --pack-data` (raw-names path) |
+| `notes_docs_dir` | the notes repo's `docs/` folder (`data/`, `mercs2-ecs/`, `mercs2-luacd/`, `mercs2-dlc-luacd/`) | `mercs2_workshop --pack-data` |
+| `unluac_jar` | the unluac jar | tests and dev tools that convert console Lua bytecode |
+| `java_binary` | the `java` executable that runs unluac | tests and dev tools that convert console Lua bytecode |
+| `unrar_binary` | `UnRAR.exe` | tests of the RAR'd Xbox 360 DLC path |
+| `lua51_src_dir` | the pristine Lua 5.1 `src` tree | the `mercs2_luac` vendor-integrity test |
 
 `scripts/find-vz-wad.sh --write` writes `vz_wad` only, and rewrites the whole file, so
-the console keys, `unpacked_exe`, the three executable keys, the patcher keys, the console-image keys and the corpus keys are added by hand after it runs. When the file, a key a test needs,
+the console keys, `unpacked_exe`, the three executable keys, the patcher keys, the console-image keys, the corpus keys and the tool keys are added by hand after it runs. The
+tool keys (`rainbow_table` through `lua51_src_dir`) name files that live outside this repository,
+so every worktree, wherever it is checked out, reads them from its own config rather than from a
+path relative to the checkout. When the file, a key a test needs,
 or the file that key names is missing, the test fails with a message naming the file
 and the key.
 Two shapes exist: integration test targets declared
