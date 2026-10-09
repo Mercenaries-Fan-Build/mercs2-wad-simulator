@@ -42,6 +42,7 @@ mod dtor;
 pub mod image;
 pub mod images;
 pub mod iso9660;
+pub mod luachunk;
 pub mod luareg;
 pub mod matcher;
 pub mod membership;
