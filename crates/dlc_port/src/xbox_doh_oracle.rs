@@ -34,12 +34,13 @@ use mercs2_formats::dlc_input::{
 use mercs2_formats::dlc_stfs::load_stfs_or_doh;
 use mercs2_formats::ucfx::parse_block_entry_table;
 use ucfx_byteswap::convert::{convert_block, QUIET};
+use ucfx_byteswap::lua::LuaTools;
 
 /// Marker substring produced by `mercs2_formats::be_to_le::convert::convert_decl_ps3_compact`.
 ///
 /// Anchoring on this exact phrase keeps the side-oracle scoped to the one
 /// rejection class the Xbox DOH can resolve. Other `convert_block` errors
-/// (wavebank-schema mismatch, `unluac.jar not found`, truncated UCFX, etc.)
+/// (wavebank-schema mismatch, an unluac round-trip failure, truncated UCFX, etc.)
 /// are shared between the PS3 and Xbox DOH inputs on the DLC01 corpus and are
 /// out of scope for this oracle — they stay on the existing skip path.
 pub const PS3_COMPACT_DECL_MARKER: &str = "PS3 compact decl detected";
@@ -79,7 +80,7 @@ pub struct XboxDohOracle {
 
 impl XboxDohOracle {
     /// Load an Xbox DOH / STFS / BE SCFF, convert every block BE→LE, and index
-    /// the results by primary `name_hash`.
+    /// the results by primary `name_hash`. `lua_tools` converts the blocks' Lua bytecode.
     ///
     /// A block that fails any step (segs-decompress, non-SCFF payload, BE→LE
     /// convert) is **not** silently dropped from the pipeline: it is omitted
@@ -87,7 +88,7 @@ impl XboxDohOracle {
     /// contract is on the caller — if the PS3 side later asks for a hash the
     /// oracle does not hold, [`XboxDohOracle::lookup`] returns `None` and the
     /// caller must fail the run.
-    pub fn load(path: &Path) -> Result<Self, String> {
+    pub fn load(path: &Path, lua_tools: &LuaTools) -> Result<Self, String> {
         let (doh, src) = load_stfs_or_doh(path)
             .map_err(|e| format!("xbox-doh-oracle: open {}: {e}", path.display()))?;
         println!(
@@ -166,7 +167,7 @@ impl XboxDohOracle {
                 continue;
             };
 
-            let swapped = match convert_block(&decompressed, false, None) {
+            let swapped = match convert_block(&decompressed, false, None, Some(lua_tools)) {
                 Ok(s) => s,
                 Err(err) => {
                     eprintln!("  xbox-doh-oracle: convert_block {path_s}: {err}");
@@ -403,6 +404,6 @@ mod tests {
         assert!(!is_ps3_compact_decl_rejection(
             "wavebank transcode: wavebank records_offset 56, expected 40"
         ));
-        assert!(!is_ps3_compact_decl_rejection("unluac.jar not found"));
+        assert!(!is_ps3_compact_decl_rejection("unluac --disassemble failed: bad header"));
     }
 }
