@@ -33,6 +33,8 @@ gltf ={ version = "1", default-features = false, features = ["utils", "names", "
 [dev-dependencies]
 serde_json = "1"
 mercs2_audio = { path = "../mercs2_audio" }
+# The game-gated dlc_stfs test checks the recovered DOH against its catalogued sha256.
+sha2 = "0.10"
 
 [features]
 # Builds the game-gated tests, which read the retail vz.wad named by the repo-root .mercs2-local.toml;
