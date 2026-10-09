@@ -115,7 +115,13 @@ another way, so their game tables carry no namespace.
 `patch`, `dlc:<name>`), platform and build, a patch or DLC naming the corpus it applies to, so
 scripts are only compared within one product. `wads.tsv` lists each corpus WAD by sha256 with the
 chain that rebuilds it from the original file: `zip:<entry>`, `wine-sfx:<path>` (a self-extracting
-installer run silently under Wine) and `wine-extrac32:<entry>` (a cabinet extracted by Wine).
+installer run silently under Wine), `wine-extrac32:<entry>` (a cabinet extracted by Wine),
+`xdvdfs:<path>` (a file from an Xbox disc image) and `stfs:<name>` (a file from an Xbox 360 STFS
+package). A WAD's name is its path from the install or disc root (`data/vz.wad` on PC, `vz.wad`
+on Xbox 360), or its name in its package for a DLC. The Xbox 360 corpora are the Jul 11 2008
+preview disc, the retail disc dump, and the Blow It Up Again Pack (retail, the Nov 6 and Nov 25
+2008 prototypes, and the Pack B prototype) and Amazon Pack prototype packages, each DLC's script
+archive being its `.doh`.
 `exemap corpus-derive` replays one chain, checking every sha256; the PC demo corpus rebuilds from
 `Mercs2_Demo_Setup.zip` this way, and its executable is build `demo-official-securom`, layout `D`.
 A WAD with an empty chain is catalogued from an install, named in its `install` column by the
@@ -129,7 +135,7 @@ to the official ones, its Loading.wad differs from the official one (and the dem
 `v11-official-unwrapped`.
 
 ```bash
-exemap corpus-derive base-pc-demo vz.wad --from Mercs2_Demo_Setup.zip --work /tmp/demo --wine <wine64>
+exemap corpus-derive base-pc-demo data/vz.wad --from Mercs2_Demo_Setup.zip --work /tmp/demo --wine <wine64>
 ```
 
 `exemap match <image_a> <image_b> --exports <dir> --evidence <list> --out <tsv> --conflicts <tsv>`
@@ -225,6 +231,9 @@ environment variable is consulted. The file holds one `key = "path"` per line:
 | `pc_demo_zip` | the public PC demo, `Mercs2_Demo_Setup.zip` (sha256 `9d32195d…`) | the `mercs2_exemap` Lua corpus test |
 | `pc_official_install_dir` | the official PC install directory, as EA's download manager installs it | the `mercs2_exemap` Lua corpus test |
 | `pc_repack_install_dir` | the ElAmigos repack install directory (every language, English last) | the `mercs2_exemap` Lua corpus test |
+| `x360_retail_dir` | the Xbox 360 retail disc dump directory (`…(NTSCU)[NTSCJ) (JTAGRip)`) | the `mercs2_exemap` Lua corpus test |
+| `x360_dlc_biua_stfs` | the retail Xbox LIVE Blow It Up Again Pack package (`45410828/00000002/86ABF01D…`) | the `mercs2_exemap` Lua corpus test |
+| `x360_dlc_prototypes_dir` | the directory of zipped Xbox 360 DLC prototype packages | the `mercs2_exemap` Lua corpus test |
 
 `scripts/find-vz-wad.sh --write` writes `vz_wad` only, and rewrites the whole file, so
 the console keys, `unpacked_exe`, the three executable keys, the patcher keys, the console-image keys and the corpus keys are added by hand after it runs. When the file, a key a test needs,
