@@ -228,7 +228,8 @@ fn hier_report(
     let dest = orchestrator::classify(&c);
 
     let all_hashes: BTreeSet<u32> = hier.iter().map(|n| n.hash).collect();
-    let mut names = mercs2_engine::worldutil::rainbow_names(&all_hashes);
+    let table = mercs2_formats::game_paths::local_config_rainbow_table(std::path::Path::new(env!("CARGO_MANIFEST_DIR")))?;
+    let mut names = mercs2_engine::worldutil::rainbow_names(&table, &all_hashes)?;
     if let Some(p) = names_file {
         let text = std::fs::read_to_string(&p).map_err(|e| format!("read {p}: {e}"))?;
         for line in text.lines() {
@@ -413,7 +414,7 @@ fn main() {
         },
         "placement-names" => diag::placement_names(&wadpath),
         "veg-census" => diag::veg_census(&wadpath),
-        "tree-census" => diag::tree_census(&wadpath),
+        "tree-census" => run(diag::tree_census(&wadpath)),
         "gfx-extract" => {
             let out = first_positional(&args).unwrap_or_else(|| {
                 "c:/Users/Shadow/Desktop/notes-on-the-released-game/output/gfx_movies".into()
