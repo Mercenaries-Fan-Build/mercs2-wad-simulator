@@ -313,6 +313,22 @@ pub fn derive_with_xex<R: Read + Seek>(image: &MapImage, container: &mut R) -> R
     Ok((out, xex))
 }
 
+/// Rebuild `image` as [`derive`] does, for a chain whose last step unpacks a PS3 SELF
+/// (`unself:`): the image is that SELF's ELF. Fails when the chain has no `unself:` step, more than
+/// one, or one that is not its last.
+pub fn derive_self_elf<R: Read + Seek>(image: &MapImage, container: &mut R) -> Result<Vec<u8>, Error> {
+    let unself_steps = image.chain.iter().filter(|l| matches!(l.step, Step::Unself(_))).count();
+    let last_is_unself = image.chain.last().is_some_and(|l| matches!(l.step, Step::Unself(_)));
+    if unself_steps != 1 || !last_is_unself {
+        return Err(Error::new(format!(
+            "image {}: its derivation chain has {unself_steps} unself steps{}; the image is not the ELF of one SELF",
+            image.id,
+            if unself_steps == 1 { ", not as its last step" } else { "" }
+        )));
+    }
+    derive(image, container)
+}
+
 fn derive_keeping_xex<R: Read + Seek>(
     image: &MapImage,
     container: &mut R,
@@ -537,5 +553,25 @@ mod tests {
         let pc = Images::embedded(&cat()).unwrap().image("pc-v10").unwrap().clone();
         let e = derive_with_xex(&pc, &mut std::io::Cursor::new(Vec::new())).unwrap_err().to_string();
         assert!(e.contains("0 xex steps"), "{e}");
+    }
+
+    #[test]
+    fn derive_self_elf_refuses_a_chain_not_ending_in_its_one_unself_step() {
+        let images = Images::embedded(&cat()).unwrap();
+        let x = images.image("x360-retail").unwrap();
+        let e = derive_self_elf(x, &mut std::io::Cursor::new(Vec::new())).unwrap_err().to_string();
+        assert!(e.contains("0 unself steps"), "{e}");
+        let mut m = images.image("ps3-v103-na").unwrap().clone();
+        m.chain.reverse();
+        let e = derive_self_elf(&m, &mut std::io::Cursor::new(Vec::new())).unwrap_err().to_string();
+        assert!(e.contains("1 unself steps, not as its last step"), "{e}");
+        let u = Link { from_sha256: SHA_B.into(), step: Step::Unself(SelfKind::App) };
+        m.chain = vec![u.clone(), u];
+        let e = derive_self_elf(&m, &mut std::io::Cursor::new(Vec::new())).unwrap_err().to_string();
+        assert!(e.contains("2 unself steps"), "{e}");
+        // a chain ending in its one unself step goes on to derive, which checks the container
+        let ps3 = images.image("ps3-v100").unwrap();
+        let e = derive_self_elf(ps3, &mut std::io::Cursor::new(b"not it".to_vec())).unwrap_err().to_string();
+        assert!(e.contains("the chain starts from"), "{e}");
     }
 }
