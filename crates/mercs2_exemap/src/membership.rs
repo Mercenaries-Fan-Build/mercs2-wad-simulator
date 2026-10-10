@@ -352,8 +352,8 @@ mod tests {
         );
         let builds = format!(
             "build_id\tsha256\tmd5\tsize\tpe_timestamp\tlayout\tcode_version\trecipe_from\trecipe_step\toverlay_set\n\
-             member\t{}\t{}\t{}\t0x00000011\tL\t1.0\t\t\tmember\n\
-             ref\t{}\t{}\t{}\t0x00000011\tL\t1.0\t\t\t\n",
+             member\t{}\t{}\t{}\t0x00000011\tL\t1.0\t-\t-\tmember\n\
+             ref\t{}\t{}\t{}\t0x00000011\tL\t1.0\t-\t-\t-\n",
             sha(member),
             md5(member),
             member.len(),
@@ -367,8 +367,8 @@ mod tests {
     fn overlays(text_sha: &str, tail_sha: &str) -> String {
         format!(
             "overlay_set\tsection\tspace\tstart\tend\tkind\truns\tdiff_bytes\tsha256\tdetail\n\
-             member\t.text\tva\t0x00401010\t0x00401014\tlineage\t1\t4\t{text_sha}\t\n\
-             member\t(slack)\tfile\t0x00000400\t0x00000408\tfile-padding\t1\t8\t{tail_sha}\t\n"
+             member\t.text\tva\t0x00401010\t0x00401014\tlineage\t1\t4\t{text_sha}\t-\n\
+             member\t(slack)\tfile\t0x00000400\t0x00000408\tfile-padding\t1\t8\t{tail_sha}\t-\n"
         )
     }
 
@@ -438,9 +438,9 @@ mod tests {
         let (r, m) = (reference(), member());
         let rows = format!(
             "overlay_set\tsection\tspace\tstart\tend\tkind\truns\tdiff_bytes\tsha256\tdetail\n\
-             member\t.text\tva\t0x00401010\t0x00401014\tlineage\t1\t4\t{}\t\n\
-             member\t.data\tva\t0x00402000\t0x00402004\tlineage\t1\t4\t{}\t\n\
-             member\t(slack)\tfile\t0x00000400\t0x00000408\tfile-padding\t1\t8\t{}\t\n",
+             member\t.text\tva\t0x00401010\t0x00401014\tlineage\t1\t4\t{}\t-\n\
+             member\t.data\tva\t0x00402000\t0x00402004\tlineage\t1\t4\t{}\t-\n\
+             member\t(slack)\tfile\t0x00000400\t0x00000408\tfile-padding\t1\t8\t{}\t-\n",
             sha(&[0xde, 0xad, 0xbe, 0xef]),
             sha(&[7; 4]),
             sha(&[1, 2, 3, 4, 5, 6, 7, 8])
@@ -456,8 +456,8 @@ mod tests {
         let tail = sha(&[1, 2, 3, 4, 5, 6, 7, 8]);
         let narrow = format!(
             "overlay_set\tsection\tspace\tstart\tend\tkind\truns\tdiff_bytes\tsha256\tdetail\n\
-             member\t.text\tva\t0x00401010\t0x00401012\tlineage\t1\t2\t{}\t\n\
-             member\t(slack)\tfile\t0x00000400\t0x00000408\tfile-padding\t1\t8\t{tail}\t\n",
+             member\t.text\tva\t0x00401010\t0x00401012\tlineage\t1\t2\t{}\t-\n\
+             member\t(slack)\tfile\t0x00000400\t0x00000408\tfile-padding\t1\t8\t{tail}\t-\n",
             sha(&[0xde, 0xad])
         );
         let c = catalogue(&r, &m, &narrow);
