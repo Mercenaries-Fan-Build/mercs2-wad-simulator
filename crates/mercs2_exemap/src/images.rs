@@ -295,6 +295,29 @@ pub fn stream_sha256<R: Read + Seek>(r: &mut R) -> Result<String, Error> {
 /// the chain's first `from_sha256`, every intermediate file the next link's, and the result the
 /// image's.
 pub fn derive<R: Read + Seek>(image: &MapImage, container: &mut R) -> Result<Vec<u8>, Error> {
+    derive_keeping_xex(image, container, false).map(|(out, _)| out)
+}
+
+/// Rebuild `image` as [`derive`] does and also return the XEX2 file its chain unpacks (the input
+/// of its one `xex:` step). Fails when the chain has no `xex:` step or more than one.
+pub fn derive_with_xex<R: Read + Seek>(image: &MapImage, container: &mut R) -> Result<(Vec<u8>, Vec<u8>), Error> {
+    let xex_steps = image.chain.iter().filter(|l| matches!(l.step, Step::Xex(_))).count();
+    if xex_steps != 1 {
+        return Err(Error::new(format!(
+            "image {}: its derivation chain has {xex_steps} xex steps, not one",
+            image.id
+        )));
+    }
+    let (out, xex) = derive_keeping_xex(image, container, true)?;
+    let xex = xex.ok_or_else(|| Error::new(format!("image {}: the xex step's input was not kept", image.id)))?;
+    Ok((out, xex))
+}
+
+fn derive_keeping_xex<R: Read + Seek>(
+    image: &MapImage,
+    container: &mut R,
+    keep_xex: bool,
+) -> Result<(Vec<u8>, Option<Vec<u8>>), Error> {
     let first = image
         .chain
         .first()
@@ -306,6 +329,13 @@ pub fn derive<R: Read + Seek>(image: &MapImage, container: &mut R) -> Result<Vec
             image.id, first.from_sha256
         )));
     }
+    let mut xex = None;
+    if keep_xex && matches!(first.step, Step::Xex(_)) {
+        container.seek(SeekFrom::Start(0)).map_err(|e| Error::new(format!("seek: {e}")))?;
+        let mut v = Vec::new();
+        container.read_to_end(&mut v).map_err(|e| Error::new(format!("read: {e}")))?;
+        xex = Some(v);
+    }
     let mut out = apply(&first.step, container)?;
     for link in &image.chain[1..] {
         let sha = sha256_hex(&out);
@@ -314,6 +344,9 @@ pub fn derive<R: Read + Seek>(image: &MapImage, container: &mut R) -> Result<Vec
                 "image {}: step output has sha256 {sha}, the next link expects {}",
                 image.id, link.from_sha256
             )));
+        }
+        if keep_xex && matches!(link.step, Step::Xex(_)) {
+            xex = Some(out.clone());
         }
         out = apply(&link.step, &mut std::io::Cursor::new(out))?;
     }
@@ -327,7 +360,7 @@ pub fn derive<R: Read + Seek>(image: &MapImage, container: &mut R) -> Result<Vec
             image.size
         )));
     }
-    Ok(out)
+    Ok((out, xex))
 }
 
 /// The executable sections of a PS3 ELF or Xbox PE, as (address, bytes), in header order.
@@ -461,5 +494,29 @@ mod tests {
         };
         let e = derive(&m, &mut std::io::Cursor::new(b"not it".to_vec())).unwrap_err().to_string();
         assert!(e.contains("the chain starts from"), "{e}");
+    }
+
+    #[test]
+    fn derive_with_xex_refuses_a_chain_without_one_xex_step() {
+        let mut m = MapImage {
+            id: "t".into(),
+            platform: Platform::Ps3,
+            ghidra_language: "L".into(),
+            sha256: SHA_A.into(),
+            size: 1,
+            base: 0,
+            build_id: None,
+            code_image: None,
+            chain: vec![Link { from_sha256: SHA_B.into(), step: Step::Unself(SelfKind::App) }],
+        };
+        let e = derive_with_xex(&m, &mut std::io::Cursor::new(Vec::new())).unwrap_err().to_string();
+        assert!(e.contains("0 xex steps"), "{e}");
+        let x = Link { from_sha256: SHA_B.into(), step: Step::Xex(XexKey::Retail) };
+        m.chain = vec![x.clone(), x];
+        let e = derive_with_xex(&m, &mut std::io::Cursor::new(Vec::new())).unwrap_err().to_string();
+        assert!(e.contains("2 xex steps"), "{e}");
+        let pc = Images::embedded(&cat()).unwrap().image("pc-v10").unwrap().clone();
+        let e = derive_with_xex(&pc, &mut std::io::Cursor::new(Vec::new())).unwrap_err().to_string();
+        assert!(e.contains("0 xex steps"), "{e}");
     }
 }
