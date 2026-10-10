@@ -24,19 +24,25 @@
 //! which FnMnemonicSig reads as its imports sidecar. The header line names the format:
 //!
 //! * an image whose derivation chain has one `xex:` step (Xbox 360): header
-//!   `address\tkind\tlibrary\tordinal`, one row per record of the XEX's import libraries optional
-//!   header (`0x000103FF`), in header order: the record's virtual address (`0x%08x`), `function` (a
-//!   type-1 stub) or `variable` (a type-0 slot), the library name and the ordinal (decimal). Every
+//!   `address\tkind\tlibrary\tordinal\tname`, one row per record of the XEX's import libraries
+//!   optional header (`0x000103FF`), in header order: the record's virtual address (`0x%08x`),
+//!   `function` (a type-1 stub) or `variable` (a type-0 slot), the library name, the ordinal
+//!   (decimal) and the export's name from `data/xbox_exports.tsv` (Xenia's export tables). Every
 //!   record's word in the image must be `type << 24 | library_index << 16 | ordinal` with type 0 or
 //!   1 and the library's own header index, and every function stub must end `mtctr r11; bctr`
-//!   (`mercs2_exemap::xbox::import_records`);
+//!   (`mercs2_exemap::xbox::import_records`); a library and ordinal the table does not list, or a
+//!   function record whose export the table lists as a variable, is an error
+//!   (`mercs2_exemap::xbox::imports_tsv`);
 //! * an image whose chain ends in its one `unself:` step (PS3): header
-//!   `address\tkind\tlibrary\tfnid\tstub`, one row per function import of the ELF's PRX import
-//!   table, ascending by stub address: the code stub's address (`0x%08x`), `function`, the library
-//!   name, the FNID (8 lowercase hex digits) and the stub's bytes (lowercase hex, so its length
-//!   gives the stub size). Every stub must be the 32-byte PRX stub form and load the slot of exactly
-//!   one function import, and the stubs must fill their executable section; a library with variable
-//!   or TLS imports is an error (`mercs2_exemap::prx::prx_imports`).
+//!   `address\tkind\tlibrary\tfnid\tname\tstub`, one row per function import of the ELF's PRX
+//!   import table, ascending by stub address: the code stub's address (`0x%08x`), `function`, the
+//!   library name, the FNID (8 lowercase hex digits), the function's name and the stub's bytes
+//!   (lowercase hex, so its length gives the stub size). Every stub must be the 32-byte PRX stub
+//!   form and load the slot of exactly one function import, and the stubs must fill their
+//!   executable section; a library with variable or TLS imports is an error
+//!   (`mercs2_exemap::prx::prx_imports`). The name is the one of `data/ps3_fnid_names.tsv` whose
+//!   hash is the FNID, or the module-level NID of `data/ps3_fixed_nids.tsv`; an FNID with neither
+//!   is an error listing every unnamed FNID by library (`mercs2_exemap::prx::prx_imports_tsv`).
 //!
 //! An image whose chain has neither step (every PC image), or both, is an error.
 //!
@@ -100,9 +106,9 @@ enum Command {
         out: PathBuf,
     },
     /// Write <exports>/<image_id>.imports.tsv: one row per XEX import record (address, function or
-    /// variable, library, ordinal) of an images.tsv image whose chain unpacks a XEX, or one row per
-    /// PRX function import (stub address, function, library, FNID, stub bytes) of an image whose
-    /// chain ends unpacking a PS3 SELF.
+    /// variable, library, ordinal, name) of an images.tsv image whose chain unpacks a XEX, or one
+    /// row per PRX function import (stub address, function, library, FNID, name, stub bytes) of an
+    /// image whose chain ends unpacking a PS3 SELF.
     Imports {
         image_id: String,
         /// The first file of the image's chain: a disc image, XEX, SELF or PSN package.
@@ -328,7 +334,7 @@ fn run(cli: Cli) -> Result<(), ExitCode> {
         }
         Command::Imports { image_id, from, exports } => {
             use mercs2_exemap::images::Step;
-            use mercs2_exemap::xbox::{import_records, imports_tsv, ImportKind};
+            use mercs2_exemap::xbox::{import_records, imports_tsv, ImportKind, XboxExports};
             let images = mercs2_exemap::images::Images::embedded(&catalogue).map_err(|e| {
                 eprintln!("error: the embedded images table is invalid: {e}");
                 ExitCode::from(2)
@@ -355,11 +361,16 @@ fn run(cli: Cli) -> Result<(), ExitCode> {
                 return Err(ExitCode::from(1));
             }
             if unself_steps > 0 {
-                use mercs2_exemap::prx::{prx_imports, prx_imports_tsv, STUB_SIZE};
+                use mercs2_exemap::prx::{prx_imports, prx_imports_tsv, FnidNames, STUB_SIZE};
+                let names = FnidNames::embedded().map_err(|e| {
+                    eprintln!("error: the embedded FNID name tables are invalid: {e}");
+                    ExitCode::from(2)
+                })?;
                 let elf = mercs2_exemap::images::derive_self_elf(image, &mut file).map_err(fail)?;
                 let imports = prx_imports(&elf).map_err(|e| fail(mercs2_exemap::Error::new(format!("image {image_id}: {e}"))))?;
+                let text = prx_imports_tsv(&imports, &names).map_err(|e| fail(mercs2_exemap::Error::new(format!("image {image_id}: {e}"))))?;
                 let out = exports.join(format!("{image_id}.imports.tsv"));
-                write(&out, prx_imports_tsv(&imports).as_bytes())?;
+                write(&out, text.as_bytes())?;
                 let mut per_lib: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
                 for i in &imports {
                     *per_lib.entry(i.library.as_str()).or_default() += 1;
@@ -370,17 +381,22 @@ fn run(cli: Cli) -> Result<(), ExitCode> {
                 let (lo, hi) = (imports[0].stub, imports[imports.len() - 1].stub + STUB_SIZE as u32);
                 println!("stubs      0x{lo:08x}..0x{hi:08x}, {STUB_SIZE} bytes each");
                 println!(
-                    "imports    {} functions in {} libraries, 0 variables -> {}",
+                    "imports    {} functions in {} libraries, 0 variables, every FNID named -> {}",
                     imports.len(),
                     per_lib.len(),
                     out.display()
                 );
                 return Ok(());
             }
+            let xbox_exports = XboxExports::embedded().map_err(|e| {
+                eprintln!("error: the embedded xbox_exports.tsv is invalid: {e}");
+                ExitCode::from(2)
+            })?;
             let (bytes, xex) = mercs2_exemap::images::derive_with_xex(image, &mut file).map_err(fail)?;
             let records = import_records(&xex, &bytes).map_err(|e| fail(mercs2_exemap::Error::new(format!("image {image_id}: {e}"))))?;
+            let text = imports_tsv(&records, &xbox_exports).map_err(|e| fail(mercs2_exemap::Error::new(format!("image {image_id}: {e}"))))?;
             let out = exports.join(format!("{image_id}.imports.tsv"));
-            write(&out, imports_tsv(&records).as_bytes())?;
+            write(&out, text.as_bytes())?;
             let mut per_lib: std::collections::BTreeMap<&str, (usize, usize)> = std::collections::BTreeMap::new();
             for r in &records {
                 let e = per_lib.entry(r.library.as_str()).or_default();
@@ -392,7 +408,7 @@ fn run(cli: Cli) -> Result<(), ExitCode> {
             for (lib, (f, v)) in &per_lib {
                 println!("library    {lib}: {} records ({f} function, {v} variable)", f + v);
             }
-            println!("imports    {} records -> {}", records.len(), out.display());
+            println!("imports    {} records, every one named -> {}", records.len(), out.display());
         }
         Command::Rtti { image, out } => {
             let bytes = read(&image)?;
