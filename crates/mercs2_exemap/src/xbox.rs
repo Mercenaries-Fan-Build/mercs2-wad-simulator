@@ -17,6 +17,22 @@
 //!
 //! The recovered PE is laid out by RVA (file offset = RVA) while its section headers keep the
 //! original packed `PointerToRawData`. [`ghidra_pe`] rewrites the headers to match the RVA layout.
+//!
+//! ## Imports
+//!
+//! An XEX2's imports are its import libraries optional header (key `0x000103FF`), which
+//! [`xex_import_libraries`] reads: `{u32 size, u32 name_table_size, u32 library_count}`, a table of
+//! NUL-terminated library names (`name_table_size` bytes, zero-padded), then per library
+//! `{u32 size, u8 digest[20], u32 id, u32 version, u32 version_min, u16 name_index, u16
+//! record_count, u32 record[record_count]}` with `size` = 40 + 4 × `record_count`; the libraries
+//! fill the header to its `size`. Each record is the virtual address of one import in the image.
+//!
+//! In the image, the word at a record's address is `type << 24 | library_index << 16 | ordinal`
+//! (`library_index` the library's position in the header): type 0 is a **variable** (a 4-byte slot
+//! the loader fills), type 1 a **function** (a 16-byte stub whose last two words are `mtctr r11;
+//! bctr`). [`import_records`] reads every record against the image and fails on a word whose type
+//! is neither, whose library index is not its library's, or a function stub that does not end
+//! `mtctr r11; bctr`.
 
 use aes::cipher::generic_array::GenericArray;
 use aes::cipher::{BlockDecrypt, KeyInit};
@@ -248,6 +264,178 @@ pub fn unpack_xex(xex: &[u8], key: XexKey) -> Result<(Vec<u8>, XexInfo), Error> 
     Ok((pe, info))
 }
 
+/// Optional-header key of the import libraries descriptor.
+const OPT_IMPORT_LIBRARIES: u32 = 0x0001_03FF;
+
+/// The last two words of an import function stub: `mtctr r11`, `bctr`.
+const STUB_MTCTR: u32 = 0x7d69_03a6;
+const STUB_BCTR: u32 = 0x4e80_0420;
+
+/// One library of an XEX2's import libraries header.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ImportLibrary {
+    pub name: String,
+    /// The virtual address of each import record, in header order.
+    pub records: Vec<u32>,
+}
+
+/// The import libraries optional header (`0x000103FF`) of an XEX2 file. Fails on a file without
+/// it, on a library whose `size` is not 40 + 4 × its record count, on a name index past the name
+/// table, and on libraries that do not fill the header exactly.
+pub fn xex_import_libraries(xex: &[u8]) -> Result<Vec<ImportLibrary>, Error> {
+    if xex.get(0..4) != Some(b"XEX2") {
+        return Err(Error::new("not an XEX2 file (magic is not \"XEX2\")"));
+    }
+    let opt_count = be32(xex, 0x14, "optional header count")? as usize;
+    let mut imp = None;
+    for i in 0..opt_count {
+        if be32(xex, 0x18 + i * 8, "optional header key")? == OPT_IMPORT_LIBRARIES {
+            imp = Some(be32(xex, 0x18 + i * 8 + 4, "optional header value")? as usize);
+        }
+    }
+    let imp = imp.ok_or_else(|| Error::new("XEX has no import libraries optional header (0x103FF)"))?;
+    let size = be32(xex, imp, "import header size")? as usize;
+    let names_size = be32(xex, imp + 4, "import name table size")? as usize;
+    let count = be32(xex, imp + 8, "import library count")? as usize;
+    let table = xex
+        .get(imp + 12..imp + 12 + names_size)
+        .ok_or_else(|| Error::new(format!("XEX truncated reading the {names_size}-byte import name table at 0x{:x}", imp + 12)))?;
+    let names: Vec<String> = table
+        .split(|b| *b == 0)
+        .filter(|s| !s.is_empty())
+        .map(|s| String::from_utf8_lossy(s).into_owned())
+        .collect();
+    let mut p = imp + 12 + names_size;
+    let mut libs = Vec::with_capacity(count);
+    for li in 0..count {
+        let lsize = be32(xex, p, "import library size")? as usize;
+        let name_index = be16(xex, p + 36, "import library name index")? as usize;
+        let n = be16(xex, p + 38, "import library record count")? as usize;
+        if lsize != 40 + 4 * n {
+            return Err(Error::new(format!(
+                "XEX import library {li} at 0x{p:x}: size {lsize} is not 40 + 4 x {n} records"
+            )));
+        }
+        let name = names.get(name_index).ok_or_else(|| {
+            Error::new(format!(
+                "XEX import library {li} at 0x{p:x}: name index {name_index} is past the {} names {names:?}",
+                names.len()
+            ))
+        })?;
+        let mut records = Vec::with_capacity(n);
+        for j in 0..n {
+            records.push(be32(xex, p + 40 + 4 * j, "import record")?);
+        }
+        libs.push(ImportLibrary { name: name.clone(), records });
+        p += lsize;
+    }
+    if p != imp + size {
+        return Err(Error::new(format!(
+            "XEX import libraries end at 0x{p:x}, the import header (0x{imp:x}, {size} bytes) at 0x{:x}",
+            imp + size
+        )));
+    }
+    Ok(libs)
+}
+
+/// What an import record is in the image.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ImportKind {
+    /// A type-1 record: a 16-byte stub ending `mtctr r11; bctr`.
+    Function,
+    /// A type-0 record: a slot the loader fills.
+    Variable,
+}
+
+impl ImportKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ImportKind::Function => "function",
+            ImportKind::Variable => "variable",
+        }
+    }
+}
+
+/// One import record of an XEX2, read against its PE image.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ImportRecord {
+    pub address: u32,
+    pub kind: ImportKind,
+    pub library: String,
+    pub ordinal: u16,
+}
+
+/// The header of an `<id>.imports.tsv` export.
+pub const IMPORTS_HEADER: &str = "address\tkind\tlibrary\tordinal";
+
+/// Every import record of `xex`, read in `image` (the PE the XEX unpacks to, with section headers
+/// that map it as [`ghidra_pe`] writes them), in header order. Fails on a record address outside the image, a repeated address, a word whose
+/// type is not 0 or 1 or whose library index is not its library's position in the header, and a
+/// function stub whose last two words are not `mtctr r11; bctr`.
+pub fn import_records(xex: &[u8], image: &[u8]) -> Result<Vec<ImportRecord>, Error> {
+    let libs = xex_import_libraries(xex)?;
+    let pe = Pe::parse(image).map_err(|e| Error::new(format!("PE parse: {e}")))?;
+    if pe.machine != MACHINE_XENON {
+        return Err(Error::new(format!("PE machine is 0x{:x}, not an Xbox 360 image (0x{MACHINE_XENON:x})", pe.machine)));
+    }
+    let word = |va: u32, what: &str| -> Result<u32, Error> {
+        let off = va
+            .checked_sub(pe.image_base)
+            .and_then(|rva| pe.rva_to_off(rva))
+            .ok_or_else(|| Error::new(format!("{what} 0x{va:08x} is not in the image")))?;
+        image
+            .get(off..off + 4)
+            .map(|b| u32::from_be_bytes(b.try_into().unwrap()))
+            .ok_or_else(|| Error::new(format!("{what} 0x{va:08x} runs past the image file")))
+    };
+    let mut seen = std::collections::BTreeSet::new();
+    let mut out = Vec::new();
+    for (li, lib) in libs.iter().enumerate() {
+        for &va in &lib.records {
+            let what = format!("{} import record", lib.name);
+            if !seen.insert(va) {
+                return Err(Error::new(format!("{what} 0x{va:08x} appears twice in the import header")));
+            }
+            let w = word(va, &what)?;
+            let (ty, idx, ordinal) = (w >> 24, (w >> 16) & 0xff, (w & 0xffff) as u16);
+            if idx as usize != li {
+                return Err(Error::new(format!(
+                    "{what} 0x{va:08x}: word 0x{w:08x} names library index {idx}, the header lists {} at index {li}",
+                    lib.name
+                )));
+            }
+            let kind = match ty {
+                0 => ImportKind::Variable,
+                1 => {
+                    let (a, b) = (word(va + 8, &what)?, word(va + 12, &what)?);
+                    if a != STUB_MTCTR || b != STUB_BCTR {
+                        return Err(Error::new(format!(
+                            "{what} 0x{va:08x}: the function stub ends 0x{a:08x} 0x{b:08x}, not mtctr r11 (0x{STUB_MTCTR:08x}); bctr (0x{STUB_BCTR:08x})"
+                        )));
+                    }
+                    ImportKind::Function
+                }
+                other => {
+                    return Err(Error::new(format!(
+                        "{what} 0x{va:08x}: word 0x{w:08x} has type {other}, not 0 (variable) or 1 (function)"
+                    )))
+                }
+            };
+            out.push(ImportRecord { address: va, kind, library: lib.name.clone(), ordinal });
+        }
+    }
+    Ok(out)
+}
+
+/// The `<id>.imports.tsv` text of `records`: [`IMPORTS_HEADER`], then one row per record.
+pub fn imports_tsv(records: &[ImportRecord]) -> String {
+    let mut s = format!("{IMPORTS_HEADER}\n");
+    for r in records {
+        s.push_str(&format!("0x{:08x}\t{}\t{}\t{}\n", r.address, r.kind.as_str(), r.library, r.ordinal));
+    }
+    s
+}
+
 /// Rewrite an Xbox 360 RVA-laid-out PE image so every section's `PointerToRawData` is its
 /// `VirtualAddress` and `SizeOfRawData` is the bytes the file holds for it, with `FileAlignment` =
 /// `SectionAlignment`.
@@ -325,6 +513,139 @@ mod tests {
     fn an_image_without_mz_is_reported_against_the_key() {
         let e = unpack_xex(&plain_xex(&[0u8; 64]), XexKey::Devkit).unwrap_err().to_string();
         assert!(e.contains("devkit key"), "{e}");
+    }
+
+    /// An XEX2 whose import libraries header lists `libs` as (name index, records), with the name
+    /// table "xam.xex\0xboxkrnl.exe\0p\0\0" (24 bytes, an unreferenced trailing name).
+    fn import_xex(libs: &[(u16, &[u32])], size_delta: i64) -> Vec<u8> {
+        let imp = 0x40usize;
+        let names = b"xam.xex\0xboxkrnl.exe\0p\0\0";
+        let mut body = Vec::new();
+        for (ni, recs) in libs {
+            let mut l = vec![0u8; 40];
+            l[0..4].copy_from_slice(&(40 + 4 * recs.len() as u32).to_be_bytes());
+            l[36..38].copy_from_slice(&ni.to_be_bytes());
+            l[38..40].copy_from_slice(&(recs.len() as u16).to_be_bytes());
+            for r in *recs {
+                l.extend_from_slice(&r.to_be_bytes());
+            }
+            body.extend_from_slice(&l);
+        }
+        let size = (12 + names.len() + body.len()) as i64 + size_delta;
+        let mut d = vec![0u8; imp];
+        d[0..4].copy_from_slice(b"XEX2");
+        d[0x14..0x18].copy_from_slice(&1u32.to_be_bytes());
+        d[0x18..0x1c].copy_from_slice(&OPT_IMPORT_LIBRARIES.to_be_bytes());
+        d[0x1c..0x20].copy_from_slice(&(imp as u32).to_be_bytes());
+        d.extend_from_slice(&(size as u32).to_be_bytes());
+        d.extend_from_slice(&(names.len() as u32).to_be_bytes());
+        d.extend_from_slice(&(libs.len() as u32).to_be_bytes());
+        d.extend_from_slice(names);
+        d.extend_from_slice(&body);
+        d
+    }
+
+    /// An Xbox PE at 0x82000000 whose one section (RVA 0x400, 0x200 bytes) holds `words` as
+    /// (address, big-endian word).
+    fn import_image(words: &[(u32, u32)]) -> Vec<u8> {
+        use crate::starts::tests::pe_image;
+        let mut sec = vec![0u8; 0x200];
+        for (va, w) in words {
+            let o = (va - 0x8200_0400) as usize;
+            sec[o..o + 4].copy_from_slice(&w.to_be_bytes());
+        }
+        pe_image(MACHINE_XENON, 0x8200_0000, &[(".text", 0x400, 0x200, 0x6000_0020, &sec)])
+    }
+
+    fn stub(va: u32, word: u32) -> [(u32, u32); 4] {
+        [(va, word), (va + 4, word + 0x0100_0000), (va + 8, STUB_MTCTR), (va + 12, STUB_BCTR)]
+    }
+
+    fn good_image() -> Vec<u8> {
+        let mut w = vec![(0x8200_0400, 0x0000_0005), (0x8200_0410, 0x0001_0007)];
+        w.extend(stub(0x8200_0500, 0x0100_0005));
+        w.extend(stub(0x8200_0510, 0x0101_0007));
+        import_image(&w)
+    }
+
+    const LIBS: &[(u16, &[u32])] = &[(0, &[0x8200_0400, 0x8200_0500]), (1, &[0x8200_0410, 0x8200_0510])];
+
+    #[test]
+    fn import_records_read_kind_library_and_ordinal_from_the_image() {
+        let libs = xex_import_libraries(&import_xex(LIBS, 0)).unwrap();
+        assert_eq!(libs[0].name, "xam.xex");
+        assert_eq!(libs[1].name, "xboxkrnl.exe");
+        let r = import_records(&import_xex(LIBS, 0), &good_image()).unwrap();
+        let rows: Vec<(u32, ImportKind, &str, u16)> = r.iter().map(|r| (r.address, r.kind, r.library.as_str(), r.ordinal)).collect();
+        assert_eq!(
+            rows,
+            vec![
+                (0x8200_0400, ImportKind::Variable, "xam.xex", 5),
+                (0x8200_0500, ImportKind::Function, "xam.xex", 5),
+                (0x8200_0410, ImportKind::Variable, "xboxkrnl.exe", 7),
+                (0x8200_0510, ImportKind::Function, "xboxkrnl.exe", 7),
+            ]
+        );
+        assert_eq!(
+            imports_tsv(&r[..2]),
+            "address\tkind\tlibrary\tordinal\n0x82000400\tvariable\txam.xex\t5\n0x82000500\tfunction\txam.xex\t5\n"
+        );
+    }
+
+    #[test]
+    fn a_word_naming_another_library_is_an_error() {
+        let mut w = vec![(0x8200_0400, 0x0001_0005), (0x8200_0410, 0x0001_0007)];
+        w.extend(stub(0x8200_0500, 0x0100_0005));
+        w.extend(stub(0x8200_0510, 0x0101_0007));
+        let e = import_records(&import_xex(LIBS, 0), &import_image(&w)).unwrap_err().to_string();
+        assert!(e.contains("0x82000400") && e.contains("library index 1"), "{e}");
+    }
+
+    #[test]
+    fn a_type_other_than_0_or_1_is_an_error() {
+        let mut w = vec![(0x8200_0400, 0x0200_0005), (0x8200_0410, 0x0001_0007)];
+        w.extend(stub(0x8200_0500, 0x0100_0005));
+        w.extend(stub(0x8200_0510, 0x0101_0007));
+        let e = import_records(&import_xex(LIBS, 0), &import_image(&w)).unwrap_err().to_string();
+        assert!(e.contains("type 2"), "{e}");
+    }
+
+    #[test]
+    fn a_stub_not_ending_mtctr_bctr_is_an_error() {
+        let mut w = vec![(0x8200_0400, 0x0000_0005), (0x8200_0410, 0x0001_0007)];
+        w.extend(stub(0x8200_0500, 0x0100_0005));
+        w.extend(stub(0x8200_0510, 0x0101_0007));
+        w.push((0x8200_051c, 0x4e80_0020));
+        let e = import_records(&import_xex(LIBS, 0), &import_image(&w)).unwrap_err().to_string();
+        assert!(e.contains("0x82000510") && e.contains("not mtctr"), "{e}");
+    }
+
+    #[test]
+    fn a_record_outside_the_image_is_an_error() {
+        let libs: &[(u16, &[u32])] = &[(0, &[0x8300_0000])];
+        let e = import_records(&import_xex(libs, 0), &good_image()).unwrap_err().to_string();
+        assert!(e.contains("0x83000000") && e.contains("not in the image"), "{e}");
+    }
+
+    #[test]
+    fn an_import_header_the_libraries_do_not_fill_is_an_error() {
+        let e = xex_import_libraries(&import_xex(LIBS, 4)).unwrap_err().to_string();
+        assert!(e.contains("import libraries end"), "{e}");
+    }
+
+    #[test]
+    fn a_name_index_past_the_name_table_is_an_error() {
+        let libs: &[(u16, &[u32])] = &[(3, &[0x8200_0400])];
+        let e = xex_import_libraries(&import_xex(libs, 0)).unwrap_err().to_string();
+        assert!(e.contains("name index 3"), "{e}");
+    }
+
+    #[test]
+    fn an_xex_without_an_import_header_is_an_error() {
+        let mut pe = vec![0u8; 64];
+        pe[0..2].copy_from_slice(b"MZ");
+        let e = xex_import_libraries(&plain_xex(&pe)).unwrap_err().to_string();
+        assert!(e.contains("0x103FF"), "{e}");
     }
 
     #[test]
