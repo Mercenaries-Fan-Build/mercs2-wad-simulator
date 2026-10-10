@@ -12,6 +12,12 @@
 //! `install` column names the local-config key of that install directory, where [`check_installed`]
 //! finds it by name; a WAD with a chain names no install.
 //!
+//! Both tables are tab-separated with one header line that must match exactly. No field is empty:
+//! a column with no value holds `-` ([`crate::NO_VALUE`]), and an empty field is an error naming
+//! the table, line and column. The columns that may hold `-` are `applies_to` in `corpora.tsv`,
+//! and `from_sha256`, `step` (together: a WAD with no chain) and `install` in `wads.tsv`; in every
+//! other column `-` is an error.
+//!
 //! | step | input → output |
 //! |---|---|
 //! | `zip:<entry>` | a zip archive → its entry |
@@ -34,7 +40,7 @@ use std::process::Command;
 
 use sha2::{Digest, Sha256};
 
-use crate::Error;
+use crate::{field_value, table_row, Error};
 
 pub const CORPORA_HEADER: &str = "corpus_id\tproduct\tplatform\tbuild\tapplies_to\tdescription";
 pub const WADS_HEADER: &str = "corpus_id\twad\tsha256\tsize\tfrom_sha256\tstep\tinstall";
@@ -136,16 +142,12 @@ fn lines<'t>(table: &str, text: &'t str, header: &str) -> Result<Vec<(usize, Vec
     if first != header {
         return Err(Error::new(format!("{table}: header line is {first:?}, expected {header:?}")));
     }
-    let width = header.split('\t').count();
-    it.enumerate()
-        .map(|(i, l)| {
-            let f: Vec<&str> = l.split('\t').collect();
-            if f.len() != width {
-                return Err(err(table, i + 2, format!("{} fields, expected {width}", f.len())));
-            }
-            Ok((i + 2, f))
-        })
-        .collect()
+    it.enumerate().map(|(i, l)| Ok((i + 2, table_row(table, header, i + 2, l)?))).collect()
+}
+
+/// The `;`-separated entries of a list column; [`crate::NO_VALUE`] is the empty list.
+fn list(s: &str) -> Vec<&str> {
+    field_value(s).map(|v| v.split(';').collect()).unwrap_or_default()
 }
 
 fn sha(table: &str, n: usize, col: &str, s: &str) -> Result<String, Error> {
@@ -166,8 +168,8 @@ impl Corpora {
         const W: &str = "wads.tsv";
         let mut cs: Vec<Corpus> = Vec::new();
         for (n, f) in lines(C, corpora, CORPORA_HEADER)? {
-            if f[0].is_empty() || f[3].is_empty() || f[5].is_empty() {
-                return Err(err(C, n, "corpus_id, build and description must be set"));
+            if [f[0], f[3], f[5]].iter().any(|v| field_value(v).is_none()) {
+                return Err(err(C, n, "corpus_id, build and description must hold a value"));
             }
             if let Some(prev) = cs.last() {
                 if prev.id.as_str() >= f[0] {
@@ -182,7 +184,7 @@ impl Corpora {
             if !matches!(f[2], "pc" | "x360" | "ps3") {
                 return Err(err(C, n, format!("platform {:?} is not pc, x360 or ps3", f[2])));
             }
-            let applies_to = (!f[4].is_empty()).then(|| f[4].to_string());
+            let applies_to = field_value(f[4]).map(str::to_string);
             let needs_base = f[1] == "patch" || f[1].starts_with("dlc:");
             if needs_base != applies_to.is_some() {
                 return Err(err(C, n, "a patch or DLC names the corpus it applies to, and nothing else does"));
@@ -201,16 +203,16 @@ impl Corpora {
             if !cs.iter().any(|c| c.id == f[0]) {
                 return Err(err(W, n, format!("corpus {} is not in corpora.tsv", f[0])));
             }
-            if f[1].is_empty() {
-                return Err(err(W, n, "wad is empty"));
+            if field_value(f[1]).is_none() {
+                return Err(err(W, n, "wad holds no value"));
             }
             if let Some(prev) = ws.last() {
                 if (prev.corpus.as_str(), prev.name.as_str()) >= (f[0], f[1]) {
                     return Err(err(W, n, format!("{} {} is not after {} {}", f[0], f[1], prev.corpus, prev.name)));
                 }
             }
-            let froms: Vec<&str> = if f[4].is_empty() { Vec::new() } else { f[4].split(';').collect() };
-            let steps: Vec<&str> = if f[5].is_empty() { Vec::new() } else { f[5].split(';').collect() };
+            let froms = list(f[4]);
+            let steps = list(f[5]);
             if froms.len() != steps.len() {
                 return Err(err(W, n, format!("{} from_sha256 entries but {} steps", froms.len(), steps.len())));
             }
@@ -221,7 +223,7 @@ impl Corpora {
                     step: Step::parse(step).ok_or_else(|| err(W, n, format!("step {step:?} is not a known step")))?,
                 });
             }
-            let install = (!f[6].is_empty()).then(|| f[6].to_string());
+            let install = field_value(f[6]).map(str::to_string);
             if chain.is_empty() != install.is_some() {
                 return Err(err(W, n, "a WAD has either a chain or an install key, not both and not neither"));
             }
@@ -559,10 +561,10 @@ mod tests {
 
     #[test]
     fn rows_that_break_the_rules_are_rejected() {
-        let base = "b\tbase\tpc\tretail\t\tthe game";
-        let wad = |c: &str| format!("{c}\tvz.wad\t{SHA_A}\t1\t{SHA_B}\tzip:x\t");
+        let base = "b\tbase\tpc\tretail\t-\tthe game";
+        let wad = |c: &str| format!("{c}\tvz.wad\t{SHA_A}\t1\t{SHA_B}\tzip:x\t-");
         // A DLC must name the base it applies to.
-        let e = Corpora::parse(&corpora(&[base, "d\tdlc:x\tpc\tretail\t\tdlc"]), &wads(&[&wad("b"), &wad("d").replace(SHA_A, SHA_B)]))
+        let e = Corpora::parse(&corpora(&[base, "d\tdlc:x\tpc\tretail\t-\tdlc"]),&wads(&[&wad("b"), &wad("d").replace(SHA_A, SHA_B)]))
             .unwrap_err()
             .to_string();
         assert!(e.contains("applies to"), "{e}");
@@ -570,19 +572,37 @@ mod tests {
         let e = Corpora::parse(&corpora(&[base]), &wads(&[&wad("z")])).unwrap_err().to_string();
         assert!(e.contains("not in corpora.tsv"), "{e}");
         // A corpus with no WADs.
-        let e = Corpora::parse(&corpora(&[base, "c\tdemo\tpc\tdemo\t\tdemo"]), &wads(&[&wad("b")])).unwrap_err().to_string();
+        let e = Corpora::parse(&corpora(&[base, "c\tdemo\tpc\tdemo\t-\tdemo"]), &wads(&[&wad("b")])).unwrap_err().to_string();
         assert!(e.contains("has no WADs"), "{e}");
         // A chained WAD naming an install, and an installed WAD naming none.
-        let e = Corpora::parse(&corpora(&[base]), &wads(&[&format!("{}k", wad("b"))])).unwrap_err().to_string();
+        let e = Corpora::parse(&corpora(&[base]), &wads(&[&wad("b").replace("\tzip:x\t-", "\tzip:x\tk")])).unwrap_err().to_string();
         assert!(e.contains("either a chain or an install key"), "{e}");
-        let e = Corpora::parse(&corpora(&[base]), &wads(&[&format!("b\tvz.wad\t{SHA_A}\t1\t\t\t")])).unwrap_err().to_string();
+        let e = Corpora::parse(&corpora(&[base]), &wads(&[&format!("b\tvz.wad\t{SHA_A}\t1\t-\t-\t-")])).unwrap_err().to_string();
         assert!(e.contains("either a chain or an install key"), "{e}");
         // One file twice within a corpus.
         let e = Corpora::parse(&corpora(&[base]), &wads(&[&wad("b"), &wad("b").replace("vz.wad", "zz.wad")])).unwrap_err().to_string();
         assert!(e.contains("twice within a corpus"), "{e}");
         // An unknown product.
-        let e = Corpora::parse(&corpora(&["b\tmod\tpc\tretail\t\tx"]), &wads(&[&wad("b")])).unwrap_err().to_string();
+        let e = Corpora::parse(&corpora(&["b\tmod\tpc\tretail\t-\tx"]), &wads(&[&wad("b")])).unwrap_err().to_string();
         assert!(e.contains("product"), "{e}");
+    }
+
+    #[test]
+    fn a_no_value_field_reads_as_none_and_an_empty_field_is_rejected() {
+        let base = "b\tbase\tpc\tretail\t-\tthe game";
+        let chained = format!("b\tvz.wad\t{SHA_A}\t1\t{SHA_B}\tzip:x\t-");
+        let installed = format!("b\tzz.wad\t{SHA_B}\t1\t-\t-\tk");
+        let c = Corpora::parse(&corpora(&[base]), &wads(&[&chained, &installed])).unwrap();
+        assert_eq!(c.corpora[0].applies_to, None);
+        assert_eq!(c.wads[0].install, None);
+        assert_eq!(c.wads[1].install.as_deref(), Some("k"));
+        assert!(c.wads[1].chain.is_empty());
+        let e = Corpora::parse(&corpora(&["b\tbase\tpc\tretail\t\tthe game"]), &wads(&[&chained])).unwrap_err().to_string();
+        assert!(e.contains("corpora.tsv line 2: column 5 (applies_to) is empty"), "{e}");
+        let e = Corpora::parse(&corpora(&[base]), &wads(&[&chained.replace("\tzip:x\t-", "\tzip:x\t")])).unwrap_err().to_string();
+        assert!(e.contains("wads.tsv line 2: column 7 (install) is empty"), "{e}");
+        let e = Corpora::parse(&corpora(&["b\tbase\tpc\t-\t-\tthe game"]), &wads(&[&chained])).unwrap_err().to_string();
+        assert!(e.contains("must hold a value"), "{e}");
     }
 
     #[test]
