@@ -13,6 +13,12 @@
 //!   executable sections and its function-start table): a regional build analysed once.
 //!   [`shared_code`] checks that claim.
 //!
+//! The table is tab-separated with one header line that must match exactly, rows sorted by
+//! `image_id`. No field is empty: a column with no value holds `-` ([`crate::NO_VALUE`]), and an
+//! empty field is an error naming the line and column. The columns that may hold `-` are
+//! `build_id` (every console row), `code_image`, and `from_sha256` with `step` (every PC row); in
+//! every other column `-` is an error.
+//!
 //! Steps:
 //!
 //! | step | input → output |
@@ -31,7 +37,7 @@ use sha2::{Digest, Sha256};
 
 use crate::starts::function_starts;
 use crate::xbox::XexKey;
-use crate::{sha256_hex, Catalogue, Error};
+use crate::{field_value, sha256_hex, table_row, Catalogue, Error};
 
 pub const IMAGES_HEADER: &str =
     "image_id\tplatform\tghidra_language\tsha256\tsize\tbase\tbuild_id\tcode_image\tfrom_sha256\tstep";
@@ -142,22 +148,16 @@ impl Images {
         let mut images: Vec<MapImage> = Vec::new();
         for (i, line) in lines.enumerate() {
             let n = i + 2;
-            let f: Vec<&str> = line.split('\t').collect();
-            if f.len() != 10 {
-                return Err(field_err(n, format!("{} fields, expected 10", f.len())));
-            }
-            let id = f[0];
-            if id.is_empty() {
-                return Err(field_err(n, "image_id is empty".into()));
-            }
+            let f = table_row("images.tsv", IMAGES_HEADER, n, line)?;
+            let id = field_value(f[0]).ok_or_else(|| field_err(n, "image_id holds no value".into()))?;
             if let Some(prev) = images.last() {
                 if prev.id.as_str() >= id {
                     return Err(field_err(n, format!("image_id {id} is not after {}", prev.id)));
                 }
             }
             let platform = Platform::parse(f[1]).ok_or_else(|| field_err(n, format!("platform {:?} is not pc, x360 or ps3", f[1])))?;
-            if f[2].is_empty() {
-                return Err(field_err(n, "ghidra_language is empty".into()));
+            if field_value(f[2]).is_none() {
+                return Err(field_err(n, "ghidra_language holds no value".into()));
             }
             let sha256 = lower_hex(n, "sha256", f[3], 64)?;
             let size = f[4].parse::<u64>().map_err(|e| field_err(n, format!("size {:?}: {e}", f[4])))?;
@@ -165,10 +165,10 @@ impl Images {
                 .strip_prefix("0x")
                 .and_then(|h| u32::from_str_radix(h, 16).ok())
                 .ok_or_else(|| field_err(n, format!("base {:?} is not 0x-prefixed 32-bit hex", f[5])))?;
-            let build_id = (!f[6].is_empty()).then(|| f[6].to_string());
-            let code_image = (!f[7].is_empty()).then(|| f[7].to_string());
-            let froms: Vec<&str> = if f[8].is_empty() { Vec::new() } else { f[8].split(';').collect() };
-            let steps: Vec<&str> = if f[9].is_empty() { Vec::new() } else { f[9].split(';').collect() };
+            let build_id = field_value(f[6]).map(str::to_string);
+            let code_image = field_value(f[7]).map(str::to_string);
+            let froms: Vec<&str> = field_value(f[8]).map(|v| v.split(';').collect()).unwrap_or_default();
+            let steps: Vec<&str> = field_value(f[9]).map(|v| v.split(';').collect()).unwrap_or_default();
             if froms.len() != steps.len() {
                 return Err(field_err(n, format!("{} from_sha256 entries but {} steps", froms.len(), steps.len())));
             }
@@ -462,20 +462,39 @@ mod tests {
     fn rows_that_break_the_rules_are_rejected() {
         let c = cat();
         // console row without a chain
-        let e = Images::parse(&row(["x", "x360", "L", SHA_A, "1", "0x0", "", "", "", ""]), &c).unwrap_err().to_string();
+        let e = Images::parse(&row(["x", "x360", "L", SHA_A, "1", "0x0", "-", "-", "-", "-"]), &c).unwrap_err().to_string();
         assert!(e.contains("carries no derivation chain"), "{e}");
         // console row naming a build
-        let e = Images::parse(&row(["x", "ps3", "L", SHA_A, "1", "0x0", "b", "", SHA_B, "unself:app"]), &c).unwrap_err().to_string();
+        let e = Images::parse(&row(["x", "ps3", "L", SHA_A, "1", "0x0", "b", "-", SHA_B, "unself:app"]), &c).unwrap_err().to_string();
         assert!(e.contains("only pc images"), "{e}");
         // pc row whose build is unknown
-        let e = Images::parse(&row(["x", "pc", "L", SHA_A, "1", "0x0", "nope", "", "", ""]), &c).unwrap_err().to_string();
+        let e = Images::parse(&row(["x", "pc", "L", SHA_A, "1", "0x0", "nope", "-", "-", "-"]), &c).unwrap_err().to_string();
         assert!(e.contains("does not list"), "{e}");
         // unknown step
-        let e = Images::parse(&row(["x", "ps3", "L", SHA_A, "1", "0x0", "", "", SHA_B, "decrypt"]), &c).unwrap_err().to_string();
+        let e = Images::parse(&row(["x", "ps3", "L", SHA_A, "1", "0x0", "-", "-", SHA_B, "decrypt"]), &c).unwrap_err().to_string();
         assert!(e.contains("not a known step"), "{e}");
         // code_image that does not exist
-        let e = Images::parse(&row(["x", "ps3", "L", SHA_A, "1", "0x0", "", "y", SHA_B, "unself:app"]), &c).unwrap_err().to_string();
+        let e = Images::parse(&row(["x", "ps3", "L", SHA_A, "1", "0x0", "-", "y", SHA_B, "unself:app"]), &c).unwrap_err().to_string();
         assert!(e.contains("shares code with y"), "{e}");
+    }
+
+    #[test]
+    fn a_no_value_field_reads_as_none_and_an_empty_field_is_rejected() {
+        let c = cat();
+        let t = Images::parse(&row(["x", "ps3", "L", SHA_A, "1", "0x0", "-", "-", SHA_B, "unself:app"]), &c).unwrap();
+        assert_eq!(t.images[0].build_id, None);
+        assert_eq!(t.images[0].code_image, None);
+        assert_eq!(t.images[0].chain.len(), 1);
+        let embedded = Images::embedded(&c).unwrap();
+        let drmfree = embedded.image("pc-v10-drmfree").unwrap();
+        assert_eq!(drmfree.build_id.as_deref(), Some("v10-drmfree-laa"));
+        assert!(drmfree.code_image.is_none() && drmfree.chain.is_empty());
+        let e = Images::parse(&row(["x", "ps3", "L", SHA_A, "1", "0x0", "", "-", SHA_B, "unself:app"]), &c).unwrap_err().to_string();
+        assert!(e.contains("images.tsv line 2: column 7 (build_id) is empty"), "{e}");
+        let e = Images::parse(&row(["x", "pc", "L", SHA_A, "1", "0x0", "b", "-", "-", ""]), &c).unwrap_err().to_string();
+        assert!(e.contains("images.tsv line 2: column 10 (step) is empty"), "{e}");
+        let e = Images::parse(&row(["-", "ps3", "L", SHA_A, "1", "0x0", "-", "-", SHA_B, "unself:app"]), &c).unwrap_err().to_string();
+        assert!(e.contains("image_id holds no value"), "{e}");
     }
 
     #[test]
