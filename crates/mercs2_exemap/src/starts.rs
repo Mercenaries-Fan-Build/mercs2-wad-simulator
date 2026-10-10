@@ -157,6 +157,37 @@ pub(crate) fn elf_sections(image: &[u8]) -> Result<(u64, Vec<ElfSection>), Error
     Ok((entry, secs))
 }
 
+pub(crate) struct ElfSegment {
+    pub(crate) kind: u32,
+    pub(crate) offset: u64,
+    pub(crate) vaddr: u64,
+    pub(crate) filesz: u64,
+}
+
+/// The program headers of a 64-bit big-endian (PS3 PPU) ELF.
+pub(crate) fn elf_segments(image: &[u8]) -> Result<Vec<ElfSegment>, Error> {
+    if image.get(4) != Some(&2) || image.get(5) != Some(&2) {
+        return Err(Error::new("ELF is not 64-bit big-endian (PS3 PPU)"));
+    }
+    let phoff = be_u64(image, 0x20)? as usize;
+    let phentsize = be_u16(image, 0x36)? as usize;
+    let phnum = be_u16(image, 0x38)? as usize;
+    if phoff == 0 || phnum == 0 {
+        return Err(Error::new("ELF has no program header table"));
+    }
+    let mut segs = Vec::with_capacity(phnum);
+    for i in 0..phnum {
+        let o = phoff + i * phentsize;
+        segs.push(ElfSegment {
+            kind: be_u32(image, o)?,
+            offset: be_u64(image, o + 8)?,
+            vaddr: be_u64(image, o + 16)?,
+            filesz: be_u64(image, o + 32)?,
+        });
+    }
+    Ok(segs)
+}
+
 /// The `.opd` section: the PROGBITS, non-executable section that holds the entry descriptor.
 pub(crate) fn opd_section(entry: u64, secs: &[ElfSection]) -> Result<&ElfSection, Error> {
     let opd = secs
