@@ -32,7 +32,10 @@
 //! its original container. Console executables come in through [`xdvdfs`] (a file from an Xbox
 //! disc image), [`xbox`] (XEX2 → PE image, the PE layout Ghidra's loader reads, and XEX imports),
 //! [`prx`] (the PRX imports of a PS3 ELF) and [`starts`] (function starts from Xbox `.pdata` or
-//! PS3 `.opd`). [`rtti`] recovers vtables from C++ type
+//! PS3 `.opd`). `data/xbox_exports.tsv` (Xenia's export tables) names each Xbox import by library
+//! and ordinal ([`xbox::XboxExports`]); `data/ps3_fnid_names.tsv` (candidate names, each checked
+//! against its FNID hash on load) and `data/ps3_fixed_nids.tsv` (module-level NIDs that are not a
+//! hash) name each PS3 import by FNID ([`prx::FnidNames`]). [`rtti`] recovers vtables from C++ type
 //! information and [`luareg`] the Lua C-function registration tables, on every platform;
 //! [`matcher`] pairs the functions of two images from those exports.
 //!
@@ -106,6 +109,23 @@ pub(crate) fn table_row<'t>(table: &str, header: &str, n: usize, line: &'t str) 
         )));
     }
     Ok(fields)
+}
+
+/// The rows of the `data/*.tsv` table `table` whose text opens with `#` comment lines (its
+/// provenance) followed by the header line `header`, which must match exactly: (line number,
+/// fields) per row, each split by [`table_row`]. Only the lines before the header are comments.
+pub(crate) fn commented_table_rows<'t>(table: &str, header: &str, text: &'t str) -> Result<Vec<(usize, Vec<&'t str>)>, Error> {
+    let mut lines = text.lines().enumerate().skip_while(|(_, l)| l.starts_with('#'));
+    match lines.next() {
+        Some((_, l)) if l == header => {}
+        other => {
+            return Err(Error::new(format!(
+                "{table}: the first line after the # comment lines is {:?}, not the header {header:?}",
+                other.map(|(_, l)| l)
+            )))
+        }
+    }
+    lines.map(|(i, l)| table_row(table, header, i + 1, l).map(|f| (i + 1, f))).collect()
 }
 
 /// `None` for a field holding [`NO_VALUE`], the field otherwise.
