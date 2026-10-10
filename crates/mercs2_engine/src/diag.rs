@@ -3148,7 +3148,8 @@ pub fn veg_census(wadpath: &str, out_path: &str) -> Result<(), String> {
     let mut w = wad::open(wadpath).map_err(|e| format!("[veg] cannot open {wadpath}: {e}"))?;
     let (_low, ls) = find_terrain_blocks(&mut w)
         .map_err(|e| format!("[veg] no terrain blocks in {wadpath}: {e}"))?;
-    let places = mercs2_formats::placement::load_placements(&ls).unwrap_or_default();
+    let places = mercs2_formats::placement::load_placements(&ls)
+        .map_err(|e| format!("[veg] layers_static placements in {wadpath} failed to parse: {e}"))?;
 
     const CELL: f32 = 500.0; // density-grid cell size, metres
 
