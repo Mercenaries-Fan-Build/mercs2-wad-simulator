@@ -15,14 +15,15 @@
 //!
 //! Every function of a fnsig export has a string `mhash` and a `callees` and a `strs` array of
 //! strings; a missing or mistyped one is an error naming the export file and the function. Call-list
-//! entries are direct callees (`0x…`), imported functions (`ext:<library>!<name>`), and indirect
-//! calls (`*0x…`, a call through a 32-bit memory slot; `*stack:<signed hex>`, a call through a
-//! function pointer held in the stack variable at that offset; and `?`, a computed target); any
-//! other entry is an error naming the export file and the function. Two aligned entries agree when
-//! both are indirect, whatever their slot address or stack offset; when both are imports with the
-//! same `<library>` and the same `<name>` (exact text: one ordinal name can be exported by two
-//! libraries); or when both are direct and neither is half of an accepted pair whose other half is
-//! not the aligned entry. Any other combination disagrees. An import is never a candidate, and
+//! entries are direct callees (`0x…`), imported functions (`ext:<library>!<name>`), PS3 system calls
+//! (`sys:<decimal>`), and indirect calls (`*0x…`, a call through a 32-bit memory slot;
+//! `*stack:<signed hex>`, a call through a function pointer held in the stack variable at that
+//! offset; and `?`, a computed target); any other entry is an error naming the export file and the
+//! function. Two aligned entries agree when both are indirect, whatever their slot address or stack
+//! offset; when both are imports with the same `<library>` and the same `<name>` (exact text: one
+//! ordinal name can be exported by two libraries); when both are system calls with the same number;
+//! or when both are direct and neither is half of an accepted pair whose other half is not the
+//! aligned entry. Any other combination disagrees. An import or system call is never a candidate, and
 //! neither is a direct callee that is not a function start in its image (Ghidra writes an import
 //! it cannot name as a small `0x…` number, which is no function start).
 //!
@@ -115,13 +116,21 @@ pub enum Callee {
     /// `*0x…` (a call through a 32-bit memory slot), `*stack:<signed hex>` (a call through a
     /// function pointer held in a stack variable) or `?` (a computed target).
     Indirect,
+    /// `sys:<N>`: a PS3 system call (`sc`) with the decimal number `N`.
+    Syscall(u32),
 }
 
 impl Callee {
     /// Parse one call-list entry; an entry of none of the forms `0x…`, `*0x…`, `*stack:-0x…`,
-    /// `*stack:0x…`, `?` and `ext:<library>!<name>` is an error.
+    /// `*stack:0x…`, `?`, `ext:<library>!<name>` and `sys:<decimal>` is an error.
     pub fn parse(s: &str) -> Result<Callee, Error> {
-        if let Some(rest) = s.strip_prefix("ext:") {
+        if let Some(n) = s.strip_prefix("sys:") {
+            if n.is_empty() || !n.bytes().all(|b| b.is_ascii_digit()) {
+                return Err(Error::new(format!("callee {s:?} is not sys:<decimal>")));
+            }
+            let n = n.parse::<u32>().map_err(|e| Error::new(format!("callee {s:?}: {e}")))?;
+            Ok(Callee::Syscall(n))
+        } else if let Some(rest) = s.strip_prefix("ext:") {
             let (library, name) =
                 rest.split_once('!').ok_or_else(|| Error::new(format!("callee {s:?} is not ext:<library>!<name>")))?;
             if library.is_empty() || name.is_empty() {
@@ -141,7 +150,9 @@ impl Callee {
         } else if s == "?" {
             Ok(Callee::Indirect)
         } else {
-            Err(Error::new(format!("callee {s:?} is none of 0x…, *0x…, *stack:<signed hex>, ? and ext:<library>!<name>")))
+            Err(Error::new(format!(
+                "callee {s:?} is none of 0x…, *0x…, *stack:<signed hex>, ?, ext:<library>!<name> and sys:<decimal>"
+            )))
         }
     }
 }
@@ -547,6 +558,7 @@ pub fn match_images(
                         la == lb && na == nb
                     }
                     (Callee::Indirect, Callee::Indirect) => true,
+                    (Callee::Syscall(na), Callee::Syscall(nb)) => na == nb,
                     _ => false,
                 });
                 if !consistent {
@@ -885,6 +897,24 @@ mod tests {
     }
 
     #[test]
+    fn aligned_system_calls_agree_only_when_their_numbers_are_equal() {
+        let sig = |callees: Vec<Callee>| Signature { mhash: String::new(), callees, strs: vec![] };
+        let bind = |n: &str, f: u32| Binding { namespace: String::new(), name: n.into(), function: f };
+        let run = |ea: &str, eb: &str| {
+            let (ia, ib) = (Callee::parse(ea).unwrap(), Callee::parse(eb).unwrap());
+            let sa: HashMap<u32, Signature> = [(1, sig(vec![ia, Callee::Direct(2)])), (2, sig(vec![]))].into();
+            let sb: HashMap<u32, Signature> = [(11, sig(vec![ib, Callee::Direct(12)])), (12, sig(vec![]))].into();
+            let a = Exports { bindings: vec![bind("Root", 1)], signatures: Some(sa), ..Default::default() };
+            let b = Exports { bindings: vec![bind("Root", 11)], signatures: Some(sb), ..Default::default() };
+            pairs_of(&match_images(&a, &b, true, &ev(&[Evidence::Lua, Evidence::Callee]), &[]).unwrap())
+        };
+        assert_eq!(run("sys:141", "sys:141"), vec![(1, 11), (2, 12)]);
+        assert_eq!(run("sys:141", "sys:142"), vec![(1, 11)], "different system calls");
+        assert_eq!(run("sys:141", "?"), vec![(1, 11)], "a system call against an indirect call");
+        assert_eq!(run("sys:141", "ext:sys_fs!fnid_2cb51f0d"), vec![(1, 11)], "a system call against an import");
+    }
+
+    #[test]
     fn callee_entries_parse_by_form() {
         assert_eq!(Callee::parse("0x00401fb0").unwrap(), Callee::Direct(0x00401fb0));
         assert_eq!(
@@ -899,6 +929,14 @@ mod tests {
             Callee::parse("ext:xboxkrnl.exe!ord_293").unwrap(),
             Callee::Import { library: "xboxkrnl.exe".into(), name: "ord_293".into() }
         );
+        assert_eq!(Callee::parse("sys:141").unwrap(), Callee::Syscall(141));
+        assert_eq!(
+            Callee::parse("ext:sys_fs!fnid_2cb51f0d").unwrap(),
+            Callee::Import { library: "sys_fs".into(), name: "fnid_2cb51f0d".into() }
+        );
+        for bad in ["sys:", "sys:-1", "sys:+1", "sys:0x8d", "sys:4294967296", "sys: 1"] {
+            assert!(Callee::parse(bad).is_err(), "{bad:?} parsed");
+        }
         assert!(Callee::parse("ext:Sleep").is_err());
         assert!(Callee::parse("ext:KERNEL32.DLL!").is_err());
         assert!(Callee::parse("0xzz").is_err());
