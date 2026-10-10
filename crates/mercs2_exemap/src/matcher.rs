@@ -11,11 +11,17 @@
 //! | `bytes` | the same masked-bytes hash (`mhash`), occurring once in each image (same Ghidra language only) |
 //! | `string` | the same referenced string, referenced by exactly one function in each image; on its own it does not accept a pair (see **corroborated** below) |
 //! | `callee` | the direct callees at the same position of an accepted pair whose call lists (in order) have the same length and agree at every position, where only two direct callees that are both function starts (keys of their image's fnsig export) form a candidate (same Ghidra language only: across compilers, inlining shifts call lists, so equal length is no alignment) |
+//! | `anchor` | a `data/anchors.tsv` row for exactly this pair of the two images (in either orientation); it is added to a candidate another rule proposed and never proposes a candidate itself. It is always applied and is not chosen in the evidence list |
 //!
-//! Call-list entries are direct callees (`0x…`), imported functions (`ext:<library>!<name>`), and
-//! indirect calls (`*0x…`, a call through a memory slot, `?`, a computed target, and every other
-//! entry). Two aligned entries agree when both are indirect; when both are imports with the same
-//! `<name>`; or when both are direct and neither is half of an accepted pair whose other half is
+//! Every function of a fnsig export has a string `mhash` and a `callees` and a `strs` array of
+//! strings; a missing or mistyped one is an error naming the export file and the function. Call-list
+//! entries are direct callees (`0x…`), imported functions (`ext:<library>!<name>`), and indirect
+//! calls (`*0x…`, a call through a 32-bit memory slot; `*stack:<signed hex>`, a call through a
+//! function pointer held in the stack variable at that offset; and `?`, a computed target); any
+//! other entry is an error naming the export file and the function. Two aligned entries agree when
+//! both are indirect, whatever their slot address or stack offset; when both are imports with the
+//! same `<library>` and the same `<name>` (exact text: one ordinal name can be exported by two
+//! libraries); or when both are direct and neither is half of an accepted pair whose other half is
 //! not the aligned entry. Any other combination disagrees. An import is never a candidate, and
 //! neither is a direct callee that is not a function start in its image (Ghidra writes an import
 //! it cannot name as a small `0x…` number, which is no function start).
@@ -30,6 +36,10 @@
 //! callees nor constrains the call-list agreement), and the rules run to a fixpoint: the candidate
 //! set and each candidate's evidence only grow, so acceptance is recomputed until it stops
 //! changing; `callee` evidence that lands on an uncorroborated `string` candidate corroborates it.
+//!
+//! An `anchor` candidate is corroborated like any candidate with evidence other than `string`, and
+//! it is accepted only when it has no rivals: an anchored candidate with another candidate on
+//! either side stays a conflict.
 //!
 //! `data/anchors.tsv` lists pairs verified by reading both decompiles; [`check_anchors`] reports
 //! every accepted pair that contradicts one.
@@ -46,6 +56,7 @@ pub enum Evidence {
     Bytes,
     String,
     Callee,
+    Anchor,
 }
 
 impl Evidence {
@@ -56,6 +67,7 @@ impl Evidence {
             Evidence::Bytes => "bytes",
             Evidence::String => "string",
             Evidence::Callee => "callee",
+            Evidence::Anchor => "anchor",
         }
     }
     pub fn parse(s: &str) -> Option<Evidence> {
@@ -65,6 +77,7 @@ impl Evidence {
             "bytes" => Some(Evidence::Bytes),
             "string" => Some(Evidence::String),
             "callee" => Some(Evidence::Callee),
+            "anchor" => Some(Evidence::Anchor),
             _ => None,
         }
     }
@@ -99,11 +112,14 @@ pub enum Callee {
     Direct(u32),
     /// `ext:<library>!<name>`: an imported function.
     Import { library: String, name: String },
-    /// `*0x…` (a call through a memory slot), `?` (a computed target), or any other entry.
+    /// `*0x…` (a call through a 32-bit memory slot), `*stack:<signed hex>` (a call through a
+    /// function pointer held in a stack variable) or `?` (a computed target).
     Indirect,
 }
 
 impl Callee {
+    /// Parse one call-list entry; an entry of none of the forms `0x…`, `*0x…`, `*stack:-0x…`,
+    /// `*stack:0x…`, `?` and `ext:<library>!<name>` is an error.
     pub fn parse(s: &str) -> Result<Callee, Error> {
         if let Some(rest) = s.strip_prefix("ext:") {
             let (library, name) =
@@ -114,8 +130,18 @@ impl Callee {
             Ok(Callee::Import { library: library.to_string(), name: name.to_string() })
         } else if s.starts_with("0x") {
             Ok(Callee::Direct(hex32(s, "callee")?))
-        } else {
+        } else if let Some(offset) = s.strip_prefix("*stack:") {
+            // A signed offset: an optional `-` and a 0x-prefixed magnitude of at most 32 bits.
+            hex32(offset.strip_prefix('-').unwrap_or(offset), "callee stack offset")
+                .map_err(|e| Error::new(format!("callee {s:?}: {e}")))?;
             Ok(Callee::Indirect)
+        } else if let Some(slot) = s.strip_prefix('*') {
+            hex32(slot, "callee slot").map_err(|e| Error::new(format!("callee {s:?}: {e}")))?;
+            Ok(Callee::Indirect)
+        } else if s == "?" {
+            Ok(Callee::Indirect)
+        } else {
+            Err(Error::new(format!("callee {s:?} is none of 0x…, *0x…, *stack:<signed hex>, ? and ext:<library>!<name>")))
         }
     }
 }
@@ -198,37 +224,52 @@ impl Exports {
         let signatures = if signatures {
             let path = dir.join(format!("{id}.fnsig.json"));
             let text = std::fs::read_to_string(&path).map_err(|e| Error::new(format!("read {}: {e}", path.display())))?;
-            let v: serde_json::Value =
-                serde_json::from_str(&text).map_err(|e| Error::new(format!("{}: {e}", path.display())))?;
-            let obj = v.as_object().ok_or_else(|| Error::new(format!("{}: not a JSON object", path.display())))?;
-            let mut m = HashMap::with_capacity(obj.len());
-            for (k, rec) in obj {
-                let addr = hex32(k, "function")?;
-                let strs = |key: &str| -> Vec<String> {
-                    rec.get(key)
-                        .and_then(|x| x.as_array())
-                        .map(|a| a.iter().filter_map(|s| s.as_str().map(str::to_string)).collect())
-                        .unwrap_or_default()
-                };
-                let callees = strs("callees")
-                    .iter()
-                    .map(|c| Callee::parse(c).map_err(|e| Error::new(format!("{} {k}: {e}", path.display()))))
-                    .collect::<Result<Vec<_>, _>>()?;
-                m.insert(
-                    addr,
-                    Signature {
-                        mhash: rec.get("mhash").and_then(|x| x.as_str()).unwrap_or_default().to_string(),
-                        callees,
-                        strs: strs("strs"),
-                    },
-                );
-            }
-            Some(m)
+            Some(parse_signatures(&text, &path.display().to_string())?)
         } else {
             None
         };
         Ok(Exports { vtables, bindings, signatures })
     }
+}
+
+/// Parse a fnsig export (`file` names it in errors). Every function must have a string `mhash`
+/// and a `callees` and a `strs` array whose entries are all strings, and every callee must parse;
+/// anything else is an error naming the file and the function.
+pub fn parse_signatures(text: &str, file: &str) -> Result<HashMap<u32, Signature>, Error> {
+    let v: serde_json::Value = serde_json::from_str(text).map_err(|e| Error::new(format!("{file}: {e}")))?;
+    let obj = v.as_object().ok_or_else(|| Error::new(format!("{file}: not a JSON object")))?;
+    let mut m = HashMap::with_capacity(obj.len());
+    for (k, rec) in obj {
+        let addr = hex32(k, "function")?;
+        let strings = |key: &str| -> Result<Vec<String>, Error> {
+            let list = rec
+                .get(key)
+                .ok_or_else(|| Error::new(format!("{file} {k}: no {key:?} key")))?
+                .as_array()
+                .ok_or_else(|| Error::new(format!("{file} {k}: {key:?} is not an array")))?;
+            list.iter()
+                .map(|x| x.as_str().map(str::to_string).ok_or_else(|| Error::new(format!("{file} {k}: {key:?} entry {x} is not a string"))))
+                .collect()
+        };
+        let callees = strings("callees")?
+            .iter()
+            .map(|c| Callee::parse(c).map_err(|e| Error::new(format!("{file} {k}: {e}"))))
+            .collect::<Result<Vec<_>, _>>()?;
+        m.insert(
+            addr,
+            Signature {
+                mhash: rec
+                    .get("mhash")
+                    .ok_or_else(|| Error::new(format!("{file} {k}: no \"mhash\" key")))?
+                    .as_str()
+                    .ok_or_else(|| Error::new(format!("{file} {k}: \"mhash\" is not a string")))?
+                    .to_string(),
+                callees,
+                strs: strings("strs")?,
+            },
+        );
+    }
+    Ok(m)
 }
 
 /// An accepted pair and the evidence behind it.
@@ -442,10 +483,31 @@ fn resolve(c: &Candidates) -> Outcome {
     out
 }
 
+/// Add `anchor` evidence to every candidate that is one of `anchors`; no candidate is created.
+fn add_anchors(c: &mut Candidates, anchors: &[(u32, u32)]) {
+    for k in anchors {
+        if let Some(s) = c.get_mut(k) {
+            s.evidence.insert(Evidence::Anchor);
+        }
+    }
+}
+
 /// Match the functions of image `a` against image `b` with the chosen evidence.
 /// `same_language` says whether both images are analysed with the same Ghidra language, i.e. built
 /// by the same compiler for the same processor; `bytes` and `callee` evidence apply only then.
-pub fn match_images(a: &Exports, b: &Exports, same_language: bool, evidence: &BTreeSet<Evidence>) -> Result<Outcome, Error> {
+/// `anchors` are the verified pairs (image `a` function, image `b` function) of the two images
+/// (see [`anchor_pairs`]); each adds `anchor` evidence to the candidate it names. `evidence` must
+/// not contain `anchor`, which is always applied.
+pub fn match_images(
+    a: &Exports,
+    b: &Exports,
+    same_language: bool,
+    evidence: &BTreeSet<Evidence>,
+    anchors: &[(u32, u32)],
+) -> Result<Outcome, Error> {
+    if evidence.contains(&Evidence::Anchor) {
+        return Err(Error::new("anchor evidence comes from data/anchors.tsv and is always applied; it is not chosen in the evidence list"));
+    }
     let mut c = Candidates::new();
     if evidence.contains(&Evidence::Vtable) {
         vtable_candidates(a, b, &mut c);
@@ -465,6 +527,7 @@ pub fn match_images(a: &Exports, b: &Exports, same_language: bool, evidence: &BT
         let bytes = same_language && evidence.contains(&Evidence::Bytes);
         signature_candidates(sa, sb, bytes, evidence.contains(&Evidence::String), &mut c);
     }
+    add_anchors(&mut c, anchors);
     let mut out = resolve(&c);
     if let (Some((sa, sb)), true, true) = (sigs, evidence.contains(&Evidence::Callee), same_language) {
         loop {
@@ -480,7 +543,9 @@ pub fn match_images(a: &Exports, b: &Exports, same_language: bool, evidence: &BT
                     (Callee::Direct(ca), Callee::Direct(cb)) => {
                         fwd.get(ca).is_none_or(|v| v == cb) && back.get(cb).is_none_or(|v| v == ca)
                     }
-                    (Callee::Import { name: na, .. }, Callee::Import { name: nb, .. }) => na == nb,
+                    (Callee::Import { library: la, name: na }, Callee::Import { library: lb, name: nb }) => {
+                        la == lb && na == nb
+                    }
                     (Callee::Indirect, Callee::Indirect) => true,
                     _ => false,
                 });
@@ -498,6 +563,7 @@ pub fn match_images(a: &Exports, b: &Exports, same_language: bool, evidence: &BT
             if !grew {
                 break;
             }
+            add_anchors(&mut c, anchors);
             out = resolve(&c);
         }
     }
@@ -557,18 +623,30 @@ pub struct AnchorCheck {
     pub contradicted: Vec<(Anchor, Pair)>,
 }
 
+/// The anchor's pair as (image `a` function, image `b` function), when it is between images `a`
+/// and `b` in either orientation.
+fn anchor_pair(a: &str, b: &str, an: &Anchor) -> Option<(u32, u32)> {
+    if an.image_a == a && an.image_b == b {
+        Some((an.va_a, an.va_b))
+    } else if an.image_a == b && an.image_b == a {
+        Some((an.va_b, an.va_a))
+    } else {
+        None
+    }
+}
+
+/// Every anchor between images `a` and `b`, in either orientation, as (image `a` function, image
+/// `b` function): the `anchors` argument of [`match_images`].
+pub fn anchor_pairs(a: &str, b: &str, anchors: &[Anchor]) -> Vec<(u32, u32)> {
+    anchors.iter().filter_map(|an| anchor_pair(a, b, an)).collect()
+}
+
 /// Check `outcome` (pairs of image `a` to image `b`) against every anchor between the two images,
 /// in either orientation.
 pub fn check_anchors(a: &str, b: &str, outcome: &Outcome, anchors: &[Anchor]) -> AnchorCheck {
     let mut r = AnchorCheck::default();
     for an in anchors {
-        let (fa, fb) = if an.image_a == a && an.image_b == b {
-            (an.va_a, an.va_b)
-        } else if an.image_a == b && an.image_b == a {
-            (an.va_b, an.va_a)
-        } else {
-            continue;
-        };
+        let Some((fa, fb)) = anchor_pair(a, b, an) else { continue };
         let hit = outcome.pairs.iter().find(|p| p.a == fa || p.b == fb);
         match hit {
             Some(p) if p.a == fa && p.b == fb => r.agreeing += 1,
@@ -607,7 +685,7 @@ mod tests {
             vtables: vec![slot("C", 5, 0, 0, 20), slot("C", 5, 0, 1, 21), slot("D", 6, 0, 0, 22), slot("D", 6, 0, 1, 23)],
             ..Default::default()
         };
-        let o = match_images(&a, &b, false, &ev(&[Evidence::Vtable])).unwrap();
+        let o = match_images(&a, &b, false, &ev(&[Evidence::Vtable]), &[]).unwrap();
         let pairs: Vec<(u32, u32)> = o.pairs.iter().map(|p| (p.a, p.b)).collect();
         assert_eq!(pairs, vec![(10, 20), (11, 21)], "D has 1 slot in a and 2 in b, so it is not used");
     }
@@ -620,16 +698,16 @@ mod tests {
         // MSVC [m0, dtor, m2] against Itanium [i0, D1, D0, i2].
         let a = Exports { vtables: vec![m(0, 10), m(1, 11), m(2, 12)], ..Default::default() };
         let b = Exports { vtables: vec![it(0, 20), it(1, 21), it(2, 22), it(3, 23)], ..Default::default() };
-        let o = match_images(&a, &b, false, &ev(&[Evidence::Vtable])).unwrap();
+        let o = match_images(&a, &b, false, &ev(&[Evidence::Vtable]), &[]).unwrap();
         let pairs: Vec<(u32, u32)> = o.pairs.iter().map(|p| (p.a, p.b)).collect();
         assert_eq!(pairs, vec![(10, 20), (12, 23)]);
         // The same pair the other way round.
-        let o = match_images(&b, &a, false, &ev(&[Evidence::Vtable])).unwrap();
+        let o = match_images(&b, &a, false, &ev(&[Evidence::Vtable]), &[]).unwrap();
         let pairs: Vec<(u32, u32)> = o.pairs.iter().map(|p| (p.a, p.b)).collect();
         assert_eq!(pairs, vec![(20, 10), (23, 12)]);
         // Without a recognised destructor there is no alignment.
         let a = Exports { vtables: vec![slot("C", 1, 0, 0, 10), slot("C", 1, 0, 1, 11), slot("C", 1, 0, 2, 12)], ..Default::default() };
-        assert!(match_images(&a, &b, false, &ev(&[Evidence::Vtable])).unwrap().pairs.is_empty());
+        assert!(match_images(&a, &b, false, &ev(&[Evidence::Vtable]), &[]).unwrap().pairs.is_empty());
     }
 
     #[test]
@@ -637,7 +715,7 @@ mod tests {
         let bind = |ns: &str, n: &str, f: u32| Binding { namespace: ns.into(), name: n.into(), function: f };
         let a = Exports { bindings: vec![bind("P", "X", 1), bind("P", "Y", 1)], ..Default::default() };
         let b = Exports { bindings: vec![bind("P", "X", 2), bind("P", "Y", 3)], ..Default::default() };
-        let o = match_images(&a, &b, false, &ev(&[Evidence::Lua])).unwrap();
+        let o = match_images(&a, &b, false, &ev(&[Evidence::Lua]), &[]).unwrap();
         assert!(o.pairs.is_empty());
         assert_eq!(o.conflicts.len(), 1);
         assert_eq!(o.conflicts[0].side, 'a');
@@ -652,11 +730,11 @@ mod tests {
         let sb: HashMap<u32, Signature> = [(11, sig(vec![12])), (12, sig(vec![13])), (13, sig(vec![]))].into();
         let a = Exports { bindings: vec![bind("Root", 1)], signatures: Some(sa), ..Default::default() };
         let b = Exports { bindings: vec![bind("Root", 11)], signatures: Some(sb), ..Default::default() };
-        let o = match_images(&a, &b, true, &ev(&[Evidence::Lua, Evidence::Callee])).unwrap();
+        let o = match_images(&a, &b, true, &ev(&[Evidence::Lua, Evidence::Callee]), &[]).unwrap();
         let pairs: Vec<(u32, u32)> = o.pairs.iter().map(|p| (p.a, p.b)).collect();
         assert_eq!(pairs, vec![(1, 11), (2, 12), (3, 13)]);
         // Across languages, callee positions are not evidence.
-        let o = match_images(&a, &b, false, &ev(&[Evidence::Lua, Evidence::Callee])).unwrap();
+        let o = match_images(&a, &b, false, &ev(&[Evidence::Lua, Evidence::Callee]), &[]).unwrap();
         assert_eq!(o.pairs.len(), 1);
     }
 
@@ -670,7 +748,7 @@ mod tests {
         let sb: HashMap<u32, Signature> = [(11, sig(vec![d(13), d(12)])), (12, sig(vec![])), (13, sig(vec![]))].into();
         let a = Exports { bindings: vec![bind("Root", 1), bind("X", 2)], signatures: Some(sa), ..Default::default() };
         let b = Exports { bindings: vec![bind("Root", 11), bind("X", 12)], signatures: Some(sb), ..Default::default() };
-        let o = match_images(&a, &b, true, &ev(&[Evidence::Lua, Evidence::Callee])).unwrap();
+        let o = match_images(&a, &b, true, &ev(&[Evidence::Lua, Evidence::Callee]), &[]).unwrap();
         let pairs: Vec<(u32, u32)> = o.pairs.iter().map(|p| (p.a, p.b)).collect();
         assert_eq!(pairs, vec![(1, 11), (2, 12)], "position 0 maps 2 to 13, contradicting the accepted 2<->12");
     }
@@ -687,7 +765,7 @@ mod tests {
     fn a_pair_whose_only_evidence_is_one_string_is_not_accepted() {
         let a = Exports { signatures: Some([(1, strs_sig(&["7374617274"]))].into()), ..Default::default() };
         let b = Exports { signatures: Some([(11, strs_sig(&["7374617274"]))].into()), ..Default::default() };
-        let o = match_images(&a, &b, false, &ev(&[Evidence::String])).unwrap();
+        let o = match_images(&a, &b, false, &ev(&[Evidence::String]), &[]).unwrap();
         assert!(o.pairs.is_empty());
         assert!(o.conflicts.is_empty());
         assert_eq!(o.uncorroborated, vec![Pair { a: 1, b: 11, evidence: ev(&[Evidence::String]) }]);
@@ -697,13 +775,13 @@ mod tests {
     fn a_second_distinct_unique_string_corroborates_a_string_pair() {
         let a = Exports { signatures: Some([(1, strs_sig(&["aa", "bb"]))].into()), ..Default::default() };
         let b = Exports { signatures: Some([(11, strs_sig(&["aa", "bb"]))].into()), ..Default::default() };
-        let o = match_images(&a, &b, false, &ev(&[Evidence::String])).unwrap();
+        let o = match_images(&a, &b, false, &ev(&[Evidence::String]), &[]).unwrap();
         assert_eq!(pairs_of(&o), vec![(1, 11)]);
         assert!(o.uncorroborated.is_empty());
         // A second string that another function of `b` also references is not unique, so it does
         // not count.
         let b = Exports { signatures: Some([(11, strs_sig(&["aa", "bb"])), (12, strs_sig(&["bb"]))].into()), ..Default::default() };
-        let o = match_images(&a, &b, false, &ev(&[Evidence::String])).unwrap();
+        let o = match_images(&a, &b, false, &ev(&[Evidence::String]), &[]).unwrap();
         assert!(o.pairs.is_empty());
         assert_eq!(o.uncorroborated.len(), 1);
     }
@@ -713,7 +791,7 @@ mod tests {
         let bind = |n: &str, f: u32| Binding { namespace: String::new(), name: n.into(), function: f };
         let a = Exports { bindings: vec![bind("F", 1)], signatures: Some([(1, strs_sig(&["aa"]))].into()), ..Default::default() };
         let b = Exports { bindings: vec![bind("F", 11)], signatures: Some([(11, strs_sig(&["aa"]))].into()), ..Default::default() };
-        let o = match_images(&a, &b, false, &ev(&[Evidence::Lua, Evidence::String])).unwrap();
+        let o = match_images(&a, &b, false, &ev(&[Evidence::Lua, Evidence::String]), &[]).unwrap();
         assert_eq!(o.pairs, vec![Pair { a: 1, b: 11, evidence: ev(&[Evidence::Lua, Evidence::String]) }]);
     }
 
@@ -725,7 +803,7 @@ mod tests {
         let sb: HashMap<u32, Signature> = [(11, sig(vec![Callee::Direct(12)], &[])), (12, sig(vec![], &["aa"]))].into();
         let a = Exports { bindings: vec![bind("Root", 1)], signatures: Some(sa), ..Default::default() };
         let b = Exports { bindings: vec![bind("Root", 11)], signatures: Some(sb), ..Default::default() };
-        let o = match_images(&a, &b, true, &ev(&[Evidence::Lua, Evidence::String, Evidence::Callee])).unwrap();
+        let o = match_images(&a, &b, true, &ev(&[Evidence::Lua, Evidence::String, Evidence::Callee]), &[]).unwrap();
         assert_eq!(o.pairs[1], Pair { a: 2, b: 12, evidence: ev(&[Evidence::String, Evidence::Callee]) });
         assert!(o.uncorroborated.is_empty());
     }
@@ -739,7 +817,7 @@ mod tests {
             signatures: Some([(11, strs_sig(&[])), (12, strs_sig(&["aa"]))].into()),
             ..Default::default()
         };
-        let o = match_images(&a, &b, false, &ev(&[Evidence::Lua, Evidence::String])).unwrap();
+        let o = match_images(&a, &b, false, &ev(&[Evidence::Lua, Evidence::String]), &[]).unwrap();
         assert!(o.pairs.is_empty());
         assert_eq!(o.conflicts.len(), 1);
         assert_eq!((o.conflicts[0].side, o.conflicts[0].function), ('a', 1));
@@ -756,27 +834,54 @@ mod tests {
         let sb: HashMap<u32, Signature> = [(11, sig(vec![d(0x6c), d(600), d(12)])), (12, sig(vec![]))].into();
         let a = Exports { bindings: vec![bind("Root", 1)], signatures: Some(sa), ..Default::default() };
         let b = Exports { bindings: vec![bind("Root", 11)], signatures: Some(sb), ..Default::default() };
-        let o = match_images(&a, &b, true, &ev(&[Evidence::Lua, Evidence::Callee])).unwrap();
+        let o = match_images(&a, &b, true, &ev(&[Evidence::Lua, Evidence::Callee]), &[]).unwrap();
         assert_eq!(pairs_of(&o), vec![(1, 11), (2, 12)]);
         assert!(o.conflicts.is_empty() && o.uncorroborated.is_empty());
     }
 
     #[test]
-    fn aligned_imports_agree_only_when_their_names_are_equal() {
+    fn aligned_imports_agree_only_when_their_libraries_and_names_are_equal() {
         let sig = |callees: Vec<Callee>| Signature { mhash: String::new(), callees, strs: vec![] };
         let bind = |n: &str, f: u32| Binding { namespace: String::new(), name: n.into(), function: f };
         let imp = |n: &str| Callee::Import { library: "KERNEL32.DLL".into(), name: n.into() };
+        let lib = |l: &str, n: &str| Callee::Import { library: l.into(), name: n.into() };
         let run = |ia: Callee, ib: Callee| {
             let sa: HashMap<u32, Signature> = [(1, sig(vec![ia, Callee::Direct(2)])), (2, sig(vec![]))].into();
             let sb: HashMap<u32, Signature> = [(11, sig(vec![ib, Callee::Direct(12)])), (12, sig(vec![]))].into();
             let a = Exports { bindings: vec![bind("Root", 1)], signatures: Some(sa), ..Default::default() };
             let b = Exports { bindings: vec![bind("Root", 11)], signatures: Some(sb), ..Default::default() };
-            pairs_of(&match_images(&a, &b, true, &ev(&[Evidence::Lua, Evidence::Callee])).unwrap())
+            pairs_of(&match_images(&a, &b, true, &ev(&[Evidence::Lua, Evidence::Callee]), &[]).unwrap())
         };
         assert_eq!(run(imp("Sleep"), imp("Sleep")), vec![(1, 11), (2, 12)]);
         assert_eq!(run(imp("Sleep"), imp("ExitProcess")), vec![(1, 11)], "different imports at position 0");
         assert_eq!(run(imp("Sleep"), Callee::Indirect), vec![(1, 11)], "an import against an indirect call");
         assert_eq!(run(Callee::Indirect, Callee::Indirect), vec![(1, 11), (2, 12)]);
+        // The same ordinal from two libraries is two imports.
+        assert_eq!(run(lib("xboxkrnl.exe", "ord_293"), lib("xboxkrnl.exe", "ord_293")), vec![(1, 11), (2, 12)]);
+        assert_eq!(run(lib("xboxkrnl.exe", "ord_293"), lib("xam.xex", "ord_293")), vec![(1, 11)], "same name, other library");
+        assert_eq!(run(lib("xboxkrnl.exe", "ord_293"), lib("XBOXKRNL.EXE", "ord_293")), vec![(1, 11)], "library text is exact");
+    }
+
+    #[test]
+    fn stack_and_slot_calls_align_as_indirect_calls_whatever_their_operand() {
+        let sig = |callees: Vec<Callee>| Signature { mhash: String::new(), callees, strs: vec![] };
+        let bind = |n: &str, f: u32| Binding { namespace: String::new(), name: n.into(), function: f };
+        let run = |ea: &str, eb: &str| {
+            let (ia, ib) = (Callee::parse(ea).unwrap(), Callee::parse(eb).unwrap());
+            let sa: HashMap<u32, Signature> = [(1, sig(vec![ia, Callee::Direct(2)])), (2, sig(vec![]))].into();
+            let sb: HashMap<u32, Signature> = [(11, sig(vec![ib, Callee::Direct(12)])), (12, sig(vec![]))].into();
+            let a = Exports { bindings: vec![bind("Root", 1)], signatures: Some(sa), ..Default::default() };
+            let b = Exports { bindings: vec![bind("Root", 11)], signatures: Some(sb), ..Default::default() };
+            pairs_of(&match_images(&a, &b, true, &ev(&[Evidence::Lua, Evidence::Callee]), &[]).unwrap())
+        };
+        let both = vec![(1, 11), (2, 12)];
+        assert_eq!(run("*stack:-0x68", "*stack:-0x68"), both);
+        assert_eq!(run("*stack:-0x68", "*stack:0x10"), both, "stack offsets are not compared");
+        assert_eq!(run("*stack:-0x68", "*0x00a0c010"), both);
+        assert_eq!(run("*stack:-0x68", "?"), both);
+        assert_eq!(run("*0x00a0c010", "*0x00b00000"), both, "slot addresses are not compared");
+        assert_eq!(run("*stack:-0x68", "ext:KERNEL32.DLL!Sleep"), vec![(1, 11)], "an indirect call against an import");
+        assert_eq!(run("*stack:-0x68", "0x00000002"), vec![(1, 11)], "an indirect call against a direct one");
     }
 
     #[test]
@@ -787,10 +892,100 @@ mod tests {
             Callee::Import { library: "KERNEL32.DLL".into(), name: "Sleep".into() }
         );
         assert_eq!(Callee::parse("*0x00000008").unwrap(), Callee::Indirect);
+        assert_eq!(Callee::parse("*stack:-0x68").unwrap(), Callee::Indirect);
+        assert_eq!(Callee::parse("*stack:0x10").unwrap(), Callee::Indirect);
         assert_eq!(Callee::parse("?").unwrap(), Callee::Indirect);
+        assert_eq!(
+            Callee::parse("ext:xboxkrnl.exe!ord_293").unwrap(),
+            Callee::Import { library: "xboxkrnl.exe".into(), name: "ord_293".into() }
+        );
         assert!(Callee::parse("ext:Sleep").is_err());
         assert!(Callee::parse("ext:KERNEL32.DLL!").is_err());
         assert!(Callee::parse("0xzz").is_err());
+        // A memory slot is 32 bits; a stack reference is written `*stack:`.
+        assert!(Callee::parse("*0xffffffffffffff98").is_err());
+        // Any other form is an error, not an indirect call.
+        for bad in [
+            "", "??", "*", "*0xzz", "*8", "401fb0", "Sleep", "ext", "*stack:", "*stack:-68", "*stack:+0x10", "*stack:--0x68",
+            "*stack:-0x", "*stack:0x1ffffffff", "*stack:esp", "*stack-0x68",
+        ] {
+            assert!(Callee::parse(bad).is_err(), "{bad:?} parsed");
+        }
+    }
+
+    #[test]
+    fn a_fnsig_export_is_read_strictly() {
+        let ok = r#"{"0x00401000": {"mhash": "h", "callees": ["0x00401fb0", "*0x00000008", "?", "ext:KERNEL32.DLL!Sleep"], "strs": ["6162"]}}"#;
+        let m = parse_signatures(ok, "x.fnsig.json").unwrap();
+        let s = &m[&0x00401000];
+        assert_eq!(s.callees.len(), 4);
+        assert_eq!(s.strs, vec!["6162".to_string()]);
+        let err = |text: &str, want: &str| {
+            let e = parse_signatures(text, "x.fnsig.json").unwrap_err().to_string();
+            assert!(e.contains("x.fnsig.json") && e.contains("0x00401000") && e.contains(want), "{e}");
+        };
+        err(r#"{"0x00401000": {"mhash": "h", "callees": ["call_me"], "strs": []}}"#, "call_me");
+        err(r#"{"0x00401000": {"mhash": "h", "callees": [7], "strs": []}}"#, "\"callees\" entry 7 is not a string");
+        err(r#"{"0x00401000": {"mhash": "h", "callees": [], "strs": [null]}}"#, "\"strs\" entry null is not a string");
+        err(r#"{"0x00401000": {"mhash": "h", "strs": []}}"#, "no \"callees\" key");
+        err(r#"{"0x00401000": {"mhash": "h", "callees": []}}"#, "no \"strs\" key");
+        err(r#"{"0x00401000": {"mhash": "h", "callees": "0x1", "strs": []}}"#, "\"callees\" is not an array");
+        err(r#"{"0x00401000": {"mhash": "h", "callees": [], "strs": {}}}"#, "\"strs\" is not an array");
+        err(r#"{"0x00401000": {"callees": [], "strs": []}}"#, "no \"mhash\" key");
+        err(r#"{"0x00401000": {"mhash": 5, "callees": [], "strs": []}}"#, "\"mhash\" is not a string");
+    }
+
+    #[test]
+    fn an_anchor_corroborates_a_string_candidate() {
+        let a = Exports { signatures: Some([(1, strs_sig(&["aa"]))].into()), ..Default::default() };
+        let b = Exports { signatures: Some([(11, strs_sig(&["aa"]))].into()), ..Default::default() };
+        let o = match_images(&a, &b, false, &ev(&[Evidence::String]), &[(1, 11)]).unwrap();
+        assert_eq!(o.pairs, vec![Pair { a: 1, b: 11, evidence: ev(&[Evidence::String, Evidence::Anchor]) }]);
+        assert!(o.uncorroborated.is_empty() && o.conflicts.is_empty());
+        // An anchor for another pair of the same functions adds nothing.
+        let o = match_images(&a, &b, false, &ev(&[Evidence::String]), &[(1, 12)]).unwrap();
+        assert!(o.pairs.is_empty());
+        assert_eq!(o.uncorroborated, vec![Pair { a: 1, b: 11, evidence: ev(&[Evidence::String]) }]);
+    }
+
+    #[test]
+    fn an_anchor_creates_no_candidate_and_overrides_no_conflict() {
+        // No rule proposes (1, 11), so the anchor makes nothing.
+        let a = Exports { signatures: Some([(1, strs_sig(&[]))].into()), ..Default::default() };
+        let b = Exports { signatures: Some([(11, strs_sig(&[]))].into()), ..Default::default() };
+        let o = match_images(&a, &b, false, &ev(&[Evidence::String]), &[(1, 11)]).unwrap();
+        assert!(o.pairs.is_empty() && o.uncorroborated.is_empty() && o.conflicts.is_empty());
+        // (1, 11) and (1, 12) are both candidates; anchoring one leaves the conflict.
+        let bind = |n: &str, f: u32| Binding { namespace: String::new(), name: n.into(), function: f };
+        let a = Exports { bindings: vec![bind("F", 1)], signatures: Some([(1, strs_sig(&["aa"]))].into()), ..Default::default() };
+        let b = Exports {
+            bindings: vec![bind("F", 11)],
+            signatures: Some([(11, strs_sig(&[])), (12, strs_sig(&["aa"]))].into()),
+            ..Default::default()
+        };
+        let o = match_images(&a, &b, false, &ev(&[Evidence::Lua, Evidence::String]), &[(1, 12)]).unwrap();
+        assert!(o.pairs.is_empty());
+        assert_eq!(o.conflicts.len(), 1);
+        assert_eq!(
+            o.conflicts[0].candidates,
+            vec![(11, ev(&[Evidence::Lua])), (12, ev(&[Evidence::String, Evidence::Anchor]))]
+        );
+    }
+
+    #[test]
+    fn anchor_evidence_is_not_chosen_in_the_evidence_list() {
+        let e = match_images(&Exports::default(), &Exports::default(), true, &ev(&[Evidence::Anchor]), &[]).unwrap_err();
+        assert!(e.to_string().contains("anchors.tsv"), "{e}");
+        assert_eq!(Evidence::parse("anchor"), Some(Evidence::Anchor));
+        assert_eq!(Evidence::Anchor.as_str(), "anchor");
+    }
+
+    #[test]
+    fn anchor_pairs_orient_to_the_images_asked_for() {
+        let an = |ia: &str, a: u32, ib: &str, b: u32| Anchor { image_a: ia.into(), va_a: a, image_b: ib.into(), va_b: b, verified_by: "read".into() };
+        let all = [an("x", 1, "y", 11), an("y", 12, "x", 2), an("x", 3, "z", 13)];
+        assert_eq!(anchor_pairs("x", "y", &all), vec![(1, 11), (2, 12)]);
+        assert_eq!(anchor_pairs("y", "x", &all), vec![(11, 1), (12, 2)]);
     }
 
     #[test]
@@ -814,7 +1009,7 @@ mod tests {
 
     #[test]
     fn signature_evidence_without_signatures_is_an_error() {
-        let e = match_images(&Exports::default(), &Exports::default(), true, &ev(&[Evidence::String])).unwrap_err();
+        let e = match_images(&Exports::default(), &Exports::default(), true, &ev(&[Evidence::String]), &[]).unwrap_err();
         assert!(e.to_string().contains("fnsig"), "{e}");
     }
 }
