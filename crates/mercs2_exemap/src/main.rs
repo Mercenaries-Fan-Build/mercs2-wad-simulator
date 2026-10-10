@@ -247,7 +247,7 @@ fn run(cli: Cli) -> Result<(), ExitCode> {
                     o.end,
                     o.runs,
                     o.diff_bytes,
-                    o.detail
+                    o.detail.as_deref().unwrap_or(mercs2_exemap::NO_VALUE)
                 );
             }
         }
