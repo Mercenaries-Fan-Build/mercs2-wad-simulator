@@ -60,6 +60,13 @@ official v1.1 patcher (sha256 `b27fedc2…`, one file for all four regions) writ
 relates to 1.0 and 1.1 is not established. `builds.tsv` records each build's `code_version`; `aliases.tsv` maps other ids for a build,
 including the ones Modkit uses, to its canonical id, and `identify` prints the canonical id.
 
+Every table under `crates/mercs2_exemap/data/` is tab-separated with one exact header line, and no
+field is empty: a column with no value holds `-` (a build with no recipe or no overlay set, an
+overlay row with no `detail`, an image with no `build_id`, `code_image` or chain, a corpus that
+applies to nothing, a WAD with no chain or no `install` key). An empty field fails the parse with
+an error naming the table, line and column, and `-` in a column that must hold a value fails it
+too. No command writes these tables; they are edited by hand.
+
 ```bash
 exemap identify Mercenaries2.exe
 exemap check Mercenaries2.exe --reference <layout-reference.exe>
@@ -84,8 +91,13 @@ exemap starts profile.pe_ghidra --out profile.starts
 ```
 
 `crates/mercs2_exemap/data/images.tsv` lists the images the function map spans on every platform,
-each with the Ghidra language and load base it is analysed with. The PC rows are the two layout
-references' SecuROM-unwrapped dumps, named by build id. Each console row carries the chain that
+each with the Ghidra language and load base it is analysed with. Each PC row names its build id:
+`pc-v10` and `pc-v11` are the two layout references' SecuROM-unwrapped process dumps
+(`dump-v10-pmcbb-unpacked`, `dump-v11-securom-unpacked`), and `pc-v10-drmfree` is the DRM-free
+v1.0 executable `v10-drmfree-laa` (`mercs2_nodrm_v3.exe`, the `drmfree_exe` key), which
+`securom_unwrap::unwrap` builds from `v10-cracked-pmcbb` with the large-address-aware flag set. It
+has no `code_image`: the `pc-v10` dump carries three `.text` hot-patches and runtime bytes in
+`.securom` that this file does not (`overlays.tsv`). Each console row carries the chain that
 rebuilds it from its original container (a file from the Xbox disc, `xex`, `ghidra-pe`; a PSN
 package entry, `unself`), and `exemap derive` replays it, checking every sha256 on the way. A
 regional build whose executable sections and function starts match another image byte for byte
@@ -148,7 +160,7 @@ region's disc; the German update ships the same patch WADs as the North American
 update its own.
 `exemap corpus-derive` replays one chain, checking every sha256; the PC demo corpus rebuilds from
 `Mercs2_Demo_Setup.zip` this way, and its executable is build `demo-official-securom`, layout `D`.
-A WAD with an empty chain is catalogued from an install, named in its `install` column by the
+A WAD with no chain (`-` in `from_sha256` and `step`) is catalogued from an install, named in its `install` column by the
 local-config key of the install directory. The PC retail corpus is English, Loading, shell and vz
 from the official release as EA's download manager installs it (English for a North American
 download; the SecuROM v1.1 executable `v11-official-securom`), plus French, German, Italian and
