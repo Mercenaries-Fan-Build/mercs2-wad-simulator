@@ -2,13 +2,17 @@
 //! `data/aliases.tsv`, parsed and cross-checked.
 //!
 //! Every table is tab-separated with one header line that must match exactly, rows sorted, and no
-//! blank lines. Integers are `0x`-prefixed hex except `size`, `runs` and `diff_bytes`, which are
-//! decimal. Any row that does not parse, any reference to an id that does not exist, and any
-//! ordering violation is an [`Error`] naming the table and line.
+//! blank lines. No field is empty: a column with no value holds `-` ([`crate::NO_VALUE`]), and an
+//! empty field is an [`Error`] naming the table, line and column. The columns that may hold `-` are
+//! `recipe_from`, `recipe_step` and `overlay_set` in `builds.tsv`, and `sha256` (exactly for an
+//! `unmapped` row) and `detail` in `overlays.tsv`; in every other column `-` is an error. Integers
+//! are `0x`-prefixed hex except `size`, `runs` and `diff_bytes`, which are decimal. Any row that
+//! does not parse, any reference to an id that does not exist, and any ordering violation is an
+//! [`Error`] naming the table and line.
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::Error;
+use crate::{field_value, table_row, Error};
 
 const BUILDS_HEADER: &str =
     "build_id\tsha256\tmd5\tsize\tpe_timestamp\tlayout\tcode_version\trecipe_from\trecipe_step\toverlay_set";
@@ -203,7 +207,8 @@ pub struct Overlay {
     pub runs: u64,
     pub diff_bytes: u64,
     pub sha256: Option<String>,
-    pub detail: String,
+    /// What the range holds, where a row says; `None` where the kind and range say it all.
+    pub detail: Option<String>,
 }
 
 /// One row of `aliases.tsv`: another name for a build, accepted wherever a build id is.
@@ -231,18 +236,10 @@ fn rows<'t>(table: &str, text: &'t str, header: &str) -> Result<Vec<(usize, Vec<
     if first != header {
         return Err(Error::new(format!("{table}: header line is {first:?}, expected {header:?}")));
     }
-    let width = header.split('\t').count();
     let mut out = Vec::new();
     for (i, line) in lines.enumerate() {
         let n = i + 2;
-        let fields: Vec<&str> = line.split('\t').collect();
-        if fields.len() != width {
-            return Err(Error::new(format!(
-                "{table} line {n}: {} fields, expected {width}",
-                fields.len()
-            )));
-        }
-        out.push((n, fields));
+        out.push((n, table_row(table, header, n, line)?));
     }
     Ok(out)
 }
@@ -272,11 +269,14 @@ fn digest(table: &str, n: usize, col: &str, s: &str, len: usize) -> Result<Strin
     Ok(s.to_string())
 }
 
-fn nonempty<'t>(table: &str, n: usize, col: &str, s: &'t str) -> Result<&'t str, Error> {
-    if s.is_empty() {
-        return Err(Error::new(format!("{table} line {n}: {col} is empty")));
-    }
-    Ok(s)
+/// A field of a column that must hold a value: [`crate::NO_VALUE`] there is an error.
+fn required<'t>(table: &str, n: usize, col: &str, s: &'t str) -> Result<&'t str, Error> {
+    field_value(s).ok_or_else(|| Error::new(format!("{table} line {n}: {col} holds no value")))
+}
+
+/// The `;`-separated entries of a list column; [`crate::NO_VALUE`] is the empty list.
+fn list(s: &str) -> Vec<&str> {
+    field_value(s).map(|v| v.split(';').collect()).unwrap_or_default()
 }
 
 impl Catalogue {
@@ -422,7 +422,7 @@ fn parse_builds(text: &str) -> Result<Vec<Build>, Error> {
     const T: &str = "builds.tsv";
     let mut out: Vec<Build> = Vec::new();
     for (n, f) in rows(T, text, BUILDS_HEADER)? {
-        let id = nonempty(T, n, "build_id", f[0])?.to_string();
+        let id = required(T, n, "build_id", f[0])?.to_string();
         if let Some(prev) = out.last() {
             if prev.id >= id {
                 return Err(Error::new(format!("{T} line {n}: build_id {id} is not after {}", prev.id)));
@@ -431,8 +431,8 @@ fn parse_builds(text: &str) -> Result<Vec<Build>, Error> {
         let code_version = CodeVersion::parse(f[6]).ok_or_else(|| {
             Error::new(format!("{T} line {n}: code_version {:?} is not 1.0, 1.1 or demo", f[6]))
         })?;
-        let froms: Vec<&str> = if f[7].is_empty() { Vec::new() } else { f[7].split(';').collect() };
-        let steps: Vec<&str> = if f[8].is_empty() { Vec::new() } else { f[8].split(';').collect() };
+        let froms = list(f[7]);
+        let steps = list(f[8]);
         if froms.len() != steps.len() {
             return Err(Error::new(format!(
                 "{T} line {n}: {} recipe_from entries but {} recipe_step entries",
@@ -444,7 +444,7 @@ fn parse_builds(text: &str) -> Result<Vec<Build>, Error> {
         for (from, step) in froms.into_iter().zip(steps) {
             recipes.push(Recipe {
                 from_sha256: digest(T, n, "recipe_from", from, 64)?,
-                step: nonempty(T, n, "recipe_step", step)?.to_string(),
+                step: required(T, n, "recipe_step", step)?.to_string(),
             });
         }
         out.push(Build {
@@ -453,10 +453,10 @@ fn parse_builds(text: &str) -> Result<Vec<Build>, Error> {
             md5: digest(T, n, "md5", f[2], 32)?,
             size: dec(T, n, "size", f[3])?,
             pe_timestamp: hex32(T, n, "pe_timestamp", f[4])?,
-            layout: nonempty(T, n, "layout", f[5])?.to_string(),
+            layout: required(T, n, "layout", f[5])?.to_string(),
             code_version,
             recipes,
-            overlay_set: if f[9].is_empty() { None } else { Some(f[9].to_string()) },
+            overlay_set: field_value(f[9]).map(str::to_string),
         });
     }
     Ok(out)
@@ -466,7 +466,7 @@ fn parse_layouts(text: &str) -> Result<Vec<Layout>, Error> {
     const T: &str = "layouts.tsv";
     let mut out: Vec<Layout> = Vec::new();
     for (n, f) in rows(T, text, LAYOUTS_HEADER)? {
-        let id = nonempty(T, n, "layout_id", f[0])?;
+        let id = required(T, n, "layout_id", f[0])?;
         let head = Layout {
             id: id.to_string(),
             pe_timestamp: hex32(T, n, "pe_timestamp", f[1])?,
@@ -477,7 +477,7 @@ fn parse_layouts(text: &str) -> Result<Vec<Layout>, Error> {
             sections: Vec::new(),
         };
         let section = LayoutSection {
-            name: nonempty(T, n, "section", f[6])?.to_string(),
+            name: required(T, n, "section", f[6])?.to_string(),
             rva: hex32(T, n, "rva", f[7])?,
             virtual_size: hex32(T, n, "virtual_size", f[8])?,
             raw_offset: hex32(T, n, "raw_offset", f[9])?,
@@ -519,16 +519,16 @@ fn parse_overlays(text: &str) -> Result<Vec<Overlay>, Error> {
         let space = Space::parse(f[2]).ok_or_else(|| Error::new(format!("{T} line {n}: space {:?} is not va or file", f[2])))?;
         let kind = Kind::parse(f[5]).ok_or_else(|| Error::new(format!("{T} line {n}: unknown kind {:?}", f[5])))?;
         let o = Overlay {
-            overlay_set: nonempty(T, n, "overlay_set", f[0])?.to_string(),
-            section: nonempty(T, n, "section", f[1])?.to_string(),
+            overlay_set: required(T, n, "overlay_set", f[0])?.to_string(),
+            section: required(T, n, "section", f[1])?.to_string(),
             space,
             start: hex(T, n, "start", f[3])?,
             end: hex(T, n, "end", f[4])?,
             kind,
             runs: dec(T, n, "runs", f[6])?,
             diff_bytes: dec(T, n, "diff_bytes", f[7])?,
-            sha256: if f[8] == "-" { None } else { Some(digest(T, n, "sha256", f[8], 64)?) },
-            detail: f[9].to_string(),
+            sha256: field_value(f[8]).map(|s| digest(T, n, "sha256", s, 64)).transpose()?,
+            detail: field_value(f[9]).map(str::to_string),
         };
         if o.start >= o.end {
             return Err(Error::new(format!("{T} line {n}: empty range 0x{:x}..0x{:x}", o.start, o.end)));
@@ -562,9 +562,9 @@ fn parse_aliases(text: &str) -> Result<Vec<Alias>, Error> {
     let mut out: Vec<Alias> = Vec::new();
     for (n, f) in rows(T, text, ALIASES_HEADER)? {
         let a = Alias {
-            alias: nonempty(T, n, "alias", f[0])?.to_string(),
-            build_id: nonempty(T, n, "build_id", f[1])?.to_string(),
-            reason: nonempty(T, n, "reason", f[2])?.to_string(),
+            alias: required(T, n, "alias", f[0])?.to_string(),
+            build_id: required(T, n, "build_id", f[1])?.to_string(),
+            reason: required(T, n, "reason", f[2])?.to_string(),
         };
         if let Some(prev) = out.last() {
             if prev.alias >= a.alias {
@@ -622,7 +622,7 @@ mod tests {
 
     fn one_build_tables(code_version: &str) -> (String, String) {
         let sha = "a".repeat(64);
-        let builds = format!("{BUILDS_HEADER}\nb\t{sha}\t{}\t1\t0x00000011\tL\t{code_version}\t\t\t\n", "b".repeat(32));
+        let builds = format!("{BUILDS_HEADER}\nb\t{sha}\t{}\t1\t0x00000011\tL\t{code_version}\t-\t-\t-\n", "b".repeat(32));
         let layouts = format!(
             "{LAYOUTS_HEADER}\nL\t0x00000011\t{sha}\t0x00400000\t0x1000\t0x200\t.text\t0x00001000\t0x00000100\t0x00000200\t0x00000100\n"
         );
@@ -661,7 +661,7 @@ mod tests {
     #[test]
     fn unknown_kinds_and_unsorted_rows_are_rejected() {
         let row = |set: &str, start: &str, kind: &str| {
-            format!("{set}\t.text\tva\t{start}\t0x00001010\t{kind}\t1\t1\t{}\t\n", "a".repeat(64))
+            format!("{set}\t.text\tva\t{start}\t0x00001010\t{kind}\t1\t1\t{}\t-\n", "a".repeat(64))
         };
         let e = parse_overlays(&format!("{OVERLAYS_HEADER}\n{}", row("s", "0x00001000", "mystery"))).unwrap_err();
         assert!(e.to_string().contains("unknown kind"), "{e}");
@@ -672,5 +672,22 @@ mod tests {
         ))
         .unwrap_err();
         assert!(e.to_string().contains("not after"), "{e}");
+    }
+
+    #[test]
+    fn a_no_value_field_reads_as_none_and_an_empty_field_is_rejected() {
+        let (builds, _) = one_build_tables("1.0");
+        let b = &parse_builds(&builds).unwrap()[0];
+        assert!(b.recipes.is_empty());
+        assert_eq!(b.overlay_set, None);
+        let e = parse_builds(&builds.replace("\t-\t-\t-\n", "\t-\t-\t\n")).unwrap_err().to_string();
+        assert!(e.contains("builds.tsv line 2: column 10 (overlay_set) is empty"), "{e}");
+        let e = parse_builds(&builds.replace("\tL\t", "\t-\t")).unwrap_err().to_string();
+        assert!(e.contains("builds.tsv line 2: layout holds no value"), "{e}");
+        let row = format!("s\t.text\tva\t0x00001000\t0x00001010\tlineage\t1\t1\t{}\t-\n", "a".repeat(64));
+        let o = &parse_overlays(&format!("{OVERLAYS_HEADER}\n{row}")).unwrap()[0];
+        assert_eq!(o.detail, None);
+        let e = parse_overlays(&format!("{OVERLAYS_HEADER}\n{}", row.replace("\t-\n", "\t\n"))).unwrap_err().to_string();
+        assert!(e.contains("overlays.tsv line 2: column 10 (detail) is empty"), "{e}");
     }
 }
