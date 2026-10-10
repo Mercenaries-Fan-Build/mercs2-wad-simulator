@@ -23,6 +23,18 @@
 //!      packed_field); `build_patch_wad_multi` (auto-sentinels dangling LOD rungs -> no 549GB wedge).
 //!   6. `aset_refcheck` the written WAD separately as the deploy gate.
 //!
+//! Flags:
+//!   --block <N>        the vz.wad block to override (u16; default 2612 when absent)
+//!   --model <HASH>     hex container name hash (optional `0x` prefix) the PHY2 must come from; when
+//!                      absent, the first container in the block carrying a PHY2+MOPP
+//!   --mopp <IDX>       swap modes: the hkpMoppCode index to swap (usize; when absent, the first MOPP with
+//!                      clean single-subpart [0..N-1] keys — an error if the body has none)
+//!   --mopp <KIND>      `--mode authored`: `spatial` (default when absent) or `return-all`
+//!   --merge-into <WAD> also merge the block into this live vz-patch.wad, written to --merge-out
+//!                      (default `<out stem>-MERGED.wad` when absent)
+//! A flag given without a value, or with a value that does not parse, is an error naming the flag and
+//! the value; defaults apply only when the flag is absent. All flags are checked before vz.wad is read.
+//!
 //! Usage (`--out` is required except with `--report`):
 //!   mopp_overlay_forge --block 2612 --report
 //!   mopp_overlay_forge --block 2612 --mode return-all --out .../vz-patch-mopp-returnall.wad \
@@ -52,8 +64,12 @@ fn sha256_hex(b: &[u8]) -> String {
     h.update(b);
     h.finalize().iter().map(|x| format!("{x:02x}")).collect()
 }
-fn arg(a: &[String], n: &str) -> Option<String> {
-    a.iter().position(|x| x == n).and_then(|i| a.get(i + 1)).cloned()
+/// The value following flag `n`: `Ok(None)` when the flag is absent, an error when it has no value.
+fn arg(a: &[String], n: &str) -> Result<Option<String>, String> {
+    match a.iter().position(|x| x == n) {
+        None => Ok(None),
+        Some(i) => a.get(i + 1).cloned().map(Some).ok_or_else(|| format!("{n} requires a value")),
+    }
 }
 fn has(a: &[String], n: &str) -> bool {
     a.iter().any(|x| x == n)
@@ -68,16 +84,16 @@ fn mode_name(m: SwapMode) -> &'static str {
 }
 
 /// First MOPP index whose source keys are a clean contiguous [0..N-1] run.
-fn first_contiguous_mopp(body: &[u8]) -> usize {
+fn first_contiguous_mopp(body: &[u8]) -> Option<usize> {
     for i in 0..count_phy2_mopps(body) {
         if let Ok(d) = decode_phy2_mopp_keys(body, i) {
             let (ks, range, missing) = d.key_summary();
             if !ks.is_empty() && missing.is_empty() && range == Some((0, ks.len() as u32 - 1)) {
-                return i;
+                return Some(i);
             }
         }
     }
-    0
+    None
 }
 
 /// Re-author a WHOLE PHY2 body from the target container's OWN decoded collision geometry, and gate it
@@ -374,34 +390,64 @@ fn main() {
 
 fn run() -> Result<(), String> {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let block: u16 = arg(&args, "--block").and_then(|s| s.parse().ok()).unwrap_or(2612);
-    let model_hash: Option<u32> = arg(&args, "--model")
-        .and_then(|s| u32::from_str_radix(s.trim_start_matches("0x"), 16).ok());
+    // Every flag value is validated here, before vz.wad is opened.
+    let block: u16 = match arg(&args, "--block")? {
+        None => 2612,
+        Some(s) => s
+            .parse()
+            .map_err(|e| format!("--block {s:?} is not a valid vz.wad block index (u16): {e}"))?,
+    };
+    let model_hash: Option<u32> = match arg(&args, "--model")? {
+        None => None,
+        Some(s) => Some(
+            u32::from_str_radix(s.trim_start_matches("0x"), 16)
+                .map_err(|e| format!("--model {s:?} is not a valid hex container name hash: {e}"))?,
+        ),
+    };
     let report = has(&args, "--report");
-    // Every run except `--report` writes the overlay WAD named by `--out`; checked before the WAD loads.
+    // Every run except `--report` writes the overlay WAD named by `--out`.
     const OUT_REQUIRED: &str = "--out <file.wad> is required (the standalone overlay WAD to write)";
-    let out = arg(&args, "--out");
+    let out = arg(&args, "--out")?;
     if out.is_none() && !report {
         return Err(OUT_REQUIRED.into());
     }
+    let merge_into = arg(&args, "--merge-into")?;
+    let merge_out = arg(&args, "--merge-out")?;
+    if merge_out.is_some() && merge_into.is_none() {
+        return Err("--merge-out names the merged WAD of --merge-into; pass --merge-into <WAD> with it".into());
+    }
     let all_mopps = has(&args, "--all-mopps");
+    let mode_arg = arg(&args, "--mode")?;
+    let mopp_arg = arg(&args, "--mopp")?;
     // `authored` is a whole-PHY2 re-authoring mode (not a MOPP swap): decode the target container's
     // mesh(es), re-author a fully-authored PHY2 (WpMeshShape16 + engine-faithful descriptor-chain wrapper
     // + native MOPP) from that SAME geometry, and splice it in. Single-shape uses build_phy2 (proven); a
     // multi-shape container uses build_phy2_multi (see the wrapper caveat printed at run time).
-    let authored = matches!(arg(&args, "--mode").as_deref(), Some("authored"));
+    let authored = matches!(mode_arg.as_deref(), Some("authored"));
     // On the authored path, `--mopp` selects which MOPP bytecode each shape carries: `spatial` (default,
     // the real collision) or `return-all` (the frame-ignoring diagnostic — SAME mesh/wrapper/m_info, only
-    // the bytecode changes; see phy2_build::MoppKind).
-    let mopp_kind = match arg(&args, "--mopp").as_deref() {
-        None | Some("spatial") => MoppKind::Spatial,
-        Some("return-all") | Some("returnall") => MoppKind::ReturnAll,
-        Some(other) => return Err(format!("unknown --mopp {other} (spatial|return-all)")),
+    // the bytecode changes; see phy2_build::MoppKind). On the swap paths it is the MOPP index to swap.
+    let (mopp_kind, mopp_index): (MoppKind, Option<usize>) = if authored {
+        let kind = match mopp_arg.as_deref() {
+            None | Some("spatial") => MoppKind::Spatial,
+            Some("return-all") | Some("returnall") => MoppKind::ReturnAll,
+            Some(other) => return Err(format!("unknown --mopp {other} (spatial|return-all)")),
+        };
+        (kind, None)
+    } else {
+        let idx = match mopp_arg {
+            None => None,
+            Some(s) => Some(
+                s.parse::<usize>()
+                    .map_err(|e| format!("--mopp {s:?} is not a valid hkpMoppCode index (usize): {e}"))?,
+            ),
+        };
+        (MoppKind::Spatial, idx)
     };
     let mode = if authored {
         SwapMode::Identity // placeholder; unused on the authored path
     } else {
-        match arg(&args, "--mode").as_deref() {
+        match mode_arg.as_deref() {
             None | Some("identity") => SwapMode::Identity,
             Some("return-all") | Some("returnall") => SwapMode::ReturnAll,
             Some("empty") => SwapMode::Empty,
@@ -477,10 +523,17 @@ fn run() -> Result<(), String> {
         author_whole_phy2(&parsed.containers[ci], &base_body, ename, mopp_kind)?
     } else {
         // Which MOPP indices does this mode target?
-        let default_idx = arg(&args, "--mopp").and_then(|s| s.parse::<usize>().ok());
         let targets: Vec<usize> = match mode {
             SwapMode::Empty if all_mopps => (0..n_mopps).collect(),
-            _ => vec![default_idx.unwrap_or_else(|| first_contiguous_mopp(&base_body))],
+            _ => match mopp_index {
+                Some(i) => vec![i],
+                None => vec![first_contiguous_mopp(&base_body).ok_or_else(|| {
+                    format!(
+                        "none of container 0x{ename:08X}'s {n_mopps} MOPP(s) has clean single-subpart \
+                         [0..N-1] keys; pass --mopp <IDX> to choose one"
+                    )
+                })?],
+            },
         };
         println!("  targeting MOPP index(es): {targets:?}");
 
@@ -592,11 +645,10 @@ fn run() -> Result<(), String> {
 
     // Optional: also emit a variant that MERGES this block into a live vz-patch.wad (append; the live
     // overlay is preserved, our block added, last-wins for c33294).
-    if let Some(live) = arg(&args, "--merge-into") {
+    if let Some(live) = merge_into {
         let existing = std::fs::read(&live).map_err(|e| format!("read live {live}: {e}"))?;
         let merged = merge_patch_wads(&existing, vec![pblk], false)?;
-        let mout = arg(&args, "--merge-out")
-            .unwrap_or_else(|| format!("{}-MERGED.wad", out.trim_end_matches(".wad")));
+        let mout = merge_out.unwrap_or_else(|| format!("{}-MERGED.wad", out.trim_end_matches(".wad")));
         std::fs::write(&mout, &merged).map_err(|e| format!("write {mout}: {e}"))?;
         println!("\nWROTE merged overlay (live + our block): {mout}");
         println!("  live in : {} ({} B)", live, existing.len());
