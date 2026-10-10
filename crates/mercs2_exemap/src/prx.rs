@@ -32,6 +32,18 @@
 //! section, a stub that is not the eight words above, and a stub that loads a slot other than the
 //! one pointing at it. The stubs must then fill one executable section exactly, ascending at 32
 //! bytes apart, so every 32-byte step of that section is the stub of exactly one record.
+//!
+//! [`prx_imports_tsv`] names every import by its FNID ([`FnidNames`]). The FNID of a name is the
+//! first 4 bytes, read little-endian, of SHA-1 of the name followed by the 16 bytes
+//! [`FNID_SUFFIX`] ([`fnid`]; RPCS3 `ppu_generate_id`, rpcs3/Emu/Cell/PPUModule.cpp:58-75).
+//! `data/ps3_fnid_names.tsv` lists candidate names with the FNID each hashes to, and every row is
+//! hashed again when it loads; `data/ps3_fixed_nids.tsv` lists the module-level NIDs whose value is
+//! not their name's hash, each with the RPCS3 source line that gives it. An FNID with no name in
+//! either is an error listing every unnamed FNID by library.
+
+use std::collections::BTreeMap;
+
+use sha1::{Digest, Sha1};
 
 use crate::starts::{elf_sections, elf_segments, SHF_EXECINSTR};
 use crate::Error;
@@ -61,7 +73,136 @@ pub struct PrxImport {
 }
 
 /// The header of a PS3 `<id>.imports.tsv` export.
-pub const PRX_IMPORTS_HEADER: &str = "address\tkind\tlibrary\tfnid\tstub";
+pub const PRX_IMPORTS_HEADER: &str = "address\tkind\tlibrary\tfnid\tname\tstub";
+
+/// The bytes SHA-1 hashes after a name to give its FNID.
+pub const FNID_SUFFIX: [u8; 16] = [0x67, 0x59, 0x65, 0x99, 0x04, 0x25, 0x04, 0x90, 0x56, 0x64, 0x27, 0x49, 0x94, 0x89, 0x74, 0x1a];
+
+/// The FNID of `name`: the first 4 bytes, little-endian, of SHA-1(`name` ‖ [`FNID_SUFFIX`]).
+pub fn fnid(name: &str) -> u32 {
+    let mut h = Sha1::new();
+    h.update(name.as_bytes());
+    h.update(FNID_SUFFIX);
+    let d = h.finalize();
+    u32::from_le_bytes([d[0], d[1], d[2], d[3]])
+}
+
+/// The header of `data/ps3_fnid_names.tsv`, after its `#` provenance lines.
+pub const FNID_NAMES_HEADER: &str = "fnid\tname";
+/// The header of `data/ps3_fixed_nids.tsv`, after its `#` provenance lines.
+pub const FIXED_NIDS_HEADER: &str = "nid\tname\tkind\tsource";
+
+/// Whether a fixed NID names a function or a variable.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NidKind {
+    Function,
+    Variable,
+}
+
+/// A name for an FNID: one whose hash it is, or a fixed module-level NID.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum FnidName {
+    /// A `ps3_fnid_names.tsv` name: the FNID is its hash.
+    Hashed(String),
+    /// A `ps3_fixed_nids.tsv` row: its name, kind and RPCS3 source line.
+    Fixed { name: String, kind: NidKind, source: String },
+}
+
+impl FnidName {
+    pub fn name(&self) -> &str {
+        match self {
+            FnidName::Hashed(n) => n,
+            FnidName::Fixed { name, .. } => name,
+        }
+    }
+}
+
+/// The names of PS3 FNIDs: `data/ps3_fnid_names.tsv` and `data/ps3_fixed_nids.tsv`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FnidNames {
+    names: BTreeMap<u32, FnidName>,
+}
+
+/// An 8-digit lowercase hex NID field of `table` line `n`.
+fn hex_nid(table: &str, n: usize, field: &str) -> Result<u32, Error> {
+    if field.len() != 8 || !field.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) {
+        return Err(Error::new(format!("{table} line {n}: {field:?} is not 8 lowercase hex digits")));
+    }
+    Ok(u32::from_str_radix(field, 16).unwrap())
+}
+
+impl FnidNames {
+    /// Parse the two tables, each `#` provenance lines then its header. `names`: [`FNID_NAMES_HEADER`],
+    /// one row per name with the FNID it hashes to; a row whose FNID is not [`fnid`] of its name
+    /// is an error, and so is an FNID or a name listed twice. `fixed`: [`FIXED_NIDS_HEADER`], one
+    /// row per module-level NID: the NID, the name, `function` or `variable`, and the source line;
+    /// a fixed NID that is also a name's hash, or a NID listed twice, is an error. Names hold no
+    /// whitespace.
+    pub fn parse(names: &str, fixed: &str) -> Result<FnidNames, Error> {
+        const N: &str = "ps3_fnid_names.tsv";
+        const F: &str = "ps3_fixed_nids.tsv";
+        let mut out: BTreeMap<u32, FnidName> = BTreeMap::new();
+        let mut seen = std::collections::BTreeSet::new();
+        let no_space = |t: &str, n: usize, name: &str| -> Result<(), Error> {
+            if name.chars().any(char::is_whitespace) {
+                return Err(Error::new(format!("{t} line {n}: name {name:?} holds whitespace")));
+            }
+            Ok(())
+        };
+        for (n, f) in crate::commented_table_rows(N, FNID_NAMES_HEADER, names)? {
+            let id = hex_nid(N, n, f[0])?;
+            no_space(N, n, f[1])?;
+            let h = fnid(f[1]);
+            if h != id {
+                return Err(Error::new(format!("{N} line {n}: {} hashes to {h:08x}, not {id:08x}", f[1])));
+            }
+            if !seen.insert(f[1].to_string()) {
+                return Err(Error::new(format!("{N} line {n}: {} is listed twice", f[1])));
+            }
+            if let Some(prev) = out.insert(id, FnidName::Hashed(f[1].to_string())) {
+                return Err(Error::new(format!("{N} line {n}: FNID {id:08x} is listed for {} and {}", prev.name(), f[1])));
+            }
+        }
+        for (n, f) in crate::commented_table_rows(F, FIXED_NIDS_HEADER, fixed)? {
+            let id = hex_nid(F, n, f[0])?;
+            no_space(F, n, f[1])?;
+            let kind = match f[2] {
+                "function" => NidKind::Function,
+                "variable" => NidKind::Variable,
+                other => return Err(Error::new(format!("{F} line {n}: kind {other:?} is not function or variable"))),
+            };
+            let row = FnidName::Fixed { name: f[1].to_string(), kind, source: f[3].to_string() };
+            if let Some(prev) = out.insert(id, row) {
+                return Err(Error::new(format!(
+                    "{F} line {n}: NID {id:08x} ({}) is already {} ({N} or an earlier row)",
+                    f[1],
+                    prev.name()
+                )));
+            }
+        }
+        Ok(FnidNames { names: out })
+    }
+
+    /// The compiled-in `data/ps3_fnid_names.tsv` and `data/ps3_fixed_nids.tsv`.
+    pub fn embedded() -> Result<FnidNames, Error> {
+        FnidNames::parse(include_str!("../data/ps3_fnid_names.tsv"), include_str!("../data/ps3_fixed_nids.tsv"))
+    }
+
+    /// The name of `id`.
+    pub fn get(&self, id: u32) -> Option<&FnidName> {
+        self.names.get(&id)
+    }
+
+    /// The number of NIDs named.
+    pub fn len(&self) -> usize {
+        self.names.len()
+    }
+
+    /// Whether no NID is named.
+    pub fn is_empty(&self) -> bool {
+        self.names.is_empty()
+    }
+}
 
 /// The slot a stub's eight words load, or `None` when they are not the stub form.
 pub fn decode_stub(w: &[u32; 8]) -> Option<u32> {
@@ -220,14 +361,38 @@ pub fn prx_imports(elf: &[u8]) -> Result<Vec<PrxImport>, Error> {
 
 /// The `<id>.imports.tsv` text of `imports`: [`PRX_IMPORTS_HEADER`], then one row per import in
 /// the order given: the stub address (`0x%08x`), `function`, the library, the FNID (8 lowercase hex
-/// digits) and the stub's bytes (lowercase hex; its length is the stub size).
-pub fn prx_imports_tsv(imports: &[PrxImport]) -> String {
+/// digits), the name `names` gives the FNID, and the stub's bytes (lowercase hex; its length is the
+/// stub size). Fails listing every FNID `names` does not name, by library, and on an FNID that is a
+/// fixed variable NID.
+pub fn prx_imports_tsv(imports: &[PrxImport], names: &FnidNames) -> Result<String, Error> {
     let mut s = format!("{PRX_IMPORTS_HEADER}\n");
+    let mut unnamed: BTreeMap<&str, Vec<String>> = BTreeMap::new();
     for i in imports {
+        let name = match names.get(i.fnid) {
+            None => {
+                unnamed.entry(i.library.as_str()).or_default().push(format!("{:08x}", i.fnid));
+                continue;
+            }
+            Some(FnidName::Fixed { name, kind: NidKind::Variable, source }) => {
+                return Err(Error::new(format!(
+                    "{} function import {:08x} (stub 0x{:08x}) is the variable NID {name} ({source})",
+                    i.library, i.fnid, i.stub
+                )))
+            }
+            Some(n) => n.name(),
+        };
         let bytes: String = i.bytes.iter().map(|b| format!("{b:02x}")).collect();
-        s.push_str(&format!("0x{:08x}\tfunction\t{}\t{:08x}\t{bytes}\n", i.stub, i.library, i.fnid));
+        s.push_str(&format!("0x{:08x}\tfunction\t{}\t{:08x}\t{name}\t{bytes}\n", i.stub, i.library, i.fnid));
     }
-    s
+    if !unnamed.is_empty() {
+        let n: usize = unnamed.values().map(Vec::len).sum();
+        let list: Vec<String> = unnamed.iter().map(|(lib, ids)| format!("{lib}: {}", ids.join(" "))).collect();
+        return Err(Error::new(format!(
+            "{n} FNIDs have no name in ps3_fnid_names.tsv or ps3_fixed_nids.tsv: {}",
+            list.join("; ")
+        )));
+    }
+    Ok(s)
 }
 
 #[cfg(test)]
@@ -356,9 +521,84 @@ mod tests {
                 (0x1_0040, S1, "sys_fs", 0x4d5f_f8e2),
             ]
         );
-        let tsv = prx_imports_tsv(&imps[..1]);
+        let tsv = prx_imports_tsv(&imps[..1], &names()).unwrap();
         let stub: String = stub_words(S2).iter().map(|w| format!("{w:08x}")).collect();
-        assert_eq!(tsv, format!("address\tkind\tlibrary\tfnid\tstub\n0x00010000\tfunction\tcellSysmodule\t32267a31\t{stub}\n"));
+        assert_eq!(
+            tsv,
+            format!("address\tkind\tlibrary\tfnid\tname\tstub\n0x00010000\tfunction\tcellSysmodule\t32267a31\tcellSysmoduleLoadModule\t{stub}\n")
+        );
+    }
+
+    const NAMES: &str = "# provenance\nfnid\tname\n2cb51f0d\tcellFsClose\n32267a31\tcellSysmoduleLoadModule\n";
+    const FIXED: &str = "# provenance\nnid\tname\tkind\tsource\n\
+        bc9a0086\tmodule_start\tfunction\trpcs3/Emu/Cell/PPUFunction.cpp:17\n\
+        d7f43016\tmodule_info\tvariable\trpcs3/Emu/Cell/PPUFunction.cpp:1811\n";
+
+    fn names() -> FnidNames {
+        FnidNames::parse(NAMES, FIXED).unwrap()
+    }
+
+    #[test]
+    fn fnid_is_the_le_sha1_prefix_of_the_name_and_suffix() {
+        // rpcs3/Emu/Cell/Modules/cellSysmodule.cpp REG_FUNC; nids.txt pairs both the same way
+        assert_eq!(fnid("cellSysmoduleLoadModule"), 0x3226_7a31);
+        assert_eq!(fnid("cellFsClose"), 0x2cb5_1f0d);
+        // module_start is a fixed NID, not its hash
+        assert_ne!(fnid("module_start"), 0xbc9a_0086);
+    }
+
+    #[test]
+    fn a_name_row_whose_fnid_is_not_its_hash_is_an_error() {
+        let e = FnidNames::parse("fnid\tname\n2cb51f0e\tcellFsClose\n", FIXED).unwrap_err().to_string();
+        assert!(e.contains("line 2: cellFsClose hashes to 2cb51f0d, not 2cb51f0e"), "{e}");
+        let e = FnidNames::parse("fnid\tname\n2CB51F0D\tcellFsClose\n", FIXED).unwrap_err().to_string();
+        assert!(e.contains("not 8 lowercase hex digits"), "{e}");
+        let e = FnidNames::parse("fnid\tname\n2cb51f0d\tcellFsClose\n2cb51f0d\tcellFsClose\n", FIXED).unwrap_err().to_string();
+        assert!(e.contains("cellFsClose is listed twice"), "{e}");
+    }
+
+    #[test]
+    fn a_fixed_nid_that_is_also_listed_is_an_error() {
+        let fixed = "nid\tname\tkind\tsource\n2cb51f0d\tmodule_x\tfunction\tsomewhere:1\n";
+        let e = FnidNames::parse(NAMES, fixed).unwrap_err().to_string();
+        assert!(e.contains("NID 2cb51f0d (module_x) is already cellFsClose"), "{e}");
+        let fixed = "nid\tname\tkind\tsource\nbc9a0086\tmodule_start\tthunk\tsomewhere:1\n";
+        let e = FnidNames::parse(NAMES, fixed).unwrap_err().to_string();
+        assert!(e.contains("kind \"thunk\""), "{e}");
+    }
+
+    #[test]
+    fn the_embedded_tables_load_with_every_hash_checked() {
+        let n = FnidNames::embedded().unwrap();
+        assert_eq!(n.get(0x3226_7a31), Some(&FnidName::Hashed("cellSysmoduleLoadModule".into())));
+        let start = n.get(0xbc9a_0086).unwrap();
+        assert_eq!(start.name(), "module_start");
+        assert!(matches!(start, FnidName::Fixed { kind: NidKind::Function, .. }), "{start:?}");
+        for (id, name) in [
+            (0x0d10_fd3f, "module_prologue"),
+            (0x330f_7005, "module_epilogue"),
+            (0x3ab9_a95e, "module_exit"),
+            (0xab77_9874, "module_stop"),
+            (0xd7f4_3016, "module_info"),
+        ] {
+            assert_eq!(n.get(id).map(FnidName::name), Some(name), "{id:08x}");
+        }
+    }
+
+    #[test]
+    fn unnamed_fnids_are_an_error_listing_each_by_library() {
+        let imps = prx_imports(&elf(LIBS, &good_stubs(), |_| {})).unwrap();
+        let only = FnidNames::parse("fnid\tname\n2cb51f0d\tcellFsClose\n", "nid\tname\tkind\tsource\n").unwrap();
+        let e = prx_imports_tsv(&imps, &only).unwrap_err().to_string();
+        assert!(e.contains("2 FNIDs have no name") && e.contains("cellSysmodule: 32267a31; sys_fs: 4d5ff8e2"), "{e}");
+    }
+
+    #[test]
+    fn a_function_import_of_a_fixed_variable_nid_is_an_error() {
+        let libs: &[(&str, &[(u32, u32)])] = &[("sys_fs", &[(0xd7f4_3016, S0), (0x2cb5_1f0d, S1)]), ("cellSysmodule", &[(0x3226_7a31, S2)])];
+        let imps = prx_imports(&elf(libs, &good_stubs(), |_| {})).unwrap();
+        let e = prx_imports_tsv(&imps, &names()).unwrap_err().to_string();
+        assert!(e.contains("d7f43016") && e.contains("variable NID module_info (rpcs3/Emu/Cell/PPUFunction.cpp:1811)"), "{e}");
     }
 
     #[test]
