@@ -30,8 +30,9 @@
 //! PC images by build id (the two layout references' process dumps and the DRM-free v1.0
 //! executable), and each console image with the chain that rebuilds it from
 //! its original container. Console executables come in through [`xdvdfs`] (a file from an Xbox
-//! disc image), [`xbox`] (XEX2 → PE image, and the PE layout Ghidra's loader reads) and [`starts`]
-//! (function starts from Xbox `.pdata` or PS3 `.opd`). [`rtti`] recovers vtables from C++ type
+//! disc image), [`xbox`] (XEX2 → PE image, the PE layout Ghidra's loader reads, and XEX imports),
+//! [`prx`] (the PRX imports of a PS3 ELF) and [`starts`] (function starts from Xbox `.pdata` or
+//! PS3 `.opd`). [`rtti`] recovers vtables from C++ type
 //! information and [`luareg`] the Lua C-function registration tables, on every platform;
 //! [`matcher`] pairs the functions of two images from those exports.
 //!
@@ -53,6 +54,7 @@ pub mod luareg;
 pub mod matcher;
 pub mod membership;
 mod mem;
+pub mod prx;
 pub mod rtti;
 pub mod starts;
 pub mod wadscripts;
