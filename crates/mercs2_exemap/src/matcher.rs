@@ -593,9 +593,9 @@ pub fn parse_anchors(text: &str, images: &crate::images::Images) -> Result<Vec<A
     }
     let mut out = Vec::new();
     for (i, l) in lines.enumerate() {
-        let f: Vec<&str> = l.split('\t').collect();
-        if f.len() != 5 || f[4].is_empty() {
-            return Err(Error::new(format!("anchors.tsv line {}: expected 5 fields with verified_by set", i + 2)));
+        let f = crate::table_row("anchors.tsv", HEADER, i + 2, l)?;
+        if crate::field_value(f[4]).is_none() {
+            return Err(Error::new(format!("anchors.tsv line {}: verified_by holds no value", i + 2)));
         }
         for id in [f[0], f[2]] {
             if images.image(id).is_none() {
