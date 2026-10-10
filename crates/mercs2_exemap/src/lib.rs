@@ -22,10 +22,13 @@
 //! id, with the reason the alias is not canonical. [`identify`] returns the canonical id;
 //! [`Catalogue::build`] and [`Catalogue::canonical_id`] accept an alias wherever they accept an id.
 //!
-//! The tables are compiled in; [`Catalogue::embedded`] parses and cross-checks them.
+//! The tables are compiled in; [`Catalogue::embedded`] parses and cross-checks them. No field of
+//! any `data/*.tsv` table is empty: a column with no value holds [`NO_VALUE`] (`-`), and an empty
+//! field is an error naming the table, line and column.
 //!
 //! `data/images.tsv` lists the images the function map spans on every platform ([`images`]): the
-//! PC layout references by build id, and each console image with the chain that rebuilds it from
+//! PC images by build id (the two layout references' process dumps and the DRM-free v1.0
+//! executable), and each console image with the chain that rebuilds it from
 //! its original container. Console executables come in through [`xdvdfs`] (a file from an Xbox
 //! disc image), [`xbox`] (XEX2 → PE image, and the PE layout Ghidra's loader reads) and [`starts`]
 //! (function starts from Xbox `.pdata` or PS3 `.opd`). [`rtti`] recovers vtables from C++ type
@@ -80,6 +83,34 @@ impl std::fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
+/// The field a `data/*.tsv` table writes where a column holds no value. No field of those tables is
+/// empty, so no row ends in whitespace.
+pub const NO_VALUE: &str = "-";
+
+/// The fields of one row of the `data/*.tsv` table `table` (line `n`), split on tabs: exactly as
+/// many as `header` names. An empty field is an error naming the table, line and column; a column
+/// with no value holds [`NO_VALUE`].
+pub(crate) fn table_row<'t>(table: &str, header: &str, n: usize, line: &'t str) -> Result<Vec<&'t str>, Error> {
+    let columns: Vec<&str> = header.split('\t').collect();
+    let fields: Vec<&str> = line.split('\t').collect();
+    if fields.len() != columns.len() {
+        return Err(Error::new(format!("{table} line {n}: {} fields, expected {}", fields.len(), columns.len())));
+    }
+    if let Some(i) = fields.iter().position(|f| f.is_empty()) {
+        return Err(Error::new(format!(
+            "{table} line {n}: column {} ({}) is empty; a column with no value holds {NO_VALUE:?}",
+            i + 1,
+            columns[i]
+        )));
+    }
+    Ok(fields)
+}
+
+/// `None` for a field holding [`NO_VALUE`], the field otherwise.
+pub(crate) fn field_value(field: &str) -> Option<&str> {
+    (field != NO_VALUE).then_some(field)
+}
+
 /// Lowercase hex sha256 of `bytes`.
 pub fn sha256_hex(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
@@ -130,5 +161,19 @@ mod tests {
         let e = identify(b"not a catalogued exe").unwrap_err().to_string();
         assert!(e.contains(&sha256_hex(b"not a catalogued exe")), "{e}");
         assert!(e.contains("unknown build"), "{e}");
+    }
+
+    #[test]
+    fn a_table_row_keeps_the_no_value_marker_and_refuses_an_empty_field() {
+        let f = table_row("t.tsv", "a\tb\tc", 2, "x\t-\tz").unwrap();
+        assert_eq!(f, ["x", "-", "z"]);
+        assert_eq!(field_value(f[0]), Some("x"));
+        assert_eq!(field_value(f[1]), None);
+        let e = table_row("t.tsv", "a\tb\tc", 7, "x\t\tz").unwrap_err().to_string();
+        assert!(e.contains("t.tsv line 7: column 2 (b) is empty"), "{e}");
+        let e = table_row("t.tsv", "a\tb\tc", 3, "x\ty\t").unwrap_err().to_string();
+        assert!(e.contains("t.tsv line 3: column 3 (c) is empty"), "{e}");
+        let e = table_row("t.tsv", "a\tb\tc", 4, "x\ty").unwrap_err().to_string();
+        assert!(e.contains("t.tsv line 4: 2 fields, expected 3"), "{e}");
     }
 }
