@@ -553,7 +553,9 @@ fn run(cli: Cli) -> Result<(), ExitCode> {
             let sigs = ev.iter().any(|e| matches!(e, Evidence::Bytes | Evidence::String | Evidence::Callee));
             let a = Exports::load(&exports, &image_a, sigs).map_err(fail)?;
             let b = Exports::load(&exports, &image_b, sigs).map_err(fail)?;
-            let o = match_images(&a, &b, ia.ghidra_language == ib.ghidra_language, &ev).map_err(fail)?;
+            let anchors = mercs2_exemap::matcher::anchors(&images).map_err(fail)?;
+            let anchored = mercs2_exemap::matcher::anchor_pairs(&image_a, &image_b, &anchors);
+            let o = match_images(&a, &b, ia.ghidra_language == ib.ghidra_language, &ev, &anchored).map_err(fail)?;
             let mut text = format!("{image_a}\t{image_b}\tevidence\n");
             let mut by_kind = std::collections::BTreeMap::new();
             for p in &o.pairs {
@@ -588,7 +590,6 @@ fn run(cli: Cli) -> Result<(), ExitCode> {
                 o.uncorroborated.len(),
                 conflicts.display()
             );
-            let anchors = mercs2_exemap::matcher::anchors(&images).map_err(fail)?;
             let chk = mercs2_exemap::matcher::check_anchors(&image_a, &image_b, &o, &anchors);
             println!("anchors    {} agree, {} unmatched, {} contradicted", chk.agreeing, chk.unmatched, chk.contradicted.len());
             if !chk.contradicted.is_empty() {
