@@ -11,7 +11,9 @@
 //! intermediate sha256 checked; every `code_image` claim is checked byte for byte; and every
 //! analysed image yields function starts and vtables (on PS3, every vtable slot an `.opd` function).
 //! Every Xbox 360 image's XEX import records read and validate against its image, with the record
-//! counts per library and kind that the three XEX import headers list.
+//! counts per library and kind that the three XEX import headers list. The PS3 v1.00 and v1.03
+//! images' PRX function imports read and validate, with the per-library counts their import tables
+//! list (17 libraries and 227 functions, 18 and 235), and no variable imports.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -134,6 +136,63 @@ fn every_xbox_image_lists_its_xex_import_records() {
         }
         let got: Vec<(&str, usize, usize)> = got.into_iter().map(|(l, (f, v))| (l, f, v)).collect();
         assert_eq!(&got, want, "image {id}: (library, functions, variables)");
+    }
+}
+
+/// The PS3 v1.00 and v1.03 images' PRX function imports, per library, as their import tables list
+/// them; `prx_imports` fails on a library that imports a variable.
+#[test]
+fn the_ps3_v100_and_v103_images_list_their_prx_imports() {
+    use mercs2_exemap::images::derive_self_elf;
+    use mercs2_exemap::prx::prx_imports;
+    let catalogue = Catalogue::embedded().unwrap_or_else(|e| panic!("embedded catalogue: {e}"));
+    let images = Images::embedded(&catalogue).unwrap_or_else(|e| panic!("embedded images: {e}"));
+    let containers = containers();
+    let common: &[(&str, usize)] = &[
+        ("cellAdec", 8),
+        ("cellAudio", 7),
+        ("cellCelpEnc", 8),
+        ("cellGcmSys", 26),
+        ("cellL10n", 2),
+        ("cellMic", 9),
+        ("cellNetCtl", 9),
+        ("cellRtc", 5),
+        ("cellSpurs", 21),
+        ("cellSync", 3),
+        ("cellSysmodule", 2),
+        ("sceNp", 35),
+        ("sys_io", 11),
+        ("sys_net", 26),
+    ];
+    let with = |extra: &[(&'static str, usize)]| -> Vec<(&'static str, usize)> {
+        let mut v: Vec<(&str, usize)> = common.iter().copied().chain(extra.iter().copied()).collect();
+        v.sort();
+        v
+    };
+    // per image: (library, functions) rows, libraries, functions
+    type Want = (Vec<(&'static str, usize)>, usize, usize);
+    let expected: BTreeMap<&str, Want> = BTreeMap::from([
+        ("ps3-v100", (with(&[("cellSysutil", 25), ("sysPrxForUser", 18), ("sys_fs", 12)]), 17, 227)),
+        (
+            "ps3-v103-na",
+            (with(&[("cellSysutil", 26), ("sceNpTrophy", 5), ("sysPrxForUser", 19), ("sys_fs", 13)]), 18, 235),
+        ),
+    ]);
+    for (id, (want, libraries, functions)) in &expected {
+        let m = images.image(id).unwrap_or_else(|| panic!("no image {id} in images.tsv"));
+        let head = &m.chain[0].from_sha256;
+        let path = containers.get(head).unwrap_or_else(|| panic!("image {id}: no container with sha256 {head}"));
+        let mut f = std::fs::File::open(path).unwrap_or_else(|e| panic!("open {}: {e}", path.display()));
+        let elf = derive_self_elf(m, &mut f).unwrap_or_else(|e| panic!("{e}"));
+        let imports = prx_imports(&elf).unwrap_or_else(|e| panic!("image {id}: {e}"));
+        let mut got: BTreeMap<&str, usize> = BTreeMap::new();
+        for i in &imports {
+            *got.entry(i.library.as_str()).or_default() += 1;
+        }
+        assert_eq!(got.len(), *libraries, "image {id}: libraries");
+        assert_eq!(imports.len(), *functions, "image {id}: function imports");
+        let got: Vec<(&str, usize)> = got.into_iter().collect();
+        assert_eq!(&got, want, "image {id}: (library, functions)");
     }
 }
 
