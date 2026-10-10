@@ -7,6 +7,7 @@
 //! exemap ghidra-pe <pe> --out <pe>
 //! exemap starts <image> --out <list>
 //! exemap derive <image_id> --from <container> --out <image>
+//! exemap imports <image_id> --from <container> --exports <dir>
 //! exemap rtti <image> --out <tsv>
 //! exemap luareg <image> --out <tsv>
 //! exemap corpus-derive <corpus_id> <wad> --from <container> --work <dir> [--wine <wine64>]
@@ -18,6 +19,15 @@
 //! exemap translate <image> <address> --to <image> --matches <dir>
 //! exemap coverage --matches <dir> --out <tsv> --contradictions <tsv>
 //! ```
+//!
+//! `imports` rebuilds an images.tsv image whose derivation chain has one `xex:` step and writes
+//! `<dir>/<image_id>.imports.tsv`: header `address\tkind\tlibrary\tordinal`, one row per record of
+//! the XEX's import libraries optional header (`0x000103FF`), in header order: the record's virtual
+//! address (`0x%08x`), `function` (a type-1 stub) or `variable` (a type-0 slot), the library name and
+//! the ordinal (decimal). Every record's word in the image must be `type << 24 | library_index << 16
+//! | ordinal` with type 0 or 1 and the library's own header index, and every function stub must end
+//! `mtctr r11; bctr` (`mercs2_exemap::xbox::import_records`); an image whose chain has no `xex:`
+//! step (every PC and PS3 image) is an error. FnMnemonicSig reads the file as its imports sidecar.
 //!
 //! Exit status: 0 on success; 1 on an unknown build, an unexpected difference, or an input the
 //! command cannot handle; 2 when a file cannot be read or written.
@@ -77,6 +87,17 @@ enum Command {
         from: PathBuf,
         #[arg(long)]
         out: PathBuf,
+    },
+    /// Write <exports>/<image_id>.imports.tsv: one row per XEX import record (address, function or
+    /// variable, library, ordinal) of an images.tsv image whose chain unpacks a XEX.
+    Imports {
+        image_id: String,
+        /// The first file of the image's chain: a disc image or XEX.
+        #[arg(long)]
+        from: PathBuf,
+        /// The exports directory the file is written to.
+        #[arg(long)]
+        exports: PathBuf,
     },
     /// Write the vtables recovered from the image's C++ type information (MSVC or Itanium), one
     /// row per slot.
@@ -291,6 +312,41 @@ fn run(cli: Cli) -> Result<(), ExitCode> {
             write(&out, &bytes)?;
             println!("image      {} ({} bytes) -> {}", image.id, bytes.len(), out.display());
             println!("sha256     {}", image.sha256);
+        }
+        Command::Imports { image_id, from, exports } => {
+            use mercs2_exemap::xbox::{import_records, imports_tsv, ImportKind};
+            let images = mercs2_exemap::images::Images::embedded(&catalogue).map_err(|e| {
+                eprintln!("error: the embedded images table is invalid: {e}");
+                ExitCode::from(2)
+            })?;
+            let image = images.image(&image_id).ok_or_else(|| {
+                eprintln!("error: images.tsv has no image {image_id}");
+                ExitCode::from(1)
+            })?;
+            let mut file = std::fs::File::open(&from).map_err(|e| {
+                eprintln!("error: cannot read {}: {e}", from.display());
+                ExitCode::from(2)
+            })?;
+            let fail = |e: mercs2_exemap::Error| {
+                eprintln!("error: {e}");
+                ExitCode::from(1)
+            };
+            let (bytes, xex) = mercs2_exemap::images::derive_with_xex(image, &mut file).map_err(fail)?;
+            let records = import_records(&xex, &bytes).map_err(|e| fail(mercs2_exemap::Error::new(format!("image {image_id}: {e}"))))?;
+            let out = exports.join(format!("{image_id}.imports.tsv"));
+            write(&out, imports_tsv(&records).as_bytes())?;
+            let mut per_lib: std::collections::BTreeMap<&str, (usize, usize)> = std::collections::BTreeMap::new();
+            for r in &records {
+                let e = per_lib.entry(r.library.as_str()).or_default();
+                match r.kind {
+                    ImportKind::Function => e.0 += 1,
+                    ImportKind::Variable => e.1 += 1,
+                }
+            }
+            for (lib, (f, v)) in &per_lib {
+                println!("library    {lib}: {} records ({f} function, {v} variable)", f + v);
+            }
+            println!("imports    {} records -> {}", records.len(), out.display());
         }
         Command::Rtti { image, out } => {
             let bytes = read(&image)?;
