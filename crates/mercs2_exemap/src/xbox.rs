@@ -33,6 +33,14 @@
 //! bctr`). [`import_records`] reads every record against the image and fails on a word whose type
 //! is neither, whose library index is not its library's, or a function stub that does not end
 //! `mtctr r11; bctr`.
+//!
+//! [`imports_tsv`] names every record by its library and ordinal from `data/xbox_exports.tsv`
+//! ([`XboxExports`]), Xenia's export tables converted by `tools/import_names.py`. A record whose
+//! library and ordinal the table does not list is an error naming both; so is a function record
+//! whose export the table lists as a variable. A variable record may name either kind: a function
+//! import has a variable record (the slot) besides its stub.
+
+use std::collections::BTreeMap;
 
 use aes::cipher::generic_array::GenericArray;
 use aes::cipher::{BlockDecrypt, KeyInit};
@@ -366,7 +374,74 @@ pub struct ImportRecord {
 }
 
 /// The header of an `<id>.imports.tsv` export.
-pub const IMPORTS_HEADER: &str = "address\tkind\tlibrary\tordinal";
+pub const IMPORTS_HEADER: &str = "address\tkind\tlibrary\tordinal\tname";
+
+/// The header of `data/xbox_exports.tsv`, after its `#` provenance lines.
+pub const XBOX_EXPORTS_HEADER: &str = "library\tordinal\tname\tkind";
+
+/// One export of an Xbox 360 system library, as `data/xbox_exports.tsv` lists it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct XboxExport {
+    pub name: String,
+    /// Xenia's kind: `kFunction` or `kVariable`.
+    pub kind: ImportKind,
+}
+
+/// The exports of the Xbox 360 system libraries by (library, ordinal): `data/xbox_exports.tsv`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct XboxExports {
+    exports: BTreeMap<(String, u16), XboxExport>,
+}
+
+impl XboxExports {
+    /// Parse an exports table: `#` provenance lines, [`XBOX_EXPORTS_HEADER`], then one row per
+    /// export: the library, the ordinal (decimal, 0..=65535, no sign or leading zero), the name (no
+    /// whitespace) and `function` or `variable`. A repeated (library, ordinal) is an error.
+    pub fn parse(text: &str) -> Result<XboxExports, Error> {
+        const T: &str = "xbox_exports.tsv";
+        let mut exports = BTreeMap::new();
+        for (n, f) in crate::commented_table_rows(T, XBOX_EXPORTS_HEADER, text)? {
+            let ordinal: u16 = f[1]
+                .parse()
+                .ok()
+                .filter(|o: &u16| o.to_string() == f[1])
+                .ok_or_else(|| Error::new(format!("{T} line {n}: ordinal {:?} is not a decimal 0..=65535", f[1])))?;
+            if f[2].chars().any(char::is_whitespace) {
+                return Err(Error::new(format!("{T} line {n}: name {:?} holds whitespace", f[2])));
+            }
+            let kind = match f[3] {
+                "function" => ImportKind::Function,
+                "variable" => ImportKind::Variable,
+                other => return Err(Error::new(format!("{T} line {n}: kind {other:?} is not function or variable"))),
+            };
+            let export = XboxExport { name: f[2].to_string(), kind };
+            if exports.insert((f[0].to_string(), ordinal), export).is_some() {
+                return Err(Error::new(format!("{T} line {n}: {} ordinal {ordinal} is listed twice", f[0])));
+            }
+        }
+        Ok(XboxExports { exports })
+    }
+
+    /// The compiled-in `data/xbox_exports.tsv`.
+    pub fn embedded() -> Result<XboxExports, Error> {
+        XboxExports::parse(include_str!("../data/xbox_exports.tsv"))
+    }
+
+    /// The export `library` lists at `ordinal`.
+    pub fn get(&self, library: &str, ordinal: u16) -> Option<&XboxExport> {
+        self.exports.get(&(library.to_string(), ordinal))
+    }
+
+    /// The number of exports listed.
+    pub fn len(&self) -> usize {
+        self.exports.len()
+    }
+
+    /// Whether no export is listed.
+    pub fn is_empty(&self) -> bool {
+        self.exports.is_empty()
+    }
+}
 
 /// Every import record of `xex`, read in `image` (the PE the XEX unpacks to, with section headers
 /// that map it as [`ghidra_pe`] writes them), in header order. Fails on a record address outside the image, a repeated address, a word whose
@@ -427,13 +502,34 @@ pub fn import_records(xex: &[u8], image: &[u8]) -> Result<Vec<ImportRecord>, Err
     Ok(out)
 }
 
-/// The `<id>.imports.tsv` text of `records`: [`IMPORTS_HEADER`], then one row per record.
-pub fn imports_tsv(records: &[ImportRecord]) -> String {
+/// The `<id>.imports.tsv` text of `records`: [`IMPORTS_HEADER`], then one row per record in the
+/// order given, its name the export `exports` lists for its library and ordinal. Fails listing
+/// every record whose library and ordinal `exports` does not list, and on a function record whose
+/// export is a variable.
+pub fn imports_tsv(records: &[ImportRecord], exports: &XboxExports) -> Result<String, Error> {
     let mut s = format!("{IMPORTS_HEADER}\n");
+    let mut missing = Vec::new();
     for r in records {
-        s.push_str(&format!("0x{:08x}\t{}\t{}\t{}\n", r.address, r.kind.as_str(), r.library, r.ordinal));
+        let Some(e) = exports.get(&r.library, r.ordinal) else {
+            missing.push(format!("{} ordinal {} (record 0x{:08x})", r.library, r.ordinal, r.address));
+            continue;
+        };
+        if r.kind == ImportKind::Function && e.kind == ImportKind::Variable {
+            return Err(Error::new(format!(
+                "the function record 0x{:08x} imports {} ordinal {}, which xbox_exports.tsv lists as the variable {}",
+                r.address, r.library, r.ordinal, e.name
+            )));
+        }
+        s.push_str(&format!("0x{:08x}\t{}\t{}\t{}\t{}\n", r.address, r.kind.as_str(), r.library, r.ordinal, e.name));
     }
-    s
+    if !missing.is_empty() {
+        return Err(Error::new(format!(
+            "xbox_exports.tsv names no export for {} import records: {}",
+            missing.len(),
+            missing.join(", ")
+        )));
+    }
+    Ok(s)
 }
 
 /// Rewrite an Xbox 360 RVA-laid-out PE image so every section's `PointerToRawData` is its
@@ -587,9 +683,76 @@ mod tests {
             ]
         );
         assert_eq!(
-            imports_tsv(&r[..2]),
-            "address\tkind\tlibrary\tordinal\n0x82000400\tvariable\txam.xex\t5\n0x82000500\tfunction\txam.xex\t5\n"
+            imports_tsv(&r[..2], &exports()).unwrap(),
+            "address\tkind\tlibrary\tordinal\tname\n0x82000400\tvariable\txam.xex\t5\tNetDll_shutdown\n0x82000500\tfunction\txam.xex\t5\tNetDll_shutdown\n"
         );
+    }
+
+    const EXPORTS: &str = "# provenance\n# more provenance\nlibrary\tordinal\tname\tkind\n\
+        xam.xex\t5\tNetDll_shutdown\tfunction\n\
+        xboxkrnl.exe\t7\tExAcquireReadWriteLockExclusive\tfunction\n\
+        xboxkrnl.exe\t9\tKeDebugMonitorData\tvariable\n";
+
+    fn exports() -> XboxExports {
+        XboxExports::parse(EXPORTS).unwrap()
+    }
+
+    #[test]
+    fn the_exports_table_reads_after_its_comment_lines() {
+        let x = exports();
+        assert_eq!(x.len(), 3);
+        assert_eq!(x.get("xboxkrnl.exe", 9), Some(&XboxExport { name: "KeDebugMonitorData".into(), kind: ImportKind::Variable }));
+        assert_eq!(x.get("xam.xex", 7), None);
+    }
+
+    #[test]
+    fn a_malformed_exports_table_is_an_error() {
+        let header = "library\tordinal\tname\tkind\n";
+        for (rows, want) in [
+            ("xam.xex\t5\ta\tfunction\nxam.xex\t5\tb\tfunction\n", "xam.xex ordinal 5 is listed twice"),
+            ("xam.xex\t05\ta\tfunction\n", "ordinal \"05\""),
+            ("xam.xex\t65536\ta\tfunction\n", "ordinal \"65536\""),
+            ("xam.xex\t5\ta\tthunk\n", "kind \"thunk\""),
+            ("xam.xex\t5\ta b\tfunction\n", "holds whitespace"),
+            ("xam.xex\t5\t\tfunction\n", "column 3 (name) is empty"),
+        ] {
+            let e = XboxExports::parse(&format!("# c\n{header}{rows}")).unwrap_err().to_string();
+            assert!(e.contains(want), "{rows:?}: {e}");
+        }
+        let e = XboxExports::parse("# c\nlibrary\tordinal\tname\n").unwrap_err().to_string();
+        assert!(e.contains("not the header"), "{e}");
+    }
+
+    #[test]
+    fn the_embedded_exports_table_is_xenias() {
+        let x = XboxExports::embedded().unwrap();
+        assert_eq!(x.len(), 2912);
+        assert_eq!(x.get("xboxkrnl.exe", 1).unwrap().name, "DbgBreakPoint");
+        assert_eq!(x.get("xam.xex", 1).unwrap().name, "NetDll_WSAStartup");
+        let v = x.get("xboxkrnl.exe", 0x157).unwrap();
+        assert_eq!(v.kind, ImportKind::Variable, "{v:?}");
+    }
+
+    #[test]
+    fn a_record_the_exports_table_does_not_name_is_an_error_naming_library_and_ordinal() {
+        let r = import_records(&import_xex(LIBS, 0), &good_image()).unwrap();
+        let only_xam = XboxExports::parse("library\tordinal\tname\tkind\nxam.xex\t5\tNetDll_shutdown\tfunction\n").unwrap();
+        let e = imports_tsv(&r, &only_xam).unwrap_err().to_string();
+        assert!(
+            e.contains("2 import records")
+                && e.contains("xboxkrnl.exe ordinal 7 (record 0x82000410)")
+                && e.contains("xboxkrnl.exe ordinal 7 (record 0x82000510)"),
+            "{e}"
+        );
+    }
+
+    #[test]
+    fn a_function_record_whose_export_is_a_variable_is_an_error() {
+        let r = vec![ImportRecord { address: 0x8200_0500, kind: ImportKind::Function, library: "xboxkrnl.exe".into(), ordinal: 9 }];
+        let e = imports_tsv(&r, &exports()).unwrap_err().to_string();
+        assert!(e.contains("0x82000500") && e.contains("variable KeDebugMonitorData"), "{e}");
+        let v = vec![ImportRecord { kind: ImportKind::Variable, ..r[0].clone() }];
+        assert!(imports_tsv(&v, &exports()).unwrap().ends_with("\tKeDebugMonitorData\n"));
     }
 
     #[test]
