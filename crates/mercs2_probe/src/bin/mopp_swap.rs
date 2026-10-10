@@ -9,11 +9,13 @@
 //! With none of those flags it runs ALL THREE.
 //!
 //! Source selection:
-//!   (default)            block 767, first single-subpart MOPP (clean [0..N-1] keys)
-//!   --block <N>          a different vz.wad block (826 = terrain)
-//!   --mopp <IDX>         a specific hkpMoppCode index within the chosen container
-//!   --body <FILE>        a raw PHY2 body dumped to disk (skips vz.wad)
+//!   --block <N>          the vz.wad block to read (u16; default 767 when absent; 826 = terrain)
+//!   --mopp <IDX>         a specific hkpMoppCode index within the chosen body (usize; when absent, the
+//!                        first single-subpart MOPP with clean [0..N-1] keys — an error if the body has none)
+//!   --body <FILE>        a raw PHY2 body dumped to disk (skips vz.wad; exclusive with --block)
 //!   --out <DIR>          write the patched bodies here (required)
+//! A flag given without a value, or with a value that does not parse, is an error naming the flag and
+//! the value (exit 2); defaults apply only when the flag is absent.
 //!
 //! Usage:
 //!   cargo run -p mercs2_probe --bin mopp_swap -- --out out/mopp
@@ -42,6 +44,25 @@ fn arg_val(args: &[String], name: &str) -> Option<String> {
 }
 fn has_flag(args: &[String], name: &str) -> bool {
     args.iter().any(|a| a == name)
+}
+
+/// Parse the value of `name`: `Ok(None)` when the flag is absent, an error naming the flag when it has
+/// no value or its value does not parse as `T`.
+fn parse_flag<T: std::str::FromStr>(args: &[String], name: &str, what: &str) -> Result<Option<T>, String>
+where
+    T::Err: std::fmt::Display,
+{
+    if !has_flag(args, name) {
+        return Ok(None);
+    }
+    let v = arg_val(args, name).ok_or_else(|| format!("{name} requires a value ({what})"))?;
+    v.parse::<T>().map(Some).map_err(|e| format!("{name} {v:?} is not a valid {what}: {e}"))
+}
+
+/// Report a bad command-line flag and exit with the usage status.
+fn flag_error(msg: String) -> ! {
+    eprintln!("mopp_swap: {msg}");
+    std::process::exit(2);
 }
 
 /// Extract a PHY2 body (that carries at least one hkpMoppCode) from a vz.wad block. Returns
@@ -172,22 +193,38 @@ fn main() {
         eprintln!("mopp_swap: usage: mopp_swap --out <DIR> [--block <N> | --body <FILE>] [--mopp <IDX>] [--identity] [--return-all] [--empty] [--spatial]");
         std::process::exit(2);
     };
+    // Every flag value is validated before any file is touched.
+    let block_arg: Option<u16> =
+        parse_flag(&args, "--block", "vz.wad block index (u16)").unwrap_or_else(|e| flag_error(e));
+    let mopp_arg: Option<usize> =
+        parse_flag(&args, "--mopp", "hkpMoppCode index (usize)").unwrap_or_else(|e| flag_error(e));
+    if has_flag(&args, "--body") && arg_val(&args, "--body").is_none() {
+        flag_error("--body requires a value (PHY2 body file)".into());
+    }
+    let body_arg = arg_val(&args, "--body");
+    if body_arg.is_some() && block_arg.is_some() {
+        flag_error("--body and --block are exclusive (the source is either a dumped body or a vz.wad block)".into());
+    }
     if let Err(e) = std::fs::create_dir_all(&out_dir) {
         eprintln!("create {}: {e}", out_dir.display());
         std::process::exit(1);
     }
 
     // Source body.
-    let (body, tag): (Vec<u8>, String) = if let Some(bf) = arg_val(&args, "--body") {
+    let (body, tag): (Vec<u8>, String) = if let Some(bf) = body_arg {
+        let Some(stem) = Path::new(&bf).file_stem().and_then(|s| s.to_str()) else {
+            flag_error(format!("--body {bf:?} has no UTF-8 file stem to name the outputs after"));
+        };
+        let stem = stem.to_string();
         match std::fs::read(&bf) {
-            Ok(b) => (b, Path::new(&bf).file_stem().and_then(|s| s.to_str()).unwrap_or("body").to_string()),
+            Ok(b) => (b, stem),
             Err(e) => {
                 eprintln!("read {bf}: {e}");
                 std::process::exit(1);
             }
         }
     } else {
-        let block: u16 = arg_val(&args, "--block").and_then(|s| s.parse().ok()).unwrap_or(767);
+        let block: u16 = block_arg.unwrap_or(767);
         match load_phy2_from_wad(block) {
             Ok((b, hash)) => (b, format!("blk{block}_0x{hash:08X}")),
             Err(e) => {
@@ -202,10 +239,21 @@ fn main() {
         eprintln!("PHY2 body carries no hkpMoppCode");
         std::process::exit(1);
     }
-    let idx: usize = arg_val(&args, "--mopp")
-        .and_then(|s| s.parse().ok())
-        .or_else(|| first_contiguous_mopp(&body))
-        .unwrap_or(0);
+    let idx: usize = match mopp_arg {
+        Some(i) => {
+            if i >= n_mopps {
+                flag_error(format!("--mopp {i} is out of range (the PHY2 body carries {n_mopps} MOPP(s))"));
+            }
+            i
+        }
+        None => first_contiguous_mopp(&body).unwrap_or_else(|| {
+            eprintln!(
+                "mopp_swap: none of the body's {n_mopps} MOPP(s) has clean single-subpart [0..N-1] keys; \
+                 pass --mopp <IDX> to choose one"
+            );
+            std::process::exit(1);
+        }),
+    };
 
     let src_sha = sha256_hex(&body);
     let src_dec = decode_phy2_mopp_keys(&body, idx).unwrap_or_else(|e| {
