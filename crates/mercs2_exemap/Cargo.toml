@@ -22,6 +22,8 @@ clap = { version = "4", features = ["derive"] }
 # Builds are identified by sha256; builds.tsv also carries md5, checked on every identification.
 sha2 = "0.10"
 md-5 = "0.10"
+# A PS3 FNID is a SHA-1 prefix of its name; ps3_fnid_names.tsv is checked against it on load.
+sha1 = "0.10"
 # The one PE32 parser in the workspace; this crate lays its mapped-image view over it.
 securom_unwrap = { path = "../securom_unwrap" }
 # The FnMnemonicSig exports the matcher reads are JSON.
