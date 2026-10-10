@@ -11,9 +11,10 @@
 //! intermediate sha256 checked; every `code_image` claim is checked byte for byte; and every
 //! analysed image yields function starts and vtables (on PS3, every vtable slot an `.opd` function).
 //! Every Xbox 360 image's XEX import records read and validate against its image, with the record
-//! counts per library and kind that the three XEX import headers list. The PS3 v1.00 and v1.03
-//! images' PRX function imports read and validate, with the per-library counts their import tables
-//! list (17 libraries and 227 functions, 18 and 235), and no variable imports.
+//! counts per library and kind that the three XEX import headers list, each named by
+//! `data/xbox_exports.tsv`. The PS3 v1.00 and v1.03 images' PRX function imports read and validate,
+//! with the per-library counts their import tables list (17 libraries and 227 functions, 18 and
+//! 235), no variable imports, and every FNID named by a name that hashes to it.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -104,18 +105,34 @@ fn every_console_image_rebuilds_from_its_container_and_shares_the_code_it_claims
     }
 }
 
-/// Every Xbox 360 image's import records, per library: (functions, variables).
+/// Every Xbox 360 image's import records, per library: (functions, variables); every record named
+/// by xbox_exports.tsv in the sidecar text, and the exports Xenia lists as variables among them.
 #[test]
 fn every_xbox_image_lists_its_xex_import_records() {
     use mercs2_exemap::images::derive_with_xex;
-    use mercs2_exemap::xbox::{import_records, ImportKind};
+    use mercs2_exemap::xbox::{import_records, imports_tsv, ImportKind, XboxExports};
     let catalogue = Catalogue::embedded().unwrap_or_else(|e| panic!("embedded catalogue: {e}"));
     let images = Images::embedded(&catalogue).unwrap_or_else(|e| panic!("embedded images: {e}"));
+    let exports = XboxExports::embedded().unwrap_or_else(|e| panic!("embedded xbox_exports.tsv: {e}"));
     let containers = containers();
     let expected: BTreeMap<&str, Vec<(&str, usize, usize)>> = BTreeMap::from([
         ("x360-preview-final", vec![("xam.xex", 109, 109), ("xboxkrnl.exe", 151, 162)]),
         ("x360-preview-profile", vec![("xam.xex", 110, 110), ("xbdm.xex", 1, 1), ("xboxkrnl.exe", 151, 162)]),
         ("x360-retail", vec![("xam.xex", 109, 109), ("xboxkrnl.exe", 151, 162)]),
+    ]);
+    // The same eleven xboxkrnl.exe variables in all three images.
+    let want_variables: BTreeSet<&str> = BTreeSet::from([
+        "ExLoadedCommandLine",
+        "ExThreadObjectType",
+        "KeCertMonitorData",
+        "KeDebugMonitorData",
+        "KeTimeStampBundle",
+        "VdGlobalDevice",
+        "VdGpuClockInMHz",
+        "VdHSIOCalibrationLock",
+        "XboxHardwareInfo",
+        "XboxKrnlVersion",
+        "XexExecutableModuleHandle",
     ]);
     let xbox: Vec<&str> = images.images.iter().filter(|m| m.platform == Platform::X360).map(|m| m.id.as_str()).collect();
     assert_eq!(xbox, expected.keys().copied().collect::<Vec<_>>(), "the Xbox 360 images of images.tsv");
@@ -136,17 +153,33 @@ fn every_xbox_image_lists_its_xex_import_records() {
         }
         let got: Vec<(&str, usize, usize)> = got.into_iter().map(|(l, (f, v))| (l, f, v)).collect();
         assert_eq!(&got, want, "image {id}: (library, functions, variables)");
+        let tsv = imports_tsv(&records, &exports).unwrap_or_else(|e| panic!("image {id}: {e}"));
+        let rows: Vec<Vec<&str>> = tsv.lines().skip(1).map(|l| l.split('\t').collect()).collect();
+        assert_eq!(rows.len(), records.len(), "image {id}: sidecar rows");
+        for (row, r) in rows.iter().zip(&records) {
+            let e = exports.get(&r.library, r.ordinal).unwrap();
+            assert_eq!(row[4], e.name, "image {id}: record 0x{:08x}", r.address);
+        }
+        let variables: BTreeSet<&str> = records
+            .iter()
+            .map(|r| exports.get(&r.library, r.ordinal).unwrap())
+            .filter(|e| e.kind == ImportKind::Variable)
+            .map(|e| e.name.as_str())
+            .collect();
+        assert_eq!(variables, want_variables, "image {id}: imports of exports Xenia lists as variables");
     }
 }
 
 /// The PS3 v1.00 and v1.03 images' PRX function imports, per library, as their import tables list
-/// them; `prx_imports` fails on a library that imports a variable.
+/// them; `prx_imports` fails on a library that imports a variable. Every import is named in the
+/// sidecar text by a name whose hash is its FNID.
 #[test]
 fn the_ps3_v100_and_v103_images_list_their_prx_imports() {
     use mercs2_exemap::images::derive_self_elf;
-    use mercs2_exemap::prx::prx_imports;
+    use mercs2_exemap::prx::{fnid, prx_imports, prx_imports_tsv, FnidNames};
     let catalogue = Catalogue::embedded().unwrap_or_else(|e| panic!("embedded catalogue: {e}"));
     let images = Images::embedded(&catalogue).unwrap_or_else(|e| panic!("embedded images: {e}"));
+    let names = FnidNames::embedded().unwrap_or_else(|e| panic!("embedded FNID names: {e}"));
     let containers = containers();
     let common: &[(&str, usize)] = &[
         ("cellAdec", 8),
@@ -193,6 +226,14 @@ fn the_ps3_v100_and_v103_images_list_their_prx_imports() {
         assert_eq!(imports.len(), *functions, "image {id}: function imports");
         let got: Vec<(&str, usize)> = got.into_iter().collect();
         assert_eq!(&got, want, "image {id}: (library, functions)");
+        let tsv = prx_imports_tsv(&imports, &names).unwrap_or_else(|e| panic!("image {id}: {e}"));
+        let rows: Vec<Vec<&str>> = tsv.lines().skip(1).map(|l| l.split('\t').collect()).collect();
+        assert_eq!(rows.len(), *functions, "image {id}: sidecar rows");
+        for (row, i) in rows.iter().zip(&imports) {
+            assert_eq!(fnid(row[4]), i.fnid, "image {id}: {} stub 0x{:08x} is named {}", i.library, i.stub, row[4]);
+        }
+        let load = rows.iter().find(|r| r[2] == "cellSysmodule" && r[3] == "32267a31").unwrap_or_else(|| panic!("image {id}: no cellSysmodule 32267a31"));
+        assert_eq!(load[4], "cellSysmoduleLoadModule", "image {id}");
     }
 }
 
