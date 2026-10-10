@@ -3,9 +3,9 @@ dump-v10-pmcbb-image	.text	va	0x005e9de0	0x005e9de5	hot-patch	1	5	75f4231283faf9
 dump-v10-pmcbb-image	.text	va	0x005e9f40	0x005e9f45	hot-patch	1	5	798ef8bc91d95de9b46657de4845d9ea81107f8014e80f50dd9680ab0267dfc7	558bec83e4 -> e97b7a6a6f (jmp 0x6fc919c0)
 dump-v10-pmcbb-image	.text	va	0x006d5640	0x006d5645	hot-patch	1	5	788745eeca45939c21be3adde61af4f8509b66ea0b62e8390565349ec3604b60	33c0c3cccc -> e97bca5f6f (jmp 0x6fcd20c0)
 dump-v10-pmcbb-image	.rdata	va	0x00b05000	0x00b05698	iat	232	1147	2798e4903613b1ce8dda34c4d75a07ea6c96db2bceb26feee950c94eeb4a05e7	inside DataDirectory[IAT] 0x705000+0x69c as v11-official-unwrapped and v10-securom-unwrap declare it; the U reference declares no IAT directory
-dump-v10-pmcbb-image	.rdata	va	0x00b68378	0x00bf5ff4	runtime	3	131	ccc951cdc25e0a6b202b0494c036636fd9285e3f05785903c61122a3e0d1bb28	
-dump-v10-pmcbb-image	.data	va	0x00bf6218	0x019f9299	runtime	102156	322507	55e44b4cc4481c3576ba72bb639ee9e63c869856627443d8de4d8c7d36adf2c4	
-dump-v10-pmcbb-image	.securom	va	0x023f13df	0x03700479	runtime	473	2609	6ba556c5fac35ea9177fdc079d4eae0dad0e9229632736356775654a7d7fa794	
+dump-v10-pmcbb-image	.rdata	va	0x00b68378	0x00bf5ff4	runtime	3	131	ccc951cdc25e0a6b202b0494c036636fd9285e3f05785903c61122a3e0d1bb28	-
+dump-v10-pmcbb-image	.data	va	0x00bf6218	0x019f9299	runtime	102156	322507	55e44b4cc4481c3576ba72bb639ee9e63c869856627443d8de4d8c7d36adf2c4	-
+dump-v10-pmcbb-image	.securom	va	0x023f13df	0x03700479	runtime	473	2609	6ba556c5fac35ea9177fdc079d4eae0dad0e9229632736356775654a7d7fa794	-
 dump-v10-pmcbb-image	(slack)	file	0x03301330	0x03302000	file-padding	1	3280	8e889f17316d7ffd28237811a485633d0b64c7e417977186721a07afe1a5cce9	zero bytes past the last section raw data
 dump-v10-pmcbb-unpacked	(headers)	va	0x004004a8	0x004004aa	header	1	2	085edad400785fca7e7e90b1fac4beb776fc2beee5aa24352d5f39b5d57efcad	SectionHeader[.securom].SizeOfRawData 0x13175f8 -> 0x1318000
 dump-v10-pmcbb-unpacked	(headers)	va	0x004004d0	0x004004d2	header	1	2	0298d122906dcfc10892cb53a73992fc5b9f493ea4c9badb27b791b4127a7fe7	SectionHeader[reloaded].SizeOfRawData 0x330 -> 0x1000
@@ -13,19 +13,19 @@ dump-v10-pmcbb-unpacked	.text	va	0x005e9de0	0x005e9de5	hot-patch	1	5	75f4231283f
 dump-v10-pmcbb-unpacked	.text	va	0x005e9f40	0x005e9f45	hot-patch	1	5	798ef8bc91d95de9b46657de4845d9ea81107f8014e80f50dd9680ab0267dfc7	558bec83e4 -> e97b7a6a6f (jmp 0x6fc919c0)
 dump-v10-pmcbb-unpacked	.text	va	0x006d5640	0x006d5645	hot-patch	1	5	788745eeca45939c21be3adde61af4f8509b66ea0b62e8390565349ec3604b60	33c0c3cccc -> e97bca5f6f (jmp 0x6fcd20c0)
 dump-v10-pmcbb-unpacked	.rdata	va	0x00b05000	0x00b05698	iat	232	1147	2798e4903613b1ce8dda34c4d75a07ea6c96db2bceb26feee950c94eeb4a05e7	inside DataDirectory[IAT] 0x705000+0x69c as v11-official-unwrapped and v10-securom-unwrap declare it; the U reference declares no IAT directory
-dump-v10-pmcbb-unpacked	.rdata	va	0x00b68378	0x00bf5ff4	runtime	3	131	ccc951cdc25e0a6b202b0494c036636fd9285e3f05785903c61122a3e0d1bb28	
-dump-v10-pmcbb-unpacked	.data	va	0x00bf6218	0x019f9299	runtime	102156	322507	55e44b4cc4481c3576ba72bb639ee9e63c869856627443d8de4d8c7d36adf2c4	
-dump-v10-pmcbb-unpacked	.securom	va	0x023f13df	0x03700479	runtime	473	2609	6ba556c5fac35ea9177fdc079d4eae0dad0e9229632736356775654a7d7fa794	
+dump-v10-pmcbb-unpacked	.rdata	va	0x00b68378	0x00bf5ff4	runtime	3	131	ccc951cdc25e0a6b202b0494c036636fd9285e3f05785903c61122a3e0d1bb28	-
+dump-v10-pmcbb-unpacked	.data	va	0x00bf6218	0x019f9299	runtime	102156	322507	55e44b4cc4481c3576ba72bb639ee9e63c869856627443d8de4d8c7d36adf2c4	-
+dump-v10-pmcbb-unpacked	.securom	va	0x023f13df	0x03700479	runtime	473	2609	6ba556c5fac35ea9177fdc079d4eae0dad0e9229632736356775654a7d7fa794	-
 dump-v11-securom-module	.rdata	va	0x00b05000	0x00b05698	iat	207	1175	011a747d57a1f87223195a3855ef265456dbd5b3b5439b719d9e2d7768ce2ff1	inside the reference DataDirectory[IAT] 0x705000+0x69c
-dump-v11-securom-module	.data	va	0x00bf5218	0x019f8299	runtime	173918	540800	5a02ff02c66e38e28bd2baf2d3d73c942bd03b645d3f8f0e2481806c55b67364	
-dump-v11-securom-module	Sdata	va	0x0216a684	0x022d9b55	runtime	4	7	4f7a7edc930a963597ffac026096e7eeb164d1a0fcc1424f2120e745f6dc452f	
-dump-v11-securom-module	.securom	va	0x0246d4c8	0x03770ad6	runtime	782	3823	7b14705501c75c52894aa2755f814c7ca59b44851c1eafda3577d909ff1da16c	
+dump-v11-securom-module	.data	va	0x00bf5218	0x019f8299	runtime	173918	540800	5a02ff02c66e38e28bd2baf2d3d73c942bd03b645d3f8f0e2481806c55b67364	-
+dump-v11-securom-module	Sdata	va	0x0216a684	0x022d9b55	runtime	4	7	4f7a7edc930a963597ffac026096e7eeb164d1a0fcc1424f2120e745f6dc452f	-
+dump-v11-securom-module	.securom	va	0x0246d4c8	0x03770ad6	runtime	782	3823	7b14705501c75c52894aa2755f814c7ca59b44851c1eafda3577d909ff1da16c	-
 dump-v11-securom-module	(slack)	file	0x03371f10	0x03372000	file-padding	1	240	2dfba633817046c7f559ed4b93076048435f7e1a90f14eb8035c04b9ebae2537	zero bytes past the last section raw data
 dump-v11-securom-unpacked	(headers)	va	0x004004a8	0x004004aa	header	1	2	548431144999ce11132441250358e8e03153d5cd91cb82cc27a8dbdcf8e1e80d	SectionHeader[.securom].SizeOfRawData 0x130df10 -> 0x130e000
 dump-v11-securom-unpacked	.rdata	va	0x00b05000	0x00b05698	iat	207	1175	011a747d57a1f87223195a3855ef265456dbd5b3b5439b719d9e2d7768ce2ff1	inside the reference DataDirectory[IAT] 0x705000+0x69c
-dump-v11-securom-unpacked	.data	va	0x00bf5218	0x019f8299	runtime	173918	540800	5a02ff02c66e38e28bd2baf2d3d73c942bd03b645d3f8f0e2481806c55b67364	
-dump-v11-securom-unpacked	Sdata	va	0x0216a684	0x022d9b55	runtime	4	7	4f7a7edc930a963597ffac026096e7eeb164d1a0fcc1424f2120e745f6dc452f	
-dump-v11-securom-unpacked	.securom	va	0x0246d4c8	0x03770ad6	runtime	782	3823	7b14705501c75c52894aa2755f814c7ca59b44851c1eafda3577d909ff1da16c	
+dump-v11-securom-unpacked	.data	va	0x00bf5218	0x019f8299	runtime	173918	540800	5a02ff02c66e38e28bd2baf2d3d73c942bd03b645d3f8f0e2481806c55b67364	-
+dump-v11-securom-unpacked	Sdata	va	0x0216a684	0x022d9b55	runtime	4	7	4f7a7edc930a963597ffac026096e7eeb164d1a0fcc1424f2120e745f6dc452f	-
+dump-v11-securom-unpacked	.securom	va	0x0246d4c8	0x03770ad6	runtime	782	3823	7b14705501c75c52894aa2755f814c7ca59b44851c1eafda3577d909ff1da16c	-
 history-v10-drmfree-v1	(headers)	va	0x00400210	0x00400213	header	1	3	e34b52cb42dec29ac86f94f6bab8461a61136460b7deb2717731e3f91b91853a	OptionalHeader.AddressOfEntryPoint 0x704c2e -> 0x5ee71c
 history-v10-drmfree-v1	(headers)	va	0x00400240	0x00400243	header	1	3	709e80c88487a2411e1ee4dfb9f22a861492d20c4765150c0c794abd70f8147c	OptionalHeader.CheckSum 0xa5438d -> 0x0
 history-v10-drmfree-v1	(headers)	va	0x0040026c	0x0040026e	header	1	2	988434552155878933a9a3afef722818104f370c74b8a46d5b77fc670ba3f79e	DataDirectory[IMPORT].Size 0x330 -> 0x190
@@ -35,9 +35,9 @@ history-v10-drmfree-v1	.text	va	0x005e9de0	0x005e9de5	hot-patch	1	5	75f4231283fa
 history-v10-drmfree-v1	.text	va	0x005e9f40	0x005e9f45	hot-patch	1	5	798ef8bc91d95de9b46657de4845d9ea81107f8014e80f50dd9680ab0267dfc7	558bec83e4 -> e97b7a6a6f (jmp 0x6fc919c0)
 history-v10-drmfree-v1	.text	va	0x006d5640	0x006d5645	hot-patch	1	5	788745eeca45939c21be3adde61af4f8509b66ea0b62e8390565349ec3604b60	33c0c3cccc -> e97bca5f6f (jmp 0x6fcd20c0)
 history-v10-drmfree-v1	.rdata	va	0x00b05000	0x00b05698	iat	232	1147	2798e4903613b1ce8dda34c4d75a07ea6c96db2bceb26feee950c94eeb4a05e7	inside DataDirectory[IAT] 0x705000+0x69c as v11-official-unwrapped and v10-securom-unwrap declare it; the U reference declares no IAT directory
-history-v10-drmfree-v1	.rdata	va	0x00b68378	0x00bf5ff4	runtime	3	131	ccc951cdc25e0a6b202b0494c036636fd9285e3f05785903c61122a3e0d1bb28	
-history-v10-drmfree-v1	.data	va	0x00bf6218	0x019f9299	runtime	102156	322507	55e44b4cc4481c3576ba72bb639ee9e63c869856627443d8de4d8c7d36adf2c4	
-history-v10-drmfree-v1	.securom	va	0x023f13df	0x03700479	runtime	473	2609	6ba556c5fac35ea9177fdc079d4eae0dad0e9229632736356775654a7d7fa794	
+history-v10-drmfree-v1	.rdata	va	0x00b68378	0x00bf5ff4	runtime	3	131	ccc951cdc25e0a6b202b0494c036636fd9285e3f05785903c61122a3e0d1bb28	-
+history-v10-drmfree-v1	.data	va	0x00bf6218	0x019f9299	runtime	102156	322507	55e44b4cc4481c3576ba72bb639ee9e63c869856627443d8de4d8c7d36adf2c4	-
+history-v10-drmfree-v1	.securom	va	0x023f13df	0x03700479	runtime	473	2609	6ba556c5fac35ea9177fdc079d4eae0dad0e9229632736356775654a7d7fa794	-
 history-v10-drmfree-v1	reloaded	va	0x0370117c	0x03701180	reloaded-patch	1	4	df3f619804a92fdb4057192dc43dd748ea778adc52bc498ce80524c014b81119	import descriptor 19 (0x370117c+0x14, the terminator after 19 descriptors): a91dff01 -> 00000000
 history-v10-drmfree-v1	reloaded	va	0x03701188	0x03701190	reloaded-patch	1	8	af5570f5a1810b7af78caf4bc70a660f0df51e42baf91d4de5b2328de0e83dfc	import descriptor 19 (0x370117c+0x14, the terminator after 19 descriptors): 44f0fe01dd13ff01 -> 0000000000000000
 history-v10-drmfree-v1	(slack)	file	0x03301330	0x03302000	file-padding	1	3280	8e889f17316d7ffd28237811a485633d0b64c7e417977186721a07afe1a5cce9	zero bytes past the last section raw data
@@ -65,26 +65,26 @@ v10-securom-unwrap	(headers)	va	0x004002c4	0x004002c6	header	1	2	2d548789a68b095
 v10-securom-unwrap	reloaded	va	0x0370117c	0x03701180	reloaded-patch	1	4	df3f619804a92fdb4057192dc43dd748ea778adc52bc498ce80524c014b81119	import descriptor 19 (0x370117c+0x14, the terminator after 19 descriptors): a91dff01 -> 00000000
 v10-securom-unwrap	reloaded	va	0x03701188	0x03701190	reloaded-patch	1	8	af5570f5a1810b7af78caf4bc70a660f0df51e42baf91d4de5b2328de0e83dfc	import descriptor 19 (0x370117c+0x14, the terminator after 19 descriptors): 44f0fe01dd13ff01 -> 0000000000000000
 v10-unsigned	(headers)	va	0x0040003c	0x00400ff8	header	125	3543	4a6c64fbb2be26fdfecffcd162681a38886f897bb78f2690288b046a5f4cd34d	e_lfanew, DOS stub, COFF header, optional header, section table, after section table
-v10-unsigned	.text	va	0x00401000	0x006dd6c0	lineage	11343	2988615	96ea934b8fd44ce77ad860e1d5db606efae23a0c53a46127149f20f82b86c365	
+v10-unsigned	.text	va	0x00401000	0x006dd6c0	lineage	11343	2988615	96ea934b8fd44ce77ad860e1d5db606efae23a0c53a46127149f20f82b86c365	-
 v10-unsigned	.text	va	0x00b04c13	0x00b04c5a	bypass-stub	9	63	0805dcdc42ca47abdc3d8fe11f8e0c7a108602022f71ab349648cfdd30a75aa6	reference bytes written by v11_to_cracked.bspatch (7a34 holds other bytes here); they push the "pmc_bb.dll" string at 0xb04c23
 v10-unsigned	.rdata	va	0x00b05000	0x00b05698	iat	20	1615	0d9e1a145ec12a1bf61b2de395712f16026089e81e3f065797b0e977e1a0046b	inside DataDirectory[IAT] 0x705000+0x69c as v11-official-unwrapped and v10-securom-unwrap declare it; the U reference declares no IAT directory
-v10-unsigned	.data	va	0x00edba5c	0x00edba92	lineage	12	25	ea659cdc838619b3767c057fdf8e6d99fde2680c5d8517eb06761c0878d40c40	
-v10-unsigned	Stext	va	0x01a49000	0x02083c50	lineage	197611	6221276	f5aedfe573c2d14c439a5480be0f9d579ab7258b9c3e1e50483791689091e11f	
-v10-unsigned	Sitext	va	0x0208402d	0x02088d5d	lineage	163	956	cb3eded5ee69cc9d09ea4b75cf560543f590ecbb9976e3785a6d8daaa57c1b20	
-v10-unsigned	Sdata	va	0x020e5000	0x023e23c8	lineage	120438	2400826	ec62504fcf59e8822aa4e52e0a3c536055668c3b869201b3aef96236b7308f8a	
-v10-unsigned	Sidata	va	0x023e3000	0x023e686c	lineage	45	112	52216914e39378a154e434258859593b54497051b411d3e429d7d10ecb870d4a	
-v10-unsigned	.securom	va	0x023f13dd	0x024fcfea	lineage	2506	42599	7171cea0f30df249ba5a0b3ec559639462674e583dee3aa725a558fa758bca7e	
+v10-unsigned	.data	va	0x00edba5c	0x00edba92	lineage	12	25	ea659cdc838619b3767c057fdf8e6d99fde2680c5d8517eb06761c0878d40c40	-
+v10-unsigned	Stext	va	0x01a49000	0x02083c50	lineage	197611	6221276	f5aedfe573c2d14c439a5480be0f9d579ab7258b9c3e1e50483791689091e11f	-
+v10-unsigned	Sitext	va	0x0208402d	0x02088d5d	lineage	163	956	cb3eded5ee69cc9d09ea4b75cf560543f590ecbb9976e3785a6d8daaa57c1b20	-
+v10-unsigned	Sdata	va	0x020e5000	0x023e23c8	lineage	120438	2400826	ec62504fcf59e8822aa4e52e0a3c536055668c3b869201b3aef96236b7308f8a	-
+v10-unsigned	Sidata	va	0x023e3000	0x023e686c	lineage	45	112	52216914e39378a154e434258859593b54497051b411d3e429d7d10ecb870d4a	-
+v10-unsigned	.securom	va	0x023f13dd	0x024fcfea	lineage	2506	42599	7171cea0f30df249ba5a0b3ec559639462674e583dee3aa725a558fa758bca7e	-
 v10-unsigned	.securom	va	0x0253a000	0x03701000	unmapped	1	18640896	-	the build maps .securom only to 0x253a000
 v10-unsigned	reloaded	va	0x03701000	0x03702000	unmapped	1	4096	-	the build has no reloaded section
 v10-unsigned	(slack)	file	0x033005f8	0x03301000	unmapped	1	2568	-	reference file offsets past the end of this build
 v11-official-securom	(headers)	va	0x0040003c	0x00400ff8	header	124	3557	d737b707d33abe124faa90b6e335f8975aa1ab26e6cc99a633eefbbef94a2ac3	e_lfanew, DOS stub, COFF header, optional header, section table, after section table
-v11-official-securom	.text	va	0x00401000	0x006dd6c0	lineage	11100	2988858	9d8013365516701738523adc92b0216b6a7c5adfae14060bc9e484d0e12b6128	
+v11-official-securom	.text	va	0x00401000	0x006dd6c0	lineage	11100	2988858	9d8013365516701738523adc92b0216b6a7c5adfae14060bc9e484d0e12b6128	-
 v11-official-securom	.rdata	va	0x00b05000	0x00b05698	iat	22	1613	790ecc8c31b398779f4d53135a83ed5b5dcc400dbba2649d05b14c414716eac0	inside the reference DataDirectory[IAT] 0x705000+0x69c
-v11-official-securom	.data	va	0x00edaa5c	0x00edaa96	lineage	13	27	66b4a8b2a17f0463f7427c0239106eaf710ea7129f42d184a58c50cdff614ba4	
-v11-official-securom	Stext	va	0x01a48000	0x020fd730	lineage	215452	6697676	4852465513a702dbc3c0904f79ebc78fd57ad0fed1f91cfef01f3e2b2cd96c43	
-v11-official-securom	Sitext	va	0x020fe027	0x02102e00	lineage	181	998	8478894b53cf567c6a8b91c3db22f2c18c45382fe66748e4ccf668d20e8c99d9	
-v11-official-securom	Sdata	va	0x02161000	0x0245df60	lineage	120077	2403702	0238bc97372c789ff415e33776bc7ac4602b087da6920133e1a04fb81c978b81	
-v11-official-securom	Sidata	va	0x0245e000	0x02460e6c	lineage	48	115	550ad47445475a3a521a856296e99fdb3b00f0d6185d500c2ad90bcf52c2d902	
-v11-official-securom	.securom	va	0x0246d4c6	0x02578d72	lineage	2147	40210	56e845da76e3b34247814abbf9cc11bf1381e9c22d8cb1f69e43853ea0c3895c	
+v11-official-securom	.data	va	0x00edaa5c	0x00edaa96	lineage	13	27	66b4a8b2a17f0463f7427c0239106eaf710ea7129f42d184a58c50cdff614ba4	-
+v11-official-securom	Stext	va	0x01a48000	0x020fd730	lineage	215452	6697676	4852465513a702dbc3c0904f79ebc78fd57ad0fed1f91cfef01f3e2b2cd96c43	-
+v11-official-securom	Sitext	va	0x020fe027	0x02102e00	lineage	181	998	8478894b53cf567c6a8b91c3db22f2c18c45382fe66748e4ccf668d20e8c99d9	-
+v11-official-securom	Sdata	va	0x02161000	0x0245df60	lineage	120077	2403702	0238bc97372c789ff415e33776bc7ac4602b087da6920133e1a04fb81c978b81	-
+v11-official-securom	Sidata	va	0x0245e000	0x02460e6c	lineage	48	115	550ad47445475a3a521a856296e99fdb3b00f0d6185d500c2ad90bcf52c2d902	-
+v11-official-securom	.securom	va	0x0246d4c6	0x02578d72	lineage	2147	40210	56e845da76e3b34247814abbf9cc11bf1381e9c22d8cb1f69e43853ea0c3895c	-
 v11-official-securom	.securom	va	0x025b6000	0x03772000	unmapped	1	18595840	-	the build maps .securom only to 0x25b6000
 v11-official-securom	(slack)	file	0x01053000	0x01054508	certificate	66	5317	a50f60633a663cfbeab2c55c79631ad35beedef829cbab9577ca367bca64a603	DataDirectory[SECURITY] 0x1053000+0x1508
