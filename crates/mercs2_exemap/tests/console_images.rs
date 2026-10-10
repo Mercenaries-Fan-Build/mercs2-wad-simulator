@@ -10,6 +10,8 @@
 //! Every console image is rebuilt from the container whose sha256 starts its chain, with every
 //! intermediate sha256 checked; every `code_image` claim is checked byte for byte; and every
 //! analysed image yields function starts and vtables (on PS3, every vtable slot an `.opd` function).
+//! Every Xbox 360 image's XEX import records read and validate against its image, with the record
+//! counts per library and kind that the three XEX import headers list.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -97,6 +99,41 @@ fn every_console_image_rebuilds_from_its_container_and_shares_the_code_it_claims
                 }
             }
         }
+    }
+}
+
+/// Every Xbox 360 image's import records, per library: (functions, variables).
+#[test]
+fn every_xbox_image_lists_its_xex_import_records() {
+    use mercs2_exemap::images::derive_with_xex;
+    use mercs2_exemap::xbox::{import_records, ImportKind};
+    let catalogue = Catalogue::embedded().unwrap_or_else(|e| panic!("embedded catalogue: {e}"));
+    let images = Images::embedded(&catalogue).unwrap_or_else(|e| panic!("embedded images: {e}"));
+    let containers = containers();
+    let expected: BTreeMap<&str, Vec<(&str, usize, usize)>> = BTreeMap::from([
+        ("x360-preview-final", vec![("xam.xex", 109, 109), ("xboxkrnl.exe", 151, 162)]),
+        ("x360-preview-profile", vec![("xam.xex", 110, 110), ("xbdm.xex", 1, 1), ("xboxkrnl.exe", 151, 162)]),
+        ("x360-retail", vec![("xam.xex", 109, 109), ("xboxkrnl.exe", 151, 162)]),
+    ]);
+    let xbox: Vec<&str> = images.images.iter().filter(|m| m.platform == Platform::X360).map(|m| m.id.as_str()).collect();
+    assert_eq!(xbox, expected.keys().copied().collect::<Vec<_>>(), "the Xbox 360 images of images.tsv");
+    for (id, want) in &expected {
+        let m = images.image(id).unwrap_or_else(|| panic!("no image {id} in images.tsv"));
+        let head = &m.chain[0].from_sha256;
+        let path = containers.get(head).unwrap_or_else(|| panic!("image {id}: no container with sha256 {head}"));
+        let mut f = std::fs::File::open(path).unwrap_or_else(|e| panic!("open {}: {e}", path.display()));
+        let (bytes, xex) = derive_with_xex(m, &mut f).unwrap_or_else(|e| panic!("{e}"));
+        let records = import_records(&xex, &bytes).unwrap_or_else(|e| panic!("image {id}: {e}"));
+        let mut got: BTreeMap<&str, (usize, usize)> = BTreeMap::new();
+        for r in &records {
+            let e = got.entry(r.library.as_str()).or_default();
+            match r.kind {
+                ImportKind::Function => e.0 += 1,
+                ImportKind::Variable => e.1 += 1,
+            }
+        }
+        let got: Vec<(&str, usize, usize)> = got.into_iter().map(|(l, (f, v))| (l, f, v)).collect();
+        assert_eq!(&got, want, "image {id}: (library, functions, variables)");
     }
 }
 
