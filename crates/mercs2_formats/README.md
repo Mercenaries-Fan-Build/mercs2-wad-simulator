@@ -130,7 +130,6 @@ cargo run -p mercs2_formats --bin shaderforge -- store-id PgSkyFP --low    # 0xa
 | `anim` | Havok `hkaAnimation` clip decoder → sampleable per-bone local pose. |
 | `animgroup` | The `animation` WAD block (`0x18166555`): clips + track→bone mapping for GPU skinning. |
 | `anim_select` | The engine's data-driven clip picker (`animationtable` assets, `0x207359C7`). |
-| `mannequin` | Procedural humanoid mesh fitted and auto-weighted to a real skeleton. |
 | `retarget` | Foreign-rig retarget driver (uses the source glb's own `JOINTS_0`/`WEIGHTS_0`). |
 | `model_build` | Author a static UCFX model container from scratch (no donor). |
 | `model_cubeize` | Rewrite a real model container's geometry to a cube, in place. |
