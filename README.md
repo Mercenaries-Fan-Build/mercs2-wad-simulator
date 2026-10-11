@@ -272,10 +272,10 @@ Every function in a `<id>.fnsig.json` export must have a string `mhash` and `cal
 arrays of strings, and every callee must be one of the forms above; anything else is an error
 naming the export file and the function. `mhash` is the SHA-1 of the function's bytes with every
 operand whose encoding holds a layout-dependent address zeroed: relative branch and call targets;
-immediates, displacements and targets whose value is an address in the image; on PowerPC the low
-half of a `lis`-built address and, on PS3, `r2`/TOC-relative operands. Registers-only operands,
-stack-frame offsets and field offsets are never masked, so the hash depends on the bytes and the
-layout, not on what Ghidra's analysis inferred.
+immediates, displacements and targets whose value is an address in the image; on PowerPC the high
+half of an address in `addis`/`lis`, the low half of a `lis`-built address and, on PS3,
+`r2`/TOC-relative operands. Registers-only operands, stack-frame offsets and field offsets are not
+masked.
 
 ```bash
 exemap derive x360-preview-profile --from "Mercenaries 2 Preview X360 (Jul 11 2008).iso" --out profile.pe_ghidra
