@@ -1,4 +1,10 @@
 /target/
+
+# mercs2_mod_runtime is its own workspace (m2-sdk.dll): its build output, lockfile, and the rust-mingw
+# libraries its scripts/fetch_mingw_libs.sh places for the link.
+/crates/mercs2_mod_runtime/target/
+/crates/mercs2_mod_runtime/Cargo.lock
+/crates/mercs2_mod_runtime/toolchain/
 /target_probe/
 Cargo.lock
 
