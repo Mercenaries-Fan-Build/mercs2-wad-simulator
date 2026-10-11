@@ -69,13 +69,19 @@
 //! - [`model_inject`], [`model_cubeize`] — conform novel geometry into a *real* donor container.
 //!   The engine rejects a hand-built container's decl/material/shader bindings (`0x004CC064`), so
 //!   the donor path is the one that ships.
-//! - [`mannequin`], [`retarget`] — procedural humanoid mesh; foreign-rig retargeting.
+//! - [`retarget`] — foreign-rig retargeting.
 //! - [`placement_build`], [`patch_wad`] — append a new world placement; serialize a `vz-patch.wad`.
 //! - [`dlc_input`], [`dlc_stfs`] — big-endian Xbox 360 DLC readers; STFS container + RAR extraction.
 //! - [`ps3_pkg`], [`ps3_edat`], [`ps3_self`], [`ps3_klic`], [`ps3_crypto`], [`ps3_keys`] — the PS3
 //!   "Blow It Up Again" DLC decrypt chain: PSN PKG → NPDRM EDAT → inner BE `SCFF` WAD, plus SCE
 //!   SELF→ELF and sliding-window AES-CMAC klicensee recovery. Output feeds the same BE `dlc_input`
 //!   + `ucfx` pipeline as the Xbox path.
+//!
+//! **Mod runtime (`m2-sdk.dll`, built by `crates/mercs2_mod_runtime`)**
+//! - [`ini`], [`lua_stack`], [`shader_registry`], [`load_ladder`] — the logic behind the DLL's INI
+//!   reader, its Lua argument readers, its shader registry queue and admission rules, and its load
+//!   triggers, kept here so it is tested on any host.
+//! - [`exe_target`] — the retail exe addresses the DLL uses, as published to C mods in `m2_target.h`.
 //!
 //! # Gotchas
 //!
@@ -105,6 +111,7 @@ pub mod chunk_validate;
 pub mod crc32;
 pub mod dlc_input;
 pub mod dlc_stfs;
+pub mod exe_target;
 pub mod donor;
 pub mod ffcs;
 pub mod fxdict;
@@ -113,6 +120,9 @@ pub mod gfx;
 pub mod hash;
 pub mod havok;
 pub mod havok_write;
+pub mod ini;
+pub mod load_ladder;
+pub mod lua_stack;
 pub mod mesh_import;
 pub mod model;
 pub mod model_build;
@@ -139,6 +149,7 @@ pub mod schema;
 pub mod scripts_block;
 pub mod scrub;
 pub mod shader3;
+pub mod shader_registry;
 pub mod sm3asm;
 pub mod sges;
 pub mod skeleton;
