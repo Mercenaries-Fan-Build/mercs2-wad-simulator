@@ -1,0 +1,5 @@
+[target.i686-pc-windows-gnu]
+linker = "i686-w64-mingw32-gcc"
+# CRT start-up objects from the Rust sysroot and libraries from toolchain/i686-mingw (the rust-mingw
+# component), so the DLL links msvcrt.dll as Rust's std expects, whatever CRT the host MinGW defaults to.
+rustflags = ["-C", "link-self-contained=yes"]
