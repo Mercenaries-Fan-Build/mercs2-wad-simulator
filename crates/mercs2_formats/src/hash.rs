@@ -56,6 +56,23 @@ pub fn pandemic_hash_m2_extend(hash: u32, suffix: &str) -> u32 {
     h.wrapping_mul(FNV1A_PRIME)
 }
 
+/// FUN_00824270 exactly, over any bytes: each byte is sign-extended (`movsx ecx, cl` @0x824280) before
+/// the `| 0x20` case fold, then the Mercs 2 finalization. Equal to [`pandemic_hash_m2`] for ASCII
+/// names; use this one for names that may hold bytes >= 0x80 or are not UTF-8 (C strings from a mod).
+/// Empty input hashes to 0, as the exe returns for an empty or null name.
+pub fn pandemic_hash_m2_bytes(name: &[u8]) -> u32 {
+    if name.is_empty() {
+        return 0;
+    }
+    let mut h = FNV1A_OFFSET_BASIS;
+    for &b in name {
+        h ^= (i32::from(b as i8) as u32) | 0x20;
+        h = h.wrapping_mul(FNV1A_PRIME);
+    }
+    h ^= 0x2A;
+    h.wrapping_mul(FNV1A_PRIME)
+}
+
 /// FNV-1a over raw bytes, no case suppression. Empty input hashes to 0.
 pub fn pandemic_hash_bytes(data: &[u8]) -> u32 {
     if data.is_empty() {
@@ -93,6 +110,16 @@ mod tests {
                 "{base}{suffix}"
             );
         }
+    }
+
+    #[test]
+    fn the_byte_variant_sign_extends_like_the_exe() {
+        for name in ["texture", "model", "TestGlowFP_pl_sl", "a"] {
+            assert_eq!(pandemic_hash_m2_bytes(name.as_bytes()), pandemic_hash_m2(name), "{name}");
+        }
+        assert_eq!(pandemic_hash_m2_bytes(b""), 0);
+        assert_eq!(pandemic_hash_m2_bytes(b"\xE9t\xE9"), 0x1449_B483);
+        assert_ne!(pandemic_hash_m2_bytes(b"\xE9t\xE9"), pandemic_hash_m2("\u{e9}t\u{e9}"));
     }
 
     #[test]
