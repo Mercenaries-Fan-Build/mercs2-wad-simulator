@@ -23,7 +23,8 @@
 //! offset; when both are imports with the same `<library>` and the same `<name>` (exact text: one
 //! ordinal name can be exported by two libraries); when both are system calls with the same number;
 //! or when both are direct and neither is half of an accepted pair whose other half is not the
-//! aligned entry. Any other combination disagrees. An import or system call is never a candidate, and
+//! aligned entry (and, when the call lists of a `callee`-derived pair are tested, the two are not
+//! contradicted by bytes; see below). Any other combination disagrees. An import or system call is never a candidate, and
 //! neither is a direct callee that is not a function start in its image (Ghidra writes an import
 //! it cannot name as a small `0x…` number, which is no function start).
 //!
@@ -34,9 +35,30 @@
 //! functions, and when it is the only candidate of both its functions it is reported as
 //! **uncorroborated**. Every conflict is reported with all its candidates; nothing is chosen among
 //! them. `callee` candidates come from accepted pairs only (an uncorroborated pair neither proposes
-//! callees nor constrains the call-list agreement), and the rules run to a fixpoint: the candidate
-//! set and each candidate's evidence only grow, so acceptance is recomputed until it stops
-//! changing; `callee` evidence that lands on an uncorroborated `string` candidate corroborates it.
+//! callees nor constrains the call-list agreement), and the rules run to a fixpoint: acceptance is
+//! recomputed until no candidate or evidence is added and none is rejected; `callee` evidence that
+//! lands on an uncorroborated `string` candidate corroborates it.
+//!
+//! A pair `(a, b)` is **contradicted by bytes** (only when `bytes` is chosen and the images share a
+//! Ghidra language) when `mhash(a)` and `mhash(b)` are both non-empty and differ, `mhash(a)` is the
+//! hash of some function of image `b` (which is not `b`), and `mhash(b)` is the hash of some
+//! function of image `a` (which is not `a`). Neither hash needs to be unique; a function without a
+//! fnsig record has no hash and is never contradicted.
+//!
+//! Two checks **reject** a pair the `callee` rule derives; candidates of every other evidence are
+//! never rejected. A rejected pair is reported with its reason and both functions' `mhash`, holds
+//! no `callee` evidence for the rest of the match, and is a candidate only while it has evidence
+//! other than `anchor`:
+//!
+//! * `contradicted-by-bytes`: the derived pair is contradicted by bytes.
+//! * `call-list-disagrees`: the derived pair's own call lists have the same length and do not
+//!   agree at every position, where two aligned direct callees also disagree when they are
+//!   contradicted by bytes. Call lists of different lengths align nothing and are no evidence
+//!   either way. Every candidate with `callee` evidence is re-tested on each round against the
+//!   pairs accepted then.
+//!
+//! An accepted pair propagates its callees when its call lists have equal lengths and agree with
+//! the accepted pairs; the bytes contradiction does not apply to that test.
 //!
 //! An `anchor` candidate is corroborated like any candidate with evidence other than `string`, and
 //! it is accepted only when it has no rivals: an anchored candidate with another candidate on
@@ -300,12 +322,45 @@ pub struct Conflict {
     pub candidates: Vec<(u32, BTreeSet<Evidence>)>,
 }
 
+/// Why a candidate was rejected.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Reason {
+    /// A `callee`-derived pair whose two hashes differ and each is the hash of a function of the
+    /// other image.
+    ContradictedByBytes,
+    /// A `callee`-derived pair whose own call lists, of the same length, disagree.
+    CallListDisagrees,
+}
+
+impl Reason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Reason::ContradictedByBytes => "contradicted-by-bytes",
+            Reason::CallListDisagrees => "call-list-disagrees",
+        }
+    }
+}
+
+/// A rejected `callee` derivation: the evidence that was rejected, the reason, and both functions'
+/// `mhash`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Rejected {
+    pub a: u32,
+    pub b: u32,
+    pub evidence: BTreeSet<Evidence>,
+    pub reason: Reason,
+    pub mhash_a: String,
+    pub mhash_b: String,
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct Outcome {
     pub pairs: Vec<Pair>,
     pub conflicts: Vec<Conflict>,
     /// Candidates that are the only candidate of both their functions but are not corroborated.
     pub uncorroborated: Vec<Pair>,
+    /// Rejected `callee` derivations, by `(a, b)`.
+    pub rejected: Vec<Rejected>,
 }
 
 /// The evidence behind one candidate pair, and how many distinct strings gave it `string`.
@@ -539,47 +594,146 @@ pub fn match_images(
         signature_candidates(sa, sb, bytes, evidence.contains(&Evidence::String), &mut c);
     }
     add_anchors(&mut c, anchors);
+    let hashes = match sigs {
+        Some((sa, sb)) if same_language && evidence.contains(&Evidence::Bytes) => Some(Hashes::new(sa, sb)),
+        _ => None,
+    };
+    let mut rejected: BTreeMap<(u32, u32), Rejected> = BTreeMap::new();
     let mut out = resolve(&c);
     if let (Some((sa, sb)), true, true) = (sigs, evidence.contains(&Evidence::Callee), same_language) {
+        let anchored: BTreeSet<(u32, u32)> = anchors.iter().copied().collect();
+        let rejected_evidence = |k: &(u32, u32)| {
+            let mut ev = BTreeSet::from([Evidence::Callee]);
+            if anchored.contains(k) {
+                ev.insert(Evidence::Anchor);
+            }
+            ev
+        };
         loop {
-            let mut grew = false;
+            let mut changed = false;
             let fwd: HashMap<u32, u32> = out.pairs.iter().map(|p| (p.a, p.b)).collect();
             let back: HashMap<u32, u32> = out.pairs.iter().map(|p| (p.b, p.a)).collect();
             for p in &out.pairs {
                 let (Some(x), Some(y)) = (sa.get(&p.a), sb.get(&p.b)) else { continue };
-                if x.callees.len() != y.callees.len() {
-                    continue;
-                }
-                let consistent = x.callees.iter().zip(&y.callees).all(|(ca, cb)| match (ca, cb) {
-                    (Callee::Direct(ca), Callee::Direct(cb)) => {
-                        fwd.get(ca).is_none_or(|v| v == cb) && back.get(cb).is_none_or(|v| v == ca)
-                    }
-                    (Callee::Import { library: la, name: na }, Callee::Import { library: lb, name: nb }) => {
-                        la == lb && na == nb
-                    }
-                    (Callee::Indirect, Callee::Indirect) => true,
-                    (Callee::Syscall(na), Callee::Syscall(nb)) => na == nb,
-                    _ => false,
-                });
-                if !consistent {
+                // The parent's own test: equal lengths and agreement with the accepted pairs.
+                if call_lists_agree(x, y, &fwd, &back, None) != Some(true) {
                     continue;
                 }
                 for (ca, cb) in x.callees.iter().zip(&y.callees) {
-                    if let (Callee::Direct(ca), Callee::Direct(cb)) = (ca, cb) {
-                        if sa.contains_key(ca) && sb.contains_key(cb) {
-                            grew |= add(&mut c, *ca, *cb, Evidence::Callee);
+                    let (Callee::Direct(ca), Callee::Direct(cb)) = (ca, cb) else { continue };
+                    let (Some(cx), Some(cy)) = (sa.get(ca), sb.get(cb)) else { continue };
+                    let k = (*ca, *cb);
+                    if rejected.contains_key(&k) {
+                        continue;
+                    }
+                    let reason = if hashes.as_ref().is_some_and(|h| h.contradicted(k.0, k.1).is_some()) {
+                        Some(Reason::ContradictedByBytes)
+                    } else if call_lists_agree(cx, cy, &fwd, &back, hashes.as_ref()) == Some(false) {
+                        Some(Reason::CallListDisagrees)
+                    } else {
+                        None
+                    };
+                    match reason {
+                        Some(reason) => {
+                            reject_callee(&mut c, &mut rejected, k, rejected_evidence(&k), reason, cx, cy);
+                            changed = true;
                         }
+                        None => changed |= add(&mut c, k.0, k.1, Evidence::Callee),
                     }
                 }
             }
-            if !grew {
+            // Re-test every pair holding `callee` evidence against the pairs accepted this round.
+            let derived: Vec<(u32, u32)> = c.iter().filter(|(_, s)| s.evidence.contains(&Evidence::Callee)).map(|(k, _)| *k).collect();
+            for k in derived {
+                let (Some(cx), Some(cy)) = (sa.get(&k.0), sb.get(&k.1)) else {
+                    unreachable!("the callee rule pairs only keys of both fnsig exports")
+                };
+                if call_lists_agree(cx, cy, &fwd, &back, hashes.as_ref()) == Some(false) {
+                    reject_callee(&mut c, &mut rejected, k, rejected_evidence(&k), Reason::CallListDisagrees, cx, cy);
+                    changed = true;
+                }
+            }
+            if !changed {
                 break;
             }
             add_anchors(&mut c, anchors);
             out = resolve(&c);
         }
     }
+    out.rejected = rejected.into_values().collect();
     Ok(out)
+}
+
+/// Every function hash of each image, for the bytes contradiction.
+struct Hashes<'a> {
+    sa: &'a HashMap<u32, Signature>,
+    sb: &'a HashMap<u32, Signature>,
+    in_a: std::collections::HashSet<&'a str>,
+    in_b: std::collections::HashSet<&'a str>,
+}
+
+impl<'a> Hashes<'a> {
+    fn new(sa: &'a HashMap<u32, Signature>, sb: &'a HashMap<u32, Signature>) -> Hashes<'a> {
+        let set = |s: &'a HashMap<u32, Signature>| s.values().map(|x| x.mhash.as_str()).filter(|h| !h.is_empty()).collect();
+        Hashes { sa, sb, in_a: set(sa), in_b: set(sb) }
+    }
+
+    /// Both hashes when `(a, b)` is contradicted by bytes: they are non-empty and differ, `mhash(a)`
+    /// is the hash of a function of image `b` (not `b`, whose hash differs) and `mhash(b)` the hash
+    /// of a function of image `a` (not `a`).
+    fn contradicted(&self, a: u32, b: u32) -> Option<(String, String)> {
+        let (x, y) = (self.sa.get(&a)?, self.sb.get(&b)?);
+        let (ha, hb) = (x.mhash.as_str(), y.mhash.as_str());
+        (!ha.is_empty() && !hb.is_empty() && ha != hb && self.in_b.contains(ha) && self.in_a.contains(hb))
+            .then(|| (ha.to_string(), hb.to_string()))
+    }
+}
+
+/// Whether the call lists of `x` and `y` agree at every position with the accepted pairs (`fwd`:
+/// image `a` to image `b`, `back`: the reverse); `None` when their lengths differ, which aligns
+/// nothing. Two aligned direct callees disagree when either is half of an accepted pair whose other
+/// half is not the other, or when `hashes` is given and they are contradicted by bytes.
+fn call_lists_agree(
+    x: &Signature,
+    y: &Signature,
+    fwd: &HashMap<u32, u32>,
+    back: &HashMap<u32, u32>,
+    hashes: Option<&Hashes>,
+) -> Option<bool> {
+    if x.callees.len() != y.callees.len() {
+        return None;
+    }
+    Some(x.callees.iter().zip(&y.callees).all(|(ca, cb)| match (ca, cb) {
+        (Callee::Direct(ca), Callee::Direct(cb)) => {
+            fwd.get(ca).is_none_or(|v| v == cb)
+                && back.get(cb).is_none_or(|v| v == ca)
+                && hashes.is_none_or(|h| h.contradicted(*ca, *cb).is_none())
+        }
+        (Callee::Import { library: la, name: na }, Callee::Import { library: lb, name: nb }) => la == lb && na == nb,
+        (Callee::Indirect, Callee::Indirect) => true,
+        (Callee::Syscall(na), Callee::Syscall(nb)) => na == nb,
+        _ => false,
+    }))
+}
+
+/// Take `callee` evidence from `k` for `reason`, record the rejection, and drop `k` as a candidate
+/// when nothing but `anchor` evidence remains (an anchor never makes a candidate).
+fn reject_callee(
+    c: &mut Candidates,
+    rejected: &mut BTreeMap<(u32, u32), Rejected>,
+    k: (u32, u32),
+    evidence: BTreeSet<Evidence>,
+    reason: Reason,
+    x: &Signature,
+    y: &Signature,
+) {
+    if let Some(s) = c.get_mut(&k) {
+        s.evidence.remove(&Evidence::Callee);
+        if s.evidence.iter().all(|e| *e == Evidence::Anchor) {
+            c.remove(&k);
+        }
+    }
+    rejected.insert(k, Rejected { a: k.0, b: k.1, evidence, reason, mhash_a: x.mhash.clone(), mhash_b: y.mhash.clone() });
 }
 
 /// One row of `data/anchors.tsv`: a pair verified by reading both functions.
@@ -1043,6 +1197,140 @@ mod tests {
         let c = crate::Catalogue::embedded().unwrap();
         let images = crate::images::Images::embedded(&c).unwrap();
         assert!(!anchors(&images).unwrap().is_empty());
+    }
+
+    fn hsig(mhash: &str, callees: &[u32]) -> Signature {
+        Signature { mhash: mhash.into(), callees: callees.iter().map(|c| Callee::Direct(*c)).collect(), strs: vec![] }
+    }
+
+    /// A parent (hash `p`, unique) calls two byte-identical wrappers (hash `w`), each calling one of
+    /// two leaves (`l1`, `l2`). Image `b` calls its wrappers in the order of `a` or crossed, and may
+    /// carry a duplicate of each leaf, which makes the leaf hashes not unique there.
+    fn wrappers(crossed: bool, duplicate_leaves: bool) -> (Exports, Exports) {
+        let sa: HashMap<u32, Signature> =
+            [(1, hsig("p", &[2, 3])), (2, hsig("w", &[4])), (3, hsig("w", &[5])), (4, hsig("l1", &[])), (5, hsig("l2", &[]))].into();
+        let mut sb: HashMap<u32, Signature> = [
+            (11, hsig("p", if crossed { &[13, 12] } else { &[12, 13] })),
+            (12, hsig("w", &[14])),
+            (13, hsig("w", &[15])),
+            (14, hsig("l1", &[])),
+            (15, hsig("l2", &[])),
+        ]
+        .into();
+        if duplicate_leaves {
+            sb.insert(16, hsig("l1", &[]));
+            sb.insert(17, hsig("l2", &[]));
+        }
+        (Exports { signatures: Some(sa), ..Default::default() }, Exports { signatures: Some(sb), ..Default::default() })
+    }
+
+    fn rejections(o: &Outcome) -> Vec<(u32, u32, Reason)> {
+        o.rejected.iter().map(|r| (r.a, r.b, r.reason)).collect()
+    }
+
+    #[test]
+    fn a_derived_pair_whose_own_call_list_disagrees_is_rejected() {
+        let all = ev(&[Evidence::Bytes, Evidence::Callee]);
+        // Crossed: the leaves pair by bytes, so the crossed wrappers' call lists ([4] against [15],
+        // [5] against [14]) disagree with the accepted leaf pairs.
+        let (a, b) = wrappers(true, false);
+        let o = match_images(&a, &b, true, &all, &[]).unwrap();
+        assert_eq!(pairs_of(&o), vec![(1, 11), (4, 14), (5, 15)]);
+        assert_eq!(rejections(&o), vec![(2, 13, Reason::CallListDisagrees), (3, 12, Reason::CallListDisagrees)]);
+        assert_eq!(o.rejected[0].evidence, ev(&[Evidence::Callee]));
+        assert_eq!((o.rejected[0].mhash_a.as_str(), o.rejected[0].mhash_b.as_str()), ("w", "w"));
+        assert!(o.conflicts.is_empty());
+        // In order, every pair is accepted and nothing is rejected.
+        let (a, b) = wrappers(false, false);
+        let o = match_images(&a, &b, true, &all, &[]).unwrap();
+        assert_eq!(pairs_of(&o), vec![(1, 11), (2, 12), (3, 13), (4, 14), (5, 15)]);
+        assert!(o.rejected.is_empty());
+    }
+
+    #[test]
+    fn crossed_wrappers_over_leaves_with_duplicate_hashes_are_rejected() {
+        let all = ev(&[Evidence::Bytes, Evidence::Callee]);
+        // The leaf hashes are not unique in `b`, so no leaf pairs by bytes. The crossed wrappers'
+        // call lists align leaves whose hashes differ and each occur in the other image, so they
+        // disagree, and the crossed leaves are never derived.
+        let (a, b) = wrappers(true, true);
+        let o = match_images(&a, &b, true, &all, &[]).unwrap();
+        assert_eq!(pairs_of(&o), vec![(1, 11)]);
+        assert_eq!(rejections(&o), vec![(2, 13, Reason::CallListDisagrees), (3, 12, Reason::CallListDisagrees)]);
+        assert!(o.conflicts.is_empty() && o.uncorroborated.is_empty());
+        // In order, equal hashes never contradict, duplicates or not.
+        let (a, b) = wrappers(false, true);
+        let o = match_images(&a, &b, true, &all, &[]).unwrap();
+        assert_eq!(pairs_of(&o), vec![(1, 11), (2, 12), (3, 13), (4, 14), (5, 15)]);
+        assert!(o.rejected.is_empty());
+    }
+
+    #[test]
+    fn a_derived_pair_whose_call_lists_differ_in_length_is_kept() {
+        let sa: HashMap<u32, Signature> = [(1, hsig("p", &[2])), (2, hsig("", &[])), (3, hsig("", &[]))].into();
+        let sb: HashMap<u32, Signature> = [(11, hsig("p", &[12])), (12, hsig("", &[13])), (13, hsig("", &[]))].into();
+        let a = Exports { signatures: Some(sa), ..Default::default() };
+        let b = Exports { signatures: Some(sb), ..Default::default() };
+        let o = match_images(&a, &b, true, &ev(&[Evidence::Bytes, Evidence::Callee]), &[]).unwrap();
+        // [] against [13] aligns nothing: no evidence either way, and (2, 12) does not propagate.
+        assert_eq!(pairs_of(&o), vec![(1, 11), (2, 12)]);
+        assert!(o.rejected.is_empty());
+    }
+
+    #[test]
+    fn the_bytes_contradiction_never_rejects_a_candidate_of_other_evidence() {
+        let bind = |n: &str, f: u32| Binding { namespace: String::new(), name: n.into(), function: f };
+        let img = |f: u32, sigs: &[(u32, &str)]| Exports {
+            bindings: vec![bind("F", f)],
+            signatures: Some(sigs.iter().map(|(k, h)| (*k, hsig(h, &[]))).collect()),
+            ..Default::default()
+        };
+        // lua proposes (1, 11) though 1 hashes as 12 does and 11 as 2 does; bytes proposes (1, 12)
+        // and (2, 11). Nothing is rejected: the candidates conflict.
+        let (a, b) = (img(1, &[(1, "x"), (2, "y")]), img(11, &[(11, "y"), (12, "x")]));
+        let o = match_images(&a, &b, true, &ev(&[Evidence::Lua, Evidence::Bytes]), &[]).unwrap();
+        assert!(o.rejected.is_empty() && o.pairs.is_empty());
+        assert_eq!(o.conflicts.len(), 2);
+    }
+
+    /// A parent (hash `p`, bound to the Lua name `Root`) calls function 4 in image `a` and 14 in
+    /// image `b`; `fa` and `fb` give those and any further functions with their hashes.
+    fn one_callee(fa: &[(u32, &str)], fb: &[(u32, &str)]) -> (Exports, Exports) {
+        let bind = |f: u32| Binding { namespace: String::new(), name: "Root".into(), function: f };
+        let mut sa: HashMap<u32, Signature> = fa.iter().map(|(k, h)| (*k, hsig(h, &[]))).collect();
+        sa.insert(1, hsig("p", &[4]));
+        let mut sb: HashMap<u32, Signature> = fb.iter().map(|(k, h)| (*k, hsig(h, &[]))).collect();
+        sb.insert(11, hsig("p", &[14]));
+        (
+            Exports { bindings: vec![bind(1)], signatures: Some(sa), ..Default::default() },
+            Exports { bindings: vec![bind(11)], signatures: Some(sb), ..Default::default() },
+        )
+    }
+
+    #[test]
+    fn a_derived_pair_contradicted_by_bytes_is_rejected() {
+        let all = ev(&[Evidence::Lua, Evidence::Bytes, Evidence::Callee]);
+        // 4 hashes as 15 and 16 do, 14 as 5 and 6 do: duplicated hashes contradict.
+        let (a, b) = one_callee(&[(4, "x"), (5, "y"), (6, "y")], &[(14, "y"), (15, "x"), (16, "x")]);
+        let o = match_images(&a, &b, true, &all, &[]).unwrap();
+        assert_eq!(pairs_of(&o), vec![(1, 11)]);
+        assert_eq!(rejections(&o), vec![(4, 14, Reason::ContradictedByBytes)]);
+        assert_eq!(o.rejected[0].evidence, ev(&[Evidence::Callee]));
+        assert_eq!((o.rejected[0].mhash_a.as_str(), o.rejected[0].mhash_b.as_str()), ("x", "y"));
+        // Without `bytes`, hashes are not compared.
+        let o = match_images(&a, &b, true, &ev(&[Evidence::Lua, Evidence::Callee]), &[]).unwrap();
+        assert_eq!(pairs_of(&o), vec![(1, 11), (4, 14)]);
+        assert!(o.rejected.is_empty());
+        // An empty hash never contradicts.
+        let (a, b) = one_callee(&[(4, ""), (5, "y"), (6, "y")], &[(14, "y")]);
+        let o = match_images(&a, &b, true, &all, &[]).unwrap();
+        assert_eq!(pairs_of(&o), vec![(1, 11), (4, 14)]);
+        assert!(o.rejected.is_empty());
+        // A hash that is no function's hash in the other image does not contradict.
+        let (a, b) = one_callee(&[(4, "x")], &[(14, "y")]);
+        let o = match_images(&a, &b, true, &all, &[]).unwrap();
+        assert_eq!(pairs_of(&o), vec![(1, 11), (4, 14)]);
+        assert!(o.rejected.is_empty());
     }
 
     #[test]
