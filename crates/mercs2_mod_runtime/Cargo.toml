@@ -1,0 +1,39 @@
+[package]
+name = "mercs2_mod_runtime"
+version = "0.4.0"
+description = "m2-sdk.dll: the one runtime every Mercenaries 2 mod shares in the game process"
+edition = "2024"
+license = "MIT"
+publish = false
+build = "build.rs"
+
+# A 32-bit Windows DLL only, so it is its own workspace (and excluded from wad_simulator's): the
+# workspace-wide host builds and tests never see it. Build it from this directory, where
+# rust-toolchain.toml and .cargo/config.toml apply.
+[workspace]
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+mercs2_formats = { path = "../mercs2_formats" }
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
+    "Win32_System_IO",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Memory",
+    "Win32_System_SystemServices",
+    "Win32_System_Threading",
+] }
+
+[build-dependencies]
+cc = "1.2"
+# The C header of the load ladder the DLL matches against (`load_ladder::c_header`).
+mercs2_formats = { path = "../mercs2_formats" }
+
+[profile.release]
+panic = "abort"
+lto = true
+codegen-units = 1
