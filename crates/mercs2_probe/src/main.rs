@@ -38,6 +38,7 @@
 //! `vz.wad` from the registry only — they have no `--wad` override.
 
 mod bone_census;
+mod gfx_golden;
 
 use mercs2_engine::diag;
 use mercs2_engine::wad;
@@ -58,7 +59,8 @@ fn usage() -> ! {
          \x20 veg-census                    (foliage instancing: understory coverage + tag-set)\n\
          \x20 tree-census                   (foliage instancing: c3-cell canopy trees + instance list)\n\
          \x20 bone-census [names.txt] [--csv P] [--wads a.wad,b.wad]      (every HIER node in every model)\n\
-         \x20 gfx-extract [outdir]          (Scaleform movies -> output/gfx_movies)\n\
+         \x20 gfx-extract <outdir>          (every cfx_pack movie of --wad, verbatim)\n\
+         \x20 gfx-golden <movies_dir> --md <report.md> --json <index.json>   (no WAD needed)\n\
          \x20 extract --model H <out.bin>   dump-block <index> <out.bin>  find-placement <substring>\n\
          \x20 save-dump <profile> [needle]  overlays <profile>\n\
          (vz.wad auto-discovers from the registry; override with --wad <path>)"
@@ -97,6 +99,8 @@ fn first_positional(args: &[String]) -> Option<String> {
             || a == "--clip"
             || a == "--csv"
             || a == "--skeleton-csv"
+            || a == "--md"
+            || a == "--json"
         {
             skip_next = true;
             continue;
@@ -340,6 +344,26 @@ fn main() {
     let cmd = all[1].clone();
     let args: Vec<String> = all[2..].to_vec();
 
+    // Subcommands that read extracted files, not a WAD: dispatched before vz.wad is resolved.
+    if cmd == "gfx-golden" {
+        let usage = "gfx-golden: usage: mercs2_probe gfx-golden <movies_dir> --md <report.md> --json <index.json>";
+        let (Some(dir), Some(md), Some(json)) =
+            (first_positional(&args), flag_val(&args, "--md"), flag_val(&args, "--json"))
+        else {
+            eprintln!("{usage}");
+            std::process::exit(2);
+        };
+        if let Err(e) = gfx_golden::gfx_golden(
+            std::path::Path::new(&dir),
+            std::path::Path::new(&md),
+            std::path::Path::new(&json),
+        ) {
+            eprintln!("gfx-golden failed: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+
     // Resolve vz.wad: explicit --wad (a folder or the file), else $VZ_WAD, else the registry key.
     let wadpath = match wad::resolve_vz_wad(flag_val(&args, "--wad").as_deref()) {
         Some(p) => p,
@@ -416,7 +440,8 @@ fn main() {
         "tree-census" => diag::tree_census(&wadpath),
         "gfx-extract" => {
             let out = first_positional(&args).unwrap_or_else(|| {
-                "c:/Users/Shadow/Desktop/notes-on-the-released-game/output/gfx_movies".into()
+                eprintln!("gfx-extract: usage: mercs2_probe gfx-extract <outdir> [--wad <path>]");
+                std::process::exit(2);
             });
             run(diag::gfx_extract(&wadpath, &out));
         }

@@ -1,0 +1,1530 @@
+{
+  "source": {
+    "repo": "mercs2-tools-gfxforge-web",
+    "commit": "9c5c12e05f16404d391b3a788525653d29948e46",
+    "license": "MIT",
+    "author": "loganw234 (Improper Aperture)"
+  },
+  "generated_by": "scratchpad driver freeze.js (not part of the repo); node v25.9.0",
+  "suite": "shape-ex",
+  "source_file": "tests/suite.shape-ex.js",
+  "notes": [
+    "decoded = tests/shape-decoder.js decodeShape3Body() of the tag body (the independent test-side decoder)."
+  ],
+  "cases": [
+    {
+      "line": 18,
+      "name": "shapeEx: plain rect (no stroke, no radius) decodes to the same path as defineShape3",
+      "shapes": [
+        {
+          "fn": "defineShape3",
+          "args": [
+            2,
+            0,
+            0,
+            50,
+            20,
+            [
+              232,
+              140,
+              24
+            ]
+          ],
+          "gfxforge_hex": "2208020058007d0000c8000100e88c18ff001014279be8001c4006439c18001c4009c000",
+          "decoded": {
+            "shapeId": 2,
+            "rect": {
+              "xmin": 0,
+              "xmax": 1000,
+              "ymin": 0,
+              "ymax": 400,
+              "nextByteOffset": 7
+            },
+            "fillStyles": [
+              {
+                "type": "solid",
+                "color": [
+                  232,
+                  140,
+                  24,
+                  255
+                ]
+              }
+            ],
+            "lineStyles": [],
+            "numFillBits": 1,
+            "numLineBits": 0,
+            "path": [
+              {
+                "type": "move",
+                "x": 0,
+                "y": 0
+              },
+              {
+                "type": "line",
+                "x": 1000,
+                "y": 0,
+                "dx": 1000,
+                "dy": 0
+              },
+              {
+                "type": "line",
+                "x": 1000,
+                "y": 400,
+                "dx": 0,
+                "dy": 400
+              },
+              {
+                "type": "line",
+                "x": 0,
+                "y": 400,
+                "dx": -1000,
+                "dy": 0
+              },
+              {
+                "type": "line",
+                "x": 0,
+                "y": 0,
+                "dx": 0,
+                "dy": -400
+              }
+            ],
+            "fillStyle1": 1,
+            "lineStyle": 0
+          }
+        },
+        {
+          "fn": "defineShapeEx",
+          "args": [
+            2,
+            0,
+            0,
+            50,
+            20,
+            {
+              "fill": [
+                232,
+                140,
+                24
+              ]
+            }
+          ],
+          "gfxforge_hex": "2208020058007d0000c8000100e88c18ff001014279be8001c4006439c18001c4009c000",
+          "decoded": {
+            "shapeId": 2,
+            "rect": {
+              "xmin": 0,
+              "xmax": 1000,
+              "ymin": 0,
+              "ymax": 400,
+              "nextByteOffset": 7
+            },
+            "fillStyles": [
+              {
+                "type": "solid",
+                "color": [
+                  232,
+                  140,
+                  24,
+                  255
+                ]
+              }
+            ],
+            "lineStyles": [],
+            "numFillBits": 1,
+            "numLineBits": 0,
+            "path": [
+              {
+                "type": "move",
+                "x": 0,
+                "y": 0
+              },
+              {
+                "type": "line",
+                "x": 1000,
+                "y": 0,
+                "dx": 1000,
+                "dy": 0
+              },
+              {
+                "type": "line",
+                "x": 1000,
+                "y": 400,
+                "dx": 0,
+                "dy": 400
+              },
+              {
+                "type": "line",
+                "x": 0,
+                "y": 400,
+                "dx": -1000,
+                "dy": 0
+              },
+              {
+                "type": "line",
+                "x": 0,
+                "y": 0,
+                "dx": 0,
+                "dy": -400
+              }
+            ],
+            "fillStyle1": 1,
+            "lineStyle": 0
+          }
+        }
+      ]
+    },
+    {
+      "line": 30,
+      "name": "shapeEx: rounded rect path starts at (x1+r, y1), closes, and stays within stroke-padded bounds",
+      "shapes": [
+        {
+          "fn": "defineShapeEx",
+          "args": [
+            3,
+            10,
+            10,
+            60,
+            40,
+            {
+              "fill": [
+                200,
+                50,
+                50
+              ],
+              "radius": 5
+            }
+          ],
+          "gfxforge_hex": "37080300606425806419000100c83232ff001015496191e6c80004cc80000c9c400642600649c00e7380004d38000139c4009c26009c640000",
+          "decoded": {
+            "shapeId": 3,
+            "rect": {
+              "xmin": 200,
+              "xmax": 1200,
+              "ymin": 200,
+              "ymax": 800,
+              "nextByteOffset": 7
+            },
+            "fillStyles": [
+              {
+                "type": "solid",
+                "color": [
+                  200,
+                  50,
+                  50,
+                  255
+                ]
+              }
+            ],
+            "lineStyles": [],
+            "numFillBits": 1,
+            "numLineBits": 0,
+            "path": [
+              {
+                "type": "move",
+                "x": 300,
+                "y": 200
+              },
+              {
+                "type": "line",
+                "x": 1100,
+                "y": 200,
+                "dx": 800,
+                "dy": 0
+              },
+              {
+                "type": "curve",
+                "controlX": 1200,
+                "controlY": 200,
+                "x": 1200,
+                "y": 300
+              },
+              {
+                "type": "line",
+                "x": 1200,
+                "y": 700,
+                "dx": 0,
+                "dy": 400
+              },
+              {
+                "type": "curve",
+                "controlX": 1200,
+                "controlY": 800,
+                "x": 1100,
+                "y": 800
+              },
+              {
+                "type": "line",
+                "x": 300,
+                "y": 800,
+                "dx": -800,
+                "dy": 0
+              },
+              {
+                "type": "curve",
+                "controlX": 200,
+                "controlY": 800,
+                "x": 200,
+                "y": 700
+              },
+              {
+                "type": "line",
+                "x": 200,
+                "y": 300,
+                "dx": 0,
+                "dy": -400
+              },
+              {
+                "type": "curve",
+                "controlX": 200,
+                "controlY": 200,
+                "x": 300,
+                "y": 200
+              }
+            ],
+            "fillStyle1": 1,
+            "lineStyle": 0
+          }
+        }
+      ]
+    },
+    {
+      "line": 47,
+      "name": "shapeEx: corner curve control points sit exactly at the sharp rectangle corners",
+      "shapes": [
+        {
+          "fn": "defineShapeEx",
+          "args": [
+            4,
+            0,
+            0,
+            100,
+            50,
+            {
+              "fill": [
+                1,
+                2,
+                3
+              ],
+              "radius": 10
+            }
+          ],
+          "gfxforge_hex": "3a08040060003e80001f400100010203ff0010152c8007ab200004ec80000191cc002589c00c89c003ace00004f380000271cc005a89c01386400000",
+          "decoded": {
+            "shapeId": 4,
+            "rect": {
+              "xmin": 0,
+              "xmax": 2000,
+              "ymin": 0,
+              "ymax": 1000,
+              "nextByteOffset": 7
+            },
+            "fillStyles": [
+              {
+                "type": "solid",
+                "color": [
+                  1,
+                  2,
+                  3,
+                  255
+                ]
+              }
+            ],
+            "lineStyles": [],
+            "numFillBits": 1,
+            "numLineBits": 0,
+            "path": [
+              {
+                "type": "move",
+                "x": 200,
+                "y": 0
+              },
+              {
+                "type": "line",
+                "x": 1800,
+                "y": 0,
+                "dx": 1600,
+                "dy": 0
+              },
+              {
+                "type": "curve",
+                "controlX": 2000,
+                "controlY": 0,
+                "x": 2000,
+                "y": 200
+              },
+              {
+                "type": "line",
+                "x": 2000,
+                "y": 800,
+                "dx": 0,
+                "dy": 600
+              },
+              {
+                "type": "curve",
+                "controlX": 2000,
+                "controlY": 1000,
+                "x": 1800,
+                "y": 1000
+              },
+              {
+                "type": "line",
+                "x": 200,
+                "y": 1000,
+                "dx": -1600,
+                "dy": 0
+              },
+              {
+                "type": "curve",
+                "controlX": 0,
+                "controlY": 1000,
+                "x": 0,
+                "y": 800
+              },
+              {
+                "type": "line",
+                "x": 0,
+                "y": 200,
+                "dx": 0,
+                "dy": -600
+              },
+              {
+                "type": "curve",
+                "controlX": 0,
+                "controlY": 0,
+                "x": 200,
+                "y": 0
+              }
+            ],
+            "fillStyle1": 1,
+            "lineStyle": 0
+          }
+        }
+      ]
+    },
+    {
+      "line": 58,
+      "name": "shapeEx: radius is clamped so it can never exceed half the shorter side",
+      "shapes": [
+        {
+          "fn": "defineShapeEx",
+          "args": [
+            5,
+            0,
+            0,
+            20,
+            10,
+            {
+              "fill": [
+                1,
+                1,
+                1
+              ],
+              "radius": 100
+            }
+          ],
+          "gfxforge_hex": "310805005000c80006400100010101ff0010150c801dec8004cc80000c9842600649c00df38004d380001398426009c6400000",
+          "decoded": {
+            "shapeId": 5,
+            "rect": {
+              "xmin": 0,
+              "xmax": 400,
+              "ymin": 0,
+              "ymax": 200,
+              "nextByteOffset": 6
+            },
+            "fillStyles": [
+              {
+                "type": "solid",
+                "color": [
+                  1,
+                  1,
+                  1,
+                  255
+                ]
+              }
+            ],
+            "lineStyles": [],
+            "numFillBits": 1,
+            "numLineBits": 0,
+            "path": [
+              {
+                "type": "move",
+                "x": 100,
+                "y": 0
+              },
+              {
+                "type": "line",
+                "x": 300,
+                "y": 0,
+                "dx": 200,
+                "dy": 0
+              },
+              {
+                "type": "curve",
+                "controlX": 400,
+                "controlY": 0,
+                "x": 400,
+                "y": 100
+              },
+              {
+                "type": "line",
+                "x": 400,
+                "y": 100,
+                "dx": 0,
+                "dy": 0
+              },
+              {
+                "type": "curve",
+                "controlX": 400,
+                "controlY": 200,
+                "x": 300,
+                "y": 200
+              },
+              {
+                "type": "line",
+                "x": 100,
+                "y": 200,
+                "dx": -200,
+                "dy": 0
+              },
+              {
+                "type": "curve",
+                "controlX": 0,
+                "controlY": 200,
+                "x": 0,
+                "y": 100
+              },
+              {
+                "type": "line",
+                "x": 0,
+                "y": 100,
+                "dx": 0,
+                "dy": 0
+              },
+              {
+                "type": "curve",
+                "controlX": 0,
+                "controlY": 0,
+                "x": 100,
+                "y": 0
+              }
+            ],
+            "fillStyle1": 1,
+            "lineStyle": 0
+          }
+        }
+      ]
+    },
+    {
+      "line": 68,
+      "name": "shapeEx: stroke declares exactly one line style with the right width and color, selected on every edge",
+      "shapes": [
+        {
+          "fn": "defineShapeEx",
+          "args": [
+            6,
+            0,
+            0,
+            40,
+            20,
+            {
+              "fill": [
+                10,
+                20,
+                30
+              ],
+              "stroke": {
+                "width": 2,
+                "color": [
+                  255,
+                  0,
+                  0,
+                  255
+                ]
+              }
+            }
+          ],
+          "gfxforge_hex": "280806005fec669fb0d20001000a141eff012800ff0000ff113427cd90000e200321ce70000e2004e000",
+          "decoded": {
+            "shapeId": 6,
+            "rect": {
+              "xmin": -20,
+              "xmax": 820,
+              "ymin": -20,
+              "ymax": 420,
+              "nextByteOffset": 7
+            },
+            "fillStyles": [
+              {
+                "type": "solid",
+                "color": [
+                  10,
+                  20,
+                  30,
+                  255
+                ]
+              }
+            ],
+            "lineStyles": [
+              {
+                "width": 40,
+                "color": [
+                  255,
+                  0,
+                  0,
+                  255
+                ]
+              }
+            ],
+            "numFillBits": 1,
+            "numLineBits": 1,
+            "path": [
+              {
+                "type": "move",
+                "x": 0,
+                "y": 0
+              },
+              {
+                "type": "line",
+                "x": 800,
+                "y": 0,
+                "dx": 800,
+                "dy": 0
+              },
+              {
+                "type": "line",
+                "x": 800,
+                "y": 400,
+                "dx": 0,
+                "dy": 400
+              },
+              {
+                "type": "line",
+                "x": 0,
+                "y": 400,
+                "dx": -800,
+                "dy": 0
+              },
+              {
+                "type": "line",
+                "x": 0,
+                "y": 0,
+                "dx": 0,
+                "dy": -400
+              }
+            ],
+            "fillStyle1": 1,
+            "lineStyle": 1
+          }
+        }
+      ]
+    },
+    {
+      "line": 79,
+      "name": "shapeEx: no stroke means zero line styles and zero line bits",
+      "shapes": [
+        {
+          "fn": "defineShapeEx",
+          "args": [
+            7,
+            0,
+            0,
+            40,
+            20,
+            {
+              "fill": [
+                10,
+                20,
+                30
+              ]
+            }
+          ],
+          "gfxforge_hex": "220807005800640000c80001000a141eff001014279b20001c4006439ce0001c4009c000",
+          "decoded": {
+            "shapeId": 7,
+            "rect": {
+              "xmin": 0,
+              "xmax": 800,
+              "ymin": 0,
+              "ymax": 400,
+              "nextByteOffset": 7
+            },
+            "fillStyles": [
+              {
+                "type": "solid",
+                "color": [
+                  10,
+                  20,
+                  30,
+                  255
+                ]
+              }
+            ],
+            "lineStyles": [],
+            "numFillBits": 1,
+            "numLineBits": 0,
+            "path": [
+              {
+                "type": "move",
+                "x": 0,
+                "y": 0
+              },
+              {
+                "type": "line",
+                "x": 800,
+                "y": 0,
+                "dx": 800,
+                "dy": 0
+              },
+              {
+                "type": "line",
+                "x": 800,
+                "y": 400,
+                "dx": 0,
+                "dy": 400
+              },
+              {
+                "type": "line",
+                "x": 0,
+                "y": 400,
+                "dx": -800,
+                "dy": 0
+              },
+              {
+                "type": "line",
+                "x": 0,
+                "y": 0,
+                "dx": 0,
+                "dy": -400
+              }
+            ],
+            "fillStyle1": 1,
+            "lineStyle": 0
+          }
+        }
+      ]
+    },
+    {
+      "line": 87,
+      "name": "shapeEx: stroke bounding rect is padded by half the stroke width on every side",
+      "shapes": [
+        {
+          "fn": "defineShapeEx",
+          "args": [
+            8,
+            10,
+            10,
+            30,
+            20,
+            {
+              "fill": [
+                1,
+                1,
+                1
+              ],
+              "stroke": {
+                "width": 4,
+                "color": [
+                  0,
+                  0,
+                  0,
+                  255
+                ]
+              }
+            }
+          ],
+          "gfxforge_hex": "2908080058a0500280dc000100010101ff015000000000ff11352c8647c590003780191c67000378027000",
+          "decoded": {
+            "shapeId": 8,
+            "rect": {
+              "xmin": 160,
+              "xmax": 640,
+              "ymin": 160,
+              "ymax": 440,
+              "nextByteOffset": 7
+            },
+            "fillStyles": [
+              {
+                "type": "solid",
+                "color": [
+                  1,
+                  1,
+                  1,
+                  255
+                ]
+              }
+            ],
+            "lineStyles": [
+              {
+                "width": 80,
+                "color": [
+                  0,
+                  0,
+                  0,
+                  255
+                ]
+              }
+            ],
+            "numFillBits": 1,
+            "numLineBits": 1,
+            "path": [
+              {
+                "type": "move",
+                "x": 200,
+                "y": 200
+              },
+              {
+                "type": "line",
+                "x": 600,
+                "y": 200,
+                "dx": 400,
+                "dy": 0
+              },
+              {
+                "type": "line",
+                "x": 600,
+                "y": 400,
+                "dx": 0,
+                "dy": 200
+              },
+              {
+                "type": "line",
+                "x": 200,
+                "y": 400,
+                "dx": -400,
+                "dy": 0
+              },
+              {
+                "type": "line",
+                "x": 200,
+                "y": 200,
+                "dx": 0,
+                "dy": -200
+              }
+            ],
+            "fillStyle1": 1,
+            "lineStyle": 1
+          }
+        }
+      ]
+    },
+    {
+      "line": 96,
+      "name": "shapeEx: horizontal linear gradient — ratio 0 at left edge, ratio 255 at right edge, no rotation",
+      "shapes": [
+        {
+          "fn": "defineShapeEx",
+          "args": [
+            9,
+            0,
+            0,
+            100,
+            50,
+            {
+              "fill": {
+                "type": "linear",
+                "direction": "horizontal",
+                "stops": [
+                  {
+                    "ratio": 0,
+                    "color": [
+                      255,
+                      0,
+                      0,
+                      255
+                    ]
+                  },
+                  {
+                    "ratio": 255,
+                    "color": [
+                      0,
+                      0,
+                      255,
+                      255
+                    ]
+                  }
+                ]
+              }
+            }
+          ],
+          "gfxforge_hex": "3308090060003e80001f400110b5f407d0845be83e800200ff0000ffff0000ffff00101427abe800073000fa3ac180007300106000",
+          "decoded": {
+            "shapeId": 9,
+            "rect": {
+              "xmin": 0,
+              "xmax": 2000,
+              "ymin": 0,
+              "ymax": 1000,
+              "nextByteOffset": 7
+            },
+            "fillStyles": [
+              {
+                "type": "linear",
+                "matrix": {
+                  "scaleX": 0.06103515625,
+                  "scaleY": 0.030517578125,
+                  "rotateSkew0": 0,
+                  "rotateSkew1": 0,
+                  "translateX": 1000,
+                  "translateY": 500
+                },
+                "spreadMode": 0,
+                "interp": 0,
+                "stops": [
+                  {
+                    "ratio": 0,
+                    "color": [
+                      255,
+                      0,
+                      0,
+                      255
+                    ]
+                  },
+                  {
+                    "ratio": 255,
+                    "color": [
+                      0,
+                      0,
+                      255,
+                      255
+                    ]
+                  }
+                ]
+              }
+            ],
+            "lineStyles": [],
+            "numFillBits": 1,
+            "numLineBits": 0,
+            "path": [
+              {
+                "type": "move",
+                "x": 0,
+                "y": 0
+              },
+              {
+                "type": "line",
+                "x": 2000,
+                "y": 0,
+                "dx": 2000,
+                "dy": 0
+              },
+              {
+                "type": "line",
+                "x": 2000,
+                "y": 1000,
+                "dx": 0,
+                "dy": 1000
+              },
+              {
+                "type": "line",
+                "x": 0,
+                "y": 1000,
+                "dx": -2000,
+                "dy": 0
+              },
+              {
+                "type": "line",
+                "x": 0,
+                "y": 0,
+                "dx": 0,
+                "dy": -1000
+              }
+            ],
+            "fillStyle1": 1,
+            "lineStyle": 0
+          }
+        }
+      ]
+    },
+    {
+      "line": 114,
+      "name": "shapeEx: vertical linear gradient — ratio 0 at top edge, ratio 255 at bottom edge",
+      "shapes": [
+        {
+          "fn": "defineShapeEx",
+          "args": [
+            10,
+            0,
+            0,
+            100,
+            50,
+            {
+              "fill": {
+                "type": "linear",
+                "direction": "vertical",
+                "stops": [
+                  {
+                    "ratio": 0,
+                    "color": [
+                      255,
+                      255,
+                      255,
+                      255
+                    ]
+                  },
+                  {
+                    "ratio": 255,
+                    "color": [
+                      0,
+                      0,
+                      0,
+                      255
+                    ]
+                  }
+                ]
+              }
+            }
+          ],
+          "gfxforge_hex": "33080a0060003e80001f40011084b4fa0fa05be83e800200ffffffffff000000ff00101427abe800073000fa3ac180007300106000",
+          "decoded": {
+            "shapeId": 10,
+            "rect": {
+              "xmin": 0,
+              "xmax": 2000,
+              "ymin": 0,
+              "ymax": 1000,
+              "nextByteOffset": 7
+            },
+            "fillStyles": [
+              {
+                "type": "linear",
+                "matrix": {
+                  "scaleX": 0,
+                  "scaleY": 0,
+                  "rotateSkew0": 0.030517578125,
+                  "rotateSkew1": 0.06103515625,
+                  "translateX": 1000,
+                  "translateY": 500
+                },
+                "spreadMode": 0,
+                "interp": 0,
+                "stops": [
+                  {
+                    "ratio": 0,
+                    "color": [
+                      255,
+                      255,
+                      255,
+                      255
+                    ]
+                  },
+                  {
+                    "ratio": 255,
+                    "color": [
+                      0,
+                      0,
+                      0,
+                      255
+                    ]
+                  }
+                ]
+              }
+            ],
+            "lineStyles": [],
+            "numFillBits": 1,
+            "numLineBits": 0,
+            "path": [
+              {
+                "type": "move",
+                "x": 0,
+                "y": 0
+              },
+              {
+                "type": "line",
+                "x": 2000,
+                "y": 0,
+                "dx": 2000,
+                "dy": 0
+              },
+              {
+                "type": "line",
+                "x": 2000,
+                "y": 1000,
+                "dx": 0,
+                "dy": 1000
+              },
+              {
+                "type": "line",
+                "x": 0,
+                "y": 1000,
+                "dx": -2000,
+                "dy": 0
+              },
+              {
+                "type": "line",
+                "x": 0,
+                "y": 0,
+                "dx": 0,
+                "dy": -1000
+              }
+            ],
+            "fillStyle1": 1,
+            "lineStyle": 0
+          }
+        }
+      ]
+    },
+    {
+      "line": 128,
+      "name": "shapeEx: radial gradient uses fill type 0x12 and a centered, non-rotated matrix",
+      "shapes": [
+        {
+          "fn": "defineShapeEx",
+          "args": [
+            11,
+            0,
+            0,
+            60,
+            60,
+            {
+              "fill": {
+                "type": "radial",
+                "stops": [
+                  {
+                    "ratio": 0,
+                    "color": [
+                      255,
+                      255,
+                      255,
+                      255
+                    ]
+                  },
+                  {
+                    "ratio": 255,
+                    "color": [
+                      0,
+                      0,
+                      0,
+                      128
+                    ]
+                  }
+                ]
+              }
+            }
+          ],
+          "gfxforge_hex": "33080b00600025800025800112b52c0960845a584b000200ffffffffff0000008000101427aa58000750004b0eb6a0001d4002d400",
+          "decoded": {
+            "shapeId": 11,
+            "rect": {
+              "xmin": 0,
+              "xmax": 1200,
+              "ymin": 0,
+              "ymax": 1200,
+              "nextByteOffset": 7
+            },
+            "fillStyles": [
+              {
+                "type": "radial",
+                "matrix": {
+                  "scaleX": 0.03662109375,
+                  "scaleY": 0.03662109375,
+                  "rotateSkew0": 0,
+                  "rotateSkew1": 0,
+                  "translateX": 600,
+                  "translateY": 600
+                },
+                "spreadMode": 0,
+                "interp": 0,
+                "stops": [
+                  {
+                    "ratio": 0,
+                    "color": [
+                      255,
+                      255,
+                      255,
+                      255
+                    ]
+                  },
+                  {
+                    "ratio": 255,
+                    "color": [
+                      0,
+                      0,
+                      0,
+                      128
+                    ]
+                  }
+                ]
+              }
+            ],
+            "lineStyles": [],
+            "numFillBits": 1,
+            "numLineBits": 0,
+            "path": [
+              {
+                "type": "move",
+                "x": 0,
+                "y": 0
+              },
+              {
+                "type": "line",
+                "x": 1200,
+                "y": 0,
+                "dx": 1200,
+                "dy": 0
+              },
+              {
+                "type": "line",
+                "x": 1200,
+                "y": 1200,
+                "dx": 0,
+                "dy": 1200
+              },
+              {
+                "type": "line",
+                "x": 0,
+                "y": 1200,
+                "dx": -1200,
+                "dy": 0
+              },
+              {
+                "type": "line",
+                "x": 0,
+                "y": 0,
+                "dx": 0,
+                "dy": -1200
+              }
+            ],
+            "fillStyle1": 1,
+            "lineStyle": 0
+          }
+        }
+      ]
+    },
+    {
+      "line": 140,
+      "name": "shapeEx: three-stop gradient round-trips all stops in order",
+      "shapes": [
+        {
+          "fn": "defineShapeEx",
+          "args": [
+            12,
+            0,
+            0,
+            100,
+            20,
+            {
+              "fill": {
+                "type": "linear",
+                "direction": "horizontal",
+                "stops": [
+                  {
+                    "ratio": 0,
+                    "color": [
+                      255,
+                      0,
+                      0,
+                      255
+                    ]
+                  },
+                  {
+                    "ratio": 128,
+                    "color": [
+                      0,
+                      255,
+                      0,
+                      255
+                    ]
+                  },
+                  {
+                    "ratio": 255,
+                    "color": [
+                      0,
+                      0,
+                      255,
+                      255
+                    ]
+                  }
+                ]
+              }
+            }
+          ],
+          "gfxforge_hex": "37080c0060003e80000c800110b5f40320845be819000300ff0000ff8000ff00ffff0000ffff00101427abe80007100190eb060001c4009c00",
+          "decoded": {
+            "shapeId": 12,
+            "rect": {
+              "xmin": 0,
+              "xmax": 2000,
+              "ymin": 0,
+              "ymax": 400,
+              "nextByteOffset": 7
+            },
+            "fillStyles": [
+              {
+                "type": "linear",
+                "matrix": {
+                  "scaleX": 0.06103515625,
+                  "scaleY": 0.01220703125,
+                  "rotateSkew0": 0,
+                  "rotateSkew1": 0,
+                  "translateX": 1000,
+                  "translateY": 200
+                },
+                "spreadMode": 0,
+                "interp": 0,
+                "stops": [
+                  {
+                    "ratio": 0,
+                    "color": [
+                      255,
+                      0,
+                      0,
+                      255
+                    ]
+                  },
+                  {
+                    "ratio": 128,
+                    "color": [
+                      0,
+                      255,
+                      0,
+                      255
+                    ]
+                  },
+                  {
+                    "ratio": 255,
+                    "color": [
+                      0,
+                      0,
+                      255,
+                      255
+                    ]
+                  }
+                ]
+              }
+            ],
+            "lineStyles": [],
+            "numFillBits": 1,
+            "numLineBits": 0,
+            "path": [
+              {
+                "type": "move",
+                "x": 0,
+                "y": 0
+              },
+              {
+                "type": "line",
+                "x": 2000,
+                "y": 0,
+                "dx": 2000,
+                "dy": 0
+              },
+              {
+                "type": "line",
+                "x": 2000,
+                "y": 400,
+                "dx": 0,
+                "dy": 400
+              },
+              {
+                "type": "line",
+                "x": 0,
+                "y": 400,
+                "dx": -2000,
+                "dy": 0
+              },
+              {
+                "type": "line",
+                "x": 0,
+                "y": 0,
+                "dx": 0,
+                "dy": -400
+              }
+            ],
+            "fillStyle1": 1,
+            "lineStyle": 0
+          }
+        }
+      ]
+    },
+    {
+      "line": 151,
+      "name": "shapeEx: tiny 1px shape with both stroke and radius does not corrupt the bit-packing (nb>=2 clamp)",
+      "shapes": [
+        {
+          "fn": "defineShapeEx",
+          "args": [
+            13,
+            0,
+            0,
+            1,
+            1,
+            {
+              "fill": [
+                1,
+                1,
+                1
+              ],
+              "radius": 1,
+              "stroke": {
+                "width": 1,
+                "color": [
+                  2,
+                  2,
+                  2,
+                  255
+                ]
+              }
+            }
+          ],
+          "gfxforge_hex": "2b080d0036cf6cf00100010101ff011400020202ff1134aa0784235000ac211815606108ec005b08460b280000",
+          "decoded": {
+            "shapeId": 13,
+            "rect": {
+              "xmin": -10,
+              "xmax": 30,
+              "ymin": -10,
+              "ymax": 30,
+              "nextByteOffset": 4
+            },
+            "fillStyles": [
+              {
+                "type": "solid",
+                "color": [
+                  1,
+                  1,
+                  1,
+                  255
+                ]
+              }
+            ],
+            "lineStyles": [
+              {
+                "width": 20,
+                "color": [
+                  2,
+                  2,
+                  2,
+                  255
+                ]
+              }
+            ],
+            "numFillBits": 1,
+            "numLineBits": 1,
+            "path": [
+              {
+                "type": "move",
+                "x": 10,
+                "y": 0
+              },
+              {
+                "type": "line",
+                "x": 10,
+                "y": 0,
+                "dx": 0,
+                "dy": 0
+              },
+              {
+                "type": "curve",
+                "controlX": 20,
+                "controlY": 0,
+                "x": 20,
+                "y": 10
+              },
+              {
+                "type": "line",
+                "x": 20,
+                "y": 10,
+                "dx": 0,
+                "dy": 0
+              },
+              {
+                "type": "curve",
+                "controlX": 20,
+                "controlY": 20,
+                "x": 10,
+                "y": 20
+              },
+              {
+                "type": "line",
+                "x": 10,
+                "y": 20,
+                "dx": 0,
+                "dy": 0
+              },
+              {
+                "type": "curve",
+                "controlX": 0,
+                "controlY": 20,
+                "x": 0,
+                "y": 10
+              },
+              {
+                "type": "line",
+                "x": 0,
+                "y": 10,
+                "dx": 0,
+                "dy": 0
+              },
+              {
+                "type": "curve",
+                "controlX": 0,
+                "controlY": 0,
+                "x": 10,
+                "y": 0
+              }
+            ],
+            "fillStyle1": 1,
+            "lineStyle": 1
+          }
+        }
+      ]
+    },
+    {
+      "line": 160,
+      "name": "shapeEx: a movie built with rounded/stroked/gradient shapes still verifies structurally end to end",
+      "input": {
+        "raw_assembly": [
+          "exporterInfo(\"shapes\")",
+          "fileAttributes()",
+          "setBackgroundColor([0,0,0])",
+          "defineShapeEx(2,0,0,100,40,{fill:linear vertical [80,80,80,255]->[20,20,20,255], radius:6, stroke:{width:1,color:[255,255,255,128]}})",
+          "placeObject(2,1)",
+          "SHOW_FRAME",
+          "END"
+        ],
+        "buildGfx": [
+          200,
+          100,
+          30
+        ]
+      },
+      "output": {
+        "movie": {
+          "gfxforge": "474658089100000068001f400003e800001e010010fa0702000000000d00000673686170657344110000000043020000003f084e000000020067fb3ed7fb1950011084b4c80fa05be832000200505050ffff141414ff011400ffffff8011350f001f56e000099e00001e398004613003c4400759200009a200002239800ba1300443c00000860606010002000040000000",
+          "length": 145,
+          "gfxforge_sha256": "72de989f7e1aa024579024c0261c26efbccc9a9e9131630483f1398b66e59f0d",
+          "retail_corrected": "474658088900000068001f400003e800001e010010fa0702130000000d00000673686170657344110000000043020000003f084e000000020067fb3ed7fb1950011084b4c80fa05be832000200505050ffff141414ff011400ffffff8011350f001f56e000099e00001e398004613003c4400759200009a200002239800ba1300443c00000860606010002000040000000",
+          "corrections_applied": [
+            {
+              "deviation": "D3",
+              "offset": 4,
+              "from": 145,
+              "to": 137
+            },
+            {
+              "deviation": "D4",
+              "offset": 24,
+              "from": 0,
+              "to": 19
+            }
+          ]
+        },
+        "gfxforge_verify_summary": {
+          "bytes": 145,
+          "tags": {
+            "0": 1,
+            "1": 1,
+            "9": 1,
+            "26": 1,
+            "32": 1,
+            "69": 1,
+            "1000": 1
+          },
+          "functions": []
+        }
+      }
+    }
+  ]
+}

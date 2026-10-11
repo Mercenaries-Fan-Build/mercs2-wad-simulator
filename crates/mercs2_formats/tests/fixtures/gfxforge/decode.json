@@ -1,0 +1,232 @@
+{
+  "source": {
+    "repo": "mercs2-tools-gfxforge-web",
+    "commit": "9c5c12e05f16404d391b3a788525653d29948e46",
+    "license": "MIT",
+    "author": "loganw234 (Improper Aperture)"
+  },
+  "generated_by": "scratchpad driver freeze.js (not part of the repo); node v25.9.0",
+  "suite": "decode",
+  "source_file": "tests/suite.decode.js",
+  "notes": [],
+  "cases": [
+    {
+      "line": 5,
+      "name": "decode: round-trips an authored movie into editable items",
+      "input": {
+        "movie_calls": [
+          {
+            "op": "new",
+            "args": [
+              200,
+              100,
+              {
+                "name": "dec",
+                "background": [
+                  10,
+                  10,
+                  10
+                ]
+              }
+            ]
+          },
+          {
+            "op": "rect",
+            "args": [
+              0,
+              0,
+              200,
+              20,
+              [
+                232,
+                140,
+                24
+              ]
+            ]
+          },
+          {
+            "op": "text",
+            "args": [
+              8,
+              4,
+              "HELLO",
+              {
+                "size": 13,
+                "color": [
+                  255,
+                  255,
+                  255
+                ],
+                "varName": "v"
+              }
+            ]
+          },
+          {
+            "op": "clip",
+            "args": [
+              "bar",
+              8,
+              40,
+              100,
+              8,
+              [
+                0,
+                200,
+                0
+              ]
+            ]
+          },
+          {
+            "op": "button",
+            "args": [
+              8,
+              60,
+              80,
+              20,
+              "go",
+              {
+                "label": "GO"
+              }
+            ]
+          }
+        ]
+      },
+      "output": {
+        "movie": {
+          "gfxforge": "474658089401000068001f400003e800001e01000dfa0702000000000d00000364656344110000000043020a0a0ae4115f6e6f726d616c5f466f6e742e737766000100010001005f6e6f726d616c5f466f6e74002408020068001f400000c8000100e88c18ff00101427bbe80001c400643bc180001c4009c0005c09030068281ea00500e6008d1101000401ffffffff760048454c4c4f002208040060003e80000500010000c800ff00101427abe80006f00283ac180006f0058000d0090500010086060601000400004000000025080600605037025832000100343a44ff0010158140961eac80001c400643ace0000710027000250807006050370258320001004a5260ff0010158140961eac80001c400643ace0000710027000ea01080009060001000006070001000000960e00004653436f6d6d616e643a676f0096020000009a0100000057090900608c35c26c32008d1101000401ebeef2ff00474f00860606010002000086060602000300008d06260300050016281900626172008606060400080000860606050009000040000000",
+          "length": 404,
+          "gfxforge_sha256": "37500586ebb61b2f8c075649620421ca6af299d73e172e0b4f743f897e050c23",
+          "retail_corrected": "474658088c01000068001f400003e800001e01000dfa0702130000000d00000364656344110000000043020a0a0ae4115f6e6f726d616c5f466f6e742e737766000100010001005f6e6f726d616c5f466f6e74002408020068001f400000c8000100e88c18ff00101427bbe80001c400643bc180001c4009c0005c09030068281ea00500e6008d1101000401ffffffff760048454c4c4f002208040060003e80000500010000c800ff00101427abe80006f00283ac180006f0058000d0090500010086060601000400004000000025080600605037025832000100343a44ff0010158140961eac80001c400643ace0000710027000250807006050370258320001004a5260ff0010158140961eac80001c400643ace0000710027000ea01080009060001000006070001000000960e00004653436f6d6d616e643a676f0096020000009a0100000057090900608c35c26c32008d1101000401ebeef2ff00474f00860606010002000086060602000300008d06260300050016281900626172008606060400080000860606050009000040000000",
+          "corrections_applied": [
+            {
+              "deviation": "D3",
+              "offset": 4,
+              "from": 404,
+              "to": 396
+            },
+            {
+              "deviation": "D4",
+              "offset": 24,
+              "from": 0,
+              "to": 19
+            }
+          ],
+          "retail_corrected_unavailable": "D6: gfxforge emitted 1 DefineButton (tag 7) record(s) (movie.js:384); retail movies contain none, so a Rust component must not emit DefineButton. No byte-patch can derive the retail-correct component output; 'retail_corrected' above only fixes D1/D3/D4 and still contains tag 7 — it is NOT a valid authoring target."
+        },
+        "gfxforge_verify_summary": {
+          "bytes": 404,
+          "tags": {
+            "0": 1,
+            "1": 1,
+            "7": 1,
+            "9": 1,
+            "26": 5,
+            "32": 4,
+            "37": 2,
+            "39": 1,
+            "69": 1,
+            "71": 1,
+            "1000": 1
+          },
+          "functions": []
+        },
+        "gfxforge_decode": {
+          "project": {
+            "version": 1,
+            "stage": {
+              "width": 200,
+              "height": 100,
+              "fps": 30,
+              "name": "dec"
+            },
+            "items": [
+              {
+                "kind": "rect",
+                "x": 0,
+                "y": 0,
+                "w": 200,
+                "h": 20,
+                "fill": [
+                  232,
+                  140,
+                  24,
+                  255
+                ]
+              },
+              {
+                "kind": "text",
+                "x": 8,
+                "y": 4,
+                "width": 188,
+                "size": 13,
+                "color": [
+                  255,
+                  255,
+                  255,
+                  255
+                ],
+                "text": "HELLO",
+                "var": "v"
+              },
+              {
+                "kind": "clip",
+                "name": "bar",
+                "x": 8,
+                "y": 40,
+                "w": 100,
+                "h": 8,
+                "fill": [
+                  0,
+                  200,
+                  0,
+                  255
+                ]
+              },
+              {
+                "kind": "button",
+                "x": 8,
+                "y": 60,
+                "w": 80,
+                "h": 20,
+                "event": "go",
+                "fill": [
+                  52,
+                  58,
+                  68,
+                  255
+                ],
+                "hover": null
+              },
+              {
+                "kind": "text",
+                "x": 14,
+                "y": 62,
+                "width": 72,
+                "size": 13,
+                "color": [
+                  235,
+                  238,
+                  242,
+                  255
+                ],
+                "text": "GO"
+              }
+            ],
+            "script": ""
+          },
+          "notes": []
+        }
+      }
+    },
+    {
+      "line": 37,
+      "name": "decode: rejects non-movie input",
+      "input": {
+        "bytes_hex": "0102030405060708"
+      },
+      "output": {
+        "gfxforge_error": "not a GFX/SWF movie (magic \"\\u0001\\u0002\\u0003\")"
+      }
+    }
+  ]
+}

@@ -98,9 +98,6 @@ As tools — the crate's binaries are auto-discovered from `src/bin/`:
 # dump the collision hulls in a model container's PHY2 chunk
 cargo run -p mercs2_formats --bin phy2_probe -- <model_block.bin>
 
-# inventory the extracted retail Scaleform movies into a golden reference set
-cargo run -p mercs2_formats --bin gfx_golden
-
 # conform a novel rigid mesh into a real vehicle/static donor container
 cargo run -p mercs2_formats --bin inject_static -- --help
 

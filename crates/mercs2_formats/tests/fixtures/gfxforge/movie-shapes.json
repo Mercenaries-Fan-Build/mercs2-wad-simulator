@@ -1,0 +1,662 @@
+{
+  "source": {
+    "repo": "mercs2-tools-gfxforge-web",
+    "commit": "9c5c12e05f16404d391b3a788525653d29948e46",
+    "license": "MIT",
+    "author": "loganw234 (Improper Aperture)"
+  },
+  "generated_by": "scratchpad driver freeze.js (not part of the repo); node v25.9.0",
+  "suite": "movie-shapes",
+  "source_file": "tests/suite.movie-shapes.js",
+  "notes": [],
+  "cases": [
+    {
+      "line": 5,
+      "name": "movie integration: rect() with no options produces byte-identical output to the original baseline",
+      "input": {
+        "movie_calls": [
+          {
+            "op": "new",
+            "args": [
+              380,
+              150,
+              {
+                "name": "hud",
+                "background": [
+                  22,
+                  24,
+                  28
+                ]
+              }
+            ]
+          },
+          {
+            "op": "rect",
+            "args": [
+              0,
+              0,
+              380,
+              30,
+              [
+                232,
+                140,
+                24
+              ]
+            ]
+          },
+          {
+            "op": "text",
+            "args": [
+              14,
+              6,
+              "OPERATOR STATUS",
+              {
+                "size": 15,
+                "color": [
+                  25,
+                  25,
+                  25
+                ]
+              }
+            ]
+          },
+          {
+            "op": "text",
+            "args": [
+              16,
+              40,
+              "HEALTH",
+              {
+                "size": 13,
+                "color": [
+                  228,
+                  232,
+                  236
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "output": {
+        "movie": {
+          "gfxforge": "47465808dc00000070000ed800005dc0001e01000dfa0702000000000d000003687564441100000000430216181ce4115f6e6f726d616c5f466f6e742e737766000100010001005f6e6f726d616c5f466f6e74002508020070000ed8000012c00100e88c18ff00101427cbb6000073000963cc4a0000730016a0006509030070230eb000f010e08d1101002c01191919ff004f50455241544f5220535441545553005c09040070280eb0064024e08d1101000401e4e8ecff004845414c54480086060601000200008606060200030000860606030004000040000000",
+          "length": 220,
+          "gfxforge_sha256": "6a6cf0d381a777bad5b6e5119de884adc2bca1a3051e9a977a8c047486fbcfe1",
+          "retail_corrected": "47465808d400000070000ed800005dc0001e01000dfa0702130000000d000003687564441100000000430216181ce4115f6e6f726d616c5f466f6e742e737766000100010001005f6e6f726d616c5f466f6e74002508020070000ed8000012c00100e88c18ff00101427cbb6000073000963cc4a0000730016a0006509030070230eb000f010e08d1101002c01191919ff004f50455241544f5220535441545553005c09040070280eb0064024e08d1101000401e4e8ecff004845414c54480086060601000200008606060200030000860606030004000040000000",
+          "corrections_applied": [
+            {
+              "deviation": "D3",
+              "offset": 4,
+              "from": 220,
+              "to": 212
+            },
+            {
+              "deviation": "D4",
+              "offset": 24,
+              "from": 0,
+              "to": 19
+            }
+          ]
+        },
+        "gfxforge_verify_summary": {
+          "bytes": 220,
+          "tags": {
+            "0": 1,
+            "1": 1,
+            "9": 1,
+            "26": 3,
+            "32": 1,
+            "37": 2,
+            "69": 1,
+            "71": 1,
+            "1000": 1
+          },
+          "functions": []
+        },
+        "asserted_length": 220
+      }
+    },
+    {
+      "line": 14,
+      "name": "movie integration: rect() with a gradient fill builds and verifies",
+      "input": {
+        "movie_calls": [
+          {
+            "op": "new",
+            "args": [
+              200,
+              100,
+              {
+                "name": "t"
+              }
+            ]
+          },
+          {
+            "op": "rect",
+            "args": [
+              0,
+              0,
+              200,
+              40,
+              {
+                "type": "linear",
+                "direction": "vertical",
+                "stops": [
+                  {
+                    "ratio": 0,
+                    "color": [
+                      80,
+                      80,
+                      80
+                    ]
+                  },
+                  {
+                    "ratio": 255,
+                    "color": [
+                      20,
+                      20,
+                      20
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "output": {
+        "movie": {
+          "gfxforge": "474658086e00000068001f400003e800001e01000bfa0702000000000d0000017444110000000043020000003408020068001f4000019000011084b86407d018fa03200200505050ffff141414ff00101427bbe80001cc00320ef060000730013800860606010002000040000000",
+          "length": 110,
+          "gfxforge_sha256": "6dc518faf64e05128abbb91bbc5ababd65d207d0e9c67bee5516baaaa752f0c5",
+          "retail_corrected": "474658086600000068001f400003e800001e01000bfa0702130000000d0000017444110000000043020000003408020068001f4000019000011084b86407d018fa03200200505050ffff141414ff00101427bbe80001cc00320ef060000730013800860606010002000040000000",
+          "corrections_applied": [
+            {
+              "deviation": "D3",
+              "offset": 4,
+              "from": 110,
+              "to": 102
+            },
+            {
+              "deviation": "D4",
+              "offset": 24,
+              "from": 0,
+              "to": 19
+            }
+          ]
+        },
+        "gfxforge_verify_summary": {
+          "bytes": 110,
+          "tags": {
+            "0": 1,
+            "1": 1,
+            "9": 1,
+            "26": 1,
+            "32": 1,
+            "69": 1,
+            "1000": 1
+          },
+          "functions": []
+        }
+      }
+    },
+    {
+      "line": 22,
+      "name": "movie integration: rect() with radius and stroke builds and verifies",
+      "input": {
+        "movie_calls": [
+          {
+            "op": "new",
+            "args": [
+              200,
+              100,
+              {
+                "name": "t"
+              }
+            ]
+          },
+          {
+            "op": "rect",
+            "args": [
+              10,
+              10,
+              100,
+              40,
+              [
+                50,
+                50,
+                50
+              ],
+              {
+                "radius": 8,
+                "stroke": {
+                  "width": 2,
+                  "color": [
+                    255,
+                    255,
+                    255
+                  ]
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "output": {
+        "movie": {
+          "gfxforge": "474658087f00000068001f400003e800001e01000bfa0702000000000d0000017444110000000043020000003f08410000000200682d11580b41fe000100323232ff012800ffffffff11354b4191f56900009d4000002838800f04e005058001d65c00027b00000160e2004413802c0a000000860606010002000040000000",
+          "length": 127,
+          "gfxforge_sha256": "9d7073c104a114c2e724f4435ec0c1269fff2206ded8130e3d50b8dd39e2e4ae",
+          "retail_corrected": "474658087700000068001f400003e800001e01000bfa0702130000000d0000017444110000000043020000003f08410000000200682d11580b41fe000100323232ff012800ffffffff11354b4191f56900009d4000002838800f04e005058001d65c00027b00000160e2004413802c0a000000860606010002000040000000",
+          "corrections_applied": [
+            {
+              "deviation": "D3",
+              "offset": 4,
+              "from": 127,
+              "to": 119
+            },
+            {
+              "deviation": "D4",
+              "offset": 24,
+              "from": 0,
+              "to": 19
+            }
+          ]
+        },
+        "gfxforge_verify_summary": {
+          "bytes": 127,
+          "tags": {
+            "0": 1,
+            "1": 1,
+            "9": 1,
+            "26": 1,
+            "32": 1,
+            "69": 1,
+            "1000": 1
+          },
+          "functions": []
+        }
+      }
+    },
+    {
+      "line": 30,
+      "name": "movie integration: button() with radius/stroke/gradient on both up and hover states",
+      "input": {
+        "movie_calls": [
+          {
+            "op": "new",
+            "args": [
+              200,
+              100,
+              {
+                "name": "t"
+              }
+            ]
+          },
+          {
+            "op": "button",
+            "args": [
+              10,
+              10,
+              80,
+              24,
+              "go",
+              {
+                "label": "GO",
+                "fill": {
+                  "type": "linear",
+                  "direction": "vertical",
+                  "stops": [
+                    {
+                      "ratio": 0,
+                      "color": [
+                        90,
+                        90,
+                        90
+                      ]
+                    },
+                    {
+                      "ratio": 255,
+                      "color": [
+                        40,
+                        40,
+                        40
+                      ]
+                    }
+                  ]
+                },
+                "hover": {
+                  "type": "linear",
+                  "direction": "vertical",
+                  "stops": [
+                    {
+                      "ratio": 0,
+                      "color": [
+                        110,
+                        110,
+                        110
+                      ]
+                    },
+                    {
+                      "ratio": 255,
+                      "color": [
+                        60,
+                        60,
+                        60
+                      ]
+                    }
+                  ]
+                },
+                "radius": 4,
+                "stroke": {
+                  "width": 1,
+                  "color": [
+                    255,
+                    255,
+                    255,
+                    100
+                  ]
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "output": {
+        "movie": {
+          "gfxforge": "474658085301000068001f400003e800001e01000bfa0702000000000d000001744411000000004302000000e4115f6e6f726d616c5f466f6e742e737766000100010001005f6e6f726d616c5f466f6e74003f084e0000000200605f38905f1590011084b4780c805be8370002005a5a5affff282828ff011400ffffff64113548c191f55a000099400001438800a04c00a16001d69800026b00000b0e2005813005828000003f084e0000000300605f38905f1590011084b4780c805be8370002006e6e6effff3c3c3cff011400ffffff64113548c191f55a000099400001438800a04c00a16001d69800026b00000b0e200581300582800000ea01040009020001000006030001000000960e00004653436f6d6d616e643a676f0096020000009a010000005709050060a037008c15408d1101000401ebeef2ff00474f008606060100040000860606020005000040000000",
+          "length": 339,
+          "gfxforge_sha256": "cf3df5fe8b0703d34237f3f92a90fbca091a1c5fd35079f83d00c84df19ea49b",
+          "retail_corrected": "474658084b01000068001f400003e800001e01000bfa0702130000000d000001744411000000004302000000e4115f6e6f726d616c5f466f6e742e737766000100010001005f6e6f726d616c5f466f6e74003f084e0000000200605f38905f1590011084b4780c805be8370002005a5a5affff282828ff011400ffffff64113548c191f55a000099400001438800a04c00a16001d69800026b00000b0e2005813005828000003f084e0000000300605f38905f1590011084b4780c805be8370002006e6e6effff3c3c3cff011400ffffff64113548c191f55a000099400001438800a04c00a16001d69800026b00000b0e200581300582800000ea01040009020001000006030001000000960e00004653436f6d6d616e643a676f0096020000009a010000005709050060a037008c15408d1101000401ebeef2ff00474f008606060100040000860606020005000040000000",
+          "corrections_applied": [
+            {
+              "deviation": "D3",
+              "offset": 4,
+              "from": 339,
+              "to": 331
+            },
+            {
+              "deviation": "D4",
+              "offset": 24,
+              "from": 0,
+              "to": 19
+            }
+          ],
+          "retail_corrected_unavailable": "D6: gfxforge emitted 1 DefineButton (tag 7) record(s) (movie.js:384); retail movies contain none, so a Rust component must not emit DefineButton. No byte-patch can derive the retail-correct component output; 'retail_corrected' above only fixes D1/D3/D4 and still contains tag 7 — it is NOT a valid authoring target."
+        },
+        "gfxforge_verify_summary": {
+          "bytes": 339,
+          "tags": {
+            "0": 1,
+            "1": 1,
+            "7": 1,
+            "9": 1,
+            "26": 2,
+            "32": 2,
+            "37": 1,
+            "69": 1,
+            "71": 1,
+            "1000": 1
+          },
+          "functions": []
+        },
+        "deviation_D6": "gfxforge asserts tags[7]==1 (suite.movie-shapes.js:41); retail has 0 DefineButton, the Rust button component must emit tags[7]==0"
+      }
+    },
+    {
+      "line": 46,
+      "name": "movie integration: clip() with radius and gradient (e.g. a styled health bar)",
+      "input": {
+        "movie_calls": [
+          {
+            "op": "new",
+            "args": [
+              200,
+              100,
+              {
+                "name": "t"
+              }
+            ]
+          },
+          {
+            "op": "clip",
+            "args": [
+              "bar",
+              10,
+              10,
+              100,
+              12,
+              {
+                "type": "linear",
+                "direction": "horizontal",
+                "stops": [
+                  {
+                    "ratio": 0,
+                    "color": [
+                      200,
+                      30,
+                      30
+                    ]
+                  },
+                  {
+                    "ratio": 255,
+                    "color": [
+                      30,
+                      200,
+                      30
+                    ]
+                  }
+                ]
+              },
+              {
+                "radius": 6
+              }
+            ]
+          }
+        ]
+      },
+      "output": {
+        "movie": {
+          "gfxforge": "474658089a00000068001f400003e800001e01000bfa0702000000000d0000017444110000000043020000003f0843000000020060003e800007800110b5f401e0845be80f000200c81e1effff1ec81eff0010150f001eadc000133c00003c6109801e22003ac900004d1000011184260088780000d009030001008606060100020000400000008d06260100030012c864006261720040000000",
+          "length": 154,
+          "gfxforge_sha256": "2b8eab79ff66f442eb9179d2b2c70469facd5fc30557a393a043e54ea92282b3",
+          "retail_corrected": "474658089200000068001f400003e800001e01000bfa0702130000000d0000017444110000000043020000003f0843000000020060003e800007800110b5f401e0845be80f000200c81e1effff1ec81eff0010150f001eadc000133c00003c6109801e22003ac900004d1000011184260088780000d009030001008606060100020000400000008d06260100030012c864006261720040000000",
+          "corrections_applied": [
+            {
+              "deviation": "D3",
+              "offset": 4,
+              "from": 154,
+              "to": 146
+            },
+            {
+              "deviation": "D4",
+              "offset": 24,
+              "from": 0,
+              "to": 19
+            }
+          ]
+        },
+        "gfxforge_verify_summary": {
+          "bytes": 154,
+          "tags": {
+            "0": 1,
+            "1": 1,
+            "9": 1,
+            "26": 1,
+            "32": 1,
+            "39": 1,
+            "69": 1,
+            "1000": 1
+          },
+          "functions": []
+        }
+      }
+    },
+    {
+      "line": 54,
+      "name": "movie integration: full HUD combining plain, gradient, stroked, and rounded shapes together",
+      "input": {
+        "movie_calls": [
+          {
+            "op": "new",
+            "args": [
+              380,
+              150,
+              {
+                "name": "hud",
+                "background": [
+                  22,
+                  24,
+                  28
+                ]
+              }
+            ]
+          },
+          {
+            "op": "rect",
+            "args": [
+              0,
+              0,
+              380,
+              30,
+              [
+                232,
+                140,
+                24
+              ]
+            ]
+          },
+          {
+            "op": "rect",
+            "args": [
+              0,
+              100,
+              380,
+              50,
+              {
+                "type": "linear",
+                "direction": "vertical",
+                "stops": [
+                  {
+                    "ratio": 0,
+                    "color": [
+                      60,
+                      60,
+                      60
+                    ]
+                  },
+                  {
+                    "ratio": 255,
+                    "color": [
+                      10,
+                      10,
+                      10
+                    ]
+                  }
+                ]
+              },
+              {
+                "radius": 10
+              }
+            ]
+          },
+          {
+            "op": "button",
+            "args": [
+              20,
+              40,
+              100,
+              24,
+              "ok",
+              {
+                "label": "OK",
+                "radius": 6,
+                "stroke": {
+                  "width": 1,
+                  "color": [
+                    255,
+                    255,
+                    255
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "op": "clip",
+            "args": [
+              "bar",
+              20,
+              70,
+              150,
+              10,
+              {
+                "type": "linear",
+                "direction": "horizontal",
+                "stops": [
+                  {
+                    "ratio": 0,
+                    "color": [
+                      200,
+                      30,
+                      30
+                    ]
+                  },
+                  {
+                    "ratio": 255,
+                    "color": [
+                      30,
+                      200,
+                      30
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "output": {
+        "movie": {
+          "gfxforge": "474658081902000070000ed800005dc0001e01000dfa0702000000000d000003687564441100000000430216181ce4115f6e6f726d616c5f466f6e742e737766000100010001005f6e6f726d616c5f466f6e74002508020070000ed8000012c00100e88c18ff00101427cbb6000073000963cc4a0000730016a0003f084e000000030070000ed80fa05dc0011084bc3e83b606bb61388002003c3c3cffff0a0a0aff0010158190fa1f2e1000013b20000064730009627003227000f31f000013ce000009c730016a27004e190000003f083f0000000400686192d4316285000100343a44ff011400ffffffff11356821907d5b80002678000078de00784c00f11001d6480002688000088de00884c0110f0000003f083f0000000500686192d43162850001004a5260ff011400ffffffff11356821907d5b80002678000078de00784c00f11001d6480002688000088de00884c0110f000000ea01060009040001000006050001000000960e00004653436f6d6d616e643a6f6b0096020000009a010000005809070068821270370280008d1101000401ebeef2ff004f4b003308080068001770000064000110b97700642118bb80c80200c81e1effff1ec81eff00101427baee0001bc00c8ef4480006f004e00d0090900010086060601000800004000000086060601000200008606060200030000860606030006000086060604000700008d06260500090018320af06261720040000000",
+          "length": 537,
+          "gfxforge_sha256": "bab84eaf9d3a219a1b2fc19727444e75d2c2f10a038a4f52570e154527f8cd5e",
+          "retail_corrected": "474658081102000070000ed800005dc0001e01000dfa0702130000000d000003687564441100000000430216181ce4115f6e6f726d616c5f466f6e742e737766000100010001005f6e6f726d616c5f466f6e74002508020070000ed8000012c00100e88c18ff00101427cbb6000073000963cc4a0000730016a0003f084e000000030070000ed80fa05dc0011084bc3e83b606bb61388002003c3c3cffff0a0a0aff0010158190fa1f2e1000013b20000064730009627003227000f31f000013ce000009c730016a27004e190000003f083f0000000400686192d4316285000100343a44ff011400ffffffff11356821907d5b80002678000078de00784c00f11001d6480002688000088de00884c0110f0000003f083f0000000500686192d43162850001004a5260ff011400ffffffff11356821907d5b80002678000078de00784c00f11001d6480002688000088de00884c0110f000000ea01060009040001000006050001000000960e00004653436f6d6d616e643a6f6b0096020000009a010000005809070068821270370280008d1101000401ebeef2ff004f4b003308080068001770000064000110b97700642118bb80c80200c81e1effff1ec81eff00101427baee0001bc00c8ef4480006f004e00d0090900010086060601000800004000000086060601000200008606060200030000860606030006000086060604000700008d06260500090018320af06261720040000000",
+          "corrections_applied": [
+            {
+              "deviation": "D3",
+              "offset": 4,
+              "from": 537,
+              "to": 529
+            },
+            {
+              "deviation": "D4",
+              "offset": 24,
+              "from": 0,
+              "to": 19
+            }
+          ],
+          "retail_corrected_unavailable": "D6: gfxforge emitted 1 DefineButton (tag 7) record(s) (movie.js:384); retail movies contain none, so a Rust component must not emit DefineButton. No byte-patch can derive the retail-correct component output; 'retail_corrected' above only fixes D1/D3/D4 and still contains tag 7 — it is NOT a valid authoring target."
+        },
+        "gfxforge_verify_summary": {
+          "bytes": 537,
+          "tags": {
+            "0": 1,
+            "1": 1,
+            "7": 1,
+            "9": 1,
+            "26": 5,
+            "32": 5,
+            "37": 1,
+            "39": 1,
+            "69": 1,
+            "71": 1,
+            "1000": 1
+          },
+          "functions": []
+        }
+      }
+    }
+  ]
+}
