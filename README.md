@@ -268,6 +268,25 @@ an error): an anchor between the two images adds `anchor` evidence to the candid
 corroborates it, but never creates a candidate or resolves a conflict. `match` reports how the
 anchors fared and fails when an accepted pair contradicts one.
 
+Two checks reject a pair that the `callee` rule derives; candidates of every other evidence are
+never rejected by them. A rejected pair is written to the conflicts file as a row whose side is the
+reason, followed by the `image_a` function, then the `image_b` function with the rejected evidence
+and both functions' `mhash`. It holds no `callee` evidence for the rest of the match, and stays a
+candidate only while it has evidence other than `anchor`. A pair is contradicted by bytes when both
+functions' hashes are non-empty and differ, the `image_a` function's hash is the hash of some
+function of `image_b`, and the `image_b` function's hash is the hash of some function of `image_a`
+(neither needs to be unique); this applies only between images analysed with the same Ghidra
+language and only when `bytes` is chosen.
+
+- `contradicted-by-bytes`: the derived pair is itself contradicted by bytes.
+- `call-list-disagrees`: the derived pair's own call lists have the same length and do not agree at
+  every position with the accepted pairs; two aligned direct callees that are contradicted by bytes
+  also disagree. Call lists of different lengths are no evidence either way. Every pair holding
+  `callee` evidence is re-tested each round against the pairs accepted then.
+
+An accepted pair propagates its callees when its call lists have equal lengths and agree with the
+accepted pairs; the bytes contradiction does not apply to that test.
+
 Every function in a `<id>.fnsig.json` export must have a string `mhash` and `callees` and `strs`
 arrays of strings, and every callee must be one of the forms above; anything else is an error
 naming the export file and the function. `mhash` is the SHA-1 of the function's bytes with every
@@ -300,11 +319,13 @@ contradicted_direct and untranslated. `--contradictions` lists every contradicte
 each answer and the paths that gave it; two functions that compose to the same function along
 different paths show up as a contradiction on the way back. The command fails when there is any
 contradiction. Across the 28 match outputs of the eight PC, Xbox 360 and PS3 images there is no
-contradiction: the v1.0 dump and the DRM-free v1.0 executable translate 23,664 functions directly,
-PC v1.0 and v1.1 22,200, PS3 v1.00 and v1.03 every one of 28,347, the Xbox 360 images 7,260–9,976
-between each other, PC and every Xbox 360 image about 2,420–2,500 (nearly all also confirmed
-through another image), PC and PS3 1,974 (1,700–1,706 directly, the rest through an Xbox 360
-image), and Xbox 360 and PS3 about 1,990.
+contradiction: the v1.0 dump and the DRM-free v1.0 executable translate 23,619 functions, PC v1.0
+and v1.1 22,124, PS3 v1.00 and v1.03 every one of 28,289, the Xbox 360 preview Final and retail
+22,008 directly and the Profile image about 17,200–17,340 with each of them, PC and every Xbox 360
+image about 2,790–2,800 (nearly all also confirmed through another image), PC and PS3 1,974
+(1,700–1,706 directly, the rest through an Xbox 360 image), and Xbox 360 and PS3 about 1,990. The
+Xbox 360 images are analysed with the Xenon language (see the notes repository's
+`docs/xbox360_ghidra_xenon.md`).
 
 The PC images' SecuROM layout is mapped by Ghidra scripts in the notes repository (see its
 `docs/securom_splice_map.md`): `<id>.splices.tsv` lists every `.text` transfer into the SecuROM
