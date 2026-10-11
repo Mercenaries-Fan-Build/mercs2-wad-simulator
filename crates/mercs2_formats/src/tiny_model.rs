@@ -38,6 +38,9 @@
 //! from the data.
 
 use crate::ucfx::{parse_ucfx_tree, write_ucfx_tree, UcfxNode};
+use crate::ucfx_codec::{
+    count_word, exact_len, f32_at, f32s, leaf, marker, put_f32s, put_u16, put_u32, u16_at, u32_at,
+};
 
 /// The vertex declaration of every TINY group: POSITION FLOAT16_4 at 0, TEXCOORD FLOAT16_2 at 8,
 /// NORMAL FLOAT16_4 at 12, end. Each element is `[u16 stream][u16 offset][u8 type][u8 method]
@@ -264,71 +267,14 @@ pub struct TinyModel {
 
 // ── little-endian reads ─────────────────────────────────────────────────────────────────────────
 
-fn u16_at(b: &[u8], o: usize) -> u16 {
-    u16::from_le_bytes([b[o], b[o + 1]])
-}
-fn u32_at(b: &[u8], o: usize) -> u32 {
-    u32::from_le_bytes([b[o], b[o + 1], b[o + 2], b[o + 3]])
-}
-fn f32_at(b: &[u8], o: usize) -> f32 {
-    f32::from_bits(u32_at(b, o))
-}
-fn f32s<const N: usize>(b: &[u8], o: usize) -> [f32; N] {
-    std::array::from_fn(|k| f32_at(b, o + 4 * k))
-}
 fn u32s<const N: usize>(b: &[u8], o: usize) -> [u32; N] {
     std::array::from_fn(|k| u32_at(b, o + 4 * k))
-}
-fn put_u32(v: &mut Vec<u8>, x: u32) {
-    v.extend_from_slice(&x.to_le_bytes());
-}
-fn put_u16(v: &mut Vec<u8>, x: u16) {
-    v.extend_from_slice(&x.to_le_bytes());
-}
-fn put_f32s(v: &mut Vec<u8>, xs: &[f32]) {
-    for x in xs {
-        v.extend_from_slice(&x.to_bits().to_le_bytes());
-    }
 }
 
 // ── tree helpers ────────────────────────────────────────────────────────────────────────────────
 
 fn tag(n: &UcfxNode) -> String {
     n.tag_str()
-}
-
-/// The body of a node that must be a leaf with no children.
-fn leaf<'a>(n: &'a UcfxNode, want: &[u8; 4], at: &str) -> Result<&'a [u8], String> {
-    if &n.tag != want {
-        return Err(format!("{at}: expected {} and found {}", String::from_utf8_lossy(want), tag(n)));
-    }
-    if !n.children.is_empty() {
-        return Err(format!("{at}: {} has {} children; it is a leaf", tag(n), n.children.len()));
-    }
-    n.body.as_deref().ok_or_else(|| format!("{at}: {} is a marker row; it carries a body", tag(n)))
-}
-
-/// The children of a node that must be a marker.
-fn marker<'a>(n: &'a UcfxNode, want: &[u8; 4], at: &str) -> Result<&'a [UcfxNode], String> {
-    if &n.tag != want {
-        return Err(format!("{at}: expected {} and found {}", String::from_utf8_lossy(want), tag(n)));
-    }
-    if n.body.is_some() {
-        return Err(format!("{at}: {} carries a body; it is a marker row", tag(n)));
-    }
-    Ok(&n.children)
-}
-
-fn exact_len(body: &[u8], len: usize, what: &str) -> Result<(), String> {
-    if body.len() != len {
-        return Err(format!("{what} is {} bytes; it is {len}", body.len()));
-    }
-    Ok(())
-}
-
-fn count_word(body: &[u8], what: &str) -> Result<usize, String> {
-    exact_len(body, 4, what)?;
-    Ok(u32_at(body, 0) as usize)
 }
 
 // ── decode ──────────────────────────────────────────────────────────────────────────────────────

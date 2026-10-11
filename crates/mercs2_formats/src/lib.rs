@@ -53,6 +53,9 @@
 //! - [`terrainmesh`] — the 400 hi-res terrain cells (`0x7C569307`): byte-exact decode/encode,
 //!   vertical displacement with normal/tangent/bounds recompute, triangle-strip codec, collision
 //!   rebuild; [`scrub`] — the ground-cover instances beside them, kept on the edited ground.
+//! - [`model`] — the static/skinned model container (`INFO`, `HIER`, `MTRL`, `BSHP`, `SEGM`, `PHY2`,
+//!   `GEOM` with `MESH`/`SKIN` groups) and its `GEOM`-only LOD blocks: typed decode, byte-identical
+//!   encode.
 //! - [`tiny_model`] — the TINY far-distance stand-in model container: full decode, byte-identical
 //!   encode.
 //! - [`orchestrator`], [`fxdict`], [`atmosphere`], [`gfx`] — destruction state machines; FX
@@ -111,6 +114,7 @@ pub mod hash;
 pub mod havok;
 pub mod havok_write;
 pub mod mesh_import;
+pub mod model;
 pub mod model_build;
 pub mod model_cubeize;
 pub mod model_inject;
@@ -155,6 +159,7 @@ pub mod pws;
 pub mod types;
 pub mod watermap_codec;
 pub mod ucfx;
+mod ucfx_codec;
 pub mod veg;
 pub mod world;
 pub mod world_index;
