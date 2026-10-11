@@ -699,6 +699,22 @@ fn run(cli: Cli) -> Result<(), ExitCode> {
                 let es: Vec<&str> = p.evidence.iter().map(|e| e.as_str()).collect();
                 ctext.push_str(&format!("uncorroborated\t0x{:08x}\t0x{:08x}({})\n", p.a, p.b, es.join("+")));
             }
+            // A rejected candidate: side is the reason, the image_a function, then its image_b
+            // function with the rejected evidence and both functions' mhash.
+            let mut by_reason = std::collections::BTreeMap::new();
+            for r in &o.rejected {
+                *by_reason.entry(r.reason.as_str()).or_insert(0usize) += 1;
+                let es: Vec<&str> = r.evidence.iter().map(|e| e.as_str()).collect();
+                ctext.push_str(&format!(
+                    "{}\t0x{:08x}\t0x{:08x}({}) mhash_a={} mhash_b={}\n",
+                    r.reason.as_str(),
+                    r.a,
+                    r.b,
+                    es.join("+"),
+                    r.mhash_a,
+                    r.mhash_b
+                ));
+            }
             write(&conflicts, ctext.as_bytes())?;
             println!("pairs      {} -> {}", o.pairs.len(), out.display());
             println!("evidence   {:?}", by_kind);
@@ -708,7 +724,8 @@ fn run(cli: Cli) -> Result<(), ExitCode> {
                 o.uncorroborated.len(),
                 conflicts.display()
             );
-            let chk = mercs2_exemap::matcher::check_anchors(&image_a, &image_b, &o, &anchors);
+            println!("rejected   {} {:?} -> {}", o.rejected.len(), by_reason, conflicts.display());
+            let chk =mercs2_exemap::matcher::check_anchors(&image_a, &image_b, &o, &anchors);
             println!("anchors    {} agree, {} unmatched, {} contradicted", chk.agreeing, chk.unmatched, chk.contradicted.len());
             if !chk.contradicted.is_empty() {
                 for (an, p) in &chk.contradicted {
