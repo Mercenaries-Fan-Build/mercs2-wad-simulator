@@ -19,6 +19,7 @@ EXPORTS
     m2_lua_join_strings
     m2_loghook_add_listener
     m2_loghook_install
+    m2_loghook_set_active
     m2_loadtrigger_on_phase
     m2_loadtrigger_install
     m2_loadtrigger_current_phase
