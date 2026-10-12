@@ -27,3 +27,15 @@ EXPORTS
     m2_shader_add_vertex
     m2_shader_outcome
     m2_shader_status_name
+    m2_lua_install
+    m2_lua_last_error
+    m2_lua_add_namespace
+    m2_lua_on_state
+    m2_lua_on_tick
+    m2_lua_exec
+    m2_lua_in_exec
+    m2_lua_raise
+    m2_lua_push_nil
+    m2_lua_push_bool
+    m2_lua_push_number
+    m2_lua_push_string
