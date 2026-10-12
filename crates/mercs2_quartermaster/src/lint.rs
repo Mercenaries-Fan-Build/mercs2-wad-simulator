@@ -2948,8 +2948,14 @@ fn enclosing_function_has_self(source: &str, at: usize) -> bool {
 fn scan_global_writes(source: &str) -> Vec<(usize, usize, String)> {
     let mut out = Vec::new();
     let bytes = source.as_bytes();
+    let code = lua_code_mask(source);
     let mut i = 0;
     while i < bytes.len() {
+        // Text inside a comment or a string literal is not a write.
+        if !code[i] {
+            i += 1;
+            continue;
+        }
         // Find the start of a potential match.
         let rest = &bytes[i..];
         let (kind, base_len) = if rest.starts_with(b"_G.") {
@@ -3009,6 +3015,61 @@ fn scan_global_writes(source: &str) -> Vec<(usize, usize, String)> {
         i = j.max(i + 1);
     }
     out
+}
+
+/// For each byte of a Lua 5.1 source, whether it is code: `false` inside a comment (`--` to the end of
+/// the line, or a long comment `--[[ … ]]` / `--[==[ … ]==]`) or a string literal (`'…'` / `"…"` with
+/// backslash escapes, or a long string `[[ … ]]` / `[==[ … ]==]`), delimiters included.
+fn lua_code_mask(source: &str) -> Vec<bool> {
+    let b = source.as_bytes();
+    let mut code = vec![true; b.len()];
+    // `[` followed by `level` `=` signs and another `[` opens a long bracket; returns the level.
+    let long_open = |at: usize| -> Option<usize> {
+        if b.get(at) != Some(&b'[') {
+            return None;
+        }
+        let mut k = at + 1;
+        while b.get(k) == Some(&b'=') {
+            k += 1;
+        }
+        (b.get(k) == Some(&b'[')).then_some(k - at - 1)
+    };
+    // The end (exclusive) of a long bracket of `level` whose content starts at `from`.
+    let long_close = |from: usize, level: usize| -> usize {
+        let mut k = from;
+        while k < b.len() {
+            if b[k] == b']' && b[k + 1..].iter().take(level).all(|&c| c == b'=') && b.get(k + 1 + level) == Some(&b']')
+            {
+                return k + level + 2;
+            }
+            k += 1;
+        }
+        b.len()
+    };
+    let mut i = 0;
+    while i < b.len() {
+        let end = if b[i] == b'-' && b.get(i + 1) == Some(&b'-') {
+            match long_open(i + 2) {
+                Some(level) => long_close(i + 2 + level + 2, level),
+                None => b[i..].iter().position(|&c| c == b'\n').map_or(b.len(), |n| i + n),
+            }
+        } else if b[i] == b'\'' || b[i] == b'"' {
+            let quote = b[i];
+            let mut k = i + 1;
+            while k < b.len() && b[k] != quote && b[k] != b'\n' {
+                k += if b[k] == b'\\' { 2 } else { 1 };
+            }
+            (k + 1).min(b.len())
+        } else if let Some(level) = long_open(i) {
+            long_close(i + level + 2, level)
+        } else {
+            i += 1;
+            continue;
+        };
+        code[i..end].iter_mut().for_each(|c| *c = false);
+        i = end;
+    }
+    code
 }
 
 /// Read a Lua source file. On error, produces no diagnostic — [`M0110_SOURCE_MISSING`] already
