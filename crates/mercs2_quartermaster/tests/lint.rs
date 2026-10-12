@@ -1309,6 +1309,22 @@ fn m0199_partial_coverage_warns_on_the_unguarded_touch() {
 }
 
 #[test]
+fn m0199_does_not_ask_symbol_touches_for_guards() {
+    // Symbols are declared beside the addresses they resolve to; only the addresses carry bytes.
+    let m = shipment_with(
+        "  - kind: native_hook
+    target: retail
+    symbol: SomeDetour
+    touches: [ProtoSSLConnect, 'ws2_32!connect', 'IDirect3DDevice9::EndScene', '0x004CF340']
+    signature_guard:
+      '0x004CF340': '55 8B EC'
+",
+    );
+    let diags = lint::lint(&m, None, None);
+    assert!(!codes(&diags).contains(&"M0199"), "only address touches need guards, got {diags:?}");
+}
+
+#[test]
 fn m0199_is_quiet_with_no_guards_or_full_valid_coverage() {
     // Opt-out: declaring no guards at all is legitimate.
     assert!(
