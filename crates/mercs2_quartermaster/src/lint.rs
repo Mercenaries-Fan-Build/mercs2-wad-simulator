@@ -3017,6 +3017,18 @@ fn scan_global_writes(source: &str) -> Vec<(usize, usize, String)> {
     out
 }
 
+/// A Lua identifier: a letter or `_`, then letters, digits or `_`, and not a reserved word.
+fn is_lua_identifier(s: &str) -> bool {
+    const RESERVED: [&str; 21] = [
+        "and", "break", "do", "else", "elseif", "end", "false", "for", "function", "if", "in", "local", "nil", "not",
+        "or", "repeat", "return", "then", "true", "until", "while",
+    ];
+    let mut chars = s.chars();
+    chars.next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+        && !RESERVED.contains(&s)
+}
+
 /// For each byte of a Lua 5.1 source, whether it is code: `false` inside a comment (`--` to the end of
 /// the line, or a long comment `--[[ … ]]` / `--[==[ … ]==]`) or a string literal (`'…'` / `"…"` with
 /// backslash escapes, or a long string `[[ … ]]` / `[==[ … ]==]`), delimiters included.
@@ -3095,7 +3107,7 @@ fn lua_source_checks(manifest: &Manifest, root: &Path) -> Vec<Diagnostic> {
     let mut add_scripts: Vec<(usize, &str, &Path)> = Vec::new();
     for (index, c) in manifest.contributions.iter().enumerate() {
         match c {
-            Contribution::AddScript { name, source } => {
+            Contribution::AddScript { name, source, .. } => {
                 add_scripts.push((index, name.as_str(), source.as_path()));
                 if let Some(src) = read_lua(root, source) {
                     for m in scan_module_names(&src) {
@@ -3161,12 +3173,26 @@ fn lua_source_checks(manifest: &Manifest, root: &Path) -> Vec<Diagnostic> {
 
     // M0301 and M0302: scan every Lua source in the Shipment.
     for (index, c) in manifest.contributions.iter().enumerate() {
-        let (rel, kind_label): (&Path, &str) = match c {
-            Contribution::AddScript { source, .. } => (source.as_path(), "add_script"),
-            Contribution::PatchLua { append, .. } => (append.as_path(), "patch_lua"),
-            Contribution::ReplaceLua { source, .. } => (source.as_path(), "replace_lua"),
+        let (rel, kind_label, exports): (&Path, &str, &[String]) = match c {
+            Contribution::AddScript { source, exports, .. } => (source.as_path(), "add_script", exports),
+            Contribution::PatchLua { append, .. } => (append.as_path(), "patch_lua", &[]),
+            Contribution::ReplaceLua { source, .. } => (source.as_path(), "replace_lua", &[]),
             _ => continue,
         };
+        for e in exports {
+            if !is_lua_identifier(e) {
+                out.push(Diagnostic {
+                    rule: M0302_GLOBAL_SHADOWING,
+                    severity: Severity::Error,
+                    message: format!(
+                        "exports entry {e:?} is not a Lua identifier. Name the global itself (`Ess`, \
+                         `OnStateChange`), without `_G.` or a field path."
+                    ),
+                    at: Some(index),
+                    fix: None,
+                });
+            }
+        }
         let Some(src) = read_lua(root, rel) else {
             continue;
         };
@@ -3196,6 +3222,13 @@ fn lua_source_checks(manifest: &Manifest, root: &Path) -> Vec<Diagnostic> {
         }
 
         for (line, col, target) in scan_global_writes(&src) {
+            let declared = target
+                .strip_prefix("_G.")
+                .and_then(|rest| rest.split('.').next())
+                .is_some_and(|name| exports.iter().any(|e| e == name));
+            if declared {
+                continue;
+            }
             let sink = if target.starts_with("_G") {
                 "the global environment"
             } else {
