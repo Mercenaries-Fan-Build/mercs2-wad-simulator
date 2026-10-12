@@ -1,20 +1,20 @@
 //! The shared subscription to the game's log stream (`m2/m2_loghook.h`). One source for the process,
 //! fanned out to up to 16 listeners:
 //! - pmc_bb exports `pmc_log_subscribe`: subscribe to its in-process stream;
-//! - otherwise: detour the shared log stub and chain to the trampoline. When pmc_bb has hooked the stub
-//!   first, the trampoline runs its detour, so both see every line. `pmc_blackbox.log` is not a source: an
-//!   older pmc_bb writes the game's lines to it only with `PMC_VERBOSE_LOG` set, so following it left the
-//!   listeners without a line, and load triggers never fired, whenever that variable was unset.
+//! - otherwise: the shared log-stub detour ([`crate::stub`]), found by name in the game image. When pmc_bb
+//!   has hooked the stub first, the trampoline runs its detour, so both see every line.
+//!   `pmc_blackbox.log` is not a source: an older pmc_bb writes the game's lines to it only with
+//!   `PMC_VERBOSE_LOG` set, so following it left the listeners without a line, and load triggers never
+//!   fired, whenever that variable was unset.
 
-use crate::{hook, luastack};
+use crate::{luastack, rt_log, stub};
 use core::ffi::{CStr, c_char, c_int, c_void};
-use core::sync::atomic::{AtomicBool, AtomicI32, AtomicPtr, AtomicUsize, Ordering};
-use mercs2_formats::{exe_target as target, lua_stack as core_stack};
+use core::sync::atomic::{AtomicBool, AtomicI32, AtomicPtr, Ordering};
+use mercs2_formats::lua_stack as core_stack;
 use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleA, GetProcAddress};
 
 /// Called on the thread that produced the line, with the message NUL-terminated.
 pub type LogListener = unsafe extern "C" fn(msg: *const c_char, ud: *mut c_void);
-type LogStubFn = unsafe extern "C" fn(l: *mut c_void) -> c_int;
 type PmcLogSubscribe = unsafe extern "C" fn(cb: LogListener, ud: *mut c_void) -> c_int;
 
 const MAX_LISTENERS: usize = 16;
@@ -32,7 +32,6 @@ static LISTENERS: [Listener; MAX_LISTENERS] =
 static LISTENER_COUNT: AtomicI32 = AtomicI32::new(0);
 static INSTALLED: AtomicBool = AtomicBool::new(false);
 static IN_HOOK: AtomicBool = AtomicBool::new(false);
-static ORIG_STUB: AtomicUsize = AtomicUsize::new(0);
 
 /// Register a listener; 0 when `cb` is null or all 16 slots are taken. The slot claim is lock-free
 /// because a mod calls this from its `DllMain`, under the loader lock. The count is never rolled back on
@@ -67,10 +66,9 @@ fn dispatch_bytes(bytes: &[u8]) {
     dispatch(CStr::from_bytes_until_nul(&line).expect("terminated above"));
 }
 
-/// The detour on the shared log stub. Only Lua `print` / `Debug.Printf` reach it with a real
-/// `lua_State`; the join rejects every other caller. It always chains to the trampoline, which holds
-/// pmc_bb's jump when pmc_bb hooked the stub first.
-unsafe extern "C" fn hook_log_stub(l: *mut c_void) -> c_int {
+/// One call of the shared log stub. Only Lua `print` / `Debug.Printf` reach it with a real `lua_State`;
+/// the join rejects every other caller.
+pub(crate) fn on_stub(l: *mut c_void) {
     if IN_HOOK.compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed).is_ok() {
         let mut msg = [0u8; MSG_MAX];
         if core_stack::join_strings(&luastack::Process, l as u32, &mut msg) >= 1 {
@@ -78,12 +76,6 @@ unsafe extern "C" fn hook_log_stub(l: *mut c_void) -> c_int {
         }
         IN_HOOK.store(false, Ordering::Release);
     }
-    let orig = ORIG_STUB.load(Ordering::Acquire);
-    if orig == 0 {
-        return 0;
-    }
-    let orig: LogStubFn = unsafe { core::mem::transmute(orig) };
-    unsafe { orig(l) }
 }
 
 /// pmc_bb's line, without its trailing newline, capped at 2047 bytes.
@@ -99,7 +91,8 @@ unsafe extern "C" fn on_pmc_line(line: *const c_char, _ud: *mut c_void) {
     dispatch_bytes(&bytes[..n.min(MSG_MAX - 1)]);
 }
 
-/// Start the log source. Idempotent; 1 on success.
+/// Start the log source. Idempotent; 1 on success. Without `pmc_log_subscribe` the stub detour is attached
+/// now, or by a thread once SecuROM has decrypted the game's code (m2-sdk.log records the outcome).
 #[unsafe(no_mangle)]
 pub extern "C" fn m2_loghook_install() -> c_int {
     if INSTALLED.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire).is_err() {
@@ -114,10 +107,10 @@ pub extern "C" fn m2_loghook_install() -> c_int {
             return 1;
         }
     }
-    let attached = unsafe {
-        hook::attach(target::LOG_STUB_VA as *mut c_void, hook_log_stub as *mut c_void, ORIG_STUB.as_ptr().cast())
-    };
-    if !attached {
+    stub::LOG_ON.store(true, Ordering::Release);
+    if let Err(e) = stub::attach_soon() {
+        rt_log::line(&format!("ERROR m2_loghook_install: {e}"));
+        stub::LOG_ON.store(false, Ordering::Release);
         INSTALLED.store(false, Ordering::Release);
         return 0;
     }
