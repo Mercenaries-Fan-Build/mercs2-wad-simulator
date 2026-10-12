@@ -21,15 +21,24 @@ const MAX_LISTENERS: usize = 16;
 const MSG_MAX: usize = 2048;
 
 /// `cb` is published last and read first, so a dispatcher skips a slot another thread has only claimed.
+/// A paused listener (`active` false) is skipped.
 struct Listener {
     cb: AtomicPtr<c_void>,
     ud: AtomicPtr<c_void>,
+    active: AtomicBool,
 }
 
-static LISTENERS: [Listener; MAX_LISTENERS] =
-    [const { Listener { cb: AtomicPtr::new(core::ptr::null_mut()), ud: AtomicPtr::new(core::ptr::null_mut()) } };
-        MAX_LISTENERS];
+static LISTENERS: [Listener; MAX_LISTENERS] = [const {
+    Listener {
+        cb: AtomicPtr::new(core::ptr::null_mut()),
+        ud: AtomicPtr::new(core::ptr::null_mut()),
+        active: AtomicBool::new(false),
+    }
+}; MAX_LISTENERS];
 static LISTENER_COUNT: AtomicI32 = AtomicI32::new(0);
+/// Listeners registered and not paused. With none, the stub source does not join the line at all: the
+/// stub runs thousands of times a frame.
+static ACTIVE_COUNT: AtomicI32 = AtomicI32::new(0);
 static INSTALLED: AtomicBool = AtomicBool::new(false);
 static IN_HOOK: AtomicBool = AtomicBool::new(false);
 
@@ -42,7 +51,29 @@ pub extern "C" fn m2_loghook_add_listener(cb: Option<LogListener>, ud: *mut c_vo
     let slot = LISTENER_COUNT.fetch_add(1, Ordering::AcqRel);
     let Some(l) = usize::try_from(slot).ok().and_then(|s| LISTENERS.get(s)) else { return 0 };
     l.ud.store(ud, Ordering::Relaxed);
+    l.active.store(true, Ordering::Relaxed);
     l.cb.store(cb as *mut c_void, Ordering::Release);
+    ACTIVE_COUNT.fetch_add(1, Ordering::AcqRel);
+    1
+}
+
+/// Pause (`active` 0) or resume a registered listener, found by `cb` and `ud`; 0 when none matches. A
+/// paused listener gets no lines, and while every listener is paused the stub source costs one load per
+/// call.
+#[unsafe(no_mangle)]
+pub extern "C" fn m2_loghook_set_active(cb: Option<LogListener>, ud: *mut c_void, active: c_int) -> c_int {
+    let Some(cb) = cb else { return 0 };
+    let n = (LISTENER_COUNT.load(Ordering::Acquire).max(0) as usize).min(MAX_LISTENERS);
+    let Some(l) = LISTENERS[..n]
+        .iter()
+        .find(|l| l.cb.load(Ordering::Acquire) == cb as *mut c_void && l.ud.load(Ordering::Relaxed) == ud)
+    else {
+        return 0;
+    };
+    let on = active != 0;
+    if l.active.swap(on, Ordering::AcqRel) != on {
+        ACTIVE_COUNT.fetch_add(if on { 1 } else { -1 }, Ordering::AcqRel);
+    }
     1
 }
 
@@ -50,7 +81,7 @@ fn dispatch(msg: &CStr) {
     let n = (LISTENER_COUNT.load(Ordering::Acquire).max(0) as usize).min(MAX_LISTENERS);
     for l in &LISTENERS[..n] {
         let cb = l.cb.load(Ordering::Acquire);
-        if cb.is_null() {
+        if cb.is_null() || !l.active.load(Ordering::Acquire) {
             continue;
         }
         let cb: LogListener = unsafe { core::mem::transmute(cb) };
@@ -69,6 +100,9 @@ fn dispatch_bytes(bytes: &[u8]) {
 /// One call of the shared log stub. Only Lua `print` / `Debug.Printf` reach it with a real `lua_State`;
 /// the join rejects every other caller.
 pub(crate) fn on_stub(l: *mut c_void) {
+    if ACTIVE_COUNT.load(Ordering::Relaxed) <= 0 {
+        return;
+    }
     if IN_HOOK.compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed).is_ok() {
         let mut msg = [0u8; MSG_MAX];
         if core_stack::join_strings(&luastack::Process, l as u32, &mut msg) >= 1 {
