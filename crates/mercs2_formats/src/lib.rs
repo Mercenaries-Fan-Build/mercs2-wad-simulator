@@ -81,10 +81,11 @@
 //! - [`ini`], [`lua_stack`], [`shader_registry`], [`load_ladder`] — the logic behind the DLL's INI
 //!   reader, its Lua argument readers, its shader registry queue and admission rules, and its load
 //!   triggers, kept here so it is tested on any host.
-//! - [`exe_target`] — the retail exe addresses the DLL uses, as published to C mods in `m2_target.h`.
 //! - [`exe_image`], [`lua_sites`] — the game executable's sections (from a file or the mapped image);
 //!   the Lua host's code sites found by signature and by `luaL_Reg` name, never by per-build address.
 //! - [`lua_exec`] — the result text and status rules of the DLL's chunk executor.
+//! - [`shader_sites`] — the shader registry's functions, pool, ShaderLevel and 45 family vtables, found in the
+//!   game image by signature and structure.
 //! - [`mod_runtime`] — bindings a Rust mod calls the loaded `m2-sdk.dll` through (`raw-dylib`, 32-bit
 //!   Windows), so nothing of the runtime is compiled into the mod.
 //!
@@ -117,7 +118,6 @@ pub mod crc32;
 pub mod dlc_input;
 pub mod dlc_stfs;
 pub mod exe_image;
-pub mod exe_target;
 pub mod donor;
 pub mod ffcs;
 pub mod fxdict;
@@ -159,6 +159,7 @@ pub mod scripts_block;
 pub mod scrub;
 pub mod shader3;
 pub mod shader_registry;
+pub mod shader_sites;
 pub mod sm3asm;
 pub mod sges;
 pub mod skeleton;
