@@ -16,12 +16,20 @@ pub const TVALUE_SIZE: u32 = 8;
 pub const TVALUE_TT: u32 = 4;
 /// String bytes start at TString + 16.
 pub const TSTRING_DATA: u32 = 16;
+/// The string's length (`luaS_newlstr` compares `[ts+0xC]` with the length it is asked for).
+pub const TSTRING_LEN: u32 = 0x0C;
+/// `lua_State.l_G`, the global state.
+pub const OFF_GLOBAL: u32 = 0x10;
 pub const MAX_ARGS: u32 = 32;
 
 pub const LUA_TNIL: u32 = 0;
 pub const LUA_TBOOLEAN: u32 = 1;
 pub const LUA_TNUMBER: u32 = 3;
 pub const LUA_TSTRING: u32 = 4;
+pub const LUA_TTABLE: u32 = 5;
+pub const LUA_TFUNCTION: u32 = 6;
+/// A `lua_State`'s own type tag, at `+4` (`tt` of its GC header).
+pub const LUA_TTHREAD: u32 = 8;
 
 /// Process memory as the readers see it.
 pub trait Mem {
