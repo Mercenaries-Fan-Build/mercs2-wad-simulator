@@ -907,6 +907,13 @@ pub fn aset_row_is_single_block(packed_block_ref: u32, secondary_ref: u32) -> bo
 }
 
 /// Parse a signature-guard value — space-separated hex byte pairs like `"55 8B EC"` — into bytes.
+/// A `touches` entry spelled as a virtual address, `0x` and hex digits.
+fn is_address_touch(t: &str) -> bool {
+    t.strip_prefix("0x")
+        .or_else(|| t.strip_prefix("0X"))
+        .is_some_and(|h| !h.is_empty() && h.chars().all(|c| c.is_ascii_hexdigit()))
+}
+
 /// `None` if it is empty or any token is not a single hex byte. Shared by the hermetic M0199 check
 /// (validity) and the game-gated one (the bytes to compare against the exe).
 fn parse_prologue_bytes(s: &str) -> Option<Vec<u8>> {
@@ -2385,10 +2392,12 @@ pub fn lint(
                 }
                 // Guards are opt-in: a hook that declares none is not flagged. But once SOME
                 // addresses are guarded, a touched address left unguarded is almost certainly an
-                // oversight — that partial-coverage gap is the advisory.
+                // oversight — that partial-coverage gap is the advisory. Only an address spelling
+                // (`0xVVVVVVVV`) has prologue bytes to guard; a symbol, `module!function` or
+                // `Interface::Method` touch is declared beside the addresses it resolves to.
                 if !signature_guard.is_empty() {
                     for t in touches {
-                        if !signature_guard.contains_key(&t.0) {
+                        if is_address_touch(&t.0) && !signature_guard.contains_key(&t.0) {
                             out.push(Diagnostic {
                                 rule: M0199_SIGNATURE_GUARD,
                                 severity: Severity::Warning,
