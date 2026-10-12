@@ -81,11 +81,10 @@ fn main() -> ExitCode {
     }
 }
 
-/// Connect, eval one chunk, return the printed result. A trailing newline is appended to the chunk so
-/// a chunk ending in a `--` line comment can't swallow the RUN marker (matches `lua_console.py`).
+/// Connect, eval one chunk, return the printed result.
 fn eval(addr: &str, chunk: &str) -> Result<String, mercs2_bridge::BridgeError> {
     let mut bridge = Bridge::connect_at(addr)?;
-    bridge.eval(&format!("{}\n", chunk.trim_end_matches('\n')))
+    bridge.eval(chunk)
 }
 
 /// A/B one chunk against two endpoints and diff. Exit 0 iff both answered and the answers are equal.
