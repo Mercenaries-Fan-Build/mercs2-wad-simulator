@@ -1254,7 +1254,7 @@ pub fn script_additions(
     let shipment = manifest.shipment.name.clone();
     let mut out = Vec::new();
     for (index, c) in manifest.contributions.iter().enumerate() {
-        if let Contribution::AddScript { name, source } = c {
+        if let Contribution::AddScript { name, source, .. } = c {
             let path = root.join(source);
             let src = std::fs::read_to_string(&path).map_err(|e| BuildError::Lower {
                 index,
