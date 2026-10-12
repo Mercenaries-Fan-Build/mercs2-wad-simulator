@@ -22,7 +22,7 @@ use mercs2_formats::lua_exec::{self, MAX_CHUNK, MAX_RESULTS};
 use mercs2_formats::lua_sites::{HOST_LUA_STATE, LuaSites, Site};
 use mercs2_formats::lua_stack::{
     LUA_TBOOLEAN, LUA_TFUNCTION, LUA_TNIL, LUA_TNUMBER, LUA_TSTRING, LUA_TTABLE, LUA_TTHREAD, Mem, OFF_BASE, OFF_GLOBAL,
-    OFF_TOP, TVALUE_SIZE, TVALUE_TT,
+    OFF_STACK, OFF_TOP, TVALUE_SIZE, TVALUE_TT,
 };
 use std::ffi::CString;
 use std::sync::Mutex;
@@ -177,9 +177,20 @@ fn push(l: u32, value: u32, tag: u32) {
 }
 
 /// `luaL_register(L, ns.name, ns.regs)` with the engine's register ABI, then pop the table it leaves.
+/// A stack slot as an offset from `L->stack`. A call that grows the stack reallocates it, so a slot is
+/// held as an offset across such a call and turned back into an address after (`luaD_pcall` 0x00868AD0
+/// restores its saved top as `L->stack (+0x20) + offset` for the same reason).
+fn stack_off(l: u32, slot: u32) -> u32 {
+    slot - read_u32(l + OFF_STACK)
+}
+
+fn stack_at(l: u32, off: u32) -> u32 {
+    read_u32(l + OFF_STACK) + off
+}
+
 fn register_one(l: u32, ns: &Namespace) -> Result<(), String> {
     let func = sites_ready().va(Site::LuaLRegister);
-    let top_before = read_u32(l + OFF_TOP);
+    let top_before_off = stack_off(l, read_u32(l + OFF_TOP));
     let table = ns.regs.as_ptr() as u32;
     let name = ns.name.as_ptr() as u32;
     unsafe {
@@ -195,6 +206,7 @@ fn register_one(l: u32, ns: &Namespace) -> Result<(), String> {
             clobber_abi("C"),
         )
     }
+    let top_before = stack_at(l, top_before_off);
     let top = read_u32(l + OFF_TOP);
     let tag = if top == top_before + TVALUE_SIZE { read_u32(top_before + TVALUE_TT) } else { u32::MAX };
     write_u32(l + OFF_TOP, top_before);
@@ -501,34 +513,41 @@ fn exec(l: u32, code: &[u8]) -> (c_int, Vec<u8>) {
     if code.len() >= MAX_CHUNK {
         return refuse("[bridge] chunk too large");
     }
+    // Every slot below is held as an offset from L->stack: loadstring and pcall can grow the stack, which
+    // moves it, and an address taken before either call would then name freed memory.
     let saved_top = read_u32(l + OFF_TOP);
     let saved_base = read_u32(l + OFF_BASE);
-    let nb = saved_top;
-    if !readable(nb, 3 * TVALUE_SIZE) {
+    if !readable(saved_top, 3 * TVALUE_SIZE) {
         return refuse("[bridge] L->top + scratch unwritable");
     }
-    let frame_bytes = (nb - saved_base).min(FRAME_SAVE_MAX);
+    let stack_before = read_u32(l + OFF_STACK);
+    let nb_off = stack_off(l, saved_top);
+    let base_off = stack_off(l, saved_base);
+    let frame_bytes = (saved_top - saved_base).min(FRAME_SAVE_MAX);
     let frame: Option<Vec<u8>> = (frame_bytes > 0 && readable(saved_base, frame_bytes))
         .then(|| (0..frame_bytes).map(|i| luastack::Process.read_u8(saved_base + i)).collect());
     let restore_frame = |f: &Option<Vec<u8>>| {
         if let Some(bytes) = f {
+            let base = stack_at(l, base_off);
             for (i, b) in bytes.iter().enumerate() {
-                unsafe { ((saved_base + i as u32) as *mut u8).write(*b) };
+                unsafe { ((base + i as u32) as *mut u8).write(*b) };
             }
         }
     };
     let restore_stack = || {
-        write_u32(l + OFF_TOP, saved_top);
-        write_u32(l + OFF_BASE, saved_base);
+        write_u32(l + OFF_TOP, stack_at(l, nb_off));
+        write_u32(l + OFF_BASE, stack_at(l, base_off));
     };
     let _guard = ExecGuard::enter();
     let source = new_string(l, code);
+    let nb = stack_at(l, nb_off);
     write_u32(nb, source);
     write_u32(nb + TVALUE_TT, LUA_TSTRING);
     write_u32(l + OFF_BASE, nb);
     write_u32(l + OFF_TOP, nb + TVALUE_SIZE);
     let loadstring: LuaCFunction = unsafe { core::mem::transmute(s.va(Site::LuaBLoadString) as usize) };
     let load_n = unsafe { loadstring(l as *mut c_void) };
+    let nb = stack_at(l, nb_off);
     if load_n == 2 {
         let text = lua_exec::render_compile_error(&luastack::Process, nb + 2 * TVALUE_SIZE);
         restore_stack();
@@ -551,6 +570,14 @@ fn exec(l: u32, code: &[u8]) -> (c_int, Vec<u8>) {
     write_u32(l + OFF_TOP, nb + TVALUE_SIZE);
     let pcall: LuaCFunction = unsafe { core::mem::transmute(s.va(Site::LuaBPcall) as usize) };
     unsafe { pcall(l as *mut c_void) };
+    let stack_after = read_u32(l + OFF_STACK);
+    if stack_after != stack_before {
+        rt_log::line(&format!(
+            "lua_State {l:#x}: the chunk grew the Lua stack, which moved from {stack_before:#x} to {stack_after:#x}"
+        ));
+    }
+    let nb = stack_at(l, nb_off);
+    let saved_base = stack_at(l, base_off);
     let saved_status = (frame.is_some() && frame_bytes >= TVALUE_SIZE)
         .then(|| (read_u32(saved_base + TVALUE_TT), read_u32(saved_base)));
     restore_frame(&frame);
