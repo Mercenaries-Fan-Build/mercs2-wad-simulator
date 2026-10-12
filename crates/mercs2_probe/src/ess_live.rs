@@ -33,6 +33,11 @@
 //!   runtime state keeps (`rt.menu`, `49_ui_menu.lua:202`), and the evidence says so; the precondition
 //!   fails only if that close does not take effect or there is no local player/character
 //!   (`49_ui_menu.lua:179`).
+//! - `swf_callback` (with `--menu`): PRESENT — the `MrxGuiBase.FlashWidget` members Ess's SWF path calls
+//!   (`40_gfx.lua:52-63`, `:79`, `:91`); RUNS — opening the menu loads Ess's runtime movie through
+//!   `SetSwfFile(file, onLoad, {})` when the runtime does not exist yet (`42_ui_engine.lua:329-341`), and
+//!   the probe wraps that onLoad (via `Ess.Gfx.widget`, restored right after the open) to observe
+//!   whether it fires and whether Ess had already taken the 3 s timeout path (`42_ui_engine.lua:380-391`).
 //! - `spawn` / `spawn_remove` / `spawn_gone` / `spawn_cleanup` (with `--spawn`): the menu ctx's own
 //!   `ctx:spawn(template, dist)` (`49_ui_menu.lua:78-95`), then `Ess.Object.remove` and
 //!   `Ess.Object.alive` polled until false (`11_object.lua:224-239`: removal is deferred ~0.5 s).
@@ -62,9 +67,15 @@ pub struct Options {
     pub spawn_dist: f64,
     /// How long to wait for a removed object to stop being alive.
     pub remove_deadline: Duration,
-    /// The interval between `alive` polls after the remove.
+    /// The interval between polls (the removed object's `alive`, the SWF load callback).
     pub poll_interval: Duration,
+    /// How long after the menu opens to wait for the SWF load callback.
+    pub swf_deadline: Duration,
 }
+
+/// The SWF-callback deadline: twice Ess's own `RT_LOAD_TIMEOUT = 3.0` (42_ui_engine.lua:288), so a
+/// callback that arrives after Ess's fallback is still seen and reported as late.
+pub const DEFAULT_SWF_DEADLINE: Duration = Duration::from_secs(6);
 
 /// The removal deadline: `11_object.lua:224-227` measured `alive` flipping ~0.5 s after `remove`.
 pub const DEFAULT_REMOVE_DEADLINE: Duration = Duration::from_secs(5);
@@ -404,7 +415,7 @@ pub fn run(opts: &Options) -> Result<Vec<CheckResult>, Unreachable> {
 
     // 5. The menu, toggled the way one hotkey press runs it.
     if let Some(menu) = &opts.menu {
-        menu_checks(&mut r, menu);
+        menu_checks(&mut r, menu, opts);
     }
 
     // 6. The spawn path ctx:spawn takes.
@@ -444,13 +455,182 @@ const MENU_PRECONDITION_EXPECT: [Expect; 7] = [
     Expect::Bool(true),
 ];
 
-fn menu_checks(r: &mut Runner, menu: &str) {
+/// swf_callback, part 1 (sent before the menu is opened).
+///
+/// PRESENT: the engine members Ess's SWF path calls — `MrxGuiBase.FlashWidget:new`, `:SetLocation`,
+/// `:SetSwfFile(file, onLoad, {})` whose 2nd argument IS the load callback, `MrxGuiBase.AddWidget`
+/// (40_gfx.lua:52-63), `:SetFlashEventHandler` (40_gfx.lua:91) and `:CallActionScriptCallback`
+/// (40_gfx.lua:79).
+///
+/// ARM: the movie is loaded only when Ess's shared runtime does not exist yet (`rtEnsure`,
+/// 42_ui_engine.lua:329-341, rebuilt after each world load by 42_ui_engine.lua:686-691), through
+/// `Ess.Gfx.widget(Ess.UI.FILES.runtime, ..., onLoad)` looked up at call time (42_ui_engine.lua:333).
+/// Ess records which path made the runtime ready only in a log line (42_ui_engine.lua:323), so the
+/// probe wraps `Ess.Gfx.widget` to wrap that one onLoad with a recorder, and forwards everything else
+/// unchanged. The recorder notes whether Ess was already ready (the 3 s timeout fallback,
+/// 42_ui_engine.lua:380-391) when the callback fired.
+///
+/// Returns: 6 member types, AddWidget's type, whether the runtime already exists, whether armed.
+const SWF_ARM: &str = "local function ty(t, k) if type(t) ~= 'table' then return 'nil' end return type(t[k]) end\n\
+     local FW = type(MrxGuiBase) == 'table' and MrxGuiBase.FlashWidget or nil\n\
+     local rtExists = Ess.UI._S.rt ~= nil\n\
+     local armed = false\n\
+     if type(FW) == 'table' and type(FW.SetSwfFile) == 'function' and not rtExists then\n\
+     \x20 local orig = Ess.Gfx.widget\n\
+     \x20 _G.__ess_live_probe_swf = { orig = orig, built = false, fired = false, readyAtFire = false }\n\
+     \x20 Ess.Gfx.widget = function(file, x, y, w, h, onLoad)\n\
+     \x20   local rec = _G.__ess_live_probe_swf\n\
+     \x20   if rec and not rec.built and file == Ess.UI.FILES.runtime and onLoad ~= nil then\n\
+     \x20     rec.built = true\n\
+     \x20     local inner = onLoad\n\
+     \x20     onLoad = function(...)\n\
+     \x20       local r2 = _G.__ess_live_probe_swf\n\
+     \x20       if r2 and not r2.fired then r2.fired = true; r2.readyAtFire = Ess.UI._rtReady() end\n\
+     \x20       return inner(...)\n\
+     \x20     end\n\
+     \x20   end\n\
+     \x20   return orig(file, x, y, w, h, onLoad)\n\
+     \x20 end\n\
+     \x20 armed = true\n\
+     end\n\
+     return ty(MrxGuiBase, 'FlashWidget'), ty(FW, 'new'), ty(FW, 'SetLocation'), ty(FW, 'SetSwfFile'), ty(FW, 'SetFlashEventHandler'), ty(FW, 'CallActionScriptCallback'), ty(MrxGuiBase, 'AddWidget'), rtExists, armed";
+
+/// swf_callback, part 2 (sent right after the menu-open chunk): put `Ess.Gfx.widget` back.
+/// Returns: whether the runtime widget was built through it, whether restored, whether rt exists.
+const SWF_RESTORE: &str = "local rec = _G.__ess_live_probe_swf\n\
+     if rec == nil then return 'not armed' end\n\
+     local restored = false\n\
+     if rec.orig ~= nil then Ess.Gfx.widget = rec.orig; rec.orig = nil; restored = true end\n\
+     return rec.built, restored, Ess.UI._S.rt ~= nil";
+
+/// swf_callback, part 3 (polled): fired, Ess-was-already-ready-when-it-fired, Ess ready now.
+const SWF_POLL: &str = "local rec = _G.__ess_live_probe_swf\n\
+     if rec == nil then return 'not armed' end\n\
+     return rec.fired, rec.readyAtFire == true, Ess.UI._rtReady()";
+
+/// swf_callback, part 4: drop the record. The recorder left inside the engine's pending callback
+/// reads the global each time, so it becomes a pure pass-through.
+const SWF_CLEANUP: &str = "_G.__ess_live_probe_swf = nil\nreturn true";
+
+const SWF_ARM_EXPECT: [Expect; 9] = [
+    Expect::Str("table"),
+    Expect::Str("function"),
+    Expect::Str("function"),
+    Expect::Str("function"),
+    Expect::Str("function"),
+    Expect::Str("function"),
+    Expect::Str("function"),
+    Expect::AnyBool,
+    Expect::AnyBool,
+];
+
+/// Send one swf_callback chunk; the transport error becomes swf_callback evidence.
+fn swf_eval(r: &mut Runner, part: &str, body: &str) -> Result<(String, Reply), String> {
+    r.bridge
+        .eval(&format!("-- ess-live:{part}\n{body}"))
+        .map(|t| {
+            let p = parse_reply(&t);
+            (t, p)
+        })
+        .map_err(|e| format!("{part}: bridge error: {e}"))
+}
+
+/// Arm swf_callback. `Ok(evidence)` when armed; `Err` = swf_callback FAIL evidence (nothing armed).
+fn swf_arm(r: &mut Runner) -> Result<String, String> {
+    let (text, reply) = swf_eval(r, "swf_arm", SWF_ARM)?;
+    let v = judge(&reply, &SWF_ARM_EXPECT).map_err(|why| format!("PRESENT check failed: {text:?} — {why}"))?;
+    match (&v[7], &v[8]) {
+        (Value::Bool(false), Value::Bool(true)) => Ok(format!("PRESENT {text:?}")),
+        (Value::Bool(true), _) => Err(format!(
+            "PRESENT, but no SWF load to observe: Ess's shared runtime (Ess.UI._S.rt) already exists this world, \
+             and the movie loads only when rtEnsure builds it (42_ui_engine.lua:329-341; reset on world load, \
+             42_ui_engine.lua:686-691). Reload the world and run ess-live before any Ess UI is shown. {text:?}"
+        )),
+        _ => Err(format!("not armed: {text:?}")),
+    }
+}
+
+/// Restore, then poll until the callback fires or the deadline passes, and record swf_callback.
+fn swf_finish(r: &mut Runner, armed_evidence: String, restore: Result<(String, Reply), String>, opened_at: Instant, opts: &Options) {
+    let restore = restore.and_then(|(text, reply)| {
+        judge(&reply, &[Expect::AnyBool, Expect::Bool(true), Expect::AnyBool])
+            .map(|v| (text.clone(), v))
+            .map_err(|why| format!("restore of Ess.Gfx.widget failed: {text:?} — {why}"))
+    });
+    let (restore_text, v) = match restore {
+        Ok(x) => x,
+        Err(e) => {
+            r.record("swf_callback", false, format!("{e}; {armed_evidence}"));
+            return;
+        }
+    };
+    if v[0] != Value::Bool(true) {
+        r.record(
+            "swf_callback",
+            false,
+            format!(
+                "opening the menu did not build Ess's runtime widget through Ess.Gfx.widget \
+                 (42_ui_engine.lua:333): {restore_text:?}; {armed_evidence}"
+            ),
+        );
+        return;
+    }
+    let mut polls = 0u32;
+    loop {
+        let (text, reply) = match swf_eval(r, "swf_poll", SWF_POLL) {
+            Ok(x) => x,
+            Err(e) => {
+                r.record("swf_callback", false, format!("{e}; {armed_evidence}"));
+                return;
+            }
+        };
+        polls += 1;
+        let ms = opened_at.elapsed().as_millis();
+        let v = match judge(&reply, &[Expect::AnyBool, Expect::AnyBool, Expect::AnyBool]) {
+            Ok(v) => v,
+            Err(why) => {
+                r.record("swf_callback", false, format!("{text:?} — {why}; {armed_evidence}"));
+                return;
+            }
+        };
+        if v[0] == Value::Bool(true) {
+            let path = if v[1] == Value::Bool(true) {
+                "Ess had already gone ready by the 3 s timeout fallback (42_ui_engine.lua:386-388) before the callback fired late"
+            } else {
+                "Ess went ready through the load callback (42_ui_engine.lua:333-335), before the timeout fallback"
+            };
+            r.record(
+                "swf_callback",
+                true,
+                format!("RUNS: the SetSwfFile load callback fired, observed by poll {polls} at {ms} ms after the menu-open reply; path: {path}. {text:?}; {armed_evidence}"),
+            );
+            return;
+        }
+        if opened_at.elapsed() >= opts.swf_deadline {
+            let path = if v[2] == Value::Bool(true) {
+                "Ess went ready through the 3 s timeout fallback (42_ui_engine.lua:386-388)"
+            } else {
+                "Ess is not ready either"
+            };
+            r.record(
+                "swf_callback",
+                false,
+                format!("the SetSwfFile load callback did not fire within {ms} ms ({polls} polls); {path}. {text:?}; {armed_evidence}"),
+            );
+            return;
+        }
+        std::thread::sleep(opts.poll_interval);
+    }
+}
+
+fn menu_checks(r: &mut Runner, menu: &str, opts: &Options) {
     let path = match lua_str(menu) {
         Ok(p) => p,
         Err(e) => {
             r.record("menu_precondition", false, format!("--menu: {e}"));
             r.not_run("menu_open", "menu_precondition failed");
             r.not_run("menu_close", "menu_precondition failed");
+            r.not_run("swf_callback", "menu_precondition failed");
             return;
         }
     };
@@ -470,8 +650,10 @@ fn menu_checks(r: &mut Runner, menu: &str) {
     if pre.is_none() {
         r.not_run("menu_open", "menu_precondition failed");
         r.not_run("menu_close", "menu_precondition failed");
+        r.not_run("swf_callback", "menu_precondition failed");
         return;
     }
+    let armed = swf_arm(r);
     let opened = r.check(
         "menu_open",
         &format!(
@@ -485,10 +667,26 @@ fn menu_checks(r: &mut Runner, menu: &str) {
         ),
         &[Expect::Bool(true), Expect::Str("string"), Expect::AnyStr, Expect::Bool(true)],
     );
+    let opened_at = Instant::now();
+    // Restore Ess.Gfx.widget straight after the open, whatever the open's outcome.
+    let swf = armed.map(|ev| (ev, swf_eval(r, "swf_restore", SWF_RESTORE)));
     if opened.is_none() {
         r.not_run("menu_close", "menu_open failed");
-        return;
+    } else {
+        menu_close(r, &path);
     }
+    match swf {
+        Ok((ev, restore)) => {
+            swf_finish(r, ev, restore, opened_at, opts);
+            if let Err(e) = swf_eval(r, "swf_cleanup", SWF_CLEANUP) {
+                r.record("swf_cleanup", false, e);
+            }
+        }
+        Err(e) => r.record("swf_callback", false, e),
+    }
+}
+
+fn menu_close(r: &mut Runner, path: &str) {
     r.check(
         "menu_close",
         &format!(
@@ -637,6 +835,12 @@ mod tests {
             "menu_precondition" => "[ok]\t\"table\"\tfalse\t\"none\"\ttrue\tfalse\ttrue\ttrue",
             "menu_open" => "[ok]\ttrue\t\"string\"\t\"Ferd's AiO SpawnMenu v0.85\"\ttrue",
             "menu_close" => "[ok]\ttrue\t\"Ferd's AiO SpawnMenu v0.85\"\ttrue\ttrue",
+            "swf_arm" => {
+                "[ok]\t\"table\"\t\"function\"\t\"function\"\t\"function\"\t\"function\"\t\"function\"\t\"function\"\tfalse\ttrue"
+            }
+            "swf_restore" => "[ok]\ttrue\ttrue\ttrue",
+            "swf_poll" => "[ok]\ttrue\tfalse\ttrue",
+            "swf_cleanup" => "[ok]\ttrue",
             "spawn" => "[ok]\t\"userdata\"\ttrue\ttrue",
             "spawn_remove" => "[ok]\ttrue",
             "spawn_gone" => "[ok]\tfalse",
@@ -665,6 +869,7 @@ mod tests {
             spawn_dist: DEFAULT_SPAWN_DIST,
             remove_deadline: Duration::from_millis(1500),
             poll_interval: Duration::from_millis(10),
+            swf_deadline: Duration::from_millis(1500),
         }
     }
 
@@ -686,6 +891,7 @@ mod tests {
         "menu_precondition",
         "menu_open",
         "menu_close",
+        "swf_callback",
         "spawn",
         "spawn_remove",
         "spawn_gone",
@@ -795,7 +1001,7 @@ mod tests {
             });
             let results = run(&opts(addr)).expect("reachable");
             assert!(!by_name(&results, "menu_precondition").pass, "{reply}");
-            for n in ["menu_open", "menu_close"] {
+            for n in ["menu_open", "menu_close", "swf_callback"] {
                 let c = by_name(&results, n);
                 assert!(!c.pass && c.evidence.starts_with("not run"), "{c:?}");
             }
@@ -812,6 +1018,111 @@ mod tests {
         let results = run(&opts(addr)).expect("reachable");
         assert!(!by_name(&results, "menu_precondition").pass);
         assert_eq!(exit_code(&results), 1);
+    }
+
+    /// The SWF chunks the fake game saw, in order.
+    fn swf_order(log: &std::sync::Mutex<Vec<String>>) -> Vec<String> {
+        log.lock().unwrap().iter().filter(|n| n.starts_with("swf_") || n.starts_with("menu_")).cloned().collect()
+    }
+
+    #[test]
+    fn ess_live_swf_callback_fired_passes_and_names_the_callback_path() {
+        let log = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen = log.clone();
+        let polls = Arc::new(AtomicUsize::new(0));
+        let p = polls.clone();
+        let addr = serve(move |chunk| {
+            let name = marker(chunk).to_string();
+            seen.lock().unwrap().push(name.clone());
+            match name.as_str() {
+                // Not fired on the first two polls, then fired before Ess was ready.
+                "swf_poll" if p.fetch_add(1, Ordering::SeqCst) < 2 => "[ok]\tfalse\tfalse\tfalse".into(),
+                n => healthy(n),
+            }
+        });
+        let results = run(&opts(addr)).expect("reachable");
+        let swf = by_name(&results, "swf_callback");
+        assert!(swf.pass, "{swf:?}");
+        assert!(swf.evidence.contains("RUNS") && swf.evidence.contains("through the load callback"), "{swf:?}");
+        assert!(swf.evidence.contains("PRESENT"), "{swf:?}");
+        assert_eq!(polls.load(Ordering::SeqCst), 3);
+        // Armed before the open, restored straight after it, cleaned up last.
+        let order = swf_order(&log);
+        let pos = |n: &str| order.iter().position(|x| x == n).unwrap_or_else(|| panic!("{n} missing: {order:?}"));
+        assert!(pos("swf_arm") < pos("menu_open") && pos("menu_open") < pos("swf_restore"));
+        assert!(pos("swf_restore") < pos("menu_close") && pos("menu_close") < pos("swf_poll"));
+        assert_eq!(order.last().map(String::as_str), Some("swf_cleanup"));
+        assert_eq!(exit_code(&results), 0);
+    }
+
+    #[test]
+    fn ess_live_swf_callback_fired_late_passes_and_names_the_timeout_path() {
+        let addr = serve(|chunk| match marker(chunk) {
+            "swf_poll" => "[ok]\ttrue\ttrue\ttrue".into(),
+            n => healthy(n),
+        });
+        let results = run(&opts(addr)).expect("reachable");
+        let swf = by_name(&results, "swf_callback");
+        assert!(swf.pass && swf.evidence.contains("timeout fallback") && swf.evidence.contains("fired late"), "{swf:?}");
+    }
+
+    #[test]
+    fn ess_live_swf_callback_not_fired_fails_at_the_deadline_naming_the_timeout_path() {
+        let cleaned = Arc::new(AtomicUsize::new(0));
+        let c = cleaned.clone();
+        let addr = serve(move |chunk| match marker(chunk) {
+            "swf_poll" => "[ok]\tfalse\tfalse\ttrue".into(),
+            "swf_cleanup" => {
+                c.fetch_add(1, Ordering::SeqCst);
+                healthy("swf_cleanup")
+            }
+            n => healthy(n),
+        });
+        let mut o = opts(addr);
+        o.swf_deadline = Duration::from_millis(100);
+        let results = run(&o).expect("reachable");
+        let swf = by_name(&results, "swf_callback");
+        assert!(!swf.pass, "{swf:?}");
+        assert!(swf.evidence.contains("did not fire") && swf.evidence.contains("3 s timeout fallback"), "{swf:?}");
+        assert_eq!(cleaned.load(Ordering::SeqCst), 1, "cleanup still runs");
+        assert_eq!(exit_code(&results), 1);
+    }
+
+    #[test]
+    fn ess_live_swf_callback_handler_missing_fails_present_and_arms_nothing() {
+        let log = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen = log.clone();
+        let addr = serve(move |chunk| {
+            let name = marker(chunk).to_string();
+            seen.lock().unwrap().push(name.clone());
+            match name.as_str() {
+                // FlashWidget has no SetSwfFile: the instrumentation is not installed.
+                "swf_arm" => {
+                    "[ok]\t\"table\"\t\"function\"\t\"function\"\t\"nil\"\t\"function\"\t\"function\"\t\"function\"\tfalse\tfalse".into()
+                }
+                n => healthy(n),
+            }
+        });
+        let results = run(&opts(addr)).expect("reachable");
+        let swf = by_name(&results, "swf_callback");
+        assert!(!swf.pass && swf.evidence.contains("PRESENT check failed"), "{swf:?}");
+        let order = swf_order(&log);
+        assert!(!order.iter().any(|n| n == "swf_restore" || n == "swf_poll" || n == "swf_cleanup"), "{order:?}");
+        assert!(by_name(&results, "menu_open").pass && by_name(&results, "menu_close").pass);
+        assert_eq!(exit_code(&results), 1);
+    }
+
+    #[test]
+    fn ess_live_swf_callback_with_the_runtime_already_built_fails_with_how_to_observe_it() {
+        let addr = serve(|chunk| match marker(chunk) {
+            "swf_arm" => {
+                "[ok]\t\"table\"\t\"function\"\t\"function\"\t\"function\"\t\"function\"\t\"function\"\t\"function\"\ttrue\tfalse".into()
+            }
+            n => healthy(n),
+        });
+        let results = run(&opts(addr)).expect("reachable");
+        let swf = by_name(&results, "swf_callback");
+        assert!(!swf.pass && swf.evidence.contains("already exists"), "{swf:?}");
     }
 
     #[test]
