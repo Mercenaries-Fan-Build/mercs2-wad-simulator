@@ -993,6 +993,35 @@ _MODULES.MrxPmc = nil
     assert!(lint::blocks_build(&diags));
 }
 
+/// Text inside a comment or a string literal is not a write: `--` line comments, `--[[ ]]` and
+/// `--[==[ ]==]` long comments, quoted strings (with escaped quotes) and long strings. A real write after
+/// each of them on the same source is still caught, so the comment and string ends are found correctly.
+#[test]
+fn m0302_ignores_comments_and_strings() {
+    let body = "\
+-- the `_G.X = _G.X or {defaults}` idiom
+--[[ _G.InLong = 1
+_G.StillInLong = 2 ]]
+--[==[ _G.InLevelled = 3 ]] _G.StillLevelled = 4 ]==]
+local s = \"_G.InString = 5 \\\" _G.AfterEscapedQuote = 6\"
+local t = '_G.InSingle = 7'
+local u = [[ _G.InLongString = 8 ]]
+local v = [=[ ]] _G.InLevelledString = 9 ]=]
+_G.Real = 10
+";
+    let root = scratch("m0302_comments", &[("src/lib.lua", body)]);
+    let m = shipment_with(
+        "  - kind: add_script
+    name: lib
+    source: src/lib.lua
+",
+    );
+    let diags = lint::lint(&m, Some(&root), None);
+    let found: Vec<&str> = diags.iter().filter(|d| d.rule.code == "M0302").map(|d| d.message.as_str()).collect();
+    assert_eq!(found.len(), 1, "only the real write is flagged: {found:#?}");
+    assert!(found[0].contains("`_G.Real`") && found[0].contains("src/lib.lua:9:1"), "{}", found[0]);
+}
+
 /// A comparison like `if _G.foo == nil then` is a READ, not a write, and must not be flagged —
 /// the rule scans for `= ` not `==`. Similarly a legitimate module-local write (`tEvents =
 /// tEvents or {}` in module scope) is silent: it targets the module's own env, not `_G`.
