@@ -82,6 +82,7 @@ pub mod ffi {
         pub fn m2_lua_on_state(cb: Option<LuaStateCb>, ud: *mut c_void) -> c_int;
         pub fn m2_lua_on_tick(cb: Option<LuaTickCb>, ud: *mut c_void) -> c_int;
         pub fn m2_lua_exec(l: *mut c_void, chunk: *const c_char, len: c_int, out: *mut c_char, cap: c_int) -> c_int;
+        pub fn m2_lua_state_ok(l: *mut c_void) -> c_int;
         pub fn m2_lua_in_exec() -> c_int;
         pub fn m2_lua_raise(l: *mut c_void, msg: *const c_char) -> !;
         pub fn m2_lua_push_nil(l: *mut c_void);
@@ -217,6 +218,11 @@ mod safe {
         let n = out.iter().position(|&b| b == 0).unwrap_or(out.len());
         out.truncate(n);
         ExecResult { status, text: out }
+    }
+
+    /// Whether `l` is a usable `lua_State` right now.
+    pub fn lua_state_ok(l: *mut c_void) -> bool {
+        unsafe { ffi::m2_lua_state_ok(l) == 1 }
     }
 
     pub fn lua_in_exec() -> bool {
