@@ -34,6 +34,7 @@ EXPORTS
     m2_lua_on_state
     m2_lua_on_tick
     m2_lua_exec
+    m2_lua_state_ok
     m2_lua_in_exec
     m2_lua_raise
     m2_lua_push_nil
