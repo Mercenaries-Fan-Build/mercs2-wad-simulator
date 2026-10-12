@@ -42,6 +42,10 @@ mercs2_audio = { path = "../mercs2_audio" }
 retail = []
 
 [[test]]
+name = "lua_sites_exes"
+required-features = ["retail"]
+
+[[test]]
 name = "anim_container_roundtrip"
 required-features = ["retail"]
 
