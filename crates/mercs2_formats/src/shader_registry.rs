@@ -44,7 +44,8 @@ pub enum Stage {
 pub struct FamilyInfo {
     pub name: &'static str,
     pub stage: Stage,
-    /// VA of the family's 6-slot vtable.
+    /// VA of the family's 6-slot vtable in the cracked/unpacked exe; m2-sdk.dll uses the vtable
+    /// [`crate::shader_sites`] resolves in the running image.
     pub vtable: u32,
     /// Record size in bytes.
     pub size: u32,
@@ -57,9 +58,14 @@ pub const FAMILY_VERTEX: i32 = 26;
 pub const PS_RECORD_MAX: u32 = 0x15C;
 pub const VS_RECORD_MAX: u32 = 0x16C;
 pub const PIXEL_CLASSES: usize = 4;
-pub use crate::exe_target::{
-    SHADER_PS_CAPACITY as PS_CAPACITY, SHADER_SHO_MAX_LEN as SHO_MAX_LEN, SHADER_VS_CAPACITY as VS_CAPACITY,
-};
+/// Slot counts of the game's two key tables (pool+0x2008 pixel, pool+0x6410 vertex). The inserts
+/// (FUN_0085b7c0 / FUN_00632250) probe `& 0x7ff` / `& 0xff` without giving up, so an insert into a full
+/// table never terminates.
+pub const PS_CAPACITY: u32 = 0x800;
+pub const VS_CAPACITY: u32 = 0x100;
+/// FUN_0085ac90 copies the sho name to record+0xb and the class lives at +0x8c, so a sho name holds at
+/// most 0x8c - 0xb - 1 = 128 characters.
+pub const SHO_MAX_LEN: usize = 128;
 
 macro_rules! fam {
     ($name:literal, $stage:ident, $vt:literal, $size:literal) => {
@@ -305,7 +311,6 @@ pub fn admit(e: &Entry, shader_level: u8, live_count: u32, keys: &[u32]) -> Stat
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::exe_target::{RDATA_SIZE, RDATA_START_VA};
     use core::ptr::null;
 
     fn cls(name: &'static CStr, sho: &'static CStr) -> Class {
@@ -331,7 +336,7 @@ mod tests {
         for f in 0..FAMILY_COUNT as i32 {
             let info = family(f).unwrap();
             assert!(!info.name.is_empty());
-            assert!((RDATA_START_VA..RDATA_START_VA + RDATA_SIZE).contains(&info.vtable));
+            assert!((0x00B0_5000..0x00BF_6000).contains(&info.vtable), ".rdata of the cracked/unpacked exe");
             match info.stage {
                 Stage::Pixel => {
                     pixel += 1;
