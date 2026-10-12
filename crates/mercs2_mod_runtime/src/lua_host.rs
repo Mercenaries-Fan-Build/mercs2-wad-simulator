@@ -113,18 +113,54 @@ fn write_u32(addr: u32, v: u32) {
     unsafe { (addr as *mut u32).write_unaligned(v) }
 }
 
+/// `len` bytes from `addr` are readable, across as many adjacent regions as they span.
 fn readable(addr: u32, len: u32) -> bool {
-    addr >= 0x10000 && luastack::Process.readable_span(addr) >= len
-}
-
-/// A `lua_State`: its type tag at +4 is `LUA_TTHREAD`, and top, base and the global state are readable,
-/// aligned, and ordered.
-fn looks_like_state(l: u32) -> bool {
-    if !readable(l, 0x18) || luastack::Process.read_u8(l + 4) as u32 != LUA_TTHREAD {
+    if addr < 0x10000 {
         return false;
     }
+    let mut covered = 0u32;
+    while covered < len {
+        let Some(at) = addr.checked_add(covered) else { return false };
+        let span = luastack::Process.readable_span(at);
+        if span == 0 {
+            return false;
+        }
+        covered = covered.saturating_add(span);
+    }
+    true
+}
+
+/// What makes `l` not a usable `lua_State`, or `None` when it is one: its type tag at +4 is
+/// `LUA_TTHREAD`, and top, base and the global state are readable, aligned, and ordered.
+fn state_problem(l: u32) -> Option<String> {
+    if !readable(l, 0x18) {
+        return Some("the state is not readable".into());
+    }
+    let tt = luastack::Process.read_u8(l + 4) as u32;
+    if tt != LUA_TTHREAD {
+        return Some(format!("type tag {tt}, not a thread"));
+    }
     let (top, base, g) = (read_u32(l + OFF_TOP), read_u32(l + OFF_BASE), read_u32(l + OFF_GLOBAL));
-    readable(base, 16) && readable(top, 4) && readable(g, 4) && (top | base) & 3 == 0 && top >= base && top - base <= 0x10000
+    let problem = if !readable(base, 16) {
+        "base is not readable"
+    } else if !readable(top, 4) {
+        "top is not readable"
+    } else if !readable(g, 4) {
+        "the global state is not readable"
+    } else if (top | base) & 3 != 0 {
+        "top or base is misaligned"
+    } else if top < base {
+        "top is below base"
+    } else if top - base > 0x10000 {
+        "the frame is over 64 KiB"
+    } else {
+        return None;
+    };
+    Some(format!("{problem} (base {base:#x}, top {top:#x}, global {g:#x})"))
+}
+
+fn looks_like_state(l: u32) -> bool {
+    state_problem(l).is_none()
 }
 
 fn new_string(l: u32, bytes: &[u8]) -> u32 {
@@ -427,6 +463,13 @@ pub extern "C" fn m2_lua_on_tick(cb: Option<TickCb>, ud: *mut c_void) -> c_int {
     }
 }
 
+/// 1 when `L` is a usable `lua_State` right now (the check [`m2_lua_exec`] makes before running), else 0.
+/// A tick's `L` can be a state that has since ended: check before taking work off a queue for it.
+#[unsafe(no_mangle)]
+pub extern "C" fn m2_lua_state_ok(l: *mut c_void) -> c_int {
+    c_int::from(looks_like_state(l as u32))
+}
+
 /// 1 while [`m2_lua_exec`] runs on this thread.
 #[unsafe(no_mangle)]
 pub extern "C" fn m2_lua_in_exec() -> c_int {
@@ -449,8 +492,8 @@ impl Drop for ExecGuard {
 fn exec(l: u32, code: &[u8]) -> (c_int, Vec<u8>) {
     let refuse = |m: &str| (EXEC_REFUSED, m.as_bytes().to_vec());
     let Ok(s) = sites::now() else { return refuse("[bridge] the game's Lua sites are not resolved") };
-    if !looks_like_state(l) {
-        return refuse("[bridge] L failed validation");
+    if let Some(problem) = state_problem(l) {
+        return refuse(&format!("[bridge] L={l:#x} failed validation: {problem}"));
     }
     if code.is_empty() {
         return refuse("[bridge] empty chunk");
