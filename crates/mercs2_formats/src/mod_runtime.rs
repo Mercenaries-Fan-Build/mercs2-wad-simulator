@@ -67,6 +67,7 @@ pub mod ffi {
         pub fn m2_lua_join_strings(l: *mut c_void, out: *mut c_char, out_max: c_int) -> c_int;
         pub fn m2_loghook_add_listener(cb: Option<LogListener>, ud: *mut c_void) -> c_int;
         pub fn m2_loghook_install() -> c_int;
+        pub fn m2_loghook_set_active(cb: Option<LogListener>, ud: *mut c_void, active: c_int) -> c_int;
         pub fn m2_loadtrigger_on_phase(target_idx: c_int, cb: Option<PhaseCb>, ud: *mut c_void) -> c_int;
         pub fn m2_loadtrigger_install() -> c_int;
         pub fn m2_loadtrigger_current_phase() -> c_int;
@@ -173,6 +174,28 @@ mod safe {
     /// `cb` may be called with `ud` on the game thread for the life of the process.
     pub unsafe fn lua_on_tick(cb: LuaTickCb, ud: *mut c_void) -> Result<(), String> {
         if unsafe { ffi::m2_lua_on_tick(Some(cb), ud) } == 1 { Ok(()) } else { Err("m2_lua_on_tick: all 16 slots are taken".into()) }
+    }
+
+    /// Add a log listener and start the log source (`m2/m2_loghook.h`).
+    ///
+    /// # Safety
+    /// `cb` may be called with `ud` on any thread that logs, for the life of the process.
+    pub unsafe fn loghook_listen(cb: LogListener, ud: *mut c_void) -> Result<(), String> {
+        if unsafe { ffi::m2_loghook_add_listener(Some(cb), ud) } != 1 {
+            return Err("m2_loghook_add_listener: all 16 slots are taken".into());
+        }
+        if unsafe { ffi::m2_loghook_install() } != 1 {
+            return Err("m2_loghook_install failed; m2-sdk.log has the reason".into());
+        }
+        Ok(())
+    }
+
+    /// Pause or resume a listener added with [`loghook_listen`].
+    pub fn loghook_set_active(cb: LogListener, ud: *mut c_void, active: bool) -> Result<(), String> {
+        if unsafe { ffi::m2_loghook_set_active(Some(cb), ud, c_int::from(active)) } != 1 {
+            return Err("m2_loghook_set_active: no such listener".into());
+        }
+        Ok(())
     }
 
     /// A chunk's outcome and its result line.
