@@ -1022,6 +1022,48 @@ _G.Real = 10
     assert!(found[0].contains("`_G.Real`") && found[0].contains("src/lib.lua:9:1"), "{}", found[0]);
 }
 
+/// `exports` on an `add_script` declares the globals the module writes on purpose: a write to a
+/// listed name (or a field under it) passes, an unlisted `_G` write and every `_MODULES` write still
+/// fail, and an entry that is not a Lua identifier is refused.
+#[test]
+fn m0302_accepts_declared_exports_only() {
+    let body = "\
+_G.Lib = _G.Lib or {}
+_G.Lib.version = 1
+local function hook() _G.OnStateChange = function() end end
+_G.Undeclared = true
+_MODULES.lib = {}
+";
+    let root = scratch("m0302_exports", &[("src/lib.lua", body)]);
+    let m = shipment_with(
+        "  - kind: add_script
+    name: lib
+    source: src/lib.lua
+    exports: [Lib, OnStateChange]
+",
+    );
+    let diags = lint::lint(&m, Some(&root), None);
+    let found: Vec<&str> = diags.iter().filter(|d| d.rule.code == "M0302").map(|d| d.message.as_str()).collect();
+    assert_eq!(found.len(), 2, "{found:#?}");
+    assert!(found.iter().any(|m| m.contains("`_G.Undeclared`")), "{found:#?}");
+    assert!(found.iter().any(|m| m.contains("`_MODULES.lib`")), "{found:#?}");
+
+    let bad = shipment_with(
+        "  - kind: add_script
+    name: lib
+    source: src/lib.lua
+    exports: [_G.Lib, Lib.version, end, Lib]
+",
+    );
+    let diags = lint::lint(&bad, Some(&root), None);
+    let refused: Vec<&str> = diags
+        .iter()
+        .filter(|d| d.rule.code == "M0302" && d.message.contains("is not a Lua identifier"))
+        .map(|d| d.message.as_str())
+        .collect();
+    assert_eq!(refused.len(), 3, "{refused:#?}");
+}
+
 /// A comparison like `if _G.foo == nil then` is a READ, not a write, and must not be flagged —
 /// the rule scans for `= ` not `==`. Similarly a legitimate module-local write (`tEvents =
 /// tEvents or {}` in module scope) is silent: it targets the module's own env, not `_G`.
