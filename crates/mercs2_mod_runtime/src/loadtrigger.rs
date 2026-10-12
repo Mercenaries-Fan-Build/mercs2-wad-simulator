@@ -95,6 +95,11 @@ unsafe extern "C" fn on_log_line(msg: *const c_char, _ud: *mut c_void) {
             fire_once(t, matched);
         }
     }
+    // The ladder's last phase: no later line can fire anything, and a trigger registered from now on
+    // fires at registration.
+    if matched as usize + 1 == ladder::count() {
+        loghook::m2_loghook_set_active(Some(on_log_line), core::ptr::null_mut(), 0);
+    }
 }
 
 /// Subscribe the one process-wide listener and start the log source. Idempotent.
