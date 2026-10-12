@@ -5,6 +5,7 @@
 use crate::rt_log;
 use mercs2_formats::exe_image::{Image, parse_headers};
 use mercs2_formats::lua_sites::{LuaSites, resolve};
+use mercs2_formats::shader_sites::{self, ShaderSites};
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleA;
@@ -16,16 +17,35 @@ const RETRY: Duration = Duration::from_millis(50);
 const HEADER_BYTES: usize = 0x1000;
 
 static SITES: OnceLock<LuaSites> = OnceLock::new();
+static SHADERS: OnceLock<ShaderSites> = OnceLock::new();
 
-fn resolve_mapped() -> Result<LuaSites, String> {
+fn mapped() -> Result<Image<'static>, String> {
     let base = unsafe { GetModuleHandleA(core::ptr::null()) } as *const u8;
     if base.is_null() {
         return Err("GetModuleHandleA(NULL) returned no module".into());
     }
     let header = unsafe { core::slice::from_raw_parts(base, HEADER_BYTES) };
     let (image_base, headers) = parse_headers(header).map_err(|e| format!("the game's headers: {e}"))?;
-    let img = unsafe { Image::from_mapped(base, image_base, headers) };
-    resolve(&img).map_err(|e| e.to_string())
+    Ok(unsafe { Image::from_mapped(base, image_base, headers) })
+}
+
+fn resolve_mapped() -> Result<LuaSites, String> {
+    resolve(&mapped()?).map_err(|e| e.to_string())
+}
+
+/// The shader registry's sites, resolving them now when that has not been done; never waits (the add
+/// functions run in a mod's `DllMain`).
+pub(crate) fn shaders_now() -> Result<&'static ShaderSites, String> {
+    if let Some(s) = SHADERS.get() {
+        return Ok(s);
+    }
+    let s = shader_sites::resolve(&mapped()?).map_err(|e| e.to_string())?;
+    let s = SHADERS.get_or_init(|| s);
+    rt_log::line(&format!(
+        "shader sites: RegisterAll {:#x}, Register {:#x}, base ctors {:#x} / {:#x}, pool {:#x}, ShaderLevel {:#x}, 45 family vtables",
+        s.register_all, s.register, s.ps_base_ctor, s.vs_base_ctor, s.ps_count, s.shader_level
+    ));
+    Ok(s)
 }
 
 fn publish(s: LuaSites) -> &'static LuaSites {
