@@ -88,6 +88,9 @@ pub const XBOX_VZ_WAD_KEY: &str = "xbox_vz_wad";
 pub const PS3_VZ_WAD_KEY: &str = "ps3_vz_wad";
 /// The `unpacked_exe` key of [`LOCAL_CONFIG`]: the SecuROM-unpacked game executable.
 pub const UNPACKED_EXE_KEY: &str = "unpacked_exe";
+/// The `exe_dumps` key of [`LOCAL_CONFIG`]: the folder of reference game executables
+/// (`mercs2_nodrm_v3.exe`, `mercs2_unpacked.exe`, `genuine_patched_unpacked.exe`).
+pub const EXE_DUMPS_KEY: &str = "exe_dumps";
 
 /// The `<key> = "…"` value in one [`LOCAL_CONFIG`]'s text, or `None` when the key is absent.
 ///
@@ -158,6 +161,30 @@ pub fn local_config_unpacked_exe(start: &Path) -> Result<PathBuf, String> {
         UNPACKED_EXE_KEY,
         "write `unpacked_exe = \"/path/to/mercs2_unpacked.exe\"` into it by hand",
     )
+}
+
+/// One reference executable for a **game-gated test**: `<exe_dumps>/<name>` from the nearest
+/// [`LOCAL_CONFIG`]. The error says whether the config, the key, the folder or the file is missing.
+pub fn local_config_exe_dump(start: &Path, name: &str) -> Result<PathBuf, String> {
+    let fix = "write `exe_dumps = \"/path/to/output/_ghidra/securom_dump\"` into it by hand";
+    let Some((file, text)) = local_configs(start).next() else {
+        return Err(format!(
+            "game-gated test: no {LOCAL_CONFIG} found in {} or any folder above it; {fix}",
+            start.display()
+        ));
+    };
+    let Some(dir) = config_value(&text, EXE_DUMPS_KEY) else {
+        return Err(format!("game-gated test: {} has no `{EXE_DUMPS_KEY}` key; {fix}", file.display()));
+    };
+    let path = dir.join(name);
+    if !path.is_file() {
+        return Err(format!(
+            "game-gated test: {} names {EXE_DUMPS_KEY} = {}, which has no file {name}",
+            file.display(),
+            dir.display()
+        ));
+    }
+    Ok(path)
 }
 
 /// The file `key` names in the nearest [`LOCAL_CONFIG`] above `start`, or an error saying which of
