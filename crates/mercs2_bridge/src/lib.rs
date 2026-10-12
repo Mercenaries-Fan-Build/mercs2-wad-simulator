@@ -8,13 +8,16 @@
 //! for browsers, and there is nothing for us to bridge (the shim Plan 03 once called its first move
 //! is obsolete now that his ASI serves both).
 //!
-//! ## The protocol (confirmed from `lua_bridge_DEV.c`)
+//! ## The protocol
 //!
 //! ```text
-//!   client → <lua chunk> <<<RUN>>>          request: a chunk, terminated by the RUN marker
-//!   (chunk queues to the next engine frame and runs on the main thread)
-//!   client ← <result> <<<END>>>            response: the result, terminated by the END marker
+//!   client → <line>\n ... <<<RUN>>>\n      request: the lines before the RUN line form the chunk
+//!   client ← [queued]\n                     the chunk is queued to the next engine frame
+//!   client ← <result>\n<<<END>>>\n          it ran on the main thread; this is its result
 //! ```
+//!
+//! Lines end at `\n`; one trailing `\r` is stripped; the RUN marker must be a whole line. A rejected
+//! request (an oversized chunk or line) is answered `<message>\n<<<END>>>\n` with no `[queued]` line.
 //!
 //! ## The discipline this crate enforces, so callers cannot forget it
 //!
@@ -32,10 +35,12 @@ use std::time::{Duration, Instant};
 /// Where the ASI listens by default — loopback only, matching its bind.
 pub const DEFAULT_ADDR: &str = "127.0.0.1:27050";
 
-/// Terminates a request chunk on the wire.
-const RUN: &[u8] = b"<<<RUN>>>";
-/// Terminates a response on the wire.
-const END: &[u8] = b"<<<END>>>";
+/// Terminates a request chunk on the wire: a line of its own.
+pub const RUN: &[u8] = b"<<<RUN>>>";
+/// Terminates a response on the wire: a line of its own.
+pub const END: &[u8] = b"<<<END>>>";
+/// The line acknowledging a queued chunk, ahead of its result.
+pub const QUEUED: &[u8] = b"[queued]";
 
 /// Everything that can go wrong talking to the game.
 #[derive(Debug)]
@@ -49,6 +54,9 @@ pub enum BridgeError {
     Timeout,
     /// The ASI closed the connection.
     Closed,
+    /// The chunk cannot be framed: it is empty (the server would queue nothing and answer nothing), or
+    /// one of its lines is the RUN marker.
+    BadChunk(&'static str),
 }
 
 impl std::fmt::Display for BridgeError {
@@ -65,6 +73,7 @@ impl std::fmt::Display for BridgeError {
                 "the game did not answer in time — it may be loading or hung. The chunk may still run"
             ),
             BridgeError::Closed => write!(f, "the game bridge closed the connection"),
+            BridgeError::BadChunk(why) => write!(f, "the chunk cannot be sent: {why}"),
         }
     }
 }
@@ -82,6 +91,8 @@ pub struct Bridge {
     min_interval: Duration,
     last_send: Option<Instant>,
     timeout: Duration,
+    /// Bytes read past the last response.
+    rx: Vec<u8>,
 }
 
 impl Bridge {
@@ -127,6 +138,7 @@ impl Bridge {
             min_interval,
             last_send: None,
             timeout,
+            rx: Vec::new(),
         })
     }
 
@@ -136,6 +148,7 @@ impl Bridge {
     /// the rate limit by waiting out any remaining interval since the last send (bounded by
     /// `min_interval`), so a caller cannot accidentally flood the game.
     pub fn eval(&mut self, chunk: &str) -> Result<String, BridgeError> {
+        let request = frame_request(chunk)?;
         if let Some(last) = self.last_send {
             let elapsed = last.elapsed();
             if elapsed < self.min_interval {
@@ -146,21 +159,24 @@ impl Bridge {
             .set_write_timeout(Some(self.timeout))
             .map_err(BridgeError::Io)?;
         self.stream
-            .write_all(chunk.as_bytes())
-            .and_then(|()| self.stream.write_all(RUN))
+            .write_all(&request)
             .and_then(|()| self.stream.flush())
             .map_err(BridgeError::Io)?;
         self.last_send = Some(Instant::now());
         self.read_until_end()
     }
 
-    /// Read the socket until the `<<<END>>>` terminator, returning everything before it. The game's
-    /// results are CP1252, but a console only displays them, so this decodes lossily as UTF-8.
+    /// Read the socket until the `<<<END>>>` line, returning the result before it (without the
+    /// `[queued]` line). The game's results are CP1252, but a console only displays them, so this decodes
+    /// lossily as UTF-8.
     fn read_until_end(&mut self) -> Result<String, BridgeError> {
         let deadline = Instant::now() + self.timeout;
-        let mut buf: Vec<u8> = Vec::with_capacity(1024);
         let mut chunk = [0u8; 4096];
         loop {
+            if let Some((body, used)) = parse_response(&self.rx) {
+                self.rx.drain(..used);
+                return Ok(String::from_utf8_lossy(&body).into_owned());
+            }
             let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
                 return Err(BridgeError::Timeout);
             };
@@ -170,13 +186,7 @@ impl Bridge {
                 .map_err(BridgeError::Io)?;
             match self.stream.read(&mut chunk) {
                 Ok(0) => return Err(BridgeError::Closed),
-                Ok(n) => {
-                    buf.extend_from_slice(&chunk[..n]);
-                    if let Some(pos) = find_subslice(&buf, END) {
-                        buf.truncate(pos);
-                        return Ok(String::from_utf8_lossy(&buf).into_owned());
-                    }
-                }
+                Ok(n) => self.rx.extend_from_slice(&chunk[..n]),
                 Err(e)
                     if matches!(
                         e.kind(),
@@ -243,27 +253,48 @@ impl Server {
         Ok(())
     }
 
-    /// Read `<<<RUN>>>`-framed chunks off one connection, answering each with `<<<END>>>`-framed
-    /// output, until EOF or an I/O error. Split out so a host can drive a single accepted socket.
+    /// Read RUN-framed chunks off one connection, acknowledging each with `[queued]` and answering it
+    /// with its result and the END line, until EOF or an I/O error. Split out so a host can drive a
+    /// single accepted socket.
     fn serve_conn<F: FnMut(&str) -> String>(
         stream: &mut TcpStream,
         handler: &mut F,
     ) -> std::io::Result<()> {
-        let mut buf: Vec<u8> = Vec::with_capacity(1024);
+        let mut rx: Vec<u8> = Vec::with_capacity(1024);
+        let mut lines: Vec<u8> = Vec::new();
         let mut chunk = [0u8; 4096];
         loop {
-            // Consume any whole requests already buffered before reading more.
-            while let Some(pos) = find_subslice(&buf, RUN) {
-                let req = String::from_utf8_lossy(&buf[..pos]).into_owned();
-                buf.drain(..pos + RUN.len());
-                let out = handler(&req);
-                stream.write_all(out.as_bytes())?;
-                stream.write_all(END)?;
-                stream.flush()?;
+            // Consume every whole line already buffered before reading more.
+            while let Some(i) = rx.iter().position(|&b| b == b'\n') {
+                let mut line = &rx[..i];
+                if let [rest @ .., b'\r'] = line {
+                    line = rest;
+                }
+                if line == RUN {
+                    if !lines.is_empty() {
+                        let req = String::from_utf8_lossy(&lines).into_owned();
+                        lines.clear();
+                        stream.write_all(QUEUED)?;
+                        stream.write_all(b"\n")?;
+                        stream.flush()?;
+                        let mut out = handler(&req).into_bytes();
+                        if !out.ends_with(b"\n") {
+                            out.push(b'\n');
+                        }
+                        out.extend_from_slice(END);
+                        out.push(b'\n');
+                        stream.write_all(&out)?;
+                        stream.flush()?;
+                    }
+                } else {
+                    lines.extend_from_slice(line);
+                    lines.push(b'\n');
+                }
+                rx.drain(..=i);
             }
             match stream.read(&mut chunk) {
                 Ok(0) => return Ok(()), // client closed
-                Ok(n) => buf.extend_from_slice(&chunk[..n]),
+                Ok(n) => rx.extend_from_slice(&chunk[..n]),
                 Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
                 Err(e) => return Err(e),
             }
@@ -271,12 +302,45 @@ impl Server {
     }
 }
 
-/// The first index at which `needle` occurs in `hay`.
-fn find_subslice(hay: &[u8], needle: &[u8]) -> Option<usize> {
-    if needle.is_empty() || hay.len() < needle.len() {
-        return None;
+/// The request bytes for `chunk`: its lines, a newline after the last, then the RUN line.
+fn frame_request(chunk: &str) -> Result<Vec<u8>, BridgeError> {
+    if chunk.trim().is_empty() {
+        return Err(BridgeError::BadChunk("it is empty"));
     }
-    (0..=hay.len() - needle.len()).find(|&i| &hay[i..i + needle.len()] == needle)
+    if chunk.lines().any(|l| l.strip_suffix('\r').unwrap_or(l).as_bytes() == RUN) {
+        return Err(BridgeError::BadChunk("one of its lines is the <<<RUN>>> marker"));
+    }
+    let mut req = Vec::with_capacity(chunk.len() + RUN.len() + 2);
+    req.extend_from_slice(chunk.as_bytes());
+    if !chunk.ends_with('\n') {
+        req.push(b'\n');
+    }
+    req.extend_from_slice(RUN);
+    req.push(b'\n');
+    Ok(req)
+}
+
+/// One whole response at the front of `rx`: the result (without a leading `[queued]` line and the
+/// newline before END), and how many bytes it used, through the END line's newline.
+fn parse_response(rx: &[u8]) -> Option<(Vec<u8>, usize)> {
+    let mut start = 0;
+    while let Some(i) = rx[start..].iter().position(|&b| b == b'\n') {
+        let mut line = &rx[start..start + i];
+        if let [rest @ .., b'\r'] = line {
+            line = rest;
+        }
+        if line == END {
+            let mut body = &rx[..start];
+            let ack_len = QUEUED.len() + 1;
+            if body.len() >= ack_len && &body[..QUEUED.len()] == QUEUED && body[QUEUED.len()] == b'\n' {
+                body = &body[ack_len..];
+            }
+            let body = body.strip_suffix(b"\n").unwrap_or(body);
+            return Some((body.to_vec(), start + i + 1));
+        }
+        start += i + 1;
+    }
+    None
 }
 
 #[cfg(test)]
@@ -284,14 +348,27 @@ mod tests {
     use super::*;
 
     #[test]
-    fn finds_the_terminator_including_across_read_boundaries() {
-        assert_eq!(find_subslice(b"abc<<<END>>>xyz", END), Some(3));
-        assert_eq!(find_subslice(b"no terminator here", END), None);
-        // The marker split over two reads is why we search the ACCUMULATED buffer, not each read.
-        let mut buf = b"result<<<EN".to_vec();
-        assert_eq!(find_subslice(&buf, END), None);
-        buf.extend_from_slice(b"D>>>");
-        assert_eq!(find_subslice(&buf, END), Some(6));
+    fn a_request_is_its_lines_then_the_run_line() {
+        assert_eq!(frame_request("return 1").unwrap(), b"return 1\n<<<RUN>>>\n");
+        assert_eq!(frame_request("a\nb\n").unwrap(), b"a\nb\n<<<RUN>>>\n");
+        assert!(matches!(frame_request("  \n"), Err(BridgeError::BadChunk(_))));
+        assert!(matches!(frame_request("x\n<<<RUN>>>\r\ny"), Err(BridgeError::BadChunk(_))));
+        assert!(frame_request("print('<<<RUN>>>')").is_ok(), "the marker inside a line is just text");
+    }
+
+    #[test]
+    fn a_response_drops_the_ack_and_needs_a_whole_end_line() {
+        let wire = b"[queued]\n[ok]\t2\n<<<END>>>\nrest";
+        assert_eq!(parse_response(wire), Some((b"[ok]\t2".to_vec(), wire.len() - 4)));
+        // The END marker split over two reads, or not yet followed by its newline: not complete.
+        assert_eq!(parse_response(b"[queued]\n1\n<<<EN"), None);
+        assert_eq!(parse_response(b"[queued]\n1\n<<<END>>>"), None);
+        // A rejection has no ack line.
+        let rejected = b"[bridge] line rejected\n<<<END>>>\n";
+        assert_eq!(parse_response(rejected), Some((b"[bridge] line rejected".to_vec(), rejected.len())));
+        // A multi-line result keeps its inner newlines; a line merely containing END is not the end.
+        let multi = b"[queued]\na\nsay <<<END>>>\n<<<END>>>\r\n";
+        assert_eq!(parse_response(multi), Some((b"a\nsay <<<END>>>".to_vec(), multi.len())));
     }
 
     /// ★ The two halves speak the same protocol: a real [`Bridge`] client, pointed at a [`Server`] on
