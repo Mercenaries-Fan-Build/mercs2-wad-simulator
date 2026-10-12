@@ -1,6 +1,7 @@
 //! m2-sdk.dll, the one shared layer every Mercenaries 2 ASI imports. It owns the process-wide state that
 //! only works as a single instance: MinHook, the log-stream subscription, the load ladder, the shader
-//! queue and the per-module log files. The exports and their behaviour are the C ABI in `m2/*.h`.
+//! queue, the Lua host (detours, captured states, namespaces, the chunk executor) and the per-module log
+//! files. The exports and their behaviour are the C ABI in `m2/*.h`.
 //!
 //! There is no `DllMain`: every facility initialises on its first call, and the DLL keeps its thread
 //! notifications because the Rust runtime's thread-local destructors run on them.
@@ -13,7 +14,11 @@ mod ini;
 mod loadtrigger;
 mod log;
 mod loghook;
+mod lua_host;
 mod luastack;
+mod rt_log;
 mod shader;
+mod sites;
+mod stub;
 mod version;
 
