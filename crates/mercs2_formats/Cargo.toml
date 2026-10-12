@@ -34,7 +34,6 @@ loadprobe = { workspace = true }
 
 [dev-dependencies]
 serde_json = "1"
-mercs2_audio = { path = "../mercs2_audio" }
 
 [features]
 # Builds the game-gated tests, which read the retail vz.wad named by the repo-root .mercs2-local.toml;
