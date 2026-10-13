@@ -11,7 +11,7 @@
 //!   `Merc2-Demo.exe` as its installer ships it), code version `demo`.
 //!
 //! The official v1.1 patcher (sha256 `b27fedc2…`, the same file in all four regions) turns
-//! `v10-unsigned` (U) into `v11-official-securom` (E). Every
+//! `v11-official-securom` (E) into `v11-official-unwrapped` (E). Every
 //! cracked, DRM-free and SecuROM-unwrapped build in the U layout runs v1.0 code.
 //!
 //! A build belongs to its layout when every byte that differs from the reference is accounted for by
