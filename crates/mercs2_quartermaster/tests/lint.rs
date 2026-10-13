@@ -993,6 +993,77 @@ _MODULES.MrxPmc = nil
     assert!(lint::blocks_build(&diags));
 }
 
+/// Text inside a comment or a string literal is not a write: `--` line comments, `--[[ ]]` and
+/// `--[==[ ]==]` long comments, quoted strings (with escaped quotes) and long strings. A real write after
+/// each of them on the same source is still caught, so the comment and string ends are found correctly.
+#[test]
+fn m0302_ignores_comments_and_strings() {
+    let body = "\
+-- the `_G.X = _G.X or {defaults}` idiom
+--[[ _G.InLong = 1
+_G.StillInLong = 2 ]]
+--[==[ _G.InLevelled = 3 ]] _G.StillLevelled = 4 ]==]
+local s = \"_G.InString = 5 \\\" _G.AfterEscapedQuote = 6\"
+local t = '_G.InSingle = 7'
+local u = [[ _G.InLongString = 8 ]]
+local v = [=[ ]] _G.InLevelledString = 9 ]=]
+_G.Real = 10
+";
+    let root = scratch("m0302_comments", &[("src/lib.lua", body)]);
+    let m = shipment_with(
+        "  - kind: add_script
+    name: lib
+    source: src/lib.lua
+",
+    );
+    let diags = lint::lint(&m, Some(&root), None);
+    let found: Vec<&str> = diags.iter().filter(|d| d.rule.code == "M0302").map(|d| d.message.as_str()).collect();
+    assert_eq!(found.len(), 1, "only the real write is flagged: {found:#?}");
+    assert!(found[0].contains("`_G.Real`") && found[0].contains("src/lib.lua:9:1"), "{}", found[0]);
+}
+
+/// `exports` on an `add_script` declares the globals the module writes on purpose: a write to a
+/// listed name (or a field under it) passes, an unlisted `_G` write and every `_MODULES` write still
+/// fail, and an entry that is not a Lua identifier is refused.
+#[test]
+fn m0302_accepts_declared_exports_only() {
+    let body = "\
+_G.Lib = _G.Lib or {}
+_G.Lib.version = 1
+local function hook() _G.OnStateChange = function() end end
+_G.Undeclared = true
+_MODULES.lib = {}
+";
+    let root = scratch("m0302_exports", &[("src/lib.lua", body)]);
+    let m = shipment_with(
+        "  - kind: add_script
+    name: lib
+    source: src/lib.lua
+    exports: [Lib, OnStateChange]
+",
+    );
+    let diags = lint::lint(&m, Some(&root), None);
+    let found: Vec<&str> = diags.iter().filter(|d| d.rule.code == "M0302").map(|d| d.message.as_str()).collect();
+    assert_eq!(found.len(), 2, "{found:#?}");
+    assert!(found.iter().any(|m| m.contains("`_G.Undeclared`")), "{found:#?}");
+    assert!(found.iter().any(|m| m.contains("`_MODULES.lib`")), "{found:#?}");
+
+    let bad = shipment_with(
+        "  - kind: add_script
+    name: lib
+    source: src/lib.lua
+    exports: [_G.Lib, Lib.version, end, Lib]
+",
+    );
+    let diags = lint::lint(&bad, Some(&root), None);
+    let refused: Vec<&str> = diags
+        .iter()
+        .filter(|d| d.rule.code == "M0302" && d.message.contains("is not a Lua identifier"))
+        .map(|d| d.message.as_str())
+        .collect();
+    assert_eq!(refused.len(), 3, "{refused:#?}");
+}
+
 /// A comparison like `if _G.foo == nil then` is a READ, not a write, and must not be flagged —
 /// the rule scans for `= ` not `==`. Similarly a legitimate module-local write (`tEvents =
 /// tEvents or {}` in module scope) is silent: it targets the module's own env, not `_G`.
@@ -1306,6 +1377,22 @@ fn m0199_partial_coverage_warns_on_the_unguarded_touch() {
     assert_eq!(d.severity, Severity::Warning);
     assert!(!lint::blocks_build(&diags), "a coverage gap is advisory, not blocking");
     assert!(d.message.contains("0x004CF400"), "names the unguarded address: {}", d.message);
+}
+
+#[test]
+fn m0199_does_not_ask_symbol_touches_for_guards() {
+    // Symbols are declared beside the addresses they resolve to; only the addresses carry bytes.
+    let m = shipment_with(
+        "  - kind: native_hook
+    target: retail
+    symbol: SomeDetour
+    touches: [ProtoSSLConnect, 'ws2_32!connect', 'IDirect3DDevice9::EndScene', '0x004CF340']
+    signature_guard:
+      '0x004CF340': '55 8B EC'
+",
+    );
+    let diags = lint::lint(&m, None, None);
+    assert!(!codes(&diags).contains(&"M0199"), "only address touches need guards, got {diags:?}");
 }
 
 #[test]

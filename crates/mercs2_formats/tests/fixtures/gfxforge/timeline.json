@@ -1,0 +1,1655 @@
+{
+  "source": {
+    "repo": "mercs2-tools-gfxforge-web",
+    "commit": "9c5c12e05f16404d391b3a788525653d29948e46",
+    "license": "MIT",
+    "author": "loganw234 (Improper Aperture)"
+  },
+  "generated_by": "scratchpad driver freeze.js (not part of the repo); node v25.9.0",
+  "suite": "timeline",
+  "source_file": "tests/suite.timeline.js",
+  "notes": [],
+  "cases": [
+    {
+      "line": 38,
+      "name": "timeline: a movie with no declared frames still has exactly one frame",
+      "input": {
+        "movie_calls": [
+          {
+            "op": "new",
+            "args": [
+              200,
+              100,
+              {
+                "name": "t"
+              }
+            ]
+          },
+          {
+            "op": "rect",
+            "args": [
+              0,
+              0,
+              50,
+              50,
+              [
+                255,
+                0,
+                0
+              ]
+            ]
+          }
+        ]
+      },
+      "output": {
+        "movie": {
+          "gfxforge": "474658085c00000068001f400003e800001e01000bfa0702000000000d0000017444110000000043020000002208020058007d0001f4000100ff0000ff001014279be8001cc003e8e706000730010600860606010002000040000000",
+          "length": 92,
+          "gfxforge_sha256": "a0f995ce8c2724bf80d116319c4c03282a8e82b39191c85a90755ff22415e653",
+          "retail_corrected": "474658085400000068001f400003e800001e01000bfa0702130000000d0000017444110000000043020000002208020058007d0001f4000100ff0000ff001014279be8001cc003e8e706000730010600860606010002000040000000",
+          "corrections_applied": [
+            {
+              "deviation": "D3",
+              "offset": 4,
+              "from": 92,
+              "to": 84
+            },
+            {
+              "deviation": "D4",
+              "offset": 24,
+              "from": 0,
+              "to": 19
+            }
+          ]
+        },
+        "gfxforge_verify_summary": {
+          "bytes": 92,
+          "tags": {
+            "0": 1,
+            "1": 1,
+            "9": 1,
+            "26": 1,
+            "32": 1,
+            "69": 1,
+            "1000": 1
+          },
+          "functions": []
+        }
+      }
+    },
+    {
+      "line": 49,
+      "name": "timeline: a single-frame movie gets no implicit stop()",
+      "input": {
+        "movie_calls": [
+          {
+            "op": "new",
+            "args": [
+              200,
+              100,
+              {
+                "name": "t"
+              }
+            ]
+          },
+          {
+            "op": "rect",
+            "args": [
+              0,
+              0,
+              50,
+              50,
+              [
+                255,
+                0,
+                0
+              ]
+            ]
+          }
+        ]
+      },
+      "output": {
+        "movie": {
+          "gfxforge": "474658085c00000068001f400003e800001e01000bfa0702000000000d0000017444110000000043020000002208020058007d0001f4000100ff0000ff001014279be8001cc003e8e706000730010600860606010002000040000000",
+          "length": 92,
+          "gfxforge_sha256": "a0f995ce8c2724bf80d116319c4c03282a8e82b39191c85a90755ff22415e653",
+          "retail_corrected": "474658085400000068001f400003e800001e01000bfa0702130000000d0000017444110000000043020000002208020058007d0001f4000100ff0000ff001014279be8001cc003e8e706000730010600860606010002000040000000",
+          "corrections_applied": [
+            {
+              "deviation": "D3",
+              "offset": 4,
+              "from": 92,
+              "to": 84
+            },
+            {
+              "deviation": "D4",
+              "offset": 24,
+              "from": 0,
+              "to": 19
+            }
+          ]
+        },
+        "gfxforge_verify_summary": {
+          "bytes": 92,
+          "tags": {
+            "0": 1,
+            "1": 1,
+            "9": 1,
+            "26": 1,
+            "32": 1,
+            "69": 1,
+            "1000": 1
+          },
+          "functions": []
+        }
+      }
+    },
+    {
+      "line": 58,
+      "name": "timeline: declared frames produce that many ShowFrames and a matching header count",
+      "input": {
+        "movie_calls": [
+          {
+            "op": "new",
+            "args": [
+              200,
+              100,
+              {
+                "name": "t",
+                "frames": [
+                  "idle",
+                  "alert",
+                  "dead"
+                ]
+              }
+            ]
+          },
+          {
+            "op": "rect",
+            "args": [
+              0,
+              0,
+              50,
+              50,
+              [
+                255,
+                0,
+                0
+              ]
+            ]
+          }
+        ]
+      },
+      "output": {
+        "movie": {
+          "gfxforge": "474658087a00000068001f400003e800001e03000bfa0702000000000d0000017444110000000043020000002208020058007d0001f4000100ff0000ff001014279be8001cc003e8e706000730010600c50a69646c65008606060100020000020307004000c60a616c657274004000c50a646561640040000000",
+          "length": 122,
+          "gfxforge_sha256": "cac18ad9fac2d2f35b6f590060c8a646c648201e3445aa6b3e5b92e6679dca12",
+          "retail_corrected": "474658087200000068001f400003e800001e03000bfa0702130000000d0000017444110000000043020000002208020058007d0001f4000100ff0000ff001014279be8001cc003e8e706000730010600c50a69646c65008606060100020000020307004000c60a616c657274004000c50a646561640040000000",
+          "corrections_applied": [
+            {
+              "deviation": "D3",
+              "offset": 4,
+              "from": 122,
+              "to": 114
+            },
+            {
+              "deviation": "D4",
+              "offset": 24,
+              "from": 0,
+              "to": 19
+            }
+          ]
+        },
+        "gfxforge_verify_summary": {
+          "bytes": 122,
+          "tags": {
+            "0": 1,
+            "1": 3,
+            "9": 1,
+            "12": 1,
+            "26": 1,
+            "32": 1,
+            "43": 3,
+            "69": 1,
+            "1000": 1
+          },
+          "functions": []
+        }
+      }
+    },
+    {
+      "line": 67,
+      "name": "timeline: frame labels are emitted, in order, with their names",
+      "input": {
+        "movie_calls": [
+          {
+            "op": "new",
+            "args": [
+              200,
+              100,
+              {
+                "name": "t",
+                "frames": [
+                  "idle",
+                  "alert"
+                ]
+              }
+            ]
+          },
+          {
+            "op": "rect",
+            "args": [
+              0,
+              0,
+              10,
+              10,
+              [
+                1,
+                2,
+                3
+              ]
+            ]
+          }
+        ]
+      },
+      "output": {
+        "movie": {
+          "gfxforge": "474658086e00000068001f400003e800001e02000bfa0702000000000d0000017444110000000043020000001f0802004801900064000100010203ff001014277b2001bc00c8df38006f004e00c50a69646c65008606060100020000020307004000c60a616c6572740040000000",
+          "length": 110,
+          "gfxforge_sha256": "c6a41828ab1b92c20f2617e911a15688f820268df483486098fb7d38d66f822f",
+          "retail_corrected": "474658086600000068001f400003e800001e02000bfa0702130000000d0000017444110000000043020000001f0802004801900064000100010203ff001014277b2001bc00c8df38006f004e00c50a69646c65008606060100020000020307004000c60a616c6572740040000000",
+          "corrections_applied": [
+            {
+              "deviation": "D3",
+              "offset": 4,
+              "from": 110,
+              "to": 102
+            },
+            {
+              "deviation": "D4",
+              "offset": 24,
+              "from": 0,
+              "to": 19
+            }
+          ]
+        },
+        "gfxforge_verify_summary": {
+          "bytes": 110,
+          "tags": {
+            "0": 1,
+            "1": 2,
+            "9": 1,
+            "12": 1,
+            "26": 1,
+            "32": 1,
+            "43": 2,
+            "69": 1,
+            "1000": 1
+          },
+          "functions": []
+        }
+      }
+    },
+    {
+      "line": 78,
+      "name": "timeline: content present on one frame and absent on the next is removed",
+      "input": {
+        "movie_calls": [
+          {
+            "op": "new",
+            "args": [
+              200,
+              100,
+              {
+                "name": "t",
+                "frames": [
+                  "a",
+                  "b"
+                ]
+              }
+            ]
+          },
+          {
+            "op": "rect",
+            "args": [
+              0,
+              0,
+              10,
+              10,
+              [
+                1,
+                2,
+                3
+              ],
+              {
+                "frames": [
+                  0
+                ]
+              }
+            ]
+          },
+          {
+            "op": "rect",
+            "args": [
+              20,
+              0,
+              10,
+              10,
+              [
+                4,
+                5,
+                6
+              ],
+              {
+                "frames": [
+                  1
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "output": {
+        "movie": {
+          "gfxforge": "474658089800000068001f400003e800001e02000bfa0702000000000d0000017444110000000043020000001f0802004801900064000100010203ff001014277b2001bc00c8df38006f004e002308030059904b000064000100040506ff0010154c8001dec8006f003237ce001bc0138000c20a61008606060100020000020307004000c20a620002070100860606020003000040000000",
+          "length": 152,
+          "gfxforge_sha256": "cc09720e4fc1d6d89174d04574ae2d33590351eda0e0e7180b997b6dd6ddbc73",
+          "retail_corrected": "474658089000000068001f400003e800001e02000bfa0702130000000d0000017444110000000043020000001f0802004801900064000100010203ff001014277b2001bc00c8df38006f004e002308030059904b000064000100040506ff0010154c8001dec8006f003237ce001bc0138000c20a61008606060100020000020307004000c20a620002070100860606020003000040000000",
+          "corrections_applied": [
+            {
+              "deviation": "D3",
+              "offset": 4,
+              "from": 152,
+              "to": 144
+            },
+            {
+              "deviation": "D4",
+              "offset": 24,
+              "from": 0,
+              "to": 19
+            }
+          ]
+        },
+        "gfxforge_verify_summary": {
+          "bytes": 152,
+          "tags": {
+            "0": 1,
+            "1": 2,
+            "9": 1,
+            "12": 1,
+            "26": 2,
+            "28": 1,
+            "32": 2,
+            "43": 2,
+            "69": 1,
+            "1000": 1
+          },
+          "functions": []
+        }
+      }
+    },
+    {
+      "line": 88,
+      "name": "timeline: an item on every frame is placed once, never removed",
+      "input": {
+        "movie_calls": [
+          {
+            "op": "new",
+            "args": [
+              200,
+              100,
+              {
+                "name": "t",
+                "frames": [
+                  "a",
+                  "b",
+                  "c"
+                ]
+              }
+            ]
+          },
+          {
+            "op": "rect",
+            "args": [
+              0,
+              0,
+              10,
+              10,
+              [
+                1,
+                2,
+                3
+              ]
+            ]
+          }
+        ]
+      },
+      "output": {
+        "movie": {
+          "gfxforge": "474658086d00000068001f400003e800001e03000bfa0702000000000d0000017444110000000043020000001f0802004801900064000100010203ff001014277b2001bc00c8df38006f004e00c20a61008606060100020000020307004000c20a62004000c20a630040000000",
+          "length": 109,
+          "gfxforge_sha256": "71d4613fbc0c510ba4dd1fab16ae40cf297252133bc2ba9bb157711b6cef8b52",
+          "retail_corrected": "474658086500000068001f400003e800001e03000bfa0702130000000d0000017444110000000043020000001f0802004801900064000100010203ff001014277b2001bc00c8df38006f004e00c20a61008606060100020000020307004000c20a62004000c20a630040000000",
+          "corrections_applied": [
+            {
+              "deviation": "D3",
+              "offset": 4,
+              "from": 109,
+              "to": 101
+            },
+            {
+              "deviation": "D4",
+              "offset": 24,
+              "from": 0,
+              "to": 19
+            }
+          ]
+        },
+        "gfxforge_verify_summary": {
+          "bytes": 109,
+          "tags": {
+            "0": 1,
+            "1": 3,
+            "9": 1,
+            "12": 1,
+            "26": 1,
+            "32": 1,
+            "43": 3,
+            "69": 1,
+            "1000": 1
+          },
+          "functions": []
+        }
+      }
+    },
+    {
+      "line": 97,
+      "name": "timeline: an item returning on a later frame is re-placed at the same depth",
+      "input": {
+        "movie_calls": [
+          {
+            "op": "new",
+            "args": [
+              200,
+              100,
+              {
+                "name": "t",
+                "frames": [
+                  "a",
+                  "b",
+                  "c"
+                ]
+              }
+            ]
+          },
+          {
+            "op": "rect",
+            "args": [
+              0,
+              0,
+              10,
+              10,
+              [
+                1,
+                2,
+                3
+              ],
+              {
+                "frames": [
+                  0,
+                  2
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "output": {
+        "movie": {
+          "gfxforge": "474658087900000068001f400003e800001e03000bfa0702000000000d0000017444110000000043020000001f0802004801900064000100010203ff001014277b2001bc00c8df38006f004e00c20a61008606060100020000020307004000c20a6200020701004000c20a6300860606010002000040000000",
+          "length": 121,
+          "gfxforge_sha256": "86dbb5ce75f045f0f33faf4ff45f98fd12a63c83efec47244401524611a697c3",
+          "retail_corrected": "474658087100000068001f400003e800001e03000bfa0702130000000d0000017444110000000043020000001f0802004801900064000100010203ff001014277b2001bc00c8df38006f004e00c20a61008606060100020000020307004000c20a6200020701004000c20a6300860606010002000040000000",
+          "corrections_applied": [
+            {
+              "deviation": "D3",
+              "offset": 4,
+              "from": 121,
+              "to": 113
+            },
+            {
+              "deviation": "D4",
+              "offset": 24,
+              "from": 0,
+              "to": 19
+            }
+          ]
+        },
+        "gfxforge_verify_summary": {
+          "bytes": 121,
+          "tags": {
+            "0": 1,
+            "1": 3,
+            "9": 1,
+            "12": 1,
+            "26": 2,
+            "28": 1,
+            "32": 1,
+            "43": 3,
+            "69": 1,
+            "1000": 1
+          },
+          "functions": []
+        }
+      }
+    },
+    {
+      "line": 111,
+      "name": "timeline: a multi-frame movie stops on frame 1 by default",
+      "input": {
+        "movie_calls": [
+          {
+            "op": "new",
+            "args": [
+              200,
+              100,
+              {
+                "name": "t",
+                "frames": [
+                  "a",
+                  "b"
+                ]
+              }
+            ]
+          },
+          {
+            "op": "rect",
+            "args": [
+              0,
+              0,
+              10,
+              10,
+              [
+                1,
+                2,
+                3
+              ]
+            ]
+          }
+        ]
+      },
+      "output": {
+        "movie": {
+          "gfxforge": "474658086700000068001f400003e800001e02000bfa0702000000000d0000017444110000000043020000001f0802004801900064000100010203ff001014277b2001bc00c8df38006f004e00c20a61008606060100020000020307004000c20a620040000000",
+          "length": 103,
+          "gfxforge_sha256": "200000676db5c77ec6a97d77f7b66c852205cf8b3fb4759377e4d3da04bfe1ca",
+          "retail_corrected": "474658085f00000068001f400003e800001e02000bfa0702130000000d0000017444110000000043020000001f0802004801900064000100010203ff001014277b2001bc00c8df38006f004e00c20a61008606060100020000020307004000c20a620040000000",
+          "corrections_applied": [
+            {
+              "deviation": "D3",
+              "offset": 4,
+              "from": 103,
+              "to": 95
+            },
+            {
+              "deviation": "D4",
+              "offset": 24,
+              "from": 0,
+              "to": 19
+            }
+          ]
+        },
+        "gfxforge_verify_summary": {
+          "bytes": 103,
+          "tags": {
+            "0": 1,
+            "1": 2,
+            "9": 1,
+            "12": 1,
+            "26": 1,
+            "32": 1,
+            "43": 2,
+            "69": 1,
+            "1000": 1
+          },
+          "functions": []
+        }
+      }
+    },
+    {
+      "line": 121,
+      "name": "timeline: stopAtStart:false leaves a multi-frame movie looping",
+      "input": {
+        "movie_calls": [
+          {
+            "op": "new",
+            "args": [
+              200,
+              100,
+              {
+                "name": "t",
+                "frames": [
+                  "a",
+                  "b"
+                ],
+                "stopAtStart": false
+              }
+            ]
+          },
+          {
+            "op": "rect",
+            "args": [
+              0,
+              0,
+              10,
+              10,
+              [
+                1,
+                2,
+                3
+              ]
+            ]
+          }
+        ]
+      },
+      "output": {
+        "movie": {
+          "gfxforge": "474658086300000068001f400003e800001e02000bfa0702000000000d0000017444110000000043020000001f0802004801900064000100010203ff001014277b2001bc00c8df38006f004e00c20a610086060601000200004000c20a620040000000",
+          "length": 99,
+          "gfxforge_sha256": "ffcc5b0aef72390f22d9e2264152e6721a588ecf41de8feb38e881017f3eb726",
+          "retail_corrected": "474658085b00000068001f400003e800001e02000bfa0702130000000d0000017444110000000043020000001f0802004801900064000100010203ff001014277b2001bc00c8df38006f004e00c20a610086060601000200004000c20a620040000000",
+          "corrections_applied": [
+            {
+              "deviation": "D3",
+              "offset": 4,
+              "from": 99,
+              "to": 91
+            },
+            {
+              "deviation": "D4",
+              "offset": 24,
+              "from": 0,
+              "to": 19
+            }
+          ]
+        },
+        "gfxforge_verify_summary": {
+          "bytes": 99,
+          "tags": {
+            "0": 1,
+            "1": 2,
+            "9": 1,
+            "26": 1,
+            "32": 1,
+            "43": 2,
+            "69": 1,
+            "1000": 1
+          },
+          "functions": []
+        }
+      }
+    },
+    {
+      "line": 128,
+      "name": "timeline: per-frame scripts land on their own frame",
+      "input": {
+        "movie_calls": [
+          {
+            "op": "new",
+            "args": [
+              200,
+              100,
+              {
+                "name": "t",
+                "frames": [
+                  "a",
+                  "b"
+                ]
+              }
+            ]
+          },
+          {
+            "op": "rect",
+            "args": [
+              0,
+              0,
+              10,
+              10,
+              [
+                1,
+                2,
+                3
+              ]
+            ]
+          },
+          {
+            "op": "script",
+            "source": "x = 1;",
+            "frame": 1
+          }
+        ]
+      },
+      "output": {
+        "movie": {
+          "gfxforge": "474658087900000068001f400003e800001e02000bfa0702000000000d0000017444110000000043020000001f0802004801900064000100010203ff001014277b2001bc00c8df38006f004e00c20a61008606060100020000020307004000c20a6200100396030000780096050007010000001d0040000000",
+          "length": 121,
+          "gfxforge_sha256": "fd733d00c51068d57adc37e03d19c8f0414aa443cccfeeb2ad2f74ad36c4e85a",
+          "retail_corrected": "474658087100000068001f400003e800001e02000bfa0702130000000d0000017444110000000043020000001f0802004801900064000100010203ff001014277b2001bc00c8df38006f004e00c20a61008606060100020000020307004000c20a6200100396030000780096050007010000001d0040000000",
+          "corrections_applied": [
+            {
+              "deviation": "D3",
+              "offset": 4,
+              "from": 121,
+              "to": 113
+            },
+            {
+              "deviation": "D4",
+              "offset": 24,
+              "from": 0,
+              "to": 19
+            }
+          ]
+        },
+        "gfxforge_verify_summary": {
+          "bytes": 121,
+          "tags": {
+            "0": 1,
+            "1": 2,
+            "9": 1,
+            "12": 2,
+            "26": 1,
+            "32": 1,
+            "43": 2,
+            "69": 1,
+            "1000": 1
+          },
+          "functions": []
+        }
+      }
+    },
+    {
+      "line": 142,
+      "name": "timeline: a built multi-frame movie still passes structural verification",
+      "input": {
+        "movie_calls": [
+          {
+            "op": "new",
+            "args": [
+              320,
+              200,
+              {
+                "name": "states",
+                "frames": [
+                  "idle",
+                  "alert"
+                ]
+              }
+            ]
+          },
+          {
+            "op": "rect",
+            "args": [
+              0,
+              0,
+              320,
+              30,
+              [
+                20,
+                20,
+                20
+              ]
+            ]
+          },
+          {
+            "op": "text",
+            "args": [
+              8,
+              6,
+              "STATUS",
+              {
+                "varName": "status",
+                "frames": [
+                  0
+                ]
+              }
+            ]
+          },
+          {
+            "op": "text",
+            "args": [
+              8,
+              6,
+              "ALERT",
+              {
+                "frames": [
+                  1
+                ]
+              }
+            ]
+          },
+          {
+            "op": "script",
+            "source": "function Show(s) { gotoAndStop(s); }"
+          }
+        ],
+        "verify_require": {
+          "functions": [
+            "Show"
+          ]
+        }
+      },
+      "output": {
+        "movie": {
+          "gfxforge": "474658080d01000070000c8000007d00001e020010fa0702000000000d0000067374617465734411000000004302000000e4115f6e6f726d616c5f466f6e742e737766000100010001005f6e6f726d616c5f466f6e74002508020070000c80000012c00100141414ff00101427cb20000073000963cce00000730016a0006209030070140c5800f00fa08d1101000401ffffffff73746174757300535441545553005b09040070140c5800f00fa08d1101000401ffffffff00414c45525400c50a69646c6500860606010002000086060602000300001b03079b0b0053686f7700010073000b009603000073001c9f010000004000c60a616c6572740002070200860606030004000040000000",
+          "length": 269,
+          "gfxforge_sha256": "0fc33acfdb39c02d9044858089b986a56cb935e8f603169411aab95f33a387e4",
+          "retail_corrected": "474658080501000070000c8000007d00001e020010fa0702130000000d0000067374617465734411000000004302000000e4115f6e6f726d616c5f466f6e742e737766000100010001005f6e6f726d616c5f466f6e74002508020070000c80000012c00100141414ff00101427cb20000073000963cce00000730016a0006209030070140c5800f00fa08d1101000401ffffffff73746174757300535441545553005b09040070140c5800f00fa08d1101000401ffffffff00414c45525400c50a69646c6500860606010002000086060602000300001b03079b0b0053686f7700010073000b009603000073001c9f010000004000c60a616c6572740002070200860606030004000040000000",
+          "corrections_applied": [
+            {
+              "deviation": "D3",
+              "offset": 4,
+              "from": 269,
+              "to": 261
+            },
+            {
+              "deviation": "D4",
+              "offset": 24,
+              "from": 0,
+              "to": 19
+            }
+          ]
+        },
+        "gfxforge_verify_summary": {
+          "bytes": 269,
+          "tags": {
+            "0": 1,
+            "1": 2,
+            "9": 1,
+            "12": 1,
+            "26": 3,
+            "28": 1,
+            "32": 1,
+            "37": 2,
+            "43": 2,
+            "69": 1,
+            "71": 1,
+            "1000": 1
+          },
+          "functions": [
+            "Show"
+          ]
+        }
+      }
+    },
+    {
+      "line": 155,
+      "name": "timeline: exportAs emits ExportAssets naming the clip sprite",
+      "input": {
+        "movie_calls": [
+          {
+            "op": "new",
+            "args": [
+              200,
+              100,
+              {
+                "name": "t"
+              }
+            ]
+          },
+          {
+            "op": "clip",
+            "args": [
+              "bar",
+              0,
+              0,
+              40,
+              8,
+              [
+                0,
+                200,
+                0
+              ]
+            ]
+          },
+          {
+            "op": "exportAs",
+            "args": [
+              "HealthBar"
+            ]
+          }
+        ]
+      },
+      "output": {
+        "movie": {
+          "gfxforge": "474658088100000068001f400003e800001e01000bfa0702000000000d0000017444110000000043020000002108020058006400005000010000c800ff001014279b20001bc00a0e7380006f005800d009030001008606060100020000400000000e0e010003004865616c7468426172008a062601000300006261720040000000",
+          "length": 129,
+          "gfxforge_sha256": "e98e9c513645d014cf63a0f2a77feb422bf85ef4dbce855a2d71627b93e4a974",
+          "retail_corrected": "474658087900000068001f400003e800001e01000bfa0702130000000d0000017444110000000043020000002108020058006400005000010000c800ff001014279b20001bc00a0e7380006f005800d009030001008606060100020000400000000e0e010003004865616c7468426172008a062601000300006261720040000000",
+          "corrections_applied": [
+            {
+              "deviation": "D3",
+              "offset": 4,
+              "from": 129,
+              "to": 121
+            },
+            {
+              "deviation": "D4",
+              "offset": 24,
+              "from": 0,
+              "to": 19
+            }
+          ]
+        },
+        "gfxforge_verify_summary": {
+          "bytes": 129,
+          "tags": {
+            "0": 1,
+            "1": 1,
+            "9": 1,
+            "26": 1,
+            "32": 1,
+            "39": 1,
+            "56": 1,
+            "69": 1,
+            "1000": 1
+          },
+          "functions": []
+        }
+      }
+    },
+    {
+      "line": 168,
+      "name": "timeline: clip events produce a PlaceObject2 carrying ClipActions",
+      "input": {
+        "movie_calls": [
+          {
+            "op": "new",
+            "args": [
+              200,
+              100,
+              {
+                "name": "t"
+              }
+            ]
+          },
+          {
+            "op": "clip",
+            "args": [
+              "btn",
+              10,
+              10,
+              60,
+              20,
+              [
+                40,
+                44,
+                52
+              ],
+              {
+                "events": {
+                  "release": "fscommand(\"fire\", 1);",
+                  "rollOver": "trace(\"over\");"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "output": {
+        "movie": {
+          "gfxforge": "47465808be00000068001f400003e800001e01000bfa0702000000000d0000017444110000000043020000002208020060002580000c800100282c34ff00101427aa580007100190eb6a0001c4009c00d00903000100860606010002000040000000bf0652000000270100030012c8640062746e000000002800000008000020000000961000004653436f6d6d616e643a666972650096050007010000009a01000000002000000b000000960600006f7665720026000000000040000000",
+          "length": 190,
+          "gfxforge_sha256": "8842ac7c4a898371f2fdfc80631dfa033cc1137092ba6c7283a6e936b29b7f16",
+          "retail_corrected": "47465808b600000068001f400003e800001e01000bfa0702130000000d0000017444110000000043020000002208020060002580000c800100282c34ff00101427aa580007100190eb6a0001c4009c00d00903000100860606010002000040000000bf0652000000a60100030012c8640062746e000000002800000008000020000000961000004653436f6d6d616e643a666972650096050007010000009a01000000002000000b000000960600006f7665720026000000000040000000",
+          "corrections_applied": [
+            {
+              "deviation": "D3",
+              "offset": 4,
+              "from": 190,
+              "to": 182
+            },
+            {
+              "deviation": "D4",
+              "offset": 24,
+              "from": 0,
+              "to": 19
+            },
+            {
+              "deviation": "D1",
+              "offset": 104,
+              "from": 39,
+              "to": 166
+            }
+          ]
+        },
+        "gfxforge_verify_summary": {
+          "bytes": 190,
+          "tags": {
+            "0": 1,
+            "1": 1,
+            "9": 1,
+            "26": 1,
+            "32": 1,
+            "39": 1,
+            "69": 1,
+            "1000": 1
+          },
+          "functions": []
+        },
+        "deviation_D1": "gfxforge test asserts (place.body[0] & 0x01) (suite.timeline.js:176); retail-correct assertion is (place.body[0] & 0x80) != 0 — see movie.corrections_applied"
+      }
+    },
+    {
+      "line": 180,
+      "name": "timeline: ClipActions framing matches what the player parses",
+      "input": {
+        "handlers": [
+          {
+            "events": [
+              "release"
+            ],
+            "actions_hex": "9605000701000000"
+          }
+        ]
+      },
+      "output": {
+        "gfxforge_hex": "000000080000000800000900000096050007010000000000000000",
+        "clip_event_release": 2048
+      }
+    },
+    {
+      "line": 197,
+      "name": "timeline: keyPress handlers carry their key code inside the measured length",
+      "input": {
+        "handlers": [
+          {
+            "events": [
+              "keyPress"
+            ],
+            "actions_hex": "9605000701000000",
+            "keyCode": 32
+          }
+        ]
+      },
+      "output": {
+        "gfxforge_hex": "000000000200000002000a0000002096050007010000000000000000"
+      }
+    },
+    {
+      "line": 209,
+      "name": "timeline: alpha lowers to a CXFORM with multiply terms over 256",
+      "input": {
+        "alpha": 0.5
+      },
+      "output": {
+        "gfxforge_hex": "690040100200"
+      }
+    },
+    {
+      "line": 221,
+      "name": "timeline: an item with alpha places via PlaceObject2 with the cxform flag",
+      "input": {
+        "movie_calls": [
+          {
+            "op": "new",
+            "args": [
+              200,
+              100,
+              {
+                "name": "t"
+              }
+            ]
+          },
+          {
+            "op": "rect",
+            "args": [
+              0,
+              0,
+              10,
+              10,
+              [
+                1,
+                2,
+                3
+              ],
+              {
+                "alpha": 0.5
+              }
+            ]
+          }
+        ]
+      },
+      "output": {
+        "movie": {
+          "gfxforge": "474658085f00000068001f400003e800001e01000bfa0702000000000d0000017444110000000043020000001f0802004801900064000100010203ff001014277b2001bc00c8df38006f004e008c060e010002000069004010020040000000",
+          "length": 95,
+          "gfxforge_sha256": "cfdcabe3f72ef05fa32a9fa9e10b164372df0156b3e71b538badab4f6c6002c5",
+          "retail_corrected": "474658085700000068001f400003e800001e01000bfa0702130000000d0000017444110000000043020000001f0802004801900064000100010203ff001014277b2001bc00c8df38006f004e008c060e010002000069004010020040000000",
+          "corrections_applied": [
+            {
+              "deviation": "D3",
+              "offset": 4,
+              "from": 95,
+              "to": 87
+            },
+            {
+              "deviation": "D4",
+              "offset": 24,
+              "from": 0,
+              "to": 19
+            }
+          ]
+        },
+        "gfxforge_verify_summary": {
+          "bytes": 95,
+          "tags": {
+            "0": 1,
+            "1": 1,
+            "9": 1,
+            "26": 1,
+            "32": 1,
+            "69": 1,
+            "1000": 1
+          },
+          "functions": []
+        }
+      }
+    },
+    {
+      "line": 231,
+      "name": "timeline: default text output is byte-identical to the original flags",
+      "input": {
+        "args": [
+          5,
+          0,
+          0,
+          100,
+          20,
+          1,
+          13,
+          "hi",
+          [
+            255,
+            255,
+            255,
+            255
+          ],
+          ""
+        ],
+        "with_empty_options_too": true
+      },
+      "output": {
+        "gfxforge_hex": "5709050060003e80000c808d1101000401ffffffff00686900",
+        "gfxforge_hex_with_empty_options": "5709050060003e80000c808d1101000401ffffffff00686900"
+      }
+    },
+    {
+      "line": 252,
+      "name": "timeline: multiline/wordWrap/html/border set their flag bits",
+      "input": {
+        "args": [
+          5,
+          0,
+          0,
+          100,
+          60,
+          1,
+          13,
+          "hi",
+          [
+            255,
+            255,
+            255,
+            255
+          ],
+          ""
+        ],
+        "options": {
+          "multiline": true,
+          "wordWrap": true,
+          "html": true,
+          "border": true,
+          "selectable": true
+        }
+      },
+      "output": {
+        "gfxforge_hex": "5709050060003e80002580ed0b01000401ffffffff00686900",
+        "decoded": {
+          "bounds": {
+            "xmin": 0,
+            "xmax": 2000,
+            "ymin": 0,
+            "ymax": 1200
+          },
+          "size": 13,
+          "color": [
+            255,
+            255,
+            255,
+            255
+          ],
+          "text": "hi",
+          "varName": ""
+        }
+      }
+    },
+    {
+      "line": 267,
+      "name": "timeline: the default flag pair is exactly the historical 0x8d/0x11",
+      "input": {
+        "args": [
+          5,
+          0,
+          0,
+          100,
+          20,
+          1,
+          13,
+          "hi",
+          [
+            255,
+            255,
+            255,
+            255
+          ],
+          ""
+        ]
+      },
+      "output": {
+        "gfxforge_hex": "5709050060003e80000c808d1101000401ffffffff00686900",
+        "flags": [
+          141,
+          17
+        ]
+      }
+    },
+    {
+      "line": 278,
+      "name": "timeline: the importer survives a movie using colour transforms and clip actions",
+      "input": {
+        "movie_calls": [
+          {
+            "op": "new",
+            "args": [
+              200,
+              100,
+              {
+                "name": "roundtrip"
+              }
+            ]
+          },
+          {
+            "op": "rect",
+            "args": [
+              0,
+              0,
+              200,
+              20,
+              [
+                30,
+                30,
+                30
+              ]
+            ]
+          },
+          {
+            "op": "clip",
+            "args": [
+              "faded",
+              10,
+              30,
+              60,
+              20,
+              [
+                0,
+                180,
+                90
+              ],
+              {
+                "alpha": 0.5,
+                "events": {
+                  "release": "fscommand(\"hit\", 1);"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "output": {
+        "movie": {
+          "gfxforge": "47465808e800000068001f400003e800001e010013fa0702000000000d000009726f756e647472697044110000000043020000002408020068001f400000c80001001e1e1eff00101427bbe80001c400643bc180001c4009c0002208030060002580000c80010000b45aff00101427aa580007100190eb6a0001c4009c00d009040001008606060100030000400000008606060100020000bf06460000002f02000400163212c0690040100200666164656400000000080000000800001f000000960f00004653436f6d6d616e643a6869740096050007010000009a010000000000000040000000",
+          "length": 232,
+          "gfxforge_sha256": "517c60e1768d1d3e9d68fa31422d41bc1d9605efa16de75713b33b77254096cb",
+          "retail_corrected": "47465808e000000068001f400003e800001e010013fa0702130000000d000009726f756e647472697044110000000043020000002408020068001f400000c80001001e1e1eff00101427bbe80001c400643bc180001c4009c0002208030060002580000c80010000b45aff00101427aa580007100190eb6a0001c4009c00d009040001008606060100030000400000008606060100020000bf0646000000ae02000400163212c0690040100200666164656400000000080000000800001f000000960f00004653436f6d6d616e643a6869740096050007010000009a010000000000000040000000",
+          "corrections_applied": [
+            {
+              "deviation": "D3",
+              "offset": 4,
+              "from": 232,
+              "to": 224
+            },
+            {
+              "deviation": "D4",
+              "offset": 24,
+              "from": 0,
+              "to": 19
+            },
+            {
+              "deviation": "D1",
+              "offset": 158,
+              "from": 47,
+              "to": 174
+            }
+          ]
+        },
+        "gfxforge_verify_summary": {
+          "bytes": 232,
+          "tags": {
+            "0": 1,
+            "1": 1,
+            "9": 1,
+            "26": 2,
+            "32": 2,
+            "39": 1,
+            "69": 1,
+            "1000": 1
+          },
+          "functions": []
+        },
+        "gfxforge_decode": {
+          "project": {
+            "version": 1,
+            "stage": {
+              "width": 200,
+              "height": 100,
+              "fps": 30,
+              "name": "roundtrip"
+            },
+            "items": [
+              {
+                "kind": "rect",
+                "x": 0,
+                "y": 0,
+                "w": 200,
+                "h": 20,
+                "fill": [
+                  30,
+                  30,
+                  30,
+                  255
+                ]
+              },
+              {
+                "kind": "clip",
+                "name": "faded",
+                "x": 10,
+                "y": 30,
+                "w": 60,
+                "h": 20,
+                "fill": [
+                  0,
+                  180,
+                  90,
+                  255
+                ]
+              }
+            ],
+            "script": ""
+          },
+          "notes": []
+        },
+        "deviation_D1": "decode.js:180 treats 0x01 as clip actions; the Rust decoder must treat 0x80 as HasClipActions and decode the retail_corrected bytes to the same project"
+      }
+    },
+    {
+      "line": 293,
+      "name": "timeline: the importer reads a CXFORM carrying BOTH add and multiply terms",
+      "input": {
+        "mult": {
+          "r": 0.5,
+          "g": 0.5,
+          "b": 0.5,
+          "a": 0.5
+        },
+        "add": {
+          "r": 40,
+          "g": -20,
+          "b": 10,
+          "a": 0
+        },
+        "place": {
+          "charId": 2,
+          "depth": 1,
+          "matrix": "IDENTITY",
+          "name": "tinted"
+        }
+      },
+      "output": {
+        "cxform_hex": "e500804020051ec05000",
+        "place_tag_hex": "97062e0100020000e500804020051ec0500074696e74656400",
+        "decoded": {
+          "depth": 1,
+          "charId": 2,
+          "name": "tinted",
+          "matrix": {
+            "scaleX": 1,
+            "scaleY": 1,
+            "rot0": 0,
+            "rot1": 0,
+            "translateX": 0,
+            "translateY": 0
+          },
+          "alpha": 0.5
+        },
+        "note": "flag byte 0x2e uses no D1-affected bit"
+      }
+    },
+    {
+      "line": 318,
+      "name": "timeline: the importer reads a multi-frame movie without losing frame-0 content",
+      "input": {
+        "movie_calls": [
+          {
+            "op": "new",
+            "args": [
+              200,
+              100,
+              {
+                "name": "frames",
+                "frames": [
+                  "a",
+                  "b"
+                ]
+              }
+            ]
+          },
+          {
+            "op": "rect",
+            "args": [
+              0,
+              0,
+              200,
+              20,
+              [
+                30,
+                30,
+                30
+              ]
+            ]
+          },
+          {
+            "op": "text",
+            "args": [
+              4,
+              2,
+              "ONE",
+              {
+                "frames": [
+                  0
+                ]
+              }
+            ]
+          },
+          {
+            "op": "text",
+            "args": [
+              4,
+              2,
+              "TWO",
+              {
+                "frames": [
+                  1
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "output": {
+        "movie": {
+          "gfxforge": "47465808e100000068001f400003e800001e020010fa0702000000000d0000066672616d65734411000000004302000000e4115f6e6f726d616c5f466f6e742e737766000100010001005f6e6f726d616c5f466f6e74002408020068001f400000c80001001e1e1eff00101427bbe80001c400643bc180001c4009c0005909030068141ea00280d2008d1101000401ffffffff004f4e45005909040068141ea00280d2008d1101000401ffffffff0054574f00c20a610086060601000200008606060200030000020307004000c20a620002070200860606030004000040000000",
+          "length": 225,
+          "gfxforge_sha256": "ea0bc441e554455e49d28de1381ea923ee2fa38cca3e1e47929d673ba320f6a0",
+          "retail_corrected": "47465808d900000068001f400003e800001e020010fa0702130000000d0000066672616d65734411000000004302000000e4115f6e6f726d616c5f466f6e742e737766000100010001005f6e6f726d616c5f466f6e74002408020068001f400000c80001001e1e1eff00101427bbe80001c400643bc180001c4009c0005909030068141ea00280d2008d1101000401ffffffff004f4e45005909040068141ea00280d2008d1101000401ffffffff0054574f00c20a610086060601000200008606060200030000020307004000c20a620002070200860606030004000040000000",
+          "corrections_applied": [
+            {
+              "deviation": "D3",
+              "offset": 4,
+              "from": 225,
+              "to": 217
+            },
+            {
+              "deviation": "D4",
+              "offset": 24,
+              "from": 0,
+              "to": 19
+            }
+          ]
+        },
+        "gfxforge_verify_summary": {
+          "bytes": 225,
+          "tags": {
+            "0": 1,
+            "1": 2,
+            "9": 1,
+            "12": 1,
+            "26": 3,
+            "28": 1,
+            "32": 1,
+            "37": 2,
+            "43": 2,
+            "69": 1,
+            "71": 1,
+            "1000": 1
+          },
+          "functions": []
+        },
+        "gfxforge_decode": {
+          "project": {
+            "version": 1,
+            "stage": {
+              "width": 200,
+              "height": 100,
+              "fps": 30,
+              "name": "frames"
+            },
+            "items": [
+              {
+                "kind": "rect",
+                "x": 0,
+                "y": 0,
+                "w": 200,
+                "h": 20,
+                "fill": [
+                  30,
+                  30,
+                  30,
+                  255
+                ]
+              },
+              {
+                "kind": "text",
+                "x": 4,
+                "y": 2,
+                "width": 192,
+                "size": 13,
+                "color": [
+                  255,
+                  255,
+                  255,
+                  255
+                ],
+                "text": "ONE"
+              },
+              {
+                "kind": "text",
+                "x": 4,
+                "y": 2,
+                "width": 192,
+                "size": 13,
+                "color": [
+                  255,
+                  255,
+                  255,
+                  255
+                ],
+                "text": "TWO"
+              }
+            ],
+            "script": ""
+          },
+          "notes": [
+            "2 bytes of ActionScript (AVM1) present — not decompiled"
+          ]
+        }
+      }
+    },
+    {
+      "line": 332,
+      "name": "timeline: alignment forces a layout record and survives decoding",
+      "input": {
+        "args": [
+          5,
+          0,
+          0,
+          100,
+          20,
+          1,
+          13,
+          "centered",
+          [
+            255,
+            255,
+            255,
+            255
+          ],
+          "v"
+        ],
+        "options": {
+          "align": "center"
+        }
+      },
+      "output": {
+        "gfxforge_hex": "6709050060003e80000c808d3101000401ffffffff020000000000000000760063656e746572656400",
+        "decoded": {
+          "bounds": {
+            "xmin": 0,
+            "xmax": 2000,
+            "ymin": 0,
+            "ymax": 400
+          },
+          "size": 13,
+          "color": [
+            255,
+            255,
+            255,
+            255
+          ],
+          "text": "centered",
+          "varName": "v"
+        }
+      }
+    }
+  ]
+}

@@ -1,6 +1,6 @@
 [package]
 name = "mercs2_probe"
-version = "2.3.0"
+version = "3.0.0"
 edition = "2021"
 description = "Mercenaries 2 modernization — headless WAD diagnostic/export tool. Runs the carved-out diagnostics from mercs2_engine::diag as subcommands (no window)."
 readme = "README.md"
@@ -19,6 +19,10 @@ flate2 = "1"
 # The diagnostics + shared world helpers live in the engine library.
 mercs2_engine = { workspace = true }
 mercs2_formats = { workspace = true }
+# `ess-menu-check` runs Ess and a menu script on the game's exact Lua 5.1 (float lua_Number).
+mercs2_luac = { workspace = true }
+# `ess-live` drives the running game through lua-bridge's REPL.
+mercs2_bridge = { workspace = true }
 # `overlays` reuses the streaming catalog fold (StreamingManager) to count what each vz_state overlay adds.
 mercs2_core = { workspace = true }
 # `model_namer` emits a rainbow-table name fragment (same JSON shape the workshop merges).

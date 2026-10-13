@@ -1,9 +1,9 @@
 //! Does the bridge speak the ASI's wire protocol correctly?
 //!
 //! A mock server stands in for the game: it accepts one connection, reads a request up to the
-//! `<<<RUN>>>` terminator, and replies `<result><<<END>>>`. That is the exact framing
-//! `lua_bridge_DEV.c` uses, so a round-trip here proves the client half without a running game — the
-//! only part a live game would add is that the chunk actually executes.
+//! `<<<RUN>>>` line, and replies `[queued]\n<result>\n<<<END>>>\n`, the game's framing, so a round-trip
+//! here proves the client half without a running game — the only part a live game would add is that the
+//! chunk actually executes.
 
 use std::io::{Read, Write};
 use std::net::TcpListener;
@@ -13,7 +13,7 @@ use std::time::Duration;
 use mercs2_bridge::{Bridge, BridgeError};
 
 /// A one-shot mock REPL. Returns its bound address and a handle. `respond` maps the received chunk
-/// (with the `<<<RUN>>>` marker stripped) to the result body the server sends back before `<<<END>>>`.
+/// (the bytes before the `<<<RUN>>>` line) to the result body the server sends back before `<<<END>>>`.
 fn mock_repl(
     respond: impl Fn(&str) -> String + Send + 'static,
 ) -> (String, thread::JoinHandle<()>) {
@@ -30,11 +30,12 @@ fn mock_repl(
                 return;
             }
             buf.extend_from_slice(&chunk[..n]);
-            if let Some(pos) = buf.windows(9).position(|w| w == b"<<<RUN>>>") {
+            if let Some(pos) = buf.windows(10).position(|w| w == b"<<<RUN>>>\n") {
                 let request = String::from_utf8_lossy(&buf[..pos]).into_owned();
                 let body = respond(&request);
+                sock.write_all(b"[queued]\n").unwrap();
                 sock.write_all(body.as_bytes()).unwrap();
-                sock.write_all(b"<<<END>>>").unwrap();
+                sock.write_all(b"\n<<<END>>>\n").unwrap();
                 sock.flush().unwrap();
                 return;
             }
@@ -48,7 +49,7 @@ fn mock_repl(
 fn a_chunk_round_trips_through_the_run_end_framing() {
     // The mock "evaluates" by echoing the chunk uppercased — enough to prove request and response
     // both crossed intact.
-    let (addr, handle) = mock_repl(|req| format!("=> {}", req.to_uppercase()));
+    let (addr, handle) = mock_repl(|req| format!("=> {}", req.trim_end().to_uppercase()));
     let mut bridge =
         Bridge::connect(&addr, Duration::from_millis(0), Duration::from_secs(2)).expect("connect");
     let out = bridge.eval("return 1+1").expect("eval");

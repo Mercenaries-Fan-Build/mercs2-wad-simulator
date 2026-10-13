@@ -3,7 +3,7 @@
 //! imported fonts, embedded bitmaps, sprites, buttons, edit-text, morph/video, AS3, GFx-extension
 //! tags).
 //!
-//! This backs the `gfx_golden` tool, which turns our inventory of extracted retail movies
+//! This backs `mercs2_probe gfx-golden`, which turns our inventory of extracted retail movies
 //! (`output/gfx_movies/`) into a **golden reference set**: for every SWF/GFx feature, the report
 //! names the real shipping movie that demonstrates it, so a community authoring tool (e.g.
 //! `gfxforge`) can byte-validate a new emitter against a movie the game actually loads.
@@ -463,8 +463,8 @@ fn scan_shape_fills(
 /// CSUM <crc32_mercs2 of everything above>
 /// ```
 ///
-/// **The movie is copied verbatim.** No recompression, in either direction. Retail ships 61 zlib
-/// `CFX` movies and 3 uncompressed `GFX` ones, so the loader demonstrably takes both, and re-encoding
+/// **The movie is copied verbatim.** No recompression, in either direction. Retail `vz.wad` ships 61
+/// zlib `CFX` movies and 3 uncompressed `GFX` ones, so the loader demonstrably takes both, and re-encoding
 /// would replace bytes the author verified with bytes nobody has. Validate the movie with
 /// [`GfxMovie::parse`] *before* calling this — it is the check that the thing being wrapped is a
 /// movie at all.
@@ -473,6 +473,26 @@ pub fn build_cfx_pack_block(name_hash: u32, movie: &[u8]) -> Vec<u8> {
     // survey later found seven more ASET types with byte-for-byte the same shape, so the code
     // lives in `ucfx` and this stays as the movie-typed front door.
     crate::ucfx::build_wrapped_block(name_hash, crate::types::TYPE_HASH_CFX_PACK, movie)
+}
+
+/// The movie a `cfx_pack` **container** carries: the inverse of the container
+/// [`build_cfx_pack_block`] writes.
+///
+/// The movie is the body of the container's `data` descriptor — nothing more. The container's own
+/// `CSUM` trailer follows that body and is not part of the movie; reading "from the magic to the end
+/// of the container" (what `gfx-extract` used to do) appends those 8 bytes to every movie.
+///
+/// The container is verified first: a bad CSUM, an out-of-bounds descriptor or a missing `data`
+/// leaf is an error naming `label`, never a best-effort slice.
+pub fn cfx_pack_movie(container: &[u8], label: &str) -> Result<Vec<u8>, String> {
+    if let Some(issues) =
+        crate::ucfx::verify_ucfx_container(container, label, crate::types::TYPE_HASH_CFX_PACK)
+    {
+        let detail: Vec<String> = issues.iter().map(|i| format!("{}: {}", i.context, i.detail)).collect();
+        return Err(format!("{label}: not a valid cfx_pack container: {}", detail.join("; ")));
+    }
+    crate::ucfx::extract_data_chunk(container)
+        .ok_or_else(|| format!("{label}: cfx_pack container has no `data` descriptor in bounds"))
 }
 
 #[cfg(test)]
@@ -577,6 +597,20 @@ mod tests {
         assert_eq!(data, movie, "the movie must be carried verbatim");
         // And it is still a movie after the round trip, not merely the same length.
         assert_eq!(&GfxMovie::parse(&data).expect("re-parse").magic, b"GFX");
+        // The extractor-side inverse gives back exactly the movie: no CSUM trailer appended.
+        assert_eq!(cfx_pack_movie(container, "cfx test").expect("movie"), movie);
+    }
+
+    /// A container whose checksum no longer matches is refused by name, not sliced.
+    #[test]
+    fn cfx_pack_movie_refuses_a_bad_checksum() {
+        let block = build_cfx_pack_block(0xC0FF_EE02, &tiny_movie());
+        let (parsed, _) = crate::ucfx::walk_decompressed_block(&block, "cfx test");
+        let mut container = parsed.containers[0].clone();
+        let last = container.len() - 1;
+        container[last] ^= 0xFF;
+        let e = cfx_pack_movie(&container, "corrupt").expect_err("a bad CSUM must be refused");
+        assert!(e.contains("corrupt"), "{e}");
     }
 
     /// A compressed `CFX` movie is wrapped exactly as an uncompressed one is — the container does

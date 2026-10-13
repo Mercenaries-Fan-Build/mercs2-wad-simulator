@@ -70,7 +70,8 @@ pub fn vz_wad_from_env() -> Option<PathBuf> {
 /// * `exe_corpus` — a **directory** of retail `Mercenaries2.exe` builds. Read only by the exe-map
 ///   tests ([`local_config_exe_corpus`]).
 /// * `exe_dumps` — a **directory** of executables and process-image dumps derived from them. Read
-///   only by the exe-map tests ([`local_config_exe_dumps`]).
+///   by the exe-map tests ([`local_config_exe_dumps`]) and the `lua_sites_exes` test
+///   ([`local_config_exe_dump`]).
 /// * `drmfree_exe` — the DRM-free executable (`mercs2_nodrm_v3.exe`, v1.0 code). Read only by the
 ///   exe-map tests ([`local_config_drmfree_exe`]).
 /// * `v11_patcher_exe` — the official v1.1 patcher (`mercenaries2_patch1_*.exe`). Read only by the
@@ -93,8 +94,9 @@ pub fn vz_wad_from_env() -> Option<PathBuf> {
 ///   English last. Read only by the exe-map Lua corpus tests ([`local_config_pc_repack_install_dir`]).
 /// * `x360_retail_dir` — a **directory**: the Xbox 360 retail disc dump (JTAG rip). Read only by
 ///   the exe-map Lua corpus tests ([`local_config_x360_retail_dir`]).
-/// * `x360_dlc_biua_stfs` — the retail Xbox LIVE Blow It Up Again Pack STFS package. Read only by
-///   the exe-map Lua corpus tests ([`local_config_x360_dlc_biua_stfs`]).
+/// * `x360_dlc_biua_stfs` — the retail Xbox LIVE Blow It Up Again Pack STFS package. Read by the
+///   exe-map Lua corpus tests and the `dlc_input` and `dlc_stfs` DOH tests
+///   ([`local_config_x360_dlc_biua_stfs`]).
 /// * `x360_dlc_prototypes_dir` — a **directory** of zipped Xbox 360 DLC prototype packages. Read
 ///   only by the exe-map Lua corpus tests ([`local_config_x360_dlc_prototypes_dir`]).
 /// * `ps3_disc_iso` — the PS3 NA disc image (BLUS30056, ISO-9660). Read only by the exe-map Lua
@@ -302,6 +304,16 @@ pub fn local_config_exe_dumps(start: &Path) -> Result<PathBuf, String> {
         Want::Dir,
         "write `exe_dumps = \"/path/to/securom_dump\"` into it by hand",
     )
+}
+
+/// The file `name` in the `exe_dumps` directory, for a **game-gated test**.
+pub fn local_config_exe_dump(start: &Path, name: &str) -> Result<PathBuf, String> {
+    let dir = local_config_exe_dumps(start)?;
+    let path = dir.join(name);
+    if !path.is_file() {
+        return Err(format!("game-gated test: {EXE_DUMPS_KEY} = {} has no file {name}", dir.display()));
+    }
+    Ok(path)
 }
 
 /// The DRM-free executable for a **game-gated test**: `drmfree_exe` in the nearest

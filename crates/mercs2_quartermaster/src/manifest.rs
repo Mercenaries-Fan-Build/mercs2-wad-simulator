@@ -998,6 +998,12 @@ pub enum Contribution {
         name: String,
         /// The `.lua` source file to compile, `src/`-relative.
         source: PathBuf,
+        /// Globals this module deliberately writes into `_G` — a library's public table, an engine
+        /// callback it chains. Each is a bare Lua identifier (`Ess`, `OnStateChange`). M0302 accepts a
+        /// write to `_G.<name>` (or `_G.<name>.<field>`) for a listed name; any other write to `_G`
+        /// or `_MODULES` stays an error.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        exports: Vec<String>,
     },
     /// Script. Wholesale REPLACE the bytecode of an existing shipped script, keeping its name and
     /// asset hash. The append counterpart to [`PatchLua`] and the additive counterpart to

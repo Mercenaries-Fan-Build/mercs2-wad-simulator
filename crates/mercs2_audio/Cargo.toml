@@ -1,6 +1,6 @@
 [package]
 name = "mercs2_audio"
-version = "1.2.3"
+version = "2.0.0"
 edition = "2021"
 description = "Mercenaries 2 reimpl — audio backend, mixer, dual-deck music FSM, banks, 3D."
 readme = "README.md"
@@ -42,3 +42,7 @@ required-features = ["retail"]
 [[test]]
 name = "retail_fields"
 required-features = ["retail"]
+
+[dev-dependencies]
+# wavebank_convert: the fixtures' provenance check.
+sha2 = "0.10"

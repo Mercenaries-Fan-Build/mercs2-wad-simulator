@@ -1105,6 +1105,7 @@ fn stub(kind: &str, n: usize) -> Option<Contribution> {
         "add_script" => Contribution::AddScript {
             name,
             source: PathBuf::from("src/module.lua"),
+            exports: Vec::new(),
         },
         "replace_lua" => Contribution::ReplaceLua {
             target: "wifpmcinterior".into(),

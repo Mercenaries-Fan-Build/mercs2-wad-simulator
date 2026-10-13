@@ -1105,61 +1105,6 @@ mod tests {
         }
     }
 
-    /// End-to-end: `convert_wavebank_data` on the retail Xbox fixture must
-    /// produce a PC body that `mercs2_audio::wave::WavebankFile::parse`
-    /// accepts, with the two clips' sample counts and sample rates
-    /// preserved and non-silent PCM16 payloads from ffmpeg.
-    #[test]
-    fn retail_wavebank_block_3322_roundtrips_through_pc_parser() {
-        assert_fixture_provenance();
-        if find_ffmpeg().is_err() {
-            panic!(
-                "ffmpeg not resolvable — set MERCS2_FFMPEG or install under tools/ffmpeg/bin/"
-            );
-        }
-
-        let pc = convert_wavebank_data(RETAIL_FIXTURE).expect("Xbox→PC convert succeeds");
-
-        assert_eq!(pc.len() % mercs2_audio::wave::BLOB_ALIGN, 0);
-        assert_eq!(
-            u32::from_le_bytes(pc[0..4].try_into().unwrap()),
-            mercs2_audio::wave::TABLE_VERSION
-        );
-        assert_eq!(
-            u32::from_le_bytes(pc[4..8].try_into().unwrap()),
-            0x9996_B5A6
-        );
-        assert_eq!(u16::from_le_bytes(pc[8..10].try_into().unwrap()), 2);
-        assert_eq!(u16::from_le_bytes(pc[10..12].try_into().unwrap()), 0);
-
-        let file = mercs2_audio::wave::WavebankFile::parse(&pc).expect("PC parse accepts output");
-        assert_eq!(file.bank_hash, 0x9996_B5A6);
-        assert_eq!(file.records.len(), 2);
-
-        let expected = [
-            (0x8E16_4121u32, 55_296u32),
-            (0x0C0E_B8B6u32, 51_968u32),
-        ];
-        for (rec, (xclip, xframes)) in file.records.iter().zip(expected.iter()) {
-            assert_eq!(rec.clip_hash, *xclip);
-            assert_eq!(rec.channels, 1);
-            assert_eq!(rec.format, mercs2_audio::wave::BYTES_PER_SAMPLE_PCM16);
-            assert_eq!(rec.sample_rate, 44100);
-            assert_eq!(rec.frames, *xframes);
-            let bytes = match &rec.data {
-                mercs2_audio::wave::WaveData::Embedded(b) => b,
-                mercs2_audio::wave::WaveData::Streamed { .. } => {
-                    panic!("embedded fixture produced a streamed record")
-                }
-            };
-            assert_eq!(bytes.len(), *xframes as usize * 2);
-            assert!(
-                bytes.iter().any(|&b| b != 0),
-                "ffmpeg-decoded PCM16 should not be all-zero"
-            );
-        }
-    }
-
     const RETAIL_FIXTURE_PS3: &[u8] =
         include_bytes!("../../tests/fixtures/ps3_wavebank_emb_block4243_be.bin");
     const RETAIL_FIXTURE_PS3_SHA256: &str =
@@ -1222,61 +1167,6 @@ mod tests {
             assert_eq!(layer, 1, "clip {i}: not Layer III");
             assert_eq!(crc_bit, 0, "clip {i}: CRC-protection bit expected 0");
             assert_eq!(channel_mode, 3, "clip {i}: expected mono (channel_mode 3)");
-        }
-    }
-
-    /// End-to-end: `convert_wavebank_data` on the retail PS3 fixture must
-    /// produce a PC body that `mercs2_audio::wave::WavebankFile::parse`
-    /// accepts, with the two clips’ sample counts preserved and
-    /// non-silent PCM16 payloads from ffmpeg’s native MP3 decoder.
-    #[test]
-    fn retail_ps3_wavebank_block_4243_roundtrips_through_pc_parser() {
-        assert_fixture_provenance_ps3();
-        if find_ffmpeg().is_err() {
-            panic!(
-                "ffmpeg not resolvable — set MERCS2_FFMPEG or install under tools/ffmpeg/bin/"
-            );
-        }
-
-        let pc = convert_wavebank_data(RETAIL_FIXTURE_PS3).expect("PS3→PC convert succeeds");
-
-        assert_eq!(pc.len() % mercs2_audio::wave::BLOB_ALIGN, 0);
-        assert_eq!(
-            u32::from_le_bytes(pc[0..4].try_into().unwrap()),
-            mercs2_audio::wave::TABLE_VERSION
-        );
-        assert_eq!(
-            u32::from_le_bytes(pc[4..8].try_into().unwrap()),
-            0x9996_B5A6
-        );
-        assert_eq!(u16::from_le_bytes(pc[8..10].try_into().unwrap()), 2);
-        assert_eq!(u16::from_le_bytes(pc[10..12].try_into().unwrap()), 0);
-
-        let file = mercs2_audio::wave::WavebankFile::parse(&pc).expect("PC parse accepts output");
-        assert_eq!(file.bank_hash, 0x9996_B5A6);
-        assert_eq!(file.records.len(), 2);
-
-        let expected = [
-            (0x8E16_4121u32, 56_448u32),
-            (0x0C0E_B8B6u32, 52_992u32),
-        ];
-        for (rec, (xclip, xframes)) in file.records.iter().zip(expected.iter()) {
-            assert_eq!(rec.clip_hash, *xclip);
-            assert_eq!(rec.channels, 1);
-            assert_eq!(rec.format, mercs2_audio::wave::BYTES_PER_SAMPLE_PCM16);
-            assert_eq!(rec.sample_rate, 44100);
-            assert_eq!(rec.frames, *xframes);
-            let bytes = match &rec.data {
-                mercs2_audio::wave::WaveData::Embedded(b) => b,
-                mercs2_audio::wave::WaveData::Streamed { .. } => {
-                    panic!("embedded fixture produced a streamed record")
-                }
-            };
-            assert_eq!(bytes.len(), *xframes as usize * 2);
-            assert!(
-                bytes.iter().any(|&b| b != 0),
-                "ffmpeg-decoded PCM16 should not be all-zero"
-            );
         }
     }
 

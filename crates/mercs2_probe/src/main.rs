@@ -38,6 +38,9 @@
 //! `vz.wad` from the registry only — they have no `--wad` override.
 
 mod bone_census;
+mod ess_live;
+mod ess_menu_check;
+mod gfx_golden;
 
 use mercs2_engine::diag;
 use mercs2_engine::wad;
@@ -58,7 +61,10 @@ fn usage() -> ! {
          \x20 veg-census <out.json>         (foliage instancing: understory coverage + tag-set)\n\
          \x20 tree-census <out.json>        (foliage instancing: c3-cell canopy trees + instance list)\n\
          \x20 bone-census [names.txt] [--csv P] [--wads a.wad,b.wad]      (every HIER node in every model)\n\
-         \x20 gfx-extract <outdir>          (Scaleform movies -> outdir)\n\
+         \x20 gfx-extract <outdir>          (every cfx_pack movie of --wad, verbatim)\n\
+         \x20 gfx-golden <movies_dir> --md <report.md> --json <index.json>   (no WAD needed)\n\
+         \x20 ess-live [--addr host:port] [--menu <scripts-rel path>] [--spawn <template>] [--spawn-dist <m>]   (live game, no WAD)\n\
+         \x20 ess-menu-check --ess <Ess.lua> <menu.lua> [<menu.lua> ...]   (exact Lua 5.1, engine stubbed, no WAD)\n\
          \x20 extract --model H <out.bin>   dump-block <index> <out.bin>  find-placement <substring>\n\
          \x20 save-dump <profile> [needle]  overlays <profile>\n\
          (vz.wad auto-discovers from the registry; override with --wad <path>)"
@@ -97,6 +103,8 @@ fn first_positional(args: &[String]) -> Option<String> {
             || a == "--clip"
             || a == "--csv"
             || a == "--skeleton-csv"
+            || a == "--md"
+            || a == "--json"
         {
             skip_next = true;
             continue;
@@ -341,6 +349,59 @@ fn main() {
     let cmd = all[1].clone();
     let args: Vec<String> = all[2..].to_vec();
 
+    // Subcommands that read extracted files, not a WAD: dispatched before vz.wad is resolved.
+    if cmd == "ess-live" {
+        let spawn_dist = match flag_val(&args, "--spawn-dist") {
+            None => ess_live::DEFAULT_SPAWN_DIST,
+            Some(d) => d.parse::<f64>().unwrap_or_else(|e| {
+                eprintln!("ess-live: --spawn-dist {d:?}: {e}");
+                std::process::exit(2);
+            }),
+        };
+        let opts = ess_live::Options {
+            addr: flag_val(&args, "--addr").unwrap_or_else(|| mercs2_bridge::DEFAULT_ADDR.to_string()),
+            menu: flag_val(&args, "--menu"),
+            spawn: flag_val(&args, "--spawn"),
+            spawn_dist,
+            remove_deadline: ess_live::DEFAULT_REMOVE_DEADLINE,
+            poll_interval: ess_live::DEFAULT_POLL_INTERVAL,
+            swf_deadline: ess_live::DEFAULT_SWF_DEADLINE,
+        };
+        match ess_live::run(&opts) {
+            Ok(results) => {
+                for r in &results {
+                    println!("{r}");
+                }
+                std::process::exit(ess_live::exit_code(&results));
+            }
+            Err(e) => {
+                eprintln!("ess-live: bridge at {} unreachable: {e}", opts.addr);
+                std::process::exit(2);
+            }
+        }
+    }
+    if cmd == "ess-menu-check" {
+        std::process::exit(ess_menu_check::main(&args));
+    }
+    if cmd == "gfx-golden" {
+        let usage = "gfx-golden: usage: mercs2_probe gfx-golden <movies_dir> --md <report.md> --json <index.json>";
+        let (Some(dir), Some(md), Some(json)) =
+            (first_positional(&args), flag_val(&args, "--md"), flag_val(&args, "--json"))
+        else {
+            eprintln!("{usage}");
+            std::process::exit(2);
+        };
+        if let Err(e) = gfx_golden::gfx_golden(
+            std::path::Path::new(&dir),
+            std::path::Path::new(&md),
+            std::path::Path::new(&json),
+        ) {
+            eprintln!("gfx-golden failed: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+
     // Resolve vz.wad: explicit --wad (a folder or the file), else $VZ_WAD, else the registry key.
     let wadpath = match wad::resolve_vz_wad(flag_val(&args, "--wad").as_deref()) {
         Some(p) => p,
@@ -432,7 +493,7 @@ fn main() {
         "gfx-extract" => match first_positional(&args) {
             Some(out) => run(diag::gfx_extract(&wadpath, &out)),
             None => {
-                eprintln!("gfx-extract: usage: mercs2_probe gfx-extract <outdir>");
+                eprintln!("gfx-extract: usage: mercs2_probe gfx-extract <outdir> [--wad <path>]");
                 std::process::exit(2);
             }
         },

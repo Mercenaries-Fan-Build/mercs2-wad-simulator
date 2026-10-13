@@ -1,0 +1,1044 @@
+{
+  "source": {
+    "repo": "mercs2-tools-gfxforge-web",
+    "commit": "9c5c12e05f16404d391b3a788525653d29948e46",
+    "license": "MIT",
+    "author": "loganw234 (Improper Aperture)"
+  },
+  "generated_by": "scratchpad driver freeze.js (not part of the repo); node v25.9.0",
+  "suite": "as2-features",
+  "source_file": "tests/suite.as2-features.js",
+  "notes": [
+    "interpreter.root holds the values gfxforge's own interpreter produced (which the JS test asserts); gfxforge_hex is the compiled AVM1 body."
+  ],
+  "cases": [
+    {
+      "line": 20,
+      "name": "as2: && and || short-circuit instead of evaluating both sides",
+      "programs": [
+        {
+          "src": "\n    calls = 0;\n    function bump() { _root.calls = _root.calls + 1; return true; }\n    a = false && bump();\n    b = true || bump();\n  ",
+          "gfxforge_hex": "9607000063616c6c730096050007000000001d9b090062756d700000003b00960700005f726f6f74001c9607000063616c6c7300960700005f726f6f74001c9607000063616c6c73004e9605000701000000474f96020005013e96030000610096020005004c129d020013001796050007000000009606000062756d70003d1d96030000620096020005014c9d020013001796050007000000009606000062756d70003d1d",
+          "interpreter": {
+            "root": {
+              "calls": 0
+            },
+            "trace": [
+              "▶ running top-level script",
+              "calls = 0",
+              "a = false",
+              "b = true"
+            ],
+            "fscommands": [],
+            "functions": [
+              "bump"
+            ],
+            "items_after": []
+          }
+        },
+        {
+          "src": "\n    calls = 0;\n    function bump() { _root.calls = _root.calls + 1; return true; }\n    a = true && bump();\n    b = false || bump();\n  ",
+          "gfxforge_hex": "9607000063616c6c730096050007000000001d9b090062756d700000003b00960700005f726f6f74001c9607000063616c6c7300960700005f726f6f74001c9607000063616c6c73004e9605000701000000474f96020005013e96030000610096020005014c129d020013001796050007000000009606000062756d70003d1d96030000620096020005004c9d020013001796050007000000009606000062756d70003d1d",
+          "interpreter": {
+            "root": {
+              "calls": 2
+            },
+            "trace": [
+              "▶ running top-level script",
+              "calls = 0",
+              "calls = 1",
+              "a = true",
+              "calls = 2",
+              "b = true"
+            ],
+            "fscommands": [],
+            "functions": [
+              "bump"
+            ],
+            "items_after": []
+          }
+        }
+      ]
+    },
+    {
+      "line": 39,
+      "name": "as2: && and || yield the operand value, not a coerced boolean",
+      "programs": [
+        {
+          "src": "a = 0 || \"fallback\"; b = \"set\" && \"second\"; c = \"\" || 0;",
+          "gfxforge_hex": "96030000610096050007000000004c9d02000e0017960a000066616c6c6261636b001d96030000620096050000736574004c129d02000c0017960800007365636f6e64001d96030000630096020000004c9d020009001796050007000000001d",
+          "interpreter": {
+            "root": {
+              "a": "fallback",
+              "b": "second",
+              "c": 0
+            },
+            "trace": [
+              "▶ running top-level script",
+              "a = \"fallback\"",
+              "b = \"second\"",
+              "c = 0"
+            ],
+            "fscommands": [],
+            "functions": [],
+            "items_after": []
+          }
+        }
+      ]
+    },
+    {
+      "line": 47,
+      "name": "as2: var inside a function stays local instead of leaking to _root",
+      "programs": [
+        {
+          "src": "\n    leaked = \"untouched\";\n    function f() { var leaked = \"local\"; return leaked; }\n    result = f();\n  ",
+          "gfxforge_hex": "960800006c65616b656400960b0000756e746f7563686564001d9b0600660000002300960800006c65616b656400960700006c6f63616c003c960800006c65616b6564001c3e96080000726573756c740096050007000000009603000066003d1d",
+          "interpreter": {
+            "root": {
+              "result": "local",
+              "leaked": "untouched"
+            },
+            "trace": [
+              "▶ running top-level script",
+              "leaked = \"untouched\"",
+              "result = \"local\""
+            ],
+            "fscommands": [],
+            "functions": [
+              "f"
+            ],
+            "items_after": []
+          }
+        }
+      ]
+    },
+    {
+      "line": 58,
+      "name": "as2: compound assignment evaluates its target exactly once",
+      "programs": [
+        {
+          "src": "\n    calls = 0;\n    arr = [10, 20, 30];\n    function idx() { _root.calls = _root.calls + 1; return 1; }\n    arr[idx()] += 5;\n  ",
+          "gfxforge_hex": "9607000063616c6c730096050007000000001d9605000061727200960500070a0000009605000714000000960500071e0000009605000703000000421d9b08006964780000003e00960700005f726f6f74001c9607000063616c6c7300960700005f726f6f74001c9607000063616c6c73004e9605000701000000474f96050007010000003e96050000617272001c960500070000000096050000696478003d87010000174c96020004004e96050007050000004796020004004d4f",
+          "interpreter": {
+            "root": {
+              "calls": 1,
+              "arr": [
+                10,
+                25,
+                30
+              ]
+            },
+            "trace": [
+              "▶ running top-level script",
+              "calls = 0",
+              "arr = [10, 20, 30]",
+              "calls = 1"
+            ],
+            "fscommands": [],
+            "functions": [
+              "idx"
+            ],
+            "items_after": []
+          }
+        }
+      ]
+    },
+    {
+      "line": 72,
+      "name": "as2: strict equality distinguishes types",
+      "programs": [
+        {
+          "src": "a = (1 === 1); b = (\"1\" === 1); c = (\"1\" !== 1); d = (1 == \"1\");",
+          "gfxforge_hex": "96030000610096050007010000009605000701000000661d9603000062009603000031009605000701000000661d960300006300960300003100960500070100000066121d9603000064009605000701000000960300003100491d",
+          "interpreter": {
+            "root": {
+              "a": true,
+              "b": false,
+              "c": true,
+              "d": true
+            },
+            "trace": [
+              "▶ running top-level script",
+              "a = true",
+              "b = false",
+              "c = true",
+              "d = true"
+            ],
+            "fscommands": [],
+            "functions": [],
+            "items_after": []
+          }
+        }
+      ]
+    },
+    {
+      "line": 81,
+      "name": "as2: bitwise and shift operators",
+      "programs": [
+        {
+          "src": "a = 12 & 10; b = 12 | 3; c = 12 ^ 10; d = 1 << 4; e = -16 >> 2; f = 8 >>> 1; g = ~5;",
+          "gfxforge_hex": "960300006100960500070c000000960500070a000000601d960300006200960500070c0000009605000703000000611d960300006300960500070c000000960500070a000000621d96030000640096050007010000009605000704000000631d960300006500960500070000000096050007100000000b9605000702000000641d96030000660096050007080000009605000701000000651d960300006700960500070500000096050007ffffffff621d",
+          "interpreter": {
+            "root": {
+              "a": 8,
+              "b": 15,
+              "c": 6,
+              "d": 16,
+              "e": -4,
+              "f": 4,
+              "g": -6
+            },
+            "trace": [
+              "▶ running top-level script",
+              "a = 8",
+              "b = 15",
+              "c = 6",
+              "d = 16",
+              "e = -4",
+              "f = 4",
+              "g = -6"
+            ],
+            "fscommands": [],
+            "functions": [],
+            "items_after": []
+          }
+        }
+      ]
+    },
+    {
+      "line": 93,
+      "name": "as2: increment and decrement in both fixities",
+      "programs": [
+        {
+          "src": "i = 5; a = i++; b = i; c = ++i; d = i; j = 5; e = j--; f = --j;",
+          "gfxforge_hex": "96030000690096050007050000001d9603000061009603000069001c9603000069009603000069001c501d1d9603000062009603000069001c1d9603000063009603000069009603000069001c501d9603000069001c1d9603000064009603000069001c1d960300006a0096050007050000001d960300006500960300006a001c960300006a00960300006a001c511d1d960300006600960300006a00960300006a001c511d960300006a001c1d",
+          "interpreter": {
+            "root": {
+              "a": 5,
+              "b": 6,
+              "c": 7,
+              "d": 7,
+              "e": 5,
+              "f": 3
+            },
+            "trace": [
+              "▶ running top-level script",
+              "i = 5",
+              "i = 6",
+              "a = 5",
+              "b = 6",
+              "i = 7",
+              "c = 7",
+              "d = 7",
+              "j = 5",
+              "j = 4",
+              "e = 5",
+              "j = 3",
+              "f = 3"
+            ],
+            "fscommands": [],
+            "functions": [],
+            "items_after": []
+          }
+        }
+      ]
+    },
+    {
+      "line": 104,
+      "name": "as2: ++ drives a for loop",
+      "programs": [
+        {
+          "src": "total = 0; for (var i = 0; i < 5; i++) { total = total + i; }",
+          "gfxforge_hex": "96070000746f74616c0096050007000000001d96030000690096050007000000003c9603000069001c960500070500000048129d0200320096070000746f74616c0096070000746f74616c001c9603000069001c471d9603000069009603000069001c501d990200b8ff",
+          "interpreter": {
+            "root": {
+              "total": 10
+            },
+            "trace": [
+              "▶ running top-level script",
+              "total = 0",
+              "i = 0",
+              "total = 0",
+              "i = 1",
+              "total = 1",
+              "i = 2",
+              "total = 3",
+              "i = 3",
+              "total = 6",
+              "i = 4",
+              "total = 10",
+              "i = 5"
+            ],
+            "fscommands": [],
+            "functions": [],
+            "items_after": []
+          }
+        }
+      ]
+    },
+    {
+      "line": 110,
+      "name": "as2: ternary picks a branch and does not evaluate the other",
+      "programs": [
+        {
+          "src": "\n    calls = 0;\n    function side() { _root.calls = _root.calls + 1; return \"no\"; }\n    a = (1 < 2) ? \"yes\" : side();\n    b = (1 > 2) ? \"no\" : \"else\";\n  ",
+          "gfxforge_hex": "9607000063616c6c730096050007000000001d9b0900736964650000003d00960700005f726f6f74001c9607000063616c6c7300960700005f726f6f74001c9607000063616c6c73004e9605000701000000474f960400006e6f003e9603000061009605000701000000960500070200000048129d02000d009605000079657300990200120096050007000000009606000073696465003d1d9603000062009605000701000000960500070200000067129d02000c00960400006e6f00990200090096060000656c7365001d",
+          "interpreter": {
+            "root": {
+              "a": "yes",
+              "b": "else",
+              "calls": 0
+            },
+            "trace": [
+              "▶ running top-level script",
+              "calls = 0",
+              "a = \"yes\"",
+              "b = \"else\""
+            ],
+            "fscommands": [],
+            "functions": [
+              "side"
+            ],
+            "items_after": []
+          }
+        }
+      ]
+    },
+    {
+      "line": 123,
+      "name": "as2: typeof reports AVM1 type names",
+      "programs": [
+        {
+          "src": "a = typeof 1; b = typeof \"s\"; c = typeof true; d = typeof undefined; e = typeof {};",
+          "gfxforge_hex": "9603000061009605000701000000441d960300006200960300007300441d9603000063009602000501441d96030000640096010003441d960300006500960500070000000043441d",
+          "interpreter": {
+            "root": {
+              "a": "number",
+              "b": "string",
+              "c": "boolean",
+              "d": "undefined",
+              "e": "object"
+            },
+            "trace": [
+              "▶ running top-level script",
+              "a = \"number\"",
+              "b = \"string\"",
+              "c = \"boolean\"",
+              "d = \"undefined\"",
+              "e = \"object\""
+            ],
+            "fscommands": [],
+            "functions": [],
+            "items_after": []
+          }
+        }
+      ]
+    },
+    {
+      "line": 133,
+      "name": "as2: compound assignment covers the bitwise forms too",
+      "programs": [
+        {
+          "src": "a = 12; a &= 10; b = 1; b |= 6; c = 1; c <<= 3; d = 10; d -= 4; e = 3; e *= 3;",
+          "gfxforge_hex": "960300006100960500070c0000001d9603000061009603000061001c960500070a000000601d96030000620096050007010000001d9603000062009603000062001c9605000706000000611d96030000630096050007010000001d9603000063009603000063001c9605000703000000631d960300006400960500070a0000001d9603000064009603000064001c96050007040000000b1d96030000650096050007030000001d9603000065009603000065001c96050007030000000c1d",
+          "interpreter": {
+            "root": {
+              "a": 8,
+              "b": 7,
+              "c": 8,
+              "d": 6,
+              "e": 9
+            },
+            "trace": [
+              "▶ running top-level script",
+              "a = 12",
+              "a = 8",
+              "b = 1",
+              "b = 7",
+              "c = 1",
+              "c = 8",
+              "d = 10",
+              "d = 6",
+              "e = 3",
+              "e = 9"
+            ],
+            "fscommands": [],
+            "functions": [],
+            "items_after": []
+          }
+        }
+      ]
+    },
+    {
+      "line": 145,
+      "name": "as2: do/while always runs its body at least once",
+      "programs": [
+        {
+          "src": "n = 0; do { n = n + 1; } while (n < 0);",
+          "gfxforge_hex": "960300006e0096050007000000001d960300006e00960300006e001c9605000701000000471d960300006e001c9605000700000000489d0200d4ff",
+          "interpreter": {
+            "root": {
+              "n": 1
+            },
+            "trace": [
+              "▶ running top-level script",
+              "n = 0",
+              "n = 1"
+            ],
+            "fscommands": [],
+            "functions": [],
+            "items_after": []
+          }
+        },
+        {
+          "src": "n = 0; do { n = n + 1; } while (n < 5);",
+          "gfxforge_hex": "960300006e0096050007000000001d960300006e00960300006e001c9605000701000000471d960300006e001c9605000705000000489d0200d4ff",
+          "interpreter": {
+            "root": {
+              "n": 5
+            },
+            "trace": [
+              "▶ running top-level script",
+              "n = 0",
+              "n = 1",
+              "n = 2",
+              "n = 3",
+              "n = 4",
+              "n = 5"
+            ],
+            "fscommands": [],
+            "functions": [],
+            "items_after": []
+          }
+        }
+      ]
+    },
+    {
+      "line": 153,
+      "name": "as2: switch matches, falls through, and honours default",
+      "programs": [
+        {
+          "src": "x = 2; switch (x) { case 1: a = \"one\"; break; case 2: a = \"two\"; break; default: a = \"other\"; }",
+          "gfxforge_hex": "96030000780096050007020000001d9603000078001c4c9605000701000000669d020015004c9605000702000000669d02000c00179902003400179902000600179902001400960300006100960500006f6e65001d99020025009603000061009605000074776f001d9902001100960300006100960700006f74686572001d",
+          "interpreter": {
+            "root": {
+              "a": "two"
+            },
+            "trace": [
+              "▶ running top-level script",
+              "x = 2",
+              "a = \"two\""
+            ],
+            "fscommands": [],
+            "functions": [],
+            "items_after": []
+          }
+        },
+        {
+          "src": "x = 9; switch (x) { case 1: a = \"one\"; break; default: a = \"other\"; }",
+          "gfxforge_hex": "96030000780096050007090000001d9603000078001c4c9605000701000000669d02000600179902001a00179902000000960300006100960500006f6e65001d9902001100960300006100960700006f74686572001d",
+          "interpreter": {
+            "root": {
+              "a": "other"
+            },
+            "trace": [
+              "▶ running top-level script",
+              "x = 9",
+              "a = \"other\""
+            ],
+            "fscommands": [],
+            "functions": [],
+            "items_after": []
+          }
+        },
+        {
+          "src": "hits = \"\"; switch (1) { case 1: hits = hits + \"a\"; case 2: hits = hits + \"b\"; break; case 3: hits = hits + \"c\"; }",
+          "gfxforge_hex": "96060000686974730096020000001d96050007010000004c9605000701000000669d020024004c9605000702000000669d02001b004c9605000703000000669d02001200179902006800179902000c00179902002100179902003b009606000068697473009606000068697473001c960300006100471d9606000068697473009606000068697473001c960300006200471d9902001b009606000068697473009606000068697473001c960300006300471d",
+          "interpreter": {
+            "root": {
+              "hits": "ab"
+            },
+            "trace": [
+              "▶ running top-level script",
+              "hits = \"\"",
+              "hits = \"a\"",
+              "hits = \"ab\""
+            ],
+            "fscommands": [],
+            "functions": [],
+            "items_after": []
+          }
+        }
+      ]
+    },
+    {
+      "line": 164,
+      "name": "as2: switch uses strict comparison, so \"1\" does not match 1",
+      "programs": [
+        {
+          "src": "a = \"none\"; switch (\"1\") { case 1: a = \"number\"; break; default: a = \"default\"; }",
+          "gfxforge_hex": "960300006100960600006e6f6e65001d9603000031004c9605000701000000669d02000600179902001d00179902000000960300006100960800006e756d626572001d99020013009603000061009609000064656661756c74001d",
+          "interpreter": {
+            "root": {
+              "a": "default"
+            },
+            "trace": [
+              "▶ running top-level script",
+              "a = \"none\"",
+              "a = \"default\""
+            ],
+            "fscommands": [],
+            "functions": [],
+            "items_after": []
+          }
+        }
+      ]
+    },
+    {
+      "line": 170,
+      "name": "as2: continue inside a switch targets the enclosing loop",
+      "programs": [
+        {
+          "src": "\n    total = 0;\n    for (var i = 0; i < 5; i++) {\n      switch (i) {\n        case 2: continue;\n        default: total = total + 1;\n      }\n    }\n  ",
+          "gfxforge_hex": "96070000746f74616c0096050007000000001d96030000690096050007000000003c9603000069001c960500070500000048129d02005a009603000069001c4c9605000702000000669d02000600179902000b001799020000009902001f0096070000746f74616c0096070000746f74616c001c9605000701000000471d9603000069009603000069001c501d99020090ff",
+          "interpreter": {
+            "root": {
+              "total": 4
+            },
+            "trace": [
+              "▶ running top-level script",
+              "total = 0",
+              "i = 0",
+              "total = 1",
+              "i = 1",
+              "total = 2",
+              "i = 2",
+              "i = 3",
+              "total = 3",
+              "i = 4",
+              "total = 4",
+              "i = 5"
+            ],
+            "fscommands": [],
+            "functions": [],
+            "items_after": []
+          }
+        }
+      ]
+    },
+    {
+      "line": 184,
+      "name": "as2: for-in walks object members",
+      "programs": [
+        {
+          "src": "o = {a: 1, b: 2, c: 3}; sum = 0; for (var k in o) { sum = sum + o[k]; }",
+          "gfxforge_hex": "960300006f009603000061009605000701000000960300006200960500070200000096030000630096050007030000009605000703000000431d9605000073756d0096050007000000001d960300006f001c554c96010002499d02002f00960300006b004d3c9605000073756d009605000073756d001c960300006f001c960300006b001c4e471d990200c6ff17",
+          "interpreter": {
+            "root": {
+              "sum": 6
+            },
+            "trace": [
+              "▶ running top-level script",
+              "o = [object Object]",
+              "sum = 0",
+              "k = \"a\"",
+              "sum = 1",
+              "k = \"b\"",
+              "sum = 3",
+              "k = \"c\"",
+              "sum = 6"
+            ],
+            "fscommands": [],
+            "functions": [],
+            "items_after": []
+          }
+        }
+      ]
+    },
+    {
+      "line": 190,
+      "name": "as2: braceless if/while bodies parse",
+      "programs": [
+        {
+          "src": "x = 0; if (1 < 2) x = 5; else x = 9; n = 0; while (n < 3) n = n + 1;",
+          "gfxforge_hex": "96030000780096050007000000001d9605000701000000960500070200000048129d0200140096030000780096050007050000001d9902000f0096030000780096050007090000001d960300006e0096050007000000001d960300006e001c960500070300000048129d02001c00960300006e00960300006e001c9605000701000000471d990200ceff",
+          "interpreter": {
+            "root": {
+              "x": 5,
+              "n": 3
+            },
+            "trace": [
+              "▶ running top-level script",
+              "x = 0",
+              "x = 5",
+              "n = 0",
+              "n = 1",
+              "n = 2",
+              "n = 3"
+            ],
+            "fscommands": [],
+            "functions": [],
+            "items_after": []
+          }
+        }
+      ]
+    },
+    {
+      "line": 197,
+      "name": "as2: multiple declarators in one var statement",
+      "programs": [
+        {
+          "src": "function f() { var a = 1, b = 2, c; return a + b; } out = f();",
+          "gfxforge_hex": "9b060066000000350096030000610096050007010000003c96030000620096050007020000003c960300006300419603000061001c9603000062001c473e960500006f75740096050007000000009603000066003d1d",
+          "interpreter": {
+            "root": {
+              "out": 3
+            },
+            "trace": [
+              "▶ running top-level script",
+              "out = 3"
+            ],
+            "fscommands": [],
+            "functions": [
+              "f"
+            ],
+            "items_after": []
+          }
+        }
+      ]
+    },
+    {
+      "line": 205,
+      "name": "as2: object literals build real objects",
+      "programs": [
+        {
+          "src": "o = {x: 10, y: 20, name: \"hud\"}; a = o.x + o.y; b = o.name;",
+          "gfxforge_hex": "960300006f00960300007800960500070a0000009603000079009605000714000000960600006e616d650096050000687564009605000703000000431d960300006100960300006f001c9603000078004e960300006f001c9603000079004e471d960300006200960300006f001c960600006e616d65004e1d",
+          "interpreter": {
+            "root": {
+              "a": 30,
+              "b": "hud"
+            },
+            "trace": [
+              "▶ running top-level script",
+              "o = [object Object]",
+              "a = 30",
+              "b = \"hud\""
+            ],
+            "fscommands": [],
+            "functions": [],
+            "items_after": []
+          }
+        }
+      ]
+    },
+    {
+      "line": 212,
+      "name": "as2: nested object and array literals",
+      "programs": [
+        {
+          "src": "o = {pos: {x: 3}, list: [1, 2, 3]}; a = o.pos.x; b = o.list[2];",
+          "gfxforge_hex": "960300006f0096050000706f73009603000078009605000703000000960500070100000043960600006c697374009605000701000000960500070200000096050007030000009605000703000000429605000702000000431d960300006100960300006f001c96050000706f73004e9603000078004e1d960300006200960300006f001c960600006c697374004e96050007020000004e1d",
+          "interpreter": {
+            "root": {
+              "a": 3,
+              "b": 3
+            },
+            "trace": [
+              "▶ running top-level script",
+              "o = [object Object]",
+              "a = 3",
+              "b = 3"
+            ],
+            "fscommands": [],
+            "functions": [],
+            "items_after": []
+          }
+        }
+      ]
+    },
+    {
+      "line": 219,
+      "name": "as2: new constructs script-defined classes",
+      "programs": [
+        {
+          "src": "\n    function Point(x, y) { this.x = x; this.y = y; }\n    p = new Point(4, 7);\n    sum = p.x + p.y;\n  ",
+          "gfxforge_hex": "9b0e00506f696e740002007800790030009606000074686973001c9603000078009603000078001c4f9606000074686973001c9603000079009603000079001c4f96030000700096050007070000009605000704000000960500070200000096070000506f696e7400401d9605000073756d009603000070001c9603000078004e9603000070001c9603000079004e471d",
+          "interpreter": {
+            "root": {
+              "sum": 11
+            },
+            "trace": [
+              "▶ running top-level script",
+              "p = [object Object]",
+              "sum = 11"
+            ],
+            "fscommands": [],
+            "functions": [
+              "Point"
+            ],
+            "items_after": []
+          }
+        }
+      ]
+    },
+    {
+      "line": 229,
+      "name": "as2: function expressions can be stored and called",
+      "programs": [
+        {
+          "src": "double = function (n) { return n * 2; }; out = double(21);",
+          "gfxforge_hex": "96080000646f75626c65009b07000001006e001100960300006e001c96050007020000000c3e1d960500006f7574009605000715000000960500070100000096080000646f75626c65003d1d",
+          "interpreter": {
+            "root": {
+              "out": 42
+            },
+            "trace": [
+              "▶ running top-level script",
+              "double = [object Object]",
+              "out = 42"
+            ],
+            "fscommands": [],
+            "functions": [],
+            "items_after": []
+          }
+        }
+      ]
+    },
+    {
+      "line": 235,
+      "name": "as2: hex literals and block comments",
+      "programs": [
+        {
+          "src": "/* leading\n   comment */ a = 0xFF; b = 0x10; // trailing\nc = 1;",
+          "gfxforge_hex": "96030000610096050007ff0000001d96030000620096050007100000001d96030000630096050007010000001d",
+          "interpreter": {
+            "root": {
+              "a": 255,
+              "b": 16,
+              "c": 1
+            },
+            "trace": [
+              "▶ running top-level script",
+              "a = 255",
+              "b = 16",
+              "c = 1"
+            ],
+            "fscommands": [],
+            "functions": [],
+            "items_after": []
+          }
+        }
+      ]
+    },
+    {
+      "line": 243,
+      "name": "as2: extended string escapes",
+      "programs": [
+        {
+          "src": "a = \"tab\\there\"; b = \"cr\\r\"; c = \"hex\\x41\"; d = \"quote\\\"q\";",
+          "gfxforge_hex": "960300006100960a00007461620968657265001d9603000062009605000063720d001d9603000063009606000068657841001d9603000064009609000071756f74652271001d",
+          "interpreter": {
+            "root": {
+              "a": "tab\there",
+              "b": "cr\r",
+              "c": "hexA",
+              "d": "quote\"q"
+            },
+            "trace": [
+              "▶ running top-level script",
+              "a = \"tab\\there\"",
+              "b = \"cr\\r\"",
+              "c = \"hexA\"",
+              "d = \"quote\\\"q\""
+            ],
+            "fscommands": [],
+            "functions": [],
+            "items_after": []
+          }
+        }
+      ]
+    },
+    {
+      "line": 252,
+      "name": "as2: trace() lowers to the Trace opcode and reaches the log",
+      "programs": [
+        {
+          "src": "trace(\"hello from the hud\");",
+          "gfxforge_hex": "9614000068656c6c6f2066726f6d20746865206875640026",
+          "interpreter": {
+            "root": {},
+            "trace": [
+              "▶ running top-level script",
+              "trace: hello from the hud"
+            ],
+            "fscommands": [],
+            "functions": [],
+            "items_after": []
+          }
+        }
+      ]
+    },
+    {
+      "line": 259,
+      "name": "as2: Math and other builtins resolve",
+      "programs": [
+        {
+          "src": "a = Math.floor(3.7); b = Math.max(2, 9); c = Math.abs(-4);",
+          "gfxforge_hex": "9603000061009609000699990d409a9999999605000701000000960600004d617468001c96070000666c6f6f7200521d960300006200960500070900000096050007020000009605000702000000960600004d617468001c960500006d617800521d960300006300960500070000000096050007040000000b9605000701000000960600004d617468001c9605000061627300521d",
+          "interpreter": {
+            "root": {
+              "a": 3,
+              "b": 9,
+              "c": 4
+            },
+            "trace": [
+              "▶ running top-level script",
+              "a = 3",
+              "b = 9",
+              "c = 4"
+            ],
+            "fscommands": [],
+            "functions": [],
+            "items_after": []
+          }
+        }
+      ]
+    },
+    {
+      "line": 267,
+      "name": "as2: a movie variable shadows a builtin of the same name",
+      "programs": [
+        {
+          "src": "Key = \"my own value\"; out = Key;",
+          "gfxforge_hex": "960500004b657900960e00006d79206f776e2076616c7565001d960500006f757400960500004b6579001c1d",
+          "interpreter": {
+            "root": {
+              "out": "my own value"
+            },
+            "trace": [
+              "▶ running top-level script",
+              "Key = \"my own value\"",
+              "out = \"my own value\""
+            ],
+            "fscommands": [],
+            "functions": [],
+            "items_after": []
+          }
+        }
+      ]
+    },
+    {
+      "line": 275,
+      "name": "as2: every new construct produces a well-formed action stream",
+      "programs": [
+        {
+          "label": "short-circuit",
+          "src": "a = x && y; b = x || y;",
+          "gfxforge_hex": "9603000061009603000078001c4c129d02000800179603000079001c1d9603000062009603000078001c4c9d02000800179603000079001c1d",
+          "walk_functions": []
+        },
+        {
+          "label": "ternary",
+          "src": "a = c ? 1 : 2;",
+          "gfxforge_hex": "9603000061009603000063001c129d02000d009605000701000000990200080096050007020000001d",
+          "walk_functions": []
+        },
+        {
+          "label": "nested ternary",
+          "src": "a = c ? (d ? 1 : 2) : 3;",
+          "gfxforge_hex": "9603000061009603000063001c129d020027009603000064001c129d02000d00960500070100000099020008009605000702000000990200080096050007030000001d",
+          "walk_functions": []
+        },
+        {
+          "label": "switch",
+          "src": "switch (x) { case 1: a = 1; break; case 2: a = 2; break; default: a = 3; }",
+          "gfxforge_hex": "9603000078001c4c9605000701000000669d020015004c9605000702000000669d02000c0017990200340017990200060017990200140096030000610096050007010000001d990200230096030000610096050007020000001d9902000f0096030000610096050007030000001d",
+          "walk_functions": []
+        },
+        {
+          "label": "do-while",
+          "src": "do { n = n + 1; } while (n < 5);",
+          "gfxforge_hex": "960300006e00960300006e001c9605000701000000471d960300006e001c9605000705000000489d0200d4ff",
+          "walk_functions": []
+        },
+        {
+          "label": "for-in",
+          "src": "for (var k in o) { total = total + o[k]; }",
+          "gfxforge_hex": "960300006f001c554c96010002499d02003300960300006b004d3c96070000746f74616c0096070000746f74616c001c960300006f001c960300006b001c4e471d990200c2ff17",
+          "walk_functions": []
+        },
+        {
+          "label": "nested loops with break",
+          "src": "for (var i = 0; i < 3; i++) { while (j < 2) { if (j == 1) { break; } j++; } }",
+          "gfxforge_hex": "96030000690096050007000000003c9603000069001c960500070300000048129d02005900960300006a001c960500070200000048129d02002f00960300006a001c960500070100000049129d020005009902001400960300006a00960300006a001c501d990200bbff9603000069009603000069001c501d99020091ff",
+          "walk_functions": []
+        },
+        {
+          "label": "object literal",
+          "src": "o = {a: 1, b: {c: 2}};",
+          "gfxforge_hex": "960300006f00960300006100960500070100000096030000620096030000630096050007020000009605000701000000439605000702000000431d",
+          "walk_functions": []
+        },
+        {
+          "label": "new",
+          "src": "p = new Point(1, 2);",
+          "gfxforge_hex": "96030000700096050007020000009605000701000000960500070200000096070000506f696e7400401d",
+          "walk_functions": []
+        },
+        {
+          "label": "function expression",
+          "src": "f = function (n) { return n * 2; };",
+          "gfxforge_hex": "9603000066009b07000001006e001100960300006e001c96050007020000000c3e1d",
+          "walk_functions": []
+        },
+        {
+          "label": "nested functions",
+          "src": "function outer(a) { function inner(b) { return b + 1; } return inner(a); }",
+          "gfxforge_hex": "9b0c006f7574657200010061003b009b0c00696e6e6572000100620011009603000062001c9605000701000000473e9603000061001c960500070100000096070000696e6e6572003d3e",
+          "walk_functions": [
+            "outer",
+            "inner"
+          ]
+        },
+        {
+          "label": "compound member",
+          "src": "o.count += 1;",
+          "gfxforge_hex": "960300006f001c4c96070000636f756e74004e96050007010000004796070000636f756e74004d4f",
+          "walk_functions": []
+        },
+        {
+          "label": "compound impure index",
+          "src": "arr[f()] += 1;",
+          "gfxforge_hex": "96050000617272001c96050007000000009603000066003d87010000174c96020004004e96050007010000004796020004004d4f",
+          "walk_functions": []
+        },
+        {
+          "label": "update operators",
+          "src": "i++; --j; a = k++;",
+          "gfxforge_hex": "9603000069009603000069001c501d960300006a00960300006a001c511d960300006100960300006b001c960300006b00960300006b001c501d1d",
+          "walk_functions": []
+        },
+        {
+          "label": "bitwise",
+          "src": "a = (x & y) | (z ^ w); b = p << 2; c = q >>> 1;",
+          "gfxforge_hex": "9603000061009603000078001c9603000079001c60960300007a001c9603000077001c62611d9603000062009603000070001c9605000702000000631d9603000063009603000071001c9605000701000000651d",
+          "walk_functions": []
+        },
+        {
+          "label": "delete and typeof",
+          "src": "delete o.p; t = typeof o;",
+          "gfxforge_hex": "960300006f001c9603000070003a17960300007400960300006f001c441d",
+          "walk_functions": []
+        },
+        {
+          "label": "deep nesting",
+          "src": "if (a) { for (var i = 0; i < 2; i++) { switch (i) { case 0: while (b) { c++; } break; } } }",
+          "gfxforge_hex": "9603000061001c129d0200810096030000690096050007000000003c9603000069001c960500070200000048129d02005c009603000069001c4c9605000700000000669d02000600179902002c001799020000009603000062001c129d020014009603000063009603000063001c501d990200dfff99020000009603000069009603000069001c501d9902008eff",
+          "walk_functions": []
+        }
+      ]
+    },
+    {
+      "line": 311,
+      "name": "as2: a compiled script survives a full movie build and verify",
+      "input": {
+        "movie_calls": [
+          {
+            "op": "new",
+            "args": [
+              320,
+              200,
+              {
+                "name": "features"
+              }
+            ]
+          },
+          {
+            "op": "text",
+            "args": [
+              10,
+              10,
+              "HP",
+              {
+                "varName": "hp"
+              }
+            ]
+          },
+          {
+            "op": "script",
+            "source": "\n    function SetHealth(n) {\n      var pct = n / 100;\n      _root.hp = (pct > 0.5) ? \"OK\" : \"LOW\";\n      for (var i = 0; i < 3; i++) { trace(\"tick \" + i); }\n    }\n  "
+          }
+        ],
+        "verify_require": {
+          "functions": [
+            "SetHealth"
+          ]
+        }
+      },
+      "output": {
+        "movie": {
+          "gfxforge": "474658084301000070000c8000007d00001e010012fa0702000000000d00000866656174757265734411000000004302000000e4115f6e6f726d616c5f466f6e742e737766000100010001005f6e6f726d616c5f466f6e74005a09020070190c58019012208d1101000401ffffffff68700048500086060601000200003f03bc0000009b10005365744865616c74680001006e00a8009605000070637400960300006e001c96050007640000000d3c960700005f726f6f74001c9604000068700096050000706374001c960900060000e03f0000000067129d02000c00960400004f4b009902000800960500004c4f57004f96030000690096050007000000003c9603000069001c960500070300000048129d02002700960700007469636b20009603000069001c47269603000069009603000069001c501d990200c3ff0040000000",
+          "length": 323,
+          "gfxforge_sha256": "e443223c9a8f60b118d8bfc2f08ac07bf011a9dc1cf8673905b972cddd0f0b15",
+          "retail_corrected": "474658083b01000070000c8000007d00001e010012fa0702130000000d00000866656174757265734411000000004302000000e4115f6e6f726d616c5f466f6e742e737766000100010001005f6e6f726d616c5f466f6e74005a09020070190c58019012208d1101000401ffffffff68700048500086060601000200003f03bc0000009b10005365744865616c74680001006e00a8009605000070637400960300006e001c96050007640000000d3c960700005f726f6f74001c9604000068700096050000706374001c960900060000e03f0000000067129d02000c00960400004f4b009902000800960500004c4f57004f96030000690096050007000000003c9603000069001c960500070300000048129d02002700960700007469636b20009603000069001c47269603000069009603000069001c501d990200c3ff0040000000",
+          "corrections_applied": [
+            {
+              "deviation": "D3",
+              "offset": 4,
+              "from": 323,
+              "to": 315
+            },
+            {
+              "deviation": "D4",
+              "offset": 24,
+              "from": 0,
+              "to": 19
+            }
+          ]
+        },
+        "gfxforge_verify_summary": {
+          "bytes": 323,
+          "tags": {
+            "0": 1,
+            "1": 1,
+            "9": 1,
+            "12": 1,
+            "26": 1,
+            "37": 1,
+            "69": 1,
+            "71": 1,
+            "1000": 1
+          },
+          "functions": [
+            "SetHealth"
+          ]
+        }
+      }
+    },
+    {
+      "line": 328,
+      "name": "as2: try/catch is rejected rather than silently emitted",
+      "programs": [
+        {
+          "src": "try { x = 1; } catch (e) { x = 2; }",
+          "mode": "source",
+          "gfxforge_error": "Line 1, column 5: expected op \";\", got op \"{\""
+        }
+      ],
+      "rust_expectation": "compile error"
+    },
+    {
+      "line": 337,
+      "name": "as2: assigning to a non-lvalue is a clear error",
+      "programs": [
+        {
+          "src": "1 + 2 = 3;",
+          "mode": "source",
+          "gfxforge_error": "cannot assign to \"binop\""
+        }
+      ],
+      "rust_expectation": "compile error"
+    }
+  ]
+}

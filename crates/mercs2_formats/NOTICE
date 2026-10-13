@@ -1,0 +1,43 @@
+mercs2_formats includes code and test data derived from the following third-party works.
+
+--------------------------------------------------------------------------------
+gfxforge-web — https://github.com/loganw234/mercs2-tools-gfxforge-web (commit 9c5c12e)
+gfxforge     — https://github.com/loganw234/mercs2-tools-gfxforge     (commit 42cca07)
+
+Used by: the `gfx` module's Scaleform GFx authoring layers (SWF tag writers, the AVM1 assembler,
+the AS2 compiler, the movie builder, the verifier, the AVM1 interpreter) and the frozen test
+fixtures under tests/fixtures/gfxforge/. Where the upstream behaviour disagrees with the retail
+Mercenaries 2 movies, the retail bytes are followed and the difference is recorded in
+docs/data/gfxforge_port_ledger.json of the notes repository.
+
+gfxforge-web:
+
+MIT License
+
+Copyright (c) 2026 loganw234 (Improper Aperture)
+
+gfxforge:
+
+MIT License
+
+Copyright (c) 2026 Improper Aperture
+
+Both are distributed under the same terms:
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.

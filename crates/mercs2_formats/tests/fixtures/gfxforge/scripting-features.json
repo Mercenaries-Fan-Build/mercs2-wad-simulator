@@ -1,0 +1,241 @@
+{
+  "source": {
+    "repo": "mercs2-tools-gfxforge-web",
+    "commit": "9c5c12e05f16404d391b3a788525653d29948e46",
+    "license": "MIT",
+    "author": "loganw234 (Improper Aperture)"
+  },
+  "generated_by": "scratchpad driver freeze.js (not part of the repo); node v25.9.0",
+  "suite": "scripting-features",
+  "source_file": "tests/suite.scripting-features.js",
+  "notes": [],
+  "cases": [
+    {
+      "line": 5,
+      "name": "scripting: for loop compiles and structurally verifies",
+      "programs": [
+        {
+          "src": "for (i = 0; i < 5; i = i + 1) { x = i; }",
+          "mode": "source",
+          "gfxforge_hex": "96030000690096050007000000001d9603000069001c960500070500000048129d02002a009603000078009603000069001c1d9603000069009603000069001c9605000701000000471d990200c0ff"
+        }
+      ]
+    },
+    {
+      "line": 11,
+      "name": "scripting: for loop with var-declared counter parses",
+      "programs": [
+        {
+          "src": "for (var i = 0; i < 3; i = i + 1) { fscommand(\"tick\", i); }",
+          "mode": "source",
+          "gfxforge_hex": "96030000690096050007000000003c9603000069001c960500070300000048129d02003a00961000004653436f6d6d616e643a7469636b009603000069001c9a0100009603000069009603000069001c9605000701000000471d990200b0ff"
+        }
+      ]
+    },
+    {
+      "line": 17,
+      "name": "scripting: empty for-clauses (infinite-loop shape) parse — for(;;) with a break",
+      "programs": [
+        {
+          "src": "for (;;) { break; }",
+          "mode": "source",
+          "gfxforge_hex": "9602000501129d02000a009902000500990200ebff"
+        }
+      ]
+    },
+    {
+      "line": 23,
+      "name": "scripting: break outside a loop is a compile error",
+      "programs": [
+        {
+          "src": "break;",
+          "mode": "source",
+          "gfxforge_error": "break used outside of a loop or switch"
+        }
+      ],
+      "rust_expectation": "compile error whose message mentions \"break\""
+    },
+    {
+      "line": 30,
+      "name": "scripting: continue outside a loop is a compile error",
+      "programs": [
+        {
+          "src": "continue;",
+          "mode": "source",
+          "gfxforge_error": "continue used outside of a loop"
+        }
+      ],
+      "rust_expectation": "compile error whose message mentions \"continue\""
+    },
+    {
+      "line": 37,
+      "name": "scripting: compound assignment operators all parse and compile",
+      "programs": [
+        {
+          "src": "x += 1;",
+          "mode": "source",
+          "gfxforge_hex": "9603000078009603000078001c9605000701000000471d"
+        },
+        {
+          "src": "x -= 1;",
+          "mode": "source",
+          "gfxforge_hex": "9603000078009603000078001c96050007010000000b1d"
+        },
+        {
+          "src": "x *= 1;",
+          "mode": "source",
+          "gfxforge_hex": "9603000078009603000078001c96050007010000000c1d"
+        },
+        {
+          "src": "x /= 1;",
+          "mode": "source",
+          "gfxforge_hex": "9603000078009603000078001c96050007010000000d1d"
+        },
+        {
+          "src": "x %= 1;",
+          "mode": "source",
+          "gfxforge_hex": "9603000078009603000078001c96050007010000003f1d"
+        }
+      ]
+    },
+    {
+      "line": 45,
+      "name": "scripting: compound assignment on a member (obj.prop += n) compiles",
+      "programs": [
+        {
+          "src": "_root.hp_val += 5;",
+          "mode": "source",
+          "gfxforge_hex": "960700005f726f6f74001c4c9608000068705f76616c004e9605000705000000479608000068705f76616c004d4f"
+        }
+      ]
+    },
+    {
+      "line": 51,
+      "name": "scripting: array literal compiles to push-elements + count + InitArray(0x42)",
+      "programs": [
+        {
+          "src": "[1, 2, 3]",
+          "mode": "expr",
+          "gfxforge_hex": "960500070100000096050007020000009605000703000000960500070300000042"
+        }
+      ]
+    },
+    {
+      "line": 58,
+      "name": "scripting: array indexing and .length still parse (existing member/index grammar)",
+      "programs": [
+        {
+          "src": "x = arr[0]; y = arr.length;",
+          "mode": "source",
+          "gfxforge_hex": "96030000780096050000617272001c96050007000000004e1d96030000790096050000617272001c960800006c656e677468004e1d"
+        }
+      ]
+    },
+    {
+      "line": 64,
+      "name": "scripting: tokenizer error includes line and column",
+      "programs": [
+        {
+          "src": "x = 1;\ny = @;",
+          "mode": "source",
+          "gfxforge_error": "Line 2, column 5: unrecognized text \"@;\""
+        }
+      ],
+      "rust_expectation": "compile error matching /Line 2, column \\d+/"
+    },
+    {
+      "line": 71,
+      "name": "scripting: parser mismatch error includes line and column",
+      "programs": [
+        {
+          "src": "if (x < 1 { y = 1; }",
+          "mode": "source",
+          "gfxforge_error": "Line 1, column 11: expected op \")\", got op \"{\""
+        }
+      ],
+      "rust_expectation": "compile error matching /Line 1, column \\d+/"
+    },
+    {
+      "line": 78,
+      "name": "scripting: unexpected-token error includes line and column, on a later line",
+      "programs": [
+        {
+          "src": "function f() {\n  x = ;\n}",
+          "mode": "source",
+          "gfxforge_error": "Line 2, column 7: unexpected op \";\""
+        }
+      ],
+      "rust_expectation": "compile error matching /Line 2/"
+    },
+    {
+      "line": 87,
+      "name": "scripting: combined program using for/break/continue/compound-assign/arrays compiles",
+      "input": {
+        "movie_calls": [
+          {
+            "op": "new",
+            "args": [
+              100,
+              40,
+              {
+                "name": "test"
+              }
+            ]
+          },
+          {
+            "op": "script",
+            "source": "\n    function Sum(n) {\n      total = 0;\n      for (i = 0; i < n; i += 1) {\n        if (i == 3) { continue; }\n        if (i > 8) { break; }\n        total += i;\n      }\n      return total;\n    }\n    scores = [10, 20, 30];\n    x = scores[1];\n  "
+          }
+        ],
+        "verify_require": {
+          "functions": [
+            "Sum"
+          ]
+        }
+      },
+      "output": {
+        "movie": {
+          "gfxforge": "474658084201000060003e80001900001e01000efa0702000000000d0000047465737444110000000043020000003f030a0100009b0a0053756d0001006e00b30096070000746f74616c0096050007000000001d96030000690096050007000000001d9603000069001c960300006e001c48129d020070009603000069001c960500070300000049129d0200050099020039009603000069001c960500070800000067129d020005009902003a0096070000746f74616c0096070000746f74616c001c9603000069001c471d9603000069009603000069001c9605000701000000471d9902007bff96070000746f74616c001c3e9608000073636f72657300960500070a0000009605000714000000960500071e0000009605000703000000421d9603000078009608000073636f726573001c96050007010000004e1d0040000000",
+          "length": 322,
+          "gfxforge_sha256": "d7e64e347ffad934b9a1babe356b19a537693949ba4edb046772351e0aa7b0fc",
+          "retail_corrected": "474658083a01000060003e80001900001e01000efa0702130000000d0000047465737444110000000043020000003f030a0100009b0a0053756d0001006e00b30096070000746f74616c0096050007000000001d96030000690096050007000000001d9603000069001c960300006e001c48129d020070009603000069001c960500070300000049129d0200050099020039009603000069001c960500070800000067129d020005009902003a0096070000746f74616c0096070000746f74616c001c9603000069001c471d9603000069009603000069001c9605000701000000471d9902007bff96070000746f74616c001c3e9608000073636f72657300960500070a0000009605000714000000960500071e0000009605000703000000421d9603000078009608000073636f726573001c96050007010000004e1d0040000000",
+          "corrections_applied": [
+            {
+              "deviation": "D3",
+              "offset": 4,
+              "from": 322,
+              "to": 314
+            },
+            {
+              "deviation": "D4",
+              "offset": 23,
+              "from": 0,
+              "to": 19
+            }
+          ]
+        },
+        "gfxforge_verify_summary": {
+          "bytes": 322,
+          "tags": {
+            "0": 1,
+            "1": 1,
+            "9": 1,
+            "12": 1,
+            "69": 1,
+            "1000": 1
+          },
+          "functions": [
+            "Sum"
+          ]
+        }
+      },
+      "programs": [
+        {
+          "src": "\n    function Sum(n) {\n      total = 0;\n      for (i = 0; i < n; i += 1) {\n        if (i == 3) { continue; }\n        if (i > 8) { break; }\n        total += i;\n      }\n      return total;\n    }\n    scores = [10, 20, 30];\n    x = scores[1];\n  ",
+          "mode": "source",
+          "gfxforge_hex": "9b0a0053756d0001006e00b30096070000746f74616c0096050007000000001d96030000690096050007000000001d9603000069001c960300006e001c48129d020070009603000069001c960500070300000049129d0200050099020039009603000069001c960500070800000067129d020005009902003a0096070000746f74616c0096070000746f74616c001c9603000069001c471d9603000069009603000069001c9605000701000000471d9902007bff96070000746f74616c001c3e9608000073636f72657300960500070a0000009605000714000000960500071e0000009605000703000000421d9603000078009608000073636f726573001c96050007010000004e1d"
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,255 @@
+{
+  "source": {
+    "repo": "mercs2-tools-gfxforge-web",
+    "commit": "9c5c12e05f16404d391b3a788525653d29948e46",
+    "license": "MIT",
+    "author": "loganw234 (Improper Aperture)"
+  },
+  "generated_by": "scratchpad driver freeze.js (not part of the repo); node v25.9.0",
+  "suite": "avm1-encoding",
+  "source_file": "tests/suite.avm1-encoding.js",
+  "notes": [
+    "Retail wire payloads at suite.avm1-encoding.js:17-23 are the test author's retail-movie samples (not re-verified by this freeze)."
+  ],
+  "cases": [
+    {
+      "line": 25,
+      "name": "avm1: ActionPush doubles encode word-swapped, matching real game movies",
+      "input": {
+        "values": [
+          0.25,
+          59.5,
+          2.5,
+          12.5,
+          0
+        ]
+      },
+      "output": {
+        "push_records": [
+          {
+            "value": 0.25,
+            "gfxforge_hex": "960900060000d03f00000000",
+            "retail_wire_payload": "0000d03f00000000",
+            "note": "type 6 payload must equal retail_wire_payload"
+          },
+          {
+            "value": 59.5,
+            "gfxforge_hex": "9609000600c04d4000000000",
+            "retail_wire_payload": "00c04d4000000000",
+            "note": "type 6 payload must equal retail_wire_payload"
+          },
+          {
+            "value": 2.5,
+            "gfxforge_hex": "960900060000044000000000",
+            "retail_wire_payload": "0000044000000000",
+            "note": "type 6 payload must equal retail_wire_payload"
+          },
+          {
+            "value": 12.5,
+            "gfxforge_hex": "960900060000294000000000",
+            "retail_wire_payload": "0000294000000000",
+            "note": "type 6 payload must equal retail_wire_payload"
+          },
+          {
+            "value": 0,
+            "gfxforge_hex": "9605000700000000",
+            "retail_wire_payload": "0000000000000000",
+            "note": "integral: gfxforge takes the i32 (type 7) path, test skips the double comparison (suite.avm1-encoding.js:32)"
+          }
+        ]
+      }
+    },
+    {
+      "line": 38,
+      "name": "avm1: the interpreter reads back exactly what the assembler wrote",
+      "input": {
+        "values": [
+          0.25,
+          59.5,
+          2.5,
+          12.5,
+          -1.5,
+          0.1,
+          1e-8,
+          -273.15,
+          1234.5678
+        ]
+      },
+      "output": {
+        "rows": [
+          {
+            "value": 0.25,
+            "code_hex": "960900060000d03f000000003e",
+            "interpreter_result": 0.25
+          },
+          {
+            "value": 59.5,
+            "code_hex": "9609000600c04d40000000003e",
+            "interpreter_result": 59.5
+          },
+          {
+            "value": 2.5,
+            "code_hex": "9609000600000440000000003e",
+            "interpreter_result": 2.5
+          },
+          {
+            "value": 12.5,
+            "code_hex": "9609000600002940000000003e",
+            "interpreter_result": 12.5
+          },
+          {
+            "value": -1.5,
+            "code_hex": "960900060000f8bf000000003e",
+            "interpreter_result": -1.5
+          },
+          {
+            "value": 0.1,
+            "code_hex": "960900069999b93f9a9999993e",
+            "interpreter_result": 0.1
+          },
+          {
+            "value": 1e-8,
+            "code_hex": "960900068e79453e3a8c30e23e",
+            "interpreter_result": 1e-8
+          },
+          {
+            "value": -273.15,
+            "code_hex": "96090006661271c0666666663e",
+            "interpreter_result": -273.15
+          },
+          {
+            "value": 1234.5678,
+            "code_hex": "96090006454a9340adfa5c6d3e",
+            "interpreter_result": 1234.5678
+          }
+        ]
+      }
+    },
+    {
+      "line": 51,
+      "name": "avm1: real game double bytes decode to their authoring values",
+      "input": {
+        "hand_assembled": true
+      },
+      "output": {
+        "rows": [
+          {
+            "code_hex": "960900060000d03f000000003e",
+            "expected_value": 0.25
+          },
+          {
+            "code_hex": "9609000600c04d40000000003e",
+            "expected_value": 59.5
+          },
+          {
+            "code_hex": "9609000600000440000000003e",
+            "expected_value": 2.5
+          },
+          {
+            "code_hex": "9609000600002940000000003e",
+            "expected_value": 12.5
+          },
+          {
+            "code_hex": "9609000600000000000000003e",
+            "expected_value": 0
+          }
+        ]
+      }
+    },
+    {
+      "line": 69,
+      "name": "avm1: DefineFunction2 header matches the layout GFx parses",
+      "input": {
+        "name": "Foo",
+        "params": [
+          {
+            "name": "a",
+            "register": 1
+          },
+          {
+            "name": "b",
+            "register": 2
+          }
+        ],
+        "body_hex": "9605000701000000",
+        "flags": 1,
+        "registerCount": null
+      },
+      "output": {
+        "gfxforge_hex": "8e1100466f6f00020003010001610002620008009605000701000000",
+        "header_len": 17,
+        "register_count": 3
+      }
+    },
+    {
+      "line": 84,
+      "name": "avm1: ConstantPool frames count + NUL-terminated strings",
+      "input": {
+        "strings": [
+          "ab",
+          "c"
+        ]
+      },
+      "output": {
+        "gfxforge_hex": "88070002006162006300"
+      }
+    },
+    {
+      "line": 94,
+      "name": "avm1: gotoFrame2 sets the play bit and optional scene bias",
+      "input": {
+        "calls": [
+          [
+            false
+          ],
+          [
+            true
+          ],
+          [
+            true,
+            4
+          ]
+        ]
+      },
+      "output": {
+        "gfxforge_hex": [
+          "9f010000",
+          "9f010001",
+          "9f0300030400"
+        ]
+      }
+    },
+    {
+      "line": 101,
+      "name": "avm1: storeRegister carries a single register byte",
+      "input": {
+        "register": 3
+      },
+      "output": {
+        "gfxforge_hex": "87010003"
+      }
+    },
+    {
+      "line": 106,
+      "name": "avm1: push wrappers cover null/undefined/register/constant",
+      "input": {
+        "pushes": [
+          "null",
+          "undefined",
+          "register(2)",
+          "constant(5)",
+          "constant(300)"
+        ]
+      },
+      "output": {
+        "gfxforge_hex": [
+          "96010002",
+          "96010003",
+          "9602000402",
+          "9602000805",
+          "960300092c01"
+        ]
+      }
+    }
+  ]
+}

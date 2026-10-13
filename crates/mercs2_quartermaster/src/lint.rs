@@ -907,6 +907,13 @@ pub fn aset_row_is_single_block(packed_block_ref: u32, secondary_ref: u32) -> bo
 }
 
 /// Parse a signature-guard value — space-separated hex byte pairs like `"55 8B EC"` — into bytes.
+/// A `touches` entry spelled as a virtual address, `0x` and hex digits.
+fn is_address_touch(t: &str) -> bool {
+    t.strip_prefix("0x")
+        .or_else(|| t.strip_prefix("0X"))
+        .is_some_and(|h| !h.is_empty() && h.chars().all(|c| c.is_ascii_hexdigit()))
+}
+
 /// `None` if it is empty or any token is not a single hex byte. Shared by the hermetic M0199 check
 /// (validity) and the game-gated one (the bytes to compare against the exe).
 fn parse_prologue_bytes(s: &str) -> Option<Vec<u8>> {
@@ -2385,10 +2392,12 @@ pub fn lint(
                 }
                 // Guards are opt-in: a hook that declares none is not flagged. But once SOME
                 // addresses are guarded, a touched address left unguarded is almost certainly an
-                // oversight — that partial-coverage gap is the advisory.
+                // oversight — that partial-coverage gap is the advisory. Only an address spelling
+                // (`0xVVVVVVVV`) has prologue bytes to guard; a symbol, `module!function` or
+                // `Interface::Method` touch is declared beside the addresses it resolves to.
                 if !signature_guard.is_empty() {
                     for t in touches {
-                        if !signature_guard.contains_key(&t.0) {
+                        if is_address_touch(&t.0) && !signature_guard.contains_key(&t.0) {
                             out.push(Diagnostic {
                                 rule: M0199_SIGNATURE_GUARD,
                                 severity: Severity::Warning,
@@ -2939,8 +2948,14 @@ fn enclosing_function_has_self(source: &str, at: usize) -> bool {
 fn scan_global_writes(source: &str) -> Vec<(usize, usize, String)> {
     let mut out = Vec::new();
     let bytes = source.as_bytes();
+    let code = lua_code_mask(source);
     let mut i = 0;
     while i < bytes.len() {
+        // Text inside a comment or a string literal is not a write.
+        if !code[i] {
+            i += 1;
+            continue;
+        }
         // Find the start of a potential match.
         let rest = &bytes[i..];
         let (kind, base_len) = if rest.starts_with(b"_G.") {
@@ -3002,6 +3017,73 @@ fn scan_global_writes(source: &str) -> Vec<(usize, usize, String)> {
     out
 }
 
+/// A Lua identifier: a letter or `_`, then letters, digits or `_`, and not a reserved word.
+fn is_lua_identifier(s: &str) -> bool {
+    const RESERVED: [&str; 21] = [
+        "and", "break", "do", "else", "elseif", "end", "false", "for", "function", "if", "in", "local", "nil", "not",
+        "or", "repeat", "return", "then", "true", "until", "while",
+    ];
+    let mut chars = s.chars();
+    chars.next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+        && !RESERVED.contains(&s)
+}
+
+/// For each byte of a Lua 5.1 source, whether it is code: `false` inside a comment (`--` to the end of
+/// the line, or a long comment `--[[ … ]]` / `--[==[ … ]==]`) or a string literal (`'…'` / `"…"` with
+/// backslash escapes, or a long string `[[ … ]]` / `[==[ … ]==]`), delimiters included.
+fn lua_code_mask(source: &str) -> Vec<bool> {
+    let b = source.as_bytes();
+    let mut code = vec![true; b.len()];
+    // `[` followed by `level` `=` signs and another `[` opens a long bracket; returns the level.
+    let long_open = |at: usize| -> Option<usize> {
+        if b.get(at) != Some(&b'[') {
+            return None;
+        }
+        let mut k = at + 1;
+        while b.get(k) == Some(&b'=') {
+            k += 1;
+        }
+        (b.get(k) == Some(&b'[')).then_some(k - at - 1)
+    };
+    // The end (exclusive) of a long bracket of `level` whose content starts at `from`.
+    let long_close = |from: usize, level: usize| -> usize {
+        let mut k = from;
+        while k < b.len() {
+            if b[k] == b']' && b[k + 1..].iter().take(level).all(|&c| c == b'=') && b.get(k + 1 + level) == Some(&b']')
+            {
+                return k + level + 2;
+            }
+            k += 1;
+        }
+        b.len()
+    };
+    let mut i = 0;
+    while i < b.len() {
+        let end = if b[i] == b'-' && b.get(i + 1) == Some(&b'-') {
+            match long_open(i + 2) {
+                Some(level) => long_close(i + 2 + level + 2, level),
+                None => b[i..].iter().position(|&c| c == b'\n').map_or(b.len(), |n| i + n),
+            }
+        } else if b[i] == b'\'' || b[i] == b'"' {
+            let quote = b[i];
+            let mut k = i + 1;
+            while k < b.len() && b[k] != quote && b[k] != b'\n' {
+                k += if b[k] == b'\\' { 2 } else { 1 };
+            }
+            (k + 1).min(b.len())
+        } else if let Some(level) = long_open(i) {
+            long_close(i + level + 2, level)
+        } else {
+            i += 1;
+            continue;
+        };
+        code[i..end].iter_mut().for_each(|c| *c = false);
+        i = end;
+    }
+    code
+}
+
 /// Read a Lua source file. On error, produces no diagnostic — [`M0110_SOURCE_MISSING`] already
 /// reports missing / unreadable sources; adding a second complaint would be noise.
 fn read_lua(root: &Path, rel: &Path) -> Option<String> {
@@ -3025,7 +3107,7 @@ fn lua_source_checks(manifest: &Manifest, root: &Path) -> Vec<Diagnostic> {
     let mut add_scripts: Vec<(usize, &str, &Path)> = Vec::new();
     for (index, c) in manifest.contributions.iter().enumerate() {
         match c {
-            Contribution::AddScript { name, source } => {
+            Contribution::AddScript { name, source, .. } => {
                 add_scripts.push((index, name.as_str(), source.as_path()));
                 if let Some(src) = read_lua(root, source) {
                     for m in scan_module_names(&src) {
@@ -3091,12 +3173,26 @@ fn lua_source_checks(manifest: &Manifest, root: &Path) -> Vec<Diagnostic> {
 
     // M0301 and M0302: scan every Lua source in the Shipment.
     for (index, c) in manifest.contributions.iter().enumerate() {
-        let (rel, kind_label): (&Path, &str) = match c {
-            Contribution::AddScript { source, .. } => (source.as_path(), "add_script"),
-            Contribution::PatchLua { append, .. } => (append.as_path(), "patch_lua"),
-            Contribution::ReplaceLua { source, .. } => (source.as_path(), "replace_lua"),
+        let (rel, kind_label, exports): (&Path, &str, &[String]) = match c {
+            Contribution::AddScript { source, exports, .. } => (source.as_path(), "add_script", exports),
+            Contribution::PatchLua { append, .. } => (append.as_path(), "patch_lua", &[]),
+            Contribution::ReplaceLua { source, .. } => (source.as_path(), "replace_lua", &[]),
             _ => continue,
         };
+        for e in exports {
+            if !is_lua_identifier(e) {
+                out.push(Diagnostic {
+                    rule: M0302_GLOBAL_SHADOWING,
+                    severity: Severity::Error,
+                    message: format!(
+                        "exports entry {e:?} is not a Lua identifier. Name the global itself (`Ess`, \
+                         `OnStateChange`), without `_G.` or a field path."
+                    ),
+                    at: Some(index),
+                    fix: None,
+                });
+            }
+        }
         let Some(src) = read_lua(root, rel) else {
             continue;
         };
@@ -3126,6 +3222,13 @@ fn lua_source_checks(manifest: &Manifest, root: &Path) -> Vec<Diagnostic> {
         }
 
         for (line, col, target) in scan_global_writes(&src) {
+            let declared = target
+                .strip_prefix("_G.")
+                .and_then(|rest| rest.split('.').next())
+                .is_some_and(|name| exports.iter().any(|e| e == name));
+            if declared {
+                continue;
+            }
             let sink = if target.starts_with("_G") {
                 "the global environment"
             } else {

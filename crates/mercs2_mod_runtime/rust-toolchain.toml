@@ -1,0 +1,4 @@
+[toolchain]
+channel = "1.94.1"
+targets = ["i686-pc-windows-gnu"]
+profile = "minimal"

@@ -1,0 +1,855 @@
+{
+  "source": {
+    "repo": "mercs2-tools-gfxforge-web",
+    "commit": "9c5c12e05f16404d391b3a788525653d29948e46",
+    "license": "MIT",
+    "author": "loganw234 (Improper Aperture)"
+  },
+  "generated_by": "scratchpad driver freeze.js (not part of the repo); node v25.9.0",
+  "suite": "interpreter",
+  "source_file": "tests/suite.interpreter.js",
+  "notes": [],
+  "cases": [
+    {
+      "line": 13,
+      "name": "interpreter: basic variable get/set and arithmetic",
+      "programs": [
+        {
+          "src": "x = 2 + 3 * 4;",
+          "gfxforge_hex": "9603000078009605000702000000960500070300000096050007040000000c471d",
+          "interpreter": {
+            "root": {
+              "x": 14
+            },
+            "trace": [
+              "▶ running top-level script",
+              "x = 14"
+            ],
+            "fscommands": [],
+            "functions": [],
+            "items_after": []
+          }
+        }
+      ]
+    },
+    {
+      "line": 19,
+      "name": "interpreter: string concatenation via +",
+      "programs": [
+        {
+          "src": "x = \"a\" + \"b\" + 1;",
+          "gfxforge_hex": "960300007800960300006100960300006200479605000701000000471d",
+          "interpreter": {
+            "root": {
+              "x": "ab1"
+            },
+            "trace": [
+              "▶ running top-level script",
+              "x = \"ab1\""
+            ],
+            "fscommands": [],
+            "functions": [],
+            "items_after": []
+          }
+        }
+      ]
+    },
+    {
+      "line": 25,
+      "name": "interpreter: comparisons and equality",
+      "programs": [
+        {
+          "src": "a = 1 < 2; b = 2 > 1; c = 3 == 3; d = 3 != 4; e = 2 <= 2; f = 2 >= 3;",
+          "gfxforge_hex": "96030000610096050007010000009605000702000000481d96030000620096050007020000009605000701000000671d96030000630096050007030000009605000703000000491d9603000064009605000703000000960500070400000049121d9603000065009605000702000000960500070200000067121d9603000066009605000702000000960500070300000048121d",
+          "interpreter": {
+            "root": {
+              "a": true,
+              "b": true,
+              "c": true,
+              "d": true,
+              "e": true,
+              "f": false
+            },
+            "trace": [
+              "▶ running top-level script",
+              "a = true",
+              "b = true",
+              "c = true",
+              "d = true",
+              "e = true",
+              "f = false"
+            ],
+            "fscommands": [],
+            "functions": [],
+            "items_after": []
+          }
+        }
+      ]
+    },
+    {
+      "line": 36,
+      "name": "interpreter: boolean and/or/not",
+      "programs": [
+        {
+          "src": "a = true && false; b = true || false; c = !false;",
+          "gfxforge_hex": "96030000610096020005014c129d020006001796020005001d96030000620096020005014c9d020006001796020005001d9603000063009602000500121d",
+          "interpreter": {
+            "root": {
+              "a": false,
+              "b": true,
+              "c": true
+            },
+            "trace": [
+              "▶ running top-level script",
+              "a = false",
+              "b = true",
+              "c = true"
+            ],
+            "fscommands": [],
+            "functions": [],
+            "items_after": []
+          }
+        }
+      ]
+    },
+    {
+      "line": 44,
+      "name": "interpreter: if/else branching picks the right side",
+      "programs": [
+        {
+          "src": "x = 10; if (x > 5) { y = \"big\"; } else { y = \"small\"; }",
+          "gfxforge_hex": "960300007800960500070a0000001d9603000078001c960500070500000067129d0200140096030000790096050000626967001d990200110096030000790096070000736d616c6c001d",
+          "interpreter": {
+            "root": {
+              "y": "big"
+            },
+            "trace": [
+              "▶ running top-level script",
+              "x = 10",
+              "y = \"big\""
+            ],
+            "fscommands": [],
+            "functions": [],
+            "items_after": []
+          }
+        },
+        {
+          "src": "x = 1; if (x > 5) { y = \"big\"; } else { y = \"small\"; }",
+          "gfxforge_hex": "96030000780096050007010000001d9603000078001c960500070500000067129d0200140096030000790096050000626967001d990200110096030000790096070000736d616c6c001d",
+          "interpreter": {
+            "root": {
+              "y": "small"
+            },
+            "trace": [
+              "▶ running top-level script",
+              "x = 1",
+              "y = \"small\""
+            ],
+            "fscommands": [],
+            "functions": [],
+            "items_after": []
+          }
+        }
+      ]
+    },
+    {
+      "line": 52,
+      "name": "interpreter: while loop accumulates correctly",
+      "programs": [
+        {
+          "src": "i = 0; total = 0; while (i < 5) { total = total + i; i = i + 1; }",
+          "gfxforge_hex": "96030000690096050007000000001d96070000746f74616c0096050007000000001d9603000069001c960500070500000048129d02003a0096070000746f74616c0096070000746f74616c001c9603000069001c471d9603000069009603000069001c9605000701000000471d990200b0ff",
+          "interpreter": {
+            "root": {
+              "total": 10,
+              "i": 5
+            },
+            "trace": [
+              "▶ running top-level script",
+              "i = 0",
+              "total = 0",
+              "total = 0",
+              "i = 1",
+              "total = 1",
+              "i = 2",
+              "total = 3",
+              "i = 3",
+              "total = 6",
+              "i = 4",
+              "total = 10",
+              "i = 5"
+            ],
+            "fscommands": [],
+            "functions": [],
+            "items_after": []
+          }
+        }
+      ]
+    },
+    {
+      "line": 59,
+      "name": "interpreter: for loop with break and continue behaves like JS would",
+      "programs": [
+        {
+          "src": "\n    total = 0;\n    for (i = 0; i < 10; i = i + 1) {\n      if (i == 3) { continue; }\n      if (i == 7) { break; }\n      total = total + i;\n    }\n  ",
+          "gfxforge_hex": "96070000746f74616c0096050007000000001d96030000690096050007000000001d9603000069001c960500070a00000048129d020070009603000069001c960500070300000049129d0200050099020039009603000069001c960500070700000049129d020005009902003a0096070000746f74616c0096070000746f74616c001c9603000069001c471d9603000069009603000069001c9605000701000000471d9902007aff",
+          "interpreter": {
+            "root": {
+              "total": 18
+            },
+            "trace": [
+              "▶ running top-level script",
+              "total = 0",
+              "i = 0",
+              "total = 0",
+              "i = 1",
+              "total = 1",
+              "i = 2",
+              "total = 3",
+              "i = 3",
+              "i = 4",
+              "total = 7",
+              "i = 5",
+              "total = 12",
+              "i = 6",
+              "total = 18",
+              "i = 7"
+            ],
+            "fscommands": [],
+            "functions": [],
+            "items_after": []
+          }
+        }
+      ]
+    },
+    {
+      "line": 73,
+      "name": "interpreter: continue in a for-loop still runs the update clause",
+      "programs": [
+        {
+          "src": "\n    count = 0;\n    for (i = 0; i < 20; i = i + 1) {\n      if (i < 15) { continue; }\n      count = count + 1;\n    }\n  ",
+          "gfxforge_hex": "96070000636f756e740096050007000000001d96030000690096050007000000001d9603000069001c960500071400000048129d020056009603000069001c960500070f00000048129d020005009902001f0096070000636f756e740096070000636f756e74001c9605000701000000471d9603000069009603000069001c9605000701000000471d99020094ff",
+          "interpreter": {
+            "root": {
+              "count": 5
+            },
+            "trace": [
+              "▶ running top-level script",
+              "count = 0",
+              "i = 0",
+              "i = 1",
+              "i = 2",
+              "i = 3",
+              "i = 4",
+              "i = 5",
+              "i = 6",
+              "i = 7",
+              "i = 8",
+              "i = 9",
+              "i = 10",
+              "i = 11",
+              "i = 12",
+              "i = 13",
+              "i = 14",
+              "i = 15",
+              "count = 1",
+              "i = 16",
+              "count = 2",
+              "i = 17",
+              "count = 3",
+              "i = 18",
+              "count = 4",
+              "i = 19",
+              "count = 5",
+              "i = 20"
+            ],
+            "fscommands": [],
+            "functions": [],
+            "items_after": []
+          }
+        }
+      ]
+    },
+    {
+      "line": 88,
+      "name": "interpreter: function definition, call with params, and return value",
+      "programs": [
+        {
+          "src": "\n    function Add(a, b) { return a + b; }\n    x = Add(3, 4);\n  ",
+          "gfxforge_hex": "9b0c004164640002006100620010009603000061001c9603000062001c473e96030000780096050007040000009605000703000000960500070200000096050000416464003d1d",
+          "interpreter": {
+            "root": {
+              "x": 7
+            },
+            "trace": [
+              "▶ running top-level script",
+              "x = 7"
+            ],
+            "fscommands": [],
+            "functions": [
+              "Add"
+            ],
+            "items_after": []
+          }
+        }
+      ]
+    },
+    {
+      "line": 97,
+      "name": "interpreter: callFunction() invokes a previously-defined function on demand",
+      "items": [
+        {
+          "kind": "text",
+          "id": "t1",
+          "x": 0,
+          "y": 0,
+          "w": 50,
+          "size": 12,
+          "text": "--",
+          "color": [
+            255,
+            255,
+            255,
+            255
+          ],
+          "varName": "hp_val"
+        }
+      ],
+      "programs": [
+        {
+          "src": "\n    function SetHealth(n) { _root.hp_val = n; }\n  ",
+          "gfxforge_hex": "9b10005365744865616c74680001006e001e00960700005f726f6f74001c9608000068705f76616c00960300006e001c4f",
+          "interpreter": {
+            "root": {},
+            "trace": [
+              "▶ running top-level script",
+              "→ call SetHealth(75)",
+              "hp_val = 75  (bound text field)"
+            ],
+            "fscommands": [],
+            "functions": [
+              "SetHealth"
+            ],
+            "items_after": [
+              {
+                "kind": "text",
+                "id": "t1",
+                "x": 0,
+                "y": 0,
+                "w": 50,
+                "size": 12,
+                "text": "--",
+                "color": [
+                  255,
+                  255,
+                  255,
+                  255
+                ],
+                "varName": "hp_val"
+              }
+            ]
+          }
+        }
+      ],
+      "calls": [
+        {
+          "fn": "SetHealth",
+          "args": [
+            75
+          ]
+        }
+      ],
+      "after_calls": {
+        "textValues": {
+          "hp_val": 75
+        }
+      }
+    },
+    {
+      "line": 110,
+      "name": "interpreter: parameters shadow same-named root/global variables",
+      "programs": [
+        {
+          "src": "\n    n = 999;\n    function F(n) { return n + 1; }\n    result = F(5);\n  ",
+          "gfxforge_hex": "960300006e0096050007e70300001d9b0800460001006e001100960300006e001c9605000701000000473e96080000726573756c7400960500070500000096050007010000009603000046003d1d",
+          "interpreter": {
+            "root": {
+              "result": 6,
+              "n": 999
+            },
+            "trace": [
+              "▶ running top-level script",
+              "n = 999",
+              "result = 6"
+            ],
+            "fscommands": [],
+            "functions": [
+              "F"
+            ],
+            "items_after": []
+          }
+        }
+      ]
+    },
+    {
+      "line": 121,
+      "name": "interpreter: nested function calls work",
+      "programs": [
+        {
+          "src": "\n    function Square(x) { return x * x; }\n    function SumOfSquares(a, b) { return Square(a) + Square(b); }\n    result = SumOfSquares(3, 4);\n  ",
+          "gfxforge_hex": "9b0d00537175617265000100780010009603000078001c9603000078001c0c3e9b150053756d4f66537175617265730002006100620038009603000061001c960500070100000096080000537175617265003d9603000062001c960500070100000096080000537175617265003d473e96080000726573756c7400960500070400000096050007030000009605000702000000960e000053756d4f6653717561726573003d1d",
+          "interpreter": {
+            "root": {
+              "result": 25
+            },
+            "trace": [
+              "▶ running top-level script",
+              "result = 25"
+            ],
+            "fscommands": [],
+            "functions": [
+              "Square",
+              "SumOfSquares"
+            ],
+            "items_after": []
+          }
+        }
+      ]
+    },
+    {
+      "line": 131,
+      "name": "interpreter: _root.member get/set on a bound text variable updates textValues",
+      "items": [
+        {
+          "kind": "text",
+          "id": "t1",
+          "x": 0,
+          "y": 0,
+          "w": 50,
+          "size": 12,
+          "text": "start",
+          "color": [
+            1,
+            1,
+            1,
+            255
+          ],
+          "varName": "hp_val"
+        }
+      ],
+      "programs": [
+        {
+          "src": "_root.hp_val = \"changed\";",
+          "gfxforge_hex": "960700005f726f6f74001c9608000068705f76616c00960900006368616e676564004f",
+          "interpreter": {
+            "root": {},
+            "trace": [
+              "▶ running top-level script",
+              "hp_val = \"changed\"  (bound text field)"
+            ],
+            "fscommands": [],
+            "functions": [],
+            "items_after": [
+              {
+                "kind": "text",
+                "id": "t1",
+                "x": 0,
+                "y": 0,
+                "w": 50,
+                "size": 12,
+                "text": "start",
+                "color": [
+                  1,
+                  1,
+                  1,
+                  255
+                ],
+                "varName": "hp_val"
+              }
+            ]
+          }
+        }
+      ],
+      "after_calls": {
+        "textValues": {
+          "hp_val": "changed"
+        }
+      }
+    },
+    {
+      "line": 143,
+      "name": "interpreter: _root.clipname._y moves the actual clip item (menu highlight pattern)",
+      "items": [
+        {
+          "kind": "clip",
+          "id": "c1",
+          "x": 20,
+          "y": 20,
+          "w": 6,
+          "h": 22,
+          "name": "sel",
+          "color": [
+            1,
+            1,
+            1,
+            255
+          ]
+        }
+      ],
+      "programs": [
+        {
+          "src": "\n    function SetSelected(i) { _root.sel._y = 20 + (i * 24); }\n  ",
+          "gfxforge_hex": "9b120053657453656c656374656400010069003500960700005f726f6f74001c9605000073656c004e960400005f790096050007140000009603000069001c96050007180000000c474f",
+          "interpreter": {
+            "root": {},
+            "trace": [
+              "▶ running top-level script",
+              "→ call SetSelected(2)",
+              "sel._y = 68"
+            ],
+            "fscommands": [],
+            "functions": [
+              "SetSelected"
+            ],
+            "items_after": [
+              {
+                "kind": "clip",
+                "id": "c1",
+                "x": 20,
+                "y": 20,
+                "w": 6,
+                "h": 22,
+                "name": "sel",
+                "color": [
+                  1,
+                  1,
+                  1,
+                  255
+                ]
+              }
+            ]
+          }
+        }
+      ],
+      "calls": [
+        {
+          "fn": "SetSelected",
+          "args": [
+            2
+          ]
+        }
+      ],
+      "after_calls": {
+        "items": [
+          {
+            "kind": "clip",
+            "id": "c1",
+            "x": 20,
+            "y": 68,
+            "w": 6,
+            "h": 22,
+            "name": "sel",
+            "color": [
+              1,
+              1,
+              1,
+              255
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "line": 155,
+      "name": "interpreter: clip _xscale/_alpha/_visible/_rotation all settable via ClipProxy",
+      "items": [
+        {
+          "kind": "clip",
+          "id": "c1",
+          "x": 0,
+          "y": 0,
+          "w": 10,
+          "h": 10,
+          "name": "bar",
+          "color": [
+            1,
+            1,
+            1,
+            255
+          ]
+        }
+      ],
+      "programs": [
+        {
+          "src": "\n    _root.bar._xscale = 50;\n    _root.bar._alpha = 30;\n    _root.bar._visible = false;\n    _root.bar._rotation = 45;\n  ",
+          "gfxforge_hex": "960700005f726f6f74001c96050000626172004e960900005f787363616c650096050007320000004f960700005f726f6f74001c96050000626172004e960800005f616c70686100960500071e0000004f960700005f726f6f74001c96050000626172004e960a00005f76697369626c650096020005004f960700005f726f6f74001c96050000626172004e960b00005f726f746174696f6e00960500072d0000004f",
+          "interpreter": {
+            "root": {},
+            "trace": [
+              "▶ running top-level script",
+              "bar._xscale = 50",
+              "bar._alpha = 30",
+              "bar._visible = false",
+              "bar._rotation = 45"
+            ],
+            "fscommands": [],
+            "functions": [],
+            "items_after": [
+              {
+                "kind": "clip",
+                "id": "c1",
+                "x": 0,
+                "y": 0,
+                "w": 10,
+                "h": 10,
+                "name": "bar",
+                "color": [
+                  1,
+                  1,
+                  1,
+                  255
+                ],
+                "_xscale": 50,
+                "_alpha": 30,
+                "_visible": false,
+                "_rotation": 45
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "line": 172,
+      "name": "interpreter: fscommand fires onFsCommand with the right command and value",
+      "programs": [
+        {
+          "src": "fscommand(\"menuClick\", 2);",
+          "gfxforge_hex": "961500004653436f6d6d616e643a6d656e75436c69636b0096050007020000009a010000",
+          "interpreter": {
+            "root": {},
+            "trace": [
+              "▶ running top-level script"
+            ],
+            "fscommands": [
+              [
+                "menuClick",
+                2
+              ]
+            ],
+            "functions": [],
+            "items_after": []
+          }
+        }
+      ]
+    },
+    {
+      "line": 181,
+      "name": "interpreter: fscommand with no second argument sends an empty string, matching the compiler",
+      "programs": [
+        {
+          "src": "fscommand(\"ping\");",
+          "gfxforge_hex": "961000004653436f6d6d616e643a70696e670096020000009a010000",
+          "interpreter": {
+            "root": {},
+            "trace": [
+              "▶ running top-level script"
+            ],
+            "fscommands": [
+              [
+                "ping",
+                ""
+              ]
+            ],
+            "functions": [],
+            "items_after": []
+          }
+        }
+      ]
+    },
+    {
+      "line": 190,
+      "name": "interpreter: array literal, indexing, length, and push()/pop() all work",
+      "programs": [
+        {
+          "src": "\n    arr = [10, 20, 30];\n    first = arr[0];\n    len1 = arr.length;\n    arr.push(40);\n    len2 = arr.length;\n    last = arr.pop();\n  ",
+          "gfxforge_hex": "9605000061727200960500070a0000009605000714000000960500071e0000009605000703000000421d9607000066697273740096050000617272001c96050007000000004e1d960600006c656e310096050000617272001c960800006c656e677468004e1d9605000728000000960500070100000096050000617272001c9606000070757368005217960600006c656e320096050000617272001c960800006c656e677468004e1d960600006c61737400960500070000000096050000617272001c96050000706f7000521d",
+          "interpreter": {
+            "root": {
+              "first": 10,
+              "len1": 3,
+              "len2": 4,
+              "last": 40,
+              "arr": [
+                10,
+                20,
+                30
+              ]
+            },
+            "trace": [
+              "▶ running top-level script",
+              "arr = [10, 20, 30]",
+              "first = 10",
+              "len1 = 3",
+              "len2 = 4",
+              "last = 40"
+            ],
+            "fscommands": [],
+            "functions": [],
+            "items_after": []
+          }
+        }
+      ]
+    },
+    {
+      "line": 207,
+      "name": "interpreter: array element assignment via index works",
+      "programs": [
+        {
+          "src": "arr = [1, 2, 3]; arr[1] = 99;",
+          "gfxforge_hex": "96050000617272009605000701000000960500070200000096050007030000009605000703000000421d96050000617272001c960500070100000096050007630000004f",
+          "interpreter": {
+            "root": {
+              "arr": [
+                1,
+                99,
+                3
+              ]
+            },
+            "trace": [
+              "▶ running top-level script",
+              "arr = [1, 2, 3]"
+            ],
+            "fscommands": [],
+            "functions": [],
+            "items_after": []
+          }
+        }
+      ]
+    },
+    {
+      "line": 213,
+      "name": "interpreter: compound assignment (+=, -=, etc.) actually mutates",
+      "programs": [
+        {
+          "src": "x = 10; x += 5; x -= 2; x *= 3; x /= 2; x %= 4;",
+          "gfxforge_hex": "960300007800960500070a0000001d9603000078009603000078001c9605000705000000471d9603000078009603000078001c96050007020000000b1d9603000078009603000078001c96050007030000000c1d9603000078009603000078001c96050007020000000d1d9603000078009603000078001c96050007040000003f1d",
+          "interpreter": {
+            "root": {
+              "x": 3.5
+            },
+            "trace": [
+              "▶ running top-level script",
+              "x = 10",
+              "x = 15",
+              "x = 13",
+              "x = 39",
+              "x = 19.5",
+              "x = 3.5"
+            ],
+            "fscommands": [],
+            "functions": [],
+            "items_after": []
+          }
+        }
+      ]
+    },
+    {
+      "line": 220,
+      "name": "interpreter: infinite while loop is caught by the instruction budget, not a browser hang",
+      "programs": [
+        {
+          "src": "x = 0; while (true) { x = x + 1; }",
+          "gfxforge_hex": "96030000780096050007000000001d9602000501129d02001c009603000078009603000078001c9605000701000000471d990200d9ff",
+          "interpreter": {
+            "root": {
+              "x": 24999
+            },
+            "trace": {
+              "summarized": true,
+              "reason": "gfxforge traces every SetVariable (25k lines); stored as count + head/tail + the cap message lines",
+              "count": 25002,
+              "head": [
+                "▶ running top-level script",
+                "x = 0",
+                "x = 1",
+                "x = 2",
+                "x = 3"
+              ],
+              "tail": [
+                "x = 24996",
+                "x = 24997",
+                "x = 24998",
+                "x = 24999",
+                "⚠ execution stopped — exceeded 250000 instructions (possible infinite loop)"
+              ],
+              "cap_lines": [
+                "⚠ execution stopped — exceeded 250000 instructions (possible infinite loop)"
+              ]
+            },
+            "fscommands": [],
+            "functions": [],
+            "items_after": []
+          }
+        }
+      ],
+      "note": "interpreter.root.x is the count reached at gfxforge's instruction budget; the asserted behaviour is the \"possible infinite loop\" trace (suite.interpreter.js:228) and timely abort, not the exact x."
+    },
+    {
+      "line": 232,
+      "name": "interpreter: unbounded recursion is caught gracefully (no crash, no hang)",
+      "programs": [
+        {
+          "src": "\n    function Recurse(n) { return Recurse(n + 1); }\n  ",
+          "gfxforge_hex": "9b0e00526563757273650001006e002600960300006e001c96050007010000004796050007010000009609000052656375727365003d3e",
+          "interpreter": {
+            "root": {},
+            "trace": [
+              "▶ running top-level script",
+              "→ call Recurse(0)",
+              "⚠ error in Recurse(): Maximum call stack size exceeded"
+            ],
+            "fscommands": [],
+            "functions": [
+              "Recurse"
+            ],
+            "items_after": []
+          }
+        }
+      ],
+      "calls": [
+        {
+          "fn": "Recurse",
+          "args": [
+            0
+          ]
+        }
+      ],
+      "after_calls": {
+        "threw": false
+      }
+    },
+    {
+      "line": 246,
+      "name": "interpreter: calling an undefined function traces a warning instead of crashing",
+      "programs": [],
+      "calls": [
+        {
+          "fn": "NoSuchFunction",
+          "args": [
+            1,
+            2
+          ]
+        }
+      ],
+      "after_calls": {
+        "result": {
+          "undefined": true
+        },
+        "trace": [
+          "⚠ \"NoSuchFunction\" is not a defined function"
+        ]
+      }
+    }
+  ]
+}

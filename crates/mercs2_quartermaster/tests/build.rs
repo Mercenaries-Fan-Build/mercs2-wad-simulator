@@ -22,6 +22,35 @@ use std::path::Path;
 // The gate
 // ---------------------------------------------------------------------------
 
+/// A blocked build's message counts the findings at error or above, and lists every finding,
+/// highest severity first.
+#[test]
+fn a_blocked_build_lists_every_finding_and_counts_the_blocking_ones() {
+    use mercs2_quartermaster::lint::{self, Diagnostic, Severity};
+    let at = |rule, severity, message: &str| Diagnostic {
+        rule,
+        severity,
+        message: message.into(),
+        at: None,
+        fix: None,
+    };
+    let e = BuildError::Blocked(vec![
+        at(lint::M0130_BARE_HASH, Severity::Info, "an info finding"),
+        at(lint::M0110_SOURCE_MISSING, Severity::Error, "an error finding"),
+        at(lint::M0130_BARE_HASH, Severity::Warning, "a warning finding"),
+    ]);
+    let text = e.to_string();
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(
+        lines[0],
+        "build blocked by 1 finding(s) at error or above (3 finding(s) in all):"
+    );
+    assert_eq!(lines.len(), 4, "{text}");
+    assert!(lines[1].contains("an error finding"), "{text}");
+    assert!(lines[2].contains("a warning finding"), "{text}");
+    assert!(lines[3].contains("an info finding"), "{text}");
+}
+
 /// The gate is the RETURN TYPE, not a field a caller might forget to read.
 #[test]
 fn a_blocking_diagnostic_fails_the_build() {

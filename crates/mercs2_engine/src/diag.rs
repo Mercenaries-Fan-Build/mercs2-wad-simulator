@@ -3059,31 +3059,43 @@ struct FoundEntity {
     container: Option<(usize, usize, [f32; 3], [f32; 3])>,
 }
 
-/// Extract every `scaleformgfx` (0xFE0E8320) chunk in the WAD as a standalone Scaleform movie
-/// file. The chunk body is an optional engine prefix followed by a VERBATIM little-endian
-/// Scaleform file (CFX/CWS/GFX/FWS magic) — platform-independent, never byte-swapped (see the
-/// scaleformgfx converter oracle). Files land in `<outdir>/<AssetName|0xHASH>[_b<block>].gfx`;
-/// identical duplicate bodies for the same asset hash are skipped.
+/// Extract every `cfx_pack` (0xFE0E8320) asset in the WAD as a standalone Scaleform movie file.
+/// The movie is the body of the container's `data` descriptor
+/// ([`mercs2_formats::gfx::cfx_pack_movie`]) — a VERBATIM little-endian Scaleform file
+/// (CFX/GFX), platform-independent, never byte-swapped. The container's `CSUM` trailer is not part
+/// of it. Files land in `<outdir>/<AssetName|0xHASH>[_b<block>].gfx`; identical duplicate bodies
+/// for the same asset hash are written once.
+///
+/// Every failure is an error naming the block: a block that does not decompress, an entry table
+/// that overruns its block, a container that does not verify, or a `data` body that is not a movie.
 pub fn gfx_extract(wadpath: &str, outdir: &str) -> Result<(), String> {
-    const TYPE_HASH_CFX_PACK: u32 = 0xFE0E8320;
-    const MAGICS: [&[u8; 3]; 4] = [b"CFX", b"CWS", b"GFX", b"FWS"];
+    use mercs2_formats::types::TYPE_HASH_CFX_PACK;
     let mut w = wad::open(wadpath)?;
-    std::fs::create_dir_all(outdir).map_err(|e| e.to_string())?;
+    std::fs::create_dir_all(outdir).map_err(|e| format!("create {outdir}: {e}"))?;
     let nblocks = wad::block_paths(&w).len() as u16;
     let mut hashes = std::collections::BTreeSet::new();
     let mut found: Vec<(u16, u32, Vec<u8>)> = Vec::new();
     for bi in 0..nblocks {
-        let Ok(dec) = wad::decompress_block_index(&mut w, bi) else { continue };
+        let dec = wad::decompress_block_index(&mut w, bi)
+            .map_err(|e| format!("block {bi} of {wadpath}: {e}"))?;
         let (count, entries) = mercs2_formats::ucfx::parse_block_entry_table(&dec);
         let mut pos = 4usize + count as usize * 16;
         for e in &entries {
             let end = pos + e.chunk_size as usize;
             if end > dec.len() {
-                break;
+                return Err(format!(
+                    "block {bi}: entry 0x{:08X} (type 0x{:08X}) runs to {end}, past the {}-byte block",
+                    e.name_hash,
+                    e.type_hash,
+                    dec.len()
+                ));
             }
             if e.type_hash == TYPE_HASH_CFX_PACK {
+                let label = format!("block {bi} cfx_pack 0x{:08X}", e.name_hash);
+                let movie = mercs2_formats::gfx::cfx_pack_movie(&dec[pos..end], &label)?;
+                mercs2_formats::gfx::GfxMovie::parse(&movie).map_err(|m| format!("{label}: {m}"))?;
                 hashes.insert(e.name_hash);
-                found.push((bi, e.name_hash, dec[pos..end].to_vec()));
+                found.push((bi, e.name_hash, movie));
             }
             pos = end;
         }
@@ -3092,18 +3104,9 @@ pub fn gfx_extract(wadpath: &str, outdir: &str) -> Result<(), String> {
     let names = rainbow_names(&table, &hashes)?;
     let mut written = 0usize;
     let mut skipped_dup = 0usize;
-    let mut no_magic = 0usize;
     let mut seen: std::collections::HashMap<u32, Vec<Vec<u8>>> = std::collections::HashMap::new();
-    for (bi, hash, body) in &found {
-        let magic_off = (0..body.len().saturating_sub(3)).find(|&i| {
-            MAGICS.iter().any(|m| &body[i..i + 3] == &m[..]) && (5..=10).contains(&body[i + 3])
-        });
-        let Some(off) = magic_off else {
-            eprintln!("[gfx-extract] block={bi} 0x{hash:08X}: no Scaleform magic in {} B chunk", body.len());
-            no_magic += 1;
-            continue;
-        };
-        let movie = &body[off..];
+    for (bi, hash, movie) in &found {
+        let movie = movie.as_slice();
         let dups = seen.entry(*hash).or_default();
         if dups.iter().any(|d| d == movie) {
             skipped_dup += 1;
@@ -3120,9 +3123,9 @@ pub fn gfx_extract(wadpath: &str, outdir: &str) -> Result<(), String> {
         };
         dups.push(movie.to_vec());
         let path = std::path::Path::new(outdir).join(&fname);
-        std::fs::write(&path, movie).map_err(|e| e.to_string())?;
+        std::fs::write(&path, movie).map_err(|e| format!("write {}: {e}", path.display()))?;
         println!(
-            "[gfx-extract] block={bi:<5} 0x{hash:08X} {} magic={} prefix={off}B {} B -> {}",
+            "[gfx-extract] block={bi:<5} 0x{hash:08X} {} magic={} {} B -> {}",
             base,
             String::from_utf8_lossy(&movie[..3]),
             movie.len(),
@@ -3131,7 +3134,7 @@ pub fn gfx_extract(wadpath: &str, outdir: &str) -> Result<(), String> {
         written += 1;
     }
     println!(
-        "[gfx-extract] {} chunks found, {written} written, {skipped_dup} identical dups skipped, {no_magic} without magic",
+        "[gfx-extract] {} cfx_pack assets, {written} written, {skipped_dup} identical duplicates written once",
         found.len()
     );
     Ok(())

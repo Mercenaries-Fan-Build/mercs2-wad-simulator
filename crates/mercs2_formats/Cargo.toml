@@ -29,17 +29,21 @@ cmac = "0.7"
 # `extras` parses the underscore-prefixed custom vertex attributes (`mesh_import` reads
 # `_SWAY_WEIGHT`); without it the validator rejects any file that carries one.
 gltf ={ version = "1", default-features = false, features = ["utils", "names", "extras"] }
+# `load_ladder`: m2-sdk.dll's load triggers match the game log against loadprobe's own phase ladder.
+loadprobe = { workspace = true }
 
 [dev-dependencies]
 serde_json = "1"
-mercs2_audio = { path = "../mercs2_audio" }
-# The game-gated dlc_stfs test checks the recovered DOH against its catalogued sha256.
 sha2 = "0.10"
 
 [features]
 # Builds the game-gated tests, which read the retail vz.wad named by the repo-root .mercs2-local.toml;
 # run them with `cargo xtask retail-test`.
 retail = []
+
+[[test]]
+name = "lua_sites_exes"
+required-features = ["retail"]
 
 [[test]]
 name = "anim_container_roundtrip"
