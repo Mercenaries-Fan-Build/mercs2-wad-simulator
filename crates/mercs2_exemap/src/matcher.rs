@@ -975,7 +975,7 @@ mod tests {
     }
 
     #[test]
-    fn an_uncorroborated_string_candidate_still_conflicts() {
+    fn an_uncorroborated_string_candidate_conflicts_with_a_lua_candidate() {
         let bind = |n: &str, f: u32| Binding { namespace: String::new(), name: n.into(), function: f };
         let a = Exports { bindings: vec![bind("F", 1)], signatures: Some([(1, strs_sig(&["aa"]))].into()), ..Default::default() };
         let b = Exports {
