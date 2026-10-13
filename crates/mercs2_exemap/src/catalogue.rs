@@ -23,8 +23,8 @@ const OVERLAYS_HEADER: &str =
 const ALIASES_HEADER: &str = "alias\tbuild_id\treason";
 
 /// The game code a build runs. Every build of a layout runs the same code version: `U` is 1.0 and
-/// `E` is 1.1 (the official v1.1 patcher turns `v10-unsigned` (U) into `v11-official-securom`
-/// (E)); `D` is the PC demo.
+/// `E` is 1.1 (the official v1.1 patcher turns `v11-official-securom` into
+/// `v11-official-unwrapped`, both E); `D` is the PC demo.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum CodeVersion {
     /// The game as released, version 1.0.
