@@ -6,12 +6,12 @@
 //! Each layout is one code version of the game, recorded per build in the `code_version` column:
 //!
 //! * `U` — timestamp `0x48a370c7`, reference `v10-cracked-pmcbb`, code version 1.0;
-//! * `E` — timestamp `0x48cae190`, reference `v11-official-unwrapped`, code version 1.1;
+//! * `E` — timestamp `0x48cae190`, reference `v11-patched-securom`, code version 1.1;
 //! * `D` — timestamp `0x48cb59e8`, reference `demo-official-securom` (the PC demo's
 //!   `Merc2-Demo.exe` as its installer ships it), code version `demo`.
 //!
 //! The official v1.1 patcher (sha256 `b27fedc2…`, the same file in all four regions) turns
-//! `v11-official-securom` (E) into `v11-official-unwrapped` (E). Every
+//! `v10-ea-signed` (E) into `v11-patched-securom` (E). Every
 //! cracked, DRM-free and SecuROM-unwrapped build in the U layout runs v1.0 code.
 //!
 //! A build belongs to its layout when every byte that differs from the reference is accounted for by
@@ -40,9 +40,12 @@
 //! [`matcher`] pairs the functions of two images from those exports.
 //!
 //! `data/corpora.tsv` and `data/wads.tsv` catalogue the Lua corpus by product, platform and build,
-//! each WAD with the chain that rebuilds it from its original file ([`corpus`]); PS3 disc images are
-//! read through [`iso9660`].
+//! each WAD with the chain that rebuilds it from its original file or the install it is found in
+//! ([`corpus`]); PS3 disc images are read through [`iso9660`].
+//!
+//! [`canonical`] finds every catalogued PC build by sha256 in the canonical tree of PC builds.
 
+pub mod canonical;
 pub mod catalogue;
 pub mod corpus;
 mod dtor;
