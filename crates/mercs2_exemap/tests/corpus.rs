@@ -152,7 +152,7 @@ fn every_build_membership_equals_its_overlay_rows() {
 fn the_same_lineage_pairs_are_identity_outside_the_documented_overlays() {
     let c = catalogue();
     let files = by_sha();
-    for id in ["v10-unsigned", "v11-official-securom"] {
+    for id in ["archived-2-disk-dump", "v11-official-securom"] {
         let b = c.build(id).unwrap_or_else(|| panic!("{id} is not catalogued"));
         let layout = c.layout(&b.layout).expect("cross-checked at load");
         let bytes = bytes_of(&files, &b.sha256, id);
