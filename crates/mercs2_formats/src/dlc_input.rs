@@ -235,80 +235,57 @@ mod tests {
         assert_eq!(decompress_be_sges(&d, 0, d.len()).unwrap(), body);
     }
 
-    /// The retail Blow It Up Again Pack's `DLC01.doh`, read out of the STFS package named by the
-    /// `x360_dlc_biua_stfs` key of `.mercs2-local.toml`, against values captured from
-    /// `tools/x360_dlc_io.py` on the same file. A missing key or file fails the test naming it.
     #[cfg(feature = "retail")]
-    #[test]
-    fn real_doh_matches_python_golden() {
-        let path = crate::game_paths::local_config_x360_dlc_biua_stfs(std::path::Path::new(env!("CARGO_MANIFEST_DIR")))
-            .unwrap_or_else(|e| panic!("{e}"));
-        let stfs = std::fs::read(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
-        let doh = crate::dlc_stfs::StfsReader::new(stfs).read_doh().expect("read_doh");
+    mod retail {
+        use super::*;
 
-        let (ver, rows) = parse_be_ffcs(&doh).unwrap();
-        assert_eq!(ver, 2);
-        let chunk = |t: &str| rows.iter().find(|r| r.tag == t).unwrap();
-        assert_eq!((chunk("INDX").offset, chunk("INDX").meta), (32768, 2196));
-        assert_eq!((chunk("DATA").offset, chunk("DATA").meta), (294912, 36));
-        assert_eq!(
-            (chunk("CSUM").offset, chunk("CSUM").meta),
-            (3130166264, 933)
-        );
-        assert_eq!((chunk("ASET").offset, chunk("ASET").meta), (59120, 5341));
-        assert_eq!((chunk("PTHS").offset, chunk("PTHS").meta), (144576, 2196));
+        /// The retail Blow It Up Again Pack's `DLC01.doh`, read out of the STFS package named by the
+        /// `x360_dlc_biua_stfs` key of `.mercs2-local.toml`, against values captured from
+        /// `tools/x360_dlc_io.py` on the same file. A missing key or file fails the test naming it.
+        #[test]
+        fn real_doh_matches_python_golden() {
+            let path =
+                crate::game_paths::local_config_x360_dlc_biua_stfs(std::path::Path::new(env!("CARGO_MANIFEST_DIR")))
+                    .unwrap_or_else(|e| panic!("{e}"));
+            let stfs = std::fs::read(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+            let doh = crate::dlc_stfs::StfsReader::new(stfs).read_doh().expect("read_doh");
 
-        let indx = parse_be_indx(
-            &doh,
-            chunk("INDX").offset as usize,
-            chunk("INDX").meta as usize,
-        );
-        assert_eq!(indx.len(), 2196);
-        assert_eq!(
-            (
-                indx[0].page_index,
-                indx[0].packed_field,
-                indx[0].flags,
-                indx[0].page_count
-            ),
-            (9, 1, 32768, 1)
-        );
-        assert_eq!(
-            (
-                indx[2].page_index,
-                indx[2].packed_field,
-                indx[2].flags,
-                indx[2].page_count
-            ),
-            (11, 5, 32768, 2)
-        );
+            let (ver, rows) = parse_be_ffcs(&doh).unwrap();
+            assert_eq!(ver, 2);
+            let chunk = |t: &str| rows.iter().find(|r| r.tag == t).unwrap();
+            assert_eq!((chunk("INDX").offset, chunk("INDX").meta), (32768, 2196));
+            assert_eq!((chunk("DATA").offset, chunk("DATA").meta), (294912, 36));
+            assert_eq!((chunk("CSUM").offset, chunk("CSUM").meta), (3130166264, 933));
+            assert_eq!((chunk("ASET").offset, chunk("ASET").meta), (59120, 5341));
+            assert_eq!((chunk("PTHS").offset, chunk("PTHS").meta), (144576, 2196));
 
-        let aset = parse_be_aset(
-            &doh,
-            chunk("ASET").offset as usize,
-            chunk("ASET").meta as usize,
-        );
-        assert_eq!(aset.len(), 5341);
-        assert_eq!(
-            (aset[0].asset_hash, aset[0].u1, aset[0].u2, aset[0].u3),
-            (1433122535, 126289364, 68616220, 27)
-        );
-        assert_eq!(
-            (aset[1].asset_hash, aset[1].u1, aset[1].u2, aset[1].u3),
-            (1843225593, 4294967295, 4294902224, 28)
-        );
+            let indx = parse_be_indx(&doh, chunk("INDX").offset as usize, chunk("INDX").meta as usize);
+            assert_eq!(indx.len(), 2196);
+            assert_eq!(
+                (indx[0].page_index, indx[0].packed_field, indx[0].flags, indx[0].page_count),
+                (9, 1, 32768, 1)
+            );
+            assert_eq!(
+                (indx[2].page_index, indx[2].packed_field, indx[2].flags, indx[2].page_count),
+                (11, 5, 32768, 2)
+            );
 
-        let pths = parse_be_pths(
-            &doh,
-            chunk("PTHS").offset as usize,
-            chunk("PTHS").meta as usize,
-        );
-        assert_eq!(pths[0], "blocks\\dlc01\\dlc01_terrain_P000_Q3.block");
-        assert_eq!(
-            pths[1],
-            "blocks\\dlc01\\dlc01_caicara_foliage_P000_Q3.block"
-        );
-        assert_eq!(pths[2], "blocks\\dlc01\\dlc01_dlccon004_P000_Q3.block");
+            let aset = parse_be_aset(&doh, chunk("ASET").offset as usize, chunk("ASET").meta as usize);
+            assert_eq!(aset.len(), 5341);
+            assert_eq!(
+                (aset[0].asset_hash, aset[0].u1, aset[0].u2, aset[0].u3),
+                (1433122535, 126289364, 68616220, 27)
+            );
+            assert_eq!(
+                (aset[1].asset_hash, aset[1].u1, aset[1].u2, aset[1].u3),
+                (1843225593, 4294967295, 4294902224, 28)
+            );
+
+            let pths = parse_be_pths(&doh, chunk("PTHS").offset as usize, chunk("PTHS").meta as usize);
+            assert_eq!(pths[0], "blocks\\dlc01\\dlc01_terrain_P000_Q3.block");
+            assert_eq!(pths[1], "blocks\\dlc01\\dlc01_caicara_foliage_P000_Q3.block");
+            assert_eq!(pths[2], "blocks\\dlc01\\dlc01_dlccon004_P000_Q3.block");
+        }
     }
 
     #[test]
