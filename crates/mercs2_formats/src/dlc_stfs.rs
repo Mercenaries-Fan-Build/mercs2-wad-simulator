@@ -580,23 +580,27 @@ mod tests {
         assert!(err.contains("locked"), "{err}");
     }
 
-    /// The retail Xbox LIVE Blow It Up Again Pack, named by the `x360_dlc_biua_stfs` key of
-    /// `.mercs2-local.toml`, yields the `DLC01.doh` the exe-map Lua corpus catalogues
-    /// (`crates/mercs2_exemap/data/wads.tsv`, corpus `dlc-biua-x360-retail`): 251,953,152 bytes,
-    /// sha256 `5b0c222d…`. A missing key or file fails the test naming it.
     #[cfg(feature = "retail")]
-    #[test]
-    fn retail_biua_package_yields_the_catalogued_doh() {
-        use sha2::{Digest, Sha256};
-        let path = crate::game_paths::local_config_x360_dlc_biua_stfs(Path::new(env!("CARGO_MANIFEST_DIR")))
-            .unwrap_or_else(|e| panic!("{e}"));
-        let stfs = std::fs::read(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
-        let doh = StfsReader::new(stfs).read_doh().expect("read_doh");
-        assert_eq!(doh.len(), 251_953_152, "DOH length");
-        assert_eq!(
-            format!("{:x}", Sha256::digest(&doh)),
-            "5b0c222d925e8c85000a925262e2b789fbf8c3e476d3d89e5935c7c018deb3ae",
-            "DOH sha256"
-        );
+    mod retail {
+        use super::*;
+
+        /// The retail Xbox LIVE Blow It Up Again Pack, named by the `x360_dlc_biua_stfs` key of
+        /// `.mercs2-local.toml`, yields the `DLC01.doh` the exe-map Lua corpus catalogues
+        /// (`crates/mercs2_exemap/data/wads.tsv`, corpus `dlc-biua-x360-retail`): 251,953,152 bytes,
+        /// sha256 `5b0c222d…`. A missing key or file fails the test naming it.
+        #[test]
+        fn retail_biua_package_yields_the_catalogued_doh() {
+            use sha2::{Digest, Sha256};
+            let path = crate::game_paths::local_config_x360_dlc_biua_stfs(Path::new(env!("CARGO_MANIFEST_DIR")))
+                .unwrap_or_else(|e| panic!("{e}"));
+            let stfs = std::fs::read(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+            let doh = StfsReader::new(stfs).read_doh().expect("read_doh");
+            assert_eq!(doh.len(), 251_953_152, "DOH length");
+            assert_eq!(
+                format!("{:x}", Sha256::digest(&doh)),
+                "5b0c222d925e8c85000a925262e2b789fbf8c3e476d3d89e5935c7c018deb3ae",
+                "DOH sha256"
+            );
+        }
     }
 }
