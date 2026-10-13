@@ -42,10 +42,6 @@ sha2 = "0.10"
 retail = []
 
 [[test]]
-name = "lua_sites_exes"
-required-features = ["retail"]
-
-[[test]]
 name = "anim_container_roundtrip"
 required-features = ["retail"]
 
