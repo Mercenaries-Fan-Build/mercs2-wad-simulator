@@ -1,24 +1,24 @@
 corpus_id	wad	sha256	size	from_sha256	step	install
-base-pc-demo	data/English.wad	ed60a320e042905692b9084cf0efe04fe85115209721c209d11fb13d11b4d9ad	2818048	9d32195deeab46b7606717c71f6a9aea47fcf474ce39e22e3f98106ef09187a6;2318115e2f1c08490e61de9861b788e82730cbf7a3975eac21b796be11f44c4a;0eaf5f4ac1bdee640276544228bcdc153bc293e343a3afb70375f6219fbcd096	zip:Mercs2_Demo_Setup.exe;wine-sfx:English1.cab;wine-extrac32:file_DataEnglish_wad	-
-base-pc-demo	data/Loading.wad	83bf45baa3ac153338eb4d52146fbd94aea0914a9cc050780ee57aee79606293	2490368	9d32195deeab46b7606717c71f6a9aea47fcf474ce39e22e3f98106ef09187a6;2318115e2f1c08490e61de9861b788e82730cbf7a3975eac21b796be11f44c4a	zip:Mercs2_Demo_Setup.exe;wine-sfx:data/Loading.wad	-
-base-pc-demo	data/shell.wad	40297a51742c28b62c3b0f0ac9e6542fa6d3b05b23ef2b1f1bf5dc51687dd9f5	24608768	9d32195deeab46b7606717c71f6a9aea47fcf474ce39e22e3f98106ef09187a6;2318115e2f1c08490e61de9861b788e82730cbf7a3975eac21b796be11f44c4a	zip:Mercs2_Demo_Setup.exe;wine-sfx:data/shell.wad	-
-base-pc-demo	data/vz.wad	82ad1bedb04e5edea2c6189d4374986a771575d46f85391701bc36a0375c29e4	1015414784	9d32195deeab46b7606717c71f6a9aea47fcf474ce39e22e3f98106ef09187a6;2318115e2f1c08490e61de9861b788e82730cbf7a3975eac21b796be11f44c4a	zip:Mercs2_Demo_Setup.exe;wine-sfx:data/vz.wad	-
-base-pc-elamigos	data/English.wad	298bb943cea0416d697b1f47421f27afcdcf40b2d4a8dc1991036b81469d480e	483426304	-	-	pc_repack_install_dir
-base-pc-elamigos	data/French.wad	599ea0003a26aaaf43ad8b8b739ad5a0846f790a429a56544663ebcbb5872417	413990912	-	-	pc_repack_install_dir
-base-pc-elamigos	data/German.wad	b77843bc36c8014139845a80833dc63db75e98c9d37857a7c1853754dcf464e8	503775232	-	-	pc_repack_install_dir
-base-pc-elamigos	data/Italian.wad	c41f220141658b35df10a84d9e24afc804538ac21246f63d192dea657efdb0a1	474972160	-	-	pc_repack_install_dir
-base-pc-elamigos	data/Loading.wad	f58131ebaa011f8b445371220a95bb6c5ed9c7619294a2f2311131e4d3473100	2490368	-	-	pc_repack_install_dir
-base-pc-elamigos	data/Spanish.wad	bea858770d879b081ac7177ca94005d2f49f1519fb4ec1f4bead67710df637eb	476807168	-	-	pc_repack_install_dir
-base-pc-elamigos	data/shell.wad	7b01ff39900c6d9430f97f2037cb814f77331fa23ab5838be32e9b04abad766f	29622272	-	-	pc_repack_install_dir
-base-pc-elamigos	data/vz.wad	a67ada8bb1ef4255d3067475d6bc579cc1421fab262e9383a9eed74c8c59c011	2565537792	-	-	pc_repack_install_dir
-base-pc-retail	data/English.wad	298bb943cea0416d697b1f47421f27afcdcf40b2d4a8dc1991036b81469d480e	483426304	-	-	pc_official_install_dir
-base-pc-retail	data/French.wad	599ea0003a26aaaf43ad8b8b739ad5a0846f790a429a56544663ebcbb5872417	413990912	-	-	pc_repack_install_dir
-base-pc-retail	data/German.wad	b77843bc36c8014139845a80833dc63db75e98c9d37857a7c1853754dcf464e8	503775232	-	-	pc_repack_install_dir
-base-pc-retail	data/Italian.wad	c41f220141658b35df10a84d9e24afc804538ac21246f63d192dea657efdb0a1	474972160	-	-	pc_repack_install_dir
-base-pc-retail	data/Loading.wad	cd6a734fff58c3bef8022b664cb5fa6f1aacea01e9f3157c64afcb64fd6c635e	2490368	-	-	pc_official_install_dir
-base-pc-retail	data/Spanish.wad	bea858770d879b081ac7177ca94005d2f49f1519fb4ec1f4bead67710df637eb	476807168	-	-	pc_repack_install_dir
-base-pc-retail	data/shell.wad	7b01ff39900c6d9430f97f2037cb814f77331fa23ab5838be32e9b04abad766f	29622272	-	-	pc_official_install_dir
-base-pc-retail	data/vz.wad	a67ada8bb1ef4255d3067475d6bc579cc1421fab262e9383a9eed74c8c59c011	2565537792	-	-	pc_official_install_dir
+base-pc-demo	data/English.wad	ed60a320e042905692b9084cf0efe04fe85115209721c209d11fb13d11b4d9ad	2818048	-	-	canonical:demo
+base-pc-demo	data/Loading.wad	83bf45baa3ac153338eb4d52146fbd94aea0914a9cc050780ee57aee79606293	2490368	-	-	canonical:demo
+base-pc-demo	data/shell.wad	40297a51742c28b62c3b0f0ac9e6542fa6d3b05b23ef2b1f1bf5dc51687dd9f5	24608768	-	-	canonical:demo
+base-pc-demo	data/vz.wad	82ad1bedb04e5edea2c6189d4374986a771575d46f85391701bc36a0375c29e4	1015414784	-	-	canonical:demo
+base-pc-elamigos	data/English.wad	298bb943cea0416d697b1f47421f27afcdcf40b2d4a8dc1991036b81469d480e	483426304	-	-	canonical:Mercenaries 2 World in Flames
+base-pc-elamigos	data/French.wad	599ea0003a26aaaf43ad8b8b739ad5a0846f790a429a56544663ebcbb5872417	413990912	-	-	canonical:repack-languages
+base-pc-elamigos	data/German.wad	b77843bc36c8014139845a80833dc63db75e98c9d37857a7c1853754dcf464e8	503775232	-	-	canonical:repack-languages
+base-pc-elamigos	data/Italian.wad	c41f220141658b35df10a84d9e24afc804538ac21246f63d192dea657efdb0a1	474972160	-	-	canonical:repack-languages
+base-pc-elamigos	data/Loading.wad	f58131ebaa011f8b445371220a95bb6c5ed9c7619294a2f2311131e4d3473100	2490368	-	-	canonical:repack-languages
+base-pc-elamigos	data/Spanish.wad	bea858770d879b081ac7177ca94005d2f49f1519fb4ec1f4bead67710df637eb	476807168	-	-	canonical:repack-languages
+base-pc-elamigos	data/shell.wad	7b01ff39900c6d9430f97f2037cb814f77331fa23ab5838be32e9b04abad766f	29622272	-	-	canonical:Mercenaries 2 World in Flames
+base-pc-elamigos	data/vz.wad	a67ada8bb1ef4255d3067475d6bc579cc1421fab262e9383a9eed74c8c59c011	2565537792	-	-	canonical:Mercenaries 2 World in Flames
+base-pc-retail	data/English.wad	298bb943cea0416d697b1f47421f27afcdcf40b2d4a8dc1991036b81469d480e	483426304	-	-	canonical:Mercenaries 2 World in Flames
+base-pc-retail	data/French.wad	599ea0003a26aaaf43ad8b8b739ad5a0846f790a429a56544663ebcbb5872417	413990912	-	-	canonical:repack-languages
+base-pc-retail	data/German.wad	b77843bc36c8014139845a80833dc63db75e98c9d37857a7c1853754dcf464e8	503775232	-	-	canonical:repack-languages
+base-pc-retail	data/Italian.wad	c41f220141658b35df10a84d9e24afc804538ac21246f63d192dea657efdb0a1	474972160	-	-	canonical:repack-languages
+base-pc-retail	data/Loading.wad	cd6a734fff58c3bef8022b664cb5fa6f1aacea01e9f3157c64afcb64fd6c635e	2490368	-	-	canonical:Mercenaries 2 World in Flames
+base-pc-retail	data/Spanish.wad	bea858770d879b081ac7177ca94005d2f49f1519fb4ec1f4bead67710df637eb	476807168	-	-	canonical:repack-languages
+base-pc-retail	data/shell.wad	7b01ff39900c6d9430f97f2037cb814f77331fa23ab5838be32e9b04abad766f	29622272	-	-	canonical:Mercenaries 2 World in Flames
+base-pc-retail	data/vz.wad	a67ada8bb1ef4255d3067475d6bc579cc1421fab262e9383a9eed74c8c59c011	2565537792	-	-	canonical:Mercenaries 2 World in Flames
 base-ps3-retail-de	PS3_GAME/USRDIR/ENGLISH.WAD	84b762bfe55447a4002740adcd33b7d15e01d6d1808d6bc387071e5014dd3289	69042176	-	-	ps3_de_disc_dir
 base-ps3-retail-de	PS3_GAME/USRDIR/GERMAN.WAD	58a8632a93279fdbfabaf0a65e99d1cacc95ac2606129bfc2ec1c294c31fdbe1	73924608	-	-	ps3_de_disc_dir
 base-ps3-retail-de	PS3_GAME/USRDIR/LOADING.WAD	ff1178297248b1505eba9668affa9c4d0d9c2bab50ea70b261a62cff7c8be238	2490368	-	-	ps3_de_disc_dir
