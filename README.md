@@ -51,10 +51,11 @@ that differs from the layout's reference build must be a catalogued overlay
 unlisted difference, 2 when a file cannot be read.
 
 The code layouts are the code versions of the game. `U` (PE timestamp `0x48a370c7`) is
-v1.0: the retail `v10-unsigned` build and every cracked, DRM-free and SecuROM-unwrapped build
-in the catalogue. `E` (PE timestamp `0x48cae190`) is v1.1: `v11-official-securom`, which the
-official v1.1 patcher (sha256 `b27fedc2…`, one file for all four regions) writes from
-`v10-unsigned`, and `v11-official-unwrapped`, the same code with the SecuROM wrapper removed.
+v1.0: the archived disk dump `archived-2-disk-dump`, the archived cracked build
+`archived-1-cracked-cruise`, and every other cracked, DRM-free and SecuROM-unwrapped build in the
+catalogue. `E` (PE timestamp `0x48cae190`) is v1.1: `v11-official-securom`, and
+`v11-official-unwrapped`, which the official v1.1 patcher (sha256 `b27fedc2…`, one file for all
+four regions) writes from `v11-official-securom`.
 `D` (PE timestamp `0x48cb59e8`, 13 Sep 2008) is the PC demo: `demo-official-securom`, the
 `Merc2-Demo.exe` that `Mercs2_Demo_Setup.exe` extracts, wrapped like the retail files.
 `builds.tsv` records each build's `code_version`; `aliases.tsv` maps other ids for a build,
@@ -431,7 +432,7 @@ retail-test` selects both from `cargo metadata`; extra arguments go to
 `cargo nextest run` (e.g. `cargo xtask retail-test --no-capture`).
 
 The official-patcher test reproduces the `v11-official-securom` recipe: it copies
-`v10-unsigned` from `exe_corpus` into a temporary install folder, creates a throwaway
+`archived-2-disk-dump` from `exe_corpus` into a temporary install folder, creates a throwaway
 `WINEPREFIX` in the system temp dir, imports the one registry value the patcher reads
 (`HKLM\SOFTWARE\WOW6432Node\EA Games\Mercenaries 2 World in Flames\Install Dir` = the
 install folder) with `wine64 reg import`, runs the patcher with the install folder as its
