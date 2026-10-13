@@ -1,4 +1,18 @@
 overlay_set	section	space	start	end	kind	runs	diff_bytes	sha256	detail
+archived-1-cracked-cruise	.text	va	0x00b04c23	0x00b04c29	import-name	1	6	fddbb38a8c0c18b628a066436f44c84b57931307f274b62255e96d50d8627b8f	'pmc_bb' -> 'cruise'
+archived-2-disk-dump	(headers)	va	0x0040003c	0x00400ff8	header	125	3543	4a6c64fbb2be26fdfecffcd162681a38886f897bb78f2690288b046a5f4cd34d	e_lfanew, DOS stub, COFF header, optional header, section table, after section table
+archived-2-disk-dump	.text	va	0x00401000	0x006dd6c0	lineage	11343	2988615	96ea934b8fd44ce77ad860e1d5db606efae23a0c53a46127149f20f82b86c365	-
+archived-2-disk-dump	.text	va	0x00b04c13	0x00b04c5a	bypass-stub	9	63	0805dcdc42ca47abdc3d8fe11f8e0c7a108602022f71ab349648cfdd30a75aa6	reference bytes written by v11_to_cracked.bspatch (7a34 holds other bytes here); they push the "pmc_bb.dll" string at 0xb04c23
+archived-2-disk-dump	.rdata	va	0x00b05000	0x00b05698	iat	20	1615	0d9e1a145ec12a1bf61b2de395712f16026089e81e3f065797b0e977e1a0046b	inside DataDirectory[IAT] 0x705000+0x69c as v11-official-unwrapped and v10-securom-unwrap declare it; the U reference declares no IAT directory
+archived-2-disk-dump	.data	va	0x00edba5c	0x00edba92	lineage	12	25	ea659cdc838619b3767c057fdf8e6d99fde2680c5d8517eb06761c0878d40c40	-
+archived-2-disk-dump	Stext	va	0x01a49000	0x02083c50	lineage	197611	6221276	f5aedfe573c2d14c439a5480be0f9d579ab7258b9c3e1e50483791689091e11f	-
+archived-2-disk-dump	Sitext	va	0x0208402d	0x02088d5d	lineage	163	956	cb3eded5ee69cc9d09ea4b75cf560543f590ecbb9976e3785a6d8daaa57c1b20	-
+archived-2-disk-dump	Sdata	va	0x020e5000	0x023e23c8	lineage	120438	2400826	ec62504fcf59e8822aa4e52e0a3c536055668c3b869201b3aef96236b7308f8a	-
+archived-2-disk-dump	Sidata	va	0x023e3000	0x023e686c	lineage	45	112	52216914e39378a154e434258859593b54497051b411d3e429d7d10ecb870d4a	-
+archived-2-disk-dump	.securom	va	0x023f13dd	0x024fcfea	lineage	2506	42599	7171cea0f30df249ba5a0b3ec559639462674e583dee3aa725a558fa758bca7e	-
+archived-2-disk-dump	.securom	va	0x0253a000	0x03701000	unmapped	1	18640896	-	the build maps .securom only to 0x253a000
+archived-2-disk-dump	reloaded	va	0x03701000	0x03702000	unmapped	1	4096	-	the build has no reloaded section
+archived-2-disk-dump	(slack)	file	0x033005f8	0x03301000	unmapped	1	2568	-	reference file offsets past the end of this build
 dump-v10-pmcbb-image	.text	va	0x005e9de0	0x005e9de5	hot-patch	1	5	75f4231283faf9240fbc22bda60bb52fb207fdff6bcaa31493eefd21737b23ff	558bec83e4 -> e91b7c6a6f (jmp 0x6fc91a00)
 dump-v10-pmcbb-image	.text	va	0x005e9f40	0x005e9f45	hot-patch	1	5	798ef8bc91d95de9b46657de4845d9ea81107f8014e80f50dd9680ab0267dfc7	558bec83e4 -> e97b7a6a6f (jmp 0x6fc919c0)
 dump-v10-pmcbb-image	.text	va	0x006d5640	0x006d5645	hot-patch	1	5	788745eeca45939c21be3adde61af4f8509b66ea0b62e8390565349ec3604b60	33c0c3cccc -> e97bca5f6f (jmp 0x6fcd20c0)
@@ -48,7 +62,6 @@ history-v10-drmfree-v2	(headers)	va	0x004002c1	0x004002c3	header	1	2	13375d73c95
 history-v10-drmfree-v2	(headers)	va	0x004002c4	0x004002c6	header	1	2	3c7e464b3ff64f3b3b54cef043c0cfbd8ab05f63d7a46ebfd415546f50c729f3	DataDirectory[IAT].Size 0x0 -> 0x690
 history-v10-drmfree-v2	reloaded	va	0x0370117c	0x03701180	reloaded-patch	1	4	df3f619804a92fdb4057192dc43dd748ea778adc52bc498ce80524c014b81119	import descriptor 19 (0x370117c+0x14, the terminator after 19 descriptors): a91dff01 -> 00000000
 history-v10-drmfree-v2	reloaded	va	0x03701188	0x03701190	reloaded-patch	1	8	af5570f5a1810b7af78caf4bc70a660f0df51e42baf91d4de5b2328de0e83dfc	import descriptor 19 (0x370117c+0x14, the terminator after 19 descriptors): 44f0fe01dd13ff01 -> 0000000000000000
-v10-cracked-cruise	.text	va	0x00b04c23	0x00b04c29	import-name	1	6	fddbb38a8c0c18b628a066436f44c84b57931307f274b62255e96d50d8627b8f	'pmc_bb' -> 'cruise'
 v10-drmfree-laa	(headers)	va	0x004001fe	0x004001ff	header	1	1	334359b90efed75da5f0ada1d5e6b256f4a6bd0aee7eb39c0f90182a021ffc8b	FileHeader.Characteristics 0x103 -> 0x123 (sets IMAGE_FILE_LARGE_ADDRESS_AWARE 0x0020)
 v10-drmfree-laa	(headers)	va	0x00400210	0x00400213	header	1	3	e34b52cb42dec29ac86f94f6bab8461a61136460b7deb2717731e3f91b91853a	OptionalHeader.AddressOfEntryPoint 0x704c2e -> 0x5ee71c
 v10-drmfree-laa	(headers)	va	0x00400240	0x00400243	header	1	3	709e80c88487a2411e1ee4dfb9f22a861492d20c4765150c0c794abd70f8147c	OptionalHeader.CheckSum 0xa5438d -> 0x0
@@ -64,19 +77,6 @@ v10-securom-unwrap	(headers)	va	0x004002c1	0x004002c3	header	1	2	13375d73c956a5e
 v10-securom-unwrap	(headers)	va	0x004002c4	0x004002c6	header	1	2	2d548789a68b095295625fb6405226494bf8a810c3a1900b259716edb285ad4b	DataDirectory[IAT].Size 0x0 -> 0x69c
 v10-securom-unwrap	reloaded	va	0x0370117c	0x03701180	reloaded-patch	1	4	df3f619804a92fdb4057192dc43dd748ea778adc52bc498ce80524c014b81119	import descriptor 19 (0x370117c+0x14, the terminator after 19 descriptors): a91dff01 -> 00000000
 v10-securom-unwrap	reloaded	va	0x03701188	0x03701190	reloaded-patch	1	8	af5570f5a1810b7af78caf4bc70a660f0df51e42baf91d4de5b2328de0e83dfc	import descriptor 19 (0x370117c+0x14, the terminator after 19 descriptors): 44f0fe01dd13ff01 -> 0000000000000000
-v10-unsigned	(headers)	va	0x0040003c	0x00400ff8	header	125	3543	4a6c64fbb2be26fdfecffcd162681a38886f897bb78f2690288b046a5f4cd34d	e_lfanew, DOS stub, COFF header, optional header, section table, after section table
-v10-unsigned	.text	va	0x00401000	0x006dd6c0	lineage	11343	2988615	96ea934b8fd44ce77ad860e1d5db606efae23a0c53a46127149f20f82b86c365	-
-v10-unsigned	.text	va	0x00b04c13	0x00b04c5a	bypass-stub	9	63	0805dcdc42ca47abdc3d8fe11f8e0c7a108602022f71ab349648cfdd30a75aa6	reference bytes written by v11_to_cracked.bspatch (7a34 holds other bytes here); they push the "pmc_bb.dll" string at 0xb04c23
-v10-unsigned	.rdata	va	0x00b05000	0x00b05698	iat	20	1615	0d9e1a145ec12a1bf61b2de395712f16026089e81e3f065797b0e977e1a0046b	inside DataDirectory[IAT] 0x705000+0x69c as v11-official-unwrapped and v10-securom-unwrap declare it; the U reference declares no IAT directory
-v10-unsigned	.data	va	0x00edba5c	0x00edba92	lineage	12	25	ea659cdc838619b3767c057fdf8e6d99fde2680c5d8517eb06761c0878d40c40	-
-v10-unsigned	Stext	va	0x01a49000	0x02083c50	lineage	197611	6221276	f5aedfe573c2d14c439a5480be0f9d579ab7258b9c3e1e50483791689091e11f	-
-v10-unsigned	Sitext	va	0x0208402d	0x02088d5d	lineage	163	956	cb3eded5ee69cc9d09ea4b75cf560543f590ecbb9976e3785a6d8daaa57c1b20	-
-v10-unsigned	Sdata	va	0x020e5000	0x023e23c8	lineage	120438	2400826	ec62504fcf59e8822aa4e52e0a3c536055668c3b869201b3aef96236b7308f8a	-
-v10-unsigned	Sidata	va	0x023e3000	0x023e686c	lineage	45	112	52216914e39378a154e434258859593b54497051b411d3e429d7d10ecb870d4a	-
-v10-unsigned	.securom	va	0x023f13dd	0x024fcfea	lineage	2506	42599	7171cea0f30df249ba5a0b3ec559639462674e583dee3aa725a558fa758bca7e	-
-v10-unsigned	.securom	va	0x0253a000	0x03701000	unmapped	1	18640896	-	the build maps .securom only to 0x253a000
-v10-unsigned	reloaded	va	0x03701000	0x03702000	unmapped	1	4096	-	the build has no reloaded section
-v10-unsigned	(slack)	file	0x033005f8	0x03301000	unmapped	1	2568	-	reference file offsets past the end of this build
 v11-official-securom	(headers)	va	0x0040003c	0x00400ff8	header	124	3557	d737b707d33abe124faa90b6e335f8975aa1ab26e6cc99a633eefbbef94a2ac3	e_lfanew, DOS stub, COFF header, optional header, section table, after section table
 v11-official-securom	.text	va	0x00401000	0x006dd6c0	lineage	11100	2988858	9d8013365516701738523adc92b0216b6a7c5adfae14060bc9e484d0e12b6128	-
 v11-official-securom	.rdata	va	0x00b05000	0x00b05698	iat	22	1613	790ecc8c31b398779f4d53135a83ed5b5dcc400dbba2649d05b14c414716eac0	inside the reference DataDirectory[IAT] 0x705000+0x69c
