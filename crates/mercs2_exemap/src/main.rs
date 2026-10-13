@@ -10,7 +10,7 @@
 //! exemap imports <image_id> --from <container> --exports <dir>
 //! exemap rtti <image> --out <tsv>
 //! exemap luareg <image> --out <tsv>
-//! exemap corpus-derive <corpus_id> <wad> --from <container> --work <dir> [--wine <wine64>]
+//! exemap corpus-derive <corpus_id> <wad> --from <container> --work <dir>
 //! exemap lua-scripts <wad> [--dump <dir>]
 //! exemap lua-index <corpus_id> --wad <file>... --out <tsv>
 //! exemap lua-pair <a.tsv> <b.tsv> --out <tsv>
@@ -135,15 +135,12 @@ enum Command {
     CorpusDerive {
         corpus_id: String,
         wad: String,
-        /// The first file of the WAD's chain (an archive, installer or disc image).
+        /// The first file of the WAD's chain (an archive, package or disc image).
         #[arg(long)]
         from: PathBuf,
         /// Work directory for the files each step writes; the WAD is left in it.
         #[arg(long)]
         work: PathBuf,
-        /// The wine64 binary, for chains with Wine steps.
-        #[arg(long)]
-        wine: Option<PathBuf>,
     },
     /// List every Lua script container of a WAD (PC, Xbox 360 or PS3): block, entry, name hash and
     /// each descriptor's tag and size, one row per container.
@@ -463,7 +460,7 @@ fn run(cli: Cli) -> Result<(), ExitCode> {
             let named = tables.iter().filter(|t| t.namespace.is_some()).count();
             println!("tables     {} ({} named by a registry, {} entries) -> {}", tables.len(), named, entries, out.display());
         }
-        Command::CorpusDerive { corpus_id, wad, from, work, wine } => {
+        Command::CorpusDerive { corpus_id, wad, from, work } => {
             use mercs2_exemap::corpus::{derive, Corpora, Env};
             let corpora = Corpora::embedded().map_err(|e| {
                 eprintln!("error: the embedded corpus tables are invalid: {e}");
@@ -473,7 +470,7 @@ fn run(cli: Cli) -> Result<(), ExitCode> {
                 eprintln!("error: wads.tsv has no {wad} in corpus {corpus_id}");
                 ExitCode::from(1)
             })?;
-            let path = derive(w, &from, &Env { wine, work }).map_err(|e| {
+            let path = derive(w, &from, &Env { work }).map_err(|e| {
                 eprintln!("error: {e}");
                 ExitCode::from(1)
             })?;
