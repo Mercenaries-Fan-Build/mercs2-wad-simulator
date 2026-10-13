@@ -67,17 +67,10 @@ pub fn vz_wad_from_env() -> Option<PathBuf> {
 ///   ([`local_config_ps3_vz_wad`]).
 /// * `unpacked_exe` — the SecuROM-unpacked game executable (`mercs2_unpacked.exe`, a runtime dump).
 ///   Read only by the tests that disassemble the engine ([`local_config_unpacked_exe`]).
-/// * `exe_corpus` — a **directory** of retail `Mercenaries2.exe` builds. Read only by the exe-map
-///   tests ([`local_config_exe_corpus`]).
-/// * `exe_dumps` — a **directory** of executables and process-image dumps derived from them. Read
-///   by the exe-map tests ([`local_config_exe_dumps`]) and the `lua_sites_exes` test
-///   ([`local_config_exe_dump`]).
-/// * `drmfree_exe` — the DRM-free executable (`mercs2_nodrm_v3.exe`, v1.0 code). Read only by the
-///   exe-map tests ([`local_config_drmfree_exe`]).
-/// * `v11_patcher_exe` — the official v1.1 patcher (`mercenaries2_patch1_*.exe`). Read only by the
-///   exe-map patcher test ([`local_config_v11_patcher_exe`]).
-/// * `wine_binary` — the `wine64` binary that runs the patcher. Read only by the exe-map patcher
-///   test ([`local_config_wine_binary`]).
+/// * `canonical_dir` — a **directory**: the canonical tree of PC builds (`game-files/canonical`),
+///   holding the PC installs, the archived and derived executables and the process-image dumps.
+///   Tests find each executable in it by sha256 and each installed file at the path its catalogue
+///   row names. Read by the exe-map tests ([`local_config_canonical_dir`]).
 /// * `x360_devkit_iso` — the Jul 11 2008 Xbox 360 preview disc image. Read only by the exe-map
 ///   console-image tests ([`local_config_x360_devkit_iso`]).
 /// * `x360_retail_xex` — the Xbox 360 retail `default.xex` (NTSC-U/J). Read only by the exe-map
@@ -86,12 +79,6 @@ pub fn vz_wad_from_env() -> Option<PathBuf> {
 ///   console-image tests ([`local_config_ps3_eboot_bin`]).
 /// * `ps3_update_pkgs` — a **directory** holding the PS3 v1.03 update `.pkg` files. Read only by
 ///   the exe-map console-image tests ([`local_config_ps3_update_pkgs`]).
-/// * `pc_demo_zip` — the public PC demo, `Mercs2_Demo_Setup.zip`. Read only by the exe-map Lua
-///   corpus tests ([`local_config_pc_demo_zip`]).
-/// * `pc_official_install_dir` — a **directory**: the official PC release as EA's download manager
-///   installs it. Read only by the exe-map Lua corpus tests ([`local_config_pc_official_install_dir`]).
-/// * `pc_repack_install_dir` — a **directory**: the ElAmigos repack, installed once per language,
-///   English last. Read only by the exe-map Lua corpus tests ([`local_config_pc_repack_install_dir`]).
 /// * `x360_retail_dir` — a **directory**: the Xbox 360 retail disc dump (JTAG rip). Read only by
 ///   the exe-map Lua corpus tests ([`local_config_x360_retail_dir`]).
 /// * `x360_dlc_biua_stfs` — the retail Xbox LIVE Blow It Up Again Pack STFS package. Read by the
@@ -152,16 +139,8 @@ pub const XBOX_VZ_WAD_KEY: &str = "xbox_vz_wad";
 pub const PS3_VZ_WAD_KEY: &str = "ps3_vz_wad";
 /// The `unpacked_exe` key of [`LOCAL_CONFIG`]: the SecuROM-unpacked game executable.
 pub const UNPACKED_EXE_KEY: &str = "unpacked_exe";
-/// The `exe_corpus` key of [`LOCAL_CONFIG`]: a directory of retail executables.
-pub const EXE_CORPUS_KEY: &str = "exe_corpus";
-/// The `exe_dumps` key of [`LOCAL_CONFIG`]: a directory of derived executables and image dumps.
-pub const EXE_DUMPS_KEY: &str = "exe_dumps";
-/// The `drmfree_exe` key of [`LOCAL_CONFIG`]: the DRM-free executable.
-pub const DRMFREE_EXE_KEY: &str = "drmfree_exe";
-/// The `v11_patcher_exe` key of [`LOCAL_CONFIG`]: the official v1.1 patcher.
-pub const V11_PATCHER_EXE_KEY: &str = "v11_patcher_exe";
-/// The `wine_binary` key of [`LOCAL_CONFIG`]: the `wine64` binary.
-pub const WINE_BINARY_KEY: &str = "wine_binary";
+/// The `canonical_dir` key of [`LOCAL_CONFIG`]: the canonical tree of PC builds.
+pub const CANONICAL_DIR_KEY: &str = "canonical_dir";
 /// The `x360_devkit_iso` key of [`LOCAL_CONFIG`]: the Xbox 360 preview disc image.
 pub const X360_DEVKIT_ISO_KEY: &str = "x360_devkit_iso";
 /// The `x360_retail_xex` key of [`LOCAL_CONFIG`]: the Xbox 360 retail `default.xex`.
@@ -170,12 +149,6 @@ pub const X360_RETAIL_XEX_KEY: &str = "x360_retail_xex";
 pub const PS3_EBOOT_BIN_KEY: &str = "ps3_eboot_bin";
 /// The `ps3_update_pkgs` key of [`LOCAL_CONFIG`]: a directory of PS3 update packages.
 pub const PS3_UPDATE_PKGS_KEY: &str = "ps3_update_pkgs";
-/// The `pc_demo_zip` key of [`LOCAL_CONFIG`]: the public PC demo archive.
-pub const PC_DEMO_ZIP_KEY: &str = "pc_demo_zip";
-/// The `pc_official_install_dir` key of [`LOCAL_CONFIG`]: the official PC install.
-pub const PC_OFFICIAL_INSTALL_DIR_KEY: &str = "pc_official_install_dir";
-/// The `pc_repack_install_dir` key of [`LOCAL_CONFIG`]: the ElAmigos repack install.
-pub const PC_REPACK_INSTALL_DIR_KEY: &str = "pc_repack_install_dir";
 /// The `x360_retail_dir` key of [`LOCAL_CONFIG`]: the Xbox 360 retail disc dump.
 pub const X360_RETAIL_DIR_KEY: &str = "x360_retail_dir";
 /// The `x360_dlc_biua_stfs` key of [`LOCAL_CONFIG`]: the retail Blow It Up Again Pack package.
@@ -278,79 +251,17 @@ pub fn local_config_unpacked_exe(start: &Path) -> Result<PathBuf, String> {
     )
 }
 
-/// The retail executable directory for a **game-gated test**: `exe_corpus` in the nearest
+/// The canonical tree of PC builds for a **game-gated test**: `canonical_dir` in the nearest
 /// [`LOCAL_CONFIG`].
 ///
 /// Same rules and the same three distinct errors as [`local_config_vz_wad`], except that the path
 /// must be a directory. No script writes this key.
-pub fn local_config_exe_corpus(start: &Path) -> Result<PathBuf, String> {
+pub fn local_config_canonical_dir(start: &Path) -> Result<PathBuf, String> {
     local_config_path(
         start,
-        EXE_CORPUS_KEY,
+        CANONICAL_DIR_KEY,
         Want::Dir,
-        "write `exe_corpus = \"/path/to/exe_sha256\"` into it by hand",
-    )
-}
-
-/// The derived-executable directory for a **game-gated test**: `exe_dumps` in the nearest
-/// [`LOCAL_CONFIG`].
-///
-/// Same rules and the same three distinct errors as [`local_config_vz_wad`], except that the path
-/// must be a directory. No script writes this key.
-pub fn local_config_exe_dumps(start: &Path) -> Result<PathBuf, String> {
-    local_config_path(
-        start,
-        EXE_DUMPS_KEY,
-        Want::Dir,
-        "write `exe_dumps = \"/path/to/securom_dump\"` into it by hand",
-    )
-}
-
-/// The file `name` in the `exe_dumps` directory, for a **game-gated test**.
-pub fn local_config_exe_dump(start: &Path, name: &str) -> Result<PathBuf, String> {
-    let dir = local_config_exe_dumps(start)?;
-    let path = dir.join(name);
-    if !path.is_file() {
-        return Err(format!("game-gated test: {EXE_DUMPS_KEY} = {} has no file {name}", dir.display()));
-    }
-    Ok(path)
-}
-
-/// The DRM-free executable for a **game-gated test**: `drmfree_exe` in the nearest
-/// [`LOCAL_CONFIG`].
-///
-/// Same rules and the same three distinct errors as [`local_config_vz_wad`]. No script writes this
-/// key.
-pub fn local_config_drmfree_exe(start: &Path) -> Result<PathBuf, String> {
-    local_config_file(
-        start,
-        DRMFREE_EXE_KEY,
-        "write `drmfree_exe = \"/path/to/mercs2_nodrm_v3.exe\"` into it by hand",
-    )
-}
-
-/// The official v1.1 patcher for a **game-gated test**: `v11_patcher_exe` in the nearest
-/// [`LOCAL_CONFIG`].
-///
-/// Same rules and the same three distinct errors as [`local_config_vz_wad`]. No script writes this
-/// key.
-pub fn local_config_v11_patcher_exe(start: &Path) -> Result<PathBuf, String> {
-    local_config_file(
-        start,
-        V11_PATCHER_EXE_KEY,
-        "write `v11_patcher_exe = \"/path/to/mercenaries2_patch1_na.exe\"` into it by hand",
-    )
-}
-
-/// The `wine64` binary for a **game-gated test**: `wine_binary` in the nearest [`LOCAL_CONFIG`].
-///
-/// Same rules and the same three distinct errors as [`local_config_vz_wad`]. No script writes this
-/// key.
-pub fn local_config_wine_binary(start: &Path) -> Result<PathBuf, String> {
-    local_config_file(
-        start,
-        WINE_BINARY_KEY,
-        "write `wine_binary = \"/path/to/wine/bin/wine64\"` into it by hand",
+        "write `canonical_dir = \"/path/to/game-files/canonical\"` into it by hand",
     )
 }
 
@@ -390,47 +301,6 @@ pub fn local_config_ps3_eboot_bin(start: &Path) -> Result<PathBuf, String> {
         start,
         PS3_EBOOT_BIN_KEY,
         "write `ps3_eboot_bin = \"/path/to/EBOOT.BIN\"` into it by hand",
-    )
-}
-
-/// The public PC demo archive for a **game-gated test**: `pc_demo_zip` in the nearest
-/// [`LOCAL_CONFIG`].
-///
-/// Same rules and the same three distinct errors as [`local_config_vz_wad`]. No script writes this
-/// key.
-pub fn local_config_pc_demo_zip(start: &Path) -> Result<PathBuf, String> {
-    local_config_file(
-        start,
-        PC_DEMO_ZIP_KEY,
-        "write `pc_demo_zip = \"/path/to/Mercs2_Demo_Setup.zip\"` into it by hand",
-    )
-}
-
-/// The official PC install for a **game-gated test**: `pc_official_install_dir` in the nearest
-/// [`LOCAL_CONFIG`].
-///
-/// Same rules and the same three distinct errors as [`local_config_vz_wad`], except that the path
-/// must be a directory. No script writes this key.
-pub fn local_config_pc_official_install_dir(start: &Path) -> Result<PathBuf, String> {
-    local_config_path(
-        start,
-        PC_OFFICIAL_INSTALL_DIR_KEY,
-        Want::Dir,
-        "write `pc_official_install_dir = \"/path/to/Mercenaries 2 World in Flames\"` into it by hand",
-    )
-}
-
-/// The ElAmigos repack install for a **game-gated test**: `pc_repack_install_dir` in the nearest
-/// [`LOCAL_CONFIG`].
-///
-/// Same rules and the same three distinct errors as [`local_config_vz_wad`], except that the path
-/// must be a directory. No script writes this key.
-pub fn local_config_pc_repack_install_dir(start: &Path) -> Result<PathBuf, String> {
-    local_config_path(
-        start,
-        PC_REPACK_INSTALL_DIR_KEY,
-        Want::Dir,
-        "write `pc_repack_install_dir = \"/path/to/Mercenaries 2 World in Flames\"` into it by hand",
     )
 }
 
@@ -841,63 +711,32 @@ mod tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
-    /// The exe-map keys: the two directory keys reject a file, the file keys reject a directory, and
-    /// each matches its key exactly.
+    /// `canonical_dir` reports the three failures under its own key, rejects a file, and matches its
+    /// key exactly.
     #[test]
-    fn the_exe_map_resolvers_require_their_kind_of_path() {
-        let root = std::env::temp_dir().join("mercs2_formats_local_config_exe_map");
+    fn the_canonical_dir_resolver_requires_a_directory() {
+        let root = std::env::temp_dir().join("mercs2_formats_local_config_canonical_dir");
         std::fs::remove_dir_all(&root).ok();
         let deep = root.join("a");
         std::fs::create_dir_all(&deep).unwrap();
 
-        let e = local_config_exe_corpus(&deep).unwrap_err();
-        assert!(e.contains("no .mercs2-local.toml found") && e.contains("exe_corpus = "), "{e}");
+        let e = local_config_canonical_dir(&deep).unwrap_err();
+        assert!(e.contains("no .mercs2-local.toml found") && e.contains("canonical_dir = "), "{e}");
 
-        let (corpus, dumps, exe) = (root.join("corpus"), root.join("dumps"), root.join("nodrm.exe"));
-        std::fs::create_dir_all(&corpus).unwrap();
-        std::fs::create_dir_all(&dumps).unwrap();
+        let (canonical, exe) = (root.join("canonical"), root.join("Mercenaries2.exe"));
+        std::fs::create_dir_all(&canonical).unwrap();
         std::fs::write(&exe, b"MZ").unwrap();
         let config = root.join(LOCAL_CONFIG);
-        std::fs::write(&config, format!("exe_corpus = \"{}\"\n", exe.display())).unwrap();
-        let e = local_config_exe_corpus(&deep).unwrap_err();
-        assert!(e.contains("which is not a directory"), "{e}");
-        let e = local_config_exe_dumps(&deep).unwrap_err();
-        assert!(e.contains("has no `exe_dumps` key"), "{e}");
+        std::fs::write(&config, format!("canonical_directory = \"{}\"\n", canonical.display())).unwrap();
+        let e = local_config_canonical_dir(&deep).unwrap_err();
+        assert!(e.contains("has no `canonical_dir` key"), "{e}");
 
-        std::fs::write(
-            &config,
-            format!(
-                "exe_corpus = \"{}\"\nexe_dumps = \"{}\"\ndrmfree_exe = \"{}\"\n",
-                corpus.display(),
-                dumps.display(),
-                dumps.display()
-            ),
-        )
-        .unwrap();
-        assert_eq!(local_config_exe_corpus(&deep), Ok(corpus.clone()));
-        assert_eq!(local_config_exe_dumps(&deep), Ok(dumps.clone()));
-        let e = local_config_drmfree_exe(&deep).unwrap_err();
-        assert!(e.contains("which is not a file"), "{e}");
+        std::fs::write(&config, format!("canonical_dir = \"{}\"\n", exe.display())).unwrap();
+        let e = local_config_canonical_dir(&deep).unwrap_err();
+        assert!(e.contains("names canonical_dir = ") && e.contains("which is not a directory"), "{e}");
 
-        std::fs::write(
-            &config,
-            format!("exe_corpus = \"{}\"\ndrmfree_exe = \"{}\"\n", corpus.display(), exe.display()),
-        )
-        .unwrap();
-        assert_eq!(local_config_drmfree_exe(&deep), Ok(exe.clone()));
-        let e = local_config_v11_patcher_exe(&deep).unwrap_err();
-        assert!(e.contains("has no `v11_patcher_exe` key"), "{e}");
-        let e = local_config_wine_binary(&deep).unwrap_err();
-        assert!(e.contains("has no `wine_binary` key"), "{e}");
-
-        std::fs::write(
-            &config,
-            format!("v11_patcher_exe = \"{}\"\nwine_binary = \"{}\"\n", exe.display(), corpus.display()),
-        )
-        .unwrap();
-        assert_eq!(local_config_v11_patcher_exe(&deep), Ok(exe));
-        let e = local_config_wine_binary(&deep).unwrap_err();
-        assert!(e.contains("which is not a file"), "{e}");
+        std::fs::write(&config, format!("canonical_dir = \"{}\"\n", canonical.display())).unwrap();
+        assert_eq!(local_config_canonical_dir(&deep), Ok(canonical));
 
         std::fs::remove_dir_all(&root).ok();
     }
@@ -942,17 +781,6 @@ mod tests {
         assert!(e.contains("which is not a file"), "{e}");
         std::fs::write(&config, format!("x360_retail_xex = \"{}\"\n", eboot.display())).unwrap();
         assert_eq!(local_config_x360_retail_xex(&deep), Ok(eboot.clone()));
-        let e = local_config_pc_demo_zip(&deep).unwrap_err();
-        assert!(e.contains("has no `pc_demo_zip` key"), "{e}");
-        std::fs::write(&config, format!("pc_demo_zip = \"{}\"\npc_official_install_dir = \"{}\"\n", eboot.display(), eboot.display())).unwrap();
-        assert_eq!(local_config_pc_demo_zip(&deep), Ok(eboot.clone()));
-        let e = local_config_pc_official_install_dir(&deep).unwrap_err();
-        assert!(e.contains("which is not a directory"), "{e}");
-        let e = local_config_pc_repack_install_dir(&deep).unwrap_err();
-        assert!(e.contains("has no `pc_repack_install_dir` key"), "{e}");
-        std::fs::write(&config, format!("pc_official_install_dir = \"{}\"\npc_repack_install_dir = \"{}\"\n", pkgs.display(), pkgs.display())).unwrap();
-        assert_eq!(local_config_pc_official_install_dir(&deep), Ok(pkgs.clone()));
-        assert_eq!(local_config_pc_repack_install_dir(&deep), Ok(pkgs.clone()));
         std::fs::write(
             &config,
             format!(
