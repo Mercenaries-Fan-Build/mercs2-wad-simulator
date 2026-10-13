@@ -749,8 +749,15 @@ impl std::fmt::Display for BuildError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             BuildError::Blocked(d) => {
-                writeln!(f, "build blocked by {} finding(s):", d.len())?;
-                for x in d.iter().filter(|x| x.severity >= lint::Severity::Error) {
+                let blocking = d.iter().filter(|x| x.severity >= lint::Severity::Error).count();
+                writeln!(
+                    f,
+                    "build blocked by {blocking} finding(s) at error or above ({} finding(s) in all):",
+                    d.len()
+                )?;
+                let mut sorted: Vec<&Diagnostic> = d.iter().collect();
+                sorted.sort_by(|a, b| b.severity.cmp(&a.severity));
+                for x in sorted {
                     writeln!(f, "  {x}")?;
                 }
                 Ok(())

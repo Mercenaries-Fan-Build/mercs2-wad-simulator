@@ -126,8 +126,16 @@ jobs:
       - name: Build binaries
         shell: bash
         run: |
-          cargo build --release --target ${{ matrix.target }} ${{ matrix.build }} \
+          # qm is built alone: in the --workspace build, feature unification enables mercs2_audio's
+          # cpal output and links libasound into qm. `qm` is mercs2_quartermaster's only bin.
+          exclude=""
+          case " ${{ matrix.bins }} " in *" qm "*) exclude="--exclude mercs2_quartermaster";; esac
+          cargo build --release --target ${{ matrix.target }} ${{ matrix.build }} $exclude \
             --message-format=json > cargo-build.json
+          if [ -n "$exclude" ]; then
+            cargo build --release --target ${{ matrix.target }} -p mercs2_quartermaster --bin qm \
+              --message-format=json >> cargo-build.json
+          fi
           # `--message-format=json` swallows human-readable diagnostics; put them back in the log.
           grep -o '"rendered":"[^"]*"' cargo-build.json | sed 's/"rendered":"//; s/"$//' | head -50 || true
           # Every executable this build produced (JSON-escapes \\ on Windows paths).
@@ -161,6 +169,11 @@ jobs:
             n=$(basename "$exe"); n="${n%.exe}"
             case " $published " in *" $n "*) ;; *) echo "  - $n";; esac
           done < built.txt
+
+      # GUARDRAIL 3: the published qm must start on a bare host at the pinned glibc floor.
+      - name: Check qm starts on a bare host
+        if: runner.os == 'Linux' && contains(format(' {0} ', matrix.bins), ' qm ')
+        run: docker run --rm -v "$PWD/dist:/dist:ro" ubuntu:22.04 /dist/qm${{ matrix.suffix }} --version
 
       # The workshop's reference bundle (workshop_charter.md, "Reference bundle" mandate): everything
       # the tool consults that is NOT a game-distributed file. Its centrepiece is `names.bin`, the
