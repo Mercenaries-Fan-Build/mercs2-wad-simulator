@@ -8,9 +8,10 @@
 //! from the original file it ships in. `from_sha256` and `step` are `;`-separated lists of equal
 //! length; step *i* turns the file with `from_sha256[i]` into the next file of the chain, and the
 //! last step yields the WAD. [`derive`] replays a chain on files in a work directory and checks
-//! every sha256 on the way. A WAD with an empty chain is catalogued from an install: its
-//! `install` column names the local-config key of that install directory, where [`check_installed`]
-//! finds it by name; a WAD with a chain names no install.
+//! every sha256 on the way. A WAD with an empty chain is catalogued from an install, where
+//! [`check_installed`] finds it by name; its `install` column ([`Install`]) is either the
+//! local-config key of that install directory or `canonical:<dir>`, a directory under the local
+//! config's `canonical_dir`. A WAD with a chain names no install.
 //!
 //! Both tables are tab-separated with one header line that must match exactly. No field is empty:
 //! a column with no value holds `-` ([`crate::NO_VALUE`]), and an empty field is an error naming
@@ -21,22 +22,16 @@
 //! | step | input → output |
 //! |---|---|
 //! | `zip:<entry>` | a zip archive → its entry |
-//! | `wine-sfx:<path>` | a self-extracting Windows installer run silently under Wine (`-s2 -d<dir>`) → the file it extracts at `<path>` |
-//! | `wine-extrac32:<entry>` | a Microsoft cabinet, extracted with Wine's `extrac32` → its entry |
 //! | `xdvdfs:<path>` | an Xbox disc image → the file at `<path>` ([`crate::xdvdfs`]) |
 //! | `stfs:<name>` | an Xbox 360 STFS package (LIVE/PIRS/CON) → the file `<name>` in it |
 //! | `iso9660:<path>` | an ISO-9660 disc image → the file at `<path>` ([`crate::iso9660`]) |
 //! | `pkg:<path>` | a PSN `.pkg` → its entry at `<path>` (`mercs2_formats::ps3_pkg`) |
 //! | `edat:<klicensee>` | an NPDRM EDAT → its payload, decrypted with the 32-hex-digit title klicensee, which must validate against the EDAT header first (`mercs2_formats::ps3_edat`, `ps3_klic`) |
-//!
-//! The Wine steps need the `wine64` binary ([`Env::wine`]); a chain that reaches one without it is
-//! an error naming the step.
 
 use std::collections::BTreeSet;
 use std::fs::File;
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use sha2::{Digest, Sha256};
 
@@ -63,8 +58,6 @@ pub struct Corpus {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Step {
     Zip(String),
-    WineSfx(String),
-    WineExtrac32(String),
     Xdvdfs(String),
     Stfs(String),
     Iso9660(String),
@@ -80,8 +73,6 @@ impl Step {
         }
         match head {
             "zip" => Some(Step::Zip(arg.to_string())),
-            "wine-sfx" => Some(Step::WineSfx(arg.to_string())),
-            "wine-extrac32" => Some(Step::WineExtrac32(arg.to_string())),
             "xdvdfs" => Some(Step::Xdvdfs(arg.to_string())),
             "stfs" => Some(Step::Stfs(arg.to_string())),
             "iso9660" => Some(Step::Iso9660(arg.to_string())),
@@ -121,8 +112,27 @@ pub struct Wad {
     pub sha256: String,
     pub size: u64,
     pub chain: Vec<Link>,
-    /// For a WAD with no chain, the local-config key of the install directory it is found in.
-    pub install: Option<String>,
+    /// For a WAD with no chain, the install directory it is found in.
+    pub install: Option<Install>,
+}
+
+/// The install directory a WAD with no chain is found in.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Install {
+    /// The directory a local-config key names (`x360_retail_dir`, `ps3_jp_disc_dir`, …).
+    Key(String),
+    /// A directory relative to the local config's `canonical_dir`, written `canonical:<dir>`.
+    Canonical(String),
+}
+
+impl Install {
+    fn parse(s: &str) -> Option<Install> {
+        match s.split_once(':') {
+            None => Some(Install::Key(s.to_string())),
+            Some(("canonical", dir)) if !dir.is_empty() => Some(Install::Canonical(dir.to_string())),
+            Some(_) => None,
+        }
+    }
 }
 
 /// Both tables, parsed and cross-checked.
@@ -223,7 +233,9 @@ impl Corpora {
                     step: Step::parse(step).ok_or_else(|| err(W, n, format!("step {step:?} is not a known step")))?,
                 });
             }
-            let install = field_value(f[6]).map(str::to_string);
+            let install = field_value(f[6])
+                .map(|v| Install::parse(v).ok_or_else(|| err(W, n, format!("install {v:?} is neither a key nor canonical:<dir>"))))
+                .transpose()?;
             if chain.is_empty() != install.is_some() {
                 return Err(err(W, n, "a WAD has either a chain or an install key, not both and not neither"));
             }
@@ -267,10 +279,9 @@ impl Corpora {
     }
 }
 
-/// Where derivations run: the `wine64` binary for the Wine steps, and a work directory for the
-/// files each step writes (reused across derivations; one installer runs once).
+/// Where derivations run: a work directory for the files each step writes, reused across
+/// derivations.
 pub struct Env {
-    pub wine: Option<PathBuf>,
     pub work: PathBuf,
 }
 
@@ -289,42 +300,6 @@ pub fn file_sha256(path: &Path) -> Result<String, Error> {
     Ok(format!("{:x}", h.finalize()))
 }
 
-/// The Windows view of a host path through Wine's `Z:` drive.
-fn wine_path(p: &Path) -> String {
-    format!("Z:{}", p.display().to_string().replace('/', "\\"))
-}
-
-fn run(cmd: &mut Command, what: &str) -> Result<(), Error> {
-    let out = cmd.output().map_err(|e| Error::new(format!("{what}: cannot start: {e}")))?;
-    if !out.status.success() {
-        return Err(Error::new(format!(
-            "{what}: exit {}; stderr: {}",
-            out.status,
-            String::from_utf8_lossy(&out.stderr).trim()
-        )));
-    }
-    Ok(())
-}
-
-fn wine_cmd(env: &Env, prefix: &Path, step: &str) -> Result<Command, Error> {
-    let wine = env
-        .wine
-        .as_ref()
-        .ok_or_else(|| Error::new(format!("step {step} needs the wine64 binary, and none was given")))?;
-    let mut c = Command::new(wine);
-    c.env("WINEPREFIX", prefix).env("WINEDEBUG", "-all");
-    Ok(c)
-}
-
-fn wine_prefix(env: &Env, step: &str) -> Result<PathBuf, Error> {
-    let prefix = env.work.join("wineprefix");
-    if !prefix.join("drive_c").is_dir() {
-        std::fs::create_dir_all(&prefix).map_err(|e| Error::new(format!("create {}: {e}", prefix.display())))?;
-        run(wine_cmd(env, &prefix, step)?.arg("wineboot").arg("-i"), "wineboot -i")?;
-    }
-    Ok(prefix)
-}
-
 /// Apply one step to the file at `input` (whose sha256 is `input_sha`), returning the output path.
 fn apply(step: &Step, input: &Path, input_sha: &str, env: &Env) -> Result<PathBuf, Error> {
     let dir = env.work.join(input_sha);
@@ -338,22 +313,6 @@ fn apply(step: &Step, input: &Path, input_sha: &str, env: &Env) -> Result<PathBu
                 std::fs::create_dir_all(out.parent().unwrap()).map_err(|e| Error::new(format!("create dir: {e}")))?;
                 let mut o = File::create(&out).map_err(|e| Error::new(format!("create {}: {e}", out.display())))?;
                 std::io::copy(&mut e, &mut o).map_err(|e| Error::new(format!("unzip {entry}: {e}")))?;
-            }
-            Ok(out)
-        }
-        Step::WineSfx(member) => {
-            let out_dir = dir.join("sfx");
-            if !out_dir.is_dir() {
-                let prefix = wine_prefix(env, "wine-sfx")?;
-                std::fs::create_dir_all(&out_dir).map_err(|e| Error::new(format!("create {}: {e}", out_dir.display())))?;
-                run(
-                    wine_cmd(env, &prefix, "wine-sfx")?.arg(input).arg("-s2").arg(format!("-d{}", wine_path(&out_dir))),
-                    &format!("wine-sfx {}", input.display()),
-                )?;
-            }
-            let out = out_dir.join(member);
-            if !out.is_file() {
-                return Err(Error::new(format!("wine-sfx: {} did not extract {member}", input.display())));
             }
             Ok(out)
         }
@@ -431,26 +390,6 @@ fn apply(step: &Step, input: &Path, input_sha: &str, env: &Env) -> Result<PathBu
                     .map_err(|e| Error::new(format!("edat {}: {e}", input.display())))?;
                 std::fs::create_dir_all(out.parent().unwrap()).map_err(|e| Error::new(format!("create dir: {e}")))?;
                 std::fs::write(&out, bytes).map_err(|e| Error::new(format!("write {}: {e}", out.display())))?;
-            }
-            Ok(out)
-        }
-        Step::WineExtrac32(entry) => {
-            let out_dir = dir.join("cab");
-            if !out_dir.is_dir() {
-                let prefix = wine_prefix(env, "wine-extrac32")?;
-                std::fs::create_dir_all(&out_dir).map_err(|e| Error::new(format!("create {}: {e}", out_dir.display())))?;
-                run(
-                    wine_cmd(env, &prefix, "wine-extrac32")?
-                        .arg("extrac32")
-                        .args(["/Y", "/E", "/L"])
-                        .arg(wine_path(&out_dir))
-                        .arg(wine_path(input)),
-                    &format!("wine-extrac32 {}", input.display()),
-                )?;
-            }
-            let out = out_dir.join(entry);
-            if !out.is_file() {
-                return Err(Error::new(format!("wine-extrac32: {} holds no {entry}", input.display())));
             }
             Ok(out)
         }
@@ -543,8 +482,7 @@ mod tests {
     #[test]
     fn steps_parse_by_exact_name() {
         assert_eq!(Step::parse("zip:a.exe"), Some(Step::Zip("a.exe".into())));
-        assert_eq!(Step::parse("wine-sfx:data/vz.wad"), Some(Step::WineSfx("data/vz.wad".into())));
-        assert_eq!(Step::parse("wine-extrac32:x"), Some(Step::WineExtrac32("x".into())));
+        assert_eq!(Step::parse("wine-sfx:data/vz.wad"), None);
         assert_eq!(Step::parse("xdvdfs:vz.wad"), Some(Step::Xdvdfs("vz.wad".into())));
         assert_eq!(Step::parse("stfs:DLC01.doh"), Some(Step::Stfs("DLC01.doh".into())));
         assert_eq!(Step::parse("iso9660:A/VZ.WAD"), Some(Step::Iso9660("A/VZ.WAD".into())));
@@ -592,11 +530,17 @@ mod tests {
         let base = "b\tbase\tpc\tretail\t-\tthe game";
         let chained = format!("b\tvz.wad\t{SHA_A}\t1\t{SHA_B}\tzip:x\t-");
         let installed = format!("b\tzz.wad\t{SHA_B}\t1\t-\t-\tk");
-        let c = Corpora::parse(&corpora(&[base]), &wads(&[&chained, &installed])).unwrap();
+        let canonical = format!("b\tzy.wad\t{}\t1\t-\t-\tcanonical:a/b", "c".repeat(64));
+        let c = Corpora::parse(&corpora(&[base]), &wads(&[&chained, &canonical, &installed])).unwrap();
         assert_eq!(c.corpora[0].applies_to, None);
         assert_eq!(c.wads[0].install, None);
-        assert_eq!(c.wads[1].install.as_deref(), Some("k"));
-        assert!(c.wads[1].chain.is_empty());
+        assert_eq!(c.wads[1].install, Some(Install::Canonical("a/b".into())));
+        assert_eq!(c.wads[2].install, Some(Install::Key("k".into())));
+        assert!(c.wads[2].chain.is_empty());
+        for bad in ["canonical:", "other:a"] {
+            let e = Corpora::parse(&corpora(&[base]), &wads(&[&installed.replace("\tk", &format!("\t{bad}"))])).unwrap_err().to_string();
+            assert!(e.contains("is neither a key nor canonical:<dir>"), "{bad}: {e}");
+        }
         let e = Corpora::parse(&corpora(&["b\tbase\tpc\tretail\t\tthe game"]), &wads(&[&chained])).unwrap_err().to_string();
         assert!(e.contains("corpora.tsv line 2: column 5 (applies_to) is empty"), "{e}");
         let e = Corpora::parse(&corpora(&[base]), &wads(&[&chained.replace("\tzip:x\t-", "\tzip:x\t")])).unwrap_err().to_string();
@@ -628,22 +572,18 @@ mod tests {
             size: 14,
             chain: vec![Link { from_sha256: zsha, step: Step::Zip("data/x.wad".into()) }],
         };
-        let env = Env { wine: None, work: work.join("work") };
+        let env = Env { work: work.join("work") };
         let out = derive(&wad, &zpath, &env).unwrap();
         assert_eq!(file_sha256(&out).unwrap(), wsha);
         // An installed WAD is checked in place; deriving it is an error.
         let inst = work.join("install");
         std::fs::create_dir_all(inst.join("data")).unwrap();
         std::fs::write(inst.join("data/x.wad"), b"FFCS wad bytes").unwrap();
-        let installed = Wad { chain: vec![], install: Some("k".into()), name: "data/x.wad".into(), ..wad.clone() };
+        let installed = Wad { chain: vec![], install: Some(Install::Key("k".into())), name: "data/x.wad".into(), ..wad.clone() };
         assert_eq!(check_installed(&installed, &inst).unwrap(), inst.join("data/x.wad"));
         assert!(derive(&installed, &zpath, &env).unwrap_err().to_string().contains("no chain"));
         std::fs::write(inst.join("data/x.wad"), b"other").unwrap();
         assert!(check_installed(&installed, &inst).unwrap_err().to_string().contains("wads.tsv says"));
-        // A Wine step without a wine binary is an error naming the step.
-        let wine_wad = Wad { chain: vec![Link { from_sha256: wad.chain[0].from_sha256.clone(), step: Step::WineSfx("x".into()) }], ..wad.clone() };
-        let e = derive(&wine_wad, &zpath, &env).unwrap_err().to_string();
-        assert!(e.contains("wine-sfx needs the wine64 binary"), "{e}");
         std::fs::remove_dir_all(&work).ok();
     }
 }
