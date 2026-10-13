@@ -53,9 +53,9 @@ unlisted difference, 2 when a file cannot be read.
 The code layouts are the code versions of the game. `U` (PE timestamp `0x48a370c7`) is
 v1.0: the archived disk dump `archived-2-disk-dump`, the archived cracked build
 `archived-1-cracked-cruise`, and every other cracked, DRM-free and SecuROM-unwrapped build in the
-catalogue. `E` (PE timestamp `0x48cae190`) is v1.1: `v11-official-securom`, and
-`v11-official-unwrapped`, which the official v1.1 patcher (sha256 `b27fedc2…`, one file for all
-four regions) writes from `v11-official-securom`.
+catalogue. `E` (PE timestamp `0x48cae190`) holds `v10-ea-signed`, the EA-signed release, and
+`v11-patched-securom`, which the official v1.1 patcher (sha256 `b27fedc2…`, one file for all four
+regions) writes from `v10-ea-signed`.
 `D` (PE timestamp `0x48cb59e8`, 13 Sep 2008) is the PC demo: `demo-official-securom`, the
 `Merc2-Demo.exe` that `Mercs2_Demo_Setup.exe` extracts, wrapped like the retail files.
 `builds.tsv` records each build's `code_version`; `aliases.tsv` maps other ids for a build,
@@ -113,7 +113,7 @@ exemap starts profile.pe_ghidra --out profile.starts
 each with the Ghidra language and load base it is analysed with. Each PC row names its build id:
 `pc-v10` and `pc-v11` are the two layout references' SecuROM-unwrapped process dumps
 (`dump-v10-pmcbb-unpacked`, `dump-v11-securom-unpacked`), and `pc-v10-drmfree` is the DRM-free
-v1.0 executable `v10-drmfree-laa` (`mercs2_nodrm_v3.exe`, the `drmfree_exe` key), which
+v1.0 executable `v10-drmfree-laa` (`mercs2_nodrm_v3.exe`), which
 `securom_unwrap::unwrap` builds from `v10-cracked-pmcbb` with the large-address-aware flag set. It
 has no `code_image`; the `pc-v10` dump differs from it by three `.text` hot-patches and runtime
 bytes in `.securom` (`overlays.tsv`). Each console row carries the chain that
@@ -158,9 +158,7 @@ platform.
 `crates/mercs2_exemap/data/corpora.tsv` catalogues the Lua corpus by product (`base`, `demo`,
 `patch`, `dlc:<name>`), platform and build, a patch or DLC naming the corpus it applies to;
 scripts are compared only within one product. `wads.tsv` lists each corpus WAD by sha256 with the
-chain that rebuilds it from the original file: `zip:<entry>`, `wine-sfx:<path>` (a self-extracting
-installer run silently under Wine), `wine-extrac32:<entry>` (a cabinet extracted by Wine),
-`xdvdfs:<path>` (a file from an Xbox disc image), `stfs:<name>` (a file from an Xbox 360 STFS
+chain that rebuilds it from the original file: `zip:<entry>`, `xdvdfs:<path>` (a file from an Xbox disc image), `stfs:<name>` (a file from an Xbox 360 STFS
 package), `iso9660:<path>` (a file from an ISO-9660 disc image, read through its Joliet tree),
 `pkg:<path>` (an entry of a PSN `.pkg`) and `edat:<klicensee>` (an NPDRM EDAT's payload, decrypted
 with the 32-hex-digit title klicensee once it validates against the EDAT header). A WAD's name is
@@ -177,20 +175,23 @@ dumps, their WADs checked in place; the European disc shares its English, German
 and vz WADs with the German one. Each of the three v1.03 updates is catalogued against its own
 region's disc; the German update ships the same patch WADs as the North American one, the European
 update its own.
-`exemap corpus-derive` replays one chain, checking every sha256; the PC demo corpus rebuilds from
-`Mercs2_Demo_Setup.zip` this way, and its executable is build `demo-official-securom`, layout `D`.
-A WAD with no chain (`-` in `from_sha256` and `step`) is catalogued from an install, named in its `install` column by the
-local-config key of the install directory. The PC retail corpus is English, Loading, shell and vz
-from the official release as EA's download manager installs it (English for a North American
-download; the SecuROM v1.1 executable `v11-official-securom`), plus French, German, Italian and
-Spanish from the ElAmigos repack install. `base-pc-elamigos` is the repack itself (not official
-media), installed once per language with English last: its English, shell and vz are byte-identical
-to the official ones, its Loading.wad differs from the official one (and the demo's) only in a
-20-byte identifier string at `0x8271`, and it ships the unwrapped v1.1 executable
-`v11-official-unwrapped`.
+`exemap corpus-derive` replays one chain, checking every sha256. A WAD with no chain (`-` in
+`from_sha256` and `step`) is catalogued from an install: its `install` column is either the
+local-config key of the install directory, or `canonical:<dir>`, a directory under the
+`canonical_dir` key's canonical tree of PC builds. Every PC corpus is catalogued from that tree:
+- `base-pc-demo` from the demo install (`canonical:demo`); its executable is build
+  `demo-official-securom`, layout `D`;
+- `base-pc-retail`: English, Loading, shell and vz from the v1.0 EA-signed install
+  (`canonical:Mercenaries 2 World in Flames`, executable `v10-ea-signed`), byte-identical to EA's
+  download manager install, plus French, German, Italian and Spanish from the ElAmigos repack
+  (`canonical:repack-languages`);
+- `base-pc-elamigos`, the repack itself (not official media), installed once per language with
+  English last: its English, shell and vz are byte-identical to the official ones, and its
+  Loading.wad (in `canonical:repack-languages`) differs from the official one (and the demo's) only
+  in a 20-byte identifier string at `0x8271`. It ships the v1.1 executable `v11-patched-securom`.
 
 ```bash
-exemap corpus-derive base-pc-demo data/vz.wad --from Mercs2_Demo_Setup.zip --work /tmp/demo --wine <wine64>
+exemap corpus-derive base-x360-preview vz.wad --from "Mercenaries 2 Preview X360 (Jul 11 2008).iso" --work /tmp/preview
 ```
 
 `exemap lua-scripts <wad> [--dump <dir>]` lists every Lua script container of a WAD on any platform,
@@ -391,18 +392,11 @@ environment variable is consulted. The file holds one `key = "path"` per line:
 | `xbox_vz_wad` | an Xbox 360 bake (`SCFF` magic) | the qm console-bake tests |
 | `ps3_vz_wad` | a PS3 bake (`SCFF` magic) | the qm console-bake tests |
 | `unpacked_exe` | the SecuROM-unpacked executable (`mercs2_unpacked.exe`) | the qm shader-registry disassembly test |
-| `exe_corpus` | a directory of retail `Mercenaries2.exe` builds (`game-files/exe_sha256`) | the `mercs2_exemap` corpus tests |
-| `exe_dumps` | a directory of derived executables and process-image dumps (`output/_ghidra/securom_dump`) | the `mercs2_exemap` corpus tests |
-| `drmfree_exe` | the DRM-free executable (`mercs2_nodrm_v3.exe`, v1.0 code) | the `mercs2_exemap` corpus tests |
-| `v11_patcher_exe` | the official v1.1 patcher (`Mercs2 WiF v1.1 Patch/mercenaries2_patch1_na.exe`) | the `mercs2_exemap` official-patcher test |
-| `wine_binary` | the `wine64` binary that runs the patcher (Modkit's `…/Wine-Crossover-23.7.1-1/Contents/Resources/wine/bin/wine64`) | the `mercs2_exemap` official-patcher test |
+| `canonical_dir` | the canonical tree of PC builds (`game-files/canonical`): the PC installs, the archived and derived executables and the process-image dumps, each executable found by sha256 | the `mercs2_exemap` corpus, Lua corpus and `lua_sites_exes` tests |
 | `x360_devkit_iso` | the Jul 11 2008 Xbox 360 preview disc image (`Mercenaries 2 Preview X360 (Jul 11 2008).iso`) | the `mercs2_exemap` console-image test |
 | `x360_retail_xex` | the Xbox 360 retail `default.xex` (NTSC-U/J, sha256 `d5b646e7…`) | the `mercs2_exemap` console-image test |
 | `ps3_eboot_bin` | the PS3 disc's `EBOOT.BIN` (BLUS30056) | the `mercs2_exemap` console-image test |
 | `ps3_update_pkgs` | a directory of the PS3 v1.03 update `.pkg` files (NA, EU, DE) | the `mercs2_exemap` console-image test and Lua corpus test |
-| `pc_demo_zip` | the public PC demo, `Mercs2_Demo_Setup.zip` (sha256 `9d32195d…`) | the `mercs2_exemap` Lua corpus test |
-| `pc_official_install_dir` | the official PC install directory, as EA's download manager installs it | the `mercs2_exemap` Lua corpus test |
-| `pc_repack_install_dir` | the ElAmigos repack install directory (every language, English last) | the `mercs2_exemap` Lua corpus test |
 | `x360_retail_dir` | the Xbox 360 retail disc dump directory (`…(NTSCU)[NTSCJ) (JTAGRip)`) | the `mercs2_exemap` Lua corpus test |
 | `x360_dlc_biua_stfs` | the retail Xbox LIVE Blow It Up Again Pack package (`45410828/00000002/86ABF01D…`) | the `mercs2_exemap` Lua corpus test |
 | `x360_dlc_prototypes_dir` | the directory of zipped Xbox 360 DLC prototype packages | the `mercs2_exemap` Lua corpus test |
@@ -420,7 +414,7 @@ environment variable is consulted. The file holds one `key = "path"` per line:
 | `lua51_src_dir` | the pristine Lua 5.1 `src` tree | the `mercs2_luac` vendor-integrity test |
 
 `scripts/find-vz-wad.sh --write` writes `vz_wad` only, and rewrites the whole file, so
-the console keys, `unpacked_exe`, the three executable keys, the patcher keys, the console-image keys, the corpus keys and the tool keys are added by hand after it runs. The
+the console keys, `unpacked_exe`, `canonical_dir`, the console-image keys, the corpus keys and the tool keys are added by hand after it runs. The
 tool keys (`rainbow_table` through `lua51_src_dir`) name files outside this repository; each
 worktree reads them from its own config. When the file, a key a test needs,
 or the file that key names is missing, the test fails with a message naming the file
@@ -429,16 +423,9 @@ Two shapes exist: integration test targets declared
 `required-features = ["retail"]`, and unit tests that need a crate's private items,
 kept in src/ inside a `#[cfg(feature = "retail")] mod retail`. `cargo xtask
 retail-test` selects both from `cargo metadata`; extra arguments go to
-`cargo nextest run` (e.g. `cargo xtask retail-test --no-capture`).
-
-The official-patcher test reproduces the `v11-official-securom` recipe: it copies
-`archived-2-disk-dump` from `exe_corpus` into a temporary install folder, creates a throwaway
-`WINEPREFIX` in the system temp dir, imports the one registry value the patcher reads
-(`HKLM\SOFTWARE\WOW6432Node\EA Games\Mercenaries 2 World in Flames\Install Dir` = the
-install folder) with `wine64 reg import`, runs the patcher with the install folder as its
-working directory, and requires the patched `Mercenaries2.exe` to be `v11-official-securom`
-and `BACKUP\Mercenaries2.A###.exe` to be the input. It stops the prefix's `wineserver` and
-removes the folder and prefix afterwards.
+`cargo nextest run` (e.g. `cargo xtask retail-test --no-capture`). No game-gated test runs a game
+executable or an installer: the PC builds and installs are read from the canonical tree and
+checked by sha256.
 
 CI runs on every pull request ([.github/workflows/ci.yml](.github/workflows/ci.yml)):
 it runs the full workspace under nextest plus doctests (without the `retail` feature,
