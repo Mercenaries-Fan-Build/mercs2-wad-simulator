@@ -1,19 +1,20 @@
 //! `corpora.tsv` / `wads.tsv` against the original files.
 //!
 //! Game-gated: built by the `retail` feature, run with `cargo xtask retail-test`. The originals are
-//! found only through the repo-root `.mercs2-local.toml` keys `pc_demo_zip` (the public PC demo
-//! archive), `wine_binary` (the `wine64` that runs its installer), `pc_official_install_dir` (the
-//! official PC install), `pc_repack_install_dir` (the ElAmigos repack install), `x360_devkit_iso`
-//! (the Xbox 360 preview disc), `x360_retail_dir` (the Xbox 360 retail disc dump),
-//! `x360_dlc_biua_stfs` (the retail Blow It Up Again Pack), `x360_dlc_prototypes_dir` (the zipped
-//! DLC prototypes), `ps3_disc_iso` (the PS3 NA disc image), `ps3_jp_disc_dir` (the PS3 Japanese disc dump), `ps3_de_disc_dir` (the PS3 German disc dump), `ps3_eu_disc_dir` (the PS3 European disc dump), `ps3_update_pkgs` (the folder of PS3
-//! update packages) and `ps3_dlc_biua_pkg` (the PS3 NA Blow It Up Again Pack); a missing key or path
-//! fails the test naming it.
+//! found only through the repo-root `.mercs2-local.toml` keys `canonical_dir` (the canonical tree
+//! of PC builds, which holds the PC installs and the PC images), `x360_devkit_iso` (the Xbox 360
+//! preview disc), `x360_retail_dir` (the Xbox 360 retail disc dump), `x360_dlc_biua_stfs` (the
+//! retail Blow It Up Again Pack), `x360_dlc_prototypes_dir` (the zipped DLC prototypes),
+//! `ps3_disc_iso` (the PS3 NA disc image), `ps3_jp_disc_dir` (the PS3 Japanese disc dump),
+//! `ps3_de_disc_dir` (the PS3 German disc dump), `ps3_eu_disc_dir` (the PS3 European disc dump),
+//! `ps3_update_pkgs` (the folder of PS3 update packages) and `ps3_dlc_biua_pkg` (the PS3 NA Blow It
+//! Up Again Pack); a missing key or path fails the test naming it. Nothing is run.
 //!
-//! Every WAD of the PC demo corpus is rebuilt from the demo archive, with every intermediate sha256
-//! checked, in a fresh work directory under the system temp directory; every WAD with an `install`
-//! column (the PC retail and repack corpora, the Xbox 360 retail dump, the PS3 Japanese, German and European dumps) is
-//! checked in place in the install that column names.
+//! Every WAD with an `install` column (the PC demo, retail and repack corpora under
+//! `canonical_dir`, the Xbox 360 retail dump, the PS3 Japanese, German and European dumps) is
+//! checked in place in the install that column names; every other WAD is rebuilt from its
+//! container, with every intermediate sha256 checked, in a fresh work directory under the system
+//! temp directory.
 //!
 //! Every catalogued corpus is also indexed (`luaindex::index`, which decodes every Lua chunk and
 //! requires it to re-encode byte for byte) once per test run, from its WADs checked in place or
@@ -21,8 +22,8 @@
 //! function and script counts, the pairings of the corpora of one lineage (`luapair::pair`), and the
 //! links of the PC and Xbox 360 retail corpora to their images' Lua registration tables
 //! (`lualink::link` over `luareg::tables`). The images are the PC v1.1 image `pc-v11`, found by
-//! sha256 among the files of the `exe_dumps` key, and the Xbox 360 retail image `x360-retail`,
-//! rebuilt from the `x360_retail_xex` key's `default.xex`.
+//! sha256 in the canonical tree, and the Xbox 360 retail image `x360-retail`, rebuilt from the
+//! `x360_retail_xex` key's `default.xex`.
 
 use std::path::Path;
 
@@ -30,49 +31,39 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
-use mercs2_exemap::corpus::{check_installed, derive, file_sha256, Corpora, Corpus, Env};
+use mercs2_exemap::canonical::builds_by_sha;
+use mercs2_exemap::corpus::{check_installed, derive, file_sha256, Corpora, Corpus, Env, Install};
 use mercs2_exemap::images::Images;
 use mercs2_exemap::luaindex::{index, FnRow};
 use mercs2_exemap::lualink::{link, Link};
 use mercs2_exemap::luapair::{pair, Pairing};
 use mercs2_exemap::luareg::tables;
-use mercs2_exemap::{sha256_hex, Catalogue};
+use mercs2_exemap::Catalogue;
 use mercs2_formats::game_paths::{
-    local_config_exe_dumps, local_config_pc_demo_zip, local_config_pc_official_install_dir, local_config_pc_repack_install_dir,
-    local_config_ps3_de_disc_dir, local_config_ps3_disc_iso, local_config_ps3_dlc_biua_pkg, local_config_ps3_eu_disc_dir, local_config_ps3_jp_disc_dir, local_config_ps3_update_pkgs, local_config_wine_binary, local_config_x360_devkit_iso, local_config_x360_dlc_biua_stfs,
-    local_config_x360_dlc_prototypes_dir, local_config_x360_retail_dir, local_config_x360_retail_xex,
+    local_config_canonical_dir, local_config_ps3_de_disc_dir, local_config_ps3_disc_iso, local_config_ps3_dlc_biua_pkg,
+    local_config_ps3_eu_disc_dir, local_config_ps3_jp_disc_dir, local_config_ps3_update_pkgs, local_config_x360_devkit_iso,
+    local_config_x360_dlc_biua_stfs, local_config_x360_dlc_prototypes_dir, local_config_x360_retail_dir,
+    local_config_x360_retail_xex,
 };
 
 fn start() -> &'static Path {
     Path::new(env!("CARGO_MANIFEST_DIR"))
 }
 
-#[test]
-fn every_pc_demo_wad_rebuilds_from_the_demo_archive() {
-    let corpora = Corpora::embedded().unwrap_or_else(|e| panic!("embedded corpus tables: {e}"));
-    let zip = local_config_pc_demo_zip(start()).unwrap_or_else(|e| panic!("{e}"));
-    let wine = local_config_wine_binary(start()).unwrap_or_else(|e| panic!("{e}"));
-    let work = std::env::temp_dir().join("mercs2_exemap_lua_corpus_pc_demo");
-    std::fs::remove_dir_all(&work).ok();
-    let env = Env { wine: Some(wine), work: work.clone() };
-    let mut n = 0;
-    for wad in corpora.wads_of("base-pc-demo") {
-        derive(wad, &zip, &env).unwrap_or_else(|e| panic!("{e}"));
-        n += 1;
-    }
-    assert_eq!(n, 4, "base-pc-demo lists four WADs");
-    std::fs::remove_dir_all(&work).ok();
+fn canonical_dir() -> PathBuf {
+    local_config_canonical_dir(start()).unwrap_or_else(|e| panic!("{e}"))
 }
 
-fn install_dir(key: &str) -> std::path::PathBuf {
-    let r = match key {
-        "pc_official_install_dir" => local_config_pc_official_install_dir(start()),
-        "pc_repack_install_dir" => local_config_pc_repack_install_dir(start()),
-        "x360_retail_dir" => local_config_x360_retail_dir(start()),
-        "ps3_jp_disc_dir" => local_config_ps3_jp_disc_dir(start()),
-        "ps3_de_disc_dir" => local_config_ps3_de_disc_dir(start()),
-        "ps3_eu_disc_dir" => local_config_ps3_eu_disc_dir(start()),
-        other => panic!("wads.tsv names install key {other}, which this test does not resolve"),
+fn install_dir(install: &Install) -> PathBuf {
+    let r = match install {
+        Install::Canonical(dir) => return canonical_dir().join(dir),
+        Install::Key(key) => match key.as_str() {
+            "x360_retail_dir" => local_config_x360_retail_dir(start()),
+            "ps3_jp_disc_dir" => local_config_ps3_jp_disc_dir(start()),
+            "ps3_de_disc_dir" => local_config_ps3_de_disc_dir(start()),
+            "ps3_eu_disc_dir" => local_config_ps3_eu_disc_dir(start()),
+            other => panic!("wads.tsv names install key {other}, which this test does not resolve"),
+        },
     };
     r.unwrap_or_else(|e| panic!("{e}"))
 }
@@ -81,11 +72,16 @@ fn check_corpus(corpus: &str, expect: usize) {
     let corpora = Corpora::embedded().unwrap_or_else(|e| panic!("embedded corpus tables: {e}"));
     let mut n = 0;
     for wad in corpora.wads_of(corpus) {
-        let key = wad.install.as_deref().unwrap_or_else(|| panic!("{corpus} {} has a chain, not an install", wad.name));
-        check_installed(wad, &install_dir(key)).unwrap_or_else(|e| panic!("{e}"));
+        let install = wad.install.as_ref().unwrap_or_else(|| panic!("{corpus} {} has a chain, not an install", wad.name));
+        check_installed(wad, &install_dir(install)).unwrap_or_else(|e| panic!("{e}"));
         n += 1;
     }
     assert_eq!(n, expect, "{corpus} lists {expect} WADs");
+}
+
+#[test]
+fn every_pc_demo_wad_is_in_the_demo_install() {
+    check_corpus("base-pc-demo", 4);
 }
 
 #[test]
@@ -128,7 +124,7 @@ fn derive_all(what: &str, select: impl Fn(&Corpus) -> bool, containers: Vec<Path
     }
     let work = std::env::temp_dir().join(format!("mercs2_exemap_lua_corpus_{what}"));
     std::fs::remove_dir_all(&work).ok();
-    let env = Env { wine: None, work: work.clone() };
+    let env = Env { work: work.clone() };
     let mut n = 0;
     for wad in corpora.wads.iter().filter(|w| select(corpora.corpus(&w.corpus).expect("every WAD names a listed corpus"))) {
         let head = &wad.chain[0].from_sha256;
@@ -210,7 +206,6 @@ fn indexes() -> &'static BTreeMap<String, Vec<FnRow>> {
 fn build_indexes() -> BTreeMap<String, Vec<FnRow>> {
     let corpora = Corpora::embedded().unwrap_or_else(|e| panic!("embedded corpus tables: {e}"));
     let mut files = vec![
-        local_config_pc_demo_zip(start()).unwrap_or_else(|e| panic!("{e}")),
         local_config_x360_devkit_iso(start()).unwrap_or_else(|e| panic!("{e}")),
         local_config_x360_dlc_biua_stfs(start()).unwrap_or_else(|e| panic!("{e}")),
         local_config_ps3_disc_iso(start()).unwrap_or_else(|e| panic!("{e}")),
@@ -222,16 +217,15 @@ fn build_indexes() -> BTreeMap<String, Vec<FnRow>> {
     for p in files {
         containers.insert(file_sha256(&p).unwrap_or_else(|e| panic!("{e}")), p);
     }
-    let wine = local_config_wine_binary(start()).unwrap_or_else(|e| panic!("{e}"));
     let work = std::env::temp_dir().join("mercs2_exemap_lua_corpus_index");
     std::fs::remove_dir_all(&work).ok();
-    let env = Env { wine: Some(wine), work: work.clone() };
+    let env = Env { work: work.clone() };
     let mut out = BTreeMap::new();
     for c in &corpora.corpora {
         let mut paths = Vec::new();
         for wad in corpora.wads_of(&c.id) {
             let path = match &wad.install {
-                Some(key) => check_installed(wad, &install_dir(key)),
+                Some(install) => check_installed(wad, &install_dir(install)),
                 None => {
                     let head = &wad.chain[0].from_sha256;
                     let container = containers.get(head).unwrap_or_else(|| {
@@ -403,19 +397,11 @@ fn images() -> Images {
 fn the_pc_retail_lookups_link_to_the_pc_v11_registration_tables() {
     let images = images();
     let m = images.image("pc-v11").expect("images.tsv lists pc-v11");
-    let dir = local_config_exe_dumps(start()).unwrap_or_else(|e| panic!("{e}"));
-    let mut image = None;
-    for entry in std::fs::read_dir(&dir).unwrap_or_else(|e| panic!("list {}: {e}", dir.display())) {
-        let p = entry.unwrap_or_else(|e| panic!("list {}: {e}", dir.display())).path();
-        if p.is_file() {
-            let bytes = std::fs::read(&p).unwrap_or_else(|e| panic!("read {}: {e}", p.display()));
-            if sha256_hex(&bytes) == m.sha256 {
-                image = Some(bytes);
-                break;
-            }
-        }
-    }
-    let image = image.unwrap_or_else(|| panic!("pc-v11 (sha256 {}) is not in the exe_dumps directory {}", m.sha256, dir.display()));
+    let catalogue = Catalogue::embedded().unwrap_or_else(|e| panic!("embedded catalogue: {e}"));
+    let dir = canonical_dir();
+    let files = builds_by_sha(&catalogue, &dir).unwrap_or_else(|e| panic!("{e}"));
+    let path = files.get(&m.sha256).unwrap_or_else(|| panic!("pc-v11 (sha256 {}) is not under {}", m.sha256, dir.display()));
+    let image = std::fs::read(path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
     assert_eq!(link_counts("base-pc-retail", &image, "pc-v11"), (1902, 719, 0, 46, 1137));
 }
 
