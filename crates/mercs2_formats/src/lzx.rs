@@ -1,7 +1,7 @@
 //! Microsoft LZX decompressor (the variant used by Xbox 360 XEX / WIM).
 //!
-//! Decodes a single continuous stream (no CAB chunk framing: the XEX block layer has already
-//! concatenated the chunks), following libmspack's `lzxd.c`:
+//! Decodes a single continuous stream (no CAB chunk framing; the input is the XEX block layer's
+//! concatenated chunks), following libmspack's `lzxd.c`:
 //!
 //! - Output is produced in 32,768-byte frames. A frame never ends inside a symbol, and after each
 //!   frame the input bitstream is realigned to the next 16-bit word.

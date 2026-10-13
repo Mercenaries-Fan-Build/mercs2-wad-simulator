@@ -1,5 +1,4 @@
-//! Which leading bytes do the blocks of a WAD start with, and are the non-deflate ones stored
-//! at their decompressed size? Tallies, per WAD given, the first four bytes of every INDX block
+//! Tallies, per WAD given, the first four bytes of every INDX block
 //! (printable as text when they are ASCII) with how many of those blocks have
 //! `compressed_page_count == decompressed_page_count`, plus one example block index per magic.
 //!

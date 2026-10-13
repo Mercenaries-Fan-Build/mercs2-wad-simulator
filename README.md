@@ -56,8 +56,8 @@ in the catalogue. `E` (PE timestamp `0x48cae190`) is v1.1: `v11-official-securom
 official v1.1 patcher (sha256 `b27fedc2…`, one file for all four regions) writes from
 `v10-unsigned`, and `v11-official-unwrapped`, the same code with the SecuROM wrapper removed.
 `D` (PE timestamp `0x48cb59e8`, 13 Sep 2008) is the PC demo: `demo-official-securom`, the
-`Merc2-Demo.exe` that `Mercs2_Demo_Setup.exe` extracts, wrapped like the retail files; how its code
-relates to 1.0 and 1.1 is not established. `builds.tsv` records each build's `code_version`; `aliases.tsv` maps other ids for a build,
+`Merc2-Demo.exe` that `Mercs2_Demo_Setup.exe` extracts, wrapped like the retail files.
+`builds.tsv` records each build's `code_version`; `aliases.tsv` maps other ids for a build,
 including the ones Modkit uses, to its canonical id, and `identify` prints the canonical id.
 
 Every table under `crates/mercs2_exemap/data/` is tab-separated with one exact header line, and no
@@ -80,7 +80,7 @@ It also takes in the console executables for disassembly:
   undoes its compression (LZX through `mercs2_formats::lzx`). A key that does not fit the file is
   an error naming the key.
 - `exemap ghidra-pe <pe> --out <pe>` rewrites an Xbox 360 image's section headers to its RVA
-  layout, which Ghidra's PE loader needs.
+  layout.
 - `exemap starts <image> --out <list>` writes one hex VA per line: the `.pdata` starts of an Xbox
   360 PE (every executable section, `.text` and `BINK`), or the `.opd` descriptor code addresses of
   a PS3 PPU ELF (found from the entry descriptor). The list seeds Ghidra's `CreateFunctions.java`.
@@ -114,8 +114,8 @@ each with the Ghidra language and load base it is analysed with. Each PC row nam
 (`dump-v10-pmcbb-unpacked`, `dump-v11-securom-unpacked`), and `pc-v10-drmfree` is the DRM-free
 v1.0 executable `v10-drmfree-laa` (`mercs2_nodrm_v3.exe`, the `drmfree_exe` key), which
 `securom_unwrap::unwrap` builds from `v10-cracked-pmcbb` with the large-address-aware flag set. It
-has no `code_image`: the `pc-v10` dump carries three `.text` hot-patches and runtime bytes in
-`.securom` that this file does not (`overlays.tsv`). Each console row carries the chain that
+has no `code_image`; the `pc-v10` dump differs from it by three `.text` hot-patches and runtime
+bytes in `.securom` (`overlays.tsv`). Each console row carries the chain that
 rebuilds it from its original container (a file from the Xbox disc, `xex`, `ghidra-pe`; a PSN
 package entry, `unself`), and `exemap derive` replays it, checking every sha256 on the way. A
 regional build whose executable sections and function starts match another image byte for byte
@@ -155,8 +155,8 @@ for the Lua libraries (`_G`, `coroutine`, `string`, `table`), so those tables ar
 platform.
 
 `crates/mercs2_exemap/data/corpora.tsv` catalogues the Lua corpus by product (`base`, `demo`,
-`patch`, `dlc:<name>`), platform and build, a patch or DLC naming the corpus it applies to, so
-scripts are only compared within one product. `wads.tsv` lists each corpus WAD by sha256 with the
+`patch`, `dlc:<name>`), platform and build, a patch or DLC naming the corpus it applies to;
+scripts are compared only within one product. `wads.tsv` lists each corpus WAD by sha256 with the
 chain that rebuilds it from the original file: `zip:<entry>`, `wine-sfx:<path>` (a self-extracting
 installer run silently under Wine), `wine-extrac32:<entry>` (a cabinet extracted by Wine),
 `xdvdfs:<path>` (a file from an Xbox disc image), `stfs:<name>` (a file from an Xbox 360 STFS
@@ -196,7 +196,7 @@ exemap corpus-derive base-pc-demo data/vz.wad --from Mercs2_Demo_Setup.zip --wor
 one row per container: its block, entry, name hash, script name (from the INFO record), function and
 instruction counts, whether the chunk keeps debug information, block path, and each descriptor's tag
 and size; `--dump` also writes each descriptor body to a file. Scripts are found by their entry
-type in every block, so no block is named in advance. Each container's checksum is verified; the
+type in every block. Each container's checksum is verified; the
 one exception is the last container of a block stored uncompressed (every block of the Japanese PS3
 disc), whose trailer is eight zero bytes. Every chunk is decoded (`luachunk`: Lua 5.1, little-endian
 on PC, big-endian on console) and must re-encode to its exact bytes, or the command fails. The
@@ -219,8 +219,8 @@ field such as an event id or a sub-table.
 content. Scripts pair by name hash (a script that several WADs of one corpus carry with the same
 code counts once). Inside a script the two main functions pair, then every function whose code and
 constants fingerprints are unique on both sides, then the nested functions of each pair are aligned
-in order along a longest common subsequence of their code fingerprints, so an inserted or removed
-function does not shift its siblings; equal-length runs between aligned children pair in order.
+in order along a longest common subsequence of their code fingerprints; equal-length runs between
+aligned children pair in order.
 Each pair is `identical`, `identical-debug-differs` (one side strips debug information),
 `constants-differ` or `code-differs`; every other function is `only-a`/`only-b` and every other
 script `script-only-a`/`script-only-b`. Across the retail builds, the PC and Japanese PS3 scripts
@@ -232,12 +232,11 @@ revisions differ in about 1,000 functions.
 export through an image's `luareg` export, by namespace and entry name: `resolved` (one native
 function), `ambiguous` (several), `unregistered-in-native-namespace` (the namespace is registered
 natively, the name is not — mostly event ids, constants and sub-tables) or `lua-namespace` (no
-native table carries that namespace: a table the scripts build themselves). The last class is only
-as complete as the export's namespace names, so the command prints how many the export names and
-refuses an export that names none. Each retail script set resolves about 660–680 distinct lookups
+native table carries that namespace: a table the scripts build themselves). The command prints how
+many namespaces the export names and refuses an export that names none. Each retail script set resolves about 660–680 distinct lookups
 to native functions (PC 719 against `pc-v11`, Xbox 360 664, the PS3 discs 676–677).
 
-`cargo xtask retail-test` locks these results in: `tests/lua_corpus.rs` indexes every catalogued
+`cargo xtask retail-test` checks these results: `tests/lua_corpus.rs` indexes every catalogued
 corpus (every chunk decodes and re-encodes), checks each corpus's function and script counts, the
 pairing counts of the same-lineage corpora, and the PC and Xbox 360 retail lookup links computed
 from the `pc-v11` and `x360-retail` images' registration tables.
@@ -252,8 +251,7 @@ around the destructor, which itself stays unpaired), `lua` (same namespace and
 binding, or a binding name unique in each image), `bytes` (a masked-bytes hash unique in each
 image), `string` (a string referenced by exactly one function in each image) and `callee`
 (positional callees of accepted pairs whose call lists agree with every accepted pair). `bytes`
-and `callee` apply only between images analysed with the same Ghidra language: across compilers,
-inlining shifts call lists. `callee` pairs only direct callees that are function starts (keys of
+and `callee` apply only between images analysed with the same Ghidra language. `callee` pairs only direct callees that are function starts (keys of
 each image's fnsig export). Two aligned call-list entries agree when both are imports
 (`ext:<library>!<name>`) with exactly the same library and name, both are PS3 system calls
 (`sys:<N>`) with the same number, or both are indirect (`*0x…` a call through a memory slot,
@@ -262,8 +260,8 @@ whatever their operand; imports and system calls are never paired. A pair is acc
 when neither function has another candidate and it is corroborated: a pair whose only evidence is
 `string` needs a second distinct such string, or any of `vtable`, `lua`, `bytes`, `callee` or
 `anchor`. Every other candidate is written to the conflicts file, unresolved; a sole candidate that
-is not corroborated is written there too, as an `uncorroborated` row. `data/anchors.tsv` holds pairs
-verified by reading both decompiles. Anchors are always applied (naming `anchor` in `--evidence` is
+is not corroborated is written there too, as an `uncorroborated` row. `data/anchors.tsv` holds function
+pairs between images, each with its `verified_by` note. Anchors are always applied (naming `anchor` in `--evidence` is
 an error): an anchor between the two images adds `anchor` evidence to the candidate it names, which
 corroborates it, but never creates a candidate or resolves a conflict. `match` reports how the
 anchors fared and fails when an accepted pair contradicts one.
@@ -422,9 +420,8 @@ environment variable is consulted. The file holds one `key = "path"` per line:
 
 `scripts/find-vz-wad.sh --write` writes `vz_wad` only, and rewrites the whole file, so
 the console keys, `unpacked_exe`, the three executable keys, the patcher keys, the console-image keys, the corpus keys and the tool keys are added by hand after it runs. The
-tool keys (`rainbow_table` through `lua51_src_dir`) name files that live outside this repository,
-so every worktree, wherever it is checked out, reads them from its own config rather than from a
-path relative to the checkout. When the file, a key a test needs,
+tool keys (`rainbow_table` through `lua51_src_dir`) name files outside this repository; each
+worktree reads them from its own config. When the file, a key a test needs,
 or the file that key names is missing, the test fails with a message naming the file
 and the key.
 Two shapes exist: integration test targets declared

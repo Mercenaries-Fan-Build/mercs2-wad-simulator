@@ -93,9 +93,7 @@ pub fn check_wad(path: &Path) -> Result<String, String> {
 
 /// Does this directory hold a usable reference bundle? It must be a complete bundle (it holds
 /// [`crate::index::BUNDLE_MANIFEST`], the only kind of folder [`crate::index::data_home`] accepts)
-/// with a readable `names.bin`. Reports the name count, which is the number that matters: a
-/// `workshop_data/` with no `names.bin` is the exact failure that shipped every asset and every
-/// BONE as a bare `0x…`.
+/// with a readable `names.bin`. Reports the name count.
 pub fn check_data_dir(path: &Path) -> Result<String, String> {
     if !path.join(crate::index::BUNDLE_MANIFEST).is_file() {
         return Err(format!(

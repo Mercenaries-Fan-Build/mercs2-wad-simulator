@@ -55,7 +55,7 @@ leading `_` before hashing (the `_dm`/`_nm`/`_sm` texture-suffix convention), so
 | `--block-strings <blk>` | block index | No | Prints printable ASCII runs (≥5 chars) from a decompressed block — pairs with `--hash-file` for hash-hunting names embedded in game data. Unparseable `blk` becomes `0`. Opens the overlay stack but decompresses **only the base WAD (`wads[0]`)**. |
 | `--hash <names…>` | one or more | consumes rest | m2-hashes every following argument and prints `0xHASH  name`. Consumes ALL remaining args. Does not open the WAD (but WAD resolution must still succeed — see `--wad`). |
 | `--hash-file <file>` | one file | No | m2-hashes every non-empty line of `file`. Same WAD-resolution caveat as `--hash`. |
-| `--pack-data [dir]` | optional dir | No | Builds the redistributable `workshop_data/` reference bundle (packed `names.bin`, registry CSVs, ECS schemas, decompiled Lua, and the five files committed in the repo's `workshop_data/`: `ess_api.json`, `ess_natives.json`, `ess_nodes.json`, `ecs_registry.tsv`, `audio_manifest.json`) and writes its `manifest.json` last. `dir` defaults to `workshop_data`; a following token starting with `--` is not consumed as the dir. In-repo sources are read from the checkout the binary was built from, not the working directory: names come from the committed `data/production_names.json`, and the five files from the committed `workshop_data/` (packing into that folder leaves them in place); a missing one of the five fails before anything is written. Every other source is named by the `notes_docs_dir` key of `.mercs2-local.toml` (and, when `production_names.json` is absent, the `rainbow_table` and `jul08_strings` keys). A missing key or source file fails before anything is written. Does not read the WAD. |
+| `--pack-data [dir]` | optional dir | No | Builds the redistributable `workshop_data/` reference bundle (packed `names.bin`, registry CSVs, ECS schemas, decompiled Lua, and the five files committed in the repo's `workshop_data/`: `ess_api.json`, `ess_natives.json`, `ess_nodes.json`, `ecs_registry.tsv`, `audio_manifest.json`) and writes its `manifest.json` last. `dir` defaults to `workshop_data`; a following token starting with `--` is not consumed as the dir. In-repo sources are read from the checkout the binary was built from: names come from the committed `data/production_names.json`, and the five files from the committed `workshop_data/` (packing into that folder leaves them in place); a missing one of the five fails before anything is written. Every other source is named by the `notes_docs_dir` key of `.mercs2-local.toml` (and, when `production_names.json` is absent, the `rainbow_table` and `jul08_strings` keys). A missing key or source file fails before anything is written. Does not read the WAD. |
 | *(no mode flag)* | — | — | Opens the GUI window (`app::run`). |
 
 ### Environment variables
@@ -82,7 +82,7 @@ is present at all, the GUI opens. There is no diagnostic for "you passed two mod
 just silently dropped.
 
 **WAD selection is global and evaluated first, before any mode.** `--wad`, `--overlay`,
-`--no-auto-patch` are read up front. Crucially, WAD *resolution* also happens up
+`--no-auto-patch` are read up front. WAD *resolution* also happens up
 front: if no `--wad` is given and no registry `vz.wad` is found, the tool exits immediately —
 including for `--hash`, `--hash-file` and `--pack-data`, which never actually read the WAD. Point
 those modes at any WAD (or install one) to get past the guard.

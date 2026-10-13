@@ -9,7 +9,7 @@
 //! rejects) — the bytecode-level disassemble/assemble avoids that.
 //!
 //! Toolchain: a `java` executable and the unluac jar, both passed in by the caller as a
-//! [`LuaTools`]. See memory: lua-bytecode-disassemble-reassemble.
+//! [`LuaTools`].
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -212,9 +212,7 @@ mod tests {
     }
 
     /// Tool paths that do not exist. A body without a LuaQ signature returns from
-    /// `convert_binn_be_to_le` before `luaq_be_to_le` checks or runs the tools, so these
-    /// paths are never touched; a conversion that did reach them would fail on the
-    /// "is not a file" check.
+    /// `convert_binn_be_to_le` before `luaq_be_to_le` checks or runs the tools.
     fn absent_tools() -> LuaTools {
         LuaTools {
             java: PathBuf::from("absent/java"),
@@ -244,7 +242,7 @@ mod tests {
         data[50..54].copy_from_slice(b"\x1bLua");
         // This runs the bytecode through unluac with the configured tools.
         let result = convert_binn_be_to_le(&data, &local_tools());
-        // We just check it doesn't crash; the junk chunk's conversion outcome is unluac's.
+        // The result is not checked; the junk chunk's conversion outcome is unluac's.
         let _ = result;
     }
 

@@ -67,8 +67,8 @@ fn identifier(mem: &Mem<'_>, va: u32) -> Option<String> {
 /// The size of a registry row `{const char* name, luaL_Reg* table, const char* init}`.
 const ROW: u32 = 12;
 
-/// The fewest consecutive rows that make a registry array. A registry is an array, so it has at
-/// least two rows; a lone `{name, table}` word pair is two adjacent pointers, not a row.
+/// The fewest consecutive rows that make a registry array; a lone `{name, table}` word pair is not
+/// a row.
 const MIN_REGISTRY_ROWS: usize = 2;
 
 /// Whether `va` points at text ended by a NUL inside one non-executable section: printable ASCII,

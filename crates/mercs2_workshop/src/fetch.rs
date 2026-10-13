@@ -1,16 +1,16 @@
 //! Reference data: fetch `mercs2-workshop-data.zip` from the release and install it.
 //!
 //! The bundle is built by CI and published as a release asset. The Workshop reads its reference
-//! data (`names.bin`, the Lua corpora, the registry rows, …) only from a complete bundle, so when
+//! data (`names.bin`, the Lua corpora, the registry rows, …) only from a complete bundle. When
 //! [`crate::index::data_home`] finds none, [`crate::index::require_data_home`] downloads and
-//! installs it automatically through [`install`] before anything that needs it loads. The Settings
-//! page's Download button runs the same install on request, replacing the downloaded copy with the
+//! installs it through [`install`] before anything that needs it loads. The Settings page's
+//! Download button runs the same install on request, replacing the downloaded copy with the
 //! latest release's.
 //!
-//! It installs into the user's cache directory, which is the LAST step of the
-//! [`crate::index::data_home`] chain — a bundle the user placed deliberately, or pointed at in
-//! Settings, always wins over one we downloaded. When the download fails, the error carries
-//! [`manual_install_help`]: where to download the bundle by hand and where to unpack it.
+//! It installs into the user's cache directory, the last step of the
+//! [`crate::index::data_home`] chain: a bundle found at any earlier step is used ahead of the
+//! downloaded one. When the download fails, the error carries [`manual_install_help`]: where to
+//! download the bundle by hand and where to unpack it.
 
 use std::io::Read;
 use std::path::{Path, PathBuf};

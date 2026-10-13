@@ -253,8 +253,8 @@ fn corpus_index(id: &str) -> &'static [FnRow] {
     indexes().get(id).unwrap_or_else(|| panic!("corpora.tsv lists no corpus {id}"))
 }
 
-/// Every corpus indexes, and its (functions, scripts) are the counts `exemap lua-index` reported;
-/// a script is one (WAD, name hash).
+/// Every corpus indexes, and its (functions, scripts) are the counts listed here; a script is one
+/// (WAD, name hash).
 #[test]
 fn every_catalogued_corpus_indexes_with_its_function_and_script_counts() {
     let want: BTreeMap<&str, (usize, usize)> = [

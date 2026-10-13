@@ -48,8 +48,7 @@ pub struct Pairs {
 }
 
 /// Parse a pairs file. `what` names it in errors. Fails on a malformed row, an unknown evidence
-/// name, and a function that occurs in two rows on the same side (the matcher accepts only 1:1
-/// pairs).
+/// name, and a function that occurs in two rows on the same side.
 pub fn parse_pairs(text: &str, what: &str) -> Result<Pairs, Error> {
     let mut lines = text.lines();
     let header = lines.next().ok_or_else(|| Error::new(format!("{what}: empty")))?;

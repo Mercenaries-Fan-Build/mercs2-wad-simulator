@@ -24,8 +24,8 @@
 //! Verified **byte-exact against all 8 retail `.profile` files**, vendored at
 //! `fixtures/saves` (e.g. `auto_6A447BF8` → `0xCA2F06BE`). Matching eight
 //! independent 32-bit values makes a coincidental fit ~`2^-256`, so this is a
-//! conclusive derivation, not a guess. That verification runs on every test run,
-//! against the committed fixtures.
+//! conclusive derivation. The tests check it on every run against the committed
+//! fixtures.
 //!
 //! The earlier "not crc32" ruling in `SAVE_FORMAT.md` tested only the
 //! **reflected** CRC-32/ISO-HDLC (zlib) model. The **non-reflected** variant is
@@ -192,8 +192,7 @@ mod tests {
     /// The same eight vendored fixtures the reader uses — see `crate::save`'s `ALL_SAVES` and
     /// `fixtures/saves/README.md`.
     ///
-    /// The module header's claim that the `ProfileHash` derivation is "verified byte-exact against all
-    /// 8 retail `.profile` files" is checked against these on every run.
+    /// The tests check the `ProfileHash` derivation byte-exact against all eight.
     use crate::game_paths::SAVE_FIXTURES as ALL_SAVES;
 
     /// Load a vendored fixture. Panics if absent: the files are committed, so a missing one is a broken

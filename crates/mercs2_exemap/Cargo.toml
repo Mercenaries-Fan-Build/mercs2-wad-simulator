@@ -5,8 +5,6 @@ edition = "2021"
 description = "Mercenaries 2 modernization — cross-build exe map: the catalogue of known Mercenaries2.exe builds, their code layouts, and a per-section layout-membership checker."
 license.workspace = true
 repository.workspace = true
-# Kept out of the crates.io release set: its tables describe retail executables and are consumed
-# from this workspace only.
 publish = false
 
 [lib]
@@ -19,23 +17,14 @@ path = "src/main.rs"
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
-# Builds are identified by sha256; builds.tsv also carries md5, checked on every identification.
 sha2 = "0.10"
 md-5 = "0.10"
-# A PS3 FNID is a SHA-1 prefix of its name; ps3_fnid_names.tsv is checked against it on load.
 sha1 = "0.10"
-# The one PE32 parser in the workspace; this crate lays its mapped-image view over it.
 securom_unwrap = { path = "../securom_unwrap" }
-# The FnMnemonicSig exports the matcher reads are JSON.
 serde_json = "1"
-# The PC demo ships as a zip; the Lua corpus chains read it.
 zip = { version = "2", default-features = false, features = ["deflate"] }
-# x86 decoding, to recognise MSVC deleting destructors in the PC images.
 iced-x86 = { version = "1", default-features = false, features = ["std", "decoder", "instr_info"] }
-# XEX2 session-key unwrap and basefile decryption (AES-128 ECB/CBC).
 aes = "0.8"
-# The LZX decoder for compressed XEX basefiles; the game-gated tests also find the corpus through
-# its repo-root .mercs2-local.toml resolvers.
 mercs2_formats = { workspace = true }
 
 [features]
@@ -45,8 +34,7 @@ mercs2_formats = { workspace = true }
 # (x360_devkit_iso, x360_retail_xex, ps3_eboot_bin, ps3_update_pkgs), and rebuild the Lua corpus
 # WADs from their originals (pc_demo_zip, wine_binary, x360_devkit_iso, x360_dlc_biua_stfs,
 # x360_dlc_prototypes_dir) or check them in place (pc_official_install_dir, pc_repack_install_dir,
-# x360_retail_dir); run
-# them with `cargo xtask retail-test`.
+# x360_retail_dir); run them with `cargo xtask retail-test`.
 retail = []
 
 [[test]]

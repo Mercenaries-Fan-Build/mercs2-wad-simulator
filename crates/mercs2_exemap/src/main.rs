@@ -84,7 +84,7 @@ enum Command {
         #[arg(long)]
         out: PathBuf,
     },
-    /// Rewrite an Xbox 360 PE image's section headers to its RVA layout, for Ghidra's PE loader.
+    /// Rewrite an Xbox 360 PE image's section headers to its RVA layout.
     GhidraPe {
         pe: PathBuf,
         #[arg(long)]

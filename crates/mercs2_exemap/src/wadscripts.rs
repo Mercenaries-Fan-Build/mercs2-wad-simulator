@@ -12,7 +12,7 @@
 //! ```
 //!
 //! A script is an entry whose `type_hash` is `mercs2_formats::types::TYPE_HASH_SCRIPT`; scripts are
-//! found by that marker in every block, so no block is named in advance. Its container is a UCFX
+//! found by that marker in every block. Its container is a UCFX
 //! container (magic `UCFX` on PC, `XFCU` on console, every field and tag in the WAD's byte order):
 //!
 //! ```text

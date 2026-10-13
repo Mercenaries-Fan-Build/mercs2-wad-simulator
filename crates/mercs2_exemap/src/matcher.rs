@@ -10,7 +10,7 @@
 //! | `lua` | the same Lua binding: the same namespace and name when both tables are named, or a name that occurs once among all bindings of each image |
 //! | `bytes` | the same masked-bytes hash (`mhash`), occurring once in each image (same Ghidra language only) |
 //! | `string` | the same referenced string, referenced by exactly one function in each image; on its own it does not accept a pair (see **corroborated** below) |
-//! | `callee` | the direct callees at the same position of an accepted pair whose call lists (in order) have the same length and agree at every position, where only two direct callees that are both function starts (keys of their image's fnsig export) form a candidate (same Ghidra language only: across compilers, inlining shifts call lists, so equal length is no alignment) |
+//! | `callee` | the direct callees at the same position of an accepted pair whose call lists (in order) have the same length and agree at every position, where only two direct callees that are both function starts (keys of their image's fnsig export) form a candidate (same Ghidra language only) |
 //! | `anchor` | a `data/anchors.tsv` row for exactly this pair of the two images (in either orientation); it is added to a candidate another rule proposed and never proposes a candidate itself. It is always applied and is not chosen in the evidence list |
 //!
 //! Every function of a fnsig export has a string `mhash` and a `callees` and a `strs` array of
@@ -20,18 +20,17 @@
 //! `*stack:<signed hex>`, a call through a function pointer held in the stack variable at that
 //! offset; and `?`, a computed target); any other entry is an error naming the export file and the
 //! function. Two aligned entries agree when both are indirect, whatever their slot address or stack
-//! offset; when both are imports with the same `<library>` and the same `<name>` (exact text: one
-//! ordinal name can be exported by two libraries); when both are system calls with the same number;
+//! offset; when both are imports with the same `<library>` and the same `<name>` (exact text);
+//! when both are system calls with the same number;
 //! or when both are direct and neither is half of an accepted pair whose other half is not the
 //! aligned entry (and, when the call lists of a `callee`-derived pair are tested, the two are not
 //! contradicted by bytes; see below). Any other combination disagrees. An import or system call is never a candidate, and
-//! neither is a direct callee that is not a function start in its image (Ghidra writes an import
-//! it cannot name as a small `0x…` number, which is no function start).
+//! neither is a direct callee that is not a function start in its image.
 //!
 //! A pair is **corroborated** when it has evidence other than `string`, or when two or more
 //! distinct strings each give it `string` evidence. A pair is **accepted** when its `a` has no
 //! other candidate, its `b` has no other candidate, and it is corroborated. An uncorroborated
-//! candidate is still a candidate: it makes a **conflict** with every other candidate of its
+//! candidate is a candidate: it makes a **conflict** with every other candidate of its
 //! functions, and when it is the only candidate of both its functions it is reported as
 //! **uncorroborated**. Every conflict is reported with all its candidates; nothing is chosen among
 //! them. `callee` candidates come from accepted pairs only (an uncorroborated pair neither proposes
@@ -64,7 +63,8 @@
 //! it is accepted only when it has no rivals: an anchored candidate with another candidate on
 //! either side stays a conflict.
 //!
-//! `data/anchors.tsv` lists pairs verified by reading both decompiles; [`check_anchors`] reports
+//! `data/anchors.tsv` lists function pairs between images, each with its `verified_by` note;
+//! [`check_anchors`] reports
 //! every accepted pair that contradicts one.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -561,7 +561,7 @@ fn add_anchors(c: &mut Candidates, anchors: &[(u32, u32)]) {
 /// Match the functions of image `a` against image `b` with the chosen evidence.
 /// `same_language` says whether both images are analysed with the same Ghidra language, i.e. built
 /// by the same compiler for the same processor; `bytes` and `callee` evidence apply only then.
-/// `anchors` are the verified pairs (image `a` function, image `b` function) of the two images
+/// `anchors` are the anchor pairs (image `a` function, image `b` function) of the two images
 /// (see [`anchor_pairs`]); each adds `anchor` evidence to the candidate it names. `evidence` must
 /// not contain `anchor`, which is always applied.
 pub fn match_images(
@@ -736,7 +736,7 @@ fn reject_callee(
     rejected.insert(k, Rejected { a: k.0, b: k.1, evidence, reason, mhash_a: x.mhash.clone(), mhash_b: y.mhash.clone() });
 }
 
-/// One row of `data/anchors.tsv`: a pair verified by reading both functions.
+/// One row of `data/anchors.tsv`: a function pair between two images, with its `verified_by` note.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Anchor {
     pub image_a: String,
@@ -785,7 +785,7 @@ pub struct AnchorCheck {
     pub agreeing: usize,
     /// Anchors neither of whose functions the outcome pairs.
     pub unmatched: usize,
-    /// Anchors the outcome contradicts, with the pair it accepted instead.
+    /// Anchors the outcome contradicts, each with the contradicting accepted pair.
     pub contradicted: Vec<(Anchor, Pair)>,
 }
 

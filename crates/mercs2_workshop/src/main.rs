@@ -2127,9 +2127,8 @@ const REPO_BUNDLE_FILES: [&str; 5] =
 
 /// The committed production lookup: `<repo>/data/production_names.json` (curated, hash-verified
 /// node/asset names), where `<repo>` is the checkout this binary was built from ([`repo_root`]).
-/// This is the authoritative, bundleable name source — it lives in THIS repo, so it needs neither
-/// the rainbow table nor the WAD. `Ok(None)` when that path is not a file; an error when it is a
-/// file that cannot be read or parsed.
+/// `Ok(None)` when that path is not a file; an error when it is a file that cannot be read or
+/// parsed.
 fn load_production_names(
     repo: &std::path::Path,
 ) -> Result<Option<std::collections::HashMap<u32, String>>, String> {
@@ -2178,8 +2177,7 @@ fn same_file(src: &std::path::Path, dst: &std::path::Path) -> Result<bool, Strin
 
 /// Copy each of [`REPO_BUNDLE_FILES`] from `src_dir` into `out`. A file whose destination already
 /// IS the source (`out` is the repo's own `workshop_data/`, as in the release workflow) is left in
-/// place: `std::fs::copy` onto itself truncates it to zero bytes. The caller checks every source
-/// exists before anything is written.
+/// place. The caller checks every source exists before anything is written.
 fn copy_repo_bundle_files(src_dir: &std::path::Path, out: &std::path::Path) -> Result<(), String> {
     for name in REPO_BUNDLE_FILES {
         let src = src_dir.join(name);
@@ -2206,13 +2204,13 @@ fn copy_repo_bundle_files(src_dir: &std::path::Path, out: &std::path::Path) -> R
 ///   ([`index::load_all_names_raw`]), which also reads the `jul08_strings` and `rainbow_table` keys
 ///   and the name corpora in `notes_docs_dir`'s `data/`.
 ///
-/// In-repo sources are read from the checkout this binary was built from ([`repo_root`]), never
-/// from the CWD: `data/production_names.json` and the [`REPO_BUNDLE_FILES`] committed in
-/// `workshop_data/`, which are copied into the bundle. A missing one of those files is an error
-/// naming it, raised before anything is written.
+/// In-repo sources are read from the checkout this binary was built from ([`repo_root`]):
+/// `data/production_names.json` and the [`REPO_BUNDLE_FILES`] committed in `workshop_data/`,
+/// which are copied into the bundle. A missing one of those files is an error naming it, raised
+/// before anything is written.
 ///
-/// `manifest.json` is written LAST: its presence is what makes `out` a complete bundle for
-/// [`index::data_home`], so an existing one is removed before anything else is written.
+/// An existing `manifest.json` is removed before anything else is written, and the new one is
+/// written last; its presence marks `out` as a complete bundle for [`index::data_home`].
 fn pack_data(
     out: &std::path::Path,
     // `None` when no game install was found. Only the raw-corpora path below needs it; the
@@ -2266,9 +2264,7 @@ fn pack_data(
     }
 
     // 1. names.bin. PREFERRED source: the committed, curated `data/production_names.json` that ships
-    // IN this repo. When it is present the pack is fully self-contained — no rainbow table and no
-    // game WAD needed, so any machine can rebuild the bundle. The raw corpora + WAD-trim path runs
-    // only when the production file is absent (i.e. when regenerating it).
+    // IN this repo. The raw corpora + WAD-trim path runs only when the production file is absent.
     let (names, full) = match load_production_names(&repo)? {
         Some(p) => {
             eprintln!("[pack] names.bin: from committed data/production_names.json ({} names)", p.len());
@@ -2320,7 +2316,7 @@ fn pack_data(
     // 3. The reference files committed in this repo's `workshop_data/`.
     copy_repo_bundle_files(&repo_bundle, out)?;
 
-    // 4. Manifest (provenance + counts, for the app's About/diagnostics) — written last.
+    // 4. Manifest (provenance + counts), written last.
     let repo_contents: String = REPO_BUNDLE_FILES.iter().map(|f| format!(", \"{f}\"")).collect();
     let manifest = format!(
         "{{\n  \"format\": 1,\n  \"names\": {},\n  \"sources\": [\"bone_name_candidates\", \"rainbow_table\", \"live_registry\"],\n  \"contents\": [\"names.bin\", \"live_registry_hashes.csv\", \"spawnable_templates.csv\", \"ecs_schemas/\", \"lua/\", \"lua_dlc/\"{repo_contents}]\n}}\n",
@@ -2379,9 +2375,8 @@ mod pack_tests {
         let _ = std::fs::remove_dir_all(&out);
     }
 
-    /// The release workflow packs INTO the repo's own `workshop_data/`, so every source is also its
-    /// destination. `std::fs::copy` of a file onto itself truncates it; the files must come through
-    /// byte-for-byte.
+    /// Packing into the source folder itself, where every source is also its destination, leaves
+    /// every file byte-for-byte intact.
     #[test]
     fn packing_into_the_source_folder_leaves_the_files_intact() {
         let src = source_dir("self");

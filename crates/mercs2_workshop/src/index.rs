@@ -361,14 +361,12 @@ impl AssetIndex {
 /// ECS schemas, the decompiled-Lua corpus. Built by `--pack-data`, resolved here so the app runs
 /// self-contained (no repo checkout needed). Resolution: `MERCS2_WORKSHOP_DATA` env, then
 /// the saved setting, then `workshop_data/` next to the exe, then a `workshop_data/` walk-up from
-/// the CWD, then the copy [`crate::fetch`] installs. The env var stays FIRST so a dev can point one
-/// run at a scratch bundle without disturbing the saved configuration; the setting sits above the
-/// positional guesses because it is the only step in the chain the user actually chose.
+/// the CWD, then the copy [`crate::fetch`] installs.
 ///
 /// A candidate counts only when it is a COMPLETE bundle: it holds [`BUNDLE_MANIFEST`], which
-/// `--pack-data` writes after every other file. A repo checkout carries a committed, partial
-/// `workshop_data/` (the Ess API, ECS registry and audio manifests, no `names.bin`) that the CWD
-/// walk-up reaches; without the manifest test that folder would be taken for the bundle.
+/// `--pack-data` writes after every other file. The committed, partial `workshop_data/` of a repo
+/// checkout (the Ess API, ECS registry and audio manifests, no `names.bin`) holds no manifest and
+/// does not count.
 ///
 /// This is the lookup alone; [`require_data_home`] adds the automatic download.
 pub fn data_home() -> Option<PathBuf> {
@@ -468,9 +466,7 @@ pub fn load_all_names_staged(
     }
     report(0.10, "bundled name pack");
     let mut names = load_names_pack(&pack)?;
-    // The CURATED ASET dictionary is applied LAST so it OVERRIDES the pack: every entry is a
-    // verified preimage of a real asset, and a brute-forced candidate in the pack must never shadow
-    // a name we actually cracked.
+    // The curated ASET dictionary is applied last and overrides the pack.
     names.extend(embedded_aset_names());
     Ok(names)
 }
@@ -618,7 +614,7 @@ pub fn load_names_pack(path: &Path) -> Result<HashMap<u32, String>, String> {
 }
 
 /// The ASET-derived name fragments under `<notes_docs_dir>/data/` (same JSON shape as the rainbow
-/// table), each a set of preimages cracked from the WAD itself rather than from a wordlist:
+/// table), each a set of preimages derived from the WAD:
 ///   `aset_discovered_names` — texture-base -> model naming convention (`X_dm` names `X`)
 ///   `aset_block_strings`    — identifiers mined out of decompressed block payloads
 ///   `aset_expanded_names`   — slot-grammar expansion of the above (road/clip/atlas families)

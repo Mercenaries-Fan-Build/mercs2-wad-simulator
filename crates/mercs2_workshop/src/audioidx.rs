@@ -11,8 +11,8 @@
 //!
 //! Bundled at `workshop_data/audio_manifest.json`, copied verbatim from the inventory the user hosts
 //! (`https://outbreak.sfo3.digitaloceanspaces.com/mercs2/manifest.json`) — vendored in, per the
-//! standing rule, rather than fetched at runtime. `--pack-data` copies it into every bundle, so a
-//! complete bundle without a readable, well-formed copy is an error naming the file.
+//! standing rule. `--pack-data` copies it into every bundle; a complete bundle without a readable,
+//! well-formed copy is an error naming the file.
 
 use std::path::Path;
 
@@ -165,8 +165,7 @@ mod tests {
     }
 
     /// ★ THE SEAM. The repo's committed `workshop_data/audio_manifest.json` must exist, parse and
-    /// carry the inventory — a change in the hosted schema (renamed fields, a different envelope)
-    /// fails here rather than at a user's boot.
+    /// carry the inventory; a renamed field or a different envelope fails this test.
     #[test]
     fn the_bundled_manifest_parses_and_carries_the_inventory() {
         let home = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../workshop_data");

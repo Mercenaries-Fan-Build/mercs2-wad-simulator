@@ -3,10 +3,8 @@
 //! The volume descriptor set starts at sector 16; each descriptor opens with its type byte and
 //! `CD001`, and the set ends at type 255. The Joliet tree is the one a supplementary descriptor
 //! (type 2) roots when its escape sequences at `+0x58` name UCS-2 (`%/@`, `%/C` or `%/E`); its names
-//! are UCS-2 big-endian. An image without one is refused. The primary tree is not read: in the PS3
-//! disc image of the catalogue it gives the three extents of `VZ.WAD` three names (`VZ.WAD;1`,
-//! `VZ~01.WAD`, `VZ~02.WAD`), where the Joliet tree names all three `VZ.WAD`. In the descriptor,
-//! `+0x80` holds the logical block size (both-endian `u16`) and `+0x9c` the root directory record.
+//! are UCS-2 big-endian. An image without one is refused. The primary tree is not read. In the
+//! descriptor, `+0x80` holds the logical block size (both-endian `u16`) and `+0x9c` the root directory record.
 //! A directory record:
 //!
 //! ```text

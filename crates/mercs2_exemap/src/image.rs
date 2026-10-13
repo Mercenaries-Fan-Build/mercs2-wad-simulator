@@ -10,7 +10,7 @@
 //!
 //! Anything that would make that view ambiguous — headers or a raw range past the end of the file,
 //! two extents that overlap, two raw ranges that overlap, a zero section alignment — is an
-//! [`Error`], never resolved by a guess.
+//! [`Error`].
 
 use std::ops::Range;
 

@@ -37,7 +37,7 @@ jobs:
       # ffmpeg (be_to_le/audio.rs) and round-trips console Lua bytecode with Java + unluac
       # (be_to_le/lua.rs). Its tests resolve ffmpeg on PATH; Java and unluac are named by the
       # `java_binary` and `unluac_jar` keys of the .mercs2-local.toml written below.
-      # The JDK is Temurin 21, the same JDK the developer machines use.
+      # The JDK is Temurin 21.
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -64,7 +64,7 @@ jobs:
           "$JAVA_HOME/bin/java" -jar tools/external/unluac/unluac.jar --help
 
       # mercs2_luac's vendor-integrity test compares the vendored Lua against pristine upstream
-      # Lua 5.1.5 `src/`, byte-identical to the developer machines' copy.
+      # Lua 5.1.5 `src/`.
       - name: Download Lua 5.1.5 source (pinned)
         env:
           LUA_URL: https://www.lua.org/ftp/lua-5.1.5.tar.gz

@@ -8,7 +8,7 @@
 //! from the original file it ships in. `from_sha256` and `step` are `;`-separated lists of equal
 //! length; step *i* turns the file with `from_sha256[i]` into the next file of the chain, and the
 //! last step yields the WAD. [`derive`] replays a chain on files in a work directory and checks
-//! every sha256 on the way. A WAD with an empty chain is catalogued from an install instead: its
+//! every sha256 on the way. A WAD with an empty chain is catalogued from an install: its
 //! `install` column names the local-config key of that install directory, where [`check_installed`]
 //! finds it by name; a WAD with a chain names no install.
 //!
@@ -268,7 +268,7 @@ impl Corpora {
 }
 
 /// Where derivations run: the `wine64` binary for the Wine steps, and a work directory for the
-/// files each step writes (reused across derivations, so one installer runs once).
+/// files each step writes (reused across derivations; one installer runs once).
 pub struct Env {
     pub wine: Option<PathBuf>,
     pub work: PathBuf,

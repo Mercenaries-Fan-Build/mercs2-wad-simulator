@@ -6,8 +6,8 @@
 //! registered under that name, [`Link::Ambiguous`] when several distinct functions are,
 //! [`Link::UnregisteredInNativeNamespace`] when the image registers the namespace but not that name,
 //! and [`Link::LuaNamespace`] when the image registers no table under that namespace at all (a table
-//! the scripts build themselves). That last class is only as complete as the export's namespace
-//! names: an export that names none is an error, and the command reports how many it names.
+//! the scripts build themselves). An export that names no namespace is an error, and the command
+//! reports how many it names.
 
 use std::collections::{BTreeMap, BTreeSet};
 

@@ -982,9 +982,9 @@ pub fn run(opts: Options) {
             return;
         }
     };
-    // Catalog NOW (instant, hashes only); the reference bundle (found, or downloaded when none is
+    // The catalog builds here (hashes only); the reference bundle (found, or downloaded when none is
     // installed — see `index::require_data_home`) loads on a background thread and lands via
-    // `apply_names`, so the window opens immediately and shows the boot screen meanwhile.
+    // `apply_names`. The window opens immediately and shows the boot screen meanwhile.
     let mut index = AssetIndex::build(&w.wads, HashMap::new());
     eprintln!(
         "[workshop] catalog: {} models, {} textures ({} wad(s))",
@@ -1229,7 +1229,7 @@ pub fn run(opts: Options) {
     let destruct_states = mercs2_destruction::live::states();
     // In-flight reference-data download from the Settings button (which replaces the downloaded
     // copy with the latest release's): the receiver while it runs, plus the latest progress line.
-    // The automatic download when no bundle is found runs on the boot thread instead.
+    // The automatic download when no bundle is found runs on the boot thread.
     let mut fetch_rx: Option<std::sync::mpsc::Receiver<crate::fetch::Event>> = None;
     let mut fetch_msg = String::new();
     // Persist the user's dragged panel widths ourselves — feeding the remembered width back as
@@ -1639,7 +1639,7 @@ pub fn run(opts: Options) {
                                 let stage = format!("loading {boot_stage}");
                                 let sw = stage.len() as f32 * 8.0 * UI_S;
                                 text_sh(&mut scene, (wpx - sw) * 0.5, hpx * 0.66, UI_S, TIP_GREEN, &stage);
-                                let ls = UI_S * 1.5; // 24px — the retail "Loading" is large + bold
+                                let ls = UI_S * 1.5; // 24px
                                 let mut oc = LOAD_ORANGE;
                                 oc[3] = 0.75 + 0.25 * (t * 2.0).sin();
                                 let lw = "Loading".len() as f32 * 8.0 * ls;

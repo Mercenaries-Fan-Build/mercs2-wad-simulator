@@ -23,16 +23,15 @@ const OVERLAYS_HEADER: &str =
 const ALIASES_HEADER: &str = "alias\tbuild_id\treason";
 
 /// The game code a build runs. Every build of a layout runs the same code version: `U` is 1.0 and
-/// `E` is 1.1, proven by the official v1.1 patcher turning `v10-unsigned` (U) into
-/// `v11-official-securom` (E); `D` is the PC demo.
+/// `E` is 1.1 (the official v1.1 patcher turns `v10-unsigned` (U) into `v11-official-securom`
+/// (E)); `D` is the PC demo.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum CodeVersion {
     /// The game as released, version 1.0.
     V1_0,
     /// The game after the official v1.1 patch.
     V1_1,
-    /// The Sep 13 2008 PC demo build (PE timestamp `0x48cb59e8`). How its code relates to 1.0 and
-    /// 1.1 is not established.
+    /// The Sep 13 2008 PC demo build (PE timestamp `0x48cb59e8`).
     Demo,
 }
 
@@ -140,7 +139,7 @@ pub enum Kind {
     /// Slots inside the import address table range `0x705000+0x69c`.
     Iat,
     /// A difference between a SecuROM-wrapped retail file and its layout reference, an unwrapped file
-    /// of the same code version, whose role in the code is not established.
+    /// of the same code version.
     Lineage,
     /// A difference in a build taken from, or built from, a running process image.
     Runtime,

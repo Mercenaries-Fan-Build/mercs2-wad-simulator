@@ -161,9 +161,9 @@ fn parse_segment_table(block_data: &[u8]) -> Result<(Endian, Vec<Segment>), Stri
 ///
 /// Every segment must decode to exactly its `uncomp_size`, and the segments together to exactly
 /// the header's `total_uncompressed`; anything else is an error naming the segment. The per-segment
-/// u16 `comp_size` is unreliable for deflate segments (it can wrap or be 0), so a deflate segment is
-/// fed the bytes from its offset up to the next segment's offset (capped at 128 KB) and the
-/// inflater consumes exactly its stream.
+/// u16 `comp_size` of a deflate segment can wrap or be 0; a deflate segment is fed the bytes from
+/// its offset up to the next segment's offset (capped at 128 KB) and the inflater consumes exactly
+/// its stream.
 pub fn decompress_sges(block_data: &[u8]) -> Result<Vec<u8>, String> {
     let (e, segments) = parse_segment_table(block_data)?;
     let target = e.u32(block_data, 8) as usize;

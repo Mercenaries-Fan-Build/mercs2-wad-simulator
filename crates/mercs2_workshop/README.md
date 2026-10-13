@@ -116,15 +116,15 @@ When none is found, the workshop downloads `mercs2-workshop-data.zip` from the l
 installs it as step 5 (`index::require_data_home`). When that fails too, the run stops with an
 error giving the release page and the folder to unpack the zip into. A complete bundle missing one
 of the five Ess / ECS / audio files, or holding a malformed one, stops the boot with an error naming
-the file. The workshop never reads the raw corpora at runtime.
+the file.
 
 `--pack-data [dir]` builds the bundle (default `workshop_data`). Its in-repo sources are read from
-the checkout the binary was built from, whatever the working directory: names come from
+the checkout the binary was built from: names come from
 `data/production_names.json`, and `ess_api.json`, `ess_natives.json`, `ess_nodes.json`,
 `ecs_registry.tsv` and `audio_manifest.json` are copied from the committed `workshop_data/`. Packing
 into that same `workshop_data/` leaves those five files in place. The rest is copied from the notes
 repo's `docs/` folder named by `notes_docs_dir` in `.mercs2-local.toml`. With no
-`production_names.json`, the names are merged from the raw corpora instead, which also reads the
+`production_names.json`, the names are merged from the raw corpora, which also reads the
 `rainbow_table` and `jul08_strings` keys. A missing key or source file stops the pack with an error
 naming it.
 
@@ -173,4 +173,4 @@ Binary crate — these are private modules, listed for orientation:
 - **`--tex-png-block` prints decoded dims, not declared dims.** One block holds one mip level, so
   the surface is usually coarser than the texture's full size.
 - **Names load from the pack only.** `workshop_data/names.bin` loads in under a second; a missing or
-  unreadable pack is an error, never a slower path.
+  unreadable pack is an error.

@@ -264,10 +264,8 @@ mod tests {
     }
 
     /// ★ THE SEAM. The repo's committed manifests (`workshop_data/ess_api.json`, `ess_natives.json`,
-    /// `ess_nodes.json`) must exist, still parse and still carry the surface the console assumes.
-    /// This is what catches a drift in Wally's library — a regeneration that renames or drops these
-    /// fails here rather than at a user's boot. Regenerate with `scripts/regen-ess-api.sh` when it
-    /// fails on a real change.
+    /// `ess_nodes.json`) must exist, parse and carry the surface the console reads; a regeneration
+    /// that renames or drops these fails this test. Regenerate with `scripts/regen-ess-api.sh`.
     #[test]
     fn the_bundled_ess_manifest_parses_and_carries_the_expected_api() {
         let home = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../workshop_data");

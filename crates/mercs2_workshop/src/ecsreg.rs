@@ -184,9 +184,8 @@ mod tests {
     }
 
     /// ★ THE SEAM (companion to the Ess one). The repo's committed `workshop_data/ecs_registry.tsv`
-    /// must exist, parse and carry the ~220 classes with their families — a regeneration that drops
-    /// or renames the registry fails here rather than at a user's boot. Regenerate with
-    /// `scripts/regen-ess-api.sh`.
+    /// must exist, parse and carry the ~220 classes with their families; a dropped or renamed
+    /// registry fails this test. Regenerate with `scripts/regen-ess-api.sh`.
     #[test]
     fn the_bundled_registry_parses_and_carries_the_classes() {
         let home = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../workshop_data");

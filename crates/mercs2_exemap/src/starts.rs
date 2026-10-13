@@ -1,4 +1,4 @@
-//! Function start addresses read from an executable's own tables, for seeding a disassembler.
+//! Function start addresses read from an executable's own tables.
 //!
 //! * **Xbox 360 PE** (machine `0x1f2`): the `.pdata` section is a table of 8-byte big-endian
 //!   records `{u32 begin_va, u32 packed_info}`, ascending, ended by a zero record or the section

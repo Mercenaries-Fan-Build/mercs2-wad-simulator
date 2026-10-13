@@ -731,8 +731,8 @@ mod tests {
 
     /// The eight retail saves these tests read, **vendored in-tree** at `fixtures/saves`.
     ///
-    /// They are committed (128 KiB total), so every test below runs unconditionally on every machine —
-    /// see `fixtures/saves/README.md`.
+    /// They are committed (128 KiB total) and every test below runs unconditionally — see
+    /// `fixtures/saves/README.md`.
     ///
     /// The set is deliberately varied: three different heroes, upgrade tiers 0 and 3, flow chains from
     /// 2 to 63 entries, and one non-ASCII slot name that exercises the UTF-16LE `save_name` path.
