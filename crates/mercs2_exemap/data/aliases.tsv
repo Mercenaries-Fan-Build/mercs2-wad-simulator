@@ -1,8 +1,10 @@
 alias	build_id	reason
+cracked-v11-cruise	archived-1-cracked-cruise	the canonical build_id names "v1.0 cracked" but the file is v1.1-derived (cracked from 7a348847); byte test at v1.0-vs-v1.1 divergent VAs shows v1.0-shape bytes at SecuROM-touched addresses — see pc_exe_build_fingerprints.md
 dump-v11-pmcbb-image	dump-v10-pmcbb-image	names v1.1; the dump is U layout, v1.0 code
 dump-v11-pmcbb-unpacked	dump-v10-pmcbb-unpacked	names v1.1; the dump is U layout, v1.0 code
 history-drmfree-v1	history-v10-drmfree-v1	names no code version; the build is U layout, v1.0 code
 history-drmfree-v2	history-v10-drmfree-v2	names no code version; the build is U layout, v1.0 code
-v11-cracked-pmcbb	v10-cracked-pmcbb	names v1.1; the build is U layout, v1.0 code
-v11-patched-drmfree	v10-drmfree-laa	names v1.1; the build is U layout, v1.0 code
-v11-securom-unwrap	v10-securom-unwrap	names v1.1; the build is U layout, v1.0 code
+v11-cracked-pmcbb	v10-cracked-pmcbb	the canonical build_id names "v1.0 cracked" but the file is v1.1-derived (cracked from 7a348847 via sibling v11_to_cracked.bspatch, pmc_bb.dll substituted); byte test at the v1.0-vs-v1.1 divergent VAs shows v1.0-shape bytes at SecuROM-touched addresses, which is why pmc_bb hot-patches work with v1.0-era offsets at those addresses
+v11-ea-signed-compact	v10-ea-signed	the canonical build_id implies v1.0 but the file wraps v1.1 game code in an EA-signed SecuROM 7.38 compact shell; proven 2026-10-14 by byte-match at the three v1.0-vs-v1.1 divergent VAs and on-disk import directory (22 unique DLLs matching v11-patched-securom)
+v11-patched-drmfree	v10-drmfree-laa	the canonical build_id names "v1.0 drmfree + LAA" but the file is a one-byte LAA flip of v10-cracked-pmcbb, which is itself v1.1-derived — see v11-cracked-pmcbb alias
+v11-securom-unwrap	v10-securom-unwrap	the canonical build_id names "v1.0 unwrap" but the file is securom_unwrap(v10-cracked-pmcbb), which is v1.1-derived — see v11-cracked-pmcbb alias
