@@ -31,7 +31,6 @@ leading `_` before hashing (the `_dm`/`_nm`/`_sm` texture-suffix convention), so
 | `--wad <path>` | path | registry-discovered `vz.wad` | See note | No | The base WAD every mode reads. If omitted, the tool looks up the installed `vz.wad` in the Windows registry. **This resolution happens before any mode dispatch: if it fails and `--wad` was not given, the tool prints an error and exits — even for modes that never open a WAD (`--hash`, `--hash-file`, `--pack-data`).** |
 | `--overlay <path>` | path | none | No | **Yes** | Opens a patch WAD *on top of* the base (the retail exe's `vz-patch.wad` last-opened-wins mechanism). Used to layer DLC-ported content (obama, sarah, DLC world blocks) into the workbench. Applied in argument order. Only consulted by the overlay-aware modes (see combining section). |
 | `--no-auto-patch` | flag | off (auto-patch on) | No | n/a | Disables the automatic loading of a `vz-patch.wad` found next to the base WAD. By default that sibling patch is auto-opened as the first overlay, exactly as the retail exe does. |
-| `--names <csv>` | path | see below | No | No | Overrides the name corpus used to resolve hashes to human names. Default is found by `default_names_csv`: env var `MERCS2_NAMES` if it points at a file, otherwise the first `docs/data/live_registry_hashes.csv` found by walking up from the CWD. Names from the CSV are merged with the embedded curated ASET dictionary and (in a repo checkout) speculative corpora. |
 
 ### Modes (choose one; each runs headless and exits)
 
@@ -56,16 +55,14 @@ leading `_` before hashing (the `_dm`/`_nm`/`_sm` texture-suffix convention), so
 | `--block-strings <blk>` | block index | No | Prints printable ASCII runs (≥5 chars) from a decompressed block — pairs with `--hash-file` for hash-hunting names embedded in game data. Unparseable `blk` becomes `0`. Opens the overlay stack but decompresses **only the base WAD (`wads[0]`)**. |
 | `--hash <names…>` | one or more | consumes rest | m2-hashes every following argument and prints `0xHASH  name`. Consumes ALL remaining args. Does not open the WAD (but WAD resolution must still succeed — see `--wad`). |
 | `--hash-file <file>` | one file | No | m2-hashes every non-empty line of `file`. Same WAD-resolution caveat as `--hash`. |
-| `--pack-data [dir]` | optional dir | No | Builds the redistributable `workshop_data/` reference bundle (packed `names.bin`, registry CSVs, ECS schemas, decompiled Lua). `dir` defaults to `workshop_data`; a following token starting with `--` is not consumed as the dir. Reads repo corpora, not the WAD. |
+| `--pack-data [dir]` | optional dir | No | Builds the redistributable `workshop_data/` reference bundle (packed `names.bin`, registry CSVs, ECS schemas, decompiled Lua, and the five files committed in the repo's `workshop_data/`: `ess_api.json`, `ess_natives.json`, `ess_nodes.json`, `ecs_registry.tsv`, `audio_manifest.json`) and writes its `manifest.json` last. `dir` defaults to `workshop_data`; a following token starting with `--` is not consumed as the dir. In-repo sources are read from the checkout the binary was built from: names come from the committed `data/production_names.json`, and the five files from the committed `workshop_data/` (packing into that folder leaves them in place); a missing one of the five fails before anything is written. Every other source is named by the `notes_docs_dir` key of `.mercs2-local.toml` (and, when `production_names.json` is absent, the `rainbow_table` and `jul08_strings` keys). A missing key or source file fails before anything is written. Does not read the WAD. |
 | *(no mode flag)* | — | — | Opens the GUI window (`app::run`). |
 
 ### Environment variables
 
 | Var | Effect |
 |-----|--------|
-| `MERCS2_NAMES` | If it points at a file, used as the default name corpus (overridden by `--names`). |
-| `MERCS2_WORKSHOP_DATA` | If it points at a directory, used as the `workshop_data` home (else the tool looks next to the exe). |
-| `MERCS2_RAINBOW` | Overrides the path to `tools/rainbow_table.json` (the 733k-hash speculative preimage table). Read by `default_rainbow_json`; consumed when `--pack-data` rebuilds the name pack in a repo checkout. If unset, the table is found by walking up from the CWD. |
+| `MERCS2_WORKSHOP_DATA` | If it points at a complete reference bundle (a directory holding `manifest.json`), used as the `workshop_data` home. Otherwise the lookup continues: the Settings data folder, `workshop_data/` next to the exe, a `workshop_data/` found walking up from the CWD, then the downloaded copy in the cache. When none is a complete bundle, the tool downloads the release bundle into the cache; if that fails it exits with the download link and the folder to unpack it into. |
 
 ## How the options combine
 
@@ -85,7 +82,7 @@ is present at all, the GUI opens. There is no diagnostic for "you passed two mod
 just silently dropped.
 
 **WAD selection is global and evaluated first, before any mode.** `--wad`, `--overlay`,
-`--no-auto-patch` and `--names` are read up front. Crucially, WAD *resolution* also happens up
+`--no-auto-patch` are read up front. WAD *resolution* also happens up
 front: if no `--wad` is given and no registry `vz.wad` is found, the tool exits immediately —
 including for `--hash`, `--hash-file` and `--pack-data`, which never actually read the WAD. Point
 those modes at any WAD (or install one) to get past the guard.
@@ -109,10 +106,10 @@ output only for overlay-aware modes, and only when that sibling file exists.
 **Sub-flags are scoped to their mode and inert elsewhere.** `--mod-group` and `--mod-out` are read
 only by `--mod-new`; `--out` only by `--export-bundle`. Passing them to any other mode has no effect.
 
-**`--names` changes labels, not resolution of your input.** The corpus is used to turn hashes into
-names in the *output* (and to enumerate/label the catalog). Your `<name|0xHASH>` argument is hashed
-independently with the built-in m2 hash regardless of `--names`, so a name you type resolves the same
-whether or not it is in the corpus — only how results are *displayed* changes.
+**Names change labels, not resolution of your input.** The reference bundle's `names.bin` (plus the
+embedded curated ASET dictionary) turns hashes into names in the *output* and labels the catalog.
+Your `<name|0xHASH>` argument is hashed independently with the built-in m2 hash, so a name you type
+resolves the same whether or not the bundle knows it — only how results are *displayed* changes.
 
 **`class:` in `--export-bundle` fans out.** `--export-bundle class:tank` selects every model whose
 inferred vehicle class matches and bundles each; a plain name/hash bundles exactly one. An empty
@@ -212,7 +209,14 @@ mercs2_workshop --wad D:/mercs2/vz.wad --pack-data workshop_data
 - **`--block-strings <blk>: <err>` / `--hash-file <f>: <err>`** — block decompression failed, or the
   hash-file could not be read. Note an unparseable block index silently becomes block `0` rather than
   erroring.
-- **`--pack-data: <err>` / `no name corpora found — run from the repo checkout`** — packing needs the
-  repo corpora (found by walking up from the CWD); a bare released binary run outside the checkout
-  cannot build the bundle. Missing individual reference files are warned-and-skipped, not fatal.
+- **`--pack-data: <err>`** — a `.mercs2-local.toml` key the pack needs (`notes_docs_dir`, and
+  `rainbow_table` / `jul08_strings` when `data/production_names.json` is absent) is missing, names a
+  path that does not exist, or one of the source files under it is missing or unreadable; or one of
+  the five files committed in the repo's `workshop_data/` is missing from the checkout the binary
+  was built from. The error names the key or the file; nothing is written.
+- **No reference bundle** — no complete `workshop_data/` was found and the download failed. The error
+  gives the release page to download `mercs2-workshop-data.zip` from and the folder to unpack it into.
+- **`workshop: <path>/<file>: <err>`** at boot — the complete bundle in use is missing, or holds a
+  malformed, `ess_api.json`, `ess_natives.json`, `ess_nodes.json`, `ecs_registry.tsv` or
+  `audio_manifest.json`. Rebuild it with `--pack-data` or download the release bundle again.
 ```

@@ -10,8 +10,8 @@ A binary crate (`cargo run -p mercs2_workshop`) that opens a winit window drivin
 the faithful path rather than an export approximation. The window is organized as workbenches; the
 one implemented today is the **asset workbench**:
 
-- browse / search every model and texture in the open WAD, with names resolved from the registry
-  dump (`index::AssetIndex`)
+- browse / search every model and texture in the open WAD, with names resolved from the reference
+  bundle's name pack (`index::AssetIndex`)
 - preview a model with its real materials, textures, orbit camera and animation clips
 - inspect layers: the HIER bone tree, per-material draw groups (isolate / hide individual
   sub-strips), full-screen texture plates
@@ -36,10 +36,9 @@ exe subsystem. What its source explicitly claims as provenance:
 - **Overlay / patch stack** — `--overlay` and the auto-loaded `vz-patch.wad` sitting next to the
   base WAD reproduce the retail exe's own patch-WAD lookup (last-opened wins). That is how
   DLC-ported content reaches the workbench.
-- **Names** — `docs/data/live_registry_hashes.csv`, ~82k names captured from the running game's
-  name-hash table (memory note `name-registry-spawn-by-hash`). A curated ASET dictionary
-  (`data/aset_names.tsv`, 18k rows generated from `docs/data/aset_names.csv`) is compiled into the
-  binary so it resolves names with no external files.
+- **Names** — the reference bundle's `names.bin`, which `--pack-data` builds from the repo's
+  `data/production_names.json`. A curated ASET dictionary (`data/aset_names.tsv`, 18k rows
+  generated from `docs/data/aset_names.csv`) is compiled into the binary and overrides the pack.
 - **Destruction state machines** — `--states` dumps the engine's own format, per
   `docs/destruction_orchestrator_format.md`, via `mercs2_formats::orchestrator`.
 - **Model injection** — publishing builds containers with
@@ -90,12 +89,44 @@ cargo run -p mercs2_workshop -- --mod-new my_tank tank_donor_name mesh.glb --mod
 
 Global options: `--wad <path>` (override registry discovery), `--overlay <path>` (repeatable,
 stacks patch WADs on top of the base), `--no-auto-patch` (suppress the automatic `vz-patch.wad`
-pickup), `--names <csv>` (override the name corpus).
+pickup).
 
 Other headless flags: `--pack-data [dir]` (assemble the redistributable `workshop_data/` reference
-bundle), `--hash <names...>` and `--hash-file <file>` (m2-hash names for hash-hunting),
+bundle; see [Reference bundle](#reference-bundle)), `--hash <names...>` and `--hash-file <file>` (m2-hash names for hash-hunting),
 `--block-strings <block>` (printable ASCII from a decompressed block), `--tex-check`, `--tex-scan`,
 `--tex-scan-blocks`, `--tex-png-block <block> <0xHASH> <out.png>`, `--import-check <file>`.
+
+## Reference bundle
+
+Everything the workshop consults that is not a game file — `names.bin`, the registry rows, the
+spawnable templates, the ECS schemas, the decompiled-Lua corpora, the Ess API reference
+(`ess_api.json`, `ess_natives.json`, `ess_nodes.json`), the ECS component registry
+(`ecs_registry.tsv`) and the captioned audio inventory (`audio_manifest.json`) — comes from one
+`workshop_data/` folder. A folder counts only when it holds the `manifest.json` that `--pack-data` writes last; a
+repo checkout's committed, partial `workshop_data/` (no `names.bin`, no manifest) never does. The
+folder is found in this order (`index::data_home`):
+
+1. `MERCS2_WORKSHOP_DATA`
+2. the Settings data folder (`data_dir` in the settings file)
+3. `workshop_data/` next to the executable
+4. `workshop_data/` in the working directory or any parent
+5. the copy downloaded into the user's cache directory (`fetch::installed_dir`)
+
+When none is found, the workshop downloads `mercs2-workshop-data.zip` from the latest release and
+installs it as step 5 (`index::require_data_home`). When that fails too, the run stops with an
+error giving the release page and the folder to unpack the zip into. A complete bundle missing one
+of the five Ess / ECS / audio files, or holding a malformed one, stops the boot with an error naming
+the file.
+
+`--pack-data [dir]` builds the bundle (default `workshop_data`). Its in-repo sources are read from
+the checkout the binary was built from: names come from
+`data/production_names.json`, and `ess_api.json`, `ess_natives.json`, `ess_nodes.json`,
+`ecs_registry.tsv` and `audio_manifest.json` are copied from the committed `workshop_data/`. Packing
+into that same `workshop_data/` leaves those five files in place. The rest is copied from the notes
+repo's `docs/` folder named by `notes_docs_dir` in `.mercs2-local.toml`. With no
+`production_names.json`, the names are merged from the raw corpora, which also reads the
+`rainbow_table` and `jul08_strings` keys. A missing key or source file stops the pack with an error
+naming it.
 
 ## Modules
 
@@ -108,8 +139,9 @@ Binary crate — these are private modules, listed for orientation:
 - `gui` — egui host: hand-rolled winit-0.29 → egui bridge + the egui-wgpu paint path.
 - `import` — foreign model import (`.obj` / `.gltf` / `.glb`) into the engine's in-memory
   `ModelData`.
-- `index` — asset catalog + the name-resolution stack (`workshop_data/names.bin`, the embedded
-  ASET dictionary, the repo corpora fallback).
+- `index` — asset catalog, reference-bundle resolution, and name resolution
+  (`workshop_data/names.bin` overlaid by the embedded ASET dictionary).
+- `fetch` — downloads and installs the release's reference bundle.
 - `luaview` — read-only Lua source viewer with a hand-rolled Lua lexer/highlighter.
 - `publish` — background-threaded mod publishing into a patch WAD, with SHA-256 + a load self-test.
 - `texenc` — CPU BC1/BC3 encode (min/max endpoint, no search) for imported images.
@@ -140,5 +172,5 @@ Binary crate — these are private modules, listed for orientation:
   BC-compressed on the fly under synthetic `m2(<file>#<n>)` hashes.
 - **`--tex-png-block` prints decoded dims, not declared dims.** One block holds one mip level, so
   the surface is usually coarser than the texture's full size.
-- **Name loading has two speeds.** `workshop_data/names.bin` (packed, sub-second) is preferred; the
-  raw repo-corpora fallback takes ~8 s. `--pack-data` builds the packed form.
+- **Names load from the pack only.** `workshop_data/names.bin` loads in under a second; a missing or
+  unreadable pack is an error.

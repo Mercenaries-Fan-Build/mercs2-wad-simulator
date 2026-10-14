@@ -1,7 +1,7 @@
 //! Rainbow table hash → name resolver.
 //!
-//! Loads `tools/rainbow_table.json` and provides fast lookup from
-//! pandemic_hash_m2 values to human-readable asset names.
+//! Loads rainbow-table JSON files (`{"pandemic_hash_m2": {"0xHEX": ["name", …]}}`) and provides
+//! fast lookup from pandemic_hash_m2 values to human-readable asset names.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -18,7 +18,7 @@ impl RainbowTable {
     pub fn load_many(paths: &[std::path::PathBuf]) -> Result<Self, Box<dyn std::error::Error>> {
         let mut merged = Self::default();
         for p in paths {
-            let t = Self::load(p)?;
+            let t = Self::load(p).map_err(|e| format!("{}: {e}", p.display()))?;
             for (hash, names) in t.m2 {
                 merged.m2.entry(hash).or_insert(names);
             }
@@ -26,29 +26,31 @@ impl RainbowTable {
         Ok(merged)
     }
 
-    /// Load from a rainbow_table.json file.
+    /// Load one rainbow-table file. A file without a `pandemic_hash_m2` object is an error.
     pub fn load(path: &Path) -> Result<Self, Box<dyn std::error::Error>> {
         let text = std::fs::read_to_string(path)?;
         let root: serde_json::Value = serde_json::from_str(&text)?;
 
+        let obj = root
+            .get("pandemic_hash_m2")
+            .and_then(|v| v.as_object())
+            .ok_or_else(|| format!("{} has no `pandemic_hash_m2` object", path.display()))?;
         let mut m2 = HashMap::new();
-        if let Some(obj) = root.get("pandemic_hash_m2").and_then(|v| v.as_object()) {
-            for (hex_key, names_val) in obj {
-                let hash = u32::from_str_radix(hex_key.trim_start_matches("0x"), 16)
-                    .unwrap_or(0);
-                if hash == 0 {
-                    continue;
-                }
-                let names: Vec<String> = match names_val.as_array() {
-                    Some(arr) => arr
-                        .iter()
-                        .filter_map(|v| v.as_str().map(String::from))
-                        .collect(),
-                    None => continue,
-                };
-                if !names.is_empty() {
-                    m2.insert(hash, names);
-                }
+        for (hex_key, names_val) in obj {
+            let hash = u32::from_str_radix(hex_key.trim_start_matches("0x"), 16)
+                .unwrap_or(0);
+            if hash == 0 {
+                continue;
+            }
+            let names: Vec<String> = match names_val.as_array() {
+                Some(arr) => arr
+                    .iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect(),
+                None => continue,
+            };
+            if !names.is_empty() {
+                m2.insert(hash, names);
             }
         }
 

@@ -1,16 +1,16 @@
-//! Self-service reference data: fetch `mercs2-workshop-data.zip` from the release and install it.
+//! Reference data: fetch `mercs2-workshop-data.zip` from the release and install it.
 //!
-//! The bundle is built by CI and published as a release asset, but a user who downloads a bare
-//! `mercs2_workshop` binary has no way to know that — and with no bundle the tool falls back to the
-//! embedded ASET dictionary alone, which is the ASSET namespace: models and textures resolve, and
-//! essentially every BONE shows as a bare `0x…`. Asking someone to find a zip on a releases page,
-//! unpack it, and drop it in the right directory is the kind of step that simply does not happen.
+//! The bundle is built by CI and published as a release asset. The Workshop reads its reference
+//! data (`names.bin`, the Lua corpora, the registry rows, …) only from a complete bundle. When
+//! [`crate::index::data_home`] finds none, [`crate::index::require_data_home`] downloads and
+//! installs it through [`install`] before anything that needs it loads. The Settings page's
+//! Download button runs the same install on request, replacing the downloaded copy with the
+//! latest release's.
 //!
-//! So the tool fetches its own. Nothing here runs on its own initiative: the download happens when
-//! the user asks for it, because a tool that reaches out to the network unprompted is a different
-//! thing from a tool that can. It installs into the user's cache directory, which is the LAST step
-//! of the [`crate::index::data_home`] chain — a bundle the user placed deliberately, or pointed at
-//! in Settings, always wins over one we downloaded.
+//! It installs into the user's cache directory, the last step of the
+//! [`crate::index::data_home`] chain: a bundle found at any earlier step is used ahead of the
+//! downloaded one. When the download fails, the error carries [`manual_install_help`]: where to
+//! download the bundle by hand and where to unpack it.
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 /// The repo publishing the release assets — the same one the modkit fetches `wad_simulator` from.
 const REPO: &str = "Mercenaries-Fan-Build/mercs2-wad-simulator";
 /// The release asset built by the workflow's "Build workshop_data reference bundle" step.
-const ASSET: &str = "mercs2-workshop-data.zip";
+pub const ASSET: &str = "mercs2-workshop-data.zip";
 /// GitHub rejects API requests without one.
 const UA: &str = "mercs2-workshop";
 /// The bundle is a few MB of text; anything past this is a hung connection, not a slow one.
@@ -52,16 +52,46 @@ pub fn installed_dir() -> Option<PathBuf> {
     Some(cache_dir()?.join("workshop_data"))
 }
 
+/// The release page a user downloads [`ASSET`] from by hand.
+pub fn release_page() -> String {
+    format!("https://github.com/{REPO}/releases/latest")
+}
+
+/// How to install the bundle by hand: the download link, the folder to unpack it into, and the
+/// Settings option that points the Workshop at a folder of the user's choosing.
+pub fn manual_install_help() -> String {
+    let settings = match crate::settings::config_path() {
+        Some(p) => format!(
+            "Settings > Reference data > Choose... (saved as `data_dir` in {})",
+            p.display()
+        ),
+        None => "Settings > Reference data > Choose...".to_string(),
+    };
+    match installed_dir() {
+        Some(dir) => format!(
+            "Download {ASSET} from {} and unpack its workshop_data folder to {}, or point {settings} at the unpacked workshop_data folder.",
+            release_page(),
+            dir.display()
+        ),
+        None => format!(
+            "Download {ASSET} from {}, unpack it, and point {settings} at the unpacked workshop_data folder.",
+            release_page()
+        ),
+    }
+}
+
 /// Download the release bundle and unpack it into [`installed_dir`], reporting progress as it goes.
 /// Blocking — run it on a thread and pipe `report` into a channel.
 pub fn download(mut report: impl FnMut(Event)) {
-    match run(&mut report) {
+    match install(&mut report) {
         Ok(p) => report(Event::Done(p)),
         Err(e) => report(Event::Failed(e)),
     }
 }
 
-fn run(report: &mut impl FnMut(Event)) -> Result<PathBuf, String> {
+/// Download the release bundle and install it into [`installed_dir`], returning that folder.
+/// Blocking. `report` receives [`Event::Progress`] lines; the outcome is the return value.
+pub fn install(report: &mut impl FnMut(Event)) -> Result<PathBuf, String> {
     let dest = installed_dir().ok_or("no cache directory on this platform")?;
 
     report(Event::Progress("finding the latest release…".into()));
@@ -86,20 +116,24 @@ fn run(report: &mut impl FnMut(Event)) -> Result<PathBuf, String> {
 
     // Unpack to a SIBLING directory first, then swap. Extracting over the live directory would
     // leave a half-written bundle behind if the process died mid-way, and a truncated names.bin
-    // fails the magic check and silently degrades to "no names" — the failure we are removing.
+    // would stop every later launch with an unreadable-pack error.
     report(Event::Progress(format!("unpacking {} KB…", zip_bytes.len() / 1024)));
     let staging = dest.with_extension("incoming");
     let _ = std::fs::remove_dir_all(&staging);
     unzip(&zip_bytes, &staging)?;
 
-    // The archive holds a top-level `workshop_data/`; lift it so `dest` IS the bundle root.
+    // The archive holds a top-level `workshop_data/`; lift it so `dest` IS the bundle root. The
+    // installed folder must pass the same completeness test [`crate::index::data_home`] applies
+    // (the `manifest.json` that `--pack-data` writes), and must carry the `names.bin` it promises.
     let root = {
         let inner = staging.join("workshop_data");
-        if inner.join("names.bin").is_file() { inner } else { staging.clone() }
+        if inner.join(crate::index::BUNDLE_MANIFEST).is_file() { inner } else { staging.clone() }
     };
-    if !root.join("names.bin").is_file() {
-        let _ = std::fs::remove_dir_all(&staging);
-        return Err("the downloaded archive has no names.bin".into());
+    for required in [crate::index::BUNDLE_MANIFEST, "names.bin"] {
+        if !root.join(required).is_file() {
+            let _ = std::fs::remove_dir_all(&staging);
+            return Err(format!("the downloaded archive has no {required}"));
+        }
     }
 
     if let Some(parent) = dest.parent() {

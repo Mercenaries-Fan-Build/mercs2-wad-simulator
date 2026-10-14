@@ -15,7 +15,7 @@ set, exactly as matched in `main()`:
 |---|---|
 | `c3-meta <out.ndjson>` | `diag::c3_meta` |
 | `placement-hashes <out.json>` | `diag::placement_hashes` |
-| `export-c3-obj [outdir]` | `diag::export_c3_obj` |
+| `export-c3-obj <outdir>` | `diag::export_c3_obj` |
 | `terrainmesh-probe [block]` | `diag::terrainmesh_probe` |
 | `terrain-probe` / `terrain-consumer` | `diag::terrain_probe` / `diag::terrain_consumer_scan` |
 | `wad-list` | `diag::wad_list` |
@@ -29,6 +29,8 @@ set, exactly as matched in `main()`:
 | `block-grep <needle>` | `diag::block_grep` |
 | `scan-hash <0xH ...>` / `find-ref <0xH ...>` | `diag::scan_hash` / `diag::find_ref` |
 | `block-probe <index>` | `diag::block_probe` |
+| `veg-census <out.json>` | `diag::veg_census` — understory coverage; writes the vegetation tag-set JSON to `out.json` |
+| `tree-census <out.json>` | `diag::tree_census` — c3-cell canopy trees; writes the per-instance list JSON to `out.json` |
 | `gfx-extract <outdir>` | `diag::gfx_extract` — writes every `cfx_pack` movie of `--wad` (the container's `data` body, verbatim) |
 | `gfx-golden <movies_dir> --md <report.md> --json <index.json>` | inventories extracted movies into the GFx golden reference set; reads files, needs no WAD |
 | `extract --model 0xHASH [out.bin]` | `wad::extract_container` → file |

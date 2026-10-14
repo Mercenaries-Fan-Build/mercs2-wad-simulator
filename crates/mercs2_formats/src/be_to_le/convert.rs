@@ -22,7 +22,7 @@
 //! # use mercs2_formats::be_to_le::convert;
 //! # fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! let be_block: Vec<u8> = vec![/* raw big-endian UCFX bytes */];
-//! let le_block = convert::convert_block(&be_block, false, None)?;
+//! let le_block = convert::convert_block(&be_block, false, None, None)?;
 //! # Ok(())
 //! # }
 //! ```
@@ -80,10 +80,13 @@ struct Descriptor {
 
 /// Convert a decompressed BE block to LE format.
 /// When `report` is `Some`, collects schema field coverage stats.
+/// `lua_tools` is the java + unluac pair that converts `BINN` (Lua bytecode) chunks; a block
+/// holding a `BINN` chunk errors when it is `None`.
 pub fn convert_block(
     be_data: &[u8],
     dry_run: bool,
     mut report: Option<&mut SchemaCoverageReport>,
+    lua_tools: Option<&lua::LuaTools>,
 ) -> Result<Vec<u8>, String> {
     if be_data.len() < 4 {
         return Err("Block too small".into());
@@ -169,7 +172,7 @@ pub fn convert_block(
         let is_ecs = entry.type_hash == TYPE_HASH_ECS_NODE
             || entry.type_hash == TYPE_HASH_WORLD_ENTITY
             || entry.type_hash == TYPE_HASH_GUIDMAP;
-        let converted = convert_container(container, is_ecs, ei, entry.type_hash, report.as_deref_mut())?;
+        let converted = convert_container(container, is_ecs, ei, entry.type_hash, report.as_deref_mut(), lua_tools)?;
         converted_containers.push(converted);
 
         offset = container_end;
@@ -218,6 +221,7 @@ fn convert_container(
     entry_idx: usize,
     type_hash: u32,
     report: Option<&mut SchemaCoverageReport>,
+    lua_tools: Option<&lua::LuaTools>,
 ) -> Result<Vec<u8>, String> {
     if container.len() < 20 {
         return Err(format!("Entry {} container too small ({})", entry_idx, container.len()));
@@ -357,7 +361,7 @@ fn convert_container(
     // disassemble→flip-endianness→reassemble round-trip (NOT a byte-swap; see
     // lua.rs). The generic pass left BINN raw BE. No-op when there is no BINN.
     if is_be {
-        apply_binn_transcode(&mut out, &descriptors, data_area_off, desc_table_end)?;
+        apply_binn_transcode(&mut out, &descriptors, data_area_off, desc_table_end, lua_tools)?;
     }
 
     // Xbox 360 terrainmesh (0x7C569307): a genuine re-encode (vertices widen to the
@@ -391,11 +395,13 @@ fn convert_container(
 /// (`lua::convert_binn_be_to_le`) and reframe the container if a body resizes.
 /// Mirrors `apply_wavebank_transcode`, generalized to multiple BINN chunks:
 /// offsets/sizes are re-read from the (possibly already-shifted) `out` table.
+/// Errors when the container holds a `BINN` chunk and `lua_tools` is `None`.
 fn apply_binn_transcode(
     out: &mut Vec<u8>,
     descriptors: &[Descriptor],
     data_area_off: usize,
     desc_table_end: usize,
+    lua_tools: Option<&lua::LuaTools>,
 ) -> Result<(), String> {
     let data_start = if data_area_off > 0 { data_area_off } else { desc_table_end };
     let binn_idxs: Vec<usize> = descriptors
@@ -411,6 +417,9 @@ fn apply_binn_transcode(
     if binn_idxs.is_empty() {
         return Ok(());
     }
+    let tools = lua_tools.ok_or(
+        "block holds BINN (Lua bytecode) chunks; converting them needs java and unluac (LuaTools)",
+    )?;
     for idx in binn_idxs {
         let row_field = 20 + idx * 20 + 4;
         let size_field = 20 + idx * 20 + 8;
@@ -424,7 +433,7 @@ fn apply_binn_transcode(
             return Err(format!("BINN body [{abs}..{old_end}] exceeds container ({})", out.len()));
         }
         let be_body = out[abs..old_end].to_vec();
-        let new_body = lua::convert_binn_be_to_le(&be_body)?;
+        let new_body = lua::convert_binn_be_to_le(&be_body, tools)?;
 
         out[size_field..size_field + 4].copy_from_slice(&(new_body.len() as u32).to_le_bytes());
         let tail = out[old_end..].to_vec();
@@ -4200,7 +4209,7 @@ mod tests {
         block.extend_from_slice(&be32(chunk_size));
         block.extend_from_slice(&container);
 
-        let out = convert_block(&block, false, None).expect("convert_block must succeed");
+        let out = convert_block(&block, false, None, None).expect("convert_block must succeed");
 
         // LE entry table row 0: [0..4]=count, [4..8]=name, [8..12]=type, [12..16]=field_c.
         assert_eq!(
@@ -4215,7 +4224,7 @@ mod tests {
         // Also confirm base-game blocks (field_c == 0) stay 0 — swapping 0 is a no-op.
         let mut block0 = block.clone();
         block0[12..16].copy_from_slice(&be32(0)); // field_c = 0
-        let out0 = convert_block(&block0, false, None).expect("convert_block must succeed");
+        let out0 = convert_block(&block0, false, None, None).expect("convert_block must succeed");
         assert_eq!(
             u32::from_le_bytes([out0[12], out0[13], out0[14], out0[15]]),
             0,
@@ -4396,7 +4405,7 @@ mod tests {
             c.extend_from_slice(&v.to_be_bytes());
         }
         c.extend_from_slice(&be_body);
-        let out = convert_container(&c, false, 0, crate::types::TYPE_HASH_EFFECT, None).expect("convert");
+        let out = convert_container(&c, false, 0, crate::types::TYPE_HASH_EFFECT, None, None).expect("convert");
         assert_eq!(&out[20..24], b"EFCT");
         let mut want = be_body;
         convert_efct_header_inplace(&mut want);

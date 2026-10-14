@@ -66,9 +66,9 @@ const VO_BANKS: &[&str] = &[
 
 #[derive(Parser)]
 struct Cli {
-    #[arg(long, default_value = r"C:\Users\Shadow\Desktop\Mercenaries 2 World in Flames\data\English.wad")]
+    #[arg(long)]
     wad: PathBuf,
-    #[arg(long, default_value = r"C:\Users\Shadow\Desktop\Mercenaries 2 World in Flames\data\Audios\vo_stream.english.pws")]
+    #[arg(long)]
     pws: PathBuf,
     #[arg(long, default_value = "output/vo_stream")]
     out: PathBuf,
@@ -132,17 +132,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let vo_stream_hash = pandemic_hash_m2("vo_stream");
 
     let rb = {
-        let t: Vec<PathBuf> = [
-            "tools/rainbow_table.json",
-            "docs/data/aset_discovered_names.json",
-            "docs/data/aset_block_strings.json",
-            "docs/data/aset_expanded_names.json",
-        ]
-        .iter()
-        .map(PathBuf::from)
-        .filter(|p| p.exists())
-        .collect();
-        RainbowTable::load_many(&t).unwrap_or_default()
+        let start = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let data = mercs2_formats::game_paths::local_config_notes_docs_dir(start)?.join("data");
+        let t: Vec<PathBuf> = vec![
+            mercs2_formats::game_paths::local_config_rainbow_table(start)?,
+            data.join("aset_discovered_names.json"),
+            data.join("aset_block_strings.json"),
+            data.join("aset_expanded_names.json"),
+        ];
+        RainbowTable::load_many(&t).map_err(|e| format!("load rainbow tables {t:?}: {e}"))?
     };
     eprintln!("rainbow: {} names", rb.len());
 

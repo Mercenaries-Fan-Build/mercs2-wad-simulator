@@ -11,13 +11,15 @@
 
 use std::collections::BTreeMap;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use mercs2_formats::be_to_le::convert::convert_block;
+use mercs2_formats::be_to_le::lua::LuaTools;
 use mercs2_formats::dlc_input::{
     decompress_be_sges, parse_be_ffcs, parse_be_indx, parse_be_pths, PAGE_SIZE,
 };
 use mercs2_formats::dlc_stfs::load_stfs_or_doh;
+use mercs2_formats::game_paths::{local_config_java_binary, local_config_unluac_jar};
 
 fn arg_str(args: &[String], key: &str) -> Option<String> {
     args.iter().position(|a| a == key).and_then(|i| args.get(i + 1).cloned())
@@ -87,6 +89,16 @@ fn hex_cap(bytes: &[u8], cap: usize) -> String {
     s
 }
 
+/// The java + unluac pair from the `java_binary` and `unluac_jar` keys of `.mercs2-local.toml`.
+/// Panics naming the missing key when either is absent.
+fn lua_tools() -> LuaTools {
+    let start = Path::new(env!("CARGO_MANIFEST_DIR"));
+    LuaTools {
+        java: local_config_java_binary(start).unwrap_or_else(|e| panic!("{e}")),
+        unluac: local_config_unluac_jar(start).unwrap_or_else(|e| panic!("{e}")),
+    }
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let ps3 = arg_str(&args, "--ps3").expect("--ps3 <scff>");
@@ -119,6 +131,7 @@ fn main() {
     let mut ps3_fail = 0usize;
     let mut xbox_fail = 0usize;
 
+    let lua_tools = lua_tools();
     for p3 in &ps3_blocks {
         let Some(xb) = x_map.get(&p3.path) else {
             continue;
@@ -131,14 +144,14 @@ fn main() {
             0
         };
 
-        let p3_out = match convert_block(&p3.raw, false, None) {
+        let p3_out = match convert_block(&p3.raw, false, None, Some(&lua_tools)) {
             Ok(b) => b,
             Err(_) => {
                 ps3_fail += 1;
                 continue;
             }
         };
-        let xb_out = match convert_block(&xb.raw, false, None) {
+        let xb_out = match convert_block(&xb.raw, false, None, Some(&lua_tools)) {
             Ok(b) => b,
             Err(_) => {
                 xbox_fail += 1;

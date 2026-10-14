@@ -44,26 +44,39 @@ pub struct EcsRegistry {
 }
 
 impl EcsRegistry {
-    /// Load the bundled `ecs_registry.tsv` from a `workshop_data/` directory. A missing or malformed
-    /// file is not fatal — the console degrades to "no component registry" rather than refusing to
-    /// open, exactly like [`crate::essapi::ApiIndex::load`].
-    pub fn load(data_home: &Path) -> EcsRegistry {
+    /// Load the bundled `ecs_registry.tsv` from a `workshop_data/` directory. An error naming the
+    /// file when it is missing or unreadable, when a non-blank line is not four tab-separated
+    /// columns with a non-empty name, or when it holds no classes.
+    pub fn load(data_home: &Path) -> Result<EcsRegistry, String> {
+        let path = data_home.join("ecs_registry.tsv");
         let mut reg = EcsRegistry::default();
-        let Ok(text) = std::fs::read_to_string(data_home.join("ecs_registry.tsv")) else {
-            return reg;
-        };
-        for line in text.lines() {
-            let mut cols = line.split('\t');
-            let (Some(family), Some(name)) = (cols.next(), cols.next()) else { continue };
-            if name.is_empty() {
+        let text = std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+        for (i, line) in text.lines().enumerate() {
+            if line.is_empty() {
                 continue;
+            }
+            let cols: Vec<&str> = line.split('\t').collect();
+            let [family, name, global, vtable] = cols[..] else {
+                return Err(format!(
+                    "{}:{}: expected 4 tab-separated columns (family, name, registrar global, \
+                     descriptor vtable), got {}",
+                    path.display(),
+                    i + 1,
+                    cols.len()
+                ));
+            };
+            if name.is_empty() {
+                return Err(format!("{}:{}: empty class name", path.display(), i + 1));
             }
             reg.classes.push(EcsClass {
                 name: name.to_string(),
                 family: family.to_string(),
-                global: cols.next().unwrap_or_default().to_string(),
-                vtable: cols.next().unwrap_or_default().to_string(),
+                global: global.to_string(),
+                vtable: vtable.to_string(),
             });
+        }
+        if reg.classes.is_empty() {
+            return Err(format!("{}: no classes", path.display()));
         }
         reg.classes.sort_by(|a, b| a.name.cmp(&b.name));
         reg.classes.dedup_by(|a, b| a.name == b.name);
@@ -72,7 +85,7 @@ impl EcsRegistry {
             .iter()
             .map(|c| format!("{} {}", c.name, c.family).to_lowercase())
             .collect();
-        reg
+        Ok(reg)
     }
 
     /// Classes whose name or family contains every whitespace-separated term of `query`
@@ -151,23 +164,32 @@ mod tests {
     }
 
     #[test]
+    fn a_missing_or_malformed_registry_is_an_error_naming_the_file() {
+        let dir = std::env::temp_dir().join("m2ws_ecsreg_bad");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let e = EcsRegistry::load(&dir).unwrap_err();
+        assert!(e.contains("ecs_registry.tsv"), "{e}");
+        std::fs::write(dir.join("ecs_registry.tsv"), "family\tName\n").unwrap();
+        let e = EcsRegistry::load(&dir).unwrap_err();
+        assert!(e.contains("ecs_registry.tsv:1"), "{e}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn families_count_the_classes() {
         let fams = reg().families();
         assert!(fams.iter().any(|(f, n)| f == "gameplay_state_health_mission" && *n == 2));
         assert!(fams.iter().any(|(f, n)| f == "ai_perception_population" && *n == 1));
     }
 
-    /// ★ THE SEAM (companion to the Ess one). The bundled `ecs_registry.tsv` must parse and carry the
-    /// ~220 classes with their families — a regeneration that drops or renames the registry fails here
-    /// rather than leaving the console's component reference silently empty.
+    /// ★ THE SEAM (companion to the Ess one). The repo's committed `workshop_data/ecs_registry.tsv`
+    /// must exist, parse and carry the ~220 classes with their families; a dropped or renamed
+    /// registry fails this test. Regenerate with `scripts/regen-ess-api.sh`.
     #[test]
     fn the_bundled_registry_parses_and_carries_the_classes() {
         let home = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../workshop_data");
-        if !home.join("ecs_registry.tsv").is_file() {
-            eprintln!("SKIPPING: no bundled ecs_registry.tsv (run scripts/regen-ess-api.sh)");
-            return;
-        }
-        let r = EcsRegistry::load(&home);
+        let r = EcsRegistry::load(&home).unwrap_or_else(|e| panic!("{e}"));
         assert!(!r.is_empty(), "the bundled registry parsed to zero classes — the seam is broken");
         // The count the doc set states: 232 registered (220 gameplay + 12 render/pipeline).
         assert!(

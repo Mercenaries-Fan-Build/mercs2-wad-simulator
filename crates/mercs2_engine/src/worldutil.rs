@@ -112,13 +112,17 @@ pub fn parse_hash(s: &str) -> Option<u32> {
     u32::from_str_radix(s, 16).ok()
 }
 
-/// Best-effort bone-name resolution from the repo rainbow table (tools/rainbow_table.json).
-/// Returns hash -> first candidate name for exactly the hashes asked for; empty map if the
-/// table is absent (the diagnostic still prints hashes).
-pub fn rainbow_names(hashes: &std::collections::BTreeSet<u32>) -> std::collections::HashMap<u32, String> {
+/// Hash-name resolution from the rainbow table at `table` (dev callers pass the `rainbow_table` key
+/// of `.mercs2-local.toml`). Returns hash -> first candidate name for the asked-for hashes the table
+/// names; a hash the table does not name is absent from the map. An unreadable table is an error
+/// naming its path.
+pub fn rainbow_names(
+    table: &std::path::Path,
+    hashes: &std::collections::BTreeSet<u32>,
+) -> Result<std::collections::HashMap<u32, String>, String> {
     let mut out = std::collections::HashMap::new();
-    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../../rainbow_table.json");
-    let Ok(text) = std::fs::read_to_string(path) else { return out };
+    let text = std::fs::read_to_string(table)
+        .map_err(|e| format!("read rainbow table {}: {e}", table.display()))?;
     for &h in hashes {
         let key = format!("\"0x{h:08X}\"");
         let Some(p) = text.find(&key) else { continue };
@@ -127,7 +131,7 @@ pub fn rainbow_names(hashes: &std::collections::BTreeSet<u32>) -> std::collectio
         let Some(q1) = rest[q0 + 1..].find('"') else { continue };
         out.insert(h, rest[q0 + 1..q0 + 1 + q1].to_string());
     }
-    out
+    Ok(out)
 }
 
 /// The PMC HQ compound, game coords (docs/coordinate_systems.md Example 1).

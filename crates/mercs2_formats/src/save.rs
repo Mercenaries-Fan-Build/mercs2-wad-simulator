@@ -731,9 +731,7 @@ mod tests {
 
     /// The eight retail saves these tests read, **vendored in-tree** at `fixtures/saves`.
     ///
-    /// They used to be read from a hardcoded `C:/Users/Shadow/Documents/...`, so on any other machine
-    /// these tests failed for a missing file rather than testing the format. They are committed now
-    /// (128 KiB total) and every test below runs unconditionally, everywhere — see
+    /// They are committed (128 KiB total) and every test below runs unconditionally — see
     /// `fixtures/saves/README.md`.
     ///
     /// The set is deliberately varied: three different heroes, upgrade tiers 0 and 3, flow chains from

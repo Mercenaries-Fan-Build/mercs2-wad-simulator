@@ -28,6 +28,13 @@ impl IndxEntry {
     pub fn compressed_page_count(&self) -> u32 {
         self.flags_and_page_count & 0xFFFF
     }
+
+    /// Bit 31 of `flags_and_page_count`: the block is stored as an `sges`/`segs` segment stream.
+    /// Clear, the block is stored as-is, in exactly its decompressed page count (the Japanese PS3
+    /// disc BLJM60101 stores every block this way; every other retail WAD compresses every block).
+    pub fn is_compressed(&self) -> bool {
+        self.flags_and_page_count & 0x8000_0000 != 0
+    }
 }
 
 #[derive(Debug, Clone)]

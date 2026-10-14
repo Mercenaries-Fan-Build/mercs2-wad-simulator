@@ -194,7 +194,7 @@ mod retail {
         assert!(vo.len() > 10_000, "expected ~12,988 records, got {}", vo.len());
 
         let home = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../workshop_data");
-        let idx = crate::audioidx::AudioIndex::load(&home);
+        let idx = crate::audioidx::AudioIndex::load(&home).unwrap_or_else(|e| panic!("{e}"));
         assert!(!idx.is_empty(), "need the manifest as the oracle");
 
         // Sample captioned clips spread across the file; each decoded duration must match.

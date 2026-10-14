@@ -67,8 +67,59 @@ pub fn vz_wad_from_env() -> Option<PathBuf> {
 ///   ([`local_config_ps3_vz_wad`]).
 /// * `unpacked_exe` — the SecuROM-unpacked game executable (`mercs2_unpacked.exe`, a runtime dump).
 ///   Read only by the tests that disassemble the engine ([`local_config_unpacked_exe`]).
+/// * `canonical_dir` — a **directory**: the canonical tree of PC builds (`game-files/canonical`),
+///   holding the PC installs, the archived and derived executables and the process-image dumps.
+///   Tests find each executable in it by sha256 and each installed file at the path its catalogue
+///   row names. Read by the exe-map tests ([`local_config_canonical_dir`]).
+/// * `x360_devkit_iso` — the Jul 11 2008 Xbox 360 preview disc image. Read only by the exe-map
+///   console-image tests ([`local_config_x360_devkit_iso`]).
+/// * `x360_retail_xex` — the Xbox 360 retail `default.xex` (NTSC-U/J). Read only by the exe-map
+///   console-image tests ([`local_config_x360_retail_xex`]).
+/// * `ps3_eboot_bin` — the PS3 disc's `EBOOT.BIN` (BLUS30056). Read only by the exe-map
+///   console-image tests ([`local_config_ps3_eboot_bin`]).
+/// * `ps3_update_pkgs` — a **directory** holding the PS3 v1.03 update `.pkg` files. Read only by
+///   the exe-map console-image tests ([`local_config_ps3_update_pkgs`]).
+/// * `x360_retail_dir` — a **directory**: the Xbox 360 retail disc dump (JTAG rip). Read only by
+///   the exe-map Lua corpus tests ([`local_config_x360_retail_dir`]).
+/// * `x360_dlc_biua_stfs` — the retail Xbox LIVE Blow It Up Again Pack STFS package. Read by the
+///   exe-map Lua corpus tests and the `dlc_input` and `dlc_stfs` DOH tests
+///   ([`local_config_x360_dlc_biua_stfs`]).
+/// * `x360_dlc_prototypes_dir` — a **directory** of zipped Xbox 360 DLC prototype packages. Read
+///   only by the exe-map Lua corpus tests ([`local_config_x360_dlc_prototypes_dir`]).
+/// * `ps3_disc_iso` — the PS3 NA disc image (BLUS30056, ISO-9660). Read only by the exe-map Lua
+///   corpus tests ([`local_config_ps3_disc_iso`]).
+/// * `ps3_dlc_biua_pkg` — the PS3 NA Blow It Up Again Pack PSN package. Read only by the exe-map
+///   Lua corpus tests ([`local_config_ps3_dlc_biua_pkg`]).
+/// * `ps3_jp_disc_dir` — a **directory**: the PS3 Japanese disc dump (BLJM60101), the folder that
+///   holds `PS3_GAME`. Read only by the exe-map Lua corpus and console-image tests
+///   ([`local_config_ps3_jp_disc_dir`]).
+/// * `ps3_de_disc_dir` — a **directory**: the PS3 German disc dump (BLES00328), the folder that
+///   holds `PS3_GAME`. Read only by the exe-map Lua corpus and console-image tests
+///   ([`local_config_ps3_de_disc_dir`]).
+/// * `ps3_eu_disc_dir` — a **directory**: the PS3 European disc dump (BLES00323), the folder that
+///   holds `PS3_GAME`. Read only by the exe-map Lua corpus and console-image tests
+///   ([`local_config_ps3_eu_disc_dir`]).
+/// * `rainbow_table` — the hash rainbow table, `rainbow_table.json`. Read only by dev tools that
+///   label hashes (`--pack-data`, the engine diag commands, the name-mining bins and probes)
+///   ([`local_config_rainbow_table`]).
+/// * `jul08_strings` — the Jul-08 Xbox 360 devkit strings dump,
+///   `mercs2_xenon_p.pe_full_strings.txt`. Read only by `mercs2_workshop --pack-data`
+///   ([`local_config_jul08_strings`]).
+/// * `notes_docs_dir` — a **directory**: the `docs` folder of the notes repo
+///   (notes-on-the-released-game), holding `data/`, `mercs2-ecs/`, `mercs2-luacd/` and
+///   `mercs2-dlc-luacd/`. Read only by `mercs2_workshop --pack-data`
+///   ([`local_config_notes_docs_dir`]).
+/// * `unluac_jar` — the unluac jar that disassembles and reassembles console Lua bytecode. Read
+///   only by dev tools and tests that convert console Lua bytecode ([`local_config_unluac_jar`]).
+/// * `java_binary` — the `java` executable that runs unluac. Read only by dev tools and tests
+///   that convert console Lua bytecode ([`local_config_java_binary`]).
+/// * `unrar_binary` — the `UnRAR.exe` that unpacks RAR'd Xbox 360 DLC. Read only by tests of the
+///   RAR'd DLC path ([`local_config_unrar_binary`]).
+/// * `lua51_src_dir` — a **directory**: the pristine Lua 5.1 `src` tree the vendored copy is
+///   checked against. Read only by the `mercs2_luac` vendor-integrity test
+///   ([`local_config_lua51_src_dir`]).
 ///
-/// The console keys and `unpacked_exe` are never inferred from `vz_wad`'s folder: each file lives
+/// The console keys and the executable keys are never inferred from `vz_wad`'s folder: each lives
 /// wherever it is kept, and a test that needs one fails naming the missing key.
 pub const LOCAL_CONFIG: &str = ".mercs2-local.toml";
 
@@ -88,9 +139,46 @@ pub const XBOX_VZ_WAD_KEY: &str = "xbox_vz_wad";
 pub const PS3_VZ_WAD_KEY: &str = "ps3_vz_wad";
 /// The `unpacked_exe` key of [`LOCAL_CONFIG`]: the SecuROM-unpacked game executable.
 pub const UNPACKED_EXE_KEY: &str = "unpacked_exe";
-/// The `exe_dumps` key of [`LOCAL_CONFIG`]: the folder of reference game executables
-/// (`mercs2_nodrm_v3.exe`, `mercs2_unpacked.exe`, `genuine_patched_unpacked.exe`).
-pub const EXE_DUMPS_KEY: &str = "exe_dumps";
+/// The `canonical_dir` key of [`LOCAL_CONFIG`]: the canonical tree of PC builds.
+pub const CANONICAL_DIR_KEY: &str = "canonical_dir";
+/// The `x360_devkit_iso` key of [`LOCAL_CONFIG`]: the Xbox 360 preview disc image.
+pub const X360_DEVKIT_ISO_KEY: &str = "x360_devkit_iso";
+/// The `x360_retail_xex` key of [`LOCAL_CONFIG`]: the Xbox 360 retail `default.xex`.
+pub const X360_RETAIL_XEX_KEY: &str = "x360_retail_xex";
+/// The `ps3_eboot_bin` key of [`LOCAL_CONFIG`]: the PS3 disc `EBOOT.BIN`.
+pub const PS3_EBOOT_BIN_KEY: &str = "ps3_eboot_bin";
+/// The `ps3_update_pkgs` key of [`LOCAL_CONFIG`]: a directory of PS3 update packages.
+pub const PS3_UPDATE_PKGS_KEY: &str = "ps3_update_pkgs";
+/// The `x360_retail_dir` key of [`LOCAL_CONFIG`]: the Xbox 360 retail disc dump.
+pub const X360_RETAIL_DIR_KEY: &str = "x360_retail_dir";
+/// The `x360_dlc_biua_stfs` key of [`LOCAL_CONFIG`]: the retail Blow It Up Again Pack package.
+pub const X360_DLC_BIUA_STFS_KEY: &str = "x360_dlc_biua_stfs";
+/// The `x360_dlc_prototypes_dir` key of [`LOCAL_CONFIG`]: a directory of zipped DLC prototypes.
+pub const X360_DLC_PROTOTYPES_DIR_KEY: &str = "x360_dlc_prototypes_dir";
+/// The `ps3_disc_iso` key of [`LOCAL_CONFIG`]: the PS3 NA disc image.
+pub const PS3_DISC_ISO_KEY: &str = "ps3_disc_iso";
+/// The `ps3_dlc_biua_pkg` key of [`LOCAL_CONFIG`]: the PS3 NA Blow It Up Again Pack package.
+pub const PS3_DLC_BIUA_PKG_KEY: &str = "ps3_dlc_biua_pkg";
+/// The `ps3_jp_disc_dir` key of [`LOCAL_CONFIG`]: the PS3 Japanese disc dump directory.
+pub const PS3_JP_DISC_DIR_KEY: &str = "ps3_jp_disc_dir";
+/// The `ps3_de_disc_dir` key of [`LOCAL_CONFIG`]: the PS3 German disc dump directory.
+pub const PS3_DE_DISC_DIR_KEY: &str = "ps3_de_disc_dir";
+/// The `ps3_eu_disc_dir` key of [`LOCAL_CONFIG`]: the PS3 European disc dump directory.
+pub const PS3_EU_DISC_DIR_KEY: &str = "ps3_eu_disc_dir";
+/// The `rainbow_table` key of [`LOCAL_CONFIG`]: the rainbow table.
+pub const RAINBOW_TABLE_KEY: &str = "rainbow_table";
+/// The `jul08_strings` key of [`LOCAL_CONFIG`]: the devkit strings dump.
+pub const JUL08_STRINGS_KEY: &str = "jul08_strings";
+/// The `notes_docs_dir` key of [`LOCAL_CONFIG`]: the notes repo docs folder.
+pub const NOTES_DOCS_DIR_KEY: &str = "notes_docs_dir";
+/// The `unluac_jar` key of [`LOCAL_CONFIG`]: the unluac jar.
+pub const UNLUAC_JAR_KEY: &str = "unluac_jar";
+/// The `java_binary` key of [`LOCAL_CONFIG`]: the java executable.
+pub const JAVA_BINARY_KEY: &str = "java_binary";
+/// The `unrar_binary` key of [`LOCAL_CONFIG`]: UnRAR.exe.
+pub const UNRAR_BINARY_KEY: &str = "unrar_binary";
+/// The `lua51_src_dir` key of [`LOCAL_CONFIG`]: the Lua 5.1 source tree.
+pub const LUA51_SRC_DIR_KEY: &str = "lua51_src_dir";
 
 /// The `<key> = "…"` value in one [`LOCAL_CONFIG`]'s text, or `None` when the key is absent.
 ///
@@ -163,33 +251,219 @@ pub fn local_config_unpacked_exe(start: &Path) -> Result<PathBuf, String> {
     )
 }
 
-/// One reference executable for a **game-gated test**: `<exe_dumps>/<name>` from the nearest
-/// [`LOCAL_CONFIG`]. The error says whether the config, the key, the folder or the file is missing.
-pub fn local_config_exe_dump(start: &Path, name: &str) -> Result<PathBuf, String> {
-    let fix = "write `exe_dumps = \"/path/to/output/_ghidra/securom_dump\"` into it by hand";
-    let Some((file, text)) = local_configs(start).next() else {
-        return Err(format!(
-            "game-gated test: no {LOCAL_CONFIG} found in {} or any folder above it; {fix}",
-            start.display()
-        ));
-    };
-    let Some(dir) = config_value(&text, EXE_DUMPS_KEY) else {
-        return Err(format!("game-gated test: {} has no `{EXE_DUMPS_KEY}` key; {fix}", file.display()));
-    };
-    let path = dir.join(name);
-    if !path.is_file() {
-        return Err(format!(
-            "game-gated test: {} names {EXE_DUMPS_KEY} = {}, which has no file {name}",
-            file.display(),
-            dir.display()
-        ));
-    }
-    Ok(path)
+/// The canonical tree of PC builds for a **game-gated test**: `canonical_dir` in the nearest
+/// [`LOCAL_CONFIG`].
+///
+/// Same rules and the same three distinct errors as [`local_config_vz_wad`], except that the path
+/// must be a directory. No script writes this key.
+pub fn local_config_canonical_dir(start: &Path) -> Result<PathBuf, String> {
+    local_config_path(
+        start,
+        CANONICAL_DIR_KEY,
+        Want::Dir,
+        "write `canonical_dir = \"/path/to/game-files/canonical\"` into it by hand",
+    )
+}
+
+/// The Xbox 360 preview disc image for a **game-gated test**: `x360_devkit_iso` in the nearest
+/// [`LOCAL_CONFIG`].
+///
+/// Same rules and the same three distinct errors as [`local_config_vz_wad`]. No script writes this
+/// key.
+pub fn local_config_x360_devkit_iso(start: &Path) -> Result<PathBuf, String> {
+    local_config_file(
+        start,
+        X360_DEVKIT_ISO_KEY,
+        "write `x360_devkit_iso = \"/path/to/Mercenaries 2 Preview X360 (Jul 11 2008).iso\"` into it by hand",
+    )
+}
+
+/// The Xbox 360 retail `default.xex` for a **game-gated test**: `x360_retail_xex` in the nearest
+/// [`LOCAL_CONFIG`].
+///
+/// Same rules and the same three distinct errors as [`local_config_vz_wad`]. No script writes this
+/// key.
+pub fn local_config_x360_retail_xex(start: &Path) -> Result<PathBuf, String> {
+    local_config_file(
+        start,
+        X360_RETAIL_XEX_KEY,
+        "write `x360_retail_xex = \"/path/to/default.xex\"` into it by hand",
+    )
+}
+
+/// The PS3 disc `EBOOT.BIN` for a **game-gated test**: `ps3_eboot_bin` in the nearest
+/// [`LOCAL_CONFIG`].
+///
+/// Same rules and the same three distinct errors as [`local_config_vz_wad`]. No script writes this
+/// key.
+pub fn local_config_ps3_eboot_bin(start: &Path) -> Result<PathBuf, String> {
+    local_config_file(
+        start,
+        PS3_EBOOT_BIN_KEY,
+        "write `ps3_eboot_bin = \"/path/to/EBOOT.BIN\"` into it by hand",
+    )
+}
+
+/// The Xbox 360 retail disc dump for a **game-gated test**: `x360_retail_dir` in the nearest
+/// [`LOCAL_CONFIG`].
+///
+/// Same rules and the same three distinct errors as [`local_config_vz_wad`], except that the path
+/// must be a directory. No script writes this key.
+pub fn local_config_x360_retail_dir(start: &Path) -> Result<PathBuf, String> {
+    local_config_path(start, X360_RETAIL_DIR_KEY, Want::Dir, "write `x360_retail_dir = \"/path/to/JTAGRip\"` into it by hand")
+}
+
+/// The retail Blow It Up Again Pack package for a **game-gated test**: `x360_dlc_biua_stfs` in the
+/// nearest [`LOCAL_CONFIG`].
+///
+/// Same rules and the same three distinct errors as [`local_config_vz_wad`]. No script writes this
+/// key.
+pub fn local_config_x360_dlc_biua_stfs(start: &Path) -> Result<PathBuf, String> {
+    local_config_file(
+        start,
+        X360_DLC_BIUA_STFS_KEY,
+        "write `x360_dlc_biua_stfs = \"/path/to/45410828/00000002/<package>\"` into it by hand",
+    )
+}
+
+/// The zipped Xbox 360 DLC prototypes for a **game-gated test**: `x360_dlc_prototypes_dir` in the
+/// nearest [`LOCAL_CONFIG`].
+///
+/// Same rules and the same three distinct errors as [`local_config_vz_wad`], except that the path
+/// must be a directory. No script writes this key.
+pub fn local_config_x360_dlc_prototypes_dir(start: &Path) -> Result<PathBuf, String> {
+    local_config_path(
+        start,
+        X360_DLC_PROTOTYPES_DIR_KEY,
+        Want::Dir,
+        "write `x360_dlc_prototypes_dir = \"/path/to/DLC prototypes\"` into it by hand",
+    )
+}
+
+/// The PS3 update package directory for a **game-gated test**: `ps3_update_pkgs` in the nearest
+/// [`LOCAL_CONFIG`].
+///
+/// Same rules and the same three distinct errors as [`local_config_vz_wad`], except that the path
+/// must be a directory. No script writes this key.
+pub fn local_config_ps3_update_pkgs(start: &Path) -> Result<PathBuf, String> {
+    local_config_path(
+        start,
+        PS3_UPDATE_PKGS_KEY,
+        Want::Dir,
+        "write `ps3_update_pkgs = \"/path/to/updates\"` into it by hand",
+    )
+}
+
+/// The PS3 NA disc image for a **game-gated test**: `ps3_disc_iso` in the nearest [`LOCAL_CONFIG`].
+///
+/// Same rules and the same three distinct errors as [`local_config_vz_wad`]. No script writes this
+/// key.
+pub fn local_config_ps3_disc_iso(start: &Path) -> Result<PathBuf, String> {
+    local_config_file(start, PS3_DISC_ISO_KEY, "write `ps3_disc_iso = \"/path/to/<BLUS30056 disc>.iso\"` into it by hand")
+}
+
+/// The PS3 NA Blow It Up Again Pack package for a **game-gated test**: `ps3_dlc_biua_pkg` in the
+/// nearest [`LOCAL_CONFIG`].
+///
+/// Same rules and the same three distinct errors as [`local_config_vz_wad`]. No script writes this
+/// key.
+pub fn local_config_ps3_dlc_biua_pkg(start: &Path) -> Result<PathBuf, String> {
+    local_config_file(start, PS3_DLC_BIUA_PKG_KEY, "write `ps3_dlc_biua_pkg = \"/path/to/<package>.pkg\"` into it by hand")
+}
+
+/// The PS3 Japanese disc dump for a **game-gated test**: `ps3_jp_disc_dir` in the nearest
+/// [`LOCAL_CONFIG`].
+///
+/// Same rules and the same three distinct errors as [`local_config_vz_wad`], except that the path
+/// must be a directory. No script writes this key.
+pub fn local_config_ps3_jp_disc_dir(start: &Path) -> Result<PathBuf, String> {
+    local_config_path(start, PS3_JP_DISC_DIR_KEY, Want::Dir, "write `ps3_jp_disc_dir = \"/path/to/<BLJM60101 dump>\"` into it by hand")
+}
+
+/// The PS3 German disc dump for a **game-gated test**: `ps3_de_disc_dir` in the nearest
+/// [`LOCAL_CONFIG`].
+///
+/// Same rules and the same three distinct errors as [`local_config_vz_wad`], except that the path
+/// must be a directory. No script writes this key.
+pub fn local_config_ps3_de_disc_dir(start: &Path) -> Result<PathBuf, String> {
+    local_config_path(start, PS3_DE_DISC_DIR_KEY, Want::Dir, "write `ps3_de_disc_dir = \"/path/to/<BLES00328 dump>\"` into it by hand")
+}
+
+/// The PS3 European disc dump for a **game-gated test**: `ps3_eu_disc_dir` in the nearest
+/// [`LOCAL_CONFIG`].
+///
+/// Same rules and the same three distinct errors as [`local_config_vz_wad`], except that the path
+/// must be a directory. No script writes this key.
+pub fn local_config_ps3_eu_disc_dir(start: &Path) -> Result<PathBuf, String> {
+    local_config_path(start, PS3_EU_DISC_DIR_KEY, Want::Dir, "write `ps3_eu_disc_dir = \"/path/to/<BLES00323 dump>\"` into it by hand")
+}
+
+/// The rainbow table for a **dev tool or game-gated test**: `rainbow_table` in the nearest [`LOCAL_CONFIG`].
+///
+/// Same rules and the same three distinct errors as [`local_config_vz_wad`]. No script writes this key.
+pub fn local_config_rainbow_table(start: &Path) -> Result<PathBuf, String> {
+    local_config_file(start, RAINBOW_TABLE_KEY, "write `rainbow_table = \"/path/to/tools/rainbow_table.json\"` into it by hand")
+}
+
+/// The devkit strings dump for a **dev tool or game-gated test**: `jul08_strings` in the nearest [`LOCAL_CONFIG`].
+///
+/// Same rules and the same three distinct errors as [`local_config_vz_wad`]. No script writes this key.
+pub fn local_config_jul08_strings(start: &Path) -> Result<PathBuf, String> {
+    local_config_file(start, JUL08_STRINGS_KEY, "write `jul08_strings = \"/path/to/output/jul08_prototype/mercs2_xenon_p.pe_full_strings.txt\"` into it by hand")
+}
+
+/// The notes repo docs folder for a **dev tool or game-gated test**: `notes_docs_dir` in the nearest [`LOCAL_CONFIG`].
+///
+/// Same rules and the same three distinct errors as [`local_config_vz_wad`], except that the path
+/// must be a directory. No script writes this key.
+pub fn local_config_notes_docs_dir(start: &Path) -> Result<PathBuf, String> {
+    local_config_path(start, NOTES_DOCS_DIR_KEY, Want::Dir, "write `notes_docs_dir = \"/path/to/notes-on-the-released-game/docs\"` into it by hand")
+}
+
+/// The unluac jar for a **dev tool or game-gated test**: `unluac_jar` in the nearest [`LOCAL_CONFIG`].
+///
+/// Same rules and the same three distinct errors as [`local_config_vz_wad`]. No script writes this key.
+pub fn local_config_unluac_jar(start: &Path) -> Result<PathBuf, String> {
+    local_config_file(start, UNLUAC_JAR_KEY, "write `unluac_jar = \"/path/to/tools/external/unluac/unluac.jar\"` into it by hand")
+}
+
+/// The java executable for a **dev tool or game-gated test**: `java_binary` in the nearest [`LOCAL_CONFIG`].
+///
+/// Same rules and the same three distinct errors as [`local_config_vz_wad`]. No script writes this key.
+pub fn local_config_java_binary(start: &Path) -> Result<PathBuf, String> {
+    local_config_file(start, JAVA_BINARY_KEY, "write `java_binary = \"/path/to/jdk/bin/java\"` into it by hand")
+}
+
+/// UnRAR.exe for a **dev tool or game-gated test**: `unrar_binary` in the nearest [`LOCAL_CONFIG`].
+///
+/// Same rules and the same three distinct errors as [`local_config_vz_wad`]. No script writes this key.
+pub fn local_config_unrar_binary(start: &Path) -> Result<PathBuf, String> {
+    local_config_file(start, UNRAR_BINARY_KEY, "write `unrar_binary = \"/path/to/tools/unrar/UnRAR.exe\"` into it by hand")
+}
+
+/// The Lua 5.1 source tree for a **dev tool or game-gated test**: `lua51_src_dir` in the nearest [`LOCAL_CONFIG`].
+///
+/// Same rules and the same three distinct errors as [`local_config_vz_wad`], except that the path
+/// must be a directory. No script writes this key.
+pub fn local_config_lua51_src_dir(start: &Path) -> Result<PathBuf, String> {
+    local_config_path(start, LUA51_SRC_DIR_KEY, Want::Dir, "write `lua51_src_dir = \"/path/to/tools/lua51-src/src\"` into it by hand")
+}
+
+/// What a [`LOCAL_CONFIG`] key must name.
+#[derive(Clone, Copy)]
+enum Want {
+    File,
+    Dir,
 }
 
 /// The file `key` names in the nearest [`LOCAL_CONFIG`] above `start`, or an error saying which of
 /// the three things is wrong — no config, no `key`, or a path that is not a file — ending in `fix`.
 fn local_config_file(start: &Path, key: &str, fix: &str) -> Result<PathBuf, String> {
+    local_config_path(start, key, Want::File, fix)
+}
+
+/// The path `key` names in the nearest [`LOCAL_CONFIG`] above `start`, which must be `want`.
+fn local_config_path(start: &Path, key: &str, want: Want, fix: &str) -> Result<PathBuf, String> {
     let Some((file, text)) = local_configs(start).next() else {
         return Err(format!(
             "game-gated test: no {LOCAL_CONFIG} found in {} or any folder above it; {fix}",
@@ -199,9 +473,13 @@ fn local_config_file(start: &Path, key: &str, fix: &str) -> Result<PathBuf, Stri
     let Some(path) = config_value(&text, key) else {
         return Err(format!("game-gated test: {} has no `{key}` key; {fix}", file.display()));
     };
-    if !path.is_file() {
+    let (ok, noun) = match want {
+        Want::File => (path.is_file(), "a file"),
+        Want::Dir => (path.is_dir(), "a directory"),
+    };
+    if !ok {
         return Err(format!(
-            "game-gated test: {} names {key} = {}, which is not a file; {fix}",
+            "game-gated test: {} names {key} = {}, which is not {noun}; {fix}",
             file.display(),
             path.display()
         ));
@@ -429,6 +707,136 @@ mod tests {
         std::fs::write(&exe, b"MZ").unwrap();
         assert_eq!(local_config_unpacked_exe(&deep), Ok(exe));
         assert_eq!(local_config_vz_wad(&deep), Ok(pc));
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// `canonical_dir` reports the three failures under its own key, rejects a file, and matches its
+    /// key exactly.
+    #[test]
+    fn the_canonical_dir_resolver_requires_a_directory() {
+        let root = std::env::temp_dir().join("mercs2_formats_local_config_canonical_dir");
+        std::fs::remove_dir_all(&root).ok();
+        let deep = root.join("a");
+        std::fs::create_dir_all(&deep).unwrap();
+
+        let e = local_config_canonical_dir(&deep).unwrap_err();
+        assert!(e.contains("no .mercs2-local.toml found") && e.contains("canonical_dir = "), "{e}");
+
+        let (canonical, exe) = (root.join("canonical"), root.join("Mercenaries2.exe"));
+        std::fs::create_dir_all(&canonical).unwrap();
+        std::fs::write(&exe, b"MZ").unwrap();
+        let config = root.join(LOCAL_CONFIG);
+        std::fs::write(&config, format!("canonical_directory = \"{}\"\n", canonical.display())).unwrap();
+        let e = local_config_canonical_dir(&deep).unwrap_err();
+        assert!(e.contains("has no `canonical_dir` key"), "{e}");
+
+        std::fs::write(&config, format!("canonical_dir = \"{}\"\n", exe.display())).unwrap();
+        let e = local_config_canonical_dir(&deep).unwrap_err();
+        assert!(e.contains("names canonical_dir = ") && e.contains("which is not a directory"), "{e}");
+
+        std::fs::write(&config, format!("canonical_dir = \"{}\"\n", canonical.display())).unwrap();
+        assert_eq!(local_config_canonical_dir(&deep), Ok(canonical));
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// The console-image keys: the disc image and EBOOT are files, the update packages a directory.
+    #[test]
+    fn the_console_image_resolvers_require_their_kind_of_path() {
+        let root = std::env::temp_dir().join("mercs2_formats_local_config_console_images");
+        std::fs::remove_dir_all(&root).ok();
+        let deep = root.join("a");
+        std::fs::create_dir_all(&deep).unwrap();
+        let (iso, eboot, pkgs) = (root.join("preview.iso"), root.join("EBOOT.BIN"), root.join("updates"));
+        std::fs::write(&iso, b"iso").unwrap();
+        std::fs::write(&eboot, b"SCE").unwrap();
+        std::fs::create_dir_all(&pkgs).unwrap();
+        let config = root.join(LOCAL_CONFIG);
+
+        std::fs::write(&config, format!("ps3_update_pkgs = \"{}\"\n", eboot.display())).unwrap();
+        let e = local_config_ps3_update_pkgs(&deep).unwrap_err();
+        assert!(e.contains("which is not a directory"), "{e}");
+        let e = local_config_x360_devkit_iso(&deep).unwrap_err();
+        assert!(e.contains("has no `x360_devkit_iso` key"), "{e}");
+
+        std::fs::write(
+            &config,
+            format!(
+                "x360_devkit_iso = \"{}\"\nps3_eboot_bin = \"{}\"\nps3_update_pkgs = \"{}\"\n",
+                iso.display(),
+                pkgs.display(),
+                pkgs.display()
+            ),
+        )
+        .unwrap();
+        assert_eq!(local_config_x360_devkit_iso(&deep), Ok(iso));
+        assert_eq!(local_config_ps3_update_pkgs(&deep), Ok(pkgs.clone()));
+        let e = local_config_ps3_eboot_bin(&deep).unwrap_err();
+        assert!(e.contains("which is not a file"), "{e}");
+
+        std::fs::write(&config, format!("ps3_eboot_bin = \"{}\"\nx360_retail_xex = \"{}\"\n", eboot.display(), pkgs.display())).unwrap();
+        assert_eq!(local_config_ps3_eboot_bin(&deep), Ok(eboot.clone()));
+        let e = local_config_x360_retail_xex(&deep).unwrap_err();
+        assert!(e.contains("which is not a file"), "{e}");
+        std::fs::write(&config, format!("x360_retail_xex = \"{}\"\n", eboot.display())).unwrap();
+        assert_eq!(local_config_x360_retail_xex(&deep), Ok(eboot.clone()));
+        std::fs::write(
+            &config,
+            format!(
+                "x360_retail_dir = \"{}\"\nx360_dlc_biua_stfs = \"{}\"\nx360_dlc_prototypes_dir = \"{}\"\n",
+                pkgs.display(),
+                pkgs.display(),
+                pkgs.display()
+            ),
+        )
+        .unwrap();
+        assert_eq!(local_config_x360_retail_dir(&deep), Ok(pkgs.clone()));
+        assert!(local_config_x360_dlc_biua_stfs(&deep).unwrap_err().contains("which is not a file"));
+        assert_eq!(local_config_x360_dlc_prototypes_dir(&deep), Ok(pkgs.clone()));
+        let e = local_config_ps3_disc_iso(&deep).unwrap_err();
+        assert!(e.contains("has no `ps3_disc_iso` key"), "{e}");
+        std::fs::write(&config, format!("ps3_disc_iso = \"{}\"\nps3_dlc_biua_pkg = \"{}\"\n", eboot.display(), pkgs.display())).unwrap();
+        assert_eq!(local_config_ps3_disc_iso(&deep), Ok(eboot.clone()));
+        assert!(local_config_ps3_dlc_biua_pkg(&deep).unwrap_err().contains("which is not a file"));
+        std::fs::write(&config, format!("ps3_jp_disc_dir = \"{}\"\n", pkgs.display())).unwrap();
+        assert_eq!(local_config_ps3_jp_disc_dir(&deep), Ok(pkgs.clone()));
+        let e = local_config_ps3_de_disc_dir(&deep).unwrap_err();
+        assert!(e.contains("has no `ps3_de_disc_dir` key"), "{e}");
+        std::fs::write(&config, format!("ps3_de_disc_dir = \"{}\"\n", pkgs.display())).unwrap();
+        assert_eq!(local_config_ps3_de_disc_dir(&deep), Ok(pkgs.clone()));
+        let e = local_config_ps3_eu_disc_dir(&deep).unwrap_err();
+        assert!(e.contains("has no `ps3_eu_disc_dir` key"), "{e}");
+        std::fs::write(&config, format!("ps3_eu_disc_dir = \"{}\"\n", pkgs.display())).unwrap();
+        assert_eq!(local_config_ps3_eu_disc_dir(&deep), Ok(pkgs.clone()));
+        let e = local_config_rainbow_table(&deep).unwrap_err();
+        assert!(e.contains("has no `rainbow_table` key"), "{e}");
+        std::fs::write(&config, format!("rainbow_table = \"{}\"\n", eboot.display())).unwrap();
+        assert_eq!(local_config_rainbow_table(&deep), Ok(eboot.clone()));
+        let e = local_config_jul08_strings(&deep).unwrap_err();
+        assert!(e.contains("has no `jul08_strings` key"), "{e}");
+        std::fs::write(&config, format!("jul08_strings = \"{}\"\n", eboot.display())).unwrap();
+        assert_eq!(local_config_jul08_strings(&deep), Ok(eboot.clone()));
+        let e = local_config_notes_docs_dir(&deep).unwrap_err();
+        assert!(e.contains("has no `notes_docs_dir` key"), "{e}");
+        std::fs::write(&config, format!("notes_docs_dir = \"{}\"\n", pkgs.display())).unwrap();
+        assert_eq!(local_config_notes_docs_dir(&deep), Ok(pkgs.clone()));
+        let e = local_config_unluac_jar(&deep).unwrap_err();
+        assert!(e.contains("has no `unluac_jar` key"), "{e}");
+        std::fs::write(&config, format!("unluac_jar = \"{}\"\n", eboot.display())).unwrap();
+        assert_eq!(local_config_unluac_jar(&deep), Ok(eboot.clone()));
+        let e = local_config_java_binary(&deep).unwrap_err();
+        assert!(e.contains("has no `java_binary` key"), "{e}");
+        std::fs::write(&config, format!("java_binary = \"{}\"\n", eboot.display())).unwrap();
+        assert_eq!(local_config_java_binary(&deep), Ok(eboot.clone()));
+        let e = local_config_unrar_binary(&deep).unwrap_err();
+        assert!(e.contains("has no `unrar_binary` key"), "{e}");
+        std::fs::write(&config, format!("unrar_binary = \"{}\"\n", eboot.display())).unwrap();
+        assert_eq!(local_config_unrar_binary(&deep), Ok(eboot.clone()));
+        let e = local_config_lua51_src_dir(&deep).unwrap_err();
+        assert!(e.contains("has no `lua51_src_dir` key"), "{e}");
+        std::fs::write(&config, format!("lua51_src_dir = \"{}\"\n", pkgs.display())).unwrap();
+        assert_eq!(local_config_lua51_src_dir(&deep), Ok(pkgs.clone()));
 
         std::fs::remove_dir_all(&root).ok();
     }

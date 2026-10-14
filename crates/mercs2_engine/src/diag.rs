@@ -1226,7 +1226,8 @@ pub fn trackmap(wadpath: &str, model: Option<String>, index: Option<String>, wan
     if hits.is_empty() {
         return Err(format!("clip 0x{clip_hash:08X} not found in any animgroup"));
     }
-    let names = rainbow_names(&wanted);
+    let table = mercs2_formats::game_paths::local_config_rainbow_table(std::path::Path::new(env!("CARGO_MANIFEST_DIR")))?;
+    let names = rainbow_names(&table, &wanted)?;
     let nm = |h: u32| names.get(&h).map(String::as_str).unwrap_or("?");
 
     println!("model 0x{hash:08X}: {} HIER bones", s.rig.len());
@@ -3099,7 +3100,8 @@ pub fn gfx_extract(wadpath: &str, outdir: &str) -> Result<(), String> {
             pos = end;
         }
     }
-    let names = rainbow_names(&hashes);
+    let table = mercs2_formats::game_paths::local_config_rainbow_table(std::path::Path::new(env!("CARGO_MANIFEST_DIR")))?;
+    let names = rainbow_names(&table, &hashes)?;
     let mut written = 0usize;
     let mut skipped_dup = 0usize;
     let mut seen: std::collections::HashMap<u32, Vec<Vec<u8>>> = std::collections::HashMap::new();
@@ -3141,20 +3143,16 @@ pub fn gfx_extract(wadpath: &str, outdir: &str) -> Result<(), String> {
 /// Vegetation census (foliage instancing, `docs/reverse_engineer/foliage_instancing_plan.md`). Classifies every named `layers_static`
 /// placement with `mercs2_formats::veg`, then reports: coverage %, per-class + per-species counts,
 /// name-hash resolution, and a coarse 500 m XZ density grid (the "treed areas" for the density
-/// stretch goal). Emits the `pandemic_hash_m2` tag-set to `output/foliage/veg_tagset.json`.
-pub fn veg_census(wadpath: &str) {
+/// stretch goal). Emits the `pandemic_hash_m2` tag-set JSON to `out_path`.
+pub fn veg_census(wadpath: &str, out_path: &str) -> Result<(), String> {
     use mercs2_formats::veg::{classify, VegClass};
     use std::collections::{HashMap, HashSet};
 
-    let Ok(mut w) = wad::open(wadpath) else {
-        eprintln!("[veg] cannot open {wadpath}");
-        return;
-    };
-    let Ok((_low, ls)) = find_terrain_blocks(&mut w) else {
-        eprintln!("[veg] no terrain blocks in {wadpath}");
-        return;
-    };
-    let places = mercs2_formats::placement::load_placements(&ls).unwrap_or_default();
+    let mut w = wad::open(wadpath).map_err(|e| format!("[veg] cannot open {wadpath}: {e}"))?;
+    let (_low, ls) = find_terrain_blocks(&mut w)
+        .map_err(|e| format!("[veg] no terrain blocks in {wadpath}: {e}"))?;
+    let places = mercs2_formats::placement::load_placements(&ls)
+        .map_err(|e| format!("[veg] layers_static placements in {wadpath} failed to parse: {e}"))?;
 
     const CELL: f32 = 500.0; // density-grid cell size, metres
 
@@ -3245,7 +3243,6 @@ pub fn veg_census(wadpath: &str) {
     }
 
     // Emit the tag-set JSON (the instancing pass consumes this: name -> {hash, class, count, imposter, resolves}).
-    let out_path = "c:/Users/Shadow/Desktop/notes-on-the-released-game/output/foliage/veg_tagset.json";
     let n_species = species.len();
     let mut json = String::new();
     json.push_str("{\n");
@@ -3264,12 +3261,12 @@ pub fn veg_census(wadpath: &str) {
     }
     json.push_str("  }\n}\n");
     if let Some(parent) = std::path::Path::new(out_path).parent() {
-        let _ = std::fs::create_dir_all(parent);
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("[veg] could not create {}: {e}", parent.display()))?;
     }
-    match std::fs::write(out_path, &json) {
-        Ok(()) => println!("[veg] tag-set written: {out_path}"),
-        Err(e) => eprintln!("[veg] could not write {out_path}: {e}"),
-    }
+    std::fs::write(out_path, &json).map_err(|e| format!("[veg] could not write {out_path}: {e}"))?;
+    println!("[veg] tag-set written: {out_path}");
+    Ok(())
 }
 
 /// Tree census (foliage instancing, the CANOPY layer). The trees are NOT placement records —
@@ -3278,17 +3275,14 @@ pub fn veg_census(wadpath: &str) {
 /// c3 cells, resolves each cell's model hashes to names (rainbow table), keeps the vegetation ones
 /// (`mercs2_formats::veg`), and reports the real tree count by species/region — counting instances at
 /// the near (P000) tier only so LOD variants aren't double-counted — plus how many cells also carry
-/// coarse imposter tiers (the resident-horizon potential). Emits per-instance transforms to
-/// `output/foliage/tree_instances.json`.
-pub fn tree_census(wadpath: &str) {
+/// coarse imposter tiers (the resident-horizon potential). Emits per-instance transforms as JSON to
+/// `out_path`.
+pub fn tree_census(wadpath: &str, out_path: &str) -> Result<(), String> {
     use mercs2_formats::veg::{classify, VegClass};
     use mercs2_formats::world_index::{c3_cell_centre, BlockClass, WorldIndex};
     use std::collections::{BTreeSet, HashMap, HashSet};
 
-    let Ok(mut w) = wad::open(wadpath) else {
-        eprintln!("[tree] cannot open {wadpath}");
-        return;
-    };
+    let mut w = wad::open(wadpath).map_err(|e| format!("[tree] cannot open {wadpath}: {e}"))?;
     let idx = {
         let (archive, file) = wad::archive_and_file(&mut w);
         WorldIndex::build(archive, file)
@@ -3354,7 +3348,8 @@ pub fn tree_census(wadpath: &str) {
         cell_hash.len()
     );
 
-    let names = crate::worldutil::rainbow_names(&all_hashes);
+    let table = mercs2_formats::game_paths::local_config_rainbow_table(std::path::Path::new(env!("CARGO_MANIFEST_DIR")))?;
+    let names = crate::worldutil::rainbow_names(&table, &all_hashes)?;
     println!(
         "[tree] {} of {} model hashes name-resolved via rainbow table",
         names.len(),
@@ -3439,7 +3434,6 @@ pub fn tree_census(wadpath: &str) {
     }
 
     // Emit per-instance transforms (the instancing pass consumes this).
-    let out_path = "c:/Users/Shadow/Desktop/notes-on-the-released-game/output/foliage/tree_instances.json";
     let mut json = String::new();
     json.push_str("{\n");
     json.push_str(&format!(
@@ -3458,10 +3452,10 @@ pub fn tree_census(wadpath: &str) {
     }
     json.push_str("  ]\n}\n");
     if let Some(parent) = std::path::Path::new(out_path).parent() {
-        let _ = std::fs::create_dir_all(parent);
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("[tree] could not create {}: {e}", parent.display()))?;
     }
-    match std::fs::write(out_path, &json) {
-        Ok(()) => println!("[tree] instance list written: {out_path} ({n} instances)"),
-        Err(e) => eprintln!("[tree] could not write {out_path}: {e}"),
-    }
+    std::fs::write(out_path, &json).map_err(|e| format!("[tree] could not write {out_path}: {e}"))?;
+    println!("[tree] instance list written: {out_path} ({n} instances)");
+    Ok(())
 }

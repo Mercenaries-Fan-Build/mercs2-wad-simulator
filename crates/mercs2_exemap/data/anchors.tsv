@@ -1,0 +1,5 @@
+image_a	va_a	image_b	va_b	verified_by
+pc-v10	0x00538c90	x360-preview-profile	0x8239cd98	both decompiles: lock-byte guard, 16-byte record copy, slot bit-count loop, capacity 0x200 (car enqueue)
+pc-v10	0x00538d20	x360-preview-profile	0x8239ce50	both decompiles: lock-byte guard, 16-byte record copy, slot bit-count loop, capacity 100 (boat/heli enqueue)
+pc-v10	0x006446b0	x360-preview-profile	0x829f39d0	both decompiles: descriptor registration with stride 0x6c and the name RuntimeWeaponProjectile
+x360-retail	0x825d8c40	ps3-v103-na	0x0094afa8	both: return when the third argument is zero, else call one function with (arg1, arg3, arg2, 0) (hkReferencedObject virtual, MSVC slot 2, Itanium slot 3)

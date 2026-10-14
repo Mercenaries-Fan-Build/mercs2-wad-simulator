@@ -228,7 +228,8 @@ fn run_converter(be_body_with_csum: &[u8]) -> Vec<u8> {
     blk.extend_from_slice(&0u32.to_be_bytes());
     blk.extend_from_slice(&(be_body_with_csum.len() as u32).to_be_bytes());
     blk.extend_from_slice(be_body_with_csum);
-    let out = ucfx_byteswap::convert::convert_block(&blk, false, None).expect("convert failed");
+    // Converts without LuaTools; a single terrainmesh entry holds no BINN (Lua bytecode).
+    let out = ucfx_byteswap::convert::convert_block(&blk, false, None, None).expect("convert failed");
     // strip [u32 n][16B entry] header and the trailing CSUM
     out[20..out.len() - 8].to_vec()
 }

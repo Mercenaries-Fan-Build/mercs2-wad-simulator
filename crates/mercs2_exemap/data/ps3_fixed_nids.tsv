@@ -1,0 +1,11 @@
+# PS3 module-level NIDs whose value is not the FNID hash of their name, each with the source line
+# of RPCS3 (https://github.com/RPCS3/rpcs3) commit 10adf2ec39f18d1549ef81b1f54c66ded797980f that
+# gives it. kind: function for a name of ppu_get_function_name, variable for one of
+# ppu_get_variable_name.
+nid	name	kind	source
+0d10fd3f	module_prologue	function	rpcs3/Emu/Cell/PPUFunction.cpp:14
+330f7005	module_epilogue	function	rpcs3/Emu/Cell/PPUFunction.cpp:15
+3ab9a95e	module_exit	function	rpcs3/Emu/Cell/PPUFunction.cpp:16
+bc9a0086	module_start	function	rpcs3/Emu/Cell/PPUFunction.cpp:17
+ab779874	module_stop	function	rpcs3/Emu/Cell/PPUFunction.cpp:18
+d7f43016	module_info	variable	rpcs3/Emu/Cell/PPUFunction.cpp:1811

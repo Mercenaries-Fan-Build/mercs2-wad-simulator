@@ -211,13 +211,16 @@ jobs:
         if: matrix.target == 'x86_64-unknown-linux-gnu'
         shell: bash
         run: |
-          # Run from _refdata so `pack_data`'s repo walk-up finds the corpora at `docs/…`. It also
-          # walks up from the EXE, which still reaches this workspace's `data/production_names.json`
-          # — so the names come from here and the corpora from there, with no new flags.
+          # `--pack-data` reads its out-of-repo sources from the keys of a `.mercs2-local.toml`
+          # found upward from its working directory. This step writes one at the workspace root with
+          # `notes_docs_dir` set to the corpora checked out above, and runs from there. The names come
+          # from this repo's `data/production_names.json` and the five Ess / ECS / audio files from its
+          # committed `workshop_data/`, both read from the checkout the binary was built from. The
+          # raw-names keys (`rainbow_table`, `jul08_strings`) are read only when
+          # production_names.json is absent.
+          printf 'notes_docs_dir = "%s"\n' "$GITHUB_WORKSPACE/_refdata/docs" > "$GITHUB_WORKSPACE/.mercs2-local.toml"
           out="$GITHUB_WORKSPACE/workshop_data"
-          cd _refdata
           "$GITHUB_WORKSPACE/target/${{ matrix.target }}/release/mercs2_workshop" --pack-data "$out"
-          cd "$GITHUB_WORKSPACE"
           # GUARDRAIL 1: a pack that built but resolved almost nothing is the exact silent failure
           # this step exists to end — fail loudly rather than ship another nameless-bone release.
           n=$(sed -n 's/.*"names": \([0-9]*\).*/\1/p' workshop_data/manifest.json)
@@ -226,11 +229,10 @@ jobs:
             echo "::error::workshop_data/names.bin has only ${n:-0} names (expected >= 20000) — bone names would be missing"
             exit 1
           fi
-          # GUARDRAIL 2: every content the manifest PROMISES must actually be in the bundle. The
-          # corpora resolve by walk-up, so a moved path degrades to a warning inside --pack-data and
-          # would otherwise ship a bundle quietly missing whole features.
+          # GUARDRAIL 2: fails when any content the manifest lists is absent from the packed bundle,
+          # before the zip is published.
           missing=""
-          for c in names.bin live_registry_hashes.csv spawnable_templates.csv ecs_schemas lua lua_dlc; do
+          for c in names.bin live_registry_hashes.csv spawnable_templates.csv ecs_schemas lua lua_dlc ess_api.json ess_natives.json ess_nodes.json ecs_registry.tsv audio_manifest.json; do
             [ -e "workshop_data/$c" ] || missing="$missing $c"
           done
           if [ -n "$missing" ]; then

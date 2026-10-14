@@ -111,7 +111,10 @@ fn main() {
     let c = ag.clips.iter().find(|c| c.name_hash == clip_hash).unwrap();
 
     let bones = &c.binding.track_to_bone_hash;
-    let names = mercs2_engine::worldutil::rainbow_names(&bones.iter().copied().collect());
+    let table = mercs2_formats::game_paths::local_config_rainbow_table(std::path::Path::new(env!("CARGO_MANIFEST_DIR")))
+        .unwrap_or_else(|e| panic!("{e}"));
+    let names = mercs2_engine::worldutil::rainbow_names(&table, &bones.iter().copied().collect())
+        .unwrap_or_else(|e| panic!("{e}"));
     let resolved = bones.iter().filter(|b| hier_set.contains(b)).count();
 
     println!(

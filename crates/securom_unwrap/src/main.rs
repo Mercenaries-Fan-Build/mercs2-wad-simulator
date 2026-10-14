@@ -22,6 +22,9 @@ struct Cli {
     /// Extra section name(s) to treat as SecuROM's (repeatable).
     #[arg(long = "securom-section")]
     securom_section: Vec<String>,
+    /// Set IMAGE_FILE_LARGE_ADDRESS_AWARE (0x0020) in FileHeader.Characteristics.
+    #[arg(long)]
+    large_address_aware: bool,
 }
 
 fn parse_hex(s: &str) -> Result<u32, String> {
@@ -40,9 +43,9 @@ fn main() -> ExitCode {
         }
     };
 
-    let mut opts = Options::default();
-    opts.oep = cli.oep;
-    opts.securom_sections.extend(cli.securom_section);
+    let mut securom_sections = Options::default().securom_sections;
+    securom_sections.extend(cli.securom_section);
+    let opts = Options { oep: cli.oep, securom_sections, large_address_aware: cli.large_address_aware };
 
     let (out, rep) = match unwrap(&data, &opts) {
         Ok(v) => v,

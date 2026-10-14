@@ -7,11 +7,9 @@
 //! every block, scanning for the `\x1bLua\x51` 5-byte header, and parsing enough of the chunk
 //! header to recover the source-name string.
 //!
-//! Handles **both** PC (FFCS, little-endian sges) and console (SCFF, big-endian segs). The
-//! `mercs2_engine::wad::decompress_block_index` path only inflates LE sges — it silently
-//! returns the raw compressed bytes for console `segs` blocks, which looks like "zero Lua
-//! chunks" when scanned. This binary opens the WAD, uses `wad::` for the path/aset metadata,
-//! but drives block decompression with an inlined per-platform decoder.
+//! Handles **both** PC (FFCS, little-endian sges) and console (SCFF, big-endian segs): blocks are
+//! inflated with `mercs2_formats::sges::decompress_block`, and a block that fails to inflate stops
+//! the scan with its index and path.
 //!
 //!   cargo run --release -p mercs2_probe --bin lua_chunk_scan -- \
 //!       --wad game-files/vz.wad [--out scratchpad/pc-vz.tsv]
@@ -19,10 +17,8 @@
 use mercs2_engine::wad;
 use mercs2_formats::ffcs::{Endian, IndxEntry};
 use std::fs::File;
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::Write;
 use std::path::PathBuf;
-
-const PAGE_SIZE: u64 = 0x8000;
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -62,11 +58,10 @@ fn main() {
         if is_console { "BE" } else { "LE" }
     );
 
-    // Re-open the file; we'll read raw block bytes ourselves for console decompression.
     let mut file = File::open(&wadpath).expect("reopen wad");
 
     if let (Some(bi), Some(dir)) = (extract_block, extract_dir.as_ref()) {
-        let data = decompress_any(&mut file, &indx, bi, endian).expect("decompress block");
+        let data = decompress_any(&mut file, &indx, bi).expect("decompress block");
         let hits = scan_block(&data);
         std::fs::create_dir_all(dir).expect("mkdir");
         eprintln!(
@@ -99,21 +94,12 @@ fn main() {
 
     let mut total_chunks = 0usize;
     let mut blocks_with_lua = 0usize;
-    let (mut ok, mut fail) = (0usize, 0usize);
     for bi in 0..n {
         if bi % 500 == 0 {
             eprintln!("  [{bi}/{n}]");
         }
-        let data = match decompress_any(&mut file, &indx, bi, endian) {
-            Ok(d) => {
-                ok += 1;
-                d
-            }
-            Err(_) => {
-                fail += 1;
-                continue;
-            }
-        };
+        let data = decompress_any(&mut file, &indx, bi)
+            .unwrap_or_else(|e| panic!("block {bi} ({}): {e}", paths[bi]));
 
         let hits = scan_block(&data);
         if hits.is_empty() {
@@ -132,10 +118,7 @@ fn main() {
         ));
     }
 
-    eprintln!(
-        "[lua-scan] blocks_with_lua={} total_chunks={} (decompress ok={} failed={})",
-        blocks_with_lua, total_chunks, ok, fail
-    );
+    eprintln!("[lua-scan] blocks_with_lua={blocks_with_lua} total_chunks={total_chunks}");
 
     print!("{}", tsv);
     if let Some(p) = outpath {
@@ -145,129 +128,12 @@ fn main() {
     }
 }
 
-/// PC or console: dispatch on endian. On PC we use the engine's wad decompressor (which
-/// correctly inflates `sges`); on console we read raw bytes and decode `segs` ourselves.
-fn decompress_any(
-    file: &mut File,
-    indx: &[IndxEntry],
-    block_index: usize,
-    endian: Endian,
-) -> Result<Vec<u8>, String> {
-    if block_index >= indx.len() {
-        return Err("oob".into());
-    }
-    let indx_entry = &indx[block_index];
-    let file_offset = indx_entry.page_index as u64 * PAGE_SIZE;
-    let compressed_pages = indx_entry.compressed_page_count();
-    let compressed_size = compressed_pages as usize * PAGE_SIZE as usize;
-
-    file.seek(SeekFrom::Start(file_offset))
-        .map_err(|e| format!("seek: {e}"))?;
-    let mut raw = vec![0u8; compressed_size];
-    file.read_exact(&mut raw).map_err(|e| format!("read: {e}"))?;
-
-    if raw.len() < 4 {
-        return Err("tiny block".into());
-    }
-
-    match endian {
-        Endian::Little => {
-            if &raw[0..4] == b"sges" {
-                decompress_sges_le(&raw)
-            } else {
-                // UCFX-raw or unknown: just truncate to the declared decompressed page size.
-                let decomp_size =
-                    indx_entry.decompressed_page_count() as usize * PAGE_SIZE as usize;
-                raw.truncate(decomp_size.min(raw.len()));
-                Ok(raw)
-            }
-        }
-        Endian::Big => {
-            if &raw[0..4] == b"segs" {
-                decompress_segs_be(&raw)
-            } else {
-                let decomp_size =
-                    indx_entry.decompressed_page_count() as usize * PAGE_SIZE as usize;
-                raw.truncate(decomp_size.min(raw.len()));
-                Ok(raw)
-            }
-        }
-    }
+/// Block `block_index`, inflated (PC `sges` or console `segs`).
+fn decompress_any(file: &mut File, indx: &[IndxEntry], block_index: usize) -> Result<Vec<u8>, String> {
+    let bi = u16::try_from(block_index).map_err(|_| format!("block index {block_index} exceeds u16"))?;
+    mercs2_formats::sges::decompress_block(file, indx, bi)
 }
 
-fn decompress_sges_le(buf: &[u8]) -> Result<Vec<u8>, String> {
-    // Use the format crate's working implementation.
-    mercs2_formats::sges::decompress_sges(buf)
-}
-
-/// Ported from `tools/cross_platform_vz_compare.py :: decompress_be_sges`, adapted to in-memory
-/// `buf` rather than file-offset slicing. Reads BE segment table; a raw segment is
-/// `csz > 0 && csz == dsz`, otherwise zlib raw-deflate.
-fn decompress_segs_be(buf: &[u8]) -> Result<Vec<u8>, String> {
-    if buf.len() < 16 || &buf[0..4] != b"segs" {
-        return Err("not segs".into());
-    }
-    let seg_count = u16::from_be_bytes([buf[6], buf[7]]) as usize;
-    let _decomp_total = u32::from_be_bytes([buf[8], buf[9], buf[10], buf[11]]) as usize;
-
-    let mut seg_table: Vec<(usize, usize)> = Vec::with_capacity(seg_count);
-    for si in 0..seg_count {
-        let so = 16 + si * 8;
-        if so + 4 > buf.len() {
-            return Err("truncated seg table".into());
-        }
-        let csz = u16::from_be_bytes([buf[so], buf[so + 1]]) as usize;
-        let dsz = u16::from_be_bytes([buf[so + 2], buf[so + 3]]) as usize;
-        seg_table.push((csz, dsz));
-    }
-
-    let seg_table_bytes = seg_count * 8;
-    let header_size = if seg_count > 0 {
-        16 + ((seg_table_bytes + 15) & !15)
-    } else {
-        16
-    };
-    if header_size > buf.len() {
-        return Err("header past end".into());
-    }
-    let payload = &buf[header_size..];
-
-    let mut result: Vec<u8> = Vec::with_capacity(_decomp_total);
-    let mut pos = 0usize;
-    for (csz, dsz) in &seg_table {
-        if pos >= payload.len() {
-            break;
-        }
-        let is_raw = *csz > 0 && csz == dsz;
-        if is_raw {
-            let end = (pos + csz).min(payload.len());
-            result.extend_from_slice(&payload[pos..end]);
-            pos = end;
-        } else {
-            let dsz = if *dsz == 0 { 65536 } else { *dsz };
-            let mut decompressor = flate2::Decompress::new(false);
-            let mut out = vec![0u8; dsz];
-            let before_in = decompressor.total_in();
-            match decompressor.decompress(
-                &payload[pos..],
-                &mut out,
-                flate2::FlushDecompress::Finish,
-            ) {
-                Ok(_) => {
-                    let written = decompressor.total_out() as usize;
-                    out.truncate(written);
-                    result.extend_from_slice(&out);
-                    let consumed = (decompressor.total_in() - before_in) as usize;
-                    pos += consumed;
-                }
-                Err(_) => break,
-            }
-        }
-        // 16-byte align
-        pos = (pos + 15) & !15;
-    }
-    Ok(result)
-}
 
 #[derive(Debug)]
 struct ChunkHit {

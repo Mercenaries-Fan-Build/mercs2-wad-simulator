@@ -566,29 +566,32 @@ thread_local! {
     static RAINBOW: HashMap<u32, String> = load_rainbow();
 }
 fn load_rainbow() -> HashMap<u32, String> {
-    // Resolve bone-name hashes to the recovered names (repo rainbow table), so the skeleton exports
-    // with real joint names. Best-effort: an unresolved bone falls back to its hex hash.
+    // Resolve bone-name hashes to the recovered names (the rainbow table named by `rainbow_table` in
+    // `.mercs2-local.toml`), so the skeleton exports with real joint names. A missing key, an
+    // unreadable or unparsable table, or one without a `pandemic_hash_m2` object panics; a bone the
+    // table does not name exports as its hex hash.
+    let path = mercs2_formats::game_paths::local_config_rainbow_table(std::path::Path::new(env!("CARGO_MANIFEST_DIR")))
+        .unwrap_or_else(|e| panic!("{e}"));
+    let txt = std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("[char_export] read rainbow table {}: {e}", path.display()));
+    let v = serde_json::from_str::<Value>(&txt)
+        .unwrap_or_else(|e| panic!("[char_export] parse rainbow table {}: {e}", path.display()));
+    let o = v
+        .get("pandemic_hash_m2")
+        .and_then(|x| x.as_object())
+        .unwrap_or_else(|| panic!("[char_export] rainbow table {} has no `pandemic_hash_m2` object", path.display()));
     let mut map = HashMap::new();
-    for root in ["tools/rainbow_table.json", "../../tools/rainbow_table.json", "../../../tools/rainbow_table.json"] {
-        if let Ok(txt) = std::fs::read_to_string(root) {
-            if let Ok(v) = serde_json::from_str::<Value>(&txt) {
-                if let Some(o) = v.get("pandemic_hash_m2").and_then(|x| x.as_object()) {
-                    for (k, names) in o {
-                        if let (Ok(h), Some(n)) = (
-                            u32::from_str_radix(k.trim_start_matches("0x"), 16),
-                            names.get(0).and_then(|x| x.as_str()),
-                        ) {
-                            let l = n.to_lowercase();
-                            if l.starts_with("bone") || l.starts_with("hp_") || l.starts_with("eff")
-                                || l == "globalsrt" || l.contains("srt") || l.starts_with("dummy")
-                            {
-                                map.insert(h, n.to_string());
-                            }
-                        }
-                    }
-                }
+    for (k, names) in o {
+        if let (Ok(h), Some(n)) = (
+            u32::from_str_radix(k.trim_start_matches("0x"), 16),
+            names.get(0).and_then(|x| x.as_str()),
+        ) {
+            let l = n.to_lowercase();
+            if l.starts_with("bone") || l.starts_with("hp_") || l.starts_with("eff")
+                || l == "globalsrt" || l.contains("srt") || l.starts_with("dummy")
+            {
+                map.insert(h, n.to_string());
             }
-            break;
         }
     }
     map

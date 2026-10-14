@@ -34,15 +34,12 @@ loadprobe = { workspace = true }
 
 [dev-dependencies]
 serde_json = "1"
+sha2 = "0.10"
 
 [features]
 # Builds the game-gated tests, which read the retail vz.wad named by the repo-root .mercs2-local.toml;
 # run them with `cargo xtask retail-test`.
 retail = []
-
-[[test]]
-name = "lua_sites_exes"
-required-features = ["retail"]
 
 [[test]]
 name = "anim_container_roundtrip"

@@ -5,13 +5,15 @@
 //!       --ps3 <ps3.scff> --xbox <xbox.doh> --only <path-substring> --out <dir>
 
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use mercs2_formats::be_to_le::convert::convert_block;
+use mercs2_formats::be_to_le::lua::LuaTools;
 use mercs2_formats::dlc_input::{
     decompress_be_sges, parse_be_ffcs, parse_be_indx, parse_be_pths, PAGE_SIZE,
 };
 use mercs2_formats::dlc_stfs::load_stfs_or_doh;
+use mercs2_formats::game_paths::{local_config_java_binary, local_config_unluac_jar};
 
 fn arg_str(args: &[String], key: &str) -> Option<String> {
     args.iter().position(|a| a == key).and_then(|i| args.get(i + 1).cloned())
@@ -57,6 +59,16 @@ fn load_block(scff_path: &str, substr: &str) -> Option<(String, Vec<u8>)> {
     None
 }
 
+/// The java + unluac pair from the `java_binary` and `unluac_jar` keys of `.mercs2-local.toml`.
+/// Panics naming the missing key when either is absent.
+fn lua_tools() -> LuaTools {
+    let start = Path::new(env!("CARGO_MANIFEST_DIR"));
+    LuaTools {
+        java: local_config_java_binary(start).unwrap_or_else(|e| panic!("{e}")),
+        unluac: local_config_unluac_jar(start).unwrap_or_else(|e| panic!("{e}")),
+    }
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let ps3 = arg_str(&args, "--ps3").expect("--ps3");
@@ -73,8 +85,9 @@ fn main() {
     fs::write(out_dir.join("ps3_be.bin"), &p3_raw).ok();
     fs::write(out_dir.join("xbox_be.bin"), &xb_raw).ok();
 
-    let p3_out = convert_block(&p3_raw, false, None).expect("ps3 convert");
-    let xb_out = convert_block(&xb_raw, false, None).expect("xbox convert");
+    let lua_tools = lua_tools();
+    let p3_out = convert_block(&p3_raw, false, None, Some(&lua_tools)).expect("ps3 convert");
+    let xb_out = convert_block(&xb_raw, false, None, Some(&lua_tools)).expect("xbox convert");
 
     fs::write(out_dir.join("ps3_le.bin"), &p3_out).ok();
     fs::write(out_dir.join("xbox_le.bin"), &xb_out).ok();

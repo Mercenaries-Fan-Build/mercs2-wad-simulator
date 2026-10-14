@@ -10,7 +10,8 @@ patch WAD the PC game can load as an overlay.
 
 The pipeline, in the order `src/main.rs` runs it:
 
-1. **Load DOH bytes** — either `extract_stfs_from_rar` (RAR → STFS → `DLC01.doh`) or
+1. **Load DOH bytes** — either `extract_stfs_from_rar` (RAR → STFS → `DLC01.doh`, unpacked by the
+   `--unrar` or `--bsdtar` program named on the command line) or
    `load_stfs_or_doh` (an STFS container, or a raw `.doh` passed straight through).
 2. **Parse the BE FFCS header** — `parse_be_ffcs` yields the chunk rows; `INDX`, `ASET`, `PTHS`
    and `CSUM` are pulled out by tag. `--list-blocks` stops here and prints page count, packed
@@ -42,28 +43,34 @@ the BE→LE block conversion.
 From an Xbox 360 DLC RAR:
 
 ```
-cargo run -p dlc_port -- --x360-rar DLC01.rar --output vz-patch.wad
+cargo run -p dlc_port -- --x360-rar DLC01.rar --unrar /path/to/UnRAR.exe \
+  --java /path/to/java --unluac /path/to/unluac.jar --output vz-patch.wad
 ```
 
 From an STFS container or a raw `DLC01.doh`:
 
 ```
-cargo run -p dlc_port -- --x360-stfs DLC01.doh --output vz-patch.wad
+cargo run -p dlc_port -- --x360-stfs DLC01.doh \
+  --java /path/to/java --unluac /path/to/unluac.jar --output vz-patch.wad
 ```
 
 Inspect the block table without converting anything:
 
 ```
-cargo run -p dlc_port -- --x360-stfs DLC01.doh --list-blocks
+cargo run -p dlc_port -- --x360-stfs DLC01.doh \
+  --java /path/to/java --unluac /path/to/unluac.jar --list-blocks
 ```
 
 Convert a slice of the block range while iterating:
 
 ```
-cargo run -p dlc_port -- --x360-stfs DLC01.doh --start-block 100 --max-blocks 20 -o test.wad
+cargo run -p dlc_port -- --x360-stfs DLC01.doh \
+  --java /path/to/java --unluac /path/to/unluac.jar --start-block 100 --max-blocks 20 -o test.wad
 ```
 
-Flags: `--x360-rar`, `--x360-stfs` (one is required), `-o/--output` (required unless
+Flags: `--x360-rar`, `--x360-stfs` (one is required), `--unrar PATH` / `--bsdtar PATH` (exactly
+one is required with `--x360-rar`), `--java PATH` and `--unluac PATH` (required: the java
+executable and unluac jar that convert Lua bytecode blocks), `-o/--output` (required unless
 `--list-blocks`), `--list-blocks`, `--max-blocks N`, `--start-block N`, `-v/--verbose`.
 
 ## Notes / gotchas

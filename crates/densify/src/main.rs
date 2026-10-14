@@ -102,9 +102,10 @@ fn main() {
 }
 
 fn parse_args() -> Result<Config, String> {
+    let mut heightmap_dir: Option<PathBuf> = None;
     let mut cfg = Config {
         wad: None,
-        heightmap_dir: PathBuf::from(r"C:\Users\Shadow\Downloads\wallys-work\heightmap-data"),
+        heightmap_dir: PathBuf::new(),
         out_dir: PathBuf::from("output/foliage"),
         radius: 60.0,
         spacing: 6.0,
@@ -123,7 +124,7 @@ fn parse_args() -> Result<Config, String> {
         let mut next = || it.next().ok_or_else(|| format!("{a} needs a value"));
         match a.as_str() {
             "--wad" => cfg.wad = Some(next()?),
-            "--heightmap" => cfg.heightmap_dir = PathBuf::from(next()?),
+            "--heightmap" => heightmap_dir = Some(PathBuf::from(next()?)),
             "--out-dir" => cfg.out_dir = PathBuf::from(next()?),
             "--radius" => cfg.radius = next()?.parse().map_err(|_| "bad --radius")?,
             "--spacing" => cfg.spacing = next()?.parse().map_err(|_| "bad --spacing")?,
@@ -170,6 +171,8 @@ fn parse_args() -> Result<Config, String> {
             o => return Err(format!("unknown arg {o}")),
         }
     }
+    cfg.heightmap_dir = heightmap_dir
+        .ok_or("--heightmap <dir> is required (the Wally heightmap-data dir with heights.bin/tiers.bin)")?;
     Ok(cfg)
 }
 
@@ -177,7 +180,7 @@ fn print_help() {
     println!(
         "densify — add vegetation density to Mercenaries 2 (novel ground-snapped scatter -> overlay WAD)\n\
          \n\
-         USAGE: densify [options]\n\
+         USAGE: densify --heightmap <dir> [options]\n\
          \n\
          --radius <m>          plant within this radius of existing veg (default 60)\n\
          --spacing <m>         min spacing between added plants (default 6)\n\
@@ -187,7 +190,7 @@ fn print_help() {
          --exclude-radius <m>  building/prop exclusion disc radius (default 8)\n\
          --region xmin,zmin,xmax,zmax   limit scatter to one area (world units)\n\
          --wad <path>          override vz.wad discovery\n\
-         --heightmap <dir>     Wally heightmap-data dir (heights.bin/tiers.bin)\n\
+         --heightmap <dir>     Wally heightmap-data dir (heights.bin/tiers.bin); required\n\
          --out-dir <dir>       output dir (default output/foliage)\n"
     );
 }

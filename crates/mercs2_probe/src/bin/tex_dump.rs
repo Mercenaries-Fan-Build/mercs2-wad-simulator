@@ -107,7 +107,9 @@ fn main() {
         }
     }
     // Metadata names: the texture's own NAME leaf (asset name), else a rainbow-table reverse of the hash.
-    let rainbow = mercs2_engine::worldutil::rainbow_names(&texs);
+    let table = mercs2_formats::game_paths::local_config_rainbow_table(std::path::Path::new(env!("CARGO_MANIFEST_DIR")))
+        .unwrap_or_else(|e| panic!("{e}"));
+    let rainbow = mercs2_engine::worldutil::rainbow_names(&table, &texs).unwrap_or_else(|e| panic!("{e}"));
     println!("== {} distinct textures; dumping (mip0), labelled by NAME leaf / rainbow reverse ==", texs.len());
     let (mut ok, mut named, mut fail) = (0u32, 0u32, 0u32);
     for th in &texs {

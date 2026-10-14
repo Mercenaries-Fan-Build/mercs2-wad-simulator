@@ -1,0 +1,54 @@
+[package]
+name = "mercs2_exemap"
+version = "0.1.0"
+edition = "2021"
+description = "Mercenaries 2 modernization — cross-build exe map: the catalogue of known Mercenaries2.exe builds, their code layouts, and a per-section layout-membership checker."
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lib]
+name = "mercs2_exemap"
+path = "src/lib.rs"
+
+[[bin]]
+name = "exemap"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+sha2 = "0.10"
+md-5 = "0.10"
+sha1 = "0.10"
+securom_unwrap = { path = "../securom_unwrap" }
+serde_json = "1"
+zip = { version = "2", default-features = false, features = ["deflate"] }
+iced-x86 = { version = "1", default-features = false, features = ["std", "decoder", "instr_info"] }
+aes = "0.8"
+mercs2_formats = { workspace = true }
+
+[features]
+# Builds the game-gated tests, which read the PC executables and installs in the canonical tree
+# named by the repo-root .mercs2-local.toml (canonical_dir), rebuild the console images from their
+# containers (x360_devkit_iso, x360_retail_xex, ps3_eboot_bin, ps3_update_pkgs), and rebuild the
+# Lua corpus WADs from their originals (x360_devkit_iso, x360_dlc_biua_stfs,
+# x360_dlc_prototypes_dir, ps3_disc_iso, ps3_update_pkgs, ps3_dlc_biua_pkg) or check them in place
+# (canonical_dir, x360_retail_dir, ps3_jp_disc_dir, ps3_de_disc_dir, ps3_eu_disc_dir); run them
+# with `cargo xtask retail-test`. None of them runs an executable.
+retail = []
+
+[[test]]
+name = "corpus"
+required-features = ["retail"]
+
+[[test]]
+name = "console_images"
+required-features = ["retail"]
+
+[[test]]
+name = "lua_corpus"
+required-features = ["retail"]
+
+[[test]]
+name = "lua_sites_exes"
+required-features = ["retail"]

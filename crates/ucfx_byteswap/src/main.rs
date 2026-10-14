@@ -2,7 +2,7 @@ use clap::Parser;
 use std::io::{self, Read, Write};
 use std::path::PathBuf;
 
-use ucfx_byteswap::{aset, convert, report, validate};
+use ucfx_byteswap::{aset, convert, lua, report, validate};
 
 use report::SchemaCoverageReport;
 
@@ -65,6 +65,15 @@ struct Cli {
     tex_fourcc: Option<String>,
     #[arg(long)]
     tex_mips: Option<usize>,
+
+    /// java executable that runs unluac. Converting a block that holds Lua bytecode (`BINN`)
+    /// requires --java and --unluac; such a block fails to convert without them.
+    #[arg(long, value_name = "JAVA_PATH", requires = "unluac")]
+    java: Option<PathBuf>,
+
+    /// unluac jar that round-trips Lua bytecode (`BINN`). Given together with --java.
+    #[arg(long, value_name = "UNLUAC_JAR", requires = "java")]
+    unluac: Option<PathBuf>,
 }
 
 /// Handle `--aset-recompute`: read the per-block protocol from `input`, run the
@@ -206,7 +215,17 @@ fn main() {
         None
     };
 
-    match convert::convert_block(&input_data, cli.dry_run, report.as_mut()) {
+    // clap's `requires` pairs --java with --unluac, so both are set or neither is.
+    let lua_tools = match (cli.java, cli.unluac) {
+        (Some(java), Some(unluac)) => Some(lua::LuaTools { java, unluac }),
+        (None, None) => None,
+        _ => {
+            eprintln!("Error: --java and --unluac must be given together");
+            std::process::exit(1);
+        }
+    };
+
+    match convert::convert_block(&input_data, cli.dry_run, report.as_mut(), lua_tools.as_ref()) {
         Ok(output) => {
             if let Some(rpt) = &report {
                 rpt.print_report();

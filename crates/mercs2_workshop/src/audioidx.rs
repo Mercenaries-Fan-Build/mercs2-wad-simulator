@@ -11,8 +11,8 @@
 //!
 //! Bundled at `workshop_data/audio_manifest.json`, copied verbatim from the inventory the user hosts
 //! (`https://outbreak.sfo3.digitaloceanspaces.com/mercs2/manifest.json`) — vendored in, per the
-//! standing rule, rather than fetched at runtime. A missing file is not fatal: the Audio domain
-//! degrades to the WAD's bank assets alone.
+//! standing rule. `--pack-data` copies it into every bundle; a complete bundle without a readable,
+//! well-formed copy is an error naming the file.
 
 use std::path::Path;
 
@@ -61,22 +61,25 @@ pub struct AudioIndex {
 }
 
 impl AudioIndex {
-    /// Load `audio_manifest.json` from a `workshop_data/` directory. Missing or malformed → an empty
-    /// index (the Audio domain still shows the WAD's bank assets).
-    pub fn load(data_home: &Path) -> AudioIndex {
+    /// Load `audio_manifest.json` from a `workshop_data/` directory. An error naming the file when it
+    /// is missing, unreadable, not JSON, has no `entries` array, or has an entry without `original`.
+    pub fn load(data_home: &Path) -> Result<AudioIndex, String> {
+        let path = data_home.join("audio_manifest.json");
         let mut idx = AudioIndex::default();
-        let Ok(text) = std::fs::read_to_string(data_home.join("audio_manifest.json")) else {
-            return idx;
-        };
-        let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else { return idx };
-        let Some(entries) = v.get("entries").and_then(|e| e.as_array()) else { return idx };
+        let text = std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+        let v = serde_json::from_str::<serde_json::Value>(&text)
+            .map_err(|e| format!("{}: bad JSON: {e}", path.display()))?;
+        let entries = v
+            .get("entries")
+            .and_then(|e| e.as_array())
+            .ok_or_else(|| format!("{}: no `entries` array", path.display()))?;
         let s = |o: &serde_json::Value, k: &str| {
             o.get(k).and_then(|x| x.as_str()).unwrap_or_default().to_string()
         };
-        for e in entries {
+        for (i, e) in entries.iter().enumerate() {
             let original = s(e, "original");
             if original.is_empty() {
-                continue;
+                return Err(format!("{}: entry {i} has no `original`", path.display()));
             }
             idx.clips.push(AudioClip {
                 bank: s(e, "bank"),
@@ -93,7 +96,7 @@ impl AudioIndex {
             .iter()
             .map(|c| format!("{} {} {}", c.bank, c.speaker, c.caption).to_lowercase())
             .collect();
-        idx
+        Ok(idx)
     }
 
     /// The banks present, each with its clip count — for a grouped browser, in name order.
@@ -161,17 +164,12 @@ mod tests {
         assert_eq!(i.clips[0].stem(), "1");
     }
 
-    /// ★ THE SEAM. The bundled `audio_manifest.json` must parse and carry the inventory — a change in
-    /// the hosted schema (renamed fields, a different envelope) fails here rather than leaving the
-    /// Audio domain silently bank-only.
+    /// ★ THE SEAM. The repo's committed `workshop_data/audio_manifest.json` must exist, parse and
+    /// carry the inventory; a renamed field or a different envelope fails this test.
     #[test]
     fn the_bundled_manifest_parses_and_carries_the_inventory() {
         let home = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../workshop_data");
-        if !home.join("audio_manifest.json").is_file() {
-            eprintln!("SKIPPING: no bundled audio_manifest.json");
-            return;
-        }
-        let i = AudioIndex::load(&home);
+        let i = AudioIndex::load(&home).unwrap_or_else(|e| panic!("{e}"));
         assert!(!i.is_empty(), "the bundled manifest parsed to zero clips — the seam is broken");
         assert!(i.clips.len() > 10_000, "expected ~12,988 clips, got {}", i.clips.len());
         // The hero VO banks must be present and captioned.

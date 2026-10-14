@@ -24,6 +24,10 @@
 //! Run `--list-blocks` to dump the block table without converting anything;
 //! `--start-block` / `--max-blocks` narrow the converted range while iterating.
 //!
+//! `--java <path>` and `--unluac <path>` (both required) name the java executable and the
+//! unluac jar that convert the DLC's Lua bytecode. `--x360-rar` also needs the RAR extractor
+//! named explicitly: exactly one of `--unrar <path>` or `--bsdtar <path>`.
+//!
 //! `--xbox-doh-oracle <path>` opts into the Xbox-DOH side-oracle resolution for
 //! PS3 blocks the UCFX descriptor walker refuses with the `PS3 compact decl
 //! detected` class (see `docs/_dlc_port_xbox_doh_side_oracle.md`). When the
@@ -38,7 +42,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::atomic::Ordering;
 
-use clap::Parser;
+use clap::{ArgGroup, Parser};
 
 use mercs2_formats::aset_type_ids::{
     type_id_for_type_hash, SCRIPT_ASET_TYPE_ID, SCRIPT_TYPE_HASH, STRINGDB_ASET_TYPE_ID,
@@ -47,20 +51,34 @@ use mercs2_formats::aset_type_ids::{
 use mercs2_formats::dlc_input::{
     decompress_be_sges, parse_be_aset, parse_be_ffcs, parse_be_indx, parse_be_pths, PAGE_SIZE,
 };
-use mercs2_formats::dlc_stfs::{extract_stfs_from_rar, load_stfs_or_doh};
+use mercs2_formats::dlc_stfs::{extract_stfs_from_rar, load_stfs_or_doh, RarExtractor};
 use mercs2_formats::patch_wad::{build_patch_wad_multi, AsetEntry, PatchBlock, FFCS_CERT_BLOB};
 use mercs2_formats::sges::{compress_sges, decompress_sges};
 use mercs2_formats::ucfx::parse_block_entry_table;
 use ucfx_byteswap::convert::{convert_block, QUIET};
+use ucfx_byteswap::lua::LuaTools;
 
 use dlc_port::xbox_doh_oracle::{is_ps3_compact_decl_rejection, primary_name_hash_be, XboxDohOracle};
 
 #[derive(Parser)]
 #[command(name = "dlc_port", about = "Port Xbox 360 / PS3 DLC to a PC vz-patch.wad (all-Rust)")]
+#[command(group(ArgGroup::new("rar_extractor").args(["unrar", "bsdtar"])))]
 struct Cli {
-    /// Xbox 360 DLC RAR archive
-    #[arg(long)]
+    /// Xbox 360 DLC RAR archive (needs exactly one of --unrar / --bsdtar)
+    #[arg(long, requires = "rar_extractor")]
     x360_rar: Option<PathBuf>,
+    /// UnRAR.exe that extracts --x360-rar
+    #[arg(long, value_name = "UNRAR_PATH")]
+    unrar: Option<PathBuf>,
+    /// bsdtar that extracts --x360-rar
+    #[arg(long, value_name = "BSDTAR_PATH")]
+    bsdtar: Option<PathBuf>,
+    /// java executable that runs unluac to convert the DLC's Lua bytecode
+    #[arg(long, value_name = "JAVA_PATH")]
+    java: PathBuf,
+    /// unluac jar that converts the DLC's Lua bytecode
+    #[arg(long, value_name = "UNLUAC_JAR")]
+    unluac: PathBuf,
     /// STFS container, raw DLC01.doh, or PS3 BE SCFF file
     #[arg(long)]
     x360_stfs: Option<PathBuf>,
@@ -118,12 +136,19 @@ enum BlockDecode {
 
 fn run() -> Result<(), String> {
     let cli = Cli::parse();
+    let lua_tools = LuaTools { java: cli.java.clone(), unluac: cli.unluac.clone() };
 
     // ── Step 1: load DOH bytes ──
     let doh: Vec<u8> = if let Some(rar) = &cli.x360_rar {
         println!("Step 1: Extracting STFS from RAR...");
         let work = std::env::temp_dir().join("dlc_port_rs");
-        let reader = extract_stfs_from_rar(rar, &work)?;
+        // clap's `requires = "rar_extractor"` on --x360-rar guarantees exactly one of these.
+        let extractor = match (&cli.unrar, &cli.bsdtar) {
+            (Some(p), None) => RarExtractor::UnRar(p.clone()),
+            (None, Some(p)) => RarExtractor::Bsdtar(p.clone()),
+            _ => return Err("--x360-rar needs exactly one of --unrar or --bsdtar".into()),
+        };
+        let reader = extract_stfs_from_rar(rar, &work, &extractor)?;
         let entry = reader.doh_entry().ok_or("No DOH in STFS")?;
         println!("  Reading DOH ({} bytes)...", entry.file_size);
         reader.read_doh()?
@@ -145,7 +170,7 @@ fn run() -> Result<(), String> {
     let xbox_doh_oracle: Option<XboxDohOracle> = match &cli.xbox_doh_oracle {
         Some(p) => {
             println!("Step 1b: Loading Xbox-DOH side oracle from {}...", p.display());
-            Some(XboxDohOracle::load(p)?)
+            Some(XboxDohOracle::load(p, &lua_tools)?)
         }
         None => None,
     };
@@ -245,7 +270,7 @@ fn run() -> Result<(), String> {
         // optional Xbox-DOH side oracle. Anything the oracle cannot resolve
         // fails the whole run — no silent fallback — so the output WAD is
         // either 100 % resolved or does not exist.
-        let decode = match convert_block(&decompressed, false, None) {
+        let decode = match convert_block(&decompressed, false, None, Some(&lua_tools)) {
             Ok(s) => BlockDecode::Ps3Direct(s),
             Err(err) => {
                 if is_ps3_compact_decl_rejection(&err) {

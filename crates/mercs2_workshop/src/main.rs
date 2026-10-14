@@ -15,7 +15,6 @@
 //!   `vz-patch.wad` mechanism (last-opened wins), which is how DLC-ported content (obama, sarah,
 //!   the DLC world blocks) gets into the workbench. A `vz-patch.wad` sitting next to the base
 //!   wad is auto-loaded, exactly as the retail exe does; `--no-auto-patch` disables that.
-//! - `--names <csv>` overrides the name corpus (default: see `index::default_names_csv`).
 //!
 //! Headless modes (each runs and exits). `<name|0xH>` takes a raw m2 hash or a name to hash:
 //! - `--list [filter]`                     — catalog dump (models + textures), substring-filtered
@@ -36,7 +35,12 @@
 //! - `--tex-scan` / `--tex-scan-blocks`    — dims/format of every texture ASET / every texture CHUNK
 //! - `--hash <names…>` / `--hash-file <f>` — m2-hash names (hash-hunting)
 //! - `--block-strings <blk>`               — printable ASCII (≥5 chars) from a decompressed block
-//! - `--pack-data [dir]`                   — build the redistributable `workshop_data/` bundle
+//! - `--pack-data [dir]`                   — build the redistributable `workshop_data/` bundle from
+//!                                           the sources `.mercs2-local.toml` names (see `pack_data`)
+//!
+//! Every mode that resolves names reads the reference bundle (`index::require_data_home`): found
+//! through `index::data_home`, else downloaded from the release, else the run fails naming where
+//! to get it.
 //!
 //! Module map:
 //! - [`app`]     — the window: winit loop over the engine `Scene`, asset workbench, editable
@@ -44,9 +48,9 @@
 //! - [`bundle`]  — the lossless export bundle; nothing is discarded (raw rung bytes survive).
 //! - [`gui`]     — egui host: hand-rolled winit-0.29 → egui bridge + the egui-wgpu paint path.
 //! - [`import`]  — foreign model import (`.obj`/`.gltf`/`.glb`) into the engine's `ModelData`.
-//! - [`fetch`]   — download + install the released reference bundle (self-service `workshop_data`).
-//! - [`index`]   — asset catalog + name resolution (packed `names.bin`, embedded ASET dictionary,
-//!                 repo-corpora fallback).
+//! - [`fetch`]   — download + install the released reference bundle (`workshop_data`), automatically
+//!                 when none is found and from the Settings page on request.
+//! - [`index`]   — asset catalog + name resolution (packed `names.bin`, embedded ASET dictionary).
 //! - [`luaview`] — read-only Lua source viewer (hand-rolled lexer/highlighter).
 //! - [`publish`] — background-threaded mod publishing: inject, compress, SHA-256, load self-test.
 //! - [`settings`] — persisted game-archive + reference-bundle paths: the Settings workbench, the
@@ -102,6 +106,18 @@ fn colocated_vz_wad() -> Option<String> {
         .filter(|root| root.join("Mercenaries2.exe").is_file())
         .find_map(|root| wad_under(&root, "vz.wad"))
         .map(|p| p.to_string_lossy().into_owned())
+}
+
+/// The full name map for a headless mode ([`index::load_all_names`]), or exit 1 printing why the
+/// reference bundle could not be found, downloaded or read.
+fn names_or_exit() -> std::collections::HashMap<u32, String> {
+    match index::load_all_names() {
+        Ok(names) => names,
+        Err(e) => {
+            eprintln!("workshop: {e}");
+            std::process::exit(1);
+        }
+    }
 }
 
 fn main() {
@@ -162,7 +178,6 @@ fn main() {
         // the binary could be anything, but the exe next to it means this IS an install.
         .or_else(colocated_vz_wad)
         .or_else(|| wad::resolve_vz_wad(None));
-    let names_csv = get("--names").map(std::path::PathBuf::from).or_else(index::default_names_csv);
 
     // Overlay stack: every `--overlay <path>`, in argument order, plus (unless --no-auto-patch)
     // an auto-loaded `vz-patch.wad` next to the base — the retail exe's own patch lookup.
@@ -190,7 +205,7 @@ fn main() {
             .filter(|s| !s.starts_with("--"))
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| std::path::PathBuf::from("workshop_data"));
-        if let Err(e) = pack_data(&out, names_csv, wadpath.as_deref(), &overlays) {
+        if let Err(e) = pack_data(&out, wadpath.as_deref(), &overlays) {
             eprintln!("--pack-data: {e}");
             std::process::exit(1);
         }
@@ -271,7 +286,7 @@ fn main() {
             Err(e) => return eprintln!("workshop: cannot open {wadpath}: {e}"),
         };
         let hashes: Vec<u32> = {
-            let idx = index::AssetIndex::build(&w.wads, index::load_all_names(names_csv.clone()));
+            let idx = index::AssetIndex::build(&w.wads, names_or_exit());
             idx.models().iter().map(|r| r.hash).collect()
         };
         println!("hash\tresolves\tbones\tskinned_groups\tverts\ttris\ttextures");
@@ -312,7 +327,7 @@ fn main() {
             Ok(s) => s,
             Err(e) => return eprintln!("workshop: cannot open {wadpath}: {e}"),
         };
-        let idx = index::AssetIndex::build(&stack.wads, index::load_all_names(names_csv));
+        let idx = index::AssetIndex::build(&stack.wads, names_or_exit());
         for (kind, rows) in
             [(index::Kind::Model, &idx.models()), (index::Kind::Texture, &idx.textures())]
         {
@@ -333,7 +348,7 @@ fn main() {
             Ok(s) => s,
             Err(e) => return eprintln!("workshop: cannot open {wadpath}: {e}"),
         };
-        let idx = index::AssetIndex::build(&stack.wads, index::load_all_names(names_csv));
+        let idx = index::AssetIndex::build(&stack.wads, names_or_exit());
         let mut by_class: std::collections::BTreeMap<&'static str, Vec<&index::AssetRow>> =
             std::collections::BTreeMap::new();
         for r in idx.models() {
@@ -483,7 +498,7 @@ fn main() {
             Ok(s) => s,
             Err(e) => return eprintln!("workshop: cannot open {wadpath}: {e}"),
         };
-        let idx = index::AssetIndex::build(&stack.wads, index::load_all_names(names_csv));
+        let idx = index::AssetIndex::build(&stack.wads, names_or_exit());
         // A whole vehicle class ("class:helicopter") or a single asset.
         let targets: Vec<(u32, String)> = if let Some(cls) = arg.strip_prefix("class:") {
             idx.models().iter()
@@ -614,7 +629,7 @@ exported {ok} bundle(s), {fail} failed -> {}", outroot.display());
             Ok(c) => c,
             Err(e) => return eprintln!("--states '{arg}' (0x{hash:08X}): {e}"),
         };
-        let names = index::load_all_names(names_csv);
+        let names = names_or_exit();
         let nm = |h: u32| names.get(&h).cloned().unwrap_or_else(|| format!("0x{h:08X}"));
         let hier = mercs2_formats::orchestrator::parse_hier(&container);
         let hier_hashes: std::collections::HashSet<u32> = hier.iter().map(|n| n.hash).collect();
@@ -721,7 +736,7 @@ exported {ok} bundle(s), {fail} failed -> {}", outroot.display());
             Ok(w) => w,
             Err(e) => return eprintln!("workshop: cannot open {wadpath}: {e}"),
         };
-        let names = index::load_all_names(names_csv);
+        let names = names_or_exit();
         let list: Vec<u32> = wad::all_asets(&w)
             .into_iter()
             .filter(|&(_, ty, primary)| ty == mercs2_formats::types::TYPE_ID_TEXTURE && primary)
@@ -743,7 +758,7 @@ exported {ok} bundle(s), {fail} failed -> {}", outroot.display());
             Ok(w) => w,
             Err(e) => return eprintln!("workshop: cannot open {wadpath}: {e}"),
         };
-        let names = index::load_all_names(names_csv);
+        let names = names_or_exit();
         let nblocks = wad::block_paths(&w).len();
         for blk in 0..nblocks as u16 {
             let Ok(dec) = wad::decompress_block_index(&mut w, blk) else { continue };
@@ -856,7 +871,7 @@ exported {ok} bundle(s), {fail} failed -> {}", outroot.display());
         // so there are no hand adjustments to carry. The GUI's "Export Shipment…" is the one that
         // records those; this exists for scripting.
         let rt = match import::import_model(src).map(|im| {
-            let (tn, tp, tpar) = app::target_bone_info(&mut w, thash, None);
+            let (tn, tp, tpar) = app::target_bone_info(&mut w, thash, &names_or_exit());
             crate::retarget::Retarget::build_full(
                 im.skin_joints, im.skin_joint_pos, im.skin_ibm, im.skin_parents, tn, tp, tpar,
             )
@@ -915,7 +930,7 @@ exported {ok} bundle(s), {fail} failed -> {}", outroot.display());
         paths.extend(overlays.iter().cloned());
         let rt = match import::import_model(std::path::Path::new(&glb))
             .and_then(|im| {
-                let (tn, tp, tpar) = app::target_bone_info(&mut w, thash, None);
+                let (tn, tp, tpar) = app::target_bone_info(&mut w, thash, &names_or_exit());
                 Ok(crate::retarget::Retarget::build_full(
                     im.skin_joints, im.skin_joint_pos, im.skin_ibm, im.skin_parents, tn, tp, tpar,
                 ))
@@ -1067,7 +1082,7 @@ exported {ok} bundle(s), {fail} failed -> {}", outroot.display());
             Ok(s) => s,
             Err(e) => return eprintln!("workshop: {e}"),
         };
-        let (tnames, tpos, tparents) = app::target_bone_info(&mut w, thash, None);
+        let (tnames, tpos, tparents) = app::target_bone_info(&mut w, thash, &names_or_exit());
         let tmd = match app::load_model_data(&mut w, thash) {
             Ok(m) => m,
             Err(e) => return eprintln!("--shot target {target}: {e}"),
@@ -1159,7 +1174,7 @@ exported {ok} bundle(s), {fail} failed -> {}", outroot.display());
         // List the clips this model's rig can bind, so a clip can be chosen by name rather than
         // guessed at. Names come from the same index the GUI uses.
         if args.iter().any(|a| a == "--render-clips") {
-            let idx = index::AssetIndex::build(&w.wads, index::load_all_names(names_csv.clone()));
+            let idx = index::AssetIndex::build(&w.wads, names_or_exit());
             let (clips, names) = app::clips_for_export(&mut w, &arg, &md.skin.rig, &idx);
             println!("--render-clips 0x{hash:08X}: {} clip(s) bind this rig", clips.len());
             for c in &clips {
@@ -1381,7 +1396,7 @@ exported {ok} bundle(s), {fail} failed -> {}", outroot.display());
             Ok(s) => s,
             Err(e) => return eprintln!("workshop: cannot open {wadpath}: {e}"),
         };
-        let (tnames, tpos, tparents) = app::target_bone_info(&mut w, thash, None);
+        let (tnames, tpos, tparents) = app::target_bone_info(&mut w, thash, &names_or_exit());
         let tmd = match app::load_model_data(&mut w, thash) {
             Ok(m) => m,
             Err(e) => return eprintln!("--rebind-check target {target}: {e}"),
@@ -1749,7 +1764,7 @@ exported {ok} bundle(s), {fail} failed -> {}", outroot.display());
             Ok(s) => s,
             Err(e) => return eprintln!("workshop: cannot open {wadpath}: {e}"),
         };
-        let (names, pos, _parents) = app::target_bone_info(&mut w, hash, None);
+        let (names, pos, _parents) = app::target_bone_info(&mut w, hash, &names_or_exit());
         println!("{arg} (0x{hash:08X}): {} bones", names.len());
         for (i, (n, p)) in names.iter().zip(pos.iter()).enumerate() {
             println!("{i:3} {n}  [{:.3}, {:.3}, {:.3}]", p[0], p[1], p[2]);
@@ -1867,7 +1882,7 @@ exported {ok} bundle(s), {fail} failed -> {}", outroot.display());
     }
 
     let shipment = get("--shipment").map(std::path::PathBuf::from);
-    app::run(app::Options { wadpath, overlays, names_csv, shipment });
+    app::run(app::Options { wadpath, overlays, shipment });
 }
 
 /// Every hash `names.bin` is actually asked to resolve: ASET catalog assets, animgroup clip names, and
@@ -2098,67 +2113,159 @@ fn referenced_hashes_one(wadpath: &str) -> std::collections::HashSet<u32> {
     set
 }
 
-/// `--pack-data <dir>`: assemble the reference bundle. Sources are the repo corpora (found by
-/// the same walk-up the app's fallback path uses); output is a portable directory.
-/// The committed production lookup: `data/production_names.json` (curated, hash-verified node/asset
-/// names), found by walking up from the CWD and from the exe. This is the authoritative, bundleable
-/// name source — it lives in THIS repo, so it needs neither the parent-repo rainbow table nor the WAD.
-fn load_production_names() -> Option<std::collections::HashMap<u32, String>> {
-    let mut roots = vec![std::env::current_dir().ok()?];
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(d) = exe.parent() {
-            roots.push(d.to_path_buf());
-        }
-    }
-    for root in roots {
-        let mut dir = root.as_path();
-        loop {
-            let cand = dir.join("data/production_names.json");
-            if cand.is_file() {
-                let txt = std::fs::read_to_string(&cand).ok()?;
-                let v: serde_json::Value = serde_json::from_str(&txt).ok()?;
-                let map = v.get("pandemic_hash_m2")?.as_object()?;
-                let mut out = std::collections::HashMap::with_capacity(map.len());
-                for (k, name) in map {
-                    if let (Ok(h), Some(n)) =
-                        (u32::from_str_radix(k.trim_start_matches("0x"), 16), name.as_str())
-                    {
-                        out.insert(h, n.to_string());
-                    }
-                }
-                return Some(out);
-            }
-            match dir.parent() {
-                Some(p) => dir = p,
-                // Exhausted THIS root — try the next. `?` here returned None from the whole
-                // function the moment the CWD walk-up hit the filesystem root, so the exe-directory
-                // root below was never reached: any run whose CWD sits outside the repo silently
-                // dropped to the slow raw-corpora path (and, without the parent-repo rainbow table
-                // beside it, to a near-empty names.bin).
-                None => break,
-            }
-        }
-    }
-    None
+/// The checkout this binary was built from (the workspace root, two levels above this crate's
+/// manifest). `--pack-data` reads its in-repo sources here and nowhere else.
+fn repo_root() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
 
+/// The reference files committed in the repo's `workshop_data/` that `--pack-data` copies into
+/// every bundle: the Ess API, natives and node catalogue (`essapi`), the ECS component registry
+/// (`ecsreg`) and the captioned audio inventory (`audioidx`).
+const REPO_BUNDLE_FILES: [&str; 5] =
+    ["ess_api.json", "ess_natives.json", "ess_nodes.json", "ecs_registry.tsv", "audio_manifest.json"];
+
+/// The committed production lookup: `<repo>/data/production_names.json` (curated, hash-verified
+/// node/asset names), where `<repo>` is the checkout this binary was built from ([`repo_root`]).
+/// `Ok(None)` when that path is not a file; an error when it is a file that cannot be read or
+/// parsed.
+fn load_production_names(
+    repo: &std::path::Path,
+) -> Result<Option<std::collections::HashMap<u32, String>>, String> {
+    let cand = repo.join("data/production_names.json");
+    if !cand.is_file() {
+        return Ok(None);
+    }
+    let txt = std::fs::read_to_string(&cand).map_err(|e| format!("{}: {e}", cand.display()))?;
+    let v: serde_json::Value =
+        serde_json::from_str(&txt).map_err(|e| format!("{}: bad JSON: {e}", cand.display()))?;
+    let map = v
+        .get("pandemic_hash_m2")
+        .and_then(|m| m.as_object())
+        .ok_or_else(|| format!("{}: no `pandemic_hash_m2` object", cand.display()))?;
+    let mut out = std::collections::HashMap::with_capacity(map.len());
+    for (k, name) in map {
+        if let (Ok(h), Some(n)) = (u32::from_str_radix(k.trim_start_matches("0x"), 16), name.as_str()) {
+            out.insert(h, n.to_string());
+        }
+    }
+    eprintln!("[pack] names source: {}", cand.display());
+    Ok(Some(out))
+}
+
+/// Whether `src` and `dst` are the same file on disk. `dst` not existing is `false`. On Unix this
+/// compares device and inode, so a hard link or a differently spelled path to the same file counts;
+/// elsewhere it compares the canonicalized paths.
+fn same_file(src: &std::path::Path, dst: &std::path::Path) -> Result<bool, String> {
+    if !dst.exists() {
+        return Ok(false);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let a = std::fs::metadata(src).map_err(|e| format!("{}: {e}", src.display()))?;
+        let b = std::fs::metadata(dst).map_err(|e| format!("{}: {e}", dst.display()))?;
+        Ok(a.dev() == b.dev() && a.ino() == b.ino())
+    }
+    #[cfg(not(unix))]
+    {
+        let a = std::fs::canonicalize(src).map_err(|e| format!("{}: {e}", src.display()))?;
+        let b = std::fs::canonicalize(dst).map_err(|e| format!("{}: {e}", dst.display()))?;
+        Ok(a == b)
+    }
+}
+
+/// Copy each of [`REPO_BUNDLE_FILES`] from `src_dir` into `out`. A file whose destination already
+/// IS the source (`out` is the repo's own `workshop_data/`, as in the release workflow) is left in
+/// place. The caller checks every source exists before anything is written.
+fn copy_repo_bundle_files(src_dir: &std::path::Path, out: &std::path::Path) -> Result<(), String> {
+    for name in REPO_BUNDLE_FILES {
+        let src = src_dir.join(name);
+        let dst = out.join(name);
+        if same_file(&src, &dst)? {
+            eprintln!("[pack] {name}: already in place at {}", dst.display());
+            continue;
+        }
+        std::fs::copy(&src, &dst).map_err(|e| format!("{} -> {}: {e}", src.display(), dst.display()))?;
+        eprintln!("[pack] {name} <- {}", src.display());
+    }
+    Ok(())
+}
+
+/// `--pack-data <dir>`: assemble the reference bundle into `out`, a portable directory.
+///
+/// Sources outside this repo are dev-machine files named by `.mercs2-local.toml`, searched upward
+/// from the CWD; a missing key or file is an error naming it:
+/// * `notes_docs_dir` — the notes repo's `docs/`: `data/live_registry_hashes.csv`,
+///   `data/spawnable_templates.csv`, `mercs2-ecs/`, `mercs2-luacd/src/` and `mercs2-dlc-luacd/src/`
+///   are copied into the bundle.
+/// * The names come from this repo's `data/production_names.json` (see
+///   [`load_production_names`]). Only when that file is absent are they merged from the raw corpora
+///   ([`index::load_all_names_raw`]), which also reads the `jul08_strings` and `rainbow_table` keys
+///   and the name corpora in `notes_docs_dir`'s `data/`.
+///
+/// In-repo sources are read from the checkout this binary was built from ([`repo_root`]):
+/// `data/production_names.json` and the [`REPO_BUNDLE_FILES`] committed in `workshop_data/`,
+/// which are copied into the bundle. A missing one of those files is an error naming it, raised
+/// before anything is written.
+///
+/// An existing `manifest.json` is removed before anything else is written, and the new one is
+/// written last; its presence marks `out` as a complete bundle for [`index::data_home`].
 fn pack_data(
     out: &std::path::Path,
-    names_csv: Option<std::path::PathBuf>,
-    // `None` when no game install was found. Only the raw-corpora fallback below needs it; the
+    // `None` when no game install was found. Only the raw-corpora path below needs it; the
     // committed-production-names path is fully self-contained, so a missing WAD is not fatal here.
     wadpath: Option<&str>,
     // The patch/DLC overlays opened on top of the base — their assets must be scanned too, or the
     // trim drops every patch-only name. See `referenced_hashes`.
     overlays: &[String],
 ) -> Result<(), String> {
-    std::fs::create_dir_all(out).map_err(|e| e.to_string())?;
+    use mercs2_formats::game_paths::{local_config_notes_docs_dir, LOCAL_CONFIG};
+    let start = std::env::current_dir().map_err(|e| format!("current directory: {e}"))?;
+    let notes_docs = local_config_notes_docs_dir(&start)?;
+    let mut files: Vec<(std::path::PathBuf, &str)> = Vec::new();
+    for name in ["live_registry_hashes.csv", "spawnable_templates.csv"] {
+        files.push((index::notes_data_file(&notes_docs, name)?, name));
+    }
+    let mut trees: Vec<(std::path::PathBuf, &str)> = Vec::new();
+    for (rel, dest) in [
+        ("mercs2-ecs", "ecs_schemas"),
+        ("mercs2-luacd/src", "lua"),
+        ("mercs2-dlc-luacd/src", "lua_dlc"),
+    ] {
+        let src = notes_docs.join(rel);
+        if !src.is_dir() {
+            return Err(format!(
+                "{} is not a directory (`notes_docs_dir` in {LOCAL_CONFIG} names {})",
+                src.display(),
+                notes_docs.display()
+            ));
+        }
+        trees.push((src, dest));
+    }
+    let repo = repo_root();
+    let repo_bundle = repo.join("workshop_data");
+    for name in REPO_BUNDLE_FILES {
+        let src = repo_bundle.join(name);
+        if !src.is_file() {
+            return Err(format!(
+                "{} is not a file (committed in this repo's workshop_data/, the checkout {} was built from)",
+                src.display(),
+                env!("CARGO_PKG_NAME")
+            ));
+        }
+    }
+
+    std::fs::create_dir_all(out).map_err(|e| format!("{}: {e}", out.display()))?;
+    let manifest_path = out.join(index::BUNDLE_MANIFEST);
+    if manifest_path.exists() {
+        std::fs::remove_file(&manifest_path)
+            .map_err(|e| format!("{}: {e}", manifest_path.display()))?;
+    }
 
     // 1. names.bin. PREFERRED source: the committed, curated `data/production_names.json` that ships
-    // IN this repo. When it is present the pack is fully self-contained — no 32 MB parent-repo rainbow
-    // table and no game WAD needed, so any machine can rebuild the bundle. Falls back to the slow raw
-    // corpora + WAD-trim path only when the production file is absent (i.e. when regenerating it).
-    let (names, full) = match load_production_names() {
+    // IN this repo. The raw corpora + WAD-trim path runs only when the production file is absent.
+    let (names, full) = match load_production_names(&repo)? {
         Some(p) => {
             eprintln!("[pack] names.bin: from committed data/production_names.json ({} names)", p.len());
             let n = p.len();
@@ -2166,9 +2273,9 @@ fn pack_data(
         }
         None => {
             eprintln!("[pack] no production_names.json — merging raw name corpora (slow one-time parse)…");
-            let mut names = index::load_all_names_raw(names_csv, |_, _| {});
+            let mut names = index::load_all_names_raw(&start)?;
             if names.is_empty() {
-                return Err("no name corpora found — run from the repo checkout".into());
+                return Err(format!("the raw name corpora named in {LOCAL_CONFIG} merged to zero names"));
             }
             let full = names.len();
             let referenced = match wadpath {
@@ -2198,50 +2305,25 @@ fn pack_data(
     );
 
     // 2. Structured reference tables + corpora, copied verbatim for the insight features.
-    let repo_file = |rel: &str| -> Option<std::path::PathBuf> {
-        let mut dir = std::env::current_dir().ok()?;
-        loop {
-            let cand = dir.join(rel);
-            if cand.exists() {
-                return Some(cand);
-            }
-            if !dir.pop() {
-                return None;
-            }
-        }
-    };
-    for (rel, dest) in [
-        ("docs/data/live_registry_hashes.csv", "live_registry_hashes.csv"),
-        ("docs/data/spawnable_templates.csv", "spawnable_templates.csv"),
-    ] {
-        match repo_file(rel) {
-            Some(src) => {
-                std::fs::copy(&src, out.join(dest)).map_err(|e| e.to_string())?;
-                eprintln!("[pack] {dest}");
-            }
-            None => eprintln!("[pack] WARNING: {rel} not found — skipped"),
-        }
+    for (src, dest) in files {
+        std::fs::copy(&src, out.join(dest)).map_err(|e| format!("{}: {e}", src.display()))?;
+        eprintln!("[pack] {dest} <- {}", src.display());
     }
-    for (rel, dest) in [
-        ("docs/mercs2-ecs", "ecs_schemas"),
-        ("docs/mercs2-luacd/src", "lua"),
-        ("docs/mercs2-dlc-luacd/src", "lua_dlc"),
-    ] {
-        match repo_file(rel) {
-            Some(src) => {
-                let n = copy_tree(&src, &out.join(dest))?;
-                eprintln!("[pack] {dest}/: {n} files");
-            }
-            None => eprintln!("[pack] WARNING: {rel} not found — skipped"),
-        }
+    for (src, dest) in trees {
+        let n = copy_tree(&src, &out.join(dest))?;
+        eprintln!("[pack] {dest}/: {n} files <- {}", src.display());
     }
+    // 3. The reference files committed in this repo's `workshop_data/`.
+    copy_repo_bundle_files(&repo_bundle, out)?;
 
-    // 3. Manifest (provenance + counts, for the app's About/diagnostics).
+    // 4. Manifest (provenance + counts), written last.
+    let repo_contents: String = REPO_BUNDLE_FILES.iter().map(|f| format!(", \"{f}\"")).collect();
     let manifest = format!(
-        "{{\n  \"format\": 1,\n  \"names\": {},\n  \"sources\": [\"bone_name_candidates\", \"rainbow_table\", \"live_registry\"],\n  \"contents\": [\"names.bin\", \"live_registry_hashes.csv\", \"spawnable_templates.csv\", \"ecs_schemas/\", \"lua/\", \"lua_dlc/\"]\n}}\n",
+        "{{\n  \"format\": 1,\n  \"names\": {},\n  \"sources\": [\"bone_name_candidates\", \"rainbow_table\", \"live_registry\"],\n  \"contents\": [\"names.bin\", \"live_registry_hashes.csv\", \"spawnable_templates.csv\", \"ecs_schemas/\", \"lua/\", \"lua_dlc/\"{repo_contents}]\n}}\n",
         names.len()
     );
-    std::fs::write(out.join("manifest.json"), manifest).map_err(|e| e.to_string())?;
+    std::fs::write(&manifest_path, manifest)
+        .map_err(|e| format!("{}: {e}", manifest_path.display()))?;
     println!("packed workshop_data -> {}", out.display());
     Ok(())
 }
@@ -2262,4 +2344,65 @@ fn copy_tree(src: &std::path::Path, dst: &std::path::Path) -> Result<usize, Stri
         }
     }
     Ok(n)
+}
+
+#[cfg(test)]
+mod pack_tests {
+    use super::*;
+
+    /// A scratch directory holding every [`REPO_BUNDLE_FILES`] entry, each with distinct content.
+    fn source_dir(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("m2ws_pack_{tag}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for name in REPO_BUNDLE_FILES {
+            std::fs::write(dir.join(name), format!("content of {name}")).unwrap();
+        }
+        dir
+    }
+
+    #[test]
+    fn repo_bundle_files_are_copied_into_the_bundle() {
+        let src = source_dir("copy_src");
+        let out = std::env::temp_dir().join("m2ws_pack_copy_out");
+        let _ = std::fs::remove_dir_all(&out);
+        std::fs::create_dir_all(&out).unwrap();
+        copy_repo_bundle_files(&src, &out).unwrap();
+        for name in REPO_BUNDLE_FILES {
+            assert_eq!(std::fs::read_to_string(out.join(name)).unwrap(), format!("content of {name}"));
+        }
+        let _ = std::fs::remove_dir_all(&src);
+        let _ = std::fs::remove_dir_all(&out);
+    }
+
+    /// Packing into the source folder itself, where every source is also its destination, leaves
+    /// every file byte-for-byte intact.
+    #[test]
+    fn packing_into_the_source_folder_leaves_the_files_intact() {
+        let src = source_dir("self");
+        copy_repo_bundle_files(&src, &src).unwrap();
+        for name in REPO_BUNDLE_FILES {
+            assert_eq!(
+                std::fs::read_to_string(src.join(name)).unwrap(),
+                format!("content of {name}"),
+                "{name} was altered by copying onto itself"
+            );
+        }
+        // The same folder reached through a different spelling of its path.
+        let dotted = src.join(".");
+        copy_repo_bundle_files(&src, &dotted).unwrap();
+        for name in REPO_BUNDLE_FILES {
+            assert_eq!(std::fs::read_to_string(src.join(name)).unwrap(), format!("content of {name}"));
+        }
+        let _ = std::fs::remove_dir_all(&src);
+    }
+
+    /// The committed sources `--pack-data` reads exist in the checkout this binary is built from.
+    #[test]
+    fn the_repo_holds_every_committed_bundle_file() {
+        let dir = repo_root().join("workshop_data");
+        for name in REPO_BUNDLE_FILES {
+            assert!(dir.join(name).is_file(), "{} is missing", dir.join(name).display());
+        }
+    }
 }

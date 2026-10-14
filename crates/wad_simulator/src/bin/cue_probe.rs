@@ -39,12 +39,13 @@ struct Cli {
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
     let rb = {
-        let t: Vec<PathBuf> = ["tools/rainbow_table.json", "docs/data/aset_block_strings.json"]
-            .iter()
-            .map(PathBuf::from)
-            .filter(|p| p.exists())
-            .collect();
-        RainbowTable::load_many(&t).unwrap_or_default()
+        let start = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let data = mercs2_formats::game_paths::local_config_notes_docs_dir(start)?.join("data");
+        let t: Vec<PathBuf> = vec![
+            mercs2_formats::game_paths::local_config_rainbow_table(start)?,
+            data.join("aset_block_strings.json"),
+        ];
+        RainbowTable::load_many(&t).map_err(|e| format!("load rainbow tables {t:?}: {e}"))?
     };
 
     // Every sounddb and soundbank of every WAD given: routing crosses archives (English.wad's VO
