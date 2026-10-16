@@ -275,33 +275,176 @@ pub fn center(_ctx: &egui::Context, _p: &Panel) -> Vec<Act> {
     Vec::new()
 }
 
+/// `1`/`2`/`3` → the hero's full name as the engine resolves it (`SHELL.SelectCharacter.*`
+/// in the shell UI; see `memory/shell-menu-and-ui-pass.md`). `?` for anything else so a
+/// future hero slot shows loudly rather than being silently mapped to Mattias.
+fn hero_name(index: u8) -> &'static str {
+    match index {
+        1 => "Mattias Nilsson",
+        2 => "Chris Jacobs",
+        3 => "Jennifer Mui",
+        _ => "?",
+    }
+}
+
+/// Format a Unix-epoch `u32` as `YYYY-MM-DD HH:MM UTC`. The `.profile` field at `@0x24`
+/// is a UTC timestamp (`docs/reverse_engineer/save_serialize_code_map.md` §4). Hand-rolled
+/// civil-from-days conversion (Howard Hinnant's standard trick) so the Workshop doesn't
+/// take a chrono / humantime dep just for one line in the inspector.
+fn timestamp_utc(t: u32) -> String {
+    let total = t as i64;
+    let (days, secs_in_day) = (total.div_euclid(86_400), total.rem_euclid(86_400));
+    let hour = secs_in_day / 3600;
+    let minute = (secs_in_day % 3600) / 60;
+    // Civil from days (Hinnant): shift so year 0000-03-01 is day 0, then invert.
+    let z = days + 719_468;
+    let era = if z >= 0 { z / 146_097 } else { (z - 146_096) / 146_097 };
+    let doe = (z - era * 146_097) as u64;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y_shift = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = y_shift + if month <= 2 { 1 } else { 0 };
+    format!("{year:04}-{month:02}-{day:02} {hour:02}:{minute:02} UTC")
+}
+
 /// The right-side inspector: the scalar editor (character / upgrade / cash / fuel / contract).
 ///
-/// Scaffold — the next commits bring the real fields in, each wired to a `save_write` edit.
+/// Read-only this commit — the fields render as text. The write path (text fields + the
+/// "Write to .profile" verb) lands in the next commit; here the inspector proves end-to-end
+/// that the browser's selection reaches a parsed `Profile` and reads sensibly.
 pub fn inspector(ui: &mut egui::Ui, p: &Panel) -> Vec<Act> {
     let acts: Vec<Act> = Vec::new();
     theme::eyebrow(ui, "SAVE");
-    match &p.selected {
-        None => {
+
+    let selected = p.selected.as_ref();
+    let entry = selected.and_then(|path| {
+        p.profiles
+            .as_ref()
+            .and_then(|list| list.iter().find(|e| &e.path == path))
+    });
+    let Some(entry) = entry else {
+        ui.label(
+            egui::RichText::new("Pick a save on the left to inspect it.")
+                .size(11.5)
+                .color(theme::FAINT),
+        );
+        return acts;
+    };
+
+    // Filename eyebrow — the row the browser is on, repeated so a wide inspector reads cleanly.
+    ui.label(
+        egui::RichText::new(&entry.stem)
+            .monospace()
+            .size(12.5)
+            .color(theme::TX),
+    );
+    ui.add_space(8.0);
+
+    let profile = match &entry.header {
+        Ok(h) => h,
+        Err(e) => {
             ui.label(
-                egui::RichText::new("Pick a save on the left to inspect it.")
+                egui::RichText::new(format!("Parse failed: {e}"))
                     .size(11.5)
-                    .color(theme::FAINT),
+                    .color(theme::BAD),
             );
+            return acts;
         }
-        Some(path) => {
+    };
+
+    // Integrity + version strip. `hash_ok` recomputes `ProfileHash` on demand (CRC-32/BZIP2
+    // over bytes [4..] per `docs/reverse_engineer/save_serialize_code_map.md` §3.2); the
+    // reader doesn't cache it, so this is the one call that confirms the hash is valid.
+    let ok = profile.hash_ok();
+    let (hc, ht) = if ok {
+        (theme::GOOD, "checksum ok")
+    } else {
+        (theme::BAD, "checksum MISMATCH")
+    };
+    ui.horizontal(|ui| {
+        theme::status_dot(ui, ht, hc);
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             ui.label(
-                egui::RichText::new(path.file_name().and_then(|s| s.to_str()).unwrap_or("?"))
+                egui::RichText::new(format!("version {}", profile.version))
                     .monospace()
-                    .size(12.0),
-            );
-            ui.label(
-                egui::RichText::new("Scalar editor lands in the next commit.")
-                    .size(11.5)
+                    .size(10.5)
                     .color(theme::FAINT),
             );
-        }
-    }
+        });
+    });
+    ui.add_space(10.0);
+
+    // HERO identity. `character_index` resolves to the hero's name; the model string that
+    // actually spawns is `_tCharacterMap[hero].templates[iUpgrade]` in `mrxplayer.lua:20`,
+    // and the upgrade tier is 0..3 (0 = base, 3 = endgame — Mattias v3 "MetalHead").
+    theme::eyebrow(ui, "HERO");
+    theme::kv(
+        ui,
+        "name",
+        egui::RichText::new(format!(
+            "{} · {}",
+            profile.character_index,
+            hero_name(profile.character_index)
+        )),
+    );
+    theme::kv(
+        ui,
+        "upgrade",
+        egui::RichText::new(format!("tier {}", profile.upgrade_index)),
+    );
+    theme::kv(
+        ui,
+        "costumes unlocked",
+        egui::RichText::new(format!("{} / 5", profile.unlocked_costumes)),
+    );
+    ui.add_space(10.0);
+
+    // RESOURCES. Cash + fuel are both signed-int32-shaped per the money-fuel memory; the
+    // reader exposes them as `u32`, which is fine for display. `fuel_capacity` is the u16
+    // at `0x2F8` — the live max fuel.
+    theme::eyebrow(ui, "RESOURCES");
+    theme::kv(
+        ui,
+        "cash",
+        egui::RichText::new(format!("${}", profile.cash)),
+    );
+    theme::kv(
+        ui,
+        "fuel",
+        egui::RichText::new(format!("{} / {}", profile.fuel, profile.fuel_capacity)),
+    );
+    theme::kv(
+        ui,
+        "active contract",
+        egui::RichText::new(profile.active_contract.as_str()),
+    );
+    ui.add_space(10.0);
+
+    // METADATA.
+    theme::eyebrow(ui, "METADATA");
+    theme::kv(
+        ui,
+        "playtime",
+        egui::RichText::new(hms(profile.play_time_seconds)),
+    );
+    theme::kv(
+        ui,
+        "timestamp",
+        egui::RichText::new(timestamp_utc(profile.timestamp)),
+    );
+    theme::kv(
+        ui,
+        "slot name",
+        egui::RichText::new(profile.save_name().to_string()),
+    );
+    theme::kv(
+        ui,
+        "size",
+        egui::RichText::new(format!("{} B", profile.raw_bytes().len())),
+    );
     acts
 }
 
