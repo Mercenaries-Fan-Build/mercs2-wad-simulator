@@ -1167,6 +1167,9 @@ pub mod theme {
         Audio,
         Missions,
         Systems,
+        /// Saves — a document with a folded top-right corner and header/footer stripes. Reads as a
+        /// `.profile` file, distinct from the Shipment crate glyph.
+        Saves,
         /// A short (1-2 char) monogram, drawn as text — the last-resort fallback for a surface with no
         /// bespoke icon yet.
         Glyph(&'static str),
@@ -1229,6 +1232,30 @@ pub mod theme {
                 p.circle_stroke(c, 6.0, s);
                 p.line_segment([c, c + vec2(0.0, -3.5)], s);
                 p.line_segment([c, c + vec2(2.8, 1.5)], s);
+            }
+            // Saves — a document outline with a bevelled top-right corner, a header stripe and a
+            // footer stripe. The silhouette echoes the `.profile` file (header bytes + inflated body).
+            RailIcon::Saves => {
+                let pts = [
+                    c + vec2(-6.0, -6.0),
+                    c + vec2(4.0, -6.0),
+                    c + vec2(6.0, -4.0),
+                    c + vec2(6.0, 6.0),
+                    c + vec2(-6.0, 6.0),
+                ];
+                for i in 0..pts.len() {
+                    p.line_segment([pts[i], pts[(i + 1) % pts.len()]], s);
+                }
+                p.rect_stroke(
+                    egui::Rect::from_min_max(c + vec2(-4.0, -6.0), c + vec2(2.0, -3.0)),
+                    0.0,
+                    s,
+                );
+                p.rect_stroke(
+                    egui::Rect::from_min_max(c + vec2(-4.0, 1.0), c + vec2(2.0, 6.0)),
+                    0.0,
+                    s,
+                );
             }
             // Craft — a hammer: a head bar up top with a handle dropping from it. (A single tool, so
             // it never reads as the crossed-blades Weapons icon.)
