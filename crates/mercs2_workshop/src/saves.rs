@@ -21,6 +21,7 @@ use std::path::{Path, PathBuf};
 
 use mercs2_formats::game_paths;
 use mercs2_formats::save::{self, Profile};
+use mercs2_formats::save_write;
 
 use crate::gui::theme;
 
@@ -31,6 +32,30 @@ pub enum Act {
     Select(PathBuf),
     /// Re-enumerate the saves folder and reparse every `.profile` header.
     Reload,
+    /// Revert pending edits back to the on-disk `Profile`. Matches the "Discard" button
+    /// — no file IO, no `save_write` call, just drop the working copy.
+    Discard,
+    /// Serialise the pending `Profile` via `save_write::write_profile` and overwrite the
+    /// selected `.profile` on disk. The round-trip is byte-exact for an unmodified
+    /// profile; a mutated one gets a fresh `ProfileHash` and remains loadable.
+    Write,
+    /// `@0x4D` — hero (1 Mattias / 2 Chris / 3 Jen). Writes to the pending Profile.
+    SetCharacter(u8),
+    /// `@0x4F` — upgrade tier 0..3. Drives `_tCharacterMap[hero].templates[iUpgrade]`
+    /// at spawn time (`mrxplayer.lua:167-168`).
+    SetUpgrade(u8),
+    /// `@0x24A` — unlocked-costume count, 1..=5. Not the active costume (that one is a
+    /// runtime-only override at `+0x63` whose on-disk byte is open).
+    SetUnlockedCostumes(u8),
+    /// `@0x18` — PMC cash. Signed-int32-shaped per the money-fuel memory; we expose
+    /// `u32` to match the reader and clamp to the 1-billion cap on write.
+    SetCash(u32),
+    /// `@0x1C` — PMC fuel. Clamped at write time to not exceed `fuel_capacity`.
+    SetFuel(u32),
+    /// `@0x2F8` — fuel capacity (u16). Changing it lifts/lowers the fuel ceiling.
+    SetFuelCapacity(u16),
+    /// `@0x2C` — active contract mission id (ASCII, max 15 chars). Truncated on write.
+    SetActiveContract(String),
 }
 
 /// One row in the browser: the `.profile`'s on-disk path, header-level facts the parser
@@ -74,8 +99,13 @@ pub struct Panel {
     /// Which row the browser has selected, if any. Carries the file path, not an index, so
     /// a `Reload` that reorders the list keeps the selection pointed at the same save.
     pub selected: Option<PathBuf>,
+    /// The working copy of the currently-selected `.profile`, cloned fresh on every
+    /// [`Act::Select`] / [`Act::Discard`] / [`Act::Reload`]. Edit widgets in the inspector
+    /// mutate THIS copy; the on-disk `ProfileEntry::header` stays as the "last-read-from-
+    /// disk" baseline so the dirty indicator and Discard can compute diffs cheaply.
+    pub pending: Option<Profile>,
     /// A short free-text banner surfaced in the browser header — the last reload's outcome,
-    /// e.g. `"8 profiles found"` or `"saves folder not found (MERCS2_SAVES_DIR unset)"`.
+    /// or the last write's `"wrote N bytes"` / error. Replaces whatever was there before.
     pub status: String,
 }
 
@@ -135,6 +165,56 @@ impl Panel {
         };
         self.saves_dir = Some(dir);
         self.profiles = Some(entries);
+        // A reload invalidates any pending edits — the on-disk bytes may have changed under
+        // us, and keeping edits bound to a stale snapshot would silently blind-write them
+        // over whatever the game just wrote.
+        self.pending = None;
+        self.repopulate_pending_from_selection();
+    }
+
+    /// Clone the parsed `Profile` of the currently-selected row into [`Self::pending`],
+    /// giving the inspector a mutable working copy. No-op when nothing is selected or when
+    /// the file failed to parse.
+    fn repopulate_pending_from_selection(&mut self) {
+        let Some(sel) = self.selected.as_ref() else {
+            self.pending = None;
+            return;
+        };
+        let Some(list) = self.profiles.as_ref() else {
+            self.pending = None;
+            return;
+        };
+        self.pending = list
+            .iter()
+            .find(|e| &e.path == sel)
+            .and_then(|e| e.header.as_ref().ok().cloned());
+    }
+
+    /// Serialise the pending `Profile` and overwrite the selected `.profile` on disk.
+    /// On success, reparse the fresh bytes so the browser row + the pending baseline move
+    /// forward together; on failure, leave both untouched so a retry works.
+    fn write_to_disk(&mut self) {
+        let (Some(path), Some(pending)) = (self.selected.as_ref().cloned(), self.pending.as_ref())
+        else {
+            self.status = "nothing selected to write".into();
+            return;
+        };
+        let bytes = save_write::write_profile(pending);
+        if let Err(e) = std::fs::write(&path, &bytes) {
+            self.status = format!("write {}: {e}", path.display());
+            return;
+        }
+        // Reparse so the browser row's header and `hash_ok` reflect the new on-disk truth.
+        let reparsed = save::parse(&bytes);
+        if let Some(list) = self.profiles.as_mut() {
+            if let Some(ent) = list.iter_mut().find(|e| e.path == path) {
+                ent.header = reparsed.clone();
+            }
+        }
+        if let Ok(p) = reparsed {
+            self.pending = Some(p);
+        }
+        self.status = format!("wrote {} ({} B)", path.display(), bytes.len());
     }
 }
 
@@ -310,13 +390,58 @@ fn timestamp_utc(t: u32) -> String {
     format!("{year:04}-{month:02}-{day:02} {hour:02}:{minute:02} UTC")
 }
 
+/// Three-way segmented control over an integer field. Returns `Some(new_value)` the frame a
+/// pill was clicked. The widget mirrors `theme::pill`'s shape so this reads as the same
+/// control vocabulary used elsewhere on the rail.
+fn seg_pills<T: Copy + PartialEq + std::fmt::Display>(
+    ui: &mut egui::Ui,
+    current: T,
+    options: &[T],
+) -> Option<T> {
+    let mut chosen: Option<T> = None;
+    ui.horizontal(|ui| {
+        for &o in options {
+            if theme::pill(ui, &o.to_string(), o == current).clicked() {
+                chosen = Some(o);
+            }
+        }
+    });
+    chosen
+}
+
+/// A labelled unsigned-integer scalar edit. Clamps to `[0, max]` so a `u32` can't underflow.
+fn u32_row(
+    ui: &mut egui::Ui,
+    key: &str,
+    value: u32,
+    max: u64,
+) -> Option<u32> {
+    let mut v = value as i64;
+    let mut edited: Option<u32> = None;
+    ui.horizontal(|ui| {
+        ui.label(egui::RichText::new(key).color(theme::DIM).size(12.0));
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let resp = ui.add(
+                egui::DragValue::new(&mut v)
+                    .range(0..=max as i64)
+                    .speed(1.0),
+            );
+            if resp.changed() {
+                edited = Some(v.clamp(0, max as i64) as u32);
+            }
+        });
+    });
+    edited
+}
+
 /// The right-side inspector: the scalar editor (character / upgrade / cash / fuel / contract).
 ///
-/// Read-only this commit — the fields render as text. The write path (text fields + the
-/// "Write to .profile" verb) lands in the next commit; here the inspector proves end-to-end
-/// that the browser's selection reaches a parsed `Profile` and reads sensibly.
+/// Live-edit: every widget change pushes a `Set*` Act into the queue; the reducer applies to
+/// `Panel::pending` (a working clone of the parsed `Profile`). The on-disk bytes don't move
+/// until the "Write to .profile" verb fires `Act::Write` — which `save_write`s the pending
+/// profile with a fresh `ProfileHash` and reparses to keep the browser row in sync.
 pub fn inspector(ui: &mut egui::Ui, p: &Panel) -> Vec<Act> {
-    let acts: Vec<Act> = Vec::new();
+    let mut acts: Vec<Act> = Vec::new();
     theme::eyebrow(ui, "SAVE");
 
     let selected = p.selected.as_ref();
@@ -343,7 +468,7 @@ pub fn inspector(ui: &mut egui::Ui, p: &Panel) -> Vec<Act> {
     );
     ui.add_space(8.0);
 
-    let profile = match &entry.header {
+    let on_disk = match &entry.header {
         Ok(h) => h,
         Err(e) => {
             ui.label(
@@ -354,21 +479,27 @@ pub fn inspector(ui: &mut egui::Ui, p: &Panel) -> Vec<Act> {
             return acts;
         }
     };
+    // `pending` falls back to the on-disk header when the panel hasn't cloned a working copy
+    // yet (e.g. the frame right after Select, before the reducer runs).
+    let pending = p.pending.as_ref().unwrap_or(on_disk);
+    let dirty = profile_differs(pending, on_disk);
 
-    // Integrity + version strip. `hash_ok` recomputes `ProfileHash` on demand (CRC-32/BZIP2
-    // over bytes [4..] per `docs/reverse_engineer/save_serialize_code_map.md` §3.2); the
-    // reader doesn't cache it, so this is the one call that confirms the hash is valid.
-    let ok = profile.hash_ok();
-    let (hc, ht) = if ok {
+    // Integrity + version + dirty strip. `hash_ok` recomputes `ProfileHash` on demand
+    // (CRC-32/BZIP2 over bytes [4..] per `docs/reverse_engineer/save_serialize_code_map.md`
+    // §3.2); the reader doesn't cache it.
+    let (hc, ht) = if on_disk.hash_ok() {
         (theme::GOOD, "checksum ok")
     } else {
         (theme::BAD, "checksum MISMATCH")
     };
     ui.horizontal(|ui| {
         theme::status_dot(ui, ht, hc);
+        if dirty {
+            theme::status_dot(ui, "pending edits", theme::BRASS);
+        }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             ui.label(
-                egui::RichText::new(format!("version {}", profile.version))
+                egui::RichText::new(format!("version {}", on_disk.version))
                     .monospace()
                     .size(10.5)
                     .color(theme::FAINT),
@@ -377,85 +508,140 @@ pub fn inspector(ui: &mut egui::Ui, p: &Panel) -> Vec<Act> {
     });
     ui.add_space(10.0);
 
-    // HERO identity. `character_index` resolves to the hero's name; the model string that
-    // actually spawns is `_tCharacterMap[hero].templates[iUpgrade]` in `mrxplayer.lua:20`,
-    // and the upgrade tier is 0..3 (0 = base, 3 = endgame — Mattias v3 "MetalHead").
+    // HERO identity. Segmented control instead of a free integer: there are only three heroes
+    // and four upgrade tiers, and a wrong value either breaks the spawn template or hits the
+    // "Player" fallback in `FUN_00634810` with no feedback.
     theme::eyebrow(ui, "HERO");
-    theme::kv(
-        ui,
-        "name",
+    ui.horizontal(|ui| {
+        ui.label(egui::RichText::new("hero").color(theme::DIM).size(12.0));
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if let Some(v) = seg_pills(ui, pending.character_index, &[1u8, 2, 3]) {
+                acts.push(Act::SetCharacter(v));
+            }
+        });
+    });
+    ui.label(
         egui::RichText::new(format!(
             "{} · {}",
-            profile.character_index,
-            hero_name(profile.character_index)
-        )),
+            pending.character_index,
+            hero_name(pending.character_index)
+        ))
+        .size(11.0)
+        .color(theme::FAINT),
     );
-    theme::kv(
-        ui,
-        "upgrade",
-        egui::RichText::new(format!("tier {}", profile.upgrade_index)),
-    );
-    theme::kv(
-        ui,
-        "costumes unlocked",
-        egui::RichText::new(format!("{} / 5", profile.unlocked_costumes)),
-    );
+    ui.horizontal(|ui| {
+        ui.label(egui::RichText::new("upgrade").color(theme::DIM).size(12.0));
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if let Some(v) = seg_pills(ui, pending.upgrade_index, &[0u8, 1, 2, 3]) {
+                acts.push(Act::SetUpgrade(v));
+            }
+        });
+    });
+    ui.horizontal(|ui| {
+        ui.label(egui::RichText::new("costumes").color(theme::DIM).size(12.0));
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if let Some(v) = seg_pills(ui, pending.unlocked_costumes, &[1u8, 2, 3, 4, 5]) {
+                acts.push(Act::SetUnlockedCostumes(v));
+            }
+        });
+    });
     ui.add_space(10.0);
 
-    // RESOURCES. Cash + fuel are both signed-int32-shaped per the money-fuel memory; the
-    // reader exposes them as `u32`, which is fine for display. `fuel_capacity` is the u16
-    // at `0x2F8` — the live max fuel.
+    // RESOURCES. Cash and fuel are both `u32` on disk; the one-billion cap on cash comes from
+    // the economy memory (money-fuel-datatype-and-cap). Fuel is clamped against capacity at
+    // write time, not here, so an interim value isn't rejected while the user types.
     theme::eyebrow(ui, "RESOURCES");
-    theme::kv(
-        ui,
-        "cash",
-        egui::RichText::new(format!("${}", profile.cash)),
-    );
-    theme::kv(
-        ui,
-        "fuel",
-        egui::RichText::new(format!("{} / {}", profile.fuel, profile.fuel_capacity)),
-    );
-    theme::kv(
-        ui,
-        "active contract",
-        egui::RichText::new(profile.active_contract.as_str()),
-    );
+    if let Some(v) = u32_row(ui, "cash", pending.cash, 1_000_000_000) {
+        acts.push(Act::SetCash(v));
+    }
+    if let Some(v) = u32_row(ui, "fuel", pending.fuel, pending.fuel_capacity.max(1) as u64) {
+        acts.push(Act::SetFuel(v));
+    }
+    if let Some(v) = u32_row(ui, "fuel cap", pending.fuel_capacity as u32, u16::MAX as u64) {
+        acts.push(Act::SetFuelCapacity(v.min(u16::MAX as u32) as u16));
+    }
+    // Active contract is 15-char ASCII (NUL-padded in the 16-byte slot). `TextEdit` with a
+    // `.char_limit` keeps the user from typing a value `save_write` would truncate.
+    ui.horizontal(|ui| {
+        ui.label(egui::RichText::new("active").color(theme::DIM).size(12.0));
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let mut buf = pending.active_contract.clone();
+            let resp = ui.add(
+                egui::TextEdit::singleline(&mut buf)
+                    .char_limit(15)
+                    .desired_width(140.0)
+                    .font(egui::TextStyle::Monospace),
+            );
+            if resp.changed() {
+                acts.push(Act::SetActiveContract(buf));
+            }
+        });
+    });
     ui.add_space(10.0);
 
-    // METADATA.
+    // METADATA — read-only. Playtime / timestamp / slot name / size are reader-exposed facts;
+    // the write path doesn't touch them (the engine stamps playtime + timestamp itself).
     theme::eyebrow(ui, "METADATA");
     theme::kv(
         ui,
         "playtime",
-        egui::RichText::new(hms(profile.play_time_seconds)),
+        egui::RichText::new(hms(pending.play_time_seconds)),
     );
     theme::kv(
         ui,
         "timestamp",
-        egui::RichText::new(timestamp_utc(profile.timestamp)),
+        egui::RichText::new(timestamp_utc(pending.timestamp)),
     );
     theme::kv(
         ui,
         "slot name",
-        egui::RichText::new(profile.save_name().to_string()),
+        egui::RichText::new(pending.save_name().to_string()),
     );
     theme::kv(
         ui,
         "size",
-        egui::RichText::new(format!("{} B", profile.raw_bytes().len())),
+        egui::RichText::new(format!("{} B", on_disk.raw_bytes().len())),
     );
     acts
 }
 
-/// The top-row verbs: Reload / Back up / Write to .profile.
+/// True when the pending Profile differs from the on-disk one on any **editable** field.
+/// Internal-only — the inspector uses it to light the "pending edits" dot.
+fn profile_differs(pending: &Profile, on_disk: &Profile) -> bool {
+    pending.character_index != on_disk.character_index
+        || pending.upgrade_index != on_disk.upgrade_index
+        || pending.unlocked_costumes != on_disk.unlocked_costumes
+        || pending.cash != on_disk.cash
+        || pending.fuel != on_disk.fuel
+        || pending.fuel_capacity != on_disk.fuel_capacity
+        || pending.active_contract != on_disk.active_contract
+}
+
+/// The top-row verbs: Reload / Discard / Write.
+///
+/// "Write to .profile" is only live when there is a selection AND pending edits actually
+/// differ from the on-disk header — a disabled button for a clean save tells the user they
+/// have nothing queued, without them having to compare the inspector by eye.
 pub fn verbs(ui: &mut egui::Ui, p: &Panel) -> Vec<Act> {
     let mut acts: Vec<Act> = Vec::new();
     if ui.button("Reload from disk").clicked() {
         acts.push(Act::Reload);
     }
-    ui.add_enabled(false, egui::Button::new("Back up"));
-    ui.add_enabled(p.selected.is_some(), egui::Button::new("Write to .profile"));
+    let dirty = match (&p.pending, &p.selected) {
+        (Some(pend), Some(_)) => p
+            .profiles
+            .as_ref()
+            .and_then(|list| list.iter().find(|e| Some(&e.path) == p.selected.as_ref()))
+            .and_then(|e| e.header.as_ref().ok())
+            .is_some_and(|on_disk| profile_differs(pend, on_disk)),
+        _ => false,
+    };
+    if ui.add_enabled(dirty, egui::Button::new("Discard edits")).clicked() {
+        acts.push(Act::Discard);
+    }
+    if theme::primary_button(ui, "Write to .profile", dirty).clicked() {
+        acts.push(Act::Write);
+    }
     acts
 }
 
@@ -466,7 +652,34 @@ pub fn verbs(ui: &mut egui::Ui, p: &Panel) -> Vec<Act> {
 /// caller via a separate `Act` variant and is handled in `app.rs`.
 pub fn apply(act: Act, p: &mut Panel) {
     match act {
-        Act::Select(path) => p.selected = Some(path),
+        Act::Select(path) => {
+            p.selected = Some(path);
+            p.repopulate_pending_from_selection();
+        }
         Act::Reload => p.refresh(),
+        Act::Discard => p.repopulate_pending_from_selection(),
+        Act::Write => p.write_to_disk(),
+        Act::SetCharacter(v) => mutate_pending(p, |pr| pr.character_index = v),
+        Act::SetUpgrade(v) => mutate_pending(p, |pr| pr.upgrade_index = v),
+        Act::SetUnlockedCostumes(v) => mutate_pending(p, |pr| pr.unlocked_costumes = v),
+        Act::SetCash(v) => mutate_pending(p, |pr| pr.cash = v),
+        Act::SetFuel(v) => mutate_pending(p, |pr| pr.fuel = v),
+        Act::SetFuelCapacity(v) => mutate_pending(p, |pr| pr.fuel_capacity = v),
+        Act::SetActiveContract(mut s) => mutate_pending(p, |pr| {
+            // The field slot is 16 bytes NUL-padded; `save_write` truncates past 15 chars.
+            // Clip here too so the inspector shows what will actually land on disk.
+            s.truncate(15);
+            pr.active_contract = s;
+        }),
+    }
+}
+
+/// Small helper so the `Act::Set*` arms don't each have to open-code the `Option` dance.
+/// `apply` runs after `repopulate_pending_from_selection`, so `pending` is populated for
+/// every edit except the frame right after a parse failure — in which case we silently
+/// drop the edit rather than resurrect a working copy for a Profile we can't write.
+fn mutate_pending(p: &mut Panel, f: impl FnOnce(&mut Profile)) {
+    if let Some(pr) = p.pending.as_mut() {
+        f(pr);
     }
 }
