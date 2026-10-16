@@ -531,6 +531,10 @@ enum Act {
 enum Workbench {
     /// Browse + read every asset: info, LOD, destruction, segments, animation, skeleton.
     Inspect,
+    /// Browse / inspect / edit a Mercenaries 2 `.profile`. A rail-sibling of Inspect: the
+    /// `mercs2_formats::save` reader, the `save_lua` AST and the `save_write` writer are the
+    /// backbone; the panel in `src/saves.rs` is their UI front end.
+    Saves,
     /// The editable placement scene: place/move/merge instances, save/load arrangements.
     Sandbox,
     /// Author a mod: conform an import onto a donor template, place hardpoints, publish a patch WAD.
@@ -654,8 +658,12 @@ impl Workbench {
     /// not top-level peers."* They are craft — they act on ONE contribution — so they are entered
     /// from the Shipment page and return to it, rather than being places you navigate to and then
     /// have to remember what you were assembling.
-    const ALL: [Workbench; 11] = [
+    const ALL: [Workbench; 12] = [
         Workbench::Inspect,
+        // Position 2 per the mockup: Saves sits next to Inspect, before Craft and the domain
+        // lenses. It is Inspect for a different subject — a `.profile`, not an asset — so it
+        // reads naturally as the second rail cell.
+        Workbench::Saves,
         Workbench::Craft,
         Workbench::Domain(crate::domain::Domain::World),
         Workbench::Domain(crate::domain::Domain::Characters),
@@ -685,7 +693,9 @@ impl Workbench {
     /// painting over that page's heading — which is exactly what Settings then did.
     fn has_viewport(self) -> bool {
         match self {
-            Workbench::Quartermaster | Workbench::Settings => false,
+            // Saves composes its own centre (hero card + HUD overlays + progression tabs) rather
+            // than painting over the 3D viewport, so the HUD chips stay suppressed here.
+            Workbench::Quartermaster | Workbench::Settings | Workbench::Saves => false,
             // A model-browsing domain shows the loaded model; audio/missions/systems do not.
             Workbench::Domain(d) => d.browses_models(),
             _ => true,
@@ -694,6 +704,7 @@ impl Workbench {
     fn label(self) -> &'static str {
         match self {
             Workbench::Inspect => "Inspect",
+            Workbench::Saves => "Saves",
             Workbench::Sandbox => "Sandbox",
             Workbench::Mods => "Mods",
             Workbench::Skeleton => "Skeleton",
@@ -709,6 +720,7 @@ impl Workbench {
     fn icon(self) -> crate::gui::theme::RailIcon {
         match self {
             Workbench::Inspect => crate::gui::theme::RailIcon::Inspect,
+            Workbench::Saves => crate::gui::theme::RailIcon::Saves,
             Workbench::Sandbox => crate::gui::theme::RailIcon::Sandbox,
             Workbench::Mods => crate::gui::theme::RailIcon::Mods,
             Workbench::Skeleton => crate::gui::theme::RailIcon::Skeleton,
@@ -722,6 +734,7 @@ impl Workbench {
     fn verb(self) -> &'static str {
         match self {
             Workbench::Inspect => "Inspecting",
+            Workbench::Saves => "Saves",
             Workbench::Sandbox => "Sandbox",
             Workbench::Mods => "Mod project",
             Workbench::Skeleton => "Retarget",
@@ -1165,6 +1178,9 @@ pub fn run(opts: Options) {
     // The Quartermaster dock. Present beside every workbench, because edits from anywhere land in
     // the same Shipment — so the surface holding them cannot be a page you navigate away to.
     let mut qm = crate::quartermaster::Panel::default();
+    // The Saves page's own state (a `.profile` currently selected, if any). Lives on the stack
+    // beside `qm` so switching rails never discards it.
+    let mut saves = crate::saves::Panel::default();
     // Host-provided, like the game stack: the crate never reaches into the filesystem for it.
     let qm_names = mercs2_quartermaster::names::NameTable::find_from(
         &std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
@@ -1851,6 +1867,7 @@ pub fn run(opts: Options) {
                     // ── The inspector GUI: toolbar, browser, Details panel, texture window.
                     // Widgets queue `Act`s; the processor below executes them. ──
     let mut qm_acts: Vec<crate::quartermaster::Act> = Vec::new();
+                    let mut saves_acts: Vec<crate::saves::Act> = Vec::new();
                     let mut hovered_bone: Option<usize> = None;
                     // Skeleton workbench hover: (bone index, is_source_tree). Resolved to a viewer
                     // highlight in the PREVIEW's current space (source before Apply, target after).
@@ -2079,6 +2096,9 @@ pub fn run(opts: Options) {
                           match eff {
                             Workbench::Quartermaster => {
                                 qm_acts.extend(crate::quartermaster::navigator(ui, &qm));
+                            }
+                            Workbench::Saves => {
+                                saves_acts.extend(crate::saves::navigator(ui, &saves));
                             }
                             Workbench::Inspect => {
                             let before = (kind, filter.clone());
@@ -2851,6 +2871,9 @@ pub fn run(opts: Options) {
                             egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
                               if eff == Workbench::Quartermaster {
                                   qm_acts.extend(crate::quartermaster::inspector(ui, &qm, &qm_stack, true));
+                              }
+                              if eff == Workbench::Saves {
+                                  saves_acts.extend(crate::saves::inspector(ui, &saves));
                               }
                               if eff.inspect_like() {
                                 match &mut preview {
@@ -4129,6 +4152,9 @@ pub fn run(opts: Options) {
                                     Workbench::Quartermaster => {
                                         qm_acts.extend(crate::quartermaster::verbs(ui, &qm, true));
                                     }
+                                    Workbench::Saves => {
+                                        saves_acts.extend(crate::saves::verbs(ui, &saves));
+                                    }
                                     // A domain page shares Inspect's verbs — it is Inspect narrowed to
                                     // a lens, so Place / Export / textures / clip act on the same
                                     // loaded model. (For a non-model domain there is no preview, so
@@ -4869,6 +4895,11 @@ pub fn run(opts: Options) {
                         if wb == Workbench::Quartermaster {
                             qm_acts.extend(crate::quartermaster::center(ctx, &qm, qm_names.as_ref()));
                         }
+                        // Saves owns its own centre too: a composed card (hero preview + at-a-glance
+                        // HUD + progression grid), not the 3D viewport (see `has_viewport`).
+                        if wb == Workbench::Saves {
+                            saves_acts.extend(crate::saves::center(ctx, &saves));
+                        }
 
                         // ── VIEWPORT HUD: status chips over the 3D (the panels are all placed now, so
                         // `available_rect` is the viewport region). Non-interactable so the camera drag
@@ -5271,6 +5302,13 @@ pub fn run(opts: Options) {
                     // the frame it completes, sync the app's status line to the panel's.
                     if qm.poll_build() {
                         status = qm.status().to_string();
+                    }
+                    // Saves follows the same drain-and-apply pattern: the panels emitted intents
+                    // this frame, and the reducer lands them on the owned Panel so the next frame
+                    // reads from the mutated state. Switching to another workbench never flushes
+                    // `saves`; it is a long-lived piece of app state, not a per-frame scratchpad.
+                    for act in std::mem::take(&mut saves_acts) {
+                        crate::saves::apply(act, &mut saves);
                     }
                     if lua_view.as_ref().is_some_and(|v| !v.open) {
                         lua_view = None;
