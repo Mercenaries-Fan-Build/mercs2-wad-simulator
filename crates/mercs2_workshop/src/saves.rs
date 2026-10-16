@@ -20,7 +20,7 @@
 use std::path::{Path, PathBuf};
 
 use mercs2_formats::game_paths;
-use mercs2_formats::save::{self, Profile};
+use mercs2_formats::save::{self, Profile, SaveState};
 use mercs2_formats::save_write;
 
 use crate::gui::theme;
@@ -32,6 +32,8 @@ pub enum Act {
     Select(PathBuf),
     /// Re-enumerate the saves folder and reparse every `.profile` header.
     Reload,
+    /// Switch which `tFlowData` lens the centre is rendering.
+    PickMissionTab(MissionTab),
     /// Revert pending edits back to the on-disk `Profile`. Matches the "Discard" button
     /// — no file IO, no `save_write` call, just drop the working copy.
     Discard,
@@ -107,6 +109,28 @@ pub struct Panel {
     /// A short free-text banner surfaced in the browser header — the last reload's outcome,
     /// or the last write's `"wrote N bytes"` / error. Replaces whatever was there before.
     pub status: String,
+    /// Cached decoded `SaveState` for the currently-selected `.profile`. The parse walks
+    /// the full inflated-Lua text (`profile.save_state()`), which is cheap but not free —
+    /// keyed by path so switching rows invalidates it, and keyed by `Result` so a parse
+    /// failure is surfaced in the centre instead of silently retried every frame.
+    pub lua_state: Option<(PathBuf, Result<SaveState, String>)>,
+    /// Which mission-flow tab the centre is on (Active / Completed / Culled / Layers).
+    pub mission_tab: MissionTab,
+}
+
+/// The centre panel's current tab over `tFlowData`. Carried on the Panel so switching rails
+/// keeps the modder's view of a given save sticky.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum MissionTab {
+    /// `tFlowData.tActiveMissions` — in-progress missions (nState / nTargetsComplete / collected).
+    #[default]
+    Active,
+    /// `tFlowData.tMyFlowData` — mission-id → flow-value flags (completed / advanced).
+    Completed,
+    /// `tFlowData.tCulledBindings` — bindings the flow fixpoint has removed, in order.
+    Culled,
+    /// `tLayerData` — active `vz_state_*` world overlays.
+    Layers,
 }
 
 impl Panel {
@@ -174,20 +198,46 @@ impl Panel {
 
     /// Clone the parsed `Profile` of the currently-selected row into [`Self::pending`],
     /// giving the inspector a mutable working copy. No-op when nothing is selected or when
-    /// the file failed to parse.
+    /// the file failed to parse. Also invalidates the Lua-state cache so the centre reparses
+    /// against the fresh selection on its next frame.
     fn repopulate_pending_from_selection(&mut self) {
         let Some(sel) = self.selected.as_ref() else {
             self.pending = None;
+            self.lua_state = None;
             return;
         };
         let Some(list) = self.profiles.as_ref() else {
             self.pending = None;
+            self.lua_state = None;
             return;
         };
         self.pending = list
             .iter()
             .find(|e| &e.path == sel)
             .and_then(|e| e.header.as_ref().ok().cloned());
+        self.repopulate_lua_state_from_selection();
+    }
+
+    /// Populate `lua_state` by decoding the inflated-Lua payload of the currently-selected
+    /// `.profile` via `Profile::save_state()`. Eagerly cached on every Select / Reload so the
+    /// centre reads from the cache rather than re-parsing per frame — a `SaveState` walk is
+    /// cheap, but the panels run at refresh rate.
+    fn repopulate_lua_state_from_selection(&mut self) {
+        self.lua_state = None;
+        let Some(sel) = self.selected.as_ref().cloned() else {
+            return;
+        };
+        let Some(list) = self.profiles.as_ref() else {
+            return;
+        };
+        let Some(entry) = list.iter().find(|e| e.path == sel) else {
+            return;
+        };
+        let result = match &entry.header {
+            Ok(h) => h.save_state(),
+            Err(e) => Err(e.clone()),
+        };
+        self.lua_state = Some((sel, result));
     }
 
     /// Serialise the pending `Profile` and overwrite the selected `.profile` on disk.
@@ -349,10 +399,210 @@ pub fn navigator(ui: &mut egui::Ui, p: &Panel) -> Vec<Act> {
     acts
 }
 
-/// The centre column: the viewport card. The hero model and the at-a-glance HUD go here
-/// once the viewport wiring is scoped against `has_viewport`.
-pub fn center(_ctx: &egui::Context, _p: &Panel) -> Vec<Act> {
-    Vec::new()
+/// The centre column: the inflated-Lua mission state view (`tFlowData` + `tLayerData`).
+///
+/// Read-only this commit — the tabs show what the engine serialised, and the next commit
+/// turns the grid into clickable state-toggle chips (via `save_lua::parse_chunk` + surgical
+/// edits + `save_write::set_lua_payload` + `write_profile`, the `save_rollback` pattern).
+pub fn center(ctx: &egui::Context, p: &Panel) -> Vec<Act> {
+    let mut acts: Vec<Act> = Vec::new();
+    egui::CentralPanel::default()
+        .frame(
+            egui::Frame::none()
+                .fill(theme::G0)
+                .inner_margin(egui::Margin::symmetric(22.0, 18.0)),
+        )
+        .show(ctx, |ui| {
+            let Some(sel) = p.selected.as_ref() else {
+                ui.label(theme::disp_text("NO SAVE OPEN", 20.0, theme::DIM));
+                ui.label(
+                    egui::RichText::new("Pick a save on the left to see its mission state.")
+                        .size(11.5)
+                        .color(theme::FAINT),
+                );
+                return;
+            };
+            let stem = sel
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("")
+                .to_string();
+            ui.label(theme::disp_text(stem.to_uppercase(), 20.0, theme::TX));
+            ui.add_space(2.0);
+            ui.label(
+                egui::RichText::new("inflated Lua · tFlowData + tLayerData")
+                    .size(11.0)
+                    .color(theme::FAINT),
+            );
+            ui.add_space(12.0);
+
+            let Some((_, parsed)) = p.lua_state.as_ref() else {
+                ui.label(
+                    egui::RichText::new("Lua not loaded yet — one frame…")
+                        .size(11.5)
+                        .color(theme::FAINT),
+                );
+                return;
+            };
+            let state = match parsed {
+                Ok(s) => s,
+                Err(e) => {
+                    ui.label(
+                        egui::RichText::new(format!("Lua parse failed: {e}"))
+                            .size(11.5)
+                            .color(theme::BAD),
+                    );
+                    return;
+                }
+            };
+
+            // Tab strip. Counts come from the real `SaveState` so the modder sees at-a-glance
+            // which lens is going to have content before clicking it.
+            ui.horizontal(|ui| {
+                for (tab, label, count) in [
+                    (MissionTab::Active,    "Active",    state.active_missions.len()),
+                    (MissionTab::Completed, "Completed", state.completed_flow.len()),
+                    (MissionTab::Culled,    "Culled",    state.flow_chain.len()),
+                    (MissionTab::Layers,    "Layers",    state.layers.len()),
+                ] {
+                    let on = p.mission_tab == tab;
+                    if theme::pill(ui, &format!("{label}  {count}"), on).clicked() {
+                        acts.push(Act::PickMissionTab(tab));
+                    }
+                }
+            });
+            ui.add_space(10.0);
+
+            egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+                match p.mission_tab {
+                    MissionTab::Active => render_active(ui, &state.active_missions),
+                    MissionTab::Completed => render_completed(ui, &state.completed_flow),
+                    MissionTab::Culled => render_culled(ui, &state.flow_chain),
+                    MissionTab::Layers => render_layers(ui, &state.layers),
+                }
+            });
+        });
+    acts
+}
+
+/// A single mission-id card for the Active tab — id + state code + targets + collected.
+fn render_active(ui: &mut egui::Ui, missions: &[save::ActiveMission]) {
+    if missions.is_empty() {
+        ui.label(
+            egui::RichText::new("No active missions in this save.")
+                .size(11.5)
+                .color(theme::FAINT),
+        );
+        return;
+    }
+    for m in missions {
+        theme::row_chip(ui, theme::G0, theme::LINE, |ui| {
+            ui.vertical(|ui| {
+                ui.horizontal(|ui| {
+                    ui.label(theme::disp_text(m.id.clone(), 13.0, theme::TX));
+                    ui.with_layout(
+                        egui::Layout::right_to_left(egui::Align::Center),
+                        |ui| {
+                            ui.label(
+                                egui::RichText::new(format!("nState {}", m.state as i64))
+                                    .monospace()
+                                    .size(10.5)
+                                    .color(theme::BRASS),
+                            );
+                        },
+                    );
+                });
+                let targets = m
+                    .targets_complete
+                    .map(|n| format!("{} targets complete", n as i64))
+                    .unwrap_or_else(|| "no targets ticked".to_string());
+                ui.label(
+                    egui::RichText::new(format!("{targets} · {} collected", m.collected.len()))
+                        .size(10.5)
+                        .color(theme::FAINT),
+                );
+            });
+        });
+    }
+}
+
+/// Compact rows for `tMyFlowData` — id · value, sorted. 100s of entries so each row is slim.
+fn render_completed(ui: &mut egui::Ui, flow: &std::collections::BTreeMap<String, f64>) {
+    if flow.is_empty() {
+        ui.label(
+            egui::RichText::new("No completed-flow keys recorded.")
+                .size(11.5)
+                .color(theme::FAINT),
+        );
+        return;
+    }
+    for (k, v) in flow {
+        ui.horizontal(|ui| {
+            ui.label(
+                egui::RichText::new(k)
+                    .monospace()
+                    .size(11.5)
+                    .color(theme::TX),
+            );
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.label(
+                    egui::RichText::new(format!("{}", *v as i64))
+                        .monospace()
+                        .size(10.5)
+                        .color(theme::GOOD),
+                );
+            });
+        });
+    }
+}
+
+/// `tCulledBindings` — ordered list, so render with a leading index to make the order visible.
+fn render_culled(ui: &mut egui::Ui, chain: &[String]) {
+    if chain.is_empty() {
+        ui.label(
+            egui::RichText::new("No culled bindings — this save hasn't trimmed any from the flow.")
+                .size(11.5)
+                .color(theme::FAINT),
+        );
+        return;
+    }
+    for (i, k) in chain.iter().enumerate() {
+        ui.horizontal(|ui| {
+            ui.label(
+                egui::RichText::new(format!("{i:3}"))
+                    .monospace()
+                    .size(10.5)
+                    .color(theme::FAINT),
+            );
+            ui.label(
+                egui::RichText::new(k)
+                    .monospace()
+                    .size(11.5)
+                    .color(theme::TX),
+            );
+        });
+    }
+}
+
+/// `tLayerData` — the active `vz_state_*` overlays, in order. Shown as mono text; this is
+/// the overlay set the streamer restores on load.
+fn render_layers(ui: &mut egui::Ui, layers: &[String]) {
+    if layers.is_empty() {
+        ui.label(
+            egui::RichText::new("No world overlays in this save.")
+                .size(11.5)
+                .color(theme::FAINT),
+        );
+        return;
+    }
+    for l in layers {
+        ui.label(
+            egui::RichText::new(l)
+                .monospace()
+                .size(11.5)
+                .color(theme::TX),
+        );
+    }
 }
 
 /// `1`/`2`/`3` → the hero's full name as the engine resolves it (`SHELL.SelectCharacter.*`
@@ -657,6 +907,7 @@ pub fn apply(act: Act, p: &mut Panel) {
             p.repopulate_pending_from_selection();
         }
         Act::Reload => p.refresh(),
+        Act::PickMissionTab(t) => p.mission_tab = t,
         Act::Discard => p.repopulate_pending_from_selection(),
         Act::Write => p.write_to_disk(),
         Act::SetCharacter(v) => mutate_pending(p, |pr| pr.character_index = v),
