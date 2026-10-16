@@ -78,6 +78,7 @@ mod retarget;
 // mapper itself lives in `mercs2_formats::retarget`; the call sites below are unchanged.
 use crate::retarget::RetargetPreview as _;
 mod quartermaster;
+mod saves;
 mod settings;
 mod shipment;
 mod shot;
