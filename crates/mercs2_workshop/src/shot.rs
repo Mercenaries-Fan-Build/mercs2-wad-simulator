@@ -56,8 +56,8 @@ impl OrbitCam {
     }
 }
 
-/// Final rendered-frame dimensions. Public so the Workshop can build an `egui::ColorImage` of the
-/// same shape without hard-coding the numbers.
+/// Frame size of the one-shot [`render`] PNGs and the size a [`HeroRenderer`] starts at; the
+/// Saves viewport resizes its renderer to the on-screen frame via [`HeroRenderer::render_rgba`].
 pub const RENDER_W: u32 = 720;
 pub const RENDER_H: u32 = 960;
 
@@ -183,8 +183,9 @@ struct VOut {
 /// per hero and ~10–30 ms per subsequent camera tick.
 ///
 /// Call [`HeroRenderer::new`] with the full mesh (verts/indices/palette/bbox/draws); call
-/// [`HeroRenderer::render_rgba`] with an [`OrbitCam`] to get back one `RENDER_W × RENDER_H` RGBA
-/// frame. Dropping the renderer releases every GPU resource.
+/// [`HeroRenderer::render_rgba`] with an [`OrbitCam`] and a pixel size to get back one RGBA frame
+/// of that size (the colour/depth targets are rebuilt when the size changes). Dropping the
+/// renderer releases every GPU resource.
 pub struct HeroRenderer {
     device: wgpu::Device,
     queue: wgpu::Queue,
@@ -201,10 +202,31 @@ pub struct HeroRenderer {
     depth_v: wgpu::TextureView,
     read_buf: wgpu::Buffer,
     bpr: u32,
+    size: (u32, u32),
     bbox_center: Vec3,
     bbox_radius: f32,
     proj: Mat4,
     flip_x: Mat4,
+}
+
+/// Colour + depth targets, readback buffer, padded row stride and projection for one frame size.
+/// Vertical FOV is fixed at 45°, so a wider frame shows more scene sideways at the same framing.
+fn size_targets(
+    device: &wgpu::Device,
+    w: u32,
+    h: u32,
+    bbox_radius: f32,
+) -> (wgpu::Texture, wgpu::TextureView, wgpu::TextureView, wgpu::Buffer, u32, Mat4) {
+    let extent = wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 };
+    let color = device.create_texture(&wgpu::TextureDescriptor { label: None, size: extent, mip_level_count: 1, sample_count: 1, dimension: wgpu::TextureDimension::D2, format: wgpu::TextureFormat::Rgba8Unorm, usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC, view_formats: &[] });
+    let color_v = color.create_view(&Default::default());
+    let depth = device.create_texture(&wgpu::TextureDescriptor { label: None, size: extent, mip_level_count: 1, sample_count: 1, dimension: wgpu::TextureDimension::D2, format: wgpu::TextureFormat::Depth32Float, usage: wgpu::TextureUsages::RENDER_ATTACHMENT, view_formats: &[] });
+    let depth_v = depth.create_view(&Default::default());
+    // Row-bytes must be aligned to 256 for the readback copy.
+    let bpr = ((w * 4 + 255) / 256) * 256;
+    let read_buf = device.create_buffer(&wgpu::BufferDescriptor { label: None, size: (bpr * h) as u64, usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
+    let proj = Mat4::perspective_rh(45f32.to_radians(), w as f32 / h as f32, 0.05, bbox_radius * 12.0);
+    (color, color_v, depth_v, read_buf, bpr, proj)
 }
 
 impl HeroRenderer {
@@ -361,19 +383,11 @@ impl HeroRenderer {
         multiview: None,
     });
 
-    let color = device.create_texture(&wgpu::TextureDescriptor { label: None, size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 }, mip_level_count: 1, sample_count: 1, dimension: wgpu::TextureDimension::D2, format: wgpu::TextureFormat::Rgba8Unorm, usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC, view_formats: &[] });
-    let color_v = color.create_view(&Default::default());
-    let depth = device.create_texture(&wgpu::TextureDescriptor { label: None, size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 }, mip_level_count: 1, sample_count: 1, dimension: wgpu::TextureDimension::D2, format: wgpu::TextureFormat::Depth32Float, usage: wgpu::TextureUsages::RENDER_ATTACHMENT, view_formats: &[] });
-    let depth_v = depth.create_view(&Default::default());
-
     let bbox_center = Vec3::from((Vec3::from(bbox.0) + Vec3::from(bbox.1)) * 0.5);
     let bbox_radius = ((Vec3::from(bbox.1) - Vec3::from(bbox.0)).length() * 0.5).max(0.1);
     // Engine mirrors clip X on screen (LH asset space -> wgpu). Match it so left/right read the same.
     let flip_x = Mat4::from_cols_array(&[-1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0]);
-    let proj = Mat4::perspective_rh(45f32.to_radians(), w as f32 / h as f32, 0.05, bbox_radius * 12.0);
-    // Row-bytes must be aligned to 256 for the readback copy.
-    let bpr = ((w * 4 + 255) / 256) * 256;
-    let read_buf = device.create_buffer(&wgpu::BufferDescriptor { label: None, size: (bpr * h) as u64, usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
+    let (color, color_v, depth_v, read_buf, bpr, proj) = size_targets(&device, w, h, bbox_radius);
 
     let draw_ranges: Vec<(u32, u32)> = draws
         .iter()
@@ -400,6 +414,7 @@ impl HeroRenderer {
         depth_v,
         read_buf,
         bpr,
+        size: (w, h),
         bbox_center,
         bbox_radius,
         proj,
@@ -407,11 +422,22 @@ impl HeroRenderer {
     }
     }
 
-    /// Draw one orbit frame with the given camera and return `RENDER_W × RENDER_H` RGBA8 bytes.
-    /// Reuses every GPU resource built in `new`; the only per-frame work is writing the camera
-    /// uniform, running the render pass, copying to the readback buffer, and memcpy-ing out.
-    pub fn render_rgba(&mut self, cam: &OrbitCam) -> Vec<u8> {
-        let (w, h) = (RENDER_W, RENDER_H);
+    /// Draw one orbit frame with the given camera at `size` pixels and return `w × h` RGBA8 bytes.
+    /// Reuses every GPU resource built in `new`; the colour/depth targets and readback buffer are
+    /// rebuilt only when `size` differs from the previous call.
+    pub fn render_rgba(&mut self, cam: &OrbitCam, size: (u32, u32)) -> Vec<u8> {
+        let (w, h) = (size.0.max(1), size.1.max(1));
+        if (w, h) != self.size {
+            let (color, color_v, depth_v, read_buf, bpr, proj) =
+                size_targets(&self.device, w, h, self.bbox_radius);
+            self.color = color;
+            self.color_v = color_v;
+            self.depth_v = depth_v;
+            self.read_buf = read_buf;
+            self.bpr = bpr;
+            self.proj = proj;
+            self.size = (w, h);
+        }
         let eye = cam.eye_for(self.bbox_center, self.bbox_radius);
         let view = Mat4::look_at_rh(eye, self.bbox_center, Vec3::Y);
         let mvp = self.flip_x * self.proj * view;
@@ -422,9 +448,7 @@ impl HeroRenderer {
         {
             let mut rp = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: None,
-                // Transparent clear so the portrait blends over whatever paints behind it in
-                // egui; fragment shader writes alpha=1 so hero pixels stay opaque.
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment { view: &self.color_v, resolve_target: None, ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color { r: 0.0, g: 0.0, b: 0.0, a: 0.0 }), store: wgpu::StoreOp::Store } })],
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment { view: &self.color_v, resolve_target: None, ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color { r: 0.1, g: 0.1, b: 0.12, a: 1.0 }), store: wgpu::StoreOp::Store } })],
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment { view: &self.depth_v, depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(1.0), store: wgpu::StoreOp::Store }), stencil_ops: None }),
                 ..Default::default()
             });
@@ -489,7 +513,7 @@ pub fn render(
         ("threeq", OrbitCam { yaw: std::f32::consts::FRAC_PI_4, pitch: 0.17408, zoom: 1.0 }),
     ];
     for (name, cam) in angles {
-        let rgba = r.render_rgba(&cam);
+        let rgba = r.render_rgba(&cam, (w, h));
         let path = format!("{out_prefix}_{name}.png");
         let file = std::fs::File::create(&path).expect("create png");
         let mut enc = png::Encoder::new(std::io::BufWriter::new(file), w, h);
@@ -503,4 +527,48 @@ pub fn render(
 fn create_init(device: &wgpu::Device, usage: wgpu::BufferUsages, data: &[u8]) -> wgpu::Buffer {
     use wgpu::util::DeviceExt;
     device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: None, contents: data, usage })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{DrawTex, HeroRenderer, OrbitCam, SV, RENDER_H, RENDER_W};
+
+    fn tri() -> (Vec<SV>, Vec<u32>) {
+        let v = |x: f32, y: f32| SV {
+            pos: [x, y, 0.0],
+            _p0: 0.0,
+            normal: [0.0, 0.0, 1.0],
+            _p1: 0.0,
+            joints: [0; 4],
+            weights: [1.0, 0.0, 0.0, 0.0],
+            uv: [0.0, 0.0],
+            _p2: [0.0; 2],
+            tangent: [1.0, 0.0, 0.0, 1.0],
+        };
+        (vec![v(-1.0, -1.0), v(1.0, -1.0), v(0.0, 1.0)], vec![0, 1, 2])
+    }
+
+    fn px(rgba: &[u8], w: u32, x: u32, y: u32) -> [u8; 4] {
+        let i = ((y * w + x) * 4) as usize;
+        [rgba[i], rgba[i + 1], rgba[i + 2], rgba[i + 3]]
+    }
+
+    #[test]
+    fn hero_renderer_resizes_to_the_requested_frame() {
+        let (verts, indices) = tri();
+        let ident = [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0]];
+        let draws = [DrawTex { index_start: 0, index_count: 3, diffuse: None, normal: None, specular: None }];
+        let mut r = HeroRenderer::new(&verts, &indices, &[ident], ([-1.0, -1.0, 0.0], [1.0, 1.0, 0.0]), &draws);
+        let cam = OrbitCam { yaw: 0.0, pitch: 0.0, zoom: 1.0 };
+        let clear = [26u8, 26, 31, 255];
+        // Default size, then a wide frame (odd row stride exercises the 256-byte readback padding).
+        for (w, h) in [(RENDER_W, RENDER_H), (1001, 360)] {
+            let rgba = r.render_rgba(&cam, (w, h));
+            assert_eq!(rgba.len(), (w * h * 4) as usize, "frame {w}x{h}");
+            for (x, y) in [(0, 0), (w - 1, 0), (0, h - 1), (w - 1, h - 1)] {
+                assert_eq!(px(&rgba, w, x, y), clear, "corner ({x},{y}) of {w}x{h} is the clear colour");
+            }
+            assert_ne!(px(&rgba, w, w / 2, h / 2), clear, "triangle covers the centre of {w}x{h}");
+        }
+    }
 }
