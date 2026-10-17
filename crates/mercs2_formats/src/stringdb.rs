@@ -346,19 +346,20 @@ pub fn key_name(key: &str) -> &str {
     k.strip_prefix('[').and_then(|s| s.strip_suffix(']')).unwrap_or(k)
 }
 
-/// The key hash a string-edit key names: a bare `0xHHHHHHHH` IS the hash; anything else is a key
-/// name, bracketed or not (`[Menu.Play]` / `Menu.Play`), hashed by its [`key_name`]. An author who
-/// only has the hash from a dump can still write the key — the reverse of a key is not always known.
+/// The key hash a string key names: `0xHHHHHHHH` IS the hash, bracketed or not — the game writes
+/// localized-name keys that way (`Object.GetLocalizedName` gives `"[0x5cb97d23]"` = "Light MG");
+/// anything else is a key name, bracketed or not (`[Menu.Play]` / `Menu.Play`), hashed by its
+/// [`key_name`]. An author who only has the hash from a dump can still write the key.
 ///
-/// The one rule for every caller that turns an edit key into a hash: [`edit_container`],
+/// The one rule for every caller that turns a key into a hash: [`edit_container`],
 /// [`add_keys_to_container`], and a caller merging several tables' edits by hash.
 pub fn key_hash(key: &str) -> u32 {
-    key.trim()
-        .strip_prefix("0x")
-        .or_else(|| key.trim().strip_prefix("0X"))
-        .filter(|h| h.len() <= 8 && h.chars().all(|c| c.is_ascii_hexdigit()))
+    let k = key_name(key);
+    k.strip_prefix("0x")
+        .or_else(|| k.strip_prefix("0X"))
+        .filter(|h| !h.is_empty() && h.len() <= 8 && h.chars().all(|c| c.is_ascii_hexdigit()))
         .and_then(|h| u32::from_str_radix(h, 16).ok())
-        .unwrap_or_else(|| pandemic_hash_m2(key_name(key)))
+        .unwrap_or_else(|| pandemic_hash_m2(k))
 }
 
 /// Add NEW keys to a stringdb container. The companion to [`edit_container`] (which errors on
@@ -536,6 +537,10 @@ mod tests {
             assert_eq!(key_hash(&format!("  [{key}] ")), hash, "padded [{key}]");
         }
         assert_eq!(key_hash("0x0D569A55"), 0x0D56_9A55, "a hex key is the hash itself");
+        // `Object.GetLocalizedName` keys, as `tStatsData.tFavWeapon` stores them; both are in
+        // the retail english table ("Light MG", "C4").
+        assert_eq!(key_hash("[0x5cb97d23]"), 0x5CB9_7D23, "a bracketed hex key is the hash");
+        assert_eq!(key_hash("[0xE3C4ADA0]"), 0xE3C4_ADA0);
         assert_eq!(key_name("[a.b]"), "a.b");
         assert_eq!(key_name("a.b"), "a.b");
         assert_eq!(key_name("[unclosed"), "[unclosed");
