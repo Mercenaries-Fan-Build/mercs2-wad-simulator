@@ -538,14 +538,17 @@ pub fn center(ctx: &egui::Context, p: &Panel) -> Vec<Act> {
                 .unwrap_or("")
                 .to_string();
 
-            // Resolve the on-disk header for the header strip. `pending` would read "as
-            // currently edited" instead; here we want the baseline the modder is editing
-            // against, so the AT-A-GLANCE card doesn't jump every keystroke.
+            // On-disk header is the baseline the modder is editing against — the AT-A-GLANCE
+            // card reads from it so cash / fuel / timestamp don't jump every keystroke. The
+            // hero viewport, in contrast, reads from PENDING (what the inspector is about to
+            // write): changing hero index or upgrade tier in the right-side panel must repose
+            // the preview, not just the file.
             let on_disk = p
                 .profiles
                 .as_ref()
                 .and_then(|list| list.iter().find(|e| &e.path == sel))
                 .and_then(|e| e.header.as_ref().ok());
+            let edit_view = p.pending.as_ref().or(on_disk);
 
             // Filename eyebrow — the row the browser is on, repeated here so a wide centre reads cleanly.
             ui.label(
@@ -555,12 +558,15 @@ pub fn center(ctx: &egui::Context, p: &Panel) -> Vec<Act> {
                     .color(theme::FAINT),
             );
             let mut hero_req: HeroReq = HeroReq::default();
-            match on_disk {
-                None => {
+            match (edit_view, on_disk) {
+                (None, _) => {
                     ui.label(theme::disp_text("UNREADABLE", 20.0, theme::BAD));
                 }
-                Some(h) => {
-                    hero_req = hero_viewport(ui, h, p);
+                (Some(ev), Some(od)) => {
+                    hero_req = hero_viewport(ui, ev, od, p);
+                }
+                (Some(ev), None) => {
+                    hero_req = hero_viewport(ui, ev, ev, p);
                 }
             }
             // The viewport reports two kinds of state at once: the camera the user has already
@@ -666,7 +672,10 @@ struct HeroReq {
 /// mouse-wheel scroll inside the viewport zooms. Each cam change emits both a `SetHeroCam`
 /// (so `Panel.hero_cam` tracks the user's intent) and an `EnsureHeroRender` (so `app.rs` draws
 /// the next frame at the new angle). A cold-start load also emits an `EnsureHeroRender`.
-fn hero_viewport(ui: &mut egui::Ui, h: &Profile, p: &Panel) -> HeroReq {
+fn hero_viewport(ui: &mut egui::Ui, h: &Profile, on_disk: &Profile, p: &Panel) -> HeroReq {
+    // `h` is the LIVE view (pending edit) — hero, upgrade tier, overlays — so inspector
+    // changes repose the preview immediately. `on_disk` is the baseline for the AT-A-GLANCE
+    // card so cash/fuel/timestamp stay stable while the modder types.
     // The viewport is pinned to EXACTLY `viewport_height` — not a minimum. The hero texture is
     // 720x960 (RENDER_W/RENDER_H in shot.rs); at 220 px the hero scaled down to a 165-tall
     // slice that visibly didn't fill the bordered frame. Going taller lets the portrait match
@@ -878,7 +887,7 @@ fn hero_viewport(ui: &mut egui::Ui, h: &Profile, p: &Panel) -> HeroReq {
             let topright = egui::pos2(frame_rect.right() - overlay_w - 2.0, frame_rect.top() + 2.0);
             ui.allocate_ui_at_rect(
                 egui::Rect::from_min_size(topright, egui::vec2(overlay_w, 200.0)),
-                |ui| at_a_glance(ui, h),
+                |ui| at_a_glance(ui, on_disk),
             );
 
             // Bottom-left: identity chip.
@@ -1111,49 +1120,54 @@ fn mission_chip_grid(ui: &mut egui::Ui, items: &[(String, Option<String>)], s: C
     let gutter = 4.0;
     let avail = ui.available_width();
     let cell_w = ((avail - (cols as f32 - 1.0) * gutter) / cols as f32).max(100.0);
-    let mut col = 0usize;
-    ui.horizontal_wrapped(|ui| {
-        ui.spacing_mut().item_spacing = egui::vec2(gutter, gutter);
-        for (id, hover) in items {
-            let resp = egui::Frame::none()
-                .fill(s.bg)
-                .stroke(egui::Stroke::new(1.0, s.bd))
-                .rounding(egui::Rounding::same(4.0))
-                .inner_margin(egui::Margin::symmetric(7.0, 4.0))
-                .show(ui, |ui| {
-                    ui.set_width(cell_w);
-                    ui.horizontal(|ui| {
-                        ui.label(
-                            egui::RichText::new(id)
-                                .monospace()
-                                .size(10.5)
-                                .color(theme::TX),
-                        );
-                        ui.with_layout(
-                            egui::Layout::right_to_left(egui::Align::Center),
-                            |ui| {
-                                egui::Frame::none()
-                                    .fill(s.tag_bg)
-                                    .rounding(egui::Rounding::same(2.0))
-                                    .inner_margin(egui::Margin::symmetric(5.0, 1.0))
-                                    .show(ui, |ui| {
-                                        ui.label(theme::disp_text(s.tag, 8.5, s.tag_fg));
-                                    });
-                            },
-                        );
-                    });
-                })
-                .response;
-            if let Some(h) = hover {
-                let _ = resp.on_hover_text(h);
+    // egui::Grid for a REAL grid — rows aligned, cells at the same x. The previous
+    // horizontal_wrapped + end_row() mix was a no-op outside of ui.grid(); chips wrapped
+    // only when they hit the right edge, so rows looked ragged whenever one chip's id was
+    // narrower than cell_w and absorbed less than its slot.
+    egui::Grid::new(ui.auto_id_with(("mission_chip_grid", items.len(), s.tag)))
+        .num_columns(cols)
+        .min_col_width(cell_w)
+        .max_col_width(cell_w)
+        .spacing(egui::vec2(gutter, gutter))
+        .show(ui, |ui| {
+            for (i, (id, hover)) in items.iter().enumerate() {
+                let resp = egui::Frame::none()
+                    .fill(s.bg)
+                    .stroke(egui::Stroke::new(1.0, s.bd))
+                    .rounding(egui::Rounding::same(4.0))
+                    .inner_margin(egui::Margin::symmetric(7.0, 4.0))
+                    .show(ui, |ui| {
+                        ui.set_width(cell_w);
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                egui::RichText::new(id)
+                                    .monospace()
+                                    .size(10.5)
+                                    .color(theme::TX),
+                            );
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    egui::Frame::none()
+                                        .fill(s.tag_bg)
+                                        .rounding(egui::Rounding::same(2.0))
+                                        .inner_margin(egui::Margin::symmetric(5.0, 1.0))
+                                        .show(ui, |ui| {
+                                            ui.label(theme::disp_text(s.tag, 8.5, s.tag_fg));
+                                        });
+                                },
+                            );
+                        });
+                    })
+                    .response;
+                if let Some(h) = hover {
+                    let _ = resp.on_hover_text(h);
+                }
+                if (i + 1) % cols == 0 {
+                    ui.end_row();
+                }
             }
-            col += 1;
-            if col >= cols {
-                ui.end_row();
-                col = 0;
-            }
-        }
-    });
+        });
 }
 
 /// `tMyFlowData` chips — the completed story beats. Palette matches the mockup's green DONE pill.
