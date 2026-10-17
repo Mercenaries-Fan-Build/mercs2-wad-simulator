@@ -114,6 +114,25 @@ impl WadStack {
             .ok_or_else(|| format!("0x{hash:08X}: no model chunk in any open wad"))
     }
 
+    /// A string table by asset name (`english`, `french`, …) as `key_hash -> text`, resolved through
+    /// the residency registry like every other asset (overlays first). Keys are hashed by their bare
+    /// name — look one up with `mercs2_formats::stringdb::key_hash`.
+    pub fn string_table(&mut self, name: &str) -> Result<HashMap<u32, String>, String> {
+        let name_hash = mercs2_formats::hash::pandemic_hash_m2(name);
+        let WadStack { wads, registry, .. } = self;
+        let container = registry
+            .resolve(wads, mercs2_formats::types::TYPE_HASH_STRINGDB, name_hash)
+            .and_then(|c| registry.slice(c).map(<[u8]>::to_vec))
+            .ok_or_else(|| format!("string table `{name}`: not in any open wad"))?;
+        let keys = mercs2_formats::ucfx::extract_chunk_body(&container, b"KEYS")
+            .ok_or_else(|| format!("string table `{name}`: no KEYS chunk"))?;
+        let strs = mercs2_formats::ucfx::extract_chunk_body(&container, b"STRS")
+            .ok_or_else(|| format!("string table `{name}`: no STRS chunk"))?;
+        let db = mercs2_formats::stringdb::parse(&keys, &strs)
+            .map_err(|e| format!("string table `{name}`: {e}"))?;
+        Ok(db.entries.into_iter().map(|e| (e.key_hash, e.text)).collect())
+    }
+
     /// The assembled model — LOD-block chain joined through the resident block. Overlays first.
     pub fn model(&mut self, hash: u32) -> Result<mercs2_engine::model::Model, String> {
         let mut last = format!("0x{hash:08X}: no model chunk in any open wad");
@@ -5330,6 +5349,11 @@ pub fn run(opts: Options) {
                     // frame. First render per hash pays the ~500 ms pipeline + mesh upload; every
                     // subsequent render (drag-orbit tick) is a camera-uniform write + draw +
                     // ~2.6 MB readback into a reused TextureHandle, usually under ~30 ms.
+                    // English string table for display names (loadout tokens). Loaded once, the
+                    // first frame the Saves page has a save list.
+                    if saves.profiles.is_some() && saves.english.is_none() {
+                        saves.english = Some(w.string_table("english"));
+                    }
                     if let (Some((hash, name)), Some(ctx)) =
                         (saves.pending_hero_render.take(), pending_ctx.as_ref())
                     {
@@ -8420,5 +8444,29 @@ fn ensure_hero_render(
         Ok(tex)
     } else {
         Ok(ctx.load_texture(format!("hero_{hash:08X}"), img, egui::TextureOptions::LINEAR))
+    }
+}
+
+#[cfg(all(test, feature = "retail"))]
+mod string_table_retail_tests {
+    use super::WadStack;
+    use mercs2_formats::stringdb::key_hash;
+
+    /// `english` resolves through the WAD stack and the save's loadout keys read as the game shows
+    /// them. Expected text from `mercs2_probe --bin stringdb_dump --filter english` on retail vz.wad.
+    #[test]
+    fn english_table_names_the_loadout_keys() {
+        let wad = mercs2_engine::wad::resolve_vz_wad(None)
+            .expect("retail vz.wad — set vz_wad in .mercs2-local.toml or VZ_WAD");
+        let mut w = WadStack::open(&wad, &[]).expect("open retail vz.wad");
+        let t = w.string_table("english").expect("english string table");
+        assert_eq!(t.len(), 18_299);
+        for (key, text) in [
+            ("[vehicle.wz10]", "Warsong Attack Helicopter"),
+            ("[support.airstrike.bunkerbuster.name]", "Bunker Buster"),
+            ("[vehicle.veyronassault]", "The Urban Commando"),
+        ] {
+            assert_eq!(t.get(&key_hash(key)).map(String::as_str), Some(text), "{key}");
+        }
     }
 }
