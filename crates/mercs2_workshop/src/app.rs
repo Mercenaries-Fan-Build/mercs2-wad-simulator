@@ -1868,6 +1868,9 @@ pub fn run(opts: Options) {
                     // Widgets queue `Act`s; the processor below executes them. ──
     let mut qm_acts: Vec<crate::quartermaster::Act> = Vec::new();
                     let mut saves_acts: Vec<crate::saves::Act> = Vec::new();
+                    // Captured below inside `gui.run` so the saves reducer (which runs after the
+                    // closure returns) can allocate egui textures for the hero-portrait render.
+                    let mut pending_ctx: Option<egui::Context> = None;
                     let mut hovered_bone: Option<usize> = None;
                     // Skeleton workbench hover: (bone index, is_source_tree). Resolved to a viewer
                     // highlight in the PREVIEW's current space (source before Apply, target after).
@@ -5220,6 +5223,11 @@ pub fn run(opts: Options) {
                         if let Some(v) = &mut lua_view {
                             v.show(ctx);
                         }
+                        // Captured here (where `ctx` is in scope) so the reducer below `gui.run`
+                        // can hand it to the hero-render helper — the render needs the egui
+                        // context to allocate a texture handle, and the reducer owns the
+                        // `WadStack` + Panel the render reads from.
+                        pending_ctx = Some(ctx.clone());
                     });
 
                     for act in std::mem::take(&mut qm_acts) {
@@ -5320,6 +5328,23 @@ pub fn run(opts: Options) {
                     // `saves`; it is a long-lived piece of app state, not a per-frame scratchpad.
                     for act in std::mem::take(&mut saves_acts) {
                         crate::saves::apply(act, &mut saves);
+                    }
+                    // ── Saves hero render: the Panel's own reducer only stamps a request slot;
+                    // the real `load_model_data` + `shot::render` + `ctx.load_texture` runs via
+                    // the egui-context stashed by `gui.run` on this frame. Blocks the UI for the
+                    // render duration (~1-2s per unique model), then caches the texture forever —
+                    // switching between saves on the same hero/tier combo after that is instant.
+                    if let (Some((hash, name)), Some(ctx)) =
+                        (saves.pending_hero_render.take(), pending_ctx.as_ref())
+                    {
+                        match render_hero_portrait(&mut w, hash, &name, ctx) {
+                            Ok(tex) => {
+                                saves.hero_textures.insert(hash, tex);
+                            }
+                            Err(e) => {
+                                saves.hero_render_failed.insert(hash, e);
+                            }
+                        }
                     }
                     if lua_view.as_ref().is_some_and(|v| !v.open) {
                         lua_view = None;
@@ -8254,4 +8279,128 @@ fn export_model_data(md: &ModelData, label: &str) -> Result<String, String> {
     }
     std::fs::write(dir.join("model.obj"), obj).map_err(|e| e.to_string())?;
     Ok(dir.to_string_lossy().into_owned())
+}
+
+/// Render a hero portrait for the Saves page and return it as an `egui::TextureHandle`.
+///
+/// Pipeline:
+/// 1. Compute a cache path under `std::env::temp_dir()/mercs2_workshop_hero_renders/`,
+///    keyed by model hash. Reuses the "front" angle PNG from a prior render if present.
+/// 2. If no cache PNG, resolve the model via [`load_model_data`], build the SV / palette
+///    (identity bind pose — no clip binding needed for a static portrait) / draws, and
+///    call [`crate::shot::render`] to write three PNGs to the cache dir.
+/// 3. Load the "front" PNG via the `png` crate, build an `egui::ColorImage` from the
+///    RGBA8 bytes, and allocate an `egui::TextureHandle` via `ctx.load_texture`.
+///
+/// Textures are flat-shaded for now (empty `DrawTex` texture slots → the shot shader's
+/// fallback white/flat-normal/black samplers bind), which gets a silhouette-and-pose
+/// readable render without pulling in `texpng::decode_bc` + the whole MTRL resolution
+/// pipeline. A follow-up can add real diffuse/normal/specular decode for the character
+/// skin. Blocks the UI for ~1-2s per unique model, then the texture is cached forever.
+fn render_hero_portrait(
+    w: &mut WadStack,
+    hash: u32,
+    name: &str,
+    ctx: &egui::Context,
+) -> Result<egui::TextureHandle, String> {
+    let cache_dir = std::env::temp_dir().join("mercs2_workshop_hero_renders");
+    std::fs::create_dir_all(&cache_dir)
+        .map_err(|e| format!("create cache dir {}: {e}", cache_dir.display()))?;
+    let out_prefix = cache_dir.join(format!("{hash:08X}"));
+    let png_path = cache_dir.join(format!("{hash:08X}_front.png"));
+
+    if !png_path.exists() {
+        let md = crate::app::load_model_data(w, hash)
+            .map_err(|e| format!("load `{name}` (0x{hash:08X}): {e}"))?;
+        if md.verts.is_empty() || md.indices.is_empty() || md.draws.is_empty() {
+            return Err(format!(
+                "model `{name}` loaded with no geometry (verts={}, indices={}, draws={})",
+                md.verts.len(),
+                md.indices.len(),
+                md.draws.len()
+            ));
+        }
+        // SV from the model's own BLENDINDICES/BLENDWEIGHT — a static identity palette on
+        // a skinned model would collapse to a bind pose, which is exactly what a portrait
+        // wants. No clip-binding here.
+        let sv: Vec<crate::shot::SV> = md
+            .verts
+            .iter()
+            .map(|v| crate::shot::SV {
+                pos: v.pos,
+                _p0: 0.0,
+                normal: v.normal,
+                _p1: 0.0,
+                uv: v.uv,
+                _p2: [0.0, 0.0],
+                tangent: v.tangent,
+                joints: [
+                    v.joints[0] as u32,
+                    v.joints[1] as u32,
+                    v.joints[2] as u32,
+                    v.joints[3] as u32,
+                ],
+                weights: [
+                    v.weights[0] as f32 / 255.0,
+                    v.weights[1] as f32 / 255.0,
+                    v.weights[2] as f32 / 255.0,
+                    v.weights[3] as f32 / 255.0,
+                ],
+            })
+            .collect();
+        const IDENT: [[f32; 4]; 4] = [
+            [1.0, 0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+            [0.0, 0.0, 0.0, 1.0],
+        ];
+        let palette: Vec<[[f32; 4]; 4]> = vec![IDENT; md.skin.rig.len().max(1)];
+        // Draws without diffuse/normal/specular — the shot shader binds its white/flat-nm/
+        // black fallbacks, yielding a readable silhouette with N·L shading. Honest for a
+        // first-pass portrait; textured decode is a dedicated follow-up.
+        let draws: Vec<crate::shot::DrawTex> = md
+            .draws
+            .iter()
+            .filter(|d| d.index_count > 0)
+            .map(|d| crate::shot::DrawTex {
+                index_start: d.index_start,
+                index_count: d.index_count,
+                diffuse: None,
+                normal: None,
+                specular: None,
+            })
+            .collect();
+        if draws.is_empty() {
+            return Err(format!(
+                "model `{name}` has {} draws but every one is empty — nothing to render",
+                md.draws.len()
+            ));
+        }
+        crate::shot::render(
+            &sv,
+            &md.indices,
+            &palette,
+            (md.stats.bbox_min, md.stats.bbox_max),
+            out_prefix.to_string_lossy().as_ref(),
+            &draws,
+        );
+    }
+
+    // Load the "front" angle PNG and hand it to egui as a texture.
+    let bytes = std::fs::read(&png_path)
+        .map_err(|e| format!("read {}: {e}", png_path.display()))?;
+    let decoder = png::Decoder::new(std::io::Cursor::new(&bytes));
+    let mut reader = decoder
+        .read_info()
+        .map_err(|e| format!("png header {}: {e}", png_path.display()))?;
+    let mut buf = vec![0u8; reader.output_buffer_size()];
+    let info = reader
+        .next_frame(&mut buf)
+        .map_err(|e| format!("png decode {}: {e}", png_path.display()))?;
+    buf.truncate(info.buffer_size());
+    let img = egui::ColorImage::from_rgba_unmultiplied(
+        [info.width as usize, info.height as usize],
+        &buf,
+    );
+    Ok(ctx.load_texture(format!("hero_{hash:08X}"), img, egui::TextureOptions::LINEAR))
 }
