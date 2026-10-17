@@ -153,6 +153,7 @@ pub mod ps3_pkg;
 pub mod ps3_self;
 pub mod safe_slice;
 pub mod save;
+pub mod save_lua;
 pub mod save_write;
 pub mod schema;
 pub mod scripts_block;
