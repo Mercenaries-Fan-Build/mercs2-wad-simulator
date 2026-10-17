@@ -80,6 +80,7 @@ use crate::retarget::RetargetPreview as _;
 mod quartermaster;
 mod saves;
 mod save_tables; // Read-only inspector sections for every other save table
+mod save_inspect; // The Saves right-click Inspect window: a readable account of one save
 mod settings;
 mod shipment;
 mod shot;
