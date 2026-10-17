@@ -365,23 +365,31 @@ impl Panel {
     }
 }
 
-/// Compact money formatter — `322684096` → `$322M`, `12345` → `$12K`. Keeps the browser
-/// rows a fixed width; the full value is shown in the inspector.
+/// Compact money formatter — `322684096` → `$322M`, `2545064` → `$2.5M`, `12345` → `$12K`.
+/// One decimal below 10 of a unit, whole numbers above. Full value is in the inspector.
 fn money(n: u32) -> String {
+    fn unit(n: u32, div: u32, suffix: char) -> String {
+        if n < 10 * div {
+            format!("${:.1}{suffix}", (n / (div / 10)) as f64 / 10.0)
+        } else {
+            format!("${}{suffix}", n / div)
+        }
+    }
     if n >= 1_000_000 {
-        format!("${}M", n / 1_000_000)
+        unit(n, 1_000_000, 'M')
     } else if n >= 1_000 {
-        format!("${}K", n / 1_000)
+        unit(n, 1_000, 'K')
     } else {
         format!("${n}")
     }
 }
 
-/// `246334` seconds → `"68h25m"`. The `.profile` field is a `u32` of elapsed seconds.
+/// `246334` seconds → `"68h25m"`, `300` → `"00h05m"`. The `.profile` field is a `u32` of
+/// elapsed seconds.
 fn hms(s: u32) -> String {
     let h = s / 3600;
     let m = (s % 3600) / 60;
-    format!("{h}h{m:02}m")
+    format!("{h:02}h{m:02}m")
 }
 
 /// Browser-header path form: last three components, slash-joined, with a trailing slash.
@@ -404,27 +412,37 @@ fn tail(p: &Path) -> String {
 pub fn navigator(ui: &mut egui::Ui, p: &Panel) -> Vec<Act> {
     let mut acts: Vec<Act> = Vec::new();
 
-    // Bottom-anchored verbs: a Reveal folder + Open file... pair. Allocated FIRST via a
-    // bottom_up pass so the save list above never pushes them off-screen.
+    // Bottom-anchored verbs, allocated first via bottom_up so the list never pushes them
+    // off-screen. In bottom_up the divider is added after the buttons so it sits above them.
     ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
-        ui.add_space(6.0);
+        ui.add_space(8.0);
         ui.horizontal(|ui| {
-            let can_reveal = p.saves_dir.is_some();
-            let reveal = ui.add_enabled(
-                can_reveal,
-                egui::Button::new(egui::RichText::new("Reveal folder").size(11.5)),
-            );
-            if reveal.clicked() {
+            let h = 26.0;
+            let open_w = 78.0;
+            let gap = ui.spacing().item_spacing.x;
+            let reveal_w = (ui.available_width() - open_w - gap).max(60.0);
+            let reveal = ui.add_enabled_ui(p.saves_dir.is_some(), |ui| {
+                ui.add_sized(
+                    [reveal_w, h],
+                    egui::Button::new(egui::RichText::new("Reveal folder").size(11.5)),
+                )
+            });
+            if reveal.inner.clicked() {
                 acts.push(Act::RevealFolder);
             }
             if ui
-                .add(egui::Button::new(egui::RichText::new("Open file…").size(11.5)))
+                .add_sized(
+                    [open_w, h],
+                    egui::Button::new(egui::RichText::new("Open file…").size(11.5)),
+                )
                 .clicked()
             {
                 acts.push(Act::OpenFilePicker);
             }
         });
-        ui.add_space(6.0);
+        ui.add_space(8.0);
+        let (line, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 1.0), egui::Sense::hover());
+        ui.painter().rect_filled(line, egui::Rounding::ZERO, theme::LINE);
 
         // Head content (eyebrow, path, status, list) stacks top-down from here upward.
         ui.with_layout(egui::Layout::top_down(egui::Align::LEFT), |ui| {
@@ -436,7 +454,7 @@ pub fn navigator(ui: &mut egui::Ui, p: &Panel) -> Vec<Act> {
 }
 
 fn navigator_head_and_list(ui: &mut egui::Ui, p: &Panel, acts: &mut Vec<Act>) {
-    theme::eyebrow(ui, "SAVES");
+    ui.label(theme::disp_text("SAVES", 15.0, theme::TX));
     if let Some(dir) = &p.saves_dir {
         ui.label(
             egui::RichText::new(tail(dir))
@@ -478,70 +496,84 @@ fn navigator_head_and_list(ui: &mut egui::Ui, p: &Panel, acts: &mut Vec<Act>) {
             );
         }
         Some(entries) => {
+            ui.spacing_mut().item_spacing.y = 0.0;
             for e in entries {
-                let selected = p.selected.as_ref() == Some(&e.path);
-                let (fill, border) = match (&e.header, selected) {
-                    (Ok(_), true) => (theme::BRASS_SOFT, theme::BRASS_DK),
-                    (Ok(_), false) => (theme::G0, theme::LINE),
-                    // There's no `BAD_SOFT`/`BAD_DK` in the palette; the darker ground + a bad
-                    // border reads as "something's wrong here" without introducing new tokens.
-                    (Err(_), _) => (theme::G2, theme::BAD),
-                };
-                let resp = theme::row_chip(ui, fill, border, |ui| {
-                    ui.vertical(|ui| {
-                        ui.with_layout(
-                            egui::Layout::left_to_right(egui::Align::Center),
-                            |ui| {
-                                let hero_fg = if selected { theme::BRASS } else { theme::DIM };
-                                // Hero initial as a tiny bordered chip (M/C/J/?), matching the
-                                // mockup's save-list badge. Drawn as a mini-frame so the letter
-                                // has structure instead of floating next to the filename.
-                                egui::Frame::none()
-                                    .stroke(egui::Stroke::new(1.0, theme::LINE2))
-                                    .rounding(egui::Rounding::same(3.0))
-                                    .inner_margin(egui::Margin::symmetric(5.0, 1.0))
-                                    .outer_margin(egui::Margin {
-                                        right: 7.0,
-                                        ..Default::default()
-                                    })
-                                    .show(ui, |ui| {
-                                        ui.label(theme::disp_text(
-                                            e.hero_letter().to_string(),
-                                            9.5,
-                                            hero_fg,
-                                        ));
-                                    });
-                                let name_col = if selected { theme::BRASS } else { theme::TX };
-                                ui.label(
-                                    egui::RichText::new(&e.stem)
-                                        .size(12.0)
-                                        .color(name_col),
-                                );
-                            },
-                        );
-                        let meta = match &e.header {
-                            Ok(h) => format!(
-                                "{} · {} · upgrade {}",
-                                hms(h.play_time_seconds),
-                                money(h.cash),
-                                h.upgrade_index
-                            ),
-                            Err(err) => format!("unreadable — {err}"),
-                        };
-                        ui.label(
-                            egui::RichText::new(meta)
-                                .monospace()
-                                .size(10.0)
-                                .color(theme::FAINT),
-                        );
-                    });
-                });
-                if resp.clicked() {
+                if save_row(ui, e, p.selected.as_ref() == Some(&e.path)).clicked() {
                     acts.push(Act::Select(e.path.clone()));
                 }
             }
         }
     }
+}
+
+/// One flat browser row: hero badge + stem, meta line below. Selected rows get a brass wash
+/// and a brass accent bar on the left edge; unreadable rows get a BAD accent bar.
+fn save_row(ui: &mut egui::Ui, e: &ProfileEntry, selected: bool) -> egui::Response {
+    // Reserved before the content so the fill lands underneath it once hover is known.
+    let bg = ui.painter().add(egui::Shape::Noop);
+    let ir = egui::Frame::none()
+        .inner_margin(egui::Margin { left: 10.0, right: 8.0, top: 6.0, bottom: 6.0 })
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal(|ui| {
+                let (badge_fg, badge_bd) = if selected {
+                    (theme::BRASS, theme::BRASS_DK)
+                } else {
+                    (theme::DIM, theme::LINE2)
+                };
+                egui::Frame::none()
+                    .stroke(egui::Stroke::new(1.0, badge_bd))
+                    .rounding(egui::Rounding::same(2.0))
+                    .inner_margin(egui::Margin::symmetric(3.0, 0.0))
+                    .show(ui, |ui| {
+                        ui.label(theme::disp_text(e.hero_letter().to_string(), 8.5, badge_fg));
+                    });
+                ui.add_space(2.0);
+                let name_col = if selected { theme::BRASS } else { theme::TX };
+                ui.add(
+                    egui::Label::new(egui::RichText::new(&e.stem).size(12.5).color(name_col))
+                        .truncate(),
+                );
+            });
+            let meta = match &e.header {
+                Ok(h) => {
+                    let tail = if e.stem.starts_with("auto_") {
+                        "auto".to_string()
+                    } else {
+                        format!("upgrade {}", h.upgrade_index)
+                    };
+                    format!("{} · {} · {tail}", hms(h.play_time_seconds), money(h.cash))
+                }
+                Err(err) => format!("unreadable — {err}"),
+            };
+            ui.label(egui::RichText::new(meta).monospace().size(10.0).color(theme::FAINT));
+        });
+    let resp = ir.response.interact(egui::Sense::click());
+    let rect = resp.rect;
+    let accent = match (&e.header, selected) {
+        (Err(_), _) => Some(theme::BAD),
+        (Ok(_), true) => Some(theme::BRASS),
+        (Ok(_), false) => None,
+    };
+    let painter = ui.painter();
+    let fill = if selected {
+        Some(theme::BRASS_SOFT)
+    } else if resp.hovered() {
+        Some(theme::G2)
+    } else {
+        None
+    };
+    if let Some(f) = fill {
+        painter.set(bg, egui::Shape::rect_filled(rect, egui::Rounding::same(2.0), f));
+    }
+    if let Some(c) = accent {
+        let bar = egui::Rect::from_min_size(rect.min, egui::vec2(2.0, rect.height()));
+        painter.rect_filled(bar, egui::Rounding::ZERO, c);
+    }
+    if resp.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    resp
 }
 
 /// The centre column: the inflated-Lua mission state view (`tFlowData` + `tLayerData`).
@@ -2101,5 +2133,28 @@ fn set_active_mission_state(root: &mut Value, mission_id: &str, new: i32) -> Res
             other.kind()
         )),
         None => Err(format!("{mission_id} has no nState")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{hms, money};
+
+    #[test]
+    fn money_formats() {
+        assert_eq!(money(0), "$0");
+        assert_eq!(money(999), "$999");
+        assert_eq!(money(50_000), "$50K");
+        assert_eq!(money(200_000), "$200K");
+        assert_eq!(money(2_545_064), "$2.5M");
+        assert_eq!(money(2_700_000), "$2.7M");
+        assert_eq!(money(322_684_096), "$322M");
+    }
+
+    #[test]
+    fn hms_zero_pads() {
+        assert_eq!(hms(300), "00h05m");
+        assert_eq!(hms(24_266), "06h44m");
+        assert_eq!(hms(246_334), "68h25m");
     }
 }
