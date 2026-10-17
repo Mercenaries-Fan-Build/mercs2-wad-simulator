@@ -204,18 +204,22 @@ pub struct Panel {
 }
 
 /// The centre panel's current tab over `tFlowData`. Carried on the Panel so switching rails
-/// keeps the modder's view of a given save sticky.
+/// keeps the modder's view of a given save sticky. Label vocabulary mirrors the mockup
+/// (Completed / Available / Culled / Flow bindings) rather than the raw save-struct field
+/// names.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum MissionTab {
-    /// `tFlowData.tActiveMissions` — in-progress missions (nState / nTargetsComplete / collected).
-    #[default]
-    Active,
     /// `tFlowData.tMyFlowData` — mission-id → flow-value flags (completed / advanced).
+    #[default]
     Completed,
+    /// `tFlowData.tActiveMissions` — in-progress missions (nState / nTargetsComplete / collected).
+    Available,
     /// `tFlowData.tCulledBindings` — bindings the flow fixpoint has removed, in order.
     Culled,
-    /// `tLayerData` — active `vz_state_*` world overlays.
-    Layers,
+    /// `tLayerData` — active `vz_state_*` world overlays. Labeled "Flow bindings" per the
+    /// mockup's vocabulary (world-layer entries are the on-disk flow-binding set the engine
+    /// restores on load) even though the raw field name is `tLayerData`.
+    FlowBindings,
 }
 
 impl Panel {
@@ -595,10 +599,10 @@ pub fn center(ctx: &egui::Context, p: &Panel) -> Vec<Act> {
                 ui.add_space(6.0);
                 ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
                     for (tab, label, count) in [
-                        (MissionTab::Active,    "Active",    state.active_missions.len()),
-                        (MissionTab::Completed, "Completed", state.completed_flow.len()),
-                        (MissionTab::Culled,    "Culled",    state.flow_chain.len()),
-                        (MissionTab::Layers,    "Layers",    state.layers.len()),
+                        (MissionTab::Completed,    "Completed",     state.completed_flow.len()),
+                        (MissionTab::Available,    "Available",     state.active_missions.len()),
+                        (MissionTab::Culled,       "Culled",        state.flow_chain.len()),
+                        (MissionTab::FlowBindings, "Flow bindings", state.layers.len()),
                     ] {
                         let on = p.mission_tab == tab;
                         if theme::pill(ui, &format!("{label}  {count}"), on).clicked() {
@@ -624,10 +628,10 @@ pub fn center(ctx: &egui::Context, p: &Panel) -> Vec<Act> {
 
             egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
                 match p.mission_tab {
-                    MissionTab::Active => acts.extend(render_active(ui, &state.active_missions)),
                     MissionTab::Completed => render_completed(ui, &state.completed_flow),
+                    MissionTab::Available => acts.extend(render_active(ui, &state.active_missions)),
                     MissionTab::Culled => render_culled(ui, &state.flow_chain),
-                    MissionTab::Layers => render_layers(ui, &state.layers),
+                    MissionTab::FlowBindings => render_layers(ui, &state.layers),
                 }
             });
         });
@@ -657,7 +661,10 @@ struct HeroReq {
 /// (so `Panel.hero_cam` tracks the user's intent) and an `EnsureHeroRender` (so `app.rs` draws
 /// the next frame at the new angle). A cold-start load also emits an `EnsureHeroRender`.
 fn hero_viewport(ui: &mut egui::Ui, h: &Profile, p: &Panel) -> HeroReq {
-    let viewport_height = 320.0;
+    // Deliberately shorter than the inspector height — the mockup puts the mission grid
+    // directly below the viewport in the same visible frame; 320 pushed the grid off-screen
+    // on a laptop and the modder had to scroll to reach PROGRESSION.
+    let viewport_height = 240.0;
     let model_name = upgrade_model_for(h.character_index, h.upgrade_index);
     let hash = mercs2_formats::hash::pandemic_hash_m2(&model_name);
     let cached_tex = p.hero_textures.get(&hash).cloned();
@@ -678,7 +685,7 @@ fn hero_viewport(ui: &mut egui::Ui, h: &Profile, p: &Panel) -> HeroReq {
     }
     let model_label = format!("UPGRADE {} · {}", h.upgrade_index, model_name);
     let identity_label = format!(
-        "{} · character_index {} · upgrade {}",
+        "{} · hero={} · upgrade={}",
         hero_name(h.character_index),
         h.character_index,
         h.upgrade_index
@@ -953,22 +960,24 @@ fn render_active(ui: &mut egui::Ui, missions: &[save::ActiveMission]) -> Vec<Act
         );
         return acts;
     }
-    // Grid with 3 approximately-equal cells per row — 5 was cramped once the ACTV tag landed
-    // next to the id (user feedback: "hard to see what the heck is going on"). 3 cols gives
-    // each chip ~230-260px, enough for the full mission id in mono + a readable state tag.
-    let cols = 3usize;
-    let gutter = 8.0;
+    // Mockup grid is 6 columns of dense chips (id · state-tag). 3 was too sparse against the
+    // mockup; 6 fits the whole retail mission set on-screen without scrolling and matches the
+    // visual density of the canonical reference.
+    let cols = 6usize;
+    let gutter = 4.0;
     let avail = ui.available_width();
-    let cell_w = ((avail - (cols as f32 - 1.0) * gutter) / cols as f32).max(140.0);
+    let cell_w = ((avail - (cols as f32 - 1.0) * gutter) / cols as f32).max(100.0);
     let mut col = 0usize;
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing = egui::vec2(gutter, gutter);
         for m in missions {
             let cur = TaskState::from_f64(m.state);
+            // Tag vocabulary mirrors the mockup — DONE / OPEN / SKIP rather than the raw
+            // MrxTaskState codes. Still cycles through all four underlying states on click.
             let (bg, bd, tag_bg, tag_fg, tag) = match cur {
-                Some(TaskState::Completed) => (theme::G2, theme::GOOD_DK, theme::GOOD_SOFT, theme::GOOD, "CMPL"),
-                Some(TaskState::Active)    => (theme::G2, theme::BRASS_DK, theme::BRASS_SOFT, theme::BRASS, "ACTV"),
-                Some(TaskState::Cancelled) => (theme::G2, theme::BAD, theme::G0, theme::BAD, "CANC"),
+                Some(TaskState::Completed) => (theme::G2, theme::GOOD_DK, theme::GOOD_SOFT, theme::GOOD, "DONE"),
+                Some(TaskState::Active)    => (theme::G2, theme::BRASS_DK, theme::BRASS_SOFT, theme::BRASS, "OPEN"),
+                Some(TaskState::Cancelled) => (theme::G2, theme::BAD, theme::G0, theme::BAD, "SKIP"),
                 Some(TaskState::Latent) | None => (theme::G0, theme::LINE, theme::G0, theme::DIM, "LATN"),
             };
             let next = cur
