@@ -661,11 +661,12 @@ struct HeroReq {
 /// (so `Panel.hero_cam` tracks the user's intent) and an `EnsureHeroRender` (so `app.rs` draws
 /// the next frame at the new angle). A cold-start load also emits an `EnsureHeroRender`.
 fn hero_viewport(ui: &mut egui::Ui, h: &Profile, p: &Panel) -> HeroReq {
-    // The viewport is pinned to EXACTLY `viewport_height` — not a minimum. Without the cap it
-    // absorbed the whole centre column's available vertical, pushing the mission grid off
-    // screen even once PROGRESSION started scrolling. The mockup fits hero + chips + at-a-
-    // glance comfortably at ~220, so that's what we size to.
-    let viewport_height = 220.0;
+    // The viewport is pinned to EXACTLY `viewport_height` — not a minimum. The hero texture is
+    // 720x960 (RENDER_W/RENDER_H in shot.rs); at 220 px the hero scaled down to a 165-tall
+    // slice that visibly didn't fill the bordered frame. Going taller lets the portrait match
+    // the frame's visible area — the mission grid sits inside a vertical ScrollArea below, so
+    // the extra height here never pushes PROGRESSION off-screen.
+    let viewport_height = 360.0;
     let model_name = upgrade_model_for(h.character_index, h.upgrade_index);
     let hash = mercs2_formats::hash::pandemic_hash_m2(&model_name);
     let cached_tex = p.hero_textures.get(&hash).cloned();
@@ -716,10 +717,14 @@ fn hero_viewport(ui: &mut egui::Ui, h: &Profile, p: &Panel) -> HeroReq {
                 egui::Sense::click_and_drag(),
             );
 
-            // Render area inside the frame (keep a bit of margin so the hero doesn't kiss
-            // the rounded border).
+            // The hero fits into the WHOLE frame (minus a small margin for the border). The
+            // 0.6 width ratio I had before (`render_w = render_h * 0.6`) was tighter than the
+            // texture's own 0.75 aspect, so the fit was width-bound rather than height-bound
+            // and the hero rendered as a thin slice down the middle. Using the frame's own
+            // width lets the fit be height-bound, so the hero scales to fill the viewport
+            // vertically — HUD chips sit on top in overlay slots, so they're not clipped.
             let render_h = (frame_rect.height() - 12.0).max(140.0);
-            let render_w = render_h * 0.6;
+            let render_w = (frame_rect.width() - 12.0).max(140.0);
             let painter = ui.painter_at(frame_rect);
             match (&cached_tex, &failed_err, in_flight) {
                 (Some(tex), _, _) => {
