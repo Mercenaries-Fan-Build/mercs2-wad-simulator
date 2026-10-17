@@ -21,6 +21,7 @@ use std::path::{Path, PathBuf};
 
 use mercs2_formats::game_paths;
 use mercs2_formats::save::{self, Profile, SaveState};
+use mercs2_formats::save_lua::{self, Number, Value};
 use mercs2_formats::save_write;
 
 use crate::gui::theme;
@@ -58,6 +59,57 @@ pub enum Act {
     SetFuelCapacity(u16),
     /// `@0x2C` — active contract mission id (ASCII, max 15 chars). Truncated on write.
     SetActiveContract(String),
+    /// Change an active mission's `nState` by rewriting the inflated Lua payload. The target
+    /// value is one of `MrxTaskState._kn{Latent=0, Active=1, Completed=2, Cancelled=3}`
+    /// (`resident/mrxtaskstate.lua:1-4`). The reducer decompresses pending's Lua, walks
+    /// `tFlowData.tActiveMissions[<id>].nState`, serialises via `save_lua::serialize`, and
+    /// calls `save_write::set_lua_payload` so the next Write dumps the right payload.
+    SetActiveMissionState(String, i32),
+}
+
+/// The four `MrxTaskState` values a mission can hold on `nState`. Mirrors
+/// `resident/mrxtaskstate.lua:1-4` verbatim so a wrong numeric constant surfaces as a
+/// missing `match` arm rather than silently writing `0` into the save.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TaskState {
+    Latent = 0,
+    Active = 1,
+    Completed = 2,
+    Cancelled = 3,
+}
+
+impl TaskState {
+    pub const ALL: [TaskState; 4] = [
+        TaskState::Latent,
+        TaskState::Active,
+        TaskState::Completed,
+        TaskState::Cancelled,
+    ];
+    pub fn label(self) -> &'static str {
+        match self {
+            TaskState::Latent => "Latent",
+            TaskState::Active => "Active",
+            TaskState::Completed => "Completed",
+            TaskState::Cancelled => "Cancelled",
+        }
+    }
+    pub fn from_f64(v: f64) -> Option<Self> {
+        match v as i32 {
+            0 => Some(TaskState::Latent),
+            1 => Some(TaskState::Active),
+            2 => Some(TaskState::Completed),
+            3 => Some(TaskState::Cancelled),
+            _ => None,
+        }
+    }
+    pub fn color(self) -> egui::Color32 {
+        match self {
+            TaskState::Latent => theme::DIM,
+            TaskState::Active => theme::BRASS,
+            TaskState::Completed => theme::GOOD,
+            TaskState::Cancelled => theme::BAD,
+        }
+    }
 }
 
 /// One row in the browser: the `.profile`'s on-disk path, header-level facts the parser
@@ -475,7 +527,7 @@ pub fn center(ctx: &egui::Context, p: &Panel) -> Vec<Act> {
 
             egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
                 match p.mission_tab {
-                    MissionTab::Active => render_active(ui, &state.active_missions),
+                    MissionTab::Active => acts.extend(render_active(ui, &state.active_missions)),
                     MissionTab::Completed => render_completed(ui, &state.completed_flow),
                     MissionTab::Culled => render_culled(ui, &state.flow_chain),
                     MissionTab::Layers => render_layers(ui, &state.layers),
@@ -485,17 +537,21 @@ pub fn center(ctx: &egui::Context, p: &Panel) -> Vec<Act> {
     acts
 }
 
-/// A single mission-id card for the Active tab — id + state code + targets + collected.
-fn render_active(ui: &mut egui::Ui, missions: &[save::ActiveMission]) {
+/// A single mission-id card for the Active tab — id + 4-state pill set + targets + collected.
+/// Clicking a pill emits [`Act::SetActiveMissionState`], which rewrites the inflated-Lua
+/// `nState` field on the pending Profile; the Write verb dumps the result to disk.
+fn render_active(ui: &mut egui::Ui, missions: &[save::ActiveMission]) -> Vec<Act> {
+    let mut acts: Vec<Act> = Vec::new();
     if missions.is_empty() {
         ui.label(
             egui::RichText::new("No active missions in this save.")
                 .size(11.5)
                 .color(theme::FAINT),
         );
-        return;
+        return acts;
     }
     for m in missions {
+        let cur = TaskState::from_f64(m.state);
         theme::row_chip(ui, theme::G0, theme::LINE, |ui| {
             ui.vertical(|ui| {
                 ui.horizontal(|ui| {
@@ -503,12 +559,16 @@ fn render_active(ui: &mut egui::Ui, missions: &[save::ActiveMission]) {
                     ui.with_layout(
                         egui::Layout::right_to_left(egui::Align::Center),
                         |ui| {
-                            ui.label(
-                                egui::RichText::new(format!("nState {}", m.state as i64))
-                                    .monospace()
-                                    .size(10.5)
-                                    .color(theme::BRASS),
-                            );
+                            // State pills, drawn right-to-left so Cancelled appears rightmost.
+                            for s in TaskState::ALL.iter().rev() {
+                                let on = cur == Some(*s);
+                                if theme::pill(ui, s.label(), on).clicked() && !on {
+                                    acts.push(Act::SetActiveMissionState(
+                                        m.id.clone(),
+                                        *s as i32,
+                                    ));
+                                }
+                            }
                         },
                     );
                 });
@@ -516,14 +576,21 @@ fn render_active(ui: &mut egui::Ui, missions: &[save::ActiveMission]) {
                     .targets_complete
                     .map(|n| format!("{} targets complete", n as i64))
                     .unwrap_or_else(|| "no targets ticked".to_string());
+                let state_label = cur
+                    .map(|s| format!("nState {} · {}", m.state as i64, s.label()))
+                    .unwrap_or_else(|| format!("nState {} · (unknown)", m.state as i64));
                 ui.label(
-                    egui::RichText::new(format!("{targets} · {} collected", m.collected.len()))
-                        .size(10.5)
-                        .color(theme::FAINT),
+                    egui::RichText::new(format!(
+                        "{state_label} · {targets} · {} collected",
+                        m.collected.len()
+                    ))
+                    .size(10.5)
+                    .color(cur.map(TaskState::color).unwrap_or(theme::FAINT)),
                 );
             });
         });
     }
+    acts
 }
 
 /// Compact rows for `tMyFlowData` — id · value, sorted. 100s of entries so each row is slim.
@@ -922,6 +989,9 @@ pub fn apply(act: Act, p: &mut Panel) {
             s.truncate(15);
             pr.active_contract = s;
         }),
+        Act::SetActiveMissionState(id, state) => {
+            mutate_pending_lua(p, |root| set_active_mission_state(root, &id, state))
+        }
     }
 }
 
@@ -932,5 +1002,90 @@ pub fn apply(act: Act, p: &mut Panel) {
 fn mutate_pending(p: &mut Panel, f: impl FnOnce(&mut Profile)) {
     if let Some(pr) = p.pending.as_mut() {
         f(pr);
+    }
+}
+
+/// Decompress pending's Lua payload, hand the AST to `edit` for surgical mutation,
+/// serialise back via `save_lua::serialize`, and re-stamp the pending Profile via
+/// `save_write::set_lua_payload`. On any step's failure the pending Profile is left
+/// untouched and the status line names the step that failed — the UX for an unwritable
+/// save is "nothing moves + you see why" rather than "silent partial update".
+///
+/// After a successful edit, refreshes `lua_state` so the centre's tabs reflect the new
+/// `SaveState` on the next frame.
+fn mutate_pending_lua(p: &mut Panel, edit: impl FnOnce(&mut Value) -> Result<(), String>) {
+    let Some(pr) = p.pending.as_mut() else {
+        p.status = "no save selected — nothing to edit".into();
+        return;
+    };
+    let lua_bytes = match pr.decompress_lua() {
+        Ok(b) => b,
+        Err(e) => {
+            p.status = format!("decompress lua: {e}");
+            return;
+        }
+    };
+    let text = match std::str::from_utf8(&lua_bytes) {
+        Ok(s) => s,
+        Err(e) => {
+            p.status = format!("lua is not utf-8: {e}");
+            return;
+        }
+    };
+    let mut ast = match save_lua::parse_chunk(text) {
+        Ok(v) => v,
+        Err(e) => {
+            p.status = format!("parse lua: {e}");
+            return;
+        }
+    };
+    if let Err(e) = edit(&mut ast) {
+        p.status = format!("edit lua: {e}");
+        return;
+    }
+    let serialised = save_lua::serialize(&ast);
+    if let Err(e) = save_write::set_lua_payload(pr, serialised.as_bytes()) {
+        p.status = format!("set payload: {e}");
+        return;
+    }
+    // Refresh the centre's cached `SaveState` so the tabs see the new flow data on the
+    // next frame. Keyed by `selected`, which hasn't changed, so no reparse of the browser
+    // row — just this one `SaveState` walk.
+    p.repopulate_lua_state_from_selection();
+}
+
+/// Walk `root.tFlowData.tActiveMissions[<mission_id>].nState` and set it to `new`.
+/// Errors with a readable message when any step in the chain is missing or the wrong type —
+/// the Lua surface is well-shaped on real saves, but a Shipment-provided mod can produce
+/// surprising structures and the Workshop should name what it found instead of panicking.
+fn set_active_mission_state(root: &mut Value, mission_id: &str, new: i32) -> Result<(), String> {
+    let flow = root
+        .as_table_mut()
+        .map_err(|e| e.to_string())?
+        .get_mut("tFlowData")
+        .ok_or_else(|| "root has no tFlowData".to_string())?
+        .as_table_mut()
+        .map_err(|e| e.to_string())?;
+    let active = flow
+        .get_mut("tActiveMissions")
+        .ok_or_else(|| "tFlowData has no tActiveMissions".to_string())?
+        .as_table_mut()
+        .map_err(|e| e.to_string())?;
+    let mission = active
+        .get_mut(mission_id)
+        .ok_or_else(|| format!("tActiveMissions has no entry `{mission_id}`"))?
+        .as_table_mut()
+        .map_err(|e| e.to_string())?;
+    match mission.get_mut("nState") {
+        Some(Value::Number(n)) => {
+            n.value = new as f64;
+            n.source = Some(format!("{new}.000000"));
+            Ok(())
+        }
+        Some(other) => Err(format!(
+            "{mission_id}.nState is a {:?}, not a number",
+            other.kind()
+        )),
+        None => Err(format!("{mission_id} has no nState")),
     }
 }
