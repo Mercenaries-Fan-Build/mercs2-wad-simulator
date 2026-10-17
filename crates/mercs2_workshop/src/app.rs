@@ -8331,9 +8331,10 @@ fn export_model_data(md: &ModelData, label: &str) -> Result<String, String> {
 ///    place via `TextureHandle::set` so egui reuses the GPU allocation (and the Image widget
 ///    binding doesn't flicker on drag); otherwise allocate a new handle via `ctx.load_texture`.
 ///
-/// Textures are still flat-shaded (empty `DrawTex` texture slots → the shot shader's fallback
-/// white/flat-normal/black samplers bind), as before. Real diffuse/normal/specular decode is
-/// a separate follow-up — "textured hero" was called out as a non-goal for the orbit round.
+/// Draw ranges carry their decoded diffuse/normal/specular — `md.textures` already holds the
+/// FULL mip chain (`WadStack::texture_best` assembled it), and `texpng::decode_bc` resolves
+/// DXT1/DXT5 into RGBA8. A `None` slot (unassigned material texture) falls back to the shot
+/// shader's flat sampler.
 fn ensure_hero_render(
     w: &mut WadStack,
     hash: u32,
@@ -8397,9 +8398,18 @@ fn ensure_hero_render(
             .map(|d| crate::shot::DrawTex {
                 index_start: d.index_start,
                 index_count: d.index_count,
-                diffuse: None,
-                normal: None,
-                specular: None,
+                diffuse: d
+                    .diffuse
+                    .and_then(|h| md.textures.get(&h))
+                    .map(crate::texpng::decode_bc),
+                normal: d
+                    .normal
+                    .and_then(|h| md.textures.get(&h))
+                    .map(crate::texpng::decode_bc),
+                specular: d
+                    .specular
+                    .and_then(|h| md.textures.get(&h))
+                    .map(crate::texpng::decode_bc),
             })
             .collect();
         if draws.is_empty() {
