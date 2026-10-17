@@ -145,7 +145,7 @@ fn guid(v: &Value) -> Option<u32> {
 }
 
 /// An entry's key as text: string keys verbatim, numeric keys as integers when whole.
-fn key_text(e: &Entry) -> String {
+pub(crate) fn key_text(e: &Entry) -> String {
     match &e.key {
         Some(Value::String(s)) => s.value.clone(),
         Some(Value::Number(n)) => fmt_num(n.value),
@@ -251,7 +251,7 @@ fn duration(secs: f64) -> String {
     }
 }
 
-fn value_text(v: &Value, lk: Lookups) -> String {
+pub(crate) fn value_text(v: &Value, lk: Lookups) -> String {
     match v {
         Value::Nil => "nil".into(),
         Value::Bool(b) => if *b { "yes" } else { "no" }.into(),
@@ -308,7 +308,7 @@ fn word_list(ui: &mut egui::Ui, words: &[String]) {
 }
 
 /// Generic readable tree for a value: tables collapse, leaves are key/value rows.
-fn tree(ui: &mut egui::Ui, label: &str, v: &Value, lk: Lookups) {
+pub(crate) fn tree(ui: &mut egui::Ui, label: &str, v: &Value, lk: Lookups) {
     match v {
         Value::Table(t) if !t.entries.is_empty() => {
             egui::CollapsingHeader::new(RichText::new(format!("{label}  ·  {}", t.entries.len())).color(theme::TX))
