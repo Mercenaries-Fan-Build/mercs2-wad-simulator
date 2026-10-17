@@ -422,10 +422,8 @@ impl HeroRenderer {
         {
             let mut rp = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: None,
-                // Clear to fully-transparent so the hero portrait blends over whatever surface
-                // paints behind it in egui — otherwise the shipped (0.1, 0.1, 0.12, 1) fill
-                // showed as a visible lighter-gray rectangle inside the viewport's dark frame.
-                // Fragment shader writes alpha=1 for every hero pixel, so hero remains opaque.
+                // Transparent clear so the portrait blends over whatever paints behind it in
+                // egui; fragment shader writes alpha=1 so hero pixels stay opaque.
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment { view: &self.color_v, resolve_target: None, ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color { r: 0.0, g: 0.0, b: 0.0, a: 0.0 }), store: wgpu::StoreOp::Store } })],
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment { view: &self.depth_v, depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(1.0), store: wgpu::StoreOp::Store }), stencil_ops: None }),
                 ..Default::default()
