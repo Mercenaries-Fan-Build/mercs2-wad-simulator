@@ -5370,6 +5370,7 @@ pub fn run(opts: Options) {
                             hash,
                             &name,
                             &cam,
+                            saves.hero_view_px,
                             &mut hero_renderers,
                             saves.hero_textures.get(&hash).cloned(),
                             ctx,
@@ -8324,9 +8325,9 @@ fn export_model_data(md: &ModelData, label: &str) -> Result<String, String> {
 /// 1. Look up (or lazily build) a per-hash [`crate::shot::HeroRenderer`] in `renderers`. The
 ///    first miss pays the ~500 ms model-load + pipeline + mesh-upload cost; subsequent calls
 ///    for the same hash reuse the stashed renderer.
-/// 2. Call `render_rgba(cam)` to get back one `RENDER_W x RENDER_H` RGBA8 frame — the
-///    renderer only rewrites the camera uniform, so this part is on the order of a draw +
-///    readback (~10-30 ms on an integrated GPU).
+/// 2. Call `render_rgba(cam, size)` to get back one RGBA8 frame at the viewport's pixel size —
+///    the renderer rewrites the camera uniform (and rebuilds its targets only when `size`
+///    changed), so this part is on the order of a draw + readback.
 /// 3. Build an `egui::ColorImage` from the bytes. If `existing_tex` is `Some`, mutate it in
 ///    place via `TextureHandle::set` so egui reuses the GPU allocation (and the Image widget
 ///    binding doesn't flicker on drag); otherwise allocate a new handle via `ctx.load_texture`.
@@ -8340,10 +8341,14 @@ fn ensure_hero_render(
     hash: u32,
     name: &str,
     cam: &crate::shot::OrbitCam,
+    size: (u32, u32),
     renderers: &mut HashMap<u32, crate::shot::HeroRenderer>,
     existing_tex: Option<egui::TextureHandle>,
     ctx: &egui::Context,
 ) -> Result<egui::TextureHandle, String> {
+    if size.0 == 0 || size.1 == 0 {
+        return Err(format!("hero viewport size not reported before render ({}x{})", size.0, size.1));
+    }
     // Build-or-fetch the per-hash renderer.
     if !renderers.contains_key(&hash) {
         let md = crate::app::load_model_data(w, hash)
@@ -8430,11 +8435,8 @@ fn ensure_hero_render(
 
     // Draw at the requested camera.
     let renderer = renderers.get_mut(&hash).expect("just inserted");
-    let rgba = renderer.render_rgba(cam);
-    let img = egui::ColorImage::from_rgba_unmultiplied(
-        [crate::shot::RENDER_W as usize, crate::shot::RENDER_H as usize],
-        &rgba,
-    );
+    let rgba = renderer.render_rgba(cam, size);
+    let img = egui::ColorImage::from_rgba_unmultiplied([size.0 as usize, size.1 as usize], &rgba);
     // Reuse the existing texture handle on a redraw so the Image widget stays bound to the same
     // id — otherwise a drag-orbit frame-swap can briefly show the old texture at the new rect
     // size while egui catches up to the new allocation.
