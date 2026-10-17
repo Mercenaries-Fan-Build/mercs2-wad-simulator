@@ -711,6 +711,10 @@ fn upgrade_model_for(hero: u8, tier: u8) -> String {
 /// The AT-A-GLANCE HUD card — a compact column of save-state at-a-glance values. Lives in
 /// the viewport's top-right overlay slot. Reads the on-disk `Profile` so it stays stable
 /// while editing (the pending Profile would make the numbers jump every keystroke).
+///
+/// Forces `top_down` inside the Frame — the call site positions the card inside an RTL
+/// alignment slot, and without this the body inherits that direction (egui 0.28
+/// `prefer_right_to_left`) and the rows render sideways instead of stacking.
 fn at_a_glance(ui: &mut egui::Ui, h: &Profile) {
     egui::Frame::none()
         .fill(egui::Color32::from_rgba_unmultiplied(14, 16, 20, 220))
@@ -718,20 +722,28 @@ fn at_a_glance(ui: &mut egui::Ui, h: &Profile) {
         .rounding(egui::Rounding::same(5.0))
         .inner_margin(egui::Margin::symmetric(10.0, 8.0))
         .show(ui, |ui| {
-            ui.set_min_width(200.0);
-            ui.label(theme::disp_text("AT A GLANCE", 9.5, theme::FAINT));
-            ui.add_space(3.0);
-            glance_row(ui, "contract", &h.active_contract);
-            glance_row(ui, "cash", &format!("{}", h.cash));
-            glance_row(ui, "fuel", &format!("{} / {}", h.fuel, h.fuel_capacity));
-            glance_row(ui, "playtime", &hms_long(h.play_time_seconds));
-            glance_row(ui, "timestamp", &timestamp_utc(h.timestamp));
+            ui.with_layout(
+                egui::Layout::top_down(egui::Align::LEFT),
+                |ui| {
+                    ui.set_min_width(220.0);
+                    ui.label(theme::disp_text("AT A GLANCE", 9.5, theme::FAINT));
+                    ui.add_space(3.0);
+                    glance_row(ui, "contract", &h.active_contract);
+                    glance_row(ui, "cash", &format!("{}", h.cash));
+                    glance_row(ui, "fuel", &format!("{} / {}", h.fuel, h.fuel_capacity));
+                    glance_row(ui, "playtime", &hms_long(h.play_time_seconds));
+                    glance_row(ui, "timestamp", &timestamp_utc(h.timestamp));
+                },
+            );
         });
 }
 
 /// One row of the AT-A-GLANCE overlay: dim label on the left, mono value right-aligned.
+/// Explicit `left_to_right` so the row doesn't inherit a top-down direction from the card
+/// and lay out label-above-value stacked instead of side-by-side.
 fn glance_row(ui: &mut egui::Ui, label: &str, value: &str) {
-    ui.horizontal(|ui| {
+    ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+        ui.set_min_width(220.0);
         ui.label(
             egui::RichText::new(label)
                 .size(10.0)
@@ -1178,9 +1190,29 @@ pub fn inspector(ui: &mut egui::Ui, p: &Panel) -> Vec<Act> {
 
     // WARDROBE — active override dropdown (runtime-only on disk, surfaced for a future write
     // byte at `+0x4E`) + an UNLOCKED COUNT stepper over `@0x24A` + a prefix-unlocked list.
+    // When the hero's `_tOutfits` table isn't catalogued (Chris / Jen for now), the panel
+    // says so plainly rather than rendering an empty list under a stepper of "/ 1".
     let mut costumes_edit: Option<u8> = None;
     theme::section(ui, "WARDROBE", None, true, |ui| {
         let outfits = hero_outfits(pending.character_index);
+        if outfits.is_empty() {
+            ui.label(
+                egui::RichText::new(format!(
+                    "No _tOutfits.<{}> catalogued yet — Mattias's table is \
+                     extracted from wifpmcinterior.lua:215; the other heroes' \
+                     tables live in the same file and will land in a later commit.",
+                    hero_name(pending.character_index).split_whitespace().next().unwrap_or("hero").to_lowercase()
+                ))
+                .size(10.5)
+                .color(theme::FAINT),
+            );
+            theme::kv(
+                ui,
+                "unlocked count",
+                egui::RichText::new(format!("{}", pending.unlocked_costumes)),
+            );
+            return;
+        }
         ui.label(
             egui::RichText::new("Active override")
                 .size(10.0)
@@ -1202,7 +1234,7 @@ pub fn inspector(ui: &mut egui::Ui, p: &Panel) -> Vec<Act> {
         );
         ui.add_space(8.0);
 
-        let cap = outfits.len().max(1) as u8;
+        let cap = outfits.len() as u8;
         ui.horizontal(|ui| {
             ui.label(
                 egui::RichText::new("UNLOCKED COUNT")
