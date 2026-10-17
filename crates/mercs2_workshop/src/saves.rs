@@ -416,33 +416,39 @@ pub fn navigator(ui: &mut egui::Ui, p: &Panel) -> Vec<Act> {
     // off-screen. In bottom_up the divider is added after the buttons so it sits above them.
     ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
         ui.add_space(8.0);
-        ui.horizontal(|ui| {
-            let h = 26.0;
-            let open_w = 78.0;
-            let gap = ui.spacing().item_spacing.x;
-            let reveal_w = (ui.available_width() - open_w - gap).max(60.0);
-            let reveal = ui.add_enabled_ui(p.saves_dir.is_some(), |ui| {
-                ui.add_sized(
-                    [reveal_w, h],
-                    egui::Button::new(egui::RichText::new("Reveal folder").size(11.5)),
-                )
-            });
-            if reveal.inner.clicked() {
-                acts.push(Act::RevealFolder);
-            }
-            if ui
-                .add_sized(
-                    [open_w, h],
-                    egui::Button::new(egui::RichText::new("Open file…").size(11.5)),
-                )
-                .clicked()
-            {
-                acts.push(Act::OpenFilePicker);
-            }
+        // Buttons share the save rows' left edge (content x minus SAVE_ROW_GUTTER).
+        let h = 26.0;
+        let open_w = 78.0;
+        let gap = 6.0;
+        let (row, _) =
+            ui.allocate_exact_size(egui::vec2(ui.available_width(), h), egui::Sense::hover());
+        let left = row.left() - SAVE_ROW_GUTTER;
+        let open_rect = egui::Rect::from_min_max(egui::pos2(row.right() - open_w, row.top()), row.max);
+        let reveal_rect = egui::Rect::from_min_max(
+            egui::pos2(left, row.top()),
+            egui::pos2(open_rect.left() - gap, row.bottom()),
+        );
+        let reveal = ui.add_enabled_ui(p.saves_dir.is_some(), |ui| {
+            ui.put(
+                reveal_rect,
+                egui::Button::new(egui::RichText::new("Reveal folder").size(11.5)),
+            )
         });
+        if reveal.inner.clicked() {
+            acts.push(Act::RevealFolder);
+        }
+        if ui
+            .put(open_rect, egui::Button::new(egui::RichText::new("Open file…").size(11.5)))
+            .clicked()
+        {
+            acts.push(Act::OpenFilePicker);
+        }
         ui.add_space(8.0);
-        let (line, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 1.0), egui::Sense::hover());
-        ui.painter().rect_filled(line, egui::Rounding::ZERO, theme::LINE);
+        // Divider runs the full panel width, edge to edge.
+        let (line, _) =
+            ui.allocate_exact_size(egui::vec2(ui.available_width(), 1.0), egui::Sense::hover());
+        let full = ui.clip_rect();
+        ui.painter().hline(full.x_range(), line.center().y, egui::Stroke::new(1.0, theme::LINE));
 
         // Head content (eyebrow, path, status, list) stacks top-down from here upward.
         ui.with_layout(egui::Layout::top_down(egui::Align::LEFT), |ui| {
@@ -506,15 +512,19 @@ fn navigator_head_and_list(ui: &mut egui::Ui, p: &Panel, acts: &mut Vec<Act>) {
     }
 }
 
+/// How far save-row washes (and the bottom verbs) bleed left of the content column into the
+/// panel's left margin.
+const SAVE_ROW_GUTTER: f32 = 8.0;
+
 /// One flat browser row: hero badge + stem, meta line below. Content starts at the same x as
-/// the SAVES heading; the selection wash and accent bar bleed `GUTTER` px into the panel's
-/// left margin. Selected rows get a brass wash + bar, unreadable rows a BAD bar.
+/// the SAVES heading; the selection wash and accent bar bleed `SAVE_ROW_GUTTER` px into the
+/// panel's left margin. Selected rows get a brass wash + bar, unreadable rows a BAD bar.
 fn save_row(ui: &mut egui::Ui, e: &ProfileEntry, selected: bool) -> egui::Response {
-    const GUTTER: f32 = 8.0;
     const ROW_H: f32 = 42.0;
     let (rect, resp) =
         ui.allocate_exact_size(egui::vec2(ui.available_width(), ROW_H), egui::Sense::click());
-    let paint_rect = egui::Rect::from_min_max(rect.min - egui::vec2(GUTTER, 0.0), rect.max);
+    let paint_rect =
+        egui::Rect::from_min_max(rect.min - egui::vec2(SAVE_ROW_GUTTER, 0.0), rect.max);
     let painter = ui.painter();
     let fill = if selected {
         Some(theme::BRASS_SOFT)
@@ -524,7 +534,7 @@ fn save_row(ui: &mut egui::Ui, e: &ProfileEntry, selected: bool) -> egui::Respon
         None
     };
     if let Some(f) = fill {
-        painter.rect_filled(paint_rect, egui::Rounding::same(2.0), f);
+        painter.rect_filled(paint_rect, egui::Rounding::ZERO, f);
     }
     let accent = match (&e.header, selected) {
         (Err(_), _) => Some(theme::BAD),
