@@ -782,6 +782,48 @@ fn hero_name(index: u8) -> &'static str {
     }
 }
 
+/// `1`/`2`/`3` → the hero's **base** spawn model. Per `_tCharacterMap[hero].base` in
+/// `docs/mercs2-luacd/src/resident/mrxplayer.lua:22,43,59` — the model the engine spawns
+/// when `iUpgrade == 0`, which is what the HERO dropdown shows alongside the display name.
+fn hero_base_model(index: u8) -> &'static str {
+    match index {
+        1 => "pmc_hum_mattias",
+        2 => "pmc_hum_chris",
+        3 => "pmc_hum_jen",
+        _ => "",
+    }
+}
+
+/// `_tCharacterMap[hero].templates` — the four `iUpgrade` template names the engine passes
+/// through at spawn (`mrxplayer.lua:167-168`: `tTemplates[iUpgrade] or tCharacterData.base`).
+/// Tier 0 falls back to the base template; tiers 1-3 are the hero's progression templates.
+/// Source: `mrxplayer.lua:23-27, 44-48, 60-64`.
+fn hero_tier_templates(index: u8) -> [&'static str; 4] {
+    match index {
+        1 => ["mattias", "mattiasupgrade1", "mattiasupgrade2", "mattiasupgrade3"],
+        2 => ["chris", "chrisupgrade1", "chrisupgrade2", "chrisupgrade3"],
+        3 => ["jen", "jenupgrade1", "jenupgrade2", "jenupgrade3"],
+        _ => ["", "", "", ""],
+    }
+}
+
+/// `_tOutfits[hero]` — the base-game costumes a hero can switch to at the mirror. Source:
+/// `docs/mercs2-luacd/src/vz/wifpmcinterior.lua:215-241` (Mattias). Chris / Jen tables live
+/// elsewhere in the same file; populated here only for Mattias to start — the other two
+/// return an empty slice so the WARDROBE section renders honestly rather than inventing.
+fn hero_outfits(index: u8) -> &'static [(&'static str, &'static str)] {
+    match index {
+        1 => &[
+            ("Original",    "pmc_hum_mattias"),
+            ("MetalHead",   "pmc_hum_mattias_v3"),
+            ("Suit",        "pmc_hum_mattias_v2"),
+            ("Jacket",      "pmc_hum_mattias_v4"),
+            ("ChickenSuit", "pmc_hum_mattias_chickensuit"),
+        ],
+        _ => &[],
+    }
+}
+
 /// Format a Unix-epoch `u32` as `YYYY-MM-DD HH:MM UTC`. The `.profile` field at `@0x24`
 /// is a UTC timestamp (`docs/reverse_engineer/save_serialize_code_map.md` §4). Hand-rolled
 /// civil-from-days conversion (Howard Hinnant's standard trick) so the Workshop doesn't
@@ -803,30 +845,6 @@ fn timestamp_utc(t: u32) -> String {
     let month = if mp < 10 { mp + 3 } else { mp - 9 };
     let year = y_shift + if month <= 2 { 1 } else { 0 };
     format!("{year:04}-{month:02}-{day:02} {hour:02}:{minute:02} UTC")
-}
-
-/// Segmented control over a small set of integer values. Returns `Some(new_value)` the frame
-/// a pill was clicked. Options render in the given order (`1 2 3`, not `3 2 1`) even inside
-/// a right-to-left alignment slot — `egui::Ui::horizontal` inherits the parent direction
-/// (egui 0.28's `prefer_right_to_left`), which reversed the pill order the first time this
-/// widget rendered inside the inspector's right-aligned rows. Explicit `left_to_right` here.
-fn seg_pills<T: Copy + PartialEq + std::fmt::Display>(
-    ui: &mut egui::Ui,
-    current: T,
-    options: &[T],
-) -> Option<T> {
-    let mut chosen: Option<T> = None;
-    ui.with_layout(
-        egui::Layout::left_to_right(egui::Align::Center),
-        |ui| {
-            for &o in options {
-                if theme::pill(ui, &o.to_string(), o == current).clicked() {
-                    chosen = Some(o);
-                }
-            }
-        },
-    );
-    chosen
 }
 
 /// A labelled unsigned-integer scalar edit. Clamps to `[0, max]` so a `u32` can't underflow.
@@ -854,12 +872,11 @@ fn u32_row(
     edited
 }
 
-/// The right-side inspector: the scalar editor (character / upgrade / cash / fuel / contract).
+/// The right-side inspector: a stack of collapsible `theme::section` cards matching the mockup
+/// (SAVE strip + HERO / STORY UPGRADE / WARDROBE / RESOURCES / COLLECTIBLES / METADATA).
 ///
-/// Live-edit: every widget change pushes a `Set*` Act into the queue; the reducer applies to
-/// `Panel::pending` (a working clone of the parsed `Profile`). The on-disk bytes don't move
-/// until the "Write to .profile" verb fires `Act::Write` — which `save_write`s the pending
-/// profile with a fresh `ProfileHash` and reparses to keep the browser row in sync.
+/// Live-edit: every widget change pushes a `Set*` Act; the reducer applies to `Panel::pending`
+/// (a working clone of the parsed `Profile`). The on-disk bytes don't move until Write.
 pub fn inspector(ui: &mut egui::Ui, p: &Panel) -> Vec<Act> {
     let mut acts: Vec<Act> = Vec::new();
     theme::eyebrow(ui, "SAVE");
@@ -879,14 +896,13 @@ pub fn inspector(ui: &mut egui::Ui, p: &Panel) -> Vec<Act> {
         return acts;
     };
 
-    // Filename eyebrow — the row the browser is on, repeated so a wide inspector reads cleanly.
     ui.label(
         egui::RichText::new(&entry.stem)
             .monospace()
             .size(12.5)
             .color(theme::TX),
     );
-    ui.add_space(8.0);
+    ui.add_space(6.0);
 
     let on_disk = match &entry.header {
         Ok(h) => h,
@@ -899,130 +915,298 @@ pub fn inspector(ui: &mut egui::Ui, p: &Panel) -> Vec<Act> {
             return acts;
         }
     };
-    // `pending` falls back to the on-disk header when the panel hasn't cloned a working copy
-    // yet (e.g. the frame right after Select, before the reducer runs).
     let pending = p.pending.as_ref().unwrap_or(on_disk);
     let dirty = profile_differs(pending, on_disk);
 
-    // Integrity + version + dirty strip. `hash_ok` recomputes `ProfileHash` on demand
-    // (CRC-32/BZIP2 over bytes [4..] per `docs/reverse_engineer/save_serialize_code_map.md`
-    // §3.2); the reader doesn't cache it.
+    // Checksum / version banner. Lives above the sections rather than inside one so a
+    // broken checksum reads loudly first.
     let (hc, ht) = if on_disk.hash_ok() {
-        (theme::GOOD, "checksum ok")
+        (theme::GOOD, "CHECKSUM OK")
     } else {
-        (theme::BAD, "checksum MISMATCH")
+        (theme::BAD, "CHECKSUM MISMATCH")
     };
-    ui.horizontal(|ui| {
-        theme::status_dot(ui, ht, hc);
-        if dirty {
-            theme::status_dot(ui, "pending edits", theme::BRASS);
-        }
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+    egui::Frame::none()
+        .fill(theme::G2)
+        .stroke(egui::Stroke::new(1.0, if on_disk.hash_ok() { theme::GOOD_DK } else { theme::BAD }))
+        .rounding(egui::Rounding::same(6.0))
+        .inner_margin(egui::Margin::symmetric(10.0, 7.0))
+        .outer_margin(egui::Margin { bottom: 10.0, ..Default::default() })
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                theme::status_dot(ui, ht, hc);
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.label(
+                        egui::RichText::new(format!("version {}", on_disk.version))
+                            .monospace()
+                            .size(10.0)
+                            .color(theme::FAINT),
+                    );
+                });
+            });
             ui.label(
-                egui::RichText::new(format!("version {}", on_disk.version))
-                    .monospace()
+                egui::RichText::new("CRC-32/BZIP2 checksum verified")
                     .size(10.5)
                     .color(theme::FAINT),
             );
+            if dirty {
+                ui.add_space(2.0);
+                theme::status_dot(ui, "pending edits", theme::BRASS);
+            }
         });
-    });
-    ui.add_space(10.0);
 
-    // HERO identity. Segmented control instead of a free integer: there are only three heroes
-    // and four upgrade tiers, and a wrong value either breaks the spawn template or hits the
-    // "Player" fallback in `FUN_00634810` with no feedback.
-    theme::eyebrow(ui, "HERO");
-    ui.horizontal(|ui| {
-        ui.label(egui::RichText::new("hero").color(theme::DIM).size(12.0));
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if let Some(v) = seg_pills(ui, pending.character_index, &[1u8, 2, 3]) {
-                acts.push(Act::SetCharacter(v));
-            }
-        });
+    // HERO — dropdown over the three real heroes, carrying the hero's base model name so a
+    // modder sees the file the engine will spawn by default without opening the Inspect tab.
+    let mut hero_edit: Option<u8> = None;
+    theme::section(ui, "HERO", None, true, |ui| {
+        ui.label(
+            egui::RichText::new("Playing as")
+                .size(10.0)
+                .color(theme::FAINT),
+        );
+        egui::ComboBox::from_id_source("saves.hero")
+            .selected_text(format!(
+                "{} · {}",
+                hero_name(pending.character_index),
+                hero_base_model(pending.character_index),
+            ))
+            .width(ui.available_width() - 2.0)
+            .show_ui(ui, |ui| {
+                for i in [1u8, 2, 3] {
+                    let on = pending.character_index == i;
+                    if ui
+                        .selectable_label(on, format!("{} · {}", hero_name(i), hero_base_model(i)))
+                        .clicked()
+                    {
+                        hero_edit = Some(i);
+                    }
+                }
+            });
     });
-    ui.label(
-        egui::RichText::new(format!(
-            "{} · {}",
-            pending.character_index,
-            hero_name(pending.character_index)
-        ))
-        .size(11.0)
-        .color(theme::FAINT),
-    );
-    ui.horizontal(|ui| {
-        ui.label(egui::RichText::new("upgrade").color(theme::DIM).size(12.0));
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if let Some(v) = seg_pills(ui, pending.upgrade_index, &[0u8, 1, 2, 3]) {
-                acts.push(Act::SetUpgrade(v));
-            }
-        });
-    });
-    ui.horizontal(|ui| {
-        ui.label(egui::RichText::new("costumes").color(theme::DIM).size(12.0));
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if let Some(v) = seg_pills(ui, pending.unlocked_costumes, &[1u8, 2, 3, 4, 5]) {
-                acts.push(Act::SetUnlockedCostumes(v));
-            }
-        });
-    });
-    ui.add_space(10.0);
+    if let Some(v) = hero_edit {
+        acts.push(Act::SetCharacter(v));
+    }
 
-    // RESOURCES. Cash and fuel are both `u32` on disk; the one-billion cap on cash comes from
-    // the economy memory (money-fuel-datatype-and-cap). Fuel is clamped against capacity at
-    // write time, not here, so an interim value isn't rejected while the user types.
-    theme::eyebrow(ui, "RESOURCES");
-    if let Some(v) = u32_row(ui, "cash", pending.cash, 1_000_000_000) {
-        acts.push(Act::SetCash(v));
+    // STORY UPGRADE — 2×2 grid of tier cards. The template name on each card is the real
+    // `_tCharacterMap[hero].templates[iUpgrade]` string the engine spawns from (or `base`
+    // for tier 0), so a modder knows what their edit swaps.
+    let mut upgrade_edit: Option<u8> = None;
+    theme::section(ui, "STORY UPGRADE", Some("0 fresh → 3 endgame"), true, |ui| {
+        let templates = hero_tier_templates(pending.character_index);
+        egui::Grid::new("saves.upgrade.grid")
+            .num_columns(2)
+            .spacing(egui::vec2(6.0, 6.0))
+            .show(ui, |ui| {
+                for tier in 0u8..4 {
+                    if tier_card(
+                        ui,
+                        tier,
+                        templates[tier as usize],
+                        pending.upgrade_index == tier,
+                    ) {
+                        upgrade_edit = Some(tier);
+                    }
+                    if tier == 1 {
+                        ui.end_row();
+                    }
+                }
+            });
+    });
+    if let Some(v) = upgrade_edit {
+        acts.push(Act::SetUpgrade(v));
     }
-    if let Some(v) = u32_row(ui, "fuel", pending.fuel, pending.fuel_capacity.max(1) as u64) {
-        acts.push(Act::SetFuel(v));
-    }
-    if let Some(v) = u32_row(ui, "fuel cap", pending.fuel_capacity as u32, u16::MAX as u64) {
-        acts.push(Act::SetFuelCapacity(v.min(u16::MAX as u32) as u16));
-    }
-    // Active contract is 15-char ASCII (NUL-padded in the 16-byte slot). `TextEdit` with a
-    // `.char_limit` keeps the user from typing a value `save_write` would truncate.
-    ui.horizontal(|ui| {
-        ui.label(egui::RichText::new("active").color(theme::DIM).size(12.0));
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            let mut buf = pending.active_contract.clone();
-            let resp = ui.add(
-                egui::TextEdit::singleline(&mut buf)
-                    .char_limit(15)
-                    .desired_width(140.0)
-                    .font(egui::TextStyle::Monospace),
+
+    // WARDROBE — active override dropdown (runtime-only on disk, surfaced for a future write
+    // byte at `+0x4E`) + an UNLOCKED COUNT stepper over `@0x24A` + a prefix-unlocked list.
+    let mut costumes_edit: Option<u8> = None;
+    theme::section(ui, "WARDROBE", None, true, |ui| {
+        let outfits = hero_outfits(pending.character_index);
+        ui.label(
+            egui::RichText::new("Active override")
+                .size(10.0)
+                .color(theme::FAINT),
+        );
+        egui::ComboBox::from_id_source("saves.wardrobe.active")
+            .selected_text("None  ·  (use story upgrade)")
+            .width(ui.available_width() - 2.0)
+            .show_ui(ui, |ui| {
+                let _ = ui.selectable_label(true, "None  ·  (use story upgrade)");
+                for (name, model) in outfits {
+                    let _ = ui.selectable_label(false, format!("{name}  ·  {model}"));
+                }
+            });
+        ui.label(
+            egui::RichText::new("runtime-only · not persisted")
+                .size(9.5)
+                .color(theme::FAINT),
+        );
+        ui.add_space(8.0);
+
+        let cap = outfits.len().max(1) as u8;
+        ui.horizontal(|ui| {
+            ui.label(
+                egui::RichText::new("UNLOCKED COUNT")
+                    .size(10.0)
+                    .color(theme::DIM),
             );
-            if resp.changed() {
-                acts.push(Act::SetActiveContract(buf));
-            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.label(
+                    egui::RichText::new(format!("/ {cap}"))
+                        .monospace()
+                        .size(10.5)
+                        .color(theme::FAINT),
+                );
+                if ui.small_button("+").clicked() {
+                    costumes_edit = Some(pending.unlocked_costumes.saturating_add(1).min(cap));
+                }
+                ui.label(
+                    egui::RichText::new(format!("{}", pending.unlocked_costumes))
+                        .monospace()
+                        .size(12.0),
+                );
+                if ui.small_button("−").clicked() {
+                    costumes_edit = Some(pending.unlocked_costumes.saturating_sub(1).max(1));
+                }
+            });
+        });
+        ui.label(
+            egui::RichText::new(
+                "The byte stores a count — the first N entries of _tOutfits.<hero> \
+                 become selectable at the mirror.",
+            )
+            .size(9.5)
+            .color(theme::FAINT),
+        );
+        ui.add_space(6.0);
+        for (i, (name, model)) in outfits.iter().enumerate() {
+            let on = (i as u8) < pending.unlocked_costumes;
+            let (fill, border, dot_fg) = if on {
+                (theme::G0, theme::LINE, theme::BRASS)
+            } else {
+                (theme::G0, theme::LINE2, theme::FAINT)
+            };
+            theme::row_chip(ui, fill, border, |ui| {
+                ui.label(theme::disp_text(if on { "●" } else { "○" }, 11.0, dot_fg));
+                ui.label(
+                    egui::RichText::new(*name)
+                        .size(11.5)
+                        .color(if on { theme::TX } else { theme::DIM }),
+                );
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.label(
+                        egui::RichText::new(*model)
+                            .monospace()
+                            .size(10.0)
+                            .color(theme::FAINT),
+                    );
+                });
+            });
+        }
+    });
+    if let Some(v) = costumes_edit {
+        acts.push(Act::SetUnlockedCostumes(v));
+    }
+
+    // RESOURCES — cash / fuel / fuel cap / active contract.
+    theme::section(ui, "RESOURCES", None, true, |ui| {
+        if let Some(v) = u32_row(ui, "cash", pending.cash, 1_000_000_000) {
+            acts.push(Act::SetCash(v));
+        }
+        if let Some(v) = u32_row(ui, "fuel", pending.fuel, pending.fuel_capacity.max(1) as u64) {
+            acts.push(Act::SetFuel(v));
+        }
+        if let Some(v) = u32_row(ui, "fuel cap", pending.fuel_capacity as u32, u16::MAX as u64) {
+            acts.push(Act::SetFuelCapacity(v.min(u16::MAX as u32) as u16));
+        }
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new("active").color(theme::DIM).size(12.0));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let mut buf = pending.active_contract.clone();
+                let resp = ui.add(
+                    egui::TextEdit::singleline(&mut buf)
+                        .char_limit(15)
+                        .desired_width(140.0)
+                        .font(egui::TextStyle::Monospace),
+                );
+                if resp.changed() {
+                    acts.push(Act::SetActiveContract(buf));
+                }
+            });
         });
     });
-    ui.add_space(10.0);
 
-    // METADATA — read-only. Playtime / timestamp / slot name / size are reader-exposed facts;
-    // the write path doesn't touch them (the engine stamps playtime + timestamp itself).
-    theme::eyebrow(ui, "METADATA");
-    theme::kv(
+    // COLLECTIBLES — the GUID count in `active_missions.collected`. A total across all active
+    // missions for now; per-type breakdown (toolboxes / parts / cards) needs collectible-type
+    // classification from the ASET registry and is TBD.
+    let collected_total: usize = p
+        .lua_state
+        .as_ref()
+        .and_then(|(_, r)| r.as_ref().ok())
+        .map(|s| s.collected_count())
+        .unwrap_or(0);
+    theme::section(
         ui,
-        "playtime",
-        egui::RichText::new(hms(pending.play_time_seconds)),
+        "COLLECTIBLES",
+        Some(&format!("{collected_total} total")),
+        true,
+        |ui| {
+            ui.label(
+                egui::RichText::new("GUIDs in active_missions.collected (total across tCollected)")
+                    .size(10.5)
+                    .color(theme::FAINT),
+            );
+            ui.add_space(3.0);
+            theme::kv(ui, "collected", egui::RichText::new(format!("{collected_total}")));
+            ui.label(
+                egui::RichText::new(
+                    "Per-type breakdown (toolboxes / parts / cards) needs collectible-type \
+                     classification from the ASET registry — TBD.",
+                )
+                .size(9.5)
+                .color(theme::FAINT),
+            );
+        },
     );
-    theme::kv(
-        ui,
-        "timestamp",
-        egui::RichText::new(timestamp_utc(pending.timestamp)),
-    );
-    theme::kv(
-        ui,
-        "slot name",
-        egui::RichText::new(pending.save_name().to_string()),
-    );
-    theme::kv(
-        ui,
-        "size",
-        egui::RichText::new(format!("{} B", on_disk.raw_bytes().len())),
-    );
+
+    // METADATA — read-only; the engine stamps playtime and timestamp itself.
+    theme::section(ui, "METADATA", None, false, |ui| {
+        theme::kv(ui, "playtime", egui::RichText::new(hms(pending.play_time_seconds)));
+        theme::kv(ui, "timestamp", egui::RichText::new(timestamp_utc(pending.timestamp)));
+        theme::kv(ui, "slot name", egui::RichText::new(pending.save_name().to_string()));
+        theme::kv(ui, "size", egui::RichText::new(format!("{} B", on_disk.raw_bytes().len())));
+    });
+
     acts
+}
+
+/// One tier card in the STORY UPGRADE 2×2 grid. Returns true the frame the card was clicked.
+/// Mirrors the mockup: "TIER N" eyebrow (brass when selected) + the real template name in
+/// mono below it, brass-bordered when the card is the current tier.
+fn tier_card(ui: &mut egui::Ui, tier: u8, template: &str, on: bool) -> bool {
+    let (fill, border, hd, body) = if on {
+        (theme::BRASS_SOFT, theme::BRASS_DK, theme::BRASS, theme::BRASS)
+    } else {
+        (theme::G0, theme::LINE, theme::FAINT, theme::DIM)
+    };
+    let resp = egui::Frame::none()
+        .fill(fill)
+        .stroke(egui::Stroke::new(1.0, border))
+        .rounding(egui::Rounding::same(4.0))
+        .inner_margin(egui::Margin::symmetric(8.0, 6.0))
+        .show(ui, |ui| {
+            ui.set_min_width(120.0);
+            ui.vertical(|ui| {
+                ui.label(theme::disp_text(format!("TIER {tier}"), 9.5, hd));
+                ui.label(
+                    egui::RichText::new(if template.is_empty() { "—" } else { template })
+                        .monospace()
+                        .size(11.0)
+                        .color(body),
+                );
+            });
+        })
+        .response
+        .interact(egui::Sense::click());
+    resp.clicked()
 }
 
 /// True when the pending Profile differs from the on-disk one on any **editable** field.
