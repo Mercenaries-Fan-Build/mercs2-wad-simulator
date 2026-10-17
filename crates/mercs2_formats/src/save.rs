@@ -369,6 +369,89 @@ pub struct SaveState {
     /// uncapped — the `Mattias Nilsson_6A0E523C` fixture holds 103. `None` when the save has no
     /// `tStatsData` / no such key. FACT.
     pub completed_toolboxes: Option<u32>,
+    /// `tPlayerData` — one entry per player, in player order. Written by `MrxPlayer.SaveSingleton`
+    /// (`resident/mrxplayer.lua`): `nHealth` and the carried weapons. FACT.
+    pub players: Vec<PlayerSave>,
+}
+
+/// One player's `tPlayerData[n]`.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct PlayerSave {
+    /// `nHealth` — `Object.GetMaxHealth` of the character at save time. FACT.
+    pub health: f64,
+    /// `tEquipment` — the carried weapons, in slot order. FACT.
+    pub equipment: Vec<CarriedWeapon>,
+}
+
+/// One `tEquipment` entry: `{ Object.GetParent(weapon), Weapon.GetReserveAmmo(weapon), … }`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CarriedWeapon {
+    /// `[1]` — the weapon's parent object, written `Sys.StringToGuid('0x8000…')`: a `worldentity`
+    /// template key (bit 31 set). Its name is that template's `Name` record. FACT.
+    pub template: u32,
+    /// `[2]` — reserve ammo. FACT.
+    pub reserve_ammo: f64,
+    /// `[3]` when present. UNKNOWN: the decompiled `SaveSingleton` writes only `[1]` and `[2]`, yet
+    /// some saves carry a third number on some entries. Carried verbatim, not interpreted.
+    pub extra: Option<f64>,
+}
+
+/// Decode a `tPlayerData` body. Player entries are keyed `[1.000000]`, `[2.000000]`, …
+fn parse_players(body: &str) -> Result<Vec<PlayerSave>, String> {
+    let mut players: Vec<(f64, PlayerSave)> = Vec::new();
+    for (key, raw) in parse_table(body) {
+        let Ok(n) = key.trim().parse::<f64>() else {
+            return Err(format!("tPlayerData: non-numeric player key `{key}`"));
+        };
+        let inner = raw.trim().strip_prefix('{').and_then(|s| s.strip_suffix('}'));
+        let Some(inner) = inner else {
+            return Err(format!("tPlayerData[{key}]: not a table"));
+        };
+        let health = scalar_value(inner, "nHealth")
+            .and_then(|s| s.parse::<f64>().ok())
+            .ok_or_else(|| format!("tPlayerData[{key}]: no numeric nHealth"))?;
+        let mut equipment = Vec::new();
+        if let Some(eq) = table_body(inner, "tEquipment") {
+            for (slot, entry) in parse_table(eq) {
+                let fields = entry
+                    .trim()
+                    .strip_prefix('{')
+                    .and_then(|s| s.strip_suffix('}'))
+                    .map(parse_table)
+                    .ok_or_else(|| format!("tEquipment[{slot}]: not a table"))?;
+                let field = |i: &str| {
+                    fields
+                        .iter()
+                        .find(|(k, _)| k.trim().parse::<f64>().ok() == i.parse::<f64>().ok())
+                        .map(|(_, v)| v.trim().to_string())
+                };
+                let guid = field("1").ok_or_else(|| format!("tEquipment[{slot}]: no [1]"))?;
+                let hex = guid
+                    .split('\'')
+                    .nth(1)
+                    .and_then(|h| h.strip_prefix("0x").or_else(|| h.strip_prefix("0X")))
+                    .ok_or_else(|| format!("tEquipment[{slot}][1] is not a StringToGuid: {guid}"))?;
+                let template = u32::from_str_radix(hex, 16)
+                    .map_err(|e| format!("tEquipment[{slot}][1] `{hex}`: {e}"))?;
+                let reserve_ammo = field("2")
+                    .and_then(|v| v.parse::<f64>().ok())
+                    .ok_or_else(|| format!("tEquipment[{slot}]: no numeric [2]"))?;
+                let extra = field("3").and_then(|v| v.parse::<f64>().ok());
+                equipment.push((slot.trim().parse::<f64>().unwrap_or(f64::MAX), CarriedWeapon {
+                    template,
+                    reserve_ammo,
+                    extra,
+                }));
+            }
+        }
+        equipment.sort_by(|a, b| a.0.total_cmp(&b.0));
+        players.push((n, PlayerSave {
+            health,
+            equipment: equipment.into_iter().map(|(_, w)| w).collect(),
+        }));
+    }
+    players.sort_by(|a, b| a.0.total_cmp(&b.0));
+    Ok(players.into_iter().map(|(_, p)| p).collect())
 }
 
 /// `nTotalToolbox` — the fixed toolbox total the PDA divides by
@@ -728,6 +811,11 @@ pub fn parse_save_state(lua: &str) -> Result<SaveState, String> {
         .and_then(|s| s.parse::<f64>().ok())
         .map(|n| n as u32);
 
+    let players = match table_body(lua, "tPlayerData") {
+        Some(b) => parse_players(b)?,
+        None => Vec::new(),
+    };
+
     Ok(SaveState {
         flow_chain,
         active_missions,
@@ -740,6 +828,7 @@ pub fn parse_save_state(lua: &str) -> Result<SaveState, String> {
         transit_enabled,
         transit_zones,
         completed_toolboxes,
+        players,
     })
 }
 
@@ -1211,6 +1300,51 @@ mod tests {
             .save_state()
             .unwrap();
         assert_eq!(st.completed_toolboxes, Some(103));
+    }
+
+    #[test]
+    fn carried_weapons_decode_from_the_fixture() {
+        let dir = save_dir();
+        let st = parse(&load_from(&dir, "Mattias Nilsson_6A0E523C.profile"))
+            .unwrap()
+            .save_state()
+            .unwrap();
+        assert_eq!(st.players.len(), 1);
+        assert_eq!(st.players[0].health, 120.0);
+        let got: Vec<(u32, f64, Option<f64>)> = st.players[0]
+            .equipment
+            .iter()
+            .map(|w| (w.template, w.reserve_ammo, w.extra))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                (0x8000_6ED0, 4.0, None),
+                (0x8000_569E, 6.0, None),
+                (0x8000_5FD3, 244.0, None),
+                (0x8000_2331, 9.0, None),
+            ]
+        );
+        for name in ALL_SAVES {
+            let st = parse(&load_from(&dir, name)).unwrap().save_state().unwrap();
+            assert!(!st.players.is_empty(), "{name}: no tPlayerData players");
+            for w in &st.players[0].equipment {
+                assert!(w.template & 0x8000_0000 != 0, "{name}: 0x{:08X} is not a template key", w.template);
+            }
+        }
+    }
+
+    #[test]
+    fn carried_weapon_third_value_is_kept_raw() {
+        let lua = r#"return { ["nTimeElapsed"] = 1.000000, ["tLayerData"] = { },
+            ["tPlayerData"] = { [1.000000] = { ["tEquipment"] = {
+                [1.000000] = { [1.000000] = Sys.StringToGuid( '0x8000569E' ), [2.000000] = 6.000000, [3.000000] = 100.000000, },
+                [2.000000] = { [1.000000] = Sys.StringToGuid( '0x80002331' ), [2.000000] = 9.000000, },
+            }, ["nHealth"] = 114.000000, }, } }"#;
+        let st = parse_save_state(lua).unwrap();
+        assert_eq!(st.players[0].health, 114.0);
+        assert_eq!(st.players[0].equipment[0].extra, Some(100.0));
+        assert_eq!(st.players[0].equipment[1].extra, None);
     }
 
     #[test]
