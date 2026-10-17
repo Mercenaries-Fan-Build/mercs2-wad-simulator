@@ -506,7 +506,7 @@ pub fn center(ctx: &egui::Context, p: &Panel) -> Vec<Act> {
                 .and_then(|list| list.iter().find(|e| &e.path == sel))
                 .and_then(|e| e.header.as_ref().ok());
 
-            // Filename eyebrow + hero line.
+            // Filename eyebrow — the row the browser is on, repeated here so a wide centre reads cleanly.
             ui.label(
                 egui::RichText::new(&stem)
                     .monospace()
@@ -518,21 +518,7 @@ pub fn center(ctx: &egui::Context, p: &Panel) -> Vec<Act> {
                     ui.label(theme::disp_text("UNREADABLE", 20.0, theme::BAD));
                 }
                 Some(h) => {
-                    ui.label(theme::disp_text(
-                        hero_name(h.character_index).to_uppercase(),
-                        20.0,
-                        theme::TX,
-                    ));
-                    ui.label(
-                        egui::RichText::new(format!(
-                            "upgrade {} · {} / 5 costumes unlocked",
-                            h.upgrade_index, h.unlocked_costumes
-                        ))
-                        .size(11.5)
-                        .color(theme::FAINT),
-                    );
-                    ui.add_space(10.0);
-                    at_a_glance(ui, h);
+                    hero_viewport(ui, h);
                 }
             }
             ui.add_space(12.0);
@@ -604,44 +590,162 @@ pub fn center(ctx: &egui::Context, p: &Panel) -> Vec<Act> {
     acts
 }
 
-/// The five-column AT-A-GLANCE strip the mockup carries as a HUD overlay on top of the hero
-/// viewport. Cash / Fuel / Playtime / Contract / Timestamp — the save's running state at a
-/// glance, framed as a brass-accented card so the modder sees the big picture before diving
-/// into the mission tabs. Reads the on-disk `Profile` so it stays stable while editing.
-fn at_a_glance(ui: &mut egui::Ui, h: &Profile) {
+/// The centre's viewport-styled area, matching the mockup: a tall frame with four HUD
+/// overlays — ORBIT + model chip top-left, AT-A-GLANCE top-right, hero identity chip bottom-
+/// left, and a centred placeholder for the 3D hero render until the Workshop renderer is
+/// wired to this surface.
+fn hero_viewport(ui: &mut egui::Ui, h: &Profile) {
+    let viewport_height = 280.0;
     egui::Frame::none()
-        .fill(theme::G2)
-        .stroke(egui::Stroke::new(1.0, theme::BRASS_DK))
+        .fill(theme::G0)
+        .stroke(egui::Stroke::new(1.0, theme::LINE))
         .rounding(egui::Rounding::same(6.0))
-        .inner_margin(egui::Margin::symmetric(13.0, 10.0))
+        .inner_margin(egui::Margin::symmetric(14.0, 12.0))
         .show(ui, |ui| {
-            ui.with_layout(egui::Layout::left_to_right(egui::Align::TOP), |ui| {
-                glance_col(ui, "CASH",     &format!("${}", h.cash));
-                glance_col(ui, "FUEL",     &format!("{} / {}", h.fuel, h.fuel_capacity));
-                glance_col(ui, "PLAYTIME", &hms_long(h.play_time_seconds));
-                glance_col(ui, "CONTRACT", &h.active_contract);
-                glance_col(ui, "TIMESTAMP", &timestamp_utc(h.timestamp));
+            ui.set_min_height(viewport_height);
+            ui.set_width(ui.available_width());
+
+            // Top row: left-side chips, right-side AT-A-GLANCE card.
+            ui.horizontal(|ui| {
+                ui.with_layout(egui::Layout::left_to_right(egui::Align::TOP), |ui| {
+                    chip(ui, "ORBIT", theme::BRASS, theme::BRASS_SOFT, theme::BRASS_DK);
+                    ui.add_space(6.0);
+                    let model_label = format!(
+                        "UPGRADE {} · {}",
+                        h.upgrade_index,
+                        upgrade_model_for(h.character_index, h.upgrade_index)
+                    );
+                    chip(ui, &model_label, theme::DIM, theme::G2, theme::LINE);
+                });
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::TOP), |ui| {
+                    at_a_glance(ui, h);
+                });
+            });
+
+            ui.add_space(8.0);
+            // Hero render placeholder — a centred dashed-border frame with a hint of what
+            // belongs there once the Workshop renderer is wired in. The identity chip at
+            // the bottom-left is sibling to this block so it hugs the viewport floor.
+            ui.vertical_centered(|ui| {
+                let avail = ui.available_size();
+                let render_h = (avail.y - 48.0).max(120.0);
+                let render_w = render_h * 0.6;
+                egui::Frame::none()
+                    .fill(theme::G2)
+                    .stroke(egui::Stroke::new(
+                        1.0,
+                        egui::Color32::from_rgb(0x42, 0x47, 0x4f),
+                    ))
+                    .rounding(egui::Rounding::same(4.0))
+                    .inner_margin(egui::Margin::symmetric(10.0, 10.0))
+                    .show(ui, |ui| {
+                        ui.set_min_size(egui::vec2(render_w, render_h));
+                        ui.vertical_centered(|ui| {
+                            ui.add_space(render_h * 0.4);
+                            ui.label(theme::disp_text(
+                                upgrade_model_for(h.character_index, h.upgrade_index).to_uppercase(),
+                                13.0,
+                                theme::DIM,
+                            ));
+                            ui.label(
+                                egui::RichText::new(
+                                    "hero render — Workshop viewport wiring pending",
+                                )
+                                .size(10.5)
+                                .color(theme::FAINT),
+                            );
+                        });
+                    });
+            });
+
+            ui.add_space(4.0);
+            // Bottom-left identity chip (hugs the viewport floor).
+            ui.horizontal(|ui| {
+                chip(
+                    ui,
+                    &format!(
+                        "{} · character_index {} · upgrade {}",
+                        hero_name(h.character_index),
+                        h.character_index,
+                        h.upgrade_index
+                    ),
+                    theme::DIM,
+                    theme::G2,
+                    theme::LINE,
+                );
             });
         });
 }
 
-/// One column of the AT-A-GLANCE strip: tiny eyebrow + mono value, with a flex-growing cell.
-fn glance_col(ui: &mut egui::Ui, label: &str, value: &str) {
-    ui.vertical(|ui| {
-        ui.set_min_width(90.0);
+/// A small rounded HUD chip — label text with a background fill + border stroke. Used by the
+/// viewport overlays (ORBIT, model, identity) so they share a visual vocabulary.
+fn chip(ui: &mut egui::Ui, label: &str, fg: egui::Color32, bg: egui::Color32, border: egui::Color32) {
+    egui::Frame::none()
+        .fill(bg)
+        .stroke(egui::Stroke::new(1.0, border))
+        .rounding(egui::Rounding::same(3.0))
+        .inner_margin(egui::Margin::symmetric(8.0, 3.0))
+        .show(ui, |ui| {
+            ui.label(theme::disp_text(label, 9.5, fg));
+        });
+}
+
+/// The hero's spawn model for the given upgrade tier. Reproduces the engine's
+/// `_tCharacterMap[hero].templates[iUpgrade] or base` resolution without the engine. The
+/// returned string is the model-registry name a modder would look up in the Inspect tab.
+/// Tier 3 for every hero maps to the hero's `_v3`; the other tiers are the template names
+/// (we don't have the per-tier model mapping tabulated beyond tier 3).
+fn upgrade_model_for(hero: u8, tier: u8) -> String {
+    let base = hero_base_model(hero);
+    let templates = hero_tier_templates(hero);
+    match (hero, tier) {
+        (_, 0) => base.to_string(),
+        (1, 3) => "pmc_hum_mattias_v3".to_string(),
+        (2, 3) => "pmc_hum_chris_v3".to_string(),
+        (3, 3) => "pmc_hum_jen_v3".to_string(),
+        (_, t) if (1..=3).contains(&t) => format!("{} → template", templates[t as usize]),
+        _ => base.to_string(),
+    }
+}
+
+/// The AT-A-GLANCE HUD card — a compact column of save-state at-a-glance values. Lives in
+/// the viewport's top-right overlay slot. Reads the on-disk `Profile` so it stays stable
+/// while editing (the pending Profile would make the numbers jump every keystroke).
+fn at_a_glance(ui: &mut egui::Ui, h: &Profile) {
+    egui::Frame::none()
+        .fill(egui::Color32::from_rgba_unmultiplied(14, 16, 20, 220))
+        .stroke(egui::Stroke::new(1.0, theme::LINE))
+        .rounding(egui::Rounding::same(5.0))
+        .inner_margin(egui::Margin::symmetric(10.0, 8.0))
+        .show(ui, |ui| {
+            ui.set_min_width(200.0);
+            ui.label(theme::disp_text("AT A GLANCE", 9.5, theme::FAINT));
+            ui.add_space(3.0);
+            glance_row(ui, "contract", &h.active_contract);
+            glance_row(ui, "cash", &format!("{}", h.cash));
+            glance_row(ui, "fuel", &format!("{} / {}", h.fuel, h.fuel_capacity));
+            glance_row(ui, "playtime", &hms_long(h.play_time_seconds));
+            glance_row(ui, "timestamp", &timestamp_utc(h.timestamp));
+        });
+}
+
+/// One row of the AT-A-GLANCE overlay: dim label on the left, mono value right-aligned.
+fn glance_row(ui: &mut egui::Ui, label: &str, value: &str) {
+    ui.horizontal(|ui| {
         ui.label(
             egui::RichText::new(label)
-                .size(9.5)
+                .size(10.0)
                 .color(theme::FAINT),
         );
-        ui.label(
-            egui::RichText::new(value)
-                .monospace()
-                .size(12.5)
-                .color(theme::TX),
-        );
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.label(
+                egui::RichText::new(value)
+                    .monospace()
+                    .size(10.5)
+                    .color(theme::TX),
+            );
+        });
     });
-    ui.add_space(16.0);
 }
 
 /// Long-form `h/m/s` playtime (`246334` → `"68h 25m 34s"`) for the AT-A-GLANCE strip, where
