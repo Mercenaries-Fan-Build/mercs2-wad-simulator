@@ -707,22 +707,27 @@ fn timestamp_utc(t: u32) -> String {
     format!("{year:04}-{month:02}-{day:02} {hour:02}:{minute:02} UTC")
 }
 
-/// Three-way segmented control over an integer field. Returns `Some(new_value)` the frame a
-/// pill was clicked. The widget mirrors `theme::pill`'s shape so this reads as the same
-/// control vocabulary used elsewhere on the rail.
+/// Segmented control over a small set of integer values. Returns `Some(new_value)` the frame
+/// a pill was clicked. Options render in the given order (`1 2 3`, not `3 2 1`) even inside
+/// a right-to-left alignment slot — `egui::Ui::horizontal` inherits the parent direction
+/// (egui 0.28's `prefer_right_to_left`), which reversed the pill order the first time this
+/// widget rendered inside the inspector's right-aligned rows. Explicit `left_to_right` here.
 fn seg_pills<T: Copy + PartialEq + std::fmt::Display>(
     ui: &mut egui::Ui,
     current: T,
     options: &[T],
 ) -> Option<T> {
     let mut chosen: Option<T> = None;
-    ui.horizontal(|ui| {
-        for &o in options {
-            if theme::pill(ui, &o.to_string(), o == current).clicked() {
-                chosen = Some(o);
+    ui.with_layout(
+        egui::Layout::left_to_right(egui::Align::Center),
+        |ui| {
+            for &o in options {
+                if theme::pill(ui, &o.to_string(), o == current).clicked() {
+                    chosen = Some(o);
+                }
             }
-        }
-    });
+        },
+    );
     chosen
 }
 
