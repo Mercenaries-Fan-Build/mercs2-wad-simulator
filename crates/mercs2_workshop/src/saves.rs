@@ -1019,10 +1019,9 @@ fn render_active(ui: &mut egui::Ui, missions: &[save::ActiveMission]) -> Vec<Act
         );
         return acts;
     }
-    // Mockup grid is 6 columns of dense chips (id · state-tag). 3 was too sparse against the
-    // mockup; 6 fits the whole retail mission set on-screen without scrolling and matches the
-    // visual density of the canonical reference.
-    let cols = 6usize;
+    // Five columns per the mockup — same column count as mission_chip_grid, so the Available
+    // tab's interactive grid lines up visually with the Completed / Culled / Flow / All tabs.
+    let cols = 5usize;
     let gutter = 4.0;
     let avail = ui.available_width();
     let cell_w = ((avail - (cols as f32 - 1.0) * gutter) / cols as f32).max(100.0);
@@ -1116,15 +1115,14 @@ struct ChipStyle {
 /// mission ids (what Completed used to be) ran off-screen at ~215 entries and did not match the
 /// mockup's density; a shared grid keeps the four tabs reading as one coherent board.
 fn mission_chip_grid(ui: &mut egui::Ui, items: &[(String, Option<String>)], s: ChipStyle) {
-    let cols = 6usize;
+    // Five columns per the mockup. Reserve 64 px off ui.available_width(): ~18 for the
+    // ScrollArea's vertical scrollbar, plus the centre panel's own inner padding and the
+    // Grid's trailing spacing. The chip Frame overhead (inner_margin 7+7 + stroke 1+1 = 16)
+    // is subtracted from the horizontal row's set_width so the Frame-outer lands exactly on
+    // cell_w. The set_width is on the HORIZONTAL child, not on the Frame's immediate inner
+    // UI — Frame measures from min_rect of its child's content.
+    let cols = 5usize;
     let gutter = 4.0;
-    // Reserve 64 px off ui.available_width(): ~18 for the ScrollArea's vertical scrollbar,
-    // plus the centre panel's own inner padding and the Grid's trailing spacing. 40 px still
-    // let column 6 clip by a few pixels against the right-side inspector. The chip Frame
-    // overhead (inner_margin 7+7 + stroke 1+1 = 16) is subtracted from the horizontal row's
-    // set_width so the Frame-outer lands exactly on cell_w. The set_width is on the HORIZONTAL
-    // child, not on the Frame's immediate inner UI — Frame measures from min_rect of its
-    // child's content.
     let avail = (ui.available_width() - 64.0).max(100.0);
     let cell_w = (avail - (cols as f32 - 1.0) * gutter) / cols as f32;
     let chip_overhead = 16.0;
