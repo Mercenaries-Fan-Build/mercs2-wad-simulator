@@ -1347,15 +1347,17 @@ pub fn inspector(ui: &mut egui::Ui, p: &Panel) -> Vec<Act> {
         });
     });
 
-    // COLLECTIBLES — the GUID count in `active_missions.collected`. A total across all active
-    // missions for now; per-type breakdown (toolboxes / parts / cards) needs collectible-type
-    // classification from the ASET registry and is TBD.
-    let collected_total: usize = p
+    // COLLECTIBLES — a per-mission breakdown of `active_missions[].collected` GUIDs. This is
+    // the real shape the save tracks: each active mission carries its own `tCollected` Vec<u32>
+    // of ASET entity ids, so the panel surfaces mission-id → count rows + a running total. The
+    // mockup's per-TYPE breakdown (toolboxes / parts / cards) wants an ASET registry classifier
+    // the Workshop doesn't ship yet; honest to say "per-mission for now" instead of inventing
+    // caps the game doesn't publish.
+    let state = p
         .lua_state
         .as_ref()
-        .and_then(|(_, r)| r.as_ref().ok())
-        .map(|s| s.collected_count())
-        .unwrap_or(0);
+        .and_then(|(_, r)| r.as_ref().ok());
+    let collected_total: usize = state.map(|s| s.collected_count()).unwrap_or(0);
     theme::section(
         ui,
         "COLLECTIBLES",
@@ -1363,20 +1365,69 @@ pub fn inspector(ui: &mut egui::Ui, p: &Panel) -> Vec<Act> {
         true,
         |ui| {
             ui.label(
-                egui::RichText::new("GUIDs in active_missions.collected (total across tCollected)")
-                    .size(10.5)
-                    .color(theme::FAINT),
-            );
-            ui.add_space(3.0);
-            theme::kv(ui, "collected", egui::RichText::new(format!("{collected_total}")));
-            ui.label(
                 egui::RichText::new(
-                    "Per-type breakdown (toolboxes / parts / cards) needs collectible-type \
-                     classification from the ASET registry — TBD.",
+                    "ASET GUIDs in active_missions.collected, one row per contributing mission.",
                 )
-                .size(9.5)
+                .size(10.5)
                 .color(theme::FAINT),
             );
+            ui.add_space(5.0);
+            match state {
+                None => {
+                    ui.label(
+                        egui::RichText::new("Lua not loaded — pick a save to populate.")
+                            .size(11.0)
+                            .color(theme::FAINT),
+                    );
+                }
+                Some(s) => {
+                    let mut rows: Vec<(&str, usize)> = s
+                        .active_missions
+                        .iter()
+                        .filter(|m| !m.collected.is_empty())
+                        .map(|m| (m.id.as_str(), m.collected.len()))
+                        .collect();
+                    if rows.is_empty() {
+                        ui.label(
+                            egui::RichText::new("No tCollected entries in any active mission.")
+                                .size(11.0)
+                                .color(theme::FAINT),
+                        );
+                        return;
+                    }
+                    rows.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(b.0)));
+                    for (id, n) in rows {
+                        theme::row_chip(ui, theme::G0, theme::LINE, |ui| {
+                            ui.label(
+                                egui::RichText::new(id)
+                                    .monospace()
+                                    .size(11.5)
+                                    .color(theme::TX),
+                            );
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    ui.label(
+                                        egui::RichText::new(format!("{n}"))
+                                            .monospace()
+                                            .size(11.0)
+                                            .color(theme::BRASS),
+                                    );
+                                },
+                            );
+                        });
+                    }
+                    ui.add_space(4.0);
+                    ui.label(
+                        egui::RichText::new(
+                            "Per-type breakdown (toolbox / part / card) needs an ASET-id → \
+                             collectible-type classifier that the Workshop doesn't ship yet.",
+                        )
+                        .size(9.5)
+                        .color(theme::FAINT),
+                    );
+                }
+            }
         },
     );
 
