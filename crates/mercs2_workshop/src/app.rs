@@ -1944,13 +1944,24 @@ pub fn run(opts: Options) {
                                 ui.with_layout(
                                     egui::Layout::right_to_left(egui::Align::Center),
                                     |ui| {
-                                        if ui.button("Load").on_hover_text("Load a saved arrangement").clicked() {
-                                            actions.push(Act::LoadScene);
+                                        // Scene Save / Load belong to the Scene surface — leaking
+                                        // them into every workbench's header made the trio read as
+                                        // a global save button on pages (Saves, Inspect, Shipment)
+                                        // that have nothing to do with the sandbox arrangement.
+                                        // Each page now owns its own verbs; the Scene scope stays
+                                        // scoped.
+                                        let in_scene = wb == Workbench::Sandbox
+                                            || (wb == Workbench::Craft
+                                                && craft_mode == CraftMode::Scene);
+                                        if in_scene {
+                                            if ui.button("Load").on_hover_text("Load a saved arrangement").clicked() {
+                                                actions.push(Act::LoadScene);
+                                            }
+                                            if ui.button("Save").on_hover_text("Save the sandbox arrangement").clicked() {
+                                                actions.push(Act::SaveScene);
+                                            }
+                                            theme::eyebrow(ui, "Scene");
                                         }
-                                        if ui.button("Save").on_hover_text("Save the sandbox arrangement").clicked() {
-                                            actions.push(Act::SaveScene);
-                                        }
-                                        theme::eyebrow(ui, "Scene");
                                         if names_pending {
                                             ui.separator();
                                             ui.add(egui::Spinner::new().size(13.0));
