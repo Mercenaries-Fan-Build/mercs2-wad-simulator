@@ -1181,6 +1181,11 @@ pub fn run(opts: Options) {
     // The Saves page's own state (a `.profile` currently selected, if any). Lives on the stack
     // beside `qm` so switching rails never discards it.
     let mut saves = crate::saves::Panel::default();
+    // Per-hero `shot::HeroRenderer`s, keyed by model hash. Each one owns its own wgpu device
+    // and keeps the pipeline + mesh / texture uploads warm, so an orbit drag re-renders in
+    // ~10-30 ms instead of the ~1-2 s a fresh `shot::render` call would take. Dropped only
+    // when the whole workshop exits.
+    let mut hero_renderers: HashMap<u32, crate::shot::HeroRenderer> = HashMap::new();
     // Host-provided, like the game stack: the crate never reaches into the filesystem for it.
     let qm_names = mercs2_quartermaster::names::NameTable::find_from(
         &std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
@@ -5330,14 +5335,30 @@ pub fn run(opts: Options) {
                         crate::saves::apply(act, &mut saves);
                     }
                     // ── Saves hero render: the Panel's own reducer only stamps a request slot;
-                    // the real `load_model_data` + `shot::render` + `ctx.load_texture` runs via
-                    // the egui-context stashed by `gui.run` on this frame. Blocks the UI for the
-                    // render duration (~1-2s per unique model), then caches the texture forever —
-                    // switching between saves on the same hero/tier combo after that is instant.
+                    // the real `load_model_data` + `shot::HeroRenderer::render_rgba` +
+                    // `TextureHandle::set` runs via the egui-context stashed by `gui.run` on this
+                    // frame. First render per hash pays the ~500 ms pipeline + mesh upload; every
+                    // subsequent render (drag-orbit tick) is a camera-uniform write + draw +
+                    // ~2.6 MB readback into a reused TextureHandle, usually under ~30 ms.
                     if let (Some((hash, name)), Some(ctx)) =
                         (saves.pending_hero_render.take(), pending_ctx.as_ref())
                     {
-                        match render_hero_portrait(&mut w, hash, &name, ctx) {
+                        // Camera read lazily: hero_cam gets populated by SetHeroCam on drag; a
+                        // cold-start (no drag yet) falls through to OrbitCam::default().
+                        let cam = saves
+                            .hero_cam
+                            .get(&hash)
+                            .copied()
+                            .unwrap_or_default();
+                        match ensure_hero_render(
+                            &mut w,
+                            hash,
+                            &name,
+                            &cam,
+                            &mut hero_renderers,
+                            saves.hero_textures.get(&hash).cloned(),
+                            ctx,
+                        ) {
                             Ok(tex) => {
                                 saves.hero_textures.insert(hash, tex);
                             }
@@ -8281,35 +8302,34 @@ fn export_model_data(md: &ModelData, label: &str) -> Result<String, String> {
     Ok(dir.to_string_lossy().into_owned())
 }
 
-/// Render a hero portrait for the Saves page and return it as an `egui::TextureHandle`.
+/// Render the hero portrait for the Saves page at the given [`crate::shot::OrbitCam`] and return
+/// an updated `egui::TextureHandle`.
 ///
 /// Pipeline:
-/// 1. Compute a cache path under `std::env::temp_dir()/mercs2_workshop_hero_renders/`,
-///    keyed by model hash. Reuses the "front" angle PNG from a prior render if present.
-/// 2. If no cache PNG, resolve the model via [`load_model_data`], build the SV / palette
-///    (identity bind pose — no clip binding needed for a static portrait) / draws, and
-///    call [`crate::shot::render`] to write three PNGs to the cache dir.
-/// 3. Load the "front" PNG via the `png` crate, build an `egui::ColorImage` from the
-///    RGBA8 bytes, and allocate an `egui::TextureHandle` via `ctx.load_texture`.
+/// 1. Look up (or lazily build) a per-hash [`crate::shot::HeroRenderer`] in `renderers`. The
+///    first miss pays the ~500 ms model-load + pipeline + mesh-upload cost; subsequent calls
+///    for the same hash reuse the stashed renderer.
+/// 2. Call `render_rgba(cam)` to get back one `RENDER_W x RENDER_H` RGBA8 frame — the
+///    renderer only rewrites the camera uniform, so this part is on the order of a draw +
+///    readback (~10-30 ms on an integrated GPU).
+/// 3. Build an `egui::ColorImage` from the bytes. If `existing_tex` is `Some`, mutate it in
+///    place via `TextureHandle::set` so egui reuses the GPU allocation (and the Image widget
+///    binding doesn't flicker on drag); otherwise allocate a new handle via `ctx.load_texture`.
 ///
-/// Textures are flat-shaded for now (empty `DrawTex` texture slots → the shot shader's
-/// fallback white/flat-normal/black samplers bind), which gets a silhouette-and-pose
-/// readable render without pulling in `texpng::decode_bc` + the whole MTRL resolution
-/// pipeline. A follow-up can add real diffuse/normal/specular decode for the character
-/// skin. Blocks the UI for ~1-2s per unique model, then the texture is cached forever.
-fn render_hero_portrait(
+/// Textures are still flat-shaded (empty `DrawTex` texture slots → the shot shader's fallback
+/// white/flat-normal/black samplers bind), as before. Real diffuse/normal/specular decode is
+/// a separate follow-up — "textured hero" was called out as a non-goal for the orbit round.
+fn ensure_hero_render(
     w: &mut WadStack,
     hash: u32,
     name: &str,
+    cam: &crate::shot::OrbitCam,
+    renderers: &mut HashMap<u32, crate::shot::HeroRenderer>,
+    existing_tex: Option<egui::TextureHandle>,
     ctx: &egui::Context,
 ) -> Result<egui::TextureHandle, String> {
-    let cache_dir = std::env::temp_dir().join("mercs2_workshop_hero_renders");
-    std::fs::create_dir_all(&cache_dir)
-        .map_err(|e| format!("create cache dir {}: {e}", cache_dir.display()))?;
-    let out_prefix = cache_dir.join(format!("{hash:08X}"));
-    let png_path = cache_dir.join(format!("{hash:08X}_front.png"));
-
-    if !png_path.exists() {
+    // Build-or-fetch the per-hash renderer.
+    if !renderers.contains_key(&hash) {
         let md = crate::app::load_model_data(w, hash)
             .map_err(|e| format!("load `{name}` (0x{hash:08X}): {e}"))?;
         if md.verts.is_empty() || md.indices.is_empty() || md.draws.is_empty() {
@@ -8320,9 +8340,9 @@ fn render_hero_portrait(
                 md.draws.len()
             ));
         }
-        // SV from the model's own BLENDINDICES/BLENDWEIGHT — a static identity palette on
-        // a skinned model would collapse to a bind pose, which is exactly what a portrait
-        // wants. No clip-binding here.
+        // SV from the model's own BLENDINDICES/BLENDWEIGHT. An identity palette on a skinned
+        // model collapses to a bind pose, which is what a portrait wants — pose/animation is a
+        // non-goal for this round.
         let sv: Vec<crate::shot::SV> = md
             .verts
             .iter()
@@ -8355,9 +8375,6 @@ fn render_hero_portrait(
             [0.0, 0.0, 0.0, 1.0],
         ];
         let palette: Vec<[[f32; 4]; 4]> = vec![IDENT; md.skin.rig.len().max(1)];
-        // Draws without diffuse/normal/specular — the shot shader binds its white/flat-nm/
-        // black fallbacks, yielding a readable silhouette with N·L shading. Honest for a
-        // first-pass portrait; textured decode is a dedicated follow-up.
         let draws: Vec<crate::shot::DrawTex> = md
             .draws
             .iter()
@@ -8376,31 +8393,30 @@ fn render_hero_portrait(
                 md.draws.len()
             ));
         }
-        crate::shot::render(
+        let r = crate::shot::HeroRenderer::new(
             &sv,
             &md.indices,
             &palette,
             (md.stats.bbox_min, md.stats.bbox_max),
-            out_prefix.to_string_lossy().as_ref(),
             &draws,
         );
+        renderers.insert(hash, r);
     }
 
-    // Load the "front" angle PNG and hand it to egui as a texture.
-    let bytes = std::fs::read(&png_path)
-        .map_err(|e| format!("read {}: {e}", png_path.display()))?;
-    let decoder = png::Decoder::new(std::io::Cursor::new(&bytes));
-    let mut reader = decoder
-        .read_info()
-        .map_err(|e| format!("png header {}: {e}", png_path.display()))?;
-    let mut buf = vec![0u8; reader.output_buffer_size()];
-    let info = reader
-        .next_frame(&mut buf)
-        .map_err(|e| format!("png decode {}: {e}", png_path.display()))?;
-    buf.truncate(info.buffer_size());
+    // Draw at the requested camera.
+    let renderer = renderers.get_mut(&hash).expect("just inserted");
+    let rgba = renderer.render_rgba(cam);
     let img = egui::ColorImage::from_rgba_unmultiplied(
-        [info.width as usize, info.height as usize],
-        &buf,
+        [crate::shot::RENDER_W as usize, crate::shot::RENDER_H as usize],
+        &rgba,
     );
-    Ok(ctx.load_texture(format!("hero_{hash:08X}"), img, egui::TextureOptions::LINEAR))
+    // Reuse the existing texture handle on a redraw so the Image widget stays bound to the same
+    // id — otherwise a drag-orbit frame-swap can briefly show the old texture at the new rect
+    // size while egui catches up to the new allocation.
+    if let Some(mut tex) = existing_tex {
+        tex.set(img, egui::TextureOptions::LINEAR);
+        Ok(tex)
+    } else {
+        Ok(ctx.load_texture(format!("hero_{hash:08X}"), img, egui::TextureOptions::LINEAR))
+    }
 }
