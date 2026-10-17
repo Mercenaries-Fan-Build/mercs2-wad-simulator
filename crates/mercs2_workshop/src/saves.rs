@@ -1118,14 +1118,17 @@ struct ChipStyle {
 fn mission_chip_grid(ui: &mut egui::Ui, items: &[(String, Option<String>)], s: ChipStyle) {
     let cols = 6usize;
     let gutter = 4.0;
-    // Reserve width for the ScrollArea's vertical scrollbar — ui.available_width() reports
-    // the whole viewport, so the right-most column was spilling past the panel edge. Chip
-    // Frame overhead (inner_margin 7+7 + stroke 2 = 16) is subtracted from the chip's inner
-    // width so Frame-outer lands exactly on cell_w instead of cell_w + 16.
-    let avail = (ui.available_width() - 20.0).max(100.0);
+    // Reserve 40 px off ui.available_width(): ~18 for the ScrollArea's vertical scrollbar,
+    // plus a safety band for the panel's own inner padding and the Grid's trailing spacing.
+    // 20 px wasn't enough — column 6 was still clipping. Chip Frame overhead (inner_margin
+    // 7+7 + stroke 1+1 = 16) is subtracted from the horizontal row's set_width so the
+    // Frame-outer lands exactly on cell_w. The set_width is on the HORIZONTAL child, not on
+    // the Frame's immediate inner UI — Frame measures from min_rect of its child's content,
+    // and setting width on the horizontal is what actually forces the Frame to that size.
+    let avail = (ui.available_width() - 40.0).max(100.0);
     let cell_w = (avail - (cols as f32 - 1.0) * gutter) / cols as f32;
     let chip_overhead = 16.0;
-    let chip_inner = (cell_w - chip_overhead).max(40.0);
+    let row_inner = (cell_w - chip_overhead).max(40.0);
     egui::Grid::new(ui.auto_id_with(("mission_chip_grid", items.len(), s.tag)))
         .num_columns(cols)
         .min_col_width(cell_w)
@@ -1139,8 +1142,8 @@ fn mission_chip_grid(ui: &mut egui::Ui, items: &[(String, Option<String>)], s: C
                     .rounding(egui::Rounding::same(4.0))
                     .inner_margin(egui::Margin::symmetric(7.0, 4.0))
                     .show(ui, |ui| {
-                        ui.set_width(chip_inner);
                         ui.horizontal(|ui| {
+                            ui.set_width(row_inner);
                             ui.label(
                                 egui::RichText::new(id)
                                     .monospace()
