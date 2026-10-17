@@ -415,8 +415,8 @@ pub fn navigator(ui: &mut egui::Ui, p: &Panel) -> Vec<Act> {
     // Bottom-anchored verbs, allocated first via bottom_up so the list never pushes them
     // off-screen. In bottom_up the divider is added after the buttons so it sits above them.
     ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
-        ui.add_space(8.0);
-        // Buttons share the save rows' left edge (content x minus SAVE_ROW_GUTTER).
+        ui.add_space(14.0);
+        // Buttons share the save rows' wash edges: left = heading x minus SAVE_ROW_GUTTER.
         let h = 26.0;
         let open_w = 78.0;
         let gap = 6.0;
@@ -512,13 +512,16 @@ fn navigator_head_and_list(ui: &mut egui::Ui, p: &Panel, acts: &mut Vec<Act>) {
     }
 }
 
-/// How far save-row washes (and the bottom verbs) bleed left of the content column into the
+/// How far save-row washes (and the bottom verbs) bleed left of the heading's x into the
 /// panel's left margin.
-const SAVE_ROW_GUTTER: f32 = 8.0;
+const SAVE_ROW_GUTTER: f32 = 6.0;
+/// Row content inset from the heading's x; content sits `SAVE_ROW_GUTTER + SAVE_ROW_INSET`
+/// inside the wash's left edge.
+const SAVE_ROW_INSET: f32 = 2.0;
 
-/// One flat browser row: hero badge + stem, meta line below. Content starts at the same x as
-/// the SAVES heading; the selection wash and accent bar bleed `SAVE_ROW_GUTTER` px into the
-/// panel's left margin. Selected rows get a brass wash + bar, unreadable rows a BAD bar.
+/// One flat browser row: hero badge + stem, meta line below. The selection wash and accent bar
+/// bleed `SAVE_ROW_GUTTER` px left of the heading; content sits `SAVE_ROW_INSET` px right of it.
+/// Selected rows get a brass wash + bar, unreadable rows a BAD bar.
 fn save_row(ui: &mut egui::Ui, e: &ProfileEntry, selected: bool) -> egui::Response {
     const ROW_H: f32 = 42.0;
     let (rect, resp) =
@@ -546,9 +549,14 @@ fn save_row(ui: &mut egui::Ui, e: &ProfileEntry, selected: bool) -> egui::Respon
         painter.rect_filled(bar, egui::Rounding::ZERO, c);
     }
 
-    let content = rect.shrink2(egui::vec2(0.0, 6.0));
+    let content = egui::Rect::from_min_max(
+        egui::pos2(rect.left() + SAVE_ROW_INSET, rect.top() + 6.0),
+        egui::pos2(rect.right() - 8.0, rect.bottom() - 6.0),
+    );
     let mut child = ui.child_ui(content, egui::Layout::top_down(egui::Align::LEFT), None);
     child.spacing_mut().item_spacing.y = 2.0;
+    // Selectable labels would take the press for text selection and the row never sees a click.
+    child.style_mut().interaction.selectable_labels = false;
     child.horizontal(|ui| {
         let (badge_fg, badge_bd) = if selected {
             (theme::BRASS, theme::BRASS_DK)
