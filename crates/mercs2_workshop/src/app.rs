@@ -133,6 +133,28 @@ impl WadStack {
         Ok(db.entries.into_iter().map(|e| (e.key_hash, e.text)).collect())
     }
 
+    /// Every `worldentity` template's name by key (`0x80005FD3 -> "C4"`), from the container's
+    /// `Name` records — the names `Pg.Spawn` resolves. The container resolves through the residency
+    /// registry like every other asset (overlays first).
+    pub fn template_names(&mut self) -> Result<HashMap<u32, String>, String> {
+        use mercs2_formats::worldentity::{
+            WorldEntity, RETAIL_WORLDENTITY_NAME_HASH, WORLDENTITY_TYPE_HASH,
+        };
+        let WadStack { wads, registry, .. } = self;
+        let container = registry
+            .resolve(wads, WORLDENTITY_TYPE_HASH, RETAIL_WORLDENTITY_NAME_HASH)
+            .and_then(|c| registry.slice(c).map(<[u8]>::to_vec))
+            .ok_or("worldentity: not in any open wad")?;
+        let we = WorldEntity::parse(&container).map_err(|e| format!("worldentity: {e}"))?;
+        let mut out = HashMap::new();
+        for (name, keys) in we.names().map_err(|e| format!("worldentity: {e}"))? {
+            for &k in keys {
+                out.entry(k).or_insert_with(|| name.clone());
+            }
+        }
+        Ok(out)
+    }
+
     /// The assembled model — LOD-block chain joined through the resident block. Overlays first.
     pub fn model(&mut self, hash: u32) -> Result<mercs2_engine::model::Model, String> {
         let mut last = format!("0x{hash:08X}: no model chunk in any open wad");
@@ -5354,6 +5376,10 @@ pub fn run(opts: Options) {
                     if saves.profiles.is_some() && saves.english.is_none() {
                         saves.english = Some(w.string_table("english"));
                     }
+                    // Template names for the save's carried weapons (worldentity `Name` records).
+                    if saves.profiles.is_some() && saves.templates.is_none() {
+                        saves.templates = Some(w.template_names());
+                    }
                     if let (Some((hash, name)), Some(ctx)) =
                         (saves.pending_hero_render.take(), pending_ctx.as_ref())
                     {
@@ -8467,6 +8493,23 @@ mod string_table_retail_tests {
             ("[vehicle.veyronassault]", "The Urban Commando"),
         ] {
             assert_eq!(t.get(&key_hash(key)).map(String::as_str), Some(text), "{key}");
+        }
+    }
+
+    /// The save's carried-weapon keys name their `worldentity` templates.
+    #[test]
+    fn worldentity_names_the_carried_weapon_templates() {
+        let wad = mercs2_engine::wad::resolve_vz_wad(None)
+            .expect("retail vz.wad — set vz_wad in .mercs2-local.toml or VZ_WAD");
+        let mut w = WadStack::open(&wad, &[]).expect("open retail vz.wad");
+        let names = w.template_names().expect("worldentity template names");
+        for (key, name) in [
+            (0x8000_5FD3u32, "C4"),
+            (0x8000_6ED0, "Fuel-Air RPG"),
+            (0x8000_569E, "Light MG"),
+            (0x8000_2331, "Grenade"),
+        ] {
+            assert_eq!(names.get(&key).map(String::as_str), Some(name), "0x{key:08X}");
         }
     }
 }
