@@ -50,7 +50,7 @@
 //! No save loaded ⇒ the picker shows no badges and the status reads "no save loaded"; nothing
 //! is synthesised.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 use egui::{Color32, Pos2, Rect, Sense, Stroke, Vec2};
 
@@ -1474,6 +1474,13 @@ pub struct Panel {
     pub pending_lua_open: Option<(String, u32)>,
     /// Set by `apply` when the user asks to pick a save file; drained by the host.
     pub pending_save_open: bool,
+    /// Per-mission node position overrides, keyed by mission id → node id → position.
+    /// A drag of a node writes here; `pick_mission` reapplies these on top of
+    /// `parse_mission`'s default layout so switching missions and back keeps the
+    /// arrangement the user built.
+    pub node_overrides: HashMap<String, HashMap<String, Pos2>>,
+    /// Per-mission pan/zoom overrides so view framing survives a mission switch too.
+    pub view_overrides: HashMap<String, (Vec2, f32)>,
 }
 
 impl Default for Panel {
@@ -1491,6 +1498,8 @@ impl Default for Panel {
             status: "no save loaded".into(),
             pending_lua_open: None,
             pending_save_open: false,
+            node_overrides: HashMap::new(),
+            view_overrides: HashMap::new(),
         }
     }
 }
@@ -1524,17 +1533,43 @@ impl Panel {
         let Some(entry) = self.catalog.get(idx).cloned() else {
             return;
         };
+        // Snapshot the outgoing mission's pan/zoom so coming back later lands on
+        // the same view.
+        if let Some(prev) = self.mission.as_ref() {
+            self.view_overrides
+                .insert(prev.id.clone(), (self.pan, self.zoom));
+        }
         let found = lua_corpus.iter().find(|(p, _, _)| *p == entry.path);
         match found {
             Some((p, content, _)) => {
-                self.mission = Some(parse_mission(p, content));
+                let mut mission = parse_mission(p, content);
+                // Reapply any node positions the user had dragged for this mission.
+                if let Some(ov) = self.node_overrides.get(&mission.id) {
+                    for n in mission.nodes.iter_mut() {
+                        if let Some(&pos) = ov.get(&n.id) {
+                            n.pos = pos;
+                        }
+                    }
+                }
+                self.mission = Some(mission);
                 self.selected_mission = Some(idx);
                 self.selected_node = self
                     .mission
                     .as_ref()
                     .and_then(|m| m.nodes.first().map(|_| 0));
-                self.pan = Vec2::ZERO;
-                self.zoom = 1.0;
+                // Restore the saved view if we have one for this mission; otherwise
+                // start fresh.
+                if let Some(&(pan, zoom)) = self
+                    .mission
+                    .as_ref()
+                    .and_then(|m| self.view_overrides.get(&m.id))
+                {
+                    self.pan = pan;
+                    self.zoom = zoom;
+                } else {
+                    self.pan = Vec2::ZERO;
+                    self.zoom = 1.0;
+                }
                 let nodes = self.mission.as_ref().map(|m| m.nodes.len()).unwrap_or(0);
                 let notes = self.mission.as_ref().map(|m| m.parse_notes.len()).unwrap_or(0);
                 self.status = format!(
@@ -1604,9 +1639,28 @@ impl Panel {
 pub enum Act {
     PickMission(usize),
     SelectNode(usize),
+    /// Select the given node, or clear selection if `None`. Used by the canvas
+    /// so an empty-canvas click reads as "deselect" without a separate verb.
+    SelectNodeOrClear(Option<usize>),
     ZoomDelta(f32),
     ResetView,
     PanDelta(Vec2),
+    /// Scroll-wheel zoom step, with the cursor's position so apply can keep
+    /// the point under the cursor fixed through the scale change (plain
+    /// scalar zoom pulls everything toward (0,0), which is disorienting).
+    ZoomBy {
+        factor: f32,
+        cursor: Option<Pos2>,
+        canvas_min: Pos2,
+    },
+    /// A node drag event — move node `idx` by `delta_mission_space` and
+    /// persist the new position per-mission so switching away and back keeps
+    /// it. Expressed in mission-space (pre-zoom) so the apply handler never
+    /// has to re-derive the zoom.
+    NodeDragDelta {
+        idx: usize,
+        delta_mission_space: Vec2,
+    },
     JumpToSource,
     OpenSavePicker,
     ClearSave,
@@ -1616,12 +1670,58 @@ pub fn apply(act: Act, p: &mut Panel, lua_corpus: &[(String, String, String)]) {
     match act {
         Act::PickMission(idx) => p.pick_mission(idx, lua_corpus),
         Act::SelectNode(i) => p.selected_node = Some(i),
-        Act::ZoomDelta(d) => p.zoom = (p.zoom + d).clamp(0.4, 2.5),
+        Act::SelectNodeOrClear(sel) => p.selected_node = sel,
+        Act::ZoomDelta(d) => p.zoom = (p.zoom + d).clamp(0.3, 3.0),
         Act::ResetView => {
             p.zoom = 1.0;
             p.pan = Vec2::ZERO;
         }
         Act::PanDelta(d) => p.pan += d,
+        Act::ZoomBy {
+            factor,
+            cursor,
+            canvas_min,
+        } => {
+            let old_scale = p.zoom;
+            let new_scale = (old_scale * factor).clamp(0.3, 3.0);
+            if (new_scale - old_scale).abs() < 1e-4 {
+                return;
+            }
+            if let Some(cursor) = cursor {
+                // Keep the mission-space point under the cursor fixed:
+                //   local = (cursor - origin_old) / old_scale
+                //   origin_new = cursor - local * new_scale
+                //   pan_new    = origin_new - canvas_min
+                let origin_old = canvas_min + p.pan;
+                let local = (cursor - origin_old) / old_scale;
+                p.zoom = new_scale;
+                let origin_new = cursor - local * new_scale;
+                p.pan = origin_new - canvas_min;
+            } else {
+                p.zoom = new_scale;
+            }
+        }
+        Act::NodeDragDelta {
+            idx,
+            delta_mission_space,
+        } => {
+            // Make the drag feel decisive — selection follows the thing you grabbed.
+            p.selected_node = Some(idx);
+            let Some(mission) = p.mission.as_mut() else {
+                return;
+            };
+            let Some(node) = mission.nodes.get_mut(idx) else {
+                return;
+            };
+            node.pos += delta_mission_space;
+            let mid = mission.id.clone();
+            let nid = node.id.clone();
+            let pos = node.pos;
+            p.node_overrides
+                .entry(mid)
+                .or_default()
+                .insert(nid, pos);
+        }
         Act::JumpToSource => {
             if let Some(node) = p.selected_node() {
                 if let Some(m) = &p.mission {
@@ -1868,11 +1968,58 @@ pub fn center(ctx: &egui::Context, p: &Panel) -> Vec<Act> {
                 return;
             }
 
+            // ── Background interact: pan + zoom (scroll). Allocated FIRST so
+            // nodes drawn later get the pointer when they overlap. egui's hit
+            // test prefers the LAST interactable at a point, which is exactly
+            // what we want here — nodes shadow the background.
+            let bg_resp = ui.interact(
+                rect,
+                egui::Id::new("missions-canvas-bg"),
+                Sense::click_and_drag(),
+            );
+            if bg_resp.dragged() {
+                acts.push(Act::PanDelta(bg_resp.drag_delta()));
+            }
+            if bg_resp.clicked() {
+                acts.push(Act::SelectNodeOrClear(None));
+            }
+            if bg_resp.hovered() {
+                let scroll = ui.input(|i| i.smooth_scroll_delta.y);
+                if scroll.abs() >= 0.5 {
+                    let factor = (scroll * 0.0025).exp();
+                    let cursor = ui.input(|i| i.pointer.hover_pos());
+                    acts.push(Act::ZoomBy {
+                        factor,
+                        cursor,
+                        canvas_min: rect.min,
+                    });
+                }
+            }
+
+            // Nodes — interact with click_and_drag so a drag MOVES the node and
+            // a click still selects. Register from first to last; because egui
+            // prefers the last-registered hit, nodes defined later in file
+            // order sit on top. For now that order IS the paint order.
             let scale = p.zoom;
             let origin = rect.min + p.pan;
             let node_rects = compute_node_rects(mission, origin, scale);
-            paint_wires(ui, mission, &node_rects);
+            for (i, n) in mission.nodes.iter().enumerate() {
+                let r = node_rects[i];
+                let id = egui::Id::new(("missions-node", &n.id));
+                let resp = ui.interact(r, id, Sense::click_and_drag());
+                if resp.clicked() {
+                    acts.push(Act::SelectNodeOrClear(Some(i)));
+                }
+                if resp.dragged() {
+                    acts.push(Act::NodeDragDelta {
+                        idx: i,
+                        delta_mission_space: resp.drag_delta() / scale.max(0.01),
+                    });
+                }
+            }
 
+            // Paint pass — wires first, nodes on top.
+            paint_wires(ui, mission, &node_rects);
             let overlay_state = p
                 .save
                 .as_ref()
@@ -1892,9 +2039,7 @@ pub fn center(ctx: &egui::Context, p: &Panel) -> Vec<Act> {
                 } else {
                     None
                 };
-                if paint_node(ui, n, r, selected, overlay_tint) {
-                    acts.push(Act::SelectNode(i));
-                }
+                paint_node(ui, n, r, selected, overlay_tint);
             }
 
             paint_legend(ui, rect);
@@ -2001,13 +2146,16 @@ fn bezier(painter: &egui::Painter, a: Pos2, b: Pos2, stroke: Stroke) {
     }
 }
 
+/// Paint one node card. Interaction (click / drag) is handled separately in
+/// `center` so a drag that started inside the node can continue across the
+/// background without the two interact calls fighting over the same ID.
 fn paint_node(
     ui: &mut egui::Ui,
     n: &Node,
     rect: Rect,
     selected: bool,
     overlay: Option<Color32>,
-) -> bool {
+) {
     let p = ui.painter();
     let rounding = egui::Rounding::same(10.0);
     p.rect_filled(
@@ -2081,9 +2229,10 @@ fn paint_node(
         }
     }
 
-    let id = egui::Id::new(("missions-node", &n.id));
-    let resp = ui.interact(rect, id, Sense::click());
-    resp.clicked()
+    // Interaction handled by `center` so we can combine click+drag with the
+    // background pan handler without conflicting IDs.
+    let _ = ui;
+    let _ = &n.id;
 }
 
 fn draw_pin(painter: &egui::Painter, port: Pos2, pin: &Pin, is_out: bool) {
