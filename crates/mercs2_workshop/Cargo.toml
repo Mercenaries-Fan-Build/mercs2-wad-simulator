@@ -50,6 +50,8 @@ mercs2_formats = { workspace = true }
 mercs2_quartermaster = { workspace = true }
 mercs2_bridge = { workspace = true }
 mercs2_destruction = { workspace = true }
+# Saves page Delete: moves a .profile to the OS trash (recoverable) rather than removing it.
+trash = "5"
 
 [features]
 # Builds the game-gated tests, which read the retail vz.wad named by the repo-root
