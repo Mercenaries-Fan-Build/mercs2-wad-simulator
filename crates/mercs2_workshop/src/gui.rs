@@ -520,7 +520,11 @@ pub mod theme {
                             });
                         }
                     })
-                    .body(|ui| {
+                    // `.body()` indents by egui's default indent (~18 px), eating most of
+                    // the inspector's left half for every section body. `body_unindented`
+                    // keeps the body flush with the header, so the stacked section cards
+                    // read as one aligned column.
+                    .body_unindented(|ui| {
                         ui.add_space(5.0);
                         add(ui);
                     });
