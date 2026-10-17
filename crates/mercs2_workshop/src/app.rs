@@ -4956,6 +4956,8 @@ pub fn run(opts: Options) {
                         // HUD + progression grid), not the 3D viewport (see `has_viewport`).
                         if wb == Workbench::Saves {
                             saves_acts.extend(crate::saves::center(ctx, &saves));
+                            // Floating windows: the Inspect view and the delete confirmation.
+                            saves_acts.extend(crate::saves::windows(ctx, &saves));
                         }
 
                         // ── VIEWPORT HUD: status chips over the 3D (the panels are all placed now, so
