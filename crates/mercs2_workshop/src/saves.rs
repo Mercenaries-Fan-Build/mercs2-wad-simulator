@@ -58,6 +58,18 @@ pub enum Act {
     RevealFolder,
     /// Prompt for a `.profile` anywhere on disk via a native file picker.
     OpenFilePicker,
+    /// Copy a `.profile` into `<saves>/Backups/`, verified by sha256.
+    Backup(PathBuf),
+    /// Ask to delete a `.profile`: opens the confirmation window.
+    RequestDelete(PathBuf),
+    /// Close the delete confirmation without deleting.
+    CancelDelete,
+    /// Move a `.profile` to the OS trash (the confirmation's "Move to trash").
+    ConfirmDelete(PathBuf),
+    /// Open the readable Inspect window for a `.profile`.
+    Inspect(PathBuf),
+    /// Close the Inspect window.
+    CloseInspect,
     /// `@0x18` — PMC cash. Signed-int32-shaped per the money-fuel memory; we expose
     /// `u32` to match the reader and clamp to the 1-billion cap on write.
     SetCash(u32),
@@ -230,6 +242,10 @@ pub struct Panel {
     /// `worldentity` template names by key, loaded by `app.rs` from the open WAD stack — names the
     /// save's carried weapons. `None` until loaded; `Some(Err)` names why it couldn't be.
     pub templates: Option<Result<HashMap<u32, String>, String>>,
+    /// The `.profile` awaiting delete confirmation.
+    pub confirm_delete: Option<PathBuf>,
+    /// The save the Inspect window shows, decoded once when it is opened.
+    pub inspecting: Option<crate::save_inspect::Inspected>,
 }
 
 /// The centre panel's current tab over `tFlowData`. Carried on the Panel so switching rails
@@ -556,12 +572,99 @@ fn navigator_head_and_list(ui: &mut egui::Ui, p: &Panel, acts: &mut Vec<Act>) {
         Some(entries) => {
             ui.spacing_mut().item_spacing.y = 4.0;
             for e in entries {
-                if save_row(ui, e, p.selected.as_ref() == Some(&e.path)).clicked() {
+                let resp = save_row(ui, e, p.selected.as_ref() == Some(&e.path));
+                if resp.clicked() {
                     acts.push(Act::Select(e.path.clone()));
                 }
+                resp.context_menu(|ui| save_context_menu(ui, &e.path, acts));
             }
         }
     }
+}
+
+/// The right-click menu of a save row.
+fn save_context_menu(ui: &mut egui::Ui, path: &Path, acts: &mut Vec<Act>) {
+    if ui.button("Inspect…").clicked() {
+        acts.push(Act::Inspect(path.to_path_buf()));
+        ui.close_menu();
+    }
+    if ui.button("Back up").clicked() {
+        acts.push(Act::Backup(path.to_path_buf()));
+        ui.close_menu();
+    }
+    if ui.button("Delete…").clicked() {
+        acts.push(Act::RequestDelete(path.to_path_buf()));
+        ui.close_menu();
+    }
+    ui.separator();
+    ui.add_enabled(false, egui::Button::new("New"))
+        .on_disabled_hover_text("Creating a save from scratch isn't supported yet.");
+}
+
+/// The Saves page's floating windows: the Inspect view and the delete confirmation.
+pub fn windows(ctx: &egui::Context, p: &Panel) -> Vec<Act> {
+    let mut acts = Vec::new();
+    if let Some(path) = &p.confirm_delete {
+        let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        egui::Window::new("Delete save?")
+            .id(egui::Id::new("saves.confirm_delete"))
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+            .show(ctx, |ui| {
+                ui.label(egui::RichText::new(format!("Move “{name}” to the trash?")).color(theme::TX));
+                ui.label(egui::RichText::new(path.display().to_string()).small().color(theme::FAINT));
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Move to trash").clicked() {
+                        acts.push(Act::ConfirmDelete(path.clone()));
+                    }
+                    if ui.button("Cancel").clicked() {
+                        acts.push(Act::CancelDelete);
+                    }
+                });
+            });
+    }
+    if let Some(ins) = &p.inspecting {
+        let lk = crate::save_tables::Lookups {
+            english: p.english.as_ref().and_then(|r| r.as_ref().ok()),
+            templates: p.templates.as_ref().and_then(|r| r.as_ref().ok()),
+        };
+        if !crate::save_inspect::show(ctx, ins, lk) {
+            acts.push(Act::CloseInspect);
+        }
+    }
+    acts
+}
+
+/// Copy `src` into `backups` as `<stem> <YYYY-MM-DD HH-MM-SS UTC>.profile` (a ` (n)` suffix
+/// when that name is taken), never overwriting, and verify the copy's sha256 against the source.
+fn backup_profile(src: &Path, backups: &Path, now_unix: i64) -> Result<PathBuf, String> {
+    let bytes = std::fs::read(src).map_err(|e| format!("read {}: {e}", src.display()))?;
+    let want = crate::publish::sha256_hex(&bytes);
+    std::fs::create_dir_all(backups).map_err(|e| format!("{}: {e}", backups.display()))?;
+    let stem = src.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "save".into());
+    let stamp = backup_stamp(now_unix);
+    let mut out = backups.join(format!("{stem} {stamp}.profile"));
+    let mut n = 2;
+    while out.exists() {
+        out = backups.join(format!("{stem} {stamp} ({n}).profile"));
+        n += 1;
+    }
+    {
+        use std::io::Write;
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&out)
+            .map_err(|e| format!("{}: {e}", out.display()))?;
+        f.write_all(&bytes).map_err(|e| format!("{}: {e}", out.display()))?;
+    }
+    let got = crate::publish::sha256_hex(&std::fs::read(&out).map_err(|e| format!("{}: {e}", out.display()))?);
+    if got != want {
+        return Err(format!("{}: copy sha256 {got} != source {want}", out.display()));
+    }
+    Ok(out)
 }
 
 /// One flat browser row: hero badge + stem, meta line below. Mockup geometry: the list sits
@@ -1625,10 +1728,22 @@ fn hero_outfits(index: u8) -> &'static [(&'static str, &'static str)] {
 /// civil-from-days conversion (Howard Hinnant's standard trick) so the Workshop doesn't
 /// take a chrono / humantime dep just for one line in the inspector.
 fn timestamp_utc(t: u32) -> String {
-    let total = t as i64;
+    let (year, month, day, hour, minute, _) = civil_utc(t as i64);
+    format!("{year:04}-{month:02}-{day:02} {hour:02}:{minute:02} UTC")
+}
+
+/// A backup filename stamp, `2026-10-17 18-42-05 UTC` — no `:`, which Windows forbids in names.
+fn backup_stamp(t: i64) -> String {
+    let (year, month, day, hour, minute, second) = civil_utc(t);
+    format!("{year:04}-{month:02}-{day:02} {hour:02}-{minute:02}-{second:02} UTC")
+}
+
+/// Unix seconds to UTC `(year, month, day, hour, minute, second)`.
+fn civil_utc(total: i64) -> (i64, u64, u64, i64, i64, i64) {
     let (days, secs_in_day) = (total.div_euclid(86_400), total.rem_euclid(86_400));
     let hour = secs_in_day / 3600;
     let minute = (secs_in_day % 3600) / 60;
+    let second = secs_in_day % 60;
     // Civil from days (Hinnant): shift so year 0000-03-01 is day 0, then invert.
     let z = days + 719_468;
     let era = if z >= 0 { z / 146_097 } else { (z - 146_096) / 146_097 };
@@ -1640,7 +1755,7 @@ fn timestamp_utc(t: u32) -> String {
     let day = doy - (153 * mp + 2) / 5 + 1;
     let month = if mp < 10 { mp + 3 } else { mp - 9 };
     let year = y_shift + if month <= 2 { 1 } else { 0 };
-    format!("{year:04}-{month:02}-{day:02} {hour:02}:{minute:02} UTC")
+    (year, month, day, hour, minute, second)
 }
 
 /// A labelled unsigned-integer scalar edit. Clamps to `[0, max]` so a `u32` can't underflow.
@@ -2176,9 +2291,8 @@ fn profile_differs(pending: &Profile, on_disk: &Profile) -> bool {
 
 /// The top-row verbs: Reload / Back up / Diff vs original / Discard / Write.
 ///
-/// Order matches the mockup. "Back up" and "Diff vs original" are stubs for now (disabled
-/// with explanatory hover text) — the backup wants a destination picker + versioned filename
-/// scheme, and the diff wants a baseline-snapshot store, both deferrable. "Write to .profile"
+/// Order matches the mockup. "Back up" copies the selected save into `SaveGames/Backups/`;
+/// "Diff vs original" is disabled with hover text — it needs a baseline-snapshot store. "Write to .profile"
 /// is only live when there is a selection AND pending edits actually differ from the on-disk
 /// header, so a disabled button for a clean save tells the user they have nothing queued
 /// without them having to compare the inspector by eye.
@@ -2187,11 +2301,16 @@ pub fn verbs(ui: &mut egui::Ui, p: &Panel) -> Vec<Act> {
     if ui.button("Reload from disk").clicked() {
         acts.push(Act::Reload);
     }
-    ui.add_enabled(false, egui::Button::new("Back up"))
-        .on_disabled_hover_text(
-            "Copy the current `.profile` to a timestamped sibling. Not wired yet — \
-             needs a destination picker and a versioned filename scheme.",
-        );
+    if ui
+        .add_enabled(p.selected.is_some(), egui::Button::new("Back up"))
+        .on_hover_text("Copy this .profile into SaveGames/Backups/ (sha256-verified)")
+        .on_disabled_hover_text("Select a save to back it up")
+        .clicked()
+    {
+        if let Some(path) = &p.selected {
+            acts.push(Act::Backup(path.clone()));
+        }
+    }
     ui.add_enabled(false, egui::Button::new("Diff vs original"))
         .on_disabled_hover_text(
             "Byte-diff the pending Profile against an on-launch snapshot of the on-disk \
@@ -2304,13 +2423,54 @@ pub fn apply(act: Act, p: &mut Panel) {
         Act::RevealFolder => {
             if let Some(dir) = &p.saves_dir {
                 #[cfg(target_os = "macos")]
-                let _ = std::process::Command::new("open").arg(dir).spawn();
+                let opener = "open";
                 #[cfg(target_os = "windows")]
-                let _ = std::process::Command::new("explorer").arg(dir).spawn();
+                let opener = "explorer";
                 #[cfg(all(unix, not(target_os = "macos")))]
-                let _ = std::process::Command::new("xdg-open").arg(dir).spawn();
+                let opener = "xdg-open";
+                if let Err(e) = std::process::Command::new(opener).arg(dir).spawn() {
+                    p.status = format!("reveal folder failed: {opener}: {e}");
+                }
             }
         }
+        Act::Backup(path) => {
+            let Some(dir) = p.saves_dir.clone() else {
+                p.status = "backup failed: the saves folder is unknown".into();
+                return;
+            };
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0);
+            p.status = match backup_profile(&path, &dir.join("Backups"), now) {
+                Ok(out) => format!("backed up to Backups/{}", out.file_name().unwrap_or_default().to_string_lossy()),
+                Err(e) => format!("backup failed: {e}"),
+            };
+        }
+        Act::RequestDelete(path) => p.confirm_delete = Some(path),
+        Act::CancelDelete => p.confirm_delete = None,
+        Act::ConfirmDelete(path) => {
+            p.confirm_delete = None;
+            let name = path.file_name().unwrap_or_default().to_string_lossy().into_owned();
+            match trash::delete(&path) {
+                Ok(()) if path.exists() => {
+                    p.status = format!("delete failed: {name} is still there after moving it to the trash");
+                }
+                Ok(()) => {
+                    if p.selected.as_ref() == Some(&path) {
+                        p.selected = None;
+                    }
+                    if p.inspecting.as_ref().is_some_and(|i| i.path == path) {
+                        p.inspecting = None;
+                    }
+                    p.refresh();
+                    p.status = format!("moved {name} to the trash");
+                }
+                Err(e) => p.status = format!("delete failed: {name}: {e}"),
+            }
+        }
+        Act::Inspect(path) => p.inspecting = Some(crate::save_inspect::Inspected::load(&path)),
+        Act::CloseInspect => p.inspecting = None,
         Act::OpenFilePicker => {
             let mut d = rfd::FileDialog::new()
                 .set_title("Pick a .profile")
@@ -2474,6 +2634,40 @@ mod tests {
         assert_eq!(hms(300), "00h05m");
         assert_eq!(hms(24_266), "06h44m");
         assert_eq!(hms(246_334), "68h25m");
+    }
+}
+
+#[cfg(test)]
+mod backup_tests {
+    use super::{backup_profile, backup_stamp};
+    use mercs2_formats::game_paths;
+
+    #[test]
+    fn backup_copies_verifies_and_never_overwrites() {
+        let src = game_paths::save_fixtures().join("Chris Jacobs_6A499ED6.profile");
+        let dir = std::env::temp_dir().join(format!("mercs2-backup-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let t = 1_792_079_680; // 2026-10-15 15:54:40 UTC
+        let a = backup_profile(&src, &dir, t).expect("first backup");
+        let b = backup_profile(&src, &dir, t).expect("second backup, same second");
+        assert_eq!(
+            a.file_name().unwrap().to_string_lossy(),
+            "Chris Jacobs_6A499ED6 2026-10-15 15-54-40 UTC.profile"
+        );
+        assert_eq!(
+            b.file_name().unwrap().to_string_lossy(),
+            "Chris Jacobs_6A499ED6 2026-10-15 15-54-40 UTC (2).profile"
+        );
+        let want = std::fs::read(&src).unwrap();
+        assert_eq!(std::fs::read(&a).unwrap(), want);
+        assert_eq!(std::fs::read(&b).unwrap(), want);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn backup_stamp_has_no_colons() {
+        assert_eq!(backup_stamp(0), "1970-01-01 00-00-00 UTC");
+        assert!(!backup_stamp(1_792_079_680).contains(':'));
     }
 }
 
