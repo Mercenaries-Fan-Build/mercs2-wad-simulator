@@ -362,7 +362,19 @@ pub struct SaveState {
     /// Misha), each present only after its unlock mission. `MrxStarterManager.SaveSingleton` writes only
     /// unlocked starters, so this is the source of truth for which PMC-interior recruit layers load. FACT.
     pub unlocked_starters: Vec<String>,
+    /// `tStatsData.nCompletedToolboxes` — toolbox (spare-part) pickups collected, the PDA's
+    /// "Toolboxes collected" stat. `MrxStatsManager.SaveSingleton`
+    /// (`resident/mrxstatsmanager.lua:119-122`) writes it; `CompleteToolboxPart` (`:387-388`)
+    /// increments it on every `PmcJob001` SpareParts pickup. Shown against [`TOTAL_TOOLBOXES`] but
+    /// uncapped — the `Mattias Nilsson_6A0E523C` fixture holds 103. `None` when the save has no
+    /// `tStatsData` / no such key. FACT.
+    pub completed_toolboxes: Option<u32>,
 }
+
+/// `nTotalToolbox` — the fixed toolbox total the PDA divides by
+/// (`resident/mrxstatsmanager.lua:11`), equal to `PmcJob001`'s `_SetQuota(100)`
+/// (`vz/pmcjob001.lua:9`). FACT.
+pub const TOTAL_TOOLBOXES: u32 = 100;
 
 /// One transit landing zone as a save records it.
 ///
@@ -710,6 +722,12 @@ pub fn parse_save_state(lua: &str) -> Result<SaveState, String> {
         .map(parse_transit)
         .unwrap_or((false, Vec::new()));
 
+    // Serialized as a float (`12.000000`), like every Lua number in the save.
+    let completed_toolboxes = table_body(lua, "tStatsData")
+        .and_then(|b| scalar_value(b, "nCompletedToolboxes"))
+        .and_then(|s| s.parse::<f64>().ok())
+        .map(|n| n as u32);
+
     Ok(SaveState {
         flow_chain,
         active_missions,
@@ -721,6 +739,7 @@ pub fn parse_save_state(lua: &str) -> Result<SaveState, String> {
         unlocked_starters,
         transit_enabled,
         transit_zones,
+        completed_toolboxes,
     })
 }
 
@@ -1174,6 +1193,36 @@ mod tests {
             "flow flags: {}",
             st.completed_flow.len()
         );
+    }
+
+    #[test]
+    fn completed_toolboxes_decodes_from_every_fixture() {
+        let dir = save_dir();
+        for name in ALL_SAVES {
+            let st = parse(&load_from(&dir, name)).unwrap().save_state().unwrap();
+            assert!(
+                st.completed_toolboxes.is_some(),
+                "{name}: tStatsData.nCompletedToolboxes not decoded"
+            );
+        }
+        // The counter is uncapped: the high-progress fixture is past the 100 total.
+        let st = parse(&load_from(&dir, "Mattias Nilsson_6A0E523C.profile"))
+            .unwrap()
+            .save_state()
+            .unwrap();
+        assert_eq!(st.completed_toolboxes, Some(103));
+    }
+
+    #[test]
+    fn completed_toolboxes_reads_the_stats_table_only() {
+        let lua = r#"return { ["nTimeElapsed"] = 1.000000, ["tLayerData"] = { },
+            ["nCompletedToolboxes"] = 99.000000,
+            ["tStatsData"] = { ["nDeaths"] = 3.000000, ["nCompletedToolboxes"] = 12.000000, } }"#;
+        let st = parse_save_state(lua).unwrap();
+        assert_eq!(st.completed_toolboxes, Some(12));
+        let none = parse_save_state(r#"return { ["nTimeElapsed"] = 1.000000, ["tLayerData"] = { } }"#)
+            .unwrap();
+        assert_eq!(none.completed_toolboxes, None);
     }
 
     #[test]
