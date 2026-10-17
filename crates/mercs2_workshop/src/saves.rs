@@ -512,6 +512,7 @@ fn navigator_head_and_list(ui: &mut egui::Ui, p: &Panel, acts: &mut Vec<Act>) {
             );
         }
         Some(entries) => {
+            ui.spacing_mut().item_spacing.y = 4.0;
             for e in entries {
                 if save_row(ui, e, p.selected.as_ref() == Some(&e.path)).clicked() {
                     acts.push(Act::Select(e.path.clone()));
