@@ -836,7 +836,7 @@ fn asset_menu(
     actions: &mut Vec<Act>,
 ) {
     use crate::gui::theme;
-    ui.label(theme::disp_text(label.to_uppercase(), 10.0, theme::BRASS));
+    ui.label(theme::disp_text(label.to_uppercase(), theme::style_eyebrow(), theme::BRASS));
     ui.separator();
 
     if is_texture {
@@ -909,7 +909,7 @@ fn asset_menu(
 /// field from the label, so the resulting contribution names this exact layer.
 fn layer_menu(ui: &mut egui::Ui, hash: u32, label: &str, actions: &mut Vec<Act>) {
     use crate::gui::theme;
-    ui.label(theme::disp_text(label.to_uppercase(), 10.0, theme::BRASS));
+    ui.label(theme::disp_text(label.to_uppercase(), theme::style_eyebrow(), theme::BRASS));
     ui.separator();
     ui.menu_button("Add to Shipment", |ui| {
         for (kind, what) in crate::quartermaster::routes_for_layer() {
@@ -1906,8 +1906,8 @@ pub fn run(opts: Options) {
                             ui.horizontal_centered(|ui| {
                                 theme::brand_mark(ui);
                                 ui.add_space(6.0);
-                                ui.label(theme::disp_text("MERCS 2", 16.0, theme::TX));
-                                ui.label(theme::disp_text("WORKSHOP", 9.5, theme::FAINT));
+                                ui.label(theme::disp_text("MERCS 2", theme::style_title(), theme::TX));
+                                ui.label(theme::disp_text("WORKSHOP", theme::style_eyebrow(), theme::FAINT));
                                 ui.separator();
                                 // A craft surface was entered FROM the Shipment, so it offers the way
                                 // back. Without this the rail no longer lists it and there is no
@@ -1916,7 +1916,7 @@ pub fn run(opts: Options) {
                                     && ui
                                         .add(egui::Button::new(theme::disp_text(
                                             "\u{2039} SHIPMENT",
-                                            10.0,
+                                            theme::style_eyebrow(),
                                             theme::BRASS,
                                         )))
                                         .on_hover_text("Back to the Shipment")
@@ -1924,7 +1924,7 @@ pub fn run(opts: Options) {
                                 {
                                     wb = Workbench::Quartermaster;
                                 }
-                                ui.label(theme::disp_text(wb.verb().to_uppercase(), 10.0, theme::FAINT));
+                                ui.label(theme::disp_text(wb.verb().to_uppercase(), theme::style_eyebrow(), theme::FAINT));
                                 // The breadcrumb names what the PAGE is working on. On the Shipment
                                 // page that is the Shipment — showing the previewed model instead
                                 // pointed at whatever Inspect happened to be holding.
@@ -2076,16 +2076,16 @@ pub fn run(opts: Options) {
                                 if let Some((dot_color, dot_text, detail)) = saves_banner {
                                     theme::status_dot(ui, dot_text, dot_color);
                                     ui.separator();
-                                    ui.label(egui::RichText::new(detail).color(theme::DIM).size(11.0));
+                                    ui.label(egui::RichText::new(detail).color(theme::DIM).small());
                                 } else if names_pending {
                                     theme::status_dot(ui, "Loading", theme::BRASS);
                                     ui.add(egui::Spinner::new().size(11.0));
                                     ui.separator();
-                                    ui.label(egui::RichText::new(status.as_str()).color(theme::DIM).size(11.0));
+                                    ui.label(egui::RichText::new(status.as_str()).color(theme::DIM).small());
                                 } else {
                                     theme::status_dot(ui, "Ready", theme::GOOD);
                                     ui.separator();
-                                    ui.label(egui::RichText::new(status.as_str()).color(theme::DIM).size(11.0));
+                                    ui.label(egui::RichText::new(status.as_str()).color(theme::DIM).small());
                                 }
                                 // Bottom-right: background work in flight (clip decodes,
                                 // mod publishing).
@@ -2136,7 +2136,7 @@ pub fn run(opts: Options) {
                             }
                             Workbench::Inspect => {
                             let before = (kind, filter.clone());
-                            ui.label(theme::disp_text("ASSETS", 15.0, theme::TX));
+                            ui.label(theme::disp_text("ASSETS", theme::style_title(), theme::TX));
                             ui.add_space(8.0);
                             // Segmented Models / Textures toggle — two EQUAL-width segments, each a
                             // centred "LABEL  count" unit, the active one filled. Custom-drawn so the
@@ -2160,12 +2160,12 @@ pub fn run(opts: Options) {
                                             let p0 = ui.painter();
                                             let g_name = p0.layout_no_wrap(
                                                 name.to_uppercase(),
-                                                egui::FontId::new(10.0, theme::disp()),
+                                                theme::font(&theme::style_eyebrow()),
                                                 theme::TX,
                                             );
                                             let g_cnt = p0.layout_no_wrap(
                                                 commafy(count),
-                                                egui::FontId::monospace(9.0),
+                                                theme::font(&egui::TextStyle::Monospace),
                                                 theme::FAINT,
                                             );
                                             let gap = 5.0;
@@ -2327,13 +2327,12 @@ pub fn run(opts: Options) {
                                                     ));
                                                     ui.label(theme::disp_text(
                                                         cat.to_uppercase(),
-                                                        10.0,
+                                                        theme::style_eyebrow(),
                                                         theme::FAINT,
                                                     ));
                                                     ui.label(
                                                         egui::RichText::new(n.to_string())
                                                             .monospace()
-                                                            .size(9.5)
                                                             .color(theme::FAINT),
                                                     );
                                                     // Claim the rest of the row so the click target
@@ -2403,7 +2402,7 @@ pub fn run(opts: Options) {
                                 // Scene OUTLINER: the placed instances, plus a place-from-library
                                 // search — the Sandbox is about arranging many objects, so this is
                                 // its own list, not the asset browser.
-                                ui.label(theme::disp_text("SCENE", 15.0, theme::TX));
+                                ui.label(theme::disp_text("SCENE", theme::style_title(), theme::TX));
                                 ui.weak("Objects placed in this scene. Select to transform.");
                                 ui.add_space(8.0);
                                 egui::Frame::none()
@@ -2484,12 +2483,12 @@ pub fn run(opts: Options) {
                                             ui.add_space(4.0);
                                             let r = ui.selectable_label(
                                                 sel,
-                                                egui::RichText::new(&plabel).size(12.5),
+                                                egui::RichText::new(&plabel),
                                             );
                                             ui.with_layout(
                                                 egui::Layout::right_to_left(egui::Align::Center),
                                                 |ui| {
-                                                    ui.label(egui::RichText::new(format!("n{i}")).monospace().size(9.5).color(theme::FAINT));
+                                                    ui.label(egui::RichText::new(format!("n{i}")).monospace().color(theme::FAINT));
                                                 },
                                             );
                                             r
@@ -2520,7 +2519,7 @@ pub fn run(opts: Options) {
                                 }
                             }
                             Workbench::Mods => {
-                                ui.label(theme::disp_text("Donor templates", 15.0, theme::TX));
+                                ui.label(theme::disp_text("Donor templates", theme::style_title(), theme::TX));
                                 ui.weak("Pick ANY host template — vehicle, character, building or prop \
                                          — it becomes the conform donor whose container hosts the \
                                          injected geometry.");
@@ -2532,7 +2531,7 @@ pub fn run(opts: Options) {
                                     for (class, rows) in &vehicle_inventory {
                                         egui::CollapsingHeader::new(theme::disp_text(
                                             format!("{class}  ({})", rows.len()),
-                                            13.0,
+                                            theme::style_title(),
                                             theme::DIM,
                                         ))
                                         .default_open(*class == "helicopter")
@@ -2562,7 +2561,7 @@ pub fn run(opts: Options) {
                                 if have_target && !show_target_picker && retarget.is_some() {
                                     if let (Some(r), Some((_, tl))) = (&retarget, &retarget_target) {
                                         ui.horizontal(|ui| {
-                                            ui.label(theme::disp_text("Skeletons", 15.0, theme::TX));
+                                            ui.label(theme::disp_text("Skeletons", theme::style_title(), theme::TX));
                                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                                 if ui.small_button("change target").clicked() {
                                                     show_target_picker = true;
@@ -2592,7 +2591,7 @@ pub fn run(opts: Options) {
                                         });
                                     }
                                 } else {
-                                    ui.label(theme::disp_text("Skeleton source", 15.0, theme::TX));
+                                    ui.label(theme::disp_text("Skeleton source", theme::style_title(), theme::TX));
                                     ui.separator();
                                     match &retarget {
                                         Some(r) => {
@@ -2636,9 +2635,9 @@ pub fn run(opts: Options) {
                             // domain-specific surface; the viewport, inspector and verbs are Inspect's,
                             // so picking a model here shows it there exactly as browsing Inspect would.
                             Workbench::Domain(d) => {
-                                ui.label(theme::disp_text(d.label().to_uppercase(), 15.0, theme::TX));
+                                ui.label(theme::disp_text(d.label().to_uppercase(), theme::style_title(), theme::TX));
                                 ui.add_space(4.0);
-                                ui.label(egui::RichText::new(d.blurb()).size(11.5).color(theme::FAINT));
+                                ui.label(egui::RichText::new(d.blurb()).small().color(theme::FAINT));
                                 ui.add_space(9.0);
                                 if d.browses_models() {
                                     // The lens-filtered model list, grouped by the Library's own
@@ -2652,7 +2651,7 @@ pub fn run(opts: Options) {
                                     });
                                     ui.label(theme::disp_text(
                                         format!("{} model(s)", rows.len()),
-                                        10.0,
+                                        theme::style_eyebrow(),
                                         theme::FAINT,
                                     ));
                                     ui.add_space(4.0);
@@ -2671,8 +2670,7 @@ pub fn run(opts: Options) {
                                                 if sel_now { theme::BRASS_SOFT } else { egui::Color32::TRANSPARENT },
                                                 theme::LINE,
                                                 |ui| {
-                                                    ui.label(egui::RichText::new(r.label())
-                                                        .size(11.5)
+                                                    ui.label(egui::RichText::new(r.label()).small()
                                                         .color(if sel_now { theme::BRASS } else { theme::TX }));
                                                 },
                                             );
@@ -2695,7 +2693,7 @@ pub fn run(opts: Options) {
                                             theme::eyebrow(ui, "World-state overlays");
                                             ui.label(theme::disp_text(
                                                 format!("{} layer(s) — right-click to route", layers.len()),
-                                                10.0,
+                                                theme::style_eyebrow(),
                                                 theme::FAINT,
                                             ));
                                             ui.add_space(3.0);
@@ -2708,7 +2706,7 @@ pub fn run(opts: Options) {
                                                     theme::LINE,
                                                     |ui| {
                                                         ui.label(egui::RichText::new(r.label())
-                                                            .monospace().size(10.5).color(theme::TX));
+                                                            .monospace().color(theme::TX));
                                                     },
                                                 );
                                                 resp.context_menu(|ui| {
@@ -2723,7 +2721,7 @@ pub fn run(opts: Options) {
                                         ui.add_space(6.0);
                                         ui.label(egui::RichText::new(
                                             "Right-click a hero → Add to Shipment ▸ add_outfit, then Edit rig in Craft.",
-                                        ).size(10.0).color(theme::FAINT));
+                                        ).small().color(theme::FAINT));
                                     }
                                 } else {
                                     // Audio / Missions / Systems: not model rows, but NOT empty either
@@ -2738,22 +2736,22 @@ pub fn run(opts: Options) {
                                         let banks = audio_idx.banks();
                                         if banks.is_empty() {
                                             let rows = index.rows(crate::index::Kind::Audio);
-                                            ui.label(theme::disp_text(format!("{} bank asset(s)", rows.len()), 10.0, theme::FAINT));
+                                            ui.label(theme::disp_text(format!("{} bank asset(s)", rows.len()), theme::style_eyebrow(), theme::FAINT));
                                             egui::ScrollArea::vertical().max_height(list_h).auto_shrink([false, false]).show(ui, |ui| {
                                                 for r in rows {
                                                     theme::row_chip(ui, egui::Color32::TRANSPARENT, theme::LINE, |ui| {
-                                                        ui.label(egui::RichText::new(r.label()).monospace().size(10.5).color(theme::TX));
+                                                        ui.label(egui::RichText::new(r.label()).monospace().color(theme::TX));
                                                     });
                                                 }
                                             });
                                         } else {
                                             let total: usize = banks.iter().map(|(_, n)| *n).sum();
-                                            ui.label(theme::disp_text(format!("{total} clip(s) across {} banks", banks.len()), 10.0, theme::FAINT));
+                                            ui.label(theme::disp_text(format!("{total} clip(s) across {} banks", banks.len()), theme::style_eyebrow(), theme::FAINT));
                                             ui.add_space(3.0);
                                             egui::ScrollArea::vertical().max_height(list_h).auto_shrink([false, false]).show(ui, |ui| {
                                                 for (bank, n) in banks {
                                                     egui::CollapsingHeader::new(
-                                                        egui::RichText::new(format!("{bank}  ·  {n}")).monospace().size(11.0).color(theme::TX)
+                                                        egui::RichText::new(format!("{bank}  ·  {n}")).monospace().color(theme::TX)
                                                     ).id_source(("audiobank", &bank)).show(ui, |ui| {
                                                         for clip in audio_idx.by_bank(&bank).into_iter().take(300) {
                                                             let cap = if clip.caption.is_empty() { clip.stem().to_string() } else { clip.caption.clone() };
@@ -2761,19 +2759,19 @@ pub fn run(opts: Options) {
                                                             ui.horizontal(|ui| {
                                                                 // ▶ streams the clip straight from vo_stream.english.pws.
                                                                 if let Some(wi) = clip.wave_index {
-                                                                    if ui.add(egui::Button::new(egui::RichText::new("\u{25B6}").size(9.0)).small())
+                                                                    if ui.add(egui::Button::new(egui::RichText::new("\u{25B6}").small()).small())
                                                                         .on_hover_text(format!("play \u{2014} {:.1}s from vo_stream.english.pws", clip.duration_s))
                                                                         .clicked()
                                                                     {
                                                                         actions.push(Act::PlayClip(wi));
                                                                     }
                                                                 }
-                                                                ui.label(egui::RichText::new(&line).size(10.0).color(theme::DIM))
+                                                                ui.label(egui::RichText::new(&line).small().color(theme::DIM))
                                                                     .on_hover_text(format!("{}\n{:.1}s", clip.original, clip.duration_s));
                                                             });
                                                         }
                                                         if n > 300 {
-                                                            ui.label(egui::RichText::new(format!("+{} more…", n - 300)).size(9.5).color(theme::FAINT));
+                                                            ui.label(egui::RichText::new(format!("+{} more…", n - 300)).small().color(theme::FAINT));
                                                         }
                                                     });
                                                 }
@@ -2786,13 +2784,13 @@ pub fn run(opts: Options) {
                                         let mut hits: Vec<&(String, String, String)> =
                                             lua_corpus.iter().filter(|(p, _, _)| d.script_lens(p)).collect();
                                         hits.sort_by(|a, b| a.0.cmp(&b.0));
-                                        ui.label(theme::disp_text(format!("{} script(s)", hits.len()), 10.0, theme::FAINT));
+                                        ui.label(theme::disp_text(format!("{} script(s)", hits.len()), theme::style_eyebrow(), theme::FAINT));
                                         ui.add_space(3.0);
                                         egui::ScrollArea::vertical().max_height(list_h).auto_shrink([false, false]).show(ui, |ui| {
                                             for (path, _, _) in hits {
                                                 let stem = path.rsplit(['/', '\\']).next().unwrap_or(path).trim_end_matches(".lua").to_string();
                                                 let resp = theme::row_chip(ui, egui::Color32::TRANSPARENT, theme::LINE, |ui| {
-                                                    ui.label(egui::RichText::new(&stem).monospace().size(10.5).color(theme::TX));
+                                                    ui.label(egui::RichText::new(&stem).monospace().color(theme::TX));
                                                 });
                                                 if resp.clicked() {
                                                     actions.push(Act::LuaOpen(path.clone()));
@@ -2800,7 +2798,7 @@ pub fn run(opts: Options) {
                                                 let stem2 = stem.clone();
                                                 let kinds = d.kinds();
                                                 resp.context_menu(|ui| {
-                                                    ui.label(theme::disp_text(stem2.to_uppercase(), 10.0, theme::BRASS));
+                                                    ui.label(theme::disp_text(stem2.to_uppercase(), theme::style_eyebrow(), theme::BRASS));
                                                     ui.separator();
                                                     if ui.button("Open in Lua viewer").clicked() {
                                                         actions.push(Act::LuaOpen(path.clone()));
@@ -2840,13 +2838,12 @@ pub fn run(opts: Options) {
                             // rides in hover text, because it is what you read ONCE and the state is
                             // what you read every time.
                             Workbench::Settings => {
-                                ui.label(theme::disp_text("SETTINGS", 15.0, theme::TX));
+                                ui.label(theme::disp_text("SETTINGS", theme::style_title(), theme::TX));
                                 ui.add_space(4.0);
                                 ui.label(
                                     egui::RichText::new(
                                         "The paths the tool cannot discover for itself on every platform.",
-                                    )
-                                    .size(11.5)
+                                    ).small()
                                     .color(theme::FAINT),
                                 );
                                 ui.add_space(9.0);
@@ -2859,11 +2856,10 @@ pub fn run(opts: Options) {
                                             ui.set_width(ui.available_width());
                                             ui.label(
                                                 egui::RichText::new(s.label())
-                                                    .size(12.5)
                                                     .color(if on { theme::BRASS } else { theme::TX }),
                                             );
                                             ui.label(
-                                                egui::RichText::new(s.blurb()).size(10.5).color(theme::FAINT),
+                                                egui::RichText::new(s.blurb()).small().color(theme::FAINT),
                                             );
                                         })
                                         .response;
@@ -2919,7 +2915,7 @@ pub fn run(opts: Options) {
                                         let head = ui.add(
                                             egui::Label::new(theme::disp_text(
                                                 plabel.to_uppercase(),
-                                                19.0,
+                                                egui::TextStyle::Heading,
                                                 theme::TX,
                                             ))
                                             .sense(egui::Sense::click()),
@@ -2927,7 +2923,6 @@ pub fn run(opts: Options) {
                                         ui.label(
                                             egui::RichText::new(format!("0x{:08X}", p.hash))
                                                 .monospace()
-                                                .size(11.5)
                                                 .color(theme::DIM),
                                         );
                                         ui.add_space(8.0);
@@ -3105,8 +3100,8 @@ pub fn run(opts: Options) {
                                                         }
                                                         cur_rank = Some(rank);
                                                         ui.horizontal(|ui| {
-                                                            ui.label(theme::disp_text(label.to_uppercase(), 9.5, theme::BRASS));
-                                                            ui.label(egui::RichText::new(hint).size(10.0).color(theme::FAINT));
+                                                            ui.label(theme::disp_text(label.to_uppercase(), theme::style_eyebrow(), theme::BRASS));
+                                                            ui.label(egui::RichText::new(hint).small().color(theme::FAINT));
                                                         });
                                                         ui.add_space(4.0);
                                                     }
@@ -3130,14 +3125,12 @@ pub fn run(opts: Options) {
                                                                 ui.label(
                                                                     egui::RichText::new(lod_levels(mask))
                                                                         .monospace()
-                                                                        .size(11.5)
                                                                         .color(if hit { theme::TX } else { theme::DIM }),
                                                                 );
                                                                 ui.add_space(4.0);
                                                                 ui.label(
                                                                     egui::RichText::new(format!("0x{mask:02X}"))
                                                                         .monospace()
-                                                                        .size(11.0)
                                                                         .color(theme::FAINT),
                                                                 );
                                                                 ui.add_space(8.0);
@@ -3145,17 +3138,16 @@ pub fn run(opts: Options) {
                                                                     egui::RichText::new(format!(
                                                                         "{n} mesh{}",
                                                                         if n == 1 { "" } else { "es" }
-                                                                    ))
-                                                                    .size(11.5)
+                                                                    )).small()
                                                                     .color(theme::DIM),
                                                                 );
                                                                 ui.with_layout(
                                                                     egui::Layout::right_to_left(egui::Align::Center),
                                                                     |ui| {
                                                                         if hit {
-                                                                            ui.label(egui::RichText::new("✔ passes").size(11.5).color(theme::GOOD));
+                                                                            ui.label(egui::RichText::new("✔ passes").small().color(theme::GOOD));
                                                                         } else {
-                                                                            ui.label(egui::RichText::new("✖ filtered").size(11.5).color(theme::FAINT));
+                                                                            ui.label(egui::RichText::new("✖ filtered").small().color(theme::FAINT));
                                                                         }
                                                                     },
                                                                 );
@@ -3228,7 +3220,7 @@ pub fn run(opts: Options) {
                                                     |ui| {
                                                         ui.label(theme::disp_text(
                                                             "enter/exit command scripts, shown per selected state below",
-                                                            9.0,
+                                                            theme::style_eyebrow(),
                                                             theme::FAINT,
                                                         ));
                                                     },
@@ -3242,7 +3234,7 @@ pub fn run(opts: Options) {
                                                             let cur = p.node_state.get(ni).copied().unwrap_or(0);
                                                             ui.label(theme::disp_text(
                                                                 name_or_hash(&index, node.name_hash),
-                                                                11.0,
+                                                                theme::style_eyebrow(),
                                                                 theme::TX,
                                                             ));
                                                             ui.add_space(3.0);
@@ -3263,11 +3255,11 @@ pub fn run(opts: Options) {
                                                                 if let Some(st) = node.states.get(cur) {
                                                                     let enter = mercs2_formats::orchestrator::decode_script(&st.enter, resolve);
                                                                     if !enter.is_empty() {
-                                                                        ui.label(egui::RichText::new(format!("→ {enter}")).monospace().size(10.0).color(theme::FAINT));
+                                                                        ui.label(egui::RichText::new(format!("→ {enter}")).monospace().color(theme::FAINT));
                                                                     }
                                                                     let exit = mercs2_formats::orchestrator::decode_script(&st.exit, resolve);
                                                                     if !exit.is_empty() {
-                                                                        ui.label(egui::RichText::new(format!("← {exit}")).monospace().size(10.0).color(theme::FAINT));
+                                                                        ui.label(egui::RichText::new(format!("← {exit}")).monospace().color(theme::FAINT));
                                                                     }
                                                                 }
                                                             }
@@ -3362,22 +3354,20 @@ pub fn run(opts: Options) {
                                                                 actions.push(Act::GroupToggle(gi));
                                                             }
                                                             ui.label(
-                                                                egui::RichText::new(tex_short)
-                                                                    .size(11.5)
+                                                                egui::RichText::new(tex_short).small()
                                                                     .color(if drawn { theme::TX } else { theme::DIM }),
                                                             );
                                                             ui.label(
                                                                 egui::RichText::new(lod_levels(d.lod_mask))
                                                                     .monospace()
-                                                                    .size(10.0)
                                                                     .color(theme::FAINT),
                                                             );
                                                             ui.with_layout(
                                                                 egui::Layout::right_to_left(egui::Align::Center),
                                                                 |ui| {
-                                                                    ui.label(egui::RichText::new(statustxt).size(11.0).color(statusc));
+                                                                    ui.label(egui::RichText::new(statustxt).small().color(statusc));
                                                                     ui.add_space(6.0);
-                                                                    ui.label(egui::RichText::new(format!("{tris} tri")).monospace().size(10.0).color(theme::DIM));
+                                                                    ui.label(egui::RichText::new(format!("{tris} tri")).monospace().color(theme::DIM));
                                                                 },
                                                             );
                                                         });
@@ -3484,13 +3474,13 @@ pub fn run(opts: Options) {
                                                         // dim, duration / bind-state right-aligned.
                                                         let nm = e.name.clone().unwrap_or_else(|| format!("clip {}", i + 1));
                                                         let mut resp = theme::row_chip(ui, fill, bord, |ui| {
-                                                            ui.label(egui::RichText::new(nm).size(11.5).color(if sel { theme::BRASS } else { theme::TX }));
-                                                            ui.label(egui::RichText::new(format!("0x{chash:08X}")).monospace().size(9.5).color(theme::FAINT));
+                                                            ui.label(egui::RichText::new(nm).small().color(if sel { theme::BRASS } else { theme::TX }));
+                                                            ui.label(egui::RichText::new(format!("0x{chash:08X}")).monospace().color(theme::FAINT));
                                                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                                                 if let Some(d) = dur {
-                                                                    ui.label(egui::RichText::new(format!("{d:.2}s")).monospace().size(10.5).color(theme::GOOD));
+                                                                    ui.label(egui::RichText::new(format!("{d:.2}s")).monospace().color(theme::GOOD));
                                                                 } else if unbound {
-                                                                    ui.label(egui::RichText::new("unbound").size(10.0).color(theme::FAINT));
+                                                                    ui.label(egui::RichText::new("unbound").small().color(theme::FAINT));
                                                                 }
                                                             });
                                                         });
@@ -3600,14 +3590,14 @@ pub fn run(opts: Options) {
                                                         // then the bone name (bright if named, dim if
                                                         // it fell back to a hash).
                                                         let mut job = egui::text::LayoutJob::default();
-                                                        let fmt = |size: f32, color: egui::Color32| egui::TextFormat {
-                                                            font_id: egui::FontId::monospace(size),
+                                                        let fmt = |color: egui::Color32| egui::TextFormat {
+                                                            font_id: theme::font(&egui::TextStyle::Monospace),
                                                             color,
                                                             ..Default::default()
                                                         };
-                                                        job.append(&"  ".repeat(depth), 0.0, fmt(11.0, theme::FAINT));
-                                                        job.append(&format!("{i:>3}  "), 0.0, fmt(10.0, theme::FAINT));
-                                                        job.append(&bname, 0.0, fmt(11.5, if named { theme::TX } else { theme::DIM }));
+                                                        job.append(&"  ".repeat(depth), 0.0, fmt(theme::FAINT));
+                                                        job.append(&format!("{i:>3}  "), 0.0, fmt(theme::FAINT));
+                                                        job.append(&bname, 0.0, fmt(if named { theme::TX } else { theme::DIM }));
                                                         let row = ui.selectable_label(sel_bone == Some(i), job);
                                                         if row.hovered() {
                                                             hovered_bone = Some(i);
@@ -3658,8 +3648,8 @@ pub fn run(opts: Options) {
                                 // The SELECTED instance's transform, then scene-wide actions.
                                 match sel_placed.and_then(|i| placed.get(i).map(|p| (i, p.label.clone()))) {
                                     Some((i, plabel)) => {
-                                        ui.label(theme::disp_text(format!("Instance n{i} · selected"), 9.5, theme::BRASS_DK));
-                                        ui.label(theme::disp_text(plabel.to_uppercase(), 18.0, theme::TX));
+                                        ui.label(theme::disp_text(format!("Instance n{i} · selected"), theme::style_eyebrow(), theme::BRASS_DK));
+                                        ui.label(theme::disp_text(plabel.to_uppercase(), egui::TextStyle::Heading, theme::TX));
                                         ui.add_space(10.0);
                                         theme::card(ui, "Transform", None, |ui| {
                                             let mut changed = false;
@@ -3698,7 +3688,7 @@ pub fn run(opts: Options) {
                                         });
                                     }
                                     None => {
-                                        ui.label(theme::disp_text("Sandbox", 18.0, theme::TX));
+                                        ui.label(theme::disp_text("Sandbox", egui::TextStyle::Heading, theme::TX));
                                         ui.add_space(6.0);
                                         ui.weak("Select an object in the Scene list at left to move / rotate / scale it.");
                                         ui.add_space(10.0);
@@ -3793,7 +3783,7 @@ pub fn run(opts: Options) {
                                                                     ui.set_min_width(lw);
                                                                     ui.set_min_height(22.0);
                                                                     ui.add(
-                                                                        egui::Label::new(theme::disp_text(name, 10.5, col))
+                                                                        egui::Label::new(theme::disp_text(name, theme::style_eyebrow(), col))
                                                                             .truncate()
                                                                             .sense(egui::Sense::click()),
                                                                     )
@@ -3988,7 +3978,7 @@ pub fn run(opts: Options) {
                                 });
                               } // ── end Mods inspector ──
                               if matches!(eff, Workbench::Skeleton) {
-                                ui.label(theme::disp_text("Skeleton retarget", 18.0, theme::TX));
+                                ui.label(theme::disp_text("Skeleton retarget", egui::TextStyle::Heading, theme::TX));
                                 match &retarget {
                                     None => {
                                         ui.add_space(4.0);
@@ -4157,15 +4147,13 @@ pub fn run(opts: Options) {
                                                     egui::RichText::new(format!(
                                                         "editing contributions[{i}]"
                                                     ))
-                                                    .size(10.5)
                                                     .monospace()
                                                     .color(theme::BRASS),
                                                 );
                                             }
                                             None => {
                                                 ui.label(
-                                                    egui::RichText::new("free-form — commits start a Shipment")
-                                                        .size(10.5)
+                                                    egui::RichText::new("free-form — commits start a Shipment").small()
                                                         .color(theme::FAINT),
                                                 );
                                             }
@@ -4174,7 +4162,7 @@ pub fn run(opts: Options) {
                                 });
                                 if let Some(why) = craft_mode.unbuilt() {
                                     ui.label(
-                                        egui::RichText::new(why).size(10.0).color(theme::FAINT),
+                                        egui::RichText::new(why).small().color(theme::FAINT),
                                     );
                                 }
                                 ui.separator();
@@ -4303,7 +4291,7 @@ pub fn run(opts: Options) {
                                             .map(|p| p.display().to_string())
                                             .unwrap_or_else(|| "(no config directory)".into());
                                         ui.label(
-                                            egui::RichText::new(loc).color(theme::FAINT).size(11.0),
+                                            egui::RichText::new(loc).color(theme::FAINT).small(),
                                         );
                                     }
                                     // See the navigator's note: `eff` never resolves to Craft.
@@ -4331,8 +4319,7 @@ pub fn run(opts: Options) {
                                             egui::RichText::new(
                                                 "Runs a Lua chunk in the RUNNING game via the lua-bridge ASI \
                                                  on 127.0.0.1:27050. Start the game with the ASI loaded, then connect.",
-                                            )
-                                            .size(11.5)
+                                            ).small()
                                             .color(theme::FAINT),
                                         );
                                         ui.add_space(8.0);
@@ -4349,7 +4336,7 @@ pub fn run(opts: Options) {
                                             } else {
                                                 (theme::FAINT, "\u{25cf} connecting\u{2026}")
                                             };
-                                            ui.label(egui::RichText::new(txt).size(11.0).color(col));
+                                            ui.label(egui::RichText::new(txt).small().color(col));
                                             if con.finished {
                                                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                                     if ui.button("Reconnect").clicked() {
@@ -4373,7 +4360,7 @@ pub fn run(opts: Options) {
                                                     };
                                                     ui.add(
                                                         egui::Label::new(
-                                                            egui::RichText::new(txt).monospace().size(11.0).color(col),
+                                                            egui::RichText::new(txt).monospace().color(col),
                                                         )
                                                         .wrap(),
                                                     );
@@ -4385,12 +4372,12 @@ pub fn run(opts: Options) {
                                         // the Lua and sends it over the same bridge.
                                         ui.add_space(4.0);
                                         egui::CollapsingHeader::new(
-                                            egui::RichText::new("Destruction").size(11.0).color(theme::HAZARD),
+                                            egui::RichText::new("Destruction").small().color(theme::HAZARD),
                                         )
                                         .id_source("destruct_panel")
                                         .show(ui, |ui| {
                                             ui.horizontal(|ui| {
-                                                ui.label(egui::RichText::new("target").size(10.0).color(theme::FAINT));
+                                                ui.label(egui::RichText::new("target").small().color(theme::FAINT));
                                                 ui.add(
                                                     egui::TextEdit::singleline(&mut destruct_target)
                                                         .hint_text("object name or guid expr")
@@ -4399,7 +4386,7 @@ pub fn run(opts: Options) {
                                             });
                                             let has_target = !destruct_target.trim().is_empty();
                                             ui.horizontal(|ui| {
-                                                ui.label(egui::RichText::new("node").size(10.0).color(theme::FAINT));
+                                                ui.label(egui::RichText::new("node").small().color(theme::FAINT));
                                                 ui.add(
                                                     egui::TextEdit::singleline(&mut destruct_node)
                                                         .hint_text("hardpoint name or 0x… (see Dump machine)")
@@ -4474,8 +4461,7 @@ pub fn run(opts: Options) {
                                             ui.label(
                                                 egui::RichText::new(
                                                     "Set state is node-keyed (logical, not a destroy); Demolish/Repair use the health lever. Dump machine lists a target's nodes.",
-                                                )
-                                                .size(9.0)
+                                                ).small()
                                                 .color(theme::FAINT),
                                             );
                                         });
@@ -4485,7 +4471,7 @@ pub fn run(opts: Options) {
                                         if !ess_api.is_empty() {
                                             ui.add_space(4.0);
                                             ui.horizontal(|ui| {
-                                                ui.label(theme::disp_text("API", 9.0, theme::FAINT));
+                                                ui.label(theme::disp_text("API", theme::style_eyebrow(), theme::FAINT));
                                                 ui.add(
                                                     egui::TextEdit::singleline(&mut console_search)
                                                         .hint_text("search Ess / natives\u{2026}")
@@ -4512,14 +4498,14 @@ pub fn run(opts: Options) {
                                                                         "raw" => theme::HAZARD,
                                                                         _ => theme::BRASS_DK,
                                                                     };
-                                                                    ui.label(egui::RichText::new(&e.tier[..1].to_uppercase()).monospace().size(9.0).color(tc));
+                                                                    ui.label(egui::RichText::new(&e.tier[..1].to_uppercase()).monospace().color(tc));
                                                                 } else {
-                                                                    ui.label(egui::RichText::new("n").monospace().size(9.0).color(theme::FAINT));
+                                                                    ui.label(egui::RichText::new("n").monospace().color(theme::FAINT));
                                                                 }
                                                                 let col = if e.ess { theme::BRASS } else { theme::DIM };
                                                                 let r = ui.add(
                                                                     egui::Label::new(
-                                                                        egui::RichText::new(e.label()).monospace().size(10.5).color(col),
+                                                                        egui::RichText::new(e.label()).monospace().color(col),
                                                                     )
                                                                     .sense(egui::Sense::click()),
                                                                 );
@@ -4557,10 +4543,10 @@ pub fn run(opts: Options) {
                                                     .show(ui, |ui| {
                                                         for c in ecs_hits {
                                                             let clicked = ui.horizontal(|ui| {
-                                                                ui.label(egui::RichText::new("C").monospace().size(9.0).color(theme::BRASS_DK));
+                                                                ui.label(egui::RichText::new("C").monospace().color(theme::BRASS_DK));
                                                                 let r = ui.add(
                                                                     egui::Label::new(
-                                                                        egui::RichText::new(&c.name).monospace().size(10.5).color(theme::DIM),
+                                                                        egui::RichText::new(&c.name).monospace().color(theme::DIM),
                                                                     )
                                                                     .sense(egui::Sense::click()),
                                                                 );
@@ -4622,7 +4608,7 @@ pub fn run(opts: Options) {
                                         .inner_margin(egui::Margin::symmetric(22.0, 18.0)),
                                 )
                                 .show(ctx, |ui| {
-                                    ui.label(theme::disp_text(settings_section.label().to_uppercase(), 18.0, theme::TX));
+                                    ui.label(theme::disp_text(settings_section.label().to_uppercase(), egui::TextStyle::Heading, theme::TX));
                                     ui.add_space(12.0);
                                     egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
 
@@ -4648,7 +4634,6 @@ pub fn run(opts: Options) {
                                             ui.label(
                                                 egui::RichText::new(text)
                                                     .monospace()
-                                                    .size(10.5)
                                                     .color(if set { theme::TX } else { theme::DIM }),
                                             );
                                         })
@@ -4794,8 +4779,7 @@ pub fn run(opts: Options) {
                                                     ui.add(egui::Spinner::new().size(11.0));
                                                     ui.label(
                                                         egui::RichText::new(&fetch_msg)
-                                                            .color(theme::DIM)
-                                                            .size(10.5),
+                                                            .color(theme::DIM).small(),
                                                     );
                                                 });
                                             }
@@ -4832,8 +4816,7 @@ pub fn run(opts: Options) {
                                                             ui.label(
                                                                 egui::RichText::new(
                                                                     "No home directory to place the library in.",
-                                                                )
-                                                                .size(11.0)
+                                                                ).small()
                                                                 .color(theme::BAD),
                                                             );
                                                         }
@@ -4865,8 +4848,7 @@ pub fn run(opts: Options) {
                                                     |ui| {
                                                         if qm_stack.is_empty() {
                                                             ui.label(
-                                                                egui::RichText::new("No game configured.")
-                                                                    .size(11.0)
+                                                                egui::RichText::new("No game configured.").small()
                                                                     .color(theme::BAD),
                                                             );
                                                         }
@@ -4960,7 +4942,7 @@ pub fn run(opts: Options) {
                                     Some(i) => {
                                         ui.label(theme::disp_text(
                                             placed[i].label.to_uppercase(),
-                                            10.0,
+                                            theme::style_eyebrow(),
                                             theme::BRASS,
                                         ));
                                         ui.separator();
@@ -4980,8 +4962,7 @@ pub fn run(opts: Options) {
                                     }
                                     None => {
                                         ui.label(
-                                            egui::RichText::new("Nothing selected — pick an object at left")
-                                                .size(10.5)
+                                            egui::RichText::new("Nothing selected — pick an object at left").small()
                                                 .color(theme::FAINT),
                                         );
                                         ui.separator();
@@ -5085,8 +5066,7 @@ pub fn run(opts: Options) {
                                                         c,
                                                     );
                                                     ui.label(
-                                                        egui::RichText::new(t)
-                                                            .size(10.5)
+                                                        egui::RichText::new(t).small()
                                                             .color(theme::DIM),
                                                     );
                                                 });
@@ -5148,8 +5128,7 @@ pub fn run(opts: Options) {
                                     ui.horizontal(|ui| {
                                         ui.label(
                                             egui::RichText::new(format!("{} lines", log.len()))
-                                                .color(theme::DIM)
-                                                .size(11.0),
+                                                .color(theme::DIM).small(),
                                         );
                                         if errs > 0 {
                                             theme::status_dot(ui, &format!("{errs} failed"), theme::BAD);
@@ -5193,8 +5172,7 @@ pub fn run(opts: Options) {
                                         ui.vertical_centered(|ui| {
                                             ui.label(
                                                 egui::RichText::new("Nothing logged yet.")
-                                                    .color(theme::FAINT)
-                                                    .size(12.0),
+                                                    .color(theme::FAINT),
                                             );
                                         });
                                         return;
@@ -5211,19 +5189,16 @@ pub fn run(opts: Options) {
                                                     ui.label(
                                                         egui::RichText::new(format!("{:>8.2}", l.t))
                                                             .monospace()
-                                                            .size(10.5)
                                                             .color(theme::FAINT),
                                                     );
                                                     ui.label(
                                                         egui::RichText::new(l.level.tag())
                                                             .monospace()
-                                                            .size(10.5)
                                                             .color(l.level.colour()),
                                                     );
                                                     ui.label(
                                                         egui::RichText::new(&l.text)
                                                             .monospace()
-                                                            .size(11.0)
                                                             .color(if l.level == LogLevel::Info {
                                                                 theme::TX
                                                             } else {
@@ -7712,11 +7687,11 @@ fn bone_tree(ui: &mut egui::Ui, names: &[String], parents: &[i32], id: &str) -> 
     }
     fn draw(ui: &mut egui::Ui, i: usize, names: &[String], kids: &[Vec<usize>], id: &str, hov: &mut Option<usize>) {
         if kids[i].is_empty() {
-            if ui.selectable_label(false, egui::RichText::new(names[i].as_str()).monospace().size(11.0)).hovered() {
+            if ui.selectable_label(false, egui::RichText::new(names[i].as_str()).monospace()).hovered() {
                 *hov = Some(i);
             }
         } else {
-            let r = egui::CollapsingHeader::new(egui::RichText::new(names[i].as_str()).monospace().size(11.0))
+            let r = egui::CollapsingHeader::new(egui::RichText::new(names[i].as_str()).monospace())
                 .id_source((id, i))
                 .default_open(true)
                 .show(ui, |ui| {
