@@ -996,15 +996,14 @@ fn hero_viewport(ui: &mut egui::Ui, h: &Profile, on_disk: &Profile, p: &Panel) -
                 },
             );
 
-            // Top-right: AT-A-GLANCE overlay card. Width is fixed so the card hugs the right
-            // edge; `allocate_ui_at_rect` plus `top_down(Align::LEFT)` inside the card keeps
-            // the rows reading left-to-right regardless of ambient layout direction.
-            let overlay_w = 240.0;
+            // Top-right: AT-A-GLANCE overlay card, sized to its content and anchored right.
+            let rows = glance_rows(on_disk);
+            let overlay_w = glance_card_width(ui, &rows);
             let topright =
                 egui::pos2(frame_rect.right() - overlay_w - INSET, frame_rect.top() + INSET);
             ui.allocate_ui_at_rect(
                 egui::Rect::from_min_size(topright, egui::vec2(overlay_w, 200.0)),
-                |ui| at_a_glance(ui, on_disk),
+                |ui| at_a_glance(ui, &rows, overlay_w),
             );
 
             // Bottom-left: identity chip.
@@ -1059,56 +1058,103 @@ fn upgrade_model_for(hero: u8, tier: u8) -> String {
     }
 }
 
-/// The AT-A-GLANCE HUD card — a compact column of save-state at-a-glance values. Lives in
-/// the viewport's top-right overlay slot. Reads the on-disk `Profile` so it stays stable
-/// while editing (the pending Profile would make the numbers jump every keystroke).
-///
-/// Forces `top_down` inside the Frame — the call site positions the card inside an RTL
-/// alignment slot, and without this the body inherits that direction (egui 0.28
-/// `prefer_right_to_left`) and the rows render sideways instead of stacking.
-fn at_a_glance(ui: &mut egui::Ui, h: &Profile) {
+/// AT-A-GLANCE card geometry, from the mockup (`Saves.dc.html:72-78`): 8px/10px padding, a
+/// 68px label column, 8px column gap, 11px text, 200px minimum width.
+const GLANCE_PAD_X: f32 = 10.0;
+const GLANCE_PAD_Y: f32 = 8.0;
+const GLANCE_LABEL_W: f32 = 68.0;
+const GLANCE_COL_GAP: f32 = 8.0;
+const GLANCE_TEXT: f32 = 11.0;
+const GLANCE_MIN_W: f32 = 200.0;
+
+/// The AT-A-GLANCE rows. Reads the on-disk `Profile` so the numbers stay stable while editing.
+fn glance_rows(h: &Profile) -> [(&'static str, String); 5] {
+    let ts = timestamp_utc(h.timestamp);
+    [
+        ("contract", h.active_contract.clone()),
+        ("cash", thousands(h.cash as u64)),
+        (
+            "fuel",
+            format!("{} / {}", thousands(h.fuel as u64), thousands(h.fuel_capacity as u64)),
+        ),
+        ("playtime", hms_long(h.play_time_seconds)),
+        ("timestamp", ts.trim_end_matches(" UTC").to_string()),
+    ]
+}
+
+/// Card width: padding + label column + gap + the widest value, at least `GLANCE_MIN_W`.
+fn glance_card_width(ui: &egui::Ui, rows: &[(&'static str, String)]) -> f32 {
+    let widest = ui.fonts(|f| {
+        rows.iter()
+            .map(|(_, v)| {
+                f.layout_no_wrap(v.clone(), egui::FontId::monospace(GLANCE_TEXT), theme::TX)
+                    .size()
+                    .x
+            })
+            .fold(0.0, f32::max)
+    });
+    (2.0 * GLANCE_PAD_X + GLANCE_LABEL_W + GLANCE_COL_GAP + widest).max(GLANCE_MIN_W)
+}
+
+/// The AT-A-GLANCE HUD card in the viewport's top-right slot: title, divider, then label/value
+/// rows with values left-aligned in their own column.
+fn at_a_glance(ui: &mut egui::Ui, rows: &[(&'static str, String)], width: f32) {
     egui::Frame::none()
-        .fill(egui::Color32::from_rgba_unmultiplied(14, 16, 20, 220))
+        .fill(egui::Color32::from_rgba_unmultiplied(14, 16, 20, 217))
         .stroke(egui::Stroke::new(1.0, theme::LINE))
         .rounding(egui::Rounding::same(5.0))
-        .inner_margin(egui::Margin::symmetric(10.0, 8.0))
+        .inner_margin(egui::Margin::symmetric(GLANCE_PAD_X, GLANCE_PAD_Y))
         .show(ui, |ui| {
-            ui.with_layout(
-                egui::Layout::top_down(egui::Align::LEFT),
-                |ui| {
-                    ui.set_min_width(220.0);
-                    ui.label(theme::disp_text("AT A GLANCE", 9.5, theme::FAINT));
-                    ui.add_space(3.0);
-                    glance_row(ui, "contract", &h.active_contract);
-                    glance_row(ui, "cash", &format!("{}", h.cash));
-                    glance_row(ui, "fuel", &format!("{} / {}", h.fuel, h.fuel_capacity));
-                    glance_row(ui, "playtime", &hms_long(h.play_time_seconds));
-                    glance_row(ui, "timestamp", &timestamp_utc(h.timestamp));
-                },
-            );
+            ui.with_layout(egui::Layout::top_down(egui::Align::LEFT), |ui| {
+                let inner_w = width - 2.0 * GLANCE_PAD_X;
+                ui.set_width(inner_w);
+                ui.spacing_mut().item_spacing = egui::vec2(0.0, 0.0);
+                ui.spacing_mut().interact_size.y = 0.0;
+                ui.style_mut().interaction.selectable_labels = false;
+                ui.label(theme::disp_text("AT A GLANCE", 9.5, theme::FAINT));
+                ui.add_space(3.0);
+                let (line, _) =
+                    ui.allocate_exact_size(egui::vec2(inner_w, 1.0), egui::Sense::hover());
+                ui.painter().rect_filled(line, egui::Rounding::ZERO, theme::LINE);
+                ui.add_space(5.0);
+                for (label, value) in rows {
+                    ui.horizontal(|ui| {
+                        ui.allocate_ui_with_layout(
+                            egui::vec2(GLANCE_LABEL_W, 0.0),
+                            egui::Layout::left_to_right(egui::Align::Center),
+                            |ui| {
+                                ui.set_min_width(GLANCE_LABEL_W);
+                                ui.label(
+                                    egui::RichText::new(*label)
+                                        .size(GLANCE_TEXT)
+                                        .color(theme::FAINT),
+                                );
+                            },
+                        );
+                        ui.add_space(GLANCE_COL_GAP);
+                        ui.label(
+                            egui::RichText::new(value)
+                                .monospace()
+                                .size(GLANCE_TEXT)
+                                .color(theme::TX),
+                        );
+                    });
+                }
+            });
         });
 }
 
-/// One row of the AT-A-GLANCE overlay: dim label on the left, mono value right-aligned.
-/// `ui.horizontal` caps row height to the tallest child, which keeps a nested `right_to_left`
-/// from absorbing the parent's spare vertical space.
-fn glance_row(ui: &mut egui::Ui, label: &str, value: &str) {
-    ui.horizontal(|ui| {
-        ui.set_width(ui.available_width());
-        ui.label(
-            egui::RichText::new(label)
-                .size(10.0)
-                .color(theme::FAINT),
-        );
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            ui.label(
-                egui::RichText::new(value)
-                    .monospace()
-                    .size(10.5)
-                    .color(theme::TX),
-            );
-        });
-    });
+/// `322684096` → `"322,684,096"`.
+fn thousands(n: u64) -> String {
+    let s = n.to_string();
+    let mut out = String::with_capacity(s.len() + s.len() / 3);
+    for (i, c) in s.chars().enumerate() {
+        if i > 0 && (s.len() - i) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
 }
 
 /// Long-form `h/m/s` playtime (`246334` → `"68h 25m 34s"`) for the AT-A-GLANCE strip, where
@@ -2324,7 +2370,16 @@ fn set_completed_toolboxes(root: &mut Value, n: u32) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{hms, money};
+    use super::{hms, money, thousands};
+
+    #[test]
+    fn thousands_groups_by_three() {
+        assert_eq!(thousands(0), "0");
+        assert_eq!(thousands(700), "700");
+        assert_eq!(thousands(4_945), "4,945");
+        assert_eq!(thousands(200_000), "200,000");
+        assert_eq!(thousands(322_684_096), "322,684,096");
+    }
 
     #[test]
     fn money_formats() {
