@@ -207,6 +207,14 @@ impl LuaView {
         LuaView { open: true, path: path.into(), lines, carries, matches, cur: 0, needle, scroll_to }
     }
 
+    /// Scroll to a 1-based source line. Used by the Missions blueprint editor's jump-to-source.
+    pub fn scroll_to_line(&mut self, line: u32) {
+        let li = (line.saturating_sub(1)) as usize;
+        if li < self.lines.len() {
+            self.scroll_to = Some(li);
+        }
+    }
+
     pub fn show(&mut self, ctx: &egui::Context) {
         let mut open = self.open;
         egui::Window::new(format!("Lua — {}", self.path))
