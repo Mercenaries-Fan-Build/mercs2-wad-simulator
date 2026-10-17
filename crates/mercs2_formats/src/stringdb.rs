@@ -232,9 +232,9 @@ impl StringDb {
         hit
     }
 
-    /// Replace by key name (e.g. `"[OilCon001.Objectives.001]"`), hashing it the way the engine does.
-    pub fn set_by_name(&mut self, key_name: &str, text: &str) -> bool {
-        self.set_by_hash(pandemic_hash_m2(key_name), text)
+    /// Replace by key name (e.g. `"[OilCon001.Objectives.001]"`), hashed by its [`key_name`].
+    pub fn set_by_name(&mut self, key: &str, text: &str) -> bool {
+        self.set_by_hash(pandemic_hash_m2(key_name(key)), text)
     }
 
     /// Replace every entry whose current text is exactly `old`. Returns how many changed.
@@ -256,9 +256,9 @@ impl StringDb {
     /// `KEYS`/`STRS` regardless of order, and the SYEK descriptors are re-emitted from
     /// `self.entries`, so appending is safe on any size delta.
     ///
-    /// The engine locates strings by hashing the bracket key at render time and comparing against
-    /// the SYEK table — an added key becomes reachable the moment the localizer next looks up
-    /// `[<name>]`. Adding a key that already appears in a shared table (english lives in both
+    /// The engine locates strings by hashing the key's bare name ([`key_name`]) at render time and
+    /// comparing against the SYEK table — an added key becomes reachable the moment the localizer
+    /// next looks up `[<name>]`. Adding a key that already appears in a shared table (english lives in both
     /// shell.wad and vz.wad) only affects the copy this call is on; a companion `edit_stringdb`
     /// on the other target is up to the manifest.
     pub fn add_by_hash(&mut self, key_hash: u32, text: &str) -> bool {
@@ -275,9 +275,9 @@ impl StringDb {
         true
     }
 
-    /// Add by key name (e.g. `"[FioDef001.Title]"`), hashing it the way the engine does.
-    pub fn add_by_name(&mut self, key_name: &str, text: &str) -> bool {
-        self.add_by_hash(pandemic_hash_m2(key_name), text)
+    /// Add by key name (e.g. `"[FioDef001.Title]"`), hashed by its [`key_name`].
+    pub fn add_by_name(&mut self, key: &str, text: &str) -> bool {
+        self.add_by_hash(pandemic_hash_m2(key_name(key)), text)
     }
 }
 
@@ -314,8 +314,7 @@ fn chunk_range(container: &[u8], tag: &[u8; 4]) -> Option<(usize, usize)> {
 /// pack proved against retail (`wad_builder::stringdb_patch`) — promoted out of that binary so the
 /// Quartermaster can reach it, since Plan 05 §C names the binary-only crates as the recurring tax.
 ///
-/// `edits` maps a bracket key (`"[DlcCon001.Title]"`) — hashed the way the engine does — to its new
-/// text. A key not present is a hard error and is NAMED: a silently-dropped correction is worse than
+/// `edits` maps a key (`"[DlcCon001.Title]"`, hashed by its [`key_name`]) to its new text. A key not present is a hard error and is NAMED: a silently-dropped correction is worse than
 /// a failed build, and it is the exact failure the SYEK/KEYS tag confusion once produced ("0
 /// containers checked" against a WAD that plainly had six).
 ///
@@ -338,9 +337,18 @@ where
     rebuild_container(container, &[(*b"KEYS", &new_keys), (*b"STRS", &new_strs)])
 }
 
-/// The key hash a string-edit key names: a bare `0xHHHHHHHH` IS the hash; anything else is a bracket
-/// key (`[Menu.Play]`), hashed the way the engine does. An author who only has the hash from a dump
-/// can still write the key — the reverse of a bracket key is not always known.
+/// The name a string table keys a string by: a bracket key's inner text. Lua and save data write
+/// keys bracketed (`[PmcJob001.Title]`), but the tables hash the bare name — retail `vz.wad` and
+/// `shell.wad` english both hold `pandemic_hash_m2("PmcJob001.Title")` = `0x0D569A55`, and the
+/// bracketed hash `0x184D32A3` is in neither. A key already bare is returned as is.
+pub fn key_name(key: &str) -> &str {
+    let k = key.trim();
+    k.strip_prefix('[').and_then(|s| s.strip_suffix(']')).unwrap_or(k)
+}
+
+/// The key hash a string-edit key names: a bare `0xHHHHHHHH` IS the hash; anything else is a key
+/// name, bracketed or not (`[Menu.Play]` / `Menu.Play`), hashed by its [`key_name`]. An author who
+/// only has the hash from a dump can still write the key — the reverse of a key is not always known.
 ///
 /// The one rule for every caller that turns an edit key into a hash: [`edit_container`],
 /// [`add_keys_to_container`], and a caller merging several tables' edits by hash.
@@ -350,7 +358,7 @@ pub fn key_hash(key: &str) -> u32 {
         .or_else(|| key.trim().strip_prefix("0X"))
         .filter(|h| h.len() <= 8 && h.chars().all(|c| c.is_ascii_hexdigit()))
         .and_then(|h| u32::from_str_radix(h, 16).ok())
-        .unwrap_or_else(|| pandemic_hash_m2(key))
+        .unwrap_or_else(|| pandemic_hash_m2(key_name(key)))
 }
 
 /// Add NEW keys to a stringdb container. The companion to [`edit_container`] (which errors on
@@ -510,6 +518,41 @@ fn rebuild_container(container: &[u8], replacements: &[([u8; 4], &[u8])]) -> Res
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Hashes present in BOTH retail english tables (`vz.wad` english_P000_Q3 and `shell.wad`
+    /// english, dumped with `mercs2_probe --bin stringdb_dump`). Each is the hash of the BARE name;
+    /// the bracketed form's hash is in neither table, so a bracket key must hash its inner name.
+    #[test]
+    fn bracket_keys_hash_their_bare_name_like_the_retail_tables() {
+        for (key, hash) in [
+            ("PmcJob001.Title", 0x0D56_9A55u32),
+            ("Generic.Collectibles", 0x1A09_38B3),
+            ("PDA.Database.Progress.ToolboxesCollected", 0x10AA_ECAE),
+            ("SHELL.SelectCharacter.Mattias", 0xF12B_957B),
+            ("vehicle.wz10", 0x95DB_BFA3),
+        ] {
+            assert_eq!(key_hash(key), hash, "{key}");
+            assert_eq!(key_hash(&format!("[{key}]")), hash, "[{key}]");
+            assert_eq!(key_hash(&format!("  [{key}] ")), hash, "padded [{key}]");
+        }
+        assert_eq!(key_hash("0x0D569A55"), 0x0D56_9A55, "a hex key is the hash itself");
+        assert_eq!(key_name("[a.b]"), "a.b");
+        assert_eq!(key_name("a.b"), "a.b");
+        assert_eq!(key_name("[unclosed"), "[unclosed");
+    }
+
+    #[test]
+    fn by_name_edits_use_the_bare_name_hash() {
+        let mut db = StringDb {
+            entries: vec![StringEntry { key_hash: 0x0D56_9A55, offset: 0, text: "old".into() }],
+            endian: Endian::Le,
+            declared_code_units: 0,
+            heap_bytes: 0,
+        };
+        assert!(db.set_by_name("[PmcJob001.Title]", "new"));
+        assert_eq!(db.entries[0].text, "new");
+        assert!(!db.add_by_name("PmcJob001.Title", "dup"), "same key, bracketed or not");
+    }
 
     fn synth(endian: Endian, rows: &[(u32, &str)]) -> (Vec<u8>, Vec<u8>) {
         let entries: Vec<StringEntry> = {
