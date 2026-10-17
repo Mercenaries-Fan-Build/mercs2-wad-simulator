@@ -88,6 +88,9 @@ pub enum Act {
     /// `app.rs`'s post-reducer step reads back from `Panel.hero_cam` to drive
     /// [`crate::shot::HeroRenderer::render_rgba`].
     SetHeroCam(u32, crate::shot::OrbitCam),
+    /// The hero viewport frame's size in physical pixels; `app.rs` renders the hero at this
+    /// size so the render covers the whole frame.
+    SetHeroViewSize(u32, u32),
 }
 
 /// The four `MrxTaskState` values a mission can hold on `nState`. Mirrors
@@ -213,6 +216,9 @@ pub struct Panel {
     /// field (profile object `+0x63`) whose `.profile` byte isn't located, so nothing is
     /// written. Cleared when the selection or hero changes.
     pub wardrobe_preview: Option<usize>,
+    /// Hero viewport frame size in physical pixels, reported by the viewport every time it
+    /// changes. `(0, 0)` until the viewport first paints.
+    pub hero_view_px: (u32, u32),
 }
 
 /// The centre panel's current tab over `tFlowData`. Carried on the Panel so switching rails
@@ -682,6 +688,10 @@ pub fn center(ctx: &egui::Context, p: &Panel) -> Vec<Act> {
             if let Some((hash, cam)) = hero_req.set_cam {
                 acts.push(Act::SetHeroCam(hash, cam));
             }
+            // Before EnsureHeroRender so app.rs renders at the new size this same frame.
+            if let Some((w, h)) = hero_req.view_px {
+                acts.push(Act::SetHeroViewSize(w, h));
+            }
             if let Some((hash, name)) = hero_req.request_render {
                 acts.push(Act::EnsureHeroRender(hash, name));
             }
@@ -766,6 +776,8 @@ struct HeroReq {
     set_cam: Option<(u32, crate::shot::OrbitCam)>,
     /// `Some((hash, model_name))` when `app.rs` should render this hero this frame.
     request_render: Option<(u32, String)>,
+    /// `Some((w, h))` when the viewport frame's pixel size differs from `Panel.hero_view_px`.
+    view_px: Option<(u32, u32)>,
 }
 
 /// Centre viewport: hero portrait with four HUD overlays — ORBIT + model chip top-left,
@@ -796,11 +808,6 @@ fn hero_viewport(ui: &mut egui::Ui, h: &Profile, on_disk: &Profile, p: &Panel) -
         .copied()
         .unwrap_or_else(crate::shot::OrbitCam::default);
     let mut out = HeroReq::default();
-    // Cold start: nothing cached and nothing in flight → request the initial render. The cam
-    // is read by app.rs from `hero_cam[hash]` (defaulted when absent), so no SetHeroCam needed.
-    if cached_tex.is_none() && failed_err.is_none() && !in_flight {
-        out.request_render = Some((hash, model_name.clone()));
-    }
     let model_label = match outfit {
         Some((name, _)) => format!("OUTFIT {name} · {model_name}"),
         None => format!("UPGRADE {} · {}", h.upgrade_index, model_name),
@@ -815,13 +822,33 @@ fn hero_viewport(ui: &mut egui::Ui, h: &Profile, on_disk: &Profile, p: &Panel) -
         .fill(theme::G0)
         .stroke(egui::Stroke::new(1.0, theme::LINE))
         .rounding(egui::Rounding::same(6.0))
-        .inner_margin(egui::Margin::symmetric(14.0, 12.0))
+        // 1px so the frame's own border stays visible around the render.
+        .inner_margin(egui::Margin::same(1.0))
         .show(ui, |ui| {
             // Pin exact height — min alone lets the Frame absorb the whole column.
             ui.set_width(ui.available_width());
             ui.set_min_height(viewport_height);
             ui.set_max_height(viewport_height);
             let frame_rect = ui.max_rect();
+
+            // The render is made at the frame's own pixel size, so it covers the whole frame.
+            let ppp = ui.ctx().pixels_per_point();
+            let want_px = (
+                (frame_rect.width() * ppp).round().clamp(1.0, 4096.0) as u32,
+                (frame_rect.height() * ppp).round().clamp(1.0, 4096.0) as u32,
+            );
+            if want_px != p.hero_view_px {
+                out.view_px = Some(want_px);
+            }
+            let stale_size = cached_tex.as_ref().is_some_and(|t| {
+                let [w, h] = t.size();
+                (w as u32, h as u32) != want_px
+            });
+            // Cold start or frame resized → request a render. The cam is read by app.rs from
+            // `hero_cam[hash]` (defaulted when absent), so no SetHeroCam needed.
+            if failed_err.is_none() && !in_flight && (cached_tex.is_none() || stale_size) {
+                out.request_render = Some((hash, model_name.clone()));
+            }
 
             // Whole frame is the drag/scroll region; chips allocated after this paint over it.
             let drag_response = ui.interact(
@@ -830,25 +857,16 @@ fn hero_viewport(ui: &mut egui::Ui, h: &Profile, on_disk: &Profile, p: &Panel) -
                 egui::Sense::click_and_drag(),
             );
 
-            let render_h = (frame_rect.height() - 12.0).max(140.0);
-            let render_w = (frame_rect.width() - 12.0).max(140.0);
+            let box_size = egui::vec2(
+                (frame_rect.width() * 0.5).clamp(200.0, 360.0),
+                (frame_rect.height() - 80.0).max(120.0),
+            );
             let painter = ui.painter_at(frame_rect);
             match (&cached_tex, &failed_err, in_flight) {
                 (Some(tex), _, _) => {
-                    let img_size = tex.size_vec2();
-                    let scale = (render_h / img_size.y).min(render_w / img_size.x);
-                    let fit = img_size * scale;
-                    // Centre the portrait horizontally in the frame — tall band, narrow image.
-                    let paint_rect = egui::Rect::from_center_size(frame_rect.center(), fit);
-                    painter.image(
-                        tex.id(),
-                        paint_rect,
-                        egui::Rect::from_min_max(
-                            egui::pos2(0.0, 0.0),
-                            egui::pos2(1.0, 1.0),
-                        ),
-                        egui::Color32::WHITE,
-                    );
+                    egui::Image::from_texture(egui::load::SizedTexture::from_handle(tex))
+                        .rounding(egui::Rounding::same(5.0))
+                        .paint_at(ui, frame_rect);
                     // Mouse-drag → yaw / pitch. 0.01 rad per pixel: a 300 px horizontal
                     // drag spins the hero one full turn-ish (3 rad), which is the "spin
                     // to look around the model" feel without being so sensitive that a
@@ -881,10 +899,7 @@ fn hero_viewport(ui: &mut egui::Ui, h: &Profile, on_disk: &Profile, p: &Panel) -
                     }
                 }
                 (None, Some(err), _) => {
-                    let box_rect = egui::Rect::from_center_size(
-                        frame_rect.center(),
-                        egui::vec2(render_w, render_h),
-                    );
+                    let box_rect = egui::Rect::from_center_size(frame_rect.center(), box_size);
                     painter.rect_filled(box_rect, egui::Rounding::same(4.0), theme::G2);
                     painter.rect_stroke(box_rect, egui::Rounding::same(4.0), egui::Stroke::new(1.0, theme::BAD));
                     painter.text(
@@ -910,10 +925,7 @@ fn hero_viewport(ui: &mut egui::Ui, h: &Profile, on_disk: &Profile, p: &Panel) -
                     );
                 }
                 (None, None, _) => {
-                    let box_rect = egui::Rect::from_center_size(
-                        frame_rect.center(),
-                        egui::vec2(render_w, render_h),
-                    );
+                    let box_rect = egui::Rect::from_center_size(frame_rect.center(), box_size);
                     painter.rect_filled(box_rect, egui::Rounding::same(4.0), theme::G2);
                     painter.rect_stroke(
                         box_rect,
@@ -961,7 +973,9 @@ fn hero_viewport(ui: &mut egui::Ui, h: &Profile, on_disk: &Profile, p: &Panel) -
                 (theme::DIM, theme::G2, theme::LINE)
             };
             let orbit_label = if orbit_live { "ORBIT · DRAG" } else { "ORBIT · WAITING" };
-            let topleft = frame_rect.min + egui::vec2(2.0, 2.0);
+            // Overlays sit 10px in from the frame edges (mockup).
+            const INSET: f32 = 10.0;
+            let topleft = frame_rect.min + egui::vec2(INSET, INSET);
             ui.allocate_ui_at_rect(
                 egui::Rect::from_min_size(topleft, egui::vec2(500.0, 30.0)),
                 |ui| {
@@ -976,7 +990,8 @@ fn hero_viewport(ui: &mut egui::Ui, h: &Profile, on_disk: &Profile, p: &Panel) -
             // edge; `allocate_ui_at_rect` plus `top_down(Align::LEFT)` inside the card keeps
             // the rows reading left-to-right regardless of ambient layout direction.
             let overlay_w = 240.0;
-            let topright = egui::pos2(frame_rect.right() - overlay_w - 2.0, frame_rect.top() + 2.0);
+            let topright =
+                egui::pos2(frame_rect.right() - overlay_w - INSET, frame_rect.top() + INSET);
             ui.allocate_ui_at_rect(
                 egui::Rect::from_min_size(topright, egui::vec2(overlay_w, 200.0)),
                 |ui| at_a_glance(ui, on_disk),
@@ -984,9 +999,15 @@ fn hero_viewport(ui: &mut egui::Ui, h: &Profile, on_disk: &Profile, p: &Panel) -
 
             // Bottom-left: identity chip.
             let identity_h = 24.0;
-            let bottomleft = egui::pos2(frame_rect.left() + 2.0, frame_rect.bottom() - identity_h - 2.0);
+            let bottomleft = egui::pos2(
+                frame_rect.left() + INSET,
+                frame_rect.bottom() - identity_h - INSET,
+            );
             ui.allocate_ui_at_rect(
-                egui::Rect::from_min_size(bottomleft, egui::vec2(frame_rect.width() - 4.0, identity_h)),
+                egui::Rect::from_min_size(
+                    bottomleft,
+                    egui::vec2(frame_rect.width() - 2.0 * INSET, identity_h),
+                ),
                 |ui| {
                     ui.horizontal(|ui| {
                         chip(ui, &identity_label, theme::DIM, theme::G2, theme::LINE);
@@ -2070,6 +2091,7 @@ pub fn apply(act: Act, p: &mut Panel) {
             // that an in-flight render (one frame behind) doesn't throw away the user's drag.
             p.hero_cam.insert(hash, cam);
         }
+        Act::SetHeroViewSize(w, h) => p.hero_view_px = (w, h),
         Act::RevealFolder => {
             if let Some(dir) = &p.saves_dir {
                 #[cfg(target_os = "macos")]
