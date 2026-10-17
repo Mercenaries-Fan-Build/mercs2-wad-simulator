@@ -530,34 +530,21 @@ fn save_row(ui: &mut egui::Ui, e: &ProfileEntry, selected: bool) -> egui::Respon
     const BLEED: f32 = 6.0;
     const PAD_X: f32 = 8.0;
     const PAD_Y: f32 = 6.0;
-    const ROW_H: f32 = 40.0;
-    let (rect, resp) =
-        ui.allocate_exact_size(egui::vec2(ui.available_width(), ROW_H), egui::Sense::click());
-    let paint_rect = rect.expand2(egui::vec2(BLEED, 0.0));
-    let painter = ui.painter();
-    let fill = if selected {
-        Some(theme::BRASS_SOFT)
-    } else if resp.hovered() {
-        Some(theme::G2)
-    } else {
-        None
-    };
-    if let Some(f) = fill {
-        painter.rect_filled(paint_rect, egui::Rounding::ZERO, f);
-    }
-    let accent = match (&e.header, selected) {
-        (Err(_), _) => Some(theme::BAD),
-        (Ok(_), true) => Some(theme::BRASS),
-        (Ok(_), false) => None,
-    };
-    if let Some(c) = accent {
-        let bar = egui::Rect::from_min_size(paint_rect.min, egui::vec2(3.0, ROW_H));
-        painter.rect_filled(bar, egui::Rounding::ZERO, c);
-    }
-
-    let content = paint_rect.shrink2(egui::vec2(PAD_X, PAD_Y));
-    let mut child = ui.child_ui(content, egui::Layout::top_down(egui::Align::LEFT), None);
+    // Background slots reserved first so they paint under the content; filled once the row's
+    // measured height and hover state are known.
+    let bg_slot = ui.painter().add(egui::Shape::Noop);
+    let bar_slot = ui.painter().add(egui::Shape::Noop);
+    let top = ui.cursor().min;
+    let width = ui.available_width();
+    let content_max = egui::Rect::from_min_max(
+        egui::pos2(top.x - BLEED + PAD_X, top.y + PAD_Y),
+        egui::pos2(top.x + width + BLEED - PAD_X, top.y + PAD_Y + 1000.0),
+    );
+    let mut child = ui.child_ui(content_max, egui::Layout::top_down(egui::Align::LEFT), None);
     child.spacing_mut().item_spacing.y = 2.0;
+    // horizontal() otherwise pads its row to interact_size.y and centres the text in it,
+    // which pushes the name line down and makes the top padding look heavier.
+    child.spacing_mut().interact_size.y = 0.0;
     // Selectable labels would take the press for text selection and the row never sees a click.
     child.style_mut().interaction.selectable_labels = false;
     child.horizontal(|ui| {
@@ -590,6 +577,29 @@ fn save_row(ui: &mut egui::Ui, e: &ProfileEntry, selected: bool) -> egui::Respon
         egui::Label::new(egui::RichText::new(meta).monospace().size(10.0).color(theme::FAINT))
             .truncate(),
     );
+
+    let row_h = child.min_rect().height() + 2.0 * PAD_Y;
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(width, row_h), egui::Sense::click());
+    let paint_rect = rect.expand2(egui::vec2(BLEED, 0.0));
+    let fill = if selected {
+        Some(theme::BRASS_SOFT)
+    } else if resp.hovered() {
+        Some(theme::G2)
+    } else {
+        None
+    };
+    if let Some(f) = fill {
+        ui.painter().set(bg_slot, egui::Shape::rect_filled(paint_rect, egui::Rounding::ZERO, f));
+    }
+    let accent = match (&e.header, selected) {
+        (Err(_), _) => Some(theme::BAD),
+        (Ok(_), true) => Some(theme::BRASS),
+        (Ok(_), false) => None,
+    };
+    if let Some(c) = accent {
+        let bar = egui::Rect::from_min_size(paint_rect.min, egui::vec2(3.0, row_h));
+        ui.painter().set(bar_slot, egui::Shape::rect_filled(bar, egui::Rounding::ZERO, c));
+    }
 
     if resp.hovered() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
