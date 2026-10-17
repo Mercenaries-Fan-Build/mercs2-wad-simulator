@@ -439,9 +439,9 @@ pub fn navigator(ui: &mut egui::Ui, p: &Panel) -> Vec<Act> {
         ui.add_space(10.0);
         let h = 24.0;
         let gap = 4.0;
-        let label = |s: &str| egui::RichText::new(s).size(11.5).color(theme::TX);
+        let label = |s: &str| egui::RichText::new(s).small().color(theme::TX);
         let open_text_w = ui.fonts(|f| {
-            f.layout_no_wrap("Open file…".into(), egui::FontId::proportional(11.5), theme::TX)
+            f.layout_no_wrap("Open file…".into(), theme::font(&egui::TextStyle::Small), theme::TX)
                 .size()
                 .x
         });
@@ -507,15 +507,15 @@ fn navigator_head_and_list(ui: &mut egui::Ui, p: &Panel, acts: &mut Vec<Act>) {
     // Header spacing per the mockup: path 2px under the title, count 12px under the path,
     // list 5px under the count.
     ui.spacing_mut().item_spacing.y = 0.0;
-    ui.label(theme::disp_text("SAVES", 15.0, theme::TX));
+    ui.label(theme::disp_text("SAVES", theme::style_title(), theme::TX));
     ui.add_space(2.0);
     let path = match &p.saves_dir {
         Some(dir) => tail(dir),
         None => "resolving saves folder…".to_string(),
     };
-    ui.label(egui::RichText::new(path).monospace().size(10.5).color(theme::FAINT));
+    ui.label(egui::RichText::new(path).monospace().color(theme::FAINT));
     ui.add_space(12.0);
-    ui.label(theme::disp_text(&p.status, 11.0, theme::DIM));
+    ui.label(theme::disp_text(&p.status, theme::style_eyebrow(), theme::DIM));
     ui.add_space(5.0);
 
     match &p.profiles {
@@ -523,15 +523,13 @@ fn navigator_head_and_list(ui: &mut egui::Ui, p: &Panel, acts: &mut Vec<Act>) {
         None => {
             acts.push(Act::Reload);
             ui.label(
-                egui::RichText::new("Loading…")
-                    .size(11.5)
+                egui::RichText::new("Loading…").small()
                     .color(theme::FAINT),
             );
         }
         Some(entries) if entries.is_empty() => {
             ui.label(
-                egui::RichText::new("No .profile files in this folder.")
-                    .size(11.5)
+                egui::RichText::new("No .profile files in this folder.").small()
                     .color(theme::FAINT),
             );
         }
@@ -579,11 +577,11 @@ fn save_row(ui: &mut egui::Ui, e: &ProfileEntry, selected: bool) -> egui::Respon
             .rounding(egui::Rounding::same(2.0))
             .inner_margin(egui::Margin::symmetric(4.0, 0.0))
             .show(ui, |ui| {
-                ui.label(theme::disp_text(e.hero_letter().to_string(), 8.5, badge_fg));
+                ui.label(theme::disp_text(e.hero_letter().to_string(), theme::style_eyebrow(), badge_fg));
             });
         let name_col = if selected { theme::BRASS } else { theme::TX };
         ui.add(
-            egui::Label::new(egui::RichText::new(&e.stem).size(12.0).color(name_col)).truncate(),
+            egui::Label::new(egui::RichText::new(&e.stem).color(name_col)).truncate(),
         );
     });
     let meta = match &e.header {
@@ -598,7 +596,7 @@ fn save_row(ui: &mut egui::Ui, e: &ProfileEntry, selected: bool) -> egui::Respon
         Err(err) => format!("unreadable — {err}"),
     };
     child.add(
-        egui::Label::new(egui::RichText::new(meta).monospace().size(10.0).color(theme::FAINT))
+        egui::Label::new(egui::RichText::new(meta).monospace().color(theme::FAINT))
             .truncate(),
     );
 
@@ -646,10 +644,9 @@ pub fn center(ctx: &egui::Context, p: &Panel) -> Vec<Act> {
         )
         .show(ctx, |ui| {
             let Some(sel) = p.selected.as_ref() else {
-                ui.label(theme::disp_text("NO SAVE OPEN", 20.0, theme::DIM));
+                ui.label(theme::disp_text("NO SAVE OPEN", egui::TextStyle::Heading, theme::DIM));
                 ui.label(
-                    egui::RichText::new("Pick a save on the left to see its mission state.")
-                        .size(11.5)
+                    egui::RichText::new("Pick a save on the left to see its mission state.").small()
                         .color(theme::FAINT),
                 );
                 return;
@@ -676,13 +673,12 @@ pub fn center(ctx: &egui::Context, p: &Panel) -> Vec<Act> {
             ui.label(
                 egui::RichText::new(&stem)
                     .monospace()
-                    .size(11.0)
                     .color(theme::FAINT),
             );
             let mut hero_req: HeroReq = HeroReq::default();
             match (edit_view, on_disk) {
                 (None, _) => {
-                    ui.label(theme::disp_text("UNREADABLE", 20.0, theme::BAD));
+                    ui.label(theme::disp_text("UNREADABLE", egui::TextStyle::Heading, theme::BAD));
                 }
                 (Some(ev), Some(od)) => {
                     hero_req = hero_viewport(ui, ev, od, p);
@@ -709,8 +705,7 @@ pub fn center(ctx: &egui::Context, p: &Panel) -> Vec<Act> {
 
             let Some((_, parsed)) = p.lua_state.as_ref() else {
                 ui.label(
-                    egui::RichText::new("Lua not loaded yet — one frame…")
-                        .size(11.5)
+                    egui::RichText::new("Lua not loaded yet — one frame…").small()
                         .color(theme::FAINT),
                 );
                 return;
@@ -719,8 +714,7 @@ pub fn center(ctx: &egui::Context, p: &Panel) -> Vec<Act> {
                 Ok(s) => s,
                 Err(e) => {
                     ui.label(
-                        egui::RichText::new(format!("Lua parse failed: {e}"))
-                            .size(11.5)
+                        egui::RichText::new(format!("Lua parse failed: {e}")).small()
                             .color(theme::BAD),
                     );
                     return;
@@ -731,7 +725,7 @@ pub fn center(ctx: &egui::Context, p: &Panel) -> Vec<Act> {
             // scope, then the four tabs with live `SaveState` counts, then an "only changed"
             // toggle right-aligned so a modder can filter the grid once a diff baseline lands.
             ui.horizontal(|ui| {
-                ui.label(theme::disp_text("PROGRESSION", 10.0, theme::DIM));
+                ui.label(theme::disp_text("PROGRESSION", theme::style_eyebrow(), theme::DIM));
                 ui.add_space(6.0);
                 ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
                     for (tab, label, count) in [
@@ -916,21 +910,21 @@ fn hero_viewport(ui: &mut egui::Ui, h: &Profile, on_disk: &Profile, p: &Panel) -
                         box_rect.center() - egui::vec2(0.0, 14.0),
                         egui::Align2::CENTER_CENTER,
                         model_name.to_uppercase(),
-                        egui::FontId::proportional(13.0),
+                        theme::font(&egui::TextStyle::Body),
                         theme::BAD,
                     );
                     painter.text(
                         box_rect.center() + egui::vec2(0.0, 6.0),
                         egui::Align2::CENTER_CENTER,
                         "render failed",
-                        egui::FontId::proportional(10.5),
+                        theme::font(&egui::TextStyle::Small),
                         theme::BAD,
                     );
                     painter.text(
                         box_rect.center() + egui::vec2(0.0, 22.0),
                         egui::Align2::CENTER_CENTER,
                         err,
-                        egui::FontId::monospace(9.5),
+                        theme::font(&egui::TextStyle::Monospace),
                         theme::FAINT,
                     );
                 }
@@ -954,14 +948,14 @@ fn hero_viewport(ui: &mut egui::Ui, h: &Profile, on_disk: &Profile, p: &Panel) -
                         box_rect.center() + egui::vec2(0.0, 14.0),
                         egui::Align2::CENTER_CENTER,
                         model_name.to_uppercase(),
-                        egui::FontId::proportional(13.0),
+                        theme::font(&egui::TextStyle::Body),
                         theme::DIM,
                     );
                     painter.text(
                         box_rect.center() + egui::vec2(0.0, 30.0),
                         egui::Align2::CENTER_CENTER,
                         if in_flight { "rendering…" } else { "queuing render…" },
-                        egui::FontId::proportional(10.5),
+                        theme::font(&egui::TextStyle::Small),
                         theme::FAINT,
                     );
                 }
@@ -1036,7 +1030,7 @@ fn chip(ui: &mut egui::Ui, label: &str, fg: egui::Color32, bg: egui::Color32, bo
         .rounding(egui::Rounding::same(3.0))
         .inner_margin(egui::Margin::symmetric(8.0, 3.0))
         .show(ui, |ui| {
-            ui.label(theme::disp_text(label, 9.5, fg));
+            ui.label(theme::disp_text(label, theme::style_eyebrow(), fg));
         });
 }
 
@@ -1059,12 +1053,12 @@ fn upgrade_model_for(hero: u8, tier: u8) -> String {
 }
 
 /// AT-A-GLANCE card geometry, from the mockup (`Saves.dc.html:72-78`): 8px/10px padding, a
-/// 68px label column, 8px column gap, 11px text, 200px minimum width.
+/// 68px label column, 8px column gap, 200px minimum width. Labels are `Small`, values
+/// `Monospace` (both 11px).
 const GLANCE_PAD_X: f32 = 10.0;
 const GLANCE_PAD_Y: f32 = 8.0;
 const GLANCE_LABEL_W: f32 = 68.0;
 const GLANCE_COL_GAP: f32 = 8.0;
-const GLANCE_TEXT: f32 = 11.0;
 const GLANCE_MIN_W: f32 = 200.0;
 
 /// The AT-A-GLANCE rows. Reads the on-disk `Profile` so the numbers stay stable while editing.
@@ -1087,7 +1081,7 @@ fn glance_card_width(ui: &egui::Ui, rows: &[(&'static str, String)]) -> f32 {
     let widest = ui.fonts(|f| {
         rows.iter()
             .map(|(_, v)| {
-                f.layout_no_wrap(v.clone(), egui::FontId::monospace(GLANCE_TEXT), theme::TX)
+                f.layout_no_wrap(v.clone(), theme::font(&egui::TextStyle::Monospace), theme::TX)
                     .size()
                     .x
             })
@@ -1111,7 +1105,7 @@ fn at_a_glance(ui: &mut egui::Ui, rows: &[(&'static str, String)], width: f32) {
                 ui.spacing_mut().item_spacing = egui::vec2(0.0, 0.0);
                 ui.spacing_mut().interact_size.y = 0.0;
                 ui.style_mut().interaction.selectable_labels = false;
-                ui.label(theme::disp_text("AT A GLANCE", 9.5, theme::FAINT));
+                ui.label(theme::disp_text("AT A GLANCE", theme::style_eyebrow(), theme::FAINT));
                 ui.add_space(3.0);
                 let (line, _) =
                     ui.allocate_exact_size(egui::vec2(inner_w, 1.0), egui::Sense::hover());
@@ -1126,7 +1120,7 @@ fn at_a_glance(ui: &mut egui::Ui, rows: &[(&'static str, String)], width: f32) {
                                 ui.set_min_width(GLANCE_LABEL_W);
                                 ui.label(
                                     egui::RichText::new(*label)
-                                        .size(GLANCE_TEXT)
+                                        .small()
                                         .color(theme::FAINT),
                                 );
                             },
@@ -1135,7 +1129,6 @@ fn at_a_glance(ui: &mut egui::Ui, rows: &[(&'static str, String)], width: f32) {
                         ui.label(
                             egui::RichText::new(value)
                                 .monospace()
-                                .size(GLANCE_TEXT)
                                 .color(theme::TX),
                         );
                     });
@@ -1176,8 +1169,7 @@ fn render_active(ui: &mut egui::Ui, missions: &[save::ActiveMission]) -> Vec<Act
     let mut acts: Vec<Act> = Vec::new();
     if missions.is_empty() {
         ui.label(
-            egui::RichText::new("No active missions in this save.")
-                .size(11.5)
+            egui::RichText::new("No active missions in this save.").small()
                 .color(theme::FAINT),
         );
         return acts;
@@ -1223,7 +1215,6 @@ fn render_active(ui: &mut egui::Ui, missions: &[save::ActiveMission]) -> Vec<Act
                         ui.label(
                             egui::RichText::new(&m.id)
                                 .monospace()
-                                .size(10.5)
                                 .color(theme::TX),
                         );
                         ui.with_layout(
@@ -1234,7 +1225,7 @@ fn render_active(ui: &mut egui::Ui, missions: &[save::ActiveMission]) -> Vec<Act
                                     .rounding(egui::Rounding::same(2.0))
                                     .inner_margin(egui::Margin::symmetric(5.0, 1.0))
                                     .show(ui, |ui| {
-                                        ui.label(theme::disp_text(tag, 8.5, tag_fg));
+                                        ui.label(theme::disp_text(tag, theme::style_eyebrow(), tag_fg));
                                     });
                             },
                         );
@@ -1301,7 +1292,7 @@ fn mission_chip_grid(ui: &mut egui::Ui, items: &[(String, Option<String>)], s: C
                                         .rounding(egui::Rounding::same(2.0))
                                         .inner_margin(egui::Margin::symmetric(5.0, 1.0))
                                         .show(ui, |ui| {
-                                            ui.label(theme::disp_text(s.tag, 8.5, s.tag_fg));
+                                            ui.label(theme::disp_text(s.tag, theme::style_eyebrow(), s.tag_fg));
                                         });
                                     // Claim the full remaining width with a left_to_right child so
                                     // the id starts at the chip's left edge (add_sized centres).
@@ -1314,7 +1305,6 @@ fn mission_chip_grid(ui: &mut egui::Ui, items: &[(String, Option<String>)], s: C
                                                 egui::Label::new(
                                                     egui::RichText::new(id)
                                                         .monospace()
-                                                        .size(10.5)
                                                         .color(theme::TX),
                                                 )
                                                 .truncate(),
@@ -1340,8 +1330,7 @@ fn mission_chip_grid(ui: &mut egui::Ui, items: &[(String, Option<String>)], s: C
 fn render_completed(ui: &mut egui::Ui, flow: &std::collections::BTreeMap<String, f64>) {
     if flow.is_empty() {
         ui.label(
-            egui::RichText::new("No completed-flow keys recorded.")
-                .size(11.5)
+            egui::RichText::new("No completed-flow keys recorded.").small()
                 .color(theme::FAINT),
         );
         return;
@@ -1368,8 +1357,7 @@ fn render_completed(ui: &mut egui::Ui, flow: &std::collections::BTreeMap<String,
 fn render_culled(ui: &mut egui::Ui, chain: &[String]) {
     if chain.is_empty() {
         ui.label(
-            egui::RichText::new("No culled bindings — this save hasn't trimmed any from the flow.")
-                .size(11.5)
+            egui::RichText::new("No culled bindings — this save hasn't trimmed any from the flow.").small()
                 .color(theme::FAINT),
         );
         return;
@@ -1397,8 +1385,7 @@ fn render_culled(ui: &mut egui::Ui, chain: &[String]) {
 fn render_layers(ui: &mut egui::Ui, layers: &[String]) {
     if layers.is_empty() {
         ui.label(
-            egui::RichText::new("No world overlays in this save.")
-                .size(11.5)
+            egui::RichText::new("No world overlays in this save.").small()
                 .color(theme::FAINT),
         );
         return;
@@ -1507,8 +1494,7 @@ fn render_all_missions(ui: &mut egui::Ui, state: &SaveState) {
     let rows = all_missions(state);
     if rows.is_empty() {
         ui.label(
-            egui::RichText::new("No mission ids in this save yet.")
-                .size(11.5)
+            egui::RichText::new("No mission ids in this save yet.").small()
                 .color(theme::FAINT),
         );
         return;
@@ -1534,7 +1520,7 @@ fn render_all_missions(ui: &mut egui::Ui, state: &SaveState) {
             continue;
         }
         ui.add_space(4.0);
-        ui.label(theme::disp_text(tag, 9.5, theme::FAINT));
+        ui.label(theme::disp_text(tag, theme::style_eyebrow(), theme::FAINT));
         ui.add_space(2.0);
         mission_chip_grid(ui, &items, bucket.style());
     }
@@ -1647,7 +1633,7 @@ fn u32_row(
     let mut v = value as i64;
     let mut edited: Option<u32> = None;
     ui.horizontal(|ui| {
-        ui.label(egui::RichText::new(key).color(theme::DIM).size(12.0));
+        ui.label(egui::RichText::new(key).color(theme::DIM));
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             let resp = ui.add(
                 egui::DragValue::new(&mut v)
@@ -1684,8 +1670,7 @@ pub fn inspector(ui: &mut egui::Ui, p: &Panel) -> Vec<Act> {
     });
     let Some(entry) = entry else {
         ui.label(
-            egui::RichText::new("Pick a save on the left to inspect it.")
-                .size(11.5)
+            egui::RichText::new("Pick a save on the left to inspect it.").small()
                 .color(theme::FAINT),
         );
         return acts;
@@ -1693,8 +1678,7 @@ pub fn inspector(ui: &mut egui::Ui, p: &Panel) -> Vec<Act> {
 
     ui.label(
         egui::RichText::new(&entry.stem)
-            .monospace()
-            .size(12.5)
+            .monospace().text_style(theme::style_mono_body())
             .color(theme::TX),
     );
     ui.add_space(6.0);
@@ -1703,8 +1687,7 @@ pub fn inspector(ui: &mut egui::Ui, p: &Panel) -> Vec<Act> {
         Ok(h) => h,
         Err(e) => {
             ui.label(
-                egui::RichText::new(format!("Parse failed: {e}"))
-                    .size(11.5)
+                egui::RichText::new(format!("Parse failed: {e}")).small()
                     .color(theme::BAD),
             );
             return acts;
@@ -1733,14 +1716,12 @@ pub fn inspector(ui: &mut egui::Ui, p: &Panel) -> Vec<Act> {
                     ui.label(
                         egui::RichText::new(format!("version {}", on_disk.version))
                             .monospace()
-                            .size(10.0)
                             .color(theme::FAINT),
                     );
                 });
             });
             ui.label(
-                egui::RichText::new("CRC-32/BZIP2 checksum verified")
-                    .size(10.5)
+                egui::RichText::new("CRC-32/BZIP2 checksum verified").small()
                     .color(theme::FAINT),
             );
             if dirty {
@@ -1754,8 +1735,7 @@ pub fn inspector(ui: &mut egui::Ui, p: &Panel) -> Vec<Act> {
     let mut hero_edit: Option<u8> = None;
     theme::section(ui, "HERO", None, true, |ui| {
         ui.label(
-            egui::RichText::new("Playing as")
-                .size(10.0)
+            egui::RichText::new("Playing as").small()
                 .color(theme::FAINT),
         );
         egui::ComboBox::from_id_source("saves.hero")
@@ -1797,8 +1777,7 @@ pub fn inspector(ui: &mut egui::Ui, p: &Panel) -> Vec<Act> {
                      extracted from wifpmcinterior.lua:215; the other heroes' \
                      tables live in the same file and will land in a later commit.",
                     hero_name(pending.character_index).split_whitespace().next().unwrap_or("hero").to_lowercase()
-                ))
-                .size(10.5)
+                )).small()
                 .color(theme::FAINT),
             );
             theme::kv(
@@ -1819,15 +1798,13 @@ pub fn inspector(ui: &mut egui::Ui, p: &Panel) -> Vec<Act> {
         let cap = outfits.len() as u8;
         ui.horizontal(|ui| {
             ui.label(
-                egui::RichText::new("UNLOCKED COUNT")
-                    .size(10.0)
+                egui::RichText::new("UNLOCKED COUNT").small()
                     .color(theme::DIM),
             );
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.label(
                     egui::RichText::new(format!("/ {cap}"))
                         .monospace()
-                        .size(10.5)
                         .color(theme::FAINT),
                 );
                 if ui.small_button("+").clicked() {
@@ -1835,8 +1812,7 @@ pub fn inspector(ui: &mut egui::Ui, p: &Panel) -> Vec<Act> {
                 }
                 ui.label(
                     egui::RichText::new(format!("{}", pending.unlocked_costumes))
-                        .monospace()
-                        .size(12.0),
+                        .monospace().text_style(theme::style_mono_body()),
                 );
                 // A picked skin stays unlocked: the count can't drop below it.
                 let floor = p
@@ -1860,13 +1836,12 @@ pub fn inspector(ui: &mut egui::Ui, p: &Panel) -> Vec<Act> {
             let resp = theme::row_chip(ui, fill, border, |ui| {
                 // Selectable labels would take the press and the row would never see a click.
                 ui.style_mut().interaction.selectable_labels = false;
-                ui.label(theme::disp_text(if unlocked { "●" } else { "○" }, 11.0, dot_fg));
-                ui.label(egui::RichText::new(*name).size(11.5).color(name_fg));
+                ui.label(theme::disp_text(if unlocked { "●" } else { "○" }, theme::style_eyebrow(), dot_fg));
+                ui.label(egui::RichText::new(*name).small().color(name_fg));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.label(
                         egui::RichText::new(*model)
                             .monospace()
-                            .size(10.0)
                             .color(theme::FAINT),
                     );
                 });
@@ -1901,7 +1876,7 @@ pub fn inspector(ui: &mut egui::Ui, p: &Panel) -> Vec<Act> {
             acts.push(Act::SetFuelCapacity(v.min(u16::MAX as u32) as u16));
         }
         ui.horizontal(|ui| {
-            ui.label(egui::RichText::new("active").color(theme::DIM).size(12.0));
+            ui.label(egui::RichText::new("active").color(theme::DIM));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let mut buf = pending.active_contract.clone();
                 let resp = ui.add(
@@ -1933,8 +1908,7 @@ pub fn inspector(ui: &mut egui::Ui, p: &Panel) -> Vec<Act> {
     theme::section(ui, "COLLECTIBLES", Some("tStatsData"), true, |ui| {
         let Some(s) = state else {
             ui.label(
-                egui::RichText::new("Lua not loaded — pick a save to populate.")
-                    .size(11.0)
+                egui::RichText::new("Lua not loaded — pick a save to populate.").small()
                     .color(theme::FAINT),
             );
             return;
@@ -1942,14 +1916,13 @@ pub fn inspector(ui: &mut egui::Ui, p: &Panel) -> Vec<Act> {
         match s.completed_toolboxes {
             None => {
                 ui.label(
-                    egui::RichText::new("This save has no tStatsData.nCompletedToolboxes.")
-                        .size(11.0)
+                    egui::RichText::new("This save has no tStatsData.nCompletedToolboxes.").small()
                         .color(theme::FAINT),
                 );
             }
             Some(n) => {
                 ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new("Toolboxes").color(theme::DIM).size(12.0));
+                    ui.label(egui::RichText::new("Toolboxes").color(theme::DIM));
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         // Only raises: the counter is uncapped and a save can hold more than 100.
                         if ui
@@ -1960,8 +1933,7 @@ pub fn inspector(ui: &mut egui::Ui, p: &Panel) -> Vec<Act> {
                             acts.push(Act::SetCompletedToolboxes(total));
                         }
                         ui.label(
-                            egui::RichText::new(format!("of {total}"))
-                                .size(10.5)
+                            egui::RichText::new(format!("of {total}")).small()
                                 .color(theme::FAINT),
                         );
                         let mut v = n as i64;
@@ -2022,18 +1994,15 @@ pub fn inspector(ui: &mut egui::Ui, p: &Panel) -> Vec<Act> {
                         ui.label(
                             egui::RichText::new(format!("LZ {:>2}", z.zone))
                                 .monospace()
-                                .size(11.0)
                                 .color(fg),
                         );
                         ui.label(
-                            egui::RichText::new(z.faction.as_deref().unwrap_or("—"))
-                                .size(11.0)
+                            egui::RichText::new(z.faction.as_deref().unwrap_or("—")).small()
                                 .color(theme::DIM),
                         );
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             ui.label(
-                                egui::RichText::new(if flags.is_empty() { "disabled" } else { &flags })
-                                    .size(10.0)
+                                egui::RichText::new(if flags.is_empty() { "disabled" } else { &flags }).small()
                                     .color(if z.is_nuked { theme::BAD } else { theme::FAINT }),
                             );
                         });
@@ -2052,8 +2021,7 @@ pub fn inspector(ui: &mut egui::Ui, p: &Panel) -> Vec<Act> {
             |ui| {
                 if s.equipped_support.is_empty() {
                     ui.label(
-                        egui::RichText::new("Nothing equipped.")
-                            .size(11.0)
+                        egui::RichText::new("Nothing equipped.").small()
                             .color(theme::FAINT),
                     );
                 }
@@ -2062,10 +2030,9 @@ pub fn inspector(ui: &mut egui::Ui, p: &Panel) -> Vec<Act> {
                         ui.label(
                             egui::RichText::new(format!("{}", i + 1))
                                 .monospace()
-                                .size(10.5)
                                 .color(theme::FAINT),
                         );
-                        ui.label(egui::RichText::new(token).monospace().size(11.0).color(theme::TX));
+                        ui.label(egui::RichText::new(token).monospace().color(theme::TX));
                     });
                 }
             },
