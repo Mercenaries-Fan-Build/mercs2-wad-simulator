@@ -1078,7 +1078,74 @@ fn render_active(ui: &mut egui::Ui, missions: &[save::ActiveMission]) -> Vec<Act
     acts
 }
 
-/// Compact rows for `tMyFlowData` — id · value, sorted. 100s of entries so each row is slim.
+/// A chip-grid palette: body colours (bg + border) + state-tag pill colours (bg + fg + label).
+/// Grouped so the three non-interactive tabs can share one chip-grid renderer and vary only the
+/// four colours + the three-letter tag.
+#[derive(Clone, Copy)]
+struct ChipStyle {
+    bg: egui::Color32,
+    bd: egui::Color32,
+    tag_bg: egui::Color32,
+    tag_fg: egui::Color32,
+    tag: &'static str,
+}
+
+/// 6-column chip grid, one palette for the whole tab. The mockup renders Completed / Culled /
+/// Flow bindings in the exact same visual grammar as Active — id on the left, state tag pill on
+/// the right — differing only in the colours and the tag text. A one-column vertical list of
+/// mission ids (what Completed used to be) ran off-screen at ~215 entries and did not match the
+/// mockup's density; a shared grid keeps the four tabs reading as one coherent board.
+fn mission_chip_grid(ui: &mut egui::Ui, items: &[(String, Option<String>)], s: ChipStyle) {
+    let cols = 6usize;
+    let gutter = 4.0;
+    let avail = ui.available_width();
+    let cell_w = ((avail - (cols as f32 - 1.0) * gutter) / cols as f32).max(100.0);
+    let mut col = 0usize;
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing = egui::vec2(gutter, gutter);
+        for (id, hover) in items {
+            let resp = egui::Frame::none()
+                .fill(s.bg)
+                .stroke(egui::Stroke::new(1.0, s.bd))
+                .rounding(egui::Rounding::same(4.0))
+                .inner_margin(egui::Margin::symmetric(7.0, 4.0))
+                .show(ui, |ui| {
+                    ui.set_width(cell_w);
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            egui::RichText::new(id)
+                                .monospace()
+                                .size(10.5)
+                                .color(theme::TX),
+                        );
+                        ui.with_layout(
+                            egui::Layout::right_to_left(egui::Align::Center),
+                            |ui| {
+                                egui::Frame::none()
+                                    .fill(s.tag_bg)
+                                    .rounding(egui::Rounding::same(2.0))
+                                    .inner_margin(egui::Margin::symmetric(5.0, 1.0))
+                                    .show(ui, |ui| {
+                                        ui.label(theme::disp_text(s.tag, 8.5, s.tag_fg));
+                                    });
+                            },
+                        );
+                    });
+                })
+                .response;
+            if let Some(h) = hover {
+                let _ = resp.on_hover_text(h);
+            }
+            col += 1;
+            if col >= cols {
+                ui.end_row();
+                col = 0;
+            }
+        }
+    });
+}
+
+/// `tMyFlowData` chips — the completed story beats. Palette matches the mockup's green DONE pill.
 fn render_completed(ui: &mut egui::Ui, flow: &std::collections::BTreeMap<String, f64>) {
     if flow.is_empty() {
         ui.label(
@@ -1088,27 +1155,25 @@ fn render_completed(ui: &mut egui::Ui, flow: &std::collections::BTreeMap<String,
         );
         return;
     }
-    for (k, v) in flow {
-        ui.horizontal(|ui| {
-            ui.label(
-                egui::RichText::new(k)
-                    .monospace()
-                    .size(11.5)
-                    .color(theme::TX),
-            );
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.label(
-                    egui::RichText::new(format!("{}", *v as i64))
-                        .monospace()
-                        .size(10.5)
-                        .color(theme::GOOD),
-                );
-            });
-        });
-    }
+    let items: Vec<(String, Option<String>)> = flow
+        .iter()
+        .map(|(k, v)| (k.clone(), Some(format!("{k}\nvalue {}", *v as i64))))
+        .collect();
+    mission_chip_grid(
+        ui,
+        &items,
+        ChipStyle {
+            bg: theme::G2,
+            bd: theme::GOOD_DK,
+            tag_bg: theme::GOOD_SOFT,
+            tag_fg: theme::GOOD,
+            tag: "DONE",
+        },
+    );
 }
 
-/// `tCulledBindings` — ordered list, so render with a leading index to make the order visible.
+/// `tCulledBindings` chips — bindings the save trimmed out of the flow. Red/BAD palette so a
+/// culled chip reads as a negative state, consistent with the mockup's SKIP styling.
 fn render_culled(ui: &mut egui::Ui, chain: &[String]) {
     if chain.is_empty() {
         ui.label(
@@ -1118,26 +1183,26 @@ fn render_culled(ui: &mut egui::Ui, chain: &[String]) {
         );
         return;
     }
-    for (i, k) in chain.iter().enumerate() {
-        ui.horizontal(|ui| {
-            ui.label(
-                egui::RichText::new(format!("{i:3}"))
-                    .monospace()
-                    .size(10.5)
-                    .color(theme::FAINT),
-            );
-            ui.label(
-                egui::RichText::new(k)
-                    .monospace()
-                    .size(11.5)
-                    .color(theme::TX),
-            );
-        });
-    }
+    let items: Vec<(String, Option<String>)> = chain
+        .iter()
+        .enumerate()
+        .map(|(i, k)| (k.clone(), Some(format!("#{i} {k}\nculled from flow chain"))))
+        .collect();
+    mission_chip_grid(
+        ui,
+        &items,
+        ChipStyle {
+            bg: theme::G2,
+            bd: theme::BAD,
+            tag_bg: theme::G0,
+            tag_fg: theme::BAD,
+            tag: "SKIP",
+        },
+    );
 }
 
-/// `tLayerData` — the active `vz_state_*` overlays, in order. Shown as mono text; this is
-/// the overlay set the streamer restores on load.
+/// `tLayerData` chips — the active `vz_state_*` world-overlay set the streamer restores. Dim
+/// LAYR tag so a layer chip reads as neutral metadata, not a completion state.
 fn render_layers(ui: &mut egui::Ui, layers: &[String]) {
     if layers.is_empty() {
         ui.label(
@@ -1147,14 +1212,21 @@ fn render_layers(ui: &mut egui::Ui, layers: &[String]) {
         );
         return;
     }
-    for l in layers {
-        ui.label(
-            egui::RichText::new(l)
-                .monospace()
-                .size(11.5)
-                .color(theme::TX),
-        );
-    }
+    let items: Vec<(String, Option<String>)> = layers
+        .iter()
+        .map(|l| (l.clone(), Some(format!("{l}\nworld overlay restored on load"))))
+        .collect();
+    mission_chip_grid(
+        ui,
+        &items,
+        ChipStyle {
+            bg: theme::G0,
+            bd: theme::LINE,
+            tag_bg: theme::G0,
+            tag_fg: theme::DIM,
+            tag: "LAYR",
+        },
+    );
 }
 
 /// `1`/`2`/`3` → the hero's full name as the engine resolves it (`SHELL.SelectCharacter.*`
