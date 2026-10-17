@@ -79,6 +79,7 @@ mod retarget;
 use crate::retarget::RetargetPreview as _;
 mod quartermaster;
 mod saves;
+mod save_tables; // Read-only inspector sections for every other save table
 mod settings;
 mod shipment;
 mod shot;
