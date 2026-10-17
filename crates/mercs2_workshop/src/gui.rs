@@ -507,6 +507,9 @@ pub mod theme {
             .inner_margin(egui::Margin::symmetric(11.0, 8.0))
             .outer_margin(egui::Margin { bottom: 10.0, ..Default::default() })
             .show(ui, |ui| {
+                // A collapsed section has only its header inside; without this the card
+                // shrinks to the header's width instead of spanning the panel.
+                ui.set_width(ui.available_width());
                 let id = ui.make_persistent_id(("sect", title));
                 egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, default_open)
                     .show_header(ui, |ui| {
