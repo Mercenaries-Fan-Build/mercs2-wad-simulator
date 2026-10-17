@@ -1706,6 +1706,36 @@ pub fn verbs(ui: &mut egui::Ui, p: &Panel) -> Vec<Act> {
     acts
 }
 
+/// The Workshop's bottom status bar hands off to this when the Saves rail tab is active
+/// and a save is selected — matching the mockup's `LOADED · 13,404 B · checksum ok ·
+/// payload inflated`. Returns `(dot_color, dot_label, detail)`; `None` falls back to the
+/// Workshop's normal "Ready / Loading" banner.
+pub fn saves_status_banner(p: &Panel) -> Option<(egui::Color32, &'static str, String)> {
+    let selected = p.selected.as_ref()?;
+    let entry = p
+        .profiles
+        .as_ref()
+        .and_then(|list| list.iter().find(|e| &e.path == selected))?;
+    match &entry.header {
+        Ok(h) => {
+            let bytes = h.raw_bytes().len();
+            let checksum = if h.hash_ok() { "checksum ok" } else { "checksum MISMATCH" };
+            let payload = match &p.lua_state {
+                Some((_, Ok(_))) => "payload inflated",
+                Some((_, Err(_))) => "payload decompression failed",
+                None => "payload not yet decompressed",
+            };
+            let dot_color = if h.hash_ok() { theme::GOOD } else { theme::BAD };
+            Some((
+                dot_color,
+                if h.hash_ok() { "LOADED" } else { "LOADED · HASH BAD" },
+                format!("{bytes} B · {checksum} · {payload}"),
+            ))
+        }
+        Err(e) => Some((theme::BAD, "ERROR", format!("parse failed: {e}"))),
+    }
+}
+
 /// Reduce the acts the four panels emit onto [`Panel`] state.
 ///
 /// Mirrors [`crate::quartermaster::apply`]. Panel-local decisions live here; anything that
