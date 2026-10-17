@@ -51,6 +51,9 @@ pub enum Act {
     /// `@0x24A` — unlocked-costume count, 1..=5. Not the active costume (that one is a
     /// runtime-only override at `+0x63` whose on-disk byte is open).
     SetUnlockedCostumes(u8),
+    /// Render the hero viewport in `hero_outfits(hero)[i]` instead of the upgrade-tier model,
+    /// or back to the upgrade-tier model on `None`. Viewport-only; nothing is written.
+    SetWardrobePreview(Option<usize>),
     /// Open the saves folder in the OS file manager.
     RevealFolder,
     /// Prompt for a `.profile` anywhere on disk via a native file picker.
@@ -205,6 +208,11 @@ pub struct Panel {
     /// scroll through other Mattias saves. A missing key = `OrbitCam::default()` the first
     /// time the viewport paints that hero.
     pub hero_cam: HashMap<u32, crate::shot::OrbitCam>,
+    /// WARDROBE "Active override" pick: an index into `hero_outfits(hero)` the viewport renders
+    /// instead of the upgrade-tier model. Viewport-only — the costume override is a runtime
+    /// field (profile object `+0x63`) whose `.profile` byte isn't located, so nothing is
+    /// written. Cleared when the selection or hero changes.
+    pub wardrobe_preview: Option<usize>,
 }
 
 /// The centre panel's current tab over `tFlowData`. Carried on the Panel so switching rails
@@ -769,7 +777,13 @@ struct HeroReq {
 /// `on_disk` backs AT-A-GLANCE so cash/fuel/timestamp stay stable while editing.
 fn hero_viewport(ui: &mut egui::Ui, h: &Profile, on_disk: &Profile, p: &Panel) -> HeroReq {
     let viewport_height = 360.0;
-    let model_name = upgrade_model_for(h.character_index, h.upgrade_index);
+    let outfit = p
+        .wardrobe_preview
+        .and_then(|i| hero_outfits(h.character_index).get(i).copied());
+    let model_name = match outfit {
+        Some((_, model)) => model.to_string(),
+        None => upgrade_model_for(h.character_index, h.upgrade_index),
+    };
     let hash = mercs2_formats::hash::pandemic_hash_m2(&model_name);
     let cached_tex = p.hero_textures.get(&hash).cloned();
     let failed_err = p.hero_render_failed.get(&hash).cloned();
@@ -787,7 +801,10 @@ fn hero_viewport(ui: &mut egui::Ui, h: &Profile, on_disk: &Profile, p: &Panel) -
     if cached_tex.is_none() && failed_err.is_none() && !in_flight {
         out.request_render = Some((hash, model_name.clone()));
     }
-    let model_label = format!("UPGRADE {} · {}", h.upgrade_index, model_name);
+    let model_label = match outfit {
+        Some((name, _)) => format!("OUTFIT {name} · {model_name}"),
+        None => format!("UPGRADE {} · {}", h.upgrade_index, model_name),
+    };
     let identity_label = format!(
         "{} · hero={} · upgrade={}",
         hero_name(h.character_index),
@@ -1569,7 +1586,7 @@ fn u32_row(
 }
 
 /// The right-side inspector: a stack of collapsible `theme::section` cards matching the mockup
-/// (SAVE strip + HERO / STORY UPGRADE / WARDROBE / RESOURCES / COLLECTIBLES / METADATA).
+/// (SAVE strip + HERO / WARDROBE / RESOURCES / COLLECTIBLES / METADATA).
 ///
 /// Live-edit: every widget change pushes a `Set*` Act; the reducer applies to `Panel::pending`
 /// (a working clone of the parsed `Profile`). The on-disk bytes don't move until Write.
@@ -1687,10 +1704,10 @@ pub fn inspector(ui: &mut egui::Ui, p: &Panel) -> Vec<Act> {
         acts.push(Act::SetCharacter(v));
     }
 
-    // WARDROBE — active override dropdown (runtime-only on disk, surfaced for a future write
-    // byte at `+0x4E`) + an UNLOCKED COUNT stepper over `@0x24A` + a prefix-unlocked list.
-    // When the hero's `_tOutfits` table isn't catalogued (Chris / Jen for now), the panel
-    // says so plainly rather than rendering an empty list under a stepper of "/ 1".
+    // WARDROBE — active override dropdown (drives the viewport only: the costume override is
+    // runtime field `+0x63` whose `.profile` byte isn't located) + an UNLOCKED COUNT stepper
+    // over `@0x24A` + a prefix-unlocked list. A hero with no catalogued `_tOutfits` table
+    // gets a plain note instead of an empty list under a stepper of "/ 1".
     let mut costumes_edit: Option<u8> = None;
     theme::section(ui, "WARDROBE", None, true, |ui| {
         let outfits = hero_outfits(pending.character_index);
@@ -1717,17 +1734,31 @@ pub fn inspector(ui: &mut egui::Ui, p: &Panel) -> Vec<Act> {
                 .size(10.0)
                 .color(theme::FAINT),
         );
+        let default_model = upgrade_model_for(pending.character_index, pending.upgrade_index);
+        let none_text = format!("None  ·  {default_model}");
+        let current = p.wardrobe_preview.filter(|&i| i < outfits.len());
+        let selected_text = match current {
+            Some(i) => format!("{}  ·  {}", outfits[i].0, outfits[i].1),
+            None => none_text.clone(),
+        };
         egui::ComboBox::from_id_source("saves.wardrobe.active")
-            .selected_text("None  ·  (use story upgrade)")
+            .selected_text(selected_text)
             .width(ui.available_width() - 2.0)
             .show_ui(ui, |ui| {
-                let _ = ui.selectable_label(true, "None  ·  (use story upgrade)");
-                for (name, model) in outfits {
-                    let _ = ui.selectable_label(false, format!("{name}  ·  {model}"));
+                if ui.selectable_label(current.is_none(), &none_text).clicked() {
+                    acts.push(Act::SetWardrobePreview(None));
+                }
+                for (i, (name, model)) in outfits.iter().enumerate() {
+                    if ui
+                        .selectable_label(current == Some(i), format!("{name}  ·  {model}"))
+                        .clicked()
+                    {
+                        acts.push(Act::SetWardrobePreview(Some(i)));
+                    }
                 }
             });
         ui.label(
-            egui::RichText::new("runtime-only · not persisted")
+            egui::RichText::new("previews in the viewport · not written to the save")
                 .size(9.5)
                 .color(theme::FAINT),
         );
@@ -2013,13 +2044,18 @@ pub fn apply(act: Act, p: &mut Panel) {
     match act {
         Act::Select(path) => {
             p.selected = Some(path);
+            p.wardrobe_preview = None;
             p.repopulate_pending_from_selection();
         }
         Act::Reload => p.refresh(),
         Act::PickMissionTab(t) => p.mission_tab = t,
         Act::Discard => p.repopulate_pending_from_selection(),
         Act::Write => p.write_to_disk(),
-        Act::SetCharacter(v) => mutate_pending(p, |pr| pr.character_index = v),
+        Act::SetCharacter(v) => {
+            p.wardrobe_preview = None;
+            mutate_pending(p, |pr| pr.character_index = v)
+        }
+        Act::SetWardrobePreview(i) => p.wardrobe_preview = i,
         Act::SetUpgrade(v) => mutate_pending(p, |pr| pr.upgrade_index = v),
         Act::SetUnlockedCostumes(v) => mutate_pending(p, |pr| pr.unlocked_costumes = v),
         Act::SetCash(v) => mutate_pending(p, |pr| pr.cash = v),
