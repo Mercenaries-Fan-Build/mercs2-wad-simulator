@@ -72,6 +72,7 @@ mod gui;
 mod import;
 mod index;
 mod luaview;
+mod missions;
 mod publish;
 mod retarget;
 // The preview-only half (`rebind_matrices` / `animation_rig`) is an extension trait now that the
