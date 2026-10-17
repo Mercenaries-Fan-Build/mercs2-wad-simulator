@@ -224,6 +224,9 @@ pub struct Panel {
     /// The game's English string table (`key_hash -> text`), loaded by `app.rs` from the open WAD
     /// stack. `None` until loaded; `Some(Err)` names why it couldn't be.
     pub english: Option<Result<HashMap<u32, String>, String>>,
+    /// `worldentity` template names by key, loaded by `app.rs` from the open WAD stack — names the
+    /// save's carried weapons. `None` until loaded; `Some(Err)` names why it couldn't be.
+    pub templates: Option<Result<HashMap<u32, String>, String>>,
 }
 
 /// The centre panel's current tab over `tFlowData`. Carried on the Panel so switching rails
@@ -2014,65 +2017,49 @@ pub fn inspector(ui: &mut egui::Ui, p: &Panel) -> Vec<Act> {
             },
         );
 
-        // LOADOUT — `vEquippedSupport`, the equipped support/vehicle tokens in slot order.
+        // LOADOUT — what the player carries (`tPlayerData[1].tEquipment`, named by the WAD's
+        // `worldentity` templates) and the PDA support slots (`vEquippedSupport`, string-table keys).
+        let carried: &[save::CarriedWeapon] =
+            s.players.first().map(|pl| pl.equipment.as_slice()).unwrap_or(&[]);
         let slots = s.equipped_support.len();
         theme::section(
             ui,
-            "LOADOUT · vEquippedSupport",
-            Some(&format!("{slots} slots")),
+            "LOADOUT",
+            Some(&format!("{} carried · {slots} support", carried.len())),
             false,
             |ui| {
-                if s.equipped_support.is_empty() {
-                    ui.label(
-                        egui::RichText::new("Nothing equipped.").small()
-                            .color(theme::FAINT),
+                let templates = loaded_or_report(ui, "template names", &p.templates);
+                let english = loaded_or_report(ui, "display names", &p.english);
+
+                ui.label(theme::disp_text("CARRIED", theme::style_eyebrow(), theme::DIM));
+                if carried.is_empty() {
+                    ui.label(egui::RichText::new("Nothing carried.").small().color(theme::FAINT));
+                }
+                for w in carried {
+                    loadout_row(
+                        ui,
+                        templates.and_then(|t| t.get(&w.template)).map(String::as_str),
+                        &format!("0x{:08X}", w.template),
+                        Some(format!("{} reserve", w.reserve_ammo as i64)),
+                        "not a worldentity template",
                     );
                 }
-                let english = match &p.english {
-                    Some(Ok(t)) => Some(t),
-                    Some(Err(e)) => {
-                        ui.label(
-                            egui::RichText::new(format!("No display names: {e}"))
-                                .small()
-                                .color(theme::BAD),
-                        );
-                        None
-                    }
-                    None => None,
-                };
-                for (i, token) in s.equipped_support.iter().enumerate() {
-                    // Tokens are string-table keys (`[vehicle.wz10]`); show the English text.
-                    let name = english
-                        .and_then(|t| t.get(&mercs2_formats::stringdb::key_hash(token)));
-                    ui.horizontal(|ui| {
-                        ui.label(
-                            egui::RichText::new(format!("{}", i + 1))
-                                .monospace()
-                                .color(theme::FAINT),
-                        );
-                        match name {
-                            Some(n) => {
-                                ui.label(egui::RichText::new(n).color(theme::TX));
-                                ui.with_layout(
-                                    egui::Layout::right_to_left(egui::Align::Center),
-                                    |ui| {
-                                        ui.add(
-                                            egui::Label::new(
-                                                egui::RichText::new(token)
-                                                    .monospace()
-                                                    .color(theme::FAINT),
-                                            )
-                                            .truncate(),
-                                        );
-                                    },
-                                );
-                            }
-                            None => {
-                                ui.label(egui::RichText::new(token).monospace().color(theme::TX))
-                                    .on_hover_text("not in the English string table");
-                            }
-                        }
-                    });
+                ui.add_space(6.0);
+                ui.label(theme::disp_text("SUPPORT", theme::style_eyebrow(), theme::DIM));
+                if s.equipped_support.is_empty() {
+                    ui.label(egui::RichText::new("Nothing equipped.").small().color(theme::FAINT));
+                }
+                for token in &s.equipped_support {
+                    // Tokens are string-table keys (`[vehicle.wz10]`).
+                    loadout_row(
+                        ui,
+                        english
+                            .and_then(|t| t.get(&mercs2_formats::stringdb::key_hash(token)))
+                            .map(String::as_str),
+                        token,
+                        None,
+                        "not in the English string table",
+                    );
                 }
             },
         );
@@ -2087,6 +2074,49 @@ pub fn inspector(ui: &mut egui::Ui, p: &Panel) -> Vec<Act> {
     });
 
     acts
+}
+
+/// A table loaded by `app.rs`: the map when loaded, `None` (with the failure shown) when it could
+/// not be, `None` silently while it has not been loaded yet.
+fn loaded_or_report<'a>(
+    ui: &mut egui::Ui,
+    what: &str,
+    table: &'a Option<Result<HashMap<u32, String>, String>>,
+) -> Option<&'a HashMap<u32, String>> {
+    match table {
+        Some(Ok(t)) => Some(t),
+        Some(Err(e)) => {
+            ui.label(egui::RichText::new(format!("No {what}: {e}")).small().color(theme::BAD));
+            None
+        }
+        None => None,
+    }
+}
+
+/// One LOADOUT row: the resolved name (plus optional detail) with the raw save value dimmed on the
+/// right; the raw value alone, with `missing` on hover, when it doesn't resolve.
+fn loadout_row(ui: &mut egui::Ui, name: Option<&str>, raw: &str, detail: Option<String>, missing: &str) {
+    ui.horizontal(|ui| match name {
+        Some(n) => {
+            ui.label(egui::RichText::new(n).color(theme::TX));
+            if let Some(d) = &detail {
+                ui.label(egui::RichText::new(d).small().color(theme::FAINT));
+            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.add(
+                    egui::Label::new(egui::RichText::new(raw).monospace().color(theme::FAINT))
+                        .truncate(),
+                );
+            });
+        }
+        None => {
+            ui.label(egui::RichText::new(raw).monospace().color(theme::TX))
+                .on_hover_text(missing);
+            if let Some(d) = &detail {
+                ui.label(egui::RichText::new(d).small().color(theme::FAINT));
+            }
+        }
+    });
 }
 
 /// True when the pending Profile differs from the on-disk one on any **editable** field, or in
