@@ -1704,11 +1704,13 @@ pub fn inspector(ui: &mut egui::Ui, p: &Panel) -> Vec<Act> {
         acts.push(Act::SetCharacter(v));
     }
 
-    // WARDROBE — active override dropdown (drives the viewport only: the costume override is
-    // runtime field `+0x63` whose `.profile` byte isn't located) + an UNLOCKED COUNT stepper
-    // over `@0x24A` + a prefix-unlocked list. A hero with no catalogued `_tOutfits` table
-    // gets a plain note instead of an empty list under a stepper of "/ 1".
+    // WARDROBE — UNLOCKED COUNT stepper over `@0x24A` + the hero's `_tOutfits` list. Clicking a
+    // skin makes it the active skin and, because unlocks are a prefix count, raises the count
+    // to include it. The active skin drives the viewport only: the costume override is runtime
+    // field `+0x63` whose `.profile` byte isn't located. A hero with no catalogued `_tOutfits`
+    // table gets a plain note instead of an empty list under a stepper of "/ 1".
     let mut costumes_edit: Option<u8> = None;
+    let mut active_edit: Option<usize> = None;
     theme::section(ui, "WARDROBE", None, true, |ui| {
         let outfits = hero_outfits(pending.character_index);
         if outfits.is_empty() {
@@ -1729,40 +1731,13 @@ pub fn inspector(ui: &mut egui::Ui, p: &Panel) -> Vec<Act> {
             );
             return;
         }
-        ui.label(
-            egui::RichText::new("Active override")
-                .size(10.0)
-                .color(theme::FAINT),
-        );
+        // With no pick, the active skin is the outfit whose model the upgrade tier spawns (tiers
+        // whose template isn't an outfit leave nothing highlighted).
         let default_model = upgrade_model_for(pending.character_index, pending.upgrade_index);
-        let none_text = format!("None  ·  {default_model}");
-        let current = p.wardrobe_preview.filter(|&i| i < outfits.len());
-        let selected_text = match current {
-            Some(i) => format!("{}  ·  {}", outfits[i].0, outfits[i].1),
-            None => none_text.clone(),
-        };
-        egui::ComboBox::from_id_source("saves.wardrobe.active")
-            .selected_text(selected_text)
-            .width(ui.available_width() - 2.0)
-            .show_ui(ui, |ui| {
-                if ui.selectable_label(current.is_none(), &none_text).clicked() {
-                    acts.push(Act::SetWardrobePreview(None));
-                }
-                for (i, (name, model)) in outfits.iter().enumerate() {
-                    if ui
-                        .selectable_label(current == Some(i), format!("{name}  ·  {model}"))
-                        .clicked()
-                    {
-                        acts.push(Act::SetWardrobePreview(Some(i)));
-                    }
-                }
-            });
-        ui.label(
-            egui::RichText::new("previews in the viewport · not written to the save")
-                .size(9.5)
-                .color(theme::FAINT),
-        );
-        ui.add_space(8.0);
+        let active = p
+            .wardrobe_preview
+            .filter(|&i| i < outfits.len())
+            .or_else(|| outfits.iter().position(|(_, m)| *m == default_model));
 
         let cap = outfits.len() as u8;
         ui.horizontal(|ui| {
@@ -1786,34 +1761,30 @@ pub fn inspector(ui: &mut egui::Ui, p: &Panel) -> Vec<Act> {
                         .monospace()
                         .size(12.0),
                 );
+                // A picked skin stays unlocked: the count can't drop below it.
+                let floor = p
+                    .wardrobe_preview
+                    .filter(|&i| i < outfits.len())
+                    .map_or(1, |i| i as u8 + 1);
                 if ui.small_button("−").clicked() {
-                    costumes_edit = Some(pending.unlocked_costumes.saturating_sub(1).max(1));
+                    costumes_edit = Some(pending.unlocked_costumes.saturating_sub(1).max(floor));
                 }
             });
         });
-        ui.label(
-            egui::RichText::new(
-                "The byte stores a count — the first N entries of _tOutfits.<hero> \
-                 become selectable at the mirror.",
-            )
-            .size(9.5)
-            .color(theme::FAINT),
-        );
         ui.add_space(6.0);
         for (i, (name, model)) in outfits.iter().enumerate() {
-            let on = (i as u8) < pending.unlocked_costumes;
-            let (fill, border, dot_fg) = if on {
-                (theme::G0, theme::LINE, theme::BRASS)
-            } else {
-                (theme::G0, theme::LINE2, theme::FAINT)
+            let unlocked = (i as u8) < pending.unlocked_costumes;
+            let is_active = active == Some(i);
+            let (fill, border, dot_fg, name_fg) = match (is_active, unlocked) {
+                (true, _) => (theme::BRASS_SOFT, theme::BRASS_DK, theme::BRASS, theme::BRASS),
+                (false, true) => (theme::G0, theme::LINE, theme::BRASS, theme::TX),
+                (false, false) => (theme::G0, theme::LINE2, theme::FAINT, theme::DIM),
             };
-            theme::row_chip(ui, fill, border, |ui| {
-                ui.label(theme::disp_text(if on { "●" } else { "○" }, 11.0, dot_fg));
-                ui.label(
-                    egui::RichText::new(*name)
-                        .size(11.5)
-                        .color(if on { theme::TX } else { theme::DIM }),
-                );
+            let resp = theme::row_chip(ui, fill, border, |ui| {
+                // Selectable labels would take the press and the row would never see a click.
+                ui.style_mut().interaction.selectable_labels = false;
+                ui.label(theme::disp_text(if unlocked { "●" } else { "○" }, 11.0, dot_fg));
+                ui.label(egui::RichText::new(*name).size(11.5).color(name_fg));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.label(
                         egui::RichText::new(*model)
@@ -1823,10 +1794,22 @@ pub fn inspector(ui: &mut egui::Ui, p: &Panel) -> Vec<Act> {
                     );
                 });
             });
+            if resp.hovered() {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+            }
+            if resp.clicked() && !is_active {
+                active_edit = Some(i);
+                if !unlocked {
+                    costumes_edit = Some(i as u8 + 1);
+                }
+            }
         }
     });
     if let Some(v) = costumes_edit {
         acts.push(Act::SetUnlockedCostumes(v));
+    }
+    if let Some(i) = active_edit {
+        acts.push(Act::SetWardrobePreview(Some(i)));
     }
 
     // RESOURCES — cash / fuel / fuel cap / active contract.
