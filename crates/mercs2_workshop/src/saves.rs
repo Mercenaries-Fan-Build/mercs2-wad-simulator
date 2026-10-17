@@ -51,6 +51,10 @@ pub enum Act {
     /// `@0x24A` — unlocked-costume count, 1..=5. Not the active costume (that one is a
     /// runtime-only override at `+0x63` whose on-disk byte is open).
     SetUnlockedCostumes(u8),
+    /// Open the saves folder in the OS file manager.
+    RevealFolder,
+    /// Prompt for a `.profile` anywhere on disk via a native file picker.
+    OpenFilePicker,
     /// `@0x18` — PMC cash. Signed-int32-shaped per the money-fuel memory; we expose
     /// `u32` to match the reader and clamp to the 1-billion cap on write.
     SetCash(u32),
@@ -380,15 +384,16 @@ fn hms(s: u32) -> String {
     format!("{h}h{m:02}m")
 }
 
-/// Human-readable path tail — the last two components, slash-joined, for the browser header.
-/// Keeps a long absolute path to the SaveGames folder from blowing out the panel width.
+/// Browser-header path form: last three components, slash-joined, with a trailing slash.
 fn tail(p: &Path) -> String {
-    let n: Vec<_> = p.components().rev().take(2).collect();
-    n.iter()
+    let n: Vec<_> = p.components().rev().take(3).collect();
+    let joined = n
+        .iter()
         .rev()
         .map(|c| c.as_os_str().to_string_lossy())
         .collect::<Vec<_>>()
-        .join("/")
+        .join("/");
+    format!("{joined}/")
 }
 
 /// The left-rail navigator: the saves browser.
@@ -399,6 +404,38 @@ fn tail(p: &Path) -> String {
 pub fn navigator(ui: &mut egui::Ui, p: &Panel) -> Vec<Act> {
     let mut acts: Vec<Act> = Vec::new();
 
+    // Bottom-anchored verbs: a Reveal folder + Open file... pair. Allocated FIRST via a
+    // bottom_up pass so the save list above never pushes them off-screen.
+    ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            let can_reveal = p.saves_dir.is_some();
+            let reveal = ui.add_enabled(
+                can_reveal,
+                egui::Button::new(egui::RichText::new("Reveal folder").size(11.5)),
+            );
+            if reveal.clicked() {
+                acts.push(Act::RevealFolder);
+            }
+            if ui
+                .add(egui::Button::new(egui::RichText::new("Open file…").size(11.5)))
+                .clicked()
+            {
+                acts.push(Act::OpenFilePicker);
+            }
+        });
+        ui.add_space(6.0);
+
+        // Head content (eyebrow, path, status, list) stacks top-down from here upward.
+        ui.with_layout(egui::Layout::top_down(egui::Align::LEFT), |ui| {
+            navigator_head_and_list(ui, p, &mut acts);
+        });
+    });
+
+    acts
+}
+
+fn navigator_head_and_list(ui: &mut egui::Ui, p: &Panel, acts: &mut Vec<Act>) {
     theme::eyebrow(ui, "SAVES");
     if let Some(dir) = &p.saves_dir {
         ui.label(
@@ -505,8 +542,6 @@ pub fn navigator(ui: &mut egui::Ui, p: &Panel) -> Vec<Act> {
             }
         }
     }
-
-    acts
 }
 
 /// The centre column: the inflated-Lua mission state view (`tFlowData` + `tLayerData`).
@@ -1948,6 +1983,28 @@ pub fn apply(act: Act, p: &mut Panel) {
             // Camera state is persisted immediately and separately from the render request so
             // that an in-flight render (one frame behind) doesn't throw away the user's drag.
             p.hero_cam.insert(hash, cam);
+        }
+        Act::RevealFolder => {
+            if let Some(dir) = &p.saves_dir {
+                #[cfg(target_os = "macos")]
+                let _ = std::process::Command::new("open").arg(dir).spawn();
+                #[cfg(target_os = "windows")]
+                let _ = std::process::Command::new("explorer").arg(dir).spawn();
+                #[cfg(all(unix, not(target_os = "macos")))]
+                let _ = std::process::Command::new("xdg-open").arg(dir).spawn();
+            }
+        }
+        Act::OpenFilePicker => {
+            let mut d = rfd::FileDialog::new()
+                .set_title("Pick a .profile")
+                .add_filter("Mercenaries 2 profile", &["profile"]);
+            if let Some(dir) = &p.saves_dir {
+                d = d.set_directory(dir);
+            }
+            if let Some(path) = d.pick_file() {
+                p.selected = Some(path);
+                p.repopulate_pending_from_selection();
+            }
         }
     }
 }
