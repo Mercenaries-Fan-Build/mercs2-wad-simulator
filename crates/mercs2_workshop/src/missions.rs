@@ -182,6 +182,24 @@ pub struct Pin {
     pub ty: PinTy,
     /// Secondary annotation printed beside the pin (literal values).
     pub annot: Option<String>,
+    /// If the pin's value came from a single scalar LITERAL in the Lua source,
+    /// its byte range in `Mission::source` (quotes included, for strings).
+    /// Drives the inspector's "edit → write back" surface. `None` for pins
+    /// whose value is dynamic (an identifier, a table expression, a count,
+    /// an exec flow), which must stay read-only — editing those is a text
+    /// rewrite the string-splice path does not know how to do.
+    pub edit_range: Option<std::ops::Range<usize>>,
+}
+
+impl Default for Pin {
+    fn default() -> Self {
+        Self {
+            label: String::new(),
+            ty: PinTy::Exec,
+            annot: None,
+            edit_range: None,
+        }
+    }
 }
 
 /// A graph node derived from the parsed Lua.
@@ -573,12 +591,21 @@ fn fn_containing(src: &str, mask: &[bool], fns: &[FnOutline], pos: usize) -> Opt
 
 /// Pull the first `"..."` string literal out of a slice (returns the unquoted content).
 fn first_string_literal(src: &str) -> Option<String> {
+    first_string_literal_ranged(src).map(|(s, _)| s)
+}
+
+/// Pull the first `"..."` or `'...'` string literal out of a slice, also
+/// returning its byte range INSIDE `src` — opening quote at `.start`, byte
+/// after closing quote at `.end`. The inspector's edit path needs the range
+/// so it can splice an edited value back into the full mission source.
+fn first_string_literal_ranged(src: &str) -> Option<(String, std::ops::Range<usize>)> {
     let b = src.as_bytes();
     let mut i = 0;
     while i < b.len() {
         let c = b[i];
         if c == b'"' || c == b'\'' {
             let quote = c;
+            let start = i;
             let mut j = i + 1;
             let mut out = String::new();
             while j < b.len() {
@@ -588,7 +615,7 @@ fn first_string_literal(src: &str) -> Option<String> {
                     continue;
                 }
                 if b[j] == quote {
-                    return Some(out);
+                    return Some((out, start..j + 1));
                 }
                 if b[j] == b'\n' {
                     return None;
@@ -606,13 +633,39 @@ fn first_string_literal(src: &str) -> Option<String> {
 /// Pull a `name = "value"` or `name = 123` or `name = IDENT` field out of a Lua table body.
 /// Returns the raw RHS (trimmed, no surrounding quotes for strings).
 fn table_field<'a>(body: &'a str, name: &str) -> Option<String> {
+    table_field_ranged(body, name).map(|(v, _)| v)
+}
+
+/// Variant of `table_field` that also returns the RHS string literal's byte
+/// range in `body` (quotes included). Non-string RHS has `None` for the range.
+fn table_field_ranged(
+    body: &str,
+    name: &str,
+) -> Option<(String, Option<std::ops::Range<usize>>)> {
     let needle = format!("{name} =");
-    let pos = body.find(&needle).or_else(|| body.find(&format!("{name}=")))?;
-    let after = &body[pos + needle.len()..];
-    let trimmed = after.trim_start();
+    let (pos, len) = match body.find(&needle) {
+        Some(p) => (p, needle.len()),
+        None => {
+            let short = format!("{name}=");
+            (body.find(&short)?, short.len())
+        }
+    };
+    let after_offset = pos + len;
+    let after = &body[after_offset..];
+    let trimmed_offset_in_after = after.len() - after.trim_start().len();
+    let trimmed = &after[trimmed_offset_in_after..];
     if trimmed.starts_with('"') || trimmed.starts_with('\'') {
-        first_string_literal(trimmed)
-    } else {
+        let (v, r) = first_string_literal_ranged(trimmed)?;
+        let base = after_offset + trimmed_offset_in_after;
+        return Some((v, Some((base + r.start)..(base + r.end))));
+    }
+    let s = table_field_rhs_nonstring(trimmed)?;
+    Some((s, None))
+}
+
+fn table_field_rhs_nonstring(trimmed: &str) -> Option<String> {
+    let after = trimmed;
+    {
         // Take up to the next comma / newline / closing brace at depth 0.
         let mut depth = 0i32;
         let mut out = String::new();
@@ -693,11 +746,13 @@ pub fn parse_mission(path: &str, src: &str) -> Mission {
                 label: "exec".into(),
                 ty: PinTy::Exec,
                 annot: None,
+            edit_range: None,
             }],
             outputs: vec![Pin {
                 label: "body".into(),
                 ty: PinTy::Exec,
                 annot: None,
+            edit_range: None,
             }],
             blurb: if f.is_lifecycle {
                 format!("Lifecycle hook — {}:{}.", id, f.name)
@@ -724,7 +779,10 @@ pub fn parse_mission(path: &str, src: &str) -> Mission {
         };
         let inside = &src[s..e];
         // first `{` inside is the args table
-        let (cue, delay) = parse_vo_args(inside);
+        let (cue, cue_range_in_inside, delay) = parse_vo_args(inside);
+        // Translate the cue-literal range from `inside`-space to `src`-space
+        // so a later splice can rewrite the whole file.
+        let cue_range = cue_range_in_inside.map(|r| (s + r.start)..(s + r.end));
         let line = line_of(src, p);
         let containing = fn_containing(src, &mask, &functions, p).unwrap_or_default();
         let title = if let Some(cue) = &cue {
@@ -736,12 +794,14 @@ pub fn parse_mission(path: &str, src: &str) -> Mission {
             label: "exec".into(),
             ty: PinTy::Exec,
             annot: None,
+            edit_range: None,
         }];
         if let Some(cue) = cue.clone() {
             inputs.push(Pin {
                 label: "cue".into(),
                 ty: PinTy::Str,
                 annot: Some(format!("\"{}\"", trunc(&cue, 32))),
+                edit_range: cue_range.clone(),
             });
         }
         if let Some(d) = delay {
@@ -749,6 +809,7 @@ pub fn parse_mission(path: &str, src: &str) -> Mission {
                 label: "delay".into(),
                 ty: PinTy::Int,
                 annot: Some(d.clone()),
+                edit_range: None,
             });
         }
         mission.nodes.push(Node {
@@ -762,6 +823,7 @@ pub fn parse_mission(path: &str, src: &str) -> Mission {
                 label: "exec".into(),
                 ty: PinTy::Exec,
                 annot: None,
+            edit_range: None,
             }],
             blurb: format!(
                 "MrxVoSequence.Start — cue {}",
@@ -788,20 +850,36 @@ pub fn parse_mission(path: &str, src: &str) -> Mission {
         let inside = &src[s..e];
         // Inside is a `{...}` table. Open-brace find.
         let brace = inside.find('{').map(|k| s + k);
-        let (name, module, course_count) = if let Some(bp) = brace {
+        let (name, name_range, module, module_range, course_count) = if let Some(bp) = brace {
             if let Some((bs, be)) = balanced(src, &mask, bp) {
                 let body = &src[bs..be];
+                // Ranges returned by `table_field_ranged` are in `body`-space; translate
+                // to `src`-space (bs offset) so splice-back sees the whole mission.
+                let translate =
+                    |r: std::ops::Range<usize>| (bs + r.start)..(bs + r.end);
+                let (name, name_r) = match table_field_ranged(body, "sName") {
+                    Some((v, Some(r))) => (Some(v), Some(translate(r))),
+                    Some((v, None)) => (Some(v), None),
+                    None => (None, None),
+                };
+                let (module, module_r) = match table_field_ranged(body, "sModuleName") {
+                    Some((v, Some(r))) => (Some(v), Some(translate(r))),
+                    Some((v, None)) => (Some(v), None),
+                    None => (None, None),
+                };
                 (
-                    table_field(body, "sName"),
-                    table_field(body, "sModuleName"),
+                    name,
+                    name_r,
+                    module,
+                    module_r,
                     count_table_entries(body, "tCourseLocs")
                         .or_else(|| count_table_entries(body, "vTgtInclude")),
                 )
             } else {
-                (None, None, None)
+                (None, None, None, None, None)
             }
         } else {
-            (None, None, None)
+            (None, None, None, None, None)
         };
         let line = line_of(src, p);
         let containing = fn_containing(src, &mask, &functions, p).unwrap_or_default();
@@ -813,12 +891,14 @@ pub fn parse_mission(path: &str, src: &str) -> Mission {
             label: "exec".into(),
             ty: PinTy::Exec,
             annot: None,
+            edit_range: None,
         }];
         if let Some(n) = &name {
             inputs.push(Pin {
                 label: "sName".into(),
                 ty: PinTy::Str,
                 annot: Some(format!("\"{}\"", trunc(n, 28))),
+                edit_range: name_range.clone(),
             });
         }
         if let Some(m) = &module {
@@ -826,6 +906,7 @@ pub fn parse_mission(path: &str, src: &str) -> Mission {
                 label: "sModuleName".into(),
                 ty: PinTy::Str,
                 annot: Some(format!("\"{}\"", trunc(m, 28))),
+                edit_range: module_range.clone(),
             });
         }
         if let Some(c) = course_count {
@@ -833,6 +914,7 @@ pub fn parse_mission(path: &str, src: &str) -> Mission {
                 label: "course".into(),
                 ty: PinTy::Arr,
                 annot: Some(format!("[{}]", c)),
+                edit_range: None,
             });
         }
         mission.nodes.push(Node {
@@ -847,11 +929,13 @@ pub fn parse_mission(path: &str, src: &str) -> Mission {
                     label: "fOnComplete".into(),
                     ty: PinTy::Exec,
                     annot: None,
+            edit_range: None,
                 },
                 Pin {
                     label: "fOnCancel".into(),
                     ty: PinTy::Exec,
                     annot: None,
+            edit_range: None,
                 },
             ],
             blurb: match (name.as_deref(), module.as_deref()) {
@@ -890,24 +974,28 @@ pub fn parse_mission(path: &str, src: &str) -> Mission {
             label: "exec".into(),
             ty: PinTy::Exec,
             annot: None,
+            edit_range: None,
         }];
         if let Some(e) = &ev {
             inputs.push(Pin {
                 label: "kind".into(),
                 ty: PinTy::Str,
                 annot: Some(e.clone()),
+                edit_range: None,
             });
         }
         let mut outputs = vec![Pin {
             label: "fire".into(),
             ty: PinTy::Exec,
             annot: cb.clone(),
+            edit_range: None,
         }];
         if cb.is_none() {
             outputs = vec![Pin {
                 label: "fire".into(),
                 ty: PinTy::Exec,
                 annot: Some("(inline fn)".into()),
+                edit_range: None,
             }];
         }
         mission.nodes.push(Node {
@@ -946,7 +1034,12 @@ pub fn parse_mission(path: &str, src: &str) -> Mission {
                 continue;
             };
             let inside = &src[s..e];
-            let track = first_string_literal(inside);
+            // Capture the track-literal's byte range too — this is the
+            // thing a modder actually tweaks on a music call.
+            let (track, track_range) = match first_string_literal_ranged(inside) {
+                Some((v, r)) => (Some(v), Some((s + r.start)..(s + r.end))),
+                None => (None, None),
+            };
             let line = line_of(src, p);
             let containing = fn_containing(src, &mask, &functions, p).unwrap_or_default();
             let title = format!("Music · {}", label);
@@ -954,12 +1047,14 @@ pub fn parse_mission(path: &str, src: &str) -> Mission {
                 label: "exec".into(),
                 ty: PinTy::Exec,
                 annot: None,
+            edit_range: None,
             }];
             if let Some(t) = &track {
                 inputs.push(Pin {
                     label: "track".into(),
                     ty: PinTy::Str,
                     annot: Some(format!("\"{}\"", trunc(t, 28))),
+                    edit_range: track_range.clone(),
                 });
             }
             mission.nodes.push(Node {
@@ -998,7 +1093,12 @@ pub fn parse_mission(path: &str, src: &str) -> Mission {
                 continue;
             };
             let inside = &src[s..e];
-            let first = first_string_literal(inside);
+            // Capture the layer-literal's byte range too — same reasoning as
+            // the music track: this is what a mod author tunes.
+            let (first, layer_range) = match first_string_literal_ranged(inside) {
+                Some((v, r)) => (Some(v), Some((s + r.start)..(s + r.end))),
+                None => (None, None),
+            };
             let line = line_of(src, p);
             let containing = fn_containing(src, &mask, &functions, p).unwrap_or_default();
             let title = format!("Layer · {}", label);
@@ -1006,12 +1106,14 @@ pub fn parse_mission(path: &str, src: &str) -> Mission {
                 label: "exec".into(),
                 ty: PinTy::Exec,
                 annot: None,
+            edit_range: None,
             }];
             if let Some(l) = &first {
                 inputs.push(Pin {
                     label: "layer".into(),
                     ty: PinTy::Str,
                     annot: Some(format!("\"{}\"", trunc(l, 28))),
+                    edit_range: layer_range.clone(),
                 });
             }
             mission.nodes.push(Node {
@@ -1025,6 +1127,7 @@ pub fn parse_mission(path: &str, src: &str) -> Mission {
                     label: "exec".into(),
                     ty: PinTy::Exec,
                     annot: None,
+            edit_range: None,
                 }],
                 blurb: format!("{} — {}", needle, first.unwrap_or_else(|| "(dyn)".into())),
                 source_line: line,
@@ -1074,13 +1177,18 @@ fn skip_ws_to_paren(b: &[u8], from: usize) -> Option<usize> {
 }
 
 /// From the body of `MrxVoSequence.Start(...)` — which is itself a Lua table literal
-/// `{ "cue", delay, {cb,args} }` — return (cue, delay) when extractable.
-fn parse_vo_args(inside: &str) -> (Option<String>, Option<String>) {
+/// `{ "cue", delay, {cb,args} }` — return (cue, cue_range, delay) when extractable.
+/// The cue's byte range is in `inside`-coordinates; the caller translates it to
+/// `src`-coordinates for a later splice.
+fn parse_vo_args(
+    inside: &str,
+) -> (Option<String>, Option<std::ops::Range<usize>>, Option<String>) {
     // Find the first `{` and get its body.
     let Some(bp) = inside.find('{') else {
-        return (None, None);
+        return (None, None, None);
     };
-    let after = &inside[bp + 1..];
+    let body_start_in_inside = bp + 1;
+    let after = &inside[body_start_in_inside..];
     // Find matching close counting braces (local to this slice).
     let mut depth = 1i32;
     let mut end = after.len();
@@ -1097,7 +1205,13 @@ fn parse_vo_args(inside: &str) -> (Option<String>, Option<String>) {
         }
     }
     let body = &after[..end];
-    let cue = first_string_literal(body);
+    let (cue, cue_range) = match first_string_literal_ranged(body) {
+        Some((v, r)) => (
+            Some(v),
+            Some((body_start_in_inside + r.start)..(body_start_in_inside + r.end)),
+        ),
+        None => (None, None),
+    };
     // Delay: first bare number after the string.
     let delay = {
         let b = body.as_bytes();
@@ -1135,7 +1249,7 @@ fn parse_vo_args(inside: &str) -> (Option<String>, Option<String>) {
             None
         }
     };
-    (cue, delay)
+    (cue, cue_range, delay)
 }
 
 /// From the body of `_CreateEvent(Event.Kind, {args}, Callback, {ctx})`, return
@@ -1481,6 +1595,13 @@ pub struct Panel {
     pub node_overrides: HashMap<String, HashMap<String, Pos2>>,
     /// Per-mission pan/zoom overrides so view framing survives a mission switch too.
     pub view_overrides: HashMap<String, (Vec2, f32)>,
+    /// Does the current mission's `source` differ from what was last parsed from
+    /// disk / overlay? Set true the moment the first in-pane edit lands, cleared
+    /// by `SaveToOverlay`.
+    pub source_dirty: bool,
+    /// Last save-to-overlay outcome — the inspector reads it to show success /
+    /// failure plainly instead of pretending nothing happened.
+    pub last_save_status: Option<Result<String, String>>,
 }
 
 impl Default for Panel {
@@ -1500,6 +1621,8 @@ impl Default for Panel {
             pending_save_open: false,
             node_overrides: HashMap::new(),
             view_overrides: HashMap::new(),
+            source_dirty: false,
+            last_save_status: None,
         }
     }
 }
@@ -1664,6 +1787,23 @@ pub enum Act {
     JumpToSource,
     OpenSavePicker,
     ClearSave,
+    /// Rewrite a string literal in the current mission's source. `node_id` and
+    /// `pin_label` identify the pin whose `edit_range` names the byte span of
+    /// the literal (quotes included); `new_value` is the UNQUOTED replacement.
+    /// Apply splices the new quoted literal into `mission.source` and re-parses,
+    /// so pin ranges and position overrides stay honest after the edit.
+    EditStringPin {
+        node_id: String,
+        pin_label: String,
+        new_value: String,
+    },
+    /// Discard every unsaved edit by re-parsing from the on-disk file. Only
+    /// enabled when the Panel's `source_dirty` is set.
+    DiscardEdits,
+    /// Write the current (mutated) mission source out to the per-user overlay
+    /// path and clear `source_dirty`. Never touches the vendored corpus — the
+    /// retail scripts are read-only reference material.
+    SaveToOverlay,
 }
 
 pub fn apply(act: Act, p: &mut Panel, lua_corpus: &[(String, String, String)]) {
@@ -1731,7 +1871,147 @@ pub fn apply(act: Act, p: &mut Panel, lua_corpus: &[(String, String, String)]) {
         }
         Act::OpenSavePicker => p.pending_save_open = true,
         Act::ClearSave => p.clear_save(),
+        Act::EditStringPin {
+            node_id,
+            pin_label,
+            new_value,
+        } => {
+            apply_string_edit(p, &node_id, &pin_label, &new_value);
+        }
+        Act::DiscardEdits => {
+            // Re-parse the mission from the file on the lua corpus to drop
+            // every in-memory edit.
+            if let Some(idx) = p.selected_mission {
+                p.pick_mission(idx, lua_corpus);
+                p.source_dirty = false;
+                p.last_save_status = None;
+            }
+        }
+        Act::SaveToOverlay => {
+            match write_overlay(p) {
+                Ok(path) => {
+                    p.source_dirty = false;
+                    p.last_save_status = Some(Ok(path));
+                }
+                Err(e) => {
+                    p.last_save_status = Some(Err(e));
+                }
+            }
+        }
     }
+}
+
+/// Rewrite the Lua literal at `pin.edit_range` with `new_value`, then re-parse
+/// the mutated source so every pin's range stays honest.
+///
+/// Quoting policy: we preserve the ORIGINAL quote style — if the literal was
+/// single-quoted in source we re-emit as `'…'` to minimise diff noise. Inner
+/// characters that would re-escape (`"`, `'`, `\`, newline) are escaped before
+/// re-emission so the splice can never produce invalid Lua.
+fn apply_string_edit(p: &mut Panel, node_id: &str, pin_label: &str, new_value: &str) {
+    let Some(mission) = p.mission.as_mut() else {
+        return;
+    };
+    let Some(node) = mission.nodes.iter().find(|n| n.id == node_id) else {
+        return;
+    };
+    let Some(pin) = node.inputs.iter().find(|p| p.label == pin_label) else {
+        return;
+    };
+    let Some(range) = pin.edit_range.clone() else {
+        return;
+    };
+    if range.start > mission.source.len() || range.end > mission.source.len() {
+        return; // stale range — safer to drop than to splice at the wrong byte
+    }
+    let old_literal = &mission.source[range.clone()];
+    let quote = old_literal.bytes().next().unwrap_or(b'"') as char;
+    if quote != '"' && quote != '\'' {
+        return;
+    }
+    let encoded = encode_lua_string(new_value, quote);
+    let mut new_source = String::with_capacity(mission.source.len() + encoded.len());
+    new_source.push_str(&mission.source[..range.start]);
+    new_source.push_str(&encoded);
+    new_source.push_str(&mission.source[range.end..]);
+
+    // Re-parse against the mutated source so pin ranges, titles, and blurbs
+    // reflect the edit immediately. Preserve the user's node arrangement and
+    // selected-node identity across the reparse.
+    let path = mission.path.clone();
+    let selected_id = p.selected_node.and_then(|i| p.mission.as_ref()?.nodes.get(i).map(|n| n.id.clone()));
+    let mut fresh = parse_mission(&path, &new_source);
+    if let Some(ov) = p.node_overrides.get(&fresh.id) {
+        for n in fresh.nodes.iter_mut() {
+            if let Some(&pos) = ov.get(&n.id) {
+                n.pos = pos;
+            }
+        }
+    }
+    if let Some(target) = selected_id {
+        if let Some(i) = fresh.nodes.iter().position(|n| n.id == target) {
+            p.selected_node = Some(i);
+        }
+    }
+    p.mission = Some(fresh);
+    p.source_dirty = true;
+    p.last_save_status = None;
+}
+
+fn encode_lua_string(value: &str, quote: char) -> String {
+    let mut out = String::with_capacity(value.len() + 2);
+    out.push(quote);
+    for ch in value.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if c == quote => {
+                out.push('\\');
+                out.push(c);
+            }
+            c => out.push(c),
+        }
+    }
+    out.push(quote);
+    out
+}
+
+/// Compute the overlay path for a mission's edited source.
+///
+/// The retail Lua lives inside the vendored corpus at
+/// `crates/mercs2_script/corpus/mercs2-luacd/src/…` and must stay pristine —
+/// those are read-only reference bytes, and overwriting them inside a workshop
+/// run would quietly corrupt the oracle. The overlay instead lands under
+/// `$CWD/missions-overlay/<mission-path>` relative to the process's current
+/// directory (which for a workshop launch is the parent repo), mirroring the
+/// corpus layout one-for-one. A later integration can route the overlay into
+/// a Shipment's src tree; this is the first-cut location, documented in the
+/// Save-to-script verb's hover text.
+fn overlay_path_for(mission_path: &str) -> std::path::PathBuf {
+    let base = std::env::current_dir()
+        .unwrap_or_else(|_| std::path::PathBuf::from("."))
+        .join("missions-overlay");
+    let rel = std::path::PathBuf::from(mission_path);
+    // Strip a leading `/` if any — treat the path as relative to the overlay.
+    let rel = match rel.strip_prefix("/") {
+        Ok(r) => r.to_path_buf(),
+        Err(_) => rel,
+    };
+    base.join(rel)
+}
+
+fn write_overlay(p: &Panel) -> Result<String, String> {
+    let Some(mission) = p.mission.as_ref() else {
+        return Err("no mission loaded".into());
+    };
+    let path = overlay_path_for(&mission.path);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
+    }
+    std::fs::write(&path, &mission.source).map_err(|e| format!("write {}: {e}", path.display()))?;
+    Ok(path.display().to_string())
 }
 
 // ───────────────────────────────────────────────────────────────────── navigator
@@ -2473,7 +2753,7 @@ fn paint_status_pill(ui: &mut egui::Ui, canvas: Rect, p: &Panel) {
 // ───────────────────────────────────────────────────────────────────── inspector
 
 pub fn inspector(ui: &mut egui::Ui, p: &Panel) -> Vec<Act> {
-    let acts = Vec::new();
+    let mut acts: Vec<Act> = Vec::new();
     let Some(mission) = &p.mission else {
         ui.weak("No mission loaded.");
         return acts;
@@ -2548,7 +2828,11 @@ pub fn inspector(ui: &mut egui::Ui, p: &Panel) -> Vec<Act> {
     );
     ui.add_space(10.0);
 
-    // Parameters
+    // Parameters — editable for string literals whose byte range the parser
+    // captured (cue, track, sName, sModuleName, layer). Non-literal params
+    // (dynamic identifiers, counts, event kinds) are read-only; the surface
+    // says so plainly so no field pretends to accept keystrokes that would
+    // not land anywhere.
     if node
         .inputs
         .iter()
@@ -2559,26 +2843,12 @@ pub fn inspector(ui: &mut egui::Ui, p: &Panel) -> Vec<Act> {
                 if matches!(pin.ty, PinTy::Exec) {
                     continue;
                 }
-                theme::row_chip(ui, Color32::TRANSPARENT, theme::LINE, |ui| {
-                    swatch(ui, pin.ty.colour(), false);
-                    ui.label(egui::RichText::new(&pin.label).size(12.0).color(theme::TX));
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.label(
-                            egui::RichText::new(pin.ty.short())
-                                .monospace()
-                                .size(9.5)
-                                .color(theme::FAINT),
-                        );
-                        if let Some(annot) = &pin.annot {
-                            ui.label(
-                                egui::RichText::new(annot)
-                                    .monospace()
-                                    .size(10.0)
-                                    .color(theme::DIM),
-                            );
-                        }
-                    });
-                });
+                let editable = pin.ty == PinTy::Str && pin.edit_range.is_some();
+                if editable {
+                    render_editable_string_pin(ui, mission, &node.id, pin, &mut acts);
+                } else {
+                    render_readonly_pin(ui, pin);
+                }
             }
         });
     }
@@ -2611,6 +2881,114 @@ pub fn inspector(ui: &mut egui::Ui, p: &Panel) -> Vec<Act> {
     });
 
     acts
+}
+
+/// Draw one editable string pin: a value well that reads the current literal
+/// out of `mission.source[pin.edit_range]`, lets the user type, and commits on
+/// Enter / blur via `Act::EditStringPin`.
+///
+/// The TextEdit backing buffer lives in egui's `data` store rather than on
+/// `Panel` because the inspector takes `&Panel`; stashing the typed-but-
+/// uncommitted text on egui's per-id data map avoids a `&mut Panel` churn and
+/// cleans up automatically when the id goes stale. The buffer's id is keyed on
+/// (mission id, node id, pin label) so switching missions never cross-feeds
+/// one pin's draft into another's slot.
+fn render_editable_string_pin(
+    ui: &mut egui::Ui,
+    mission: &Mission,
+    node_id: &str,
+    pin: &Pin,
+    acts: &mut Vec<Act>,
+) {
+    let Some(range) = pin.edit_range.clone() else {
+        render_readonly_pin(ui, pin);
+        return;
+    };
+    if range.start >= mission.source.len() || range.end > mission.source.len() {
+        render_readonly_pin(ui, pin);
+        return;
+    }
+    let raw = &mission.source[range.clone()];
+    let current_unquoted = strip_lua_quotes(raw);
+    let id = egui::Id::new((
+        "missions-str-edit",
+        mission.id.as_str(),
+        node_id,
+        pin.label.as_str(),
+    ));
+    let mut buf: String = ui
+        .ctx()
+        .data_mut(|d| d.get_temp::<String>(id))
+        .unwrap_or_else(|| current_unquoted.clone());
+    ui.horizontal(|ui| {
+        swatch(ui, pin.ty.colour(), false);
+        ui.label(egui::RichText::new(&pin.label).size(12.0).color(theme::TX));
+        let dirty = buf.as_str() != current_unquoted.as_str();
+        let resp = ui.add(
+            egui::TextEdit::singleline(&mut buf)
+                .font(egui::FontId::monospace(11.0))
+                .desired_width(ui.available_width() - 60.0),
+        );
+        ui.ctx().data_mut(|d| d.insert_temp(id, buf.clone()));
+        let committed = resp.lost_focus()
+            && ui.input(|i| i.key_pressed(egui::Key::Enter) || i.key_pressed(egui::Key::Tab));
+        if (committed || resp.lost_focus()) && dirty {
+            acts.push(Act::EditStringPin {
+                node_id: node_id.to_string(),
+                pin_label: pin.label.clone(),
+                new_value: buf.clone(),
+            });
+        }
+    });
+}
+
+/// Draw a parameter pin that cannot be edited through the string-splice path
+/// (anything that isn't a bare string literal in source). The eyebrow spells
+/// out WHY it's not editable, so the user does not stare at a greyed row with
+/// no explanation.
+fn render_readonly_pin(ui: &mut egui::Ui, pin: &Pin) {
+    theme::row_chip(ui, Color32::TRANSPARENT, theme::LINE, |ui| {
+        swatch(ui, pin.ty.colour(), false);
+        ui.label(egui::RichText::new(&pin.label).size(12.0).color(theme::TX));
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let suffix = match pin.ty {
+                PinTy::Int => "int · read-only (edit in source)",
+                PinTy::Obj | PinTy::Arr => "composite · read-only",
+                PinTy::Str => "dynamic · read-only",
+                PinTy::Exec => "",
+            };
+            ui.label(
+                egui::RichText::new(suffix)
+                    .monospace()
+                    .size(9.5)
+                    .color(theme::FAINT),
+            );
+            if let Some(annot) = &pin.annot {
+                ui.label(
+                    egui::RichText::new(annot)
+                        .monospace()
+                        .size(10.0)
+                        .color(theme::DIM),
+                );
+            }
+        });
+    });
+}
+
+/// Strip Lua quote characters from a literal — accepts `"foo"` and `'foo'`
+/// and leaves anything else untouched. Lua escape sequences are left as-is
+/// (the parser consumes the file verbatim and the splice preserves the
+/// author's exact bytes until an edit replaces them).
+fn strip_lua_quotes(raw: &str) -> String {
+    if raw.len() >= 2 {
+        let b = raw.as_bytes();
+        let first = b[0];
+        let last = b[raw.len() - 1];
+        if (first == b'"' || first == b'\'') && first == last {
+            return raw[1..raw.len() - 1].to_string();
+        }
+    }
+    raw.to_string()
 }
 
 fn pill_tag(ui: &mut egui::Ui, text: &str, border: Color32) {
@@ -2654,6 +3032,53 @@ pub fn verbs(ui: &mut egui::Ui, p: &Panel) -> Vec<Act> {
         .clicked()
     {
         acts.push(Act::JumpToSource);
+    }
+    // Save / discard — enabled only while there are in-memory edits. Both are
+    // hidden-when-disabled would be dishonest; a disabled chip is clearer.
+    let dirty = p.source_dirty && p.mission.is_some();
+    if ui
+        .add_enabled(dirty, egui::Button::new("Save to overlay"))
+        .on_hover_text(
+            "Writes the edited mission source to \
+             <cwd>/missions-overlay/<path> — never overwrites the vendored corpus.",
+        )
+        .clicked()
+    {
+        acts.push(Act::SaveToOverlay);
+    }
+    if ui
+        .add_enabled(dirty, egui::Button::new("Discard edits"))
+        .on_hover_text("Re-parse the mission from disk, dropping every edit in memory")
+        .clicked()
+    {
+        acts.push(Act::DiscardEdits);
+    }
+    // Status line for the save verb — surfaced here (not in the inspector)
+    // because it is a verb-bar event.
+    match &p.last_save_status {
+        Some(Ok(path)) => {
+            ui.label(
+                egui::RichText::new(format!("saved: {}", path))
+                    .size(10.5)
+                    .color(theme::GOOD),
+            );
+        }
+        Some(Err(e)) => {
+            ui.label(
+                egui::RichText::new(format!("save failed: {}", e))
+                    .size(10.5)
+                    .color(theme::BAD),
+            );
+        }
+        None => {
+            if dirty {
+                ui.label(
+                    egui::RichText::new("unsaved edits")
+                        .size(10.5)
+                        .color(theme::BRASS),
+                );
+            }
+        }
     }
     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
         // No compile step yet — this is the honest surface.
@@ -2764,6 +3189,51 @@ MrxVoSequence.Start({"real"})
             .nodes
             .iter()
             .any(|n| matches!(n.kind, NodeKind::Unparseable)));
+    }
+
+    #[test]
+    fn string_edit_round_trips_through_apply() {
+        // Build a panel with a tiny mission, verify the splice path mutates
+        // the source in-place and keeps `source_dirty` honest.
+        let src = PMCCON016;
+        let mission = parse_mission("lua/pmccon016.lua", src);
+        let (vo_id, range) = {
+            let vo_node = mission
+                .nodes
+                .iter()
+                .find(|n| matches!(n.kind, NodeKind::Vo))
+                .expect("vo node");
+            let cue_pin = vo_node
+                .inputs
+                .iter()
+                .find(|p| p.label == "cue")
+                .expect("cue pin");
+            (
+                vo_node.id.clone(),
+                cue_pin.edit_range.clone().expect("cue has an edit range"),
+            )
+        };
+        // Range points at `"Fiona-In-Mission-..."` (quotes included).
+        assert_eq!(&src[range.start..=range.start], "\"");
+        assert_eq!(&src[range.end - 1..range.end], "\"");
+
+        let mut p = Panel::default();
+        p.mission = Some(mission);
+        apply_string_edit(&mut p, &vo_id, "cue", "Pmc16-FAKE");
+        let mutated = p.mission.as_ref().unwrap();
+        assert!(mutated.source.contains("\"Pmc16-FAKE\""));
+        assert!(!mutated.source.contains("Fiona-In-Mission-MinorContract-Pmc16-01"));
+        assert!(p.source_dirty);
+    }
+
+    #[test]
+    fn encode_lua_string_escapes_quotes_and_backslashes() {
+        assert_eq!(encode_lua_string("plain", '"'), "\"plain\"");
+        assert_eq!(encode_lua_string("a\"b", '"'), "\"a\\\"b\"");
+        assert_eq!(encode_lua_string("a\\b", '"'), "\"a\\\\b\"");
+        assert_eq!(encode_lua_string("line\n2", '"'), "\"line\\n2\"");
+        // Alt quote: using single-quote delimiter escapes only ' not "
+        assert_eq!(encode_lua_string("x\"y", '\''), "'x\"y'");
     }
 
     /// End-to-end: parse a real retail script and confirm the headline counts match a direct
