@@ -412,18 +412,30 @@ fn tail(p: &Path) -> String {
 pub fn navigator(ui: &mut egui::Ui, p: &Panel) -> Vec<Act> {
     let mut acts: Vec<Act> = Vec::new();
 
-    // Bottom-anchored verbs, allocated first via bottom_up so the list never pushes them
-    // off-screen. In bottom_up the divider is added after the buttons so it sits above them.
+    // Geometry follows the mockup (Saves.dc.html). The SidePanel's inner margins (13 left,
+    // 10 right, 12 top, 0 bottom) are the mockup's header padding, so offsets below are
+    // relative to the panel's content rect.
+    //
+    // Footer: full-width divider, 6px, then the verbs inset 10px from both panel edges with a
+    // 4px gap, then 10px to the panel bottom. Allocated first via bottom_up so the list never
+    // pushes them off-screen; in bottom_up the divider is added after the buttons.
     ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
-        ui.add_space(14.0);
-        // Buttons share the save rows' wash edges: left = heading x minus SAVE_ROW_GUTTER.
-        let h = 26.0;
-        let open_w = 78.0;
-        let gap = 6.0;
+        ui.add_space(10.0);
+        let h = 24.0;
+        let gap = 4.0;
+        let label = |s: &str| egui::RichText::new(s).size(11.5).color(theme::TX);
+        let open_text_w = ui.fonts(|f| {
+            f.layout_no_wrap("Open file…".into(), egui::FontId::proportional(11.5), theme::TX)
+                .size()
+                .x
+        });
+        let open_w = open_text_w + 2.0 * 8.0 + 2.0;
         let (row, _) =
             ui.allocate_exact_size(egui::vec2(ui.available_width(), h), egui::Sense::hover());
-        let left = row.left() - SAVE_ROW_GUTTER;
-        let open_rect = egui::Rect::from_min_max(egui::pos2(row.right() - open_w, row.top()), row.max);
+        // Content rect starts 13px in; the mockup's verbs start 10px in.
+        let left = row.left() - 3.0;
+        let open_rect =
+            egui::Rect::from_min_max(egui::pos2(row.right() - open_w, row.top()), row.max);
         let reveal_rect = egui::Rect::from_min_max(
             egui::pos2(left, row.top()),
             egui::pos2(open_rect.left() - gap, row.bottom()),
@@ -431,20 +443,28 @@ pub fn navigator(ui: &mut egui::Ui, p: &Panel) -> Vec<Act> {
         let reveal = ui.add_enabled_ui(p.saves_dir.is_some(), |ui| {
             ui.put(
                 reveal_rect,
-                egui::Button::new(egui::RichText::new("Reveal folder").size(11.5)),
+                egui::Button::new(label("Reveal folder"))
+                    .fill(theme::G3)
+                    .stroke(egui::Stroke::new(1.0, theme::LINE2))
+                    .rounding(egui::Rounding::same(4.0)),
             )
         });
         if reveal.inner.clicked() {
             acts.push(Act::RevealFolder);
         }
         if ui
-            .put(open_rect, egui::Button::new(egui::RichText::new("Open file…").size(11.5)))
+            .put(
+                open_rect,
+                egui::Button::new(label("Open file…"))
+                    .fill(theme::G2)
+                    .stroke(egui::Stroke::new(1.0, theme::LINE))
+                    .rounding(egui::Rounding::same(4.0)),
+            )
             .clicked()
         {
             acts.push(Act::OpenFilePicker);
         }
-        ui.add_space(8.0);
-        // Divider runs the full panel width, edge to edge.
+        ui.add_space(6.0);
         let (line, _) =
             ui.allocate_exact_size(egui::vec2(ui.available_width(), 1.0), egui::Sense::hover());
         let full = ui.clip_rect();
@@ -460,29 +480,19 @@ pub fn navigator(ui: &mut egui::Ui, p: &Panel) -> Vec<Act> {
 }
 
 fn navigator_head_and_list(ui: &mut egui::Ui, p: &Panel, acts: &mut Vec<Act>) {
+    // Header spacing per the mockup: path 2px under the title, count 12px under the path,
+    // list 5px under the count.
+    ui.spacing_mut().item_spacing.y = 0.0;
     ui.label(theme::disp_text("SAVES", 15.0, theme::TX));
-    if let Some(dir) = &p.saves_dir {
-        ui.label(
-            egui::RichText::new(tail(dir))
-                .monospace()
-                .size(10.5)
-                .color(theme::FAINT),
-        );
-    } else {
-        ui.label(
-            egui::RichText::new("resolving saves folder…")
-                .monospace()
-                .size(10.5)
-                .color(theme::FAINT),
-        );
-    }
-    ui.add_space(6.0);
-    ui.label(
-        egui::RichText::new(&p.status)
-            .size(11.0)
-            .color(theme::DIM),
-    );
-    ui.add_space(8.0);
+    ui.add_space(2.0);
+    let path = match &p.saves_dir {
+        Some(dir) => tail(dir),
+        None => "resolving saves folder…".to_string(),
+    };
+    ui.label(egui::RichText::new(path).monospace().size(10.5).color(theme::FAINT));
+    ui.add_space(12.0);
+    ui.label(theme::disp_text(&p.status, 11.0, theme::DIM));
+    ui.add_space(5.0);
 
     match &p.profiles {
         // One-shot bootstrap: first frame the panel renders, ask the reducer to load.
@@ -502,7 +512,6 @@ fn navigator_head_and_list(ui: &mut egui::Ui, p: &Panel, acts: &mut Vec<Act>) {
             );
         }
         Some(entries) => {
-            ui.spacing_mut().item_spacing.y = 0.0;
             for e in entries {
                 if save_row(ui, e, p.selected.as_ref() == Some(&e.path)).clicked() {
                     acts.push(Act::Select(e.path.clone()));
@@ -512,22 +521,18 @@ fn navigator_head_and_list(ui: &mut egui::Ui, p: &Panel, acts: &mut Vec<Act>) {
     }
 }
 
-/// How far save-row washes (and the bottom verbs) bleed left of the heading's x into the
-/// panel's left margin.
-const SAVE_ROW_GUTTER: f32 = 6.0;
-/// Row content inset from the heading's x; content sits `SAVE_ROW_GUTTER + SAVE_ROW_INSET`
-/// inside the wash's left edge.
-const SAVE_ROW_INSET: f32 = 2.0;
-
-/// One flat browser row: hero badge + stem, meta line below. The selection wash and accent bar
-/// bleed `SAVE_ROW_GUTTER` px left of the heading; content sits `SAVE_ROW_INSET` px right of it.
-/// Selected rows get a brass wash + bar, unreadable rows a BAD bar.
+/// One flat browser row: hero badge + stem, meta line below. Mockup geometry: the list sits
+/// 7px from the panel's left edge and 4px from its right (the content rect is 13/10 in, so the
+/// row box bleeds 6px out on both sides), rows pad 6px top/bottom and 8px left/right, with no
+/// gap between rows. Selected rows get a brass wash + 3px accent bar, unreadable rows a BAD bar.
 fn save_row(ui: &mut egui::Ui, e: &ProfileEntry, selected: bool) -> egui::Response {
-    const ROW_H: f32 = 42.0;
+    const BLEED: f32 = 6.0;
+    const PAD_X: f32 = 8.0;
+    const PAD_Y: f32 = 6.0;
+    const ROW_H: f32 = 40.0;
     let (rect, resp) =
         ui.allocate_exact_size(egui::vec2(ui.available_width(), ROW_H), egui::Sense::click());
-    let paint_rect =
-        egui::Rect::from_min_max(rect.min - egui::vec2(SAVE_ROW_GUTTER, 0.0), rect.max);
+    let paint_rect = rect.expand2(egui::vec2(BLEED, 0.0));
     let painter = ui.painter();
     let fill = if selected {
         Some(theme::BRASS_SOFT)
@@ -545,35 +550,28 @@ fn save_row(ui: &mut egui::Ui, e: &ProfileEntry, selected: bool) -> egui::Respon
         (Ok(_), false) => None,
     };
     if let Some(c) = accent {
-        let bar = egui::Rect::from_min_size(paint_rect.min, egui::vec2(2.0, ROW_H));
+        let bar = egui::Rect::from_min_size(paint_rect.min, egui::vec2(3.0, ROW_H));
         painter.rect_filled(bar, egui::Rounding::ZERO, c);
     }
 
-    let content = egui::Rect::from_min_max(
-        egui::pos2(rect.left() + SAVE_ROW_INSET, rect.top() + 6.0),
-        egui::pos2(rect.right() - 8.0, rect.bottom() - 6.0),
-    );
+    let content = paint_rect.shrink2(egui::vec2(PAD_X, PAD_Y));
     let mut child = ui.child_ui(content, egui::Layout::top_down(egui::Align::LEFT), None);
     child.spacing_mut().item_spacing.y = 2.0;
     // Selectable labels would take the press for text selection and the row never sees a click.
     child.style_mut().interaction.selectable_labels = false;
     child.horizontal(|ui| {
-        let (badge_fg, badge_bd) = if selected {
-            (theme::BRASS, theme::BRASS_DK)
-        } else {
-            (theme::DIM, theme::LINE2)
-        };
+        ui.spacing_mut().item_spacing.x = 6.0;
+        let badge_fg = if selected { theme::BRASS } else { theme::DIM };
         egui::Frame::none()
-            .stroke(egui::Stroke::new(1.0, badge_bd))
+            .stroke(egui::Stroke::new(1.0, theme::LINE2))
             .rounding(egui::Rounding::same(2.0))
-            .inner_margin(egui::Margin::symmetric(3.0, 0.0))
+            .inner_margin(egui::Margin::symmetric(4.0, 0.0))
             .show(ui, |ui| {
                 ui.label(theme::disp_text(e.hero_letter().to_string(), 8.5, badge_fg));
             });
-        ui.add_space(2.0);
         let name_col = if selected { theme::BRASS } else { theme::TX };
         ui.add(
-            egui::Label::new(egui::RichText::new(&e.stem).size(12.5).color(name_col)).truncate(),
+            egui::Label::new(egui::RichText::new(&e.stem).size(12.0).color(name_col)).truncate(),
         );
     });
     let meta = match &e.header {
