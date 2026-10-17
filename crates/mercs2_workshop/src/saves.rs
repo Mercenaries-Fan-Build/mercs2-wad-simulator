@@ -73,6 +73,8 @@ pub enum Act {
     /// `tFlowData.tActiveMissions[<id>].nState`, serialises via `save_lua::serialize`, and
     /// calls `save_write::set_lua_payload` so the next Write dumps the right payload.
     SetActiveMissionState(String, i32),
+    /// Set `tStatsData.nCompletedToolboxes` in the pending Lua payload.
+    SetCompletedToolboxes(u32),
     /// Request that the hero viewport's 3D render be produced for `(hash, model_name)` and
     /// cached in `Panel.hero_textures`. The panel-local reducer only stamps `pending_hero_render`
     /// — the actual load_model + `shot::HeroRenderer` draw + texture allocation happens
@@ -1871,79 +1873,150 @@ pub fn inspector(ui: &mut egui::Ui, p: &Panel) -> Vec<Act> {
         .lua_state
         .as_ref()
         .and_then(|(_, r)| r.as_ref().ok());
-    let collected_total: usize = state.map(|s| s.collected_count()).unwrap_or(0);
-    theme::section(
-        ui,
-        "COLLECTIBLES",
-        Some(&format!("{collected_total} total")),
-        true,
-        |ui| {
+    // COLLECTIBLES — the toolbox counter (`tStatsData.nCompletedToolboxes` of 100), plus any
+    // collect-job GUIDs an in-progress mission is holding (`tActiveMissions[id].tCollected`).
+    let total = save::TOTAL_TOOLBOXES;
+    theme::section(ui, "COLLECTIBLES", Some("tStatsData"), true, |ui| {
+        let Some(s) = state else {
             ui.label(
-                egui::RichText::new(
-                    "ASET GUIDs in active_missions.collected, one row per contributing mission.",
-                )
-                .size(10.5)
-                .color(theme::FAINT),
+                egui::RichText::new("Lua not loaded — pick a save to populate.")
+                    .size(11.0)
+                    .color(theme::FAINT),
             );
-            ui.add_space(5.0);
-            match state {
-                None => {
+            return;
+        };
+        match s.completed_toolboxes {
+            None => {
+                ui.label(
+                    egui::RichText::new("This save has no tStatsData.nCompletedToolboxes.")
+                        .size(11.0)
+                        .color(theme::FAINT),
+                );
+            }
+            Some(n) => {
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new("Toolboxes").color(theme::DIM).size(12.0));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        // Only raises: the counter is uncapped and a save can hold more than 100.
+                        if ui
+                            .add_enabled(n < total, egui::Button::new("Set all").small())
+                            .on_hover_text(format!("Set the counter to {total}"))
+                            .clicked()
+                        {
+                            acts.push(Act::SetCompletedToolboxes(total));
+                        }
+                        ui.label(
+                            egui::RichText::new(format!("of {total}"))
+                                .size(10.5)
+                                .color(theme::FAINT),
+                        );
+                        let mut v = n as i64;
+                        if ui
+                            .add(egui::DragValue::new(&mut v).range(0..=9_999).speed(1.0))
+                            .changed()
+                        {
+                            acts.push(Act::SetCompletedToolboxes(v.clamp(0, 9_999) as u32));
+                        }
+                    });
+                });
+            }
+        }
+        let held: Vec<(&str, usize)> = s
+            .active_missions
+            .iter()
+            .filter(|m| !m.collected.is_empty())
+            .map(|m| (m.id.as_str(), m.collected.len()))
+            .collect();
+        for (id, k) in held {
+            theme::kv(
+                ui,
+                &format!("{id} · picked up"),
+                egui::RichText::new(format!("{k}")).monospace(),
+            );
+        }
+    });
+
+    // TRANSIT ZONES — `tTransitData`, read-only.
+    if let Some(s) = state {
+        let enabled = s.transit_zones.iter().filter(|z| z.enabled).count();
+        let nuked = s.transit_zones.iter().filter(|z| z.is_nuked).count();
+        theme::section(
+            ui,
+            "TRANSIT ZONES",
+            Some(&format!("{enabled} enabled · {nuked} nuked")),
+            false,
+            |ui| {
+                theme::kv(
+                    ui,
+                    "transit system",
+                    egui::RichText::new(if s.transit_enabled { "on" } else { "off" }),
+                );
+                ui.add_space(4.0);
+                for z in &s.transit_zones {
+                    let fg = if z.enabled { theme::TX } else { theme::FAINT };
+                    let flags = [
+                        (z.enabled, "enabled"),
+                        (z.is_nuked, "nuked"),
+                        (z.played_fanfare, "fanfare played"),
+                    ]
+                    .iter()
+                    .filter(|(on, _)| *on)
+                    .map(|(_, s)| *s)
+                    .collect::<Vec<_>>()
+                    .join(" · ");
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            egui::RichText::new(format!("LZ {:>2}", z.zone))
+                                .monospace()
+                                .size(11.0)
+                                .color(fg),
+                        );
+                        ui.label(
+                            egui::RichText::new(z.faction.as_deref().unwrap_or("—"))
+                                .size(11.0)
+                                .color(theme::DIM),
+                        );
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.label(
+                                egui::RichText::new(if flags.is_empty() { "disabled" } else { &flags })
+                                    .size(10.0)
+                                    .color(if z.is_nuked { theme::BAD } else { theme::FAINT }),
+                            );
+                        });
+                    });
+                }
+            },
+        );
+
+        // LOADOUT — `vEquippedSupport`, the equipped support/vehicle tokens in slot order.
+        let slots = s.equipped_support.len();
+        theme::section(
+            ui,
+            "LOADOUT · vEquippedSupport",
+            Some(&format!("{slots} slots")),
+            false,
+            |ui| {
+                if s.equipped_support.is_empty() {
                     ui.label(
-                        egui::RichText::new("Lua not loaded — pick a save to populate.")
+                        egui::RichText::new("Nothing equipped.")
                             .size(11.0)
                             .color(theme::FAINT),
                     );
                 }
-                Some(s) => {
-                    let mut rows: Vec<(&str, usize)> = s
-                        .active_missions
-                        .iter()
-                        .filter(|m| !m.collected.is_empty())
-                        .map(|m| (m.id.as_str(), m.collected.len()))
-                        .collect();
-                    if rows.is_empty() {
+                for (i, token) in s.equipped_support.iter().enumerate() {
+                    ui.horizontal(|ui| {
                         ui.label(
-                            egui::RichText::new("No tCollected entries in any active mission.")
-                                .size(11.0)
+                            egui::RichText::new(format!("{}", i + 1))
+                                .monospace()
+                                .size(10.5)
                                 .color(theme::FAINT),
                         );
-                        return;
-                    }
-                    rows.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(b.0)));
-                    for (id, n) in rows {
-                        theme::row_chip(ui, theme::G0, theme::LINE, |ui| {
-                            ui.label(
-                                egui::RichText::new(id)
-                                    .monospace()
-                                    .size(11.5)
-                                    .color(theme::TX),
-                            );
-                            ui.with_layout(
-                                egui::Layout::right_to_left(egui::Align::Center),
-                                |ui| {
-                                    ui.label(
-                                        egui::RichText::new(format!("{n}"))
-                                            .monospace()
-                                            .size(11.0)
-                                            .color(theme::BRASS),
-                                    );
-                                },
-                            );
-                        });
-                    }
-                    ui.add_space(4.0);
-                    ui.label(
-                        egui::RichText::new(
-                            "Per-type breakdown (toolbox / part / card) needs an ASET-id → \
-                             collectible-type classifier that the Workshop doesn't ship yet.",
-                        )
-                        .size(9.5)
-                        .color(theme::FAINT),
-                    );
+                        ui.label(egui::RichText::new(token).monospace().size(11.0).color(theme::TX));
+                    });
                 }
-            }
-        },
-    );
+            },
+        );
+    }
 
     // METADATA — read-only; the engine stamps playtime and timestamp itself.
     theme::section(ui, "METADATA", None, false, |ui| {
@@ -1956,10 +2029,12 @@ pub fn inspector(ui: &mut egui::Ui, p: &Panel) -> Vec<Act> {
     acts
 }
 
-/// True when the pending Profile differs from the on-disk one on any **editable** field.
-/// Internal-only — the inspector uses it to light the "pending edits" dot.
+/// True when the pending Profile differs from the on-disk one on any **editable** field, or in
+/// its raw bytes (Lua-payload edits — mission states, toolboxes — rewrite `raw` via
+/// `set_lua_payload` and touch no header field). Gates the Write verb.
 fn profile_differs(pending: &Profile, on_disk: &Profile) -> bool {
-    pending.character_index != on_disk.character_index
+    pending.raw_bytes() != on_disk.raw_bytes()
+        || pending.character_index != on_disk.character_index
         || pending.upgrade_index != on_disk.upgrade_index
         || pending.unlocked_costumes != on_disk.unlocked_costumes
         || pending.cash != on_disk.cash
@@ -2073,6 +2148,9 @@ pub fn apply(act: Act, p: &mut Panel) {
         }),
         Act::SetActiveMissionState(id, state) => {
             mutate_pending_lua(p, |root| set_active_mission_state(root, &id, state))
+        }
+        Act::SetCompletedToolboxes(n) => {
+            mutate_pending_lua(p, |root| set_completed_toolboxes(root, n))
         }
         Act::EnsureHeroRender(hash, name) => {
             // A previously-failed load always suppresses: the model can't be loaded; retrying
@@ -2212,6 +2290,30 @@ fn set_active_mission_state(root: &mut Value, mission_id: &str, new: i32) -> Res
     }
 }
 
+/// Set `root.tStatsData.nCompletedToolboxes` to `n`. Errors when the table or key is missing or
+/// not a number rather than inventing either.
+fn set_completed_toolboxes(root: &mut Value, n: u32) -> Result<(), String> {
+    let stats = root
+        .as_table_mut()
+        .map_err(|e| e.to_string())?
+        .get_mut("tStatsData")
+        .ok_or_else(|| "root has no tStatsData".to_string())?
+        .as_table_mut()
+        .map_err(|e| e.to_string())?;
+    match stats.get_mut("nCompletedToolboxes") {
+        Some(Value::Number(num)) => {
+            num.value = n as f64;
+            num.source = Some(format!("{n}.000000"));
+            Ok(())
+        }
+        Some(other) => Err(format!(
+            "tStatsData.nCompletedToolboxes is a {:?}, not a number",
+            other.kind()
+        )),
+        None => Err("tStatsData has no nCompletedToolboxes".to_string()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{hms, money};
@@ -2232,5 +2334,31 @@ mod tests {
         assert_eq!(hms(300), "00h05m");
         assert_eq!(hms(24_266), "06h44m");
         assert_eq!(hms(246_334), "68h25m");
+    }
+}
+
+#[cfg(test)]
+mod lua_edit_tests {
+    use super::{apply, profile_differs, Act, Panel};
+    use mercs2_formats::{game_paths, save};
+
+    fn fixture(name: &str) -> save::Profile {
+        let path = game_paths::save_fixtures().join(name);
+        let bytes = std::fs::read(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+        save::parse(&bytes).expect("fixture parses")
+    }
+
+    #[test]
+    fn toolbox_edit_rewrites_the_lua_and_enables_write() {
+        let on_disk = fixture("Mattias Nilsson_63430745.profile");
+        assert_eq!(on_disk.save_state().unwrap().completed_toolboxes, Some(4));
+        let mut p = Panel { pending: Some(on_disk.clone()), ..Default::default() };
+        assert!(!profile_differs(p.pending.as_ref().unwrap(), &on_disk));
+
+        apply(Act::SetCompletedToolboxes(100), &mut p);
+
+        let pending = p.pending.as_ref().unwrap();
+        assert_eq!(pending.save_state().unwrap().completed_toolboxes, Some(100), "status: {}", p.status);
+        assert!(profile_differs(pending, &on_disk), "a Lua-only edit must enable Write");
     }
 }
