@@ -2,8 +2,64 @@
 //! retarget/rebind (no window, no surface; renders straight to a texture and reads it back). Flat
 //! N·L shading is enough to judge silhouette, pose and left/right placement. Mirrors the engine's
 //! final clip-X flip so left/right match what the interactive workshop shows on screen.
+//!
+//! Two surfaces:
+//! - [`render`] — the one-shot three-angle PNG writer used by the CLI probes in `main.rs`. Builds
+//!   a fresh `wgpu::Device` per call, renders front/side/threeq, drops everything.
+//! - [`HeroRenderer`] — a stateful renderer the Saves panel keeps across frames: the device +
+//!   pipeline + mesh/texture uploads are paid once at `new`, then every orbit tick just rewrites
+//!   the camera uniform and reads back the colour buffer. Lets the Workshop drag-orbit the hero at
+//!   ~30–60 Hz without rebuilding the whole GPU pipeline each tick. (Not drawing INTO the egui
+//!   render pass yet — that's the follow-up; this one still round-trips through CPU + a new
+//!   `TextureHandle::set` so the pipeline stays single-threaded against the egui context.)
 
 use glam::{Mat4, Vec3};
+
+/// A spherical-coordinates orbit camera (yaw/pitch around the bbox centre + a radius multiplier).
+/// Lives in the Saves panel and is driven by mouse drag + scroll over the hero viewport; passed
+/// into [`HeroRenderer::render_rgba`] on every re-render.
+///
+/// Defaults frame the hero from front-centre, pitched slightly down toward the model's chest —
+/// matches the "front" angle the one-shot [`render`] used before orbit existed, so a cold start
+/// shows the same framing a static portrait used to.
+#[derive(Clone, Copy, Debug)]
+pub struct OrbitCam {
+    /// Horizontal rotation around the model's up-axis, radians. 0 = facing the hero's front.
+    pub yaw: f32,
+    /// Vertical tilt in radians, clamped by the caller to roughly `[-π/2 + ε, π/2 − ε]` to avoid
+    /// the look-at singularity at the poles. Positive = looking down at the model from above.
+    pub pitch: f32,
+    /// Distance multiplier against the mesh's bounding-sphere radius. 1.0 = the default
+    /// 3× radius the one-shot `render` used; drag-scroll pushes this into `[0.3, 6.0]`.
+    pub zoom: f32,
+}
+
+impl Default for OrbitCam {
+    fn default() -> Self {
+        // yaw=0 looks at the hero's front. pitch=0.15 rad (~8.5°) matches the static-portrait's
+        // `dir = (0.0, 0.15, 1.0).normalize()` — a modest downward tilt that reads the face.
+        OrbitCam { yaw: 0.0, pitch: 0.15, zoom: 1.0 }
+    }
+}
+
+impl OrbitCam {
+    /// Convert to a world-space `eye` position orbiting `center` at `base_radius * 3.0 * zoom`.
+    /// The 3× multiplier is the same framing margin the one-shot `render` baked in — kept here so
+    /// `OrbitCam::default` with `base_radius = model.radius` lands on the old framing exactly.
+    pub fn eye_for(&self, center: Vec3, base_radius: f32) -> Vec3 {
+        let dist = (base_radius * 3.0 * self.zoom).max(0.01);
+        // Standard spherical→cartesian with yaw around Y, pitch above the XZ plane. Signs chosen
+        // so (yaw=0, pitch=0) looks along +Z (model's front, matching the engine's convention).
+        let cy = self.pitch.cos();
+        let dir = Vec3::new(cy * self.yaw.sin(), self.pitch.sin(), cy * self.yaw.cos());
+        center + dir * dist
+    }
+}
+
+/// Final rendered-frame dimensions. Public so the Workshop can build an `egui::ColorImage` of the
+/// same shape without hard-coding the numbers.
+pub const RENDER_W: u32 = 720;
+pub const RENDER_H: u32 = 960;
 
 /// One vertex for the shot shader: position, normal, UV, bone indices + weights (LBS, same
 /// convention as the engine shader — `bones[j] * v`, palette uploaded row-major).
@@ -122,18 +178,48 @@ struct VOut {
 }
 "#;
 
-/// Render `verts`/`indices` with the given `palette` (row-major skin matrices) from several angles;
-/// write one PNG per angle as `<out_prefix>_<angle>.png`. `bbox` frames the camera.
-pub fn render(
-    verts: &[SV],
-    indices: &[u32],
-    palette: &[[[f32; 4]; 4]],
-    bbox: ([f32; 3], [f32; 3]),
-    out_prefix: &str,
-    draws: &[DrawTex],
-) {
-    let (w, h) = (720u32, 960u32);
-    let instance = wgpu::Instance::default();
+/// A stateful offscreen hero renderer. One `wgpu::Device` + pipeline + mesh/texture upload per
+/// instance, kept across frames so the Workshop's orbit-drag UI pays the ~500 ms setup cost once
+/// per hero and ~10–30 ms per subsequent camera tick.
+///
+/// Call [`HeroRenderer::new`] with the full mesh (verts/indices/palette/bbox/draws); call
+/// [`HeroRenderer::render_rgba`] with an [`OrbitCam`] to get back one `RENDER_W × RENDER_H` RGBA
+/// frame. Dropping the renderer releases every GPU resource.
+pub struct HeroRenderer {
+    device: wgpu::Device,
+    queue: wgpu::Queue,
+    pipeline: wgpu::RenderPipeline,
+    cam_buf: wgpu::Buffer,
+    cam_bind: wgpu::BindGroup,
+    bone_bind: wgpu::BindGroup,
+    vbuf: wgpu::Buffer,
+    ibuf: wgpu::Buffer,
+    tex_binds: Vec<wgpu::BindGroup>,
+    draws: Vec<(u32, u32)>,
+    color: wgpu::Texture,
+    color_v: wgpu::TextureView,
+    depth_v: wgpu::TextureView,
+    read_buf: wgpu::Buffer,
+    bpr: u32,
+    bbox_center: Vec3,
+    bbox_radius: f32,
+    proj: Mat4,
+    flip_x: Mat4,
+}
+
+impl HeroRenderer {
+    /// Build the renderer, uploading everything that doesn't change frame-to-frame. The GPU
+    /// adapter + device are built with `pollster::block_on` here only; `render_rgba` is also
+    /// synchronous but only submits + reads a mapped buffer, no device creation.
+    pub fn new(
+        verts: &[SV],
+        indices: &[u32],
+        palette: &[[[f32; 4]; 4]],
+        bbox: ([f32; 3], [f32; 3]),
+        draws: &[DrawTex],
+    ) -> Self {
+        let (w, h) = (RENDER_W, RENDER_H);
+        let instance = wgpu::Instance::default();
     let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
         power_preference: wgpu::PowerPreference::HighPerformance,
         compatible_surface: None,
@@ -280,68 +366,128 @@ pub fn render(
     let depth = device.create_texture(&wgpu::TextureDescriptor { label: None, size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 }, mip_level_count: 1, sample_count: 1, dimension: wgpu::TextureDimension::D2, format: wgpu::TextureFormat::Depth32Float, usage: wgpu::TextureUsages::RENDER_ATTACHMENT, view_formats: &[] });
     let depth_v = depth.create_view(&Default::default());
 
-    let center = Vec3::from((Vec3::from(bbox.0) + Vec3::from(bbox.1)) * 0.5);
-    let radius = ((Vec3::from(bbox.1) - Vec3::from(bbox.0)).length() * 0.5).max(0.1);
+    let bbox_center = Vec3::from((Vec3::from(bbox.0) + Vec3::from(bbox.1)) * 0.5);
+    let bbox_radius = ((Vec3::from(bbox.1) - Vec3::from(bbox.0)).length() * 0.5).max(0.1);
     // Engine mirrors clip X on screen (LH asset space -> wgpu). Match it so left/right read the same.
     let flip_x = Mat4::from_cols_array(&[-1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0]);
-    let proj = Mat4::perspective_rh(45f32.to_radians(), w as f32 / h as f32, 0.05, radius * 12.0);
-    let angles: [(&str, Vec3); 3] = [
-        ("front", Vec3::new(0.0, 0.15, 1.0)),
-        ("side", Vec3::new(1.0, 0.15, 0.15)),
-        ("threeq", Vec3::new(0.8, 0.2, 0.8)),
-    ];
+    let proj = Mat4::perspective_rh(45f32.to_radians(), w as f32 / h as f32, 0.05, bbox_radius * 12.0);
     // Row-bytes must be aligned to 256 for the readback copy.
     let bpr = ((w * 4 + 255) / 256) * 256;
     let read_buf = device.create_buffer(&wgpu::BufferDescriptor { label: None, size: (bpr * h) as u64, usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
 
-    for (name, dir) in angles {
-        let eye = center + dir.normalize() * radius * 3.0;
-        let view = Mat4::look_at_rh(eye, center, Vec3::Y);
-        let mvp = flip_x * proj * view;
-        queue.write_buffer(&cam_buf, 0, bytemuck::cast_slice(&mvp.to_cols_array()));
-        queue.write_buffer(&cam_buf, 64, bytemuck::cast_slice(&[eye.x, eye.y, eye.z, 1.0f32]));
+    let draw_ranges: Vec<(u32, u32)> = draws
+        .iter()
+        .filter(|d| d.index_count > 0)
+        .map(|d| {
+            let end = (d.index_start + d.index_count).min(indices.len() as u32);
+            (d.index_start, end.saturating_sub(d.index_start))
+        })
+        .collect();
 
-        let mut enc = device.create_command_encoder(&Default::default());
+    HeroRenderer {
+        device,
+        queue,
+        pipeline,
+        cam_buf,
+        cam_bind,
+        bone_bind,
+        vbuf,
+        ibuf,
+        tex_binds,
+        draws: draw_ranges,
+        color,
+        color_v,
+        depth_v,
+        read_buf,
+        bpr,
+        bbox_center,
+        bbox_radius,
+        proj,
+        flip_x,
+    }
+    }
+
+    /// Draw one orbit frame with the given camera and return `RENDER_W × RENDER_H` RGBA8 bytes.
+    /// Reuses every GPU resource built in `new`; the only per-frame work is writing the camera
+    /// uniform, running the render pass, copying to the readback buffer, and memcpy-ing out.
+    pub fn render_rgba(&mut self, cam: &OrbitCam) -> Vec<u8> {
+        let (w, h) = (RENDER_W, RENDER_H);
+        let eye = cam.eye_for(self.bbox_center, self.bbox_radius);
+        let view = Mat4::look_at_rh(eye, self.bbox_center, Vec3::Y);
+        let mvp = self.flip_x * self.proj * view;
+        self.queue.write_buffer(&self.cam_buf, 0, bytemuck::cast_slice(&mvp.to_cols_array()));
+        self.queue.write_buffer(&self.cam_buf, 64, bytemuck::cast_slice(&[eye.x, eye.y, eye.z, 1.0f32]));
+
+        let mut enc = self.device.create_command_encoder(&Default::default());
         {
             let mut rp = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: None,
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment { view: &color_v, resolve_target: None, ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color { r: 0.1, g: 0.1, b: 0.12, a: 1.0 }), store: wgpu::StoreOp::Store } })],
-                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment { view: &depth_v, depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(1.0), store: wgpu::StoreOp::Store }), stencil_ops: None }),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment { view: &self.color_v, resolve_target: None, ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color { r: 0.1, g: 0.1, b: 0.12, a: 1.0 }), store: wgpu::StoreOp::Store } })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment { view: &self.depth_v, depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(1.0), store: wgpu::StoreOp::Store }), stencil_ops: None }),
                 ..Default::default()
             });
-            rp.set_pipeline(&pipeline);
-            rp.set_bind_group(0, &cam_bind, &[]);
-            rp.set_bind_group(1, &bone_bind, &[]);
-            rp.set_vertex_buffer(0, vbuf.slice(..));
-            rp.set_index_buffer(ibuf.slice(..), wgpu::IndexFormat::Uint32);
-            for (i, d) in draws.iter().enumerate() {
-                rp.set_bind_group(2, &tex_binds[i], &[]);
-                let end = (d.index_start + d.index_count).min(indices.len() as u32);
-                if end > d.index_start {
-                    rp.draw_indexed(d.index_start..end, 0, 0..1);
+            rp.set_pipeline(&self.pipeline);
+            rp.set_bind_group(0, &self.cam_bind, &[]);
+            rp.set_bind_group(1, &self.bone_bind, &[]);
+            rp.set_vertex_buffer(0, self.vbuf.slice(..));
+            rp.set_index_buffer(self.ibuf.slice(..), wgpu::IndexFormat::Uint32);
+            for (i, (start, count)) in self.draws.iter().enumerate() {
+                rp.set_bind_group(2, &self.tex_binds[i], &[]);
+                if *count > 0 {
+                    rp.draw_indexed(*start..(*start + *count), 0, 0..1);
                 }
             }
         }
         enc.copy_texture_to_buffer(
-            wgpu::ImageCopyTexture { texture: &color, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
-            wgpu::ImageCopyBuffer { buffer: &read_buf, layout: wgpu::ImageDataLayout { offset: 0, bytes_per_row: Some(bpr), rows_per_image: Some(h) } },
+            wgpu::ImageCopyTexture { texture: &self.color, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+            wgpu::ImageCopyBuffer { buffer: &self.read_buf, layout: wgpu::ImageDataLayout { offset: 0, bytes_per_row: Some(self.bpr), rows_per_image: Some(h) } },
             wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
         );
-        queue.submit([enc.finish()]);
+        self.queue.submit([enc.finish()]);
 
-        let slice = read_buf.slice(..);
+        let slice = self.read_buf.slice(..);
         slice.map_async(wgpu::MapMode::Read, |_| {});
-        device.poll(wgpu::Maintain::Wait);
+        self.device.poll(wgpu::Maintain::Wait);
         let data = slice.get_mapped_range();
-        // Un-pad rows.
         let mut rgba = Vec::with_capacity((w * h * 4) as usize);
         for row in 0..h {
-            let s = (row * bpr) as usize;
+            let s = (row * self.bpr) as usize;
             rgba.extend_from_slice(&data[s..s + (w * 4) as usize]);
         }
         drop(data);
-        read_buf.unmap();
+        self.read_buf.unmap();
+        rgba
+    }
+}
 
+/// Render `verts`/`indices` with the given `palette` (row-major skin matrices) from several angles;
+/// write one PNG per angle as `<out_prefix>_<angle>.png`. `bbox` frames the camera.
+///
+/// Thin wrapper around [`HeroRenderer`]: builds a renderer, re-renders at three canned
+/// yaw/pitch combinations, writes a PNG per frame. The one-shot CLI probes in `main.rs` call this.
+pub fn render(
+    verts: &[SV],
+    indices: &[u32],
+    palette: &[[[f32; 4]; 4]],
+    bbox: ([f32; 3], [f32; 3]),
+    out_prefix: &str,
+    draws: &[DrawTex],
+) {
+    let (w, h) = (RENDER_W, RENDER_H);
+    let mut r = HeroRenderer::new(verts, indices, palette, bbox, draws);
+    // Match the three directions the pre-refactor `render` used: front / side / three-quarter.
+    // Converted to (yaw, pitch) with yaw around Y, pitch above the XZ plane. zoom=1 → the old
+    // `radius * 3.0` eye distance.
+    let angles: [(&str, OrbitCam); 3] = [
+        // dir = (0, 0.15, 1).normalize() → yaw=0, pitch=atan2(0.15, 1)
+        ("front",  OrbitCam { yaw: 0.0, pitch: 0.14888995, zoom: 1.0 }),
+        // dir = (1, 0.15, 0.15).normalize() → yaw=atan2(1, 0.15), pitch=asin(0.15 / len)
+        ("side",   OrbitCam { yaw: std::f32::consts::FRAC_PI_2 - 0.14888995, pitch: 0.14858, zoom: 1.0 }),
+        // dir = (0.8, 0.2, 0.8).normalize() → yaw=atan2(0.8, 0.8)=π/4, pitch=asin(0.2 / len)
+        ("threeq", OrbitCam { yaw: std::f32::consts::FRAC_PI_4, pitch: 0.17408, zoom: 1.0 }),
+    ];
+    for (name, cam) in angles {
+        let rgba = r.render_rgba(&cam);
         let path = format!("{out_prefix}_{name}.png");
         let file = std::fs::File::create(&path).expect("create png");
         let mut enc = png::Encoder::new(std::io::BufWriter::new(file), w, h);
