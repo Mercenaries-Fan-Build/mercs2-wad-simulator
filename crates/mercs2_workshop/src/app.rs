@@ -658,15 +658,18 @@ impl Workbench {
     /// not top-level peers."* They are craft — they act on ONE contribution — so they are entered
     /// from the Shipment page and return to it, rather than being places you navigate to and then
     /// have to remember what you were assembling.
-    /// The rail, trimmed to match the mockup's seven top slots. CRAFT and the World /
-    /// Characters / Weapons / Audio domain lenses are REMOVED from this list — their
-    /// `Workbench` variants + dispatch arms stay compiled in (so a non-rail entry point can
-    /// resurrect them later), they're just not reachable from the rail. See the end-of-session
-    /// features-displaced summary for exactly what's hidden.
-    const ALL: [Workbench; 7] = [
+    const ALL: [Workbench; 12] = [
         Workbench::Inspect,
+        // Position 2 per the mockup: Saves sits next to Inspect, before Craft and the domain
+        // lenses. It is Inspect for a different subject — a `.profile`, not an asset — so it
+        // reads naturally as the second rail cell.
         Workbench::Saves,
+        Workbench::Craft,
+        Workbench::Domain(crate::domain::Domain::World),
+        Workbench::Domain(crate::domain::Domain::Characters),
+        Workbench::Domain(crate::domain::Domain::Weapons),
         Workbench::Domain(crate::domain::Domain::Driving),
+        Workbench::Domain(crate::domain::Domain::Audio),
         Workbench::Domain(crate::domain::Domain::Missions),
         Workbench::Domain(crate::domain::Domain::Systems),
         Workbench::Quartermaster,
