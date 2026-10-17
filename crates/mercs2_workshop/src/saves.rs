@@ -221,6 +221,9 @@ pub struct Panel {
     /// Hero viewport frame size in physical pixels, reported by the viewport every time it
     /// changes. `(0, 0)` until the viewport first paints.
     pub hero_view_px: (u32, u32),
+    /// The game's English string table (`key_hash -> text`), loaded by `app.rs` from the open WAD
+    /// stack. `None` until loaded; `Some(Err)` names why it couldn't be.
+    pub english: Option<Result<HashMap<u32, String>, String>>,
 }
 
 /// The centre panel's current tab over `tFlowData`. Carried on the Panel so switching rails
@@ -2025,14 +2028,50 @@ pub fn inspector(ui: &mut egui::Ui, p: &Panel) -> Vec<Act> {
                             .color(theme::FAINT),
                     );
                 }
+                let english = match &p.english {
+                    Some(Ok(t)) => Some(t),
+                    Some(Err(e)) => {
+                        ui.label(
+                            egui::RichText::new(format!("No display names: {e}"))
+                                .small()
+                                .color(theme::BAD),
+                        );
+                        None
+                    }
+                    None => None,
+                };
                 for (i, token) in s.equipped_support.iter().enumerate() {
+                    // Tokens are string-table keys (`[vehicle.wz10]`); show the English text.
+                    let name = english
+                        .and_then(|t| t.get(&mercs2_formats::stringdb::key_hash(token)));
                     ui.horizontal(|ui| {
                         ui.label(
                             egui::RichText::new(format!("{}", i + 1))
                                 .monospace()
                                 .color(theme::FAINT),
                         );
-                        ui.label(egui::RichText::new(token).monospace().color(theme::TX));
+                        match name {
+                            Some(n) => {
+                                ui.label(egui::RichText::new(n).color(theme::TX));
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        ui.add(
+                                            egui::Label::new(
+                                                egui::RichText::new(token)
+                                                    .monospace()
+                                                    .color(theme::FAINT),
+                                            )
+                                            .truncate(),
+                                        );
+                                    },
+                                );
+                            }
+                            None => {
+                                ui.label(egui::RichText::new(token).monospace().color(theme::TX))
+                                    .on_hover_text("not in the English string table");
+                            }
+                        }
                     });
                 }
             },
