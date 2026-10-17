@@ -209,8 +209,12 @@ pub struct Panel {
 /// names.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum MissionTab {
-    /// `tFlowData.tMyFlowData` — mission-id → flow-value flags (completed / advanced).
+    /// Union of every mission id this save mentions, with each row's palette picked from
+    /// whichever source it appears in (Completed > Available > Culled > Flow bindings). The
+    /// mockup's broader "look at the whole board" view; the per-source tabs below are drill-ins.
     #[default]
+    All,
+    /// `tFlowData.tMyFlowData` — mission-id → flow-value flags (completed / advanced).
     Completed,
     /// `tFlowData.tActiveMissions` — in-progress missions (nState / nTargetsComplete / collected).
     Available,
@@ -599,6 +603,7 @@ pub fn center(ctx: &egui::Context, p: &Panel) -> Vec<Act> {
                 ui.add_space(6.0);
                 ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
                     for (tab, label, count) in [
+                        (MissionTab::All,          "All missions",  all_missions_count(state)),
                         (MissionTab::Completed,    "Completed",     state.completed_flow.len()),
                         (MissionTab::Available,    "Available",     state.active_missions.len()),
                         (MissionTab::Culled,       "Culled",        state.flow_chain.len()),
@@ -628,6 +633,7 @@ pub fn center(ctx: &egui::Context, p: &Panel) -> Vec<Act> {
 
             egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
                 match p.mission_tab {
+                    MissionTab::All => render_all_missions(ui, state),
                     MissionTab::Completed => render_completed(ui, &state.completed_flow),
                     MissionTab::Available => acts.extend(render_active(ui, &state.active_missions)),
                     MissionTab::Culled => render_culled(ui, &state.flow_chain),
@@ -1232,6 +1238,126 @@ fn render_layers(ui: &mut egui::Ui, layers: &[String]) {
             tag: "LAYR",
         },
     );
+}
+
+/// Which bucket a mission falls into for the "All missions" view. First-match-wins priority:
+/// a completed mission is DONE even if it also appears in `tLayerData`; a culled one is SKIP
+/// even if the engine still has an overlay for it. Keep this in sync with [`all_missions`].
+#[derive(Clone, Copy)]
+enum AllMissionBucket {
+    Done,
+    Open,
+    Skip,
+    Layer,
+}
+
+impl AllMissionBucket {
+    fn style(self) -> ChipStyle {
+        match self {
+            AllMissionBucket::Done => ChipStyle {
+                bg: theme::G2,
+                bd: theme::GOOD_DK,
+                tag_bg: theme::GOOD_SOFT,
+                tag_fg: theme::GOOD,
+                tag: "DONE",
+            },
+            AllMissionBucket::Open => ChipStyle {
+                bg: theme::G2,
+                bd: theme::BRASS_DK,
+                tag_bg: theme::BRASS_SOFT,
+                tag_fg: theme::BRASS,
+                tag: "OPEN",
+            },
+            AllMissionBucket::Skip => ChipStyle {
+                bg: theme::G2,
+                bd: theme::BAD,
+                tag_bg: theme::G0,
+                tag_fg: theme::BAD,
+                tag: "SKIP",
+            },
+            AllMissionBucket::Layer => ChipStyle {
+                bg: theme::G0,
+                bd: theme::LINE,
+                tag_bg: theme::G0,
+                tag_fg: theme::DIM,
+                tag: "LAYR",
+            },
+        }
+    }
+}
+
+/// Union of every mission id this save mentions, deduped, bucketed by state. Priority:
+/// Completed > Available > Culled > Flow bindings — a mission that is both completed and
+/// present as a world overlay reads as DONE, not LAYR, because that's what matters when
+/// scanning the board.
+fn all_missions(state: &SaveState) -> Vec<(String, AllMissionBucket)> {
+    use std::collections::BTreeMap;
+    let mut by_id: BTreeMap<String, AllMissionBucket> = BTreeMap::new();
+    for k in state.completed_flow.keys() {
+        by_id.insert(k.clone(), AllMissionBucket::Done);
+    }
+    for m in &state.active_missions {
+        by_id.entry(m.id.clone()).or_insert(AllMissionBucket::Open);
+    }
+    for k in &state.flow_chain {
+        by_id.entry(k.clone()).or_insert(AllMissionBucket::Skip);
+    }
+    for l in &state.layers {
+        by_id.entry(l.clone()).or_insert(AllMissionBucket::Layer);
+    }
+    by_id.into_iter().collect()
+}
+
+/// Count for the tab strip. Cheap — the real walk happens in [`all_missions`].
+fn all_missions_count(state: &SaveState) -> usize {
+    use std::collections::BTreeSet;
+    let mut seen: BTreeSet<&str> = BTreeSet::new();
+    seen.extend(state.completed_flow.keys().map(|s| s.as_str()));
+    seen.extend(state.active_missions.iter().map(|m| m.id.as_str()));
+    seen.extend(state.flow_chain.iter().map(|s| s.as_str()));
+    seen.extend(state.layers.iter().map(|s| s.as_str()));
+    seen.len()
+}
+
+/// The "All missions" tab — one chip per unique mission id across every source in the save,
+/// each tagged by whichever bucket it fell into. Groups the chips by bucket (DONE first, then
+/// OPEN, SKIP, LAYR) so the eye can scan completion density; within each group the ids are
+/// alphabetical to match the per-source tabs.
+fn render_all_missions(ui: &mut egui::Ui, state: &SaveState) {
+    let rows = all_missions(state);
+    if rows.is_empty() {
+        ui.label(
+            egui::RichText::new("No mission ids in this save yet.")
+                .size(11.5)
+                .color(theme::FAINT),
+        );
+        return;
+    }
+    for bucket in [
+        AllMissionBucket::Done,
+        AllMissionBucket::Open,
+        AllMissionBucket::Skip,
+        AllMissionBucket::Layer,
+    ] {
+        let tag = bucket.style().tag;
+        let items: Vec<(String, Option<String>)> = rows
+            .iter()
+            .filter(|(_, b)| matches!((b, bucket),
+                (AllMissionBucket::Done, AllMissionBucket::Done)
+                | (AllMissionBucket::Open, AllMissionBucket::Open)
+                | (AllMissionBucket::Skip, AllMissionBucket::Skip)
+                | (AllMissionBucket::Layer, AllMissionBucket::Layer)
+            ))
+            .map(|(id, _)| (id.clone(), Some(format!("{id}\n{tag}"))))
+            .collect();
+        if items.is_empty() {
+            continue;
+        }
+        ui.add_space(4.0);
+        ui.label(theme::disp_text(tag, 9.5, theme::FAINT));
+        ui.add_space(2.0);
+        mission_chip_grid(ui, &items, bucket.style());
+    }
 }
 
 /// `1`/`2`/`3` → the hero's full name as the engine resolves it (`SHELL.SelectCharacter.*`
