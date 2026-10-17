@@ -194,6 +194,9 @@ pub struct Panel {
     /// keyed by path so switching rows invalidates it, and keyed by `Result` so a parse
     /// failure is surfaced in the centre instead of silently retried every frame.
     pub lua_state: Option<(PathBuf, Result<SaveState, String>)>,
+    /// The same payload as a full Lua tree (`save_lua`), for the read-only inspector sections
+    /// that show every top-level table. Refreshed alongside `lua_state`.
+    pub lua_tree: Option<Result<save_lua::Value, String>>,
     /// Which mission-flow tab the centre is on (Active / Completed / Culled / Layers).
     pub mission_tab: MissionTab,
     /// Rendered-hero textures keyed by model hash. Populated by `app.rs` out-of-band when
@@ -343,6 +346,7 @@ impl Panel {
     /// cheap, but the panels run at refresh rate.
     fn repopulate_lua_state_from_selection(&mut self) {
         self.lua_state = None;
+        self.lua_tree = None;
         let Some(sel) = self.selected.as_ref().cloned() else {
             return;
         };
@@ -352,11 +356,21 @@ impl Panel {
         let Some(entry) = list.iter().find(|e| e.path == sel) else {
             return;
         };
-        let result = match &entry.header {
-            Ok(h) => h.save_state(),
-            Err(e) => Err(e.clone()),
+        // Decode the PENDING profile when there is one: Lua edits (mission states, toolboxes)
+        // land there, and decoding the on-disk header would show the pre-edit values.
+        let source = match (&self.pending, &entry.header) {
+            (Some(p), _) => Ok(p),
+            (None, Ok(h)) => Ok(h),
+            (None, Err(e)) => Err(e.clone()),
         };
-        self.lua_state = Some((sel, result));
+        let state = source.clone().and_then(|p| p.save_state());
+        let tree = source.and_then(|p| {
+            let bytes = p.decompress_lua()?;
+            let text = std::str::from_utf8(&bytes).map_err(|e| format!("lua is not utf-8: {e}"))?;
+            save_lua::parse_chunk(text).map_err(|e| format!("parse lua: {e}"))
+        });
+        self.lua_state = Some((sel, state));
+        self.lua_tree = Some(tree);
     }
 
     /// Serialise the pending `Profile` and overwrite the selected `.profile` on disk.
@@ -2032,6 +2046,9 @@ pub fn inspector(ui: &mut egui::Ui, p: &Panel) -> Vec<Act> {
                 let english = loaded_or_report(ui, "display names", &p.english);
 
                 ui.label(theme::disp_text("CARRIED", theme::style_eyebrow(), theme::DIM));
+                if let Some(pl) = s.players.first() {
+                    theme::kv(ui, "health", egui::RichText::new(format!("{}", pl.health as i64)));
+                }
                 if carried.is_empty() {
                     ui.label(egui::RichText::new("Nothing carried.").small().color(theme::FAINT));
                 }
@@ -2065,8 +2082,32 @@ pub fn inspector(ui: &mut egui::Ui, p: &Panel) -> Vec<Act> {
         );
     }
 
+    // Every other save table, read-only (save_tables.rs).
+    match &p.lua_tree {
+        Some(Ok(tree)) => match tree.as_table() {
+            Ok(root) => crate::save_tables::sections(
+                ui,
+                root,
+                crate::save_tables::Lookups {
+                    english: p.english.as_ref().and_then(|r| r.as_ref().ok()),
+                    templates: p.templates.as_ref().and_then(|r| r.as_ref().ok()),
+                },
+            ),
+            Err(e) => {
+                ui.label(egui::RichText::new(format!("Save Lua is not a table: {e}")).small().color(theme::BAD));
+            }
+        },
+        Some(Err(e)) => {
+            ui.label(egui::RichText::new(format!("Save Lua unreadable: {e}")).small().color(theme::BAD));
+        }
+        None => {}
+    }
+
     // METADATA — read-only; the engine stamps playtime and timestamp itself.
     theme::section(ui, "METADATA", None, false, |ui| {
+        if let Some(s) = state {
+            theme::kv(ui, "time elapsed (Lua)", egui::RichText::new(hms_long(s.time_elapsed_secs as u32)));
+        }
         theme::kv(ui, "playtime", egui::RichText::new(hms(pending.play_time_seconds)));
         theme::kv(ui, "timestamp", egui::RichText::new(timestamp_utc(pending.timestamp)));
         theme::kv(ui, "slot name", egui::RichText::new(pending.save_name().to_string()));
