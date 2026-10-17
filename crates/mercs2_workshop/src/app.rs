@@ -2061,14 +2061,29 @@ pub fn run(opts: Options) {
                             )
                             .show(ctx, |ui| {
                             ui.horizontal(|ui| {
-                                if names_pending {
+                                // On the Saves workbench with a selection, the status bar
+                                // speaks about the loaded `.profile` instead of the workshop's
+                                // asset-load state — matches the mockup's "LOADED · 13,404 B ·
+                                // checksum ok · payload inflated". Falls through to the normal
+                                // workshop status for every other page and for Saves with no
+                                // selection.
+                                let saves_banner = (wb == Workbench::Saves)
+                                    .then(|| crate::saves::saves_status_banner(&saves))
+                                    .flatten();
+                                if let Some((dot_color, dot_text, detail)) = saves_banner {
+                                    theme::status_dot(ui, dot_text, dot_color);
+                                    ui.separator();
+                                    ui.label(egui::RichText::new(detail).color(theme::DIM).size(11.0));
+                                } else if names_pending {
                                     theme::status_dot(ui, "Loading", theme::BRASS);
                                     ui.add(egui::Spinner::new().size(11.0));
+                                    ui.separator();
+                                    ui.label(egui::RichText::new(status.as_str()).color(theme::DIM).size(11.0));
                                 } else {
                                     theme::status_dot(ui, "Ready", theme::GOOD);
+                                    ui.separator();
+                                    ui.label(egui::RichText::new(status.as_str()).color(theme::DIM).size(11.0));
                                 }
-                                ui.separator();
-                                ui.label(egui::RichText::new(status.as_str()).color(theme::DIM).size(11.0));
                                 // Bottom-right: background work in flight (clip decodes,
                                 // mod publishing).
                                 let n = clip_loader.inflight.len();
