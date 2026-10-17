@@ -635,9 +635,14 @@ fn hms_long(s: u32) -> String {
     format!("{h}h {m:02}m {sec:02}s")
 }
 
-/// A single mission-id card for the Active tab — id + 4-state pill set + targets + collected.
-/// Clicking a pill emits [`Act::SetActiveMissionState`], which rewrites the inflated-Lua
-/// `nState` field on the pending Profile; the Write verb dumps the result to disk.
+/// The Active tab's 5-column grid of mission chips. Each chip is a mission id + a right-side
+/// state label (LATN/ACTV/CMPL/CANC — short to keep the chip width stable); clicking the chip
+/// cycles the mission to the next state via [`Act::SetActiveMissionState`], so a modder can
+/// walk a chain of chips without the chip width changing between frames.
+///
+/// Hover a chip to see its full state label and `nTargetsComplete` / `collected` detail. The
+/// row-list that used to render per-mission with full state pills is gone; it did not scale
+/// past ~a dozen missions and the mockup shows the grid.
 fn render_active(ui: &mut egui::Ui, missions: &[save::ActiveMission]) -> Vec<Act> {
     let mut acts: Vec<Act> = Vec::new();
     if missions.is_empty() {
@@ -648,46 +653,80 @@ fn render_active(ui: &mut egui::Ui, missions: &[save::ActiveMission]) -> Vec<Act
         );
         return acts;
     }
-    for m in missions {
-        let cur = TaskState::from_f64(m.state);
-        theme::row_chip(ui, theme::G0, theme::LINE, |ui| {
-            ui.vertical(|ui| {
-                ui.horizontal(|ui| {
-                    ui.label(theme::disp_text(m.id.clone(), 13.0, theme::TX));
-                    ui.with_layout(
-                        egui::Layout::right_to_left(egui::Align::Center),
-                        |ui| {
-                            // State pills, drawn right-to-left so Cancelled appears rightmost.
-                            for s in TaskState::ALL.iter().rev() {
-                                let on = cur == Some(*s);
-                                if theme::pill(ui, s.label(), on).clicked() && !on {
-                                    acts.push(Act::SetActiveMissionState(
-                                        m.id.clone(),
-                                        *s as i32,
-                                    ));
-                                }
-                            }
-                        },
-                    );
-                });
-                let targets = m
-                    .targets_complete
-                    .map(|n| format!("{} targets complete", n as i64))
-                    .unwrap_or_else(|| "no targets ticked".to_string());
-                let state_label = cur
-                    .map(|s| format!("nState {} · {}", m.state as i64, s.label()))
-                    .unwrap_or_else(|| format!("nState {} · (unknown)", m.state as i64));
-                ui.label(
-                    egui::RichText::new(format!(
-                        "{state_label} · {targets} · {} collected",
-                        m.collected.len()
-                    ))
-                    .size(10.5)
-                    .color(cur.map(TaskState::color).unwrap_or(theme::FAINT)),
-                );
-            });
-        });
-    }
+    // Grid with 5 approximately-equal cells per row. Widths come from the available width so
+    // the grid tracks the panel resize; each chip is a mini row_chip with a right-aligned
+    // state tag.
+    let cols = 5usize;
+    let gutter = 6.0;
+    let avail = ui.available_width();
+    let cell_w = ((avail - (cols as f32 - 1.0) * gutter) / cols as f32).max(100.0);
+    let mut col = 0usize;
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing = egui::vec2(gutter, gutter);
+        for m in missions {
+            let cur = TaskState::from_f64(m.state);
+            let (bg, bd, tag_bg, tag_fg, tag) = match cur {
+                Some(TaskState::Completed) => (theme::G2, theme::GOOD_DK, theme::GOOD_SOFT, theme::GOOD, "CMPL"),
+                Some(TaskState::Active)    => (theme::G2, theme::BRASS_DK, theme::BRASS_SOFT, theme::BRASS, "ACTV"),
+                Some(TaskState::Cancelled) => (theme::G2, theme::BAD, theme::G0, theme::BAD, "CANC"),
+                Some(TaskState::Latent) | None => (theme::G0, theme::LINE, theme::G0, theme::DIM, "LATN"),
+            };
+            let next = cur
+                .map(|s| TaskState::ALL[((s as usize) + 1) % TaskState::ALL.len()])
+                .unwrap_or(TaskState::Latent);
+            let targets_txt = m
+                .targets_complete
+                .map(|n| format!("{} targets complete", n as i64))
+                .unwrap_or_else(|| "no targets ticked".to_string());
+            let hover = format!(
+                "{}\nnState {} · {} · {} collected\nClick to cycle → {}",
+                m.id,
+                m.state as i64,
+                targets_txt,
+                m.collected.len(),
+                next.label()
+            );
+            let resp = egui::Frame::none()
+                .fill(bg)
+                .stroke(egui::Stroke::new(1.0, bd))
+                .rounding(egui::Rounding::same(4.0))
+                .inner_margin(egui::Margin::symmetric(7.0, 4.0))
+                .show(ui, |ui| {
+                    ui.set_width(cell_w);
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            egui::RichText::new(&m.id)
+                                .monospace()
+                                .size(10.5)
+                                .color(theme::TX),
+                        );
+                        ui.with_layout(
+                            egui::Layout::right_to_left(egui::Align::Center),
+                            |ui| {
+                                egui::Frame::none()
+                                    .fill(tag_bg)
+                                    .rounding(egui::Rounding::same(2.0))
+                                    .inner_margin(egui::Margin::symmetric(5.0, 1.0))
+                                    .show(ui, |ui| {
+                                        ui.label(theme::disp_text(tag, 8.5, tag_fg));
+                                    });
+                            },
+                        );
+                    });
+                })
+                .response
+                .interact(egui::Sense::click())
+                .on_hover_text(hover);
+            if resp.clicked() {
+                acts.push(Act::SetActiveMissionState(m.id.clone(), next as i32));
+            }
+            col += 1;
+            if col >= cols {
+                ui.end_row();
+                col = 0;
+            }
+        }
+    });
     acts
 }
 
