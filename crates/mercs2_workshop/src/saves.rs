@@ -506,55 +506,15 @@ fn navigator_head_and_list(ui: &mut egui::Ui, p: &Panel, acts: &mut Vec<Act>) {
     }
 }
 
-/// One flat browser row: hero badge + stem, meta line below. Selected rows get a brass wash
-/// and a brass accent bar on the left edge; unreadable rows get a BAD accent bar.
+/// One flat browser row: hero badge + stem, meta line below. Content starts at the same x as
+/// the SAVES heading; the selection wash and accent bar bleed `GUTTER` px into the panel's
+/// left margin. Selected rows get a brass wash + bar, unreadable rows a BAD bar.
 fn save_row(ui: &mut egui::Ui, e: &ProfileEntry, selected: bool) -> egui::Response {
-    // Reserved before the content so the fill lands underneath it once hover is known.
-    let bg = ui.painter().add(egui::Shape::Noop);
-    let ir = egui::Frame::none()
-        .inner_margin(egui::Margin { left: 10.0, right: 8.0, top: 6.0, bottom: 6.0 })
-        .show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            ui.horizontal(|ui| {
-                let (badge_fg, badge_bd) = if selected {
-                    (theme::BRASS, theme::BRASS_DK)
-                } else {
-                    (theme::DIM, theme::LINE2)
-                };
-                egui::Frame::none()
-                    .stroke(egui::Stroke::new(1.0, badge_bd))
-                    .rounding(egui::Rounding::same(2.0))
-                    .inner_margin(egui::Margin::symmetric(3.0, 0.0))
-                    .show(ui, |ui| {
-                        ui.label(theme::disp_text(e.hero_letter().to_string(), 8.5, badge_fg));
-                    });
-                ui.add_space(2.0);
-                let name_col = if selected { theme::BRASS } else { theme::TX };
-                ui.add(
-                    egui::Label::new(egui::RichText::new(&e.stem).size(12.5).color(name_col))
-                        .truncate(),
-                );
-            });
-            let meta = match &e.header {
-                Ok(h) => {
-                    let tail = if e.stem.starts_with("auto_") {
-                        "auto".to_string()
-                    } else {
-                        format!("upgrade {}", h.upgrade_index)
-                    };
-                    format!("{} · {} · {tail}", hms(h.play_time_seconds), money(h.cash))
-                }
-                Err(err) => format!("unreadable — {err}"),
-            };
-            ui.label(egui::RichText::new(meta).monospace().size(10.0).color(theme::FAINT));
-        });
-    let resp = ir.response.interact(egui::Sense::click());
-    let rect = resp.rect;
-    let accent = match (&e.header, selected) {
-        (Err(_), _) => Some(theme::BAD),
-        (Ok(_), true) => Some(theme::BRASS),
-        (Ok(_), false) => None,
-    };
+    const GUTTER: f32 = 8.0;
+    const ROW_H: f32 = 42.0;
+    let (rect, resp) =
+        ui.allocate_exact_size(egui::vec2(ui.available_width(), ROW_H), egui::Sense::click());
+    let paint_rect = egui::Rect::from_min_max(rect.min - egui::vec2(GUTTER, 0.0), rect.max);
     let painter = ui.painter();
     let fill = if selected {
         Some(theme::BRASS_SOFT)
@@ -564,12 +524,56 @@ fn save_row(ui: &mut egui::Ui, e: &ProfileEntry, selected: bool) -> egui::Respon
         None
     };
     if let Some(f) = fill {
-        painter.set(bg, egui::Shape::rect_filled(rect, egui::Rounding::same(2.0), f));
+        painter.rect_filled(paint_rect, egui::Rounding::same(2.0), f);
     }
+    let accent = match (&e.header, selected) {
+        (Err(_), _) => Some(theme::BAD),
+        (Ok(_), true) => Some(theme::BRASS),
+        (Ok(_), false) => None,
+    };
     if let Some(c) = accent {
-        let bar = egui::Rect::from_min_size(rect.min, egui::vec2(2.0, rect.height()));
+        let bar = egui::Rect::from_min_size(paint_rect.min, egui::vec2(2.0, ROW_H));
         painter.rect_filled(bar, egui::Rounding::ZERO, c);
     }
+
+    let content = rect.shrink2(egui::vec2(0.0, 6.0));
+    let mut child = ui.child_ui(content, egui::Layout::top_down(egui::Align::LEFT), None);
+    child.spacing_mut().item_spacing.y = 2.0;
+    child.horizontal(|ui| {
+        let (badge_fg, badge_bd) = if selected {
+            (theme::BRASS, theme::BRASS_DK)
+        } else {
+            (theme::DIM, theme::LINE2)
+        };
+        egui::Frame::none()
+            .stroke(egui::Stroke::new(1.0, badge_bd))
+            .rounding(egui::Rounding::same(2.0))
+            .inner_margin(egui::Margin::symmetric(3.0, 0.0))
+            .show(ui, |ui| {
+                ui.label(theme::disp_text(e.hero_letter().to_string(), 8.5, badge_fg));
+            });
+        ui.add_space(2.0);
+        let name_col = if selected { theme::BRASS } else { theme::TX };
+        ui.add(
+            egui::Label::new(egui::RichText::new(&e.stem).size(12.5).color(name_col)).truncate(),
+        );
+    });
+    let meta = match &e.header {
+        Ok(h) => {
+            let tail = if e.stem.starts_with("auto_") {
+                "auto".to_string()
+            } else {
+                format!("upgrade {}", h.upgrade_index)
+            };
+            format!("{} · {} · {tail}", hms(h.play_time_seconds), money(h.cash))
+        }
+        Err(err) => format!("unreadable — {err}"),
+    };
+    child.add(
+        egui::Label::new(egui::RichText::new(meta).monospace().size(10.0).color(theme::FAINT))
+            .truncate(),
+    );
+
     if resp.hovered() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     }
@@ -1178,19 +1182,23 @@ fn mission_chip_grid(ui: &mut egui::Ui, items: &[(String, Option<String>)], s: C
                                         .show(ui, |ui| {
                                             ui.label(theme::disp_text(s.tag, 8.5, s.tag_fg));
                                         });
-                                    // add_sized gives the label the full remaining width so a
-                                    // short id doesn't shrink against the tag with blank space
-                                    // to its left.
+                                    // Claim the full remaining width with a left_to_right child so
+                                    // the id starts at the chip's left edge (add_sized centres).
                                     let remaining = ui.available_width();
-                                    ui.add_sized(
+                                    ui.allocate_ui_with_layout(
                                         egui::vec2(remaining, 14.0),
-                                        egui::Label::new(
-                                            egui::RichText::new(id)
-                                                .monospace()
-                                                .size(10.5)
-                                                .color(theme::TX),
-                                        )
-                                        .truncate(),
+                                        egui::Layout::left_to_right(egui::Align::Center),
+                                        |ui| {
+                                            ui.add(
+                                                egui::Label::new(
+                                                    egui::RichText::new(id)
+                                                        .monospace()
+                                                        .size(10.5)
+                                                        .color(theme::TX),
+                                                )
+                                                .truncate(),
+                                            );
+                                        },
                                     );
                                 },
                             );
