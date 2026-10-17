@@ -360,6 +360,14 @@ impl Panel {
     /// `.profile` via `Profile::save_state()`. Eagerly cached on every Select / Reload so the
     /// centre reads from the cache rather than re-parsing per frame — a `SaveState` walk is
     /// cheap, but the panels run at refresh rate.
+    /// The name tables that have loaded, for the read-only topic views.
+    pub(crate) fn lookups(&self) -> crate::save_tables::Lookups<'_> {
+        crate::save_tables::Lookups {
+            english: self.english.as_ref().and_then(|r| r.as_ref().ok()),
+            templates: self.templates.as_ref().and_then(|r| r.as_ref().ok()),
+        }
+    }
+
     fn repopulate_lua_state_from_selection(&mut self) {
         self.lua_state = None;
         self.lua_tree = None;
@@ -626,11 +634,7 @@ pub fn windows(ctx: &egui::Context, p: &Panel) -> Vec<Act> {
             });
     }
     if let Some(ins) = &p.inspecting {
-        let lk = crate::save_tables::Lookups {
-            english: p.english.as_ref().and_then(|r| r.as_ref().ok()),
-            templates: p.templates.as_ref().and_then(|r| r.as_ref().ok()),
-        };
-        if !crate::save_inspect::show(ctx, ins, lk) {
+        if !crate::save_inspect::show(ctx, ins, p) {
             acts.push(Act::CloseInspect);
         }
     }
@@ -1275,7 +1279,7 @@ fn thousands(n: u64) -> String {
 
 /// Long-form `h/m/s` playtime (`246334` → `"68h 25m 34s"`) for the AT-A-GLANCE strip, where
 /// the browser row's compact `hms` form sacrifices the seconds.
-fn hms_long(s: u32) -> String {
+pub(crate) fn hms_long(s: u32) -> String {
     let h = s / 3600;
     let m = (s % 3600) / 60;
     let sec = s % 60;
@@ -1652,7 +1656,7 @@ fn render_all_missions(ui: &mut egui::Ui, state: &SaveState) {
 /// `1`/`2`/`3` → the hero's full name as the engine resolves it (`SHELL.SelectCharacter.*`
 /// in the shell UI; see `memory/shell-menu-and-ui-pass.md`). `?` for anything else so a
 /// future hero slot shows loudly rather than being silently mapped to Mattias.
-fn hero_name(index: u8) -> &'static str {
+pub(crate) fn hero_name(index: u8) -> &'static str {
     match index {
         1 => "Mattias Nilsson",
         2 => "Chris Jacobs",
@@ -1727,7 +1731,7 @@ fn hero_outfits(index: u8) -> &'static [(&'static str, &'static str)] {
 /// is a UTC timestamp (`docs/reverse_engineer/save_serialize_code_map.md` §4). Hand-rolled
 /// civil-from-days conversion (Howard Hinnant's standard trick) so the Workshop doesn't
 /// take a chrono / humantime dep just for one line in the inspector.
-fn timestamp_utc(t: u32) -> String {
+pub(crate) fn timestamp_utc(t: u32) -> String {
     let (year, month, day, hour, minute, _) = civil_utc(t as i64);
     format!("{year:04}-{month:02}-{day:02} {hour:02}:{minute:02} UTC")
 }
@@ -2097,116 +2101,13 @@ pub fn inspector(ui: &mut egui::Ui, p: &Panel) -> Vec<Act> {
         }
     });
 
-    // TRANSIT ZONES — `tTransitData`, read-only.
-    if let Some(s) = state {
-        let enabled = s.transit_zones.iter().filter(|z| z.enabled).count();
-        let nuked = s.transit_zones.iter().filter(|z| z.is_nuked).count();
-        theme::section(
-            ui,
-            "TRANSIT ZONES",
-            Some(&format!("{enabled} enabled · {nuked} nuked")),
-            false,
-            |ui| {
-                theme::kv(
-                    ui,
-                    "transit system",
-                    egui::RichText::new(if s.transit_enabled { "on" } else { "off" }),
-                );
-                ui.add_space(4.0);
-                for z in &s.transit_zones {
-                    let fg = if z.enabled { theme::TX } else { theme::FAINT };
-                    let flags = [
-                        (z.enabled, "enabled"),
-                        (z.is_nuked, "nuked"),
-                        (z.played_fanfare, "fanfare played"),
-                    ]
-                    .iter()
-                    .filter(|(on, _)| *on)
-                    .map(|(_, s)| *s)
-                    .collect::<Vec<_>>()
-                    .join(" · ");
-                    ui.horizontal(|ui| {
-                        ui.label(
-                            egui::RichText::new(format!("LZ {:>2}", z.zone))
-                                .monospace()
-                                .color(fg),
-                        );
-                        ui.label(
-                            egui::RichText::new(z.faction.as_deref().unwrap_or("—")).small()
-                                .color(theme::DIM),
-                        );
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            ui.label(
-                                egui::RichText::new(if flags.is_empty() { "disabled" } else { &flags }).small()
-                                    .color(if z.is_nuked { theme::BAD } else { theme::FAINT }),
-                            );
-                        });
-                    });
-                }
-            },
-        );
-
-        // LOADOUT — what the player carries (`tPlayerData[1].tEquipment`, named by the WAD's
-        // `worldentity` templates) and the PDA support slots (`vEquippedSupport`, string-table keys).
-        let carried: &[save::CarriedWeapon] =
-            s.players.first().map(|pl| pl.equipment.as_slice()).unwrap_or(&[]);
-        let slots = s.equipped_support.len();
-        theme::section(
-            ui,
-            "LOADOUT",
-            Some(&format!("{} carried · {slots} support", carried.len())),
-            false,
-            |ui| {
-                let templates = loaded_or_report(ui, "template names", &p.templates);
-                let english = loaded_or_report(ui, "display names", &p.english);
-
-                ui.label(theme::disp_text("CARRIED", theme::style_eyebrow(), theme::DIM));
-                if let Some(pl) = s.players.first() {
-                    theme::kv(ui, "health", egui::RichText::new(format!("{}", pl.health as i64)));
-                }
-                if carried.is_empty() {
-                    ui.label(egui::RichText::new("Nothing carried.").small().color(theme::FAINT));
-                }
-                for w in carried {
-                    loadout_row(
-                        ui,
-                        templates.and_then(|t| t.get(&w.template)).map(String::as_str),
-                        &format!("0x{:08X}", w.template),
-                        Some(format!("{} reserve", w.reserve_ammo as i64)),
-                        "not a worldentity template",
-                    );
-                }
-                ui.add_space(6.0);
-                ui.label(theme::disp_text("SUPPORT", theme::style_eyebrow(), theme::DIM));
-                if s.equipped_support.is_empty() {
-                    ui.label(egui::RichText::new("Nothing equipped.").small().color(theme::FAINT));
-                }
-                for token in &s.equipped_support {
-                    // Tokens are string-table keys (`[vehicle.wz10]`).
-                    loadout_row(
-                        ui,
-                        english
-                            .and_then(|t| t.get(&mercs2_formats::stringdb::key_hash(token)))
-                            .map(String::as_str),
-                        token,
-                        None,
-                        "not in the English string table",
-                    );
-                }
-            },
-        );
-    }
-
-    // Every other save table, read-only (save_tables.rs).
+    // Read-only topics, shared with the Inspect window (save_tables.rs).
+    lookup_errors(ui, p);
     match &p.lua_tree {
         Some(Ok(tree)) => match tree.as_table() {
-            Ok(root) => crate::save_tables::sections(
+            Ok(root) => crate::save_tables::panel_sections(
                 ui,
-                root,
-                crate::save_tables::Lookups {
-                    english: p.english.as_ref().and_then(|r| r.as_ref().ok()),
-                    templates: p.templates.as_ref().and_then(|r| r.as_ref().ok()),
-                },
+                &crate::save_tables::Ctx { root, profile: Some(pending), lk: p.lookups() },
             ),
             Err(e) => {
                 ui.label(egui::RichText::new(format!("Save Lua is not a table: {e}")).small().color(theme::BAD));
@@ -2221,7 +2122,7 @@ pub fn inspector(ui: &mut egui::Ui, p: &Panel) -> Vec<Act> {
     // METADATA — read-only; the engine stamps playtime and timestamp itself.
     theme::section(ui, "METADATA", None, false, |ui| {
         if let Some(s) = state {
-            theme::kv(ui, "time elapsed (Lua)", egui::RichText::new(hms_long(s.time_elapsed_secs as u32)));
+            theme::kv(ui, "time elapsed", egui::RichText::new(hms_long(s.time_elapsed_secs as u32)));
         }
         theme::kv(ui, "playtime", egui::RichText::new(hms(pending.play_time_seconds)));
         theme::kv(ui, "timestamp", egui::RichText::new(timestamp_utc(pending.timestamp)));
@@ -2232,47 +2133,13 @@ pub fn inspector(ui: &mut egui::Ui, p: &Panel) -> Vec<Act> {
     acts
 }
 
-/// A table loaded by `app.rs`: the map when loaded, `None` (with the failure shown) when it could
-/// not be, `None` silently while it has not been loaded yet.
-fn loaded_or_report<'a>(
-    ui: &mut egui::Ui,
-    what: &str,
-    table: &'a Option<Result<HashMap<u32, String>, String>>,
-) -> Option<&'a HashMap<u32, String>> {
-    match table {
-        Some(Ok(t)) => Some(t),
-        Some(Err(e)) => {
+/// A red line for each name table that failed to load (names then show raw).
+pub(crate) fn lookup_errors(ui: &mut egui::Ui, p: &Panel) {
+    for (what, t) in [("display names", &p.english), ("template names", &p.templates)] {
+        if let Some(Err(e)) = t {
             ui.label(egui::RichText::new(format!("No {what}: {e}")).small().color(theme::BAD));
-            None
         }
-        None => None,
     }
-}
-
-/// One LOADOUT row: the resolved name (plus optional detail) with the raw save value dimmed on the
-/// right; the raw value alone, with `missing` on hover, when it doesn't resolve.
-fn loadout_row(ui: &mut egui::Ui, name: Option<&str>, raw: &str, detail: Option<String>, missing: &str) {
-    ui.horizontal(|ui| match name {
-        Some(n) => {
-            ui.label(egui::RichText::new(n).color(theme::TX));
-            if let Some(d) = &detail {
-                ui.label(egui::RichText::new(d).small().color(theme::FAINT));
-            }
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.add(
-                    egui::Label::new(egui::RichText::new(raw).monospace().color(theme::FAINT))
-                        .truncate(),
-                );
-            });
-        }
-        None => {
-            ui.label(egui::RichText::new(raw).monospace().color(theme::TX))
-                .on_hover_text(missing);
-            if let Some(d) = &detail {
-                ui.label(egui::RichText::new(d).small().color(theme::FAINT));
-            }
-        }
-    });
 }
 
 /// True when the pending Profile differs from the on-disk one on any **editable** field, or in
