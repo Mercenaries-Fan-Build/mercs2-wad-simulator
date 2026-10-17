@@ -2501,6 +2501,35 @@ mod lua_edit_tests {
         assert_eq!(pending.save_state().unwrap().completed_toolboxes, Some(100), "status: {}", p.status);
         assert!(profile_differs(pending, &on_disk), "a Lua-only edit must enable Write");
     }
+
+    /// The panel's displayed state follows the pending edit, not the on-disk header.
+    #[test]
+    fn an_edit_shows_in_the_displayed_state_and_tree() {
+        let name = "Mattias Nilsson_63430745.profile";
+        let path = game_paths::save_fixtures().join(name);
+        let mut p = Panel {
+            profiles: Some(vec![super::ProfileEntry {
+                path: path.clone(),
+                stem: name.trim_end_matches(".profile").to_string(),
+                header: Ok(fixture(name)),
+            }]),
+            ..Default::default()
+        };
+        apply(Act::Select(path), &mut p);
+        apply(Act::SetCompletedToolboxes(77), &mut p);
+
+        let shown = p.lua_state.as_ref().unwrap().1.as_ref().unwrap();
+        assert_eq!(shown.completed_toolboxes, Some(77), "status: {}", p.status);
+        let tree = p.lua_tree.as_ref().unwrap().as_ref().unwrap().as_table().unwrap();
+        let stats = match tree.get("tStatsData") {
+            Some(mercs2_formats::save_lua::Value::Table(t)) => t,
+            _ => panic!("no tStatsData"),
+        };
+        match stats.get("nCompletedToolboxes") {
+            Some(mercs2_formats::save_lua::Value::Number(n)) => assert_eq!(n.value, 77.0),
+            other => panic!("nCompletedToolboxes: {other:?}"),
+        }
+    }
 }
 
 #[cfg(test)]
