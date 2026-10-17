@@ -620,7 +620,7 @@ pub fn center(ctx: &egui::Context, p: &Panel) -> Vec<Act> {
 /// render request when the current hero/upgrade's model isn't cached yet — `app.rs` picks
 /// that up post-reducer, loads the model, and lands a texture back on the Panel.
 fn hero_viewport(ui: &mut egui::Ui, h: &Profile, p: &Panel) -> Option<(u32, String)> {
-    let viewport_height = 280.0;
+    let viewport_height = 320.0;
     let model_name = upgrade_model_for(h.character_index, h.upgrade_index);
     let hash = mercs2_formats::hash::pandemic_hash_m2(&model_name);
     let cached_tex = p.hero_textures.get(&hash).cloned();
@@ -630,49 +630,34 @@ fn hero_viewport(ui: &mut egui::Ui, h: &Profile, p: &Panel) -> Option<(u32, Stri
     if cached_tex.is_none() && failed_err.is_none() && !in_flight {
         want = Some((hash, model_name.clone()));
     }
+    let model_label = format!("UPGRADE {} · {}", h.upgrade_index, model_name);
+    let identity_label = format!(
+        "{} · character_index {} · upgrade {}",
+        hero_name(h.character_index),
+        h.character_index,
+        h.upgrade_index
+    );
     egui::Frame::none()
         .fill(theme::G0)
         .stroke(egui::Stroke::new(1.0, theme::LINE))
         .rounding(egui::Rounding::same(6.0))
         .inner_margin(egui::Margin::symmetric(14.0, 12.0))
         .show(ui, |ui| {
-            ui.set_min_height(viewport_height);
             ui.set_width(ui.available_width());
+            ui.set_min_height(viewport_height);
+            let frame_rect = ui.max_rect();
 
-            // Top row: left-side chips, right-side AT-A-GLANCE card.
-            ui.horizontal(|ui| {
-                ui.with_layout(egui::Layout::left_to_right(egui::Align::TOP), |ui| {
-                    chip(ui, "ORBIT", theme::BRASS, theme::BRASS_SOFT, theme::BRASS_DK);
-                    ui.add_space(6.0);
-                    let model_label = format!(
-                        "UPGRADE {} · {}",
-                        h.upgrade_index,
-                        upgrade_model_for(h.character_index, h.upgrade_index)
-                    );
-                    chip(ui, &model_label, theme::DIM, theme::G2, theme::LINE);
-                });
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::TOP), |ui| {
-                    at_a_glance(ui, h);
-                });
-            });
-
-            ui.add_space(8.0);
-            // The hero render itself — the cached texture if we have one, a spinner if the
-            // render is in flight, an error if it failed, else a one-line "about to request"
-            // hint on the frame before `app.rs` sees `pending_hero_render`.
+            // ── Background layer: the hero render fills the whole frame. Drawn first so the
+            // chips and the AT-A-GLANCE card below sit ON TOP as HUD overlays. ──
             ui.vertical_centered(|ui| {
-                let avail = ui.available_size();
-                let render_h = (avail.y - 48.0).max(120.0);
+                let render_h = (frame_rect.height() - 20.0).max(160.0);
                 let render_w = render_h * 0.6;
                 match (&cached_tex, &failed_err, in_flight) {
                     (Some(tex), _, _) => {
                         let img_size = tex.size_vec2();
                         let scale = (render_h / img_size.y).min(render_w / img_size.x);
                         let fit = img_size * scale;
-                        ui.add(
-                            egui::Image::new((tex.id(), fit))
-                                .fit_to_exact_size(fit),
-                        );
+                        ui.add(egui::Image::new((tex.id(), fit)).fit_to_exact_size(fit));
                     }
                     (None, Some(err), _) => {
                         egui::Frame::none()
@@ -684,32 +669,16 @@ fn hero_viewport(ui: &mut egui::Ui, h: &Profile, p: &Panel) -> Option<(u32, Stri
                                 ui.set_min_size(egui::vec2(render_w, render_h));
                                 ui.vertical_centered(|ui| {
                                     ui.add_space(render_h * 0.3);
-                                    ui.label(theme::disp_text(
-                                        model_name.to_uppercase(),
-                                        13.0,
-                                        theme::BAD,
-                                    ));
-                                    ui.label(
-                                        egui::RichText::new("render failed")
-                                            .size(10.5)
-                                            .color(theme::BAD),
-                                    );
-                                    ui.label(
-                                        egui::RichText::new(err)
-                                            .monospace()
-                                            .size(9.5)
-                                            .color(theme::FAINT),
-                                    );
+                                    ui.label(theme::disp_text(model_name.to_uppercase(), 13.0, theme::BAD));
+                                    ui.label(egui::RichText::new("render failed").size(10.5).color(theme::BAD));
+                                    ui.label(egui::RichText::new(err).monospace().size(9.5).color(theme::FAINT));
                                 });
                             });
                     }
                     (None, None, _) => {
                         egui::Frame::none()
                             .fill(theme::G2)
-                            .stroke(egui::Stroke::new(
-                                1.0,
-                                egui::Color32::from_rgb(0x42, 0x47, 0x4f),
-                            ))
+                            .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(0x42, 0x47, 0x4f)))
                             .rounding(egui::Rounding::same(4.0))
                             .inner_margin(egui::Margin::symmetric(10.0, 10.0))
                             .show(ui, |ui| {
@@ -718,17 +687,11 @@ fn hero_viewport(ui: &mut egui::Ui, h: &Profile, p: &Panel) -> Option<(u32, Stri
                                     ui.add_space(render_h * 0.4);
                                     ui.add(egui::Spinner::new().size(28.0));
                                     ui.add_space(6.0);
-                                    ui.label(theme::disp_text(
-                                        model_name.to_uppercase(),
-                                        13.0,
-                                        theme::DIM,
-                                    ));
+                                    ui.label(theme::disp_text(model_name.to_uppercase(), 13.0, theme::DIM));
                                     ui.label(
-                                        egui::RichText::new(
-                                            if in_flight { "rendering…" } else { "queuing render…" },
-                                        )
-                                        .size(10.5)
-                                        .color(theme::FAINT),
+                                        egui::RichText::new(if in_flight { "rendering…" } else { "queuing render…" })
+                                            .size(10.5)
+                                            .color(theme::FAINT),
                                     );
                                 });
                             });
@@ -736,22 +699,44 @@ fn hero_viewport(ui: &mut egui::Ui, h: &Profile, p: &Panel) -> Option<(u32, Stri
                 }
             });
 
-            ui.add_space(4.0);
-            // Bottom-left identity chip (hugs the viewport floor).
-            ui.horizontal(|ui| {
-                chip(
-                    ui,
-                    &format!(
-                        "{} · character_index {} · upgrade {}",
-                        hero_name(h.character_index),
-                        h.character_index,
-                        h.upgrade_index
-                    ),
-                    theme::DIM,
-                    theme::G2,
-                    theme::LINE,
-                );
-            });
+            // ── Overlay layer: HUD chips and the AT-A-GLANCE card, placed at absolute
+            // positions INSIDE the viewport frame via `allocate_ui_at_rect`. These paint ON
+            // TOP of the hero render, as proper HUD overlays rather than siblings laid out
+            // above it. ──
+
+            // Top-left: ORBIT chip + model chip.
+            let topleft = frame_rect.min + egui::vec2(2.0, 2.0);
+            ui.allocate_ui_at_rect(
+                egui::Rect::from_min_size(topleft, egui::vec2(500.0, 30.0)),
+                |ui| {
+                    ui.horizontal(|ui| {
+                        chip(ui, "ORBIT", theme::BRASS, theme::BRASS_SOFT, theme::BRASS_DK);
+                        chip(ui, &model_label, theme::DIM, theme::G2, theme::LINE);
+                    });
+                },
+            );
+
+            // Top-right: AT-A-GLANCE overlay card. Width is fixed so the card hugs the right
+            // edge; `allocate_ui_at_rect` plus `top_down(Align::LEFT)` inside the card keeps
+            // the rows reading left-to-right regardless of ambient layout direction.
+            let overlay_w = 240.0;
+            let topright = egui::pos2(frame_rect.right() - overlay_w - 2.0, frame_rect.top() + 2.0);
+            ui.allocate_ui_at_rect(
+                egui::Rect::from_min_size(topright, egui::vec2(overlay_w, 200.0)),
+                |ui| at_a_glance(ui, h),
+            );
+
+            // Bottom-left: identity chip.
+            let identity_h = 24.0;
+            let bottomleft = egui::pos2(frame_rect.left() + 2.0, frame_rect.bottom() - identity_h - 2.0);
+            ui.allocate_ui_at_rect(
+                egui::Rect::from_min_size(bottomleft, egui::vec2(frame_rect.width() - 4.0, identity_h)),
+                |ui| {
+                    ui.horizontal(|ui| {
+                        chip(ui, &identity_label, theme::DIM, theme::G2, theme::LINE);
+                    });
+                },
+            );
         });
     want
 }
@@ -866,13 +851,13 @@ fn render_active(ui: &mut egui::Ui, missions: &[save::ActiveMission]) -> Vec<Act
         );
         return acts;
     }
-    // Grid with 5 approximately-equal cells per row. Widths come from the available width so
-    // the grid tracks the panel resize; each chip is a mini row_chip with a right-aligned
-    // state tag.
-    let cols = 5usize;
-    let gutter = 6.0;
+    // Grid with 3 approximately-equal cells per row — 5 was cramped once the ACTV tag landed
+    // next to the id (user feedback: "hard to see what the heck is going on"). 3 cols gives
+    // each chip ~230-260px, enough for the full mission id in mono + a readable state tag.
+    let cols = 3usize;
+    let gutter = 8.0;
     let avail = ui.available_width();
-    let cell_w = ((avail - (cols as f32 - 1.0) * gutter) / cols as f32).max(100.0);
+    let cell_w = ((avail - (cols as f32 - 1.0) * gutter) / cols as f32).max(140.0);
     let mut col = 0usize;
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing = egui::vec2(gutter, gutter);
@@ -1151,6 +1136,11 @@ fn u32_row(
 /// (a working clone of the parsed `Profile`). The on-disk bytes don't move until Write.
 pub fn inspector(ui: &mut egui::Ui, p: &Panel) -> Vec<Act> {
     let mut acts: Vec<Act> = Vec::new();
+    // Force every child (checksum banner + every `theme::section` Frame) to span the full
+    // inspector width even when collapsed. Without this a `theme::section` with no body
+    // (METADATA default-closed) shrinks to just the header text's bounding box and the
+    // card reads as "narrower than the others", which looks like a layout bug.
+    ui.set_width(ui.available_width());
     theme::eyebrow(ui, "SAVE");
 
     let selected = p.selected.as_ref();
