@@ -17,6 +17,7 @@
 //! [`apply`]. The panel itself never performs IO or touches the Rail — that stays in the
 //! parent, matching the Quartermaster convention.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use mercs2_formats::game_paths;
@@ -65,6 +66,11 @@ pub enum Act {
     /// `tFlowData.tActiveMissions[<id>].nState`, serialises via `save_lua::serialize`, and
     /// calls `save_write::set_lua_payload` so the next Write dumps the right payload.
     SetActiveMissionState(String, i32),
+    /// Request that the hero viewport's 3D render be produced for `(hash, model_name)` and
+    /// cached in `Panel.hero_textures`. The panel-local reducer only stamps `pending_hero_render`
+    /// — the actual load_model + `shot::render` + texture allocation happens post-reducer in
+    /// `app.rs`, which owns the `WadStack` and the `egui::Context` the texture binds against.
+    EnsureHeroRender(u32, String),
 }
 
 /// The four `MrxTaskState` values a mission can hold on `nState`. Mirrors
@@ -168,6 +174,18 @@ pub struct Panel {
     pub lua_state: Option<(PathBuf, Result<SaveState, String>)>,
     /// Which mission-flow tab the centre is on (Active / Completed / Culled / Layers).
     pub mission_tab: MissionTab,
+    /// Rendered-hero textures keyed by model hash. Populated by `app.rs` out-of-band when
+    /// `pending_hero_render` is set and the renderer walks the WAD stack. Keyed by hash so the
+    /// same tier/hero combo across different saves hits the same cached texture.
+    pub hero_textures: HashMap<u32, egui::TextureHandle>,
+    /// `Some((hash, model_name))` the frame the centre notices the current selection's hero
+    /// model isn't in `hero_textures` yet. `app.rs` drains this at the end of each frame and
+    /// kicks off the render; a failed render leaves the hash in `hero_render_failed` so the
+    /// centre doesn't retry forever.
+    pub pending_hero_render: Option<(u32, String)>,
+    /// Hashes we've tried and failed to render — matched against so the panel can show a
+    /// one-line error instead of an eternal spinner. Error text is in the value.
+    pub hero_render_failed: HashMap<u32, String>,
 }
 
 /// The centre panel's current tab over `tFlowData`. Carried on the Panel so switching rails
@@ -513,13 +531,19 @@ pub fn center(ctx: &egui::Context, p: &Panel) -> Vec<Act> {
                     .size(11.0)
                     .color(theme::FAINT),
             );
+            let mut want_hero_render: Option<(u32, String)> = None;
             match on_disk {
                 None => {
                     ui.label(theme::disp_text("UNREADABLE", 20.0, theme::BAD));
                 }
                 Some(h) => {
-                    hero_viewport(ui, h);
+                    want_hero_render = hero_viewport(ui, h, p);
                 }
+            }
+            // Centre only emits a render request; the reducer upgrades it to the Panel's
+            // `pending_hero_render` slot without clobbering an in-flight one.
+            if let Some(req) = want_hero_render {
+                acts.push(Act::EnsureHeroRender(req.0, req.1));
             }
             ui.add_space(12.0);
 
@@ -592,10 +616,20 @@ pub fn center(ctx: &egui::Context, p: &Panel) -> Vec<Act> {
 
 /// The centre's viewport-styled area, matching the mockup: a tall frame with four HUD
 /// overlays — ORBIT + model chip top-left, AT-A-GLANCE top-right, hero identity chip bottom-
-/// left, and a centred placeholder for the 3D hero render until the Workshop renderer is
-/// wired to this surface.
-fn hero_viewport(ui: &mut egui::Ui, h: &Profile) {
+/// left, and the 3D hero render (or an honest status placeholder) in the middle. Returns a
+/// render request when the current hero/upgrade's model isn't cached yet — `app.rs` picks
+/// that up post-reducer, loads the model, and lands a texture back on the Panel.
+fn hero_viewport(ui: &mut egui::Ui, h: &Profile, p: &Panel) -> Option<(u32, String)> {
     let viewport_height = 280.0;
+    let model_name = upgrade_model_for(h.character_index, h.upgrade_index);
+    let hash = mercs2_formats::hash::pandemic_hash_m2(&model_name);
+    let cached_tex = p.hero_textures.get(&hash).cloned();
+    let failed_err = p.hero_render_failed.get(&hash).cloned();
+    let in_flight = matches!(&p.pending_hero_render, Some((h, _)) if *h == hash);
+    let mut want: Option<(u32, String)> = None;
+    if cached_tex.is_none() && failed_err.is_none() && !in_flight {
+        want = Some((hash, model_name.clone()));
+    }
     egui::Frame::none()
         .fill(theme::G0)
         .stroke(egui::Stroke::new(1.0, theme::LINE))
@@ -623,39 +657,83 @@ fn hero_viewport(ui: &mut egui::Ui, h: &Profile) {
             });
 
             ui.add_space(8.0);
-            // Hero render placeholder — a centred dashed-border frame with a hint of what
-            // belongs there once the Workshop renderer is wired in. The identity chip at
-            // the bottom-left is sibling to this block so it hugs the viewport floor.
+            // The hero render itself — the cached texture if we have one, a spinner if the
+            // render is in flight, an error if it failed, else a one-line "about to request"
+            // hint on the frame before `app.rs` sees `pending_hero_render`.
             ui.vertical_centered(|ui| {
                 let avail = ui.available_size();
                 let render_h = (avail.y - 48.0).max(120.0);
                 let render_w = render_h * 0.6;
-                egui::Frame::none()
-                    .fill(theme::G2)
-                    .stroke(egui::Stroke::new(
-                        1.0,
-                        egui::Color32::from_rgb(0x42, 0x47, 0x4f),
-                    ))
-                    .rounding(egui::Rounding::same(4.0))
-                    .inner_margin(egui::Margin::symmetric(10.0, 10.0))
-                    .show(ui, |ui| {
-                        ui.set_min_size(egui::vec2(render_w, render_h));
-                        ui.vertical_centered(|ui| {
-                            ui.add_space(render_h * 0.4);
-                            ui.label(theme::disp_text(
-                                upgrade_model_for(h.character_index, h.upgrade_index).to_uppercase(),
-                                13.0,
-                                theme::DIM,
-                            ));
-                            ui.label(
-                                egui::RichText::new(
-                                    "hero render — Workshop viewport wiring pending",
-                                )
-                                .size(10.5)
-                                .color(theme::FAINT),
-                            );
-                        });
-                    });
+                match (&cached_tex, &failed_err, in_flight) {
+                    (Some(tex), _, _) => {
+                        let img_size = tex.size_vec2();
+                        let scale = (render_h / img_size.y).min(render_w / img_size.x);
+                        let fit = img_size * scale;
+                        ui.add(
+                            egui::Image::new((tex.id(), fit))
+                                .fit_to_exact_size(fit),
+                        );
+                    }
+                    (None, Some(err), _) => {
+                        egui::Frame::none()
+                            .fill(theme::G2)
+                            .stroke(egui::Stroke::new(1.0, theme::BAD))
+                            .rounding(egui::Rounding::same(4.0))
+                            .inner_margin(egui::Margin::symmetric(10.0, 10.0))
+                            .show(ui, |ui| {
+                                ui.set_min_size(egui::vec2(render_w, render_h));
+                                ui.vertical_centered(|ui| {
+                                    ui.add_space(render_h * 0.3);
+                                    ui.label(theme::disp_text(
+                                        model_name.to_uppercase(),
+                                        13.0,
+                                        theme::BAD,
+                                    ));
+                                    ui.label(
+                                        egui::RichText::new("render failed")
+                                            .size(10.5)
+                                            .color(theme::BAD),
+                                    );
+                                    ui.label(
+                                        egui::RichText::new(err)
+                                            .monospace()
+                                            .size(9.5)
+                                            .color(theme::FAINT),
+                                    );
+                                });
+                            });
+                    }
+                    (None, None, _) => {
+                        egui::Frame::none()
+                            .fill(theme::G2)
+                            .stroke(egui::Stroke::new(
+                                1.0,
+                                egui::Color32::from_rgb(0x42, 0x47, 0x4f),
+                            ))
+                            .rounding(egui::Rounding::same(4.0))
+                            .inner_margin(egui::Margin::symmetric(10.0, 10.0))
+                            .show(ui, |ui| {
+                                ui.set_min_size(egui::vec2(render_w, render_h));
+                                ui.vertical_centered(|ui| {
+                                    ui.add_space(render_h * 0.4);
+                                    ui.add(egui::Spinner::new().size(28.0));
+                                    ui.add_space(6.0);
+                                    ui.label(theme::disp_text(
+                                        model_name.to_uppercase(),
+                                        13.0,
+                                        theme::DIM,
+                                    ));
+                                    ui.label(
+                                        egui::RichText::new(
+                                            if in_flight { "rendering…" } else { "queuing render…" },
+                                        )
+                                        .size(10.5)
+                                        .color(theme::FAINT),
+                                    );
+                                });
+                            });
+                    }
+                }
             });
 
             ui.add_space(4.0);
@@ -675,6 +753,7 @@ fn hero_viewport(ui: &mut egui::Ui, h: &Profile) {
                 );
             });
         });
+    want
 }
 
 /// A small rounded HUD chip — label text with a background fill + border stroke. Used by the
@@ -1555,6 +1634,21 @@ pub fn apply(act: Act, p: &mut Panel) {
         }),
         Act::SetActiveMissionState(id, state) => {
             mutate_pending_lua(p, |root| set_active_mission_state(root, &id, state))
+        }
+        Act::EnsureHeroRender(hash, name) => {
+            // Idempotent: a successful cache hit, an in-flight request for the same hash,
+            // and a previously-failed hash all suppress the re-request. Only a NEW hash
+            // (or a different one than what's already pending) overwrites the slot.
+            if p.hero_textures.contains_key(&hash) {
+                return;
+            }
+            if p.hero_render_failed.contains_key(&hash) {
+                return;
+            }
+            if matches!(&p.pending_hero_render, Some((h, _)) if *h == hash) {
+                return;
+            }
+            p.pending_hero_render = Some((hash, name));
         }
     }
 }
