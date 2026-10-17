@@ -557,20 +557,38 @@ pub fn center(ctx: &egui::Context, p: &Panel) -> Vec<Act> {
                 }
             };
 
-            // Tab strip. Counts come from the real `SaveState` so the modder sees at-a-glance
-            // which lens is going to have content before clicking it.
-            ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                for (tab, label, count) in [
-                    (MissionTab::Active,    "Active",    state.active_missions.len()),
-                    (MissionTab::Completed, "Completed", state.completed_flow.len()),
-                    (MissionTab::Culled,    "Culled",    state.flow_chain.len()),
-                    (MissionTab::Layers,    "Layers",    state.layers.len()),
-                ] {
-                    let on = p.mission_tab == tab;
-                    if theme::pill(ui, &format!("{label}  {count}"), on).clicked() {
-                        acts.push(Act::PickMissionTab(tab));
+            // Tab strip. Mirrors the mockup: `PROGRESSION` eyebrow on the left names the
+            // scope, then the four tabs with live `SaveState` counts, then an "only changed"
+            // toggle right-aligned so a modder can filter the grid once a diff baseline lands.
+            ui.horizontal(|ui| {
+                ui.label(theme::disp_text("PROGRESSION", 10.0, theme::DIM));
+                ui.add_space(6.0);
+                ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                    for (tab, label, count) in [
+                        (MissionTab::Active,    "Active",    state.active_missions.len()),
+                        (MissionTab::Completed, "Completed", state.completed_flow.len()),
+                        (MissionTab::Culled,    "Culled",    state.flow_chain.len()),
+                        (MissionTab::Layers,    "Layers",    state.layers.len()),
+                    ] {
+                        let on = p.mission_tab == tab;
+                        if theme::pill(ui, &format!("{label}  {count}"), on).clicked() {
+                            acts.push(Act::PickMissionTab(tab));
+                        }
                     }
-                }
+                });
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    // Local-only cosmetic toggle for now — needs a baseline snapshot to
+                    // actually filter, same dependency as the "Diff vs original" verb above.
+                    let mut only_changed = false;
+                    ui.add_enabled_ui(false, |ui| {
+                        ui.checkbox(&mut only_changed, "only changed")
+                            .on_disabled_hover_text(
+                                "Filter the grid to missions whose state differs from the \
+                                 on-disk baseline. Not wired yet — same baseline-snapshot \
+                                 store as `Diff vs original`.",
+                            );
+                    });
+                });
             });
             ui.add_space(10.0);
 
@@ -1260,16 +1278,29 @@ fn profile_differs(pending: &Profile, on_disk: &Profile) -> bool {
         || pending.active_contract != on_disk.active_contract
 }
 
-/// The top-row verbs: Reload / Discard / Write.
+/// The top-row verbs: Reload / Back up / Diff vs original / Discard / Write.
 ///
-/// "Write to .profile" is only live when there is a selection AND pending edits actually
-/// differ from the on-disk header — a disabled button for a clean save tells the user they
-/// have nothing queued, without them having to compare the inspector by eye.
+/// Order matches the mockup. "Back up" and "Diff vs original" are stubs for now (disabled
+/// with explanatory hover text) — the backup wants a destination picker + versioned filename
+/// scheme, and the diff wants a baseline-snapshot store, both deferrable. "Write to .profile"
+/// is only live when there is a selection AND pending edits actually differ from the on-disk
+/// header, so a disabled button for a clean save tells the user they have nothing queued
+/// without them having to compare the inspector by eye.
 pub fn verbs(ui: &mut egui::Ui, p: &Panel) -> Vec<Act> {
     let mut acts: Vec<Act> = Vec::new();
     if ui.button("Reload from disk").clicked() {
         acts.push(Act::Reload);
     }
+    ui.add_enabled(false, egui::Button::new("Back up"))
+        .on_disabled_hover_text(
+            "Copy the current `.profile` to a timestamped sibling. Not wired yet — \
+             needs a destination picker and a versioned filename scheme.",
+        );
+    ui.add_enabled(false, egui::Button::new("Diff vs original"))
+        .on_disabled_hover_text(
+            "Byte-diff the pending Profile against an on-launch snapshot of the on-disk \
+             bytes. Not wired yet — needs the baseline snapshot store.",
+        );
     let dirty = match (&p.pending, &p.selected) {
         (Some(pend), Some(_)) => p
             .profiles
