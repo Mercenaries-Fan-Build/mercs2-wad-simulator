@@ -661,10 +661,11 @@ struct HeroReq {
 /// (so `Panel.hero_cam` tracks the user's intent) and an `EnsureHeroRender` (so `app.rs` draws
 /// the next frame at the new angle). A cold-start load also emits an `EnsureHeroRender`.
 fn hero_viewport(ui: &mut egui::Ui, h: &Profile, p: &Panel) -> HeroReq {
-    // Deliberately shorter than the inspector height — the mockup puts the mission grid
-    // directly below the viewport in the same visible frame; 320 pushed the grid off-screen
-    // on a laptop and the modder had to scroll to reach PROGRESSION.
-    let viewport_height = 240.0;
+    // The viewport is pinned to EXACTLY `viewport_height` — not a minimum. Without the cap it
+    // absorbed the whole centre column's available vertical, pushing the mission grid off
+    // screen even once PROGRESSION started scrolling. The mockup fits hero + chips + at-a-
+    // glance comfortably at ~220, so that's what we size to.
+    let viewport_height = 220.0;
     let model_name = upgrade_model_for(h.character_index, h.upgrade_index);
     let hash = mercs2_formats::hash::pandemic_hash_m2(&model_name);
     let cached_tex = p.hero_textures.get(&hash).cloned();
@@ -696,107 +697,141 @@ fn hero_viewport(ui: &mut egui::Ui, h: &Profile, p: &Panel) -> HeroReq {
         .rounding(egui::Rounding::same(6.0))
         .inner_margin(egui::Margin::symmetric(14.0, 12.0))
         .show(ui, |ui| {
+            // EXACT height: both floor and cap. `set_min_height` alone let the Frame grow to
+            // whatever the parent column handed down, which is how the hero ended up filling
+            // the whole centre and burying the mission grid.
             ui.set_width(ui.available_width());
             ui.set_min_height(viewport_height);
+            ui.set_max_height(viewport_height);
             let frame_rect = ui.max_rect();
 
-            // ── Background layer: the hero render fills the whole frame. Drawn first so the
-            // chips and the AT-A-GLANCE card below sit ON TOP as HUD overlays. ──
-            ui.vertical_centered(|ui| {
-                let render_h = (frame_rect.height() - 20.0).max(160.0);
-                let render_w = render_h * 0.6;
-                match (&cached_tex, &failed_err, in_flight) {
-                    (Some(tex), _, _) => {
-                        let img_size = tex.size_vec2();
-                        let scale = (render_h / img_size.y).min(render_w / img_size.x);
-                        let fit = img_size * scale;
-                        // Allocate the image's rect as a drag-sensing region. Painting the
-                        // texture into that same rect via `Painter::image` (rather than
-                        // `ui.add(Image)`) keeps the pointer input on OUR response —
-                        // otherwise the Image eats the drag and the viewport never orbits.
-                        let (rect, response) = ui.allocate_exact_size(
-                            fit,
-                            egui::Sense::click_and_drag(),
-                        );
-                        ui.painter().image(
-                            tex.id(),
-                            rect,
-                            egui::Rect::from_min_max(
-                                egui::pos2(0.0, 0.0),
-                                egui::pos2(1.0, 1.0),
-                            ),
-                            egui::Color32::WHITE,
-                        );
-                        // Mouse-drag → yaw / pitch. 0.01 rad per pixel: a 300 px horizontal
-                        // drag spins the hero one full turn-ish (3 rad), which is the "spin
-                        // to look around the model" feel without being so sensitive that a
-                        // 2 px wobble triggers a re-render. Pitch is clamped just inside
-                        // ±π/2 so the look_at never degenerates at the poles.
-                        let mut cam = current_cam;
-                        let mut moved = false;
-                        if response.dragged() {
-                            let d = response.drag_delta();
-                            if d.x.abs() > 0.01 || d.y.abs() > 0.01 {
-                                cam.yaw += d.x * 0.01;
-                                cam.pitch = (cam.pitch - d.y * 0.01).clamp(-1.5, 1.5);
-                                moved = true;
-                            }
-                        }
-                        // Scroll → zoom. Clamp to a sane range so a scroll flick can't
-                        // push the camera through the model or into the far-plane.
-                        if response.hovered() {
-                            let scroll_y = ui.input(|i| i.smooth_scroll_delta.y);
-                            if scroll_y.abs() > 0.1 {
-                                let factor = (1.0_f32 - scroll_y * 0.0025).clamp(0.5, 2.0);
-                                cam.zoom = (cam.zoom * factor).clamp(0.3, 6.0);
-                                moved = true;
-                            }
-                        }
-                        if moved {
-                            out.set_cam = Some((hash, cam));
-                            out.request_render = Some((hash, model_name.clone()));
-                            ui.ctx().request_repaint();
+            // ── Interaction layer: the ENTIRE frame is the drag/scroll region. The hero image
+            // only covers a slice of the frame (portraits are tall and narrow), and sensing
+            // just the image rect left the dark bands on either side dead to the cursor. The
+            // overlay chips are allocated on top AFTER this; egui's layer-last-wins pointer
+            // handling means clicking a chip is a chip-click, not an orbit-drag. ──
+            let drag_response = ui.interact(
+                frame_rect,
+                ui.id().with(("hero_drag", hash)),
+                egui::Sense::click_and_drag(),
+            );
+
+            // Render area inside the frame (keep a bit of margin so the hero doesn't kiss
+            // the rounded border).
+            let render_h = (frame_rect.height() - 12.0).max(140.0);
+            let render_w = render_h * 0.6;
+            let painter = ui.painter_at(frame_rect);
+            match (&cached_tex, &failed_err, in_flight) {
+                (Some(tex), _, _) => {
+                    let img_size = tex.size_vec2();
+                    let scale = (render_h / img_size.y).min(render_w / img_size.x);
+                    let fit = img_size * scale;
+                    // Centre the portrait horizontally in the frame — tall band, narrow image.
+                    let paint_rect = egui::Rect::from_center_size(frame_rect.center(), fit);
+                    painter.image(
+                        tex.id(),
+                        paint_rect,
+                        egui::Rect::from_min_max(
+                            egui::pos2(0.0, 0.0),
+                            egui::pos2(1.0, 1.0),
+                        ),
+                        egui::Color32::WHITE,
+                    );
+                    // Mouse-drag → yaw / pitch. 0.01 rad per pixel: a 300 px horizontal
+                    // drag spins the hero one full turn-ish (3 rad), which is the "spin
+                    // to look around the model" feel without being so sensitive that a
+                    // 2 px wobble triggers a re-render. Pitch is clamped just inside
+                    // ±π/2 so the look_at never degenerates at the poles.
+                    let mut cam = current_cam;
+                    let mut moved = false;
+                    if drag_response.dragged() {
+                        let d = drag_response.drag_delta();
+                        if d.x.abs() > 0.01 || d.y.abs() > 0.01 {
+                            cam.yaw += d.x * 0.01;
+                            cam.pitch = (cam.pitch - d.y * 0.01).clamp(-1.5, 1.5);
+                            moved = true;
                         }
                     }
-                    (None, Some(err), _) => {
-                        egui::Frame::none()
-                            .fill(theme::G2)
-                            .stroke(egui::Stroke::new(1.0, theme::BAD))
-                            .rounding(egui::Rounding::same(4.0))
-                            .inner_margin(egui::Margin::symmetric(10.0, 10.0))
-                            .show(ui, |ui| {
-                                ui.set_min_size(egui::vec2(render_w, render_h));
-                                ui.vertical_centered(|ui| {
-                                    ui.add_space(render_h * 0.3);
-                                    ui.label(theme::disp_text(model_name.to_uppercase(), 13.0, theme::BAD));
-                                    ui.label(egui::RichText::new("render failed").size(10.5).color(theme::BAD));
-                                    ui.label(egui::RichText::new(err).monospace().size(9.5).color(theme::FAINT));
-                                });
-                            });
+                    // Scroll → zoom. Clamp to a sane range so a scroll flick can't
+                    // push the camera through the model or into the far-plane.
+                    if drag_response.hovered() {
+                        let scroll_y = ui.input(|i| i.smooth_scroll_delta.y);
+                        if scroll_y.abs() > 0.1 {
+                            let factor = (1.0_f32 - scroll_y * 0.0025).clamp(0.5, 2.0);
+                            cam.zoom = (cam.zoom * factor).clamp(0.3, 6.0);
+                            moved = true;
+                        }
                     }
-                    (None, None, _) => {
-                        egui::Frame::none()
-                            .fill(theme::G2)
-                            .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(0x42, 0x47, 0x4f)))
-                            .rounding(egui::Rounding::same(4.0))
-                            .inner_margin(egui::Margin::symmetric(10.0, 10.0))
-                            .show(ui, |ui| {
-                                ui.set_min_size(egui::vec2(render_w, render_h));
-                                ui.vertical_centered(|ui| {
-                                    ui.add_space(render_h * 0.4);
-                                    ui.add(egui::Spinner::new().size(28.0));
-                                    ui.add_space(6.0);
-                                    ui.label(theme::disp_text(model_name.to_uppercase(), 13.0, theme::DIM));
-                                    ui.label(
-                                        egui::RichText::new(if in_flight { "rendering…" } else { "queuing render…" })
-                                            .size(10.5)
-                                            .color(theme::FAINT),
-                                    );
-                                });
-                            });
+                    if moved {
+                        out.set_cam = Some((hash, cam));
+                        out.request_render = Some((hash, model_name.clone()));
+                        ui.ctx().request_repaint();
                     }
                 }
-            });
+                (None, Some(err), _) => {
+                    let box_rect = egui::Rect::from_center_size(
+                        frame_rect.center(),
+                        egui::vec2(render_w, render_h),
+                    );
+                    painter.rect_filled(box_rect, egui::Rounding::same(4.0), theme::G2);
+                    painter.rect_stroke(box_rect, egui::Rounding::same(4.0), egui::Stroke::new(1.0, theme::BAD));
+                    painter.text(
+                        box_rect.center() - egui::vec2(0.0, 14.0),
+                        egui::Align2::CENTER_CENTER,
+                        model_name.to_uppercase(),
+                        egui::FontId::proportional(13.0),
+                        theme::BAD,
+                    );
+                    painter.text(
+                        box_rect.center() + egui::vec2(0.0, 6.0),
+                        egui::Align2::CENTER_CENTER,
+                        "render failed",
+                        egui::FontId::proportional(10.5),
+                        theme::BAD,
+                    );
+                    painter.text(
+                        box_rect.center() + egui::vec2(0.0, 22.0),
+                        egui::Align2::CENTER_CENTER,
+                        err,
+                        egui::FontId::monospace(9.5),
+                        theme::FAINT,
+                    );
+                }
+                (None, None, _) => {
+                    let box_rect = egui::Rect::from_center_size(
+                        frame_rect.center(),
+                        egui::vec2(render_w, render_h),
+                    );
+                    painter.rect_filled(box_rect, egui::Rounding::same(4.0), theme::G2);
+                    painter.rect_stroke(
+                        box_rect,
+                        egui::Rounding::same(4.0),
+                        egui::Stroke::new(1.0, egui::Color32::from_rgb(0x42, 0x47, 0x4f)),
+                    );
+                    // Spinner needs a real widget — allocate a small UI centred on the box.
+                    let spinner_rect = egui::Rect::from_center_size(
+                        box_rect.center() - egui::vec2(0.0, 10.0),
+                        egui::vec2(32.0, 32.0),
+                    );
+                    ui.allocate_ui_at_rect(spinner_rect, |ui| {
+                        ui.add(egui::Spinner::new().size(28.0));
+                    });
+                    painter.text(
+                        box_rect.center() + egui::vec2(0.0, 14.0),
+                        egui::Align2::CENTER_CENTER,
+                        model_name.to_uppercase(),
+                        egui::FontId::proportional(13.0),
+                        theme::DIM,
+                    );
+                    painter.text(
+                        box_rect.center() + egui::vec2(0.0, 30.0),
+                        egui::Align2::CENTER_CENTER,
+                        if in_flight { "rendering…" } else { "queuing render…" },
+                        egui::FontId::proportional(10.5),
+                        theme::FAINT,
+                    );
+                }
+            }
 
             // ── Overlay layer: HUD chips and the AT-A-GLANCE card, placed at absolute
             // positions INSIDE the viewport frame via `allocate_ui_at_rect`. These paint ON
@@ -912,11 +947,15 @@ fn at_a_glance(ui: &mut egui::Ui, h: &Profile) {
 }
 
 /// One row of the AT-A-GLANCE overlay: dim label on the left, mono value right-aligned.
-/// Explicit `left_to_right` so the row doesn't inherit a top-down direction from the card
-/// and lay out label-above-value stacked instead of side-by-side.
+///
+/// `ui.horizontal` CAPS the row's vertical extent to the tallest widget it contains — the
+/// previous `with_layout(left_to_right, ..)` wrapper did not cap height, and the nested
+/// `right_to_left` inside it absorbed the whole remaining vertical space of the top-down
+/// parent. That's what produced the mystery dead-space BETWEEN the "contract" row and the
+/// cash/fuel/playtime cluster: the first row was ~90 px tall and the rest got the leftovers.
 fn glance_row(ui: &mut egui::Ui, label: &str, value: &str) {
-    ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-        ui.set_min_width(220.0);
+    ui.horizontal(|ui| {
+        ui.set_width(ui.available_width());
         ui.label(
             egui::RichText::new(label)
                 .size(10.0)
