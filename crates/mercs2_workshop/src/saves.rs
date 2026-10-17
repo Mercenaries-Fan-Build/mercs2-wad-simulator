@@ -1620,35 +1620,6 @@ pub fn inspector(ui: &mut egui::Ui, p: &Panel) -> Vec<Act> {
         acts.push(Act::SetCharacter(v));
     }
 
-    // STORY UPGRADE — 2×2 grid of tier cards. The template name on each card is the real
-    // `_tCharacterMap[hero].templates[iUpgrade]` string the engine spawns from (or `base`
-    // for tier 0), so a modder knows what their edit swaps.
-    let mut upgrade_edit: Option<u8> = None;
-    theme::section(ui, "STORY UPGRADE", Some("0 fresh → 3 endgame"), true, |ui| {
-        let templates = hero_tier_templates(pending.character_index);
-        egui::Grid::new("saves.upgrade.grid")
-            .num_columns(2)
-            .spacing(egui::vec2(6.0, 6.0))
-            .show(ui, |ui| {
-                for tier in 0u8..4 {
-                    if tier_card(
-                        ui,
-                        tier,
-                        templates[tier as usize],
-                        pending.upgrade_index == tier,
-                    ) {
-                        upgrade_edit = Some(tier);
-                    }
-                    if tier == 1 {
-                        ui.end_row();
-                    }
-                }
-            });
-    });
-    if let Some(v) = upgrade_edit {
-        acts.push(Act::SetUpgrade(v));
-    }
-
     // WARDROBE — active override dropdown (runtime-only on disk, surfaced for a future write
     // byte at `+0x4E`) + an UNLOCKED COUNT stepper over `@0x24A` + a prefix-unlocked list.
     // When the hero's `_tOutfits` table isn't catalogued (Chris / Jen for now), the panel
@@ -1881,37 +1852,6 @@ pub fn inspector(ui: &mut egui::Ui, p: &Panel) -> Vec<Act> {
     });
 
     acts
-}
-
-/// One tier card in the STORY UPGRADE 2×2 grid. Returns true the frame the card was clicked.
-/// Mirrors the mockup: "TIER N" eyebrow (brass when selected) + the real template name in
-/// mono below it, brass-bordered when the card is the current tier.
-fn tier_card(ui: &mut egui::Ui, tier: u8, template: &str, on: bool) -> bool {
-    let (fill, border, hd, body) = if on {
-        (theme::BRASS_SOFT, theme::BRASS_DK, theme::BRASS, theme::BRASS)
-    } else {
-        (theme::G0, theme::LINE, theme::FAINT, theme::DIM)
-    };
-    let resp = egui::Frame::none()
-        .fill(fill)
-        .stroke(egui::Stroke::new(1.0, border))
-        .rounding(egui::Rounding::same(4.0))
-        .inner_margin(egui::Margin::symmetric(8.0, 6.0))
-        .show(ui, |ui| {
-            ui.set_min_width(120.0);
-            ui.vertical(|ui| {
-                ui.label(theme::disp_text(format!("TIER {tier}"), 9.5, hd));
-                ui.label(
-                    egui::RichText::new(if template.is_empty() { "—" } else { template })
-                        .monospace()
-                        .size(11.0)
-                        .color(body),
-                );
-            });
-        })
-        .response
-        .interact(egui::Sense::click());
-    resp.clicked()
 }
 
 /// True when the pending Profile differs from the on-disk one on any **editable** field.
