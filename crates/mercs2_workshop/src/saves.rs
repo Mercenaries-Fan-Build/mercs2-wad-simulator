@@ -1118,14 +1118,14 @@ struct ChipStyle {
 fn mission_chip_grid(ui: &mut egui::Ui, items: &[(String, Option<String>)], s: ChipStyle) {
     let cols = 6usize;
     let gutter = 4.0;
-    // Reserve 40 px off ui.available_width(): ~18 for the ScrollArea's vertical scrollbar,
-    // plus a safety band for the panel's own inner padding and the Grid's trailing spacing.
-    // 20 px wasn't enough — column 6 was still clipping. Chip Frame overhead (inner_margin
-    // 7+7 + stroke 1+1 = 16) is subtracted from the horizontal row's set_width so the
-    // Frame-outer lands exactly on cell_w. The set_width is on the HORIZONTAL child, not on
-    // the Frame's immediate inner UI — Frame measures from min_rect of its child's content,
-    // and setting width on the horizontal is what actually forces the Frame to that size.
-    let avail = (ui.available_width() - 40.0).max(100.0);
+    // Reserve 64 px off ui.available_width(): ~18 for the ScrollArea's vertical scrollbar,
+    // plus the centre panel's own inner padding and the Grid's trailing spacing. 40 px still
+    // let column 6 clip by a few pixels against the right-side inspector. The chip Frame
+    // overhead (inner_margin 7+7 + stroke 1+1 = 16) is subtracted from the horizontal row's
+    // set_width so the Frame-outer lands exactly on cell_w. The set_width is on the HORIZONTAL
+    // child, not on the Frame's immediate inner UI — Frame measures from min_rect of its
+    // child's content.
+    let avail = (ui.available_width() - 64.0).max(100.0);
     let cell_w = (avail - (cols as f32 - 1.0) * gutter) / cols as f32;
     let chip_overhead = 16.0;
     let row_inner = (cell_w - chip_overhead).max(40.0);
@@ -1144,12 +1144,11 @@ fn mission_chip_grid(ui: &mut egui::Ui, items: &[(String, Option<String>)], s: C
                     .show(ui, |ui| {
                         ui.horizontal(|ui| {
                             ui.set_width(row_inner);
-                            ui.label(
-                                egui::RichText::new(id)
-                                    .monospace()
-                                    .size(10.5)
-                                    .color(theme::TX),
-                            );
+                            // Right-side tag FIRST (via right_to_left on the whole row), then
+                            // the id label fills the remaining width with ELLIPSIS truncation.
+                            // The previous layout — id left, tag right_to_left — let a long id
+                            // push the whole row wider, which wrapped the DONE tag onto a new
+                            // line and made that chip taller than its row-mates.
                             ui.with_layout(
                                 egui::Layout::right_to_left(egui::Align::Center),
                                 |ui| {
@@ -1160,6 +1159,15 @@ fn mission_chip_grid(ui: &mut egui::Ui, items: &[(String, Option<String>)], s: C
                                         .show(ui, |ui| {
                                             ui.label(theme::disp_text(s.tag, 8.5, s.tag_fg));
                                         });
+                                    ui.add(
+                                        egui::Label::new(
+                                            egui::RichText::new(id)
+                                                .monospace()
+                                                .size(10.5)
+                                                .color(theme::TX),
+                                        )
+                                        .truncate(),
+                                    );
                                 },
                             );
                         });
