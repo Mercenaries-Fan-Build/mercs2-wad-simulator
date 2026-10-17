@@ -1241,6 +1241,9 @@ pub fn run(opts: Options) {
     // ~10-30 ms instead of the ~1-2 s a fresh `shot::render` call would take. Dropped only
     // when the whole workshop exits.
     let mut hero_renderers: HashMap<u32, crate::shot::HeroRenderer> = HashMap::new();
+    // The Missions blueprint editor's panel. One per app session — pan/zoom/selection survive the
+    // navigator tab switching away and back, which the real workflow does constantly.
+    let mut missions_panel = crate::missions::Panel::default();
     // Host-provided, like the game stack: the crate never reaches into the filesystem for it.
     let qm_names = mercs2_quartermaster::names::NameTable::find_from(
         &std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
@@ -1931,6 +1934,7 @@ pub fn run(opts: Options) {
                     // Captured below inside `gui.run` so the saves reducer (which runs after the
                     // closure returns) can allocate egui textures for the hero-portrait render.
                     let mut pending_ctx: Option<egui::Context> = None;
+                    let mut missions_acts: Vec<crate::missions::Act> = Vec::new();
                     let mut hovered_bone: Option<usize> = None;
                     // Skeleton workbench hover: (bone index, is_source_tree). Resolved to a viewer
                     // highlight in the PREVIEW's current space (source before Apply, target after).
@@ -2689,6 +2693,12 @@ pub fn run(opts: Options) {
                             // ── DOMAIN: a curated lens over the catalog. The navigator is the only
                             // domain-specific surface; the viewport, inspector and verbs are Inspect's,
                             // so picking a model here shows it there exactly as browsing Inspect would.
+                            Workbench::Domain(crate::domain::Domain::Missions) => {
+                                // The Missions rail opens the Blueprint-style node editor rather
+                                // than the generic script-list lens — the follow-up to this file
+                                // keeps that lens one click away in the picker inside the editor.
+                                missions_acts.extend(crate::missions::navigator(ui, &missions_panel));
+                            }
                             Workbench::Domain(d) => {
                                 ui.label(theme::disp_text(d.label().to_uppercase(), theme::style_title(), theme::TX));
                                 ui.add_space(4.0);
@@ -2960,7 +2970,13 @@ pub fn run(opts: Options) {
                               if eff == Workbench::Saves {
                                   saves_acts.extend(crate::saves::inspector(ui, &saves));
                               }
-                              if eff.inspect_like() {
+                              // The Missions editor owns the right pane entirely — the generic
+                              // Inspect-style preview panel would compete with the node details.
+                              let is_missions_bench = eff == Workbench::Domain(crate::domain::Domain::Missions);
+                              if is_missions_bench {
+                                  missions_acts.extend(crate::missions::inspector(ui, &missions_panel));
+                              }
+                              if eff.inspect_like() && !is_missions_bench {
                                 match &mut preview {
                                     None => {
                                         ui.weak("No model loaded — pick one in the browser at left.");
@@ -4232,6 +4248,12 @@ pub fn run(opts: Options) {
                                     Workbench::Saves => {
                                         saves_acts.extend(crate::saves::verbs(ui, &saves));
                                     }
+                                    // Missions owns its own verb bar: Jump-to-source / Add node /
+                                    // Compile, which is what a blueprint editor needs, not Place /
+                                    // Export / textures.
+                                    Workbench::Domain(crate::domain::Domain::Missions) => {
+                                        missions_acts.extend(crate::missions::verbs(ui, &missions_panel));
+                                    }
                                     // A domain page shares Inspect's verbs — it is Inspect narrowed to
                                     // a lens, so Place / Export / textures / clip act on the same
                                     // loaded model. (For a non-model domain there is no preview, so
@@ -4974,6 +4996,13 @@ pub fn run(opts: Options) {
                             saves_acts.extend(crate::saves::windows(ctx, &saves));
                         }
 
+                        // ── MISSIONS main content: the Blueprint-style node canvas. Takes the
+                        // full centre, not a viewport pass, so the dot-grid and node cards sit
+                        // where the 3D would.
+                        if wb == Workbench::Domain(crate::domain::Domain::Missions) {
+                            missions_acts.extend(crate::missions::center(ctx, &missions_panel));
+                        }
+
                         // ── VIEWPORT HUD: status chips over the 3D (the panels are all placed now, so
                         // `available_rect` is the viewport region). Non-interactable so the camera drag
                         // works underneath. ──
@@ -5367,6 +5396,10 @@ pub fn run(opts: Options) {
                             qm_corpus.as_deref(),
                             &mut status,
                         );
+                    }
+                    // Fold the Missions editor's queued actions back into its panel.
+                    for act in missions_acts.drain(..) {
+                        crate::missions::apply(act, &mut missions_panel);
                     }
                     // A background build (Act::Build) reports back here. While it runs, the verb
                     // bar's spinner keeps egui repainting, so this polls every frame until it lands;
