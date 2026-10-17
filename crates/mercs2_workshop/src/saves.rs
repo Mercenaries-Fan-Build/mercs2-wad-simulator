@@ -662,25 +662,14 @@ struct HeroReq {
     request_render: Option<(u32, String)>,
 }
 
-/// The centre's viewport-styled area, matching the mockup: a tall frame with four HUD
-/// overlays — ORBIT + model chip top-left, AT-A-GLANCE top-right, hero identity chip bottom-
-/// left, and the 3D hero render in the middle. The hero fills the whole frame as a background
-/// layer; the chips + AT-A-GLANCE paint on top as absolutely-positioned HUD overlays (via
-/// `allocate_ui_at_rect`) so they read as proper overlays rather than siblings above the image.
+/// Centre viewport: hero portrait with four HUD overlays — ORBIT + model chip top-left,
+/// AT-A-GLANCE top-right, identity chip bottom-left. Chips paint on top via
+/// `allocate_ui_at_rect`. Drag orbits, scroll zooms; each change emits `SetHeroCam` +
+/// `EnsureHeroRender`.
 ///
-/// Drag inside the render area orbits the camera (horizontal drag = yaw, vertical = pitch);
-/// mouse-wheel scroll inside the viewport zooms. Each cam change emits both a `SetHeroCam`
-/// (so `Panel.hero_cam` tracks the user's intent) and an `EnsureHeroRender` (so `app.rs` draws
-/// the next frame at the new angle). A cold-start load also emits an `EnsureHeroRender`.
+/// `h` drives the preview (pending edit, so inspector changes repose immediately).
+/// `on_disk` backs AT-A-GLANCE so cash/fuel/timestamp stay stable while editing.
 fn hero_viewport(ui: &mut egui::Ui, h: &Profile, on_disk: &Profile, p: &Panel) -> HeroReq {
-    // `h` is the LIVE view (pending edit) — hero, upgrade tier, overlays — so inspector
-    // changes repose the preview immediately. `on_disk` is the baseline for the AT-A-GLANCE
-    // card so cash/fuel/timestamp stay stable while the modder types.
-    // The viewport is pinned to EXACTLY `viewport_height` — not a minimum. The hero texture is
-    // 720x960 (RENDER_W/RENDER_H in shot.rs); at 220 px the hero scaled down to a 165-tall
-    // slice that visibly didn't fill the bordered frame. Going taller lets the portrait match
-    // the frame's visible area — the mission grid sits inside a vertical ScrollArea below, so
-    // the extra height here never pushes PROGRESSION off-screen.
     let viewport_height = 360.0;
     let model_name = upgrade_model_for(h.character_index, h.upgrade_index);
     let hash = mercs2_formats::hash::pandemic_hash_m2(&model_name);
@@ -713,31 +702,19 @@ fn hero_viewport(ui: &mut egui::Ui, h: &Profile, on_disk: &Profile, p: &Panel) -
         .rounding(egui::Rounding::same(6.0))
         .inner_margin(egui::Margin::symmetric(14.0, 12.0))
         .show(ui, |ui| {
-            // EXACT height: both floor and cap. `set_min_height` alone let the Frame grow to
-            // whatever the parent column handed down, which is how the hero ended up filling
-            // the whole centre and burying the mission grid.
+            // Pin exact height — min alone lets the Frame absorb the whole column.
             ui.set_width(ui.available_width());
             ui.set_min_height(viewport_height);
             ui.set_max_height(viewport_height);
             let frame_rect = ui.max_rect();
 
-            // ── Interaction layer: the ENTIRE frame is the drag/scroll region. The hero image
-            // only covers a slice of the frame (portraits are tall and narrow), and sensing
-            // just the image rect left the dark bands on either side dead to the cursor. The
-            // overlay chips are allocated on top AFTER this; egui's layer-last-wins pointer
-            // handling means clicking a chip is a chip-click, not an orbit-drag. ──
+            // Whole frame is the drag/scroll region; chips allocated after this paint over it.
             let drag_response = ui.interact(
                 frame_rect,
                 ui.id().with(("hero_drag", hash)),
                 egui::Sense::click_and_drag(),
             );
 
-            // The hero fits into the WHOLE frame (minus a small margin for the border). The
-            // 0.6 width ratio I had before (`render_w = render_h * 0.6`) was tighter than the
-            // texture's own 0.75 aspect, so the fit was width-bound rather than height-bound
-            // and the hero rendered as a thin slice down the middle. Using the frame's own
-            // width lets the fit be height-bound, so the hero scales to fill the viewport
-            // vertically — HUD chips sit on top in overlay slots, so they're not clipped.
             let render_h = (frame_rect.height() - 12.0).max(140.0);
             let render_w = (frame_rect.width() - 12.0).max(140.0);
             let painter = ui.painter_at(frame_rect);
@@ -967,12 +944,8 @@ fn at_a_glance(ui: &mut egui::Ui, h: &Profile) {
 }
 
 /// One row of the AT-A-GLANCE overlay: dim label on the left, mono value right-aligned.
-///
-/// `ui.horizontal` CAPS the row's vertical extent to the tallest widget it contains — the
-/// previous `with_layout(left_to_right, ..)` wrapper did not cap height, and the nested
-/// `right_to_left` inside it absorbed the whole remaining vertical space of the top-down
-/// parent. That's what produced the mystery dead-space BETWEEN the "contract" row and the
-/// cash/fuel/playtime cluster: the first row was ~90 px tall and the rest got the leftovers.
+/// `ui.horizontal` caps row height to the tallest child, which keeps a nested `right_to_left`
+/// from absorbing the parent's spare vertical space.
 fn glance_row(ui: &mut egui::Ui, label: &str, value: &str) {
     ui.horizontal(|ui| {
         ui.set_width(ui.available_width());
@@ -1006,9 +979,7 @@ fn hms_long(s: u32) -> String {
 /// cycles the mission to the next state via [`Act::SetActiveMissionState`], so a modder can
 /// walk a chain of chips without the chip width changing between frames.
 ///
-/// Hover a chip to see its full state label and `nTargetsComplete` / `collected` detail. The
-/// row-list that used to render per-mission with full state pills is gone; it did not scale
-/// past ~a dozen missions and the mockup shows the grid.
+/// Hover a chip to see its full state label and `nTargetsComplete` / `collected` detail.
 fn render_active(ui: &mut egui::Ui, missions: &[save::ActiveMission]) -> Vec<Act> {
     let mut acts: Vec<Act> = Vec::new();
     if missions.is_empty() {
@@ -1019,8 +990,6 @@ fn render_active(ui: &mut egui::Ui, missions: &[save::ActiveMission]) -> Vec<Act
         );
         return acts;
     }
-    // Five columns per the mockup — same column count as mission_chip_grid, so the Available
-    // tab's interactive grid lines up visually with the Completed / Culled / Flow / All tabs.
     let cols = 5usize;
     let gutter = 4.0;
     let avail = ui.available_width();
@@ -1030,8 +999,6 @@ fn render_active(ui: &mut egui::Ui, missions: &[save::ActiveMission]) -> Vec<Act
         ui.spacing_mut().item_spacing = egui::vec2(gutter, gutter);
         for m in missions {
             let cur = TaskState::from_f64(m.state);
-            // Tag vocabulary mirrors the mockup — DONE / OPEN / SKIP rather than the raw
-            // MrxTaskState codes. Still cycles through all four underlying states on click.
             let (bg, bd, tag_bg, tag_fg, tag) = match cur {
                 Some(TaskState::Completed) => (theme::G2, theme::GOOD_DK, theme::GOOD_SOFT, theme::GOOD, "DONE"),
                 Some(TaskState::Active)    => (theme::G2, theme::BRASS_DK, theme::BRASS_SOFT, theme::BRASS, "OPEN"),
@@ -1109,24 +1076,16 @@ struct ChipStyle {
     tag: &'static str,
 }
 
-/// 6-column chip grid, one palette for the whole tab. The mockup renders Completed / Culled /
-/// Flow bindings in the exact same visual grammar as Active — id on the left, state tag pill on
-/// the right — differing only in the colours and the tag text. A one-column vertical list of
-/// mission ids (what Completed used to be) ran off-screen at ~215 entries and did not match the
-/// mockup's density; a shared grid keeps the four tabs reading as one coherent board.
+/// Shared 5-column chip grid used by every PROGRESSION tab except Available (which is
+/// interactive). One palette per tab; id left, state-tag pill right.
 fn mission_chip_grid(ui: &mut egui::Ui, items: &[(String, Option<String>)], s: ChipStyle) {
-    // Five columns per the mockup. Reserve 64 px off ui.available_width(): ~18 for the
-    // ScrollArea's vertical scrollbar, plus the centre panel's own inner padding and the
-    // Grid's trailing spacing. The chip Frame overhead (inner_margin 7+7 + stroke 1+1 = 16)
-    // is subtracted from the horizontal row's set_width so the Frame-outer lands exactly on
-    // cell_w. The set_width is on the HORIZONTAL child, not on the Frame's immediate inner
-    // UI — Frame measures from min_rect of its child's content.
     let cols = 5usize;
     let gutter = 4.0;
-    let avail = (ui.available_width() - 64.0).max(100.0);
+    // 24 px: ScrollArea vertical scrollbar + grid trailing spacing.
+    let avail = (ui.available_width() - 24.0).max(100.0);
     let cell_w = (avail - (cols as f32 - 1.0) * gutter) / cols as f32;
-    let chip_overhead = 16.0;
-    let row_inner = (cell_w - chip_overhead).max(40.0);
+    // 16 = chip Frame inner_margin (7+7) + stroke (1+1).
+    let row_inner = (cell_w - 16.0).max(40.0);
     egui::Grid::new(ui.auto_id_with(("mission_chip_grid", items.len(), s.tag)))
         .num_columns(cols)
         .min_col_width(cell_w)
@@ -1142,11 +1101,6 @@ fn mission_chip_grid(ui: &mut egui::Ui, items: &[(String, Option<String>)], s: C
                     .show(ui, |ui| {
                         ui.horizontal(|ui| {
                             ui.set_width(row_inner);
-                            // Right-side tag FIRST (via right_to_left on the whole row), then
-                            // the id label fills the remaining width with ELLIPSIS truncation.
-                            // The previous layout — id left, tag right_to_left — let a long id
-                            // push the whole row wider, which wrapped the DONE tag onto a new
-                            // line and made that chip taller than its row-mates.
                             ui.with_layout(
                                 egui::Layout::right_to_left(egui::Align::Center),
                                 |ui| {
@@ -1157,7 +1111,12 @@ fn mission_chip_grid(ui: &mut egui::Ui, items: &[(String, Option<String>)], s: C
                                         .show(ui, |ui| {
                                             ui.label(theme::disp_text(s.tag, 8.5, s.tag_fg));
                                         });
-                                    ui.add(
+                                    // add_sized gives the label the full remaining width so a
+                                    // short id doesn't shrink against the tag with blank space
+                                    // to its left.
+                                    let remaining = ui.available_width();
+                                    ui.add_sized(
+                                        egui::vec2(remaining, 14.0),
                                         egui::Label::new(
                                             egui::RichText::new(id)
                                                 .monospace()
