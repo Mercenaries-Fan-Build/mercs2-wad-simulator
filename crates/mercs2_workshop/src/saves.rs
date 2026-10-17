@@ -411,19 +411,36 @@ pub fn navigator(ui: &mut egui::Ui, p: &Panel) -> Vec<Act> {
                 };
                 let resp = theme::row_chip(ui, fill, border, |ui| {
                     ui.vertical(|ui| {
-                        ui.horizontal(|ui| {
-                            ui.label(theme::disp_text(
-                                e.hero_letter().to_string(),
-                                11.0,
-                                if selected { theme::BRASS } else { theme::DIM },
-                            ));
-                            let name_col = if selected { theme::BRASS } else { theme::TX };
-                            ui.label(
-                                egui::RichText::new(&e.stem)
-                                    .size(12.0)
-                                    .color(name_col),
-                            );
-                        });
+                        ui.with_layout(
+                            egui::Layout::left_to_right(egui::Align::Center),
+                            |ui| {
+                                let hero_fg = if selected { theme::BRASS } else { theme::DIM };
+                                // Hero initial as a tiny bordered chip (M/C/J/?), matching the
+                                // mockup's save-list badge. Drawn as a mini-frame so the letter
+                                // has structure instead of floating next to the filename.
+                                egui::Frame::none()
+                                    .stroke(egui::Stroke::new(1.0, theme::LINE2))
+                                    .rounding(egui::Rounding::same(3.0))
+                                    .inner_margin(egui::Margin::symmetric(5.0, 1.0))
+                                    .outer_margin(egui::Margin {
+                                        right: 7.0,
+                                        ..Default::default()
+                                    })
+                                    .show(ui, |ui| {
+                                        ui.label(theme::disp_text(
+                                            e.hero_letter().to_string(),
+                                            9.5,
+                                            hero_fg,
+                                        ));
+                                    });
+                                let name_col = if selected { theme::BRASS } else { theme::TX };
+                                ui.label(
+                                    egui::RichText::new(&e.stem)
+                                        .size(12.0)
+                                        .color(name_col),
+                                );
+                            },
+                        );
                         let meta = match &e.header {
                             Ok(h) => format!(
                                 "{} · {} · upgrade {}",
@@ -479,13 +496,45 @@ pub fn center(ctx: &egui::Context, p: &Panel) -> Vec<Act> {
                 .and_then(|s| s.to_str())
                 .unwrap_or("")
                 .to_string();
-            ui.label(theme::disp_text(stem.to_uppercase(), 20.0, theme::TX));
-            ui.add_space(2.0);
+
+            // Resolve the on-disk header for the header strip. `pending` would read "as
+            // currently edited" instead; here we want the baseline the modder is editing
+            // against, so the AT-A-GLANCE card doesn't jump every keystroke.
+            let on_disk = p
+                .profiles
+                .as_ref()
+                .and_then(|list| list.iter().find(|e| &e.path == sel))
+                .and_then(|e| e.header.as_ref().ok());
+
+            // Filename eyebrow + hero line.
             ui.label(
-                egui::RichText::new("inflated Lua · tFlowData + tLayerData")
+                egui::RichText::new(&stem)
+                    .monospace()
                     .size(11.0)
                     .color(theme::FAINT),
             );
+            match on_disk {
+                None => {
+                    ui.label(theme::disp_text("UNREADABLE", 20.0, theme::BAD));
+                }
+                Some(h) => {
+                    ui.label(theme::disp_text(
+                        hero_name(h.character_index).to_uppercase(),
+                        20.0,
+                        theme::TX,
+                    ));
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "upgrade {} · {} / 5 costumes unlocked",
+                            h.upgrade_index, h.unlocked_costumes
+                        ))
+                        .size(11.5)
+                        .color(theme::FAINT),
+                    );
+                    ui.add_space(10.0);
+                    at_a_glance(ui, h);
+                }
+            }
             ui.add_space(12.0);
 
             let Some((_, parsed)) = p.lua_state.as_ref() else {
@@ -510,7 +559,7 @@ pub fn center(ctx: &egui::Context, p: &Panel) -> Vec<Act> {
 
             // Tab strip. Counts come from the real `SaveState` so the modder sees at-a-glance
             // which lens is going to have content before clicking it.
-            ui.horizontal(|ui| {
+            ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
                 for (tab, label, count) in [
                     (MissionTab::Active,    "Active",    state.active_missions.len()),
                     (MissionTab::Completed, "Completed", state.completed_flow.len()),
@@ -535,6 +584,55 @@ pub fn center(ctx: &egui::Context, p: &Panel) -> Vec<Act> {
             });
         });
     acts
+}
+
+/// The five-column AT-A-GLANCE strip the mockup carries as a HUD overlay on top of the hero
+/// viewport. Cash / Fuel / Playtime / Contract / Timestamp — the save's running state at a
+/// glance, framed as a brass-accented card so the modder sees the big picture before diving
+/// into the mission tabs. Reads the on-disk `Profile` so it stays stable while editing.
+fn at_a_glance(ui: &mut egui::Ui, h: &Profile) {
+    egui::Frame::none()
+        .fill(theme::G2)
+        .stroke(egui::Stroke::new(1.0, theme::BRASS_DK))
+        .rounding(egui::Rounding::same(6.0))
+        .inner_margin(egui::Margin::symmetric(13.0, 10.0))
+        .show(ui, |ui| {
+            ui.with_layout(egui::Layout::left_to_right(egui::Align::TOP), |ui| {
+                glance_col(ui, "CASH",     &format!("${}", h.cash));
+                glance_col(ui, "FUEL",     &format!("{} / {}", h.fuel, h.fuel_capacity));
+                glance_col(ui, "PLAYTIME", &hms_long(h.play_time_seconds));
+                glance_col(ui, "CONTRACT", &h.active_contract);
+                glance_col(ui, "TIMESTAMP", &timestamp_utc(h.timestamp));
+            });
+        });
+}
+
+/// One column of the AT-A-GLANCE strip: tiny eyebrow + mono value, with a flex-growing cell.
+fn glance_col(ui: &mut egui::Ui, label: &str, value: &str) {
+    ui.vertical(|ui| {
+        ui.set_min_width(90.0);
+        ui.label(
+            egui::RichText::new(label)
+                .size(9.5)
+                .color(theme::FAINT),
+        );
+        ui.label(
+            egui::RichText::new(value)
+                .monospace()
+                .size(12.5)
+                .color(theme::TX),
+        );
+    });
+    ui.add_space(16.0);
+}
+
+/// Long-form `h/m/s` playtime (`246334` → `"68h 25m 34s"`) for the AT-A-GLANCE strip, where
+/// the browser row's compact `hms` form sacrifices the seconds.
+fn hms_long(s: u32) -> String {
+    let h = s / 3600;
+    let m = (s % 3600) / 60;
+    let sec = s % 60;
+    format!("{h}h {m:02}m {sec:02}s")
 }
 
 /// A single mission-id card for the Active tab — id + 4-state pill set + targets + collected.
