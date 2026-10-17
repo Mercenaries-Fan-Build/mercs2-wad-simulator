@@ -980,10 +980,15 @@ fn hero_tier_templates(index: u8) -> [&'static str; 4] {
     }
 }
 
-/// `_tOutfits[hero]` — the base-game costumes a hero can switch to at the mirror. Source:
-/// `docs/mercs2-luacd/src/vz/wifpmcinterior.lua:215-241` (Mattias). Chris / Jen tables live
-/// elsewhere in the same file; populated here only for Mattias to start — the other two
-/// return an empty slice so the WARDROBE section renders honestly rather than inventing.
+/// `_tOutfits[hero]` — the base-game costumes a hero can switch to at the mirror. All three
+/// heroes' tables extracted verbatim from `docs/mercs2-luacd/src/vz/wifpmcinterior.lua`:
+///   - Mattias: lines 215-241 (5 outfits)
+///   - Chris:   lines 156-182 (5 outfits)
+///   - Jen:     lines 183-214 (6 outfits — Jen is the only hero with ChickenSuit AND five
+///              non-chicken skins; the retail Lua table is keyed `jennifer`, not `jen`.)
+///
+/// Order matches the source so the UNLOCKED COUNT prefix-reveal lines up with what the
+/// engine's `SetAvailableCostumes` surfaces at the mirror.
 fn hero_outfits(index: u8) -> &'static [(&'static str, &'static str)] {
     match index {
         1 => &[
@@ -992,6 +997,21 @@ fn hero_outfits(index: u8) -> &'static [(&'static str, &'static str)] {
             ("Suit",        "pmc_hum_mattias_v2"),
             ("Jacket",      "pmc_hum_mattias_v4"),
             ("ChickenSuit", "pmc_hum_mattias_chickensuit"),
+        ],
+        2 => &[
+            ("Original",    "pmc_hum_chris"),
+            ("Vacation",    "pmc_hum_chris_v2"),
+            ("Commando",    "pmc_hum_chris_v3"),
+            ("OffDuty",     "pmc_hum_chris_v4"),
+            ("ChickenSuit", "pmc_hum_chris_chickensuit"),
+        ],
+        3 => &[
+            ("Original",    "pmc_hum_jen"),
+            ("Rebel",       "pmc_hum_jen_v3"),
+            ("Tactical",    "pmc_hum_jen_v5"),
+            ("NoJacket",    "pmc_hum_jen_v2"),
+            ("CatSuit",     "pmc_hum_jen_v4"),
+            ("ChickenSuit", "pmc_hum_jen_chickensuit"),
         ],
         _ => &[],
     }
