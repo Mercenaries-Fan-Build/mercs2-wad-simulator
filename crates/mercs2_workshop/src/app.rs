@@ -529,6 +529,9 @@ enum Act {
     TexClose,
     /// Open a decompiled game script (corpus path) in the read-only Lua viewer.
     LuaOpen(String),
+    /// Open a decompiled game script in the Lua viewer scrolled to a specific 1-based line —
+    /// used by the Missions blueprint editor's "Jump to source" verb.
+    LuaOpenAt(String, u32),
     /// Mod project: set the donor model for the next new asset.
     ModDonor(u32, String),
     /// Mod project: package the current imported preview as a new asset named this.
@@ -1646,6 +1649,9 @@ pub fn run(opts: Options) {
                                     let BootData { names, lua, ess_api: api, ecs_reg: ecs, audio_idx: audio, secs } = *data;
                                     index.apply_names(names);
                                     lua_corpus = lua;
+                                    // The Missions blueprint editor derives its mission catalog
+                                    // from the lua corpus — build it as soon as scripts arrive.
+                                    missions_panel.ensure_catalog(&lua_corpus);
                                     ess_api = api;
                                     ecs_reg = ecs;
                                     audio_idx = audio;
@@ -5397,9 +5403,33 @@ pub fn run(opts: Options) {
                             &mut status,
                         );
                     }
-                    // Fold the Missions editor's queued actions back into its panel.
+                    // Fold the Missions editor's queued actions back into its panel. The panel
+                    // needs the lua corpus so Act::PickMission can parse the picked script in
+                    // place; we pass the same slice the rest of the app reads.
                     for act in missions_acts.drain(..) {
-                        crate::missions::apply(act, &mut missions_panel);
+                        crate::missions::apply(act, &mut missions_panel, &lua_corpus);
+                    }
+                    // Drain any outer intents the Missions panel asked the host to carry out.
+                    // `pending_lua_open` is the Blueprint jump-to-source → luaview bridge.
+                    if let Some((path, line)) = missions_panel.pending_lua_open.take() {
+                        actions.push(Act::LuaOpenAt(path, line));
+                    }
+                    // The Missions panel's "Load .profile…" verb asks the host for a native file
+                    // picker. We do it inline here so the modal lives on the UI thread.
+                    if std::mem::take(&mut missions_panel.pending_save_open) {
+                        if let Some(path) = rfd::FileDialog::new()
+                            .add_filter("profile", &["profile"])
+                            .set_title("Load Mercenaries 2 save (.profile)")
+                            .set_directory(
+                                mercs2_formats::game_paths::saves_dir_from_env()
+                                    .unwrap_or_else(|| std::path::PathBuf::from(".")),
+                            )
+                            .pick_file()
+                        {
+                            if let Err(e) = missions_panel.load_save(&path) {
+                                status = format!("missions: {e}");
+                            }
+                        }
                     }
                     // A background build (Act::Build) reports back here. While it runs, the verb
                     // bar's spinner keeps egui repainting, so this polls every frame until it lands;
@@ -6523,6 +6553,16 @@ pub fn run(opts: Options) {
                                         lua_view = Some(crate::luaview::LuaView::new(
                                             &path, content, &needle,
                                         ));
+                                    }
+                                    None => status = format!("script not in corpus: {path}"),
+                                }
+                            }
+                            Act::LuaOpenAt(path, line) => {
+                                match lua_corpus.iter().find(|(p, _, _)| *p == path) {
+                                    Some((_, content, _)) => {
+                                        let mut v = crate::luaview::LuaView::new(&path, content, "");
+                                        v.scroll_to_line(line);
+                                        lua_view = Some(v);
                                     }
                                     None => status = format!("script not in corpus: {path}"),
                                 }
