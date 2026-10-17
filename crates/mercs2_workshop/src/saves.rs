@@ -456,7 +456,15 @@ pub fn navigator(ui: &mut egui::Ui, p: &Panel) -> Vec<Act> {
             egui::pos2(left, row.top()),
             egui::pos2(open_rect.left() - gap, row.bottom()),
         );
-        let reveal = ui.add_enabled_ui(p.saves_dir.is_some(), |ui| {
+        // Placed through a child UI: `ui.put` on the panel's own UI would grow the panel's
+        // measured content by the 3px overhang, and egui's SidePanel stores that measured width
+        // for the next frame, so the panel crept wider every frame and undid any drag.
+        let mut verbs_ui = ui.child_ui(
+            reveal_rect.union(open_rect),
+            egui::Layout::left_to_right(egui::Align::Center),
+            None,
+        );
+        let reveal = verbs_ui.add_enabled_ui(p.saves_dir.is_some(), |ui| {
             ui.put(
                 reveal_rect,
                 egui::Button::new(label("Reveal folder"))
@@ -468,7 +476,7 @@ pub fn navigator(ui: &mut egui::Ui, p: &Panel) -> Vec<Act> {
         if reveal.inner.clicked() {
             acts.push(Act::RevealFolder);
         }
-        if ui
+        if verbs_ui
             .put(
                 open_rect,
                 egui::Button::new(label("Open file…"))
@@ -2360,5 +2368,36 @@ mod lua_edit_tests {
         let pending = p.pending.as_ref().unwrap();
         assert_eq!(pending.save_state().unwrap().completed_toolboxes, Some(100), "status: {}", p.status);
         assert!(profile_differs(pending, &on_disk), "a Lua-only edit must enable Write");
+    }
+}
+
+#[cfg(test)]
+mod navigator_layout_tests {
+    use super::{navigator, Panel};
+
+    /// The navigator must not report content wider than its panel: egui's SidePanel stores the
+    /// measured width for the next frame, so any overhang makes the panel grow every frame.
+    #[test]
+    fn navigator_keeps_a_resizable_panel_at_its_width() {
+        let ctx = egui::Context::default();
+        crate::gui::theme::install(&ctx);
+        let panel = Panel {
+            saves_dir: Some(std::path::PathBuf::from("/x/My Games/Mercenaries 2/SaveGames")),
+            ..Default::default()
+        };
+        let mut width = 0.0;
+        for _ in 0..30 {
+            let _ = ctx.run(egui::RawInput::default(), |ctx| {
+                let r = egui::SidePanel::left("nav_test")
+                    .resizable(true)
+                    .default_width(300.0)
+                    .width_range(egui::Rangef::new(220.0, 360.0))
+                    .show(ctx, |ui| {
+                        let _ = navigator(ui, &panel);
+                    });
+                width = r.response.rect.width();
+            });
+        }
+        assert!((width - 300.0).abs() < 0.5, "panel crept to {width}");
     }
 }
