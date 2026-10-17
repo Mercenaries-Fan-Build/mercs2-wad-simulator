@@ -68,9 +68,19 @@ pub enum Act {
     SetActiveMissionState(String, i32),
     /// Request that the hero viewport's 3D render be produced for `(hash, model_name)` and
     /// cached in `Panel.hero_textures`. The panel-local reducer only stamps `pending_hero_render`
-    /// — the actual load_model + `shot::render` + texture allocation happens post-reducer in
-    /// `app.rs`, which owns the `WadStack` and the `egui::Context` the texture binds against.
+    /// — the actual load_model + `shot::HeroRenderer` draw + texture allocation happens
+    /// post-reducer in `app.rs`, which owns the `WadStack`, the egui context, and the
+    /// renderer-cache the GPU state outlives one panel-visit on.
+    ///
+    /// The camera to render at is read from `Panel.hero_cam[hash]` (defaulted when missing), so
+    /// this variant stays `(hash, name)` — a drag just mutates `hero_cam` via [`Act::SetHeroCam`]
+    /// and re-emits `EnsureHeroRender` to request the matching redraw.
     EnsureHeroRender(u32, String),
+    /// Stash the user's orbit-camera for a given hero model hash. Emitted every frame the user
+    /// is dragging / scrolling the viewport, before the matching `EnsureHeroRender` request;
+    /// `app.rs`'s post-reducer step reads back from `Panel.hero_cam` to drive
+    /// [`crate::shot::HeroRenderer::render_rgba`].
+    SetHeroCam(u32, crate::shot::OrbitCam),
 }
 
 /// The four `MrxTaskState` values a mission can hold on `nState`. Mirrors
@@ -178,14 +188,19 @@ pub struct Panel {
     /// `pending_hero_render` is set and the renderer walks the WAD stack. Keyed by hash so the
     /// same tier/hero combo across different saves hits the same cached texture.
     pub hero_textures: HashMap<u32, egui::TextureHandle>,
-    /// `Some((hash, model_name))` the frame the centre notices the current selection's hero
-    /// model isn't in `hero_textures` yet. `app.rs` drains this at the end of each frame and
-    /// kicks off the render; a failed render leaves the hash in `hero_render_failed` so the
-    /// centre doesn't retry forever.
+    /// `Some((hash, model_name))` when the centre wants `app.rs` to render this hero THIS frame
+    /// — either a cold start (no texture yet) or an orbit-drag re-render after a camera change.
+    /// `app.rs` drains it at the end of each frame; the camera to use is read from
+    /// `hero_cam[hash]`. A failed cold-start load leaves the hash in `hero_render_failed`.
     pub pending_hero_render: Option<(u32, String)>,
     /// Hashes we've tried and failed to render — matched against so the panel can show a
     /// one-line error instead of an eternal spinner. Error text is in the value.
     pub hero_render_failed: HashMap<u32, String>,
+    /// Per-hero orbit camera, keyed by model hash. Survives save-switches so a modder who
+    /// turned the Mattias hero to the three-quarter angle doesn't have to re-orbit when they
+    /// scroll through other Mattias saves. A missing key = `OrbitCam::default()` the first
+    /// time the viewport paints that hero.
+    pub hero_cam: HashMap<u32, crate::shot::OrbitCam>,
 }
 
 /// The centre panel's current tab over `tFlowData`. Carried on the Panel so switching rails
@@ -531,19 +546,24 @@ pub fn center(ctx: &egui::Context, p: &Panel) -> Vec<Act> {
                     .size(11.0)
                     .color(theme::FAINT),
             );
-            let mut want_hero_render: Option<(u32, String)> = None;
+            let mut hero_req: HeroReq = HeroReq::default();
             match on_disk {
                 None => {
                     ui.label(theme::disp_text("UNREADABLE", 20.0, theme::BAD));
                 }
                 Some(h) => {
-                    want_hero_render = hero_viewport(ui, h, p);
+                    hero_req = hero_viewport(ui, h, p);
                 }
             }
-            // Centre only emits a render request; the reducer upgrades it to the Panel's
-            // `pending_hero_render` slot without clobbering an in-flight one.
-            if let Some(req) = want_hero_render {
-                acts.push(Act::EnsureHeroRender(req.0, req.1));
+            // The viewport reports two kinds of state at once: the camera the user has already
+            // moved to (always, so it's never lost on an in-flight render) and the fact that a
+            // new render is wanted. SetHeroCam goes first so the reducer stamps `hero_cam`
+            // before app.rs reads it for the EnsureHeroRender draw.
+            if let Some((hash, cam)) = hero_req.set_cam {
+                acts.push(Act::SetHeroCam(hash, cam));
+            }
+            if let Some((hash, name)) = hero_req.request_render {
+                acts.push(Act::EnsureHeroRender(hash, name));
             }
             ui.add_space(12.0);
 
@@ -614,21 +634,47 @@ pub fn center(ctx: &egui::Context, p: &Panel) -> Vec<Act> {
     acts
 }
 
+/// Outputs the hero viewport pushes back up to [`center`]: the camera the user has orbited to
+/// (so it's never lost even if the renderer is a frame behind), and a flag that a new render is
+/// wanted this frame. Both fields are plain `Option`s so a quiet viewport (no drag, nothing to
+/// request) is `HeroReq::default()`.
+#[derive(Default)]
+struct HeroReq {
+    /// `Some((hash, cam))` when the camera for `hash` just changed (drag or scroll this frame).
+    set_cam: Option<(u32, crate::shot::OrbitCam)>,
+    /// `Some((hash, model_name))` when `app.rs` should render this hero this frame.
+    request_render: Option<(u32, String)>,
+}
+
 /// The centre's viewport-styled area, matching the mockup: a tall frame with four HUD
 /// overlays — ORBIT + model chip top-left, AT-A-GLANCE top-right, hero identity chip bottom-
-/// left, and the 3D hero render (or an honest status placeholder) in the middle. Returns a
-/// render request when the current hero/upgrade's model isn't cached yet — `app.rs` picks
-/// that up post-reducer, loads the model, and lands a texture back on the Panel.
-fn hero_viewport(ui: &mut egui::Ui, h: &Profile, p: &Panel) -> Option<(u32, String)> {
+/// left, and the 3D hero render in the middle. The hero fills the whole frame as a background
+/// layer; the chips + AT-A-GLANCE paint on top as absolutely-positioned HUD overlays (via
+/// `allocate_ui_at_rect`) so they read as proper overlays rather than siblings above the image.
+///
+/// Drag inside the render area orbits the camera (horizontal drag = yaw, vertical = pitch);
+/// mouse-wheel scroll inside the viewport zooms. Each cam change emits both a `SetHeroCam`
+/// (so `Panel.hero_cam` tracks the user's intent) and an `EnsureHeroRender` (so `app.rs` draws
+/// the next frame at the new angle). A cold-start load also emits an `EnsureHeroRender`.
+fn hero_viewport(ui: &mut egui::Ui, h: &Profile, p: &Panel) -> HeroReq {
     let viewport_height = 320.0;
     let model_name = upgrade_model_for(h.character_index, h.upgrade_index);
     let hash = mercs2_formats::hash::pandemic_hash_m2(&model_name);
     let cached_tex = p.hero_textures.get(&hash).cloned();
     let failed_err = p.hero_render_failed.get(&hash).cloned();
     let in_flight = matches!(&p.pending_hero_render, Some((h, _)) if *h == hash);
-    let mut want: Option<(u32, String)> = None;
+    // Current camera for this hero — a missing entry means "never orbited this one yet", which
+    // the reducer treats as `OrbitCam::default()`.
+    let current_cam = p
+        .hero_cam
+        .get(&hash)
+        .copied()
+        .unwrap_or_else(crate::shot::OrbitCam::default);
+    let mut out = HeroReq::default();
+    // Cold start: nothing cached and nothing in flight → request the initial render. The cam
+    // is read by app.rs from `hero_cam[hash]` (defaulted when absent), so no SetHeroCam needed.
     if cached_tex.is_none() && failed_err.is_none() && !in_flight {
-        want = Some((hash, model_name.clone()));
+        out.request_render = Some((hash, model_name.clone()));
     }
     let model_label = format!("UPGRADE {} · {}", h.upgrade_index, model_name);
     let identity_label = format!(
@@ -657,7 +703,53 @@ fn hero_viewport(ui: &mut egui::Ui, h: &Profile, p: &Panel) -> Option<(u32, Stri
                         let img_size = tex.size_vec2();
                         let scale = (render_h / img_size.y).min(render_w / img_size.x);
                         let fit = img_size * scale;
-                        ui.add(egui::Image::new((tex.id(), fit)).fit_to_exact_size(fit));
+                        // Allocate the image's rect as a drag-sensing region. Painting the
+                        // texture into that same rect via `Painter::image` (rather than
+                        // `ui.add(Image)`) keeps the pointer input on OUR response —
+                        // otherwise the Image eats the drag and the viewport never orbits.
+                        let (rect, response) = ui.allocate_exact_size(
+                            fit,
+                            egui::Sense::click_and_drag(),
+                        );
+                        ui.painter().image(
+                            tex.id(),
+                            rect,
+                            egui::Rect::from_min_max(
+                                egui::pos2(0.0, 0.0),
+                                egui::pos2(1.0, 1.0),
+                            ),
+                            egui::Color32::WHITE,
+                        );
+                        // Mouse-drag → yaw / pitch. 0.01 rad per pixel: a 300 px horizontal
+                        // drag spins the hero one full turn-ish (3 rad), which is the "spin
+                        // to look around the model" feel without being so sensitive that a
+                        // 2 px wobble triggers a re-render. Pitch is clamped just inside
+                        // ±π/2 so the look_at never degenerates at the poles.
+                        let mut cam = current_cam;
+                        let mut moved = false;
+                        if response.dragged() {
+                            let d = response.drag_delta();
+                            if d.x.abs() > 0.01 || d.y.abs() > 0.01 {
+                                cam.yaw += d.x * 0.01;
+                                cam.pitch = (cam.pitch - d.y * 0.01).clamp(-1.5, 1.5);
+                                moved = true;
+                            }
+                        }
+                        // Scroll → zoom. Clamp to a sane range so a scroll flick can't
+                        // push the camera through the model or into the far-plane.
+                        if response.hovered() {
+                            let scroll_y = ui.input(|i| i.smooth_scroll_delta.y);
+                            if scroll_y.abs() > 0.1 {
+                                let factor = (1.0_f32 - scroll_y * 0.0025).clamp(0.5, 2.0);
+                                cam.zoom = (cam.zoom * factor).clamp(0.3, 6.0);
+                                moved = true;
+                            }
+                        }
+                        if moved {
+                            out.set_cam = Some((hash, cam));
+                            out.request_render = Some((hash, model_name.clone()));
+                            ui.ctx().request_repaint();
+                        }
                     }
                     (None, Some(err), _) => {
                         egui::Frame::none()
@@ -704,13 +796,23 @@ fn hero_viewport(ui: &mut egui::Ui, h: &Profile, p: &Panel) -> Option<(u32, Stri
             // TOP of the hero render, as proper HUD overlays rather than siblings laid out
             // above it. ──
 
-            // Top-left: ORBIT chip + model chip.
+            // Top-left: ORBIT chip + model chip. ORBIT reads brass `· DRAG` once there's a
+            // cached texture (orbit input will produce a new frame instantly), dim `· WAITING`
+            // while the first render is still queuing — honest readout of whether a drag will
+            // actually do anything right now.
+            let orbit_live = cached_tex.is_some();
+            let (orbit_fg, orbit_bg, orbit_stroke) = if orbit_live {
+                (theme::BRASS, theme::BRASS_SOFT, theme::BRASS_DK)
+            } else {
+                (theme::DIM, theme::G2, theme::LINE)
+            };
+            let orbit_label = if orbit_live { "ORBIT · DRAG" } else { "ORBIT · WAITING" };
             let topleft = frame_rect.min + egui::vec2(2.0, 2.0);
             ui.allocate_ui_at_rect(
                 egui::Rect::from_min_size(topleft, egui::vec2(500.0, 30.0)),
                 |ui| {
                     ui.horizontal(|ui| {
-                        chip(ui, "ORBIT", theme::BRASS, theme::BRASS_SOFT, theme::BRASS_DK);
+                        chip(ui, orbit_label, orbit_fg, orbit_bg, orbit_stroke);
                         chip(ui, &model_label, theme::DIM, theme::G2, theme::LINE);
                     });
                 },
@@ -738,7 +840,7 @@ fn hero_viewport(ui: &mut egui::Ui, h: &Profile, p: &Panel) -> Option<(u32, Stri
                 },
             );
         });
-    want
+    out
 }
 
 /// A small rounded HUD chip — label text with a background fill + border stroke. Used by the
@@ -1626,19 +1728,21 @@ pub fn apply(act: Act, p: &mut Panel) {
             mutate_pending_lua(p, |root| set_active_mission_state(root, &id, state))
         }
         Act::EnsureHeroRender(hash, name) => {
-            // Idempotent: a successful cache hit, an in-flight request for the same hash,
-            // and a previously-failed hash all suppress the re-request. Only a NEW hash
-            // (or a different one than what's already pending) overwrites the slot.
-            if p.hero_textures.contains_key(&hash) {
-                return;
-            }
+            // A previously-failed load always suppresses: the model can't be loaded; retrying
+            // would just thrash the WAD stack and keep the panel locked on "render failed".
             if p.hero_render_failed.contains_key(&hash) {
                 return;
             }
-            if matches!(&p.pending_hero_render, Some((h, _)) if *h == hash) {
-                return;
-            }
+            // The pending slot is "the single frame we want next". For drag-orbit, each new
+            // request overwrites the previous one so the renderer always targets the latest
+            // `hero_cam[hash]` (an in-flight render is for a strictly older cam). The
+            // post-reducer in app.rs clears this slot the frame it fires the render.
             p.pending_hero_render = Some((hash, name));
+        }
+        Act::SetHeroCam(hash, cam) => {
+            // Camera state is persisted immediately and separately from the render request so
+            // that an in-flight render (one frame behind) doesn't throw away the user's drag.
+            p.hero_cam.insert(hash, cam);
         }
     }
 }
