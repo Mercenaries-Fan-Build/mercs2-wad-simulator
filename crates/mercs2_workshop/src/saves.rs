@@ -1301,9 +1301,9 @@ fn render_active(ui: &mut egui::Ui, missions: &[save::ActiveMission]) -> Vec<Act
         );
         return acts;
     }
-    let cols = 5usize;
     let gutter = 4.0;
     let avail = ui.available_width();
+    let cols = chip_columns(avail, gutter);
     let cell_w = ((avail - (cols as f32 - 1.0) * gutter) / cols as f32).max(100.0);
     let mut col = 0usize;
     ui.horizontal_wrapped(|ui| {
@@ -1386,13 +1386,21 @@ struct ChipStyle {
     tag: &'static str,
 }
 
-/// Shared 5-column chip grid used by every PROGRESSION tab except Available (which is
-/// interactive). One palette per tab; id left, state-tag pill right.
+/// Narrowest a mission chip gets before the grid drops a column.
+const CHIP_MIN_W: f32 = 150.0;
+
+/// Columns of mission chips that fit `avail` px at `CHIP_MIN_W` each, between 2 and 5.
+fn chip_columns(avail: f32, gutter: f32) -> usize {
+    (((avail + gutter) / (CHIP_MIN_W + gutter)).floor() as usize).clamp(2, 5)
+}
+
+/// Shared chip grid used by every PROGRESSION tab except Available (which is interactive).
+/// One palette per tab; id left, state-tag pill right.
 fn mission_chip_grid(ui: &mut egui::Ui, items: &[(String, Option<String>)], s: ChipStyle) {
-    let cols = 5usize;
     let gutter = 4.0;
     // 24 px: ScrollArea vertical scrollbar + grid trailing spacing.
     let avail = (ui.available_width() - 24.0).max(100.0);
+    let cols = chip_columns(avail, gutter);
     let cell_w = (avail - (cols as f32 - 1.0) * gutter) / cols as f32;
     // 16 = chip Frame inner_margin (7+7) + stroke (1+1).
     let row_inner = (cell_w - 16.0).max(40.0);
@@ -2501,6 +2509,20 @@ mod tests {
         assert_eq!(hms(300), "00h05m");
         assert_eq!(hms(24_266), "06h44m");
         assert_eq!(hms(246_334), "68h25m");
+    }
+}
+
+#[cfg(test)]
+mod chip_grid_tests {
+    use super::chip_columns;
+
+    #[test]
+    fn columns_follow_width_between_two_and_five() {
+        assert_eq!(chip_columns(200.0, 4.0), 2, "never fewer than 2");
+        assert_eq!(chip_columns(3.0 * 154.0 - 4.0, 4.0), 3);
+        assert_eq!(chip_columns(4.0 * 154.0 - 4.0, 4.0), 4);
+        assert_eq!(chip_columns(5.0 * 154.0 - 4.0, 4.0), 5);
+        assert_eq!(chip_columns(2000.0, 4.0), 5, "never more than 5");
     }
 }
 
