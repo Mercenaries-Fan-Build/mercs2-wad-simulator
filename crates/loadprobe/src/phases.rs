@@ -178,6 +178,11 @@ pub static KNOWN_EIPS: &[KnownEip] = &[
     // `L`/`TValue` and AVs.
     KnownEip { eip: 0x00868AEA, label: "luaD_pcall (fn 0x00868AD0) reads L->0x60 — external lua_pcall hook clobbered EAX=L before the trampoline", teardown: false },
     KnownEip { eip: 0x00868611, label: "Lua VM state-walker (fn 0x00868610) checks TValue.tt at [eax+4] — external lua_pcall hook shifted the stack so retail read return-addr as nargs", teardown: false },
+    // 0x005AE362: `_SYS._IMPORT` (fn 0x005AE2D0, Lua `import`) looks the module up by
+    // {name hash, script type 0x42498680} (the pair is on the stack at the fault) and derefs the
+    // result at +0x40 without a NULL check, so importing a module no mounted WAD has crashes here.
+    // Seen 2026-10-18: lua_bridge OnLoad `import("ess")` (hash 0xE508E18C) with vz-patch.wad absent.
+    KnownEip { eip: 0x005AE362, label: "_SYS._IMPORT (fn 0x005AE2D0) — import() of a module no mounted WAD has (NULL lookup result); name hash is on the stack before 0x42498680", teardown: false },
 ];
 
 pub fn eip_label(eip: u32) -> Option<&'static str> {
