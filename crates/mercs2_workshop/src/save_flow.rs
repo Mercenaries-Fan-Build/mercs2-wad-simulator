@@ -460,8 +460,18 @@ impl Work<'_> {
         if active.get(&m.id).is_none() {
             set(active, &m.id, Value::Table(Self::fresh_entry(&m, ContractState::Offered)));
             self.log.push(format!("unlock {}", m.id));
+            self.briefing_starter(&m)?;
         }
         Ok(())
+    }
+
+    /// A mission with a briefing registers it at its starter, which requests the starter
+    /// (`_AddBriefingToStarter`, `mrxmissionflow.lua:300-307, 382-386`).
+    fn briefing_starter(&mut self, m: &Mission) -> Result<(), String> {
+        match (&m.starter, m.has_briefing) {
+            (Some(s), true) => self.ensure_starter(s),
+            _ => Ok(()),
+        }
     }
 
     /// A starter as `RequestStarter` leaves it once activated (`mrxstarter.lua:305-310`).
@@ -1138,6 +1148,7 @@ impl Work<'_> {
                 None => {
                     set(active, &m.id, Value::Table(Self::fresh_entry(m, to)));
                     self.log.push(format!("{} {}", m.id, to.label().to_lowercase()));
+                    self.briefing_starter(m)?;
                 }
             },
             ContractState::Completed => return Err(format!("{}: completing goes through complete()", m.id)),
@@ -1325,7 +1336,7 @@ mod retail_tests {
         assert_eq!(keyset(flow(ours, "tMyFlowData")), keyset(flow(&game, "tMyFlowData")));
         assert_eq!(sorted(strings(flow(ours, "tCulledBindings"))), sorted(strings(flow(&game, "tCulledBindings"))));
         assert_eq!(keyset(flow(ours, "tActiveMissions")), keyset(flow(&game, "tActiveMissions")));
-        for key in ["tActiveBio", "tLockedGates"] {
+        for key in ["tActiveBio", "tLockedGates", "tStarterData"] {
             assert_eq!(keyset(sub(root(ours), key)), keyset(sub(root(&game), key)), "{key}");
         }
         assert_eq!(boundary(ours), boundary(&game));
