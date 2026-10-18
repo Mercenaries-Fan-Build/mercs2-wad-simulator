@@ -2456,6 +2456,7 @@ pub fn apply(act: Act, p: &mut Panel) {
             next.cash = out.cash;
             next.fuel = out.fuel;
             next.unlocked_costumes = out.costumes;
+            next.active_contract = out.last_mission;
             *pr = next;
             p.status = format!("{id} → {}: {} changes", to.label(), out.changes.len());
             p.repopulate_lua_state_from_selection();
