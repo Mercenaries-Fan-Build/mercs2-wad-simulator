@@ -89,7 +89,20 @@ pub struct Outcome {
     pub cash: u32,
     pub fuel: u32,
     pub costumes: u8,
+    /// `sLastMissionName`, which the header carries at `0x2C`.
+    pub last_mission: String,
     pub changes: Vec<String>,
+}
+
+/// The contract other than `except` that the save has in progress.
+fn contract_in_progress(rules: &GameRules, root: &Table, except: &str) -> Option<String> {
+    let active = sub(root, "tFlowData").and_then(|f| sub(f, "tActiveMissions"))?;
+    active
+        .iter_str()
+        .filter(|(id, _)| *id != except)
+        .filter(|(id, _)| rules.missions.get(*id).is_some_and(|m| m.contract == Some(true)))
+        .find(|(_, e)| matches!(e, Value::Table(e) if num(e, "nState") == Some(1.0)))
+        .map(|(id, _)| id.to_string())
 }
 
 /// `id`'s state in the save whose Lua root is `root`.
@@ -114,6 +127,9 @@ pub fn unavailable(rules: &GameRules, root: &Table, id: &str, to: ContractState)
         ContractState::Completed if from == ContractState::Locked => Some("not unlocked in this save".into()),
         ContractState::Offered if !mission.has_briefing => {
             Some("no briefing: the game starts this mission as soon as it unlocks".into())
+        }
+        ContractState::InProgress if mission.contract == Some(true) => {
+            contract_in_progress(rules, root, id).map(|other| format!("{other} is the contract in progress"))
         }
         _ => None,
     }
@@ -152,12 +168,23 @@ pub fn transition(lua: &Value, header: &Profile, rules: &GameRules, id: &str, to
         }
         _ => w.place(&mission, to)?,
     }
+    // Retry locations belong to the contract in progress: set when it activates, cleared when it
+    // completes or is cancelled (`mrxtaskcontract.lua:55-57, 144, 386`). A save that has them
+    // spawns the player there instead of the PMC (`vz/xQ!L.lua:656-662`).
+    if contract_in_progress(rules, &w.root, "").is_none() && w.root.remove_str("tRetryLocations").is_some() {
+        w.log.push("retry locations cleared: no contract in progress".into());
+    }
     let costumes = num(&w.root, "nAvailableCostumes").unwrap_or(1.0);
+    let last_mission = match w.root.get("sLastMissionName") {
+        Some(Value::String(s)) => s.value.clone(),
+        _ => header.active_contract.clone(),
+    };
     Ok(Outcome {
         lua: Value::Table(w.root),
         cash: w.cash as u32,
         fuel: w.fuel as u32,
         costumes: costumes.clamp(0.0, 255.0) as u8,
+        last_mission,
         changes: w.log,
     })
 }
@@ -865,11 +892,6 @@ impl Work<'_> {
                 self.log.push(format!("{k} leaves the active missions"));
             }
         }
-        if let Some(Value::String(s)) = self.root.get("sLastMissionName") {
-            if removed.contains(&s.value) {
-                self.root.remove_str("sLastMissionName");
-            }
-        }
         self.recompute_boundary(&after)
     }
 
@@ -1120,6 +1142,16 @@ impl Work<'_> {
             },
             ContractState::Completed => return Err(format!("{}: completing goes through complete()", m.id)),
         }
+        // A contract that activates with no retry locations takes its start locations
+        // (`mrxtaskcontract.lua:55-57`).
+        if to == ContractState::InProgress && m.contract == Some(true) && self.root.get("tRetryLocations").is_none() {
+            if let Some(locs) = self.rules.start_locations(&m.id)? {
+                let mut t = Table::default();
+                set_array(&mut t, strings_to_values(locs.clone()));
+                set(&mut self.root, "tRetryLocations", Value::Table(t));
+                self.log.push(format!("retry locations {}", locs.join(", ")));
+            }
+        }
         Ok(())
     }
 }
@@ -1308,6 +1340,36 @@ mod retail_tests {
         );
         let pay = r.rewards["PmcCon001"].cash.unwrap_or(0.0) as u32;
         assert_eq!(out.cash, p.cash + pay);
+        assert!(root(&before).get("tRetryLocations").is_some(), "saved mid-contract");
+        assert_eq!(root(ours).get("tRetryLocations"), root(&game).get("tRetryLocations"), "spawn at the PMC, not the contract");
+        let (gp, _) = fixture("auto_6A0BE454.profile");
+        assert_eq!(out.last_mission, gp.active_contract);
+    }
+
+    /// The Chris save was made mid-PmcCon001 with retry locations at its start; completing it must
+    /// not leave them, or the load spawns the player back at PmcCon001's start.
+    #[test]
+    fn completing_the_contract_in_progress_clears_its_retry_locations() {
+        let r = rules();
+        let (p, v) = fixture("Chris Jacobs_6A499ED6.profile");
+        assert!(root(&v).get("tRetryLocations").is_some());
+        let out = transition(&v, &p, &r, "PmcCon001", ContractState::Completed).unwrap_or_else(|e| panic!("{e}"));
+        assert!(root(&out.lua).get("tRetryLocations").is_none());
+        assert_eq!(out.last_mission, "PmcCon001");
+    }
+
+    /// Putting a contract in progress gives it the start locations the game would (and only one
+    /// contract can be in progress).
+    #[test]
+    fn a_contract_put_in_progress_gets_its_start_locations() {
+        let r = rules();
+        let (p, v) = fixture("auto_6A0BE454.profile");
+        assert!(root(&v).get("tRetryLocations").is_none());
+        let out = transition(&v, &p, &r, "OilCon020", ContractState::InProgress).unwrap_or_else(|e| panic!("{e}"));
+        let want = r.start_locations("OilCon020").unwrap().expect("OilCon020 has start locations");
+        assert_eq!(strings(sub(root(&out.lua), "tRetryLocations")), want);
+        let why = unavailable(&r, root(&out.lua), "PmcCon031", ContractState::InProgress);
+        assert_eq!(why.as_deref(), Some("OilCon020 is the contract in progress"));
     }
 
     /// Undoing PmcCon001 in the save made after it gives back the save made before it, and
