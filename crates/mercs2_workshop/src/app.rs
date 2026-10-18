@@ -8493,6 +8493,16 @@ fn ensure_hero_render(
     }
 }
 
+/// The retail `vz.wad` the game-gated tests read: `vz_wad` in the nearest `.mercs2-local.toml`
+/// (`scripts/find-vz-wad.sh --write`). Panics naming what is missing.
+#[cfg(all(test, feature = "retail"))]
+pub(crate) fn retail_vz_wad() -> String {
+    mercs2_formats::game_paths::local_config_vz_wad(std::path::Path::new(env!("CARGO_MANIFEST_DIR")))
+        .unwrap_or_else(|e| panic!("{e}"))
+        .to_string_lossy()
+        .into_owned()
+}
+
 #[cfg(all(test, feature = "retail"))]
 mod string_table_retail_tests {
     use super::WadStack;
@@ -8502,8 +8512,7 @@ mod string_table_retail_tests {
     /// them. Expected text from `mercs2_probe --bin stringdb_dump --filter english` on retail vz.wad.
     #[test]
     fn english_table_names_the_loadout_keys() {
-        let wad = mercs2_engine::wad::resolve_vz_wad(None)
-            .expect("retail vz.wad — set vz_wad in .mercs2-local.toml or VZ_WAD");
+        let wad = super::retail_vz_wad();
         let mut w = WadStack::open(&wad, &[]).expect("open retail vz.wad");
         let t = w.string_table("english").expect("english string table");
         assert_eq!(t.len(), 18_299);
@@ -8519,8 +8528,7 @@ mod string_table_retail_tests {
     /// The save's carried-weapon keys name their `worldentity` templates.
     #[test]
     fn worldentity_names_the_carried_weapon_templates() {
-        let wad = mercs2_engine::wad::resolve_vz_wad(None)
-            .expect("retail vz.wad — set vz_wad in .mercs2-local.toml or VZ_WAD");
+        let wad = super::retail_vz_wad();
         let mut w = WadStack::open(&wad, &[]).expect("open retail vz.wad");
         let names = w.template_names().expect("worldentity template names");
         for (key, name) in [
@@ -8537,8 +8545,7 @@ mod string_table_retail_tests {
     /// the game's own VM accepts.
     #[test]
     fn mission_scripts_resolve_as_loadable_bytecode() {
-        let wad = mercs2_engine::wad::resolve_vz_wad(None)
-            .expect("retail vz.wad — set vz_wad in .mercs2-local.toml or VZ_WAD");
+        let wad = super::retail_vz_wad();
         let mut w = WadStack::open(&wad, &[]).expect("open retail vz.wad");
         let lua = mercs2_engine::script::mercs2_luac::rt::Lua::new().unwrap();
         for name in ["wifmissiondata", "wifmissionflow", "mrxrewarddata", "mrxmissionflow"] {
