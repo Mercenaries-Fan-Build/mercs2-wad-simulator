@@ -42,6 +42,14 @@ pub use crate::save::ZLIB_OFFSET;
 /// Bytes available for the zlib payload + padding in the fixed-size file.
 pub const PAYLOAD_CAPACITY: usize = save::PROFILE_SIZE - save::ZLIB_OFFSET;
 
+/// The engine's blob header right before the zlib stream: three **big-endian** u32s — version
+/// (`1`), the compressed length, the decompressed length (all 8 vendored fixtures). The engine
+/// inflates by these lengths; a payload that doesn't match them loads as no save at all (the
+/// game hands Lua a nil save and starts a new game).
+pub const OFF_BLOB_VERSION: usize = 0x45C;
+pub const OFF_BLOB_COMPRESSED_LEN: usize = 0x460;
+pub const OFF_BLOB_LUA_LEN: usize = 0x464;
+
 /// The `ProfileHash` integrity checksum: **CRC-32/BZIP2** (poly `0x04C11DB7`,
 /// init/xorout `0xFFFFFFFF`, non-reflected). Feed the file bytes **`[4:]`**.
 ///
@@ -150,10 +158,10 @@ pub fn write_profile(p: &Profile) -> Vec<u8> {
 /// `return { … }` blob (`lua_source` = the Lua table text, including its
 /// `return ` prefix — exactly what [`Profile::decompress_lua`] yields).
 ///
-/// The compressed stream is written at `0x468` and the remainder of the
-/// fixed-size file is zero-padded (the engine's deflate reader stops at the
-/// stream end and ignores trailing bytes). Errors if the compressed result does
-/// not fit [`PAYLOAD_CAPACITY`].
+/// The compressed stream is written at `0x468`, its compressed and decompressed
+/// lengths into the blob header ([`OFF_BLOB_COMPRESSED_LEN`], [`OFF_BLOB_LUA_LEN`]),
+/// and the remainder of the fixed-size file is zero-padded. Errors if the
+/// compressed result does not fit [`PAYLOAD_CAPACITY`].
 ///
 /// After calling this, use [`write_profile`] to emit the file with an updated
 /// header + hash. Note this changes the on-disk bytes, so the result no longer
@@ -181,6 +189,8 @@ pub fn set_lua_payload(p: &mut Profile, lua_source: &[u8]) -> Result<(), String>
         *b = 0;
     }
     raw[save::ZLIB_OFFSET..save::ZLIB_OFFSET + compressed.len()].copy_from_slice(&compressed);
+    raw[OFF_BLOB_COMPRESSED_LEN..OFF_BLOB_COMPRESSED_LEN + 4].copy_from_slice(&(compressed.len() as u32).to_be_bytes());
+    raw[OFF_BLOB_LUA_LEN..OFF_BLOB_LUA_LEN + 4].copy_from_slice(&(lua_source.len() as u32).to_be_bytes());
     Ok(())
 }
 
@@ -290,6 +300,43 @@ mod tests {
             p2.save_state().unwrap().layers,
             p.save_state().unwrap().layers
         );
+    }
+
+    fn be_u32(b: &[u8], off: usize) -> u32 {
+        u32::from_be_bytes([b[off], b[off + 1], b[off + 2], b[off + 3]])
+    }
+
+    /// Every save the game wrote carries version 1 and the zlib stream's exact compressed and
+    /// decompressed lengths, big-endian, right before the stream.
+    #[test]
+    fn every_retail_save_records_its_payload_lengths() {
+        for name in ALL_SAVES {
+            let bytes = load(name);
+            let mut dec = flate2::Decompress::new(true);
+            let mut lua = Vec::with_capacity(1 << 17);
+            dec.decompress_vec(&bytes[ZLIB_OFFSET..], &mut lua, flate2::FlushDecompress::Finish).unwrap();
+            assert_eq!(be_u32(&bytes, OFF_BLOB_VERSION), 1, "{name}: version");
+            assert_eq!(be_u32(&bytes, OFF_BLOB_COMPRESSED_LEN) as u64, dec.total_in(), "{name}: compressed length");
+            assert_eq!(be_u32(&bytes, OFF_BLOB_LUA_LEN) as u64, dec.total_out(), "{name}: Lua length");
+        }
+    }
+
+    /// A new payload records its own lengths; leaving the old ones makes the game load no save.
+    #[test]
+    fn set_lua_payload_records_the_new_lengths() {
+        let orig = load("Chris Jacobs_6A499ED6.profile");
+        let mut p = parse(&orig).unwrap();
+        let mut lua = p.decompress_lua().unwrap();
+        lua.extend_from_slice(b"\n-- grown\n");
+        set_lua_payload(&mut p, &lua).unwrap();
+        let out = write_profile(&p);
+        let mut dec = flate2::Decompress::new(true);
+        let mut back = Vec::with_capacity(1 << 17);
+        dec.decompress_vec(&out[ZLIB_OFFSET..], &mut back, flate2::FlushDecompress::Finish).unwrap();
+        assert_eq!(back, lua);
+        assert_eq!(be_u32(&out, OFF_BLOB_VERSION), 1);
+        assert_eq!(be_u32(&out, OFF_BLOB_COMPRESSED_LEN) as u64, dec.total_in());
+        assert_eq!(be_u32(&out, OFF_BLOB_LUA_LEN) as usize, lua.len());
     }
 
     #[test]
