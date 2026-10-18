@@ -201,7 +201,7 @@ pub struct Panel {
     /// The same payload as a full Lua tree (`save_lua`), for the read-only inspector sections
     /// that show every top-level table. Refreshed alongside `lua_state`.
     pub lua_tree: Option<Result<save_lua::Value, String>>,
-    /// Which mission-flow tab the centre is on (Active / Completed / Culled / Layers).
+    /// Which PROGRESSION tab the centre is on.
     pub mission_tab: MissionTab,
     /// Rendered-hero textures keyed by model hash. Populated by `app.rs` out-of-band when
     /// `pending_hero_render` is set and the renderer walks the WAD stack. Keyed by hash so the
@@ -261,27 +261,23 @@ pub struct ContractChange {
     pub outcome: Result<Outcome, String>,
 }
 
-/// The centre panel's current tab over `tFlowData`. Carried on the Panel so switching rails
-/// keeps the modder's view of a given save sticky. Label vocabulary mirrors the mockup
-/// (Completed / Available / Culled / Flow bindings) rather than the raw save-struct field
-/// names.
+/// The centre panel's current tab over the save's progression. Carried on the Panel so switching
+/// rails keeps the modder's view of a given save sticky.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum MissionTab {
-    /// Union of every mission id this save mentions, with each row's palette picked from
-    /// whichever source it appears in (Completed > Available > Culled > Flow bindings). The
-    /// mockup's broader "look at the whole board" view; the per-source tabs below are drill-ins.
+    /// Every mission in `WifMissionData`, grouped by its state in this save.
     #[default]
     All,
-    /// `tFlowData.tMyFlowData` — mission-id → flow-value flags (completed / advanced).
-    Completed,
-    /// `tFlowData.tActiveMissions` — in-progress missions (nState / nTargetsComplete / collected).
+    /// `tFlowData.tMyFlowData` — every key the flow has awarded (missions, milestones, intros), with
+    /// its count.
+    FlowKeys,
+    /// `tFlowData.tActiveMissions` — offered and in-progress missions (nState / nTargetsComplete /
+    /// collected).
     Available,
-    /// `tFlowData.tCulledBindings` — bindings the flow fixpoint has removed, in order.
-    Culled,
-    /// `tLayerData` — active `vz_state_*` world overlays. Labeled "Flow bindings" per the
-    /// mockup's vocabulary (world-layer entries are the on-disk flow-binding set the engine
-    /// restores on load) even though the raw field name is `tLayerData`.
-    FlowBindings,
+    /// `tFlowData.tCulledBindings` — the flow bindings that have fired, in firing order.
+    FiredBindings,
+    /// `tLayerData` — the `vz_state_*` world layers the save restores.
+    WorldLayers,
 }
 
 impl Panel {
@@ -1072,11 +1068,11 @@ pub fn center(ctx: &egui::Context, p: &Panel) -> Vec<Act> {
                         _ => None,
                     };
                     for (tab, label, count) in [
-                        (MissionTab::All,          "All missions",  all_count),
-                        (MissionTab::Completed,    "Completed",     Some(state.completed_flow.len())),
-                        (MissionTab::Available,    "Available",     Some(state.active_missions.len())),
-                        (MissionTab::Culled,       "Culled",        Some(state.flow_chain.len())),
-                        (MissionTab::FlowBindings, "Flow bindings", Some(state.layers.len())),
+                        (MissionTab::All,           "All missions",   all_count),
+                        (MissionTab::FlowKeys,      "Flow keys",      Some(state.completed_flow.len())),
+                        (MissionTab::Available,     "Available",      Some(state.active_missions.len())),
+                        (MissionTab::FiredBindings, "Fired bindings", Some(state.flow_chain.len())),
+                        (MissionTab::WorldLayers,   "World layers",   Some(state.layers.len())),
                     ] {
                         let on = p.mission_tab == tab;
                         let text = match count {
@@ -1110,10 +1106,10 @@ pub fn center(ctx: &egui::Context, p: &Panel) -> Vec<Act> {
             egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
                 match p.mission_tab {
                     MissionTab::All => acts.extend(render_all_missions(ui, p)),
-                    MissionTab::Completed => acts.extend(render_completed(ui, &state.completed_flow, p)),
+                    MissionTab::FlowKeys => acts.extend(render_flow_keys(ui, &state.completed_flow, p)),
                     MissionTab::Available => acts.extend(render_active(ui, &state.active_missions, p)),
-                    MissionTab::Culled => render_culled(ui, &state.flow_chain),
-                    MissionTab::FlowBindings => render_layers(ui, &state.layers),
+                    MissionTab::FiredBindings => render_fired_bindings(ui, &state.flow_chain),
+                    MissionTab::WorldLayers => render_layers(ui, &state.layers),
                 }
             });
         });
@@ -1706,11 +1702,11 @@ fn mission_chip_grid(ui: &mut egui::Ui, salt: &str, items: &[Chip]) -> Vec<(Stri
 
 /// `tMyFlowData` chips — every key the flow has awarded, with its count. Mission keys carry the
 /// contract menu.
-fn render_completed(ui: &mut egui::Ui, flow: &std::collections::BTreeMap<String, f64>, p: &Panel) -> Vec<Act> {
+fn render_flow_keys(ui: &mut egui::Ui, flow: &std::collections::BTreeMap<String, f64>, p: &Panel) -> Vec<Act> {
     let mut acts = Vec::new();
     if flow.is_empty() {
         ui.label(
-            egui::RichText::new("No completed-flow keys recorded.").small()
+            egui::RichText::new("No flow keys awarded yet.").small()
                 .color(theme::FAINT),
         );
         return acts;
@@ -1723,17 +1719,17 @@ fn render_completed(ui: &mut egui::Ui, flow: &std::collections::BTreeMap<String,
             style: state_style(ContractState::Completed),
         })
         .collect();
-    for (id, resp) in mission_chip_grid(ui, "completed", &chips) {
+    for (id, resp) in mission_chip_grid(ui, "flow_keys", &chips) {
         contract_menu(&resp, &id, p, &mut acts);
     }
     acts
 }
 
 /// `tCulledBindings` chips — the flow bindings that have fired, in firing order.
-fn render_culled(ui: &mut egui::Ui, chain: &[String]) {
+fn render_fired_bindings(ui: &mut egui::Ui, chain: &[String]) {
     if chain.is_empty() {
         ui.label(
-            egui::RichText::new("No culled bindings — this save hasn't trimmed any from the flow.").small()
+            egui::RichText::new("No flow bindings have fired yet.").small()
                 .color(theme::FAINT),
         );
         return;
@@ -1743,19 +1739,19 @@ fn render_culled(ui: &mut egui::Ui, chain: &[String]) {
         .enumerate()
         .map(|(i, k)| Chip {
             id: k.clone(),
-            hover: Some(format!("#{i} {k}\nfired, culled from the flow")),
+            hover: Some(format!("#{i} {k}\nfired")),
             style: ChipStyle { bg: theme::G0, bd: theme::LINE, tag_bg: theme::G0, tag_fg: theme::DIM, tag: "BIND" },
         })
         .collect();
-    mission_chip_grid(ui, "culled", &chips);
+    mission_chip_grid(ui, "fired_bindings", &chips);
 }
 
-/// `tLayerData` chips — the active `vz_state_*` world-overlay set the streamer restores. Dim
-/// LAYR tag so a layer chip reads as neutral metadata, not a completion state.
+/// `tLayerData` chips — the `vz_state_*` world layers the save restores. Dim LAYR tag so a layer
+/// chip reads as neutral metadata, not a completion state.
 fn render_layers(ui: &mut egui::Ui, layers: &[String]) {
     if layers.is_empty() {
         ui.label(
-            egui::RichText::new("No world overlays in this save.").small()
+            egui::RichText::new("No world layers in this save.").small()
                 .color(theme::FAINT),
         );
         return;
@@ -1764,7 +1760,7 @@ fn render_layers(ui: &mut egui::Ui, layers: &[String]) {
         .iter()
         .map(|l| Chip {
             id: l.clone(),
-            hover: Some(format!("{l}\nworld overlay restored on load")),
+            hover: Some(format!("{l}\nworld layer restored on load")),
             style: ChipStyle { bg: theme::G0, bd: theme::LINE, tag_bg: theme::G0, tag_fg: theme::DIM, tag: "LAYR" },
         })
         .collect();
