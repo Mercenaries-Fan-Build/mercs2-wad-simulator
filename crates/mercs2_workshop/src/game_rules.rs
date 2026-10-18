@@ -734,8 +734,7 @@ mod retail_tests {
     use super::*;
 
     fn rules() -> GameRules {
-        let wad = mercs2_engine::wad::resolve_vz_wad(None)
-            .expect("retail vz.wad — set vz_wad in .mercs2-local.toml or VZ_WAD");
+        let wad = crate::app::retail_vz_wad();
         let mut w = WadStack::open(&wad, &[]).expect("open retail vz.wad");
         GameRules::load(&mut w).unwrap_or_else(|e| panic!("{e}"))
     }
