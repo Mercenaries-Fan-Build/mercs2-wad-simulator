@@ -25,7 +25,7 @@ Diff result: `const=4363  vary=9041` bytes. Varying regions (start–end inclusi
 0x0214-0x0222  save-name UTF-16 chars
 0x024A         costume index
 0x02F8-0x02F9  fuel capacity
-0x0462-0x0467  (pre-zlib, unknown — 2 u16, not lengths)
+0x0462-0x0467  low halves of the big-endian compressed / Lua lengths at 0x460 / 0x464
 0x046B-0x2790  zlib deflate payload
 ```
 
@@ -52,6 +52,9 @@ Diff result: `const=4363  vary=9041` bytes. Varying regions (start–end inclusi
 | `0x24A` | u8 | `unlocked_costumes` | INFERRED | UNLOCKED-outfit count (feeds `Player.GetAvailableCostumes`, the wardrobe menu gate): 1 on fresh/mid saves, 5 (= all five base outfits) on the completed saves. NOT the selected outfit — user ground truth disproved that twice (looks differ between saves sharing these bytes; the look is `0x4F` upgrade-tier driven). |
 | `0x24B` | u8 | `unknown_0x24b` | unknown | `1` in every observed save. NOT character/costume/upgrade. |
 | `0x2F8` | u16 | `fuel_capacity` | INFERRED | Max fuel; ≥ `fuel` (700/5500/300). |
+| `0x45C` | u32 **BE** | blob version | FACT | `1` in all 8 vendored saves. The engine's big-endian SaveData blob header (`FUN_005a4520`, `ntohl`) starts here. |
+| `0x460` | u32 **BE** | compressed length | FACT | Exact length of the zlib stream at `0x468`, all 8 saves (`save_write` test `every_retail_save_records_its_payload_lengths`). |
+| `0x464` | u32 **BE** | Lua length | FACT | Exact inflated length. The engine reads the payload by these two lengths: a save whose stream doesn't match them loads as **no save** — Lua receives `nil` save data and the game starts a new game (Lua trace: `Sys.GetSkipMission()` from `vz/xQ!L.lua:638-640`, then all 67 flow bindings refresh). `set_lua_payload` stamps both. |
 | `0x468` | — | zlib Lua payload | FACT | Header byte `0x78 0xDA`. Inflates to 24.8K–54K of Lua `SaveSingleton` text (mission/faction/economy tables). Rest of file is fixed-size padding the deflate stream ignores. |
 
 ## Per-file summary (all six)
@@ -138,7 +141,8 @@ Writer: [`src/save_write.rs`](src/save_write.rs) — the inverse of `save::parse
   emits the 13,404-byte file. **Round-trips byte-exact**: `write_profile(&parse(x)) == x`.
   Mutate a public field then re-write to get a loadable save with a valid integrity hash.
 - `save_write::set_lua_payload(&mut Profile, lua_source)` — re-deflates a
-  `return { … }` Lua blob into the fixed payload region (`0x468`, capacity 12,276 B).
+  `return { … }` Lua blob into the fixed payload region (`0x468`, capacity 12,276 B)
+  and stamps its compressed / Lua lengths at `0x460` / `0x464` (big-endian).
 
 The `saveProfile` disk-write *body* is still absent from the Ghidra dump, but every
 behaviour it must reproduce is now grounded (LE header, zlib@0x468, CRC-32/BZIP2 hash),
@@ -146,8 +150,6 @@ so `write_profile` is a faithful reimplementation, not a stand-in.
 
 ## Not yet reversed
 
-- `0x462`–`0x467`: two u16 immediately before the zlib stream; not the
-  compressed/uncompressed lengths (verified) — purpose unknown.
 - Byte `0xAC`, and the `0x4C`/`0x4F–0x51` flag bit meanings.
 - The Lua payload is exposed raw (`Profile::decompress_lua()`) and decoded into
   a `SaveState` (see "SaveSingleton Lua boot-state" above). Tables beyond the
