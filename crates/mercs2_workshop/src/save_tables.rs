@@ -27,7 +27,7 @@ pub struct Lookups<'a> {
 
 impl<'a> Lookups<'a> {
     /// English text for a string-table key (`[Generic.Contracts]`, `[0x5cb97d23]`, `vehicle.wz10`).
-    fn text(&self, key: &str) -> Option<&'a str> {
+    pub(crate) fn text(&self, key: &str) -> Option<&'a str> {
         self.english?.get(&key_hash(key)).map(String::as_str)
     }
 
