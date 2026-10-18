@@ -133,6 +133,20 @@ impl WadStack {
         Ok(db.entries.into_iter().map(|e| (e.key_hash, e.text)).collect())
     }
 
+    /// A shipped script's LuaQ bytecode by module name (`wifmissiondata`, `mrxrewarddata`, …),
+    /// resolved through the residency registry like every other asset (overlays first).
+    pub fn script_bytecode(&mut self, name: &str) -> Result<Vec<u8>, String> {
+        let name_hash = mercs2_formats::hash::pandemic_hash_m2(name);
+        let WadStack { wads, registry, .. } = self;
+        let container = registry
+            .resolve(wads, mercs2_formats::types::TYPE_HASH_SCRIPT, name_hash)
+            .and_then(|c| registry.slice(c).map(<[u8]>::to_vec))
+            .ok_or_else(|| format!("script `{name}`: not in any open wad"))?;
+        let lay = mercs2_formats::scripts_block::parse_container(&container)
+            .map_err(|e| format!("script `{name}`: {e}"))?;
+        Ok(container[lay.luaq_off..lay.csum_off].to_vec())
+    }
+
     /// Every `worldentity` template's name by key (`0x80005FD3 -> "C4"`), from the container's
     /// `Name` records — the names `Pg.Spawn` resolves. The container resolves through the residency
     /// registry like every other asset (overlays first).
@@ -5382,6 +5396,10 @@ pub fn run(opts: Options) {
                     if saves.profiles.is_some() && saves.templates.is_none() {
                         saves.templates = Some(w.template_names());
                     }
+                    // The mission, reward and flow scripts the contract menu runs.
+                    if saves.profiles.is_some() && saves.rules.is_none() {
+                        saves.rules = Some(crate::game_rules::GameRules::load(&mut w));
+                    }
                     if let (Some((hash, name)), Some(ctx)) =
                         (saves.pending_hero_render.take(), pending_ctx.as_ref())
                     {
@@ -8512,6 +8530,21 @@ mod string_table_retail_tests {
             (0x8000_2331, "Grenade"),
         ] {
             assert_eq!(names.get(&key).map(String::as_str), Some(name), "0x{key:08X}");
+        }
+    }
+
+    /// The mission, reward and flow scripts come out of the resident and scripts_vz blocks as LuaQ
+    /// the game's own VM accepts.
+    #[test]
+    fn mission_scripts_resolve_as_loadable_bytecode() {
+        let wad = mercs2_engine::wad::resolve_vz_wad(None)
+            .expect("retail vz.wad — set vz_wad in .mercs2-local.toml or VZ_WAD");
+        let mut w = WadStack::open(&wad, &[]).expect("open retail vz.wad");
+        let lua = mercs2_engine::script::mercs2_luac::rt::Lua::new().unwrap();
+        for name in ["wifmissiondata", "wifmissionflow", "mrxrewarddata", "mrxmissionflow"] {
+            let code = w.script_bytecode(name).unwrap_or_else(|e| panic!("{e}"));
+            assert_eq!(&code[..4], b"\x1bLua", "{name}");
+            lua.load(&code).set_name(name).into_function().unwrap_or_else(|e| panic!("{name}: {e}"));
         }
     }
 }
