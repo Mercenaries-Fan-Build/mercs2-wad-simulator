@@ -22,10 +22,11 @@ use std::path::{Path, PathBuf};
 
 use mercs2_formats::game_paths;
 use mercs2_formats::save::{self, Profile, SaveState};
-use mercs2_formats::save_lua::{self, Number, Value};
+use mercs2_formats::save_lua::{self, Value};
 use mercs2_formats::save_write;
 
 use crate::gui::theme;
+use crate::save_flow::{self, ContractState, Outcome};
 
 /// A single intent emitted by one of the panels, applied by [`apply`].
 #[derive(Clone, Debug)]
@@ -79,12 +80,17 @@ pub enum Act {
     SetFuelCapacity(u16),
     /// `@0x2C` — active contract mission id (ASCII, max 15 chars). Truncated on write.
     SetActiveContract(String),
-    /// Change an active mission's `nState` by rewriting the inflated Lua payload. The target
-    /// value is one of `MrxTaskState._kn{Latent=0, Active=1, Completed=2, Cancelled=3}`
-    /// (`resident/mrxtaskstate.lua:1-4`). The reducer decompresses pending's Lua, walks
-    /// `tFlowData.tActiveMissions[<id>].nState`, serialises via `save_lua::serialize`, and
-    /// calls `save_write::set_lua_payload` so the next Write dumps the right payload.
-    SetActiveMissionState(String, i32),
+    /// Open the contract window for a mission id.
+    InspectContract(String),
+    /// Close the contract window.
+    CloseContractInspect,
+    /// Work out everything moving a contract to a state changes in the pending save, and show it
+    /// for confirmation (`save_flow::transition`).
+    PreviewContractState(String, ContractState),
+    /// Write the previewed contract change into the pending save.
+    ApplyContractState,
+    /// Close the contract change preview without applying it.
+    CancelContractState,
     /// Set `tStatsData.nCompletedToolboxes` in the pending Lua payload.
     SetCompletedToolboxes(u32),
     /// Request that the hero viewport's 3D render be produced for `(hash, model_name)` and
@@ -119,12 +125,6 @@ pub enum TaskState {
 }
 
 impl TaskState {
-    pub const ALL: [TaskState; 4] = [
-        TaskState::Latent,
-        TaskState::Active,
-        TaskState::Completed,
-        TaskState::Cancelled,
-    ];
     pub fn label(self) -> &'static str {
         match self {
             TaskState::Latent => "Latent",
@@ -140,14 +140,6 @@ impl TaskState {
             2 => Some(TaskState::Completed),
             3 => Some(TaskState::Cancelled),
             _ => None,
-        }
-    }
-    pub fn color(self) -> egui::Color32 {
-        match self {
-            TaskState::Latent => theme::DIM,
-            TaskState::Active => theme::BRASS,
-            TaskState::Completed => theme::GOOD,
-            TaskState::Cancelled => theme::BAD,
         }
     }
 }
@@ -246,6 +238,27 @@ pub struct Panel {
     pub confirm_delete: Option<PathBuf>,
     /// The save the Inspect window shows, decoded once when it is opened.
     pub inspecting: Option<crate::save_inspect::Inspected>,
+    /// The game's mission, reward and flow rules, run from the open WAD stack by `app.rs`.
+    /// `None` until loaded; `Some(Err)` names why they couldn't be.
+    pub rules: Option<Result<crate::game_rules::GameRules, String>>,
+    /// The contract whose window is open.
+    pub contract_inspect: Option<ContractInspect>,
+    /// A contract state change awaiting confirmation.
+    pub contract_change: Option<ContractChange>,
+}
+
+/// The contract window: a mission id and the flow bindings whose consequence unlocks it, worked
+/// out once when the window opens.
+pub struct ContractInspect {
+    pub id: String,
+    pub unlocked_by: Result<Vec<String>, String>,
+}
+
+/// A previewed contract state change: everything it does to the pending save.
+pub struct ContractChange {
+    pub id: String,
+    pub to: ContractState,
+    pub outcome: Result<Outcome, String>,
 }
 
 /// The centre panel's current tab over `tFlowData`. Carried on the Panel so switching rails
@@ -638,7 +651,206 @@ pub fn windows(ctx: &egui::Context, p: &Panel) -> Vec<Act> {
             acts.push(Act::CloseInspect);
         }
     }
+    if let Some(ci) = &p.contract_inspect {
+        let mut open = true;
+        egui::Window::new(format!("Contract — {}", ci.id))
+            .id(egui::Id::new("saves.contract_inspect"))
+            .open(&mut open)
+            .default_size([460.0, 520.0])
+            .vscroll(true)
+            .show(ctx, |ui| contract_window(ui, ci, p));
+        if !open {
+            acts.push(Act::CloseContractInspect);
+        }
+    }
+    if let Some(ch) = &p.contract_change {
+        egui::Window::new(format!("{} → {}", ch.id, ch.to.label()))
+            .id(egui::Id::new("saves.contract_change"))
+            .collapsible(false)
+            .default_size([520.0, 420.0])
+            .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+            .show(ctx, |ui| {
+                match &ch.outcome {
+                    Ok(out) => {
+                        ui.label(
+                            egui::RichText::new(format!("{} changes to the pending save", out.changes.len())).color(theme::TX),
+                        );
+                        ui.add_space(4.0);
+                        egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
+                            for line in &out.changes {
+                                ui.label(egui::RichText::new(line).monospace().color(theme::DIM));
+                            }
+                        });
+                    }
+                    Err(e) => {
+                        ui.label(egui::RichText::new(e).color(theme::BAD));
+                    }
+                }
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui.add_enabled(ch.outcome.is_ok(), egui::Button::new("Apply")).clicked() {
+                        acts.push(Act::ApplyContractState);
+                    }
+                    if ui.button("Cancel").clicked() {
+                        acts.push(Act::CancelContractState);
+                    }
+                });
+            });
+    }
     acts
+}
+
+/// The contract window's body: what the game's mission data says about the contract, and where
+/// it stands in this save.
+fn contract_window(ui: &mut egui::Ui, ci: &ContractInspect, p: &Panel) {
+    let (Some(Ok(rules)), Some(Ok(Value::Table(root)))) = (&p.rules, &p.lua_tree) else {
+        ui.label(egui::RichText::new("Mission rules or save data not loaded.").color(theme::BAD));
+        return;
+    };
+    let Some(m) = rules.missions.get(&ci.id) else {
+        ui.label(egui::RichText::new(format!("{} is not in WifMissionData.", ci.id)).color(theme::BAD));
+        return;
+    };
+    let title = p.lookups().text(&m.title_key()).map(str::to_string);
+    ui.label(theme::disp_text(title.clone().unwrap_or_else(|| m.id.clone()), theme::style_title(), theme::TX));
+    let flow = |k: &str| match root.get("tFlowData") {
+        Some(Value::Table(f)) => match f.get(k) {
+            Some(Value::Table(t)) => Some(t),
+            _ => None,
+        },
+        _ => None,
+    };
+    let keys = flow("tMyFlowData");
+    let count = keys.and_then(|k| match k.get(&m.id) {
+        Some(Value::Number(n)) => Some(n.value),
+        _ => None,
+    });
+    let fired: Vec<String> = match flow("tCulledBindings") {
+        Some(t) => t
+            .iter_entries()
+            .filter_map(|e| match &e.value {
+                Value::String(s) => Some(s.value.clone()),
+                _ => None,
+            })
+            .collect(),
+        None => Vec::new(),
+    };
+    let yes_no = |b: bool| if b { "yes" } else { "no" }.to_string();
+    let rows: Vec<(&str, String)> = vec![
+        ("State", save_flow::state_of(root, &m.id).label().to_string()),
+        ("Completions", count.map(|n| (n as i64).to_string()).unwrap_or_else(|| "0".into())),
+        ("Kind", match m.contract {
+            Some(true) => "Contract".into(),
+            Some(false) => "Job".into(),
+            None => "—".into(),
+        }),
+        ("Faction", m.faction.clone().unwrap_or_else(|| "—".into())),
+        ("Starter", match &m.starter {
+            Some(s) if m.has_briefing => format!("{s} (briefing)"),
+            Some(s) => s.clone(),
+            None => "—".into(),
+        }),
+        ("Critical path", yes_no(m.critical_path)),
+        ("Repeatable", yes_no(m.repeatable)),
+        ("Levels", m.levels.map(|n| n.to_string()).unwrap_or_else(|| "—".into())),
+        ("Title key", m.title_key()),
+    ];
+    egui::Grid::new("contract.facts").num_columns(2).spacing([12.0, 3.0]).striped(true).show(ui, |ui| {
+        for (k, v) in rows {
+            ui.label(egui::RichText::new(k).color(theme::DIM));
+            ui.label(egui::RichText::new(v).monospace().color(theme::TX));
+            ui.end_row();
+        }
+    });
+
+    let section = |ui: &mut egui::Ui, name: &str| {
+        ui.add_space(10.0);
+        ui.label(theme::disp_text(name, theme::style_eyebrow(), theme::FAINT));
+    };
+
+    section(ui, "UNLOCKED BY");
+    match &ci.unlocked_by {
+        Ok(v) if v.is_empty() => {
+            ui.label(egui::RichText::new("No flow binding unlocks it.").color(theme::DIM));
+        }
+        Ok(v) => {
+            for b in v {
+                let state = if fired.contains(b) { "fired" } else { "not fired" };
+                ui.label(egui::RichText::new(format!("{b}  ({state})")).monospace().color(theme::TX));
+            }
+        }
+        Err(e) => {
+            ui.label(egui::RichText::new(e).color(theme::BAD));
+        }
+    }
+
+    if !m.milestones.is_empty() {
+        section(ui, "MILESTONES");
+        egui::Grid::new("contract.milestones").num_columns(3).spacing([12.0, 2.0]).show(ui, |ui| {
+            for ms in &m.milestones {
+                let held = keys.is_some_and(|k| k.get(&ms.key).is_some());
+                ui.label(egui::RichText::new(&ms.key).monospace().color(theme::TX));
+                ui.label(egui::RichText::new(format!("at {}", ms.at)).color(theme::DIM));
+                ui.label(egui::RichText::new(if held { "held" } else { "—" }).color(if held { theme::GOOD } else { theme::FAINT }));
+                ui.end_row();
+            }
+        });
+    }
+
+    let reward_keys: Vec<&str> = std::iter::once(m.id.as_str()).chain(m.milestones.iter().map(|ms| ms.key.as_str())).collect();
+    let rewarded: Vec<(&str, &crate::game_rules::Reward)> =
+        reward_keys.iter().filter_map(|k| rules.rewards.get(*k).map(|r| (*k, r))).collect();
+    if !rewarded.is_empty() {
+        section(ui, "REWARDS");
+        for (k, r) in rewarded {
+            let mut parts = Vec::new();
+            if let Some(c) = r.cash {
+                parts.push(format!("${}", thousands(c as u64)));
+            }
+            if let Some(f) = r.fuel {
+                parts.push(format!("{f} fuel"));
+            }
+            for (f, n) in &r.attitude {
+                parts.push(format!("{f} {n:+}"));
+            }
+            for (id, f) in &r.support {
+                parts.push(format!("{id} @ {f}"));
+            }
+            for (id, f) in &r.equipment {
+                parts.push(format!("{id} ({f})"));
+            }
+            for (id, q) in &r.stockpile {
+                parts.push(format!("{q} × {id}"));
+            }
+            ui.label(egui::RichText::new(format!("{k}: {}", parts.join(" · "))).monospace().color(theme::TX));
+        }
+    }
+
+    section(ui, "WORLD LAYERS");
+    let loaded: Vec<String> = match root.get("tLayerData") {
+        Some(Value::Table(t)) => t
+            .iter_entries()
+            .filter_map(|e| match &e.value {
+                Value::String(s) => Some(s.value.clone()),
+                _ => None,
+            })
+            .collect(),
+        _ => Vec::new(),
+    };
+    for l in m.world_layers() {
+        let on = loaded.contains(&l.to_lowercase());
+        ui.label(
+            egui::RichText::new(format!("{l}  {}", if on { "(in this save)" } else { "(not in this save)" }))
+                .monospace()
+                .color(if on { theme::TX } else { theme::FAINT }),
+        );
+    }
+
+    if let Some(entry) = flow("tActiveMissions").and_then(|a| a.get(&m.id)) {
+        section(ui, "ACTIVE ENTRY");
+        let mut text = save_lua::serialize(entry);
+        ui.add(egui::TextEdit::multiline(&mut text).font(egui::TextStyle::Monospace).desired_width(f32::INFINITY).interactive(false));
+    }
 }
 
 /// Copy `src` into `backups` as `<stem> <YYYY-MM-DD HH-MM-SS UTC>.profile` (a ` (n)` suffix
@@ -855,15 +1067,23 @@ pub fn center(ctx: &egui::Context, p: &Panel) -> Vec<Act> {
                 ui.label(theme::disp_text("PROGRESSION", theme::style_eyebrow(), theme::DIM));
                 ui.add_space(6.0);
                 ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                    let all_count = match &p.rules {
+                        Some(Ok(r)) => Some(r.missions.len()),
+                        _ => None,
+                    };
                     for (tab, label, count) in [
-                        (MissionTab::All,          "All missions",  all_missions_count(state)),
-                        (MissionTab::Completed,    "Completed",     state.completed_flow.len()),
-                        (MissionTab::Available,    "Available",     state.active_missions.len()),
-                        (MissionTab::Culled,       "Culled",        state.flow_chain.len()),
-                        (MissionTab::FlowBindings, "Flow bindings", state.layers.len()),
+                        (MissionTab::All,          "All missions",  all_count),
+                        (MissionTab::Completed,    "Completed",     Some(state.completed_flow.len())),
+                        (MissionTab::Available,    "Available",     Some(state.active_missions.len())),
+                        (MissionTab::Culled,       "Culled",        Some(state.flow_chain.len())),
+                        (MissionTab::FlowBindings, "Flow bindings", Some(state.layers.len())),
                     ] {
                         let on = p.mission_tab == tab;
-                        if theme::pill(ui, &format!("{label}  {count}"), on).clicked() {
+                        let text = match count {
+                            Some(n) => format!("{label}  {n}"),
+                            None => label.to_string(),
+                        };
+                        if theme::pill(ui, &text, on).clicked() {
                             acts.push(Act::PickMissionTab(tab));
                         }
                     }
@@ -882,13 +1102,16 @@ pub fn center(ctx: &egui::Context, p: &Panel) -> Vec<Act> {
                     });
                 });
             });
+            if let Some(Err(e)) = &p.rules {
+                ui.label(egui::RichText::new(format!("Mission rules: {e}")).small().color(theme::BAD));
+            }
             ui.add_space(10.0);
 
             egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
                 match p.mission_tab {
-                    MissionTab::All => render_all_missions(ui, state),
-                    MissionTab::Completed => render_completed(ui, &state.completed_flow),
-                    MissionTab::Available => acts.extend(render_active(ui, &state.active_missions)),
+                    MissionTab::All => acts.extend(render_all_missions(ui, p)),
+                    MissionTab::Completed => acts.extend(render_completed(ui, &state.completed_flow, p)),
+                    MissionTab::Available => acts.extend(render_active(ui, &state.active_missions, p)),
                     MissionTab::Culled => render_culled(ui, &state.flow_chain),
                     MissionTab::FlowBindings => render_layers(ui, &state.layers),
                 }
@@ -1286,13 +1509,10 @@ pub(crate) fn hms_long(s: u32) -> String {
     format!("{h}h {m:02}m {sec:02}s")
 }
 
-/// The Active tab's 5-column grid of mission chips. Each chip is a mission id + a right-side
-/// state label (LATN/ACTV/CMPL/CANC — short to keep the chip width stable); clicking the chip
-/// cycles the mission to the next state via [`Act::SetActiveMissionState`], so a modder can
-/// walk a chain of chips without the chip width changing between frames.
-///
-/// Hover a chip to see its full state label and `nTargetsComplete` / `collected` detail.
-fn render_active(ui: &mut egui::Ui, missions: &[save::ActiveMission]) -> Vec<Act> {
+/// The Available tab: one chip per `tActiveMissions` entry, OPEN once accepted (`nState` 1) and
+/// OFFR while it waits at its briefing — the one distinction the game reads back on load
+/// (`mrxmissionflow.lua:237`). Right-click a chip for the contract menu.
+fn render_active(ui: &mut egui::Ui, missions: &[save::ActiveMission], p: &Panel) -> Vec<Act> {
     let mut acts: Vec<Act> = Vec::new();
     if missions.is_empty() {
         ui.label(
@@ -1301,77 +1521,88 @@ fn render_active(ui: &mut egui::Ui, missions: &[save::ActiveMission]) -> Vec<Act
         );
         return acts;
     }
-    let gutter = 4.0;
-    let avail = ui.available_width();
-    let cols = chip_columns(avail, gutter);
-    let cell_w = ((avail - (cols as f32 - 1.0) * gutter) / cols as f32).max(100.0);
-    let mut col = 0usize;
-    ui.horizontal_wrapped(|ui| {
-        ui.spacing_mut().item_spacing = egui::vec2(gutter, gutter);
-        for m in missions {
-            let cur = TaskState::from_f64(m.state);
-            let (bg, bd, tag_bg, tag_fg, tag) = match cur {
-                Some(TaskState::Completed) => (theme::G2, theme::GOOD_DK, theme::GOOD_SOFT, theme::GOOD, "DONE"),
-                Some(TaskState::Active)    => (theme::G2, theme::BRASS_DK, theme::BRASS_SOFT, theme::BRASS, "OPEN"),
-                Some(TaskState::Cancelled) => (theme::G2, theme::BAD, theme::G0, theme::BAD, "SKIP"),
-                Some(TaskState::Latent) | None => (theme::G0, theme::LINE, theme::G0, theme::DIM, "LATN"),
-            };
-            let next = cur
-                .map(|s| TaskState::ALL[((s as usize) + 1) % TaskState::ALL.len()])
-                .unwrap_or(TaskState::Latent);
+    let chips: Vec<Chip> = missions
+        .iter()
+        .map(|m| {
+            let state = if m.state == 1.0 { ContractState::InProgress } else { ContractState::Offered };
             let targets_txt = m
                 .targets_complete
                 .map(|n| format!("{} targets complete", n as i64))
                 .unwrap_or_else(|| "no targets ticked".to_string());
             let hover = format!(
-                "{}\nnState {} · {} · {} collected\nClick to cycle → {}",
-                m.id,
+                "{}\n{} · nState {} · {} · {} collected",
+                mission_title(p, &m.id),
+                state.label(),
                 m.state as i64,
                 targets_txt,
                 m.collected.len(),
-                next.label()
             );
-            let resp = egui::Frame::none()
-                .fill(bg)
-                .stroke(egui::Stroke::new(1.0, bd))
-                .rounding(egui::Rounding::same(4.0))
-                .inner_margin(egui::Margin::symmetric(7.0, 4.0))
-                .show(ui, |ui| {
-                    ui.set_width(cell_w);
-                    ui.horizontal(|ui| {
-                        ui.label(
-                            egui::RichText::new(&m.id)
-                                .monospace()
-                                .color(theme::TX),
-                        );
-                        ui.with_layout(
-                            egui::Layout::right_to_left(egui::Align::Center),
-                            |ui| {
-                                egui::Frame::none()
-                                    .fill(tag_bg)
-                                    .rounding(egui::Rounding::same(2.0))
-                                    .inner_margin(egui::Margin::symmetric(5.0, 1.0))
-                                    .show(ui, |ui| {
-                                        ui.label(theme::disp_text(tag, theme::style_eyebrow(), tag_fg));
-                                    });
-                            },
-                        );
-                    });
-                })
-                .response
-                .interact(egui::Sense::click())
-                .on_hover_text(hover);
-            if resp.clicked() {
-                acts.push(Act::SetActiveMissionState(m.id.clone(), next as i32));
-            }
-            col += 1;
-            if col >= cols {
-                ui.end_row();
-                col = 0;
+            Chip { id: m.id.clone(), hover: Some(hover), style: state_style(state) }
+        })
+        .collect();
+    for (id, resp) in mission_chip_grid(ui, "available", &chips) {
+        contract_menu(&resp, &id, p, &mut acts);
+    }
+    acts
+}
+
+/// `id`'s title from the English table (`[<id>.Title]`, `WifMissionData.GetMissionTitle`), or
+/// the id when the table or the key is missing.
+fn mission_title(p: &Panel, id: &str) -> String {
+    match p.lookups().text(&format!("[{id}.Title]")) {
+        Some(t) => format!("{id} — {t}"),
+        None => id.to_string(),
+    }
+}
+
+/// The chip palette for a contract state.
+fn state_style(s: ContractState) -> ChipStyle {
+    match s {
+        ContractState::Completed => {
+            ChipStyle { bg: theme::G2, bd: theme::GOOD_DK, tag_bg: theme::GOOD_SOFT, tag_fg: theme::GOOD, tag: "DONE" }
+        }
+        ContractState::InProgress => {
+            ChipStyle { bg: theme::G2, bd: theme::BRASS_DK, tag_bg: theme::BRASS_SOFT, tag_fg: theme::BRASS, tag: "OPEN" }
+        }
+        ContractState::Offered => {
+            ChipStyle { bg: theme::G0, bd: theme::BRASS_DK, tag_bg: theme::G0, tag_fg: theme::BRASS, tag: "OFFR" }
+        }
+        ContractState::Locked => {
+            ChipStyle { bg: theme::G0, bd: theme::LINE, tag_bg: theme::G0, tag_fg: theme::DIM, tag: "LOCK" }
+        }
+    }
+}
+
+/// The right-click menu on a mission chip: open the contract window, or move the contract to
+/// another state. A state the save can't move to from here shows disabled, with the reason.
+fn contract_menu(resp: &egui::Response, id: &str, p: &Panel, acts: &mut Vec<Act>) {
+    let (Some(Ok(rules)), Some(Ok(Value::Table(root)))) = (&p.rules, &p.lua_tree) else {
+        return;
+    };
+    if !rules.missions.contains_key(id) {
+        return;
+    }
+    resp.context_menu(|ui| {
+        if ui.button("Inspect contract…").clicked() {
+            acts.push(Act::InspectContract(id.to_string()));
+            ui.close_menu();
+        }
+        ui.separator();
+        ui.label(theme::disp_text("SET STATE", theme::style_eyebrow(), theme::FAINT));
+        for s in ContractState::ALL {
+            match save_flow::unavailable(rules, root, id, s) {
+                None => {
+                    if ui.button(s.label()).clicked() {
+                        acts.push(Act::PreviewContractState(id.to_string(), s));
+                        ui.close_menu();
+                    }
+                }
+                Some(why) => {
+                    ui.add_enabled(false, egui::Button::new(s.label())).on_disabled_hover_text(why);
+                }
             }
         }
     });
-    acts
 }
 
 /// A chip-grid palette: body colours (bg + border) + state-tag pill colours (bg + fg + label).
@@ -1394,9 +1625,16 @@ fn chip_columns(avail: f32, gutter: f32) -> usize {
     (((avail + gutter) / (CHIP_MIN_W + gutter)).floor() as usize).clamp(2, 5)
 }
 
-/// Shared chip grid used by every PROGRESSION tab except Available (which is interactive).
-/// One palette per tab; id left, state-tag pill right.
-fn mission_chip_grid(ui: &mut egui::Ui, items: &[(String, Option<String>)], s: ChipStyle) {
+/// One chip in a PROGRESSION grid: id, hover text, palette.
+struct Chip {
+    id: String,
+    hover: Option<String>,
+    style: ChipStyle,
+}
+
+/// Shared chip grid for every PROGRESSION tab: id left, state-tag pill right. Returns each chip's
+/// id with its response, for the callers that attach the contract menu.
+fn mission_chip_grid(ui: &mut egui::Ui, salt: &str, items: &[Chip]) -> Vec<(String, egui::Response)> {
     let gutter = 4.0;
     // 24 px: ScrollArea vertical scrollbar + grid trailing spacing.
     let avail = (ui.available_width() - 24.0).max(100.0);
@@ -1404,13 +1642,14 @@ fn mission_chip_grid(ui: &mut egui::Ui, items: &[(String, Option<String>)], s: C
     let cell_w = (avail - (cols as f32 - 1.0) * gutter) / cols as f32;
     // 16 = chip Frame inner_margin (7+7) + stroke (1+1).
     let row_inner = (cell_w - 16.0).max(40.0);
-    egui::Grid::new(ui.auto_id_with(("mission_chip_grid", items.len(), s.tag)))
+    let mut out = Vec::with_capacity(items.len());
+    egui::Grid::new(ui.auto_id_with(("mission_chip_grid", items.len(), salt)))
         .num_columns(cols)
         .min_col_width(cell_w)
         .max_col_width(cell_w)
         .spacing(egui::vec2(gutter, gutter))
         .show(ui, |ui| {
-            for (i, (id, hover)) in items.iter().enumerate() {
+            for (i, Chip { id, hover, style: s }) in items.iter().enumerate() {
                 let resp = egui::Frame::none()
                     .fill(s.bg)
                     .stroke(egui::Stroke::new(1.0, s.bd))
@@ -1450,45 +1689,47 @@ fn mission_chip_grid(ui: &mut egui::Ui, items: &[(String, Option<String>)], s: C
                             );
                         });
                     })
-                    .response;
-                if let Some(h) = hover {
-                    let _ = resp.on_hover_text(h);
-                }
+                    .response
+                    .interact(egui::Sense::click());
+                let resp = match hover {
+                    Some(h) => resp.on_hover_text(h),
+                    None => resp,
+                };
+                out.push((id.clone(), resp));
                 if (i + 1) % cols == 0 {
                     ui.end_row();
                 }
             }
         });
+    out
 }
 
-/// `tMyFlowData` chips — the completed story beats. Palette matches the mockup's green DONE pill.
-fn render_completed(ui: &mut egui::Ui, flow: &std::collections::BTreeMap<String, f64>) {
+/// `tMyFlowData` chips — every key the flow has awarded, with its count. Mission keys carry the
+/// contract menu.
+fn render_completed(ui: &mut egui::Ui, flow: &std::collections::BTreeMap<String, f64>, p: &Panel) -> Vec<Act> {
+    let mut acts = Vec::new();
     if flow.is_empty() {
         ui.label(
             egui::RichText::new("No completed-flow keys recorded.").small()
                 .color(theme::FAINT),
         );
-        return;
+        return acts;
     }
-    let items: Vec<(String, Option<String>)> = flow
+    let chips: Vec<Chip> = flow
         .iter()
-        .map(|(k, v)| (k.clone(), Some(format!("{k}\nvalue {}", *v as i64))))
+        .map(|(k, v)| Chip {
+            id: k.clone(),
+            hover: Some(format!("{}\nvalue {}", mission_title(p, k), *v as i64)),
+            style: state_style(ContractState::Completed),
+        })
         .collect();
-    mission_chip_grid(
-        ui,
-        &items,
-        ChipStyle {
-            bg: theme::G2,
-            bd: theme::GOOD_DK,
-            tag_bg: theme::GOOD_SOFT,
-            tag_fg: theme::GOOD,
-            tag: "DONE",
-        },
-    );
+    for (id, resp) in mission_chip_grid(ui, "completed", &chips) {
+        contract_menu(&resp, &id, p, &mut acts);
+    }
+    acts
 }
 
-/// `tCulledBindings` chips — bindings the save trimmed out of the flow. Red/BAD palette so a
-/// culled chip reads as a negative state, consistent with the mockup's SKIP styling.
+/// `tCulledBindings` chips — the flow bindings that have fired, in firing order.
 fn render_culled(ui: &mut egui::Ui, chain: &[String]) {
     if chain.is_empty() {
         ui.label(
@@ -1497,22 +1738,16 @@ fn render_culled(ui: &mut egui::Ui, chain: &[String]) {
         );
         return;
     }
-    let items: Vec<(String, Option<String>)> = chain
+    let chips: Vec<Chip> = chain
         .iter()
         .enumerate()
-        .map(|(i, k)| (k.clone(), Some(format!("#{i} {k}\nculled from flow chain"))))
+        .map(|(i, k)| Chip {
+            id: k.clone(),
+            hover: Some(format!("#{i} {k}\nfired, culled from the flow")),
+            style: ChipStyle { bg: theme::G0, bd: theme::LINE, tag_bg: theme::G0, tag_fg: theme::DIM, tag: "BIND" },
+        })
         .collect();
-    mission_chip_grid(
-        ui,
-        &items,
-        ChipStyle {
-            bg: theme::G2,
-            bd: theme::BAD,
-            tag_bg: theme::G0,
-            tag_fg: theme::BAD,
-            tag: "SKIP",
-        },
-    );
+    mission_chip_grid(ui, "culled", &chips);
 }
 
 /// `tLayerData` chips — the active `vz_state_*` world-overlay set the streamer restores. Dim
@@ -1525,140 +1760,51 @@ fn render_layers(ui: &mut egui::Ui, layers: &[String]) {
         );
         return;
     }
-    let items: Vec<(String, Option<String>)> = layers
+    let chips: Vec<Chip> = layers
         .iter()
-        .map(|l| (l.clone(), Some(format!("{l}\nworld overlay restored on load"))))
+        .map(|l| Chip {
+            id: l.clone(),
+            hover: Some(format!("{l}\nworld overlay restored on load")),
+            style: ChipStyle { bg: theme::G0, bd: theme::LINE, tag_bg: theme::G0, tag_fg: theme::DIM, tag: "LAYR" },
+        })
         .collect();
-    mission_chip_grid(
-        ui,
-        &items,
-        ChipStyle {
-            bg: theme::G0,
-            bd: theme::LINE,
-            tag_bg: theme::G0,
-            tag_fg: theme::DIM,
-            tag: "LAYR",
-        },
-    );
+    mission_chip_grid(ui, "layers", &chips);
 }
 
-/// Which bucket a mission falls into for the "All missions" view. First-match-wins priority:
-/// a completed mission is DONE even if it also appears in `tLayerData`; a culled one is SKIP
-/// even if the engine still has an overlay for it. Keep this in sync with [`all_missions`].
-#[derive(Clone, Copy)]
-enum AllMissionBucket {
-    Done,
-    Open,
-    Skip,
-    Layer,
-}
-
-impl AllMissionBucket {
-    fn style(self) -> ChipStyle {
-        match self {
-            AllMissionBucket::Done => ChipStyle {
-                bg: theme::G2,
-                bd: theme::GOOD_DK,
-                tag_bg: theme::GOOD_SOFT,
-                tag_fg: theme::GOOD,
-                tag: "DONE",
-            },
-            AllMissionBucket::Open => ChipStyle {
-                bg: theme::G2,
-                bd: theme::BRASS_DK,
-                tag_bg: theme::BRASS_SOFT,
-                tag_fg: theme::BRASS,
-                tag: "OPEN",
-            },
-            AllMissionBucket::Skip => ChipStyle {
-                bg: theme::G2,
-                bd: theme::BAD,
-                tag_bg: theme::G0,
-                tag_fg: theme::BAD,
-                tag: "SKIP",
-            },
-            AllMissionBucket::Layer => ChipStyle {
-                bg: theme::G0,
-                bd: theme::LINE,
-                tag_bg: theme::G0,
-                tag_fg: theme::DIM,
-                tag: "LAYR",
-            },
+/// The "All missions" tab — every mission in `WifMissionData`, grouped by its state in this save
+/// (completed, in progress, offered, not unlocked). Right-click a chip for the contract menu.
+fn render_all_missions(ui: &mut egui::Ui, p: &Panel) -> Vec<Act> {
+    let mut acts = Vec::new();
+    let rules = match &p.rules {
+        None => {
+            ui.label(egui::RichText::new("Loading the game's mission rules…").small().color(theme::FAINT));
+            return acts;
         }
-    }
-}
-
-/// Union of every mission id this save mentions, deduped, bucketed by state. Priority:
-/// Completed > Available > Culled > Flow bindings — a mission that is both completed and
-/// present as a world overlay reads as DONE, not LAYR, because that's what matters when
-/// scanning the board.
-fn all_missions(state: &SaveState) -> Vec<(String, AllMissionBucket)> {
-    use std::collections::BTreeMap;
-    let mut by_id: BTreeMap<String, AllMissionBucket> = BTreeMap::new();
-    for k in state.completed_flow.keys() {
-        by_id.insert(k.clone(), AllMissionBucket::Done);
-    }
-    for m in &state.active_missions {
-        by_id.entry(m.id.clone()).or_insert(AllMissionBucket::Open);
-    }
-    for k in &state.flow_chain {
-        by_id.entry(k.clone()).or_insert(AllMissionBucket::Skip);
-    }
-    for l in &state.layers {
-        by_id.entry(l.clone()).or_insert(AllMissionBucket::Layer);
-    }
-    by_id.into_iter().collect()
-}
-
-/// Count for the tab strip. Cheap — the real walk happens in [`all_missions`].
-fn all_missions_count(state: &SaveState) -> usize {
-    use std::collections::BTreeSet;
-    let mut seen: BTreeSet<&str> = BTreeSet::new();
-    seen.extend(state.completed_flow.keys().map(|s| s.as_str()));
-    seen.extend(state.active_missions.iter().map(|m| m.id.as_str()));
-    seen.extend(state.flow_chain.iter().map(|s| s.as_str()));
-    seen.extend(state.layers.iter().map(|s| s.as_str()));
-    seen.len()
-}
-
-/// The "All missions" tab — one chip per unique mission id across every source in the save,
-/// each tagged by whichever bucket it fell into. Groups the chips by bucket (DONE first, then
-/// OPEN, SKIP, LAYR) so the eye can scan completion density; within each group the ids are
-/// alphabetical to match the per-source tabs.
-fn render_all_missions(ui: &mut egui::Ui, state: &SaveState) {
-    let rows = all_missions(state);
-    if rows.is_empty() {
-        ui.label(
-            egui::RichText::new("No mission ids in this save yet.").small()
-                .color(theme::FAINT),
-        );
-        return;
-    }
-    for bucket in [
-        AllMissionBucket::Done,
-        AllMissionBucket::Open,
-        AllMissionBucket::Skip,
-        AllMissionBucket::Layer,
-    ] {
-        let tag = bucket.style().tag;
-        let items: Vec<(String, Option<String>)> = rows
-            .iter()
-            .filter(|(_, b)| matches!((b, bucket),
-                (AllMissionBucket::Done, AllMissionBucket::Done)
-                | (AllMissionBucket::Open, AllMissionBucket::Open)
-                | (AllMissionBucket::Skip, AllMissionBucket::Skip)
-                | (AllMissionBucket::Layer, AllMissionBucket::Layer)
-            ))
-            .map(|(id, _)| (id.clone(), Some(format!("{id}\n{tag}"))))
+        // `center` shows the load error above the tabs.
+        Some(Err(_)) => return acts,
+        Some(Ok(r)) => r,
+    };
+    let Some(Ok(Value::Table(root))) = &p.lua_tree else {
+        return acts;
+    };
+    for s in ContractState::ALL {
+        let chips: Vec<Chip> = rules
+            .missions
+            .keys()
+            .filter(|id| save_flow::state_of(root, id) == s)
+            .map(|id| Chip { id: id.clone(), hover: Some(format!("{}\n{}", mission_title(p, id), s.label())), style: state_style(s) })
             .collect();
-        if items.is_empty() {
+        if chips.is_empty() {
             continue;
         }
         ui.add_space(4.0);
-        ui.label(theme::disp_text(tag, theme::style_eyebrow(), theme::FAINT));
+        ui.label(theme::disp_text(s.label().to_uppercase(), theme::style_eyebrow(), theme::FAINT));
         ui.add_space(2.0);
-        mission_chip_grid(ui, &items, bucket.style());
+        for (id, resp) in mission_chip_grid(ui, s.label(), &chips) {
+            contract_menu(&resp, &id, p, &mut acts);
+        }
     }
+    acts
 }
 
 /// `1`/`2`/`3` → the hero's full name as the engine resolves it (`SHELL.SelectCharacter.*`
@@ -2271,8 +2417,48 @@ pub fn apply(act: Act, p: &mut Panel) {
             s.truncate(15);
             pr.active_contract = s;
         }),
-        Act::SetActiveMissionState(id, state) => {
-            mutate_pending_lua(p, |root| set_active_mission_state(root, &id, state))
+        Act::InspectContract(id) => {
+            let unlocked_by = match (&p.rules, &p.lua_tree) {
+                (Some(Ok(rules)), Some(Ok(Value::Table(root)))) => save_flow::unlocked_by(rules, root, &id),
+                (Some(Err(e)), _) => Err(format!("mission rules: {e}")),
+                (None, _) => Err("mission rules not loaded".into()),
+                (_, Some(Err(e))) => Err(e.clone()),
+                (_, _) => Err("no save data".into()),
+            };
+            p.contract_inspect = Some(ContractInspect { id, unlocked_by });
+        }
+        Act::CloseContractInspect => p.contract_inspect = None,
+        Act::PreviewContractState(id, to) => {
+            let outcome = match (&p.rules, &p.lua_tree, &p.pending) {
+                (Some(Ok(rules)), Some(Ok(lua)), Some(header)) => save_flow::transition(lua, header, rules, &id, to),
+                (Some(Err(e)), _, _) => Err(format!("mission rules: {e}")),
+                (None, _, _) => Err("mission rules not loaded".into()),
+                (_, Some(Err(e)), _) => Err(e.clone()),
+                (_, _, _) => Err("no save selected".into()),
+            };
+            p.contract_change = Some(ContractChange { id, to, outcome });
+        }
+        Act::CancelContractState => p.contract_change = None,
+        Act::ApplyContractState => {
+            let Some(ContractChange { id, to, outcome: Ok(out) }) = p.contract_change.take() else {
+                p.status = "no contract change to apply".into();
+                return;
+            };
+            let Some(pr) = p.pending.as_mut() else {
+                p.status = "no save selected — nothing to edit".into();
+                return;
+            };
+            let mut next = pr.clone();
+            if let Err(e) = save_write::set_lua_payload(&mut next, save_lua::serialize(&out.lua).as_bytes()) {
+                p.status = format!("set payload: {e}");
+                return;
+            }
+            next.cash = out.cash;
+            next.fuel = out.fuel;
+            next.unlocked_costumes = out.costumes;
+            *pr = next;
+            p.status = format!("{id} → {}: {} changes", to.label(), out.changes.len());
+            p.repopulate_lua_state_from_selection();
         }
         Act::SetCompletedToolboxes(n) => {
             mutate_pending_lua(p, |root| set_completed_toolboxes(root, n))
@@ -2418,42 +2604,6 @@ fn mutate_pending_lua(p: &mut Panel, edit: impl FnOnce(&mut Value) -> Result<(),
     // next frame. Keyed by `selected`, which hasn't changed, so no reparse of the browser
     // row — just this one `SaveState` walk.
     p.repopulate_lua_state_from_selection();
-}
-
-/// Walk `root.tFlowData.tActiveMissions[<mission_id>].nState` and set it to `new`.
-/// Errors with a readable message when any step in the chain is missing or the wrong type —
-/// the Lua surface is well-shaped on real saves, but a Shipment-provided mod can produce
-/// surprising structures and the Workshop should name what it found instead of panicking.
-fn set_active_mission_state(root: &mut Value, mission_id: &str, new: i32) -> Result<(), String> {
-    let flow = root
-        .as_table_mut()
-        .map_err(|e| e.to_string())?
-        .get_mut("tFlowData")
-        .ok_or_else(|| "root has no tFlowData".to_string())?
-        .as_table_mut()
-        .map_err(|e| e.to_string())?;
-    let active = flow
-        .get_mut("tActiveMissions")
-        .ok_or_else(|| "tFlowData has no tActiveMissions".to_string())?
-        .as_table_mut()
-        .map_err(|e| e.to_string())?;
-    let mission = active
-        .get_mut(mission_id)
-        .ok_or_else(|| format!("tActiveMissions has no entry `{mission_id}`"))?
-        .as_table_mut()
-        .map_err(|e| e.to_string())?;
-    match mission.get_mut("nState") {
-        Some(Value::Number(n)) => {
-            n.value = new as f64;
-            n.source = Some(format!("{new}.000000"));
-            Ok(())
-        }
-        Some(other) => Err(format!(
-            "{mission_id}.nState is a {:?}, not a number",
-            other.kind()
-        )),
-        None => Err(format!("{mission_id} has no nState")),
-    }
 }
 
 /// Set `root.tStatsData.nCompletedToolboxes` to `n`. Errors when the table or key is missing or
@@ -2611,6 +2761,69 @@ mod lua_edit_tests {
         match stats.get("nCompletedToolboxes") {
             Some(mercs2_formats::save_lua::Value::Number(n)) => assert_eq!(n.value, 77.0),
             other => panic!("nCompletedToolboxes: {other:?}"),
+        }
+    }
+}
+
+#[cfg(all(test, feature = "retail"))]
+mod contract_menu_retail_tests {
+    use super::{apply, center, profile_differs, windows, Act, Panel};
+    use crate::save_flow::ContractState;
+    use mercs2_formats::{game_paths, save};
+
+    fn panel_on(name: &str) -> (Panel, save::Profile) {
+        let path = game_paths::save_fixtures().join(name);
+        let on_disk = save::parse(&std::fs::read(&path).unwrap()).unwrap();
+        let wad = mercs2_engine::wad::resolve_vz_wad(None)
+            .expect("retail vz.wad — set vz_wad in .mercs2-local.toml or VZ_WAD");
+        let mut w = crate::app::WadStack::open(&wad, &[]).expect("open retail vz.wad");
+        let mut p = Panel {
+            profiles: Some(vec![super::ProfileEntry {
+                path: path.clone(),
+                stem: name.trim_end_matches(".profile").to_string(),
+                header: Ok(on_disk.clone()),
+            }]),
+            rules: Some(crate::game_rules::GameRules::load(&mut w)),
+            english: Some(w.string_table("english")),
+            ..Default::default()
+        };
+        apply(Act::Select(path), &mut p);
+        (p, on_disk)
+    }
+
+    /// Preview then Apply writes each change into the pending save. OilCon020 pays nothing and
+    /// unlocks OilCon021 (`wifmissionflow.lua:182`), which pays 25,000 (`mrxrewarddata.lua:859-860`).
+    #[test]
+    fn applying_previewed_completions_edits_the_pending_save() {
+        let (mut p, on_disk) = panel_on("auto_6A0BE454.profile");
+        for id in ["OilCon020", "OilCon021"] {
+            apply(Act::PreviewContractState(id.into(), ContractState::Completed), &mut p);
+            let change = p.contract_change.as_ref().expect("preview opened");
+            assert!(change.outcome.is_ok(), "{id}: {:?}", change.outcome.as_ref().err());
+            apply(Act::ApplyContractState, &mut p);
+            assert!(p.contract_change.is_none());
+            let state = p.lua_state.as_ref().unwrap().1.as_ref().unwrap();
+            assert!(state.completed_flow.contains_key(id), "status: {}", p.status);
+        }
+        let pending = p.pending.as_ref().unwrap();
+        assert_eq!(pending.cash, on_disk.cash + 25_000);
+        assert!(profile_differs(pending, &on_disk));
+    }
+
+    /// The centre, the contract window and the change preview all render on a real save.
+    #[test]
+    fn the_contract_ui_renders() {
+        let (mut p, _) = panel_on("Mattias Nilsson_63430745.profile");
+        apply(Act::InspectContract("PmcCon002".into()), &mut p);
+        assert!(p.contract_inspect.as_ref().unwrap().unlocked_by.as_ref().is_ok_and(|v| v == &["OilCon001_GurCon001"]));
+        apply(Act::PreviewContractState("PmcCon001".into(), ContractState::Locked), &mut p);
+        let ctx = egui::Context::default();
+        crate::gui::theme::install(&ctx);
+        for _ in 0..2 {
+            let _ = ctx.run(egui::RawInput::default(), |c| {
+                let _ = center(c, &p);
+                let _ = windows(c, &p);
+            });
         }
     }
 }
