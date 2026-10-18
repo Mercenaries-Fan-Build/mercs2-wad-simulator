@@ -142,6 +142,14 @@ Binary crate — these are private modules, listed for orientation:
 - `index` — asset catalog, reference-bundle resolution, and name resolution
   (`workshop_data/names.bin` overlaid by the embedded ASET dictionary).
 - `fetch` — downloads and installs the release's reference bundle.
+- `saves` — the Saves page: save browser, hero viewport, PROGRESSION grid with the contract menu,
+  inspector, Write.
+- `save_tables` / `save_inspect` — the readable views of every save table, and the Inspect window.
+- `game_rules` — the shipped mission, reward and flow scripts, run from the WAD stack on the game's
+  Lua VM; every other module is a recorder, so a flow binding's consequence comes back as the calls
+  the game would make.
+- `save_flow` — contract state changes on a save (complete, undo, offer, start, lock), as the game
+  makes them. What it writes where: `docs/save_contract_state.md`.
 - `luaview` — read-only Lua source viewer with a hand-rolled Lua lexer/highlighter.
 - `publish` — background-threaded mod publishing into a patch WAD, with SHA-256 + a load self-test.
 - `texenc` — CPU BC1/BC3 encode (min/max endpoint, no search) for imported images.
