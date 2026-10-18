@@ -2775,8 +2775,7 @@ mod contract_menu_retail_tests {
     fn panel_on(name: &str) -> (Panel, save::Profile) {
         let path = game_paths::save_fixtures().join(name);
         let on_disk = save::parse(&std::fs::read(&path).unwrap()).unwrap();
-        let wad = mercs2_engine::wad::resolve_vz_wad(None)
-            .expect("retail vz.wad — set vz_wad in .mercs2-local.toml or VZ_WAD");
+        let wad = crate::app::retail_vz_wad();
         let mut w = crate::app::WadStack::open(&wad, &[]).expect("open retail vz.wad");
         let mut p = Panel {
             profiles: Some(vec![super::ProfileEntry {
