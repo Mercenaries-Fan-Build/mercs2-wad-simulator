@@ -1682,14 +1682,6 @@ impl ScriptHost {
     pub fn import_module(&self, name: &str) -> LuaResult<Table> {
         self.loader.import(&self.lua, name)
     }
-
-    /// Register `module` as the already-loaded module `name`: every later `import`/`inherit` of that
-    /// name returns this table instead of loading a chunk.
-    pub fn provide_module(&self, name: &str, module: Table) -> LuaResult<()> {
-        self.loader.loaded.borrow_mut().insert(name.to_ascii_lowercase(), module.clone());
-        self.lua.globals().set(name, module)
-    }
-
     /// Execute a source chunk in the global environment (for boot glue / tests).
     pub fn exec(&self, src: &str, name: &str) -> LuaResult<()> {
         self.lua.load(src).set_name(name.to_string()).exec()
@@ -2175,22 +2167,6 @@ mod tests {
         let h = ScriptHost::with_module_source(|name| Err(format!("{name} is not in any open wad"))).unwrap();
         let e = h.import_module("Nowhere").unwrap_err().to_string();
         assert!(e.contains("Nowhere is not in any open wad"), "{e}");
-    }
-
-    /// A provided module answers every `import` of its name; the source is never asked for it.
-    #[test]
-    fn a_provided_module_is_what_import_returns() {
-        let user = mercs2_luac::compile("import('Svc')\nfunction Ask() return Svc.nValue end", "@user").unwrap();
-        let h = ScriptHost::with_module_source(move |name| match name {
-            "User" => Ok(user.clone()),
-            other => Err(format!("{other} must not be fetched")),
-        })
-        .unwrap();
-        let svc = h.lua().create_table().unwrap();
-        svc.set("nValue", 41).unwrap();
-        h.provide_module("Svc", svc).unwrap();
-        let ask: mercs2_luac::rt::Function = h.import_module("User").unwrap().get("Ask").unwrap();
-        assert_eq!(ask.call::<i64>(()).unwrap(), 41);
     }
 
     #[test]
