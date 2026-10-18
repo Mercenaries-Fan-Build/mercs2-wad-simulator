@@ -79,6 +79,8 @@ mod retarget;
 use crate::retarget::RetargetPreview as _;
 mod quartermaster;
 mod saves;
+mod game_rules; // The shipped mission, reward and flow scripts, run on the game's VM
+mod save_flow; // Contract state changes on a save: complete, undo, offer, lock
 mod save_tables; // Read-only inspector sections for every other save table
 mod save_inspect; // The Saves right-click Inspect window: a readable account of one save
 mod settings;
