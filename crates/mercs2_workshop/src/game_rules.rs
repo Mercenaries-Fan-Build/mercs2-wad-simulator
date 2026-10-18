@@ -515,6 +515,23 @@ impl GameRules {
         Ok(std::mem::take(&mut *self.calls.borrow_mut()))
     }
 
+    /// Where a mission's players spawn: `MrxMissionFlow.GetMissionStartLocations` as shipped
+    /// (`mrxmissionflow.lua:411-421`). `None` when it has none.
+    pub fn start_locations(&self, mission: &str) -> Result<Option<Vec<String>>, String> {
+        let f: Function = self.flow.get("GetMissionStartLocations").map_err(|e| format!("GetMissionStartLocations: {e}"))?;
+        match f.call::<Value>(mission.to_string()).map_err(|e| format!("GetMissionStartLocations({mission}): {e}"))? {
+            Value::Table(t) => {
+                let mut out = Vec::new();
+                for v in t.sequence_values::<String>() {
+                    out.push(v.map_err(|e| format!("GetMissionStartLocations({mission}): {e}"))?);
+                }
+                Ok(Some(out))
+            }
+            Value::Nil => Ok(None),
+            other => Err(format!("GetMissionStartLocations({mission}) returned a {}", other.type_name())),
+        }
+    }
+
     /// The bindings whose consequence calls `UnlockMission(mission)` when run against `ctx`.
     pub fn unlockers_of(&self, mission: &str, ctx: &FlowCtx) -> Result<Vec<String>, String> {
         let mut out = Vec::new();
