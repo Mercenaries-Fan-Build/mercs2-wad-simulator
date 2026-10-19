@@ -86,6 +86,10 @@ name = "scripts_block_survey"
 required-features = ["retail"]
 
 [[test]]
+name = "script_meta_retail"
+required-features = ["retail"]
+
+[[test]]
 name = "scrub_retail"
 required-features = ["retail"]
 
