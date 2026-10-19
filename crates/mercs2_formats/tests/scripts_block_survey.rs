@@ -147,6 +147,37 @@ fn replacing_bytecode_with_itself_round_trips_the_block() {
     }
 }
 
+/// Replacing a script's bytecode with bytecode that no longer imports one of its retail DEPS is
+/// refused, naming the dropped module's hash: the engine loads DEPS before it runs a script, and
+/// other modules can rely on that load.
+#[test]
+fn replacing_bytecode_that_drops_a_retail_dep_is_refused() {
+    let wad = vz_wad();
+    let blocks = script_blocks(&wad).expect("read the script blocks");
+    let (_, dec) = blocks.into_iter().next().expect("a scripts_vz block");
+    let mut block = ScriptsBlock::parse(&dec).expect("parse");
+
+    let with_deps = (0..block.entries.len())
+        .find(|&i| !mercs2_formats::scripts_block::container_deps(&block.entries[i].bytes).unwrap().is_empty())
+        .expect("a script with DEPS");
+    let without_deps = (0..block.entries.len())
+        .find(|&i| mercs2_formats::scripts_block::container_deps(&block.entries[i].bytes).unwrap().is_empty())
+        .expect("a script without DEPS");
+    let target = &block.entries[with_deps].bytes;
+    let name = mercs2_formats::scripts_block::container_info(target).unwrap().name;
+    let dropped = mercs2_formats::scripts_block::container_deps(target).unwrap()[0];
+
+    // Bytecode that imports nothing, named as the target script.
+    let mut chunk = mercs2_formats::luachunk::decode(&block.extract_lua(without_deps).unwrap()).unwrap();
+    chunk.main.source = Some(name.as_bytes().to_vec());
+    let bare = mercs2_formats::luachunk::encode(&chunk);
+
+    let before = block.entries[with_deps].bytes.clone();
+    let err = block.replace_lua(with_deps, &bare).expect_err("dropping a retail dep must be refused");
+    assert!(err.contains(&format!("0x{dropped:08X}")), "the error names the dropped dep: {err}");
+    assert_eq!(block.entries[with_deps].bytes, before, "a refused replacement changes nothing");
+}
+
 /// ★ Adding a NEW script to `scripts_vz` produces a block that still round-trips and CSUM-verifies,
 /// and the new script resolves by name while every existing script is byte-for-byte untouched.
 ///
@@ -163,11 +194,15 @@ fn adding_a_new_script_round_trips_and_leaves_the_others_intact() {
     let n_before = before.entries.len();
     // Snapshot the existing containers so we can prove none moved.
     let originals: Vec<Vec<u8>> = before.entries.iter().map(|e| e.bytes.clone()).collect();
-    // Borrow a real script's LuaQ as the new script's bytecode.
-    let payload = before.extract_lua(0).expect("extract a template LuaQ");
+    // Borrow a real script's LuaQ as the new script's bytecode, under the new script's name: a
+    // container's INFO name must be the chunk's own source name.
+    let name = "qm_test_new_script";
+    let mut chunk = mercs2_formats::luachunk::decode(&before.extract_lua(0).expect("extract a template LuaQ"))
+        .expect("decode the template LuaQ");
+    chunk.main.source = Some(name.as_bytes().to_vec());
+    let payload = mercs2_formats::luachunk::encode(&chunk);
 
     let mut block = ScriptsBlock::parse(&dec).expect("parse for edit");
-    let name = "qm_test_new_script";
     assert!(block.find_by_name(name).is_none(), "the test name must be novel");
     let idx = block.add_script(name, &payload).expect("add_script");
     assert_eq!(idx, n_before, "the new entry appends after the existing ones");
