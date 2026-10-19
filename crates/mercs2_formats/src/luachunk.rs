@@ -33,9 +33,25 @@
 //! The INFO record ([`Info`]) is `u8 5`, a u16 name length, the name, a NUL, a u16 and a u8, the
 //! u16s in the WAD's byte order.
 
-use mercs2_formats::ffcs::Endian;
+use crate::ffcs::Endian;
 
-use crate::Error;
+/// A chunk or INFO record that does not decode: a message saying what was not handled and why.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Error(String);
+
+impl Error {
+    pub fn new(msg: impl Into<String>) -> Error {
+        Error(msg.into())
+    }
+}
+
+impl std::fmt::Display for Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for Error {}
 
 /// The 12-byte header with the endianness byte at [`ENDIAN_AT`].
 const HEADER: [u8; 12] = [0x1b, 0x4c, 0x75, 0x61, 0x51, 0x00, 0x00, 0x04, 0x04, 0x04, 0x04, 0x00];
