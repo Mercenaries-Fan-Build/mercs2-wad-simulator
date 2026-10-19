@@ -52,7 +52,7 @@ mod dtor;
 pub mod image;
 pub mod images;
 pub mod iso9660;
-pub mod luachunk;
+pub use mercs2_formats::luachunk;
 pub mod luaindex;
 pub mod lualink;
 pub mod luapair;
@@ -90,6 +90,12 @@ impl std::fmt::Display for Error {
 }
 
 impl std::error::Error for Error {}
+
+impl From<luachunk::Error> for Error {
+    fn from(e: luachunk::Error) -> Error {
+        Error(e.to_string())
+    }
+}
 
 /// The field a `data/*.tsv` table writes where a column holds no value. No field of those tables is
 /// empty, so no row ends in whitespace.
