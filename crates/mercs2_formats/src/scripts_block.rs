@@ -19,7 +19,10 @@
 //! identity round-trip (re-serialize == input) plus a full CSUM re-verification.
 
 use crate::crc32::crc32_mercs2;
+use crate::ffcs::Endian;
 use crate::hash::pandemic_hash_m2;
+use crate::luachunk::{decode_info, Info};
+use crate::script_meta::{self, ScriptMeta};
 use crate::ucfx::walk_decompressed_block;
 
 const LUAQ_SIG: &[u8; 4] = b"\x1bLua";
@@ -121,39 +124,50 @@ impl ScriptsBlock {
         Ok(c[lay.luaq_off..lay.csum_off].to_vec())
     }
 
-    /// Replace entry `idx`'s LuaQ bytecode with `new_luaq`. LuaQ is the last body
-    /// before the CSUM trailer, so only the BINN descriptor `body_size`, the
-    /// CSUM, and the entry `chunk_size` change — the UCFX header / descriptor
-    /// offsets / INFO+DEPS bodies are untouched.
+    /// Replace entry `idx`'s LuaQ bytecode with `new_luaq`, rebuilding the container: INFO and DEPS
+    /// are derived again from the new bytecode ([`script_meta::derive`]), keeping the script's name.
+    ///
+    /// The engine loads every DEPS entry before it runs a script, so the new DEPS must still contain
+    /// every module the old DEPS listed. One that is missing is an error naming it: dropping a load
+    /// dependency of a retail script can leave a module its code uses unloaded (memory
+    /// `ucfx-script-chunk-replace-header-bug`: an emptied `wifpmcinterior` DEPS wedged the world load).
     pub fn replace_lua(&mut self, idx: usize, new_luaq: &[u8]) -> Result<(), String> {
-        self.entries[idx].bytes = rebuild_container_with_luaq(&self.entries[idx].bytes, new_luaq)?;
+        let old = &self.entries[idx].bytes;
+        let name = container_info(old)?.name;
+        let old_deps = container_deps(old)?;
+        let meta = script_meta::derive(&name, new_luaq)?;
+        let missing: Vec<String> = old_deps
+            .iter()
+            .filter(|h| !meta.deps.iter().any(|d| d.hash == **h))
+            .map(|h| format!("0x{h:08X}"))
+            .collect();
+        if !missing.is_empty() {
+            return Err(format!(
+                "script {name}: the new bytecode no longer imports {} of its retail DEPS ({}); keep every import the script had",
+                missing.len(),
+                missing.join(", ")
+            ));
+        }
+        self.entries[idx].bytes = build_container(&meta, new_luaq);
         Ok(())
     }
 
     /// Add a BRAND-NEW script entry carrying `luaq`, named `name`. Returns its index.
     ///
     /// This is what lets a Shipment ship a new resident script (a mod loader) instead of only
-    /// appending to an existing one. The recipe is not speculative — it is the one the shipped DLC
-    /// uses. Confirmed from four angles:
-    ///
-    /// * the exe's own bootstrap: `import(m)` → `_SYS._IMPORT(getfenv(2), m)`, and the engine
-    ///   resolves a module **by ASET hash across all loaded WADs**
-    ///   (`docs/vanilla_mission_lifecycle_analysis.md` Open-Q1);
-    /// * every one of the 114 retail `scripts_vz` scripts carries a primary type-35 ASET row;
-    /// * `dlc_aset_normalize.py` adds `script_aset_entry(pandemic_hash_m2(name))` for each NEW DLC
-    ///   script precisely so `import`/`dynamic_import` can find it — a shipped, working case;
-    /// * the heli experiment's documented lesson is this same recipe; its hangs were a MISSING ASET
-    ///   row, use of the *resident* block (worldentity double-registration) and a DEPS cycle — all
-    ///   avoided here by targeting `scripts_vz` and resolving via `import` (no DEPS edge).
+    /// appending to an existing one. The engine finds a script by `{pandemic_hash_m2(name), script
+    /// type}` across all loaded WADs, the same way it finds the shipped DLC's new scripts.
     ///
     /// **This method only builds the block entry.** The caller MUST also emit the matching ASET row
-    /// (type 35, this block, primary `0xFFFF`), or the loader wedges silently when the import is
-    /// resolved — that is step 4, the one that bites.
+    /// (type 35, this block, primary `0xFFFF`), or the loader wedges silently when the script is
+    /// requested.
     ///
-    /// The container is CLONED from an existing INFO/BINN script in this block, then its LuaQ is
-    /// swapped, so it reuses the exact container shape the engine already accepts. `luaq` must be
-    /// compiled with the BARE `name` as its chunk name (retail's convention, which `mercs2_luac`
-    /// follows). Refuses a duplicate name — two entries for one hash make the import ambiguous.
+    /// The container is built from `luaq` with INFO and DEPS derived from it
+    /// ([`script_meta::derive`]): its own name, globals and inherit counts, and one DEPS entry per
+    /// literal `import`/`inherit`, so the engine loads those modules before it runs this one.
+    /// `luaq` must be compiled with the bare lowercase `name` as its chunk name (retail's
+    /// convention, which `mercs2_luac` follows). Refuses a duplicate name — two entries for one hash
+    /// make the import ambiguous.
     pub fn add_script(&mut self, name: &str, luaq: &[u8]) -> Result<usize, String> {
         let h = pandemic_hash_m2(name);
         if self.entries.iter().any(|e| e.name_hash == h) {
@@ -161,58 +175,101 @@ impl ScriptsBlock {
                 "a container named {name:?} (0x{h:08X}) already exists; use replace_lua to edit it"
             ));
         }
-        // A plain INFO/BINN script (no DEPS): the new script declares no dependencies — its load
-        // timing is controlled by whoever imports it, not by a DEPS edge.
-        let (field_c, template) = self
-            .entries
-            .iter()
-            .find(|e| {
-                e.type_hash == crate::types::TYPE_HASH_SCRIPT && !container_has_chunk(&e.bytes, b"DEPS")
-            })
-            .map(|e| (e.field_c, e.bytes.clone()))
-            .ok_or("no plain INFO/BINN script in this block to use as a template")?;
-        let bytes = rebuild_container_with_luaq(&template, luaq)?;
+        let meta = script_meta::derive(name, luaq)?;
         self.entries.push(Entry {
             name_hash: h,
             type_hash: crate::types::TYPE_HASH_SCRIPT,
-            field_c,
-            bytes,
+            field_c: SCRIPT_FIELD_C,
+            bytes: build_container(&meta, luaq),
         });
         Ok(self.entries.len() - 1)
     }
 }
 
-/// True if a UCFX container's descriptor table carries a chunk tagged `tag`.
-fn container_has_chunk(c: &[u8], tag: &[u8; 4]) -> bool {
-    if c.len() < 20 || &c[0..4] != b"UCFX" {
-        return false;
+/// The block-table `field_c` of every retail script entry (the `script_meta_retail` test holds this).
+pub const SCRIPT_FIELD_C: u32 = 0;
+
+/// A script container built from its INFO/DEPS metadata and LuaQ chunk, laid out as retail lays one
+/// out:
+///
+/// ```text
+/// "UCFX"  u32 data_base = 20 + 20 × n   u32 0   u32 0   u32 n (descriptor count)
+/// n × { tag, u32 body offset from data_base, u32 body size, u32 descriptors after this one, u32 0 }
+/// INFO body, DEPS body (when present), BINN body = the LuaQ chunk — packed, no padding
+/// "CSUM"  u32 crc32_mercs2 of every byte before it
+/// ```
+pub fn build_container(meta: &ScriptMeta, luaq: &[u8]) -> Vec<u8> {
+    let mut bodies: Vec<(&[u8; 4], Vec<u8>)> = vec![(b"INFO", meta.info_body())];
+    if let Some(deps) = meta.deps_body() {
+        bodies.push((b"DEPS", deps));
     }
-    let n_desc = rd_u32(c, 16) as usize;
-    (0..n_desc).any(|d| {
-        let off = 20 + d * 20;
-        off + 4 <= c.len() && &c[off..off + 4] == tag
-    })
+    bodies.push((b"BINN", luaq.to_vec()));
+    let n = bodies.len();
+    let data_base = 20 + 20 * n;
+    let mut out = Vec::with_capacity(data_base + bodies.iter().map(|(_, b)| b.len()).sum::<usize>() + 8);
+    out.extend_from_slice(b"UCFX");
+    out.extend_from_slice(&(data_base as u32).to_le_bytes());
+    out.extend_from_slice(&0u32.to_le_bytes());
+    out.extend_from_slice(&0u32.to_le_bytes());
+    out.extend_from_slice(&(n as u32).to_le_bytes());
+    let mut offset = 0usize;
+    for (d, (tag, body)) in bodies.iter().enumerate() {
+        out.extend_from_slice(*tag);
+        out.extend_from_slice(&(offset as u32).to_le_bytes());
+        out.extend_from_slice(&(body.len() as u32).to_le_bytes());
+        out.extend_from_slice(&((n - 1 - d) as u32).to_le_bytes());
+        out.extend_from_slice(&0u32.to_le_bytes());
+        offset += body.len();
+    }
+    for (_, body) in &bodies {
+        out.extend_from_slice(body);
+    }
+    let csum = crc32_mercs2(&out);
+    out.extend_from_slice(b"CSUM");
+    out.extend_from_slice(&csum.to_le_bytes());
+    out
 }
 
-/// Swap a container's LuaQ tail for `new_luaq`, fixing the BINN `body_size` and re-stamping the
-/// CSUM. Shared by [`ScriptsBlock::replace_lua`] and [`ScriptsBlock::add_script`].
-fn rebuild_container_with_luaq(c: &[u8], new_luaq: &[u8]) -> Result<Vec<u8>, String> {
-    let lay = parse_container(c)?;
-    if lay.binn_body_size as usize != lay.luaq_len {
-        return Err(format!(
-            "BINN.body_size ({}) != LuaQ length ({}); metadata-bearing BINN not yet supported",
-            lay.binn_body_size, lay.luaq_len
-        ));
+/// The body of a container's chunk tagged `tag`, if it has one.
+pub fn container_chunk<'c>(c: &'c [u8], tag: &[u8; 4]) -> Result<Option<&'c [u8]>, String> {
+    if c.len() < 20 || &c[0..4] != b"UCFX" {
+        return Err("not a UCFX container".into());
     }
-    let mut nc = Vec::with_capacity(lay.luaq_off + new_luaq.len() + 8);
-    nc.extend_from_slice(&c[..lay.luaq_off]);
-    nc.extend_from_slice(new_luaq);
-    let bs_off = lay.binn_desc_off + 8; // BINN descriptor body_size
-    nc[bs_off..bs_off + 4].copy_from_slice(&(new_luaq.len() as u32).to_le_bytes());
-    let csum = crc32_mercs2(&nc);
-    nc.extend_from_slice(b"CSUM");
-    nc.extend_from_slice(&csum.to_le_bytes());
-    Ok(nc)
+    let data_base = rd_u32(c, 4) as usize;
+    let n_desc = rd_u32(c, 16) as usize;
+    for d in 0..n_desc {
+        let off = 20 + d * 20;
+        if off + 20 > c.len() {
+            return Err("descriptor table overruns container".into());
+        }
+        if &c[off..off + 4] == tag {
+            let start = data_base + rd_u32(c, off + 4) as usize;
+            let end = start + rd_u32(c, off + 8) as usize;
+            if end > c.len() {
+                return Err(format!("{} body overruns container", String::from_utf8_lossy(tag)));
+            }
+            return Ok(Some(&c[start..end]));
+        }
+    }
+    Ok(None)
+}
+
+/// A container's decoded INFO record.
+pub fn container_info(c: &[u8]) -> Result<Info, String> {
+    let body = container_chunk(c, b"INFO")?.ok_or("no INFO descriptor")?;
+    decode_info(body, Endian::Little).map_err(|e| e.to_string())
+}
+
+/// A container's DEPS hashes; empty when it has no DEPS chunk.
+pub fn container_deps(c: &[u8]) -> Result<Vec<u32>, String> {
+    let Some(body) = container_chunk(c, b"DEPS")? else {
+        return Ok(Vec::new());
+    };
+    let n = *body.first().ok_or("empty DEPS body")? as usize;
+    if body.len() != 1 + 4 * n {
+        return Err(format!("DEPS body is {} bytes for {n} entries", body.len()));
+    }
+    Ok((0..n).map(|i| rd_u32(body, 1 + 4 * i)).collect())
 }
 
 /// Parse a single container and return field offsets we need for editing.
