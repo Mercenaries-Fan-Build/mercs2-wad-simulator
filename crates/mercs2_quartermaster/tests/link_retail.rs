@@ -510,16 +510,20 @@ fn replace_lua_and_add_script_follow_the_order() {
     let corpus = corpus();
     let base = retail_block_bytes("scripts_vz");
     let resolved = order(&["zzz", "aaa"]);
+    // A replacement must keep every import the retail script has (its DEPS); these are
+    // wifpmcgarage's.
+    let imports = "import(\"MrxState\")\nimport(\"MrxPmc\")\nimport(\"MrxSupportData\")\nimport(\"WifPmcInterior\")\n\
+                   import(\"MrxGuiGarage\")\nimport(\"MrxUtil\")\nimport(\"MrxVoSequence\")\n";
     let replacements = [
         link::ScriptReplacement {
             shipment: "aaa".into(),
             target: "wifpmcgarage".into(),
-            source: "QM_ORDER_MARKER = \"aaa-replaced\"\n".into(),
+            source: format!("{imports}QM_ORDER_MARKER = \"aaa-replaced\"\n"),
         },
         link::ScriptReplacement {
             shipment: "zzz".into(),
             target: "wifpmcgarage".into(),
-            source: "QM_ORDER_MARKER = \"zzz-replaced\"\n".into(),
+            source: format!("{imports}QM_ORDER_MARKER = \"zzz-replaced\"\n"),
         },
     ];
     let additions = [
