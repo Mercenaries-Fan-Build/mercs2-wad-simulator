@@ -72,6 +72,7 @@ mod gui;
 mod import;
 mod index;
 mod luaview;
+mod lua_source;
 mod missions;
 mod publish;
 mod retarget;
