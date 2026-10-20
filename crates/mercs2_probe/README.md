@@ -62,11 +62,12 @@ set, exactly as matched in `main()`:
 * **Animation**: `action_table_probe`, `charanim`, `clipbind`, `swim_clip_probe`.
 * **Textures / materials / FX / lights**: `tex_dump`, `texcmp`, `mtrl_probe`, `fx_probe`,
   `light_probe`, `tex_users` (the reverse of `mtrl_probe`: every model container, in every block,
-  whose `MTRL` cites a given texture hash; exit 1 if any block or MTRL could not be read),
-  `tex_orphans` (every texture chunk no `MTRL` of any loader cites — model, terrainmesh, font,
-  lowresterrain, scrub — grouped by block, with any other chunk that holds the hash as a raw u32),
-  `model_skins` (every model with no known name, listed with the named textures its own `MTRL` cites;
-  `--all` includes named models).
+  whose `MTRL` cites a given texture hash; exit 1 if any block or MTRL could not be read;
+  `--unnamed-models` lists every model with no known name with the named textures its own `MTRL`
+  cites, `--all` including named models), `tex_orphans` (every texture chunk no `MTRL` of any loader
+  cites — model, terrainmesh, font, lowresterrain, scrub — grouped by block, with any other chunk
+  that holds the hash as a raw u32). Both read names from `docs/data/aset_names.csv` under the
+  `notes_docs_dir` key of `.mercs2-local.toml`.
 * **Archive / naming**: `aset_probe` (every ASET row a name-hash owns + a multi-block striping
   census), `model_namer` (derives a model's name from the textures it uses, and can emit a rainbow-
   table name fragment), `kit_templates` (the resident worldentity's spawn templates that wear a given
