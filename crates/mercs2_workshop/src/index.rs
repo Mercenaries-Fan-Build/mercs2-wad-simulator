@@ -141,11 +141,18 @@ pub struct AssetRow {
     pub src: usize,
     /// Registry name, when the hash reverses (most placeable content does).
     pub name: Option<String>,
+    /// A spawn template's view of a character kit: the template's `Name`. The row loads the kit
+    /// (`hash`) showing that template's outfit (`app::KitOutfits`). `None` for an asset row.
+    pub template: Option<String>,
 }
 
 impl AssetRow {
-    /// List label: the registry name when known, else the raw hash.
+    /// List label: the template name for a template row, else the registry name when known, else
+    /// the raw hash.
     pub fn label(&self) -> String {
+        if let Some(t) = &self.template {
+            return t.clone();
+        }
         match &self.name {
             Some(n) => n.clone(),
             None => format!("0x{:08X}", self.hash),
@@ -166,6 +173,9 @@ impl AssetRow {
     /// convention: vehicles break out by class, then characters / buildings / weapons / props /
     /// world-state / other. Drives the grouped model navigator. `Unnamed` = hash-only rows.
     pub fn category(&self) -> &'static str {
+        if self.template.is_some() {
+            return "Character";
+        }
         let Some(name) = self.name.as_ref() else { return "Unnamed" };
         if let Some(c) = self.vehicle_class() {
             return vehicle_display(c);
@@ -267,6 +277,9 @@ pub struct AssetIndex {
     /// existed already had to be listed by hand in `rows`, `build` and `apply_names`.
     rows: Vec<Vec<AssetRow>>,
     pub names: HashMap<u32, String>,
+    /// The world's templates that name a model (`mercs2_formats::mixr::kit_templates`), as given to
+    /// [`Self::add_kit_templates`] — what a kit preview reads its outfits from.
+    pub kit_templates: Vec<mercs2_formats::mixr::KitTemplate>,
 }
 
 impl AssetIndex {
@@ -326,15 +339,37 @@ impl AssetIndex {
                 } else {
                     0
                 };
-                buckets[i].insert(hash, AssetRow { hash, block, src, name: None });
+                buckets[i].insert(hash, AssetRow { hash, block, src, name: None, template: None });
             }
         }
         let mut idx = AssetIndex {
             rows: buckets.into_iter().map(|b| b.into_values().collect()).collect(),
             names: HashMap::new(),
+            kit_templates: Vec::new(),
         };
         idx.apply_names(names);
         idx
+    }
+
+    /// Add one model row per kit template (`app::load_kit_templates`: a template that picks a
+    /// character-kit outfit), labelled by the template's `Name`, beside its kit's own row. A template
+    /// whose model has no row in the catalog adds nothing. Returns how many rows were added.
+    pub fn add_kit_templates(&mut self, templates: &[mercs2_formats::mixr::KitTemplate]) -> usize {
+        let Some(mi) = Kind::ALL.iter().position(|k| *k == Kind::Model) else { return 0 };
+        let mut added = Vec::new();
+        for t in templates {
+            let (Some(name), Some(kit)) = (&t.name, self.rows[mi].iter().find(|r| r.hash == t.model && r.template.is_none()))
+            else {
+                continue;
+            };
+            added.push(AssetRow { template: Some(name.clone()), ..kit.clone() });
+        }
+        let n = added.len();
+        self.rows[mi].extend(added);
+        self.kit_templates = templates.to_vec();
+        let names = std::mem::take(&mut self.names);
+        self.apply_names(names);
+        n
     }
 
     /// Attach a (new) hash→name map: resolve every row's label and re-sort — named assets first
