@@ -61,10 +61,16 @@ set, exactly as matched in `main()`:
   > what it measures — and load the LOD chain.
 * **Animation**: `action_table_probe`, `charanim`, `clipbind`, `swim_clip_probe`.
 * **Textures / materials / FX / lights**: `tex_dump`, `texcmp`, `mtrl_probe`, `fx_probe`,
-  `light_probe`.
+  `light_probe`, `tex_users` (the reverse of `mtrl_probe`: every model container, in every block,
+  whose `MTRL` cites a given texture hash; exit 1 if any block or MTRL could not be read),
+  `tex_orphans` (every texture chunk no `MTRL` of any loader cites — model, terrainmesh, font,
+  lowresterrain, scrub — grouped by block, with any other chunk that holds the hash as a raw u32),
+  `model_skins` (every model with no known name, listed with the named textures its own `MTRL` cites;
+  `--all` includes named models).
 * **Archive / naming**: `aset_probe` (every ASET row a name-hash owns + a multi-block striping
   census), `model_namer` (derives a model's name from the textures it uses, and can emit a rainbow-
-  table name fragment).
+  table name fragment), `kit_templates` (the resident worldentity's spawn templates that wear a given
+  model, by their `Name` — the in-game identity of an unnamed model).
 * **Water**: `watermap_probe` — resolves the `watr` singleton through `AssetSource::extract_singleton`
   and reports grid, world extent, wet/dry census, waterline range and the Layer 0 × Layer 1 cross-tab.
   The cross-tab is the regression guard on the 44-byte header: a wet cell carrying the dry sentinel
