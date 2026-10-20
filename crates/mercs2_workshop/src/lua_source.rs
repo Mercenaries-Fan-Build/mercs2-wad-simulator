@@ -60,11 +60,6 @@ impl Script {
             })
     }
 
-    /// The script printed from its AST.
-    pub fn print(&self) -> String {
-        self.ast.to_string()
-    }
-
     pub fn ast(&self) -> &Ast {
         &self.ast
     }
@@ -231,7 +226,7 @@ mod tests {
                 match Script::parse(&src) {
                     Err(e) => failures.push(format!("{}: {e}", path.display())),
                     Ok(script) => {
-                        let printed = script.print();
+                        let printed = script.ast().to_string();
                         if printed != src {
                             let at = printed
                                 .bytes()
