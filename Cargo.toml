@@ -17,7 +17,7 @@ repository = "https://github.com/Mercenaries-Fan-Build/notes-on-the-released-gam
 # with it — a `^2.1` consumer (e.g. mercs2-modkit) will NOT pick 3.0.0 up until it is edited too.
 [workspace.dependencies]
 mercs2_formats = { path = "crates/mercs2_formats", version = "5.0" }
-loadprobe = { path = "crates/loadprobe", version = "2.3.1" }
+loadprobe = { path = "crates/loadprobe", version = "2.3.2" }
 mercs2_luac = { path = "crates/mercs2_luac", version = "1.2.0" }
 mercs2_mesh = { path = "crates/mercs2_mesh", version = "1.0.3" }
 ucfx_byteswap = { path = "crates/ucfx_byteswap", version = "2.1.3" }
