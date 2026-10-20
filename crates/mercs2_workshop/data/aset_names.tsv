@@ -152,6 +152,7 @@
 0x01E2F247	groutpost_bld_shacktall01_ruin_lod
 0x01E5B1A0	oc_hum_mercenary_a_ub_sm
 0x01ED24DA	global_windowbars03
+0x01ED3D6F	civ_hum_super_aidworkerfemale
 0x01F73647	groutpost_bld_shackcave04_ladder_sm
 0x01FCE5EB	spiel_minorcontract_pir03_mattias
 0x01FE4958	ocoutpostinterior_trashcanb_nm
@@ -404,6 +405,7 @@
 0x054F206A	vz_state_gurjob11_09_tinygeometry_tgr11_tgc23_0x00143c46
 0x05542E46	pmcoutpost_interior_jet
 0x055BFD06	estate_bld_mansion03_stair_ruin
+0x055E9085	civ_hum_super_taxi
 0x055F02F1	outskirt_bld_market04_sm
 0x056141D6	all_mi35_driverdoor_actionhijack_getin_section06_fb
 0x0567F4C8	island_bld_hutmodern01_floor_nm
@@ -574,6 +576,7 @@
 0x07F5F9A9	english_base
 0x07F9592C	industrial_att_pipelargecap_001
 0x07F96BA2	port_containerb
+0x07FC456B	civ_hum_super_rich
 0x07FD5131	spiel_job_gur06_mattias
 0x080262ED	gr_hum_officerfemale_hair
 0x080385BB	rocket_launcher_sm
@@ -649,6 +652,7 @@
 0x09089D5A	pickup_shotgun
 0x0911E48D	vzoutpost_bld_garagebunker_pilasters_nm
 0x091253D0	tt_shortyellowgrass
+0x09139BCD	vz_hum_super_soldier
 0x091D1C31	icon_hijack_joystick_down
 0x0921CECE	vz_mar_industrial
 0x09256E6D	outpost_bld_govtbld_clock01_nm
@@ -917,6 +921,7 @@
 0x0CFDE3DD	global_interior_drywall
 0x0CFE172D	caracas_walllong_pristine
 0x0D0B4EA3	margarita_bld_condo01_doors_dm
+0x0D0B8CF5	oc_hum_super_mercenary
 0x0D0C6398	mountain_blastdoors_details_sm
 0x0D121C65	residential_bld_segment16x16c_ruin_sm
 0x0D1577C0	vz_amazon_base
@@ -1179,6 +1184,7 @@
 0x106027A1	city_bld_skyscraper03_wall02_nm
 0x1064206B	pause_menu_ifd
 0x10651EAE	radar_Jammer
+0x1066F684	ch_hum_super_worker
 0x106B0843	pmccon002_shot_2
 0x106DC82E	city_bld_apartment06_parts_ruin_nm
 0x107005E3	veh_boatbigfishing
@@ -1910,6 +1916,7 @@
 0x1A8B9EB5	MEC01_Contract_Briefing_Yes_Starter-Chris
 0x1A98F393	commercial_road5cross
 0x1A992D82	vzoutpost_bld_garage_wall01_dm
+0x1A9D89DF	civ_hum_super_aidworker
 0x1A9F08ED	pr_hum_sailorfemale_a_ub_nm
 0x1AA51BC0	estate_bld_mansion04_lod
 0x1AA7B07D	civ_hum_poor_lba_nm
@@ -2717,6 +2724,7 @@
 0x25DDDFD6	global_handrails01_nm
 0x25DECE1C	MrxGuiBootstrap_ShellOnly
 0x25E24D64	Vz_State_AllJob009_05_Pristine
+0x25E39BE9	civ_hum_super_poor
 0x25E8E5A8	civ_veh_truck_ridgeline_wheels_dm
 0x25EA9928	poi_anch_sshot4
 0x25EB48EA	vz_state_gurjob11_05_tinygeometry_tgr12_tgc22_0x00143c3e
@@ -2808,6 +2816,7 @@
 0x26F8DDEB	village_bld_housestilts02_wood01_ruin_sm
 0x27008B62	amb_birds
 0x270121C0	spiel_job_oil03_jennifer
+0x2703554F	civ_hum_super_businessfemale
 0x27092D68	outskirt_bld_mercbar_pristine_ruin_lod
 0x271182F1	oc_hum_mercenaryofficer_head_sm
 0x27148AF8	pr_att_sailor_a_ammobelt
@@ -3388,6 +3397,7 @@
 0x2EE45F8D	global_env_palmtreebend03
 0x2EF266F8	ch_veh_tank_ztz98_sm
 0x2EF46E54	groutpost_bld_bunkerconcrete
+0x2EF7E3C3	oc_hum_super_executive
 0x2EF9FE98	allcon002_briefing_ia
 0x2EFA8DA5	vz_state_gurjob012_04
 0x2EFCBB4C	vzoutpost_bld_barracktent_canvas_ruin_dm
@@ -3783,6 +3793,7 @@
 0x35031A7B	ocoutpostinterior_trashcanb_sm
 0x350AAFC3	gr_hum_heavy_a_ammobelt_nm
 0x351176AE	HUD_objective_timer
+0x3511CCE7	civ_hum_super_protester
 0x351202BD	vz_caracas_ruindebris02_r13_c08_0x0013dae3
 0x35153015	font_gr_glyphs_f0
 0x351F91D4	jungle_road10t
@@ -4307,6 +4318,7 @@
 0x3C947E50	oilrig_bld_buildinga_details_02
 0x3C96F88B	vz_Chi_Job006_b
 0x3C9A2C16	vz_state_pirjob012_03_pristine_tinygeometry_tgr11_tgc12_0x00143d6b
+0x3C9A5987	civ_hum_super_businessb
 0x3C9E1493	groutpost_bld_cranemining_cabintop_sm
 0x3CA518CE	oc_hum_executive_ub_sm
 0x3CA6464E	proutpost_att_satelitelarge003_sm
@@ -5066,6 +5078,7 @@
 0x4758C4C4	global_electronicboxa_sm
 0x475A2779	vzoutpost_bld_barracktent_parts_dm
 0x47608DC9	MrxSoundShellBootstrap
+0x4761451B	civ_hum_super_mechanic
 0x47662522	vz_hum_deathsquad_lba_sm
 0x476F06FE	industrial_lampost02_sm
 0x47735427	vzoutpost_bld_garage_ruin_lod
@@ -5311,6 +5324,7 @@
 0x4AA965E1	shanty_bld_house02_ruin_lod
 0x4AAB782C	groutpost_bld_trailerhut01_ruin_nm
 0x4AAB8F77	vz_state_gurjob002_03
+0x4AB6F9B6	gr_hum_super_soldier
 0x4ABB0B55	vz_state_oc_depot_tinygeometry_tgr27_tgc30_0x00144df4
 0x4ABF9AAA	vz_amazon_tiny_tinygeometry_tgr17_tgc21_0x00143faf
 0x4AC7E58C	caracas_bld_skyscraperpristine02_roof_sm
@@ -5838,6 +5852,7 @@
 0x52492C6E	poi_gr_sshot3
 0x524C9536	outskirt_road20t10
 0x52513895	MrxRewardData
+0x5253854D	civ_hum_super_poorfemale
 0x52582DF2	village_bld_house01_windows_ruin_sm
 0x525BF97A	pmcoutpost_bld_hqexterior_wall05_nm
 0x526022AD	aloutpost_bld_guardtower_ruin
@@ -6850,6 +6865,7 @@
 0x608E8AF7	civ_hum_richfemale_ubb
 0x609414A7	white_road10_straight
 0x60A30D4C	Vz_State_AllCon003
+0x60A4EEF3	civ_hum_super_richfemale
 0x60A5886D	city_bld_apartment05_wall01_dm
 0x60A8900A	city_bld_apartment01_wall01_ruin_nm
 0x60ABB7A3	global_waterpuddle03
@@ -8352,6 +8368,7 @@
 0x759485F1	vz_cumana_tiny_tinygeometry_tgr19_tgc08_0x00144e3e
 0x7598ED58	global_bld_officetrailera_nm
 0x75994CA6	ALL04_Contract_Briefing_No_Starter-Jennifer
+0x759BDE16	gr_hum_super_soldierfemale
 0x75A0BBD2	vz_veh_truck_m151_lod_dm
 0x75A1F986	chinaoutpost_bld_commbunker01_ground_ruin_sm
 0x75A20E55	ocoutpost_interiordetail
@@ -8864,6 +8881,7 @@
 0x7CA827AB	village_bld_housestilts05_wall_ruin_nm
 0x7CB5ADA0	vzoutpost_bld_hangarbunker_ruin_lod
 0x7CB72AEB	vz_state_all_fuel_amazon_tinygeometry_tgr06_tgc10_0x001439a6
+0x7CB86FC9	civ_hum_super_cartworker
 0x7CC149A7	gr_hum_soldierfemale_a_head
 0x7CC413C4	global_vendingmachine01
 0x7CC4F5A1	vz_pirate_isles_tiny_tinygeometry_tgr36_tgc22_0x00144f1f
@@ -9925,6 +9943,7 @@
 0x8BB9C22A	vz_guanare_tiny_tinygeometry_tgr13_tgc23_0x00144e4b
 0x8BBA08EC	estate_wallgate01_lod
 0x8BBAD1FE	global_veh_weapon_rocket19_dm
+0x8BC154D7	civ_hum_super_protesterfemale
 0x8BC25675	vz_maracaibo_tiny_tinygeometry_tgr23_tgc31_0x00144e7b
 0x8BC48393	mountain_bld_bunkerdestroyed_floor_nm
 0x8BD5DB15	Vz_State_PirJob007_A_Staging
@@ -10545,6 +10564,7 @@
 0x9483F0A7	global_brickpile01
 0x9486F4D0	vz_mar_trash01_r12_c15_0x00102a5d
 0x948A6719	civ_hum_doctorfemale_glassesa_sm
+0x949187D0	civ_hum_super_industrialfemale
 0x94922184	port_cranegantry_c_sm
 0x9494EAE2	cartel_hum_officer_uba_sm
 0x949E3E10	caracas_bld_cathedralstatue_ruin_nm
@@ -11677,6 +11697,7 @@
 0xA3B4547F	civ_veh_motorcycle_chopper_lod_dm
 0xA3BA5377	gr_veh_towed_m101a_lod_dm
 0xA3BBDFCE	city_bld_corner16x16a_wall02_sm
+0xA3BFC1E6	vz_hum_hvt03
 0xA3C1FABC	pmc_hum_mattias_v3
 0xA3C4B3DC	ocoutpostinterior_interiordetailb_sm
 0xA3CA0184	global_gui_failed
@@ -12398,6 +12419,7 @@
 0xADBF8ED3	vz_state_alljob009_03_defenses_tinygeometry_tgr19_tgc16_0x00143a21
 0xADC903C8	city_bld_segment32x32d_pavement_nm
 0xADCDCA45	groutpost_bld_earthmover_cabinwall_nm
+0xADD11AC5	vz_hum_hvt04
 0xADD263E1	vz_state_jetcon001_pristine_tinygeometry_0x00143c52
 0xADD4D0F0	industrial_bld_warehouse01c_sm
 0xADDAD5EC	groutpost_sandbags_ruin_sm
@@ -12582,6 +12604,7 @@
 0xB09DEE2A	civ_hum_industrialfemale_ub_a
 0xB09EBEB3	ocoutpost_bld_hq_ruin_lod
 0xB09F3E02	chinaoutpost_bld_rail01_sm
+0xB0A0930E	civ_hum_super_casual
 0xB0A4CFF8	margarita_bld_club01_roof_sm
 0xB0B223D4	outskirt_bld_mercbar_walla_nm
 0xB0B6C4AB	ALL01_Contract_Briefing_Starter-Jennifer
@@ -13420,6 +13443,7 @@
 0xBC56E28B	vz_terrainglobal_r06_c16_0x0003fd5b
 0xBC580719	civ_hum_poorfemale_b_hair
 0xBC59210A	margarita_bld_condo01_ruin_lod
+0xBC65582A	ch_hum_super_sailor
 0xBC6709CB	city_bld_segment32x32d_pavement_sm
 0xBC6CC403	industrial_bld_conveyorbelt_roof_dm
 0xBC6D56CB	vz_state_gurjob002_02_ruined_tinygeometry_tgr07_tgc30_0x00143fdb
@@ -13441,6 +13465,7 @@
 0xBCB3DAA6	Vz_State_PirJob002_02_Pristine
 0xBCB45902	global_weapon_fae_nm
 0xBCB4EDDD	village_bld_windmill01_metal_sm
+0xBCBA07EE	civ_hum_super_casualfemale
 0xBCBA1B28	pickup_combat
 0xBCBADB1C	global_weapon_suppressor_nm
 0xBCBDCDA2	global_crateaid
@@ -14075,6 +14100,7 @@
 0xC5B68B26	global_telephonebooth_sm
 0xC5B94889	port_gangplankb_parts_nm
 0xC5C19F74	Global_Job_Briefing_Eva
+0xC5C23603	vz_hum_hvt02
 0xC5C2BCF2	pr_hum_thug_a_ub_sm
 0xC5C65E4C	merida_bld_hotel_sm
 0xC5C9F31D	village_bld_plantationsmall01_roof_ruin_dm
@@ -16444,6 +16470,7 @@
 0xE7C5C63C	vz_terrainglobal_r19_c10_0x0007472c
 0xE7D2DAF0	caracas_bld_cathedralstatue_dbr_dm
 0xE7D3FD64	civ_hum_latin_headf
+0xE7D6462D	civ_hum_super_cartworkerfemale
 0xE7D6B071	japanese_18_20
 0xE7D8F9DF	global_decal_generic_bullet_01
 0xE7D90ED1	village_bld_farmhouse_wall_ruin_dm
@@ -16638,6 +16665,7 @@
 0xEA7AC9DA	outskirt_bld_market05_sm
 0xEA7B1826	jungle_bld_ruinshotelback_roof_ruin_nm
 0xEA7CF147	Vz_State_PirJob007_C_Staging
+0xEA7F9F3F	civ_hum_super_business
 0xEA8601E0	vz_veh_truck_m35_cab2_nm
 0xEA89878F	MecJob
 0xEA9DDB55	airport_bld_hanger_roof_sm
@@ -16645,6 +16673,7 @@
 0xEAA0ADAD	outskirt_bld_churchfloor_nm
 0xEAA1C080	maracaibo_bld_skyscraper01
 0xEAA69AAF	estate_walllong_ruin_lod
+0xEAA71CCB	oc_hum_super_executivefemale
 0xEAAA295F	spiel_minorcontract_oil04_chris
 0xEAAC95E4	vz_terrainglobal_r03_c12_0x0003fd1b
 0xEAAE4113	pmc_veh_motorcycle_mattias_lod_dm
@@ -17220,6 +17249,7 @@
 0xF23FFC29	industrial_bld_gasstationpump02_nm
 0xF2423255	estate_bld_mansion03_03
 0xF242434B	global_weapon_chainfeed01_sm
+0xF245AC63	pr_hum_super_thug
 0xF2478F9A	global_ropeties_nm
 0xF2485070	global_weapon_c4land_15thsec
 0xF2497140	pmcoutpost_bld_hqinterior_wall03_livedin
@@ -17344,6 +17374,7 @@
 0xF4106885	vz_state_chijob006_e_pristine_tinygeometry_0x00143b70
 0xF4124EF4	ch_veh_truck_sx2150_tanker_nm
 0xF41801F3	caracas_skytramcolumn_stair_ruin_sm
+0xF419FFEB	pr_hum_super_thugfemale
 0xF41B95A0	margarita_bld_condo01_banner_dm
 0xF41D412A	margarita_bld_hotelresort01_railway_ruin_dm
 0xF4225DC6	city_bld_corner32x32d_wall_nm
@@ -17783,6 +17814,7 @@
 0xF9E7D665	groutpost_bld_shackcave06_nm
 0xF9E81CC9	_bold_italic_font_f0
 0xF9E8A9D9	civ_veh_car_r90_sm
+0xF9EA3B44	civ_hum_super_industrial
 0xF9EB20B7	vz_state_gurjob011_04_destroyed_tinygeometry_0x00143c20
 0xF9F19570	global_windowbars01
 0xF9F27893	Vz_State_AllJob010_02_Pristine
