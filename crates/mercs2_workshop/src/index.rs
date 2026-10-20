@@ -305,12 +305,6 @@ impl AssetIndex {
         self.rows(Kind::Texture)
     }
 
-    /// The world-state placement layers (`vz_state_*` / `layers_static`) — what `edit_world` and
-    /// `activate_layer` act on. The World domain browses these directly.
-    pub fn layers(&self) -> &[AssetRow] {
-        self.rows(Kind::Layer)
-    }
-
     /// How many assets a category holds — for the category strip's counts.
     pub fn count(&self, kind: Kind) -> usize {
         self.rows(kind).len()
