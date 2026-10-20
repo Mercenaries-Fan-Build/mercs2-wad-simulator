@@ -159,17 +159,24 @@ pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
         })?,
     )?;
 
-    // --- Time / timestamp surface (self-consistent monotonic clock; no host method needed). ---
+    // --- Time / timestamp surface: the VM's game clock (`super::ScriptClock`), advanced by the
+    // engine's `Event.__pump(dt)` tick — never the wall clock, so the same ticks give the same times.
     // The game marks a stamp (Real/MainTimeStamp, TimeStampMark) and later reads the delta
-    // (TimeStampGetElapsed) — e.g. antiair.lua's lock-on blink. A single boot Instant makes every stamp
-    // and elapsed value coherent.
-    let boot = std::time::Instant::now();
-    b.real("MainTime", lua.create_function(move |_, ()| Ok(boot.elapsed().as_secs_f64()))?)?;
-    b.real("RealTime", lua.create_function(move |_, ()| Ok(boot.elapsed().as_secs_f64()))?)?;
-    b.real("MainTimeStamp", lua.create_function(move |_, ()| Ok(boot.elapsed().as_secs_f64()))?)?;
-    b.real("RealTimeStamp", lua.create_function(move |_, ()| Ok(boot.elapsed().as_secs_f64()))?)?;
-    b.real("TimeStampMark", lua.create_function(move |_, ()| Ok(boot.elapsed().as_secs_f64()))?)?;
-    b.real("Clock", lua.create_function(move |_, ()| Ok(boot.elapsed().as_secs_f64()))?)?;
+    // (TimeStampGetElapsed) — e.g. antiair.lua's lock-on blink. One clock keeps every stamp and elapsed
+    // value coherent. `RealTime*` is the same game clock; see DEFERRED.md.
+    let clock = super::script_clock(lua);
+    let c = clock.clone();
+    b.real("MainTime", lua.create_function(move |_, ()| Ok(c.now()))?)?;
+    let c = clock.clone();
+    b.real("RealTime", lua.create_function(move |_, ()| Ok(c.now()))?)?;
+    let c = clock.clone();
+    b.real("MainTimeStamp", lua.create_function(move |_, ()| Ok(c.now()))?)?;
+    let c = clock.clone();
+    b.real("RealTimeStamp", lua.create_function(move |_, ()| Ok(c.now()))?)?;
+    let c = clock.clone();
+    b.real("TimeStampMark", lua.create_function(move |_, ()| Ok(c.now()))?)?;
+    let c = clock.clone();
+    b.real("Clock", lua.create_function(move |_, ()| Ok(c.now()))?)?;
     // `Option<f64>` in AND out, deliberately: the shipped binding tolerates a nil stamp, and the
     // shipped Lua proves it. `MrxPlayState.GetTotalTimeElapsed` (`mrxplaystate.lua:100-107`) does
     //
@@ -183,33 +190,19 @@ pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
     // → `GenerateSaveData` chain reads `GetTotalTimeElapsed` while `_uSessionStartTimestamp` is
     // still nil — `StartSessionTimer()` is eight lines later, at `:869`. Declaring `ts: f64` made
     // that a hard `error converting Lua nil to f64` and stranded the resume boot mid-transition.
+    let c = clock.clone();
     b.real(
         "TimeStampGetElapsed",
-        lua.create_function(move |_, ts: Option<f64>| {
-            Ok(ts.map(|t| boot.elapsed().as_secs_f64() - t))
-        })?,
+        lua.create_function(move |_, ts: Option<f64>| Ok(ts.map(|t| c.now() - t)))?,
     )?;
     b.real("DiffTime", lua.create_function(|_, (a, b): (f64, f64)| Ok(a - b))?)?;
-    b.real(
-        "Time",
-        lua.create_function(|_, ()| {
-            let secs = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs() as i64)
-                .unwrap_or(0);
-            Ok(secs)
-        })?,
-    )?;
-    b.real(
-        "Date",
-        lua.create_function(|_, ()| {
-            let secs = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs())
-                .unwrap_or(0);
-            Ok(format!("{secs}"))
-        })?,
-    )?;
+    // `Time`/`Date` are whole seconds of the same game clock, not seconds since the Unix epoch: no
+    // shipped script calls either (no `Sys.Time`/`Sys.Date` in the corpus), and a wall-clock read here
+    // would make two identical runs differ. See DEFERRED.md.
+    let c = clock.clone();
+    b.real("Time", lua.create_function(move |_, ()| Ok(c.now().floor() as i64))?)?;
+    let c = clock.clone();
+    b.real("Date", lua.create_function(move |_, ()| Ok(format!("{}", c.now().floor() as i64)))?)?;
 
     // --- Config / platform / profile getters the game branches on → faithful retail-PC defaults. ---
     // (No host method for these yet; each returns the value the retail PC build reports.)

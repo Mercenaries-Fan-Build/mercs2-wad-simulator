@@ -201,6 +201,59 @@ impl Installed {
     }
 }
 
+/// The VM's game clock: seconds of simulated time, advanced only by the engine's tick into the VM
+/// (`Event.__pump(dt)`, the same call that counts `TimerRelative` handlers down). Every `Sys` time
+/// binding reads it, so script timers and `Sys.MainTime`/`TimeStamp*` always agree, and two runs fed
+/// the same ticks see the same times. Shared per VM through app data; see [`script_clock`].
+#[derive(Clone, Default)]
+pub struct ScriptClock(std::rc::Rc<std::cell::Cell<f64>>);
+
+impl ScriptClock {
+    pub fn now(&self) -> f64 {
+        self.0.get()
+    }
+
+    pub(crate) fn advance(&self, dt: f64) {
+        self.0.set(self.0.get() + dt);
+    }
+}
+
+/// This VM's [`ScriptClock`], created at zero on first use.
+pub fn script_clock(lua: &Lua) -> ScriptClock {
+    if let Some(c) = lua.app_data_ref::<ScriptClock>() {
+        return (*c).clone();
+    }
+    let c = ScriptClock::default();
+    lua.set_app_data(c.clone());
+    c
+}
+
+/// The VM's one random-number state, behind `Math.randi`/`Math.randf` and the standard library's
+/// `math.random`/`math.randomseed` alike, so no script draws from the process-wide C `rand()`.
+/// Shared per VM through app data; see [`script_rng`].
+#[derive(Clone)]
+pub struct ScriptRng(pub(crate) std::rc::Rc<std::cell::RefCell<u64>>);
+
+/// The state every VM starts from.
+pub const DEFAULT_RNG_SEED: u64 = 0x2545F4914F6CDD1D;
+
+impl ScriptRng {
+    /// Restart the sequence from `seed`.
+    pub fn reseed(&self, seed: u64) {
+        *self.0.borrow_mut() = seed;
+    }
+}
+
+/// This VM's [`ScriptRng`], created at [`DEFAULT_RNG_SEED`] on first use.
+pub fn script_rng(lua: &Lua) -> ScriptRng {
+    if let Some(r) = lua.app_data_ref::<ScriptRng>() {
+        return (*r).clone();
+    }
+    let r = ScriptRng(std::rc::Rc::new(std::cell::RefCell::new(DEFAULT_RNG_SEED)));
+    lua.set_app_data(r.clone());
+    r
+}
+
 /// Accumulates real/stub bindings while building a namespace's Lua table, then installs it as a
 /// global. This is the only surface a namespace file touches — it keeps the real/stub bookkeeping
 /// honest (you cannot record a binding without also installing it).

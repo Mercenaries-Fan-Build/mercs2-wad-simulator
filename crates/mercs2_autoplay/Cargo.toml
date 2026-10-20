@@ -1,0 +1,36 @@
+[package]
+name = "mercs2_autoplay"
+version = "0.1.0"
+edition = "2021"
+description = "Mercenaries 2 modernization — headless autoplay harness: runs the shipped game Lua on the engine's script host against the real world data, as the base for exhaustive path exploration and call tracing."
+readme = "README.md"
+license.workspace = true
+repository.workspace = true
+
+[lib]
+name = "mercs2_autoplay"
+path = "src/lib.rs"
+
+[[bin]]
+name = "mercs2_autoplay"
+path = "src/main.rs"
+
+[dependencies]
+# The script host (`GameScriptHost` + the resident `ScriptHost`), the boot flow, and the world-data
+# readers (`worldutil`) the game itself boots from. The harness drives them; it does not copy them.
+mercs2_engine = { workspace = true }
+# `World` / `GuidMap` — the entity store the named markers and landing pads are realized into.
+mercs2_core = { workspace = true }
+# `game_paths` — where `vz.wad` is configured.
+mercs2_formats = { workspace = true }
+# The NDJSON call trace (`trace`): correct string escaping for arbitrary game strings.
+serde_json = "1"
+
+[features]
+# Builds the game-gated tests, which read the retail vz.wad named by the repo-root .mercs2-local.toml;
+# run them with `cargo xtask retail-test`.
+retail = []
+
+[[test]]
+name = "boot"
+required-features = ["retail"]

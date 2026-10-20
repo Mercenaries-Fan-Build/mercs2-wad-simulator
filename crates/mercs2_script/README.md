@@ -92,6 +92,8 @@ sh.fire_state_change("WaitForStreaming", "enter")?;
 
 Other public entry points: `ScriptHost::import_module(name)` (load + cache a corpus module),
 `ScriptHost::exec(src, name)`, `ScriptHost::lua()` (the raw `mlua::Lua`),
+`ScriptHost::set_rng_seed(seed)` / `ScriptHost::game_time()` (the VM's RNG state and game clock — see
+the determinism note below),
 `ScriptHost::register_engine_reported(host)` (same as `register_engine` but returns
 `Vec<NsCoverage>`), and `ScriptHost::enable_autostub(sink)` — a bring-up layer that installs a `_G`
 metatable so a read of an as-yet-unwired **Capitalized** global resolves to a logged, indexable+callable
@@ -146,3 +148,10 @@ The crate root exports `ScriptHost`, `EngineHost`, `SharedHost`, and re-exports 
   `[lua]` log stream is load-bearing, so it gets a real body. The other five `Debug.*` are faithful
   no-ops.
 * Bindings map a `0` GUID to Lua `nil`, so the game's `if not uGuid` control flow stays authentic.
+* **Deterministic by construction: no binding reads the wall clock or the process RNG.** Every `Sys`
+  time binding (`MainTime`, `RealTime`, `*TimeStamp*`, `TimeStampGetElapsed`, `Clock`, `Time`, `Date`)
+  reads the VM's game clock (`bindings::ScriptClock`), which only `Event.__pump(dt)` advances — the same
+  tick that counts `TimerRelative` down. `Math.randi`/`Math.randf` and the stdlib `math.random`/
+  `math.randomseed` share one per-VM LCG state (`bindings::ScriptRng`, `set_rng_seed`), so two VMs in one
+  process never share a sequence. The same ticks, calls and seed give the same script behaviour; the
+  `mercs2_autoplay` determinism test holds the whole boot to byte-identical call traces.

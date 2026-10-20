@@ -8,7 +8,7 @@
 //! `Set*`→`Get*` round-trip for real (a HUD script that hides a widget actually hides it). The GFx
 //! *rasterization* (drawing the tree) is a separate render pass; here we own the scene-graph state.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 /// Widget node type (`Hud.Create*Widget`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -207,7 +207,9 @@ impl Widget {
 /// walks. Handles are stable, non-zero, unique.
 #[derive(Default)]
 pub struct WidgetTree {
-    widgets: HashMap<u64, Widget>,
+    /// Ordered by handle, i.e. creation order. The movie and animation ticks walk this map to queue
+    /// completion callbacks, so a hash map here dispatched them in a different order every run.
+    widgets: BTreeMap<u64, Widget>,
     next: u64,
     z_top: i32,
     /// Monotonic id source for retained callbacks. Never reused, so a stale id from a deleted widget
@@ -221,7 +223,7 @@ pub struct WidgetTree {
 
 impl WidgetTree {
     pub fn new() -> Self {
-        WidgetTree { widgets: HashMap::new(), next: 1, z_top: 0, ..Default::default() }
+        WidgetTree { widgets: BTreeMap::new(), next: 1, z_top: 0, ..Default::default() }
     }
 
     /// Mint an opaque callback id for the script layer to associate with a retained Lua function.

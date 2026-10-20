@@ -240,13 +240,15 @@ depending on `mercs2_script`; the Missions page consumes its IR and renders with
 2. **Tier A edges:** run each `GetOriginalFlowData` binding's `fPrereq`/`fConseq` under the recording
    oracle, which captures:
    - **prereqs** = every `HasKey`/`GetKeyValue>=n` atom in `fPrereq`, each with **polarity** —
-     `not HasKey(x)` is a *negative* precondition (13 sites, e.g. the `PmcCon002_*` hint chain);
-     flattening it to a positive prereq inverts the gate.
+     `not HasKey(x)` is a *negative* precondition (4 sites, all in the `PmcCon002_*` hint chain;
+     the other 9 `not HasKey` tests are guards inside consequences); flattening it to a positive
+     prereq inverts the gate.
    - **consequences** = `UnlockMission`/`AwardKey`/`DestroyMission` args in `fConseq`. Emit
      `unlocks`/`awards`/`removes` edges through the key namespace. A consequence may sit inside an
-     `if` (9 guarded unlocks, e.g. `OilCon052`→`OilCon005` only `if not HasKey("ChiCon002")`) —
-     capture the enclosing condition as the edge `guard`, or the graph shows unlocks the game
-     suppresses.
+     `if` (3 of the 69 `UnlockMission` calls sit directly in a key guard, e.g. `OilCon052`→`OilCon005`
+     only `if not HasKey("ChiCon002")`; 3 more run only from a teleport callback behind
+     `if type(tStartLocations) == "table"`) — capture the enclosing condition as the edge `guard`,
+     or the graph shows unlocks the game suppresses.
    - `fConseq` is **not always an inline closure**: handle bare named-fn refs
      (`fConseq = _AddHeroCostume`), a *missing* `fConseq` (`PmcJob001`), and verbs nested in
      `local function`s (`Start`/`PmcCon001`) — follow the reference.
@@ -297,8 +299,9 @@ depending on `mercs2_script`; the Missions page consumes its IR and renders with
    free-text-with-suggestions, not fixed dropdowns. Trailing bools on `Boundary`/`ObjectProximity`
    are low-confidence; mark optional.
 10. **Cross-node pin reads:** `ObjectiveRelease` reads its *parent's* `tMaterielScale`.
-11. **Prereqs have polarity; consequences can be guarded.** `not HasKey(x)` (13 sites) is a real
-    negative precondition, and 9 `UnlockMission`s sit inside `if`-guards. Both are *progression*
+11. **Prereqs have polarity; consequences can be guarded.** `not HasKey(x)` in a prereq (4 sites)
+    is a real negative precondition, and 3 `UnlockMission`s sit inside key `if`-guards (3 more
+    behind a start-location check). Both are *progression*
     edges — not summarizable glue — so model them with `negated` + `guard`, never flatten.
 12. **`ObjectInSeat`/`HumanStateTransition` args are coded, not worded** — seat `"d"/"a"`, action
     `"e"/"ei"/"x"/"xo"`; transition states are dotted `"Group.Phase"` strings. Free-text-with-

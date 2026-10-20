@@ -19,8 +19,9 @@
 //! - `GetXZHeading(dx,dy,dz)` → yaw about +Y in the XZ plane = `atan2(dx, dz)` (radians), fed straight
 //!   to `Object.SetYaw` (`mrxchicon001rescue.lua:55-56`).
 //!
-//! `randi`/`randf` draw from a deterministic seeded LCG owned by this table (the reimpl forbids
-//! nondeterministic RNG); every boot replays the same sequence.
+//! `randi`/`randf` draw from the VM's deterministic seeded LCG (`super::ScriptRng`; the reimpl forbids
+//! nondeterministic RNG), and so does the stdlib `math.random`, which `install` redirects onto the same
+//! state. Every boot replays the same sequence for the same seed (`ScriptHost::set_rng_seed`).
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -77,8 +78,9 @@ fn lcg_f64(state: &RefCell<u64>) -> f64 {
 pub fn install(lua: &Lua, _host: &SharedHost) -> LuaResult<Installed> {
     let mut b = NsBuilder::new(lua)?;
 
-    // Seeded so the RNG sequence is identical every boot (reimpl determinism mandate).
-    let rng: Rc<RefCell<u64>> = Rc::new(RefCell::new(0x2545F4914F6CDD1D));
+    // The VM's one seeded RNG state (reimpl determinism mandate): identical every boot for the same
+    // seed, and shared with the stdlib `math.random` installed at the end of this function.
+    let rng: Rc<RefCell<u64>> = super::script_rng(lua).0;
 
     // --- scalar helpers (game-side Math, distinct from Lua stdlib `math`) ---
     b.real("abs", lua.create_function(|_, x: f64| Ok(x.abs()))?)?;
@@ -170,6 +172,51 @@ pub fn install(lua: &Lua, _host: &SharedHost) -> LuaResult<Installed> {
         lua.create_function(|_, (angle_deg, radius): (f64, f64)| {
             let a = angle_deg.to_radians();
             Ok((radius * a.cos(), radius * a.sin()))
+        })?,
+    )?;
+
+    // The stdlib `math.random`/`math.randomseed` (lmathlib.c `math_random`/`math_randomseed`), redirected
+    // from the process-wide C `rand()` to this VM's RNG state. The prelude's `math.randi` — 45 corpus
+    // call sites — is built on `math.random`, so without this two VMs in one process (or one VM run
+    // twice) drew from a shared sequence. The argument handling and the three result forms are 5.1's:
+    // `()` → `[0,1)`, `(u)` → integer in `[1,u]`, `(l,u)` → integer in `[l,u]`, with luaL_checkint's
+    // truncation and its "interval is empty" errors.
+    let math: mercs2_luac::rt::Table = lua.globals().get("math")?;
+    let r = rng.clone();
+    math.set(
+        "random",
+        lua.create_function(move |_, args: Variadic<f64>| {
+            let x = lcg_f64(&r);
+            match args.len() {
+                0 => Ok(x),
+                1 => {
+                    let u = args[0].trunc();
+                    if u < 1.0 {
+                        return Err(mercs2_luac::rt::Error::RuntimeError(
+                            "bad argument #1 to 'random' (interval is empty)".into(),
+                        ));
+                    }
+                    Ok((x * u).floor() + 1.0)
+                }
+                2 => {
+                    let (l, u) = (args[0].trunc(), args[1].trunc());
+                    if l > u {
+                        return Err(mercs2_luac::rt::Error::RuntimeError(
+                            "bad argument #2 to 'random' (interval is empty)".into(),
+                        ));
+                    }
+                    Ok((x * (u - l + 1.0)).floor() + l)
+                }
+                _ => Err(mercs2_luac::rt::Error::RuntimeError("wrong number of arguments".into())),
+            }
+        })?,
+    )?;
+    let r = rng.clone();
+    math.set(
+        "randomseed",
+        lua.create_function(move |_, seed: f64| {
+            *r.borrow_mut() = seed.trunc() as i64 as u64;
+            Ok(())
         })?,
     )?;
 

@@ -1845,7 +1845,11 @@ pub fn register_named_markers(
     {
         let mut w = world.borrow_mut();
         let h = host.borrow();
-        for (name, pos) in index {
+        // Spawn in name order: a `HashMap` iterates in a per-instance random order, which made every
+        // marker's entity — and so its script guid — differ from one boot to the next.
+        let mut ordered: Vec<(&String, &[f32; 3])> = index.iter().collect();
+        ordered.sort_unstable_by(|a, b| a.0.cmp(b.0));
+        for (name, pos) in ordered {
             let e = w.spawn((Transform::from_translation((*pos).into()),));
             h.register_named_entity(e, pandemic_hash_m2(name));
         }

@@ -1755,6 +1755,19 @@ impl ScriptHost {
         Ok(out)
     }
 
+    /// Restart this VM's random sequence from `seed` — the one state behind `Math.randi`/`Math.randf`
+    /// and `math.random` (see [`bindings::ScriptRng`]). Every VM starts at
+    /// [`bindings::DEFAULT_RNG_SEED`]; the same seed and the same calls give the same draws.
+    pub fn set_rng_seed(&self, seed: u64) {
+        bindings::script_rng(&self.lua).reseed(seed);
+    }
+
+    /// Seconds of game time this VM has been ticked through (`Event.__pump(dt)` sums), as every
+    /// `Sys` time binding reports it (see [`bindings::ScriptClock`]).
+    pub fn game_time(&self) -> f64 {
+        bindings::script_clock(&self.lua).now()
+    }
+
     /// Advance the `TimerRelative` handlers by `dt` seconds (the engine's per-tick `Event.__pump`).
     pub fn pump_events(&self, dt: f32) -> LuaResult<()> {
         let ev: Table = self.lua.globals().get("Event")?;
@@ -1844,6 +1857,57 @@ mod tests {
         fn add_layers(&mut self, layers: &[String]) {
             self.layers.extend_from_slice(layers);
         }
+    }
+
+    fn host_with_bindings() -> ScriptHost {
+        let sh = ScriptHost::bare().unwrap();
+        sh.register_engine(Rc::new(RefCell::new(RecordingHost::default()))).unwrap();
+        sh
+    }
+
+    /// `Sys` time is the VM's game clock: it starts at zero and moves only with `Event.__pump(dt)`.
+    #[test]
+    fn sys_time_is_the_game_clock_advanced_by_the_pump() {
+        let sh = host_with_bindings();
+        let t0: f64 = sh.eval("return Sys.MainTime()").unwrap();
+        assert_eq!(t0, 0.0, "a fresh VM has seen no ticks");
+        sh.exec("__stamp = Sys.TimeStampMark()", "@t").unwrap();
+        sh.pump_events(0.5).unwrap();
+        sh.pump_events(0.25).unwrap();
+        let (main, elapsed, real): (f64, f64, f64) = sh
+            .eval("return Sys.MainTime(), Sys.TimeStampGetElapsed(__stamp), Sys.RealTimeStamp()")
+            .unwrap();
+        assert_eq!(main, 0.75);
+        assert_eq!(elapsed, 0.75);
+        assert_eq!(real, 0.75);
+        assert_eq!(sh.game_time(), 0.75);
+    }
+
+    /// `math.random` and `Math.randi` draw from one per-VM state: two VMs give the same sequence, and
+    /// `set_rng_seed` restarts it.
+    #[test]
+    fn math_random_is_per_vm_and_seeded() {
+        const DRAWS: &str = "local t = {} for i = 1, 8 do t[#t+1] = math.random(1, 1000) end \
+                             t[#t+1] = Math.randi(1, 1000) t[#t+1] = math.randi(5) return t";
+        let seq = |sh: &ScriptHost| -> Vec<i64> {
+            let t: mercs2_luac::rt::Table = sh.eval(DRAWS).unwrap();
+            t.sequence_values::<i64>().map(Result::unwrap).collect()
+        };
+        let (a, b) = (host_with_bindings(), host_with_bindings());
+        let first = seq(&a);
+        assert_eq!(first, seq(&b), "two fresh VMs draw the same sequence");
+        assert!(first.iter().take(8).all(|n| (1..=1000).contains(n)), "{first:?}");
+
+        a.set_rng_seed(7);
+        let seven = seq(&a);
+        assert_ne!(seven, first, "a different seed gives a different sequence");
+        a.set_rng_seed(7);
+        assert_eq!(seq(&a), seven, "re-seeding replays the sequence");
+
+        let x: f64 = a.eval("return math.random()").unwrap();
+        assert!((0.0..1.0).contains(&x), "math.random() is in [0,1): {x}");
+        let err = a.exec("math.random(0)", "@empty").unwrap_err().to_string();
+        assert!(err.contains("interval is empty"), "{err}");
     }
 
     #[test]

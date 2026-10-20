@@ -371,9 +371,18 @@ pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
         })?,
     )?;
 
-    // Engine-driven timer pump (not a game cfunc — the render/sim loop calls this each tick).
+    // Engine-driven timer pump (not a game cfunc — the render/sim loop calls this each tick). It is
+    // also the one place game time advances: the clock moves first, so a timer callback that reads
+    // `Sys.MainTime` sees the tick it fired on.
     let m = mgr.clone();
-    b.extra("__pump", lua.create_function(move |_, dt: f32| pump(&m, dt))?)?;
+    let clock = super::script_clock(lua);
+    b.extra(
+        "__pump",
+        lua.create_function(move |_, dt: f32| {
+            clock.advance(dt as f64);
+            pump(&m, dt)
+        })?,
+    )?;
 
     b.install_global(GLOBAL)
 }

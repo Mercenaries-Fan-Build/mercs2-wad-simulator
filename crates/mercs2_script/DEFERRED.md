@@ -85,3 +85,13 @@ the oracle; only `[faithful-blocker: yes]` items can change observable game beha
   retail instead has an actual seat type `a` (e.g. "any available"), a filter written for it would over-
   match here. UNBLOCK: the seat-type table behind `Vehicle.GetSeatByType` (`vehicle_code_map.md` §1
   applier `FUN_0053f110`).
+
+- **`Sys.RealTime`/`RealTimeStamp`/`Time`/`Date` report game time, not wall time.** `[faithful-blocker: no]`
+  All `Sys` time bindings read the VM's game clock (`bindings::ScriptClock`, advanced only by
+  `Event.__pump(dt)`), so scripted behaviour is reproducible from the same ticks. Retail's `RealTime*`
+  presumably keeps running through pauses and time scaling while `MainTime*` does not (INFERRED from the
+  names; the cfunc bodies are not read), and `Time`/`Date` presumably read the system clock. In the
+  shipped corpus `RealTimeStamp` has one call site and `Time`/`Date` have none, and nothing in this host
+  pauses or scales the clock yet, so no script can observe the difference today. UNBLOCK: read the
+  `Sys.RealTime`/`Sys.Time` cfuncs (table VA in `sys.rs`) and, if they are wall-clock, give the clock a
+  second, real-time track that a host may drive from the wall clock and a harness from its virtual one.
