@@ -2949,11 +2949,17 @@ mod tests {
              lua_dlc/ corpus",
         );
         let mut out = Vec::new();
-        for (sub, tag, expected) in [("lua", "lua", 370), ("lua_dlc", "dlc", 39)] {
+        for ((sub, expected), tag) in crate::index::PINNED_CORPUS.into_iter().zip(["lua", "dlc"]) {
             let root = home.join(sub);
             let mut files = Vec::new();
             lua_files(&root, &mut files);
-            assert_eq!(files.len(), expected, "{sub}/ under {} holds {} scripts", home.display(), files.len());
+            assert_eq!(
+                files.len(),
+                expected,
+                "{sub}/ under {} holds {} scripts; the gates are pinned to the bundle CI downloads",
+                home.display(),
+                files.len()
+            );
             for f in files {
                 let rel = f.strip_prefix(&root).expect("under the root").to_string_lossy().replace('\\', "/");
                 let src = std::fs::read_to_string(&f).unwrap_or_else(|e| panic!("{}: {e}", f.display()));
