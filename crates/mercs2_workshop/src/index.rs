@@ -642,7 +642,11 @@ const ASET_NAME_FRAGMENTS: [&str; 6] = [
 /// one bank and each copy is its own script. An error when the bundle cannot be found or
 /// downloaded, lacks either folder, or holds a script that cannot be read.
 pub fn load_lua_corpus() -> Result<Vec<(String, String, String)>, String> {
-    let home = require_data_home(&mut |_, _| {})?;
+    lua_corpus_at(&require_data_home(&mut |_, _| {})?)
+}
+
+/// The Lua corpus of the reference bundle at `home`, as [`load_lua_corpus`] reads it.
+pub fn lua_corpus_at(home: &Path) -> Result<Vec<(String, String, String)>, String> {
     let mut out = Vec::new();
     for (tag, sub) in [("lua", "lua"), ("dlc", "lua_dlc")] {
         let d = home.join(sub);
@@ -658,6 +662,12 @@ pub fn load_lua_corpus() -> Result<Vec<(String, String, String)>, String> {
     eprintln!("[lua] reference corpus: {} scripts", out.len());
     Ok(out)
 }
+
+/// The Lua corpus of the reference bundle the corpus gates are pinned to — release v0.17.0's
+/// `mercs2-workshop-data.zip`, the one CI downloads — as (folder, scripts). A gate run over any
+/// other bundle fails on the count, so a stale or partial bundle cannot pass on fewer scripts.
+#[cfg(test)]
+pub const PINNED_CORPUS: [(&str, usize); 2] = [("lua", 675), ("lua_dlc", 39)];
 
 #[cfg(test)]
 mod lua_corpus_tests {
