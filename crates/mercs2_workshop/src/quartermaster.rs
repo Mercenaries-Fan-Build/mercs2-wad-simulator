@@ -623,6 +623,11 @@ impl Panel {
         self.shipment.as_ref().map(|s| s.root.as_path())
     }
 
+    /// The index of the first contribution `matches` accepts, in the open Shipment.
+    pub(crate) fn find_contribution(&self, matches: impl Fn(&Contribution) -> bool) -> Option<usize> {
+        self.shipment.as_ref()?.manifest.contributions.iter().position(matches)
+    }
+
     /// The load target for a craft bench entered from contribution `i`: its source model and its
     /// resolved donor. `None` when there is no open Shipment, no such contribution, or the
     /// contribution is not one a bench edits (only `add_outfit` / `add_model` carry a model + donor).
