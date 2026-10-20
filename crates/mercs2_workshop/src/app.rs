@@ -2741,7 +2741,7 @@ pub fn run(opts: Options) {
                                             if !humanoid || (!f.is_empty() && !ll.contains(&f)) {
                                                 continue;
                                             }
-                                            let on = retarget_target.as_ref().is_some_and(|(h, _)| *h == r.hash);
+                                            let on = retarget_target.as_ref().is_some_and(|(h, l)| *h == r.hash && *l == label);
                                             if ui.selectable_label(on, label.clone()).clicked() {
                                                 show_target_picker = false;
                                                 actions.push(Act::RetargetSetTarget(r.hash, label.clone()));
@@ -2789,7 +2789,10 @@ pub fn run(opts: Options) {
                                                 theme::eyebrow(ui, cat);
                                                 last_cat = cat;
                                             }
-                                            let sel_now = preview.as_ref().is_some_and(|p| p.hash == r.hash);
+                                            let sel_now = preview.as_ref().is_some_and(|p| {
+                                                let shown = p.kit.as_ref().and_then(|(_, s)| s.as_ref());
+                                                r.is(p.hash, shown.map(|(t, _)| t.as_str()))
+                                            });
                                             let resp = theme::row_chip(
                                                 ui,
                                                 if sel_now { theme::BRASS_SOFT } else { egui::Color32::TRANSPARENT },
