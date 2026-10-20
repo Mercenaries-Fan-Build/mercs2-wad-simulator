@@ -16,7 +16,7 @@ build = "build.rs"
 crate-type = ["cdylib"]
 
 [dependencies]
-mercs2_formats = "4.1.0"
+mercs2_formats = "5.0"
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Security",
@@ -31,7 +31,7 @@ windows-sys = { version = "0.61", features = [
 [build-dependencies]
 cc = "1.2"
 # The C header of the load ladder the DLL matches against (`load_ladder::c_header`).
-mercs2_formats = "4.1.0"
+mercs2_formats = "5.0"
 
 [profile.release]
 panic = "abort"
