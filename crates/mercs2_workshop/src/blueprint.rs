@@ -35,6 +35,7 @@ use full_moon::ast::{
 };
 use full_moon::node::Node as AstNode;
 use full_moon::tokenizer::{Symbol, Token, TokenReference, TokenType};
+use full_moon::visitors::{VisitMut, VisitorMut};
 
 use crate::lua_source::Script;
 
@@ -146,6 +147,15 @@ pub struct Node {
     form: Form,
     closures: Vec<ClosureForm>,
     semi: Option<TokenReference>,
+    /// The whitespace the statement's line starts with.
+    indent: String,
+    /// Made in the editor rather than lifted: emitted indented to the block it is wired into.
+    fresh: bool,
+    /// Outputs that are in scope after this statement: the locals it declares.
+    declares: Vec<usize>,
+    /// Outputs in scope only inside the block on an exec output: a loop's variables, an
+    /// anonymous function's parameters.
+    block_vars: Vec<(usize, Vec<usize>)>,
 }
 
 #[derive(Clone, Debug)]
@@ -507,7 +517,16 @@ impl Node {
             form,
             closures: Vec::new(),
             semi: None,
+            indent: String::new(),
+            fresh: false,
+            declares: Vec::new(),
+            block_vars: Vec::new(),
         }
+    }
+
+    /// Made in the editor rather than lifted from the script.
+    pub fn is_new(&self) -> bool {
+        self.fresh
     }
 }
 
@@ -605,12 +624,14 @@ impl<'c> Lifter<'c> {
             let id = self.stmt(stmt);
             self.chunk = false;
             self.g.nodes[id].semi = semi.clone();
+            self.g.nodes[id].indent = indent_of(stmt);
             self.g.exec.push(ExecWire { from: cur, to: id });
             cur = (id, self.g.nodes[id].next.expect("a statement continues"));
         }
         if let Some((last, semi)) = b.last_stmt_with_semicolon() {
             let id = self.last(last);
             self.g.nodes[id].semi = semi.clone();
+            self.g.nodes[id].indent = indent_of(last);
             self.g.exec.push(ExecWire { from: cur, to: id });
         }
     }
@@ -671,6 +692,7 @@ impl<'c> Lifter<'c> {
                 self.frames.push(Vec::new());
                 let out = self.output(id, var.clone(), PinTy::Num, OutKind::Var);
                 self.declare(var, (id, out));
+                self.g.nodes[id].block_vars.push((body, vec![out]));
                 self.block(f.block(), (id, body));
                 self.frames.pop();
                 self.g.nodes[id].form = Form::NumericFor {
@@ -699,10 +721,13 @@ impl<'c> Lifter<'c> {
                 }
                 let body = self.exec_out(id, "body");
                 self.frames.push(Vec::new());
+                let mut outs = Vec::new();
                 for n in names {
                     let out = self.output(id, n.clone(), PinTy::Any, OutKind::Var);
                     self.declare(n, (id, out));
+                    outs.push(out);
                 }
+                self.g.nodes[id].block_vars.push((body, outs));
                 self.block(f.block(), (id, body));
                 self.frames.pop();
                 self.g.nodes[id].form = Form::GenericFor {
@@ -752,6 +777,7 @@ impl<'c> Lifter<'c> {
                 let id = self.add(Node::new(Category::Fn, name.clone(), line, true, Form::Entry));
                 let out = self.output(id, name.clone(), PinTy::Obj, OutKind::Var);
                 self.declare(name.clone(), (id, out));
+                self.g.nodes[id].declares.push(out);
                 let sub = self.canvas(&name, false, f.body(), line);
                 self.function_node(id, &name, sub, FnDecl::Local(f.clone()));
                 id
@@ -830,6 +856,7 @@ impl<'c> Lifter<'c> {
             let id = self.add(Node::new(Category::Fn, name.clone(), line, true, Form::Entry));
             let out = self.output(id, name.clone(), PinTy::Obj, OutKind::Var);
             self.declare(name.clone(), (id, out));
+            self.g.nodes[id].declares.push(out);
             let Expression::Function(f) = exprs[0] else { unreachable!() };
             let sub = self.canvas(name, false, f.body(), line);
             let name = name.clone();
@@ -875,6 +902,7 @@ impl<'c> Lifter<'c> {
             let ty = value_tys.get(i).copied().unwrap_or(PinTy::Any);
             let out = self.output(id, name.clone(), ty, OutKind::Var);
             self.declare(name, (id, out));
+            self.g.nodes[id].declares.push(out);
         }
         id
     }
@@ -1232,11 +1260,14 @@ impl<'c> Lifter<'c> {
         if let Expression::Function(f) = e {
             let exec = self.exec_out(owner, &label);
             self.frames.push(Vec::new());
+            let mut outs = Vec::new();
             for p in f.body().parameters() {
                 let name = param_name(p);
                 let out = self.output(owner, name.clone(), PinTy::Any, OutKind::Var);
                 self.declare(name, (owner, out));
+                outs.push(out);
             }
+            self.g.nodes[owner].block_vars.push((exec, outs));
             self.g.nodes[owner].closures.push(ClosureForm {
                 func: (**f).clone(),
                 exec,
@@ -1461,15 +1492,20 @@ impl<'c> Lifter<'c> {
 
 // ───────────────────────────────────────────────────────────────────── emitting
 
+/// One level of indentation for statements the editor writes: the reference corpus's (unluac's).
+const INDENT_UNIT: &str = "  ";
+
 impl Graph {
     /// The block this canvas stands for, rebuilt from its nodes and wires.
     pub fn emit_body(&self) -> Result<Block, Vec<Problem>> {
-        let mut em = Emitter {
-            g: self,
-            reached: vec![false; self.nodes.len()],
-            used: vec![0; self.nodes.len()],
-        };
-        let block = em.chain((ENTRY, 0)).map_err(|p| vec![p])?;
+        self.emit_body_at(String::new())
+    }
+
+    /// As [`Graph::emit_body`], for a body whose new statements indent to `indent` when no
+    /// statement from the source shows the block's indentation.
+    fn emit_body_at(&self, indent: String) -> Result<Block, Vec<Problem>> {
+        let mut em = Emitter::new(self);
+        let block = em.chain((ENTRY, 0), indent).map_err(|p| vec![p])?;
         let mut problems = Vec::new();
         for (i, n) in self.nodes.iter().enumerate() {
             if n.exec_in && !em.reached[i] {
@@ -1507,6 +1543,24 @@ struct Emitter<'g> {
     g: &'g Graph,
     reached: Vec<bool>,
     used: Vec<u32>,
+    /// The indentation of the statement being emitted; its blocks indent one level further.
+    indent: String,
+    /// The variables (node, output) in scope where emission stands: those declared by statements
+    /// already emitted on this chain and the chains enclosing it, and those of the blocks being
+    /// emitted (a loop's variables, a function's parameters). The entry's are always in scope.
+    scope: Vec<(NodeId, usize)>,
+}
+
+impl<'g> Emitter<'g> {
+    fn new(g: &'g Graph) -> Self {
+        Emitter {
+            g,
+            reached: vec![false; g.nodes.len()],
+            used: vec![0; g.nodes.len()],
+            indent: String::new(),
+            scope: Vec::new(),
+        }
+    }
 }
 
 fn problem(node: NodeId, message: impl Into<String>) -> Problem {
@@ -1534,48 +1588,111 @@ impl Emitter<'_> {
         Ok(first)
     }
 
-    fn chain(&mut self, from: (NodeId, usize)) -> Result<Block, Problem> {
-        let mut stmts = Vec::new();
-        let mut last = None;
+    /// The statements on the chain from exec output `from`, in order.
+    fn walk(&mut self, from: (NodeId, usize)) -> Result<Vec<NodeId>, Problem> {
+        let g = self.g;
+        let mut ids = Vec::new();
         let mut cur = self.target(from)?;
         while let Some(id) = cur {
+            let n = &g.nodes[id];
             if self.reached[id] {
                 return Err(problem(
                     id,
-                    format!("`{}` is reached twice; an exec chain cannot loop back or merge", self.g.nodes[id].title),
+                    format!("`{}` is reached twice; an exec chain cannot loop back or merge", n.title),
                 ));
             }
             self.reached[id] = true;
-            let g = self.g;
-            let n = &g.nodes[id];
             if !n.exec_in {
                 return Err(problem(id, format!("`{}` has no exec input", n.title)));
             }
-            match &n.form {
-                Form::Return { ret, values } => {
-                    let returns = self.slots(id, values)?;
-                    last = Some((LastStmt::Return(ret.clone().with_returns(returns)), n.semi.clone()));
-                }
-                Form::Break(t) => last = Some((LastStmt::Break(t.clone()), n.semi.clone())),
-                _ => stmts.push((self.stmt(id)?, n.semi.clone())),
-            }
-            if last.is_some() {
-                if let Some(next) = n.next {
-                    if let Some(after) = self.target((id, next))? {
-                        return Err(problem(
-                            after,
-                            format!("`{}` follows a `{}`, which ends its block", self.g.nodes[after].title, n.title),
-                        ));
-                    }
-                }
-                break;
-            }
-            cur = match n.next {
+            ids.push(id);
+            let next = match n.next {
                 Some(next) => self.target((id, next))?,
                 None => None,
             };
+            if matches!(n.form, Form::Return { .. } | Form::Break(_)) {
+                if let Some(after) = next {
+                    return Err(problem(
+                        after,
+                        format!("`{}` follows a `{}`, which ends its block", g.nodes[after].title, n.title),
+                    ));
+                }
+                break;
+            }
+            cur = next;
+        }
+        Ok(ids)
+    }
+
+    /// The block the chain from `from` stands for. Statements made in the editor indent to the
+    /// block's indentation: a source statement's on the chain, else `fallback`.
+    fn chain(&mut self, from: (NodeId, usize), fallback: String) -> Result<Block, Problem> {
+        let mark = self.scope.len();
+        let block = self.chain_open(from, fallback);
+        self.scope.truncate(mark);
+        block
+    }
+
+    /// As [`Emitter::chain`], leaving the chain's statements in scope for the caller.
+    fn chain_open(&mut self, from: (NodeId, usize), fallback: String) -> Result<Block, Problem> {
+        let g = self.g;
+        let ids = self.walk(from)?;
+        let block_indent = ids
+            .iter()
+            .find(|&&id| !g.nodes[id].fresh)
+            .map(|&id| g.nodes[id].indent.clone())
+            .unwrap_or(fallback);
+        let mut stmts = Vec::new();
+        let mut last = None;
+        for id in ids {
+            let n = &g.nodes[id];
+            let own = if n.fresh { block_indent.clone() } else { n.indent.clone() };
+            let saved = std::mem::replace(&mut self.indent, own);
+            match &n.form {
+                Form::Return { ret, values } => {
+                    let returns = self.slots(id, values)?;
+                    let mut s = LastStmt::Return(ret.clone().with_returns(returns));
+                    if n.fresh {
+                        s = reindent(s, &n.indent, &self.indent);
+                    }
+                    last = Some((s, n.semi.clone()));
+                }
+                Form::Break(t) => {
+                    let mut s = LastStmt::Break(t.clone());
+                    if n.fresh {
+                        s = reindent(s, &n.indent, &self.indent);
+                    }
+                    last = Some((s, n.semi.clone()));
+                }
+                _ => {
+                    let mut s = self.stmt(id)?;
+                    if n.fresh {
+                        s = reindent(s, &n.indent, &self.indent);
+                    }
+                    stmts.push((s, n.semi.clone()));
+                }
+            }
+            self.indent = saved;
+            self.scope.extend(n.declares.iter().map(|&o| (id, o)));
         }
         Ok(Block::new().with_stmts(stmts).with_last_stmt(last))
+    }
+
+    /// Bring the variables of the block on exec output `out` of `id` into scope.
+    fn open_block(&mut self, id: NodeId, out: usize) {
+        let vars = self.g.nodes[id].block_vars.iter().filter(|(o, _)| *o == out).flat_map(|(_, v)| v);
+        self.scope.extend(vars.map(|&v| (id, v)));
+    }
+
+    /// The block hanging off exec output `out` of the statement being emitted, with the
+    /// statement's own variables (a loop's, a function's parameters) in scope.
+    fn inner(&mut self, id: NodeId, out: usize) -> Result<Block, Problem> {
+        let deeper = format!("{}{INDENT_UNIT}", self.indent);
+        let mark = self.scope.len();
+        self.open_block(id, out);
+        let block = self.chain((id, out), deeper);
+        self.scope.truncate(mark);
+        block
     }
 
     fn slots(&mut self, id: NodeId, slots: &[(SlotRef, Option<TokenReference>)]) -> Result<Punctuated<Expression>, Problem> {
@@ -1621,15 +1738,15 @@ impl Emitter<'_> {
                 otherwise,
             } => {
                 let c = self.slot(id, *cond)?;
-                let b = self.chain((id, *then))?;
+                let b = self.inner(id, *then)?;
                 let mut eifs = Vec::new();
                 for (e, ec, out) in elseifs {
                     let c = self.slot(id, *ec)?;
-                    let b = self.chain((id, *out))?;
+                    let b = self.inner(id, *out)?;
                     eifs.push(e.clone().with_condition(c).with_block(b));
                 }
                 let else_block = match otherwise {
-                    Some(o) => Some(self.chain((id, *o))?),
+                    Some(o) => Some(self.inner(id, *o)?),
                     None => None,
                 };
                 Stmt::If(Box::new(
@@ -1643,12 +1760,18 @@ impl Emitter<'_> {
             }
             Form::While { stmt, cond, body } => {
                 let c = self.slot(id, *cond)?;
-                let b = self.chain((id, *body))?;
+                let b = self.inner(id, *body)?;
                 Stmt::While(Box::new(stmt.as_ref().clone().with_condition(c).with_block(b)))
             }
             Form::Repeat { stmt, until, body } => {
-                let b = self.chain((id, *body))?;
-                let u = self.slot(id, *until)?;
+                // `until` sees the body's locals, so the body's scope stays open for it.
+                let deeper = format!("{}{INDENT_UNIT}", self.indent);
+                let mark = self.scope.len();
+                self.open_block(id, *body);
+                let b = self.chain_open((id, *body), deeper);
+                let u = b.as_ref().ok().map(|_| self.slot(id, *until));
+                self.scope.truncate(mark);
+                let (b, u) = (b?, u.expect("the body emitted")?);
                 Stmt::Repeat(Box::new(stmt.as_ref().clone().with_block(b).with_until(u)))
             }
             Form::NumericFor {
@@ -1664,23 +1787,23 @@ impl Emitter<'_> {
                     Some(st) => Some(self.slot(id, *st)?),
                     None => None,
                 };
-                let b = self.chain((id, *body))?;
+                let b = self.inner(id, *body)?;
                 Stmt::NumericFor(Box::new(
                     stmt.as_ref().clone().with_start(s).with_end(e).with_step(st).with_block(b),
                 ))
             }
             Form::GenericFor { stmt, exprs, body } => {
                 let es = self.slots(id, exprs)?;
-                let b = self.chain((id, *body))?;
+                let b = self.inner(id, *body)?;
                 Stmt::GenericFor(Box::new(stmt.as_ref().clone().with_expressions(es).with_block(b)))
             }
             Form::Do { stmt, body } => {
-                let b = self.chain((id, *body))?;
+                let b = self.inner(id, *body)?;
                 Stmt::Do(Box::new(stmt.as_ref().clone().with_block(b)))
             }
             Form::Function(decl) => {
                 let sub = n.sub.as_ref().expect("a function node has a canvas");
-                let block = sub.emit_body().map_err(|ps| {
+                let block = sub.emit_body_at(format!("{}{INDENT_UNIT}", self.indent)).map_err(|ps| {
                     let first = &ps[0];
                     problem(id, format!("in `{}`: {}", n.title, first.message))
                 })?;
@@ -1728,7 +1851,7 @@ impl Emitter<'_> {
             SlotRef::Closure(c) => {
                 let g = self.g;
                 let cf = &g.nodes[id].closures[c];
-                let block = self.chain((id, cf.exec))?;
+                let block = self.inner(id, cf.exec)?;
                 let f = cf.func.clone();
                 let body = f.body().clone().with_block(block);
                 Ok(Expression::Function(Box::new(f.with_body(body))))
@@ -1757,8 +1880,25 @@ impl Emitter<'_> {
                 let (from, out) = w.from;
                 let producer = &g.nodes[from].outputs[out];
                 let base = match producer.kind {
-                    OutKind::Var | OutKind::Captured => Expression::Var(Var::Name(name_token(&producer.label, site.as_ref()))),
-                    OutKind::Value => self.expr(from)?,
+                    OutKind::Var | OutKind::Captured => {
+                        if from != ENTRY && !self.scope.contains(&(from, out)) {
+                            return Err(problem(
+                                id,
+                                format!(
+                                    "`{}` pin `{}` reads `{}`, which is not in scope there: `{}` declares it later or inside another block",
+                                    n.title, input.label, producer.label, g.nodes[from].title
+                                ),
+                            ));
+                        }
+                        Expression::Var(Var::Name(name_token(&producer.label, site.as_ref())))
+                    }
+                    OutKind::Value => {
+                        let e = self.expr(from)?;
+                        match site {
+                            Some(s) => retrivia(e, s.leading_trivia().cloned().collect(), s.trailing_trivia().cloned().collect()),
+                            None => e,
+                        }
+                    }
                 };
                 with_suffixes(base, suffixes).map_err(|m| problem(id, m))?
             }
@@ -1915,6 +2055,531 @@ fn with_suffixes(e: Expression, suffixes: &[Suffix]) -> Result<Expression, Strin
     } else {
         Expression::Var(Var::Expression(Box::new(VarExpression::new(prefix).with_suffixes(all))))
     })
+}
+
+// ───────────────────────────────────────────────────────────────────── editing
+
+/// Whether a value of type `from` may feed a pin of type `to`.
+pub fn compatible(from: PinTy, to: PinTy) -> bool {
+    from == to || from == PinTy::Any || to == PinTy::Any || (to == PinTy::Obj && from == PinTy::Arr)
+}
+
+impl Graph {
+    /// The Lua a pin holds now, or why it holds none.
+    pub fn pin_source(&self, node: NodeId, pin: usize) -> Result<String, String> {
+        let mut em = Emitter::new(self);
+        em.scope = all_vars(self);
+        em.input(node, pin).map(|e| bare(&e)).map_err(|p| p.message)
+    }
+
+    /// The data wire feeding a pin, if one does.
+    pub fn feeder(&self, node: NodeId, pin: usize) -> Option<(NodeId, usize)> {
+        self.data.iter().find(|w| w.to == (node, pin)).map(|w| w.from)
+    }
+
+    /// Where an exec output leads, if it is wired.
+    pub fn exec_target(&self, node: NodeId, out: usize) -> Option<NodeId> {
+        self.exec.iter().find(|w| w.from == (node, out)).map(|w| w.to)
+    }
+
+    /// The whitespace and comments around what a pin holds now, to carry over to what replaces it.
+    fn pin_trivia(&self, node: NodeId, pin: usize) -> (Vec<Token>, Vec<Token>) {
+        let mut em = Emitter::new(self);
+        em.scope = all_vars(self);
+        match em.input(node, pin) {
+            Ok(e) => outer_trivia(&e),
+            Err(_) => match &self.nodes[node].inputs[pin].value {
+                Value::Wired { site: Some(s), .. } => {
+                    (s.leading_trivia().cloned().collect(), s.trailing_trivia().cloned().collect())
+                }
+                _ => (Vec::new(), Vec::new()),
+            },
+        }
+    }
+
+    /// Replace what a pin holds with the Lua expression `lua`: a literal, a global path, or any
+    /// other expression (kept as Lua). A wired pin changes by its wire.
+    pub fn set_value(&mut self, node: NodeId, pin: usize, lua: &str) -> Result<(), String> {
+        let input = self.nodes.get(node).and_then(|n| n.inputs.get(pin)).ok_or("no such pin")?;
+        if self.feeder(node, pin).is_some() {
+            return Err(format!("`{}` is wired; break the wire before typing a value", input.label));
+        }
+        let e = parse_expression(lua)?;
+        let (lead, trail) = self.pin_trivia(node, pin);
+        let (value, ty) = typed_value(retrivia(e, lead, trail));
+        let input = &mut self.nodes[node].inputs[pin];
+        input.value = value;
+        input.ty = ty;
+        Ok(())
+    }
+
+    /// Wire output `from` into input `to`, replacing what fed it.
+    pub fn connect_data(&mut self, from: (NodeId, usize), to: (NodeId, usize)) -> Result<(), String> {
+        let out = self.nodes.get(from.0).and_then(|n| n.outputs.get(from.1)).ok_or("no such output")?;
+        let input = self.nodes.get(to.0).and_then(|n| n.inputs.get(to.1)).ok_or("no such pin")?;
+        if !compatible(out.ty, input.ty) {
+            return Err(format!(
+                "`{}` carries {}, and `{}` takes {}",
+                out.label,
+                out.ty.name(),
+                input.label,
+                input.ty.name()
+            ));
+        }
+        if from.0 == to.0 || self.feeds(to.0, from.0) {
+            return Err("that wire would make an expression contain itself".into());
+        }
+        let ty = if out.ty == PinTy::Any { input.ty } else { out.ty };
+        let (lead, trail) = self.pin_trivia(to.0, to.1);
+        self.data.retain(|w| w.to != to);
+        self.data.push(DataWire { from, to });
+        let input = &mut self.nodes[to.0].inputs[to.1];
+        input.value = Value::Wired {
+            site: Some(TokenReference::new(lead, ident("_"), trail)),
+            suffixes: Vec::new(),
+        };
+        input.ty = ty;
+        Ok(())
+    }
+
+    /// Remove the wire feeding a pin. The pin is empty until something is wired or typed in.
+    pub fn break_data(&mut self, to: (NodeId, usize)) {
+        if self.feeder(to.0, to.1).is_none() {
+            return;
+        }
+        let (lead, trail) = self.pin_trivia(to.0, to.1);
+        self.data.retain(|w| w.to != to);
+        self.nodes[to.0].inputs[to.1].value = Value::Wired {
+            site: Some(TokenReference::new(lead, ident("_"), trail)),
+            suffixes: Vec::new(),
+        };
+    }
+
+    /// Whether `a`'s value reaches `b` through data wires.
+    fn feeds(&self, a: NodeId, b: NodeId) -> bool {
+        let mut stack = vec![a];
+        let mut seen = vec![false; self.nodes.len()];
+        while let Some(n) = stack.pop() {
+            if n == b {
+                return true;
+            }
+            if std::mem::replace(&mut seen[n], true) {
+                continue;
+            }
+            stack.extend(self.data.iter().filter(|w| w.from.0 == n).map(|w| w.to.0));
+        }
+        false
+    }
+
+    /// Wire exec output `from` to statement `to`. `to` leaves whatever chain it was on.
+    pub fn connect_exec(&mut self, from: (NodeId, usize), to: NodeId) -> Result<(), String> {
+        let n = self.nodes.get(from.0).ok_or("no such node")?;
+        if from.1 >= n.exec_outs.len() {
+            return Err("no such exec output".into());
+        }
+        let target = self.nodes.get(to).ok_or("no such node")?;
+        if !target.exec_in {
+            return Err(format!("`{}` is a value, not a statement; wire it into a pin", target.title));
+        }
+        if to == from.0 || self.runs_into(to, from.0) {
+            return Err(format!("`{}` already leads back here; an exec chain cannot loop", target.title));
+        }
+        self.exec.retain(|w| w.from != from && w.to != to);
+        self.exec.push(ExecWire { from, to });
+        Ok(())
+    }
+
+    /// Remove the exec wire leaving `from`.
+    pub fn break_exec(&mut self, from: (NodeId, usize)) {
+        self.exec.retain(|w| w.from != from);
+    }
+
+    /// Whether execution from `a` (any of its exec outputs) reaches `b`.
+    fn runs_into(&self, a: NodeId, b: NodeId) -> bool {
+        let mut stack = vec![a];
+        let mut seen = vec![false; self.nodes.len()];
+        while let Some(n) = stack.pop() {
+            if n == b {
+                return true;
+            }
+            if std::mem::replace(&mut seen[n], true) {
+                continue;
+            }
+            stack.extend(self.exec.iter().filter(|w| w.from.0 == n).map(|w| w.to));
+        }
+        false
+    }
+
+    /// `ids` with everything that belongs to them: the data nodes feeding them only, and the
+    /// statements in their blocks and anonymous functions.
+    fn subtree(&self, ids: &[NodeId]) -> Vec<bool> {
+        let mut inside = vec![false; self.nodes.len()];
+        let mut stack: Vec<NodeId> = ids.iter().copied().filter(|&i| i != ENTRY).collect();
+        while let Some(n) = stack.pop() {
+            if std::mem::replace(&mut inside[n], true) {
+                continue;
+            }
+            let node = &self.nodes[n];
+            for w in self.exec.iter().filter(|w| w.from.0 == n && Some(w.from.1) != node.next) {
+                stack.push(w.to);
+            }
+            for w in self.exec.iter().filter(|w| w.from.0 == n && Some(w.from.1) == node.next) {
+                if !ids.contains(&n) {
+                    stack.push(w.to);
+                }
+            }
+            for w in self.data.iter().filter(|w| w.to.0 == n) {
+                let p = &self.nodes[w.from.0];
+                if !p.exec_in && w.from.0 != ENTRY {
+                    stack.push(w.from.0);
+                }
+            }
+        }
+        inside
+    }
+
+    /// Delete nodes with everything that belongs to them. A deleted statement's chain closes up
+    /// over it. Returns where each old node id went (`None` for deleted ones).
+    pub fn delete(&mut self, ids: &[NodeId]) -> Vec<Option<NodeId>> {
+        let gone = self.subtree(ids);
+        for &id in ids {
+            if id == ENTRY || !self.nodes[id].exec_in {
+                continue;
+            }
+            let Some(into) = self.exec.iter().find(|w| w.to == id).map(|w| w.from) else { continue };
+            if gone[into.0] {
+                continue;
+            }
+            let mut cur = id;
+            let next = loop {
+                match self.nodes[cur].next.and_then(|o| self.exec_target(cur, o)) {
+                    Some(t) if gone[t] => cur = t,
+                    other => break other,
+                }
+            };
+            self.exec.retain(|w| w.from != into);
+            if let Some(next) = next {
+                self.exec.push(ExecWire { from: into, to: next });
+            }
+        }
+        let mut map = Vec::with_capacity(self.nodes.len());
+        let mut kept = 0;
+        for &g in &gone {
+            map.push(if g { None } else { kept += 1; Some(kept - 1) });
+        }
+        let old = std::mem::take(&mut self.nodes);
+        self.nodes = old.into_iter().zip(&gone).filter(|(_, g)| !**g).map(|(n, _)| n).collect();
+        self.exec = self
+            .exec
+            .iter()
+            .filter_map(|w| Some(ExecWire { from: (map[w.from.0]?, w.from.1), to: map[w.to]? }))
+            .collect();
+        self.data = self
+            .data
+            .iter()
+            .filter_map(|w| Some(DataWire { from: (map[w.from.0]?, w.from.1), to: (map[w.to.0]?, w.to.1) }))
+            .collect();
+        map
+    }
+
+    /// Copy statements with everything that belongs to them. The copies are not on any chain
+    /// yet; wires from outside (the locals they read) are copied too. Returns the copies of
+    /// `ids`, in order.
+    pub fn clone_nodes(&mut self, ids: &[NodeId]) -> Vec<NodeId> {
+        let inside = self.subtree(ids);
+        let base = self.nodes.len();
+        let mut map = vec![None; base];
+        for (i, &inn) in inside.iter().enumerate() {
+            if inn {
+                map[i] = Some(self.nodes.len());
+                let mut copy = self.nodes[i].clone();
+                copy.fresh = copy.exec_in;
+                self.nodes.push(copy);
+            }
+        }
+        let exec: Vec<ExecWire> = self
+            .exec
+            .iter()
+            .filter_map(|w| {
+                let from = map[w.from.0]?;
+                let n = &self.nodes[w.from.0];
+                if ids.contains(&w.from.0) && Some(w.from.1) == n.next {
+                    return None;
+                }
+                Some(ExecWire { from: (from, w.from.1), to: map[w.to]? })
+            })
+            .collect();
+        let data: Vec<DataWire> = self
+            .data
+            .iter()
+            .filter_map(|w| {
+                let to = map[w.to.0]?;
+                let from = map[w.from.0].unwrap_or(w.from.0);
+                Some(DataWire { from: (from, w.from.1), to: (to, w.to.1) })
+            })
+            .collect();
+        self.exec.extend(exec);
+        self.data.extend(data);
+        ids.iter().filter_map(|&i| map.get(i).copied().flatten()).collect()
+    }
+
+    /// Add a statement written as Lua (`MrxMusic.PlaySpecialMusic("mu_x")`) to this canvas,
+    /// lifted the way the source's own statements are; names of this canvas's parameters wire to
+    /// them. It is on no chain until wired.
+    pub fn add_statement(&mut self, lua: &str, ctx: &Context<'_>) -> Result<NodeId, String> {
+        let ast = full_moon::parse_fallible(lua, full_moon::LuaVersion::lua52())
+            .into_result()
+            .map_err(|errs| errs.iter().map(|e| e.error_message().to_string()).collect::<Vec<_>>().join("; "))?;
+        let block = ast.nodes();
+        let stmts: Vec<&Stmt> = block.stmts().collect();
+        let before = self.nodes.len();
+        let mut l = Lifter::new(ctx, Vec::new(), Node::new(Category::Chunk, String::new(), 0, false, Form::Entry), false);
+        l.g = std::mem::replace(
+            self,
+            Graph {
+                nodes: Vec::new(),
+                exec: Vec::new(),
+                data: Vec::new(),
+            },
+        );
+        for (i, o) in l.g.nodes[ENTRY].outputs.iter().enumerate() {
+            l.frames[0].push((o.label.clone(), (ENTRY, i)));
+        }
+        let id = match (stmts.as_slice(), block.last_stmt()) {
+            ([s], None) => Ok(l.stmt(s)),
+            ([], Some(last)) => Ok(l.last(last)),
+            _ => Err("write one statement".to_string()),
+        };
+        *self = l.g;
+        let id = id?;
+        for n in &mut self.nodes[before..] {
+            n.fresh = n.exec_in;
+        }
+        Ok(id)
+    }
+}
+
+/// Every variable output of a canvas, for reading one pin outside of an emission.
+fn all_vars(g: &Graph) -> Vec<(NodeId, usize)> {
+    g.nodes
+        .iter()
+        .enumerate()
+        .flat_map(|(i, n)| {
+            n.outputs
+                .iter()
+                .enumerate()
+                .filter(|(_, o)| o.kind != OutKind::Value)
+                .map(move |(k, _)| (i, k))
+        })
+        .collect()
+}
+
+/// `lua` as one expression.
+fn parse_expression(lua: &str) -> Result<Expression, String> {
+    let src = format!("return {lua}");
+    let ast = full_moon::parse_fallible(&src, full_moon::LuaVersion::lua52())
+        .into_result()
+        .map_err(|errs| errs.iter().map(|e| e.error_message().to_string()).collect::<Vec<_>>().join("; "))?;
+    let block = ast.nodes();
+    let value = match (block.stmts().next(), block.last_stmt()) {
+        (None, Some(LastStmt::Return(r))) if r.returns().len() == 1 => r.returns().iter().next().cloned(),
+        _ => None,
+    };
+    match value {
+        Some(e) => Ok(retrivia(e, Vec::new(), Vec::new())),
+        None => Err(format!("`{lua}` is not one Lua expression")),
+    }
+}
+
+/// The value and type a typed-in expression gives a pin.
+fn typed_value(e: Expression) -> (Value, PinTy) {
+    match &e {
+        Expression::Number(_) => (Value::Literal(e), PinTy::Num),
+        Expression::String(_) => (Value::Literal(e), PinTy::Str),
+        Expression::Symbol(t) => {
+            let ty = match t.token().token_type() {
+                TokenType::Symbol {
+                    symbol: Symbol::True | Symbol::False,
+                } => PinTy::Bool,
+                _ => PinTy::Any,
+            };
+            (Value::Literal(e), ty)
+        }
+        _ if is_literal(&e) => (Value::Literal(e), PinTy::Num),
+        Expression::TableConstructor(tc) if is_literal_list(tc) => (Value::Array(tc.clone()), PinTy::Arr),
+        Expression::Var(v @ Var::Name(_)) => (Value::Path(v.clone()), PinTy::Obj),
+        Expression::Var(v @ Var::Expression(ve))
+            if matches!(ve.prefix(), Prefix::Name(_))
+                && ve.suffixes().all(|s| matches!(s, Suffix::Index(Index::Dot { .. }))) =>
+        {
+            (Value::Path(v.clone()), PinTy::Obj)
+        }
+        _ => (Value::Lua(Lua::Expr(e)), PinTy::Any),
+    }
+}
+
+impl PinTy {
+    pub fn name(self) -> &'static str {
+        match self {
+            PinTy::Exec => "exec",
+            PinTy::Str => "str",
+            PinTy::Num => "num",
+            PinTy::Bool => "bool",
+            PinTy::Obj => "obj",
+            PinTy::Arr => "arr",
+            PinTy::Any => "any",
+        }
+    }
+}
+
+fn ident(name: &str) -> Token {
+    Token::new(TokenType::Identifier {
+        identifier: name.into(),
+    })
+}
+
+fn whitespace(s: &str) -> Token {
+    Token::new(TokenType::Whitespace { characters: s.into() })
+}
+
+fn ends_line(trivia: &[Token]) -> bool {
+    trivia.last().is_some_and(|t| t.to_string().ends_with('\n'))
+}
+
+/// The leading trivia of a node's first token and the trailing trivia of its last.
+fn outer_trivia(n: &impl AstNode) -> (Vec<Token>, Vec<Token>) {
+    let first = n.tokens().next();
+    let last = n.tokens().last();
+    (
+        first.map(|t| t.leading_trivia().cloned().collect()).unwrap_or_default(),
+        last.map(|t| t.trailing_trivia().cloned().collect()).unwrap_or_default(),
+    )
+}
+
+/// The whitespace a statement's line starts with.
+fn indent_of(n: &impl AstNode) -> String {
+    let Some(first) = n.tokens().next() else { return String::new() };
+    let lead: String = first.leading_trivia().map(|t| t.to_string()).collect();
+    let line = lead.rsplit('\n').next().unwrap_or("");
+    if line.chars().all(char::is_whitespace) {
+        line.to_string()
+    } else {
+        String::new()
+    }
+}
+
+/// `e` with `lead` before its first token and `trail` after its last.
+fn retrivia(e: Expression, lead: Vec<Token>, trail: Vec<Token>) -> Expression {
+    struct Swap {
+        i: usize,
+        last: usize,
+        lead: Option<Vec<Token>>,
+        trail: Option<Vec<Token>>,
+    }
+    impl VisitorMut for Swap {
+        fn visit_token_reference(&mut self, t: TokenReference) -> TokenReference {
+            let i = self.i;
+            self.i += 1;
+            let mut leading: Vec<Token> = t.leading_trivia().cloned().collect();
+            let mut trailing: Vec<Token> = t.trailing_trivia().cloned().collect();
+            if i == 0 {
+                leading = self.lead.take().unwrap_or_default();
+            }
+            if i == self.last {
+                trailing = self.trail.take().unwrap_or_default();
+            }
+            TokenReference::new(leading, t.token().clone(), trailing)
+        }
+    }
+    let last = e.tokens().count().saturating_sub(1);
+    e.visit_mut(&mut Swap {
+        i: 0,
+        last,
+        lead: Some(lead),
+        trail: Some(trail),
+    })
+}
+
+/// A statement made in the editor, its lines re-based from indentation `old` to `new` and its
+/// last token ending the line. Only the statement's own tokens move: the blocks inside it are
+/// other statements, already emitted at their own indentation.
+fn reindent<T: AstNode + VisitMut>(s: T, old: &str, new: &str) -> T {
+    struct Reindent<'a> {
+        old: &'a str,
+        new: &'a str,
+        depth: usize,
+        line_start: bool,
+        i: usize,
+        last: usize,
+    }
+    impl VisitorMut for Reindent<'_> {
+        fn visit_block(&mut self, b: Block) -> Block {
+            self.depth += 1;
+            b
+        }
+        fn visit_block_end(&mut self, b: Block) -> Block {
+            self.depth -= 1;
+            b
+        }
+        fn visit_token_reference(&mut self, t: TokenReference) -> TokenReference {
+            let i = self.i;
+            self.i += 1;
+            let mut leading: Vec<Token> = t.leading_trivia().cloned().collect();
+            let mut trailing: Vec<Token> = t.trailing_trivia().cloned().collect();
+            if self.depth == 0 {
+                if self.line_start {
+                    let split = leading
+                        .iter()
+                        .rposition(|t| !matches!(t.token_type(), TokenType::Whitespace { .. }))
+                        .map_or(0, |p| p + 1);
+                    let tail: String = leading[split..].iter().map(|t| t.to_string()).collect();
+                    let (head, line) = match tail.rfind('\n') {
+                        Some(p) => tail.split_at(p + 1),
+                        None => ("", tail.as_str()),
+                    };
+                    let rest = line.strip_prefix(self.old).unwrap_or("");
+                    leading.truncate(split);
+                    let ws = format!("{head}{}{rest}", self.new);
+                    if !ws.is_empty() {
+                        leading.push(whitespace(&ws));
+                    }
+                }
+                if i == self.last && !ends_line(&trailing) {
+                    trailing.push(whitespace("\n"));
+                }
+            }
+            self.line_start = ends_line(&trailing);
+            TokenReference::new(leading, t.token().clone(), trailing)
+        }
+    }
+    let last = s.tokens().count().saturating_sub(1);
+    s.visit_mut(&mut Reindent {
+        old,
+        new,
+        depth: 0,
+        line_start: true,
+        i: 0,
+        last,
+    })
+}
+
+// ───────────────────────────────────────────────────────────────────── compiling
+
+/// Why [`compile`] produced no bytecode.
+#[derive(Clone, Debug, PartialEq)]
+pub enum CompileFailure {
+    /// The graph does not stand for a script yet.
+    Graph(Vec<Problem>),
+    /// The game's Lua refused the emitted script; the message is Lua's own, with the line.
+    Lua(String),
+}
+
+/// Emit the script `chunk` stands for and compile it with the game's Lua 5.1.
+/// Returns the emitted source and its bytecode.
+pub fn compile(script: &Script, chunk: &Graph, chunk_name: &str) -> Result<(String, Vec<u8>), CompileFailure> {
+    let source = emit(script, chunk).map_err(CompileFailure::Graph)?;
+    let bytecode = mercs2_luac::compile(&source, chunk_name).map_err(|e| CompileFailure::Lua(e.to_string()))?;
+    Ok((source, bytecode))
 }
 
 // ───────────────────────────────────────────────────────────────────── helpers
@@ -2075,26 +2740,27 @@ mod tests {
         assert!(failures.is_empty(), "{} failures:\n{}", failures.len(), failures.join("\n"));
     }
 
-    const RACE: &str = "inherit(\"MrxTaskContract\")\n\
-function Activated(self)\n\
-  MrxTaskContract.Activated(self)\n\
-  self:GetVehicles()\n\
-  local nCompletions = self:GetNumCompletions()\n\
-  if nCompletions == 1 then\n\
-    nTimeLimit = 60\n\
-  end\n\
-  self.oRace = self:CreateChild({\n\
-    sName = \"PmcCon016Race\",\n\
-    sModuleName = \"MrxTaskRace\",\n\
-    tCourseLocs = {\"loc_1\", \"loc_2\"},\n\
-    fOnComplete = function()\n\
-      MrxMusic.PlaySpecialMusic(\"mu_PmcCon016_01\")\n\
-    end\n\
-  })\n\
-  self:_CreateEvent(Event.ObjectDeath, {tVehicle}, self.VehicleDeath, {self})\n\
-end\n\
-function GetVehicles(self)\n\
-end\n";
+    const RACE: &str = r#"inherit("MrxTaskContract")
+function Activated(self)
+  MrxTaskContract.Activated(self)
+  self:GetVehicles()
+  local nCompletions = self:GetNumCompletions()
+  if nCompletions == 1 then
+    nTimeLimit = 60
+  end
+  self.oRace = self:CreateChild({
+    sName = "PmcCon016Race",
+    sModuleName = "MrxTaskRace",
+    tCourseLocs = {"loc_1", "loc_2"},
+    fOnComplete = function()
+      MrxMusic.PlaySpecialMusic("mu_PmcCon016_01")
+    end
+  })
+  self:_CreateEvent(Event.ObjectDeath, {tVehicle}, self.VehicleDeath, {self})
+end
+function GetVehicles(self)
+end
+"#;
 
     const RACE_PATH: &str = "lua/vz/pmccon016.lua";
 
@@ -2160,6 +2826,148 @@ end\n";
         let labels: Vec<&str> = event.inputs.iter().map(|i| i.label.as_str()).collect();
         assert_eq!(labels, vec!["self", "eEvent", "tVehicle", "fCallback", "self"]);
         assert_eq!(event.inputs[2].group.as_deref(), Some("tArgs"));
+    }
+
+    /// The compile gate: every script without `goto` compiles with the game's Lua 5.1 from its
+    /// lifted graph; every one with it (unluac's output for debug-stripped DLC chunks) is refused
+    /// by that Lua, not by the graph.
+    #[test]
+    fn every_corpus_script_compiles_with_the_games_lua() {
+        let corpus = corpus();
+        let index = CorpusIndex::build(corpus.iter().map(|(p, s)| (p.as_str(), s.as_str()))).expect("the corpus indexes");
+        let mut failures = Vec::new();
+        let mut refused = 0;
+        for (path, src) in &corpus {
+            let script = Script::parse(src).unwrap_or_else(|e| panic!("{path}: {e}"));
+            let graph = lift(&script, &index.context(path));
+            match (compile(&script, &graph, path), script.uses_goto()) {
+                (Ok(_), false) => {}
+                (Err(CompileFailure::Lua(_)), true) => refused += 1,
+                (Ok(_), true) => failures.push(format!("{path}: has goto but compiled")),
+                (Err(e), _) => failures.push(format!("{path}: {e:?}")),
+            }
+        }
+        assert!(failures.is_empty(), "{} failures:\n{}", failures.len(), failures.join("\n"));
+        assert_eq!(refused, 15, "scripts with goto");
+    }
+
+    fn canvas_mut<'g>(chunk: &'g mut Graph, name: &str) -> &'g mut Graph {
+        chunk
+            .nodes
+            .iter_mut()
+            .find(|n| n.title == name && n.sub.is_some())
+            .and_then(|n| n.sub.as_deref_mut())
+            .unwrap_or_else(|| panic!("no canvas {name}"))
+    }
+
+    fn node(g: &Graph, title: &str) -> NodeId {
+        g.nodes.iter().position(|n| n.title == title).unwrap_or_else(|| panic!("no node {title}"))
+    }
+
+    fn race() -> (Script, CorpusIndex) {
+        (Script::parse(RACE).expect("parses"), race_index())
+    }
+
+    #[test]
+    fn typing_a_literal_changes_that_literal_only() {
+        let (script, index) = race();
+        let ctx = index.context(RACE_PATH);
+        let mut chunk = lift(&script, &ctx);
+        let act = canvas_mut(&mut chunk, "Activated");
+        let music = node(act, "MrxMusic.PlaySpecialMusic");
+        act.set_value(music, 0, "\"mu_new\"").expect("sets");
+        let (out, _) = compile(&script, &chunk, "pmccon016").expect("compiles");
+        assert_eq!(out, RACE.replace("\"mu_PmcCon016_01\"", "\"mu_new\""));
+    }
+
+    #[test]
+    fn a_new_statement_emits_at_its_blocks_indentation() {
+        let (script, index) = race();
+        let ctx = index.context(RACE_PATH);
+        let mut chunk = lift(&script, &ctx);
+        let act = canvas_mut(&mut chunk, "Activated");
+        let sup = node(act, "Super.Activated");
+        let next = act.nodes[sup].next.expect("continues");
+        let after = act.exec_target(sup, next).expect("wired");
+        let id = act.add_statement("MrxMusic.StopSpecialMusic()", &ctx).expect("adds");
+        assert_eq!(act.nodes[id].category, Category::Music);
+        act.connect_exec((sup, next), id).expect("wires in");
+        act.connect_exec((id, act.nodes[id].next.expect("continues")), after).expect("wires out");
+        let (out, _) = compile(&script, &chunk, "pmccon016").expect("compiles");
+        assert_eq!(
+            out,
+            RACE.replace(
+                "  MrxTaskContract.Activated(self)\n",
+                "  MrxTaskContract.Activated(self)\n  MrxMusic.StopSpecialMusic()\n"
+            )
+        );
+    }
+
+    #[test]
+    fn deleting_a_statement_closes_the_chain_over_it() {
+        let (script, index) = race();
+        let mut chunk = lift(&script, &index.context(RACE_PATH));
+        let act = canvas_mut(&mut chunk, "Activated");
+        let get = node(act, "GetVehicles");
+        let local = node(act, "self:GetNumCompletions");
+        act.delete(&[get, local]);
+        assert!(act.nodes.iter().all(|n| n.title != "GetVehicles"));
+        let problems = act.emit_body().expect_err("the comparison reads the deleted local");
+        assert!(problems.iter().any(|p| p.message.contains("nothing wired")), "{problems:?}");
+        let mut chunk = lift(&script, &index.context(RACE_PATH));
+        let act = canvas_mut(&mut chunk, "Activated");
+        let get = node(act, "GetVehicles");
+        act.delete(&[get]);
+        let (out, _) = compile(&script, &chunk, "pmccon016").expect("compiles");
+        assert_eq!(out, RACE.replace("  self:GetVehicles()\n", ""));
+    }
+
+    #[test]
+    fn deleting_consecutive_statements_closes_the_chain_over_all_of_them() {
+        let (script, index) = race();
+        let mut chunk = lift(&script, &index.context(RACE_PATH));
+        let act = canvas_mut(&mut chunk, "Activated");
+        let sup = node(act, "Super.Activated");
+        let get = node(act, "GetVehicles");
+        act.delete(&[sup, get]);
+        let (out, _) = compile(&script, &chunk, "pmccon016").expect("compiles");
+        assert_eq!(out, RACE.replace("  MrxTaskContract.Activated(self)\n  self:GetVehicles()\n", ""));
+    }
+
+    #[test]
+    fn a_clone_wired_in_emits_a_copy_of_the_line() {
+        let (script, index) = race();
+        let mut chunk = lift(&script, &index.context(RACE_PATH));
+        let act = canvas_mut(&mut chunk, "Activated");
+        let music = node(act, "MrxMusic.PlaySpecialMusic");
+        let copy = act.clone_nodes(&[music])[0];
+        act.connect_exec((music, act.nodes[music].next.expect("continues")), copy).expect("wires");
+        let (out, _) = compile(&script, &chunk, "pmccon016").expect("compiles");
+        let line = "      MrxMusic.PlaySpecialMusic(\"mu_PmcCon016_01\")\n";
+        assert_eq!(out, RACE.replace(line, &format!("{line}{line}")));
+    }
+
+    #[test]
+    fn a_wire_to_a_local_out_of_scope_is_a_problem() {
+        let (script, index) = race();
+        let mut chunk = lift(&script, &index.context(RACE_PATH));
+        let act = canvas_mut(&mut chunk, "Activated");
+        let sup = node(act, "Super.Activated");
+        let local = node(act, "self:GetNumCompletions");
+        act.connect_data((local, 0), (sup, 0)).expect("types fit");
+        let problems = act.emit_body().expect_err("out of scope");
+        assert!(problems[0].message.contains("not in scope"), "{problems:?}");
+    }
+
+    #[test]
+    fn an_exec_wire_back_up_the_chain_is_refused() {
+        let (script, index) = race();
+        let mut chunk = lift(&script, &index.context(RACE_PATH));
+        let act = canvas_mut(&mut chunk, "Activated");
+        let sup = node(act, "Super.Activated");
+        let get = node(act, "GetVehicles");
+        let err = act.connect_exec((get, act.nodes[get].next.expect("continues")), sup).expect_err("a loop");
+        assert!(err.contains("cannot loop"), "{err}");
     }
 
     #[test]
