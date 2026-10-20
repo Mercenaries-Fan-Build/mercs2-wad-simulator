@@ -13,9 +13,11 @@
 
 use std::ops::Range;
 
+use full_moon::ast::lua52::{Goto, Label};
 use full_moon::ast::{Ast, Call, Expression, FunctionArgs, FunctionBody, Parameter, Prefix, Stmt, Suffix};
 use full_moon::node::Node;
 use full_moon::tokenizer::{TokenReference, TokenType};
+use full_moon::visitors::Visitor;
 use full_moon::LuaVersion;
 
 /// A parsed script.
@@ -65,6 +67,24 @@ impl Script {
 
     pub fn ast(&self) -> &Ast {
         &self.ast
+    }
+
+    /// Whether the script has a `goto` or a `::label::` — Lua 5.2 syntax the game's Lua 5.1
+    /// cannot compile.
+    pub fn uses_goto(&self) -> bool {
+        #[derive(Default)]
+        struct Find(bool);
+        impl Visitor for Find {
+            fn visit_goto(&mut self, _: &Goto) {
+                self.0 = true;
+            }
+            fn visit_label(&mut self, _: &Label) {
+                self.0 = true;
+            }
+        }
+        let mut find = Find::default();
+        find.visit_ast(&self.ast);
+        find.0
     }
 
     /// The module named by the script's top-level `inherit("Name")` call, if it makes one.
@@ -268,6 +288,14 @@ mod tests {
         let activated = &fns[0];
         assert!(src[activated.span.clone()].starts_with("function Activated(self)"));
         assert!(src[activated.span.clone()].ends_with("end\nend"));
+    }
+
+    #[test]
+    fn uses_goto_finds_gotos_and_labels() {
+        let jump = Script::parse("for i = 1, 2 do\n  if i then goto skip end\n  ::skip::\nend\n").expect("parses");
+        assert!(jump.uses_goto());
+        let plain = Script::parse("local goto_count = 1\n").expect("parses");
+        assert!(!plain.uses_goto());
     }
 
     #[test]
