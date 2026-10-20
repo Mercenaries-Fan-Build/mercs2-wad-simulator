@@ -3313,11 +3313,10 @@ pub fn run(opts: Options) {
                                             );
                                             theme::section(ui, "Character kit", Some(&k_badge), true, |ui| {
                                                 for t in &kit.templates {
-                                                    let name =
-                                                        t.name.clone().unwrap_or_else(|| format!("0x{:08X}", t.key));
+                                                    let name = t.label();
                                                     theme::eyebrow(ui, &name);
                                                     ui.add_space(3.0);
-                                                    match kit.of_template(&name) {
+                                                    match kit.mixr.template_outfits(t) {
                                                         Ok((_, outfits)) => {
                                                             ui.horizontal_wrapped(|ui| {
                                                                 for k in 0..outfits.len() {
@@ -7607,20 +7606,15 @@ pub(crate) struct KitOutfits {
 }
 
 impl KitOutfits {
-    /// A template of this kit by its `Name`: its profile index and that profile's outfits, in the
-    /// exe's order. An error when no template of the kit has the name, or its `ModelMixerProfile`
-    /// names no profile the kit carries (retail's `OC Soldier (Bench Press)` carries the allied
-    /// kit's).
+    /// A template of this kit by its `Name`: [`Mixr::template_outfits`](mercs2_formats::mixr::Mixr::template_outfits).
+    /// An error when no template of the kit has the name, or its profile is not the kit's.
     pub(crate) fn of_template(&self, name: &str) -> Result<(usize, Vec<u32>), String> {
         let t = self
             .templates
             .iter()
             .find(|t| t.name.as_deref() == Some(name))
             .ok_or_else(|| format!("no template of this kit is named {name:?}"))?;
-        let pi = self.mixr.profile_index(t.profile).ok_or_else(|| {
-            format!("template {name:?} picks profile 0x{:08X}, which this kit does not carry", t.profile)
-        })?;
-        Ok((pi, self.mixr.outfits(pi)))
+        self.mixr.template_outfits(t)
     }
 }
 
