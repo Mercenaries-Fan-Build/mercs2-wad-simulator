@@ -132,6 +132,7 @@ pub mod lua_exec;
 pub mod lua_sites;
 pub mod lua_stack;
 pub mod mesh_import;
+pub mod mixr;
 pub mod mod_runtime;
 pub mod model;
 pub mod model_build;
