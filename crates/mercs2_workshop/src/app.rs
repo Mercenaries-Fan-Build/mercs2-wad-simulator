@@ -169,6 +169,29 @@ impl WadStack {
         Ok(out)
     }
 
+    /// The `worldentity` container — the world's templates — resolved as the singleton class it is,
+    /// through the same residency registry.
+    pub fn worldentity(&mut self) -> Result<Vec<u8>, String> {
+        let WadStack { wads, registry, .. } = self;
+        registry
+            .resolve_singleton(wads, mercs2_formats::worldentity::WORLDENTITY_TYPE_HASH)
+            .and_then(|(_, c)| registry.slice(c).map(<[u8]>::to_vec))
+            .ok_or_else(|| "no worldentity chunk in any open wad".to_string())
+    }
+
+    /// The raw containers of a model's LOD-block chain (coarsest first), from the first open wad that
+    /// carries it, overlays first — the same resolution as [`Self::model`], whose rungs they are.
+    pub fn model_lods(&mut self, hash: u32) -> Result<Vec<wad::ModelLod>, String> {
+        let mut last = format!("0x{hash:08X}: no model chunk in any open wad");
+        for i in (0..self.wads.len()).rev() {
+            match wad::extract_model_lods(&mut self.wads[i], hash) {
+                Ok(l) => return Ok(l),
+                Err(e) => last = e,
+            }
+        }
+        Err(last)
+    }
+
     /// The assembled model — LOD-block chain joined through the resident block. Overlays first.
     pub fn model(&mut self, hash: u32) -> Result<mercs2_engine::model::Model, String> {
         let mut last = format!("0x{hash:08X}: no model chunk in any open wad");
@@ -7492,6 +7515,60 @@ pub(crate) fn default_render_state(w: &mut WadStack, hash: u32) -> mercs2_engine
         })
         .unwrap_or_default();
     mercs2_engine::render_state::RenderState { lod: 0, view_state: 0x01, node_enable }
+}
+
+/// A character kit's part mixer (`mercs2_formats::mixr`) and the world templates that wear it.
+pub(crate) struct KitOutfits {
+    pub(crate) mixr: mercs2_formats::mixr::Mixr,
+    pub(crate) templates: Vec<mercs2_formats::mixr::KitTemplate>,
+}
+
+impl KitOutfits {
+    /// A template of this kit by its `Name`: its profile index and that profile's outfits, in the
+    /// exe's order. An error when no template of the kit has the name, or its `ModelMixerProfile`
+    /// names no profile the kit carries (retail's `OC Soldier (Bench Press)` carries the allied
+    /// kit's).
+    pub(crate) fn of_template(&self, name: &str) -> Result<(usize, Vec<u32>), String> {
+        let t = self
+            .templates
+            .iter()
+            .find(|t| t.name.as_deref() == Some(name))
+            .ok_or_else(|| format!("no template of this kit is named {name:?}"))?;
+        let pi = self.mixr.profile_index(t.profile).ok_or_else(|| {
+            format!("template {name:?} picks profile 0x{:08X}, which this kit does not carry", t.profile)
+        })?;
+        Ok((pi, self.mixr.outfits(pi)))
+    }
+}
+
+/// The kit data of `hash`, or `None` when its container carries no `MIXR`.
+pub(crate) fn kit_outfits(w: &mut WadStack, hash: u32) -> Result<Option<KitOutfits>, String> {
+    let c = w.extract_container(hash)?;
+    let Some(mixr) = mercs2_formats::mixr::Mixr::find(&c)? else { return Ok(None) };
+    let we = mercs2_formats::worldentity::WorldEntity::parse(&w.worldentity()?)?;
+    let templates = mercs2_formats::mixr::kit_templates(&we)?.into_iter().filter(|t| t.model == hash).collect();
+    Ok(Some(KitOutfits { mixr, templates }))
+}
+
+/// The render state that shows exactly `outfit` of kit `hash` at rung 0: the spawn path's per-part
+/// `visible` states (`Mixr::outfit_node_states`) run through the same state machine as
+/// [`default_render_state`].
+pub(crate) fn outfit_render_state(
+    w: &mut WadStack,
+    hash: u32,
+    mixr: &mercs2_formats::mixr::Mixr,
+    outfit: u32,
+) -> Result<mercs2_engine::render_state::RenderState, String> {
+    use mercs2_formats::orchestrator as orch;
+    let c = w.extract_container(hash)?;
+    let hier = orch::parse_hier(&c);
+    let sm = orch::parse_state_machine(&c).ok_or_else(|| format!("kit 0x{hash:08X} has no state machine"))?;
+    let chosen = mixr.outfit_node_states(&sm, &hier, outfit)?;
+    Ok(mercs2_engine::render_state::RenderState {
+        lod: 0,
+        view_state: 0x01,
+        node_enable: orch::machine_node_enable(&sm, &hier, &chosen),
+    })
 }
 
 /// The 3-rung cross-fade `view_state` centred on rung `n`: `1<<(n-1) | 1<<n | 1<<(n+1)`, exactly
