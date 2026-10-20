@@ -179,6 +179,22 @@ impl Mixr {
         (0..self.parts.len()).filter(|&i| outfit & (1 << i) != 0).collect()
     }
 
+    /// A template's profile index and that profile's outfits, in the exe's order. An error when the
+    /// template's `ModelMixerProfile` names no profile of this kit (retail's `OC Soldier (Bench Press)`
+    /// carries the allied kit's).
+    pub fn template_outfits(&self, t: &KitTemplate) -> Result<(usize, Vec<u32>), String> {
+        let pi = self.profile_index(t.profile).ok_or_else(|| {
+            format!("template {:?} picks profile 0x{:08X}, which this kit does not carry", t.label(), t.profile)
+        })?;
+        Ok((pi, self.outfits(pi)))
+    }
+
+    /// Outfit number `n` — counted from 1, as `--render-outfit "<template>#n"` takes it — as one
+    /// listing line: `#n: parts [..]`.
+    pub fn outfit_line(&self, n: usize, outfit: u32) -> String {
+        format!("#{n}: parts {:?}", self.parts_of(outfit))
+    }
+
     /// The state index per switch node of `sm` that shows exactly `outfit`: the node's `visible`
     /// state for a worn part, its default state otherwise. Mirrors the spawn loop at `0x004D03F3`,
     /// which looks each worn part's node up in the model's HIER and, when found, sets that node's
@@ -215,6 +231,13 @@ pub struct KitTemplate {
     pub name: Option<String>,
     pub model: u32,
     pub profile: u32,
+}
+
+impl KitTemplate {
+    /// The template's `Name`, or its key in hex when it has none.
+    pub fn label(&self) -> String {
+        self.name.clone().unwrap_or_else(|| format!("0x{:08X}", self.key))
+    }
 }
 
 /// Every template with a `ModelName`, in key order. An error when a `ModelName` or
@@ -322,6 +345,22 @@ mod tests {
                 vec![3, 6, 7, 8, 10, 12, 13],
                 vec![3, 6, 7, 9, 10, 12, 13],
             ]
+        );
+    }
+
+    #[test]
+    fn a_template_resolves_to_its_profile_outfits() {
+        let m = elite();
+        let jungle = KitTemplate { key: 0x8000_6E40, name: Some("Jungle Elite".into()), model: 0x4D4F_42B5, profile: 0x3510_13C5 };
+        let (pi, outfits) = m.template_outfits(&jungle).unwrap();
+        assert_eq!((pi, outfits.len()), (0, 4));
+        assert_eq!(m.outfit_line(1, outfits[0]), "#1: parts [3, 5, 7, 8, 10, 12, 13]");
+
+        let stray = KitTemplate { key: 0x1234, name: None, model: 0x4D4F_42B5, profile: 0xDEAD_BEEF };
+        assert_eq!(stray.label(), "0x00001234");
+        assert_eq!(
+            m.template_outfits(&stray).unwrap_err(),
+            "template \"0x00001234\" picks profile 0xDEADBEEF, which this kit does not carry"
         );
     }
 
