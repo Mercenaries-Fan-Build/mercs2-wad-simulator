@@ -1,6 +1,6 @@
 [package]
 name = "mercs2_exemap"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2021"
 description = "Mercenaries 2 modernization — cross-build exe map: the catalogue of known Mercenaries2.exe builds, their code layouts, and a per-section layout-membership checker."
 license.workspace = true
