@@ -118,6 +118,11 @@ error giving the release page and the folder to unpack the zip into. A complete 
 of the five Ess / ECS / audio files, or holding a malformed one, stops the boot with an error naming
 the file.
 
+The corpus gates in `lua_source`, `blueprint` and `missions` run over the bundle's Lua and are
+pinned to release v0.17.0's bundle (`index::PINNED_CORPUS`: 675 scripts in `lua/`, 39 in
+`lua_dlc/`), the one CI downloads. A different bundle fails them on the count: re-download the
+bundle from Settings, or point `MERCS2_WORKSHOP_DATA` at an unpacked v0.17.0 `workshop_data/`.
+
 `--pack-data [dir]` builds the bundle (default `workshop_data`). Its in-repo sources are read from
 the checkout the binary was built from: names come from
 `data/production_names.json`, and `ess_api.json`, `ess_natives.json`, `ess_nodes.json`,
