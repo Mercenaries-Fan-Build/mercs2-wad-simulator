@@ -2,7 +2,7 @@
 //!
 //! A native workshop over the SAME `mercs2_engine` renderer the game boots: browse every model /
 //! texture in the install, preview them faithfully (materials, skinning, clips), inspect layers
-//! (HIER, per-material draw groups, texture plates), and compose an editable sandbox scene —
+//! (HIER, per-material draw groups, texture plates), and use them as donors for new contributions —
 //! all without booting the game. See `docs/modernization/workshop_charter.md` for the
 //! workbench roadmap (mission design, model import/fix, AV replacement, unlock auditing).
 //!
@@ -43,14 +43,15 @@
 //! to get it.
 //!
 //! Module map:
-//! - [`app`]     — the window: winit loop over the engine `Scene`, asset workbench, editable
-//!                 sandbox (`workshop_scene.json`), the OBJ/PNG exporter.
+//! - [`app`]     — the window: winit loop over the engine `Scene`, the rail and its pages, the
+//!                 Retarget / Fit benches, the OBJ/PNG exporter.
 //! - [`bundle`]  — the lossless export bundle; nothing is discarded (raw rung bytes survive).
 //! - [`gui`]     — egui host: hand-rolled winit-0.29 → egui bridge + the egui-wgpu paint path.
 //! - [`import`]  — foreign model import (`.obj`/`.gltf`/`.glb`) into the engine's `ModelData`.
 //! - [`fetch`]   — download + install the released reference bundle (`workshop_data`), automatically
 //!                 when none is found and from the Settings page on request.
 //! - [`index`]   — asset catalog + name resolution (packed `names.bin`, embedded ASET dictionary).
+//! - [`live`]    — the Live page + the lua-bridge reachability probe behind its rail dot.
 //! - [`luaview`] — read-only Lua source viewer (hand-rolled lexer/highlighter).
 //! - [`publish`] — background-threaded mod publishing: inject, compress, SHA-256, load self-test.
 //! - [`settings`] — persisted game-archive + reference-bundle paths: the Settings workbench, the
@@ -63,7 +64,6 @@ mod audioidx; // Captioned audio inventory (the Audio domain's real content)
 mod audioplay; // One-shot audio preview on the default output device (cpal)
 mod vostream; // Stream VO PCM straight from the game's vo_stream.english.pws
 mod bundle;
-mod console;
 mod ecsreg;
 mod essapi;
 mod domain;
@@ -71,6 +71,7 @@ mod fetch;
 mod gui;
 mod import;
 mod index;
+mod live;
 mod luaview;
 mod lua_source;
 mod blueprint;
