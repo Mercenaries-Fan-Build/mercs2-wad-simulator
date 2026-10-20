@@ -150,6 +150,13 @@ Binary crate — these are private modules, listed for orientation:
   the game would make.
 - `save_flow` — contract state changes on a save (complete, undo, offer, start, lock), as the game
   makes them. What it writes where: `docs/save_contract_state.md`.
+- `missions` — the Missions page: a Blueprint editor over a mission script's Lua (script list,
+  palette from the corpus, zoomable canvas, inspector, Compile, Add to Shipment as `replace_lua`).
+- `blueprint` — a Lua function body as nodes and wires: lifted from the AST, edited, and emitted back
+  through it, plus the corpus index (signatures, inherit chains) and the palette. Its gates lift and
+  emit every corpus script byte-identical and compile each with the game's Lua 5.1.
+- `lua_source` — the lossless Lua model the Blueprint stands on (full_moon); its gate parses and
+  prints every corpus script byte-identical.
 - `luaview` — read-only Lua source viewer with a hand-rolled Lua lexer/highlighter.
 - `publish` — background-threaded mod publishing into a patch WAD, with SHA-256 + a load self-test.
 - `texenc` — CPU BC1/BC3 encode (min/max endpoint, no search) for imported images.
