@@ -47,6 +47,9 @@ bytemuck = { version = "1", features = ["derive"] }
 # emits them for control flow it cannot structure in the debug-stripped DLC chunks
 # (docs/mercs2-dlc-luacd/README.md). What retail accepts is decided by the mercs2_luac compile.
 full_moon = { version = "3", default-features = false, features = ["lua52"] }
+# The Blueprint's Compile: the workspace's one Lua 5.1.5 (the game's float VM), so a script that
+# compiles here is bytecode the game loads.
+mercs2_luac = { workspace = true }
 mercs2_engine = { workspace = true }
 mercs2_core = { workspace = true }
 mercs2_formats = { workspace = true }
