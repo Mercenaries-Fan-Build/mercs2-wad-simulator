@@ -195,7 +195,7 @@ mod tests {
     use super::*;
 
     fn row(name: &str) -> AssetRow {
-        AssetRow { hash: 0, block: 0, src: 0, name: Some(name.to_string()) }
+        AssetRow { hash: 0, block: 0, src: 0, name: Some(name.to_string()), template: None }
     }
 
     /// The lenses sort real retail names into the domain the Library would also file them under —
@@ -252,7 +252,7 @@ mod tests {
     /// An unnamed (hash-only) row belongs to no domain lens — there is nothing to classify on.
     #[test]
     fn an_unnamed_row_belongs_to_no_domain() {
-        let bare = AssetRow { hash: 0xDEAD_BEEF, block: 0, src: 0, name: None };
+        let bare = AssetRow { hash: 0xDEAD_BEEF, block: 0, src: 0, name: None, template: None };
         assert!(Domain::ALL.iter().all(|d| !d.model_lens(&bare)));
     }
 
@@ -263,5 +263,20 @@ mod tests {
         assert!(!Domain::Systems.script_lens("lua/resident/mrxmusic.lua"));
         assert!(Domain::Audio.script_lens("lua/resident/mrxmusic.lua"));
         assert!(Domain::Systems.script_lens("lua/resident/mrxbootstrap.lua"));
+    }
+
+    /// A spawn template's row of a character kit is a Character, whatever its kit is named.
+    #[test]
+    fn a_kit_template_row_is_a_character() {
+        let kit = AssetRow {
+            hash: 0x4D4F_42B5,
+            block: 0,
+            src: 0,
+            name: None,
+            template: Some("Jungle Elite".into()),
+        };
+        assert_eq!(kit.label(), "Jungle Elite");
+        assert!(Domain::Characters.model_lens(&kit));
+        assert_eq!(Domain::ALL.iter().filter(|d| d.model_lens(&kit)).count(), 1);
     }
 }

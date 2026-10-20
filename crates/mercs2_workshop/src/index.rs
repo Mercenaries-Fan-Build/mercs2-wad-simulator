@@ -141,15 +141,28 @@ pub struct AssetRow {
     pub src: usize,
     /// Registry name, when the hash reverses (most placeable content does).
     pub name: Option<String>,
+    /// A spawn template's view of a character kit: the template's `Name`. The row loads the kit
+    /// (`hash`) showing that template's outfit (`app::KitOutfits`). `None` for an asset row.
+    pub template: Option<String>,
 }
 
 impl AssetRow {
-    /// List label: the registry name when known, else the raw hash.
+    /// List label: the template name for a template row, else the registry name when known, else
+    /// the raw hash.
     pub fn label(&self) -> String {
+        if let Some(t) = &self.template {
+            return t.clone();
+        }
         match &self.name {
             Some(n) => n.clone(),
             None => format!("0x{:08X}", self.hash),
         }
+    }
+
+    /// Whether this row is model `hash` showing `template`'s outfit (`None`: no template). A kit's
+    /// template rows all share the kit's hash, so the hash alone names every one of them.
+    pub fn is(&self, hash: u32, template: Option<&str>) -> bool {
+        self.hash == hash && self.template.as_deref() == template
     }
 
     /// Vehicle class for the Model Workbench inventory, or `None` if not a vehicle. Data-driven
@@ -166,6 +179,9 @@ impl AssetRow {
     /// convention: vehicles break out by class, then characters / buildings / weapons / props /
     /// world-state / other. Drives the grouped model navigator. `Unnamed` = hash-only rows.
     pub fn category(&self) -> &'static str {
+        if self.template.is_some() {
+            return "Character";
+        }
         let Some(name) = self.name.as_ref() else { return "Unnamed" };
         if let Some(c) = self.vehicle_class() {
             return vehicle_display(c);
@@ -267,6 +283,9 @@ pub struct AssetIndex {
     /// existed already had to be listed by hand in `rows`, `build` and `apply_names`.
     rows: Vec<Vec<AssetRow>>,
     pub names: HashMap<u32, String>,
+    /// The world's templates that name a model (`mercs2_formats::mixr::kit_templates`), as given to
+    /// [`Self::add_kit_templates`] — what a kit preview reads its outfits from.
+    pub kit_templates: Vec<mercs2_formats::mixr::KitTemplate>,
 }
 
 impl AssetIndex {
@@ -326,15 +345,37 @@ impl AssetIndex {
                 } else {
                     0
                 };
-                buckets[i].insert(hash, AssetRow { hash, block, src, name: None });
+                buckets[i].insert(hash, AssetRow { hash, block, src, name: None, template: None });
             }
         }
         let mut idx = AssetIndex {
             rows: buckets.into_iter().map(|b| b.into_values().collect()).collect(),
             names: HashMap::new(),
+            kit_templates: Vec::new(),
         };
         idx.apply_names(names);
         idx
+    }
+
+    /// Add one model row per kit template (`app::load_kit_templates`: a template that picks a
+    /// character-kit outfit), labelled by the template's `Name`, beside its kit's own row. A template
+    /// whose model has no row in the catalog adds nothing. Returns how many rows were added.
+    pub fn add_kit_templates(&mut self, templates: &[mercs2_formats::mixr::KitTemplate]) -> usize {
+        let Some(mi) = Kind::ALL.iter().position(|k| *k == Kind::Model) else { return 0 };
+        let mut added = Vec::new();
+        for t in templates {
+            let (Some(name), Some(kit)) = (&t.name, self.rows[mi].iter().find(|r| r.hash == t.model && r.template.is_none()))
+            else {
+                continue;
+            };
+            added.push(AssetRow { template: Some(name.clone()), ..kit.clone() });
+        }
+        let n = added.len();
+        self.rows[mi].extend(added);
+        self.kit_templates = templates.to_vec();
+        let names = std::mem::take(&mut self.names);
+        self.apply_names(names);
+        n
     }
 
     /// Attach a (new) hash→name map: resolve every row's label and re-sort — named assets first
@@ -785,4 +826,26 @@ fn load_names_csv(path: &Path) -> Result<HashMap<u32, String>, String> {
     }
     eprintln!("[names] {} registry names from {}", map.len(), path.display());
     Ok(map)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::AssetRow;
+
+    fn row(hash: u32, template: Option<&str>) -> AssetRow {
+        AssetRow { hash, block: 0, src: 0, name: None, template: template.map(str::to_string) }
+    }
+
+    #[test]
+    fn a_kit_template_row_is_only_its_own_template() {
+        let soldier = row(0x45CC_35FE, Some("Allied Soldier"));
+        let officer = row(0x45CC_35FE, Some("Allied Officer"));
+        let kit = row(0x45CC_35FE, None);
+        assert!(soldier.is(0x45CC_35FE, Some("Allied Soldier")));
+        assert!(!officer.is(0x45CC_35FE, Some("Allied Soldier")));
+        assert!(!kit.is(0x45CC_35FE, Some("Allied Soldier")));
+        assert!(kit.is(0x45CC_35FE, None));
+        assert!(!soldier.is(0x45CC_35FE, None));
+        assert!(!soldier.is(0x4D4F_42B5, Some("Allied Soldier")));
+    }
 }

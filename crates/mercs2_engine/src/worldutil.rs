@@ -134,6 +134,44 @@ pub fn rainbow_names(
     Ok(out)
 }
 
+/// An asset named on a command line: `0x`-prefixed hex is the hash itself, anything else is a name
+/// and is hashed with `pandemic_hash_m2`. Unlike [`parse_hash`], a bare word is never read as hex —
+/// `dead` is a name.
+pub fn hash_or_name(s: &str) -> Result<u32, String> {
+    match s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+        Some(h) => u32::from_str_radix(h, 16).map_err(|e| format!("{s:?} is not a hex hash: {e}")),
+        None => Ok(mercs2_formats::hash::pandemic_hash_m2(s)),
+    }
+}
+
+/// hash -> name from the ASET export (`docs/data/aset_names.csv`, written by `aset_export`): its
+/// first column is the hash, its second the name, empty for a hash nobody has named — those are
+/// absent from the map. Every row after the header must start with a `0x` hash; one that does not
+/// is an error naming its line.
+pub fn aset_names(csv: &std::path::Path) -> Result<std::collections::HashMap<u32, String>, String> {
+    let text = std::fs::read_to_string(csv).map_err(|e| format!("read {}: {e}", csv.display()))?;
+    let mut out = std::collections::HashMap::new();
+    for (i, line) in text.lines().enumerate().skip(1) {
+        let mut f = line.split(',');
+        let col0 = f.next().unwrap_or("");
+        let h = col0
+            .strip_prefix("0x")
+            .and_then(|h| u32::from_str_radix(h, 16).ok())
+            .ok_or_else(|| format!("{}:{}: {col0:?} is not a 0x hash", csv.display(), i + 1))?;
+        if let Some(n) = f.next().filter(|n| !n.is_empty()) {
+            out.insert(h, n.to_string());
+        }
+    }
+    Ok(out)
+}
+
+/// [`aset_names`] for a **dev tool**: the CSV under `data/` of the `notes_docs_dir` named by the
+/// nearest `.mercs2-local.toml` above `start`.
+pub fn dev_aset_names(start: &std::path::Path) -> Result<std::collections::HashMap<u32, String>, String> {
+    let docs = mercs2_formats::game_paths::local_config_notes_docs_dir(start)?;
+    aset_names(&docs.join("data").join("aset_names.csv"))
+}
+
 /// The PMC HQ compound, game coords (docs/coordinate_systems.md Example 1).
 pub const PMC_HQ: [f32; 2] = [2647.0, -951.0];
 pub const PMC_HQ_RADIUS_M: f32 = 150.0;
@@ -1965,6 +2003,36 @@ impl HeightMap {
             }
         }
         crate::physics::Heightmap::new(MIN, MIN, cell, W, W, heights)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hash_or_name_reads_hex_only_after_0x() {
+        assert_eq!(hash_or_name("0x4D4F42B5"), Ok(0x4D4F_42B5));
+        assert_eq!(hash_or_name("0X4d4f42b5"), Ok(0x4D4F_42B5));
+        assert_eq!(hash_or_name("dead"), Ok(mercs2_formats::hash::pandemic_hash_m2("dead")));
+        assert_eq!(hash_or_name("al_hum_soldier_elitea_ub"), Ok(0x037C_DC9B));
+        assert!(hash_or_name("0xnothex").is_err());
+    }
+
+    #[test]
+    fn aset_names_keeps_named_rows_and_rejects_a_row_without_a_hash() {
+        let dir = std::env::temp_dir().join("mercs2_engine_aset_names_test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let good = dir.join("good.csv");
+        std::fs::write(&good, "asset_hash,name,rest\n0x00000001,one,x\n0x00000002,,y\n").unwrap();
+        let names = aset_names(&good).unwrap();
+        assert_eq!(names.len(), 1);
+        assert_eq!(names.get(&1).map(String::as_str), Some("one"));
+
+        let bad = dir.join("bad.csv");
+        std::fs::write(&bad, "asset_hash,name\n0x00000001,one\nnope,two\n").unwrap();
+        let e = aset_names(&bad).unwrap_err();
+        assert!(e.ends_with("bad.csv:3: \"nope\" is not a 0x hash"), "{e}");
     }
 }
 

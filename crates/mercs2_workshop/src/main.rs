@@ -331,11 +331,21 @@ fn main() {
     // Headless: dump the catalog (optionally substring-filtered) and exit.
     if let Some(i) = args.iter().position(|a| a == "--list") {
         let filter = args.get(i + 1).map(|s| s.to_ascii_lowercase()).unwrap_or_default();
-        let stack = match app::WadStack::open(&wadpath, &overlays) {
+        let mut stack = match app::WadStack::open(&wadpath, &overlays) {
             Ok(s) => s,
             Err(e) => return eprintln!("workshop: cannot open {wadpath}: {e}"),
         };
-        let idx = index::AssetIndex::build(&stack.wads, names_or_exit());
+        let mut idx = index::AssetIndex::build(&stack.wads, names_or_exit());
+        // The kit template rows, as the GUI catalog lists them.
+        match app::load_kit_templates(&mut stack) {
+            Ok(t) => {
+                idx.add_kit_templates(&t);
+            }
+            Err(e) => {
+                eprintln!("--list: cannot read the world's templates (worldentity): {e}");
+                std::process::exit(1);
+            }
+        }
         for (kind, rows) in
             [(index::Kind::Model, &idx.models()), (index::Kind::Texture, &idx.textures())]
         {
@@ -502,17 +512,42 @@ fn main() {
             args.iter().position(|a| a == "--out").and_then(|j| args.get(j + 1)).cloned()
                 .unwrap_or_else(|| "workshop_export".into()),
         );
-        let stack = match app::WadStack::open(&wadpath, &overlays) {
+        let mut stack = match app::WadStack::open(&wadpath, &overlays) {
             Ok(s) => s,
             Err(e) => return eprintln!("workshop: cannot open {wadpath}: {e}"),
         };
-        let idx = index::AssetIndex::build(&stack.wads, names_or_exit());
-        // A whole vehicle class ("class:helicopter") or a single asset.
+        let mut idx = index::AssetIndex::build(&stack.wads, names_or_exit());
+        match app::load_kit_templates(&mut stack) {
+            Ok(t) => {
+                idx.add_kit_templates(&t);
+            }
+            Err(e) => {
+                eprintln!("--export-bundle: cannot read the world's templates (worldentity): {e}");
+                std::process::exit(1);
+            }
+        }
+        // A kit template's outfit: "<template name>"[#n], n counted from 1.
+        let (tpl_name, tpl_outfit) = match arg.rsplit_once('#') {
+            Some((a, b)) => match b.parse::<usize>() {
+                Ok(n) if n >= 1 => (a.to_string(), Some(n - 1)),
+                _ => {
+                    eprintln!("--export-bundle: {arg:?}: the part after '#' is an outfit number from 1");
+                    std::process::exit(1);
+                }
+            },
+            None => (arg.clone(), None),
+        };
+        let tpl = idx.models().iter().find(|r| r.template.as_deref() == Some(tpl_name.as_str())).map(|r| r.hash);
+        let mut outfit = None;
+        // A whole vehicle class ("class:helicopter"), a kit template, or a single asset.
         let targets: Vec<(u32, String)> = if let Some(cls) = arg.strip_prefix("class:") {
             idx.models().iter()
                 .filter(|r| r.vehicle_class() == Some(cls))
                 .map(|r| (r.hash, r.label()))
                 .collect()
+        } else if let Some(h) = tpl {
+            outfit = tpl_outfit;
+            vec![(h, tpl_name.clone())]
         } else {
             let h = arg.strip_prefix("0x").and_then(|x| u32::from_str_radix(x, 16).ok())
                 .unwrap_or_else(|| mercs2_formats::hash::pandemic_hash_m2(&arg));
@@ -525,7 +560,7 @@ fn main() {
         drop(stack);
         let (mut ok, mut fail) = (0, 0);
         for (h, label) in &targets {
-            match app::export_bundle_by_hash(&wadpath, &overlays, *h, label, &idx, &outroot) {
+            match app::export_bundle_by_hash(&wadpath, &overlays, *h, label, &idx, &outroot, outfit) {
                 Ok(d) => { ok += 1; println!("  [ok]   {label} (0x{h:08X}) -> {d}"); }
                 Err(e) => { fail += 1; eprintln!("  [FAIL] {label} (0x{h:08X}): {e}"); }
             }
@@ -1267,6 +1302,57 @@ exported {ok} bundle(s), {fail} failed -> {}", outroot.display());
         // freshly-placed instance gets. For a character this is all-true: characters ship no
         // destruction machine, so clause (3) is a no-op for them and only the LOD tier bites.
         let mut rs = app::default_render_state(&mut w, hash);
+        // A character KIT (a model carrying a MIXR) holds several heads, bodies and accessories; a
+        // spawn shows one outfit of them. `--render-outfits` lists the kit's templates and the
+        // outfits each can show (the exe's enumeration, `mercs2_formats::mixr`);
+        // `--render-outfit "<template name>"[#n]` renders outfit n (from 1; default 1) of that template —
+        // the parts the spawn path sets `visible`, run through the same state machine.
+        let list_outfits = args.iter().any(|a| a == "--render-outfits");
+        if list_outfits || get("--render-outfit").is_some() {
+            let die = |m: String| -> ! {
+                eprintln!("--render-outfit: {m}");
+                std::process::exit(1)
+            };
+            let kit = match app::kit_outfits(&mut w, hash) {
+                Ok(Some(k)) => k,
+                Ok(None) => die(format!("0x{hash:08X} carries no MIXR; it is not a character kit")),
+                Err(e) => die(e),
+            };
+            if list_outfits {
+                println!("--render-outfits 0x{hash:08X}: {} parts, {} profiles", kit.mixr.parts.len(), kit.mixr.profiles.len());
+                for t in &kit.templates {
+                    let name = t.label();
+                    match kit.mixr.template_outfits(t) {
+                        Ok((pi, outfits)) => {
+                            println!("  {name:?}: profile {pi} (0x{:08X}), {} outfit(s)", t.profile, outfits.len());
+                            for (k, o) in outfits.iter().enumerate() {
+                                println!("    {}", kit.mixr.outfit_line(k + 1, *o));
+                            }
+                        }
+                        Err(e) => println!("  {name:?}: {e}"),
+                    }
+                }
+                return;
+            }
+            let spec = get("--render-outfit").expect("checked above");
+            let (name, n) = match spec.rsplit_once('#') {
+                Some((a, b)) => match b.parse::<usize>() {
+                    Ok(n) if n >= 1 => (a.to_string(), n),
+                    _ => die(format!("{spec:?}: the part after '#' is an outfit number from 1")),
+                },
+                None => (spec.clone(), 1),
+            };
+            let (pi, outfits) = kit.of_template(&name).unwrap_or_else(|e| die(e));
+            let Some(&outfit) = outfits.get(n - 1) else {
+                die(format!("{name:?} has {} outfit(s); #{n} does not exist", outfits.len()))
+            };
+            rs = app::outfit_render_state(&mut w, hash, &kit.mixr, outfit).unwrap_or_else(|e| die(e));
+            println!(
+                "outfit #{n} of {} for {name:?} (profile {pi}): parts {:?}",
+                outfits.len(),
+                kit.mixr.parts_of(outfit)
+            );
+        }
         // `--render-view-state 0xNN` forces the draw gate's view_state, which is otherwise pinned
         // to 0x01 (rung 0). Without it a model's LOD tiers can only be REPORTED, never seen — and
         // "geometry on a 0x02 group previews perfectly and is invisible in game" is a failure this
@@ -1288,17 +1374,27 @@ exported {ok} bundle(s), {fail} failed -> {}", outroot.display());
                 ),
             }
         }
-        let gate: std::collections::HashSet<usize> = match w.extract_container(hash) {
-            Ok(c) => match mercs2_formats::model_inject::group_draw_report(&c) {
-                Ok(rep) => rep.iter().filter(|r| r.1 > 0 && r.2 > 0).map(|r| r.0).collect(),
-                Err(e) => {
-                    eprintln!("--render: draw report failed ({e}); rendering every group");
-                    md.draws.iter().map(|d| d.group_index).collect()
+        // Keyed by (rung, group): every LOD block numbers its groups from 0, and a multi-block
+        // model's close-up geometry lives in a finer block (the allied elite kit's rung-0 bodies are
+        // in its `_P001` block). A gate read from the resident container alone dropped those groups
+        // and checked overlapping indices against the wrong block's draw counts.
+        let gate: std::collections::HashSet<(u8, usize)> = match w.model_lods(hash) {
+            Ok(lods) => {
+                let mut g = std::collections::HashSet::new();
+                for l in &lods {
+                    match mercs2_formats::model_inject::group_draw_report(&l.container) {
+                        Ok(rep) => g.extend(rep.iter().filter(|r| r.1 > 0 && r.2 > 0).map(|r| (l.level, r.0))),
+                        Err(e) => {
+                            eprintln!("--render: draw report failed for rung {} ({e}); rendering its every group", l.level);
+                            g.extend(md.draws.iter().filter(|d| d.rung == l.level).map(|d| (d.rung, d.group_index)));
+                        }
+                    }
                 }
-            },
+                g
+            }
             Err(e) => {
                 eprintln!("--render: container unavailable ({e}); rendering every group");
-                md.draws.iter().map(|d| d.group_index).collect()
+                md.draws.iter().map(|d| (d.rung, d.group_index)).collect()
             }
         };
 
@@ -1315,7 +1411,7 @@ exported {ok} bundle(s), {fail} failed -> {}", outroot.display());
             // therefore modelled clause (2) only for rung 0 and clause (3) not at all. That shipped
             // a build whose torso and arms were invisible in game while rendering perfectly here -
             // the host group sat in the 0x02 tier and nothing looked.
-            .filter(|d| gate.contains(&d.group_index) && rs.segment_visible(d.lod_mask, d.node))
+            .filter(|d| gate.contains(&(d.rung, d.group_index)) && rs.segment_visible(d.lod_mask, d.node))
             .map(|d| shot::DrawTex {
                 index_start: d.index_start,
                 index_count: d.index_count,
@@ -1358,7 +1454,7 @@ exported {ok} bundle(s), {fail} failed -> {}", outroot.display());
             md.draws.len(),
             md.indices.len()
         );
-        for d in md.draws.iter().filter(|d| gate.contains(&d.group_index) && d.index_count > 0) {
+        for d in md.draws.iter().filter(|d| gate.contains(&(d.rung, d.group_index)) && d.index_count > 0) {
             if !rs.segment_visible(d.lod_mask, d.node) {
                 println!(
                     "    group {:>2}  {:>6} idx  lod 0x{:02X}  node {:>4}  <-- GATED OUT, invisible in game",

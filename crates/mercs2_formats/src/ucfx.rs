@@ -53,6 +53,31 @@ pub fn parse_block_entry_table(decompressed: &[u8]) -> (u32, Vec<BlockTableEntry
     (count, entries)
 }
 
+/// A decompressed block's entry table, each entry with its chunk's byte range: the chunks follow the
+/// table back to back, in table order. An error when the table holds fewer entries than its count,
+/// or a chunk runs past the end of the block.
+pub fn block_chunk_spans(decompressed: &[u8]) -> Result<Vec<(BlockTableEntry, std::ops::Range<usize>)>, String> {
+    let (count, entries) = parse_block_entry_table(decompressed);
+    if entries.len() != count as usize {
+        return Err(format!("entry table claims {count}, holds {}", entries.len()));
+    }
+    let mut off = 4 + count as usize * 16;
+    let mut spans = Vec::with_capacity(entries.len());
+    for e in entries {
+        let end = off + e.chunk_size as usize;
+        if end > decompressed.len() {
+            return Err(format!(
+                "chunk 0x{:08X} runs to {end}, block is {} bytes",
+                e.name_hash,
+                decompressed.len()
+            ));
+        }
+        spans.push((e, off..end));
+        off = end;
+    }
+    Ok(spans)
+}
+
 pub fn walk_decompressed_block(
     decompressed: &[u8],
     label: &str,
@@ -688,6 +713,40 @@ fn emit_level(level: &[UcfxNode], rows: &mut Vec<u8>, data: &mut Vec<u8>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A block of `(name, type, body)` chunks: `u32 count`, 16-byte entries, then the bodies.
+    fn block_of(chunks: &[(u32, u32, &[u8])]) -> Vec<u8> {
+        let mut b = (chunks.len() as u32).to_le_bytes().to_vec();
+        for (name, ty, body) in chunks {
+            for v in [*name, *ty, 0, body.len() as u32] {
+                b.extend_from_slice(&v.to_le_bytes());
+            }
+        }
+        for (_, _, body) in chunks {
+            b.extend_from_slice(body);
+        }
+        b
+    }
+
+    #[test]
+    fn block_chunk_spans_follow_the_table() {
+        let b = block_of(&[(0xA, 0x1, &[1, 2, 3]), (0xB, 0x2, &[]), (0xC, 0x3, &[4, 5])]);
+        let spans = block_chunk_spans(&b).unwrap();
+        let got: Vec<(u32, u32, &[u8])> = spans.iter().map(|(e, r)| (e.name_hash, e.type_hash, &b[r.clone()])).collect();
+        assert_eq!(got, vec![(0xA, 0x1, &[1u8, 2, 3][..]), (0xB, 0x2, &[][..]), (0xC, 0x3, &[4u8, 5][..])]);
+    }
+
+    #[test]
+    fn block_chunk_spans_reject_a_short_table_and_an_overrun() {
+        let mut short = block_of(&[(0xA, 0x1, &[1])]);
+        short[0] = 2;
+        short.truncate(4 + 16);
+        assert_eq!(block_chunk_spans(&short).unwrap_err(), "entry table claims 2, holds 1");
+
+        let mut over = block_of(&[(0xA, 0x1, &[1, 2])]);
+        over.pop();
+        assert_eq!(block_chunk_spans(&over).unwrap_err(), "chunk 0x0000000A runs to 22, block is 21 bytes");
+    }
 
     fn tree_sample() -> Vec<UcfxNode> {
         vec![UcfxNode::with_children(

@@ -263,8 +263,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             for anc in &anchor_list {
                 for shape in &shapes {
                     let free = shape.iter().filter(|s| s.is_none()).count();
-                    let words = |fill: (&str, &str)| -> Vec<String> {
-                        let mut it = [fill.0, fill.1].into_iter();
+                    let words = |fill: (&str, &str, &str)| -> Vec<String> {
+                        let mut it = [fill.0, fill.1, fill.2].into_iter();
                         shape
                             .iter()
                             .map(|s| match s {
@@ -308,11 +308,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                     };
                     match free {
-                        0 => emit(&words(("", "")), &mut out),
-                        1 => emit(&words((wa, "")), &mut out),
+                        0 => emit(&words(("", "", "")), &mut out),
+                        1 => emit(&words((wa, "", "")), &mut out),
+                        2 => {
+                            for wb in &pool {
+                                emit(&words((wa, wb, "")), &mut out);
+                            }
+                        }
                         _ => {
                             for wb in &pool {
-                                emit(&words((wa, wb)), &mut out);
+                                for wc in &pool {
+                                    emit(&words((wa, wb, wc)), &mut out);
+                                }
                             }
                         }
                     }
