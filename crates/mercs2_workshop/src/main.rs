@@ -331,11 +331,21 @@ fn main() {
     // Headless: dump the catalog (optionally substring-filtered) and exit.
     if let Some(i) = args.iter().position(|a| a == "--list") {
         let filter = args.get(i + 1).map(|s| s.to_ascii_lowercase()).unwrap_or_default();
-        let stack = match app::WadStack::open(&wadpath, &overlays) {
+        let mut stack = match app::WadStack::open(&wadpath, &overlays) {
             Ok(s) => s,
             Err(e) => return eprintln!("workshop: cannot open {wadpath}: {e}"),
         };
-        let idx = index::AssetIndex::build(&stack.wads, names_or_exit());
+        let mut idx = index::AssetIndex::build(&stack.wads, names_or_exit());
+        // The kit template rows, as the GUI catalog lists them.
+        match app::load_kit_templates(&mut stack) {
+            Ok(t) => {
+                idx.add_kit_templates(&t);
+            }
+            Err(e) => {
+                eprintln!("--list: cannot read the world's templates (worldentity): {e}");
+                std::process::exit(1);
+            }
+        }
         for (kind, rows) in
             [(index::Kind::Model, &idx.models()), (index::Kind::Texture, &idx.textures())]
         {
@@ -502,17 +512,42 @@ fn main() {
             args.iter().position(|a| a == "--out").and_then(|j| args.get(j + 1)).cloned()
                 .unwrap_or_else(|| "workshop_export".into()),
         );
-        let stack = match app::WadStack::open(&wadpath, &overlays) {
+        let mut stack = match app::WadStack::open(&wadpath, &overlays) {
             Ok(s) => s,
             Err(e) => return eprintln!("workshop: cannot open {wadpath}: {e}"),
         };
-        let idx = index::AssetIndex::build(&stack.wads, names_or_exit());
-        // A whole vehicle class ("class:helicopter") or a single asset.
+        let mut idx = index::AssetIndex::build(&stack.wads, names_or_exit());
+        match app::load_kit_templates(&mut stack) {
+            Ok(t) => {
+                idx.add_kit_templates(&t);
+            }
+            Err(e) => {
+                eprintln!("--export-bundle: cannot read the world's templates (worldentity): {e}");
+                std::process::exit(1);
+            }
+        }
+        // A kit template's outfit: "<template name>"[#n], n counted from 1.
+        let (tpl_name, tpl_outfit) = match arg.rsplit_once('#') {
+            Some((a, b)) => match b.parse::<usize>() {
+                Ok(n) if n >= 1 => (a.to_string(), Some(n - 1)),
+                _ => {
+                    eprintln!("--export-bundle: {arg:?}: the part after '#' is an outfit number from 1");
+                    std::process::exit(1);
+                }
+            },
+            None => (arg.clone(), None),
+        };
+        let tpl = idx.models().iter().find(|r| r.template.as_deref() == Some(tpl_name.as_str())).map(|r| r.hash);
+        let mut outfit = None;
+        // A whole vehicle class ("class:helicopter"), a kit template, or a single asset.
         let targets: Vec<(u32, String)> = if let Some(cls) = arg.strip_prefix("class:") {
             idx.models().iter()
                 .filter(|r| r.vehicle_class() == Some(cls))
                 .map(|r| (r.hash, r.label()))
                 .collect()
+        } else if let Some(h) = tpl {
+            outfit = tpl_outfit;
+            vec![(h, tpl_name.clone())]
         } else {
             let h = arg.strip_prefix("0x").and_then(|x| u32::from_str_radix(x, 16).ok())
                 .unwrap_or_else(|| mercs2_formats::hash::pandemic_hash_m2(&arg));
@@ -525,7 +560,7 @@ fn main() {
         drop(stack);
         let (mut ok, mut fail) = (0, 0);
         for (h, label) in &targets {
-            match app::export_bundle_by_hash(&wadpath, &overlays, *h, label, &idx, &outroot) {
+            match app::export_bundle_by_hash(&wadpath, &overlays, *h, label, &idx, &outroot, outfit) {
                 Ok(d) => { ok += 1; println!("  [ok]   {label} (0x{h:08X}) -> {d}"); }
                 Err(e) => { fail += 1; eprintln!("  [FAIL] {label} (0x{h:08X}): {e}"); }
             }
@@ -1270,7 +1305,7 @@ exported {ok} bundle(s), {fail} failed -> {}", outroot.display());
         // A character KIT (a model carrying a MIXR) holds several heads, bodies and accessories; a
         // spawn shows one outfit of them. `--render-outfits` lists the kit's templates and the
         // outfits each can show (the exe's enumeration, `mercs2_formats::mixr`);
-        // `--render-outfit "<template name>"[#n]` renders outfit n (default 0) of that template —
+        // `--render-outfit "<template name>"[#n]` renders outfit n (from 1; default 1) of that template —
         // the parts the spawn path sets `visible`, run through the same state machine.
         let list_outfits = args.iter().any(|a| a == "--render-outfits");
         if list_outfits || get("--render-outfit").is_some() {
@@ -1291,7 +1326,7 @@ exported {ok} bundle(s), {fail} failed -> {}", outroot.display());
                         Ok((pi, outfits)) => {
                             println!("  {name:?}: profile {pi} (0x{:08X}), {} outfit(s)", t.profile, outfits.len());
                             for (k, o) in outfits.iter().enumerate() {
-                                println!("    #{k}: parts {:?}", kit.mixr.parts_of(*o));
+                                println!("    #{}: parts {:?}", k + 1, kit.mixr.parts_of(*o));
                             }
                         }
                         Err(e) => println!("  {name:?}: {e}"),
@@ -1302,13 +1337,13 @@ exported {ok} bundle(s), {fail} failed -> {}", outroot.display());
             let spec = get("--render-outfit").expect("checked above");
             let (name, n) = match spec.rsplit_once('#') {
                 Some((a, b)) => match b.parse::<usize>() {
-                    Ok(n) => (a.to_string(), n),
-                    Err(_) => die(format!("{spec:?}: the part after '#' is an outfit number")),
+                    Ok(n) if n >= 1 => (a.to_string(), n),
+                    _ => die(format!("{spec:?}: the part after '#' is an outfit number from 1")),
                 },
-                None => (spec.clone(), 0),
+                None => (spec.clone(), 1),
             };
             let (pi, outfits) = kit.of_template(&name).unwrap_or_else(|e| die(e));
-            let Some(&outfit) = outfits.get(n) else {
+            let Some(&outfit) = outfits.get(n - 1) else {
                 die(format!("{name:?} has {} outfit(s); #{n} does not exist", outfits.len()))
             };
             rs = app::outfit_render_state(&mut w, hash, &kit.mixr, outfit).unwrap_or_else(|e| die(e));
