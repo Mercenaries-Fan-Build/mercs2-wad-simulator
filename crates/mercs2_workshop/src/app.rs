@@ -1073,6 +1073,7 @@ pub fn run(opts: Options) {
     struct BootData {
         names: HashMap<u32, String>,
         lua: Vec<(String, String, String)>,
+        missions: crate::missions::Reference,
         ess_api: crate::essapi::ApiIndex,
         ecs_reg: crate::ecsreg::EcsRegistry,
         audio_idx: crate::audioidx::AudioIndex,
@@ -1095,10 +1096,15 @@ pub fn run(opts: Options) {
                 })?;
                 let _ = tx.send(Boot::Prog(0.97, "Lua reference corpus"));
                 let lua = crate::index::load_lua_corpus()?;
+                // The Missions page's corpus index and palette: every script parsed and lifted
+                // once, here rather than on the UI thread.
+                let _ = tx.send(Boot::Prog(0.98, "Mission scripts"));
+                let missions = crate::missions::Reference::build(&lua)?;
                 let home = crate::index::require_data_home(&mut |_, _| {})?;
                 Ok(BootData {
                     names,
                     lua,
+                    missions,
                     // The Ess / engine API reference the console autocompletes against.
                     ess_api: crate::essapi::ApiIndex::load(&home)?,
                     // The native ECS component-class registry — the *typed* half of the reference
@@ -1646,12 +1652,12 @@ pub fn run(opts: Options) {
                                     boot_stage = stage;
                                 }
                                 Ok(Boot::Done(data)) => {
-                                    let BootData { names, lua, ess_api: api, ecs_reg: ecs, audio_idx: audio, secs } = *data;
+                                    let BootData { names, lua, missions, ess_api: api, ecs_reg: ecs, audio_idx: audio, secs } = *data;
                                     index.apply_names(names);
                                     lua_corpus = lua;
-                                    // The Missions blueprint editor derives its mission catalog
-                                    // from the lua corpus — build it as soon as scripts arrive.
-                                    missions_panel.ensure_catalog(&lua_corpus);
+                                    // The Missions blueprint editor's script list and palette come
+                                    // from the corpus the boot thread indexed.
+                                    missions_panel.set_reference(missions, &lua_corpus);
                                     ess_api = api;
                                     ecs_reg = ecs;
                                     audio_idx = audio;
@@ -5413,6 +5419,28 @@ pub fn run(opts: Options) {
                     // `pending_lua_open` is the Blueprint jump-to-source → luaview bridge.
                     if let Some((path, line)) = missions_panel.pending_lua_open.take() {
                         actions.push(Act::LuaOpenAt(path, line));
+                    }
+                    // Add to Shipment: the compiled script goes into the open Shipment's src/ (one
+                    // is scaffolded if none is open) and a replace_lua contribution names it —
+                    // updated in place if this script already has one.
+                    if let Some(req) = missions_panel.pending_shipment.take() {
+                        let out = (|| -> Result<String, String> {
+                            let dir = qm.ensure_shipment(qm_names.as_ref())?;
+                            let rel = std::path::Path::new("src").join(format!("{}.lua", req.target));
+                            let file = dir.join(&rel);
+                            std::fs::create_dir_all(dir.join("src")).map_err(|e| format!("{}: {e}", dir.display()))?;
+                            std::fs::write(&file, &req.source).map_err(|e| format!("{}: {e}", file.display()))?;
+                            let existing = qm.find_contribution(|c| {
+                                matches!(c, mercs2_quartermaster::manifest::Contribution::ReplaceLua { target, .. } if *target == req.target)
+                            });
+                            let c = mercs2_quartermaster::manifest::Contribution::ReplaceLua { target: req.target.clone(), source: rel };
+                            let at = qm.upsert_contribution(qm_names.as_ref(), existing, c)?;
+                            Ok(format!("contributions[{at}] replace_lua {} — {}", req.target, file.display()))
+                        })();
+                        status = match out {
+                            Ok(m) => m,
+                            Err(e) => format!("ADD TO SHIPMENT FAILED: {e}"),
+                        };
                     }
                     // The Missions panel's "Load .profile…" verb asks the host for a native file
                     // picker. We do it inline here so the modal lives on the UI thread.
