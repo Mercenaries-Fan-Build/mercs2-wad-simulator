@@ -68,3 +68,7 @@ retail = []
 [[test]]
 name = "anim_export_parity"
 required-features = ["retail"]
+
+[[test]]
+name = "outfit_render"
+required-features = ["retail"]
