@@ -10,5 +10,5 @@ name = "ps3_dlc_crypt"
 path = "src/main.rs"
 
 [dependencies]
-mercs2_formats = { path = "../mercs2_formats" }
+mercs2_formats = { workspace = true }
 clap = { version = "4", features = ["derive"] }
