@@ -1321,12 +1321,12 @@ exported {ok} bundle(s), {fail} failed -> {}", outroot.display());
             if list_outfits {
                 println!("--render-outfits 0x{hash:08X}: {} parts, {} profiles", kit.mixr.parts.len(), kit.mixr.profiles.len());
                 for t in &kit.templates {
-                    let name = t.name.clone().unwrap_or_else(|| format!("0x{:08X}", t.key));
-                    match kit.of_template(&name) {
+                    let name = t.label();
+                    match kit.mixr.template_outfits(t) {
                         Ok((pi, outfits)) => {
                             println!("  {name:?}: profile {pi} (0x{:08X}), {} outfit(s)", t.profile, outfits.len());
                             for (k, o) in outfits.iter().enumerate() {
-                                println!("    #{}: parts {:?}", k + 1, kit.mixr.parts_of(*o));
+                                println!("    {}", kit.mixr.outfit_line(k + 1, *o));
                             }
                         }
                         Err(e) => println!("  {name:?}: {e}"),
