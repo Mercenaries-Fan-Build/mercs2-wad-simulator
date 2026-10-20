@@ -366,6 +366,43 @@ pub fn block_paths(wad: &Wad) -> &[String] {
     &wad.archive.paths
 }
 
+/// One chunk of a block, as [`for_each_chunk`] hands it over.
+pub struct BlockChunk<'a> {
+    pub block: u16,
+    /// The block's PTHS path.
+    pub path: &'a str,
+    pub entry: &'a mercs2_formats::ucfx::BlockTableEntry,
+    pub bytes: &'a [u8],
+}
+
+/// Visit every chunk of every block, block by block in entry-table order — the whole archive, not
+/// only what the ASET table names. A block that cannot be decompressed, or whose entry table does
+/// not lay out (`ucfx::block_chunk_spans`), is not visited: it comes back as one
+/// `"block {b} {path}: …"` line.
+pub fn for_each_chunk(wad: &mut Wad, mut f: impl FnMut(BlockChunk<'_>)) -> Vec<String> {
+    let paths = wad.archive.paths.clone();
+    let mut failures = Vec::new();
+    for (b, path) in paths.iter().enumerate() {
+        let b = b as u16;
+        let dec = match decompress_block_index(wad, b) {
+            Ok(d) => d,
+            Err(e) => {
+                failures.push(format!("block {b} {path}: decompress: {e}"));
+                continue;
+            }
+        };
+        match mercs2_formats::ucfx::block_chunk_spans(&dec) {
+            Ok(spans) => {
+                for (entry, range) in &spans {
+                    f(BlockChunk { block: b, path, entry, bytes: &dec[range.clone()] });
+                }
+            }
+            Err(e) => failures.push(format!("block {b} {path}: {e}")),
+        }
+    }
+    failures
+}
+
 /// Decompress only the head of a block (enough for its entry table) — a cheap format probe
 /// that avoids inflating multi-MB texture/stream blocks during scans.
 pub fn peek_block_head(wad: &mut Wad, block: u16, max_out: usize) -> Result<Vec<u8>, String> {
