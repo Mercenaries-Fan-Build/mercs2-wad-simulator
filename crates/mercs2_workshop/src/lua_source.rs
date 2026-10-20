@@ -13,9 +13,9 @@
 
 use std::ops::Range;
 
-use full_moon::ast::{Ast, Expression, FunctionBody, Parameter, Stmt};
+use full_moon::ast::{Ast, Call, Expression, FunctionArgs, FunctionBody, Parameter, Prefix, Stmt, Suffix};
 use full_moon::node::Node;
-use full_moon::tokenizer::TokenReference;
+use full_moon::tokenizer::{TokenReference, TokenType};
 use full_moon::LuaVersion;
 
 /// A parsed script.
@@ -61,6 +61,33 @@ impl Script {
     /// The script printed from its AST.
     pub fn print(&self) -> String {
         self.ast.to_string()
+    }
+
+    pub fn ast(&self) -> &Ast {
+        &self.ast
+    }
+
+    /// The module named by the script's top-level `inherit("Name")` call, if it makes one.
+    pub fn inherits(&self) -> Option<String> {
+        self.ast.nodes().stmts().find_map(|stmt| {
+            let Stmt::FunctionCall(call) = stmt else { return None };
+            let Prefix::Name(name) = call.prefix() else { return None };
+            if name.token().to_string() != "inherit" {
+                return None;
+            }
+            let mut suffixes = call.suffixes();
+            let (Some(Suffix::Call(Call::AnonymousCall(args))), None) = (suffixes.next(), suffixes.next()) else {
+                return None;
+            };
+            let FunctionArgs::Parentheses { arguments, .. } = args.as_ref() else { return None };
+            match arguments.iter().next()?.clone() {
+                Expression::String(t) => match t.token().token_type() {
+                    TokenType::StringLiteral { literal, .. } => Some(literal.to_string()),
+                    _ => None,
+                },
+                _ => None,
+            }
+        })
     }
 
     /// The functions defined by the script's top-level statements, in source order:
@@ -241,5 +268,13 @@ mod tests {
         let activated = &fns[0];
         assert!(src[activated.span.clone()].starts_with("function Activated(self)"));
         assert!(src[activated.span.clone()].ends_with("end\nend"));
+    }
+
+    #[test]
+    fn inherits_names_the_top_level_inherit_call() {
+        let script = Script::parse("-- a contract\ninherit(\"MrxTaskContract\")\nimport(\"MrxMusic\")\n").expect("parses");
+        assert_eq!(script.inherits().as_deref(), Some("MrxTaskContract"));
+        let none = Script::parse("import(\"MrxMusic\")\nfunction f() inherit(\"X\") end\n").expect("parses");
+        assert_eq!(none.inherits(), None);
     }
 }
