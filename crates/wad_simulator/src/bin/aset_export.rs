@@ -98,6 +98,11 @@ struct Cli {
     /// Output CSV: one row per DISTINCT asset hash (the name dictionary)
     #[arg(long, default_value = "docs/data/aset_names.csv")]
     dict_out: PathBuf,
+
+    /// Also write the workshop's compiled-in dictionary (`0xHASH\tname` for every resolved
+    /// hash): `crates/mercs2_workshop/data/aset_names.tsv`.
+    #[arg(long)]
+    embed_tsv: Option<PathBuf>,
 }
 
 /// Accumulated facts about one distinct asset hash across all WADs.
@@ -351,6 +356,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         )?;
     }
     df.flush()?;
+
+    // The workshop's compiled-in dictionary (`crates/mercs2_workshop/data/aset_names.tsv`): the
+    // resolved rows of the dictionary above as `0xHASH\tname`, in the same order.
+    if let Some(p) = &cli.embed_tsv {
+        let mut tf = BufWriter::new(File::create(p)?);
+        writeln!(tf, "# Curated ASET hash -> name dictionary, embedded in mercs2_workshop.")?;
+        writeln!(
+            tf,
+            "# Generated from docs/data/aset_names.csv (resolved rows only). Regenerate with aset_export."
+        )?;
+        for (h, f) in &dict {
+            if let Some(n) = f.names.first() {
+                writeln!(tf, "0x{h:08X}\t{n}")?;
+            }
+        }
+        tf.flush()?;
+        println!("Wrote {}", p.display());
+    }
 
     let dict_named = dict.values().filter(|f| !f.names.is_empty()).count();
     println!(
