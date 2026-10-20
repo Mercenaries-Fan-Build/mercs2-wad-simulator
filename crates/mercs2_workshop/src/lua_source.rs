@@ -200,8 +200,9 @@ mod tests {
         out.sort();
     }
 
-    /// The gate: every script in the reference corpus parses and prints back byte-identical. The bundle is required — a run without one fails, it does not pass on
-    /// nothing — and the counts pin the corpus so a shrunken bundle cannot pass either.
+    /// The gate: every script in the reference corpus parses and prints back byte-identical. The
+    /// bundle is required — a run without one fails, it does not pass on nothing — and the counts
+    /// pin the corpus to the release CI downloads, so a stale or shrunken bundle cannot pass either.
     #[test]
     fn every_corpus_script_round_trips_byte_identical() {
         let home = crate::index::data_home().expect(
@@ -210,10 +211,16 @@ mod tests {
              downloaded copy); the round-trip gate runs over its lua/ and lua_dlc/ corpus",
         );
         let mut failures = Vec::new();
-        for (sub, expected) in [("lua", 370), ("lua_dlc", 39)] {
+        for (sub, expected) in crate::index::PINNED_CORPUS {
             let mut files = Vec::new();
             lua_files(&home.join(sub), &mut files);
-            assert_eq!(files.len(), expected, "{sub}/ under {} holds {} scripts", home.display(), files.len());
+            assert_eq!(
+                files.len(),
+                expected,
+                "{sub}/ under {} holds {} scripts; the gates are pinned to the bundle CI downloads",
+                home.display(),
+                files.len()
+            );
             for path in files {
                 let bytes = std::fs::read(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
                 let src = match String::from_utf8(bytes) {
