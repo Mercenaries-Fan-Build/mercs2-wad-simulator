@@ -11,25 +11,28 @@
 //! Any OTHER container type that carries an `MTRL` row is not parsed (its loader is not decoded) and
 //! is listed; it makes the run exit 1, because its citations are missing from the census.
 //!
-//! Exit 0 = every block, every MTRL read; 1 = something could not be read (listed); 2 = usage.
+//! Names come from `docs/data/aset_names.csv` under the `notes_docs_dir` of `.mercs2-local.toml`.
+//!
+//! Exit 0 = every block, every MTRL read; 1 = something could not be read (listed); 2 = usage or setup.
 //!
 //! ```text
 //! cargo run -p mercs2_probe --bin tex_orphans -- [--wad path] [--tsv out.tsv]
 //! ```
 
 use mercs2_engine::wad;
+use mercs2_engine::worldutil::dev_aset_names;
 use mercs2_formats::texture::{parse_mtrl, MtrlSource};
-use mercs2_formats::types::TYPE_HASH_TEXTURE;
+use mercs2_formats::types::{TYPE_HASH_FONT, TYPE_HASH_LOWRES_TERRAIN, TYPE_HASH_MODEL, TYPE_HASH_TERRAIN_MESH, TYPE_HASH_TEXTURE};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::io::Write;
 
 fn mtrl_source(type_hash: u32) -> Option<MtrlSource> {
     match type_hash {
-        0x5B72_4250 => Some(MtrlSource::Model),
-        0x7C56_9307 => Some(MtrlSource::TerrainMesh),
-        0x99E7_7ACE => Some(MtrlSource::Font),
-        0x1602_815C => Some(MtrlSource::LowResTerrain),
-        0x600B_904E => Some(MtrlSource::Scrub),
+        TYPE_HASH_MODEL => Some(MtrlSource::Model),
+        TYPE_HASH_TERRAIN_MESH => Some(MtrlSource::TerrainMesh),
+        TYPE_HASH_FONT => Some(MtrlSource::Font),
+        TYPE_HASH_LOWRES_TERRAIN => Some(MtrlSource::LowResTerrain),
+        mercs2_formats::scrub::TYPE_HASH => Some(MtrlSource::Scrub),
         _ => None,
     }
 }
@@ -47,96 +50,56 @@ fn has_mtrl_row(c: &[u8]) -> bool {
     })
 }
 
+fn setup_fail(msg: String) -> ! {
+    eprintln!("tex_orphans: {msg}");
+    std::process::exit(2);
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let get = |k: &str| args.iter().position(|a| a == k).and_then(|i| args.get(i + 1)).cloned();
     let tsv = get("--tsv");
 
-    let csv = ["docs/data/aset_names.csv", "../../docs/data/aset_names.csv"]
-        .iter()
-        .map(std::path::PathBuf::from)
-        .find(|p| p.is_file())
-        .expect("aset_names.csv (run from the repo root or tools/wad_simulator)");
-    let text = std::fs::read_to_string(&csv).expect("read aset_names.csv");
-    let mut name_of: HashMap<u32, String> = HashMap::new();
-    for line in text.lines().skip(1) {
-        let f: Vec<&str> = line.split(',').collect();
-        let Some(h) = f.first().and_then(|s| u32::from_str_radix(s.trim().trim_start_matches("0x"), 16).ok())
-        else {
-            continue;
-        };
-        if let Some(n) = f.get(1).map(|s| s.trim()).filter(|s| !s.is_empty()) {
-            name_of.insert(h, n.to_string());
-        }
-    }
+    let name_of = dev_aset_names(std::path::Path::new(env!("CARGO_MANIFEST_DIR"))).unwrap_or_else(|e| setup_fail(e));
 
-    let wadpath = wad::resolve_vz_wad(get("--wad").as_deref()).unwrap_or_else(|| {
-        eprintln!("tex_orphans: no vz.wad found (pass --wad, or write .mercs2-local.toml)");
-        std::process::exit(2);
-    });
-    let mut w = wad::open(&wadpath).unwrap_or_else(|e| {
-        eprintln!("tex_orphans: cannot open {wadpath}: {e}");
-        std::process::exit(2);
-    });
+    let wadpath = wad::resolve_vz_wad(get("--wad").as_deref())
+        .unwrap_or_else(|| setup_fail("no vz.wad found (pass --wad, or write .mercs2-local.toml)".into()));
+    let mut w = wad::open(&wadpath).unwrap_or_else(|e| setup_fail(format!("cannot open {wadpath}: {e}")));
     let paths: Vec<String> = wad::block_paths(&w).to_vec();
     eprintln!("[tex_orphans] pass 1: {} blocks of {wadpath}", paths.len());
 
     // texture hash -> blocks holding a texture chunk of it
     let mut tex_blocks: BTreeMap<u32, BTreeSet<u16>> = BTreeMap::new();
     let mut cited: HashSet<u32> = HashSet::new();
-    let mut cited_by_source: BTreeMap<&'static str, usize> = BTreeMap::new();
+    let mut cited_by_source: BTreeMap<String, usize> = BTreeMap::new();
     let mut unparsed_mtrl: BTreeMap<u32, usize> = BTreeMap::new();
     let mut failures: Vec<String> = Vec::new();
 
     // Pass 1: texture inventory + every MTRL citation.
-    for (b, path) in paths.iter().enumerate() {
-        let b = b as u16;
-        let dec = match wad::decompress_block_index(&mut w, b) {
-            Ok(d) => d,
-            Err(e) => {
-                failures.push(format!("block {b} {path}: decompress: {e}"));
-                continue;
-            }
-        };
-        let (count, entries) = mercs2_formats::ucfx::parse_block_entry_table(&dec);
-        if entries.len() != count as usize {
-            failures.push(format!("block {b} {path}: entry table claims {count}, holds {}", entries.len()));
-            continue;
+    let pass1 = wad::for_each_chunk(&mut w, |c| {
+        let e = c.entry;
+        if e.type_hash == TYPE_HASH_TEXTURE {
+            tex_blocks.entry(e.name_hash).or_default().insert(c.block);
+            return;
         }
-        let mut off = 4 + count as usize * 16;
-        for e in &entries {
-            let end = off + e.chunk_size as usize;
-            if end > dec.len() {
-                failures.push(format!("block {b} {path}: chunk 0x{:08X} overruns the block", e.name_hash));
-                break;
-            }
-            let chunk = &dec[off..end];
-            off = end;
-            if e.type_hash == TYPE_HASH_TEXTURE {
-                tex_blocks.entry(e.name_hash).or_default().insert(b);
-                continue;
-            }
-            match mtrl_source(e.type_hash) {
-                Some(src) => match parse_mtrl(chunk, src) {
-                    Ok(mats) => {
-                        *cited_by_source.entry(format!("{src:?}").leak()).or_default() += 1;
-                        for m in mats {
-                            cited.extend(m.textures.iter().copied().filter(|t| *t != 0 && *t != 0xFFFF_FFFF));
-                        }
+        match mtrl_source(e.type_hash) {
+            Some(src) => match parse_mtrl(c.bytes, src) {
+                Ok(mats) => {
+                    *cited_by_source.entry(format!("{src:?}")).or_default() += 1;
+                    for m in mats {
+                        cited.extend(m.textures.iter().copied().filter(|t| *t != 0 && *t != 0xFFFF_FFFF));
                     }
-                    Err(err) => failures.push(format!(
-                        "block {b} {path}: {src:?} 0x{:08X} MTRL: {err}",
-                        e.name_hash
-                    )),
-                },
-                None => {
-                    if has_mtrl_row(chunk) {
-                        *unparsed_mtrl.entry(e.type_hash).or_default() += 1;
-                    }
+                }
+                Err(err) => failures.push(format!("block {} {}: {src:?} 0x{:08X} MTRL: {err}", c.block, c.path, e.name_hash)),
+            },
+            None => {
+                if has_mtrl_row(c.bytes) {
+                    *unparsed_mtrl.entry(e.type_hash).or_default() += 1;
                 }
             }
         }
-    }
+    });
+    failures.extend(pass1);
 
     let orphans: BTreeSet<u32> = tex_blocks.keys().copied().filter(|h| !cited.contains(h)).collect();
     eprintln!(
@@ -148,32 +111,18 @@ fn main() {
 
     // Pass 2: does any non-texture chunk hold an orphan's hash as an aligned LE u32?
     let mut raw_holders: HashMap<u32, BTreeMap<u32, usize>> = HashMap::new();
-    for (b, path) in paths.iter().enumerate() {
-        let b = b as u16;
-        let dec = match wad::decompress_block_index(&mut w, b) {
-            Ok(d) => d,
-            Err(e) => {
-                failures.push(format!("block {b} {path}: decompress (pass 2): {e}"));
-                continue;
-            }
-        };
-        let (count, entries) = mercs2_formats::ucfx::parse_block_entry_table(&dec);
-        let mut off = 4 + count as usize * 16;
-        for e in &entries {
-            let end = (off + e.chunk_size as usize).min(dec.len());
-            let chunk = &dec[off..end];
-            off = end;
-            if e.type_hash == TYPE_HASH_TEXTURE {
-                continue;
-            }
-            for word in chunk.chunks_exact(4) {
-                let v = u32::from_le_bytes([word[0], word[1], word[2], word[3]]);
-                if orphans.contains(&v) {
-                    *raw_holders.entry(v).or_default().entry(e.type_hash).or_default() += 1;
-                }
+    let pass2 = wad::for_each_chunk(&mut w, |c| {
+        if c.entry.type_hash == TYPE_HASH_TEXTURE {
+            return;
+        }
+        for word in c.bytes.chunks_exact(4) {
+            let v = u32::from_le_bytes([word[0], word[1], word[2], word[3]]);
+            if orphans.contains(&v) {
+                *raw_holders.entry(v).or_default().entry(c.entry.type_hash).or_default() += 1;
             }
         }
-    }
+    });
+    failures.extend(pass2.into_iter().map(|f| format!("pass 2: {f}")));
 
     let label = |h: u32| name_of.get(&h).cloned().unwrap_or_else(|| "(unnamed)".into());
     let leaf = |b: u16| paths[b as usize].rsplit(['\\', '/']).next().unwrap_or("").to_string();
