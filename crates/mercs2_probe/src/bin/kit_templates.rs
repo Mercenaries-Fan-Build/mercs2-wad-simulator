@@ -1,7 +1,7 @@
 //! Which world templates wear a given model, and — for a character kit — which outfits each can show.
 //!
-//! Reads the resident `worldentity` (type `0x5647C35D`) through `mercs2_formats::worldentity` and its
-//! templates through `mercs2_formats::mixr::kit_templates` (`ModelName`, `Name`, `ModelMixerProfile`).
+//! Reads the resident `worldentity` (type `0x5647C35D`, resolved as the singleton it is through
+//! `mercs2_engine::registry`) through `mercs2_formats::worldentity` and its templates through `mercs2_formats::mixr::kit_templates` (`ModelName`, `Name`, `ModelMixerProfile`).
 //!
 //! * default: each queried model's templates by `Name`;
 //! * `--components`: every component record of each of those templates;
@@ -17,7 +17,9 @@
 //! cargo run -p mercs2_probe --bin kit_templates -- --all-kits [--wad path]
 //! ```
 
+use mercs2_engine::registry::AssetRegistry;
 use mercs2_engine::wad;
+use mercs2_engine::worldutil::hash_or_name;
 use mercs2_formats::mixr::{kit_templates, KitTemplate, Mixr};
 use mercs2_formats::worldentity::{WorldEntity, WORLDENTITY_TYPE_HASH};
 use std::collections::BTreeMap;
@@ -37,12 +39,11 @@ fn main() {
         .iter()
         .enumerate()
         .filter(|(i, a)| !a.starts_with("--") && !(*i > 0 && args[i - 1] == "--wad"))
-        .map(|(_, a)| match a.strip_prefix("0x").or_else(|| a.strip_prefix("0X")) {
-            Some(h) => u32::from_str_radix(h, 16).unwrap_or_else(|e| {
-                eprintln!("kit_templates: {a:?} is not a hex hash: {e}");
+        .map(|(_, a)| {
+            hash_or_name(a).unwrap_or_else(|e| {
+                eprintln!("kit_templates: {e}");
                 std::process::exit(2);
-            }),
-            None => mercs2_formats::hash::pandemic_hash_m2(a),
+            })
         })
         .collect();
     if targets.is_empty() && !all_kits {
@@ -54,16 +55,16 @@ fn main() {
         eprintln!("kit_templates: no vz.wad found (pass --wad, or write .mercs2-local.toml)");
         std::process::exit(2);
     });
-    let mut w = wad::open(&wadpath).unwrap_or_else(|e| fail(format!("cannot open {wadpath}: {e}")));
+    let mut wads = vec![wad::open(&wadpath).unwrap_or_else(|e| fail(format!("cannot open {wadpath}: {e}")))];
 
     // `--all-kits`: every ASET model whose own container (the block its row names — finer LOD rungs
     // are streamed GEOM blocks with other framing) carries a MIXR.
     if all_kits {
-        let mut models: Vec<u32> = wad::model_list_all(&w).into_iter().map(|(h, _)| h).collect();
+        let mut models: Vec<u32> = wad::model_list_all(&wads[0]).into_iter().map(|(h, _)| h).collect();
         models.sort_unstable();
         models.dedup();
         for &h in &models {
-            let c = wad::extract_container(&mut w, h).unwrap_or_else(|e| fail(format!("model 0x{h:08X}: {e}")));
+            let c = wad::extract_container(&mut wads[0], h).unwrap_or_else(|e| fail(format!("model 0x{h:08X}: {e}")));
             if Mixr::find(&c).unwrap_or_else(|e| fail(format!("model 0x{h:08X} MIXR: {e}"))).is_some() {
                 targets.push(h);
             }
@@ -71,27 +72,14 @@ fn main() {
         eprintln!("[kit_templates] {} of {} model(s) carry a MIXR", targets.len(), models.len());
     }
 
-    // The worldentity chunk, found by its type in every block's entry table.
-    let nblocks = wad::block_paths(&w).len() as u16;
-    let mut found: Option<(u16, Vec<u8>)> = None;
-    'blocks: for b in 0..nblocks {
-        let dec = wad::decompress_block_index(&mut w, b).unwrap_or_else(|e| fail(format!("block {b}: {e}")));
-        let (count, entries) = mercs2_formats::ucfx::parse_block_entry_table(&dec);
-        let mut off = 4 + count as usize * 16;
-        for e in &entries {
-            let end = off + e.chunk_size as usize;
-            if end > dec.len() {
-                fail(format!("block {b}: chunk 0x{:08X} overruns the block", e.name_hash));
-            }
-            if e.type_hash == WORLDENTITY_TYPE_HASH {
-                found = Some((b, dec[off..end].to_vec()));
-                break 'blocks;
-            }
-            off = end;
-        }
-    }
-    let (we_block, bytes) = found.unwrap_or_else(|| fail("no worldentity chunk in any block".into()));
-    let we = WorldEntity::parse(&bytes).unwrap_or_else(|e| fail(format!("worldentity: {e}")));
+    // The worldentity chunk: the singleton of its type, made resident the way the game does.
+    let mut registry = AssetRegistry::default();
+    let (_, we_ref) = registry
+        .resolve_singleton(&mut wads, WORLDENTITY_TYPE_HASH)
+        .unwrap_or_else(|| fail("no worldentity chunk in the wad".into()));
+    let we_block = we_ref.block;
+    let bytes = registry.slice(we_ref).unwrap_or_else(|| fail("worldentity block evicted before read".into()));
+    let we = WorldEntity::parse(bytes).unwrap_or_else(|e| fail(format!("worldentity: {e}")));
     let templates = kit_templates(&we).unwrap_or_else(|e| fail(format!("templates: {e}")));
     eprintln!(
         "[kit_templates] worldentity in block {we_block}: {} components, {} templates with a ModelName",
@@ -121,7 +109,7 @@ fn main() {
         if !profiles {
             continue;
         }
-        let c = wad::extract_container(&mut w, *m).unwrap_or_else(|e| fail(format!("model 0x{m:08X}: {e}")));
+        let c = wad::extract_container(&mut wads[0], *m).unwrap_or_else(|e| fail(format!("model 0x{m:08X}: {e}")));
         let Some(mx) = Mixr::find(&c).unwrap_or_else(|e| fail(format!("model 0x{m:08X} MIXR: {e}"))) else {
             println!("  (no MIXR)");
             continue;
