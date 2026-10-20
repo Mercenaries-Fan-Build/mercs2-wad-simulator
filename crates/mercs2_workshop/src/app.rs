@@ -369,6 +369,10 @@ struct Preview {
     hier_nodes: Vec<mercs2_formats::orchestrator::HierNode>,
     indx: Vec<usize>,
     node_state: Vec<usize>,
+    /// A character kit's outfits (its MIXR and the world templates that wear it) and the outfit
+    /// shown, as (template name, outfit number). `None` for a model that is not a kit. A kit shows
+    /// no part until an outfit is chosen — every part's switch starts hidden, as in the game.
+    kit: Option<(KitOutfits, Option<(String, usize)>)>,
     /// The object's HEALTH fraction (1.0 = full, 0.0 = destroyed). Drives the destruction machine:
     /// `node_states_for_health` picks each node's state, so the inspector shows the real pristine →
     /// damaged → wreck progression instead of hand-picked states.
@@ -541,6 +545,8 @@ enum Act {
     ShowAllGroups,
     /// Put switch node `.0` into its state index `.1` and re-execute the machine's SHOW/Hide.
     NodeState(usize, usize),
+    /// Show a character kit's outfit `.1` of the template named `.0` (`KitOutfits::of_template`).
+    Outfit(String, usize),
     /// Set the object's HEALTH fraction (0..1) and drive the destruction machine from it — pristine
     /// at full, damaged/on-fire as it drops, wreck at 0. The systemic replacement for hand-picking
     /// per-node states.
@@ -1080,8 +1086,18 @@ pub fn run(opts: Options) {
     // installed — see `index::require_data_home`) loads on a background thread and lands via
     // `apply_names`. The window opens immediately and shows the boot screen meanwhile.
     let mut index = AssetIndex::build(&w.wads, HashMap::new());
+    // The world's templates: each spawn template that picks a character-kit outfit gets its own
+    // catalog row ("Jungle Elite", "VZ Sniper", …). Required — the catalog is wrong without them.
+    let mut kit_templates = match load_kit_templates(&mut w) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("workshop: cannot read the world's templates (worldentity): {e}");
+            return;
+        }
+    };
+    let kit_rows = index.add_kit_templates(&kit_templates);
     eprintln!(
-        "[workshop] catalog: {} models, {} textures ({} wad(s))",
+        "[workshop] catalog: {} models ({kit_rows} kit template rows), {} textures ({} wad(s))",
         index.models().len(),
         index.textures().len(),
         w.wads.len()
@@ -1849,6 +1865,15 @@ pub fn run(opts: Options) {
                                         w.labels.push(path_str);
                                         let names = std::mem::take(&mut index.names);
                                         index = AssetIndex::build(&w.wads, names);
+                                        // The new overlay may carry its own worldentity.
+                                        match load_kit_templates(&mut w) {
+                                            Ok(t) => kit_templates = t,
+                                            Err(e) => {
+                                                kit_templates.clear();
+                                                status.push_str(&format!(" (kit templates unreadable, no template rows: {e})"));
+                                            }
+                                        }
+                                        index.add_kit_templates(&kit_templates);
                                         filtered = refilter(&index, kind, &filter);
                                         inventory_dirty = true;
                                         sel = sel.min(filtered.len().saturating_sub(1));
@@ -3271,6 +3296,43 @@ pub fn run(opts: Options) {
                                                 ui.weak(
                                                     "LOD is one axis; destruction (below) is the other. A mesh draws only if BOTH pass.",
                                                 );
+                                            });
+                                        }
+                                        // Character kit — every outfit the game can give each world
+                                        // template that wears this kit (`mercs2_formats::mixr`: the
+                                        // exe's per-profile enumeration). Which one a spawn shows is
+                                        // the game's pick; each pill shows one of them.
+                                        if let Some((kit, shown)) = &p.kit {
+                                            let k_badge = format!(
+                                                "{} templates · {} parts",
+                                                kit.templates.len(),
+                                                kit.mixr.parts.len()
+                                            );
+                                            theme::section(ui, "Character kit", Some(&k_badge), true, |ui| {
+                                                for t in &kit.templates {
+                                                    let name =
+                                                        t.name.clone().unwrap_or_else(|| format!("0x{:08X}", t.key));
+                                                    theme::eyebrow(ui, &name);
+                                                    ui.add_space(3.0);
+                                                    match kit.of_template(&name) {
+                                                        Ok((_, outfits)) => {
+                                                            ui.horizontal_wrapped(|ui| {
+                                                                for k in 0..outfits.len() {
+                                                                    let on = shown
+                                                                        .as_ref()
+                                                                        .is_some_and(|(s, i)| *s == name && *i == k);
+                                                                    if theme::pill(ui, &(k + 1).to_string(), on).clicked() {
+                                                                        actions.push(Act::Outfit(name.clone(), k));
+                                                                    }
+                                                                }
+                                                            });
+                                                        }
+                                                        Err(e) => {
+                                                            ui.weak(e);
+                                                        }
+                                                    }
+                                                    ui.add_space(6.0);
+                                                }
                                             });
                                         }
                                         // Destruction — the ENGINE's state machine, interactive:
@@ -6133,6 +6195,7 @@ pub fn run(opts: Options) {
                                             p.label.clone(),
                                             index.clone(),
                                             std::path::PathBuf::from("workshop_export"),
+                                            p.kit.as_ref().and_then(|(_, shown)| shown.as_ref()).map(|(_, n)| *n),
                                         ));
                                     }
                                 }
@@ -6392,6 +6455,14 @@ pub fn run(opts: Options) {
                                             .unwrap_or_default();
                                         status = format!("node {ni} -> state {sname}");
                                     }
+                                }
+                            }
+                            Act::Outfit(template, n) => {
+                                if let Some(p) = &mut preview {
+                                    status = match show_outfit(p, &mut scene, &template, n) {
+                                        Ok(s) => s,
+                                        Err(e) => format!("OUTFIT FAILED: {e}"),
+                                    };
                                 }
                             }
                             Act::ImportModel => {
@@ -6678,6 +6749,15 @@ pub fn run(opts: Options) {
                                     w.labels.remove(i);
                                     let names = std::mem::take(&mut index.names);
                                     index = AssetIndex::build(&w.wads, names);
+                                    // The dropped overlay may have carried the worldentity in use.
+                                    match load_kit_templates(&mut w) {
+                                        Ok(t) => kit_templates = t,
+                                        Err(e) => {
+                                            kit_templates.clear();
+                                            status = format!("kit templates unreadable, no template rows: {e}");
+                                        }
+                                    }
+                                    index.add_kit_templates(&kit_templates);
                                     filtered = refilter(&index, kind, &filter);
                                     inventory_dirty = true;
                                     sel = sel.min(filtered.len().saturating_sub(1));
@@ -7543,11 +7623,55 @@ impl KitOutfits {
 
 /// The kit data of `hash`, or `None` when its container carries no `MIXR`.
 pub(crate) fn kit_outfits(w: &mut WadStack, hash: u32) -> Result<Option<KitOutfits>, String> {
+    let templates = load_kit_templates(w)?;
+    kit_outfits_with(w, hash, &templates)
+}
+
+/// [`kit_outfits`] with the world's templates already read ([`load_kit_templates`]).
+pub(crate) fn kit_outfits_with(
+    w: &mut WadStack,
+    hash: u32,
+    templates: &[mercs2_formats::mixr::KitTemplate],
+) -> Result<Option<KitOutfits>, String> {
     let c = w.extract_container(hash)?;
     let Some(mixr) = mercs2_formats::mixr::Mixr::find(&c)? else { return Ok(None) };
-    let we = mercs2_formats::worldentity::WorldEntity::parse(&w.worldentity()?)?;
-    let templates = mercs2_formats::mixr::kit_templates(&we)?.into_iter().filter(|t| t.model == hash).collect();
+    let templates = templates.iter().filter(|t| t.model == hash).cloned().collect();
     Ok(Some(KitOutfits { mixr, templates }))
+}
+
+/// Every template of the open stack's `worldentity` that picks a character-kit outfit: a non-zero
+/// `ModelMixerProfile` on a model whose container carries a `MIXR`. A profile on a model with no
+/// mixer is passed over at spawn (`0x004D0393`: no mixer object, no outfit) — retail has six, the
+/// story characters among them — so those templates are not kit templates.
+pub(crate) fn load_kit_templates(w: &mut WadStack) -> Result<Vec<mercs2_formats::mixr::KitTemplate>, String> {
+    let we = mercs2_formats::worldentity::WorldEntity::parse(&w.worldentity()?)?;
+    let mut is_kit: HashMap<u32, bool> = HashMap::new();
+    let mut out = Vec::new();
+    for t in mercs2_formats::mixr::kit_templates(&we)? {
+        if t.profile == 0 {
+            continue;
+        }
+        let kit = match is_kit.get(&t.model) {
+            Some(&k) => k,
+            None => {
+                // A model no open wad carries (retail templates name 307 such) has no MIXR.
+                let present = w
+                    .wads
+                    .iter()
+                    .any(|x| wad::aset_types(x, t.model).iter().any(|(ty, _, _)| *ty == wad::MODEL_ASET_TYPE_ID));
+                let k = present && {
+                    let c = w.extract_container(t.model)?;
+                    mercs2_formats::mixr::Mixr::find(&c)?.is_some()
+                };
+                is_kit.insert(t.model, k);
+                k
+            }
+        };
+        if kit {
+            out.push(t);
+        }
+    }
+    Ok(out)
 }
 
 /// The render state that shows exactly `outfit` of kit `hash` at rung 0: the spawn path's per-part
@@ -7569,6 +7693,33 @@ pub(crate) fn outfit_render_state(
         view_state: 0x01,
         node_enable: orch::machine_node_enable(&sm, &hier, &chosen),
     })
+}
+
+/// Show outfit `n` of `template` on a kit preview: its per-switch states (`Mixr::outfit_node_states`)
+/// re-executed through the preview's state machine into the entity's render state. Returns the
+/// status line, or why the outfit cannot be shown.
+fn show_outfit(p: &mut Preview, scene: &mut Scene, template: &str, n: usize) -> Result<String, String> {
+    let Some((kit, shown)) = &mut p.kit else { return Err(format!("{} is not a character kit", p.label)) };
+    let sm = p.machine.as_ref().ok_or_else(|| format!("kit {} has no state machine", p.label))?;
+    let (pi, outfits) = kit.of_template(template)?;
+    let outfit = *outfits
+        .get(n)
+        .ok_or_else(|| format!("{template:?} has {} outfit(s); #{n} does not exist", outfits.len()))?;
+    p.node_state = kit.mixr.outfit_node_states(sm, &p.hier_nodes, outfit)?;
+    let node_enable = mercs2_formats::orchestrator::machine_node_enable(sm, &p.hier_nodes, &p.node_state);
+    let rs = mercs2_engine::render_state::RenderState { lod: p.tier.trailing_zeros() as u8, view_state: p.tier, node_enable };
+    for (gi, d) in p.draws.iter().enumerate() {
+        if rs.segment_visible(d.lod_mask, d.node) {
+            p.hidden.remove(&gi);
+        } else {
+            p.hidden.insert(gi);
+        }
+    }
+    p.node_enable = rs.node_enable.clone();
+    scene.set_entity_render_state(p.entity, rs);
+    let parts = kit.mixr.parts_of(outfit);
+    *shown = Some((template.to_string(), n));
+    Ok(format!("{template} — outfit {} of {} (profile {pi}): parts {parts:?}", n + 1, outfits.len()))
 }
 
 /// The 3-rung cross-fade `view_state` centred on rung `n`: `1<<(n-1) | 1<<n | 1<<(n+1)`, exactly
@@ -8223,7 +8374,20 @@ fn build_preview(
         }
     }
 
-    Preview {
+    // A character kit (its container carries a MIXR) shows nothing until an outfit is chosen; a row
+    // labelled by one of its templates opens on that template's first outfit.
+    let kit = match kit_outfits_with(w, hash, &index.kit_templates) {
+        Ok(k) => k.map(|k| (k, None)),
+        Err(e) => {
+            eprintln!("[workshop] ERROR: kit data of {label} (0x{hash:08X}) unreadable: {e}");
+            None
+        }
+    };
+    let opens_outfit = kit
+        .as_ref()
+        .is_some_and(|(k, _)| k.templates.iter().any(|t| t.name.as_deref() == Some(label.as_str())));
+
+    let mut p = Preview {
         hash,
         label,
         entity,
@@ -8242,6 +8406,7 @@ fn build_preview(
         hier_nodes: md.hier_nodes.clone(),
         indx: md.indx.clone(),
         node_state,
+        kit,
         health: 1.0,
         hide_ruin: false,
         node_enable: rs_node_enable,
@@ -8257,7 +8422,14 @@ fn build_preview(
         tris,
         center,
         radius,
+    };
+    if opens_outfit {
+        let template = p.label.clone();
+        if let Err(e) = show_outfit(&mut p, scene, &template, 0) {
+            eprintln!("[workshop] ERROR: outfit 1 of {template:?}: {e}");
+        }
     }
+    p
 }
 
 /// Bake every placed sandbox instance into ONE static model: vertices transformed by each
@@ -8366,7 +8538,8 @@ fn export_preview(
         let md = source_model_data(w, imported, p.hash)?;
         return export_model_data(&md, &p.label);
     }
-    export_bundle_by_hash(base, overlays, p.hash, &p.label, index, std::path::Path::new("workshop_export"))
+    let outfit = p.kit.as_ref().and_then(|(_, shown)| shown.as_ref()).map(|(_, n)| *n);
+    export_bundle_by_hash(base, overlays, p.hash, &p.label, index, std::path::Path::new("workshop_export"), outfit)
 }
 
 /// Headless OBJ export (`--export <name|0xHASH>`): resolve the model through a fresh stack and
@@ -8394,9 +8567,30 @@ pub(crate) fn export_bundle_by_hash(
     // The name catalog — also the source of each clip's procedural (ActionTable-derived) name.
     index: &AssetIndex,
     outroot: &std::path::Path,
+    // For a kit template's row (`label` names a template of this kit): which of its outfits to write
+    // (0-based; the first when `None`). Ignored for any other model.
+    outfit: Option<usize>,
 ) -> Result<String, String> {
     let mut w = WadStack::open(base, overlays)?;
     let md = load_model_data(&mut w, hash)?;
+    // A kit template's bundle is the template's outfit, every LOD tier of it — the groups whose node
+    // the outfit's state machine leaves enabled — not the whole kit with every head on.
+    let mut suffix = String::new();
+    let draws: Vec<DrawGroup> =
+        if index.kit_templates.iter().any(|t| t.model == hash && t.name.as_deref() == Some(label)) {
+            let kit = kit_outfits_with(&mut w, hash, &index.kit_templates)?
+                .ok_or_else(|| format!("{label}: its model 0x{hash:08X} carries no MIXR"))?;
+            let (_, outfits) = kit.of_template(label)?;
+            let n = outfit.unwrap_or(0);
+            let o = *outfits
+                .get(n)
+                .ok_or_else(|| format!("{label:?} has {} outfit(s); #{n} does not exist", outfits.len()))?;
+            let rs = outfit_render_state(&mut w, hash, &kit.mixr, o)?;
+            suffix = format!("_outfit{}", n + 1);
+            md.draws.iter().filter(|d| rs.node_visible(d.node)).cloned().collect()
+        } else {
+            md.draws.clone()
+        };
     // The LOD chain, raw. Resolution walks the whole open stack (base + patch overlays).
     let mut lods: Vec<mercs2_engine::wad::ModelLod> = Vec::new();
     for wad in w.wads.iter_mut().rev() {
@@ -8415,7 +8609,7 @@ pub(crate) fn export_bundle_by_hash(
         .chars()
         .map(|c| if c.is_ascii_alphanumeric() || c == '_' || c == '-' { c } else { '_' })
         .collect();
-    let dir = outroot.join(&safe);
+    let dir = outroot.join(format!("{safe}{suffix}"));
     crate::bundle::export_bundle(
         &dir,
         label,
@@ -8423,7 +8617,7 @@ pub(crate) fn export_bundle_by_hash(
         &lods,
         &md.verts,
         &md.indices,
-        &md.draws,
+        &draws,
         &md.textures,
         &md.hier_nodes,
         md.header.as_ref(),
@@ -8454,11 +8648,12 @@ pub(crate) fn export_bundle_in_background(
     label: String,
     index: AssetIndex,
     outroot: std::path::PathBuf,
+    outfit: Option<usize>,
 ) -> Exporter {
     let (tx, rx) = std::sync::mpsc::channel();
     let worker_label = label.clone();
     std::thread::spawn(move || {
-        let _ = tx.send(export_bundle_by_hash(&base, &overlays, hash, &worker_label, &index, &outroot));
+        let _ = tx.send(export_bundle_by_hash(&base, &overlays, hash, &worker_label, &index, &outroot, outfit));
     });
     Exporter { rx, label }
 }
