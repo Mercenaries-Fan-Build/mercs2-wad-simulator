@@ -90,7 +90,6 @@ fn main() {
     for t in &templates {
         of_model.entry(t.model).or_default().push(t);
     }
-    let label = |t: &KitTemplate| t.name.clone().unwrap_or_else(|| format!("0x{:08X}", t.key));
 
     let (mut templates_seen, mut templates_unmatched) = (0usize, 0usize);
     for m in &targets {
@@ -121,25 +120,22 @@ fn main() {
         }
         for (pi, p) in mx.profiles.iter().enumerate() {
             let allowed: Vec<usize> = (0..p.allowed.len()).filter(|&i| p.allowed[i]).collect();
-            let users: Vec<String> = ts.iter().filter(|t| t.profile == p.hash).map(|t| label(t)).collect();
+            let users: Vec<String> = ts.iter().filter(|t| t.profile == p.hash).map(|t| t.label()).collect();
             let outfits = mx.outfits(pi);
             println!(
                 "    profile {pi} 0x{:08X}: allows {allowed:?}; {} outfit(s); templates {users:?}",
                 p.hash,
                 outfits.len()
             );
-            for o in &outfits {
-                println!("      {:?}", mx.parts_of(*o));
+            for (k, o) in outfits.iter().enumerate() {
+                println!("      {}", mx.outfit_line(k + 1, *o));
             }
         }
         for t in &ts {
             templates_seen += 1;
-            if mx.profile_index(t.profile).is_none() {
+            if let Err(e) = mx.template_outfits(t) {
                 templates_unmatched += 1;
-                println!(
-                    "    template 0x{:08X} {:?}: ModelMixerProfile 0x{:08X} names no profile of this kit",
-                    t.key, t.name, t.profile
-                );
+                println!("    entity 0x{:08X}: {e}", t.key);
             }
         }
     }
