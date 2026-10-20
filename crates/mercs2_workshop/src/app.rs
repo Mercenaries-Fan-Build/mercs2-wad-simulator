@@ -1,15 +1,14 @@
 //! The workshop window: a native, engine-rendered developer tool.
 //!
 //! One winit loop over the engine's `Scene` (the SAME renderer `mercs2_game` boots — materials,
-//! skinning, lighting, shadow are all the faithful path, not an export approximation). The app is
-//! organized as workbenches; this file implements the first one, the ASSET workbench:
+//! skinning, lighting, shadow are all the faithful path, not an export approximation). A rail
+//! switches the page; this file holds the rail, Inspect and the Retarget / Fit benches:
 //!
 //! - browse/search every model + texture in the WAD (registry names via `index::AssetIndex`)
 //! - preview a model with its real materials/textures, orbit camera, animation clips
 //! - inspect layers: HIER bone tree, per-material draw groups (isolate/hide sub-strips),
 //!   full-screen texture plates
-//! - an EDITABLE sandbox: place instances, move/rotate/scale them, save/load the arrangement
-//!   (`workshop_scene.json`) — experiments in isolation, no game boot required
+//! - use a model as a donor: a bench writes a new contribution on it, never the model itself
 //!
 //! Future workbenches (mission design, model import/fix, AV replacement, unlock auditing) mount
 //! into the same loop — see `docs/modernization/workshop_charter.md`.
@@ -25,7 +24,6 @@ use mercs2_formats::anim_select::AnimSelector;
 use mercs2_engine::render::{ClipAnim, TexMap};
 use mercs2_engine::scene::Scene;
 use mercs2_engine::{game_world, pose, wad};
-use serde::{Deserialize, Serialize};
 use winit::event::{ElementState, Event, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::EventLoop;
 use winit::keyboard::{KeyCode, PhysicalKey};
@@ -414,31 +412,6 @@ struct ClipEntry {
     label: String,
 }
 
-/// One instance placed into the editable sandbox.
-struct Placed {
-    hash: u32,
-    label: String,
-    entity: Entity,
-    pos: Vec3,
-    yaw: f32,
-    scale: f32,
-}
-
-/// Serialized sandbox arrangement (`workshop_scene.json`).
-#[derive(Serialize, Deserialize)]
-struct SceneFile {
-    items: Vec<SceneItem>,
-}
-
-#[derive(Serialize, Deserialize)]
-struct SceneItem {
-    hash: u32,
-    name: Option<String>,
-    pos: [f32; 3],
-    yaw: f32,
-    scale: f32,
-}
-
 /// Full-screen texture plate view (rendered through the engine's loading-plate path).
 struct TexView {
     hashes: Vec<u32>,
@@ -447,8 +420,6 @@ struct TexView {
     /// Dims/format of the currently bound plate (for the caption).
     info: String,
 }
-
-const SCENE_FILE: &str = "workshop_scene.json";
 
 /// One user intention, queued from EITHER a keyboard shortcut or an inspector-GUI widget and
 /// executed once per frame where every `&mut` is free — so the GUI and the keys share one
@@ -524,22 +495,9 @@ enum Act {
     ClipStop,
     PlayPause,
     GroupToggle(usize),
-    Place,
-    /// Context-menu: place a catalog model into the sandbox WITHOUT making it the preview.
-    PlaceHash(u32, String),
-    Merge,
     Export,
     /// Context-menu: export a catalog model directly (no preview needed).
     ExportHash(u32, String),
-    SaveScene,
-    LoadScene,
-    ClearSandbox,
-    RemovePlaced(usize),
-    DuplicatePlaced(usize),
-    /// Move a placed instance to the current camera target.
-    SnapPlaced(usize),
-    /// Push a placed instance's (GUI-edited) transform into its ECS entity.
-    SyncPlaced(usize),
     /// Hide every draw group except this one / show them all again.
     IsolateGroup(usize),
     ShowAllGroups,
@@ -571,7 +529,7 @@ enum Act {
     Publish,
     /// Conform: seed the transform fields from the real-envelope auto-fit (donor vs import).
     ConformAutofit,
-    /// Conform: place the donor template into the sandbox at the origin as a visual reference.
+    /// Conform: draw the donor template at the origin as a visual reference (replacing the last one).
     LoadDonorRef,
     /// Load a model by hash onto the preview pedestal (Model Workbench inventory click).
     LoadModelHash(u32, String),
@@ -580,8 +538,9 @@ enum Act {
     /// Library routing: start a contribution of `kind` with this asset as its donor/target,
     /// scaffolding a Shipment if none is open, and go to the Shipment page.
     AddToShipment(&'static str, u32, String),
-    /// Library routing: open a craft bench on this asset.
-    CraftOn(CraftMode, u32, String),
+    /// Library routing: use this asset as a bench's donor — start the contribution the bench writes
+    /// (`add_outfit` for Retarget, `add_model` for Fit) and open the bench on it.
+    Bench(crate::quartermaster::Craft, u32, String),
     /// Audio domain: preview a VO clip by its wave index — decode it from the game's
     /// `vo_stream.english.pws` and play it on the default output device.
     PlayClip(u32),
@@ -622,8 +581,6 @@ enum Workbench {
     /// `mercs2_formats::save` reader, the `save_lua` AST and the `save_write` writer are the
     /// backbone; the panel in `src/saves.rs` is their UI front end.
     Saves,
-    /// The editable placement scene: place/move/merge instances, save/load arrangements.
-    Sandbox,
     /// Author a mod: conform an import onto a donor template, place hardpoints, publish a patch WAD.
     Mods,
     /// Retarget a Source-rigged (ValveBiped / Mixamo / Unreal) import onto a Mercs2 HIER skeleton.
@@ -634,108 +591,14 @@ enum Workbench {
     /// Where the game and the reference bundle live — the two paths the tool cannot discover for
     /// itself on every platform. Last on the rail: configuration, not an authoring surface.
     Settings,
-    /// **Craft** — the persistent, domain-agnostic bench, and the rail slot Sandbox used to hold.
-    ///
-    /// Plan 02: *"Craft cuts across domains. Texture-swap, Lua editing, retarget, the linter,
-    /// build/publish each apply to World AND Weapons AND Driving. If nav were purely by domain,
-    /// those tools would appear five times or fracture."*
-    ///
-    /// It is never rendered directly: [`CraftMode`] selects which bench the panels show, so the
-    /// existing Scene / Rig / Conform surfaces keep their implementations and simply stop being
-    /// rail peers. That is the half of the Plan-02 migration that was never built — `Mods` and
-    /// `Skeleton` were deleted from the rail on the promise of this surface, and without it they
-    /// became reachable only through a one-way, index-less page flip from two contribution kinds.
-    Craft,
+    /// The running game (`crate::live`). Pinned to the rail's foot, above Log, with a dot saying
+    /// whether the game answers.
+    Live,
     /// **A domain** (Plan 02 §C): one of seven curated lenses over the catalog. A single variant
     /// rather than seven, so each dispatch site gains ONE arm, not seven. A domain page IS Inspect
     /// with a lens-filtered navigator — the viewport, inspector cards and verbs all read the same
     /// loaded preview, so browsing here is browsing there, narrowed to what the domain governs.
     Domain(crate::domain::Domain),
-}
-
-/// Which bench the Craft surface is showing.
-///
-/// Chosen by a strip on the FIRST row of the centre column, above the verbs — so the mode changes
-/// what the viewport is doing while the navigator and inspector stay bound to the same subject.
-/// That is what makes "follows the current subject" true by construction rather than by discipline.
-#[derive(PartialEq, Clone, Copy)]
-enum CraftMode {
-    /// Arrange placed instances — the old Sandbox.
-    Scene,
-    /// Retarget a source rig onto a Mercs2 HIER skeleton — the old Skeleton bench.
-    Rig,
-    /// Fit an import onto a donor: host group, transform, hardpoints — the old Mods bench.
-    Conform,
-    /// Swap a texture and see it on the real material.
-    Texture,
-    /// The game's Lua, read-only until the editor lands.
-    Script,
-    /// The destruction state machine.
-    States,
-    /// The LIVE Lua console — a chunk runs in the running game via `mercs2_bridge`, not a file.
-    Console,
-}
-
-impl CraftMode {
-    const ALL: [CraftMode; 7] = [
-        CraftMode::Scene,
-        CraftMode::Rig,
-        CraftMode::Conform,
-        CraftMode::Texture,
-        CraftMode::Script,
-        CraftMode::States,
-        CraftMode::Console,
-    ];
-    fn label(self) -> &'static str {
-        match self {
-            CraftMode::Scene => "Scene",
-            CraftMode::Rig => "Rig",
-            CraftMode::Conform => "Conform",
-            CraftMode::Texture => "Texture",
-            CraftMode::Script => "Script",
-            CraftMode::States => "States",
-            CraftMode::Console => "Console",
-        }
-    }
-    /// The workbench whose panels implement this mode.
-    ///
-    /// The mapping exists so the migration did not have to move three thousand lines of working
-    /// panel code: `Mods` and `Skeleton` stop being reachable from the rail and become the
-    /// implementation of a mode instead.
-    fn workbench(self) -> Workbench {
-        match self {
-            CraftMode::Scene => Workbench::Sandbox,
-            CraftMode::Rig => Workbench::Skeleton,
-            CraftMode::Conform => Workbench::Mods,
-            // Not yet their own surfaces: Texture and States are read-only views that live on
-            // Inspect today, and Script is the read-only Lua viewer. Named here rather than hidden
-            // so the set of craft tools Plan 02 lists is visible, with its gaps stated.
-            // Console renders its own centre (the live REPL), but maps to Inspect for the
-            // navigator/inspector panels it does not use.
-            CraftMode::Texture | CraftMode::Script | CraftMode::States | CraftMode::Console => {
-                Workbench::Inspect
-            }
-        }
-    }
-    /// What this mode still needs before it is a real bench, or `None` when it is one.
-    fn unbuilt(self) -> Option<&'static str> {
-        match self {
-            CraftMode::Scene | CraftMode::Rig | CraftMode::Conform | CraftMode::Console => None,
-            CraftMode::Texture => Some(
-                "read-only: the plate viewer. Authoring a swap is `replace_texture` / \
-                 `add_texture` on the Shipment page.",
-            ),
-            CraftMode::Script => Some(
-                "read-only: the Lua viewer. An editor needs the compiler beside the host, which \
-                 is now linkable.",
-            ),
-            CraftMode::States => Some(
-                "read-only here: the state picker. To SHIP an edit, `qm extract-states <model>` \
-                 for the baseline, edit it, and add an `edit_state_machine` to the Shipment — the \
-                 writer lowers it byte-identically.",
-            ),
-        }
-    }
 }
 
 impl Workbench {
@@ -745,23 +608,35 @@ impl Workbench {
     /// not top-level peers."* They are craft — they act on ONE contribution — so they are entered
     /// from the Shipment page and return to it, rather than being places you navigate to and then
     /// have to remember what you were assembling.
-    const ALL: [Workbench; 12] = [
+    const ALL: [Workbench; 7] = [
         Workbench::Inspect,
-        // Position 2 per the mockup: Saves sits next to Inspect, before Craft and the domain
-        // lenses. It is Inspect for a different subject — a `.profile`, not an asset — so it
-        // reads naturally as the second rail cell.
         Workbench::Saves,
-        Workbench::Craft,
-        Workbench::Domain(crate::domain::Domain::World),
-        Workbench::Domain(crate::domain::Domain::Characters),
-        Workbench::Domain(crate::domain::Domain::Weapons),
         Workbench::Domain(crate::domain::Domain::Driving),
-        Workbench::Domain(crate::domain::Domain::Audio),
         Workbench::Domain(crate::domain::Domain::Missions),
         Workbench::Domain(crate::domain::Domain::Systems),
         Workbench::Quartermaster,
         Workbench::Settings,
     ];
+
+    /// The domains Inspect offers as Lenses: those that browse models and are not rail pages.
+    fn lenses() -> Vec<crate::domain::Domain> {
+        crate::domain::Domain::ALL
+            .into_iter()
+            .filter(|d| d.browses_models() && !Workbench::ALL.contains(&Workbench::Domain(*d)))
+            .collect()
+    }
+
+    /// The rail's foot cell that opens the log; it is not a page, so it has no variant.
+    const LOG_LABEL: &'static str = "Log";
+
+    /// The rail entry this page lights: a bench works on one Shipment contribution, so it lights
+    /// Shipment; a page reached from Inspect lights Inspect.
+    fn rail_entry(self) -> Workbench {
+        match self {
+            Workbench::Mods | Workbench::Skeleton => Workbench::Quartermaster,
+            other => other,
+        }
+    }
 
     /// A domain page reuses Inspect's centre viewport, inspector cards and verbs — it is Inspect with
     /// a lens-filtered navigator. This is the single predicate that keeps those three surfaces shared.
@@ -782,7 +657,7 @@ impl Workbench {
         match self {
             // Saves composes its own centre (hero card + HUD overlays + progression tabs) rather
             // than painting over the 3D viewport, so the HUD chips stay suppressed here.
-            Workbench::Quartermaster | Workbench::Settings | Workbench::Saves => false,
+            Workbench::Quartermaster | Workbench::Settings | Workbench::Saves | Workbench::Live => false,
             // A model-browsing domain shows the loaded model; audio/missions/systems do not.
             Workbench::Domain(d) => d.browses_models(),
             _ => true,
@@ -792,12 +667,11 @@ impl Workbench {
         match self {
             Workbench::Inspect => "Inspect",
             Workbench::Saves => "Saves",
-            Workbench::Sandbox => "Sandbox",
             Workbench::Mods => "Mods",
             Workbench::Skeleton => "Skeleton",
             Workbench::Quartermaster => "Shipment",
             Workbench::Settings => "Settings",
-            Workbench::Craft => "Craft",
+            Workbench::Live => "Live",
             Workbench::Domain(d) => d.label(),
         }
     }
@@ -808,12 +682,11 @@ impl Workbench {
         match self {
             Workbench::Inspect => crate::gui::theme::RailIcon::Inspect,
             Workbench::Saves => crate::gui::theme::RailIcon::Saves,
-            Workbench::Sandbox => crate::gui::theme::RailIcon::Sandbox,
             Workbench::Mods => crate::gui::theme::RailIcon::Mods,
             Workbench::Skeleton => crate::gui::theme::RailIcon::Skeleton,
             Workbench::Quartermaster => crate::gui::theme::RailIcon::Quartermaster,
             Workbench::Settings => crate::gui::theme::RailIcon::Settings,
-            Workbench::Craft => crate::gui::theme::RailIcon::Craft,
+            Workbench::Live => crate::gui::theme::RailIcon::Live,
             Workbench::Domain(d) => d.rail_icon(),
         }
     }
@@ -822,14 +695,21 @@ impl Workbench {
         match self {
             Workbench::Inspect => "Inspecting",
             Workbench::Saves => "Saves",
-            Workbench::Sandbox => "Sandbox",
-            Workbench::Mods => "Mod project",
-            Workbench::Skeleton => "Retarget",
+            Workbench::Mods => "Fit to donor",
+            Workbench::Skeleton => "Retarget rig",
             Workbench::Quartermaster => "Shipment",
             Workbench::Settings => "Settings",
-            Workbench::Craft => "Craft",
+            Workbench::Live => "Live",
             Workbench::Domain(d) => d.label(),
         }
+    }
+}
+
+/// The page that implements a bench: Retarget is the Skeleton workbench, Fit the Mods one.
+fn bench_page(bench: crate::quartermaster::Craft) -> Workbench {
+    match bench {
+        crate::quartermaster::Craft::Rig => Workbench::Skeleton,
+        crate::quartermaster::Craft::Conform => Workbench::Mods,
     }
 }
 
@@ -883,24 +763,15 @@ impl SettingsSection {
 /// pressing keys, since the verb bar names a handful and the rest are buried in an event handler.
 const SHORTCUTS: &[(&str, &str)] = &[
     ("Esc", "Quit (or close the texture plate)"),
-    ("Tab", "Toggle browse / edit mode"),
     ("Enter", "Load the selected asset"),
     ("F3", "View the preview's textures"),
     ("F4", "Next animation clip"),
-    ("F5 / F9", "Save / load the sandbox arrangement"),
-    ("F6", "Place the preview into the sandbox"),
-    ("F7", "Merge every placed object into one model"),
-    ("F8", "Clear the sandbox"),
     ("F10", "Export the preview (OBJ + textures)"),
     ("F11", "Cycle LOD tier"),
     ("Space", "Play / pause the clip"),
     (", / .", "Previous / next clip"),
     ("\\", "Stop the clip"),
     ("[ / ]", "Cycle draw groups"),
-    ("N / B", "Cycle the selected placed object"),
-    ("Delete", "Remove the selected placed object"),
-    ("W A S D / Q E", "Move the camera"),
-    ("R / F", "Raise / lower the camera"),
     ("Drag / Shift-drag", "Orbit / pan"),
 ];
 
@@ -932,29 +803,37 @@ fn asset_menu(
             ui.close_menu();
         }
     } else {
-        if ui.button("Preview").clicked() {
+        if ui.add(egui::Button::new("Load in viewport").shortcut_text("Enter")).clicked() {
             actions.push(Act::LoadModelHash(hash, label.to_string()));
             ui.close_menu();
         }
-        if ui.button("Place in scene").clicked() {
-            actions.push(Act::PlaceHash(hash, label.to_string()));
+        if ui
+            .add(egui::Button::new("Export").shortcut_text("F10"))
+            .on_hover_text("OBJ + textures")
+            .clicked()
+        {
+            actions.push(Act::ExportHash(hash, label.to_string()));
             ui.close_menu();
         }
-        // Craft follows the SUBJECT — that is the property the surface exists for, so an asset can
-        // be taken straight to a bench instead of having to be reached from a contribution.
-        ui.menu_button("Open in Craft", |ui| {
-            for m in [CraftMode::Rig, CraftMode::Conform, CraftMode::Texture] {
-                let mut b = ui.button(m.label());
-                if let Some(why) = m.unbuilt() {
-                    b = b.on_hover_text(why);
-                }
-                if b.clicked() {
-                    actions.push(Act::CraftOn(m, hash, label.to_string()));
-                    ui.close_menu();
-                }
+        ui.separator();
+        // A bench borrows this model — its rig, materials and state machine — and writes a NEW
+        // contribution; the asset itself is never the thing written.
+        ui.label(theme::disp_text("Use as a donor \u{b7} never overwritten".to_uppercase(), theme::style_eyebrow(), theme::FAINT));
+        let benches = [
+            (crate::quartermaster::Craft::Rig, "Retarget a rig onto this\u{2026}", "opens the Retarget bench \u{b7} writes a wearable outfit in your Shipment"),
+            (crate::quartermaster::Craft::Conform, "Fit an import to this\u{2026}", "opens the Fit bench \u{b7} writes a new model in your Shipment"),
+        ];
+        for (bench, title, what) in benches {
+            let mut job = egui::text::LayoutJob::default();
+            job.append(title, 0.0, egui::TextFormat::simple(theme::font(&egui::TextStyle::Button), theme::TX));
+            job.append(&format!("\n{what}"), 0.0, egui::TextFormat::simple(theme::font(&egui::TextStyle::Small), theme::DIM));
+            if ui.add(egui::Button::new(job)).clicked() {
+                actions.push(Act::Bench(bench, hash, label.to_string()));
+                ui.close_menu();
             }
-        });
+        }
     }
+    ui.separator();
 
     // The routing that did not exist. A shipped asset becomes a DONOR or a TARGET — never the
     // thing written — so no entry here can produce a destructive contribution.
@@ -968,10 +847,6 @@ fn asset_menu(
     });
 
     ui.separator();
-    if !is_texture && ui.button("Export (OBJ + textures)").clicked() {
-        actions.push(Act::ExportHash(hash, label.to_string()));
-        ui.close_menu();
-    }
     if ui.button("Copy name").clicked() {
         ui.ctx().copy_text(label.to_string());
         ui.close_menu();
@@ -986,6 +861,57 @@ fn asset_menu(
         ui.ctx().copy_text(label.to_string());
         ui.close_menu();
     }
+}
+
+/// The captioned audio inventory, by bank: each bank expands to its lines with speaker and caption,
+/// ▶ streaming the clip from `vo_stream.english.pws`. `filter` narrows an open bank's lines.
+fn audio_browser(ui: &mut egui::Ui, audio: &crate::audioidx::AudioIndex, filter: &str, actions: &mut Vec<Act>) {
+    use crate::gui::theme;
+    /// Lines listed per bank before the rest are summarised.
+    const SHOWN: usize = 300;
+    let banks = audio.banks();
+    let total: usize = banks.iter().map(|(_, n)| *n).sum();
+    let f = filter.to_ascii_lowercase();
+    ui.label(theme::disp_text(format!("{total} clip(s) across {} banks", banks.len()), theme::style_eyebrow(), theme::FAINT));
+    ui.add_space(3.0);
+    egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+        for (bank, n) in banks {
+            egui::CollapsingHeader::new(egui::RichText::new(format!("{bank}  ·  {n}")).monospace().color(theme::TX))
+                .id_source(("audiobank", &bank))
+                .show(ui, |ui| {
+                    let mut shown = 0;
+                    let mut matching = 0;
+                    for clip in audio.by_bank(&bank) {
+                        let cap = if clip.caption.is_empty() { clip.stem().to_string() } else { clip.caption.clone() };
+                        let line = if clip.speaker.is_empty() { cap.clone() } else { format!("{}: {}", clip.speaker, cap) };
+                        if !f.is_empty() && !line.to_ascii_lowercase().contains(&f) && !clip.stem().to_ascii_lowercase().contains(&f) {
+                            continue;
+                        }
+                        matching += 1;
+                        if shown == SHOWN {
+                            continue;
+                        }
+                        shown += 1;
+                        ui.horizontal(|ui| {
+                            if let Some(wi) = clip.wave_index {
+                                if ui
+                                    .add(egui::Button::new(egui::RichText::new("\u{25B6}").small()).small())
+                                    .on_hover_text(format!("play \u{2014} {:.1}s from vo_stream.english.pws", clip.duration_s))
+                                    .clicked()
+                                {
+                                    actions.push(Act::PlayClip(wi));
+                                }
+                            }
+                            ui.label(egui::RichText::new(&line).small().color(theme::DIM))
+                                .on_hover_text(format!("{}\n{:.1}s", clip.original, clip.duration_s));
+                        });
+                    }
+                    if matching > shown {
+                        ui.label(egui::RichText::new(format!("+{} more…", matching - shown)).small().color(theme::FAINT));
+                    }
+                });
+        }
+    });
 }
 
 /// The context menu for a world-state LAYER — the World domain's second subject.
@@ -1015,20 +941,6 @@ fn layer_menu(ui: &mut egui::Ui, hash: u32, label: &str, actions: &mut Vec<Act>)
         ui.ctx().copy_text(format!("0x{hash:08X}"));
         ui.close_menu();
     }
-}
-
-/// A secondary-click-only handle over the viewport rect.
-///
-/// `Sense::click()` alone would swallow the LEFT button too and kill the camera drag, so this
-/// senses the secondary button only and leaves primary drags to the camera underneath.
-fn ui_ctx_interact(ctx: &egui::Context, rect: egui::Rect) -> egui::Response {
-    egui::Area::new(egui::Id::new("vp_ctx"))
-        .fixed_pos(rect.left_top())
-        .order(egui::Order::Background)
-        .show(ctx, |ui| {
-            ui.allocate_response(rect.size(), egui::Sense::click())
-        })
-        .inner
 }
 
 /// Resolve HIER node-name hashes to names from `names` — the full map [`crate::index::load_all_names`]
@@ -1071,6 +983,39 @@ fn build_donor_inventory(
         }
     }
     out
+}
+
+/// Whether `r` shows under Inspect's Lens `lens` (`None` = All).
+fn in_lens(lens: Option<crate::domain::Domain>, r: &crate::index::AssetRow) -> bool {
+    lens.map_or(true, |d| d.model_lens(r))
+}
+
+/// The browser list: indices into `rows` (one `kind`'s rows) that pass the Lens (Models only) and
+/// the name filter, in display order.
+fn filter_rows(
+    rows: &[crate::index::AssetRow],
+    kind: Kind,
+    filter: &str,
+    lens: Option<crate::domain::Domain>,
+) -> Vec<usize> {
+    let f = filter.to_ascii_lowercase();
+    let mut v: Vec<usize> = rows
+        .iter()
+        .enumerate()
+        .filter(|(_, r)| kind != Kind::Model || in_lens(lens, r))
+        .filter(|(_, r)| f.is_empty() || r.label().to_ascii_lowercase().contains(&f))
+        .map(|(i, _)| i)
+        .collect();
+    // Models list groups by category (vehicles-by-class → characters → buildings → …), then
+    // name within a group; textures stay in the plain name order `apply_names` set.
+    if kind == Kind::Model {
+        v.sort_by(|&a, &b| {
+            crate::index::category_order(rows[a].category())
+                .cmp(&crate::index::category_order(rows[b].category()))
+                .then_with(|| rows[a].label().cmp(&rows[b].label()))
+        });
+    }
+    v
 }
 
 pub fn run(opts: Options) {
@@ -1218,6 +1163,8 @@ pub fn run(opts: Options) {
 
     // Browser state.
     let mut kind = Kind::Model;
+    // Inspect's Lens: the Models list narrowed to one domain (`None` = all models).
+    let mut lens: Option<crate::domain::Domain> = None;
     let mut filter = String::new();
     let mut filtered: Vec<usize> = (0..index.rows(kind).len()).collect();
     let mut sel: usize = 0;
@@ -1225,19 +1172,18 @@ pub fn run(opts: Options) {
     // away so only the category line remains. Persists across frames; keyed by the static category
     // name so it survives refilter/re-sort. Empty = everything expanded (the default).
     let mut collapsed_cats: HashSet<&'static str> = HashSet::new();
-    let mut list_visible = true; // Tab: browse (list + filter typing) <-> edit (letter controls)
 
     // Viewport state.
     let mut preview: Option<Preview> = None;
-    let mut placed: Vec<Placed> = Vec::new();
-    // CPU-side store for models that do NOT live in a WAD: drag-drop imports + merge results.
-    // Keyed by their synthetic hash; merge/export source geometry from here first.
+    // The Fit bench's donor reference: the donor model drawn at the origin beside the import, as
+    // `(model hash, its entity)`.
+    let mut donor_ref: Option<(u32, Entity)> = None;
+    // CPU-side store for models that do NOT live in a WAD: drag-drop imports.
+    // Keyed by their synthetic hash; export sources geometry from here first.
     let mut imported: HashMap<u32, ModelData> = HashMap::new();
-    let mut merge_seq = 0usize;
     // Skeleton highlighting: the bone row the pointer is over this frame (transient) + the
     // clicked/pinned one. Rendered as engine glow cards at the bone's POSED position.
     let mut sel_bone: Option<usize> = None;
-    let mut sel_placed: Option<usize> = None;
     let mut tex_view: Option<TexView> = None;
     let mut lua_view: Option<crate::luaview::LuaView> = None;
     // Mod project (publish workbench M3): novel new-hash assets queued for packaging.
@@ -1257,7 +1203,7 @@ pub fn run(opts: Options) {
     let mut exporter: Option<Exporter> = None;
     // ── Conform transform (dedicated panel): interactively scale/rotate/place the imported mesh
     // against the donor template, baked into the export. `conform_live` drives the preview entity
-    // from these fields so the placement is visible against a donor reference in the sandbox. ──
+    // from these fields so the placement is visible against the donor reference. ──
     let mut conform_scale: f32 = 1.0;
     let mut conform_t: [f32; 3] = [0.0, 0.0, 0.0];
     let mut conform_r: [f32; 3] = [0.0, 0.0, 0.0]; // XYZ euler degrees
@@ -1327,15 +1273,12 @@ pub fn run(opts: Options) {
     let mut cfg_note: Option<Result<String, String>> = None;
     // Which Settings section the centre is showing. The navigator lists them.
     let mut settings_section = SettingsSection::Game;
-    // Which bench the Craft surface is showing, and which contribution (if any) it was entered
-    // from. The index is what makes a craft edit land back on the RIGHT contribution instead of
-    // appending a new one — `Act::Craft` used to carry no index at all, so a bench had no idea
-    // what it was editing and no way back.
-    let mut craft_mode = CraftMode::Scene;
+    // Which contribution (if any) the open bench was entered from. The index is what makes a bench
+    // edit land back on the RIGHT contribution instead of appending a new one — `Act::Craft` used to
+    // carry no index at all, so a bench had no idea what it was editing and no way back.
     let mut craft_subject: Option<usize> = None;
-    // The live Lua console (Craft ▸ Console). `None` until the author connects; a worker thread holds
-    // the socket so the frame loop never blocks on the game.
-    let mut live_console: Option<crate::console::LiveConsole> = None;
+    // Whether the running game answers on its lua-bridge port: the Live rail cell's dot.
+    let live_probe = crate::live::Probe::spawn(mercs2_bridge::DEFAULT_ADDR.to_string());
     // The Ess / engine API reference, the ECS component registry and the captioned audio inventory,
     // loaded from the reference bundle on the boot thread (`BootData`) and set when it finishes.
     let mut ess_api = crate::essapi::ApiIndex::default();
@@ -1347,13 +1290,6 @@ pub fn run(opts: Options) {
     let mut vo_player: Option<crate::audioplay::Player> = None;
     // Remembered so a failed open (missing English.wad / .pws / device) is reported once, not per click.
     let mut vo_error: Option<String> = None;
-    let mut console_search = String::new();
-    // Destruction poke: a target (object name or guid expr), a NODE (hardpoint name or 0x… hash —
-    // ObjectState.SetState is node-keyed), and the chosen vocabulary state.
-    let mut destruct_target = String::new();
-    let mut destruct_node = String::new();
-    let mut destruct_state = 0usize;
-    let destruct_states = mercs2_destruction::live::states();
     // In-flight reference-data download from the Settings button (which replaces the downloaded
     // copy with the latest release's): the receiver while it runs, plus the latest progress line.
     // The automatic download when no bundle is found runs on the boot thread.
@@ -1404,31 +1340,12 @@ pub fn run(opts: Options) {
     let mut lmb = false;
     let mut shift = false;
     let mut last_cursor: Option<(f64, f64)> = None;
-    let mut held: HashSet<KeyCode> = HashSet::new();
 
     let start = std::time::Instant::now();
     let mut last_frame = std::time::Instant::now();
 
-    let refilter = |index: &AssetIndex, kind: Kind, filter: &str| -> Vec<usize> {
-        let f = filter.to_ascii_lowercase();
-        let mut v: Vec<usize> = index
-            .rows(kind)
-            .iter()
-            .enumerate()
-            .filter(|(_, r)| f.is_empty() || r.label().to_ascii_lowercase().contains(&f))
-            .map(|(i, _)| i)
-            .collect();
-        // Models list groups by category (vehicles-by-class → characters → buildings → …), then
-        // name within a group; textures stay in the plain name order `apply_names` set.
-        if kind == Kind::Model {
-            let rows = index.rows(kind);
-            v.sort_by(|&a, &b| {
-                crate::index::category_order(rows[a].category())
-                    .cmp(&crate::index::category_order(rows[b].category()))
-                    .then_with(|| rows[a].label().cmp(&rows[b].label()))
-            });
-        }
-        v
+    let refilter = |index: &AssetIndex, kind: Kind, filter: &str, lens: Option<crate::domain::Domain>| -> Vec<usize> {
+        filter_rows(index.rows(kind), kind, filter, lens)
     };
 
     event_loop
@@ -1451,7 +1368,7 @@ pub fn run(opts: Options) {
                         &path, &mut w, &mut scene, &mut world, &mut imported, &mut preview,
                         &mut cam_target, &mut cam_dist, &mut retarget, &retarget_target,
                         &mut retarget_src_path, &mut wb,
-                        &mut sel_bone, &placed, &index, &anim_sel, &lua_corpus,
+                        &mut sel_bone, donor_ref.map(|(h, _)| h), &index, &anim_sel, &lua_corpus,
                     );
                 }
                 // GUI captured this input (pointer over a panel / text into a widget): the camera
@@ -1507,10 +1424,8 @@ pub fn run(opts: Options) {
                     ..
                 } => {
                     if state == ElementState::Released {
-                        held.remove(&code);
                         return;
                     }
-                    held.insert(code);
 
                     // Boot loading screen: input is Esc-to-quit only until the corpora are in.
                     if names_pending {
@@ -1533,41 +1448,33 @@ pub fn run(opts: Options) {
 
                     match code {
                         KeyCode::Escape => elwt.exit(),
-                        KeyCode::Tab => {
-                            list_visible = !list_visible;
-                            status = if list_visible {
-                                "BROWSE: type to filter, Enter loads.".into()
-                            } else {
-                                "EDIT: N/B select placed, WASD/QE move, R/F yaw, -/= scale, Del remove.".into()
-                            };
-                        }
-                        // ── Browser (list visible): navigation + filter typing. ──
-                        KeyCode::ArrowUp if list_visible => sel = sel.saturating_sub(1),
-                        KeyCode::ArrowDown if list_visible => {
+                        // ── Browser: navigation + filter typing. ──
+                        KeyCode::ArrowUp => sel = sel.saturating_sub(1),
+                        KeyCode::ArrowDown => {
                             sel = (sel + 1).min(filtered.len().saturating_sub(1));
                         }
-                        KeyCode::PageUp if list_visible => sel = sel.saturating_sub(24),
-                        KeyCode::PageDown if list_visible => {
+                        KeyCode::PageUp => sel = sel.saturating_sub(24),
+                        KeyCode::PageDown => {
                             sel = (sel + 24).min(filtered.len().saturating_sub(1));
                         }
-                        KeyCode::Home if list_visible => sel = 0,
-                        KeyCode::End if list_visible => sel = filtered.len().saturating_sub(1),
-                        KeyCode::ArrowLeft | KeyCode::ArrowRight if list_visible => {
+                        KeyCode::Home => sel = 0,
+                        KeyCode::End => sel = filtered.len().saturating_sub(1),
+                        KeyCode::ArrowLeft | KeyCode::ArrowRight => {
                             // Cycles the whole category strip now that there are eight of them,
                             // not two. Left steps back, right steps forward, both wrapping.
                             let cur = Kind::ALL.iter().position(|k| *k == kind).unwrap_or(0);
                             let n = Kind::ALL.len();
                             let step = if code == KeyCode::ArrowLeft { n - 1 } else { 1 };
                             kind = Kind::ALL[(cur + step) % n];
-                            filtered = refilter(&index, kind, &filter);
+                            filtered = refilter(&index, kind, &filter, lens);
                             sel = 0;
                         }
-                        KeyCode::Backspace if list_visible => {
+                        KeyCode::Backspace => {
                             filter.pop();
-                            filtered = refilter(&index, kind, &filter);
+                            filtered = refilter(&index, kind, &filter, lens);
                             sel = sel.min(filtered.len().saturating_sub(1));
                         }
-                        KeyCode::Enter if list_visible => actions.push(Act::LoadRow(sel)),
+                        KeyCode::Enter => actions.push(Act::LoadRow(sel)),
                         // ── Preview actions (also reachable from the inspector GUI). ──
                         KeyCode::F3 => actions.push(Act::TexOfPreview),
                         // , / . — previous / next catalog clip. Excluded from the filter charset
@@ -1589,53 +1496,24 @@ pub fn run(opts: Options) {
                             }
                         }
                         KeyCode::Space => actions.push(Act::PlayPause),
-                        // ── Sandbox / pipeline shortcuts: same Acts the inspector GUI queues —
-                        // one implementation, in the action processor below. ──
-                        KeyCode::F6 => actions.push(Act::Place),
-                        KeyCode::F7 => actions.push(Act::Merge),
-                        KeyCode::F8 => actions.push(Act::ClearSandbox),
-                        KeyCode::F5 => actions.push(Act::SaveScene),
-                        KeyCode::F9 => actions.push(Act::LoadScene),
+                        // ── Pipeline shortcuts: same Acts the inspector GUI queues — one
+                        // implementation, in the action processor below. ──
                         KeyCode::F10 => actions.push(Act::Export),
                         KeyCode::F11 => actions.push(Act::TierNext),
-                        // ── Edit mode letter controls (list hidden = letters are free). ──
-                        KeyCode::KeyN | KeyCode::KeyB if !list_visible && !placed.is_empty() => {
-                            let n = placed.len();
-                            sel_placed = Some(match (sel_placed, code) {
-                                (Some(i), KeyCode::KeyN) => (i + 1) % n,
-                                (Some(i), _) => (i + n - 1) % n,
-                                (None, _) => 0,
-                            });
-                        }
-                        KeyCode::Delete if !list_visible => {
-                            if let Some(i) = sel_placed {
-                                let pl = placed.remove(i);
-                                world.despawn(pl.entity).ok();
-                                scene.forget_entity(pl.entity);
-                                sel_placed = (!placed.is_empty()).then(|| i.min(placed.len() - 1));
-                            }
-                        }
-                        KeyCode::KeyG if !list_visible => {
-                            if let Some(i) = sel_placed {
-                                placed[i].pos = cam_target;
-                            }
-                        }
                         _ => {
-                            // Remaining printable keys type into the filter (browse mode only).
-                            if list_visible {
-                                if let Some(t) = text {
-                                    let mut changed = false;
-                                    for c in t.chars() {
-                                        // ',' '.' '\\' are anim keys, NOT filter chars.
-                                        if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
-                                            filter.push(c.to_ascii_lowercase());
-                                            changed = true;
-                                        }
+                            // Remaining printable keys type into the filter.
+                            if let Some(t) = text {
+                                let mut changed = false;
+                                for c in t.chars() {
+                                    // ',' '.' '\\' are anim keys, NOT filter chars.
+                                    if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+                                        filter.push(c.to_ascii_lowercase());
+                                        changed = true;
                                     }
-                                    if changed {
-                                        filtered = refilter(&index, kind, &filter);
-                                        sel = 0;
-                                    }
+                                }
+                                if changed {
+                                    filtered = refilter(&index, kind, &filter, lens);
+                                    sel = 0;
                                 }
                             }
                         }
@@ -1700,7 +1578,7 @@ pub fn run(opts: Options) {
                                     ess_api = api;
                                     ecs_reg = ecs;
                                     audio_idx = audio;
-                                    filtered = refilter(&index, kind, &filter);
+                                    filtered = refilter(&index, kind, &filter, lens);
                                     inventory_dirty = true; // names now resolve → build the vehicle inventory
                                     sel = sel.min(filtered.len().saturating_sub(1));
                                     names_pending = false;
@@ -1715,6 +1593,9 @@ pub fn run(opts: Options) {
                                         index.textures().len(),
                                         lua_corpus.len()
                                     );
+                                    // The loader's last word: it exits after sending this, so the
+                                    // next receive would see it gone and call that a failure.
+                                    break;
                                 }
                                 Ok(Boot::Failed(e)) => {
                                     eprintln!("workshop: {e}");
@@ -1874,7 +1755,7 @@ pub fn run(opts: Options) {
                                             }
                                         }
                                         index.add_kit_templates(&kit_templates);
-                                        filtered = refilter(&index, kind, &filter);
+                                        filtered = refilter(&index, kind, &filter, lens);
                                         inventory_dirty = true;
                                         sel = sel.min(filtered.len().saturating_sub(1));
                                     }
@@ -1905,32 +1786,6 @@ pub fn run(opts: Options) {
                             Ok(dir) => format!("exported {lbl} -> {dir}"),
                             Err(e) => format!("EXPORT FAILED: {e}"),
                         };
-                    }
-
-                    // ── Edit-mode held-key nudging of the selected placed instance. ──
-                    if !list_visible {
-                        if let Some(i) = sel_placed {
-                            let pl = &mut placed[i];
-                            let step = (cam_dist * 0.35 * dt).max(0.002);
-                            if held.contains(&KeyCode::KeyW) { pl.pos.z += step; }
-                            if held.contains(&KeyCode::KeyS) { pl.pos.z -= step; }
-                            if held.contains(&KeyCode::KeyA) { pl.pos.x -= step; }
-                            if held.contains(&KeyCode::KeyD) { pl.pos.x += step; }
-                            if held.contains(&KeyCode::KeyQ) { pl.pos.y -= step; }
-                            if held.contains(&KeyCode::KeyE) { pl.pos.y += step; }
-                            if held.contains(&KeyCode::KeyR) { pl.yaw += 1.2 * dt; }
-                            if held.contains(&KeyCode::KeyF) { pl.yaw -= 1.2 * dt; }
-                            if held.contains(&KeyCode::Equal) { pl.scale *= 1.0 + 0.8 * dt; }
-                            if held.contains(&KeyCode::Minus) { pl.scale /= 1.0 + 0.8 * dt; }
-                            let _ = world.insert_one(
-                                pl.entity,
-                                Transform {
-                                    translation: pl.pos,
-                                    rotation: Quat::from_rotation_y(pl.yaw),
-                                    scale: Vec3::splat(pl.scale),
-                                },
-                            );
-                        }
                     }
 
                     // ── Conform live preview: drive the imported pedestal entity from the conform
@@ -2003,14 +1858,12 @@ pub fn run(opts: Options) {
                         vehicle_inventory = build_donor_inventory(&index, None);
                         inventory_dirty = false;
                     }
-                    // The workbench whose PANELS and MARKERS to draw this frame. Craft is never
-                    // rendered directly: its mode selects one of the benches that used to be rail
-                    // peers, so the panel code below is unchanged and simply stops being reachable
-                    // by navigating to it.
-                    //
-                    // Resolved ONCE per frame, before the GUI runs, so the panels, the viewport HUD
-                    // and the 3D marker passes cannot disagree about which bench is showing.
-                    let eff = if wb == Workbench::Craft { craft_mode.workbench() } else { wb };
+                    // The workbench whose PANELS and MARKERS to draw this frame. Taken ONCE per
+                    // frame, before the GUI runs, so the panels, the viewport HUD and the 3D marker
+                    // passes cannot disagree about which bench is showing when an action switches
+                    // page mid-frame.
+                    let eff = wb;
+                    let rail_lit = wb.rail_entry();
                     use crate::gui::theme;
                     gui.run(|ctx| {
                         // ── COMMAND BAR: identity + breadcrumb (left) · scene I/O (right). Only
@@ -2028,67 +1881,66 @@ pub fn run(opts: Options) {
                                 ui.label(theme::disp_text("MERCS 2", theme::style_title(), theme::TX));
                                 ui.label(theme::disp_text("WORKSHOP", theme::style_eyebrow(), theme::FAINT));
                                 ui.separator();
-                                // A craft surface was entered FROM the Shipment, so it offers the way
-                                // back. Without this the rail no longer lists it and there is no
-                                // route out — which is how a "dissolved" page becomes a trap.
-                                if wb.is_craft()
-                                    && ui
-                                        .add(egui::Button::new(theme::disp_text(
-                                            "\u{2039} SHIPMENT",
-                                            theme::style_eyebrow(),
-                                            theme::BRASS,
-                                        )))
-                                        .on_hover_text("Back to the Shipment")
-                                        .clicked()
-                                {
-                                    wb = Workbench::Quartermaster;
-                                }
-                                ui.label(theme::disp_text(wb.verb().to_uppercase(), theme::style_eyebrow(), theme::FAINT));
-                                // The breadcrumb names what the PAGE is working on. On the Shipment
-                                // page that is the Shipment — showing the previewed model instead
-                                // pointed at whatever Inspect happened to be holding.
-                                if wb == Workbench::Quartermaster {
-                                    if let Some(root) = qm.root() {
-                                        ui.label(
-                                            egui::RichText::new(
-                                                root.file_name()
-                                                    .map(|s| s.to_string_lossy().to_string())
-                                                    .unwrap_or_default(),
-                                            )
-                                            .strong(),
-                                        );
-                                    } else {
-                                        ui.label(egui::RichText::new("no shipment").weak());
+                                // A bench works on one contribution of the open Shipment, so its
+                                // breadcrumb is that path — SHIPMENTS › shipment › contribution ›
+                                // BENCH — and every crumb but the bench leads back to the Shipment.
+                                if wb.is_craft() {
+                                    let crumb = |ui: &mut egui::Ui, text: egui::RichText| {
+                                        ui.add(egui::Button::new(text).frame(false)).on_hover_text("Back to the Shipment").clicked()
+                                    };
+                                    let sep = |ui: &mut egui::Ui| {
+                                        ui.label(egui::RichText::new("\u{203a}").color(theme::LINE2));
+                                    };
+                                    let mut back = crumb(ui, theme::disp_text("SHIPMENTS", theme::style_eyebrow(), theme::DIM));
+                                    sep(ui);
+                                    match qm.root() {
+                                        Some(root) => {
+                                            let leaf = root.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+                                            back |= crumb(ui, egui::RichText::new(leaf).color(theme::TX));
+                                        }
+                                        None => {
+                                            ui.label(egui::RichText::new("no shipment").weak());
+                                        }
                                     }
-                                } else if let Some(p) = &preview {
-                                    ui.label(egui::RichText::new(&p.label).strong());
-                                    ui.label(
-                                        egui::RichText::new(format!("0x{:08X}", p.hash))
-                                            .monospace()
-                                            .color(theme::BRASS_DK),
-                                    );
+                                    if let Some(name) = craft_subject.and_then(|i| qm.contribution_title(i)) {
+                                        sep(ui);
+                                        back |= crumb(ui, egui::RichText::new(name).color(theme::TX));
+                                    }
+                                    sep(ui);
+                                    ui.label(theme::disp_text(wb.verb().to_uppercase(), theme::style_eyebrow(), theme::BRASS));
+                                    if back {
+                                        wb = Workbench::Quartermaster;
+                                    }
+                                } else {
+                                    ui.label(theme::disp_text(wb.verb().to_uppercase(), theme::style_eyebrow(), theme::FAINT));
+                                    // The breadcrumb names what the PAGE is working on. On the
+                                    // Shipment page that is the Shipment — showing the previewed
+                                    // model instead pointed at whatever Inspect happened to be holding.
+                                    if wb == Workbench::Quartermaster {
+                                        if let Some(root) = qm.root() {
+                                            ui.label(
+                                                egui::RichText::new(
+                                                    root.file_name()
+                                                        .map(|s| s.to_string_lossy().to_string())
+                                                        .unwrap_or_default(),
+                                                )
+                                                .strong(),
+                                            );
+                                        } else {
+                                            ui.label(egui::RichText::new("no shipment").weak());
+                                        }
+                                    } else if let Some(p) = &preview {
+                                        ui.label(egui::RichText::new(&p.label).strong());
+                                        ui.label(
+                                            egui::RichText::new(format!("0x{:08X}", p.hash))
+                                                .monospace()
+                                                .color(theme::BRASS_DK),
+                                        );
+                                    }
                                 }
                                 ui.with_layout(
                                     egui::Layout::right_to_left(egui::Align::Center),
                                     |ui| {
-                                        // Scene Save / Load belong to the Scene surface — leaking
-                                        // them into every workbench's header made the trio read as
-                                        // a global save button on pages (Saves, Inspect, Shipment)
-                                        // that have nothing to do with the sandbox arrangement.
-                                        // Each page now owns its own verbs; the Scene scope stays
-                                        // scoped.
-                                        let in_scene = wb == Workbench::Sandbox
-                                            || (wb == Workbench::Craft
-                                                && craft_mode == CraftMode::Scene);
-                                        if in_scene {
-                                            if ui.button("Load").on_hover_text("Load a saved arrangement").clicked() {
-                                                actions.push(Act::LoadScene);
-                                            }
-                                            if ui.button("Save").on_hover_text("Save the sandbox arrangement").clicked() {
-                                                actions.push(Act::SaveScene);
-                                            }
-                                            theme::eyebrow(ui, "Scene");
-                                        }
                                         if names_pending {
                                             ui.separator();
                                             ui.add(egui::Spinner::new().size(13.0));
@@ -2121,58 +1973,58 @@ pub fn run(opts: Options) {
                         }
                         // ── ACTIVITY RAIL: pick the workbench. The viewport/camera never reset when
                         // this changes — only the navigator + inspector reconfigure. ──
+                        // As the Rail design draws it: the numbered workbenches from the top, Live
+                        // and Log pinned to the foot.
                         egui::SidePanel::left("rail")
-                            .exact_width(66.0)
+                            .exact_width(theme::RAIL_W)
                             .resizable(false)
-                            .frame(egui::Frame::none().fill(theme::G0))
+                            .frame(egui::Frame::none().fill(theme::G0).inner_margin(egui::Margin::symmetric(0.0, 6.0)))
                             .show(ctx, |ui| {
                                 ui.spacing_mut().item_spacing.y = 1.0;
-                                // Log pins to the BOTTOM and is laid out first so it keeps its
-                                // place however many workbenches the rail grows.
-                                ui.with_layout(egui::Layout::bottom_up(egui::Align::Center), |ui| {
-                                    ui.add_space(6.0);
-                                    // Was inert: the returned `bool` was discarded and there was no
-                                    // history behind it anyway. Both halves exist now.
-                                    let unread = log
-                                        .iter()
-                                        .filter(|l| l.level == LogLevel::Error)
-                                        .count();
-                                    if theme::rail_item_badged(
-                                        ui,
-                                        None,
-                                        "Log",
-                                        theme::RailIcon::Log,
-                                        log_open,
-                                        (unread > 0).then_some(unread),
-                                    ) {
+                                // The foot is laid out first so it keeps its place however tall the
+                                // window is.
+                                ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
+                                    let log_item = theme::RailItem {
+                                        index: None,
+                                        label: Workbench::LOG_LABEL,
+                                        icon: theme::RailIcon::Log,
+                                        on: false,
+                                        badge: None,
+                                        dot: None,
+                                    };
+                                    if theme::rail_item(ui, &log_item) {
                                         log_open = !log_open;
                                     }
-                                    // The workbenches fill the space above, top-down, and scroll if
-                                    // the rail ever runs out of height.
-                                    ui.with_layout(egui::Layout::top_down(egui::Align::Center), |ui| {
-                                        ui.add_space(6.0);
-                                        egui::ScrollArea::vertical()
-                                            .auto_shrink([false, false])
-                                            .show(ui, |ui| {
-                                                ui.spacing_mut().item_spacing.y = 1.0;
-                                                for (i, w) in Workbench::ALL.iter().enumerate() {
-                                                    // The Shipment carries a count of what BLOCKS,
-                                                    // so the gate is visible from whatever page you
-                                                    // are actually working on.
-                                                    let badge = (*w == Workbench::Quartermaster)
-                                                        .then(|| qm.blocking_count());
-                                                    if theme::rail_item_badged(
-                                                        ui,
-                                                        Some(i + 1),
-                                                        w.label(),
-                                                        w.icon(),
-                                                        wb == *w,
-                                                        badge,
-                                                    ) {
-                                                        wb = *w;
-                                                    }
+                                    let live_item = theme::RailItem {
+                                        index: None,
+                                        label: Workbench::Live.label(),
+                                        icon: Workbench::Live.icon(),
+                                        on: wb == Workbench::Live,
+                                        badge: None,
+                                        dot: Some(if live_probe.reachable() { theme::GOOD } else { theme::LINE2 }),
+                                    };
+                                    if theme::rail_item(ui, &live_item) {
+                                        wb = Workbench::Live;
+                                    }
+                                    ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
+                                        egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+                                            ui.spacing_mut().item_spacing.y = 1.0;
+                                            for (i, w) in Workbench::ALL.iter().enumerate() {
+                                                let item = theme::RailItem {
+                                                    index: Some(i + 1),
+                                                    label: w.label(),
+                                                    icon: w.icon(),
+                                                    on: rail_lit == *w,
+                                                    // The Shipment carries a count of what BLOCKS, so
+                                                    // the gate is visible from whatever page you are on.
+                                                    badge: (*w == Workbench::Quartermaster).then(|| qm.blocking_count()),
+                                                    dot: None,
+                                                };
+                                                if theme::rail_item(ui, &item) {
+                                                    wb = *w;
                                                 }
-                                            });
+                                            }
+                                        });
                                     });
                                 });
                             });
@@ -2232,7 +2084,8 @@ pub fn run(opts: Options) {
                         });
                         // ── NAVIGATOR (left): the current workbench's list. The viewport keeps its
                         // camera when the workbench changes; only this + the inspector reconfigure. ──
-                        let navigator_resp = egui::SidePanel::left("navigator")
+                        // Not on Live: that page is blank until it is built to its design.
+                        let navigator_resp = (eff != Workbench::Live).then(|| egui::SidePanel::left("navigator")
                             .resizable(true)
                             .default_width(navigator_width)
                             // Finite max: egui 0.28's SidePanel never clamps content to the panel
@@ -2247,6 +2100,7 @@ pub fn run(opts: Options) {
                             )
                             .show(ctx, |ui| {
                           match eff {
+                            Workbench::Live => unreachable!("Live has no navigator"),
                             Workbench::Quartermaster => {
                                 qm_acts.extend(crate::quartermaster::navigator(ui, &qm));
                             }
@@ -2254,7 +2108,7 @@ pub fn run(opts: Options) {
                                 saves_acts.extend(crate::saves::navigator(ui, &saves));
                             }
                             Workbench::Inspect => {
-                            let before = (kind, filter.clone());
+                            let before = (kind, filter.clone(), lens);
                             ui.label(theme::disp_text("ASSETS", theme::style_title(), theme::TX));
                             ui.add_space(8.0);
                             // Segmented Models / Textures toggle — two EQUAL-width segments, each a
@@ -2338,6 +2192,24 @@ pub fn run(opts: Options) {
                                         }
                                     });
                                 });
+                            // The Lens: the Models list narrowed to one domain's models — the
+                            // domains that are not rail pages of their own.
+                            if kind == Kind::Model {
+                                ui.add_space(8.0);
+                                ui.horizontal_wrapped(|ui| {
+                                    ui.spacing_mut().item_spacing.x = 3.0;
+                                    ui.label(theme::disp_text("LENS", theme::style_eyebrow(), theme::FAINT));
+                                    ui.add_space(4.0);
+                                    let models = index.models();
+                                    for d in std::iter::once(None).chain(Workbench::lenses().into_iter().map(Some)) {
+                                        let n = models.iter().filter(|r| in_lens(d, r)).count();
+                                        let name = d.map_or("All", |d| d.label());
+                                        if theme::lens_pill(ui, name, &commafy(n), lens == d).clicked() {
+                                            lens = d;
+                                        }
+                                    }
+                                });
+                            }
                             ui.add_space(7.0);
                             // Filter with a search glyph.
                             egui::Frame::none()
@@ -2369,11 +2241,16 @@ pub fn run(opts: Options) {
                                         );
                                     });
                                 });
-                            if before.0 != kind || before.1 != filter {
-                                filtered = refilter(&index, kind, &filter);
+                            if before.0 != kind || before.1 != filter || before.2 != lens {
+                                filtered = refilter(&index, kind, &filter, lens);
                                 sel = 0;
                             }
                             ui.add_space(6.0);
+                            // Audio browses the captioned clip inventory — what the game says, by
+                            // bank — rather than opaque bank assets, whenever the bundle carries it.
+                            if kind == Kind::Audio && !audio_idx.banks().is_empty() {
+                                audio_browser(ui, &audio_idx, &filter, &mut actions);
+                            } else {
                             // Grouped display: category headers interleaved with rows, all one line
                             // high so `show_rows` still virtualizes the (3000+ row) models list.
                             // `filtered` is category-sorted; a header opens each new run. `Disp::Row`
@@ -2503,6 +2380,12 @@ pub fn run(opts: Options) {
                                             actions.push(Act::LoadRow(vi));
                                         }
                                         row.context_menu(|ui| {
+                                            // A layer is a set of placements you switch on or move,
+                                            // not an asset you preview or donate.
+                                            if kind == Kind::Layer {
+                                                layer_menu(ui, hash, &label, &mut actions);
+                                                return;
+                                            }
                                             // ONE menu, shared with the inspector heading — the
                                             // two used to be separate copies and had drifted.
                                             asset_menu(
@@ -2516,127 +2399,8 @@ pub fn run(opts: Options) {
                                     }
                                 },
                             );
-                            } // ── end Inspect navigator (asset browser) ──
-                            Workbench::Sandbox => {
-                                // Scene OUTLINER: the placed instances, plus a place-from-library
-                                // search — the Sandbox is about arranging many objects, so this is
-                                // its own list, not the asset browser.
-                                ui.label(theme::disp_text("SCENE", theme::style_title(), theme::TX));
-                                ui.weak("Objects placed in this scene. Select to transform.");
-                                ui.add_space(8.0);
-                                egui::Frame::none()
-                                    .fill(theme::G0)
-                                    .stroke(egui::Stroke::new(1.0, theme::LINE))
-                                    .rounding(egui::Rounding::same(6.0))
-                                    .inner_margin(egui::Margin::symmetric(8.0, 4.0))
-                                    .show(ui, |ui| {
-                                        ui.horizontal(|ui| {
-                                            let (r, _) = ui.allocate_exact_size(egui::vec2(13.0, 13.0), egui::Sense::hover());
-                                            let c = r.center();
-                                            let plus_col = if filter.is_empty() { theme::FAINT } else { theme::BRASS_DK };
-                                            let s = egui::Stroke::new(1.6, plus_col);
-                                            ui.painter().line_segment([c + egui::vec2(-4.0, 0.0), c + egui::vec2(4.0, 0.0)], s);
-                                            ui.painter().line_segment([c + egui::vec2(0.0, -4.0), c + egui::vec2(0.0, 4.0)], s);
-                                            ui.add(
-                                                egui::TextEdit::singleline(&mut filter)
-                                                    .hint_text("place from library…")
-                                                    .frame(false)
-                                                    .desired_width(f32::INFINITY),
-                                            );
-                                        });
-                                    });
-                                let f = filter.to_ascii_lowercase();
-                                if !f.is_empty() {
-                                    ui.add_space(4.0);
-                                    egui::Frame::none()
-                                        .fill(theme::G0)
-                                        .stroke(egui::Stroke::new(1.0, theme::LINE))
-                                        .rounding(egui::Rounding::same(6.0))
-                                        .inner_margin(egui::Margin::same(4.0))
-                                        .show(ui, |ui| {
-                                            let mut shown = 0usize;
-                                            for r in index.models().iter() {
-                                                if shown >= 10 {
-                                                    ui.weak("…refine the search");
-                                                    break;
-                                                }
-                                                let label = r.label();
-                                                if !label.to_ascii_lowercase().contains(&f) {
-                                                    continue;
-                                                }
-                                                shown += 1;
-                                                let clicked = ui
-                                                    .horizontal(|ui| {
-                                                        row_icon(ui, r.category(), 14.0);
-                                                        ui.add_space(4.0);
-                                                        ui.selectable_label(false, label.clone()).clicked()
-                                                    })
-                                                    .inner;
-                                                if clicked {
-                                                    actions.push(Act::PlaceHash(r.hash, label.clone()));
-                                                }
-                                            }
-                                            if shown == 0 {
-                                                ui.weak("no model matches");
-                                            }
-                                        });
-                                }
-                                ui.add_space(6.0);
-                                theme::eyebrow(ui, &format!("Objects · {}", placed.len()));
-                                ui.add_space(5.0);
-                                if placed.is_empty() {
-                                    ui.weak("Nothing placed yet — search above to add one.");
-                                }
-                                for i in 0..placed.len() {
-                                    let (phash, plabel) = (placed[i].hash, placed[i].label.clone());
-                                    let cat = index
-                                        .models()
-                                        .iter()
-                                        .find(|r| r.hash == phash)
-                                        .map(|r| r.category())
-                                        .unwrap_or("Other");
-                                    let sel = sel_placed == Some(i);
-                                    let row = ui
-                                        .horizontal(|ui| {
-                                            row_icon(ui, cat, 14.0);
-                                            ui.add_space(4.0);
-                                            let r = ui.selectable_label(
-                                                sel,
-                                                egui::RichText::new(&plabel),
-                                            );
-                                            ui.with_layout(
-                                                egui::Layout::right_to_left(egui::Align::Center),
-                                                |ui| {
-                                                    ui.label(egui::RichText::new(format!("n{i}")).monospace().color(theme::FAINT));
-                                                },
-                                            );
-                                            r
-                                        })
-                                        .inner;
-                                    if row.clicked() {
-                                        sel_placed = Some(i);
-                                    }
-                                    row.context_menu(|ui| {
-                                        if ui.button("Snap to camera target").clicked() {
-                                            actions.push(Act::SnapPlaced(i));
-                                            ui.close_menu();
-                                        }
-                                        if ui.button("Duplicate").clicked() {
-                                            actions.push(Act::DuplicatePlaced(i));
-                                            ui.close_menu();
-                                        }
-                                        if ui.button("Remove").clicked() {
-                                            actions.push(Act::RemovePlaced(i));
-                                            ui.close_menu();
-                                        }
-                                        ui.separator();
-                                        if ui.button(format!("Copy hash 0x{phash:08X}")).clicked() {
-                                            ui.ctx().copy_text(format!("0x{phash:08X}"));
-                                            ui.close_menu();
-                                        }
-                                    });
-                                }
                             }
+                            } // ── end Inspect navigator (asset browser) ──
                             Workbench::Mods => {
                                 ui.label(theme::disp_text("Donor templates", theme::style_title(), theme::TX));
                                 ui.weak("Pick ANY host template — vehicle, character, building or prop \
@@ -2805,107 +2569,19 @@ pub fn run(opts: Options) {
                                             if resp.clicked() {
                                                 actions.push(Act::LoadModelHash(r.hash, r.label()));
                                             }
-                                            // Route an asset into a Shipment or Craft — the same menu
+                                            // Route an asset into a Shipment or a bench — the same menu
                                             // the Library uses, so the two cannot drift.
                                             resp.context_menu(|ui| {
                                                 asset_menu(ui, r.hash, &r.label(), false, &mut actions);
                                             });
                                         }
-                                        // ── World-state overlays. The vz_state layers are the World
-                                        // domain's other subject: not models to render, but placement
-                                        // sets you switch on (activate_layer) or move (edit_world).
-                                        // Rendered in the same scroll so the two fit one column.
-                                        if d.browses_layers() {
-                                            let layers = index.layers();
-                                            ui.add_space(8.0);
-                                            theme::eyebrow(ui, "World-state overlays");
-                                            ui.label(theme::disp_text(
-                                                format!("{} layer(s) — right-click to route", layers.len()),
-                                                theme::style_eyebrow(),
-                                                theme::FAINT,
-                                            ));
-                                            ui.add_space(3.0);
-                                            let mut sorted: Vec<&crate::index::AssetRow> = layers.iter().collect();
-                                            sorted.sort_by(|a, b| a.label().cmp(&b.label()));
-                                            for r in sorted {
-                                                let resp = theme::row_chip(
-                                                    ui,
-                                                    egui::Color32::TRANSPARENT,
-                                                    theme::LINE,
-                                                    |ui| {
-                                                        ui.label(egui::RichText::new(r.label())
-                                                            .monospace().color(theme::TX));
-                                                    },
-                                                );
-                                                resp.context_menu(|ui| {
-                                                    layer_menu(ui, r.hash, &r.label(), &mut actions);
-                                                });
-                                            }
-                                        }
                                     });
-                                    // Characters thickens toward the wardrobe: an outfit edit routes
-                                    // to Craft::Rig, which is where a hero's rig is retargeted.
-                                    if matches!(d, crate::domain::Domain::Characters) {
-                                        ui.add_space(6.0);
-                                        ui.label(egui::RichText::new(
-                                            "Right-click a hero → Add to Shipment ▸ add_outfit, then Edit rig in Craft.",
-                                        ).small().color(theme::FAINT));
-                                    }
                                 } else {
-                                    // Audio / Missions / Systems: not model rows, but NOT empty either
-                                    // — each browses the real base-game content it governs.
+                                    // Missions / Systems: not model rows, but NOT empty either — each
+                                    // browses the real base-game content it governs.
                                     // Reserve a footer for the always-present "Add to this domain" row.
                                     let list_h = (ui.available_height() - 52.0).max(80.0);
-                                    if d.browses_audio() {
-                                        // The captioned inventory: 12,988 clips across 27 banks. Grouped
-                                        // by bank, each expandable to its lines with speaker + caption —
-                                        // what the game actually SAYS, not opaque bank hashes. Falls back
-                                        // to the WAD's bank assets if the manifest is not bundled.
-                                        let banks = audio_idx.banks();
-                                        if banks.is_empty() {
-                                            let rows = index.rows(crate::index::Kind::Audio);
-                                            ui.label(theme::disp_text(format!("{} bank asset(s)", rows.len()), theme::style_eyebrow(), theme::FAINT));
-                                            egui::ScrollArea::vertical().max_height(list_h).auto_shrink([false, false]).show(ui, |ui| {
-                                                for r in rows {
-                                                    theme::row_chip(ui, egui::Color32::TRANSPARENT, theme::LINE, |ui| {
-                                                        ui.label(egui::RichText::new(r.label()).monospace().color(theme::TX));
-                                                    });
-                                                }
-                                            });
-                                        } else {
-                                            let total: usize = banks.iter().map(|(_, n)| *n).sum();
-                                            ui.label(theme::disp_text(format!("{total} clip(s) across {} banks", banks.len()), theme::style_eyebrow(), theme::FAINT));
-                                            ui.add_space(3.0);
-                                            egui::ScrollArea::vertical().max_height(list_h).auto_shrink([false, false]).show(ui, |ui| {
-                                                for (bank, n) in banks {
-                                                    egui::CollapsingHeader::new(
-                                                        egui::RichText::new(format!("{bank}  ·  {n}")).monospace().color(theme::TX)
-                                                    ).id_source(("audiobank", &bank)).show(ui, |ui| {
-                                                        for clip in audio_idx.by_bank(&bank).into_iter().take(300) {
-                                                            let cap = if clip.caption.is_empty() { clip.stem().to_string() } else { clip.caption.clone() };
-                                                            let line = if clip.speaker.is_empty() { cap.clone() } else { format!("{}: {}", clip.speaker, cap) };
-                                                            ui.horizontal(|ui| {
-                                                                // ▶ streams the clip straight from vo_stream.english.pws.
-                                                                if let Some(wi) = clip.wave_index {
-                                                                    if ui.add(egui::Button::new(egui::RichText::new("\u{25B6}").small()).small())
-                                                                        .on_hover_text(format!("play \u{2014} {:.1}s from vo_stream.english.pws", clip.duration_s))
-                                                                        .clicked()
-                                                                    {
-                                                                        actions.push(Act::PlayClip(wi));
-                                                                    }
-                                                                }
-                                                                ui.label(egui::RichText::new(&line).small().color(theme::DIM))
-                                                                    .on_hover_text(format!("{}\n{:.1}s", clip.original, clip.duration_s));
-                                                            });
-                                                        }
-                                                        if n > 300 {
-                                                            ui.label(egui::RichText::new(format!("+{} more…", n - 300)).small().color(theme::FAINT));
-                                                        }
-                                                    });
-                                                }
-                                            });
-                                        }
-                                    } else if d.browses_scripts() {
+                                    if d.browses_scripts() {
                                         // Missions / Systems: the decompiled Lua that governs this
                                         // domain, keyed off the governing needles. Click to read; right-
                                         // click to patch it (patch_lua seeded with the script name).
@@ -3003,19 +2679,17 @@ pub fn run(opts: Options) {
                                     }
                                 }
                             }
-                            // `eff` is resolved through `CraftMode::workbench()`, whose match is
-                            // exhaustive and never yields `Craft` — Craft is a rail slot, not a
-                            // page. Loud rather than silent if that ever stops being true.
-                            Workbench::Craft => unreachable!("Craft resolves to a CraftMode bench"),
                           } // ── end match wb (navigator) ──
-                        });
-                        navigator_width = navigator_resp.response.rect.width();
+                        }));
+                        if let Some(r) = navigator_resp {
+                            navigator_width = r.response.rect.width();
+                        }
                         // ── INSPECTOR (right): the current workbench's detail cards. ──
                         // ── INSPECTOR (right). NOT registered on Settings: that page has a
                         // navigator and a centre and nothing a detail panel would hold, and an
                         // empty registered panel reads as something that failed to load rather
                         // than something that was never meant to be there.
-                        let inspector_resp = (wb != Workbench::Settings).then(|| egui::SidePanel::right("inspector")
+                        let inspector_resp = (eff != Workbench::Settings && eff != Workbench::Live).then(|| egui::SidePanel::right("inspector")
                             .resizable(true)
                             .default_width(inspector_width)
                             // See the navigator's note: bound the width so content wraps to the panel
@@ -3043,6 +2717,25 @@ pub fn run(opts: Options) {
                                 match &mut preview {
                                     None => {
                                         ui.weak("No model loaded — pick one in the browser at left.");
+                                        // The active Lens: what it holds, and the contributions it
+                                        // starts.
+                                        if let (Workbench::Inspect, Kind::Model, Some(d)) = (eff, kind, lens) {
+                                            ui.add_space(10.0);
+                                            let n = index.models().iter().filter(|r| in_lens(Some(d), r)).count();
+                                            theme::section(ui, &format!("{} lens", d.label()), Some(&format!("{n} models")), true, |ui| {
+                                                ui.label(egui::RichText::new(d.blurb()).small().color(theme::DIM));
+                                                ui.add_space(8.0);
+                                                theme::eyebrow(ui, "Start a contribution from here");
+                                                ui.horizontal_wrapped(|ui| {
+                                                    for k in d.kinds() {
+                                                        let title = crate::quartermaster::kind_title(k);
+                                                        if ui.button(title).on_hover_text(*k).clicked() {
+                                                            actions.push(Act::AddToShipment(*k, 0, String::new()));
+                                                        }
+                                                    }
+                                                });
+                                            });
+                                        }
                                     }
                                     Some(p) => {
                                         let (phash, plabel) = (p.hash, p.label.clone());
@@ -3814,79 +3507,6 @@ pub fn run(opts: Options) {
                                     }
                                 }
                               } // ── end Inspect inspector ──
-                              if matches!(eff, Workbench::Sandbox) {
-                                // The SELECTED instance's transform, then scene-wide actions.
-                                match sel_placed.and_then(|i| placed.get(i).map(|p| (i, p.label.clone()))) {
-                                    Some((i, plabel)) => {
-                                        ui.label(theme::disp_text(format!("Instance n{i} · selected"), theme::style_eyebrow(), theme::BRASS_DK));
-                                        ui.label(theme::disp_text(plabel.to_uppercase(), egui::TextStyle::Heading, theme::TX));
-                                        ui.add_space(10.0);
-                                        theme::card(ui, "Transform", None, |ui| {
-                                            let mut changed = false;
-                                            {
-                                                let pl = &mut placed[i];
-                                                let mut pos = [pl.pos.x, pl.pos.y, pl.pos.z];
-                                                if theme::vec3_field(ui, "Location", &mut pos, 0.05) {
-                                                    pl.pos = Vec3::new(pos[0], pos[1], pos[2]);
-                                                    changed = true;
-                                                }
-                                                changed |= theme::scalar_field(ui, "Yaw", &mut pl.yaw, 0.01);
-                                                let mut scale = pl.scale;
-                                                if theme::scalar_field(ui, "Scale", &mut scale, 0.01) {
-                                                    pl.scale = scale.clamp(0.01, 1000.0);
-                                                    changed = true;
-                                                }
-                                            }
-                                            if changed {
-                                                actions.push(Act::SyncPlaced(i));
-                                            }
-                                            ui.add_space(7.0);
-                                            ui.horizontal(|ui| {
-                                                if ui.button("Duplicate").clicked() {
-                                                    actions.push(Act::DuplicatePlaced(i));
-                                                }
-                                                if ui.button("Snap to camera").clicked() {
-                                                    actions.push(Act::SnapPlaced(i));
-                                                }
-                                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                                    if theme::danger_button(ui, "Delete", true).clicked() {
-                                                        actions.push(Act::RemovePlaced(i));
-                                                        sel_placed = None;
-                                                    }
-                                                });
-                                            });
-                                        });
-                                    }
-                                    None => {
-                                        ui.label(theme::disp_text("Sandbox", egui::TextStyle::Heading, theme::TX));
-                                        ui.add_space(6.0);
-                                        ui.weak("Select an object in the Scene list at left to move / rotate / scale it.");
-                                        ui.add_space(10.0);
-                                    }
-                                }
-                                let sbadge = format!("{} placed", placed.len());
-                                theme::card(ui, "Scene", Some(&sbadge), |ui| {
-                                    if theme::primary_button(ui, "Merge to one model", !placed.is_empty()).clicked() {
-                                        actions.push(Act::Merge);
-                                    }
-                                    ui.add_space(4.0);
-                                    ui.horizontal(|ui| {
-                                        if ui.button("Save scene").clicked() {
-                                            actions.push(Act::SaveScene);
-                                        }
-                                        if ui.button("Load scene").clicked() {
-                                            actions.push(Act::LoadScene);
-                                        }
-                                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                            if theme::danger_button(ui, "Clear", !placed.is_empty()).clicked() {
-                                                actions.push(Act::ClearSandbox);
-                                            }
-                                        });
-                                    });
-                                    ui.add_space(4.0);
-                                    ui.weak("Merging bakes every placed instance into one model you can export or add to a mod.");
-                                });
-                              } // ── end Sandbox inspector ──
                               if matches!(eff, Workbench::Mods) {
                                 // ── Interaction hardpoints: a vehicle's `hp_*` HIER nodes (seat you
                                 // enter at, exhausts, wheels, muzzle). Conform at a different SIZE and
@@ -4048,7 +3668,7 @@ pub fn run(opts: Options) {
                                             .on_hover_text("mark every HIER node of the previewed model — green = positioned attach point (rotor/skid/seat/hardpoint), grey = origin/structural — as spatial anchors to map geometry onto");
                                         if ui
                                             .button("Load donor ref")
-                                            .on_hover_text("place the donor template in the sandbox at the origin as a visual anchor")
+                                            .on_hover_text("draw the donor template at the origin as a visual anchor")
                                             .clicked()
                                         {
                                             actions.push(Act::LoadDonorRef);
@@ -4278,68 +3898,17 @@ pub fn run(opts: Options) {
                         // full-width bar under the status bar and read as chrome belonging to the
                         // whole app rather than verbs belonging to the page.
                         //
-                        // brass = go, hazard = the irreversible. Every verb shows its shortcut. ──
+                        // brass = go, hazard = the irreversible. Every verb shows its shortcut.
+                        // Not on Live: that page is blank until it is built to its design. ──
+                        if eff != Workbench::Live {
                         egui::TopBottomPanel::top("verbs")
                             .frame(
                                 egui::Frame::side_top_panel(&ctx.style())
                                     .inner_margin(egui::Margin::symmetric(13.0, 5.0)),
                             )
                             .show(ctx, |ui| {
-                            // ── CRAFT MODE STRIP: row one of the centre column.
-                            //
-                            // Above the verbs and inside the centre, so switching bench changes
-                            // what the VIEWPORT does while the navigator and inspector stay bound
-                            // to the same subject. Craft is a mode of the centre, never a page you
-                            // navigate away to — which is the property that stopped Skeleton being
-                            // a dead end.
-                            if wb == Workbench::Craft {
-                                ui.horizontal(|ui| {
-                                    for m in CraftMode::ALL {
-                                        let on = craft_mode == m;
-                                        let r = theme::pill(ui, m.label(), on);
-                                        // A mode that is not a real bench yet SAYS so on hover
-                                        // rather than opening something that looks broken.
-                                        let r = match m.unbuilt() {
-                                            Some(why) => r.on_hover_text(why),
-                                            None => r,
-                                        };
-                                        if r.clicked() {
-                                            craft_mode = m;
-                                        }
-                                    }
-                                    // What the bench is acting on. Without this the benches had no
-                                    // idea what they were editing — `Act::Craft` carried no index.
-                                    ui.with_layout(
-                                        egui::Layout::right_to_left(egui::Align::Center),
-                                        |ui| match craft_subject {
-                                            Some(i) => {
-                                                ui.label(
-                                                    egui::RichText::new(format!(
-                                                        "editing contributions[{i}]"
-                                                    ))
-                                                    .monospace()
-                                                    .color(theme::BRASS),
-                                                );
-                                            }
-                                            None => {
-                                                ui.label(
-                                                    egui::RichText::new("free-form — commits start a Shipment").small()
-                                                        .color(theme::FAINT),
-                                                );
-                                            }
-                                        },
-                                    );
-                                });
-                                if let Some(why) = craft_mode.unbuilt() {
-                                    ui.label(
-                                        egui::RichText::new(why).small().color(theme::FAINT),
-                                    );
-                                }
-                                ui.separator();
-                            }
                             ui.horizontal(|ui| {
                                 let has_preview = preview.is_some();
-                                let has_placed = !placed.is_empty();
                                 match eff {
                                     Workbench::Quartermaster => {
                                         qm_acts.extend(crate::quartermaster::verbs(ui, &qm, true));
@@ -4348,19 +3917,16 @@ pub fn run(opts: Options) {
                                         saves_acts.extend(crate::saves::verbs(ui, &saves));
                                     }
                                     // Missions owns its own verb bar: Jump-to-source / Add node /
-                                    // Compile, which is what a blueprint editor needs, not Place /
-                                    // Export / textures.
+                                    // Compile, which is what a blueprint editor needs, not Export /
+                                    // textures.
                                     Workbench::Domain(crate::domain::Domain::Missions) => {
                                         missions_acts.extend(crate::missions::verbs(ui, &missions_panel));
                                     }
                                     // A domain page shares Inspect's verbs — it is Inspect narrowed to
-                                    // a lens, so Place / Export / textures / clip act on the same
-                                    // loaded model. (For a non-model domain there is no preview, so
-                                    // these sit disabled, which reads correctly as "nothing loaded".)
+                                    // a lens, so Export / textures / clip act on the same loaded
+                                    // model. (For a non-model domain there is no preview, so these
+                                    // sit disabled, which reads correctly as "nothing loaded".)
                                     Workbench::Inspect | Workbench::Domain(_) => {
-                                        if theme::primary_button(ui, "+ Place  F6", has_preview).clicked() {
-                                            actions.push(Act::Place);
-                                        }
                                         if ui.add_enabled(has_preview && exporter.is_none(), egui::Button::new("Export  F10")).clicked() {
                                             actions.push(Act::Export);
                                         }
@@ -4371,28 +3937,6 @@ pub fn run(opts: Options) {
                                         if ui.add_enabled(has_preview, egui::Button::new("Next clip  F4")).clicked() {
                                             actions.push(Act::ClipNav(1));
                                         }
-                                    }
-                                    Workbench::Sandbox => {
-                                        let has_sel = sel_placed.is_some_and(|i| i < placed.len());
-                                        if theme::primary_button(ui, "+ Place  F6", has_preview).clicked() {
-                                            actions.push(Act::Place);
-                                        }
-                                        if ui.add_enabled(has_sel, egui::Button::new("Duplicate")).clicked() {
-                                            actions.push(Act::DuplicatePlaced(sel_placed.unwrap()));
-                                        }
-                                        if ui.add_enabled(has_sel, egui::Button::new("Delete")).clicked() {
-                                            actions.push(Act::RemovePlaced(sel_placed.unwrap()));
-                                            sel_placed = None;
-                                        }
-                                        ui.separator();
-                                        if ui.add_enabled(has_placed, egui::Button::new("Merge  F7")).clicked() {
-                                            actions.push(Act::Merge);
-                                        }
-                                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                            if theme::danger_button(ui, "Clear", has_placed).clicked() {
-                                                actions.push(Act::ClearSandbox);
-                                            }
-                                        });
                                     }
                                     Workbench::Mods => {
                                         if ui.button("Load donor ref").clicked() {
@@ -4470,304 +4014,10 @@ pub fn run(opts: Options) {
                                             egui::RichText::new(loc).color(theme::FAINT).small(),
                                         );
                                     }
-                                    // See the navigator's note: `eff` never resolves to Craft.
-                                    Workbench::Craft => {
-                                        unreachable!("Craft resolves to a CraftMode bench")
-                                    }
+                                    Workbench::Live => unreachable!("Live has no verb bar"),
                                 }
                             });
                         });
-
-                        // -- LIVE LUA CONSOLE (Craft ▸ Console): a chunk runs in the running game via
-                        // the bridge worker. A floating window, so it does not fight the central
-                        // viewport's dispatch; the worker thread keeps the socket off this frame loop.
-                        if wb == Workbench::Craft && craft_mode == CraftMode::Console {
-                            if let Some(con) = live_console.as_mut() {
-                                con.poll(|h| index.names.get(&h).cloned());
-                            }
-                            let mut do_connect = false;
-                            let mut send_chunk: Option<String> = None;
-                            egui::Window::new("Live Lua console")
-                                .default_size([560.0, 440.0])
-                                .show(ctx, |ui| match live_console.as_mut() {
-                                    None => {
-                                        ui.label(
-                                            egui::RichText::new(
-                                                "Runs a Lua chunk in the RUNNING game via the lua-bridge ASI \
-                                                 on 127.0.0.1:27050. Start the game with the ASI loaded, then connect.",
-                                            ).small()
-                                            .color(theme::FAINT),
-                                        );
-                                        ui.add_space(8.0);
-                                        if theme::primary_button(ui, "Connect", true).clicked() {
-                                            do_connect = true;
-                                        }
-                                    }
-                                    Some(con) => {
-                                        ui.horizontal(|ui| {
-                                            let (col, txt) = if con.finished {
-                                                (theme::BAD, "\u{25cf} disconnected")
-                                            } else if con.connected {
-                                                (theme::GOOD, "\u{25cf} connected")
-                                            } else {
-                                                (theme::FAINT, "\u{25cf} connecting\u{2026}")
-                                            };
-                                            ui.label(egui::RichText::new(txt).small().color(col));
-                                            if con.finished {
-                                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                                    if ui.button("Reconnect").clicked() {
-                                                        do_connect = true;
-                                                    }
-                                                });
-                                            }
-                                        });
-                                        ui.separator();
-                                        egui::ScrollArea::vertical()
-                                            .stick_to_bottom(true)
-                                            .auto_shrink([false, false])
-                                            .max_height(320.0)
-                                            .show(ui, |ui| {
-                                                for line in &con.history {
-                                                    let (col, txt) = match line {
-                                                        crate::console::Line::Sent(s) => (theme::BRASS, format!("\u{bb} {s}")),
-                                                        crate::console::Line::Result(s) => (theme::TX, s.clone()),
-                                                        crate::console::Line::Error(s) => (theme::BAD, format!("! {s}")),
-                                                        crate::console::Line::Status(s) => (theme::FAINT, format!("\u{b7} {s}")),
-                                                    };
-                                                    ui.add(
-                                                        egui::Label::new(
-                                                            egui::RichText::new(txt).monospace().color(col),
-                                                        )
-                                                        .wrap(),
-                                                    );
-                                                }
-                                            });
-                                        // Destruction: force a destructible's state by NAME (our
-                                        // cracked global vocabulary — the one thing Ess has no verb
-                                        // for), or demolish/repair via the health lever. Generates
-                                        // the Lua and sends it over the same bridge.
-                                        ui.add_space(4.0);
-                                        egui::CollapsingHeader::new(
-                                            egui::RichText::new("Destruction").small().color(theme::HAZARD),
-                                        )
-                                        .id_source("destruct_panel")
-                                        .show(ui, |ui| {
-                                            ui.horizontal(|ui| {
-                                                ui.label(egui::RichText::new("target").small().color(theme::FAINT));
-                                                ui.add(
-                                                    egui::TextEdit::singleline(&mut destruct_target)
-                                                        .hint_text("object name or guid expr")
-                                                        .desired_width(190.0),
-                                                );
-                                            });
-                                            let has_target = !destruct_target.trim().is_empty();
-                                            ui.horizontal(|ui| {
-                                                ui.label(egui::RichText::new("node").small().color(theme::FAINT));
-                                                ui.add(
-                                                    egui::TextEdit::singleline(&mut destruct_node)
-                                                        .hint_text("hardpoint name or 0x… (see Dump machine)")
-                                                        .desired_width(190.0),
-                                                );
-                                            });
-                                            let has_node = !destruct_node.trim().is_empty();
-                                            ui.horizontal(|ui| {
-                                                egui::ComboBox::from_id_source("destruct_state")
-                                                    .selected_text(
-                                                        destruct_states.get(destruct_state).map(|(n, _)| *n).unwrap_or("state"),
-                                                    )
-                                                    .show_ui(ui, |ui| {
-                                                        for (i, (n, _)) in destruct_states.iter().enumerate() {
-                                                            ui.selectable_value(&mut destruct_state, i, *n);
-                                                        }
-                                                    });
-                                                // SetState is node-keyed and is a LOGICAL state change (not a
-                                                // destroy — use Demolish for that), so it needs both a target
-                                                // and a node.
-                                                if ui
-                                                    .add_enabled(has_target && has_node, egui::Button::new("Set state"))
-                                                    .on_hover_text("force this node's logical state (ObjectState.SetState); not a destroy")
-                                                    .clicked()
-                                                {
-                                                    if let Some((name, _)) = destruct_states.get(destruct_state) {
-                                                        if let Ok(lua) = mercs2_destruction::live::set_state_lua(
-                                                            &destruct_target,
-                                                            &destruct_node,
-                                                            name,
-                                                        ) {
-                                                            send_chunk = Some(lua);
-                                                        }
-                                                    }
-                                                }
-                                            });
-                                            ui.horizontal(|ui| {
-                                                if theme::danger_button(ui, "Demolish", has_target).clicked() {
-                                                    send_chunk = Some(mercs2_destruction::live::demolish_lua(&destruct_target));
-                                                }
-                                                if ui.add_enabled(has_target, egui::Button::new("Repair")).clicked() {
-                                                    send_chunk = Some(mercs2_destruction::live::repair_lua(&destruct_target));
-                                                }
-                                                if ui
-                                                    .button("Watch")
-                                                    .on_hover_text("install a reporter that logs every destruction transition, by state name")
-                                                    .clicked()
-                                                {
-                                                    send_chunk = Some(mercs2_destruction::live::watch_lua());
-                                                }
-                                            });
-                                            // The READS. There is no Lua getter for an object's destruction
-                                            // state, so inspecting is a machine DUMP (nodes + current states)
-                                            // to the log — which is also where the node hashes for Set state
-                                            // come from. Health does have real getters (GetHealth).
-                                            ui.horizontal(|ui| {
-                                                if ui
-                                                    .add_enabled(has_target, egui::Button::new("Dump machine"))
-                                                    .on_hover_text("log every node + its current state (ObjectState.PrintStateMachine) — the node source for Set state")
-                                                    .clicked()
-                                                {
-                                                    send_chunk = Some(mercs2_destruction::live::print_machine_lua(&destruct_target));
-                                                }
-                                                if ui
-                                                    .add_enabled(has_target, egui::Button::new("Read health"))
-                                                    .on_hover_text("print the target's current / max health")
-                                                    .clicked()
-                                                {
-                                                    send_chunk = Some(mercs2_destruction::live::read_health_lua(&destruct_target));
-                                                }
-                                            });
-                                            ui.label(
-                                                egui::RichText::new(
-                                                    "Set state is node-keyed (logical, not a destroy); Demolish/Repair use the health lever. Dump machine lists a target's nodes.",
-                                                ).small()
-                                                .color(theme::FAINT),
-                                            );
-                                        });
-
-                                        // API reference: type to search Ess wrappers + engine natives
-                                        // (bundled from Wally's library). Click an entry to insert it.
-                                        if !ess_api.is_empty() {
-                                            ui.add_space(4.0);
-                                            ui.horizontal(|ui| {
-                                                ui.label(theme::disp_text("API", theme::style_eyebrow(), theme::FAINT));
-                                                ui.add(
-                                                    egui::TextEdit::singleline(&mut console_search)
-                                                        .hint_text("search Ess / natives\u{2026}")
-                                                        .desired_width(200.0),
-                                                );
-                                                if !console_search.is_empty() && ui.small_button("\u{2715}").clicked() {
-                                                    console_search.clear();
-                                                }
-                                            });
-                                            let hits = ess_api.search(&console_search, 8);
-                                            if !hits.is_empty() {
-                                                egui::Frame::none()
-                                                    .fill(theme::G0)
-                                                    .stroke(egui::Stroke::new(1.0, theme::LINE))
-                                                    .rounding(4.0)
-                                                    .inner_margin(egui::Margin::symmetric(6.0, 4.0))
-                                                    .show(ui, |ui| {
-                                                        for e in hits {
-                                                            let clicked = ui.horizontal(|ui| {
-                                                                // A small tier tag: easy=green (guardrailed), core=brass, raw=hazard.
-                                                                if !e.tier.is_empty() {
-                                                                    let tc = match e.tier.as_str() {
-                                                                        "easy" => theme::GOOD,
-                                                                        "raw" => theme::HAZARD,
-                                                                        _ => theme::BRASS_DK,
-                                                                    };
-                                                                    ui.label(egui::RichText::new(&e.tier[..1].to_uppercase()).monospace().color(tc));
-                                                                } else {
-                                                                    ui.label(egui::RichText::new("n").monospace().color(theme::FAINT));
-                                                                }
-                                                                let col = if e.ess { theme::BRASS } else { theme::DIM };
-                                                                let r = ui.add(
-                                                                    egui::Label::new(
-                                                                        egui::RichText::new(e.label()).monospace().color(col),
-                                                                    )
-                                                                    .sense(egui::Sense::click()),
-                                                                );
-                                                                // Hover: the friendly node title (if any) + the description; else a bare hint.
-                                                                let hover = if !e.doc.is_empty() {
-                                                                    if e.title.is_empty() { e.doc.clone() } else { format!("{}\n\n{}", e.title, e.doc) }
-                                                                } else if e.ess {
-                                                                    format!("Ess {} \u{2014} click to insert", e.tier)
-                                                                } else {
-                                                                    "engine native \u{2014} click to insert".into()
-                                                                };
-                                                                r.on_hover_text(hover).clicked()
-                                                            }).inner;
-                                                            if clicked {
-                                                                if !con.input.is_empty() && !con.input.ends_with(char::is_whitespace) {
-                                                                    con.input.push(' ');
-                                                                }
-                                                                con.input.push_str(&e.name);
-                                                            }
-                                                        }
-                                                    });
-                                            }
-                                            // The typed half: engine ECS component classes. What a
-                                            // live entity is MADE of, so a modder writing a read knows
-                                            // the vocabulary (RuntimeHealth, StateMachine, …).
-                                            let ecs_hits = ecs_reg.search(&console_search, 6);
-                                            if !ecs_hits.is_empty() {
-                                                ui.add_space(2.0);
-                                                theme::eyebrow(ui, "ECS components");
-                                                egui::Frame::none()
-                                                    .fill(theme::G0)
-                                                    .stroke(egui::Stroke::new(1.0, theme::LINE))
-                                                    .rounding(4.0)
-                                                    .inner_margin(egui::Margin::symmetric(6.0, 4.0))
-                                                    .show(ui, |ui| {
-                                                        for c in ecs_hits {
-                                                            let clicked = ui.horizontal(|ui| {
-                                                                ui.label(egui::RichText::new("C").monospace().color(theme::BRASS_DK));
-                                                                let r = ui.add(
-                                                                    egui::Label::new(
-                                                                        egui::RichText::new(&c.name).monospace().color(theme::DIM),
-                                                                    )
-                                                                    .sense(egui::Sense::click()),
-                                                                );
-                                                                r.on_hover_text(format!(
-                                                                    "ECS component class \u{2014} family {}\n(reflection registry; a generic per-component read waits on Ess)",
-                                                                    c.family
-                                                                )).clicked()
-                                                            }).inner;
-                                                            if clicked {
-                                                                if !con.input.is_empty() && !con.input.ends_with(char::is_whitespace) {
-                                                                    con.input.push(' ');
-                                                                }
-                                                                con.input.push_str(&c.name);
-                                                            }
-                                                        }
-                                                    });
-                                            }
-                                        }
-                                        ui.add_space(4.0);
-                                        let resp = ui.add(
-                                            egui::TextEdit::multiline(&mut con.input)
-                                                .desired_rows(2)
-                                                .font(egui::TextStyle::Monospace)
-                                                .hint_text("Lua \u{2014} Ctrl+Enter to run")
-                                                .desired_width(f32::INFINITY),
-                                        );
-                                        let ctrl_enter = resp.has_focus()
-                                            && ui.input(|i| i.modifiers.command && i.key_pressed(egui::Key::Enter));
-                                        if theme::primary_button(ui, "Run  Ctrl+Enter", !con.input.trim().is_empty()).clicked()
-                                            || ctrl_enter
-                                        {
-                                            send_chunk = Some(std::mem::take(&mut con.input));
-                                        }
-                                    }
-                                });
-                            if do_connect {
-                                live_console = Some(crate::console::LiveConsole::spawn(
-                                    mercs2_bridge::DEFAULT_ADDR.to_string(),
-                                ));
-                            }
-                            if let Some(chunk) = send_chunk {
-                                if let Some(con) = live_console.as_mut() {
-                                    con.send(chunk);
-                                }
-                            }
                         }
 
                         // -- SETTINGS page: the navigator lists the sections, the CENTRE holds the selected one.
@@ -4776,6 +4026,9 @@ pub fn run(opts: Options) {
                         // inspector registered and EMPTY -- two blank panels on the one page with nothing to put
                         // in them. Settings is now shaped like every other page, and the inspector is simply not
                         // registered here (see its `wb != Settings` guard) rather than being drawn blank.
+                        if eff == Workbench::Live {
+                            crate::live::center(ctx);
+                        }
                         if wb == Workbench::Settings {
                             egui::CentralPanel::default()
                                 .frame(
@@ -5112,80 +4365,6 @@ pub fn run(opts: Options) {
                         // than as `!= Quartermaster`, which silently stopped being the whole answer
                         // the moment Settings also took the centre.
                         let vp = ctx.available_rect();
-                        // ── VIEWPORT CONTEXT MENU (Scene).
-                        //
-                        // The navigator rows have had one for a long time; the 3D itself had none,
-                        // so every scene verb needed a round trip to the list. Right-click acts on
-                        // the SELECTED instance — a real hit test needs a picking pass the renderer
-                        // does not have, and inventing one from the bounding sphere would mis-pick
-                        // silently, which is worse than asking for a selection.
-                        if eff == Workbench::Sandbox {
-                            let bg = ui_ctx_interact(ctx, vp);
-                            let sel = sel_placed.filter(|&i| i < placed.len());
-                            bg.context_menu(|ui| {
-                                match sel {
-                                    Some(i) => {
-                                        ui.label(theme::disp_text(
-                                            placed[i].label.to_uppercase(),
-                                            theme::style_eyebrow(),
-                                            theme::BRASS,
-                                        ));
-                                        ui.separator();
-                                        if ui.button("Snap to camera target").clicked() {
-                                            actions.push(Act::SnapPlaced(i));
-                                            ui.close_menu();
-                                        }
-                                        if ui.button("Duplicate").clicked() {
-                                            actions.push(Act::DuplicatePlaced(i));
-                                            ui.close_menu();
-                                        }
-                                        if ui.button("Remove").clicked() {
-                                            actions.push(Act::RemovePlaced(i));
-                                            ui.close_menu();
-                                        }
-                                        ui.separator();
-                                    }
-                                    None => {
-                                        ui.label(
-                                            egui::RichText::new("Nothing selected — pick an object at left").small()
-                                                .color(theme::FAINT),
-                                        );
-                                        ui.separator();
-                                    }
-                                }
-                                if ui
-                                    .add_enabled(preview.is_some(), egui::Button::new("Place preview  F6"))
-                                    .clicked()
-                                {
-                                    actions.push(Act::Place);
-                                    ui.close_menu();
-                                }
-                                if ui
-                                    .add_enabled(!placed.is_empty(), egui::Button::new("Merge all  F7"))
-                                    .clicked()
-                                {
-                                    actions.push(Act::Merge);
-                                    ui.close_menu();
-                                }
-                                ui.separator();
-                                if ui.button("Save arrangement  F5").clicked() {
-                                    actions.push(Act::SaveScene);
-                                    ui.close_menu();
-                                }
-                                if ui.button("Load arrangement  F9").clicked() {
-                                    actions.push(Act::LoadScene);
-                                    ui.close_menu();
-                                }
-                                ui.separator();
-                                if ui
-                                    .add_enabled(!placed.is_empty(), egui::Button::new("Clear scene  F8"))
-                                    .clicked()
-                                {
-                                    actions.push(Act::ClearSandbox);
-                                    ui.close_menu();
-                                }
-                            });
-                        }
                         if eff.has_viewport() && wb != Workbench::Settings {
                         egui::Area::new(egui::Id::new("vp_hud"))
                             .fixed_pos(vp.left_top() + egui::vec2(14.0, 12.0))
@@ -5193,12 +4372,7 @@ pub fn run(opts: Options) {
                             .show(ctx, |ui| {
                                 ui.horizontal(|ui| {
                                     theme::chip(ui, "Orbit", true, Some(theme::BRASS));
-                                    if eff == Workbench::Sandbox {
-                                        theme::chip(ui, &format!("{} objects", placed.len()), false, None);
-                                        if let Some(i) = sel_placed.filter(|&i| i < placed.len()) {
-                                            theme::chip(ui, &format!("n{i} selected"), true, Some(theme::BRASS));
-                                        }
-                                    } else if let Some(p) = &preview {
+                                    if let Some(p) = &preview {
                                         // Clip position — name (or bind pose) + n/total + play state.
                                         let n = p.clip_catalog.len();
                                         let clip = if n == 0 {
@@ -5418,11 +4592,7 @@ pub fn run(opts: Options) {
                         // one-way, index-less page flip — the bench never learned its subject and
                         // there was no route back, which is how a "dissolved" page became a trap.
                         if let crate::quartermaster::Act::Craft(c, at) = act {
-                            let mode = match c {
-                                crate::quartermaster::Craft::Rig => CraftMode::Rig,
-                                crate::quartermaster::Craft::Conform => CraftMode::Conform,
-                            };
-                            craft_mode = mode;
+                            let bench = bench_page(c);
                             craft_subject = Some(at);
 
                             // Load the contribution's OWN model and donor into the bench, so it
@@ -5435,22 +4605,22 @@ pub fn run(opts: Options) {
                                 Some(subject) if subject.model.is_file() => {
                                     // The import becomes the pedestal (Conform) / retarget source
                                     // (Rig). `import_file` flips the workbench to Skeleton for a
-                                    // rigged model; we re-assert Craft below, after the load.
+                                    // rigged model; we re-assert the bench below, after the load.
                                     let s = import_file(
                                         &subject.model, &mut w, &mut scene, &mut world,
                                         &mut imported, &mut preview, &mut cam_target, &mut cam_dist,
                                         &mut retarget, &retarget_target, &mut retarget_src_path,
-                                        &mut wb, &mut sel_bone, &placed, &index, &anim_sel,
+                                        &mut wb, &mut sel_bone, donor_ref.map(|(h, _)| h), &index, &anim_sel,
                                         &lua_corpus,
                                     );
                                     // The donor is the retarget TARGET (Rig) or the conform HOST
                                     // (Conform), resolved from the manifest name in `craft_subject`.
-                                    let donor_note = match (&subject.donor, mode) {
-                                        (Some((dh, dl)), CraftMode::Rig) => {
+                                    let donor_note = match (&subject.donor, c) {
+                                        (Some((dh, dl)), crate::quartermaster::Craft::Rig) => {
                                             actions.push(Act::RetargetSetTarget(*dh, dl.clone()));
                                             format!("donor {dl}")
                                         }
-                                        (Some((dh, dl)), CraftMode::Conform) => {
+                                        (Some((dh, dl)), crate::quartermaster::Craft::Conform) => {
                                             mod_donor = Some((*dh, dl.clone()));
                                             format!("donor {dl}")
                                         }
@@ -5465,26 +4635,26 @@ pub fn run(opts: Options) {
                                         .map(|f| format!(" · saved map from {f} (re-derived)"))
                                         .unwrap_or_default();
                                     status = format!(
-                                        "{} bench — contributions[{at}]: {s} · {donor_note}{map_note}",
-                                        mode.label()
+                                        "{} — contributions[{at}]: {s} · {donor_note}{map_note}",
+                                        bench.verb()
                                     );
                                 }
                                 Some(subject) => {
                                     status = format!(
-                                        "{} bench — contributions[{at}]: source model missing at {}",
-                                        mode.label(),
+                                        "{} — contributions[{at}]: source model missing at {}",
+                                        bench.verb(),
                                         subject.model.display()
                                     );
                                 }
                                 None => {
                                     status = format!(
-                                        "{} bench — contributions[{at}] carries no model to load",
-                                        mode.label()
+                                        "{} — contributions[{at}] carries no model to load",
+                                        bench.verb()
                                     );
                                 }
                             }
-                            // A CRAFT bench regardless of what `import_file` set the workbench to.
-                            wb = Workbench::Craft;
+                            // The bench asked for, regardless of what `import_file` set the workbench to.
+                            wb = bench;
                             continue;
                         }
                         crate::quartermaster::apply(
@@ -5619,7 +4789,7 @@ pub fn run(opts: Options) {
                                     Ok(md) => {
                                         let p = build_preview(
                                             &mut w, &mut scene, &mut world, hash, label.clone(), md,
-                                            &preview, &placed, &index, &anim_sel, &lua_corpus,
+                                            &preview, donor_ref.map(|(h, _)| h), &index, &anim_sel, &lua_corpus,
                                         );
                                         cam_target = p.center;
                                         cam_dist = (p.radius * 2.4).clamp(1.5, 15000.0);
@@ -5734,7 +4904,7 @@ pub fn run(opts: Options) {
                                         scene.unload_model(phash);
                                         let mut p = build_preview(
                                             &mut w, &mut scene, &mut world, phash, label, md, &preview,
-                                            &placed, &index, &anim_sel, &lua_corpus,
+                                            donor_ref.map(|(h, _)| h), &index, &anim_sel, &lua_corpus,
                                         );
                                         // The mesh is now in the TARGET skeleton's bind space, so the
                                         // target's clips drive it directly — clear any cross-retarget.
@@ -5948,7 +5118,7 @@ pub fn run(opts: Options) {
                                             Ok(md) => {
                                                 let p = build_preview(
                                                     &mut w, &mut scene, &mut world, row.hash,
-                                                    row.label(), md, &preview, &placed, &index,
+                                                    row.label(), md, &preview, donor_ref.map(|(h, _)| h), &index,
                                                     &anim_sel, &lua_corpus,
                                                 );
                                                 cam_target = p.center;
@@ -6114,70 +5284,6 @@ pub fn run(opts: Options) {
                                     }
                                 }
                             }
-                            Act::Place => {
-                                if let Some(p) = &preview {
-                                    let pos = cam_target;
-                                    let e = world.spawn((
-                                        Transform {
-                                            translation: pos,
-                                            rotation: Quat::IDENTITY,
-                                            scale: Vec3::ONE,
-                                        },
-                                        ModelRef { model: p.hash },
-                                        AnimState::default(),
-                                        SkinPalette { mats: p.bind.clone() },
-                                    ));
-                                    // Inherit the preview's live render state (its LOD rung and the
-                                    // node states you picked), not a fresh default.
-                                    let rs = scene
-                                        .entity_render_state(p.entity)
-                                        .cloned()
-                                        .unwrap_or_else(|| default_render_state(&mut w, p.hash));
-                                    scene.set_entity_render_state(e, rs);
-                                    placed.push(Placed {
-                                        hash: p.hash,
-                                        label: p.label.clone(),
-                                        entity: e,
-                                        pos,
-                                        yaw: 0.0,
-                                        scale: 1.0,
-                                    });
-                                    sel_placed = Some(placed.len() - 1);
-                                    status =
-                                        format!("placed {} ({} in sandbox)", p.label, placed.len());
-                                }
-                            }
-                            Act::Merge => {
-                                if placed.is_empty() {
-                                    status = "merge: place models first".into();
-                                    continue;
-                                }
-                                match merge_placed(&mut w, &imported, &placed) {
-                                    Ok(md) => {
-                                        merge_seq += 1;
-                                        let label = format!("merged_{merge_seq}");
-                                        let hash = mercs2_formats::hash::pandemic_hash_m2(&label);
-                                        imported.insert(hash, md.clone());
-                                        scene.unload_model(hash);
-                                        let p = build_preview(
-                                            &mut w, &mut scene, &mut world, hash, label, md,
-                                            &preview, &placed, &index, &anim_sel, &lua_corpus,
-                                        );
-                                        cam_target = p.center;
-                                        cam_dist = (p.radius * 2.4).clamp(0.5, 15000.0);
-                                        status = format!(
-                                            "merged {} instance(s) -> {} ({} verts, {} groups)",
-                                            placed.len(),
-                                            p.label,
-                                            p.verts,
-                                            p.draws.len()
-                                        );
-                                        sel_bone = None;
-                                        preview = Some(p);
-                                    }
-                                    Err(e) => status = format!("MERGE FAILED: {e}"),
-                                }
-                            }
                             Act::Export => {
                                 if let Some(p) = &preview {
                                     if imported.contains_key(&p.hash) {
@@ -6232,26 +5338,36 @@ pub fn run(opts: Options) {
                                     Err(e) => status = format!("ADD TO SHIPMENT FAILED: {e}"),
                                 }
                             }
-                            Act::CraftOn(mode, hash, label) => {
-                                wb = Workbench::Craft;
-                                craft_mode = mode;
-                                // Reached from the Library rather than from a contribution, so
-                                // there is nothing to write back to yet. A commit will scaffold.
-                                craft_subject = None;
-                                match mode {
-                                    // The rig bench needs a TARGET skeleton; the asset is it.
-                                    CraftMode::Rig => {
-                                        actions.push(Act::RetargetSetTarget(hash, label.clone()));
-                                        status = format!("Rig bench — target {label}");
+                            Act::Bench(bench, hash, label) => {
+                                // The contribution the bench writes, with this asset as its donor,
+                                // so the bench opens on a subject a commit lands back on.
+                                let kind = match bench {
+                                    crate::quartermaster::Craft::Rig => "add_outfit",
+                                    crate::quartermaster::Craft::Conform => "add_model",
+                                };
+                                let out = (|| -> Result<usize, String> {
+                                    qm.ensure_shipment(qm_names.as_ref())?;
+                                    let n = qm.contribution_count() + 1;
+                                    let c = crate::quartermaster::seeded(kind, &label, n)
+                                        .ok_or_else(|| format!("no stub for `{kind}`"))?;
+                                    qm.upsert_contribution(qm_names.as_ref(), None, c)
+                                })();
+                                match out {
+                                    Ok(at) => {
+                                        craft_subject = Some(at);
+                                        wb = bench_page(bench);
+                                        match bench {
+                                            // The rig bench needs a TARGET skeleton; the asset is it.
+                                            crate::quartermaster::Craft::Rig => {
+                                                actions.push(Act::RetargetSetTarget(hash, label.clone()));
+                                            }
+                                            crate::quartermaster::Craft::Conform => {
+                                                actions.push(Act::ModDonor(hash, label.clone()));
+                                            }
+                                        }
+                                        status = format!("{} — contributions[{at}] {kind} on donor {label}", wb.verb());
                                     }
-                                    CraftMode::Conform => {
-                                        actions.push(Act::ModDonor(hash, label.clone()));
-                                        status = format!("Conform bench — donor {label}");
-                                    }
-                                    _ => {
-                                        actions.push(Act::LoadModelHash(hash, label.clone()));
-                                        status = format!("{} bench — {label}", mode.label());
-                                    }
+                                    Err(e) => status = format!("{} FAILED: {e}", bench_page(bench).verb().to_uppercase()),
                                 }
                             }
                             Act::LoadTexture(hash, label) => {
@@ -6270,70 +5386,6 @@ pub fn run(opts: Options) {
                                     Ok(dir) => format!("exported {label} -> {dir}"),
                                     Err(e) => format!("EXPORT FAILED: {e}"),
                                 };
-                            }
-                            Act::PlaceHash(hash, label) => {
-                                if !scene.has_model(hash) {
-                                    if let Err(e) = load_gpu_only(&mut w, &mut scene, hash) {
-                                        status = format!("PLACE FAILED: {e}");
-                                        continue;
-                                    }
-                                }
-                                let pos = cam_target;
-                                let bones = scene.model_bone_count(hash).max(1);
-                                let e = world.spawn((
-                                    Transform {
-                                        translation: pos,
-                                        rotation: Quat::IDENTITY,
-                                        scale: Vec3::ONE,
-                                    },
-                                    ModelRef { model: hash },
-                                    AnimState::default(),
-                                    SkinPalette { mats: vec![IDENTITY; bones] },
-                                ));
-                                let rs = default_render_state(&mut w, hash);
-                                scene.set_entity_render_state(e, rs);
-                                placed.push(Placed { hash, label: label.clone(), entity: e, pos, yaw: 0.0, scale: 1.0 });
-                                sel_placed = Some(placed.len() - 1);
-                                status = format!("placed {label} ({} in sandbox)", placed.len());
-                            }
-                            Act::DuplicatePlaced(i) => {
-                                if let Some(src) = placed.get(i) {
-                                    let pos = src.pos + Vec3::new(0.5, 0.0, 0.5);
-                                    let (hash, label, yaw, scale, src_entity) =
-                                        (src.hash, src.label.clone(), src.yaw, src.scale, src.entity);
-                                    let bones = scene.model_bone_count(hash).max(1);
-                                    let e = world.spawn((
-                                        Transform {
-                                            translation: pos,
-                                            rotation: Quat::from_rotation_y(yaw),
-                                            scale: Vec3::splat(scale),
-                                        },
-                                        ModelRef { model: hash },
-                                        AnimState::default(),
-                                        SkinPalette { mats: vec![IDENTITY; bones] },
-                                    ));
-                                    // Per-entity state: the duplicate can now diverge from its source.
-                                    let rs = scene
-                                        .entity_render_state(src_entity)
-                                        .cloned()
-                                        .unwrap_or_else(|| default_render_state(&mut w, hash));
-                                    scene.set_entity_render_state(e, rs);
-                                    placed.push(Placed { hash, label, entity: e, pos, yaw, scale });
-                                    sel_placed = Some(placed.len() - 1);
-                                }
-                            }
-                            Act::SnapPlaced(i) => {
-                                if let Some(pl) = placed.get_mut(i) {
-                                    pl.pos = cam_target;
-                                    let _ = world.insert_one(
-                                        pl.entity,
-                                        Transform {
-                                            translation: pl.pos,
-                                            rotation: Quat::from_rotation_y(pl.yaw),
-                                            scale: Vec3::splat(pl.scale),
-                                        },
-                                    );
-                                }
                             }
                             Act::IsolateGroup(gi) => {
                                 if let Some(p) = &mut preview {
@@ -6479,7 +5531,7 @@ pub fn run(opts: Options) {
                                             &mut preview, &mut cam_target, &mut cam_dist,
                                             &mut retarget, &retarget_target, &mut retarget_src_path,
                                             &mut wb, &mut sel_bone,
-                                            &placed, &index, &anim_sel, &lua_corpus,
+                                            donor_ref.map(|(h, _)| h), &index, &anim_sel, &lua_corpus,
                                         );
                                     }
                                 }
@@ -6497,115 +5549,6 @@ pub fn run(opts: Options) {
                                 sel_bone = None;
                                 show_target_picker = false;
                                 status = "cleared import — drop a .glb or use Import to start over".into();
-                            }
-                            Act::SaveScene => {
-                                let f = SceneFile {
-                                    items: placed
-                                        .iter()
-                                        .map(|p| SceneItem {
-                                            hash: p.hash,
-                                            name: index.names.get(&p.hash).cloned(),
-                                            pos: p.pos.into(),
-                                            yaw: p.yaw,
-                                            scale: p.scale,
-                                        })
-                                        .collect(),
-                                };
-                                status = match serde_json::to_string_pretty(&f)
-                                    .map_err(|e| e.to_string())
-                                    .and_then(|s| {
-                                        std::fs::write(SCENE_FILE, s).map_err(|e| e.to_string())
-                                    }) {
-                                    Ok(()) => {
-                                        format!("saved {} item(s) -> {SCENE_FILE}", placed.len())
-                                    }
-                                    Err(e) => format!("SAVE FAILED: {e}"),
-                                };
-                            }
-                            Act::LoadScene => {
-                                match std::fs::read_to_string(SCENE_FILE)
-                                    .map_err(|e| e.to_string())
-                                    .and_then(|s| {
-                                        serde_json::from_str::<SceneFile>(&s)
-                                            .map_err(|e| e.to_string())
-                                    }) {
-                                    Ok(f) => {
-                                        for pl in placed.drain(..) {
-                                            world.despawn(pl.entity).ok();
-                                            scene.forget_entity(pl.entity);
-                                        }
-                                        let mut ok = 0usize;
-                                        for it in f.items {
-                                            let label = it
-                                                .name
-                                                .clone()
-                                                .unwrap_or_else(|| format!("0x{:08X}", it.hash));
-                                            if !scene.has_model(it.hash) {
-                                                if let Err(e) =
-                                                    load_gpu_only(&mut w, &mut scene, it.hash)
-                                                {
-                                                    eprintln!("[load] {label}: {e}");
-                                                    continue;
-                                                }
-                                            }
-                                            let pos = Vec3::from(it.pos);
-                                            let bones = scene.model_bone_count(it.hash).max(1);
-                                            let e = world.spawn((
-                                                Transform {
-                                                    translation: pos,
-                                                    rotation: Quat::from_rotation_y(it.yaw),
-                                                    scale: Vec3::splat(it.scale),
-                                                },
-                                                ModelRef { model: it.hash },
-                                                AnimState::default(),
-                                                SkinPalette { mats: vec![IDENTITY; bones] },
-                                            ));
-                                            let rs = default_render_state(&mut w, it.hash);
-                                            scene.set_entity_render_state(e, rs);
-                                            placed.push(Placed {
-                                                hash: it.hash,
-                                                label,
-                                                entity: e,
-                                                pos,
-                                                yaw: it.yaw,
-                                                scale: it.scale,
-                                            });
-                                            ok += 1;
-                                        }
-                                        sel_placed = (!placed.is_empty()).then_some(0);
-                                        status = format!("loaded {ok} item(s) from {SCENE_FILE}");
-                                    }
-                                    Err(e) => status = format!("LOAD FAILED: {e}"),
-                                }
-                            }
-                            Act::ClearSandbox => {
-                                for pl in placed.drain(..) {
-                                    world.despawn(pl.entity).ok();
-                                    scene.forget_entity(pl.entity);
-                                }
-                                sel_placed = None;
-                                status = "sandbox cleared".into();
-                            }
-                            Act::RemovePlaced(i) => {
-                                if i < placed.len() {
-                                    let pl = placed.remove(i);
-                                    world.despawn(pl.entity).ok();
-                                    scene.forget_entity(pl.entity);
-                                    sel_placed =
-                                        (!placed.is_empty()).then(|| i.min(placed.len() - 1));
-                                }
-                            }
-                            Act::SyncPlaced(i) => {
-                                if let Some(pl) = placed.get(i) {
-                                    let _ = world.insert_one(
-                                        pl.entity,
-                                        Transform {
-                                            translation: pl.pos,
-                                            rotation: Quat::from_rotation_y(pl.yaw),
-                                            scale: Vec3::splat(pl.scale),
-                                        },
-                                    );
-                                }
                             }
                             Act::TexOfPreview => {
                                 if let Some(p) = &preview {
@@ -6760,7 +5703,7 @@ pub fn run(opts: Options) {
                                         }
                                     }
                                     index.add_kit_templates(&kit_templates);
-                                    filtered = refilter(&index, kind, &filter);
+                                    filtered = refilter(&index, kind, &filter, lens);
                                     inventory_dirty = true;
                                     sel = sel.min(filtered.len().saturating_sub(1));
                                 }
@@ -6823,15 +5766,15 @@ pub fn run(opts: Options) {
                                 ));
                                 let rs = default_render_state(&mut w, dh);
                                 scene.set_entity_render_state(e, rs);
-                                placed.push(Placed {
-                                    hash: dh,
-                                    label: format!("ref:{dl}"),
-                                    entity: e,
-                                    pos: Vec3::ZERO,
-                                    yaw: 0.0,
-                                    scale: 1.0,
-                                });
-                                status = format!("donor reference placed at origin: {dl}");
+                                // One reference at a time: the new donor replaces the last.
+                                if let Some((old, oe)) = donor_ref.replace((dh, e)) {
+                                    world.despawn(oe).ok();
+                                    scene.forget_entity(oe);
+                                    if old != dh && preview.as_ref().map(|p| p.hash) != Some(old) {
+                                        scene.unload_model(old);
+                                    }
+                                }
+                                status = format!("donor reference at origin: {dl}");
                             }
                             Act::TexClose => {
                                 tex_view = None;
@@ -7063,20 +6006,6 @@ pub fn run(opts: Options) {
                     // highlighted bone reads through it; fully opaque otherwise.
                     scene.set_model_alpha(if hover_skel.is_some() || hovered_bone.is_some() { 0.4 } else { 1.0 });
 
-                    // The Inspect preview is a persistent world entity — HIDE it in the Sandbox
-                    // (drop its ModelRef so the draw query skips it) so only PLACED objects render
-                    // there; otherwise it sits in the scene un-movable. Mods/Skeleton keep the
-                    // preview (it is their working model), so restore its ModelRef when we leave.
-                    if let Some(p) = &preview {
-                        let show = wb != Workbench::Sandbox;
-                        let has_ref = world.get::<&ModelRef>(p.entity).is_ok();
-                        if show && !has_ref {
-                            let _ = world.insert_one(p.entity, ModelRef { model: p.hash });
-                        } else if !show && has_ref {
-                            let _ = world.remove_one::<ModelRef>(p.entity);
-                        }
-                    }
-
                     // ── Session log: record `status` whenever it CHANGED this frame. Runs after the
                     // action processor, so a click and the outcome it produced land on one line.
                     if status != last_status {
@@ -7095,8 +6024,7 @@ pub fn run(opts: Options) {
                                        s: [u32; 2]| {
                         gui.paint(d, q, e, v, s);
                     };
-                    let show_preview = preview.is_some() && wb != Workbench::Sandbox;
-                    let r = if tex_view.is_some() || (!show_preview && placed.is_empty()) {
+                    let r = if tex_view.is_some() || (preview.is_none() && donor_ref.is_none()) {
                         scene.render_menu_with(t, Some(&mut overlay))
                     } else {
                         let fwd = dir_from(cam_yaw, cam_pitch);
@@ -7360,7 +6288,7 @@ fn bind_tex_plate(w: &mut WadStack, scene: &mut Scene, tv: &mut TexView) {
     }
 }
 
-/// Everything `load_preview` and the sandbox loader share: container → indexed geometry →
+/// Everything `load_preview` and the donor-reference loader share: container → indexed geometry →
 /// textures → skin (native metres) → clips.
 #[derive(Clone)]
 pub(crate) struct ModelData {
@@ -8058,7 +6986,7 @@ fn conform_autofit(donor: &ModelData, import: &ModelData) -> (f32, [f32; 3]) {
     (s, t)
 }
 
-/// GPU-upload a model by hash (used by the sandbox scene loader for models not previewed yet).
+/// GPU-upload a model by hash (used by the Fit bench's donor reference for a model not previewed yet).
 fn load_gpu_only(w: &mut WadStack, scene: &mut Scene, hash: u32) -> Result<(), String> {
     let md = load_model_data(w, hash)?;
     scene.load_model(hash, &md.verts, &md.indices, &md.draws, &md.textures, &md.skin);
@@ -8066,8 +6994,8 @@ fn load_gpu_only(w: &mut WadStack, scene: &mut Scene, hash: u32) -> Result<(), S
 }
 
 /// Put `md` on the preview pedestal as `hash`: upload to the GPU, spawn its entity at the
-/// origin, tear down the previous preview (keeping its model resident if the sandbox still uses
-/// it). Works for WAD models, drag-drop imports, and merge results alike.
+/// origin, tear down the previous preview (keeping its model resident if the donor reference still
+/// draws it). Works for WAD models and drag-drop imports alike.
 #[allow(clippy::too_many_arguments)]
 /// Render a bone hierarchy (names + parent indices, `-1` = root) as a collapsible tree. Returns the
 /// index of the bone whose row is hovered this frame (for the viewer highlight), if any. `id` keeps
@@ -8168,7 +7096,7 @@ fn import_file(
     retarget_src_path: &mut Option<std::path::PathBuf>,
     wb: &mut Workbench,
     sel_bone: &mut Option<usize>,
-    placed: &[Placed],
+    keep: Option<u32>,
     index: &AssetIndex,
     anim_sel: &Option<AnimSelector>,
     lua_corpus: &[(String, String, String)],
@@ -8189,7 +7117,7 @@ fn import_file(
     imported.insert(hash, md.clone());
     scene.unload_model(hash); // re-import of the same file replaces it
     let p = build_preview(
-        w, scene, world, hash, label, md, &*preview, placed, index, anim_sel, lua_corpus,
+        w, scene, world, hash, label, md, &*preview, keep, index, anim_sel, lua_corpus,
     );
     *cam_target = p.center;
     *cam_dist = (p.radius * 2.4).clamp(0.5, 15000.0);
@@ -8232,17 +7160,18 @@ fn build_preview(
     label: String,
     md: ModelData,
     old: &Option<Preview>,
-    placed: &[Placed],
+    keep: Option<u32>,
     index: &AssetIndex,
     anim_sel: &Option<AnimSelector>,
     lua_corpus: &[(String, String, String)],
 ) -> Preview {
 
     // Tear down the previous preview AFTER the new load succeeded (a failed load keeps the old one).
+    // Its model stays loaded when `keep` (the Fit bench's donor reference) still draws it.
     if let Some(p) = old {
         world.despawn(p.entity).ok();
         scene.forget_entity(p.entity);
-        if p.hash != hash && !placed.iter().any(|pl| pl.hash == p.hash) {
+        if p.hash != hash && keep != Some(p.hash) {
             scene.unload_model(p.hash);
         }
     }
@@ -8429,98 +7358,10 @@ fn build_preview(
     p
 }
 
-/// Bake every placed sandbox instance into ONE static model: vertices transformed by each
-/// instance's Transform, index ranges concatenated, draw groups renumbered, texture maps
-/// unioned. Skinned sources are baked at BIND POSE and re-weighted to bone 0 (identity), so the
-/// merged model renders correctly with no rig.
-fn merge_placed(
-    w: &mut WadStack,
-    imported: &HashMap<u32, ModelData>,
-    placed: &[Placed],
-) -> Result<ModelData, String> {
-    let mut verts: Vec<mesh::Vertex> = Vec::new();
-    let mut indices: Vec<u32> = Vec::new();
-    let mut draws: Vec<DrawGroup> = Vec::new();
-    let mut textures: TexMap = HashMap::new();
-    for pl in placed {
-        let md = source_model_data(w, imported, pl.hash)
-            .map_err(|e| format!("{}: {e}", pl.label))?;
-        let m = Mat4::from_scale_rotation_translation(
-            Vec3::splat(pl.scale),
-            Quat::from_rotation_y(pl.yaw),
-            pl.pos,
-        );
-        let base = verts.len() as u32;
-        for v in &md.verts {
-            let mut nv = *v;
-            nv.pos = m.transform_point3(Vec3::from(v.pos)).into();
-            nv.normal = m.transform_vector3(Vec3::from(v.normal)).normalize_or_zero().into();
-            // Static bake: everything weights to bone 0 (identity palette) — see doc comment.
-            nv.joints = [0, 0, 0, 0];
-            nv.weights = [255, 0, 0, 0];
-            verts.push(nv);
-        }
-        for d in &md.draws {
-            let start = indices.len() as u32;
-            let s = d.index_start as usize;
-            let e = (d.index_start + d.index_count) as usize;
-            indices.extend(md.indices[s.min(md.indices.len())..e.min(md.indices.len())].iter().map(|&i| base + i));
-            draws.push(DrawGroup {
-                index_start: start,
-                index_count: indices.len() as u32 - start,
-                diffuse: d.diffuse,
-                specular: d.specular,
-                normal: d.normal,
-                group_index: draws.len(),
-                ..Default::default()
-            });
-        }
-        for (h, t) in &md.textures {
-            textures.entry(*h).or_insert_with(|| t.clone());
-        }
-    }
-    let (mut bmin, mut bmax) = ([f32::MAX; 3], [f32::MIN; 3]);
-    for v in &verts {
-        for k in 0..3 {
-            bmin[k] = bmin[k].min(v.pos[k]);
-            bmax[k] = bmax[k].max(v.pos[k]);
-        }
-    }
-    let stats = mesh::ModelStats {
-        meshes: draws.len(),
-        vertices: verts.len(),
-        skipped: 0,
-        bbox_min: bmin,
-        bbox_max: bmax,
-        fit_center: [0.0; 3],
-        fit_scale: 1.0,
-        bones: Vec::new(),
-        rig: Vec::new(),
-        prelit: false,
-    };
-    let mut skin = mesh::SkinData::identity();
-    skin.center = [0.0; 3];
-    skin.scale = 1.0;
-    Ok(ModelData {
-        verts,
-        indices,
-        draws,
-        stats,
-        skin,
-        textures,
-        tiers: Vec::new(),
-        tier: 0x01,
-        machine: None,
-        hier_nodes: Vec::new(),
-        indx: Vec::new(),
-        header: None,
-    })
-}
-
 /// F10 export. For a WAD asset this writes the LOSSLESS RIGGED bundle — skeleton, joints, skin
 /// weights, inverse-bind matrices, and the character's full clip set as glTF animations (via
 /// [`export_bundle_by_hash`]) — so a re-import lands with its rig intact, not stripped to static
-/// geometry. Imports and merge results have no LOD-rung container to bundle, so they fall back to
+/// geometry. Imports have no LOD-rung container to bundle, so they fall back to
 /// the OBJ + textures writer ([`export_model_data`]).
 fn export_preview(
     w: &mut WadStack,
@@ -8656,7 +7497,7 @@ pub(crate) fn export_bundle_in_background(
 }
 
 /// Write a model to `workshop_export/<label>/` as OBJ + MTL + decoded PNG textures (game-space
-/// coordinates, one `usemtl` per draw group). Works for WAD assets, imports, and merge results —
+/// coordinates, one `usemtl` per draw group). Works for WAD assets and imports —
 /// the hand-off point into the UCFX/patch pipeline.
 fn export_model_data(md: &ModelData, label: &str) -> Result<String, String> {
     let safe: String = label
@@ -8860,6 +7701,116 @@ fn ensure_hero_render(
         Ok(tex)
     } else {
         Ok(ctx.load_texture(format!("hero_{hash:08X}"), img, egui::TextureOptions::LINEAR))
+    }
+}
+
+#[cfg(test)]
+mod rail_tests {
+    use super::{bench_page, filter_rows, in_lens, Kind, Workbench};
+    use crate::domain::Domain;
+    use crate::index::AssetRow;
+
+    /// Every page, through a match the compiler checks: a variant added to `Workbench` does not
+    /// build here until it is listed, so it cannot dodge the reachability test.
+    fn every_page() -> Vec<Workbench> {
+        fn listed(w: Workbench) {
+            match w {
+                Workbench::Inspect
+                | Workbench::Saves
+                | Workbench::Mods
+                | Workbench::Skeleton
+                | Workbench::Quartermaster
+                | Workbench::Settings
+                | Workbench::Live
+                | Workbench::Domain(_) => {}
+            }
+        }
+        let mut pages = vec![
+            Workbench::Inspect,
+            Workbench::Saves,
+            Workbench::Mods,
+            Workbench::Skeleton,
+            Workbench::Quartermaster,
+            Workbench::Settings,
+            Workbench::Live,
+        ];
+        pages.extend(Domain::ALL.into_iter().map(Workbench::Domain));
+        pages.iter().for_each(|w| listed(*w));
+        pages
+    }
+
+    /// The rail lists the mockup's seven entries, in its order; Live and Log sit at its foot.
+    #[test]
+    fn the_rail_is_in_the_mockups_order() {
+        let labels: Vec<&str> = Workbench::ALL.iter().map(|w| w.label()).collect();
+        assert_eq!(labels, ["Inspect", "Saves", "Driving", "Missions", "Systems", "Shipment", "Settings"]);
+        assert!(!Workbench::ALL.contains(&Workbench::Live), "Live is pinned to the foot, not listed");
+    }
+
+    /// Inspect's Lens row offers the model domains that are not rail pages, in the mockup's order.
+    #[test]
+    fn inspect_offers_the_mockups_lenses() {
+        let labels: Vec<&str> = Workbench::lenses().iter().map(|d| d.label()).collect();
+        assert_eq!(labels, ["World", "Characters", "Weapons"]);
+    }
+
+    /// Every page is reached from somewhere: the rail, the rail's foot (Live), or a bench opened
+    /// on a contribution. A domain that is not a page is a Lens.
+    #[test]
+    fn every_page_is_reachable() {
+        let mut reached: Vec<Workbench> = Workbench::ALL.to_vec();
+        reached.push(Workbench::Live);
+        reached.push(bench_page(crate::quartermaster::Craft::Rig));
+        reached.push(bench_page(crate::quartermaster::Craft::Conform));
+        for page in every_page() {
+            match page {
+                Workbench::Domain(d) if !reached.contains(&page) => {
+                    assert!(Workbench::lenses().contains(&d), "{} is neither a page nor a Lens", d.label());
+                }
+                _ => assert!(reached.contains(&page), "{} is not reachable", page.label()),
+            }
+        }
+    }
+
+    /// A bench works on a Shipment contribution, so it lights Shipment; every rail page lights itself.
+    #[test]
+    fn a_bench_lights_shipment() {
+        for b in [crate::quartermaster::Craft::Rig, crate::quartermaster::Craft::Conform] {
+            assert!(bench_page(b) == Workbench::Mods || bench_page(b) == Workbench::Skeleton);
+            assert!(bench_page(b).rail_entry() == Workbench::Quartermaster);
+        }
+        for w in Workbench::ALL {
+            assert!(w.rail_entry() == w, "{} does not light itself", w.label());
+        }
+    }
+
+    fn row(name: &str) -> AssetRow {
+        AssetRow { hash: 0, block: 0, src: 0, name: Some(name.to_string()), template: None }
+    }
+
+    /// A Lens pill's count is the number of rows the list shows under it, and the Lenses never
+    /// claim a row twice.
+    #[test]
+    fn a_lens_count_is_what_the_lens_lists() {
+        let rows = [
+            row("al_veh_helicopter_havoc"),
+            row("pmc_hum_mattias"),
+            row("al_bld_hq_01"),
+            row("us_wpn_rifle_m4"),
+        ];
+        let mut lensed = 0;
+        for lens in std::iter::once(None).chain(Workbench::lenses().into_iter().map(Some)) {
+            let n = rows.iter().filter(|r| in_lens(lens, r)).count();
+            assert_eq!(n, filter_rows(&rows, Kind::Model, "", lens).len());
+            if lens.is_some() {
+                assert_eq!(n, 1, "{:?} should hold exactly one of the four", lens.map(|d| d.label()));
+                lensed += n;
+            } else {
+                assert_eq!(n, rows.len());
+            }
+        }
+        // The helicopter is Driving's: a rail page, not a Lens.
+        assert_eq!(lensed, 3);
     }
 }
 
