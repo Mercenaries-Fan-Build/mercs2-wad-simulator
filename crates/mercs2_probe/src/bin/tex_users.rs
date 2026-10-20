@@ -7,7 +7,8 @@
 //!
 //! Second pass, reported separately: any OTHER chunk (not a model, not the queried texture itself)
 //! whose bytes hold a queried hash as an aligned little-endian u32. That only says the value occurs;
-//! the field it sits in is not decoded.
+//! the field it sits in is not decoded. `--raw-all` widens that pass to model chunks and to every byte
+//! offset, for hashes that are not textures.
 //!
 //! Exit 0 = every block and every model MTRL was read; 1 = something could not be read (listed);
 //! 2 = usage.
@@ -23,6 +24,9 @@ use std::collections::{BTreeMap, HashMap};
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let wad_arg = args.iter().position(|a| a == "--wad").and_then(|i| args.get(i + 1)).cloned();
+    // `--raw-all`: the raw pass also covers model chunks and matches at every byte offset — for a hash
+    // that is not a texture (a record payload in a grouped component need not be 4-aligned).
+    let raw_all = args.iter().any(|a| a == "--raw-all");
     let queries: Vec<u32> = args
         .iter()
         .enumerate()
@@ -131,13 +135,19 @@ fn main() {
                         model_hits.entry(*q).or_default().push((e.name_hash, b, used));
                     }
                 }
-            } else {
+            }
+            if e.type_hash != wad::MODEL_TYPE_HASH || raw_all {
                 for q in &queries {
                     if e.name_hash == *q {
                         continue; // the texture's own chunk
                     }
                     let needle = q.to_le_bytes();
-                    if chunk.chunks_exact(4).any(|word| word == needle) {
+                    let found = if raw_all {
+                        chunk.windows(4).any(|w| w == needle)
+                    } else {
+                        chunk.chunks_exact(4).any(|word| word == needle)
+                    };
+                    if found {
                         raw_hits.entry(*q).or_default().push((e.name_hash, e.type_hash, b));
                     }
                 }
@@ -154,7 +164,11 @@ fn main() {
             println!("  model 0x{m:08X}  {:40}  block {b:5} {}  materials {mats:?}", label(*m), leaf(*b));
         }
         let rs = raw_hits.get(q).map(Vec::as_slice).unwrap_or(&[]);
-        println!("other chunks holding it as an aligned LE u32 (field not decoded): {}", rs.len());
+        if raw_all {
+            println!("chunks (models included) holding it as a LE u32 at any offset (field not decoded): {}", rs.len());
+        } else {
+            println!("other chunks holding it as an aligned LE u32 (field not decoded): {}", rs.len());
+        }
         for (n, t, b) in rs {
             println!("  chunk 0x{n:08X} type 0x{t:08X}  {:40}  block {b:5} {}", label(*n), leaf(*b));
         }
