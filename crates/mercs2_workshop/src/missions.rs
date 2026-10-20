@@ -2545,7 +2545,8 @@ mod tests {
     /// adds a node from the palette and takes it back — drawing every frame in between.
     #[test]
     fn the_page_opens_edits_and_compiles_a_real_contract() {
-        let corpus = crate::index::load_lua_corpus().expect("the reference bundle's Lua corpus");
+        let home = crate::index::data_home().expect("no workshop_data reference bundle found; the page test opens its Lua");
+        let corpus = crate::index::lua_corpus_at(&home).expect("the reference bundle's Lua corpus");
         let reference = Reference::build(&corpus).expect("the corpus indexes and lifts");
         let mut p = Panel::default();
         p.set_reference(reference, &corpus);
