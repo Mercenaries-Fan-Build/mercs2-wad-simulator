@@ -149,11 +149,129 @@ fn main() {
         out
     };
 
+    // `--components`: every other component record each entity carries. `data` is grouped records
+    // `[u32 n][n × u32 key][payload]` with the schm `payload_stride` (docs/worldentity_container_format.md
+    // §3.3); the three classes whose native reader reads another layout are not walked.
+    let profiles = args.iter().any(|a| a == "--profiles");
+    let components = profiles || args.iter().any(|a| a == "--components");
+    let mut comps_of: BTreeMap<u32, Vec<(String, Vec<u8>)>> = BTreeMap::new();
+    if components {
+        let wanted_keys: HashSet<u32> = model_keys.values().flatten().copied().collect();
+        for g in &groups {
+            let name = g.name.clone().unwrap_or_else(|| format!("0x{:08X}", g.type_hash.unwrap_or(0)));
+            if ["Name", "PointLocation", "NetCategoryInfo", "ModelName"].contains(&name.as_str()) {
+                continue;
+            }
+            let (Some(schema), Some(data)) = (g.schema(), g.data.as_ref()) else { continue };
+            let stride = schema.payload_stride as usize;
+            let rd = |o: usize| u32::from_le_bytes([data[o], data[o + 1], data[o + 2], data[o + 3]]);
+            let mut o = 0usize;
+            while o < data.len() {
+                if o + 4 > data.len() {
+                    fail(format!("{name}: truncated count at {o}"));
+                }
+                let n = rd(o) as usize;
+                let end = o + 4 + n * 4 + stride;
+                if n == 0 || end > data.len() {
+                    fail(format!("{name}: group at {o} claims {n} keys + {stride}-byte payload, past {} bytes", data.len()));
+                }
+                let payload = &data[o + 4 + n * 4..end];
+                for i in 0..n {
+                    let key = rd(o + 4 + i * 4);
+                    if wanted_keys.contains(&key) {
+                        comps_of.entry(key).or_default().push((name.clone(), payload.to_vec()));
+                    }
+                }
+                o = end;
+            }
+        }
+    }
+
     for t in &targets {
         let keys = model_keys.get(t).cloned().unwrap_or_default();
         println!("\n=== model 0x{t:08X}: {} ModelName record(s)", keys.len());
         for k in keys {
             println!("  entity 0x{k:08X}  name {:?}", name_for(k));
+            for (c, p) in comps_of.get(&k).map(Vec::as_slice).unwrap_or(&[]) {
+                let words: Vec<String> = p
+                    .chunks(4)
+                    .map(|w| w.iter().rev().map(|b| format!("{b:02X}")).collect::<String>())
+                    .collect();
+                println!("    {c:28} {}", words.join(" "));
+            }
+        }
+
+        // `--profiles`: where inside the model container each template's ModelMixerProfile hash sits.
+        // UCFX rows are `{tag, rel_off, size, x2, x3}` at 20 + 20·i, in pre-order with x3 = descendant
+        // count, bodies at `data_area_off (u32 @4) + rel_off` (docs/ucfx_tree_container.md §1).
+        if !profiles {
+            continue;
+        }
+        let mut wanted: Vec<u32> = Vec::new();
+        for k in model_keys.get(t).map(Vec::as_slice).unwrap_or(&[]) {
+            for (c, p) in comps_of.get(k).map(Vec::as_slice).unwrap_or(&[]) {
+                if c == "ModelMixerProfile" && p.len() == 4 {
+                    let v = u32::from_le_bytes([p[0], p[1], p[2], p[3]]);
+                    if v != 0 && !wanted.contains(&v) {
+                        wanted.push(v);
+                    }
+                }
+            }
+        }
+        let c = wad::extract_container(&mut w, *t).unwrap_or_else(|e| fail(format!("model 0x{t:08X}: {e}")));
+        let rd = |o: usize| u32::from_le_bytes([c[o], c[o + 1], c[o + 2], c[o + 3]]);
+        let (data_off, nrows) = (rd(4) as usize, rd(16) as usize);
+        let tag = |i: usize| String::from_utf8_lossy(&c[20 + i * 20..24 + i * 20]).into_owned();
+        // parent chain of row i: the nearest earlier row whose subtree covers i
+        let parents = |i: usize| -> Vec<String> {
+            let mut chain = Vec::new();
+            let mut j = i;
+            while let Some(p) = (0..j).rev().find(|&p| p + rd(20 + p * 20 + 16) as usize >= j) {
+                chain.push(tag(p));
+                j = p;
+            }
+            chain.reverse();
+            chain
+        };
+        println!("  --- profiles inside model 0x{t:08X} ({} rows, data @{data_off})", nrows);
+        // The whole subtree of every MIXR row, bodies in full.
+        for m in (0..nrows).filter(|&i| tag(i) == "MIXR") {
+            let x3 = rd(20 + m * 20 + 16) as usize;
+            for i in m..=m + x3 {
+                let (ro, sz) = (rd(20 + i * 20 + 4), rd(20 + i * 20 + 8) as usize);
+                if ro == 0xFFFF_FFFF {
+                    println!("  row {i:3} {} (marker, {} descendants)", tag(i), rd(20 + i * 20 + 16));
+                    continue;
+                }
+                let body = &c[data_off + ro as usize..data_off + ro as usize + sz];
+                let words: Vec<String> = body.chunks(4).map(|w| w.iter().rev().map(|b| format!("{b:02X}")).collect()).collect();
+                println!("  row {i:3} {} {sz} bytes: {}", tag(i), words.join(" "));
+            }
+        }
+        for v in &wanted {
+            let needle = v.to_le_bytes();
+            let hits: Vec<usize> = c.windows(4).enumerate().filter(|(_, w)| *w == needle).map(|(i, _)| i).collect();
+            for at in hits {
+                let row = (0..nrows).find(|&i| {
+                    let (ro, sz) = (rd(20 + i * 20 + 4), rd(20 + i * 20 + 8) as usize);
+                    ro != 0xFFFF_FFFF && at >= data_off + ro as usize && at < data_off + ro as usize + sz
+                });
+                match row {
+                    None => println!("  profile 0x{v:08X} @{at}: not inside any row body"),
+                    Some(i) => {
+                        let (ro, sz) = (rd(20 + i * 20 + 4) as usize, rd(20 + i * 20 + 8) as usize);
+                        let body = &c[data_off + ro..data_off + ro + sz];
+                        let words: Vec<String> = body.chunks(4).map(|w| w.iter().rev().map(|b| format!("{b:02X}")).collect()).collect();
+                        println!(
+                            "  profile 0x{v:08X} @{at}: row {i} {} under {:?}, body {sz} bytes, +{}",
+                            tag(i),
+                            parents(i),
+                            at - data_off - ro
+                        );
+                        println!("    {}", words.join(" "));
+                    }
+                }
+            }
         }
     }
 }
