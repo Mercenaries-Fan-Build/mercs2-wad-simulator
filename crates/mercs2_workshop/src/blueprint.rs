@@ -458,6 +458,12 @@ impl CorpusIndex {
             .or_else(|| all.iter().find(|m| m.bank == "resident"))
     }
 
+    /// The module the script at `path` inherits, as its `inherit()` call writes it.
+    pub fn inherits(&self, path: &str) -> Option<&str> {
+        let (bank, stem) = bank_and_stem(path);
+        self.resolve(&stem, &bank)?.inherits.as_deref()
+    }
+
     /// The context for lifting the script at `path`.
     pub fn context(&self, path: &str) -> Context<'_> {
         let (bank, stem) = bank_and_stem(path);
@@ -527,6 +533,52 @@ impl Node {
     /// Made in the editor rather than lifted from the script.
     pub fn is_new(&self) -> bool {
         self.fresh
+    }
+
+    /// What a call node calls, as written: `MrxMusic.PlaySpecialMusic`, `self:CreateChild`.
+    pub fn callee(&self) -> Option<String> {
+        let call = match &self.form {
+            Form::Call { call, .. } | Form::CallExpr(call) => call,
+            _ => return None,
+        };
+        let mut s = match &call.head {
+            HeadForm::Global(t) => t.token().to_string(),
+            HeadForm::Slot(SlotRef::In(i)) => self.inputs[*i].label.clone(),
+            HeadForm::Slot(SlotRef::Closure(_)) => "function".into(),
+        };
+        for p in &call.path {
+            s.push_str(&bare(p));
+        }
+        if let Some(m) = &call.method {
+            s.push(':');
+            s.push_str(&m.name().token().to_string());
+        }
+        Some(s)
+    }
+
+    /// Whether the call is made on a global (a module or engine table) rather than a local.
+    pub fn calls_global(&self) -> bool {
+        matches!(&self.form, Form::Call { call, .. } | Form::CallExpr(call) if matches!(call.head, HeadForm::Global(_)))
+    }
+
+    /// The pin indices that are part of an assignment's targets (`self.oRace = …`), not the call.
+    pub fn is_target(&self, pin: usize) -> bool {
+        match &self.form {
+            Form::Call {
+                binding: Binding::Assign { targets, .. },
+                ..
+            }
+            | Form::Set {
+                binding: Binding::Assign { targets, .. },
+                ..
+            } => targets.iter().any(|(s, _)| matches!(s, SlotRef::In(i) if *i == pin)),
+            _ => false,
+        }
+    }
+
+    /// Whether this is the canvas of a `function` statement, opened rather than edited in place.
+    pub fn is_function(&self) -> bool {
+        matches!(self.form, Form::Function(_))
     }
 }
 
@@ -2072,6 +2124,30 @@ impl Graph {
         em.input(node, pin).map(|e| bare(&e)).map_err(|p| p.message)
     }
 
+    /// A statement's own Lua (its blocks included), without the whitespace and comments around
+    /// it and with its lines dedented to start at column 0 — what the inspector shows and what
+    /// the palette re-adds.
+    pub fn node_source(&self, node: NodeId) -> Result<String, String> {
+        let n = self.nodes.get(node).ok_or("no such node")?;
+        let mut em = Emitter::new(self);
+        em.scope = all_vars(self);
+        em.indent = n.indent.clone();
+        let text = match &n.form {
+            Form::Return { ret, values } => {
+                let returns = em.slots(node, values).map_err(|p| p.message)?;
+                strip_outer(LastStmt::Return(ret.clone().with_returns(returns))).to_string()
+            }
+            Form::Break(t) => strip_outer(LastStmt::Break(t.clone())).to_string(),
+            _ if n.exec_in => strip_outer(em.stmt(node).map_err(|p| p.message)?).to_string(),
+            _ => strip_outer(em.expr(node).map_err(|p| p.message)?).to_string(),
+        };
+        Ok(text
+            .lines()
+            .map(|l| l.strip_prefix(n.indent.as_str()).unwrap_or(l))
+            .collect::<Vec<_>>()
+            .join("\n"))
+    }
+
     /// The data wire feeding a pin, if one does.
     pub fn feeder(&self, node: NodeId, pin: usize) -> Option<(NodeId, usize)> {
         self.data.iter().find(|w| w.to == (node, pin)).map(|w| w.from)
@@ -2468,8 +2544,13 @@ fn indent_of(n: &impl AstNode) -> String {
     }
 }
 
+/// A node without the whitespace and comments before its first token and after its last.
+fn strip_outer<T: AstNode + VisitMut>(n: T) -> T {
+    retrivia(n, Vec::new(), Vec::new())
+}
+
 /// `e` with `lead` before its first token and `trail` after its last.
-fn retrivia(e: Expression, lead: Vec<Token>, trail: Vec<Token>) -> Expression {
+fn retrivia<T: AstNode + VisitMut>(e: T, lead: Vec<Token>, trail: Vec<Token>) -> T {
     struct Swap {
         i: usize,
         last: usize,
@@ -2561,6 +2642,190 @@ fn reindent<T: AstNode + VisitMut>(s: T, old: &str, new: &str) -> T {
         i: 0,
         last,
     })
+}
+
+// ───────────────────────────────────────────────────────────────────── palette
+
+/// Something the editor can add, with the Lua it adds.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PaletteEntry {
+    pub label: String,
+    pub category: Category,
+    /// The statement it adds: the shortest real call site in the corpus, or one of Lua's forms.
+    pub lua: String,
+    /// Corpus call sites (overriding scripts, for a lifecycle hook; 0 for Lua's own forms).
+    pub uses: usize,
+    /// A function definition, added at the top level of the script rather than in a body.
+    pub top_level: bool,
+}
+
+/// What the editor can add, from the corpus.
+#[derive(Clone, Debug, Default)]
+pub struct Palette {
+    /// The base task's functions, by how many mission scripts override them.
+    pub lifecycle: Vec<PaletteEntry>,
+    /// `Event.*` kinds the scripts create events for.
+    pub events: Vec<PaletteEntry>,
+    /// The objective classes `CreateChild` names.
+    pub objectives: Vec<PaletteEntry>,
+    /// Calls on globals, by the global (`MrxMusic`, `Pg`), most-used group first.
+    pub calls: Vec<(String, Vec<PaletteEntry>)>,
+    /// Lua's own statements.
+    pub flow: Vec<PaletteEntry>,
+}
+
+/// The module every mission task inherits from, whose functions are the lifecycle hooks.
+const TASK_BASE: &str = "mrxtask";
+
+impl Palette {
+    /// Lift every script in `corpus` and collect what it calls. A script that does not parse,
+    /// or a node whose source cannot be read back, is an error naming it.
+    pub fn build<'a>(
+        index: &CorpusIndex,
+        corpus: impl IntoIterator<Item = (&'a str, &'a str)>,
+    ) -> Result<Palette, String> {
+        type Sites = HashMap<String, (usize, String, Category)>;
+        let mut events: Sites = HashMap::new();
+        let mut objectives: Sites = HashMap::new();
+        let mut calls: HashMap<String, Sites> = HashMap::new();
+        let mut overrides: HashMap<String, usize> = HashMap::new();
+
+        fn note(sites: &mut Sites, key: String, lua: String, category: Category) {
+            let e = sites.entry(key).or_insert((0, lua.clone(), category));
+            e.0 += 1;
+            if lua.len() < e.1.len() {
+                e.1 = lua;
+            }
+        }
+        fn walk(
+            g: &Graph,
+            path: &str,
+            events: &mut Sites,
+            objectives: &mut Sites,
+            calls: &mut HashMap<String, Sites>,
+        ) -> Result<(), String> {
+            for (id, n) in g.nodes.iter().enumerate() {
+                if let Some(sub) = &n.sub {
+                    walk(sub, path, events, objectives, calls)?;
+                }
+                if !(n.exec_in && matches!(n.form, Form::Call { .. })) {
+                    continue;
+                }
+                let Some(callee) = n.callee() else { continue };
+                let lua = g.node_source(id).map_err(|e| format!("{path}: {e}"))?;
+                match n.category {
+                    Category::Event => {
+                        let kind = n.title.strip_prefix("Event · ").unwrap_or(&n.title).to_string();
+                        note(events, kind, lua, Category::Event);
+                    }
+                    Category::Objective => note(objectives, n.title.clone(), lua, Category::Objective),
+                    c if n.calls_global() || callee.starts_with("self:") => {
+                        let head = callee.split(['.', ':']).next().unwrap_or(&callee).to_string();
+                        note(calls.entry(head).or_default(), callee, lua, c);
+                    }
+                    _ => {}
+                }
+            }
+            Ok(())
+        }
+
+        for (path, src) in corpus {
+            let script = Script::parse(src).map_err(|e| format!("{path}: {e}"))?;
+            let ctx = index.context(path);
+            let chunk = lift(&script, &ctx);
+            walk(&chunk, path, &mut events, &mut objectives, &mut calls)?;
+            if ctx.bases.iter().any(|b| b == TASK_BASE) {
+                for n in &chunk.nodes {
+                    if n.is_function() && n.category == Category::Lifecycle {
+                        *overrides.entry(n.title.clone()).or_default() += 1;
+                    }
+                }
+            }
+        }
+
+        fn ranked(sites: Sites) -> Vec<PaletteEntry> {
+            let mut v: Vec<PaletteEntry> = sites
+                .into_iter()
+                .map(|(label, (uses, lua, category))| PaletteEntry {
+                    label,
+                    category,
+                    lua,
+                    uses,
+                    top_level: false,
+                })
+                .collect();
+            v.sort_by(|a, b| b.uses.cmp(&a.uses).then_with(|| a.label.cmp(&b.label)));
+            v
+        }
+
+        let mut lifecycle: Vec<PaletteEntry> = index
+            .resolve(TASK_BASE, "resident")
+            .map(|m| {
+                m.functions
+                    .iter()
+                    .map(|(name, params)| PaletteEntry {
+                        label: name.clone(),
+                        category: Category::Lifecycle,
+                        lua: format!("function {name}({})\nend", params.join(", ")),
+                        uses: overrides.get(name).copied().unwrap_or(0),
+                        top_level: true,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        lifecycle.retain(|e| e.uses > 0);
+        lifecycle.sort_by(|a, b| b.uses.cmp(&a.uses).then_with(|| a.label.cmp(&b.label)));
+
+        let mut calls: Vec<(String, Vec<PaletteEntry>)> = calls.into_iter().map(|(h, s)| (h, ranked(s))).collect();
+        calls.sort_by(|a, b| {
+            let total = |v: &[PaletteEntry]| v.iter().map(|e| e.uses).sum::<usize>();
+            total(&b.1).cmp(&total(&a.1)).then_with(|| a.0.cmp(&b.0))
+        });
+
+        Ok(Palette {
+            lifecycle,
+            events: ranked(events),
+            objectives: ranked(objectives),
+            calls,
+            flow: lua_forms(),
+        })
+    }
+
+    /// Every entry, for searching.
+    pub fn all(&self) -> impl Iterator<Item = &PaletteEntry> {
+        self.flow
+            .iter()
+            .chain(&self.lifecycle)
+            .chain(&self.events)
+            .chain(&self.objectives)
+            .chain(self.calls.iter().flat_map(|(_, v)| v))
+    }
+}
+
+/// Lua's own statements, for the palette.
+fn lua_forms() -> Vec<PaletteEntry> {
+    [
+        ("if", Category::Flow, "if true then\nend"),
+        ("if … else", Category::Flow, "if true then\nelse\nend"),
+        ("while", Category::Flow, "while true do\nend"),
+        ("for i = a, b", Category::Flow, "for i = 1, 10 do\nend"),
+        ("for k, v in pairs", Category::Flow, "for k, v in pairs({}) do\nend"),
+        ("repeat … until", Category::Flow, "repeat\nuntil true"),
+        ("do", Category::Flow, "do\nend"),
+        ("return", Category::Flow, "return"),
+        ("break", Category::Flow, "break"),
+        ("local", Category::Variable, "local value = nil"),
+        ("set", Category::Variable, "value = nil"),
+    ]
+    .into_iter()
+    .map(|(label, category, lua)| PaletteEntry {
+        label: label.into(),
+        category,
+        lua: lua.into(),
+        uses: 0,
+        top_level: false,
+    })
+    .collect()
 }
 
 // ───────────────────────────────────────────────────────────────────── compiling
@@ -2968,6 +3233,59 @@ end
         let get = node(act, "GetVehicles");
         let err = act.connect_exec((get, act.nodes[get].next.expect("continues")), sup).expect_err("a loop");
         assert!(err.contains("cannot loop"), "{err}");
+    }
+
+    fn race_corpus() -> Vec<(&'static str, &'static str)> {
+        vec![
+            (RACE_PATH, RACE),
+            ("lua/resident/mrxtaskcontract.lua", "inherit(\"MrxTask\")\nfunction Activated(self) end\n"),
+            (
+                "lua/resident/mrxtask.lua",
+                "function Activated(self) end\nfunction _CreateEvent(self, eEvent, tArgs, fCallback, tCallbackArgs) end\n",
+            ),
+            ("lua/resident/mrxmusic.lua", "function PlaySpecialMusic(sMusicCue) end\n"),
+        ]
+    }
+
+    #[test]
+    fn the_palette_collects_hooks_events_objectives_and_calls() {
+        let corpus = race_corpus();
+        let index = CorpusIndex::build(corpus.clone()).expect("indexes");
+        let palette = Palette::build(&index, corpus).expect("builds");
+        let entry = |v: &[PaletteEntry], label: &str| v.iter().find(|e| e.label == label).cloned();
+
+        // pmccon016 and mrxtaskcontract both inherit from MrxTask and define Activated.
+        let hook = entry(&palette.lifecycle, "Activated").expect("hook");
+        assert_eq!((hook.uses, hook.lua.as_str(), hook.top_level), (2, "function Activated(self)\nend", true));
+        let event = entry(&palette.events, "ObjectDeath").expect("event");
+        assert_eq!(event.lua, "self:_CreateEvent(Event.ObjectDeath, {tVehicle}, self.VehicleDeath, {self})");
+        let race = entry(&palette.objectives, "MrxTaskRace").expect("objective");
+        assert!(race.lua.starts_with("self.oRace = self:CreateChild({\n  sName = \"PmcCon016Race\","), "{}", race.lua);
+        let music = palette.calls.iter().find(|(h, _)| h == "MrxMusic").expect("group");
+        assert_eq!(music.1[0].lua, "MrxMusic.PlaySpecialMusic(\"mu_PmcCon016_01\")");
+        assert_eq!(music.1[0].category, Category::Music);
+    }
+
+    /// Every palette entry the corpus yields adds back as a statement, in a function canvas and,
+    /// for a hook, at the top of a script.
+    #[test]
+    fn every_corpus_palette_entry_adds_as_a_statement() {
+        let corpus = corpus();
+        let pairs = || corpus.iter().map(|(p, s)| (p.as_str(), s.as_str()));
+        let index = CorpusIndex::build(pairs()).expect("indexes");
+        let palette = Palette::build(&index, pairs()).expect("builds");
+        assert!(!palette.lifecycle.is_empty() && !palette.events.is_empty() && !palette.objectives.is_empty());
+        let (script, race) = race();
+        let ctx = race.context(RACE_PATH);
+        let mut failures = Vec::new();
+        for e in palette.all() {
+            let mut chunk = lift(&script, &ctx);
+            let target = if e.top_level { &mut chunk } else { canvas_mut(&mut chunk, "Activated") };
+            if let Err(err) = target.add_statement(&e.lua, &ctx) {
+                failures.push(format!("{}: {err}\n{}", e.label, e.lua));
+            }
+        }
+        assert!(failures.is_empty(), "{} failures:\n{}", failures.len(), failures.join("\n"));
     }
 
     #[test]
