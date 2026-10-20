@@ -7,16 +7,25 @@ assets on the `mercs2_engine` renderer, without booting the game.
 
 A binary crate (`cargo run -p mercs2_workshop`) that opens a winit window driving the engine's
 `Scene` — the SAME renderer `mercs2_game` boots, so materials, skinning, lighting and shadows are
-the faithful path rather than an export approximation. The window is organized as workbenches; the
-one implemented today is the **asset workbench**:
+the faithful path rather than an export approximation. The window is a rail of pages — **Inspect ·
+Saves · Driving · Missions · Systems · Shipment · Settings** — with **Live** and **Log** pinned at
+its foot:
 
-- browse / search every model and texture in the open WAD, with names resolved from the reference
-  bundle's name pack (`index::AssetIndex`)
+- **Inspect** browses / searches every model, texture, layer and audio clip in the open WAD, with
+  names resolved from the reference bundle's name pack (`index::AssetIndex`). On the Models tab a
+  Lens row narrows the list to World, Characters or Weapons, and the inspector's Lens card starts a
+  contribution of that domain's kinds. The Audio tab is the captioned clip browser, ▶ streaming a
+  line from `vo_stream.english.pws`.
 - preview a model with its real materials, textures, orbit camera and animation clips
 - inspect layers: the HIER bone tree, per-material draw groups (isolate / hide individual
   sub-strips), full-screen texture plates
-- an editable sandbox: place instances, move / rotate / scale them, save and reload the arrangement
-  to `workshop_scene.json`
+- right-click a model to load or export it, or to use it as a donor: **Retarget a rig onto this…**
+  and **Fit an import to this…** each add a contribution to the open Shipment (`add_outfit` /
+  `add_model`, scaffolding a Shipment if none is open) and open their bench on it, lit under
+  Shipment with a `SHIPMENTS › shipment › contribution › bench` breadcrumb. The donor is never
+  written.
+- **Live** is a blank page; its rail dot is lit while the game's lua-bridge (`127.0.0.1:27050`)
+  accepts a connection.
 - read-only Lua source viewer with a hand-rolled highlighter, opened from corpus hits
 - import a foreign mesh (`.obj` / `.gltf` / `.glb`) and preview it on the engine renderer
 - publish a NOVEL (new-hash) model into a patch WAD
@@ -137,8 +146,8 @@ naming it.
 
 Binary crate — these are private modules, listed for orientation:
 
-- `app` — the workshop window: winit loop over the engine `Scene`, the asset workbench, the
-  editable sandbox, the OBJ/PNG exporter.
+- `app` — the workshop window: winit loop over the engine `Scene`, the rail and its pages, the
+  Retarget / Fit benches, the OBJ/PNG exporter.
 - `bundle` — the lossless export bundle (`raw/*.ucfx` verbatim rungs + `model.gltf` + `textures/`
   + `manifest.json` reassembly map).
 - `gui` — egui host: hand-rolled winit-0.29 → egui bridge + the egui-wgpu paint path.
@@ -147,6 +156,8 @@ Binary crate — these are private modules, listed for orientation:
 - `index` — asset catalog, reference-bundle resolution, and name resolution
   (`workshop_data/names.bin` overlaid by the embedded ASET dictionary).
 - `fetch` — downloads and installs the release's reference bundle.
+- `live` — the Live page and the probe behind its rail dot (`mercs2_bridge::reachable`, polled off
+  the frame loop).
 - `saves` — the Saves page: save browser, hero viewport, PROGRESSION grid with the contract menu,
   inspector, Write.
 - `save_tables` / `save_inspect` — the readable views of every save table, and the Inspect window.
