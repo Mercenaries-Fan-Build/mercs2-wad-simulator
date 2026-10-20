@@ -268,9 +268,12 @@ const MAX_STEPS: usize = 1_000_000;
 /// every call returns nil; branches follow Lua's truthiness. Running stops at the first `RETURN` or
 /// `TAILCALL`.
 ///
+/// A numeric `for` whose bounds the script does not set itself is stepped over when its body cannot
+/// change the result however many times it runs ([`loop_is_inert`]).
+///
 /// When the outcome depends on a value the model does not know — comparing an unknown value, a
-/// numeric `for` whose bounds are not constants, calling or indexing nil — the count is not
-/// computable and this returns an error naming the instruction, rather than a guess.
+/// numeric `for` with unknown bounds whose body could change the result, calling or indexing nil —
+/// the count is not computable and this returns an error naming the instruction, rather than a guess.
 pub fn count_globals(p: &Proto) -> Result<u16, String> {
     let mut reg: Vec<Val> = vec![Val::Nil; 512];
     let mut env: Vec<(Vec<u8>, Val)> = Vec::new();
@@ -406,7 +409,16 @@ pub fn count_globals(p: &Proto) -> Result<u16, String> {
             OP_TAILCALL | OP_RETURN => break,
             OP_FORPREP => {
                 let (Val::Num(init), Val::Num(_), Val::Num(step)) = (&reg[ra], &reg[ra + 1], &reg[ra + 2]) else {
-                    return Err(undecidable("a numeric for loop whose bounds the script does not set itself", at));
+                    // The FORLOOP that closes the loop is where FORPREP jumps to.
+                    let close = (pc as i64 + sbx(i)) as usize;
+                    if loop_is_inert(p, pc, close, ra) {
+                        pc = close + 1;
+                        continue;
+                    }
+                    return Err(undecidable(
+                        "a numeric for loop whose bounds the script does not set itself, and whose body sets a global, an earlier local or returns",
+                        at,
+                    ));
                 };
                 reg[ra] = Val::Num(init - step);
                 pc = (pc as i64 + sbx(i)) as usize;
@@ -446,6 +458,44 @@ pub fn count_globals(p: &Proto) -> Result<u16, String> {
     }
     let n = env.iter().filter(|(_, v)| *v != Val::Nil).count();
     u16::try_from(n).map_err(|_| format!("{n} globals; INFO holds at most {}", u16::MAX))
+}
+
+/// Whether the numeric `for` loop whose body is `p.code[body..close]` (closed by the `FORLOOP` at
+/// `close`, its registers from `base` up) leaves the same state behind whether it runs zero times or
+/// many: the body sets no global, writes no register below `base` (a local declared before the
+/// loop), and holds no `RETURN` or `TAILCALL`. Registers from `base` up belong to the loop and are
+/// dead once it ends, and the model ignores table contents, so nothing else the body does is visible
+/// afterwards.
+fn loop_is_inert(p: &Proto, body: usize, close: usize, base: usize) -> bool {
+    match p.code.get(close) {
+        Some(&i) if op(i) == OP_FORLOOP && a(i) == base => {}
+        _ => return false,
+    }
+    let mut pc = body;
+    while pc < close {
+        let i = p.code[pc];
+        pc += 1;
+        let ra = a(i);
+        let lowest_written = match op(i) {
+            OP_SETGLOBAL | OP_RETURN | OP_TAILCALL => return false,
+            OP_SETUPVAL | OP_SETTABLE | OP_JMP | OP_EQ | OP_LT | OP_LE | OP_TEST | OP_CLOSE => None,
+            OP_SETLIST => {
+                if c(i) == 0 {
+                    pc += 1;
+                }
+                None
+            }
+            OP_CLOSURE => {
+                pc += p.protos.get(bx(i)).map(|q| q.nups as usize).unwrap_or(0);
+                Some(ra)
+            }
+            _ => Some(ra),
+        };
+        if lowest_written.is_some_and(|r| r < base) {
+            return false;
+        }
+    }
+    true
 }
 
 #[cfg(test)]
@@ -595,24 +645,44 @@ mod tests {
         assert!(derive("dyn", &chunk("dyn", main)).unwrap().deps.is_empty());
     }
 
+    /// `local t = {}  for i = 1, n do <body> end  x = 1` with `n` a global the script does not set.
+    /// The loop's registers start at 1; `t` is register 0, a local declared before the loop.
+    fn unknown_bound_loop(body: Vec<u32>) -> Vec<u8> {
+        let mut code = vec![
+            abc(OP_NEWTABLE, 0, 0, 0),
+            abx(OP_LOADK, 1, 0),
+            abx(OP_GETGLOBAL, 2, 1),
+            abx(OP_LOADK, 3, 0),
+        ];
+        let n = body.len() as i64;
+        code.push(asbx(OP_FORPREP, 1, n));
+        code.extend(body);
+        code.push(asbx(OP_FORLOOP, 1, -(n + 1)));
+        code.push(abx(OP_LOADK, 0, 0));
+        code.push(abx(OP_SETGLOBAL, 0, 2));
+        code.push(abc(OP_RETURN, 0, 1, 0));
+        let main = proto(code, vec![Constant::Number(1.0f32.to_bits()), s("n"), s("x")], vec![]);
+        chunk("loop", main)
+    }
+
     #[test]
-    fn a_loop_over_unknown_bounds_is_an_error_not_a_guess() {
-        // for i = 1, #t do ... end  with t unknown: the limit is LEN of an unknown, which the
-        // model folds to 0, so make the bound a global instead.
-        let main = proto(
-            vec![
-                abx(OP_LOADK, 0, 0),
-                abx(OP_GETGLOBAL, 1, 1),
-                abx(OP_LOADK, 2, 0),
-                asbx(OP_FORPREP, 0, 0),
-                asbx(OP_FORLOOP, 0, -1),
-                abc(OP_RETURN, 0, 1, 0),
-            ],
-            vec![Constant::Number(1.0f32.to_bits()), s("n")],
-            vec![],
-        );
-        let e = derive("loop", &chunk("loop", main)).unwrap_err();
+    fn a_loop_over_unknown_bounds_that_only_fills_a_table_is_stepped_over() {
+        // t[i] = i: a table store and the loop's own registers only.
+        let m = derive("loop", &unknown_bound_loop(vec![abc(OP_SETTABLE, 0, 4, 4)])).unwrap();
+        assert_eq!(m.globals, 1, "x is set after the loop");
+    }
+
+    #[test]
+    fn a_loop_over_unknown_bounds_that_could_change_the_count_is_an_error_not_a_guess() {
+        // G = i: sets a global, so the count depends on whether the loop runs.
+        let e = derive("loop", &unknown_bound_loop(vec![abx(OP_SETGLOBAL, 4, 2)])).unwrap_err();
         assert!(e.contains("numeric for loop") && e.contains("script loop"), "{e}");
+        // t = i: writes a local declared before the loop.
+        let e = derive("loop", &unknown_bound_loop(vec![abc(OP_MOVE, 0, 4, 0)])).unwrap_err();
+        assert!(e.contains("numeric for loop"), "{e}");
+        // return inside the body.
+        let e = derive("loop", &unknown_bound_loop(vec![abc(OP_RETURN, 0, 1, 0)])).unwrap_err();
+        assert!(e.contains("numeric for loop"), "{e}");
     }
 
     #[test]
