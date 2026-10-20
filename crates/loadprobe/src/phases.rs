@@ -183,6 +183,10 @@ pub static KNOWN_EIPS: &[KnownEip] = &[
     // result at +0x40 without a NULL check, so importing a module no mounted WAD has crashes here.
     // Seen 2026-10-18: lua_bridge OnLoad `import("ess")` (hash 0xE508E18C) with vz-patch.wad absent.
     KnownEip { eip: 0x005AE362, label: "_SYS._IMPORT (fn 0x005AE2D0) — import() of a module no mounted WAD has (NULL lookup result); name hash is on the stack before 0x42498680", teardown: false },
+    // 0x005AE362 (v1.1) / 0x005AE372 (v1.0): `_SYS._IMPORT` reads `[resource+0x40]` with no NULL
+    // check, so `import("x")` of a script no loaded WAD holds faults with AV READ 0x00000040.
+    // Seen live 2026-10-19 when lua-bridge's `preimport = ess` ran against an overlay without `ess`.
+    KnownEip { eip: 0x005AE372, label: "_SYS._IMPORT (v1.0) of a script no loaded WAD holds — import() of a missing module (NULL resource +0x40)", teardown: false },
 ];
 
 pub fn eip_label(eip: u32) -> Option<&'static str> {
