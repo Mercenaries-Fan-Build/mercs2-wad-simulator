@@ -201,6 +201,17 @@ impl Bridge {
     }
 }
 
+/// Whether a REPL host accepts connections at `addr` within `timeout` — the game is running with
+/// the bridge loaded.
+///
+/// It opens a socket and closes it without sending: a host acts only on a `<<<RUN>>>` request, so
+/// the game runs nothing, and its single-client loop sees the EOF and moves on. Cheap enough to poll
+/// every few seconds from a worker thread; never per frame.
+pub fn reachable(addr: impl ToSocketAddrs, timeout: Duration) -> bool {
+    let Ok(addrs) = addr.to_socket_addrs() else { return false };
+    addrs.into_iter().any(|a| TcpStream::connect_timeout(&a, timeout).is_ok())
+}
+
 /// The **server** half of the bridge protocol — the counterpart to [`Bridge`].
 ///
 /// Wally's ASI is one host that answers this protocol; our reimpl engine ([`mercs2_game`]) is
@@ -392,5 +403,32 @@ mod tests {
         // The server thread ends when the last connection closes only if we stop accepting; it is a
         // daemon here, so just detach — the test's assertions are what matter.
         drop(h);
+    }
+
+    /// A listening host is reachable and a probe runs nothing on it; a closed port is not reachable.
+    #[test]
+    fn reachable_sees_a_listening_host_and_runs_nothing_on_it() {
+        let server = Server::bind("127.0.0.1:0").expect("bind ephemeral");
+        let addr = server.local_addr().unwrap();
+        let ran = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = ran.clone();
+        let _h = std::thread::spawn(move || {
+            let _ = server.serve(|_| {
+                counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                String::new()
+            });
+        });
+        assert!(reachable(addr, Duration::from_millis(500)));
+        assert!(reachable(addr, Duration::from_millis(500)));
+        // Prove the server is still serving after the probes, and that they ran nothing.
+        let mut client = Bridge::connect_at(addr).expect("connect after probes");
+        client.eval("x = 1").expect("serves after probes");
+        assert_eq!(ran.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        let closed = {
+            let l = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+            l.local_addr().unwrap()
+        };
+        assert!(!reachable(closed, Duration::from_millis(500)));
     }
 }
