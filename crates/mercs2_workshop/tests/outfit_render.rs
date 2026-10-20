@@ -45,7 +45,7 @@ fn jungle_elite_renders_its_close_up_body() {
         "--render",
         ELITE_KIT,
         "--render-outfit",
-        "Jungle Elite#0",
+        "Jungle Elite#1",
         "--render-out",
         &out.to_string_lossy(),
     ]);
@@ -65,4 +65,25 @@ fn elite_kit_lists_the_exe_outfits() {
     let stdout = workshop(&["--render", ELITE_KIT, "--render-outfits"]);
     assert!(stdout.contains("\"Jungle Elite\": profile 0 (0x351013C5), 4 outfit(s)"), "{stdout}");
     assert!(stdout.contains("\"Night Vision Elite\": profile 1 (0xF79D3014), 20 outfit(s)"), "{stdout}");
+}
+
+#[test]
+fn a_template_bundle_holds_only_its_outfit() {
+    let dir = std::env::temp_dir().join("mercs2_outfit_bundle_test");
+    let _ = std::fs::remove_dir_all(&dir);
+    workshop(&["--export-bundle", "Night Vision Elite#5", "--out", &dir.to_string_lossy()]);
+    let manifest = std::fs::read_to_string(dir.join("Night_Vision_Elite_outfit5").join("manifest.json"))
+        .expect("manifest.json");
+    let m: serde_json::Value = serde_json::from_str(&manifest).expect("manifest JSON");
+    let mut nodes: Vec<u64> = m["draw_groups"]
+        .as_array()
+        .expect("draw_groups")
+        .iter()
+        .map(|g| g["segm_node"].as_u64().expect("segm_node"))
+        .collect();
+    nodes.sort_unstable();
+    nodes.dedup();
+    // Outfit 5 wears parts [1, 5, 7, 8, 11, 13]: the asian head, elite-A upper body, lower body,
+    // gear 8 and the night-vision piece — HIER nodes 68, 71, 69, 75, 76 (part 13 has no node).
+    assert_eq!(nodes, vec![68, 69, 71, 75, 76]);
 }
