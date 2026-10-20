@@ -26,8 +26,11 @@
 //! selector chooses from. Which entry a given spawn shows is decided by that selector
 //! (`FUN_004609A0`, SecuROM-virtualized); it is not modelled here.
 
+use crate::orchestrator::{default_state_index, HierNode, StateMachine};
 use crate::ucfx::{parse_ucfx_tree, UcfxNode};
 use crate::ucfx_codec::{exact_len, leaf, marker, u16_at, u32_at};
+use crate::worldentity::{Payload, WorldEntity};
+use std::collections::BTreeMap;
 
 /// The `visible` switch state (`pandemic_hash_m2("visible")`) a shown part's node enters.
 pub const STATE_VISIBLE: u32 = 0x517F_B5D1;
@@ -175,6 +178,84 @@ impl Mixr {
     pub fn parts_of(&self, outfit: u32) -> Vec<usize> {
         (0..self.parts.len()).filter(|&i| outfit & (1 << i) != 0).collect()
     }
+
+    /// The state index per switch node of `sm` that shows exactly `outfit`: the node's `visible`
+    /// state for a worn part, its default state otherwise. Mirrors the spawn loop at `0x004D03F3`,
+    /// which looks each worn part's node up in the model's HIER and, when found, sets that node's
+    /// state to `visible`; a worn part whose node is not in the HIER is passed over there too.
+    /// An error when a worn part's node is in the HIER but no switch node of `sm` gives it a
+    /// `visible` state — the exe's setter for that case is not read.
+    pub fn outfit_node_states(&self, sm: &StateMachine, hier: &[HierNode], outfit: u32) -> Result<Vec<usize>, String> {
+        let mut chosen: Vec<usize> = sm.nodes.iter().map(default_state_index).collect();
+        for p in self.parts_of(outfit) {
+            let node = self.parts[p];
+            if !hier.iter().any(|h| h.hash == node) {
+                continue;
+            }
+            let slot = sm
+                .nodes
+                .iter()
+                .position(|n| n.name_hash == node)
+                .ok_or_else(|| format!("part {p} node 0x{node:08X} is in the HIER but no switch node controls it"))?;
+            chosen[slot] = sm.nodes[slot]
+                .states
+                .iter()
+                .position(|s| s.name_hash == STATE_VISIBLE)
+                .ok_or_else(|| format!("part {p} node 0x{node:08X}'s switch has no visible state"))?;
+        }
+        Ok(chosen)
+    }
+}
+
+/// One template of the resident `worldentity` that names a model: its key, `Name`, `ModelName`
+/// and `ModelMixerProfile` (0 when it carries none).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KitTemplate {
+    pub key: u32,
+    pub name: Option<String>,
+    pub model: u32,
+    pub profile: u32,
+}
+
+/// Every template with a `ModelName`, in key order. An error when a `ModelName` or
+/// `ModelMixerProfile` payload is not one u32, or a key carries two different values of either.
+pub fn kit_templates(we: &WorldEntity) -> Result<Vec<KitTemplate>, String> {
+    let u32_values = |class: &str| -> Result<BTreeMap<u32, u32>, String> {
+        let mut out: BTreeMap<u32, u32> = BTreeMap::new();
+        for c in we.groups_of(class) {
+            for r in &c.records {
+                let v = match &r.payload {
+                    Payload::Fixed(b) if b.len() == 4 => u32_at(b, 0),
+                    p => return Err(format!("{class}: payload {p:?} is not one u32")),
+                };
+                for &k in &r.keys {
+                    if let Some(old) = out.insert(k, v) {
+                        if old != v {
+                            return Err(format!("{class}: key 0x{k:08X} has 0x{old:08X} and 0x{v:08X}"));
+                        }
+                    }
+                }
+            }
+        }
+        Ok(out)
+    };
+    let models = u32_values("ModelName")?;
+    let profiles = u32_values("ModelMixerProfile")?;
+    let mut names: BTreeMap<u32, String> = BTreeMap::new();
+    for (n, keys) in we.names()? {
+        for &k in keys {
+            names.insert(k, n.clone());
+        }
+    }
+    Ok(models
+        .iter()
+        .map(|(&key, &model)| KitTemplate {
+            key,
+            name: names.get(&key).cloned(),
+            model,
+            profile: profiles.get(&key).copied().unwrap_or(0),
+        })
+        .collect())
 }
 
 #[cfg(test)]
@@ -258,6 +339,60 @@ mod tests {
             assert!(!p.contains(&10) && !p.contains(&12), "{p:?}");
         }
         assert_eq!(m.parts_of(got[0]), vec![0, 5, 7, 8, 11, 13]);
+    }
+
+    fn hier_of(hashes: &[u32]) -> Vec<HierNode> {
+        hashes
+            .iter()
+            .enumerate()
+            .map(|(index, &hash)| HierNode {
+                index,
+                hash,
+                parent: None,
+                local: [0.0; 16],
+                bbox_min: [0.0; 3],
+                bbox_max: [0.0; 3],
+            })
+            .collect()
+    }
+
+    /// Each kit switch node has the states `[0x0ACE072A, visible]` with no init script (retail elite kit).
+    fn kit_machine(nodes: &[u32]) -> StateMachine {
+        use crate::orchestrator::{StateDef, SwitchNodeDef};
+        StateMachine {
+            switch_slots: nodes.to_vec(),
+            nodes: nodes
+                .iter()
+                .map(|&n| SwitchNodeDef {
+                    name_hash: n,
+                    states: vec![
+                        StateDef { name_hash: 0x0ACE_072A, ..Default::default() },
+                        StateDef { name_hash: STATE_VISIBLE, ..Default::default() },
+                    ],
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn outfit_node_states_show_the_worn_parts() {
+        let m = elite();
+        // The 13 real part nodes have switches and HIER nodes; part 13 (0x244DDF2E) has neither.
+        let sm = kit_machine(&NAME[..13]);
+        let hier = hier_of(&NAME[..13]);
+        let outfit = m.outfits(0)[0]; // [3, 5, 7, 8, 10, 12, 13]
+        let chosen = m.outfit_node_states(&sm, &hier, outfit).expect("states");
+        let visible: Vec<usize> = (0..chosen.len()).filter(|&i| chosen[i] == 1).collect();
+        assert_eq!(visible, vec![3, 5, 7, 8, 10, 12]);
+    }
+
+    #[test]
+    fn outfit_node_states_refuse_a_part_without_a_switch() {
+        let m = elite();
+        let sm = kit_machine(&NAME[1..13]); // part 0's node lost its switch
+        let hier = hier_of(&NAME[..13]);
+        let err = m.outfit_node_states(&sm, &hier, 1 << 0).unwrap_err();
+        assert!(err.contains("no switch node"), "{err}");
     }
 
     #[test]
