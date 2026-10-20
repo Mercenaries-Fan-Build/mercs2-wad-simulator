@@ -159,6 +159,12 @@ impl AssetRow {
         }
     }
 
+    /// Whether this row is model `hash` showing `template`'s outfit (`None`: no template). A kit's
+    /// template rows all share the kit's hash, so the hash alone names every one of them.
+    pub fn is(&self, hash: u32, template: Option<&str>) -> bool {
+        self.hash == hash && self.template.as_deref() == template
+    }
+
     /// Vehicle class for the Model Workbench inventory, or `None` if not a vehicle. Data-driven
     /// off the `<faction>_veh_<class>_<name>` naming convention (plus a few irregular names like
     /// `uh1huey`). The class token after `_veh_` is normalised into the 12-type taxonomy from
@@ -820,4 +826,26 @@ fn load_names_csv(path: &Path) -> Result<HashMap<u32, String>, String> {
     }
     eprintln!("[names] {} registry names from {}", map.len(), path.display());
     Ok(map)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::AssetRow;
+
+    fn row(hash: u32, template: Option<&str>) -> AssetRow {
+        AssetRow { hash, block: 0, src: 0, name: None, template: template.map(str::to_string) }
+    }
+
+    #[test]
+    fn a_kit_template_row_is_only_its_own_template() {
+        let soldier = row(0x45CC_35FE, Some("Allied Soldier"));
+        let officer = row(0x45CC_35FE, Some("Allied Officer"));
+        let kit = row(0x45CC_35FE, None);
+        assert!(soldier.is(0x45CC_35FE, Some("Allied Soldier")));
+        assert!(!officer.is(0x45CC_35FE, Some("Allied Soldier")));
+        assert!(!kit.is(0x45CC_35FE, Some("Allied Soldier")));
+        assert!(kit.is(0x45CC_35FE, None));
+        assert!(!soldier.is(0x45CC_35FE, None));
+        assert!(!soldier.is(0x4D4F_42B5, Some("Allied Soldier")));
+    }
 }
