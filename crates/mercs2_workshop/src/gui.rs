@@ -271,6 +271,43 @@ pub mod theme {
         FontFamily::Name("disp".into())
     }
 
+    /// Display-face tags, eyebrows and chip labels.
+    pub fn style_eyebrow() -> TextStyle {
+        TextStyle::Name("eyebrow".into())
+    }
+    /// Display-face panel titles.
+    pub fn style_title() -> TextStyle {
+        TextStyle::Name("title".into())
+    }
+    /// Monospace at body size, for values that read as primary content.
+    pub fn style_mono_body() -> TextStyle {
+        TextStyle::Name("mono_body".into())
+    }
+
+    /// The Workshop type scale — every text size in the app is one of these styles, and none is
+    /// smaller than 11px. `install` registers them; `font` resolves one for `Painter::text`.
+    pub fn type_scale() -> [(TextStyle, FontId); 8] {
+        [
+            (TextStyle::Small, FontId::new(11.0, FontFamily::Proportional)),
+            (TextStyle::Body, FontId::new(13.0, FontFamily::Proportional)),
+            (TextStyle::Button, FontId::new(13.0, FontFamily::Proportional)),
+            (TextStyle::Monospace, FontId::new(11.0, FontFamily::Monospace)),
+            (style_mono_body(), FontId::new(13.0, FontFamily::Monospace)),
+            (style_eyebrow(), FontId::new(11.0, disp())),
+            (style_title(), FontId::new(15.0, disp())),
+            (TextStyle::Heading, FontId::new(18.0, disp())),
+        ]
+    }
+
+    /// The `FontId` of a type-scale style, for painter calls that take a font directly.
+    pub fn font(style: &TextStyle) -> FontId {
+        type_scale()
+            .into_iter()
+            .find(|(s, _)| s == style)
+            .map(|(_, f)| f)
+            .unwrap_or_else(|| panic!("{style:?} is not in the Workshop type scale"))
+    }
+
     fn load_font(defs: &mut egui::FontDefinitions, key: &str, paths: &[&str]) -> bool {
         for p in paths {
             if let Ok(bytes) = std::fs::read(p) {
@@ -330,12 +367,9 @@ pub mod theme {
 
         // ── type scale + visuals ──
         let mut style = (*ctx.style()).clone();
-        let disp = FontFamily::Name("disp".into());
-        style.text_styles.insert(TextStyle::Heading, FontId::new(18.0, disp.clone()));
-        style.text_styles.insert(TextStyle::Body, FontId::new(13.0, FontFamily::Proportional));
-        style.text_styles.insert(TextStyle::Button, FontId::new(13.0, FontFamily::Proportional));
-        style.text_styles.insert(TextStyle::Small, FontId::new(11.0, FontFamily::Proportional));
-        style.text_styles.insert(TextStyle::Monospace, FontId::new(12.0, FontFamily::Monospace));
+        for (s, f) in type_scale() {
+            style.text_styles.insert(s, f);
+        }
 
         let mut v = egui::Visuals::dark();
         v.panel_fill = G1;
@@ -403,7 +437,7 @@ pub mod theme {
                         let (r, _) = ui.allocate_exact_size(egui::vec2(6.0, 6.0), egui::Sense::hover());
                         ui.painter().rect_filled(r, egui::Rounding::same(1.0), c);
                     }
-                    ui.label(disp_text(label.to_uppercase(), 9.5, fg));
+                    ui.label(disp_text(label.to_uppercase(), style_eyebrow(), fg));
                 });
             });
     }
@@ -412,15 +446,15 @@ pub mod theme {
     pub fn eyebrow(ui: &mut egui::Ui, text: &str) -> egui::Response {
         ui.add(egui::Label::new(
             egui::RichText::new(text.to_uppercase())
-                .family(disp())
-                .size(11.0)
+                .text_style(style_eyebrow())
                 .color(DIM),
         ))
     }
 
-    /// Display-family rich text at a chosen size/colour (headings, chips, titles).
-    pub fn disp_text(text: impl Into<String>, size: f32, color: Color32) -> egui::RichText {
-        egui::RichText::new(text.into()).family(disp()).size(size).color(color)
+    /// Display-face rich text in one of the display styles (`style_eyebrow`, `style_title`,
+    /// `TextStyle::Heading`) and a colour.
+    pub fn disp_text(text: impl Into<String>, style: TextStyle, color: Color32) -> egui::RichText {
+        egui::RichText::new(text.into()).text_style(style).color(color)
     }
 
     /// A framed inspector card: a rounded panel with a stencil eyebrow header (brass tick + title +
@@ -442,10 +476,10 @@ pub mod theme {
                     let (r, _) = ui.allocate_exact_size(egui::vec2(6.0, 6.0), egui::Sense::hover());
                     ui.painter().rect_filled(r, egui::Rounding::ZERO, BRASS_DK);
                     ui.add_space(3.0);
-                    ui.label(disp_text(title.to_uppercase(), 11.0, DIM));
+                    ui.label(disp_text(title.to_uppercase(), style_eyebrow(), DIM));
                     if let Some(b) = badge {
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            ui.label(egui::RichText::new(b).monospace().size(10.0).color(FAINT));
+                            ui.label(egui::RichText::new(b).monospace().color(FAINT));
                         });
                     }
                 });
@@ -481,7 +515,7 @@ pub mod theme {
             .inner_margin(egui::Margin::symmetric(8.0, 6.0))
             .show(ui, |ui| {
                 ui.add(
-                    egui::Label::new(egui::RichText::new(text).monospace().size(11.0).color(DIM))
+                    egui::Label::new(egui::RichText::new(text).monospace().color(DIM))
                         .selectable(true)
                         .wrap(),
                 );
@@ -507,20 +541,23 @@ pub mod theme {
             .inner_margin(egui::Margin::symmetric(11.0, 8.0))
             .outer_margin(egui::Margin { bottom: 10.0, ..Default::default() })
             .show(ui, |ui| {
+                // A collapsed section has only its header inside; without this the card
+                // shrinks to the header's width instead of spanning the panel.
+                ui.set_width(ui.available_width());
                 let id = ui.make_persistent_id(("sect", title));
                 egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, default_open)
                     .show_header(ui, |ui| {
                         let (r, _) = ui.allocate_exact_size(egui::vec2(6.0, 6.0), egui::Sense::hover());
                         ui.painter().rect_filled(r, egui::Rounding::ZERO, BRASS_DK);
                         ui.add_space(3.0);
-                        ui.label(disp_text(title.to_uppercase(), 11.0, DIM));
+                        ui.label(disp_text(title.to_uppercase(), style_eyebrow(), DIM));
                         if let Some(b) = badge {
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                ui.label(egui::RichText::new(b).monospace().size(10.0).color(FAINT));
+                                ui.label(egui::RichText::new(b).monospace().color(FAINT));
                             });
                         }
                     })
-                    .body(|ui| {
+                    .body_unindented(|ui| {
                         ui.add_space(5.0);
                         add(ui);
                     });
@@ -539,7 +576,7 @@ pub mod theme {
         let mut open = ui.data_mut(|d| d.get_temp::<bool>(id).unwrap_or(false));
         let marker = if open { '\u{25be}' } else { '\u{25b8}' }; // ▾ / ▸
         let resp = ui
-            .add(egui::Label::new(disp_text(format!("{marker} ADVANCED"), 9.0, FAINT))
+            .add(egui::Label::new(disp_text(format!("{marker} ADVANCED"), style_eyebrow(), FAINT))
                 .sense(egui::Sense::click()))
             .on_hover_text("format-level detail — raw hashes and descriptor rows");
         if resp.hovered() {
@@ -590,7 +627,7 @@ pub mod theme {
             .inner_margin(egui::Margin::symmetric(8.0, 3.0))
             .outer_margin(egui::Margin { right: 4.0, bottom: 4.0, ..Default::default() })
             .show(ui, |ui| {
-                ui.label(disp_text(label, 10.0, txt));
+                ui.label(disp_text(label, style_eyebrow(), txt));
             })
             .response
             .interact(egui::Sense::click())
@@ -599,9 +636,9 @@ pub mod theme {
     /// A key → value row inside a card body: dim label left, tabular mono value right-aligned.
     pub fn kv(ui: &mut egui::Ui, key: &str, value: egui::RichText) {
         ui.horizontal(|ui| {
-            ui.label(egui::RichText::new(key).color(DIM).size(12.0));
+            ui.label(egui::RichText::new(key).color(DIM));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.label(value.monospace().size(11.5));
+                ui.label(value.monospace());
             });
         });
     }
@@ -617,7 +654,7 @@ pub mod theme {
             rect.center(),
             egui::Align2::CENTER_CENTER,
             label,
-            egui::FontId::monospace(11.0),
+            font(&TextStyle::Monospace),
             txt,
         );
         resp.clicked()
@@ -662,7 +699,7 @@ pub mod theme {
                 w.widgets.hovered.bg_stroke = egui::Stroke::NONE;
                 w.widgets.active.weak_bg_fill = Color32::TRANSPARENT;
                 w.widgets.active.bg_stroke = egui::Stroke::NONE;
-                ui.style_mut().override_font_id = Some(egui::FontId::monospace(11.0));
+                ui.style_mut().override_font_id = Some(font(&TextStyle::Monospace));
                 ui.add(
                     egui::DragValue::new(value)
                         .speed(speed)
@@ -700,7 +737,7 @@ pub mod theme {
                 // row's value fields line up (allocate_ui advances by content size otherwise).
                 ui.set_min_width(lw);
                 ui.add(
-                    egui::Label::new(disp_text(label.to_uppercase(), 9.5, DIM))
+                    egui::Label::new(disp_text(label.to_uppercase(), style_eyebrow(), DIM))
                         .truncate()
                         .selectable(false),
                 )
@@ -738,7 +775,7 @@ pub mod theme {
                 egui::Layout::left_to_right(egui::Align::Center),
                 |ui| {
                     ui.set_min_width(lw);
-                    ui.label(disp_text(label.to_uppercase(), 8.5, FAINT));
+                    ui.label(disp_text(label.to_uppercase(), style_eyebrow(), FAINT));
                 },
             );
             let cell = ((ui.available_width() - 12.0) / 3.0).max(30.0);
@@ -750,7 +787,7 @@ pub mod theme {
                         ui.set_min_width(cell);
                         // Match the value's left inset (strip + gap) so the header sits over the digits.
                         ui.add_space(9.0);
-                        ui.label(disp_text(t, 9.0, c));
+                        ui.label(disp_text(t, style_eyebrow(), c));
                     },
                 );
             }
@@ -874,7 +911,7 @@ pub mod theme {
                         egui::TextEdit::singleline(value)
                             .hint_text(hint)
                             .frame(false)
-                            .font(egui::FontId::monospace(11.0))
+                            .font(font(&TextStyle::Monospace))
                             .desired_width(f32::INFINITY),
                     )
                 })
@@ -915,7 +952,7 @@ pub mod theme {
                     flatten(ui);
                     egui::ComboBox::from_id_source(ui.auto_id_with(label))
                         .selected_text(
-                            egui::RichText::new(shown).monospace().size(11.0).color(TX),
+                            egui::RichText::new(shown).monospace().color(TX),
                         )
                         .width(inner.width())
                         .show_ui(ui, |ui| {
@@ -1022,7 +1059,7 @@ pub mod theme {
                 inner.left_center(),
                 egui::Align2::LEFT_CENTER,
                 text,
-                egui::FontId::monospace(11.0),
+                font(&TextStyle::Monospace),
                 if empty { FAINT } else { TX },
             );
             if !empty {
@@ -1121,7 +1158,7 @@ pub mod theme {
         ui.horizontal_wrapped(|ui| {
             ui.add_space(lw + 4.0);
             ui.spacing_mut().item_spacing.x = 0.0;
-            ui.label(egui::RichText::new(msg).size(10.5).color(colour));
+            ui.label(egui::RichText::new(msg).small().color(colour));
         });
     }
 
@@ -1141,7 +1178,7 @@ pub mod theme {
     pub fn danger_button(ui: &mut egui::Ui, label: &str, enabled: bool) -> egui::Response {
         ui.add_enabled(
             enabled,
-            egui::Button::new(disp_text(label.to_uppercase(), 12.0, HAZARD))
+            egui::Button::new(disp_text(label.to_uppercase(), style_title(), HAZARD))
                 .fill(HAZARD_SOFT)
                 .stroke(egui::Stroke::new(1.0, HAZARD)),
         )
@@ -1167,6 +1204,9 @@ pub mod theme {
         Audio,
         Missions,
         Systems,
+        /// Saves — a document with a folded top-right corner and header/footer stripes. Reads as a
+        /// `.profile` file, distinct from the Shipment crate glyph.
+        Saves,
         /// A short (1-2 char) monogram, drawn as text — the last-resort fallback for a surface with no
         /// bespoke icon yet.
         Glyph(&'static str),
@@ -1229,6 +1269,30 @@ pub mod theme {
                 p.circle_stroke(c, 6.0, s);
                 p.line_segment([c, c + vec2(0.0, -3.5)], s);
                 p.line_segment([c, c + vec2(2.8, 1.5)], s);
+            }
+            // Saves — a document outline with a bevelled top-right corner, a header stripe and a
+            // footer stripe. The silhouette echoes the `.profile` file (header bytes + inflated body).
+            RailIcon::Saves => {
+                let pts = [
+                    c + vec2(-6.0, -6.0),
+                    c + vec2(4.0, -6.0),
+                    c + vec2(6.0, -4.0),
+                    c + vec2(6.0, 6.0),
+                    c + vec2(-6.0, 6.0),
+                ];
+                for i in 0..pts.len() {
+                    p.line_segment([pts[i], pts[(i + 1) % pts.len()]], s);
+                }
+                p.rect_stroke(
+                    egui::Rect::from_min_max(c + vec2(-4.0, -6.0), c + vec2(2.0, -3.0)),
+                    0.0,
+                    s,
+                );
+                p.rect_stroke(
+                    egui::Rect::from_min_max(c + vec2(-4.0, 1.0), c + vec2(2.0, 6.0)),
+                    0.0,
+                    s,
+                );
             }
             // Craft — a hammer: a head bar up top with a handle dropping from it. (A single tool, so
             // it never reads as the crossed-blades Weapons icon.)
@@ -1323,7 +1387,7 @@ pub mod theme {
                     c,
                     egui::Align2::CENTER_CENTER,
                     text,
-                    egui::FontId::new(11.0, disp()),
+                    font(&style_eyebrow()),
                     col,
                 );
             }
@@ -1370,7 +1434,7 @@ pub mod theme {
                 rect.left_top() + egui::vec2(7.0, 5.0),
                 egui::Align2::LEFT_TOP,
                 format!("{i:02}"),
-                egui::FontId::monospace(8.0),
+                font(&TextStyle::Monospace),
                 if on { BRASS } else { FAINT },
             );
         }
@@ -1381,7 +1445,7 @@ pub mod theme {
             egui::pos2(cx, rect.center().y + 15.0),
             egui::Align2::CENTER_CENTER,
             label.to_uppercase(),
-            egui::FontId::new(8.5, disp()),
+            font(&style_eyebrow()),
             col,
         );
         // BAD, not BRASS: this counts things that BLOCK, and blocking is the one state the colour
@@ -1393,7 +1457,7 @@ pub mod theme {
                 c,
                 egui::Align2::CENTER_CENTER,
                 if n > 9 { "9+".to_string() } else { n.to_string() },
-                egui::FontId::new(9.0, disp()),
+                font(&style_eyebrow()),
                 Color32::from_rgb(0x1a, 0x0f, 0x0c),
             );
         }
@@ -1405,7 +1469,7 @@ pub mod theme {
         let (r, _) = ui.allocate_exact_size(egui::vec2(6.0, 6.0), egui::Sense::hover());
         ui.painter().rect_filled(r, egui::Rounding::same(1.0), color);
         ui.add_space(2.0);
-        ui.label(disp_text(label.to_uppercase(), 9.5, color));
+        ui.label(disp_text(label.to_uppercase(), style_eyebrow(), color));
     }
 
     /// The command-bar diamond brand mark (a filled brass rhombus with a dark inner cut — the game's
@@ -1483,4 +1547,63 @@ fn map_key(code: KeyCode) -> Option<egui::Key> {
         KeyCode::KeyZ => K::Z,
         _ => return None,
     })
+}
+
+#[cfg(test)]
+mod type_scale_tests {
+    use super::theme;
+
+    #[test]
+    fn no_style_in_the_type_scale_is_below_11px() {
+        for (style, font) in theme::type_scale() {
+            assert!(font.size >= 11.0, "{style:?} is {}px", font.size);
+        }
+    }
+
+    /// Text sizes come from the type scale only. A literal `.size(N)` (other than a spinner's),
+    /// `FontId::proportional/monospace(..)`, or a `FontId::new(..)` outside `type_scale` is a
+    /// hard-coded font size and fails here.
+    #[test]
+    fn no_hard_coded_font_sizes_in_the_workshop_sources() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut hits = Vec::new();
+        for entry in std::fs::read_dir(&dir).expect("read src dir") {
+            let path = entry.expect("dir entry").path();
+            if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+                continue;
+            }
+            let mut src = std::fs::read_to_string(&path).expect("read source");
+            // This test's own pattern strings are not font sizes.
+            if let Some(cut) = src.find("mod type_scale_tests") {
+                src.truncate(cut);
+            }
+            let file = path.file_name().unwrap().to_string_lossy().into_owned();
+            let mut in_scale_fn = false;
+            for (n, line) in src.lines().enumerate() {
+                let t = line.trim_start();
+                if t.starts_with("//") || t.starts_with("///") {
+                    continue;
+                }
+                if t.starts_with("pub fn type_scale()") {
+                    in_scale_fn = true;
+                }
+                if in_scale_fn && t == "}" && line.starts_with("    }") {
+                    in_scale_fn = false;
+                }
+                let literal_size = line
+                    .match_indices(".size(")
+                    .any(|(i, _)| {
+                        line[i + 6..].starts_with(|c: char| c.is_ascii_digit())
+                            && !line[..i].trim_end().ends_with("Spinner::new()")
+                    });
+                let font_ctor = line.contains("FontId::proportional(")
+                    || line.contains("FontId::monospace(")
+                    || (line.contains("FontId::new(") && !in_scale_fn);
+                if literal_size || font_ctor {
+                    hits.push(format!("{file}:{}: {}", n + 1, line.trim()));
+                }
+            }
+        }
+        assert!(hits.is_empty(), "hard-coded font sizes:\n{}", hits.join("\n"));
+    }
 }

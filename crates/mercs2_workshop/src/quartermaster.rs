@@ -623,6 +623,11 @@ impl Panel {
         self.shipment.as_ref().map(|s| s.root.as_path())
     }
 
+    /// The index of the first contribution `matches` accepts, in the open Shipment.
+    pub(crate) fn find_contribution(&self, matches: impl Fn(&Contribution) -> bool) -> Option<usize> {
+        self.shipment.as_ref()?.manifest.contributions.iter().position(matches)
+    }
+
     /// The load target for a craft bench entered from contribution `i`: its source model and its
     /// resolved donor. `None` when there is no open Shipment, no such contribution, or the
     /// contribution is not one a bench edits (only `add_outfit` / `add_model` carry a model + donor).
@@ -720,7 +725,7 @@ fn sev_chip(ui: &mut egui::Ui, s: Severity) {
         .rounding(3.0)
         .inner_margin(egui::Margin::symmetric(5.0, 1.0))
         .show(ui, |ui| {
-            ui.label(theme::disp_text(sev_label(s).to_uppercase(), 9.0, fg));
+            ui.label(theme::disp_text(sev_label(s).to_uppercase(), theme::style_eyebrow(), fg));
         });
 }
 
@@ -848,7 +853,7 @@ fn row_of(ui: &mut egui::Ui, key: &str, value: &str, hover: &str, colour: Color3
             r.left_center(),
             egui::Align2::LEFT_CENTER,
             key,
-            egui::FontId::proportional(11.0),
+            theme::font(&egui::TextStyle::Small),
             theme::FAINT,
         );
         let max_chars = ((ui.available_width() / 6.2).floor() as usize).max(12);
@@ -861,7 +866,7 @@ fn row_of(ui: &mut egui::Ui, key: &str, value: &str, hover: &str, colour: Color3
         } else {
             format!("{}\u{2026}", value.chars().take(max_chars - 1).collect::<String>())
         };
-        ui.label(egui::RichText::new(shown).monospace().size(11.0).color(colour))
+        ui.label(egui::RichText::new(shown).monospace().color(colour))
             .on_hover_text(hover);
     });
 }
@@ -1220,14 +1225,13 @@ fn stub(kind: &str, n: usize) -> Option<Contribution> {
 /// to a contribution, so a stripe without its cause would just be a colour.
 pub fn navigator(ui: &mut egui::Ui, p: &Panel) -> Vec<Act> {
     let mut acts = Vec::new();
-    ui.label(theme::disp_text("SHIPMENT", 15.0, theme::TX));
+    ui.label(theme::disp_text("SHIPMENT", theme::style_title(), theme::TX));
     let Some(s) = &p.shipment else {
         ui.add_space(6.0);
         ui.label(
             egui::RichText::new(
                 "A Shipment is a folder that builds to one overlay WAD, leaving the base game untouched.",
-            )
-            .size(11.5)
+            ).small()
             .color(theme::FAINT),
         );
         return acts;
@@ -1237,7 +1241,6 @@ pub fn navigator(ui: &mut egui::Ui, p: &Panel) -> Vec<Act> {
             "{} {}",
             s.manifest.shipment.name, s.manifest.shipment.version
         ))
-        .size(10.5)
         .monospace()
         .color(theme::FAINT),
     );
@@ -1251,7 +1254,7 @@ pub fn navigator(ui: &mut egui::Ui, p: &Panel) -> Vec<Act> {
     // beside the game.
     let add_menu = |ui: &mut egui::Ui, out: &mut Vec<Act>| {
         for (layer, kinds) in KINDS {
-            ui.label(theme::disp_text(layer.to_uppercase(), 9.0, theme::FAINT));
+            ui.label(theme::disp_text(layer.to_uppercase(), theme::style_eyebrow(), theme::FAINT));
             for (kind, blurb) in *kinds {
                 if ui.button(*kind).on_hover_text(*blurb).clicked() {
                     out.push(Act::Add(kind));
@@ -1275,20 +1278,19 @@ pub fn navigator(ui: &mut egui::Ui, p: &Panel) -> Vec<Act> {
             .inner_margin(egui::Margin { left: 9.0, right: 8.0, top: 6.0, bottom: 7.0 })
             .show(ui, |ui| {
                 ui.set_width(ui.available_width());
-                ui.label(theme::disp_text(c.kind().to_uppercase(), 8.5, theme::DIM));
+                ui.label(theme::disp_text(c.kind().to_uppercase(), theme::style_eyebrow(), theme::DIM));
                 ui.label(
                     egui::RichText::new(contribution_name(c))
-                        .size(12.5)
                         .color(if selected { theme::BRASS } else { theme::TX }),
                 );
                 if let Some(d) = worst_on(p, i) {
                     ui.horizontal(|ui| {
                         sev_chip(ui, d.severity);
                         ui.label(
-                            egui::RichText::new(d.rule.code).size(9.5).monospace().color(theme::DIM),
+                            egui::RichText::new(d.rule.code).monospace().color(theme::DIM),
                         );
                     });
-                    ui.label(egui::RichText::new(short(d.rule.title)).size(10.5).color(theme::DIM));
+                    ui.label(egui::RichText::new(short(d.rule.title)).small().color(theme::DIM));
                 }
             })
             .response;
@@ -1352,12 +1354,11 @@ pub fn center(ctx: &egui::Context, p: &Panel, names: Option<&NameTable>) -> Vec<
             let Some(i) = p.selected.filter(|i| *i < s.manifest.contributions.len()) else {
                 ui.label(theme::disp_text(
                     s.manifest.shipment.name.to_uppercase(),
-                    22.0,
+                    egui::TextStyle::Heading,
                     theme::TX,
                 ));
                 ui.label(
-                    egui::RichText::new("the Shipment itself — pick a contribution at left to edit one")
-                        .size(11.0)
+                    egui::RichText::new("the Shipment itself — pick a contribution at left to edit one").small()
                         .color(theme::FAINT),
                 );
                 ui.add_space(14.0);
@@ -1375,12 +1376,11 @@ pub fn center(ctx: &egui::Context, p: &Panel, names: Option<&NameTable>) -> Vec<
             let c = &s.manifest.contributions[i];
 
             ui.horizontal(|ui| {
-                ui.label(theme::disp_text(c.kind().to_uppercase(), 11.0, theme::BRASS));
-                ui.label(egui::RichText::new(contribution_name(c)).size(22.0).color(theme::TX));
+                ui.label(theme::disp_text(c.kind().to_uppercase(), theme::style_eyebrow(), theme::BRASS));
+                ui.label(egui::RichText::new(contribution_name(c)).heading().color(theme::TX));
             });
             ui.label(
                 egui::RichText::new(format!("contributions[{i}]"))
-                    .size(10.5)
                     .monospace()
                     .color(theme::FAINT),
             );
@@ -1398,8 +1398,7 @@ pub fn center(ctx: &egui::Context, p: &Panel, names: Option<&NameTable>) -> Vec<
                         ui.label(
                             egui::RichText::new(
                                 "`_tOutfits` has one list per hero, so the wearer is a closed set \u{2014} and the merge key is (wearer, slug), which is why retail can reuse `Original` across all three.",
-                            )
-                            .size(11.0)
+                            ).small()
                             .color(theme::FAINT),
                         );
                         ui.add_space(7.0);
@@ -1467,7 +1466,7 @@ pub fn center(ctx: &egui::Context, p: &Panel, names: Option<&NameTable>) -> Vec<
                     // lowers to, so the easy face is never opaque about the manifest it produces.
                     ui.add_space(6.0);
                     theme::advanced(ui, "what-this-writes", |ui| {
-                        ui.label(theme::disp_text("writes this into manifest.yaml", 9.0, theme::FAINT));
+                        ui.label(theme::disp_text("writes this into manifest.yaml", theme::style_eyebrow(), theme::FAINT));
                         ui.add_space(2.0);
                         let yaml = mercs2_quartermaster::contribution_yaml(c);
                         theme::code_block(ui, yaml.trim_end());
@@ -1478,8 +1477,7 @@ pub fn center(ctx: &egui::Context, p: &Panel, names: Option<&NameTable>) -> Vec<
                     ui.label(
                         egui::RichText::new(
                             "Derived from the contribution, not declared \u{2014} only `raw` declares its own.",
-                        )
-                        .size(11.0)
+                        ).small()
                         .color(theme::FAINT),
                     );
                     ui.add_space(6.0);
@@ -1492,8 +1490,7 @@ pub fn center(ctx: &egui::Context, p: &Panel, names: Option<&NameTable>) -> Vec<
                 theme::section(ui, "Findings", Some(&format!("{}", mine.len())), true, |ui| {
                     if mine.is_empty() {
                         ui.label(
-                            egui::RichText::new("Nothing to report against this contribution.")
-                                .size(11.5)
+                            egui::RichText::new("Nothing to report against this contribution.").small()
                                 .color(theme::FAINT),
                         );
                     }
@@ -1502,15 +1499,13 @@ pub fn center(ctx: &egui::Context, p: &Panel, names: Option<&NameTable>) -> Vec<
                             sev_chip(ui, d.severity);
                             ui.label(
                                 egui::RichText::new(d.rule.code)
-                                    .size(10.0)
                                     .monospace()
                                     .color(theme::DIM),
                             );
-                            ui.label(egui::RichText::new(d.rule.title).size(12.0).color(theme::TX));
+                            ui.label(egui::RichText::new(d.rule.title).color(theme::TX));
                         });
                         ui.label(
                             egui::RichText::new(&d.message)
-                                .size(10.5)
                                 .monospace()
                                 .color(theme::DIM),
                         );
@@ -1519,7 +1514,6 @@ pub fn center(ctx: &egui::Context, p: &Panel, names: Option<&NameTable>) -> Vec<
                         if let Some(fix) = &d.fix {
                             ui.label(
                                 egui::RichText::new(format!("fix: {fix}"))
-                                    .size(10.0)
                                     .monospace()
                                     .color(theme::GOOD),
                             );
@@ -2736,8 +2730,7 @@ fn identity_form(
                  (optionally within a version range) or a capability some Shipment provides. A \
                  Shipment loads after the Shipments it requires. `conflicts` names a Shipment \
                  (optionally within a range) that cannot be installed alongside this.",
-            )
-            .size(11.0)
+            ).small()
             .color(theme::FAINT),
         );
         ui.add_space(6.0);
@@ -3083,9 +3076,9 @@ fn retarget_summary(
 fn empty_middle(ui: &mut egui::Ui, title: &str, sub: &str) {
     ui.vertical_centered(|ui| {
         ui.add_space(90.0);
-        ui.label(theme::disp_text(title, 13.0, theme::FAINT));
+        ui.label(theme::disp_text(title, theme::style_title(), theme::FAINT));
         ui.add_space(6.0);
-        ui.label(egui::RichText::new(sub).size(12.0).color(theme::FAINT));
+        ui.label(egui::RichText::new(sub).color(theme::FAINT));
     });
 }
 
@@ -3247,14 +3240,14 @@ pub fn inspector(ui: &mut egui::Ui, p: &Panel, wad_stack: &[String], has_game: b
             ui.horizontal(|ui| {
                 let (r, _) = ui.allocate_exact_size(egui::vec2(9.0, 9.0), egui::Sense::hover());
                 ui.painter().circle_filled(r.center(), 4.5, gc);
-                ui.label(theme::disp_text(gate.title().to_uppercase(), 11.5, gc));
+                ui.label(theme::disp_text(gate.title().to_uppercase(), theme::style_eyebrow(), gc));
             });
-            ui.label(egui::RichText::new(p.gate_detail(gate)).size(11.5).color(theme::DIM));
+            ui.label(egui::RichText::new(p.gate_detail(gate)).small().color(theme::DIM));
         });
     ui.add_space(10.0);
 
     if let Some(e) = &p.error {
-        ui.label(egui::RichText::new(e).size(11.0).color(theme::BAD));
+        ui.label(egui::RichText::new(e).small().color(theme::BAD));
         ui.add_space(6.0);
     }
 
@@ -3263,8 +3256,7 @@ pub fn inspector(ui: &mut egui::Ui, p: &Panel, wad_stack: &[String], has_game: b
     theme::section(ui, "Game stack", None, true, |ui| {
         if wad_stack.is_empty() {
             ui.label(
-                egui::RichText::new("Not configured \u{2014} set it in Settings.")
-                    .size(11.0)
+                egui::RichText::new("Not configured \u{2014} set it in Settings.").small()
                     .italics()
                     .color(theme::FAINT),
             );
@@ -3281,7 +3273,7 @@ pub fn inspector(ui: &mut egui::Ui, p: &Panel, wad_stack: &[String], has_game: b
                     }
                 }
                 Err(e) => {
-                    ui.label(egui::RichText::new(e).size(11.0).color(theme::BAD));
+                    ui.label(egui::RichText::new(e).small().color(theme::BAD));
                 }
             }
         }
@@ -3298,7 +3290,6 @@ pub fn inspector(ui: &mut egui::Ui, p: &Panel, wad_stack: &[String], has_game: b
                         .add(
                             egui::Label::new(
                                 egui::RichText::new(d.rule.code)
-                                    .size(10.0)
                                     .monospace()
                                     .color(theme::DIM)
                                     .underline(),
@@ -3311,13 +3302,12 @@ pub fn inspector(ui: &mut egui::Ui, p: &Panel, wad_stack: &[String], has_game: b
                         acts.push(Act::OpenDoc(d.rule.url()));
                     }
                 });
-                ui.label(egui::RichText::new(d.rule.title).size(11.5).color(theme::TX));
+                ui.label(egui::RichText::new(d.rule.title).small().color(theme::TX));
                 if let Some(i) = d.at {
                     if ui
                         .add(
                             egui::Label::new(
                                 egui::RichText::new(format!("contributions[{i}]"))
-                                    .size(10.0)
                                     .monospace()
                                     .color(theme::FAINT),
                             )
@@ -3360,8 +3350,7 @@ pub fn inspector(ui: &mut egui::Ui, p: &Panel, wad_stack: &[String], has_game: b
             ui.label(
                 egui::RichText::new(
                     "The script half relinks across every installed Shipment at install, so this WAD is only valid standalone.",
-                )
-                .size(10.0)
+                ).small()
                 .color(theme::FAINT),
             );
         });

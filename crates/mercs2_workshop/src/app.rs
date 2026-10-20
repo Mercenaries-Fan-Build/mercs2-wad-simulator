@@ -114,6 +114,61 @@ impl WadStack {
             .ok_or_else(|| format!("0x{hash:08X}: no model chunk in any open wad"))
     }
 
+    /// A string table by asset name (`english`, `french`, …) as `key_hash -> text`, resolved through
+    /// the residency registry like every other asset (overlays first). Keys are hashed by their bare
+    /// name — look one up with `mercs2_formats::stringdb::key_hash`.
+    pub fn string_table(&mut self, name: &str) -> Result<HashMap<u32, String>, String> {
+        let name_hash = mercs2_formats::hash::pandemic_hash_m2(name);
+        let WadStack { wads, registry, .. } = self;
+        let container = registry
+            .resolve(wads, mercs2_formats::types::TYPE_HASH_STRINGDB, name_hash)
+            .and_then(|c| registry.slice(c).map(<[u8]>::to_vec))
+            .ok_or_else(|| format!("string table `{name}`: not in any open wad"))?;
+        let keys = mercs2_formats::ucfx::extract_chunk_body(&container, b"KEYS")
+            .ok_or_else(|| format!("string table `{name}`: no KEYS chunk"))?;
+        let strs = mercs2_formats::ucfx::extract_chunk_body(&container, b"STRS")
+            .ok_or_else(|| format!("string table `{name}`: no STRS chunk"))?;
+        let db = mercs2_formats::stringdb::parse(&keys, &strs)
+            .map_err(|e| format!("string table `{name}`: {e}"))?;
+        Ok(db.entries.into_iter().map(|e| (e.key_hash, e.text)).collect())
+    }
+
+    /// A shipped script's LuaQ bytecode by module name (`wifmissiondata`, `mrxrewarddata`, …),
+    /// resolved through the residency registry like every other asset (overlays first).
+    pub fn script_bytecode(&mut self, name: &str) -> Result<Vec<u8>, String> {
+        let name_hash = mercs2_formats::hash::pandemic_hash_m2(name);
+        let WadStack { wads, registry, .. } = self;
+        let container = registry
+            .resolve(wads, mercs2_formats::types::TYPE_HASH_SCRIPT, name_hash)
+            .and_then(|c| registry.slice(c).map(<[u8]>::to_vec))
+            .ok_or_else(|| format!("script `{name}`: not in any open wad"))?;
+        let lay = mercs2_formats::scripts_block::parse_container(&container)
+            .map_err(|e| format!("script `{name}`: {e}"))?;
+        Ok(container[lay.luaq_off..lay.csum_off].to_vec())
+    }
+
+    /// Every `worldentity` template's name by key (`0x80005FD3 -> "C4"`), from the container's
+    /// `Name` records — the names `Pg.Spawn` resolves. The container resolves through the residency
+    /// registry like every other asset (overlays first).
+    pub fn template_names(&mut self) -> Result<HashMap<u32, String>, String> {
+        use mercs2_formats::worldentity::{
+            WorldEntity, RETAIL_WORLDENTITY_NAME_HASH, WORLDENTITY_TYPE_HASH,
+        };
+        let WadStack { wads, registry, .. } = self;
+        let container = registry
+            .resolve(wads, WORLDENTITY_TYPE_HASH, RETAIL_WORLDENTITY_NAME_HASH)
+            .and_then(|c| registry.slice(c).map(<[u8]>::to_vec))
+            .ok_or("worldentity: not in any open wad")?;
+        let we = WorldEntity::parse(&container).map_err(|e| format!("worldentity: {e}"))?;
+        let mut out = HashMap::new();
+        for (name, keys) in we.names().map_err(|e| format!("worldentity: {e}"))? {
+            for &k in keys {
+                out.entry(k).or_insert_with(|| name.clone());
+            }
+        }
+        Ok(out)
+    }
+
     /// The assembled model — LOD-block chain joined through the resident block. Overlays first.
     pub fn model(&mut self, hash: u32) -> Result<mercs2_engine::model::Model, String> {
         let mut last = format!("0x{hash:08X}: no model chunk in any open wad");
@@ -474,6 +529,9 @@ enum Act {
     TexClose,
     /// Open a decompiled game script (corpus path) in the read-only Lua viewer.
     LuaOpen(String),
+    /// Open a decompiled game script in the Lua viewer scrolled to a specific 1-based line —
+    /// used by the Missions blueprint editor's "Jump to source" verb.
+    LuaOpenAt(String, u32),
     /// Mod project: set the donor model for the next new asset.
     ModDonor(u32, String),
     /// Mod project: package the current imported preview as a new asset named this.
@@ -531,6 +589,10 @@ enum Act {
 enum Workbench {
     /// Browse + read every asset: info, LOD, destruction, segments, animation, skeleton.
     Inspect,
+    /// Browse / inspect / edit a Mercenaries 2 `.profile`. A rail-sibling of Inspect: the
+    /// `mercs2_formats::save` reader, the `save_lua` AST and the `save_write` writer are the
+    /// backbone; the panel in `src/saves.rs` is their UI front end.
+    Saves,
     /// The editable placement scene: place/move/merge instances, save/load arrangements.
     Sandbox,
     /// Author a mod: conform an import onto a donor template, place hardpoints, publish a patch WAD.
@@ -654,8 +716,12 @@ impl Workbench {
     /// not top-level peers."* They are craft — they act on ONE contribution — so they are entered
     /// from the Shipment page and return to it, rather than being places you navigate to and then
     /// have to remember what you were assembling.
-    const ALL: [Workbench; 11] = [
+    const ALL: [Workbench; 12] = [
         Workbench::Inspect,
+        // Position 2 per the mockup: Saves sits next to Inspect, before Craft and the domain
+        // lenses. It is Inspect for a different subject — a `.profile`, not an asset — so it
+        // reads naturally as the second rail cell.
+        Workbench::Saves,
         Workbench::Craft,
         Workbench::Domain(crate::domain::Domain::World),
         Workbench::Domain(crate::domain::Domain::Characters),
@@ -685,7 +751,9 @@ impl Workbench {
     /// painting over that page's heading — which is exactly what Settings then did.
     fn has_viewport(self) -> bool {
         match self {
-            Workbench::Quartermaster | Workbench::Settings => false,
+            // Saves composes its own centre (hero card + HUD overlays + progression tabs) rather
+            // than painting over the 3D viewport, so the HUD chips stay suppressed here.
+            Workbench::Quartermaster | Workbench::Settings | Workbench::Saves => false,
             // A model-browsing domain shows the loaded model; audio/missions/systems do not.
             Workbench::Domain(d) => d.browses_models(),
             _ => true,
@@ -694,6 +762,7 @@ impl Workbench {
     fn label(self) -> &'static str {
         match self {
             Workbench::Inspect => "Inspect",
+            Workbench::Saves => "Saves",
             Workbench::Sandbox => "Sandbox",
             Workbench::Mods => "Mods",
             Workbench::Skeleton => "Skeleton",
@@ -709,6 +778,7 @@ impl Workbench {
     fn icon(self) -> crate::gui::theme::RailIcon {
         match self {
             Workbench::Inspect => crate::gui::theme::RailIcon::Inspect,
+            Workbench::Saves => crate::gui::theme::RailIcon::Saves,
             Workbench::Sandbox => crate::gui::theme::RailIcon::Sandbox,
             Workbench::Mods => crate::gui::theme::RailIcon::Mods,
             Workbench::Skeleton => crate::gui::theme::RailIcon::Skeleton,
@@ -722,6 +792,7 @@ impl Workbench {
     fn verb(self) -> &'static str {
         match self {
             Workbench::Inspect => "Inspecting",
+            Workbench::Saves => "Saves",
             Workbench::Sandbox => "Sandbox",
             Workbench::Mods => "Mod project",
             Workbench::Skeleton => "Retarget",
@@ -823,7 +894,7 @@ fn asset_menu(
     actions: &mut Vec<Act>,
 ) {
     use crate::gui::theme;
-    ui.label(theme::disp_text(label.to_uppercase(), 10.0, theme::BRASS));
+    ui.label(theme::disp_text(label.to_uppercase(), theme::style_eyebrow(), theme::BRASS));
     ui.separator();
 
     if is_texture {
@@ -896,7 +967,7 @@ fn asset_menu(
 /// field from the label, so the resulting contribution names this exact layer.
 fn layer_menu(ui: &mut egui::Ui, hash: u32, label: &str, actions: &mut Vec<Act>) {
     use crate::gui::theme;
-    ui.label(theme::disp_text(label.to_uppercase(), 10.0, theme::BRASS));
+    ui.label(theme::disp_text(label.to_uppercase(), theme::style_eyebrow(), theme::BRASS));
     ui.separator();
     ui.menu_button("Add to Shipment", |ui| {
         for (kind, what) in crate::quartermaster::routes_for_layer() {
@@ -1002,6 +1073,7 @@ pub fn run(opts: Options) {
     struct BootData {
         names: HashMap<u32, String>,
         lua: Vec<(String, String, String)>,
+        missions: crate::missions::Reference,
         ess_api: crate::essapi::ApiIndex,
         ecs_reg: crate::ecsreg::EcsRegistry,
         audio_idx: crate::audioidx::AudioIndex,
@@ -1024,10 +1096,15 @@ pub fn run(opts: Options) {
                 })?;
                 let _ = tx.send(Boot::Prog(0.97, "Lua reference corpus"));
                 let lua = crate::index::load_lua_corpus()?;
+                // The Missions page's corpus index and palette: every script parsed and lifted
+                // once, here rather than on the UI thread.
+                let _ = tx.send(Boot::Prog(0.98, "Mission scripts"));
+                let missions = crate::missions::Reference::build(&lua)?;
                 let home = crate::index::require_data_home(&mut |_, _| {})?;
                 Ok(BootData {
                     names,
                     lua,
+                    missions,
                     // The Ess / engine API reference the console autocompletes against.
                     ess_api: crate::essapi::ApiIndex::load(&home)?,
                     // The native ECS component-class registry — the *typed* half of the reference
@@ -1165,6 +1242,17 @@ pub fn run(opts: Options) {
     // The Quartermaster dock. Present beside every workbench, because edits from anywhere land in
     // the same Shipment — so the surface holding them cannot be a page you navigate away to.
     let mut qm = crate::quartermaster::Panel::default();
+    // The Saves page's own state (a `.profile` currently selected, if any). Lives on the stack
+    // beside `qm` so switching rails never discards it.
+    let mut saves = crate::saves::Panel::default();
+    // Per-hero `shot::HeroRenderer`s, keyed by model hash. Each one owns its own wgpu device
+    // and keeps the pipeline + mesh / texture uploads warm, so an orbit drag re-renders in
+    // ~10-30 ms instead of the ~1-2 s a fresh `shot::render` call would take. Dropped only
+    // when the whole workshop exits.
+    let mut hero_renderers: HashMap<u32, crate::shot::HeroRenderer> = HashMap::new();
+    // The Missions blueprint editor's panel. One per app session — pan/zoom/selection survive the
+    // navigator tab switching away and back, which the real workflow does constantly.
+    let mut missions_panel = crate::missions::Panel::default();
     // Host-provided, like the game stack: the crate never reaches into the filesystem for it.
     let qm_names = mercs2_quartermaster::names::NameTable::find_from(
         &std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
@@ -1564,9 +1652,12 @@ pub fn run(opts: Options) {
                                     boot_stage = stage;
                                 }
                                 Ok(Boot::Done(data)) => {
-                                    let BootData { names, lua, ess_api: api, ecs_reg: ecs, audio_idx: audio, secs } = *data;
+                                    let BootData { names, lua, missions, ess_api: api, ecs_reg: ecs, audio_idx: audio, secs } = *data;
                                     index.apply_names(names);
                                     lua_corpus = lua;
+                                    // The Missions blueprint editor's script list and palette come
+                                    // from the corpus the boot thread indexed.
+                                    missions_panel.set_reference(missions, &lua_corpus);
                                     ess_api = api;
                                     ecs_reg = ecs;
                                     audio_idx = audio;
@@ -1851,6 +1942,11 @@ pub fn run(opts: Options) {
                     // ── The inspector GUI: toolbar, browser, Details panel, texture window.
                     // Widgets queue `Act`s; the processor below executes them. ──
     let mut qm_acts: Vec<crate::quartermaster::Act> = Vec::new();
+                    let mut saves_acts: Vec<crate::saves::Act> = Vec::new();
+                    // Captured below inside `gui.run` so the saves reducer (which runs after the
+                    // closure returns) can allocate egui textures for the hero-portrait render.
+                    let mut pending_ctx: Option<egui::Context> = None;
+                    let mut missions_acts: Vec<crate::missions::Act> = Vec::new();
                     let mut hovered_bone: Option<usize> = None;
                     // Skeleton workbench hover: (bone index, is_source_tree). Resolved to a viewer
                     // highlight in the PREVIEW's current space (source before Apply, target after).
@@ -1881,8 +1977,8 @@ pub fn run(opts: Options) {
                             ui.horizontal_centered(|ui| {
                                 theme::brand_mark(ui);
                                 ui.add_space(6.0);
-                                ui.label(theme::disp_text("MERCS 2", 16.0, theme::TX));
-                                ui.label(theme::disp_text("WORKSHOP", 9.5, theme::FAINT));
+                                ui.label(theme::disp_text("MERCS 2", theme::style_title(), theme::TX));
+                                ui.label(theme::disp_text("WORKSHOP", theme::style_eyebrow(), theme::FAINT));
                                 ui.separator();
                                 // A craft surface was entered FROM the Shipment, so it offers the way
                                 // back. Without this the rail no longer lists it and there is no
@@ -1891,7 +1987,7 @@ pub fn run(opts: Options) {
                                     && ui
                                         .add(egui::Button::new(theme::disp_text(
                                             "\u{2039} SHIPMENT",
-                                            10.0,
+                                            theme::style_eyebrow(),
                                             theme::BRASS,
                                         )))
                                         .on_hover_text("Back to the Shipment")
@@ -1899,7 +1995,7 @@ pub fn run(opts: Options) {
                                 {
                                     wb = Workbench::Quartermaster;
                                 }
-                                ui.label(theme::disp_text(wb.verb().to_uppercase(), 10.0, theme::FAINT));
+                                ui.label(theme::disp_text(wb.verb().to_uppercase(), theme::style_eyebrow(), theme::FAINT));
                                 // The breadcrumb names what the PAGE is working on. On the Shipment
                                 // page that is the Shipment — showing the previewed model instead
                                 // pointed at whatever Inspect happened to be holding.
@@ -1927,13 +2023,24 @@ pub fn run(opts: Options) {
                                 ui.with_layout(
                                     egui::Layout::right_to_left(egui::Align::Center),
                                     |ui| {
-                                        if ui.button("Load").on_hover_text("Load a saved arrangement").clicked() {
-                                            actions.push(Act::LoadScene);
+                                        // Scene Save / Load belong to the Scene surface — leaking
+                                        // them into every workbench's header made the trio read as
+                                        // a global save button on pages (Saves, Inspect, Shipment)
+                                        // that have nothing to do with the sandbox arrangement.
+                                        // Each page now owns its own verbs; the Scene scope stays
+                                        // scoped.
+                                        let in_scene = wb == Workbench::Sandbox
+                                            || (wb == Workbench::Craft
+                                                && craft_mode == CraftMode::Scene);
+                                        if in_scene {
+                                            if ui.button("Load").on_hover_text("Load a saved arrangement").clicked() {
+                                                actions.push(Act::LoadScene);
+                                            }
+                                            if ui.button("Save").on_hover_text("Save the sandbox arrangement").clicked() {
+                                                actions.push(Act::SaveScene);
+                                            }
+                                            theme::eyebrow(ui, "Scene");
                                         }
-                                        if ui.button("Save").on_hover_text("Save the sandbox arrangement").clicked() {
-                                            actions.push(Act::SaveScene);
-                                        }
-                                        theme::eyebrow(ui, "Scene");
                                         if names_pending {
                                             ui.separator();
                                             ui.add(egui::Spinner::new().size(13.0));
@@ -2028,14 +2135,29 @@ pub fn run(opts: Options) {
                             )
                             .show(ctx, |ui| {
                             ui.horizontal(|ui| {
-                                if names_pending {
+                                // On the Saves workbench with a selection, the status bar
+                                // speaks about the loaded `.profile` instead of the workshop's
+                                // asset-load state — matches the mockup's "LOADED · 13,404 B ·
+                                // checksum ok · payload inflated". Falls through to the normal
+                                // workshop status for every other page and for Saves with no
+                                // selection.
+                                let saves_banner = (wb == Workbench::Saves)
+                                    .then(|| crate::saves::saves_status_banner(&saves))
+                                    .flatten();
+                                if let Some((dot_color, dot_text, detail)) = saves_banner {
+                                    theme::status_dot(ui, dot_text, dot_color);
+                                    ui.separator();
+                                    ui.label(egui::RichText::new(detail).color(theme::DIM).small());
+                                } else if names_pending {
                                     theme::status_dot(ui, "Loading", theme::BRASS);
                                     ui.add(egui::Spinner::new().size(11.0));
+                                    ui.separator();
+                                    ui.label(egui::RichText::new(status.as_str()).color(theme::DIM).small());
                                 } else {
                                     theme::status_dot(ui, "Ready", theme::GOOD);
+                                    ui.separator();
+                                    ui.label(egui::RichText::new(status.as_str()).color(theme::DIM).small());
                                 }
-                                ui.separator();
-                                ui.label(egui::RichText::new(status.as_str()).color(theme::DIM).size(11.0));
                                 // Bottom-right: background work in flight (clip decodes,
                                 // mod publishing).
                                 let n = clip_loader.inflight.len();
@@ -2080,9 +2202,12 @@ pub fn run(opts: Options) {
                             Workbench::Quartermaster => {
                                 qm_acts.extend(crate::quartermaster::navigator(ui, &qm));
                             }
+                            Workbench::Saves => {
+                                saves_acts.extend(crate::saves::navigator(ui, &saves));
+                            }
                             Workbench::Inspect => {
                             let before = (kind, filter.clone());
-                            ui.label(theme::disp_text("ASSETS", 15.0, theme::TX));
+                            ui.label(theme::disp_text("ASSETS", theme::style_title(), theme::TX));
                             ui.add_space(8.0);
                             // Segmented Models / Textures toggle — two EQUAL-width segments, each a
                             // centred "LABEL  count" unit, the active one filled. Custom-drawn so the
@@ -2106,12 +2231,12 @@ pub fn run(opts: Options) {
                                             let p0 = ui.painter();
                                             let g_name = p0.layout_no_wrap(
                                                 name.to_uppercase(),
-                                                egui::FontId::new(10.0, theme::disp()),
+                                                theme::font(&theme::style_eyebrow()),
                                                 theme::TX,
                                             );
                                             let g_cnt = p0.layout_no_wrap(
                                                 commafy(count),
-                                                egui::FontId::monospace(9.0),
+                                                theme::font(&egui::TextStyle::Monospace),
                                                 theme::FAINT,
                                             );
                                             let gap = 5.0;
@@ -2273,13 +2398,12 @@ pub fn run(opts: Options) {
                                                     ));
                                                     ui.label(theme::disp_text(
                                                         cat.to_uppercase(),
-                                                        10.0,
+                                                        theme::style_eyebrow(),
                                                         theme::FAINT,
                                                     ));
                                                     ui.label(
                                                         egui::RichText::new(n.to_string())
                                                             .monospace()
-                                                            .size(9.5)
                                                             .color(theme::FAINT),
                                                     );
                                                     // Claim the rest of the row so the click target
@@ -2349,7 +2473,7 @@ pub fn run(opts: Options) {
                                 // Scene OUTLINER: the placed instances, plus a place-from-library
                                 // search — the Sandbox is about arranging many objects, so this is
                                 // its own list, not the asset browser.
-                                ui.label(theme::disp_text("SCENE", 15.0, theme::TX));
+                                ui.label(theme::disp_text("SCENE", theme::style_title(), theme::TX));
                                 ui.weak("Objects placed in this scene. Select to transform.");
                                 ui.add_space(8.0);
                                 egui::Frame::none()
@@ -2430,12 +2554,12 @@ pub fn run(opts: Options) {
                                             ui.add_space(4.0);
                                             let r = ui.selectable_label(
                                                 sel,
-                                                egui::RichText::new(&plabel).size(12.5),
+                                                egui::RichText::new(&plabel),
                                             );
                                             ui.with_layout(
                                                 egui::Layout::right_to_left(egui::Align::Center),
                                                 |ui| {
-                                                    ui.label(egui::RichText::new(format!("n{i}")).monospace().size(9.5).color(theme::FAINT));
+                                                    ui.label(egui::RichText::new(format!("n{i}")).monospace().color(theme::FAINT));
                                                 },
                                             );
                                             r
@@ -2466,7 +2590,7 @@ pub fn run(opts: Options) {
                                 }
                             }
                             Workbench::Mods => {
-                                ui.label(theme::disp_text("Donor templates", 15.0, theme::TX));
+                                ui.label(theme::disp_text("Donor templates", theme::style_title(), theme::TX));
                                 ui.weak("Pick ANY host template — vehicle, character, building or prop \
                                          — it becomes the conform donor whose container hosts the \
                                          injected geometry.");
@@ -2478,7 +2602,7 @@ pub fn run(opts: Options) {
                                     for (class, rows) in &vehicle_inventory {
                                         egui::CollapsingHeader::new(theme::disp_text(
                                             format!("{class}  ({})", rows.len()),
-                                            13.0,
+                                            theme::style_title(),
                                             theme::DIM,
                                         ))
                                         .default_open(*class == "helicopter")
@@ -2508,7 +2632,7 @@ pub fn run(opts: Options) {
                                 if have_target && !show_target_picker && retarget.is_some() {
                                     if let (Some(r), Some((_, tl))) = (&retarget, &retarget_target) {
                                         ui.horizontal(|ui| {
-                                            ui.label(theme::disp_text("Skeletons", 15.0, theme::TX));
+                                            ui.label(theme::disp_text("Skeletons", theme::style_title(), theme::TX));
                                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                                 if ui.small_button("change target").clicked() {
                                                     show_target_picker = true;
@@ -2538,7 +2662,7 @@ pub fn run(opts: Options) {
                                         });
                                     }
                                 } else {
-                                    ui.label(theme::disp_text("Skeleton source", 15.0, theme::TX));
+                                    ui.label(theme::disp_text("Skeleton source", theme::style_title(), theme::TX));
                                     ui.separator();
                                     match &retarget {
                                         Some(r) => {
@@ -2581,10 +2705,16 @@ pub fn run(opts: Options) {
                             // ── DOMAIN: a curated lens over the catalog. The navigator is the only
                             // domain-specific surface; the viewport, inspector and verbs are Inspect's,
                             // so picking a model here shows it there exactly as browsing Inspect would.
+                            Workbench::Domain(crate::domain::Domain::Missions) => {
+                                // The Missions rail opens the Blueprint-style node editor rather
+                                // than the generic script-list lens — the follow-up to this file
+                                // keeps that lens one click away in the picker inside the editor.
+                                missions_acts.extend(crate::missions::navigator(ui, &missions_panel));
+                            }
                             Workbench::Domain(d) => {
-                                ui.label(theme::disp_text(d.label().to_uppercase(), 15.0, theme::TX));
+                                ui.label(theme::disp_text(d.label().to_uppercase(), theme::style_title(), theme::TX));
                                 ui.add_space(4.0);
-                                ui.label(egui::RichText::new(d.blurb()).size(11.5).color(theme::FAINT));
+                                ui.label(egui::RichText::new(d.blurb()).small().color(theme::FAINT));
                                 ui.add_space(9.0);
                                 if d.browses_models() {
                                     // The lens-filtered model list, grouped by the Library's own
@@ -2598,7 +2728,7 @@ pub fn run(opts: Options) {
                                     });
                                     ui.label(theme::disp_text(
                                         format!("{} model(s)", rows.len()),
-                                        10.0,
+                                        theme::style_eyebrow(),
                                         theme::FAINT,
                                     ));
                                     ui.add_space(4.0);
@@ -2617,8 +2747,7 @@ pub fn run(opts: Options) {
                                                 if sel_now { theme::BRASS_SOFT } else { egui::Color32::TRANSPARENT },
                                                 theme::LINE,
                                                 |ui| {
-                                                    ui.label(egui::RichText::new(r.label())
-                                                        .size(11.5)
+                                                    ui.label(egui::RichText::new(r.label()).small()
                                                         .color(if sel_now { theme::BRASS } else { theme::TX }));
                                                 },
                                             );
@@ -2641,7 +2770,7 @@ pub fn run(opts: Options) {
                                             theme::eyebrow(ui, "World-state overlays");
                                             ui.label(theme::disp_text(
                                                 format!("{} layer(s) — right-click to route", layers.len()),
-                                                10.0,
+                                                theme::style_eyebrow(),
                                                 theme::FAINT,
                                             ));
                                             ui.add_space(3.0);
@@ -2654,7 +2783,7 @@ pub fn run(opts: Options) {
                                                     theme::LINE,
                                                     |ui| {
                                                         ui.label(egui::RichText::new(r.label())
-                                                            .monospace().size(10.5).color(theme::TX));
+                                                            .monospace().color(theme::TX));
                                                     },
                                                 );
                                                 resp.context_menu(|ui| {
@@ -2669,7 +2798,7 @@ pub fn run(opts: Options) {
                                         ui.add_space(6.0);
                                         ui.label(egui::RichText::new(
                                             "Right-click a hero → Add to Shipment ▸ add_outfit, then Edit rig in Craft.",
-                                        ).size(10.0).color(theme::FAINT));
+                                        ).small().color(theme::FAINT));
                                     }
                                 } else {
                                     // Audio / Missions / Systems: not model rows, but NOT empty either
@@ -2684,22 +2813,22 @@ pub fn run(opts: Options) {
                                         let banks = audio_idx.banks();
                                         if banks.is_empty() {
                                             let rows = index.rows(crate::index::Kind::Audio);
-                                            ui.label(theme::disp_text(format!("{} bank asset(s)", rows.len()), 10.0, theme::FAINT));
+                                            ui.label(theme::disp_text(format!("{} bank asset(s)", rows.len()), theme::style_eyebrow(), theme::FAINT));
                                             egui::ScrollArea::vertical().max_height(list_h).auto_shrink([false, false]).show(ui, |ui| {
                                                 for r in rows {
                                                     theme::row_chip(ui, egui::Color32::TRANSPARENT, theme::LINE, |ui| {
-                                                        ui.label(egui::RichText::new(r.label()).monospace().size(10.5).color(theme::TX));
+                                                        ui.label(egui::RichText::new(r.label()).monospace().color(theme::TX));
                                                     });
                                                 }
                                             });
                                         } else {
                                             let total: usize = banks.iter().map(|(_, n)| *n).sum();
-                                            ui.label(theme::disp_text(format!("{total} clip(s) across {} banks", banks.len()), 10.0, theme::FAINT));
+                                            ui.label(theme::disp_text(format!("{total} clip(s) across {} banks", banks.len()), theme::style_eyebrow(), theme::FAINT));
                                             ui.add_space(3.0);
                                             egui::ScrollArea::vertical().max_height(list_h).auto_shrink([false, false]).show(ui, |ui| {
                                                 for (bank, n) in banks {
                                                     egui::CollapsingHeader::new(
-                                                        egui::RichText::new(format!("{bank}  ·  {n}")).monospace().size(11.0).color(theme::TX)
+                                                        egui::RichText::new(format!("{bank}  ·  {n}")).monospace().color(theme::TX)
                                                     ).id_source(("audiobank", &bank)).show(ui, |ui| {
                                                         for clip in audio_idx.by_bank(&bank).into_iter().take(300) {
                                                             let cap = if clip.caption.is_empty() { clip.stem().to_string() } else { clip.caption.clone() };
@@ -2707,19 +2836,19 @@ pub fn run(opts: Options) {
                                                             ui.horizontal(|ui| {
                                                                 // ▶ streams the clip straight from vo_stream.english.pws.
                                                                 if let Some(wi) = clip.wave_index {
-                                                                    if ui.add(egui::Button::new(egui::RichText::new("\u{25B6}").size(9.0)).small())
+                                                                    if ui.add(egui::Button::new(egui::RichText::new("\u{25B6}").small()).small())
                                                                         .on_hover_text(format!("play \u{2014} {:.1}s from vo_stream.english.pws", clip.duration_s))
                                                                         .clicked()
                                                                     {
                                                                         actions.push(Act::PlayClip(wi));
                                                                     }
                                                                 }
-                                                                ui.label(egui::RichText::new(&line).size(10.0).color(theme::DIM))
+                                                                ui.label(egui::RichText::new(&line).small().color(theme::DIM))
                                                                     .on_hover_text(format!("{}\n{:.1}s", clip.original, clip.duration_s));
                                                             });
                                                         }
                                                         if n > 300 {
-                                                            ui.label(egui::RichText::new(format!("+{} more…", n - 300)).size(9.5).color(theme::FAINT));
+                                                            ui.label(egui::RichText::new(format!("+{} more…", n - 300)).small().color(theme::FAINT));
                                                         }
                                                     });
                                                 }
@@ -2732,13 +2861,13 @@ pub fn run(opts: Options) {
                                         let mut hits: Vec<&(String, String, String)> =
                                             lua_corpus.iter().filter(|(p, _, _)| d.script_lens(p)).collect();
                                         hits.sort_by(|a, b| a.0.cmp(&b.0));
-                                        ui.label(theme::disp_text(format!("{} script(s)", hits.len()), 10.0, theme::FAINT));
+                                        ui.label(theme::disp_text(format!("{} script(s)", hits.len()), theme::style_eyebrow(), theme::FAINT));
                                         ui.add_space(3.0);
                                         egui::ScrollArea::vertical().max_height(list_h).auto_shrink([false, false]).show(ui, |ui| {
                                             for (path, _, _) in hits {
                                                 let stem = path.rsplit(['/', '\\']).next().unwrap_or(path).trim_end_matches(".lua").to_string();
                                                 let resp = theme::row_chip(ui, egui::Color32::TRANSPARENT, theme::LINE, |ui| {
-                                                    ui.label(egui::RichText::new(&stem).monospace().size(10.5).color(theme::TX));
+                                                    ui.label(egui::RichText::new(&stem).monospace().color(theme::TX));
                                                 });
                                                 if resp.clicked() {
                                                     actions.push(Act::LuaOpen(path.clone()));
@@ -2746,7 +2875,7 @@ pub fn run(opts: Options) {
                                                 let stem2 = stem.clone();
                                                 let kinds = d.kinds();
                                                 resp.context_menu(|ui| {
-                                                    ui.label(theme::disp_text(stem2.to_uppercase(), 10.0, theme::BRASS));
+                                                    ui.label(theme::disp_text(stem2.to_uppercase(), theme::style_eyebrow(), theme::BRASS));
                                                     ui.separator();
                                                     if ui.button("Open in Lua viewer").clicked() {
                                                         actions.push(Act::LuaOpen(path.clone()));
@@ -2786,13 +2915,12 @@ pub fn run(opts: Options) {
                             // rides in hover text, because it is what you read ONCE and the state is
                             // what you read every time.
                             Workbench::Settings => {
-                                ui.label(theme::disp_text("SETTINGS", 15.0, theme::TX));
+                                ui.label(theme::disp_text("SETTINGS", theme::style_title(), theme::TX));
                                 ui.add_space(4.0);
                                 ui.label(
                                     egui::RichText::new(
                                         "The paths the tool cannot discover for itself on every platform.",
-                                    )
-                                    .size(11.5)
+                                    ).small()
                                     .color(theme::FAINT),
                                 );
                                 ui.add_space(9.0);
@@ -2805,11 +2933,10 @@ pub fn run(opts: Options) {
                                             ui.set_width(ui.available_width());
                                             ui.label(
                                                 egui::RichText::new(s.label())
-                                                    .size(12.5)
                                                     .color(if on { theme::BRASS } else { theme::TX }),
                                             );
                                             ui.label(
-                                                egui::RichText::new(s.blurb()).size(10.5).color(theme::FAINT),
+                                                egui::RichText::new(s.blurb()).small().color(theme::FAINT),
                                             );
                                         })
                                         .response;
@@ -2852,7 +2979,16 @@ pub fn run(opts: Options) {
                               if eff == Workbench::Quartermaster {
                                   qm_acts.extend(crate::quartermaster::inspector(ui, &qm, &qm_stack, true));
                               }
-                              if eff.inspect_like() {
+                              if eff == Workbench::Saves {
+                                  saves_acts.extend(crate::saves::inspector(ui, &saves));
+                              }
+                              // The Missions editor owns the right pane entirely — the generic
+                              // Inspect-style preview panel would compete with the node details.
+                              let is_missions_bench = eff == Workbench::Domain(crate::domain::Domain::Missions);
+                              if is_missions_bench {
+                                  missions_acts.extend(crate::missions::inspector(ui, &missions_panel));
+                              }
+                              if eff.inspect_like() && !is_missions_bench {
                                 match &mut preview {
                                     None => {
                                         ui.weak("No model loaded — pick one in the browser at left.");
@@ -2862,7 +2998,7 @@ pub fn run(opts: Options) {
                                         let head = ui.add(
                                             egui::Label::new(theme::disp_text(
                                                 plabel.to_uppercase(),
-                                                19.0,
+                                                egui::TextStyle::Heading,
                                                 theme::TX,
                                             ))
                                             .sense(egui::Sense::click()),
@@ -2870,7 +3006,6 @@ pub fn run(opts: Options) {
                                         ui.label(
                                             egui::RichText::new(format!("0x{:08X}", p.hash))
                                                 .monospace()
-                                                .size(11.5)
                                                 .color(theme::DIM),
                                         );
                                         ui.add_space(8.0);
@@ -3048,8 +3183,8 @@ pub fn run(opts: Options) {
                                                         }
                                                         cur_rank = Some(rank);
                                                         ui.horizontal(|ui| {
-                                                            ui.label(theme::disp_text(label.to_uppercase(), 9.5, theme::BRASS));
-                                                            ui.label(egui::RichText::new(hint).size(10.0).color(theme::FAINT));
+                                                            ui.label(theme::disp_text(label.to_uppercase(), theme::style_eyebrow(), theme::BRASS));
+                                                            ui.label(egui::RichText::new(hint).small().color(theme::FAINT));
                                                         });
                                                         ui.add_space(4.0);
                                                     }
@@ -3073,14 +3208,12 @@ pub fn run(opts: Options) {
                                                                 ui.label(
                                                                     egui::RichText::new(lod_levels(mask))
                                                                         .monospace()
-                                                                        .size(11.5)
                                                                         .color(if hit { theme::TX } else { theme::DIM }),
                                                                 );
                                                                 ui.add_space(4.0);
                                                                 ui.label(
                                                                     egui::RichText::new(format!("0x{mask:02X}"))
                                                                         .monospace()
-                                                                        .size(11.0)
                                                                         .color(theme::FAINT),
                                                                 );
                                                                 ui.add_space(8.0);
@@ -3088,17 +3221,16 @@ pub fn run(opts: Options) {
                                                                     egui::RichText::new(format!(
                                                                         "{n} mesh{}",
                                                                         if n == 1 { "" } else { "es" }
-                                                                    ))
-                                                                    .size(11.5)
+                                                                    )).small()
                                                                     .color(theme::DIM),
                                                                 );
                                                                 ui.with_layout(
                                                                     egui::Layout::right_to_left(egui::Align::Center),
                                                                     |ui| {
                                                                         if hit {
-                                                                            ui.label(egui::RichText::new("✔ passes").size(11.5).color(theme::GOOD));
+                                                                            ui.label(egui::RichText::new("✔ passes").small().color(theme::GOOD));
                                                                         } else {
-                                                                            ui.label(egui::RichText::new("✖ filtered").size(11.5).color(theme::FAINT));
+                                                                            ui.label(egui::RichText::new("✖ filtered").small().color(theme::FAINT));
                                                                         }
                                                                     },
                                                                 );
@@ -3171,7 +3303,7 @@ pub fn run(opts: Options) {
                                                     |ui| {
                                                         ui.label(theme::disp_text(
                                                             "enter/exit command scripts, shown per selected state below",
-                                                            9.0,
+                                                            theme::style_eyebrow(),
                                                             theme::FAINT,
                                                         ));
                                                     },
@@ -3185,7 +3317,7 @@ pub fn run(opts: Options) {
                                                             let cur = p.node_state.get(ni).copied().unwrap_or(0);
                                                             ui.label(theme::disp_text(
                                                                 name_or_hash(&index, node.name_hash),
-                                                                11.0,
+                                                                theme::style_eyebrow(),
                                                                 theme::TX,
                                                             ));
                                                             ui.add_space(3.0);
@@ -3206,11 +3338,11 @@ pub fn run(opts: Options) {
                                                                 if let Some(st) = node.states.get(cur) {
                                                                     let enter = mercs2_formats::orchestrator::decode_script(&st.enter, resolve);
                                                                     if !enter.is_empty() {
-                                                                        ui.label(egui::RichText::new(format!("→ {enter}")).monospace().size(10.0).color(theme::FAINT));
+                                                                        ui.label(egui::RichText::new(format!("→ {enter}")).monospace().color(theme::FAINT));
                                                                     }
                                                                     let exit = mercs2_formats::orchestrator::decode_script(&st.exit, resolve);
                                                                     if !exit.is_empty() {
-                                                                        ui.label(egui::RichText::new(format!("← {exit}")).monospace().size(10.0).color(theme::FAINT));
+                                                                        ui.label(egui::RichText::new(format!("← {exit}")).monospace().color(theme::FAINT));
                                                                     }
                                                                 }
                                                             }
@@ -3305,22 +3437,20 @@ pub fn run(opts: Options) {
                                                                 actions.push(Act::GroupToggle(gi));
                                                             }
                                                             ui.label(
-                                                                egui::RichText::new(tex_short)
-                                                                    .size(11.5)
+                                                                egui::RichText::new(tex_short).small()
                                                                     .color(if drawn { theme::TX } else { theme::DIM }),
                                                             );
                                                             ui.label(
                                                                 egui::RichText::new(lod_levels(d.lod_mask))
                                                                     .monospace()
-                                                                    .size(10.0)
                                                                     .color(theme::FAINT),
                                                             );
                                                             ui.with_layout(
                                                                 egui::Layout::right_to_left(egui::Align::Center),
                                                                 |ui| {
-                                                                    ui.label(egui::RichText::new(statustxt).size(11.0).color(statusc));
+                                                                    ui.label(egui::RichText::new(statustxt).small().color(statusc));
                                                                     ui.add_space(6.0);
-                                                                    ui.label(egui::RichText::new(format!("{tris} tri")).monospace().size(10.0).color(theme::DIM));
+                                                                    ui.label(egui::RichText::new(format!("{tris} tri")).monospace().color(theme::DIM));
                                                                 },
                                                             );
                                                         });
@@ -3427,13 +3557,13 @@ pub fn run(opts: Options) {
                                                         // dim, duration / bind-state right-aligned.
                                                         let nm = e.name.clone().unwrap_or_else(|| format!("clip {}", i + 1));
                                                         let mut resp = theme::row_chip(ui, fill, bord, |ui| {
-                                                            ui.label(egui::RichText::new(nm).size(11.5).color(if sel { theme::BRASS } else { theme::TX }));
-                                                            ui.label(egui::RichText::new(format!("0x{chash:08X}")).monospace().size(9.5).color(theme::FAINT));
+                                                            ui.label(egui::RichText::new(nm).small().color(if sel { theme::BRASS } else { theme::TX }));
+                                                            ui.label(egui::RichText::new(format!("0x{chash:08X}")).monospace().color(theme::FAINT));
                                                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                                                 if let Some(d) = dur {
-                                                                    ui.label(egui::RichText::new(format!("{d:.2}s")).monospace().size(10.5).color(theme::GOOD));
+                                                                    ui.label(egui::RichText::new(format!("{d:.2}s")).monospace().color(theme::GOOD));
                                                                 } else if unbound {
-                                                                    ui.label(egui::RichText::new("unbound").size(10.0).color(theme::FAINT));
+                                                                    ui.label(egui::RichText::new("unbound").small().color(theme::FAINT));
                                                                 }
                                                             });
                                                         });
@@ -3543,14 +3673,14 @@ pub fn run(opts: Options) {
                                                         // then the bone name (bright if named, dim if
                                                         // it fell back to a hash).
                                                         let mut job = egui::text::LayoutJob::default();
-                                                        let fmt = |size: f32, color: egui::Color32| egui::TextFormat {
-                                                            font_id: egui::FontId::monospace(size),
+                                                        let fmt = |color: egui::Color32| egui::TextFormat {
+                                                            font_id: theme::font(&egui::TextStyle::Monospace),
                                                             color,
                                                             ..Default::default()
                                                         };
-                                                        job.append(&"  ".repeat(depth), 0.0, fmt(11.0, theme::FAINT));
-                                                        job.append(&format!("{i:>3}  "), 0.0, fmt(10.0, theme::FAINT));
-                                                        job.append(&bname, 0.0, fmt(11.5, if named { theme::TX } else { theme::DIM }));
+                                                        job.append(&"  ".repeat(depth), 0.0, fmt(theme::FAINT));
+                                                        job.append(&format!("{i:>3}  "), 0.0, fmt(theme::FAINT));
+                                                        job.append(&bname, 0.0, fmt(if named { theme::TX } else { theme::DIM }));
                                                         let row = ui.selectable_label(sel_bone == Some(i), job);
                                                         if row.hovered() {
                                                             hovered_bone = Some(i);
@@ -3601,8 +3731,8 @@ pub fn run(opts: Options) {
                                 // The SELECTED instance's transform, then scene-wide actions.
                                 match sel_placed.and_then(|i| placed.get(i).map(|p| (i, p.label.clone()))) {
                                     Some((i, plabel)) => {
-                                        ui.label(theme::disp_text(format!("Instance n{i} · selected"), 9.5, theme::BRASS_DK));
-                                        ui.label(theme::disp_text(plabel.to_uppercase(), 18.0, theme::TX));
+                                        ui.label(theme::disp_text(format!("Instance n{i} · selected"), theme::style_eyebrow(), theme::BRASS_DK));
+                                        ui.label(theme::disp_text(plabel.to_uppercase(), egui::TextStyle::Heading, theme::TX));
                                         ui.add_space(10.0);
                                         theme::card(ui, "Transform", None, |ui| {
                                             let mut changed = false;
@@ -3641,7 +3771,7 @@ pub fn run(opts: Options) {
                                         });
                                     }
                                     None => {
-                                        ui.label(theme::disp_text("Sandbox", 18.0, theme::TX));
+                                        ui.label(theme::disp_text("Sandbox", egui::TextStyle::Heading, theme::TX));
                                         ui.add_space(6.0);
                                         ui.weak("Select an object in the Scene list at left to move / rotate / scale it.");
                                         ui.add_space(10.0);
@@ -3736,7 +3866,7 @@ pub fn run(opts: Options) {
                                                                     ui.set_min_width(lw);
                                                                     ui.set_min_height(22.0);
                                                                     ui.add(
-                                                                        egui::Label::new(theme::disp_text(name, 10.5, col))
+                                                                        egui::Label::new(theme::disp_text(name, theme::style_eyebrow(), col))
                                                                             .truncate()
                                                                             .sense(egui::Sense::click()),
                                                                     )
@@ -3931,7 +4061,7 @@ pub fn run(opts: Options) {
                                 });
                               } // ── end Mods inspector ──
                               if matches!(eff, Workbench::Skeleton) {
-                                ui.label(theme::disp_text("Skeleton retarget", 18.0, theme::TX));
+                                ui.label(theme::disp_text("Skeleton retarget", egui::TextStyle::Heading, theme::TX));
                                 match &retarget {
                                     None => {
                                         ui.add_space(4.0);
@@ -4100,15 +4230,13 @@ pub fn run(opts: Options) {
                                                     egui::RichText::new(format!(
                                                         "editing contributions[{i}]"
                                                     ))
-                                                    .size(10.5)
                                                     .monospace()
                                                     .color(theme::BRASS),
                                                 );
                                             }
                                             None => {
                                                 ui.label(
-                                                    egui::RichText::new("free-form — commits start a Shipment")
-                                                        .size(10.5)
+                                                    egui::RichText::new("free-form — commits start a Shipment").small()
                                                         .color(theme::FAINT),
                                                 );
                                             }
@@ -4117,7 +4245,7 @@ pub fn run(opts: Options) {
                                 });
                                 if let Some(why) = craft_mode.unbuilt() {
                                     ui.label(
-                                        egui::RichText::new(why).size(10.0).color(theme::FAINT),
+                                        egui::RichText::new(why).small().color(theme::FAINT),
                                     );
                                 }
                                 ui.separator();
@@ -4128,6 +4256,15 @@ pub fn run(opts: Options) {
                                 match eff {
                                     Workbench::Quartermaster => {
                                         qm_acts.extend(crate::quartermaster::verbs(ui, &qm, true));
+                                    }
+                                    Workbench::Saves => {
+                                        saves_acts.extend(crate::saves::verbs(ui, &saves));
+                                    }
+                                    // Missions owns its own verb bar: Jump-to-source / Add node /
+                                    // Compile, which is what a blueprint editor needs, not Place /
+                                    // Export / textures.
+                                    Workbench::Domain(crate::domain::Domain::Missions) => {
+                                        missions_acts.extend(crate::missions::verbs(ui, &missions_panel));
                                     }
                                     // A domain page shares Inspect's verbs — it is Inspect narrowed to
                                     // a lens, so Place / Export / textures / clip act on the same
@@ -4243,7 +4380,7 @@ pub fn run(opts: Options) {
                                             .map(|p| p.display().to_string())
                                             .unwrap_or_else(|| "(no config directory)".into());
                                         ui.label(
-                                            egui::RichText::new(loc).color(theme::FAINT).size(11.0),
+                                            egui::RichText::new(loc).color(theme::FAINT).small(),
                                         );
                                     }
                                     // See the navigator's note: `eff` never resolves to Craft.
@@ -4271,8 +4408,7 @@ pub fn run(opts: Options) {
                                             egui::RichText::new(
                                                 "Runs a Lua chunk in the RUNNING game via the lua-bridge ASI \
                                                  on 127.0.0.1:27050. Start the game with the ASI loaded, then connect.",
-                                            )
-                                            .size(11.5)
+                                            ).small()
                                             .color(theme::FAINT),
                                         );
                                         ui.add_space(8.0);
@@ -4289,7 +4425,7 @@ pub fn run(opts: Options) {
                                             } else {
                                                 (theme::FAINT, "\u{25cf} connecting\u{2026}")
                                             };
-                                            ui.label(egui::RichText::new(txt).size(11.0).color(col));
+                                            ui.label(egui::RichText::new(txt).small().color(col));
                                             if con.finished {
                                                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                                     if ui.button("Reconnect").clicked() {
@@ -4313,7 +4449,7 @@ pub fn run(opts: Options) {
                                                     };
                                                     ui.add(
                                                         egui::Label::new(
-                                                            egui::RichText::new(txt).monospace().size(11.0).color(col),
+                                                            egui::RichText::new(txt).monospace().color(col),
                                                         )
                                                         .wrap(),
                                                     );
@@ -4325,12 +4461,12 @@ pub fn run(opts: Options) {
                                         // the Lua and sends it over the same bridge.
                                         ui.add_space(4.0);
                                         egui::CollapsingHeader::new(
-                                            egui::RichText::new("Destruction").size(11.0).color(theme::HAZARD),
+                                            egui::RichText::new("Destruction").small().color(theme::HAZARD),
                                         )
                                         .id_source("destruct_panel")
                                         .show(ui, |ui| {
                                             ui.horizontal(|ui| {
-                                                ui.label(egui::RichText::new("target").size(10.0).color(theme::FAINT));
+                                                ui.label(egui::RichText::new("target").small().color(theme::FAINT));
                                                 ui.add(
                                                     egui::TextEdit::singleline(&mut destruct_target)
                                                         .hint_text("object name or guid expr")
@@ -4339,7 +4475,7 @@ pub fn run(opts: Options) {
                                             });
                                             let has_target = !destruct_target.trim().is_empty();
                                             ui.horizontal(|ui| {
-                                                ui.label(egui::RichText::new("node").size(10.0).color(theme::FAINT));
+                                                ui.label(egui::RichText::new("node").small().color(theme::FAINT));
                                                 ui.add(
                                                     egui::TextEdit::singleline(&mut destruct_node)
                                                         .hint_text("hardpoint name or 0x… (see Dump machine)")
@@ -4414,8 +4550,7 @@ pub fn run(opts: Options) {
                                             ui.label(
                                                 egui::RichText::new(
                                                     "Set state is node-keyed (logical, not a destroy); Demolish/Repair use the health lever. Dump machine lists a target's nodes.",
-                                                )
-                                                .size(9.0)
+                                                ).small()
                                                 .color(theme::FAINT),
                                             );
                                         });
@@ -4425,7 +4560,7 @@ pub fn run(opts: Options) {
                                         if !ess_api.is_empty() {
                                             ui.add_space(4.0);
                                             ui.horizontal(|ui| {
-                                                ui.label(theme::disp_text("API", 9.0, theme::FAINT));
+                                                ui.label(theme::disp_text("API", theme::style_eyebrow(), theme::FAINT));
                                                 ui.add(
                                                     egui::TextEdit::singleline(&mut console_search)
                                                         .hint_text("search Ess / natives\u{2026}")
@@ -4452,14 +4587,14 @@ pub fn run(opts: Options) {
                                                                         "raw" => theme::HAZARD,
                                                                         _ => theme::BRASS_DK,
                                                                     };
-                                                                    ui.label(egui::RichText::new(&e.tier[..1].to_uppercase()).monospace().size(9.0).color(tc));
+                                                                    ui.label(egui::RichText::new(&e.tier[..1].to_uppercase()).monospace().color(tc));
                                                                 } else {
-                                                                    ui.label(egui::RichText::new("n").monospace().size(9.0).color(theme::FAINT));
+                                                                    ui.label(egui::RichText::new("n").monospace().color(theme::FAINT));
                                                                 }
                                                                 let col = if e.ess { theme::BRASS } else { theme::DIM };
                                                                 let r = ui.add(
                                                                     egui::Label::new(
-                                                                        egui::RichText::new(e.label()).monospace().size(10.5).color(col),
+                                                                        egui::RichText::new(e.label()).monospace().color(col),
                                                                     )
                                                                     .sense(egui::Sense::click()),
                                                                 );
@@ -4497,10 +4632,10 @@ pub fn run(opts: Options) {
                                                     .show(ui, |ui| {
                                                         for c in ecs_hits {
                                                             let clicked = ui.horizontal(|ui| {
-                                                                ui.label(egui::RichText::new("C").monospace().size(9.0).color(theme::BRASS_DK));
+                                                                ui.label(egui::RichText::new("C").monospace().color(theme::BRASS_DK));
                                                                 let r = ui.add(
                                                                     egui::Label::new(
-                                                                        egui::RichText::new(&c.name).monospace().size(10.5).color(theme::DIM),
+                                                                        egui::RichText::new(&c.name).monospace().color(theme::DIM),
                                                                     )
                                                                     .sense(egui::Sense::click()),
                                                                 );
@@ -4562,7 +4697,7 @@ pub fn run(opts: Options) {
                                         .inner_margin(egui::Margin::symmetric(22.0, 18.0)),
                                 )
                                 .show(ctx, |ui| {
-                                    ui.label(theme::disp_text(settings_section.label().to_uppercase(), 18.0, theme::TX));
+                                    ui.label(theme::disp_text(settings_section.label().to_uppercase(), egui::TextStyle::Heading, theme::TX));
                                     ui.add_space(12.0);
                                     egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
 
@@ -4588,7 +4723,6 @@ pub fn run(opts: Options) {
                                             ui.label(
                                                 egui::RichText::new(text)
                                                     .monospace()
-                                                    .size(10.5)
                                                     .color(if set { theme::TX } else { theme::DIM }),
                                             );
                                         })
@@ -4734,8 +4868,7 @@ pub fn run(opts: Options) {
                                                     ui.add(egui::Spinner::new().size(11.0));
                                                     ui.label(
                                                         egui::RichText::new(&fetch_msg)
-                                                            .color(theme::DIM)
-                                                            .size(10.5),
+                                                            .color(theme::DIM).small(),
                                                     );
                                                 });
                                             }
@@ -4772,8 +4905,7 @@ pub fn run(opts: Options) {
                                                             ui.label(
                                                                 egui::RichText::new(
                                                                     "No home directory to place the library in.",
-                                                                )
-                                                                .size(11.0)
+                                                                ).small()
                                                                 .color(theme::BAD),
                                                             );
                                                         }
@@ -4805,8 +4937,7 @@ pub fn run(opts: Options) {
                                                     |ui| {
                                                         if qm_stack.is_empty() {
                                                             ui.label(
-                                                                egui::RichText::new("No game configured.")
-                                                                    .size(11.0)
+                                                                egui::RichText::new("No game configured.").small()
                                                                     .color(theme::BAD),
                                                             );
                                                         }
@@ -4869,6 +5000,20 @@ pub fn run(opts: Options) {
                         if wb == Workbench::Quartermaster {
                             qm_acts.extend(crate::quartermaster::center(ctx, &qm, qm_names.as_ref()));
                         }
+                        // Saves owns its own centre too: a composed card (hero preview + at-a-glance
+                        // HUD + progression grid), not the 3D viewport (see `has_viewport`).
+                        if wb == Workbench::Saves {
+                            saves_acts.extend(crate::saves::center(ctx, &saves));
+                            // Floating windows: the Inspect view and the delete confirmation.
+                            saves_acts.extend(crate::saves::windows(ctx, &saves));
+                        }
+
+                        // ── MISSIONS main content: the Blueprint-style node canvas. Takes the
+                        // full centre, not a viewport pass, so the dot-grid and node cards sit
+                        // where the 3D would.
+                        if wb == Workbench::Domain(crate::domain::Domain::Missions) {
+                            missions_acts.extend(crate::missions::center(ctx, &missions_panel));
+                        }
 
                         // ── VIEWPORT HUD: status chips over the 3D (the panels are all placed now, so
                         // `available_rect` is the viewport region). Non-interactable so the camera drag
@@ -4895,7 +5040,7 @@ pub fn run(opts: Options) {
                                     Some(i) => {
                                         ui.label(theme::disp_text(
                                             placed[i].label.to_uppercase(),
-                                            10.0,
+                                            theme::style_eyebrow(),
                                             theme::BRASS,
                                         ));
                                         ui.separator();
@@ -4915,8 +5060,7 @@ pub fn run(opts: Options) {
                                     }
                                     None => {
                                         ui.label(
-                                            egui::RichText::new("Nothing selected — pick an object at left")
-                                                .size(10.5)
+                                            egui::RichText::new("Nothing selected — pick an object at left").small()
                                                 .color(theme::FAINT),
                                         );
                                         ui.separator();
@@ -5020,8 +5164,7 @@ pub fn run(opts: Options) {
                                                         c,
                                                     );
                                                     ui.label(
-                                                        egui::RichText::new(t)
-                                                            .size(10.5)
+                                                        egui::RichText::new(t).small()
                                                             .color(theme::DIM),
                                                     );
                                                 });
@@ -5083,8 +5226,7 @@ pub fn run(opts: Options) {
                                     ui.horizontal(|ui| {
                                         ui.label(
                                             egui::RichText::new(format!("{} lines", log.len()))
-                                                .color(theme::DIM)
-                                                .size(11.0),
+                                                .color(theme::DIM).small(),
                                         );
                                         if errs > 0 {
                                             theme::status_dot(ui, &format!("{errs} failed"), theme::BAD);
@@ -5128,8 +5270,7 @@ pub fn run(opts: Options) {
                                         ui.vertical_centered(|ui| {
                                             ui.label(
                                                 egui::RichText::new("Nothing logged yet.")
-                                                    .color(theme::FAINT)
-                                                    .size(12.0),
+                                                    .color(theme::FAINT),
                                             );
                                         });
                                         return;
@@ -5146,19 +5287,16 @@ pub fn run(opts: Options) {
                                                     ui.label(
                                                         egui::RichText::new(format!("{:>8.2}", l.t))
                                                             .monospace()
-                                                            .size(10.5)
                                                             .color(theme::FAINT),
                                                     );
                                                     ui.label(
                                                         egui::RichText::new(l.level.tag())
                                                             .monospace()
-                                                            .size(10.5)
                                                             .color(l.level.colour()),
                                                     );
                                                     ui.label(
                                                         egui::RichText::new(&l.text)
                                                             .monospace()
-                                                            .size(11.0)
                                                             .color(if l.level == LogLevel::Info {
                                                                 theme::TX
                                                             } else {
@@ -5178,6 +5316,11 @@ pub fn run(opts: Options) {
                         if let Some(v) = &mut lua_view {
                             v.show(ctx);
                         }
+                        // Captured here (where `ctx` is in scope) so the reducer below `gui.run`
+                        // can hand it to the hero-render helper — the render needs the egui
+                        // context to allocate a texture handle, and the reducer owns the
+                        // `WadStack` + Panel the render reads from.
+                        pending_ctx = Some(ctx.clone());
                     });
 
                     for act in std::mem::take(&mut qm_acts) {
@@ -5266,11 +5409,115 @@ pub fn run(opts: Options) {
                             &mut status,
                         );
                     }
+                    // Fold the Missions editor's queued actions back into its panel. The panel
+                    // needs the lua corpus so Act::PickMission can parse the picked script in
+                    // place; we pass the same slice the rest of the app reads.
+                    for act in missions_acts.drain(..) {
+                        crate::missions::apply(act, &mut missions_panel, &lua_corpus);
+                    }
+                    // Drain any outer intents the Missions panel asked the host to carry out.
+                    // `pending_lua_open` is the Blueprint jump-to-source → luaview bridge.
+                    if let Some((path, line)) = missions_panel.pending_lua_open.take() {
+                        actions.push(Act::LuaOpenAt(path, line));
+                    }
+                    // Add to Shipment: the compiled script goes into the open Shipment's src/ (one
+                    // is scaffolded if none is open) and a replace_lua contribution names it —
+                    // updated in place if this script already has one.
+                    if let Some(req) = missions_panel.pending_shipment.take() {
+                        let out = (|| -> Result<String, String> {
+                            let dir = qm.ensure_shipment(qm_names.as_ref())?;
+                            let rel = std::path::Path::new("src").join(format!("{}.lua", req.target));
+                            let file = dir.join(&rel);
+                            std::fs::create_dir_all(dir.join("src")).map_err(|e| format!("{}: {e}", dir.display()))?;
+                            std::fs::write(&file, &req.source).map_err(|e| format!("{}: {e}", file.display()))?;
+                            let existing = qm.find_contribution(|c| {
+                                matches!(c, mercs2_quartermaster::manifest::Contribution::ReplaceLua { target, .. } if *target == req.target)
+                            });
+                            let c = mercs2_quartermaster::manifest::Contribution::ReplaceLua { target: req.target.clone(), source: rel };
+                            let at = qm.upsert_contribution(qm_names.as_ref(), existing, c)?;
+                            Ok(format!("contributions[{at}] replace_lua {} — {}", req.target, file.display()))
+                        })();
+                        status = match out {
+                            Ok(m) => m,
+                            Err(e) => format!("ADD TO SHIPMENT FAILED: {e}"),
+                        };
+                    }
+                    // The Missions panel's "Load .profile…" verb asks the host for a native file
+                    // picker. We do it inline here so the modal lives on the UI thread.
+                    if std::mem::take(&mut missions_panel.pending_save_open) {
+                        if let Some(path) = rfd::FileDialog::new()
+                            .add_filter("profile", &["profile"])
+                            .set_title("Load Mercenaries 2 save (.profile)")
+                            .set_directory(
+                                mercs2_formats::game_paths::saves_dir_from_env()
+                                    .unwrap_or_else(|| std::path::PathBuf::from(".")),
+                            )
+                            .pick_file()
+                        {
+                            if let Err(e) = missions_panel.load_save(&path) {
+                                status = format!("missions: {e}");
+                            }
+                        }
+                    }
                     // A background build (Act::Build) reports back here. While it runs, the verb
                     // bar's spinner keeps egui repainting, so this polls every frame until it lands;
                     // the frame it completes, sync the app's status line to the panel's.
                     if qm.poll_build() {
                         status = qm.status().to_string();
+                    }
+                    // Saves follows the same drain-and-apply pattern: the panels emitted intents
+                    // this frame, and the reducer lands them on the owned Panel so the next frame
+                    // reads from the mutated state. Switching to another workbench never flushes
+                    // `saves`; it is a long-lived piece of app state, not a per-frame scratchpad.
+                    for act in std::mem::take(&mut saves_acts) {
+                        crate::saves::apply(act, &mut saves);
+                    }
+                    // ── Saves hero render: the Panel's own reducer only stamps a request slot;
+                    // the real `load_model_data` + `shot::HeroRenderer::render_rgba` +
+                    // `TextureHandle::set` runs via the egui-context stashed by `gui.run` on this
+                    // frame. First render per hash pays the ~500 ms pipeline + mesh upload; every
+                    // subsequent render (drag-orbit tick) is a camera-uniform write + draw +
+                    // ~2.6 MB readback into a reused TextureHandle, usually under ~30 ms.
+                    // English string table for display names (loadout tokens). Loaded once, the
+                    // first frame the Saves page has a save list.
+                    if saves.profiles.is_some() && saves.english.is_none() {
+                        saves.english = Some(w.string_table("english"));
+                    }
+                    // Template names for the save's carried weapons (worldentity `Name` records).
+                    if saves.profiles.is_some() && saves.templates.is_none() {
+                        saves.templates = Some(w.template_names());
+                    }
+                    // The mission, reward and flow scripts the contract menu runs.
+                    if saves.profiles.is_some() && saves.rules.is_none() {
+                        saves.rules = Some(crate::game_rules::GameRules::load(&mut w));
+                    }
+                    if let (Some((hash, name)), Some(ctx)) =
+                        (saves.pending_hero_render.take(), pending_ctx.as_ref())
+                    {
+                        // Camera read lazily: hero_cam gets populated by SetHeroCam on drag; a
+                        // cold-start (no drag yet) falls through to OrbitCam::default().
+                        let cam = saves
+                            .hero_cam
+                            .get(&hash)
+                            .copied()
+                            .unwrap_or_default();
+                        match ensure_hero_render(
+                            &mut w,
+                            hash,
+                            &name,
+                            &cam,
+                            saves.hero_view_px,
+                            &mut hero_renderers,
+                            saves.hero_textures.get(&hash).cloned(),
+                            ctx,
+                        ) {
+                            Ok(tex) => {
+                                saves.hero_textures.insert(hash, tex);
+                            }
+                            Err(e) => {
+                                saves.hero_render_failed.insert(hash, e);
+                            }
+                        }
                     }
                     if lua_view.as_ref().is_some_and(|v| !v.open) {
                         lua_view = None;
@@ -6334,6 +6581,16 @@ pub fn run(opts: Options) {
                                         lua_view = Some(crate::luaview::LuaView::new(
                                             &path, content, &needle,
                                         ));
+                                    }
+                                    None => status = format!("script not in corpus: {path}"),
+                                }
+                            }
+                            Act::LuaOpenAt(path, line) => {
+                                match lua_corpus.iter().find(|(p, _, _)| *p == path) {
+                                    Some((_, content, _)) => {
+                                        let mut v = crate::luaview::LuaView::new(&path, content, "");
+                                        v.scroll_to_line(line);
+                                        lua_view = Some(v);
                                     }
                                     None => status = format!("script not in corpus: {path}"),
                                 }
@@ -7601,11 +7858,11 @@ fn bone_tree(ui: &mut egui::Ui, names: &[String], parents: &[i32], id: &str) -> 
     }
     fn draw(ui: &mut egui::Ui, i: usize, names: &[String], kids: &[Vec<usize>], id: &str, hov: &mut Option<usize>) {
         if kids[i].is_empty() {
-            if ui.selectable_label(false, egui::RichText::new(names[i].as_str()).monospace().size(11.0)).hovered() {
+            if ui.selectable_label(false, egui::RichText::new(names[i].as_str()).monospace()).hovered() {
                 *hov = Some(i);
             }
         } else {
-            let r = egui::CollapsingHeader::new(egui::RichText::new(names[i].as_str()).monospace().size(11.0))
+            let r = egui::CollapsingHeader::new(egui::RichText::new(names[i].as_str()).monospace())
                 .id_source((id, i))
                 .default_open(true)
                 .show(ui, |ui| {
@@ -8205,4 +8462,197 @@ fn export_model_data(md: &ModelData, label: &str) -> Result<String, String> {
     }
     std::fs::write(dir.join("model.obj"), obj).map_err(|e| e.to_string())?;
     Ok(dir.to_string_lossy().into_owned())
+}
+
+/// Render the hero portrait for the Saves page at the given [`crate::shot::OrbitCam`] and return
+/// an updated `egui::TextureHandle`.
+///
+/// Pipeline:
+/// 1. Look up (or lazily build) a per-hash [`crate::shot::HeroRenderer`] in `renderers`. The
+///    first miss pays the ~500 ms model-load + pipeline + mesh-upload cost; subsequent calls
+///    for the same hash reuse the stashed renderer.
+/// 2. Call `render_rgba(cam, size)` to get back one RGBA8 frame at the viewport's pixel size —
+///    the renderer rewrites the camera uniform (and rebuilds its targets only when `size`
+///    changed), so this part is on the order of a draw + readback.
+/// 3. Build an `egui::ColorImage` from the bytes. If `existing_tex` is `Some`, mutate it in
+///    place via `TextureHandle::set` so egui reuses the GPU allocation (and the Image widget
+///    binding doesn't flicker on drag); otherwise allocate a new handle via `ctx.load_texture`.
+///
+/// Draw ranges carry their decoded diffuse/normal/specular — `md.textures` already holds the
+/// FULL mip chain (`WadStack::texture_best` assembled it), and `texpng::decode_bc` resolves
+/// DXT1/DXT5 into RGBA8. A `None` slot (unassigned material texture) falls back to the shot
+/// shader's flat sampler.
+fn ensure_hero_render(
+    w: &mut WadStack,
+    hash: u32,
+    name: &str,
+    cam: &crate::shot::OrbitCam,
+    size: (u32, u32),
+    renderers: &mut HashMap<u32, crate::shot::HeroRenderer>,
+    existing_tex: Option<egui::TextureHandle>,
+    ctx: &egui::Context,
+) -> Result<egui::TextureHandle, String> {
+    if size.0 == 0 || size.1 == 0 {
+        return Err(format!("hero viewport size not reported before render ({}x{})", size.0, size.1));
+    }
+    // Build-or-fetch the per-hash renderer.
+    if !renderers.contains_key(&hash) {
+        let md = crate::app::load_model_data(w, hash)
+            .map_err(|e| format!("load `{name}` (0x{hash:08X}): {e}"))?;
+        if md.verts.is_empty() || md.indices.is_empty() || md.draws.is_empty() {
+            return Err(format!(
+                "model `{name}` loaded with no geometry (verts={}, indices={}, draws={})",
+                md.verts.len(),
+                md.indices.len(),
+                md.draws.len()
+            ));
+        }
+        // SV from the model's own BLENDINDICES/BLENDWEIGHT. An identity palette on a skinned
+        // model collapses to a bind pose, which is what a portrait wants — pose/animation is a
+        // non-goal for this round.
+        let sv: Vec<crate::shot::SV> = md
+            .verts
+            .iter()
+            .map(|v| crate::shot::SV {
+                pos: v.pos,
+                _p0: 0.0,
+                normal: v.normal,
+                _p1: 0.0,
+                uv: v.uv,
+                _p2: [0.0, 0.0],
+                tangent: v.tangent,
+                joints: [
+                    v.joints[0] as u32,
+                    v.joints[1] as u32,
+                    v.joints[2] as u32,
+                    v.joints[3] as u32,
+                ],
+                weights: [
+                    v.weights[0] as f32 / 255.0,
+                    v.weights[1] as f32 / 255.0,
+                    v.weights[2] as f32 / 255.0,
+                    v.weights[3] as f32 / 255.0,
+                ],
+            })
+            .collect();
+        const IDENT: [[f32; 4]; 4] = [
+            [1.0, 0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+            [0.0, 0.0, 0.0, 1.0],
+        ];
+        let palette: Vec<[[f32; 4]; 4]> = vec![IDENT; md.skin.rig.len().max(1)];
+        let draws: Vec<crate::shot::DrawTex> = md
+            .draws
+            .iter()
+            .filter(|d| d.index_count > 0)
+            .map(|d| crate::shot::DrawTex {
+                index_start: d.index_start,
+                index_count: d.index_count,
+                diffuse: d
+                    .diffuse
+                    .and_then(|h| md.textures.get(&h))
+                    .map(crate::texpng::decode_bc),
+                normal: d
+                    .normal
+                    .and_then(|h| md.textures.get(&h))
+                    .map(crate::texpng::decode_bc),
+                specular: d
+                    .specular
+                    .and_then(|h| md.textures.get(&h))
+                    .map(crate::texpng::decode_bc),
+            })
+            .collect();
+        if draws.is_empty() {
+            return Err(format!(
+                "model `{name}` has {} draws but every one is empty — nothing to render",
+                md.draws.len()
+            ));
+        }
+        let r = crate::shot::HeroRenderer::new(
+            &sv,
+            &md.indices,
+            &palette,
+            (md.stats.bbox_min, md.stats.bbox_max),
+            &draws,
+        );
+        renderers.insert(hash, r);
+    }
+
+    // Draw at the requested camera.
+    let renderer = renderers.get_mut(&hash).expect("just inserted");
+    let rgba = renderer.render_rgba(cam, size);
+    let img = egui::ColorImage::from_rgba_unmultiplied([size.0 as usize, size.1 as usize], &rgba);
+    // Reuse the existing texture handle on a redraw so the Image widget stays bound to the same
+    // id — otherwise a drag-orbit frame-swap can briefly show the old texture at the new rect
+    // size while egui catches up to the new allocation.
+    if let Some(mut tex) = existing_tex {
+        tex.set(img, egui::TextureOptions::LINEAR);
+        Ok(tex)
+    } else {
+        Ok(ctx.load_texture(format!("hero_{hash:08X}"), img, egui::TextureOptions::LINEAR))
+    }
+}
+
+/// The retail `vz.wad` the game-gated tests read: `vz_wad` in the nearest `.mercs2-local.toml`
+/// (`scripts/find-vz-wad.sh --write`). Panics naming what is missing.
+#[cfg(all(test, feature = "retail"))]
+pub(crate) fn retail_vz_wad() -> String {
+    mercs2_formats::game_paths::local_config_vz_wad(std::path::Path::new(env!("CARGO_MANIFEST_DIR")))
+        .unwrap_or_else(|e| panic!("{e}"))
+        .to_string_lossy()
+        .into_owned()
+}
+
+#[cfg(all(test, feature = "retail"))]
+mod string_table_retail_tests {
+    use super::WadStack;
+    use mercs2_formats::stringdb::key_hash;
+
+    /// `english` resolves through the WAD stack and the save's loadout keys read as the game shows
+    /// them. Expected text from `mercs2_probe --bin stringdb_dump --filter english` on retail vz.wad.
+    #[test]
+    fn english_table_names_the_loadout_keys() {
+        let wad = super::retail_vz_wad();
+        let mut w = WadStack::open(&wad, &[]).expect("open retail vz.wad");
+        let t = w.string_table("english").expect("english string table");
+        assert_eq!(t.len(), 18_299);
+        for (key, text) in [
+            ("[vehicle.wz10]", "Warsong Attack Helicopter"),
+            ("[support.airstrike.bunkerbuster.name]", "Bunker Buster"),
+            ("[vehicle.veyronassault]", "The Urban Commando"),
+        ] {
+            assert_eq!(t.get(&key_hash(key)).map(String::as_str), Some(text), "{key}");
+        }
+    }
+
+    /// The save's carried-weapon keys name their `worldentity` templates.
+    #[test]
+    fn worldentity_names_the_carried_weapon_templates() {
+        let wad = super::retail_vz_wad();
+        let mut w = WadStack::open(&wad, &[]).expect("open retail vz.wad");
+        let names = w.template_names().expect("worldentity template names");
+        for (key, name) in [
+            (0x8000_5FD3u32, "C4"),
+            (0x8000_6ED0, "Fuel-Air RPG"),
+            (0x8000_569E, "Light MG"),
+            (0x8000_2331, "Grenade"),
+        ] {
+            assert_eq!(names.get(&key).map(String::as_str), Some(name), "0x{key:08X}");
+        }
+    }
+
+    /// The mission, reward and flow scripts come out of the resident and scripts_vz blocks as LuaQ
+    /// the game's own VM accepts.
+    #[test]
+    fn mission_scripts_resolve_as_loadable_bytecode() {
+        let wad = super::retail_vz_wad();
+        let mut w = WadStack::open(&wad, &[]).expect("open retail vz.wad");
+        let lua = mercs2_engine::script::mercs2_luac::rt::Lua::new().unwrap();
+        for name in ["wifmissiondata", "wifmissionflow", "mrxrewarddata", "mrxmissionflow"] {
+            let code = w.script_bytecode(name).unwrap_or_else(|e| panic!("{e}"));
+            assert_eq!(&code[..4], b"\x1bLua", "{name}");
+            lua.load(&code).set_name(name).into_function().unwrap_or_else(|e| panic!("{name}: {e}"));
+        }
+    }
 }

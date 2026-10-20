@@ -9,13 +9,12 @@ flagged `[faithful-blocker: yes]`; convenience/cleanup/perf is `[faithful-blocke
 - **From-scratch profile assembly (no template).** `save_write::write_profile`
   currently re-stamps fields over an existing parsed `Profile`'s raw buffer, so it
   needs a real `.profile` as a template to supply the still-unexplained *constant*
-  bytes (byte `@0xAC`, the two `@0x462..0x467` pre-zlib u16s, and the padding after
-  the deflate stream). A `Profile::new_blank()` that builds all 13,404 bytes with no
+  bytes (byte `@0xAC`, and the padding after the deflate stream). A `Profile::new_blank()` that builds all 13,404 bytes with no
   template would let the engine mint a brand-new save from pure `SaveState`. Not a
   blocker for round-tripping or editing existing saves. `[faithful-blocker: no]`
-- **`@0x462..0x467` (2×u16) + byte `@0xAC` meaning.** Preserved verbatim by the
-  writer today (byte-exact), so no fidelity loss — but their purpose is unread.
-  Recover via a live save capture (break `saveProfile 0x7BC628`). `[faithful-blocker: no]`
+- **Byte `@0xAC` meaning.** Preserved verbatim by the writer today (byte-exact), so
+  no fidelity loss — but its purpose is unread. Recover via a live save capture
+  (break `saveProfile 0x7BC628`). `[faithful-blocker: no]`
 - **Deflate encoder parity.** `set_lua_payload` uses flate2's default zlib encoder,
   which produces a *valid* stream the engine inflates correctly but whose bytes need
   not match the engine's own deflate output. The `ProfileHash` covers the compressed

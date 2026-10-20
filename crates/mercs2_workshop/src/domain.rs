@@ -145,11 +145,13 @@ impl Domain {
         matches!(self, Domain::Missions | Domain::Systems)
     }
 
-    /// Does a corpus script at `path` belong to this domain's script lens? True when the path contains
-    /// any governing needle (case-insensitive). Only meaningful for the script domains.
+    /// Does a corpus script at `path` belong to this domain's script lens? True when the script's
+    /// file name contains any governing needle (case-insensitive) — the name, not the bank folder
+    /// it ships in, so `resident/` does not put every resident script in Systems. Only meaningful
+    /// for the script domains.
     pub fn script_lens(self, path: &str) -> bool {
-        let p = path.to_ascii_lowercase();
-        self.governing_scripts().iter().any(|n| p.contains(n))
+        let name = path.rsplit('/').next().unwrap_or(path).to_ascii_lowercase();
+        self.governing_scripts().iter().any(|n| name.contains(n))
     }
 
     /// Corpus path/name needles for the Lua that governs this domain — the scripts a domain edit is
@@ -252,5 +254,14 @@ mod tests {
     fn an_unnamed_row_belongs_to_no_domain() {
         let bare = AssetRow { hash: 0xDEAD_BEEF, block: 0, src: 0, name: None };
         assert!(Domain::ALL.iter().all(|d| !d.model_lens(&bare)));
+    }
+
+    /// The script lens reads the file name: the bank folder a script ships in is not part of what
+    /// the script is about.
+    #[test]
+    fn the_script_lens_matches_the_file_name_not_the_bank() {
+        assert!(!Domain::Systems.script_lens("lua/resident/mrxmusic.lua"));
+        assert!(Domain::Audio.script_lens("lua/resident/mrxmusic.lua"));
+        assert!(Domain::Systems.script_lens("lua/resident/mrxbootstrap.lua"));
     }
 }

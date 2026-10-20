@@ -41,8 +41,15 @@ mercs2_audio = { workspace = true }
 zip = { version = "2", default-features = false, features = ["deflate"] }
 # Offscreen `--shot` renderer: POD vertex/buffer casts.
 bytemuck = { version = "1", features = ["derive"] }
-# NOTE (blueprint editor, planned): `full_moon` (Lua 5.1 AST, round-trip) + `egui-snarl`
-# (node graph) — see docs/modernization/workshop_charter.md §Mission designer.
+# The Missions Blueprint's Lua model: a lossless Lua AST (every token keeps its trivia), so a
+# script printed back from it is byte-for-byte the source it was parsed from — see
+# docs/modernization/workshop_charter.md §Mission designer. `lua52` for `goto`/`::label::`: unluac
+# emits them for control flow it cannot structure in the debug-stripped DLC chunks
+# (docs/mercs2-dlc-luacd/README.md). What retail accepts is decided by the mercs2_luac compile.
+full_moon = { version = "3", default-features = false, features = ["lua52"] }
+# The Blueprint's Compile: the workspace's one Lua 5.1.5 (the game's float VM), so a script that
+# compiles here is bytecode the game loads.
+mercs2_luac = { workspace = true }
 mercs2_engine = { workspace = true }
 mercs2_core = { workspace = true }
 mercs2_formats = { workspace = true }
@@ -50,6 +57,8 @@ mercs2_formats = { workspace = true }
 mercs2_quartermaster = { workspace = true }
 mercs2_bridge = { workspace = true }
 mercs2_destruction = { workspace = true }
+# Saves page Delete: moves a .profile to the OS trash (recoverable) rather than removing it.
+trash = "5"
 
 [features]
 # Builds the game-gated tests, which read the retail vz.wad named by the repo-root

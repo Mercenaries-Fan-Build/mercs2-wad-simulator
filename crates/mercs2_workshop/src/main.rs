@@ -72,12 +72,20 @@ mod gui;
 mod import;
 mod index;
 mod luaview;
+mod lua_source;
+mod blueprint;
+mod missions;
 mod publish;
 mod retarget;
 // The preview-only half (`rebind_matrices` / `animation_rig`) is an extension trait now that the
 // mapper itself lives in `mercs2_formats::retarget`; the call sites below are unchanged.
 use crate::retarget::RetargetPreview as _;
 mod quartermaster;
+mod saves;
+mod game_rules; // The shipped mission, reward and flow scripts, run on the game's VM
+mod save_flow; // Contract state changes on a save: complete, undo, offer, lock
+mod save_tables; // Read-only inspector sections for every other save table
+mod save_inspect; // The Saves right-click Inspect window: a readable account of one save
 mod settings;
 mod shipment;
 mod shot;

@@ -1379,11 +1379,18 @@ setmetatable(_G, {
 })
 "#;
 
+/// Where `import` finds a module's chunk.
+enum ModuleSource {
+    /// lowercased module name (file stem) → source path.
+    Files(HashMap<String, PathBuf>),
+    /// module name → chunk bytes, source or LuaQ bytecode (the shipped scripts in the game's WADs).
+    Fetch(Box<dyn Fn(&str) -> Result<Vec<u8>, String>>),
+}
+
 /// The module loader: resolves `import`/`inherit` names to corpus `.lua` files, executes each in its
 /// own environment, and caches the result. Held behind an `Rc` and captured by the loader closures.
 struct Loader {
-    /// lowercased module name (file stem) → source path.
-    index: HashMap<String, PathBuf>,
+    source: ModuleSource,
     /// lowercased module name → its loaded environment table (also the module's public surface).
     loaded: RefCell<HashMap<String, Table>>,
     /// Stack of environment tables for the currently-executing `import` chain, so `inherit()` can find
@@ -1404,8 +1411,12 @@ impl Loader {
         for root in roots {
             index_lua_files(root, &mut index);
         }
+        Self::with_source(ModuleSource::Files(index))
+    }
+
+    fn with_source(source: ModuleSource) -> Self {
         Loader {
-            index,
+            source,
             loaded: RefCell::new(HashMap::new()),
             stack: RefCell::new(Vec::new()),
             pending_init: RefCell::new(Vec::new()),
@@ -1441,11 +1452,18 @@ impl Loader {
             lua.globals().set(name, t.clone())?;
             return Ok(t.clone());
         }
-        let path = self.index.get(&key).cloned().ok_or_else(|| {
-            mercs2_luac::rt::Error::RuntimeError(format!("import: module '{name}' not found in roots"))
-        })?;
-        let src = std::fs::read_to_string(&path)
-            .map_err(|e| mercs2_luac::rt::Error::RuntimeError(format!("import '{name}': {e}")))?;
+        let src: Vec<u8> = match &self.source {
+            ModuleSource::Files(index) => {
+                let path = index.get(&key).cloned().ok_or_else(|| {
+                    mercs2_luac::rt::Error::RuntimeError(format!("import: module '{name}' not found in roots"))
+                })?;
+                std::fs::read_to_string(&path)
+                    .map_err(|e| mercs2_luac::rt::Error::RuntimeError(format!("import '{name}': {e}")))?
+                    .into_bytes()
+            }
+            ModuleSource::Fetch(fetch) => fetch(name)
+                .map_err(|e| mercs2_luac::rt::Error::RuntimeError(format!("import '{name}': {e}")))?,
+        };
 
         // Fresh environment; misses fall through to the globals (stdlib, other modules, engine tables).
         let env = lua.create_table()?;
@@ -1526,6 +1544,16 @@ impl ScriptHost {
     /// Build a host whose `import`/`inherit` resolve module names against `roots` (recursively indexed
     /// `.lua` files — e.g. `docs/mercs2-luacd/src`). Installs the compat prelude and the module system.
     pub fn new(roots: Vec<PathBuf>) -> LuaResult<Self> {
+        Self::with_loader(Loader::new(&roots))
+    }
+
+    /// Build a host whose `import`/`inherit` take each module's chunk from `fetch(name)` — source or
+    /// LuaQ bytecode, e.g. the shipped scripts read out of the game's WADs.
+    pub fn with_module_source(fetch: impl Fn(&str) -> Result<Vec<u8>, String> + 'static) -> LuaResult<Self> {
+        Self::with_loader(Loader::with_source(ModuleSource::Fetch(Box::new(fetch))))
+    }
+
+    fn with_loader(loader: Loader) -> LuaResult<Self> {
         // All stdlibs incl. `debug` (the game Lua uses the 5.1 `getfenv`/`setfenv`, which our compat
         // shims implement via `debug.getupvalue`/`setupvalue`). This host runs TRUSTED decompiled game
         // Lua, so the unsafe `debug` library is acceptable.
@@ -1534,7 +1562,7 @@ impl ScriptHost {
         let lua = Lua::new()?;
         lua.load(PRELUDE).set_name("@prelude").exec()?;
 
-        let loader = Rc::new(Loader::new(&roots));
+        let loader = Rc::new(loader);
 
         let imp = loader.clone();
         let import_fn = lua.create_function(move |lua, name: String| imp.import(lua, &name))?;
@@ -1654,7 +1682,6 @@ impl ScriptHost {
     pub fn import_module(&self, name: &str) -> LuaResult<Table> {
         self.loader.import(&self.lua, name)
     }
-
     /// Execute a source chunk in the global environment (for boot glue / tests).
     pub fn exec(&self, src: &str, name: &str) -> LuaResult<()> {
         self.lua.load(src).set_name(name.to_string()).exec()
@@ -2114,6 +2141,32 @@ mod tests {
             "raised error must round-trip: {}",
             crashes[0]
         );
+    }
+
+    /// A fetched chunk may be bytecode: `import` runs it in its own environment, `inherit` chains to
+    /// another fetched module, and `Init` runs once the chain settles — the same as a `.lua` file.
+    #[test]
+    fn module_source_runs_fetched_bytecode() {
+        let base = mercs2_luac::compile("function Greet() return 'hi' end", "@base").unwrap();
+        let child = mercs2_luac::compile("inherit('Base')\nfunction Init() nInit = 7 end", "@child").unwrap();
+        let h = ScriptHost::with_module_source(move |name| match name {
+            "Base" => Ok(base.clone()),
+            "Child" => Ok(child.clone()),
+            other => Err(format!("no module {other}")),
+        })
+        .unwrap();
+        let m = h.import_module("Child").unwrap();
+        assert_eq!(m.get::<i64>("nInit").unwrap(), 7);
+        let greet: mercs2_luac::rt::Function = m.get("Greet").unwrap();
+        assert_eq!(greet.call::<String>(()).unwrap(), "hi");
+    }
+
+    /// A module the source cannot supply fails the import with the source's own message.
+    #[test]
+    fn module_source_reports_a_missing_module() {
+        let h = ScriptHost::with_module_source(|name| Err(format!("{name} is not in any open wad"))).unwrap();
+        let e = h.import_module("Nowhere").unwrap_err().to_string();
+        assert!(e.contains("Nowhere is not in any open wad"), "{e}");
     }
 
     #[test]

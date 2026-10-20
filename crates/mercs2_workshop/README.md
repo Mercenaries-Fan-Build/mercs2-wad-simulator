@@ -118,6 +118,11 @@ error giving the release page and the folder to unpack the zip into. A complete 
 of the five Ess / ECS / audio files, or holding a malformed one, stops the boot with an error naming
 the file.
 
+The corpus gates in `lua_source`, `blueprint` and `missions` run over the bundle's Lua and are
+pinned to release v0.17.0's bundle (`index::PINNED_CORPUS`: 675 scripts in `lua/`, 39 in
+`lua_dlc/`), the one CI downloads. A different bundle fails them on the count: re-download the
+bundle from Settings, or point `MERCS2_WORKSHOP_DATA` at an unpacked v0.17.0 `workshop_data/`.
+
 `--pack-data [dir]` builds the bundle (default `workshop_data`). Its in-repo sources are read from
 the checkout the binary was built from: names come from
 `data/production_names.json`, and `ess_api.json`, `ess_natives.json`, `ess_nodes.json`,
@@ -142,6 +147,21 @@ Binary crate — these are private modules, listed for orientation:
 - `index` — asset catalog, reference-bundle resolution, and name resolution
   (`workshop_data/names.bin` overlaid by the embedded ASET dictionary).
 - `fetch` — downloads and installs the release's reference bundle.
+- `saves` — the Saves page: save browser, hero viewport, PROGRESSION grid with the contract menu,
+  inspector, Write.
+- `save_tables` / `save_inspect` — the readable views of every save table, and the Inspect window.
+- `game_rules` — the shipped mission, reward and flow scripts, run from the WAD stack on the game's
+  Lua VM; every other module is a recorder, so a flow binding's consequence comes back as the calls
+  the game would make.
+- `save_flow` — contract state changes on a save (complete, undo, offer, start, lock), as the game
+  makes them. What it writes where: `docs/save_contract_state.md`.
+- `missions` — the Missions page: a Blueprint editor over a mission script's Lua (script list,
+  palette from the corpus, zoomable canvas, inspector, Compile, Add to Shipment as `replace_lua`).
+- `blueprint` — a Lua function body as nodes and wires: lifted from the AST, edited, and emitted back
+  through it, plus the corpus index (signatures, inherit chains) and the palette. Its gates lift and
+  emit every corpus script byte-identical and compile each with the game's Lua 5.1.
+- `lua_source` — the lossless Lua model the Blueprint stands on (full_moon); its gate parses and
+  prints every corpus script byte-identical.
 - `luaview` — read-only Lua source viewer with a hand-rolled Lua lexer/highlighter.
 - `publish` — background-threaded mod publishing into a patch WAD, with SHA-256 + a load self-test.
 - `texenc` — CPU BC1/BC3 encode (min/max endpoint, no search) for imported images.
