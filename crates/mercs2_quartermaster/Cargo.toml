@@ -51,7 +51,7 @@ semver = "1"
 # The sound kinds encode and fork bank tables (`encode_bank`, `retarget_cue`) and read authored
 # WAVs (`wav::read_pcm16_wav`) with the codecs that re-encode every retail bank byte-identically.
 # Decode/encode side only: no device output, so no `cpal` / ALSA in the CLI.
-mercs2_audio = { path = "../mercs2_audio", version = "2.0.0", default-features = false }
+mercs2_audio = { path = "../mercs2_audio", version = "2.0.1", default-features = false }
 
 [dev-dependencies]
 # Only to BUILD a compressed `CFX` movie fixture. The `add_movie` lowering must accept one and ship
