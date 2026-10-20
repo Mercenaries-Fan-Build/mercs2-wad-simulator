@@ -73,6 +73,7 @@ mod import;
 mod index;
 mod luaview;
 mod lua_source;
+mod blueprint;
 mod missions;
 mod publish;
 mod retarget;
