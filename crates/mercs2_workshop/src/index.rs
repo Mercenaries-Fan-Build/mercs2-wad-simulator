@@ -637,8 +637,10 @@ const ASET_NAME_FRAGMENTS: [&str; 6] = [
 ];
 
 /// Load the decompiled-Lua corpus for reference search: `(display path, content, lowercased)`,
-/// from the reference bundle's `lua/` and `lua_dlc/` (~7 MB total). An error when the bundle
-/// cannot be found or downloaded, or lacks either folder.
+/// from the reference bundle's `lua/` and `lua_dlc/` (~7 MB total). The display path keeps the
+/// bank the script ships in (`lua/resident/mrxmusic.lua`), because a module can ship in more than
+/// one bank and each copy is its own script. An error when the bundle cannot be found or
+/// downloaded, lacks either folder, or holds a script that cannot be read.
 pub fn load_lua_corpus() -> Result<Vec<(String, String, String)>, String> {
     let home = require_data_home(&mut |_, _| {})?;
     let mut out = Vec::new();
@@ -651,26 +653,72 @@ pub fn load_lua_corpus() -> Result<Vec<(String, String, String)>, String> {
                 crate::fetch::manual_install_help()
             ));
         }
-        collect_lua(&d, tag, &mut out);
+        collect_lua(&d, &d, tag, &mut out)?;
     }
     eprintln!("[lua] reference corpus: {} scripts", out.len());
     Ok(out)
 }
 
-fn collect_lua(dir: &Path, tag: &str, out: &mut Vec<(String, String, String)>) {
-    let Ok(rd) = std::fs::read_dir(dir) else { return };
-    for e in rd.flatten() {
-        let p = e.path();
+#[cfg(test)]
+mod lua_corpus_tests {
+    use super::collect_lua;
+
+    fn scratch(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("mercs2-workshop-{name}-{}", std::process::id()));
+        if dir.exists() {
+            std::fs::remove_dir_all(&dir).expect("clear the scratch dir");
+        }
+        std::fs::create_dir_all(&dir).expect("make the scratch dir");
+        dir
+    }
+
+    /// A module that ships in two banks is two scripts, and each keeps its bank in its path.
+    #[test]
+    fn a_script_keeps_the_bank_it_ships_in() {
+        let root = scratch("banks");
+        for bank in ["resident", "shell"] {
+            std::fs::create_dir_all(root.join(bank)).expect("bank dir");
+            std::fs::write(root.join(bank).join("mrxmusic.lua"), format!("-- {bank}\n")).expect("write");
+        }
+        let mut out = Vec::new();
+        collect_lua(&root, &root, "lua", &mut out).expect("collects");
+        let paths: Vec<&str> = out.iter().map(|(p, _, _)| p.as_str()).collect();
+        assert_eq!(paths, vec!["lua/resident/mrxmusic.lua", "lua/shell/mrxmusic.lua"]);
+        std::fs::remove_dir_all(&root).expect("clean up");
+    }
+
+    /// A script that cannot be read stops the load with its name, rather than leaving the corpus
+    /// one script short with nothing said.
+    #[test]
+    fn an_unreadable_script_is_an_error_naming_it() {
+        let root = scratch("unreadable");
+        std::fs::write(root.join("bad.lua"), [0xff, 0xfe, 0x00]).expect("write");
+        let mut out = Vec::new();
+        let err = collect_lua(&root, &root, "lua", &mut out).expect_err("not UTF-8");
+        assert!(err.contains("bad.lua"), "{err}");
+        std::fs::remove_dir_all(&root).expect("clean up");
+    }
+}
+
+fn collect_lua(root: &Path, dir: &Path, tag: &str, out: &mut Vec<(String, String, String)>) -> Result<(), String> {
+    let rd = std::fs::read_dir(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    let mut paths = Vec::new();
+    for e in rd {
+        paths.push(e.map_err(|e| format!("{}: {e}", dir.display()))?.path());
+    }
+    paths.sort();
+    for p in paths {
         if p.is_dir() {
-            collect_lua(&p, tag, out);
+            collect_lua(root, &p, tag, out)?;
         } else if p.extension().and_then(|x| x.to_str()) == Some("lua") {
-            if let Ok(content) = std::fs::read_to_string(&p) {
-                let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("?");
-                let lower = content.to_ascii_lowercase();
-                out.push((format!("{tag}/{name}"), content, lower));
-            }
+            let content = std::fs::read_to_string(&p).map_err(|e| format!("{}: {e}", p.display()))?;
+            let rel = p.strip_prefix(root).map_err(|e| format!("{}: {e}", p.display()))?;
+            let rel = rel.to_string_lossy().replace('\\', "/");
+            let lower = content.to_ascii_lowercase();
+            out.push((format!("{tag}/{rel}"), content, lower));
         }
     }
+    Ok(())
 }
 
 /// Hash a plain name-per-line list (bone-name candidates, devkit strings) into hash → name.
