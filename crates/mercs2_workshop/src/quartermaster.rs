@@ -519,6 +519,20 @@ impl Panel {
         Ok(dir)
     }
 
+    /// "Start a Shipment from this…": scaffold a new Shipment in `dir` (it becomes the open one) and
+    /// add `kind` with `asset` as its donor or target. Returns the contribution's index.
+    pub(crate) fn start_from(
+        &mut self,
+        dir: &Path,
+        names: Option<&NameTable>,
+        kind: &str,
+        asset: &str,
+    ) -> Result<usize, String> {
+        let c = seeded(kind, asset, 1).ok_or_else(|| format!("no stub for `{kind}`"))?;
+        self.scaffold(dir, names)?;
+        self.upsert_contribution(names, None, c)
+    }
+
     /// Write a fresh `manifest.yaml` + `src/` + `README.md` into `dir` and open it.
     ///
     /// Refuses a folder that already holds a manifest rather than overwriting one: this is reached
@@ -961,6 +975,16 @@ pub fn routes_for(is_texture: bool) -> &'static [(&'static str, &'static str)] {
             ("add_outfit", "New outfit on this donor"),
             ("add_model", "New model on this donor"),
         ]
+    }
+}
+
+/// The route "Start a Shipment from this…" takes for an asset: a texture is replaced, a character
+/// becomes the donor of a wearable outfit, any other model the donor of a new model.
+pub fn first_route(is_texture: bool, is_character: bool) -> &'static str {
+    match (is_texture, is_character) {
+        (true, _) => "replace_texture",
+        (false, true) => "add_outfit",
+        (false, false) => "add_model",
     }
 }
 
@@ -4319,6 +4343,31 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Starting a Shipment from an asset leaves a new Shipment holding exactly that asset's route,
+    /// selected, with the asset as its donor — even with another Shipment open before.
+    #[test]
+    fn a_shipment_started_from_an_asset_holds_its_route() {
+        let mut p = Panel::default();
+        p.scaffold(&tmp("start_old"), None).unwrap();
+        let d = tmp("start_new");
+        let kind = first_route(false, true);
+        let at = p.start_from(&d, None, kind, "pmc_hum_mattias").unwrap();
+        assert_eq!(p.root(), Some(d.as_path()), "the new Shipment is not the open one");
+        let cs = &p.shipment.as_ref().unwrap().manifest.contributions;
+        assert_eq!((at, cs.len(), p.selected), (0, 1, Some(0)));
+        match &cs[0] {
+            Contribution::AddOutfit { donor, .. } => assert_eq!(donor.as_deref(), Some("pmc_hum_mattias")),
+            c => panic!("expected add_outfit, got {}", c.kind()),
+        }
+    }
+
+    #[test]
+    fn the_first_route_follows_what_the_asset_is() {
+        assert_eq!(first_route(true, false), "replace_texture");
+        assert_eq!(first_route(false, true), "add_outfit");
+        assert_eq!(first_route(false, false), "add_model");
     }
 
     #[test]
