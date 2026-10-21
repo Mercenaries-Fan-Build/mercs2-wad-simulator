@@ -99,6 +99,19 @@ Global options: `--wad <path>` (override registry discovery), `--overlay <path>`
 stacks patch WADs on top of the base), `--no-auto-patch` (suppress the automatic `vz-patch.wad`
 pickup).
 
+Capture a page in a given state (a diagnostic for comparing a page with its design artboard):
+
+```
+cargo run -p mercs2_workshop -- --ui-state crates/mercs2_workshop/ui_states/inspect.json
+```
+
+The JSON names the state by the words the window shows — `page` (a rail label or `Live`),
+`settings_section`, `tab`, `lens`, `filter`, `load` (a model name), `shipment` + `contribution`,
+`bench` + `donor` — plus `capture` (the PNG to write, relative to the working directory) and
+`settle_frames` (default 8). The window opens, applies the state once the reference data is in,
+captures the presented frame (3D and GUI) and exits 0. A name that does not resolve, a field it does
+not know, or a surface that cannot be read back exits 2 with the reason.
+
 Other headless flags: `--pack-data [dir]` (assemble the redistributable `workshop_data/` reference
 bundle; see [Reference bundle](#reference-bundle)), `--hash <names...>` and `--hash-file <file>` (m2-hash names for hash-hunting),
 `--block-strings <block>` (printable ASCII from a decompressed block), `--tex-check`, `--tex-scan`,
