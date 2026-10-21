@@ -19,11 +19,10 @@ its foot:
 - preview a model with its real materials, textures, orbit camera and animation clips
 - inspect layers: the HIER bone tree, per-material draw groups (isolate / hide individual
   sub-strips), full-screen texture plates
-- right-click a model to load or export it, or to use it as a donor: **Retarget a rig onto this…**
-  and **Fit an import to this…** each add a contribution to the open Shipment (`add_outfit` /
-  `add_model`, scaffolding a Shipment if none is open) and open their bench on it, lit under
-  Shipment with a `SHIPMENTS › shipment › contribution › bench` breadcrumb. The donor is never
-  written.
+- right-click a model to load or export it, or to use it as a donor: **Retarget a rig onto this**
+  and **Fit an import to this** open their bench with the model as donor, lit under Shipment with
+  a `SHIPMENTS › shipment › contribution › bench` breadcrumb. The work happens in the bench and
+  nothing is written until it saves; the donor is never written.
 - **Live** is a blank page; its rail dot is lit while the game's lua-bridge (`127.0.0.1:27050`)
   accepts a connection.
 - read-only Lua source viewer with a hand-rolled highlighter, opened from corpus hits
