@@ -8,13 +8,16 @@
 //! * `--profiles`: the model's `MIXR` (`mercs2_formats::mixr`) — each part's exclusions, each
 //!   profile's allowed parts and outfits, and the templates that pick it;
 //! * `--all-kits`: `--profiles` over every ASET model whose own container carries a `MIXR`, with a
-//!   count of templates whose `ModelMixerProfile` names no profile of their kit.
+//!   count of templates whose `ModelMixerProfile` names no profile of their kit;
+//! * `--factions`: every template with a `ModelName`, one tab-separated line each —
+//!   `model hash · FactionMarker hash (or -) · template name` — to join against model names.
 //!
 //! Exit 0 = everything read; 1 = the worldentity, a model container or a MIXR could not be read; 2 = usage.
 //!
 //! ```text
 //! cargo run -p mercs2_probe --bin kit_templates -- 0x4D4F42B5 [--profiles] [--components] [--wad path]
 //! cargo run -p mercs2_probe --bin kit_templates -- --all-kits [--wad path]
+//! cargo run -p mercs2_probe --bin kit_templates -- --factions [--wad path]
 //! ```
 
 use mercs2_engine::registry::AssetRegistry;
@@ -33,6 +36,7 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let wad_arg = args.iter().position(|a| a == "--wad").and_then(|i| args.get(i + 1)).cloned();
     let all_kits = args.iter().any(|a| a == "--all-kits");
+    let factions = args.iter().any(|a| a == "--factions");
     let profiles = all_kits || args.iter().any(|a| a == "--profiles");
     let show_components = args.iter().any(|a| a == "--components");
     let mut targets: Vec<u32> = args
@@ -46,8 +50,8 @@ fn main() {
             })
         })
         .collect();
-    if targets.is_empty() && !all_kits {
-        eprintln!("usage: kit_templates <model name|0xHASH>... | --all-kits  [--components] [--profiles] [--wad <path>]");
+    if targets.is_empty() && !all_kits && !factions {
+        eprintln!("usage: kit_templates <model name|0xHASH>... | --all-kits | --factions  [--components] [--profiles] [--wad <path>]");
         std::process::exit(2);
     }
 
@@ -86,6 +90,13 @@ fn main() {
         we.components.len(),
         templates.len()
     );
+    if factions {
+        for t in &templates {
+            let f = t.faction.map(|f| format!("0x{f:08X}")).unwrap_or_else(|| "-".into());
+            println!("0x{:08X}\t{f}\t{}", t.model, t.label());
+        }
+        return;
+    }
     let mut of_model: BTreeMap<u32, Vec<&KitTemplate>> = BTreeMap::new();
     for t in &templates {
         of_model.entry(t.model).or_default().push(t);
