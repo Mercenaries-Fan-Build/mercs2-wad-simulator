@@ -342,7 +342,7 @@ fn main() {
         // The kit template rows, as the GUI catalog lists them.
         match app::load_kit_templates(&mut stack) {
             Ok(t) => {
-                idx.add_kit_templates(&t);
+                idx.add_kit_templates(&t.kits, &t.all);
             }
             Err(e) => {
                 eprintln!("--list: cannot read the world's templates (worldentity): {e}");
@@ -522,7 +522,7 @@ fn main() {
         let mut idx = index::AssetIndex::build(&stack.wads, names_or_exit());
         match app::load_kit_templates(&mut stack) {
             Ok(t) => {
-                idx.add_kit_templates(&t);
+                idx.add_kit_templates(&t.kits, &t.all);
             }
             Err(e) => {
                 eprintln!("--export-bundle: cannot read the world's templates (worldentity): {e}");
@@ -563,7 +563,7 @@ fn main() {
         drop(stack);
         let (mut ok, mut fail) = (0, 0);
         for (h, label) in &targets {
-            match app::export_bundle_by_hash(&wadpath, &overlays, *h, label, &idx, &outroot, outfit) {
+            match app::export_bundle_by_hash(&wadpath, &overlays, *h, label, label, &idx, &outroot, outfit) {
                 Ok(d) => { ok += 1; println!("  [ok]   {label} (0x{h:08X}) -> {d}"); }
                 Err(e) => { fail += 1; eprintln!("  [FAIL] {label} (0x{h:08X}): {e}"); }
             }
