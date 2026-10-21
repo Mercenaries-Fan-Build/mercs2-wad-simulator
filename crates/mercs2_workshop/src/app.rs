@@ -497,9 +497,15 @@ enum Act {
     ClipStop,
     PlayPause,
     GroupToggle(usize),
-    Export,
-    /// Context-menu: export a catalog model directly (no preview needed).
-    ExportHash(u32, String),
+    /// "Start a Shipment from this…": a new Shipment in a picked folder, holding this asset's first
+    /// route (`quartermaster::first_route`). `.2` = the asset is a texture.
+    StartShipment(u32, String, bool),
+    /// Open the Export dialog for a model (the menu's "Export…", or F10 on the loaded one).
+    OpenExport(u32, String),
+    /// The Export dialog's "Choose…": pick the folder it writes into.
+    ExportFolder,
+    /// The Export dialog's "Export": write the model as the dialog says.
+    RunExport,
     /// Hide every draw group except this one / show them all again.
     IsolateGroup(usize),
     ShowAllGroups,
@@ -809,12 +815,8 @@ fn asset_menu(
             actions.push(Act::LoadModelHash(hash, label.to_string()));
             ui.close_menu();
         }
-        if ui
-            .add(egui::Button::new("Export").shortcut_text("F10"))
-            .on_hover_text("OBJ + textures")
-            .clicked()
-        {
-            actions.push(Act::ExportHash(hash, label.to_string()));
+        if ui.add(egui::Button::new("Export\u{2026}").shortcut_text("F10")).clicked() {
+            actions.push(Act::OpenExport(hash, label.to_string()));
             ui.close_menu();
         }
         ui.separator();
@@ -847,6 +849,10 @@ fn asset_menu(
             }
         }
     });
+    if ui.button("Start a Shipment from this\u{2026}").clicked() {
+        actions.push(Act::StartShipment(hash, label.to_string(), is_texture));
+        ui.close_menu();
+    }
 
     ui.separator();
     if ui.button("Copy name").clicked() {
@@ -992,6 +998,46 @@ fn in_lens(lens: Option<crate::domain::Domain>, r: &crate::index::AssetRow) -> b
     lens.map_or(true, |d| d.model_lens(r))
 }
 
+/// The keys that queue the same Act wherever they are pressed — the ones [`SHORTCUTS`] lists that
+/// need nothing but the key. `, / .` step the clip and are kept out of the filter charset for it.
+fn shortcut_act(code: KeyCode) -> Option<Act> {
+    Some(match code {
+        KeyCode::F3 => Act::TexOfPreview,
+        KeyCode::F4 | KeyCode::Period => Act::ClipNav(1),
+        KeyCode::Comma => Act::ClipNav(-1),
+        KeyCode::Backslash => Act::ClipStop,
+        KeyCode::Space => Act::PlayPause,
+        KeyCode::F11 => Act::TierNext,
+        _ => return None,
+    })
+}
+
+/// Inspect's header crumb after `INSPECTING`: the tab, then the Lens (the Models tab with a Lens
+/// on), then the loaded model.
+fn inspect_crumb(kind: Kind, lens: Option<crate::domain::Domain>, loaded: Option<&str>) -> Vec<String> {
+    let mut crumb = vec![kind.short().to_string()];
+    if let (Kind::Model, Some(d)) = (kind, lens) {
+        crumb.push(d.label().to_string());
+    }
+    if let Some(m) = loaded {
+        crumb.push(m.to_string());
+    }
+    crumb
+}
+
+/// The group header a model row lists under: its faction under a Lens
+/// (`AssetRow::faction_group`), its category with All.
+fn list_group(
+    r: &crate::index::AssetRow,
+    lens: Option<crate::domain::Domain>,
+    faction_labels: &HashMap<u32, String>,
+) -> String {
+    match lens {
+        Some(_) => r.faction_group(faction_labels),
+        None => r.category().to_uppercase(),
+    }
+}
+
 /// The browser list: indices into `rows` (one `kind`'s rows) that pass the Lens (Models only) and
 /// the name filter, in display order.
 fn filter_rows(
@@ -999,6 +1045,7 @@ fn filter_rows(
     kind: Kind,
     filter: &str,
     lens: Option<crate::domain::Domain>,
+    faction_labels: &HashMap<u32, String>,
 ) -> Vec<usize> {
     let f = filter.to_ascii_lowercase();
     let mut v: Vec<usize> = rows
@@ -1008,14 +1055,22 @@ fn filter_rows(
         .filter(|(_, r)| f.is_empty() || r.label().to_ascii_lowercase().contains(&f))
         .map(|(i, _)| i)
         .collect();
-    // Models list groups by category (vehicles-by-class → characters → buildings → …), then
-    // name within a group; textures stay in the plain name order `apply_names` set.
+    // Models list groups — by faction under a Lens, alphabetically; by category with All
+    // (vehicles-by-class → characters → buildings → …) — then name within a group; textures stay in
+    // the plain name order `apply_names` set.
     if kind == Kind::Model {
-        v.sort_by(|&a, &b| {
-            crate::index::category_order(rows[a].category())
-                .cmp(&crate::index::category_order(rows[b].category()))
-                .then_with(|| rows[a].label().cmp(&rows[b].label()))
-        });
+        match lens {
+            Some(_) => v.sort_by(|&a, &b| {
+                list_group(&rows[a], lens, faction_labels)
+                    .cmp(&list_group(&rows[b], lens, faction_labels))
+                    .then_with(|| rows[a].label().cmp(&rows[b].label()))
+            }),
+            None => v.sort_by(|&a, &b| {
+                crate::index::category_order(rows[a].category())
+                    .cmp(&crate::index::category_order(rows[b].category()))
+                    .then_with(|| rows[a].label().cmp(&rows[b].label()))
+            }),
+        }
     }
     v
 }
@@ -1042,7 +1097,7 @@ pub fn run(opts: Options) {
             return;
         }
     };
-    let kit_rows = index.add_kit_templates(&kit_templates);
+    let kit_rows = index.add_kit_templates(&kit_templates.kits, &kit_templates.all);
     eprintln!(
         "[workshop] catalog: {} models ({kit_rows} kit template rows), {} textures ({} wad(s))",
         index.models().len(),
@@ -1170,10 +1225,11 @@ pub fn run(opts: Options) {
     let mut filter = String::new();
     let mut filtered: Vec<usize> = (0..index.rows(kind).len()).collect();
     let mut sel: usize = 0;
-    // Category headers the user has collapsed in the model list — click a header to fold its rows
-    // away so only the category line remains. Persists across frames; keyed by the static category
-    // name so it survives refilter/re-sort. Empty = everything expanded (the default).
-    let mut collapsed_cats: HashSet<&'static str> = HashSet::new();
+    // Group headers the user has collapsed in the model list — click a header to fold its rows
+    // away so only the header line remains. Persists across frames; keyed by the header text (a
+    // category, or a faction under a Lens) so it survives refilter/re-sort. Empty = everything
+    // expanded (the default).
+    let mut collapsed_cats: HashSet<String> = HashSet::new();
 
     // Viewport state.
     let mut preview: Option<Preview> = None;
@@ -1203,6 +1259,8 @@ pub fn run(opts: Options) {
     let mut publisher: Option<crate::publish::Publisher> = None;
     // In-flight background F10 export of a WAD asset (the heavy full-clip-decode path).
     let mut exporter: Option<Exporter> = None;
+    // The open Export dialog, if any: what it exports and the name, format and folder chosen.
+    let mut export_dialog: Option<ExportDialog> = None;
     // ── Conform transform (dedicated panel): interactively scale/rotate/place the imported mesh
     // against the donor template, baked into the export. `conform_live` drives the preview entity
     // from these fields so the placement is visible against the donor reference. ──
@@ -1352,7 +1410,7 @@ pub fn run(opts: Options) {
     let mut last_frame = std::time::Instant::now();
 
     let refilter = |index: &AssetIndex, kind: Kind, filter: &str, lens: Option<crate::domain::Domain>| -> Vec<usize> {
-        filter_rows(index.rows(kind), kind, filter, lens)
+        filter_rows(index.rows(kind), kind, filter, lens, &index.faction_labels)
     };
 
     event_loop
@@ -1483,13 +1541,12 @@ pub fn run(opts: Options) {
                         }
                         KeyCode::Enter => actions.push(Act::LoadRow(sel)),
                         // ── Preview actions (also reachable from the inspector GUI). ──
-                        KeyCode::F3 => actions.push(Act::TexOfPreview),
-                        // , / . — previous / next catalog clip. Excluded from the filter charset
-                        // for exactly this reason.
-                        KeyCode::Comma => actions.push(Act::ClipNav(-1)),
-                        KeyCode::Period => actions.push(Act::ClipNav(1)),
-                        // \ — stop clip playback and return to bind pose.
-                        KeyCode::Backslash => actions.push(Act::ClipStop),
+                        _ if shortcut_act(code).is_some() => actions.extend(shortcut_act(code)),
+                        KeyCode::F10 => {
+                            if let Some(p) = &preview {
+                                actions.push(Act::OpenExport(p.hash, p.label.clone()));
+                            }
+                        }
                         KeyCode::BracketLeft | KeyCode::BracketRight => {
                             if let Some(p) = &mut preview {
                                 if !p.draws.is_empty() {
@@ -1502,11 +1559,6 @@ pub fn run(opts: Options) {
                                 }
                             }
                         }
-                        KeyCode::Space => actions.push(Act::PlayPause),
-                        // ── Pipeline shortcuts: same Acts the inspector GUI queues — one
-                        // implementation, in the action processor below. ──
-                        KeyCode::F10 => actions.push(Act::Export),
-                        KeyCode::F11 => actions.push(Act::TierNext),
                         _ => {
                             // Remaining printable keys type into the filter.
                             if let Some(t) = text {
@@ -1761,11 +1813,11 @@ pub fn run(opts: Options) {
                                         match load_kit_templates(&mut w) {
                                             Ok(t) => kit_templates = t,
                                             Err(e) => {
-                                                kit_templates.clear();
+                                                kit_templates = KitTemplates::default();
                                                 status.push_str(&format!(" (kit templates unreadable, no template rows: {e})"));
                                             }
                                         }
-                                        index.add_kit_templates(&kit_templates);
+                                        index.add_kit_templates(&kit_templates.kits, &kit_templates.all);
                                         filtered = refilter(&index, kind, &filter, lens);
                                         inventory_dirty = true;
                                         sel = sel.min(filtered.len().saturating_sub(1));
@@ -2014,6 +2066,19 @@ pub fn run(opts: Options) {
                                         } else {
                                             ui.label(egui::RichText::new("no shipment").weak());
                                         }
+                                    } else if wb == Workbench::Inspect {
+                                        let loaded = preview.as_ref().map(|p| p.label.as_str());
+                                        ui.label(
+                                            egui::RichText::new(inspect_crumb(kind, lens, loaded).join(" \u{203a} "))
+                                                .color(theme::TX),
+                                        );
+                                        if let Some(p) = &preview {
+                                            ui.label(
+                                                egui::RichText::new(format!("0x{:08X}", p.hash))
+                                                    .monospace()
+                                                    .color(theme::BRASS_DK),
+                                            );
+                                        }
                                     } else if let Some(p) = &preview {
                                         ui.label(egui::RichText::new(&p.label).strong());
                                         ui.label(
@@ -2034,6 +2099,65 @@ pub fn run(opts: Options) {
                                 );
                             });
                         });
+                        // ── Export dialog: the name, format and folder an export writes, then Export.
+                        if let Some(d) = export_dialog.as_mut() {
+                            let mut open = true;
+                            egui::Window::new("Export")
+                                .id(egui::Id::new("export_dialog"))
+                                .collapsible(false)
+                                .resizable(false)
+                                .open(&mut open)
+                                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                                .show(ctx, |ui| {
+                                    ui.set_width(420.0);
+                                    ui.label(theme::disp_text(d.label.to_uppercase(), theme::style_eyebrow(), theme::BRASS));
+                                    ui.add_space(6.0);
+                                    let name_state = if d.name.trim().is_empty() { theme::FieldState::Bad } else { theme::FieldState::Neutral };
+                                    theme::text_field(ui, "Name", &mut d.name, "folder name", name_state);
+                                    ui.add_space(6.0);
+                                    theme::eyebrow(ui, "Format");
+                                    for f in ExportFormat::ALL {
+                                        let why = d.refusal(f);
+                                        let r = ui
+                                            .add_enabled_ui(why.is_none(), |ui| ui.radio_value(&mut d.format, f, f.label()))
+                                            .inner;
+                                        if let Some(w) = why {
+                                            r.on_disabled_hover_text(w);
+                                        }
+                                        ui.label(egui::RichText::new(f.what()).small().color(theme::DIM));
+                                    }
+                                    ui.add_space(6.0);
+                                    theme::eyebrow(ui, "Folder");
+                                    ui.horizontal(|ui| {
+                                        ui.label(egui::RichText::new(d.folder.display().to_string()).monospace().color(theme::TX));
+                                        if ui.button("Choose\u{2026}").clicked() {
+                                            actions.push(Act::ExportFolder);
+                                        }
+                                    });
+                                    let suffix = d.outfit.map(|n| format!("_outfit{}", n + 1)).unwrap_or_default();
+                                    ui.label(
+                                        egui::RichText::new(format!(
+                                            "writes {}",
+                                            d.folder.join(format!("{}{suffix}", export_dir_name(&d.name))).display()
+                                        ))
+                                        .small()
+                                        .color(theme::FAINT),
+                                    );
+                                    ui.add_space(8.0);
+                                    ui.horizontal(|ui| {
+                                        let ready = !d.name.trim().is_empty() && d.refusal(d.format).is_none() && exporter.is_none();
+                                        if theme::primary_button(ui, "Export", ready).clicked() {
+                                            actions.push(Act::RunExport);
+                                        }
+                                        if exporter.is_some() {
+                                            ui.label(egui::RichText::new("another export is still running").small().color(theme::DIM));
+                                        }
+                                    });
+                                });
+                            if !open {
+                                export_dialog = None;
+                            }
+                        }
                         // ── Background-export modal: a centered "Exporting…" card while the worker
                         // decodes the clip set. Request a repaint each frame so the poll above keeps
                         // running (and the spinner animates) even without pointer input. ──
@@ -2341,25 +2465,28 @@ pub fn run(opts: Options) {
                             // `filtered` is category-sorted; a header opens each new run. `Disp::Row`
                             // carries the position in `filtered` so selection/keyboard stay unchanged.
                             enum Disp {
-                                Header(&'static str, usize),
+                                Header(String, usize),
                                 Row(usize),
                             }
                             let mut display: Vec<Disp> = Vec::with_capacity(filtered.len() + 32);
                             if kind == Kind::Model {
                                 let rows = index.rows(kind);
-                                let mut counts: HashMap<&'static str, usize> = HashMap::new();
-                                for &ri in &filtered {
-                                    *counts.entry(rows[ri].category()).or_default() += 1;
+                                let groups: Vec<String> = filtered
+                                    .iter()
+                                    .map(|&ri| list_group(&rows[ri], lens, &index.faction_labels))
+                                    .collect();
+                                let mut counts: HashMap<&str, usize> = HashMap::new();
+                                for g in &groups {
+                                    *counts.entry(g.as_str()).or_default() += 1;
                                 }
-                                let mut last = "";
-                                for (vi, &ri) in filtered.iter().enumerate() {
-                                    let cat = rows[ri].category();
-                                    if cat != last {
-                                        display.push(Disp::Header(cat, counts[cat]));
-                                        last = cat;
+                                let mut last: Option<&str> = None;
+                                for (vi, g) in groups.iter().enumerate() {
+                                    if last != Some(g.as_str()) {
+                                        display.push(Disp::Header(g.clone(), counts[g.as_str()]));
+                                        last = Some(g.as_str());
                                     }
-                                    // A collapsed category keeps its header but drops its rows.
-                                    if !collapsed_cats.contains(cat) {
+                                    // A collapsed group keeps its header but drops its rows.
+                                    if !collapsed_cats.contains(g) {
                                         display.push(Disp::Row(vi));
                                     }
                                 }
@@ -2375,7 +2502,7 @@ pub fn run(opts: Options) {
                                 display.len(),
                                 |ui, range| {
                                     for di in range {
-                                        let vi = match display[di] {
+                                        let vi = match &display[di] {
                                             Disp::Header(cat, n) => {
                                                 let is_collapsed = collapsed_cats.contains(cat);
                                                 // Lay the header out, filling the row so the WHOLE
@@ -2407,7 +2534,7 @@ pub fn run(opts: Options) {
                                                         egui::Stroke::NONE,
                                                     ));
                                                     ui.label(theme::disp_text(
-                                                        cat.to_uppercase(),
+                                                        cat.clone(),
                                                         theme::style_eyebrow(),
                                                         theme::FAINT,
                                                     ));
@@ -2436,12 +2563,12 @@ pub fn run(opts: Options) {
                                                     if is_collapsed {
                                                         collapsed_cats.remove(cat);
                                                     } else {
-                                                        collapsed_cats.insert(cat);
+                                                        collapsed_cats.insert(cat.clone());
                                                     }
                                                 }
                                                 continue;
                                             }
-                                            Disp::Row(vi) => vi,
+                                            Disp::Row(vi) => *vi,
                                         };
                                         let r = &index.rows(kind)[filtered[vi]];
                                         let (hash, label) = (r.hash, r.label());
@@ -4012,8 +4139,10 @@ pub fn run(opts: Options) {
                                     // model. (For a non-model domain there is no preview, so these
                                     // sit disabled, which reads correctly as "nothing loaded".)
                                     Workbench::Inspect | Workbench::Domain(_) => {
-                                        if ui.add_enabled(has_preview && exporter.is_none(), egui::Button::new("Export  F10")).clicked() {
-                                            actions.push(Act::Export);
+                                        if ui.add_enabled(has_preview, egui::Button::new("Export  F10")).clicked() {
+                                            if let Some(p) = &preview {
+                                                actions.push(Act::OpenExport(p.hash, p.label.clone()));
+                                            }
                                         }
                                         ui.separator();
                                         if ui.add_enabled(has_preview, egui::Button::new("View textures  F3")).clicked() {
@@ -4880,6 +5009,15 @@ pub fn run(opts: Options) {
                                         cam_dist = (p.radius * 2.4).clamp(1.5, 15000.0);
                                         sel_bone = None;
                                         preview = Some(p);
+                                        // The loaded row is the cursor row, however it was loaded
+                                        // (a click, the menu, Enter), when the list shows it.
+                                        let rows = index.rows(kind);
+                                        if let Some(vi) = filtered
+                                            .iter()
+                                            .position(|&ri| rows[ri].hash == hash && rows[ri].label() == label)
+                                        {
+                                            sel = vi;
+                                        }
                                         // Loading a workbench template also sets it as the conform
                                         // donor (its container hosts the injected geometry).
                                         mod_donor = Some((hash, label.clone()));
@@ -5369,26 +5507,89 @@ pub fn run(opts: Options) {
                                     }
                                 }
                             }
-                            Act::Export => {
-                                if let Some(p) = &preview {
-                                    if imported.contains_key(&p.hash) {
-                                        // Import/merge → the fast OBJ writer (no clip decode); safe inline.
-                                        status = match export_preview(&mut w, &opts.wadpath, &opts.overlays, &imported, &index, p) {
-                                            Ok(dir) => format!("exported {} -> {dir}", p.label),
+                            Act::StartShipment(hash, label, is_texture) => {
+                                let Some(dir) = rfd::FileDialog::new()
+                                    .set_title("New Shipment — pick an empty folder")
+                                    .pick_folder()
+                                else {
+                                    continue;
+                                };
+                                // The row this menu belongs to: a kit-template row shares its kit's
+                                // hash, so the label picks it out.
+                                let is_character = index
+                                    .models()
+                                    .iter()
+                                    .find(|r| r.hash == hash && r.label() == label)
+                                    .is_some_and(|r| r.category() == "Character");
+                                let kind = crate::quartermaster::first_route(is_texture, is_character);
+                                match qm.start_from(&dir, qm_names.as_ref(), kind, &label) {
+                                    Ok(at) => {
+                                        wb = Workbench::Quartermaster;
+                                        status = format!(
+                                            "new Shipment {} — contributions[{at}] {kind} from {label}",
+                                            dir.display()
+                                        );
+                                    }
+                                    Err(e) => status = format!("START A SHIPMENT FAILED: {e}"),
+                                }
+                            }
+                            Act::OpenExport(hash, label) => {
+                                // The outfit on show, when this is the loaded kit-template row.
+                                let outfit = preview
+                                    .as_ref()
+                                    .filter(|p| p.hash == hash && p.label == label)
+                                    .and_then(|p| p.kit.as_ref())
+                                    .and_then(|(_, shown)| shown.as_ref())
+                                    .map(|(_, n)| *n);
+                                export_dialog =
+                                    Some(ExportDialog::new(hash, &label, outfit, imported.contains_key(&hash)));
+                            }
+                            Act::ExportFolder => {
+                                if let Some(d) = export_dialog.as_mut() {
+                                    if let Some(f) = rfd::FileDialog::new()
+                                        .set_title("Export into…")
+                                        .set_directory(&d.folder)
+                                        .pick_folder()
+                                    {
+                                        d.folder = f;
+                                    }
+                                }
+                            }
+                            Act::RunExport => {
+                                let Some(d) = export_dialog.take() else { continue };
+                                if let Some(why) = d.refusal(d.format) {
+                                    status = format!("EXPORT FAILED: {why}");
+                                    export_dialog = Some(d);
+                                    continue;
+                                }
+                                match d.format {
+                                    // The OBJ writer decodes nothing heavy; safe inline.
+                                    ExportFormat::Obj => {
+                                        status = match source_model_data(&mut w, &imported, d.hash)
+                                            .and_then(|md| export_model_data(&md, &d.folder, &d.name))
+                                        {
+                                            Ok(dir) => format!("exported {} -> {dir}", d.label),
                                             Err(e) => format!("EXPORT FAILED: {e}"),
                                         };
-                                    } else if exporter.is_none() {
-                                        // WAD asset → the heavy rigged bundle (full clip decode) runs on a
-                                        // worker so the UI stays live; the modal reports until it lands.
-                                        status = format!("exporting {}…", p.label);
+                                    }
+                                    // The rigged bundle decodes every clip, so it runs on a worker
+                                    // and the progress window reports until it lands.
+                                    ExportFormat::Bundle => {
+                                        if exporter.is_some() {
+                                            status = "EXPORT FAILED: another export is still running".into();
+                                            export_dialog = Some(d);
+                                            continue;
+                                        }
+                                        status = format!("exporting {}…", d.label);
                                         exporter = Some(export_bundle_in_background(
                                             opts.wadpath.clone(),
                                             opts.overlays.clone(),
-                                            p.hash,
-                                            p.label.clone(),
+                                            d.hash,
+                                            d.label.clone(),
+                                            d.name.clone(),
                                             index.clone(),
-                                            std::path::PathBuf::from("workshop_export"),
-                                            p.kit.as_ref().and_then(|(_, shown)| shown.as_ref()).map(|(_, n)| *n),
+                                            d.folder.clone(),
+                                            d.outfit,
                                         ));
                                     }
                                 }
@@ -5448,14 +5649,6 @@ pub fn run(opts: Options) {
                                     info: String::new(),
                                 });
                                 status = format!("texture {label}");
-                            }
-                            Act::ExportHash(hash, label) => {
-                                status = match source_model_data(&mut w, &imported, hash)
-                                    .and_then(|md| export_model_data(&md, &label))
-                                {
-                                    Ok(dir) => format!("exported {label} -> {dir}"),
-                                    Err(e) => format!("EXPORT FAILED: {e}"),
-                                };
                             }
                             Act::IsolateGroup(gi) => {
                                 if let Some(p) = &mut preview {
@@ -5768,11 +5961,11 @@ pub fn run(opts: Options) {
                                     match load_kit_templates(&mut w) {
                                         Ok(t) => kit_templates = t,
                                         Err(e) => {
-                                            kit_templates.clear();
+                                            kit_templates = KitTemplates::default();
                                             status = format!("kit templates unreadable, no template rows: {e}");
                                         }
                                     }
-                                    index.add_kit_templates(&kit_templates);
+                                    index.add_kit_templates(&kit_templates.kits, &kit_templates.all);
                                     filtered = refilter(&index, kind, &filter, lens);
                                     inventory_dirty = true;
                                     sel = sel.min(filtered.len().saturating_sub(1));
@@ -6647,7 +6840,7 @@ impl KitOutfits {
 /// The kit data of `hash`, or `None` when its container carries no `MIXR`.
 pub(crate) fn kit_outfits(w: &mut WadStack, hash: u32) -> Result<Option<KitOutfits>, String> {
     let templates = load_kit_templates(w)?;
-    kit_outfits_with(w, hash, &templates)
+    kit_outfits_with(w, hash, &templates.kits)
 }
 
 /// [`kit_outfits`] with the world's templates already read ([`load_kit_templates`]).
@@ -6662,15 +6855,17 @@ pub(crate) fn kit_outfits_with(
     Ok(Some(KitOutfits { mixr, templates }))
 }
 
-/// Every template of the open stack's `worldentity` that picks a character-kit outfit: a non-zero
-/// `ModelMixerProfile` on a model whose container carries a `MIXR`. A profile on a model with no
-/// mixer is passed over at spawn (`0x004D0393`: no mixer object, no outfit) — retail has six, the
-/// story characters among them — so those templates are not kit templates.
-pub(crate) fn load_kit_templates(w: &mut WadStack) -> Result<Vec<mercs2_formats::mixr::KitTemplate>, String> {
+/// The open stack's `worldentity` templates that name a model, and among them every one that picks
+/// a character-kit outfit: a non-zero `ModelMixerProfile` on a model whose container carries a
+/// `MIXR`. A profile on a model with no mixer is passed over at spawn (`0x004D0393`: no mixer
+/// object, no outfit) — retail has six, the story characters among them — so those templates are
+/// not kit templates.
+pub(crate) fn load_kit_templates(w: &mut WadStack) -> Result<KitTemplates, String> {
     let we = mercs2_formats::worldentity::WorldEntity::parse(&w.worldentity()?)?;
+    let all = mercs2_formats::mixr::kit_templates(&we)?;
     let mut is_kit: HashMap<u32, bool> = HashMap::new();
     let mut out = Vec::new();
-    for t in mercs2_formats::mixr::kit_templates(&we)? {
+    for t in all.iter().cloned() {
         if t.profile == 0 {
             continue;
         }
@@ -6694,7 +6889,15 @@ pub(crate) fn load_kit_templates(w: &mut WadStack) -> Result<Vec<mercs2_formats:
             out.push(t);
         }
     }
-    Ok(out)
+    Ok(KitTemplates { kits: out, all })
+}
+
+/// The world's templates that name a model: `all` of them, and the `kits` among them — those
+/// that pick an outfit of a character kit.
+#[derive(Default)]
+pub(crate) struct KitTemplates {
+    pub kits: Vec<mercs2_formats::mixr::KitTemplate>,
+    pub all: Vec<mercs2_formats::mixr::KitTemplate>,
 }
 
 /// The render state that shows exactly `outfit` of kit `hash` at rung 0: the spawn path's per-part
@@ -7456,30 +7659,77 @@ fn build_preview(
     p
 }
 
-/// F10 export. For a WAD asset this writes the LOSSLESS RIGGED bundle — skeleton, joints, skin
-/// weights, inverse-bind matrices, and the character's full clip set as glTF animations (via
-/// [`export_bundle_by_hash`]) — so a re-import lands with its rig intact, not stripped to static
-/// geometry. Imports have no LOD-rung container to bundle, so they fall back to
-/// the OBJ + textures writer ([`export_model_data`]).
-fn export_preview(
-    w: &mut WadStack,
-    base: &str,
-    overlays: &[String],
-    imported: &HashMap<u32, ModelData>,
-    index: &AssetIndex,
-    p: &Preview,
-) -> Result<String, String> {
-    // No raw rung bytes for an import/merge — the bundle path can't run, so OBJ it is.
-    if imported.contains_key(&p.hash) {
-        let md = source_model_data(w, imported, p.hash)?;
-        return export_model_data(&md, &p.label);
+/// The folder [`ExportDialog`] proposes, and the one the headless exports write under.
+const EXPORT_ROOT: &str = "workshop_export";
+
+/// What the Export dialog writes.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum ExportFormat {
+    /// [`export_bundle_by_hash`]: glTF with the rig and every clip, each LOD rung's original
+    /// container bytes, the textures, and the manifest that reassembles them.
+    Bundle,
+    /// [`export_model_data`]: an OBJ per LOD rung with MTL materials and decoded PNG textures.
+    Obj,
+}
+
+impl ExportFormat {
+    const ALL: [ExportFormat; 2] = [ExportFormat::Bundle, ExportFormat::Obj];
+    fn label(self) -> &'static str {
+        match self {
+            ExportFormat::Bundle => "Lossless bundle",
+            ExportFormat::Obj => "OBJ + MTL + PNG",
+        }
     }
-    let outfit = p.kit.as_ref().and_then(|(_, shown)| shown.as_ref()).map(|(_, n)| *n);
-    export_bundle_by_hash(base, overlays, p.hash, &p.label, index, std::path::Path::new("workshop_export"), outfit)
+    fn what(self) -> &'static str {
+        match self {
+            ExportFormat::Bundle => {
+                "glTF with the rig and every clip, each LOD rung's original bytes, textures, and a manifest to rebuild it"
+            }
+            ExportFormat::Obj => "a static mesh per LOD rung, materials, and decoded textures",
+        }
+    }
+}
+
+/// The Export dialog: what is being exported, and the name, format and folder chosen for it.
+struct ExportDialog {
+    hash: u32,
+    label: String,
+    name: String,
+    format: ExportFormat,
+    folder: PathBuf,
+    /// The kit outfit to write, for a kit-template row shown in the viewport.
+    outfit: Option<usize>,
+    /// A drag-dropped import: it has no LOD-rung container, so only OBJ applies.
+    imported: bool,
+}
+
+impl ExportDialog {
+    fn new(hash: u32, label: &str, outfit: Option<usize>, imported: bool) -> ExportDialog {
+        ExportDialog {
+            hash,
+            label: label.to_string(),
+            name: label.to_string(),
+            format: if imported { ExportFormat::Obj } else { ExportFormat::Bundle },
+            folder: PathBuf::from(EXPORT_ROOT),
+            outfit,
+            imported,
+        }
+    }
+
+    /// Why `format` cannot be written for this asset, if it cannot.
+    fn refusal(&self, format: ExportFormat) -> Option<&'static str> {
+        (self.imported && format == ExportFormat::Bundle)
+            .then_some("an imported mesh has no LOD-rung container to bundle")
+    }
+}
+
+/// `name` as a folder name: anything but ASCII letters, digits, `_` and `-` becomes `_`.
+fn export_dir_name(name: &str) -> String {
+    name.chars().map(|c| if c.is_ascii_alphanumeric() || c == '_' || c == '-' { c } else { '_' }).collect()
 }
 
 /// Headless OBJ export (`--export <name|0xHASH>`): resolve the model through a fresh stack and
-/// write it out as OBJ + textures. The rigged sibling is `--export-bundle` (and the in-app F10).
+/// write it out as OBJ + textures under [`EXPORT_ROOT`]. The rigged sibling is `--export-bundle`.
 pub(crate) fn export_by_hash(
     base: &str,
     overlays: &[String],
@@ -7488,7 +7738,7 @@ pub(crate) fn export_by_hash(
 ) -> Result<String, String> {
     let mut w = WadStack::open(base, overlays)?;
     let md = load_model_data(&mut w, hash)?;
-    export_model_data(&md, label)
+    export_model_data(&md, std::path::Path::new(EXPORT_ROOT), label)
 }
 
 /// LOSSLESS bundle export: editable glTF (+PNG skins) alongside the ORIGINAL container bytes of
@@ -7500,6 +7750,8 @@ pub(crate) fn export_bundle_by_hash(
     overlays: &[String],
     hash: u32,
     label: &str,
+    // The folder name under `outroot` (made safe by `export_dir_name`).
+    name: &str,
     // The name catalog — also the source of each clip's procedural (ActionTable-derived) name.
     index: &AssetIndex,
     outroot: &std::path::Path,
@@ -7541,11 +7793,7 @@ pub(crate) fn export_bundle_by_hash(
     // The character's FULL animation set from the AnimationLookup tables (~100 for Mattias), not the
     // 6-clip working set the preview's generic loader is capped at.
     let (clips, clip_names) = clips_for_export(&mut w, label, &md.skin.rig, index);
-    let safe: String = label
-        .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '_' || c == '-' { c } else { '_' })
-        .collect();
-    let dir = outroot.join(format!("{safe}{suffix}"));
+    let dir = outroot.join(format!("{}{suffix}", export_dir_name(name)));
     crate::bundle::export_bundle(
         &dir,
         label,
@@ -7582,6 +7830,7 @@ pub(crate) fn export_bundle_in_background(
     overlays: Vec<String>,
     hash: u32,
     label: String,
+    name: String,
     index: AssetIndex,
     outroot: std::path::PathBuf,
     outfit: Option<usize>,
@@ -7589,20 +7838,16 @@ pub(crate) fn export_bundle_in_background(
     let (tx, rx) = std::sync::mpsc::channel();
     let worker_label = label.clone();
     std::thread::spawn(move || {
-        let _ = tx.send(export_bundle_by_hash(&base, &overlays, hash, &worker_label, &index, &outroot, outfit));
+        let _ = tx.send(export_bundle_by_hash(&base, &overlays, hash, &worker_label, &name, &index, &outroot, outfit));
     });
     Exporter { rx, label }
 }
 
-/// Write a model to `workshop_export/<label>/` as OBJ + MTL + decoded PNG textures (game-space
+/// Write a model to `<outroot>/<name>/` as OBJ + MTL + decoded PNG textures (game-space
 /// coordinates, one `usemtl` per draw group). Works for WAD assets and imports —
 /// the hand-off point into the UCFX/patch pipeline.
-fn export_model_data(md: &ModelData, label: &str) -> Result<String, String> {
-    let safe: String = label
-        .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '_' || c == '-' { c } else { '_' })
-        .collect();
-    let dir = std::path::PathBuf::from("workshop_export").join(&safe);
+fn export_model_data(md: &ModelData, outroot: &std::path::Path, name: &str) -> Result<String, String> {
+    let dir = outroot.join(export_dir_name(name));
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
 
     // Textures → PNG (decoded from BC), MTL materials per draw group. Every slot the material binds
@@ -7883,7 +8128,7 @@ mod rail_tests {
     }
 
     fn row(name: &str) -> AssetRow {
-        AssetRow { hash: 0, block: 0, src: 0, name: Some(name.to_string()), template: None }
+        AssetRow { hash: 0, block: 0, src: 0, name: Some(name.to_string()), template: None, faction: None }
     }
 
     /// A Lens pill's count is the number of rows the list shows under it, and the Lenses never
@@ -7899,7 +8144,7 @@ mod rail_tests {
         let mut lensed = 0;
         for lens in std::iter::once(None).chain(Workbench::lenses().into_iter().map(Some)) {
             let n = rows.iter().filter(|r| in_lens(lens, r)).count();
-            assert_eq!(n, filter_rows(&rows, Kind::Model, "", lens).len());
+            assert_eq!(n, filter_rows(&rows, Kind::Model, "", lens, &std::collections::HashMap::new()).len());
             if lens.is_some() {
                 assert_eq!(n, 1, "{:?} should hold exactly one of the four", lens.map(|d| d.label()));
                 lensed += n;
@@ -7912,6 +8157,62 @@ mod rail_tests {
     }
 }
 
+#[cfg(test)]
+mod inspect_tests {
+    use super::*;
+    use crate::domain::Domain;
+
+    #[test]
+    fn the_crumb_names_the_tab_the_lens_and_the_loaded_model() {
+        assert_eq!(inspect_crumb(Kind::Model, None, None), ["Models"]);
+        assert_eq!(inspect_crumb(Kind::Model, Some(Domain::Characters), None), ["Models", "Characters"]);
+        assert_eq!(
+            inspect_crumb(Kind::Model, Some(Domain::Characters), Some("pmc_hum_mattias")),
+            ["Models", "Characters", "pmc_hum_mattias"]
+        );
+        // A Lens narrows models only, so on another tab it is not part of where you are.
+        assert_eq!(inspect_crumb(Kind::Audio, Some(Domain::Characters), None), ["Audio"]);
+    }
+
+    /// F4 is "Next clip" in SHORTCUTS and on the verb bar, and was bound to nothing.
+    #[test]
+    fn f4_steps_the_clip_and_every_listed_key_acts() {
+        assert!(matches!(shortcut_act(KeyCode::F4), Some(Act::ClipNav(1))));
+        for code in [KeyCode::F3, KeyCode::F11, KeyCode::Space, KeyCode::Comma, KeyCode::Period, KeyCode::Backslash] {
+            assert!(shortcut_act(code).is_some(), "{code:?} is listed in SHORTCUTS but does nothing");
+        }
+    }
+
+    #[test]
+    fn the_export_dialog_starts_from_the_asset_and_refuses_a_bundle_of_an_import() {
+        let d = ExportDialog::new(1, "pmc_hum_mattias", None, false);
+        assert_eq!(d.name, "pmc_hum_mattias");
+        assert_eq!(d.format, ExportFormat::Bundle);
+        assert_eq!(d.folder, PathBuf::from(EXPORT_ROOT));
+        assert!(d.refusal(ExportFormat::Bundle).is_none());
+        let i = ExportDialog::new(2, "import_box", None, true);
+        assert_eq!(i.format, ExportFormat::Obj);
+        assert!(i.refusal(ExportFormat::Bundle).is_some());
+        assert!(i.refusal(ExportFormat::Obj).is_none());
+    }
+
+    #[test]
+    fn an_obj_export_lands_under_the_chosen_folder_and_name() {
+        let dir = std::env::temp_dir().join("m2ws_export_obj");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let src = dir.join("tri.obj");
+        std::fs::write(&src, "v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n").unwrap();
+        let md: ModelData = crate::import::import_model(&src).unwrap().into();
+        let out = dir.join("chosen");
+        let written = export_model_data(&md, &out, "my box/v2").unwrap();
+        let expect = out.join("my_box_v2");
+        assert_eq!(PathBuf::from(written), expect);
+        assert!(expect.join("model.obj").is_file(), "no model.obj");
+        assert!(expect.join("model.mtl").is_file(), "no model.mtl");
+    }
+}
+
 /// The retail `vz.wad` the game-gated tests read: `vz_wad` in the nearest `.mercs2-local.toml`
 /// (`scripts/find-vz-wad.sh --write`). Panics naming what is missing.
 #[cfg(all(test, feature = "retail"))]
@@ -7920,6 +8221,28 @@ pub(crate) fn retail_vz_wad() -> String {
         .unwrap_or_else(|e| panic!("{e}"))
         .to_string_lossy()
         .into_owned()
+}
+
+#[cfg(all(test, feature = "retail"))]
+mod export_retail_tests {
+    use super::{export_bundle_by_hash, AssetIndex, WadStack};
+
+    /// The Export dialog's Lossless bundle writes under the folder and name chosen in it.
+    #[test]
+    fn a_bundle_export_lands_under_the_chosen_folder_and_name() {
+        let wad = super::retail_vz_wad();
+        let w = WadStack::open(&wad, &[]).expect("open retail vz.wad");
+        let index = AssetIndex::build(&w.wads, std::collections::HashMap::new());
+        let out = std::env::temp_dir().join("m2ws_export_bundle");
+        let _ = std::fs::remove_dir_all(&out);
+        let name = "global_weapon_aarocket";
+        let hash = mercs2_formats::hash::pandemic_hash_m2(name);
+        let written = export_bundle_by_hash(&wad, &[], hash, name, "rocket copy", &index, &out, None)
+            .unwrap_or_else(|e| panic!("{e}"));
+        let expect = out.join("rocket_copy");
+        assert_eq!(std::path::PathBuf::from(written), expect);
+        assert!(expect.join("manifest.json").is_file(), "no manifest.json under {}", expect.display());
+    }
 }
 
 #[cfg(all(test, feature = "retail"))]
