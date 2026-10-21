@@ -11,9 +11,9 @@
 //! with a real call site to start from), and Lua's own statements. Centre: the canvas. Right: the
 //! selected node's execution, parameters and source. Bottom: compile state, counts and zoom.
 //!
-//! Canvas text comes from the Workshop type scale, scaled by zoom and never drawn below the
-//! scale's smallest size: when zooming out would take it lower, pin text drops out first and node
-//! titles last, so the canvas can zoom out far enough to see a whole contract.
+//! Canvas text comes from the Workshop type scale times the zoom, like the rest of the drawing:
+//! zoomed out, it shrinks below the scale's smallest size rather than disappearing, so a whole
+//! contract can be seen at once. The page's own panels keep the scale as it is.
 
 use std::collections::{BTreeMap, HashMap};
 
@@ -904,13 +904,8 @@ fn glyph(p: &egui::Painter, r: Rect, c: Category, col: Color32) {
 
 // ───────────────────────────────────────────────────────────────────── node geometry
 
-const MIN_ZOOM: f32 = 0.2;
+const MIN_ZOOM: f32 = 0.1;
 const MAX_ZOOM: f32 = 2.0;
-/// Below this zoom, pin text is not drawn: at its scale it would be under the type scale's
-/// smallest size.
-const PIN_TEXT_ZOOM: f32 = 0.6;
-/// Below this zoom, node titles are not drawn either.
-const TITLE_ZOOM: f32 = 0.3;
 const HEADER_H: f32 = 34.0;
 const ROW_H: f32 = 26.0;
 const PAD_Y: f32 = 8.0;
@@ -925,21 +920,12 @@ const INDENT_X: f32 = 48.0;
 /// Longest literal shown beside a pin before it is cut.
 const ANNOT_CHARS: usize = 30;
 
-/// `style` at `zoom`, or `None` where it would be smaller than the scale's smallest size.
-/// With `floor`, a size under the smallest is drawn at the smallest instead.
-fn scaled(style: &TextStyle, zoom: f32, floor: bool) -> Option<egui::FontId> {
-    let smallest = theme::font(&TextStyle::Small).size;
+/// `style` at `zoom`, in half-pixel steps: each size egui draws text at is rasterised into its
+/// glyph texture, so a smooth zoom must not ask for a new size every frame.
+fn scaled(style: &TextStyle, zoom: f32) -> egui::FontId {
     let mut f = theme::font(style);
-    let size = f.size * zoom;
-    if size < smallest {
-        if !floor {
-            return None;
-        }
-        f.size = smallest;
-    } else {
-        f.size = size;
-    }
-    Some(f)
+    f.size = ((f.size * zoom * 2.0).round() / 2.0).max(0.5);
+    f
 }
 
 fn exec_label(n: &blueprint::Node, i: usize) -> &str {
@@ -1870,20 +1856,15 @@ fn paint_node(p: &egui::Painter, g: &Graph, id: NodeId, n: &blueprint::Node, r: 
     let icon = Rect::from_min_size(header.min + Vec2::new(9.0, (HEADER_H - ICON) * 0.5) * zoom, Vec2::splat(ICON * zoom));
     p.rect_filled(icon, 5.0 * zoom, Color32::from_black_alpha(70));
     glyph(p, icon.shrink(3.0 * zoom), n.category, lk.icon);
-    let clip = p.with_clip_rect(header.shrink(2.0).intersect(p.clip_rect()));
-    if zoom >= TITLE_ZOOM {
-        if let Some(f) = scaled(&TextStyle::Body, zoom, true) {
-            let at = Pos2::new(icon.max.x + 8.0 * zoom, header.center().y);
-            clip.text(at, egui::Align2::LEFT_CENTER, &n.title, f, lk.text);
-        }
-    }
-    if let Some(f) = scaled(&theme::style_eyebrow(), zoom, false) {
-        let at = Pos2::new(header.max.x - PAD_X * zoom, header.center().y);
-        clip.text(at, egui::Align2::RIGHT_CENTER, lk.eyebrow.to_uppercase(), f, Color32::from_white_alpha(110));
-    }
+    let clip = p.with_clip_rect(header.shrink(2.0 * zoom).intersect(p.clip_rect()));
+    let at = Pos2::new(icon.max.x + 8.0 * zoom, header.center().y);
+    clip.text(at, egui::Align2::LEFT_CENTER, &n.title, scaled(&TextStyle::Body, zoom), lk.text);
+    let at = Pos2::new(header.max.x - PAD_X * zoom, header.center().y);
+    let eyebrow = scaled(&theme::style_eyebrow(), zoom);
+    clip.text(at, egui::Align2::RIGHT_CENTER, lk.eyebrow.to_uppercase(), eyebrow, Color32::from_white_alpha(110));
     // Pins.
-    let text = (zoom >= PIN_TEXT_ZOOM).then(|| scaled(&TextStyle::Small, zoom, true)).flatten();
-    let mono = (zoom >= PIN_TEXT_ZOOM).then(|| scaled(&TextStyle::Monospace, zoom, true)).flatten();
+    let text = scaled(&TextStyle::Small, zoom);
+    let mono = scaled(&TextStyle::Monospace, zoom);
     let body = p.with_clip_rect(r.intersect(p.clip_rect()));
     let size = r.size() / zoom;
     for pin in pins_of(id, n) {
@@ -1895,7 +1876,7 @@ fn paint_node(p: &egui::Painter, g: &Graph, id: NodeId, n: &blueprint::Node, r: 
             PinRef::Out(_, k) => g.data.iter().any(|w| w.from == (id, k)),
         };
         pin_shape(p, c, pin_ty(g, pin), wired, zoom);
-        let Some(f) = &text else { continue };
+        let f = &text;
         let (label, strong) = match pin {
             PinRef::ExecIn(_) => ("Exec".to_string(), true),
             PinRef::ExecOut(_, k) => (exec_label(n, k).to_string(), true),
@@ -1907,9 +1888,9 @@ fn paint_node(p: &egui::Painter, g: &Graph, id: NodeId, n: &blueprint::Node, r: 
         match pin {
             PinRef::ExecIn(_) | PinRef::In(..) => {
                 let lr = body.text(c + Vec2::new(offset, 0.0), egui::Align2::LEFT_CENTER, &label, f.clone(), colour);
-                if let (PinRef::In(_, i), Some(m)) = (pin, &mono) {
+                if let PinRef::In(_, i) = pin {
                     if let Some(a) = annot(&n.inputs[i].value) {
-                        body.text(Pos2::new(lr.max.x + 6.0 * zoom, c.y), egui::Align2::LEFT_CENTER, a, m.clone(), ANNOT);
+                        body.text(Pos2::new(lr.max.x + 6.0 * zoom, c.y), egui::Align2::LEFT_CENTER, a, mono.clone(), ANNOT);
                     }
                 }
             }
@@ -2515,12 +2496,17 @@ mod tests {
         assert_eq!(zoom, MIN_ZOOM);
     }
 
+    /// Canvas text scales with the zoom, below the type scale's smallest size too, in half-pixel
+    /// steps.
     #[test]
-    fn scaled_text_never_drops_below_the_smallest_style() {
-        let smallest = theme::font(&TextStyle::Small).size;
-        assert!(scaled(&TextStyle::Body, 0.5, false).is_none());
-        assert_eq!(scaled(&TextStyle::Body, 0.5, true).expect("floored").size, smallest);
-        assert_eq!(scaled(&TextStyle::Body, 2.0, false).expect("drawn").size, theme::font(&TextStyle::Body).size * 2.0);
+    fn canvas_text_scales_with_the_zoom_in_half_pixel_steps() {
+        let body = theme::font(&TextStyle::Body).size;
+        assert_eq!(scaled(&TextStyle::Body, 2.0).size, body * 2.0);
+        assert_eq!(scaled(&TextStyle::Body, 0.1).size, (body * 0.1 * 2.0).round() / 2.0);
+        assert!(scaled(&TextStyle::Body, 0.1).size < theme::font(&TextStyle::Small).size);
+        let sizes: std::collections::BTreeSet<u32> =
+            (100..=200).map(|z| (scaled(&TextStyle::Body, z as f32 / 1000.0).size * 2.0) as u32).collect();
+        assert!(sizes.len() <= 3, "{sizes:?}");
     }
 
     /// Draw the whole page for a frame, the way the app lays it out, and apply what it asked for.

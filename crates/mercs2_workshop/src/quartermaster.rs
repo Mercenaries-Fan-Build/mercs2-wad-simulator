@@ -623,6 +623,11 @@ impl Panel {
         self.shipment.as_ref().map(|s| s.root.as_path())
     }
 
+    /// The name contribution `i` goes by in the queue, for a bench's breadcrumb.
+    pub(crate) fn contribution_title(&self, i: usize) -> Option<String> {
+        self.shipment.as_ref()?.manifest.contributions.get(i).map(contribution_name)
+    }
+
     /// The index of the first contribution `matches` accepts, in the open Shipment.
     pub(crate) fn find_contribution(&self, matches: impl Fn(&Contribution) -> bool) -> Option<usize> {
         self.shipment.as_ref()?.manifest.contributions.iter().position(matches)
@@ -871,63 +876,73 @@ fn row_of(ui: &mut egui::Ui, key: &str, value: &str, hover: &str, colour: Color3
     });
 }
 
-/// Every kind the format knows, grouped by the layer it lands in.
+/// Every kind the format knows, grouped by the layer it lands in: `(kind, title, description)`.
 ///
 /// Taken from the `Contribution` enum rather than a hand-kept list, so a kind the format gains
-/// cannot silently go missing from the menu.
-pub const KINDS: &[(&str, &[(&str, &str)])] = &[
+/// cannot silently go missing from the menu. The title is what a button that starts one says.
+pub const KINDS: &[(&str, &[(&str, &str, &str)])] = &[
     (
         "Data",
         &[
-            ("add_outfit", "A wearable outfit — model plus a wardrobe row"),
-            ("add_model", "A new model on a donor's rig"),
-            ("add_texture", "A new texture under a name you choose"),
-            ("add_sound", "A new sound bank encoded from WAV cues, loaded by the mod loader"),
-            ("replace_sound_bank", "Replace every cue of a shipped sound bank, same entry name"),
-            ("replace_sound_cue", "Replace one cue of a shipped sound bank with a new WAV"),
-            ("add_movie", "A Scaleform movie"),
-            ("add_ui", "A Scaleform movie, wired up so it appears on screen"),
-            ("replace_texture", "Replace a shipped texture, same hash"),
-            ("edit_state_machine", "Rewrite a destructible's states"),
-            ("edit_world", "Move / rotate / re-model a layer's placed entities"),
-            ("add_tiny_geometry", "A far-distance stand-in for one 200 m cell of a layer"),
-            ("edit_stringdb", "Correct or localise UI text"),
-            ("replace_phy2", "Swap a shipped model's collision (PHY2), same hash"),
-            ("add_placement", "Add one entity to an existing layer"),
-            ("add_layer", "Mint a whole new placement layer"),
-            ("add_animation", "Add a new animation clip"),
-            ("replace_animation", "Replace a shipped animation, same hash"),
-            ("add_shader", "Register new shaders and add them to the shader stores"),
-            ("replace_shader", "Replace a shipped shader's bytecode in the shader stores"),
-            ("add_fx", "Add a particle effect and the template that starts it"),
-            ("replace_fx", "Edit a shipped effect in place"),
-            ("add_fx_sprite", "A sprite frame for effects, drawn into the vfx atlas"),
-            ("replace_terrain_cell", "Replace a terrain cell, same hash"),
-            ("add_stringdb_keys", "Add brand-new string-table keys"),
-            ("replace_stringdb_text", "Rewrite strings by exact text match"),
-            ("add_language", "Add a new selectable language (new base WAD)"),
+            ("add_outfit", "Wearable outfit", "A wearable outfit — model plus a wardrobe row"),
+            ("add_model", "New model", "A new model on a donor's rig"),
+            ("add_texture", "New texture", "A new texture under a name you choose"),
+            ("add_sound", "New sound bank", "A new sound bank encoded from WAV cues, loaded by the mod loader"),
+            ("replace_sound_bank", "Replace sound bank", "Replace every cue of a shipped sound bank, same entry name"),
+            ("replace_sound_cue", "Replace sound cue", "Replace one cue of a shipped sound bank with a new WAV"),
+            ("add_movie", "New movie", "A Scaleform movie"),
+            ("add_ui", "New UI", "A Scaleform movie, wired up so it appears on screen"),
+            ("replace_texture", "Replace texture", "Replace a shipped texture, same hash"),
+            ("edit_state_machine", "Destruction states", "Rewrite a destructible's states"),
+            ("edit_world", "Edit world", "Move / rotate / re-model a layer's placed entities"),
+            ("add_tiny_geometry", "Far stand-in", "A far-distance stand-in for one 200 m cell of a layer"),
+            ("edit_stringdb", "Edit text", "Correct or localise UI text"),
+            ("replace_phy2", "Collision swap", "Swap a shipped model's collision (PHY2), same hash"),
+            ("add_placement", "New placement", "Add one entity to an existing layer"),
+            ("add_layer", "New layer", "Mint a whole new placement layer"),
+            ("add_animation", "New animation", "Add a new animation clip"),
+            ("replace_animation", "Replace animation", "Replace a shipped animation, same hash"),
+            ("add_shader", "New shader", "Register new shaders and add them to the shader stores"),
+            ("replace_shader", "Replace shader", "Replace a shipped shader's bytecode in the shader stores"),
+            ("add_fx", "New effect", "Add a particle effect and the template that starts it"),
+            ("replace_fx", "Edit effect", "Edit a shipped effect in place"),
+            ("add_fx_sprite", "New effect sprite", "A sprite frame for effects, drawn into the vfx atlas"),
+            ("replace_terrain_cell", "Replace terrain cell", "Replace a terrain cell, same hash"),
+            ("add_stringdb_keys", "New text keys", "Add brand-new string-table keys"),
+            ("replace_stringdb_text", "Rewrite text", "Rewrite strings by exact text match"),
+            ("add_language", "New language", "Add a new selectable language (new base WAD)"),
         ],
     ),
     (
         "Script",
         &[
-            ("patch_lua", "Append to a shipped script"),
-            ("activate_layer", "Turn a hidden world-state layer on (permanent)"),
-            ("add_script", "Mint a new Lua module (import-able)"),
-            ("replace_lua", "Replace a shipped script's bytecode"),
-            ("add_shop_item", "Add a purchasable shop item"),
+            ("patch_lua", "Patch script", "Append to a shipped script"),
+            ("activate_layer", "Activate layer", "Turn a hidden world-state layer on (permanent)"),
+            ("add_script", "New script", "Mint a new Lua module (import-able)"),
+            ("replace_lua", "Replace script", "Replace a shipped script's bytecode"),
+            ("add_shop_item", "New shop item", "Add a purchasable shop item"),
         ],
     ),
     (
         "Code",
         &[
-            ("native_hook", "An ASI plugin, or a symbol to detour"),
-            ("place_file", "A companion file beside a plugin"),
-            ("add_runtime_dll", "A runtime DLL in the game root, named after the Shipment"),
+            ("native_hook", "Native hook", "An ASI plugin, or a symbol to detour"),
+            ("place_file", "Companion file", "A companion file beside a plugin"),
+            ("add_runtime_dll", "Runtime DLL", "A runtime DLL in the game root, named after the Shipment"),
         ],
     ),
-    ("Any", &[("raw", "Opaque bytes plus a declared blast radius")]),
+    ("Any", &[("raw", "Raw bytes", "Opaque bytes plus a declared blast radius")]),
 ];
+
+/// The short title of `kind` from [`KINDS`]. A kind the table does not list is a bug in the caller.
+pub fn kind_title(kind: &str) -> &'static str {
+    KINDS
+        .iter()
+        .flat_map(|(_, ks)| ks.iter())
+        .find(|(k, _, _)| *k == kind)
+        .map(|(_, t, _)| *t)
+        .unwrap_or_else(|| panic!("`{kind}` is not a kind in KINDS"))
+}
 
 /// What an EXISTING game asset can become the basis of, and how.
 ///
@@ -1255,7 +1270,7 @@ pub fn navigator(ui: &mut egui::Ui, p: &Panel) -> Vec<Act> {
     let add_menu = |ui: &mut egui::Ui, out: &mut Vec<Act>| {
         for (layer, kinds) in KINDS {
             ui.label(theme::disp_text(layer.to_uppercase(), theme::style_eyebrow(), theme::FAINT));
-            for (kind, blurb) in *kinds {
+            for (kind, _, blurb) in *kinds {
                 if ui.button(*kind).on_hover_text(*blurb).clicked() {
                     out.push(Act::Add(kind));
                     ui.close_menu();
@@ -4115,7 +4130,7 @@ mod tests {
     #[test]
     fn the_add_menu_offers_every_kind_the_format_knows() {
         let offered: std::collections::BTreeSet<&str> =
-            KINDS.iter().flat_map(|(_, ks)| ks.iter().map(|(k, _)| *k)).collect();
+            KINDS.iter().flat_map(|(_, ks)| ks.iter().map(|(k, _, _)| *k)).collect();
         let missing: Vec<&&str> = Contribution::ALL_KINDS
             .iter()
             .filter(|k| !offered.contains(**k))
@@ -4269,12 +4284,14 @@ mod tests {
         assert!(build_stack_paths(&stack, &french).unwrap_err().contains("french"));
     }
 
-    /// Every kind a domain offers under "Add to Shipment" has a stub for its button to add.
+    /// Every kind a domain offers under "Add to Shipment" has a stub for its button to add, and a
+    /// title for the Lens card's button to say.
     #[test]
-    fn every_domain_kind_has_a_stub() {
+    fn every_domain_kind_has_a_stub_and_a_title() {
         for d in crate::domain::Domain::ALL {
             for k in d.kinds() {
                 assert!(stub(k, 1).is_some(), "{k} is offered by a domain but has no stub");
+                assert!(!kind_title(k).is_empty(), "{k} has an empty title");
             }
         }
     }
@@ -4284,8 +4301,22 @@ mod tests {
     fn no_kind_is_offered_twice() {
         let mut seen = std::collections::BTreeSet::new();
         for (_, ks) in KINDS {
-            for (k, _) in *ks {
+            for (k, _, _) in *ks {
                 assert!(seen.insert(*k), "`{k}` is listed in more than one layer group");
+            }
+        }
+    }
+
+    /// Every kind has a short title, and no two kinds share one: a button says which it starts.
+    #[test]
+    fn every_kind_has_a_distinct_title() {
+        let mut seen = std::collections::BTreeMap::new();
+        for (_, ks) in KINDS {
+            for (k, t, _) in *ks {
+                assert!(!t.trim().is_empty(), "`{k}` has no title");
+                if let Some(other) = seen.insert(*t, *k) {
+                    panic!("`{k}` and `{other}` share the title {t:?}");
+                }
             }
         }
     }

@@ -1188,20 +1188,19 @@ pub mod theme {
     #[derive(Clone, Copy)]
     pub enum RailIcon {
         Inspect,
-        Sandbox,
         Mods,
         Skeleton,
         Quartermaster,
         Settings,
         Log,
-        // The Craft bench and the seven domain surfaces — hand-drawn line-art so the rail reads by
-        // shape, not by a two-letter monogram.
-        Craft,
+        /// The Live page: the running game.
+        Live,
+        // The domain surfaces — hand-drawn line-art so the rail reads by shape, not by a two-letter
+        // monogram.
         World,
         Characters,
         Weapons,
         Driving,
-        Audio,
         Missions,
         Systems,
         /// Saves — a document with a folded top-right corner and header/footer stripes. Reads as a
@@ -1219,18 +1218,6 @@ pub mod theme {
             RailIcon::Inspect => {
                 p.circle_stroke(c + vec2(-1.5, -1.5), 5.0, s);
                 p.line_segment([c + vec2(1.8, 1.8), c + vec2(6.0, 6.0)], s);
-            }
-            RailIcon::Sandbox => {
-                let r = 6.0;
-                let top = c + vec2(0.0, -r);
-                let l = c + vec2(-r, -r * 0.4);
-                let rr = c + vec2(r, -r * 0.4);
-                let bl = c + vec2(-r, r * 0.5);
-                let br = c + vec2(r, r * 0.5);
-                let bot = c + vec2(0.0, r);
-                for seg in [[top, l], [top, rr], [l, bl], [rr, br], [bl, bot], [br, bot], [l, rr], [top, bot]] {
-                    p.line_segment(seg, s);
-                }
             }
             RailIcon::Mods => {
                 p.circle_stroke(c + vec2(-3.5, -3.5), 3.0, s);
@@ -1270,6 +1257,21 @@ pub mod theme {
                 p.line_segment([c, c + vec2(0.0, -3.5)], s);
                 p.line_segment([c, c + vec2(2.8, 1.5)], s);
             }
+            // Live — a mast: a node on a short stem with two broadcast arcs over it.
+            RailIcon::Live => {
+                p.circle_stroke(c + vec2(0.0, 1.0), 1.6, s);
+                p.line_segment([c + vec2(0.0, 2.6), c + vec2(0.0, 7.0)], s);
+                let arc_centre = c + vec2(0.0, 1.8);
+                for r in [5.0_f32, 8.6] {
+                    let pts: Vec<egui::Pos2> = (0..=12)
+                        .map(|k| {
+                            let a = (-136.0 + 92.0 * k as f32 / 12.0).to_radians();
+                            arc_centre + vec2(a.cos() * r, a.sin() * r)
+                        })
+                        .collect();
+                    p.add(egui::Shape::line(pts, s));
+                }
+            }
             // Saves — a document outline with a bevelled top-right corner, a header stripe and a
             // footer stripe. The silhouette echoes the `.profile` file (header bytes + inflated body).
             RailIcon::Saves => {
@@ -1293,16 +1295,6 @@ pub mod theme {
                     0.0,
                     s,
                 );
-            }
-            // Craft — a hammer: a head bar up top with a handle dropping from it. (A single tool, so
-            // it never reads as the crossed-blades Weapons icon.)
-            RailIcon::Craft => {
-                // head
-                p.rect_stroke(egui::Rect::from_center_size(c + vec2(0.0, -4.0), vec2(11.0, 3.8)), 0.8, s);
-                // a peen notch so the block reads as a hammer head, not a bar
-                p.line_segment([c + vec2(3.5, -5.9), c + vec2(3.5, -2.1)], s);
-                // handle
-                p.line_segment([c + vec2(-0.5, -2.1), c + vec2(0.8, 6.6)], s);
             }
             // World — a globe: circle with an equator, two latitudes and a meridian.
             RailIcon::World => {
@@ -1353,17 +1345,6 @@ pub mod theme {
                     p.line_segment([c + vec2(cs * 2.3, sn * 2.3), c + vec2(cs * 6.6, sn * 6.6)], s);
                 }
             }
-            // Audio — a speaker cone with a sound chevron.
-            RailIcon::Audio => {
-                p.line_segment([c + vec2(-6.0, -2.2), c + vec2(-6.0, 2.2)], s);
-                p.line_segment([c + vec2(-6.0, -2.2), c + vec2(-3.0, -2.2)], s);
-                p.line_segment([c + vec2(-6.0, 2.2), c + vec2(-3.0, 2.2)], s);
-                p.line_segment([c + vec2(-3.0, -2.2), c + vec2(0.5, -5.2)], s);
-                p.line_segment([c + vec2(-3.0, 2.2), c + vec2(0.5, 5.2)], s);
-                p.line_segment([c + vec2(0.5, -5.2), c + vec2(0.5, 5.2)], s);
-                p.line_segment([c + vec2(3.2, -3.2), c + vec2(5.4, 0.0)], s);
-                p.line_segment([c + vec2(5.4, 0.0), c + vec2(3.2, 3.2)], s);
-            }
             // Missions — a pennant flag on a pole.
             RailIcon::Missions => {
                 p.line_segment([c + vec2(-3.6, -6.6), c + vec2(-3.6, 6.6)], s);
@@ -1394,64 +1375,54 @@ pub mod theme {
         }
     }
 
-    /// One activity-rail entry: index + icon + label, with a brass left-bar + soft fill when active.
-    /// Returns whether it was clicked.
-    pub fn rail_item(ui: &mut egui::Ui, index: Option<usize>, label: &str, icon: RailIcon, on: bool) -> bool {
-        rail_item_badged(ui, index, label, icon, on, None)
+    /// The rail's width, and one cell's height (the Rail design: a 64px column, 63×58 cells, the
+    /// last pixel the panel's edge line).
+    pub const RAIL_W: f32 = 63.0;
+    pub const RAIL_CELL_H: f32 = 58.0;
+
+    /// One activity-rail entry, as the Rail design draws it.
+    pub struct RailItem<'a> {
+        /// The two-digit position, top-left, for the numbered workbenches.
+        pub index: Option<usize>,
+        pub label: &'a str,
+        pub icon: RailIcon,
+        /// The page showing: brass fill, brass left bar, brass ink.
+        pub on: bool,
+        /// A count of what BLOCKS, top-right, in red. Zero paints nothing: a badge that is always
+        /// there is decoration.
+        pub badge: Option<usize>,
+        /// A status dot, top-right (Live: whether the game answers).
+        pub dot: Option<Color32>,
     }
 
-    /// [`rail_item`] with a count in the corner.
-    ///
-    /// This is the "always-present" half of the Quartermaster: the page is one of several, but
-    /// whether something BLOCKS the build has to be visible from wherever you are working, or you
-    /// only find out when you go looking. A zero count paints nothing — a badge that is always
-    /// there is decoration.
-    pub fn rail_item_badged(
-        ui: &mut egui::Ui,
-        index: Option<usize>,
-        label: &str,
-        icon: RailIcon,
-        on: bool,
-        badge: Option<usize>,
-    ) -> bool {
-        let w = ui.available_width();
-        // Square cell: height == width, so the icon+label block reads as a tidy square button.
-        let (rect, resp) = ui.allocate_exact_size(egui::vec2(w, w), egui::Sense::click());
-        let col = if on { BRASS } else if resp.hovered() { DIM } else { FAINT };
+    /// Draw a rail cell; returns whether it was clicked.
+    pub fn rail_item(ui: &mut egui::Ui, item: &RailItem<'_>) -> bool {
+        let (rect, resp) = ui.allocate_exact_size(egui::vec2(RAIL_W, RAIL_CELL_H), egui::Sense::click());
+        let col = if item.on { BRASS } else if resp.hovered() { DIM } else { FAINT };
         let p = ui.painter();
-        if on {
+        let at = |x: f32, y: f32| rect.left_top() + egui::vec2(x, y);
+        if item.on {
             p.rect_filled(rect, egui::Rounding::ZERO, BRASS_SOFT);
-            let bar = egui::Rect::from_min_size(
-                egui::pos2(rect.left(), rect.top() + 6.0),
-                egui::vec2(3.0, rect.height() - 12.0),
-            );
+            let bar = egui::Rect::from_min_max(at(0.0, 6.0), at(3.0, RAIL_CELL_H - 6.0));
             p.rect_filled(bar, egui::Rounding { ne: 2.0, se: 2.0, ..Default::default() }, BRASS);
         } else if resp.hovered() {
             p.rect_filled(rect, egui::Rounding::ZERO, Color32::from_rgba_unmultiplied(255, 255, 255, 6));
         }
-        if let Some(i) = index {
-            p.text(
-                rect.left_top() + egui::vec2(7.0, 5.0),
-                egui::Align2::LEFT_TOP,
-                format!("{i:02}"),
-                font(&TextStyle::Monospace),
-                if on { BRASS } else { FAINT },
-            );
+        if let Some(i) = item.index {
+            p.text(at(7.0, 5.0), egui::Align2::LEFT_TOP, format!("{i:02}"), font(&TextStyle::Monospace), col);
         }
-        let cx = rect.center().x;
-        // Icon above the centre, label below — the pair centred within the square cell.
-        paint_icon(p, icon, egui::pos2(cx, rect.center().y - 8.0), col);
+        paint_icon(p, item.icon, at(31.0, 22.0), col);
         p.text(
-            egui::pos2(cx, rect.center().y + 15.0),
-            egui::Align2::CENTER_CENTER,
-            label.to_uppercase(),
+            at(RAIL_W / 2.0, 37.0),
+            egui::Align2::CENTER_TOP,
+            item.label.to_uppercase(),
             font(&style_eyebrow()),
             col,
         );
         // BAD, not BRASS: this counts things that BLOCK, and blocking is the one state the colour
         // contract reserves red for.
-        if let Some(n) = badge.filter(|n| *n > 0) {
-            let c = rect.right_top() + egui::vec2(-11.0, 11.0);
+        if let Some(n) = item.badge.filter(|n| *n > 0) {
+            let c = at(RAIL_W - 13.0, 13.0);
             p.circle_filled(c, 7.0, BAD);
             p.text(
                 c,
@@ -1461,7 +1432,36 @@ pub mod theme {
                 Color32::from_rgb(0x1a, 0x0f, 0x0c),
             );
         }
+        if let Some(d) = item.dot {
+            p.circle_filled(at(RAIL_W - 12.0, 11.0), 3.0, d);
+        }
         resp.clicked()
+    }
+
+    /// One choice of a pill radio row (Inspect's Lens): a name and a count, brass when chosen.
+    pub fn lens_pill(ui: &mut egui::Ui, name: &str, count: &str, on: bool) -> egui::Response {
+        let (fill, stroke, ink) = if on { (BRASS_SOFT, BRASS_DK, BRASS) } else { (Color32::TRANSPARENT, LINE, DIM) };
+        // One allocation for the whole pill, so a wrapping row moves it to the next line whole.
+        let (pad_x, pad_y, gap) = (7.0, 1.0, 4.0);
+        let fonts = ui.fonts(|f| {
+            (
+                f.layout_no_wrap(name.to_string(), font(&TextStyle::Small), ink),
+                f.layout_no_wrap(count.to_string(), font(&TextStyle::Monospace), if on { BRASS_DK } else { FAINT }),
+            )
+        });
+        let (name_g, count_g) = fonts;
+        let h = name_g.size().y.max(count_g.size().y) + 2.0 * pad_y;
+        let w = name_g.size().x + gap + count_g.size().x + 2.0 * pad_x;
+        let (rect, resp) = ui.allocate_exact_size(egui::vec2(w, h), egui::Sense::click());
+        if ui.is_rect_visible(rect) {
+            let p = ui.painter();
+            p.rect(rect, egui::Rounding::same(10.0), fill, egui::Stroke::new(1.0, stroke));
+            let x = rect.left() + pad_x;
+            p.galley(egui::pos2(x, rect.center().y - name_g.size().y / 2.0), name_g.clone(), ink);
+            let cx = x + name_g.size().x + gap;
+            p.galley(egui::pos2(cx, rect.center().y - count_g.size().y / 2.0), count_g, ink);
+        }
+        resp.on_hover_cursor(egui::CursorIcon::PointingHand)
     }
 
     /// A small square status dot + label (the "READY" pill in the status bar).
