@@ -12,10 +12,19 @@ Saves · Driving · Missions · Systems · Shipment · Settings** — with **Liv
 its foot:
 
 - **Inspect** browses / searches every model, texture, layer and audio clip in the open WAD, with
-  names resolved from the reference bundle's name pack (`index::AssetIndex`). On the Models tab a
-  Lens row narrows the list to World, Characters or Weapons, and the inspector's Lens card starts a
-  contribution of that domain's kinds. The Audio tab is the captioned clip browser, ▶ streaming a
-  line from `vo_stream.english.pws`.
+  names resolved from the reference bundle's name pack (`index::AssetIndex`). The header reads
+  `INSPECTING  Tab › Lens › model`. On the Models tab a Lens row narrows the list to World,
+  Characters or Weapons and groups it by faction: a spawn template's row by its own `FactionMarker`
+  (so a defector sits with the faction it serves), any other row by its name's prefix; each marker
+  is labelled with the prefix it pairs with across the world's templates. The inspector's Lens card
+  starts a contribution of that domain's kinds. The Audio tab is the captioned clip browser, ▶
+  streaming a line from `vo_stream.english.pws`.
+- **Export…** (the model menu, F10, the verb bar) opens a dialog: a name, the format — the lossless
+  bundle or OBJ + MTL + PNG (an imported mesh has no LOD rungs to bundle) — and the folder
+  (`workshop_export/` unless chosen); it writes `<folder>/<name>/`.
+- **Start a Shipment from this…** scaffolds a new Shipment in a picked folder holding the asset's
+  first route — an outfit for a character, a new model for any other model, a texture replacement for
+  a texture — and opens it on the Shipment page.
 - preview a model with its real materials, textures, orbit camera and animation clips
 - inspect layers: the HIER bone tree, per-material draw groups (isolate / hide individual
   sub-strips), full-screen texture plates
