@@ -53,6 +53,8 @@ pub struct Options {
     /// The dock is otherwise only reachable by clicking, which makes it unverifiable from a script —
     /// and this project's standard is that a change is shown, not asserted.
     pub shipment: Option<PathBuf>,
+    /// `--ui-state`: a state to open in and a frame to capture, then exit.
+    pub ui_state: Option<crate::ui_state::UiState>,
 }
 
 /// The open archive set: base + overlays. Asset resolution walks the stack in REVERSE (last
@@ -1279,6 +1281,11 @@ pub fn run(opts: Options) {
     let mut craft_subject: Option<usize> = None;
     // Whether the running game answers on its lua-bridge port: the Live rail cell's dot.
     let live_probe = crate::live::Probe::spawn(mercs2_bridge::DEFAULT_ADDR.to_string());
+    // `--ui-state`: applied once the reference data is in; then frames to settle before the capture,
+    // and whether the capture has been asked of the scene.
+    let mut ui_state = opts.ui_state.clone();
+    let mut capture_to: Option<(PathBuf, u32)> = None;
+    let mut capture_asked = false;
     // The Ess / engine API reference, the ECS component registry and the captioned audio inventory,
     // loaded from the reference bundle on the boot thread (`BootData`) and set when it finishes.
     let mut ess_api = crate::essapi::ApiIndex::default();
@@ -1621,6 +1628,10 @@ pub fn run(opts: Options) {
                             const LOAD_ORANGE: [f32; 4] = [1.0, 0.62, 0.12, 1.0];
                             const BOOT_ERROR: [f32; 4] = [1.0, 0.38, 0.32, 1.0];
                             if let Some(err) = &boot_error {
+                                if ui_state.is_some() {
+                                    eprintln!("--ui-state: the window never left the boot screen: {err}");
+                                    std::process::exit(2);
+                                }
                                 // The error, word-wrapped to the window, then how to leave.
                                 let glyph = 8.0 * UI_S;
                                 let cols = (((wpx - 96.0) / glyph).floor() as usize).max(20);
@@ -1845,6 +1856,80 @@ pub fn run(opts: Options) {
                     // ── The inspector GUI: toolbar, browser, Details panel, texture window.
                     // Widgets queue `Act`s; the processor below executes them. ──
     let mut qm_acts: Vec<crate::quartermaster::Act> = Vec::new();
+                    // ── `--ui-state`: put the window in the named state, once the reference data is
+                    // in (names resolve), and start the countdown to the capture. ──
+                    if let Some(st) = ui_state.take() {
+                        let applied = (|| -> Result<(), String> {
+                            use crate::ui_state::pick;
+                            let model = |name: &str| -> Result<(u32, String), String> {
+                                index
+                                    .models()
+                                    .iter()
+                                    .find(|r| r.label() == name)
+                                    .map(|r| (r.hash, r.label()))
+                                    .ok_or_else(|| format!("no model named {name:?} in the catalog"))
+                            };
+                            if let Some(p) = &st.page {
+                                let mut pages: Vec<(&str, Workbench)> =
+                                    Workbench::ALL.iter().map(|w| (w.label(), *w)).collect();
+                                pages.push((Workbench::Live.label(), Workbench::Live));
+                                wb = pick("page", p, &pages)?;
+                            }
+                            if let Some(s) = &st.settings_section {
+                                let sections: Vec<(&str, SettingsSection)> =
+                                    SettingsSection::ALL.iter().map(|s| (s.label(), *s)).collect();
+                                settings_section = pick("settings section", s, &sections)?;
+                            }
+                            if let Some(t) = &st.tab {
+                                let tabs: Vec<(&str, Kind)> = Kind::ALL.iter().map(|k| (k.label(), *k)).collect();
+                                kind = pick("tab", t, &tabs)?;
+                            }
+                            if let Some(l) = &st.lens {
+                                let mut lenses: Vec<(&str, Option<crate::domain::Domain>)> = vec![("All", None)];
+                                lenses.extend(Workbench::lenses().into_iter().map(|d| (d.label(), Some(d))));
+                                lens = pick("lens", l, &lenses)?;
+                            }
+                            if let Some(f) = &st.filter {
+                                filter = f.clone();
+                            }
+                            filtered = refilter(&index, kind, &filter, lens);
+                            sel = 0;
+                            if let Some(name) = &st.load {
+                                let (hash, label) = model(name)?;
+                                actions.push(Act::LoadModelHash(hash, label));
+                            }
+                            if let Some(dir) = &st.shipment {
+                                qm.open_shipment(dir, qm_names.as_ref());
+                                if qm.root().is_none() {
+                                    return Err(format!("{}: {}", dir.display(), qm.status()));
+                                }
+                            }
+                            if let Some(i) = st.contribution {
+                                if i >= qm.contribution_count() {
+                                    return Err(format!(
+                                        "contribution {i} is past the Shipment's {}",
+                                        qm.contribution_count()
+                                    ));
+                                }
+                                qm_acts.push(crate::quartermaster::Act::Select(i));
+                            }
+                            if let (Some(b), Some(d)) = (&st.bench, &st.donor) {
+                                let benches = [
+                                    (bench_page(crate::quartermaster::Craft::Rig).verb(), crate::quartermaster::Craft::Rig),
+                                    (bench_page(crate::quartermaster::Craft::Conform).verb(), crate::quartermaster::Craft::Conform),
+                                ];
+                                let bench = pick("bench", b, &benches)?;
+                                let (hash, label) = model(d)?;
+                                actions.push(Act::Bench(bench, hash, label));
+                            }
+                            Ok(())
+                        })();
+                        if let Err(e) = applied {
+                            eprintln!("--ui-state: {e}");
+                            std::process::exit(2);
+                        }
+                        capture_to = Some((st.capture.clone(), st.settle_frames));
+                    }
                     let mut saves_acts: Vec<crate::saves::Act> = Vec::new();
                     // Captured below inside `gui.run` so the saves reducer (which runs after the
                     // closure returns) can allocate egui textures for the hero-portrait render.
@@ -6009,6 +6094,18 @@ pub fn run(opts: Options) {
                                        s: [u32; 2]| {
                         gui.paint(d, q, e, v, s);
                     };
+                    // `--ui-state`: once the window has settled, the next frame presented is read back.
+                    if let Some((_, frames)) = capture_to.as_mut() {
+                        if *frames > 0 {
+                            *frames -= 1;
+                        } else if !capture_asked {
+                            if let Err(e) = scene.request_capture() {
+                                eprintln!("--ui-state: {e}");
+                                std::process::exit(2);
+                            }
+                            capture_asked = true;
+                        }
+                    }
                     let r = if tex_view.is_some() || (preview.is_none() && donor_ref.is_none()) {
                         scene.render_menu_with(t, Some(&mut overlay))
                     } else {
@@ -6030,6 +6127,22 @@ pub fn run(opts: Options) {
                         }
                         Err(wgpu::SurfaceError::OutOfMemory) => elwt.exit(),
                         Err(e) => eprintln!("surface error: {e:?}"),
+                    }
+                    if let Some(frame) = scene.take_capture() {
+                        let (path, _) = capture_to.take().expect("a capture is only asked for with a path");
+                        let written = frame.and_then(|f| {
+                            crate::texpng::write_png(&path.to_string_lossy(), f.width, f.height, &f.rgba)
+                        });
+                        match written {
+                            Ok(()) => {
+                                println!("--ui-state: captured {}", path.display());
+                                elwt.exit();
+                            }
+                            Err(e) => {
+                                eprintln!("--ui-state: capture to {}: {e}", path.display());
+                                std::process::exit(2);
+                            }
+                        }
                     }
                 }
                 _ => {}
