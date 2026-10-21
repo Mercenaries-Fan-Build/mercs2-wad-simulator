@@ -12,7 +12,7 @@ it writes, and what proves it. Nothing on the page is drawn without its row bein
 | Tab strip | click a tab → the list shows that kind; each count is the live row count | `index::AssetIndex::count`, `Kind::ALL` | — | capture |
 | Lens row (Models tab) | click a pill → the list narrows to that domain; counts live; the Lens is kept when you switch tabs and come back | `domain::Domain::model_lens`, `app::in_lens` | — | test (exists: `a_lens_count_is_what_the_lens_lists`) + capture |
 | Filter | typing narrows the list by name, live; Enter loads the cursor row | `app::filter_rows` | — | existing behaviour |
-| Group headers | under a Lens, rows group by faction (the model name's prefix before the first `_`, shown upper-case: PMC, VZ, AL, CIV, OC…), each with its live count; with All, by category as today; click ▾/▸ folds a group | `AssetRow::name` (a kit-template row carries its kit model's name, `index.rs:365`) | — | test: grouping + counts over real names |
+| Group headers | under a Lens, rows group by faction, each with its live count; with All, by category as today; click ▾/▸ folds a group. A kit-template row's faction is its own `FactionMarker` (so a defector sits with the faction it serves, not its kit's); any other row's is its model name's prefix before the first `_`. Headers use the prefix spelling, upper-case (PMC, VZ, AL, CIV, OC…): a marker is labelled with the prefix it pairs with most often across the loaded templates | `KitTemplate::faction`, `AssetRow::name` | — | test: grouping, labels and counts |
 | Row | click → loads the model into the viewport (as today) and moves the cursor there; ↑/↓ move the cursor; the cursor row is highlighted | `Act::LoadModelHash` | — | existing behaviour |
 | Right-click menu: Load in viewport · Enter | loads the row's model | `Act::LoadModelHash` | — | existing |
 | Export… · F10 | opens the Export dialog for that model | see Export dialog | — | — |
@@ -29,11 +29,11 @@ it writes, and what proves it. Nothing on the page is drawn without its row bein
 | Inspector, loaded | the existing model cards | existing | — | — |
 | Footer | READY + the load summary | existing | — | — |
 
-## Open question (needs an answer before the grouping row is built)
+## Faction grouping: what the data says
 
-Some kit-template rows (the "AL Defender (AA)", "Allied Airborne"… rows the Characters Lens lists) are
-kits whose model has no known name, so they have no prefix to group by. The world templates do carry
-a `FactionMarker` component (one u32 per template, `mercs2_formats/src/schema.rs:938-953`), but which
-names its values resolve to — and whether those line up with the PMC/VZ/AL/CIV/OC prefixes — is not
-yet checked. Options: group those rows by their `FactionMarker` once its values are resolved and shown
-to line up; or put rows with no prefix under their own header.
+`FactionMarker` holds `pandemic_hash_m2` of the faction's HUD icon name — `HUD_faction_AN`, `_CH`,
+`_CV`, `_GR`, `_OC`, `_PR`, `_VZ`, `_PMC`, and `global_pickupmarker` on the police/taxi templates —
+and belongs to the template, not its model ("VZ Oil Company Defector" wears `oc_hum_super_executive`).
+Over the 3,351 templates with a model, each name prefix pairs with one marker by a wide margin (al→AN
+95/132, civ→CV 246/267, vz→VZ 118/144 …), which is what labels a marker's group. Dump:
+`mercs2_probe --bin kit_templates -- --factions`.
