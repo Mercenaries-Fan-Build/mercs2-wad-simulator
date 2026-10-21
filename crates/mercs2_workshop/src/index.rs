@@ -144,6 +144,9 @@ pub struct AssetRow {
     /// A spawn template's view of a character kit: the template's `Name`. The row loads the kit
     /// (`hash`) showing that template's outfit (`app::KitOutfits`). `None` for an asset row.
     pub template: Option<String>,
+    /// A template row's `FactionMarker` (`mercs2_formats::mixr::KitTemplate::faction`): the faction
+    /// is the template's, not its kit's. `None` for an asset row.
+    pub faction: Option<u32>,
 }
 
 impl AssetRow {
@@ -163,6 +166,20 @@ impl AssetRow {
     /// template rows all share the kit's hash, so the hash alone names every one of them.
     pub fn is(&self, hash: u32, template: Option<&str>) -> bool {
         self.hash == hash && self.template.as_deref() == template
+    }
+
+    /// The faction this row lists under in an Inspect Lens: a template row by its own
+    /// `FactionMarker`, named through `labels` ([`faction_labels`]); any other row by its name's
+    /// prefix before the first `_`, upper-case. A row with neither shows its hash, the way an
+    /// unnamed row is labelled everywhere.
+    pub fn faction_group(&self, labels: &HashMap<u32, String>) -> String {
+        if let Some(f) = self.faction {
+            return labels.get(&f).cloned().unwrap_or_else(|| format!("0x{f:08X}"));
+        }
+        match &self.name {
+            Some(n) => n.split('_').next().unwrap_or(n).to_ascii_uppercase(),
+            None => format!("0x{:08X}", self.hash),
+        }
     }
 
     /// Vehicle class for the Model Workbench inventory, or `None` if not a vehicle. Data-driven
@@ -286,6 +303,34 @@ pub struct AssetIndex {
     /// The world's templates that name a model (`mercs2_formats::mixr::kit_templates`), as given to
     /// [`Self::add_kit_templates`] — what a kit preview reads its outfits from.
     pub kit_templates: Vec<mercs2_formats::mixr::KitTemplate>,
+    /// Every world template that names a model — what [`faction_labels`] learns its pairs from.
+    pub world_templates: Vec<mercs2_formats::mixr::KitTemplate>,
+    /// Each `FactionMarker`'s group label ([`faction_labels`]), kept current with the names.
+    pub faction_labels: HashMap<u32, String>,
+}
+
+/// Each `FactionMarker` value, labelled with the model-name prefix it pairs with most often across
+/// `templates` whose model has a name (upper-case, e.g. `HUD_faction_AN` → `AL`) — the spelling the
+/// rest of the catalog groups under. Prefixes tied for most are joined with `/`. A marker no named
+/// template carries has no label.
+pub fn faction_labels(
+    templates: &[mercs2_formats::mixr::KitTemplate],
+    names: &HashMap<u32, String>,
+) -> HashMap<u32, String> {
+    let mut pairs: HashMap<u32, std::collections::BTreeMap<String, usize>> = HashMap::new();
+    for t in templates {
+        let (Some(f), Some(model)) = (t.faction, names.get(&t.model)) else { continue };
+        let prefix = model.split('_').next().unwrap_or(model).to_ascii_uppercase();
+        *pairs.entry(f).or_default().entry(prefix).or_default() += 1;
+    }
+    pairs
+        .into_iter()
+        .map(|(f, counts)| {
+            let top = counts.values().copied().max().unwrap_or(0);
+            let label: Vec<String> = counts.into_iter().filter(|(_, n)| *n == top).map(|(p, _)| p).collect();
+            (f, label.join("/"))
+        })
+        .collect()
 }
 
 impl AssetIndex {
@@ -339,13 +384,15 @@ impl AssetIndex {
                 } else {
                     0
                 };
-                buckets[i].insert(hash, AssetRow { hash, block, src, name: None, template: None });
+                buckets[i].insert(hash, AssetRow { hash, block, src, name: None, template: None, faction: None });
             }
         }
         let mut idx = AssetIndex {
             rows: buckets.into_iter().map(|b| b.into_values().collect()).collect(),
             names: HashMap::new(),
             kit_templates: Vec::new(),
+            world_templates: Vec::new(),
+            faction_labels: HashMap::new(),
         };
         idx.apply_names(names);
         idx
@@ -353,16 +400,22 @@ impl AssetIndex {
 
     /// Add one model row per kit template (`app::load_kit_templates`: a template that picks a
     /// character-kit outfit), labelled by the template's `Name`, beside its kit's own row. A template
-    /// whose model has no row in the catalog adds nothing. Returns how many rows were added.
-    pub fn add_kit_templates(&mut self, templates: &[mercs2_formats::mixr::KitTemplate]) -> usize {
+    /// whose model has no row in the catalog adds nothing. `world` is every template that names a
+    /// model, which the faction labels are learned from. Returns how many rows were added.
+    pub fn add_kit_templates(
+        &mut self,
+        templates: &[mercs2_formats::mixr::KitTemplate],
+        world: &[mercs2_formats::mixr::KitTemplate],
+    ) -> usize {
         let Some(mi) = Kind::ALL.iter().position(|k| *k == Kind::Model) else { return 0 };
+        self.world_templates = world.to_vec();
         let mut added = Vec::new();
         for t in templates {
             let (Some(name), Some(kit)) = (&t.name, self.rows[mi].iter().find(|r| r.hash == t.model && r.template.is_none()))
             else {
                 continue;
             };
-            added.push(AssetRow { template: Some(name.clone()), ..kit.clone() });
+            added.push(AssetRow { template: Some(name.clone()), faction: t.faction, ..kit.clone() });
         }
         let n = added.len();
         self.rows[mi].extend(added);
@@ -388,6 +441,7 @@ impl AssetIndex {
             }
             rows.sort_by(order);
         }
+        self.faction_labels = faction_labels(&self.world_templates, &self.names);
     }
 }
 
@@ -827,7 +881,7 @@ mod tests {
     use super::AssetRow;
 
     fn row(hash: u32, template: Option<&str>) -> AssetRow {
-        AssetRow { hash, block: 0, src: 0, name: None, template: template.map(str::to_string) }
+        AssetRow { hash, block: 0, src: 0, name: None, template: template.map(str::to_string), faction: None }
     }
 
     #[test]
@@ -841,5 +895,63 @@ mod tests {
         assert!(kit.is(0x45CC_35FE, None));
         assert!(!soldier.is(0x45CC_35FE, None));
         assert!(!soldier.is(0x4D4F_42B5, Some("Allied Soldier")));
+    }
+
+    use mercs2_formats::hash::pandemic_hash_m2 as m2;
+    use mercs2_formats::mixr::KitTemplate;
+    use std::collections::HashMap;
+
+    fn template(model: u32, faction: &str, name: &str) -> KitTemplate {
+        KitTemplate { key: 0, name: Some(name.into()), model, profile: 0, faction: Some(m2(faction)) }
+    }
+
+    /// Retail pairs, from `kit_templates --factions`: the oc executive kit is worn by OC executives
+    /// and by the VZ defector; the civilian aid-worker kit only by civilians.
+    fn retail_like() -> (Vec<KitTemplate>, HashMap<u32, String>) {
+        let (exec, aid) = (0x2EF7_E3C3, 0x01ED_3D6F);
+        let names = HashMap::from([
+            (exec, "oc_hum_super_executive".to_string()),
+            (aid, "civ_hum_super_aidworkerfemale".to_string()),
+        ]);
+        let templates = vec![
+            template(exec, "HUD_faction_OC", "OC Executive"),
+            template(exec, "HUD_faction_OC", "OC Executive (Phone)"),
+            template(exec, "HUD_faction_VZ", "VZ Oil Company Defector"),
+            template(aid, "HUD_faction_CV", "Aid Worker (Female)"),
+        ];
+        (templates, names)
+    }
+
+    /// A marker is labelled with the prefix it pairs with most; a marker only carried by a template
+    /// on another faction's kit takes that kit's prefix, which is all the data says about it.
+    #[test]
+    fn a_faction_marker_is_labelled_by_the_prefix_it_pairs_with() {
+        let (templates, names) = retail_like();
+        let labels = super::faction_labels(&templates, &names);
+        assert_eq!(labels[&m2("HUD_faction_OC")], "OC");
+        assert_eq!(labels[&m2("HUD_faction_CV")], "CIV");
+        assert_eq!(labels[&m2("HUD_faction_VZ")], "OC");
+    }
+
+    #[test]
+    fn prefixes_tied_for_a_marker_are_both_shown() {
+        let names = HashMap::from([(1, "al_hum_a".to_string()), (2, "civ_hum_b".to_string())]);
+        let templates = vec![template(1, "HUD_faction_AN", "a"), template(2, "HUD_faction_AN", "b")];
+        assert_eq!(super::faction_labels(&templates, &names)[&m2("HUD_faction_AN")], "AL/CIV");
+    }
+
+    /// A template row groups by its own marker, so the defector sits with its faction rather than
+    /// its kit's; an asset row by its name's prefix; a nameless row by its hash.
+    #[test]
+    fn a_row_groups_by_its_template_faction_else_its_name_prefix() {
+        let labels = HashMap::from([(m2("HUD_faction_VZ"), "VZ".to_string())]);
+        let mut defector = row(0x2EF7_E3C3, Some("VZ Oil Company Defector"));
+        defector.name = Some("oc_hum_super_executive".into());
+        defector.faction = Some(m2("HUD_faction_VZ"));
+        assert_eq!(defector.faction_group(&labels), "VZ");
+        let mut hero = row(0x1234, None);
+        hero.name = Some("pmc_hum_mattias".into());
+        assert_eq!(hero.faction_group(&labels), "PMC");
+        assert_eq!(row(0xDEAD_BEEF, None).faction_group(&labels), "0xDEADBEEF");
     }
 }
