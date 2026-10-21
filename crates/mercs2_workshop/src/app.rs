@@ -538,8 +538,8 @@ enum Act {
     /// Library routing: start a contribution of `kind` with this asset as its donor/target,
     /// scaffolding a Shipment if none is open, and go to the Shipment page.
     AddToShipment(&'static str, u32, String),
-    /// Library routing: use this asset as a bench's donor — start the contribution the bench writes
-    /// (`add_outfit` for Retarget, `add_model` for Fit) and open the bench on it.
+    /// Library routing: open a bench with this asset as its donor. Nothing is written until the
+    /// bench saves.
     Bench(crate::quartermaster::Craft, u32, String),
     /// Audio domain: preview a VO clip by its wave index — decode it from the game's
     /// `vo_stream.english.pws` and play it on the default output device.
@@ -820,8 +820,8 @@ fn asset_menu(
         // contribution; the asset itself is never the thing written.
         ui.label(theme::disp_text("Use as a donor \u{b7} never overwritten".to_uppercase(), theme::style_eyebrow(), theme::FAINT));
         let benches = [
-            (crate::quartermaster::Craft::Rig, "Retarget a rig onto this\u{2026}", "opens the Retarget bench \u{b7} writes a wearable outfit in your Shipment"),
-            (crate::quartermaster::Craft::Conform, "Fit an import to this\u{2026}", "opens the Fit bench \u{b7} writes a new model in your Shipment"),
+            (crate::quartermaster::Craft::Rig, "Retarget a rig onto this", "opens the Retarget bench \u{b7} writes a wearable outfit in your Shipment"),
+            (crate::quartermaster::Craft::Conform, "Fit an import to this", "opens the Fit bench \u{b7} writes a new model in your Shipment"),
         ];
         for (bench, title, what) in benches {
             let mut job = egui::text::LayoutJob::default();
@@ -5339,36 +5339,21 @@ pub fn run(opts: Options) {
                                 }
                             }
                             Act::Bench(bench, hash, label) => {
-                                // The contribution the bench writes, with this asset as its donor,
-                                // so the bench opens on a subject a commit lands back on.
-                                let kind = match bench {
-                                    crate::quartermaster::Craft::Rig => "add_outfit",
-                                    crate::quartermaster::Craft::Conform => "add_model",
-                                };
-                                let out = (|| -> Result<usize, String> {
-                                    qm.ensure_shipment(qm_names.as_ref())?;
-                                    let n = qm.contribution_count() + 1;
-                                    let c = crate::quartermaster::seeded(kind, &label, n)
-                                        .ok_or_else(|| format!("no stub for `{kind}`"))?;
-                                    qm.upsert_contribution(qm_names.as_ref(), None, c)
-                                })();
-                                match out {
-                                    Ok(at) => {
-                                        craft_subject = Some(at);
-                                        wb = bench_page(bench);
-                                        match bench {
-                                            // The rig bench needs a TARGET skeleton; the asset is it.
-                                            crate::quartermaster::Craft::Rig => {
-                                                actions.push(Act::RetargetSetTarget(hash, label.clone()));
-                                            }
-                                            crate::quartermaster::Craft::Conform => {
-                                                actions.push(Act::ModDonor(hash, label.clone()));
-                                            }
-                                        }
-                                        status = format!("{} — contributions[{at}] {kind} on donor {label}", wb.verb());
+                                // The work happens in the bench and nothing is written until it
+                                // saves: opened from the Library it has no contribution yet, and its
+                                // save appends the new one.
+                                craft_subject = None;
+                                wb = bench_page(bench);
+                                match bench {
+                                    // The rig bench needs a TARGET skeleton; the asset is it.
+                                    crate::quartermaster::Craft::Rig => {
+                                        actions.push(Act::RetargetSetTarget(hash, label.clone()));
                                     }
-                                    Err(e) => status = format!("{} FAILED: {e}", bench_page(bench).verb().to_uppercase()),
+                                    crate::quartermaster::Craft::Conform => {
+                                        actions.push(Act::ModDonor(hash, label.clone()));
+                                    }
                                 }
+                                status = format!("{} — donor {label}", wb.verb());
                             }
                             Act::LoadTexture(hash, label) => {
                                 tex_view = Some(TexView {
