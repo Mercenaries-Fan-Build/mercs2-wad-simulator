@@ -58,6 +58,7 @@
 //!                 first-run picker, and the resolution chain both of them feed.
 //! - [`texenc`]  — CPU BC1/BC3 encode for imported images.
 //! - [`texpng`]  — CPU BC1/BC3 decode + PNG write for the headless texture dumps.
+//! - [`ui_state`] — `--ui-state`: open the window in a named state and capture the frame.
 
 mod app;
 mod audioidx; // Captioned audio inventory (the Audio domain's real content)
@@ -92,6 +93,7 @@ mod shipment;
 mod shot;
 mod texenc;
 mod texpng;
+mod ui_state;
 
 use mercs2_engine::{mesh, wad};
 
@@ -227,9 +229,9 @@ fn main() {
     // but the GUI launch has a user right there — so it asks once, with a native picker, and
     // remembers the answer. Both paths are also reachable later from the Settings workbench.
     // `--shipment` CONFIGURES the GUI run rather than replacing it, so it belongs here: treating it
-    // as a mode flag would open a Shipment into a window that never appears.
-    const PASSIVE_FLAGS: [&str; 5] =
-        ["--wad", "--names", "--overlay", "--no-auto-patch", "--shipment"];
+    // as a mode flag would open a Shipment into a window that never appears. `--ui-state` likewise.
+    const PASSIVE_FLAGS: [&str; 6] =
+        ["--wad", "--names", "--overlay", "--no-auto-patch", "--shipment", "--ui-state"];
     let headless =
         args[1..].iter().any(|a| a.starts_with("--") && !PASSIVE_FLAGS.contains(&a.as_str()));
     let wadpath = match wadpath {
@@ -1987,7 +1989,15 @@ exported {ok} bundle(s), {fail} failed -> {}", outroot.display());
     }
 
     let shipment = get("--shipment").map(std::path::PathBuf::from);
-    app::run(app::Options { wadpath, overlays, shipment });
+    let ui_state = match get("--ui-state").map(|p| ui_state::UiState::load(std::path::Path::new(&p))) {
+        Some(Ok(st)) => Some(st),
+        Some(Err(e)) => {
+            eprintln!("--ui-state: {e}");
+            std::process::exit(2);
+        }
+        None => None,
+    };
+    app::run(app::Options { wadpath, overlays, shipment, ui_state });
 }
 
 /// Every hash `names.bin` is actually asked to resolve: ASET catalog assets, animgroup clip names, and
