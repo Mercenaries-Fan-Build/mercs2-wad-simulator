@@ -223,8 +223,10 @@ use mercs2_formats::hash::pandemic_hash_m2 as m2;
 // cue's +0x0C length is computed from the waves it plays, never passed in.
 let bank = encode_bank(&BankSpec {
     name: "mod_ui_sounds".into(),
+    hash: m2("mod_ui_sounds"), // a new bank's hash is its name's
     cues: vec![CueSpec {
         name: "mod_click".into(),
+        guid: m2("mod_click"), // a new cue's guid is its name's
         category: "ui".into(), // must be one of the retail Mercs2Globals categories
         sound_id: m2("mod_click"),
         clip_hash: m2("mod_click"),
@@ -247,7 +249,8 @@ use mercs2_audio::wave::WavebankFile;
 let pcm = read_pcm16_wav(&std::fs::read("pda_open.wav")?)?; // PCM16, mono or stereo, any rate > 0
 let mut ui_hud = Soundbank::parse(&game_soundbank_body)?;
 let spec = CueSpec {
-    name: "ui_PDA_Open_01_st".into(), // the cue to rewrite
+    name: "ui_PDA_Open_01_st".into(),
+    guid: m2("ui_PDA_Open_01_st"), // the cue to rewrite: its guid in the game's bank
     category: "ui".into(),
     sound_id,
     clip_hash,
