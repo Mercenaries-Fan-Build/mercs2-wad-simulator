@@ -22,6 +22,10 @@
 //! Two functions of `X` that translate to the same function of `Y` along different paths show as
 //! a contradiction of that function's translation from `Y` back to `X`, so [`Graph::coverage`],
 //! which translates every function in both directions, reports that case too.
+//!
+//! [`Graph::route`] computes the paths between two images and each hop's pairs once; its walks and
+//! verdict for a function are exactly those of [`Graph::translate`], for translating many functions
+//! between the same two images.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::Path;
@@ -157,22 +161,27 @@ pub struct Translation {
     pub paths: Vec<(Vec<String>, Walk)>,
 }
 
+/// The verdict of the walks of every path between two images, in path order.
+fn verdict_of<'w>(walks: impl ExactSizeIterator<Item = &'w Walk>) -> Verdict {
+    if walks.len() == 0 {
+        return Verdict::NoPath;
+    }
+    let mut answers: BTreeMap<u32, Vec<usize>> = BTreeMap::new();
+    for (i, w) in walks.enumerate() {
+        if let Walk::Answer(f) = w {
+            answers.entry(*f).or_default().push(i);
+        }
+    }
+    match answers.len() {
+        0 => Verdict::Untranslated,
+        1 => Verdict::Agreed(*answers.keys().next().unwrap()),
+        _ => Verdict::Contradicted(answers),
+    }
+}
+
 impl Translation {
     pub fn verdict(&self) -> Verdict {
-        if self.paths.is_empty() {
-            return Verdict::NoPath;
-        }
-        let mut answers: BTreeMap<u32, Vec<usize>> = BTreeMap::new();
-        for (i, (_, w)) in self.paths.iter().enumerate() {
-            if let Walk::Answer(f) = w {
-                answers.entry(*f).or_default().push(i);
-            }
-        }
-        match answers.len() {
-            0 => Verdict::Untranslated,
-            1 => Verdict::Agreed(*answers.keys().next().unwrap()),
-            _ => Verdict::Contradicted(answers),
-        }
+        verdict_of(self.paths.iter().map(|(_, w)| w))
     }
 
     /// The direct path's walk, when the two images share an edge.
@@ -274,15 +283,21 @@ impl Graph {
         out
     }
 
+    /// Each hop's pairs along `path`, in its own orientation.
+    fn hops(&self, path: &[String]) -> Vec<&HashMap<u32, u32>> {
+        path.windows(2).map(|w| &self.maps[&(w[0].clone(), w[1].clone())]).collect()
+    }
+
     fn walk(&self, path: &[String], function: u32) -> Walk {
-        let mut f = function;
-        for (i, w) in path.windows(2).enumerate() {
-            match self.maps[&(w[0].clone(), w[1].clone())].get(&f) {
-                Some(g) => f = *g,
-                None => return Walk::Stops { at: i, function: f },
-            }
-        }
-        Walk::Answer(f)
+        walk_hops(&self.hops(path), function)
+    }
+
+    /// Every path from `from` to `to` ([`Graph::paths`]) with each hop's pairs, computed once to
+    /// translate many functions of `from` exactly as [`Graph::translate`] does.
+    pub fn route(&self, from: &str, to: &str) -> Route<'_> {
+        let paths = self.paths(from, to);
+        let hops = paths.iter().map(|p| self.hops(p)).collect();
+        Route { paths, hops }
     }
 
     fn translate_along(&self, paths: &[Vec<String>], function: u32) -> Translation {
@@ -348,6 +363,69 @@ impl Graph {
             }
         }
         (rows, contradictions)
+    }
+}
+
+/// Map `function` through each hop's pairs in turn.
+fn walk_hops(hops: &[&HashMap<u32, u32>], function: u32) -> Walk {
+    let mut f = function;
+    for (i, m) in hops.iter().enumerate() {
+        match m.get(&f) {
+            Some(g) => f = *g,
+            None => return Walk::Stops { at: i, function: f },
+        }
+    }
+    Walk::Answer(f)
+}
+
+/// Every path between two images with each hop's pairs ([`Graph::route`]).
+#[derive(Clone, Debug)]
+pub struct Route<'g> {
+    /// The paths, in [`Graph::paths`] order.
+    pub paths: Vec<Vec<String>>,
+    hops: Vec<Vec<&'g HashMap<u32, u32>>>,
+}
+
+/// What every path of a [`Route`] gives for one function.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RouteWalks {
+    /// One walk per path, in [`Route::paths`] order.
+    pub walks: Vec<Walk>,
+}
+
+impl RouteWalks {
+    /// The verdict, exactly as [`Translation::verdict`] gives it for the same paths.
+    pub fn verdict(&self) -> Verdict {
+        verdict_of(self.walks.iter())
+    }
+
+    /// How many paths answer.
+    pub fn answering(&self) -> usize {
+        self.walks.iter().filter(|w| matches!(w, Walk::Answer(_))).count()
+    }
+}
+
+impl Route<'_> {
+    /// Walk `function` along every path.
+    pub fn walks(&self, function: u32) -> RouteWalks {
+        RouteWalks { walks: self.hops.iter().map(|h| walk_hops(h, function)).collect() }
+    }
+
+    /// The direct path's walk in `w`, when the two images share an edge (as
+    /// [`Translation::direct`]).
+    pub fn direct<'w>(&self, w: &'w RouteWalks) -> Option<&'w Walk> {
+        self.paths.iter().position(|p| p.len() == 2).map(|i| &w.walks[i])
+    }
+
+    /// The contradiction a [`Verdict::Contradicted`] of `function` of `image` to `to` reports:
+    /// each answer with the paths that gave it.
+    pub fn contradiction(&self, image: &str, function: u32, to: &str, answers: &BTreeMap<u32, Vec<usize>>) -> Contradiction {
+        Contradiction {
+            image: image.into(),
+            function,
+            to: to.into(),
+            answers: answers.iter().map(|(g, idx)| (*g, idx.iter().map(|i| self.paths[*i].clone()).collect())).collect(),
+        }
     }
 }
 
@@ -533,6 +611,31 @@ mod tests {
         let (_, cs) = g.coverage();
         let back: Vec<String> = cs.iter().filter(|c| c.image == "c").map(Contradiction::tsv).collect();
         assert_eq!(back, vec!["c\t0x00000015\ta\t0x00000001(c>a) 0x00000002(c>b>a)".to_string()]);
+    }
+
+    #[test]
+    fn a_route_gives_what_translate_gives_for_every_function() {
+        let g = Graph::new(&[
+            pairs("a", "b", &[(1, 11), (2, 12), (3, 13), (5, 15)]),
+            pairs("b", "c", &[(11, 22), (12, 23), (13, 24)]),
+            pairs("a", "c", &[(1, 21), (2, 23), (4, 25)]),
+        ])
+        .unwrap();
+        let r = g.route("a", "c");
+        assert_eq!(r.paths, g.paths("a", "c"));
+        for f in [1, 2, 3, 4, 5, 99] {
+            let t = g.translate("a", f, "c");
+            let w = r.walks(f);
+            assert_eq!(w.walks, t.paths.iter().map(|(_, w)| w.clone()).collect::<Vec<_>>(), "function {f}");
+            assert_eq!(w.verdict(), t.verdict(), "function {f}");
+            assert_eq!(r.direct(&w), t.direct(), "function {f}");
+        }
+        let w = r.walks(1);
+        let Verdict::Contradicted(answers) = w.verdict() else { panic!("a1 -> c is contradicted") };
+        assert_eq!(r.contradiction("a", 1, "c", &answers).tsv(), "a\t0x00000001\tc\t0x00000015(a>c) 0x00000016(a>b>c)");
+        let none = g.route("a", "z");
+        assert!(none.paths.is_empty());
+        assert_eq!(none.walks(1).verdict(), Verdict::NoPath);
     }
 
     #[test]
