@@ -1902,7 +1902,7 @@ fn sound_loader_rows(
 /// it by its retail name, through no loader (`sound::loader_sessions`).
 fn override_loader_rows(bank: &str, language: Option<mercs2_quartermaster::manifest::Language>) -> Vec<(String, String)> {
     use mercs2_quartermaster::sound::{bank_loader, loader_sessions, BankLoader, RETAIL_LUA_LOAD_SITES};
-    match bank_loader(bank, &RETAIL_LUA_LOAD_SITES) {
+    match bank_loader(bank, language, &RETAIL_LUA_LOAD_SITES) {
         BankLoader::Lua => sound_loader_rows(&loader_sessions(bank, language), "its wavebank"),
         BankLoader::Engine => vec![(
             "Script".to_string(),
