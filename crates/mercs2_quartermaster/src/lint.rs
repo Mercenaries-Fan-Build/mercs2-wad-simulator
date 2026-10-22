@@ -313,9 +313,10 @@ pub const M0214_SOUND_WAVE_UNUSABLE: Rule = Rule {
 };
 
 /// A sound name the engine cannot reach: two cues of one bank whose names hash alike (the hash
-/// folds case), a name written as a bare hash or with surrounding whitespace, a bank with no cues,
-/// or an `add_sound` bank named `vo_*` (retail Lua appends the language to such a name before
-/// loading it, `mrxsoundbanks.lua:80-87`).
+/// folds case), a name with surrounding whitespace, an `add_sound` bank or cue written as a bare
+/// hash (an override may write one: it names a bank or cue the game has), a bank with no cues, or
+/// an `add_sound` bank named `vo_*` (retail Lua appends the language to such a name before loading
+/// it, `mrxsoundbanks.lua:80-87`).
 pub const M0215_SOUND_NAME_UNUSABLE: Rule = Rule {
     code: "M0215",
     title: "a sound bank or cue name the engine cannot reach",
@@ -1510,8 +1511,10 @@ fn unreachable_hash_checks(blocks: &[mercs2_formats::patch_wad::PatchBlock]) -> 
     out
 }
 
-/// Why a bank or cue name cannot be used, or `None`.
-fn sound_name_refusal(what: &str, name: &str) -> Option<String> {
+/// Why a bank or cue name cannot be used, or `None`. An override names a bank or cue the game has,
+/// so it may write a bare hash (`new` false); `add_sound` mints them (`new` true), and a new
+/// identity's hash is the hash of its name.
+fn sound_name_refusal(what: &str, name: &str, new: bool) -> Option<String> {
     if name.is_empty() {
         return Some(format!("the {what} name is empty"));
     }
@@ -1520,9 +1523,9 @@ fn sound_name_refusal(what: &str, name: &str) -> Option<String> {
             "the {what} name {name:?} has surrounding whitespace, which is hashed with it — trim it"
         ));
     }
-    if crate::manifest::bare_hash(name).is_some() {
+    if new && crate::manifest::bare_hash(name).is_some() {
         return Some(format!(
-            "the {what} name {name:?} is a bare hash; a sound {what} is authored by name, and the \
+            "the {what} name {name:?} is a bare hash; a new sound {what} is authored by name, and the \
              name is what its guid is the hash of"
         ));
     }
@@ -1578,7 +1581,8 @@ fn sound_checks(
         })
     };
 
-    if let Some(why) = sound_name_refusal("bank", bank) {
+    let new = kind == "add_sound";
+    if let Some(why) = sound_name_refusal("bank", bank, new) {
         push(M0215_SOUND_NAME_UNUSABLE, format!("{kind}: {why}."), None);
     }
     if kind == "add_sound" && crate::sound::is_vo_bank(bank) {
@@ -1598,17 +1602,18 @@ fn sound_checks(
     }
     let mut seen: std::collections::BTreeMap<u32, &str> = std::collections::BTreeMap::new();
     for cue in cues {
-        if let Some(why) = sound_name_refusal("cue", &cue.name) {
+        if let Some(why) = sound_name_refusal("cue", &cue.name, new) {
             push(M0215_SOUND_NAME_UNUSABLE, format!("{kind}: {why}."), None);
             continue;
         }
-        let guid = mercs2_formats::hash::pandemic_hash_m2(&cue.name);
+        let guid = crate::manifest::asset_hash(&cue.name);
         if let Some(first) = seen.insert(guid, &cue.name) {
             push(
                 M0215_SOUND_NAME_UNUSABLE,
                 format!(
                     "cues {first:?} and {:?} hash to the same guid 0x{guid:08X} (the hash folds \
-                     case), so only one of them can be looked up. Rename one.",
+                     case, and a bare hash is its own guid), so only one of them can be looked up. \
+                     Rename one, or declare the cue once.",
                     cue.name
                 ),
                 None,
@@ -1630,7 +1635,10 @@ fn sound_checks(
         );
     }
 
-    if let Some(language) = language {
+    // A bank written as a bare hash names its entry: whether it is a language's copy is where the
+    // game carries it, which the game-dependent M0218 checks against the declared language.
+    let named = crate::manifest::bare_hash(bank).is_none();
+    if let (Some(language), true) = (language, named) {
         match (crate::sound::is_vo_bank(bank), language) {
             (true, None) => push(
                 M0217_SOUND_LANGUAGE,
