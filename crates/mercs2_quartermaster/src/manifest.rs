@@ -916,6 +916,26 @@ pub enum Contribution {
         /// The cue: `name` is the cue it replaces.
         cue: SoundCue,
     },
+    /// Data, SAME-HASH. Replace one line — one wave record of a wavebank the game ships — wherever it
+    /// plays: in every soundbank of the WAD that carries the wavebank, each group wave reference to
+    /// the record is pointed at the new wave, keeping its weight and every other wave of the group,
+    /// and each cue that reaches a rewritten group gets its length recomputed. The forked soundbanks
+    /// ship as a `replace_sound_cue`'s do; the wave ships in a wavebank of its own, which the mod
+    /// loader loads. A record is streamed or embedded by its wavebank's kind, not by itself
+    /// (`FUN_0082e8b0` reads the wavebank's `+0x0A`), which is why the groups move rather than the
+    /// record.
+    ReplaceSoundWave {
+        /// The wavebank, as the groups name it (`vo_stream`), or a bare hash of its entry.
+        wavebank: String,
+        /// For a localized wavebank, the language whose copy is replaced: the entry is
+        /// `<wavebank>.<language>`. Absent for any other wavebank.
+        #[serde(default)]
+        language: Option<Language>,
+        /// The line: the record's `+0x00` clip hash, as a name or a bare hash. The new record keeps it.
+        line: String,
+        /// The `src/`-relative WAV: uncompressed 16-bit PCM, mono or stereo, at any rate above zero.
+        wave: PathBuf,
+    },
     /// Data, new-hash additive. A Scaleform GFx movie (`cfx_pack`, type_id 23) added as a WAD asset,
     /// so Lua can point `SetSwfFile` at it.
     ///
@@ -1481,6 +1501,7 @@ impl Contribution {
         "add_sound",
         "replace_sound_bank",
         "replace_sound_cue",
+        "replace_sound_wave",
         "add_movie",
         "add_ui",
         "replace_texture",
@@ -1540,6 +1561,7 @@ impl Contribution {
             Contribution::AddSound { .. } => "add_sound",
             Contribution::ReplaceSoundBank { .. } => "replace_sound_bank",
             Contribution::ReplaceSoundCue { .. } => "replace_sound_cue",
+            Contribution::ReplaceSoundWave { .. } => "replace_sound_wave",
             Contribution::AddMovie { .. } => "add_movie",
             Contribution::AddUi { .. } => "add_ui",
             Contribution::ReplaceTexture { .. } => "replace_texture",
