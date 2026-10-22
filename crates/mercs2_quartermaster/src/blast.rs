@@ -87,6 +87,9 @@ pub enum Claim {
     /// bank, the language whose copy of the bank it is in. One language's cue does not touch
     /// another's: each language's banks are separate entries (`<bank>.<language>`).
     SoundCue { guid: u32, language: Option<String> },
+    /// A line — one wave record — of a wavebank, keyed on the wavebank's entry hash and the record's
+    /// clip hash, and the language of a localized wavebank's copy.
+    SoundLine { wavebank: u32, clip: u32, language: Option<String> },
     /// A shader store record, keyed on `pandemic_hash_m2(stem)`: the record `<stem>_3.sho` of
     /// `shader3.bin` and `<stem>_3l.sho` of `shader3Low.bin`. The hash folds case, like the ids.
     ShaderStem { key: u32 },
@@ -172,6 +175,16 @@ impl Claim {
                 (None, Some(l)) => format!("sound cue 0x{guid:08X} ({l})"),
                 (None, None) => format!("sound cue 0x{guid:08X}"),
             },
+            Claim::SoundLine { wavebank, clip, language } => {
+                let line = match name {
+                    Some(n) => format!("line {n} (0x{clip:08X})"),
+                    None => format!("line 0x{clip:08X}"),
+                };
+                match language {
+                    Some(l) => format!("{line} of wavebank 0x{wavebank:08X} ({l})"),
+                    None => format!("{line} of wavebank 0x{wavebank:08X}"),
+                }
+            }
             Claim::ShaderStem { key } => match name {
                 Some(n) => format!("shader store record {n} (0x{key:08X})"),
                 None => format!("shader store record 0x{key:08X}"),
@@ -279,6 +292,9 @@ pub fn merge_class(claim: &Claim, access: Access, intent: Intent) -> MergeClass 
         // A replaced cue has one winner in the table the game loads; a second replacement of the
         // same cue cannot also take effect.
         Claim::SoundCue { .. } => MergeClass::Exclusive,
+        // A replaced line has one wave in the groups the game loads; a second replacement of the
+        // same line cannot also take effect.
+        Claim::SoundLine { .. } => MergeClass::Exclusive,
         // One store record has one blob in the stores `qm link` emits: a second edit of the same
         // stem cannot also take effect.
         Claim::ShaderStem { .. } => MergeClass::Exclusive,
@@ -433,6 +449,20 @@ pub fn claims(manifest: &Manifest) -> Vec<ClaimRecord> {
             Contribution::ReplaceSoundCue { bank, language, cue, .. } => {
                 push(Access::Write, Claim::sound_cue(&cue.name, *language), Intent::ReplaceExclusive);
                 for script in loader_scripts(&crate::sound::loader_sessions(bank, *language)) {
+                    push(Access::Write, bare(script), Intent::Additive);
+                }
+            }
+            // The line, and the scripts of the loaders that load its override wavebank: the banks
+            // that play a wavebank's waves are loaded as the wavebank is (a localized wavebank's by
+            // its language's `vo_*` banks; an engine-loaded bank's waves by that bank alone).
+            Contribution::ReplaceSoundWave { wavebank, language, line, .. } => {
+                let claim = Claim::SoundLine {
+                    wavebank: crate::sound::entry_hash(wavebank, *language),
+                    clip: crate::manifest::asset_hash(line),
+                    language: language.map(|l| l.token().to_string()),
+                };
+                push(Access::Write, (claim, Some(line.clone())), Intent::ReplaceExclusive);
+                for script in loader_scripts(&crate::sound::loader_sessions(wavebank, *language)) {
                     push(Access::Write, bare(script), Intent::Additive);
                 }
             }
