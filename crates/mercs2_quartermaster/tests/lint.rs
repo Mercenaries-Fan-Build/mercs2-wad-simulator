@@ -1461,10 +1461,28 @@ fn add_sound_in(bank: &str, category: &str, cues: &[&str], load_in: &str) -> Man
 
 /// A `replace_sound_cue` of `bank`, with `language` when given.
 fn replace_cue(bank: &str, language: Option<&str>) -> Manifest {
+    replace_cue_named(bank, language, "ui_PDA_Open_01_st")
+}
+
+/// A `replace_sound_cue` of `cue` in `bank`, with `language` when given.
+fn replace_cue_named(bank: &str, language: Option<&str>, cue: &str) -> Manifest {
     let language = language.map(|l| format!("    language: {l}\n")).unwrap_or_default();
     shipment_with(&format!(
         "  - kind: replace_sound_cue\n    bank: {bank}\n{language}    category: ui\n    cue:\n{}",
-        cue_fields("      ", "ui_PDA_Open_01_st", "src/a.wav")
+        cue_fields("      ", cue, "src/a.wav")
+    ))
+}
+
+/// A `replace_sound_bank` of `bank` declaring `cues`, with `language` when given.
+fn replace_bank(bank: &str, language: Option<&str>, cues: &[&str]) -> Manifest {
+    let language = language.map(|l| format!("    language: {l}\n")).unwrap_or_default();
+    let mut list = String::new();
+    for c in cues {
+        let f = cue_fields("        ", c, "src/a.wav");
+        list.push_str(&format!("      - {}", &f[8..]));
+    }
+    shipment_with(&format!(
+        "  - kind: replace_sound_bank\n    bank: {bank}\n{language}    category: ui\n    cues:\n{list}"
     ))
 }
 
@@ -1521,6 +1539,26 @@ fn m0215_fires_on_unusable_sound_names() {
     assert!(codes(&lint::lint(&add_sound("vo_mine", "ui", &["mod_click"]), None, None)).contains(&"M0215"));
     // A usable bank is quiet.
     assert!(!codes(&lint::lint(&add_sound("mod_sounds", "ui", &["mod_click"]), None, None)).contains(&"M0215"));
+}
+
+/// An override names a bank and a cue the game has, so it may write either as a bare hash, as any
+/// asset reference may; a hash is its own guid, so a cue declared once by name and once by its hash
+/// is declared twice (M0215). A hashed bank names its entry, so the static M0217 leaves its language
+/// to the game check (M0218).
+#[test]
+fn an_override_addresses_its_bank_and_cue_by_hash() {
+    let h = |name: &str| format!("\"0x{:08X}\"", mercs2_formats::hash::pandemic_hash_m2(name));
+    let quiet = |m: &Manifest| {
+        let d = lint::lint(m, None, None);
+        assert!(d.is_empty(), "{d:?}");
+    };
+    quiet(&replace_cue_named("ui_hud", None, &h("ui_PDA_Open_01_st")));
+    quiet(&replace_cue_named(&h("ui_hud"), None, &h("ui_PDA_Open_01_st")));
+    quiet(&replace_cue_named(&h("vo_jen.english"), Some("english"), "\"0x96FFDF9F\""));
+    quiet(&replace_bank(&h("vo_jen.english"), Some("english"), &["\"0x96FFDF9F\"", "\"0x4A9E1835\""]));
+    let twice = replace_bank("ui_hud", None, &["ui_PDA_Open_01_st", &h("ui_PDA_Open_01_st")]);
+    let d = lint::lint(&twice, None, None);
+    assert!(d.iter().any(|d| d.rule.code == "M0215" && d.message.contains("same guid")), "{d:?}");
 }
 
 /// M0216: a category outside the tree, with the nearest named one offered.
