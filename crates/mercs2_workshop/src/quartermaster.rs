@@ -767,6 +767,11 @@ fn contribution_name(c: &Contribution) -> String {
             mercs2_quartermaster::sound::entry_name(bank, *language),
             cue.name
         ),
+        Contribution::ReplaceSoundWave { wavebank, language, line, .. } => format!(
+            "{} {}",
+            mercs2_quartermaster::sound::entry_name(wavebank, *language),
+            line
+        ),
         Contribution::ReplaceTexture { target, .. }
         | Contribution::PatchLua { target, .. }
         | Contribution::EditStateMachine { target, .. }
@@ -904,6 +909,7 @@ pub const KINDS: &[(&str, &[(&str, &str, &str)])] = &[
             ("add_sound", "New sound bank", "A new sound bank encoded from WAV cues, loaded by the mod loader"),
             ("replace_sound_bank", "Replace sound bank", "Replace every cue of a shipped sound bank, same entry name"),
             ("replace_sound_cue", "Replace sound cue", "Replace one cue of a shipped sound bank with a new WAV"),
+            ("replace_sound_wave", "Replace a line", "Replace one line of a shipped wavebank wherever it plays"),
             ("add_movie", "New movie", "A Scaleform movie"),
             ("add_ui", "New UI", "A Scaleform movie, wired up so it appears on screen"),
             ("replace_texture", "Replace texture", "Replace a shipped texture, same hash"),
@@ -1082,6 +1088,14 @@ fn stub(kind: &str, n: usize) -> Option<Contribution> {
             language: None,
             category: String::new(),
             cue: unset_cue(),
+        },
+        // The wavebank and the line name a record the game ships, so they start empty (M0215), and
+        // the WAV path does not exist yet (M0110).
+        "replace_sound_wave" => Contribution::ReplaceSoundWave {
+            wavebank: String::new(),
+            language: None,
+            line: String::new(),
+            wave: PathBuf::from("src/line.wav"),
         },
         "edit_state_machine" => Contribution::EditStateMachine {
             target: "al_veh_boat_destroyer".into(),
@@ -1948,25 +1962,44 @@ fn sound_load_in_row(ui: &mut egui::Ui, load_in: &mut Vec<mercs2_quartermaster::
     commit
 }
 
-/// The bank a sound override targets, and the language of a `vo_*` bank's copy. The language row
-/// is shown for a bank that starts with `vo_` (`sound::is_vo_bank`, the rule retail Lua localizes
-/// by); committing a bank that does not clears the language.
+/// The bank (or, `what` = "wavebank", the wavebank) a sound override targets, and the language of a
+/// `vo_*` one's copy. The language row is shown for a name that starts with `vo_`
+/// (`sound::is_vo_bank`, the rule retail Lua localizes by), and committing a name that does not
+/// clears the language. A bare hash names the entry itself, so its language is the author's choice,
+/// none included, and the game check holds it to the WAD that carries the entry (M0218).
 fn sound_bank_row(
     ui: &mut egui::Ui,
+    what: &str,
     bank: &mut String,
     language: &mut Option<mercs2_quartermaster::manifest::Language>,
 ) -> bool {
-    use mercs2_quartermaster::manifest::Language;
+    use mercs2_quartermaster::manifest::{bare_hash, Language};
     use mercs2_quartermaster::sound::{entry_name, is_vo_bank};
     let mut commit = false;
-    if text_row(ui, "Bank", bank, "ui_hud", true) {
+    let (label, placeholder, note) = match what {
+        "wavebank" => ("Wavebank", "vo_stream", "a wavebank the game ships, as its groups name it, or its entry's hash"),
+        _ => ("Bank", "ui_hud", "a bank the game ships, as its Lua loads it, or its entry's hash"),
+    };
+    if text_row(ui, label, bank, placeholder, true) {
         commit = true;
-        if !is_vo_bank(bank) {
+        if bare_hash(bank).is_none() && !is_vo_bank(bank) {
             *language = None;
         }
     }
-    theme::field_note(ui, theme::FieldState::Neutral, "a bank the game ships, as its Lua loads it");
-    if is_vo_bank(bank) {
+    theme::field_note(ui, theme::FieldState::Neutral, note);
+    if let Some(hash) = bare_hash(bank) {
+        let mut options: Vec<(Option<Language>, &str)> = vec![(None, "none (vz.wad / shell.wad)")];
+        options.extend(Language::ALL.iter().map(|l| (Some(*l), l.token())));
+        commit |= theme::combo_field(ui, "Language", language, &options, theme::FieldState::Neutral);
+        theme::field_note(
+            ui,
+            theme::FieldState::Neutral,
+            &match language {
+                Some(l) => format!("0x{hash:08X} is looked up in {}.wad: the hash of `<{what}>.{}`", l.token(), l.token()),
+                None => format!("0x{hash:08X} is looked up in vz.wad and shell.wad"),
+            },
+        );
+    } else if is_vo_bank(bank) {
         let options: Vec<(Option<Language>, &str)> =
             Language::ALL.iter().map(|l| (Some(*l), l.token())).collect();
         let state = if language.is_none() { theme::FieldState::Bad } else { theme::FieldState::Neutral };
@@ -2012,7 +2045,7 @@ fn sound_cue_fields(ui: &mut egui::Ui, cue: &mut SoundCue, root: &Path) -> bool 
             theme::FieldState::Neutral,
             &format!(
                 "0x{:08X} \u{2014} the guid Sound.CueSound looks up",
-                mercs2_formats::hash::pandemic_hash_m2(&cue.name)
+                mercs2_quartermaster::manifest::asset_hash(&cue.name)
             ),
         );
     }
@@ -2351,7 +2384,7 @@ fn contribution_form(
             commit |= sound_cue_list(ui, cues, root);
         }
         Contribution::ReplaceSoundBank { bank, language, category, cues } => {
-            commit |= sound_bank_row(ui, bank, language);
+            commit |= sound_bank_row(ui, "bank", bank, language);
             commit |= sound_category_row(ui, category, "the category every cue's group is in");
             theme::field_note(
                 ui,
@@ -2362,10 +2395,24 @@ fn contribution_form(
             commit |= sound_cue_list(ui, cues, root);
         }
         Contribution::ReplaceSoundCue { bank, language, category, cue } => {
-            commit |= sound_bank_row(ui, bank, language);
+            commit |= sound_bank_row(ui, "bank", bank, language);
             commit |= sound_category_row(ui, category, "the category of the cue's new group");
-            theme::eyebrow(ui, "Cue — its name is the game's cue it replaces");
+            theme::eyebrow(ui, "Cue — its name (or guid) is the game's cue it replaces");
             commit |= sound_cue_fields(ui, cue, root);
+        }
+        Contribution::ReplaceSoundWave { wavebank, language, line, wave } => {
+            commit |= sound_bank_row(ui, "wavebank", wavebank, language);
+            commit |= text_row(ui, "Line", line, "0x96FFDF9F", true);
+            theme::field_note(
+                ui,
+                theme::FieldState::Neutral,
+                &format!(
+                    "0x{:08X} — the clip hash of the record it replaces, in every group that plays it; \
+                     the group's other waves stay",
+                    mercs2_quartermaster::manifest::asset_hash(line)
+                ),
+            );
+            commit |= source_row(ui, "Wave", wave, root, &["wav"]);
         }
         Contribution::AddMovie { name, movie } => {
             commit |= text_row(ui, "Asset name", name, "my_menu", true);
@@ -3185,6 +3232,17 @@ fn blast_rows(c: &Contribution) -> Vec<(String, String)> {
                 ),
             )];
             rows.extend(override_loader_rows(bank, *language));
+            rows
+        }
+        Contribution::ReplaceSoundWave { wavebank, language, line, .. } => {
+            let mut rows = vec![(
+                "Writes".to_string(),
+                format!(
+                    "line {line} of {}, in every soundbank that plays it  \u{2014} EXCLUSIVE",
+                    mercs2_quartermaster::sound::entry_name(wavebank, *language)
+                ),
+            )];
+            rows.extend(override_loader_rows(wavebank, *language));
             rows
         }
         Contribution::ReplaceTexture { target, .. } => vec![
@@ -4199,6 +4257,22 @@ mod tests {
             assert!(codes.contains(&"M0215"), "{kind}: the missing name or cues are not reported: {codes:?}");
             assert_eq!(codes.contains(&"M0221"), kind == "add_sound", "{kind}: the unchosen load_in: {codes:?}");
         }
+    }
+
+    /// The `replace_sound_wave` stub is written and reopens unchanged, with the empty wavebank and
+    /// line reported (M0215); it has no category to choose.
+    #[test]
+    fn the_line_stub_is_written_and_reopens() {
+        let d = tmp("sound_stub_replace_sound_wave");
+        let mut p = Panel::default();
+        p.scaffold(&d, None).expect("scaffold");
+        let c = stub("replace_sound_wave", 1).expect("stub");
+        p.mutate(None, |m| m.contributions.push(c.clone())).expect("write");
+        let s = p.shipment.as_ref().expect("the Shipment reopens");
+        assert_eq!(s.manifest.contributions, vec![c]);
+        let codes: Vec<&str> = p.findings_for(0).map(|d| d.rule.code).collect();
+        assert!(codes.contains(&"M0215"), "the empty wavebank and line are not reported: {codes:?}");
+        assert!(!codes.contains(&"M0216"), "a line has no category: {codes:?}");
     }
 
     /// The preview names each session's loader for a sound kind: an `add_sound` its `load_in`, an
