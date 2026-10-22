@@ -44,7 +44,13 @@
 //! ([`corpus`]); PS3 disc images are read through [`iso9660`].
 //!
 //! [`canonical`] finds every catalogued PC build by sha256 in the canonical tree of PC builds.
+//!
+//! [`xmap`] translates a function between any two images through the match graph of [`matcher`]
+//! outputs; [`annotate`] writes, per function of one image's Ghidra functions export, every name
+//! it carries (Ghidra, rtti, luareg, imports) with its source and its agreed translation to every
+//! other image of the graph, as JSON Lines for a search corpus.
 
+pub mod annotate;
 pub mod canonical;
 pub mod catalogue;
 pub mod corpus;
