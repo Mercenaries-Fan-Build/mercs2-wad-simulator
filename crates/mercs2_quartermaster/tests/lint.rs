@@ -1561,6 +1561,28 @@ fn an_override_addresses_its_bank_and_cue_by_hash() {
     assert!(d.iter().any(|d| d.rule.code == "M0215" && d.message.contains("same guid")), "{d:?}");
 }
 
+/// A `replace_sound_wave`: a well-formed one lints clean by name or by hash; an empty wavebank or
+/// line is M0215; a `vo_` wavebank without a language, or another with one, is M0217; a hashed
+/// wavebank's language is left to the game check.
+#[test]
+fn a_replaced_line_lints_its_names_and_language() {
+    let line = |wavebank: &str, language: Option<&str>, line: &str| {
+        let language = language.map(|l| format!("    language: {l}\n")).unwrap_or_default();
+        shipment_with(&format!(
+            "  - kind: replace_sound_wave\n    wavebank: {wavebank}\n{language}    line: {line}\n    wave: src/a.wav\n"
+        ))
+    };
+    let codes_of = |m: &Manifest| codes(&lint::lint(m, None, None)).into_iter().map(str::to_string).collect::<Vec<_>>();
+    assert!(codes_of(&line("vo_stream", Some("english"), "chris-Banter-Contract-All01-29")).is_empty());
+    assert!(codes_of(&line("vo_stream", Some("english"), "\"0x96FFDF9F\"")).is_empty());
+    assert!(codes_of(&line("\"0xCAFEF00D\"", None, "\"0x96FFDF9F\"")).is_empty());
+    assert!(codes_of(&line("\"0xCAFEF00D\"", Some("german"), "\"0x96FFDF9F\"")).is_empty());
+    assert!(codes_of(&line("\"\"", Some("english"), "x")).contains(&"M0215".to_string()));
+    assert!(codes_of(&line("vo_stream", Some("english"), "\"\"")).contains(&"M0215".to_string()));
+    assert!(codes_of(&line("vo_stream", None, "x")).contains(&"M0217".to_string()));
+    assert!(codes_of(&line("music", Some("english"), "x")).contains(&"M0217".to_string()));
+}
+
 /// M0216: a category outside the tree, with the nearest named one offered.
 #[test]
 fn m0216_fires_on_an_unknown_category_and_suggests_one() {
