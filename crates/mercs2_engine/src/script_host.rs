@@ -2568,8 +2568,10 @@ mod tests {
         // A bank with one positional cue (group `+0x14` set) long enough to outlive the test.
         let enc = encode_bank(&BankSpec {
             name: "mod_emit".into(),
+            hash: pandemic_hash_m2("mod_emit"),
             cues: vec![CueSpec {
                 name: "mod_engine".into(),
+                guid: pandemic_hash_m2("mod_engine"),
                 category: "sfx".into(),
                 sound_id: pandemic_hash_m2("mod_engine"),
                 clip_hash: pandemic_hash_m2("mod_engine"),
@@ -2635,8 +2637,10 @@ mod tests {
 
         let enc = encode_bank(&BankSpec {
             name: "mod_test".into(),
+            hash: pandemic_hash_m2("mod_test"),
             cues: vec![CueSpec {
                 name: "mod_test_cue".into(),
+                guid: pandemic_hash_m2("mod_test_cue"),
                 category: "sfx".into(),
                 sound_id: pandemic_hash_m2("mod_test_cue"),
                 clip_hash: pandemic_hash_m2("mod_test_cue"),
