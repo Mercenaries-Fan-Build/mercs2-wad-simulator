@@ -18,7 +18,16 @@
 //! exemap match <image_a> <image_b> --exports <dir> --evidence <list> --out <tsv> --conflicts <tsv>
 //! exemap translate <image> <address> --to <image> --matches <dir>
 //! exemap coverage --matches <dir> --out <tsv> --contradictions <tsv>
+//! exemap annotate <image_id> --functions <jsonl> --exports <dir> --matches <dir> --out <jsonl>
+//! exemap seeds <image_id> --functions <jsonl> --exports <dir> --out <starts> --names <tsv>
 //! ```
+//!
+//! `annotate` reads the image's Ghidra functions export (`<image_id>.functions.jsonl`), its rtti,
+//! luareg and (for an image whose chain unpacks a XEX or a PS3 SELF) imports exports, and the match
+//! graph, and writes one JSON line per function: every name with its source, and every agreed
+//! translation to another graph image. It fails on a functions file that is truncated, of another
+//! image or of other bytes than images.tsv's, and on any contradicted translation, listing each
+//! (`mercs2_exemap::annotate`).
 //!
 //! `imports` rebuilds an images.tsv image and writes its imports to `<dir>/<image_id>.imports.tsv`,
 //! which FnMnemonicSig reads as its imports sidecar. The header line names the format:
@@ -210,6 +219,40 @@ enum Command {
         out: PathBuf,
         #[arg(long)]
         contradictions: PathBuf,
+    },
+    /// Write one JSON line per function of an image's Ghidra functions export: every name it
+    /// carries (Ghidra, rtti, luareg, imports) with its source, and its agreed translation to every
+    /// other image of the match graph; fails on any contradicted translation.
+    Annotate {
+        image_id: String,
+        /// The image's functions export (<image_id>.functions.jsonl).
+        #[arg(long)]
+        functions: PathBuf,
+        /// The exports directory holding <image_id>.rtti.tsv, .luareg.tsv and .imports.tsv.
+        #[arg(long)]
+        exports: PathBuf,
+        /// A directory of `match` outputs.
+        #[arg(long)]
+        matches: PathBuf,
+        #[arg(long)]
+        out: PathBuf,
+    },
+    /// Write the seed starts of an image: every rtti or luareg target that is not a function of its
+    /// Ghidra functions export, as a CreateFunctions.java start list, with a names TSV for review.
+    Seeds {
+        image_id: String,
+        /// The image's functions export (<image_id>.functions.jsonl).
+        #[arg(long)]
+        functions: PathBuf,
+        /// The exports directory holding <image_id>.rtti.tsv, .luareg.tsv and .imports.tsv.
+        #[arg(long)]
+        exports: PathBuf,
+        /// The start list written: one hex VA per line, no 0x.
+        #[arg(long)]
+        out: PathBuf,
+        /// The names TSV written: va, source, name, detail.
+        #[arg(long)]
+        names: PathBuf,
     },
 }
 
@@ -829,6 +872,62 @@ fn run(cli: Cli) -> Result<(), ExitCode> {
                 eprintln!("error: {} translations are contradicted by the match graph", cs.len());
                 return Err(ExitCode::from(1));
             }
+        }
+        Command::Annotate { image_id, functions, exports, matches, out } => {
+            use mercs2_exemap::annotate::{annotate, annotated_image, read_functions, sidecar_names};
+            use mercs2_exemap::xmap::{load_dir, Graph};
+            let fail = |e: mercs2_exemap::Error| {
+                eprintln!("error: {e}");
+                ExitCode::from(1)
+            };
+            let images = mercs2_exemap::images::Images::embedded(&catalogue).map_err(fail)?;
+            let image = annotated_image(&images, &image_id).map_err(fail)?;
+            let text = std::fs::read_to_string(&functions).map_err(|e| {
+                eprintln!("error: cannot read {}: {e}", functions.display());
+                ExitCode::from(2)
+            })?;
+            let file = read_functions(&text, &functions.display().to_string()).map_err(fail)?;
+            drop(text);
+            let names = sidecar_names(&exports, image).map_err(fail)?;
+            let dir = load_dir(&matches, &images).map_err(fail)?;
+            let g = Graph::new(&dir.pairs).map_err(fail)?;
+            let a = annotate(&images, &image_id, &file, &names, &g).map_err(fail)?;
+            write(&out, a.text.as_bytes())?;
+            println!(
+                "graph      {} images, {} pairs files ({} conflicts files not read: they name no images)",
+                g.images().count(),
+                dir.pairs.len(),
+                dir.conflicts_files
+            );
+            for (source, (on, off)) in &a.sidecar_rows {
+                println!("names      {source:<7} {on} rows name a function, {off} rows name an address that is no function of the functions file");
+            }
+            for (to, n) in &a.translated {
+                println!("{image_id:<22} -> {to:<22} {n:>6} of {} functions translated", a.functions);
+            }
+            println!("untranslatable {} (no path in the graph)", a.untranslatable_images.join(" "));
+            println!("functions  {} -> {}", a.functions, out.display());
+        }
+        Command::Seeds { image_id, functions, exports, out, names } => {
+            use mercs2_exemap::annotate::{annotated_image, read_functions, seeds, sidecar_names};
+            let fail = |e: mercs2_exemap::Error| {
+                eprintln!("error: {e}");
+                ExitCode::from(1)
+            };
+            let images = mercs2_exemap::images::Images::embedded(&catalogue).map_err(fail)?;
+            let image = annotated_image(&images, &image_id).map_err(fail)?;
+            let text = std::fs::read_to_string(&functions).map_err(|e| {
+                eprintln!("error: cannot read {}: {e}", functions.display());
+                ExitCode::from(2)
+            })?;
+            let file = read_functions(&text, &functions.display().to_string()).map_err(fail)?;
+            drop(text);
+            let by_va = sidecar_names(&exports, image).map_err(fail)?;
+            let s = seeds(&images, &image_id, &file, &by_va).map_err(fail)?;
+            write(&out, s.starts.as_bytes())?;
+            write(&names, s.names.as_bytes())?;
+            println!("seeds      {} rtti/luareg targets that are no function of {} -> {}", s.count, functions.display(), out.display());
+            println!("names      -> {}", names.display());
         }
     }
     Ok(())
