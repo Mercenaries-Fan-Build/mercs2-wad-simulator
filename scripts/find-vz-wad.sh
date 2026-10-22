@@ -14,9 +14,12 @@
 #   vz_wad        the PC base archive; every game-gated test reads it. This script writes it.
 #   xbox_vz_wad   an Xbox 360 bake (SCFF magic); read by the qm console-bake tests.
 #   ps3_vz_wad    a PS3 bake (SCFF magic); read by the qm console-bake tests.
+#   ghidra_headless  Ghidra's analyzeHeadless; read by the notes repo's
+#                 scripts/ghidra_export_functions.sh, which fails naming this file and key without it.
 #
-# --write rewrites the whole file with `vz_wad` only. The console keys are added by hand after it
-# runs; this script reports console bakes it finds ("also present: console …") but never writes them.
+# --write rewrites the whole file with `vz_wad` only. The console keys and ghidra_headless are added
+# by hand after it runs; this script reports console bakes it finds ("also present: console …") but
+# never writes them.
 #
 # The same file is also a low-priority source for the tools (`mercs2_quartermaster::game::discover`,
 # `mercs2_formats::game_paths::vz_wad`), which check the environment first.
