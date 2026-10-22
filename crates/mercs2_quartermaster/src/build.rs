@@ -3268,8 +3268,9 @@ fn lower(
         // session's loader loads it.
         Contribution::AddSound { .. } => Ok(Lowering::Nothing),
         // Lowered together, per bank, after every contribution (`sound::lower_overrides`): several
-        // overrides of one bank share one forked soundbank and one override wavebank.
-        Contribution::ReplaceSoundBank { .. } | Contribution::ReplaceSoundCue { .. } => {
+        // overrides of one bank share one forked soundbank and one override wavebank; a replaced line
+        // is an override of every bank whose groups play it.
+        Contribution::ReplaceSoundBank { .. } | Contribution::ReplaceSoundCue { .. } | Contribution::ReplaceSoundWave { .. } => {
             if game.is_none() {
                 return Err(BuildError::GameRequired { index, kind });
             }
@@ -5223,24 +5224,22 @@ pub fn merged_string_tables<'a>(
 /// sounddb and wavebank too), then — when any Shipment has an `add_fx` or a `replace_fx` — the
 /// effects block ([`crate::fx::EFFECTS_BLOCK`]).
 /// A deploy step drops the per-Shipment copies of exactly these blocks, because the link WAD carries
-/// the set-wide version of each.
+/// the set-wide version of each. The banks a `replace_sound_wave` reaches are read from `game`.
 pub fn link_block_paths<'a>(
     manifests: impl IntoIterator<Item = &'a crate::manifest::Manifest>,
-) -> Vec<String> {
+    game: Option<&mut GameStack>,
+) -> Result<Vec<String>, String> {
     let manifests: Vec<&crate::manifest::Manifest> = manifests.into_iter().collect();
     let fx = manifests.iter().any(|m| crate::fx::has_fx(m));
-    link::SCRIPT_BLOCKS
+    let sound = crate::sound::linked_sound_entries(manifests.iter().copied(), game)?;
+    Ok(link::SCRIPT_BLOCKS
         .iter()
         .chain(link::SHELL_SCRIPT_BLOCKS)
         .map(|(_, p)| p.to_string())
         .chain(merged_string_tables(manifests.iter().copied()).into_iter().map(stringdb_block_path))
-        .chain(
-            crate::sound::linked_sound_entries(manifests.iter().copied())
-                .into_iter()
-                .map(crate::sound::block_path),
-        )
+        .chain(sound.into_iter().map(crate::sound::block_path))
         .chain(fx.then(|| crate::fx::EFFECTS_BLOCK.1.to_string()))
-        .collect()
+        .collect())
 }
 
 /// How [`merge_string_tables`] treats key writes: the one difference between a Shipment's own
@@ -5728,8 +5727,9 @@ pub fn link_installed(
         && replacements.is_empty());
     // Every string table any Shipment edits or adds keys to is merged into one link-owned copy.
     let tables = merged_string_tables(shipments.iter().map(|s| &s.manifest));
-    // Every sound bank any Shipment's replace_sound_cue targets, likewise.
-    let sound_entries = crate::sound::linked_sound_entries(shipments.iter().map(|s| &s.manifest));
+    // Every sound bank any Shipment's replace_sound_cue targets or replace_sound_wave reaches, likewise.
+    let sound_entries = crate::sound::linked_sound_entries(shipments.iter().map(|s| &s.manifest), Some(&mut *game))
+        .map_err(|message| BuildError::Lower { index: 0, kind: "link", message })?;
     // Every effect, template and sprite, into one effects block, one worldentity, one fxdict and
     // one atlas.
     let fx = shipments.iter().any(|s| crate::fx::merges_fx(&s.manifest));
