@@ -2045,6 +2045,7 @@ mod playback_tests {
     ) -> AudioEngine {
         let spec = TablesSpec {
             name: BANK.into(),
+            hash: m2(BANK),
             waves: vec![WaveSpec { clip_hash: 1, pcm: Pcm16 { channels: 1, sample_rate: 22050, samples: vec![1000; frames] } }],
             groups: vec![
                 GroupSpec {
@@ -2076,7 +2077,7 @@ mod playback_tests {
             ],
             cues: cues
                 .into_iter()
-                .map(|(name, gain, body)| CueDef { name: name.into(), byte_06: 0, gain, body })
+                .map(|(name, gain, body)| CueDef { name: name.into(), guid: m2(name), byte_06: 0, gain, body })
                 .collect(),
         };
         let enc = build_general(&spec).unwrap().to_bytes().unwrap();
