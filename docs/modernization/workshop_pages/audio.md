@@ -58,10 +58,9 @@ Add to Shipment are unavailable until it is found.
 
 ### A. Sound overrides address banks and cues by name or hash
 
-Today M0215 refuses a bare hash as a sound bank or cue name, while every other asset reference takes
-a name or a bare `0xHHHHHHHH` (`manifest::asset_hash`, M0130 preferring names as a warning). Most
-shipped audio has no known name: 9,850 clips' only cue, and 41 of `English.wad`'s 68 soundbank
-entries.
+Every other asset reference takes a name or a bare `0xHHHHHHHH` (`manifest::asset_hash`, M0130
+preferring names as a warning), and most shipped audio has no known name: 9,850 clips' only cue,
+and 41 of `English.wad`'s 68 soundbank entries.
 
 - In `replace_sound_bank` and `replace_sound_cue`, `bank` and every cue `name` take a name or a bare
   hash, resolved through `manifest::asset_hash` at every site (lint, claims, build, link). A bank
