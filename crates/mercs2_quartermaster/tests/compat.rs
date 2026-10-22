@@ -552,6 +552,26 @@ fn supersedes_without_a_game_root_is_an_error() {
     }
 }
 
+/// With no game folder, a Shipment that replaces a line cannot have its merged banks planned: the
+/// banks that play a line are read from the game's WADs, so the plan refuses, naming the item.
+#[test]
+fn a_replaced_line_without_a_game_root_is_an_error() {
+    let d = scratch("line-noroot");
+    let s = shipment_at(
+        &d,
+        "shipment: { name: line, version: 1.0.0, target: retail }\ncontributions:\n  - kind: replace_sound_wave\n    wavebank: vo_stream\n    language: english\n    line: \"0x96FFDF9F\"\n    wave: src/a.wav\n",
+    );
+    assert!(compat::needs_game_root([&s.manifest]));
+    let inputs = [PlanInput { id: "shipment:line", shipment: &s }];
+    match compat::plan(&inputs, Producer::Preflight, None) {
+        Err(CompatError::Item { id, message }) => {
+            assert_eq!(id, "shipment:line");
+            assert!(message.contains("replace_sound_wave"), "{message}");
+        }
+        other => panic!("expected the item's error, got {other:?}"),
+    }
+}
+
 /// The game folder is the parent of the `data` directory holding `vz.wad`; anything else is refused.
 #[test]
 fn game_root_not_under_data_fails() {
