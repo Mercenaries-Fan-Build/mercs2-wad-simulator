@@ -198,13 +198,15 @@ pub fn bare_hash_suggestions(manifest: &Manifest, names: &NameTable) -> Vec<Bare
         if let Contribution::Raw { touches, .. } = c {
             refs.extend(touches.iter().map(|t| t.0.as_str()));
         }
-        // A sound override's bank and cues name a bank and cues the game has. A localized bank's
-        // hash is its entry's, `<bank>.<language>`, so its name is written without the suffix.
+        // A sound override's bank and cues (a replaced line's wavebank and line) name tables and cues
+        // the game has. A localized bank's hash is its entry's, `<bank>.<language>`, so its name is
+        // written without the suffix.
         let (bank, language, cues): (Option<&str>, _, Vec<&str>) = match c {
             Contribution::ReplaceSoundBank { bank, language, cues, .. } => {
                 (Some(bank), *language, cues.iter().map(|q| q.name.as_str()).collect())
             }
             Contribution::ReplaceSoundCue { bank, language, cue, .. } => (Some(bank), *language, vec![cue.name.as_str()]),
+            Contribution::ReplaceSoundWave { wavebank, language, line, .. } => (Some(wavebank), *language, vec![line.as_str()]),
             _ => (None, None, Vec::new()),
         };
         refs.extend(cues);
