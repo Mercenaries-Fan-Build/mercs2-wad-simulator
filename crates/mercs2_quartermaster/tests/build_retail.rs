@@ -2453,7 +2453,7 @@ mod sound {
         let lua: BTreeSet<u32> = FRONT_END_SOUNDBANK_LOADS.iter().chain(GAMEPLAY_SOUNDBANK_LOADS).map(|n| m2(n)).collect();
         let engine: BTreeSet<u32> = vz.asset_hashes(TYPE_ID_SOUNDBANK).into_iter().filter(|h| !lua.contains(h)).collect();
         assert_eq!(
-            mercs2_quartermaster::sound::bank_loader("wpn_grapplegun", &mercs2_quartermaster::sound::RETAIL_LUA_LOAD_SITES),
+            mercs2_quartermaster::sound::bank_loader("wpn_grapplegun", None, &mercs2_quartermaster::sound::RETAIL_LUA_LOAD_SITES),
             BankLoader::Engine
         );
         assert!(engine.contains(&m2("wpn_grapplegun")));
@@ -2867,6 +2867,45 @@ mod sound {
         assert_eq!((soundbank, group_index as usize), (m2("vo_mattias"), retail.groups.len()));
         let GroupForm::Single { wave, .. } = &forked.groups[group_index as usize].form else { panic!("single-wave") };
         assert_eq!(wave.wavebank, m2("qm_mattias-cue_vo_mattias.english"));
+    }
+
+    /// ★ The same override written by hash — the bank as its entry's hash, the cue as its guid — forks
+    /// the same cue into the English patch, its wave in an override wavebank named for the entry as
+    /// written. A hashed cue the bank does not have, and a hashed localized bank with no language,
+    /// are the game check's errors (M0218).
+    #[test]
+    fn replace_sound_cue_on_a_voice_over_bank_by_hash() {
+        let entry = m2("vo_mattias.english");
+        let bank = format!("\"0x{entry:08X}\"");
+        let dir = scratch("rsc_vo_hash");
+        let probe = cue_override(&dir.join("probe"), "probe", &bank, Some("english"), "\"0x00000001\"", &[1; 8]);
+        let mut game = stack_for(&[&probe]);
+        let problems = mercs2_quartermaster::sound::override_target_problems(&probe.manifest, &mut game);
+        assert!(problems.iter().any(|(_, m)| m.contains("has no cue")), "{problems:?}");
+        let no_language = cue_override(&dir.join("nolang"), "nolang", &bank, None, "\"0x00000001\"", &[1; 8]);
+        let problems = mercs2_quartermaster::sound::override_target_problems(&no_language.manifest, &mut game);
+        assert!(problems.iter().any(|(_, m)| m.contains("no game WAD carries")), "{problems:?}");
+
+        let retail = Soundbank::parse(&table(&mut game, entry, TYPE_HASH_SOUNDBANK, TYPE_ID_SOUNDBANK)).unwrap();
+        let cue = a_mattias_cue(&retail);
+        let cue_index = retail.cues.iter().position(|c| c.guid == m2(&cue)).unwrap();
+        let s = cue_override(&dir.join("s"), "mattias-hash", &bank, Some("english"), &format!("\"0x{:08X}\"", m2(&cue)), &[3; 800]);
+        assert!(mercs2_quartermaster::sound::override_target_problems(&s.manifest, &mut game).is_empty());
+        let out = dir.join("_build");
+        let report = build::build(&s, Some(&mut game), None, Some(&out), Some(&corpus()), None).expect("builds");
+        let english = report
+            .placements
+            .iter()
+            .find(|p| matches!(&p.destination, Destination::LanguagePatch { language, .. } if language == "english"))
+            .expect("an English patch");
+        let forked = Soundbank::parse(&tables_of(block_at(&blocks_of(&out, english), entry))[0].2).unwrap();
+        assert_only_cue_changed(&retail, &forked, &[cue_index]);
+        let CueBody::SingleTrack { soundbank, group_index, .. } = forked.cues[cue_index].body else {
+            panic!("the rewritten cue is single-track")
+        };
+        assert_eq!(soundbank, m2("vo_mattias"), "the fork keeps the game soundbank's own bank hash");
+        let GroupForm::Single { wave, .. } = &forked.groups[group_index as usize].form else { panic!("single-wave") };
+        assert_eq!(wave.wavebank, m2(&format!("qm_mattias-hash_0x{entry:08X}")));
     }
 
     /// ★ Two Shipments overriding different cues of one bank: `qm link` merges both into one soundbank
