@@ -2908,6 +2908,119 @@ mod sound {
         assert_eq!(wave.wavebank, m2(&format!("qm_mattias-hash_0x{entry:08X}")));
     }
 
+    /// ★ `replace_sound_wave` on a `vo_stream` line that one of `vo_Fiona`'s variant groups picks among:
+    /// every English soundbank that plays the line is forked into the English patch with each
+    /// reference to the record moved to the Shipment's override wavebank (its weight kept, the
+    /// group's other variants untouched, every group that does not play it byte-identical), and each
+    /// cue that reaches a moved group is remeasured. The override wavebank ships to gameplay with the
+    /// record's clip hash, its loader registered; the link merges the same banks the load plan
+    /// promises. A line the wavebank lacks is the game check's error.
+    #[test]
+    fn replace_sound_wave_moves_a_line_in_every_group_that_plays_it() {
+        let dir = scratch("rsw_vo");
+        let line_yaml = |line: &str| {
+            format!("  - kind: replace_sound_wave\n    wavebank: vo_stream\n    language: english\n    line: \"{line}\"\n    wave: src/new.wav\n")
+        };
+        let shipment = |name: &str, line: &str| {
+            let d = dir.join(name);
+            std::fs::create_dir_all(d.join("src")).unwrap();
+            std::fs::write(d.join("src/new.wav"), pcm16_wav(1, 22050, &vec![5; 22050 * 3])).unwrap();
+            named_shipment(&d, name, &line_yaml(line))
+        };
+        let probe = shipment("probe", "0x00000001");
+        let mut game = stack_for(&[&probe]);
+        let problems = mercs2_quartermaster::sound::override_target_problems(&probe.manifest, &mut game);
+        assert!(problems.iter().any(|(_, m)| m.contains("has no line")), "{problems:?}");
+
+        let vo = WavebankFile::parse(&table(&mut game, m2("vo_stream.english"), TYPE_HASH_WAVEBANK, TYPE_ID_WAVEBANK)).unwrap();
+        let fiona_entry = m2("vo_fiona.english");
+        let fiona = Soundbank::parse(&table(&mut game, fiona_entry, TYPE_HASH_SOUNDBANK, TYPE_ID_SOUNDBANK)).unwrap();
+        let unique = |i: u32| vo.records.iter().filter(|r| r.clip_hash == vo.records[i as usize].clip_hash).count() == 1;
+        let (variants, wave) = fiona
+            .groups
+            .iter()
+            .enumerate()
+            .find_map(|(g, grp)| {
+                let ws = grp.waves();
+                (ws.len() > 1 && ws.iter().all(|w| w.wavebank == vo.bank_hash) && unique(ws[1].index)).then(|| (g, ws[1]))
+            })
+            .expect("a vo_Fiona group picking among vo_stream variants");
+        let clip = vo.records[wave.index as usize].clip_hash;
+        let line = format!("0x{clip:08X}");
+
+        let s = shipment("fiona-line", &line);
+        assert!(mercs2_quartermaster::sound::override_target_problems(&s.manifest, &mut game).is_empty());
+        let mut shell = None;
+        let targets = mercs2_quartermaster::sound::line_targets(&mut game, &mut shell, "vo_stream", Some(mercs2_quartermaster::manifest::Language::English), &line).unwrap();
+        assert!(targets.entries.contains(&fiona_entry));
+        assert_eq!(targets.from, (vo.bank_hash, wave.index));
+
+        let out = dir.join("_build");
+        let report = build::build(&s, Some(&mut game), None, Some(&out), Some(&corpus()), None).expect("builds");
+        let english = report
+            .placements
+            .iter()
+            .find(|p| matches!(&p.destination, Destination::LanguagePatch { language, .. } if language == "english"))
+            .expect("an English patch");
+        let english_blocks = blocks_of(&out, english);
+        for entry in &targets.entries {
+            block_at(&english_blocks, *entry);
+        }
+        let mine = m2(&format!("qm_fiona-line_0x{fiona_entry:08X}"));
+        let forked = Soundbank::parse(&tables_of(block_at(&english_blocks, fiona_entry))[0].2).unwrap();
+        assert_eq!(forked.bank_hash, fiona.bank_hash);
+        assert_eq!(forked.groups.len(), fiona.groups.len(), "no group is added: the references move");
+        for (g, (a, b)) in fiona.groups.iter().zip(&forked.groups).enumerate() {
+            let plays = a.waves().iter().any(|w| (w.wavebank, w.index) == targets.from);
+            if !plays {
+                assert_eq!(a, b, "group {g} does not play the line and stays as it is");
+                continue;
+            }
+            for (wa, wb) in a.waves().iter().zip(b.waves()) {
+                if (wa.wavebank, wa.index) == targets.from {
+                    assert_eq!((wb.wavebank, wb.index, wb.weight), (mine, 0, wa.weight), "group {g}");
+                } else {
+                    assert_eq!(wa, wb, "group {g}'s other variants stay");
+                }
+            }
+        }
+        assert!(forked.groups[variants].waves().len() > 1);
+        // The cues of the variant group: the longest wave they can pick, the new 3 s line among them.
+        let len = |w: &mercs2_audio::soundbank::WaveRef| {
+            if (w.wavebank, w.index) == (mine, 0) {
+                3.0
+            } else {
+                mercs2_audio::duration::wave_length_s(&vo.records[w.index as usize]).unwrap()
+            }
+        };
+        let mut measured = 0;
+        for (i, cue) in forked.cues.iter().enumerate() {
+            let CueBody::SingleTrack { group_index, .. } = cue.body else { continue };
+            if usize::from(group_index) != variants {
+                continue;
+            }
+            let GroupForm::Multi(m) = &forked.groups[variants].form else { panic!("a multi-wave group") };
+            let want = if m.byte_2c != 0 { -1.0 } else { forked.groups[variants].waves().iter().map(len).fold(0.0, f64::max) as f32 };
+            assert_eq!(cue.length_s, want, "cue {i} is remeasured");
+            measured += 1;
+        }
+        assert!(measured > 0, "a cue plays the variant group");
+
+        let overlay = report.placements.iter().find(|p| p.destination == Destination::Overlay).expect("an overlay");
+        let wb = WavebankFile::parse(&tables_of(block_at(&blocks_of(&out, overlay), mine))[0].2).unwrap();
+        assert_eq!(wb.records.len(), 1);
+        assert_eq!(wb.records[0].clip_hash, clip, "the new record keeps the line's clip hash");
+
+        let ids: Vec<String> = vec!["arg:1".into()];
+        let inputs = vec![PlanInput { id: &ids[0], shipment: &s }];
+        let link_out = dir.join("_link");
+        let linked = build::link_installed(&inputs, &mut game, &corpus(), &link_out, None).expect("links");
+        for entry in &targets.entries {
+            let path = mercs2_quartermaster::sound::block_path(*entry);
+            assert!(linked.plan.link_block_paths.contains(&path), "the plan promises {path}");
+        }
+    }
+
     /// ★ Two Shipments overriding different cues of one bank: `qm link` merges both into one soundbank
     /// per carrier at the path the plan promises, each cue playing its own Shipment's wavebank; and the
     /// same cue in both is a conflict the plan refuses.
