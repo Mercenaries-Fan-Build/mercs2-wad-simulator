@@ -146,6 +146,7 @@ mod tests {
     fn routes_each_wave_to_the_cue_that_plays_it() {
         let cue = |name: &str| CueSpec {
             name: name.to_string(),
+            guid: m2(name),
             category: "ui".to_string(),
             sound_id: m2(name),
             clip_hash: m2(name),
@@ -153,7 +154,7 @@ mod tests {
             group: UI_PDA_OPEN_GROUP,
             cue: UI_PDA_OPEN_CUE,
         };
-        let enc = encode_bank(&BankSpec { name: "b".into(), cues: vec![cue("zeta"), cue("alpha")] }).unwrap();
+        let enc = encode_bank(&BankSpec { name: "b".into(), hash: m2("b"), cues: vec![cue("zeta"), cue("alpha")] }).unwrap();
         let db = SoundDb::parse(&enc.sounddb).unwrap();
         let sb = Soundbank::parse(&enc.soundbank).unwrap();
         let r = route(std::slice::from_ref(&db), std::slice::from_ref(&sb)).unwrap();
