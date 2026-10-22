@@ -152,8 +152,11 @@ pub const UI_PDA_OPEN_CUE: CueParams = CueParams {
 /// One cue to encode.
 #[derive(Clone, Debug, PartialEq)]
 pub struct CueSpec {
-    /// Cue name; its guid is `m2(name)`, which is what `Sound.CueSound(name)` looks up.
+    /// Cue name as the author wrote it (a name, or a bare hash for a game cue), for messages.
     pub name: String,
+    /// Cue guid, what `Sound.CueSound(name)` looks up: `m2(name)` for a new cue, the game cue's own
+    /// guid for a cue an override rewrites.
+    pub guid: u32,
     /// Category name; must hash to one of [`RETAIL_CATEGORIES`].
     pub category: String,
     /// The group's `+0x00` sound id (read by `FUN_008369e0`'s language gate; `m2(name)` in
@@ -172,8 +175,11 @@ pub struct CueSpec {
 /// A bank to encode.
 #[derive(Clone, Debug, PartialEq)]
 pub struct BankSpec {
-    /// Bank name; every table carries `m2(name)`.
+    /// Bank name as the author wrote it, for messages.
     pub name: String,
+    /// The bank hash every table carries: `m2(name)` for a new bank, the game soundbank's own bank
+    /// hash for a replacement.
+    pub hash: u32,
     /// The cues, in the order they take in the soundbank and wavebank.
     pub cues: Vec<CueSpec>,
 }
@@ -405,8 +411,10 @@ pub enum CueBodySpec {
 /// One cue of a bank.
 #[derive(Clone, Debug, PartialEq)]
 pub struct CueDef {
-    /// Cue name; its guid is `m2(name)`.
+    /// Cue name, for messages.
     pub name: String,
+    /// Cue guid ([`CueSpec::guid`]).
+    pub guid: u32,
     /// `+0x06` start limit: the engine starts the cue only while fewer than this many of its
     /// instances play (`FUN_00834ad0`; `FUN_008354e0` counts one up as an instance plays,
     /// `FUN_00835850` one down as it finishes); 0 = no limit.
@@ -420,8 +428,10 @@ pub struct CueDef {
 /// A whole bank, authored table by table.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TablesSpec {
-    /// Bank name; every table carries `m2(name)`.
+    /// Bank name, for messages.
     pub name: String,
+    /// The bank hash every table carries ([`BankSpec::hash`]).
+    pub hash: u32,
     /// The waves, in wavebank order.
     pub waves: Vec<WaveSpec>,
     /// The groups, in soundbank order.
@@ -468,7 +478,7 @@ pub fn build_general(spec: &TablesSpec) -> Result<BankTables, EncodeError> {
             return Err(EncodeError::TooLarge { what, value: n });
         }
     }
-    let bank_hash = pandemic_hash_m2(&spec.name);
+    let bank_hash = spec.hash;
 
     let records = spec
         .waves
@@ -544,7 +554,7 @@ pub fn build_general(spec: &TablesSpec) -> Result<BankTables, EncodeError> {
         if c.name.is_empty() {
             return Err(EncodeError::EmptyName);
         }
-        let guid = pandemic_hash_m2(&c.name);
+        let guid = c.guid;
         if entries.iter().any(|e| e.guid == guid) {
             return Err(EncodeError::DuplicateCue { name: c.name.clone(), guid });
         }
@@ -616,7 +626,8 @@ pub fn build_tables(spec: &BankSpec) -> Result<BankTables, EncodeError> {
     if spec.cues.is_empty() {
         return Err(EncodeError::NoCues);
     }
-    let mut general = TablesSpec { name: spec.name.clone(), waves: Vec::new(), groups: Vec::new(), cues: Vec::new() };
+    let mut general =
+        TablesSpec { name: spec.name.clone(), hash: spec.hash, waves: Vec::new(), groups: Vec::new(), cues: Vec::new() };
     for (i, c) in spec.cues.iter().enumerate() {
         check_pcm(&format!("cue {:?}", c.name), &c.pcm)?;
         let hash = pandemic_hash_m2(&c.category);
@@ -645,6 +656,7 @@ pub fn build_tables(spec: &BankSpec) -> Result<BankTables, EncodeError> {
         });
         general.cues.push(CueDef {
             name: c.name.clone(),
+            guid: c.guid,
             byte_06: c.cue.byte_06,
             gain: c.cue.gain,
             body: CueBodySpec::SingleTrack { group: i, unknown_16: c.cue.unknown_16 },
@@ -697,7 +709,7 @@ pub struct Retargeted {
     pub record: WaveRecord,
 }
 
-/// Rewrite cue `m2(spec.name)` of `bank` to play a new single-wave group, and nothing else.
+/// Rewrite cue `spec.guid` of `bank` to play a new single-wave group, and nothing else.
 ///
 /// The group is appended after the bank's last group — so every existing group keeps its index and
 /// bytes — with `spec`'s category, sound id and group fields, and one wave `{wavebank, wave_index,
@@ -713,7 +725,7 @@ pub fn retarget_cue(
     if spec.name.is_empty() {
         return Err(EncodeError::EmptyName);
     }
-    let guid = pandemic_hash_m2(&spec.name);
+    let guid = spec.guid;
     let cue_index = bank
         .cues
         .iter()
@@ -770,6 +782,7 @@ mod tests {
     fn cue(name: &str, channels: u8, samples: Vec<i16>) -> CueSpec {
         CueSpec {
             name: name.to_string(),
+            guid: pandemic_hash_m2(name),
             category: "ui".to_string(),
             sound_id: pandemic_hash_m2(name),
             clip_hash: pandemic_hash_m2(name),
@@ -782,6 +795,7 @@ mod tests {
     fn spec() -> BankSpec {
         BankSpec {
             name: "mod_ui_sounds".to_string(),
+            hash: pandemic_hash_m2("mod_ui_sounds"),
             cues: vec![
                 cue("mod_click", 1, (0..1001).map(|i| (i * 7) as i16).collect()),
                 cue("mod_whoosh", 2, (0..2000).map(|i| (i * 3) as i16).collect()),
@@ -836,6 +850,7 @@ mod tests {
     fn bad_input_is_refused() {
         let mut s = spec();
         s.cues[1].name = "mod_click".to_string();
+        s.cues[1].guid = pandemic_hash_m2("mod_click");
         assert!(matches!(encode_bank(&s), Err(EncodeError::DuplicateCue { .. })));
 
         let mut s = spec();
@@ -893,6 +908,7 @@ mod tests {
         let wave = |v: i16| WaveSpec { clip_hash: 0x1000 + v as u32, pcm: Pcm16 { channels: 1, sample_rate: 22050, samples: vec![v; 64] } };
         let spec = TablesSpec {
             name: "mod_layers".to_string(),
+            hash: pandemic_hash_m2("mod_layers"),
             waves: vec![wave(1), wave(2), wave(3), wave(4)],
             groups: vec![
                 GroupSpec {
@@ -910,6 +926,7 @@ mod tests {
             ],
             cues: vec![CueDef {
                 name: "mod_layered_hit".to_string(),
+                guid: pandemic_hash_m2("mod_layered_hit"),
                 byte_06: 0,
                 gain: 1.0,
                 body: CueBodySpec::MultiTrack(MultiTrackCue {
