@@ -186,6 +186,8 @@ Binary crate — these are private modules, listed for orientation:
   makes them. What it writes where: `docs/save_contract_state.md`.
 - `missions` — the Missions page: a Blueprint editor over a mission script's Lua (script list,
   palette from the corpus, zoomable canvas, inspector, Compile, Add to Shipment as `replace_lua`).
+  A function's statements chain left to right; a chain wider than the canvas at 1:1 wraps into rows
+  sized to the canvas's shape, each row's blocks hanging under it before the next row starts.
 - `blueprint` — a Lua function body as nodes and wires: lifted from the AST, edited, and emitted back
   through it, plus the corpus index (signatures, inherit chains) and the palette. Its gates lift and
   emit every corpus script byte-identical and compile each with the game's Lua 5.1.
