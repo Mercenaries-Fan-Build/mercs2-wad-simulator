@@ -17,8 +17,16 @@ its foot:
   Characters or Weapons and groups it by faction: a spawn template's row by its own `FactionMarker`
   (so a defector sits with the faction it serves), any other row by its name's prefix; each marker
   is labelled with the prefix it pairs with across the world's templates. The inspector's Lens card
-  starts a contribution of that domain's kinds. The Audio tab is the captioned clip browser, ▶
-  streaming a line from `vo_stream.english.pws`.
+  starts a contribution of that domain's kinds.
+- **Audio** (Inspect's AUDIO tab, `audiopage`) lists the 12,988 voice-over lines by the banks whose
+  cues play them, read from `English.wad` (`audioroute`, through `sound::wavebank_players`): the 27
+  labelled `vo_*` banks, 19 per-scene banks known by hash, and the 34 lines no cue plays. Search
+  every clip by bank, speaker, caption or file name; select with the checkboxes or Ctrl/Cmd+A; ▶ or
+  Space plays the current line from `vo_stream.english.pws`, again pauses and resumes it, with its
+  position in the now-playing card. **Add to Shipment** offers *Replace this line*
+  (`replace_sound_wave`), *Replace cue …* per cue that plays it (`replace_sound_cue`, seeded with the
+  retail cue's values, by name or guid) and *Replace its bank*; the EXPORT card (F10) writes the
+  selection, the bank or the search hits as 16-bit WAVs plus `captions.csv`.
 - **Export…** (the model menu, F10, the verb bar) opens a dialog: a name, the format — the lossless
   bundle or OBJ + MTL + PNG (an imported mesh has no LOD rungs to bundle) — and the folder
   (`workshop_export/` unless chosen); it writes `<folder>/<name>/`.
@@ -100,6 +108,10 @@ cargo run -p mercs2_workshop -- --export mattias_v3
 # LOSSLESS bundle: glTF + PNG skins + every LOD rung's ORIGINAL container bytes + manifest
 cargo run -p mercs2_workshop -- --export-bundle class:helicopter --out workshop_export
 
+# voice-over clips as the Audio page exports them: a bank, or every clip a search finds
+cargo run -p mercs2_workshop -- --audio-export vo_Jen out_dir
+cargo run -p mercs2_workshop -- --audio-export "the cia" out_dir
+
 # publish a novel new-hash model into a patch WAD (self-tests by reopening + engine-loading it)
 cargo run -p mercs2_workshop -- --mod-new my_tank tank_donor_name mesh.glb --mod-out vz-mod.wad
 ```
@@ -116,8 +128,9 @@ cargo run -p mercs2_workshop -- --ui-state crates/mercs2_workshop/ui_states/insp
 
 The JSON names the state by the words the window shows — `page` (a rail label or `Live`),
 `settings_section`, `tab`, `lens`, `filter`, `load` (a model name), `shipment` + `contribution`,
-`bench` + `donor` — plus `capture` (the PNG to write, relative to the working directory) and
-`settle_frames` (default 8). The window opens, applies the state once the reference data is in,
+`bench` + `donor`, and on the AUDIO tab `bank`, `clip`, `search` and `select` (record indices),
+applied once the tab's routing is read (`ui_states/audio.json`) — plus `capture` (the PNG to write,
+relative to the working directory) and `settle_frames` (default 8). The window opens, applies the state once the reference data is in,
 captures the presented frame (3D and GUI) and exits 0. A name that does not resolve, a field it does
 not know, or a surface that cannot be read back exits 2 with the reason.
 
