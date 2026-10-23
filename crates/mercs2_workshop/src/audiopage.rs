@@ -697,9 +697,15 @@ pub fn center(ctx: &egui::Context, p: &Panel, playing: Option<audioplay::Status>
                         } else {
                             egui::Color32::TRANSPARENT
                         };
-                        let resp = egui::Frame::none().fill(fill).rounding(egui::Rounding::same(3.0)).show(ui, |ui| {
-                            ui.set_min_height(row_h - 2.0);
-                            ui.horizontal(|ui| {
+                        // The row's own click (make it current) is sensed FIRST, and its checkbox, ▶
+                        // and cells laid over it after: in egui the widget registered later is on top,
+                        // so each keeps its own click and the row gets the rest. Sensed after its
+                        // children, the row took every click, ▶ and checkbox included.
+                        let (rect, row) =
+                            ui.allocate_exact_size(egui::vec2(ui.available_width(), row_h - 2.0), egui::Sense::click());
+                        ui.painter().rect_filled(rect, egui::Rounding::same(3.0), fill);
+                        let mut content = ui.child_ui(rect, egui::Layout::left_to_right(egui::Align::Center), None);
+                        content.horizontal(|ui| {
                                 let mut checked = on;
                                 if ui.add_sized([widths[0], row_h - 4.0], egui::Checkbox::without_text(&mut checked)).changed() {
                                     acts.push(Act::Toggle(w));
@@ -730,10 +736,8 @@ pub fn center(ctx: &egui::Context, p: &Panel, playing: Option<audioplay::Status>
                                 cell(ui, len_w, h, |ui| {
                                     ui.label(egui::RichText::new(secs(c.duration_s)).monospace().color(theme::DIM));
                                 });
-                            });
                         });
-                        let click = ui.interact(resp.response.rect, egui::Id::new(("audio-row", w)), egui::Sense::click());
-                        if click.clicked() {
+                        if row.clicked() {
                             acts.push(Act::Current(w));
                         }
                     }
@@ -993,6 +997,49 @@ mod tests {
         apply(Act::Current(2), &mut p);
         apply(Act::PlayCurrent, &mut p);
         assert_eq!(p.play, Some(2));
+    }
+
+    /// What clicking at `pos` in the centre asks for: a frame to lay out, one to move the pointer
+    /// there, one to press and one to release, each drawn as the app draws it.
+    fn click_at(p: &Panel, pos: egui::Pos2) -> Vec<Act> {
+        let ctx = egui::Context::default();
+        theme::install(&ctx);
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1200.0, 800.0));
+        let button = |pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::default(),
+        };
+        let mut acts = Vec::new();
+        for events in [vec![], vec![egui::Event::PointerMoved(pos)], vec![button(true)], vec![button(false)]] {
+            let input = egui::RawInput { screen_rect: Some(screen), events, ..Default::default() };
+            let _ = ctx.run(input, |ctx| acts.extend(center(ctx, p, None)));
+        }
+        acts
+    }
+
+    /// Clicking in a row: its ▶ plays that line, its checkbox toggles it, and anywhere else on it
+    /// (the caption) makes it the current line — each widget gets its own click, the row the rest.
+    #[test]
+    fn a_rows_play_button_and_checkbox_take_their_own_clicks() {
+        let p = panel();
+        // Row 0's band: every y where a caption click makes it current. egui also gives a click
+        // just outside every widget to the closest one, so probe the band's middle, not its edge.
+        let band: Vec<f32> = (0..800)
+            .step_by(2)
+            .map(|y| y as f32)
+            .filter(|y| click_at(&p, egui::pos2(700.0, *y)).contains(&Act::Current(0)))
+            .collect();
+        let y = (band.first().expect("a click on the first row's caption makes it current") + band.last().unwrap()) / 2.0;
+        let mut seen = Vec::new();
+        for x in (0..700).step_by(3) {
+            seen.extend(click_at(&p, egui::pos2(x as f32, y)));
+        }
+        assert!(seen.contains(&Act::Play(0)), "no click on row 0 plays it: {seen:?}");
+        assert!(seen.contains(&Act::Toggle(0)), "no click on row 0 toggles it: {seen:?}");
+        let caption = click_at(&p, egui::pos2(700.0, y));
+        assert!(caption.contains(&Act::Current(0)) && !caption.contains(&Act::Play(0)), "{caption:?}");
     }
 
     /// Replace this line asks for a replace_sound_wave by the line's name; a line no cue plays is
