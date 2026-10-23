@@ -30,7 +30,6 @@ enum Msg {
     Play { clip: u32, samples: Vec<i16>, rate: u32, channels: u8 },
     Pause,
     Resume,
-    Stop,
 }
 
 /// Seconds of audio kept queued in the device ahead of what it plays.
@@ -146,10 +145,6 @@ impl Player {
                             p.resume();
                         }
                     }
-                    Ok(Msg::Stop) => {
-                        sink.clear();
-                        playing = None;
-                    }
                     Err(RecvTimeoutError::Timeout) => {}
                     Err(RecvTimeoutError::Disconnected) => return,
                 }
@@ -185,11 +180,6 @@ impl Player {
     /// Resume where the pause held.
     pub fn resume(&self) {
         let _ = self.tx.send(Msg::Resume);
-    }
-
-    /// Stop and forget the clip.
-    pub fn stop(&self) {
-        let _ = self.tx.send(Msg::Stop);
     }
 
     /// What is playing or paused, or `None` once the clip has played out.
