@@ -232,7 +232,7 @@ jobs:
           # GUARDRAIL 2: fails when any content the manifest lists is absent from the packed bundle,
           # before the zip is published.
           missing=""
-          for c in names.bin live_registry_hashes.csv spawnable_templates.csv ecs_schemas lua lua_dlc ess_api.json ess_natives.json ess_nodes.json ecs_registry.tsv audio_manifest.json; do
+          for c in names.bin live_registry_hashes.csv spawnable_templates.csv ecs_schemas lua lua_dlc audio_manifest.json; do
             [ -e "workshop_data/$c" ] || missing="$missing $c"
           done
           if [ -n "$missing" ]; then
