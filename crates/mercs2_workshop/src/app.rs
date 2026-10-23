@@ -5855,7 +5855,7 @@ pub fn run(opts: Options) {
                                                 pcm.duration_s(),
                                                 pcm.rate
                                             );
-                                            player.play(pcm.samples, pcm.rate, pcm.channels);
+                                            player.play(wave_index, pcm.samples, pcm.rate, pcm.channels);
                                         }
                                         Err(e) => status = format!("AUDIO: {e}"),
                                     },
