@@ -59,7 +59,7 @@ pub struct Routes {
     pub soundbanks: BTreeMap<u32, Soundbank>,
     /// The cues that play each record.
     pub plays: BTreeMap<u32, Vec<Play>>,
-    /// The banks that play at least one line, by name.
+    /// The banks that play at least one line: the labelled ones by name, then those known by hash.
     pub banks: Vec<Bank>,
     /// The records no cue plays.
     pub unplayed: Vec<u32>,
@@ -128,7 +128,8 @@ impl Routes {
                 lines: lines.into_iter().collect(),
             })
             .collect();
-        banks.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+        // The labelled banks first, by name; then the ones known only by hash.
+        banks.sort_by_key(|b| (b.name.starts_with("0x"), b.name.to_lowercase()));
         let unplayed = (0..wavebank.records.len() as u32).filter(|i| !plays.contains_key(i)).collect();
         Routes { wavebank, soundbanks: soundbanks.into_iter().collect(), plays, banks, unplayed }
     }
@@ -356,7 +357,7 @@ mod tests {
             &["vo_Chris".to_string(), "vo_misc".to_string()],
         );
         let names: Vec<(String, Vec<u32>)> = r.banks.iter().map(|b| (b.name.clone(), b.lines.clone())).collect();
-        assert_eq!(names, vec![(format!("0x{other:08X}"), vec![2]), ("vo_Chris".to_string(), vec![0, 1, 2])]);
+        assert_eq!(names, vec![("vo_Chris".to_string(), vec![0, 1, 2]), (format!("0x{other:08X}"), vec![2])], "named banks first");
         assert_eq!(r.unplayed, vec![3, 4]);
         let two = &r.plays[&2];
         assert_eq!(two.len(), 2, "record 2 is played by a cue of each bank");
