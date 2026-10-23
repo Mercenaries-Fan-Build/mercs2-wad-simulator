@@ -549,9 +549,6 @@ enum Act {
     /// Library routing: open a bench with this asset as its donor. Nothing is written until the
     /// bench saves.
     Bench(crate::quartermaster::Craft, u32, String),
-    /// Audio domain: preview a VO clip by its wave index — decode it from the game's
-    /// `vo_stream.english.pws` and play it on the default output device.
-    PlayClip(u32),
     /// Skeleton workbench: set the target character skeleton and (re)compute the bone map.
     RetargetSetTarget(u32, String),
     /// Skeleton workbench: recompute the source→target bone map from the current source + target.
@@ -869,57 +866,6 @@ fn asset_menu(
         ui.ctx().copy_text(label.to_string());
         ui.close_menu();
     }
-}
-
-/// The captioned audio inventory, by bank: each bank expands to its lines with speaker and caption,
-/// ▶ streaming the clip from `vo_stream.english.pws`. `filter` narrows an open bank's lines.
-fn audio_browser(ui: &mut egui::Ui, audio: &crate::audioidx::AudioIndex, filter: &str, actions: &mut Vec<Act>) {
-    use crate::gui::theme;
-    /// Lines listed per bank before the rest are summarised.
-    const SHOWN: usize = 300;
-    let banks = audio.banks();
-    let total: usize = banks.iter().map(|(_, n)| *n).sum();
-    let f = filter.to_ascii_lowercase();
-    ui.label(theme::disp_text(format!("{total} clip(s) across {} banks", banks.len()), theme::style_eyebrow(), theme::FAINT));
-    ui.add_space(3.0);
-    egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-        for (bank, n) in banks {
-            egui::CollapsingHeader::new(egui::RichText::new(format!("{bank}  ·  {n}")).monospace().color(theme::TX))
-                .id_source(("audiobank", &bank))
-                .show(ui, |ui| {
-                    let mut shown = 0;
-                    let mut matching = 0;
-                    for clip in audio.by_bank(&bank) {
-                        let cap = if clip.caption.is_empty() { clip.stem().to_string() } else { clip.caption.clone() };
-                        let line = if clip.speaker.is_empty() { cap.clone() } else { format!("{}: {}", clip.speaker, cap) };
-                        if !f.is_empty() && !line.to_ascii_lowercase().contains(&f) && !clip.stem().to_ascii_lowercase().contains(&f) {
-                            continue;
-                        }
-                        matching += 1;
-                        if shown == SHOWN {
-                            continue;
-                        }
-                        shown += 1;
-                        ui.horizontal(|ui| {
-                            if let Some(wi) = clip.wave_index {
-                                if ui
-                                    .add(egui::Button::new(egui::RichText::new("\u{25B6}").small()).small())
-                                    .on_hover_text(format!("play \u{2014} {:.1}s from vo_stream.english.pws", clip.duration_s))
-                                    .clicked()
-                                {
-                                    actions.push(Act::PlayClip(wi));
-                                }
-                            }
-                            ui.label(egui::RichText::new(&line).small().color(theme::DIM))
-                                .on_hover_text(format!("{}\n{:.1}s", clip.original, clip.duration_s));
-                        });
-                    }
-                    if matching > shown {
-                        ui.label(egui::RichText::new(format!("+{} more…", matching - shown)).small().color(theme::FAINT));
-                    }
-                });
-        }
-    });
 }
 
 /// The context menu for a world-state LAYER — the World domain's second subject.
@@ -1335,11 +1281,17 @@ pub fn run(opts: Options) {
     // `--ui-state`: applied once the reference data is in; then frames to settle before the capture,
     // and whether the capture has been asked of the scene.
     let mut ui_state = opts.ui_state.clone();
+    // Its AUDIO-tab keys, held until the tab's routing is in.
+    let mut audio_ui: Option<crate::ui_state::UiState> = None;
     let mut capture_to: Option<(PathBuf, u32)> = None;
     let mut capture_asked = false;
-    // The captioned audio inventory, loaded from the reference bundle on the boot thread
-    // (`BootData`) and set when it finishes.
-    let mut audio_idx = crate::audioidx::AudioIndex::default();
+    // The Audio page (Inspect's AUDIO tab): the captioned inventory, set from the boot thread's
+    // `BootData`, and its routing, read from English.wad the first time the tab is shown. Its acts
+    // are queued here by keys as well as widgets.
+    let mut audio_page = crate::audiopage::Panel::default();
+    let mut audio_acts: Vec<crate::audiopage::Act> = Vec::new();
+    // Ctrl (or Cmd) held: the Audio tab's select-all.
+    let mut ctrl = false;
     // VO playback, both opened LAZILY on the first ▶ (English.wad + the output device are heavy, and
     // most sessions never touch audio). `vo_stream` is the record index; `vo_player` the device.
     let mut vo_stream: Option<crate::vostream::VoStream> = None;
@@ -1439,7 +1391,10 @@ pub fn run(opts: Options) {
                         lmb = false;
                     }
                 }
-                WindowEvent::ModifiersChanged(m) => shift = m.state().shift_key(),
+                WindowEvent::ModifiersChanged(m) => {
+                    shift = m.state().shift_key();
+                    ctrl = m.state().control_key() || m.state().super_key();
+                }
                 WindowEvent::MouseInput { state, button: MouseButton::Left, .. } => {
                     lmb = state == ElementState::Pressed;
                 }
@@ -1502,6 +1457,17 @@ pub fn run(opts: Options) {
                         return;
                     }
 
+                    // ── The Audio tab: its own keys; nothing types into the asset filter, which the
+                    // tab does not show. Esc still quits and ←/→ still step the tabs. ──
+                    if wb == Workbench::Inspect && kind == Kind::Audio {
+                        if let Some(a) = crate::audiopage::shortcut(code, ctrl) {
+                            audio_acts.push(a);
+                            return;
+                        }
+                        if !matches!(code, KeyCode::Escape | KeyCode::ArrowLeft | KeyCode::ArrowRight) {
+                            return;
+                        }
+                    }
                     match code {
                         KeyCode::Escape => elwt.exit(),
                         // ── Browser: navigation + filter typing. ──
@@ -1625,7 +1591,7 @@ pub fn run(opts: Options) {
                                     // The Missions blueprint editor's script list and palette come
                                     // from the corpus the boot thread indexed.
                                     missions_panel.set_reference(missions, &lua_corpus);
-                                    audio_idx = audio;
+                                    audio_page.set_index(audio);
                                     filtered = refilter(&index, kind, &filter, lens);
                                     inventory_dirty = true; // names now resolve → build the vehicle inventory
                                     sel = sel.min(filtered.len().saturating_sub(1));
@@ -1969,7 +1935,29 @@ pub fn run(opts: Options) {
                             eprintln!("--ui-state: {e}");
                             std::process::exit(2);
                         }
-                        capture_to = Some((st.capture.clone(), st.settle_frames));
+                        // The AUDIO keys wait for the tab's routing (read on a worker); the capture
+                        // counts down once they are in.
+                        if st.audio() {
+                            audio_page.ensure_routes(std::path::Path::new(&opts.wadpath));
+                            audio_ui = Some(st);
+                        } else {
+                            capture_to = Some((st.capture.clone(), st.settle_frames));
+                        }
+                    }
+                    if audio_ui.is_some() {
+                        audio_page.poll();
+                        if let Some(e) = audio_page.routes_error() {
+                            eprintln!("--ui-state: the AUDIO tab's routing failed: {e}");
+                            std::process::exit(2);
+                        }
+                        if audio_page.routes().is_some() {
+                            let st = audio_ui.take().expect("checked above");
+                            if let Err(e) = crate::audiopage::apply_state(&mut audio_page, &st) {
+                                eprintln!("--ui-state: {e}");
+                                std::process::exit(2);
+                            }
+                            capture_to = Some((st.capture.clone(), st.settle_frames));
+                        }
                     }
                     let mut saves_acts: Vec<crate::saves::Act> = Vec::new();
                     // Captured below inside `gui.run` so the saves reducer (which runs after the
@@ -2055,6 +2043,11 @@ pub fn run(opts: Options) {
                                         } else {
                                             ui.label(egui::RichText::new("no shipment").weak());
                                         }
+                                    } else if wb == Workbench::Inspect && kind == Kind::Audio {
+                                        ui.label(
+                                            egui::RichText::new(crate::audiopage::crumb(&audio_page).join(" \u{203a} "))
+                                                .color(theme::TX),
+                                        );
                                     } else if wb == Workbench::Inspect {
                                         let loaded = preview.as_ref().map(|p| p.label.as_str());
                                         ui.label(
@@ -2254,7 +2247,20 @@ pub fn run(opts: Options) {
                                 } else {
                                     theme::status_dot(ui, "Ready", theme::GOOD);
                                     ui.separator();
-                                    ui.label(egui::RichText::new(status.as_str()).color(theme::DIM).small());
+                                    // While a voice-over line plays, the bar says which and from where.
+                                    match vo_player.as_ref().and_then(|p| p.status()) {
+                                        Some(s) => {
+                                            let verb = if s.paused { "paused" } else { "playing" };
+                                            ui.label(
+                                                egui::RichText::new(format!("{verb} {:05} from vo_stream.english.pws", s.clip))
+                                                    .color(theme::DIM)
+                                                    .small(),
+                                            );
+                                        }
+                                        None => {
+                                            ui.label(egui::RichText::new(status.as_str()).color(theme::DIM).small());
+                                        }
+                                    }
                                 }
                                 // Bottom-right: background work in flight (clip decodes,
                                 // mod publishing).
@@ -2409,7 +2415,8 @@ pub fn run(opts: Options) {
                                 });
                             }
                             ui.add_space(7.0);
-                            // Filter with a search glyph.
+                            // Filter with a search glyph. The Audio tab searches its clips instead.
+                            if kind != Kind::Audio {
                             egui::Frame::none()
                                 .fill(theme::G0)
                                 .stroke(egui::Stroke::new(1.0, theme::LINE))
@@ -2439,15 +2446,17 @@ pub fn run(opts: Options) {
                                         );
                                     });
                                 });
+                            }
                             if before.0 != kind || before.1 != filter || before.2 != lens {
                                 filtered = refilter(&index, kind, &filter, lens);
                                 sel = 0;
                             }
                             ui.add_space(6.0);
-                            // Audio browses the captioned clip inventory — what the game says, by
-                            // bank — rather than opaque bank assets, whenever the bundle carries it.
-                            if kind == Kind::Audio && !audio_idx.banks().is_empty() {
-                                audio_browser(ui, &audio_idx, &filter, &mut actions);
+                            // Audio is the Audio page: the voice-over lines by the banks that play
+                            // them, routed from English.wad, rather than the opaque bank assets.
+                            if kind == Kind::Audio {
+                                audio_page.ensure_routes(std::path::Path::new(&opts.wadpath));
+                                audio_acts.extend(crate::audiopage::navigator(ui, &audio_page));
                             } else {
                             // Grouped display: category headers interleaved with rows, all one line
                             // high so `show_rows` still virtualizes the (3000+ row) models list.
@@ -2914,7 +2923,12 @@ pub fn run(opts: Options) {
                               if is_missions_bench {
                                   missions_acts.extend(crate::missions::inspector(ui, &missions_panel));
                               }
-                              if eff.inspect_like() && !is_missions_bench {
+                              // The Audio tab's right pane is the clip and the export.
+                              let audio_tab = eff == Workbench::Inspect && kind == Kind::Audio;
+                              if audio_tab {
+                                  audio_acts.extend(crate::audiopage::inspector(ui, &audio_page));
+                              }
+                              if eff.inspect_like() && !is_missions_bench && !audio_tab {
                                 match &mut preview {
                                     None => {
                                         ui.weak("No model loaded — pick one in the browser at left.");
@@ -4123,6 +4137,12 @@ pub fn run(opts: Options) {
                                     Workbench::Domain(crate::domain::Domain::Missions) => {
                                         missions_acts.extend(crate::missions::verbs(ui, &missions_panel));
                                     }
+                                    // The Audio tab's verbs act on its clips: Play, Select all, Add to
+                                    // Shipment, Export.
+                                    Workbench::Inspect if kind == Kind::Audio => {
+                                        let playing = vo_player.as_ref().and_then(|p| p.status());
+                                        audio_acts.extend(crate::audiopage::verbs(ui, &audio_page, playing));
+                                    }
                                     // A domain page shares Inspect's verbs — it is Inspect narrowed to
                                     // a lens, so Export / textures / clip act on the same loaded
                                     // model. (For a non-model domain there is no preview, so these
@@ -4557,6 +4577,12 @@ pub fn run(opts: Options) {
                         if wb == Workbench::Domain(crate::domain::Domain::Missions) {
                             missions_acts.extend(crate::missions::center(ctx, &missions_panel));
                         }
+                        // ── AUDIO main content: the clip table, not the 3D viewport.
+                        let audio_tab = wb == Workbench::Inspect && kind == Kind::Audio;
+                        if audio_tab {
+                            let playing = vo_player.as_ref().and_then(|p| p.status());
+                            audio_acts.extend(crate::audiopage::center(ctx, &audio_page, playing));
+                        }
 
                         // ── VIEWPORT HUD: status chips over the 3D (the panels are all placed now, so
                         // `available_rect` is the viewport region). Non-interactable so the camera drag
@@ -4568,7 +4594,7 @@ pub fn run(opts: Options) {
                         // than as `!= Quartermaster`, which silently stopped being the whole answer
                         // the moment Settings also took the centre.
                         let vp = ctx.available_rect();
-                        if eff.has_viewport() && wb != Workbench::Settings {
+                        if eff.has_viewport() && wb != Workbench::Settings && !audio_tab {
                         egui::Area::new(egui::Id::new("vp_hud"))
                             .fixed_pos(vp.left_top() + egui::vec2(14.0, 12.0))
                             .interactable(false)
@@ -4874,6 +4900,77 @@ pub fn run(opts: Options) {
                     // place; we pass the same slice the rest of the app reads.
                     for act in missions_acts.drain(..) {
                         crate::missions::apply(act, &mut missions_panel, &lua_corpus);
+                    }
+                    // The Audio page: its acts, its workers, and what it asks of the host.
+                    for act in audio_acts.drain(..) {
+                        crate::audiopage::apply(act, &mut audio_page);
+                    }
+                    audio_page.poll();
+                    if let Some(wave) = audio_page.play.take() {
+                        // Lazily open the record index (English.wad + .pws) and the device on the
+                        // first play — both are heavy and most sessions never play audio.
+                        if vo_error.is_none() && vo_stream.is_none() {
+                            let data_dir = std::path::Path::new(&opts.wadpath)
+                                .parent()
+                                .map(|p| p.to_path_buf())
+                                .unwrap_or_default();
+                            match crate::vostream::VoStream::open(&data_dir) {
+                                Ok(s) => vo_stream = Some(s),
+                                Err(e) => vo_error = Some(e),
+                            }
+                        }
+                        if vo_error.is_none() && vo_player.is_none() {
+                            match crate::audioplay::Player::start() {
+                                Some(p) => vo_player = Some(p),
+                                None => vo_error = Some("no audio output device".into()),
+                            }
+                        }
+                        match (&vo_stream, &vo_player, &vo_error) {
+                            (_, _, Some(e)) => status = format!("AUDIO: {e}"),
+                            (Some(vo), Some(player), None) => match player.status() {
+                                // The clip already playing pauses, and a paused one resumes.
+                                Some(s) if s.clip == wave && !s.paused => player.pause(),
+                                Some(s) if s.clip == wave => player.resume(),
+                                _ => match vo.clip_pcm(wave) {
+                                    Ok(pcm) => player.play(wave, pcm.samples, pcm.rate, pcm.channels),
+                                    Err(e) => status = format!("AUDIO: {e}"),
+                                },
+                            },
+                            _ => {}
+                        }
+                    }
+                    // Add to Shipment: into the open Shipment (one is scaffolded if none is open);
+                    // a line, cue or bank it already overrides is updated in place. Then its page.
+                    if let Some(c) = audio_page.shipment.take() {
+                        use mercs2_quartermaster::manifest::{asset_hash, Contribution as C};
+                        let kind = c.kind();
+                        let out = (|| -> Result<String, String> {
+                            let dir = qm.ensure_shipment(qm_names.as_ref())?;
+                            let existing = qm.find_contribution(|o| match (&c, o) {
+                                (C::ReplaceSoundWave { line: a, .. }, C::ReplaceSoundWave { line: b, .. }) => asset_hash(a) == asset_hash(b),
+                                (C::ReplaceSoundCue { cue: a, .. }, C::ReplaceSoundCue { cue: b, .. }) => asset_hash(&a.name) == asset_hash(&b.name),
+                                (C::ReplaceSoundBank { bank: a, .. }, C::ReplaceSoundBank { bank: b, .. }) => asset_hash(a) == asset_hash(b),
+                                _ => false,
+                            });
+                            let at = qm.upsert_contribution(qm_names.as_ref(), existing, c)?;
+                            Ok(format!("contributions[{at}] {kind} — {}", dir.display()))
+                        })();
+                        match out {
+                            Ok(m) => {
+                                wb = Workbench::Quartermaster;
+                                status = m;
+                            }
+                            Err(e) => status = format!("ADD TO SHIPMENT FAILED: {e}"),
+                        }
+                    }
+                    if std::mem::take(&mut audio_page.pick_folder) {
+                        if let Some(dir) = rfd::FileDialog::new()
+                            .set_title("Export voice-over clips into…")
+                            .set_directory(&audio_page.folder)
+                            .pick_folder()
+                        {
+                            audio_page.folder = dir;
+                        }
                     }
                     // Drain any outer intents the Missions panel asked the host to carry out.
                     // `pending_lua_open` is the Blueprint jump-to-source → luaview bridge.
@@ -5825,41 +5922,6 @@ pub fn run(opts: Options) {
                                     let n = tv.hashes.len() as i32;
                                     tv.idx = (tv.idx as i32 + d).rem_euclid(n) as usize;
                                     bind_tex_plate(&mut w, &mut scene, tv);
-                                }
-                            }
-                            Act::PlayClip(wave_index) => {
-                                // Lazily open the record index (English.wad + .pws) and the device on
-                                // the first play — both are heavy and most sessions never play audio.
-                                if vo_error.is_none() && vo_stream.is_none() {
-                                    let data_dir = std::path::Path::new(&opts.wadpath)
-                                        .parent()
-                                        .map(|p| p.to_path_buf())
-                                        .unwrap_or_default();
-                                    match crate::vostream::VoStream::open(&data_dir) {
-                                        Ok(s) => vo_stream = Some(s),
-                                        Err(e) => vo_error = Some(e),
-                                    }
-                                }
-                                if vo_error.is_none() && vo_player.is_none() {
-                                    match crate::audioplay::Player::start() {
-                                        Some(p) => vo_player = Some(p),
-                                        None => vo_error = Some("no audio output device".into()),
-                                    }
-                                }
-                                match (&vo_stream, &vo_player, &vo_error) {
-                                    (_, _, Some(e)) => status = format!("AUDIO: {e}"),
-                                    (Some(vo), Some(player), None) => match vo.clip_pcm(wave_index) {
-                                        Ok(pcm) => {
-                                            status = format!(
-                                                "\u{25B6} clip {wave_index} \u{2014} {:.1}s @ {} Hz",
-                                                pcm.duration_s(),
-                                                pcm.rate
-                                            );
-                                            player.play(wave_index, pcm.samples, pcm.rate, pcm.channels);
-                                        }
-                                        Err(e) => status = format!("AUDIO: {e}"),
-                                    },
-                                    _ => {}
                                 }
                             }
                             Act::LuaOpen(path) => {
@@ -7649,7 +7711,7 @@ fn build_preview(
 }
 
 /// The folder [`ExportDialog`] proposes, and the one the headless exports write under.
-const EXPORT_ROOT: &str = "workshop_export";
+pub(crate) const EXPORT_ROOT: &str = "workshop_export";
 
 /// What the Export dialog writes.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -7713,7 +7775,7 @@ impl ExportDialog {
 }
 
 /// `name` as a folder name: anything but ASCII letters, digits, `_` and `-` becomes `_`.
-fn export_dir_name(name: &str) -> String {
+pub(crate) fn export_dir_name(name: &str) -> String {
     name.chars().map(|c| if c.is_ascii_alphanumeric() || c == '_' || c == '-' { c } else { '_' }).collect()
 }
 
