@@ -700,9 +700,62 @@ fn carriers_for<'g>(
     })
 }
 
+/// One WAD that carries a wavebank: its copy of the wavebank and every soundbank it carries.
+#[derive(Debug, Clone)]
+pub struct CarrierTables {
+    /// The WAD.
+    pub carrier: Carrier,
+    /// Its copy of the wavebank, parsed.
+    pub wavebank: WavebankFile,
+    /// Every soundbank the WAD carries, `(entry hash, table)`, in entry-hash order.
+    pub soundbanks: Vec<(u32, Soundbank)>,
+}
+
+/// A wavebank the game ships, and every soundbank of each WAD that carries it: the tables a line of
+/// it is played through ([`line_targets`]), and what the Workshop's Audio page routes clips by.
+#[derive(Debug, Clone)]
+pub struct WavebankPlayers {
+    /// The wavebank's entry (`<wavebank>.<language>` for a localized one, or `0xHHHHHHHH`).
+    pub entry: String,
+    /// Each carrier that holds it.
+    pub carriers: Vec<CarrierTables>,
+}
+
+/// Read the wavebank `wavebank` of `language` (or none) and every soundbank of each WAD that holds
+/// it: that language's WAD in `game`, or `vz.wad` in `game` and `shell.wad` (opened into `shell`).
+/// No carrier holding it is an error naming the entry.
+pub fn wavebank_players(
+    game: &mut GameStack,
+    shell: &mut Option<GameStack>,
+    wavebank: &str,
+    language: Option<Language>,
+) -> Result<WavebankPlayers, String> {
+    let entry = entry_name(wavebank, language);
+    let entry_hash = asset_hash(&entry);
+    let mut carriers = Vec::new();
+    for (carrier, stack) in carriers_for(game, shell, language)? {
+        let Some(wb) = carrier_wavebank(stack, carrier, entry_hash)? else { continue };
+        let mut soundbanks = Vec::new();
+        for h in carrier_hashes(stack, carrier, TYPE_ID_SOUNDBANK) {
+            if let Some(sb) = carrier_soundbank(stack, carrier, h)? {
+                soundbanks.push((h, sb));
+            }
+        }
+        carriers.push(CarrierTables { carrier, wavebank: wb, soundbanks });
+    }
+    if carriers.is_empty() {
+        return Err(format!(
+            "no game WAD carries a wavebank named {entry:?} (0x{entry_hash:08X}) — check the wavebank \
+             name as the groups name it (vo_stream), or its entry's hash{}",
+            if language.is_some() { ", and the language" } else { "" }
+        ));
+    }
+    Ok(WavebankPlayers { entry, carriers })
+}
+
 /// Resolve a line: the wavebank's entry (`<wavebank>.<language>` for a localized one, or a bare
-/// hash of it) in each carrier that holds it, the one record whose clip hash is `line`, and every
-/// soundbank of those carriers whose groups play that record.
+/// hash of it) in each carrier that holds it ([`wavebank_players`]), the one record whose clip hash
+/// is `line`, and every soundbank of those carriers whose groups play that record.
 ///
 /// Errors, each naming what it looked for: no carrier holds the wavebank; no record, or more than
 /// one, carries the clip hash; the carriers' copies place it differently; no group plays it (a
@@ -715,7 +768,12 @@ pub fn line_targets(
     language: Option<Language>,
     line: &str,
 ) -> Result<LineTargets, String> {
-    let entry = entry_name(wavebank, language);
+    resolve_line(wavebank_players(game, shell, wavebank, language)?, line)
+}
+
+/// [`line_targets`] over tables already read.
+pub fn resolve_line(players: WavebankPlayers, line: &str) -> Result<LineTargets, String> {
+    let entry = players.entry;
     let entry_hash = asset_hash(&entry);
     let clip = asset_hash(line);
     let mut found: Option<(u32, u32, WaveRecord, WavebankFile)> = None;
@@ -724,8 +782,7 @@ pub fn line_targets(
     // (soundbank bank hash, group) of every group that plays the line, and every cue's reach.
     let mut playing: BTreeSet<(u32, u16)> = BTreeSet::new();
     let mut reach: Vec<(u32, u32, Vec<(u32, u16)>)> = Vec::new();
-    for (carrier, stack) in carriers_for(game, shell, language)? {
-        let Some(wb) = carrier_wavebank(stack, carrier, entry_hash)? else { continue };
+    for CarrierTables { carrier, wavebank: wb, soundbanks } in players.carriers {
         holders.push(carrier.wad());
         let hits: Vec<usize> = wb.records.iter().enumerate().filter(|(_, r)| r.clip_hash == clip).map(|(i, _)| i).collect();
         let index = match hits.as_slice() {
@@ -760,8 +817,8 @@ pub fn line_targets(
         } else {
             found = Some((from.0, index, wb.records[index as usize].clone(), wb));
         }
-        for h in carrier_hashes(stack, carrier, TYPE_ID_SOUNDBANK) {
-            let Some(sb) = carrier_soundbank(stack, carrier, h)? else { continue };
+        for (h, sb) in &soundbanks {
+            let h = *h;
             let mut plays = false;
             for (g, group) in sb.groups.iter().enumerate() {
                 if group.waves().iter().any(|w| (w.wavebank, w.index) == from) {
@@ -779,11 +836,7 @@ pub fn line_targets(
         }
     }
     let Some((bank_hash, index, record, wavebank)) = found else {
-        return Err(format!(
-            "no game WAD carries a wavebank named {entry:?} (0x{entry_hash:08X}) — check the wavebank \
-             name as the groups name it (vo_stream), or its entry's hash{}",
-            if language.is_some() { ", and the language" } else { "" }
-        ));
+        return Err(format!("internal error: the wavebank {entry:?} was read from no carrier"));
     };
     if entries.is_empty() {
         return Err(format!(
