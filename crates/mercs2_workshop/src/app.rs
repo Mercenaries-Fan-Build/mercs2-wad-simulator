@@ -1115,8 +1115,6 @@ pub fn run(opts: Options) {
         names: HashMap<u32, String>,
         lua: Vec<(String, String, String)>,
         missions: crate::missions::Reference,
-        ess_api: crate::essapi::ApiIndex,
-        ecs_reg: crate::ecsreg::EcsRegistry,
         audio_idx: crate::audioidx::AudioIndex,
         secs: f32,
     }
@@ -1146,11 +1144,6 @@ pub fn run(opts: Options) {
                     names,
                     lua,
                     missions,
-                    // The Ess / engine API reference the console autocompletes against.
-                    ess_api: crate::essapi::ApiIndex::load(&home)?,
-                    // The native ECS component-class registry — the *typed* half of the reference
-                    // (what a live entity is made of), searched alongside the callables.
-                    ecs_reg: crate::ecsreg::EcsRegistry::load(&home)?,
                     // The captioned audio inventory — the Audio domain browses this (banks → clips
                     // with captions).
                     audio_idx: crate::audioidx::AudioIndex::load(&home)?,
@@ -1344,10 +1337,8 @@ pub fn run(opts: Options) {
     let mut ui_state = opts.ui_state.clone();
     let mut capture_to: Option<(PathBuf, u32)> = None;
     let mut capture_asked = false;
-    // The Ess / engine API reference, the ECS component registry and the captioned audio inventory,
-    // loaded from the reference bundle on the boot thread (`BootData`) and set when it finishes.
-    let mut ess_api = crate::essapi::ApiIndex::default();
-    let mut ecs_reg = crate::ecsreg::EcsRegistry::default();
+    // The captioned audio inventory, loaded from the reference bundle on the boot thread
+    // (`BootData`) and set when it finishes.
     let mut audio_idx = crate::audioidx::AudioIndex::default();
     // VO playback, both opened LAZILY on the first ▶ (English.wad + the output device are heavy, and
     // most sessions never touch audio). `vo_stream` is the record index; `vo_player` the device.
@@ -1628,14 +1619,12 @@ pub fn run(opts: Options) {
                                     boot_stage = stage;
                                 }
                                 Ok(Boot::Done(data)) => {
-                                    let BootData { names, lua, missions, ess_api: api, ecs_reg: ecs, audio_idx: audio, secs } = *data;
+                                    let BootData { names, lua, missions, audio_idx: audio, secs } = *data;
                                     index.apply_names(names);
                                     lua_corpus = lua;
                                     // The Missions blueprint editor's script list and palette come
                                     // from the corpus the boot thread indexed.
                                     missions_panel.set_reference(missions, &lua_corpus);
-                                    ess_api = api;
-                                    ecs_reg = ecs;
                                     audio_idx = audio;
                                     filtered = refilter(&index, kind, &filter, lens);
                                     inventory_dirty = true; // names now resolve → build the vehicle inventory
