@@ -40,6 +40,8 @@ leading `_` before hashing (the `_dm`/`_nm`/`_sm` texture-suffix convention), so
 | `--inventory [class]` | optional class | No | Lists models grouped by inferred vehicle class (helicopter, tank, car, boat, …), derived from the `_veh_<token>_` name segment. Optional `class` filters to one class. Overlay-aware. |
 | `--check <name\|0xHASH>` | one asset | No | Loads a model end-to-end through the full LOD-block chain — geometry, textures, bones, clip count, LOD tiers, bbox, destruction state machine, and (when the name maps a character) the AnimationLookup/ActionTable coverage. Also prints asset-layer residency stats. Overlay-aware. |
 | `--states <name\|0xHASH>` | one asset | No | Dumps the model's destruction state machine (NODE/STAT family) with names resolved, plus HIER node count and SEGM state tiers. Prints `no state machine` when absent. Overlay-aware. |
+| `--audio-export <bank\|query> <dir>` | 2 positional | No | Exports voice-over clips as the Audio page does: the bank of that name as the page lists it (routed from `English.wad` beside the base WAD), or else every clip whose bank, speaker, caption or file name holds every word of the query — each as a 16-bit PCM WAV under its shipped file name, plus `captions.csv` (`file,wave,bank,speaker,caption,length_s`), into `<dir>/<bank or search_query>/`. Reads the samples from `Audios/vo_stream.english.pws`. Exit 0; 2 with the reason when the arguments are missing, nothing matches, or a file cannot be read or written. |
+| `--ui-state <file.json>` | one file | No | Not a mode: opens the window in the state the file names and captures the presented frame to its `capture` PNG, then exits 0 (2 with the reason for a name that does not resolve or a frame that cannot be read back). Keys: `page`, `settings_section`, `tab`, `lens`, `filter`, `load`, `shipment` + `contribution`, `bench` + `donor`, and on `"tab": "AUDIO"` `bank`, `clip`, `search` and `select` (applied once the tab's routing is read); `capture`; `settle_frames` (default 8). |
 | `--export <name\|0xHASH>` | one asset | No | Writes OBJ + MTL + PNG textures to `workshop_export/<name>/`. Overlay-aware. |
 | `--export-bundle <name\|0xHASH\|class:X>` | one asset or a class | No | Writes a **lossless** bundle per target: editable glTF + PNG skins + every LOD rung's original container bytes + a reassembly manifest. `class:helicopter` (etc.) bundles every model in that class. Output root set by `--out` (default `workshop_export`). Overlay-aware. |
 | `--out <dir>` | path | No | Output root for `--export-bundle` only. Default `workshop_export`. Ignored by every other mode. |
@@ -71,7 +73,7 @@ mode flags in a fixed sequence and the FIRST one present wins; all later ones ar
 is:
 
 ```
---pack-data → --list → --inventory → --mod-new → --export → --export-bundle →
+--pack-data → --list → --inventory → --mod-new → --audio-export → --export → --export-bundle →
 --hash → --block-strings → --hash-file → --states → --import-check →
 --tex-check → --tex-scan → --tex-scan-blocks → --tex-png-block → --tex-png → --check
 ```
