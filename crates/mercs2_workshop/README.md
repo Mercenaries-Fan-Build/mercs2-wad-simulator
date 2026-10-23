@@ -129,9 +129,8 @@ bundle; see [Reference bundle](#reference-bundle)), `--hash <names...>` and `--h
 ## Reference bundle
 
 Everything the workshop consults that is not a game file — `names.bin`, the registry rows, the
-spawnable templates, the ECS schemas, the decompiled-Lua corpora, the Ess API reference
-(`ess_api.json`, `ess_natives.json`, `ess_nodes.json`), the ECS component registry
-(`ecs_registry.tsv`) and the captioned audio inventory (`audio_manifest.json`) — comes from one
+spawnable templates, the ECS schemas, the decompiled-Lua corpora and the captioned audio inventory
+(`audio_manifest.json`) — comes from one
 `workshop_data/` folder. A folder counts only when it holds the `manifest.json` that `--pack-data` writes last; a
 repo checkout's committed, partial `workshop_data/` (no `names.bin`, no manifest) never does. The
 folder is found in this order (`index::data_home`):
@@ -144,9 +143,8 @@ folder is found in this order (`index::data_home`):
 
 When none is found, the workshop downloads `mercs2-workshop-data.zip` from the latest release and
 installs it as step 5 (`index::require_data_home`). When that fails too, the run stops with an
-error giving the release page and the folder to unpack the zip into. A complete bundle missing one
-of the five Ess / ECS / audio files, or holding a malformed one, stops the boot with an error naming
-the file.
+error giving the release page and the folder to unpack the zip into. A complete bundle missing
+`audio_manifest.json`, or holding a malformed one, stops the boot with an error naming the file.
 
 The corpus gates in `lua_source`, `blueprint` and `missions` run over the bundle's Lua and are
 pinned to release v0.17.0's bundle (`index::PINNED_CORPUS`: 675 scripts in `lua/`, 39 in
@@ -155,9 +153,8 @@ bundle from Settings, or point `MERCS2_WORKSHOP_DATA` at an unpacked v0.17.0 `wo
 
 `--pack-data [dir]` builds the bundle (default `workshop_data`). Its in-repo sources are read from
 the checkout the binary was built from: names come from
-`data/production_names.json`, and `ess_api.json`, `ess_natives.json`, `ess_nodes.json`,
-`ecs_registry.tsv` and `audio_manifest.json` are copied from the committed `workshop_data/`. Packing
-into that same `workshop_data/` leaves those five files in place. The rest is copied from the notes
+`data/production_names.json`, and `audio_manifest.json` is copied from the committed
+`workshop_data/`. Packing into that same `workshop_data/` leaves it in place. The rest is copied from the notes
 repo's `docs/` folder named by `notes_docs_dir` in `.mercs2-local.toml`. With no
 `production_names.json`, the names are merged from the raw corpora, which also reads the
 `rainbow_table` and `jul08_strings` keys. A missing key or source file stops the pack with an error
