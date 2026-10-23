@@ -37,6 +37,11 @@ pub trait AudioSink {
     /// Drop everything still queued — for a one-shot preview that should interrupt the last clip
     /// rather than play after it. Default no-op (a continuous mixer never wants this).
     fn clear(&mut self) {}
+    /// Samples submitted and not yet played. Default 0: a sink that does not buffer (it plays or
+    /// discards each submit at once) holds nothing back.
+    fn queued(&self) -> usize {
+        0
+    }
 }
 
 /// A headless sink — discards everything. The default; keeps the mixer fully functional with no
@@ -210,5 +215,8 @@ impl AudioSink for CpalSink {
         if let Ok(mut r) = self.ring.lock() {
             r.clear();
         }
+    }
+    fn queued(&self) -> usize {
+        self.queued_samples()
     }
 }
