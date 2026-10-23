@@ -65,8 +65,6 @@ mod audioidx; // Captioned audio inventory (the Audio domain's real content)
 mod audioplay; // One-shot audio preview on the default output device (cpal)
 mod vostream; // Stream VO PCM straight from the game's vo_stream.english.pws
 mod bundle;
-mod ecsreg;
-mod essapi;
 mod domain;
 mod fetch;
 mod gui;
@@ -2235,10 +2233,8 @@ fn repo_root() -> std::path::PathBuf {
 }
 
 /// The reference files committed in the repo's `workshop_data/` that `--pack-data` copies into
-/// every bundle: the Ess API, natives and node catalogue (`essapi`), the ECS component registry
-/// (`ecsreg`) and the captioned audio inventory (`audioidx`).
-const REPO_BUNDLE_FILES: [&str; 5] =
-    ["ess_api.json", "ess_natives.json", "ess_nodes.json", "ecs_registry.tsv", "audio_manifest.json"];
+/// every bundle: the captioned audio inventory (`audioidx`).
+const REPO_BUNDLE_FILES: [&str; 1] = ["audio_manifest.json"];
 
 /// The committed production lookup: `<repo>/data/production_names.json` (curated, hash-verified
 /// node/asset names), where `<repo>` is the checkout this binary was built from ([`repo_root`]).
