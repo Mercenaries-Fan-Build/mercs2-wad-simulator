@@ -454,7 +454,7 @@ impl AssetIndex {
 ///
 /// A candidate counts only when it is a COMPLETE bundle: it holds [`BUNDLE_MANIFEST`], which
 /// `--pack-data` writes after every other file. The committed, partial `workshop_data/` of a repo
-/// checkout (the Ess API, ECS registry and audio manifests, no `names.bin`) holds no manifest and
+/// checkout (the audio manifest, no `names.bin`) holds no manifest and
 /// does not count.
 ///
 /// This is the lookup alone; [`require_data_home`] adds the automatic download.
