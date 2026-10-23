@@ -13,13 +13,16 @@ row being true.
   `vo_stream.english` wavebank: 12,988 entries, the file name's leading number is the record index.
   The entry's id (`context` hashed, or `asset_id`) is the record's `+0x00` clip hash in 12,935 of
   them.
-- **Routing**: the 27 `vo_*.english` soundbanks in `English.wad`. A clip is *played by* a cue when the
-  cue's group (single-track) or one of its tracks' sound entries (multi-track) names
-  `{wavebank m2("vo_stream"), index = the clip's record}`. Over the retail data: 12,829 clips are played
-  by at least one cue; 159 by none; 1,125 by cues of more than one bank.
+- **Routing**: every soundbank in `English.wad` (`audioroute::Routes`, read through
+  `sound::wavebank_players`). A clip is *played by* a cue when the cue's group (single-track) or one
+  of its tracks' sound entries (multi-track) names `{wavebank m2("vo_stream"), index = the clip's
+  record}`. Over the retail data: 12,954 clips are played by at least one cue and 34 by none, through
+  46 banks — the 27 labelled `vo_*` banks and 19 per-scene banks known only by their entry hash.
+  Over the 27 `vo_*` banks alone, 1,125 clips are played by cues of more than one bank.
 - **Cue names**: a cue guid is `m2(<cue name>)`; the name is known when the clip's `context` hashes to
-  it or the rainbow table / `names.bin` holds it. 1,606 clips are played by exactly one single-track
-  cue with a known name; 9,850 by exactly one single-track cue whose name is not known.
+  it or the rainbow table / `names.bin` holds it. Over the 27 `vo_*` banks, 1,606 clips are played by
+  exactly one single-track cue with a known name, 9,850 by exactly one single-track cue whose name is
+  not known.
 - **Samples**: `vostream::VoStream` over `data/Audios/vo_stream.english.pws` (IMA ADPCM decoded to PCM16).
 
 `English.wad` or the `.pws` missing is an error banner on the page naming the file; play, export and
@@ -42,7 +45,7 @@ Add to Shipment are unavailable until it is found.
 | Now-playing card | `CLIP <wave> · PLAYING` (or `PAUSED`), the caption, a progress bar with `<position> / <length> s` from the samples the device has consumed | `Player::position` | — | test + capture |
 | Inspector: CLIP card | speaker, bank(s) that play it, the cue(s) that play it (name, or the guid when the name is not known) with their form, source file, stream file | routing, `AudioClip` | — | test |
 | Select bank · Ctrl A | as **select all** | selection set | — | test: key binding |
-| Add to Shipment ▸ | the current clip's routes: **Replace this line** (`replace_sound_wave`, proposal B), **Replace cue …** one item per cue that plays it, naming how many waves it plays (`replace_sound_cue`: the cue's bank, `language: english`, the group's category, and `cue` = the cue's name, or its guid when the name is not known (proposal A), plus every value the retail cue and group carry: gains in dB, pitch, positional, distances, exponent, Doppler, start limit, sound id, priority, `group_20`, `cue_16`, the record's clip hash), and **Replace its bank** (`replace_sound_bank`, seeded as in ADD TO THIS DOMAIN). The `wave` is left for the author. For a clip no soundbank plays (159), Replace this line is disabled with that reason — replacing it would change nothing, which the build refuses (M0218) | routing, `quartermaster::{seeded, ensure_shipment, upsert_contribution}` | `manifest.yaml` | test: seeded cue equals the retail values |
+| Add to Shipment ▸ | the current clip's routes: **Replace this line** (`replace_sound_wave`, proposal B), **Replace cue …** one item per cue that plays it, naming how many waves it plays (`replace_sound_cue`: the cue's bank, `language: english`, the group's category, and `cue` = the cue's name, or its guid when the name is not known (proposal A), plus every value the retail cue and group carry: gains in dB, pitch, positional, distances, exponent, Doppler, start limit, sound id, priority, `group_20`, `cue_16`, the record's clip hash), and **Replace its bank** (`replace_sound_bank`, seeded as in ADD TO THIS DOMAIN). The `wave` is left for the author. For a clip no soundbank plays (34), Replace this line is disabled with that reason — replacing it would change nothing, which the build refuses (M0218) | routing, `quartermaster::{seeded, ensure_shipment, upsert_contribution}` | `manifest.yaml` | test: seeded cue equals the retail values |
 | Export N clips · F10 | opens the EXPORT card's export; disabled while the chosen scope is empty | as below | — | — |
 | EXPORT card | scope: **N selected** · **bank · N** · **search hits · N** (the last only in search mode); format WAV 16-bit PCM; names as shipped (the manifest's file name, e.g. `01595__chris-Banter-Contract-All01-29.wav`); **Choose folder…**; Export runs in the background with the progress window and writes the WAVs plus `captions.csv` (file, wave, bank, speaker, caption, length) | `vostream::clip_pcm`, a WAV writer | `<folder>/<bank or query>/*.wav`, `captions.csv` | test: WAV header + sample count, CSV rows |
 | Headless `--audio-export <bank\|query> <dir>` | the same export without a window: an exact bank name exports the bank, anything else the search hits; exit 0, or 2 with the reason (no hits, no `English.wad`, unwritable folder) | shared export fn | as above | test |
@@ -50,17 +53,17 @@ Add to Shipment are unavailable until it is found.
 
 ## Decisions
 
-- **Q1 — bank listing: by routing.** A clip is listed under every bank whose cues play it; the 159 no
-  cue plays sit in a *not played by any cue* group. (The manifest's `bank` matches the routing for
-  3,694 clips and files 9,135 under `vo_misc`, whose soundbank plays 160.)
+- **Q1 — bank listing: by routing.** A clip is listed under every bank whose cues play it; the 34 no
+  cue plays sit in a *not played by any cue* group. (The manifest's `bank` matches the routing of the
+  27 `vo_*` banks for 3,694 clips and files 9,135 under `vo_misc`, whose soundbank plays 160.)
 
 ## Manifest changes (approved)
 
 ### A. Sound overrides address banks and cues by name or hash
 
 Every other asset reference takes a name or a bare `0xHHHHHHHH` (`manifest::asset_hash`, M0130
-preferring names as a warning), and most shipped audio has no known name: 9,850 clips' only cue,
-and 41 of `English.wad`'s 68 soundbank entries.
+preferring names as a warning), and most shipped audio has no known name: the only `vo_*` cue of
+9,850 clips, and 41 of `English.wad`'s 68 soundbank entries.
 
 - In `replace_sound_bank` and `replace_sound_cue`, `bank` and every cue `name` take a name or a bare
   hash, resolved through `manifest::asset_hash` at every site (lint, claims, build, link). A bank
@@ -77,7 +80,7 @@ and 41 of `English.wad`'s 68 soundbank entries.
 
 A clip is a wave record; cues reach it through groups. 1,431 single-track `vo_*` cues play a group
 of 2–14 waves (variants the engine picks between, e.g. `vo_Fiona` `0xB5E91E91`, records 3844–3857),
-and 1,367 clips are played by more than one cue. `replace_sound_cue` makes the cue play one new wave,
+and 1,367 clips are played by more than one `vo_*` cue. `replace_sound_cue` makes the cue play one new wave,
 so on such a cue it drops the variants, and the other cues that play the line keep the old one.
 
 ```yaml
