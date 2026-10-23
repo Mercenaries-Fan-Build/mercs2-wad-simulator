@@ -32,6 +32,14 @@ pub struct UiState {
     pub bench: Option<String>,
     /// The bench's donor model, by name.
     pub donor: Option<String>,
+    /// On the AUDIO tab: the bank to open, by the name the page lists it under.
+    pub bank: Option<String>,
+    /// On the AUDIO tab: the clip to make current, by record index.
+    pub clip: Option<u32>,
+    /// On the AUDIO tab: the clip search.
+    pub search: Option<String>,
+    /// On the AUDIO tab: the clips to select, by record index.
+    pub select: Option<Vec<u32>>,
     /// Where to write the captured frame (PNG).
     pub capture: PathBuf,
     /// Frames to let the window settle after the state is applied, before the capture.
@@ -53,7 +61,15 @@ impl UiState {
         if st.contribution.is_some() && st.shipment.is_none() {
             return Err(format!("{}: `contribution` needs a `shipment`", path.display()));
         }
+        if st.audio() && !st.tab.as_deref().is_some_and(|t| t.eq_ignore_ascii_case("AUDIO")) {
+            return Err(format!("{}: `bank`, `clip`, `search` and `select` need `\"tab\": \"AUDIO\"`", path.display()));
+        }
         Ok(st)
+    }
+
+    /// Whether any AUDIO-tab key is set: those wait for the tab's routing before they apply.
+    pub fn audio(&self) -> bool {
+        self.bank.is_some() || self.clip.is_some() || self.search.is_some() || self.select.is_some()
     }
 }
 
@@ -106,6 +122,17 @@ mod tests {
         assert!(UiState::load(&p).unwrap_err().contains("bench"));
         let p = write("contrib.json", r#"{ "contribution": 0, "capture": "out.png" }"#);
         assert!(UiState::load(&p).unwrap_err().contains("shipment"));
+    }
+
+    /// The AUDIO-tab keys need the AUDIO tab.
+    #[test]
+    fn audio_keys_need_the_audio_tab() {
+        let p = write("bank.json", r#"{ "page": "Inspect", "bank": "vo_Chris", "capture": "out.png" }"#);
+        assert!(UiState::load(&p).unwrap_err().contains("AUDIO"));
+        let p = write("audio.json", r#"{ "page": "Inspect", "tab": "audio", "bank": "vo_Chris", "clip": 1595, "select": [1595, 1598], "capture": "out.png" }"#);
+        let st = UiState::load(&p).unwrap();
+        assert!(st.audio());
+        assert_eq!((st.clip, st.select.as_deref()), (Some(1595), Some(&[1595u32, 1598][..])));
     }
 
     #[test]
