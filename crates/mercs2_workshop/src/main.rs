@@ -64,6 +64,8 @@ mod app;
 mod audioidx; // Captioned audio inventory (the Audio domain's real content)
 mod audioplay; // One-shot audio preview on the default output device (cpal)
 mod audioroute; // Which banks and cues play each VO line, from English.wad
+mod audioexport; // VO clips out as WAV + captions.csv
+mod audiopage; // Inspect's AUDIO tab: banks, clips, preview, export, Add to Shipment
 mod vostream; // Stream VO PCM straight from the game's vo_stream.english.pws
 mod bundle;
 mod domain;
@@ -488,6 +490,24 @@ fn main() {
                 }
             }
             Err(e) => eprintln!("--mod-skel: {e}"),
+        }
+        return;
+    }
+
+    // Headless: export voice-over clips as the Audio page does — `--audio-export <bank|query> <dir>`:
+    // the bank of that name, or else every clip the query finds, as WAVs plus captions.csv under
+    // <dir>/<bank or query>. Exit 0, or 2 with the reason.
+    if let Some(i) = args.iter().position(|a| a == "--audio-export") {
+        let (Some(what), Some(dir)) = (args.get(i + 1), args.get(i + 2)) else {
+            eprintln!("--audio-export: usage: --audio-export <bank|query> <dir>");
+            std::process::exit(2);
+        };
+        match audiopage::export_headless(std::path::Path::new(&wadpath), what, std::path::Path::new(dir)) {
+            Ok(r) => println!("exported {} clip(s) and captions.csv -> {}", r.clips, r.dir.display()),
+            Err(e) => {
+                eprintln!("--audio-export {what}: {e}");
+                std::process::exit(2);
+            }
         }
         return;
     }
