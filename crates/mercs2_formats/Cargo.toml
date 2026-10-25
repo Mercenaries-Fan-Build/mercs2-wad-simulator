@@ -32,6 +32,10 @@ gltf ={ version = "1", default-features = false, features = ["utils", "names", "
 # `load_ladder`: m2-sdk.dll's load triggers match the game log against loadprobe's own phase ladder.
 loadprobe = { workspace = true }
 
+[target.'cfg(windows)'.dependencies]
+# `keys`: every virtual-key code in the name table is checked at compile time against the SDK's.
+windows-sys = { version = "0.61", features = ["Win32_UI_Input_KeyboardAndMouse"] }
+
 [dev-dependencies]
 serde_json = "1"
 sha2 = "0.10"
