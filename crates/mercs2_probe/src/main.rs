@@ -41,6 +41,7 @@ mod bone_census;
 mod ess_live;
 mod ess_menu_check;
 mod gfx_golden;
+mod prof_samples;
 
 use mercs2_engine::diag;
 use mercs2_engine::wad;
@@ -382,6 +383,9 @@ fn main() {
     }
     if cmd == "ess-menu-check" {
         std::process::exit(ess_menu_check::main(&args));
+    }
+    if cmd == "prof-samples" {
+        std::process::exit(prof_samples::main(&args));
     }
     if cmd == "gfx-golden" {
         let usage = "gfx-golden: usage: mercs2_probe gfx-golden <movies_dir> --md <report.md> --json <index.json>";
