@@ -1,0 +1,19 @@
+# The profiler's capture service. The game (under Wine on this machine) runs the Tracy client on
+# port 8086 and sends START/STOP to port 8099; each session becomes a new .tracy file in
+# MERCS2_CAPTURES_DIR.
+#
+#   MERCS2_CAPTURES_DIR=/path/to/captures docker compose -f tools/tracy/compose.yaml up --build
+services:
+  profd:
+    build:
+      context: ../..
+      dockerfile: tools/tracy/Dockerfile
+    image: mercs2-tracy:0.14.1
+    environment:
+      PROFD_LISTEN: 0.0.0.0:8099
+      PROFD_GAME_HOST: host.docker.internal
+      PROFD_GAME_PORT: "8086"
+    ports:
+      - "127.0.0.1:8099:8099"
+    volumes:
+      - ${MERCS2_CAPTURES_DIR:?set MERCS2_CAPTURES_DIR to the directory captures are written to}:/captures
