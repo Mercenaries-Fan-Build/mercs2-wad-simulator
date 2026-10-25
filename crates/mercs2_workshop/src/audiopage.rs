@@ -556,7 +556,12 @@ pub fn navigator(ui: &mut egui::Ui, p: &Panel) -> Vec<Act> {
             ui.label(egui::RichText::new(format!("English.wad could not be routed: {e}")).color(theme::BAD));
         }
         (_, None) => {
-            ui.label(egui::RichText::new("Reading English.wad's soundbanks…").color(theme::FAINT));
+            // The spinner also keeps egui repainting, so `poll` runs each frame and the banks
+            // appear the frame the worker lands, not on the next pointer move.
+            ui.horizontal(|ui| {
+                ui.add(egui::Spinner::new().size(13.0));
+                ui.label(egui::RichText::new("Reading English.wad's soundbanks…").color(theme::FAINT));
+            });
         }
         (_, Some(r)) => {
             let row = |ui: &mut egui::Ui, name: &str, n: usize, on: bool| {
