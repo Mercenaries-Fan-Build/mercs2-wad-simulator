@@ -1,4 +1,4 @@
-//! The Lua host's sites and the shader sites resolve exactly once, at the addresses read from the
+//! The Lua host's sites, the shader sites and the profiler sites resolve exactly once, at the addresses read from the
 //! disassembly, in the reference executables: the v1.0-code builds `v10-securom-unwrap`,
 //! `v10-drmfree-laa` and `dump-v10-pmcbb-unpacked` (one layout) and the v1.1 dump
 //! `dump-v11-securom-unpacked` (code at other addresses).
@@ -94,5 +94,35 @@ fn shader_sites_resolve_in_every_reference_build() {
             let want = if v11 { V11_VTABLES[f] } else { family(f as i32).unwrap().vtable };
             assert_eq!(s.vtable[f], want, "{id} family {f}");
         }
+    }
+}
+
+/// `(site, v1.0 VA, v1.1 VA)`, read with objdump.
+const PROFILER_EXPECTED: [(mercs2_formats::profiler_sites::Site, u32, u32); 5] = [
+    (mercs2_formats::profiler_sites::Site::RunFrame, 0x630ef0, 0x630e10),
+    (mercs2_formats::profiler_sites::Site::BindDevice, 0x749060, 0x749270),
+    (mercs2_formats::profiler_sites::Site::JobRegister, 0x84b230, 0x84b4a0),
+    (mercs2_formats::profiler_sites::Site::JobWait, 0x8765c0, 0x876810),
+    (mercs2_formats::profiler_sites::Site::CellsChangeRing, 0x735aef, 0x735cef),
+];
+
+#[test]
+fn profiler_sites_resolve_in_every_reference_build() {
+    use mercs2_formats::profiler_sites::resolve as resolve_profiler;
+    for (id, v11, bytes) in images() {
+        let s = resolve_profiler(&Image::from_file(&bytes).unwrap_or_else(|e| panic!("{id}: {e}"))).unwrap_or_else(|e| panic!("{id}: {e}"));
+        for (site, va, va11) in PROFILER_EXPECTED {
+            assert_eq!(s.va(site), if v11 { va11 } else { va }, "{id} {}", site.name());
+        }
+        // `mov eax, [RenderSystem]` in BindDevice, read with objdump.
+        assert_eq!(s.render_system(), if v11 { 0x1175288 } else { 0x1176288 }, "{id} RenderSystem global");
+        // `mov eax, [count]` and the two `mov [eax*8+table], ecx` in JobRegister, read with objdump.
+        let jobs = s.jobs();
+        assert_eq!(jobs.count, if v11 { 0x117563c } else { 0x117663c }, "{id} jobtype count");
+        assert_eq!(jobs.handlers, if v11 { [0x19f804c, 0x19f8178] } else { [0x19f904c, 0x19f9178] }, "{id} handler tables");
+        // The counter and ring in CellsChangeRing, read with objdump.
+        let ring = s.cells_change();
+        assert_eq!(ring.counter, if v11 { 0xdd4788 } else { 0xdd5788 }, "{id} cells change counter");
+        assert_eq!(ring.ring, if v11 { 0xdd4790 } else { 0xdd5790 }, "{id} cells change ring");
     }
 }
