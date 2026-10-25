@@ -3,7 +3,7 @@
 //! Field offsets are the PE/COFF specification's: `e_lfanew` at DOS header `0x3c`; COFF file header after
 //! the `PE\0\0` signature (`NumberOfSections` +2, `SizeOfOptionalHeader` +16); PE32 optional header magic
 //! `0x10b`, `ImageBase` +28; 40-byte section headers (`VirtualSize` +8, `VirtualAddress` +12,
-//! `SizeOfRawData` +16, `PointerToRawData` +20).
+//! `SizeOfRawData` +16, `PointerToRawData` +20, `Characteristics` +36).
 //!
 //! A section's bytes here are its first `min(VirtualSize, SizeOfRawData)` bytes: that span holds the same
 //! content in the file (from `PointerToRawData`) and in the mapped image (from `VirtualAddress`), so an
@@ -41,9 +41,18 @@ pub struct SectionHeader {
     pub virtual_address: u32,
     pub raw_size: u32,
     pub raw_pointer: u32,
+    pub characteristics: u32,
 }
 
+/// `IMAGE_SCN_CNT_CODE`: the section contains executable code.
+pub const SCN_CNT_CODE: u32 = 0x20;
+
 impl SectionHeader {
+    /// Whether the section is marked as containing code.
+    pub fn is_code(&self) -> bool {
+        self.characteristics & SCN_CNT_CODE != 0
+    }
+
     /// Length of the span that exists identically in the file and in the mapped image.
     pub fn common_len(&self) -> usize {
         self.virtual_size.min(self.raw_size) as usize
@@ -90,6 +99,7 @@ pub fn parse_headers(b: &[u8]) -> Result<(u32, Vec<SectionHeader>), ExeError> {
             virtual_address: u32_at(b, h + 12)?,
             raw_size: u32_at(b, h + 16)?,
             raw_pointer: u32_at(b, h + 20)?,
+            characteristics: u32_at(b, h + 36)?,
         });
     }
     Ok((image_base, sections))
@@ -153,6 +163,12 @@ impl<'a> Image<'a> {
 
     pub fn section(&self, name: &str) -> Option<&Section<'a>> {
         self.sections.iter().find(|s| s.header.name == name)
+    }
+
+    /// `[start, end)` of every section marked as code, over its `VirtualSize` (the span mapped), in
+    /// section-table order.
+    pub fn code_ranges(&self) -> Vec<(u32, u32)> {
+        self.sections.iter().filter(|s| s.header.is_code()).map(|s| (s.va, s.va + s.header.virtual_size)).collect()
     }
 
     /// The bytes at `va` up to the end of its section.
@@ -228,6 +244,20 @@ mod tests {
         assert_eq!(img.section_of(0x402000), Some(".rdata"));
         assert_eq!(img.section_of(0x403000), None);
         assert_eq!(img.u32_at(0x402000), Some(u32::from_le_bytes(*b"abc\0")));
+    }
+
+    #[test]
+    fn code_sections_are_read_from_characteristics() {
+        let mut file = synth::pe(0x400000, &[(".text", 0x1000, vec![0x90; 0x10]), (".rdata", 0x2000, vec![0; 8]), ("Stext", 0x3000, vec![0xc3; 4])]);
+        // Section headers start at 0x178 in the synthetic file (synth::pe); Characteristics is +36.
+        for (i, ch) in [(0usize, 0x6000_0020u32), (1, 0x4000_0040), (2, 0xe000_0020)] {
+            let at = 0x178 + i * 40 + 36;
+            file[at..at + 4].copy_from_slice(&ch.to_le_bytes());
+        }
+        let img = Image::from_file(&file).unwrap();
+        assert!(img.section(".text").unwrap().header.is_code());
+        assert!(!img.section(".rdata").unwrap().header.is_code());
+        assert_eq!(img.code_ranges(), vec![(0x401000, 0x401010), (0x403000, 0x403004)]);
     }
 
     #[test]
