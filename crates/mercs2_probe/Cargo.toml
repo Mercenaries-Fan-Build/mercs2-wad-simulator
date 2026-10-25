@@ -31,6 +31,9 @@ serde_json = "1"
 serde = { version = "1", features = ["derive"] }
 # `mopp_swap` verifies its patched PHY2 artifacts BY sha256 (mandate: verify-artifacts-by-hash).
 sha2 = "0.10"
+# `prof-samples` finds the code image of a profiled exe (catalogue, images, canonical tree) and reads its
+# Ghidra functions export.
+mercs2_exemap = { workspace = true }
 
 [features]
 # Builds the game-gated tests, which read the retail vz.wad named by the repo-root .mercs2-local.toml;
