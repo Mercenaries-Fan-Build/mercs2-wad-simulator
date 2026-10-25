@@ -6,8 +6,8 @@
 //! (`{"kind":"function","va":"0x%08x","name","name_source","thunk",…}`), then an end record
 //! (`{"kind":"end","functions":N,…}`). [`read_functions`] reads only the record kinds, the image
 //! record's `image_id`, `program_sha256` and `functions`, each function's `va`, `name`,
-//! `name_source` and `thunk`, and the end record's `functions`; every other field (the decompiled
-//! text among them) is neither kept nor checked. It fails on an empty line, a line that is not a
+//! `name_source`, `thunk` and `size`, and the end record's `functions`; every other field (the
+//! decompiled text among them) is neither kept nor checked. It fails on an empty line, a line that is not a
 //! JSON object, a missing or mistyped field it reads, a `va` that is not `0x` and eight lowercase
 //! hex digits, a `va` that repeats, a first record that is not the image record, a record after the
 //! end record, a missing end record (a truncated export), and a function count that differs from
@@ -67,6 +67,8 @@ pub struct Function {
     pub name: String,
     pub name_source: String,
     pub thunk: bool,
+    /// Ghidra's function body size in bytes (the span of its address set).
+    pub size: u32,
 }
 
 /// A functions file, checked for completeness ([`read_functions`]).
@@ -89,6 +91,7 @@ struct Record {
     name: Option<String>,
     name_source: Option<String>,
     thunk: Option<bool>,
+    size: Option<u32>,
 }
 
 /// `0x` and eight lowercase hex digits.
@@ -135,7 +138,8 @@ pub fn read_functions(text: &str, what: &str) -> Result<FunctionsFile, Error> {
                 let name = need(r.name.clone(), "name")?;
                 let name_source = need(r.name_source.clone(), "name_source")?;
                 let thunk = r.thunk.ok_or_else(|| at(format!("function {va_text} has no boolean \"thunk\"")))?;
-                functions.push(Function { va, name, name_source, thunk });
+                let size = r.size.ok_or_else(|| at(format!("function {va_text} has no number \"size\"")))?;
+                functions.push(Function { va, name, name_source, thunk, size });
             }
             ("end", _) => end = Some((n, need_n(r.functions)?)),
             (other, _) => return Err(at(format!("unknown record kind {other:?}"))),
@@ -721,6 +725,10 @@ mod tests {
         let no_thunk = lines[1].replace("\"thunk\":false,", "");
         let e = read_functions(&[lines[0], &no_thunk, lines[2], lines[3]].join("\n"), "f").unwrap_err().to_string();
         assert!(e.contains("no boolean \"thunk\""), "{e}");
+        let no_size = lines[1].replace("\"size\":4,", "");
+        let e = read_functions(&[lines[0], &no_size, lines[2], lines[3]].join("\n"), "f").unwrap_err().to_string();
+        assert!(e.contains("no number \"size\""), "{e}");
+        assert_eq!(read_functions(&full, "f").unwrap().functions[0].size, 4);
         let short_va = lines[1].replace("0x00000001", "0x1");
         let e = read_functions(&[lines[0], &short_va, lines[2], lines[3]].join("\n"), "f").unwrap_err().to_string();
         assert!(e.contains("eight lowercase hex digits"), "{e}");
