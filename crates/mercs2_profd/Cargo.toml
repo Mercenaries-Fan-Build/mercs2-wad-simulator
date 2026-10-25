@@ -1,0 +1,19 @@
+[package]
+name = "mercs2_profd"
+version = "0.1.0"
+edition = "2021"
+description = "Mercenaries 2 profiler capture service: runs tracy-capture for each session the profiler ASI starts and stops."
+readme = "README.md"
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[[bin]]
+name = "mercs2_profd"
+path = "src/main.rs"
+
+[dependencies]
+# The request/reply protocol shared with the profiler ASI.
+mercs2_formats = { workspace = true }
+clap = { version = "4", features = ["derive", "env"] }
+libc = "0.2"
