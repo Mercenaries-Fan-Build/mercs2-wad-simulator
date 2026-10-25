@@ -705,12 +705,16 @@ pub fn center(ctx: &egui::Context, p: &Panel, playing: Option<audioplay::Status>
                         // The row's own click (make it current) is sensed FIRST, and its checkbox, ▶
                         // and cells laid over it after: in egui the widget registered later is on top,
                         // so each keeps its own click and the row gets the rest. Sensed after its
-                        // children, the row took every click, ▶ and checkbox included.
+                        // children, the row took every click, ▶ and checkbox included. The cells go
+                        // straight into the row's own layout, which centres each on the row's height;
+                        // a `horizontal` in between is only `interact_size.y` tall, so it was the one
+                        // centred, and the taller ▶ hung out of the row's foot.
                         let (rect, row) =
                             ui.allocate_exact_size(egui::vec2(ui.available_width(), row_h - 2.0), egui::Sense::click());
                         ui.painter().rect_filled(rect, egui::Rounding::same(3.0), fill);
                         let mut content = ui.child_ui(rect, egui::Layout::left_to_right(egui::Align::Center), None);
-                        content.horizontal(|ui| {
+                        {
+                                let ui = &mut content;
                                 let mut checked = on;
                                 if ui.add_sized([widths[0], row_h - 4.0], egui::Checkbox::without_text(&mut checked)).changed() {
                                     acts.push(Act::Toggle(w));
@@ -741,7 +745,7 @@ pub fn center(ctx: &egui::Context, p: &Panel, playing: Option<audioplay::Status>
                                 cell(ui, len_w, h, |ui| {
                                     ui.label(egui::RichText::new(secs(c.duration_s)).monospace().color(theme::DIM));
                                 });
-                        });
+                        }
                         if row.clicked() {
                             acts.push(Act::Current(w));
                         }
