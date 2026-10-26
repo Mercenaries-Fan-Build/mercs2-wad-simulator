@@ -7,8 +7,9 @@
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
 
-/// The state to open in, applied once the reference data is loaded. Every field but `capture` is
-/// optional; an absent one leaves that part of the window as a normal launch has it.
+/// The state to open in, applied once the reference data is loaded — or at once when the window
+/// opens on Settings because a path chain has no answer. Every field but `capture` is optional; an
+/// absent one leaves that part of the window as a normal launch has it.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct UiState {
