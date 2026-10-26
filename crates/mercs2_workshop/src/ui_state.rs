@@ -41,6 +41,11 @@ pub struct UiState {
     pub search: Option<String>,
     /// On the AUDIO tab: the clips to select, by record index.
     pub select: Option<Vec<u32>>,
+    /// Once the state is applied: use this game archive for this run, as Settings' "Use for this
+    /// run only…" does, and capture after the reload it starts has landed.
+    pub run_wad: Option<PathBuf>,
+    /// The same for the reference bundle.
+    pub run_data: Option<PathBuf>,
     /// Where to write the captured frame (PNG).
     pub capture: PathBuf,
     /// Frames to let the window settle after the state is applied, before the capture.
