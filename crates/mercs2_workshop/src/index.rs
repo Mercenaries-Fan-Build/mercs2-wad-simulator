@@ -448,65 +448,37 @@ impl AssetIndex {
 /// The workshop's bundled reference data (`workshop_data/`): everything the tool consults that
 /// is NOT a game-distributed file — the merged name pack, registry rows, spawnable templates,
 /// ECS schemas, the decompiled-Lua corpus. Built by `--pack-data`, resolved here so the app runs
-/// self-contained (no repo checkout needed). Resolution: `MERCS2_WORKSHOP_DATA` env, then
-/// the saved setting, then `workshop_data/` next to the exe, then a `workshop_data/` walk-up from
-/// the CWD, then the copy [`crate::fetch`] installs.
+/// self-contained (no repo checkout needed). Resolution is [`crate::chains::data`]: this run's
+/// choice, `MERCS2_WORKSHOP_DATA`, the saved setting, then `workshop_data/` next to the exe, a
+/// `workshop_data/` walk-up from the CWD, and the copy [`crate::fetch`] installs.
 ///
-/// A candidate counts only when it is a COMPLETE bundle: it holds [`BUNDLE_MANIFEST`], which
-/// `--pack-data` writes after every other file. The committed, partial `workshop_data/` of a repo
-/// checkout (the audio manifest, no `names.bin`) holds no manifest and
-/// does not count.
+/// A source a person set that is not a COMPLETE bundle (it holds [`BUNDLE_MANIFEST`], which
+/// `--pack-data` writes after every other file) is an error naming it — never passed over for the
+/// next source. The searched steps count only a complete bundle, so the committed, partial
+/// `workshop_data/` of a repo checkout (the audio manifest, no `names.bin`) does not count.
 ///
 /// This is the lookup alone; [`require_data_home`] adds the automatic download.
-pub fn data_home() -> Option<PathBuf> {
-    if let Ok(p) = std::env::var("MERCS2_WORKSHOP_DATA") {
-        let p = PathBuf::from(p);
-        if is_complete_bundle(&p) {
-            return Some(p);
-        }
-    }
-    if let Some(p) = crate::settings::load().data_dir {
-        if is_complete_bundle(&p) {
-            return Some(p);
-        }
-    }
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            let cand = dir.join("workshop_data");
-            if is_complete_bundle(&cand) {
-                return Some(cand);
-            }
-        }
-    }
-    if let Ok(cwd) = std::env::current_dir() {
-        for dir in cwd.ancestors() {
-            let cand = dir.join("workshop_data");
-            if is_complete_bundle(&cand) {
-                return Some(cand);
-            }
-        }
-    }
-    // LAST: a bundle this tool downloaded for itself (see `fetch`). Deliberately behind every other
-    // step — a bundle the user installed or pointed Settings at must always beat a fetched copy.
-    crate::fetch::installed_dir().filter(|p| is_complete_bundle(p))
+pub fn data_home() -> Result<PathBuf, String> {
+    let chain = crate::chains::data();
+    chain.in_use().map(Path::to_path_buf).ok_or_else(|| chain.unresolved("the reference data"))
 }
 
 /// The file `--pack-data` writes last into a bundle; its presence is what makes a folder a
 /// complete bundle for [`data_home`].
 pub const BUNDLE_MANIFEST: &str = "manifest.json";
 
-/// Whether `dir` is a complete reference bundle (holds [`BUNDLE_MANIFEST`]).
-fn is_complete_bundle(dir: &Path) -> bool {
-    dir.join(BUNDLE_MANIFEST).is_file()
-}
-
-/// The reference bundle, found through [`data_home`] or, when none is found, downloaded and
-/// installed through [`crate::fetch::install`]. An error when both fail, carrying where to
-/// download the bundle by hand and where to put it. `report` receives the download's stage for the
-/// boot loading screen.
+/// The reference bundle, found through [`data_home`] or, when nothing is set and none is found,
+/// downloaded and installed through [`crate::fetch::install`]. A source a person set that is broken
+/// is an error, never downloaded over. A failed download is an error carrying where to download
+/// the bundle by hand and where to put it. `report` receives the download's stage for the boot
+/// loading screen.
 pub fn require_data_home(report: &mut impl FnMut(f32, &'static str)) -> Result<PathBuf, String> {
-    if let Some(home) = data_home() {
-        return Ok(home);
+    let chain = crate::chains::data();
+    if let Some(home) = chain.in_use() {
+        return Ok(home.to_path_buf());
+    }
+    if !chain.is_empty() {
+        return Err(chain.unresolved("the reference data"));
     }
     report(0.02, "reference data (downloading workshop_data)");
     eprintln!(
