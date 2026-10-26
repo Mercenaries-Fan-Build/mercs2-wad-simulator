@@ -317,8 +317,21 @@ pub fn section(ui: &mut egui::Ui, v: &View<'_>) -> Vec<Act> {
     });
     if !v.opened.is_empty() {
         theme::section(ui, "What it opened", v.opened_badge.as_deref(), true, |ui| {
+            // Key, then the value left-aligned and cut to the card: a full path is wider than the
+            // card, and an unclipped one pushes the whole section past its left edge.
             for (k, val) in &v.opened {
-                theme::kv(ui, k, egui::RichText::new(val.as_str()).color(theme::DIM));
+                ui.horizontal(|ui| {
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(110.0, ui.spacing().interact_size.y),
+                        egui::Layout::left_to_right(egui::Align::Center),
+                        |ui| {
+                            ui.set_min_width(110.0);
+                            ui.label(egui::RichText::new(*k).color(theme::FAINT));
+                        },
+                    );
+                    ui.add(egui::Label::new(egui::RichText::new(val.as_str()).monospace().color(theme::DIM)).truncate())
+                        .on_hover_text(val.as_str());
+                });
             }
         });
     }
