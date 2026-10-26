@@ -146,7 +146,9 @@ cargo run -p mercs2_workshop -- --ui-state crates/mercs2_workshop/ui_states/insp
 The JSON names the state by the words the window shows — `page` (a rail label or `Live`),
 `settings_section`, `tab`, `lens`, `filter`, `load` (a model name), `shipment` + `contribution`,
 `bench` + `donor`, and on the AUDIO tab `bank`, `clip`, `search` and `select` (record indices),
-applied once the tab's routing is read (`ui_states/audio.json`) — plus `capture` (the PNG to write,
+applied once the tab's routing is read (`ui_states/audio.json`), `run_wad` / `run_data` (a path
+used for this run as Settings' "Use for this run only…" does, after the first load; the capture
+waits for the reload it starts, and a path that starts none exits 2) — plus `capture` (the PNG to write,
 relative to the working directory) and `settle_frames` (default 8). The window opens, applies the state once the reference data is in
 (or at once when it opens on Settings for a chain with no answer: `ui_states/settings_unset.json`),
 captures the presented frame (3D and GUI) and exits 0. A name that does not resolve, a field it does
