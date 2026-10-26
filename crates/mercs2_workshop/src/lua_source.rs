@@ -205,11 +205,9 @@ mod tests {
     /// pin the corpus to the release CI downloads, so a stale or shrunken bundle cannot pass either.
     #[test]
     fn every_corpus_script_round_trips_byte_identical() {
-        let home = crate::index::data_home().expect(
-            "no workshop_data reference bundle found (MERCS2_WORKSHOP_DATA, the Settings data \
-             folder, workshop_data beside the executable or above the working directory, or the \
-             downloaded copy); the round-trip gate runs over its lua/ and lua_dlc/ corpus",
-        );
+        let home = crate::index::data_home().unwrap_or_else(|e| {
+            panic!("the round-trip gate runs over the reference bundle's lua/ and lua_dlc/ corpus: {e}")
+        });
         let mut failures = Vec::new();
         for (sub, expected) in crate::index::PINNED_CORPUS {
             let mut files = Vec::new();
