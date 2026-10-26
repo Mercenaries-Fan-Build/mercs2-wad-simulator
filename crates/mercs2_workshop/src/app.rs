@@ -44,10 +44,13 @@ fn text_sh(scene: &mut Scene, x: f32, y: f32, scale: f32, color: [f32; 4], s: &s
 }
 
 pub struct Options {
-    pub wadpath: String,
-    /// Overlay WADs opened ON TOP of the base, in load order — the game's own patch mechanism
-    /// (`data/vz-patch.wad`): a later archive's asset wins over an earlier one's.
-    pub overlays: Vec<String>,
+    /// `--wad`: the first step of the game-archive chain ([`crate::chains::game`]). The window
+    /// resolves the chain itself, so a change made in Settings re-resolves it with the same flag.
+    pub wad_flag: Option<String>,
+    /// Load `vz-patch.wad` beside the base (no `--no-auto-patch`).
+    pub auto_patch: bool,
+    /// Every `--overlay`, in argument order. See [`overlays_for`].
+    pub extra_overlays: Vec<String>,
     /// A Shipment folder to open in the Quartermaster dock at startup.
     ///
     /// The dock is otherwise only reachable by clicking, which makes it unverifiable from a script —
@@ -90,6 +93,11 @@ impl WadStack {
             }
         }
         Ok(WadStack { wads, labels, registry: Default::default(), tex_cache: HashMap::new() })
+    }
+
+    /// No archive open: the window's state before a boot brings one in.
+    pub fn empty() -> WadStack {
+        WadStack { wads: Vec::new(), labels: Vec::new(), registry: Default::default(), tex_cache: HashMap::new() }
     }
 
     /// Short display tag for an asset's source wad (base = "", overlays = "+<file stem>").
@@ -724,8 +732,8 @@ fn bench_page(bench: crate::quartermaster::Craft) -> Workbench {
 /// inspector deliberately registered and empty — two blank panels on the one page that had nothing
 /// to put in them. It now behaves like every other page: the navigator lists, the centre holds the
 /// subject, and the inspector is simply not registered here (see the `wb != Settings` guard on it).
-#[derive(PartialEq, Clone, Copy)]
-enum SettingsSection {
+#[derive(PartialEq, Clone, Copy, Debug)]
+pub(crate) enum SettingsSection {
     Game,
     Data,
     Shipments,
@@ -734,14 +742,14 @@ enum SettingsSection {
 }
 
 impl SettingsSection {
-    const ALL: [SettingsSection; 5] = [
+    pub(crate) const ALL: [SettingsSection; 5] = [
         SettingsSection::Game,
         SettingsSection::Data,
         SettingsSection::Shipments,
         SettingsSection::Shortcuts,
         SettingsSection::About,
     ];
-    fn label(self) -> &'static str {
+    pub(crate) fn label(self) -> &'static str {
         match self {
             SettingsSection::Game => "Game archive",
             SettingsSection::Data => "Reference data",
@@ -750,7 +758,7 @@ impl SettingsSection {
             SettingsSection::About => "About & diagnostics",
         }
     }
-    fn blurb(self) -> &'static str {
+    pub(crate) fn blurb(self) -> &'static str {
         match self {
             SettingsSection::Game => "Which install the tool reads",
             SettingsSection::Data => "Hash-to-name bundle",
@@ -1021,28 +1029,57 @@ fn filter_rows(
     v
 }
 
-pub fn run(opts: Options) {
-    let mut clip_loader = ClipLoader::spawn(opts.wadpath.clone(), opts.overlays.clone());
-    let mut w = match WadStack::open(&opts.wadpath, &opts.overlays) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("workshop: cannot open {}: {e}", opts.wadpath);
-            return;
+/// The overlay WADs opened ON TOP of `base`, in load order — the game's own patch mechanism: the
+/// `vz-patch.wad` beside it (when `auto_patch` and it exists), then `extra` (every `--overlay`). A
+/// later archive's asset wins over an earlier one's.
+pub fn overlays_for(base: &str, auto_patch: bool, extra: &[String]) -> Vec<String> {
+    let mut out = Vec::new();
+    if auto_patch {
+        let auto = std::path::Path::new(base).with_file_name("vz-patch.wad");
+        if auto.is_file() {
+            out.push(auto.to_string_lossy().into_owned());
         }
-    };
-    // The catalog builds here (hashes only); the reference bundle (found, or downloaded when none is
-    // installed — see `index::require_data_home`) loads on a background thread and lands via
-    // `apply_names`. The window opens immediately and shows the boot screen meanwhile.
+    }
+    out.extend(extra.iter().filter(|o| !out.contains(o)).cloned().collect::<Vec<_>>());
+    out
+}
+
+/// The mod publisher's default output: next to the base wad, NEVER vz-patch.wad (that's the DLC
+/// port's file).
+fn mod_out_beside(base: &str) -> String {
+    std::path::Path::new(base)
+        .parent()
+        .map(|d| d.join("vz-mod.wad"))
+        .unwrap_or_else(|| std::path::PathBuf::from("vz-mod.wad"))
+        .to_string_lossy()
+        .into_owned()
+}
+
+/// Everything opened from the game archive: built on the boot thread, so the loading screen keeps
+/// animating while a 2.5 GB archive's index is read.
+struct Archive {
+    wadpath: String,
+    overlays: Vec<String>,
+    w: WadStack,
+    /// The catalog, without names (the bundle half of the boot brings those).
+    index: AssetIndex,
+    kit_templates: KitTemplates,
+    anim_sel: Option<AnimSelector>,
+    /// The game's own shell plate (shell.wad): the browse backdrop.
+    shell_plate: Option<mercs2_formats::texture::TextureData>,
+    /// The Loading.wad gold skull: the loading screen's art.
+    boot_skull: Option<mercs2_formats::texture::TextureData>,
+}
+
+/// Open the game archive at `wadpath` with `overlays` and build its catalog.
+fn open_archive(wadpath: &str, overlays: &[String]) -> Result<Archive, String> {
+    let mut w = WadStack::open(wadpath, overlays).map_err(|e| format!("cannot open {wadpath}: {e}"))?;
+    // The catalog builds here (hashes only); names land later through `apply_names`.
     let mut index = AssetIndex::build(&w.wads, HashMap::new());
     // The world's templates: each spawn template that picks a character-kit outfit gets its own
     // catalog row ("Jungle Elite", "VZ Sniper", …). Required — the catalog is wrong without them.
-    let mut kit_templates = match load_kit_templates(&mut w) {
-        Ok(t) => t,
-        Err(e) => {
-            eprintln!("workshop: cannot read the world's templates (worldentity): {e}");
-            return;
-        }
-    };
+    let kit_templates = load_kit_templates(&mut w)
+        .map_err(|e| format!("cannot read the world's templates (worldentity): {e}"))?;
     let kit_rows = index.add_kit_templates(&kit_templates.kits, &kit_templates.all);
     eprintln!(
         "[workshop] catalog: {} models ({kit_rows} kit template rows), {} textures ({} wad(s))",
@@ -1056,64 +1093,160 @@ pub fn run(opts: Options) {
     if anim_sel.is_none() {
         eprintln!("[workshop] AnimationLookup not found — character-specific clips unavailable");
     }
-    /// Everything the boot thread loads from the reference bundle.
-    struct BootData {
-        names: HashMap<u32, String>,
-        lua: Vec<(String, String, String)>,
-        missions: crate::missions::Reference,
-        audio_idx: crate::audioidx::AudioIndex,
-        secs: f32,
-    }
-    enum Boot {
-        Prog(f32, &'static str),
-        Done(Box<BootData>),
-        /// The reference bundle could not be found, downloaded or read; the boot screen shows this.
-        Failed(String),
-    }
-    let (ntx, nrx) = std::sync::mpsc::channel::<Boot>();
-    {
-        let tx = ntx.clone();
-        std::thread::spawn(move || {
-            let t0 = std::time::Instant::now();
-            let load = || -> Result<BootData, String> {
-                let names = crate::index::load_all_names_staged(|f, stage| {
-                    let _ = tx.send(Boot::Prog(f, stage));
-                })?;
-                let _ = tx.send(Boot::Prog(0.97, "Lua reference corpus"));
-                let lua = crate::index::load_lua_corpus()?;
-                // The Missions page's corpus index and palette: every script parsed and lifted
-                // once, here rather than on the UI thread.
-                let _ = tx.send(Boot::Prog(0.98, "Mission scripts"));
-                let missions = crate::missions::Reference::build(&lua)?;
-                let home = crate::index::require_data_home(&mut |_, _| {})?;
-                Ok(BootData {
-                    names,
-                    lua,
-                    missions,
-                    // The captioned audio inventory — the Audio domain browses this (banks → clips
-                    // with captions).
-                    audio_idx: crate::audioidx::AudioIndex::load(&home)?,
-                    secs: t0.elapsed().as_secs_f32(),
-                })
-            };
-            let _ = ntx.send(match load() {
-                Ok(data) => Boot::Done(Box::new(data)),
-                Err(e) => Boot::Failed(e),
-            });
+    let shell_plate = match wad::shell_loading_plate(wadpath) {
+        Ok(td) => Some(td),
+        Err(e) => {
+            eprintln!("[workshop] shell plate unavailable ({e}); flat backdrop");
+            None
+        }
+    };
+    let boot_skull = std::path::Path::new(wadpath)
+        .with_file_name("Loading.wad")
+        .to_str()
+        .and_then(|p| wad::open(p).ok())
+        .and_then(|mut lw| {
+            let h = mercs2_formats::hash::pandemic_hash_m2("global_loading_skull");
+            wad::extract_texture(&mut lw, h).ok()
         });
+    if boot_skull.is_none() {
+        eprintln!("[workshop] Loading.wad skull unavailable; boot screen without icon");
     }
-    // Boot loading screen state: the app renders the engine's loading path (shell plate +
-    // spinner + progress bar) until the reference bundle is in, then drops into the browser.
-    let mut names_pending = true;
-    // Set when the boot thread fails: the boot screen shows it in place of the loading stage and
-    // the app goes no further (Esc quits).
-    let mut boot_error: Option<String> = None;
-    // Decompiled-Lua reference corpus (path, content, lowercased) — loaded on the boot thread.
-    let mut lua_corpus: Vec<(String, String, String)> = Vec::new();
-    let mut boot_target = 0.02f32; // stage-start fraction from the loader thread
-    let mut boot_shown = 0.0f32; // eased bar position
-    let mut boot_stage: &'static str = "asset catalog";
+    Ok(Archive {
+        wadpath: wadpath.to_string(),
+        overlays: overlays.to_vec(),
+        w,
+        index,
+        kit_templates,
+        anim_sel,
+        shell_plate,
+        boot_skull,
+    })
+}
 
+/// Everything the boot thread loads from the reference bundle.
+struct BootData {
+    /// The bundle it was loaded from (the downloaded copy when the boot downloaded it).
+    home: PathBuf,
+    names: HashMap<u32, String>,
+    lua: Vec<(String, String, String)>,
+    missions: crate::missions::Reference,
+    audio_idx: crate::audioidx::AudioIndex,
+    secs: f32,
+}
+
+use crate::settingspage::Which;
+
+enum Boot {
+    Prog(f32, &'static str),
+    /// The game archive is open.
+    Archive(Box<Archive>),
+    /// The boot is over, with the reference bundle when it loaded one.
+    Done(Option<Box<BootData>>),
+    /// The archive or the bundle could not be loaded; Settings shows it on that chain.
+    Failed(Which, String),
+}
+
+/// Start a boot: open `archive` (base and overlays) when given, then load the reference bundle
+/// when `data`. Messages arrive in that order; `Done` (or `Failed`) is the last.
+fn spawn_boot(archive: Option<(String, Vec<String>)>, data: bool) -> std::sync::mpsc::Receiver<Boot> {
+    let (tx, rx) = std::sync::mpsc::channel::<Boot>();
+    std::thread::spawn(move || {
+        let t0 = std::time::Instant::now();
+        if let Some((wadpath, overlays)) = archive {
+            let _ = tx.send(Boot::Prog(0.01, "asset catalog"));
+            match open_archive(&wadpath, &overlays) {
+                Ok(a) => {
+                    let _ = tx.send(Boot::Archive(Box::new(a)));
+                }
+                Err(e) => {
+                    let _ = tx.send(Boot::Failed(Which::Game, e));
+                    return;
+                }
+            }
+        }
+        if !data {
+            let _ = tx.send(Boot::Done(None));
+            return;
+        }
+        let load = || -> Result<BootData, String> {
+            let home = crate::index::require_data_home(&mut |f, stage| {
+                let _ = tx.send(Boot::Prog(f, stage));
+            })?;
+            let names = crate::index::load_all_names_staged(|f, stage| {
+                let _ = tx.send(Boot::Prog(f, stage));
+            })?;
+            let _ = tx.send(Boot::Prog(0.97, "Lua reference corpus"));
+            let lua = crate::index::load_lua_corpus()?;
+            // The Missions page's corpus index and palette: every script parsed and lifted
+            // once, here rather than on the UI thread.
+            let _ = tx.send(Boot::Prog(0.98, "Mission scripts"));
+            let missions = crate::missions::Reference::build(&lua)?;
+            Ok(BootData {
+                // The captioned audio inventory — the Audio domain browses this (banks → clips
+                // with captions).
+                audio_idx: crate::audioidx::AudioIndex::load(&home)?,
+                home,
+                names,
+                lua,
+                missions,
+                secs: t0.elapsed().as_secs_f32(),
+            })
+        };
+        let _ = tx.send(match load() {
+            Ok(data) => Boot::Done(Some(Box::new(data))),
+            Err(e) => Boot::Failed(Which::Data, e),
+        });
+    });
+    rx
+}
+
+/// Where the window is: on Settings because a chain has no answer, loading, or ready.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Phase {
+    Setup,
+    Booting,
+    Ready,
+}
+
+/// What the chains ask of the window, given what it has loaded.
+#[derive(Debug, PartialEq)]
+enum Next {
+    /// Nothing changed.
+    Stay,
+    /// A chain has no answer: Settings, on that section.
+    Setup(SettingsSection),
+    /// Load: the archive at this path (base; overlays are derived), and/or the reference bundle.
+    Boot { archive: Option<PathBuf>, data: bool },
+}
+
+/// Decide what the window does with `game` and `data` when it has `loaded_wad` and `loaded_data`
+/// in. A reference chain with nothing set and nothing found boots too: the boot downloads it.
+fn next_step(loaded_wad: Option<&std::path::Path>, loaded_data: Option<&std::path::Path>, game: &crate::chains::Chain, data: &crate::chains::Chain) -> Next {
+    let Some(g) = game.in_use() else { return Next::Setup(SettingsSection::Game) };
+    let d = data.in_use();
+    if d.is_none() && !data.is_empty() {
+        return Next::Setup(SettingsSection::Data);
+    }
+    let archive = (loaded_wad != Some(g)).then(|| g.to_path_buf());
+    // A new archive reloads the bundle with it: every page that reads the corpus is reset with the
+    // archive, and is filled again from one boot. With nothing set and nothing found, whatever is
+    // loaded came from a source that is gone.
+    let data = archive.is_some()
+        || match d {
+            Some(d) => loaded_data != Some(d),
+            None => true,
+        };
+    if archive.is_none() && !data {
+        Next::Stay
+    } else {
+        Next::Boot { archive, data }
+    }
+}
+
+pub fn run(opts: Options) {
+    // The window comes FIRST. Nothing before it may set the platform's app object up (a native
+    // picker here set the macOS app up ahead of winit's event loop, and winit then panicked), and a
+    // chain with no answer opens on Settings instead of failing before there is a window.
     let event_loop = EventLoop::new().expect("event loop");
     let window = Arc::new(
         WindowBuilder::new()
@@ -1127,35 +1260,51 @@ pub fn run(opts: Options) {
     // The inspector GUI (egui through the engine's overlay hook) + the frame's queued actions.
     let mut gui = crate::gui::Gui::new(scene.device(), scene.surface_format(), &window);
     let mut actions: Vec<Act> = Vec::new();
+
+    // The two chains (`crate::chains`): where the game archive and the reference bundle come from.
+    // Re-resolved whenever Settings changes a source.
+    let mut game_chain = crate::chains::game(opts.wad_flag.as_deref());
+    let mut data_chain = crate::chains::data();
+    // What is loaded: the archive (base path, overlays) and the bundle's folder. Empty until a boot
+    // brings them in; a changed chain is compared against these to decide what to reload.
+    let mut wadpath = String::new();
+    let mut overlays: Vec<String> = Vec::new();
+    let mut loaded_data: Option<PathBuf> = None;
+    // The archive-bound state, empty until the archive is open (`Boot::Archive` fills it).
+    let mut clip_loader = ClipLoader::spawn(String::new(), Vec::new());
+    let mut w = WadStack::empty();
+    let mut index = AssetIndex::build(&[], HashMap::new());
+    let mut kit_templates = KitTemplates::default();
+    let mut anim_sel: Option<AnimSelector> = None;
     // The game's own shell plate (shell.wad) as the workshop backdrop — the browse screen renders
     // through the engine's menu path over it until something is loaded into the 3D viewport.
-    let shell_plate = match wad::shell_loading_plate(&opts.wadpath) {
-        Ok(td) => Some(td),
-        Err(e) => {
-            eprintln!("[workshop] shell plate unavailable ({e}); flat backdrop");
-            None
-        }
+    let mut shell_plate: Option<mercs2_formats::texture::TextureData> = None;
+    // The base path and overlays of an archive chain answer.
+    let stack_of = |p: &std::path::Path, auto_patch: bool, extra: &[String]| -> (String, Vec<String>) {
+        let s = p.to_string_lossy().into_owned();
+        let o = overlays_for(&s, auto_patch, extra);
+        (s, o)
     };
-    // BOOT art: the authentic Loading.wad gold skull — the boot-mode loading shader draws it
-    // pulsing on black with the warm sheen. The shell plate takes over as the browse backdrop
-    // once boot completes.
-    let boot_skull = std::path::Path::new(&opts.wadpath)
-        .with_file_name("Loading.wad")
-        .to_str()
-        .and_then(|p| wad::open(p).ok())
-        .and_then(|mut lw| {
-            let h = mercs2_formats::hash::pandemic_hash_m2("global_loading_skull");
-            wad::extract_texture(&mut lw, h).ok()
-        });
-    match &boot_skull {
-        Some(td) => scene.set_loading_art(td),
-        None => {
-            eprintln!("[workshop] Loading.wad skull unavailable; boot screen without icon");
-            if let Some(td) = &shell_plate {
-                scene.set_loading_art(td);
-            }
-        }
-    }
+    // Where the window starts: loading both, or Settings on the chain with no answer.
+    let first = next_step(None, None, &game_chain, &data_chain);
+    let (mut phase, mut boot_rx) = match &first {
+        Next::Boot { archive, data } => (
+            Phase::Booting,
+            Some(spawn_boot(archive.as_deref().map(|p| stack_of(p, opts.auto_patch, &opts.extra_overlays)), *data)),
+        ),
+        Next::Setup(_) => (Phase::Setup, None),
+        Next::Stay => unreachable!("nothing is loaded at startup"),
+    };
+    // Set when Settings changed a source: the chains are re-resolved at the top of the next frame.
+    let mut chains_dirty = false;
+    // Decompiled-Lua reference corpus (path, content, lowercased) — loaded on the boot thread.
+    let mut lua_corpus: Vec<(String, String, String)> = Vec::new();
+    let mut boot_target = 0.02f32; // stage-start fraction from the loader thread
+    let mut boot_shown = 0.0f32; // eased bar position
+    let mut boot_stage: &'static str = "asset catalog";
+    // The last boot's failure: which chain it belongs to and why. Settings shows that chain red
+    // with the reason until the next boot starts.
+    let mut boot_fail: Option<(Which, String)> = None;
 
     // Browser state.
     let mut kind = Kind::Model;
@@ -1188,13 +1337,9 @@ pub fn run(opts: Options) {
     let mut mod_name = String::new();
     let mut mod_donor: Option<(u32, String)> = None;
     let mut mod_group: usize = 0;
-    // Output default: next to the base wad, NEVER vz-patch.wad (that's the DLC port's file).
-    let mut mod_out: String = std::path::Path::new(&opts.wadpath)
-        .parent()
-        .map(|d| d.join("vz-mod.wad"))
-        .unwrap_or_else(|| std::path::PathBuf::from("vz-mod.wad"))
-        .to_string_lossy()
-        .into_owned();
+    // Output default: next to the base wad, NEVER vz-patch.wad (that's the DLC port's file). Set
+    // when the archive opens (`mod_out_beside`).
+    let mut mod_out = String::new();
     let mut publisher: Option<crate::publish::Publisher> = None;
     // In-flight background F10 export of a WAD asset (the heavy full-clip-decode path).
     let mut exporter: Option<Exporter> = None;
@@ -1246,12 +1391,11 @@ pub fn run(opts: Options) {
             .ok()
             .and_then(|e| e.parent().and_then(mercs2_quartermaster::names::NameTable::find_from))
     });
-    let qm_stack: Vec<String> = {
-        let mut v = vec![opts.wadpath.clone()];
-        v.extend(opts.overlays.iter().cloned());
-        v
-    };
-    let qm_corpus = crate::quartermaster::corpus_root();
+    // The open stack (base, then overlays), for the Shipment page and About. Set when the archive
+    // opens.
+    let mut qm_stack: Vec<String> = Vec::new();
+    // Re-read when a boot brings a reference bundle in.
+    let mut qm_corpus = crate::quartermaster::corpus_root();
     if let Some(dir) = opts.shipment.clone() {
         qm.open_shipment(&dir, qm_names.as_ref());
         eprintln!("[workshop] quartermaster: {}", qm.status_line(true));
@@ -1259,19 +1403,27 @@ pub fn run(opts: Options) {
     // The active workbench (activity rail) + the vehicle inventory the Mods navigator lists as donor
     // templates (rebuilt when names/overlays change).
     // Asking for a Shipment IS asking for its page — landing on Inspect would hide what you opened.
-    let mut wb = if opts.shipment.is_some() {
+    // A chain with no answer opens on Settings; the first boot to finish lands on `resume_wb`.
+    let resume_wb = if opts.shipment.is_some() {
         Workbench::Quartermaster
     } else {
         Workbench::Inspect
     };
+    let mut wb = if phase == Phase::Setup { Workbench::Settings } else { resume_wb };
+    // Whether a boot has ever finished: a reload's boot returns to Settings, where it was asked for.
+    let mut ever_ready = false;
     // Settings workbench: the saved document plus the outcome of the last action. `cfg_note` is the
     // ONLY feedback the page gives, so it carries the validation result (model count / name count),
     // never a bare "saved" — a settings page that cannot say what it just accepted is how a bad path
     // gets remembered and fails at the next launch instead of at the click.
     let mut cfg = crate::settings::load();
     let mut cfg_note: Option<Result<String, String>> = None;
-    // Which Settings section the centre is showing. The navigator lists them.
-    let mut settings_section = SettingsSection::Game;
+    // Which Settings section the centre is showing. The navigator lists them. A chain with no
+    // answer opens on its section.
+    let mut settings_section = match first {
+        Next::Setup(s) => s,
+        _ => SettingsSection::Game,
+    };
     // Which contribution (if any) the open bench was entered from. The index is what makes a bench
     // edit land back on the RIGHT contribution instead of appending a new one — `Act::Craft` used to
     // carry no index at all, so a bench had no idea what it was editing and no way back.
@@ -1362,14 +1514,14 @@ pub fn run(opts: Options) {
             Event::WindowEvent { window_id, event } if window_id == scene.window.id() => {
             // Feed the GUI first: when a panel captures the pointer/keyboard, the camera and the
             // app shortcuts stand down (see the `_ if gui_took_it` arm below).
-            let gui_took_it = !names_pending && gui.on_event(&event);
+            let gui_took_it = phase != Phase::Booting && gui.on_event(&event);
             match event {
                 WindowEvent::CloseRequested => elwt.exit(),
                 WindowEvent::Resized(size) => scene.resize(size),
                 // Drag-drop IMPORT: .obj / .gltf / .glb dropped on the window goes straight onto
                 // the preview pedestal, rendered by the engine like any game asset.
                 WindowEvent::DroppedFile(path) => {
-                    if names_pending {
+                    if phase != Phase::Ready {
                         return;
                     }
                     status = import_file(
@@ -1438,8 +1590,10 @@ pub fn run(opts: Options) {
                         return;
                     }
 
-                    // Boot loading screen: input is Esc-to-quit only until the corpora are in.
-                    if names_pending {
+                    // Loading screen, and Settings while a chain has no answer: Esc quits; the
+                    // browse keys have nothing to browse. (Settings' own widgets take their keys
+                    // through egui, above.)
+                    if phase != Phase::Ready {
                         if code == KeyCode::Escape {
                             elwt.exit();
                         }
@@ -1540,20 +1694,17 @@ pub fn run(opts: Options) {
                     let dt = last_frame.elapsed().as_secs_f32().min(0.05);
                     last_frame = std::time::Instant::now();
 
-                    // ── Reference-data download (Settings): drain whatever the worker has said. The
-                    // names already in memory are NOT swapped out underneath the running session —
-                    // a whole catalog re-label mid-frame is a far bigger surprise than "restart to
-                    // load it", and every other path in this chain is read once at boot too. ──
+                    // ── Reference-data download (Settings): drain whatever the worker has said. A
+                    // finished download re-resolves the chain, which loads it in place when it is
+                    // now the source in use. ──
                     if let Some(rx) = &fetch_rx {
                         let mut finished = false;
                         loop {
                             match rx.try_recv() {
                                 Ok(crate::fetch::Event::Progress(m)) => fetch_msg = m,
                                 Ok(crate::fetch::Event::Done(p)) => {
-                                    cfg_note = Some(Ok(format!(
-                                        "Reference data installed to {} — restart to load it.",
-                                        p.display()
-                                    )));
+                                    cfg_note = Some(Ok(format!("Reference data installed to {}.", p.display())));
+                                    chains_dirty = true;
                                     finished = true;
                                 }
                                 Ok(crate::fetch::Event::Failed(e)) => {
@@ -1574,106 +1725,212 @@ pub fn run(opts: Options) {
                         }
                     }
 
-                    // ── Boot loading screen: engine loading path (shell plate + spinner + bar)
-                    // until the reference bundle is in, then fall through into the browser. When
-                    // the boot thread fails, the screen shows its error and stays (Esc quits). ──
-                    if names_pending {
-                        loop {
-                            match nrx.try_recv() {
-                                Ok(Boot::Prog(f, stage)) => {
-                                    boot_target = f;
-                                    boot_stage = stage;
-                                }
-                                Ok(Boot::Done(data)) => {
-                                    let BootData { names, lua, missions, audio_idx: audio, secs } = *data;
-                                    index.apply_names(names);
-                                    lua_corpus = lua;
-                                    // The Missions blueprint editor's script list and palette come
-                                    // from the corpus the boot thread indexed.
-                                    missions_panel.set_reference(missions, &lua_corpus);
-                                    audio_page.set_index(audio);
-                                    filtered = refilter(&index, kind, &filter, lens);
-                                    inventory_dirty = true; // names now resolve → build the vehicle inventory
-                                    sel = sel.min(filtered.len().saturating_sub(1));
-                                    names_pending = false;
-                                    // Swap the boot skull out for the shell plate (browse backdrop).
-                                    if let Some(td) = &shell_plate {
-                                        scene.set_loading_art(td);
+                    // ── A source changed in Settings: re-resolve both chains and do what they ask —
+                    // nothing, unload into Settings, or reload in place. Anything tied to what is
+                    // being replaced is dropped first, so no page keeps state from the old archive
+                    // or bundle. ──
+                    if chains_dirty && phase != Phase::Booting {
+                        chains_dirty = false;
+                        game_chain = crate::chains::game(opts.wad_flag.as_deref());
+                        data_chain = crate::chains::data();
+                        let loaded_wad = (!wadpath.is_empty()).then(|| PathBuf::from(&wadpath));
+                        let next = next_step(loaded_wad.as_deref(), loaded_data.as_deref(), &game_chain, &data_chain);
+                        let (drop_archive, drop_data) = match &next {
+                            Next::Stay => (false, false),
+                            Next::Setup(SettingsSection::Game) => (true, true),
+                            Next::Setup(_) => (false, true),
+                            Next::Boot { archive, .. } => (archive.is_some(), true),
+                        };
+                        if drop_archive {
+                            preview = None;
+                            donor_ref = None;
+                            world = World::new();
+                            hero_renderers.clear();
+                            tex_view = None;
+                            export_dialog = None;
+                            craft_subject = None;
+                            retarget_target = None;
+                            mod_donor = None;
+                            vo_stream = None;
+                            vo_player = None;
+                            vo_error = None;
+                            w = WadStack::empty();
+                            index = AssetIndex::build(&[], HashMap::new());
+                            kit_templates = KitTemplates::default();
+                            anim_sel = None;
+                            clip_loader = ClipLoader::spawn(String::new(), Vec::new());
+                            shell_plate = None;
+                            wadpath.clear();
+                            overlays.clear();
+                            qm_stack.clear();
+                            mod_out.clear();
+                            filtered = refilter(&index, kind, &filter, lens);
+                            sel = 0;
+                            inventory_dirty = true;
+                        }
+                        if drop_data {
+                            lua_corpus.clear();
+                            lua_view = None;
+                            missions_panel = crate::missions::Panel::default();
+                            // Its routing reads English.wad beside the archive, its clips the bundle.
+                            audio_page = crate::audiopage::Panel::default();
+                            loaded_data = None;
+                        }
+                        match next {
+                            Next::Stay => {}
+                            Next::Setup(s) => {
+                                phase = Phase::Setup;
+                                wb = Workbench::Settings;
+                                settings_section = s;
+                            }
+                            Next::Boot { archive, data } => {
+                                boot_fail = None;
+                                boot_target = 0.02;
+                                boot_shown = 0.0;
+                                boot_stage = if archive.is_some() { "asset catalog" } else { "reference data" };
+                                boot_rx = Some(spawn_boot(
+                                    archive.as_deref().map(|p| stack_of(p, opts.auto_patch, &opts.extra_overlays)),
+                                    data,
+                                ));
+                                phase = Phase::Booting;
+                            }
+                        }
+                    }
+
+                    // ── Loading screen: engine loading path (shell plate + spinner + bar) while a
+                    // boot runs, then into the app. A boot that fails lands on Settings with the
+                    // failing chain in red and the error under it. ──
+                    if phase == Phase::Booting {
+                        let mut ended: Option<Result<(), (Which, String)>> = None;
+                        if let Some(rx) = &boot_rx {
+                            loop {
+                                match rx.try_recv() {
+                                    Ok(Boot::Prog(f, stage)) => {
+                                        boot_target = f;
+                                        boot_stage = stage;
                                     }
-                                    status = format!(
-                                        "{} names loaded ({secs:.1}s) — {} models, {} textures, {} lua scripts",
-                                        index.names.len(),
-                                        index.models().len(),
-                                        index.textures().len(),
-                                        lua_corpus.len()
-                                    );
-                                    // The loader's last word: it exits after sending this, so the
-                                    // next receive would see it gone and call that a failure.
-                                    break;
-                                }
-                                Ok(Boot::Failed(e)) => {
-                                    eprintln!("workshop: {e}");
-                                    boot_error = Some(e);
-                                }
-                                Err(std::sync::mpsc::TryRecvError::Empty) => break,
-                                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                                    if boot_error.is_none() {
-                                        let e = "the reference-data loader stopped without a result".to_string();
-                                        eprintln!("workshop: {e}");
-                                        boot_error = Some(e);
+                                    Ok(Boot::Archive(a)) => {
+                                        let Archive { wadpath: p, overlays: o, w: nw, index: ni, kit_templates: kt, anim_sel: asel, shell_plate: sp, boot_skull } = *a;
+                                        clip_loader = ClipLoader::spawn(p.clone(), o.clone());
+                                        mod_out = mod_out_beside(&p);
+                                        qm_stack = std::iter::once(p.clone()).chain(o.iter().cloned()).collect();
+                                        wadpath = p;
+                                        overlays = o;
+                                        w = nw;
+                                        index = ni;
+                                        kit_templates = kt;
+                                        anim_sel = asel;
+                                        shell_plate = sp;
+                                        // BOOT art: the authentic Loading.wad gold skull — the
+                                        // boot-mode loading shader draws it pulsing on black with
+                                        // the warm sheen. The shell plate takes over as the browse
+                                        // backdrop once the boot completes.
+                                        if let Some(td) = boot_skull.as_ref().or(shell_plate.as_ref()) {
+                                            scene.set_loading_art(td);
+                                        }
+                                        filtered = refilter(&index, kind, &filter, lens);
+                                        sel = 0;
+                                        inventory_dirty = true;
                                     }
-                                    break;
+                                    Ok(Boot::Done(data)) => {
+                                        if let Some(data) = data {
+                                            let BootData { home, names, lua, missions, audio_idx: audio, secs } = *data;
+                                            index.apply_names(names);
+                                            lua_corpus = lua;
+                                            // The Missions blueprint editor's script list and palette
+                                            // come from the corpus the boot thread indexed.
+                                            missions_panel.set_reference(missions, &lua_corpus);
+                                            audio_page.set_index(audio);
+                                            loaded_data = Some(home);
+                                            qm_corpus = crate::quartermaster::corpus_root();
+                                            status = format!(
+                                                "{} names loaded ({secs:.1}s) — {} models, {} textures, {} lua scripts",
+                                                index.names.len(),
+                                                index.models().len(),
+                                                index.textures().len(),
+                                                lua_corpus.len()
+                                            );
+                                        }
+                                        filtered = refilter(&index, kind, &filter, lens);
+                                        inventory_dirty = true; // names now resolve → build the vehicle inventory
+                                        sel = sel.min(filtered.len().saturating_sub(1));
+                                        // Swap the boot skull out for the shell plate (browse backdrop).
+                                        if let Some(td) = &shell_plate {
+                                            scene.set_loading_art(td);
+                                        }
+                                        ended = Some(Ok(()));
+                                        // The loader's last word: it exits after sending this, so the
+                                        // next receive would see it gone and call that a failure.
+                                        break;
+                                    }
+                                    Ok(Boot::Failed(which, e)) => {
+                                        ended = Some(Err((which, e)));
+                                        break;
+                                    }
+                                    Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                                        let which = if wadpath.is_empty() { Which::Game } else { Which::Data };
+                                        ended = Some(Err((which, "the loader stopped without a result".to_string())));
+                                        break;
+                                    }
                                 }
                             }
                         }
-                        if names_pending {
+                        match ended {
+                            None => {}
+                            Some(Ok(())) => {
+                                boot_rx = None;
+                                // The chains as they stand now: a boot that downloaded the bundle
+                                // made the downloaded copy the data chain's answer.
+                                game_chain = crate::chains::game(opts.wad_flag.as_deref());
+                                data_chain = crate::chains::data();
+                                phase = Phase::Ready;
+                                if !ever_ready {
+                                    wb = resume_wb;
+                                }
+                                ever_ready = true;
+                            }
+                            Some(Err((which, e))) => {
+                                eprintln!("workshop: {e}");
+                                if ui_state.is_some() {
+                                    eprintln!("--ui-state: the window never left the loading screen: {e}");
+                                    std::process::exit(2);
+                                }
+                                boot_rx = None;
+                                // What the failed boot half-loaded goes with it.
+                                if which == Which::Game {
+                                    w = WadStack::empty();
+                                    index = AssetIndex::build(&[], HashMap::new());
+                                    wadpath.clear();
+                                    overlays.clear();
+                                    qm_stack.clear();
+                                    filtered = refilter(&index, kind, &filter, lens);
+                                    sel = 0;
+                                }
+                                let chain = if which == Which::Game { &mut game_chain } else { &mut data_chain };
+                                chain.fail_in_use(if which == Which::Game { "WON'T OPEN" } else { "UNREADABLE" }, e.clone());
+                                boot_fail = Some((which, e.clone()));
+                                cfg_note = Some(Err(e));
+                                phase = Phase::Setup;
+                                wb = Workbench::Settings;
+                                settings_section = if which == Which::Game { SettingsSection::Game } else { SettingsSection::Data };
+                            }
+                        }
+                        if phase == Phase::Booting {
                             boot_shown += (boot_target - boot_shown) * (1.0 - (-3.0 * dt).exp());
                             let (wpx, hpx) = (scene.size.width as f32, scene.size.height as f32);
                             // Retail layout: green tip line centred at ~2/3 height; bold orange
                             // "Loading" at the lower right (gently breathing like the game's).
                             const TIP_GREEN: [f32; 4] = [0.76, 0.80, 0.44, 1.0];
                             const LOAD_ORANGE: [f32; 4] = [1.0, 0.62, 0.12, 1.0];
-                            const BOOT_ERROR: [f32; 4] = [1.0, 0.38, 0.32, 1.0];
-                            if let Some(err) = &boot_error {
-                                if ui_state.is_some() {
-                                    eprintln!("--ui-state: the window never left the boot screen: {err}");
-                                    std::process::exit(2);
-                                }
-                                // The error, word-wrapped to the window, then how to leave.
-                                let glyph = 8.0 * UI_S;
-                                let cols = (((wpx - 96.0) / glyph).floor() as usize).max(20);
-                                let mut lines: Vec<String> = Vec::new();
-                                let mut line = String::new();
-                                for word in err.split_whitespace() {
-                                    if !line.is_empty() && line.chars().count() + 1 + word.chars().count() > cols {
-                                        lines.push(std::mem::take(&mut line));
-                                    }
-                                    if !line.is_empty() {
-                                        line.push(' ');
-                                    }
-                                    line.push_str(word);
-                                }
-                                if !line.is_empty() {
-                                    lines.push(line);
-                                }
-                                lines.push(String::new());
-                                lines.push("Press Esc to quit.".to_string());
-                                let lh = glyph * 1.4;
-                                let mut y = (hpx - lines.len() as f32 * lh).max(0.0) * 0.5;
-                                for l in &lines {
-                                    text_sh(&mut scene, 48.0, y, UI_S, BOOT_ERROR, l);
-                                    y += lh;
-                                }
-                            } else {
-                                let stage = format!("loading {boot_stage}");
-                                let sw = stage.len() as f32 * 8.0 * UI_S;
-                                text_sh(&mut scene, (wpx - sw) * 0.5, hpx * 0.66, UI_S, TIP_GREEN, &stage);
-                                let ls = UI_S * 1.5; // 24px
-                                let mut oc = LOAD_ORANGE;
-                                oc[3] = 0.75 + 0.25 * (t * 2.0).sin();
-                                let lw = "Loading".len() as f32 * 8.0 * ls;
-                                text_sh(&mut scene, wpx - lw - 56.0, hpx * 0.84, ls, oc, "Loading");
-                            }
+                            let stage = format!("loading {boot_stage}");
+                            let sw = stage.len() as f32 * 8.0 * UI_S;
+                            text_sh(&mut scene, (wpx - sw) * 0.5, hpx * 0.66, UI_S, TIP_GREEN, &stage);
+                            let ls = UI_S * 1.5; // 24px
+                            let mut oc = LOAD_ORANGE;
+                            oc[3] = 0.75 + 0.25 * (t * 2.0).sin();
+                            let lw = "Loading".len() as f32 * 8.0 * ls;
+                            text_sh(&mut scene, wpx - lw - 56.0, hpx * 0.84, ls, oc, "Loading");
                             match scene.render_boot(t, boot_shown.min(0.98)) {
                                 Ok(())
                                 | Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {}
@@ -1938,7 +2195,7 @@ pub fn run(opts: Options) {
                         // The AUDIO keys wait for the tab's routing (read on a worker); the capture
                         // counts down once they are in.
                         if st.audio() {
-                            audio_page.ensure_routes(std::path::Path::new(&opts.wadpath));
+                            audio_page.ensure_routes(std::path::Path::new(&wadpath));
                             audio_ui = Some(st);
                         } else {
                             capture_to = Some((st.capture.clone(), st.settle_frames));
@@ -2061,6 +2318,8 @@ pub fn run(opts: Options) {
                                                     .color(theme::BRASS_DK),
                                             );
                                         }
+                                    } else if wb == Workbench::Settings {
+                                        ui.label(egui::RichText::new(settings_section.label()).color(theme::TX));
                                     } else if let Some(p) = &preview {
                                         ui.label(egui::RichText::new(&p.label).strong());
                                         ui.label(
@@ -2070,15 +2329,6 @@ pub fn run(opts: Options) {
                                         );
                                     }
                                 }
-                                ui.with_layout(
-                                    egui::Layout::right_to_left(egui::Align::Center),
-                                    |ui| {
-                                        if names_pending {
-                                            ui.separator();
-                                            ui.add(egui::Spinner::new().size(13.0));
-                                        }
-                                    },
-                                );
                             });
                         });
                         // ── Export dialog: the name, format and folder an export writes, then Export.
@@ -2182,10 +2432,20 @@ pub fn run(opts: Options) {
                                         on: false,
                                         badge: None,
                                         dot: None,
+                                        locked: None,
                                     };
                                     if theme::rail_item(ui, &log_item) {
                                         log_open = !log_open;
                                     }
+                                    // While a chain has no answer every page but Settings is
+                                    // locked: there is nothing loaded for it to show.
+                                    let lock = (phase == Phase::Setup).then(|| {
+                                        if game_chain.in_use().is_none() || matches!(boot_fail, Some((Which::Game, _))) {
+                                            "Set the game archive first"
+                                        } else {
+                                            "Set the reference data first"
+                                        }
+                                    });
                                     let live_item = theme::RailItem {
                                         index: None,
                                         label: Workbench::Live.label(),
@@ -2193,6 +2453,7 @@ pub fn run(opts: Options) {
                                         on: wb == Workbench::Live,
                                         badge: None,
                                         dot: Some(if live_probe.reachable() { theme::GOOD } else { theme::LINE2 }),
+                                        locked: lock,
                                     };
                                     if theme::rail_item(ui, &live_item) {
                                         wb = Workbench::Live;
@@ -2210,6 +2471,7 @@ pub fn run(opts: Options) {
                                                     // the gate is visible from whatever page you are on.
                                                     badge: (*w == Workbench::Quartermaster).then(|| qm.blocking_count()),
                                                     dot: None,
+                                                    locked: lock.filter(|_| *w != Workbench::Settings),
                                                 };
                                                 if theme::rail_item(ui, &item) {
                                                     wb = *w;
@@ -2239,11 +2501,24 @@ pub fn run(opts: Options) {
                                     theme::status_dot(ui, dot_text, dot_color);
                                     ui.separator();
                                     ui.label(egui::RichText::new(detail).color(theme::DIM).small());
-                                } else if names_pending {
-                                    theme::status_dot(ui, "Loading", theme::BRASS);
-                                    ui.add(egui::Spinner::new().size(11.0));
+                                } else if phase == Phase::Setup {
+                                    // What is missing, named: the footer is the one line every page shows.
+                                    let mut missing = Vec::new();
+                                    if game_chain.in_use().is_none() || matches!(boot_fail, Some((Which::Game, _))) {
+                                        missing.push("the game archive");
+                                    }
+                                    if (data_chain.in_use().is_none() && !data_chain.is_empty())
+                                        || matches!(boot_fail, Some((Which::Data, _)))
+                                    {
+                                        missing.push("the reference data");
+                                    }
+                                    theme::status_dot(ui, "Setup", theme::BAD);
                                     ui.separator();
-                                    ui.label(egui::RichText::new(status.as_str()).color(theme::DIM).small());
+                                    ui.label(
+                                        egui::RichText::new(format!("Set {} to load the game", missing.join(" and ")))
+                                            .color(theme::DIM)
+                                            .small(),
+                                    );
                                 } else {
                                     theme::status_dot(ui, "Ready", theme::GOOD);
                                     ui.separator();
@@ -2455,7 +2730,7 @@ pub fn run(opts: Options) {
                             // Audio is the Audio page: the voice-over lines by the banks that play
                             // them, routed from English.wad, rather than the opaque bank assets.
                             if kind == Kind::Audio {
-                                audio_page.ensure_routes(std::path::Path::new(&opts.wadpath));
+                                audio_page.ensure_routes(std::path::Path::new(&wadpath));
                                 audio_acts.extend(crate::audiopage::navigator(ui, &audio_page));
                             } else {
                             // Grouped display: category headers interleaved with rows, all one line
@@ -2844,49 +3119,22 @@ pub fn run(opts: Options) {
                                     });
                                 }
                             }
-                            // ── SETTINGS: the two paths the tool cannot always discover. ──
-                            // Two cards in the inspector's own vocabulary (`section` + `row_chip`),
-                            // NOT prose: each is a path chip you can read at a glance, a count in the
-                            // eyebrow badge, and two buttons. Everything explanatory — the fallback
-                            // chain, what the bundle is for, where the value actually came from —
-                            // rides in hover text, because it is what you read ONCE and the state is
-                            // what you read every time.
+                            // ── SETTINGS: the sections, the two path chains badged red when they
+                            // have no answer and CHECK when a set source below the one in use is
+                            // broken. ──
                             Workbench::Settings => {
-                                ui.label(theme::disp_text("SETTINGS", theme::style_title(), theme::TX));
-                                ui.add_space(4.0);
-                                ui.label(
-                                    egui::RichText::new(
-                                        "The paths the tool cannot discover for itself on every platform.",
-                                    ).small()
-                                    .color(theme::FAINT),
+                                let game_badge = crate::settingspage::badge(
+                                    &game_chain,
+                                    matches!(boot_fail, Some((Which::Game, _))),
+                                    false,
                                 );
-                                ui.add_space(9.0);
-                                for s in SettingsSection::ALL {
-                                    let on = settings_section == s;
-                                    let r = egui::Frame::none()
-                                        .fill(if on { theme::BRASS_SOFT } else { egui::Color32::TRANSPARENT })
-                                        .inner_margin(egui::Margin { left: 9.0, right: 8.0, top: 6.0, bottom: 7.0 })
-                                        .show(ui, |ui| {
-                                            ui.set_width(ui.available_width());
-                                            ui.label(
-                                                egui::RichText::new(s.label())
-                                                    .color(if on { theme::BRASS } else { theme::TX }),
-                                            );
-                                            ui.label(
-                                                egui::RichText::new(s.blurb()).small().color(theme::FAINT),
-                                            );
-                                        })
-                                        .response;
-                                    if on {
-                                        ui.painter().rect_filled(
-                                            egui::Rect::from_min_size(r.rect.min, egui::vec2(3.0, r.rect.height())),
-                                            0.0,
-                                            theme::BRASS,
-                                        );
-                                    }
-                                    if r.interact(egui::Sense::click()).clicked() {
-                                        settings_section = s;
-                                    }
+                                let data_badge = crate::settingspage::badge(
+                                    &data_chain,
+                                    matches!(boot_fail, Some((Which::Data, _))),
+                                    true,
+                                );
+                                if let Some(s) = crate::settingspage::navigator(ui, settings_section, game_badge, data_badge) {
+                                    settings_section = s;
                                 }
                             }
                           } // ── end match wb (navigator) ──
@@ -3988,7 +4236,7 @@ pub fn run(opts: Options) {
                                     None => {
                                         ui.add_space(4.0);
                                         if ui
-                                            .add_enabled(!names_pending, egui::Button::new("Import rigged model…"))
+                                            .add_enabled(phase == Phase::Ready, egui::Button::new("Import rigged model…"))
                                             .clicked()
                                         {
                                             actions.push(Act::ImportModel);
@@ -4292,150 +4540,142 @@ pub fn run(opts: Options) {
                                         .on_hover_text(hover);
                                     };
                                         match settings_section {
-                                            SettingsSection::Game => {
-                                        // ── Game archive ──
-                                        let wad_badge = format!("{} models", index.models().len());
-                                        theme::section(ui, "Game archive", Some(&wad_badge), true, |ui| {
-                                            let set = cfg.wad_path.is_some();
-                                            let shown = cfg
-                                                .wad_path
-                                                .as_deref()
-                                                .map(tail)
-                                                .unwrap_or_else(|| tail(std::path::Path::new(&opts.wadpath)));
-                                            path_chip(
-                                                ui,
-                                                set,
-                                                &shown,
-                                                &format!(
-                                                    "In use: {}\n\n{}",
-                                                    opts.wadpath,
-                                                    if set {
-                                                        "Saved setting. Cleared, the app falls back to auto-detection."
-                                                    } else if cfg!(windows) {
-                                                        "Auto-detected from the EA Games registry key. Choose a file to pin it."
-                                                    } else {
-                                                        // No registry off Windows — this page is the only
-                                                        // way to avoid retyping `--wad` on every launch.
-                                                        "No auto-detection on this platform: without a saved path, --wad is required every launch."
-                                                    }
-                                                ),
-                                            );
-                                            ui.horizontal(|ui| {
-                                                if ui.button("Choose…").clicked() {
-                                                    if let Some(p) = crate::settings::pick_wad() {
-                                                        // Validate before saving, for the same reason the
-                                                        // first-run picker does: a remembered bad path fails
-                                                        // at the NEXT launch, far from the click that caused it.
-                                                        cfg_note = Some(match crate::settings::check_wad(&p) {
-                                                            Ok(desc) => {
-                                                                cfg.wad_path = Some(p);
-                                                                cfg.save()
-                                                                    .map(|_| format!("Saved ({desc}). Restart to load it."))
-                                                                    .map_err(|e| format!("Could not save: {e}"))
+                                            SettingsSection::Game | SettingsSection::Data => {
+                                                // ── Game archive / Reference data: the chain's rows, what it
+                                                // opened, and the buttons that change a source. A change marks
+                                                // the chains dirty; the top of the next frame re-resolves them
+                                                // and reloads in place. ──
+                                                use crate::settingspage::Act as SAct;
+                                                let which = if settings_section == SettingsSection::Game { Which::Game } else { Which::Data };
+                                                let failed = matches!(&boot_fail, Some((f, _)) if *f == which);
+                                                let auto_patch_path = std::path::Path::new(&wadpath).with_file_name("vz-patch.wad");
+                                                let sacts = {
+                                                    let (chain, saved_set) = match which {
+                                                        Which::Game => (&game_chain, cfg.wad_path.is_some()),
+                                                        Which::Data => (&data_chain, cfg.data_dir.is_some()),
+                                                    };
+                                                    let (opened, opened_badge) = match which {
+                                                        Which::Game if !wadpath.is_empty() => {
+                                                            let mut rows: Vec<(&'static str, String)> = vec![("base", wadpath.clone())];
+                                                            if overlays.is_empty() {
+                                                                rows.push(("overlay", "none".into()));
                                                             }
-                                                            Err(e) => Err(format!("Not a game archive: {e}")),
-                                                        });
-                                                    }
-                                                }
-                                                if ui
-                                                    .add_enabled(set, egui::Button::new("Clear"))
-                                                    .on_hover_text("Forget the saved path and go back to auto-detection")
-                                                    .clicked()
-                                                {
-                                                    cfg.wad_path = None;
-                                                    cfg_note = Some(
-                                                        cfg.save()
-                                                            .map(|_| "Cleared — back to auto-detection.".to_string())
-                                                            .map_err(|e| format!("Could not save: {e}")),
-                                                    );
-                                                }
-                                            });
-                                        });
-                                            }
-                                            SettingsSection::Data => {
-                                        // ── Reference data ──
-                                        // The badge IS the health readout: names resolved is the one number
-                                        // that says whether the bundle is doing its job.
-                                        let data_badge = if names_pending {
-                                            "loading…".to_string()
-                                        } else {
-                                            format!("{} names", index.names.len())
-                                        };
-                                        theme::section(ui, "Reference data", Some(&data_badge), true, |ui| {
-                                            let set = cfg.data_dir.is_some();
-                                            let home = crate::index::data_home();
-                                            let shown = match (cfg.data_dir.as_deref(), home.as_deref()) {
-                                                (Some(p), _) => tail(p),
-                                                (None, Some(h)) => tail(h),
-                                                (None, None) => "none found".to_string(),
-                                            };
-                                            path_chip(
-                                                ui,
-                                                set,
-                                                &shown,
-                                                &match &home {
-                                                    Some(h) => format!(
-                                                        "In use: {}\n\nThe workshop_data bundle: hash to name for every asset and bone.",
-                                                        h.display()
-                                                    ),
-                                                    None => "No complete bundle found (a workshop_data folder holding manifest.json).\n\nShips with the release as mercs2-workshop-data.zip.".to_string(),
-                                                },
-                                            );
-                                            ui.horizontal(|ui| {
-                                                if ui.button("Choose…").clicked() {
-                                                    if let Some(p) = crate::settings::pick_data_dir() {
-                                                        cfg_note = Some(match crate::settings::check_data_dir(&p) {
-                                                            Ok(desc) => {
-                                                                cfg.data_dir = Some(p);
-                                                                cfg.save()
-                                                                    .map(|_| format!("Saved ({desc}). Restart to load it."))
-                                                                    .map_err(|e| format!("Could not save: {e}"))
+                                                            for o in &overlays {
+                                                                let how = if std::path::Path::new(o) == auto_patch_path { "found beside it" } else { "--overlay" };
+                                                                rows.push(("overlay", format!("{o} · {how}")));
                                                             }
-                                                            Err(e) => Err(e),
-                                                        });
-                                                    }
-                                                }
-                                                if ui.add_enabled(set, egui::Button::new("Clear")).clicked() {
-                                                    cfg.data_dir = None;
-                                                    cfg_note = Some(
-                                                        cfg.save()
-                                                            .map(|_| "Cleared.".to_string())
-                                                            .map_err(|e| format!("Could not save: {e}")),
-                                                    );
-                                                }
-                                                // Fetch the latest release's bundle into the download cache
-                                                // (`fetch::installed_dir`), replacing the copy there. The boot
-                                                // thread runs the same install when no bundle is found.
-                                                let busy = fetch_rx.is_some();
-                                                let label = if busy { "Downloading…" } else { "Download" };
-                                                if ui
-                                                    .add_enabled(!busy, egui::Button::new(label))
-                                                    .on_hover_text(
-                                                        "Fetch the reference bundle published with the latest release and install it for this user",
+                                                            rows.push((
+                                                                "catalog",
+                                                                format!("{} models · {} textures", commafy(index.models().len()), commafy(index.textures().len())),
+                                                            ));
+                                                            (rows, Some(format!("{} models", commafy(index.models().len()))))
+                                                        }
+                                                        Which::Data => match &loaded_data {
+                                                            Some(h) => (
+                                                                vec![
+                                                                    ("bundle", h.display().to_string()),
+                                                                    ("names", commafy(index.names.len())),
+                                                                    ("Lua scripts", commafy(lua_corpus.len())),
+                                                                ],
+                                                                Some(format!("{} names", commafy(index.names.len()))),
+                                                            ),
+                                                            None => (Vec::new(), None),
+                                                        },
+                                                        Which::Game => (Vec::new(), None),
+                                                    };
+                                                    crate::settingspage::section(
+                                                        ui,
+                                                        &crate::settingspage::View {
+                                                            which,
+                                                            chain,
+                                                            failed,
+                                                            opened,
+                                                            opened_badge,
+                                                            saved_set,
+                                                            downloading: fetch_rx.is_some().then_some(fetch_msg.as_str()),
+                                                        },
                                                     )
-                                                    .clicked()
-                                                {
-                                                    let (tx, rx) = std::sync::mpsc::channel();
-                                                    fetch_rx = Some(rx);
-                                                    fetch_msg = "starting…".into();
-                                                    cfg_note = None;
-                                                    std::thread::spawn(move || {
-                                                        crate::fetch::download(|e| {
-                                                            let _ = tx.send(e);
-                                                        });
-                                                    });
+                                                };
+                                                let in_use = match which {
+                                                    Which::Game => game_chain.in_use().map(|p| p.to_path_buf()),
+                                                    Which::Data => data_chain.in_use().map(|p| p.to_path_buf()),
+                                                };
+                                                for a in sacts {
+                                                    match a {
+                                                        // Checked before it is kept, for the same reason the
+                                                        // chain checks it: a remembered bad path fails at the
+                                                        // NEXT launch, far from the click that caused it.
+                                                        SAct::Choose(w) | SAct::RunOnly(w) => {
+                                                            let picked = match w {
+                                                                Which::Game => crate::settings::pick_wad(),
+                                                                Which::Data => crate::settings::pick_data_dir(),
+                                                            };
+                                                            let Some(p) = picked else { continue };
+                                                            let checked = match w {
+                                                                Which::Game => crate::settings::check_wad(&p).map_err(|e| format!("Not a game archive: {e}")),
+                                                                Which::Data => crate::settings::check_data_dir(&p),
+                                                            };
+                                                            cfg_note = Some(match checked {
+                                                                Err(e) => Err(e),
+                                                                Ok(desc) if matches!(a, SAct::RunOnly(_)) => {
+                                                                    match w {
+                                                                        Which::Game => crate::chains::set_run_wad(p.clone()),
+                                                                        Which::Data => crate::chains::set_run_data(p.clone()),
+                                                                    }
+                                                                    chains_dirty = true;
+                                                                    Ok(format!("Using {} for this run ({desc}); nothing saved.", p.display()))
+                                                                }
+                                                                Ok(desc) => {
+                                                                    match w {
+                                                                        Which::Game => cfg.wad_path = Some(p),
+                                                                        Which::Data => cfg.data_dir = Some(p),
+                                                                    }
+                                                                    chains_dirty = true;
+                                                                    cfg.save()
+                                                                        .map(|f| format!("Saved to {} ({desc}).", f.display()))
+                                                                        .map_err(|e| format!("Could not save: {e}"))
+                                                                }
+                                                            });
+                                                        }
+                                                        SAct::ClearSaved(_) | SAct::SaveRunPath(_) => {
+                                                            if crate::settingspage::edit_saved(&mut cfg, a, in_use.as_deref()) {
+                                                                chains_dirty = true;
+                                                                cfg_note = Some(
+                                                                    cfg.save()
+                                                                        .map(|f| format!("Saved to {}.", f.display()))
+                                                                        .map_err(|e| format!("Could not save: {e}")),
+                                                                );
+                                                            }
+                                                        }
+                                                        // Fetch the latest release's bundle into the download
+                                                        // cache (`fetch::installed_dir`), replacing the copy
+                                                        // there. The boot thread runs the same install when
+                                                        // nothing is set and nothing is found.
+                                                        SAct::Download => {
+                                                            let (tx, rx) = std::sync::mpsc::channel();
+                                                            fetch_rx = Some(rx);
+                                                            fetch_msg = "starting…".into();
+                                                            cfg_note = None;
+                                                            std::thread::spawn(move || {
+                                                                crate::fetch::download(|e| {
+                                                                    let _ = tx.send(e);
+                                                                });
+                                                            });
+                                                        }
+                                                        SAct::Reveal(w) => {
+                                                            let dir = match (w, in_use.as_deref()) {
+                                                                (Which::Game, Some(p)) => p.parent().map(|d| d.to_path_buf()),
+                                                                (Which::Data, Some(p)) => Some(p.to_path_buf()),
+                                                                (_, None) => None,
+                                                            };
+                                                            if let Some(d) = dir {
+                                                                if let Err(e) = crate::quartermaster::open_in_os(&d) {
+                                                                    cfg_note = Some(Err(format!("Could not open {}: {e}", d.display())));
+                                                                }
+                                                            }
+                                                        }
+                                                    }
                                                 }
-                                            });
-                                            if fetch_rx.is_some() {
-                                                ui.horizontal(|ui| {
-                                                    ui.add(egui::Spinner::new().size(11.0));
-                                                    ui.label(
-                                                        egui::RichText::new(&fetch_msg)
-                                                            .color(theme::DIM).small(),
-                                                    );
-                                                });
-                                            }
-                                        });
                                             }
                                             SettingsSection::Shipments => {
                                                 // Where a built Shipment is handed to Modkit. Deliberately NOT
@@ -4525,7 +4765,7 @@ pub fn run(opts: Options) {
                                                             egui::RichText::new(
                                                                 crate::index::data_home()
                                                                     .map(|h| h.display().to_string())
-                                                                    .unwrap_or_else(|| "none found".into()),
+                                                                    .unwrap_or_else(|e| e),
                                                             ),
                                                         );
                                                         theme::kv(ui, "models", egui::RichText::new(commafy(index.models().len())));
@@ -4910,7 +5150,7 @@ pub fn run(opts: Options) {
                         // Lazily open the record index (English.wad + .pws) and the device on the
                         // first play — both are heavy and most sessions never play audio.
                         if vo_error.is_none() && vo_stream.is_none() {
-                            let data_dir = std::path::Path::new(&opts.wadpath)
+                            let data_dir = std::path::Path::new(&wadpath)
                                 .parent()
                                 .map(|p| p.to_path_buf())
                                 .unwrap_or_default();
@@ -5168,8 +5408,8 @@ pub fn run(opts: Options) {
                                         let src_path = retarget_src_path.clone().unwrap();
                                         let (thash, tl) = retarget_target.clone().unwrap();
                                         let rt = retarget.as_ref().unwrap();
-                                        let mut paths = vec![opts.wadpath.clone()];
-                                        paths.extend(opts.overlays.iter().cloned());
+                                        let mut paths = vec![wadpath.clone()];
+                                        paths.extend(overlays.iter().cloned());
                                         let (cs, glb, _donor) =
                                             faithful_char_skin(&paths, thash, rt, &src_path)?;
                                         let target_rig = load_model_data(&mut w, thash)
@@ -5284,8 +5524,8 @@ pub fn run(opts: Options) {
                                     // it, so what you see on the pedestal is exactly what gets written.
                                     // The target container gives both the HIER skeleton and the injection
                                     // donor. Re-loads the source glb raw (exact f32 weights + node graph).
-                                    let mut paths = vec![opts.wadpath.clone()];
-                                    paths.extend(opts.overlays.iter().cloned());
+                                    let mut paths = vec![wadpath.clone()];
+                                    paths.extend(overlays.iter().cloned());
                                     let (glb, donor, opts_lower) =
                                         faithful_lower_opts(&paths, thash, rt, &src_path)?;
                                     let Some(out_path) = rfd::FileDialog::new()
@@ -5668,8 +5908,8 @@ pub fn run(opts: Options) {
                                         }
                                         status = format!("exporting {}…", d.label);
                                         exporter = Some(export_bundle_in_background(
-                                            opts.wadpath.clone(),
-                                            opts.overlays.clone(),
+                                            wadpath.clone(),
+                                            overlays.clone(),
                                             d.hash,
                                             d.label.clone(),
                                             d.name.clone(),
@@ -5869,7 +6109,7 @@ pub fn run(opts: Options) {
                                 }
                             }
                             Act::ImportModel => {
-                                if !names_pending {
+                                if phase == Phase::Ready {
                                     if let Some(path) = rfd::FileDialog::new()
                                         .add_filter("model", &["glb", "gltf", "obj"])
                                         .set_title("Import model — .glb / .gltf / .obj")
@@ -8205,6 +8445,60 @@ mod rail_tests {
         }
         // The helicopter is Driving's: a rail page, not a Lens.
         assert_eq!(lensed, 3);
+    }
+}
+
+#[cfg(test)]
+mod startup_tests {
+    use super::*;
+    use crate::chains::{resolve, Chain, Step};
+    use std::path::Path;
+
+    /// A one-step chain: `set` usable when `ok`, broken otherwise; nothing set when `None`.
+    fn chain(set: Option<&str>, ok: bool) -> Chain {
+        resolve(vec![Step::Set { label: "saved setting".into(), set: set.map(PathBuf::from) }], |p| {
+            if ok {
+                Ok(p.to_path_buf())
+            } else {
+                Err(("FILE MISSING", format!("{} is gone", p.display())))
+            }
+        })
+    }
+
+    #[test]
+    fn startup_opens_settings_on_the_first_chain_with_no_answer() {
+        assert_eq!(next_step(None, None, &chain(None, false), &chain(Some("/d"), true)), Next::Setup(SettingsSection::Game));
+        assert_eq!(next_step(None, None, &chain(Some("/g"), true), &chain(Some("/d"), false)), Next::Setup(SettingsSection::Data));
+        assert_eq!(
+            next_step(None, None, &chain(Some("/g"), true), &chain(Some("/d"), true)),
+            Next::Boot { archive: Some(PathBuf::from("/g")), data: true }
+        );
+        // No reference data set or found: the boot downloads it.
+        assert_eq!(
+            next_step(None, None, &chain(Some("/g"), true), &chain(None, false)),
+            Next::Boot { archive: Some(PathBuf::from("/g")), data: true }
+        );
+    }
+
+    #[test]
+    fn a_changed_source_reloads_what_it_feeds_and_nothing_else() {
+        let (g, d) = (Some(Path::new("/g")), Some(Path::new("/d")));
+        assert_eq!(next_step(g, d, &chain(Some("/g"), true), &chain(Some("/d"), true)), Next::Stay);
+        assert_eq!(
+            next_step(g, d, &chain(Some("/g"), true), &chain(Some("/d2"), true)),
+            Next::Boot { archive: None, data: true },
+            "a new bundle reloads only the bundle"
+        );
+        assert_eq!(
+            next_step(g, d, &chain(Some("/g2"), true), &chain(Some("/d"), true)),
+            Next::Boot { archive: Some(PathBuf::from("/g2")), data: true },
+            "a new archive reloads the bundle with it"
+        );
+        assert_eq!(
+            next_step(g, d, &chain(Some("/gone"), false), &chain(Some("/d"), true)),
+            Next::Setup(SettingsSection::Game),
+            "a source broken under a running archive unloads it into Settings"
+        );
     }
 }
 
