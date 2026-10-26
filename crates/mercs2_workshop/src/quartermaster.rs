@@ -3515,7 +3515,7 @@ pub fn verbs(ui: &mut egui::Ui, p: &Panel, has_game: bool) -> Vec<Act> {
 /// never reach. That guess is exactly what let the released `qm`/Workshop ship unable to link while
 /// "working" in dev.
 pub fn corpus_root() -> Option<PathBuf> {
-    let lua = crate::index::data_home()?.join("lua");
+    let lua = crate::index::data_home().ok()?.join("lua");
     lua.is_dir().then_some(lua)
 }
 
