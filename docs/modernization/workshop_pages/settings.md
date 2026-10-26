@@ -71,7 +71,7 @@ before anything else in the GUI launch.
 | WHAT IT OPENED (Reference data) | bundle folder, names loaded, Lua scripts (the manifest carries no release tag) | `AssetIndex::names`, the Lua corpus | — | capture |
 | Choose vz.wad… / Choose folder… | Native picker. The choice is checked (`check_wad` / `check_data_dir`); a failure is shown under the buttons and nothing is written. A good choice is saved and **loaded in place**: see *Reloading* below | `settings` | `settings.json` | test: bad choice writes nothing |
 | Use for this run only… | Native picker, same check. A good choice becomes step 2 (archive) or step 1 (data) for this launch; nothing is written. Loaded in place, as Choose… | process-wide run override | — | test: override wins over env and saved; nothing written |
-| Clear saved | Enabled only when the setting is saved; removes it. The chain re-resolves; if that leaves it unresolved and nothing is loaded, the section turns red | `settings` | `settings.json` | test |
+| Clear saved | Enabled only when the setting is saved; removes it. The chain re-resolves; if that leaves it with no answer, what it fed is unloaded (a game archive takes the bundle with it), the window is on Settings and the section turns red | `settings` | `settings.json` | test |
 | Download (Reference data) | Offered only when no explicit data source is set. Fetches `mercs2-workshop-data.zip` from the latest release into the download cache, with a spinner and stage text. On success the chain re-resolves to the downloaded copy (step 6) | `fetch::download` | download cache | test: offered only with no explicit source; capture of the download running |
 | Reveal folder | Opens the folder of the source in use in the OS file browser. Disabled while unresolved | `quartermaster::open_in_os` | — | — |
 | Footer | READY + live load summary, as today. While unresolved: "SETUP" + "Set <the unresolved chains> to load the game" | status | — | capture |
@@ -97,8 +97,15 @@ Clear saved, or a finished Download), the workshop reloads in place, with no rel
 - A reload that fails (a bundle with a malformed file, say) leaves that chain red on Settings
   with the error. It does not show the boot error screen.
 
-Proof: test that a chain change starts the reload with the new source and clears the state above;
-capture of Settings after a reload.
+A Download into the folder already in use (the downloaded copy) reloads it too: the path is the same
+but its files are new. A changed archive also unloads the preview's and the donor's meshes from the
+scene, which keeps uploads by model hash.
+
+Proof: test that a chain change starts the reload with the new source (`next_step`); captures after
+a reload, through `--ui-state`'s `run_wad` / `run_data` (Settings' "Use for this run only…" applied
+after the first load, captured once the reload lands): the run's choice IN USE with what it opened,
+and a model loaded before the reload gone after it. Those states name local paths, so they are not
+committed.
 
 Building and installing a Shipment while the game is running is Modkit's concern. The workshop
 does not check for a running game.
