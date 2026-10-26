@@ -68,6 +68,7 @@ mod audioexport; // VO clips out as WAV + captions.csv
 mod audiopage; // Inspect's AUDIO tab: banks, clips, preview, export, Add to Shipment
 mod vostream; // Stream VO PCM straight from the game's vo_stream.english.pws
 mod bundle;
+mod chains; // Where the game archive and the reference bundle come from, first match wins
 mod domain;
 mod fetch;
 mod gui;
@@ -90,6 +91,7 @@ mod save_flow; // Contract state changes on a save: complete, undo, offer, lock
 mod save_tables; // Read-only inspector sections for every other save table
 mod save_inspect; // The Saves right-click Inspect window: a readable account of one save
 mod settings;
+mod settingspage; // Settings' navigator and its Game archive / Reference data sections
 mod shipment;
 mod shot;
 mod texenc;
@@ -97,28 +99,6 @@ mod texpng;
 mod ui_state;
 
 use mercs2_engine::{mesh, wad};
-
-/// `vz.wad` from an install the Workshop is sitting INSIDE — the executable's own directory first,
-/// then the working directory.
-///
-/// Plan 02 rev 2's resolution step 2. Each candidate has to carry `Mercenaries2.exe` before its
-/// archive counts: the exe is what makes a folder an install, whereas a bare `vz.wad` beside the
-/// binary could be a copy someone was extracting from. Both the root and its `data/` are probed,
-/// via `game_paths::wad_under` — the shared rule for what "a path to the game" means, so this does
-/// not become a fourth private copy of it.
-fn colocated_vz_wad() -> Option<String> {
-    use mercs2_formats::game_paths::wad_under;
-    let roots = [
-        std::env::current_exe().ok().and_then(|e| e.parent().map(|p| p.to_path_buf())),
-        std::env::current_dir().ok(),
-    ];
-    roots
-        .into_iter()
-        .flatten()
-        .filter(|root| root.join("Mercenaries2.exe").is_file())
-        .find_map(|root| wad_under(&root, "vz.wad"))
-        .map(|p| p.to_string_lossy().into_owned())
-}
 
 /// The full name map for a headless mode ([`index::load_all_names`]), or exit 1 printing why the
 /// reference bundle could not be found, downloaded or read.
@@ -165,47 +145,33 @@ fn main() {
     // made `--pack-data` unrunnable on a machine without the game — i.e. on the CI runner that is
     // supposed to PUBLISH the bundle, which is why released workshops shipped with no bone names.
     //
-    // Resolution order: the flag (a one-off run must never rewrite the saved config), then the
-    // saved setting, then `resolve_vz_wad` — which is `$MERCS2_GAME_DIR` / `$VZ_WAD` and only THEN
-    // the registry key. Two independent reasons this tool works off Windows: `registry_vz_wad` is
-    // `cfg(not(windows)) -> None`, so before the saved setting a macOS or Linux user had to retype
-    // `--wad <path>` on every launch, and before the environment step a machine configured for
-    // every other tool in the repo still looked unconfigured to this one.
+    // Resolution is `chains::game`: the flag (a one-off run must never rewrite the saved config),
+    // this run's choice from Settings, the saved setting, an install the workshop sits inside, then
+    // `$MERCS2_GAME_DIR` / `$VZ_WAD` and only THEN the registry key. Two independent reasons this
+    // tool works off Windows: `registry_vz_wad` is `cfg(not(windows)) -> None`, so before the saved
+    // setting a macOS or Linux user had to retype `--wad <path>` on every launch, and before the
+    // environment step a machine configured for every other tool in the repo still looked
+    // unconfigured to this one.
     //
-    // The flag and the environment both take an install root, its `data` folder, or the file. An
-    // unresolvable `--wad` is kept AS TYPED rather than falling through to the next source: the
-    // later open then fails naming the path the user actually gave, instead of silently succeeding
-    // against a different install.
-    let wadpath = get("--wad")
-        .map(|p| wad::vz_wad_in(&p).unwrap_or(p))
-        .or_else(|| {
-            settings::load().wad_path.filter(|p| p.is_file()).map(|p| p.to_string_lossy().into_owned())
-        })
-        // CO-LOCATION, before the environment/registry step. Plan 02 rev 2 calls this "the only
-        // path that works off Windows": modders really do drop the Workshop into the game folder,
-        // and `registry_vz_wad` is `cfg(not(windows)) -> None`, so without this a macOS or Linux
-        // user sitting *inside* the install still had to type `--wad` every launch.
-        //
-        // Anchored on `Mercenaries2.exe` rather than on finding a `vz.wad`: a stray `vz.wad` beside
-        // the binary could be anything, but the exe next to it means this IS an install.
-        .or_else(colocated_vz_wad)
-        .or_else(|| wad::resolve_vz_wad(None));
+    // The flag and the environment both take an install root, its `data` folder, or the file. A
+    // source a person set that does not resolve STOPS the chain rather than falling through to the
+    // next source: the run then fails naming the path the user actually gave, instead of silently
+    // succeeding against a different install.
+    let wad_flag = get("--wad");
+    let game_chain = chains::game(wad_flag.as_deref());
+    let wadpath = game_chain.in_use().map(|p| p.to_string_lossy().into_owned());
 
-    // Overlay stack: every `--overlay <path>`, in argument order, plus (unless --no-auto-patch)
-    // an auto-loaded `vz-patch.wad` next to the base — the retail exe's own patch lookup.
-    let mut overlays: Vec<String> = Vec::new();
-    if !args.iter().any(|a| a == "--no-auto-patch") {
-        if let Some(auto) = wadpath.as_ref().map(|w| std::path::Path::new(w).with_file_name("vz-patch.wad")) {
-            if auto.is_file() {
-                overlays.push(auto.to_string_lossy().into_owned());
-            }
-        }
-    }
-    for i in 0..args.len().saturating_sub(1) {
-        if args[i] == "--overlay" {
-            overlays.push(args[i + 1].clone());
-        }
-    }
+    // Overlay stack: an auto-loaded `vz-patch.wad` next to the base (unless --no-auto-patch) — the
+    // retail exe's own patch lookup — then every `--overlay <path>`, in argument order.
+    let auto_patch = !args.iter().any(|a| a == "--no-auto-patch");
+    let extra_overlays: Vec<String> = (0..args.len().saturating_sub(1))
+        .filter(|&i| args[i] == "--overlay")
+        .map(|i| args[i + 1].clone())
+        .collect();
+    let overlays = match &wadpath {
+        Some(w) => app::overlays_for(w, auto_patch, &extra_overlays),
+        None => extra_overlays.clone(),
+    };
 
     // Build the redistributable reference bundle: everything the workshop consults that is NOT a
     // game-distributed file, in load-fast formats. The app then runs self-contained from
@@ -217,6 +183,12 @@ fn main() {
             .filter(|s| !s.starts_with("--"))
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| std::path::PathBuf::from("workshop_data"));
+        // Optional, but not when one was set and is broken: packing untrimmed against a typo'd
+        // `--wad` would publish a bundle nobody asked for.
+        if game_chain.blocker().is_some() {
+            eprintln!("--pack-data: {}", game_chain.unresolved("the game archive"));
+            std::process::exit(2);
+        }
         if let Err(e) = pack_data(&out, wadpath.as_deref(), &overlays) {
             eprintln!("--pack-data: {e}");
             std::process::exit(1);
@@ -224,60 +196,42 @@ fn main() {
         return;
     }
 
-    // Every mode past this point reads the game archive. Nothing found means one of two very
+    // Every mode past this point reads the game archive. An unresolved chain means one of two very
     // different situations, and treating them alike is what made the tool unopenable off Windows:
-    // a HEADLESS run has nobody to answer a dialog and must fail with a message a script can read,
-    // but the GUI launch has a user right there — so it asks once, with a native picker, and
-    // remembers the answer. Both paths are also reachable later from the Settings workbench.
+    // a HEADLESS run has nobody to fix it and must fail with a message a script can read (exit 2),
+    // but the GUI launch has a user right there — so the window opens on Settings with the chain in
+    // red, which is where it is fixed. (A native picker here, before the window, set the macOS app
+    // up ahead of winit's event loop, and winit then panicked.)
     // `--shipment` CONFIGURES the GUI run rather than replacing it, so it belongs here: treating it
     // as a mode flag would open a Shipment into a window that never appears. `--ui-state` likewise.
     const PASSIVE_FLAGS: [&str; 6] =
         ["--wad", "--names", "--overlay", "--no-auto-patch", "--shipment", "--ui-state"];
     let headless =
         args[1..].iter().any(|a| a.starts_with("--") && !PASSIVE_FLAGS.contains(&a.as_str()));
+    let shipment = get("--shipment").map(std::path::PathBuf::from);
+    let ui_state = match get("--ui-state").map(|p| ui_state::UiState::load(std::path::Path::new(&p))) {
+        Some(Ok(st)) => Some(st),
+        Some(Err(e)) => {
+            eprintln!("--ui-state: {e}");
+            std::process::exit(2);
+        }
+        None => None,
+    };
+    let gui_options = || app::Options {
+        wad_flag: wad_flag.clone(),
+        auto_patch,
+        extra_overlays: extra_overlays.clone(),
+        shipment: shipment.clone(),
+        ui_state: ui_state.clone(),
+    };
     let wadpath = match wadpath {
         Some(p) => p,
         None if headless => {
-            eprintln!("workshop: no vz.wad found (install not in registry) — pass --wad <path>");
-            return;
+            eprintln!("workshop: {}", game_chain.unresolved("the game archive"));
+            std::process::exit(2);
         }
-        None => {
-            eprintln!("workshop: no vz.wad found — asking where the game is installed");
-            let Some(picked) = settings::pick_wad() else {
-                eprintln!("workshop: no game archive selected — pass --wad <path> to skip the prompt");
-                return;
-            };
-            // Validate BEFORE saving: a remembered path that does not open would turn a one-time
-            // mistake into a permanent one, and the next launch would fail far from the cause.
-            match settings::check_wad(&picked) {
-                Ok(desc) => {
-                    let mut s = settings::load();
-                    s.wad_path = Some(picked.clone());
-                    match s.save() {
-                        Ok(cfg) => eprintln!("[settings] game archive saved to {} ({desc})", cfg.display()),
-                        Err(e) => eprintln!("[settings] could not save ({e}) — using it for this run only"),
-                    }
-                }
-                Err(e) => {
-                    eprintln!("workshop: {} cannot be opened as a game archive: {e}", picked.display());
-                    return;
-                }
-            }
-            picked.to_string_lossy().into_owned()
-        }
+        None => return app::run(gui_options()),
     };
-    // The overlay scan above ran while the archive path was still unknown, so a path that came from
-    // the picker never had its sibling patch considered. Re-check against the FINAL archive, keeping
-    // the auto-patch ahead of the explicit `--overlay`s as before, and skip what is already listed.
-    if !args.iter().any(|a| a == "--no-auto-patch") {
-        let auto = std::path::Path::new(&wadpath).with_file_name("vz-patch.wad");
-        if auto.is_file() {
-            let s = auto.to_string_lossy().into_owned();
-            if !overlays.contains(&s) {
-                overlays.insert(0, s);
-            }
-        }
-    }
 
     // Headless: one TSV row per model, in ONE wad open:
     //   `hash <TAB> resolves <TAB> bones <TAB> skinned_groups <TAB> verts <TAB> tris <TAB> tex,tex,...`
@@ -2007,16 +1961,7 @@ exported {ok} bundle(s), {fail} failed -> {}", outroot.display());
         return;
     }
 
-    let shipment = get("--shipment").map(std::path::PathBuf::from);
-    let ui_state = match get("--ui-state").map(|p| ui_state::UiState::load(std::path::Path::new(&p))) {
-        Some(Ok(st)) => Some(st),
-        Some(Err(e)) => {
-            eprintln!("--ui-state: {e}");
-            std::process::exit(2);
-        }
-        None => None,
-    };
-    app::run(app::Options { wadpath, overlays, shipment, ui_state });
+    app::run(gui_options());
 }
 
 /// Every hash `names.bin` is actually asked to resolve: ASET catalog assets, animgroup clip names, and
