@@ -116,9 +116,26 @@ cargo run -p mercs2_workshop -- --audio-export "the cia" out_dir
 cargo run -p mercs2_workshop -- --mod-new my_tank tank_donor_name mesh.glb --mod-out vz-mod.wad
 ```
 
-Global options: `--wad <path>` (override registry discovery), `--overlay <path>` (repeatable,
-stacks patch WADs on top of the base), `--no-auto-patch` (suppress the automatic `vz-patch.wad`
-pickup).
+Global options: `--wad <path>` (the first step of the game-archive chain, below), `--overlay <path>`
+(repeatable, stacks patch WADs on top of the base), `--no-auto-patch` (suppress the automatic
+`vz-patch.wad` pickup).
+
+## Where the game and the reference data come from
+
+Two chains, first match wins (`chains.rs`):
+
+- **Game archive**: `--wad` → this run's choice (Settings) → the saved setting → an install the
+  workshop sits inside → `MERCS2_GAME_DIR` / `VZ_WAD` → the Windows registry key.
+- **Reference data**: this run's choice (Settings) → `MERCS2_WORKSHOP_DATA` → the saved setting →
+  `workshop_data/` next to the exe → `workshop_data/` in the working directory or a parent → the
+  downloaded copy.
+
+A source someone set that is broken stops its chain; it is never passed over for the next one. The
+window always opens first. When a chain has no answer it opens on Settings with that chain in red
+and every other page locked. Settings shows each chain step by step, with **Choose…** (saved),
+**Use for this run only…** (not saved), **Clear saved**, **Reveal folder**, and for reference data
+with nothing set, **Download**. A change there reloads the archive or the bundle in place, with no
+relaunch. A headless mode with the game chain unresolved exits 2, printing every step.
 
 Capture a page in a given state (a diagnostic for comparing a page with its design artboard):
 
@@ -130,7 +147,8 @@ The JSON names the state by the words the window shows — `page` (a rail label 
 `settings_section`, `tab`, `lens`, `filter`, `load` (a model name), `shipment` + `contribution`,
 `bench` + `donor`, and on the AUDIO tab `bank`, `clip`, `search` and `select` (record indices),
 applied once the tab's routing is read (`ui_states/audio.json`) — plus `capture` (the PNG to write,
-relative to the working directory) and `settle_frames` (default 8). The window opens, applies the state once the reference data is in,
+relative to the working directory) and `settle_frames` (default 8). The window opens, applies the state once the reference data is in
+(or at once when it opens on Settings for a chain with no answer: `ui_states/settings_unset.json`),
 captures the presented frame (3D and GUI) and exits 0. A name that does not resolve, a field it does
 not know, or a surface that cannot be read back exits 2 with the reason.
 
@@ -146,16 +164,19 @@ spawnable templates, the ECS schemas, the decompiled-Lua corpora and the caption
 (`audio_manifest.json`) — comes from one
 `workshop_data/` folder. A folder counts only when it holds the `manifest.json` that `--pack-data` writes last; a
 repo checkout's committed, partial `workshop_data/` (no `names.bin`, no manifest) never does. The
-folder is found in this order (`index::data_home`):
+folder is found in this order (`index::data_home`, over `chains::data`):
 
-1. `MERCS2_WORKSHOP_DATA`
-2. the Settings data folder (`data_dir` in the settings file)
-3. `workshop_data/` next to the executable
-4. `workshop_data/` in the working directory or any parent
-5. the copy downloaded into the user's cache directory (`fetch::installed_dir`)
+1. this run's choice (Settings, "Use for this run only…")
+2. `MERCS2_WORKSHOP_DATA`
+3. the Settings data folder (`data_dir` in the settings file)
+4. `workshop_data/` next to the executable
+5. `workshop_data/` in the working directory or any parent
+6. the copy downloaded into the user's cache directory (`fetch::installed_dir`)
 
-When none is found, the workshop downloads `mercs2-workshop-data.zip` from the latest release and
-installs it as step 5 (`index::require_data_home`). When that fails too, the run stops with an
+Steps 1–3 are set by a person: one that is not a complete bundle is an error naming it, never passed
+over for a later step. When nothing is set and nothing is found, the workshop downloads
+`mercs2-workshop-data.zip` from the latest release and installs it as step 6
+(`index::require_data_home`). When that fails too, the run stops with an
 error giving the release page and the folder to unpack the zip into. A complete bundle missing
 `audio_manifest.json`, or holding a malformed one, stops the boot with an error naming the file.
 
@@ -187,6 +208,10 @@ Binary crate — these are private modules, listed for orientation:
 - `index` — asset catalog, reference-bundle resolution, and name resolution
   (`workshop_data/names.bin` overlaid by the embedded ASET dictionary).
 - `fetch` — downloads and installs the release's reference bundle.
+- `chains` — where the game archive and the reference bundle come from: each chain's steps, first
+  match wins, a broken set source stopping it; the rows Settings draws and headless runs print.
+- `settingspage` — Settings' navigator (with each chain's badge) and its Game archive / Reference
+  data sections: the chain rows, the "saved path not found" banner, what it opened, the buttons.
 - `live` — the Live page and the probe behind its rail dot (`mercs2_bridge::reachable`, polled off
   the frame loop).
 - `saves` — the Saves page: save browser, hero viewport, PROGRESSION grid with the contract menu,
