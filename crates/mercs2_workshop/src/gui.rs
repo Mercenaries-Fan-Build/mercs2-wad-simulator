@@ -1393,12 +1393,28 @@ pub mod theme {
         pub badge: Option<usize>,
         /// A status dot, top-right (Live: whether the game answers).
         pub dot: Option<Color32>,
+        /// Why the page cannot be opened now (shown on hover); the cell is drawn dim and takes no
+        /// click.
+        pub locked: Option<&'a str>,
     }
 
     /// Draw a rail cell; returns whether it was clicked.
     pub fn rail_item(ui: &mut egui::Ui, item: &RailItem<'_>) -> bool {
-        let (rect, resp) = ui.allocate_exact_size(egui::vec2(RAIL_W, RAIL_CELL_H), egui::Sense::click());
-        let col = if item.on { BRASS } else if resp.hovered() { DIM } else { FAINT };
+        let sense = if item.locked.is_some() { egui::Sense::hover() } else { egui::Sense::click() };
+        let (rect, resp) = ui.allocate_exact_size(egui::vec2(RAIL_W, RAIL_CELL_H), sense);
+        let resp = match item.locked {
+            Some(why) => resp.on_hover_text(why),
+            None => resp,
+        };
+        let col = if item.on {
+            BRASS
+        } else if item.locked.is_some() {
+            LINE2
+        } else if resp.hovered() {
+            DIM
+        } else {
+            FAINT
+        };
         let p = ui.painter();
         let at = |x: f32, y: f32| rect.left_top() + egui::vec2(x, y);
         if item.on {
