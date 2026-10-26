@@ -1305,6 +1305,10 @@ pub fn run(opts: Options) {
     // The last boot's failure: which chain it belongs to and why. Settings shows that chain red
     // with the reason until the next boot starts.
     let mut boot_fail: Option<(Which, String)> = None;
+    // Boots finished, and `--ui-state`'s capture waiting on a reload: (PNG, settle frames, the
+    // boot count when it was asked).
+    let mut boots_done: u32 = 0;
+    let mut reload_capture: Option<(PathBuf, u32, u32)> = None;
 
     // Browser state.
     let mut kind = Kind::Model;
@@ -1704,6 +1708,11 @@ pub fn run(opts: Options) {
                                 Ok(crate::fetch::Event::Progress(m)) => fetch_msg = m,
                                 Ok(crate::fetch::Event::Done(p)) => {
                                     cfg_note = Some(Ok(format!("Reference data installed to {}.", p.display())));
+                                    // Re-downloaded into the folder in use: same path, new files, so
+                                    // the chain alone would see nothing to reload.
+                                    if loaded_data.as_deref() == Some(p.as_path()) {
+                                        loaded_data = None;
+                                    }
                                     chains_dirty = true;
                                     finished = true;
                                 }
@@ -1735,6 +1744,10 @@ pub fn run(opts: Options) {
                         data_chain = crate::chains::data();
                         let loaded_wad = (!wadpath.is_empty()).then(|| PathBuf::from(&wadpath));
                         let next = next_step(loaded_wad.as_deref(), loaded_data.as_deref(), &game_chain, &data_chain);
+                        if reload_capture.is_some() && !matches!(next, Next::Boot { .. }) {
+                            eprintln!("--ui-state: run_wad / run_data started no reload ({next:?}): it names what is already loaded, or leaves a chain with no answer");
+                            std::process::exit(2);
+                        }
                         let (drop_archive, drop_data) = match &next {
                             Next::Stay => (false, false),
                             Next::Setup(SettingsSection::Game) => (true, true),
@@ -1742,8 +1755,16 @@ pub fn run(opts: Options) {
                             Next::Boot { archive, .. } => (archive.is_some(), true),
                         };
                         if drop_archive {
-                            preview = None;
-                            donor_ref = None;
+                            // The scene keeps uploads by model hash, and the donor path skips a hash
+                            // it already has: a hash both archives share would draw the old mesh.
+                            if let Some(p) = preview.take() {
+                                scene.forget_entity(p.entity);
+                                scene.unload_model(p.hash);
+                            }
+                            if let Some((h, e)) = donor_ref.take() {
+                                scene.forget_entity(e);
+                                scene.unload_model(h);
+                            }
                             world = World::new();
                             hero_renderers.clear();
                             tex_view = None;
@@ -1889,10 +1910,11 @@ pub fn run(opts: Options) {
                                     wb = resume_wb;
                                 }
                                 ever_ready = true;
+                                boots_done += 1;
                             }
                             Some(Err((which, e))) => {
                                 eprintln!("workshop: {e}");
-                                if ui_state.is_some() {
+                                if ui_state.is_some() || reload_capture.is_some() {
                                     eprintln!("--ui-state: the window never left the loading screen: {e}");
                                     std::process::exit(2);
                                 }
@@ -2193,12 +2215,28 @@ pub fn run(opts: Options) {
                             std::process::exit(2);
                         }
                         // The AUDIO keys wait for the tab's routing (read on a worker); the capture
-                        // counts down once they are in.
-                        if st.audio() {
+                        // counts down once they are in. A run-only path waits for the reload it
+                        // starts, through the same chains_dirty step a Settings click takes.
+                        if st.run_wad.is_some() || st.run_data.is_some() {
+                            if let Some(p) = &st.run_wad {
+                                crate::chains::set_run_wad(p.clone());
+                            }
+                            if let Some(p) = &st.run_data {
+                                crate::chains::set_run_data(p.clone());
+                            }
+                            chains_dirty = true;
+                            reload_capture = Some((st.capture.clone(), st.settle_frames, boots_done));
+                        } else if st.audio() {
                             audio_page.ensure_routes(std::path::Path::new(&wadpath));
                             audio_ui = Some(st);
                         } else {
                             capture_to = Some((st.capture.clone(), st.settle_frames));
+                        }
+                    }
+                    if let Some((to, settle, at)) = &reload_capture {
+                        if phase == Phase::Ready && boots_done > *at {
+                            capture_to = Some((to.clone(), *settle));
+                            reload_capture = None;
                         }
                     }
                     if audio_ui.is_some() {
@@ -4556,13 +4594,21 @@ pub fn run(opts: Options) {
                                                     };
                                                     let (opened, opened_badge) = match which {
                                                         Which::Game if !wadpath.is_empty() => {
-                                                            let mut rows: Vec<(&'static str, String)> = vec![("base", wadpath.clone())];
+                                                            // The file names, as the board has them: the full
+                                                            // path is the chain row above (and its hover).
+                                                            let name = |p: &str| {
+                                                                std::path::Path::new(p)
+                                                                    .file_name()
+                                                                    .map(|n| n.to_string_lossy().into_owned())
+                                                                    .unwrap_or_else(|| p.to_string())
+                                                            };
+                                                            let mut rows: Vec<(&'static str, String)> = vec![("base", name(&wadpath))];
                                                             if overlays.is_empty() {
                                                                 rows.push(("overlay", "none".into()));
                                                             }
                                                             for o in &overlays {
                                                                 let how = if std::path::Path::new(o) == auto_patch_path { "found beside it" } else { "--overlay" };
-                                                                rows.push(("overlay", format!("{o} · {how}")));
+                                                                rows.push(("overlay", format!("{} · {how}", name(o))));
                                                             }
                                                             rows.push((
                                                                 "catalog",
@@ -4631,9 +4677,27 @@ pub fn run(opts: Options) {
                                                                         Which::Data => cfg.data_dir = Some(p),
                                                                     }
                                                                     chains_dirty = true;
-                                                                    cfg.save()
-                                                                        .map(|f| format!("Saved to {} ({desc}).", f.display()))
-                                                                        .map_err(|e| format!("Could not save: {e}"))
+                                                                    match cfg.save() {
+                                                                        Err(e) => Err(format!("Could not save: {e}")),
+                                                                        Ok(f) => {
+                                                                            // Saved is step 3: a broken step above it still
+                                                                            // stops the chain, and "saved" alone would read
+                                                                            // as fixed while the section stays red.
+                                                                            let now = match w {
+                                                                                Which::Game => crate::chains::game(opts.wad_flag.as_deref()),
+                                                                                Which::Data => crate::chains::data(),
+                                                                            };
+                                                                            match now.blocker() {
+                                                                                Some(b) => Err(format!(
+                                                                                    "Saved to {}, but {} above it is still broken, so it is not used. Use \u{201c}Use for this run only\u{2026}\u{201d}, or fix {}.",
+                                                                                    f.display(),
+                                                                                    b.label,
+                                                                                    b.label
+                                                                                )),
+                                                                                None => Ok(format!("Saved to {} ({desc}).", f.display())),
+                                                                            }
+                                                                        }
+                                                                    }
                                                                 }
                                                             });
                                                         }
