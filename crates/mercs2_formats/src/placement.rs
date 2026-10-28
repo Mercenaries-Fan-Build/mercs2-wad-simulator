@@ -367,8 +367,16 @@ fn parse_transform_records(data: &[u8], off: usize, size: usize) -> Vec<(u32, [f
 }
 
 /// Parse a `Name` COMP `data` blob into (key -> name) records. Each record is
-/// `[u32 key][ascii "EntityName 0xKEY\0"]`; the stored string is the full
-/// `"Name 0xHEXID"` — we keep the bare name portion (before the trailing hex id).
+/// `[u32 key][ascii "EntityName 0xKEY"][NUL][u8 flag]`; the stored string is the full
+/// `"Name 0xHEXID"` — we keep the bare name portion (before the trailing hex id). A record with an
+/// empty string yields no name.
+///
+/// The flag is ONE byte: `0x00` in most Name COMPs, `0x01` in the locator/starter-name COMP
+/// (sub-block 33: `PmcCon001_Start1`, `Starter_*`, …). The next record's key starts right after it,
+/// and a key's low byte can itself be `0x00` (`vz_state_pmccon004` places `0x00105200` "VZ Heavy
+/// (RPG)" right after a `0x00` flag), so nothing past the flag is skipped. Measured over every Name
+/// COMP of retail `vz.wad`'s 923 layers: this layout consumes each one exactly, with every flag
+/// `0x00` or `0x01`.
 fn parse_name_records(data: &[u8], off: usize, size: usize) -> Vec<(u32, String)> {
     let mut out = Vec::new();
     if off + size > data.len() {
@@ -384,27 +392,18 @@ fn parse_name_records(data: &[u8], off: usize, size: usize) -> Vec<(u32, String)
         while p < blob.len() && blob[p] != 0 {
             p += 1;
         }
-        if p <= start {
-            // Empty string; skip the NUL and continue.
-            p += 1;
+        let s = String::from_utf8_lossy(&blob[start..p]).into_owned();
+        // Past the NUL and the one flag byte.
+        p += 2;
+        if s.is_empty() {
             continue;
         }
-        let s = String::from_utf8_lossy(&blob[start..p]).into_owned();
         // Strip a trailing " 0xHEXID" if present (gameplay name is the head).
         let name = match s.rfind(" 0x") {
             Some(i) => s[..i].to_string(),
             None => s,
         };
         out.push((key, name));
-        // Advance past the string's NUL terminator, then a per-record trailer/flag byte + any zero
-        // padding. Records are `[u32 key][cstring\0][u8 flag]` — the flag is `0x00` in most Name COMPs
-        // (so the old NUL-only skip happened to align) but `0x01` in the locator/starter-name COMP
-        // (sub-block 33: `PmcCon001_Start1`, `Starter_*`, …), which slipped every later key by a byte
-        // and dropped those names. Entity keys are dense mid-range ids whose low byte is never `0x00`/
-        // `0x01`, so a leading `0x00`/`0x01` after a name is a terminator/flag, not the next key.
-        while p < blob.len() && (blob[p] == 0x00 || blob[p] == 0x01) {
-            p += 1;
-        }
     }
     out
 }
@@ -1223,16 +1222,40 @@ mod tests {
         assert!(recs.windows(2).all(|w| w[0].key < w[1].key));
     }
 
-    /// Name records are `[u32 key][ascii name 0xHEXID\0]`; the bare name is kept.
+    /// Name records are `[u32 key][ascii name 0xHEXID\0][u8 flag]`; the bare name is kept.
     #[test]
     fn name_record_strips_hex_id() {
         let mut d = Vec::new();
         d.extend_from_slice(&0x00AB_CDEFu32.to_le_bytes());
-        d.extend_from_slice(b"pmc_interior 0xABCDEF\0");
+        d.extend_from_slice(b"pmc_interior 0xABCDEF\0\0");
         let recs = parse_name_records(&d, 0, d.len());
         assert_eq!(recs.len(), 1);
         assert_eq!(recs[0].0, 0x00AB_CDEF);
         assert_eq!(recs[0].1, "pmc_interior");
+    }
+
+    /// The flag is one byte, and the next key starts right after it even when that key's low byte
+    /// is `0x00`. These are retail bytes: `vz_state_pmccon004`'s Name COMP at `+0x5316` has
+    /// `VZ Soldier 0x001051ff` with flag `0x00`, then the key `0x00105200` (`00 52 10 00`), then
+    /// `VZ Heavy (RPG) 0x00105200`; the third record carries flag `0x01`, as the starter COMP's do.
+    #[test]
+    fn name_record_flag_is_one_byte_and_a_key_may_start_with_zero() {
+        let mut d = Vec::new();
+        d.extend_from_slice(&0x0010_51FFu32.to_le_bytes());
+        d.extend_from_slice(b"VZ Soldier 0x001051ff\0\x00");
+        d.extend_from_slice(&0x0010_5200u32.to_le_bytes());
+        d.extend_from_slice(b"VZ Heavy (RPG) 0x00105200\0\x01");
+        d.extend_from_slice(&0x0010_5201u32.to_le_bytes());
+        d.extend_from_slice(b"VZ Heavy (Light MG) 0x00105201\0\x00");
+        let recs = parse_name_records(&d, 0, d.len());
+        assert_eq!(
+            recs,
+            vec![
+                (0x0010_51FF, "VZ Soldier".to_string()),
+                (0x0010_5200, "VZ Heavy (RPG)".to_string()),
+                (0x0010_5201, "VZ Heavy (Light MG)".to_string()),
+            ]
+        );
     }
 
     /// A ModelName record is `{u32 key, u32 model_hash}` at 8-byte stride.
