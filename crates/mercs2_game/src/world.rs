@@ -1398,7 +1398,7 @@ impl mercs2_engine::app::Game for Mercs2Game {
                 Transform::IDENTITY,
                 ModelRef { model: stream_terrain.hash },
                 AnimState::default(),
-                SkinPalette { mats: vec![IDENTITY] },
+                SkinPalette { mats: scene.model_rest_palette(stream_terrain.hash) },
             ));
         }
         if let Some(sh) = &self.script {
@@ -1450,7 +1450,7 @@ impl mercs2_engine::app::Game for Mercs2Game {
                 Transform::IDENTITY,
                 ModelRef { model: pm.hash },
                 AnimState::default(),
-                SkinPalette { mats: vec![IDENTITY] },
+                SkinPalette { mats: scene.model_rest_palette(pm.hash) },
             ));
         }
 
@@ -1459,7 +1459,7 @@ impl mercs2_engine::app::Game for Mercs2Game {
             scene.load_model(m.hash, &m.verts, &m.indices, &m.draws, &m.textures, &m.skin);
             let mut t = Transform::from_translation(Vec3::new(pos[0], pos[1], pos[2]));
             t.rotation = Quat::from_rotation_y(yaw);
-            ctx.world.borrow_mut().spawn((t, ModelRef { model: m.hash }, AnimState::default(), SkinPalette { mats: vec![IDENTITY] }));
+            ctx.world.borrow_mut().spawn((t, ModelRef { model: m.hash }, AnimState::default(), SkinPalette { mats: scene.model_rest_palette(m.hash) }));
         }
 
         // Hi-res c3 cell geometry (`--cells`) — collect world-space triangles for collision.
@@ -1473,7 +1473,7 @@ impl mercs2_engine::app::Game for Mercs2Game {
                 Transform::from_translation(tr),
                 ModelRef { model: m.hash },
                 AnimState::default(),
-                SkinPalette { mats: vec![IDENTITY] },
+                SkinPalette { mats: scene.model_rest_palette(m.hash) },
             ));
         }
 
@@ -1487,8 +1487,7 @@ impl mercs2_engine::app::Game for Mercs2Game {
             self.collision_tris.extend(mercs2_engine::worldutil::mesh_collision_tris(
                 &m.verts, &m.indices, pos, quat,
             ));
-            let nbones = m.skin.bones.len().max(1);
-            ctx.world.borrow_mut().spawn((t, ModelRef { model: m.hash }, AnimState::default(), SkinPalette { mats: vec![IDENTITY; nbones] }));
+            ctx.world.borrow_mut().spawn((t, ModelRef { model: m.hash }, AnimState::default(), SkinPalette { mats: scene.model_rest_palette(m.hash) }));
         }
 
         // ModelName props (exterior + interior furniture) — each non-water instance blocks → collision.
@@ -1510,7 +1509,7 @@ impl mercs2_engine::app::Game for Mercs2Game {
             if destructible {
                 prop_destructibles += 1;
             }
-            let nbones = m.skin.bones.len().max(1);
+            let rest = scene.model_rest_palette(hash);
             for (pos, quat) in instances {
                 let tr = Vec3::new(pos[0], pos[1], pos[2]);
                 let q = Quat::from_xyzw(quat[0], quat[1], quat[2], quat[3]);
@@ -1519,7 +1518,7 @@ impl mercs2_engine::app::Game for Mercs2Game {
                 ));
                 let mut t = Transform::from_translation(tr);
                 t.rotation = q;
-                let e = ctx.world.borrow_mut().spawn((t, ModelRef { model: hash }, AnimState::default(), SkinPalette { mats: vec![IDENTITY; nbones] }));
+                let e = ctx.world.borrow_mut().spawn((t, ModelRef { model: hash }, AnimState::default(), SkinPalette { mats: rest.clone() }));
                 if destructible {
                     // `Health` is the destruction system's INPUT; `Destructible` is where the machine
                     // keeps its position and the node-enable table the draw gate reads.
@@ -1610,12 +1609,11 @@ impl mercs2_engine::app::Game for Mercs2Game {
             if let (Some(mut wm), Some(hb)) = (data.weapon, data.weapon_hand_bone) {
                 wm.skin.center = [0.0, 0.0, 0.0];
                 wm.skin.scale = 1.0;
-                let ident = vec![IDENTITY; wm.skin.rig.len().max(1)];
                 scene.load_model(wm.hash, &wm.verts, &wm.indices, &wm.draws, &wm.textures, &wm.skin);
                 self.weapon_entity = Some(ctx.world.borrow_mut().spawn((
                     Transform::from_translation(self.player.pos),
                     ModelRef { model: wm.hash },
-                    SkinPalette { mats: ident },
+                    SkinPalette { mats: scene.model_rest_palette(wm.hash) },
                 )));
                 self.weapon_hand_bone = hb;
                 self.weapon_player_model = p.hash;
