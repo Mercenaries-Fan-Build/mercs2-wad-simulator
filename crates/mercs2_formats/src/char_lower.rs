@@ -221,12 +221,27 @@ pub fn faithful_partition(
     }
 }
 
-/// Lower a rigged source mesh into `donor_block`, re-stamped as `new_name_hash`.
+/// Lower a rigged source mesh into `donor_block`, re-stamped as `new_name_hash`, on the donor
+/// draw groups the split picks (largest first).
 pub fn character_into_donor(
     donor_block: &[u8],
     glb: &CharGlbData,
     new_name_hash: u32,
     opts: &LowerOpts,
+) -> Result<Lowered, String> {
+    character_into_donor_at(donor_block, glb, new_name_hash, opts, None)
+}
+
+/// [`character_into_donor`], with `first_host` — when given — as the first host draw group: a mesh
+/// the split keeps in one group goes into it whole, and one split across several starts in it and
+/// continues in the donor's largest other groups. A `first_host` that is not one of the donor's
+/// drawing groups is an error naming the ones it has.
+pub fn character_into_donor_at(
+    donor_block: &[u8],
+    glb: &CharGlbData,
+    new_name_hash: u32,
+    opts: &LowerOpts,
+    first_host: Option<usize>,
 ) -> Result<Lowered, String> {
     let skel = Skeleton::from_block(donor_block)
         .map_err(|e| format!("donor has no readable HIER skeleton: {e}"))?;
@@ -265,6 +280,16 @@ pub fn character_into_donor(
     // cannot ship a real character by itself.
     let mut caps = drawing_group_caps(donor_block);
     caps.sort_by_key(|&(_, vcap, _)| std::cmp::Reverse(vcap));
+    // The named first host leads; the rest stay largest first.
+    if let Some(g) = first_host {
+        let Some(at) = caps.iter().position(|&(ord, _, _)| ord == g) else {
+            let mut ords: Vec<usize> = caps.iter().map(|&(ord, _, _)| ord).collect();
+            ords.sort_unstable();
+            return Err(format!("group {g} is not a drawing group of the donor (its drawing groups: {ords:?})"));
+        };
+        let named = caps.remove(at);
+        caps.insert(0, named);
+    }
 
     // Global HIER index per vertex influence — what the partitioner reasons about, and what the
     // multi-group injector expects in `mesh.joints`.
@@ -307,8 +332,8 @@ pub fn character_into_donor(
     // The faithful partition discovers how many groups are needed instead: one per source part,
     // split further only where a palette would overflow.
     //
-    // `single_host` overrides all of this: ONE group holding the whole mesh, on the largest donor
-    // group. The per-part split exists only to give each material its own group, and single-host
+    // `single_host` overrides all of this: ONE group holding the whole mesh, on the first of `caps`
+    // (the named first host, else the largest donor group). The per-part split exists only to give each material its own group, and single-host
     // forgoes per-material skins by definition — so a trivial one-segment partition is correct, and
     // it routes the build to the proven `inject_character_into_donor_block` path below.
     let (part, hosts): (Partition, Vec<usize>) = if opts.single_host {
