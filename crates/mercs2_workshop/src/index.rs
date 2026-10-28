@@ -532,8 +532,9 @@ pub fn load_all_names_staged(
     Ok(names)
 }
 
-/// The curated ASET hash→name dictionary (every name we have actually CRACKED), compiled into the
-/// binary. Unlike the rainbow table this is not speculative — each entry is a verified preimage.
+/// The ASET hash→name dictionary compiled into the binary (`data/aset_names.tsv`, written by
+/// `aset_export --embed-tsv` from the rainbow table and this crate's name fragments). Each entry's
+/// name hashes to its key; a hash match alone does not prove the name is the one the game used.
 const EMBEDDED_ASET_NAMES: &str = include_str!("../data/aset_names.tsv");
 
 /// Parse [`EMBEDDED_ASET_NAMES`] (`0xHASH\tname` per line, `#` comments).
@@ -551,10 +552,11 @@ pub fn embedded_aset_names() -> HashMap<u32, String> {
     out
 }
 
-/// The RAW corpora merge behind `--pack-data` when the repo's `data/production_names.json` is
+/// The RAW corpora merge behind `--pack-data` when this crate's `data/production_names.json` is
 /// absent, merged lowest→highest priority: the Jul-08 devkit strings, the bone-name candidates,
-/// the rainbow table, the ASET-derived name fragments, then the live registry dump. Every source
-/// is a dev-machine file named by `.mercs2-local.toml` (searched upward from `start`): the
+/// the rainbow table, the ASET-derived name fragments, then the live registry dump. The fragments
+/// are committed in this crate's `data/` ([`crate_data_file`]); every other source is a
+/// dev-machine file named by `.mercs2-local.toml` (searched upward from `start`): the
 /// `jul08_strings` and `rainbow_table` keys, and the `data/` folder under `notes_docs_dir`. A
 /// missing key or file is an error naming it.
 pub fn load_all_names_raw(start: &Path) -> Result<HashMap<u32, String>, String> {
@@ -571,11 +573,29 @@ pub fn load_all_names_raw(start: &Path) -> Result<HashMap<u32, String>, String> 
     // table structurally cannot — it is what makes most unnamed vehicle/prop models (the whole
     // aircraft roster: A-10, AC-130, C-130, Predator, Pave Low, AH-1Z, MiG-27, …) browsable.
     // Produced by `wad_simulator --bin asset_gap_probe --emit`; every entry is a verified preimage.
+    // The block-string harvest goes under the fragments: a fragment's name wins over a harvested one.
+    names.extend(load_harvested_names(&notes_data_file(&notes_docs, "aset_block_strings.json")?)?);
     for f in ASET_NAME_FRAGMENTS {
-        names.extend(load_rainbow_json(&notes_data_file(&notes_docs, f)?)?);
+        names.extend(load_rainbow_json(&crate_data_file(f)?)?);
     }
     names.extend(load_names_csv(&notes_data_file(&notes_docs, "live_registry_hashes.csv")?)?);
     Ok(names)
+}
+
+/// `<this crate>/data/<name>` in the checkout this binary was built from — the committed name
+/// lookups (`data/README.md`) — or an error naming the missing file. Read by `--pack-data`, which
+/// runs from a checkout; a released binary carries `names.bin` instead.
+pub fn crate_data_file(name: &str) -> Result<PathBuf, String> {
+    let p = Path::new(env!("CARGO_MANIFEST_DIR")).join("data").join(name);
+    if p.is_file() {
+        Ok(p)
+    } else {
+        Err(format!(
+            "{} is not a file (committed in the checkout {} was built from)",
+            p.display(),
+            env!("CARGO_PKG_NAME")
+        ))
+    }
 }
 
 /// `<notes_docs_dir>/data/<name>`, or an error naming the `notes_docs_dir` key and the missing file.
@@ -674,11 +694,10 @@ pub fn load_names_pack(path: &Path) -> Result<HashMap<u32, String>, String> {
     Ok(names)
 }
 
-/// The ASET-derived name fragments under `<notes_docs_dir>/data/` (same JSON shape as the rainbow
-/// table), each a set of preimages derived from the WAD:
+/// The ASET-derived name fragments committed in this crate's `data/` (same JSON shape as the
+/// rainbow table), each a set of preimages derived from the WAD:
 ///   `aset_discovered_names` — texture-base -> model naming convention (`X_dm` names `X`)
-///   `aset_block_strings`    — identifiers mined out of decompressed block payloads
-///   `aset_expanded_names`   — slot-grammar expansion of the above (road/clip/atlas families)
+///   `aset_expanded_names`   — slot-grammar expansion of seed names (road/clip/atlas families)
 ///   `aset_external_names`   — block-path stems mined from the CONSOLE WADs (`aset_external_mine`).
 ///                             The PC bake strips generated-asset names; the PS3/Xbox builds ship an
 ///                             uncompressed block-path table that still spells them, and a block path
@@ -688,13 +707,19 @@ pub fn load_names_pack(path: &Path) -> Result<HashMap<u32, String>, String> {
 ///                             order-preserving token SUBSEQUENCE of one of its texture names, which
 ///                             catches the middle-token case (`civ_hum_casualfemale_ub_c` ->
 ///                             `civ_hum_casualfemale_c`) that no suffix-strip can reach.
+///   `aset_roster_names`     — model roots from the game roster × the `<faction>_veh_<class>_<name>`
+///                             grammar
+///   `aset_variant_names`    — decorated variants of named models (`vz_veh_tank_amx30_base`)
+/// The notes repo's `aset_block_strings.json` (identifiers harvested out of decompressed block
+/// payloads) is not one of them: a harvested run that hashes to an asset can be collision debris
+/// (`-ufzc9`, `.j0x.`), so it is read through [`load_harvested_names`].
 const ASET_NAME_FRAGMENTS: [&str; 6] = [
     "aset_discovered_names.json",
-    "aset_block_strings.json",
     "aset_expanded_names.json",
     "aset_model_names.json",
     "aset_external_names.json",
     "aset_roster_names.json",
+    "aset_variant_names.json",
 ];
 
 /// Load the decompiled-Lua corpus for reference search: `(display path, content, lowercased)`,
@@ -808,6 +833,21 @@ fn load_name_lines(path: &Path) -> Result<HashMap<u32, String>, String> {
 
 /// Parse the rainbow table (`{"pandemic_hash_m2": {"0xHEX": ["name", …]}}`) into hash → first name.
 fn load_rainbow_json(path: &Path) -> Result<HashMap<u32, String>, String> {
+    load_rainbow_json_where(path, |_, _| true)
+}
+
+/// The names HARVESTED from block bytes (`aset_block_strings.json`): only the identifier-shaped
+/// ones ([`mercs2_formats::hash::is_identifier_shaped`]), minus every `(hash, name)` in this crate's
+/// `data/rejected_names.json`.
+fn load_harvested_names(path: &Path) -> Result<HashMap<u32, String>, String> {
+    let rejected = load_rainbow_json(&crate_data_file("rejected_names.json")?)?;
+    load_rainbow_json_where(path, |h, n| {
+        mercs2_formats::hash::is_identifier_shaped(n) && rejected.get(&h).map(String::as_str) != Some(n)
+    })
+}
+
+/// [`load_rainbow_json`] keeping, per hash, the first candidate `keep` accepts.
+fn load_rainbow_json_where(path: &Path, keep: impl Fn(u32, &str) -> bool) -> Result<HashMap<u32, String>, String> {
     let t0 = std::time::Instant::now();
     let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
     let root = serde_json::from_str::<serde_json::Value>(&text)
@@ -819,7 +859,8 @@ fn load_rainbow_json(path: &Path) -> Result<HashMap<u32, String>, String> {
     let mut map = HashMap::new();
     for (hex, names) in obj {
         let Ok(h) = u32::from_str_radix(hex.trim_start_matches("0x"), 16) else { continue };
-        if let Some(n) = names.as_array().and_then(|a| a.first()).and_then(|v| v.as_str()) {
+        let first = names.as_array().and_then(|a| a.iter().filter_map(|v| v.as_str()).find(|n| keep(h, n)));
+        if let Some(n) = first {
             map.insert(h, n.to_string());
         }
     }
@@ -867,6 +908,50 @@ mod tests {
         assert!(kit.is(0x45CC_35FE, None));
         assert!(!soldier.is(0x45CC_35FE, None));
         assert!(!soldier.is(0x4D4F_42B5, Some("Allied Soldier")));
+    }
+
+    /// Every name fragment `--pack-data` merges is committed in this crate, parses, and holds only
+    /// names that hash to their keys; the harvested block strings are not among them.
+    #[test]
+    fn the_name_fragments_load_from_the_crate() {
+        assert!(!super::ASET_NAME_FRAGMENTS.contains(&"aset_block_strings.json"));
+        for f in super::ASET_NAME_FRAGMENTS {
+            let p = super::crate_data_file(f).unwrap_or_else(|e| panic!("{e}"));
+            let names = super::load_rainbow_json(&p).unwrap_or_else(|e| panic!("{e}"));
+            assert!(!names.is_empty(), "{f} holds no names");
+            for (h, n) in &names {
+                assert_eq!(m2(n), *h, "{f}: {n} does not hash to 0x{h:08X}");
+            }
+        }
+        assert!(super::crate_data_file("production_names.json").is_ok());
+    }
+
+    /// The harvest keeps identifier-shaped names, drops debris by shape and by the reject list, and
+    /// falls through to a hash's next candidate when its first is dropped.
+    #[test]
+    fn harvested_names_drop_debris() {
+        let rejected = super::load_rainbow_json(&super::crate_data_file("rejected_names.json").unwrap()).unwrap();
+        assert_eq!(rejected.len(), 3);
+        for (h, n) in &rejected {
+            assert_eq!(m2(n), *h, "{n}");
+        }
+        let dir = std::env::temp_dir().join(format!("harvest_test_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("harvest.json");
+        let real = "all_md500_driverdoor_actionhijack_getin_loopf_fb";
+        let doc = serde_json::json!({ "pandemic_hash_m2": {
+            "0x9C94874B": [real],
+            "0xEB74016B": ["-ufzc9"],
+            "0x862155E2": ["wxfm0u"],
+            "0x0000BEEF": [".j0x.", "telephone"],
+        }});
+        std::fs::write(&p, doc.to_string()).unwrap();
+        let got = super::load_harvested_names(&p).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(got.get(&0x9C94_874B).map(String::as_str), Some(real));
+        assert!(!got.contains_key(&0xEB74_016B));
+        assert!(!got.contains_key(&0x8621_55E2));
+        assert_eq!(got.get(&0x0000_BEEF).map(String::as_str), Some("telephone"));
     }
 
     use mercs2_formats::hash::pandemic_hash_m2 as m2;
