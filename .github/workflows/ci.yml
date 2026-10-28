@@ -90,7 +90,9 @@ jobs:
       # mercs2_workshop's corpus gates (lua_source, blueprint, missions) run over the decompiled Lua
       # in the Workshop reference bundle, a release asset rather than a committed file. Pinned to one
       # release by sha256; the gates pin that release's script counts (index::PINNED_CORPUS), and
-      # fail rather than skip when MERCS2_WORKSHOP_DATA names no bundle.
+      # fail rather than skip when MERCS2_WORKSHOP_DATA names no bundle. mercs2_workshop's
+      # fetch::PINNED reads BUNDLE_URL and BUNDLE_SHA256 from this step at compile time: the Workshop
+      # downloads and sha256-checks this same bundle.
       - name: Download the Workshop reference bundle (pinned)
         env:
           BUNDLE_URL: https://github.com/Mercenaries-Fan-Build/mercs2-wad-simulator/releases/download/v0.17.0/mercs2-workshop-data.zip
