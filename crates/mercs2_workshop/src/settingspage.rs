@@ -181,8 +181,9 @@ pub struct View<'a> {
     pub chain: &'a Chain,
     /// The last load of this chain's source failed.
     pub failed: bool,
-    /// "WHAT IT OPENED": key → value rows, empty while nothing is loaded, and its badge.
-    pub opened: Vec<(&'static str, String)>,
+    /// "WHAT IT OPENED": key → value rows (`true`: drawn as a failure), empty while nothing is
+    /// loaded, and its badge.
+    pub opened: Vec<(&'static str, String, bool)>,
     pub opened_badge: Option<String>,
     /// A saved setting exists (Clear saved is enabled).
     pub saved_set: bool,
@@ -319,7 +320,7 @@ pub fn section(ui: &mut egui::Ui, v: &View<'_>) -> Vec<Act> {
         theme::section(ui, "What it opened", v.opened_badge.as_deref(), true, |ui| {
             // Key, then the value left-aligned and cut to the card: a full path is wider than the
             // card, and an unclipped one pushes the whole section past its left edge.
-            for (k, val) in &v.opened {
+            for (k, val, bad) in &v.opened {
                 ui.horizontal(|ui| {
                     ui.allocate_ui_with_layout(
                         egui::vec2(110.0, ui.spacing().interact_size.y),
@@ -329,7 +330,8 @@ pub fn section(ui: &mut egui::Ui, v: &View<'_>) -> Vec<Act> {
                             ui.label(egui::RichText::new(*k).color(theme::FAINT));
                         },
                     );
-                    ui.add(egui::Label::new(egui::RichText::new(val.as_str()).monospace().color(theme::DIM)).truncate())
+                    let col = if *bad { theme::BAD } else { theme::DIM };
+                    ui.add(egui::Label::new(egui::RichText::new(val.as_str()).monospace().color(col)).truncate())
                         .on_hover_text(val.as_str());
                 });
             }
