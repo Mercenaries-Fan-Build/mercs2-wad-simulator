@@ -9,11 +9,86 @@
 //! `b.stub(..)` for a deliberate faithful no-op), then `b.install_global("Pg")`. Nothing else in
 //! the crate changes — the coverage harness (see `super`) picks up the delta automatically.
 
-use mercs2_luac::rt::{Lua, MultiValue, Result as LuaResult, Table};
+use mercs2_luac::rt::{Lua, MultiValue, Result as LuaResult, Table, Value};
 
 use super::{Installed, NsBuilder, Required};
 use crate::attribution::LuaFnExt;
-use crate::{Guid, SharedHost};
+use crate::{Guid, SharedHost, SpawnArgs, SpawnTemplate};
+
+/// `lua_isnumber` + `lua_tonumber` (Lua 5.1: a numeric string converts).
+fn lua_number(v: Option<&Value>) -> Option<f32> {
+    match v? {
+        Value::Number(n) => Some(*n),
+        Value::String(s) => String::from_utf8(s.as_bytes()).ok()?.trim().parse().ok(),
+        _ => None,
+    }
+}
+
+/// A guid argument as `FUN_0059FF50` reads it: a lightuserdata; a full userdata is not modelled.
+fn guid_arg(v: Option<&Value>) -> LuaResult<Option<u64>> {
+    match v {
+        Some(Value::LightUserData(_)) => Ok(Some(Guid::from_value(v.expect("matched")).raw())),
+        Some(Value::Other(_, "userdata")) => {
+            Err(mercs2_luac::rt::Error::RuntimeError("Pg.Spawn: a full-userdata guid is not modelled by this host".into()))
+        }
+        _ => Ok(None),
+    }
+}
+
+/// Read `Pg.Spawn`'s arguments as `0x5D5D20` does (Xbox `0x82336B70`), with an index that moves only
+/// past what it reads: a string template name, else a guid; three numbers of position
+/// (`None` without them: the binding pushes nil); an optional number of yaw (0 otherwise); two
+/// booleans, each also taking a nil (`FUN_0059F6D0` accepts type 0 or 1), defaulting to false and
+/// true; an optional guid.
+fn parse_spawn(args: &[Value]) -> LuaResult<Option<SpawnArgs>> {
+    let mut i = 0;
+    let template = match args.first() {
+        Some(Value::String(s)) => {
+            i += 1;
+            SpawnTemplate::Name(
+                String::from_utf8(s.as_bytes()).map_err(|e| mercs2_luac::rt::Error::RuntimeError(format!("Pg.Spawn: template name: {e}")))?,
+            )
+        }
+        // `lua_isstring` takes a number too and converts it with the VM's number format, which is
+        // not decoded; no shipped script passes one.
+        Some(Value::Number(n)) => {
+            return Err(mercs2_luac::rt::Error::RuntimeError(format!("Pg.Spawn: a number template ({n}) is not modelled")))
+        }
+        v => match guid_arg(v)? {
+            Some(g) => {
+                i += 1;
+                SpawnTemplate::Guid(g)
+            }
+            None => SpawnTemplate::Guid(0),
+        },
+    };
+    let (Some(x), Some(y), Some(z)) = (lua_number(args.get(i)), lua_number(args.get(i + 1)), lua_number(args.get(i + 2))) else {
+        return Ok(None);
+    };
+    i += 3;
+    let yaw = match lua_number(args.get(i)) {
+        Some(v) => {
+            i += 1;
+            v
+        }
+        None => 0.0,
+    };
+    let mut flag = |default: bool| match args.get(i) {
+        Some(Value::Boolean(b)) => {
+            i += 1;
+            *b
+        }
+        Some(Value::Nil) => {
+            i += 1;
+            false
+        }
+        _ => default,
+    };
+    let remove_alpha_animation = flag(false);
+    let net = flag(true);
+    let collision_source = guid_arg(args.get(i))?.unwrap_or(0);
+    Ok(Some(SpawnArgs { template, pos: [x, y, z], yaw, remove_alpha_animation, net, collision_source }))
+}
 
 /// Stable coverage key (unique per luaL_Reg table; two tables may share a Lua global).
 pub const NAMESPACE: &str = "Pg";
@@ -128,17 +203,17 @@ pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
     )?;
 
     let h = host.clone();
-    // Pg.Spawn(template, x, y, z, yaw, [bLink], [bHighDetail]) -> guid | nil
+    // Pg.Spawn(template | guid, x, y, z, [yaw], [arg6], [arg7], [arg8]) -> guid | nil
     b.real(
         "Spawn",
-        lua.create_function(
-            move |_,
-                  (template, x, y, z, yaw, _link, high): (String, f32, f32, f32, f32, Option<bool>, Option<bool>)| {
-                let guid =
-                    h.borrow_mut().pg_spawn(&template, [x, y, z], yaw, high.unwrap_or(false));
-                Ok::<Guid, mercs2_luac::rt::Error>(Guid(guid))
-            },
-        )?,
+        lua.create_function(move |_, args: MultiValue| {
+            let args: Vec<Value> = args.into_iter().collect();
+            let guid = match parse_spawn(&args)? {
+                Some(spawn) => h.borrow_mut().pg_spawn(&spawn).map_err(mercs2_luac::rt::Error::RuntimeError)?,
+                None => 0,
+            };
+            Ok::<Guid, mercs2_luac::rt::Error>(Guid(guid))
+        })?,
     )?;
 
     // ===== Static-layer state queries (mrxlayermanager reads these as booleans). =====
@@ -148,12 +223,22 @@ pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
     // every layer as "does not exist" and the world never streams in).
     b.real("AssetExists", lua.create_function(|_, _: MultiValue| Ok(true))?)?;
 
+    // The static-layer teardown flag (`[0x1175F58]`) and the layer record's static bit.
+    let h = host.clone();
+    b.real("UnloadingStaticLayers", lua.create_function(move |_, on: Option<bool>| {
+        h.borrow_mut().set_unloading_static_layers(on.unwrap_or(false));
+        Ok(())
+    })?)?;
+    let h = host.clone();
+    b.real("GetUnloadingStaticLayers", lua.create_function(move |_, _: MultiValue| Ok(h.borrow().unloading_static_layers()))?)?;
+    let h = host.clone();
+    b.real("IsStaticLayer", lua.create_function(move |_, layer: String| Ok(h.borrow().is_static_layer(&layer)))?)?;
+    // `Pg.LoadingStaticLayers` / `GetLoadingStaticLayers` stay a fixed false below: their flag's role
+    // in the layer load is not decoded (`mrxtask.lua:312-315` only saves and restores it).
+
     for name in [
         "LoadingStaticLayers",
         "GetLoadingStaticLayers",
-        "IsStaticLayer",
-        "UnloadingStaticLayers",
-        "GetUnloadingStaticLayers",
         "IsPointInBoundary",
         "LoadGame",
         "LoadIsRetry",
@@ -254,71 +339,74 @@ pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
     // behavior by later world/AI systems; the game's Lua control flow runs unchanged here.
     // Layer/asset load, context actions, boundary + pursuit control, contract lifecycle, heli-wave/
     // skirmish spawners → recorded Pg commands the world/pursuit/streaming runtime drains.
-    // Layer load/unload/reload → the real async completion: register the status-change callback (arg 3)
-    // into a pending queue that the resident pump fires next tick with success — the engine's
-    // layer-streaming callback that lets MrxLayerManager fulfil the request + fire the gameplay-setup
-    // signal (_AttemptGameplaySetup{"static"/"dynamic"}). Deferred (not synchronous) so the fire doesn't
-    // reenter MrxLayerManager mid-`_ProcessOpQueue`. Returns true (accepted).
+    //
+    // Layer load/unload/reload (`docs/reverse_engineer/layer_load_code_map.md` §2–3): the host makes
+    // the request (a refused one returns nil and tracks nothing); an accepted one with a callback
+    // enters the request tracker, which `__flush_layer_loads` polls each script update against the
+    // layer record (`FUN_005A28F0`), firing `cb(sRequestType, sLayerName, "layer", bSuccess)` once the
+    // request completes. The callback never runs inside the request call itself.
+    // `Pg.LoadLayer(sName, bDynamic, fCallback, tCallbackData, bLoadingScreen)`;
+    // `Pg.ReloadLayer` / `Pg.UnloadLayer(sName, fCallback, tCallbackData, bLoadingScreen)`
+    // (`mrxlayermanager.lua:224-236`).
     for (name, req) in [("LoadLayer", "Load"), ("ReloadLayer", "Reload"), ("UnloadLayer", "Unload")] {
-        let req = req;
+        let h = host.clone();
         b.real(name, lua.create_function(move |lua, args: mercs2_luac::rt::MultiValue| {
-            // args: (layerName, [dynamic], callback, [cbdata], [screen]); the callback is the first
-            // Function; the layer name is the first string.
-            let layer = args.iter().find_map(|v| v.as_str().map(|s| s.to_string())).unwrap_or_default();
-            let cb = args.iter().find_map(|v| if let mercs2_luac::rt::Value::Function(f) = v { Some(f.clone()) } else { None });
-            if let Some(cb) = cb {
+            use mercs2_luac::rt::Value;
+            let args: Vec<Value> = args.into_iter().collect();
+            let arg = |i: usize| args.get(i).cloned().unwrap_or(Value::Nil);
+            let layer: String = match arg(0) {
+                Value::String(s) => s.to_string_lossy(),
+                v => return Err(mercs2_luac::rt::Error::RuntimeError(format!("Pg.{name}: layer name expected, got {}", v.type_name()))),
+            };
+            let (dynamic, first) = if req == "Load" { (matches!(arg(1), Value::Boolean(true)), 2) } else { (false, 1) };
+            if !h.borrow_mut().layer_request(req, &layer, dynamic) {
+                return Ok(Value::Nil);
+            }
+            if let Value::Function(cb) = arg(first) {
                 let pend: mercs2_luac::rt::Table = match lua.globals().get("__pending_layer_loads") {
                     Ok(t) => t,
                     Err(_) => { let t = lua.create_table()?; lua.globals().set("__pending_layer_loads", t.clone())?; t }
                 };
                 let entry = lua.create_table()?;
                 entry.set("cb", cb)?;
+                entry.set("data", arg(first + 1))?;
                 entry.set("req", req)?;
                 entry.set("layer", layer)?;
                 pend.push(entry)?;
             }
-            Ok(true)
+            Ok(Value::Boolean(true))
         })?)?;
     }
-    // Flush hook the resident pump calls each tick: fire each pending layer-load callback with success
-    // (`_LayerStatusChange(sRequestType, sLayerName, sLayerType, bSuccess=true)`).
-    b.extra("__flush_layer_loads", lua.create_function(|lua, ()| {
+    // The tracker poll the resident pump runs each script update: fire each completed request's
+    // callback, keep the pending ones.
+    let h = host.clone();
+    b.extra("__flush_layer_loads", lua.create_function(move |lua, ()| {
         let Ok(pend) = lua.globals().get::<mercs2_luac::rt::Table>("__pending_layer_loads") else { return Ok(()) };
-        let entries: Vec<mercs2_luac::rt::Table> = pend.clone().sequence_values::<mercs2_luac::rt::Table>().flatten().collect();
-        lua.globals().set("__pending_layer_loads", lua.create_table()?)?;
-        // Record what streamed in, for the engine to wake. `Pg.LoadLayer` is Lua-side bookkeeping —
-        // it instantiates nothing — so without this the objects a layer brings in never signal
-        // `Event.ObjectHibernation` and every script gated on its own awake-event waits forever.
-        // Drained by the engine's pump (`GameScriptHost::take_streamed_layers`), which owns the
-        // layer→objects index; a Lua-side global keeps the binding free of engine types.
-        let streamed: mercs2_luac::rt::Table = match lua.globals().get("__layers_streamed") {
-            Ok(t) => t,
-            Err(_) => {
-                let t = lua.create_table()?;
-                lua.globals().set("__layers_streamed", t.clone())?;
-                t
-            }
-        };
+        let entries: Vec<mercs2_luac::rt::Table> = pend.clone().sequence_values::<mercs2_luac::rt::Table>().collect::<Result<_, _>>()?;
+        let mut done = Vec::new();
+        let still = lua.create_table()?;
         for e in entries {
-            let cb: mercs2_luac::rt::Function = e.get("cb")?;
             let req: String = e.get("req")?;
             let layer: String = e.get("layer")?;
-            // Unload does not wake anything; Load and Reload both bring the layer's objects in.
-            if req != "Unload" {
-                streamed.push(layer.clone())?;
+            match h.borrow().layer_request_status(&req, &layer) {
+                Some(success) => done.push((e, req, layer, success)),
+                None => still.push(e)?,
             }
-            if let Err(err) =
-                cb.call_attr::<()>((req, layer.clone(), "layer", true), "Pg.LayerLoadComplete")
-            {
-                // Surface the divergence (was silently swallowed → the layer load never cascaded).
-                // `pf.call` (below) is engine-internal Debug.Printf — not a mod callback — so it
-                // stays a plain `call`, not `call_attr`.
-                if let Ok(dbg) = lua.globals().get::<mercs2_luac::rt::Table>("Debug") {
-                    if let Ok(pf) = dbg.get::<mercs2_luac::rt::Function>("Printf") {
-                        let _ = pf.call::<()>(format!("layer '{layer}' completion aborted: {err}"));
-                    }
-                }
-            }
+        }
+        lua.globals().set("__pending_layer_loads", still)?;
+        // The callback receives its callback data unpacked, then (sLayerName, "layer", bSuccess):
+        // `_LayerStatusChange(sRequestType, sLayerName, sLayerType, bSuccess)` is registered with
+        // `{"Load"}` / `{"Reload"}` / `{"Unload"}` (`mrxlayermanager.lua:204-206, 245`).
+        for (e, _req, layer, success) in done {
+            let cb: mercs2_luac::rt::Function = e.get("cb")?;
+            let mut cargs: Vec<mercs2_luac::rt::Value> = match e.get::<Option<Table>>("data")? {
+                Some(t) => t.sequence_values::<mercs2_luac::rt::Value>().collect::<Result<_, _>>()?,
+                None => Vec::new(),
+            };
+            cargs.push(mercs2_luac::rt::IntoLua::into_lua(layer, lua)?);
+            cargs.push(mercs2_luac::rt::IntoLua::into_lua("layer", lua)?);
+            cargs.push(mercs2_luac::rt::Value::Boolean(success));
+            cb.call_attr::<()>(mercs2_luac::rt::Variadic::from_iter(cargs), "Pg.LayerLoadComplete")?;
         }
         Ok(())
     })?)?;
@@ -364,4 +452,59 @@ pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
     ])?;
 
     b.install_global(GLOBAL)
+}
+
+#[cfg(test)]
+mod spawn_parse_tests {
+    use super::*;
+
+    fn parse(lua: &Lua, src: &str) -> Option<SpawnArgs> {
+        lua.globals().set("__g", Guid(0x8000_75E7)).unwrap();
+        lua.globals().set("__s", Guid(0x4000_0010)).unwrap();
+        let v: MultiValue = lua.load(&format!("return {src}")).eval().unwrap();
+        parse_spawn(&v.into_iter().collect::<Vec<_>>()).unwrap()
+    }
+
+    /// The shipped call shapes: `MrxUtil.SpawnActor`'s `(t, 0,0,0, 0, false, true)`, a guid template
+    /// with a collision source (`soldier.lua:37`), and `MrxPlayer.CreatePlayerCharacter`'s trailing
+    /// `false` where the guid would be.
+    #[test]
+    fn reads_the_shipped_shapes() {
+        let lua = Lua::new().unwrap();
+        let a = parse(&lua, "\"Veyron\", 1, 2, 3, 90, false, true").unwrap();
+        assert_eq!(a, SpawnArgs { template: SpawnTemplate::Name("Veyron".into()), pos: [1.0, 2.0, 3.0], yaw: 90.0, remove_alpha_animation: false, net: true, collision_source: 0 });
+        let b = parse(&lua, "__g, 1, 2, 3, 0, false, true, __s").unwrap();
+        assert_eq!((b.template, b.collision_source), (SpawnTemplate::Guid(0x8000_75E7), 0x4000_0010));
+        let c = parse(&lua, "\"chris\", 1, 2, 3, 45, false, false, false").unwrap();
+        assert_eq!((c.net, c.collision_source), (false, 0));
+    }
+
+    /// The yaw is optional and does not consume a non-number: `pmccon034.lua:293` passes
+    /// `(t, x, y, z, false, true)`, which is yaw 0 with arg6 false and arg7 true.
+    #[test]
+    fn a_missing_yaw_does_not_move_the_index() {
+        let lua = Lua::new().unwrap();
+        let a = parse(&lua, "\"El Grande (Driver)\", 1, 2, 3, false, true").unwrap();
+        assert_eq!((a.yaw, a.remove_alpha_animation, a.net), (0.0, false, true));
+        let b = parse(&lua, "\"x\", 1, 2, 3").unwrap();
+        assert_eq!((b.yaw, b.remove_alpha_animation, b.net), (0.0, false, true), "defaults");
+        let c = parse(&lua, "\"x\", 1, 2, 3, 0, true").unwrap();
+        assert!(c.remove_alpha_animation && c.net);
+    }
+
+    /// A nil where a boolean is read counts as false and is consumed (`FUN_0059F6D0` takes type 0).
+    #[test]
+    fn a_nil_flag_is_false() {
+        let lua = Lua::new().unwrap();
+        let a = parse(&lua, "\"x\", 1, 2, 3, 0, nil, nil").unwrap();
+        assert_eq!((a.remove_alpha_animation, a.net), (false, false));
+    }
+
+    /// Without three numbers of position the binding pushes nil (`0x5D5DC0`).
+    #[test]
+    fn no_position_is_nil() {
+        let lua = Lua::new().unwrap();
+        assert!(parse(&lua, "\"x\", 1, 2").is_none());
+        assert!(parse(&lua, "\"x\"").is_none());
+    }
 }

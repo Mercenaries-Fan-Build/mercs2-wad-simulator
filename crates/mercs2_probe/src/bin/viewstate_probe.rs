@@ -27,7 +27,7 @@ fn main() {
     let node_enable = match orch::parse_state_machine(&c) {
         Some(sm) => {
             let chosen: Vec<usize> = sm.nodes.iter().map(orch::default_state_index).collect();
-            orch::machine_node_enable(&sm, &hier, &chosen)
+            orch::machine_node_enable(&sm, &hier, &chosen).unwrap_or_else(|e| panic!("{e}"))
         }
         None => Vec::new(),
     };

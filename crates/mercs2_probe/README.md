@@ -39,8 +39,28 @@ set, exactly as matched in `main()`:
 | `hier --model 0xHASH [names.txt] [--csv path]` | HIER bone tree with name resolution (see below) |
 | `overlays <profile-path>` | resolves a save's active `vz_state` layers and folds them through the real streaming catalog |
 | `save-dump <profile-path> [grep-needle]` | parsed `.profile` header + the decompressed SaveSingleton Lua payload |
+| `anim-table <name\|0xH> [--handle 0xH] [--list <column>]` | an `animationtable` as the loader holds it: columns, defaults row, data rows, and each row's `ASTO` list |
+| `we-template <name\|0xKEY>...` · `--class <Class>` · `--uses <0xU32>` · `--enums` | the retail `worldentity`: a template's component records, a class's schema (field names) and records, every record holding a value, or the enum tables |
+| `clip-pose --model H --clip H --bones 0xA,0xB.. --ref 0xR [--frames N]` | a clip posed on a model as the engine poses it: the bones' model-space positions per frame and their positions in the reference bone's frame |
+| `dump-read <capture-dir> <0xVA> [len]` | retail memory from an x32dbg capture (`game-files/memory-dumps/<build>/<state>`); no WAD |
+| `dump-chain <capture-dir> <0xVA> <0xOFF>...` | follows `[[VA]+o0]+o1…` (the last offset is added, not read) |
+| `dump-find <capture-dir> <0xU32>...` | every 4-aligned captured address holding one of the values |
+| `dump-find-vec3 <capture> <x> <y> <z> [--tol T]` | every 4-aligned address where three consecutive f32 lie within T (default 0.0005) |
+| `dump-containers <capture-dir>` | all 334 live component containers: name, class, type id, live count, stride |
+| `dump-pool <capture-dir> <name\|0xVA> [--key 0xK] [--bytes N] [--limit N]` | one container's live records: key, address, bytes |
+| `dump-hibernation <capture>` | the hibernation grid (`0x0179C7B0`): viewers, every row (via each SceneObject's block index), awake count; its retail test checks `mercs2_core::hibernation` against every row |
+| `dump-spawnlists <capture>` | the runtime unit lists the game built from `PopulationList` data (table `0x016E51F0`): units and weights in stored order |
 
-**2. ~34 single-purpose dev bins** under `src/bin/` — each is a standalone investigation, run with
+`<capture>` is either a capture folder (`<build>/<state>/` with `process.dmp`, `SHA256SUMS.txt`,
+`capture.log`) or a `<yyyymmdd>_<label>.dmp` listed in a sibling `MANIFEST.md`. The `dump-*` commands
+refuse a dump whose bytes do not match the recorded sha256, a folder capture whose exe (`capture.log`
+`exe_sha256=`) is not a v1.0 build in `mercs2_exemap`'s `builds.tsv`, and any dump whose own image
+fails the three-address v1.0 code-byte test (`pc_exe_build_fingerprints.md`) — only v1.0 shares the
+Ghidra decomp's addresses. An address the capture did not hold is an error, never
+zeros. Their tests are game-gated (`--features retail`) and read `memory_dumps_dir` from
+`.mercs2-local.toml`.
+
+**2. ~100 single-purpose dev bins** under `src/bin/` — each is a standalone investigation, run with
 `cargo run -p mercs2_probe --bin <name>`. They cluster into:
 
 * **Model assembly / LOD**: `lod_chunks`, `lodchain_probe`, `model_blocks`, `segm_join`,
@@ -48,7 +68,8 @@ set, exactly as matched in `main()`:
   `header_diff`, `rigid_probe`.
 * **Node binding** (which HIER node places which mesh): `indx_dump`, `segfix_probe`, `segm_probe2`,
   `node_witness`, `place_probe`, `hier_dump`, `hier_chain`.
-* **Destruction / draw gate**: `sm_dump`, `gate_probe`, `govern_probe`, `seedcmp`, `mesh_probe`.
+* **Destruction / draw gate**: `sm_dump`, `gate_probe`, `govern_probe`, `health_draws` (drawn/total
+  draw groups at full / half / zero health through the full LOD chain), `mesh_probe`.
 
   > `health_probe` was **removed** (2026-07-26). It printed drawn/total draw groups per health band,
   > but assembled geometry from `extract_container` + `build_indexed_all` on the **resident block
@@ -56,9 +77,7 @@ set, exactly as matched in `main()`:
   > tanks"). Its counts described the coarse stand-in, not what the engine draws, and read as a
   > destruction bug: `ch_veh_apc_wz551` showed 3/13 groups pristine and 0/13 destroyed. Measured
   > through the full LOD chain (`Model::load`, as `govern_probe` does) the same model gives 39/78 →
-  > 49/78 → 9/78, which is the expected shape. `seedcmp` replaces it and additionally compares both
-  > `NodeSeed` variants. If a per-health probe is wanted again, bring it back under a name that says
-  > what it measures — and load the LOD chain.
+  > 49/78 → 9/78, which is the expected shape. `health_draws` replaces it, through the LOD chain.
 * **Animation**: `action_table_probe`, `charanim`, `clipbind`, `swim_clip_probe`.
 * **Textures / materials / FX / lights**: `tex_dump`, `texcmp`, `mtrl_probe`, `fx_probe`,
   `light_probe`, `tex_users` (the reverse of `mtrl_probe`: every model container, in every block,
@@ -110,7 +129,8 @@ Provenance the source itself records:
 
 ## Usage
 
-`vz.wad` auto-discovers from the EA Games registry key; override it with `--wad <path>`:
+`vz.wad` auto-discovers from `MERCS2_GAME_DIR` / `VZ_WAD`, then the EA Games registry key; override
+it with `--wad <path>`:
 
 ```
 HKLM\SOFTWARE\WOW6432Node\EA Games\Mercenaries 2 World in Flames\Install Dir
@@ -161,19 +181,22 @@ cargo run -p mercs2_probe --bin aset_probe     -- 0x9FCAE910 0x89D8DE72
 cargo run -p mercs2_probe --bin model_namer    -- --emit fragment.json
 ```
 
-`mercs2_probe` with no subcommand (or `-h` / `--help` / `help`) prints the usage summary and exits 2;
-a failing diagnostic exits 1.
+`mercs2_probe` with no subcommand prints the usage summary and exits 2. `-h` / `--help` / `help` do
+the same once a `vz.wad` resolves; with none, they print the "no vz.wad found" message and exit 1.
+A failing diagnostic exits 1.
 
 ## Notes / gotchas
 
-* **`--wad` is a main-binary flag only**, but every `src/bin/*` dev bin now resolves `vz.wad` through
-  `wad::resolve_vz_wad(None)`, so `VZ_WAD` overrides them all. `VZ_WAD` takes the install root, its
-  `data` folder, or the `vz.wad` file itself. The dev bins previously went straight to the EA Games
+* **`--wad` is a main-binary flag** (a few dev bins parse their own), and 42 of the `src/bin/*` dev
+  bins resolve `vz.wad` through `wad::resolve_vz_wad(None)`, so `MERCS2_GAME_DIR` / `VZ_WAD` override
+  those; the rest take a WAD path argument or read `game_paths`' local config. Either variable takes
+  the install root, its `data` folder, or the `vz.wad` file itself. The dev bins previously went straight to the EA Games
   registry key and panicked without it, which made them unrunnable off Windows and after a copied-off
   install. The main binary's `--wad` accepts the same folder-or-file forms.
-* Flag values are consumed positionally: `flag_val` reads the token *after* `--wad` / `--model` /
-  `--index` / `--clip` / `--csv`, and `first_positional` skips exactly those five flags and their
-  values. A flag value that itself starts with `--` is rejected.
+* Flag values are consumed positionally: `flag_val` reads the token *after* a flag such as `--wad` /
+  `--model` / `--index` / `--clip` / `--csv`, and `first_positional` skips `--wad`, `--wads`,
+  `--model`, `--index`, `--clip`, `--csv`, `--skeleton-csv`, `--md` and `--json` with their values
+  (any other `--` token is skipped alone). A flag value that itself starts with `--` is rejected.
 * `hier`'s name resolution is rainbow-table first, then an optional plain-text candidate file (one
   string per line, hashed with `pandemic_hash_m2` and accepted only if the hash is actually present
   in this model's HIER) — unresolved nodes print as `?`.

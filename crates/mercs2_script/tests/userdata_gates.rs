@@ -20,24 +20,30 @@ use mercs2_script::{EngineHost, ScriptHost, SharedHost};
 struct GateHost {
     next_filter: u64,
     members: Vec<u64>,
+    guids: Rc<RefCell<mercs2_core::GuidMap>>,
 }
 
 impl EngineHost for GateHost {
     fn log(&mut self, _source: &str, _msg: &str) {}
+    fn guids(&self) -> Rc<RefCell<mercs2_core::GuidMap>> {
+        self.guids.clone()
+    }
+    fn object_activation_state(&self, guid: u64) -> Option<u8> {
+        self.guids.borrow().state(u32::try_from(guid).ok()?)
+    }
     fn get_level_name(&self) -> String {
         "vz".into()
     }
     fn guid_by_name(&mut self, _name: &str) -> u64 {
         0
     }
-    fn pg_spawn(&mut self, _template: &str, _pos: [f32; 3], _yaw: f32, _high_detail: bool) -> u64 {
-        0
+    fn pg_spawn(&mut self, _spawn: &mercs2_script::SpawnArgs) -> Result<u64, String> {
+        Ok(0)
     }
     fn object_set_name(&mut self, _guid: u64, _name: &str) {}
     fn object_set_position(&mut self, _guid: u64, _pos: [f32; 3]) {}
     fn object_set_yaw(&mut self, _guid: u64, _yaw: f32) {}
     fn teleport_hero(&mut self, _pos: [f32; 3]) {}
-    fn add_layers(&mut self, _layers: &[String]) {}
 
     fn object_filter_create(&mut self) -> u64 {
         self.next_filter += 1;

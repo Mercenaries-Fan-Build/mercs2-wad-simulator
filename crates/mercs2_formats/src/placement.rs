@@ -366,6 +366,124 @@ fn parse_transform_records(data: &[u8], off: usize, size: usize) -> Vec<(u32, [f
     out
 }
 
+/// Parse a `Transform` COMP `data` blob into `(key, Parent)`: the `Parent` field (`0x79450675`,
+/// payload `+0x20` = record `+0x24`) is the entity's worldentity template, 0 for none
+/// (`docs/placement_data_format.md` §2.5).
+fn parse_transform_parents(data: &[u8], off: usize, size: usize) -> Vec<(u32, u32)> {
+    const STRIDE: usize = 42;
+    let mut out = Vec::new();
+    for i in 0..size / STRIDE {
+        let r = off + i * STRIDE;
+        if r + STRIDE > data.len() {
+            break;
+        }
+        out.push((read_u32_le(data, r), read_u32_le(data, r + 36)));
+    }
+    out
+}
+
+/// Every placed entity's template (`Transform.Parent`) in a decompressed placement block, by entity
+/// key; entities with no template (`Parent` 0) are left out. Retail resolves a placed entity's
+/// components through it (`FUN_00649a80`), so an entity carries its template's records — e.g. the
+/// `PopulationSimpleSpawner`s of the template it was placed from.
+pub fn transform_parents(block: &[u8]) -> std::collections::HashMap<u32, u32> {
+    let ucfx_positions = find_all(block, b"UCFX");
+    let mut out = std::collections::HashMap::new();
+    for (si, &ucfx_pos) in ucfx_positions.iter().enumerate() {
+        let block_end = ucfx_positions.get(si + 1).copied().unwrap_or(block.len());
+        for c in walk_sub_block_comps_full(block, ucfx_pos, block_end) {
+            let (Some("Transform"), Some((off, size))) = (c.info_name.as_deref(), c.data) else { continue };
+            for (k, parent) in parse_transform_parents(block, off, size) {
+                if parent != 0 {
+                    out.entry(k).or_insert(parent);
+                }
+            }
+        }
+    }
+    out
+}
+
+/// One placed entity: every `Transform` record of a placement block is one.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PlacedEntity {
+    pub key: u32,
+    pub pos: [f32; 3],
+    pub quat: [f32; 4],
+    /// `Transform.Parent`: the worldentity template, 0 for none.
+    pub parent: u32,
+    /// The record's trailing u16 (`+0x28`): the Transform reader `FUN_0063D7C0` (`0x63D886..0x63D8EE`)
+    /// spreads it over SceneObject `+0x1A` (bit 9 → bit 2, bits 0..3 → bits 4..7) and `+0x1B`
+    /// (`0x40 | bit10 << 5 | bit8 << 4 | bits 7..4`).
+    pub flags: u16,
+    /// The entity has its own `TerrainObject` or `LowResTerrainObject` record.
+    pub terrain: bool,
+    /// Its `LowResTerrainObject` payload word 0: the low-res tile mesh (asset type `0x1602815C`).
+    pub low_res_mesh: Option<u32>,
+}
+
+impl PlacedEntity {
+    /// SceneObject `+0x1A` bit 2 (from Transform flag bit 9).
+    pub const NON_STATIC_FLAG: u16 = 0x200;
+
+    /// Whether retail registers the entity in the hibernation grid as static (`FUN_00516280`): not
+    /// terrain and SceneObject `+0x1A` bit 2 clear (`docs/reverse_engineer/hibernation_grid.md` §2).
+    pub fn is_static(&self) -> bool {
+        !self.terrain && self.flags & Self::NON_STATIC_FLAG == 0
+    }
+}
+
+/// Every placed entity of a decompressed placement block, in data order. A `Transform` data chunk
+/// that does not divide into 42-byte records, or a key with two `Transform` records, is an error.
+pub fn placed_entities(block: &[u8]) -> Result<Vec<PlacedEntity>, String> {
+    const STRIDE: usize = 42;
+    let ucfx_positions = find_all(block, b"UCFX");
+    let mut out = Vec::new();
+    let mut terrain = std::collections::HashSet::new();
+    let mut low_res = std::collections::HashMap::new();
+    for (si, &ucfx_pos) in ucfx_positions.iter().enumerate() {
+        let block_end = ucfx_positions.get(si + 1).copied().unwrap_or(block.len());
+        for c in walk_sub_block_comps_full(block, ucfx_pos, block_end) {
+            let Some((off, size)) = c.data else { continue };
+            match c.info_name.as_deref() {
+                Some("Transform") => {
+                    if size % STRIDE != 0 || off + size > block.len() {
+                        return Err(format!("sub-block {si}: Transform data of {size} bytes at {off} is not whole {STRIDE}-byte records"));
+                    }
+                    let parents = parse_transform_parents(block, off, size);
+                    for (i, ((key, pos, quat), (_, parent))) in parse_transform_records(block, off, size).into_iter().zip(parents).enumerate() {
+                        let r = off + i * STRIDE;
+                        let flags = u16::from_le_bytes([block[r + 40], block[r + 41]]);
+                        out.push(PlacedEntity { key, pos, quat, parent, flags, terrain: false, low_res_mesh: None });
+                    }
+                }
+                Some(name @ ("TerrainObject" | "LowResTerrainObject")) => {
+                    let stride = 4 + c.payload_stride.ok_or_else(|| format!("sub-block {si}: {name} has no schm"))? as usize;
+                    if size % stride != 0 || off + size > block.len() || stride < 8 {
+                        return Err(format!("sub-block {si}: {name} data of {size} bytes at {off} is not whole {stride}-byte records"));
+                    }
+                    for i in 0..size / stride {
+                        let r = off + i * stride;
+                        terrain.insert(read_u32_le(block, r));
+                        if name == "LowResTerrainObject" && low_res.insert(read_u32_le(block, r), read_u32_le(block, r + 4)).is_some() {
+                            return Err(format!("entity 0x{:08X} has two LowResTerrainObject records", read_u32_le(block, r)));
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    let mut seen = std::collections::HashSet::new();
+    for e in &mut out {
+        if !seen.insert(e.key) {
+            return Err(format!("entity 0x{:08X} has two Transform records", e.key));
+        }
+        e.terrain = terrain.contains(&e.key);
+        e.low_res_mesh = low_res.get(&e.key).copied();
+    }
+    Ok(out)
+}
+
 /// Parse a `Name` COMP `data` blob into (key -> name) records. Each record is
 /// `[u32 key][ascii "EntityName 0xKEY"][NUL][u8 flag]`; the stored string is the full
 /// `"Name 0xHEXID"` — we keep the bare name portion (before the trailing hex id). A record with an
@@ -378,6 +496,34 @@ fn parse_transform_records(data: &[u8], off: usize, size: usize) -> Vec<(u32, [f
 /// COMP of retail `vz.wad`'s 923 layers: this layout consumes each one exactly, with every flag
 /// `0x00` or `0x01`.
 fn parse_name_records(data: &[u8], off: usize, size: usize) -> Vec<(u32, String)> {
+    parse_raw_name_records(data, off, size)
+        .into_iter()
+        .map(|(k, s)| match s.rfind(" 0x") {
+            Some(i) => (k, s[..i].to_string()),
+            None => (k, s),
+        })
+        .collect()
+}
+
+/// Every placed entity's `Name` string as stored — `"<name> 0x<KEY>"`, or a bare name for the
+/// suffix-less ones — by entity key, in data order. Retail's name index registers exactly this string
+/// (`Pg.GetGuidByName`, `docs/reverse_engineer/object_entity_core_code_map.md` §4.0).
+pub fn placed_names(block: &[u8]) -> Vec<(u32, String)> {
+    let ucfx_positions = find_all(block, b"UCFX");
+    let mut out = Vec::new();
+    for (si, &ucfx_pos) in ucfx_positions.iter().enumerate() {
+        let block_end = ucfx_positions.get(si + 1).copied().unwrap_or(block.len());
+        for c in walk_sub_block_comps_full(block, ucfx_pos, block_end) {
+            if let (Some("Name"), Some((off, size))) = (c.info_name.as_deref(), c.data) {
+                out.extend(parse_raw_name_records(block, off, size));
+            }
+        }
+    }
+    out
+}
+
+/// [`parse_name_records`] without stripping the ` 0x<KEY>` suffix.
+fn parse_raw_name_records(data: &[u8], off: usize, size: usize) -> Vec<(u32, String)> {
     let mut out = Vec::new();
     if off + size > data.len() {
         return out;
@@ -398,12 +544,7 @@ fn parse_name_records(data: &[u8], off: usize, size: usize) -> Vec<(u32, String)
         if s.is_empty() {
             continue;
         }
-        // Strip a trailing " 0xHEXID" if present (gameplay name is the head).
-        let name = match s.rfind(" 0x") {
-            Some(i) => s[..i].to_string(),
-            None => s,
-        };
-        out.push((key, name));
+        out.push((key, s));
     }
     out
 }
@@ -502,66 +643,6 @@ pub fn load_placements(layers_static_block: &[u8]) -> Result<Vec<Placement>, Str
         return Err("no Transform COMP records found in layers_static".into());
     }
     Ok(out)
-}
-
-/// Per-entity streaming/LOD directive parsed from a `HibernationControl` COMP (ECS class
-/// `0xe18afd65`). The engine caches an object out (hibernates it) once the player is beyond its
-/// hibernation distance, and picks its LOD tier by the LOD distances; this is the per-object
-/// control INPUT that drives the streaming manager's load/hibernate/LOD decision (NOT a blanket
-/// per-class radius). See `docs/modernization/world_streaming_spec.md` §10 and
-/// `docs/mercs2-pdb-analysis/world-streaming.md` §Hibernation.
-///
-/// On-disk record (verified against retail `layers_static`, 10-byte stride):
-/// `{key:u32, dist0:u16, dist1:u8, dist2:u8, dist3:u8, flag:u8}`. `dist0` is the per-object
-/// hibernation distance (default 100, here overridden 213–500; the engine warns if > 400 — "may
-/// fall through terrain"); `dist1..3` are the LOD-tier distances (class defaults 160 / 60 / 20 in
-/// every sampled record, i.e. stored as single bytes because they fit). `flag` is a bool (0 in
-/// every sampled record — likely `NoDelOnHibernateIfPreplaced` or a runtime marker).
-#[derive(Debug, Clone, Copy)]
-pub struct Hibernation {
-    /// The 4 LOD/hibernation distances, in schema order (defaults 100 / 160 / 60 / 20).
-    /// `dist[0]` is the per-object hibernation (stream-out) distance; `dist[1..4]` are LOD tiers.
-    pub dist: [u16; 4],
-    /// Trailing bool byte (0 in all sampled retail records).
-    pub flag: u8,
-}
-
-impl Hibernation {
-    /// The distance past which the engine caches this object out (`dist[0]`, the per-object field).
-    pub fn hibernation_distance(&self) -> u16 {
-        self.dist[0]
-    }
-}
-
-/// Parse a `HibernationControl` COMP `data` blob into (key -> [`Hibernation`]) records. Each record
-/// is 10 bytes: `{u32 key, u16 dist0, u8 dist1, u8 dist2, u8 dist3, u8 flag}` (empirically verified
-/// — the on-disk stride is 10, not the `schm` in-memory footprint). `dist1..3` are widened to u16.
-fn parse_hibernation_records(data: &[u8], off: usize, size: usize) -> Vec<(u32, Hibernation)> {
-    const STRIDE: usize = 10;
-    let mut out = Vec::new();
-    if off + size > data.len() {
-        return out;
-    }
-    let n = size / STRIDE;
-    for i in 0..n {
-        let r = off + i * STRIDE;
-        if r + STRIDE > data.len() {
-            break;
-        }
-        let key = read_u32_le(data, r);
-        let dist0 = u16::from_le_bytes([data[r + 4], data[r + 5]]);
-        let h = Hibernation {
-            dist: [
-                dist0,
-                data[r + 6] as u16,
-                data[r + 7] as u16,
-                data[r + 8] as u16,
-            ],
-            flag: data[r + 9],
-        };
-        out.push((key, h));
-    }
-    out
 }
 
 /// Parse a `{u32 entity_key, u32 asset_hash}` COMP (8-byte records) — `TerrainObject` (the asset is a
@@ -697,30 +778,6 @@ fn load_keyed_asset_placements(block: &[u8], comp: &str) -> KeyedPlacements {
     (out, orphans)
 }
 
-/// Load every `HibernationControl` per-entity streaming directive from a decompressed UCFX block,
-/// keyed by entity key (matched across sub-blocks; keys are block-unique). This is the per-object
-/// control data the streaming runtime joins to each placement to decide stream-in/out + LOD tier.
-pub fn load_hibernation(block: &[u8]) -> std::collections::HashMap<u32, Hibernation> {
-    let ucfx_positions = find_all(block, b"UCFX");
-    let mut out: std::collections::HashMap<u32, Hibernation> = std::collections::HashMap::new();
-    for (si, &ucfx_pos) in ucfx_positions.iter().enumerate() {
-        let block_end = if si + 1 < ucfx_positions.len() {
-            ucfx_positions[si + 1]
-        } else {
-            block.len()
-        };
-        for c in walk_sub_block_comps_full(block, ucfx_pos, block_end) {
-            let Some((off, size)) = c.data else { continue };
-            if c.info_name.as_deref() == Some("HibernationControl") {
-                for (k, h) in parse_hibernation_records(block, off, size) {
-                    out.entry(k).or_insert(h);
-                }
-            }
-        }
-    }
-    out
-}
-
 /// A parsed `LightObject` ECS component record (reflection class `0x97e8ee92`) — a placed dynamic
 /// light. The field order is taken verbatim from the reflection deserialize template
 /// `FUN_006622e0` (Ghidra decomp) and `docs/mercs2-ecs/05_presentation_audio_fx.md`:
@@ -738,9 +795,10 @@ pub fn load_hibernation(block: &[u8]) -> std::collections::HashMap<u32, Hibernat
 /// The nine floats all default to `0.0` in the shipping `.rdata` (their live values arrive from the
 /// level stream); the semantic *names* below are INFERRED from the class purpose and corroborated by
 /// the UE port bindings (`docs/ue_game_bindings.md` → PointLight: color, `Intensity`,
-/// `AttenuationRadius`). We therefore keep all nine raw floats and expose `intensity()`/`radius()`
-/// as the best-known mapping (`params[0]` / `params[1]`) — a downstream consumer can re-map without
-/// re-parsing if a live capture pins a different slot.
+/// `AttenuationRadius`). We therefore keep all nine raw floats. The light's render node reads payload
+/// `+0x18` (`params[2]`) as its range and `+0x24` (`params[5]`) as its cone angle (`FUN_004A7120`,
+/// `FUN_004A7660`), and `+0x28`/`+0x2C`/`+0x30` (`params[6..9]`) are the runtime intensity / range /
+/// cone scales a LightAnimation writes (`0x4A80DA`; shipped 1.0).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct LightObject {
     /// Reflected int field 0 — light type / id (point vs spot vs ..., engine-internal enum).
@@ -759,6 +817,13 @@ impl LightObject {
     pub const PAYLOAD_STRIDE: usize = 0x34;
     /// On-disk COMP record stride: u32 entity key + reflected payload = 56 bytes.
     pub const RECORD_STRIDE: usize = 4 + Self::PAYLOAD_STRIDE;
+
+    /// From one record payload (no key): `light_type`, rgb, nine floats.
+    pub fn from_payload(p: &[u8]) -> LightObject {
+        assert_eq!(p.len(), Self::PAYLOAD_STRIDE, "a LightObject payload is {} bytes", Self::PAYLOAD_STRIDE);
+        let f = |o: usize| read_f32_le(p, o);
+        LightObject { light_type: read_u32_le(p, 0), color: [f(4), f(8), f(12)], params: std::array::from_fn(|j| f(16 + 4 * j)) }
+    }
 
     /// `light_type` = point/omni. **Pinned empirically** — see [`is_spot`](Self::is_spot).
     pub const TYPE_POINT: u32 = 2;
@@ -799,10 +864,11 @@ impl LightObject {
         self.params[4]
     }
 
-    /// Outer cone half-angle in radians (`params[5]`) — WildStar `ConeFallOffMax`; the cone edge.
-    /// Meaningless on a point light (frozen at 0.785 = 45°).
-    pub fn cone_outer(&self) -> f32 {
-        self.params[5]
+    /// The spot cone's full angle in radians (`params[5]`, payload `+0x24`), clamped to 0..π as the
+    /// spot light's render node takes it (`FUN_004A7660`, which bounds the cone with tan(angle/2)).
+    /// Meaningless on a point light (frozen at 0.785).
+    pub fn cone_angle(&self) -> f32 {
+        self.params[5].clamp(0.0, std::f32::consts::PI)
     }
 }
 
@@ -844,27 +910,54 @@ fn parse_light_records(data: &[u8], off: usize, size: usize) -> Vec<(u32, LightO
         if r + STRIDE > data.len() {
             break;
         }
-        let key = read_u32_le(data, r);
-        let light_type = read_u32_le(data, r + 4);
-        let color = [
-            read_f32_le(data, r + 8),
-            read_f32_le(data, r + 12),
-            read_f32_le(data, r + 16),
-        ];
-        let mut params = [0f32; 9];
-        for (j, p) in params.iter_mut().enumerate() {
-            *p = read_f32_le(data, r + 20 + j * 4);
-        }
-        out.push((
-            key,
-            LightObject {
-                light_type,
-                color,
-                params,
-            },
-        ));
+        out.push((read_u32_le(data, r), LightObject::from_payload(&data[r + 4..r + STRIDE])));
     }
     out
+}
+
+/// The keys of every record of component `class` in a decompressed placement block (records
+/// `[u32 key][payload]` at the class's `schm` stride). A chunk that does not divide into records is an
+/// error.
+pub fn component_keys(block: &[u8], class: &str) -> Result<std::collections::HashSet<u32>, String> {
+    let ucfx_positions = find_all(block, b"UCFX");
+    let mut out = std::collections::HashSet::new();
+    for (si, &ucfx_pos) in ucfx_positions.iter().enumerate() {
+        let block_end = ucfx_positions.get(si + 1).copied().unwrap_or(block.len());
+        for c in walk_sub_block_comps_full(block, ucfx_pos, block_end) {
+            if c.info_name.as_deref() != Some(class) {
+                continue;
+            }
+            let Some((off, size)) = c.data else { continue };
+            let stride = 4 + c.payload_stride.ok_or_else(|| format!("sub-block {si}: {class} has no schm"))? as usize;
+            if size % stride != 0 || off + size > block.len() {
+                return Err(format!("sub-block {si}: {class} data of {size} bytes is not whole {stride}-byte records"));
+            }
+            out.extend((0..size / stride).map(|i| read_u32_le(block, off + i * stride)));
+        }
+    }
+    Ok(out)
+}
+
+/// Every placed entity's own `LightObject` in a decompressed placement block, by key. A data chunk
+/// that does not divide into records, or a key with two different records, is an error.
+pub fn placed_light_objects(block: &[u8]) -> Result<std::collections::HashMap<u32, LightObject>, String> {
+    let ucfx_positions = find_all(block, b"UCFX");
+    let mut out = std::collections::HashMap::new();
+    for (si, &ucfx_pos) in ucfx_positions.iter().enumerate() {
+        let block_end = ucfx_positions.get(si + 1).copied().unwrap_or(block.len());
+        for c in walk_sub_block_comps_full(block, ucfx_pos, block_end) {
+            let (Some("LightObject"), Some((off, size))) = (c.info_name.as_deref(), c.data) else { continue };
+            if size % LightObject::RECORD_STRIDE != 0 || off + size > block.len() {
+                return Err(format!("sub-block {si}: LightObject data of {size} bytes is not whole records"));
+            }
+            for (k, l) in parse_light_records(block, off, size) {
+                if out.insert(k, l).is_some_and(|prev| prev != l) {
+                    return Err(format!("entity 0x{k:08X} has two different LightObject records"));
+                }
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// One placed dynamic light: its `LightObject` params joined to the owning entity's `Transform`
@@ -961,9 +1054,6 @@ pub struct ModelPlacement {
     pub pos: [f32; 3],
     pub quat: [f32; 4],
     pub name: Option<String>,
-    /// Per-entity streaming/LOD directive (from a `HibernationControl` COMP on the same entity),
-    /// if present. `None` = the object uses class-default distances (100 / 160 / 60 / 20).
-    pub hibernation: Option<Hibernation>,
 }
 
 /// Parse a `ModelName` COMP `data` blob into (key -> model_hash) records. Each record is
@@ -1113,7 +1203,6 @@ pub fn load_model_placements(block: &[u8]) -> Vec<ModelPlacement> {
         let mut xform: std::collections::HashMap<u32, ([f32; 3], [f32; 4])> =
             std::collections::HashMap::new();
         let mut names: std::collections::HashMap<u32, String> = std::collections::HashMap::new();
-        let mut hib: std::collections::HashMap<u32, Hibernation> = std::collections::HashMap::new();
         let mut models: Vec<(u32, u32)> = Vec::new();
         for c in walk_sub_block_comps_full(block, ucfx_pos, block_end) {
             let Some((off, size)) = c.data else { continue };
@@ -1126,11 +1215,6 @@ pub fn load_model_placements(block: &[u8]) -> Vec<ModelPlacement> {
                 Some("Name") => {
                     for (k, n) in parse_name_records(block, off, size) {
                         names.entry(k).or_insert(n);
-                    }
-                }
-                Some("HibernationControl") => {
-                    for (k, h) in parse_hibernation_records(block, off, size) {
-                        hib.entry(k).or_insert(h);
                     }
                 }
                 Some("ModelName") => {
@@ -1150,7 +1234,6 @@ pub fn load_model_placements(block: &[u8]) -> Vec<ModelPlacement> {
                 pos,
                 quat,
                 name: names.get(&key).cloned(),
-                hibernation: hib.get(&key).copied(),
             });
         }
     }
@@ -1178,6 +1261,19 @@ mod tests {
         assert_eq!(recs[0].1, [12.5, -3.0, 7.0]);
         assert_eq!(recs[0].2, [0.0, 0.0, 0.0, 1.0]);
         assert_eq!(recs[1].0, 0x2222_2222);
+    }
+
+    /// `Parent` is the u32 at record `+0x24`: the first layers_static Transform record, verbatim
+    /// (`docs/placement_data_format.md` §2.5), names template `0x80004DA5`
+    /// (`_outskirt_wallchurchshort`).
+    #[test]
+    fn transform_parent_is_the_word_after_the_quaternion() {
+        let d: Vec<u8> = vec![
+            0x85, 0x6e, 0x08, 0x00, 0x53, 0x10, 0x30, 0x45, 0xfb, 0x7b, 0x39, 0x41, 0x58, 0x56, 0xae, 0x43, //
+            0x00, 0x00, 0x00, 0x00, 0x95, 0xef, 0x12, 0xb6, 0xbd, 0x64, 0x7a, 0x3f, 0xac, 0xa4, 0xa1, 0x35, //
+            0xee, 0x21, 0x55, 0x3e, 0xa5, 0x4d, 0x00, 0x80, 0x16, 0x04,
+        ];
+        assert_eq!(parse_transform_parents(&d, 0, d.len()), [(0x0008_6E85, 0x8000_4DA5)]);
     }
 
     /// A LandingZone record is 12 bytes `{u32 key, u32 slot, u32 zone}`. Bytes are the first three
@@ -1272,27 +1368,6 @@ mod tests {
         assert_eq!(recs[1], (0xAAAA_0002, 0xDEAD_BEEF));
     }
 
-    /// A HibernationControl record is 10 bytes: {u32 key, u16 dist0, u8 dist1, u8 dist2, u8 dist3,
-    /// u8 flag}. Bytes are the first two real retail records from layers_static sub_block 2.
-    #[test]
-    fn hibernation_record_stride_10() {
-        // rec0: key 0x00095b1d, dist0=0x00df=223, 160/60/20, flag 0.
-        // rec3: key 0x00095b59, dist0=0x01f4=500 (>400 warn), 160/60/20, flag 0.
-        let d: Vec<u8> = vec![
-            0x1d, 0x5b, 0x09, 0x00, 0xdf, 0x00, 0xa0, 0x3c, 0x14, 0x00, //
-            0x59, 0x5b, 0x09, 0x00, 0xf4, 0x01, 0xa0, 0x3c, 0x14, 0x00,
-        ];
-        let recs = parse_hibernation_records(&d, 0, d.len());
-        assert_eq!(recs.len(), 2);
-        assert_eq!(recs[0].0, 0x0009_5b1d);
-        assert_eq!(recs[0].1.dist, [223, 160, 60, 20]);
-        assert_eq!(recs[0].1.hibernation_distance(), 223);
-        assert_eq!(recs[0].1.flag, 0);
-        assert_eq!(recs[1].0, 0x0009_5b59);
-        assert_eq!(recs[1].1.dist, [500, 160, 60, 20]);
-        assert!(recs[1].1.hibernation_distance() > 400); // triggers the fall-through-terrain warning
-    }
-
     /// A LightObject record is 56 bytes: {u32 key, u32 type, f32 r,g,b, f32 params[9]} — the
     /// reflection field order from FUN_006622e0 (int + rgb + 9 floats), prefixed by the entity key.
     #[test]
@@ -1310,7 +1385,7 @@ mod tests {
         d[24..28].copy_from_slice(&1.0f32.to_le_bytes()); // params[1] (role open; ~1.0 in real data)
         d[28..32].copy_from_slice(&12.5f32.to_le_bytes()); // params[2] = radius / cone length (pinned)
         d[36..40].copy_from_slice(&0.262f32.to_le_bytes()); // params[4] = inner cone half-angle (rad)
-        d[40..44].copy_from_slice(&0.524f32.to_le_bytes()); // params[5] = outer cone half-angle (rad)
+        d[40..44].copy_from_slice(&0.524f32.to_le_bytes()); // params[5] = cone angle (rad)
         d[52..56].copy_from_slice(&0.75f32.to_le_bytes()); // params[8] (last float, at +32)
                                                            // rec1 key must be read exactly at +56.
         d[56..60].copy_from_slice(&0x0009_5c11u32.to_le_bytes());
@@ -1327,7 +1402,7 @@ mod tests {
         // (see `LightObject::is_spot` — pinned empirically over all 1406 authored lights).
         assert_eq!(l0.radius(), 12.5);
         assert_eq!(l0.cone_inner(), 0.262);
-        assert_eq!(l0.cone_outer(), 0.524);
+        assert_eq!(l0.cone_angle(), 0.524);
         assert!(!l0.is_spot()); // light_type 1 here is neither the point (2) nor spot (3) value
         assert_eq!(l0.params[8], 0.75);
         assert_eq!(recs[1].0, 0x0009_5c11);

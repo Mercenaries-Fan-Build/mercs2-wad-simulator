@@ -136,11 +136,10 @@ impl GameplaySystems {
         // when the machines are advanced — retail drives transitions from damage messages, not from
         // a poll one frame stale. Produces the node-enable tables the render side mirrors onto the
         // draw gate via `destruction::sync_destruction_to_scene`.
-        self.destruction_intents.extend(mercs2_destruction::destruction_system(
-            world,
-            &self.destruction,
-            mercs2_destruction::DamageBands::default(),
-        ));
+        self.destruction_intents.extend(
+            mercs2_destruction::destruction_system(world, &self.destruction, mercs2_destruction::DamageBands::default())
+                .unwrap_or_else(|e| panic!("destruction: {e}")),
+        );
         // Reap the deferred weapon-destroy queue **after** everything above, so a script that destroys
         // and re-applies a loadout inside one frame still sees valid handles — the shipped
         // snapshot-restore pattern (`mrxplayer.lua:661-724`) depends on that deferral. A weapon
@@ -287,7 +286,8 @@ mod tests {
         const NODE: u32 = 0xAAAA_0001;
         let h = |s: &str| mercs2_formats::hash::pandemic_hash_m2(s);
         // `1 <imm>` push · `2 <cmd>` invoke · `3` end.
-        let pristine = vec![1, STATE_WRECK, 1, 0xC650_7EE1u32, 2, h("setstateonmsg"), 3];
+        // A `SWIT` participant is hidden until a state shows it: pristine shows it, the wreck hides it.
+        let pristine = vec![1, NODE, 2, h("show"), 1, STATE_WRECK, 1, 0xC650_7EE1u32, 2, h("setstateonmsg"), 3];
         let wreck = vec![1u32, NODE, 2, h("hide"), 3];
 
         let audio = Rc::new(RefCell::new(AudioEngine::default()));
@@ -295,7 +295,7 @@ mod tests {
         gp.destruction_store_mut().insert(
             MODEL,
             Some(StateMachine {
-                switch_slots: vec![0],
+                switch_slots: vec![NODE],
                 nodes: vec![SwitchNodeDef {
                     name_hash: NODE,
                     states: vec![

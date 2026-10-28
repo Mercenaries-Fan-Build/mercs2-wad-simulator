@@ -25,7 +25,7 @@ use std::path::Path;
 
 use mercs2_engine::mesh::{BoneRig, DrawGroup};
 use mercs2_engine::render::{ClipAnim, TexMap};
-use mercs2_formats::skeleton::{affine_inverse, transform_dir, transform_point, Skeleton};
+use mercs2_formats::skeleton::{transform_dir, transform_point};
 
 /// An engine matrix (row-major storage, ROW-vector convention: `p' = p · M`) as the 16 floats glTF
 /// wants (column-major storage, COLUMN-vector convention: `p' = M · p`).
@@ -252,20 +252,6 @@ pub fn export_bundle(
     }
 
     // ---- 3. glTF: real node tree + geometry parented to its binding node. ----
-    // Skeleton (world-rest per node) so we can put each group back into NODE-LOCAL space.
-    let skel = lods
-        .iter()
-        .min_by_key(|l| l.level)
-        .and_then(|l| {
-            let mut b = Vec::with_capacity(20 + l.container.len());
-            b.extend_from_slice(&1u32.to_le_bytes());
-            b.extend_from_slice(&hash.to_le_bytes());
-            b.extend_from_slice(&0x5B72_4250u32.to_le_bytes());
-            b.extend_from_slice(&0u32.to_le_bytes());
-            b.extend_from_slice(&(l.container.len() as u32).to_le_bytes());
-            b.extend_from_slice(&l.container);
-            Skeleton::from_block(&b).ok()
-        });
 
     let mut bin: Vec<u8> = Vec::new();
     let mut accessors = Vec::new();
@@ -334,14 +320,11 @@ pub fn export_bundle(
         if s >= e {
             continue;
         }
-        // Rigid: un-bake from its bone's world-rest so it can be re-parented under that node.
+        // Rigid: un-bake from its bone's SKIN bind — the bind `mercs2_mesh` placed it by
+        // (`BoneRig::inv_bind`) — so it can be re-parented under that node.
         // Deforming: leave it in bind space — the inverse-bind matrices and the per-vertex weights
         // are what move it, and pre-transforming by one bone would double-apply that bone.
-        let inv = if d.skinned || d.node < 0 {
-            None
-        } else {
-            skel.as_ref().and_then(|sk| sk.bones.get(d.node as usize)).map(|b| affine_inverse(&b.world))
-        };
+        let inv = if d.skinned || d.node < 0 { None } else { rig.get(d.node as usize).map(|b| b.inv_bind) };
 
         // Re-index this group's verts compactly.
         let mut remap: BTreeMap<u32, u32> = BTreeMap::new();

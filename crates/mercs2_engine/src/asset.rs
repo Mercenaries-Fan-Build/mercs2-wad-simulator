@@ -8,9 +8,9 @@
 //! the workshop share one implementation instead of each opening `vz.wad` ad hoc.
 //!
 //! NOTE — two distinct "overlay" vocabularies, do not conflate: THIS overlay = patch-WAD *file* stacking
-//! (whole archives layered on top). The `overlays` argument to `game_world::load_streaming_world_data`
-//! and `worldutil::add_overlay_to_catalog` is a DIFFERENT thing — `vz_state` layer *blocks inside one
-//! wad* folded into the streaming catalog. `AssetSource` is the file-stacking one.
+//! (whole archives layered on top). The `overlays` argument to `game_world::run_game_world` is a
+//! DIFFERENT thing — `vz_state` *layers inside one wad*, loaded as dynamic layers by the streaming
+//! world. `AssetSource` is the file-stacking one.
 
 use crate::registry::{AssetRegistry, RegistryStats};
 use crate::wad::{self, Wad};

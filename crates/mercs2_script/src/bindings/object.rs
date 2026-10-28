@@ -250,9 +250,10 @@ pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
 
     // --- hibernation / streaming (real: host state; part of the world-streaming spec) ---
     let h = host.clone();
-    b.real("IsAwake", lua.create_function(move |_, guid: Guid| Ok(h.borrow().object_is_awake(guid.raw())))?)?;
+    // State 2 / not 2; nil for a guid with no SceneObject row (`0x5CF300` / `0x5CF240`).
+    b.real("IsAwake", lua.create_function(move |_, guid: Guid| Ok(h.borrow().object_activation_state(guid.raw()).map(|s| s == 2)))?)?;
     let h = host.clone();
-    b.real("IsHibernated", lua.create_function(move |_, guid: Guid| Ok(h.borrow().object_is_hibernated(guid.raw())))?)?;
+    b.real("IsHibernated", lua.create_function(move |_, guid: Guid| Ok(h.borrow().object_activation_state(guid.raw()).map(|s| s != 2)))?)?;
     let h = host.clone();
     b.real("GetHibernationDistance", lua.create_function(move |_, guid: Guid| Ok(h.borrow().object_hibernation_distance(guid.raw())))?)?;
     let h = host.clone();
@@ -311,7 +312,9 @@ pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
         lua.create_function(|_, _: MultiValue| Ok(()))?,
     )?;
     let h = host.clone();
-    b.real("Attach", lua.create_function(move |_, (child, parent): (Guid, Guid)| {
+    // Retail order (cfunc 0x5D1060): argument 1 is the parent (link owner +0x44), 3 the attached child
+    // (+0x60); argument 2 names the parent's hardpoint the child is placed at — not modelled here.
+    b.real("Attach", lua.create_function(move |_, (parent, _hardpoint, child): (Guid, Option<String>, Guid)| {
         h.borrow_mut().object_attach(child.raw(), parent.raw());
         Ok(())
     })?)?;

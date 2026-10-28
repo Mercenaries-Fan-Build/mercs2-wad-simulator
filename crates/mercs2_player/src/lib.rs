@@ -75,7 +75,7 @@ pub use boundary::{Boundary, BoundarySet, NetAuthority};
 pub use callbacks::{CallbackArg, CallbackFire, CallbackId, CallbackRegistry, CallbackSlot};
 pub use components::{ControllerPlayer, GrappleParameters, ModelMixerProfile, VehicleDisguiseScale, CONTROL_BINDING_TYPES};
 pub use disguise::DisguiseRequest;
-pub use locomotion::{LocomotionInput, PlayerController, CLIP_IDLE, CLIP_RUN, CLIP_WALK, RUN_SPEED, WALK_SPEED};
+pub use locomotion::{LocomotionClips, LocomotionInput, PlayerController, RUN_SPEED, WALK_SPEED};
 pub use object::{
     BoundaryState, PdaMapMode, PlayerDisguise, PlayerMode, PlayerObject, ReticleState, SatelliteScan,
     SurvivalState, NOT_JOINED, PDA_WIDGET_TYPE_HASH, PLAYER_OBJECT_MIN_SIZE,
@@ -157,9 +157,9 @@ impl PlayerWorld {
         PlayerWorld { player_start: DEFAULT_PLAYER_START.to_string(), ..Default::default() }
     }
 
-    /// The single-player boot state: one joined local player in slot 0.
-    pub fn single_player() -> Self {
-        PlayerWorld { roster: PlayerRoster::single_player(), ..PlayerWorld::new() }
+    /// The single-player boot state: one joined local player in slot 0 whose player object is `key`.
+    pub fn single_player(key: u64) -> Self {
+        PlayerWorld { roster: PlayerRoster::single_player(key), ..PlayerWorld::new() }
     }
 
     // ===== Disguise gate (§7) =====
@@ -263,10 +263,10 @@ mod tests {
     /// and creating or destroying a player cannot change it.
     #[test]
     fn the_profile_is_global_and_the_roster_is_per_slot() {
-        let mut w = PlayerWorld::single_player();
+        let mut w = PlayerWorld::single_player(0x4000_0001);
         w.profile.set_cash(75_000, false);
         // Slot 1 joins as a second local player (create allocates; bind joins).
-        w.roster.create(1);
+        w.roster.create(1, || 0x4000_0002);
         possession::bind_to_local(&mut w.roster, 1, 1);
 
         assert_eq!(w.roster.current_players(), 2);
@@ -285,7 +285,7 @@ mod tests {
     /// disguise, and a player's disguise does not flip the gate.
     #[test]
     fn the_disguise_gate_and_per_player_disguise_are_independent() {
-        let mut w = PlayerWorld::single_player();
+        let mut w = PlayerWorld::single_player(0x4000_0001);
         w.set_vehicle_disguise_gate(true);
         w.roster.get_mut(0).unwrap().disguise.flag_bit3 = true;
 
@@ -304,7 +304,7 @@ mod tests {
     /// 24 `record_all` verbs it replaces did not have.
     #[test]
     fn the_camera_teleport_queue_drains() {
-        let mut w = PlayerWorld::single_player();
+        let mut w = PlayerWorld::single_player(0x4000_0001);
         assert!(w.take_camera_teleports().is_empty());
 
         w.teleport_camera(0x2);
@@ -321,7 +321,7 @@ mod tests {
         let mut w = PlayerWorld::new();
         assert_eq!(w.resolve_any_character(), 0, "no players -> nil, not a panic");
 
-        w.roster = PlayerRoster::single_player();
+        w.roster = PlayerRoster::single_player(0x4000_0001);
         assert_eq!(w.resolve_any_character(), 0, "joined but unpossessed -> still nil");
 
         possession::attach_to_character(&mut w.roster, 0, 0xC0FFEE, CheatFlags::default());
@@ -333,7 +333,7 @@ mod tests {
     /// `SetInputEnabled(Object.IsPlayerControlled(u), false)` into `SetInputEnabled(true, false)`.
     #[test]
     fn player_for_controlled_object_returns_a_handle_not_a_flag() {
-        let mut w = PlayerWorld::single_player();
+        let mut w = PlayerWorld::single_player(0x4000_0001);
         possession::attach_to_character(&mut w.roster, 0, 0xC0FFEE, CheatFlags::default());
 
         let player_guid = w.roster.get(0).unwrap().guid;
@@ -376,7 +376,7 @@ mod readme_example {
 
     #[test]
     fn the_readme_usage_example_compiles_and_holds() {
-        let mut w = PlayerWorld::single_player();
+        let mut w = PlayerWorld::single_player(0x4000_0001);
         possession::attach_to_character(&mut w.roster, 0, 0xC0FFEE, CheatFlags::default());
 
         assert_eq!(w.roster.get(0).unwrap().character, 0xC0FFEE);
@@ -384,7 +384,7 @@ mod readme_example {
         assert_eq!(w.roster.by_character(0xC0FFEE).map(|p| p.guid), Some(player_guid));
 
         w.profile.set_cash(75_000, false);
-        w.roster.create(1);
+        w.roster.create(1, || 0x4000_0002);
         assert_eq!(w.profile.cash, 75_000);
 
         assert!(!w.profile.autosave_due());

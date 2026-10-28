@@ -2,9 +2,9 @@
 //!
 //! Most subcommands run one of the diagnostics carved out of the engine binary into
 //! `mercs2_engine::diag`; the rest (`extract`, `dump-block`, `find-placement`, `hier`, `overlays`,
-//! `save-dump`) are implemented here in `main.rs`. `vz.wad` is auto-discovered from the EA Games
-//! registry key (same as the engine), or passed explicitly with `--wad <path>`. No window is ever
-//! opened.
+//! `save-dump`) are implemented here in `main.rs`. `vz.wad` is auto-discovered from
+//! `MERCS2_GAME_DIR` / `VZ_WAD`, then the EA Games registry key (same as the engine), or passed
+//! explicitly with `--wad <path>`. No window is ever opened.
 //!
 //! Flags are positional-value pairs: `--wad`, `--model`, `--index`, `--clip`, `--csv`. Everything
 //! else that doesn't start with `--` is a positional argument (see `first_positional`).
@@ -27,21 +27,28 @@
 //!   mercs2_probe overlays <profile>
 //!   mercs2_probe --wad D:/game/data/vz.wad comp-probe
 //!
-//! Beside this multiplexed binary the crate also ships ~34 single-purpose dev bins under
+//! Beside this multiplexed binary the crate also ships ~100 single-purpose dev bins under
 //! `src/bin/` (`cargo run -p mercs2_probe --bin <name>`), each a standalone investigation of one
 //! question: model/LOD assembly (`lod_chunks`, `segm_join`, `viewstate_probe`, ...), the
 //! INDX->SEGM node binding (`indx_dump`, `node_witness`, `segfix_probe`, ...), the destruction
-//! state machine and draw gate (`sm_dump`, `gate_probe`, `seedcmp`, ...), animation
+//! state machine and draw gate (`sm_dump`, `gate_probe`, `health_draws`, ...), animation
 //! (`action_table_probe`, `charanim`, `clipbind`), textures/materials/FX (`tex_dump`, `texcmp`,
 //! `mtrl_probe`, `fx_probe`, `light_probe`) and archive naming (`aset_probe`, `model_namer`).
-//! Those bins take a model NAME (hashed with `pandemic_hash_m2`) or a `0xHASH`, and resolve
-//! `vz.wad` from the registry only — they have no `--wad` override.
+//! Those bins take a model NAME (hashed with `pandemic_hash_m2`) or a `0xHASH`. Each finds its WAD
+//! its own way: most through `wad::resolve_vz_wad` (`MERCS2_GAME_DIR` / `VZ_WAD`, then the
+//! registry), others from a WAD path argument, a `--wad` flag, or `game_paths`' local config.
 
+mod anim_table;
 mod bone_census;
+mod clip_pose;
+mod dump;
+mod dump_hibernation;
+mod dump_spawnlists;
 mod ess_live;
 mod ess_menu_check;
 mod gfx_golden;
 mod prof_samples;
+mod we_template;
 
 use mercs2_engine::diag;
 use mercs2_engine::wad;
@@ -68,7 +75,18 @@ fn usage() -> ! {
          \x20 ess-menu-check --ess <Ess.lua> <menu.lua> [<menu.lua> ...]   (exact Lua 5.1, engine stubbed, no WAD)\n\
          \x20 extract --model H <out.bin>   dump-block <index> <out.bin>  find-placement <substring>\n\
          \x20 save-dump <profile> [needle]  overlays <profile>\n\
-         (vz.wad auto-discovers from the registry; override with --wad <path>)"
+         \x20 anim-table <name|0xH> [--handle 0xH] [--list <column>]   (an animationtable's rows verbatim)\n\
+         \x20 we-template <name|0xKEY>... | --class <Class> | --uses <0xU32>   (worldentity templates / records)\n\
+         \x20 clip-pose --model H --clip H --bones 0xA,0xB.. --ref 0xR [--frames N]   (bone positions over a clip)\n\
+         \x20 dump-read <capture-dir> <0xVA> [len]          (retail memory from a v1.0 x32dbg capture, no WAD)\n\
+         \x20 dump-chain <capture-dir> <0xVA> <0xOFF>...    ([[VA]+o0]+o1 ... ; last offset added, not read)\n\
+         \x20 dump-find <capture-dir> <0xU32> [0xU32...]    (every aligned address holding a value)\n\
+         \x20 dump-find-vec3 <capture> <x> <y> <z> [--tol T]   (three consecutive f32 within T)\n\
+         \x20 dump-containers <capture-dir>                 (all 334 live component containers)\n\
+         \x20 dump-pool <capture-dir> <name|0xVA> [--key 0xK] [--bytes N] [--limit N]   (one container's live records)\n\
+         \x20 dump-spawnlists <capture>                     (the runtime unit lists built from PopulationList)\n\
+         \x20 dump-hibernation <capture>                    (the hibernation grid: viewers, rows, awake count)\n\
+         (vz.wad auto-discovers from MERCS2_GAME_DIR / VZ_WAD, then the registry; override with --wad <path>)"
     );
     std::process::exit(2);
 }
@@ -118,6 +136,142 @@ fn first_positional(args: &[String]) -> Option<String> {
     None
 }
 
+/// `dump-read <capture-dir> <0xVA> [len]` / `dump-chain <capture-dir> <0xVA> <0xOFF>...`: read retail
+/// memory out of a verified v1.0 capture (see [`dump::Capture`]). Returns the process exit code:
+/// 0 read, 1 the capture or an address failed, 2 usage.
+fn dump_cli(cmd: &str, args: &[String]) -> i32 {
+    let hex = |s: &String| u32::from_str_radix(s.trim_start_matches("0x"), 16).ok();
+    let (Some(dir), Some(va)) = (args.first(), args.get(1).and_then(hex)) else {
+        eprintln!("{cmd}: usage: mercs2_probe {cmd} <capture-dir> <0xVA> {}", if cmd == "dump-read" { "[len]" } else { "<0xOFF>..." });
+        return 2;
+    };
+    let rest = &args[2..];
+    let run = || -> Result<(), String> {
+        let cap = dump::Capture::open(std::path::Path::new(dir))?;
+        let mem = cap.mem()?;
+        println!("[{cmd}] {} (build {})", cap.path.display(), cap.build_id);
+        if cmd == "dump-find" {
+            let mut values = vec![va];
+            for s in rest {
+                values.push(hex(s).ok_or_else(|| format!("bad value {s:?}"))?);
+            }
+            let hits = mem.find_u32(&values);
+            for (at, v) in &hits {
+                println!("0x{at:08X}  0x{v:08X}");
+            }
+            println!("{} hit(s)", hits.len());
+            return Ok(());
+        }
+        if cmd == "dump-chain" {
+            let offs: Vec<u32> = rest.iter().map(|s| hex(s).ok_or_else(|| format!("bad offset {s:?}"))).collect::<Result<_, _>>()?;
+            let at = mem.chase(va, &offs)?;
+            println!("0x{at:08X}");
+            return Ok(());
+        }
+        let len = match rest.first() {
+            None => 0x40,
+            Some(s) => s.parse::<usize>().map_err(|e| format!("len {s:?}: {e}"))?,
+        };
+        print!("{}", dump::hexdump(va, &mem.read(va, len)?));
+        Ok(())
+    };
+    match run() {
+        Ok(()) => 0,
+        Err(e) => {
+            eprintln!("{cmd} failed: {e}");
+            1
+        }
+    }
+}
+
+/// `dump-find-vec3 <capture> <x> <y> <z> [--tol T]`: every aligned address where three consecutive
+/// f32 lie within T (default 0.0005) of (x, y, z). 0 / 1 / 2 as `dump_cli`.
+fn dump_vec3_cli(args: &[String]) -> i32 {
+    let f = |i: usize| args.get(i).and_then(|s| s.parse::<f32>().ok());
+    let (Some(dir), Some(x), Some(y), Some(z)) = (args.first(), f(1), f(2), f(3)) else {
+        eprintln!("dump-find-vec3: usage: mercs2_probe dump-find-vec3 <capture> <x> <y> <z> [--tol T]");
+        return 2;
+    };
+    let run = || -> Result<(), String> {
+        let tol = match flag_val(args, "--tol") {
+            None => 0.0005,
+            Some(t) => t.parse::<f32>().map_err(|e| format!("--tol {t:?}: {e}"))?,
+        };
+        let cap = dump::Capture::open(std::path::Path::new(dir))?;
+        println!("[dump-find-vec3] {} (build {})", cap.path.display(), cap.build_id);
+        let hits = cap.mem()?.find_vec3([x, y, z], tol);
+        for at in &hits {
+            println!("0x{at:08X}");
+        }
+        println!("{} hit(s)", hits.len());
+        Ok(())
+    };
+    match run() {
+        Ok(()) => 0,
+        Err(e) => {
+            eprintln!("dump-find-vec3 failed: {e}");
+            1
+        }
+    }
+}
+
+/// `dump-containers <capture-dir>`: every live component container (name, class, type id, count,
+/// stride). `dump-pool <capture-dir> <name|0xVA> [--bytes N] [--limit N]`: every live record of one
+/// container — key, address, and its first N bytes (default: the whole stride). 0 / 1 / 2 as `dump_cli`.
+fn dump_pool_cli(cmd: &str, args: &[String]) -> i32 {
+    let Some(dir) = args.first() else {
+        eprintln!("{cmd}: usage: mercs2_probe dump-containers <capture-dir> | dump-pool <capture-dir> <name|0xVA> [--bytes N] [--limit N]");
+        return 2;
+    };
+    let num = |flag: &str| -> Result<Option<usize>, String> {
+        flag_val(args, flag).map(|v| v.parse::<usize>().map_err(|e| format!("{flag} {v:?}: {e}"))).transpose()
+    };
+    let run = || -> Result<(), String> {
+        let cap = dump::Capture::open(std::path::Path::new(dir))?;
+        let mem = cap.mem()?;
+        println!("[{cmd}] {} (build {})", cap.path.display(), cap.build_id);
+        if cmd == "dump-containers" {
+            for c in mem.containers()? {
+                println!(
+                    "0x{:08X} {:?} id {:3} count {:6} stride {:4} per_page {:5}  {}",
+                    c.va, c.class, c.type_id, c.count, c.stride, c.per_page, c.name
+                );
+            }
+            return Ok(());
+        }
+        let which = args.get(1).ok_or("dump-pool: missing <name|0xVA>")?;
+        let c = match which.strip_prefix("0x").and_then(|h| u32::from_str_radix(h, 16).ok()) {
+            Some(va) => mem.containers()?.into_iter().find(|c| c.va == va).ok_or_else(|| format!("no container at {which}"))?,
+            None => mem.container_named(which)?,
+        };
+        let bytes = num("--bytes")?.unwrap_or(c.stride as usize);
+        let limit = num("--limit")?.unwrap_or(usize::MAX);
+        let key = match flag_val(args, "--key") {
+            None => None,
+            Some(k) => Some(u32::from_str_radix(k.trim_start_matches("0x"), 16).map_err(|e| format!("--key {k:?}: {e}"))?),
+        };
+        let all = mem.records(&c)?;
+        let recs: Vec<_> = all.iter().filter(|r| key.map_or(true, |k| r.key == k)).collect();
+        println!(
+            "{} @0x{:08X} {:?} stride {} — {} live record(s){}",
+            c.name, c.va, c.class, c.stride, all.len(),
+            key.map_or(String::new(), |k| format!(", {} with key 0x{k:08X}", recs.len()))
+        );
+        for r in recs.iter().take(limit) {
+            println!("-- key 0x{:08X} @0x{:08X}", r.key, r.va);
+            print!("{}", dump::hexdump(r.va, &mem.read(r.va, bytes)?));
+        }
+        Ok(())
+    };
+    match run() {
+        Ok(()) => 0,
+        Err(e) => {
+            eprintln!("{cmd} failed: {e}");
+            1
+        }
+    }
+}
+
 /// Dump a save `.profile`: all parsed header fields (including the raw bytes around the
 /// character/costume region, 0x240..0x260) + the DECOMPRESSED SaveSingleton Lua payload — the
 /// grep-able ground truth for header-byte meanings. `needle` filters payload lines
@@ -155,14 +309,12 @@ fn save_dump(profile_path: &str, needle: Option<&str>) -> Result<(), String> {
     Ok(())
 }
 
-/// Headless verification of vz_state overlay activation: parse a `.profile` → its active `SaveState`
-/// layers → resolve each to a WAD block → run the REAL streaming fold (`add_overlay_to_catalog`) and
-/// report how many resolve + how many entities each adds. Proves the boot-state overlay path without
-/// a window (the engine's streaming render uses the same `worldutil` fold).
+/// Headless verification of a save's layers: parse a `.profile` → its active `SaveState` layers →
+/// read each layer's own container (`layer_container`, the type-9 ASET asset a layer load
+/// instantiates) into a catalog on top of the whole `layers_static` block, and report how many
+/// resolve + how many entities each places.
 fn overlays_report(wadpath: &str, profile_path: &str) -> Result<(), String> {
-    use mercs2_core::streaming::{StreamingConfig, StreamingManager};
-    use mercs2_engine::worldutil::{add_overlay_to_catalog, resolve_overlay_block, PropSpawn};
-    use std::collections::HashMap;
+    use mercs2_engine::worldutil::{find_terrain_blocks, layer_container, PlacedCatalog, TemplateRecords};
 
     let bytes = std::fs::read(profile_path).map_err(|e| format!("read {profile_path}: {e}"))?;
     let profile = mercs2_formats::save::parse(&bytes)?;
@@ -176,33 +328,32 @@ fn overlays_report(wadpath: &str, profile_path: &str) -> Result<(), String> {
     );
 
     let mut w = wad::open(wadpath)?;
-    let cfg = StreamingConfig::default();
-    let mut mgr = StreamingManager::new(cfg);
-    let mut props: HashMap<u32, PropSpawn> = HashMap::new();
+    let templates = TemplateRecords::load(&mut mercs2_engine::asset::AssetSource::discover(wadpath, &[])?)?;
+    let mut catalog = PlacedCatalog::default();
+    let (_low, ls) = find_terrain_blocks(&mut w)?;
+    let base = catalog.add_block(&ls, &templates)?.len();
 
-    let (mut resolved, mut tot_mn, mut tot_named) = (0usize, 0usize, 0usize);
+    let (mut resolved, mut total) = (0usize, 0usize);
     let mut unresolved: Vec<&str> = Vec::new();
     let mut per: Vec<(String, usize)> = Vec::new();
     for l in layers {
-        match resolve_overlay_block(&w, l) {
-            Some(bi) => {
-                let dec = wad::decompress_block_index(&mut w, bi).map_err(|e| format!("block {bi}: {e}"))?;
-                let (mn, nm) = add_overlay_to_catalog(&dec, cfg.default_distances, &mut mgr, &mut props);
+        match layer_container(&mut w, mercs2_formats::hash::pandemic_hash_m2(l))? {
+            Some(c) => {
+                let n = catalog.add_block(&c, &templates).map_err(|e| format!("{l}: {e}"))?.len();
                 resolved += 1;
-                tot_mn += mn;
-                tot_named += nm;
-                if mn + nm > 0 {
-                    per.push((l.clone(), mn + nm));
+                total += n;
+                if n > 0 {
+                    per.push((l.clone(), n));
                 }
             }
             None => unresolved.push(l),
         }
     }
-    println!("[overlays] resolved {resolved}/{} layers to blocks", layers.len());
+    println!("[overlays] resolved {resolved}/{} layers to layer assets", layers.len());
     println!(
-        "[overlays] entities added: {tot_mn} ModelName + {tot_named} named = {} ({} distinct streamable keys)",
-        tot_mn + tot_named,
-        props.len()
+        "[overlays] placed entities: {base} layers_static + {total} layer = {} distinct ({} with a model)",
+        catalog.len(),
+        catalog.iter().filter(|o| o.model.is_some()).count()
     );
     per.sort_by(|a, b| b.1.cmp(&a.1));
     println!("[overlays] top overlays by entity count:");
@@ -381,6 +532,37 @@ fn main() {
             }
         }
     }
+    if cmd == "dump-find-vec3" {
+        std::process::exit(dump_vec3_cli(&args));
+    }
+    if cmd == "dump-read" || cmd == "dump-chain" || cmd == "dump-find" {
+        std::process::exit(dump_cli(&cmd, &args));
+    }
+    if cmd == "dump-containers" || cmd == "dump-pool" {
+        std::process::exit(dump_pool_cli(&cmd, &args));
+    }
+    if cmd == "dump-hibernation" {
+        let Some(capture) = args.first() else {
+            eprintln!("dump-hibernation: usage: mercs2_probe dump-hibernation <capture>");
+            std::process::exit(2);
+        };
+        if let Err(e) = dump_hibernation::dump_hibernation(capture) {
+            eprintln!("dump-hibernation failed: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    if cmd == "dump-spawnlists" {
+        let Some(capture) = args.first() else {
+            eprintln!("dump-spawnlists: usage: mercs2_probe dump-spawnlists <capture>");
+            std::process::exit(2);
+        };
+        if let Err(e) = dump_spawnlists::dump_spawnlists(capture) {
+            eprintln!("dump-spawnlists failed: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
     if cmd == "ess-menu-check" {
         std::process::exit(ess_menu_check::main(&args));
     }
@@ -406,12 +588,13 @@ fn main() {
         return;
     }
 
-    // Resolve vz.wad: explicit --wad (a folder or the file), else $VZ_WAD, else the registry key.
+    // Resolve vz.wad: explicit --wad (a folder or the file), else $MERCS2_GAME_DIR / $VZ_WAD, else
+    // the registry key.
     let wadpath = match wad::resolve_vz_wad(flag_val(&args, "--wad").as_deref()) {
         Some(p) => p,
         None => {
             eprintln!(
-                "no vz.wad found — pass --wad <folder-or-file>, set VZ_WAD, or install so that\n  \
+                "no vz.wad found — pass --wad <folder-or-file>, set MERCS2_GAME_DIR or VZ_WAD, or install so that\n  \
                  HKLM\\SOFTWARE\\WOW6432Node\\EA Games\\Mercenaries 2 World in Flames\\Install Dir\n  \
                  resolves to a folder containing data\\vz.wad"
             );
@@ -642,6 +825,80 @@ fn main() {
                 n
             };
             run(save_dump(&prof, needle.as_deref()));
+        }
+        "anim-table" => {
+            let name = first_positional(&args).unwrap_or_else(|| {
+                eprintln!("anim-table: usage: mercs2_probe anim-table <name|0xH> [--handle 0xH] [--list <column>]");
+                std::process::exit(2);
+            });
+            let hash = parse_hash(&name).unwrap_or_else(|| mercs2_formats::hash::pandemic_hash_m2(&name));
+            let handle = match flag_val(&args, "--handle") {
+                Some(h) => Some(parse_hash(&h).unwrap_or_else(|| {
+                    eprintln!("anim-table: --handle {h:?} is not a 0xHASH");
+                    std::process::exit(2);
+                })),
+                None => None,
+            };
+            run(anim_table::anim_table(&wadpath, hash, handle, flag_val(&args, "--list").as_deref()));
+        }
+        "clip-pose" => {
+            let usage = "clip-pose: usage: mercs2_probe clip-pose --model 0xH --clip 0xH --bones 0xA,0xB.. --ref 0xR [--frames N]";
+            let hash = |flag: &str| {
+                flag_val(&args, flag).and_then(|v| parse_hash(&v)).unwrap_or_else(|| {
+                    eprintln!("{usage}");
+                    std::process::exit(2);
+                })
+            };
+            let (m, c, r) = (hash("--model"), hash("--clip"), hash("--ref"));
+            let bones: Vec<u32> = flag_val(&args, "--bones")
+                .unwrap_or_default()
+                .split(',')
+                .filter(|s| !s.is_empty())
+                .map(|s| {
+                    parse_hash(s).unwrap_or_else(|| {
+                        eprintln!("clip-pose: --bones entry {s:?} is not a 0xHASH");
+                        std::process::exit(2);
+                    })
+                })
+                .collect();
+            if bones.is_empty() {
+                eprintln!("{usage}");
+                std::process::exit(2);
+            }
+            let frames = match flag_val(&args, "--frames") {
+                Some(f) => f.parse().unwrap_or_else(|_| {
+                    eprintln!("clip-pose: --frames {f:?} is not a count");
+                    std::process::exit(2);
+                }),
+                None => 9,
+            };
+            run(clip_pose::clip_pose(&wadpath, m, c, &bones, r, frames));
+        }
+        "we-template" => {
+            let q = if args.iter().any(|a| a == "--enums") {
+                we_template::Query::Enums
+            } else if let Some(c) = flag_val(&args, "--class") {
+                we_template::Query::Class(c)
+            } else if let Some(v) = flag_val(&args, "--uses") {
+                we_template::Query::Uses(parse_hash(&v).unwrap_or_else(|| {
+                    eprintln!("we-template: --uses {v:?} is not a 0xHASH");
+                    std::process::exit(2);
+                }))
+            } else {
+                // Every argument that is neither a `--flag` nor a flag's value.
+                let names: Vec<String> = args
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, a)| !a.starts_with("--") && (*i == 0 || !args[i - 1].starts_with("--")))
+                    .map(|(_, a)| a.clone())
+                    .collect();
+                if names.is_empty() {
+                    eprintln!("we-template: usage: mercs2_probe we-template <name|0xKEY>... | --class <Class> | --uses <0xU32>");
+                    std::process::exit(2);
+                }
+                we_template::Query::Templates(names)
+            };
+            run(we_template::we_template(&wadpath, q));
         }
         "-h" | "--help" | "help" => usage(),
         other => {

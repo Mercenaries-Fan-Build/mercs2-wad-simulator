@@ -856,6 +856,27 @@ pub fn probe_terrain(low_res_block: &[u8]) -> Result<Vec<TileProbe>, crate::text
     Ok(out)
 }
 
+/// A low-res terrain tile's bounding sphere `(centre, radius)`, tile-local metres: its single `BNDS`
+/// (a direct child of a top-level `GEOM`, 40 bytes: centre xyz, radius, box min xyz, box max xyz), as
+/// the tile loader `FUN_004A8690` reads it and the tile's render node (`FUN_004A8A00`) copies it.
+pub fn lowres_tile_sphere(container: &[u8]) -> Result<([f32; 3], f32), String> {
+    let tree = crate::ucfx::parse_ucfx_tree(container)?;
+    let mut found = Vec::new();
+    for g in tree.iter().filter(|n| &n.tag == b"GEOM") {
+        for c in g.children.iter().filter(|c| &c.tag == b"BNDS") {
+            found.push(c.body.as_deref().ok_or("a BNDS row has no body")?);
+        }
+    }
+    let [b] = found.as_slice() else {
+        return Err(format!("{} BNDS under the top-level GEOMs, expected 1", found.len()));
+    };
+    if b.len() != 40 {
+        return Err(format!("BNDS is {} bytes, expected 40", b.len()));
+    }
+    let f = |i: usize| f32::from_le_bytes([b[4 * i], b[4 * i + 1], b[4 * i + 2], b[4 * i + 3]]);
+    Ok(([f(0), f(1), f(2)], f(3)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

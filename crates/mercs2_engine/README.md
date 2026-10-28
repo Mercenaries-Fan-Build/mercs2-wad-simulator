@@ -126,9 +126,14 @@ engine owns the window, loop and render; you supply the config, the loader, and 
 ## Notes / gotchas
 
 - **Two different "overlay" vocabularies — do not conflate.** `AssetSource`'s overlays are whole patch
-  **WAD files** stacked on top of the base. The `overlays` argument to `run_game_world` /
-  `load_streaming_world_data` / `worldutil::add_overlay_to_catalog` is a different thing: `vz_state`
-  layer **blocks inside one wad**, folded into the streaming catalog.
+  **WAD files** stacked on top of the base. The `overlays` argument to `run_game_world` is a different
+  thing: `vz_state` **layers inside one wad**, which the free-fly boot requests as dynamic layers.
+- **Placed entities arrive by layer loads.** `StreamingWorld` starts empty; the layer requests on the
+  shared `GuidMap` (`Pg.LoadLayer` & co., `Sys.RequiredAsset` for `<level>_base`) instantiate each
+  layer's own container — catalog, hibernation grid, SceneObject rows, names, LandingZone rows,
+  population regions, lights — per `docs/reverse_engineer/layer_load_code_map.md`. A headless
+  `step_headless` runs the same layers, grid and activations with no presentation (the boot tests,
+  `mercs2_autoplay`).
 - **The two resolution rules run at once, in opposite directions.** Which *block* becomes resident for
   a hash is resolved by walking the WAD stack in reverse (**last** overlay wins). Once a block is
   resident, its chunks register into the global tables **first**-wins. That is exactly how retail

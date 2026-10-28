@@ -53,7 +53,7 @@ fn main() {
             RenderState {
                 lod: tier,
                 view_state: 1u8 << tier,
-                node_enable: orch::machine_node_enable(sm, &m.hier, &chosen),
+                node_enable: orch::machine_node_enable(sm, &m.hier, &chosen).unwrap_or_else(|e| panic!("{e}")),
             }
         };
         let draw_by_node = |rs: &RenderState| -> BTreeMap<i16, (u32, Option<u32>)> {

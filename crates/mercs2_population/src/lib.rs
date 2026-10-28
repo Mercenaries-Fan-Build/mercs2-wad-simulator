@@ -14,7 +14,7 @@
 //! - [`density`] — the `>>1 & 0x7f7f7f7f` spawn-history decay + the `10/10/2/2` ambient budgets +
 //!   the `TrafficControlEnum` gate (§3/§9, H constants);
 //! - [`spawner`] — the four-family `UpdateSimpleSpawners` mechanism over a 768-cap instance pool with
-//!   cap-128 family queues, emitting [`SpawnRequest`]s, plus `TweakAttachedSpawners` apply (§6, H);
+//!   per-family request queues, emitting [`SpawnRequest`]s, plus `TweakAttachedSpawners` apply (§6, H);
 //! - [`components`] — the population reflection components (hashes/strides/defaults/enums, §9).
 //!
 //! # Entry point
@@ -38,7 +38,7 @@
 //! | --- | --- |
 //! | [`death`] | [`DeathQueue`] / [`PendingDeath`], [`DEATH_BUDGET_PER_FRAME`] (20/frame), [`DEATH_DISTANCE_SQ_TABLE`] (9 squared radii). |
 //! | [`density`] | [`DensityController`] / [`DensityBudget`] (`10/10/2/2`), [`decay_spawn_history`], [`traffic_allows`], [`density_faction_participates`]. |
-//! | [`spawner`] | [`SimpleSpawnerManager`] / [`SimpleSpawner`] / [`SpawnQueue`] / [`SpawnRequest`] / [`SpawnerAdjust`] / [`SpawnerFamily`] + the recovered caps ([`SIMPLE_SPAWNER_POOL`] 768, [`SPAWN_QUEUE_CAP`] 128, [`SPAWNER_GROUP_COUNT`] 8, [`SPAWNER_STATE_TERMINAL`] 5). |
+//! | [`spawner`] | [`SimpleSpawnerManager`] / [`SimpleSpawner`] / [`SpawnQueue`] / [`SpawnRequest`] / [`SpawnerAdjust`] / [`SpawnerFamily`] + [`SIMPLE_SPAWNER_POOL`] 768, [`SPAWN_QUEUE_CAP`], [`SPAWNER_GROUP_COUNT`] 8, [`SPAWNER_STATE_TERMINAL`] 5. |
 //! | [`components`] | [`PopulationDensity`], [`PopulationDynamicRoad`], [`PopulationFlow`], [`SkirmishZone`], [`SkirmishSpawnList`], [`SocialUse`], [`RtPopMembership`], [`RuntimeTravelGroup`] + the [`TrafficControl`] / [`DynamicRoadType`] / [`FlowControlType`] / [`NeedType`] enums and the [`SpawnFaction`] spawn-list channels. |
 //!
 //! **What this crate deliberately does NOT build** (data / Lua / unrecovered per the code map):
@@ -49,11 +49,14 @@
 //! only cfunc bodies (§7, undecompiled); the CacheIn/CacheOut kept-ring (streaming-coupled, capacity
 //! 64-vs-8 confirm-live §5). Those are represented as inputs/seams, never as invented bodies.
 
+pub mod adjust;
 pub mod components;
 pub mod death;
 pub mod density;
+pub mod runtime_spawner;
 pub mod slot_table;
 pub mod spawner;
+pub mod units;
 
 pub use components::{
     DynamicRoadType, FlowControlType, NeedType, PopulationDensity, PopulationDynamicRoad,
@@ -65,14 +68,25 @@ pub use density::{
     decay_spawn_history, density_faction_participates, traffic_allows, DensityBudget,
     DensityController,
 };
-pub use slot_table::{faction_template_hash, faction_template_name, FACTION_TEMPLATE_NAMES};
 pub use spawner::{
     SimpleSpawner, SimpleSpawnerManager, SpawnQueue, SpawnRequest, SpawnerAdjust, SpawnerFamily,
-    SIMPLE_SPAWNER_POOL, SPAWNER_GROUP_COUNT, SPAWNER_STATE_TERMINAL, SPAWN_QUEUE_CAP,
+    SIMPLE_SPAWNER_POOL, SPAWNER_GROUP_COUNT, SPAWNER_GROUP_ENUM_COUNT, SPAWNER_STATE_TERMINAL, SPAWN_QUEUE_CAP,
 };
+pub use units::{UnitCatalog, UnitChoice};
 
 use mercs2_core::glam::Vec3;
-use mercs2_core::{Time, World};
+use mercs2_core::{Time, Transform, World};
+
+/// A unit chosen for a fired spawner — what the resolver seam realizes: the template key, where, which
+/// spawner group, which family, and the spawner's owner.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct UnitSpawn {
+    pub template: u32,
+    pub transform: Transform,
+    pub group: u8,
+    pub family: SpawnerFamily,
+    pub owner: u32,
+}
 
 /// The `Event.Post` hash the spawn pipeline fires when a unit spawns (PC `FUN_004b7ab0(0x7962caf5,…)`,
 /// code map §9). Carried so the reimpl's spawn resolver can post the same event the game does.
@@ -102,17 +116,20 @@ pub struct PopulationWorld {
     pub deaths: DeathQueue,
     /// The ambient-density budget + spawn-history decay + traffic gate.
     pub density: DensityController,
-    /// The 768-cap simple-spawner pool + four cap-128 family queues.
+    /// The 768-cap simple-spawner pool + four family request queues.
     pub spawners: SimpleSpawnerManager,
+    /// The unit lists fired spawners choose from (empty until the host loads the `PopulationList`
+    /// data).
+    pub units: UnitCatalog,
     /// The live ambient-population ceiling the density gate throttles emissions against — the reimpl's
     /// analogue of the game's per-player WAD **desired count** (`DAT_00ed55c8[]`/`ed55b0[]`). Defaults
     /// to [`POP_LIVE_CAP`]; a caller with a real per-zone desired count overwrites it. Emission stops
     /// entirely once [`live`](Self::live) reaches this — the anti-runaway ceiling.
     pub live_cap: u32,
-    /// Spawn requests emitted this tick, awaiting the resolver seam (drained by [`take_requests`]).
+    /// Units chosen this tick, awaiting the resolver seam (drained by [`take_requests`]).
     ///
     /// [`take_requests`]: PopulationWorld::take_requests
-    requests: Vec<SpawnRequest>,
+    requests: Vec<UnitSpawn>,
     /// Entities retired this tick by the death system, awaiting despawn by the caller.
     retired: Vec<mercs2_core::Entity>,
     /// Current live ambient-population count — the reimpl's analogue of the game's live-count DATs
@@ -139,6 +156,7 @@ impl Default for PopulationWorld {
             deaths: DeathQueue::default(),
             density: DensityController::default(),
             spawners: SimpleSpawnerManager::default(),
+            units: UnitCatalog::default(),
             live_cap: POP_LIVE_CAP,
             requests: Vec::new(),
             retired: Vec::new(),
@@ -165,13 +183,22 @@ impl PopulationWorld {
     /// `PgSysPopulation::Update` (PC `FUN_00502510`) — the per-fixed-step population tick, mirroring the
     /// recovered fan-out order (§3): **death check/compute → (density decay, folded into the density
     /// controller) → simple-spawner families → spawn-queue drain**. `viewports` are the camera anchors
-    /// the death distance gate measures against. Retired entities and spawn requests are staged for the
+    /// the death distance gate measures against. Each drained request's unit is chosen by its spawner's
+    /// [`UnitChoice`] ([`UnitCatalog::pick`]) with `next` — the game's random draw — and, for the
+    /// `Health*` rules, `owner_health(world, owner)`. Retired entities and chosen units are staged for the
     /// caller to drain ([`take_retired`](Self::take_retired) / [`take_requests`](Self::take_requests));
     /// the actual entity despawn/spawn is the resolver seam, not owned here.
     ///
     /// Idle-safe: with no pending deaths and no registered spawners it does nothing, the same
     /// data-driven way the sibling systems idle until their content exists.
-    pub fn tick(&mut self, _world: &mut World, time: &Time, viewports: &[Vec3]) {
+    pub fn tick(
+        &mut self,
+        world: &mut World,
+        time: &Time,
+        viewports: &[Vec3],
+        next: &mut dyn FnMut() -> u32,
+        owner_health: &dyn Fn(&World, u32) -> f32,
+    ) {
         // 1. Death check/compute — retire aged-out, far bodies (budget 20/frame). Retiring frees live
         //    headroom, exactly as the game decrements its live-count DATs (`DAT_016d3078` &c.) on death,
         //    so a saturated zone reopens for spawning as bodies age out and leave.
@@ -181,7 +208,7 @@ impl PopulationWorld {
         // 2. Spawn-history decay — the recovered per-byte halving `>>1 & 0x7f7f7f7f` applied each tick
         //    (code map §3 density-decay step) so recent-spawn history ages out of its throttle.
         self.spawn_history = decay_spawn_history(self.spawn_history);
-        // 3. Simple-spawner families — advance timers, enqueue fired requests to the cap-128 queues.
+        // 3. Simple-spawner families — advance timers, enqueue fired requests to the family queues.
         //    Gated by the recovered activation-radius test (`UpdateSimpleSpawners`, §6): only spawners
         //    within a `viewport`'s activation radius fire — the rest are cached-out and hold their
         //    countdown. This is the PROXIMITY half (WHICH spawners fire, clustered around the player);
@@ -226,7 +253,12 @@ impl PopulationWorld {
             if headroom == 0 {
                 break; // desired count reached — refuse the remaining requests this tick
             }
-            let class_left = if req.faction.is_vehicle() { &mut veh_left } else { &mut ped_left };
+            // The spawner's unit (`FUN_004E4150`); a rule that spawns nothing ends the request here.
+            let owner = req.choice.owner;
+            let Some(template) = self.units.pick(&req.choice, || owner_health(world, owner), next) else {
+                continue;
+            };
+            let class_left = if self.units.is_vehicle(template) { &mut veh_left } else { &mut ped_left };
             if *class_left == 0 {
                 continue; // this class's per-tick fill rate is spent; a later tick may emit it
             }
@@ -235,15 +267,15 @@ impl PopulationWorld {
             // Record the emission into the decaying spawn-history accumulator (saturating; the low byte
             // is what `decay_spawn_history` halves back down over subsequent ticks).
             self.spawn_history = self.spawn_history.saturating_add(1);
-            self.requests.push(req);
+            self.requests.push(UnitSpawn { template, transform: req.transform, group: req.group, family: req.family, owner });
             emitted += 1;
         }
         self.live += emitted;
     }
 
-    /// Drain the spawn requests emitted so far — the resolver seam realizes each into an entity (and
-    /// posts [`SPAWN_EVENT_HASH`]). Empties the staging buffer.
-    pub fn take_requests(&mut self) -> Vec<SpawnRequest> {
+    /// Drain the units chosen so far — the resolver seam realizes each into an entity (and posts
+    /// [`SPAWN_EVENT_HASH`]). Empties the staging buffer.
+    pub fn take_requests(&mut self) -> Vec<UnitSpawn> {
         std::mem::take(&mut self.requests)
     }
 
@@ -262,7 +294,22 @@ impl PopulationWorld {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mercs2_core::Transform;
+    use mercs2_formats::unit_list::UnitListEntry;
+
+    /// A person unit and the one-entry list (`Simple`) every test spawner draws from.
+    const PERSON: u32 = 0x8000_0001;
+    const CHOICE: UnitChoice = UnitChoice { owner: 0x8000_0F00, unit_list: 0x8000_0100, weighting: 1 };
+
+    /// A population world whose catalog serves [`CHOICE`].
+    fn pop_world() -> PopulationWorld {
+        let lists = std::collections::BTreeMap::from([(CHOICE.unit_list, vec![UnitListEntry { unit: PERSON, weight: 1 }])]);
+        PopulationWorld { units: UnitCatalog::new(lists, Default::default()).unwrap(), ..PopulationWorld::new() }
+    }
+
+    /// One population tick with a fixed draw and full owner health.
+    fn tick(pop: &mut PopulationWorld, world: &mut World, time: &Time, viewports: &[Vec3]) {
+        pop.tick(world, time, viewports, &mut || 0, &|_, _| 1.0);
+    }
 
     #[test]
     fn spawn_event_hash_is_recovered_constant() {
@@ -274,13 +321,13 @@ mod tests {
     #[test]
     fn tick_emits_spawn_requests_from_registered_spawners() {
         let mut world = World::new();
-        let mut pop = PopulationWorld::new();
+        let mut pop = pop_world();
         pop.spawners
             .register(SimpleSpawner {
                 interval: 1.0,
                 countdown: 1.0,
                 reload: 1.0,
-                faction: SpawnFaction::Vz,
+                choice: CHOICE,
                 family: SpawnerFamily::Window,
                 transform: Transform::from_translation(Vec3::new(10.0, 0.0, 0.0)),
                 ..SimpleSpawner::default()
@@ -288,11 +335,12 @@ mod tests {
             .unwrap();
 
         let time = Time::new(1.0); // dt = 1.0s → one tick crosses the 1.0s interval
-        pop.tick(&mut world, &time, &[Vec3::ZERO]);
+        tick(&mut pop, &mut world, &time,&[Vec3::ZERO]);
         // The clock's dt is 1.0 (fixed_dt for 1 Hz); the spawner's countdown 1.0 - 1.0 <= 0 fires.
         let reqs = pop.take_requests();
         assert_eq!(reqs.len(), 1, "the window spawner fired once");
-        assert_eq!(reqs[0].faction, SpawnFaction::Vz);
+        assert_eq!(reqs[0].template, PERSON, "the spawner's list chose the unit");
+        assert_eq!(reqs[0].owner, CHOICE.owner);
         assert_eq!(reqs[0].transform.translation, Vec3::new(10.0, 0.0, 0.0));
         assert!(pop.take_requests().is_empty(), "requests drained");
     }
@@ -304,13 +352,13 @@ mod tests {
     #[test]
     fn tick_gates_spawners_by_viewport_proximity() {
         let mut world = World::new();
-        let mut pop = PopulationWorld::new();
+        let mut pop = pop_world();
         pop.spawners
             .register(SimpleSpawner {
                 interval: 1.0,
                 countdown: 1.0,
                 reload: 1.0,
-                faction: SpawnFaction::Ped,
+                choice: CHOICE,
                 family: SpawnerFamily::Window,
                 // 2 km from the origin — far outside the 160 m Window activation radius.
                 transform: Transform::from_translation(Vec3::new(2000.0, 0.0, 0.0)),
@@ -322,12 +370,12 @@ mod tests {
         // Hero far away: the spawner is cached-out — nothing fires no matter how long we wait, and its
         // countdown does not drain.
         for _ in 0..5 {
-            pop.tick(&mut world, &time, &[Vec3::ZERO]);
+            tick(&mut pop, &mut world, &time,&[Vec3::ZERO]);
             assert!(pop.take_requests().is_empty(), "far spawner stays cached-out");
         }
 
         // Hero moves within the 160 m Window radius (50 m from the spawner): it resumes and fires.
-        pop.tick(&mut world, &time, &[Vec3::new(1950.0, 0.0, 0.0)]);
+        tick(&mut pop, &mut world, &time,&[Vec3::new(1950.0, 0.0, 0.0)]);
         let reqs = pop.take_requests();
         assert_eq!(reqs.len(), 1, "in-range spawner fires");
         assert_eq!(reqs[0].transform.translation, Vec3::new(2000.0, 0.0, 0.0));
@@ -340,7 +388,7 @@ mod tests {
     #[test]
     fn population_stabilizes_at_bounded_live_count_under_constant_spawn_pressure() {
         let mut world = World::new();
-        let mut pop = PopulationWorld::new();
+        let mut pop = pop_world();
         // A small stand-in for the WAD per-region desired count so saturation is reached quickly. The
         // gate is identical at the recovered 768 default; the cap is data (see `POP_LIVE_CAP`).
         pop.live_cap = 25;
@@ -351,7 +399,7 @@ mod tests {
                     interval: 1.0,
                     countdown: 1.0,
                     reload: 1.0,
-                    faction: SpawnFaction::Ped,
+                    choice: CHOICE,
                     family: SpawnerFamily::NoModel,
                     group: i % SPAWNER_GROUP_COUNT,
                     transform: Transform::from_translation(Vec3::new(i as f32, 0.0, 0.0)),
@@ -363,7 +411,7 @@ mod tests {
 
         // Drive many ticks, draining emitted requests each tick as the runtime caller would.
         for _ in 0..200 {
-            pop.tick(&mut world, &time, &[Vec3::ZERO]);
+            tick(&mut pop, &mut world, &time,&[Vec3::ZERO]);
             let _ = pop.take_requests(); // realized by the caller; `live` already tracks the count
         }
         // Bounded: never exceeds the desired-count ceiling despite 29 spawners firing every tick.
@@ -374,7 +422,7 @@ mod tests {
         );
         // Saturated AND stable: filled to the ceiling, and a further tick emits nothing.
         assert_eq!(pop.live(), 25, "population fills to the desired-count ceiling");
-        pop.tick(&mut world, &time, &[Vec3::ZERO]);
+        tick(&mut pop, &mut world, &time,&[Vec3::ZERO]);
         assert!(
             pop.take_requests().is_empty(),
             "a saturated population emits zero — the anti-runaway gate holds"
@@ -387,7 +435,7 @@ mod tests {
     #[test]
     fn retiring_bodies_reopens_spawn_headroom() {
         let mut world = World::new();
-        let mut pop = PopulationWorld::new();
+        let mut pop = pop_world();
         pop.live_cap = 5;
         // Enough spawners that supply is never the limit (8 fire every tick).
         for i in 0..8u8 {
@@ -396,7 +444,7 @@ mod tests {
                     interval: 1.0,
                     countdown: 1.0,
                     reload: 1.0,
-                    faction: SpawnFaction::Ped,
+                    choice: CHOICE,
                     family: SpawnerFamily::NoModel,
                     group: i % SPAWNER_GROUP_COUNT,
                     ..SimpleSpawner::default()
@@ -406,11 +454,11 @@ mod tests {
         let time = Time::new(1.0);
         // Saturate to the cap.
         for _ in 0..10 {
-            pop.tick(&mut world, &time, &[Vec3::ZERO]);
+            tick(&mut pop, &mut world, &time,&[Vec3::ZERO]);
             let _ = pop.take_requests();
         }
         assert_eq!(pop.live(), 5, "saturated at the ceiling");
-        pop.tick(&mut world, &time, &[Vec3::ZERO]);
+        tick(&mut pop, &mut world, &time,&[Vec3::ZERO]);
         assert!(pop.take_requests().is_empty(), "no headroom → no emission");
 
         // Retire two far, expired bodies via the death queue → live drops, headroom frees.
@@ -418,7 +466,7 @@ mod tests {
         let b = world.spawn(());
         pop.deaths.push(PendingDeath { entity: a, timer: 0.0, gate: 0, position: Vec3::new(1000.0, 0.0, 0.0) });
         pop.deaths.push(PendingDeath { entity: b, timer: 0.0, gate: 0, position: Vec3::new(1000.0, 0.0, 0.0) });
-        pop.tick(&mut world, &time, &[Vec3::ZERO]);
+        tick(&mut pop, &mut world, &time,&[Vec3::ZERO]);
         assert_eq!(pop.take_retired(), vec![b, a], "both far+expired bodies retired");
         // Spawning resumed: the freed headroom (2) was refilled this same tick, back to the ceiling.
         assert_eq!(pop.take_requests().len(), 2, "emission resumes into the freed headroom");
@@ -430,7 +478,7 @@ mod tests {
     fn tick_retires_dead_bodies() {
         let mut world = World::new();
         let body = world.spawn(());
-        let mut pop = PopulationWorld::new();
+        let mut pop = pop_world();
         pop.deaths.push(PendingDeath {
             entity: body,
             timer: 0.0,
@@ -438,14 +486,14 @@ mod tests {
             position: Vec3::new(1000.0, 0.0, 0.0),
         });
         let time = Time::new(60.0);
-        pop.tick(&mut world, &time, &[Vec3::ZERO]);
+        tick(&mut pop, &mut world, &time,&[Vec3::ZERO]);
         assert_eq!(pop.take_retired(), vec![body]);
     }
 
     /// `tweak_attached_spawners` drives the group bit loop from the world bundle.
     #[test]
     fn tweak_attached_spawners_routes_to_manager() {
-        let mut pop = PopulationWorld::new();
+        let mut pop = pop_world();
         pop.spawners
             .register(SimpleSpawner { group: 2, ..SimpleSpawner::default() })
             .unwrap();
@@ -462,9 +510,9 @@ mod tests {
     #[test]
     fn empty_world_tick_is_noop() {
         let mut world = World::new();
-        let mut pop = PopulationWorld::new();
+        let mut pop = pop_world();
         let time = Time::new(60.0);
-        pop.tick(&mut world, &time, &[]);
+        tick(&mut pop, &mut world, &time,&[]);
         assert!(pop.take_requests().is_empty());
         assert!(pop.take_retired().is_empty());
     }

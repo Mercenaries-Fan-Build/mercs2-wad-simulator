@@ -1,7 +1,8 @@
 //! swim_clip_probe — find the swimming animation clip(s) for a merc through the real ActionTable +
 //! AnimationLookup (resident block 3185). Stance/Action state names are `pandemic_hash_m2(name)`
 //! (verified: m2("Upright")=0x12C07B18, m2("Fidget")=0x0C0A7FA6), so we probe swim-ish state keys and
-//! print which `(Stance, Action)` resolves to a clip via `AnimSelector::resolve_state`.
+//! print which `(Stance, Action)` lists clips for a CharacterName (ActionTable handle → every clip of the
+//! AnimationLookup rows keyed to that exact CharacterName).
 
 use mercs2_engine::wad;
 use mercs2_formats::anim_select::AnimSelector;
@@ -12,7 +13,18 @@ fn main() {
         .and_then(|p| wad::open(&p).ok())
         .expect("open vz.wad");
     let dec = wad::decompress_block_index(&mut w, 3185).expect("decompress 3185");
-    let sel = AnimSelector::from_resident_block(&dec).expect("AnimSelector from resident block");
+    let sel = AnimSelector::from_resident_block(&dec)
+        .unwrap_or_else(|e| panic!("block 3185: {e}"))
+        .expect("block 3185 carries the AnimationLookup");
+    // Every clip the rows of `handle` list for exactly `character`.
+    let char_clips = |handle: u32, character: u32| -> Vec<u32> {
+        sel.handle_clips(handle).into_iter().filter(|&(c, _)| c == character).map(|(_, clip)| clip).collect()
+    };
+    // Every clip a `(stance, action)` state's handles list for exactly `character`.
+    let state_clips = |stance: u32, action: u32, character: u32| -> Vec<u32> {
+        sel.handles_for_state(stance, action).into_iter().flat_map(|h| char_clips(h, character)).collect()
+    };
+    let hex = |clips: &[u32]| clips.iter().map(|c| format!("0x{c:08X}")).collect::<Vec<_>>().join(",");
 
     // Dump the distinct (Stance, Action) hashes so the real state names can be reverse-looked-up in the
     // rainbow table (tools/rainbow_table.json: name -> m2 hash).
@@ -37,8 +49,9 @@ fn main() {
             continue;
         }
         for h in sel.handles_for_state(*st, *ac) {
-            if let Some(clip) = sel.resolve_handle(h, none) {
-                println!("  action=0x{ac:08X} handle=0x{h:08X} clip=0x{clip:08X}");
+            let clips = char_clips(h, none);
+            if !clips.is_empty() {
+                println!("  action=0x{ac:08X} handle=0x{h:08X} clips=[{}]", hex(&clips));
             }
         }
     }
@@ -51,8 +64,7 @@ fn main() {
             if *st != swim_stance {
                 continue;
             }
-            let clip = sel.resolve_state(*st, *ac, c);
-            println!("  {merc:>8}  action=0x{ac:08X} -> {clip:?}");
+            println!("  {merc:>8}  action=0x{ac:08X} -> [{}]", hex(&state_clips(*st, *ac, c)));
         }
     }
 
@@ -120,8 +132,9 @@ fn main() {
         let mut any = false;
         for st in stances {
             for ac in actions {
-                if let Some(clip) = sel.resolve_state(m2(st), m2(ac), c) {
-                    println!("  ({st:>9}, {ac:>7}) stance=0x{:08X} action=0x{:08X} -> clip 0x{clip:08X}", m2(st), m2(ac));
+                let clips = state_clips(m2(st), m2(ac), c);
+                if !clips.is_empty() {
+                    println!("  ({st:>9}, {ac:>7}) stance=0x{:08X} action=0x{:08X} -> clips [{}]", m2(st), m2(ac), hex(&clips));
                     any = true;
                 }
             }

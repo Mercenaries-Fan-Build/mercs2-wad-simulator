@@ -2,8 +2,9 @@
 //! tools for the game's WAD/sges/UCFX container stack and everything inside it.
 //!
 //! No rendering, no simulation, no I/O policy — just format code, reverse-engineered from the
-//! retail PC build and its console siblings. The core dependency is `flate2`; the `ps3_*` DLC
-//! decrypt chain additionally links `aes` + `cmac`.
+//! retail PC build and its console siblings. The dependencies are `flate2`, `gltf` (the import
+//! readers) and `loadprobe` (`load_ladder`); the `ps3_*` DLC decrypt chain additionally links
+//! `aes` + `cmac`.
 //!
 //! # Getting bytes out of a WAD
 //!
@@ -191,6 +192,11 @@ pub mod types;
 pub mod watermap_codec;
 pub mod ucfx;
 mod ucfx_codec;
+pub mod spawner_record;
+pub mod hibernation_control;
+pub mod model_name;
+pub mod render_node;
+pub mod unit_list;
 pub mod veg;
 pub mod world;
 pub mod world_index;

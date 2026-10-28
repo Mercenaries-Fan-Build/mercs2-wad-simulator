@@ -1,23 +1,23 @@
 //! The simple-spawner mechanism — `UpdateSimpleSpawners` (Xbox `FUN_82338768` ↔ PC `FUN_004e4100`).
 //!
 //! Code map §6 (H core). `PopulationSimpleSpawner` is a **class-manager, not a flat descriptor**
-//! (which is why it never appeared in the 231-class registry TSVs): a 768-cap instance pool that the
-//! per-frame update walks, dispatching **four family updaters** — Window / NoModel / Hardpoint / Path —
-//! each draining its own **128-cap** pending-spawn queue. A spawner is a timer + a placement radius +
+//! (which is why it never appeared in the 231-class registry TSVs). The per-frame update dispatches
+//! **four family updaters** — Window / NoModel / Hardpoint / Path. In this crate a spawner is a timer +
+//! a placement radius +
 //! a target spawn list; when its countdown elapses it emits one **spawn request** (template + a
 //! transform) which the game's spawn resolver later realizes into an entity (that terminal commit is
 //! the SecuROM-VM-dispatched worker `0x24F3200` — a seam, not built here).
 //!
-//! Recovered instance field layout (PC, from the consumers, §6): `+0x20` guid, `+0x2c` adjust-target,
-//! `+0x58` faction/list index, `+0x5c`/`+0x60`/`+0x6c` interval+countdown+reload, `+0x63`/`+0x64`/`+0x68`
-//! the 3 type discriminators, `+0x78`/`+0x7c` radii (× scale `DAT_00b97eec`), `+0x89` state, `+0x8b`
-//! group, `+0x8c` done. Terminal state byte = **5** (`SimpleSpawnerStateEnum` = 5 members); groups
-//! **< 8**; Window radius² = **25600 = 160²**.
+//! The retail runtime spawner layout (148 B, written by init `FUN_004e2840`) is the table in code map
+//! §6. Groups **< 8**. The spawn-instantiate `FUN_004e4150` reads
+//! the unit choice from `+0x24` (owner), `+0x2c` (`UnitList`) and the byte `+0x8e`
+//! (`UnitListWeighting`) ([`crate::units`]).
 
 use mercs2_core::glam::Vec3;
 use mercs2_core::Transform;
 
-use crate::components::{SkirmishSpawnList, SpawnFaction};
+use crate::components::SkirmishSpawnList;
+use crate::units::UnitChoice;
 
 /// Instance-pool cap (`cdbsizes.ini`, both builds) — `PopulationSimpleSpawner` = 768.
 pub const SIMPLE_SPAWNER_POOL: u32 = 768;
@@ -28,28 +28,31 @@ pub const SPAWNER_ADJUST_POOL: (u32, u32) = (16, 16);
 /// `SpawnOnDeath` pool (PC image strings) — 384/128.
 pub const SPAWN_ON_DEATH_POOL: (u32, u32) = (384, 128);
 
-/// Terminal spawner state (`+0x89 == 5` ⇒ exhausted/removed). `SimpleSpawnerStateEnum` has 5 members,
-/// so 5 is the one-past-the-last "done" sentinel the update tests against.
+/// Spawner state 5 (`+0x89`): no further spawns (retail keeps the spawner queued, `0x4E1DEB`).
 pub const SPAWNER_STATE_TERMINAL: u8 = 5;
 /// Spawner group count — `+0x8b < 8` (the 8-group bit loop, both builds).
 pub const SPAWNER_GROUP_COUNT: u8 = 8;
-/// Category count — `SimpleSpawnerTypeEnum` = 4 (the 3 type discriminators `+0x63/+0x64/+0x68` fold to
-/// 4 categories; the exact fold is a **confirm-live** item §10.2, so it is not synthesised here).
+/// `SimpleSpawnerGroupEnum` member count — None, Ground, Balcony, RoofTop, GroundVehicle, AirVehicle,
+/// AA, Window, G1…G8 (`we-template --enums`; the `Ai.TweakAttachedSpawnersInGroup` binding
+/// `FUN_005a4d10` hashes a group name into the same 16-entry table `DAT_00D16E40`). A spawner's group
+/// is any of these; only the first [`SPAWNER_GROUP_COUNT`] can be tweaked by group.
+pub const SPAWNER_GROUP_ENUM_COUNT: u8 = 16;
+/// Category count — `SimpleSpawnerTypeEnum` = 4.
 pub const SPAWNER_CATEGORY_COUNT: u8 = 4;
-/// Each pending-spawn queue is capped at 128 (`0x80`) — 4 families × cap 128 (code map §6 / §9).
+/// This crate's per-family pending-request bound. Not a retail constant: retail's four family lists
+/// hold active spawners, capped 200 / 100 / 200 / 64 (code map §6).
 pub const SPAWN_QUEUE_CAP: usize = 0x80;
-/// Window-spawner activation radius² = 160² (code map §6, both builds).
+/// This crate's default activation radius² (160²). Not retail's activation rule: retail's 25600
+/// (`DAT_00d1e410`) gates only the post-spawn event; activation is ActiveRadius² (code map §6).
 pub const WINDOW_RADIUS_SQ: f32 = 25600.0;
 
 /// The four `UpdateSimpleSpawners` family updaters (Xbox lists `0x82C1F488/7B8/958/C88` ↔ PC procs
-/// `FUN_004e1590/1ad0/2110/1d50` draining queues `DAT_00dccb00/ce30/cfd0/d300`).
-///
-/// **Confirm-live (§10.2):** the PC proc↔queue↔family pairing is by size/position, **not proven** —
-/// the four procs are structurally interchangeable. Window is the safest anchor (its Xbox fn carries
-/// the `'Have %d window Spawners'` string + the `OccupiedBuildingSpawnCallback` dispatch).
+/// `FUN_004e1590/1ad0/2110/1d50` draining queues `DAT_00dccb00/ce30/cfd0/d300`). The queue of each
+/// family is the one its creator fills: `FUN_004e4c50` → Window `DCCB00`, `FUN_004e4e50` → NoModel
+/// `DCCE30`, `FUN_004e5090` → Hardpoint `DCCFD0`, `FUN_004e4f70` → Path `DCD300` (code map §6).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SpawnerFamily {
-    /// Spawns units at building windows (`OccupiedBuildingSpawnCallback`); radius² 160².
+    /// Spawns units at building windows.
     Window = 0,
     /// Spawns units with no placement model (ambient/off-screen).
     NoModel = 1,
@@ -69,56 +72,47 @@ impl SpawnerFamily {
     ];
 }
 
-/// One emitted spawn request — the output of the spawner/density mechanism. It is **not** an engine
-/// entity: the game's spawn resolver (the SecuROM-VM terminal worker, a seam) realizes it later. This
-/// is the `0xBC`-byte spawn-record's essential payload: *what* to spawn, *where*, on whose list, in
-/// which group. Requests carry the [`crate::SPAWN_EVENT_HASH`] `Event.Post` context.
+/// One fired spawner, queued for instantiation. It is **not** an engine entity: which unit it becomes
+/// is chosen when the queue is drained ([`crate::PopulationWorld::tick`], `FUN_004E4150`'s unit
+/// choice), and the game's spawn resolver realizes that unit. Requests carry the
+/// [`crate::SPAWN_EVENT_HASH`] `Event.Post` context.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SpawnRequest {
-    /// Name-registry hash of the template to spawn (resolved via the `0xDF6B88` family →
-    /// [[name-registry-spawn-by-hash]] on the engine side). 0 = "let the list pick" (data-driven).
-    pub template: u32,
+    /// The spawner's owner, list and rule — what the unit is chosen from.
+    pub choice: UnitChoice,
     /// Where to place the spawned unit — the spawner's world transform offset by its radius.
     pub transform: Transform,
-    /// Which faction spawn-list channel this request draws from.
-    pub faction: SpawnFaction,
     /// Which of the 8 spawner groups issued it (for `TweakAttachedSpawnersInGroup` targeting).
     pub group: u8,
     /// Emitting family.
     pub family: SpawnerFamily,
 }
 
-/// A `PopulationSimpleSpawner` pool instance — the recovered `+0x20…+0x8c` field layout as a struct.
-/// A timer-driven emitter: while not terminal, its `countdown` decrements by `dt`; on reaching zero it
-/// emits one [`SpawnRequest`] and reloads. This is the faithful mechanism the family updaters run over
-/// their instances; the *decision of which template* comes from the attached [`SkirmishSpawnList`]
-/// (data), not from a compiled body.
+/// A spawner instance: a timer-driven emitter. While not terminal, its `countdown` decrements by
+/// `dt`; on reaching zero it emits one [`SpawnRequest`] and reloads. The *decision of which template*
+/// is its [`UnitChoice`] over the shipped `PopulationList` data ([`crate::units`]).
 #[derive(Clone, Debug, PartialEq)]
 pub struct SimpleSpawner {
-    /// `+0x20` — this spawner's guid.
     pub guid: u32,
-    /// `+0x2c` — the `SpawnerAdjust` target this spawner answers to (0 = none).
-    pub adjust_target: u32,
-    /// `+0x58` — faction/list index: which spawn-list channel the emitted units belong to.
-    pub faction: SpawnFaction,
-    /// `+0x5c` — reload **interval** in seconds between spawns.
+    /// The owner (`+0x24`), `UnitList` and `UnitListWeighting` its units are chosen by
+    /// (`FUN_004E4150`).
+    pub choice: UnitChoice,
+    /// Seconds between spawns.
     pub interval: f32,
-    /// `+0x60` — **countdown** to the next spawn (seconds); decrements by `dt`.
+    /// Seconds to the next spawn; decrements by `dt`.
     pub countdown: f32,
-    /// `+0x6c` — **reload** value the countdown is reset to after a spawn (usually == `interval`).
+    /// The value the countdown is reset to after a spawn.
     pub reload: f32,
-    /// `+0x63/+0x64/+0x68` — the 3 raw type discriminators (fold to a `SimpleSpawnerType` category;
-    /// the fold is confirm-live, so kept raw — see [`SPAWNER_CATEGORY_COUNT`]).
     pub type_disc: [u8; 3],
-    /// `+0x78` — primary spawn/activation radius (× the runtime scale `DAT_00b97eec`).
+    /// Activation radius (`activation_radius_sq`).
     pub radius: f32,
-    /// `+0x7c` — secondary radius.
     pub radius2: f32,
-    /// `+0x89` — state byte; `== 5` ([`SPAWNER_STATE_TERMINAL`]) ⇒ exhausted/removed.
+    /// State byte (`+0x89`); [`SPAWNER_STATE_TERMINAL`] stops spawning.
     pub state: u8,
-    /// `+0x8b` — group index, `< 8` ([`SPAWNER_GROUP_COUNT`]).
+    /// `+0x8b` — the record's `SpawnerGroup` byte (`FUN_004E2840` `0x004E289A`), a
+    /// `SimpleSpawnerGroupEnum` value `< 16` ([`SPAWNER_GROUP_ENUM_COUNT`]); only groups
+    /// `< 8` ([`SPAWNER_GROUP_COUNT`]) answer a [`SpawnerAdjust`].
     pub group: u8,
-    /// `+0x8c` — "done" flag.
     pub done: bool,
     /// Which family updater owns this instance.
     pub family: SpawnerFamily,
@@ -130,8 +124,7 @@ impl Default for SimpleSpawner {
     fn default() -> Self {
         SimpleSpawner {
             guid: 0,
-            adjust_target: 0,
-            faction: SpawnFaction::Vz,
+            choice: UnitChoice::default(),
             interval: 1.0,
             countdown: 1.0,
             reload: 1.0,
@@ -148,25 +141,18 @@ impl Default for SimpleSpawner {
 }
 
 impl SimpleSpawner {
-    /// Whether the spawner has reached its terminal state (`+0x89 == 5`) and should be skipped/removed.
+    /// Whether the spawner is in state [`SPAWNER_STATE_TERMINAL`] (no further spawns).
     pub fn is_terminal(&self) -> bool {
         self.state == SPAWNER_STATE_TERMINAL
     }
 
-    /// This spawner's activation radius **squared**, in the horizontal (XZ) plane. The recovered
-    /// `UpdateSimpleSpawners` gate tests the player/viewport against `+0x78 radius` (× runtime scale
-    /// `DAT_00b97eec`, treated as 1 here — the scale is not statically recovered). When the authored
-    /// `+0x78` radius is present (`> 0`) it wins; otherwise the recovered Window-family default
-    /// [`WINDOW_RADIUS_SQ`] (160²) applies (code map §6).
-    ///
-    /// **CONFIRM-LIVE:** `register_population_spawners` does not yet load the per-instance `+0x78`
-    /// value, so in practice `radius == 0` and every spawner falls back to the 160² default. The
-    /// `radius > 0` branch is the faithful path for when that field is threaded in.
+    /// This spawner's activation radius **squared**, in the horizontal (XZ) plane: `radius²` when
+    /// `radius > 0`, else [`WINDOW_RADIUS_SQ`].
     fn activation_radius_sq(&self) -> f32 {
         if self.radius > 0.0 {
-            self.radius * self.radius // CONFIRM-LIVE: per-instance +0x78 authored radius (× DAT_00b97eec scale = 1)
+            self.radius * self.radius
         } else {
-            WINDOW_RADIUS_SQ // recovered 160² Window-family default
+            WINDOW_RADIUS_SQ
         }
     }
 
@@ -211,23 +197,12 @@ impl SimpleSpawner {
         // Fired: reload the timer and emit a request. Reload of 0 would busy-fire, so the terminal
         // "one-shot then done" spawner is expressed by state==5 / done, not a zero reload.
         self.countdown = self.reload;
-        Some(SpawnRequest {
-            // Slot→template resolution (CF-1): resolve this spawner's faction/list channel to a real,
-            // corpus-verified faction human template so the fired unit realizes a faction-correct
-            // Character, not the invisible `template 0` prop. (The exact per-slot crowd pick is the
-            // CONFIRM-LIVE runtime spawn-list `int[]` — see [`crate::slot_table`].) The vehicle
-            // channel has no human template → 0, which stays the veh-naming/prop path on the resolver.
-            template: crate::slot_table::faction_template_hash(self.faction),
-            transform: self.transform,
-            faction: self.faction,
-            group: self.group,
-            family: self.family,
-        })
+        Some(SpawnRequest { choice: self.choice, transform: self.transform, group: self.group, family: self.family })
     }
 }
 
-/// A cap-128 pending-spawn queue for one family (the `DAT_00dcc*` / cnt `DAT_00dcc*` pairs). Bounded
-/// exactly like the exe: once at [`SPAWN_QUEUE_CAP`], further enqueues are dropped, not overwritten.
+/// A pending-spawn queue for one family. Once at [`SPAWN_QUEUE_CAP`], further enqueues are dropped,
+/// not overwritten.
 #[derive(Default, Debug)]
 pub struct SpawnQueue {
     pending: Vec<SpawnRequest>,
@@ -272,8 +247,8 @@ pub struct SpawnerAdjust {
     pub group_mask: u8,
     /// New spawner state to write (`Some` ⇒ overwrite `+0x89`); `Some(5)` force-despawns (terminal).
     pub spawner_state: Option<u8>,
-    /// New spawn-list channel to switch attached spawners to (`Some` ⇒ overwrite `+0x58`).
-    pub spawn_list: Option<SpawnFaction>,
+    /// New `PopulationList` to switch attached spawners to (`Some` ⇒ overwrite their `UnitList`).
+    pub spawn_list: Option<u32>,
     /// Reset each matched spawner's countdown to fire immediately (force-respawn).
     pub force_respawn: bool,
 }
@@ -358,15 +333,15 @@ impl SimpleSpawnerManager {
     pub fn apply_adjust(&mut self, adjust: &SpawnerAdjust) -> u32 {
         let mut touched = 0;
         for sp in self.spawners.iter_mut() {
-            debug_assert!(sp.group < SPAWNER_GROUP_COUNT);
-            if adjust.group_mask & (1u8 << sp.group) == 0 {
+            // `FUN_004E2480`: a group past 7 is never in the 8-bit mask (`cmp ecx,7; ja`).
+            if sp.group >= SPAWNER_GROUP_COUNT || adjust.group_mask & (1u8 << sp.group) == 0 {
                 continue;
             }
             if let Some(state) = adjust.spawner_state {
                 sp.state = state;
             }
             if let Some(list) = adjust.spawn_list {
-                sp.faction = list;
+                sp.choice.unit_list = list;
             }
             if adjust.force_respawn {
                 sp.countdown = 0.0;
@@ -377,12 +352,6 @@ impl SimpleSpawnerManager {
         touched
     }
 }
-
-/// `Ai.SetSpawnList`'s change log (code map §7): the engine keeps a **256-entry** log of spawn-list
-/// changes and answers `GetSpawnListChangeInfo` from a **64-row** query window. Both are the recovered
-/// capacities (Xbox 0x100 / 0x40; PC shape matches). Modeled here as the two caps for the reimpl seam.
-pub const SPAWN_LIST_CHANGE_LOG_CAP: usize = 256;
-pub const SPAWN_LIST_CHANGE_QUERY_ROWS: usize = 64;
 
 /// Look up a template from a [`SkirmishSpawnList`] slot (the data-authored table a spawner draws from).
 /// Returns the raw slot int; interpreting it (unit/count/faction index) is content-authored, so this is
@@ -402,10 +371,12 @@ mod tests {
             reload: interval,
             family,
             group,
-            faction: SpawnFaction::Vz,
+            choice: CHOICE,
             ..SimpleSpawner::default()
         }
     }
+
+    const CHOICE: UnitChoice = UnitChoice { owner: 0x8000_0001, unit_list: 0x8000_0100, weighting: 1 };
 
     /// Recovered spawner constants.
     #[test]
@@ -417,8 +388,6 @@ mod tests {
         assert_eq!(SPAWNER_CATEGORY_COUNT, 4);
         assert_eq!(SPAWN_QUEUE_CAP, 128);
         assert_eq!(WINDOW_RADIUS_SQ, 160.0 * 160.0);
-        assert_eq!(SPAWN_LIST_CHANGE_LOG_CAP, 256);
-        assert_eq!(SPAWN_LIST_CHANGE_QUERY_ROWS, 64);
         assert_eq!(SpawnerFamily::ALL.len(), 4);
     }
 
@@ -432,7 +401,7 @@ mod tests {
         assert!(sp.update(0.4, &HERE).is_none(), "0.4s < 1.0s interval");
         assert!(sp.update(0.4, &HERE).is_none(), "0.8s total, still under");
         let req = sp.update(0.4, &HERE).expect("2 ticks past 1.0s should fire");
-        assert_eq!(req.faction, SpawnFaction::Vz);
+        assert_eq!(req.choice, CHOICE, "the request carries the spawner's unit choice");
         assert_eq!(req.family, SpawnerFamily::Window);
         assert!((sp.countdown - 1.0).abs() < 1e-6, "reloaded to interval");
         assert!(sp.update(0.5, &HERE).is_none(), "just reloaded — no immediate refire");
@@ -481,7 +450,7 @@ mod tests {
         assert!(!sp.within_activation_radius(&[Vec3::new(350.0, 0.0, 50.0)]));
     }
 
-    /// The per-instance `+0x78` radius overrides the 160² default when authored (`> 0`).
+    /// The per-instance radius overrides the 160² default when set (`> 0`).
     #[test]
     fn spawner_uses_per_instance_radius_when_authored() {
         // radius 50 m (radius² 2500): a viewport 100 m away is OUT of range, even though 100 m is
@@ -494,28 +463,6 @@ mod tests {
         assert!(sp.update(1.0, &HERE).is_none(), "100 m > 50 m authored radius → dormant");
         // Viewport 40 m away → inside the authored 50 m → fires.
         assert!(sp.update(1.0, &[Vec3::new(60.0, 0.0, 0.0)]).is_some(), "40 m < 50 m → fires");
-    }
-
-    /// CF-1: a fired spawner resolves its faction channel to a REAL, non-zero template (not the old
-    /// literal `0`), and the template matches `slot_table`'s per-channel resolution — so the request
-    /// realizes a faction-correct Character downstream, not the invisible template-0 prop.
-    #[test]
-    fn fired_spawner_resolves_a_nonzero_faction_template() {
-        for f in [
-            SpawnFaction::Vz,
-            SpawnFaction::Gur,
-            SpawnFaction::Pir,
-            SpawnFaction::Ped,
-        ] {
-            let mut sp = SimpleSpawner {
-                faction: f,
-                ..spawner(1.0, SpawnerFamily::NoModel, 0)
-            };
-            let req = sp.update(1.0, &HERE).expect("crosses the 1.0s interval");
-            assert_ne!(req.template, 0, "{f:?} spawner must emit a real template, not 0");
-            assert_eq!(req.template, crate::slot_table::faction_template_hash(f));
-            assert_eq!(req.faction, f);
-        }
     }
 
     /// A terminal (state 5) spawner never fires.
@@ -531,13 +478,7 @@ mod tests {
     #[test]
     fn queue_caps_at_128() {
         let mut q = SpawnQueue::default();
-        let req = SpawnRequest {
-            template: 0,
-            transform: Transform::IDENTITY,
-            faction: SpawnFaction::Ped,
-            group: 0,
-            family: SpawnerFamily::NoModel,
-        };
+        let req = SpawnRequest { choice: CHOICE, transform: Transform::IDENTITY, group: 0, family: SpawnerFamily::NoModel };
         for _ in 0..SPAWN_QUEUE_CAP {
             assert!(q.push(req));
         }
@@ -576,19 +517,32 @@ mod tests {
         mgr.register(spawner(1.0, SpawnerFamily::Window, 3)).unwrap(); // group 3
         mgr.register(spawner(1.0, SpawnerFamily::Window, 5)).unwrap(); // group 5
 
-        // Target only group 3 → despawn (state 5) + switch to the Guerilla list.
+        // Target only group 3 → despawn (state 5) + switch to "Spawnlist (Guerilla Ground)".
         let adjust = SpawnerAdjust {
             group_mask: 1 << 3,
             spawner_state: Some(SPAWNER_STATE_TERMINAL),
-            spawn_list: Some(SpawnFaction::Gur),
+            spawn_list: Some(0x8000_720A),
             force_respawn: false,
         };
         assert_eq!(mgr.apply_adjust(&adjust), 1, "only the group-3 spawner matches");
         let s = mgr.spawners();
         assert!(!s[0].is_terminal());
         assert!(s[1].is_terminal());
-        assert_eq!(s[1].faction, SpawnFaction::Gur);
+        assert_eq!(s[1].choice.unit_list, 0x8000_720A);
+        assert_eq!(s[0].choice.unit_list, CHOICE.unit_list);
         assert!(!s[2].is_terminal());
+    }
+
+    /// A spawner in group G1…G8 (8..15) answers no adjust, not even an all-groups mask.
+    #[test]
+    fn spawner_adjust_skips_groups_past_seven() {
+        let mut mgr = SimpleSpawnerManager::new();
+        mgr.register(spawner(1.0, SpawnerFamily::Window, 8)).unwrap(); // G1
+        mgr.register(spawner(1.0, SpawnerFamily::Window, 7)).unwrap(); // Window
+        let adjust = SpawnerAdjust { spawner_state: Some(SPAWNER_STATE_TERMINAL), ..SpawnerAdjust::default() };
+        assert_eq!(mgr.apply_adjust(&adjust), 1, "only the group-7 spawner matches mask 0xFF");
+        assert!(!mgr.spawners()[0].is_terminal());
+        assert!(mgr.spawners()[1].is_terminal());
     }
 
     /// Force-respawn zeroes the countdown so the next update fires immediately.

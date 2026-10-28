@@ -507,8 +507,13 @@ pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
     let h = host.clone();
     // ⚠ Takes a SLOT INDEX (`mrxplayer.lua:117 Player.CreatePlayer(i)` over `0..GetMaximumPlayers()-1`),
     // and is idempotent — that loop runs against an already-populated roster at Init.
+    // A new record's player object takes the next runtime key; an occupied slot or one past the cap
+    // takes none.
     b.real("CreatePlayer", lua.create_function(move |_, slot: Option<i64>| {
-        Ok(guid_opt(wm(&h, 0, |w| w.roster.create(slot.unwrap_or(0).max(0) as u32))))
+        let slot = slot.unwrap_or(0).max(0) as u32;
+        let empty = (slot as usize) < mercs2_player::ROSTER_CAP && wr(&h, false, |w| w.roster.get(slot).is_none());
+        let key = empty.then(|| h.borrow_mut().mint_runtime_key());
+        Ok(guid_opt(wm(&h, 0, |w| w.roster.create(slot, || key.expect("a key was minted for the empty slot")))))
     })?)?;
     let h = host.clone();
     // ⚠ Also a slot index (`mrxplayer.lua:125`, the mirror of the Init loop).

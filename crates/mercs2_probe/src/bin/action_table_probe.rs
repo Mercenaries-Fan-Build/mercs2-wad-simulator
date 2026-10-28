@@ -463,14 +463,11 @@ fn main() {
     let atget = |row: usize, ci: usize| r_u32(&cont, vstart + (row * total_dims + ci) * 4);
     let atrows = (vsz / 4) / total_dims;
 
-    let (_, lk) = animation_tables(&dec3185).into_iter().find(|(nh, _)| *nh == 0xE00B080C).unwrap();
-    let (_, ltd, _, lnames, lvalu) = parse_table(&lk).unwrap();
-    let (lvs, lvz) = lvalu.unwrap();
-    let lcol = |n: &str| lnames.iter().position(|x| x.eq_ignore_ascii_case(n)).unwrap();
-    let (l_h, l_cn, l_an) = (lcol("Handle"), lcol("CharacterName"), lcol("Animation"));
-    let lget = |row: usize, ci: usize| r_u32(&lk, lvs + (row * ltd + ci) * 4);
-    let lrows = (lvz / 4) / ltd;
-    let (_, asto_s, asto_z) = chunks(&lk).into_iter().find(|(t, _, _)| t == b"ASTO").unwrap();
+    // The lookup through the engine's parser: `Animation` cells point at `[count][clips]` lists.
+    let sel = mercs2_formats::anim_select::AnimSelector::from_resident_block(&dec3185)
+        .unwrap_or_else(|e| panic!("block 3185: {e}"))
+        .expect("block 3185 carries the AnimationLookup");
+    let hex_list = |clips: &[u32]| clips.iter().map(|c| format!("0x{c:08X}")).collect::<Vec<_>>().join(",");
 
     let _ = &other_keys;
     // Build Handle -> set of Actions for Upright-stance rows (keyDims=6, so Action is a key col).
@@ -493,33 +490,18 @@ fn main() {
     for (nm, action) in [("idle", 0xB4DA003Bu32), ("walk", 0x5607E14E), ("run", 0x41332AA0), ("jog", 0x84FFBF2B)] {
         for r in (0..atrows).filter(|&r| atget(r, c_action) == action) {
             let h = atget(r, c_ah);
-            // resolve this handle for each merc + the none default
-            let resolve = |cval: u32| (0..lrows).find(|&lr| lget(lr, l_h) == h && lget(lr, l_cn) == cval)
-                .and_then(|lr| { let o = asto_s + lget(lr, l_an) as usize * 4; (o + 4 <= asto_s + asto_z).then(|| r_u32(&lk, o)) });
+            // every clip this handle's rows list for each merc + the none default
+            let rows = sel.lookup_rows(h);
+            let resolve = |cval: u32| {
+                let clips: Vec<u32> = rows.iter().filter(|r| r.character == cval).flat_map(|r| r.clips.iter().copied()).collect();
+                (!clips.is_empty()).then(|| hex_list(&clips))
+            };
             let dirs: Vec<usize> = ["AimState", "ActionDirection"].iter().map(|n| atcol(n)).collect();
             let ctx: Vec<String> = dirs.iter().map(|&c| format!("0x{:04X}", atget(r, c) & 0xffff)).collect();
             println!("  '{nm}' row: Stance={} Handle=0x{h:08X} [aim,dir]={ctx:?} | mattias={:?} chris={:?} jen={:?} none={:?}",
                 stance_name(atget(r, c_stance)),
-                resolve(0x030E6C38).map(|c| format!("0x{c:08X}")), resolve(0xD64BB122).map(|c| format!("0x{c:08X}")),
-                resolve(0xF3144C8E).map(|c| format!("0x{c:08X}")), resolve(NONE_SENTINEL).map(|c| format!("0x{c:08X}")));
+                resolve(0x030E6C38), resolve(0xD64BB122), resolve(0xF3144C8E), resolve(NONE_SENTINEL));
         }
-    }
-    // Resolve the validated primary-idle handle 0x700D4DE0 for each merc (idle-cluster head).
-    println!("\n== primary-idle handle 0x700D4DE0 per merc ==");
-    for (merc, cval) in [("mattias", 0x030E6C38u32), ("chris", 0xD64BB122), ("jennifer", 0xF3144C8E)] {
-        let clip = (0..lrows).find(|&lr| lget(lr, l_h) == 0x700D4DE0 && lget(lr, l_cn) == cval)
-            .and_then(|lr| { let o = asto_s + lget(lr, l_an) as usize * 4; (o + 4 <= asto_s + asto_z).then(|| r_u32(&lk, o)) });
-        println!("  [{merc:8}] 0x700D4DE0 -> {:?}", clip.map(|c| format!("0x{c:08X}")));
-    }
-
-    // Validate the SHIPPED resolver the engine now uses (mercs2_formats::anim_select).
-    println!("\n== mercs2_formats::anim_select::AnimSelector (engine code path) ==");
-    match mercs2_formats::anim_select::AnimSelector::from_resident_block(&dec3185) {
-        Some(sel) => for merc in ["mattias", "chris", "jennifer"] {
-            let cn = mercs2_formats::anim_select::AnimSelector::character_name(merc);
-            println!("  {merc:8} (0x{cn:08X}) idle -> {:?}", sel.primary_idle(cn).map(|c| format!("0x{c:08X}")));
-        },
-        None => println!("  from_resident_block(3185) = None"),
     }
 
     println!("\n== per-merc Upright action distribution (Handle->Action, clip counts) ==");
@@ -528,20 +510,15 @@ fn main() {
         let _ = &clips;
         let mut by_action: std::collections::BTreeMap<u32, BTreeSet<u32>> = Default::default();
         let mut unmatched = 0;
-        for lr in 0..lrows {
-            if lget(lr, l_cn) != cval { continue; }
-            let h = lget(lr, l_h);
-            let o = asto_s + lget(lr, l_an) as usize * 4;
-            if o + 4 > asto_s + asto_z { continue; }
-            let clip = r_u32(&lk, o);
-            match handle_actions.get(&h) {
-                Some(acts) => for a in acts { by_action.entry(*a).or_default().insert(clip); },
+        for cc in sel.character_clips(cval) {
+            match handle_actions.get(&cc.handle) {
+                Some(acts) => for a in acts { by_action.entry(*a).or_default().insert(cc.clip); },
                 None => unmatched += 1,
             }
         }
         let mut sorted: Vec<_> = by_action.iter().collect();
         sorted.sort_by_key(|(_, cs)| std::cmp::Reverse(cs.len()));
         let summ: Vec<String> = sorted.iter().take(12).map(|(a, cs)| format!("{}={}", action_name(**a), cs.len())).collect();
-        println!("  [{merc:8}] {} actions, {unmatched} rows w/ non-Upright handle | {}", by_action.len(), summ.join(" "));
+        println!("  [{merc:8}] {} actions, {unmatched} clips w/ non-Upright handle | {}", by_action.len(), summ.join(" "));
     }
 }

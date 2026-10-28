@@ -291,10 +291,25 @@ pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
     let h = host.clone();
     b.real("StartSingleplayer", lua.create_function(move |_, _: MultiValue| { h.borrow_mut().sys_start_singleplayer(); Ok(()) })?)?;
 
+    // `Sys.RequiredAsset(sName, sType, iPriority, b)`. A `"layer"` is a layer load request: this is
+    // how the level's `<LevelName>_base` layer goes live at level start (`levelbootstrap.lua:14`). It
+    // is not loaded dynamically — no RuntimeLayerId rows, and the teardown can remove it only while
+    // `Pg.UnloadingStaticLayers` is set (`xQ!L.lua:618-620`). Other asset types stay recorded.
+    let h = host.clone();
+    b.real("RequiredAsset", lua.create_function(move |_, args: MultiValue| {
+        let sa: Vec<String> = args.iter().map(super::stringify_arg).collect();
+        if sa.get(1).map(String::as_str) == Some("layer") {
+            h.borrow_mut().layer_request("Load", &sa[0], false);
+        } else {
+            h.borrow_mut().script_cmd("Sys.RequiredAsset", sa);
+        }
+        Ok(())
+    })?)?;
+
     // --- UNBACKED residue (burn-down): asset-preload/streaming controls + string-DB + intro movies +
     // mission-skip need the asset/streaming + localization subsystems. Honest no-ops. ---
     super::record_all(&mut b, lua, host, "Sys", &[
-        "RequiredAsset", "Callback", "SetSkipMission", "SetINIBriefing", "DisableAssetPreload",
+        "Callback", "SetSkipMission", "SetINIBriefing", "DisableAssetPreload",
         "FlushAssets", "PlayIntroMovies", "AddStringDb", "ClearStringDb", "ForceNextAutosave",
     ])?;
 

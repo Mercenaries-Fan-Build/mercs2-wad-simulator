@@ -60,9 +60,9 @@ the engine, the system takes a `&dyn`, and no leaf→leaf edge appears.
 
 ## Faithfulness caveats — read before trusting output
 
-- **The node-enable seed is not ground truth.** `NodeSeed`'s variants are a choice validated against
-  real models; the engine constructor's `memset` sits behind a register alias in the decomp
-  (`model_render_gate_spec.md` §6). Everything here inherits that caveat.
+- **The node-enable table** is retail's state machine (`orchestrator::machine_node_enable`,
+  `docs/reverse_engineer/hibernation_grid.md` §2): `InitState`, then each node's chosen state entered
+  directly — the intermediate states a damage path passes through are not replayed.
 - **The health→message band thresholds are ours**, not the engine's. Retail posts real damage
   messages with live HP math we have not recovered. `DamageBands` makes that approximation explicit
   and tunable rather than burying a magic number.

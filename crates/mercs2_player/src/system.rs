@@ -110,7 +110,7 @@ mod tests {
     #[test]
     fn the_roster_system_tolerates_a_roster_without_entities() {
         let world = World::new();
-        let mut player = PlayerWorld::single_player();
+        let mut player = PlayerWorld::single_player(0x4000_0001);
         crate::possession::attach_to_character(&mut player.roster, 0, 0x1234, Default::default());
         assert_eq!(player_roster_system(&world, &mut player, |_| None, 1.0 / 60.0), 0);
         assert_eq!(player.roster.current_players(), 1, "the roster is untouched");
@@ -122,7 +122,7 @@ mod tests {
     fn pass_b_reports_boundary_death_and_the_tick_gate_suppresses_it() {
         let mut world = World::new();
         let e = world.spawn((Health { cur: 0.0, max: 100.0 },));
-        let mut player = PlayerWorld::single_player();
+        let mut player = PlayerWorld::single_player(0x4000_0001);
         crate::possession::attach_to_character(&mut player.roster, 0, 0x1234, Default::default());
         let resolve = |g: u64| (g == 0x1234).then_some(e);
 

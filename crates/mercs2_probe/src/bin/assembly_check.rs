@@ -89,7 +89,7 @@ fn main() {
             let node_enable = match &m.machine {
                 Some(sm) => {
                     let chosen = orch::node_states_for_health(sm, health, 0.99);
-                    orch::machine_node_enable(sm, &m.hier, &chosen)
+                    orch::machine_node_enable(sm, &m.hier, &chosen).unwrap_or_else(|e| panic!("{e}"))
                 }
                 None => Vec::new(),
             };

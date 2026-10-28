@@ -184,3 +184,72 @@ fn the_c4_template_and_the_key_ranges() {
     let pl = we.groups_of("PointLocation").next().unwrap();
     assert!(matches!(&pl.records[0].payload, Payload::PointLocation { text, .. } if text.is_empty()));
 }
+
+/// Every template `PopulationSimpleSpawner` record reads by field name through its schema; the
+/// `_aloutpost_bld_guardtowershort` template (`0x80004DE2`) carries the guard-tower spawner its
+/// `mercs2_probe we-template --class PopulationSimpleSpawner` row shows.
+#[test]
+fn template_spawner_records_read_by_name() {
+    use mercs2_formats::spawner_record::{template_spawner_records, SpawnerRecord};
+    let (_, c) = retail_worldentity();
+    let we = WorldEntity::parse(&c).expect("typed parse");
+    let all = template_spawner_records(&we).unwrap_or_else(|e| panic!("{e}"));
+    let total: usize = we.groups_of("PopulationSimpleSpawner").map(|g| g.records.len()).sum();
+    assert_eq!(total, 575, "575 template records");
+    assert_eq!(
+        all[&0x8000_4DE2],
+        [SpawnerRecord {
+            position: [0.0; 3],
+            rotation: [0.0, 0.0, 0.0, 1.0],
+            spawner_name: 0x24CE_BC21,
+            hard_point: 0xEBBF_5043,
+            door: 0,
+            unit_list: 0x8000_B00D,
+            squad_name: 0,
+            seconds_per_cycle: 10.0,
+            escape_radius: 40.0,
+            active_radius: 100.0,
+            path_spacing: 0.0,
+            wakeup_effect: 0,
+            unit_list_weighting: 1,
+            radius_type: 1,
+            default_state: 1,
+            spawner_type: 2,
+            group: 3,
+            skip_percent_chance: 0,
+            max_skips: 0,
+            max_no_skips: 0,
+            chance_not_active: 0,
+            chance_to_deactivate: 0,
+            wakeup_fixed_countdown: 0,
+            wakeup_random_countdown: 0,
+            path_count: 0,
+            ignore_model: 0,
+            window_spawner: 0,
+            traffic_spawner: 0,
+        }]
+    );
+}
+
+/// Every template's `HumanAnimationSet` decodes as `{gender, character}` — the layout read live in a
+/// retail capture (container `0x017BCD18`). The three hero templates the boot spawns by name carry
+/// the `Hero` gender and their own CharacterName, the key the AnimationLookup is joined on.
+#[test]
+fn hero_templates_carry_their_animation_identity() {
+    use mercs2_formats::anim_select::{human_animation_sets, AnimIdentity};
+    use mercs2_formats::hash::pandemic_hash_m2 as m2;
+    let (_, c) = retail_worldentity();
+    let we = WorldEntity::parse(&c).expect("typed parse");
+    let sets = human_animation_sets(&we).expect("HumanAnimationSet decodes");
+    let names = we.names().expect("names");
+    for (template, character) in [("mattias", "mattias"), ("chris", "chris"), ("jen", "jennifer")] {
+        let keys: Vec<u32> = names.iter().filter(|(n, _)| n.eq_ignore_ascii_case(template)).flat_map(|(_, k)| k.iter().copied()).collect();
+        assert_eq!(keys.len(), 1, "template {template:?} names one key: {keys:X?}");
+        assert_eq!(
+            sets.get(&keys[0]),
+            Some(&AnimIdentity { gender: m2("Hero"), character: m2(character) }),
+            "template {template:?} 0x{:08X}",
+            keys[0]
+        );
+    }
+}

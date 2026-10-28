@@ -37,7 +37,7 @@ Each module states the oracle it was derived from; in the crate's own words:
 | `event` (Keystone B) | The one shared GUI/Net/AI event bus: `ToggleHud @8255e488` and `NetEventCallback @825d3ce8` marshal through the same quartet (`FUN_8241d458` → `FUN_82878c50` → `FUN_82420690` → `FUN_8256eb28`). Verified: 32-bit name-hash identity, 4 typed arg kinds, argc ≤ 7, 2048-slot frame cap. |
 | `frame` (Keystone C) | RunFrame `FUN_00630ef0` (9 stages) + the master tick `FUN_004c14f0 → FUN_004c15e0` (5-slot layer stack ticked 0→4, init `FUN_004c1170`, `DAT_017bbcf4 = 5`, target `DAT_017bbcfc = 4`). `docs/reverse_engineer/scheduler_tick_code_map.md`. |
 | `Time` | The decoupled fixed-sim + variable-render split, RunFrame stages 3–4; `dt * timescale` (`_DAT_0198dc48 += dt*timescale`, `FUN_004c14f0`). |
-| `streaming` | The world-streaming decision layer: per-entity `HibernationControl` distances (`FUN_00640a40`, class defaults 100/160/60/20), the global LOD-budget governor `FUN_0084ae70`, and the PgSysPopulation region cache-in/out. `docs/modernization/world_streaming_spec.md` §10, `world_streaming_code_map.md`. |
+| `streaming` | The world-streaming decision layer: block residency and the PgSysPopulation region cache-in/out. `docs/modernization/world_streaming_spec.md` §10, `world_streaming_code_map.md`. |
 | `guidmap` | The engine's resident guidmap singleton (`0x385EA82C`) that `Pg.GetGuidByName` / `Object.*` resolve against. |
 | `physics_query` | The engine's shared query layer: `hkpWorldRayCaster` / `CastRay`, `LthkpWorld::getClosestPoints` (`FUN_008db880`), the `hkpCharacterProxy` swept-capsule controller (`HumanPhysics::Activate` builder `FUN_004255c0`). `docs/reverse_engineer/physics_code_map.md` §3/§4. |
 | `object_filter` | The `ObjectFilter.*` Lua namespace; the label boolean-expression grammar is recovered verbatim from the shipped mission scripts. |
@@ -53,7 +53,8 @@ exe's router collapses to unrecovered stubs).
 use mercs2_core::{
     event::{Event, EventArg, EventBus},
     frame::{LayerStack, LAYER_GAME},
-    streaming::{BlockUnit, Extent2, EntityUnit, StreamingConfig, StreamingManager},
+    hibernation::{HibernationGrid, HibernationScale, Registration, Viewer, DEFAULT_RINGS, MAX_VIEWERS},
+    streaming::{BlockUnit, Extent2, StreamingConfig, StreamingManager},
     ModelRef, Schedule, Time, Transform, World,
 };
 use mercs2_core::glam::Vec3;
@@ -89,9 +90,17 @@ mgr.add_block(BlockUnit {
     stream_out: 700.0,
     always_resident: false,
 });
-mgr.add_entity(EntityUnit { key: 1, pos: [3800.0, 451.0, -3900.0], dist: [100, 160, 60, 20] });
-let diff = mgr.update([3794.0, 451.0, -3911.0]);   // load_blocks / unload_blocks / wake / hibernate / tier_changes
+let diff = mgr.update([3794.0, 451.0, -3911.0]);   // load_blocks / unload_blocks
 assert!(diff.load_blocks.contains(&3490));
+
+// 5. The hibernation grid: register entities, set the viewers each frame, read the wake/sleep events.
+let mut grid = HibernationGrid::new(HibernationScale::single_player());
+grid.insert(&Registration { key: 1, position: [3800.0, 451.0, -3900.0], distance: 100, rings: DEFAULT_RINGS, base: 0, is_static: true }, false);
+let mut viewers = [None; MAX_VIEWERS];
+viewers[0] = Some(Viewer { position: [3794.0, 451.0, -3911.0], local: true });
+grid.set_viewers(viewers);
+let events = grid.step();                          // {key, old, new}: viewer mask + ring tier
+assert!(events.iter().any(|e| e.key == 1 && e.mask_changed()));
 ```
 
 `steps` is the number of fixed sim steps executed this frame; a host that runs its own fixed-step body
@@ -105,10 +114,12 @@ instead of a `Schedule` calls `Time::advance_frame(real_dt)` and loops that many
 | `registry` | Keystone A — `ComponentRegistry` / `ComponentDescriptor` / `FieldLayout` / `FieldKind`: component classes keyed by type-hash, with `cdbsizes.ini` pool budgets (`load_budgets`) and the reflected field schema. |
 | `event` | Keystone B — `EventBus` / `Event` / `EventArg` / `SubId`: name-hash pub/sub, ≤7 typed args (`MAX_EVENT_ARGS`), immediate `emit` plus a bounded deferred queue (`DEFAULT_QUEUE_CAP` = 2048) drained by `dispatch_all`. |
 | `frame` | Keystone C — `LayerStack` / `LayerTransition` / `LAYER_COUNT` / `LAYER_GAME`: the 5-slot application-layer stack, index-only (the per-layer `Update` bodies live in the host). |
-| `streaming` | The world-streaming decision core: `StreamingManager` → `StreamDiff` (block residency, entity wake/hibernate, LOD tiers), `GlobalLodGovernor`, `RegionCache`, `lod_tier`, `DEFAULT_DISTANCES`. |
-| `guidmap` | `GuidMap`: name-hash → `Entity` and guid ↔ `Entity`, plus the reserved `HERO_GUID` / `LOCAL_PLAYER_GUID` handles and `FIRST_DYNAMIC_GUID` mint base. |
+| `streaming` | The world-streaming decision core: `StreamingManager` → `StreamDiff` (block residency), `RegionCache`. |
+| `hibernation` | Retail's hibernation grid (`docs/reverse_engineer/hibernation_grid.md`): `HibernationGrid` / `Registration` / `HibernationEvent`, `HibernationScale`, `quantize`, `evaluate`, `wake_decisions` (the event consumer's order), `node_input` (the render-node re-cell input). |
+| `activation` | Retail's entity activation and pending queue: `ActivationQueue` (`activate` / `deactivate` / `pump`) over an `ActivationHost`. |
+| `guidmap` | `GuidMap`, the entity-key world a script guid addresses: the name index (first registration wins), SceneObject rows (`SceneRow`: transform, template, activation state), key ↔ `Entity` links, the runtime key counter (`RUNTIME_KEY_BASE` = `0x40000000`, post-increment), layer records and their requests (`LayerRecord`, `LayerOp`, status-polled completion), RuntimeLayerId, and LandingZone rows. |
 | `object_filter` | `ObjectFilter` / `ObjectFilterRegistry` / `eval_label_expr`: the `ObjectFilter.*` label boolean-expression + include/exclude sets, minted through a handle registry. |
-| `render_state` | `RenderState` and its `AtmosphereState` / `BloomState` / `GraphicsState` / `FadeState` sub-states — the parameters the presentation Lua sets and the render passes read. |
+| `render_state` | `RenderSettings` and its `AtmosphereState` / `BloomState` / `GraphicsState` / `FadeState` sub-states — the parameters the presentation Lua sets and the render passes read. |
 | `physics_query` | The `PhysicsQuery` trait + `RayHit` / `ClosestPoint`: the collision-query contract the sim systems compile against instead of depending on `mercs2_physics`. |
 
 ## Notes / gotchas
@@ -118,20 +129,14 @@ instead of a `Schedule` calls `Time::advance_frame(real_dt)` and loops that many
   `mercs2_formats` so there is a single implementation and no drift. Callers pass the hash in.
 * **Registration order is the tick order.** `Schedule` intentionally has no dependency solver — an
   auto-scheduler would reorder work away from the oracle.
-* **Two different LOD tiers compose.** The per-entity `HibernationControl` tier (`lod_tier`, class
-  defaults 100/160/60/20) is distinct from the global memory-pressure LOD-budget tier
-  (`GlobalLodGovernor`, engine `FUN_0084ae70`); the global tier acts as a *coarseness floor* on the
-  per-entity tier inside `StreamingManager::update`.
 * **c3 "tier" is a size index, not a LOD level.** `StreamingConfig::tier_stream_out` is indexed by
   the c3 chain tier, which is loose-quadtree *depth* ≈ object size (big landmarks bucket shallow,
   small props deep) — not a detail level of a shared surface.
-* **Streaming throttles only the additive direction.** `block_budget` / `entity_budget` cap loads and
-  wakes per update; unloads and hibernations are never throttled.
+* **Streaming throttles only the additive direction.** `block_budget` caps loads per update; unloads
+  are never throttled.
 * **Event-bus overflow is dropped, never blocked.** A full deferred queue increments
   `dropped_count()`; `EmitBuilder::arg` past the 7-arg cap drops the arg and sets `overflowed()`
   (use `Event::try_push` when you want a hard `Err`).
 * `DEFERRED.md` lists the non-blocking gaps deliberately left open (region-catalog wiring, the full
-  population spawner, live-captured LOD-budget thresholds, the 8-vs-64 kept-ring discrepancy). Each
+  population spawner, the 8-vs-64 kept-ring discrepancy). Each
   is tagged with whether it is a faithfulness blocker.
-</content>
-</invoke>

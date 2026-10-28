@@ -98,7 +98,7 @@ mod tests {
     use crate::roster::PlayerRoster;
 
     fn possessed(character: u64) -> PlayerRoster {
-        let mut r = PlayerRoster::single_player();
+        let mut r = PlayerRoster::single_player(0x4000_0001);
         attach_to_character(&mut r, 0, character, CheatFlags::default());
         r
     }
@@ -124,7 +124,7 @@ mod tests {
     /// A miss is `false`, never a panic, so the binding can push nil and keep `if ... then` working.
     #[test]
     fn an_unresolvable_character_is_a_miss_not_a_panic() {
-        let mut r = PlayerRoster::single_player();
+        let mut r = PlayerRoster::single_player(0x4000_0001);
         let mut cbs = CallbackRegistry::default();
         assert!(!apply(&mut r, DisguiseRequest { character: 0xBAD, remove: false }, 0, &mut cbs));
     }
