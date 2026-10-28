@@ -44,7 +44,7 @@ mercs2_formats = { workspace = true }
 mercs2_ai = { workspace = true }
 
 # EmmyLua / lua-language-server stub generator — an in-crate view of `bindings::NAMESPACES`, so a
-# Shipment author gets IDE autocomplete on the whole 1086-cfunc surface. Lives here because the
+# Shipment author gets IDE autocomplete on the whole 1092-cfunc surface. Lives here because the
 # data source IS this crate: the drift-alarm test that pins `NAMESPACES` to `install_all`'s output
 # is an in-crate invariant. See `src/stubs.rs`.
 [[bin]]
