@@ -188,16 +188,36 @@ folder is found in this order (`index::data_home`, over `chains::data`):
 6. the copy downloaded into the user's cache directory (`fetch::installed_dir`)
 
 Steps 1–3 are set by a person: one that is not a complete bundle is an error naming it, never passed
-over for a later step. When nothing is set and nothing is found, the workshop downloads
-`mercs2-workshop-data.zip` from the latest release and installs it as step 6
-(`index::require_data_home`). When that fails too, the run stops with an
-error giving the release page and the folder to unpack the zip into. A complete bundle missing
-`audio_manifest.json`, or holding a malformed one, stops the boot with an error naming the file.
+over for a later step. When nothing is set and nothing is found, the workshop downloads the pinned
+`mercs2-workshop-data.zip` and installs it as step 6 (`index::require_data_home`); the Settings
+page's Download button runs the same install. The
+pin is `fetch::PINNED`, read at compile time from the `BUNDLE_URL=` and `BUNDLE_SHA256=` lines of
+`data/workshop_data_pin.env`. `.github/workflows/ci.yml` sources the same file to download the
+bundle for the corpus gates, so moving the pin is an edit to those two lines alone. A pin file
+without exactly one of each line, a URL other than
+`https://github.com/Mercenaries-Fan-Build/mercs2-wad-simulator/releases/download/<tag>/mercs2-workshop-data.zip`,
+or a digest other than 64 lowercase hex digits stops the build. The install downloads that URL and
+nothing else, and checks the archive's sha256 against `BUNDLE_SHA256` before unpacking; a mismatch
+stops the install with both digests, unpacks nothing, and leaves the installed copy as it was. A
+staging folder or installed copy the install cannot remove stops it with an error naming the folder
+and the removal. The installed copy is renamed aside to `workshop_data.previous` before the new one
+is moved in, and removed only after: when the move fails, the previous copy is renamed back and the
+error says it was kept, or names both failures and where the previous copy is. When
+the download fails, the run stops with an error giving the URL, its sha256 and the folder to unpack
+the zip into. A complete bundle missing `audio_manifest.json`, or holding a malformed one, stops the
+boot with an error naming the file.
+
+The install writes the pin it checked into the bundle as `installed_pin.env`, and step 6 uses the
+downloaded copy only when that record names the pin's URL and sha256 (`fetch::installed_pin_mismatch`).
+A copy without the record (unpacked into the cache by hand, or installed from the latest release by
+an earlier build) or with another pin is passed over: with nothing above it, the boot replaces it
+through the pinned install, and the lookup's error and the boot log say why it was not used.
 
 The corpus gates in `lua_source`, `blueprint` and `missions` run over the bundle's Lua and are
-pinned to release v0.17.0's bundle (`index::PINNED_CORPUS`: 675 scripts in `lua/`, 39 in
-`lua_dlc/`), the one CI downloads. A different bundle fails them on the count: re-download the
-bundle from Settings, or point `MERCS2_WORKSHOP_DATA` at an unpacked v0.17.0 `workshop_data/`.
+pinned to the bundle `data/workshop_data_pin.env` names (`index::PINNED_CORPUS`: 675 scripts in
+`lua/`, 39 in `lua_dlc/`), the one CI downloads and `fetch::PINNED` installs. A different bundle
+fails them on the count: re-download the bundle from Settings, or point `MERCS2_WORKSHOP_DATA` at
+that release's unpacked `workshop_data/`.
 
 `--pack-data [dir]` builds the bundle (default `workshop_data`). Its in-repo sources are read from
 the checkout the binary was built from: names come from this crate's
