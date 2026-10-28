@@ -734,8 +734,8 @@ enum Workbench {
     /// The running game (`crate::live`). Pinned to the rail's foot, above Log, with a dot saying
     /// whether the game answers.
     Live,
-    /// **A domain** (Plan 02 §C): one of seven curated lenses over the catalog. A single variant
-    /// rather than seven, so each dispatch site gains ONE arm, not seven. A domain page IS Inspect
+    /// **A domain** (Plan 02 §C): one of six curated lenses over the catalog. A single variant
+    /// rather than six, so each dispatch site gains ONE arm, not six. A domain page IS Inspect
     /// with a lens-filtered navigator — the viewport, inspector cards and verbs all read the same
     /// loaded preview, so browsing here is browsing there, narrowed to what the domain governs.
     Domain(crate::domain::Domain),
@@ -6536,6 +6536,7 @@ pub fn run(opts: Options) {
                                                 &p.hier_nodes,
                                                 &p.node_state,
                                             )
+                                            .unwrap_or_else(|e| panic!("{}: {e}", p.label))
                                         })
                                         .unwrap_or_default();
                                     let rs = mercs2_engine::render_state::RenderState {
@@ -6881,7 +6882,8 @@ pub fn run(opts: Options) {
                                                 sm,
                                                 &p.hier_nodes,
                                                 &p.node_state,
-                                            );
+                                            )
+                                            .unwrap_or_else(|e| panic!("{}: {e}", p.label));
                                         let rs = mercs2_engine::render_state::RenderState {
                                             lod: p.tier.trailing_zeros() as u8,
                                             view_state: p.tier,
@@ -6944,7 +6946,8 @@ pub fn run(opts: Options) {
                                                 sm,
                                                 &p.hier_nodes,
                                                 &p.node_state,
-                                            );
+                                            )
+                                            .unwrap_or_else(|e| panic!("{}: {e}", p.label));
                                         let rs = mercs2_engine::render_state::RenderState {
                                             lod: p.tier.trailing_zeros() as u8,
                                             view_state: p.tier,
@@ -7976,7 +7979,7 @@ pub(crate) fn default_render_state(w: &mut WadStack, hash: u32) -> mercs2_engine
     let node_enable = orch::parse_state_machine(&c)
         .map(|sm| {
             let chosen: Vec<usize> = sm.nodes.iter().map(orch::default_state_index).collect();
-            orch::machine_node_enable(&sm, &hier, &chosen)
+            orch::machine_node_enable(&sm, &hier, &chosen).unwrap_or_else(|e| panic!("model 0x{hash:08X}: {e}"))
         })
         .unwrap_or_default();
     mercs2_engine::render_state::RenderState { lod: 0, view_state: 0x01, node_enable }
@@ -8081,7 +8084,7 @@ pub(crate) fn outfit_render_state(
     Ok(mercs2_engine::render_state::RenderState {
         lod: 0,
         view_state: 0x01,
-        node_enable: orch::machine_node_enable(&sm, &hier, &chosen),
+        node_enable: orch::machine_node_enable(&sm, &hier, &chosen).map_err(|e| format!("kit 0x{hash:08X}: {e}"))?,
     })
 }
 
@@ -8096,7 +8099,7 @@ fn show_outfit(p: &mut Preview, scene: &mut Scene, template: &str, n: usize) -> 
         .get(n)
         .ok_or_else(|| format!("{template:?} has {} outfit(s); #{n} does not exist", outfits.len()))?;
     p.node_state = kit.mixr.outfit_node_states(sm, &p.hier_nodes, outfit)?;
-    let node_enable = mercs2_formats::orchestrator::machine_node_enable(sm, &p.hier_nodes, &p.node_state);
+    let node_enable = mercs2_formats::orchestrator::machine_node_enable(sm, &p.hier_nodes, &p.node_state)?;
     let rs = mercs2_engine::render_state::RenderState { lod: p.tier.trailing_zeros() as u8, view_state: p.tier, node_enable };
     for (gi, d) in p.draws.iter().enumerate() {
         if rs.segment_visible(d.lod_mask, d.node) {
@@ -8126,7 +8129,9 @@ fn preview_render_state(md: &ModelData, node_state: &[usize]) -> mercs2_engine::
     let node_enable = md
         .machine
         .as_ref()
-        .map(|sm| mercs2_formats::orchestrator::machine_node_enable(sm, &md.hier_nodes, node_state))
+        .map(|sm| {
+            mercs2_formats::orchestrator::machine_node_enable(sm, &md.hier_nodes, node_state).unwrap_or_else(|e| panic!("{e}"))
+        })
         .unwrap_or_default();
     mercs2_engine::render_state::RenderState {
         lod: md.tier.trailing_zeros() as u8,
@@ -8198,10 +8203,14 @@ fn load_model_data_tier(w: &mut WadStack, hash: u32, want_bit: u8) -> Result<Mod
 }
 
 /// Parse the resident AnimationLookup once (base resident block 3185, else any resident-named
-/// block) — the same discovery order as the game's `resolve_player_idle`.
+/// block) — the same discovery order as the game's `resolve_player_idle`. A block that carries the
+/// lookup but does not parse is a hard error.
 pub(crate) fn load_anim_selector(w: &mut wad::Wad) -> Option<AnimSelector> {
+    let parse = |i: usize, dec: &[u8]| {
+        AnimSelector::from_resident_block(dec).unwrap_or_else(|e| panic!("block {i}: AnimationLookup: {e}"))
+    };
     if let Ok(dec) = wad::decompress_block_index(w, 3185) {
-        if let Some(s) = AnimSelector::from_resident_block(&dec) {
+        if let Some(s) = parse(3185, &dec) {
             return Some(s);
         }
     }
@@ -8216,7 +8225,7 @@ pub(crate) fn load_anim_selector(w: &mut wad::Wad) -> Option<AnimSelector> {
     };
     for i in resident {
         if let Ok(dec) = wad::decompress_block_index(w, i as u16) {
-            if let Some(s) = AnimSelector::from_resident_block(&dec) {
+            if let Some(s) = parse(i, &dec) {
                 return Some(s);
             }
         }
@@ -9124,9 +9133,9 @@ fn ensure_hero_render(
                 md.draws.len()
             ));
         }
-        // SV from the model's own BLENDINDICES/BLENDWEIGHT. An identity palette on a skinned
-        // model collapses to a bind pose, which is what a portrait wants — pose/animation is a
-        // non-goal for this round.
+        // SV from the model's own BLENDINDICES/BLENDWEIGHT, posed by the model's REST palette
+        // (`SkinData::bones`, the reference pose retail holds for undriven nodes) — what a portrait
+        // wants; pose/animation is a non-goal for this round.
         let sv: Vec<crate::shot::SV> = md
             .verts
             .iter()
@@ -9158,7 +9167,7 @@ fn ensure_hero_render(
             [0.0, 0.0, 1.0, 0.0],
             [0.0, 0.0, 0.0, 1.0],
         ];
-        let palette: Vec<[[f32; 4]; 4]> = vec![IDENT; md.skin.rig.len().max(1)];
+        let palette: Vec<[[f32; 4]; 4]> = if md.skin.bones.is_empty() { vec![IDENT] } else { md.skin.bones.clone() };
         let draws: Vec<crate::shot::DrawTex> = md
             .draws
             .iter()

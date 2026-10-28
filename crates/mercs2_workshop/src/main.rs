@@ -1237,10 +1237,12 @@ exported {ok} bundle(s), {fail} failed -> {}", outroot.display());
 
         // IN-PLACE posing, the same call app.rs uses for a WAD model. Correct here because this
         // geometry already lives in its own rig's bind space -- unlike --shot, which previews a
-        // foreign import and must retarget across skeletons. No clip = bind pose (identity palette),
-        // which is the "before animation" view.
+        // foreign import and must retarget across skeletons. No clip = the model's REST palette
+        // (`SkinData::bones`: the reference pose retail holds for undriven nodes), the "before
+        // animation" view.
         const IDENT: [[f32; 4]; 4] =
             [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0]];
+        let rest: Vec<[[f32; 4]; 4]> = if md.skin.bones.is_empty() { vec![IDENT] } else { md.skin.bones.clone() };
         let t_frac: f32 = get("--render-t").and_then(|s| s.parse().ok()).unwrap_or(0.35);
         let flip_green = args.iter().any(|a| a == "--render-flip-green");
         let flat = args.iter().any(|a| a == "--render-flat");
@@ -1263,11 +1265,11 @@ exported {ok} bundle(s), {fail} failed -> {}", outroot.display());
                     )
                 }
                 None => {
-                    eprintln!("--render: clip 0x{ch:08X} not found for this rig; rendering bind pose");
-                    vec![IDENT; md.skin.rig.len().max(1)]
+                    eprintln!("--render: clip 0x{ch:08X} not found for this rig; rendering the rest pose");
+                    rest.clone()
                 }
             },
-            None => vec![IDENT; md.skin.rig.len().max(1)],
+            None => rest.clone(),
         };
 
         // THE ENGINE'S DRAW GATE. The mesh builder emits a range for every PRMG group it can
