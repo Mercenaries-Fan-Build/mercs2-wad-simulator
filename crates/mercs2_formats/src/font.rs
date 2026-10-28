@@ -12,16 +12,22 @@
 //! |---|---|---|
 //! | 0-1, 2-3 | `u0`, `u1` | left and right edge, UNORM16 over the page width |
 //! | 4-5, 6-7 | `v0`, `v1` | top and bottom edge, UNORM16 over the page height |
-//! | 8 | `width` | the box width in pixels |
+//! | 8 | `advance` | signed: the pen step in glyph units, and the box width in pixels |
 //! | 9 | `height` | the box height in pixels |
-//! | 10 | `byte10` | not established — the baseline glyphs of `english_18` end at `byte10 + height = 28`, which reads like an offset from the line top, but the code that lays text out has not been found |
-//! | 11 | `page` | index into the `MTRL` pages |
+//! | 10 | `byte10` | not established — the baseline glyphs of `english_18` end at `byte10 + height = 28`, which reads like an offset from the line top, but the code that places a glyph vertically runs behind a SecuROM VM entry (`0x0292a000`) and has not been read |
+//! | 11 | `page` | index into the `MTRL` pages; `0xFF` is the lookup's "no such glyph" |
+//!
+//! Text layout (pc-v10): the glyph lookup (`FUN_004ace71`, probe `FUN_008242b0`) hashes the code
+//! point into the table built at load and returns `movsx` byte 8; a code point the font lacks — or
+//! whose record's page is `0xFF` — advances 0. `GetTextWidth` (`0x6226d0`) sums byte 8 × the
+//! widget's x scale × ⅔; `GetTextHeight` (`0x622800`) is lines × x scale × ⅔ × `INFO u16 @8`, the
+//! line height. No kerning lookup is on any measure or draw path.
 //!
 //! Measured on the retail fonts: every `english_18` and `english_20` glyph's box, `(u1-u0)·w` by
-//! `(v1-v0)·h` on its page, matches `width` × `height` to half a pixel and lies inside the page; the
-//! `u16 @8` / `u16 @10` of `INFO` are the largest `width` / `height`. 16 glyphs of other fonts
-//! (punctuation, CJK, private use) have a box whose size disagrees with `width`/`height` or whose
-//! `v1 < v0`. No record field holds an advance.
+//! `(v1-v0)·h` on its page, matches byte 8 × byte 9 to half a pixel and lies inside the page;
+//! `INFO u16 @8` (the line height) and `u16 @10` also equal the largest byte 8 / byte 9 of all 22
+//! fonts. 16 glyphs of other fonts (punctuation, CJK, private use) have a box whose size disagrees
+//! with byte 8 / byte 9 or whose `v1 < v0`.
 
 use crate::ucfx::extract_chunk_body;
 
@@ -35,8 +41,9 @@ pub struct Glyph {
     pub u1: u16,
     pub v0: u16,
     pub v1: u16,
-    /// The box size in pixels.
-    pub width: u8,
+    /// Byte 8: the pen advance (signed, `movsx` in the lookup), equal to the box width in pixels.
+    pub advance: i8,
+    /// Byte 9: the box height in pixels.
     pub height: u8,
     /// Byte 10 of the record; its meaning is not established (see the module docs).
     pub byte10: u8,
@@ -57,8 +64,9 @@ impl Glyph {
 pub struct Font {
     /// `INFO u32 @4`: stored on the font object at `+0x20`; no reader of it has been found.
     pub info_u32_4: u32,
-    /// `INFO u16 @8` / `@10`: the largest glyph width / height in pixels.
-    pub max_width: u16,
+    /// `INFO u16 @8`: the line height (`GetTextHeight`); it also equals the largest advance.
+    pub line_height: u16,
+    /// `INFO u16 @10`: equals the largest glyph height in every retail font; no reader found.
     pub max_height: u16,
     pub glyphs: Vec<Glyph>,
     /// Each page's texture hash, in `MTRL` order (a material's first texture).
@@ -89,7 +97,7 @@ pub fn parse_font(container: &[u8]) -> Result<Font, String> {
                 u1: u16_at(&chr, r + 2),
                 v0: u16_at(&chr, r + 4),
                 v1: u16_at(&chr, r + 6),
-                width: chr[r + 8],
+                advance: chr[r + 8] as i8,
                 height: chr[r + 9],
                 byte10: chr[r + 10],
                 page: chr[r + 11],
@@ -105,7 +113,7 @@ pub fn parse_font(container: &[u8]) -> Result<Font, String> {
         .enumerate()
         .map(|(i, m)| m.textures.first().copied().ok_or(format!("font: page {i}'s material names no texture")))
         .collect::<Result<Vec<u32>, String>>()?;
-    Ok(Font { info_u32_4: u32_at(&info, 4), max_width: u16_at(&info, 8), max_height: u16_at(&info, 10), glyphs, pages })
+    Ok(Font { info_u32_4: u32_at(&info, 4), line_height: u16_at(&info, 8), max_height: u16_at(&info, 10), glyphs, pages })
 }
 
 #[cfg(test)]
@@ -115,9 +123,9 @@ mod tests {
     /// english_18's `A`, as the retail record holds it, on its 256×512 page.
     #[test]
     fn a_glyph_box_is_its_unorm_edges_over_the_page() {
-        let a = Glyph { code: 65, u0: 48383, u1: 52735, v0: 10623, v1: 13183, width: 17, height: 20, byte10: 8, page: 0 };
+        let a = Glyph { code: 65, u0: 48383, u1: 52735, v0: 10623, v1: 13183, advance: 17, height: 20, byte10: 8, page: 0 };
         let (x0, y0, x1, y1) = a.box_px(256, 512);
-        assert!((x1 - x0 - a.width as f32).abs() <= 0.5, "{x0} {x1}");
+        assert!((x1 - x0 - a.advance as f32).abs() <= 0.5, "{x0} {x1}");
         assert!((y1 - y0 - a.height as f32).abs() <= 0.5, "{y0} {y1}");
         assert!(x0 >= 0.0 && x1 <= 256.0 && y0 >= 0.0 && y1 <= 512.0);
     }
