@@ -41,8 +41,8 @@ refused.
 ## Where it comes from
 
 * The WAD read/write path is not new: it reuses the shipped modding pipeline verbatim
-  (`mercs2_formats::{ffcs, sges, animgroup, patch_wad}`) and follows the same block-build pattern as
-  the cube_mod proof of concept (`docs/cube_mod_poc.md`) — source the target block via its ASET entry,
+  (`mercs2_formats::{ffcs, sges, animgroup, patch_wad}`) and builds the override block the same way —
+  source the target block via its ASET entry,
   copy its exact `path_string` and *all* of its ASET entries, `compress_sges`, wrap in a `PatchBlock`,
   `build_patch_wad_multi`.
 * The only genuinely new logic is (a) locating the human-rig animgroup block that owns the player-idle
