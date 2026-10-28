@@ -72,10 +72,9 @@ impl TexFormat {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct MtrlMaterial {
     pub textures: Vec<u32>,
-    /// The `u16 flags@104` word. Encodes render mode (e.g. `0x0080` on 3-map materials, `0x0088`
-    /// adds a bit) — NOT a per-material intact/ruin gate (verified: the tank's ruin material and an
-    /// intact material share `0x0080`). Kept so material rendering can honour it instead of drawing
-    /// every submesh flat-opaque.
+    /// The on-disk `u16 flags@104` word — render state, decoded by [`runtime_material_flags`]. NOT a
+    /// per-material intact/ruin gate (verified: the tank's ruin material and an intact material share
+    /// `0x0080`).
     pub flags: u16,
     /// The 104-byte float preamble before the flags — material properties (tint / blend / alpha /
     /// specular params). 26 floats; not yet interpreted, but no longer discarded.
@@ -87,16 +86,45 @@ pub struct MtrlMaterial {
 }
 
 impl MtrlMaterial {
-    /// Diffuse (albedo) texture hash — slot 0, or `None` if the record has no textures.
-    pub fn diffuse(&self) -> Option<u32> {
-        self.textures.first().copied()
+    /// The texture bound at `slot`, or `None` when the record is shorter or the slot holds hash 0.
+    /// `Mtrl_Parse` binds no texture for a 0 hash (the slot loop skips it), which is how the
+    /// stealth suit's refraction materials leave slot 0 empty.
+    pub fn slot(&self, slot: usize) -> Option<u32> {
+        self.textures.get(slot).copied().filter(|&h| h != 0)
     }
 
-    /// Specular / gloss (`_sm`) texture hash — slot 1, or `None`. (Slot 0 = diffuse, slot 1 =
+    /// Diffuse (albedo) texture hash — slot 0 ([`Self::slot`]).
+    pub fn diffuse(&self) -> Option<u32> {
+        self.slot(0)
+    }
+
+    /// Specular / gloss (`_sm`) texture hash — slot 1 ([`Self::slot`]). (Slot 0 = diffuse, slot 1 =
     /// specular, slot 2 = normal — the authored MTRL slot order.)
     pub fn specular(&self) -> Option<u32> {
-        self.textures.get(1).copied()
+        self.slot(1)
     }
+
+    /// The runtime flags `Mtrl_Parse` stores at material `+0xA0` ([`runtime_material_flags`]).
+    pub fn runtime_flags(&self) -> u16 {
+        runtime_material_flags(self.flags)
+    }
+}
+
+/// `FUN_0084ee70`: the on-disk `flags@104` word as `Mtrl_Parse` stores it at material `+0xA0`
+/// (instruction `0x858b97`). The low three bits are a blend-mode enum turned one-hot (1..4 → 1, 2,
+/// 4, 8; anything else → 0); the remaining bits move: `0x008→0x40`, `0x010→0x80`, `0x020→0x10`,
+/// `0x040→0x20`, `0x080→0x100`, `0x100→0x200`, `0x200→0x400`, `0x400→0x800`, `0x800→0x4000`, and
+/// `0x1000` and above are dropped.
+pub fn runtime_material_flags(disk: u16) -> u16 {
+    let d = disk as u32;
+    let mode = match d & 7 {
+        1 => 1,
+        2 => 2,
+        3 => 4,
+        4 => 8,
+        _ => 0,
+    };
+    ((((d & 0x818) * 4 | d & 0x780) * 2) | (d >> 1) & 0x30 | mode) as u16
 }
 
 /// A ready-to-upload texture: raw DXT/BC bytes plus dimensions and format.
@@ -1406,5 +1434,41 @@ mod tests {
         assert_eq!(per, vec![vec![3], vec![6, 7]]);
         let first = group_material_indices(&c);
         assert_eq!(first, vec![3, 6]);
+    }
+
+    #[test]
+    fn runtime_flags_are_fun_0084ee70() {
+        // The blend-mode enum goes one-hot; 5..7 have no bit.
+        for (disk, rt) in [(0, 0), (1, 1), (2, 2), (3, 4), (4, 8), (5, 0), (6, 0), (7, 0)] {
+            assert_eq!(runtime_material_flags(disk), rt, "mode {disk}");
+        }
+        // Every other bit moves; 0x1000 and above drop.
+        for (disk, rt) in [
+            (0x008, 0x40),
+            (0x010, 0x80),
+            (0x020, 0x10),
+            (0x040, 0x20),
+            (0x080, 0x100),
+            (0x100, 0x200),
+            (0x200, 0x400),
+            (0x400, 0x800),
+            (0x800, 0x4000),
+            (0x1000, 0),
+            (0x8000, 0),
+        ] {
+            assert_eq!(runtime_material_flags(disk), rt, "disk 0x{disk:04X}");
+        }
+        // Bits combine: 0x0088 (2,787 retail materials) and the stealth suit's 0x0100.
+        assert_eq!(runtime_material_flags(0x0088), 0x0140);
+        assert_eq!(runtime_material_flags(0x0100), 0x0200);
+    }
+
+    #[test]
+    fn a_zero_hash_slot_binds_no_texture() {
+        let m = MtrlMaterial { textures: vec![0, 0x68C3_5B79, 0xC6F9_E110], ..Default::default() };
+        assert_eq!(m.diffuse(), None);
+        assert_eq!(m.specular(), Some(0x68C3_5B79));
+        assert_eq!(m.slot(2), Some(0xC6F9_E110));
+        assert_eq!(m.slot(3), None);
     }
 }
