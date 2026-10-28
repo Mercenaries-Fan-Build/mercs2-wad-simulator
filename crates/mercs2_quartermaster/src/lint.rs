@@ -206,6 +206,36 @@ pub const M0194_LAYER_UNKNOWN: Rule = Rule {
     doc: "docs/modding/manifest_format.md#activate_layer",
 };
 
+/// An `add_script` name, or the `module` of a novel shop behaviour, that a script already has. The
+/// engine finds a script by `{name hash, script type}` and the registry keeps the first one, so one
+/// of the two is not the one that loads. Hermetic half ([`lint`]): `qm_modloader`,
+/// `qm_shell_modloader` and the Shipment's own novel shop modules. Game half ([`game_checks`]): a
+/// script row (type id 35) in a WAD of the game stack or in a game WAD present beside `vz.wad`
+/// ([`GameStack::present_side_wads`]). Registered here, with M0199, as one rule with two halves.
+pub const M0197_SCRIPT_NAME_TAKEN: Rule = Rule {
+    code: "M0197",
+    title: "an add_script name or novel shop module is already a script's name",
+    doc: "docs/modding/manifest_format.md#m0197",
+};
+
+/// An `add_placement` / `add_layer` entity file lists one key twice, or an `add_placement` key is
+/// one the target layer's block already places ([`placement_game_checks`]). Retail places every
+/// key once.
+pub const M0198_ENTITY_KEY_TAKEN: Rule = Rule {
+    code: "M0198",
+    title: "an added entity's key is already placed in the target layer, or twice in its file",
+    doc: "docs/modding/manifest_format.md#m0198",
+};
+
+/// An `add_shop_item` whose `behaviour.script` mints a novel module: its rows are inserted by
+/// `qm_modloader` from `wifpmcinterior`'s `_OnEnter`, so the item is at no vendor until the host's
+/// first entry into the PMC interior in a session. A warning: that may be what the author wants.
+pub const M0310_SHOP_BEHAVIOUR_AFTER_PMC: Rule = Rule {
+    code: "M0310",
+    title: "a novel shop behaviour is offered only after the host first enters the PMC interior",
+    doc: "docs/modding/manifest_format.md#m0310",
+};
+
 /// An `add_language` name that cannot be a novel language WAD — not a lowercase `[a-z0-9_]` token, or
 /// one the game already ships (`.\Data\<name>.wad`), which the kind would otherwise overwrite. The
 /// message comes from [`crate::build::language_name_refusal`], the same check the lowering enforces —
@@ -793,6 +823,7 @@ pub const RULES: &[Rule] = &[
     M0178_DLL_NOT_LOADABLE,
     M0190_MOVIE_CARRIES_AS3,
     M0191_SHARED_STRING_TABLE,
+    M0197_SCRIPT_NAME_TAKEN,
     M0199_SIGNATURE_GUARD,
     M0200_LANGUAGE_NAME_UNUSABLE,
     M0202_COLLISION_ON_SKINNED,
@@ -826,6 +857,7 @@ pub const RULES: &[Rule] = &[
     M0305_SPRITE_NAME,
     M0308_RAW_SPRITES,
     M0309_EMITTER_SHAPE,
+    M0310_SHOP_BEHAVIOUR_AFTER_PMC,
 ];
 
 /// Every rule [`game_checks`] (or a lowering that holds the game stack) reports.
@@ -835,6 +867,7 @@ pub const GAME_RULES: &[Rule] = &[
     M0192_MOVIE_UNREFERENCED,
     M0193_STATE_OFF_VOCABULARY,
     M0194_LAYER_UNKNOWN,
+    M0198_ENTITY_KEY_TAKEN,
     M0218_SOUND_TARGET_MISSING,
     M0219_LANGUAGE_BASE_INCOMPLETE,
     M0220_SOUND_CUE_SHADOWED,
@@ -943,6 +976,21 @@ fn parse_address(s: &str) -> Option<u32> {
 /// with no game, and mixing the two would make the hermetic set impossible to run alone.
 pub fn game_checks(manifest: &Manifest, game: &mut GameStack) -> Vec<Diagnostic> {
     let mut out = Vec::new();
+
+    // M0197 (game-gated half): a script name this Shipment mints that a script of the game has.
+    let mut minted: Vec<(usize, &str, &str)> = manifest
+        .contributions
+        .iter()
+        .enumerate()
+        .filter_map(|(i, c)| match c {
+            Contribution::AddScript { name, .. } => Some((i, name.as_str(), "add_script")),
+            _ => None,
+        })
+        .collect();
+    minted.extend(novel_shop_modules(manifest).into_iter().map(|(i, m)| (i, m, "novel shop module")));
+    if !minted.is_empty() {
+        out.extend(script_name_checks(&minted, game));
+    }
 
     // M0241, M0245–M0247, M0250: each add_tiny_geometry against the game's layers.
     for (index, p) in crate::tiny::game_problems(manifest, game) {
@@ -1157,8 +1205,9 @@ pub fn game_checks(manifest: &Manifest, game: &mut GameStack) -> Vec<Diagnostic>
                         message: format!(
                             "no layer named {name:?} is in the game stack (no type_id 9 ASET row), \
                              so `MrxLayerManager.MarkForAddition`/`MarkForRemoval` reaches nothing \
-                             at runtime — the activation ships but does nothing. Layer names are \
-                             CASE-SENSITIVE; a `vz_state_*` name must match retail exactly. If a \
+                             at runtime — the activation ships but does nothing. Case does not \
+                             matter (the layer manager lowercases the name and the hash folds \
+                             case); the spelling must match a retail layer. If a \
                              companion `edit_world` or `raw` in this install ships this layer, \
                              ignore this."
                         ),
@@ -1752,7 +1801,84 @@ fn sound_checks(
     out
 }
 
-/// M0190 — an `add_movie` payload carrying ActionScript 3.
+/// Every `add_shop_item` whose `behaviour.script` mints a novel module: `(index, module)`.
+fn novel_shop_modules(manifest: &Manifest) -> Vec<(usize, &str)> {
+    manifest
+        .contributions
+        .iter()
+        .enumerate()
+        .filter_map(|(i, c)| match c {
+            Contribution::AddShopItem { behaviour: Some(b), .. } if b.script.is_some() => Some((i, b.module.as_str())),
+            _ => None,
+        })
+        .collect()
+}
+
+/// M0197's game-gated half: each script name the Shipment mints — `add_script` names and novel shop
+/// modules, `(index, name, what)` — against the script rows (type id 35) of every WAD of `game` and
+/// of every game WAD present beside its base ([`GameStack::present_side_wads`]). A side WAD that is
+/// present and does not read, or a folder that cannot be listed, is an M0197 error: the check could
+/// not be made.
+fn script_name_checks(minted: &[(usize, &str, &str)], game: &GameStack) -> Vec<Diagnostic> {
+    use mercs2_formats::types::TYPE_ID_SCRIPT;
+    let mut out = Vec::new();
+    let file_name = |p: &Path| p.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_else(|| p.display().to_string());
+    let mut side: Vec<(String, GameStack)> = Vec::new();
+    match game.present_side_wads() {
+        Ok(paths) => {
+            for p in paths {
+                match GameStack::open(std::slice::from_ref(&p)) {
+                    Ok(s) => side.push((file_name(&p), s)),
+                    Err(e) => out.push(Diagnostic {
+                        rule: M0197_SCRIPT_NAME_TAKEN,
+                        severity: Severity::Error,
+                        message: format!(
+                            "{} is beside vz.wad and does not read ({e}), so the script names it \
+                             carries cannot be checked against the ones this Shipment mints",
+                            file_name(&p)
+                        ),
+                        at: None,
+                        fix: None,
+                    }),
+                }
+            }
+        }
+        Err(e) => out.push(Diagnostic {
+            rule: M0197_SCRIPT_NAME_TAKEN,
+            severity: Severity::Error,
+            message: format!(
+                "the game WADs beside vz.wad cannot be listed ({e}), so the script names they carry \
+                 cannot be checked against the ones this Shipment mints"
+            ),
+            at: None,
+            fix: None,
+        }),
+    }
+    for &(index, name, what) in minted {
+        let hash = crate::manifest::asset_hash(name);
+        let mut holders: Vec<String> = game.wads_holding(hash, TYPE_ID_SCRIPT).into_iter().map(file_name).collect();
+        holders.extend(side.iter().filter(|(_, s)| s.has_asset(hash, TYPE_ID_SCRIPT)).map(|(f, _)| f.clone()));
+        if holders.is_empty() {
+            continue;
+        }
+        out.push(Diagnostic {
+            rule: M0197_SCRIPT_NAME_TAKEN,
+            severity: Severity::Error,
+            message: format!(
+                "{what} {name:?} (0x{hash:08X}) is the name of a script the game ships in {}. The \
+                 registry keeps the first script of a name, so one of the two would not be the one \
+                 that loads. Rename the module; to change the game's script, use patch_lua or \
+                 replace_lua.",
+                holders.join(", ")
+            ),
+            at: Some(index),
+            fix: None,
+        });
+    }
+    out
+}
+
+/// M0190 — an `add_movie` or `add_ui` payload carrying ActionScript 3.
 ///
 /// **The runtime is AVM1 only.** The embedded middleware is Scaleform GFx **2.0.48**, targeting
 /// Flash 8 / AS2, proven three ways in the unpacked exe: the `gfxVersion` property returns the
@@ -2210,6 +2336,99 @@ pub fn fx_game_checks(manifest: &Manifest, root: &Path, game: &mut GameStack) ->
     Ok(out)
 }
 
+/// An `add_placement` / `add_layer` entity file [`placement_game_checks`] could not read: the same
+/// refusal the lowering makes of it ([`crate::build::read_entities_file`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EntityFileError {
+    pub index: usize,
+    pub kind: &'static str,
+    pub message: String,
+}
+
+impl std::fmt::Display for EntityFileError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "contributions[{}] ({}): {}", self.index, self.kind, self.message)
+    }
+}
+
+impl std::error::Error for EntityFileError {}
+
+/// M0198 for a Shipment's `add_placement` and `add_layer`: a key two records of one entity file
+/// share, and an `add_placement` key the target layer's block (the block the lowering re-emits,
+/// [`GameStack::layer_block_for_edit`]) already places in a `Transform`, `ModelName` or `Name`
+/// record. A target layer the stack does not have is the lowering's refusal, not this rule's.
+/// A contribution whose entity path is already an error (M0110 missing, M0111 escaping) is not
+/// read: an escaping path would be read outside the Shipment.
+///
+/// `Err` when an entity file does not read or parse — what the lowering refuses, refused here too
+/// so `qm lint --with-game` does not pass a Shipment `qm build` cannot build.
+pub fn placement_game_checks(manifest: &Manifest, root: &Path, game: &mut GameStack) -> Result<Vec<Diagnostic>, EntityFileError> {
+    let mut out = Vec::new();
+    let unreadable: Vec<usize> = discover::check_sources(manifest, root)
+        .iter()
+        .filter_map(|i| match i {
+            SourceIssue::Missing { index, .. }
+            | SourceIssue::Absolute { index, .. }
+            | SourceIssue::EscapesRoot { index, .. } => Some(*index),
+            SourceIssue::OutsideSrc { .. } => None,
+        })
+        .collect();
+    for (index, c) in manifest.contributions.iter().enumerate() {
+        let (file, layer) = match c {
+            Contribution::AddPlacement { layer, entity } => (entity, Some(layer)),
+            Contribution::AddLayer { entities, .. } => (entities, None),
+            _ => continue,
+        };
+        if unreadable.contains(&index) {
+            continue;
+        }
+        let kind = c.kind();
+        let ents = crate::build::read_entities_file(&root.join(file))
+            .map_err(|message| EntityFileError { index, kind, message })?;
+        let mut seen = std::collections::BTreeSet::new();
+        let mut twice = std::collections::BTreeSet::new();
+        for e in &ents {
+            if !seen.insert(e.key) {
+                twice.insert(e.key);
+            }
+        }
+        for key in twice {
+            out.push(Diagnostic {
+                rule: M0198_ENTITY_KEY_TAKEN,
+                severity: Severity::Error,
+                message: format!(
+                    "{kind}: entity key 0x{key:08X} is in two records of {}; each placed entity \
+                     needs its own key",
+                    file.display()
+                ),
+                at: Some(index),
+                fix: None,
+            });
+        }
+        let Some(layer) = layer else { continue };
+        let Some(inputs) = game.layer_block_for_edit(layer) else { continue };
+        let placed = mercs2_formats::placement::entity_key_set(&inputs.block);
+        let mut taken: Vec<u32> = ents.iter().map(|e| e.key).filter(|k| placed.contains(k)).collect();
+        taken.sort_unstable();
+        taken.dedup();
+        for key in taken {
+            out.push(Diagnostic {
+                rule: M0198_ENTITY_KEY_TAKEN,
+                severity: Severity::Error,
+                message: format!(
+                    "add_placement: entity key 0x{key:08X} is already placed in {} (the block layer \
+                     {layer:?} names). Retail places every key once; give the new entity a key no \
+                     record of that block uses.",
+                    inputs.path
+                ),
+                at: Some(index),
+                fix: None,
+            });
+        }
+    }
+    Ok(out)
+}
+
 /// Run every hermetic rule.
 ///
 /// `root` enables the source-file checks; pass `None` to lint manifest text alone. `names` enables
@@ -2330,8 +2549,10 @@ pub fn lint(
                     });
                 }
             }
-            Contribution::AddMovie { name, movie } => {
-                if let Some(root) = root {
+            // `add_ui` ships the same movie an `add_movie` does. A movie path that is already an
+            // error (M0110 / M0111) is not read: an escaping one would be read outside the Shipment.
+            Contribution::AddMovie { name, movie } | Contribution::AddUi { name, movie } => {
+                if let Some(root) = root.filter(|_| !source_issue_at.contains(&index)) {
                     out.extend(movie_checks(index, name, root, movie));
                 }
             }
@@ -2597,6 +2818,58 @@ pub fn lint(
                         fix: None,
                     });
                 }
+            }
+            // M0197 (hermetic half): a name `qm link` mints a loader under, or a novel shop module of
+            // this Shipment. The game's own script names are the game-gated half in `game_checks`.
+            Contribution::AddScript { name, .. } => {
+                let hash = crate::manifest::asset_hash(name);
+                for loader in [crate::link::QM_MODLOADER_NAME, crate::link::QM_SHELL_MODLOADER_NAME] {
+                    if crate::manifest::asset_hash(loader) == hash {
+                        out.push(Diagnostic {
+                            rule: M0197_SCRIPT_NAME_TAKEN,
+                            severity: Severity::Error,
+                            message: format!(
+                                "add_script {name:?} names {loader:?}, the loader script `qm link` \
+                                 mints; the registry keeps the first script of a name, so one of the \
+                                 two would not be the one that loads. Rename the module."
+                            ),
+                            at: Some(index),
+                            fix: None,
+                        });
+                    }
+                }
+                for (shop, module) in novel_shop_modules(manifest) {
+                    if crate::manifest::asset_hash(module) == hash {
+                        out.push(Diagnostic {
+                            rule: M0197_SCRIPT_NAME_TAKEN,
+                            severity: Severity::Error,
+                            message: format!(
+                                "add_script {name:?} names the module contributions[{shop}]'s novel \
+                                 shop behaviour mints ({module:?}); the registry keeps the first \
+                                 script of a name, so one of the two would not be the one that loads. \
+                                 Rename one."
+                            ),
+                            at: Some(index),
+                            fix: None,
+                        });
+                    }
+                }
+            }
+            Contribution::AddShopItem { id, behaviour: Some(b), .. } if b.script.is_some() => {
+                out.push(Diagnostic {
+                    rule: M0310_SHOP_BEHAVIOUR_AFTER_PMC,
+                    severity: Severity::Warning,
+                    message: format!(
+                        "shop item {id:?}: its novel behaviour {:?} is inserted by qm_modloader from \
+                         wifpmcinterior's _OnEnter, so the item is at no vendor until the host first \
+                         enters the PMC interior in a session, and at every listed vendor from then. \
+                         A session that starts in the world (an alternate spawn, a save carrying \
+                         retry locations) reaches outpost vendors first.",
+                        b.module
+                    ),
+                    at: Some(index),
+                    fix: None,
+                });
             }
             _ => {}
         }
