@@ -149,7 +149,7 @@ cargo run -p mercs2_workshop -- --ui-state crates/mercs2_workshop/ui_states/insp
 ```
 
 The JSON names the state by the words the window shows — `page` (a rail label or `Live`),
-`settings_section`, `tab`, `lens`, `filter`, `load` (a model name), `shipment` + `contribution`,
+`settings_section`, `tab`, `lens`, `filter`, `load` (a model name, or on another tab that tab's row by its label), `shipment` + `contribution`,
 `bench` + `donor`, and on the AUDIO tab `bank`, `clip`, `search` and `select` (record indices),
 applied once the tab's routing is read (`ui_states/audio.json`), `run_wad` / `run_data` (a path
 used for this run as Settings' "Use for this run only…" does, after the first load; the capture
@@ -221,6 +221,9 @@ Binary crate — these are private modules, listed for orientation:
   data sections: the chain rows, the "saved path not found" banner, what it opened, the buttons.
 - `live` — the Live page and the probe behind its rail dot (`mercs2_bridge::reachable`, polled off
   the frame loop).
+- `textpage` — Inspect's Text tab: every string table of every WAD side by side by key (read on a
+  worker, keys named from `names.bin` and the Lua corpus), and a font's pages with every glyph's box
+  (`mercs2_formats::font`).
 - `saves` — the Saves page: save browser, hero viewport, PROGRESSION grid with the contract menu,
   inspector, Write.
 - `save_tables` / `save_inspect` — the readable views of every save table, and the Inspect window.
