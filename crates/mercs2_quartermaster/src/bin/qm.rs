@@ -68,8 +68,9 @@ enum Command {
         /// Where the game is installed. Only meaningful with --with-game.
         #[arg(long, value_name = "DIR")]
         game: Option<PathBuf>,
-        /// hash → name lookup, for M0130. Defaults to the workspace's
-        /// crates/mercs2_workshop/data/production_names.json.
+        /// hash → name lookup, for M0130. Defaults to the first
+        /// crates/mercs2_workshop/data/production_names.json found walking up from the qm
+        /// executable, then from the working directory.
         #[arg(long, value_name = "FILE")]
         names: Option<PathBuf>,
         /// Also write the findings as JSON (lint-report.json) to this file. Any older file there is
@@ -97,7 +98,7 @@ enum Command {
     /// Print a manifest's Shipment name and version as one JSON object. Hermetic: parses and
     /// validates the manifest file alone — no source files, no game.
     ///
-    /// Exit 0: stdout is exactly `{"name": "<shipment.name>", "version": "<shipment.version>"}`.
+    /// Exit 0: stdout is exactly `{"name":"<shipment.name>","version":"<shipment.version>"}`.
     /// Exit 2: the file cannot be read, has no manifest extension (yaml, yml, json, toml), does not
     /// parse, or fails validation; the reason goes to stderr and stdout is empty.
     ManifestInfo {
@@ -141,8 +142,9 @@ enum Command {
         /// ships it). Used only when --corpus is absent. Env: MERCS2_WORKSHOP_DATA.
         #[arg(long, value_name = "DIR")]
         workshop_data: Option<PathBuf>,
-        /// hash → name lookup, for M0130. Defaults to the workspace's
-        /// crates/mercs2_workshop/data/production_names.json.
+        /// hash → name lookup, for M0130. Defaults to the first
+        /// crates/mercs2_workshop/data/production_names.json found walking up from the qm
+        /// executable, then from the working directory.
         #[arg(long, value_name = "FILE")]
         names: Option<PathBuf>,
         /// The directory holding the game's original shader3.bin and shader3Low.bin. The shader
@@ -211,7 +213,9 @@ enum Command {
         /// Where the game is installed. Defaults to host discovery.
         #[arg(long, value_name = "DIR")]
         game: Option<PathBuf>,
-        /// hash → name lookup, so the dump reads in names. Defaults to the workspace's names.
+        /// hash → name lookup, so the dump reads in names. Defaults to the first
+        /// crates/mercs2_workshop/data/production_names.json found walking up from the qm
+        /// executable, then from the working directory.
         #[arg(long, value_name = "FILE")]
         names: Option<PathBuf>,
     },
@@ -225,7 +229,9 @@ enum Command {
         layer: String,
         #[arg(long, value_name = "DIR")]
         game: Option<PathBuf>,
-        /// hash → name lookup, so a model reads by name. Defaults to the workspace's names.
+        /// hash → name lookup, so a model reads by name. Defaults to the first
+        /// crates/mercs2_workshop/data/production_names.json found walking up from the qm
+        /// executable, then from the working directory.
         #[arg(long, value_name = "FILE")]
         names: Option<PathBuf>,
     },
@@ -242,7 +248,9 @@ enum Command {
         out: PathBuf,
         #[arg(long, value_name = "DIR")]
         game: Option<PathBuf>,
-        /// hash → name lookup, so a texture reads by name. Defaults to the workspace's names.
+        /// hash → name lookup, so a texture reads by name. Defaults to the first
+        /// crates/mercs2_workshop/data/production_names.json found walking up from the qm
+        /// executable, then from the working directory.
         #[arg(long, value_name = "FILE")]
         names: Option<PathBuf>,
     },
@@ -453,6 +461,13 @@ fn cmd_lint(
             Ok(d) => found.extend(d),
             Err(e) => {
                 eprintln!("error: effects and sprites: {e}");
+                return ExitCode::from(EXIT_UNUSABLE);
+            }
+        }
+        match lint::placement_game_checks(&shipment.manifest, &shipment.root, &mut stack) {
+            Ok(d) => found.extend(d),
+            Err(e) => {
+                eprintln!("error: {e}");
                 return ExitCode::from(EXIT_UNUSABLE);
             }
         }
@@ -1133,7 +1148,10 @@ fn cmd_rules() -> ExitCode {
     for r in lint::RULES {
         println!("  {}  {}\n      {}", r.code, r.title, r.url());
     }
-    println!("\nNeed the retail WADs — `qm lint --with-game`, and always during `qm build`:");
+    println!(
+        "\nNeed the retail WADs — `qm lint --with-game`, and always during `qm build` (a rule a \
+         lowering reports, such as M0193, only during `qm build`):"
+    );
     for r in lint::GAME_RULES {
         println!("  {}  {}\n      {}", r.code, r.title, r.url());
     }
