@@ -197,7 +197,9 @@ without exactly one of each line, a URL other than
 `https://github.com/Mercenaries-Fan-Build/mercs2-wad-simulator/releases/download/<tag>/mercs2-workshop-data.zip`,
 or a digest other than 64 lowercase hex digits stops the build. The install downloads that URL and
 nothing else, and checks the archive's sha256 against `BUNDLE_SHA256` before unpacking; a mismatch
-stops the install with both digests, unpacks nothing, and leaves the installed copy as it was. When
+stops the install with both digests, unpacks nothing, and leaves the installed copy as it was. A
+staging folder or installed copy the install cannot remove stops it with an error naming the folder
+and the removal. When
 the download fails, the run stops with an error giving the URL, its sha256 and the folder to unpack
 the zip into. A complete bundle missing `audio_manifest.json`, or holding a malformed one, stops the
 boot with an error naming the file.
