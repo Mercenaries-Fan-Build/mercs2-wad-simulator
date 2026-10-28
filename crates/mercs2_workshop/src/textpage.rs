@@ -316,7 +316,7 @@ pub fn font_center(ctx: &egui::Context, p: &mut Panel) -> Vec<Act> {
                     let col = if chosen { theme::BRASS } else { theme::BRASS.gamma_multiply(0.45) };
                     painter.rect_stroke(r, 0.0, egui::Stroke::new(if chosen { 2.0 } else { 1.0 }, col));
                     let resp = ui.interact(r, egui::Id::new(("font_glyph", f.hash, gi)), egui::Sense::click());
-                    let resp = resp.on_hover_text(format!("{} (U+{:04X}) {}\u{d7}{}", glyph_char(g.code), g.code, g.width, g.height));
+                    let resp = resp.on_hover_text(format!("{} (U+{:04X}) {}\u{d7}{}", glyph_char(g.code), g.code, g.advance, g.height));
                     if resp.clicked() {
                         acts.push(Act::Glyph(gi));
                     }
@@ -333,7 +333,8 @@ pub fn font_inspector(ui: &mut egui::Ui, p: &Panel) -> Vec<Act> {
     theme::card(ui, "Font", Some(&f.label), |ui| {
         theme::kv(ui, "glyphs", egui::RichText::new(f.font.glyphs.len().to_string()));
         theme::kv(ui, "pages", egui::RichText::new(f.pages.len().to_string()));
-        theme::kv(ui, "widest / tallest", egui::RichText::new(format!("{} / {} px", f.font.max_width, f.font.max_height)));
+        theme::kv(ui, "line height", egui::RichText::new(format!("{} px", f.font.line_height)));
+        theme::kv(ui, "INFO u16 @10", egui::RichText::new(format!("{} \u{b7} the tallest glyph; no reader found", f.font.max_height)).color(theme::DIM));
         theme::kv(ui, "INFO u32 @4", egui::RichText::new(format!("{} \u{b7} meaning not established", f.font.info_u32_4)).color(theme::DIM));
         theme::kv(ui, "hash", egui::RichText::new(format!("0x{:08X}", f.hash)).monospace());
         theme::kv(ui, "read from", egui::RichText::new(&f.wad));
@@ -342,7 +343,8 @@ pub fn font_inspector(ui: &mut egui::Ui, p: &Panel) -> Vec<Act> {
         theme::card(ui, "Glyph", Some(&format!("U+{:04X}", g.code)), |ui| {
             ui.label(egui::RichText::new(glyph_char(g.code)).text_style(egui::TextStyle::Heading).color(theme::TX));
             theme::kv(ui, "page", egui::RichText::new(g.page.to_string()));
-            theme::kv(ui, "box", egui::RichText::new(format!("{} \u{d7} {} px", g.width, g.height)));
+            theme::kv(ui, "advance", egui::RichText::new(format!("{} px", g.advance)));
+            theme::kv(ui, "box", egui::RichText::new(format!("{} \u{d7} {} px", g.advance, g.height)));
             theme::kv(ui, "edges u / v", egui::RichText::new(format!("{}\u{2013}{} / {}\u{2013}{}", g.u0, g.u1, g.v0, g.v1)).monospace());
             theme::kv(ui, "byte 10", egui::RichText::new(format!("{} \u{b7} meaning not established", g.byte10)).color(theme::DIM));
         });
@@ -354,7 +356,7 @@ pub fn font_inspector(ui: &mut egui::Ui, p: &Panel) -> Vec<Act> {
                 let g = &f.font.glyphs[gi];
                 // A code point with no printable form shows only its number.
                 let shown = char::from_u32(g.code as u32).filter(|c| !c.is_control()).map_or("\u{b7}".to_string(), |c| c.to_string());
-                let text = format!("{shown}  U+{:04X}  p{}  {}\u{d7}{}", g.code, g.page, g.width, g.height);
+                let text = format!("{shown}  U+{:04X}  p{}  {}\u{d7}{}", g.code, g.page, g.advance, g.height);
                 if ui.selectable_label(f.glyph == Some(gi), egui::RichText::new(text).monospace()).clicked() {
                     acts.push(Act::Glyph(gi));
                 }
@@ -734,7 +736,7 @@ mod retail {
                     let page = w.texture_best(font.pages[g.page as usize]).unwrap_or_else(|e| panic!("{e}"));
                     let (x0, y0, x1, y1) = g.box_px(page.width, page.height);
                     assert!(x0 >= 0.0 && y0 >= 0.0 && x1 <= page.width as f32 && y1 <= page.height as f32, "U+{:04X} off its page", g.code);
-                    assert!((x1 - x0 - g.width as f32).abs() <= 0.5 && (y1 - y0 - g.height as f32).abs() <= 0.5, "U+{:04X} box", g.code);
+                    assert!((x1 - x0 - g.advance as f32).abs() <= 0.5 && (y1 - y0 - g.height as f32).abs() <= 0.5, "U+{:04X} box", g.code);
                     checked += 1;
                 }
             }
