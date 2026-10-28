@@ -116,8 +116,8 @@ pub fn vz_wad_from_env() -> Option<PathBuf> {
 /// * `unrar_binary` — the `UnRAR.exe` that unpacks RAR'd Xbox 360 DLC. Read only by tests of the
 ///   RAR'd DLC path ([`local_config_unrar_binary`]).
 /// * `lua51_src_dir` — a **directory**: the pristine Lua 5.1 `src` tree the vendored copy is
-///   checked against. Read only by the `mercs2_luac` vendor-integrity test
-///   ([`local_config_lua51_src_dir`]).
+///   checked against. Read only by the `mercs2_luac` vendor-vs-upstream test
+///   (`tests/vendor_upstream_retail.rs`, `retail` feature; [`local_config_lua51_src_dir`]).
 ///
 /// The console keys and the executable keys are never inferred from `vz_wad`'s folder: each lives
 /// wherever it is kept, and a test that needs one fails naming the missing key.
@@ -441,7 +441,7 @@ pub fn local_config_unrar_binary(start: &Path) -> Result<PathBuf, String> {
     local_config_file(start, UNRAR_BINARY_KEY, "write `unrar_binary = \"/path/to/tools/unrar/UnRAR.exe\"` into it by hand")
 }
 
-/// The Lua 5.1 source tree for a **dev tool or game-gated test**: `lua51_src_dir` in the nearest [`LOCAL_CONFIG`].
+/// The Lua 5.1 source tree for the **vendored-Lua upstream comparison**: `lua51_src_dir` in the nearest [`LOCAL_CONFIG`].
 ///
 /// Same rules and the same three distinct errors as [`local_config_vz_wad`], except that the path
 /// must be a directory. No script writes this key.
@@ -463,15 +463,19 @@ fn local_config_file(start: &Path, key: &str, fix: &str) -> Result<PathBuf, Stri
 }
 
 /// The path `key` names in the nearest [`LOCAL_CONFIG`] above `start`, which must be `want`.
+///
+/// The errors name the config, the key and the fix, and nothing about the caller: the same keys
+/// serve game-gated tests, tests that read a non-game tree (`lua51_src_dir`) and dev tools, so the
+/// caller says what it needed the path for.
 fn local_config_path(start: &Path, key: &str, want: Want, fix: &str) -> Result<PathBuf, String> {
     let Some((file, text)) = local_configs(start).next() else {
         return Err(format!(
-            "game-gated test: no {LOCAL_CONFIG} found in {} or any folder above it; {fix}",
+            "no {LOCAL_CONFIG} found in {} or any folder above it; {fix}",
             start.display()
         ));
     };
     let Some(path) = config_value(&text, key) else {
-        return Err(format!("game-gated test: {} has no `{key}` key; {fix}", file.display()));
+        return Err(format!("{} has no `{key}` key; {fix}", file.display()));
     };
     let (ok, noun) = match want {
         Want::File => (path.is_file(), "a file"),
@@ -479,7 +483,7 @@ fn local_config_path(start: &Path, key: &str, want: Want, fix: &str) -> Result<P
     };
     if !ok {
         return Err(format!(
-            "game-gated test: {} names {key} = {}, which is not {noun}; {fix}",
+            "{} names {key} = {}, which is not {noun}; {fix}",
             file.display(),
             path.display()
         ));
