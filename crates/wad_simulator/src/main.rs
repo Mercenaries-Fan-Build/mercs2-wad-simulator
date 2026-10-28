@@ -55,7 +55,8 @@
 //! - `chunk_invariants` — exe-derived structural invariants run on every UCFX chunk
 //! - `model` / `texture` / `material` / `animation` / `script` — per-type consumers
 //! - `placement` — layer/ECS_NODE Transform + `flgs` vz_state placement validation
-//! - `action_table` — ActionTable 1024-slot overflow check (the world-load livelock)
+//! - `action_table` — ActionTable 1024-slot overflow check (an unverified heuristic, live-disproven
+//!   as the DLC world-load hang; see its module header)
 //! - `resident` — resident singletons (watermap, fxdict)
 //! - `audio` / `pws` — wavebank + soundbank consumption; external `.pws` streaming audit
 //! - `names` — rainbow-table hash → name resolver

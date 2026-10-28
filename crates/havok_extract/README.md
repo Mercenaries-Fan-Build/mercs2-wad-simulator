@@ -17,7 +17,8 @@ model container body — scans it for every embedded Havok packfile, and writes,
 * `manifest.json` — schema `mercs2_havok/2`, one `havok_slices[]` entry per packfile with its
   `offset`, `size_written`, Havok `version`, per-class instance census (`class_counts`), and a
   `shapes[]` array. Shapes are tagged `convex` (with `vertices` + `planes`), `box` (with
-  `half_extents`), `mopp`, `mesh`, or `other` (with the class name).
+  `half_extents`), `capsule` (with `radius` + `half_len`), `sphere` (with `radius`), `mopp`,
+  `mesh` (with `tris`, `verts`, `xz_span`), or `other` (with the class name).
 
 All the actual parsing lives in [`mercs2_formats::havok`]; this crate is the CLI + OBJ/JSON
 emission around it.

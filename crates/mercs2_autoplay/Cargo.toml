@@ -1,6 +1,7 @@
 [package]
 name = "mercs2_autoplay"
 version = "0.1.0"
+publish = false                # excluded from the crates.io release set
 edition = "2021"
 description = "Mercenaries 2 modernization — headless autoplay harness: runs the shipped game Lua on the engine's script host against the real world data, as the base for exhaustive path exploration and call tracing."
 readme = "README.md"

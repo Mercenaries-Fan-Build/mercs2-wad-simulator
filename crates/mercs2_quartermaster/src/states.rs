@@ -4,8 +4,9 @@
 //! with Enter/Exit command scripts that are raw `u32` token streams. So the workflow is **extract,
 //! then edit**: [`extract`] dumps the machine a model already carries into this format (names where a
 //! hash reverses, opcodes as plain integers), the author changes what they want, and [`parse`] reads
-//! it back. `serialize_state_machine` then applies it — which, being same-shape only, means the doc
-//! is a faithful edit of the extracted baseline rather than a free-form authoring surface.
+//! it back. `serialize_state_machine` then applies it, regenerating the whole family, so an edit may
+//! add or remove nodes and states; starting from the extracted baseline keeps the shape and state
+//! identities the model's own.
 //!
 //! A token is written as a plain integer (the `1`/`2`/`3` script opcodes, or any small value) or as
 //! a string — a registry name we hash, or a bare `0xHHHHHHHH`. Extraction prefers the name so the

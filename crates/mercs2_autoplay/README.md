@@ -32,9 +32,12 @@ through the real `vz` master script against the real world data from `vz.wad` â€
 cargo run -p mercs2_autoplay -- boot --trace out.ndjson [--hero mattias|jennifer|chris] [--vz-wad <path>]
 ```
 
-Without `--vz-wad` the archive comes from `MERCS2_VZ_WAD`, then the checkout's `.mercs2-local.toml`
-(write it with `scripts/find-vz-wad.sh --write`, run from `tools/wad_simulator`). Exit codes: 0 booted,
-1 the boot ran but did not finish, 2 could not run.
+Without `--vz-wad` the archive comes from `MERCS2_GAME_DIR`, then `VZ_WAD` (each the install root, its
+`data` folder, or the archive itself), then the first `.mercs2-local.toml` at or above the working
+directory whose `vz_wad` key names an existing file (write it with `scripts/find-vz-wad.sh --write`, run
+from `tools/wad_simulator`).
+`MERCS2_VZ_WAD` is not read here. Exit codes: 0 booted, 1 the boot ran but did not finish, 2 could not
+run.
 
 The game-gated tests (`retail` feature, `cargo xtask retail-test`) pin the boot to the first objective,
 pin each record kind to a shipped source line, and require two boots to write byte-identical traces.

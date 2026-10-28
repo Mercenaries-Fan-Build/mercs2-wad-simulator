@@ -81,8 +81,7 @@ that we do not yet (parity gaps) belong in the code map's confirm-live list (see
 
 ## Binding wiring (the seam, not a gap)
 
-- **`mercs2_script` Sound/VO real bodies** — `bindings/sound.rs` + `bindings/vo.rs` still return
-  `Installed::none()`. Filling them is the `mercs2_script`/`mercs2_engine` owner's edit (outside this
-  crate's scope): add `AudioEngine` methods to `EngineHost` and forward each cfunc. See
-  `engine.rs` module docs "Binding-wiring seam". Every `Sound.*`/`VO.*` engine body it needs exists
-  here now.
+- **`mercs2_script` Sound/VO real bodies** — `bindings/sound.rs` + `bindings/vo.rs` install real
+  bodies for all 88 `Sound.*` and 11 `VO.*` cfuncs (`mercs2_script/binding_coverage.json`). Each
+  forwards through `EngineHost` to `mercs2_engine`'s `GameScriptHost`, which holds the
+  `AudioEngine`. See `engine.rs` module docs "Binding-wiring seam".

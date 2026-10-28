@@ -31,9 +31,10 @@
 //! Wheel raycasts are grounded on `mercs2_core::PhysicsQuery`; this crate never
 //! depends on `mercs2_physics`.
 //!
-//! The authored tuning defaults and the camera preset float layout are NOT decoded (field names /
-//! strings are stripped on PC). Those sites are marked `CONFIRM-LIVE` in-source and tracked in
-//! `DEFERRED.md`; the values present are structural placeholders, not oracle values.
+//! The authored tuning schema defaults are recovered ([`tuning::schema`], in engine units); the
+//! engine→model unit bridge, the per-wheel field labels and the camera preset float layout are NOT
+//! decoded (field names / strings are stripped on PC). Those sites are marked `CONFIRM-LIVE` in-source
+//! and tracked in `DEFERRED.md`; the camera preset values are structural placeholders, not oracle values.
 
 pub mod camera;
 pub mod command;

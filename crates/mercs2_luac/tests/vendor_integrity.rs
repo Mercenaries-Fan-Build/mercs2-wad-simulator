@@ -1,4 +1,4 @@
-//! Guards on the vendored Lua tree.
+//! Guards on the vendored Lua tree that read `vendor/` alone.
 //!
 //! `tools/lua51-mercs2/README.md` declares the patches to be the single source of truth, and
 //! `vendor/` to be upstream `tools/lua51-src/src` with those patches applied. Nothing enforced
@@ -8,68 +8,21 @@
 //! Rather than shell out to `patch` (absent on a stock Windows box), these assert the *invariant*
 //! the patches exist to produce:
 //!
-//! * every file the patches do NOT touch is byte-identical to upstream, modulo line endings;
-//! * the three files they DO touch carry each documented change;
+//! * the three files they touch carry each documented change;
 //! * `LUA_COMPAT_VARARG` is on.
 //!
-//! The last one is not from a patch — it is stock 5.1 config — but two corpus scripts depend on it
-//! and it is exactly the sort of compat define a future tidy-up would switch off. See
+//! The other half — every file the patches do NOT touch is byte-identical to upstream, modulo line
+//! endings — needs the upstream tree, so it lives in `vendor_upstream_retail.rs` (`retail` feature).
+//!
+//! `LUA_COMPAT_VARARG` is not from a patch — it is stock 5.1 config — but two corpus scripts depend
+//! on it and it is exactly the sort of compat define a future tidy-up would switch off. See
 //! `sys::tests::implicit_vararg_arg_table_exists`, which proves the runtime behaviour; this proves
 //! the intent is written down.
 
 use std::path::{Path, PathBuf};
 
-/// Upstream lives outside the crate: `lua51_src_dir` in `.mercs2-local.toml` names it. A missing
-/// config, a missing key, or a path that is not a directory fails the test with the key's name.
-fn upstream_dir() -> PathBuf {
-    mercs2_formats::game_paths::local_config_lua51_src_dir(Path::new(env!("CARGO_MANIFEST_DIR")))
-        .unwrap_or_else(|e| panic!("{e}"))
-}
-
 fn vendor_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("vendor")
-}
-
-/// Compare ignoring line endings — the vendored copy is CRLF, upstream is LF, and that difference
-/// is not a code change.
-fn same_ignoring_line_endings(a: &str, b: &str) -> bool {
-    a.replace("\r\n", "\n") == b.replace("\r\n", "\n")
-}
-
-/// The only files any patch is allowed to touch.
-const PATCHED: [&str; 3] = ["luaconf.h", "ldump.c", "lundump.c"];
-
-#[test]
-fn vendor_is_upstream_plus_exactly_the_three_patched_files() {
-    let upstream = upstream_dir();
-    let vendor = vendor_dir();
-
-    let mut checked = 0usize;
-    let mut unexpected = Vec::new();
-
-    for entry in std::fs::read_dir(&vendor).expect("read vendor/") {
-        let path = entry.expect("dir entry").path();
-        let name = path.file_name().unwrap().to_string_lossy().to_string();
-        if !(name.ends_with(".c") || name.ends_with(".h")) || PATCHED.contains(&name.as_str()) {
-            continue;
-        }
-        let up = upstream.join(&name);
-        assert!(up.is_file(), "{name} is in vendor/ but not upstream — where did it come from?");
-
-        let a = std::fs::read_to_string(&up).expect("read upstream");
-        let b = std::fs::read_to_string(&path).expect("read vendor");
-        if !same_ignoring_line_endings(&a, &b) {
-            unexpected.push(name);
-        }
-        checked += 1;
-    }
-
-    assert!(checked > 20, "expected the full Lua tree, only compared {checked} files");
-    assert!(
-        unexpected.is_empty(),
-        "these vendored files differ from upstream but no patch claims them: {unexpected:?}. \
-         Either the change belongs in tools/lua51-mercs2/patches/ or it should not be there."
-    );
 }
 
 #[test]

@@ -6,7 +6,7 @@
 //! annotated with `---@meta` so `lua-language-server` treats it as a type declaration only. A
 //! Shipment author drops these into their editor's workspace (via a `.luarc.json` `workspace
 //! .library` entry, or by placing the folder alongside their `src/`) and immediately gets
-//! autocomplete for every one of the engine's **1086 cfuncs across 35+ namespaces**.
+//! autocomplete for every one of the engine's **1092 cfuncs across 37 namespaces**.
 //!
 //! Lives inside `mercs2_script` because the data source *is* this crate — the [`bindings`]
 //! module's [`NAMESPACES`](crate::bindings::NAMESPACES) table. Keeping the generator adjacent

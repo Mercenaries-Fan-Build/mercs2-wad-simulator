@@ -28,8 +28,9 @@
 //! **Deliberately NOT built (data / render-time / confirm-live per the code map):**
 //! - The **water render pass** (wake→occlusion→reflection→surface, the ping-pong `pHeightS`/`pNormalS`/
 //!   `pFoamMas` sim RTs, the reflection mirror-matrix, `PgWater*` shaders, `OWater::LOD` tessellation
-//!   banding) — code map §1–§3. That is the seam handled against `mercs2_engine`; the **dynamic wave
-//!   displacement** lives there, so this crate models only the *static* waterline.
+//!   banding) — code map §1–§3. That is the seam handled against `mercs2_engine`. The animated wave
+//!   field ([`WaveModel`]) is modelled here, on top of the static waterline; the engine's water shader
+//!   samples the same field.
 //! - The **exact `FUN_00480440` return packing** (height-vs-boolean) — a SecuROM-island thunk, code map
 //!   §5 confirm-live; we expose both facts ([`watermap::WaterSample`]) and let the caller pick.
 //! - **`AiWaterZoneEnum` member names** — the table exists but is not itemised (ai_code_map §4); the

@@ -2,13 +2,13 @@
 //! `vz-patch.wad` overlay for controlled Mercenaries 2 animation modding.
 //!
 //! Reuses the shipped modding pipeline verbatim
-//! (`mercs2_formats::{ffcs, sges, animgroup, patch_wad}`) and matches the
-//! `cube_mod` block-build pattern: source the target block via its ASET entry,
+//! (`mercs2_formats::{ffcs, sges, animgroup, patch_wad}`) to build the override
+//! block: source the target block via its ASET entry,
 //! copy its exact `path_string` + ALL of its ASET entries, `compress_sges`, wrap
 //! in a `PatchBlock`, and `build_patch_wad_multi`. The only new logic is (a)
 //! locating the human-rig animgroup block that owns player-idle clip
 //! `0x24F8C8E6`, and (b) the optional in-place clip perturbation passes in
-//! [`perturb`].
+//! [`mercs2_formats::anim::perturb`].
 //!
 //! Block selection (precedence: `--block-index` > `--clip` > `--anim-name`):
 //! the default is `--anim-name characternameanimgroup_mattias`, i.e. the PLAYER's
@@ -20,22 +20,27 @@
 //! Modes:
 //!   --roundtrip  decompress → recompress UNMODIFIED → verify byte-exact → pack.
 //!   --freeze     zero every clip's dynamic wavelet coefficient data → pack.
+//!   --replace-clip HASH --replace-file PATH
+//!                splice an external Havok packfile over one clip → pack.
+//!   --assetcc EXE round-trip every clip through AssetCc2 and splice each back → pack.
 //!   --list       print the selected block's clips (hash @ havok_offset) and exit.
 //!   --dump PATH  write the selected block's DECOMPRESSED bytes and exit.
 //!
-//! `--roundtrip` and `--freeze` are mutually exclusive, and one of the four modes
-//! is required. Every pack path re-decompresses the block it just compressed and
+//! `--roundtrip` is mutually exclusive with `--freeze` and `--replace-clip`, and
+//! one of the six modes is required. Every pack path re-decompresses the block it just compressed and
 //! asserts byte-exact equality before writing (`sges` is lossless).
 //!
 //! Output goes to `--out` (default `crates/anim_patch/out/vz-patch.wad`); the real
-//! game vz-patch.wad is only touched when `--deploy` is passed. The source vz.wad
-//! and the deploy target are discovered from the EA Games registry key on Windows;
-//! elsewhere `--wad` is mandatory.
+//! game vz-patch.wad is only touched when `--deploy` is passed, and `--deploy`
+//! together with `--out` is refused (two destinations). The source vz.wad
+//! and the deploy target come from the install named by `$MERCS2_GAME_DIR` or
+//! `$VZ_WAD`, then the EA Games registry key on Windows; with none of those,
+//! `--wad` is mandatory and `--deploy` fails.
 //!
 //! Module map:
 //!   `main`     — CLI, FFCS load, block selection, patch-WAD build/verify/write.
-//!   [`perturb`] — in-place perturbation passes on the DECOMPRESSED block bytes
-//!                 (currently [`mercs2_formats::anim::perturb::freeze_clip`]).
+//!   [`mercs2_formats::anim::perturb`] — in-place perturbation passes on the
+//!                 DECOMPRESSED block bytes (`freeze_clip`, `replace_clip`).
 
 // perturb passes moved to mercs2_formats::anim::perturb (dedup W_OFF_* constants).
 
@@ -60,11 +65,12 @@ const PLAYER_IDLE_CLIP: u32 = 0x24F8_C8E6;
     about = "Export the base-game player animation block and repack it into a vz-patch.wad overlay"
 )]
 struct Cli {
-    /// Source vz.wad to read the animgroup block from. Defaults to the
-    /// registry-discovered game vz.wad if present.
+    /// Source vz.wad to read the animgroup block from. Defaults to the game
+    /// vz.wad found via $MERCS2_GAME_DIR / $VZ_WAD / the registry, if present.
     #[arg(long)]
     wad: Option<PathBuf>,
-    /// Output patch WAD path (default: crates/anim_patch/out/vz-patch.wad).
+    /// Output patch WAD path (default: crates/anim_patch/out/vz-patch.wad). Refused together
+    /// with --deploy.
     #[arg(short, long)]
     out: Option<PathBuf>,
     /// Select the animgroup block whose path_string contains this substring
@@ -92,8 +98,9 @@ struct Cli {
     /// Zero every clip's dynamic wavelet coefficient data (static/near-bind pose).
     #[arg(long)]
     freeze: bool,
-    /// Write the result to the game's data/vz-patch.wad instead of --out.
-    #[arg(long)]
+    /// Write the result to the game's data/vz-patch.wad (the install from $MERCS2_GAME_DIR /
+    /// $VZ_WAD / the registry) instead of the default --out path. Refused together with --out.
+    #[arg(long, conflicts_with = "out")]
     deploy: bool,
     /// Just report which block holds the clip (and its clips) and exit.
     #[arg(long)]
@@ -102,8 +109,8 @@ struct Cli {
     #[arg(long)]
     dump: Option<PathBuf>,
     /// Replace the packfile of the clip with this hash (hex) with the external Havok packfile
-    /// given by --replace-file. The replacement must fit the clip's on-disk region (zero-padded
-    /// to fit — a Havok packfile is self-describing, so trailing zeros are ignored). Composable
+    /// given by --replace-file. The replacement must fit the clip's on-disk region; it is written
+    /// at the region start and the region's remaining bytes are left unchanged. Composable
     /// with --freeze: freeze everything, then restore this one clip from the external packfile.
     #[arg(long, value_parser = parse_hex_u32)]
     replace_clip: Option<u32>,
@@ -343,8 +350,8 @@ fn to_patch_aset(e: &ArchiveAsetEntry) -> AsetEntry {
 }
 
 /// Build the single override `PatchBlock` from a (possibly perturbed) decompressed
-/// block, matching the cube_mod pattern (path_string + all ASET entries + packed
-/// page count + defaults).
+/// block: the source block's path_string + all its ASET entries + packed page
+/// count + defaults.
 fn build_block(loc: &Located, decompressed: &[u8]) -> Result<PatchBlock, String> {
     let compressed = compress_sges(decompressed).map_err(|e| format!("sges compress: {e}"))?;
     let aset: Vec<AsetEntry> = loc.aset_entries.iter().map(to_patch_aset).collect();
@@ -383,7 +390,7 @@ fn run() -> Result<(), String> {
         .wad
         .clone()
         .or_else(registry_vz_wad)
-        .ok_or("no --wad given and vz.wad not found via registry")?;
+        .ok_or("no --wad given and vz.wad not found via MERCS2_GAME_DIR / VZ_WAD / registry")?;
     let mut file = File::open(&wad_path).map_err(|e| format!("open {}: {e}", wad_path.display()))?;
     let file_size = file.metadata().map_err(|e| format!("metadata: {e}"))?.len();
     let archive = load_ffcs_archive(&mut file, file_size).map_err(|e| format!("FFCS: {e}"))?;
@@ -580,10 +587,12 @@ fn run() -> Result<(), String> {
         println!("verify: recompressed block re-decompresses byte-exact ({} bytes)", work.len());
     }
 
-    // Resolve output path (scratch by default; game dir only with --deploy).
+    // Resolve output path (scratch by default; game dir only with --deploy, which clap refuses
+    // alongside --out).
     let out = if cli.deploy {
-        cli.out.clone().or_else(registry_vz_patch_wad).ok_or(
-            "--deploy given but game vz-patch.wad path not found via registry (pass --out)",
+        registry_vz_patch_wad().ok_or(
+            "--deploy given but game vz-patch.wad path not found via MERCS2_GAME_DIR / VZ_WAD / registry \
+             (set MERCS2_GAME_DIR or VZ_WAD, or drop --deploy and pass --out)",
         )?
     } else {
         cli.out.clone().unwrap_or_else(|| {
@@ -609,5 +618,34 @@ fn main() -> ExitCode {
             eprintln!("anim_patch error: {e}");
             ExitCode::FAILURE
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Cli;
+    use clap::error::ErrorKind;
+    use clap::Parser;
+
+    /// `--deploy` names the game's own `vz-patch.wad` as the destination and `--out` names another;
+    /// given both, the tool must refuse rather than pick one, and the refusal names both flags.
+    #[test]
+    fn deploy_with_an_explicit_out_is_refused_naming_both_flags() {
+        let err = Cli::try_parse_from(["anim_patch", "--roundtrip", "--deploy", "--out", "x.wad"])
+            .err()
+            .expect("--deploy with --out must not parse");
+        assert_eq!(err.kind(), ErrorKind::ArgumentConflict);
+        let text = err.to_string();
+        assert!(text.contains("--deploy"), "the error names --deploy: {text}");
+        assert!(text.contains("--out"), "the error names --out: {text}");
+    }
+
+    /// Each flag alone still parses: the refusal is about the pair, not either flag.
+    #[test]
+    fn deploy_alone_and_out_alone_parse() {
+        let deploy = Cli::try_parse_from(["anim_patch", "--roundtrip", "--deploy"]).expect("--deploy alone");
+        assert!(deploy.deploy && deploy.out.is_none());
+        let out = Cli::try_parse_from(["anim_patch", "--roundtrip", "--out", "x.wad"]).expect("--out alone");
+        assert!(!out.deploy && out.out.as_deref() == Some(std::path::Path::new("x.wad")));
     }
 }

@@ -5,7 +5,7 @@
 //!
 //! This is the workshop-side driver for the Skeleton workbench. The heavy lifting on the Mercs2
 //! (donor) side — the per-vertex weight remap + injection — already exists in
-//! `mercs2_formats::{retarget, mannequin, model_inject}`; this module supplies the detection + the
+//! `mercs2_formats::{char_skin, char_lower, model_inject}`; this module supplies the detection + the
 //! human-readable bone map the inspector shows, and the source→target joint table `apply` consumes.
 
 /// The recognised source-rig conventions. Detection is by joint-name shape.

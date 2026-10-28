@@ -139,8 +139,9 @@ Produces `interior.luac` — the decompiler-ready LuaQ chunk for that one script
 ### `replace-lua` — swap one script's bytecode and re-emit the block
 
 Reads new LuaQ from `--luac` (rejected unless it starts with `\x1bLua`), replaces the named
-script's bytecode, patches the BINN descriptor `body_size` and the entry `chunk_size`,
-recomputes the CSUM, and self-verifies: it re-parses the rebuilt block and re-checks every
+script's bytecode by rebuilding its whole container (`ScriptsBlock::replace_lua`: `INFO` and
+`DEPS` re-derived from the new bytecode by `mercs2_formats::script_meta`, keeping the script's
+name; then `BINN`, the descriptor table and a fresh CSUM), and self-verifies: it re-parses the rebuilt block and re-checks every
 CSUM. If the new bytecode is byte-identical to the old, it additionally asserts the whole
 block reproduced the input byte-for-byte (an identity safety net).
 
@@ -151,10 +152,9 @@ block reproduced the input byte-for-byte (an identity safety net).
 | `--luac` | yes | New LuaQ (`\x1bLua`-headed). |
 | `--out` | yes | Rebuilt block `.bin`. |
 
-Only the LuaQ tail, BINN `body_size`, CSUM and `chunk_size` change; the UCFX header,
-descriptor offsets, and INFO/DEPS bodies are untouched. **Constraint:** the container's
-`BINN.body_size` must equal its LuaQ length (a pure-LuaQ BINN body). Metadata-bearing BINN
-bodies are rejected with an explicit error.
+**Constraint:** the new bytecode must still import every module the script's old `DEPS`
+listed (a dropped load dependency can leave a module the script uses unloaded); otherwise the
+command fails naming the missing hashes.
 
 ```
 wad_builder replace-lua --block scripts_vz.bin --script wifpmcinterior --luac new.luac --out scripts_vz.new.bin
@@ -244,7 +244,8 @@ self-verifies.
 | `--out` | yes | no | Output block. |
 
 Requires at least one `--bone`; if a container has more MESH slots than bones supplied, that
-container errors (`need N bone(s), got M`). Reads the model's `HIER` chunk to compute the
+container is left unchanged with `entry #i: no reskin (need N bone(s), got M)` and the run
+continues. Reads the model's `HIER` chunk to compute the
 per-slot world-space translation, so the block must contain a HIER.
 
 ```
@@ -576,17 +577,21 @@ I/O error (`read: <e>` / `write: <e>`) also lands here.
 * `'<name>' not found` / `'<inspect>' not found (pandemic_hash_m2 mismatch)` — no entry hashes
   to that name.
 * `luac file is not LuaQ bytecode (missing \x1bLua header)` — `--luac` isn't compiled LuaQ.
-* `BINN.body_size (…) != LuaQ length (…); metadata-bearing BINN not yet supported` — the
-  container's BINN body isn't pure LuaQ; `replace-lua`/`build-skin` can't edit it.
+* `script <name>: the new bytecode no longer imports N of its retail DEPS (0x…); keep every
+  import the script had` — `replace-lua`/`build-skin` refuse bytecode that drops a `DEPS` entry.
 * `identical-LuaQ replace did NOT reproduce input block` — the identity safety net tripped
   (indicates a bug in the rebuild path, not user error).
 
 **Model-surgery errors**
-* `no MTRL chunk in container` / `MTRL body out of range` (`fix-model-mtrl`, `repoint-tex`).
 * `no --remap pairs given` / `bad --remap '<r>' (want OLD:NEW)` / `bad old hex …` / `bad new
   hex …` (`repoint-tex`).
-* `no --bone given …` / `need N bone(s), got M` / `no HIER chunk` / `STRM already has blend
-  channels` / `STRM decl has no NORMAL element` (`reskin-eyes`).
+* `no --bone given …` (`reskin-eyes`).
+* Per-entry model errors are **not** fatal: `fix-model-mtrl`, `fix-model-vertices`,
+  `unwrap-mesh`, `repoint-tex` and `reskin-eyes` print `entry #i: no … (<message>)` for a
+  container they cannot edit, leave it unchanged, and go on (exit `0` once the output
+  self-verifies). The messages include `no MTRL chunk in container` / `MTRL body out of range`
+  (`fix-model-mtrl`, `repoint-tex`) and `need N bone(s), got M` / `no HIER chunk` / `STRM
+  already has blend channels` / `STRM decl has no NORMAL element` (`reskin-eyes`).
 
 **Texture errors**
 * `no INFO chunk` / `no CSUM trailer` (`set-tex-specular`).

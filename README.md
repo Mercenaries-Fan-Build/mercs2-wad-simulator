@@ -24,7 +24,7 @@ Start from the [Shipment template](https://github.com/Mercenaries-Fan-Build/merc
 which has a runnable example for every contribution kind.
 
 ### `wad_simulator`
-Engine-accurate consumption simulator for WAD archives. Validates WAD structure, detects out-of-bounds ASET entries, and runs every asset through a consumption pipeline (meshes, textures, sounds, scripts, etc.). Useful for validating WAD conversions and catching data corruption before runtime.
+Engine-accurate consumption simulator for WAD archives. Validates WAD structure, checks ASET hash ownership, and runs every asset through a consumption pipeline (meshes, textures, sounds, scripts, etc.). Useful for validating WAD conversions and catching data corruption before runtime.
 
 ```bash
 wad_simulator --wad output/data/vz-patch.wad --rainbow-table tools/rainbow_table.json
@@ -327,6 +327,22 @@ image about 2,790–2,800 (nearly all also confirmed through another image), PC 
 Xbox 360 images are analysed with the Xenon language (see the notes repository's
 `docs/xbox360_ghidra_xenon.md`).
 
+`exemap annotate <image_id> --functions <jsonl> --exports <dir> --matches <dir> --out <jsonl>`
+writes one JSON line per function of an image's Ghidra functions export
+(`<image_id>.functions.jsonl`: an image record, one record per function, an end record) for a search
+corpus. Each line lists every name the function carries, none chosen over another: the Ghidra name
+(source `ghidra:<name_source>`), every `<id>.rtti.tsv` slot that holds it (`rtti`), every
+`<id>.luareg.tsv` entry that registers it (`luareg`) and every `<id>.imports.tsv` row at its address
+(`import`; the imports export is required for an image whose chain unpacks a XEX or a PS3 SELF and
+refused for any other). Each line then lists the function's agreed translation to every other image
+of the match graph, with whether the direct pair gives it and how many of the paths answer; the paths
+are computed once per image pair. The first line names the image's variants (images whose
+`code_image` is this one), the graph's other images and the `images.tsv` images the graph has no path
+to. The command fails on a functions file without its end record, with a function count other than
+the declared one, with a repeated address, of another image or of bytes other than the image's
+`images.tsv` sha256; on a variant (annotate its code image); and on any contradicted translation,
+listing each.
+
 The PC images' SecuROM layout is mapped by Ghidra scripts in the notes repository (see its
 `docs/securom_splice_map.md`): `<id>.splices.tsv` lists every `.text` transfer into the SecuROM
 blocks and how the code it reaches ends, and `<id>.securom_reach.tsv` labels every function that
@@ -411,7 +427,7 @@ environment variable is consulted. The file holds one `key = "path"` per line:
 | `unluac_jar` | the unluac jar | tests and dev tools that convert console Lua bytecode |
 | `java_binary` | the `java` executable that runs unluac | tests and dev tools that convert console Lua bytecode |
 | `unrar_binary` | `UnRAR.exe` | tests of the RAR'd Xbox 360 DLC path |
-| `lua51_src_dir` | the pristine Lua 5.1 `src` tree | the `mercs2_luac` vendor-integrity test |
+| `lua51_src_dir` | the pristine Lua 5.1 `src` tree | the `mercs2_luac` vendor-vs-upstream test (`tests/vendor_upstream_retail.rs`) |
 
 `scripts/find-vz-wad.sh --write` writes `vz_wad` only, and rewrites the whole file, so
 the console keys, `unpacked_exe`, `canonical_dir`, the console-image keys, the corpus keys and the tool keys are added by hand after it runs. The

@@ -18,7 +18,7 @@
 //!   (`FUN_006cdac0`), and [`session::should_replicate`], the **host gate**.
 //! - [`replicate`] — the local-vs-wire branch of the marshal core: local-post always, wire-marshal
 //!   when the host gate fires (mirrors the AI bus's `DirectAction` → replicate-if-hosting).
-//! - [`category`] — the `NetCategoryInfo` property-sync descriptor: the primary class + 8 `NetSubCat*`.
+//! - [`category`] — the `NetCategoryInfo` property-sync descriptor: the primary class + 7 `NetSubCat*`.
 //! - [`module_pull`] — the join-time module pull (`SynchNetImportModule`, gate hash `0x762c8f61`).
 //!
 //! The crate root ties the session and the module-sync state together in [`NetWorld`] (the world-global

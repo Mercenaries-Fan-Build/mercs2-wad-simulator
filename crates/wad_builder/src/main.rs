@@ -1,6 +1,6 @@
 //! wad_builder — generic "raw asset → engine format → vz-patch.wad" builder.
 //!
-//! Jumping off from `dlc_port`/`cube_mod`, this crate adds the build-side
+//! Jumping off from `dlc_port`/`mercs2_smuggler`, this crate adds the build-side
 //! editing those lack. It started with Lua-script replacement inside a
 //! multi-entry `scripts_vz` block (compile-from-source → re-wrap BINN/UCFX → fix
 //! CSUM + chunk_size) and now covers model, texture and whole-WAD surgery too.
@@ -24,7 +24,8 @@
 //!   `scripts_vz` block, recompress (sges round-trip checked) and rebuild the WAD,
 //!   then re-read the output and assert the edit landed.
 //!
-//! Module map:
+//! Module map (none of these is a module of this crate: each lives in `mercs2_formats` —
+//! `scripts_block` and `model_edit::{mtrl, vertex, unwrap, reskin}` — imported under these names):
 //!
 //! * [`scripts_block`] — `ScriptsBlock`/`Entry` container model (parse, serialize,
 //!   CSUM verify, name lookup by `pandemic_hash_m2`, LuaQ extract/replace). The

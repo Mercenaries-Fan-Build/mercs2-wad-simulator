@@ -138,11 +138,11 @@ sits relative to the vehicle drive step in the master tick (`system.rs`).
 
 ## Notes / gotchas
 
-- **Tuning defaults and the camera preset math are placeholders, not decoded values.** The
-  `_CarPhysicsV2` field *names* are stripped on the PC build, and the camera preset float layout /
-  look-axis apply / pitch clamp are string-stripped. Everything unread is marked `CONFIRM-LIVE` in
-  the source and listed in `DEFERRED.md` under "Faithful blockers" (recover by breaking
-  `0x00449460` and diffing the 0x18c block). Treat the numbers as structural, not authored.
+- **The speed / suspension / friction / brake tuning and the camera preset math are stand-ins, not
+  authored values.** The `_CarPhysicsV2` / `_TankPhysics` schema defaults are recovered
+  (`tuning::schema`, engine units), but those drive-model fields keep model-scale values until the engine→model unit bridge is confirmed live,
+  and the camera preset float layout / look-axis apply / pitch clamp are string-stripped. Everything
+  unread is marked `CONFIRM-LIVE` in the source and listed in `DEFERRED.md` under "Faithful blockers".
 - The command-**ID hash function** is unknown; the constants in `command::cmd` are used verbatim
   because they are exactly what the ring compares against.
 - The rings are **broadcast**: every subscriber sees every record once, and a record is only

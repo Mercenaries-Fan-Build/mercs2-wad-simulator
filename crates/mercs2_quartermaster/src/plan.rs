@@ -181,8 +181,9 @@ pub struct LoadPlan {
     pub supersedes: Vec<SupersededRow>,
     /// The PTHS path of every block `qm link` re-emits: the `vz.wad` scripts blocks, the `shell.wad`
     /// scripts block (`blocks\Shell\resident_P000_Q3.block`), then each merged string table's
-    /// block, then each merged sound bank's block. A deploy step drops the per-Shipment copies of
-    /// exactly these.
+    /// block, then each merged sound bank's block, then — when any Shipment has an `add_fx` or a
+    /// `replace_fx` — the effects block. A deploy step drops the per-Shipment copies of exactly
+    /// these.
     pub link_block_paths: Vec<String>,
     /// Every game data file `qm link` emits for the set (`data/shader3.bin`, `data/shader3Low.bin`):
     /// both stores when any Shipment has a shader kind. A deploy step drops the per-Shipment

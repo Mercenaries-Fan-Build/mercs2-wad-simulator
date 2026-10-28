@@ -7,14 +7,15 @@ overlay, for controlled Mercenaries 2 animation modding.
 
 A command-line tool (single `[[bin]]`, no library surface). It:
 
-1. Opens the game's `vz.wad` (passed with `--wad`, or discovered from the Windows registry key
+1. Opens the game's `vz.wad` (passed with `--wad`, or `data/vz.wad` under the install named by
+   `MERCS2_GAME_DIR` / `VZ_WAD`, then the Windows registry key
    `HKLM\SOFTWARE\WOW6432Node\EA Games\Mercenaries 2 World in Flames` → `Install Dir` + `data\vz.wad`).
 2. Selects one animation block. Selector precedence is `--block-index` > `--clip` > `--anim-name`
    (default `characternameanimgroup_mattias`). A block only qualifies if it owns an ASET entry with
    `type_id == TYPE_ID_ANIMATION` (16).
 3. Decompresses that block (`sges::decompress_block`) and parses it as an animgroup
    (`animgroup::parse_animgroup`) to enumerate its clips (`name_hash`, `havok_offset`).
-4. Optionally perturbs the decompressed bytes in place (`--freeze`).
+4. Optionally perturbs the decompressed bytes in place (`--freeze`, `--replace-clip`, `--assetcc`).
 5. Recompresses with `compress_sges`, **verifies the recompressed data re-decompresses byte-exact**,
    wraps it in a `PatchBlock` (original `path_string` + *all* of the block's ASET entries + decompressed
    page count `(len + 0x7FFF) / 0x8000`), and emits a patch WAD via `patch_wad::build_patch_wad_multi`
@@ -26,26 +27,30 @@ Modes:
 | --- | --- |
 | `--roundtrip` | Identity pass: recompress the block **unmodified**, assert a byte-exact round-trip, then pack. Run this first — nothing else is trusted until it passes. |
 | `--freeze` | Zero every clip's dynamic quantized wavelet coefficient stream (`quantData`), producing a static / near-bind pose, then pack. |
+| `--replace-clip <hash> --replace-file <path>` | Splice the external Havok packfile at `<path>` over the clip `<hash>` (it must fit the clip's region; the region's remaining bytes are left unchanged), then pack. Applied after `--freeze`. |
+| `--assetcc <AssetCc2.exe>` | Round-trip every clip through AssetCc2 (`--xml`, then `--strip --rules4101`) and splice each back, then pack. |
 | `--list` | Print every clip in the selected block (`0xHASH @0xOFFSET`) and exit. |
 | `--dump <path>` | Write the selected block's decompressed bytes to `<path>` and exit. |
 
-`--roundtrip` and `--freeze` are mutually exclusive, and one of them (or `--list`/`--dump`) is required.
+`--roundtrip` is mutually exclusive with `--freeze` and `--replace-clip`, and one of `--roundtrip` /
+`--freeze` / `--replace-clip` / `--assetcc` (or `--list`/`--dump`) is required.
 Output goes to `--out` (default `crates/anim_patch/out/vz-patch.wad`); the game's real
-`data/vz-patch.wad` is only written when `--deploy` is passed.
+`data/vz-patch.wad` is only written when `--deploy` is passed. `--deploy` and `--out` together are
+refused.
 
 ## Where it comes from
 
 * The WAD read/write path is not new: it reuses the shipped modding pipeline verbatim
-  (`mercs2_formats::{ffcs, sges, animgroup, patch_wad}`) and follows the same block-build pattern as
-  the cube_mod proof of concept (`docs/cube_mod_poc.md`) — source the target block via its ASET entry,
+  (`mercs2_formats::{ffcs, sges, animgroup, patch_wad}`) and builds the override block the same way —
+  source the target block via its ASET entry,
   copy its exact `path_string` and *all* of its ASET entries, `compress_sges`, wrap in a `PatchBlock`,
   `build_patch_wad_multi`.
 * The only genuinely new logic is (a) locating the human-rig animgroup block that owns the player-idle
-  clip `0x24F8C8E6`, and (b) the in-place clip perturbation in `perturb.rs`.
-* `perturb.rs` works against the on-disk `hkaWaveletSkeletalAnimation` layout (Havok 5.5.0-r1, 32-bit LE).
-  Its field offsets (`W_OFF_ANIM_TYPE` 8, `W_OFF_DURATION` 12, `W_OFF_NUM_TT` 16, `W_OFF_BLOCK_SIZE` 40,
-  `W_OFF_QUANT_DATA_IDX` 80, `W_OFF_QUANT_DATA_SIZE` 84, struct size 96) intentionally mirror the private
-  `W_OFF_*` constants in `mercs2_formats::anim`, and the struct finder mirrors `anim::find_wavelet_struct`.
+  clip `0x24F8C8E6`, and (b) the in-place clip perturbation in `mercs2_formats::anim::perturb`.
+* `mercs2_formats::anim::perturb` works against the on-disk `hkaWaveletSkeletalAnimation` layout
+  (Havok 5.5.0-r1, 32-bit LE). It uses the `W_OFF_*` constants of `mercs2_formats::anim` itself
+  (`W_OFF_ANIM_TYPE` 8, `W_OFF_DURATION` 12, `W_OFF_NUM_TT` 16, `W_OFF_BLOCK_SIZE` 40,
+  `W_OFF_QUANT_DATA_IDX` 80, struct size 96) plus its own `W_OFF_QUANT_DATA_SIZE` 84.
 
 ## Usage
 
@@ -98,5 +103,8 @@ cargo run -p anim_patch -- --clip 0x24F8C8E6 --list
   / near-bind pose rather than garbage.
 * Every pack path re-decompresses the block it just compressed and asserts equality before writing;
   `sges` is lossless, so a mismatch means the pipeline is broken, not the data.
-* Registry discovery of `vz.wad` / `vz-patch.wad` is Windows-only; elsewhere `--wad` is mandatory and
-  `--deploy` requires an explicit `--out`.
+* Registry discovery of `vz.wad` / `vz-patch.wad` is Windows-only; elsewhere, without `MERCS2_GAME_DIR`
+  / `VZ_WAD`, `--wad` is mandatory and `--deploy` fails (no install to deploy into).
+* `--deploy` and `--out` name two different destinations, so passing both is refused before anything is
+  read (`the argument '--deploy' cannot be used with '--out <OUT>'`). Use `--deploy` to write the
+  install's `data/vz-patch.wad`, or `--out` for any other path.

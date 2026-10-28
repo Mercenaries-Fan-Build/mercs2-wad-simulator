@@ -29,8 +29,8 @@
 //! * [`symbolize`] — optional (`--symbolize`) COFF/exe-map naming of crash frames.
 //! * [`sha256`] — dependency-free SHA-256 for the log's own fingerprint.
 //!
-//! Integration tests in `tests/fixtures.rs` lock the classifier against four real
-//! captures in `storage/`.
+//! Integration tests in `tests/fixtures.rs` lock the classifier against five real
+//! captures in `tests/fixtures/`.
 
 mod parse;
 mod phases;
@@ -48,7 +48,7 @@ const EXE_SYMBOLS_ENV: &str = "MERCS2_EXE_SYMBOLS";
 
 /// The game's `pmc_blackbox.log`, which retail writes into the install folder.
 ///
-/// Derived from the resolved install (`--game-dir`/`MERCS2_GAME_DIR`/`VZ_WAD`/registry).
+/// Derived from the install named by `MERCS2_GAME_DIR` or `VZ_WAD` (no flag, no registry lookup).
 /// Mirrors `mercs2_formats::game_paths::GAME_DIR_VARS`, reproduced locally rather than depended upon —
 /// this is a small standalone log tool and pulling in the format crate for three lines of path probing
 /// would be the tail wagging the dog. Keep the variable names in step.
@@ -111,7 +111,7 @@ struct Cli {
     symbolize: bool,
 
     /// Curated Mercenaries2.exe VA→name map for --symbolize.
-    /// Defaults to `$MERCS2_EXE_SYMBOLS`; required when `--symbolize` is used.
+    /// Defaults to `$MERCS2_EXE_SYMBOLS`; without it `--symbolize` names only .asi/.dll frames.
     #[arg(long)]
     exe_symbols: Option<PathBuf>,
 

@@ -130,6 +130,7 @@ with the per-fixed-step `tick`.
   itemise it, so the zone value is carried raw.
 - **Deliberately out of scope here:** the water *render* pass (wake → occlusion → reflection → surface,
   the ping-pong `pHeightS`/`pNormalS`/`pFoamMas` sim RTs, the reflection mirror-matrix, `PgWater*`
-  shaders, `OWater::LOD` tessellation banding — code map §1–§3). The **dynamic wave displacement** lives
-  there, so this crate models only the *static* waterline. Motion blur is **absent on PC** per the code
+  shaders, `OWater::LOD` tessellation banding — code map §1–§3). The animated wave field
+  (`wave::WaveModel`) is modelled here, on top of the static waterline: the height query and the swim
+  update sample it, and the engine's water shader samples the same field. Motion blur is **absent on PC** per the code
   map, and nothing here fabricates it.

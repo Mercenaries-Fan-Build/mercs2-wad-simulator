@@ -17,7 +17,7 @@ Three families of subcommands:
 | Command | What it does |
 | --- | --- |
 | `identity-test` | The correctness oracle: parse a block, verify every container CSUM, re-serialize and assert byte-for-byte equality with the input, then dump one entry's container layout. |
-| `extract-lua` / `replace-lua` | Pull out / swap one script's LuaQ bytecode inside a multi-entry `scripts_vz` block (fixes BINN `body_size`, the BINN metadata `bytecode_size`, the CSUM and the entry's `chunk_size`). |
+| `extract-lua` / `replace-lua` | Pull out / swap one script's LuaQ bytecode inside a multi-entry `scripts_vz` block. `replace-lua` rebuilds the whole container: `INFO` and `DEPS` re-derived from the new bytecode (`mercs2_formats::script_meta`, keeping the script's name), the `BINN` body, the descriptor sizes and the CSUM. It refuses bytecode that no longer imports every module of the script's old `DEPS`. |
 | `fix-model-mtrl` | Un-transpose the `[u16 flags][u16 count]` pair in MTRL material records `1..n` left swapped by `ucfx_byteswap::convert_mtrl`. |
 | `fix-model-vertices` | Un-transpose FLOAT16 vertex positions in mixed-decl STRM streams that `apply_strm_vertex_fix` skips. |
 | `unwrap-mesh` | Strip `AREA` chunks from static-`MESH` groups inside a skinned model; `--drop-slots` removes the MESH slots entirely (drop the GEOM count, trim `INDX`). |
@@ -88,7 +88,8 @@ cargo run -p wad_builder --release -- merge-blocks --patch-wad output/data/vz-pa
 
 ## Modules
 
-Binary crate — no public library API. Internal modules:
+Binary crate — no public library API. The modules it uses live in `mercs2_formats` (`scripts_block`
+and `model_edit::{mtrl, vertex, unwrap, reskin}`, imported in `main.rs` under the names below):
 
 * `scripts_block` — the `ScriptsBlock` / `Entry` container model: parse, `serialize`, `verify_csums`,
   `find_by_name` (by `pandemic_hash_m2`), `extract_lua`, `replace_lua`, plus `parse_container` for the

@@ -29,7 +29,7 @@ Four things it can build, composable in one invocation:
   (`--shape corner|clamp`). Kept for plumbing bisection — it proves the WAD/ASET/sges path works
   independently of any new geometry. `--no-cubeize` is the identity passthrough.
 
-It also reads: `--list` (list model-bearing blocks matching `--target-name`),
+It also reads: `--list` (list every block whose path matches `--target-name`),
 `--dump-container` (write the donor model's raw UCFX bytes out, the input a mesh converter needs as
 its structural donor) and `--dump-block` (write the whole raw decompressed block out).
 
@@ -92,7 +92,7 @@ smuggler --source-wad vz.wad --extra-only \
 ```
 
 Defaults worth knowing: `--target-name` is `deliverycrate,crateaid`, `--shape` is `corner`.
-`--output` is required unless you are dumping.
+`--output` is required unless you are listing or dumping.
 
 ## Notes / gotchas
 

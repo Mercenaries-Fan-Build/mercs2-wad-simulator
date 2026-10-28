@@ -7,9 +7,10 @@
 //! `boot` boots a new game headless, records every call the Lua makes to `--trace` (see
 //! `mercs2_autoplay::trace` for the record kinds), and prints the live task tree once the world load
 //! has finished.
-//! Without `--vz-wad` the archive comes from `MERCS2_VZ_WAD`, then the checkout's
-//! `.mercs2-local.toml` (`mercs2_formats::game_paths::vz_wad`). No archive is an error: there is no
-//! world-less mode.
+//! Without `--vz-wad` the archive comes from `MERCS2_GAME_DIR`, then `VZ_WAD` (each the install
+//! root, its `data` folder, or the archive itself), then the first `.mercs2-local.toml` at or above
+//! the working directory whose `vz_wad` key names an existing file
+//! (`mercs2_formats::game_paths::vz_wad`). No archive is an error: there is no world-less mode.
 //!
 //! Exit codes: 0 booted, 1 the boot ran but did not finish, 2 could not run (bad arguments, no archive).
 
@@ -69,8 +70,8 @@ fn cmd_boot(args: &[String]) -> ExitCode {
                 Some(p) => p,
                 None => {
                     return usage_error(
-                        "no vz.wad: pass --vz-wad, set MERCS2_VZ_WAD, or run scripts/find-vz-wad.sh --write \
-                         from tools/wad_simulator",
+                        "no vz.wad: pass --vz-wad, set MERCS2_GAME_DIR or VZ_WAD, or run \
+                         scripts/find-vz-wad.sh --write from tools/wad_simulator",
                     )
                 }
             }

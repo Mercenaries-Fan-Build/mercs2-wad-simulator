@@ -21,7 +21,7 @@
 //! [`crate::ScriptHost::register_engine`] at boot. This avoids threading a `&SharedHost`
 //! through every internal fn — the crate has 14 scattered call-into-Lua sites and adding a
 //! parameter to each one (plus their internal helpers) would cascade into a signature change
-//! across the crate boundary. mlua's `Lua` is `!Send + !Sync`, so this crate is single-
+//! across the crate boundary. `mercs2_luac`'s `Lua` is `!Send + !Sync`, so this crate is single-
 //! threaded; the TL is the natural fit.
 //!
 //! # What it does NOT do (yet)

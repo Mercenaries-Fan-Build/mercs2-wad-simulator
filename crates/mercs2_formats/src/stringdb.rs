@@ -1,4 +1,4 @@
-//! Stringdb (SYEK / SRTS) codec — read AND write localized string tables.
+//! Stringdb (KEYS / STRS) codec — read AND write localized string tables.
 //!
 //! Used by the unofficial fix pack to correct shipped typos and grammar. Read-side exists so we
 //! can find a reported string; write-side exists so a correction can be **any length**, which the
@@ -10,11 +10,11 @@
 //! false for the PC build, and building a writer on it would have produced silent garbage. Measured
 //! across all six `shell.wad` language blocks and `vz.wad`'s english block:
 //!
-//! * `SYEK` = `u32 key_count`, then `key_count × (u32 key_hash, u32 byte_offset)` — **little-endian**.
-//! * `SRTS` = `u32 total_code_units`, then the heap — **little-endian**. Note the header counts
+//! * `KEYS` = `u32 key_count`, then `key_count × (u32 key_hash, u32 byte_offset)` — **little-endian**.
+//! * `STRS` = `u32 total_code_units`, then the heap — **little-endian**. Note the header counts
 //!   UTF-16 **code units, not bytes**: `heap_bytes == 2 × header`, exact in all six languages.
-//! * Heap strings are NUL-terminated UTF-16**LE**. `SYEK` offsets are **byte** offsets from the
-//!   start of the heap (i.e. from SRTS body + 4), not code-unit offsets.
+//! * Heap strings are NUL-terminated UTF-16**LE**. `KEYS` offsets are **byte** offsets from the
+//!   start of the heap (i.e. from STRS body + 4), not code-unit offsets.
 //!
 //! Endianness is still *detected* rather than assumed, so this keeps working if a big-endian
 //! (Xbox) table is ever fed through it.
@@ -70,7 +70,7 @@ pub struct StringEntry {
 pub struct StringDb {
     pub entries: Vec<StringEntry>,
     pub endian: Endian,
-    /// `SRTS` header value as read (code units). Kept for round-trip fidelity checks.
+    /// `STRS` header value as read (code units). Kept for round-trip fidelity checks.
     pub declared_code_units: u32,
     pub heap_bytes: usize,
 }
@@ -128,9 +128,9 @@ fn ascii_score(heap: &[u8], e: Endian) -> usize {
 
 /// Parse a stringdb from its two raw chunk bodies (as returned by `ucfx::extract_chunk_body`).
 pub fn parse(syek: &[u8], srts: &[u8]) -> Result<StringDb, String> {
-    let (kend, count) = detect(syek, 8).ok_or("SYEK: key_count implausible under BE and LE")?;
+    let (kend, count) = detect(syek, 8).ok_or("KEYS: key_count implausible under BE and LE")?;
     if srts.len() < 4 {
-        return Err(format!("SRTS too short ({} bytes)", srts.len()));
+        return Err(format!("STRS too short ({} bytes)", srts.len()));
     }
     let heap = &srts[4..];
     let tend = if ascii_score(heap, Endian::Le) >= ascii_score(heap, Endian::Be) {
@@ -144,13 +144,13 @@ pub fn parse(syek: &[u8], srts: &[u8]) -> Result<StringDb, String> {
     for k in 0..count as usize {
         let base = 4 + k * 8;
         if base + 8 > syek.len() {
-            return Err(format!("SYEK truncated at entry {k}"));
+            return Err(format!("KEYS truncated at entry {k}"));
         }
         let key_hash = kend.u32(syek, base);
         let offset = kend.u32(syek, base + 4);
         if offset as usize > heap.len() {
             return Err(format!(
-                "SYEK entry {k}: offset {offset} past heap ({})",
+                "KEYS entry {k}: offset {offset} past heap ({})",
                 heap.len()
             ));
         }
@@ -169,7 +169,7 @@ pub fn parse(syek: &[u8], srts: &[u8]) -> Result<StringDb, String> {
     })
 }
 
-/// Serialize back to `(SYEK, SRTS)` bodies.
+/// Serialize back to `(KEYS, STRS)` bodies.
 ///
 /// The heap is rebuilt from the decoded text, laid out in **ascending original offset** order so
 /// that an unmodified table reproduces retail byte-for-byte (see `roundtrip_*` tests). Entries
@@ -253,11 +253,11 @@ impl StringDb {
 
     /// Insert a NEW key with its text. Returns false if the key already exists (no overwrite —
     /// use [`set_by_hash`]/[`set_by_name`] for that). The heap-rebuild in `build` produces valid
-    /// `KEYS`/`STRS` regardless of order, and the SYEK descriptors are re-emitted from
+    /// `KEYS`/`STRS` regardless of order, and the KEYS descriptors are re-emitted from
     /// `self.entries`, so appending is safe on any size delta.
     ///
     /// The engine locates strings by hashing the key's bare name ([`key_name`]) at render time and
-    /// comparing against the SYEK table — an added key becomes reachable the moment the localizer
+    /// comparing against the KEYS table — an added key becomes reachable the moment the localizer
     /// next looks up `[<name>]`. Adding a key that already appears in a shared table (english lives in both
     /// shell.wad and vz.wad) only affects the copy this call is on; a companion `edit_stringdb`
     /// on the other target is up to the manifest.
@@ -597,7 +597,7 @@ mod tests {
         assert_eq!(db.entries.len(), 2);
         assert_eq!(db.entries[0].text, "Hello");
         assert_eq!(db.entries[1].text, "World!");
-        // SRTS header is a code-unit count: "Hello\0" + "World!\0" = 6 + 7 = 13 units.
+        // STRS header is a code-unit count: "Hello\0" + "World!\0" = 6 + 7 = 13 units.
         assert_eq!(db.declared_code_units, 13);
         assert_eq!(db.heap_bytes, 26);
         let (s2, r2) = build(&db);

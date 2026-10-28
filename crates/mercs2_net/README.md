@@ -19,7 +19,7 @@ and nothing else:
 - **Replicate routing.** `route()` mirrors the engine's marshal core: local-post always happens; the
   wire marshal is the host-gated addendum. `deliver()` is the receive-side decode.
 - **Categories.** `NetCategory` names the recovered per-object property-sync set: one primary class
-  plus eight `NetSubCat*` sub-streams (health, node health, inventory, seat link, powered gate,
+  plus seven `NetSubCat*` sub-streams (health, node health, inventory, seat link, powered gate,
   friend-or-foe, is-important), each independently serialized.
 - **Module pull.** `ModulePullState` gates inbound events: an event for a Lua module this peer has not
   synced yet produces a **pull request** to the host before the event is allowed to deliver.

@@ -41,9 +41,9 @@ Library crate. Equip a weapon, drive the system, drain the frame's impact FX rec
 ```rust
 use glam::Vec3;
 use hecs::World;
-use mercs2_combat::{Health, RuntimeWeapon, WeaponStats, WeaponSystem};
+use mercs2_combat::{RuntimeWeapon, WeaponStats, WeaponSystem};
 use mercs2_core::event::EventBus;
-use mercs2_core::Transform;
+use mercs2_core::{Health, Transform};
 
 let mut world = World::new();
 let mut bus = EventBus::new();
@@ -92,7 +92,7 @@ if let Some(blob) = parse_weapon_block(block, false) {
 
 | Module | Owns |
 | --- | --- |
-| `components` | The live ECS instances: `RuntimeWeapon`, `RuntimeProjectile`, `RuntimeHomingWeapon`, `RuntimeExplosion`, `HomingState`, `Health`, `Inventory`. |
+| `components` | The live ECS instances: `RuntimeWeapon`, `RuntimeProjectile`, `RuntimeHomingWeapon`, `RuntimeExplosion`, `HomingState`, `RuntimeInventory`. (`Health` is `mercs2_core::Health`.) |
 | `stats` | The `wpn_*` weapon-def blob parser and the authored stat structs (`WeaponStats`, `ExplosiveStats`, `HomingStats`, `FireType`, `WeaponSubObject`, `WeaponDefBlob`). |
 | `firing` | Trigger → shot: rate-of-fire, magazine/reload, hitscan vs projectile spawn; defers homing launches. |
 | `homing` | The lock-on FSM, missile launch, and guided-flight integration. |
@@ -109,5 +109,5 @@ if let Some(blob) = parse_weapon_block(block, false) {
 * Passing `physics: None` is legal and degrades predictably (hitscans miss; projectiles fly to lifetime; explosions still damage by ECS overlap) — it is how the crate ran before the physics system landed.
 * Explosion `Impact` normals are a fixed world-up (`+Y`, canonical game space) FX convention, not a measured surface; degenerate `RayHit` normals fall back to the negated travel direction.
 * The Lua *bindings* live in `mercs2_script`; this crate only supplies the bodies they call, because a leaf sim crate may not depend on the script host.
-* `Health` is a local stand-in for the destruction system's `RuntimeHealth`; the event contract (`DamageMsg`/`DestroyMsg`) is already faithful, so retargeting later is a swap, not a rewrite.
+* `Health` is `mercs2_core::Health`, the shared `RuntimeHealth {cur,max}` analog damage and destruction both read; this crate defines no health type of its own.
 * Equip/weapon-visibility, skill-weighted scatter sampling, and the full airstrike flight path are explicitly out of scope (`DEFERRED.md`, all non-blockers).

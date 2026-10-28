@@ -18,6 +18,7 @@ securom_unwrap [OPTIONS] <INPUT> <OUTPUT>
 | `<OUTPUT>` | path | — | yes | no | Path the SecuROM-free PE is written to (positional #2). Overwrites if it exists. |
 | `--oep <OEP>` | hex RVA (`u32`) | derived from the entry stub | no | no (last wins) | Override the original entry point, as a hex RVA. `0x`/`0X` prefix is optional (e.g. `--oep 0x5ee71c` or `--oep 5ee71c`). When set, the built-in OEP walker is skipped entirely. |
 | `--securom-section <NAME>` | string (section name) | see below | no | yes | Add an extra section name to the set treated as SecuROM's. **Extends**, does not replace, the built-in list. Matching is case-insensitive. |
+| `--large-address-aware` | flag | off | no | no | Also set `IMAGE_FILE_LARGE_ADDRESS_AWARE` (`0x0020`) in `FileHeader.Characteristics`; no other bit changes. |
 | `-h`, `--help` | — | — | no | no | Print help and exit. |
 | `-V`, `--version` | — | — | no | no | Print version and exit. |
 
@@ -45,7 +46,7 @@ Each import descriptor is tagged SecuROM or not by which section its `FirstThunk
 - The **IAT data directory** (`iat_rva`/`iat_size`, data directory 12) is recomputed to span only the *kept* descriptors' thunk arrays (min start RVA to max end RVA). Change the partition and this span changes.
 - If a newly-matched section splits the game's imports — i.e. a SecuROM descriptor appears *before* a game one — the prefix invariant breaks and the run aborts with `ImportsNotPrefix` rather than silently dropping a real import. So `--securom-section` can *cause* that failure if pointed at a section the game legitimately imports through.
 
-`--oep` and `--securom-section` never interact with each other; they touch disjoint parts of the header. Regardless of options, the output keeps the input's section layout and file size unchanged — the only writes are: `AddressOfEntryPoint` → OEP, `CheckSum` → 0, import-directory size, IAT directory RVA+size, and the one zeroed terminator descriptor.
+`--oep` and `--securom-section` never interact with each other; they touch disjoint parts of the header. `--large-address-aware` is independent of both: it ORs `0x0020` into `FileHeader.Characteristics`. Regardless of options, the output keeps the input's section layout and file size unchanged — the only writes are: `AddressOfEntryPoint` → OEP, `CheckSum` → 0, import-directory size, IAT directory RVA+size, the one zeroed terminator descriptor, and (with `--large-address-aware`) `Characteristics`.
 
 ## Examples
 

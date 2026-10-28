@@ -47,6 +47,8 @@ ucfx_byteswap --stdin --aset-recompute < aset_protocol.bin > updated_u32_2.bin
 | `--tex-h <TEX_H>` | usize | none | With `--untile-tex` | No | Texture height in pixels. |
 | `--tex-fourcc <TEX_FOURCC>` | string | none | With `--untile-tex` | No | DXT FourCC, exactly 4 characters, e.g. `DXT1` or `DXT5`. |
 | `--tex-mips <TEX_MIPS>` | usize | none | With `--untile-tex` | No | Number of mip levels in the body. |
+| `--java <JAVA_PATH>` | path | none | When the block holds `BINN` | No | `java` executable that runs unluac. Converting a block that holds Lua bytecode (`BINN`) needs `--java` and `--unluac`; without them `convert_block` errors (`Conversion error: block holds BINN ...`, exit 1). clap rejects `--java` without `--unluac`. |
+| `--unluac <UNLUAC_JAR>` | path | none | When the block holds `BINN` | No | unluac jar that round-trips the `BINN` bytecode (disassemble → flip endianness → reassemble). clap rejects `--unluac` without `--java`. |
 | `-h`, `--help` | flag | — | No | No | Print help and exit. |
 
 ## How the options combine

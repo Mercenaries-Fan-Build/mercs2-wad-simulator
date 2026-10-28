@@ -48,8 +48,8 @@ fn vz_wad() -> PathBuf {
 
 /// A rigged humanoid that is not on the game's own skeleton — the cross-rig case the whole
 /// `retarget:` path exists for.
-/// A rigged humanoid to lower. `MERCS2_TEST_CHAR_GLB` overrides; otherwise the working models this
-/// project keeps outside the repo (they are third-party assets we do not vendor).
+/// A rigged humanoid to lower: `MERCS2_TEST_CHAR_GLB` if set, otherwise the in-repo paths below
+/// (the models are third-party assets we do not vendor, so a checkout may hold none of them).
 ///
 /// It must be a real humanoid rig. The first candidate tried here was
 /// `game-files/new-models/.../fsb_operator.glb`, which carries **3 joints** — not a character rig at
@@ -64,9 +64,8 @@ fn source_glb() -> Option<PathBuf> {
         eprintln!("SKIPPING: MERCS2_TEST_CHAR_GLB is set but {} is not a file", p.display());
         return None;
     }
-    // In-repo first, so the test is runnable by someone who is not this machine. `find_upward` was
-    // written for exactly this and then left unused — the resolver went straight to `~/Downloads`
-    // while the skip message named `game-files/new-models`, a directory nothing ever searched.
+    // In-repo paths only, found by walking up from this crate, so the test is runnable by someone
+    // who is not this machine. No home-folder path: a model anywhere else is named with the variable.
     for rel in [
         "game-files/new-models/RuMerc1.glb",
         "crates/mercs2_formats/tests/fixtures/char_source.glb",
@@ -75,20 +74,11 @@ fn source_glb() -> Option<PathBuf> {
             return Some(p);
         }
     }
-    if let Some(home) = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME")) {
-        for rel in ["Downloads/RuMerc1.glb", "Downloads/hmmm.glb"] {
-            let p = PathBuf::from(&home).join(rel);
-            if p.is_file() {
-                return Some(p);
-            }
-        }
-    }
     // A skip has to name every path it actually tried, or it is indistinguishable from a pass.
     eprintln!(
         "SKIPPING: no rigged character model. Tried $MERCS2_TEST_CHAR_GLB, \
-         <repo>/game-files/new-models/RuMerc1.glb, \
-         crates/mercs2_formats/tests/fixtures/char_source.glb, ~/Downloads/RuMerc1.glb and \
-         ~/Downloads/hmmm.glb."
+         <repo>/game-files/new-models/RuMerc1.glb and \
+         crates/mercs2_formats/tests/fixtures/char_source.glb."
     );
     None
 }
@@ -97,7 +87,11 @@ fn source_glb() -> Option<PathBuf> {
 fn a_rigged_glb_lowers_onto_a_retail_donor() {
     let wad = vz_wad();
     let Some(glb_path) = source_glb() else {
-        return eprintln!("SKIPPING: no rigged source model under game-files/new-models");
+        return eprintln!(
+            "SKIPPING: no rigged source model (looked at $MERCS2_TEST_CHAR_GLB, \
+             <repo>/game-files/new-models/RuMerc1.glb and \
+             crates/mercs2_formats/tests/fixtures/char_source.glb)"
+        );
     };
 
     let glb = mercs2_formats::char_import::load_char_glb(&glb_path).expect("read the rigged glb");

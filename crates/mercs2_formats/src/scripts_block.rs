@@ -12,10 +12,10 @@
 //! (`crc32_mercs2`) over every byte from the `UCFX` tag up to (not including)
 //! the `CSUM` tag.
 //!
-//! To replace a script's compiled bytecode we: swap the LuaQ tail of the BINN
-//! body, fix the BINN descriptor's `body_size` and the BINN metadata
-//! `bytecode_size`, recompute the trailing CSUM, and update the entry's
-//! `chunk_size`. The container model is verified against the real block by an
+//! To replace a script's compiled bytecode we rebuild its container
+//! ([`build_container`]): INFO and DEPS are derived again from the new bytecode,
+//! the LuaQ chunk becomes the BINN body, the trailing CSUM is recomputed, and the
+//! entry's `chunk_size` follows the new container length. The container model is verified against the real block by an
 //! identity round-trip (re-serialize == input) plus a full CSUM re-verification.
 
 use crate::crc32::crc32_mercs2;

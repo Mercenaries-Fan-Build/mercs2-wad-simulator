@@ -20,7 +20,8 @@
 //!   equations for viewing (see [`hull_faces`]).
 //! - `manifest.json` — schema `mercs2_havok/2`: per packfile its `offset`,
 //!   `size_written`, Havok `version`, `class_counts` census, and a `shapes[]`
-//!   array tagged `convex` / `box` / `mopp` / `mesh` / `other`.
+//!   array tagged `convex` / `box` / `capsule` / `sphere` / `mopp` / `mesh` /
+//!   `other`.
 //!
 //! `--max-len` is accepted and ignored (CLI parity with the Python tool); the
 //! real packfile size is always used. Exit codes: 0 ok, 1 I/O error, 2 usage.

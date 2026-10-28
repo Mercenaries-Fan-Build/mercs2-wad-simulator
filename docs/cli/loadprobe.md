@@ -1,7 +1,7 @@
 # loadprobe
 
 Scores how far a Mercenaries 2 world-load got by grading `pmc_blackbox.log` against a
-20-step milestone ladder, then classifies the end-state (REACHED-WORLD / CRASH / HANG /
+21-phase (0–20) milestone ladder, then classifies the end-state (REACHED-WORLD / CRASH / HANG /
 TRUNCATED) and dumps a forensic report — phase timeline, streaming cycles, texture-pool
 health, crash decode, high-signal Lua markers, and a build/run identity fingerprint. The
 verdict is also the process exit code, so scripts can branch on how the load ended without
@@ -14,14 +14,15 @@ loadprobe [OPTIONS] [LOG]
 loadprobe --milestones
 ```
 
-`LOG` is the log file to analyze. When omitted it defaults to the deployed game's log at
-`C:/Users/Shadow/Desktop/Mercenaries 2 World in Flames/pmc_blackbox.log`.
+`LOG` is the log file to analyze. When omitted it defaults to `<install>/pmc_blackbox.log`,
+with the install taken from `MERCS2_GAME_DIR` or `VZ_WAD` (the install root, its `data`
+folder, or `data/vz.wad`). With neither set (or no log there), loadprobe exits `2`.
 
 ## Options
 
 | Flag | Value | Default | Required | Repeatable | Effect |
 | --- | --- | --- | --- | --- | --- |
-| `[LOG]` | path (positional) | the deployed game's `pmc_blackbox.log` (see Synopsis) | no | no | The log file to analyze. If it cannot be read, loadprobe exits `2`. |
+| `[LOG]` | path (positional) | the install's `pmc_blackbox.log` (see Synopsis) | no | no | The log file to analyze. If it cannot be read, loadprobe exits `2`. |
 | `--routine` | comma-separated source tags | `lua,pool` | no | no (comma-list, not multi-flag) | Source tags treated as routine and **suppressed** from the FLAGGED SOURCES dump. The `raw` (continuation) source is always skipped regardless. |
 | `--hang-secs` | integer (u64, seconds) | `10` | no | no | Minimum steady-with-no-progress duration to classify a HANG. A load is only a HANG if the gap between the last `[lua]`/`[world]` line and the last log line is ≥ this many seconds **and** the tail is pool-dominated. |
 | `--top-gaps` | integer (usize) | `5` | no | no | Number of largest inter-line time gaps to report in the LARGEST TIME GAPS section. |
@@ -30,7 +31,7 @@ loadprobe --milestones
 | `--no-color` | flag | off (colored) | no | no | Disable ANSI colors in the text dump. No effect on `--json` (JSON is never colored). |
 | `--milestones` | flag | off | no | no | Print the milestone ladder (index / name / match substrings) and the reached-world index, then exit `0`. The log is never read. |
 | `-S`, `--symbolize` | flag | off | no | no | Rewrite `module+0xOFFSET` tokens in the `[crash]` block into `= function+0xN`, using the exe VA→name map plus the un-stripped COFF symbols of any `.asi`/`.dll` found near the log. Only touches the crash block; a run with no crash is unaffected. |
-| `--exe-symbols` | path | `C:/Users/Shadow/Desktop/notes-on-the-released-game/scripts/mercs2_annotations.json` | no | no | The curated `Mercenaries2.exe` VA→name JSON consulted by `--symbolize` for `.exe` frames. Only read when `--symbolize` is set. |
+| `--exe-symbols` | path | `$MERCS2_EXE_SYMBOLS` (if set and the file exists) | no | no | The curated `Mercenaries2.exe` VA→name JSON consulted by `--symbolize` for `.exe` frames. Only read when `--symbolize` is set; without it `.exe` frames stay unresolved. |
 | `--module-dir` | path | none | no | **yes** (pass multiple times) | Extra directory to search for `.asi`/`.dll` module files during `--symbolize`. The log's own directory and its `scripts/` subdir are always searched in addition. Only used when `--symbolize` is set. |
 | `-h`, `--help` | flag | — | no | no | Print help and exit. |
 
@@ -124,7 +125,7 @@ pool health — those key on message content, not on these lists.
 
 ## Examples
 
-Analyze the deployed game's log with the default report:
+Analyze the install's log with the default report:
 
 ```
 loadprobe
@@ -182,7 +183,10 @@ The FLAGGED SOURCES section now includes `lua` and `pool` instead of hiding them
 
 ## Failure modes
 
-* **`loadprobe: cannot read <path>: <err>`** — the `LOG` path (or the default deployed-game
+* **`loadprobe: no log given and none found in the install.`** — no `LOG` argument, and
+  neither `MERCS2_GAME_DIR` nor `VZ_WAD` leads to an existing `<install>/pmc_blackbox.log`.
+  Exit code `2`. Pass an explicit `LOG` or set one of the variables.
+* **`loadprobe: cannot read <path>: <err>`** — the `LOG` path (or the default install
   path) could not be read. Exit code `2`. Check the path, or pass an explicit `LOG`.
 * **`loadprobe: --symbolize found no symbol sources (exe map <path> and no .asi/.dll next to
   the log)`** — `--symbolize` was requested but neither the `--exe-symbols` JSON nor any
