@@ -27,15 +27,15 @@
 //!   (`frame f, track t → transforms[f * numTracks + t]`). Sampling is exact:
 //!   per-track linear-interp of T/S and slerp of R between the two bracketing
 //!   frames. **This is the faithful, verified path.**
-//! - `hkaWaveletSkeletalAnimation` / `hkaDeltaCompressed*` — the *header* is
-//!   decoded faithfully (duration, track counts, pose count = frame count, and
-//!   the full wavelet quantization descriptor), but **per-frame decompression
-//!   is not implemented**: the inverse-wavelet + dequantization + block
-//!   reconstruction is proprietary Havok code that is not present in this
-//!   workspace's decompilation and is not publicly documented. For these clips
-//!   [`AnimClip::sample_local`] returns the neutral pose (identity rotation,
-//!   zero translation, unit scale) for every track, and [`AnimClip::decoded`]
-//!   is `false`. See the module-level report / MEMORY for the blocking detail.
+//! - `hkaWaveletSkeletalAnimation` — decoded by a transcription of the retail
+//!   `LtSampleWave` call tree ([`decode_wavelet`]).
+//! - `hkaDeltaCompressedSkeletalAnimation` — decoded by a transcription of the
+//!   retail `LtSampleDelta` call tree ([`decode_delta`]); every one of the 56
+//!   retail delta clips decodes to unit rotations. Not yet compared against a
+//!   live capture of the sampler, as the wavelet path was.
+//! - `hkaSplineCompressedAnimation` — header only; no retail clip uses it. For
+//!   such a clip [`AnimClip::sample_local`] returns the neutral pose and
+//!   [`AnimClip::decoded`] is `false`.
 //!
 //! Layout facts are cross-checked against the golden fixture
 //! `tests/fixtures/anim_ks750_le.bin` and against the BE→LE converter's class
@@ -114,7 +114,7 @@ pub enum AnimType {
     Interleaved,
     /// `hkaWaveletSkeletalAnimation` — header decoded, frames not (proprietary).
     Wavelet,
-    /// `hkaDeltaCompressedSkeletalAnimation` — header decoded, frames not.
+    /// `hkaDeltaCompressedSkeletalAnimation` — decoded ([`decode_delta`]).
     Delta,
     /// `hkaSplineCompressedAnimation` — header decoded, frames not.
     Spline,
@@ -1166,8 +1166,24 @@ fn decode_wavelet(blob: &[u8]) -> Option<WaveletDecoded> {
         }
     }
 
-    // Assemble one hkQsTransform per (frame, track) with StRecomposeW's rules.
-    let sd_base = db + sd_idx;
+    Some(WaveletDecoded {
+        duration: dur,
+        n_tt,
+        frames: recompose_frames(blob, &masks, n_tt, db + sd_idx, &per_dof_frames, n_poses),
+    })
+}
+
+/// StRecomposeW (FUN_009fb870), shared by the wavelet and delta samplers: one `hkQsTransform` per
+/// (frame, track) from the tracks' static masks, the static-DOF floats at `sd_base` and each
+/// dynamic DOF's per-frame values (`per_dof_frames`, in DOF order).
+fn recompose_frames(
+    blob: &[u8],
+    masks: &[u16],
+    n_tt: usize,
+    sd_base: usize,
+    per_dof_frames: &[Vec<f32>],
+    n_poses: usize,
+) -> Vec<Vec<QsTransform>> {
     let next_static = |sc: &mut usize| -> f32 {
         let v = f32_le(blob, sd_base + *sc * 4);
         *sc += 1;
@@ -1233,12 +1249,136 @@ fn decode_wavelet(blob: &[u8]) -> Option<WaveletDecoded> {
         }
         out.push(track);
     }
+    out
+}
 
-    Some(WaveletDecoded {
-        duration: dur,
-        n_tt,
-        frames: out,
-    })
+/// The number of dynamic DOFs StRecomposeW reads for `masks`: every selector bit set in a group
+/// that is not the identity (type 2).
+fn dynamic_dof_count(masks: &[u16]) -> usize {
+    masks
+        .iter()
+        .map(|&m| {
+            let (low, u) = (m as u32, (m as u32) >> 6);
+            let mut n = 0;
+            if low & 3 != 2 {
+                n += POS_SUBS.iter().filter(|(b, _)| u & b != 0).count();
+            }
+            if (low >> 2) & 3 != 2 {
+                n += ROT_SUBS.iter().filter(|(b, _)| u & b != 0).count();
+            }
+            if (low >> 4) & 3 != 2 {
+                n += SCALE_SUBS.iter().filter(|(b, _)| u & b != 0).count();
+            }
+            n
+        })
+        .sum()
+}
+
+// `hkaDeltaCompressedSkeletalAnimation`, offsets from the object (pc-v10: vtable 0x00b6ab8c, sampler
+// `LtSampleDelta` FUN_009f2ee0 at slot 4). The data buffer follows the 0x70-byte object.
+const D_OFF_NUM_POSES: usize = 0x24;
+const D_OFF_BLOCK_SIZE: usize = 0x28;
+const D_OFF_PRESERVED: usize = 0x2D;
+const D_OFF_NUM_D: usize = 0x30;
+const D_OFF_OFFSET_IDX: usize = 0x34;
+const D_OFF_SCALE_IDX: usize = 0x38;
+const D_OFF_BW_IDX: usize = 0x3C;
+const D_OFF_QUANT_IDX: usize = 0x40;
+const D_OFF_QUANT_SIZE: usize = 0x44;
+const D_OFF_STATIC_MASK_IDX: usize = 0x48;
+const D_OFF_STATIC_DOFS_IDX: usize = 0x50;
+const D_OFF_TOTAL_BLOCK_SIZE: usize = 0x58;
+const D_OFF_LAST_BLOCK_SIZE: usize = 0x5C;
+const D_OFF_DATA_SIZE: usize = 0x64;
+const DELTA_STRUCT_SIZE: usize = 0x70;
+
+/// Decode a `hkaDeltaCompressedSkeletalAnimation` at object offset `obj` of `blob`, frame by frame —
+/// the LtSampleDelta call tree (FUN_009f2ee0 → FUN_009f26b0 per block → FUN_009f2090 per DOF):
+///
+/// * the quantized data is `numPoses / blockSize` blocks of `totalBlockSize` bytes (the last
+///   `lastBlockSize`); in a block, each dynamic DOF in order holds `preserved` raw f32s then
+///   `count - preserved` codes of its bit width, LSB first, padded to a byte (FUN_009fd810);
+/// * a code dequantizes as `code · 2^-bw · scale[k] + offset[k]` (FUN_009fdd50; its bias
+///   `_DAT_00bea940` is 0.0 in the pc-v10 image);
+/// * the block's values are a running sum, the first absolute (FUN_009fdbb0);
+/// * StRecomposeW ([`recompose_frames`]) builds each frame's transforms, as for wavelet clips.
+///
+/// Every block's DOF chunks must add up to its stored size, and the masks' dynamic DOFs to `numD`;
+/// a clip that does not is an error saying which.
+fn decode_delta(blob: &[u8], obj: usize, duration: f32, n_tt: usize, n_ft: usize) -> Result<WaveletDecoded, String> {
+    let rd = |o: usize| -> Result<u32, String> {
+        blob.get(obj + o..obj + o + 4).map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]])).ok_or_else(|| format!("delta header past the packfile at +0x{o:X}"))
+    };
+    let n_poses = rd(D_OFF_NUM_POSES)? as usize;
+    let block_size = rd(D_OFF_BLOCK_SIZE)? as usize;
+    let preserved = *blob.get(obj + D_OFF_PRESERVED).ok_or("delta header truncated")? as usize;
+    let num_d = rd(D_OFF_NUM_D)? as usize;
+    let (offset_idx, scale_idx, bw_idx) = (rd(D_OFF_OFFSET_IDX)? as usize, rd(D_OFF_SCALE_IDX)? as usize, rd(D_OFF_BW_IDX)? as usize);
+    let (quant_idx, quant_size) = (rd(D_OFF_QUANT_IDX)? as usize, rd(D_OFF_QUANT_SIZE)? as usize);
+    let (sm_idx, sd_idx) = (rd(D_OFF_STATIC_MASK_IDX)? as usize, rd(D_OFF_STATIC_DOFS_IDX)? as usize);
+    let (total_block, last_block) = (rd(D_OFF_TOTAL_BLOCK_SIZE)? as usize, rd(D_OFF_LAST_BLOCK_SIZE)? as usize);
+    let data_size = rd(D_OFF_DATA_SIZE)? as usize;
+    if n_poses == 0 || block_size == 0 {
+        return Err(format!("delta clip with {n_poses} poses and block size {block_size}"));
+    }
+    let db = obj + DELTA_STRUCT_SIZE;
+    if db + data_size > blob.len() || quant_idx + quant_size > data_size {
+        return Err(format!("delta data ({data_size} B, quantized {quant_idx}+{quant_size}) runs past the packfile"));
+    }
+    let masks: Vec<u16> = (0..n_tt + n_ft)
+        .map(|i| {
+            let o = db + sm_idx + i * 2;
+            u16::from_le_bytes([blob[o], blob[o + 1]])
+        })
+        .collect();
+    if dynamic_dof_count(&masks) != num_d {
+        return Err(format!("the static masks select {} dynamic DOFs; numD is {num_d}", dynamic_dof_count(&masks)));
+    }
+    let mult: Vec<f32> = (0..num_d).map(|k| f32_le(blob, db + scale_idx + k * 4)).collect();
+    let addend: Vec<f32> = (0..num_d).map(|k| f32_le(blob, db + offset_idx + k * 4)).collect();
+    let bw: Vec<u32> = (0..num_d).map(|k| blob[db + bw_idx + k] as u32).collect();
+    let n_blocks = n_poses.div_ceil(block_size);
+    let mut per_dof: Vec<Vec<f32>> = vec![Vec::with_capacity(n_poses); num_d];
+    for b in 0..n_blocks {
+        let count = block_size.min(n_poses - b * block_size);
+        let start = db + quant_idx + b * total_block;
+        let want = if b + 1 == n_blocks { last_block } else { total_block };
+        let mut p = start;
+        for k in 0..num_d {
+            if bw[k] > 32 || preserved > count {
+                return Err(format!("block {b} DOF {k}: bit width {} with {preserved} preserved of {count}", bw[k]));
+            }
+            let len = (((count - preserved) * bw[k] as usize + 7) >> 3) + 4 * preserved;
+            let chunk = blob.get(p..p + len).ok_or_else(|| format!("block {b} DOF {k} runs past the packfile"))?;
+            let scale = mult[k] * 2f32.powi(-(bw[k] as i32));
+            let mut acc: u64 = 0;
+            let mut nbits = 0u32;
+            let mut bp = 4 * preserved;
+            let mut sum = 0.0f32;
+            for j in 0..count {
+                let v = if j < preserved {
+                    f32_le(chunk, j * 4)
+                } else {
+                    while nbits < bw[k] && bp < chunk.len() {
+                        acc |= (chunk[bp] as u64) << nbits;
+                        bp += 1;
+                        nbits += 8;
+                    }
+                    let code = (acc & ((1u64 << bw[k]) - 1)) as u32;
+                    acc >>= bw[k];
+                    nbits = nbits.saturating_sub(bw[k]);
+                    code as f32 * scale + addend[k]
+                };
+                sum = if j == 0 { v } else { v + sum };
+                per_dof[k].push(sum);
+            }
+            p += len;
+        }
+        if p - start != want {
+            return Err(format!("block {b}: the DOF chunks take {} bytes; the block holds {want}", p - start));
+        }
+    }
+    Ok(WaveletDecoded { duration, n_tt, frames: recompose_frames(blob, &masks, n_tt, db + sd_idx, &per_dof, n_poses) })
 }
 
 /// Decode a Havok animation packfile into a sampleable [`AnimClip`].
@@ -1345,10 +1485,23 @@ pub fn parse_anim(packfile: &[u8]) -> Result<AnimClip, String> {
                 frames: Vec::new(),
             })
         }
-        AnimType::Delta | AnimType::Spline => {
-            // Header decoded faithfully; frame reconstruction is proprietary and
-            // absent from this workspace — return a header-only clip. (delta.py is
-            // header-only too; detection is enough — don't crash on it.)
+        AnimType::Delta => {
+            let n_ft = i32_le(pk, obj + W_OFF_NUM_FT).max(0) as usize;
+            let d = decode_delta(pk, obj, duration, num_tracks, n_ft).map_err(|e| format!("delta animation: {e}"))?;
+            let num_frames = d.frames.len();
+            Ok(AnimClip {
+                anim_type,
+                duration: d.duration,
+                num_tracks: d.n_tt,
+                num_frames,
+                track_to_bone,
+                decoded: true,
+                frames: d.frames.into_iter().flatten().collect(),
+            })
+        }
+        AnimType::Spline => {
+            // Header decoded faithfully; frame reconstruction is not implemented (no retail
+            // Mercs2 clip is spline-compressed: `anim_codec_census`) — a header-only clip.
             let num_frames = i32_le(pk, obj + OFF_WAVELET_NUM_POSES).max(0) as usize;
             Ok(AnimClip {
                 anim_type,
