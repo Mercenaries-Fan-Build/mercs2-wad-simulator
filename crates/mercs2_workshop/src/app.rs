@@ -627,6 +627,13 @@ enum Act {
     TierNext,
     ClipSel(usize),
     ClipNav(i32),
+    /// Play this clip (hash, label) on the loaded model, adding it to the model's clip list.
+    PlayClip(u32, String),
+    /// Open the hero picker for the clip the Anims tab shows.
+    HeroPick,
+    /// Make this model (hash, row label) the hero, saved in the settings.
+    SetHero(u32, String),
+    HeroClose,
     ClipStop,
     PlayPause,
     GroupToggle(usize),
@@ -1016,6 +1023,95 @@ fn asset_menu(
         ui.ctx().copy_text(label.to_string());
         ui.close_menu();
     }
+}
+
+/// One animation clip, as the Anims tab's inspector shows it.
+#[derive(Clone, Debug)]
+pub(crate) struct ClipInfo {
+    /// The animgroup block that lists it, and the stack WAD it was found in.
+    pub block: u16,
+    pub wad: String,
+    /// The Havok class it is stored as, and whether its frames decode.
+    pub codec: &'static str,
+    pub decoded: bool,
+    pub duration: f32,
+    pub frames: usize,
+    /// Its binding: one bone name-hash per transform track (the `trnm` list).
+    pub bones: Vec<u32>,
+    /// A `MANM` material animation (no Havok packfile, no bones): its decoded tracks.
+    pub material: Option<mercs2_formats::manm::MaterialAnim>,
+}
+
+/// Read clip `hash`'s binding and header from the first stack WAD (last-opened first) whose
+/// animgroups list it; a container with no Havok packfile is decoded as a `MANM` material
+/// animation. An error names why: no animgroup lists it, or what is there does not decode.
+pub(crate) fn clip_info(w: &mut WadStack, hash: u32) -> Result<ClipInfo, String> {
+    use mercs2_formats::anim::AnimType;
+    for i in (0..w.wads.len()).rev() {
+        let wad_name = std::path::Path::new(&w.labels[i])
+            .file_name()
+            .map_or_else(|| w.labels[i].clone(), |f| f.to_string_lossy().into_owned());
+        let ix = game_world::clip_index(&mut w.wads[i]);
+        let Some(e) = ix.clips.iter().find(|c| c.name_hash == hash) else { continue };
+        let (block, bones) = (e.block, e.bones.clone());
+        let data = wad::decompress_block_index(&mut w.wads[i], block)?;
+        let ag = mercs2_formats::animgroup::parse_animgroup(&data).map_err(|e| format!("block {block}: {e}"))?;
+        let c = ag.clips.iter().find(|c| c.name_hash == hash).ok_or_else(|| format!("block {block} no longer lists 0x{hash:08X}"))?;
+        if c.havok_len == 0 {
+            let m = c
+                .container(&data)
+                .and_then(mercs2_formats::manm::parse_material_anim)
+                .map_err(|e| format!("{wad_name} block {block}: {e}"))?;
+            return Ok(ClipInfo {
+                block,
+                wad: wad_name,
+                codec: "MANM material animation",
+                decoded: true,
+                duration: 0.0,
+                frames: 0,
+                bones,
+                material: Some(m),
+            });
+        }
+        let clip = c
+            .packfile(&data)
+            .and_then(|pk| mercs2_formats::anim::parse_anim(pk))
+            .map_err(|e| format!("{wad_name} block {block}: {e}"))?;
+        let codec = match clip.anim_type {
+            AnimType::Interleaved => "interleaved",
+            AnimType::Wavelet => "wavelet",
+            AnimType::Delta => "delta-compressed",
+            AnimType::Spline => "spline-compressed",
+        };
+        return Ok(ClipInfo { block, wad: wad_name, codec, decoded: clip.decoded, duration: clip.duration, frames: clip.num_frames, bones, material: None });
+    }
+    Err(format!("no animgroup of the stack lists 0x{hash:08X}"))
+}
+
+/// Why clip `hash` gave the loaded model nothing to play: its frames do not decode, it binds no bone
+/// of `hier`, or it did not read — from what the Anims tab read of it; the binding's own message for
+/// a clip it has not read.
+fn unplayable(infos: &HashMap<u32, Result<ClipInfo, String>>, hash: u32, label: &str, hier: &[u32]) -> String {
+    match infos.get(&hash) {
+        Some(Ok(i)) if i.material.is_some() => format!("{label} is a material animation: it drives material values, not bones"),
+        Some(Ok(i)) if !i.decoded => format!("{label} is {}: its frames are not decoded", i.codec),
+        Some(Ok(i)) => {
+            let n = i.bones.iter().filter(|b| hier.contains(b)).count();
+            format!("{label} binds {n} of its {} bones on this model", i.bones.len())
+        }
+        Some(Err(e)) => format!("{label}: {e}"),
+        None => format!("clip {label} is not in any animgroup bound to this rig"),
+    }
+}
+
+/// The hero picker: the models a hero can be, ranked by how many of `want`'s bones their skeleton
+/// holds; `then` is the clip to play once a hero is chosen.
+pub(crate) struct HeroPicker {
+    /// What the hero is being chosen for ("clip ALL01_…"), and its bone hashes.
+    pub what: String,
+    pub want: Vec<u32>,
+    pub filter: String,
+    pub then: Option<(u32, String)>,
 }
 
 /// What a catalog row of `kind` is, for routing it into a Shipment ([`asset_menu`]).
@@ -1481,6 +1577,9 @@ pub fn run(opts: Options) {
     let mut filter = String::new();
     let mut filtered: Vec<usize> = (0..index.rows(kind).len()).collect();
     let mut sel: usize = 0;
+    // The asset list's last drawn selection, scroll offset and viewport height: a selection that
+    // differs next frame is scrolled into view.
+    let mut list_follow: (Option<usize>, (f32, f32)) = (None, (0.0, 0.0));
     // Group headers the user has collapsed in the model list — click a header to fold its rows
     // away so only the header line remains. Persists across frames; keyed by the header text (a
     // category, or a faction under a Lens) so it survives refilter/re-sort. Empty = everything
@@ -1586,6 +1685,19 @@ pub fn run(opts: Options) {
     // gets remembered and fails at the next launch instead of at the click.
     let mut cfg = crate::settings::load();
     let mut cfg_note: Option<Result<String, String>> = None;
+    // The hero: the model the Anims and FaceFX tabs play on (saved in the settings), every model's
+    // skeleton for ranking candidates (read on a worker the first time it is needed), the picker,
+    // the clip the Anims tab shows, and each clip read so far.
+    let mut hero: Option<crate::settings::Hero> = cfg.hero.clone();
+    let mut skeletons: Option<crate::heroidx::Skeletons> = None;
+    let mut skel_rx: Option<std::sync::mpsc::Receiver<crate::heroidx::Msg>> = None;
+    let mut skel_progress: (f32, String) = (0.0, String::new());
+    let mut skel_error: Option<String> = None;
+    let mut hero_picker: Option<HeroPicker> = None;
+    let mut anim_clip: Option<(u32, String)> = None;
+    let mut clip_infos: HashMap<u32, Result<ClipInfo, String>> = HashMap::new();
+    // The material animation card's playhead, in key-time units.
+    let mut manm_t: f32 = 0.0;
     // Which Settings section the centre is showing. The navigator lists them. A chain with no
     // answer opens on its section.
     let mut settings_section = match first {
@@ -1606,6 +1718,8 @@ pub fn run(opts: Options) {
     // A `--ui-state` that opened a string table: its capture (path, settle frames), taken once the
     // tables have read.
     let mut text_ui: Option<(PathBuf, u32)> = None;
+    // A `--ui-state` that opened a clip: (capture, settle frames, clip, on a hero, frames waited).
+    let mut anim_ui: Option<(PathBuf, u32, u32, bool, u32)> = None;
     let mut capture_to: Option<(PathBuf, u32)> = None;
     let mut capture_asked = false;
     // The Audio page (Inspect's AUDIO tab): the captioned inventory, set from the boot thread's
@@ -1948,6 +2062,14 @@ pub fn run(opts: Options) {
                             w = WadStack::empty();
                             index = AssetIndex::build(&[], &[], HashMap::new());
                             anim_sel = None;
+                            // Skeletons and clips are the archive's; the hero is checked against the
+                            // new catalog when it lands.
+                            skeletons = None;
+                            skel_rx = None;
+                            skel_error = None;
+                            hero_picker = None;
+                            anim_clip = None;
+                            clip_infos.clear();
                             clip_loader = ClipLoader::spawn(String::new(), Vec::new());
                             shell_plate = None;
                             wadpath.clear();
@@ -2045,6 +2167,17 @@ pub fn run(opts: Options) {
                                         filtered = refilter(&index, kind, &filter, lens);
                                         inventory_dirty = true; // names now resolve → build the vehicle inventory
                                         sel = sel.min(filtered.len().saturating_sub(1));
+                                        // A saved hero this archive does not hold is cleared, and said.
+                                        if let Some(h) = &hero {
+                                            if !index.models().iter().any(|r| r.hash == h.hash && r.label() == h.label) {
+                                                status = format!("the hero {} is not in this archive — pick another on the Anims tab", h.label);
+                                                hero = None;
+                                                cfg.hero = None;
+                                                if let Err(e) = cfg.save() {
+                                                    status = format!("{status} (settings not saved: {e})");
+                                                }
+                                            }
+                                        }
                                         // Swap the boot skull out for the shell plate (browse backdrop).
                                         if let Some(td) = &shell_plate {
                                             scene.set_loading_art(td);
@@ -2166,9 +2299,7 @@ pub fn run(opts: Options) {
                                         .find(|e| e.hash == done.hash)
                                         .map(|e| e.label.clone())
                                         .unwrap_or_else(|| format!("0x{:08X}", done.hash));
-                                    status = format!(
-                                        "clip {label} is not in any animgroup bound to this rig"
-                                    );
+                                    status = unplayable(&clip_infos, done.hash, &label, &p.hier);
                                 }
                             }
                         }
@@ -2317,6 +2448,9 @@ pub fn run(opts: Options) {
                     if let Some(st) = ui_state.take() {
                         // The state opens a string table, which reads on a worker before the capture.
                         let mut waits_on_text = false;
+                        // The state opens a clip: (its hash, whether a hero plays it) — the capture waits
+                        // for the clip's load on the hero, or for the picker's skeletons.
+                        let mut waits_on_clip: Option<(u32, bool)> = None;
                         let applied = (|| -> Result<(), String> {
                             use crate::ui_state::pick;
                             let model = |name: &str| -> Result<(u32, String), String> {
@@ -2352,6 +2486,10 @@ pub fn run(opts: Options) {
                             }
                             filtered = refilter(&index, kind, &filter, lens);
                             sel = 0;
+                            if let Some(name) = &st.hero {
+                                let (hash, label) = model(name)?;
+                                hero = Some(crate::settings::Hero { hash, label });
+                            }
                             if let Some(name) = &st.load {
                                 if kind == Kind::Model {
                                     let (hash, label) = model(name)?;
@@ -2366,6 +2504,9 @@ pub fn run(opts: Options) {
                                     sel = vi;
                                     actions.push(Act::LoadRow(vi));
                                     waits_on_text = rows[filtered[vi]].type_id == mercs2_formats::types::TYPE_ID_STRINGDB;
+                                    if kind == Kind::Animation {
+                                        waits_on_clip = Some((rows[filtered[vi]].hash, hero.is_some()));
+                                    }
                                 }
                             }
                             if let Some(dir) = &st.shipment {
@@ -2416,8 +2557,31 @@ pub fn run(opts: Options) {
                         } else if waits_on_text {
                             // A string table reads on a worker; the capture waits for it.
                             text_ui = Some((st.capture.clone(), st.settle_frames));
+                        } else if let Some((clip, on_hero)) = waits_on_clip {
+                            anim_ui = Some((st.capture.clone(), st.settle_frames, clip, on_hero, 0));
                         } else {
                             capture_to = Some((st.capture.clone(), st.settle_frames));
+                        }
+                    }
+                    // An ANIMS row: on a hero, wait until the clip has loaded on it (decoded or
+                    // refused); without one, until the picker's skeletons have read. Frames are
+                    // counted so a clip that never resolves is a failure, not a hang.
+                    if let Some((to, settle, clip, on_hero, frames)) = &mut anim_ui {
+                        *frames += 1;
+                        let material = matches!(clip_infos.get(clip), Some(Ok(i)) if i.material.is_some());
+                        let ready = if material {
+                            true
+                        } else if *on_hero {
+                            preview.as_ref().is_some_and(|p| p.clip_cache.contains_key(clip))
+                        } else {
+                            skeletons.is_some() || skel_error.is_some()
+                        };
+                        if ready {
+                            capture_to = Some((to.clone(), *settle));
+                            anim_ui = None;
+                        } else if *frames > 60 * 120 {
+                            eprintln!("--ui-state: clip 0x{clip:08X} did not load within 120 s of frames");
+                            std::process::exit(2);
                         }
                     }
                     if let Some((to, settle)) = &text_ui {
@@ -3005,7 +3169,22 @@ pub fn run(opts: Options) {
                                 }
                             }
                             let row_h = 19.0_f32.max(ui.text_style_height(&egui::TextStyle::Body));
-                            egui::ScrollArea::vertical().auto_shrink([false, false]).show_rows(
+                            // A selection that moved since the last frame (keys, F4, a state file)
+                            // is scrolled just into view; a click lands on a row already in view.
+                            let mut list_area = egui::ScrollArea::vertical().auto_shrink([false, false]);
+                            if list_follow.0 != Some(sel) {
+                                if let Some(di) = display.iter().position(|d| matches!(d, Disp::Row(v) if *v == sel)) {
+                                    let step = row_h + ui.spacing().item_spacing.y;
+                                    let (top, (off, view_h)) = (di as f32 * step, list_follow.1);
+                                    // No viewport measured yet (the first frame): put the row on top.
+                                    if view_h <= 0.0 || top < off {
+                                        list_area = list_area.vertical_scroll_offset(top);
+                                    } else if top + step > off + view_h {
+                                        list_area = list_area.vertical_scroll_offset(top + step - view_h);
+                                    }
+                                }
+                            }
+                            let list_out = list_area.show_rows(
                                 ui,
                                 row_h,
                                 display.len(),
@@ -3130,6 +3309,7 @@ pub fn run(opts: Options) {
                                     }
                                 },
                             );
+                            list_follow = (Some(sel), (list_out.state.offset.y, list_out.inner_rect.height()));
                             }
                             } // ── end Inspect navigator (asset browser) ──
                             Workbench::Mods => {
@@ -3421,6 +3601,98 @@ pub fn run(opts: Options) {
                               let audio_tab = eff == Workbench::Inspect && kind == Kind::Audio;
                               if audio_tab {
                                   audio_acts.extend(crate::audiopage::inspector(ui, &audio_page));
+                              }
+                              // The Anims tab: the hero clips play on, and the clip chosen. The hero's
+                              // own model cards follow, as for any loaded model.
+                              if eff == Workbench::Inspect && kind == Kind::Animation {
+                                  theme::card(ui, "Hero", hero.as_ref().map(|h| h.label.as_str()), |ui| {
+                                      match &hero {
+                                          None => {
+                                              ui.weak("No hero \u{2014} pick the model clips play on.");
+                                          }
+                                          Some(h) => {
+                                              ui.label(egui::RichText::new(&h.label).color(theme::TX));
+                                              ui.label(egui::RichText::new(format!("0x{:08X} \u{b7} kept across tabs and launches", h.hash)).small().color(theme::DIM));
+                                          }
+                                      }
+                                      let pick = if hero.is_some() { "Change\u{2026}" } else { "Pick\u{2026}" };
+                                      if ui.button(pick).clicked() {
+                                          actions.push(Act::HeroPick);
+                                      }
+                                  });
+                                  if let Some((clip, label)) = &anim_clip {
+                                      match clip_infos.get(clip) {
+                                          // A material animation: every track's curve, sampled as the
+                                          // retail sampler does, against one playhead.
+                                          Some(Ok(ClipInfo { material: Some(m), block, wad, .. })) => {
+                                              let name = |h: u32| index.names.get(&h).cloned().unwrap_or_else(|| format!("0x{h:08X}"));
+                                              theme::card(ui, "Material animation", Some(&format!("0x{clip:08X}")), |ui| {
+                                                  ui.label(egui::RichText::new(label).color(theme::TX));
+                                                  theme::kv(ui, "groups \u{b7} tracks", egui::RichText::new(format!("{} \u{b7} {}", m.groups.len(), m.track_count())));
+                                                  let (lo, hi) = m.time_span();
+                                                  theme::kv(ui, "key times", egui::RichText::new(format!("{lo} \u{2013} {hi}")));
+                                                  theme::kv(ui, "MANM f32 @8", egui::RichText::new(format!("{:.5}", m.header_f32())));
+                                                  ui.label(
+                                                      egui::RichText::new("key-time unit not established: the playhead is in key units")
+                                                          .small()
+                                                          .color(theme::DIM),
+                                                  );
+                                                  theme::kv(ui, "read from", egui::RichText::new(format!("{wad} \u{b7} block {block}")));
+                                                  theme::scrub(
+                                                      ui,
+                                                      (ui.available_width() - 80.0).max(60.0),
+                                                      egui::Slider::new(&mut manm_t, lo as f32..=hi.max(lo + 1) as f32).text("at"),
+                                                  );
+                                                  for g in &m.groups {
+                                                      ui.add_space(6.0);
+                                                      theme::eyebrow(ui, &format!("group {}", name(g.hash)));
+                                                      for t in &g.tracks {
+                                                          theme::kv(ui, &name(t.property), egui::RichText::new(format!("{:.4}", t.sample(manm_t))));
+                                                          ui.label(
+                                                              egui::RichText::new(format!("{} keys \u{b7} \u{f7} {}", t.keys.len(), t.divisor))
+                                                                  .small()
+                                                                  .color(theme::DIM),
+                                                          );
+                                                          if let Some(x) = theme::curve(ui, 28.0, lo as f32, hi.max(lo + 1) as f32, manm_t, |x| t.sample(x)) {
+                                                              manm_t = x;
+                                                          }
+                                                      }
+                                                  }
+                                              });
+                                          }
+                                          Some(Ok(i)) => {
+                                              theme::card(ui, "Clip", Some(&format!("0x{clip:08X}")), |ui| {
+                                                  ui.label(egui::RichText::new(label).color(theme::TX));
+                                                  theme::kv(ui, "stored as", egui::RichText::new(if i.decoded { i.codec.to_string() } else { format!("{} \u{b7} frames not decoded", i.codec) }));
+                                                  theme::kv(ui, "length", egui::RichText::new(format!("{:.2} s \u{b7} {} frames", i.duration, i.frames)));
+                                                  theme::kv(ui, "tracks", egui::RichText::new(i.bones.len().to_string()));
+                                                  theme::kv(ui, "read from", egui::RichText::new(format!("{} \u{b7} block {}", i.wad, i.block)));
+                                                  // On the hero: how many of its bones the clip drives,
+                                                  // and the bones it names that the hero lacks.
+                                                  if let (Some(h), Some(p)) = (&hero, &preview) {
+                                                      if p.hash == h.hash {
+                                                          let missing: Vec<u32> = i.bones.iter().copied().filter(|b| !p.hier.contains(b)).collect();
+                                                          theme::kv(ui, "bound on the hero", egui::RichText::new(format!("{}/{}", i.bones.len() - missing.len(), i.bones.len())));
+                                                          if !missing.is_empty() {
+                                                              let names: Vec<String> = missing
+                                                                  .iter()
+                                                                  .map(|b| index.names.get(b).cloned().unwrap_or_else(|| format!("0x{b:08X}")))
+                                                                  .collect();
+                                                              ui.label(egui::RichText::new(format!("not on the hero: {}", names.join(", "))).small().color(theme::DIM));
+                                                          }
+                                                      }
+                                                  }
+                                              });
+                                          }
+                                          Some(Err(e)) => {
+                                              theme::card(ui, "Clip", Some(&format!("0x{clip:08X}")), |ui| {
+                                                  ui.label(egui::RichText::new(label).color(theme::TX));
+                                                  ui.label(egui::RichText::new(e).color(theme::BAD));
+                                              });
+                                          }
+                                          None => {}
+                                      }
+                                  }
                               }
                               // The Text tab with a string table or a font open.
                               let text_tab = eff == Workbench::Inspect
@@ -3766,13 +4038,13 @@ pub fn run(opts: Options) {
                                                 ui.add_space(4.0);
                                                 let mut hp = p.health * 100.0;
                                                 ui.horizontal(|ui| {
-                                                    if ui
-                                                        .add(
-                                                            egui::Slider::new(&mut hp, 0.0..=100.0)
-                                                                .suffix("%")
-                                                                .fixed_decimals(0),
-                                                        )
-                                                        .changed()
+                                                    let rail = ui.spacing().slider_width;
+                                                    if theme::scrub(
+                                                        ui,
+                                                        rail,
+                                                        egui::Slider::new(&mut hp, 0.0..=100.0).suffix("%").fixed_decimals(0),
+                                                    )
+                                                    .changed()
                                                     {
                                                         actions.push(Act::SetHealth(hp / 100.0));
                                                     }
@@ -4025,9 +4297,10 @@ pub fn run(opts: Options) {
                                                             p.anim_time
                                                         ));
                                                     });
-                                                    ui.add(
-                                                        egui::Slider::new(&mut p.anim_time, 0.0..=dur)
-                                                            .show_value(false),
+                                                    theme::scrub(
+                                                        ui,
+                                                        ui.available_width(),
+                                                        egui::Slider::new(&mut p.anim_time, 0.0..=dur).show_value(false),
                                                     );
                                                 }
                                             }
@@ -5225,6 +5498,84 @@ pub fn run(opts: Options) {
                                 });
                         }
 
+                        // ── The hero picker: every model, those whose skeleton holds the most of the
+                        // bones it is chosen for first.
+                        if let Some(hp) = &mut hero_picker {
+                            let mut open = true;
+                            egui::Window::new("Choose the hero")
+                                .id(egui::Id::new("hero_picker"))
+                                .open(&mut open)
+                                .default_size([480.0, 540.0])
+                                .resizable(true)
+                                .show(ctx, |ui| {
+                                    ui.label(egui::RichText::new(format!("The model {} plays on, kept across tabs and launches.", hp.what)).color(theme::DIM));
+                                    if !hp.want.is_empty() {
+                                        ui.label(
+                                            egui::RichText::new(format!(
+                                                "Models whose skeleton holds the most of its {} bones come first; one holding none cannot be chosen.",
+                                                hp.want.len()
+                                            ))
+                                            .small()
+                                            .color(theme::DIM),
+                                        );
+                                    }
+                                    ui.add(egui::TextEdit::singleline(&mut hp.filter).hint_text("filter models").desired_width(f32::INFINITY));
+                                    ui.add_space(4.0);
+                                    if !hp.want.is_empty() && skeletons.is_none() {
+                                        match &skel_error {
+                                            Some(e) => {
+                                                ui.label(egui::RichText::new(format!("The skeletons did not read: {e}")).color(theme::BAD));
+                                            }
+                                            None => {
+                                                ui.horizontal(|ui| {
+                                                    ui.add(egui::Spinner::new());
+                                                    ui.label(
+                                                        egui::RichText::new(format!(
+                                                            "Reading every model's skeleton\u{2026} {:.0}% {}",
+                                                            skel_progress.0 * 100.0,
+                                                            skel_progress.1
+                                                        ))
+                                                        .color(theme::FAINT),
+                                                    );
+                                                });
+                                            }
+                                        }
+                                        return;
+                                    }
+                                    let needle = hp.filter.trim().to_lowercase();
+                                    let models = index.models();
+                                    let mut rows: Vec<(usize, Option<usize>)> = models
+                                        .iter()
+                                        .enumerate()
+                                        .filter(|(_, r)| needle.is_empty() || r.label().to_lowercase().contains(&needle))
+                                        .map(|(i, r)| (i, skeletons.as_ref().filter(|_| !hp.want.is_empty()).and_then(|s| s.coverage(r.hash, &hp.want))))
+                                        .collect();
+                                    rows.sort_by(|a, b| {
+                                        b.1.unwrap_or(0)
+                                            .cmp(&a.1.unwrap_or(0))
+                                            .then_with(|| models[a.0].label().to_lowercase().cmp(&models[b.0].label().to_lowercase()))
+                                    });
+                                    let row_h = 20.0;
+                                    egui::ScrollArea::vertical().auto_shrink([false, false]).show_rows(ui, row_h, rows.len(), |ui, range| {
+                                        for &(mi, cov) in &rows[range] {
+                                            let r = &models[mi];
+                                            let fits = hp.want.is_empty() || cov.unwrap_or(0) > 0;
+                                            let on = hero.as_ref().is_some_and(|h| h.hash == r.hash && h.label == r.label());
+                                            let text = match cov {
+                                                Some(n) if !hp.want.is_empty() => format!("{}   {n}/{} bones", r.label(), hp.want.len()),
+                                                _ => r.label(),
+                                            };
+                                            let col = if fits { theme::TX } else { theme::FAINT };
+                                            if ui.selectable_label(on, egui::RichText::new(text).color(col)).clicked() {
+                                                actions.push(Act::SetHero(r.hash, r.label()));
+                                            }
+                                        }
+                                    });
+                                });
+                            if !open {
+                                actions.push(Act::HeroClose);
+                            }
+                        }
                         if let Some(tv) = &tex_view {
                             egui::Window::new("Texture")
                                 .anchor(egui::Align2::CENTER_BOTTOM, [0.0, -48.0])
@@ -5482,6 +5833,34 @@ pub fn run(opts: Options) {
                         }
                     }
                     text_page.poll();
+                    // Every model's skeleton, for ranking hero candidates.
+                    let mut skel_done = false;
+                    if let Some(rx) = &skel_rx {
+                        loop {
+                            match rx.try_recv() {
+                                Ok(crate::heroidx::Msg::Progress(f, wad)) => skel_progress = (f, wad),
+                                Ok(crate::heroidx::Msg::Done(Ok(s))) => {
+                                    skeletons = Some(s);
+                                    skel_done = true;
+                                    break;
+                                }
+                                Ok(crate::heroidx::Msg::Done(Err(e))) => {
+                                    skel_error = Some(e);
+                                    skel_done = true;
+                                    break;
+                                }
+                                Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                                    skel_error = Some("the skeleton reader stopped".into());
+                                    skel_done = true;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    if skel_done {
+                        skel_rx = None;
+                    }
                     if let Some(wave) = audio_page.play.take() {
                         // Lazily open the record index (English.wad + .pws) and the device on the
                         // first play — both are heavy and most sessions never play audio.
@@ -6031,6 +6410,47 @@ pub fn run(opts: Options) {
                                         bind_tex_plate(&mut w, &mut scene, &mut tv);
                                         tex_view = Some(tv);
                                     }
+                                    // A clip: played on the hero, or the hero picker first when there is
+                                    // none, ranked by the clip's bones.
+                                    Kind::Animation => {
+                                        let (clip, label) = (row.hash, row.label());
+                                        let info = clip_infos.entry(clip).or_insert_with(|| clip_info(&mut w, clip)).clone();
+                                        anim_clip = Some((clip, label.clone()));
+                                        tex_view = None;
+                                        manm_t = 0.0;
+                                        match (&hero, info) {
+                                            (_, Err(e)) => status = format!("{label}: {e}"),
+                                            // A material animation drives no bone: its tracks show
+                                            // in the inspector, nothing loads on the hero.
+                                            (_, Ok(ClipInfo { material: Some(m), .. })) => {
+                                                manm_t = m.time_span().0 as f32;
+                                                status = format!(
+                                                    "{label}: material animation \u{b7} {} groups \u{b7} {} tracks",
+                                                    m.groups.len(),
+                                                    m.track_count()
+                                                );
+                                            }
+                                            (None, Ok(i)) => {
+                                                if skeletons.is_none() && skel_rx.is_none() {
+                                                    skel_error = None;
+                                                    skel_rx = Some(crate::heroidx::spawn(w.labels.clone(), w.side_labels.clone()));
+                                                }
+                                                hero_picker = Some(HeroPicker {
+                                                    what: format!("clip {label}"),
+                                                    want: i.bones,
+                                                    filter: String::new(),
+                                                    then: Some((clip, label.clone())),
+                                                });
+                                                status = format!("{label}: pick the hero it plays on");
+                                            }
+                                            (Some(h), Ok(_)) => {
+                                                if preview.as_ref().map(|p| (p.hash, p.label.as_str())) != Some((h.hash, h.label.as_str())) {
+                                                    actions.push(Act::LoadModelHash(h.hash, h.label.clone()));
+                                                }
+                                                actions.push(Act::PlayClip(clip, label));
+                                            }
+                                        }
+                                    }
                                     // A string table: every table's text side by side, this one first.
                                     Kind::Text if row.type_id == mercs2_formats::types::TYPE_ID_STRINGDB => {
                                         let mut sources = Vec::new();
@@ -6151,6 +6571,78 @@ pub fn run(opts: Options) {
                                     );
                                 }
                             }
+                            // On the Anims tab the clip keys step the tab's rows: each plays on the hero.
+                            Act::ClipNav(d) if wb == Workbench::Inspect && kind == Kind::Animation => {
+                                if !filtered.is_empty() {
+                                    let n = filtered.len() as i32;
+                                    sel = (sel as i32 + d).rem_euclid(n) as usize;
+                                    actions.push(Act::LoadRow(sel));
+                                }
+                            }
+                            Act::PlayClip(clip, label) => {
+                                let Some(p) = &mut preview else {
+                                    status = format!("{label}: no model is loaded to play it on");
+                                    continue;
+                                };
+                                let ci = match p.clip_catalog.iter().position(|e| e.hash == clip) {
+                                    Some(i) => i,
+                                    None => {
+                                        p.clip_catalog.push(ClipEntry {
+                                            hash: clip,
+                                            handles: Vec::new(),
+                                            label: label.clone(),
+                                            name: index.names.get(&clip).cloned(),
+                                        });
+                                        p.clip_catalog.len() - 1
+                                    }
+                                };
+                                actions.push(Act::ClipSel(ci));
+                            }
+                            Act::HeroPick => {
+                                let (what, want, then) = match &anim_clip {
+                                    Some((clip, label)) => match clip_infos.get(clip) {
+                                        Some(Ok(i)) if i.material.is_none() => {
+                                            (format!("clip {label}"), i.bones.clone(), Some((*clip, label.clone())))
+                                        }
+                                        _ => (format!("clip {label}"), Vec::new(), None),
+                                    },
+                                    None => ("the Anims and FaceFX tabs".to_string(), Vec::new(), None),
+                                };
+                                if skeletons.is_none() && skel_rx.is_none() {
+                                    skel_error = None;
+                                    skel_rx = Some(crate::heroidx::spawn(w.labels.clone(), w.side_labels.clone()));
+                                }
+                                hero_picker = Some(HeroPicker { what, want, filter: String::new(), then });
+                            }
+                            Act::HeroClose => hero_picker = None,
+                            Act::SetHero(hash, label) => {
+                                let want = hero_picker.as_ref().map_or(Vec::new(), |hp| hp.want.clone());
+                                // A model holding none of the bones it is chosen for is refused.
+                                if !want.is_empty() {
+                                    match skeletons.as_ref().and_then(|s| s.coverage(hash, &want)) {
+                                        Some(0) => {
+                                            status = format!("{label} holds none of the {} bones it would play — not made the hero", want.len());
+                                            continue;
+                                        }
+                                        None => {
+                                            status = format!("{label}: its skeleton is not read yet");
+                                            continue;
+                                        }
+                                        Some(_) => {}
+                                    }
+                                }
+                                let h = crate::settings::Hero { hash, label: label.clone() };
+                                hero = Some(h.clone());
+                                cfg.hero = Some(h);
+                                status = match cfg.save() {
+                                    Ok(p) => format!("hero {label} (saved in {})", p.display()),
+                                    Err(e) => format!("hero {label} — SETTINGS NOT SAVED: {e}"),
+                                };
+                                actions.push(Act::LoadModelHash(hash, label));
+                                if let Some(then) = hero_picker.take().and_then(|hp| hp.then) {
+                                    actions.push(Act::PlayClip(then.0, then.1));
+                                }
+                            }
                             a @ (Act::ClipSel(_) | Act::ClipNav(_)) => {
                                 clip_seek = 0; // user chose a clip — stop auto-seeking
                                 if let Some(p) = &mut preview {
@@ -6181,10 +6673,7 @@ pub fn run(opts: Options) {
                                                 );
                                             }
                                             Some(None) => {
-                                                status = format!(
-                                                    "clip {} is not in any animgroup bound to this rig",
-                                                    p.clip_catalog[ci].label
-                                                );
+                                                status = unplayable(&clip_infos, hash, &p.clip_catalog[ci].label, &p.hier);
                                             }
                                             Some(Some(_)) => {}
                                         }
