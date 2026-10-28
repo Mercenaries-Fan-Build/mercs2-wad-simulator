@@ -24,7 +24,8 @@
 //!   `scripts_vz` block, recompress (sges round-trip checked) and rebuild the WAD,
 //!   then re-read the output and assert the edit landed.
 //!
-//! Module map:
+//! Module map (none of these is a module of this crate: each lives in `mercs2_formats` —
+//! `scripts_block` and `model_edit::{mtrl, vertex, unwrap, reskin}` — imported under these names):
 //!
 //! * [`scripts_block`] — `ScriptsBlock`/`Entry` container model (parse, serialize,
 //!   CSUM verify, name lookup by `pandemic_hash_m2`, LuaQ extract/replace). The
