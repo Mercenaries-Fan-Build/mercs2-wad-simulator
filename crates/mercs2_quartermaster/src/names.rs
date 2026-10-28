@@ -6,7 +6,7 @@
 //! human WRITES should be a name too (mandate `no-arbitrary-hashes`).
 //!
 //! This module closes the gap between those: it takes the curated
-//! `crates/mercs2_workshop/data/production_names.json` (23,110 hash-verified entries) and gives
+//! `crates/mercs2_workshop/data/production_names.json` (23,106 hash-verified entries) and gives
 //! back the name for a hash,
 //! so that
 //!
