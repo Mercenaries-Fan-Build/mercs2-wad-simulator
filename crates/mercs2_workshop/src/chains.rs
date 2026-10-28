@@ -261,11 +261,16 @@ fn check_data(p: &Path) -> Result<PathBuf, (&'static str, String)> {
 
 /// The reference-data chain: this run's choice → `MERCS2_WORKSHOP_DATA` → saved → beside the exe →
 /// the working directory or a parent → the downloaded copy. The committed, partial `workshop_data/`
-/// of a repo checkout has no manifest and is passed over by the searched steps.
+/// of a repo checkout has no manifest and is passed over by the searched steps. The downloaded copy
+/// counts only when it is the pinned bundle the install puts there
+/// ([`crate::fetch::installed_pin_mismatch`]); any other copy is passed over, so with nothing above
+/// it the chain is empty and [`crate::index::require_data_home`] replaces it through the pinned,
+/// sha256-checked install.
 pub fn data_chain(i: DataInputs) -> Chain {
     let complete = |d: PathBuf| is_complete_bundle(&d).then_some(d);
     let beside = i.exe_dir.map(|d| d.join("workshop_data")).and_then(complete);
     let walk = i.cwd.and_then(|c| c.ancestors().map(|d| d.join("workshop_data")).find(|d| is_complete_bundle(d)));
+    let cache = i.cache.and_then(complete).filter(|d| crate::fetch::installed_pin_mismatch(d).is_none());
     resolve(
         vec![
             Step::Set { label: RUN.into(), set: i.run },
@@ -273,7 +278,7 @@ pub fn data_chain(i: DataInputs) -> Chain {
             Step::Set { label: SAVED.into(), set: i.saved },
             Step::Found { label: "beside the exe".into(), found: beside },
             Step::Found { label: "working directory".into(), found: walk },
-            Step::Found { label: "downloaded copy".into(), found: i.cache.and_then(complete) },
+            Step::Found { label: "downloaded copy".into(), found: cache },
         ],
         check_data,
     )
@@ -372,6 +377,14 @@ mod tests {
         dir.to_path_buf()
     }
 
+    /// A complete bundle at `dir` as the pinned install leaves it: with the record of the pin.
+    fn pinned_copy(dir: &Path) -> PathBuf {
+        let d = bundle(dir);
+        std::fs::write(d.join(crate::fetch::INSTALLED_PIN), crate::fetch::pin_record(&crate::fetch::PINNED))
+            .expect("pin record");
+        d
+    }
+
     /// An install root holding `data/vz.wad`.
     fn install(dir: &Path) -> PathBuf {
         std::fs::create_dir_all(dir.join("data")).expect("install dir");
@@ -456,7 +469,7 @@ mod tests {
     fn an_incomplete_bundle_in_the_environment_stops_the_chain_before_the_downloaded_copy() {
         let d = scratch("env_incomplete");
         std::fs::create_dir_all(d.join("partial")).expect("partial");
-        let cache = bundle(&d.join("cache"));
+        let cache = pinned_copy(&d.join("cache"));
         let c = data_chain(DataInputs { env: Some(d.join("partial")), cache: Some(cache.clone()), ..no_data() });
         assert_eq!(c.in_use(), None, "the downloaded copy {} must not be used", cache.display());
         let b = c.blocker().expect("the environment blocks");
@@ -480,7 +493,7 @@ mod tests {
         // The repo checkout's partial workshop_data: no manifest, passed over.
         std::fs::create_dir_all(d.join("repo/workshop_data")).expect("partial");
         std::fs::create_dir_all(d.join("repo/crate")).expect("cwd");
-        let cache = bundle(&d.join("cache"));
+        let cache = pinned_copy(&d.join("cache"));
         let c = data_chain(DataInputs {
             exe_dir: Some(d.join("bin")),
             cwd: Some(d.join("repo/crate")),
@@ -502,6 +515,30 @@ mod tests {
         let d = scratch("not_empty");
         let c = data_chain(DataInputs { saved: Some(d.join("gone")), ..no_data() });
         assert!(!c.is_empty(), "a broken saved folder is not a reason to download over it");
+    }
+
+    /// A complete downloaded copy that is not the pinned bundle — no pin record (unpacked by hand,
+    /// or installed from the latest release by an earlier build), or a record of another pin — is
+    /// passed over, leaving the empty chain that the pinned install replaces it from.
+    #[test]
+    fn a_downloaded_copy_that_is_not_the_pinned_bundle_is_passed_over() {
+        let d = scratch("stale_cache");
+        let cache = bundle(&d.join("cache"));
+        let c = data_chain(DataInputs { cache: Some(cache.clone()), ..no_data() });
+        assert_eq!(c.in_use(), None, "{} has no pin record", cache.display());
+        assert_eq!(c.rows[5].status, Status::NotFound);
+        assert!(c.is_empty(), "nothing usable: the state the pinned install runs in");
+
+        let other_sha = "0".repeat(64);
+        let other = crate::fetch::Pin { url: crate::fetch::PINNED.url, tag: crate::fetch::PINNED.tag, sha256: &other_sha };
+        std::fs::write(cache.join(crate::fetch::INSTALLED_PIN), crate::fetch::pin_record(&other)).expect("record");
+        let c = data_chain(DataInputs { cache: Some(cache.clone()), ..no_data() });
+        assert_eq!(c.in_use(), None, "{} records another digest", cache.display());
+        assert!(c.is_empty());
+
+        let pinned = pinned_copy(&cache);
+        let c = data_chain(DataInputs { cache: Some(pinned.clone()), ..no_data() });
+        assert_eq!(c.in_use(), Some(pinned.as_path()));
     }
 
     #[test]
