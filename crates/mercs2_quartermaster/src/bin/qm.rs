@@ -68,7 +68,8 @@ enum Command {
         /// Where the game is installed. Only meaningful with --with-game.
         #[arg(long, value_name = "DIR")]
         game: Option<PathBuf>,
-        /// hash → name lookup, for M0130. Defaults to the workspace's data/production_names.json.
+        /// hash → name lookup, for M0130. Defaults to the workspace's
+        /// crates/mercs2_workshop/data/production_names.json.
         #[arg(long, value_name = "FILE")]
         names: Option<PathBuf>,
         /// Also write the findings as JSON (lint-report.json) to this file. Any older file there is
@@ -140,7 +141,8 @@ enum Command {
         /// ships it). Used only when --corpus is absent. Env: MERCS2_WORKSHOP_DATA.
         #[arg(long, value_name = "DIR")]
         workshop_data: Option<PathBuf>,
-        /// hash → name lookup, for M0130. Defaults to the workspace's data/production_names.json.
+        /// hash → name lookup, for M0130. Defaults to the workspace's
+        /// crates/mercs2_workshop/data/production_names.json.
         #[arg(long, value_name = "FILE")]
         names: Option<PathBuf>,
         /// The directory holding the game's original shader3.bin and shader3Low.bin. The shader
