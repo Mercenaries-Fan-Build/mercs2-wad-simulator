@@ -108,6 +108,29 @@ impl MtrlMaterial {
     pub fn runtime_flags(&self) -> u16 {
         runtime_material_flags(self.flags)
     }
+
+    /// Whether the material is alpha-tested ([`material_alpha_tested`]).
+    pub fn alpha_tested(&self) -> bool {
+        material_alpha_tested(self.flags)
+    }
+
+    /// The alpha multiplier: preamble word 13, which `Mtrl_Parse` stores at material `+0x5C` and the
+    /// draw uploads as `materialData` c98.w. The pixel shaders write `oC0.w = diffuse.a × c98.w`, so
+    /// the alpha test compares that product. Retail: 1.0 on 3,743 alpha-tested materials, 0.7 on 11.
+    pub fn alpha_multiplier(&self) -> f32 {
+        self.preamble[13]
+    }
+}
+
+/// The `ALPHAREF` retail sets for an alpha-tested material, with `ALPHAFUNC` 5 (GREATER): a pixel
+/// survives when its alpha, as a byte, exceeds 77 (`FUN_00858320` / `FUN_00858530`).
+pub const MATERIAL_ALPHA_REF: u8 = 0x4D;
+
+/// Whether a material with on-disk flags `disk` is alpha-tested in the colour pass: runtime bit
+/// `0x40` (on-disk `0x008`). `FUN_00858320`, which sets the state for opaque (class 6) and blended
+/// (class 8) packets, writes `ALPHATESTENABLE = (F >> 6) & 1`.
+pub fn material_alpha_tested(disk: u16) -> bool {
+    runtime_material_flags(disk) & 0x40 != 0
 }
 
 /// `FUN_0084ee70`: the on-disk `flags@104` word as `Mtrl_Parse` stores it at material `+0xA0`
@@ -1461,6 +1484,16 @@ mod tests {
         // Bits combine: 0x0088 (2,787 retail materials) and the stealth suit's 0x0100.
         assert_eq!(runtime_material_flags(0x0088), 0x0140);
         assert_eq!(runtime_material_flags(0x0100), 0x0200);
+    }
+
+    #[test]
+    fn only_the_0x008_bit_alpha_tests_the_colour_pass() {
+        assert!(material_alpha_tested(0x0088));
+        assert!(material_alpha_tested(0x0008));
+        assert!(!material_alpha_tested(0x0080));
+        // A blend mode alone does not alpha-test in FUN_00858320.
+        assert!(!material_alpha_tested(0x0001));
+        assert!(!material_alpha_tested(0x0090));
     }
 
     #[test]
