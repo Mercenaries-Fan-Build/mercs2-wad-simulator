@@ -35,7 +35,7 @@ fn tris_at(m: &Model, rung: u8, health: f32) -> u32 {
     let node_enable = match &m.machine {
         Some(sm) => {
             let chosen = orch::node_states_for_health(sm, health, 0.99);
-            orch::machine_node_enable(sm, &m.hier, &chosen)
+            orch::machine_node_enable(sm, &m.hier, &chosen).unwrap_or_else(|e| panic!("{e}"))
         }
         None => Vec::new(),
     };
@@ -83,7 +83,7 @@ fn wrecking_a_vehicle_swaps_geometry_rather_than_adding_it() {
             let node_enable = match &m.machine {
                 Some(sm) => {
                     let chosen = orch::node_states_for_health(sm, health, 0.99);
-                    orch::machine_node_enable(sm, &m.hier, &chosen)
+                    orch::machine_node_enable(sm, &m.hier, &chosen).unwrap_or_else(|e| panic!("{e}"))
                 }
                 None => Vec::new(),
             };
@@ -201,4 +201,64 @@ fn lod_masks_partition_the_tiers_across_the_chain() {
     assert_eq!(by_level(0) & 0x70, 0x70, "resident block serves the far tiers");
     assert!(by_level(2) & 0x03 != 0, "the finest block serves the near tiers");
     assert!(m.rungs.iter().all(|r| r.lod_bits() != 0), "no rung resolves to a zero mask");
+}
+
+/// Bounding-box centre of one draw's triangles, posed by its rung's REST palette (`stats.bones`).
+fn rest_center(r: &mercs2_engine::model::Rung, d: &mercs2_engine::mesh::DrawGroup) -> [f32; 3] {
+    let (mut lo, mut hi) = ([f32::MAX; 3], [f32::MIN; 3]);
+    for k in d.index_start..d.index_start + d.index_count {
+        let v = &r.vertices[r.indices[k as usize] as usize];
+        let mut p = [0f32; 3];
+        for j in 0..4 {
+            let w = v.weights[j] as f32 / 255.0;
+            if w == 0.0 {
+                continue;
+            }
+            let s = &r.stats.bones[v.joints[j] as usize];
+            for a in 0..3 {
+                p[a] += w * (v.pos[0] * s[0][a] + v.pos[1] * s[1][a] + v.pos[2] * s[2][a] + s[3][a]);
+            }
+        }
+        for a in 0..3 {
+            lo[a] = lo[a].min(p[a]);
+            hi[a] = hi[a].max(p[a]);
+        }
+    }
+    [(lo[0] + hi[0]) * 0.5, (lo[1] + hi[1]) * 0.5, (lo[2] + hi[2]) * 0.5]
+}
+
+#[test]
+fn every_segm_row_draws_including_instance_rows() {
+    // Retail's draw loop (`FUN_00472a50`) walks SEGM ROWS: row r draws `renderable[seg_id]` at its own
+    // node. The M1A2's rows 74..99 re-draw its one road-wheel mesh (segs 72/73) on the other 13 hubs;
+    // reaching SEGM only through INDX drew 74 of its 100 rows and left 13 wheels off.
+    let mut w = open_vz_wad();
+    let m = Model::load(&mut w, 0xCE77_D4CB).expect("al_veh_tank_m1a2 assembles");
+    assert_eq!(m.segm.len(), 100);
+    let drawn: std::collections::BTreeSet<usize> = m.rungs.iter().flat_map(|r| r.draws.iter().map(|d| d.segm_row)).collect();
+    let missing: Vec<usize> = (0..m.segm.len()).filter(|i| !drawn.contains(i)).collect();
+    assert!(missing.is_empty(), "SEGM rows with no draw: {missing:?}");
+    let instances = m.rungs.iter().flat_map(|r| &r.draws).filter(|d| d.segm_row != d.seg_id).count();
+    assert_eq!(instances, 26, "13 instanced road wheels x 2 LOD tiers");
+}
+
+#[test]
+fn instanced_road_wheels_rest_on_their_own_hubs() {
+    // Retail's live per-node matrices are the `+16` chain (see `mercs2_probe`
+    // `retail_node_matrices_are_the_plus16_chain`); an instance node's `+80` is a COPY of its source's,
+    // so an identity rest palette stacked all 14 near-tier wheels on one hub. Under the rest palette
+    // each sits on its own: seven per side at x = +-1.45.
+    let mut w = open_vz_wad();
+    let m = Model::load(&mut w, 0xCE77_D4CB).expect("al_veh_tank_m1a2 assembles");
+    let mut hubs: Vec<[i32; 3]> = Vec::new();
+    for r in &m.rungs {
+        for d in r.draws.iter().filter(|d| d.seg_id == 72) {
+            let c = rest_center(r, d);
+            assert!((c[0].abs() - 1.45).abs() < 0.01, "wheel row {} off the track line: {c:?}", d.segm_row);
+            hubs.push([(c[0] * 100.0).round() as i32, (c[1] * 100.0).round() as i32, (c[2] * 100.0).round() as i32]);
+        }
+    }
+    hubs.sort_unstable();
+    hubs.dedup();
+    assert_eq!(hubs.len(), 14, "14 road wheels on 14 distinct hubs: {hubs:?}");
 }
