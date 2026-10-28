@@ -1,5 +1,5 @@
-//! Live destruction control — the Lua the Workshop console sends to a running game to inspect and
-//! drive a destructible's state machine.
+//! Live destruction control — Lua chunks for a running game (sent over `mercs2_bridge`) to inspect
+//! and drive a destructible's state machine.
 //!
 //! Ess already exposes the *health* lever (`Ess.Object.damage/kill/setHealth`), which the engine
 //! converts to a destruction transition (`FUN_004d05c0` → `SetState(InitDestroyedState)` + break
@@ -7,9 +7,9 @@
 //! `SetState` vocabulary** (`orchestrator::STATE_VOCABULARY`, cracked from `edit_state_machine`): the
 //! shared state hashes the engine's `SetState` (`FUN_004d3e10`) keys on. With those names we can
 //! generate the chunk to force ANY state, read transitions by name, and demolish/repair — the
-//! console then sends it over `mercs2_bridge`.
+//! caller then sends it over `mercs2_bridge`.
 //!
-//! These functions only GENERATE Lua; the console runs it. That keeps them pure and unit-testable —
+//! These functions only GENERATE Lua; the caller sends it to the game. That keeps them pure and unit-testable —
 //! the correctness of a chunk is its bytes, checked here — while the live game is the one thing a
 //! test cannot stand in for.
 //!
