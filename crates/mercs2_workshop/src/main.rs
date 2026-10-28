@@ -1006,7 +1006,7 @@ exported {ok} bundle(s), {fail} failed -> {}", outroot.display());
                 weights: [v.weights[0] as f32/255.0, v.weights[1] as f32/255.0, v.weights[2] as f32/255.0, v.weights[3] as f32/255.0] }
         }).collect();
         // Flat white geometry, matching the workshop white-mesh view (the surface where the break shows).
-        let draws = vec![shot::DrawTex { index_start: 0, index_count: im.indices.len() as u32, diffuse: None, normal: None, specular: None }];
+        let draws = vec![shot::DrawTex { index_start: 0, index_count: im.indices.len() as u32, diffuse: None, normal: None, specular: None, material_flags: 0, material_alpha: 1.0 }];
         println!("--faithful: {} verts, {} tris, target {target}", im.verts.len(), im.indices.len()/3);
         // The renderer FRAMES the bbox, so a conform that got the proportions wrong still fills the
         // image and reads as correct. Print the conformed extent in METRES beside the target rig's
@@ -1167,7 +1167,7 @@ exported {ok} bundle(s), {fail} failed -> {}", outroot.display());
             None => vec![IDENT; bone_count],
         };
         // One untextured range: --shot previews a raw glTF import, which carries no WAD material.
-        let draws = vec![shot::DrawTex { index_start: 0, index_count: im.indices.len() as u32, diffuse: None, normal: None, specular: None }];
+        let draws = vec![shot::DrawTex { index_start: 0, index_count: im.indices.len() as u32, diffuse: None, normal: None, specular: None, material_flags: 0, material_alpha: 1.0 }];
         shot::render(&sv, &im.indices, &palette, (lo, hi), &out, &draws);
         return;
     }
@@ -1411,6 +1411,8 @@ exported {ok} bundle(s), {fail} failed -> {}", outroot.display());
                     }
                     (w, h, rgba)
                 }) },
+                material_flags: d.material_flags,
+                material_alpha: d.material_alpha,
             })
             .collect();
         let untextured = draws.iter().filter(|d| d.diffuse.is_none()).count();
