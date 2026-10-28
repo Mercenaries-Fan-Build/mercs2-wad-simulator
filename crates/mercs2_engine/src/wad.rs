@@ -1,6 +1,6 @@
 //! Load real base-game models directly from a Mercenaries 2 WAD (`vz.wad`).
 //!
-//! Mirrors `cube_mod`'s extraction: open the FFCS archive, find model assets via the ASET table
+//! Mirrors `mercs2_smuggler`'s extraction: open the FFCS archive, find model assets via the ASET table
 //! (`type_id == 19`, primary), decompress the owning block, and slice out the model container
 //! (`type_hash == "model"`) — which is the UCFX container `mesh::build_from_container` consumes.
 
