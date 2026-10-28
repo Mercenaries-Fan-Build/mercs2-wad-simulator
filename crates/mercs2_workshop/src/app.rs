@@ -1603,6 +1603,9 @@ pub fn run(opts: Options) {
     let mut ui_state = opts.ui_state.clone();
     // Its AUDIO-tab keys, held until the tab's routing is in.
     let mut audio_ui: Option<crate::ui_state::UiState> = None;
+    // A `--ui-state` that opened a string table: its capture (path, settle frames), taken once the
+    // tables have read.
+    let mut text_ui: Option<(PathBuf, u32)> = None;
     let mut capture_to: Option<(PathBuf, u32)> = None;
     let mut capture_asked = false;
     // The Audio page (Inspect's AUDIO tab): the captioned inventory, set from the boot thread's
@@ -1610,6 +1613,9 @@ pub fn run(opts: Options) {
     // are queued here by keys as well as widgets.
     let mut audio_page = crate::audiopage::Panel::default();
     let mut audio_acts: Vec<crate::audiopage::Act> = Vec::new();
+    // The Text tab's string tables: read on a worker the first time a table is opened.
+    let mut text_page = crate::textpage::Panel::default();
+    let mut text_acts: Vec<crate::textpage::Act> = Vec::new();
     // Ctrl (or Cmd) held: the Audio tab's select-all.
     let mut ctrl = false;
     // VO playback, both opened LAZILY on the first ▶ (English.wad + the output device are heavy, and
@@ -1958,6 +1964,8 @@ pub fn run(opts: Options) {
                             missions_panel = crate::missions::Panel::default();
                             // Its routing reads English.wad beside the archive, its clips the bundle.
                             audio_page = crate::audiopage::Panel::default();
+                            // Its tables are the archive's, its key names the bundle's.
+                            text_page = crate::textpage::Panel::default();
                             loaded_data = None;
                         }
                         match next {
@@ -2307,6 +2315,8 @@ pub fn run(opts: Options) {
                     // ── `--ui-state`: put the window in the named state, once the reference data is
                     // in (names resolve), and start the countdown to the capture. ──
                     if let Some(st) = ui_state.take() {
+                        // The state opens a string table, which reads on a worker before the capture.
+                        let mut waits_on_text = false;
                         let applied = (|| -> Result<(), String> {
                             use crate::ui_state::pick;
                             let model = |name: &str| -> Result<(u32, String), String> {
@@ -2343,8 +2353,20 @@ pub fn run(opts: Options) {
                             filtered = refilter(&index, kind, &filter, lens);
                             sel = 0;
                             if let Some(name) = &st.load {
-                                let (hash, label) = model(name)?;
-                                actions.push(Act::LoadModelHash(hash, label));
+                                if kind == Kind::Model {
+                                    let (hash, label) = model(name)?;
+                                    actions.push(Act::LoadModelHash(hash, label));
+                                } else {
+                                    // The tab's row by its label, opened as its click opens it.
+                                    let rows = index.rows(kind);
+                                    let vi = filtered
+                                        .iter()
+                                        .position(|&ri| rows[ri].label() == *name)
+                                        .ok_or_else(|| format!("no {} row named {name:?}", kind.label()))?;
+                                    sel = vi;
+                                    actions.push(Act::LoadRow(vi));
+                                    waits_on_text = rows[filtered[vi]].type_id == mercs2_formats::types::TYPE_ID_STRINGDB;
+                                }
                             }
                             if let Some(dir) = &st.shipment {
                                 qm.open_shipment(dir, qm_names.as_ref());
@@ -2391,8 +2413,21 @@ pub fn run(opts: Options) {
                         } else if st.audio() {
                             audio_page.ensure_routes(std::path::Path::new(&wadpath));
                             audio_ui = Some(st);
+                        } else if waits_on_text {
+                            // A string table reads on a worker; the capture waits for it.
+                            text_ui = Some((st.capture.clone(), st.settle_frames));
                         } else {
                             capture_to = Some((st.capture.clone(), st.settle_frames));
+                        }
+                    }
+                    if let Some((to, settle)) = &text_ui {
+                        if let Some(e) = text_page.error() {
+                            eprintln!("--ui-state: the string tables did not read: {e}");
+                            std::process::exit(2);
+                        }
+                        if text_page.tables().is_some() {
+                            capture_to = Some((to.clone(), *settle));
+                            text_ui = None;
                         }
                     }
                     if let Some((to, settle, at)) = &reload_capture {
@@ -2862,6 +2897,7 @@ pub fn run(opts: Options) {
                                                 crate::index::Preview::Plate => {
                                                     resp.on_hover_text("previews as a texture plate")
                                                 }
+                                                crate::index::Preview::View(what) => resp.on_hover_text(what),
                                                 crate::index::Preview::None(why) => resp
                                                     .on_hover_text(format!("browse only — {why}")),
                                             };
@@ -3386,7 +3422,18 @@ pub fn run(opts: Options) {
                               if audio_tab {
                                   audio_acts.extend(crate::audiopage::inspector(ui, &audio_page));
                               }
-                              if eff.inspect_like() && !is_missions_bench && !audio_tab {
+                              // The Text tab with a string table or a font open.
+                              let text_tab = eff == Workbench::Inspect
+                                  && kind == Kind::Text
+                                  && (text_page.table.is_some() || text_page.font.is_some());
+                              if text_tab {
+                                  if text_page.font.is_some() {
+                                      text_acts.extend(crate::textpage::font_inspector(ui, &text_page));
+                                  } else {
+                                      text_acts.extend(crate::textpage::inspector(ui, &text_page));
+                                  }
+                              }
+                              if eff.inspect_like() && !is_missions_bench && !audio_tab && !text_tab {
                                 match &mut preview {
                                     None => {
                                         ui.weak("No model loaded — pick one in the browser at left.");
@@ -4597,6 +4644,13 @@ pub fn run(opts: Options) {
                                     }
                                     // The Audio tab's verbs act on its clips: Play, Select all, Add to
                                     // Shipment, Export.
+                                    // An open string table's verbs act on it, not on a model; a font
+                                    // has none (no kind takes one).
+                                    Workbench::Inspect
+                                        if kind == Kind::Text && (text_page.table.is_some() || text_page.font.is_some()) =>
+                                    {
+                                        text_acts.extend(crate::textpage::verbs(ui, &text_page));
+                                    }
                                     Workbench::Inspect if kind == Kind::Audio => {
                                         let playing = vo_player.as_ref().and_then(|p| p.status());
                                         audio_acts.extend(crate::audiopage::verbs(ui, &audio_page, playing));
@@ -5068,6 +5122,18 @@ pub fn run(opts: Options) {
                             let playing = vo_player.as_ref().and_then(|p| p.status());
                             audio_acts.extend(crate::audiopage::center(ctx, &audio_page, playing));
                         }
+                        // ── TEXT main content: an open string table, every language side by side, or
+                        // an open font's pages.
+                        let text_tab = wb == Workbench::Inspect
+                            && kind == Kind::Text
+                            && (text_page.table.is_some() || text_page.font.is_some());
+                        if text_tab {
+                            if text_page.font.is_some() {
+                                text_acts.extend(crate::textpage::font_center(ctx, &mut text_page));
+                            } else {
+                                text_acts.extend(crate::textpage::center(ctx, &text_page));
+                            }
+                        }
 
                         // ── VIEWPORT HUD: status chips over the 3D (the panels are all placed now, so
                         // `available_rect` is the viewport region). Non-interactable so the camera drag
@@ -5079,7 +5145,7 @@ pub fn run(opts: Options) {
                         // than as `!= Quartermaster`, which silently stopped being the whole answer
                         // the moment Settings also took the centre.
                         let vp = ctx.available_rect();
-                        if eff.has_viewport() && wb != Workbench::Settings && !audio_tab {
+                        if eff.has_viewport() && wb != Workbench::Settings && !audio_tab && !text_tab {
                         egui::Area::new(egui::Id::new("vp_hud"))
                             .fixed_pos(vp.left_top() + egui::vec2(14.0, 12.0))
                             .interactable(false)
@@ -5407,6 +5473,15 @@ pub fn run(opts: Options) {
                         crate::audiopage::apply(act, &mut audio_page);
                     }
                     audio_page.poll();
+                    for act in text_acts.drain(..) {
+                        match act {
+                            crate::textpage::Act::Ship(hash, label) => {
+                                actions.push(Act::AddToShipment("edit_stringdb", hash, label));
+                            }
+                            a => crate::textpage::apply(a, &mut text_page),
+                        }
+                    }
+                    text_page.poll();
                     if let Some(wave) = audio_page.play.take() {
                         // Lazily open the record index (English.wad + .pws) and the device on the
                         // first play — both are heavy and most sessions never play audio.
@@ -5955,6 +6030,56 @@ pub fn run(opts: Options) {
                                         };
                                         bind_tex_plate(&mut w, &mut scene, &mut tv);
                                         tex_view = Some(tv);
+                                    }
+                                    // A string table: every table's text side by side, this one first.
+                                    Kind::Text if row.type_id == mercs2_formats::types::TYPE_ID_STRINGDB => {
+                                        let mut sources = Vec::new();
+                                        for r in index.rows(Kind::Text) {
+                                            if r.type_id != mercs2_formats::types::TYPE_ID_STRINGDB {
+                                                continue;
+                                            }
+                                            for src in std::iter::once(r.src).chain(r.others.iter().copied()) {
+                                                sources.push(crate::textpage::Source {
+                                                    hash: r.hash,
+                                                    label: r.label(),
+                                                    path: w.source_path(src).to_string(),
+                                                });
+                                            }
+                                        }
+                                        let lua: Vec<String> = lua_corpus.iter().map(|(_, c, _)| c.clone()).collect();
+                                        text_page.ensure(sources, index.names.clone(), lua);
+                                        text_page.table = Some(row.hash);
+                                        text_page.font = None;
+                                        tex_view = None;
+                                        status = format!("string table {}", row.label());
+                                    }
+                                    // A font: its pages with every glyph's box, read from the WAD
+                                    // the row previews from; its pages resolve like any texture.
+                                    Kind::Text if row.type_id == mercs2_formats::types::TYPE_ID_FONT => {
+                                        let (hash, label, src) = (row.hash, row.label(), row.src);
+                                        let opened = (|| -> Result<crate::textpage::FontView, String> {
+                                            let file = std::path::Path::new(w.source_path(src))
+                                                .file_name()
+                                                .map_or_else(|| format!("source {src}"), |f| f.to_string_lossy().into_owned());
+                                            let wad = w.source_mut(src).ok_or_else(|| format!("no source {src}"))?;
+                                            let c = wad::extract_container_typed(wad, hash, mercs2_formats::types::TYPE_HASH_FONT)?;
+                                            let font = mercs2_formats::font::parse_font(&c)?;
+                                            let pages = font
+                                                .pages
+                                                .iter()
+                                                .map(|&t| (name_or_hash(&index, t), w.texture_best(t).map(|td| crate::texpng::decode_bc(&td))))
+                                                .collect();
+                                            Ok(crate::textpage::FontView::new(hash, label.clone(), file, font, pages))
+                                        })();
+                                        match opened {
+                                            Ok(f) => {
+                                                status = format!("font {label}: {} glyphs on {} pages", f.font.glyphs.len(), f.pages.len());
+                                                text_page.font = Some(f);
+                                                text_page.table = None;
+                                                tex_view = None;
+                                            }
+                                            Err(e) => status = format!("FONT FAILED: {label}: {e}"),
+                                        }
                                     }
                                     // A category with no faithful preview SAYS so rather than silently doing
                                     // nothing. It is browsable, and that is the honest state of it — the
