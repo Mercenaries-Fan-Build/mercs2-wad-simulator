@@ -7179,7 +7179,7 @@ pub fn run(opts: Options) {
                                         continue;
                                     }
                                 }
-                                let bones = scene.model_bone_count(dh).max(1);
+                                let rest = scene.model_rest_palette(dh);
                                 let e = world.spawn((
                                     Transform {
                                         translation: Vec3::ZERO,
@@ -7188,7 +7188,7 @@ pub fn run(opts: Options) {
                                     },
                                     ModelRef { model: dh },
                                     AnimState::default(),
-                                    SkinPalette { mats: vec![IDENTITY; bones] },
+                                    SkinPalette { mats: rest },
                                 ));
                                 let rs = default_render_state(&mut w, dh);
                                 scene.set_entity_render_state(e, rs);
