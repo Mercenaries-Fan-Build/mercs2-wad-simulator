@@ -34,7 +34,7 @@
 //!
 //! # Module map
 //! - [`components`] — the live ECS instances ([`RuntimeWeapon`], [`RuntimeProjectile`],
-//!   [`RuntimeHomingWeapon`], [`RuntimeExplosion`], [`HomingState`], [`Health`], [`Inventory`]).
+//!   [`RuntimeHomingWeapon`], [`RuntimeExplosion`], [`HomingState`], [`RuntimeInventory`]).
 //! - [`stats`] — the `wpn_*` weapon-def blob parser ([`stats::parse_weapon_block`]) and the authored
 //!   stat structs ([`WeaponStats`], [`ExplosiveStats`], [`HomingStats`], [`FireType`]).
 //! - [`firing`] — trigger → shot: rate-of-fire, magazine/reload, hitscan-vs-projectile dispatch.
