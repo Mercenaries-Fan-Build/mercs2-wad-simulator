@@ -575,34 +575,66 @@ fn block_lod_level(paths: &[String], blk: u16) -> Option<u8> {
 }
 
 /// Extract a container chunk of a given CHDR class `chunk_type` (e.g. the `0x7C569307` terrainmesh)
-/// by its asset hash — resolves the block via ANY primary ASET for the hash (not just MODEL), then
-/// walks the block entry table to the chunk whose `type_hash == chunk_type` and `name_hash` matches.
+/// by its asset hash: every ASET row for the hash names a block, primary rows first; the first of
+/// those blocks whose entry table holds a chunk with `type_hash == chunk_type` and the name gives it.
+///
+/// One name can be several assets of different types — `italian` in `Italian.wad` is a music state
+/// map and a script in block 24 and the string table in block 29 — so the first primary row is not
+/// necessarily this type's. Not every asset carries a PRIMARY row (the `vo_stream.english` wavebank
+/// is only reachable through a plain row), so plain rows are tried too.
 pub fn extract_container_typed(
     wad: &mut Wad,
     name_hash: u32,
     chunk_type: u32,
 ) -> Result<Vec<u8>, String> {
-    let block = wad
-        .archive
-        .aset
-        .iter()
-        .find(|e| e.asset_hash == name_hash && e.is_primary())
-        // Not every asset carries a PRIMARY row — the `vo_stream.english` wavebank, for one, is only
-        // reachable through a plain row. Fall back to any row for the name, like `extract_container`.
-        .or_else(|| wad.archive.aset.iter().find(|e| e.asset_hash == name_hash))
-        .map(|e| e.block_index())
-        .ok_or_else(|| format!("no ASET for 0x{name_hash:08X}"))?;
-    let dec = decompress_block(&mut wad.file, &wad.archive.indx, block)?;
-    let (count, entries) = mercs2_formats::ucfx::parse_block_entry_table(&dec);
-    let mut pos = 4 + count as usize * 16;
-    for e in &entries {
-        let end = pos + e.chunk_size as usize;
-        if e.type_hash == chunk_type && e.name_hash == name_hash && end <= dec.len() {
-            return Ok(dec[pos..end].to_vec());
+    let mut blocks: Vec<u16> = Vec::new();
+    for primary in [true, false] {
+        for e in wad.archive.aset.iter().filter(|e| e.asset_hash == name_hash && e.is_primary() == primary) {
+            if !blocks.contains(&e.block_index()) {
+                blocks.push(e.block_index());
+            }
         }
-        pos = end;
     }
-    Err(format!("chunk type 0x{chunk_type:08X} name 0x{name_hash:08X} not found in block {block}"))
+    if blocks.is_empty() {
+        return Err(format!("no ASET for 0x{name_hash:08X}"));
+    }
+    for &block in &blocks {
+        let dec = decompress_block(&mut wad.file, &wad.archive.indx, block)?;
+        let (count, entries) = mercs2_formats::ucfx::parse_block_entry_table(&dec);
+        let mut pos = 4 + count as usize * 16;
+        for e in &entries {
+            let end = pos + e.chunk_size as usize;
+            if e.type_hash == chunk_type && e.name_hash == name_hash && end <= dec.len() {
+                return Ok(dec[pos..end].to_vec());
+            }
+            pos = end;
+        }
+    }
+    Err(format!("chunk type 0x{chunk_type:08X} name 0x{name_hash:08X} not found in blocks {blocks:?}"))
+}
+
+#[cfg(all(test, feature = "retail"))]
+mod typed_retail_tests {
+    /// `italian` in the retail `Italian.wad` is a music state map and a script (block 24) and the
+    /// string table (block 29): the typed read finds the string table, where taking the first
+    /// primary row looked in block 24 and failed.
+    #[test]
+    fn a_name_several_assets_share_reads_the_type_asked_for() {
+        let vz = mercs2_formats::game_paths::local_config_vz_wad(std::path::Path::new(env!("CARGO_MANIFEST_DIR")))
+            .unwrap_or_else(|e| panic!("{e}"));
+        let dir = vz.parent().expect("vz.wad has a folder");
+        let italian = std::fs::read_dir(dir)
+            .unwrap_or_else(|e| panic!("{}: {e}", dir.display()))
+            .filter_map(Result::ok)
+            .map(|e| e.path())
+            .find(|p| p.file_name().is_some_and(|n| n.to_string_lossy().eq_ignore_ascii_case("italian.wad")))
+            .unwrap_or_else(|| panic!("no Italian.wad beside {}", vz.display()));
+        let mut w = super::open(&italian.to_string_lossy()).unwrap_or_else(|e| panic!("{e}"));
+        let name = mercs2_formats::hash::pandemic_hash_m2("italian");
+        let c = super::extract_container_typed(&mut w, name, mercs2_formats::types::TYPE_HASH_STRINGDB)
+            .unwrap_or_else(|e| panic!("{e}"));
+        assert!(mercs2_formats::ucfx::extract_chunk_body(&c, b"KEYS").is_some(), "the container read is not a string table");
+    }
 }
 
 #[cfg(test)]
