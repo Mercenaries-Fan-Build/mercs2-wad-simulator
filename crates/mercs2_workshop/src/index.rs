@@ -136,9 +136,15 @@ impl Kind {
 #[derive(Clone)]
 pub struct AssetRow {
     pub hash: u32,
+    /// The ASET type id of the row's asset (one of its [`Kind::type_ids`]): a Text row is a font or
+    /// a string table, an Effects row an effect or the fxdict.
+    pub type_id: u32,
     pub block: u16,
-    /// Which wad of the open stack owns this asset (0 = base, 1.. = overlays; last-wins).
+    /// The source the row previews from: a wad of the open stack (0 = base, 1.. = overlays;
+    /// last-wins), else the first side WAD that holds it (`stack.len() + i`).
     pub src: usize,
+    /// Every other source that holds the hash, stack before side WADs.
+    pub others: Vec<usize>,
     /// Registry name, when the hash reverses (most placeable content does).
     pub name: Option<String>,
     /// A spawn template's view of a character kit: the template's `Name`. The row loads the kit
@@ -356,13 +362,15 @@ impl AssetIndex {
     }
 
     /// Build the catalog from EVERY open WAD's ASET table (base + overlays, in stack order — a
-    /// later wad's row wins, the game's patch rule). ALL model ASETs are listed, not just
+    /// later wad's row wins, the game's patch rule), then the `side` WADs (`app::side_wad_files`),
+    /// which add the hashes the stack does not hold and are listed as other sources of the ones it
+    /// does. ALL model ASETs are listed, not just
     /// primaries: shared/instanced meshes (recruits like Misha/Ewan/Fiona, costume skins, world
     /// props) ride as SUB-ENTRIES and have no primary row — `extract_container` falls back to
     /// sub-entries, so they load fine once listed. `names` may be empty at boot — the app loads
     /// the (multi-second) name corpora on a background thread and calls [`Self::apply_names`]
     /// when they arrive, so the window opens immediately.
-    pub fn build(wads: &[wad::Wad], names: HashMap<u32, String>) -> AssetIndex {
+    pub fn build(wads: &[wad::Wad], side: &[wad::Wad], names: HashMap<u32, String>) -> AssetIndex {
         // type_id -> which category it lands in, derived from `Kind::type_ids` so the mapping is
         // stated once. An id no category claims is skipped rather than guessed at.
         let mut of_type: HashMap<u32, usize> = HashMap::new();
@@ -373,7 +381,8 @@ impl AssetIndex {
         }
         let mut buckets: Vec<HashMap<u32, AssetRow>> =
             (0..Kind::ALL.len()).map(|_| HashMap::new()).collect();
-        for (src, w) in wads.iter().enumerate() {
+        let n = wads.len();
+        for (src, w) in wads.iter().chain(side).enumerate() {
             let primary_block: HashMap<u32, u16> = wad::model_list(w).into_iter().collect();
             for (hash, ty, _) in wad::all_asets(w) {
                 let Some(&i) = of_type.get(&ty) else { continue };
@@ -384,7 +393,24 @@ impl AssetIndex {
                 } else {
                     0
                 };
-                buckets[i].insert(hash, AssetRow { hash, block, src, name: None, template: None, faction: None });
+                let fresh = AssetRow { hash, type_id: ty, block, src, others: Vec::new(), name: None, template: None, faction: None };
+                match buckets[i].get_mut(&hash) {
+                    None => {
+                        buckets[i].insert(hash, fresh);
+                    }
+                    Some(r) if r.src == src => {}
+                    // A later stack wad wins; the copy it shadows is another source.
+                    Some(r) if src < n => {
+                        let shadowed = r.src;
+                        *r = AssetRow { others: std::mem::take(&mut r.others), ..fresh };
+                        r.others.push(shadowed);
+                    }
+                    Some(r) => {
+                        if !r.others.contains(&src) {
+                            r.others.push(src);
+                        }
+                    }
+                }
             }
         }
         let mut idx = AssetIndex {
@@ -894,7 +920,7 @@ mod tests {
     use super::AssetRow;
 
     fn row(hash: u32, template: Option<&str>) -> AssetRow {
-        AssetRow { hash, block: 0, src: 0, name: None, template: template.map(str::to_string), faction: None }
+        AssetRow { hash, type_id: 0, block: 0, src: 0, others: Vec::new(), name: None, template: template.map(str::to_string), faction: None }
     }
 
     #[test]
