@@ -40,7 +40,7 @@ smuggler --source-wad vz.wad -o data/vz-patch.wad --extra-only --inject-extra 0x
 | `--block-index <N>` | usize | — | no | **yes** | Explicit block index(es) to target. When present, **overrides** `--target-name` for selecting which block(s) to operate on. Repeatable; multiple `--block-index N` build/override multiple blocks in one run. |
 | `--exact-block` | flag | off | no | — | Honour `--block-index` VERBATIM for read/write: use exactly that block's model container with NO redirect to the ASET-primary block. The only way to reach the finer LOD rungs of a vehicle (`_P000_Q3` resident → `_P001_` → `_P002_`) and models with no primary ASET row. Affects `--dump-container` and `--inject-container`/cube/`--no-cubeize` source resolution. |
 | `--target-name <CSV>` | comma-sep substrings | `deliverycrate,crateaid` | no | no (CSV) | Path substrings (case-insensitive) to auto-select target blocks when `--block-index` is absent. Ignored when `--block-index` is given (except that `--list` always uses `--target-name`). |
-| `--list` | flag | off | no | — | List blocks whose path matches `--target-name` **and** contain a model, then exit. Read-only. |
+| `--list` | flag | off | no | — | List every block whose path matches `--target-name` (whether or not it holds a model), then exit. Read-only. |
 | `--no-cubeize` | flag | off | no | — | Build mode: identity passthrough — copy the donor model container unchanged (no cube-ize). Isolates geometry vs plumbing issues. Overridden by `--inject-container`. |
 | `--shape <corner\|clamp>` | string | `corner` | no | — | Cube shape for the default cube-ize mode: `corner` (sharp 8-corner cube) or `clamp`. Validated on every run (invalid value errors), but only has effect when actually cube-izing (i.e. not `--inject-container`, not `--no-cubeize`). |
 | `--inject-container <PATH>` | path (UCFX) | — | no | no | Build mode: inject a pre-built model UCFX container in place of cube-izing. The file must start with `UCFX` and be ≥20 bytes. Applied to **every** targeted block (constrain with a single `--block-index`). Overrides `--no-cubeize` and `--shape`. Read at startup — a bad path errors before anything else runs. |
@@ -60,8 +60,7 @@ Only these ASET `type_id`s resolve to a UCFX type-hash and are accepted:
 | 27 | texture | `0xF011157A` |
 | 35 | script | `0x42498680` |
 
-Any other `TYPEID` is rejected. Note: the crate's error text names only `19 model / 27 texture`, but
-`35 script` is fully supported by the code.
+Any other `TYPEID` is rejected.
 
 ## How the options combine
 
@@ -131,7 +130,7 @@ this, zero blocks were produced.
 
 ## Examples
 
-List every crate block that contains a model:
+List every crate block:
 ```
 smuggler --source-wad vz.wad --list
 ```
@@ -213,12 +212,12 @@ All errors print `smuggler error: <msg>` to stderr and exit non-zero. Real paths
 | `block N: model has no vertex meshes` | Cube-ize found no vertex streams to reshape in the donor model. |
 | `--inject-extra '<spec>' must be HASH:TYPEID:path` | `--inject-extra` did not split into three colon-separated fields. |
 | `bad hash in '<spec>': ...` / `bad type_id in '<spec>': ...` | Non-hex hash or non-numeric type_id in an `--inject-extra` spec. |
-| `unsupported type_id N (need 19 model / 27 texture)` | `--inject-extra` type_id was not 19, 27, or 35. (Text lists only model/texture; 35 script is also accepted.) |
+| `unsupported type_id N (need 19 model / 27 texture / 35 script)` | `--inject-extra` type_id was not 19, 27, or 35. |
 | `<path> is not a UCFX container` | An `--inject-extra` container file is <20 bytes or lacks the `UCFX` magic. |
 | `--inject-block '<spec>' must be <path_substr>:<file>` | `--inject-block` had no `:` separator. |
 | `no block path contains '<needle>'` | `--inject-block` path substring matched no block in the source WAD. |
 | `block N (<path>) has no ASET entries` | The `--inject-block` source block carries no ASET entries to forward. |
-| `--output is required (unless --dump-container)` | A build mode was requested without `-o/--output`. |
+| `--output is required (unless --list, --dump-container or --dump-block)` | A build mode was requested without `-o/--output`. |
 | `no model-bearing blocks among the targets` | After building, zero blocks were produced (e.g. all targets lacked models and no extras). |
 
 **Note on paths with colons.** `--inject-extra` splits on the first two colons only, so a Windows
