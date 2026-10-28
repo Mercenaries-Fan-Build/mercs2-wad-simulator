@@ -76,7 +76,8 @@ pub(crate) struct WadStack {
     /// uncached cost was paid once per material slot, which is what made full-res "too slow" and got
     /// the resident tail wired into model loads instead. Cached, each texture is walked once.
     tex_cache: HashMap<u32, mercs2_formats::texture::TextureData>,
-    /// The game's other WADs beside the base ([`side_wad_files`]), opened read-only. The game loads
+    /// The game's other WADs beside the base ([`mercs2_quartermaster::game::side_wad_files`]),
+    /// opened read-only. The game loads
     /// each in its own slot, so they never shadow the stack: a source index `wads.len() + i` names
     /// `side[i]`, and resolution reads them only after the stack.
     pub side: Vec<wad::Wad>,
@@ -86,7 +87,7 @@ pub(crate) struct WadStack {
     pub side_report: Vec<(String, SideWad)>,
 }
 
-/// What became of one side WAD ([`side_wad_files`]).
+/// What became of one side WAD ([`mercs2_quartermaster::game::side_wad_files`]).
 pub(crate) enum SideWad {
     /// Opened, from this path.
     Opened(String),
@@ -94,15 +95,6 @@ pub(crate) enum SideWad {
     Absent,
     /// Present but it would not open: the path and the error.
     Unreadable(String),
-}
-
-/// The game's own WADs beside `vz.wad` that Inspect reads besides the stack: the shell and loading
-/// levels, then one per entry of the engine's language table (`.\Data\<token>.wad`,
-/// `mercs2_quartermaster::manifest::Language`).
-pub(crate) fn side_wad_files() -> Vec<String> {
-    let mut out = vec!["shell.wad".to_string(), "Loading.wad".to_string()];
-    out.extend(mercs2_quartermaster::manifest::Language::ALL.iter().map(|l| format!("{}.wad", l.token())));
-    out
 }
 
 impl WadStack {
@@ -122,7 +114,8 @@ impl WadStack {
         let mut side = Vec::new();
         let mut side_labels = Vec::new();
         let mut side_report = Vec::new();
-        for file in side_wad_files() {
+        // The game's own WADs beside `vz.wad` that Inspect reads besides the stack.
+        for file in mercs2_quartermaster::game::side_wad_files() {
             let found = match mercs2_quartermaster::sound::sibling_wad(std::path::Path::new(base), &file) {
                 Ok(p) => p,
                 Err(_) => {
