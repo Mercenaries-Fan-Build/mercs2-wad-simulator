@@ -421,9 +421,8 @@ impl GameStack {
     }
 
     /// Each of the game's own WADs ([`side_wad_files`]) present beside this stack's base WAD, found
-    /// case-insensitively, that the stack does not already hold. An absent one is not listed; a
-    /// folder that cannot be listed is an error. `-patch.wad` overlays are not among them: they are
-    /// mod output, not the game's.
+    /// case-insensitively. An absent one is not listed; a folder that cannot be listed is an error.
+    /// `-patch.wad` overlays are not among them: they are mod output, not the game's.
     pub fn present_side_wads(&self) -> Result<Vec<PathBuf>, String> {
         let base = self.wads.first().map(|w| w.path.as_path()).ok_or("the game stack is empty")?;
         let dir = base.parent().ok_or_else(|| format!("{} has no parent folder", base.display()))?;
@@ -432,18 +431,22 @@ impl GameStack {
             present.push(e.map_err(|e| format!("reading {}: {e}", dir.display()))?.path());
         }
         let name_of = |p: &Path| p.file_name().map(|f| f.to_string_lossy().to_ascii_lowercase());
-        let held: Vec<Option<String>> = self.wads.iter().map(|w| name_of(&w.path)).collect();
         let mut out = Vec::new();
         for file in side_wad_files() {
             let file = file.to_ascii_lowercase();
-            if held.iter().any(|h| h.as_deref() == Some(file.as_str())) {
-                continue;
-            }
             if let Some(p) = present.iter().find(|p| name_of(p).as_deref() == Some(file.as_str())) {
                 out.push(p.clone());
             }
         }
         Ok(out)
+    }
+
+    /// Whether the BASE WAD alone — the first of the stack, `vz.wad` — carries an ASET row for
+    /// `(hash, type_id)`, whatever the overlays above it carry.
+    pub fn base_has_asset(&self, name_hash: u32, type_id: u32) -> bool {
+        self.wads.first().is_some_and(|w| {
+            w.archive.aset.iter().any(|e| e.asset_hash == name_hash && e.type_id == type_id)
+        })
     }
 
     /// The stack as configured, base first. Shown in the UI so "which install was it reading" is
