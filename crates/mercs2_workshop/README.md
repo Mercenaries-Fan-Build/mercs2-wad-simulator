@@ -52,8 +52,8 @@ exe subsystem. What its source explicitly claims as provenance:
 - **Model injection** — publishing builds containers with
   `model_inject::inject_into_donor_block`, the CJ donor recipe (take a real container the engine
   already accepts, rebuild the geometry, re-stamp the name, recompute CSUM). Never a from-scratch
-  UCFX — that is the "sarah-hang". The single-entry-block + ASET-row shape is the cube_mod-proven
-  one; no retail-block surgery. Milestone M3 of
+  UCFX — that is the "sarah-hang". Each asset ships in a single-entry block with its own ASET row,
+  the shape `mercs2_smuggler` builds; no retail-block surgery. Milestone M3 of
   `docs/modernization/workshop_publish_pipeline.md`.
 - **Roadmap** — `docs/modernization/workshop_charter.md` (mission design, model import/fix, AV
   replacement, unlock auditing are the planned workbenches).
