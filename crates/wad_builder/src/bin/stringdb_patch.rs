@@ -25,10 +25,11 @@
 //! then attributable to the edit alone.
 //!
 //! `--allow-resize` lifts that. Arbitrary-length corrections re-lay-out the container (descriptor
-//! offsets and sizes) and re-splice it into the block (the entry table's `chunk_size`). It is gated
-//! on `--selftest-resize`, which re-lays-out the shipped container substituting NOTHING and requires
-//! the result byte-for-byte: anything the layout logic fails to model shows up there as a diff
-//! rather than as a container that validates cleanly and is quietly wrong in someone's game.
+//! offsets and sizes) and re-splice it into the block (the entry table's `chunk_size`). Its check is
+//! `--selftest-resize`, a separate run (not required by `--allow-resize`) that re-lays-out the
+//! shipped container substituting NOTHING and requires the result byte-for-byte: anything the layout
+//! logic fails to model shows up there as a diff rather than as a container that validates cleanly
+//! and is quietly wrong in someone's game.
 //!
 //! Usage:
 //!   stringdb_patch --source-wad <wad> --out <English-patch.wad>
@@ -331,7 +332,7 @@ fn run() -> Result<(), String> {
         return dump_layout(container);
     }
     if selftest {
-        // ★ The gate for --allow-resize, in the same spirit as stringdb_roundtrip: re-lay-out the
+        // ★ The check for --allow-resize, in the same spirit as stringdb_roundtrip: re-lay-out the
         // container substituting NOTHING, and require the result byte-for-byte. Anything the layout
         // logic fails to model — a padding rule, a header field that tracks a size, a descriptor
         // field beyond offset/size — shows up here as a diff rather than as a container that
