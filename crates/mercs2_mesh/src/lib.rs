@@ -32,8 +32,9 @@ pub struct ModelStats {
     /// camera MVP (NOT baked into vertex positions) so skinning runs in model space.
     pub fit_center: [f32; 3],
     pub fit_scale: f32,
-    /// Per-bone skinning palette `Skin[b] = InvBind[b] · Pose[b]` (row-vector). At bind pose
-    /// (Pose = world-rest) every entry is identity — the LBS gate. Empty when no skeleton.
+    /// Per-bone REST palette `Skin[b] = InvBind[b] · Pose[b]` (row-vector) with Pose = the `+16`
+    /// reference pose retail holds for a node no clip drives. It is identity only where `+16` and
+    /// `+80` agree. Empty when no skeleton.
     pub bones: Vec<[[f32; 4]; 4]>,
     /// Per-bone rig (parent/inv-bind/local-bind) for re-posing under animation. Empty when no skeleton.
     pub rig: Vec<BoneRig>,
@@ -62,8 +63,8 @@ pub struct BoneRig {
     pub local_bind: [[f32; 4]; 4],
 }
 
-/// Everything the renderer needs to skin + place a model: the fit transform, the bind-pose bone
-/// palette (identity at bind), and the per-bone rig for re-posing under animation.
+/// Everything the renderer needs to skin + place a model: the fit transform, the rest palette
+/// ([`ModelStats::bones`]), and the per-bone rig for re-posing under animation.
 #[derive(Debug, Clone)]
 pub struct SkinData {
     pub center: [f32; 3],
@@ -89,6 +90,30 @@ impl SkinData {
             rig: Vec::new(),
             prelit: false,
         }
+    }
+
+    /// The palette an instance of a model with these `verts` rests at when no clip drives it. It
+    /// covers every joint the verts reference, not just the entries the skin ships: an unrigged mesh
+    /// carrying the 1-entry identity skin can still index a full palette, and a short palette makes
+    /// those verts read a zero matrix and collapse onto the origin. A rigged skin rests at
+    /// [`Self::bones`], which must already cover every joint; an unrigged one (terrain, cells) at
+    /// identity.
+    pub fn rest_palette(&self, verts: &[Vertex]) -> Result<Vec<[[f32; 4]; 4]>, String> {
+        const IDENT: [[f32; 4]; 4] =
+            [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0]];
+        let max_joint = verts.iter().flat_map(|v| v.joints).map(|j| j as usize).max().unwrap_or(0);
+        let joints = self.bones.len().max(max_joint + 1);
+        if self.rig.is_empty() {
+            return Ok(vec![IDENT; joints]);
+        }
+        if self.bones.len() != joints {
+            return Err(format!(
+                "a {}-bone rig ships a {}-entry rest palette for {joints} referenced joints",
+                self.rig.len(),
+                self.bones.len()
+            ));
+        }
+        Ok(self.bones.clone())
     }
 }
 
@@ -149,6 +174,13 @@ pub struct DrawGroup {
     /// texture X" and consults only those three gets the wrong answer for every texture bound
     /// in a later slot.
     pub textures: Vec<u32>,
+    /// The material's on-disk `flags@104` word: blend mode, alpha test, two-sided and the
+    /// refraction bit (`mercs2_formats::texture::runtime_material_flags` decodes it). 0 = an opaque,
+    /// untested, culled material, which is also what a draw with no material gets.
+    pub material_flags: u16,
+    /// The material's pixel-shader key (`pandemic_hash_m2` of a registered pixel shader name, e.g.
+    /// `PgDiffEmisFP`), which decides what the texture slots mean. 0 = no material.
+    pub shader_key: u32,
     /// The container's drawing-group (PRMG) index this draw came from — the MESH-order index that
     /// `INDX`/destruction (`orchestrator::Destruction::state_of_mesh`) keys on. Lets a caller hide a
     /// group by destruction state (e.g. drop the `break_piece` rubble to show the pristine building).
@@ -197,6 +229,8 @@ impl Default for DrawGroup {
             specular: None,
             normal: None,
             textures: Vec::new(),
+            material_flags: 0,
+            shader_key: 0,
             group_index: 0,
             lod_mask: 0xFF,
             node: -1,
@@ -648,12 +682,14 @@ fn build_indexed_source(
                 index_count,
                 diffuse: mat.and_then(|m| m.diffuse()),
                 specular: mat.and_then(|m| m.specular()),
-                normal: mat.and_then(|m| m.textures.get(2).copied()),
+                normal: mat.and_then(|m| m.slot(2)),
                 // Every slot, not just the first three. A material can bind up to 10 textures,
                 // and a tool asking "which parts use texture X" gets the wrong answer if it can
                 // only see slots 0-2 — on retail that alone is the difference between 40% and
                 // 89% of textures being attributable to a surface.
                 textures: mat.map(|m| m.textures.clone()).unwrap_or_default(),
+                material_flags: mat.map_or(0, |m| m.flags),
+                shader_key: mat.map_or(0, |m| m.shader_key),
                 group_index: m.group_index,
                 lod_mask: pl.lod_mask,
                 // SEGM +0 is a SIGNED i16: 0xFFFF is node -1 ("no node"), not node 65535.
@@ -819,4 +855,49 @@ pub fn build_from_container(container: &[u8]) -> Result<(Vec<Vertex>, ModelStats
         prelit: false, // position-only path carries no vertex colors
     };
     Ok((verts, stats))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const IDENT: [[f32; 4]; 4] =
+        [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0]];
+
+    fn vert(joint: u8) -> Vertex {
+        Vertex {
+            pos: [0.0; 3],
+            color: [1.0; 3],
+            uv: [0.0; 2],
+            normal: [0.0, 1.0, 0.0],
+            tangent: [1.0, 0.0, 0.0, 1.0],
+            joints: [joint, 0, 0, 0],
+            weights: [255, 0, 0, 0],
+        }
+    }
+
+    fn bone(parent: i32) -> BoneRig {
+        BoneRig { parent, name_hash: 0, world_bind: IDENT, inv_bind: IDENT, local_bind: IDENT }
+    }
+
+    #[test]
+    fn an_unrigged_skin_rests_at_identity_over_every_referenced_joint() {
+        let rest = SkinData::identity().rest_palette(&[vert(0), vert(3)]).unwrap();
+        assert_eq!(rest, vec![IDENT; 4]);
+    }
+
+    #[test]
+    fn a_rigged_skin_rests_at_its_bones() {
+        let mut lifted = IDENT;
+        lifted[3][1] = 1.63;
+        let skin = SkinData { bones: vec![IDENT, lifted], rig: vec![bone(-1), bone(0)], ..SkinData::identity() };
+        assert_eq!(skin.rest_palette(&[vert(1)]).unwrap(), vec![IDENT, lifted]);
+    }
+
+    #[test]
+    fn a_rigged_skin_whose_verts_outrun_its_palette_is_an_error() {
+        let skin = SkinData { bones: vec![IDENT; 2], rig: vec![bone(-1), bone(0)], ..SkinData::identity() };
+        let e = skin.rest_palette(&[vert(4)]).unwrap_err();
+        assert!(e.contains("2-entry rest palette for 5 referenced joints"), "{e}");
+    }
 }
