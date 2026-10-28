@@ -133,14 +133,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let rb = {
         let start = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-        let data = mercs2_formats::game_paths::local_config_notes_docs_dir(start)?.join("data");
+        let notes = mercs2_formats::game_paths::local_config_notes_docs_dir(start)?.join("data");
+        let names = start.join("../mercs2_workshop/data");
         let t: Vec<PathBuf> = vec![
             mercs2_formats::game_paths::local_config_rainbow_table(start)?,
-            data.join("aset_discovered_names.json"),
-            data.join("aset_block_strings.json"),
-            data.join("aset_expanded_names.json"),
+            names.join("aset_discovered_names.json"),
         ];
-        RainbowTable::load_many(&t).map_err(|e| format!("load rainbow tables {t:?}: {e}"))?
+        let mut rb = RainbowTable::load_many(&t).map_err(|e| format!("load rainbow tables {t:?}: {e}"))?;
+        rb.merge(RainbowTable::load_harvested(&notes.join("aset_block_strings.json"), &names.join("rejected_names.json"))?);
+        rb.merge(RainbowTable::load(&names.join("aset_expanded_names.json"))?);
+        rb
     };
     eprintln!("rainbow: {} names", rb.len());
 
