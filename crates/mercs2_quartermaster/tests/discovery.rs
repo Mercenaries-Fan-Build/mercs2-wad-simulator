@@ -384,6 +384,7 @@ fn a_shop_item_without_a_script_has_no_source() {
 }
 
 /// Through `qm lint`: a missing script is M0110, and one that climbs out of the Shipment is M0111.
+/// A novel behaviour is also M0310's warning, whatever its path.
 #[test]
 fn a_shop_behaviour_script_gets_the_source_rules() {
     use mercs2_quartermaster::lint;
@@ -391,11 +392,11 @@ fn a_shop_behaviour_script_gets_the_source_rules() {
     let m = mercs2_quartermaster::from_str(&novel_shop_item("src/lua/missing.lua"), Format::Yaml)
         .unwrap();
     let codes: Vec<&str> = lint::lint(&m, Some(&dir), None).iter().map(|d| d.rule.code).collect();
-    assert_eq!(codes, vec!["M0110"]);
+    assert_eq!(codes, vec!["M0110", "M0310"]);
 
     let m = mercs2_quartermaster::from_str(&novel_shop_item("../x.lua"), Format::Yaml).unwrap();
     let codes: Vec<&str> = lint::lint(&m, Some(&dir), None).iter().map(|d| d.rule.code).collect();
-    assert_eq!(codes, vec!["M0111"]);
+    assert_eq!(codes, vec!["M0111", "M0310"]);
 }
 
 /// An animation's optional `events` file is a source too, collected only when given.
