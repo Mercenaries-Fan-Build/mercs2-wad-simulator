@@ -321,7 +321,7 @@ fn install_pinned(
     // would stop every later launch with an unreadable-pack error.
     report(Event::Progress(format!("unpacking {} KB…", zip_bytes.len() / 1024)));
     let staging = dest.with_extension("incoming");
-    let _ = std::fs::remove_dir_all(&staging);
+    remove_tree(&staging, "clear an earlier staging copy")?;
     unzip(&zip_bytes, &staging)?;
 
     // The archive holds a top-level `workshop_data/`; lift it so `dest` IS the bundle root. The
@@ -333,18 +333,33 @@ fn install_pinned(
     };
     for required in [crate::index::BUNDLE_MANIFEST, "names.bin"] {
         if !root.join(required).is_file() {
-            let _ = std::fs::remove_dir_all(&staging);
-            return Err(format!("the downloaded archive has no {required}"));
+            let missing = format!("the downloaded archive has no {required}");
+            return Err(match remove_tree(&staging, "clear the staging copy of that archive") {
+                Ok(()) => missing,
+                Err(e) => format!("{missing}; {e}"),
+            });
         }
     }
 
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
     }
-    let _ = std::fs::remove_dir_all(dest);
+    remove_tree(dest, "replace the installed bundle")?;
     std::fs::rename(&root, dest).map_err(|e| format!("install to {}: {e}", dest.display()))?;
-    let _ = std::fs::remove_dir_all(&staging);
+    // When the archive's root was the staging folder itself, the rename moved it and this finds
+    // nothing; otherwise it removes the emptied staging folder.
+    remove_tree(&staging, "clear the staging folder after the install")?;
     Ok(dest.to_path_buf())
+}
+
+/// Remove the directory tree at `path`. A path that does not exist is already gone; any other
+/// failure is an error naming the path and what the removal was for.
+fn remove_tree(path: &Path, purpose: &str) -> Result<(), String> {
+    match std::fs::remove_dir_all(path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(format!("remove {} (to {purpose}): {e}", path.display())),
+    }
 }
 
 /// One GET, following redirects (the asset URL redirects to object storage).
@@ -583,6 +598,87 @@ mod tests {
         assert!(!dest.with_extension("incoming").exists());
         assert_eq!(std::fs::read(dest.join("names.bin")).unwrap(), b"previous");
         assert!(!dest.join("manifest.json").exists());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// `<dir>/locked/held` with `locked` made read-only, so removing `dir`'s tree fails on `held`.
+    /// Returns `locked`, for [`unlock`].
+    #[cfg(unix)]
+    fn lock_inside(dir: &Path) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let locked = dir.join("locked");
+        std::fs::create_dir_all(&locked).unwrap();
+        std::fs::write(locked.join("held"), b"held").unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o555)).unwrap();
+        locked
+    }
+
+    #[cfg(unix)]
+    fn unlock(locked: &Path) {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    /// A staging folder left by an earlier run that cannot be removed stops the install with an
+    /// error naming it and the removal; the installed bundle is not touched. (Unix: the fixture is
+    /// a directory without write permission, which Windows does not model.)
+    #[cfg(unix)]
+    #[test]
+    fn install_reports_a_staging_folder_it_cannot_remove() {
+        let dir = scratch("stuckstaging");
+        let dest = dir.join("workshop_data");
+        std::fs::create_dir_all(&dest).unwrap();
+        std::fs::write(dest.join("names.bin"), b"previous").unwrap();
+        let staging = dest.with_extension("incoming");
+        let locked = lock_inside(&staging);
+        let zip = bundle_zip();
+        let sha = crate::publish::sha256_hex(&zip);
+        let pin = Pin { url: PINNED.url, tag: PINNED.tag, sha256: &sha };
+        let res = install_pinned(&pin, &dest, |_| Ok(zip.clone()), &mut |_| {});
+        unlock(&locked);
+        let err = res.expect_err("an unremovable staging folder must stop the install");
+        assert!(
+            err.starts_with(&format!("remove {} (to clear an earlier staging copy): ", staging.display())),
+            "{err}"
+        );
+        assert_eq!(std::fs::read(dest.join("names.bin")).unwrap(), b"previous");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// An installed bundle that cannot be removed stops the install with an error naming it,
+    /// rather than the new bundle being dropped in silence. (Unix, as above.)
+    #[cfg(unix)]
+    #[test]
+    fn install_reports_an_installed_bundle_it_cannot_replace() {
+        let dir = scratch("stuckdest");
+        let dest = dir.join("workshop_data");
+        let locked = lock_inside(&dest);
+        let zip = bundle_zip();
+        let sha = crate::publish::sha256_hex(&zip);
+        let pin = Pin { url: PINNED.url, tag: PINNED.tag, sha256: &sha };
+        let res = install_pinned(&pin, &dest, |_| Ok(zip.clone()), &mut |_| {});
+        unlock(&locked);
+        let err = res.expect_err("an unremovable installed bundle must stop the install");
+        assert!(
+            err.starts_with(&format!("remove {} (to replace the installed bundle): ", dest.display())),
+            "{err}"
+        );
+        assert!(locked.join("held").is_file());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// An archive without the bundle's required files is refused and its staging copy removed.
+    #[test]
+    fn install_refuses_an_incomplete_archive_and_clears_its_staging_copy() {
+        let dir = scratch("incomplete");
+        let dest = dir.join("workshop_data");
+        let zip = zip_of(&[("workshop_data/lua/a.lua", b"-- hi")]);
+        let sha = crate::publish::sha256_hex(&zip);
+        let pin = Pin { url: PINNED.url, tag: PINNED.tag, sha256: &sha };
+        let err = install_pinned(&pin, &dest, |_| Ok(zip.clone()), &mut |_| {})
+            .expect_err("no manifest, no install");
+        assert_eq!(err, format!("the downloaded archive has no {}", crate::index::BUNDLE_MANIFEST));
+        assert!(!dest.exists() && !dest.with_extension("incoming").exists());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
