@@ -29,7 +29,7 @@ pub enum Act {
     ClearSaved(Which),
     /// Save the source in use (from `--wad` or this run's choice) as the setting.
     SaveRunPath(Which),
-    /// Fetch the reference bundle from the latest release.
+    /// Fetch the pinned reference bundle, checked against its recorded sha256.
     Download,
     /// Open the source in use's folder in the OS file browser.
     Reveal(Which),
@@ -356,7 +356,7 @@ pub fn section(ui: &mut egui::Ui, v: &View<'_>) -> Vec<Act> {
             let label = if busy { "Downloading\u{2026}" } else { "Download" };
             if ui
                 .add_enabled(!busy, egui::Button::new(label))
-                .on_hover_text("Fetch the reference bundle published with the latest release and install it for this user")
+                .on_hover_text("Fetch the pinned release's reference bundle, check its sha256, and install it for this user")
                 .clicked()
             {
                 acts.push(Act::Download);
