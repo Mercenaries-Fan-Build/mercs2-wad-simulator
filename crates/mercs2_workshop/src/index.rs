@@ -21,6 +21,8 @@ pub enum Preview {
     Render,
     /// 2D plate view (hi-mip streamed).
     Plate,
+    /// Its own view in the centre, as said.
+    View(&'static str),
     /// Browsable with metadata; no faithful preview yet, and here is why.
     None(&'static str),
 }
@@ -125,7 +127,7 @@ impl Kind {
             Kind::Audio => Preview::None("playback is not wired into the Library yet"),
             Kind::UiGfx => Preview::None("no Scaleform renderer in the workshop"),
             Kind::FaceFx => Preview::None("needs a head to drive"),
-            Kind::Text => Preview::None("fonts render as a plate; string tables as a list"),
+            Kind::Text => Preview::View("a string table opens every table side by side; a font, its pages and glyphs"),
             Kind::Layer => Preview::None(
                 "a layer is a placement set — browse it, then edit_world / activate_layer",
             ),
