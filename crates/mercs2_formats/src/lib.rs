@@ -129,6 +129,7 @@ pub mod havok;
 pub mod havok_write;
 pub mod ini;
 pub mod load_ladder;
+pub mod manm;
 pub mod lua_exec;
 pub mod lua_sites;
 pub mod lua_stack;
