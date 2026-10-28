@@ -140,8 +140,8 @@ fn main() {
     }
 
     // The WAD stays OPTIONAL until after the `--pack-data` branch below. Every other mode needs a
-    // game install, but building the reference bundle does not: its names come from the committed
-    // `data/production_names.json`, and the WAD is consulted only by the fallback trim. Failing here
+    // game install, but building the reference bundle does not: its names come from this crate's
+    // committed `data/production_names.json`, and the WAD is consulted only by the fallback trim. Failing here
     // made `--pack-data` unrunnable on a machine without the game — i.e. on the CI runner that is
     // supposed to PUBLISH the bundle, which is why released workshops shipped with no bone names.
     //
@@ -2202,14 +2202,12 @@ fn repo_root() -> std::path::PathBuf {
 /// every bundle: the captioned audio inventory (`audioidx`).
 const REPO_BUNDLE_FILES: [&str; 1] = ["audio_manifest.json"];
 
-/// The committed production lookup: `<repo>/data/production_names.json` (curated, hash-verified
-/// node/asset names), where `<repo>` is the checkout this binary was built from ([`repo_root`]).
-/// `Ok(None)` when that path is not a file; an error when it is a file that cannot be read or
-/// parsed.
-fn load_production_names(
-    repo: &std::path::Path,
-) -> Result<Option<std::collections::HashMap<u32, String>>, String> {
-    let cand = repo.join("data/production_names.json");
+/// The committed production lookup: this crate's `data/production_names.json` (curated,
+/// hash-verified node/asset names) in the checkout this binary was built from. `Ok(None)` when
+/// that path is not a file (the regeneration step in `data/README.md` packs without it); an error
+/// when it is a file that cannot be read or parsed.
+fn load_production_names() -> Result<Option<std::collections::HashMap<u32, String>>, String> {
+    let cand = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("data/production_names.json");
     if !cand.is_file() {
         return Ok(None);
     }
@@ -2276,15 +2274,15 @@ fn copy_repo_bundle_files(src_dir: &std::path::Path, out: &std::path::Path) -> R
 /// * `notes_docs_dir` — the notes repo's `docs/`: `data/live_registry_hashes.csv`,
 ///   `data/spawnable_templates.csv`, `mercs2-ecs/`, `mercs2-luacd/src/` and `mercs2-dlc-luacd/src/`
 ///   are copied into the bundle.
-/// * The names come from this repo's `data/production_names.json` (see
+/// * The names come from this crate's `data/production_names.json` (see
 ///   [`load_production_names`]). Only when that file is absent are they merged from the raw corpora
-///   ([`index::load_all_names_raw`]), which also reads the `jul08_strings` and `rainbow_table` keys
-///   and the name corpora in `notes_docs_dir`'s `data/`.
+///   ([`index::load_all_names_raw`]): this crate's name fragments, the `jul08_strings` and
+///   `rainbow_table` keys, and the name corpora in `notes_docs_dir`'s `data/`.
 ///
-/// In-repo sources are read from the checkout this binary was built from ([`repo_root`]):
-/// `data/production_names.json` and the [`REPO_BUNDLE_FILES`] committed in `workshop_data/`,
-/// which are copied into the bundle. A missing one of those files is an error naming it, raised
-/// before anything is written.
+/// In-repo sources are read from the checkout this binary was built from: this crate's
+/// `data/production_names.json`, and the [`REPO_BUNDLE_FILES`] committed in the repo's
+/// `workshop_data/` ([`repo_root`]), which are copied into the bundle. A missing one of those files
+/// is an error naming it, raised before anything is written.
 ///
 /// An existing `manifest.json` is removed before anything else is written, and the new one is
 /// written last; its presence marks `out` as a complete bundle for [`index::data_home`].
@@ -2341,8 +2339,8 @@ fn pack_data(
     }
 
     // 1. names.bin. PREFERRED source: the committed, curated `data/production_names.json` that ships
-    // IN this repo. The raw corpora + WAD-trim path runs only when the production file is absent.
-    let (names, full) = match load_production_names(&repo)? {
+    // IN this crate. The raw corpora + WAD-trim path runs only when the production file is absent.
+    let (names, full) = match load_production_names()? {
         Some(p) => {
             eprintln!("[pack] names.bin: from committed data/production_names.json ({} names)", p.len());
             let n = p.len();
