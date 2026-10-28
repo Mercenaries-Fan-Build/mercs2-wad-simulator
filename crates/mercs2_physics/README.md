@@ -113,9 +113,9 @@ let boom = broadphase::raycast(&tris, feet, Vec3::Z, 5.0);             // camera
 
 ## Notes / gotchas
 
-* **No broadphase.** Every query is a linear scan over the triangle list with a cheap proximity cull.
-  The retail engine uses `hkpMoppBvTreeShape`. Fine at current triangle counts; swap in a BVH when they
-  grow.
+* **The broadphase is a uniform XZ grid, not a MOPP BV-tree.** A query visits only the grid cells its
+  probe/ray/capsule covers, then runs the exact per-triangle tests (with the cheap proximity cull) on
+  those candidates. The retail engine uses `hkpMoppBvTreeShape`.
 * **The two culls have different tuning.** The crate-root `StaticCollision` culls by distance to a
   triangle's *first vertex* — it is tuned for the game's **small** world triangles (the tests build
   tiled floors for exactly this reason). The `broadphase` module culls by triangle **bbox** and is therefore
