@@ -93,6 +93,11 @@ pub struct DrawTex {
     pub normal: Option<(u32, u32, Vec<u8>)>,
     /// The `_sm` specular mask, decoded to RGBA8. `None` = black = matte (no highlight).
     pub specular: Option<(u32, u32, Vec<u8>)>,
+    /// The material's on-disk flags and alpha multiplier (`DrawGroup::material_flags` /
+    /// `material_alpha`): they decide the alpha test exactly as the engine's draw does. 0 / 1.0 for a
+    /// draw with no material.
+    pub material_flags: u16,
+    pub material_alpha: f32,
 }
 
 const WGSL: &str = r#"
@@ -103,6 +108,9 @@ struct Cam { mvp: mat4x4<f32>, cam_pos: vec4<f32> };
 @group(2) @binding(1) var s_diffuse: sampler;
 @group(2) @binding(2) var t_normal: texture_2d<f32>;
 @group(2) @binding(3) var t_specular: texture_2d<f32>;
+// The material's alpha test, as shader.wgsl: x = reference (or -1 = not tested), y = multiplier.
+struct MaterialParams { alpha: vec4<f32> };
+@group(2) @binding(4) var<uniform> material: MaterialParams;
 struct VIn {
   @location(0) pos: vec3<f32>,
   @location(1) normal: vec3<f32>,
@@ -155,7 +163,9 @@ struct VOut {
   let nz = sqrt(max(1.0 - nx * nx - ny * ny, 0.0));
   let tbn = mat3x3<f32>(normalize(in.t), normalize(in.b), normalize(in.n));
   let N = normalize(tbn * vec3<f32>(nx, ny, nz));
-  let albedo = textureSample(t_diffuse, s_diffuse, in.uv).rgb;
+  let dtex = textureSample(t_diffuse, s_diffuse, in.uv);
+  if (material.alpha.x >= 0.0 && !(dtex.a * material.alpha.y > material.alpha.x)) { discard; }
+  let albedo = dtex.rgb;
 
   // Lighting matched to shader.wgsl's DYNAMIC (non-prelit) branch: an ambient floor plus a single
   // sun key light, and Blinn-Phong specular masked by the _sm map. The exterior sun values are
@@ -300,6 +310,12 @@ impl HeroRenderer {
                 ty: wgpu::BindingType::Texture { sample_type: wgpu::TextureSampleType::Float { filterable: true }, view_dimension: wgpu::TextureViewDimension::D2, multisampled: false },
                 count: None,
             },
+            wgpu::BindGroupLayoutEntry {
+                binding: 4,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None },
+                count: None,
+            },
         ],
     });
     let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
@@ -336,7 +352,8 @@ impl HeroRenderer {
     // has no normal map, so the fragment shader has one path.
     let flat_nm = upload(1, 1, &[0u8, 128, 255, 128]);
     let black = upload(1, 1, &[0u8, 0, 0, 255]); // matte fallback where a group has no _sm
-    let bind_of = |diff: &wgpu::TextureView, nrm: &wgpu::TextureView, spc: &wgpu::TextureView| -> wgpu::BindGroup {
+    let bind_of = |diff: &wgpu::TextureView, nrm: &wgpu::TextureView, spc: &wgpu::TextureView, d: &DrawTex| -> wgpu::BindGroup {
+        let params = mercs2_engine::render::material_params(&device, d.material_flags, d.material_alpha);
         device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: None,
             layout: &tex_bgl,
@@ -345,6 +362,7 @@ impl HeroRenderer {
                 wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&sampler) },
                 wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(nrm) },
                 wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(spc) },
+                wgpu::BindGroupEntry { binding: 4, resource: params.as_entire_binding() },
             ],
         })
     };
@@ -354,7 +372,7 @@ impl HeroRenderer {
             let dv = d.diffuse.as_ref().map(|(w, h, r)| upload(*w, *h, r));
             let nv = d.normal.as_ref().map(|(w, h, r)| upload(*w, *h, r));
             let sv = d.specular.as_ref().map(|(w, h, r)| upload(*w, *h, r));
-            bind_of(dv.as_ref().unwrap_or(&white), nv.as_ref().unwrap_or(&flat_nm), sv.as_ref().unwrap_or(&black))
+            bind_of(dv.as_ref().unwrap_or(&white), nv.as_ref().unwrap_or(&flat_nm), sv.as_ref().unwrap_or(&black), d)
         })
         .collect();
 
@@ -557,7 +575,7 @@ mod tests {
     fn hero_renderer_resizes_to_the_requested_frame() {
         let (verts, indices) = tri();
         let ident = [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0]];
-        let draws = [DrawTex { index_start: 0, index_count: 3, diffuse: None, normal: None, specular: None }];
+        let draws = [DrawTex { index_start: 0, index_count: 3, diffuse: None, normal: None, specular: None, material_flags: 0, material_alpha: 1.0 }];
         let mut r = HeroRenderer::new(&verts, &indices, &[ident], ([-1.0, -1.0, 0.0], [1.0, 1.0, 0.0]), &draws);
         let cam = OrbitCam { yaw: 0.0, pitch: 0.0, zoom: 1.0 };
         let clear = [26u8, 26, 31, 255];
