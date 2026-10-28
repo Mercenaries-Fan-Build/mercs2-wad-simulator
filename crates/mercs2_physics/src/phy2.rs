@@ -72,7 +72,7 @@ pub struct AuthoredCollision {
 impl AuthoredCollision {
     /// Whether these authored tris are a COMPLETE static collider — no undecoded static mesh left to
     /// account for, AND either it produced collision tris OR it accounted for the body's geometry with a
-    /// terrain-scale mesh routed to the heightfield (empty triangle set, but NOT a case for the render fallback).
+    /// terrain-scale mesh routed to the heightfield (empty triangle set, yet complete).
     /// The streaming loader uses this to choose between authored PHY2 and no collision for a unit.
     pub fn is_complete(&self) -> bool {
         !self.has_undecoded_mesh && (!self.tris.is_empty() || self.n_terrain_mesh > 0)
@@ -355,7 +355,7 @@ mod tests {
     }
 
     /// The gating census: a body with only convex hulls is COMPLETE; adding an undecoded static mesh
-    /// makes it incomplete (caller must keep the render fallback); capsules/spheres are counted, never
+    /// makes it incomplete (the caller then gives the unit no collision); capsules/spheres are counted, never
     /// emitted as world tris.
     #[test]
     fn authored_collision_gates_on_undecoded_mesh() {
@@ -374,14 +374,14 @@ mod tests {
         assert_eq!(convex_only.n_hulls, 1);
         assert_eq!(convex_only.tris.len(), 12);
 
-        // An UNDECODED mesh (empty verts/indices) forces the render fallback.
+        // An UNDECODED mesh (empty verts/indices) makes the collider incomplete.
         let empty_mesh = Shape::Mesh(MeshShape { vertices: Vec::new(), indices: Vec::new() });
         let with_mesh = authored_collision(&[Shape::Convex(cube.clone()), empty_mesh]);
         assert!(!with_mesh.is_complete(), "an undecoded static mesh makes the collider incomplete");
         assert!(with_mesh.has_undecoded_mesh);
 
-        // A BUILDING-scale decoded mesh (small span, few tris) drops its tris into the collider and needs no
-        // fallback. Two tris forming a small quad at the origin.
+        // A BUILDING-scale decoded mesh (small span, few tris) drops its tris into the collider and is
+        // complete. Two tris forming a small quad at the origin.
         let bldg = Shape::Mesh(MeshShape {
             vertices: vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [1.0, 0.0, 1.0], [0.0, 0.0, 1.0]],
             indices: vec![[0, 1, 2], [0, 2, 3]],
@@ -392,7 +392,7 @@ mod tests {
         assert_eq!(with_bldg.tris.len(), 2, "both building-mesh tris go into the collider");
 
         // A TERRAIN-scale decoded mesh (≈400 m XZ span) is recognised and kept OUT of the collider, yet still
-        // counts as complete so the caller does not render-fallback a terrain cell into the collider.
+        // counts as complete: the terrain heightfield covers the cell.
         let terrain = Shape::Mesh(MeshShape {
             vertices: vec![[0.0, 0.0, 0.0], [400.0, 0.0, 0.0], [400.0, 0.0, 400.0]],
             indices: vec![[0, 1, 2]],
@@ -413,7 +413,7 @@ mod tests {
         assert!(wrapped.is_complete(), "mesh + its MOPP wrapper is a complete authored collider");
         assert_eq!((wrapped.n_mesh, wrapped.n_mopp), (1, 2));
 
-        // A MOPP with NO decoded mesh IS an undecoded static mesh → keep the render fallback.
+        // A MOPP with NO decoded mesh IS an undecoded static mesh → the collider is incomplete.
         let mopp_only = authored_collision(&[Shape::Mopp, Shape::Mopp]);
         assert!(mopp_only.has_undecoded_mesh, "a MOPP with no decoded WpMesh is an undecoded static mesh");
         assert!(!mopp_only.is_complete());
