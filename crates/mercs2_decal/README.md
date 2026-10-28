@@ -113,8 +113,9 @@ The crate root additionally exports `DecalWorld`, the table+pool pair the host t
 
 * **The table numbers are not recovered.** The retail block is read via computed offsets inside
   stripped functions, never by name, so per-type texture handle / size / lifetime are `confirm-live`
-  data. `DecalTable::stock()` seeds the recovered *categories* with `DecalDef::placeholder` params
-  (size `1.0`, lifetime `30 s`) purely so the mechanism is exercisable — those are not retail values.
+  data. `DecalTable::stock()` seeds the recovered *categories* with `DecalDef::for_category` params
+  (per-category look-tuning, e.g. bullet hole `0.20 m` / `45 s`, a permanent super `DamageShadow`)
+  purely so the mechanism is exercisable — those are not retail values.
 * **`DEFAULT_POOL_CAP` (256) is a reimpl default, not a recovered number.** The `0x400`-byte alloc
   sizes the *table* object, not the instance pool. The retail cap is `confirm-live`; pass it to
   `DecalPool::new` / `DecalWorld::with` when known.
