@@ -544,16 +544,20 @@ pub fn claims(manifest: &Manifest) -> Vec<ClaimRecord> {
             Contribution::ReplacePhy2 { target, .. } => {
                 push(Access::Write, Claim::asset(target), Intent::ReplaceExclusive);
             }
-            // add_placement writes into an existing layer's placement block. Additive by design --
-            // two Shipments adding disjoint entity keys to the same layer merge, same-key is the
-            // hard conflict (handled by the layer's own key check at build time).
+            // add_placement writes into an existing layer's placement block. Additive, so the claim
+            // is a `KeyedSet` on the layer's hash: two Shipments adding to the same layer are a hard
+            // conflict even when their entity keys are disjoint (same-key within the layer is M0198).
             Contribution::AddPlacement { layer, .. } => {
                 push(Access::Write, Claim::asset(layer), Intent::Additive);
             }
             // add_layer mints a NEW layer asset. Same shape as add_texture / add_movie: two
-            // Shipments minting the same layer name is a hard conflict.
-            Contribution::AddLayer { name, .. } => {
+            // Shipments minting the same layer name is a hard conflict. Its sub-block is appended to
+            // the template's block, which ships whole, so the template is claimed as an
+            // add_placement's layer is: another Shipment's add_placement, add_layer or edit_world on
+            // it conflicts.
+            Contribution::AddLayer { name, template, .. } => {
                 push(Access::Write, Claim::asset(name), Intent::Additive);
+                push(Access::Write, Claim::asset(template), Intent::Additive);
             }
             // Novel Havok animation clip. New hash, Additive.
             Contribution::AddAnimation { name, .. } => {
@@ -647,7 +651,23 @@ pub fn claims(manifest: &Manifest) -> Vec<ClaimRecord> {
             // A shop item claims the catalog script it appends a row to (support vs equipment) plus
             // `mrxrewarddata` for the reward row. Appends are `OrderedList`, so N shop mods union
             // rather than clobber.
-            Contribution::AddShopItem { catalog, .. } => {
+            Contribution::AddShopItem { catalog, behaviour, .. } => {
+                // A novel behaviour mints its module as a new script, as add_script does: Additive on
+                // the module's hash, so two Shipments minting one module (or one minting it and
+                // another an add_script of that name) conflict. Claimed by the first item of the
+                // Shipment naming that module and script, so items sharing one subclass mint it once;
+                // one naming the module with another script claims it again (M0120).
+                if let Some(b) = behaviour.as_ref().filter(|b| b.script.is_some()) {
+                    let earlier = manifest.contributions[..index].iter().any(|c| {
+                        matches!(c, Contribution::AddShopItem { behaviour: Some(e), .. }
+                            if e.script.is_some()
+                                && e.script == b.script
+                                && crate::manifest::asset_hash(&e.module) == crate::manifest::asset_hash(&b.module))
+                    });
+                    if !earlier {
+                        push(Access::Write, Claim::asset(&b.module), Intent::Additive);
+                    }
+                }
                 let catalog_script = match catalog {
                     crate::manifest::ShopCatalog::Support => "mrxsupportdata",
                     crate::manifest::ShopCatalog::Equipment => "wifequipmentdata",

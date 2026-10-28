@@ -478,6 +478,82 @@ fn two_shipments_minting_one_script_name_conflict() {
     assert_eq!(p.findings[0].refs[0].section, Section::Conflicts);
 }
 
+/// A shop item whose novel behaviour mints `module` from `script`.
+fn novel_shop_item(id: &str, module: &str, script: &str) -> String {
+    format!(
+        "  - {{ kind: add_shop_item, id: {id}, name: {id}, icon: hud_support_airstrike, shops: [pmc], type: airstrike, \
+         behaviour: {{ module: {module}, script: {script} }} }}\n"
+    )
+}
+
+/// Two Shipments minting one novel shop module conflict: the link minted the first Shipment's
+/// module and dropped the second's source with nothing to say so. So do a novel module and another
+/// Shipment's `add_script` of that name.
+#[test]
+fn two_shipments_minting_one_novel_shop_module_conflict() {
+    let d = scratch("shop-module");
+    let body = |name: &str, items: &str| {
+        format!("shipment: {{ name: {name}, version: 1.0.0, target: retail }}\ncontributions:\n{items}")
+    };
+    let a = shipment_at(&d.join("a"), &body("strike-a", &novel_shop_item("strike_a", "mystrike", "src/a.lua")));
+    let b = shipment_at(&d.join("b"), &body("strike-b", &novel_shop_item("strike_b", "MyStrike", "src/b.lua")));
+    let p = plan_of(&[&a, &b], None);
+    assert_eq!(codes(&p), vec!["M0207"], "{:?}", p.findings);
+    match &p.conflicts[0] {
+        ConflictRow::Claims(r) => {
+            let who: Vec<(&str, &str)> = r.claimants.iter().map(|c| (c.item.as_str(), c.kind.as_str())).collect();
+            assert_eq!(who, vec![("shipment:strike-a", "add_shop_item"), ("shipment:strike-b", "add_shop_item")]);
+        }
+        other => panic!("{other:?}"),
+    }
+
+    let s = shipment_at(
+        &d.join("s"),
+        &body("helpers", "  - { kind: add_script, name: mystrike, source: src/s.lua }\n"),
+    );
+    assert_eq!(codes(&plan_of(&[&a, &s], None)), vec!["M0207"]);
+
+    // One Shipment's two items sharing the module and its script mint it once: no conflict.
+    let shared = shipment_at(
+        &d.join("shared"),
+        &body(
+            "strike-pair",
+            &format!(
+                "{}{}",
+                novel_shop_item("strike_c", "pairstrike", "src/p.lua"),
+                novel_shop_item("strike_d", "pairstrike", "src/p.lua")
+            ),
+        ),
+    );
+    let p = plan_of(&[&shared], None);
+    assert!(p.ok, "{:?}", p.findings);
+}
+
+/// `add_layer` ships its template's whole block, so it claims the template as an `add_placement`
+/// claims its layer: another Shipment's `add_placement` on that layer, or `add_layer` from it,
+/// conflicts.
+#[test]
+fn add_layer_claims_its_template_layer() {
+    let d = scratch("add-layer-template");
+    let body = |name: &str, c: &str| format!("shipment: {{ name: {name}, version: 1.0.0, target: retail }}\ncontributions:\n{c}");
+    let minter = shipment_at(
+        &d.join("m"),
+        &body("minter", "  - { kind: add_layer, name: vz_state_mine, template: layers_static, entities: src/e.yaml }\n"),
+    );
+    let placer = shipment_at(
+        &d.join("p"),
+        &body("placer", "  - { kind: add_placement, layer: layers_static, entity: src/e.yaml }\n"),
+    );
+    let other = shipment_at(
+        &d.join("o"),
+        &body("other-minter", "  - { kind: add_layer, name: vz_state_theirs, template: layers_static, entities: src/e.yaml }\n"),
+    );
+    assert_eq!(codes(&plan_of(&[&minter, &placer], None)), vec!["M0207"]);
+    assert_eq!(codes(&plan_of(&[&minter, &other], None)), vec!["M0207"]);
+    let p = plan_of(&[&minter], None);
+    assert!(p.ok, "{:?}", p.findings);
+}
+
 // ---------------------------------------------------------------------------
 // M0208 — superseded files
 // ---------------------------------------------------------------------------

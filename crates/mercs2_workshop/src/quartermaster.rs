@@ -2529,7 +2529,7 @@ fn contribution_form(
             theme::field_note(
                 ui,
                 theme::FieldState::Neutral,
-                "MarkForAddition at runtime — a CASE-SENSITIVE layer name, not a path. Baked into \
+                "MarkForAddition at runtime — a layer name (matched case-insensitively), not a path. Baked into \
                  the mod loader; the world never grows a per-mod script.",
             );
             // `replaces` is a list of layer NAMES (MarkForRemoval, in order). Names carry no commas,

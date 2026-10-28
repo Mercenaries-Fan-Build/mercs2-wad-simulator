@@ -1184,11 +1184,12 @@ pub struct LandingZonePad {
     pub slot: u32,
     /// World-data entity key of the pad object.
     pub key: u32,
-    /// The pad's authored `Name` COMP, lowercased, when it has one. Retail vz names 45 of its 46 pads
+    /// The pad's authored `Name` COMP, lowercased, when it has one. Retail vz names all 46 of its pads
     /// `<zone>_<faction>_<site>_lz_player{one,two}` — the names the shipped Lua also resolves directly
-    /// (`Pg.GetGuidByName("01_pmc_hq_lz_playerone")`, `vz/wifpmcinterior.lua:2108`). Zone 12 slot 1 has
-    /// a `LandingZone` record and a `Transform` but NO `Name` record in the retail block, which is why
-    /// this is optional and why the COMP — not the name convention — is the enumeration authority.
+    /// (`Pg.GetGuidByName("01_pmc_hq_lz_playerone")`, `vz/wifpmcinterior.lua:2108`;
+    /// `sParkingLot = "12_chi_hq_lz_playerone"`, `vz/wifhqdata.lua:128`). Optional because a pad is
+    /// a `LandingZone` record joined to its `Transform`, and the COMP — not the name convention — is
+    /// the enumeration authority.
     pub name: Option<String>,
     /// Authored world position (native game space, +Y up) from the entity's `Transform`.
     pub pos: [f32; 3],
@@ -1440,8 +1441,8 @@ pub fn retail_landing_zone_pads() -> Vec<LandingZonePad> {
                 f.next()?.parse().ok()?,
                 f.next()?.parse().ok()?,
             ];
-            // An EMPTY name is meaningful, not missing: retail zone 12 slot 1 ships without a `Name`
-            // COMP, and collapsing that to `Some("")` would invent a name the archive does not have.
+            // An EMPTY name column is a pad with no `Name` record; collapsing it to `Some("")` would
+            // invent a name the archive does not have.
             let name = (!name.is_empty()).then(|| name.to_string());
             Some(LandingZonePad { zone, slot, key, name, pos })
         })
@@ -1520,11 +1521,12 @@ pub(crate) mod schema_wire_tests {
             slots.sort_unstable();
             assert_eq!(slots, vec![1, 2], "zone {z} must have one pad per player slot");
         }
-        // 45 of 46 named; zone 12 slot 1 ships without a `Name` COMP.
-        assert_eq!(pads.iter().filter(|p| p.name.is_some()).count(), 45);
+        // All 46 named; zone 12 slot 1 is the `12_chi_hq_lz_playerone` `vz/wifhqdata.lua:128` resolves.
         let unnamed: Vec<(u32, u32)> =
             pads.iter().filter(|p| p.name.is_none()).map(|p| (p.zone, p.slot)).collect();
-        assert_eq!(unnamed, vec![(12, 1)], "zone 12 slot 1 is the one unnamed retail pad");
+        assert_eq!(unnamed, Vec::<(u32, u32)>::new(), "every retail pad carries a Name");
+        let zone12: Vec<Option<&str>> = pads.iter().filter(|p| p.zone == 12).map(|p| p.name.as_deref()).collect();
+        assert_eq!(zone12, vec![Some("12_chi_hq_lz_playerone"), Some("12_chi_hq_lz_playertwo")]);
         // Distinct authored positions — they are physical touchdown spots, not placeholders.
         let mut seen = std::collections::HashSet::new();
         for p in &pads {
@@ -1613,9 +1615,9 @@ pub(crate) mod schema_wire_tests {
         /// - The zone set `1..8, 12, 15..18, 20..25, 27..30` is exactly the set `vz/wifhqdata.lua`'s
         ///   `nLandingZone`/`nAltLandingZone` fields reference (`docs/mercs2-luacd/04_tutorials_wifdata.md`
         ///   §2.5); the seven gaps appear nowhere in the corpus.
-        /// - 45 of 46 pads carry a `Name` of the form `<zone>_<faction>_<site>_lz_player{one,two}` — the
+        /// - All 46 pads carry a `Name` of the form `<zone>_<faction>_<site>_lz_player{one,two}` — the
         ///   names the shipped Lua also resolves by hand (`resident/mrxsupport.lua:606-610`,
-        ///   `vz/wifpmcinterior.lua:2108`). Zone 12 slot 1 ships without one.
+        ///   `vz/wifpmcinterior.lua:2108`, `vz/wifhqdata.lua:128` for zone 12 slot 1).
         /// The world name index spans **streamed-layer blocks**, not just `layers_static`.
         ///
         /// The regression this pins: `Pg.GetGuidByName("VzaCon001_StartingBoat")` returned nil, which
@@ -1701,7 +1703,7 @@ pub(crate) mod schema_wire_tests {
 
             // The name convention, where a name exists: `<zone>_…_lz_player{one,two}`.
             let named = pads.iter().filter(|p| p.name.is_some()).count();
-            assert_eq!(named, 45, "45 of the 46 retail pads carry a Name COMP");
+            assert_eq!(named, 46, "all 46 retail pads carry a Name COMP");
             for p in pads.iter().filter(|p| p.name.is_some()) {
                 let n = p.name.as_deref().unwrap();
                 let want_slot = if p.slot == 1 { "_playerone" } else { "_playertwo" };

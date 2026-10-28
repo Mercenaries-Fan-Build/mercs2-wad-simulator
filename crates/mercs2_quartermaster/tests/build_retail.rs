@@ -3474,3 +3474,199 @@ mod sound {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// M0197 (game half) — a script name the game ships
+// ---------------------------------------------------------------------------
+
+/// The M0197 findings `game_checks` reports for a Shipment of `contributions`.
+fn m0197_of(label: &str, contributions: &str) -> Vec<mercs2_quartermaster::lint::Diagnostic> {
+    let dir = scratch(label);
+    let s = shipment(&dir, contributions);
+    mercs2_quartermaster::lint::game_checks(&s.manifest, &mut retail_game())
+        .into_iter()
+        .filter(|d| d.rule.code == "M0197")
+        .collect()
+}
+
+/// A script of `resident` (`mrxplayer`) and one of `scripts_vz` (`wifpmcinterior`), in any case,
+/// are names vz.wad carries; a script only `shell.wad` carries is found there; a novel name is quiet.
+/// A novel shop module is checked the same way.
+#[test]
+fn m0197_refuses_a_script_name_the_game_ships() {
+    use mercs2_formats::types::TYPE_ID_SCRIPT;
+    for name in ["mrxplayer", "WifPmcInterior"] {
+        let d = m0197_of(&format!("m0197_{name}"), &format!("  - kind: add_script\n    name: {name}\n    source: src/a.lua\n"));
+        assert_eq!(d.len(), 1, "{name}: {d:?}");
+        assert!(d[0].message.contains("vz.wad"), "{name}: {}", d[0].message);
+        assert_eq!(d[0].severity, mercs2_quartermaster::lint::Severity::Error);
+    }
+
+    let game = retail_game();
+    let shell = game.open_sibling("shell.wad").expect("shell.wad beside vz.wad");
+    let h = mercs2_quartermaster::manifest::asset_hash;
+    let shell_only = ["mrxgui_shellonly", "mrxguibootstrap_shellonly", "mrxutil_shell", "shellbootstrap", "mrxguishell"]
+        .into_iter()
+        .find(|n| shell.has_asset(h(n), TYPE_ID_SCRIPT) && !game.has_asset(h(n), TYPE_ID_SCRIPT))
+        .expect("a script shell.wad carries and vz.wad does not");
+    let d = m0197_of("m0197_shell", &format!("  - kind: add_script\n    name: {shell_only}\n    source: src/a.lua\n"));
+    assert_eq!(d.len(), 1, "{shell_only}: {d:?}");
+    assert!(d[0].message.contains("shell.wad") && !d[0].message.contains("vz.wad,"), "{}", d[0].message);
+
+    let d = m0197_of(
+        "m0197_shop",
+        "  - kind: add_shop_item\n    id: my_strike\n    name: my_strike\n    icon: hud_support_airstrike\n    shops: [pmc]\n    \
+         type: airstrike\n    behaviour: { module: mrxplayer, script: src/s.lua }\n",
+    );
+    assert_eq!(d.len(), 1, "{d:?}");
+    assert!(d[0].message.starts_with("novel shop module \"mrxplayer\""), "{}", d[0].message);
+
+    assert!(m0197_of("m0197_novel", "  - kind: add_script\n    name: qm_w2_novel_module\n    source: src/a.lua\n").is_empty());
+}
+
+/// A `-patch.wad` overlay is never read for M0197: the Shipment's own installed build carries the
+/// script it mints, and a stack holding it (the Workshop's build stack holds `vz-patch.wad`) must
+/// not refuse the Shipment's own name.
+#[test]
+fn m0197_does_not_read_the_stacks_overlays() {
+    use mercs2_formats::types::TYPE_ID_SCRIPT;
+    let mut game = retail_game();
+    let dir = scratch("m0197_overlay");
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::write(dir.join("src/a.lua"), "return {}\n").unwrap();
+    let s = shipment(&dir, "  - kind: add_script\n    name: qm_w2_overlay_probe\n    source: src/a.lua\n");
+    let corpus = corpus_for_tests();
+    let report = build::build(&s, Some(&mut game), None, None, Some(&corpus), None).expect("the add_script builds");
+    let overlay = report.wad.expect("a WAD");
+
+    let vz = game.paths()[0].to_path_buf();
+    let stacked = mercs2_quartermaster::GameStack::open(&[vz, overlay]).expect("vz.wad + the build");
+    let h = mercs2_quartermaster::manifest::asset_hash("qm_w2_overlay_probe");
+    assert!(stacked.has_asset(h, TYPE_ID_SCRIPT), "the overlay carries the minted script");
+    assert!(!stacked.base_has_asset(h, TYPE_ID_SCRIPT), "vz.wad does not");
+    let mut stacked = stacked;
+    let d: Vec<_> = mercs2_quartermaster::lint::game_checks(&s.manifest, &mut stacked)
+        .into_iter()
+        .filter(|d| d.rule.code == "M0197")
+        .collect();
+    assert!(d.is_empty(), "{d:?}");
+}
+
+/// The game's own WADs present beside vz.wad are found case-insensitively (`Loading.wad`,
+/// `English.wad`), absent ones are not listed, and `-patch.wad` overlays never are.
+#[test]
+fn the_present_side_wads_are_the_games_own() {
+    let game = retail_game();
+    let found = game.present_side_wads().expect("the data folder lists");
+    let names: Vec<String> =
+        found.iter().map(|p| p.file_name().unwrap().to_string_lossy().to_ascii_lowercase()).collect();
+    eprintln!("present side WADs: {names:?}");
+    for want in ["shell.wad", "loading.wad", "english.wad"] {
+        assert!(names.iter().any(|n| n == want), "{want} is beside vz.wad: {names:?}");
+    }
+    assert!(names.iter().all(|n| !n.ends_with("-patch.wad")), "{names:?}");
+    let allowed: Vec<String> = mercs2_quartermaster::game::side_wad_files().iter().map(|f| f.to_ascii_lowercase()).collect();
+    assert!(names.iter().all(|n| allowed.contains(n)), "{names:?} beyond {allowed:?}");
+}
+
+// ---------------------------------------------------------------------------
+// M0198 — an entity key already placed; the entity file
+// ---------------------------------------------------------------------------
+
+/// A Shipment at a fresh scratch dir whose `src/e.yaml` is `entities`.
+fn placement_shipment(label: &str, entities: &str, contributions: &str) -> discover::LoadedShipment {
+    let dir = scratch(label);
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::write(dir.join("src/e.yaml"), entities).unwrap();
+    shipment(&dir, contributions)
+}
+
+/// A key `layers_static`'s block places, and one it does not.
+fn placed_and_free_key(game: &mut mercs2_quartermaster::GameStack) -> (u32, u32) {
+    let inputs = game.layer_block_for_edit("layers_static").expect("layers_static in the stack");
+    let keys = mercs2_formats::placement::entity_key_set(&inputs.block);
+    let placed = *keys.iter().min().expect("layers_static places entities");
+    let free = (0x7F00_0000u32..).find(|k| !keys.contains(k)).expect("a free key");
+    (placed, free)
+}
+
+/// An `add_placement` key the target layer's block already places is M0198, and blocks the build;
+/// a key it does not place is quiet. Two records of one file under one key are M0198 for
+/// `add_placement` and `add_layer` alike.
+#[test]
+fn m0198_refuses_a_key_already_placed() {
+    use mercs2_quartermaster::lint;
+    let mut game = retail_game();
+    let (placed, free) = placed_and_free_key(&mut game);
+    let entity = |key: u32| format!("key: 0x{key:08X}\nmodel: al_prop_barrel_red\npos: [0, 0, 0]\n");
+    let add = "  - kind: add_placement\n    layer: layers_static\n    entity: src/e.yaml\n";
+
+    let taken = placement_shipment("m0198_taken", &entity(placed), add);
+    let d = lint::placement_game_checks(&taken.manifest, &taken.root, &mut game);
+    assert_eq!(d.iter().map(|d| d.rule.code).collect::<Vec<_>>(), vec!["M0198"], "{d:?}");
+    assert!(d[0].message.contains(&format!("0x{placed:08X}")), "{}", d[0].message);
+    match build::build(&taken, Some(&mut game), None, None, None, None) {
+        Err(BuildError::Blocked(diags)) => assert!(diags.iter().any(|d| d.rule.code == "M0198"), "{diags:?}"),
+        Err(e) => panic!("expected the build to block on M0198, got {e}"),
+        Ok(_) => panic!("a key the layer places must not build"),
+    }
+
+    let fresh = placement_shipment("m0198_fresh", &entity(free), add);
+    assert!(lint::placement_game_checks(&fresh.manifest, &fresh.root, &mut game).is_empty());
+
+    let twice = format!(
+        "- {{ key: 0x{free:08X}, model: a, pos: [0, 0, 0] }}\n- {{ key: 0x{free:08X}, model: b, pos: [1, 0, 0] }}\n"
+    );
+    for c in [
+        add,
+        "  - kind: add_layer\n    name: vz_state_qm_w2_test\n    template: layers_static\n    entities: src/e.yaml\n",
+    ] {
+        let s = placement_shipment("m0198_twice", &twice, c);
+        let d = lint::placement_game_checks(&s.manifest, &s.root, &mut game);
+        assert_eq!(d.iter().map(|d| d.rule.code).collect::<Vec<_>>(), vec!["M0198"], "{c}: {d:?}");
+        assert!(d[0].message.contains("two records"), "{}", d[0].message);
+    }
+}
+
+/// An entity file that does not parse is handled as an `edit_world` edits file is: no lint reads it
+/// (the M0198 check reports nothing for it), and the build refuses it as a lowering error naming the
+/// file and the reason — here the field the closed schema does not have.
+#[test]
+fn an_unparseable_entity_file_is_refused_by_name() {
+    let mut game = retail_game();
+    let bad = "key: 0x7F000001\nmodel: a\nposition: [0, 0, 0]\n";
+    let s = placement_shipment(
+        "entity_unknown_field",
+        bad,
+        "  - kind: add_placement\n    layer: layers_static\n    entity: src/e.yaml\n",
+    );
+    let d = mercs2_quartermaster::lint::placement_game_checks(&s.manifest, &s.root, &mut game);
+    assert!(d.is_empty(), "{d:?}");
+    match build::build(&s, Some(&mut game), None, None, None, None) {
+        Err(BuildError::Lower { index: 0, kind: "add_placement", message }) => {
+            assert!(message.contains("e.yaml") && message.contains("unknown field `position`"), "{message}")
+        }
+        Err(other) => panic!("expected a lowering error naming the file, got {other}"),
+        Ok(_) => panic!("an unparseable entity file must not build"),
+    }
+}
+
+/// An `add_placement` with a fresh key builds, and the shipped layer block places it.
+#[test]
+fn an_add_placement_with_a_fresh_key_builds_and_places_it() {
+    let mut game = retail_game();
+    let (_, free) = placed_and_free_key(&mut game);
+    let s = placement_shipment(
+        "add_placement_fresh",
+        &format!("key: 0x{free:08X}\nmodel: al_prop_barrel_red\npos: [10, 2, 30]\nyaw: 90\n"),
+        "  - kind: add_placement\n    layer: layers_static\n    entity: src/e.yaml\n",
+    );
+    let report = build::build(&s, Some(&mut game), None, None, None, None).expect("a fresh key builds");
+    let on_disk = std::fs::read(report.wad.expect("a WAD")).unwrap();
+    let contents = mercs2_formats::patch_wad::read_patch_wad(&on_disk).expect("re-read the WAD");
+    let placed = contents.blocks.iter().any(|b| {
+        let dec = mercs2_formats::sges::decompress_sges(&b.compressed_data).expect("sges");
+        mercs2_formats::placement::entity_key_set(&dec).contains(&free)
+    });
+    assert!(placed, "the shipped block places 0x{free:08X}");
+}

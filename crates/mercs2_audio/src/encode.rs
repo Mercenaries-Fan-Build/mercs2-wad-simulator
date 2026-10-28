@@ -340,8 +340,8 @@ pub struct GroupHeadParams {
 /// A multi-wave group's fields after the head (see [`crate::soundbank::MultiGroup`]).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MultiGroupParams {
-    /// `+0x2C` the wave loop count (0 plays once; a cue that can reach a non-zero count is refused
-    /// by [`crate::AudioEngine::cue_sound`]).
+    /// `+0x2C` the wave loop count (0 plays once; a non-zero count plays the wave `1 + count` times,
+    /// `FUN_00839e90`).
     pub byte_2c: u8,
     /// `+0x2E` selection mode: 0 sequential, 1 weighted random, 2 weighted random without an
     /// immediate repeat.

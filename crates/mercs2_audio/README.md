@@ -365,6 +365,5 @@ eng.duck_master_volume(0.0); // ref-counted; unduck_master_volume releases
   (`OpenStreamFile`/`CloseStreamFile` record intent only) and the device
   fold-down stand-in are tracked in `DEFERRED.md` — all tagged
   `[faithful-blocker: no]`.
-* The `Sound`/`VO` Lua tables in `mercs2_script` still return `Installed::none()`; wiring them is the
-  `mercs2_engine` owner's edit (see the "Binding-wiring seam" docs in `engine.rs`). Every engine body
-  they need exists in this crate.
+* The `Sound`/`VO` Lua tables in `mercs2_script` install real bodies for every cfunc; they reach this
+  crate through `mercs2_engine`'s `GameScriptHost` (see the "Binding-wiring seam" docs in `engine.rs`).

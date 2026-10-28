@@ -283,6 +283,15 @@ fn mercs2_engine_registry_vz_wad() -> Option<PathBuf> {
     None
 }
 
+/// The game's own WADs beside `vz.wad` that are not the level stack: the shell and loading levels,
+/// then one per entry of the engine's language table (`.\Data\<token>.wad`,
+/// [`crate::manifest::Language::ALL`]).
+pub fn side_wad_files() -> Vec<String> {
+    let mut out = vec!["shell.wad".to_string(), "Loading.wad".to_string()];
+    out.extend(crate::manifest::Language::ALL.iter().map(|l| format!("{}.wad", l.token())));
+    out
+}
+
 struct OpenWad {
     path: PathBuf,
     file: File,
@@ -409,6 +418,35 @@ impl GameStack {
         let base = self.wads.first().map(|w| w.path.as_path()).ok_or("the game stack is empty")?;
         let path = crate::sound::sibling_wad(base, file)?;
         GameStack::open(std::slice::from_ref(&path)).map_err(|e| e.to_string())
+    }
+
+    /// Each of the game's own WADs ([`side_wad_files`]) present beside this stack's base WAD, found
+    /// case-insensitively. An absent one is not listed; a folder that cannot be listed is an error.
+    /// `-patch.wad` overlays are not among them: they are mod output, not the game's.
+    pub fn present_side_wads(&self) -> Result<Vec<PathBuf>, String> {
+        let base = self.wads.first().map(|w| w.path.as_path()).ok_or("the game stack is empty")?;
+        let dir = base.parent().ok_or_else(|| format!("{} has no parent folder", base.display()))?;
+        let mut present: Vec<PathBuf> = Vec::new();
+        for e in std::fs::read_dir(dir).map_err(|e| format!("reading {}: {e}", dir.display()))? {
+            present.push(e.map_err(|e| format!("reading {}: {e}", dir.display()))?.path());
+        }
+        let name_of = |p: &Path| p.file_name().map(|f| f.to_string_lossy().to_ascii_lowercase());
+        let mut out = Vec::new();
+        for file in side_wad_files() {
+            let file = file.to_ascii_lowercase();
+            if let Some(p) = present.iter().find(|p| name_of(p).as_deref() == Some(file.as_str())) {
+                out.push(p.clone());
+            }
+        }
+        Ok(out)
+    }
+
+    /// Whether the BASE WAD alone — the first of the stack, `vz.wad` — carries an ASET row for
+    /// `(hash, type_id)`, whatever the overlays above it carry.
+    pub fn base_has_asset(&self, name_hash: u32, type_id: u32) -> bool {
+        self.wads.first().is_some_and(|w| {
+            w.archive.aset.iter().any(|e| e.asset_hash == name_hash && e.type_id == type_id)
+        })
     }
 
     /// The stack as configured, base first. Shown in the UI so "which install was it reading" is

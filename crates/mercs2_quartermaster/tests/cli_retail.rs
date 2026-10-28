@@ -98,6 +98,33 @@ fn target_dimensions(vz: &Path, hash: u32) -> (u32, u32) {
 }
 
 // ---------------------------------------------------------------------------
+// qm lint --with-game
+// ---------------------------------------------------------------------------
+
+/// `qm lint --with-game` runs M0197's game half and M0198: an `add_script` named like the resident
+/// `mrxplayer` and an `add_placement` key `layers_static`'s block already places are findings, exit 1.
+#[test]
+fn lint_with_game_reports_a_taken_script_name_and_entity_key() {
+    let vz = retail_vz_wad();
+    let mut stack = mercs2_quartermaster::GameStack::open(std::slice::from_ref(&vz)).expect("the game stack");
+    let block = stack.layer_block_for_edit("layers_static").expect("layers_static").block;
+    let placed = *mercs2_formats::placement::entity_key_set(&block).iter().min().expect("a placed key");
+
+    let dir = scratch("lint-with-game");
+    std::fs::write(dir.join("src/a.lua"), "return {}\n").unwrap();
+    std::fs::write(dir.join("src/e.yaml"), format!("key: 0x{placed:08X}\nmodel: al_prop_barrel_red\npos: [0, 0, 0]\n")).unwrap();
+    let s = shipment(
+        &dir,
+        "  - kind: add_script\n    name: mrxplayer\n    source: src/a.lua\n  \
+         - kind: add_placement\n    layer: layers_static\n    entity: src/e.yaml\n",
+    );
+    let out = qm(&["lint", s.to_str().unwrap(), "--with-game", "--game", vz.to_str().unwrap()]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(code(&out), EXIT_FINDINGS, "stderr: {stderr}");
+    assert!(stderr.contains("M0197") && stderr.contains("M0198"), "{stderr}");
+}
+
+// ---------------------------------------------------------------------------
 // qm build's default output
 // ---------------------------------------------------------------------------
 

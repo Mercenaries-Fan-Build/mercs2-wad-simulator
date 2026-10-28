@@ -225,6 +225,43 @@ fn a_rigged_glb_lowers_onto_a_retail_donor() {
     );
 }
 
+/// A named first host leads the split: the lowering puts the mesh's first part in it, where the
+/// default picks the largest groups; a group the donor does not draw is refused, naming the ones it
+/// has. This is what an `add_model`'s `group:` reaches on the skinned (`retarget:`) path.
+#[test]
+fn a_named_first_host_leads_the_split() {
+    let wad = vz_wad();
+    let Some(glb_path) = source_glb() else {
+        return eprintln!("SKIPPING: no rigged source model");
+    };
+    let glb = mercs2_formats::char_import::load_char_glb(&glb_path).expect("read glb");
+    let donor_hash = mercs2_formats::hash::pandemic_hash_m2("pmc_hum_mattias");
+    let donor = mercs2_formats::donor::donor_block(&[wad], donor_hash).expect("donor");
+    let opts = mercs2_formats::char_lower::LowerOpts::default();
+    let hash = mercs2_formats::hash::pandemic_hash_m2("pmc_hum_test_hosted");
+
+    let default = mercs2_formats::char_lower::character_into_donor(&donor, &glb, hash, &opts).expect("default lowering");
+    let drawing: Vec<usize> =
+        mercs2_formats::model_inject::drawing_group_caps(&donor).iter().map(|&(ord, _, _)| ord).collect();
+    let named = *drawing
+        .iter()
+        .find(|g| !default.hosts.contains(g))
+        .unwrap_or_else(|| panic!("every drawing group {drawing:?} is a default host {:?}", default.hosts));
+
+    let hosted = mercs2_formats::char_lower::character_into_donor_at(&donor, &glb, hash, &opts, Some(named))
+        .expect("lowering onto the named group");
+    eprintln!("[char-lowering] default hosts {:?}, named {named} -> hosts {:?}", default.hosts, hosted.hosts);
+    assert_eq!(hosted.hosts.first(), Some(&named), "the named group must be the first host");
+    assert_eq!(hosted.hosts.len(), default.hosts.len(), "the split decides the host count, not the name");
+
+    let not_drawn = (0..64).find(|g| !drawing.contains(g)).expect("a group number the donor does not draw");
+    let err = match mercs2_formats::char_lower::character_into_donor_at(&donor, &glb, hash, &opts, Some(not_drawn)) {
+        Err(e) => e,
+        Ok(_) => panic!("group {not_drawn} is not a drawing group and must be refused"),
+    };
+    assert!(err.contains(&format!("group {not_drawn} is not a drawing group")), "{err}");
+}
+
 /// The lowering must refuse a donor it cannot fit rather than emitting a block that renders wrong.
 #[test]
 fn a_mesh_that_cannot_fit_any_group_is_a_loud_error() {

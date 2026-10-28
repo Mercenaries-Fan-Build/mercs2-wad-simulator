@@ -610,6 +610,78 @@ fn literal_import_unknown_warns_but_links() {
     assert!(out.scripts.iter().any(|l| l.target == "ess"), "the addition was minted");
 }
 
+/// An `add_script` whose name a script of the OTHER block carries is refused. New scripts are minted
+/// into the `wifpmcinterior` block (`scripts_vz`), and `mrxplayer` is a `resident` script: the
+/// refusal must come from every block, not only the one the module would land in.
+#[test]
+fn an_add_script_named_like_a_resident_script_is_refused() {
+    let mut loaded = retail_blocks();
+    let corpus = corpus();
+    assert!(loaded[0].1.find_script_by_name("mrxplayer").is_none(), "mrxplayer is not a scripts_vz script");
+    assert!(loaded[1].1.find_script_by_name("mrxplayer").is_some(), "mrxplayer is a resident script");
+    let additions = [link::ScriptAddition {
+        shipment: "clash".into(),
+        name: "mrxplayer".into(),
+        source: "return {}\n".into(),
+    }];
+    let mut targets: Vec<link::TargetBlock<'_>> = loaded
+        .iter_mut()
+        .map(|(path, block)| link::TargetBlock { path: path.clone(), block })
+        .collect();
+    let err = link::link_into_blocks(&mut targets, &corpus, &[], &[], &[], &[], &[], &additions, &[], &order(&["clash"]))
+        .expect_err("a name the resident block carries must not be minted");
+    match err {
+        link::LinkError::NameTaken { name, shipment, path } => {
+            assert_eq!((name.as_str(), shipment.as_str()), ("mrxplayer", "clash"));
+            assert_eq!(path, r"blocks\VZ\resident_P000_Q3.block");
+        }
+        other => panic!("expected NameTaken, got {other}"),
+    }
+}
+
+/// Two Shipments' support registrations of one novel module are refused rather than the second's
+/// source dropped; one Shipment's two items sharing a module and source mint it once.
+#[test]
+fn one_novel_support_module_from_two_shipments_is_refused() {
+    let corpus = corpus();
+    let reg = |shipment: &str, id: &str, source: &str| link::SupportRegistration {
+        shipment: shipment.into(),
+        module: "qm_w2_strike".into(),
+        source: source.into(),
+        id: id.into(),
+        name: id.into(),
+        description: String::new(),
+        icon: "hud_support_airstrike".into(),
+        item_type: "Airstrike".into(),
+        cash_cost: 1,
+        fuel_cost: 0,
+        max_stock: 1,
+        unlock_table: "{}".into(),
+        cargo: None,
+        delivery_vehicle: None,
+        shops: vec!["Pmc".into()],
+    };
+    let link_with = |regs: &[link::SupportRegistration], names: &[&str]| {
+        let mut loaded = retail_blocks();
+        let mut targets: Vec<link::TargetBlock<'_>> = loaded
+            .iter_mut()
+            .map(|(path, block)| link::TargetBlock { path: path.clone(), block })
+            .collect();
+        link::link_into_blocks(&mut targets, &corpus, &[], &[], &[], regs, &[], &[], &[], &order(names)).map(|o| o.scripts)
+    };
+    let src = "QM_W2 = true\n";
+    let err = link_with(&[reg("aaa", "strike_a", src), reg("bbb", "strike_b", "QM_W2_B = true\n")], &["aaa", "bbb"])
+        .expect_err("one module from two Shipments must be refused");
+    match err {
+        link::LinkError::SupportModuleTwice { module, first, second } => {
+            assert_eq!((module.as_str(), first.as_str(), second.as_str()), ("qm_w2_strike", "aaa", "bbb"));
+        }
+        other => panic!("expected SupportModuleTwice, got {other}"),
+    }
+    let linked = link_with(&[reg("aaa", "strike_a", src), reg("aaa", "strike_b", src)], &["aaa"]).expect("shared module");
+    assert_eq!(linked.iter().filter(|l| l.target == "qm_w2_strike").count(), 1, "minted once");
+}
+
 /// `dynamic_import(...)` and `import(<expr>)` are unchecked by design: never flagged.
 #[test]
 fn dynamic_import_not_flagged() {

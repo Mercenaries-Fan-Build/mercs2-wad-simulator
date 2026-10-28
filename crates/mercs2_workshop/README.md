@@ -88,7 +88,8 @@ exe subsystem. What its source explicitly claims as provenance:
 
 ## Usage
 
-Open the window against the registry-discovered `vz.wad`:
+Open the window against the `vz.wad` the game-archive chain finds (below; with no answer, the window
+opens on Settings):
 
 ```
 cargo run -p mercs2_workshop

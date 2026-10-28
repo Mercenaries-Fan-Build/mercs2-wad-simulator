@@ -338,6 +338,8 @@ fn build_layer_container(template: &[u8], ents: &[NewEntity]) -> Result<Vec<u8>,
 /// the table by 16 bytes shifts every sub-block, but each sub-block is located by
 /// cumulative `size` and its child offsets are data-area-relative, so the shift is
 /// transparent.
+///
+/// Refuses `ents` that give one key to two entities: retail places every key once.
 pub fn append_placements(
     block: &[u8],
     template_sub: usize,
@@ -346,6 +348,13 @@ pub fn append_placements(
 ) -> Result<Vec<u8>, String> {
     if ents.is_empty() {
         return Err("no entities to place".into());
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    if let Some(e) = ents.iter().find(|e| !seen.insert(e.key)) {
+        return Err(format!(
+            "entity key 0x{:08X} is given to two of the entities to place; each needs its own key",
+            e.key
+        ));
     }
     let (t_off, t_len) =
         nth_container(block, template_sub).ok_or("template sub-block out of range")?;
@@ -529,6 +538,30 @@ mod tests {
             }
         }
         assert_eq!(info_seen, 3, "expected Name/ModelName/Transform info descriptors");
+    }
+
+    /// Two of the entities to place under one key are refused, naming the key, before anything is
+    /// built; distinct keys append.
+    #[test]
+    fn appending_two_entities_under_one_key_is_refused() {
+        let template = synthetic_template();
+        let mut block = Vec::new();
+        block.extend_from_slice(&1u32.to_le_bytes());
+        block.extend_from_slice(&0x1111_1111u32.to_le_bytes());
+        block.extend_from_slice(&0xE6B8_1A54u32.to_le_bytes());
+        block.extend_from_slice(&0u32.to_le_bytes());
+        block.extend_from_slice(&(template.len() as u32).to_le_bytes());
+        block.extend_from_slice(&template);
+        let ent = |key: u32| NewEntity {
+            key,
+            model_hash: 0x9F2B_CEBE,
+            pos: [0.0, 0.0, 0.0],
+            quat: [0.0, 0.0, 0.0, 1.0],
+            name: "prop".into(),
+        };
+        let e = append_placements(&block, 0, &[ent(0x00F0_0002), ent(0x00F0_0002)], 0x2222_2222).unwrap_err();
+        assert!(e.contains("0x00F00002"), "{e}");
+        assert!(append_placements(&block, 0, &[ent(0x00F0_0002), ent(0x00F0_0003)], 0x2222_2222).is_ok());
     }
 }
 

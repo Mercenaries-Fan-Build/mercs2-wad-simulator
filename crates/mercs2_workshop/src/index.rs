@@ -360,7 +360,8 @@ impl AssetIndex {
     }
 
     /// Build the catalog from EVERY open WAD's ASET table (base + overlays, in stack order — a
-    /// later wad's row wins, the game's patch rule), then the `side` WADs (`app::side_wad_files`),
+    /// later wad's row wins, the game's patch rule), then the `side` WADs
+    /// (`mercs2_quartermaster::game::side_wad_files`),
     /// which add the hashes the stack does not hold and are listed as other sources of the ones it
     /// does. ALL model ASETs are listed, not just
     /// primaries: shared/instanced meshes (recruits like Misha/Ewan/Fiona, costume skins, world

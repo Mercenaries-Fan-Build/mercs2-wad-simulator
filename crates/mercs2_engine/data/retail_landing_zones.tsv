@@ -20,9 +20,10 @@
 # `retail_capture_corroborates_the_authored_landing_zone_set`). `landing_zone_pads_match_the_vendored_table`
 # re-derives this file from the WAD and fails on any drift, so it cannot silently rot.
 #
-# Zone 12 slot 1 has an empty name: it ships with a `LandingZone` record and a `Transform` but no
-# `Name` COMP. Reproduced, not repaired -- it is why the COMP, and not the name convention, is the
-# enumeration authority. Zone 3 slot 1's `..._llz_playerone` is likewise a retail typo, kept.
+# Every pad carries a `Name` record. Zone 12 slot 1's (`12_chi_hq_lz_playerone`, the name
+# `vz/wifhqdata.lua:128` resolves) sits right after a 0x01 key byte that the Name parser used to skip
+# as a flag, so earlier extractions read no name for it. Zone 3 slot 1's `..._llz_playerone` is a
+# retail typo, kept.
 #
 # Columns, tab-separated: zone  slot  key  name  x  y  z
 1	1	882922	01_pmc_hq_lz_playerone	2631.5313	8.071381	-887.1286
@@ -41,7 +42,7 @@
 7	2	882975	07_all_hq_lz_playertwo	260.59012	-30.011986	220.14267
 8	1	882936	08_pir_hq_lz_playerone	2081.7854	-27.89162	2619.0552
 8	2	882987	08_pir_hq_lz_playertwo	2084.0403	-27.891626	2615.1013
-12	1	882945		-2315.9001	15.611906	1081.1229
+12	1	882945	12_chi_hq_lz_playerone	-2315.9001	15.611906	1081.1229
 12	2	882977	12_chi_hq_lz_playertwo	-2318.6128	15.611915	1085.0865
 15	1	1119346	15_mar_altagracia_lz_playerone	1558.2863	-20.38021	1181.3029
 15	2	1119347	15_mar_altagracia_lz_playertwo	1558.2776	-20.38021	1186.9607

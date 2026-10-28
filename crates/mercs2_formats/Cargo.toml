@@ -70,6 +70,10 @@ name = "novel_asset_shape_survey"
 required-features = ["retail"]
 
 [[test]]
+name = "placement_keys_retail"
+required-features = ["retail"]
+
+[[test]]
 name = "placement_roundtrip_survey"
 required-features = ["retail"]
 
