@@ -64,7 +64,7 @@ its own evidence.
 ## Usage
 
 ```bash
-# analyze the deployed game's log (the default path is baked in)
+# analyze the install's log (<install>/pmc_blackbox.log, install from $MERCS2_GAME_DIR or $VZ_WAD)
 cargo run -p loadprobe
 
 # a specific capture, machine-readable
@@ -84,7 +84,7 @@ Flags (all optional):
 
 | flag | default | meaning |
 |---|---|---|
-| `[LOG]` (positional) | the deployed game's `pmc_blackbox.log` | log file to analyze |
+| `[LOG]` (positional) | `<install>/pmc_blackbox.log`, install from `MERCS2_GAME_DIR` or `VZ_WAD` | log file to analyze |
 | `--routine` | `lua,pool` | comma-separated sources treated as routine (suppressed from the flagged-source dump) |
 | `--hang-secs` | `10` | seconds of no progress (steady pool polls) before classifying a HANG |
 | `--top-gaps` | `5` | how many largest inter-line time gaps to report |
@@ -93,12 +93,12 @@ Flags (all optional):
 | `--no-color` | off | disable ANSI colors |
 | `--milestones` | off | print the milestone ladder and exit |
 | `--symbolize` / `-S` | off | resolve `module+0xOFFSET` in the `[crash]` block |
-| `--exe-symbols` | `scripts/mercs2_annotations.json` | curated exe VA→name map for `--symbolize` |
+| `--exe-symbols` | `$MERCS2_EXE_SYMBOLS` | curated exe VA→name map for `--symbolize` |
 | `--module-dir` | — | extra dir to search for `.asi`/`.dll` (repeatable); the log's dir and its `scripts/` are always searched |
 
 ## Modules
 
-Binary-only crate; the modules are internal (declared in `src/main.rs`).
+The binary declares these modules privately in `src/main.rs`; `src/lib.rs` also exports all five as a library.
 
 * `parse` — `pmc_blackbox.log` line parser → ordered `LogLine`s (timestamp with midnight-wrap
   correction, source tag, message, Lua `@script:line`, `>>> ` world echo, file line number).
@@ -111,9 +111,9 @@ Binary-only crate; the modules are internal (declared in `src/main.rs`).
   rewrites crash-block lines.
 * `sha256` — dependency-free FIPS 180-4 SHA-256 used to fingerprint the analyzed log.
 
-`tests/fixtures.rs` runs the built binary with `--json` against four real captures in `storage/` and
-locks in their verdicts (reached-world / hang / hang / parses). Those fixtures live outside the crate;
-the tests skip gracefully if they're absent.
+`tests/fixtures.rs` runs the built binary with `--json` against five real captures in `tests/fixtures/` and
+locks in their verdicts (all reached-world). Those fixtures are committed with the crate; a missing
+one fails the test.
 
 ## Notes / gotchas
 
@@ -125,6 +125,6 @@ the tests skip gracefully if they're absent.
   hardcoded ladder index, so reordering the ladder can't break it.
 * `--symbolize` is post-analysis by design; if it finds no symbol source (no exe map, no `.asi`/`.dll`
   next to the log) it warns to stderr and leaves the crash block untouched.
-* The default log path is a hardcoded absolute path to this developer's install
-  (`C:/Users/Shadow/Desktop/Mercenaries 2 World in Flames/pmc_blackbox.log`); pass the log explicitly
-  anywhere else.
+* The default log path is `<install>/pmc_blackbox.log`, with the install taken from `MERCS2_GAME_DIR`
+  or `VZ_WAD` (the install root, its `data` folder, or `data/vz.wad`); with neither set, pass the log
+  explicitly (otherwise exit 2).
