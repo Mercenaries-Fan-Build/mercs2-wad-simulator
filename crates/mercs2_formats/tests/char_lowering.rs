@@ -87,7 +87,11 @@ fn source_glb() -> Option<PathBuf> {
 fn a_rigged_glb_lowers_onto_a_retail_donor() {
     let wad = vz_wad();
     let Some(glb_path) = source_glb() else {
-        return eprintln!("SKIPPING: no rigged source model under game-files/new-models");
+        return eprintln!(
+            "SKIPPING: no rigged source model (looked at $MERCS2_TEST_CHAR_GLB, \
+             <repo>/game-files/new-models/RuMerc1.glb and \
+             crates/mercs2_formats/tests/fixtures/char_source.glb)"
+        );
     };
 
     let glb = mercs2_formats::char_import::load_char_glb(&glb_path).expect("read the rigged glb");
