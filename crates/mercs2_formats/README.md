@@ -25,10 +25,11 @@ rendering, no simulation and no I/O policy — just format code:
   `placement_build` (append a new world placement), `patch_wad` (serialize a PC `vz-patch.wad`),
   `save_write`, and the DLC-port readers `dlc_input` / `dlc_stfs`.
 
-Sixteen binaries and five examples in the crate drive those paths from the command line (see
+Nineteen binaries and five examples in the crate drive those paths from the command line (see
 [Usage](#usage)).
 
-The crate has exactly one dependency: `flate2`.
+The crate's dependencies are `flate2`, `gltf` (the import readers), `loadprobe` (`load_ladder`), and
+`aes` + `cmac` for the `ps3_*` DLC decrypt chain.
 
 ## Where it comes from
 
