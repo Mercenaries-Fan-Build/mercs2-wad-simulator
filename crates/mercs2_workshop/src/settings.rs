@@ -35,6 +35,16 @@ pub struct Settings {
     pub wad_path: Option<PathBuf>,
     /// The `workshop_data/` reference bundle — `names.bin` and the corpora that ride with it.
     pub data_dir: Option<PathBuf>,
+    /// The hero: the model Inspect's Anims and FaceFX tabs play on, kept across tabs and launches.
+    pub hero: Option<Hero>,
+}
+
+/// A model chosen as the hero, by its catalog row: the model's hash and the row's label (a
+/// kit-template row shares its kit's hash; the label picks it out).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Hero {
+    pub hash: u32,
+    pub label: String,
 }
 
 /// `<config>/mercs2-workshop/settings.json`, per-OS. Resolved from environment variables rather
