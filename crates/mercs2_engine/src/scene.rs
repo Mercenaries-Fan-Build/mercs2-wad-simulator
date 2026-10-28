@@ -315,6 +315,8 @@ pub struct Scene {
     camera_bgl: wgpu::BindGroupLayout,
     bone_bgl: wgpu::BindGroupLayout,
     tex_bgl: wgpu::BindGroupLayout,
+    /// The material parameters (binding 4) of a bind with no material: not alpha-tested.
+    no_material_params: wgpu::Buffer,
     sampler: wgpu::Sampler,
     white: wgpu::TextureView,
     flat_normal: wgpu::TextureView,
@@ -518,8 +520,21 @@ impl Scene {
                     count: None,
                 },
                 tex_entry(3), // specular / gloss (`_sm`)
+                // the material's alpha-test parameters (`render::material_params`)
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
             ],
         });
+        // The parameters of a draw with no material: not alpha-tested.
+        let no_material_params = crate::render::material_params(&device, 0, 1.0);
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("material sampler"),
             address_mode_u: wgpu::AddressMode::Repeat,
@@ -1022,7 +1037,7 @@ impl Scene {
             entries: &[wgpu::BindGroupEntry { binding: 0, resource: loading_buf.as_entire_binding() }],
         });
         let loading_art_bind =
-            make_tex_bind(&device, &tex_bgl, &sampler, &white, &flat_normal, &black);
+            make_tex_bind(&device, &tex_bgl, &sampler, &white, &flat_normal, &black, &no_material_params);
         let loading_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("loading pipeline layout"),
             bind_group_layouts: &[&loading_bgl, &tex_bgl],
@@ -1091,6 +1106,7 @@ impl Scene {
             camera_bgl,
             bone_bgl,
             tex_bgl,
+            no_material_params,
             sampler,
             white,
             flat_normal,
@@ -1198,6 +1214,7 @@ impl Scene {
         if let Some(v) = make_bc_view(&self.device, &self.queue, td, true) {
             self.loading_art_bind = make_tex_bind(
                 &self.device, &self.tex_bgl, &self.sampler, &v, &self.flat_normal, &self.black,
+                &self.no_material_params,
             );
             self.loading_art_aspect = td.width as f32 / td.height.max(1) as f32;
         }
@@ -1523,6 +1540,7 @@ impl Scene {
         }
         let mut tex_binds = vec![make_tex_bind(
             &self.device, &self.tex_bgl, &self.sampler, &self.white, &self.flat_normal, &self.black,
+            &self.no_material_params,
         )];
         let mut draw_calls: Vec<DrawCall> = Vec::new();
         for d in draws {
@@ -1530,7 +1548,8 @@ impl Scene {
             let norm = d.normal.and_then(|h| views.get(&h)).unwrap_or(&self.flat_normal);
             let spec = d.specular.and_then(|h| views.get(&h)).unwrap_or(&self.black);
             let idx = tex_binds.len();
-            tex_binds.push(make_tex_bind(&self.device, &self.tex_bgl, &self.sampler, diff, norm, spec));
+            let params = crate::render::material_params(&self.device, d.material_flags, d.material_alpha);
+            tex_binds.push(make_tex_bind(&self.device, &self.tex_bgl, &self.sampler, diff, norm, spec, &params));
             draw_calls.push(DrawCall {
                 index_start: d.index_start,
                 index_count: d.index_count,
