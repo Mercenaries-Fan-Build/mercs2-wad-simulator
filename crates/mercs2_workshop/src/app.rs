@@ -1063,7 +1063,6 @@ struct Archive {
     w: WadStack,
     /// The catalog, without names (the bundle half of the boot brings those).
     index: AssetIndex,
-    kit_templates: KitTemplates,
     anim_sel: Option<AnimSelector>,
     /// The game's own shell plate (shell.wad): the browse backdrop.
     shell_plate: Option<mercs2_formats::texture::TextureData>,
@@ -1116,7 +1115,6 @@ fn open_archive(wadpath: &str, overlays: &[String]) -> Result<Archive, String> {
         overlays: overlays.to_vec(),
         w,
         index,
-        kit_templates,
         anim_sel,
         shell_plate,
         boot_skull,
@@ -1274,7 +1272,6 @@ pub fn run(opts: Options) {
     let mut clip_loader = ClipLoader::spawn(String::new(), Vec::new());
     let mut w = WadStack::empty();
     let mut index = AssetIndex::build(&[], HashMap::new());
-    let mut kit_templates = KitTemplates::default();
     let mut anim_sel: Option<AnimSelector> = None;
     // The game's own shell plate (shell.wad) as the workshop backdrop — the browse screen renders
     // through the engine's menu path over it until something is loaded into the 3D viewport.
@@ -1777,7 +1774,6 @@ pub fn run(opts: Options) {
                             vo_error = None;
                             w = WadStack::empty();
                             index = AssetIndex::build(&[], HashMap::new());
-                            kit_templates = KitTemplates::default();
                             anim_sel = None;
                             clip_loader = ClipLoader::spawn(String::new(), Vec::new());
                             shell_plate = None;
@@ -1831,7 +1827,7 @@ pub fn run(opts: Options) {
                                         boot_stage = stage;
                                     }
                                     Ok(Boot::Archive(a)) => {
-                                        let Archive { wadpath: p, overlays: o, w: nw, index: ni, kit_templates: kt, anim_sel: asel, shell_plate: sp, boot_skull } = *a;
+                                        let Archive { wadpath: p, overlays: o, w: nw, index: ni, anim_sel: asel, shell_plate: sp, boot_skull } = *a;
                                         clip_loader = ClipLoader::spawn(p.clone(), o.clone());
                                         mod_out = mod_out_beside(&p);
                                         qm_stack = std::iter::once(p.clone()).chain(o.iter().cloned()).collect();
@@ -1839,7 +1835,6 @@ pub fn run(opts: Options) {
                                         overlays = o;
                                         w = nw;
                                         index = ni;
-                                        kit_templates = kt;
                                         anim_sel = asel;
                                         shell_plate = sp;
                                         // BOOT art: the authentic Loading.wad gold skull — the
@@ -2044,13 +2039,13 @@ pub fn run(opts: Options) {
                                         let names = std::mem::take(&mut index.names);
                                         index = AssetIndex::build(&w.wads, names);
                                         // The new overlay may carry its own worldentity.
-                                        match load_kit_templates(&mut w) {
-                                            Ok(t) => kit_templates = t,
+                                        let kit_templates = match load_kit_templates(&mut w) {
+                                            Ok(t) => t,
                                             Err(e) => {
-                                                kit_templates = KitTemplates::default();
                                                 status.push_str(&format!(" (kit templates unreadable, no template rows: {e})"));
+                                                KitTemplates::default()
                                             }
-                                        }
+                                        };
                                         index.add_kit_templates(&kit_templates.kits, &kit_templates.all);
                                         filtered = refilter(&index, kind, &filter, lens);
                                         inventory_dirty = true;
@@ -6313,13 +6308,13 @@ pub fn run(opts: Options) {
                                     let names = std::mem::take(&mut index.names);
                                     index = AssetIndex::build(&w.wads, names);
                                     // The dropped overlay may have carried the worldentity in use.
-                                    match load_kit_templates(&mut w) {
-                                        Ok(t) => kit_templates = t,
+                                    let kit_templates = match load_kit_templates(&mut w) {
+                                        Ok(t) => t,
                                         Err(e) => {
-                                            kit_templates = KitTemplates::default();
                                             status = format!("kit templates unreadable, no template rows: {e}");
+                                            KitTemplates::default()
                                         }
-                                    }
+                                    };
                                     index.add_kit_templates(&kit_templates.kits, &kit_templates.all);
                                     filtered = refilter(&index, kind, &filter, lens);
                                     inventory_dirty = true;
