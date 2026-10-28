@@ -76,6 +76,33 @@ pub(crate) struct WadStack {
     /// uncached cost was paid once per material slot, which is what made full-res "too slow" and got
     /// the resident tail wired into model loads instead. Cached, each texture is walked once.
     tex_cache: HashMap<u32, mercs2_formats::texture::TextureData>,
+    /// The game's other WADs beside the base ([`side_wad_files`]), opened read-only. The game loads
+    /// each in its own slot, so they never shadow the stack: a source index `wads.len() + i` names
+    /// `side[i]`, and resolution reads them only after the stack.
+    pub side: Vec<wad::Wad>,
+    /// `side[i]`'s path.
+    pub side_labels: Vec<String>,
+    /// Every side WAD looked for and what became of it — what Settings' "What it opened" lists.
+    pub side_report: Vec<(String, SideWad)>,
+}
+
+/// What became of one side WAD ([`side_wad_files`]).
+pub(crate) enum SideWad {
+    /// Opened, from this path.
+    Opened(String),
+    /// No such file beside the base.
+    Absent,
+    /// Present but it would not open: the path and the error.
+    Unreadable(String),
+}
+
+/// The game's own WADs beside `vz.wad` that Inspect reads besides the stack: the shell and loading
+/// levels, then one per entry of the engine's language table (`.\Data\<token>.wad`,
+/// `mercs2_quartermaster::manifest::Language`).
+pub(crate) fn side_wad_files() -> Vec<String> {
+    let mut out = vec!["shell.wad".to_string(), "Loading.wad".to_string()];
+    out.extend(mercs2_quartermaster::manifest::Language::ALL.iter().map(|l| format!("{}.wad", l.token())));
+    out
 }
 
 impl WadStack {
@@ -92,24 +119,77 @@ impl WadStack {
                 Err(e) => eprintln!("[workshop] overlay {o}: {e} (skipped)"),
             }
         }
-        Ok(WadStack { wads, labels, registry: Default::default(), tex_cache: HashMap::new() })
+        let mut side = Vec::new();
+        let mut side_labels = Vec::new();
+        let mut side_report = Vec::new();
+        for file in side_wad_files() {
+            let found = match mercs2_quartermaster::sound::sibling_wad(std::path::Path::new(base), &file) {
+                Ok(p) => p,
+                Err(_) => {
+                    side_report.push((file, SideWad::Absent));
+                    continue;
+                }
+            };
+            let path = found.to_string_lossy().into_owned();
+            match wad::open(&path) {
+                Ok(w) => {
+                    side.push(w);
+                    side_labels.push(path.clone());
+                    side_report.push((file, SideWad::Opened(path)));
+                }
+                Err(e) => side_report.push((file, SideWad::Unreadable(format!("{path}: {e}")))),
+            }
+        }
+        Ok(WadStack { wads, labels, registry: Default::default(), tex_cache: HashMap::new(), side, side_labels, side_report })
     }
 
     /// No archive open: the window's state before a boot brings one in.
     pub fn empty() -> WadStack {
-        WadStack { wads: Vec::new(), labels: Vec::new(), registry: Default::default(), tex_cache: HashMap::new() }
+        WadStack {
+            wads: Vec::new(),
+            labels: Vec::new(),
+            registry: Default::default(),
+            tex_cache: HashMap::new(),
+            side: Vec::new(),
+            side_labels: Vec::new(),
+            side_report: Vec::new(),
+        }
     }
 
-    /// Short display tag for an asset's source wad (base = "", overlays = "+<file stem>").
+    /// Short display tag for an asset's source wad: base = "", an overlay = "+<file stem>", a side
+    /// WAD = " · <file stem>".
     pub fn tag(&self, src: usize) -> String {
         if src == 0 {
             return String::new();
         }
-        let stem = std::path::Path::new(&self.labels[src])
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("overlay");
-        format!("+{stem}")
+        let stem = |p: &str| {
+            std::path::Path::new(p).file_stem().and_then(|s| s.to_str()).unwrap_or("wad").to_string()
+        };
+        match self.labels.get(src) {
+            Some(l) => format!("+{}", stem(l)),
+            None => match self.side_labels.get(src - self.labels.len()) {
+                Some(l) => format!(" · {}", stem(l)),
+                None => format!(" · source {src}"),
+            },
+        }
+    }
+
+    /// The path of source `src` (a stack WAD, then the side WADs).
+    pub fn source_path(&self, src: usize) -> &str {
+        self.labels
+            .get(src)
+            .or_else(|| self.side_labels.get(src.wrapping_sub(self.labels.len())))
+            .map_or("", String::as_str)
+    }
+
+    /// Source `src`'s WAD (a stack WAD, then the side WADs).
+    pub fn source_mut(&mut self, src: usize) -> Option<&mut wad::Wad> {
+        let n = self.wads.len();
+        if src < n {
+            self.wads.get_mut(src)
+        } else {
+            self.side.get_mut(src - n)
+        }
     }
 
     /// Model container by hash, resolved through the engine's residency registry — the owning block
@@ -187,12 +267,20 @@ impl WadStack {
             .ok_or_else(|| "no worldentity chunk in any open wad".to_string())
     }
 
+    /// Every source in resolution order: the stack last-opened first, then the side WADs.
+    pub fn resolution_order(&self) -> Vec<usize> {
+        let n = self.wads.len();
+        (0..n).rev().chain(n..n + self.side.len()).collect()
+    }
+
     /// The raw containers of a model's LOD-block chain (coarsest first), from the first open wad that
-    /// carries it, overlays first — the same resolution as [`Self::model`], whose rungs they are.
+    /// carries it ([`Self::resolution_order`]) — the same resolution as [`Self::model`], whose rungs
+    /// they are.
     pub fn model_lods(&mut self, hash: u32) -> Result<Vec<wad::ModelLod>, String> {
         let mut last = format!("0x{hash:08X}: no model chunk in any open wad");
-        for i in (0..self.wads.len()).rev() {
-            match wad::extract_model_lods(&mut self.wads[i], hash) {
+        for src in self.resolution_order() {
+            let Some(w) = self.source_mut(src) else { continue };
+            match wad::extract_model_lods(w, hash) {
                 Ok(l) => return Ok(l),
                 Err(e) => last = e,
             }
@@ -200,11 +288,13 @@ impl WadStack {
         Err(last)
     }
 
-    /// The assembled model — LOD-block chain joined through the resident block. Overlays first.
+    /// The assembled model — LOD-block chain joined through the resident block, from the first
+    /// open wad that carries it ([`Self::resolution_order`]).
     pub fn model(&mut self, hash: u32) -> Result<mercs2_engine::model::Model, String> {
         let mut last = format!("0x{hash:08X}: no model chunk in any open wad");
-        for i in (0..self.wads.len()).rev() {
-            match mercs2_engine::model::Model::load(&mut self.wads[i], hash) {
+        for src in self.resolution_order() {
+            let Some(w) = self.source_mut(src) else { continue };
+            match mercs2_engine::model::Model::load(w, hash) {
                 Ok(m) => return Ok(m),
                 Err(e) => last = e,
             }
@@ -234,9 +324,9 @@ impl WadStack {
             return Ok(t.clone());
         }
         let mut last = format!("0x{hash:08X}: not in any open wad");
-        for i in (0..self.wads.len()).rev() {
-            let w = &mut self.wads[i];
-            match wad::extract_texture_hires(w, hash).or_else(|_| wad::extract_texture(w, hash)) {
+        // The stack last-opened first, then the side WADs (a texture only `shell.wad` ships).
+        for src in self.resolution_order() {
+            match self.texture_from(src, hash) {
                 Ok(t) => {
                     self.tex_cache.insert(hash, t.clone());
                     return Ok(t);
@@ -245,6 +335,13 @@ impl WadStack {
             }
         }
         Err(last)
+    }
+
+    /// The texture `hash` at full streamed resolution from source `src` alone — the copy one WAD
+    /// holds, for comparing it with another WAD's.
+    pub fn texture_from(&mut self, src: usize, hash: u32) -> Result<mercs2_formats::texture::TextureData, String> {
+        let w = self.source_mut(src).ok_or_else(|| format!("no source {src}"))?;
+        wad::extract_texture_hires(w, hash).or_else(|_| wad::extract_texture(w, hash))
     }
 
     /// Generic rig-matched clips: first wad (reverse order) whose animgroups drive this rig.
@@ -429,6 +526,34 @@ struct TexView {
     idx: usize,
     /// Dims/format of the currently bound plate (for the caption).
     info: String,
+    /// A single catalog row's texture: every source holding it (the row's own first), whether each
+    /// copy's bytes differ from the first's, and the source shown. Empty for a model's texture list,
+    /// which resolves each texture through the stack.
+    copies: Vec<(usize, bool)>,
+    src: Option<usize>,
+}
+
+impl TexView {
+    /// A model's textures, each resolved through the stack.
+    fn of_list(hashes: Vec<u32>, labels: Vec<String>) -> TexView {
+        TexView { hashes, labels, idx: 0, info: String::new(), copies: Vec::new(), src: None }
+    }
+}
+
+/// Every source of a texture row (`src` first, then `others`), each with whether its copy differs
+/// from `src`'s — compared on the decoded texture, so two byte-identical copies in different WADs
+/// read the same.
+fn texture_copies(w: &mut WadStack, hash: u32, src: usize, others: &[usize]) -> Vec<(usize, bool)> {
+    let first = w.texture_from(src, hash).ok();
+    let mut out = vec![(src, false)];
+    for &o in others {
+        let differs = match (&first, w.texture_from(o, hash)) {
+            (Some(a), Ok(b)) => a.mip0 != b.mip0 || a.width != b.width || a.height != b.height || a.format != b.format,
+            _ => true,
+        };
+        out.push((o, differs));
+    }
+    out
 }
 
 /// One user intention, queued from EITHER a keyboard shortcut or an inspector-GUI widget and
@@ -506,8 +631,8 @@ enum Act {
     PlayPause,
     GroupToggle(usize),
     /// "Start a Shipment from this…": a new Shipment in a picked folder, holding this asset's first
-    /// route (`quartermaster::first_route`). `.2` = the asset is a texture.
-    StartShipment(u32, String, bool),
+    /// route (`quartermaster::first_route`): the asset's label and what it is.
+    StartShipment(String, crate::quartermaster::Subject),
     /// Open the Export dialog for a model (the menu's "Export…", or F10 on the loaded one).
     OpenExport(u32, String),
     /// The Export dialog's "Choose…": pick the folder it writes into.
@@ -529,6 +654,8 @@ enum Act {
     ToggleRuin,
     TexOfPreview,
     TexNav(i32),
+    /// Show the plate's copy from this source (a texture more than one WAD holds).
+    TexSource(usize),
     TexClose,
     /// Open a decompiled game script (corpus path) in the read-only Lua viewer.
     LuaOpen(String),
@@ -799,21 +926,34 @@ const SHORTCUTS: &[(&str, &str)] = &[
 ///
 /// Export stays: it is asset extraction and independently useful. It is just no longer the only
 /// thing you can do with an asset.
+///
+/// What it offers follows the asset ([`crate::quartermaster::Subject`]): a model's load, export and
+/// benches, a texture's plate, or — for every other kind — `preview`, the row's own click. The
+/// Shipment routes are the kinds that take that subject; a subject no kind takes offers none.
 fn asset_menu(
     ui: &mut egui::Ui,
     hash: u32,
     label: &str,
-    is_texture: bool,
+    subject: crate::quartermaster::Subject,
+    preview: Option<Act>,
     actions: &mut Vec<Act>,
 ) {
     use crate::gui::theme;
+    use crate::quartermaster::Subject;
     ui.label(theme::disp_text(label.to_uppercase(), theme::style_eyebrow(), theme::BRASS));
     ui.separator();
 
-    if is_texture {
-        if ui.button("View plate").clicked() {
+    if subject == Subject::Texture {
+        if ui.add(egui::Button::new("View plate").shortcut_text("Enter")).clicked() {
             actions.push(Act::LoadTexture(hash, label.to_string()));
             ui.close_menu();
+        }
+    } else if !matches!(subject, Subject::Model { .. }) {
+        if let Some(p) = preview {
+            if ui.add(egui::Button::new("Preview").shortcut_text("Enter")).clicked() {
+                actions.push(p);
+                ui.close_menu();
+            }
         }
     } else {
         if ui.add(egui::Button::new("Load in viewport").shortcut_text("Enter")).clicked() {
@@ -846,20 +986,22 @@ fn asset_menu(
 
     // The routing that did not exist. A shipped asset becomes a DONOR or a TARGET — never the
     // thing written — so no entry here can produce a destructive contribution.
-    ui.menu_button("Add to Shipment", |ui| {
-        for (kind, what) in crate::quartermaster::routes_for(is_texture) {
-            if ui.button(*what).clicked() {
-                actions.push(Act::AddToShipment(kind, hash, label.to_string()));
-                ui.close_menu();
+    let routes = crate::quartermaster::routes_for(subject);
+    if !routes.is_empty() {
+        ui.menu_button("Add to Shipment", |ui| {
+            for (kind, what) in routes {
+                if ui.button(*what).clicked() {
+                    actions.push(Act::AddToShipment(kind, hash, label.to_string()));
+                    ui.close_menu();
+                }
             }
+        });
+        if ui.button("Start a Shipment from this\u{2026}").clicked() {
+            actions.push(Act::StartShipment(label.to_string(), subject));
+            ui.close_menu();
         }
-    });
-    if ui.button("Start a Shipment from this\u{2026}").clicked() {
-        actions.push(Act::StartShipment(hash, label.to_string(), is_texture));
-        ui.close_menu();
+        ui.separator();
     }
-
-    ui.separator();
     if ui.button("Copy name").clicked() {
         ui.ctx().copy_text(label.to_string());
         ui.close_menu();
@@ -874,6 +1016,31 @@ fn asset_menu(
         ui.ctx().copy_text(label.to_string());
         ui.close_menu();
     }
+}
+
+/// What a catalog row of `kind` is, for routing it into a Shipment ([`asset_menu`]).
+fn subject_of(kind: Kind, r: &crate::index::AssetRow) -> crate::quartermaster::Subject {
+    use crate::quartermaster::Subject;
+    use mercs2_formats::types::{TYPE_ID_EFFECT, TYPE_ID_STRINGDB};
+    match kind {
+        Kind::Model => Subject::Model { character: r.category() == "Character" },
+        Kind::Texture => Subject::Texture,
+        Kind::Animation => Subject::Animation,
+        Kind::Effect if r.type_id == TYPE_ID_EFFECT => Subject::Effect,
+        Kind::Text if r.type_id == TYPE_ID_STRINGDB => Subject::StringTable,
+        _ => Subject::Other,
+    }
+}
+
+/// The subject of the model row `label` of `hash` (a kit-template row shares its kit's hash, so the
+/// label picks it out).
+fn model_subject(index: &AssetIndex, hash: u32, label: &str) -> crate::quartermaster::Subject {
+    let character = index
+        .models()
+        .iter()
+        .find(|r| r.hash == hash && r.label() == label)
+        .is_some_and(|r| r.category() == "Character");
+    crate::quartermaster::Subject::Model { character }
 }
 
 /// The context menu for a world-state LAYER — the World domain's second subject.
@@ -1074,7 +1241,7 @@ struct Archive {
 fn open_archive(wadpath: &str, overlays: &[String]) -> Result<Archive, String> {
     let mut w = WadStack::open(wadpath, overlays).map_err(|e| format!("cannot open {wadpath}: {e}"))?;
     // The catalog builds here (hashes only); names land later through `apply_names`.
-    let mut index = AssetIndex::build(&w.wads, HashMap::new());
+    let mut index = AssetIndex::build(&w.wads, &w.side, HashMap::new());
     // The world's templates: each spawn template that picks a character-kit outfit gets its own
     // catalog row ("Jungle Elite", "VZ Sniper", …). Required — the catalog is wrong without them.
     let kit_templates = load_kit_templates(&mut w)
@@ -1271,7 +1438,7 @@ pub fn run(opts: Options) {
     // The archive-bound state, empty until the archive is open (`Boot::Archive` fills it).
     let mut clip_loader = ClipLoader::spawn(String::new(), Vec::new());
     let mut w = WadStack::empty();
-    let mut index = AssetIndex::build(&[], HashMap::new());
+    let mut index = AssetIndex::build(&[], &[], HashMap::new());
     let mut anim_sel: Option<AnimSelector> = None;
     // The game's own shell plate (shell.wad) as the workshop backdrop — the browse screen renders
     // through the engine's menu path over it until something is loaded into the 3D viewport.
@@ -1773,7 +1940,7 @@ pub fn run(opts: Options) {
                             vo_player = None;
                             vo_error = None;
                             w = WadStack::empty();
-                            index = AssetIndex::build(&[], HashMap::new());
+                            index = AssetIndex::build(&[], &[], HashMap::new());
                             anim_sel = None;
                             clip_loader = ClipLoader::spawn(String::new(), Vec::new());
                             shell_plate = None;
@@ -1917,7 +2084,7 @@ pub fn run(opts: Options) {
                                 // What the failed boot half-loaded goes with it.
                                 if which == Which::Game {
                                     w = WadStack::empty();
-                                    index = AssetIndex::build(&[], HashMap::new());
+                                    index = AssetIndex::build(&[], &[], HashMap::new());
                                     wadpath.clear();
                                     overlays.clear();
                                     qm_stack.clear();
@@ -2037,7 +2204,7 @@ pub fn run(opts: Options) {
                                         w.wads.push(nw);
                                         w.labels.push(path_str);
                                         let names = std::mem::take(&mut index.names);
-                                        index = AssetIndex::build(&w.wads, names);
+                                        index = AssetIndex::build(&w.wads, &w.side, names);
                                         // The new overlay may carry its own worldentity.
                                         let kit_templates = match load_kit_templates(&mut w) {
                                             Ok(t) => t,
@@ -2879,7 +3046,9 @@ pub fn run(opts: Options) {
                                         let r = &index.rows(kind)[filtered[vi]];
                                         let (hash, label) = (r.hash, r.label());
                                         let cat = if kind == Kind::Model { r.category() } else { "" };
-                                        let mark = if r.src > 0 { "+ " } else { "" };
+                                        // `+ ` marks an overlay's row; a side WAD's names its WAD after.
+                                        let side = r.src >= w.wads.len();
+                                        let mark = if r.src > 0 && !side { "+ " } else { "" };
                                         let row = ui
                                             .horizontal(|ui| {
                                                 if kind == Kind::Model {
@@ -2887,10 +3056,17 @@ pub fn run(opts: Options) {
                                                     row_icon(ui, cat, 15.0);
                                                     ui.add_space(5.0);
                                                 }
-                                                ui.selectable_label(
-                                                    vi == sel,
-                                                    format!("{mark}{label}"),
-                                                )
+                                                let mut text = egui::text::LayoutJob::default();
+                                                let body = egui::TextFormat {
+                                                    font_id: egui::TextStyle::Body.resolve(ui.style()),
+                                                    color: ui.visuals().text_color(),
+                                                    ..Default::default()
+                                                };
+                                                text.append(&format!("{mark}{label}"), 0.0, body.clone());
+                                                if side {
+                                                    text.append(&w.tag(r.src), 0.0, egui::TextFormat { color: theme::FAINT, ..body });
+                                                }
+                                                ui.selectable_label(vi == sel, text)
                                             })
                                             .inner;
                                         if row.clicked() {
@@ -2910,7 +3086,8 @@ pub fn run(opts: Options) {
                                                 ui,
                                                 hash,
                                                 &label,
-                                                kind == Kind::Texture,
+                                                subject_of(kind, r),
+                                                Some(Act::LoadRow(vi)),
                                                 &mut actions,
                                             );
                                         });
@@ -3090,7 +3267,7 @@ pub fn run(opts: Options) {
                                             // Route an asset into a Shipment or a bench — the same menu
                                             // the Library uses, so the two cannot drift.
                                             resp.context_menu(|ui| {
-                                                asset_menu(ui, r.hash, &r.label(), false, &mut actions);
+                                                asset_menu(ui, r.hash, &r.label(), subject_of(Kind::Model, r), None, &mut actions);
                                             });
                                         }
                                     });
@@ -3253,7 +3430,7 @@ pub fn run(opts: Options) {
                                             // The SAME menu as the browser row. These were two
                                             // copies: this one offered only OBJ export, and neither
                                             // had been revisited since before Shipments existed.
-                                            asset_menu(ui, phash, &plabel, false, &mut actions);
+                                            asset_menu(ui, phash, &plabel, model_subject(&index, phash, &plabel), None, &mut actions);
                                         });
                                         theme::section(ui, "Info", None, true, |ui| {
                                                 theme::kv(ui, "verts / tris", egui::RichText::new(format!("{} / {}", p.verts, p.tris)));
@@ -4597,26 +4774,35 @@ pub fn run(opts: Options) {
                                                                     .map(|n| n.to_string_lossy().into_owned())
                                                                     .unwrap_or_else(|| p.to_string())
                                                             };
-                                                            let mut rows: Vec<(&'static str, String)> = vec![("base", name(&wadpath))];
+                                                            let mut rows: Vec<(&'static str, String, bool)> = vec![("base", name(&wadpath), false)];
                                                             if overlays.is_empty() {
-                                                                rows.push(("overlay", "none".into()));
+                                                                rows.push(("overlay", "none".into(), false));
                                                             }
                                                             for o in &overlays {
                                                                 let how = if std::path::Path::new(o) == auto_patch_path { "found beside it" } else { "--overlay" };
-                                                                rows.push(("overlay", format!("{} · {how}", name(o))));
+                                                                rows.push(("overlay", format!("{} · {how}", name(o)), false));
+                                                            }
+                                                            // The game's other WADs, read for Inspect beside the stack.
+                                                            for (file, got) in &w.side_report {
+                                                                rows.push(match got {
+                                                                    SideWad::Opened(p) => ("also read", name(p), false),
+                                                                    SideWad::Absent => ("also read", format!("{file} · not present"), false),
+                                                                    SideWad::Unreadable(e) => ("also read", format!("{file} · unreadable: {e}"), true),
+                                                                });
                                                             }
                                                             rows.push((
                                                                 "catalog",
                                                                 format!("{} models · {} textures", commafy(index.models().len()), commafy(index.textures().len())),
+                                                                false,
                                                             ));
                                                             (rows, Some(format!("{} models", commafy(index.models().len()))))
                                                         }
                                                         Which::Data => match &loaded_data {
                                                             Some(h) => (
                                                                 vec![
-                                                                    ("bundle", h.display().to_string()),
-                                                                    ("names", commafy(index.names.len())),
-                                                                    ("Lua scripts", commafy(lua_corpus.len())),
+                                                                    ("bundle", h.display().to_string(), false),
+                                                                    ("names", commafy(index.names.len()), false),
+                                                                    ("Lua scripts", commafy(lua_corpus.len()), false),
                                                                 ],
                                                                 Some(format!("{} names", commafy(index.names.len()))),
                                                             ),
@@ -4986,6 +5172,22 @@ pub fn run(opts: Options) {
                                         tv.hashes.len(),
                                         tv.info
                                     ));
+                                    // A texture more than one WAD holds: every copy, the one shown
+                                    // marked, a copy whose bytes differ from the first said so.
+                                    if tv.copies.len() > 1 {
+                                        ui.horizontal_wrapped(|ui| {
+                                            ui.label(egui::RichText::new("copies").color(theme::FAINT));
+                                            for &(s, differs) in &tv.copies {
+                                                let file = std::path::Path::new(w.source_path(s))
+                                                    .file_name()
+                                                    .map_or_else(|| format!("source {s}"), |f| f.to_string_lossy().into_owned());
+                                                let text = if differs { format!("{file} \u{b7} differs") } else { file };
+                                                if ui.selectable_label(tv.src == Some(s), text).clicked() {
+                                                    actions.push(Act::TexSource(s));
+                                                }
+                                            }
+                                        });
+                                    }
                                     ui.horizontal(|ui| {
                                         if ui.button("◀ prev").clicked() {
                                             actions.push(Act::TexNav(-1));
@@ -5735,7 +5937,7 @@ pub fn run(opts: Options) {
                                                     "loaded {} [blk {}{}] in {:.2}s",
                                                     p.label,
                                                     row.block,
-                                                    if row.src > 0 { " overlay" } else { "" },
+                                                    w.tag(row.src),
                                                     t0.elapsed().as_secs_f32()
                                                 );
                                                 sel_bone = None; // bone indices belong to the old rig
@@ -5745,11 +5947,11 @@ pub fn run(opts: Options) {
                                         }
                                     }
                                     Kind::Texture => {
+                                        let copies = texture_copies(&mut w, row.hash, row.src, &row.others);
                                         let mut tv = TexView {
-                                            hashes: vec![row.hash],
-                                            labels: vec![row.label()],
-                                            idx: 0,
-                                            info: String::new(),
+                                            copies,
+                                            src: Some(row.src),
+                                            ..TexView::of_list(vec![row.hash], vec![row.label()])
                                         };
                                         bind_tex_plate(&mut w, &mut scene, &mut tv);
                                         tex_view = Some(tv);
@@ -5892,21 +6094,18 @@ pub fn run(opts: Options) {
                                     }
                                 }
                             }
-                            Act::StartShipment(hash, label, is_texture) => {
+                            Act::StartShipment(label, subject) => {
+                                // The menu offers this only for a subject some kind takes.
+                                let Some(kind) = crate::quartermaster::first_route(subject) else {
+                                    status = format!("START A SHIPMENT FAILED: no kind takes {label}");
+                                    continue;
+                                };
                                 let Some(dir) = rfd::FileDialog::new()
                                     .set_title("New Shipment — pick an empty folder")
                                     .pick_folder()
                                 else {
                                     continue;
                                 };
-                                // The row this menu belongs to: a kit-template row shares its kit's
-                                // hash, so the label picks it out.
-                                let is_character = index
-                                    .models()
-                                    .iter()
-                                    .find(|r| r.hash == hash && r.label() == label)
-                                    .is_some_and(|r| r.category() == "Character");
-                                let kind = crate::quartermaster::first_route(is_texture, is_character);
                                 match qm.start_from(&dir, qm_names.as_ref(), kind, &label) {
                                     Ok(at) => {
                                         wb = Workbench::Quartermaster;
@@ -6027,12 +6226,16 @@ pub fn run(opts: Options) {
                                 status = format!("{} — donor {label}", wb.verb());
                             }
                             Act::LoadTexture(hash, label) => {
-                                tex_view = Some(TexView {
-                                    hashes: vec![hash],
-                                    labels: vec![label.clone()],
-                                    idx: 0,
-                                    info: String::new(),
-                                });
+                                // The plate is bound here: an unbound view showed the previous
+                                // plate (or the shell art) under this texture's caption.
+                                let row = index.textures().iter().find(|r| r.hash == hash).cloned();
+                                let mut tv = TexView::of_list(vec![hash], vec![label.clone()]);
+                                if let Some(r) = row {
+                                    tv.copies = texture_copies(&mut w, hash, r.src, &r.others);
+                                    tv.src = Some(r.src);
+                                }
+                                bind_tex_plate(&mut w, &mut scene, &mut tv);
+                                tex_view = Some(tv);
                                 status = format!("texture {label}");
                             }
                             Act::IsolateGroup(gi) => {
@@ -6201,16 +6404,10 @@ pub fn run(opts: Options) {
                             Act::TexOfPreview => {
                                 if let Some(p) = &preview {
                                     if !p.tex_hashes.is_empty() {
-                                        let mut tv = TexView {
-                                            hashes: p.tex_hashes.clone(),
-                                            labels: p
-                                                .tex_hashes
-                                                .iter()
-                                                .map(|h| name_or_hash(&index, *h))
-                                                .collect(),
-                                            idx: 0,
-                                            info: String::new(),
-                                        };
+                                        let mut tv = TexView::of_list(
+                                            p.tex_hashes.clone(),
+                                            p.tex_hashes.iter().map(|h| name_or_hash(&index, *h)).collect(),
+                                        );
                                         bind_tex_plate(&mut w, &mut scene, &mut tv);
                                         tex_view = Some(tv);
                                     }
@@ -6220,6 +6417,12 @@ pub fn run(opts: Options) {
                                 if let Some(tv) = &mut tex_view {
                                     let n = tv.hashes.len() as i32;
                                     tv.idx = (tv.idx as i32 + d).rem_euclid(n) as usize;
+                                    bind_tex_plate(&mut w, &mut scene, tv);
+                                }
+                            }
+                            Act::TexSource(s) => {
+                                if let Some(tv) = &mut tex_view {
+                                    tv.src = Some(s);
                                     bind_tex_plate(&mut w, &mut scene, tv);
                                 }
                             }
@@ -6306,7 +6509,7 @@ pub fn run(opts: Options) {
                                     w.wads.remove(i);
                                     w.labels.remove(i);
                                     let names = std::mem::take(&mut index.names);
-                                    index = AssetIndex::build(&w.wads, names);
+                                    index = AssetIndex::build(&w.wads, &w.side, names);
                                     // The dropped overlay may have carried the worldentity in use.
                                     let kit_templates = match load_kit_templates(&mut w) {
                                         Ok(t) => t,
@@ -6920,7 +7123,11 @@ fn procedural_clip_name(
 /// engine's letterboxed plate; records dims/format into the caption.
 fn bind_tex_plate(w: &mut WadStack, scene: &mut Scene, tv: &mut TexView) {
     let h = tv.hashes[tv.idx];
-    match w.texture_best(h) {
+    let got = match tv.src {
+        Some(s) => w.texture_from(s, h),
+        None => w.texture_best(h),
+    };
+    match got {
         Ok(td) => {
             tv.info = format!("{}x{}  {:?}  {} mips", td.width, td.height, td.format, td.mip_count);
             scene.set_loading_art(&td);
@@ -8478,7 +8685,7 @@ mod rail_tests {
     }
 
     fn row(name: &str) -> AssetRow {
-        AssetRow { hash: 0, block: 0, src: 0, name: Some(name.to_string()), template: None, faction: None }
+        AssetRow { hash: 0, type_id: 0, block: 0, src: 0, others: Vec::new(), name: Some(name.to_string()), template: None, faction: None }
     }
 
     /// A Lens pill's count is the number of rows the list shows under it, and the Lenses never
@@ -8566,6 +8773,32 @@ mod inspect_tests {
     use super::*;
     use crate::domain::Domain;
 
+    /// A row's menu follows what the row is: a font, a UI movie, a FaceFX asset and the fxdict take
+    /// no Shipment route; a string table, an effect and a clip take theirs.
+    #[test]
+    fn a_rows_subject_follows_its_kind_and_type() {
+        use crate::quartermaster::Subject;
+        use mercs2_formats::types::*;
+        let row = |type_id: u32| crate::index::AssetRow {
+            hash: 1,
+            type_id,
+            block: 0,
+            src: 0,
+            others: Vec::new(),
+            name: Some("x".into()),
+            template: None,
+            faction: None,
+        };
+        assert_eq!(subject_of(Kind::Text, &row(TYPE_ID_STRINGDB)), Subject::StringTable);
+        assert_eq!(subject_of(Kind::Text, &row(TYPE_ID_FONT)), Subject::Other);
+        assert_eq!(subject_of(Kind::Effect, &row(TYPE_ID_EFFECT)), Subject::Effect);
+        assert_eq!(subject_of(Kind::Effect, &row(TYPE_ID_FX_DICTIONARY)), Subject::Other);
+        assert_eq!(subject_of(Kind::Animation, &row(TYPE_ID_ANIMATION)), Subject::Animation);
+        assert_eq!(subject_of(Kind::UiGfx, &row(TYPE_ID_CFX_PACK)), Subject::Other);
+        assert_eq!(subject_of(Kind::FaceFx, &row(5)), Subject::Other);
+        assert_eq!(subject_of(Kind::Texture, &row(TYPE_ID_TEXTURE)), Subject::Texture);
+    }
+
     #[test]
     fn the_crumb_names_the_tab_the_lens_and_the_loaded_model() {
         assert_eq!(inspect_crumb(Kind::Model, None, None), ["Models"]);
@@ -8628,6 +8861,52 @@ pub(crate) fn retail_vz_wad() -> String {
 }
 
 #[cfg(all(test, feature = "retail"))]
+mod side_wad_retail_tests {
+    use super::{AssetIndex, SideWad, WadStack};
+    use crate::index::Kind;
+
+    /// Inspect reads the game's other WADs beside the stack: the shell's UI movies and a language
+    /// WAD's string table are rows, named by the WAD they come from, and every side WAD of the
+    /// retail install opened.
+    #[test]
+    fn the_catalog_holds_the_shell_movies_and_a_languages_string_table() {
+        let w = WadStack::open(&super::retail_vz_wad(), &[]).expect("open retail vz.wad");
+        for (file, got) in &w.side_report {
+            assert!(!matches!(got, SideWad::Unreadable(_)), "{file} did not open");
+        }
+        let index = AssetIndex::build(&w.wads, &w.side, std::collections::HashMap::new());
+        let is = |src: usize, file: &str| {
+            std::path::Path::new(w.source_path(src))
+                .file_name()
+                .is_some_and(|n| n.to_string_lossy().eq_ignore_ascii_case(file))
+        };
+        assert!(index.rows(Kind::UiGfx).iter().any(|r| is(r.src, "shell.wad")), "no UI movie from shell.wad");
+        // `french` ships in shell.wad and French.wad: one row, previewing the first side WAD's copy
+        // (shell.wad opens first) and naming French.wad as another source.
+        let french = mercs2_formats::hash::pandemic_hash_m2("french");
+        let row = index.rows(Kind::Text).iter().find(|r| r.hash == french).expect("no `french` string table");
+        assert!(is(row.src, "shell.wad"), "`french` previews from {}", w.source_path(row.src));
+        assert!(row.others.iter().any(|&s| is(s, "french.wad")), "`french` does not name French.wad");
+    }
+
+    /// A texture vz.wad and shell.wad both ship (`_shell_font_glyphs_f0`, IDENTICAL in
+    /// `docs/fixpack/wad_duplicate_inventory.md`) lists both copies, previews vz.wad's, reads the
+    /// same from either, and is not marked as differing.
+    #[test]
+    fn a_texture_in_two_wads_offers_both_copies() {
+        let mut w = WadStack::open(&super::retail_vz_wad(), &[]).expect("open retail vz.wad");
+        let index = AssetIndex::build(&w.wads, &w.side, std::collections::HashMap::new());
+        let hash = mercs2_formats::hash::pandemic_hash_m2("_shell_font_glyphs_f0");
+        let row = index.textures().iter().find(|r| r.hash == hash).expect("no _shell_font_glyphs_f0 row").clone();
+        assert_eq!(row.src, 0, "previews from {}", w.source_path(row.src));
+        let copies = super::texture_copies(&mut w, hash, row.src, &row.others);
+        assert!(copies.len() >= 2, "{copies:?}");
+        assert!(copies.iter().any(|&(s, _)| w.source_path(s).to_ascii_lowercase().ends_with("shell.wad")));
+        assert!(copies.iter().all(|&(_, differs)| !differs), "{copies:?}");
+    }
+}
+
+#[cfg(all(test, feature = "retail"))]
 mod export_retail_tests {
     use super::{export_bundle_by_hash, AssetIndex, WadStack};
 
@@ -8636,7 +8915,7 @@ mod export_retail_tests {
     fn a_bundle_export_lands_under_the_chosen_folder_and_name() {
         let wad = super::retail_vz_wad();
         let w = WadStack::open(&wad, &[]).expect("open retail vz.wad");
-        let index = AssetIndex::build(&w.wads, std::collections::HashMap::new());
+        let index = AssetIndex::build(&w.wads, &w.side, std::collections::HashMap::new());
         let out = std::env::temp_dir().join("m2ws_export_bundle");
         let _ = std::fs::remove_dir_all(&out);
         let name = "global_weapon_aarocket";
