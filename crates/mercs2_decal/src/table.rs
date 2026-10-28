@@ -13,7 +13,7 @@
 //! data, not statically recovered. This module therefore models the table as **loadable data +
 //! lookup**: the recovered *layout* (the four field columns) and the recovered *category set* are
 //! encoded; the numbers are fields a loader fills. `DecalTable::stock()` seeds the recovered
-//! categories with neutral, clearly-marked placeholder parameters so the mechanism is exercisable —
+//! categories with per-category look-tuning parameters (`DecalDef::for_category`) so the mechanism is exercisable —
 //! it does **not** claim those numbers are the retail values.
 
 use mercs2_formats::hash::pandemic_hash_m2;
