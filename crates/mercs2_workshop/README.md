@@ -190,9 +190,10 @@ Steps 1–3 are set by a person: one that is not a complete bundle is an error n
 over for a later step. When nothing is set and nothing is found, the workshop downloads the pinned
 `mercs2-workshop-data.zip` and installs it as step 6 (`index::require_data_home`); the Settings
 page's Download button runs the same install. The
-pin is `fetch::PINNED`, read at compile time from the `BUNDLE_URL` and `BUNDLE_SHA256` lines of
-`.github/workflows/ci.yml` — the bundle CI downloads for the corpus gates — so moving the pin is an
-edit to those two lines alone. A workflow without exactly one of each line, a URL other than
+pin is `fetch::PINNED`, read at compile time from the `BUNDLE_URL=` and `BUNDLE_SHA256=` lines of
+`data/workshop_data_pin.env`. `.github/workflows/ci.yml` sources the same file to download the
+bundle for the corpus gates, so moving the pin is an edit to those two lines alone. A pin file
+without exactly one of each line, a URL other than
 `https://github.com/Mercenaries-Fan-Build/mercs2-wad-simulator/releases/download/<tag>/mercs2-workshop-data.zip`,
 or a digest other than 64 lowercase hex digits stops the build. The install downloads that URL and
 nothing else, and checks the archive's sha256 against `BUNDLE_SHA256` before unpacking; a mismatch
