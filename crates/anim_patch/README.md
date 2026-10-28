@@ -35,7 +35,8 @@ Modes:
 `--roundtrip` is mutually exclusive with `--freeze` and `--replace-clip`, and one of `--roundtrip` /
 `--freeze` / `--replace-clip` / `--assetcc` (or `--list`/`--dump`) is required.
 Output goes to `--out` (default `crates/anim_patch/out/vz-patch.wad`); the game's real
-`data/vz-patch.wad` is only written when `--deploy` is passed.
+`data/vz-patch.wad` is only written when `--deploy` is passed. `--deploy` and `--out` together are
+refused.
 
 ## Where it comes from
 
@@ -103,4 +104,7 @@ cargo run -p anim_patch -- --clip 0x24F8C8E6 --list
 * Every pack path re-decompresses the block it just compressed and asserts equality before writing;
   `sges` is lossless, so a mismatch means the pipeline is broken, not the data.
 * Registry discovery of `vz.wad` / `vz-patch.wad` is Windows-only; elsewhere, without `MERCS2_GAME_DIR`
-  / `VZ_WAD`, `--wad` is mandatory and `--deploy` requires an explicit `--out`.
+  / `VZ_WAD`, `--wad` is mandatory and `--deploy` fails (no install to deploy into).
+* `--deploy` and `--out` name two different destinations, so passing both is refused before anything is
+  read (`the argument '--deploy' cannot be used with '--out <OUT>'`). Use `--deploy` to write the
+  install's `data/vz-patch.wad`, or `--out` for any other path.
