@@ -2,7 +2,7 @@
 //!
 //! Milestone M3 of `docs/modernization/workshop_publish_pipeline.md`. Each new asset ships as
 //! its own single-entry block (`[u32 count=1][16-byte entry][UCFX]`) with an ASET row keyed by
-//! `pandemic_hash_m2(name)` — the cube_mod-proven shape; no retail-block surgery. The model
+//! `pandemic_hash_m2(name)` — the shape `mercs2_smuggler` builds; no retail-block surgery. The model
 //! container itself is built by `model_inject::inject_into_donor_block` (the CJ donor recipe:
 //! a real container the engine already accepts, geometry rebuilt, name re-stamped, CSUM
 //! recomputed — never a from-scratch UCFX, that's the sarah-hang).
@@ -196,7 +196,7 @@ fn publish(
         blocks.push(pb);
     }
 
-    // ── Assemble the patch WAD (CSUM value/meta mirrored from the base, like cube_mod). ──
+    // ── Assemble the patch WAD (CSUM value/meta mirrored from the base, like mercs2_smuggler). ──
     let (csum_value, csum_meta) = base_csum(&wad_paths[0])?;
 
     let wad_bytes = build_patch_wad_multi(&blocks, csum_value, csum_meta, &FFCS_CERT_BLOB)?;
