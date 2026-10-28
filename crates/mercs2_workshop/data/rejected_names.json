@@ -1,6 +1,9 @@
 {
-  "note": "Names harvested from block bytes (aset_block_strings.json) that hash to an asset and have an identifier's shape, but are collision debris. Every reader of the harvest drops these (hash, name) pairs. Each hash is pandemic_hash_m2 of its name.",
+  "note": "Names harvested from block bytes (aset_block_strings.json) that hash to an asset but are collision debris: ones with an identifier's shape, and ones the production table (production_names.json) took in before the harvest was filtered. Every reader of the harvest, and --pack-data's read of the production table, drops these (hash, name) pairs. Each hash is pandemic_hash_m2 of its name.",
   "pandemic_hash_m2": {
+    "0x845FF0E6": [
+      "j-cfe"
+    ],
     "0x862155E2": [
       "wxfm0u"
     ],
