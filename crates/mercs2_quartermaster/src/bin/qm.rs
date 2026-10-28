@@ -464,13 +464,7 @@ fn cmd_lint(
                 return ExitCode::from(EXIT_UNUSABLE);
             }
         }
-        match lint::placement_game_checks(&shipment.manifest, &shipment.root, &mut stack) {
-            Ok(d) => found.extend(d),
-            Err(e) => {
-                eprintln!("error: {e}");
-                return ExitCode::from(EXIT_UNUSABLE);
-            }
-        }
+        found.extend(lint::placement_game_checks(&shipment.manifest, &shipment.root, &mut stack));
         if mercs2_quartermaster::shader::has_shader_kinds(&shipment.manifest) {
             let Some(original) = original_data else {
                 eprintln!(
