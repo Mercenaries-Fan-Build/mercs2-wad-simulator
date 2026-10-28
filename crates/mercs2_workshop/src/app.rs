@@ -1739,7 +1739,7 @@ pub fn run(opts: Options) {
     // Remembered so a failed open (missing English.wad / .pws / device) is reported once, not per click.
     let mut vo_error: Option<String> = None;
     // In-flight reference-data download from the Settings button (which replaces the downloaded
-    // copy with the latest release's): the receiver while it runs, plus the latest progress line.
+    // copy with the pinned release's): the receiver while it runs, plus the latest progress line.
     // The automatic download when no bundle is found runs on the boot thread.
     let mut fetch_rx: Option<std::sync::mpsc::Receiver<crate::fetch::Event>> = None;
     let mut fetch_msg = String::new();
@@ -5219,7 +5219,7 @@ pub fn run(opts: Options) {
                                                                 );
                                                             }
                                                         }
-                                                        // Fetch the latest release's bundle into the download
+                                                        // Fetch the pinned release's bundle into the download
                                                         // cache (`fetch::installed_dir`), replacing the copy
                                                         // there. The boot thread runs the same install when
                                                         // nothing is set and nothing is found.
