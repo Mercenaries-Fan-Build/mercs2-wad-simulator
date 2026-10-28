@@ -1018,8 +1018,8 @@ pub enum Contribution {
     /// ⚠ **`name` cannot collide with a script name.** The registry is first-writer-wins on
     /// asset hash, so a name that already exists silently drops one of the two. M0197 refuses
     /// `qm_modloader`, `qm_shell_modloader` and the Shipment's own novel shop modules with no game,
-    /// and, with the game, a name a script row of the game stack or of a game WAD beside `vz.wad`
-    /// (`shell.wad`, `Loading.wad`, the language WADs) carries.
+    /// and, with the game, a name a script row of the game's own WADs carries: `vz.wad` and the
+    /// game WADs beside it (`shell.wad`, `Loading.wad`, the language WADs), never a `-patch.wad`.
     AddScript {
         /// The module name the engine `import`s. Bare, lowercase-ish, no extension, no path — see
         /// the doc comment on this variant.
