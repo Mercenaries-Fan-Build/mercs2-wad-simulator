@@ -7,11 +7,11 @@
 //! Download button runs the same install on request, replacing the downloaded copy with the
 //! pinned release's.
 //!
-//! The release is the one [`PINNED`] names: the bundle `.github/workflows/ci.yml` downloads for
-//! the corpus gates, read at compile time from that workflow's `BUNDLE_URL` and `BUNDLE_SHA256`.
-//! The install downloads exactly that URL and checks the archive's sha256 against
-//! `BUNDLE_SHA256` before unpacking anything; a mismatch is an error and leaves the installed
-//! copy as it was.
+//! The release is the one [`PINNED`] names, read at compile time from the `BUNDLE_URL` and
+//! `BUNDLE_SHA256` of `data/workshop_data_pin.env` — the file `.github/workflows/ci.yml` sources
+//! to download the bundle the corpus gates run over. The install downloads exactly that URL and
+//! checks the archive's sha256 against `BUNDLE_SHA256` before unpacking anything; a mismatch is
+//! an error and leaves the installed copy as it was.
 //!
 //! It installs into the user's cache directory, the last step of the
 //! [`crate::index::data_home`] chain: a bundle found at any earlier step is used ahead of the
@@ -21,7 +21,7 @@
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
-/// [`REPO`] as a literal, for the `concat!` in [`pin_from_workflow`]'s compile-time messages.
+/// [`REPO`] as a literal, for the `concat!` in [`pin_from_env`]'s compile-time messages.
 macro_rules! repo {
     () => {
         "Mercenaries-Fan-Build/mercs2-wad-simulator"
@@ -33,14 +33,21 @@ macro_rules! asset {
         "mercs2-workshop-data.zip"
     };
 }
+/// The pin file's path in the repo, for the same messages.
+macro_rules! pin_file {
+    () => {
+        "crates/mercs2_workshop/data/workshop_data_pin.env"
+    };
+}
 /// The repo publishing the release assets — the same one the modkit fetches `wad_simulator` from.
 const REPO: &str = repo!();
 /// The release asset built by the workflow's "Build workshop_data reference bundle" step.
 pub const ASSET: &str = asset!();
-/// The CI workflow. Its "Download the Workshop reference bundle (pinned)" step records the bundle
-/// the corpus gates run over (`index::PINNED_CORPUS` holds that bundle's script counts) as
-/// `BUNDLE_URL` and `BUNDLE_SHA256`; [`PINNED`] is read from those two lines.
-const CI_WORKFLOW: &str = include_str!("../../../.github/workflows/ci.yml");
+/// The pinned bundle as `BUNDLE_URL=` and `BUNDLE_SHA256=` lines. The CI workflow's "Download
+/// the Workshop reference bundle (pinned)" step sources this file to fetch the bundle the corpus
+/// gates run over (`index::PINNED_CORPUS` holds that bundle's script counts); [`PINNED`] is read
+/// from the same two lines. Inside the crate, so a packaged copy of the crate carries it.
+const PIN_ENV: &str = include_str!("../data/workshop_data_pin.env");
 
 /// One release of [`ASSET`]: its download URL, the release tag in that URL, and the archive's
 /// sha256 (lowercase hex).
@@ -51,37 +58,39 @@ pub struct Pin<'a> {
     pub sha256: &'a str,
 }
 
-/// The bundle [`install`] downloads, read from [`CI_WORKFLOW`] at compile time. A workflow
-/// without exactly one `BUNDLE_URL:` and one `BUNDLE_SHA256:` line, a URL that is not
+/// The bundle [`install`] downloads, read from [`PIN_ENV`] at compile time. A pin file without
+/// exactly one `BUNDLE_URL=` and one `BUNDLE_SHA256=` line, a URL that is not
 /// `https://github.com/<REPO>/releases/download/<tag>/<ASSET>`, or a digest that is not 64
 /// lowercase hex digits stops the build with the reason.
-pub const PINNED: Pin<'static> = match pin_from_workflow(CI_WORKFLOW) {
+pub const PINNED: Pin<'static> = match pin_from_env(PIN_ENV) {
     Ok(p) => p,
     Err(e) => panic!("{}", e),
 };
 
-/// Read the [`Pin`] from a workflow's `BUNDLE_URL:` and `BUNDLE_SHA256:` lines (each key the first
-/// thing on its line after indentation, exactly once in the file).
-const fn pin_from_workflow(src: &str) -> Result<Pin<'_>, &'static str> {
-    let url = match workflow_value(src, b"BUNDLE_URL") {
+/// Read the [`Pin`] from `BUNDLE_URL=` and `BUNDLE_SHA256=` lines (each key the first thing on its
+/// line after indentation, exactly once in the file; the value is the rest of the line, as is).
+const fn pin_from_env(src: &str) -> Result<Pin<'_>, &'static str> {
+    let url = match env_value(src, b"BUNDLE_URL") {
         Lookup::Found(v) => v,
-        Lookup::Missing => return Err(".github/workflows/ci.yml has no `BUNDLE_URL:` line"),
-        Lookup::Repeated => return Err(".github/workflows/ci.yml has more than one `BUNDLE_URL:` line"),
-        Lookup::NotUtf8 => return Err("BUNDLE_URL in .github/workflows/ci.yml is not UTF-8"),
+        Lookup::Missing => return Err(concat!(pin_file!(), " has no `BUNDLE_URL=` line")),
+        Lookup::Repeated => return Err(concat!(pin_file!(), " has more than one `BUNDLE_URL=` line")),
+        Lookup::NotUtf8 => return Err(concat!("BUNDLE_URL in ", pin_file!(), " is not UTF-8")),
     };
-    let sha256 = match workflow_value(src, b"BUNDLE_SHA256") {
+    let sha256 = match env_value(src, b"BUNDLE_SHA256") {
         Lookup::Found(v) => v,
-        Lookup::Missing => return Err(".github/workflows/ci.yml has no `BUNDLE_SHA256:` line"),
+        Lookup::Missing => return Err(concat!(pin_file!(), " has no `BUNDLE_SHA256=` line")),
         Lookup::Repeated => {
-            return Err(".github/workflows/ci.yml has more than one `BUNDLE_SHA256:` line")
+            return Err(concat!(pin_file!(), " has more than one `BUNDLE_SHA256=` line"))
         }
-        Lookup::NotUtf8 => return Err("BUNDLE_SHA256 in .github/workflows/ci.yml is not UTF-8"),
+        Lookup::NotUtf8 => return Err(concat!("BUNDLE_SHA256 in ", pin_file!(), " is not UTF-8")),
     };
     let tag = match release_tag(url) {
         Some(t) => t,
         None => {
             return Err(concat!(
-                "BUNDLE_URL in .github/workflows/ci.yml is not https://github.com/",
+                "BUNDLE_URL in ",
+                pin_file!(),
+                " is not https://github.com/",
                 repo!(),
                 "/releases/download/<tag>/",
                 asset!()
@@ -89,12 +98,12 @@ const fn pin_from_workflow(src: &str) -> Result<Pin<'_>, &'static str> {
         }
     };
     if !is_sha256_hex(sha256.as_bytes()) {
-        return Err("BUNDLE_SHA256 in .github/workflows/ci.yml is not 64 lowercase hex digits");
+        return Err(concat!("BUNDLE_SHA256 in ", pin_file!(), " is not 64 lowercase hex digits"));
     }
     Ok(Pin { url, tag, sha256 })
 }
 
-/// What [`workflow_value`] found for a key.
+/// What [`env_value`] found for a key.
 enum Lookup<'a> {
     Found(&'a str),
     Missing,
@@ -102,8 +111,9 @@ enum Lookup<'a> {
     NotUtf8,
 }
 
-/// The value of the `<key>: <value>` line in `src`, trimmed of surrounding spaces.
-const fn workflow_value<'a>(src: &'a str, key: &[u8]) -> Lookup<'a> {
+/// The value of the `<key>=<value>` line in `src`: everything after the `=` up to the line end,
+/// untrimmed, so a stray space or CR fails the URL / digest checks rather than being dropped.
+const fn env_value<'a>(src: &'a str, key: &[u8]) -> Lookup<'a> {
     let b = src.as_bytes();
     let mut found: Option<(usize, usize)> = None;
     let mut line = 0;
@@ -113,23 +123,15 @@ const fn workflow_value<'a>(src: &'a str, key: &[u8]) -> Lookup<'a> {
             end += 1;
         }
         let mut k = line;
-        while k < end && b[k] == b' ' {
+        while k < end && (b[k] == b' ' || b[k] == b'\t') {
             k += 1;
         }
-        let colon = k + key.len();
-        if colon < end && bytes_at(b, k, key) && b[colon] == b':' {
-            let mut v = colon + 1;
-            while v < end && b[v] == b' ' {
-                v += 1;
-            }
-            let mut e = end;
-            while e > v && (b[e - 1] == b' ' || b[e - 1] == b'\r') {
-                e -= 1;
-            }
+        let eq = k + key.len();
+        if eq < end && bytes_at(b, k, key) && b[eq] == b'=' {
             if found.is_some() {
                 return Lookup::Repeated;
             }
-            found = Some((v, e));
+            found = Some((eq + 1, end));
         }
         line = end + 1;
     }
@@ -305,9 +307,12 @@ fn install_pinned(
     let got = crate::publish::sha256_hex(&zip_bytes);
     if got != pin.sha256 {
         return Err(format!(
-            "{} has sha256 {got}, but the {} bundle is recorded as {} (BUNDLE_SHA256 in \
-             .github/workflows/ci.yml); nothing was installed",
-            pin.url, pin.tag, pin.sha256
+            "{} has sha256 {got}, but the {} bundle is recorded as {} (BUNDLE_SHA256 in {}); \
+             nothing was installed",
+            pin.url,
+            pin.tag,
+            pin.sha256,
+            pin_file!()
         ));
     }
 
@@ -443,10 +448,10 @@ mod tests {
         ])
     }
 
-    /// The compiled-in pin is the one the CI workflow downloads: a release-download URL of this
-    /// repo's asset (never the `latest` alias), its tag, and a sha256 digest.
+    /// The compiled-in pin is a release-download URL of this repo's asset (never the `latest`
+    /// alias), its tag, and a sha256 digest.
     #[test]
-    fn pinned_bundle_is_read_from_the_ci_workflow() {
+    fn pinned_bundle_is_a_tagged_release_download() {
         assert_eq!(
             PINNED.url,
             format!("https://github.com/{REPO}/releases/download/{}/{ASSET}", PINNED.tag)
@@ -459,31 +464,58 @@ mod tests {
         assert!(!format!("{help}{}", release_page()).contains("latest"), "{help}");
     }
 
+    /// CI downloads the same bundle: its pinned-bundle step sources this crate's pin file and
+    /// spells neither value out itself.
     #[test]
-    fn workflow_pin_parses_the_env_lines() {
+    fn ci_workflow_sources_the_pin_file() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        assert!(root.join(pin_file!()).is_file(), "{} is not in the repo", pin_file!());
+        let ci_path = root.join(".github/workflows/ci.yml");
+        let ci = std::fs::read_to_string(&ci_path).expect("read .github/workflows/ci.yml");
+        assert!(ci.contains(concat!(". ", pin_file!())), "ci.yml does not source {}", pin_file!());
+        for key in ["BUNDLE_URL", "BUNDLE_SHA256"] {
+            assert!(
+                !ci.lines().any(|l| {
+                    let l = l.trim_start();
+                    l.starts_with(&format!("{key}:")) || l.starts_with(&format!("{key}="))
+                }),
+                "ci.yml sets {key} itself; it must come from {}",
+                pin_file!()
+            );
+        }
+    }
+
+    #[test]
+    fn env_pin_parses_the_key_lines() {
         let sha = "f13605e27652cd4c45fe7a7df91808ff9ab7992974d0605edb7c2f7267ab161d";
         let url = format!("https://github.com/{REPO}/releases/download/v9.9.9/{ASSET}");
         let src = format!(
-            "steps:\n  - env:\n      BUNDLE_URL: {url}  \r\n      BUNDLE_SHA256: {sha}\n    run: |\n      curl \"$BUNDLE_URL\"\n      echo \"$BUNDLE_SHA256  x\"\n"
+            "# BUNDLE_URL=https://example.invalid/commented-out\n\nBUNDLE_URL={url}\n  BUNDLE_SHA256={sha}"
         );
-        assert_eq!(pin_from_workflow(&src), Ok(Pin { url: &url, tag: "v9.9.9", sha256: sha }));
+        assert_eq!(pin_from_env(&src), Ok(Pin { url: &url, tag: "v9.9.9", sha256: sha }));
     }
 
-    /// Each malformed workflow is refused with its own reason — none yields a pin.
+    /// Each malformed pin file is refused with its own reason — none yields a pin.
     #[test]
-    fn workflow_pin_refuses_malformed_lines() {
+    fn env_pin_refuses_malformed_lines() {
         let sha = "f13605e27652cd4c45fe7a7df91808ff9ab7992974d0605edb7c2f7267ab161d";
         let good = format!("https://github.com/{REPO}/releases/download/v9.9.9/{ASSET}");
-        let case = |url: &str, sha: &str| format!("BUNDLE_URL: {url}\nBUNDLE_SHA256: {sha}\n");
+        let case = |url: &str, sha: &str| format!("BUNDLE_URL={url}\nBUNDLE_SHA256={sha}\n");
         let refused = |src: String, why: &str| {
-            let err = pin_from_workflow(&src).expect_err(&src);
+            let err = pin_from_env(&src).expect_err(&src);
             assert!(err.contains(why), "{src:?}: expected {why:?}, got {err:?}");
         };
-        refused(format!("BUNDLE_SHA256: {sha}\n"), "no `BUNDLE_URL:` line");
-        refused(format!("BUNDLE_URL: {good}\n"), "no `BUNDLE_SHA256:` line");
-        refused(format!("{}BUNDLE_URL: {good}\n", case(&good, sha)), "more than one `BUNDLE_URL:`");
-        refused(format!("{}BUNDLE_SHA256: {sha}\n", case(&good, sha)), "more than one `BUNDLE_SHA256:`");
+        refused(format!("BUNDLE_SHA256={sha}\n"), "no `BUNDLE_URL=` line");
+        refused(format!("BUNDLE_URL={good}\n"), "no `BUNDLE_SHA256=` line");
+        refused(format!("BUNDLE_URL: {good}\nBUNDLE_SHA256={sha}\n"), "no `BUNDLE_URL=` line");
+        refused(format!("{}BUNDLE_URL={good}\n", case(&good, sha)), "more than one `BUNDLE_URL=`");
+        refused(format!("{}BUNDLE_SHA256={sha}\n", case(&good, sha)), "more than one `BUNDLE_SHA256=`");
         for url in [
+            String::new(),
+            format!(" {good}"),
+            format!("{good} "),
+            format!("{good}\r"),
+            format!("https://github.com/{REPO}/releases/latest/download/{ASSET}"),
             format!("https://github.com/{REPO}/releases/latest/download/{ASSET}"),
             format!("https://github.com/{REPO}/releases/download//{ASSET}"),
             format!("https://github.com/{REPO}/releases/download/v9.9.9/mercs2-workshop-data-debug.zip"),
@@ -495,6 +527,7 @@ mod tests {
         }
         for bad in [
             sha[..63].to_string(),
+            format!("{sha}\r"),
             sha.to_uppercase(),
             format!("{sha}0"),
             format!("sha256:{}", &sha[..57]),
