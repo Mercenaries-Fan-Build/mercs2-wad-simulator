@@ -202,6 +202,22 @@ pub enum LinkError {
     NotInOrder {
         shipment: String,
     },
+    /// A script the link mints — an `add_script` module, a novel shop module, `qm_modloader` —
+    /// whose name a script of one of the blocks already carries (M0197). The registry keeps the
+    /// first script of a name, so one of the two would not be the one that loads.
+    NameTaken {
+        name: String,
+        shipment: String,
+        /// The PTHS path of the block that carries it.
+        path: String,
+    },
+    /// One novel shop module minted from two sources: by two Shipments (M0207), or by one with two
+    /// different `behaviour.script` files (M0120). Only one source can be the module.
+    SupportModuleTwice {
+        module: String,
+        first: String,
+        second: String,
+    },
     Block(String),
 }
 
@@ -230,6 +246,17 @@ impl std::fmt::Display for LinkError {
                 f,
                 "internal error: {shipment} contributes to the link but is not in the resolved load \
                  order — the order must name every Shipment in the set"
+            ),
+            LinkError::NameTaken { name, shipment, path } => write!(
+                f,
+                "[M0197] {shipment} mints the script {name:?}, but {path} already carries a script \
+                 of that name; the registry keeps the first, so one of the two would not be the one \
+                 that loads — rename the module"
+            ),
+            LinkError::SupportModuleTwice { module, first, second } => write!(
+                f,
+                "the novel shop module {module:?} is minted from two sources, by {first} and by \
+                 {second}; one module name has one source — rename one"
             ),
             LinkError::Block(m) => write!(f, "{m}"),
         }
@@ -1407,6 +1434,21 @@ pub fn link_front_end(
     Ok(LinkOutput { scripts: linked, unresolved_imports: Vec::new() })
 }
 
+/// Refuse minting a script named `name` when a script of ANY of `blocks` already carries it
+/// ([`LinkError::NameTaken`]). A new script is minted into the `wifpmcinterior` block, and
+/// `ScriptsBlock::add_script` refuses only a name of that one block; a name another block carries
+/// (`mrxplayer` in `resident`) would mint a second script of one name.
+fn refuse_taken(blocks: &[TargetBlock<'_>], name: &str, shipment: &str) -> Result<(), LinkError> {
+    match blocks.iter().find(|tb| tb.block.find_script_by_name(name).is_some()) {
+        Some(tb) => Err(LinkError::NameTaken {
+            name: name.to_string(),
+            shipment: shipment.to_string(),
+            path: tb.path.clone(),
+        }),
+        None => Ok(()),
+    }
+}
+
 /// Link every mutation into whichever of `blocks` actually carries its target script.
 ///
 /// Mutations targeting the same script are merged; mutations targeting different scripts are
@@ -1517,6 +1559,7 @@ pub fn link_into_blocks(
         let mut additions: Vec<&ScriptAddition> = additions.iter().collect();
         sort_by_order(&mut additions, order, |a| a.shipment.as_str(), |_| ())?;
         for a in additions {
+            refuse_taken(blocks, &a.name, &a.shipment)?;
             let bytecode = mercs2_luac::compile(&a.source, &a.name)
                 .map_err(|e| LinkError::Compile {
                     target: a.name.clone(),
@@ -1554,14 +1597,25 @@ pub fn link_into_blocks(
 
         // Mint each NOVEL support subclass as its own new `scripts_vz` script, so the loader can
         // `import` it by name at `_OnEnter`. Same `add_script` mechanism as `qm_modloader` below.
-        // Deduped by module name — two items sharing one subclass mint it once.
-        let mut minted: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+        // Two items of one Shipment sharing one subclass and one source mint it once; one module
+        // from two Shipments, or from two sources, is refused rather than one source dropped.
+        let mut minted: std::collections::BTreeMap<u32, &SupportRegistration> = std::collections::BTreeMap::new();
         let mut support_in_order: Vec<&SupportRegistration> = support_regs.iter().collect();
         sort_by_order(&mut support_in_order, order, |r| r.shipment.as_str(), |_| ())?;
         for r in support_in_order {
-            if !minted.insert(r.module.as_str()) {
-                continue;
+            let key = mercs2_formats::hash::pandemic_hash_m2(&r.module);
+            if let Some(first) = minted.get(&key) {
+                if first.shipment == r.shipment && first.source == r.source {
+                    continue;
+                }
+                return Err(LinkError::SupportModuleTwice {
+                    module: r.module.clone(),
+                    first: first.shipment.clone(),
+                    second: r.shipment.clone(),
+                });
             }
+            minted.insert(key, r);
+            refuse_taken(blocks, &r.module, &r.shipment)?;
             let bytecode =
                 mercs2_luac::compile(&r.source, &r.module).map_err(|e| LinkError::Compile {
                     target: r.module.clone(),
@@ -1585,6 +1639,7 @@ pub fn link_into_blocks(
         }
 
         let source = qm_modloader_source(ui_regs, layer_regs, support_regs, sound_regs, order)?;
+        refuse_taken(blocks, QM_MODLOADER_NAME, MODLOADER_CONTRIBUTOR)?;
         // BARE chunk name, like every other script here — see the module note.
         let bytecode =
             mercs2_luac::compile(&source, QM_MODLOADER_NAME).map_err(|e| LinkError::Compile {
