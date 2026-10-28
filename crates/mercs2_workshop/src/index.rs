@@ -481,10 +481,27 @@ impl AssetIndex {
 /// next source. The searched steps count only a complete bundle, so the committed, partial
 /// `workshop_data/` of a repo checkout (the audio manifest, no `names.bin`) does not count.
 ///
+/// The downloaded copy counts only when it is the pinned bundle ([`crate::chains::data_chain`]);
+/// when one is there but is not, the error says why.
+///
 /// This is the lookup alone; [`require_data_home`] adds the automatic download.
 pub fn data_home() -> Result<PathBuf, String> {
     let chain = crate::chains::data();
-    chain.in_use().map(Path::to_path_buf).ok_or_else(|| chain.unresolved("the reference data"))
+    chain.in_use().map(Path::to_path_buf).ok_or_else(|| {
+        let mut e = chain.unresolved("the reference data");
+        if let Some(note) = unpinned_download_note(crate::fetch::installed_dir()) {
+            e.push_str(&format!("\n  {note}"));
+        }
+        e
+    })
+}
+
+/// Why the downloaded copy at `dir` is passed over, when it is a complete bundle that is not the
+/// pinned one ([`crate::fetch::installed_pin_mismatch`]); `None` when there is no such copy.
+fn unpinned_download_note(dir: Option<PathBuf>) -> Option<String> {
+    let dir = dir.filter(|d| crate::chains::is_complete_bundle(d))?;
+    crate::fetch::installed_pin_mismatch(&dir)
+        .map(|why| format!("the downloaded copy is not the pinned bundle, so it is not used: {why}"))
 }
 
 /// The file `--pack-data` writes last into a bundle; its presence is what makes a folder a
@@ -505,6 +522,9 @@ pub fn require_data_home(report: &mut impl FnMut(f32, &'static str)) -> Result<P
         return Err(chain.unresolved("the reference data"));
     }
     report(0.02, "reference data (downloading workshop_data)");
+    if let Some(note) = unpinned_download_note(crate::fetch::installed_dir()) {
+        eprintln!("[data] {note}; the pinned install replaces it");
+    }
     eprintln!(
         "[data] no complete workshop_data bundle found — downloading {} from {}",
         crate::fetch::ASSET,
@@ -773,9 +793,11 @@ pub fn lua_corpus_at(home: &Path) -> Result<Vec<(String, String, String)>, Strin
     Ok(out)
 }
 
-/// The Lua corpus of the reference bundle the corpus gates are pinned to — release v0.17.0's
-/// `mercs2-workshop-data.zip`, the one CI downloads — as (folder, scripts). A gate run over any
-/// other bundle fails on the count, so a stale or partial bundle cannot pass on fewer scripts.
+/// The Lua corpus of the reference bundle the corpus gates are pinned to — the
+/// `mercs2-workshop-data.zip` that [`crate::fetch::PINNED`] names (`data/workshop_data_pin.env`),
+/// the one CI downloads and the install fetches — as (folder, scripts). A gate run over any other
+/// bundle fails on the count, so a stale or partial bundle cannot pass on fewer scripts. Moving
+/// the pin to another release means these counts change with it.
 #[cfg(test)]
 pub const PINNED_CORPUS: [(&str, usize); 2] = [("lua", 675), ("lua_dlc", 39)];
 
@@ -911,6 +933,45 @@ fn load_names_csv(path: &Path) -> Result<HashMap<u32, String>, String> {
     }
     eprintln!("[names] {} registry names from {}", map.len(), path.display());
     Ok(map)
+}
+
+#[cfg(test)]
+mod download_note_tests {
+    use super::{unpinned_download_note, BUNDLE_MANIFEST};
+    use crate::fetch::{pin_record, INSTALLED_PIN, PINNED};
+
+    fn scratch(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("m2ws_note_{name}_{}", std::process::id()));
+        if dir.exists() {
+            std::fs::remove_dir_all(&dir).expect("clear the scratch dir");
+        }
+        std::fs::create_dir_all(&dir).expect("make the scratch dir");
+        dir
+    }
+
+    /// A complete downloaded copy without the pin's record is named as not used, with the reason;
+    /// the pinned copy, an incomplete folder and no folder at all carry no note.
+    #[test]
+    fn an_unpinned_downloaded_copy_is_named_with_its_reason() {
+        let dir = scratch("unpinned");
+        assert_eq!(unpinned_download_note(None), None);
+        assert_eq!(unpinned_download_note(Some(dir.join("absent"))), None);
+        assert_eq!(unpinned_download_note(Some(dir.clone())), None, "no manifest: not a bundle");
+
+        std::fs::write(dir.join(BUNDLE_MANIFEST), "{}").unwrap();
+        let note = unpinned_download_note(Some(dir.clone())).expect("a bundle without the pin record");
+        assert_eq!(
+            note,
+            format!(
+                "the downloaded copy is not the pinned bundle, so it is not used: {}",
+                crate::fetch::installed_pin_mismatch(&dir).expect("no record")
+            )
+        );
+
+        std::fs::write(dir.join(INSTALLED_PIN), pin_record(&PINNED)).unwrap();
+        assert_eq!(unpinned_download_note(Some(dir.clone())), None);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 }
 
 #[cfg(test)]
