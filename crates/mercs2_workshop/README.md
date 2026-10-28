@@ -61,9 +61,10 @@ exe subsystem. What its source explicitly claims as provenance:
 - **Overlay / patch stack** — `--overlay` and the auto-loaded `vz-patch.wad` sitting next to the
   base WAD reproduce the retail exe's own patch-WAD lookup (last-opened wins). That is how
   DLC-ported content reaches the workbench.
-- **Names** — the reference bundle's `names.bin`, which `--pack-data` builds from the repo's
-  `data/production_names.json`. A curated ASET dictionary (`data/aset_names.tsv`, 18k rows
-  generated from `docs/data/aset_names.csv`) is compiled into the binary and overrides the pack.
+- **Names** — the reference bundle's `names.bin`, which `--pack-data` builds from this crate's
+  `data/production_names.json`. An ASET dictionary (`data/aset_names.tsv`, written by
+  `aset_export --embed-tsv` from the rainbow table and this crate's name fragments) is compiled into
+  the binary and overrides the pack. Every name file lives in `data/` (see `data/README.md`).
 - **Destruction state machines** — `--states` dumps the engine's own format, per
   `docs/destruction_orchestrator_format.md`, via `mercs2_formats::orchestrator`.
 - **Model injection** — publishing builds containers with
@@ -188,13 +189,13 @@ pinned to release v0.17.0's bundle (`index::PINNED_CORPUS`: 675 scripts in `lua/
 bundle from Settings, or point `MERCS2_WORKSHOP_DATA` at an unpacked v0.17.0 `workshop_data/`.
 
 `--pack-data [dir]` builds the bundle (default `workshop_data`). Its in-repo sources are read from
-the checkout the binary was built from: names come from
-`data/production_names.json`, and `audio_manifest.json` is copied from the committed
+the checkout the binary was built from: names come from this crate's
+`data/production_names.json`, and `audio_manifest.json` is copied from the repo's committed
 `workshop_data/`. Packing into that same `workshop_data/` leaves it in place. The rest is copied from the notes
 repo's `docs/` folder named by `notes_docs_dir` in `.mercs2-local.toml`. With no
-`production_names.json`, the names are merged from the raw corpora, which also reads the
-`rainbow_table` and `jul08_strings` keys. A missing key or source file stops the pack with an error
-naming it.
+`production_names.json`, the names are merged from the raw corpora: this crate's name fragments in
+`data/`, and the `rainbow_table` and `jul08_strings` keys. A missing key or source file stops the
+pack with an error naming it.
 
 ## Modules
 
