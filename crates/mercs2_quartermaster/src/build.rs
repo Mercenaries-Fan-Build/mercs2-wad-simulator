@@ -13,7 +13,7 @@
 //!
 //! ## Lowering status
 //!
-//! Every kind lowers here except `edit_state_machine`.
+//! Every kind lowers here.
 //!
 //! `raw` is the open lower bound: opaque bytes plus an author-DECLARED blast radius. It is the one
 //! kind with no encoder behind it, so the lowering checks everything structural it can and refuses
@@ -26,23 +26,21 @@
 //! Shipment's own mutations here keeps its overlay valid **standalone**; the cross-Shipment relink
 //! is deploy's job, and skipping it is what lets one script mod overwrite another's Lua.
 //!
-//! `add_movie` is the only kind that needs NO game stack: a Scaleform movie is self-contained, so
-//! unlike a texture (whose dimensions come from the target) or a model (whose rig comes from a
-//! donor) there is nothing to read out of retail. It therefore lowers in template CI as well.
+//! `add_movie` needs NO game stack: a Scaleform movie is self-contained, so unlike a texture
+//! replacement (whose dimensions come from the target) or a model (whose rig comes from a donor)
+//! there is nothing to read out of retail. It therefore lowers with `game: None`, as `add_texture`,
+//! `add_animation` and `add_sound` do.
 //!
 //! `native_hook` and `place_file` are the kinds that produce no WAD content at all — a file placed
 //! in the game folder, plus the [`Placement`] record that makes the drop reversible. `native_hook`
 //! places the `.asi` and chooses its directory outright; `place_file` places the companions that
 //! `.asi` reads, and lets the author pick a destination NAME from a closed set
 //! ([`crate::manifest::PlaceIn`]) rather than write a path. Neither can be pointed at the game
-//! executable or a WAD, and neither needs a game stack, so both lower in template CI.
+//! executable or a WAD, and neither needs a game stack, so both lower with `game: None`.
 //!
-//! `edit_state_machine` returns `Unsupported`, and is expected to keep doing so for a while: the
-//! destruction machine can be read and cannot be written, and three of the four things blocking it
-//! live outside this crate. The reason it returns says which, so the refusal is actionable rather
-//! than a deferral — and it points the author at `raw`, which can carry a hand-built block today
-//! with a declared blast radius. A kind that returns `Unsupported` with a reason is honest; one
-//! that is quietly skipped produces a WAD that looks fine and does nothing.
+//! A contribution the lowering cannot honour returns `Unsupported` with the reason. A refusal with
+//! a reason is honest; a contribution that is quietly skipped produces a WAD that looks fine and
+//! does nothing.
 
 use crate::discover::LoadedShipment;
 use crate::game::{GameStack, Platform};
@@ -707,7 +705,7 @@ pub enum BuildError {
     },
     /// The configured stack is a console bake and we cannot yet EMIT for one.
     ConsoleOutputUnsupported,
-    /// A kind whose lowering is not implemented yet, with the reason.
+    /// A contribution the lowering refuses, with the reason.
     Unsupported {
         index: usize,
         kind: &'static str,
@@ -782,7 +780,7 @@ impl std::fmt::Display for BuildError {
             } => {
                 write!(
                     f,
-                    "contributions[{index}] ({kind}) cannot be lowered yet: {reason}"
+                    "contributions[{index}] ({kind}) cannot be lowered: {reason}"
                 )
             }
             BuildError::Lower {
@@ -841,12 +839,9 @@ pub fn sha256_hex(data: &[u8]) -> String {
     h.finalize().iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// Which drawing group of the donor hosts the injected geometry.
-///
-/// ⚠ The manifest has no field for this — the Workshop's UI lets an author pick, but `add_model`
-/// carries only name/model/donor. Group 0 is the common case for a simple prop; a donor whose
-/// interesting geometry sits in a later group cannot currently be targeted. Recorded rather than
-/// papered over: it likely wants a `group:` field, which is a format change.
+/// Which drawing group of the donor hosts the injected geometry on the rigid path when the manifest
+/// names none: an `add_model` without `group:`, and a rigid `add_outfit`, which has no `group:`
+/// field. Group 0 is the common case for a simple prop.
 const DEFAULT_TARGET_GROUP: usize = 0;
 
 /// Every script mutation a Shipment declares, derived from its manifest alone.
@@ -989,47 +984,12 @@ pub fn script_mutations(
     Ok(out)
 }
 
-#[derive(serde::Deserialize)]
-struct EntityYaml {
-    key: u32,
-    model: String,
-    pos: [f32; 3],
-    #[serde(default)]
-    quat: Option<[f32; 4]>,
-    #[serde(default)]
-    yaw: Option<f32>,
-    #[serde(default)]
-    name: Option<String>,
-}
-
-#[derive(serde::Deserialize)]
-#[serde(untagged)]
-enum EntitiesDoc {
-    List(Vec<EntityYaml>),
-    Single(EntityYaml),
-}
-
-fn parse_entities_file(path: &Path) -> Result<Vec<mercs2_formats::placement_build::NewEntity>, String> {
-    let text = std::fs::read_to_string(path).map_err(|e| format!("reading: {e}"))?;
-    let doc: EntitiesDoc = serde_norway::from_str(&text).map_err(|e| format!("parse yaml: {e}"))?;
-    let list = match doc {
-        EntitiesDoc::List(v) => v,
-        EntitiesDoc::Single(e) => vec![e],
-    };
-    if list.is_empty() { return Err("no entities".into()); }
-    list.into_iter().map(|e| {
-        let quat = if let Some(q) = e.quat { q }
-        else if let Some(yaw) = e.yaw {
-            let h = (yaw.to_radians() * 0.5); [0.0, h.sin(), 0.0, h.cos()]
-        } else { [0.0, 0.0, 0.0, 1.0] };
-        Ok(mercs2_formats::placement_build::NewEntity {
-            key: e.key,
-            model_hash: crate::manifest::asset_hash(&e.model),
-            pos: e.pos,
-            quat,
-            name: e.name.unwrap_or_else(|| format!("modent_{:08x}", e.key)),
-        })
-    }).collect()
+/// An `add_placement` / `add_layer` entity file ([`crate::world::parse_entities`]), read and
+/// refused exactly as an `edit_world` edits file is: `reading <path>: <error>` when it cannot be read,
+/// `<path>: <why>` when it does not parse.
+pub(crate) fn read_entities_file(path: &Path) -> Result<Vec<mercs2_formats::placement_build::NewEntity>, String> {
+    let text = std::fs::read_to_string(path).map_err(|e| format!("reading {}: {e}", path.display()))?;
+    crate::world::parse_entities(&text).map_err(|m| format!("{}: {m}", path.display()))
 }
 
 fn lower_layer_append(
@@ -2206,11 +2166,15 @@ fn lower_skinned(
     root: &Path,
     game: &mut GameStack,
     names: Option<&NameTable>,
-    // The author's own skin. Empty for `add_model`, which has no `textures:` field.
+    // The author's own skin: the `textures:` of the `add_outfit` / `add_model`. Empty means the
+    // donor's materials.
     textures: &crate::manifest::Textures,
     // Force one draw group + the source's own weights (see `AddOutfit::single_group`). `add_model`
     // passes `false`.
     single_group: bool,
+    // The first host draw group: `add_model`'s `group:` (`AddModel::group`). `None` lets the split
+    // pick the largest groups; `add_outfit` has no `group:` field.
+    first_host: Option<u32>,
     log: &mut Vec<String>,
 ) -> Result<Skinned, BuildError> {
     let lower_err = |m: String| BuildError::Lower {
@@ -2616,7 +2580,8 @@ fn lower_skinned(
     };
 
     let hash = crate::manifest::asset_hash(name);
-    let out = char_lower::character_into_donor(&donor_blk, &glb, hash, &opts).map_err(lower_err)?;
+    let out = char_lower::character_into_donor_at(&donor_blk, &glb, hash, &opts, first_host.map(|g| g as usize))
+        .map_err(lower_err)?;
 
     // Report every host, not `hosts[0]`. A two-host build logging "group 3" said nothing about
     // group 7 also being rewritten and the other 26 neutralised.
@@ -2841,7 +2806,7 @@ fn lower(
                 return Err(BuildError::Unsupported {
                     index,
                     kind,
-                    reason: "donor auto-pick is not implemented yet — name a `donor:` explicitly. \
+                    reason: "add_model has no donor auto-pick — name a `donor:` explicitly. \
                              The donor supplies the rig, materials and state machine, so picking \
                              the wrong one fails quietly rather than loudly."
                         .into(),
@@ -2858,7 +2823,7 @@ fn lower(
                 // mesh, the case the field was added for.
                 let skinned = lower_skinned(
                     index, kind, name, model, donor_name, rt, root, game, names, textures, false,
-                    log,
+                    *group, log,
                 )?;
                 let (mut new_block, tex_blocks) = (skinned.block, skinned.tex_blocks);
                 let geometry = crate::shader_import::Geometry {
@@ -3146,7 +3111,7 @@ fn lower(
             if let Some(rt) = retarget {
                 let skinned = lower_skinned(
                     index, kind, name, model, donor_name, rt, root, game, names, textures,
-                    *single_group, log,
+                    *single_group, None, log,
                 )?;
                 let (new_block, tex_blocks) = (skinned.block, skinned.tex_blocks);
                 let hash = crate::manifest::asset_hash(name);
@@ -3347,16 +3312,12 @@ fn lower(
         // future work; the manifest side is real today for anyone who has the encoder.
         Contribution::AddPlacement { layer, entity } => {
             let Some(game) = game else { return Err(BuildError::GameRequired { index, kind }); };
-            let ents = parse_entities_file(&root.join(entity)).map_err(|m| BuildError::Lower {
-                index, kind, message: format!("{}: {m}", root.join(entity).display()),
-            })?;
+            let ents = read_entities_file(&root.join(entity)).map_err(|message| BuildError::Lower { index, kind, message })?;
             lower_layer_append(game, layer, layer, &ents, index, kind)
         }
         Contribution::AddLayer { name, template, entities } => {
             let Some(game) = game else { return Err(BuildError::GameRequired { index, kind }); };
-            let ents = parse_entities_file(&root.join(entities)).map_err(|m| BuildError::Lower {
-                index, kind, message: format!("{}: {m}", root.join(entities).display()),
-            })?;
+            let ents = read_entities_file(&root.join(entities)).map_err(|message| BuildError::Lower { index, kind, message })?;
             lower_layer_append(game, template, name, &ents, index, kind)
         }
         // A new clip needs nothing from retail, so it lowers hermetically.
@@ -3893,29 +3854,6 @@ fn lower(
             })
         }
 
-        // NOT implemented, and the reason is worth stating precisely rather than deferring: the
-        // destruction machine can be READ and cannot be WRITTEN, and three of the four gaps are
-        // outside this crate.
-        //
-        // 1. No serializer. `orchestrator::parse_state_machine` decodes the family (validated on
-        //    retail: al_veh_boat_destroyer 0xE54047D5 parses to 59 switch slots and 47 nodes), but
-        //    `StateMachine` is a VIEW — no descriptor indices, no data offsets, no container
-        //    position — so it cannot even round-trip. Nothing in the workspace writes SWIT / NODE /
-        //    STAT / CHDR / CEXE; `mercs2_workshop`'s bundler lists exactly these tags under
-        //    `preserved_only_in_raw`, which is the ecosystem carrying them verbatim because it
-        //    cannot author them either.
-        // 2. The family is a NESTED container inside the model container, so writing one means
-        //    rebuilding that container's descriptor table (tag / offset / size / descendant count
-        //    per row), re-basing every following sibling's data offset, recomputing the CSUM, and
-        //    re-emitting the whole model block. `model_inject` rewrites geometry groups, not an
-        //    arbitrary sibling subtree.
-        // 3. `states:` has no schema. Nothing in the manifest format says what that file contains,
-        //    so defining one is a format change (Plan 04), not a lowering.
-        // 4. There would be no way to check the result. The closest known destructible-model
-        //    corruption — collapsing a group's PRMT records so the machine reads off the end — is
-        //    an access violation at model instantiation that `wad_simulator` does NOT catch; it
-        //    shows up only in-game. Every structural bug this crate has shipped was caught by that
-        //    simulator, so a lowering it cannot see is a lowering with no safety net at all.
         // The destruction state machine, EDITED in place. The container is a leaf inside a model
         // block whose ASET row carries a LOD chain, but we do NOT shadow the whole base block: we
         // emit ONLY this model's edited container as a single-entry block, copy its ASET row, and
@@ -4474,6 +4412,10 @@ pub fn build(
         diagnostics.extend(
             lint::fx_game_checks(manifest, &shipment.root, g)
                 .map_err(|message| BuildError::Lower { index: 0, kind: "fx", message })?,
+        );
+        diagnostics.extend(
+            lint::placement_game_checks(manifest, &shipment.root, g)
+                .map_err(|e| BuildError::Lower { index: e.index, kind: e.kind, message: e.message })?,
         );
     }
     // The shader kinds read the original stores from `--original-data` and the game's VT and R2VB
