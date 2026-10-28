@@ -33,9 +33,11 @@ with whether it blocks a faithful reimplementation.
 
 These are *not* improvements — they are unread oracle values. Marked `// CONFIRM-LIVE:` in source.
 
-- Authored tuning defaults (MaxSpeed, suspension/friction constants, DonutBoost/DonutSidePower,
-  gear/engine table) — field NAMES stripped on PC; recover by breaking `0x00449460` and diffing the
-  0x18c block. `[faithful-blocker: yes — placeholders in `tuning.rs`]`
+- Tuning engine→model unit bridge (MaxSpeed, suspension/friction/brake), the intra-wheel-block field
+  labels, the per-vehicle gear/engine table and the `_TankPhysics` field map — the schema defaults
+  themselves are recovered (`tuning::schema`, engine units), but the drive model runs on model-scale
+  stand-ins; confirm the unit live (`bp 0x0044a970`, read `+0x180` vs chassis m/s).
+  `[faithful-blocker: yes — model-unit stand-ins in `tuning.rs`]`
 - The command-ID hash function (`0x3483DBF1` etc. are used verbatim; the *hash* that produced them
   is unknown). Does not block: the constants are what the ring compares. `[faithful-blocker: no]`
 - Camera preset float layout + look-axis apply / pitch clamp (`FUN_0060f6d0` mode gate, string
