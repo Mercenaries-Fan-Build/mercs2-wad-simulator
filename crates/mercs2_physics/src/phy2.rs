@@ -377,7 +377,7 @@ mod tests {
         // An UNDECODED mesh (empty verts/indices) forces the render fallback.
         let empty_mesh = Shape::Mesh(MeshShape { vertices: Vec::new(), indices: Vec::new() });
         let with_mesh = authored_collision(&[Shape::Convex(cube.clone()), empty_mesh]);
-        assert!(!with_mesh.is_complete(), "an undecoded static mesh forces the render fallback");
+        assert!(!with_mesh.is_complete(), "an undecoded static mesh makes the collider incomplete");
         assert!(with_mesh.has_undecoded_mesh);
 
         // A BUILDING-scale decoded mesh (small span, few tris) drops its tris into the collider and needs no
