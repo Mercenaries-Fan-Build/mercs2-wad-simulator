@@ -10,7 +10,7 @@
 //! - **Embedded type conversions**:
 //!   - Havok packfile (`layoutRules` restoration)
 //!   - Texture untiling (DXT GPU-tiled → linear)
-//!   - Wavebank audio transcode (Xbox-ADPCM/XMA → PC IMA)
+//!   - Wavebank audio transcode (PCM / XMA / XMA2 / MP3 → PC PCM16)
 //!   - Mesh vertex format translation (Xbox 12-byte → PC 8-byte D3DVERTEXELEMENT9)
 //!   - Lua bytecode (unluac round-trip)
 //!   - Terrainmesh re-encoding (vertex expansion + index destrip)
@@ -337,8 +337,8 @@ fn convert_container(
         apply_texture_untile(&mut out, &descriptors, data_area_off, desc_table_end);
     }
 
-    // Xbox 360 wavebanks: transcode embedded audio clips (Xbox-ADPCM nibble-swap /
-    // XMA via ffmpeg → PC IMA) and reframe the container (the audio body resizes).
+    // Xbox 360 wavebanks: transcode embedded audio clips (PCM byte swap / XMA, XMA2
+    // and MP3 via ffmpeg → PC PCM16) and reframe the container (the audio body resizes).
     // The generic pass left the `data` chunk raw BE for this.
     if is_be && type_hash == types::TYPE_HASH_WAVEBANK {
         apply_wavebank_transcode(&mut out, &descriptors, data_area_off, desc_table_end)?;
@@ -458,7 +458,7 @@ fn apply_binn_transcode(
     Ok(())
 }
 
-/// Xbox-360 wavebank: transcode the audio `data` chunk (Xbox-ADPCM / XMA → PC IMA)
+/// Xbox-360 wavebank: transcode the audio `data` chunk (PCM / XMA / XMA2 / MP3 → PC PCM16)
 /// and reframe the container, mirroring `apply_texture_untile`. The body was left
 /// raw BE by `convert_generic_bodies`' wavebank no-op arm, so the BE record fields
 /// are intact for `audio::convert_wavebank_data`.
@@ -1433,8 +1433,8 @@ fn convert_generic_bodies(
                         );
                     }
                     ChunkTag::Body if is_texture => {
-                        // DXT compressed pixel data — leave as-is.
-                        // Proper texture BODY conversion (untiling) is not implemented yet.
+                        // DXT compressed pixel data — leave as-is here; a BE texture's
+                        // full DXT BODY is untiled afterward by apply_texture_untile.
                     }
                     ChunkTag::Schm | ChunkTag::Flgs => {
                         swap_u32_array(&mut data_area[body_local_start..body_local_end]);
@@ -1561,8 +1561,8 @@ fn convert_generic_bodies(
                     }
                     ChunkTag::Data if type_hash == types::TYPE_HASH_WAVEBANK => {
                         // Wavebank `data` is the audio body. Leave it RAW BE here; it
-                        // is transcoded (Xbox-ADPCM nibble-swap / XMA via ffmpeg → PC
-                        // IMA) and the container reframed by apply_wavebank_transcode
+                        // is transcoded (PCM byte swap / XMA, XMA2 and MP3 via ffmpeg →
+                        // PC PCM16) and the container reframed by apply_wavebank_transcode
                         // afterward — the body resizes, so it can't be an in-place swap
                         // (mirrors the texture BODY path left raw for apply_texture_untile).
                     }
