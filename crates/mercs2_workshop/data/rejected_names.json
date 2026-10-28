@@ -1,0 +1,14 @@
+{
+  "note": "Names harvested from block bytes (aset_block_strings.json) that hash to an asset and have an identifier's shape, but are collision debris. Every reader of the harvest drops these (hash, name) pairs. Each hash is pandemic_hash_m2 of its name.",
+  "pandemic_hash_m2": {
+    "0x862155E2": [
+      "wxfm0u"
+    ],
+    "0x8AD3F7B7": [
+      "i4e2"
+    ],
+    "0xE74E1413": [
+      "csumoe9mucfxp"
+    ]
+  }
+}
