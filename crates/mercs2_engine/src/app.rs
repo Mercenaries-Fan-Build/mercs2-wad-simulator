@@ -1,8 +1,8 @@
 //! The engine-owned application shell: one winit event loop + a `Game` hook trait.
 //!
-//! Today two near-verbatim frame loops exist — `game_world::run_game_world` (dev free-fly) and
-//! `mercs2_game::world::run_scene_world_loading` (the TPS game). Their window/cursor/mouse/`LayerStack`/
-//! fixed-step/loading/render bodies are copies. This module is the single home for that machinery: the
+//! Both boots run on this one loop — `game_world::run_game_world` (dev free-fly, as `FreeFlyGame`) and
+//! `mercs2_game::world::Mercs2Game` (the TPS game). This module is the single home for their
+//! window/cursor/mouse/`LayerStack`/fixed-step/loading/render machinery: the
 //! engine owns the window, event loop, raw input plumbing, `Time`, the `LayerStack`, the background-load
 //! polling + loading-screen render, the shared `World`, and the per-frame render; a `Game` implementor
 //! supplies only POLICY (its config, its loaded data type, camera, sim, menu/HUD) through the hooks.
