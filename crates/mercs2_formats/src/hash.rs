@@ -73,6 +73,21 @@ pub fn pandemic_hash_m2_bytes(name: &[u8]) -> u32 {
     h.wrapping_mul(FNV1A_PRIME)
 }
 
+/// Whether a name HARVESTED from block bytes (`aset_block_strings.json`) has the shape of an
+/// authored identifier: it starts with an ASCII letter and holds only `[A-Za-z0-9_]`.
+///
+/// A run of bytes that happens to hash to an asset is not evidence of its name. Over the 281 asset
+/// names whose only source is that harvest, the 15 this refuses are all collision debris (`6xht`,
+/// `-ufzc9`, `.j0x.`, `2v3tx`, `j-cfe` …); what it keeps includes the hijack clip names the
+/// decompiled Lua spells (`all_md500_driverdoor_actionhijack_getin_loopf_fb`). Debris with the
+/// right shape goes on the workshop crate's `data/rejected_names.json`. Only for harvested names:
+/// authored names from other sources may hold spaces or hyphens (`Allied Infantry_Mirron01`).
+pub fn is_identifier_shaped(name: &str) -> bool {
+    let mut bytes = name.bytes();
+    bytes.next().is_some_and(|b| b.is_ascii_alphabetic())
+        && bytes.all(|b| b.is_ascii_alphanumeric() || b == b'_')
+}
+
 /// FNV-1a over raw bytes, no case suppression. Empty input hashes to 0.
 pub fn pandemic_hash_bytes(data: &[u8]) -> u32 {
     if data.is_empty() {
@@ -120,6 +135,16 @@ mod tests {
         assert_eq!(pandemic_hash_m2_bytes(b""), 0);
         assert_eq!(pandemic_hash_m2_bytes(b"\xE9t\xE9"), 0x1449_B483);
         assert_ne!(pandemic_hash_m2_bytes(b"\xE9t\xE9"), pandemic_hash_m2("\u{e9}t\u{e9}"));
+    }
+
+    #[test]
+    fn harvested_debris_is_not_identifier_shaped() {
+        for junk in ["6xht", "6-ucfx", "5twtt", "-ufzc9", ".j0x.", "2v3tx", "1uud", "j-cfe", ""] {
+            assert!(!is_identifier_shaped(junk), "{junk}");
+        }
+        for real in ["all_md500_driverdoor_actionhijack_getin_loopf_fb", "telephone", "gr_veh_tank_m551sheridan", "Font_glyphs"] {
+            assert!(is_identifier_shaped(real), "{real}");
+        }
     }
 
     #[test]
