@@ -27,6 +27,12 @@ its foot:
   (`replace_sound_wave`), *Replace cue …* per cue that plays it (`replace_sound_cue`, seeded with the
   retail cue's values, by name or guid) and *Replace its bank*; the EXPORT card (F10) writes the
   selection, the bank or the search hits as 16-bit WAVs plus `captions.csv`.
+- **Anims** plays a clip on the **hero**, the one model you choose for clips (kept in
+  `settings.json`, shared with FaceFX). With no hero the picker opens, ranking every model by how
+  many of the clip's bones its skeleton holds (`heroidx`, read on a worker). The clip card gives
+  the codec (wavelet, interleaved and delta-compressed all decode), length, tracks and the bones
+  bound on the hero. The 29 MANM material animations open a card of their tracks instead: each
+  property's value at the playhead and its curve, sampled as the game samples them (`manm`).
 - **Export…** (the model menu, F10, the verb bar) opens a dialog: a name, the format — the lossless
   bundle or OBJ + MTL + PNG (an imported mesh has no LOD rungs to bundle) — and the folder
   (`workshop_export/` unless chosen); it writes `<folder>/<name>/`.
@@ -149,7 +155,7 @@ cargo run -p mercs2_workshop -- --ui-state crates/mercs2_workshop/ui_states/insp
 ```
 
 The JSON names the state by the words the window shows — `page` (a rail label or `Live`),
-`settings_section`, `tab`, `lens`, `filter`, `load` (a model name, or on another tab that tab's row by its label), `shipment` + `contribution`,
+`settings_section`, `tab`, `lens`, `filter`, `load` (a model name, or on another tab that tab's row by its label), `hero` (a model name, set before `load`), `shipment` + `contribution`,
 `bench` + `donor`, and on the AUDIO tab `bank`, `clip`, `search` and `select` (record indices),
 applied once the tab's routing is read (`ui_states/audio.json`), `run_wad` / `run_data` (a path
 used for this run as Settings' "Use for this run only…" does, after the first load; the capture
