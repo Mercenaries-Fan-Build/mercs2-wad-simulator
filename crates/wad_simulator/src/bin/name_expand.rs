@@ -26,8 +26,9 @@
 //! Usage:
 //!   cargo run --release -p wad_simulator --bin name_expand -- \
 //!       --export docs/data/aset_export.csv \
-//!       --seed docs/data/aset_block_strings.json --seed docs/data/aset_discovered_names.json \
-//!       --emit docs/data/aset_expanded_names.json
+//!       --seed docs/data/aset_block_strings.json \
+//!       --seed crates/mercs2_workshop/data/aset_discovered_names.json \
+//!       --emit crates/mercs2_workshop/data/aset_expanded_names.json
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
@@ -47,7 +48,7 @@ struct Cli {
     #[arg(long)]
     seed: Vec<PathBuf>,
 
-    #[arg(long, default_value = "docs/data/aset_expanded_names.json")]
+    #[arg(long, default_value = "crates/mercs2_workshop/data/aset_expanded_names.json")]
     emit: PathBuf,
 
     /// Max value tried in a numeric slot.
