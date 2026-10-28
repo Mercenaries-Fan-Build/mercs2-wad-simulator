@@ -11,12 +11,12 @@
 //!   These hulls are far lower-poly than the render mesh (a crate: 6 hulls vs its full render shell).
 //! * [`Shape::Box`] — half-extents at the shape's local origin → 12 tris ([`box_tris`]).
 //!
-//! What is **not** wired here (and why the caller must fall back to the render mesh for a unit that
-//! carries it):
+//! What is **not** wired here (an undecoded static mesh makes the collider incomplete —
+//! [`AuthoredCollision::is_complete`] — and the engine then gives the unit no collision, never a
+//! render-mesh substitute):
 //! * [`Shape::Mesh`] (`WpMeshShape16`) — the static building/terrain collision mesh, now DECODED
 //!   ([`mercs2_formats::havok::MeshShape`]: dequantized verts + index triples). A **building-scale** mesh
-//!   (small XZ span / low tri count) drops straight into the collider, so the unit stops needing the render
-//!   fallback. A **terrain-scale** mesh (a full c3 cell, ≈400 m XZ span, ~10k–18k tris) is deliberately
+//!   (small XZ span / low tri count) drops straight into the collider. A **terrain-scale** mesh (a full c3 cell, ≈400 m XZ span, ~10k–18k tris) is deliberately
 //!   NOT fed into the collider — that would re-create the 273k-triangle rebuild churn the heightfield fix
 //!   removed. The terrain heightfield already covers those cells, so a terrain-scale mesh is counted
 //!   ([`AuthoredCollision::n_terrain_mesh`]) and skipped. See [`TERRAIN_MESH_SPAN_M`]/[`TERRAIN_MESH_TRIS`].
@@ -42,7 +42,7 @@ pub const TERRAIN_MESH_SPAN_M: f32 = 300.0;
 pub const TERRAIN_MESH_TRIS: usize = 2000;
 
 /// Model-local authored collision recovered from a `PHY2` body, plus the census the caller needs to
-/// decide whether it is COMPLETE enough to replace the render-mesh collider.
+/// decide whether it is a COMPLETE collider.
 #[derive(Debug, Clone, Default)]
 pub struct AuthoredCollision {
     /// Model-local collision triangles (convex hulls + boxes). Empty when the body has no decodable
@@ -51,7 +51,7 @@ pub struct AuthoredCollision {
     /// The body carries a static collision **mesh** we cannot triangulate (an undecodable
     /// `WpMeshShape16`, or a `hkpMoppBvTreeShape` whose wrapped WpMesh we don't reach). When true the
     /// convex/box tris are only PART of the collider (e.g. a building's break pieces without its walls),
-    /// so the caller must keep the render-mesh fallback.
+    /// so the collider is incomplete ([`Self::is_complete`] is false).
     pub has_undecoded_mesh: bool,
     pub n_hulls: usize,
     pub n_box: usize,
@@ -73,7 +73,7 @@ impl AuthoredCollision {
     /// Whether these authored tris are a COMPLETE static collider — no undecoded static mesh left to
     /// account for, AND either it produced collision tris OR it accounted for the body's geometry with a
     /// terrain-scale mesh routed to the heightfield (empty triangle set, but NOT a case for the render fallback).
-    /// The streaming loader uses this to choose authored PHY2 over the render-mesh triangles for a unit.
+    /// The streaming loader uses this to choose between authored PHY2 and no collision for a unit.
     pub fn is_complete(&self) -> bool {
         !self.has_undecoded_mesh && (!self.tris.is_empty() || self.n_terrain_mesh > 0)
     }
@@ -82,7 +82,7 @@ impl AuthoredCollision {
 /// Triangulate every authored shape in a decoded `PHY2` body into model-local collision tris.
 ///
 /// See the module docs for the per-shape policy. The returned [`AuthoredCollision::has_undecoded_mesh`]
-/// flag is the signal the caller uses to keep the render-mesh fallback for a mesh-collider unit.
+/// flag marks a body whose authored tris are not a complete collider.
 pub fn authored_collision(shapes: &[Shape]) -> AuthoredCollision {
     let mut out = AuthoredCollision::default();
     // A `WpMeshShape16` that failed to decode (empty verts/indices) — a genuinely undecoded static mesh.
@@ -97,11 +97,11 @@ pub fn authored_collision(shapes: &[Shape]) -> AuthoredCollision {
                 out.n_box += 1;
                 out.tris.extend(box_tris(*half_extents));
             }
-            // Decoded `WpMeshShape16`. Route by scale: a building-scale mesh drops its tris into the collider
-            // (the unit stops needing the render fallback); a terrain-scale mesh (full c3 cell) is skipped
+            // Decoded `WpMeshShape16`. Route by scale: a building-scale mesh drops its tris into the collider;
+            // a terrain-scale mesh (full c3 cell) is skipped
             // — the terrain heightfield covers it, and flooding the collider with ~10k–18k tris per cell would
             // re-create the broadphase-rebuild churn the heightfield fix removed. An empty (undecoded)
-            // mesh keeps the render fallback.
+            // mesh makes the collider incomplete.
             Shape::Mesh(mesh) => {
                 if mesh.indices.is_empty() {
                     saw_undecoded_mesh = true;
@@ -121,7 +121,7 @@ pub fn authored_collision(shapes: &[Shape]) -> AuthoredCollision {
             // MOPP is the BV-TREE WRAPPER around a `WpMeshShape16` — NOT separate geometry. In retail each
             // WpMesh is paired with `hkpMoppBvTreeShape` + `hkpMoppCode` (so `n_mopp == 2 * n_meshes`).
             // Counted here; whether it leaves an UNACCOUNTED static mesh is decided after the loop: only a
-            // MOPP with NO decoded WpMesh in the same body is an undecoded static mesh (keep the fallback).
+            // MOPP with NO decoded WpMesh in the same body is an undecoded static mesh (collider incomplete).
             Shape::Mopp => out.n_mopp += 1,
             // Ragdoll/character body colliders — not static world geometry (no model-space transform in
             // the shape). Counted, not emitted, so they are never misplaced at the model origin.
