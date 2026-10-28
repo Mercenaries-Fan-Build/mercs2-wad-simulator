@@ -181,6 +181,9 @@ pub struct DrawGroup {
     /// The material's pixel-shader key (`pandemic_hash_m2` of a registered pixel shader name, e.g.
     /// `PgDiffEmisFP`), which decides what the texture slots mean. 0 = no material.
     pub shader_key: u32,
+    /// The material's alpha multiplier (`MtrlMaterial::alpha_multiplier`, `materialData` c98.w): the
+    /// pixel alpha is `diffuse.a × this`. 1.0 for a draw with no material.
+    pub material_alpha: f32,
     /// The container's drawing-group (PRMG) index this draw came from — the MESH-order index that
     /// `INDX`/destruction (`orchestrator::Destruction::state_of_mesh`) keys on. Lets a caller hide a
     /// group by destruction state (e.g. drop the `break_piece` rubble to show the pristine building).
@@ -231,6 +234,7 @@ impl Default for DrawGroup {
             textures: Vec::new(),
             material_flags: 0,
             shader_key: 0,
+            material_alpha: 1.0,
             group_index: 0,
             lod_mask: 0xFF,
             node: -1,
@@ -690,6 +694,7 @@ fn build_indexed_source(
                 textures: mat.map(|m| m.textures.clone()).unwrap_or_default(),
                 material_flags: mat.map_or(0, |m| m.flags),
                 shader_key: mat.map_or(0, |m| m.shader_key),
+                material_alpha: mat.map_or(1.0, |m| m.alpha_multiplier()),
                 group_index: m.group_index,
                 lod_mask: pl.lod_mask,
                 // SEGM +0 is a SIGNED i16: 0xFFFF is node -1 ("no node"), not node 65535.
