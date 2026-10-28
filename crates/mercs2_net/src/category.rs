@@ -12,7 +12,7 @@
 //! PTR_s_NetCategoryInfo_017bebf4 = "NetCategoryInfo";
 //! ```
 //!
-//! The descriptor backs the recovered category set: one **primary** class plus eight **sub-cats**,
+//! The descriptor backs the recovered category set: one **primary** class plus seven **sub-cats**,
 //! each an independently-serialized typed sub-stream (§3) — the engine syncs `NetSubCatHealth` /
 //! `NetSubCatInventory` / … separately, not one monolithic snapshot. This granularity is the reason
 //! the model replicates node/health/importance rather than full transforms (GDC 2008: both peers
@@ -30,7 +30,7 @@ pub const CATEGORY_POOL_SIZE: u32 = 0x100;
 pub const CATEGORY_HASH_SEED: u32 = 0x9e37_79b9;
 
 /// The recovered replication categories (§3). `Primary` is the object's replication class;
-/// the eight `SubCat*` are the independently-synced typed sub-streams.
+/// the seven `SubCat*` are the independently-synced typed sub-streams.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum NetCategory {
     /// `NetPrimaryCategory` — the primary replication class of the object.
