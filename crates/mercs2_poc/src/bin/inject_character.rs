@@ -8,7 +8,7 @@
 //! target skeleton (its HIER = the 84/100-bone rig we re-pose onto).
 //!
 //! Usage:
-//!   inject_character --glb <model.glb> --donor <block.bin> --group <ordinal> --out <out.bin>
+//!   inject_character --glb <model.glb> --donor <block.bin> --group <ordinal>[,<ordinal>...] --out <out.bin>
 //!                    [--name <hex>] [--repoint <from_hex>:<to_hex>]... [--container-verts <tsv>]
 //!
 //! Without `--container-verts` the model→container transform is ESTIMATED from bone
