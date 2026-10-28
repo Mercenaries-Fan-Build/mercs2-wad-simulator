@@ -27,6 +27,10 @@ pub struct UiState {
     /// row of the chosen tab listed under that label — opened as a click on it opens it. A row that
     /// reads on a worker (a string table) is captured once it has read.
     pub load: Option<String>,
+    /// The hero for this run, by its model row's label — not saved to the settings. Applied before
+    /// `load`, so an ANIMS row plays on it; without one, an ANIMS row opens the hero picker, which
+    /// is captured once every skeleton has read.
+    pub hero: Option<String>,
     /// A Shipment folder to open.
     pub shipment: Option<PathBuf>,
     /// The contribution to select in that Shipment, by index.
