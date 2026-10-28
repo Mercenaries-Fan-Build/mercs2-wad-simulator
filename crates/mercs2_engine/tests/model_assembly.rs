@@ -205,16 +205,26 @@ fn lod_masks_partition_the_tiers_across_the_chain() {
 
 /// Bounding-box centre of one draw's triangles, posed by its rung's REST palette (`stats.bones`).
 fn rest_center(r: &mercs2_engine::model::Rung, d: &mercs2_engine::mesh::DrawGroup) -> [f32; 3] {
+    posed_center(&r.vertices, &r.indices, &r.stats.bones, d)
+}
+
+/// The bbox centre of one draw's vertices skinned by `palette`.
+fn posed_center(
+    vertices: &[mercs2_engine::mesh::Vertex],
+    indices: &[u32],
+    palette: &[[[f32; 4]; 4]],
+    d: &mercs2_engine::mesh::DrawGroup,
+) -> [f32; 3] {
     let (mut lo, mut hi) = ([f32::MAX; 3], [f32::MIN; 3]);
     for k in d.index_start..d.index_start + d.index_count {
-        let v = &r.vertices[r.indices[k as usize] as usize];
+        let v = &vertices[indices[k as usize] as usize];
         let mut p = [0f32; 3];
         for j in 0..4 {
             let w = v.weights[j] as f32 / 255.0;
             if w == 0.0 {
                 continue;
             }
-            let s = &r.stats.bones[v.joints[j] as usize];
+            let s = &palette[v.joints[j] as usize];
             for a in 0..3 {
                 p[a] += w * (v.pos[0] * s[0][a] + v.pos[1] * s[1][a] + v.pos[2] * s[2][a] + s[3][a]);
             }
@@ -257,6 +267,27 @@ fn instanced_road_wheels_rest_on_their_own_hubs() {
             assert!((c[0].abs() - 1.45).abs() < 0.01, "wheel row {} off the track line: {c:?}", d.segm_row);
             hubs.push([(c[0] * 100.0).round() as i32, (c[1] * 100.0).round() as i32, (c[2] * 100.0).round() as i32]);
         }
+    }
+    hubs.sort_unstable();
+    hubs.dedup();
+    assert_eq!(hubs.len(), 14, "14 road wheels on 14 distinct hubs: {hubs:?}");
+}
+
+#[test]
+fn an_undriven_vehicle_spawns_at_its_rest_palette() {
+    // The game world loads a placed model through `load_model_by_hash` and spawns it with the scene's
+    // `SkinData::rest_palette`. An identity palette there sank the M1A2's turret and stacked its
+    // instanced wheels in game exactly as it did in the Workshop; the rest palette puts every
+    // near-tier wheel on its own hub.
+    let mut w = open_vz_wad();
+    let (m, _, _) = mercs2_engine::game_world::load_model_by_hash(&mut w, 0xCE77_D4CB).expect("al_veh_tank_m1a2 loads");
+    let rest = m.skin.rest_palette(&m.verts).unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(rest, m.skin.bones, "a rigged model rests at its skin's rest palette");
+    let mut hubs: Vec<[i32; 3]> = Vec::new();
+    for d in m.draws.iter().filter(|d| d.seg_id == 72) {
+        let c = posed_center(&m.verts, &m.indices, &rest, d);
+        assert!((c[0].abs() - 1.45).abs() < 0.01, "wheel row {} off the track line: {c:?}", d.segm_row);
+        hubs.push([(c[0] * 100.0).round() as i32, (c[1] * 100.0).round() as i32, (c[2] * 100.0).round() as i32]);
     }
     hubs.sort_unstable();
     hubs.dedup();
