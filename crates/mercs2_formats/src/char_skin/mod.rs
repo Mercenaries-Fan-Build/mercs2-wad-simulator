@@ -79,7 +79,7 @@ impl TargetSkeleton {
     /// the `hash_XXXXXXXX` spelling, which is honest — a name we do not have is not a name we may
     /// invent, and the correction tables simply will not match it.
     ///
-    /// The workspace's own source is `crates/mercs2_workshop/data/production_names.json` (23,110
+    /// The workspace's own source is `crates/mercs2_workshop/data/production_names.json` (23,106
     /// hash-verified entries),
     /// reachable through `mercs2_quartermaster::names::NameTable`. On `pmc_hum_mattias` it resolves
     /// 95 of 116 bones; the 21 it misses are unresolvable by any corpus in the project, and none of
