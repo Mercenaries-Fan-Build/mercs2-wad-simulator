@@ -427,7 +427,7 @@ environment variable is consulted. The file holds one `key = "path"` per line:
 | `unluac_jar` | the unluac jar | tests and dev tools that convert console Lua bytecode |
 | `java_binary` | the `java` executable that runs unluac | tests and dev tools that convert console Lua bytecode |
 | `unrar_binary` | `UnRAR.exe` | tests of the RAR'd Xbox 360 DLC path |
-| `lua51_src_dir` | the pristine Lua 5.1 `src` tree | the `mercs2_luac` vendor-integrity test |
+| `lua51_src_dir` | the pristine Lua 5.1 `src` tree | the `mercs2_luac` vendor-vs-upstream test (`tests/vendor_upstream_retail.rs`) |
 
 `scripts/find-vz-wad.sh --write` writes `vz_wad` only, and rewrites the whole file, so
 the console keys, `unpacked_exe`, `canonical_dir`, the console-image keys, the corpus keys and the tool keys are added by hand after it runs. The
