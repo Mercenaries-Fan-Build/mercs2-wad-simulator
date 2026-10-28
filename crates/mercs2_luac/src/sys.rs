@@ -2,7 +2,8 @@
 //!
 //! Every declaration here is **transcribed** from `vendor/lua.h`, `vendor/lauxlib.h`,
 //! `vendor/lualib.h` and `vendor/luaconf.h` — not recalled. When the vendored tree moves, so does
-//! this file, and `tests/vendor_integrity.rs` is what notices.
+//! this file, and `tests/vendor_integrity.rs` (the patched files) with
+//! `tests/vendor_upstream_retail.rs` (everything else against upstream) is what notices.
 //!
 //! # The one declaration that matters
 //!
