@@ -135,10 +135,9 @@ entry, copied from the base WAD: an asset in a block with no row naming it is th
 
 ## Status
 
-Every kind lowers end-to-end against retail WADs except `edit_state_machine`, which returns
-`Unsupported` **with the reason** rather than being quietly skipped — a dropped contribution
-produces a WAD that looks fine and does nothing. (`raw` and `native_hook` used to be in that
-sentence too; both lower now.)
+Every kind lowers end-to-end against retail WADs. A contribution the lowering cannot honour is
+refused **with the reason** rather than quietly skipped — a dropped contribution produces a WAD
+that looks fine and does nothing.
 
 The Code layer is three kinds, and the split is about who chooses the destination. `native_hook`
 places one `.asi` and chooses the directory itself; `add_runtime_dll` places one runtime DLL in the
@@ -149,12 +148,14 @@ destination **name** from a closed set (`game_root`, `scripts`, `plugins`, `upda
 `on_load`, `on_key`). Neither takes a path, so `Mercenaries2.exe` and `data/vz.wad` stay unreachable
 by construction rather than by a rule that could be suppressed: a path-shaped `dest:` does not
 parse, and the filename comes from the source file, with `.wad`, `.exe`, `.dll` and the loader's own
-reserved name refused outright (a `.dll` only through `add_runtime_dll`). None needs a game stack,
-so all three lower in template CI.
+reserved name refused outright (a `.dll` only through `add_runtime_dll`). None reads the game
+stack, so the library's `build` lowers all three without one; `qm build` itself opens a game stack
+for every Shipment and exits 2 when none is found.
 
-`add_movie` is the odd one out in a useful way: it is the only Data kind that needs no game stack.
-A Scaleform GFx movie is self-contained — no donor to borrow a rig from, no target whose dimensions
-it must match — so it builds where the retail WADs do not exist, which is where template CI runs.
+`add_movie` needs no game stack either — nor do `add_texture`, `add_animation` and `add_sound`.
+A Scaleform GFx movie is self-contained — no donor to borrow a rig from, no
+target whose dimensions it must match — so the library's `build` lowers it where the retail WADs
+do not exist.
 The movie is validated by parsing it and then injected **verbatim**; retail ships 61 compressed
 `CFX` movies and 3 uncompressed `GFX`, so there is no encoding to normalise to and nothing is
 re-encoded in either direction.
