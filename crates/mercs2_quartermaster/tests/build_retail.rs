@@ -3524,6 +3524,34 @@ fn m0197_refuses_a_script_name_the_game_ships() {
     assert!(m0197_of("m0197_novel", "  - kind: add_script\n    name: qm_w2_novel_module\n    source: src/a.lua\n").is_empty());
 }
 
+/// A `-patch.wad` overlay is never read for M0197: the Shipment's own installed build carries the
+/// script it mints, and a stack holding it (the Workshop's build stack holds `vz-patch.wad`) must
+/// not refuse the Shipment's own name.
+#[test]
+fn m0197_does_not_read_the_stacks_overlays() {
+    use mercs2_formats::types::TYPE_ID_SCRIPT;
+    let mut game = retail_game();
+    let dir = scratch("m0197_overlay");
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::write(dir.join("src/a.lua"), "return {}\n").unwrap();
+    let s = shipment(&dir, "  - kind: add_script\n    name: qm_w2_overlay_probe\n    source: src/a.lua\n");
+    let corpus = corpus_for_tests();
+    let report = build::build(&s, Some(&mut game), None, None, Some(&corpus), None).expect("the add_script builds");
+    let overlay = report.wad.expect("a WAD");
+
+    let vz = game.paths()[0].to_path_buf();
+    let stacked = mercs2_quartermaster::GameStack::open(&[vz, overlay]).expect("vz.wad + the build");
+    let h = mercs2_quartermaster::manifest::asset_hash("qm_w2_overlay_probe");
+    assert!(stacked.has_asset(h, TYPE_ID_SCRIPT), "the overlay carries the minted script");
+    assert!(!stacked.base_has_asset(h, TYPE_ID_SCRIPT), "vz.wad does not");
+    let mut stacked = stacked;
+    let d: Vec<_> = mercs2_quartermaster::lint::game_checks(&s.manifest, &mut stacked)
+        .into_iter()
+        .filter(|d| d.rule.code == "M0197")
+        .collect();
+    assert!(d.is_empty(), "{d:?}");
+}
+
 /// The game's own WADs present beside vz.wad are found case-insensitively (`Loading.wad`,
 /// `English.wad`), absent ones are not listed, and `-patch.wad` overlays never are.
 #[test]
@@ -3574,7 +3602,7 @@ fn m0198_refuses_a_key_already_placed() {
     let add = "  - kind: add_placement\n    layer: layers_static\n    entity: src/e.yaml\n";
 
     let taken = placement_shipment("m0198_taken", &entity(placed), add);
-    let d = lint::placement_game_checks(&taken.manifest, &taken.root, &mut game).expect("the file reads");
+    let d = lint::placement_game_checks(&taken.manifest, &taken.root, &mut game);
     assert_eq!(d.iter().map(|d| d.rule.code).collect::<Vec<_>>(), vec!["M0198"], "{d:?}");
     assert!(d[0].message.contains(&format!("0x{placed:08X}")), "{}", d[0].message);
     match build::build(&taken, Some(&mut game), None, None, None, None) {
@@ -3584,7 +3612,7 @@ fn m0198_refuses_a_key_already_placed() {
     }
 
     let fresh = placement_shipment("m0198_fresh", &entity(free), add);
-    assert!(lint::placement_game_checks(&fresh.manifest, &fresh.root, &mut game).unwrap().is_empty());
+    assert!(lint::placement_game_checks(&fresh.manifest, &fresh.root, &mut game).is_empty());
 
     let twice = format!(
         "- {{ key: 0x{free:08X}, model: a, pos: [0, 0, 0] }}\n- {{ key: 0x{free:08X}, model: b, pos: [1, 0, 0] }}\n"
@@ -3594,15 +3622,15 @@ fn m0198_refuses_a_key_already_placed() {
         "  - kind: add_layer\n    name: vz_state_qm_w2_test\n    template: layers_static\n    entities: src/e.yaml\n",
     ] {
         let s = placement_shipment("m0198_twice", &twice, c);
-        let d = lint::placement_game_checks(&s.manifest, &s.root, &mut game).expect("the file reads");
+        let d = lint::placement_game_checks(&s.manifest, &s.root, &mut game);
         assert_eq!(d.iter().map(|d| d.rule.code).collect::<Vec<_>>(), vec!["M0198"], "{c}: {d:?}");
         assert!(d[0].message.contains("two records"), "{}", d[0].message);
     }
 }
 
-/// An entity file that does not parse is refused as an `edit_world` edits file is: by the build, as
-/// a lowering error naming the file and the reason — here the field the closed schema does not
-/// have — and by the M0198 check, so `qm lint --with-game` cannot pass what `qm build` refuses.
+/// An entity file that does not parse is handled as an `edit_world` edits file is: no lint reads it
+/// (the M0198 check reports nothing for it), and the build refuses it as a lowering error naming the
+/// file and the reason — here the field the closed schema does not have.
 #[test]
 fn an_unparseable_entity_file_is_refused_by_name() {
     let mut game = retail_game();
@@ -3612,9 +3640,8 @@ fn an_unparseable_entity_file_is_refused_by_name() {
         bad,
         "  - kind: add_placement\n    layer: layers_static\n    entity: src/e.yaml\n",
     );
-    let e = mercs2_quartermaster::lint::placement_game_checks(&s.manifest, &s.root, &mut game).unwrap_err();
-    assert_eq!((e.index, e.kind), (0, "add_placement"));
-    assert!(e.message.contains("e.yaml") && e.message.contains("unknown field `position`"), "{e}");
+    let d = mercs2_quartermaster::lint::placement_game_checks(&s.manifest, &s.root, &mut game);
+    assert!(d.is_empty(), "{d:?}");
     match build::build(&s, Some(&mut game), None, None, None, None) {
         Err(BuildError::Lower { index: 0, kind: "add_placement", message }) => {
             assert!(message.contains("e.yaml") && message.contains("unknown field `position`"), "{message}")
