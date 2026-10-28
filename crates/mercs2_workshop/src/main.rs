@@ -66,6 +66,7 @@ mod audioplay; // One-shot audio preview on the default output device (cpal)
 mod audioroute; // Which banks and cues play each VO line, from English.wad
 mod audioexport; // VO clips out as WAV + captions.csv
 mod audiopage; // Inspect's AUDIO tab: banks, clips, preview, export, Add to Shipment
+mod textpage; // Inspect's TEXT tab: every string table side by side by key
 mod vostream; // Stream VO PCM straight from the game's vo_stream.english.pws
 mod bundle;
 mod chains; // Where the game archive and the reference bundle come from, first match wins
