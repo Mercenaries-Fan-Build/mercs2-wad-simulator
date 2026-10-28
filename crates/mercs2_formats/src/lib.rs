@@ -120,6 +120,7 @@ pub mod dlc_stfs;
 pub mod exe_image;
 pub mod donor;
 pub mod ffcs;
+pub mod font;
 pub mod fxdict;
 pub mod game_paths;
 pub mod gfx;
