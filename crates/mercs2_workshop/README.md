@@ -206,11 +206,17 @@ the download fails, the run stops with an error giving the URL, its sha256 and t
 the zip into. A complete bundle missing `audio_manifest.json`, or holding a malformed one, stops the
 boot with an error naming the file.
 
+The install writes the pin it checked into the bundle as `installed_pin.env`, and step 6 uses the
+downloaded copy only when that record names the pin's URL and sha256 (`fetch::installed_pin_mismatch`).
+A copy without the record (unpacked into the cache by hand, or installed from the latest release by
+an earlier build) or with another pin is passed over: with nothing above it, the boot replaces it
+through the pinned install, and the lookup's error and the boot log say why it was not used.
+
 The corpus gates in `lua_source`, `blueprint` and `missions` run over the bundle's Lua and are
-pinned to release v0.17.0's bundle (`index::PINNED_CORPUS`: 675 scripts in `lua/`, 39 in
-`lua_dlc/`), the one CI downloads and `fetch::PINNED` names. A different bundle fails them on the
-count: re-download the bundle from Settings, or point `MERCS2_WORKSHOP_DATA` at an unpacked v0.17.0
-`workshop_data/`.
+pinned to the bundle `data/workshop_data_pin.env` names (`index::PINNED_CORPUS`: 675 scripts in
+`lua/`, 39 in `lua_dlc/`), the one CI downloads and `fetch::PINNED` installs. A different bundle
+fails them on the count: re-download the bundle from Settings, or point `MERCS2_WORKSHOP_DATA` at
+that release's unpacked `workshop_data/`.
 
 `--pack-data [dir]` builds the bundle (default `workshop_data`). Its in-repo sources are read from
 the checkout the binary was built from: names come from this crate's
