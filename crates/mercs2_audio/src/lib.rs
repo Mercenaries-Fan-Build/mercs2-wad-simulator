@@ -349,9 +349,11 @@ mod tests {
         let other: Vec<i16> = vec![-3000; 2 * 400];
         let spec = BankSpec {
             name: "mod_chain_bank".to_string(),
+            hash: m2("mod_chain_bank"),
             cues: vec![
                 CueSpec {
                     name: "mod_other".to_string(),
+                    guid: m2("mod_other"),
                     category: "sfx".to_string(),
                     sound_id: m2("mod_other"),
                     clip_hash: m2("mod_other"),
@@ -361,6 +363,7 @@ mod tests {
                 },
                 CueSpec {
                     name: "mod_tone".to_string(),
+                    guid: m2("mod_tone"),
                     category: "ui".to_string(),
                     sound_id: m2("mod_tone"),
                     clip_hash: m2("mod_tone"),

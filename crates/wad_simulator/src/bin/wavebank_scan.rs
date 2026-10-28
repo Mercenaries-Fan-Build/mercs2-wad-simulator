@@ -68,13 +68,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let rb = {
         let start = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-        let data = mercs2_formats::game_paths::local_config_notes_docs_dir(start)?.join("data");
+        let notes = mercs2_formats::game_paths::local_config_notes_docs_dir(start)?.join("data");
+        let names = start.join("../mercs2_workshop/data");
         let tables: Vec<PathBuf> = vec![
             mercs2_formats::game_paths::local_config_rainbow_table(start)?,
-            data.join("aset_discovered_names.json"),
-            data.join("aset_block_strings.json"),
+            names.join("aset_discovered_names.json"),
         ];
-        RainbowTable::load_many(&tables).map_err(|e| format!("load rainbow tables {tables:?}: {e}"))?
+        let mut rb = RainbowTable::load_many(&tables).map_err(|e| format!("load rainbow tables {tables:?}: {e}"))?;
+        rb.merge(RainbowTable::load_harvested(&notes.join("aset_block_strings.json"), &names.join("rejected_names.json"))?);
+        rb
     };
 
     let mut f = File::open(&cli.wad)?;

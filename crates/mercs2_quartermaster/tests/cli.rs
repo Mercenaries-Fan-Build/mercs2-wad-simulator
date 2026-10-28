@@ -225,7 +225,7 @@ fn the_name_table_is_found_by_walking_up_not_by_a_compiled_in_path() {
 ",
     );
     // CARGO_MANIFEST_DIR is this crate's directory, which is inside the workspace that owns
-    // data/production_names.json — so a correct walk-up finds it.
+    // crates/mercs2_workshop/data/production_names.json — so a correct walk-up finds it.
     let out = Command::new(env!("CARGO_BIN_EXE_qm"))
         .args(["lint", s.to_str().unwrap()])
         .current_dir(env!("CARGO_MANIFEST_DIR"))

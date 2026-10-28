@@ -15,7 +15,7 @@
 //!
 //! Emits a CSV row per distinct node hash and a summary to stdout.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap};
 
 use mercs2_engine::wad;
 use mercs2_formats::hash::pandemic_hash_m2;
@@ -141,45 +141,35 @@ pub fn bone_census(
     let mut n_models_seen = 0usize;
     let mut n_models_parsed = 0usize;
     let mut n_models_no_hier = 0usize;
+    let mut n_models_unreadable = 0usize;
     let mut n_animgroups = 0usize;
     let mut n_clips = 0usize;
 
     for wadpath in wadpaths {
         let mut w = wad::open(wadpath).map_err(|e| format!("open {wadpath}: {e}"))?;
 
-        // ---- models, grouped by block so each block decompresses once ----
-        let mut by_block: BTreeMap<u16, Vec<u32>> = BTreeMap::new();
-        for (hash, block) in wad::model_list_all(&w) {
-            by_block.entry(block).or_default().push(hash);
-        }
-        let n_blocks = by_block.len();
-        eprintln!(
-            "[{wadpath}] {} model assets in {n_blocks} blocks",
-            by_block.values().map(|v| v.len()).sum::<usize>()
-        );
-
-        for (bi, (block, models)) in by_block.into_iter().enumerate() {
-            if bi % 100 == 0 {
-                eprintln!("  block {bi}/{n_blocks} ...");
-            }
-            let Ok(dec) = wad::decompress_block_index(&mut w, block) else { continue };
-            for m in models {
-                n_models_seen += 1;
-                // Fast path: slice the model out of the already-decompressed block.
-                let mut container = wad::model_span_in(&dec, m);
-                let mut hier = container.as_deref().map(orchestrator::parse_hier).unwrap_or_default();
-                // Robust fallback: full container extraction resolves models that model_span_in can't
-                // slice from their primary block alone (multi-block models, e.g. al_veh_boat_destroyer).
-                if hier.is_empty() {
-                    if let Ok(c) = wad::extract_container(&mut w, m) {
-                        hier = orchestrator::parse_hier(&c);
-                        container = Some(c);
-                    }
+        // ---- models, block by block so each block decompresses once (`wad::for_each_model_hier`) ----
+        eprintln!("[{wadpath}] {} model assets", wad::model_list_all(&w).len());
+        wad::for_each_model_hier(
+            &mut w,
+            |done, total| {
+                if done % 100 == 0 {
+                    eprintln!("  block {done}/{total} ...");
                 }
-                let Some(container) = container else { continue };
+            },
+            |m, read| {
+                n_models_seen += 1;
+                let (container, hier) = match read {
+                    Ok(r) => r,
+                    Err(e) => {
+                        n_models_unreadable += 1;
+                        eprintln!("  model 0x{m:08X}: {e}");
+                        return;
+                    }
+                };
                 if hier.is_empty() {
                     n_models_no_hier += 1;
-                    continue;
+                    return;
                 }
                 n_models_parsed += 1;
 
@@ -226,8 +216,8 @@ pub fn bone_census(
                         rec.states.insert(s.as_str().to_string());
                     }
                 }
-            }
-        }
+            },
+        );
 
         // ---- animgroups: which nodes are actually DRIVEN by animation ----
         for blk in wad::animgroup_blocks(&w) {
@@ -304,6 +294,7 @@ pub fn bone_census(
     println!("  with a HIER        : {n_models_parsed}");
     println!("  no HIER / no span  : {}", n_models_seen - n_models_parsed);
     println!("  (empty HIER)       : {n_models_no_hier}");
+    println!("  (unreadable)       : {n_models_unreadable}");
     println!("animgroups / clips   : {n_animgroups} / {n_clips}");
     println!("DISTINCT NODE HASHES : {}", bones.len());
     println!("  named (any source) : {named}  (rainbow-backed: {rainbow_named})");

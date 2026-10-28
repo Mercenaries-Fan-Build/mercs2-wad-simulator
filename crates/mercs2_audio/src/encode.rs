@@ -152,8 +152,11 @@ pub const UI_PDA_OPEN_CUE: CueParams = CueParams {
 /// One cue to encode.
 #[derive(Clone, Debug, PartialEq)]
 pub struct CueSpec {
-    /// Cue name; its guid is `m2(name)`, which is what `Sound.CueSound(name)` looks up.
+    /// Cue name as the author wrote it (a name, or a bare hash for a game cue), for messages.
     pub name: String,
+    /// Cue guid, what `Sound.CueSound(name)` looks up: `m2(name)` for a new cue, the game cue's own
+    /// guid for a cue an override rewrites.
+    pub guid: u32,
     /// Category name; must hash to one of [`RETAIL_CATEGORIES`].
     pub category: String,
     /// The group's `+0x00` sound id (read by `FUN_008369e0`'s language gate; `m2(name)` in
@@ -172,8 +175,11 @@ pub struct CueSpec {
 /// A bank to encode.
 #[derive(Clone, Debug, PartialEq)]
 pub struct BankSpec {
-    /// Bank name; every table carries `m2(name)`.
+    /// Bank name as the author wrote it, for messages.
     pub name: String,
+    /// The bank hash every table carries: `m2(name)` for a new bank, the game soundbank's own bank
+    /// hash for a replacement.
+    pub hash: u32,
     /// The cues, in the order they take in the soundbank and wavebank.
     pub cues: Vec<CueSpec>,
 }
@@ -243,6 +249,9 @@ pub enum EncodeError {
     SoundDb(SoundDbError),
     /// A cue's length could not be computed (e.g. it plays another bank's group).
     Length { cue: String, error: DurationError },
+    /// A cue whose length is to be recomputed also plays a group of another soundbank, which this
+    /// bank does not hold.
+    CrossBankCue { cue: String, soundbank: u32 },
 }
 
 impl std::fmt::Display for EncodeError {
@@ -285,6 +294,11 @@ impl std::fmt::Display for EncodeError {
             EncodeError::Wavebank(e) => write!(f, "encode: {e}"),
             EncodeError::Soundbank(e) => write!(f, "encode: {e}"),
             EncodeError::SoundDb(e) => write!(f, "encode: {e}"),
+            EncodeError::CrossBankCue { cue, soundbank } => write!(
+                f,
+                "encode: cue {cue} also plays a group of soundbank 0x{soundbank:08X}, so its length \
+                 cannot be recomputed from this bank alone"
+            ),
             EncodeError::Length { cue, error } => write!(f, "encode: cue {cue:?}: {error}"),
         }
     }
@@ -405,8 +419,10 @@ pub enum CueBodySpec {
 /// One cue of a bank.
 #[derive(Clone, Debug, PartialEq)]
 pub struct CueDef {
-    /// Cue name; its guid is `m2(name)`.
+    /// Cue name, for messages.
     pub name: String,
+    /// Cue guid ([`CueSpec::guid`]).
+    pub guid: u32,
     /// `+0x06` start limit: the engine starts the cue only while fewer than this many of its
     /// instances play (`FUN_00834ad0`; `FUN_008354e0` counts one up as an instance plays,
     /// `FUN_00835850` one down as it finishes); 0 = no limit.
@@ -420,8 +436,10 @@ pub struct CueDef {
 /// A whole bank, authored table by table.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TablesSpec {
-    /// Bank name; every table carries `m2(name)`.
+    /// Bank name, for messages.
     pub name: String,
+    /// The bank hash every table carries ([`BankSpec::hash`]).
+    pub hash: u32,
     /// The waves, in wavebank order.
     pub waves: Vec<WaveSpec>,
     /// The groups, in soundbank order.
@@ -468,7 +486,7 @@ pub fn build_general(spec: &TablesSpec) -> Result<BankTables, EncodeError> {
             return Err(EncodeError::TooLarge { what, value: n });
         }
     }
-    let bank_hash = pandemic_hash_m2(&spec.name);
+    let bank_hash = spec.hash;
 
     let records = spec
         .waves
@@ -544,7 +562,7 @@ pub fn build_general(spec: &TablesSpec) -> Result<BankTables, EncodeError> {
         if c.name.is_empty() {
             return Err(EncodeError::EmptyName);
         }
-        let guid = pandemic_hash_m2(&c.name);
+        let guid = c.guid;
         if entries.iter().any(|e| e.guid == guid) {
             return Err(EncodeError::DuplicateCue { name: c.name.clone(), guid });
         }
@@ -616,7 +634,8 @@ pub fn build_tables(spec: &BankSpec) -> Result<BankTables, EncodeError> {
     if spec.cues.is_empty() {
         return Err(EncodeError::NoCues);
     }
-    let mut general = TablesSpec { name: spec.name.clone(), waves: Vec::new(), groups: Vec::new(), cues: Vec::new() };
+    let mut general =
+        TablesSpec { name: spec.name.clone(), hash: spec.hash, waves: Vec::new(), groups: Vec::new(), cues: Vec::new() };
     for (i, c) in spec.cues.iter().enumerate() {
         check_pcm(&format!("cue {:?}", c.name), &c.pcm)?;
         let hash = pandemic_hash_m2(&c.category);
@@ -645,6 +664,7 @@ pub fn build_tables(spec: &BankSpec) -> Result<BankTables, EncodeError> {
         });
         general.cues.push(CueDef {
             name: c.name.clone(),
+            guid: c.guid,
             byte_06: c.cue.byte_06,
             gain: c.cue.gain,
             body: CueBodySpec::SingleTrack { group: i, unknown_16: c.cue.unknown_16 },
@@ -697,7 +717,7 @@ pub struct Retargeted {
     pub record: WaveRecord,
 }
 
-/// Rewrite cue `m2(spec.name)` of `bank` to play a new single-wave group, and nothing else.
+/// Rewrite cue `spec.guid` of `bank` to play a new single-wave group, and nothing else.
 ///
 /// The group is appended after the bank's last group — so every existing group keeps its index and
 /// bytes — with `spec`'s category, sound id and group fields, and one wave `{wavebank, wave_index,
@@ -713,7 +733,7 @@ pub fn retarget_cue(
     if spec.name.is_empty() {
         return Err(EncodeError::EmptyName);
     }
-    let guid = pandemic_hash_m2(&spec.name);
+    let guid = spec.guid;
     let cue_index = bank
         .cues
         .iter()
@@ -762,6 +782,74 @@ pub fn retarget_cue(
     Ok(Retargeted { cue_index, group_index, record })
 }
 
+// ---- moving one wave of an existing bank --------------------------------------------------------
+
+/// Point every wave reference of `bank`'s groups to `from` (`(wavebank, index)`) at `to`, keeping
+/// the reference's weight and every other wave of its group. Returns the indices of the groups it
+/// rewrote; every other byte of the bank is left as parsed.
+pub fn retarget_wave(bank: &mut Soundbank, from: (u32, u32), to: (u32, u32)) -> Vec<usize> {
+    let mut rewritten = Vec::new();
+    for (i, g) in bank.groups.iter_mut().enumerate() {
+        let waves: &mut [WaveRef] = match &mut g.form {
+            GroupForm::Single { wave, .. } => std::slice::from_mut(wave),
+            GroupForm::Multi(m) => &mut m.waves,
+        };
+        let mut hit = false;
+        for w in waves.iter_mut().filter(|w| (w.wavebank, w.index) == from) {
+            (w.wavebank, w.index) = to;
+            hit = true;
+        }
+        if hit {
+            rewritten.push(i);
+        }
+    }
+    rewritten
+}
+
+/// The `(soundbank, group)` pairs a cue can play: its one group, or every entry of every sound of
+/// every track.
+pub fn cue_groups(body: &CueBody) -> Vec<(u32, u16)> {
+    match body {
+        CueBody::SingleTrack { soundbank, group_index, .. } => vec![(*soundbank, *group_index)],
+        CueBody::MultiTrack(m) => m
+            .tracks
+            .iter()
+            .flat_map(|t| t.sounds.iter())
+            .flat_map(|s| s.entries.iter())
+            .map(|e| (e.soundbank, e.group_index))
+            .collect(),
+    }
+}
+
+/// Recompute the `+0x0C` length ([`crate::duration`]) of every cue of `bank` that reaches one of
+/// `groups` (indices into `bank.groups`), finding wave records with `wave`. A cue that reaches a
+/// group of another soundbank is refused: its length depends on tables this bank does not hold.
+/// Returns the indices of the cues whose length it set.
+pub fn recompute_lengths<'a>(
+    bank: &mut Soundbank,
+    groups: &[usize],
+    wave: impl Fn(u32, u32) -> Option<&'a WaveRecord>,
+) -> Result<Vec<usize>, EncodeError> {
+    let hash = bank.bank_hash;
+    let reached = |g: &(u32, u16)| g.0 == hash && groups.contains(&usize::from(g.1));
+    let own = bank.groups.clone();
+    let mut set = Vec::new();
+    for (i, cue) in bank.cues.iter_mut().enumerate() {
+        let pairs = cue_groups(&cue.body);
+        if !pairs.iter().any(reached) {
+            continue;
+        }
+        let name = format!("0x{:08X}", cue.guid);
+        if let Some(&(other, _)) = pairs.iter().find(|(sb, _)| *sb != hash) {
+            return Err(EncodeError::CrossBankCue { cue: name, soundbank: other });
+        }
+        cue.length_s = duration::cue_length_s(&cue.body, |_, g| own.get(usize::from(g)), |wb, w| wave(wb, w))
+            .map_err(|error| EncodeError::Length { cue: name, error })?;
+        set.push(i);
+    }
+    Ok(set)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -770,6 +858,7 @@ mod tests {
     fn cue(name: &str, channels: u8, samples: Vec<i16>) -> CueSpec {
         CueSpec {
             name: name.to_string(),
+            guid: pandemic_hash_m2(name),
             category: "ui".to_string(),
             sound_id: pandemic_hash_m2(name),
             clip_hash: pandemic_hash_m2(name),
@@ -782,6 +871,7 @@ mod tests {
     fn spec() -> BankSpec {
         BankSpec {
             name: "mod_ui_sounds".to_string(),
+            hash: pandemic_hash_m2("mod_ui_sounds"),
             cues: vec![
                 cue("mod_click", 1, (0..1001).map(|i| (i * 7) as i16).collect()),
                 cue("mod_whoosh", 2, (0..2000).map(|i| (i * 3) as i16).collect()),
@@ -836,6 +926,7 @@ mod tests {
     fn bad_input_is_refused() {
         let mut s = spec();
         s.cues[1].name = "mod_click".to_string();
+        s.cues[1].guid = pandemic_hash_m2("mod_click");
         assert!(matches!(encode_bank(&s), Err(EncodeError::DuplicateCue { .. })));
 
         let mut s = spec();
@@ -893,6 +984,7 @@ mod tests {
         let wave = |v: i16| WaveSpec { clip_hash: 0x1000 + v as u32, pcm: Pcm16 { channels: 1, sample_rate: 22050, samples: vec![v; 64] } };
         let spec = TablesSpec {
             name: "mod_layers".to_string(),
+            hash: pandemic_hash_m2("mod_layers"),
             waves: vec![wave(1), wave(2), wave(3), wave(4)],
             groups: vec![
                 GroupSpec {
@@ -910,6 +1002,7 @@ mod tests {
             ],
             cues: vec![CueDef {
                 name: "mod_layered_hit".to_string(),
+                guid: pandemic_hash_m2("mod_layered_hit"),
                 byte_06: 0,
                 gain: 1.0,
                 body: CueBodySpec::MultiTrack(MultiTrackCue {
@@ -1104,5 +1197,117 @@ mod tests {
             assert!(RETAIL_CATEGORIES.iter().any(|c| c.category == h), "{name} = 0x{h:08X}");
             assert!(seen.insert(h), "{name} names a category another name already names");
         }
+    }
+
+    /// Moving one wave: every reference to it, in a single-wave group and among a multi-wave group's
+    /// variants, now names the new wave with its weight kept, the group's other variants stay, and
+    /// only the cues that reach a rewritten group get a new length — the longest wave they can play.
+    /// A cue that also reaches another soundbank's group is refused.
+    #[test]
+    fn a_wave_moves_in_every_group_and_its_cues_are_remeasured() {
+        let head = GroupHeadParams {
+            unknown_10: 1.0,
+            unknown_14: 0,
+            min_distance: 1.0,
+            max_distance: 10.0,
+            unknown_20: 1.0,
+            distance_exponent: 1.0,
+            doppler_scale: 1.0,
+        };
+        let multi = MultiGroupParams {
+            byte_2c: 0,
+            selection: 1,
+            byte_2f: 0,
+            unknown_30: 0.0,
+            unknown_34: 0.0,
+            unknown_3c: 0.0,
+            unknown_40: 0.0,
+            word_48: 0,
+            floats_4c: [0.5, 0.5, 0.5, 0.0, 0.0, 0.0],
+            unknown_64: 0.0,
+        };
+        let wave = |frames: usize| WaveSpec { clip_hash: frames as u32, pcm: Pcm16 { channels: 1, sample_rate: 1000, samples: vec![1; frames] } };
+        let group = |form| GroupSpec { sound_id: 0, category: "vo".to_string(), head, form };
+        let cue = |name: &str, group: usize| CueDef {
+            name: name.to_string(),
+            guid: pandemic_hash_m2(name),
+            byte_06: 0,
+            gain: 1.0,
+            body: CueBodySpec::SingleTrack { group, unknown_16: 0 },
+        };
+        let hash = pandemic_hash_m2("vo_test");
+        let mut bank = build_general(&TablesSpec {
+            name: "vo_test".to_string(),
+            hash,
+            waves: vec![wave(500), wave(1000), wave(2000)],
+            groups: vec![
+                group(GroupFormSpec::Single { wave: 1, gain: 1.0, unknown_30: 0.0, weight: 1.0 }),
+                group(GroupFormSpec::Multi { params: multi, waves: vec![(0, 0.25), (1, 0.75)] }),
+                group(GroupFormSpec::Single { wave: 2, gain: 1.0, unknown_30: 0.0, weight: 1.0 }),
+            ],
+            cues: vec![cue("line", 0), cue("variants", 1), cue("other", 2)],
+        })
+        .unwrap();
+        let before = bank.soundbank.clone();
+        let wavebank = bank.wavebank.clone();
+
+        let mine = pandemic_hash_m2("qm_mod_vo_test");
+        let new = wave_record("new", 1, &Pcm16 { channels: 1, sample_rate: 1000, samples: vec![2; 3000] }).unwrap();
+        let sb = &mut bank.soundbank;
+        let rewritten = retarget_wave(sb, (hash, 1), (mine, 0));
+        assert_eq!(rewritten, vec![0, 1]);
+        assert_eq!(sb.groups[0].waves(), &[WaveRef { wavebank: mine, index: 0, weight: 1.0 }]);
+        assert_eq!(
+            sb.groups[1].waves(),
+            &[WaveRef { wavebank: hash, index: 0, weight: 0.25 }, WaveRef { wavebank: mine, index: 0, weight: 0.75 }],
+            "the other variant stays, and each reference keeps its weight"
+        );
+        assert_eq!(sb.groups[2], before.groups[2]);
+
+        let records = |wb: u32, i: u32| match wb {
+            w if w == hash => wavebank.records.get(i as usize),
+            w if w == mine && i == 0 => Some(&new),
+            _ => None,
+        };
+        assert_eq!(recompute_lengths(sb, &rewritten, records).unwrap(), vec![0, 1]);
+        assert_eq!(sb.cues[0].length_s, 3.0);
+        assert_eq!(sb.cues[1].length_s, 3.0, "the longest wave the group can pick");
+        assert_eq!(sb.cues[2], before.cues[2]);
+
+        // A cue that also plays another bank's group cannot be measured from this bank.
+        let mut crossing = before.clone();
+        crossing.cues[0].body = CueBody::MultiTrack(crate::multitrack::MultiTrackCue {
+            byte_10: 0,
+            sound_slots: 1,
+            unknown_18: 1.0,
+            unknown_1c: -1.0,
+            unknown_20: -1.0,
+            unknown_24: 0.0,
+            events: vec![],
+            curves: vec![],
+            tracks: vec![crate::multitrack::Track {
+                byte_00: 0,
+                unknown_04: -1.0,
+                unknown_08: -1.0,
+                automation: vec![],
+                sounds: vec![crate::multitrack::Sound {
+                    slot: 0,
+                    byte_01: 0,
+                    byte_02: 0,
+                    selection: 0,
+                    start_s: 0.0,
+                    entries: vec![
+                        crate::multitrack::SoundEntry { soundbank: hash, group_index: 0, unknown_06: 0, weight: 0.5 },
+                        crate::multitrack::SoundEntry { soundbank: 0x1234, group_index: 0, unknown_06: 0, weight: 0.5 },
+                    ],
+                }],
+            }],
+            params: vec![],
+        });
+        let rewritten = retarget_wave(&mut crossing, (hash, 1), (mine, 0));
+        assert!(matches!(
+            recompute_lengths(&mut crossing, &rewritten, records),
+            Err(EncodeError::CrossBankCue { soundbank: 0x1234, .. })
+        ));
     }
 }

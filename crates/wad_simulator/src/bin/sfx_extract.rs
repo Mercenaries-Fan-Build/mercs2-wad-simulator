@@ -160,19 +160,25 @@ fn write_wav(path: &std::path::Path, pcm: &[i16], channels: u16, rate: u32) -> s
     Ok(())
 }
 
-/// `rainbow_table` from `.mercs2-local.toml`, the `data/aset_discovered_names.json` and
-/// `data/aset_block_strings.json` fragments under its `notes_docs_dir`, then `extra`. Every table
-/// must load.
+/// `rainbow_table` from `.mercs2-local.toml`, the workshop crate's
+/// `data/aset_discovered_names.json`, the identifier-shaped `data/aset_block_strings.json` names
+/// under its `notes_docs_dir` (minus the workshop crate's `data/rejected_names.json`), then `extra`.
+/// Every table must load.
 fn rainbow(extra: &[PathBuf]) -> Result<RainbowTable, String> {
     let start = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-    let data = mercs2_formats::game_paths::local_config_notes_docs_dir(start)?.join("data");
-    let mut tables: Vec<PathBuf> = vec![
+    let notes = mercs2_formats::game_paths::local_config_notes_docs_dir(start)?.join("data");
+    let names = start.join("../mercs2_workshop/data");
+    let first: Vec<PathBuf> = vec![
         mercs2_formats::game_paths::local_config_rainbow_table(start)?,
-        data.join("aset_discovered_names.json"),
-        data.join("aset_block_strings.json"),
+        names.join("aset_discovered_names.json"),
     ];
-    tables.extend(extra.iter().cloned());
-    RainbowTable::load_many(&tables).map_err(|e| format!("load rainbow tables {tables:?}: {e}"))
+    let mut rb = RainbowTable::load_many(&first).map_err(|e| format!("load rainbow tables {first:?}: {e}"))?;
+    rb.merge(
+        RainbowTable::load_harvested(&notes.join("aset_block_strings.json"), &names.join("rejected_names.json"))
+            .map_err(|e| format!("load harvested names: {e}"))?,
+    );
+    rb.merge(RainbowTable::load_many(extra).map_err(|e| format!("load rainbow tables {extra:?}: {e}"))?);
+    Ok(rb)
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {

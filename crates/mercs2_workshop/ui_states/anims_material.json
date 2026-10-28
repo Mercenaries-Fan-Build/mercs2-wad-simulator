@@ -1,0 +1,6 @@
+{
+  "page": "Inspect",
+  "tab": "ANIMATIONS",
+  "load": "global_gpsjammer_anim",
+  "capture": "anims_material.png"
+}

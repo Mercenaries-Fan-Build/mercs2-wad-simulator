@@ -5,8 +5,9 @@ The working corpus (`tools/rainbow_table.json`, ~739k entries) is a research art
 the PARENT repo, it is 32 MB, and it mixes verified authored names with Lua strings, collisions, and
 brute-force handles. That is the wrong thing to ship.
 
-This produces the PRODUCTION lookup — `data/production_names.json`, committed inside the wad_simulator
-repo so it bundles with the workshop and needs no cross-repo file and no game WAD to rebuild the pack.
+This produces the PRODUCTION lookup — `crates/mercs2_workshop/data/production_names.json`, committed
+inside the wad_simulator repo so it bundles with the workshop and needs no cross-repo file and no game
+WAD to rebuild the pack.
 
 It is built from the current `names.bin` (already trimmed to hashes the workshop actually resolves),
 then every entry is:
@@ -98,7 +99,7 @@ def main() -> int:
             junk += 1
             continue
         kept[h] = n
-    outp = here / "data/production_names.json"
+    outp = here / "crates/mercs2_workshop/data/production_names.json"
     outp.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "format": 1,

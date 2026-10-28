@@ -58,14 +58,19 @@
 //!                 first-run picker, and the resolution chain both of them feed.
 //! - [`texenc`]  — CPU BC1/BC3 encode for imported images.
 //! - [`texpng`]  — CPU BC1/BC3 decode + PNG write for the headless texture dumps.
+//! - [`ui_state`] — `--ui-state`: open the window in a named state and capture the frame.
 
 mod app;
 mod audioidx; // Captioned audio inventory (the Audio domain's real content)
 mod audioplay; // One-shot audio preview on the default output device (cpal)
+mod audioroute; // Which banks and cues play each VO line, from English.wad
+mod audioexport; // VO clips out as WAV + captions.csv
+mod audiopage; // Inspect's AUDIO tab: banks, clips, preview, export, Add to Shipment
+mod textpage; // Inspect's TEXT tab: every string table side by side by key
+mod heroidx; // every model's skeleton, for ranking the hero clips and faces play on
 mod vostream; // Stream VO PCM straight from the game's vo_stream.english.pws
 mod bundle;
-mod ecsreg;
-mod essapi;
+mod chains; // Where the game archive and the reference bundle come from, first match wins
 mod domain;
 mod fetch;
 mod gui;
@@ -88,34 +93,14 @@ mod save_flow; // Contract state changes on a save: complete, undo, offer, lock
 mod save_tables; // Read-only inspector sections for every other save table
 mod save_inspect; // The Saves right-click Inspect window: a readable account of one save
 mod settings;
+mod settingspage; // Settings' navigator and its Game archive / Reference data sections
 mod shipment;
 mod shot;
 mod texenc;
 mod texpng;
+mod ui_state;
 
 use mercs2_engine::{mesh, wad};
-
-/// `vz.wad` from an install the Workshop is sitting INSIDE — the executable's own directory first,
-/// then the working directory.
-///
-/// Plan 02 rev 2's resolution step 2. Each candidate has to carry `Mercenaries2.exe` before its
-/// archive counts: the exe is what makes a folder an install, whereas a bare `vz.wad` beside the
-/// binary could be a copy someone was extracting from. Both the root and its `data/` are probed,
-/// via `game_paths::wad_under` — the shared rule for what "a path to the game" means, so this does
-/// not become a fourth private copy of it.
-fn colocated_vz_wad() -> Option<String> {
-    use mercs2_formats::game_paths::wad_under;
-    let roots = [
-        std::env::current_exe().ok().and_then(|e| e.parent().map(|p| p.to_path_buf())),
-        std::env::current_dir().ok(),
-    ];
-    roots
-        .into_iter()
-        .flatten()
-        .filter(|root| root.join("Mercenaries2.exe").is_file())
-        .find_map(|root| wad_under(&root, "vz.wad"))
-        .map(|p| p.to_string_lossy().into_owned())
-}
 
 /// The full name map for a headless mode ([`index::load_all_names`]), or exit 1 printing why the
 /// reference bundle could not be found, downloaded or read.
@@ -157,52 +142,38 @@ fn main() {
     }
 
     // The WAD stays OPTIONAL until after the `--pack-data` branch below. Every other mode needs a
-    // game install, but building the reference bundle does not: its names come from the committed
-    // `data/production_names.json`, and the WAD is consulted only by the fallback trim. Failing here
+    // game install, but building the reference bundle does not: its names come from this crate's
+    // committed `data/production_names.json`, and the WAD is consulted only by the fallback trim. Failing here
     // made `--pack-data` unrunnable on a machine without the game — i.e. on the CI runner that is
     // supposed to PUBLISH the bundle, which is why released workshops shipped with no bone names.
     //
-    // Resolution order: the flag (a one-off run must never rewrite the saved config), then the
-    // saved setting, then `resolve_vz_wad` — which is `$MERCS2_GAME_DIR` / `$VZ_WAD` and only THEN
-    // the registry key. Two independent reasons this tool works off Windows: `registry_vz_wad` is
-    // `cfg(not(windows)) -> None`, so before the saved setting a macOS or Linux user had to retype
-    // `--wad <path>` on every launch, and before the environment step a machine configured for
-    // every other tool in the repo still looked unconfigured to this one.
+    // Resolution is `chains::game`: the flag (a one-off run must never rewrite the saved config),
+    // this run's choice from Settings, the saved setting, an install the workshop sits inside, then
+    // `$MERCS2_GAME_DIR` / `$VZ_WAD` and only THEN the registry key. Two independent reasons this
+    // tool works off Windows: `registry_vz_wad` is `cfg(not(windows)) -> None`, so before the saved
+    // setting a macOS or Linux user had to retype `--wad <path>` on every launch, and before the
+    // environment step a machine configured for every other tool in the repo still looked
+    // unconfigured to this one.
     //
-    // The flag and the environment both take an install root, its `data` folder, or the file. An
-    // unresolvable `--wad` is kept AS TYPED rather than falling through to the next source: the
-    // later open then fails naming the path the user actually gave, instead of silently succeeding
-    // against a different install.
-    let wadpath = get("--wad")
-        .map(|p| wad::vz_wad_in(&p).unwrap_or(p))
-        .or_else(|| {
-            settings::load().wad_path.filter(|p| p.is_file()).map(|p| p.to_string_lossy().into_owned())
-        })
-        // CO-LOCATION, before the environment/registry step. Plan 02 rev 2 calls this "the only
-        // path that works off Windows": modders really do drop the Workshop into the game folder,
-        // and `registry_vz_wad` is `cfg(not(windows)) -> None`, so without this a macOS or Linux
-        // user sitting *inside* the install still had to type `--wad` every launch.
-        //
-        // Anchored on `Mercenaries2.exe` rather than on finding a `vz.wad`: a stray `vz.wad` beside
-        // the binary could be anything, but the exe next to it means this IS an install.
-        .or_else(colocated_vz_wad)
-        .or_else(|| wad::resolve_vz_wad(None));
+    // The flag and the environment both take an install root, its `data` folder, or the file. A
+    // source a person set that does not resolve STOPS the chain rather than falling through to the
+    // next source: the run then fails naming the path the user actually gave, instead of silently
+    // succeeding against a different install.
+    let wad_flag = get("--wad");
+    let game_chain = chains::game(wad_flag.as_deref());
+    let wadpath = game_chain.in_use().map(|p| p.to_string_lossy().into_owned());
 
-    // Overlay stack: every `--overlay <path>`, in argument order, plus (unless --no-auto-patch)
-    // an auto-loaded `vz-patch.wad` next to the base — the retail exe's own patch lookup.
-    let mut overlays: Vec<String> = Vec::new();
-    if !args.iter().any(|a| a == "--no-auto-patch") {
-        if let Some(auto) = wadpath.as_ref().map(|w| std::path::Path::new(w).with_file_name("vz-patch.wad")) {
-            if auto.is_file() {
-                overlays.push(auto.to_string_lossy().into_owned());
-            }
-        }
-    }
-    for i in 0..args.len().saturating_sub(1) {
-        if args[i] == "--overlay" {
-            overlays.push(args[i + 1].clone());
-        }
-    }
+    // Overlay stack: an auto-loaded `vz-patch.wad` next to the base (unless --no-auto-patch) — the
+    // retail exe's own patch lookup — then every `--overlay <path>`, in argument order.
+    let auto_patch = !args.iter().any(|a| a == "--no-auto-patch");
+    let extra_overlays: Vec<String> = (0..args.len().saturating_sub(1))
+        .filter(|&i| args[i] == "--overlay")
+        .map(|i| args[i + 1].clone())
+        .collect();
+    let overlays = match &wadpath {
+        Some(w) => app::overlays_for(w, auto_patch, &extra_overlays),
+        None => extra_overlays.clone(),
+    };
 
     // Build the redistributable reference bundle: everything the workshop consults that is NOT a
     // game-distributed file, in load-fast formats. The app then runs self-contained from
@@ -214,6 +185,12 @@ fn main() {
             .filter(|s| !s.starts_with("--"))
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| std::path::PathBuf::from("workshop_data"));
+        // Optional, but not when one was set and is broken: packing untrimmed against a typo'd
+        // `--wad` would publish a bundle nobody asked for.
+        if game_chain.blocker().is_some() {
+            eprintln!("--pack-data: {}", game_chain.unresolved("the game archive"));
+            std::process::exit(2);
+        }
         if let Err(e) = pack_data(&out, wadpath.as_deref(), &overlays) {
             eprintln!("--pack-data: {e}");
             std::process::exit(1);
@@ -221,60 +198,42 @@ fn main() {
         return;
     }
 
-    // Every mode past this point reads the game archive. Nothing found means one of two very
+    // Every mode past this point reads the game archive. An unresolved chain means one of two very
     // different situations, and treating them alike is what made the tool unopenable off Windows:
-    // a HEADLESS run has nobody to answer a dialog and must fail with a message a script can read,
-    // but the GUI launch has a user right there — so it asks once, with a native picker, and
-    // remembers the answer. Both paths are also reachable later from the Settings workbench.
+    // a HEADLESS run has nobody to fix it and must fail with a message a script can read (exit 2),
+    // but the GUI launch has a user right there — so the window opens on Settings with the chain in
+    // red, which is where it is fixed. (A native picker here, before the window, set the macOS app
+    // up ahead of winit's event loop, and winit then panicked.)
     // `--shipment` CONFIGURES the GUI run rather than replacing it, so it belongs here: treating it
-    // as a mode flag would open a Shipment into a window that never appears.
-    const PASSIVE_FLAGS: [&str; 5] =
-        ["--wad", "--names", "--overlay", "--no-auto-patch", "--shipment"];
+    // as a mode flag would open a Shipment into a window that never appears. `--ui-state` likewise.
+    const PASSIVE_FLAGS: [&str; 6] =
+        ["--wad", "--names", "--overlay", "--no-auto-patch", "--shipment", "--ui-state"];
     let headless =
         args[1..].iter().any(|a| a.starts_with("--") && !PASSIVE_FLAGS.contains(&a.as_str()));
+    let shipment = get("--shipment").map(std::path::PathBuf::from);
+    let ui_state = match get("--ui-state").map(|p| ui_state::UiState::load(std::path::Path::new(&p))) {
+        Some(Ok(st)) => Some(st),
+        Some(Err(e)) => {
+            eprintln!("--ui-state: {e}");
+            std::process::exit(2);
+        }
+        None => None,
+    };
+    let gui_options = || app::Options {
+        wad_flag: wad_flag.clone(),
+        auto_patch,
+        extra_overlays: extra_overlays.clone(),
+        shipment: shipment.clone(),
+        ui_state: ui_state.clone(),
+    };
     let wadpath = match wadpath {
         Some(p) => p,
         None if headless => {
-            eprintln!("workshop: no vz.wad found (install not in registry) — pass --wad <path>");
-            return;
+            eprintln!("workshop: {}", game_chain.unresolved("the game archive"));
+            std::process::exit(2);
         }
-        None => {
-            eprintln!("workshop: no vz.wad found — asking where the game is installed");
-            let Some(picked) = settings::pick_wad() else {
-                eprintln!("workshop: no game archive selected — pass --wad <path> to skip the prompt");
-                return;
-            };
-            // Validate BEFORE saving: a remembered path that does not open would turn a one-time
-            // mistake into a permanent one, and the next launch would fail far from the cause.
-            match settings::check_wad(&picked) {
-                Ok(desc) => {
-                    let mut s = settings::load();
-                    s.wad_path = Some(picked.clone());
-                    match s.save() {
-                        Ok(cfg) => eprintln!("[settings] game archive saved to {} ({desc})", cfg.display()),
-                        Err(e) => eprintln!("[settings] could not save ({e}) — using it for this run only"),
-                    }
-                }
-                Err(e) => {
-                    eprintln!("workshop: {} cannot be opened as a game archive: {e}", picked.display());
-                    return;
-                }
-            }
-            picked.to_string_lossy().into_owned()
-        }
+        None => return app::run(gui_options()),
     };
-    // The overlay scan above ran while the archive path was still unknown, so a path that came from
-    // the picker never had its sibling patch considered. Re-check against the FINAL archive, keeping
-    // the auto-patch ahead of the explicit `--overlay`s as before, and skip what is already listed.
-    if !args.iter().any(|a| a == "--no-auto-patch") {
-        let auto = std::path::Path::new(&wadpath).with_file_name("vz-patch.wad");
-        if auto.is_file() {
-            let s = auto.to_string_lossy().into_owned();
-            if !overlays.contains(&s) {
-                overlays.insert(0, s);
-            }
-        }
-    }
 
     // Headless: one TSV row per model, in ONE wad open:
     //   `hash <TAB> resolves <TAB> bones <TAB> skinned_groups <TAB> verts <TAB> tris <TAB> tex,tex,...`
@@ -295,7 +254,7 @@ fn main() {
             Err(e) => return eprintln!("workshop: cannot open {wadpath}: {e}"),
         };
         let hashes: Vec<u32> = {
-            let idx = index::AssetIndex::build(&w.wads, names_or_exit());
+            let idx = index::AssetIndex::build(&w.wads, &w.side, names_or_exit());
             idx.models().iter().map(|r| r.hash).collect()
         };
         println!("hash\tresolves\tbones\tskinned_groups\tverts\ttris\ttextures");
@@ -336,11 +295,11 @@ fn main() {
             Ok(s) => s,
             Err(e) => return eprintln!("workshop: cannot open {wadpath}: {e}"),
         };
-        let mut idx = index::AssetIndex::build(&stack.wads, names_or_exit());
+        let mut idx = index::AssetIndex::build(&stack.wads, &stack.side, names_or_exit());
         // The kit template rows, as the GUI catalog lists them.
         match app::load_kit_templates(&mut stack) {
             Ok(t) => {
-                idx.add_kit_templates(&t);
+                idx.add_kit_templates(&t.kits, &t.all);
             }
             Err(e) => {
                 eprintln!("--list: cannot read the world's templates (worldentity): {e}");
@@ -367,7 +326,7 @@ fn main() {
             Ok(s) => s,
             Err(e) => return eprintln!("workshop: cannot open {wadpath}: {e}"),
         };
-        let idx = index::AssetIndex::build(&stack.wads, names_or_exit());
+        let idx = index::AssetIndex::build(&stack.wads, &stack.side, names_or_exit());
         let mut by_class: std::collections::BTreeMap<&'static str, Vec<&index::AssetRow>> =
             std::collections::BTreeMap::new();
         for r in idx.models() {
@@ -491,6 +450,24 @@ fn main() {
         return;
     }
 
+    // Headless: export voice-over clips as the Audio page does — `--audio-export <bank|query> <dir>`:
+    // the bank of that name, or else every clip the query finds, as WAVs plus captions.csv under
+    // <dir>/<bank or query>. Exit 0, or 2 with the reason.
+    if let Some(i) = args.iter().position(|a| a == "--audio-export") {
+        let (Some(what), Some(dir)) = (args.get(i + 1), args.get(i + 2)) else {
+            eprintln!("--audio-export: usage: --audio-export <bank|query> <dir>");
+            std::process::exit(2);
+        };
+        match audiopage::export_headless(std::path::Path::new(&wadpath), what, std::path::Path::new(dir)) {
+            Ok(r) => println!("exported {} clip(s) and captions.csv -> {}", r.clips, r.dir.display()),
+            Err(e) => {
+                eprintln!("--audio-export {what}: {e}");
+                std::process::exit(2);
+            }
+        }
+        return;
+    }
+
     // Headless: export a model to workshop_export/<name>/ (OBJ + MTL + PNG textures).
     if let Some(arg) = get("--export") {
         let hash = arg
@@ -517,10 +494,10 @@ fn main() {
             Ok(s) => s,
             Err(e) => return eprintln!("workshop: cannot open {wadpath}: {e}"),
         };
-        let mut idx = index::AssetIndex::build(&stack.wads, names_or_exit());
+        let mut idx = index::AssetIndex::build(&stack.wads, &stack.side, names_or_exit());
         match app::load_kit_templates(&mut stack) {
             Ok(t) => {
-                idx.add_kit_templates(&t);
+                idx.add_kit_templates(&t.kits, &t.all);
             }
             Err(e) => {
                 eprintln!("--export-bundle: cannot read the world's templates (worldentity): {e}");
@@ -561,7 +538,7 @@ fn main() {
         drop(stack);
         let (mut ok, mut fail) = (0, 0);
         for (h, label) in &targets {
-            match app::export_bundle_by_hash(&wadpath, &overlays, *h, label, &idx, &outroot, outfit) {
+            match app::export_bundle_by_hash(&wadpath, &overlays, *h, label, label, &idx, &outroot, outfit) {
                 Ok(d) => { ok += 1; println!("  [ok]   {label} (0x{h:08X}) -> {d}"); }
                 Err(e) => { fail += 1; eprintln!("  [FAIL] {label} (0x{h:08X}): {e}"); }
             }
@@ -1218,7 +1195,7 @@ exported {ok} bundle(s), {fail} failed -> {}", outroot.display());
         // List the clips this model's rig can bind, so a clip can be chosen by name rather than
         // guessed at. Names come from the same index the GUI uses.
         if args.iter().any(|a| a == "--render-clips") {
-            let idx = index::AssetIndex::build(&w.wads, names_or_exit());
+            let idx = index::AssetIndex::build(&w.wads, &w.side, names_or_exit());
             let (clips, names) = app::clips_for_export(&mut w, &arg, &md.skin.rig, &idx);
             println!("--render-clips 0x{hash:08X}: {} clip(s) bind this rig", clips.len());
             for c in &clips {
@@ -1986,8 +1963,7 @@ exported {ok} bundle(s), {fail} failed -> {}", outroot.display());
         return;
     }
 
-    let shipment = get("--shipment").map(std::path::PathBuf::from);
-    app::run(app::Options { wadpath, overlays, shipment });
+    app::run(gui_options());
 }
 
 /// Every hash `names.bin` is actually asked to resolve: ASET catalog assets, animgroup clip names, and
@@ -2225,19 +2201,17 @@ fn repo_root() -> std::path::PathBuf {
 }
 
 /// The reference files committed in the repo's `workshop_data/` that `--pack-data` copies into
-/// every bundle: the Ess API, natives and node catalogue (`essapi`), the ECS component registry
-/// (`ecsreg`) and the captioned audio inventory (`audioidx`).
-const REPO_BUNDLE_FILES: [&str; 5] =
-    ["ess_api.json", "ess_natives.json", "ess_nodes.json", "ecs_registry.tsv", "audio_manifest.json"];
+/// every bundle: the captioned audio inventory (`audioidx`).
+const REPO_BUNDLE_FILES: [&str; 1] = ["audio_manifest.json"];
 
-/// The committed production lookup: `<repo>/data/production_names.json` (curated, hash-verified
-/// node/asset names), where `<repo>` is the checkout this binary was built from ([`repo_root`]).
-/// `Ok(None)` when that path is not a file; an error when it is a file that cannot be read or
-/// parsed.
-fn load_production_names(
-    repo: &std::path::Path,
-) -> Result<Option<std::collections::HashMap<u32, String>>, String> {
-    let cand = repo.join("data/production_names.json");
+/// The committed production lookup: this crate's `data/production_names.json` (curated,
+/// hash-verified node/asset names) in the checkout this binary was built from. `Ok(None)` when
+/// that path is not a file (the regeneration step in `data/README.md` packs without it); an error
+/// when it is a file that cannot be read or parsed. Every `(hash, name)` pair on this crate's
+/// `data/rejected_names.json` is dropped, so the table that regenerates from `names.bin` keeps
+/// none of that debris.
+fn load_production_names() -> Result<Option<std::collections::HashMap<u32, String>>, String> {
+    let cand = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("data/production_names.json");
     if !cand.is_file() {
         return Ok(None);
     }
@@ -2248,10 +2222,13 @@ fn load_production_names(
         .get("pandemic_hash_m2")
         .and_then(|m| m.as_object())
         .ok_or_else(|| format!("{}: no `pandemic_hash_m2` object", cand.display()))?;
+    let rejected = index::load_rainbow_json(&index::crate_data_file("rejected_names.json")?)?;
     let mut out = std::collections::HashMap::with_capacity(map.len());
     for (k, name) in map {
         if let (Ok(h), Some(n)) = (u32::from_str_radix(k.trim_start_matches("0x"), 16), name.as_str()) {
-            out.insert(h, n.to_string());
+            if rejected.get(&h).map(String::as_str) != Some(n) {
+                out.insert(h, n.to_string());
+            }
         }
     }
     eprintln!("[pack] names source: {}", cand.display());
@@ -2304,15 +2281,15 @@ fn copy_repo_bundle_files(src_dir: &std::path::Path, out: &std::path::Path) -> R
 /// * `notes_docs_dir` — the notes repo's `docs/`: `data/live_registry_hashes.csv`,
 ///   `data/spawnable_templates.csv`, `mercs2-ecs/`, `mercs2-luacd/src/` and `mercs2-dlc-luacd/src/`
 ///   are copied into the bundle.
-/// * The names come from this repo's `data/production_names.json` (see
+/// * The names come from this crate's `data/production_names.json` (see
 ///   [`load_production_names`]). Only when that file is absent are they merged from the raw corpora
-///   ([`index::load_all_names_raw`]), which also reads the `jul08_strings` and `rainbow_table` keys
-///   and the name corpora in `notes_docs_dir`'s `data/`.
+///   ([`index::load_all_names_raw`]): this crate's name fragments, the `jul08_strings` and
+///   `rainbow_table` keys, and the name corpora in `notes_docs_dir`'s `data/`.
 ///
-/// In-repo sources are read from the checkout this binary was built from ([`repo_root`]):
-/// `data/production_names.json` and the [`REPO_BUNDLE_FILES`] committed in `workshop_data/`,
-/// which are copied into the bundle. A missing one of those files is an error naming it, raised
-/// before anything is written.
+/// In-repo sources are read from the checkout this binary was built from: this crate's
+/// `data/production_names.json`, and the [`REPO_BUNDLE_FILES`] committed in the repo's
+/// `workshop_data/` ([`repo_root`]), which are copied into the bundle. A missing one of those files
+/// is an error naming it, raised before anything is written.
 ///
 /// An existing `manifest.json` is removed before anything else is written, and the new one is
 /// written last; its presence marks `out` as a complete bundle for [`index::data_home`].
@@ -2369,8 +2346,8 @@ fn pack_data(
     }
 
     // 1. names.bin. PREFERRED source: the committed, curated `data/production_names.json` that ships
-    // IN this repo. The raw corpora + WAD-trim path runs only when the production file is absent.
-    let (names, full) = match load_production_names(&repo)? {
+    // IN this crate. The raw corpora + WAD-trim path runs only when the production file is absent.
+    let (names, full) = match load_production_names()? {
         Some(p) => {
             eprintln!("[pack] names.bin: from committed data/production_names.json ({} names)", p.len());
             let n = p.len();

@@ -95,7 +95,8 @@ pub fn declared_languages<'a>(
     for c in manifests.into_iter().flat_map(|m| m.contributions.iter()) {
         match c {
             crate::manifest::Contribution::ReplaceSoundBank { language: Some(l), .. }
-            | crate::manifest::Contribution::ReplaceSoundCue { language: Some(l), .. } => {
+            | crate::manifest::Contribution::ReplaceSoundCue { language: Some(l), .. }
+            | crate::manifest::Contribution::ReplaceSoundWave { language: Some(l), .. } => {
                 out.insert(*l);
             }
             crate::manifest::Contribution::AddLanguage { .. } => {
@@ -152,9 +153,29 @@ pub fn game_root_of(vz_wad: &Path) -> Result<PathBuf, String> {
         .ok_or_else(|| format!("{} has no parent directory", data.display()))
 }
 
-/// Whether any Shipment declares `supersedes`, and so needs the game folder probed.
+/// Whether any Shipment declares `supersedes`, and so needs the game folder probed, or replaces a
+/// line (`replace_sound_wave`), whose merged banks the plan reads from the game's WADs.
 pub fn needs_game_root<'a>(manifests: impl IntoIterator<Item = &'a Manifest>) -> bool {
-    manifests.into_iter().any(|m| !m.supersedes.is_empty())
+    manifests.into_iter().any(|m| {
+        !m.supersedes.is_empty() || m.contributions.iter().any(|c| matches!(c, crate::manifest::Contribution::ReplaceSoundWave { .. }))
+    })
+}
+
+/// The game stack the plan reads a line's banks from: `vz.wad` in `game_root`'s `data` folder (both
+/// matched case-insensitively), then each declared language's WAD ([`game_stack_paths`]).
+fn plan_stack(game_root: &Path, manifests: &[&Manifest]) -> Result<crate::game::GameStack, String> {
+    let entries = std::fs::read_dir(game_root).map_err(|e| format!("reading {}: {e}", game_root.display()))?;
+    let mut data = None;
+    for e in entries {
+        let e = e.map_err(|e| format!("reading {}: {e}", game_root.display()))?;
+        if e.file_name().to_string_lossy().eq_ignore_ascii_case("data") {
+            data = Some(e.path());
+        }
+    }
+    let data = data.ok_or_else(|| format!("{} has no data folder", game_root.display()))?;
+    let vz = crate::sound::sibling_wad(&data.join("vz.wad"), "vz.wad")?;
+    let paths = game_stack_paths(&vz, manifests.iter().copied())?;
+    crate::game::GameStack::open(&paths).map_err(|e| e.to_string())
 }
 
 /// Whether a superseded legacy file is in the game folder.
@@ -683,6 +704,27 @@ pub fn plan(
         .iter()
         .any(|f| f.severity == FindingSeverity::Error);
 
+    // The banks a replaced line reaches are the game's answer; any other set's blocks follow from
+    // the manifests alone.
+    let manifests: Vec<&Manifest> = inputs.iter().map(|i| &i.shipment.manifest).collect();
+    let line_item = inputs.iter().find(|i| {
+        i.shipment.manifest.contributions.iter().any(|c| matches!(c, crate::manifest::Contribution::ReplaceSoundWave { .. }))
+    });
+    let mut stack = match line_item {
+        Some(item) => {
+            let root = game_root.ok_or_else(|| CompatError::Item {
+                id: item.id.to_string(),
+                message: "this Shipment replaces a line (replace_sound_wave), and the banks that play it \
+                          are read from the game's WADs; no game folder was resolved — pass --game"
+                    .into(),
+            })?;
+            Some(plan_stack(root, &manifests).map_err(|message| CompatError::GameRoot { message })?)
+        }
+        None => None,
+    };
+    let link_block_paths = build::link_block_paths(manifests.iter().copied(), stack.as_mut())
+        .map_err(|message| CompatError::GameRoot { message })?;
+
     Ok(LoadPlan {
         format: PLAN_FORMAT,
         producer,
@@ -695,7 +737,7 @@ pub fn plan(
         capabilities,
         conflicts,
         supersedes,
-        link_block_paths: build::link_block_paths(inputs.iter().map(|i| &i.shipment.manifest)),
+        link_block_paths,
         link_file_paths: if inputs.iter().any(|i| crate::shader::has_shader_kinds(&i.shipment.manifest)) {
             crate::shader::DataFile::ALL.to_vec()
         } else {

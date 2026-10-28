@@ -48,7 +48,7 @@ use mercs2_formats::ucfx::{build_wrapped_entries, extract_data_chunk, WrappedEnt
 use crate::discover::LoadedShipment;
 use crate::game::GameStack;
 use crate::link::{Level, SoundBankRegistration};
-use crate::manifest::{Contribution, Language, LoadSession, Manifest, SoundCue};
+use crate::manifest::{asset_hash, bare_hash, Contribution, Language, LoadSession, Manifest, SoundCue};
 
 /// The sounddb's ASET type id (`mercs2_formats::aset_type_ids`: `0xE5273C14 → 13`).
 pub const TYPE_ID_SOUNDDB: u32 = 13;
@@ -61,11 +61,30 @@ pub fn is_vo_bank(bank: &str) -> bool {
 }
 
 /// The entry name a bank's tables are registered under: `<bank>.<language>` for a localized bank,
-/// the bank name otherwise.
+/// the bank name otherwise. A bank written as a bare hash is the entry's own hash (for a localized
+/// bank, the hash of `<bank>.<language>`), returned as `0xHHHHHHHH`.
 pub fn entry_name(bank: &str, language: Option<Language>) -> String {
+    if let Some(hash) = bare_hash(bank) {
+        return format!("0x{hash:08X}");
+    }
     match language {
         Some(l) => format!("{bank}.{}", l.token()),
         None => bank.to_string(),
+    }
+}
+
+/// The hash a bank's tables are registered under: [`entry_name`] resolved as an asset reference.
+pub fn entry_hash(bank: &str, language: Option<Language>) -> u32 {
+    asset_hash(&entry_name(bank, language))
+}
+
+/// Whether an override's bank is localized: a named bank by its `vo_` prefix ([`is_vo_bank`]); a
+/// bank written as a bare hash names its entry, so by the language it declares, which the carrier
+/// lookup then holds it to (the entry must be in that language's WAD).
+pub fn is_localized(bank: &str, language: Option<Language>) -> bool {
+    match bare_hash(bank) {
+        Some(_) => language.is_some(),
+        None => is_vo_bank(bank),
     }
 }
 
@@ -114,6 +133,7 @@ pub fn cue_spec(category: &str, cue: &SoundCue, root: &Path) -> Result<CueSpec, 
     }
     Ok(CueSpec {
         name: cue.name.clone(),
+        guid: asset_hash(&cue.name),
         category: category.to_string(),
         sound_id: cue.sound_id,
         clip_hash: cue.clip_hash,
@@ -159,7 +179,7 @@ pub fn lower_add_sound(
     log: &mut Vec<String>,
 ) -> Result<PatchBlock, String> {
     let specs = cues.iter().map(|c| cue_spec(category, c, root)).collect::<Result<Vec<_>, _>>()?;
-    let spec = BankSpec { name: bank.to_string(), cues: specs };
+    let spec = BankSpec { name: bank.to_string(), hash: m2(bank), cues: specs };
     let enc = encode::encode_bank(&spec).map_err(|e| format!("bank {bank:?}: {e}"))?;
     log.push(format!(
         "add_sound {bank} 0x{:08X}: {} cue(s); soundbank {} B, sounddb {} B, wavebank {} B",
@@ -201,9 +221,10 @@ pub const GAMEPLAY_SOUNDBANK_LOADS: &[&str] = &[
     "ui_hud",
 ];
 
-/// Whether `bank` is one of `names`, as the engine compares them: by name hash, which folds case.
+/// Whether `bank` (a name or a bare hash) is one of `names`, as the engine compares them: by name
+/// hash, which folds case.
 fn named_in(bank: &str, names: &[&str]) -> bool {
-    names.iter().any(|n| m2(n) == m2(bank))
+    names.iter().any(|n| m2(n) == asset_hash(bank))
 }
 
 /// The soundbanks retail Lua loads by a literal name, per session: the input [`bank_loader`]
@@ -238,9 +259,9 @@ pub enum BankLoader {
 }
 
 /// Classify `bank` by the load sites `sites`: [`BankLoader::Lua`] for a bank a site names or a
-/// `vo_*` bank ([`is_vo_bank`]), [`BankLoader::Engine`] for any other. Names compare by hash.
-pub fn bank_loader(bank: &str, sites: &LuaLoadSites<'_>) -> BankLoader {
-    if is_vo_bank(bank) || named_in(bank, sites.front_end) || named_in(bank, sites.gameplay) {
+/// localized bank ([`is_localized`]), [`BankLoader::Engine`] for any other. Names compare by hash.
+pub fn bank_loader(bank: &str, language: Option<Language>, sites: &LuaLoadSites<'_>) -> BankLoader {
+    if is_localized(bank, language) || named_in(bank, sites.front_end) || named_in(bank, sites.gameplay) {
         BankLoader::Lua
     } else {
         BankLoader::Engine
@@ -297,7 +318,7 @@ pub fn retail_sessions(bank: &str, language: Option<Language>) -> BTreeSet<LoadS
 /// bank retail Lua loads, none for one the engine loads ([`bank_loader`] over
 /// [`RETAIL_LUA_LOAD_SITES`]).
 pub fn loader_sessions(bank: &str, language: Option<Language>) -> BTreeSet<LoadSession> {
-    match bank_loader(bank, &RETAIL_LUA_LOAD_SITES) {
+    match bank_loader(bank, language, &RETAIL_LUA_LOAD_SITES) {
         BankLoader::Lua => retail_sessions(bank, language),
         BankLoader::Engine => BTreeSet::new(),
     }
@@ -327,15 +348,18 @@ pub fn sound_registrations(manifest: &Manifest, carriers: &CarrierMap) -> Result
                 sessions: load_in.iter().copied().collect(),
             },
             Contribution::ReplaceSoundBank { bank, language, .. } | Contribution::ReplaceSoundCue { bank, language, .. } => {
-                let entry = entry_name(bank, *language);
-                let found = carriers.get(&entry).ok_or_else(|| {
-                    format!("internal error: {shipment} contributions[{index}] overrides {entry:?}, whose carriers were not looked up")
+                let hash = entry_hash(bank, *language);
+                let (entry, found) = carriers.iter().find(|(e, _)| asset_hash(e) == hash).ok_or_else(|| {
+                    format!(
+                        "internal error: {shipment} contributions[{index}] overrides {:?}, whose carriers were not looked up",
+                        entry_name(bank, *language)
+                    )
                 })?;
                 let sessions = override_sessions(bank, found);
                 if sessions.is_empty() {
                     return Err(no_session(&entry, found, &format!("{shipment} contributions[{index}] ({})", c.kind())));
                 }
-                if bank_loader(bank, &RETAIL_LUA_LOAD_SITES) == BankLoader::Engine {
+                if bank_loader(bank, *language, &RETAIL_LUA_LOAD_SITES) == BankLoader::Engine {
                     continue;
                 }
                 SoundBankRegistration {
@@ -403,12 +427,12 @@ const ENGINE_BANK_ROWS: [(u32, &str); 3] =
 
 /// Check that each bank of `entries`, which the engine loads by its retail name, has one block in
 /// `blocks` (the blocks emitted for `vz.wad`) carrying its soundbank, sounddb and wavebank rows
-/// under `m2(entry)`: the engine requests the tables by that name, and a row the block lacks is the
-/// game's, whose indices the shipped soundbank does not match. A missing row is refused, naming the
-/// bank and the rows.
+/// under the entry's hash: the engine requests the tables by that name, and a row the block lacks is
+/// the game's, whose indices the shipped soundbank does not match. A missing row is refused, naming
+/// the bank and the rows.
 pub fn check_engine_banks(entries: &[String], blocks: &[&PatchBlock]) -> Result<(), String> {
     for entry in entries {
-        let hash = m2(entry);
+        let hash = asset_hash(entry);
         let missing = |b: &PatchBlock| -> Vec<&str> {
             ENGINE_BANK_ROWS
                 .iter()
@@ -451,7 +475,12 @@ pub fn lower_shipment_sound(
         .contributions
         .iter()
         .enumerate()
-        .find(|(_, c)| matches!(c, Contribution::ReplaceSoundBank { .. } | Contribution::ReplaceSoundCue { .. }))
+        .find(|(_, c)| {
+            matches!(
+                c,
+                Contribution::ReplaceSoundBank { .. } | Contribution::ReplaceSoundCue { .. } | Contribution::ReplaceSoundWave { .. }
+            )
+        })
     {
         Some((index, c)) => {
             let Some(game) = game else {
@@ -478,18 +507,37 @@ pub fn lower_shipment_sound(
     Ok(out)
 }
 
-/// The entry hash of every bank a `replace_sound_cue` in the set targets: `qm link` merges each into
+/// The entry hash of every bank a `replace_sound_cue` in the set targets, and of every bank whose
+/// groups play a line a `replace_sound_wave` replaces ([`line_targets`]): `qm link` merges each into
 /// one soundbank for the whole set (and, for a bank the engine loads, one wavebank beside it), at
-/// [`block_path`] of the entry.
-pub fn linked_sound_entries<'a>(manifests: impl IntoIterator<Item = &'a Manifest>) -> BTreeSet<u32> {
-    manifests
-        .into_iter()
-        .flat_map(|m| m.contributions.iter())
-        .filter_map(|c| match c {
-            Contribution::ReplaceSoundCue { bank, language, .. } => Some(m2(&entry_name(bank, *language))),
-            _ => None,
-        })
-        .collect()
+/// [`block_path`] of the entry. Which banks play a line is the game's answer, so a set with a
+/// `replace_sound_wave` needs `game` (holding the declared languages' WADs); without it that is an
+/// error naming the contribution.
+pub fn linked_sound_entries<'a>(
+    manifests: impl IntoIterator<Item = &'a Manifest>,
+    mut game: Option<&mut GameStack>,
+) -> Result<BTreeSet<u32>, String> {
+    let mut out = BTreeSet::new();
+    let mut shell: Option<GameStack> = None;
+    for m in manifests {
+        for (index, c) in m.contributions.iter().enumerate() {
+            match c {
+                Contribution::ReplaceSoundCue { bank, language, .. } => {
+                    out.insert(entry_hash(bank, *language));
+                }
+                Contribution::ReplaceSoundWave { wavebank, language, line, .. } => {
+                    let who = format!("{} contributions[{index}] (replace_sound_wave)", m.shipment.name);
+                    let Some(game) = game.as_deref_mut() else {
+                        return Err(format!("{who}: the banks that play a line are read from the game, and none was given"));
+                    };
+                    let t = line_targets(game, &mut shell, wavebank, *language, line).map_err(|e| format!("{who}: {e}"))?;
+                    out.extend(t.entries);
+                }
+                _ => {}
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// Where a bank entry's override tables ship, and what the loaders load.
@@ -550,11 +598,15 @@ struct Op<'a> {
 enum OpKind {
     Bank,
     Cue,
+    /// A `replace_sound_wave` the bank's groups play: the reference `from` moves to the Shipment's
+    /// override wave `record`.
+    Wave { from: (u32, u32), record: u32 },
 }
 
-/// Everything the set does to one bank entry.
+/// Everything the set does to one bank entry. `bank` is as a contribution wrote it, or, for a bank
+/// only a replaced line reaches, the entry's hash as `0xHHHHHHHH`.
 struct EntryOps<'a> {
-    bank: &'a str,
+    bank: String,
     language: Option<Language>,
     ops: Vec<Op<'a>>,
 }
@@ -567,9 +619,41 @@ type OverrideWaves = BTreeMap<(String, String), Vec<WaveRecord>>;
 /// Shipment's first wave in it, by Shipment.
 type WavePlacement<'a> = BTreeMap<&'a str, (u32, u32)>;
 
-/// The soundbank a carrier WAD holds for `entry`, parsed.
-fn carrier_soundbank(stack: &mut GameStack, entry: u32) -> Result<Option<Soundbank>, String> {
-    if !stack.has_asset(entry, TYPE_ID_SOUNDBANK) {
+/// Whether `carrier`'s WAD in `stack` carries an ASET row for `(hash, type_id)`. The game stack holds
+/// the declared languages' WADs beside `vz.wad`, so the WAD is told apart by name: a language's is
+/// `<token>.wad`, and [`Carrier::Vz`] / [`Carrier::Shell`] are every other WAD of their stack.
+fn carrier_holds(stack: &GameStack, carrier: Carrier, hash: u32, type_id: u32) -> bool {
+    let language_wad = |p: &Path| {
+        let file = p.file_name().map(|n| n.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
+        Language::ALL.iter().find(|l| file == format!("{}.wad", l.token())).copied()
+    };
+    stack.wads_holding(hash, type_id).into_iter().any(|p| match carrier {
+        Carrier::Language(l) => language_wad(p) == Some(l),
+        Carrier::Vz | Carrier::Shell => language_wad(p).is_none(),
+    })
+}
+
+/// Every asset hash of `type_id` that `carrier`'s WAD in `stack` carries ([`carrier_holds`]).
+fn carrier_hashes(stack: &GameStack, carrier: Carrier, type_id: u32) -> Vec<u32> {
+    stack.asset_hashes(type_id).into_iter().filter(|h| carrier_holds(stack, carrier, *h, type_id)).collect()
+}
+
+/// The wavebank `carrier`'s WAD in `stack` holds for `entry`, parsed.
+fn carrier_wavebank(stack: &mut GameStack, carrier: Carrier, entry: u32) -> Result<Option<WavebankFile>, String> {
+    if !carrier_holds(stack, carrier, entry, TYPE_ID_WAVEBANK) {
+        return Ok(None);
+    }
+    let container = stack
+        .container_for_asset(entry, TYPE_HASH_WAVEBANK, TYPE_ID_WAVEBANK)
+        .ok_or_else(|| format!("wavebank 0x{entry:08X} has an ASET row but its block does not read"))?;
+    let body = extract_data_chunk(&container)
+        .ok_or_else(|| format!("wavebank 0x{entry:08X}: its container has no data chunk"))?;
+    WavebankFile::parse(&body).map(Some).map_err(|e| format!("wavebank 0x{entry:08X}: {e}"))
+}
+
+/// The soundbank `carrier`'s WAD in `stack` holds for `entry`, parsed ([`carrier_holds`]).
+fn carrier_soundbank(stack: &mut GameStack, carrier: Carrier, entry: u32) -> Result<Option<Soundbank>, String> {
+    if !carrier_holds(stack, carrier, entry, TYPE_ID_SOUNDBANK) {
         return Ok(None);
     }
     let container = stack
@@ -578,6 +662,198 @@ fn carrier_soundbank(stack: &mut GameStack, entry: u32) -> Result<Option<Soundba
     let body = extract_data_chunk(&container)
         .ok_or_else(|| format!("soundbank 0x{entry:08X}: its container has no data chunk"))?;
     Soundbank::parse(&body).map(Some).map_err(|e| format!("soundbank 0x{entry:08X}: {e}"))
+}
+
+/// Where a `replace_sound_wave`'s line plays.
+#[derive(Debug, Clone)]
+pub struct LineTargets {
+    /// The reference the groups play the line by: the wavebank's bank hash (`+0x04`, which for a
+    /// localized wavebank is the hash of its name without the language) and the record's index.
+    pub from: (u32, u32),
+    /// The record's clip hash, which the new record keeps.
+    pub clip: u32,
+    /// The record: its length is what a remeasured cue had.
+    pub record: WaveRecord,
+    /// The entry hash of every soundbank of the carriers that hold the wavebank whose groups play
+    /// the line.
+    pub entries: BTreeSet<u32>,
+    /// The line's wavebank, parsed: the other records a remeasured cue's groups pick from.
+    pub wavebank: WavebankFile,
+}
+
+/// The carriers a sound table of `language` (or none) is looked up in, each with its stack:
+/// that language's WAD in `game`, or `vz.wad` in `game` and `shell.wad` (opened into `shell`).
+fn carriers_for<'g>(
+    game: &'g mut GameStack,
+    shell: &'g mut Option<GameStack>,
+    language: Option<Language>,
+) -> Result<Vec<(Carrier, &'g mut GameStack)>, String> {
+    Ok(match language {
+        Some(l) => vec![(Carrier::Language(l), game)],
+        None => {
+            if shell.is_none() {
+                *shell = Some(game.open_sibling("shell.wad")?);
+            }
+            let stack = shell.as_mut().ok_or("internal error: shell.wad was not opened")?;
+            vec![(Carrier::Vz, game), (Carrier::Shell, stack)]
+        }
+    })
+}
+
+/// One WAD that carries a wavebank: its copy of the wavebank and every soundbank it carries.
+#[derive(Debug, Clone)]
+pub struct CarrierTables {
+    /// The WAD.
+    pub carrier: Carrier,
+    /// Its copy of the wavebank, parsed.
+    pub wavebank: WavebankFile,
+    /// Every soundbank the WAD carries, `(entry hash, table)`, in entry-hash order.
+    pub soundbanks: Vec<(u32, Soundbank)>,
+}
+
+/// A wavebank the game ships, and every soundbank of each WAD that carries it: the tables a line of
+/// it is played through ([`line_targets`]), and what the Workshop's Audio page routes clips by.
+#[derive(Debug, Clone)]
+pub struct WavebankPlayers {
+    /// The wavebank's entry (`<wavebank>.<language>` for a localized one, or `0xHHHHHHHH`).
+    pub entry: String,
+    /// Each carrier that holds it.
+    pub carriers: Vec<CarrierTables>,
+}
+
+/// Read the wavebank `wavebank` of `language` (or none) and every soundbank of each WAD that holds
+/// it: that language's WAD in `game`, or `vz.wad` in `game` and `shell.wad` (opened into `shell`).
+/// No carrier holding it is an error naming the entry.
+pub fn wavebank_players(
+    game: &mut GameStack,
+    shell: &mut Option<GameStack>,
+    wavebank: &str,
+    language: Option<Language>,
+) -> Result<WavebankPlayers, String> {
+    let entry = entry_name(wavebank, language);
+    let entry_hash = asset_hash(&entry);
+    let mut carriers = Vec::new();
+    for (carrier, stack) in carriers_for(game, shell, language)? {
+        let Some(wb) = carrier_wavebank(stack, carrier, entry_hash)? else { continue };
+        let mut soundbanks = Vec::new();
+        for h in carrier_hashes(stack, carrier, TYPE_ID_SOUNDBANK) {
+            if let Some(sb) = carrier_soundbank(stack, carrier, h)? {
+                soundbanks.push((h, sb));
+            }
+        }
+        carriers.push(CarrierTables { carrier, wavebank: wb, soundbanks });
+    }
+    if carriers.is_empty() {
+        return Err(format!(
+            "no game WAD carries a wavebank named {entry:?} (0x{entry_hash:08X}) — check the wavebank \
+             name as the groups name it (vo_stream), or its entry's hash{}",
+            if language.is_some() { ", and the language" } else { "" }
+        ));
+    }
+    Ok(WavebankPlayers { entry, carriers })
+}
+
+/// Resolve a line: the wavebank's entry (`<wavebank>.<language>` for a localized one, or a bare
+/// hash of it) in each carrier that holds it ([`wavebank_players`]), the one record whose clip hash
+/// is `line`, and every soundbank of those carriers whose groups play that record.
+///
+/// Errors, each naming what it looked for: no carrier holds the wavebank; no record, or more than
+/// one, carries the clip hash; the carriers' copies place it differently; no group plays it (a
+/// replacement would change nothing); or a cue plays it through another soundbank's group, whose
+/// length this bank's fork could not remeasure.
+pub fn line_targets(
+    game: &mut GameStack,
+    shell: &mut Option<GameStack>,
+    wavebank: &str,
+    language: Option<Language>,
+    line: &str,
+) -> Result<LineTargets, String> {
+    resolve_line(wavebank_players(game, shell, wavebank, language)?, line)
+}
+
+/// [`line_targets`] over tables already read.
+pub fn resolve_line(players: WavebankPlayers, line: &str) -> Result<LineTargets, String> {
+    let entry = players.entry;
+    let entry_hash = asset_hash(&entry);
+    let clip = asset_hash(line);
+    let mut found: Option<(u32, u32, WaveRecord, WavebankFile)> = None;
+    let mut holders: Vec<String> = Vec::new();
+    let mut entries = BTreeSet::new();
+    // (soundbank bank hash, group) of every group that plays the line, and every cue's reach.
+    let mut playing: BTreeSet<(u32, u16)> = BTreeSet::new();
+    let mut reach: Vec<(u32, u32, Vec<(u32, u16)>)> = Vec::new();
+    for CarrierTables { carrier, wavebank: wb, soundbanks } in players.carriers {
+        holders.push(carrier.wad());
+        let hits: Vec<usize> = wb.records.iter().enumerate().filter(|(_, r)| r.clip_hash == clip).map(|(i, _)| i).collect();
+        let index = match hits.as_slice() {
+            [i] => *i as u32,
+            [] => {
+                return Err(format!(
+                    "the wavebank {entry:?} (0x{entry_hash:08X}) in {} has no line {line:?} (clip hash \
+                     0x{clip:08X}) among its {} records",
+                    carrier.wad(),
+                    wb.records.len()
+                ))
+            }
+            many => {
+                return Err(format!(
+                    "the wavebank {entry:?} in {} has {} records with clip hash 0x{clip:08X} ({line:?}): \
+                     records {many:?}, so the line names no one record",
+                    carrier.wad(),
+                    many.len()
+                ))
+            }
+        };
+        let from = (wb.bank_hash, index);
+        if let Some((bank_hash, at, ..)) = &found {
+            if (*bank_hash, *at) != from {
+                return Err(format!(
+                    "the copies of the wavebank {entry:?} place line {line:?} differently: 0x{bank_hash:08X} \
+                     record {at}, and 0x{:08X} record {index} in {}",
+                    from.0,
+                    carrier.wad()
+                ));
+            }
+        } else {
+            found = Some((from.0, index, wb.records[index as usize].clone(), wb));
+        }
+        for (h, sb) in &soundbanks {
+            let h = *h;
+            let mut plays = false;
+            for (g, group) in sb.groups.iter().enumerate() {
+                if group.waves().iter().any(|w| (w.wavebank, w.index) == from) {
+                    plays = true;
+                    let g = u16::try_from(g).map_err(|_| format!("soundbank 0x{h:08X}: group {g} is past u16"))?;
+                    playing.insert((sb.bank_hash, g));
+                }
+            }
+            if plays {
+                entries.insert(h);
+            }
+            for cue in &sb.cues {
+                reach.push((sb.bank_hash, cue.guid, encode::cue_groups(&cue.body)));
+            }
+        }
+    }
+    let Some((bank_hash, index, record, wavebank)) = found else {
+        return Err(format!("internal error: the wavebank {entry:?} was read from no carrier"));
+    };
+    if entries.is_empty() {
+        return Err(format!(
+            "no soundbank of {} plays line {line:?} (record {index} of {entry:?}), so replacing it would \
+             change nothing",
+            holders.join(" or ")
+        ));
+    }
+    for (own, guid, groups) in &reach {
+        if let Some((other, g)) = groups.iter().find(|(sb, g)| sb != own && playing.contains(&(*sb, *g))) {
+            return Err(format!(
+                "cue 0x{guid:08X} of soundbank 0x{own:08X} plays line {line:?} through group {g} of \
+                 soundbank 0x{other:08X}, so its length could not be remeasured with its own bank"
+            ));
+        }
+    }
+    Ok(LineTargets { from: (bank_hash, index), clip, record, entries, wavebank })
 }
 
 /// The game's tables of a bank the engine loads.
@@ -594,7 +870,7 @@ pub struct RetailBank {
 /// The body of `entry`'s table of `what` in `stack`: an error naming the bank when the stack does
 /// not carry it.
 fn carrier_table(stack: &mut GameStack, entry: &str, type_hash: u32, type_id: u32, what: &str) -> Result<Vec<u8>, String> {
-    let hash = m2(entry);
+    let hash = asset_hash(entry);
     if !stack.has_asset(hash, type_id) {
         return Err(format!(
             "vz.wad carries the soundbank {entry:?} (0x{hash:08X}) and no {what} of that name, which an \
@@ -608,16 +884,16 @@ fn carrier_table(stack: &mut GameStack, entry: &str, type_hash: u32, type_id: u3
 }
 
 /// `soundbank` with the sounddb and wavebank `game` carries for `entry`, a bank the engine loads.
-/// The wavebank must carry `m2(entry)`, the name the engine requests it by.
+/// The wavebank must carry the entry's hash, the name the engine requests it by.
 fn retail_engine_bank(game: &mut GameStack, entry: &str, soundbank: Soundbank) -> Result<RetailBank, String> {
     let sounddb = carrier_table(game, entry, ASSET_TYPE_SOUNDDB, TYPE_ID_SOUNDDB, "sounddb")?;
     let body = carrier_table(game, entry, TYPE_HASH_WAVEBANK, TYPE_ID_WAVEBANK, "wavebank")?;
     let wavebank = WavebankFile::parse(&body).map_err(|e| format!("wavebank {entry:?}: {e}"))?;
-    if wavebank.bank_hash != m2(entry) {
+    if wavebank.bank_hash != asset_hash(entry) {
         return Err(format!(
             "vz.wad's wavebank {entry:?} (0x{:08X}) carries the bank hash 0x{:08X}, and the engine \
              requests a bank's wavebank by the bank's own name",
-            m2(entry),
+            asset_hash(entry),
             wavebank.bank_hash
         ));
     }
@@ -668,10 +944,15 @@ fn wave_at(placed: &WavePlacement<'_>, op: &Op<'_>, index: u32) -> Result<(u32, 
     Ok((*wavebank, at))
 }
 
-/// A `replace_sound_bank`'s soundbank and sounddb, built from its cues, each group playing its wave
-/// where `placed` puts it.
-fn replacement_tables(bank: &str, op: &Op<'_>, placed: &WavePlacement<'_>) -> Result<(Soundbank, Vec<u8>), String> {
-    let spec = BankSpec { name: bank.to_string(), cues: op.specs.iter().map(|(s, _)| s.clone()).collect() };
+/// A `replace_sound_bank`'s soundbank and sounddb, built from its cues under `bank_hash` (the game
+/// soundbank's own), each group playing its wave where `placed` puts it.
+fn replacement_tables(
+    bank: &str,
+    bank_hash: u32,
+    op: &Op<'_>,
+    placed: &WavePlacement<'_>,
+) -> Result<(Soundbank, Vec<u8>), String> {
+    let spec = BankSpec { name: bank.to_string(), hash: bank_hash, cues: op.specs.iter().map(|(s, _)| s.clone()).collect() };
     let mut tables = encode::build_tables(&spec).map_err(|err| format!("{}: {err}", op.who))?;
     for (group, (_, index)) in tables.soundbank.groups.iter_mut().zip(&op.specs) {
         let (wavebank, at) = wave_at(placed, op, *index)?;
@@ -699,6 +980,100 @@ fn retarget_cues(soundbank: &mut Soundbank, ops: &[Op<'_>], placed: &WavePlaceme
         }
     }
     Ok(())
+}
+
+/// The wavebank hash of every wave a cue of `soundbank` can pick when it reaches a group that plays
+/// one of `ops`' replaced lines: what remeasuring those cues reads.
+fn wavebanks_reached(soundbank: &Soundbank, ops: &[Op<'_>]) -> BTreeSet<u32> {
+    let lines: Vec<(u32, u32)> =
+        ops.iter().filter_map(|o| if let OpKind::Wave { from, .. } = o.kind { Some(from) } else { None }).collect();
+    let own = soundbank.bank_hash;
+    let plays = |g: &(u32, u16)| {
+        g.0 == own
+            && soundbank
+                .groups
+                .get(usize::from(g.1))
+                .is_some_and(|grp| grp.waves().iter().any(|w| lines.contains(&(w.wavebank, w.index))))
+    };
+    let mut out = BTreeSet::new();
+    for cue in &soundbank.cues {
+        let groups = encode::cue_groups(&cue.body);
+        if !groups.iter().any(plays) {
+            continue;
+        }
+        for g in groups.iter().filter(|(sb, _)| *sb == own).map(|(_, g)| g) {
+            if let Some(grp) = soundbank.groups.get(usize::from(*g)) {
+                out.extend(grp.waves().iter().map(|w| w.wavebank));
+            }
+        }
+    }
+    out
+}
+
+/// Put the wavebank whose bank hash is `hash` into `cache`, read from `carrier`'s WAD in `stack`:
+/// the entry of that hash when the carrier holds one (an unlocalized wavebank's entry is its bank
+/// hash), otherwise the carrier's wavebank that carries the bank hash. One the carrier does not
+/// hold is left out, and the cue that reads it fails to remeasure, naming it.
+fn fill_wavebank(stack: &mut GameStack, carrier: Carrier, hash: u32, cache: &mut BTreeMap<u32, WavebankFile>) -> Result<(), String> {
+    if cache.contains_key(&hash) {
+        return Ok(());
+    }
+    if let Some(wb) = carrier_wavebank(stack, carrier, hash)? {
+        cache.insert(wb.bank_hash, wb);
+        if cache.contains_key(&hash) {
+            return Ok(());
+        }
+    }
+    for entry in carrier_hashes(stack, carrier, TYPE_ID_WAVEBANK) {
+        if let Some(wb) = carrier_wavebank(stack, carrier, entry)? {
+            let found = wb.bank_hash == hash;
+            cache.entry(wb.bank_hash).or_insert(wb);
+            if found {
+                return Ok(());
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Apply every `replace_sound_wave` of `ops` to `soundbank`: each moves its line to the new wave
+/// where `placed` puts it ([`encode::retarget_wave`]), then every cue that reaches a moved
+/// reference is remeasured ([`encode::recompute_lengths`]), finding the new waves in `waves` and
+/// every other record with `retail`. The line was found in this bank's game copy, so a bank with no
+/// reference to move is an error unless a `replace_sound_bank` replaced it. Returns how many groups
+/// and cues changed.
+fn retarget_waves<'r>(
+    soundbank: &mut Soundbank,
+    entry: &str,
+    ops: &[Op<'_>],
+    placed: &WavePlacement<'_>,
+    waves: &'r OverrideWaves,
+    retail: impl Fn(u32, u32) -> Option<&'r WaveRecord>,
+) -> Result<(usize, usize), String> {
+    let replaced = ops.iter().any(|o| o.kind == OpKind::Bank);
+    let mut moved: BTreeSet<usize> = BTreeSet::new();
+    let mut new: Vec<((u32, u32), &'r WaveRecord)> = Vec::new();
+    for op in ops {
+        let OpKind::Wave { from, record } = op.kind else { continue };
+        let to = wave_at(placed, op, record)?;
+        let rec = waves
+            .get(&(op.shipment.to_string(), entry.to_string()))
+            .and_then(|r| r.get(record as usize))
+            .ok_or_else(|| format!("internal error: {}'s wave {record} for {entry:?} was not collected", op.who))?;
+        new.push((to, rec));
+        let groups = encode::retarget_wave(soundbank, from, to);
+        if groups.is_empty() && !replaced {
+            return Err(format!(
+                "internal error: {} found its line in {entry:?}, and no group of the bank plays it",
+                op.who
+            ));
+        }
+        moved.extend(groups);
+    }
+    let moved: Vec<usize> = moved.into_iter().collect();
+    let lookup = |wb: u32, i: u32| new.iter().find(|(at, _)| *at == (wb, i)).map(|(_, r)| *r).or_else(|| retail(wb, i));
+    let cues = encode::recompute_lengths(soundbank, &moved, lookup).map_err(|err| format!("bank {entry:?}: {err}"))?;
+    Ok((moved.len(), cues.len()))
 }
 
 /// The wavebank a bank the engine loads ships: `retail`'s waves, each at its own index, then
@@ -731,11 +1106,16 @@ pub struct EngineTables {
 fn engine_tables(entry: &str, e: &EntryOps<'_>, waves: &OverrideWaves, retail: &RetailBank) -> Result<EngineTables, String> {
     let (placed, appended) = place_waves(entry, &e.ops, waves, Some(&retail.wavebank))?;
     let (mut soundbank, sounddb) = match e.ops.iter().find(|o| o.kind == OpKind::Bank) {
-        Some(op) => replacement_tables(e.bank, op, &placed)?,
+        Some(op) => replacement_tables(&e.bank, retail.soundbank.bank_hash, op, &placed)?,
         None => (retail.soundbank.clone(), retail.sounddb.clone()),
     };
     retarget_cues(&mut soundbank, &e.ops, &placed)?;
     let wavebank = engine_wavebank(&retail.wavebank, &appended).map_err(|err| format!("bank {entry:?}: {err}"))?;
+    // A remeasured cue's records are this bank's wavebank's (a line of it is played by no other
+    // soundbank); a group that also picks a wave of another wavebank fails the measure, naming it.
+    retarget_waves(&mut soundbank, entry, &e.ops, &placed, waves, |wb, i| {
+        (wb == wavebank.bank_hash).then(|| wavebank.records.get(i as usize)).flatten()
+    })?;
     Ok(EngineTables { soundbank, sounddb, wavebank })
 }
 
@@ -768,9 +1148,55 @@ pub fn lower_overrides(
 ) -> Result<OverrideBlocks, String> {
     let mut entries: BTreeMap<String, EntryOps<'_>> = BTreeMap::new();
     let mut wavebanks = OverrideWaves::new();
+    // One spelling per entry, the first seen: a bank named in one contribution and written as its
+    // entry hash in another is one entry.
+    let mut spelled: BTreeMap<u32, String> = BTreeMap::new();
+    let mut shell: Option<GameStack> = None;
+    // The wavebanks of the replaced lines, by bank hash: the records a remeasured cue picks from.
+    let mut line_wavebanks: BTreeMap<u32, WavebankFile> = BTreeMap::new();
+    // Each Shipment's entries a replaced line reaches, in contribution order: its registrations.
+    let mut line_entries: Vec<(&str, String)> = Vec::new();
     for s in shipments {
         let shipment = s.manifest.shipment.name.as_str();
         for (index, c) in s.manifest.contributions.iter().enumerate() {
+            let who = format!("{shipment} contributions[{index}] ({})", c.kind());
+            // A replaced line is an override of every bank whose groups play it.
+            if let Contribution::ReplaceSoundWave { wavebank, language, line, wave } = c {
+                if bare_hash(wavebank).is_none() && is_vo_bank(wavebank) != language.is_some() {
+                    return Err(format!(
+                        "{who}: wavebank {wavebank:?} {} — a `vo_*` wavebank is replaced per language, \
+                         any other has none",
+                        if language.is_some() { "is not a vo_* wavebank but declares a language" } else { "is a vo_* wavebank and declares no language" }
+                    ));
+                }
+                let t = line_targets(game, &mut shell, wavebank, *language, line).map_err(|m| format!("{who}: {m}"))?;
+                let path = s.root.join(wave);
+                let bytes = std::fs::read(&path).map_err(|e| format!("{who}: reading {}: {e}", path.display()))?;
+                let pcm = mercs2_audio::wav::read_pcm16_wav(&bytes)
+                    .map_err(|e| format!("{who}: {} is not a usable WAV: {e}", path.display()))?;
+                let record = encode::wave_record(&format!("line {line:?}"), t.clip, &pcm).map_err(|e| format!("{who}: {e}"))?;
+                for h in &t.entries {
+                    let entry = spelled.entry(*h).or_insert_with(|| format!("0x{h:08X}")).clone();
+                    let records = wavebanks.entry((shipment.to_string(), entry.clone())).or_default();
+                    let at = u32::try_from(records.len()).map_err(|_| format!("{who}: wave index past u32"))?;
+                    records.push(record.clone());
+                    entries
+                        .entry(entry.clone())
+                        .or_insert_with(|| EntryOps { bank: entry.clone(), language: *language, ops: Vec::new() })
+                        .ops
+                        .push(Op { shipment, who: who.clone(), kind: OpKind::Wave { from: t.from, record: at }, specs: Vec::new() });
+                    line_entries.push((shipment, entry));
+                }
+                log.push(format!(
+                    "{who}: line {line:?} (clip 0x{:08X}, record {} of wavebank 0x{:08X}) plays in {} bank(s)",
+                    t.clip,
+                    t.from.1,
+                    t.from.0,
+                    t.entries.len()
+                ));
+                line_wavebanks.entry(t.wavebank.bank_hash).or_insert(t.wavebank);
+                continue;
+            }
             let (bank, language, category, cues, kind): (&str, Option<Language>, &str, Vec<&SoundCue>, OpKind) = match c {
                 Contribution::ReplaceSoundBank { bank, language, category, cues, .. } => {
                     (bank, *language, category, cues.iter().collect(), OpKind::Bank)
@@ -780,15 +1206,16 @@ pub fn lower_overrides(
                 }
                 _ => continue,
             };
-            let who = format!("{shipment} contributions[{index}] ({})", c.kind());
-            if is_vo_bank(bank) != language.is_some() {
+            // A bank written as a bare hash names its entry; the carrier lookup below holds it to the
+            // WAD its language (or none) says.
+            if bare_hash(bank).is_none() && is_vo_bank(bank) != language.is_some() {
                 return Err(format!(
                     "{who}: bank {bank:?} {} — a `vo_*` bank is replaced per language, any other bank \
                      has none",
                     if language.is_some() { "is not a vo_* bank but declares a language" } else { "is a vo_* bank and declares no language" }
                 ));
             }
-            let entry = entry_name(bank, language);
+            let entry = spelled.entry(entry_hash(bank, language)).or_insert_with(|| entry_name(bank, language)).clone();
             let records = wavebanks.entry((shipment.to_string(), entry.clone())).or_default();
             let mut specs = Vec::with_capacity(cues.len());
             for cue in cues {
@@ -800,30 +1227,30 @@ pub fn lower_overrides(
             }
             entries
                 .entry(entry)
-                .or_insert_with(|| EntryOps { bank, language, ops: Vec::new() })
+                .or_insert_with(|| EntryOps { bank: bank.to_string(), language, ops: Vec::new() })
                 .ops
                 .push(Op { shipment, who, kind, specs });
         }
     }
 
     // The carriers of every entry, each with the soundbank it carries, whatever the scope.
-    let mut shell: Option<GameStack> = None;
     let mut carried: BTreeMap<&str, Vec<(Carrier, Soundbank)>> = BTreeMap::new();
     for (entry, e) in &entries {
-        let entry_hash = m2(entry);
+        let entry_hash = asset_hash(entry);
         let mut found: Vec<(Carrier, Soundbank)> = Vec::new();
         if let Some(language) = e.language {
-            let base = carrier_soundbank(game, entry_hash)?.ok_or_else(|| missing(entry, &e.ops))?;
-            found.push((Carrier::Language(language), base));
+            let carrier = Carrier::Language(language);
+            let base = carrier_soundbank(game, carrier, entry_hash)?.ok_or_else(|| missing(entry, &e.ops))?;
+            found.push((carrier, base));
         } else {
-            if let Some(base) = carrier_soundbank(game, entry_hash)? {
+            if let Some(base) = carrier_soundbank(game, Carrier::Vz, entry_hash)? {
                 found.push((Carrier::Vz, base));
             }
             if shell.is_none() {
                 shell = Some(game.open_sibling("shell.wad")?);
             }
             let stack = shell.as_mut().ok_or("internal error: shell.wad was not opened")?;
-            if let Some(base) = carrier_soundbank(stack, entry_hash)? {
+            if let Some(base) = carrier_soundbank(stack, Carrier::Shell, entry_hash)? {
                 found.push((Carrier::Shell, base));
             }
             if found.is_empty() {
@@ -839,11 +1266,33 @@ pub fn lower_overrides(
 
     let mut out = OverrideBlocks::default();
     for s in shipments {
+        let shipment = s.manifest.shipment.name.as_str();
         out.registrations.extend(sound_registrations(&s.manifest, &carriers)?);
+        // A replaced line's override wavebank for each Lua-loaded bank it reaches loads where the bank
+        // does, as a `replace_sound_cue`'s does.
+        for (_, entry) in line_entries.iter().filter(|(sh, _)| *sh == shipment) {
+            let e = &entries[entry];
+            if bank_loader(&e.bank, e.language, &RETAIL_LUA_LOAD_SITES) == BankLoader::Engine {
+                continue;
+            }
+            let sessions = override_sessions(&e.bank, &carriers[entry]);
+            if sessions.is_empty() {
+                return Err(no_session(entry, &carriers[entry], &format!("{shipment}'s replaced line")));
+            }
+            let reg = SoundBankRegistration {
+                shipment: shipment.to_string(),
+                bank: override_wavebank_name(shipment, entry),
+                soundbank: false,
+                sessions,
+            };
+            if !out.registrations.contains(&reg) {
+                out.registrations.push(reg);
+            }
+        }
     }
 
     for (entry, e) in &entries {
-        let entry_hash = m2(entry);
+        let entry_hash = asset_hash(entry);
         let banks: Vec<&Op<'_>> = e.ops.iter().filter(|o| o.kind == OpKind::Bank).collect();
         if banks.len() > 1 {
             return Err(format!(
@@ -854,22 +1303,23 @@ pub fn lower_overrides(
         // Only the carriers that load the bank get its tables.
         let loading: Vec<(Carrier, Soundbank)> = carried[entry.as_str()]
             .iter()
-            .filter(|(c, _)| carrier_session(e.bank, *c).is_some())
+            .filter(|(c, _)| carrier_session(&e.bank, *c).is_some())
             .cloned()
             .collect();
         if loading.is_empty() {
             let who = e.ops.iter().map(|o| o.who.as_str()).collect::<Vec<_>>().join(" and ");
             return Err(no_session(entry, &carriers[entry], &who));
         }
-        let has_cue = e.ops.iter().any(|o| o.kind == OpKind::Cue);
-        if scope == OverrideScope::Link && !has_cue {
+        // The link merges a bank's cue and line overrides; a replacement alone is each Shipment's own.
+        let merged = e.ops.iter().any(|o| matches!(o.kind, OpKind::Cue | OpKind::Wave { .. }));
+        if scope == OverrideScope::Link && !merged {
             continue;
         }
         let shipments_of = || {
             e.ops.iter().map(|o| o.shipment).collect::<BTreeSet<_>>().into_iter().collect::<Vec<_>>().join(", ")
         };
 
-        if bank_loader(e.bank, &RETAIL_LUA_LOAD_SITES) == BankLoader::Engine {
+        if bank_loader(&e.bank, e.language, &RETAIL_LUA_LOAD_SITES) == BankLoader::Engine {
             let [(Carrier::Vz, soundbank)] = loading.as_slice() else {
                 return Err(format!(
                     "internal error: the engine loads the bank {entry:?}, and the carriers that load it \
@@ -910,7 +1360,19 @@ pub fn lower_overrides(
         // A bank retail Lua loads: each Shipment's waves in its own override wavebank.
         let (placed, _) = place_waves(entry, &e.ops, &wavebanks, None)?;
         let replacement = match e.ops.iter().find(|o| o.kind == OpKind::Bank) {
-            Some(op) => Some(replacement_tables(e.bank, op, &placed)?),
+            Some(op) => {
+                // The replacement carries the game soundbank's own bank hash, which every carrier's
+                // copy must agree on.
+                let hashes: BTreeSet<u32> = loading.iter().map(|(_, sb)| sb.bank_hash).collect();
+                let [bank_hash] = hashes.iter().copied().collect::<Vec<_>>()[..] else {
+                    return Err(format!(
+                        "bank {entry:?}: the carriers' soundbanks carry different bank hashes ({}), so the \
+                         replacement has no one bank hash to carry",
+                        hashes.iter().map(|h| format!("0x{h:08X}")).collect::<Vec<_>>().join(", ")
+                    ));
+                };
+                Some(replacement_tables(&e.bank, bank_hash, op, &placed)?)
+            }
             None => None,
         };
         for (carrier, retail) in loading {
@@ -919,6 +1381,18 @@ pub fn lower_overrides(
                 None => retail,
             };
             retarget_cues(&mut soundbank, &e.ops, &placed)?;
+            // The records a remeasured cue picks from: the lines' wavebanks, and any other wavebank a
+            // moved line's groups pick from, read from this carrier.
+            let stack = match carrier {
+                Carrier::Shell => shell.as_mut().ok_or("internal error: shell.wad was not opened")?,
+                Carrier::Vz | Carrier::Language(_) => &mut *game,
+            };
+            for hash in wavebanks_reached(&soundbank, &e.ops) {
+                fill_wavebank(stack, carrier, hash, &mut line_wavebanks)?;
+            }
+            let (groups, cues) = retarget_waves(&mut soundbank, entry, &e.ops, &placed, &wavebanks, |wb, i| {
+                line_wavebanks.get(&wb).and_then(|w| w.records.get(i as usize))
+            })?;
             let sb = soundbank.to_bytes().map_err(|err| format!("bank {entry:?}: {err}"))?;
             let mut tables: Vec<(u32, u32, &[u8])> = vec![(TYPE_ID_SOUNDBANK, TYPE_HASH_SOUNDBANK, &sb)];
             if let Some((_, db)) = &replacement {
@@ -926,12 +1400,13 @@ pub fn lower_overrides(
             }
             let block = bank_block(entry_hash, &tables).map_err(|err| format!("bank {entry:?}: {err}"))?;
             log.push(format!(
-                "sound bank {entry} 0x{entry_hash:08X} → {}: {} op(s) from {}, soundbank {} B{}",
+                "sound bank {entry} 0x{entry_hash:08X} → {}: {} op(s) from {}, soundbank {} B{}{}",
                 carrier.label(),
                 e.ops.len(),
                 shipments_of(),
                 sb.len(),
-                if replacement.is_some() { " + the replacement's sounddb" } else { "" }
+                if replacement.is_some() { " + the replacement's sounddb" } else { "" },
+                if groups > 0 { format!(", {groups} group(s) moved to a replaced line, {cues} cue(s) remeasured") } else { String::new() }
             ));
             match carrier {
                 Carrier::Vz => out.overlay.push(block),
@@ -944,7 +1419,7 @@ pub fn lower_overrides(
     if scope == OverrideScope::Shipment {
         for ((shipment, entry), records) in wavebanks {
             // A bank the engine loads carries its override waves in its own retail-named block.
-            if bank_loader(entries[&entry].bank, &RETAIL_LUA_LOAD_SITES) == BankLoader::Engine {
+            if bank_loader(&entries[&entry].bank, entries[&entry].language, &RETAIL_LUA_LOAD_SITES) == BankLoader::Engine {
                 continue;
             }
             let name = override_wavebank_name(&shipment, &entry);
@@ -952,7 +1427,7 @@ pub fn lower_overrides(
             let body = WavebankFile { bank_hash: hash, stream_name: None, records }
                 .to_bytes()
                 .map_err(|err| format!("wavebank {name:?}: {err}"))?;
-            let sessions = override_sessions(entries[&entry].bank, &carriers[&entry]);
+            let sessions = override_sessions(&entries[&entry].bank, &carriers[&entry]);
             for session in &sessions {
                 let block = bank_block(hash, &[(TYPE_ID_WAVEBANK, TYPE_HASH_WAVEBANK, &body)])
                     .map_err(|err| format!("wavebank {name:?}: {err}"))?;
@@ -1004,8 +1479,9 @@ impl Carrier {
 fn missing(entry: &str, ops: &[Op<'_>]) -> String {
     format!(
         "[M0218] no game WAD carries a soundbank named {entry:?} (0x{:08X}), which {} overrides — \
-         check the bank name (as the game's Lua loads it) and, for a vo_* bank, the language",
-        m2(entry),
+         check the bank name (as the game's Lua loads it) or hash (the entry's, `<bank>.<language>` \
+         for a vo_* bank) and, for a vo_* bank, the language",
+        asset_hash(entry),
         ops.iter().map(|o| o.who.as_str()).collect::<Vec<_>>().join(" and ")
     )
 }
@@ -1054,6 +1530,7 @@ pub fn installed_cue_guids(game: &mut GameStack) -> Result<BTreeSet<u32>, String
     Ok(guids)
 }
 
+/// For each `replace_sound_wave` of `manifest`, why its line cannot be replaced ([`line_targets`]).
 /// For each `replace_sound_bank` / `replace_sound_cue` of `manifest`, why its target is not in the
 /// game: the bank is in no carrier (`game`, which holds the declared languages' WADs, and
 /// `shell.wad` beside it), no carrier loads it ([`carrier_session`]: a bank the engine loads is
@@ -1062,23 +1539,31 @@ pub fn installed_cue_guids(game: &mut GameStack) -> Result<BTreeSet<u32>, String
 pub fn override_target_problems(manifest: &Manifest, game: &mut GameStack) -> Vec<(usize, String)> {
     let mut out = Vec::new();
     let mut shell: Option<Result<GameStack, String>> = None;
+    let mut line_shell: Option<GameStack> = None;
     for (index, c) in manifest.contributions.iter().enumerate() {
+        // A line: its wavebank, its one record, and a bank that plays it ([`line_targets`]).
+        if let Contribution::ReplaceSoundWave { wavebank, language, line, .. } = c {
+            if let Err(e) = line_targets(game, &mut line_shell, wavebank, *language, line) {
+                out.push((index, e));
+            }
+            continue;
+        }
         let (bank, language, cue) = match c {
             Contribution::ReplaceSoundBank { bank, language, .. } => (bank, *language, None),
             Contribution::ReplaceSoundCue { bank, language, cue, .. } => (bank, *language, Some(&cue.name)),
             _ => continue,
         };
         let entry = entry_name(bank, language);
-        let hash = m2(&entry);
+        let hash = asset_hash(&entry);
         let first = match language {
             Some(l) => Carrier::Language(l),
             None => Carrier::Vz,
         };
-        let mut carriers: Vec<(Carrier, Result<Option<Soundbank>, String>)> = vec![(first, carrier_soundbank(game, hash))];
+        let mut carriers: Vec<(Carrier, Result<Option<Soundbank>, String>)> = vec![(first, carrier_soundbank(game, first, hash))];
         if language.is_none() {
             let shell = shell.get_or_insert_with(|| game.open_sibling("shell.wad"));
             match shell {
-                Ok(stack) => carriers.push((Carrier::Shell, carrier_soundbank(stack, hash))),
+                Ok(stack) => carriers.push((Carrier::Shell, carrier_soundbank(stack, Carrier::Shell, hash))),
                 Err(e) => {
                     out.push((index, format!("the front end's shell.wad cannot be read, so {bank:?} cannot be looked up in it: {e}")));
                     continue;
@@ -1102,7 +1587,7 @@ pub fn override_target_problems(manifest: &Manifest, game: &mut GameStack) -> Ve
                 index,
                 format!(
                     "no game WAD carries a soundbank named {entry:?} (0x{hash:08X}) — check the bank \
-                     name as the game's Lua loads it{}",
+                     name as the game's Lua loads it, or the hash (the entry's own){}",
                     if language.is_some() { ", and the language" } else { "" }
                 ),
             ));
@@ -1114,10 +1599,10 @@ pub fn override_target_problems(manifest: &Manifest, game: &mut GameStack) -> Ve
             continue;
         }
         let Some(cue) = cue else { continue };
-        let guid = m2(cue);
+        let guid = asset_hash(cue);
         let replaced = manifest.contributions.iter().any(|other| match other {
             Contribution::ReplaceSoundBank { bank: b, language: l, cues, .. } => {
-                entry_name(b, *l) == entry && cues.iter().any(|c| m2(&c.name) == guid)
+                entry_hash(b, *l) == hash && cues.iter().any(|c| asset_hash(&c.name) == guid)
             }
             _ => false,
         });
@@ -1218,7 +1703,7 @@ mod tests {
                 ("qm_s_vo_mattias.german".to_string(), false, sessions(&[LoadSession::Gameplay])),
             ]
         );
-        assert_eq!(linked_sound_entries([&m]), BTreeSet::from([m2("ui_hud"), m2("ui_shell")]));
+        assert_eq!(linked_sound_entries([&m], None).unwrap(), BTreeSet::from([m2("ui_hud"), m2("ui_shell")]));
 
         // An override whose carriers were not looked up is an internal error.
         let partial = carriers(&[("ui_hud", &[Carrier::Vz, Carrier::Shell])]);
@@ -1283,18 +1768,24 @@ mod tests {
     #[test]
     fn the_loader_is_classified_from_the_load_sites() {
         let sites = LuaLoadSites { front_end: &["menu_bank"], gameplay: &["veh_jeep"] };
-        assert_eq!(bank_loader("veh_jeep", &sites), BankLoader::Lua);
-        assert_eq!(bank_loader("VEH_Jeep", &sites), BankLoader::Lua, "names compare by hash");
-        assert_eq!(bank_loader("menu_bank", &sites), BankLoader::Lua);
-        assert_eq!(bank_loader("vo_anyone", &sites), BankLoader::Lua);
-        assert_eq!(bank_loader("wpn_pistol", &sites), BankLoader::Engine);
-        assert_eq!(bank_loader("ui_hud", &sites), BankLoader::Engine, "only the supplied sites count");
+        assert_eq!(bank_loader("veh_jeep", None, &sites), BankLoader::Lua);
+        assert_eq!(bank_loader("VEH_Jeep", None, &sites), BankLoader::Lua, "names compare by hash");
+        assert_eq!(bank_loader("menu_bank", None, &sites), BankLoader::Lua);
+        assert_eq!(bank_loader("vo_anyone", Some(Language::English), &sites), BankLoader::Lua);
+        assert_eq!(bank_loader("wpn_pistol", None, &sites), BankLoader::Engine);
+        assert_eq!(bank_loader("ui_hud", None, &sites), BankLoader::Engine, "only the supplied sites count");
+        // A bank written as a bare hash: a site's bank by its hash, a language's copy by its language.
+        assert_eq!(bank_loader(&format!("0x{:08X}", m2("veh_jeep")), None, &sites), BankLoader::Lua);
+        assert_eq!(bank_loader(&format!("0x{:08X}", m2("wpn_pistol")), None, &sites), BankLoader::Engine);
+        let jen = format!("0x{:08X}", m2("vo_jen.english"));
+        assert_eq!(bank_loader(&jen, Some(Language::English), &sites), BankLoader::Lua);
 
-        for bank in ["ui_hud", "ui_shell", "music", "wpn_shared", "veh_support", "vo_mattias"] {
-            assert_eq!(bank_loader(bank, &RETAIL_LUA_LOAD_SITES), BankLoader::Lua, "{bank}");
+        for bank in ["ui_hud", "ui_shell", "music", "wpn_shared", "veh_support"] {
+            assert_eq!(bank_loader(bank, None, &RETAIL_LUA_LOAD_SITES), BankLoader::Lua, "{bank}");
         }
+        assert_eq!(bank_loader("vo_mattias", Some(Language::German), &RETAIL_LUA_LOAD_SITES), BankLoader::Lua);
         for bank in ["veh_jeep", "wpn_pistol", "wpn_grapplegun"] {
-            assert_eq!(bank_loader(bank, &RETAIL_LUA_LOAD_SITES), BankLoader::Engine, "{bank}");
+            assert_eq!(bank_loader(bank, None, &RETAIL_LUA_LOAD_SITES), BankLoader::Engine, "{bank}");
         }
         assert!(loader_sessions("veh_jeep", None).is_empty());
         assert_eq!(loader_sessions("ui_hud", None), sessions(&LoadSession::ALL));
@@ -1316,7 +1807,7 @@ mod tests {
         let found = carriers(&[("veh_jeep", &[Carrier::Vz]), ("ui_hud", &[Carrier::Vz, Carrier::Shell])]);
         let banks: Vec<String> = sound_registrations(&m, &found).unwrap().into_iter().map(|r| r.bank).collect();
         assert_eq!(banks, vec!["qm_s_ui_hud".to_string()]);
-        assert_eq!(linked_sound_entries([&m]), BTreeSet::from([m2("veh_jeep"), m2("ui_hud")]));
+        assert_eq!(linked_sound_entries([&m], None).unwrap(), BTreeSet::from([m2("veh_jeep"), m2("ui_hud")]));
 
         // M0218's no-session clause: vz.wad loads a bank the engine loads; shell.wad does not.
         let only_shell = carriers(&[("veh_jeep", &[Carrier::Shell]), ("ui_hud", &[Carrier::Vz, Carrier::Shell])]);
@@ -1328,6 +1819,7 @@ mod tests {
     fn spec(name: &str, v: i16) -> CueSpec {
         CueSpec {
             name: name.to_string(),
+            guid: m2(name),
             category: "ui".to_string(),
             sound_id: m2(name),
             clip_hash: m2(name),
@@ -1339,7 +1831,11 @@ mod tests {
 
     /// A retail-shaped bank `veh_test` of the cues `veh_a` (samples 1) and `veh_b` (samples 2).
     fn retail_bank() -> RetailBank {
-        let tables = encode::build_tables(&BankSpec { name: "veh_test".into(), cues: vec![spec("veh_a", 1), spec("veh_b", 2)] })
+        let tables = encode::build_tables(&BankSpec {
+            name: "veh_test".into(),
+            hash: m2("veh_test"),
+            cues: vec![spec("veh_a", 1), spec("veh_b", 2)],
+        })
             .unwrap();
         RetailBank { soundbank: tables.soundbank, sounddb: tables.sounddb.to_bytes().unwrap(), wavebank: tables.wavebank }
     }
@@ -1348,7 +1844,7 @@ mod tests {
     /// Shipment's waves in contribution order.
     fn ops<'a>(rows: &[(&'a str, OpKind, Vec<CueSpec>)]) -> (EntryOps<'a>, OverrideWaves) {
         let mut waves = OverrideWaves::new();
-        let mut e = EntryOps { bank: "veh_test", language: None, ops: Vec::new() };
+        let mut e = EntryOps { bank: "veh_test".to_string(), language: None, ops: Vec::new() };
         for (shipment, kind, specs) in rows {
             let records = waves.entry((shipment.to_string(), "veh_test".to_string())).or_default();
             let mut placed = Vec::new();

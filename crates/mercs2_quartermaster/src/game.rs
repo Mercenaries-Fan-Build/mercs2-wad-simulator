@@ -446,6 +446,17 @@ impl GameStack {
         })
     }
 
+    /// The WADs of the stack that carry an ASET row for `(hash, type_id)`, in stack order — for a
+    /// caller that must know which file holds an asset (a language's WAD beside `vz.wad`), not only
+    /// that the stack does.
+    pub fn wads_holding(&self, name_hash: u32, type_id: u32) -> Vec<&Path> {
+        self.wads
+            .iter()
+            .filter(|w| w.archive.aset.iter().any(|e| e.asset_hash == name_hash && e.type_id == type_id))
+            .map(|w| w.path.as_path())
+            .collect()
+    }
+
     /// Every asset hash of a given type across the stack, deduplicated — for callers that must scan
     /// (a domain lens, the destructible finder) rather than name one asset up front.
     pub fn asset_hashes(&self, type_id: u32) -> Vec<u32> {

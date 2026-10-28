@@ -81,9 +81,10 @@ struct Cli {
     /// rainbow_table.json (pandemic_hash_m2 -> [names]). Repeatable: later tables
     /// supply names for hashes the earlier ones missed (e.g. the fragment emitted
     /// by `asset_gap_probe --emit`). When given, these tables are exactly the set
-    /// loaded. When absent, the set is `rainbow_table` from `.mercs2-local.toml`
-    /// plus the `data/aset_*_names.json` / `data/aset_block_strings.json`
-    /// fragments under its `notes_docs_dir`. Every table in the set must load.
+    /// loaded. When absent, the set is `rainbow_table` from `.mercs2-local.toml`,
+    /// the `aset_*_names.json` fragments in `crates/mercs2_workshop/data/`, and the
+    /// identifier-shaped names of `data/aset_block_strings.json` under its `notes_docs_dir`
+    /// minus `crates/mercs2_workshop/data/rejected_names.json`. Every table must load.
     #[arg(long)]
     rainbow: Vec<PathBuf>,
 
@@ -141,19 +142,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map(|&(id, name, hash)| (id, (name, hash)))
         .collect();
 
-    let tables: Vec<PathBuf> = if cli.rainbow.is_empty() {
+    let rainbow = if cli.rainbow.is_empty() {
         let start = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-        let data = mercs2_formats::game_paths::local_config_notes_docs_dir(start)?.join("data");
-        vec![
-            mercs2_formats::game_paths::local_config_rainbow_table(start)?,
-            // Fragments cracked from the WAD itself, each a set of verified preimages:
-            //   asset_gap_probe      — texture-base -> model convention
-            //   block_string_harvest — identifiers mined from decompressed block payloads
-            //   name_expand          — slot-grammar expansion of the above
-            //   aset_external_mine   — block-path stems mined from the CONSOLE WADs, which
-            //                          ship an uncompressed name table the PC bake strips
-            data.join("aset_discovered_names.json"),
-            data.join("aset_block_strings.json"),
+        // The name fragments are committed in the workshop crate (its `data/README.md`).
+        let data = start.join("../mercs2_workshop/data");
+        let notes = mercs2_formats::game_paths::local_config_notes_docs_dir(start)?.join("data");
+        let first = [mercs2_formats::game_paths::local_config_rainbow_table(start)?, data.join("aset_discovered_names.json")];
+        // Fragments cracked from the WAD itself:
+        //   asset_gap_probe      — texture-base -> model convention
+        //   block_string_harvest — identifiers mined from decompressed block payloads; only the
+        //                          identifier-shaped ones, minus `rejected_names.json`
+        //   name_expand          — slot-grammar expansion of seed names
+        //   aset_external_mine   — block-path stems mined from the CONSOLE WADs, which
+        //                          ship an uncompressed name table the PC bake strips
+        let rest = [
             data.join("aset_expanded_names.json"),
             data.join("aset_external_names.json"),
             // aset_roster_names — model roots named by crossing the game vehicle/weapon roster with
@@ -162,13 +164,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // aset_variant_names — models that are a DECORATED VARIANT of a named asset
             // (`vz_veh_tank_amx30_base`), found per-model against its own hash (T=1).
             data.join("aset_variant_names.json"),
-        ]
+        ];
+        let mut t = RainbowTable::load_many(&first).map_err(|e| format!("load rainbow tables {first:?}: {e}"))?;
+        let harvested = notes.join("aset_block_strings.json");
+        t.merge(
+            RainbowTable::load_harvested(&harvested, &data.join("rejected_names.json"))
+                .map_err(|e| format!("load {}: {e}", harvested.display()))?,
+        );
+        t.merge(RainbowTable::load_many(&rest).map_err(|e| format!("load rainbow tables {rest:?}: {e}"))?);
+        t
     } else {
-        cli.rainbow.clone()
+        RainbowTable::load_many(&cli.rainbow).map_err(|e| format!("load rainbow tables {:?}: {e}", cli.rainbow))?
     };
-    eprintln!("Loading {} rainbow table(s) ...", tables.len());
-    let rainbow = RainbowTable::load_many(&tables)
-        .map_err(|e| format!("load rainbow tables {tables:?}: {e}"))?;
     eprintln!("  {} m2 hashes loaded", rainbow.len());
 
     if let Some(dir) = cli.out.parent() {
@@ -193,9 +200,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         BTreeMap::new();
 
     for wad_path in &wads {
-        if !wad_path.exists() {
-            eprintln!("SKIP (missing): {}", wad_path.display());
-            continue;
+        if !wad_path.is_file() {
+            return Err(format!("{} is not a file (pass the WADs to export with --wad)", wad_path.display()).into());
         }
         let wad_name = wad_path
             .file_name()
@@ -364,7 +370,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         writeln!(tf, "# Curated ASET hash -> name dictionary, embedded in mercs2_workshop.")?;
         writeln!(
             tf,
-            "# Generated from docs/data/aset_names.csv (resolved rows only). Regenerate with aset_export."
+            "# The resolved rows of aset_export's name dictionary. Regenerate with aset_export --embed-tsv."
         )?;
         for (h, f) in &dict {
             if let Some(n) = f.names.first() {

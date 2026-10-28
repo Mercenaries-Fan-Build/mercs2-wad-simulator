@@ -26,7 +26,7 @@
 //!   cargo run --release -p wad_simulator --bin aset_external_mine -- \
 //!       --names docs/data/aset_names.csv \
 //!       --source game-files/ps3-VZ.WAD --source game-files/xbox-vz.strings.txt \
-//!       --emit docs/data/aset_external_names.json
+//!       --emit crates/mercs2_workshop/data/aset_external_names.json
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::Read;
@@ -59,7 +59,7 @@ struct Cli {
     #[arg(long)]
     roster: Vec<PathBuf>,
 
-    #[arg(long, default_value = "docs/data/aset_external_names.json")]
+    #[arg(long, default_value = "crates/mercs2_workshop/data/aset_external_names.json")]
     emit: Option<PathBuf>,
 
     /// Reject tokens that cannot be asset names (hex literals, dotted paths, digit-led).

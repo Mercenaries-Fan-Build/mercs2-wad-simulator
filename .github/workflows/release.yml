@@ -182,7 +182,7 @@ jobs:
       # HIER; the pack covers 5,309. So without this step every released workshop drew its skeletons
       # and exported its glTF nodes as `bone0`, `bone1`, … and name-based retarget had nothing to
       # match on. Built ONCE (the pack is OS-independent) from the committed
-      # `data/production_names.json`, which needs neither the parent-repo rainbow table nor a game
+      # `crates/mercs2_workshop/data/production_names.json`, which needs neither the parent-repo rainbow table nor a game
       # install — that self-containment is the whole reason the pack can be built on a CI runner.
       # The bundle's OTHER four sources live in the research repo, not this one: the registry rows,
       # the spawnable templates, the 220-class ECS schemas and the two decompiled-Lua corpora. They
@@ -214,7 +214,7 @@ jobs:
           # `--pack-data` reads its out-of-repo sources from the keys of a `.mercs2-local.toml`
           # found upward from its working directory. This step writes one at the workspace root with
           # `notes_docs_dir` set to the corpora checked out above, and runs from there. The names come
-          # from this repo's `data/production_names.json` and the five Ess / ECS / audio files from its
+          # from this repo's `crates/mercs2_workshop/data/production_names.json` and the five Ess / ECS / audio files from its
           # committed `workshop_data/`, both read from the checkout the binary was built from. The
           # raw-names keys (`rainbow_table`, `jul08_strings`) are read only when
           # production_names.json is absent.
@@ -232,7 +232,7 @@ jobs:
           # GUARDRAIL 2: fails when any content the manifest lists is absent from the packed bundle,
           # before the zip is published.
           missing=""
-          for c in names.bin live_registry_hashes.csv spawnable_templates.csv ecs_schemas lua lua_dlc ess_api.json ess_natives.json ess_nodes.json ecs_registry.tsv audio_manifest.json; do
+          for c in names.bin live_registry_hashes.csv spawnable_templates.csv ecs_schemas lua lua_dlc audio_manifest.json; do
             [ -e "workshop_data/$c" ] || missing="$missing $c"
           done
           if [ -n "$missing" ]; then

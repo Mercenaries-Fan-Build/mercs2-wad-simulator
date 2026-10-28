@@ -7,15 +7,18 @@
 //! bundle was the same story in reverse — `MERCS2_WORKSHOP_DATA` or a `workshop_data/` sitting in
 //! the right place, with no in-app way to point at one.
 //!
-//! So both paths are settable and remembered here. Resolution order, most explicit first:
+//! So both paths are settable and remembered here. Resolution is `crate::chains`, most explicit
+//! first, first match wins:
 //!
-//!   WAD   `--wad <path>` → this file → CO-LOCATION → `$MERCS2_GAME_DIR`/`$VZ_WAD` → the Windows
-//!         registry key → the first-run picker
-//!   data  `MERCS2_WORKSHOP_DATA` → this file → next to the exe → a CWD walk-up
+//!   WAD   `--wad <path>` → this run's choice → this file → CO-LOCATION →
+//!         `$MERCS2_GAME_DIR`/`$VZ_WAD` → the Windows registry key
+//!   data  this run's choice → `MERCS2_WORKSHOP_DATA` → this file → next to the exe → a CWD
+//!         walk-up → the downloaded copy
 //!
 //! A command-line flag still wins over a saved setting (a one-off run must not silently rewrite
 //! the user's configuration), and the env var still wins for the data dir (it is how a dev points
-//! a build at a scratch bundle). Saving is explicit — nothing here writes the file on its own.
+//! a build at a scratch bundle). A source that is set but broken stops its chain, and the window
+//! opens on Settings with it in red. Saving is explicit — nothing here writes the file on its own.
 
 use std::path::{Path, PathBuf};
 
@@ -32,6 +35,16 @@ pub struct Settings {
     pub wad_path: Option<PathBuf>,
     /// The `workshop_data/` reference bundle — `names.bin` and the corpora that ride with it.
     pub data_dir: Option<PathBuf>,
+    /// The hero: the model Inspect's Anims and FaceFX tabs play on, kept across tabs and launches.
+    pub hero: Option<Hero>,
+}
+
+/// A model chosen as the hero, by its catalog row: the model's hash and the row's label (a
+/// kit-template row shares its kit's hash; the label picks it out).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Hero {
+    pub hash: u32,
+    pub label: String,
 }
 
 /// `<config>/mercs2-workshop/settings.json`, per-OS. Resolved from environment variables rather
@@ -54,8 +67,15 @@ pub fn config_path() -> Option<PathBuf> {
 /// document, never an error: a corrupt config must not stop the tool from starting, because the
 /// UI that repairs it is inside the tool.
 pub fn load() -> Settings {
-    let Some(p) = config_path() else { return Settings::default() };
-    let Ok(text) = std::fs::read_to_string(&p) else { return Settings::default() };
+    match config_path() {
+        Some(p) => load_from(&p),
+        None => Settings::default(),
+    }
+}
+
+/// [`load`] from `p` rather than the per-OS config file.
+pub fn load_from(p: &Path) -> Settings {
+    let Ok(text) = std::fs::read_to_string(p) else { return Settings::default() };
     match serde_json::from_str(&text) {
         Ok(s) => s,
         Err(e) => {
@@ -70,12 +90,17 @@ impl Settings {
     /// show — "saved" with no location is not a verifiable claim.
     pub fn save(&self) -> Result<PathBuf, String> {
         let p = config_path().ok_or("no config directory on this platform")?;
+        self.save_to(&p)?;
+        Ok(p)
+    }
+
+    /// [`Settings::save`] to `p` rather than the per-OS config file.
+    pub fn save_to(&self, p: &Path) -> Result<(), String> {
         if let Some(dir) = p.parent() {
             std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
         }
         let text = serde_json::to_string_pretty(self).map_err(|e| e.to_string())?;
-        std::fs::write(&p, text).map_err(|e| format!("{}: {e}", p.display()))?;
-        Ok(p)
+        std::fs::write(p, text).map_err(|e| format!("{}: {e}", p.display()))
     }
 }
 

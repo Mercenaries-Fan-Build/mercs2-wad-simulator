@@ -497,9 +497,9 @@ pub fn load_clip_for_rig(w: &mut wad::Wad, hier: &[u32], want: Option<u32>) -> O
     let data = wad::decompress_block_index(w, blk).ok()?;
     let ag = parse_animgroup(&data).ok()?;
     let c = ag.clips.iter().find(|c| c.name_hash == clip_hash)?;
-    let clip = mercs2_formats::anim::parse_anim(&data[c.havok_offset..]).ok()?;
+    let clip = mercs2_formats::anim::parse_anim(c.packfile(&data).ok()?).ok()?;
     if !clip.decoded {
-        return None; // e.g. a delta clip (header-only) — leave synthetic driver in place
+        return None; // a spline clip (header-only; none ship) — leave synthetic driver in place
     }
     let track_to_hier = c.binding.resolve_to_hier(hier);
     Some(ClipAnim {
@@ -545,7 +545,7 @@ pub fn load_clips_for_rig(w: &mut wad::Wad, hier: &[u32], wants: &[u32]) -> Vec<
             let data = cache.get(&blk)?;
             let ag = parse_animgroup(data).ok()?;
             let c = ag.clips.iter().find(|c| c.name_hash == h)?;
-            let clip = mercs2_formats::anim::parse_anim(&data[c.havok_offset..]).ok()?;
+            let clip = mercs2_formats::anim::parse_anim(c.packfile(data).ok()?).ok()?;
             if !clip.decoded {
                 return None;
             }
@@ -571,15 +571,15 @@ pub fn load_clips_for_rig(w: &mut wad::Wad, hier: &[u32], wants: &[u32]) -> Vec<
 // binding (`AnimBinding::resolve_to_hier`). Decode stays the existing wavelet/Havok path — this only
 // adds the *selection* the player did by hand.
 //
-// RE NOTE (verified against retail vz.wad, 2026-07): retail *props* ship no clip of their own. A full
-// census — 0/335 rigged `ModelName` placement props, and 0 of 1248 rigged models across all 1771
-// model ASETs — has a clip whose `trnm` resolves into its rig; all 4261 animgroup clips are the
-// character skeleton family (60–105 tracks). The native `sequ/SINF/TRCK/MINF/MANM/VALU` chunk cluster
-// (concentrated in blocks 3183/3185, alongside the known Mattias clip 0x547C0A27) is the *character*
-// animation binding/registry, not a prop-clip system; retail interior props/doors are moved by script
-// or procedural bone controllers, not shipped clips. So this path is the correct, faithful mechanism
-// and animates any model that DOES carry clips (characters/NPCs/DLC/mods); it is a deliberate no-op
-// for clip-less retail props. See docs/modernization/rendering_fx_lighting_gap.md §H.
+// What the retail clips are (`mercs2_probe --bin anim_codec_census` over vz.wad + vz-patch.wad):
+// 4,261 animgroup entries — 4,103 wavelet, 73 interleaved and 56 delta-compressed Havok clips, and 29
+// MANM material animations (MANM/MINF/TRCK rows, no `trnm`, played by `Object.PlayMaterialAnimation`).
+// By transform-track count: 3,606 have 60–105, 356 have 20–59, 126 have 2–19, 141 have one (the
+// hijack clips drive a vehicle's door or hatch node: `0x9C94874B` drives md500 HIER node 21), 3 have
+// more than 105, and the 29 MANM have none. Of vz.wad's 2,414 models with two or more HIER nodes, 312
+// carry a node some clip's binding names, 288 a node named by a clip of fewer than 20 tracks. This
+// path animates any model whose rig a clip binds; `select_for_rig` below keeps a clip only when a
+// majority of its tracks bind.
 
 /// One clip's identity + rig binding, indexed once over every animgroup block so a model's clips can
 /// be discovered by name-hash rig match without re-scanning the archive per model.
@@ -647,14 +647,14 @@ impl AnimClipIndex {
     }
 
     /// Decode ONE indexed clip (its block is already known — no re-scan) and bind its tracks to
-    /// `hier`. Returns `None` for a non-decoded (delta header-only) clip.
+    /// `hier`. Returns `None` for a non-decoded (spline header-only) clip.
     fn decode(&self, w: &mut wad::Wad, hier: &[u32], name_hash: u32) -> Option<ClipAnim> {
         use mercs2_formats::animgroup::parse_animgroup;
         let entry = self.clips.iter().find(|c| c.name_hash == name_hash)?;
         let data = wad::decompress_block_index(w, entry.block).ok()?;
         let ag = parse_animgroup(&data).ok()?;
         let c = ag.clips.iter().find(|c| c.name_hash == name_hash)?;
-        let clip = mercs2_formats::anim::parse_anim(&data[c.havok_offset..]).ok()?;
+        let clip = mercs2_formats::anim::parse_anim(c.packfile(&data).ok()?).ok()?;
         if !clip.decoded {
             return None;
         }
@@ -1924,6 +1924,45 @@ mod glow_card_tests {
         assert_eq!(rgb, [63.0 / 255.0; 3]);
         let first = colr.keys.iter().find(|k| k.rgba[0] == 0x3f).unwrap();
         assert_eq!(a, first.rgba[3] as f32 / 255.0);
+    }
+}
+
+#[cfg(all(test, feature = "retail"))]
+mod delta_clip_retail_tests {
+    use super::*;
+
+    /// Every delta-compressed clip of the retail vz.wad decodes (each block's DOF chunks add up to
+    /// its stored size, the masks' dynamic DOFs to numD) into finite poses whose rotations are unit
+    /// quaternions to within 0.02 (the largest a mixed static/dynamic rotation track reaches).
+    #[test]
+    fn every_retail_delta_clip_decodes_to_unit_rotations() {
+        use mercs2_formats::anim::AnimType;
+        let vz = mercs2_formats::game_paths::local_config_vz_wad(std::path::Path::new(env!("CARGO_MANIFEST_DIR")))
+            .unwrap_or_else(|e| panic!("{e}"));
+        let mut w = wad::open(&vz.to_string_lossy()).unwrap_or_else(|e| panic!("{e}"));
+        let mut decoded = 0;
+        for blk in wad::animgroup_blocks(&w) {
+            let data = wad::decompress_block_index(&mut w, blk).unwrap_or_else(|e| panic!("block {blk}: {e}"));
+            let ag = mercs2_formats::animgroup::parse_animgroup(&data).unwrap_or_else(|e| panic!("block {blk}: {e}"));
+            for c in &ag.clips {
+                let Ok(pk) = c.packfile(&data) else { continue };
+                let clip = mercs2_formats::anim::parse_anim(pk).unwrap_or_else(|e| panic!("clip 0x{:08X}: {e}", c.name_hash));
+                if clip.anim_type != AnimType::Delta {
+                    continue;
+                }
+                assert!(clip.decoded);
+                for f in 0..clip.num_frames {
+                    let t = clip.duration * f as f32 / (clip.num_frames.max(2) - 1) as f32;
+                    for q in clip.sample_local(t) {
+                        let n = q.rotation.iter().map(|x| x * x).sum::<f32>().sqrt();
+                        assert!(n.is_finite() && (n - 1.0).abs() < 0.02, "clip 0x{:08X} frame {f}: |q| = {n}", c.name_hash);
+                        assert!(q.translation.iter().chain(&q.scale).all(|x| x.is_finite()));
+                    }
+                }
+                decoded += 1;
+            }
+        }
+        assert_eq!(decoded, 56, "the census counts 56 delta clips in vz.wad + vz-patch.wad");
     }
 }
 

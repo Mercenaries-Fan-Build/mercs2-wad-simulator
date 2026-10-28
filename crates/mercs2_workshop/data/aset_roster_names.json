@@ -1,0 +1,61 @@
+{
+  "pandemic_hash_m2": {
+    "0x01B52044": [
+      "global_listeningpost"
+    ],
+    "0x03587437": [
+      "docks_net"
+    ],
+    "0x0BBD20A3": [
+      "global_fruitboxe"
+    ],
+    "0x0FF16E33": [
+      "global_feather_fxmodel_b"
+    ],
+    "0x38381266": [
+      "docks_bld_bar"
+    ],
+    "0x482FD3FE": [
+      "jungle_ruinshotelpool"
+    ],
+    "0x503C9BD5": [
+      "police_hum_officer_c"
+    ],
+    "0x5ECD18B5": [
+      "global_fencechain"
+    ],
+    "0x62661F6C": [
+      "global_weapon_emplaced_tow"
+    ],
+    "0x72118596": [
+      "global_weapon_maverick"
+    ],
+    "0x72A0BE76": [
+      "global_barricadeb"
+    ],
+    "0x757EAE95": [
+      "pmcoutpost_interior_sickbay"
+    ],
+    "0x78D95307": [
+      "port_crane01"
+    ],
+    "0xA6591585": [
+      "global_pole"
+    ],
+    "0xAEE44824": [
+      "merida_bld_oilwellland"
+    ],
+    "0xDF6ACBC3": [
+      "global_fencechainlong"
+    ],
+    "0xE9BAAC86": [
+      "global_fruitboxd"
+    ],
+    "0xF5CEDCD6": [
+      "oc_hum_mercenaryelite_a"
+    ],
+    "0xF6CA6AA1": [
+      "industrial_pipesstacked"
+    ]
+  }
+}

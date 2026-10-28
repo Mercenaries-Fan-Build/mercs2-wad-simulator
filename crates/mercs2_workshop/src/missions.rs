@@ -917,6 +917,8 @@ const GRID: f32 = 26.0;
 const GAP_X: f32 = 56.0;
 const GAP_Y: f32 = 36.0;
 const INDENT_X: f32 = 48.0;
+/// Screen pixels kept clear around a fitted canvas.
+const FIT_MARGIN: f32 = 48.0;
 /// Longest literal shown beside a pin before it is cut.
 const ANNOT_CHARS: usize = 30;
 
@@ -1023,14 +1025,29 @@ fn pins_of(id: NodeId, n: &blueprint::Node) -> Vec<PinRef> {
 
 // ───────────────────────────────────────────────────────────────────── layout
 
+/// The width a canvas's rows wrap at: the width of a rectangle of the canvas's shape whose area is
+/// every node's footprint with its gaps, and never narrower than what the canvas shows at 1:1 or
+/// than the widest node — so a function that fits stays in one row, and a long one comes out the
+/// canvas's shape rather than one long strip.
+fn wrap_width(sizes: &[Vec2], canvas: Vec2) -> f32 {
+    let aspect = canvas.x / canvas.y.max(1.0);
+    let area: f32 = sizes.iter().map(|s| (s.x + GAP_X) * (s.y + GAP_Y)).sum();
+    let widest = sizes.iter().map(|s| s.x).fold(0.0, f32::max);
+    (area * aspect.max(0.1)).sqrt().max(canvas.x - FIT_MARGIN * 2.0).max(widest)
+}
+
 /// Positions for a canvas: each exec chain runs left to right, a statement's values stack under
 /// it, and the blocks off a statement (a branch's arms, a loop's body, a callback) chain below
-/// the row they hang from.
-fn layout(g: &Graph, sizes: &[Vec2]) -> HashMap<NodeId, Pos2> {
+/// the row they hang from. A chain row that would pass [`wrap_width`] for the `canvas` (its size
+/// on screen) ends, and the chain carries on in a new row under that row's blocks, back at the
+/// row's start.
+fn layout(g: &Graph, sizes: &[Vec2], canvas: Vec2) -> HashMap<NodeId, Pos2> {
     struct L<'a> {
         g: &'a Graph,
         sizes: &'a [Vec2],
         pos: HashMap<NodeId, Pos2>,
+        /// The x no row's statements start past, once the row holds one.
+        right: f32,
     }
     impl L<'_> {
         /// Stack the data nodes feeding `id` under it from `y`; returns the stack's width and
@@ -1072,18 +1089,31 @@ fn layout(g: &Graph, sizes: &[Vec2]) -> HashMap<NodeId, Pos2> {
                 cur = self.g.nodes[id].next.and_then(|n| self.g.exec_target(id, n));
             }
             let mut cx = x;
+            let mut row_y = y;
             let mut bottom = y;
             let mut placed = Vec::new();
             for &id in &ids {
-                self.pos.insert(id, Pos2::new(cx, y));
-                placed.push(id);
                 let s = self.sizes[id];
-                let (vw, vh) = self.values(id, cx, y + s.y + GAP_Y * 0.5, &mut placed);
-                bottom = bottom.max(y + s.y + if vh > 0.0 { GAP_Y * 0.5 + vh } else { 0.0 });
+                if cx > x && cx + s.x > self.right {
+                    row_y = self.blocks(&placed, bottom + GAP_Y) + GAP_Y;
+                    placed.clear();
+                    cx = x;
+                    bottom = row_y;
+                }
+                self.pos.insert(id, Pos2::new(cx, row_y));
+                placed.push(id);
+                let (vw, vh) = self.values(id, cx, row_y + s.y + GAP_Y * 0.5, &mut placed);
+                bottom = bottom.max(row_y + s.y + if vh > 0.0 { GAP_Y * 0.5 + vh } else { 0.0 });
                 cx += s.x.max(vw) + GAP_X;
             }
-            let mut below = bottom + GAP_Y;
-            for id in placed {
+            self.blocks(&placed, bottom + GAP_Y)
+        }
+
+        /// Chain the blocks off `placed` (every exec out but `next`) one under another from `y`,
+        /// each indented from the node it hangs from; returns the y below the last.
+        fn blocks(&mut self, placed: &[NodeId], y: f32) -> f32 {
+            let mut below = y;
+            for &id in placed {
                 let n = &self.g.nodes[id];
                 for k in 0..n.exec_outs.len() {
                     if Some(k) == n.next {
@@ -1102,28 +1132,37 @@ fn layout(g: &Graph, sizes: &[Vec2]) -> HashMap<NodeId, Pos2> {
         g,
         sizes,
         pos: HashMap::new(),
+        right: wrap_width(sizes, canvas),
     };
     l.pos.insert(ENTRY, Pos2::ZERO);
     let mut entry_values = Vec::new();
     let (_, eh) = l.values(ENTRY, 0.0, sizes[ENTRY].y + GAP_Y * 0.5, &mut entry_values);
     let mut bottom = l.chain((ENTRY, 0), sizes[ENTRY].x + GAP_X, 0.0).max(sizes[ENTRY].y + eh);
-    // Whatever no chain reaches (unwired statements, loose values) goes in a row underneath.
+    // Whatever no chain reaches (unwired statements, loose values) goes in rows underneath,
+    // wrapping at the same width.
     let mut x = 0.0;
     bottom += GAP_Y * 2.0;
+    let mut row_h: f32 = 0.0;
     for id in 0..g.nodes.len() {
-        if let std::collections::hash_map::Entry::Vacant(v) = l.pos.entry(id) {
-            v.insert(Pos2::new(x, bottom));
-            x += sizes[id].x + GAP_X;
+        if l.pos.contains_key(&id) {
+            continue;
         }
+        if x > 0.0 && x + sizes[id].x > l.right {
+            x = 0.0;
+            bottom += row_h + GAP_Y;
+            row_h = 0.0;
+        }
+        l.pos.insert(id, Pos2::new(x, bottom));
+        x += sizes[id].x + GAP_X;
+        row_h = row_h.max(sizes[id].y);
     }
     l.pos
 }
 
 /// The pan and zoom that fit `bounds` (canvas units) into a canvas of `size`, no closer than 1:1.
 fn fit(bounds: Rect, size: Vec2) -> (Vec2, f32) {
-    let margin = 48.0;
-    let zx = (size.x - margin * 2.0) / bounds.width().max(1.0);
-    let zy = (size.y - margin * 2.0) / bounds.height().max(1.0);
+    let zx = (size.x - FIT_MARGIN * 2.0) / bounds.width().max(1.0);
+    let zy = (size.y - FIT_MARGIN * 2.0) / bounds.height().max(1.0);
     let zoom = zx.min(zy).clamp(MIN_ZOOM, 1.0);
     let pan = size * 0.5 - bounds.center().to_vec2() * zoom;
     (pan, zoom)
@@ -1463,7 +1502,7 @@ fn canvas(ui: &mut egui::Ui, rect: Rect, p: &Panel, o: &Open, g: &Graph, acts: &
         if pos.is_empty() {
             fit_now = true;
         }
-        let missing: HashMap<NodeId, Pos2> = layout(g, &sizes).into_iter().filter(|(k, _)| !pos.contains_key(k)).collect();
+        let missing: HashMap<NodeId, Pos2> = layout(g, &sizes, rect.size()).into_iter().filter(|(k, _)| !pos.contains_key(k)).collect();
         pos.extend(missing.clone());
         acts.push(Act::Place(missing));
     }
@@ -2531,7 +2570,7 @@ mod tests {
     /// adds a node from the palette and takes it back — drawing every frame in between.
     #[test]
     fn the_page_opens_edits_and_compiles_a_real_contract() {
-        let home = crate::index::data_home().expect("no workshop_data reference bundle found; the page test opens its Lua");
+        let home = crate::index::data_home().unwrap_or_else(|e| panic!("the page test opens the reference bundle's Lua: {e}"));
         let corpus = crate::index::lua_corpus_at(&home).expect("the reference bundle's Lua corpus");
         let reference = Reference::build(&corpus).expect("the corpus indexes and lifts");
         let mut p = Panel::default();
@@ -2589,11 +2628,66 @@ mod tests {
         let chunk = blueprint::lift(&script, &index.context("lua/vz/x.lua"));
         let g = chunk.nodes[1].sub.as_deref().expect("canvas");
         let sizes = vec![Vec2::new(150.0, 80.0); g.nodes.len()];
-        let pos = layout(g, &sizes);
+        let pos = layout(g, &sizes, Vec2::new(1600.0, 900.0));
         assert_eq!(pos.len(), g.nodes.len());
         let at = |t: &str| pos[&g.nodes.iter().position(|n| n.title == t).expect(t)];
         assert!(at("a").x < at("if").x && at("if").x < at("d").x);
         assert_eq!(at("a").y, at("d").y);
         assert!(at("c").y > at("if").y);
+    }
+
+    /// A long flat function wraps into rows: the statements keep their reading order (row by row,
+    /// left to right), every row starts where the first does, no row starts a statement past the
+    /// wrap width, a block hangs under its own row and above the next, and the whole canvas comes
+    /// out near the canvas's shape — where one unwrapped row is a strip dozens of times as wide as
+    /// it is tall. A function that fits the canvas at 1:1 stays in one row (the test above).
+    #[test]
+    fn a_long_chain_wraps_into_rows_of_the_canvas_shape() {
+        let mut src = String::from("function F(self)\n");
+        for i in 0..40 {
+            src.push_str(&format!("  s{i}()\n"));
+            if i == 3 {
+                src.push_str("  if b then\n    c()\n  end\n");
+            }
+        }
+        src.push_str("end\n");
+        let index = CorpusIndex::build([("lua/vz/x.lua", src.as_str())]).expect("indexes");
+        let script = Script::parse(&src).expect("parses");
+        let chunk = blueprint::lift(&script, &index.context("lua/vz/x.lua"));
+        let g = chunk.nodes[1].sub.as_deref().expect("canvas");
+        let sizes = vec![Vec2::new(150.0, 80.0); g.nodes.len()];
+        let id = |t: &str| g.nodes.iter().position(|n| n.title == t).expect(t);
+        let shape = |pos: &HashMap<NodeId, Pos2>| {
+            let b = (0..g.nodes.len())
+                .map(|i| Rect::from_min_size(pos[&i], sizes[i]))
+                .reduce(|a, b| a.union(b))
+                .expect("nodes");
+            b.width() / b.height()
+        };
+
+        let canvas = Vec2::new(1600.0, 900.0);
+        let pos = layout(g, &sizes, canvas);
+        assert_eq!(pos.len(), g.nodes.len());
+        let right = wrap_width(&sizes, canvas);
+        let stmts: Vec<Pos2> = (0..40).map(|i| pos[&id(&format!("s{i}"))]).collect();
+        let rows: std::collections::BTreeSet<i64> = stmts.iter().map(|p| p.y as i64).collect();
+        assert!(rows.len() > 1, "the chain wraps");
+        for w in stmts.windows(2) {
+            assert!(w[1].y > w[0].y || (w[1].y == w[0].y && w[1].x > w[0].x), "reading order: {w:?}");
+        }
+        let start = stmts[0].x;
+        for p in &stmts {
+            assert!(p.x >= start && p.x <= right, "{p:?} starts past the wrap width {right}");
+        }
+        for y in &rows {
+            assert!(stmts.iter().any(|p| p.y as i64 == *y && p.x == start), "row {y} starts at the chain's start");
+        }
+        let (iff, c) = (pos[&id("if")], pos[&id("c")]);
+        let next_row = stmts.iter().map(|p| p.y).filter(|y| *y > iff.y).fold(f32::INFINITY, f32::min);
+        assert!(c.y > iff.y && c.y < next_row, "the block hangs under its own row: if {iff:?}, c {c:?}, next row {next_row}");
+        let wrapped = shape(&pos);
+        assert!((1.0..3.0).contains(&wrapped), "wrapped canvas aspect {wrapped}");
+        let strip = shape(&layout(g, &sizes, Vec2::new(100_000.0, 100.0)));
+        assert!(strip > 10.0, "unwrapped, the same function is a strip: {strip}");
     }
 }

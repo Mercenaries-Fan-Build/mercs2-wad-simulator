@@ -36,7 +36,8 @@
 use mercs2_formats::model_cubeize::read_model_meshes;
 use std::collections::BTreeSet;
 
-/// `hash → name` from the workspace's curated `data/production_names.json`, for labelling census
+/// `hash → name` from the workspace's curated `crates/mercs2_workshop/data/production_names.json`,
+/// for labelling census
 /// rows and for the character filter. Absent table = hashes, which is degraded but not wrong.
 fn load_names(explicit: Option<&str>) -> std::collections::HashMap<u32, String> {
     let mut out = std::collections::HashMap::new();
@@ -46,7 +47,7 @@ fn load_names(explicit: Option<&str>) -> std::collections::HashMap<u32, String> 
             let mut dir: Option<&std::path::Path> = Some(std::path::Path::new(env!("CARGO_MANIFEST_DIR")));
             let mut found = None;
             while let Some(d) = dir {
-                let c = d.join("data/production_names.json");
+                let c = d.join("crates/mercs2_workshop/data/production_names.json");
                 if c.is_file() {
                     found = Some(c);
                     break;
@@ -57,7 +58,7 @@ fn load_names(explicit: Option<&str>) -> std::collections::HashMap<u32, String> 
         }
     };
     let Some(path) = path else {
-        eprintln!("note: no data/production_names.json found — rows will be labelled by hash");
+        eprintln!("note: no crates/mercs2_workshop/data/production_names.json found — rows will be labelled by hash");
         return out;
     };
     let Ok(text) = std::fs::read_to_string(&path) else { return out };

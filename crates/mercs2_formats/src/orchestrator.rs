@@ -1132,8 +1132,9 @@ pub fn classify(buf: &[u8]) -> Option<Destruction> {
             }
         }
     }
-    // SWIT node indices present in this HIER.
-    let swit_idx: std::collections::HashSet<usize> = swit
+    // SWIT node indices present in this HIER, in index order: a group's roots are listed in that
+    // order, so the break root of a tied group is the same on every run (a hash set's order is not).
+    let swit_idx: std::collections::BTreeSet<usize> = swit
         .iter()
         .filter_map(|w| hash_to_idx.get(w).copied())
         .collect();
@@ -1159,12 +1160,17 @@ pub fn classify(buf: &[u8]) -> Option<Destruction> {
     let mut state = vec![(DestructionState::Static, None::<usize>); n];
     for (group, (_parent, roots)) in by_parent.iter().enumerate() {
         // Break root = the one with the most descendants also in SWIT.
-        let break_root = roots.iter().copied().max_by_key(|&r| {
-            subtree(r)
-                .into_iter()
-                .filter(|x| *x != r && swit_idx.contains(x))
-                .count()
-        });
+        let swit_below = |r: usize| subtree(r).into_iter().filter(|x| *x != r && swit_idx.contains(x)).count();
+        let break_root = roots.iter().copied().max_by_key(|&r| swit_below(r));
+        // Tied roots give no evidence which one breaks; the last in index order is taken, and said.
+        if let Some(b) = break_root {
+            let tied: Vec<usize> = roots.iter().copied().filter(|&r| swit_below(r) == swit_below(b)).collect();
+            if tied.len() > 1 {
+                warnings.push(format!(
+                    "switch group {group}: roots {tied:?} tie for the break root (node {b} taken, the last in index order)"
+                ));
+            }
+        }
         for &r in roots {
             let s = if Some(r) == break_root {
                 DestructionState::BreakPiece
@@ -1257,6 +1263,46 @@ mod tests {
         // every intact/break node carries the same switch group; static carries none.
         assert_eq!(d.nodes[4].switch_group, Some(0));
         assert_eq!(d.nodes[0].switch_group, None);
+    }
+
+    /// A container of `parents.len()` HIER nodes (node `i` hashed `0x100 + i`, parent `parents[i]`)
+    /// and a SWIT listing the nodes in `swit`.
+    fn hier_swit_container(parents: &[Option<u16>], swit: &[usize]) -> Vec<u8> {
+        let mut hier = vec![0u8; parents.len() * 176];
+        for (i, p) in parents.iter().enumerate() {
+            hier[i * 176..i * 176 + 4].copy_from_slice(&(0x100 + i as u32).to_le_bytes());
+            hier[i * 176 + 8..i * 176 + 10].copy_from_slice(&p.unwrap_or(0xFFFF).to_le_bytes());
+        }
+        let sw: Vec<u8> = swit.iter().flat_map(|&i| (0x100 + i as u32).to_le_bytes()).collect();
+        let data_off = 20 + 2 * 20;
+        let mut buf = vec![0u8; data_off];
+        buf[4..8].copy_from_slice(&(data_off as u32).to_le_bytes());
+        buf[16..20].copy_from_slice(&2u32.to_le_bytes());
+        for (d, (tag, off, len)) in [(b"HIER", 0usize, hier.len()), (b"SWIT", hier.len(), sw.len())].into_iter().enumerate() {
+            let ro = 20 + d * 20;
+            buf[ro..ro + 4].copy_from_slice(tag);
+            buf[ro + 4..ro + 8].copy_from_slice(&(off as u32).to_le_bytes());
+            buf[ro + 8..ro + 12].copy_from_slice(&(len as u32).to_le_bytes());
+        }
+        buf.extend_from_slice(&hier);
+        buf.extend_from_slice(&sw);
+        buf
+    }
+
+    /// Two switch roots that tie for the break root classify the same way on every call (they
+    /// used to follow a hash set's order), and the tie is reported.
+    #[test]
+    fn a_tied_switch_group_classifies_the_same_every_time() {
+        // node0 → {node1 → node3, node2 → node4}; SWIT = nodes 1..4, so roots 1 and 2 tie (1 each).
+        let buf = hier_swit_container(&[None, Some(0), Some(0), Some(1), Some(2)], &[1, 2, 3, 4]);
+        let first: Vec<DestructionState> = classify(&buf).unwrap().nodes.iter().map(|n| n.state).collect();
+        assert_eq!(first[2], DestructionState::BreakPiece, "the last tied root in index order breaks");
+        assert_eq!(first[1], DestructionState::Intact);
+        for _ in 0..64 {
+            let d = classify(&buf).unwrap();
+            assert_eq!(d.nodes.iter().map(|n| n.state).collect::<Vec<_>>(), first);
+            assert!(d.warnings.iter().any(|w| w.contains("tie for the break root")), "{:?}", d.warnings);
+        }
     }
 
     #[test]

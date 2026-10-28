@@ -519,6 +519,20 @@ impl Panel {
         Ok(dir)
     }
 
+    /// "Start a Shipment from this…": scaffold a new Shipment in `dir` (it becomes the open one) and
+    /// add `kind` with `asset` as its donor or target. Returns the contribution's index.
+    pub(crate) fn start_from(
+        &mut self,
+        dir: &Path,
+        names: Option<&NameTable>,
+        kind: &str,
+        asset: &str,
+    ) -> Result<usize, String> {
+        let c = seeded(kind, asset, 1).ok_or_else(|| format!("no stub for `{kind}`"))?;
+        self.scaffold(dir, names)?;
+        self.upsert_contribution(names, None, c)
+    }
+
     /// Write a fresh `manifest.yaml` + `src/` + `README.md` into `dir` and open it.
     ///
     /// Refuses a folder that already holds a manifest rather than overwriting one: this is reached
@@ -753,6 +767,11 @@ fn contribution_name(c: &Contribution) -> String {
             mercs2_quartermaster::sound::entry_name(bank, *language),
             cue.name
         ),
+        Contribution::ReplaceSoundWave { wavebank, language, line, .. } => format!(
+            "{} {}",
+            mercs2_quartermaster::sound::entry_name(wavebank, *language),
+            line
+        ),
         Contribution::ReplaceTexture { target, .. }
         | Contribution::PatchLua { target, .. }
         | Contribution::EditStateMachine { target, .. }
@@ -890,6 +909,7 @@ pub const KINDS: &[(&str, &[(&str, &str, &str)])] = &[
             ("add_sound", "New sound bank", "A new sound bank encoded from WAV cues, loaded by the mod loader"),
             ("replace_sound_bank", "Replace sound bank", "Replace every cue of a shipped sound bank, same entry name"),
             ("replace_sound_cue", "Replace sound cue", "Replace one cue of a shipped sound bank with a new WAV"),
+            ("replace_sound_wave", "Replace a line", "Replace one line of a shipped wavebank wherever it plays"),
             ("add_movie", "New movie", "A Scaleform movie"),
             ("add_ui", "New UI", "A Scaleform movie, wired up so it appears on screen"),
             ("replace_texture", "Replace texture", "Replace a shipped texture, same hash"),
@@ -953,14 +973,41 @@ pub fn kind_title(kind: &str) -> &'static str {
 /// materials and state machine are borrowed, read-only); a shipped texture becomes a **target**.
 /// That distinction is the `no-destructive-replacements` mandate expressed as a menu: nothing here
 /// can produce a contribution that overwrites the asset you right-clicked.
-pub fn routes_for(is_texture: bool) -> &'static [(&'static str, &'static str)] {
-    if is_texture {
-        &[("replace_texture", "Replace this texture")]
-    } else {
-        &[
+pub fn routes_for(subject: Subject) -> &'static [(&'static str, &'static str)] {
+    match subject {
+        Subject::Model { .. } => &[
             ("add_outfit", "New outfit on this donor"),
             ("add_model", "New model on this donor"),
-        ]
+        ],
+        Subject::Texture => &[("replace_texture", "Replace this texture")],
+        Subject::Animation => &[("replace_animation", "Replace this animation")],
+        Subject::Effect => &[("replace_fx", "Edit this effect")],
+        Subject::StringTable => &[("edit_stringdb", "Edit this text")],
+        Subject::Other => &[],
+    }
+}
+
+/// What a shipped asset is, as far as routing it into a Shipment goes: the kinds that take it as a
+/// donor or target ([`routes_for`]). A font, a UI movie, a FaceFX asset or a fxdict is `Other`: no
+/// kind targets one.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Subject {
+    Model { character: bool },
+    Texture,
+    Animation,
+    Effect,
+    StringTable,
+    Other,
+}
+
+/// The route "Start a Shipment from this…" takes for an asset: a character becomes the donor of a
+/// wearable outfit, any other model the donor of a new model, anything else its first route.
+/// `None`: no kind takes the asset.
+pub fn first_route(subject: Subject) -> Option<&'static str> {
+    match subject {
+        Subject::Model { character: true } => Some("add_outfit"),
+        Subject::Model { character: false } => Some("add_model"),
+        s => routes_for(s).first().map(|(k, _)| *k),
     }
 }
 
@@ -976,7 +1023,12 @@ pub fn seeded(kind: &str, asset: &str, n: usize) -> Option<Contribution> {
         Contribution::AddOutfit { donor, .. } | Contribution::AddModel { donor, .. } => {
             *donor = Some(asset.to_string());
         }
-        Contribution::ReplaceTexture { target, .. } => *target = asset.to_string(),
+        Contribution::ReplaceTexture { target, .. } | Contribution::ReplaceAnimation { target, .. } => {
+            *target = asset.to_string()
+        }
+        Contribution::ReplaceFx { target, .. } => {
+            *target = mercs2_quartermaster::manifest::FxTarget::Effect { effect: asset.to_string() }
+        }
         // A layer routed from the World domain: `asset` is the layer NAME, so seed the field the kind
         // actually operates on (the stub's placeholder replaces/edits stay as authored defaults).
         Contribution::EditWorld { layer, .. } | Contribution::ActivateLayer { layer, .. } => {
@@ -1058,6 +1110,14 @@ fn stub(kind: &str, n: usize) -> Option<Contribution> {
             language: None,
             category: String::new(),
             cue: unset_cue(),
+        },
+        // The wavebank and the line name a record the game ships, so they start empty (M0215), and
+        // the WAV path does not exist yet (M0110).
+        "replace_sound_wave" => Contribution::ReplaceSoundWave {
+            wavebank: String::new(),
+            language: None,
+            line: String::new(),
+            wave: PathBuf::from("src/line.wav"),
         },
         "edit_state_machine" => Contribution::EditStateMachine {
             target: "al_veh_boat_destroyer".into(),
@@ -1878,7 +1938,7 @@ fn sound_loader_rows(
 /// it by its retail name, through no loader (`sound::loader_sessions`).
 fn override_loader_rows(bank: &str, language: Option<mercs2_quartermaster::manifest::Language>) -> Vec<(String, String)> {
     use mercs2_quartermaster::sound::{bank_loader, loader_sessions, BankLoader, RETAIL_LUA_LOAD_SITES};
-    match bank_loader(bank, &RETAIL_LUA_LOAD_SITES) {
+    match bank_loader(bank, language, &RETAIL_LUA_LOAD_SITES) {
         BankLoader::Lua => sound_loader_rows(&loader_sessions(bank, language), "its wavebank"),
         BankLoader::Engine => vec![(
             "Script".to_string(),
@@ -1924,25 +1984,44 @@ fn sound_load_in_row(ui: &mut egui::Ui, load_in: &mut Vec<mercs2_quartermaster::
     commit
 }
 
-/// The bank a sound override targets, and the language of a `vo_*` bank's copy. The language row
-/// is shown for a bank that starts with `vo_` (`sound::is_vo_bank`, the rule retail Lua localizes
-/// by); committing a bank that does not clears the language.
+/// The bank (or, `what` = "wavebank", the wavebank) a sound override targets, and the language of a
+/// `vo_*` one's copy. The language row is shown for a name that starts with `vo_`
+/// (`sound::is_vo_bank`, the rule retail Lua localizes by), and committing a name that does not
+/// clears the language. A bare hash names the entry itself, so its language is the author's choice,
+/// none included, and the game check holds it to the WAD that carries the entry (M0218).
 fn sound_bank_row(
     ui: &mut egui::Ui,
+    what: &str,
     bank: &mut String,
     language: &mut Option<mercs2_quartermaster::manifest::Language>,
 ) -> bool {
-    use mercs2_quartermaster::manifest::Language;
+    use mercs2_quartermaster::manifest::{bare_hash, Language};
     use mercs2_quartermaster::sound::{entry_name, is_vo_bank};
     let mut commit = false;
-    if text_row(ui, "Bank", bank, "ui_hud", true) {
+    let (label, placeholder, note) = match what {
+        "wavebank" => ("Wavebank", "vo_stream", "a wavebank the game ships, as its groups name it, or its entry's hash"),
+        _ => ("Bank", "ui_hud", "a bank the game ships, as its Lua loads it, or its entry's hash"),
+    };
+    if text_row(ui, label, bank, placeholder, true) {
         commit = true;
-        if !is_vo_bank(bank) {
+        if bare_hash(bank).is_none() && !is_vo_bank(bank) {
             *language = None;
         }
     }
-    theme::field_note(ui, theme::FieldState::Neutral, "a bank the game ships, as its Lua loads it");
-    if is_vo_bank(bank) {
+    theme::field_note(ui, theme::FieldState::Neutral, note);
+    if let Some(hash) = bare_hash(bank) {
+        let mut options: Vec<(Option<Language>, &str)> = vec![(None, "none (vz.wad / shell.wad)")];
+        options.extend(Language::ALL.iter().map(|l| (Some(*l), l.token())));
+        commit |= theme::combo_field(ui, "Language", language, &options, theme::FieldState::Neutral);
+        theme::field_note(
+            ui,
+            theme::FieldState::Neutral,
+            &match language {
+                Some(l) => format!("0x{hash:08X} is looked up in {}.wad: the hash of `<{what}>.{}`", l.token(), l.token()),
+                None => format!("0x{hash:08X} is looked up in vz.wad and shell.wad"),
+            },
+        );
+    } else if is_vo_bank(bank) {
         let options: Vec<(Option<Language>, &str)> =
             Language::ALL.iter().map(|l| (Some(*l), l.token())).collect();
         let state = if language.is_none() { theme::FieldState::Bad } else { theme::FieldState::Neutral };
@@ -1988,7 +2067,7 @@ fn sound_cue_fields(ui: &mut egui::Ui, cue: &mut SoundCue, root: &Path) -> bool 
             theme::FieldState::Neutral,
             &format!(
                 "0x{:08X} \u{2014} the guid Sound.CueSound looks up",
-                mercs2_formats::hash::pandemic_hash_m2(&cue.name)
+                mercs2_quartermaster::manifest::asset_hash(&cue.name)
             ),
         );
     }
@@ -2327,7 +2406,7 @@ fn contribution_form(
             commit |= sound_cue_list(ui, cues, root);
         }
         Contribution::ReplaceSoundBank { bank, language, category, cues } => {
-            commit |= sound_bank_row(ui, bank, language);
+            commit |= sound_bank_row(ui, "bank", bank, language);
             commit |= sound_category_row(ui, category, "the category every cue's group is in");
             theme::field_note(
                 ui,
@@ -2338,10 +2417,24 @@ fn contribution_form(
             commit |= sound_cue_list(ui, cues, root);
         }
         Contribution::ReplaceSoundCue { bank, language, category, cue } => {
-            commit |= sound_bank_row(ui, bank, language);
+            commit |= sound_bank_row(ui, "bank", bank, language);
             commit |= sound_category_row(ui, category, "the category of the cue's new group");
-            theme::eyebrow(ui, "Cue — its name is the game's cue it replaces");
+            theme::eyebrow(ui, "Cue — its name (or guid) is the game's cue it replaces");
             commit |= sound_cue_fields(ui, cue, root);
+        }
+        Contribution::ReplaceSoundWave { wavebank, language, line, wave } => {
+            commit |= sound_bank_row(ui, "wavebank", wavebank, language);
+            commit |= text_row(ui, "Line", line, "0x96FFDF9F", true);
+            theme::field_note(
+                ui,
+                theme::FieldState::Neutral,
+                &format!(
+                    "0x{:08X} — the clip hash of the record it replaces, in every group that plays it; \
+                     the group's other waves stay",
+                    mercs2_quartermaster::manifest::asset_hash(line)
+                ),
+            );
+            commit |= source_row(ui, "Wave", wave, root, &["wav"]);
         }
         Contribution::AddMovie { name, movie } => {
             commit |= text_row(ui, "Asset name", name, "my_menu", true);
@@ -3163,6 +3256,17 @@ fn blast_rows(c: &Contribution) -> Vec<(String, String)> {
             rows.extend(override_loader_rows(bank, *language));
             rows
         }
+        Contribution::ReplaceSoundWave { wavebank, language, line, .. } => {
+            let mut rows = vec![(
+                "Writes".to_string(),
+                format!(
+                    "line {line} of {}, in every soundbank that plays it  \u{2014} EXCLUSIVE",
+                    mercs2_quartermaster::sound::entry_name(wavebank, *language)
+                ),
+            )];
+            rows.extend(override_loader_rows(wavebank, *language));
+            rows
+        }
         Contribution::ReplaceTexture { target, .. } => vec![
             ("Writes".to_string(), format!("texture {target}")),
             (
@@ -3433,7 +3537,7 @@ pub fn verbs(ui: &mut egui::Ui, p: &Panel, has_game: bool) -> Vec<Act> {
 /// never reach. That guess is exactly what let the released `qm`/Workshop ship unable to link while
 /// "working" in dev.
 pub fn corpus_root() -> Option<PathBuf> {
-    let lua = crate::index::data_home()?.join("lua");
+    let lua = crate::index::data_home().ok()?.join("lua");
     lua.is_dir().then_some(lua)
 }
 
@@ -4177,6 +4281,22 @@ mod tests {
         }
     }
 
+    /// The `replace_sound_wave` stub is written and reopens unchanged, with the empty wavebank and
+    /// line reported (M0215); it has no category to choose.
+    #[test]
+    fn the_line_stub_is_written_and_reopens() {
+        let d = tmp("sound_stub_replace_sound_wave");
+        let mut p = Panel::default();
+        p.scaffold(&d, None).expect("scaffold");
+        let c = stub("replace_sound_wave", 1).expect("stub");
+        p.mutate(None, |m| m.contributions.push(c.clone())).expect("write");
+        let s = p.shipment.as_ref().expect("the Shipment reopens");
+        assert_eq!(s.manifest.contributions, vec![c]);
+        let codes: Vec<&str> = p.findings_for(0).map(|d| d.rule.code).collect();
+        assert!(codes.contains(&"M0215"), "the empty wavebank and line are not reported: {codes:?}");
+        assert!(!codes.contains(&"M0216"), "a line has no category: {codes:?}");
+    }
+
     /// The preview names each session's loader for a sound kind: an `add_sound` its `load_in`, an
     /// override the sessions retail Lua loads its bank in (`ui_shell`: the front end only; `ui_hud`:
     /// both), and none for a bank the engine loads (`veh_jeep`).
@@ -4319,6 +4439,63 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Starting a Shipment from an asset leaves a new Shipment holding exactly that asset's route,
+    /// selected, with the asset as its donor — even with another Shipment open before.
+    #[test]
+    fn a_shipment_started_from_an_asset_holds_its_route() {
+        let mut p = Panel::default();
+        p.scaffold(&tmp("start_old"), None).unwrap();
+        let d = tmp("start_new");
+        let kind = first_route(Subject::Model { character: true }).unwrap();
+        let at = p.start_from(&d, None, kind, "pmc_hum_mattias").unwrap();
+        assert_eq!(p.root(), Some(d.as_path()), "the new Shipment is not the open one");
+        let cs = &p.shipment.as_ref().unwrap().manifest.contributions;
+        assert_eq!((at, cs.len(), p.selected), (0, 1, Some(0)));
+        match &cs[0] {
+            Contribution::AddOutfit { donor, .. } => assert_eq!(donor.as_deref(), Some("pmc_hum_mattias")),
+            c => panic!("expected add_outfit, got {}", c.kind()),
+        }
+    }
+
+    #[test]
+    fn the_first_route_follows_what_the_asset_is() {
+        assert_eq!(first_route(Subject::Texture), Some("replace_texture"));
+        assert_eq!(first_route(Subject::Model { character: true }), Some("add_outfit"));
+        assert_eq!(first_route(Subject::Model { character: false }), Some("add_model"));
+        assert_eq!(first_route(Subject::Animation), Some("replace_animation"));
+        assert_eq!(first_route(Subject::Effect), Some("replace_fx"));
+        assert_eq!(first_route(Subject::StringTable), Some("edit_stringdb"));
+        assert_eq!(first_route(Subject::Other), None);
+    }
+
+    /// Every route a subject offers seeds its asset into the field the kind operates on.
+    #[test]
+    fn each_route_seeds_the_asset_it_was_offered_for() {
+        use mercs2_quartermaster::manifest::FxTarget;
+        let subjects = [
+            Subject::Model { character: false },
+            Subject::Texture,
+            Subject::Animation,
+            Subject::Effect,
+            Subject::StringTable,
+        ];
+        for s in subjects {
+            for (kind, _) in routes_for(s) {
+                let c = seeded(kind, "the_asset", 0).unwrap_or_else(|| panic!("no stub for {kind}"));
+                let seeded_with = match &c {
+                    Contribution::AddOutfit { donor, .. } | Contribution::AddModel { donor, .. } => donor.clone(),
+                    Contribution::ReplaceTexture { target, .. }
+                    | Contribution::ReplaceAnimation { target, .. }
+                    | Contribution::EditStringDb { target, .. } => Some(target.clone()),
+                    Contribution::ReplaceFx { target: FxTarget::Effect { effect }, .. } => Some(effect.clone()),
+                    c => panic!("{kind} seeded {}", c.kind()),
+                };
+                assert_eq!(seeded_with.as_deref(), Some("the_asset"), "{kind}");
+            }
+        }
+        assert!(routes_for(Subject::Other).is_empty());
     }
 
     #[test]

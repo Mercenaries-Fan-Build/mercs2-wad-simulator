@@ -2944,10 +2944,9 @@ mod tests {
     /// The reference corpus as `(corpus path, source)`, named the way the Workshop's loader
     /// names it.
     fn corpus() -> Vec<(String, String)> {
-        let home = crate::index::data_home().expect(
-            "no workshop_data reference bundle found; the Blueprint gates run over its lua/ and \
-             lua_dlc/ corpus",
-        );
+        let home = crate::index::data_home().unwrap_or_else(|e| {
+            panic!("the Blueprint gates run over the reference bundle's lua/ and lua_dlc/ corpus: {e}")
+        });
         let mut out = Vec::new();
         for ((sub, expected), tag) in crate::index::PINNED_CORPUS.into_iter().zip(["lua", "dlc"]) {
             let root = home.join(sub);

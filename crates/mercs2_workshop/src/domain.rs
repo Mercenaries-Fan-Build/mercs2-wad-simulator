@@ -163,7 +163,7 @@ mod tests {
     use super::*;
 
     fn row(name: &str) -> AssetRow {
-        AssetRow { hash: 0, block: 0, src: 0, name: Some(name.to_string()), template: None }
+        AssetRow { hash: 0, type_id: 0, block: 0, src: 0, others: Vec::new(), name: Some(name.to_string()), template: None, faction: None }
     }
 
     /// The lenses sort real retail names into the domain the Library would also file them under —
@@ -209,7 +209,7 @@ mod tests {
     /// An unnamed (hash-only) row belongs to no domain lens — there is nothing to classify on.
     #[test]
     fn an_unnamed_row_belongs_to_no_domain() {
-        let bare = AssetRow { hash: 0xDEAD_BEEF, block: 0, src: 0, name: None, template: None };
+        let bare = AssetRow { hash: 0xDEAD_BEEF, type_id: 0, block: 0, src: 0, others: Vec::new(), name: None, template: None, faction: None };
         assert!(Domain::ALL.iter().all(|d| !d.model_lens(&bare)));
     }
 
@@ -227,10 +227,13 @@ mod tests {
     fn a_kit_template_row_is_a_character() {
         let kit = AssetRow {
             hash: 0x4D4F_42B5,
+            type_id: 0,
             block: 0,
             src: 0,
+            others: Vec::new(),
             name: None,
             template: Some("Jungle Elite".into()),
+            faction: None,
         };
         assert_eq!(kit.label(), "Jungle Elite");
         assert!(Domain::Characters.model_lens(&kit));

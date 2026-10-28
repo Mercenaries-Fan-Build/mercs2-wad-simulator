@@ -39,6 +39,7 @@ pub struct Pcm {
     pub channels: u8,
 }
 
+#[cfg(test)]
 impl Pcm {
     /// Length in seconds — the oracle the tests check against the manifest's `duration_s`.
     pub fn duration_s(&self) -> f32 {

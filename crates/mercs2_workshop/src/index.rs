@@ -21,6 +21,8 @@ pub enum Preview {
     Render,
     /// 2D plate view (hi-mip streamed).
     Plate,
+    /// Its own view in the centre, as said.
+    View(&'static str),
     /// Browsable with metadata; no faithful preview yet, and here is why.
     None(&'static str),
 }
@@ -114,18 +116,14 @@ impl Kind {
         match self {
             Kind::Model => Preview::Render,
             Kind::Texture => Preview::Plate,
-            // A clip needs a rig to play on, and the Library has no subject of its own. The
-            // per-character catalog on a loaded model's Animation card is where clips play today.
-            Kind::Animation => Preview::None(
-                "a clip needs a rig — load a character and use its Animation card",
-            ),
+            Kind::Animation => Preview::View("plays on the hero, the model you choose for clips"),
             Kind::Effect => Preview::None(
                 "the effect format is decoded but its parameters are still hash-only",
             ),
             Kind::Audio => Preview::None("playback is not wired into the Library yet"),
             Kind::UiGfx => Preview::None("no Scaleform renderer in the workshop"),
             Kind::FaceFx => Preview::None("needs a head to drive"),
-            Kind::Text => Preview::None("fonts render as a plate; string tables as a list"),
+            Kind::Text => Preview::View("a string table opens every table side by side; a font, its pages and glyphs"),
             Kind::Layer => Preview::None(
                 "a layer is a placement set — browse it, then edit_world / activate_layer",
             ),
@@ -136,14 +134,23 @@ impl Kind {
 #[derive(Clone)]
 pub struct AssetRow {
     pub hash: u32,
+    /// The ASET type id of the row's asset (one of its [`Kind::type_ids`]): a Text row is a font or
+    /// a string table, an Effects row an effect or the fxdict.
+    pub type_id: u32,
     pub block: u16,
-    /// Which wad of the open stack owns this asset (0 = base, 1.. = overlays; last-wins).
+    /// The source the row previews from: a wad of the open stack (0 = base, 1.. = overlays;
+    /// last-wins), else the first side WAD that holds it (`stack.len() + i`).
     pub src: usize,
+    /// Every other source that holds the hash, stack before side WADs.
+    pub others: Vec<usize>,
     /// Registry name, when the hash reverses (most placeable content does).
     pub name: Option<String>,
     /// A spawn template's view of a character kit: the template's `Name`. The row loads the kit
     /// (`hash`) showing that template's outfit (`app::KitOutfits`). `None` for an asset row.
     pub template: Option<String>,
+    /// A template row's `FactionMarker` (`mercs2_formats::mixr::KitTemplate::faction`): the faction
+    /// is the template's, not its kit's. `None` for an asset row.
+    pub faction: Option<u32>,
 }
 
 impl AssetRow {
@@ -163,6 +170,20 @@ impl AssetRow {
     /// template rows all share the kit's hash, so the hash alone names every one of them.
     pub fn is(&self, hash: u32, template: Option<&str>) -> bool {
         self.hash == hash && self.template.as_deref() == template
+    }
+
+    /// The faction this row lists under in an Inspect Lens: a template row by its own
+    /// `FactionMarker`, named through `labels` ([`faction_labels`]); any other row by its name's
+    /// prefix before the first `_`, upper-case. A row with neither shows its hash, the way an
+    /// unnamed row is labelled everywhere.
+    pub fn faction_group(&self, labels: &HashMap<u32, String>) -> String {
+        if let Some(f) = self.faction {
+            return labels.get(&f).cloned().unwrap_or_else(|| format!("0x{f:08X}"));
+        }
+        match &self.name {
+            Some(n) => n.split('_').next().unwrap_or(n).to_ascii_uppercase(),
+            None => format!("0x{:08X}", self.hash),
+        }
     }
 
     /// Vehicle class for the Model Workbench inventory, or `None` if not a vehicle. Data-driven
@@ -286,6 +307,34 @@ pub struct AssetIndex {
     /// The world's templates that name a model (`mercs2_formats::mixr::kit_templates`), as given to
     /// [`Self::add_kit_templates`] — what a kit preview reads its outfits from.
     pub kit_templates: Vec<mercs2_formats::mixr::KitTemplate>,
+    /// Every world template that names a model — what [`faction_labels`] learns its pairs from.
+    pub world_templates: Vec<mercs2_formats::mixr::KitTemplate>,
+    /// Each `FactionMarker`'s group label ([`faction_labels`]), kept current with the names.
+    pub faction_labels: HashMap<u32, String>,
+}
+
+/// Each `FactionMarker` value, labelled with the model-name prefix it pairs with most often across
+/// `templates` whose model has a name (upper-case, e.g. `HUD_faction_AN` → `AL`) — the spelling the
+/// rest of the catalog groups under. Prefixes tied for most are joined with `/`. A marker no named
+/// template carries has no label.
+pub fn faction_labels(
+    templates: &[mercs2_formats::mixr::KitTemplate],
+    names: &HashMap<u32, String>,
+) -> HashMap<u32, String> {
+    let mut pairs: HashMap<u32, std::collections::BTreeMap<String, usize>> = HashMap::new();
+    for t in templates {
+        let (Some(f), Some(model)) = (t.faction, names.get(&t.model)) else { continue };
+        let prefix = model.split('_').next().unwrap_or(model).to_ascii_uppercase();
+        *pairs.entry(f).or_default().entry(prefix).or_default() += 1;
+    }
+    pairs
+        .into_iter()
+        .map(|(f, counts)| {
+            let top = counts.values().copied().max().unwrap_or(0);
+            let label: Vec<String> = counts.into_iter().filter(|(_, n)| *n == top).map(|(p, _)| p).collect();
+            (f, label.join("/"))
+        })
+        .collect()
 }
 
 impl AssetIndex {
@@ -311,13 +360,15 @@ impl AssetIndex {
     }
 
     /// Build the catalog from EVERY open WAD's ASET table (base + overlays, in stack order — a
-    /// later wad's row wins, the game's patch rule). ALL model ASETs are listed, not just
+    /// later wad's row wins, the game's patch rule), then the `side` WADs (`app::side_wad_files`),
+    /// which add the hashes the stack does not hold and are listed as other sources of the ones it
+    /// does. ALL model ASETs are listed, not just
     /// primaries: shared/instanced meshes (recruits like Misha/Ewan/Fiona, costume skins, world
     /// props) ride as SUB-ENTRIES and have no primary row — `extract_container` falls back to
     /// sub-entries, so they load fine once listed. `names` may be empty at boot — the app loads
     /// the (multi-second) name corpora on a background thread and calls [`Self::apply_names`]
     /// when they arrive, so the window opens immediately.
-    pub fn build(wads: &[wad::Wad], names: HashMap<u32, String>) -> AssetIndex {
+    pub fn build(wads: &[wad::Wad], side: &[wad::Wad], names: HashMap<u32, String>) -> AssetIndex {
         // type_id -> which category it lands in, derived from `Kind::type_ids` so the mapping is
         // stated once. An id no category claims is skipped rather than guessed at.
         let mut of_type: HashMap<u32, usize> = HashMap::new();
@@ -328,7 +379,8 @@ impl AssetIndex {
         }
         let mut buckets: Vec<HashMap<u32, AssetRow>> =
             (0..Kind::ALL.len()).map(|_| HashMap::new()).collect();
-        for (src, w) in wads.iter().enumerate() {
+        let n = wads.len();
+        for (src, w) in wads.iter().chain(side).enumerate() {
             let primary_block: HashMap<u32, u16> = wad::model_list(w).into_iter().collect();
             for (hash, ty, _) in wad::all_asets(w) {
                 let Some(&i) = of_type.get(&ty) else { continue };
@@ -339,13 +391,32 @@ impl AssetIndex {
                 } else {
                     0
                 };
-                buckets[i].insert(hash, AssetRow { hash, block, src, name: None, template: None });
+                let fresh = AssetRow { hash, type_id: ty, block, src, others: Vec::new(), name: None, template: None, faction: None };
+                match buckets[i].get_mut(&hash) {
+                    None => {
+                        buckets[i].insert(hash, fresh);
+                    }
+                    Some(r) if r.src == src => {}
+                    // A later stack wad wins; the copy it shadows is another source.
+                    Some(r) if src < n => {
+                        let shadowed = r.src;
+                        *r = AssetRow { others: std::mem::take(&mut r.others), ..fresh };
+                        r.others.push(shadowed);
+                    }
+                    Some(r) => {
+                        if !r.others.contains(&src) {
+                            r.others.push(src);
+                        }
+                    }
+                }
             }
         }
         let mut idx = AssetIndex {
             rows: buckets.into_iter().map(|b| b.into_values().collect()).collect(),
             names: HashMap::new(),
             kit_templates: Vec::new(),
+            world_templates: Vec::new(),
+            faction_labels: HashMap::new(),
         };
         idx.apply_names(names);
         idx
@@ -353,16 +424,22 @@ impl AssetIndex {
 
     /// Add one model row per kit template (`app::load_kit_templates`: a template that picks a
     /// character-kit outfit), labelled by the template's `Name`, beside its kit's own row. A template
-    /// whose model has no row in the catalog adds nothing. Returns how many rows were added.
-    pub fn add_kit_templates(&mut self, templates: &[mercs2_formats::mixr::KitTemplate]) -> usize {
+    /// whose model has no row in the catalog adds nothing. `world` is every template that names a
+    /// model, which the faction labels are learned from. Returns how many rows were added.
+    pub fn add_kit_templates(
+        &mut self,
+        templates: &[mercs2_formats::mixr::KitTemplate],
+        world: &[mercs2_formats::mixr::KitTemplate],
+    ) -> usize {
         let Some(mi) = Kind::ALL.iter().position(|k| *k == Kind::Model) else { return 0 };
+        self.world_templates = world.to_vec();
         let mut added = Vec::new();
         for t in templates {
             let (Some(name), Some(kit)) = (&t.name, self.rows[mi].iter().find(|r| r.hash == t.model && r.template.is_none()))
             else {
                 continue;
             };
-            added.push(AssetRow { template: Some(name.clone()), ..kit.clone() });
+            added.push(AssetRow { template: Some(name.clone()), faction: t.faction, ..kit.clone() });
         }
         let n = added.len();
         self.rows[mi].extend(added);
@@ -388,71 +465,44 @@ impl AssetIndex {
             }
             rows.sort_by(order);
         }
+        self.faction_labels = faction_labels(&self.world_templates, &self.names);
     }
 }
 
 /// The workshop's bundled reference data (`workshop_data/`): everything the tool consults that
 /// is NOT a game-distributed file — the merged name pack, registry rows, spawnable templates,
 /// ECS schemas, the decompiled-Lua corpus. Built by `--pack-data`, resolved here so the app runs
-/// self-contained (no repo checkout needed). Resolution: `MERCS2_WORKSHOP_DATA` env, then
-/// the saved setting, then `workshop_data/` next to the exe, then a `workshop_data/` walk-up from
-/// the CWD, then the copy [`crate::fetch`] installs.
+/// self-contained (no repo checkout needed). Resolution is [`crate::chains::data`]: this run's
+/// choice, `MERCS2_WORKSHOP_DATA`, the saved setting, then `workshop_data/` next to the exe, a
+/// `workshop_data/` walk-up from the CWD, and the copy [`crate::fetch`] installs.
 ///
-/// A candidate counts only when it is a COMPLETE bundle: it holds [`BUNDLE_MANIFEST`], which
-/// `--pack-data` writes after every other file. The committed, partial `workshop_data/` of a repo
-/// checkout (the Ess API, ECS registry and audio manifests, no `names.bin`) holds no manifest and
-/// does not count.
+/// A source a person set that is not a COMPLETE bundle (it holds [`BUNDLE_MANIFEST`], which
+/// `--pack-data` writes after every other file) is an error naming it — never passed over for the
+/// next source. The searched steps count only a complete bundle, so the committed, partial
+/// `workshop_data/` of a repo checkout (the audio manifest, no `names.bin`) does not count.
 ///
 /// This is the lookup alone; [`require_data_home`] adds the automatic download.
-pub fn data_home() -> Option<PathBuf> {
-    if let Ok(p) = std::env::var("MERCS2_WORKSHOP_DATA") {
-        let p = PathBuf::from(p);
-        if is_complete_bundle(&p) {
-            return Some(p);
-        }
-    }
-    if let Some(p) = crate::settings::load().data_dir {
-        if is_complete_bundle(&p) {
-            return Some(p);
-        }
-    }
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            let cand = dir.join("workshop_data");
-            if is_complete_bundle(&cand) {
-                return Some(cand);
-            }
-        }
-    }
-    if let Ok(cwd) = std::env::current_dir() {
-        for dir in cwd.ancestors() {
-            let cand = dir.join("workshop_data");
-            if is_complete_bundle(&cand) {
-                return Some(cand);
-            }
-        }
-    }
-    // LAST: a bundle this tool downloaded for itself (see `fetch`). Deliberately behind every other
-    // step — a bundle the user installed or pointed Settings at must always beat a fetched copy.
-    crate::fetch::installed_dir().filter(|p| is_complete_bundle(p))
+pub fn data_home() -> Result<PathBuf, String> {
+    let chain = crate::chains::data();
+    chain.in_use().map(Path::to_path_buf).ok_or_else(|| chain.unresolved("the reference data"))
 }
 
 /// The file `--pack-data` writes last into a bundle; its presence is what makes a folder a
 /// complete bundle for [`data_home`].
 pub const BUNDLE_MANIFEST: &str = "manifest.json";
 
-/// Whether `dir` is a complete reference bundle (holds [`BUNDLE_MANIFEST`]).
-fn is_complete_bundle(dir: &Path) -> bool {
-    dir.join(BUNDLE_MANIFEST).is_file()
-}
-
-/// The reference bundle, found through [`data_home`] or, when none is found, downloaded and
-/// installed through [`crate::fetch::install`]. An error when both fail, carrying where to
-/// download the bundle by hand and where to put it. `report` receives the download's stage for the
-/// boot loading screen.
+/// The reference bundle, found through [`data_home`] or, when nothing is set and none is found,
+/// downloaded and installed through [`crate::fetch::install`]. A source a person set that is broken
+/// is an error, never downloaded over. A failed download is an error carrying where to download
+/// the bundle by hand and where to put it. `report` receives the download's stage for the boot
+/// loading screen.
 pub fn require_data_home(report: &mut impl FnMut(f32, &'static str)) -> Result<PathBuf, String> {
-    if let Some(home) = data_home() {
-        return Ok(home);
+    let chain = crate::chains::data();
+    if let Some(home) = chain.in_use() {
+        return Ok(home.to_path_buf());
+    }
+    if !chain.is_empty() {
+        return Err(chain.unresolved("the reference data"));
     }
     report(0.02, "reference data (downloading workshop_data)");
     eprintln!(
@@ -506,8 +556,9 @@ pub fn load_all_names_staged(
     Ok(names)
 }
 
-/// The curated ASET hash→name dictionary (every name we have actually CRACKED), compiled into the
-/// binary. Unlike the rainbow table this is not speculative — each entry is a verified preimage.
+/// The ASET hash→name dictionary compiled into the binary (`data/aset_names.tsv`, written by
+/// `aset_export --embed-tsv` from the rainbow table and this crate's name fragments). Each entry's
+/// name hashes to its key; a hash match alone does not prove the name is the one the game used.
 const EMBEDDED_ASET_NAMES: &str = include_str!("../data/aset_names.tsv");
 
 /// Parse [`EMBEDDED_ASET_NAMES`] (`0xHASH\tname` per line, `#` comments).
@@ -525,10 +576,11 @@ pub fn embedded_aset_names() -> HashMap<u32, String> {
     out
 }
 
-/// The RAW corpora merge behind `--pack-data` when the repo's `data/production_names.json` is
+/// The RAW corpora merge behind `--pack-data` when this crate's `data/production_names.json` is
 /// absent, merged lowest→highest priority: the Jul-08 devkit strings, the bone-name candidates,
-/// the rainbow table, the ASET-derived name fragments, then the live registry dump. Every source
-/// is a dev-machine file named by `.mercs2-local.toml` (searched upward from `start`): the
+/// the rainbow table, the ASET-derived name fragments, then the live registry dump. The fragments
+/// are committed in this crate's `data/` ([`crate_data_file`]); every other source is a
+/// dev-machine file named by `.mercs2-local.toml` (searched upward from `start`): the
 /// `jul08_strings` and `rainbow_table` keys, and the `data/` folder under `notes_docs_dir`. A
 /// missing key or file is an error naming it.
 pub fn load_all_names_raw(start: &Path) -> Result<HashMap<u32, String>, String> {
@@ -545,11 +597,29 @@ pub fn load_all_names_raw(start: &Path) -> Result<HashMap<u32, String>, String> 
     // table structurally cannot — it is what makes most unnamed vehicle/prop models (the whole
     // aircraft roster: A-10, AC-130, C-130, Predator, Pave Low, AH-1Z, MiG-27, …) browsable.
     // Produced by `wad_simulator --bin asset_gap_probe --emit`; every entry is a verified preimage.
+    // The block-string harvest goes under the fragments: a fragment's name wins over a harvested one.
+    names.extend(load_harvested_names(&notes_data_file(&notes_docs, "aset_block_strings.json")?)?);
     for f in ASET_NAME_FRAGMENTS {
-        names.extend(load_rainbow_json(&notes_data_file(&notes_docs, f)?)?);
+        names.extend(load_rainbow_json(&crate_data_file(f)?)?);
     }
     names.extend(load_names_csv(&notes_data_file(&notes_docs, "live_registry_hashes.csv")?)?);
     Ok(names)
+}
+
+/// `<this crate>/data/<name>` in the checkout this binary was built from — the committed name
+/// lookups (`data/README.md`) — or an error naming the missing file. Read by `--pack-data`, which
+/// runs from a checkout; a released binary carries `names.bin` instead.
+pub fn crate_data_file(name: &str) -> Result<PathBuf, String> {
+    let p = Path::new(env!("CARGO_MANIFEST_DIR")).join("data").join(name);
+    if p.is_file() {
+        Ok(p)
+    } else {
+        Err(format!(
+            "{} is not a file (committed in the checkout {} was built from)",
+            p.display(),
+            env!("CARGO_PKG_NAME")
+        ))
+    }
 }
 
 /// `<notes_docs_dir>/data/<name>`, or an error naming the `notes_docs_dir` key and the missing file.
@@ -648,11 +718,10 @@ pub fn load_names_pack(path: &Path) -> Result<HashMap<u32, String>, String> {
     Ok(names)
 }
 
-/// The ASET-derived name fragments under `<notes_docs_dir>/data/` (same JSON shape as the rainbow
-/// table), each a set of preimages derived from the WAD:
+/// The ASET-derived name fragments committed in this crate's `data/` (same JSON shape as the
+/// rainbow table), each a set of preimages derived from the WAD:
 ///   `aset_discovered_names` — texture-base -> model naming convention (`X_dm` names `X`)
-///   `aset_block_strings`    — identifiers mined out of decompressed block payloads
-///   `aset_expanded_names`   — slot-grammar expansion of the above (road/clip/atlas families)
+///   `aset_expanded_names`   — slot-grammar expansion of seed names (road/clip/atlas families)
 ///   `aset_external_names`   — block-path stems mined from the CONSOLE WADs (`aset_external_mine`).
 ///                             The PC bake strips generated-asset names; the PS3/Xbox builds ship an
 ///                             uncompressed block-path table that still spells them, and a block path
@@ -662,13 +731,19 @@ pub fn load_names_pack(path: &Path) -> Result<HashMap<u32, String>, String> {
 ///                             order-preserving token SUBSEQUENCE of one of its texture names, which
 ///                             catches the middle-token case (`civ_hum_casualfemale_ub_c` ->
 ///                             `civ_hum_casualfemale_c`) that no suffix-strip can reach.
+///   `aset_roster_names`     — model roots from the game roster × the `<faction>_veh_<class>_<name>`
+///                             grammar
+///   `aset_variant_names`    — decorated variants of named models (`vz_veh_tank_amx30_base`)
+/// The notes repo's `aset_block_strings.json` (identifiers harvested out of decompressed block
+/// payloads) is not one of them: a harvested run that hashes to an asset can be collision debris
+/// (`-ufzc9`, `.j0x.`), so it is read through [`load_harvested_names`].
 const ASET_NAME_FRAGMENTS: [&str; 6] = [
     "aset_discovered_names.json",
-    "aset_block_strings.json",
     "aset_expanded_names.json",
     "aset_model_names.json",
     "aset_external_names.json",
     "aset_roster_names.json",
+    "aset_variant_names.json",
 ];
 
 /// Load the decompiled-Lua corpus for reference search: `(display path, content, lowercased)`,
@@ -781,7 +856,22 @@ fn load_name_lines(path: &Path) -> Result<HashMap<u32, String>, String> {
 }
 
 /// Parse the rainbow table (`{"pandemic_hash_m2": {"0xHEX": ["name", …]}}`) into hash → first name.
-fn load_rainbow_json(path: &Path) -> Result<HashMap<u32, String>, String> {
+pub(crate) fn load_rainbow_json(path: &Path) -> Result<HashMap<u32, String>, String> {
+    load_rainbow_json_where(path, |_, _| true)
+}
+
+/// The names HARVESTED from block bytes (`aset_block_strings.json`): only the identifier-shaped
+/// ones ([`mercs2_formats::hash::is_identifier_shaped`]), minus every `(hash, name)` in this crate's
+/// `data/rejected_names.json`.
+fn load_harvested_names(path: &Path) -> Result<HashMap<u32, String>, String> {
+    let rejected = load_rainbow_json(&crate_data_file("rejected_names.json")?)?;
+    load_rainbow_json_where(path, |h, n| {
+        mercs2_formats::hash::is_identifier_shaped(n) && rejected.get(&h).map(String::as_str) != Some(n)
+    })
+}
+
+/// [`load_rainbow_json`] keeping, per hash, the first candidate `keep` accepts.
+fn load_rainbow_json_where(path: &Path, keep: impl Fn(u32, &str) -> bool) -> Result<HashMap<u32, String>, String> {
     let t0 = std::time::Instant::now();
     let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
     let root = serde_json::from_str::<serde_json::Value>(&text)
@@ -793,7 +883,8 @@ fn load_rainbow_json(path: &Path) -> Result<HashMap<u32, String>, String> {
     let mut map = HashMap::new();
     for (hex, names) in obj {
         let Ok(h) = u32::from_str_radix(hex.trim_start_matches("0x"), 16) else { continue };
-        if let Some(n) = names.as_array().and_then(|a| a.first()).and_then(|v| v.as_str()) {
+        let first = names.as_array().and_then(|a| a.iter().filter_map(|v| v.as_str()).find(|n| keep(h, n)));
+        if let Some(n) = first {
             map.insert(h, n.to_string());
         }
     }
@@ -827,7 +918,7 @@ mod tests {
     use super::AssetRow;
 
     fn row(hash: u32, template: Option<&str>) -> AssetRow {
-        AssetRow { hash, block: 0, src: 0, name: None, template: template.map(str::to_string) }
+        AssetRow { hash, type_id: 0, block: 0, src: 0, others: Vec::new(), name: None, template: template.map(str::to_string), faction: None }
     }
 
     #[test]
@@ -841,5 +932,120 @@ mod tests {
         assert!(kit.is(0x45CC_35FE, None));
         assert!(!soldier.is(0x45CC_35FE, None));
         assert!(!soldier.is(0x4D4F_42B5, Some("Allied Soldier")));
+    }
+
+    /// Every name fragment `--pack-data` merges is committed in this crate, parses, and holds only
+    /// names that hash to their keys; the harvested block strings are not among them.
+    #[test]
+    fn the_name_fragments_load_from_the_crate() {
+        assert!(!super::ASET_NAME_FRAGMENTS.contains(&"aset_block_strings.json"));
+        for f in super::ASET_NAME_FRAGMENTS {
+            let p = super::crate_data_file(f).unwrap_or_else(|e| panic!("{e}"));
+            let names = super::load_rainbow_json(&p).unwrap_or_else(|e| panic!("{e}"));
+            assert!(!names.is_empty(), "{f} holds no names");
+            for (h, n) in &names {
+                assert_eq!(m2(n), *h, "{f}: {n} does not hash to 0x{h:08X}");
+            }
+        }
+        assert!(super::crate_data_file("production_names.json").is_ok());
+    }
+
+    /// The harvest keeps identifier-shaped names, drops debris by shape and by the reject list, and
+    /// falls through to a hash's next candidate when its first is dropped.
+    #[test]
+    fn harvested_names_drop_debris() {
+        let rejected = super::load_rainbow_json(&super::crate_data_file("rejected_names.json").unwrap()).unwrap();
+        assert_eq!(rejected.len(), 4);
+        for (h, n) in &rejected {
+            assert_eq!(m2(n), *h, "{n}");
+        }
+        let dir = std::env::temp_dir().join(format!("harvest_test_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("harvest.json");
+        let real = "all_md500_driverdoor_actionhijack_getin_loopf_fb";
+        let doc = serde_json::json!({ "pandemic_hash_m2": {
+            "0x9C94874B": [real],
+            "0xEB74016B": ["-ufzc9"],
+            "0x862155E2": ["wxfm0u"],
+            "0x0000BEEF": [".j0x.", "telephone"],
+        }});
+        std::fs::write(&p, doc.to_string()).unwrap();
+        let got = super::load_harvested_names(&p).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(got.get(&0x9C94_874B).map(String::as_str), Some(real));
+        assert!(!got.contains_key(&0xEB74_016B));
+        assert!(!got.contains_key(&0x8621_55E2));
+        assert_eq!(got.get(&0x0000_BEEF).map(String::as_str), Some("telephone"));
+    }
+
+    /// The production table `names.bin` is packed from holds none of the rejected debris.
+    #[test]
+    fn the_production_table_holds_no_rejected_name() {
+        let rejected = super::load_rainbow_json(&super::crate_data_file("rejected_names.json").unwrap()).unwrap();
+        let p = super::crate_data_file("production_names.json").unwrap();
+        let doc: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&p).unwrap()).unwrap();
+        let table = doc["pandemic_hash_m2"].as_object().expect("pandemic_hash_m2 object");
+        assert_eq!(doc["count"].as_u64(), Some(table.len() as u64), "the count field is the table's size");
+        for (h, n) in &rejected {
+            assert_ne!(table.get(&format!("0x{h:08X}")).and_then(|v| v.as_str()), Some(n.as_str()), "{n}");
+        }
+    }
+
+    use mercs2_formats::hash::pandemic_hash_m2 as m2;
+    use mercs2_formats::mixr::KitTemplate;
+    use std::collections::HashMap;
+
+    fn template(model: u32, faction: &str, name: &str) -> KitTemplate {
+        KitTemplate { key: 0, name: Some(name.into()), model, profile: 0, faction: Some(m2(faction)) }
+    }
+
+    /// Retail pairs, from `kit_templates --factions`: the oc executive kit is worn by OC executives
+    /// and by the VZ defector; the civilian aid-worker kit only by civilians.
+    fn retail_like() -> (Vec<KitTemplate>, HashMap<u32, String>) {
+        let (exec, aid) = (0x2EF7_E3C3, 0x01ED_3D6F);
+        let names = HashMap::from([
+            (exec, "oc_hum_super_executive".to_string()),
+            (aid, "civ_hum_super_aidworkerfemale".to_string()),
+        ]);
+        let templates = vec![
+            template(exec, "HUD_faction_OC", "OC Executive"),
+            template(exec, "HUD_faction_OC", "OC Executive (Phone)"),
+            template(exec, "HUD_faction_VZ", "VZ Oil Company Defector"),
+            template(aid, "HUD_faction_CV", "Aid Worker (Female)"),
+        ];
+        (templates, names)
+    }
+
+    /// A marker is labelled with the prefix it pairs with most; a marker only carried by a template
+    /// on another faction's kit takes that kit's prefix, which is all the data says about it.
+    #[test]
+    fn a_faction_marker_is_labelled_by_the_prefix_it_pairs_with() {
+        let (templates, names) = retail_like();
+        let labels = super::faction_labels(&templates, &names);
+        assert_eq!(labels[&m2("HUD_faction_OC")], "OC");
+        assert_eq!(labels[&m2("HUD_faction_CV")], "CIV");
+        assert_eq!(labels[&m2("HUD_faction_VZ")], "OC");
+    }
+
+    #[test]
+    fn prefixes_tied_for_a_marker_are_both_shown() {
+        let names = HashMap::from([(1, "al_hum_a".to_string()), (2, "civ_hum_b".to_string())]);
+        let templates = vec![template(1, "HUD_faction_AN", "a"), template(2, "HUD_faction_AN", "b")];
+        assert_eq!(super::faction_labels(&templates, &names)[&m2("HUD_faction_AN")], "AL/CIV");
+    }
+
+    /// A template row groups by its own marker, so the defector sits with its faction rather than
+    /// its kit's; an asset row by its name's prefix; a nameless row by its hash.
+    #[test]
+    fn a_row_groups_by_its_template_faction_else_its_name_prefix() {
+        let labels = HashMap::from([(m2("HUD_faction_VZ"), "VZ".to_string())]);
+        let mut defector = row(0x2EF7_E3C3, Some("VZ Oil Company Defector"));
+        defector.name = Some("oc_hum_super_executive".into());
+        defector.faction = Some(m2("HUD_faction_VZ"));
+        assert_eq!(defector.faction_group(&labels), "VZ");
+        let mut hero = row(0x1234, None);
+        hero.name = Some("pmc_hum_mattias".into());
+        assert_eq!(hero.faction_group(&labels), "PMC");
+        assert_eq!(row(0xDEAD_BEEF, None).faction_group(&labels), "0xDEADBEEF");
     }
 }

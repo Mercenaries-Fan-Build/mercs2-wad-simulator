@@ -302,7 +302,7 @@ pub const M0303_MISSION_ID_UNPARSEABLE: Rule = Rule {
     doc: "docs/modding/lua_engine_seam_hardening.md",
 };
 
-/// A sound cue's `wave` is not a WAV a wavebank record can embed: the strict reader
+/// A sound cue's or replaced line's `wave` is not a WAV a wavebank record can embed: the strict reader
 /// ([`mercs2_audio::wav::read_pcm16_wav`]) refuses it — not RIFF/WAVE, not uncompressed 16-bit PCM,
 /// not mono or stereo, rate 0, or an empty or partial-frame data chunk. The lowering reads the file
 /// through the same reader. Needs the file, so it runs only when lint has the Shipment root.
@@ -313,9 +313,11 @@ pub const M0214_SOUND_WAVE_UNUSABLE: Rule = Rule {
 };
 
 /// A sound name the engine cannot reach: two cues of one bank whose names hash alike (the hash
-/// folds case), a name written as a bare hash or with surrounding whitespace, a bank with no cues,
-/// or an `add_sound` bank named `vo_*` (retail Lua appends the language to such a name before
-/// loading it, `mrxsoundbanks.lua:80-87`).
+/// folds case), a bank, cue, wavebank or line name that is empty or has surrounding whitespace, an
+/// `add_sound` bank or cue written as a bare hash (an override may write one: it names a bank, cue,
+/// wavebank or line the game has), a bank with no cues, or
+/// an `add_sound` bank named `vo_*` (retail Lua appends the language to such a name before loading
+/// it, `mrxsoundbanks.lua:80-87`).
 pub const M0215_SOUND_NAME_UNUSABLE: Rule = Rule {
     code: "M0215",
     title: "a sound bank or cue name the engine cannot reach",
@@ -331,8 +333,9 @@ pub const M0216_SOUND_CATEGORY_UNKNOWN: Rule = Rule {
     doc: "docs/modding/manifest_format.md#m0216",
 };
 
-/// `language` on a sound override whose bank is not `vo_*` (the engine never localizes it), or no
-/// `language` on one whose bank is (the entry is `<bank>.<language>`).
+/// `language` on a sound override whose bank or wavebank is not `vo_*` (the engine never localizes
+/// it), or no `language` on one whose bank or wavebank is (the entry is `<bank>.<language>`). A
+/// bank or wavebank written as a bare hash names its entry, and M0218 holds it to its language.
 pub const M0217_SOUND_LANGUAGE: Rule = Rule {
     code: "M0217",
     title: "a sound override's language does not match its bank",
@@ -344,7 +347,8 @@ pub const M0217_SOUND_LANGUAGE: Rule = Rule {
 /// loads only the banks the front end's Lua loads, and `vz.wad` every bank it carries but the ones
 /// retail Lua loads only in the front end (`ui_shell`), the engine loading the ones no Lua names
 /// ([`crate::sound::BankLoader::Engine`]); or the cue a `replace_sound_cue` names is not in that
-/// bank.
+/// bank; or a `replace_sound_wave`'s wavebank is not in the game, no record or several carry its
+/// line, or no soundbank plays the line ([`crate::sound::line_targets`]).
 pub const M0218_SOUND_TARGET_MISSING: Rule = Rule {
     code: "M0218",
     title: "a sound override's bank or cue is not in the game, or no level that carries the bank loads it",
@@ -1510,8 +1514,10 @@ fn unreachable_hash_checks(blocks: &[mercs2_formats::patch_wad::PatchBlock]) -> 
     out
 }
 
-/// Why a bank or cue name cannot be used, or `None`.
-fn sound_name_refusal(what: &str, name: &str) -> Option<String> {
+/// Why a bank or cue name cannot be used, or `None`. An override names a bank or cue the game has,
+/// so it may write a bare hash (`new` false); `add_sound` mints them (`new` true), and a new
+/// identity's hash is the hash of its name.
+fn sound_name_refusal(what: &str, name: &str, new: bool) -> Option<String> {
     if name.is_empty() {
         return Some(format!("the {what} name is empty"));
     }
@@ -1520,13 +1526,80 @@ fn sound_name_refusal(what: &str, name: &str) -> Option<String> {
             "the {what} name {name:?} has surrounding whitespace, which is hashed with it — trim it"
         ));
     }
-    if crate::manifest::bare_hash(name).is_some() {
+    if new && crate::manifest::bare_hash(name).is_some() {
         return Some(format!(
-            "the {what} name {name:?} is a bare hash; a sound {what} is authored by name, and the \
+            "the {what} name {name:?} is a bare hash; a new sound {what} is authored by name, and the \
              name is what its guid is the hash of"
         ));
     }
     None
+}
+
+/// Why the WAV at `root/wave` cannot be encoded (M0214), or `None`: the strict reader takes
+/// uncompressed 16-bit PCM, mono or stereo.
+fn wav_refusal(root: &Path, wave: &Path) -> Option<String> {
+    let path = root.join(wave);
+    match std::fs::read(&path) {
+        Ok(bytes) => mercs2_audio::wav::read_pcm16_wav(&bytes).err().map(|e| e.to_string()),
+        Err(e) => Some(format!("it cannot be read: {e}")),
+    }
+}
+
+/// M0214, M0215 and M0217 for a `replace_sound_wave`: the wavebank and line names, the language a
+/// named wavebank's copy takes, and the WAV. Whether the line is in the game is M0218's.
+fn line_checks(
+    index: usize,
+    wavebank: &str,
+    language: Option<crate::manifest::Language>,
+    line: &str,
+    wave: &Path,
+    root: Option<&Path>,
+    source_issue_at: &[usize],
+) -> Vec<Diagnostic> {
+    let mut out = Vec::new();
+    let mut push = |rule: Rule, message: String| {
+        out.push(Diagnostic { rule, severity: Severity::Error, message, at: Some(index), fix: None })
+    };
+    for (what, name) in [("wavebank", wavebank), ("line", line)] {
+        if let Some(why) = sound_name_refusal(what, name, false) {
+            push(M0215_SOUND_NAME_UNUSABLE, format!("replace_sound_wave: {why}."));
+        }
+    }
+    if crate::manifest::bare_hash(wavebank).is_none() {
+        match (crate::sound::is_vo_bank(wavebank), language) {
+            (true, None) => push(
+                M0217_SOUND_LANGUAGE,
+                format!(
+                    "wavebank {wavebank:?} is a `vo_*` wavebank: each language has its own copy \
+                     (`{wavebank}.<language>`), so the override must name the language it replaces."
+                ),
+            ),
+            (false, Some(l)) => push(
+                M0217_SOUND_LANGUAGE,
+                format!(
+                    "wavebank {wavebank:?} is not a `vo_*` wavebank, so it has one copy for every \
+                     language; remove `language: {}`.",
+                    l.token()
+                ),
+            ),
+            _ => {}
+        }
+    }
+    if let Some(root) = root {
+        if !source_issue_at.contains(&index) {
+            if let Some(why) = wav_refusal(root, wave) {
+                push(
+                    M0214_SOUND_WAVE_UNUSABLE,
+                    format!(
+                        "line {line:?}: {} is not usable: {why}. Export it as uncompressed 16-bit PCM, \
+                         mono or stereo.",
+                        wave.display()
+                    ),
+                );
+            }
+        }
+    }
+    out
 }
 
 /// Why an `add_sound`'s `load_in` cannot be shipped as written (M0221), or `None`: it must list at
@@ -1578,7 +1651,8 @@ fn sound_checks(
         })
     };
 
-    if let Some(why) = sound_name_refusal("bank", bank) {
+    let new = kind == "add_sound";
+    if let Some(why) = sound_name_refusal("bank", bank, new) {
         push(M0215_SOUND_NAME_UNUSABLE, format!("{kind}: {why}."), None);
     }
     if kind == "add_sound" && crate::sound::is_vo_bank(bank) {
@@ -1598,17 +1672,18 @@ fn sound_checks(
     }
     let mut seen: std::collections::BTreeMap<u32, &str> = std::collections::BTreeMap::new();
     for cue in cues {
-        if let Some(why) = sound_name_refusal("cue", &cue.name) {
+        if let Some(why) = sound_name_refusal("cue", &cue.name, new) {
             push(M0215_SOUND_NAME_UNUSABLE, format!("{kind}: {why}."), None);
             continue;
         }
-        let guid = mercs2_formats::hash::pandemic_hash_m2(&cue.name);
+        let guid = crate::manifest::asset_hash(&cue.name);
         if let Some(first) = seen.insert(guid, &cue.name) {
             push(
                 M0215_SOUND_NAME_UNUSABLE,
                 format!(
                     "cues {first:?} and {:?} hash to the same guid 0x{guid:08X} (the hash folds \
-                     case), so only one of them can be looked up. Rename one.",
+                     case, and a bare hash is its own guid), so only one of them can be looked up. \
+                     Rename one, or declare the cue once.",
                     cue.name
                 ),
                 None,
@@ -1630,7 +1705,10 @@ fn sound_checks(
         );
     }
 
-    if let Some(language) = language {
+    // A bank written as a bare hash names its entry: whether it is a language's copy is where the
+    // game carries it, which the game-dependent M0218 checks against the declared language.
+    let named = crate::manifest::bare_hash(bank).is_none();
+    if let (Some(language), true) = (language, named) {
         match (crate::sound::is_vo_bank(bank), language) {
             (true, None) => push(
                 M0217_SOUND_LANGUAGE,
@@ -1656,12 +1734,7 @@ fn sound_checks(
     if let Some(root) = root {
         if !source_issue_at.contains(&index) {
             for cue in cues {
-                let path = root.join(&cue.wave);
-                let why = match std::fs::read(&path) {
-                    Ok(bytes) => mercs2_audio::wav::read_pcm16_wav(&bytes).err().map(|e| e.to_string()),
-                    Err(e) => Some(format!("it cannot be read: {e}")),
-                };
-                if let Some(why) = why {
+                if let Some(why) = wav_refusal(root, &cue.wave) {
                     push(
                         M0214_SOUND_WAVE_UNUSABLE,
                         format!(
@@ -2464,6 +2537,9 @@ pub fn lint(
                     cues: vec![cue],
                 };
                 out.extend(sound_checks(index, &fields, root, &source_issue_at));
+            }
+            Contribution::ReplaceSoundWave { wavebank, language, line, wave } => {
+                out.extend(line_checks(index, wavebank, *language, line, wave, root, &source_issue_at));
             }
             Contribution::AddLanguage { name, .. } => {
                 // The `data/` safety pivot: refuse a name that is not a usable language token or that

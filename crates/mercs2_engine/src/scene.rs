@@ -278,12 +278,30 @@ struct EntityGpu {
     bone_count: usize,
 }
 
+/// One presented frame read back to the CPU: tightly packed RGBA8, top row first.
+pub struct CapturedFrame {
+    pub width: u32,
+    pub height: u32,
+    pub rgba: Vec<u8>,
+}
+
+/// Where a frame read-back stands: asked for, then filled in by the next present.
+enum Capture {
+    Idle,
+    Pending,
+    Done(Result<CapturedFrame, String>),
+}
+
 pub struct Scene {
     pub window: Arc<Window>,
     surface: wgpu::Surface<'static>,
     device: wgpu::Device,
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
+    /// The usages the surface supports, from its capabilities: a frame capture needs `COPY_SRC`.
+    surface_usages: wgpu::TextureUsages,
+    /// A requested read-back of the next presented frame ([`Scene::request_capture`]).
+    capture: Capture,
     pub size: winit::dpi::PhysicalSize<u32>,
     pipeline: wgpu::RenderPipeline,
     /// Transparent (alpha-blend, no depth-write) variant of `pipeline`, used when `model_alpha < 1`.
@@ -444,6 +462,7 @@ impl Scene {
             .expect("surface unsupported by adapter");
         config.usage = wgpu::TextureUsages::RENDER_ATTACHMENT;
         surface.configure(&device, &config);
+        let surface_usages = surface.get_capabilities(&adapter).usages;
 
         // group 0: per-entity MVP uniform (+ fog params, read by the fragment stage).
         let camera_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -1060,6 +1079,8 @@ impl Scene {
             device,
             queue,
             config,
+            surface_usages,
+            capture: Capture::Idle,
             size,
             pipeline,
             pipeline_t,
@@ -1272,7 +1293,9 @@ impl Scene {
         if let Some(f) = overlay {
             f(&self.device, &self.queue, &mut encoder, &view_tex, [self.config.width, self.config.height]);
         }
+        let readback = self.encode_capture(&mut encoder, &output.texture);
         self.queue.submit(std::iter::once(encoder.finish()));
+        self.finish_capture(readback);
         output.present();
         Ok(())
     }
@@ -1651,6 +1674,86 @@ impl Scene {
         });
         self.entities
             .insert(e, EntityGpu { mvp_buf, mvp_bind, bone_buf, bone_bind, bone_count });
+    }
+
+    /// Read back the next presented frame: everything drawn, overlays included. Collect it with
+    /// [`Scene::take_capture`] after that frame. Fails when this surface cannot be a copy source.
+    pub fn request_capture(&mut self) -> Result<(), String> {
+        if !self.surface_usages.contains(wgpu::TextureUsages::COPY_SRC) {
+            return Err(format!(
+                "this surface cannot be read back: its usages are {:?}, without COPY_SRC",
+                self.surface_usages
+            ));
+        }
+        if !self.config.usage.contains(wgpu::TextureUsages::COPY_SRC) {
+            self.config.usage |= wgpu::TextureUsages::COPY_SRC;
+            self.surface.configure(&self.device, &self.config);
+        }
+        self.capture = Capture::Pending;
+        Ok(())
+    }
+
+    /// The frame a [`Scene::request_capture`] asked for, once it has been presented.
+    pub fn take_capture(&mut self) -> Option<Result<CapturedFrame, String>> {
+        match std::mem::replace(&mut self.capture, Capture::Idle) {
+            Capture::Done(r) => Some(r),
+            other => {
+                self.capture = other;
+                None
+            }
+        }
+    }
+
+    /// Queue the copy of a pending capture's swapchain texture into a read-back buffer.
+    fn encode_capture(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        texture: &wgpu::Texture,
+    ) -> Option<(wgpu::Buffer, u32)> {
+        if !matches!(self.capture, Capture::Pending) {
+            return None;
+        }
+        let (w, h) = (self.config.width, self.config.height);
+        let padded = padded_row_bytes(w);
+        let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("frame capture"),
+            size: u64::from(padded) * u64::from(h),
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        encoder.copy_texture_to_buffer(
+            wgpu::ImageCopyTexture { texture, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+            wgpu::ImageCopyBuffer {
+                buffer: &buffer,
+                layout: wgpu::ImageDataLayout { offset: 0, bytes_per_row: Some(padded), rows_per_image: Some(h) },
+            },
+            wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+        );
+        Some((buffer, padded))
+    }
+
+    /// Finish a capture queued by [`Scene::encode_capture`], once its commands are submitted.
+    fn finish_capture(&mut self, readback: Option<(wgpu::Buffer, u32)>) {
+        let Some((buffer, padded)) = readback else { return };
+        let (w, h) = (self.config.width, self.config.height);
+        let slice = buffer.slice(..);
+        let (tx, rx) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |r| {
+            let _ = tx.send(r);
+        });
+        self.device.poll(wgpu::Maintain::Wait);
+        let result = match rx.recv() {
+            Ok(Ok(())) => {
+                let data = slice.get_mapped_range();
+                let rgba = unpad_to_rgba(&data, w, h, padded, self.config.format);
+                drop(data);
+                buffer.unmap();
+                rgba.map(|rgba| CapturedFrame { width: w, height: h, rgba })
+            }
+            Ok(Err(e)) => Err(format!("mapping the frame capture failed: {e}")),
+            Err(_) => Err("the frame capture's map callback never ran".into()),
+        };
+        self.capture = Capture::Done(result);
     }
 
     pub fn resize(&mut self, new: winit::dpi::PhysicalSize<u32>) {
@@ -2316,10 +2419,52 @@ impl Scene {
             self.dispatch_nodes(node, &mut encoder, &view_tex, &items, view_proj, view, cam_world, t);
         }
 
+        let readback = self.encode_capture(&mut encoder, &output.texture);
         self.queue.submit(std::iter::once(encoder.finish()));
+        self.finish_capture(readback);
         output.present();
         Ok(())
     }
+}
+
+/// Bytes per row of a texture-to-buffer copy `width` RGBA8 pixels wide: wgpu requires each row to
+/// start on a 256-byte boundary.
+fn padded_row_bytes(width: u32) -> u32 {
+    let unpadded = width * 4;
+    let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+    unpadded.div_ceil(align) * align
+}
+
+/// Strip the row padding from a swapchain read-back and order its bytes as RGBA. The swapchain is
+/// BGRA or RGBA depending on the platform; any other format is an error naming it.
+fn unpad_to_rgba(
+    data: &[u8],
+    width: u32,
+    height: u32,
+    padded: u32,
+    format: wgpu::TextureFormat,
+) -> Result<Vec<u8>, String> {
+    let bgra = match format {
+        wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Bgra8UnormSrgb => true,
+        wgpu::TextureFormat::Rgba8Unorm | wgpu::TextureFormat::Rgba8UnormSrgb => false,
+        other => return Err(format!("cannot read back a {other:?} swapchain")),
+    };
+    let row = (width * 4) as usize;
+    let mut rgba = Vec::with_capacity(row * height as usize);
+    for y in 0..height as usize {
+        let start = y * padded as usize;
+        let src = data
+            .get(start..start + row)
+            .ok_or_else(|| format!("frame capture is short: row {y} of {height} is missing"))?;
+        if bgra {
+            for px in src.chunks_exact(4) {
+                rgba.extend_from_slice(&[px[2], px[1], px[0], px[3]]);
+            }
+        } else {
+            rgba.extend_from_slice(src);
+        }
+    }
+    Ok(rgba)
 }
 
 /// A snapshot of one drawable entity for a frame: `(entity, model-space transform, model hash,
@@ -2587,6 +2732,41 @@ fn light_anim_factor(a: &LightAnim, t: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A row is padded to the next 256-byte boundary, and an exact multiple is left as it is.
+    #[test]
+    fn capture_rows_pad_to_256_bytes() {
+        assert_eq!(padded_row_bytes(64), 256);
+        assert_eq!(padded_row_bytes(65), 512);
+        assert_eq!(padded_row_bytes(1), 256);
+    }
+
+    /// The padding is dropped and BGRA becomes RGBA; an RGBA swapchain keeps its byte order.
+    #[test]
+    fn capture_unpads_and_reorders_to_rgba() {
+        let (w, h, padded) = (2u32, 2u32, 256u32);
+        let mut data = vec![0u8; (padded * h) as usize];
+        for y in 0..h as usize {
+            for x in 0..w as usize {
+                let p = y * padded as usize + x * 4;
+                data[p..p + 4].copy_from_slice(&[10 + x as u8, 20 + y as u8, 30, 255]);
+            }
+        }
+        let bgra = unpad_to_rgba(&data, w, h, padded, wgpu::TextureFormat::Bgra8UnormSrgb).unwrap();
+        assert_eq!(bgra.len(), 16);
+        assert_eq!(&bgra[0..4], &[30, 20, 10, 255]);
+        assert_eq!(&bgra[12..16], &[30, 21, 11, 255]);
+        let rgba = unpad_to_rgba(&data, w, h, padded, wgpu::TextureFormat::Rgba8Unorm).unwrap();
+        assert_eq!(&rgba[0..4], &[10, 20, 30, 255]);
+    }
+
+    /// A format the read-back cannot order, or a buffer shorter than the frame, is an error.
+    #[test]
+    fn capture_refuses_unknown_formats_and_short_buffers() {
+        let data = vec![0u8; 256];
+        assert!(unpad_to_rgba(&data, 1, 1, 256, wgpu::TextureFormat::Rgba16Float).unwrap_err().contains("Rgba16Float"));
+        assert!(unpad_to_rgba(&data, 1, 2, 256, wgpu::TextureFormat::Rgba8Unorm).unwrap_err().contains("row 1"));
+    }
 
     /// Statically parse + validate every WGSL module the scene loads, so a shader syntax error or a
     /// bad binding is caught by `cargo test` (pipeline creation — the only runtime WGSL check —

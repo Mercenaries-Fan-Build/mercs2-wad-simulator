@@ -45,7 +45,7 @@ Status: Validated=42, Registered=27, NeedsInvestigation=163
 | `SOUN` | 0x0045f76d | Validated | ECS sound ref array @0x45f76d: count×4 u32 refs (overflow-guarded). Validated: body % 4 == 0 |
 | `STRM` | 0x004782fd | Validated |  |
 | `TEXT` | 0x00492fab | Validated | effect text/texture ref @0x492fab: reads a leading u32 (id/count) then variable data. Validated: body >= 4 |
-| `TRCK` | 0x0068e7c3 | Validated | anim track @0x68e7c3: 12-byte inline header (3×u32) then count×4 parallel arrays (overflow-guarded). Validated: body >= 12 |
+| `TRCK` | 0x0068e7c3 | Validated | anim track @0x68e7c3: 12-byte inline header (3×u32) then count×4 parallel arrays (overflow-guarded). Validated: body >= 12. In the 29 MANM containers the bytes decode as [u32 property hash][f32 divisor][u16 N] then N×[i16 time][i16 value], size 10+4N (manm.rs, 378 tracks) |
 | `TRFM` | 0x0048cd09 | Validated | transform @FUN_0048cc30 (decomp): unrolled read of 16x4-byte floats = one 4x4 matrix. Validated: body >= 64 |
 | `VALU` | 0x0067c9d7 | Validated | anim VALU @0x67c9d7: (count+1)×width value blob, u32 elements (overflow-guarded). Validated: body % 4 == 0 |
 | `data` | 0x004a47d6 | Validated |  |

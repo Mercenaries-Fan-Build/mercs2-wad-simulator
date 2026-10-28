@@ -6,7 +6,8 @@
 //! human WRITES should be a name too (mandate `no-arbitrary-hashes`).
 //!
 //! This module closes the gap between those: it takes the curated
-//! `data/production_names.json` (23,110 hash-verified entries) and gives back the name for a hash,
+//! `crates/mercs2_workshop/data/production_names.json` (23,106 hash-verified entries) and gives
+//! back the name for a hash,
 //! so that
 //!
 //! * a `touches: ["0xE54047D5"]` shows up in diagnostics as `al_veh_boat_destroyer`, and
@@ -49,7 +50,7 @@ impl std::fmt::Display for NameTableError {
 impl std::error::Error for NameTableError {}
 
 /// The committed lookup, relative to a repo root.
-pub const PRODUCTION_NAMES: &str = "data/production_names.json";
+pub const PRODUCTION_NAMES: &str = "crates/mercs2_workshop/data/production_names.json";
 
 impl NameTable {
     /// Build from `hash → name` pairs. Mostly for tests and for callers with their own source.
@@ -63,7 +64,7 @@ impl NameTable {
         }
     }
 
-    /// Load `data/production_names.json`. Shape: `{ "pandemic_hash_m2": { "0xHHHHHHHH": "name" } }`.
+    /// Load [`PRODUCTION_NAMES`]. Shape: `{ "pandemic_hash_m2": { "0xHHHHHHHH": "name" } }`.
     pub fn load(path: &Path) -> Result<NameTable, NameTableError> {
         let text = std::fs::read_to_string(path).map_err(|e| NameTableError::Io {
             path: path.to_path_buf(),
@@ -95,7 +96,7 @@ impl NameTable {
         Ok(NameTable { by_hash })
     }
 
-    /// Walk up from `start` looking for `data/production_names.json`, as `mercs2_workshop` does.
+    /// Walk up from `start` looking for [`PRODUCTION_NAMES`].
     /// Returns `None` rather than erroring — a missing table degrades diagnostics, it is never fatal.
     pub fn find_from(start: &Path) -> Option<NameTable> {
         let mut dir = Some(start);
@@ -197,6 +198,29 @@ pub fn bare_hash_suggestions(manifest: &Manifest, names: &NameTable) -> Vec<Bare
         // would be nonsense, so those are skipped rather than mis-suggested.
         if let Contribution::Raw { touches, .. } = c {
             refs.extend(touches.iter().map(|t| t.0.as_str()));
+        }
+        // A sound override's bank and cues (a replaced line's wavebank and line) name tables and cues
+        // the game has. A localized bank's hash is its entry's, `<bank>.<language>`, so its name is
+        // written without the suffix.
+        let (bank, language, cues): (Option<&str>, _, Vec<&str>) = match c {
+            Contribution::ReplaceSoundBank { bank, language, cues, .. } => {
+                (Some(bank), *language, cues.iter().map(|q| q.name.as_str()).collect())
+            }
+            Contribution::ReplaceSoundCue { bank, language, cue, .. } => (Some(bank), *language, vec![cue.name.as_str()]),
+            Contribution::ReplaceSoundWave { wavebank, language, line, .. } => (Some(wavebank), *language, vec![line.as_str()]),
+            _ => (None, None, Vec::new()),
+        };
+        refs.extend(cues);
+        if let Some(bank) = bank {
+            if let Some(entry) = crate::manifest::bare_hash(bank).and_then(|h| names.reverse(h)) {
+                let name = match language {
+                    Some(l) => entry.strip_suffix(&format!(".{}", l.token())),
+                    None => Some(entry),
+                };
+                if let Some(name) = name {
+                    out.push(BareHashSuggestion { index, kind, written: bank.trim().to_string(), name: name.to_string() });
+                }
+            }
         }
 
         for r in refs {

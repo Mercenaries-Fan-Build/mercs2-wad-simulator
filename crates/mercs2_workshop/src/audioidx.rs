@@ -29,6 +29,9 @@ pub struct AudioClip {
     pub caption: String,
     /// Duration in seconds.
     pub duration_s: f32,
+    /// The line's authored name when the inventory knows it (`chris-Banter-Contract-All01-29`), of
+    /// which the record's clip hash is the hash. Empty otherwise.
+    pub context: String,
     /// The clip's index into the `vo_stream.english` wavebank, parsed from the leading number of
     /// `original` (`vo_Chris/01595__…` → 1595). That record's `(offset, size)` locates the PCM in
     /// `vo_stream.english.pws`, so this is how a browsed clip becomes playable audio.
@@ -65,7 +68,7 @@ impl AudioIndex {
     /// is missing, unreadable, not JSON, has no `entries` array, or has an entry without `original`.
     pub fn load(data_home: &Path) -> Result<AudioIndex, String> {
         let path = data_home.join("audio_manifest.json");
-        let mut idx = AudioIndex::default();
+        let mut clips = Vec::new();
         let text = std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
         let v = serde_json::from_str::<serde_json::Value>(&text)
             .map_err(|e| format!("{}: bad JSON: {e}", path.display()))?;
@@ -81,22 +84,27 @@ impl AudioIndex {
             if original.is_empty() {
                 return Err(format!("{}: entry {i} has no `original`", path.display()));
             }
-            idx.clips.push(AudioClip {
+            clips.push(AudioClip {
                 bank: s(e, "bank"),
                 speaker: s(e, "speaker"),
                 caption: s(e, "caption"),
                 duration_s: e.get("duration_s").and_then(|d| d.as_f64()).unwrap_or(0.0) as f32,
+                context: s(e, "context"),
                 wave_index: AudioClip::parse_wave_index(&original),
                 original,
             });
         }
-        idx.clips.sort_by(|a, b| a.bank.cmp(&b.bank).then_with(|| a.original.cmp(&b.original)));
-        idx.keys = idx
-            .clips
+        Ok(AudioIndex::from_clips(clips))
+    }
+
+    /// An index over `clips`, in bank then path order, with each clip's search key.
+    pub fn from_clips(mut clips: Vec<AudioClip>) -> AudioIndex {
+        clips.sort_by(|a, b| a.bank.cmp(&b.bank).then_with(|| a.original.cmp(&b.original)));
+        let keys = clips
             .iter()
-            .map(|c| format!("{} {} {}", c.bank, c.speaker, c.caption).to_lowercase())
+            .map(|c| format!("{} {} {} {}", c.bank, c.speaker, c.caption, c.original).to_lowercase())
             .collect();
-        Ok(idx)
+        AudioIndex { clips, keys }
     }
 
     /// The banks present, each with its clip count — for a grouped browser, in name order.
@@ -108,12 +116,7 @@ impl AudioIndex {
         counts.into_iter().map(|(b, n)| (b.to_string(), n)).collect()
     }
 
-    /// Clips in one bank, in path order.
-    pub fn by_bank(&self, bank: &str) -> Vec<&AudioClip> {
-        self.clips.iter().filter(|c| c.bank == bank).collect()
-    }
-
-    /// Clips whose bank, speaker or caption contains every whitespace-separated term of `query`
+    /// Clips whose bank, speaker, caption or file name contains every whitespace-separated term of `query`
     /// (case-insensitive), capped at `limit`. An empty query returns nothing.
     pub fn search(&self, query: &str, limit: usize) -> Vec<&AudioClip> {
         let terms: Vec<String> = query.split_whitespace().map(|t| t.to_lowercase()).collect();
@@ -139,23 +142,17 @@ mod tests {
     use super::*;
 
     fn idx() -> AudioIndex {
-        let mut i = AudioIndex {
-            clips: vec![
-                AudioClip { original: "vo_Chris/1.wav".into(), bank: "vo_Chris".into(), speaker: "Chris".into(), caption: "Now the CIA.".into(), duration_s: 4.9, wave_index: Some(1) },
-                AudioClip { original: "vo_Chris/2.wav".into(), bank: "vo_Chris".into(), speaker: "Chris".into(), caption: "Rat bastard.".into(), duration_s: 2.0, wave_index: Some(2) },
-                AudioClip { original: "vo_Jen/1.wav".into(), bank: "vo_Jen".into(), speaker: "Jen".into(), caption: "Now the CIA.".into(), duration_s: 3.1, wave_index: Some(1) },
-            ],
-            keys: vec![],
-        };
-        i.keys = i.clips.iter().map(|c| format!("{} {} {}", c.bank, c.speaker, c.caption).to_lowercase()).collect();
-        i
+        AudioIndex::from_clips(vec![
+            AudioClip { original: "vo_Chris/1.wav".into(), bank: "vo_Chris".into(), speaker: "Chris".into(), caption: "Now the CIA.".into(), duration_s: 4.9, wave_index: Some(1), ..Default::default() },
+            AudioClip { original: "vo_Chris/2.wav".into(), bank: "vo_Chris".into(), speaker: "Chris".into(), caption: "Rat bastard.".into(), duration_s: 2.0, wave_index: Some(2), ..Default::default() },
+            AudioClip { original: "vo_Jen/1.wav".into(), bank: "vo_Jen".into(), speaker: "Jen".into(), caption: "Now the CIA.".into(), duration_s: 3.1, wave_index: Some(1), ..Default::default() },
+        ])
     }
 
     #[test]
     fn banks_group_and_search_matches_caption_and_speaker() {
         let i = idx();
         assert_eq!(i.banks(), vec![("vo_Chris".to_string(), 2), ("vo_Jen".to_string(), 1)]);
-        assert_eq!(i.by_bank("vo_Jen").len(), 1);
         // Caption term matches across banks; speaker term narrows.
         assert_eq!(i.search("cia", 10).len(), 2);
         assert_eq!(i.search("cia jen", 10).len(), 1);

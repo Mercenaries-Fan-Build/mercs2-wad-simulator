@@ -643,6 +643,44 @@ pub mod theme {
         });
     }
 
+    /// A slider whose rail shows against a card: egui draws the rail in the inactive widget fill,
+    /// which this theme sets to the card colour. `width` is the rail's; the slider is returned.
+    pub fn scrub(ui: &mut egui::Ui, width: f32, slider: egui::Slider<'_>) -> egui::Response {
+        ui.scope(|ui| {
+            ui.spacing_mut().slider_width = width;
+            ui.visuals_mut().widgets.inactive.bg_fill = LINE;
+            ui.add(slider.trailing_fill(true))
+        })
+        .inner
+    }
+
+    /// A curve `f` over `x0..=x1`, sampled once per pixel column, in a `height`-tall inset strip
+    /// as wide as the row; the y range is the curve's own (a flat curve is drawn mid-height), with
+    /// a brass playhead at `at`. Clicking or dragging on the strip returns the x it was put at.
+    pub fn curve(ui: &mut egui::Ui, height: f32, x0: f32, x1: f32, at: f32, f: impl Fn(f32) -> f32) -> Option<f32> {
+        let (rect, resp) =
+            ui.allocate_exact_size(egui::vec2(ui.available_width(), height), egui::Sense::click_and_drag());
+        let p = ui.painter_at(rect);
+        p.rect(rect, egui::Rounding::same(3.0), G0, egui::Stroke::new(1.0, LINE));
+        let inner = rect.shrink(4.0);
+        let span = (x1 - x0).max(f32::EPSILON);
+        let cols = inner.width().max(2.0) as usize;
+        let ys: Vec<f32> = (0..=cols).map(|i| f(x0 + span * i as f32 / cols as f32)).collect();
+        let (lo, hi) = ys.iter().fold((f32::MAX, f32::MIN), |(l, h), &y| (l.min(y), h.max(y)));
+        let to_y = |y: f32| if hi > lo { inner.bottom() - (y - lo) / (hi - lo) * inner.height() } else { inner.center().y };
+        let pts: Vec<egui::Pos2> =
+            ys.iter().enumerate().map(|(i, &y)| egui::pos2(inner.left() + i as f32, to_y(y))).collect();
+        p.add(egui::Shape::line(pts, egui::Stroke::new(1.5, TX)));
+        let px = inner.left() + ((at - x0) / span).clamp(0.0, 1.0) * inner.width();
+        p.line_segment([egui::pos2(px, rect.top()), egui::pos2(px, rect.bottom())], egui::Stroke::new(1.0, BRASS));
+        if resp.clicked() || resp.dragged() {
+            if let Some(pos) = resp.interact_pointer_pos() {
+                return Some(x0 + ((pos.x - inner.left()) / inner.width()).clamp(0.0, 1.0) * span);
+            }
+        }
+        None
+    }
+
     /// A 26×26 LOD/state bit chip. Returns whether it was clicked.
     pub fn bit_chip(ui: &mut egui::Ui, label: &str, on: bool) -> bool {
         let (rect, resp) = ui.allocate_exact_size(egui::vec2(26.0, 26.0), egui::Sense::click());
@@ -1393,12 +1431,28 @@ pub mod theme {
         pub badge: Option<usize>,
         /// A status dot, top-right (Live: whether the game answers).
         pub dot: Option<Color32>,
+        /// Why the page cannot be opened now (shown on hover); the cell is drawn dim and takes no
+        /// click.
+        pub locked: Option<&'a str>,
     }
 
     /// Draw a rail cell; returns whether it was clicked.
     pub fn rail_item(ui: &mut egui::Ui, item: &RailItem<'_>) -> bool {
-        let (rect, resp) = ui.allocate_exact_size(egui::vec2(RAIL_W, RAIL_CELL_H), egui::Sense::click());
-        let col = if item.on { BRASS } else if resp.hovered() { DIM } else { FAINT };
+        let sense = if item.locked.is_some() { egui::Sense::hover() } else { egui::Sense::click() };
+        let (rect, resp) = ui.allocate_exact_size(egui::vec2(RAIL_W, RAIL_CELL_H), sense);
+        let resp = match item.locked {
+            Some(why) => resp.on_hover_text(why),
+            None => resp,
+        };
+        let col = if item.on {
+            BRASS
+        } else if item.locked.is_some() {
+            LINE2
+        } else if resp.hovered() {
+            DIM
+        } else {
+            FAINT
+        };
         let p = ui.painter();
         let at = |x: f32, y: f32| rect.left_top() + egui::vec2(x, y);
         if item.on {

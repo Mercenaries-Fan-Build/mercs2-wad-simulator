@@ -189,6 +189,32 @@ pub fn read_pcm16_wav(bytes: &[u8]) -> Result<Pcm16, WavError> {
     Ok(Pcm16 { channels: channels as u8, sample_rate, samples })
 }
 
+/// Write `pcm` as the shape [`read_pcm16_wav`] reads: `RIFF`/`WAVE`, a 16-byte PCM `fmt ` chunk and
+/// one `data` chunk (16-bit samples, so always an even length). A data chunk past `u32` is refused.
+pub fn write_pcm16_wav(pcm: &Pcm16) -> Result<Vec<u8>, String> {
+    let channels = u16::from(pcm.channels);
+    let data_len = u32::try_from(pcm.samples.len() * 2)
+        .ok()
+        .filter(|n| n.checked_add(36).is_some())
+        .ok_or_else(|| "the samples do not fit a WAV data chunk".to_string())?;
+    let block_align = channels * 2;
+    let mut out = Vec::with_capacity(44 + data_len as usize);
+    out.extend_from_slice(b"RIFF");
+    out.extend_from_slice(&(4 + 8 + 16 + 8 + data_len).to_le_bytes());
+    out.extend_from_slice(b"WAVEfmt ");
+    out.extend_from_slice(&16u32.to_le_bytes());
+    out.extend_from_slice(&1u16.to_le_bytes());
+    out.extend_from_slice(&channels.to_le_bytes());
+    out.extend_from_slice(&pcm.sample_rate.to_le_bytes());
+    out.extend_from_slice(&(pcm.sample_rate * u32::from(block_align)).to_le_bytes());
+    out.extend_from_slice(&block_align.to_le_bytes());
+    out.extend_from_slice(&16u16.to_le_bytes());
+    out.extend_from_slice(b"data");
+    out.extend_from_slice(&data_len.to_le_bytes());
+    out.extend(pcm.samples.iter().flat_map(|s| s.to_le_bytes()));
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -238,6 +264,19 @@ mod tests {
         assert_eq!(mono, Pcm16 { channels: 1, sample_rate: 22050, samples: s.to_vec() });
         let stereo = read_pcm16_wav(&wav(1, 2, 44100, 16, &pcm(&s), &[])).expect("stereo");
         assert_eq!(stereo, Pcm16 { channels: 2, sample_rate: 44100, samples: s.to_vec() });
+    }
+
+    /// What [`write_pcm16_wav`] writes, the strict reader reads back as it was, mono and stereo.
+    #[test]
+    fn written_wavs_read_back_verbatim() {
+        for pcm in [
+            Pcm16 { channels: 1, sample_rate: 22050, samples: vec![0, 1, -1, i16::MAX, i16::MIN] },
+            Pcm16 { channels: 2, sample_rate: 44100, samples: vec![7, -7, 300, -300] },
+        ] {
+            let bytes = write_pcm16_wav(&pcm).expect("writes");
+            assert_eq!(&bytes[..4], b"RIFF");
+            assert_eq!(read_pcm16_wav(&bytes), Ok(pcm));
+        }
     }
 
     #[test]

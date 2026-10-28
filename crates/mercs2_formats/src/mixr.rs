@@ -223,14 +223,18 @@ impl Mixr {
     }
 }
 
-/// One template of the resident `worldentity` that names a model: its key, `Name`, `ModelName`
-/// and `ModelMixerProfile` (0 when it carries none).
+/// One template of the resident `worldentity` that names a model: its key, `Name`, `ModelName`,
+/// `ModelMixerProfile` (0 when it carries none) and `FactionMarker`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KitTemplate {
     pub key: u32,
     pub name: Option<String>,
     pub model: u32,
     pub profile: u32,
+    /// The template's `FactionMarker`: `pandemic_hash_m2` of the faction's HUD icon name
+    /// (`HUD_faction_AN`, `_CH`, `_CV`, `_GR`, `_OC`, `_PR`, `_VZ` in retail). It belongs to the
+    /// template, not the model: one kit model is worn by templates of different factions.
+    pub faction: Option<u32>,
 }
 
 impl KitTemplate {
@@ -240,8 +244,9 @@ impl KitTemplate {
     }
 }
 
-/// Every template with a `ModelName`, in key order. An error when a `ModelName` or
-/// `ModelMixerProfile` payload is not one u32, or a key carries two different values of either.
+/// Every template with a `ModelName`, in key order. An error when a `ModelName`,
+/// `ModelMixerProfile` or `FactionMarker` payload is not one u32, or a key carries two different
+/// values of one of them.
 pub fn kit_templates(we: &WorldEntity) -> Result<Vec<KitTemplate>, String> {
     let u32_values = |class: &str| -> Result<BTreeMap<u32, u32>, String> {
         let mut out: BTreeMap<u32, u32> = BTreeMap::new();
@@ -264,6 +269,7 @@ pub fn kit_templates(we: &WorldEntity) -> Result<Vec<KitTemplate>, String> {
     };
     let models = u32_values("ModelName")?;
     let profiles = u32_values("ModelMixerProfile")?;
+    let factions = u32_values("FactionMarker")?;
     let mut names: BTreeMap<u32, String> = BTreeMap::new();
     for (n, keys) in we.names()? {
         for &k in keys {
@@ -277,6 +283,7 @@ pub fn kit_templates(we: &WorldEntity) -> Result<Vec<KitTemplate>, String> {
             name: names.get(&key).cloned(),
             model,
             profile: profiles.get(&key).copied().unwrap_or(0),
+            faction: factions.get(&key).copied(),
         })
         .collect())
 }
@@ -351,12 +358,12 @@ mod tests {
     #[test]
     fn a_template_resolves_to_its_profile_outfits() {
         let m = elite();
-        let jungle = KitTemplate { key: 0x8000_6E40, name: Some("Jungle Elite".into()), model: 0x4D4F_42B5, profile: 0x3510_13C5 };
+        let jungle = KitTemplate { key: 0x8000_6E40, name: Some("Jungle Elite".into()), model: 0x4D4F_42B5, profile: 0x3510_13C5, faction: None };
         let (pi, outfits) = m.template_outfits(&jungle).unwrap();
         assert_eq!((pi, outfits.len()), (0, 4));
         assert_eq!(m.outfit_line(1, outfits[0]), "#1: parts [3, 5, 7, 8, 10, 12, 13]");
 
-        let stray = KitTemplate { key: 0x1234, name: None, model: 0x4D4F_42B5, profile: 0xDEAD_BEEF };
+        let stray = KitTemplate { key: 0x1234, name: None, model: 0x4D4F_42B5, profile: 0xDEAD_BEEF, faction: None };
         assert_eq!(stray.label(), "0x00001234");
         assert_eq!(
             m.template_outfits(&stray).unwrap_err(),

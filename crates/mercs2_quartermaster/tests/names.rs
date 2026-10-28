@@ -9,7 +9,7 @@
 
 use mercs2_formats::hash::pandemic_hash_m2;
 use mercs2_quartermaster::blast::{self, Claim};
-use mercs2_quartermaster::names::{bare_hash_suggestions, NameTable};
+use mercs2_quartermaster::names::{bare_hash_suggestions, NameTable, PRODUCTION_NAMES};
 use mercs2_quartermaster::{from_str, Format, Manifest};
 
 const DESTROYER: &str = "al_veh_boat_destroyer";
@@ -157,6 +157,59 @@ fn an_unnameable_hash_is_not_nagged_about() {
     assert!(bare_hash_suggestions(&m, &table()).is_empty());
 }
 
+/// A sound override written by hash: a known cue hash is offered its name, and a localized bank's
+/// hash — its entry's, `<bank>.<language>` — is offered the bank name without the suffix, which is
+/// what the manifest writes beside `language`. An entry name that does not end in the declared
+/// language is not offered (the hash is not that language's copy).
+#[test]
+fn a_hashed_sound_override_is_offered_its_names() {
+    let manifest = |bank: u32, language: &str| {
+        from_str(
+            &format!(
+                "format: 2
+shipment: {{ name: a, version: 1.0.0, target: retail }}
+contributions:
+  - kind: replace_sound_cue
+    bank: \"0x{bank:08X}\"
+    language: {language}
+    category: vo
+    cue:
+      name: \"0x{:08X}\"
+      wave: src/x.wav
+      group_gain_db: 0
+      cue_gain_db: 0
+      pitch_semitones: 0
+      positional: false
+      min_distance: 1
+      max_distance: 2
+      distance_exponent: 1
+      doppler_scale: 1
+      start_limit: 0
+      sound_id: 0
+      priority: 1
+      group_20: 1
+      cue_16: 0
+      clip_hash: 0
+",
+                pandemic_hash_m2("chris-Banter-Contract-All01-29")
+            ),
+            Format::Yaml,
+        )
+        .unwrap()
+    };
+    let entry = pandemic_hash_m2("vo_chris.english");
+    let names = NameTable::from_pairs([
+        (entry, "vo_chris.english"),
+        (pandemic_hash_m2("chris-Banter-Contract-All01-29"), "chris-Banter-Contract-All01-29"),
+    ]);
+    let s = bare_hash_suggestions(&manifest(entry, "english"), &names);
+    let offered: Vec<(&str, &str)> = s.iter().map(|s| (s.written.as_str(), s.name.as_str())).collect();
+    assert!(offered.contains(&(format!("0x{entry:08X}").as_str(), "vo_chris")), "{offered:?}");
+    assert!(offered.iter().any(|(_, n)| *n == "chris-Banter-Contract-All01-29"), "{offered:?}");
+    let german = bare_hash_suggestions(&manifest(entry, "german"), &names);
+    assert!(!german.iter().any(|s| s.name.starts_with("vo_chris")), "{german:?}");
+}
+
 /// A native hook's `touches` are CODE ADDRESSES, not asset hashes. Reversing one through the asset
 /// name table would produce a confident, wrong suggestion.
 #[test]
@@ -183,15 +236,14 @@ contributions:
 // The real table
 // ---------------------------------------------------------------------------
 
-/// Against the committed 23,110-entry lookup. Skips rather than fails when the crate is built
+/// Against the committed 23,106-entry lookup. Skips rather than fails when the crate is built
 /// outside the workspace, since a missing table degrades diagnostics but is never fatal.
 #[test]
 fn the_committed_table_reverses_a_known_asset() {
     let here = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let Some(names) = NameTable::find_from(here) else {
-        eprintln!("no data/production_names.json found; skipping");
-        return;
-    };
+    // The table is committed in this workspace, so not finding it is a failure, not a skip.
+    let names = NameTable::find_from(here)
+        .unwrap_or_else(|| panic!("no {} found walking up from {}", PRODUCTION_NAMES, here.display()));
     assert!(
         names.len() > 20_000,
         "expected the full table, got {}",

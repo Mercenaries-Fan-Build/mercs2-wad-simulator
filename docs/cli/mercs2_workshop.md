@@ -28,7 +28,7 @@ leading `_` before hashing (the `_dm`/`_nm`/`_sm` texture-suffix convention), so
 
 | Flag | Value | Default | Required | Repeatable | Effect |
 |------|-------|---------|----------|------------|--------|
-| `--wad <path>` | path | registry-discovered `vz.wad` | See note | No | The base WAD every mode reads. If omitted, the tool looks up the installed `vz.wad` in the Windows registry. **This resolution happens before any mode dispatch: if it fails and `--wad` was not given, the tool prints an error and exits — even for modes that never open a WAD (`--hash`, `--hash-file`, `--pack-data`).** |
+| `--wad <path>` | path (the install root, its `data` folder, or the file) | the game-archive chain's answer | See note | No | The base WAD every mode reads: the first step of the game-archive chain (`--wad` → the saved setting → an install the workshop sits inside → `MERCS2_GAME_DIR` / `VZ_WAD` → the Windows registry key; first match wins). **A source that is set but broken (here, a `--wad` with no `vz.wad`) stops the chain: it is never passed over for the next source.** A headless mode with the chain unresolved exits 2 printing every step and why it was not used; the window opens on Settings instead. |
 | `--overlay <path>` | path | none | No | **Yes** | Opens a patch WAD *on top of* the base (the retail exe's `vz-patch.wad` last-opened-wins mechanism). Used to layer DLC-ported content (obama, sarah, DLC world blocks) into the workbench. Applied in argument order. Only consulted by the overlay-aware modes (see combining section). |
 | `--no-auto-patch` | flag | off (auto-patch on) | No | n/a | Disables the automatic loading of a `vz-patch.wad` found next to the base WAD. By default that sibling patch is auto-opened as the first overlay, exactly as the retail exe does. |
 
@@ -40,6 +40,8 @@ leading `_` before hashing (the `_dm`/`_nm`/`_sm` texture-suffix convention), so
 | `--inventory [class]` | optional class | No | Lists models grouped by inferred vehicle class (helicopter, tank, car, boat, …), derived from the `_veh_<token>_` name segment. Optional `class` filters to one class. Overlay-aware. |
 | `--check <name\|0xHASH>` | one asset | No | Loads a model end-to-end through the full LOD-block chain — geometry, textures, bones, clip count, LOD tiers, bbox, destruction state machine, and (when the name maps a character) the AnimationLookup/ActionTable coverage. Also prints asset-layer residency stats. Overlay-aware. |
 | `--states <name\|0xHASH>` | one asset | No | Dumps the model's destruction state machine (NODE/STAT family) with names resolved, plus HIER node count and SEGM state tiers. Prints `no state machine` when absent. Overlay-aware. |
+| `--audio-export <bank\|query> <dir>` | 2 positional | No | Exports voice-over clips as the Audio page does: the bank of that name as the page lists it (routed from `English.wad` beside the base WAD), or else every clip whose bank, speaker, caption or file name holds every word of the query — each as a 16-bit PCM WAV under its shipped file name, plus `captions.csv` (`file,wave,bank,speaker,caption,length_s`), into `<dir>/<bank or search_query>/`. Reads the samples from `Audios/vo_stream.english.pws`. Exit 0; 2 with the reason when the arguments are missing, nothing matches, or a file cannot be read or written. |
+| `--ui-state <file.json>` | one file | No | Not a mode: opens the window in the state the file names and captures the presented frame to its `capture` PNG, then exits 0 (2 with the reason for a name that does not resolve or a frame that cannot be read back). Keys: `page`, `settings_section`, `tab`, `lens`, `filter`, `load` (a model by name, or on another tab that tab's row by its label, opened as its click opens it; a string table is captured once the tables have read), `shipment` + `contribution`, `bench` + `donor`, and on `"tab": "AUDIO"` `bank`, `clip`, `search` and `select` (applied once the tab's routing is read); `run_wad` / `run_data` (used for this run as Settings' "Use for this run only…" does, after the first load; the capture waits for the reload, and a path that starts no reload exits 2); `capture`; `settle_frames` (default 8). The state applies once the reference data is in, or at once when the window opens on Settings for a chain with no answer. |
 | `--export <name\|0xHASH>` | one asset | No | Writes OBJ + MTL + PNG textures to `workshop_export/<name>/`. Overlay-aware. |
 | `--export-bundle <name\|0xHASH\|class:X>` | one asset or a class | No | Writes a **lossless** bundle per target: editable glTF + PNG skins + every LOD rung's original container bytes + a reassembly manifest. `class:helicopter` (etc.) bundles every model in that class. Output root set by `--out` (default `workshop_export`). Overlay-aware. |
 | `--out <dir>` | path | No | Output root for `--export-bundle` only. Default `workshop_export`. Ignored by every other mode. |
@@ -55,14 +57,15 @@ leading `_` before hashing (the `_dm`/`_nm`/`_sm` texture-suffix convention), so
 | `--block-strings <blk>` | block index | No | Prints printable ASCII runs (≥5 chars) from a decompressed block — pairs with `--hash-file` for hash-hunting names embedded in game data. Unparseable `blk` becomes `0`. Opens the overlay stack but decompresses **only the base WAD (`wads[0]`)**. |
 | `--hash <names…>` | one or more | consumes rest | m2-hashes every following argument and prints `0xHASH  name`. Consumes ALL remaining args. Does not open the WAD (but WAD resolution must still succeed — see `--wad`). |
 | `--hash-file <file>` | one file | No | m2-hashes every non-empty line of `file`. Same WAD-resolution caveat as `--hash`. |
-| `--pack-data [dir]` | optional dir | No | Builds the redistributable `workshop_data/` reference bundle (packed `names.bin`, registry CSVs, ECS schemas, decompiled Lua, and the five files committed in the repo's `workshop_data/`: `ess_api.json`, `ess_natives.json`, `ess_nodes.json`, `ecs_registry.tsv`, `audio_manifest.json`) and writes its `manifest.json` last. `dir` defaults to `workshop_data`; a following token starting with `--` is not consumed as the dir. In-repo sources are read from the checkout the binary was built from: names come from the committed `data/production_names.json`, and the five files from the committed `workshop_data/` (packing into that folder leaves them in place); a missing one of the five fails before anything is written. Every other source is named by the `notes_docs_dir` key of `.mercs2-local.toml` (and, when `production_names.json` is absent, the `rainbow_table` and `jul08_strings` keys). A missing key or source file fails before anything is written. Does not read the WAD. |
-| *(no mode flag)* | — | — | Opens the GUI window (`app::run`). |
+| `--pack-data [dir]` | optional dir | No | Builds the redistributable `workshop_data/` reference bundle (packed `names.bin`, registry CSVs, ECS schemas, decompiled Lua, and `audio_manifest.json`, committed in the repo's `workshop_data/`) and writes its `manifest.json` last. `dir` defaults to `workshop_data`; a following token starting with `--` is not consumed as the dir. In-repo sources are read from the checkout the binary was built from: names come from the committed `crates/mercs2_workshop/data/production_names.json` (with no such file, from the raw corpora, including the name fragments committed beside it), and `audio_manifest.json` from the committed `workshop_data/` (packing into that folder leaves it in place); a missing one fails before anything is written. Every other source is named by the `notes_docs_dir` key of `.mercs2-local.toml` (and, when `production_names.json` is absent, the `rainbow_table` and `jul08_strings` keys). A missing key or source file fails before anything is written. Does not read the WAD. |
+| *(no mode flag)* | — | — | Opens the GUI window (`app::run`). When the game archive or the reference data has no answer, the window opens on Settings with that chain in red and every other page locked; fixing it there loads the game without a restart. |
 
 ### Environment variables
 
 | Var | Effect |
 |-----|--------|
-| `MERCS2_WORKSHOP_DATA` | If it points at a complete reference bundle (a directory holding `manifest.json`), used as the `workshop_data` home. Otherwise the lookup continues: the Settings data folder, `workshop_data/` next to the exe, a `workshop_data/` found walking up from the CWD, then the downloaded copy in the cache. When none is a complete bundle, the tool downloads the release bundle into the cache; if that fails it exits with the download link and the folder to unpack it into. |
+| `MERCS2_WORKSHOP_DATA` | The second step of the reference-data chain (this run's choice from Settings → `MERCS2_WORKSHOP_DATA` → the Settings data folder → `workshop_data/` next to the exe → a `workshop_data/` found walking up from the CWD → the downloaded copy in the cache; first match wins). It must name a complete reference bundle (a directory holding `manifest.json`): one that does not is an error naming it, never passed over for a later step. With nothing set and nothing found, the tool downloads the release bundle into the cache; if that fails it exits with the download link and the folder to unpack it into. |
+| `MERCS2_GAME_DIR`, `VZ_WAD` | A game-archive chain step (see `--wad`): the install root, its `data` folder, or the file. The first one set is the source; set but holding no `vz.wad`, it stops the chain. |
 
 ## How the options combine
 
@@ -71,7 +74,7 @@ mode flags in a fixed sequence and the FIRST one present wins; all later ones ar
 is:
 
 ```
---pack-data → --list → --inventory → --mod-new → --export → --export-bundle →
+--pack-data → --list → --inventory → --mod-new → --audio-export → --export → --export-bundle →
 --hash → --block-strings → --hash-file → --states → --import-check →
 --tex-check → --tex-scan → --tex-scan-blocks → --tex-png-block → --tex-png → --check
 ```
@@ -82,10 +85,10 @@ is present at all, the GUI opens. There is no diagnostic for "you passed two mod
 just silently dropped.
 
 **WAD selection is global and evaluated first, before any mode.** `--wad`, `--overlay`,
-`--no-auto-patch` are read up front. WAD *resolution* also happens up
-front: if no `--wad` is given and no registry `vz.wad` is found, the tool exits immediately —
-including for `--hash`, `--hash-file` and `--pack-data`, which never actually read the WAD. Point
-those modes at any WAD (or install one) to get past the guard.
+`--no-auto-patch` are read up front, and the game-archive chain is resolved up front. `--pack-data`
+runs without an archive (it only trims names against one) unless a set source is broken, which exits
+2. Every other mode — `--hash` and `--hash-file` included, though they never read the WAD — exits 2
+when the chain has no answer, printing each step and why it was not used.
 
 **The overlay stack is built once and shared, but only some modes consult it.** The stack is: the
 auto-loaded sibling `vz-patch.wad` (unless `--no-auto-patch`), then every `--overlay` in argument
@@ -181,9 +184,10 @@ mercs2_workshop --wad D:/mercs2/vz.wad --pack-data workshop_data
 
 ## Failure modes
 
-- **`workshop: no vz.wad found (install not in registry) — pass --wad <path>`** — WAD resolution
-  failed and no `--wad` was given. Emitted up front, so it blocks even non-WAD modes (`--hash`,
-  `--hash-file`, `--pack-data`); give any valid `--wad` to proceed.
+- **`workshop: the game archive is not set and was not found`** /
+  **`workshop: the game archive is not usable: <step> — <why>`**, followed by one line per chain step
+  — the game-archive chain has no answer (exit 2). Emitted up front, so it blocks even non-WAD modes
+  (`--hash`, `--hash-file`); fix or clear the step named, or give a valid `--wad`.
 - **`workshop: cannot open <wad>: <err>`** — the base (or, for the stack, a required) WAD could not
   be opened/parsed. A failing `--overlay` is *not* fatal — it prints `[workshop] overlay <p>: <err>
   (skipped)` and continues without it.
@@ -210,13 +214,12 @@ mercs2_workshop --wad D:/mercs2/vz.wad --pack-data workshop_data
   hash-file could not be read. Note an unparseable block index silently becomes block `0` rather than
   erroring.
 - **`--pack-data: <err>`** — a `.mercs2-local.toml` key the pack needs (`notes_docs_dir`, and
-  `rainbow_table` / `jul08_strings` when `data/production_names.json` is absent) is missing, names a
-  path that does not exist, or one of the source files under it is missing or unreadable; or one of
-  the five files committed in the repo's `workshop_data/` is missing from the checkout the binary
-  was built from. The error names the key or the file; nothing is written.
+  `rainbow_table` / `jul08_strings` when `crates/mercs2_workshop/data/production_names.json` is absent) is missing, names a
+  path that does not exist, or one of the source files under it is missing or unreadable; or
+  `audio_manifest.json`, committed in the repo's `workshop_data/`, is missing from the checkout the
+  binary was built from. The error names the key or the file; nothing is written.
 - **No reference bundle** — no complete `workshop_data/` was found and the download failed. The error
   gives the release page to download `mercs2-workshop-data.zip` from and the folder to unpack it into.
 - **`workshop: <path>/<file>: <err>`** at boot — the complete bundle in use is missing, or holds a
-  malformed, `ess_api.json`, `ess_natives.json`, `ess_nodes.json`, `ecs_registry.tsv` or
-  `audio_manifest.json`. Rebuild it with `--pack-data` or download the release bundle again.
+  malformed, `audio_manifest.json`. Rebuild it with `--pack-data` or download the release bundle again.
 ```
