@@ -73,10 +73,10 @@ assert_eq!(w.attitude(oil), Attitude::Friendly);
 assert_eq!(w.price_multiplier(oil), Some(1.0)); // Friendly sells at 1.0x
 let _ = w.take_relation_changes();              // drain the seeding intents
 
-// Blow up two of their people and hijack a truck, then let them report it.
-w.add_infraction(oil, InfractionKind::DestroyPerson, oil as i32, 2); // 2 x 50
+// Blow up four of their people and hijack a truck, then let them report it.
+w.add_infraction(oil, InfractionKind::DestroyPerson, oil as i32, 4); // 4 x 50
 w.add_infraction(oil, InfractionKind::Hijack, oil as i32, 1);        // 1 x 10
-w.report(oil);                                                       // mood 110 -> relation -110 -> clamps to -100
+w.report(oil);                                                       // mood 210 -> relation 66 - 210 -> clamps to -100
 
 assert_eq!(w.attitude(oil), Attitude::Hostile);
 assert_eq!(w.price_multiplier(oil), None);      // Hostile will not sell
