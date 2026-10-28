@@ -3,7 +3,8 @@
 //! This is the proof `anim_container` rests on. It walks every block an ASET type-16 row names,
 //! parses each `animation` container with the strict reader, writes it back with the writer, and
 //! requires the bytes to match — for both kinds (Havok clips with and without `evnt`, and the
-//! `MANM` keyframe animations). It also decodes every `evnt` chunk and re-encodes it, and checks the
+//! `MANM` keyframe animations, each of which must also decode with `manm::parse_material_anim`).
+//! It also decodes every `evnt` chunk and re-encodes it, and checks the
 //! clip / `trnm` / `evnt` pairing rules the Quartermaster's lint enforces, so a rule that retail
 //! itself breaks cannot be shipped as an error.
 //!
@@ -17,6 +18,7 @@ use mercs2_formats::anim_container::{
     build_container, build_evnt, classify, clip_pairing_problems, parse_container, parse_evnt,
     AnimContainerKind, CLIP_INFO, HAVOK_PACKFILE_MAGIC,
 };
+use mercs2_formats::manm::parse_material_anim;
 use mercs2_formats::ffcs::load_ffcs_archive;
 use mercs2_formats::sges::decompress_block;
 use mercs2_formats::types::{TYPE_HASH_ANIMATION, TYPE_ID_ANIMATION};
@@ -44,7 +46,7 @@ fn every_retail_animation_container_rebuilds_byte_identically() {
         }
     }
 
-    let (mut clips_plain, mut clips_evnt, mut keyframe) = (0usize, 0usize, 0usize);
+    let (mut clips_plain, mut clips_evnt, mut keyframe, mut keyframe_tracks) = (0usize, 0usize, 0usize, 0usize);
     let mut events_total = 0usize;
     let mut categories: BTreeMap<String, usize> = BTreeMap::new();
     let mut failures: Vec<String> = Vec::new();
@@ -72,7 +74,13 @@ fn every_retail_animation_container_rebuilds_byte_identically() {
                 continue;
             }
             match classify(&chunks) {
-                Ok(AnimContainerKind::Keyframe) => keyframe += 1,
+                Ok(AnimContainerKind::Keyframe) => {
+                    keyframe += 1;
+                    match parse_material_anim(container) {
+                        Ok(m) => keyframe_tracks += m.track_count(),
+                        Err(m) => failures.push(format!("{label}: MANM decode: {m}")),
+                    }
+                }
                 Ok(AnimContainerKind::HavokClip { has_events }) => {
                     if has_events {
                         clips_evnt += 1;
@@ -111,7 +119,7 @@ fn every_retail_animation_container_rebuilds_byte_identically() {
 
     eprintln!(
         "animation containers: {} Havok clips ({clips_plain} without evnt, {clips_evnt} with), \
-         {keyframe} MANM keyframe; {events_total} events; categories {categories:?}; \
+         {keyframe} MANM keyframe ({keyframe_tracks} tracks); {events_total} events; categories {categories:?}; \
          {} animation asset hashes",
         clips_plain + clips_evnt,
         anim_hashes.len()
@@ -121,4 +129,5 @@ fn every_retail_animation_container_rebuilds_byte_identically() {
     assert_eq!(clips_plain, 1969);
     assert_eq!(clips_evnt, 2263);
     assert_eq!(keyframe, 29);
+    assert_eq!(keyframe_tracks, 378);
 }
