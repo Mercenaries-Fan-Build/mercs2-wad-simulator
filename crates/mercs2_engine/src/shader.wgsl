@@ -17,6 +17,13 @@ struct Camera {
 @group(1) @binding(1) var t_normal:   texture_2d<f32>;
 @group(1) @binding(2) var s_linear:   sampler;
 @group(1) @binding(3) var t_specular: texture_2d<f32>; // MTRL slot 1 (`_sm`); black = matte
+// The material's alpha test (`render::material_params`): x = the alpha a pixel must exceed (retail
+// ALPHAREF 77/255, ALPHAFUNC GREATER), or -1 when the material is not alpha-tested; y = the alpha
+// multiplier (materialData c98.w), so the tested alpha is `diffuse.a × y` as in the retail shaders.
+struct MaterialParams {
+    alpha: vec4<f32>,
+};
+@group(1) @binding(4) var<uniform> material: MaterialParams;
 
 // Skinning palette: Skin[b] = InvBind[b]·Pose[b], row-vector, uploaded row-major so WGSL's
 // column-major read yields the transpose — i.e. `bones[b] * v` computes the row-vector product
@@ -194,11 +201,10 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
         // color = (1,1,1) so this is a no-op there; the untextured placement markers use it (white
         // fallback texture) to category-tint via vertex color.
         let tex = textureSample(t_diffuse, s_linear, in.uv);
-        // Alpha-tested cutout. Opaque diffuse (DXT1 / authored a=1, and the white fallback a=1) reads
-        // alpha ≈ 1 and never discards; DXT5 / 1-bit-alpha diffuse carries the cutout mask, so foliage,
-        // railings, fences and window/arch openings in the building shells render see-through instead of
-        // as solid quads. (True alpha-BLEND — glass — is a later, sort-order pass.)
-        if (tex.a < 0.5) { discard; }
+        // Alpha-tested cutout, only for a material whose flags carry the alpha-test bit (foliage,
+        // railings, fences, window/arch openings): a pixel survives when diffuse.a × c98.w exceeds the
+        // reference. Every other material ignores its diffuse alpha here.
+        if (material.alpha.x >= 0.0 && !(tex.a * material.alpha.y > material.alpha.x)) { discard; }
         albedo = tex.rgb * in.color;
 
         // Normal maps are DXT5nm/swizzled: X in ALPHA (DXT5's 8-bit alpha), Y in GREEN, Z reconstructed.
