@@ -23,7 +23,9 @@ pub struct UiState {
     pub lens: Option<String>,
     /// The browser's filter text.
     pub filter: Option<String>,
-    /// A model to load into the viewport, by name.
+    /// What to open, by name: a model into the viewport on the MODELS tab (or with no tab), else the
+    /// row of the chosen tab listed under that label — opened as a click on it opens it. A row that
+    /// reads on a worker (a string table) is captured once it has read.
     pub load: Option<String>,
     /// A Shipment folder to open.
     pub shipment: Option<PathBuf>,
