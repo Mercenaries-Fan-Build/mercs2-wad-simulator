@@ -67,6 +67,14 @@ pub struct CellsChangeRing {
 impl CellsChangeRing {
     /// A ring entry's size in bytes (`shl eax, 4` before indexing).
     pub const ENTRY_BYTES: usize = 16;
+
+    /// The `CRITICAL_SECTION` every writer of the ring enters around its push: the counter is the lock
+    /// object's `+0x18` and the entries start at `+0x20` (the consumer `FUN_00518890` reads the counter as
+    /// `[obj + 0x18]` with `obj = &DAT_00DD4770`, the object `FUN_00735840` and `FUN_00518830` push
+    /// before `EnterCriticalSection`).
+    pub fn critical_section(&self) -> u32 {
+        self.counter - 0x18
+    }
 }
 
 /// The Pimp job system's registry, from [`Site::JobRegister`].
@@ -429,6 +437,7 @@ mod tests {
         assert_eq!(s.render_system(), 0x403008);
         assert_eq!(s.jobs(), JobTables { count: 0x403010, handlers: [0x40304c, 0x403178] });
         assert_eq!(s.cells_change(), CellsChangeRing { counter: 0x403020, ring: 0x403028 });
+        assert_eq!(s.cells_change().critical_section(), 0x403008);
     }
 
     #[test]
