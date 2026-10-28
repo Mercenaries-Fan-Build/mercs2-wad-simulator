@@ -1782,7 +1782,8 @@ fn activate_layer_of_a_real_layer_is_quiet_but_an_unknown_name_warns() {
     // Reverse a real layer hash to the name that produced it, so the quiet fixture names a layer the
     // stack genuinely carries — verified by re-hashing (the name→hash→row round-trip M0194 walks).
     let names = NameTable::load(
-        &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data/production_names.json"),
+        &std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../mercs2_workshop/data/production_names.json"),
     )
     .expect("the vendored name table must load");
     let layer_type = mercs2_formats::types::TYPE_ID_LAYER;
