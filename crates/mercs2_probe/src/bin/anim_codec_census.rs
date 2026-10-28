@@ -38,6 +38,8 @@ fn main() {
         wads.push(p);
     }
     let mut by_codec: BTreeMap<&'static str, BTreeSet<u32>> = BTreeMap::new();
+    // Clip → its binding's bone hashes (first WAD listing it), for the track counts and the rigs.
+    let mut bones_of: BTreeMap<u32, Vec<u32>> = BTreeMap::new();
     let mut failures = 0usize;
     for path in &wads {
         let mut w = wad::open(path).unwrap_or_else(|e| usage(&format!("{path}: {e}")));
@@ -61,7 +63,13 @@ fn main() {
             };
             for c in &ag.clips {
                 listed.insert(c.name_hash);
-                let codec = match mercs2_formats::anim::parse_anim(&data[c.havok_offset..]) {
+                bones_of.entry(c.name_hash).or_insert_with(|| c.binding.track_to_bone_hash.clone());
+                if c.havok_len == 0 {
+                    // No Havok packfile: a MANM material animation (MANM/MINF/TRCK rows).
+                    by_codec.entry("manm (material animation)").or_default().insert(c.name_hash);
+                    continue;
+                }
+                let codec = match c.packfile(&data).and_then(|pk| mercs2_formats::anim::parse_anim(pk)) {
                     Ok(clip) => match (clip.anim_type, clip.decoded) {
                         (AnimType::Interleaved, true) => "interleaved",
                         (AnimType::Wavelet, true) => "wavelet",
@@ -92,6 +100,46 @@ fn main() {
     for (codec, set) in &by_codec {
         println!("  {codec:<34} {:>6}", set.len());
     }
+    // Transform-track counts (the binding's length).
+    let mut tracks: BTreeMap<&'static str, usize> = BTreeMap::new();
+    for b in bones_of.values() {
+        let bucket = match b.len() {
+            0 => "0 tracks",
+            1 => "1 track",
+            2..=19 => "2-19 tracks",
+            20..=59 => "20-59 tracks",
+            60..=105 => "60-105 tracks",
+            _ => "over 105 tracks",
+        };
+        *tracks.entry(bucket).or_default() += 1;
+    }
+    println!("=== BY TRACK COUNT ({} listed clips, longest {}) ===", bones_of.len(), bones_of.values().map(Vec::len).max().unwrap_or(0));
+    for (b, n) in &tracks {
+        println!("  {b:<34} {n:>6}");
+    }
+    // Models some clip drives: a model of the first WAD whose HIER holds a bone a clip's binding
+    // names, split by whether that clip has 20+ tracks (a body clip) or fewer (a part clip).
+    let mut w0 = wad::open(&wads[0]).unwrap_or_else(|e| usage(&format!("{}: {e}", wads[0])));
+    let all_bones: BTreeSet<u32> = bones_of.values().flatten().copied().collect();
+    let part_bones: BTreeSet<u32> = bones_of.values().filter(|b| b.len() < 20).flatten().copied().collect();
+    let (mut rigged, mut driven, mut part_driven) = (0usize, 0usize, 0usize);
+    wad::for_each_model_hier(&mut w0, |_, _| {}, |_, read| {
+        let Ok((_, hier)) = read else { return };
+        if hier.len() < 2 {
+            return;
+        }
+        rigged += 1;
+        if hier.iter().any(|n| all_bones.contains(&n.hash)) {
+            driven += 1;
+        }
+        if hier.iter().any(|n| part_bones.contains(&n.hash)) {
+            part_driven += 1;
+        }
+    });
+    println!("=== RIGS ({}) ===", wads[0]);
+    println!("  models with 2+ HIER nodes           {rigged:>6}");
+    println!("  ... a clip's binding names a node   {driven:>6}");
+    println!("  ... a <20-track clip names a node   {part_driven:>6}");
     if let Some(want) = list {
         let set = by_codec.iter().find(|(k, _)| k.starts_with(want.as_str())).map(|(_, v)| v);
         match set {
