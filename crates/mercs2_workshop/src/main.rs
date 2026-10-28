@@ -67,6 +67,7 @@ mod audioroute; // Which banks and cues play each VO line, from English.wad
 mod audioexport; // VO clips out as WAV + captions.csv
 mod audiopage; // Inspect's AUDIO tab: banks, clips, preview, export, Add to Shipment
 mod textpage; // Inspect's TEXT tab: every string table side by side by key
+mod heroidx; // every model's skeleton, for ranking the hero clips and faces play on
 mod vostream; // Stream VO PCM straight from the game's vo_stream.english.pws
 mod bundle;
 mod chains; // Where the game archive and the reference bundle come from, first match wins
@@ -2206,7 +2207,9 @@ const REPO_BUNDLE_FILES: [&str; 1] = ["audio_manifest.json"];
 /// The committed production lookup: this crate's `data/production_names.json` (curated,
 /// hash-verified node/asset names) in the checkout this binary was built from. `Ok(None)` when
 /// that path is not a file (the regeneration step in `data/README.md` packs without it); an error
-/// when it is a file that cannot be read or parsed.
+/// when it is a file that cannot be read or parsed. Every `(hash, name)` pair on this crate's
+/// `data/rejected_names.json` is dropped, so the table that regenerates from `names.bin` keeps
+/// none of that debris.
 fn load_production_names() -> Result<Option<std::collections::HashMap<u32, String>>, String> {
     let cand = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("data/production_names.json");
     if !cand.is_file() {
@@ -2219,10 +2222,13 @@ fn load_production_names() -> Result<Option<std::collections::HashMap<u32, Strin
         .get("pandemic_hash_m2")
         .and_then(|m| m.as_object())
         .ok_or_else(|| format!("{}: no `pandemic_hash_m2` object", cand.display()))?;
+    let rejected = index::load_rainbow_json(&index::crate_data_file("rejected_names.json")?)?;
     let mut out = std::collections::HashMap::with_capacity(map.len());
     for (k, name) in map {
         if let (Ok(h), Some(n)) = (u32::from_str_radix(k.trim_start_matches("0x"), 16), name.as_str()) {
-            out.insert(h, n.to_string());
+            if rejected.get(&h).map(String::as_str) != Some(n) {
+                out.insert(h, n.to_string());
+            }
         }
     }
     eprintln!("[pack] names source: {}", cand.display());
