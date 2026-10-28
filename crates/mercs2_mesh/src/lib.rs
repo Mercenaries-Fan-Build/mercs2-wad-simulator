@@ -50,12 +50,15 @@ pub struct ModelStats {
 pub struct BoneRig {
     pub parent: i32, // -1 = root
     pub name_hash: u32,
-    /// Bind-pose world-rest transform.
+    /// SKIN bind world transform: the inverse of the HIER record's `+80` inverse-bind — the pose the
+    /// geometry was authored against (see `build_indexed_source`).
     pub world_bind: [[f32; 4]; 4],
     /// Inverse of `world_bind` (the InvBind used in `Skin[b] = InvBind[b] · Pose[b]`).
     pub inv_bind: [[f32; 4]; 4],
-    /// Bind-pose LOCAL transform (relative to parent). Animation replaces this per bone; bones
-    /// with no track keep it, so an un-animated skeleton recomposes to the exact bind pose.
+    /// REFERENCE-pose LOCAL transform (relative to parent): the HIER `+16` local, which is what
+    /// retail's `hkaSkeleton` reference pose holds. Animation replaces it per bone; bones with no
+    /// track keep it. It recomposes to `world_bind` only where `+16` and `+80` agree — on most models
+    /// everywhere, on `pmc_hum_chris` not on the arm chain.
     pub local_bind: [[f32; 4]; 4],
 }
 
@@ -161,6 +164,11 @@ pub struct DrawGroup {
     pub sub_object: usize,
     /// `INDX[group]` — this group's index into the SEGM record array.
     pub seg_id: usize,
+    /// The `SEGM` row this draw serves. Retail's draw loop (`FUN_00472a50`) walks SEGM rows, not
+    /// geometry: row `r` draws `renderable[SEGM[r].seg_id]` at `SEGM[r].node` under
+    /// `SEGM[r].state_mask`. Equal to `seg_id` on the row that owns the geometry; different on an
+    /// INSTANCE row, which draws another row's geometry again at its own node.
+    pub segm_row: usize,
     /// The LOD-block rung this geometry came from: `0` = the resident (coarsest) block, higher = a
     /// finer `_P00N_` block. Stamped by [`crate::model::Model::load`]; a single-block model (every
     /// character) is all rung 0. The renderer ignores it — `lod_mask` already carries the supersede
@@ -194,6 +202,7 @@ impl Default for DrawGroup {
             node: -1,
             sub_object: 0,
             seg_id: 0,
+            segm_row: 0,
             rung: 0,
             skinned: false,
         }
@@ -320,25 +329,54 @@ fn build_indexed_source(
     block.extend_from_slice(skel_src);
     let skel = Skeleton::from_block(&block).ok();
 
-    // Skinning palette: Skin[b] = InvBind[b] · Pose[b] (row-vector). Phase A is the bind-pose gate:
-    // Pose = world-rest, so Skin[b] = InvBind[b] · WorldBind[b] = identity (up to fp). Rebuilding it
-    // from the real matrices (rather than emitting literal identities) exercises the matmul/inverse
-    // so a convention bug detonates the model instead of hiding. Phase B swaps Pose per animation frame.
-    let bones: Vec<[[f32; 4]; 4]> = match &skel {
-        Some(s) => (0..s.bones.len())
-            .map(|b| mat4_mul(&s.inv_world_bind(b), &s.world_bind(b)))
-            .collect(),
+    // The SKIN bind of each bone: the inverse of the HIER record's `+80` inverse-bind matrix, taken
+    // RAW (`Bone::bind_world_raw`) — read off retail's live skin palette: in the
+    // `23fe7f38_cracked-cruise/pmc` capture, solving `palette · pose⁻¹` for `pmc_hum_mattias` gives
+    // the raw `+80` on every bone where `+80` and the `+16` chain differ (#3, #5–#8, #22–#24, #61,
+    // #83), including the records `Skeleton` calls stale (an ancestor's matrix copied onto a child).
+    // Those are rigid accessory pieces retail places offset from their authored spot on purpose —
+    // its live pose keeps their `+16` local (bone #5 sits 158 mm from #4) while skinning them with
+    // the parent's inverse-bind. `Skeleton`'s staleness rejection is an AUTHORING judgement and is
+    // not applied here. Test: `mercs2_probe` `retail_skin_matches_the_live_palette`.
+    //
+    // It is NOT the `+16` local chain (`Bone::world`). The two agree on most models but not all:
+    // `pmc_hum_chris`'s `+16` locals hold a weapon-carry pose that puts his forearm-roll bones at
+    // local T (0.0805, -0.0859, -0.0685), while his `+80` binds — and every clip — put them at
+    // (0.1721, 0, 0). Skinning against the `+16` chain tore his arms by 143 mm under animation;
+    // retail renders him intact. `+16` remains the Havok REFERENCE pose (`local_bind` below; read
+    // live from retail's `hkaSkeleton`), which drives bones a clip does not animate.
+    //
+    // A node whose `+80` is absent/singular has no authored bind at all. That is only legal on a
+    // node no skinned vertex depends on: a node-placed or rigid group is positioned by
+    // `skin_bind[b]` and skinned by its inverse, so whichever bind it carries cancels exactly. A
+    // skinned vertex that weights such a node is a load error (checked below, once the meshes are
+    // read).
+    let skin_bind: Vec<[[f32; 4]; 4]> = match &skel {
+        Some(s) => s.bones.iter().map(|b| b.bind_world_raw.unwrap_or(b.world)).collect(),
         None => Vec::new(),
     };
 
-    // Per-bone rig for animation: parent, inv-bind, and the bind-pose LOCAL transform
-    // (local_b = world_b · inv(world_parent); root's local = its world).
+    // The REST palette: Skin[b] = InvBind[b] · Pose[b] (row-vector) with Pose = the REFERENCE pose,
+    // the `+16` local chain — what retail holds for a node no clip drives. Read off retail's live
+    // per-node matrices (`23fe7f38_cracked-cruise/pmc`, model `0x1FBFBB4B`, the array at OBJ+0x2B8):
+    // all 73 equal the `+16` chain, while `+80` matches only the 8 nodes that own geometry. It is NOT
+    // the `+80` bind (Skin = identity): a vehicle's part nodes carry their PARENT's `+80` (the M1A2
+    // turret's is the hull origin, 1.63 m below its `+16` mount), and an instance node carries a copy
+    // of its source's, so an identity rest sank every turret and stacked every instanced wheel.
+    // Animation swaps Pose per frame.
+    let bones: Vec<[[f32; 4]; 4]> = match &skel {
+        Some(s) => s.bones.iter().zip(&skin_bind).map(|(b, sb)| mat4_mul(&affine_inverse(sb), &b.world)).collect(),
+        None => Vec::new(),
+    };
+
+    // Per-bone rig for animation: parent, the skin bind + its inverse, and the REFERENCE-pose LOCAL
+    // transform (`+16`: local_b = world_b · inv(world_parent); root's local = its world).
     let rig: Vec<BoneRig> = match &skel {
         Some(s) => s
             .bones
             .iter()
-            .map(|b| {
-                let inv_bind = affine_inverse(&b.world);
+            .zip(&skin_bind)
+            .map(|(b, sb)| {
                 let local_bind = if b.parent < 0 {
                     b.world
                 } else {
@@ -347,8 +385,8 @@ fn build_indexed_source(
                 BoneRig {
                     parent: b.parent,
                     name_hash: b.name_hash,
-                    world_bind: b.world,
-                    inv_bind,
+                    world_bind: *sb,
+                    inv_bind: affine_inverse(sb),
                     local_bind,
                 }
             })
@@ -367,6 +405,11 @@ fn build_indexed_source(
         /// The bone this group was placed by (SEGM bone for MESH accessories, INDX node for
         /// blend-less PRMG groups) — the whole group binds 100% to it.
         placed_bone: Option<usize>,
+        /// The SEGM row this placement serves, and that row's node + LOD mask — the source's own
+        /// row for geometry reached through INDX, another row for an instance.
+        row: usize,
+        node: i16,
+        lod_mask: u8,
         positions: Vec<[f32; 3]>,
         normals: Vec<[f32; 3]>,
         tangents: Vec<[f32; 4]>,
@@ -375,6 +418,38 @@ fn build_indexed_source(
     // Per-PRMG-group POFF (parent GEOM position offset). Needed so multi-GEOM meshes (the terrainmesh:
     // 16 sub-tiles at ±150/±50) don't collapse onto each other; single-GEOM models get [0,0,0].
     let poffs = mercs2_formats::model_cubeize::prmg_geom_offsets(container);
+
+    // A group's geometry in model space: bone-local vertices through the placing bone's bind (none =
+    // already model-space), then the group's POFF (parent-GEOM translation; non-zero only for
+    // multi-GEOM meshes).
+    let place = |m: &ModelMesh, bonemat: Option<[[f32; 4]; 4]>| {
+        let (mut positions, normals, tangents): (Vec<[f32; 3]>, Vec<[f32; 3]>, Vec<[f32; 4]>) =
+            if let Some(w) = bonemat {
+                (
+                    m.positions.iter().map(|&p| transform_point(&w, p)).collect(),
+                    m.normals.iter().map(|&n| transform_dir(&w, n)).collect(),
+                    m.tangents
+                        .iter()
+                        .map(|&t| {
+                            let d = transform_dir(&w, [t[0], t[1], t[2]]);
+                            [d[0], d[1], d[2], t[3]]
+                        })
+                        .collect(),
+                )
+            } else {
+                (m.positions.clone(), m.normals.clone(), m.tangents.clone())
+            };
+        if let Some(off) = poffs.get(m.group_index) {
+            if *off != [0.0, 0.0, 0.0] {
+                for p in positions.iter_mut() {
+                    p[0] += off[0];
+                    p[1] += off[1];
+                    p[2] += off[2];
+                }
+            }
+        }
+        (positions, normals, tangents)
+    };
 
     // INDX: mesh-group → HIER node. Groups with NO blend data (no BLENDINDICES/WEIGHT elements
     // in their decl — game data, not inference) are NODE-RIGID: authored node-local and placed
@@ -414,36 +489,87 @@ fn build_indexed_source(
         } else {
             None
         };
-        let bonemat = placed_bone
-            .and_then(|b| skel.as_ref().and_then(|s| s.bones.get(b)))
-            .map(|b| b.world);
-        let (mut positions, normals, tangents) = if let Some(w) = bonemat {
-            (
-                m.positions.iter().map(|&p| transform_point(&w, p)).collect(),
-                m.normals.iter().map(|&n| transform_dir(&w, n)).collect(),
-                m.tangents
-                    .iter()
-                    .map(|&t| {
-                        let d = transform_dir(&w, [t[0], t[1], t[2]]);
-                        [d[0], d[1], d[2], t[3]]
-                    })
-                    .collect(),
-            )
-        } else {
-            (m.positions.clone(), m.normals.clone(), m.tangents.clone())
-        };
-        // Apply the group's POFF (parent-GEOM translation). Non-zero only for multi-GEOM meshes.
-        if let Some(off) = poffs.get(m.group_index) {
-            if *off != [0.0, 0.0, 0.0] {
-                for p in positions.iter_mut() {
-                    p[0] += off[0];
-                    p[1] += off[1];
-                    p[2] += off[2];
+        // Placed by the SAME bind the palette inverts (see `skin_bind`), so pose·local is exact.
+        let bonemat = placed_bone.and_then(|b| skin_bind.get(b)).copied();
+        // A skinned vertex must weight only nodes that carry an authored `+80` bind.
+        if placed_bone.is_none() {
+            if let Some(s) = &skel {
+                for (j, w) in m.joints.iter().zip(&m.weights) {
+                    for k in 0..4 {
+                        let b = j[k] as usize;
+                        if w[k] > 0 && s.bones.get(b).is_some_and(|bone| bone.bind_world_raw.is_none()) {
+                            return Err(format!(
+                                "group {}: skinned vertex weights HIER node {b} (0x{:08X}), which has no invertible +80 inverse-bind",
+                                m.group_index,
+                                s.bones[b].name_hash
+                            ));
+                        }
+                    }
                 }
             }
         }
-        kept.push(Placed { m, placed_bone, positions, normals, tangents });
+        let (positions, normals, tangents) = place(m, bonemat);
+        kept.push(Placed {
+            m,
+            placed_bone,
+            row: m.seg_id,
+            node: m.bone as i16,
+            lod_mask: m.state_mask,
+            positions,
+            normals,
+            tangents,
+        });
     }
+
+    // INSTANCE rows. Retail draws per SEGM ROW (`FUN_00472a50`): row r draws `renderable[seg_id]`,
+    // and the matrix slot comes from the row's own node alone (`FUN_004778b0` reads rec+0, never the
+    // seg_id). So a row whose `seg_id` names ANOTHER row's geometry draws that geometry again, at its
+    // own node, under its own LOD mask. Reaching SEGM only through INDX (above) never finds these:
+    // `SEGM[i].seg_id == i` is NOT an invariant. 251 retail models carry 3,739 such rows — the M1A2's
+    // rows 74..99 put its one road-wheel mesh (segs 72/73) on the other 13 hubs; cars re-draw three
+    // wheels. A source lives in exactly one rung's geometry, so a rung that lacks it draws none here.
+    let segm_rows = match &res_segm {
+        Some(s) => s.clone(),
+        None => mercs2_formats::model_cubeize::parse_segm(container),
+    };
+    let mut instances: Vec<Placed> = Vec::new();
+    for (row, rec) in segm_rows.iter().enumerate() {
+        let src = rec.seg_id as usize;
+        if src == row {
+            continue;
+        }
+        if let Some(bit) = lod_filter {
+            if rec.state_mask != 0 && (rec.state_mask & bit) == 0 {
+                continue;
+            }
+        }
+        for pl in kept.iter().filter(|pl| pl.row == src) {
+            // Every instance measured has a node-placed source. A deforming skin carries its own
+            // per-vertex bones, and what re-drawing it at another node means is not known.
+            if pl.placed_bone.is_none() {
+                return Err(format!(
+                    "SEGM row {row} instances seg {src} (group {}), a deforming skin — instancing a skin is not modelled",
+                    pl.m.group_index
+                ));
+            }
+            let node = rec.bone as i16;
+            let bonemat = usize::try_from(node).ok().and_then(|b| skin_bind.get(b)).copied().ok_or_else(|| {
+                format!("SEGM row {row} instances seg {src} at node {node}, which has no bind ({} HIER nodes)", skin_bind.len())
+            })?;
+            let (positions, normals, tangents) = place(pl.m, Some(bonemat));
+            instances.push(Placed {
+                m: pl.m,
+                placed_bone: Some(node as usize),
+                row,
+                node,
+                lod_mask: rec.state_mask,
+                positions,
+                normals,
+                tangents,
+            });
+        }
+    }
+    kept.extend(instances);
     if kept.is_empty() {
         return Err("model container had no placed drawing groups".into());
     }
@@ -529,11 +655,12 @@ fn build_indexed_source(
                 // 89% of textures being attributable to a surface.
                 textures: mat.map(|m| m.textures.clone()).unwrap_or_default(),
                 group_index: m.group_index,
-                lod_mask: m.state_mask,
+                lod_mask: pl.lod_mask,
                 // SEGM +0 is a SIGNED i16: 0xFFFF is node -1 ("no node"), not node 65535.
-                node: m.bone as i16,
+                node: pl.node,
                 sub_object: m.sub_object,
                 seg_id: m.seg_id,
+                segm_row: pl.row,
                 // This builder reads ONE container and can't know where it sits in the chain;
                 // `Model::load` stamps the real rung once it has walked the LOD blocks.
                 rung: 0,
