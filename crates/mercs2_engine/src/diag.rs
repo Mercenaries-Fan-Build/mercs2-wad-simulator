@@ -954,7 +954,8 @@ pub fn animdiag(wadpath: &str, model: Option<String>, index: Option<String>) -> 
 
     println!("  per-clip max bbox extent (want ~{bind_extent:.2}; >1.4x = spikes):");
     for c in &ag.clips {
-        let Ok(ac) = mercs2_formats::anim::parse_anim(&data[c.havok_offset..]) else { continue };
+        let Ok(pk) = c.packfile(&data) else { continue };
+        let Ok(ac) = mercs2_formats::anim::parse_anim(pk) else { continue };
         if !ac.decoded { continue; }
         let tth = c.binding.resolve_to_hier(&hier);
         let resolved = tth.iter().filter(|r| r.is_some()).count();
@@ -1026,7 +1027,7 @@ pub fn animcheck(wadpath: &str, model: Option<String>, index: Option<String>) ->
         .iter()
         .find(|c| c.name_hash == clip_hash)
         .ok_or("clip vanished on re-parse")?;
-    let pk = &data[clip.havok_offset..];
+    let pk = clip.packfile(&data)?;
     let ac = mercs2_formats::anim::parse_anim(pk).map_err(|e| format!("parse_anim: {e}"))?;
     println!(
         "clip: class={} decoded={} tracks={} frames={} duration={:.3}",
@@ -1640,7 +1641,7 @@ pub fn trackmap(wadpath: &str, model: Option<String>, index: Option<String>, wan
             break;
         }
 
-        let ac = mercs2_formats::anim::parse_anim(&data[c.havok_offset..]).ok();
+        let ac = c.packfile(&data).ok().and_then(|pk| mercs2_formats::anim::parse_anim(pk).ok());
         println!("\n== block {blk}: clip 0x{clip_hash:08X} class={} ==", c.class);
         println!(
             "  header: numTransformTracks={} numFloatTracks={} duration={:.4}s poses={}",
