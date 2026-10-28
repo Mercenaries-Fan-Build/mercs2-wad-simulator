@@ -11,7 +11,9 @@
 //! `BUNDLE_SHA256` of `data/workshop_data_pin.env` — the file `.github/workflows/ci.yml` sources
 //! to download the bundle the corpus gates run over. The install downloads exactly that URL and
 //! checks the archive's sha256 against `BUNDLE_SHA256` before unpacking anything; a mismatch is
-//! an error and leaves the installed copy as it was.
+//! an error and leaves the installed copy as it was. The installed bundle carries the pin it was
+//! checked against ([`INSTALLED_PIN`]); a downloaded copy whose record is missing or names another
+//! pin is not used ([`installed_pin_mismatch`]), so the next install replaces it.
 //!
 //! It installs into the user's cache directory, the last step of the
 //! [`crate::index::data_home`] chain: a bundle found at any earlier step is used ahead of the
@@ -211,6 +213,56 @@ const fn sub(b: &[u8], start: usize, end: usize) -> &[u8] {
     let (mid, _) = rest.split_at(end - start);
     mid
 }
+
+/// The file the install writes into the bundle it installs: the [`Pin`] whose archive it checked,
+/// as `BUNDLE_URL=` / `BUNDLE_SHA256=` lines. The unpacked bundle cannot be hashed back to its
+/// archive, so this is what ties a downloaded copy to a pin ([`installed_pin_mismatch`]).
+pub const INSTALLED_PIN: &str = "installed_pin.env";
+
+/// The [`INSTALLED_PIN`] text for `pin`.
+pub(crate) fn pin_record(pin: &Pin<'_>) -> String {
+    format!("BUNDLE_URL={}\nBUNDLE_SHA256={}\n", pin.url, pin.sha256)
+}
+
+/// Why the bundle at `dir` is not the [`PINNED`] one the install puts there, or `None` when it is:
+/// its [`INSTALLED_PIN`] names [`PINNED`]'s URL and sha256. A bundle without the record (unpacked
+/// by hand into the cache, or installed by a build that took the latest release) or with another
+/// pin is not.
+pub fn installed_pin_mismatch(dir: &Path) -> Option<String> {
+    installed_pin_mismatch_with(dir, &PINNED)
+}
+
+fn installed_pin_mismatch_with(dir: &Path, pinned: &Pin<'_>) -> Option<String> {
+    let path = dir.join(INSTALLED_PIN);
+    let text = match std::fs::read_to_string(&path) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Some(format!(
+                "{} has no {INSTALLED_PIN}, so the pinned install did not put it there",
+                dir.display()
+            ))
+        }
+        Err(e) => return Some(format!("{}: {e}", path.display())),
+    };
+    match pin_from_env(&text) {
+        // `pin_from_env`'s reasons name the pin file, not this record.
+        Err(_) => Some(format!(
+            "{} is not a pin record (one `BUNDLE_URL=` release download of {ASSET} and one \
+             `BUNDLE_SHA256=` digest)",
+            path.display()
+        )),
+        Ok(got) if got.url == pinned.url && got.sha256 == pinned.sha256 => None,
+        Ok(got) => Some(format!(
+            "{} holds the {} bundle (sha256 {}); the pin is {} (sha256 {})",
+            dir.display(),
+            got.tag,
+            got.sha256,
+            pinned.tag,
+            pinned.sha256
+        )),
+    }
+}
+
 /// GitHub rejects API requests without one.
 const UA: &str = "mercs2-workshop";
 /// The bundle is a few MB of text; anything past this is a hung connection, not a slow one.
@@ -340,6 +392,11 @@ fn install_pinned(
             });
         }
     }
+
+    // Recorded inside the bundle before the swap, so a bundle in place always carries the pin its
+    // archive was checked against.
+    let record = root.join(INSTALLED_PIN);
+    std::fs::write(&record, pin_record(pin)).map_err(|e| format!("{}: {e}", record.display()))?;
 
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
@@ -578,7 +635,6 @@ mod tests {
             format!("{good} "),
             format!("{good}\r"),
             format!("https://github.com/{REPO}/releases/latest/download/{ASSET}"),
-            format!("https://github.com/{REPO}/releases/latest/download/{ASSET}"),
             format!("https://github.com/{REPO}/releases/download//{ASSET}"),
             format!("https://github.com/{REPO}/releases/download/v9.9.9/mercs2-workshop-data-debug.zip"),
             format!("https://github.com/someone/else/releases/download/v9.9.9/{ASSET}"),
@@ -623,6 +679,52 @@ mod tests {
         assert_eq!(std::fs::read(dest.join("names.bin")).unwrap(), b"M2NAMES1____");
         assert!(dest.join("manifest.json").is_file() && dest.join("lua/a.lua").is_file());
         assert!(!dest.with_extension("incoming").exists());
+        // The installed bundle records the pin it was checked against, and only that pin.
+        assert_eq!(std::fs::read_to_string(dest.join(INSTALLED_PIN)).unwrap(), pin_record(&pin));
+        assert_eq!(installed_pin_mismatch_with(&dest, &pin), None);
+        assert!(installed_pin_mismatch(&dest).is_some(), "the fixture's digest is not PINNED's");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A downloaded copy counts as the pinned bundle only when its record names the pin.
+    #[test]
+    fn installed_pin_mismatch_names_why_a_copy_is_not_the_pinned_bundle() {
+        let dir = scratch("record");
+        let none = installed_pin_mismatch(&dir).expect("no record is not the pinned bundle");
+        assert_eq!(
+            none,
+            format!("{} has no {INSTALLED_PIN}, so the pinned install did not put it there", dir.display())
+        );
+
+        std::fs::write(dir.join(INSTALLED_PIN), pin_record(&PINNED)).unwrap();
+        assert_eq!(installed_pin_mismatch(&dir), None);
+
+        let other_sha = "0".repeat(64);
+        let other_url = format!("https://github.com/{REPO}/releases/download/v0.0.1/{ASSET}");
+        let other = Pin { url: &other_url, tag: "v0.0.1", sha256: &other_sha };
+        std::fs::write(dir.join(INSTALLED_PIN), pin_record(&other)).unwrap();
+        let why = installed_pin_mismatch(&dir).expect("another pin is not the pinned bundle");
+        assert_eq!(
+            why,
+            format!(
+                "{} holds the v0.0.1 bundle (sha256 {other_sha}); the pin is {} (sha256 {})",
+                dir.display(),
+                PINNED.tag,
+                PINNED.sha256
+            )
+        );
+
+        // Same URL, other digest: the digest is what identifies the archive.
+        let same_url = Pin { url: PINNED.url, tag: PINNED.tag, sha256: &other_sha };
+        std::fs::write(dir.join(INSTALLED_PIN), pin_record(&same_url)).unwrap();
+        assert!(installed_pin_mismatch(&dir).is_some());
+
+        std::fs::write(dir.join(INSTALLED_PIN), "BUNDLE_URL=nonsense\n").unwrap();
+        let bad = installed_pin_mismatch(&dir).expect("a malformed record is not the pinned bundle");
+        assert!(
+            bad.starts_with(&format!("{} is not a pin record", dir.join(INSTALLED_PIN).display())),
+            "{bad}"
+        );
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
