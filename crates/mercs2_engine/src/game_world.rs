@@ -1320,14 +1320,6 @@ impl mercs2_core::activation::ActivationHost for Activator<'_> {
     }
 }
 
-/// The one-bone identity palette of a static streamed model.
-const IDENTITY: [[f32; 4]; 4] = [
-    [1.0, 0.0, 0.0, 0.0],
-    [0.0, 1.0, 0.0, 0.0],
-    [0.0, 0.0, 1.0, 0.0],
-    [0.0, 0.0, 0.0, 1.0],
-];
-
 /// A per-frame stats snapshot for the streaming console/HUD line.
 pub struct StreamStats {
     pub resident: usize,
@@ -2058,7 +2050,7 @@ impl StreamingWorld {
                     Transform::from_translation(Vec3::new(off[0], off[1], off[2])),
                     ModelRef { model: m.hash },
                     AnimState::default(),
-                    SkinPalette { mats: vec![IDENTITY] },
+                    SkinPalette { mats: scene.model_rest_palette(m.hash) },
                 ));
                 *model_refs.entry(m.hash).or_insert(0) += 1;
                 block_ents.insert(*b, e);
@@ -2157,7 +2149,7 @@ impl StreamingWorld {
                     self.terrain_field.insert(key, grid);
                 }
             }
-            let e = world.spawn((Transform::IDENTITY, ModelRef { model: tm }, AnimState::default(), SkinPalette { mats: vec![IDENTITY] }));
+            let e = world.spawn((Transform::IDENTITY, ModelRef { model: tm }, AnimState::default(), SkinPalette { mats: scene.model_rest_palette(tm) }));
             *self.model_refs.entry(tm).or_insert(0) += 1;
             self.prop_ents.insert(key, e);
             self.guids.borrow_mut().bind(key, e);
@@ -2170,7 +2162,7 @@ impl StreamingWorld {
         let model = o.model.expect("sync_visual spawns only an entity with a model");
         let q = Quat::from_xyzw(o.quat[0], o.quat[1], o.quat[2], o.quat[3]);
         let p = Vec3::new(o.pos[0], o.pos[1], o.pos[2]);
-        let nbones = scene.model_bone_count(model).max(1);
+        let rest = scene.model_rest_palette(model);
         let mut t = Transform::from_translation(p);
         t.rotation = q;
         // A runtime spawn of a vehicle or character template is its gameplay entity, which moves: no
@@ -2179,14 +2171,14 @@ impl StreamingWorld {
             Some((crate::spawn::Archetype::Character, faction)) => {
                 let e = crate::spawn::spawn_character(world, o.parent, model, t);
                 crate::spawn::set_faction(world, e, faction);
-                let _ = world.insert_one(e, SkinPalette { mats: vec![IDENTITY; nbones] });
+                let _ = world.insert_one(e, SkinPalette { mats: rest });
                 self.bind_visual(key, model, e);
                 return;
             }
             Some((crate::spawn::Archetype::Vehicle(class), _)) => {
                 let e = crate::spawn::spawn_default_vehicle(world, class, key, t);
                 let _ = world.insert_one(e, ModelRef { model });
-                let _ = world.insert_one(e, SkinPalette { mats: vec![IDENTITY; nbones] });
+                let _ = world.insert_one(e, SkinPalette { mats: rest });
                 self.bind_visual(key, model, e);
                 return;
             }
@@ -2210,7 +2202,7 @@ impl StreamingWorld {
             Some(&clip) => AnimState::playing(clip),
             None => AnimState::default(),
         };
-        let e = world.spawn((t, ModelRef { model }, anim, SkinPalette { mats: vec![IDENTITY; nbones] }));
+        let e = world.spawn((t, ModelRef { model }, anim, SkinPalette { mats: rest }));
         self.bind_visual(key, model, e);
     }
 
@@ -2421,7 +2413,7 @@ where
                 Transform::IDENTITY,
                 ModelRef { model: terrain.hash },
                 AnimState::default(),
-                SkinPalette { mats: vec![IDENTITY] },
+                SkinPalette { mats: ctx.scene.model_rest_palette(terrain.hash) },
             ));
         }
         // GAME population hook: hand the game the live World/Scene/Wad so it can spawn its own entities.
