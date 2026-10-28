@@ -2,8 +2,8 @@
 //! `vz-patch.wad` overlay for controlled Mercenaries 2 animation modding.
 //!
 //! Reuses the shipped modding pipeline verbatim
-//! (`mercs2_formats::{ffcs, sges, animgroup, patch_wad}`) and matches the
-//! `cube_mod` block-build pattern: source the target block via its ASET entry,
+//! (`mercs2_formats::{ffcs, sges, animgroup, patch_wad}`) to build the override
+//! block: source the target block via its ASET entry,
 //! copy its exact `path_string` + ALL of its ASET entries, `compress_sges`, wrap
 //! in a `PatchBlock`, and `build_patch_wad_multi`. The only new logic is (a)
 //! locating the human-rig animgroup block that owns player-idle clip
@@ -350,8 +350,8 @@ fn to_patch_aset(e: &ArchiveAsetEntry) -> AsetEntry {
 }
 
 /// Build the single override `PatchBlock` from a (possibly perturbed) decompressed
-/// block, matching the cube_mod pattern (path_string + all ASET entries + packed
-/// page count + defaults).
+/// block: the source block's path_string + all its ASET entries + packed page
+/// count + defaults.
 fn build_block(loc: &Located, decompressed: &[u8]) -> Result<PatchBlock, String> {
     let compressed = compress_sges(decompressed).map_err(|e| format!("sges compress: {e}"))?;
     let aset: Vec<AsetEntry> = loc.aset_entries.iter().map(to_patch_aset).collect();
