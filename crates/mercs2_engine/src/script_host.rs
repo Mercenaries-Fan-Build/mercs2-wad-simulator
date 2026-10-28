@@ -1869,8 +1869,8 @@ pub fn register_named_markers(
 /// A pad that carries a `Name` COMP is looked up through the guidmap first, so it shares the ONE entity
 /// the named-marker pass already created for that name (the shipped Lua reaches the same pads by name —
 /// `Pg.GetGuidByName("01_pmc_hq_lz_playerone")`, `vz/wifpmcinterior.lua:2108` — and both routes must
-/// land on the same object). Unnamed pads (retail vz has exactly one: zone 12 slot 1) get a fresh
-/// anonymous entity at their authored `Transform`; they are reachable only through this index, which is
+/// land on the same object). A pad with no `Name` record (retail vz names all 46) gets a fresh
+/// anonymous entity at its authored `Transform`; it is reachable only through this index, which is
 /// why the `LandingZone` COMP and not the name convention is the enumeration authority.
 pub fn register_landing_zones(
     host: &Rc<RefCell<GameScriptHost>>,
