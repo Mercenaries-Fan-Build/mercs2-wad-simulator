@@ -53,7 +53,7 @@ hud.add_child(root, label);
 assert_eq!(hud.children(root), vec![label]);
 
 let w = hud.get_mut(label).unwrap();
-w.location = [64.0, 32.0];
+w.location = [64.0, 32.0, 320.0, 64.0]; // the rect [x1, y1, x2, y2]
 w.visible = true;
 w.text.as_mut().unwrap().text = "OBJECTIVE".into();
 w.text.as_mut().unwrap().justification = 1; // 0 = left, 1 = center, 2 = right
