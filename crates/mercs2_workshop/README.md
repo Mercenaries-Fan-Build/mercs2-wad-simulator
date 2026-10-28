@@ -61,6 +61,10 @@ exe subsystem. What its source explicitly claims as provenance:
 - **Overlay / patch stack** — `--overlay` and the auto-loaded `vz-patch.wad` sitting next to the
   base WAD reproduce the retail exe's own patch-WAD lookup (last-opened wins). That is how
   DLC-ported content reaches the workbench.
+- **The game's other WADs** — `shell.wad`, `Loading.wad` and each language's `<token>.wad` (the
+  engine's language table, `mercs2_quartermaster::manifest::Language`) are opened read-only beside
+  the stack. The game loads each in its own slot, so they never shadow it: Inspect lists what only
+  they ship (its WAD named after the row) and, for an asset several WADs hold, every copy.
 - **Names** — the reference bundle's `names.bin`, which `--pack-data` builds from this crate's
   `data/production_names.json`. An ASET dictionary (`data/aset_names.tsv`, written by
   `aset_export --embed-tsv` from the rainbow table and this crate's name fragments) is compiled into
