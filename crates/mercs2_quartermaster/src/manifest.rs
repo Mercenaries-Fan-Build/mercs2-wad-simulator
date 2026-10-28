@@ -643,9 +643,10 @@ pub struct ShopBehaviour {
     /// resident-load time, when the novel global is still `nil`, aborting a resident script (the
     /// phase-8 deadlock's cousin). Omit to reference a module the game already ships.
     ///
-    /// Author-facing caveat (the linter warns): a novel-behaviour item surfaces reliably only at
-    /// Eva's PMC shop — the trampoline fires on PMC-interior entry, so an outpost vendor that opens
-    /// first caches its list without the item. Co-op requires both peers to install the Shipment.
+    /// The loader inserts the rows from the trampoline on `wifpmcinterior`'s `_OnEnter`, so the item
+    /// is at no vendor until the host's first entry into the PMC interior in a session, and at every
+    /// vendor in `shops` from then (the loader clears `MrxRewardData.gtAllSupport`, the per-faction
+    /// list cache). A session that starts in the world reaches outpost vendors first. M0310 warns.
     #[serde(default)]
     pub script: Option<PathBuf>,
 }
@@ -819,12 +820,17 @@ pub enum Contribution {
     AddModel {
         name: String,
         model: PathBuf,
-        /// Host whose rig/materials are BORROWED — read-only, never written. Omit to auto-pick.
+        /// Host whose rig/materials are BORROWED — read-only, never written. The build refuses an
+        /// `add_model` without one: there is no auto-pick for a prop.
         #[serde(default)]
         donor: Option<String>,
         /// The donor draw group the geometry is injected into (0..=63).
         ///
-        /// Omit to let the builder pick. The Workshop's conform bench has always had this control
+        /// Rigid: omit for group 0. With `retarget:` the mesh is split one draw group per source
+        /// part, and `group` is the first of them: a mesh the split keeps in one group goes into it
+        /// whole, and one split across several starts in it and continues in the donor's largest
+        /// other groups; omit it for the largest groups alone. A `group` the donor does not draw is a
+        /// build error. The Workshop's conform bench has always had this control
         /// and had nowhere to record it, so a conformed placement could be previewed and then not
         /// expressed — the transform was baked into vertices while the host group was lost.
         #[serde(default)]
@@ -1009,9 +1015,11 @@ pub enum Contribution {
     /// run on first import — so `inherit()` / `import()` calls at the top of the file resolve
     /// against modules that ARE loaded by then (mrxmissionflow, wifmissiondata, MrxTaskContract).
     ///
-    /// ⚠ **`name` cannot collide with a shipped script.** The registry is first-writer-wins on
-    /// asset hash, so a name that already exists silently drops one of the two. The linter (M0197)
-    /// refuses a name it recognises in the base corpus.
+    /// ⚠ **`name` cannot collide with a script name.** The registry is first-writer-wins on
+    /// asset hash, so a name that already exists silently drops one of the two. M0197 refuses
+    /// `qm_modloader`, `qm_shell_modloader` and the Shipment's own novel shop modules with no game,
+    /// and, with the game, a name a script row of the game stack or of a game WAD beside `vz.wad`
+    /// (`shell.wad`, `Loading.wad`, the language WADs) carries.
     AddScript {
         /// The module name the engine `import`s. Bare, lowercase-ish, no extension, no path — see
         /// the doc comment on this variant.
@@ -1033,13 +1041,13 @@ pub enum Contribution {
     ///
     /// Use when the desired change is a full rewrite rather than an append — a stock script whose
     /// structure you cannot cleanly wrap, or a Lua-side reimplementation of an engine subsystem.
-    /// This is a `LastWins` claim (like `replace_texture`), so two Shipments replacing the same
-    /// script is a load-order question rather than a hard conflict; the later-mounted wins and the
-    /// earlier's bytecode is silently absent.
+    /// This is an `Exclusive` claim on the script, so two Shipments replacing the same script — or
+    /// one replacing it while another `patch_lua`s it — are a hard conflict that no load order
+    /// resolves.
     ///
     /// ⚠ **Prefer `patch_lua` when the change is additive.** Two `patch_lua` mods on the same
     /// script COMPOSE (the linker concatenates their appends and compiles once); two `replace_lua`
-    /// mods CLOBBER (the later one erases the earlier). Only reach for `replace_lua` when the
+    /// mods CONFLICT (they cannot be installed together). Only reach for `replace_lua` when the
     /// change genuinely cannot be expressed as an append.
     ReplaceLua {
         /// The shipped script to replace, e.g. `wifpmcinterior`.
@@ -1053,8 +1061,8 @@ pub enum Contribution {
     /// preserved, so every entity referencing the model transparently picks up the new collision.
     ///
     /// The `phy2` file must be a fully-formed PHY2 body (Havok packfile + trailing wrapper if the
-    /// donor had one), matching the shape [`build_phy2_multi`] emits. Same-hash, `Replace` intent
-    /// — two mods swapping the same model's PHY2 is a load-order question, not a hard conflict.
+    /// donor had one), matching the shape [`build_phy2_multi`] emits. Same-hash, `ReplaceExclusive`
+    /// intent — two mods swapping the same model's PHY2 is a hard conflict, not a load-order question.
     ReplacePhy2 {
         /// The model to swap collision on, by name or bare `0xHHHHHHHH` hash.
         target: String,
@@ -1067,17 +1075,18 @@ pub enum Contribution {
     /// (which patches existing entities in-place).
     ///
     /// A concrete placement carries a model hash, a transform (position + orientation quaternion),
-    /// and an entity key (`u32`) — the same three fields `edit_world` edits. The build refuses a
-    /// key that already exists in the target layer (M0198), because reusing a key silently
-    /// overwrites the existing entity and that is not what "add" means.
+    /// and an entity key (`u32`) — the same three fields `edit_world` edits. M0198 refuses a key the
+    /// target layer's block already places, and a key two records of the file share: retail places
+    /// every key once (none of `vz.wad`'s 101,299 keys is in two of its 923 layers).
     AddPlacement {
         /// The layer name (`layers_static`, `vz_state_pmccon004_pristine`, …). Used both as the
         /// carrier block (where the appended sub-block lands) AND as the COMP-scaffolding template
         /// the new sub-block clones from — the existing layer's Transform / ModelName / Name / flgs
         /// COMP layouts are cloned verbatim, then extended with the author's new entity.
         layer: String,
-        /// The new entity's config, `src/`-relative — YAML with `key`, `model`, `position`,
-        /// `orientation` (either `quat: [x,y,z,w]` or `yaw: <degrees>`).
+        /// The new entity's config, `src/`-relative — YAML, one record or a list of them, each with
+        /// `key`, `model`, `pos: [x,y,z]`, an optional `name`, and an optional orientation:
+        /// `quat: [x,y,z,w]` or `yaw: <degrees>`, never both ([`crate::world::parse_entities`]).
         entity: PathBuf,
     },
     /// Data. Mint a WHOLE NEW placement layer, mountable as its own overlay + toggle-able via
@@ -1093,10 +1102,12 @@ pub enum Contribution {
         /// The existing layer whose COMP scaffolding (Transform / ModelName / Name / flgs layouts,
         /// FLGS 32-byte per-entity payload template, etc.) to clone. Every real layer has to have
         /// this scaffolding; `append_placements` clones it from a template rather than authoring
-        /// COMP defaults per author. `layers_static` is the usual choice.
+        /// COMP defaults per author. `layers_static` is the usual choice. The new layer's sub-block
+        /// is appended to the block this layer lives in, and that whole block ships, so the
+        /// template is claimed as an `add_placement`'s layer is.
         template: String,
         /// `src/`-relative YAML — a list of entity records (same shape as `add_placement.entity`,
-        /// one row per entity).
+        /// one row per entity). M0198 refuses a key two records share.
         entities: PathBuf,
     },
     /// Data. Add a NEW animation clip: an `animation` asset (ASET type id 16) under the clip's name.
@@ -1255,8 +1266,9 @@ pub enum Contribution {
     /// merge cleanly and the resident script never grows with mod count. Each mark runs under `pcall`,
     /// so a mistyped layer name cannot wedge the loader (it silently does nothing — M0194 warns).
     ActivateLayer {
-        /// The layer to `MarkForAddition`, e.g. `vz_state_pmccon004_destroyed`. CASE-SENSITIVE — the
-        /// name hashes to a UCFX block in the ASET, and a wrong case reaches no layer.
+        /// The layer to `MarkForAddition`, e.g. `vz_state_pmccon004_destroyed`. Case does not matter —
+        /// `MrxLayerManager` lowercases the name and the name hash folds case — but the spelling must
+        /// name a layer in the ASET, or the mark reaches no layer.
         layer: String,
         /// Layers to `MarkForRemoval` first — the pristine / prior overlay this one replaces. Omit to
         /// only add.
@@ -1274,7 +1286,8 @@ pub enum Contribution {
     /// Installed together, every Shipment's additions and edits to one table are merged by `qm link`
     /// into one table, by key hash in load order; the later Shipment's text wins. To OVERRIDE an
     /// existing key's text, use [`EditStringDb`]; a mixed intent must be split into two rows.
-    /// The same shell/vz duplication caveat applies as for [`EditStringDb`] (M0191 warns).
+    /// The same shell/vz duplication caveat applies as for [`EditStringDb`] (M0191 warns on
+    /// `edit_stringdb` only, not on this kind).
     // `snake_case` would derive `add_string_db_keys`; the kind is `add_stringdb_keys` everywhere else
     // (`kind()`, `ALL_KINDS`, the docs), so the tag is pinned, as `edit_stringdb`'s is.
     #[serde(rename = "add_stringdb_keys")]
@@ -1336,7 +1349,8 @@ pub enum Contribution {
     ///
     /// This is the one kind that places a NEW BASE WAD in `data/` rather than an overlay. It has to:
     /// the engine builds BOTH the mounted filename (`.\Data\<name>.wad`) AND the stringdb key
-    /// (`pandemic_hash_m2(name) × 0x39E5E978`) from the same language-name string, and a missing base
+    /// (`pandemic_hash_m2(name)` under the stringdb type hash `0x39E5E978`) from the same
+    /// language-name string, and a missing base
     /// `<name>.wad` is a hard `exit(1)` (`FUN_004bfe20`). So a new selectable language is a new base
     /// WAD, which no overlay kind can express. The `data/` write is safe by CONSTRUCTION — the
     /// filename is builder-derived from `name` and refused if it collides with a WAD the game already
@@ -1458,7 +1472,8 @@ pub enum Contribution {
         /// `nFuelCost` (support only).
         #[serde(default)]
         fuel_cost: u64,
-        /// `nMaxStock` (support). Capped at 99 by `Init`.
+        /// `nMaxStock` (support). `mrxsupportdata.Init` overwrites it with `_kMaxStock` (99) on every
+        /// row present when it runs; a novel-behaviour row, deferred past `Init`, is capped at 99.
         #[serde(default = "default_shop_max_stock")]
         max_stock: u32,
         /// `tUnlockStatus` — unlocked in every listed vendor. Required in Eva's obscured shop, where
