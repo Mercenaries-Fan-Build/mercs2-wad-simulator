@@ -20,7 +20,8 @@
 //! ## Carve note
 //! Only a subset of the canonical nodes is realized today; the rest are **seams that render nothing**
 //! (NOT faked). The engine's current single-forward realization maps onto the graph like so:
-//! - [`PassId::ShadowCascade`] — our single directional shadow-depth pass (one cascade, not four).
+//! - [`PassId::ShadowCascade`] — our directional shadow-depth pass: four cascades into the 1024×4096
+//!   atlas, one 1024² tile each (`scene.rs` `SHADOW_CASCADES`).
 //! - [`PassId::Color`] — our combined forward pass: a fullscreen sky draw (engine approximation of the
 //!   canonical sky-as-pass) then the opaque geometry, optionally through the HDR + bloom post chain.
 //! - [`PassId::TransparentFx`] / [`PassId::Ui`] / [`PassId::Overlay`] — engine-added tail passes that
@@ -57,7 +58,7 @@ pub enum PassId {
     ZOpaque,
     /// 4× shadow-cascade emit — `while(i<4){ FUN_008596c0; FUN_00468ca0; FUN_00859790 }` around the
     /// per-object `RenderShadow` vtbl `+0x18`, one emit per cascade into the 1024×4096 atlas
-    /// (shadow_code_map §1/§4). Our engine realizes ONE directional cascade.
+    /// (shadow_code_map §1/§4). Our engine realizes all four cascades into the same atlas layout.
     ShadowCascade,
     /// Water reflection — `FUN_00486fa0()` → `FUN_004677d0` (Water::RenderReflections, Xbox 0x15f00):
     /// builds mirrored view matrices vs the water plane (`+0xab0/+0xb70`) and re-renders renderables
@@ -184,11 +185,9 @@ pub type RenderItem = (mercs2_core::Entity, glam::Mat4, u32, Vec<[[f32; 4]; 4]>)
 /// re-extending this one struct.
 ///
 /// ## What each render pass now has vs still needs
-/// - **Lighting / shadow cascades:** HAS `lights_bind` (group-3 dynamic-light array + folded
-///   directional shadow map + light view-proj), the camera (`view_proj` / `view` / `cam_pos`) and
-///   `depth`. STILL NEEDS extra per-cascade shadow RTs of its own (create via `device` +
-///   `surface_format`) — the engine exposes ONE directional shadow map, not the exe's 4-cascade
-///   1024×4096 atlas (shadow_code_map.md §4).
+/// - **Lighting / shadow cascades:** HAS `lights_bind` (group-3 dynamic-light array + the 4-cascade
+///   1024×4096 directional shadow atlas + the per-cascade light view-projs, shadow_code_map.md §4),
+///   the camera (`view_proj` / `view` / `cam_pos`) and `depth`.
 /// - **FX / decals:** HAS the camera + `depth` + `color` (project decal quads, depth-test
 ///   against the scene) and `items` (find the affected surfaces). The projected-decal pass is
 ///   REALIZED as `scene::DecalNode`, registered at [`PassId::Blob`] via `Scene::enable_decals` and
@@ -255,8 +254,9 @@ pub struct PassCtx<'a> {
 
 /// A pluggable scene pass. **Seam:** the reflection / water / decal / sky / particle passes
 /// implement this and register the node against its canonical [`PassId`] slot; the engine executes it
-/// in [`SCENE_ORDER`] position. The engine ships the ordering + the seams only — no external
-/// `RenderNode` is registered yet, so the trait exists purely as the documented plug-in point.
+/// in [`SCENE_ORDER`] position. The engine ships the ordering + the seams; `scene::DecalNode`
+/// (via `Scene::enable_decals`) and [`crate::water::WaterNode`] (via `Scene::add_render_node`) are
+/// the nodes registered against them.
 pub trait RenderNode {
     /// The canonical slot this node fills.
     fn id(&self) -> PassId;
