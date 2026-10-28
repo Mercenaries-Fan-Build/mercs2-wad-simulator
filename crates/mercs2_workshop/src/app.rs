@@ -9187,6 +9187,8 @@ fn ensure_hero_render(
                     .specular
                     .and_then(|h| md.textures.get(&h))
                     .map(crate::texpng::decode_bc),
+                material_flags: d.material_flags,
+                material_alpha: d.material_alpha,
             })
             .collect();
         if draws.is_empty() {
