@@ -596,6 +596,131 @@ fn m0190_is_registered() {
     assert!(lint::RULES.iter().any(|r| r.code == "M0190"));
 }
 
+/// An AS3 movie `kind` (`add_movie` / `add_ui`) ships from `movie`, written into a scratch Shipment
+/// root at `on_disk` (relative to the root, which may lie outside it), linted.
+fn lint_movie_kind(label: &str, kind: &str, movie: &str, on_disk: &str) -> Vec<lint::Diagnostic> {
+    let mut abc = 1u32.to_le_bytes().to_vec();
+    abc.extend_from_slice(b"widget\0");
+    abc.extend_from_slice(&[0x10, 0x00, 0x2E, 0x00]);
+    let base = std::env::temp_dir().join(format!("qm_lint_moviekind_{}_{label}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    let root = base.join("shipment");
+    std::fs::create_dir_all(root.join("src")).expect("scratch");
+    let path = root.join(on_disk);
+    std::fs::create_dir_all(path.parent().expect("a parent")).expect("scratch");
+    std::fs::write(&path, movie_with(&[(82, abc)])).expect("write movie");
+    let m = shipment_with(&format!("  - kind: {kind}\n    name: qm_test_ui\n    movie: {movie}\n"));
+    lint::lint(&m, Some(&root), None)
+}
+
+/// `add_ui` ships the same movie `add_movie` does, so an AS3 one is M0190 there too.
+#[test]
+fn an_add_ui_movie_carrying_as3_is_an_error() {
+    let diags = lint_movie_kind("ui_as3", "add_ui", "src/ui.gfx", "src/ui.gfx");
+    let found: Vec<_> = diags.iter().filter(|d| d.rule.code == "M0190").collect();
+    assert_eq!(found.len(), 1, "{diags:?}");
+    assert_eq!(found[0].at, Some(0));
+    assert!(lint::blocks_build(&diags));
+}
+
+/// A movie path that escapes the Shipment is M0111, and the movie it names is NOT read: reading it
+/// would read a file outside the Shipment. The file there carries AS3, so a read would show M0190.
+#[test]
+fn an_escaping_movie_path_is_not_read() {
+    for kind in ["add_movie", "add_ui"] {
+        let diags = lint_movie_kind(&format!("escape_{kind}"), kind, "../outside.gfx", "../outside.gfx");
+        let c = codes(&diags);
+        assert!(c.contains(&"M0111"), "{kind}: {diags:?}");
+        assert!(!c.contains(&"M0190"), "{kind}: the escaping movie was read: {diags:?}");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// M0197 (hermetic half) and M0310 — the scripts a Shipment mints
+// ---------------------------------------------------------------------------
+
+/// An `add_shop_item` with a novel behaviour `module`, minted from `script`.
+fn novel_shop_item(id: &str, module: &str, script: &str) -> String {
+    format!(
+        "  - kind: add_shop_item\n    id: {id}\n    name: {id}\n    icon: hud_support_airstrike\n    shops: [pmc]\n    \
+         type: airstrike\n    cash_cost: 1000\n    behaviour: {{ module: {module}, script: {script} }}\n"
+    )
+}
+
+/// `qm_modloader` and `qm_shell_modloader`, in any case, are the loaders `qm link` mints: an
+/// `add_script` of either name is M0197. Another name is quiet.
+#[test]
+fn m0197_fires_on_a_qm_loader_name() {
+    for name in ["qm_modloader", "QM_Shell_ModLoader"] {
+        let m = shipment_with(&format!("  - kind: add_script\n    name: {name}\n    source: src/a.lua\n"));
+        let d = lint::lint(&m, None, None);
+        assert_eq!(codes(&d), vec!["M0197"], "{name}: {d:?}");
+        assert_eq!(d[0].severity, Severity::Error);
+    }
+    let m = shipment_with("  - kind: add_script\n    name: my_helpers\n    source: src/a.lua\n");
+    assert!(lint::lint(&m, None, None).is_empty());
+}
+
+/// An `add_script` named like a novel shop module of the same Shipment is M0197 — and, both minting
+/// one script asset, M0120.
+#[test]
+fn m0197_fires_on_a_novel_shop_module_of_the_shipment() {
+    let m = shipment_with(&format!(
+        "  - kind: add_script\n    name: MyStrike\n    source: src/a.lua\n{}",
+        novel_shop_item("my_strike", "mystrike", "src/strike.lua")
+    ));
+    let d = lint::lint(&m, None, None);
+    let c = codes(&d);
+    assert!(c.contains(&"M0197") && c.contains(&"M0120"), "{d:?}");
+    let m0197 = d.iter().find(|d| d.rule.code == "M0197").expect("M0197");
+    assert_eq!(m0197.at, Some(0));
+    assert!(m0197.message.contains("contributions[1]"), "{}", m0197.message);
+}
+
+/// A novel shop behaviour is M0310, a warning that does not block; a behaviour naming a module the
+/// game ships (no `script`) is quiet.
+#[test]
+fn m0310_warns_on_a_novel_shop_behaviour() {
+    let d = lint::lint(&shipment_with(&novel_shop_item("my_strike", "mystrike", "src/strike.lua")), None, None);
+    assert_eq!(codes(&d), vec!["M0310"], "{d:?}");
+    assert_eq!(d[0].severity, Severity::Warning);
+    assert!(d[0].message.contains("PMC interior"), "{}", d[0].message);
+    assert!(!lint::blocks_build(&d));
+
+    let shipped = shipment_with(
+        "  - kind: add_shop_item\n    id: my_drop\n    name: my_drop\n    icon: hud_support_airstrike\n    shops: [pmc]\n    \
+         type: airstrike\n    behaviour: { module: mrxcratedelivery }\n",
+    );
+    assert!(lint::lint(&shipped, None, None).is_empty());
+}
+
+/// Two items of one Shipment sharing one novel module and one script mint it once: quiet but for
+/// each item's M0310. One module from two scripts is M0120 — only one source can be the module.
+#[test]
+fn one_novel_module_from_two_scripts_is_a_self_conflict() {
+    let shared = shipment_with(&format!(
+        "{}{}",
+        novel_shop_item("strike_a", "mystrike", "src/strike.lua"),
+        novel_shop_item("strike_b", "mystrike", "src/strike.lua")
+    ));
+    assert_eq!(codes(&lint::lint(&shared, None, None)), vec!["M0310", "M0310"]);
+    let two = shipment_with(&format!(
+        "{}{}",
+        novel_shop_item("strike_a", "mystrike", "src/strike.lua"),
+        novel_shop_item("strike_b", "mystrike", "src/other.lua")
+    ));
+    assert!(codes(&lint::lint(&two, None, None)).contains(&"M0120"));
+}
+
+/// M0197 and M0310 are hermetic rules, M0198 a game rule, each with its doc anchor.
+#[test]
+fn the_minted_script_and_placement_rules_are_registered() {
+    for (code, table) in [("M0197", lint::RULES), ("M0310", lint::RULES), ("M0198", lint::GAME_RULES)] {
+        let r = table.iter().find(|r| r.code == code).unwrap_or_else(|| panic!("{code}"));
+        assert_eq!(r.doc, format!("docs/modding/manifest_format.md#{}", code.to_lowercase()));
+    }
+}
+
 // ---------------------------------------------------------------------------
 // add_language (M0200)
 // ---------------------------------------------------------------------------
