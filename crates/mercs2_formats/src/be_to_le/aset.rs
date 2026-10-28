@@ -13,11 +13,12 @@
 //! distinction explicit.
 //!
 //! ## Staging (per the porting plan)
-//! STEP 1 (this file): reproduce the *current* Python behavior **exactly** so we
-//! can prove byte-parity of the emitted WAD before changing anything. The known
-//! bug (faithful BE-sub not preserved: primaries got the physical index; then
-//! body-less stubs got force-`0xFFFF`, clobbering real sub-offsets) is **left
-//! intact here on purpose** and fixed in STEP 3 once parity is confirmed.
+//! STEP 1 reproduced the Python behavior **exactly** to prove byte-parity of the
+//! emitted WAD before changing anything. The known bug it carried (faithful
+//! BE-sub not preserved: primaries got the physical index; then body-less stubs
+//! got force-`0xFFFF`, clobbering real sub-offsets) is fixed in this file by the
+//! STEP 3 rules of [`recompute_block_aset_subs`]: primaries and in-base hashes
+//! keep `0xFFFF`, and a DLC-new stub keeps its BE sub.
 
 /// Sentinel meaning "primary reference / resolve the body by hash".
 pub const SUB_PRIMARY: u16 = 0xFFFF;
