@@ -2415,7 +2415,7 @@ impl Scene {
             }
             // After the built-in pass for this slot, run any node plugged into it, handed
             // the fully-populated PassCtx (camera + lights + surface format + the collected `items`
-            // list). No registered nodes yet → this is a no-op and the frame stays byte-identical.
+            // list). With no node registered for the slot this is a no-op.
             self.dispatch_nodes(node, &mut encoder, &view_tex, &items, view_proj, view, cam_world, t);
         }
 
