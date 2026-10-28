@@ -12,7 +12,7 @@ name, and every entry satisfies `m2(name) == hash`.
 | `aset_roster_names.json` | Model roots from the vehicle/weapon roster × the `<faction>_veh_<class>_<name>` grammar | `aset_external_mine --roster` |
 | `aset_model_names.json` | Model names derived from the textures each model uses | `mercs2_probe --bin model_namer` |
 | `aset_variant_names.json` | Decorated variants of named models (`vz_veh_tank_amx30_base`) | per-model search against its own hash |
-| `rejected_names.json` | Names harvested from block bytes that have an identifier's shape but are collision debris (`wxfm0u`, `i4e2`, `csumoe9mucfxp`). Every reader of the harvest drops these pairs | by hand, each hash checked |
+| `rejected_names.json` | Names harvested from block bytes that are collision debris: those with an identifier's shape (`wxfm0u`, `i4e2`, `csumoe9mucfxp`), and `j-cfe`, which `production_names.json` had taken in. Every reader of the harvest, and `--pack-data`'s read of `production_names.json`, drops these pairs | by hand, each hash checked |
 | `aset_names.tsv` | The ASET dictionary compiled into the binary (`0xHASH\tname`), applied over `names.bin` | `wad_simulator --bin aset_export --embed-tsv` |
 
 Candidate sources stay in the notes repo's `docs/data/` (named by `notes_docs_dir` in
