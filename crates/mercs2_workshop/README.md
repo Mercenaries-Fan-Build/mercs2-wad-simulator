@@ -187,16 +187,25 @@ folder is found in this order (`index::data_home`, over `chains::data`):
 6. the copy downloaded into the user's cache directory (`fetch::installed_dir`)
 
 Steps 1–3 are set by a person: one that is not a complete bundle is an error naming it, never passed
-over for a later step. When nothing is set and nothing is found, the workshop downloads
-`mercs2-workshop-data.zip` from the latest release and installs it as step 6
-(`index::require_data_home`). When that fails too, the run stops with an
-error giving the release page and the folder to unpack the zip into. A complete bundle missing
-`audio_manifest.json`, or holding a malformed one, stops the boot with an error naming the file.
+over for a later step. When nothing is set and nothing is found, the workshop downloads the pinned
+`mercs2-workshop-data.zip` and installs it as step 6 (`index::require_data_home`); the Settings
+page's Download button runs the same install. The
+pin is `fetch::PINNED`, read at compile time from the `BUNDLE_URL` and `BUNDLE_SHA256` lines of
+`.github/workflows/ci.yml` — the bundle CI downloads for the corpus gates — so moving the pin is an
+edit to those two lines alone. A workflow without exactly one of each line, a URL other than
+`https://github.com/Mercenaries-Fan-Build/mercs2-wad-simulator/releases/download/<tag>/mercs2-workshop-data.zip`,
+or a digest other than 64 lowercase hex digits stops the build. The install downloads that URL and
+nothing else, and checks the archive's sha256 against `BUNDLE_SHA256` before unpacking; a mismatch
+stops the install with both digests, unpacks nothing, and leaves the installed copy as it was. When
+the download fails, the run stops with an error giving the URL, its sha256 and the folder to unpack
+the zip into. A complete bundle missing `audio_manifest.json`, or holding a malformed one, stops the
+boot with an error naming the file.
 
 The corpus gates in `lua_source`, `blueprint` and `missions` run over the bundle's Lua and are
 pinned to release v0.17.0's bundle (`index::PINNED_CORPUS`: 675 scripts in `lua/`, 39 in
-`lua_dlc/`), the one CI downloads. A different bundle fails them on the count: re-download the
-bundle from Settings, or point `MERCS2_WORKSHOP_DATA` at an unpacked v0.17.0 `workshop_data/`.
+`lua_dlc/`), the one CI downloads and `fetch::PINNED` names. A different bundle fails them on the
+count: re-download the bundle from Settings, or point `MERCS2_WORKSHOP_DATA` at an unpacked v0.17.0
+`workshop_data/`.
 
 `--pack-data [dir]` builds the bundle (default `workshop_data`). Its in-repo sources are read from
 the checkout the binary was built from: names come from this crate's
