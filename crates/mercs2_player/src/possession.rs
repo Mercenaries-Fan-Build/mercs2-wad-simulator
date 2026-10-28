@@ -207,7 +207,7 @@ mod tests {
     /// source and **seeds** the disguise base, which the two obvious one-line implementations miss.
     #[test]
     fn attach_performs_all_three_writes() {
-        let mut r = PlayerRoster::single_player();
+        let mut r = PlayerRoster::single_player(0x4000_0001);
         // Pretend the player was riding something before the attach.
         r.get_mut(0).unwrap().control_source = 0xDEAD;
 
@@ -221,7 +221,7 @@ mod tests {
     /// Re-attaching to a different character leaves no trace of the old link — the teardown branch.
     #[test]
     fn reattaching_replaces_the_old_link_entirely() {
-        let mut r = PlayerRoster::single_player();
+        let mut r = PlayerRoster::single_player(0x4000_0001);
         attach_to_character(&mut r, 0, 0xAAA, CheatFlags::default());
         attach_to_character(&mut r, 0, 0xBBB, CheatFlags::default());
         let p = r.get(0).unwrap();
@@ -233,7 +233,7 @@ mod tests {
     /// Detach clears possession, and an unpossessed record stops resolving by character.
     #[test]
     fn detach_clears_possession() {
-        let mut r = PlayerRoster::single_player();
+        let mut r = PlayerRoster::single_player(0x4000_0001);
         attach_to_character(&mut r, 0, 0x1234, CheatFlags::default());
         assert!(r.by_character(0x1234).is_some());
 
@@ -247,7 +247,7 @@ mod tests {
     /// is what `FUN_006CDAF0` returning 0 produces in retail.
     #[test]
     fn attach_to_a_bad_slot_is_a_no_op() {
-        let mut r = PlayerRoster::single_player();
+        let mut r = PlayerRoster::single_player(0x4000_0001);
         assert!(!attach_to_character(&mut r, 7, 0x1234, CheatFlags::default()));
         assert_eq!(r.get(0).unwrap().character, 0, "the valid record is untouched");
     }
@@ -258,7 +258,7 @@ mod tests {
     fn the_bind_trio_drives_the_three_predicates() {
         let mut r = PlayerRoster::new();
         // `create` takes a SLOT and leaves the record **not joined** — binding is what joins it.
-        r.create(0);
+        r.create(0, || 0x4000_0001);
         let p = r.get(0).expect("slot 0 exists");
         assert!(!p.is_joined() && !p.is_local() && !p.is_remote(), "created is not yet joined");
 

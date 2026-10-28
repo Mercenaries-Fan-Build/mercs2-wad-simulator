@@ -148,15 +148,15 @@ fn main() {
 
     // Destruction filter — the AUTHORITATIVE engine gate, not a heuristic. A vehicle ships its intact
     // body AND its wreck in one container; the SWIT state machine SHOW/Hides one at a time (the game
-    // never co-renders them). `machine_node_enable` replays the pristine state's enter-script over the
-    // HIER exactly as `render_state` clause (3) does — `NodeSeed::SwitchSlotsHidden` hides every switch
-    // subtree until a SHOW re-enables it, so the wreck stays hidden and only the intact body survives.
+    // never co-renders them). `machine_node_enable` runs the machine into the pristine states over the
+    // HIER as `render_state` clause (3) does — every switch subtree is hidden until a SHOW re-enables
+    // it, so the wreck stays hidden and only the intact body survives.
     let keep_node: Vec<bool> = match &m.machine {
         Some(sm) => {
             use mercs2_formats::orchestrator as orch;
             // Full health = the pristine state; its chosen state indices drive the SHOW/Hide replay.
             let chosen = orch::node_states_for_health(sm, 1.0, 0.99);
-            orch::machine_node_enable(sm, &m.hier, &chosen)
+            orch::machine_node_enable(sm, &m.hier, &chosen).unwrap_or_else(|e| panic!("{e}"))
         }
         None => vec![true; rig.len()],
     };

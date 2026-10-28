@@ -26,7 +26,7 @@
 //!   environment-set the original engine did (`_SYS._IMPORT`), done here with `Chunk::set_environment`.
 //!   A module's parameterless `Init()` is auto-invoked, **deferred** two-phase (load all, then Init in
 //!   load order).
-//! - The **engine binding surface**: 35 namespaces / 1086 required cfuncs, one [`bindings`] module per
+//! - The **engine binding surface**: 37 namespaces / 1092 required cfuncs, one [`bindings`] module per
 //!   `luaL_Reg` table, seeded from the live Surface-B trace
 //!   (`mods/lua_trace_asi/reference/binding_map.json`; human index
 //!   `docs/reverse_engineer/scripting_host_binding_code_map.md` §3). Coverage is machine-readable
@@ -62,21 +62,41 @@ pub use bindings::{coverage_json, install_all, totals, NsCoverage, Totals};
 pub mod stubs;
 pub mod docs;
 pub mod attribution;
-/// The canonical `ObjectHibernation` phases + the folding function, re-exported because the ENGINE is
-/// the producer: it must fire the same canonical spelling the registrations were folded onto, and the
-/// `bindings` submodules are otherwise private. See `bindings::event::canon_phase` for why the corpus's
-/// five spellings collapse to two.
-pub use bindings::event::{canon_phase, PHASE_ASLEEP, PHASE_AWAKE};
-
 /// The Lua-boundary handle type. Engine GUIDs cross into Lua as **lightuserdata**, the way retail
 /// pushes them (`FUN_0059FF50` accepts only tags 2/7; `GetAnyCharacter` writes tag 2 — see
 /// [`guid`] for the full provenance), because ~114 shipped-script sites `type()`-check them.
 pub mod guid;
 pub use guid::Guid;
 
+/// What `Pg.Spawn`'s first argument names.
+#[derive(Clone, Debug, PartialEq)]
+pub enum SpawnTemplate {
+    /// A template name, resolved through the name index.
+    Name(String),
+    /// A template key passed as a handle.
+    Guid(u64),
+}
+
+/// `Pg.Spawn(template, x, y, z, [yaw], [arg6], [arg7], [arg8])` as `0x5D5D20` reads it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SpawnArgs {
+    pub template: SpawnTemplate,
+    pub pos: [f32; 3],
+    /// Degrees (`[0xDF67A4]` = π/180); 0 when absent.
+    pub yaw: f32,
+    /// True: the new entity's RtAlphaAnimation record is removed (`0x5E0580`). Default false.
+    pub remove_alpha_animation: bool,
+    /// The replication request: with `Net.IsEnabled` and the template's NetCategoryInfo low nibble set,
+    /// the spawn is net-registered and registers non-static. Default true.
+    pub net: bool,
+    /// The entity a physics collision group is copied from (INFERRED from the Xbox body); 0 for none.
+    pub collision_source: u64,
+}
+
 /// Locating the decompiled game-script corpus (see `corpus.rs`) — the behavioural spec the replay
-/// suites and `examples/mission_lab.rs` run against. It lives outside this repo by design, so
-/// [`corpus::root`] returns `Option` and callers degrade with [`corpus::skip_notice`].
+/// suites and `examples/mission_lab.rs` run against. It is vendored inside this crate; [`corpus::root`]
+/// returns `Option` (`None` only when the vendored tree is absent) and callers degrade with
+/// [`corpus::skip_notice`].
 pub mod corpus;
 
 /// The engine services the script bindings call. The engine (`mercs2_engine`) implements this; the
@@ -104,6 +124,70 @@ pub trait EngineHost {
     /// `Pg.GetGuidByName` — resolve a placed-object name to its runtime GUID (0 = not found; the
     /// binding maps 0 → Lua `nil` so the game's `if not uGuid` control flow is authentic).
     fn guid_by_name(&mut self, name: &str) -> u64;
+    /// The world's entity-key registry (`mercs2_core::GuidMap`): names, SceneObject rows, layer
+    /// records, the runtime key counter. Shared with the engine's frame loop and streaming executor;
+    /// the layer and key bindings below read and write it.
+    fn guids(&self) -> Rc<RefCell<mercs2_core::GuidMap>>;
+    /// The next runtime entity key (the allocator `0x6746D0`: `0x40000000` up, never reused) — for
+    /// objects a binding creates, such as `Player.CreatePlayer`'s player object.
+    fn mint_runtime_key(&mut self) -> u64 {
+        u64::from(self.guids().borrow_mut().mint_runtime())
+    }
+    /// `Pg.LoadLayer` / `Pg.ReloadLayer` / `Pg.UnloadLayer` (`op` = `"Load"` / `"Reload"` /
+    /// `"Unload"`): make the request. False when it is refused (the binding pushes nil and tracks
+    /// nothing) — `docs/reverse_engineer/layer_load_code_map.md` §2–3.
+    fn layer_request(&mut self, op: &str, layer: &str, dynamic: bool) -> bool {
+        self.guids().borrow_mut().request_layer(layer_op(op), layer_hash(layer), dynamic)
+    }
+    /// Whether a request of `op` on `layer` has completed, with its `bSuccess`; `None` while pending.
+    /// The script update polls this to fire the request's callback (`FUN_005A28F0`).
+    fn layer_request_status(&self, op: &str, layer: &str) -> Option<bool> {
+        self.guids().borrow().layer_request_status(layer_op(op), layer_hash(layer))
+    }
+    /// `Pg.UnloadingStaticLayers(b)` — static layers may be unloaded while set (`[0x1175F58]`).
+    fn set_unloading_static_layers(&mut self, on: bool) {
+        self.guids().borrow_mut().unloading_static_layers = on;
+    }
+    /// `Pg.GetUnloadingStaticLayers()`.
+    fn unloading_static_layers(&self) -> bool {
+        self.guids().borrow().unloading_static_layers
+    }
+    /// `Pg.IsStaticLayer(name)` — the layer record's static bit.
+    fn is_static_layer(&self, layer: &str) -> bool {
+        self.guids().borrow().layer(layer_hash(layer)).is_some_and(|r| r.statik)
+    }
+    /// `guid`'s activation state (SceneObject `+0x18` bits 12..13: 0 asleep, 1 waking, 2 awake);
+    /// `None` without a SceneObject row. `Object.IsAwake` (`0x5CF300`) is state 2 and
+    /// `Object.IsHibernated` (`0x5CF240`) state ≠ 2, nil without a row.
+    fn object_activation_state(&self, guid: u64) -> Option<u8>;
+    /// The `Event.ObjectHibernation` entity test (`0x0246F220`, `docs/reverse_engineer/hibernation_grid.md`
+    /// §6a): false without a SceneObject row; false unless the activation state is exactly `state`;
+    /// then, with a `detail`, the entity's model (own ModelName, else its template's) must be resident
+    /// at that detail level — an entity with no ModelName passes. The detail gate is not modelled: no
+    /// shipped script passes a detail (the one site that forwards one, `MrxUtil.SpawnActor`'s `nDetail`,
+    /// passes nil), so a detail is a hard error.
+    fn object_hibernation_passes(&self, guid: u64, state: u8, detail: Option<i32>) -> bool {
+        if let Some(d) = detail {
+            panic!("Event.ObjectHibernation on {guid:#x} with model detail {d}: the detail gate is not modelled");
+        }
+        self.object_activation_state(guid) == Some(state)
+    }
+    /// The `Event.ObjectHibernation` layer form: true at layer status 3; at status 2 or 4, when every
+    /// entity the (dynamic) layer placed passes the entity test; false otherwise
+    /// (`docs/reverse_engineer/layer_load_code_map.md` §4).
+    fn layer_hibernation_passes(&self, layer: &str, state: u8, detail: Option<i32>) -> bool {
+        let h = layer_hash(layer);
+        let (status, keys) = {
+            let gm = self.guids();
+            let gm = gm.borrow();
+            (gm.layer(h).map(|r| r.status), gm.keys_of_runtime_layer(h))
+        };
+        match status {
+            Some(3) => true,
+            Some(2 | 4) => keys.into_iter().all(|k| self.object_hibernation_passes(u64::from(k), state, detail)),
+            _ => false,
+        }
+    }
     /// `Pg.GetAllLandingZones(nSlot)` — the transit landing pads serving **co-op player slot** `nSlot`,
     /// as `(landing-zone number, pad guid)` pairs in ascending zone order.
     ///
@@ -122,10 +206,11 @@ pub trait EngineHost {
         let _ = slot;
         Vec::new()
     }
-    /// `Pg.Spawn(template, x,y,z,yaw, bLink, bHighDetail)` — instantiate a template actor. This is the
-    /// bottom-out of `MrxUtil.SpawnActor`, and where a template NAME (e.g. `HqInterior`) is resolved
-    /// into geometry. Returns the new actor's GUID (0 on failure → Lua `nil`).
-    fn pg_spawn(&mut self, template: &str, pos: [f32; 3], yaw: f32, high_detail: bool) -> u64;
+    /// `Pg.Spawn` (`0x5D5D20`, Xbox `0x82336B70`) — instantiate a worldentity template as a runtime
+    /// entity: its key, SceneObject row and grid registration, then a direct activation when a viewer
+    /// is in range (`docs/reverse_engineer/hibernation_grid.md` §6 "Runtime spawns"). Returns the new
+    /// key, 0 (Lua `nil`) when retail returns nil; an error is raised into Lua.
+    fn pg_spawn(&mut self, spawn: &SpawnArgs) -> Result<u64, String>;
     /// `Object.SetName` — bind a placed name to a runtime GUID.
     fn object_set_name(&mut self, guid: u64, name: &str);
     /// `Object.SetPosition` — move an actor to a world position.
@@ -145,9 +230,6 @@ pub trait EngineHost {
     /// `MrxUtil._TeleportHero` — move the player to a world position. (Lua binding wired in a later
     /// phase, once its C-binding bottom-out is pinned; the seam is final.)
     fn teleport_hero(&mut self, pos: [f32; 3]);
-    /// The bottom-out of `MrxLayerManager.Add({..})`: request `vz_state_*` world-state layers. (Lua
-    /// binding wired in a later phase; the seam is final.)
-    fn add_layers(&mut self, layers: &[String]);
 
     // ===== The player concern (`Player.*` — 107 cfuncs) → `mercs2_player`. =====
     //
@@ -357,7 +439,7 @@ pub trait EngineHost {
     // `true` (or nil when its second argument is absent), and `DestroyAllWeapons` pushes **nothing**.
     // Shipped scripts branch on those.
     //
-    // The trait stays **scalar-only**: `mercs2_script` depends on `mlua`/`mercs2_ui`/`mercs2_core`/
+    // The trait stays **scalar-only**: `mercs2_script` depends on `mercs2_luac`/`mercs2_ui`/`mercs2_core`/
     // `mercs2_player` and must never name a `mercs2_combat` type. The engine impl does the ECS work.
 
     /// `SetAllWeapons(uChar, …)` — destroy the current loadout, then apply at most 2 primaries + 2
@@ -954,16 +1036,6 @@ pub trait EngineHost {
     fn object_set_visible(&mut self, guid: u64, on: bool) {
         let _ = (guid, on);
     }
-    /// `Object.IsAwake(guid)`.
-    fn object_is_awake(&self, guid: u64) -> bool {
-        let _ = guid;
-        true
-    }
-    /// `Object.IsHibernated(guid)`.
-    fn object_is_hibernated(&self, guid: u64) -> bool {
-        let _ = guid;
-        false
-    }
     /// `Object.GetHibernationDistance(guid)`.
     fn object_hibernation_distance(&self, guid: u64) -> f32 {
         let _ = guid;
@@ -1004,7 +1076,7 @@ pub trait EngineHost {
         let _ = guid;
         Vec::new()
     }
-    /// `Object.Attach(child, parent)` — parent `child` under `parent` in the attachment graph.
+    /// `Object.Attach(parent, hardpoint, child)` — parent `child` under `parent` in the attachment graph.
     fn object_attach(&mut self, child: u64, parent: u64) {
         let _ = (child, parent);
     }
@@ -1251,9 +1323,25 @@ pub trait EngineHost {
     }
 }
 
+/// The layer operation a `Pg.*Layer` request type names. Only the three bindings call this, with
+/// their own constants.
+fn layer_op(op: &str) -> mercs2_core::LayerOp {
+    match op {
+        "Load" => mercs2_core::LayerOp::Load,
+        "Reload" => mercs2_core::LayerOp::Reload,
+        "Unload" => mercs2_core::LayerOp::Unload,
+        other => panic!("layer request type {other:?} is not Load/Reload/Unload"),
+    }
+}
+
+/// A layer's resource name hash (`pandemic_hash_m2`, which case-folds; lookup `FUN_00874150`).
+fn layer_hash(layer: &str) -> u32 {
+    mercs2_formats::hash::pandemic_hash_m2(layer)
+}
+
 /// Shared, single-threaded handle to the engine host. The VM and the engine live on the same thread
 /// (the render loop is `pollster::block_on` on main), so `Rc<RefCell<…>>` is the right sharing model —
-/// no `Send` is required (and `mlua`'s default build does not demand it).
+/// no `Send` is required (and `mercs2_luac`'s `Lua` is not `Send` either).
 pub type SharedHost = Rc<RefCell<dyn EngineHost>>;
 
 /// The engine's **own** Lua bootstrap glue, recovered verbatim from the binary's string pool
@@ -1542,7 +1630,7 @@ pub struct ScriptHost {
 
 impl ScriptHost {
     /// Build a host whose `import`/`inherit` resolve module names against `roots` (recursively indexed
-    /// `.lua` files — e.g. `docs/mercs2-luacd/src`). Installs the compat prelude and the module system.
+    /// `.lua` files — e.g. `docs/mercs2-luacd/src`). Installs the prelude and the module system.
     pub fn new(roots: Vec<PathBuf>) -> LuaResult<Self> {
         Self::with_loader(Loader::new(&roots))
     }
@@ -1554,9 +1642,8 @@ impl ScriptHost {
     }
 
     fn with_loader(loader: Loader) -> LuaResult<Self> {
-        // All stdlibs incl. `debug` (the game Lua uses the 5.1 `getfenv`/`setfenv`, which our compat
-        // shims implement via `debug.getupvalue`/`setupvalue`). This host runs TRUSTED decompiled game
-        // Lua, so the unsafe `debug` library is acceptable.
+        // All stdlibs incl. `debug`. This host runs TRUSTED decompiled game Lua, so the unsafe `debug`
+        // library is acceptable.
         // The full 5.1 standard library, `debug`/`io`/`os` included. Same set retail opened, and
         // the corpus calls into `os.*` (22 sites) and `io.*` (19).
         let lua = Lua::new()?;
@@ -1631,7 +1718,7 @@ impl ScriptHost {
     /// Install the engine binding tables backed by `host`. Idempotent-ish: call once after `new`.
     ///
     /// The surface is modular: one file per engine namespace under [`bindings`], each declaring its
-    /// required cfunc surface and installing this build's real/stub bodies. All 1086 required cfuncs
+    /// required cfunc surface and installing this build's real/stub bodies. All 1092 required cfuncs
     /// are installed and callable; the ones still lacking a real engine-backed body are the "stubs
     /// remaining" tally (see [`Self::register_engine_reported`] / [`bindings::coverage_json`]). The
     /// `Mrx*` modules are *game* Lua and come from the corpus via `import`, not from here.
@@ -1714,14 +1801,6 @@ impl ScriptHost {
         crate::bindings::player::pump_player_callbacks(&self.lua, host)
     }
 
-    /// Fire the `ObjectHibernation` handlers waiting on `(guid, phase)` — the streaming system calls
-    /// this when an object wakes (`"awake"`) or hibernates (`"asleep"`). This is the condition behind
-    /// the awake-gate that opens nearly every object script:
-    /// `Event.Create(Event.ObjectHibernation, {uGuid, "awake"}, SetupEvents, {uGuid})`.
-    pub fn fire_object_hibernation(&self, guid: u64, phase: &str) -> LuaResult<()> {
-        crate::bindings::event::fire_object_hibernation(&self.lua, guid, phase)
-    }
-
     /// Fire the `ObjectDeath` handlers registered for `guid`.
     pub fn fire_object_death(&self, guid: u64) -> LuaResult<()> {
         crate::bindings::event::fire_object_death(&self.lua, guid)
@@ -1740,21 +1819,6 @@ impl ScriptHost {
         crate::bindings::event::fire_object_in_seat(&self.lua, occupant, vehicle, seat, action)
     }
 
-    /// Drain the layer names whose load completed since the last call — the layers whose objects the
-    /// engine should now wake (see `Pg.__flush_layer_loads`). Clears the list.
-    ///
-    /// `Pg.LoadLayer` is Lua-side bookkeeping that instantiates nothing, so this is how the engine
-    /// learns a layer arrived. Unload requests are not reported: they wake nothing.
-    pub fn take_streamed_layers(&self) -> LuaResult<Vec<String>> {
-        let g = self.lua.globals();
-        let Ok(t) = g.get::<mercs2_luac::rt::Table>("__layers_streamed") else { return Ok(Vec::new()) };
-        let out: Vec<String> = t.sequence_values::<String>().flatten().collect();
-        if !out.is_empty() {
-            g.set("__layers_streamed", self.lua.create_table()?)?;
-        }
-        Ok(out)
-    }
-
     /// Restart this VM's random sequence from `seed` — the one state behind `Math.randi`/`Math.randf`
     /// and `math.random` (see [`bindings::ScriptRng`]). Every VM starts at
     /// [`bindings::DEFAULT_RNG_SEED`]; the same seed and the same calls give the same draws.
@@ -1769,6 +1833,15 @@ impl ScriptHost {
     }
 
     /// Advance the `TimerRelative` handlers by `dt` seconds (the engine's per-tick `Event.__pump`).
+    /// Poll the layer request tracker (`Pg.__flush_layer_loads`): fire the callback of every
+    /// `Pg.LoadLayer`/`ReloadLayer`/`UnloadLayer` request that has completed (`FUN_005A28F0`). Called
+    /// from the engine with no Lua frame above it, as retail's script update calls it.
+    pub fn poll_layer_requests(&self) -> LuaResult<()> {
+        let pg: Table = self.lua.globals().get("Pg")?;
+        let flush: mercs2_luac::rt::Function = pg.get("__flush_layer_loads")?;
+        crate::attribution::call_attributed::<()>(&flush, (), "Pg.PollLayerRequests")
+    }
+
     pub fn pump_events(&self, dt: f32) -> LuaResult<()> {
         let ev: Table = self.lua.globals().get("Event")?;
         let pump: mercs2_luac::rt::Function = ev.get("__pump")?;
@@ -1815,18 +1888,24 @@ mod tests {
     #[derive(Default)]
     struct RecordingHost {
         logs: Vec<String>,
-        /// (template, spawn-pos, yaw, high_detail) per `Pg.Spawn`.
-        spawns: Vec<(String, [f32; 3], f32, bool)>,
+        /// Every `Pg.Spawn`'s arguments.
+        spawns: Vec<SpawnArgs>,
         names: Vec<(u64, String)>,
         positions: Vec<(u64, [f32; 3])>,
         yaws: Vec<(u64, f32)>,
-        layers: Vec<String>,
         teleports: Vec<[f32; 3]>,
         next_guid: u64,
+        guids: Rc<RefCell<mercs2_core::GuidMap>>,
     }
     impl EngineHost for RecordingHost {
         fn log(&mut self, _source: &str, msg: &str) {
             self.logs.push(msg.to_string());
+        }
+        fn guids(&self) -> Rc<RefCell<mercs2_core::GuidMap>> {
+            self.guids.clone()
+        }
+        fn object_activation_state(&self, guid: u64) -> Option<u8> {
+            self.guids.borrow().state(u32::try_from(guid).ok()?)
         }
         fn get_level_name(&self) -> String {
             "vz".to_string()
@@ -1837,10 +1916,10 @@ mod tests {
         fn guid_by_name(&mut self, _name: &str) -> u64 {
             0 // "not yet spawned" → binding returns nil, so `if not uGuid` takes the Spawn path
         }
-        fn pg_spawn(&mut self, template: &str, pos: [f32; 3], yaw: f32, high_detail: bool) -> u64 {
+        fn pg_spawn(&mut self, spawn: &SpawnArgs) -> Result<u64, String> {
             self.next_guid += 1;
-            self.spawns.push((template.to_string(), pos, yaw, high_detail));
-            self.next_guid
+            self.spawns.push(spawn.clone());
+            Ok(self.next_guid)
         }
         fn object_set_name(&mut self, guid: u64, name: &str) {
             self.names.push((guid, name.to_string()));
@@ -1853,9 +1932,6 @@ mod tests {
         }
         fn teleport_hero(&mut self, pos: [f32; 3]) {
             self.teleports.push(pos);
-        }
-        fn add_layers(&mut self, layers: &[String]) {
-            self.layers.extend_from_slice(layers);
         }
     }
 
@@ -1989,7 +2065,14 @@ mod tests {
         assert_eq!(hb.logs, vec!["gui loaded".to_string()]);
         assert_eq!(
             hb.spawns,
-            vec![("PmcHqInterior".to_string(), [0.0, 0.0, 0.0], 0.0, true)]
+            vec![SpawnArgs {
+                template: SpawnTemplate::Name("PmcHqInterior".to_string()),
+                pos: [0.0, 0.0, 0.0],
+                yaw: 0.0,
+                remove_alpha_animation: false,
+                net: true,
+                collision_source: 0,
+            }]
         );
         assert_eq!(hb.names, vec![(1u64, "HqInterior".to_string())]);
         assert_eq!(hb.positions, vec![(1u64, [3750.0, 450.0, -3840.0])]);
@@ -2017,7 +2100,7 @@ mod tests {
         // NOT counted as real — retail has real bodies there; we simply have no movie playback yet.
         const EXPECTED_NAMESPACES: usize = 37;
         const EXPECTED_REQUIRED: usize = 1092;
-        // Binding-surface burn-down. ALL 1086 Required cfuncs are installed & callable
+        // Binding-surface burn-down. ALL 1092 Required cfuncs are installed & callable
         // (tests/binding_smoke.rs enforces that). The split is the HONEST progress metric:
         //   real  = BACKED — wired to a real engine mechanism (`mercs2_ai`/`faction`/`population`/
         //           `audio`/…) or reads real host state. A wrong body here is a bug.

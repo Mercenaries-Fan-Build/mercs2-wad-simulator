@@ -1,13 +1,16 @@
 ﻿//! GAME render/boot: the full third-person + free-fly world render path — player avatar, TPS/free
-//! camera toggle, and the 10-stage full load (terrain / heightmap / player / clips / c3 cells /
-//! placements / interior / props). This is GAME code: it spawns the player + the PMC interior + world
+//! camera toggle, and the 19-stage full load (`LOAD_PHASES`: terrain / heightmap / player / clips /
+//! c3 cells / placements / interior / props / …). This is GAME code: it spawns the player + the PMC interior + world
 //! content, driving the asset-agnostic engine through its public API (`mercs2_engine::{wad, mesh, pose,
 //! scene, render, game_world, worldutil}` + `crate::pmc`).
 //!
 //! Recovered from the pre-teardown engine bin (git 78944ed) — it was wrongly deleted with that bin
-//! (it is render/boot code, not the engine). `run_scene_world_loading` is the `--world` / TPS entry.
+//! (it is render/boot code, not the engine). [`Mercs2Game`] (the `Game` impl handed to
+//! `mercs2_engine::app::run`) is the TPS entry.
 
+use std::cell::RefCell;
 use std::collections::HashMap;
+use std::rc::Rc;
 
 use mercs2_core::glam::{Mat4, Quat, Vec3};
 use mercs2_core::{AnimState, Entity, ModelRef, SkinPalette, Transform, World};
@@ -98,18 +101,6 @@ impl mercs2_engine::anim::AnimAssets for StoreAnimAssets<'_> {
 // the game's byte-identical copy was removed so the loader shares the engine's staged progress type that
 // `app::run` renders the bar off.
 
-/// One preloaded ambient-population NPC template: the loaded model (mesh + textures + rig, with its
-/// idle clip already bound to its HIER) plus the resident idle clip name-hash. Built on the load thread
-/// exactly like the player avatar and realized in `setup` — uploaded to the scene (GPU) + AssetStore
-/// (anim) and registered on the runtime, so a population `ModelRef{template_hash}` draws and a spawned
-/// Character animates. `idle_clip == 0` (or `confirm_live`) marks a template whose CharacterName→idle
-/// did not resolve to a per-character clip (fell back to the shared/none idle, or none) — CONFIRM-LIVE.
-struct NpcTemplateLoad {
-    model: LoadedModel,
-    idle_clip: u32,
-    confirm_live: bool,
-}
-
 /// Everything `--world` needs loaded before play: plain CPU data (Send), so it can be produced
 /// on a background thread while the window shows the loading spinner.
 pub struct WorldData {
@@ -119,6 +110,9 @@ pub struct WorldData {
     #[allow(dead_code)]
     terrain: LoadedModel,
     player: Option<LoadedModel>,
+    /// The hero's Upright locomotion clips, resolved from its template's animation identity (see
+    /// `load_world_data`); every one of them is loaded into `player.clips`.
+    player_clips: mercs2_engine::player::LocomotionClips,
     /// The shared swim locomotion clip hash resolved for the hero (loaded into `player.clips`), so the
     /// controller can switch to it in water. `None` if unresolved.
     player_swim_clip: Option<u32>,
@@ -128,20 +122,6 @@ pub struct WorldData {
     cells: Vec<(LoadedModel, [f32; 3])>,
     /// Merged placement-marker mesh (one model + one static entity), when `--placements` is set.
     placements: Option<LoadedModel>,
-    /// Named world markers → world position (lowercased name → pos), harvested from the placement
-    /// records. These are entity-ized at setup so `Pg.GetGuidByName` resolves them to LIVE entities,
-    /// which is how the boot flow places the hero: the master script picks a marker NAME
-    /// (`VzaCon001_Start1` for a new game, `Pmc_Entry1` when resuming) and
-    /// `CreatePlayerCharacter` turns it into a position via `Pg.GetGuidByName` → `Object.GetPosition`.
-    /// Nothing here is a hardcoded coordinate (see `vanilla_boot_load_order.md`).
-    named_locations: std::collections::HashMap<String, [f32; 3]>,
-    /// The world's transit landing pads, from the `LandingZone` COMP joined to each pad's Transform/Name
-    /// (`worldutil::landing_zone_pads`). Entity-ized at setup so `Pg.GetAllLandingZones` — which
-    /// `MrxTransit.Reset` calls on the very first save the boot writes — has real objects to return.
-    /// Independent of `--placements`: the transit system is not a debug view.
-    landing_zones: Vec<mercs2_engine::worldutil::LandingZonePad>,
-    /// Layer name → the objects it contains, so a completed `Pg.LoadLayer` can wake them.
-    layer_index: mercs2_engine::worldutil::LayerIndex,
     /// PMC-subset real-geometry models resolved by name→mesh (currently none — see report).
     pmc_models: Vec<(LoadedModel, [f32; 3], f32)>,
     /// PMC interior instances (`--interior`): resolved interior geometry + authored world Transform
@@ -159,12 +139,6 @@ pub struct WorldData {
     /// The HQ-interior hero spawn, derived the base-game way (actor position + `hp_playerA_enter`
     /// hardpoint) when `spawn_interior`. `None` for the exterior boot (the hero uses a named marker).
     interior_spawn: Option<[f32; 3]>,
-    /// Dynamic `LightObject` point lights harvested from layers_static + the interior state blocks
-    /// (world-space). Fed to `Scene::set_lights`; the scene uploads the nearest set per frame.
-    lights: Vec<mercs2_engine::render::GpuLight>,
-    /// Dynamic `LightObject` **spot** lights (`light_type` 3) from the same inventory, aimed along
-    /// their placement's local −Y. Fed to `Scene::set_spot_lights` (the `_sl` per-pixel cone path).
-    spot_lights: Vec<mercs2_engine::scene::SpotLightGpu>,
     /// Authored `global_particle_*` FX placements (effect name + world position) — each starts an
     /// emitter (classified by name). The faithful producer for environmental particle effects
     /// (fire/smoke/steam). Static environmental *glows* (god-ray light shafts) are split out into
@@ -179,21 +153,24 @@ pub struct WorldData {
     /// completes so scripted `Sound.*` cues resolve (sounddb → soundbank cue → group → wave) and play
     /// real decoded waves. Empty for interior-only.
     resident_audio: mercs2_engine::asset::ResidentAudio,
-    /// The streaming-world runtime (K2 unification): block index + Layer-2 streaming catalog + WAD
-    /// handle, built on this load thread (it is `Send`). REPLACES the static exterior-props + c3-cell
-    /// preload — `setup` uploads its terrain and takes ownership of the [`StreamingWorld`] executor.
-    /// Opaque here (its fields are crate-private to `mercs2_engine`); consumed via `into_streaming_world`.
+    /// The streaming-world runtime (K2 unification): block index, template records and WAD handle,
+    /// built on this load thread (it is `Send`). `setup` uploads its terrain and takes ownership of the
+    /// [`StreamingWorld`] executor, which loads the layers the scripts request — the world's placed
+    /// entities, names, landing pads and lights. Opaque here (its fields are crate-private to
+    /// `mercs2_engine`); consumed via `into_streaming_world`.
     streaming: StreamingWorldData,
     /// The decompressed `layers_static` block (block 29), carried off the load thread so `setup` can feed
     /// its authored `PopulationSimpleSpawner` COMPs into the runtime's population manager
     /// (`GameRuntime::load_population_spawners`). Without this the spawner pool stays empty → no ambient
     /// crowds/traffic ever spawn. It is the SAME `ls` the terrain/placement/light passes read above.
     population_block: Vec<u8>,
-    /// The bounded set of ambient-population NPC templates (`FACTION_TEMPLATE_NAMES`), preloaded on the
-    /// load thread: mesh + textures + rig + bound idle clip per resolvable template. Realized in `setup`
-    /// (scene + AssetStore + runtime registration) so population-spawned Characters render + animate.
-    /// Shorter than 7 if any template failed to build (each failure is logged, never aborts the load).
-    npc_templates: Vec<NpcTemplateLoad>,
+    /// The `PopulationList` unit lists and unit templates (`game_world::PopulationData`), handed to the
+    /// runtime in `setup` before its spawners register.
+    population: mercs2_engine::game_world::PopulationData,
+    /// Every model a `layers_static` spawner's list can spawn, built on the load thread with each
+    /// Character unit's idle bound (`game_world::load_population_models`). Realized in `setup` (scene +
+    /// AssetStore + runtime registration) so population-spawned units render and animate.
+    population_models: Vec<mercs2_engine::game_world::PopulationModel>,
 }
 
 /// The loader's real phases, in order — the SINGLE SOURCE OF TRUTH for the loading bar's total (no
@@ -201,7 +178,7 @@ pub struct WorldData {
 /// (and its matching `progress.step`) keeps the bar honest automatically. These cover the WHOLE load,
 /// including the tail (watermap / resident audio / hero spawn) that used to run AFTER the bar hit 100%.
 const LOAD_PHASES: &[&str] = &[
-    "terrain", "heightmap", "vertices", "player", "clips", "npc templates", "cells", "placements", "interior", "props",
+    "terrain", "heightmap", "vertices", "player", "clips", "population units", "cells", "placements", "interior", "props",
     "interior props", "lights + fx", "watermap", "resident audio", "hero spawn",
     // The streaming-world build (`load_streaming_world_data`) steps these four itself — the K2
     // executor's block index + Layer-2 catalog, produced on this same load thread.
@@ -270,7 +247,7 @@ pub(crate) fn load_world_data(
     recruits: crate::pmc::RecruitUnlocks,
     stockpile: &crate::pmc::Stockpile,
     player_models: &[String],
-    overlays: &[String],
+    hero_template: &str,
     progress: &LoadProgress,
 ) -> Result<WorldData, String> {
     // Cohesive asset layer: base vz.wad + auto-discovered `vz-patch.wad` overlay (the game's patch
@@ -325,25 +302,20 @@ pub(crate) fn load_world_data(
     // SAVE (hero + wardrobe outfit, `crate::hero::player_model_candidates`) — candidates are
     // tried in order (saved outfit → hero Original → proven-good fallback).
     // NOTE: world scale and facing are first-pass and not yet calibrated.
-    // animate=false: skip load_from_wad's own animgroup scan — all three clips (idle/walk/run)
-    // come from ONE cached scan below instead of three full-archive passes (~20 s -> ~7 s load).
+    // animate=false: skip load_from_wad's own animgroup scan — all the hero's clips come from ONE
+    // cached scan below instead of a full-archive pass each.
     //
-    // Per-character idle, DATA-DRIVEN (was hardcoded to Jennifer's `0x24F8C8E6` for everyone —
-    // the hip-swing that warped Mattias). The merc identity is the hero's base model, always in
-    // the candidate list (`pmc_hum_{mattias,chris,jen}`). Resolve their real idle through the
-    // resident AnimationLookup; fall back to the validated per-merc hash, then the old constant.
-    let merc = if player_models.iter().any(|m| m.contains("_jen")) {
-        "jennifer"
-    } else if player_models.iter().any(|m| m.contains("_chris")) {
-        "chris"
-    } else {
-        "mattias"
-    };
-    let character = mercs2_formats::anim_select::AnimSelector::character_name(merc);
-    let idle_clip = resolve_player_idle(assets.base_mut(), character)
-        .or_else(|| mercs2_formats::anim_select::fallback_idle(character))
-        .unwrap_or(0x24F8_C8E6);
-    println!("[world] player merc '{merc}' (CharacterName 0x{character:08X}) → idle clip 0x{idle_clip:08X}");
+    // The hero's locomotion clips, DATA-DRIVEN: the hero template's `HumanAnimationSet` identity
+    // (Gender + CharacterName) keys the AnimationLookup rows of retail's Upright locomotion handles
+    // (idle / walk / run). The hero carries no weapon here — the reimpl has no inventory equip yet —
+    // so the key's equipment class is `Bare`; an equipped weapon's class selects its own rows.
+    let anim = mercs2_engine::game_world::HumanAnimData::load(&mut assets)?;
+    let hero_identity = anim.identity_of_template(hero_template)?;
+    let player_clips = anim.locomotion(hero_identity, mercs2_formats::anim_select::EQUIPMENT_BARE)?;
+    println!(
+        "[world] hero template {hero_template:?} {hero_identity:08X?} → idle 0x{:08X} walk 0x{:08X} run 0x{:08X}",
+        player_clips.idle, player_clips.walk, player_clips.run
+    );
 
     let mut player_swim_clip: Option<u32> = None;
     // Held weapon: NOT loaded here (see the player-load block below) — the equipped weapon comes from
@@ -377,7 +349,7 @@ pub(crate) fn load_world_data(
             if swim_clip != 0 {
                 println!("[world] player swim clip 0x{swim_clip:08X} (shared Swim-stance anim)");
             }
-            let wanted = [idle_clip, 0x5368_2784, 0x867B_166D, swim_clip]; // idle (per-merc), walk, run, swim
+            let wanted = [player_clips.idle, player_clips.walk, player_clips.run, swim_clip];
             let names = ["idle", "walk", "run", "swim"];
             player_swim_clip = (swim_clip != 0).then_some(swim_clip);
 
@@ -401,7 +373,12 @@ pub(crate) fn load_world_data(
                         );
                         clips.push(ca);
                     }
-                    None => println!("[world] {name} clip 0x{h:08X} not found"),
+                    None if name == "swim" => println!("[world] {name} clip 0x{h:08X} not found"),
+                    None => {
+                        return Err(format!(
+                            "hero {hero_template:?}: {name} clip 0x{h:08X} is in no animgroup that binds to the model"
+                        ))
+                    }
                 }
             }
             Some(LoadedModel { hash: h, verts: v, indices: i, draws: d, textures: t, skin: s, clips, machine: None, hier: Vec::new() })
@@ -414,63 +391,24 @@ pub(crate) fn load_world_data(
     };
     progress.step("clips");
 
-    // ---- Ambient-population NPC templates (preload) ----
-    // Make the BOUNDED set of faction human templates the population spawns (FACTION_TEMPLATE_NAMES)
-    // resident at boot, the SAME way the hero is loaded: build each mesh+textures+rig via `load_from_wad`
-    // (identity fit → world metres, like the player), then resolve + bind its idle clip through the SAME
-    // resident-AnimationLookup path (`AnimSelector` CharacterName → `resolve_player_idle` →
-    // `load_clips_for_rig`). `setup` uploads each to the scene (GPU) + AssetStore (anim) and registers it
-    // on the runtime, so a population `ModelRef{template_hash}` draws + a spawned Character animates.
-    // A template that fails to build is skipped (logged), never aborting the load.
-    const NONE_ANIM_KEY: u32 = 0x27DE_7135; // shared/character-agnostic AnimationLookup key (idle fallback)
-    let mut npc_templates: Vec<NpcTemplateLoad> = Vec::new();
-    for name in mercs2_engine::population::slot_table::FACTION_TEMPLATE_NAMES {
-        let hash = mercs2_formats::hash::pandemic_hash_m2(name);
-        // Build via `game_world::load_model_by_hash` — the SAME loader the population/`slot_table`
-        // verification uses. It handles the NON-PRIMARY human containers (e.g. `civ_hum_beachfemale_a`,
-        // `vz_hum_soldierelite_a`) that `load_from_wad` (primary-model path) rejects — which is why the
-        // default civilian was invisible before.
-        let Some((mut m, _bmin, _bmax)) = mercs2_engine::game_world::load_model_by_hash(assets.base_mut(), hash)
-        else {
-            println!("[world] NPC template {name} (0x{hash:08X}) failed to build; skipping");
-            continue;
-        };
-        // World scale + identity fit, matching the player so NPCs stand at hero size.
-        m.skin.center = [0.0, 0.0, 0.0];
-        m.skin.scale = 1.0;
-        let hier: Vec<u32> = m.skin.rig.iter().map(|b| b.name_hash).collect();
-        // Idle via the resident AnimationLookup keyed by the template's CharacterName; then the per-merc
-        // static fallback (misses for NPCs); then the shared NONE-key idle → CONFIRM-LIVE.
-        let character = mercs2_formats::anim_select::AnimSelector::character_name(name);
-        let mut confirm_live = false;
-        let resolved_idle = resolve_player_idle(assets.base_mut(), character)
-            .or_else(|| mercs2_formats::anim_select::fallback_idle(character))
-            .or_else(|| {
-                confirm_live = true;
-                resolve_player_idle(assets.base_mut(), NONE_ANIM_KEY)
-            })
-            .unwrap_or(0);
-        // Bind the resolved idle to THIS model's HIER (the same loader the hero's clips use). Keep only
-        // clips that actually decoded + bound; the registered idle is the one that loaded.
-        let wanted: Vec<u32> = if resolved_idle != 0 { vec![resolved_idle] } else { Vec::new() };
-        let clips: Vec<ClipAnim> = load_clips_for_rig(assets.base_mut(), &hier, &wanted)
-            .into_iter()
-            .flatten()
-            .collect();
-        let idle_clip = clips.first().map(|c| c.name_hash).unwrap_or(0);
-        let confirm_live = confirm_live || idle_clip == 0;
-        m.clips = clips;
-        m.hier = Vec::new();
-        println!(
-            "[world] NPC template {name} (0x{:08X}): {} bones, idle 0x{idle_clip:08X}{}",
-            m.hash,
-            m.skin.rig.len(),
-            if confirm_live { " (CONFIRM-LIVE: shared/no idle)" } else { "" }
-        );
-        npc_templates.push(NpcTemplateLoad { model: m, idle_clip, confirm_live });
+    // ---- Ambient-population units (preload) ----
+    // The units the population can spawn come from its data: each `layers_static` spawner's `UnitList`
+    // names a `PopulationList`, whose entries are unit templates. Register the spawners against the
+    // lists here (a scratch population, so a bad spawner fails the load) to learn every reachable unit,
+    // then build each unit's model once — a Character's with its own unarmed idle bound — so `setup`
+    // only uploads.
+    let population = mercs2_engine::game_world::PopulationData::load(&mut assets)?;
+    let mut scratch = mercs2_engine::population::PopulationWorld::new();
+    scratch.units = population.catalog;
+    mercs2_engine::worldutil::register_population_spawners(&ls, &mut scratch)?;
+    let units = mercs2_engine::game_world::population_units(&scratch);
+    let population = mercs2_engine::game_world::PopulationData { catalog: std::mem::take(&mut scratch.units), units: population.units };
+    let population_models = mercs2_engine::game_world::load_population_models(assets.base_mut(), &anim, &population, &units)?;
+    for pm in &population_models {
+        println!("[world] population model 0x{:08X}: {} bones, units {:08X?}", pm.model.hash, pm.model.skin.rig.len(), pm.units);
     }
-    println!("[world] NPC templates built: {}/7", npc_templates.len());
-    progress.step("npc templates");
+    println!("[world] population units built: {} units over {} models", units.len(), population_models.len());
+    progress.step("population units");
 
     // Static c3-cell preload REMOVED (K2 unification): the `StreamingWorld` executor now LOADs c3
     // streaming cells by camera distance each frame, so a fixed near-spawn preload would double-load
@@ -479,14 +417,6 @@ pub(crate) fn load_world_data(
     let _ = load_cells;
     let cells: Vec<(LoadedModel, [f32; 3])> = Vec::new();
     progress.step("cells (streaming)");
-
-    // The world's name → position index, over EVERY placement-bearing block (not just `layers_static`).
-    //
-    // Deliberately NOT behind `--placements`. That flag gates a debug *marker mesh*; this is the table
-    // `Pg.GetGuidByName` resolves against — 1240 corpus call sites, and the mission scripts' only way to
-    // reach an authored entity. Gating it made name resolution a rendering option, which is why
-    // `VzaCon001` parked on `VzaCon001_StartingBoat` in every run that did not pass the flag.
-    let named_locations = mercs2_engine::worldutil::world_name_index(assets.base_mut(), &ls);
 
     // World placements (layers_static block 29): a merged marker mesh + the interior-hunt report,
     // plus an attempt to resolve the PMC-subset to real geometry (opt-in via `--placements`).
@@ -562,33 +492,18 @@ pub(crate) fn load_world_data(
     };
     progress.step(if spawn_interior { "interior props" } else { "interior props (skipped)" });
 
-    // Dynamic point lights: harvest `LightObject` COMPs (world-space) from layers_static (exterior) +
-    // the interior state block (the villa's `Light_small_*`). The block cache makes the re-decompress
-    // of the interior block a hit. Fed to Scene::set_lights so the shell/props are actually lit.
-    let ls_lights = mercs2_formats::placement::light_inventory(&ls);
-    let mut lights = mercs2_engine::game_world::placed_lights_to_gpu(&ls_lights);
-    // The spot half of the same inventory (light_type 3) — aimed along each placement's local -Y.
-    let mut spot_lights = mercs2_engine::game_world::placed_spot_lights_to_gpu(&ls_lights);
-    // Environmental FX placements (Name-keyed `global_particle_*` Transforms) in the interior. These
-    // split by kind: static environmental light-shaft glows (god rays) become additive glow cards
-    // resolved against their effect template here (WAD open); fire/smoke/steam stay as particle
-    // emitters classified by name at render-thread start.
+    // Placed lights are not harvested here: the streaming world sets the scene's lights from each
+    // loaded layer's `LightObject`s. Environmental FX placements (Name-keyed `global_particle_*`
+    // Transforms) in the interior split by kind: static environmental light-shaft glows (god rays)
+    // become additive glow cards resolved against their effect template here (WAD open); fire/smoke/
+    // steam stay as particle emitters classified by name at render-thread start.
     let mut particle_fx: Vec<(mercs2_engine::particles::EmitterDesc, [f32; 3])> = Vec::new();
     let mut glow_cards: Vec<mercs2_engine::particles::GlowCard> = Vec::new();
     if spawn_interior {
         if let Ok(dec) = wad::decompress_block_index(assets.base_mut(), PMC_INTERIOR_STATE_BLOCK) {
-            let int_lights = mercs2_formats::placement::light_inventory(&dec);
-            lights.extend(mercs2_engine::game_world::placed_lights_to_gpu(&int_lights));
-            spot_lights.extend(mercs2_engine::game_world::placed_spot_lights_to_gpu(&int_lights));
             for p in mercs2_formats::placement::load_placements(&dec).unwrap_or_default() {
                 let raw = p.name.as_deref().unwrap_or("");
                 let name = raw.split(" 0x").next().unwrap_or(raw).trim_start_matches('_');
-                // Named interior lights (`Light_small_<hue>[_dim]`) carry no LightObject COMP — their
-                // colour/brightness is the NAME convention. Turn each into a coloured point light.
-                if let Some(l) = interior_named_light(name, p.pos) {
-                    lights.push(l);
-                    continue;
-                }
                 if !name.starts_with("global_particle") {
                     continue;
                 }
@@ -612,8 +527,8 @@ pub(crate) fn load_world_data(
         }
     }
     println!(
-        "[world] dynamic lights harvested: {} point + {} spot; particle placements: {}; light-shaft glows: {}",
-        lights.len(), spot_lights.len(), particle_fx.len(), glow_cards.len()
+        "[world] particle placements: {}; light-shaft glows: {}",
+        particle_fx.len(), glow_cards.len()
     );
     // The lights/FX harvest above (incl. the interior state-block decompress) is real load work that
     // used to run AFTER the bar hit 100% — count it as the final stage so the progress reflects reality.
@@ -658,34 +573,20 @@ pub(crate) fn load_world_data(
     };
     progress.step("hero spawn");
 
-    // Transit landing pads (`LandingZone` COMP). Read unconditionally: `MrxTransit.Reset` runs on the
-    // boot's first save regardless of any debug flag, and `SaveSingleton` (mrxtransit.lua:367) iterates
-    // `_tLandingZones` with none of the `if not _tLandingZones` guards its siblings carry — an empty
-    // list there is a shipped-bug crash, not a degraded view.
-    let landing_zones = mercs2_engine::worldutil::landing_zone_pads(&ls);
-    println!("[world] {} transit landing pads read from LandingZone COMP", landing_zones.len());
-
-    // Which objects each streamable layer brings in — the data behind `Event.ObjectHibernation`.
-    // Layers are ordinary ASET assets (type 9), so this is a straight archive read, not a side table.
-    let layer_index = mercs2_engine::worldutil::layer_index(assets.base_mut());
-
-    // Streaming world (K2 unification): build the whole block index + Layer-2 streaming catalog on THIS
-    // load thread (it is `Send`), folding in the save's vz_state overlays. This REPLACES the static
-    // exterior props + c3 preload removed above; `setup` uploads its terrain and drives the executor.
-    // Budgets/radii mirror the free-fly boot (`FreeFlyGame::spawn_loader`) so both boots stream alike.
-    // Its four `progress.step`s are the last four `LOAD_PHASES` ("stream …") — the bar stays honest.
+    // Streaming world (K2 unification): build the block index and template records on THIS load
+    // thread (it is `Send`). `setup` uploads its terrain and drives the executor, which loads the layers
+    // the boot scripts request (`vz_base`, the static list, the save's layers). Budgets/radii mirror the
+    // free-fly boot (`FreeFlyGame::spawn_loader`) so both boots stream alike. Its four
+    // `progress.step`s are the last four `LOAD_PHASES` ("stream …") — the bar stays honest.
     let stream_cfg = mercs2_core::streaming::StreamingConfig {
         block_unload_margin: 200.0,
         block_budget: 2,
-        entity_budget: 6,
-        entity_hysteresis: 15.0,
-        entity_scan_cap: 700.0,
-        grid_cell: 128.0,
         ..mercs2_core::streaming::StreamingConfig::default()
     };
-    let streaming = mercs2_engine::game_world::load_streaming_world_data(wadpath, stream_cfg, overlays, progress)?;
+    let templates = mercs2_engine::worldutil::TemplateRecords::load(&mut assets)?;
+    let streaming = mercs2_engine::game_world::load_streaming_world_data(wadpath, stream_cfg, templates, progress)?;
 
-    Ok(WorldData { terrain, player, player_swim_clip, weapon, weapon_hand_bone, cells, placements, named_locations, landing_zones, layer_index, pmc_models, interior, props, interior_props, hmap, watermap, interior_spawn, lights, spot_lights, particle_fx, glow_cards, resident_audio, streaming, population_block: ls, npc_templates })
+    Ok(WorldData { terrain, player, player_clips, player_swim_clip, weapon, weapon_hand_bone, cells, placements, pmc_models, interior, props, interior_props, hmap, watermap, interior_spawn, particle_fx, glow_cards, resident_audio, streaming, population_block: ls, population, population_models })
 }
 
 /// Whether a `global_particle_*` name is a static environmental light-shaft ("god ray") FX. These are
@@ -695,48 +596,6 @@ pub(crate) fn load_world_data(
 fn is_light_shaft_fx(name: &str) -> bool {
     let n = name.to_ascii_lowercase();
     n.contains("godray") || n.contains("lightshaft") || n.contains("light_shaft") || n.contains("_env_light")
-}
-
-/// A named interior light placement (`Light_small_<hue>[_dim]`) → a coloured point light. These have
-/// no `LightObject` COMP; the game reads the light from the NAME. Colour = hue token, brightness =
-/// `dim`, range = `small`. Returns `None` for non-light names. Values are first-pass tunables.
-fn interior_named_light(name: &str, pos: [f32; 3]) -> Option<mercs2_engine::render::GpuLight> {
-    let n = name.to_ascii_lowercase();
-    // Two kinds of interior light: authored `Light_<hue>` markers, and lamp/stage-light PROPS that are
-    // also physical meshes (the floating military lamp heads) — both illuminate the room.
-    let is_lamp = n.contains("lamppost")
-        || n.contains("portablelight")
-        || n.contains("spotlight")
-        || n.contains("stagelight");
-    if !n.starts_with("light_") && !is_lamp {
-        return None;
-    }
-    let color = if n.contains("darkblue") {
-        [0.18, 0.30, 0.85]
-    } else if n.contains("blue") {
-        [0.35, 0.55, 1.0]
-    } else if n.contains("yellow") {
-        [1.0, 0.82, 0.42]
-    } else if n.contains("red") {
-        [1.0, 0.32, 0.22]
-    } else if n.contains("green") {
-        [0.40, 1.0, 0.45]
-    } else {
-        [1.0, 0.95, 0.85] // warm white (lamps + default)
-    };
-    // Intensity multiplies the surface albedo, so these stay < 1 (accent) to not blow out the baked
-    // room. Lamp/stage-light PROPS are the room's REAL sources → brighter + wider than the small
-    // authored markers. All tunable.
-    let (intensity, radius) = if is_lamp {
-        (0.60, 12.0)
-    } else if n.contains("dim") {
-        (0.20, 7.0)
-    } else if n.contains("small") {
-        (0.45, 7.0)
-    } else {
-        (0.45, 12.0)
-    };
-    Some(mercs2_engine::render::GpuLight::point(pos, color, intensity, radius))
 }
 
 /// Classify a `global_particle_*` effect name → a billboard [`EmitterDesc`] for the particle sim.
@@ -1124,6 +983,14 @@ struct ActiveRagdoll {
     model_pose: Vec<[[f32; 4]; 4]>,
 }
 
+/// The character the local player possesses is the game's own player entity (bound in `setup`), so the
+/// streamer must build none for it.
+fn adopt_possessed(host: &mercs2_engine::script_host::GameScriptHost, stream: &RefCell<StreamingWorld>) {
+    if let Some(c) = host.player().roster.local().map(|p| p.character).filter(|&c| c != 0) {
+        stream.borrow_mut().adopt(u32::try_from(c).unwrap_or_else(|_| panic!("character key {c:#x} is not a u32 key")));
+    }
+}
+
 /// The engine `mesh::BoneRig` and the anim seam's `anim::pose::BoneRig` are field-identical but distinct
 /// types; the ragdoll seed/read-back speak the anim one, so copy the fields across.
 fn to_anim_rig(rig: &[mesh::BoneRig]) -> Vec<mercs2_engine::anim::pose::BoneRig> {
@@ -1195,12 +1062,10 @@ pub struct Mercs2Game {
     /// one unit ([`STATIC_COLLISION_KEY`]) in `setup`; the streamer then feeds per-unit WAKE/HIBERNATE
     /// deltas alongside it.
     collision_tris: Vec<[Vec3; 3]>,
-    /// The save's vz_state overlay layer names (set in `apply_boot`) — passed to the streaming loader as
-    /// the interior/staging/faction layers folded into the streaming catalog.
-    overlays: Vec<String>,
-    /// The reusable streaming executor (K2 unification), owned once `setup` hands it the loaded state.
-    /// `None` before load, and on the static `--interior` boot (which streams nothing).
-    stream: Option<StreamingWorld>,
+    /// The reusable streaming executor (K2 unification), owned once `setup` hands it the loaded state,
+    /// and shared with the script host for `Pg.Spawn`. `None` before load, and on the static
+    /// `--interior` boot (which streams nothing after the boot).
+    stream: Option<Rc<RefCell<StreamingWorld>>>,
     hmap: Option<HeightMap>,
     watermap: Option<mercs2_engine::water_sim::Watermap>,
     fire_cooldown: f32,
@@ -1229,13 +1094,11 @@ impl Mercs2Game {
         player_models: Vec<String>,
         menu: Option<crate::menu::Menu>,
     ) -> Self {
-        use std::cell::RefCell;
-        use std::rc::Rc;
-        let guids = Rc::new(RefCell::new(mercs2_core::GuidMap::new()));
         // Persistent mission-Lua host. The live World is attached in `setup` (it's owned by the engine
-        // loop, not available at construction) so `Object.*`/`Pg.GetGuidByName` resolve real entities;
-        // seed the economy from the save now.
+        // loop, not available at construction) so `Object.*` resolve real entities; the host's entity-key
+        // registry is shared with the streaming world. Seed the economy from the save now.
         let script_host = Rc::new(RefCell::new(mercs2_engine::script_host::GameScriptHost::new("vz")));
+        let guids = script_host.borrow().guids();
         script_host.borrow_mut().set_cash(stockpile.cash);
         let script = mercs2_engine::script_host::resident_script_host(script_host.clone());
         if script.is_some() {
@@ -1288,7 +1151,6 @@ impl Mercs2Game {
             use_prev: false,
             veh_lut: mercs2_engine::vehicle::DonutLut::new(),
             collision_tris: Vec::new(),
-            overlays: Vec::new(),
             stream: None,
             hmap: None,
             watermap: None,
@@ -1337,13 +1199,9 @@ impl Mercs2Game {
         self.stockpile = cfg.stockpile;
         self.player_models = cfg.models;
         self.hero_character = cfg.hero_character;
-        // The save's vz_state world-state overlays drive the streaming catalog (interior/staging/faction
-        // layers). Captured BEFORE `cfg.save` is moved into the host below — matching what main.rs
-        // computes for the `--stream` free-fly boot (INTERIOR_OVERLAYS is empty, so it's just the save's
-        // layers). A new game (`save = None`) streams the base world only.
-        self.overlays = cfg.save.as_ref().map(|s| s.layers.clone()).unwrap_or_default();
         // Hand the save (or nothing) to the script host BEFORE the boot flow runs — `run_boot_flow`
-        // answers `Pg.LoadGame` from it, and that answer picks the branch.
+        // answers `Pg.LoadGame` from it, and that answer picks the branch. The save's world-state layers
+        // (`tLayerData`) are requested by `MrxLayerManager.LoadSingleton` during that boot.
         self.script_host.borrow_mut().set_boot_save_state(cfg.save);
         println!("[shell] boot: {} [contract {}]", cfg.label, cfg.contract);
     }
@@ -1469,10 +1327,10 @@ impl mercs2_engine::app::Game for Mercs2Game {
         let recruits = self.recruits.clone();
         let stockpile = self.stockpile.clone();
         let models = self.player_models.clone();
-        let overlays = self.overlays.clone();
+        let hero = self.hero_character.clone();
         std::thread::spawn(move || {
             let t0 = std::time::Instant::now();
-            let r = load_world_data(&wadpath, lc, lp, si, lpr, recruits, &stockpile, &models, &overlays, &progress);
+            let r = load_world_data(&wadpath, lc, lp, si, lpr, recruits, &stockpile, &models, &hero, &progress);
             if r.is_ok() {
                 println!("[load] done in {:.1}s", t0.elapsed().as_secs_f64());
             }
@@ -1483,9 +1341,9 @@ impl mercs2_engine::app::Game for Mercs2Game {
 
     fn setup(&mut self, ctx: &mut mercs2_engine::app::Ctx, mut data: WorldData) {
         const IDENTITY: [[f32; 4]; 4] = GAME_IDENTITY;
-        // Marry the Lua host to the engine's live World (the one the renderer draws): now `Object.*` /
-        // `Pg.GetGuidByName` and every spawn below land in the World that actually renders.
-        self.script_host.borrow_mut().attach_world(ctx.world.clone(), self.guids.clone());
+        // Marry the Lua host to the engine's live World (the one the renderer draws): now `Object.*` and
+        // every spawn below land in the World that actually renders.
+        self.script_host.borrow_mut().attach_world(ctx.world.clone());
         let scene = &mut *ctx.scene;
         // Re-apply the atmosphere now that the boot branch IS known (see `config`): a new game starts
         // outdoors at the opening contract and must not inherit the interior's sunless dark fog.
@@ -1498,8 +1356,13 @@ impl mercs2_engine::app::Game for Mercs2Game {
         // Feed the `layers_static` `PopulationSimpleSpawner` COMPs into the runtime's population manager
         // (the realize path — `tick_population` → resolver — is already wired in `fixed_update`). Before
         // this the spawner pool was empty, so no crowds/traffic ever ran. Base-game content, loaded on
-        // every boot branch (the spawners live in the always-present base layer).
-        let pop_spawners = self.runtime.load_population_spawners(&data.population_block);
+        // every boot branch (the spawners live in the always-present base layer). The load thread already
+        // registered these same spawners against the same lists, so a failure here is a broken invariant.
+        self.runtime.set_population_data(data.population);
+        let pop_spawners = self
+            .runtime
+            .load_population_spawners(&data.population_block)
+            .unwrap_or_else(|e| panic!("[population] {e}"));
         println!("[world] population: registered {pop_spawners} ambient spawners from layers_static");
         // ---- Provisional hero spawn ----
         // The AUTHORITATIVE spawn comes from the boot Lua flow below (the master script picks the start
@@ -1512,26 +1375,50 @@ impl mercs2_engine::app::Game for Mercs2Game {
             println!("[world] provisional spawn: HQ interior (actor + hardpoint) -> ({:.1}, {:.1}, {:.1})", self.player.pos.x, self.player.pos.y, self.player.pos.z);
         }
 
-        // Entity-ize the named world markers into the live World + guidmap (so `Pg.GetGuidByName`
-        // resolves real entities), BEFORE the boot Lua flow's CreatePlayerCharacter → GetGuidByName.
-        mercs2_engine::script_host::register_named_markers(
-            &self.script_host,
-            &ctx.world,
-            &data.named_locations,
-        );
-        // The layer → objects index, AFTER the markers: it wakes objects by name through the guidmap,
-        // so the entities those names resolve to have to exist first.
-        self.script_host.borrow_mut().set_layer_index(data.layer_index.clone());
-        // The transit landing pads, AFTER the named markers so a pad that carries a `Name` reuses that
-        // one entity instead of creating a second at the same spot.
-        mercs2_engine::script_host::register_landing_zones(
-            &self.script_host,
-            &ctx.world,
-            &data.landing_zones,
-        );
+        // The streaming world over the host's entity-key registry (K2 unification). It starts empty:
+        // placed entities, their names, the landing pads and the lights arrive by the layers the boot
+        // scripts request. `into_streaming_world` hands back the low-res per-tile terrain (the streamer
+        // hides a tile when its hi-res terrainmesh wakes). In --interior the room sits above the SE
+        // terrain peak and the exterior would occlude it, so that boot keeps the exterior out of the
+        // scene: its world steps headless during the boot and is not kept.
+        let interior_only = std::env::args().any(|a| a == "--interior");
+        let (stream_terrain, stream) = data.streaming.into_streaming_world(self.guids.clone());
+        let stream = Rc::new(RefCell::new(stream));
+        self.script_host.borrow_mut().attach_stream(stream.clone());
+        if !interior_only {
+            scene.load_model(
+                stream_terrain.hash,
+                &stream_terrain.verts,
+                &stream_terrain.indices,
+                &stream_terrain.draws,
+                &stream_terrain.textures,
+                &stream_terrain.skin,
+            );
+            ctx.world.borrow_mut().spawn((
+                Transform::IDENTITY,
+                ModelRef { model: stream_terrain.hash },
+                AnimState::default(),
+                SkinPalette { mats: vec![IDENTITY] },
+            ));
+        }
         if let Some(sh) = &self.script {
             self.script_host.borrow_mut().set_boot_context(self.hero_character.clone());
-            mercs2_engine::script_host::run_boot_flow(sh, &self.script_host, &self.hero_character);
+            // Between pumps the world performs the scripts' layer requests and, once the hero exists,
+            // steps around it, so what the scripts wait on (the opening boat) activates.
+            let host = self.script_host.clone();
+            let world = ctx.world.clone();
+            mercs2_engine::script_host::run_boot_flow(sh, &self.script_host, &self.hero_character, &mut || {
+                let viewer = host.borrow().hero_position();
+                adopt_possessed(&host.borrow(), &stream);
+                let mut stream = stream.borrow_mut();
+                match viewer {
+                    Some(v) if !interior_only => stream.step(&mut *scene, &mut world.borrow_mut(), v, &|_| false),
+                    Some(v) => stream.step_headless(v, &|_| false),
+                    None => stream.apply_layer_ops(&|_| false),
+                }
+                .unwrap_or_else(|e| panic!("[stream] {e}"));
+                stream.settled()
+            });
             // The game's own answer, unconditionally. `Pg.Spawn(hero, x,y,z)` at the end of
             // `CreatePlayerCharacter` is where retail places the hero, so whatever it produced wins over
             // the provisional guess above — including on the interior boot, where the flow resolves
@@ -1549,31 +1436,10 @@ impl mercs2_engine::app::Game for Mercs2Game {
             }
         }
 
-        // Base streaming terrain + take ownership of the executor (K2 unification). `into_streaming_world`
-        // hands back the low-res per-tile terrain (the streamer hides a tile when its hi-res terrainmesh
-        // wakes) and the overlay lights, then yields the `StreamingWorld`. Skipped in --interior: the room
-        // sits above the SE terrain peak and the exterior would occlude it, so that boot stays fully
-        // static (no streaming) — preserving the interior-orbit debug view.
-        let interior_only = std::env::args().any(|a| a == "--interior");
-        let (stream_terrain, stream_lights, stream) = data.streaming.into_streaming_world();
-        if !interior_only {
-            // Fold the overlay-layer point lights (which the static harvest does not cover) into the
-            // scene light set before `set_lights` runs below.
-            data.lights.extend(stream_lights);
-            scene.load_model(
-                stream_terrain.hash,
-                &stream_terrain.verts,
-                &stream_terrain.indices,
-                &stream_terrain.draws,
-                &stream_terrain.textures,
-                &stream_terrain.skin,
-            );
-            ctx.world.borrow_mut().spawn((
-                Transform::IDENTITY,
-                ModelRef { model: stream_terrain.hash },
-                AnimState::default(),
-                SkinPalette { mats: vec![IDENTITY] },
-            ));
+        if interior_only {
+            // Not kept, so the lights of the layers it loaded are presented once here.
+            stream.borrow().present_lights(scene);
+        } else {
             self.stream = Some(stream);
         }
 
@@ -1676,13 +1542,9 @@ impl mercs2_engine::app::Game for Mercs2Game {
 
         // Player avatar.
         if let Some(p) = data.player {
-            self.player.has_run = p.clips.iter().any(|c| c.name_hash == mercs2_engine::player::CLIP_RUN);
+            let loco = data.player_clips;
+            self.player.clips = Some(loco);
             self.player.swim_clip = data.player_swim_clip.unwrap_or(0);
-            self.player.idle = p.clips.iter().map(|c| c.name_hash)
-                .find(|h| *h != mercs2_engine::player::CLIP_WALK
-                    && *h != mercs2_engine::player::CLIP_RUN
-                    && Some(*h) != data.player_swim_clip)
-                .unwrap_or(mercs2_engine::player::CLIP_IDLE);
             for c in &p.clips {
                 let d = c.clip.duration.max(1e-3);
                 let sp = pose::clip_root_speed(
@@ -1693,10 +1555,10 @@ impl mercs2_engine::app::Game for Mercs2Game {
                     c.num_transform_tracks,
                     d * 0.999,
                 );
-                if c.name_hash == mercs2_engine::player::CLIP_WALK {
+                if c.name_hash == loco.walk {
                     self.player.dur_walk = d;
                     if sp > 0.1 { self.player.walk_speed = sp; }
-                } else if c.name_hash == mercs2_engine::player::CLIP_RUN {
+                } else if c.name_hash == loco.run {
                     self.player.dur_run = d;
                     if sp > 0.1 { self.player.run_speed = sp; }
                 }
@@ -1716,20 +1578,31 @@ impl mercs2_engine::app::Game for Mercs2Game {
                 rig,
                 clips: p.clips.into_iter().map(|c| (c.name_hash, c)).collect(),
             });
-            let anim = if playing { AnimState::playing(self.player.idle) } else { AnimState::default() };
+            let anim = if playing { AnimState::playing(loco.idle) } else { AnimState::default() };
             let npc_bind = if self.test_world { bind.clone() } else { Vec::new() };
             let mut t = Transform::from_translation(self.player.pos);
             t.rotation = Quat::from_rotation_y(0.0);
             self.player.entity = Some(ctx.world.borrow_mut().spawn((t, ModelRef { model: p.hash }, anim, SkinPalette { mats: bind })));
+            // The hero entity is the character the local player possesses: the boot flow's spawned hero
+            // (`CreatePlayerCharacter` → `Player.AttachToCharacter`), or the construction-time hero
+            // when no boot flow ran.
             if let Some(pe) = self.player.entity {
-                self.script_host.borrow().register_entity(pe, mercs2_engine::script_host::HERO_GUID, None);
+                let host = self.script_host.borrow();
+                let character = host
+                    .player()
+                    .roster
+                    .local()
+                    .map(|p| p.character)
+                    .filter(|&c| c != 0)
+                    .expect("the local player possesses a character after the boot");
+                host.bind_entity(character, pe);
             }
             // TEST WORLD: a visible NPC (same merc model) facing the hero — an actor to build onto.
             if self.test_world {
                 let npc_pos = self.player.pos + Vec3::new(3.0, 0.0, 12.0);
                 let mut nt = Transform::from_translation(npc_pos);
                 nt.rotation = Quat::from_rotation_y(std::f32::consts::PI);
-                let npc_anim = if playing { AnimState::playing(self.player.idle) } else { AnimState::default() };
+                let npc_anim = if playing { AnimState::playing(loco.idle) } else { AnimState::default() };
                 ctx.world.borrow_mut().spawn((nt, ModelRef { model: p.hash }, npc_anim, SkinPalette { mats: npc_bind }));
                 println!("[test-world] NPC placed at ({:.1},{:.1},{:.1}) facing the hero", npc_pos.x, npc_pos.y, npc_pos.z);
             }
@@ -1750,17 +1623,17 @@ impl mercs2_engine::app::Game for Mercs2Game {
             }
         }
 
-        // ---- Ambient-population NPC templates: make them resident + animatable ----
-        // Upload each preloaded faction template to the scene (GPU) + AssetStore (rig + clips), EXACTLY as
-        // the player avatar above, then register its render/anim metadata on the runtime. A
-        // population-spawned Character carries `ModelRef{template_hash}` (from `spawn_character`); with the
-        // model now resident under that hash it draws, and `tick_population` gives it this template's
-        // rig-sized bind palette + resident idle so `animation_system` advances + samples it. Reuses the
-        // hero's `load_model` / `ModelAnim` / `skin_palette` path — no new loader.
+        // ---- Ambient-population units: make their models resident + animatable ----
+        // Upload each preloaded population model to the scene (GPU) + AssetStore (rig + clips), EXACTLY as
+        // the player avatar above, then register each Character unit's render/anim metadata on the
+        // runtime. A population-spawned unit carries `ModelRef{model}` (its template's `ModelName`); with
+        // the model now resident under that hash it draws, and `tick_population` gives a Character this
+        // model's rig-sized bind palette + its template's idle so `animation_system` advances + samples
+        // it. Reuses the hero's `load_model` / `ModelAnim` / `skin_palette` path — no new loader.
         let mut npc_resident = 0usize;
-        let mut npc_confirm_live = 0usize;
-        for nt in data.npc_templates {
-            let NpcTemplateLoad { model: m, idle_clip, confirm_live } = nt;
+        let population_models = data.population_models.len();
+        for pm in data.population_models {
+            let mercs2_engine::game_world::PopulationModel { model: m, units } = pm;
             let LoadedModel { hash, verts, indices, draws, textures, skin, clips, .. } = m;
             scene.load_model(hash, &verts, &indices, &draws, &textures, &skin);
             let rig = skin.rig.clone();
@@ -1774,17 +1647,16 @@ impl mercs2_engine::app::Game for Mercs2Game {
                 rig,
                 clips: clips.into_iter().map(|c| (c.name_hash, c)).collect(),
             });
-            // Hand the runtime this template's bind palette (sized to the rig) + resident idle, so
-            // `tick_population` gives each spawned actor of this template a correct `SkinPalette` + clip.
-            self.runtime.register_npc_model(hash, bind, idle_clip);
-            npc_resident += 1;
-            if confirm_live {
-                npc_confirm_live += 1;
+            // Hand the runtime each Character template's bind palette (sized to the rig) + resident idle,
+            // so `tick_population` gives each spawned actor of it a correct `SkinPalette` + clip.
+            for (template, idle) in units {
+                if let Some(idle_clip) = idle {
+                    self.runtime.register_npc_model(template, bind.clone(), idle_clip);
+                    npc_resident += 1;
+                }
             }
         }
-        println!(
-            "[world] preloaded {npc_resident}/7 NPC templates (scene+store+runtime); {npc_confirm_live} idle CONFIRM-LIVE"
-        );
+        println!("[world] preloaded {population_models} population models, {npc_resident} character units (scene+store+runtime)");
 
         self.hmap = Some(data.hmap);
         self.watermap = data.watermap;
@@ -1829,33 +1701,26 @@ impl mercs2_engine::app::Game for Mercs2Game {
             }
         }
         println!("[world] collision: {} world-space triangles (buildings + interior shells)", self.collision_tris.len());
-        // Streaming PRE-WARM: step the streamer a bounded number of times at the hero's spawn BEFORE the
-        // loading bar clears, so the immediate surroundings (ground/buildings/props) are already resident
-        // instead of popping in over the first seconds of play — and so the hero has streamed collision
-        // under them the instant control starts. Each step loads a small block/prop budget; stop early
-        // once the resident set stops growing (the ring around the spawn is filled). Exterior boots only
-        // (`self.stream` is `None` for the interior boot).
-        if let Some(sw) = self.stream.as_mut() {
-            const PREWARM_MAX_STEPS: usize = 80;
-            let cam = self.player.pos.to_array();
-            let (mut last, mut stable) = (usize::MAX, 0u32);
-            for _ in 0..PREWARM_MAX_STEPS {
+        // Streaming PRE-WARM: step the streamer at the hero's spawn BEFORE the loading bar clears until
+        // the hibernation grid has settled and no activation is pending, so the surroundings are awake
+        // and the hero has streamed collision under them the instant control starts. Exterior boots
+        // only (`self.stream` is `None` for the interior boot).
+        if let Some(sw) = &self.stream {
+            adopt_possessed(&self.script_host.borrow(), sw);
+            let mut sw = sw.borrow_mut();
+            let viewer = self.player.pos.to_array();
+            let mut steps = 0usize;
+            loop {
                 {
                     let mut w = ctx.world.borrow_mut();
-                    sw.step(&mut *scene, &mut w, cam);
+                    sw.step(&mut *scene, &mut w, viewer, &|_| false).unwrap_or_else(|e| panic!("[stream] {e}"));
                 }
-                let r = sw.stats().resident;
-                if r == last {
-                    stable += 1;
-                    if stable >= 3 {
-                        break;
-                    }
-                } else {
-                    stable = 0;
-                    last = r;
+                steps += 1;
+                if sw.settled() {
+                    break;
                 }
             }
-            println!("[world] streaming pre-warm: {} block(s) resident around spawn", sw.stats().resident);
+            println!("[world] streaming pre-warm: {} entities awake around spawn after {steps} frames", sw.stats().awake);
         }
         // Seed the PERSISTENT broadphase (retail `hkpWorld`): the STATIC baseline (interior shells +
         // furniture) as ONE unit, then the pre-warmed streamed prop/building units applied incrementally
@@ -1868,8 +1733,8 @@ impl mercs2_engine::app::Game for Mercs2Game {
             phys.clear();
             phys.insert_unit(STATIC_COLLISION_KEY, &self.collision_tris);
         }
-        if let Some(sw) = self.stream.as_mut() {
-            let ops = sw.take_collision_ops();
+        if let Some(sw) = &self.stream {
+            let ops = sw.borrow_mut().take_collision_ops();
             let phys = self.runtime.gameplay.physics_mut();
             for op in ops {
                 match op {
@@ -1891,8 +1756,6 @@ impl mercs2_engine::app::Game for Mercs2Game {
             println!("[world] terrain heightmap -> fleet physics ({}x{} grid)", phm.width, phm.depth);
             self.runtime.set_heightmap(Some(phm));
         }
-        scene.set_lights(std::mem::take(&mut data.lights));
-        scene.set_spot_lights(std::mem::take(&mut data.spot_lights));
         // Environmental FX: glow cards (god rays) + particle emitters (fire/smoke/steam).
         {
             let cards = std::mem::take(&mut data.glow_cards);
@@ -2079,6 +1942,7 @@ impl mercs2_engine::app::Game for Mercs2Game {
                     // heightmap and watermap as separate parameters — it lives in `mercs2_player` now, and a
                     // leaf crate cannot name `mercs2_water` or the engine's heightmap. `SceneLocomotion`
                     // borrows all three, so building one per frame is free.
+                    let stream = self.stream.as_ref().map(|sw| sw.borrow());
                     let q = mercs2_engine::locomotion::SceneLocomotion {
                         tris: self.runtime.gameplay.physics().tris(),
                         hmap: self.hmap.as_ref(),
@@ -2086,7 +1950,7 @@ impl mercs2_engine::app::Game for Mercs2Game {
                         // `terrainmesh` tiles' near surface, sampled O(1). `None` on the interior boot
                         // (no streamer). This is what the hero stands on outdoors — the terrain tris are
                         // not in the collision broadphase (`runtime.gameplay.physics()`).
-                        terrain: self.stream.as_ref().map(|sw| sw.terrain_field()),
+                        terrain: stream.as_ref().map(|sw| sw.terrain_field()),
                         water: self.watermap.as_ref(),
                         interior: self.spawn_interior,
                     };
@@ -2152,11 +2016,17 @@ impl mercs2_engine::app::Game for Mercs2Game {
         // the hero, then — only when the streamed collision set actually changed — rebuild the runtime
         // physics collider as the STATIC interior shells MERGED with the streamer's live world-space collider.
         // `animate` poses any woken rigged props (no-op for the clip-less props that dominate).
-        let cam = self.player.pos.to_array();
-        if let Some(sw) = self.stream.as_mut() {
+        // The viewer is the camera's target: the hero on foot, the vehicle when riding (`player.pos`
+        // follows the seated vehicle).
+        let viewer = self.player.pos.to_array();
+        // A dynamic layer's unload spares the player-controlled entity: the vehicle the hero rides.
+        let ridden = self.ridden.and_then(|e| self.guids.borrow().key_of(e));
+        if let Some(sw) = &self.stream {
+            adopt_possessed(&self.script_host.borrow(), sw);
+            let mut sw = sw.borrow_mut();
             {
                 let mut w = ctx.world.borrow_mut();
-                sw.step(&mut *ctx.scene, &mut w, cam);
+                sw.step(&mut *ctx.scene, &mut w, viewer, &|k| Some(k) == ridden).unwrap_or_else(|e| panic!("[stream] {e}"));
             }
             let ops = sw.take_collision_ops();
             if !ops.is_empty() {
@@ -2228,7 +2098,19 @@ impl mercs2_engine::app::Game for Mercs2Game {
             host.update_sound_emitters(ctx.time.fixed_dt);
             self.runtime.tick(&mut ctx.world.borrow_mut(), host.player_mut(), ctx.time.fixed_dt);
         }
-        self.runtime.tick_population(&mut ctx.world.borrow_mut(), ctx.time.fixed_dt, self.player.pos);
+        // Population draws from the game's one random state (`DAT_00DFCBAC`); a `Health*` spawner reads
+        // its owner — the object carrying the spawner, awake in the streamer — through `FUN_004E3DD0`.
+        {
+            let rng = self.script_host.borrow().game_rng();
+            let stream = &self.stream;
+            self.runtime.tick_population(
+                &mut ctx.world.borrow_mut(),
+                ctx.time.fixed_dt,
+                self.player.pos,
+                &mut || rng.borrow_mut().next_draw(),
+                &|w, owner| mercs2_engine::runtime::spawner_owner_health(w, stream.as_ref().and_then(|s| s.borrow().entity_of_key(owner))),
+            );
+        }
         // Death → constrained multi-body ragdoll (W6). The weapon/damage pass inside `runtime.tick`
         // lowered `Health` and, on a lethal blast, flagged victims with `combat::Ragdoll` carrying their
         // blast-seed velocity. Here — the GAME layer, which owns the model rigs — snaps
@@ -2316,21 +2198,10 @@ impl mercs2_engine::app::Game for Mercs2Game {
                 self.death_ragdolls.remove(&e);
             }
         }
-        // Persistent mission-Lua: advance the event/timer system, then realize its runtime Pg.Spawns.
+        // Persistent mission-Lua: advance the event/timer system. Its `Pg.Spawn`s register in the
+        // streamer inside the call; their entities follow at its next step.
         if let Some(sh) = &self.script {
             mercs2_engine::script_host::pump_resident(sh, &self.script_host, ctx.time.fixed_dt);
-            let new_spawns = self.script_host.borrow_mut().take_new_spawns();
-            if !new_spawns.is_empty() {
-                let realized = self.runtime.realize_spawns(&mut ctx.world.borrow_mut(), &new_spawns);
-                {
-                    let host = self.script_host.borrow();
-                    for (req, (e, _)) in new_spawns.iter().zip(&realized) {
-                        let nh = (!req.name.is_empty()).then(|| mercs2_formats::hash::pandemic_hash_m2(&req.name.to_ascii_lowercase()));
-                        host.register_entity(*e, req.guid, nh);
-                    }
-                }
-                println!("[world] realized {} runtime spawn(s) from mission Lua", realized.len());
-            }
         }
     }
 

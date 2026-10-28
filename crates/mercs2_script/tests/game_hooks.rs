@@ -57,14 +57,18 @@ struct HarnessHost {
     // AI mechanism (the recovered action ring + relation matrix + AiBehavior flags)
     ai: mercs2_ai::AiWorld,
     ai_states: HashMap<u64, mercs2_ai::AiBehavior>,
+    guids: Rc<RefCell<mercs2_core::GuidMap>>,
 }
 
 impl HarnessHost {
     /// A host with one player character (guid 1, "Mattias", 100 HP) already in the world — enough for
     /// the Object/Player hooks to have something to act on, like a booted game.
     fn booted() -> Rc<RefCell<Self>> {
+        let guids = Rc::new(RefCell::new(mercs2_core::GuidMap::new()));
+        let player_key = u64::from(guids.borrow_mut().mint_runtime());
         let mut h = HarnessHost {
-            player: mercs2_player::PlayerWorld::single_player(),
+            player: mercs2_player::PlayerWorld::single_player(player_key),
+            guids,
             ..Default::default()
         };
         h.player.profile.set_fuel_capacity(100);
@@ -129,13 +133,16 @@ impl EngineHost for HarnessHost {
     fn guid_by_name(&mut self, name: &str) -> u64 {
         self.named.get(name).copied().unwrap_or(0)
     }
-    fn pg_spawn(&mut self, template: &str, pos: [f32; 3], yaw: f32, _hi: bool) -> u64 {
+    fn pg_spawn(&mut self, spawn: &mercs2_script::SpawnArgs) -> Result<u64, String> {
+        let mercs2_script::SpawnTemplate::Name(template) = &spawn.template else {
+            return Err(format!("harness: spawn by template guid {:?} is not modelled", spawn.template));
+        };
         let g = self.spawn_obj(template);
         if let Some(o) = self.objs.get_mut(&g) {
-            o.pos = pos;
-            o.yaw = yaw;
+            o.pos = spawn.pos;
+            o.yaw = spawn.yaw;
         }
-        g
+        Ok(g)
     }
     fn object_set_name(&mut self, guid: u64, name: &str) {
         let guid = self.resolve(guid);
@@ -165,7 +172,12 @@ impl EngineHost for HarnessHost {
         self.objs.get(&guid).map(|o| o.yaw).unwrap_or(0.0)
     }
     fn teleport_hero(&mut self, _pos: [f32; 3]) {}
-    fn add_layers(&mut self, _layers: &[String]) {}
+    fn guids(&self) -> Rc<RefCell<mercs2_core::GuidMap>> {
+        self.guids.clone()
+    }
+    fn object_activation_state(&self, guid: u64) -> Option<u8> {
+        self.guids.borrow().state(u32::try_from(guid).ok()?)
+    }
 
     // The player concern is backed by the REAL mechanism, exactly as `Ai.*` is backed by a real
     // `mercs2_ai::AiWorld` here — so these hooks exercise `mercs2_player` rather than a hand-rolled

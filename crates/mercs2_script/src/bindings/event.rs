@@ -132,6 +132,78 @@ struct InSeatFilter {
     action: Option<String>,
 }
 
+/// An `Event.ObjectHibernation` condition (factory `0x5F2530`, parse `0x5F2300`, poll
+/// `FUN_005F2440`). The script update polls it every frame (`docs/reverse_engineer/hibernation_grid.md`
+/// §6a); it is not raised by a transition.
+#[derive(Debug, Clone, PartialEq)]
+enum HibernationSubject {
+    /// A non-zero guid: the entity test.
+    Guid(u64),
+    /// No guid, a layer name: the layer form.
+    Layer(String),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct HibernationCondition {
+    subject: HibernationSubject,
+    /// The activation state it waits for: 2 when the phase's first letter, case-folded, is `'a'`
+    /// (and when there is no phase); 0 for anything else. So `"awake"`/`"a"` wait for awake,
+    /// `"hibernated"`/`"s"` for asleep — and the one `"asleep"` site (`gurcon002.lua:194`) waits for
+    /// awake, as in retail.
+    state: u8,
+    /// The optional model detail level (`+0x2C`); only the awake form keeps one.
+    detail: Option<i32>,
+}
+
+/// Parse `{[layer name], [guid], [phase], [detail]}` the way `0x5F2300` reads its arguments: a
+/// string (or number) first is a layer name; a guid is taken only from a lightuserdata/userdata and
+/// moves the index on only when read; the phase defaults to `"a"`; the detail is a number truncated
+/// toward zero. `None` when there is neither a guid nor a layer name (`Event.Create` returns nil).
+fn parse_hibernation(params: &Table) -> LuaResult<Option<HibernationCondition>> {
+    let mut i = 1;
+    let layer = match params.get::<Value>(i)? {
+        Value::String(_) | Value::Number(_) => {
+            i += 1;
+            Some(params.get::<String>(1)?)
+        }
+        _ => None,
+    };
+    let guid = match params.get::<Value>(i)? {
+        Value::LightUserData(_) => {
+            let g = params.get::<Guid>(i)?.raw();
+            i += 1;
+            g
+        }
+        // Retail also reads a full userdata's handle (tag 7, `+0x18`); this host never makes one.
+        Value::Other(_, "userdata") => {
+            return Err(mercs2_luac::rt::Error::RuntimeError(
+                "Event.ObjectHibernation: a full-userdata guid is not modelled by this host".into(),
+            ))
+        }
+        _ => 0,
+    };
+    let phase = match params.get::<Value>(i)? {
+        Value::String(_) => {
+            let p = params.get::<String>(i)?;
+            i += 1;
+            p
+        }
+        _ => "a".to_string(),
+    };
+    let state = if phase.bytes().next().is_some_and(|c| c.eq_ignore_ascii_case(&b'a')) { 2 } else { 0 };
+    // `cvttss2si` on the single-precision value (`0x59F886`).
+    let detail = match params.get::<Value>(i)? {
+        Value::Number(n) if state == 2 => Some(n as f32 as i32),
+        _ => None,
+    };
+    let subject = match (guid, layer) {
+        (0, None) => return Ok(None),
+        (0, Some(l)) => HibernationSubject::Layer(l),
+        (g, _) => HibernationSubject::Guid(g),
+    };
+    Ok(Some(HibernationCondition { subject, state, detail }))
+}
+
 /// One registered event handler.
 struct EventReg {
     kind: i64,
@@ -146,8 +218,8 @@ struct EventReg {
     timer_period: Option<f32>,
     // Condition kinds (ObjectDeath/…): the subject GUID the engine fires against.
     subject: Option<u64>,
-    // ObjectHibernation: the phase on `subject` this handler waits for (`"awake"` / `"asleep"`).
-    phase: Option<String>,
+    // ObjectHibernation: what the polled condition tests — see [`HibernationCondition`].
+    hibernation: Option<HibernationCondition>,
     // ObjectInSeat: the `{occupant, vehicle, seat, action}` filter. `subject` holds the occupant.
     in_seat: Option<InSeatFilter>,
     // GameStateChange: the `(stateName, phase)` this handler waits for (e.g. `("WaitForStreaming",
@@ -173,7 +245,8 @@ fn seq_values(t: &Option<Table>) -> LuaResult<Vec<Value>> {
     }
 }
 
-/// `Event.Create` / `Event.CreatePersistent` body: register a handler, return its integer handle.
+/// `Event.Create` / `Event.CreatePersistent` body: register a handler, return its integer handle
+/// (`None` = the condition's arguments were rejected and nothing was registered → nil).
 fn make(
     mgr: &Mgr,
     kind: i64,
@@ -181,35 +254,32 @@ fn make(
     callback: Function,
     cbargs: Option<Table>,
     persistent: bool,
-) -> LuaResult<i64> {
+) -> LuaResult<Option<i64>> {
     let cbargs = seq_values(&cbargs)?;
-    // Set only by the ObjectInSeat arm; kept out of the tuple, which is already seven wide.
+    // Set only by the ObjectInSeat / ObjectHibernation arms; kept out of the tuple.
     let mut in_seat: Option<InSeatFilter> = None;
-    let (script_name, filter, timer_remaining, timer_period, subject, phase, state_match) = if kind == KIND_SCRIPT_EVENT {
+    let mut hibernation: Option<HibernationCondition> = None;
+    let (script_name, filter, timer_remaining, timer_period, subject, state_match) = if kind == KIND_SCRIPT_EVENT {
         // params = { name, [filter_fn] }
-        (params.get::<String>(1).ok(), params.get::<Option<Function>>(2)?, None, None, None, None, None)
+        (params.get::<String>(1).ok(), params.get::<Option<Function>>(2)?, None, None, None, None)
     } else if kind == KIND_TIMER_RELATIVE {
         // params = { seconds }
         let secs: f32 = params.get(1).unwrap_or(0.0);
-        (None, None, Some(secs), Some(secs), None, None, None)
+        (None, None, Some(secs), Some(secs), None, None)
     } else if kind == KIND_OBJECT_DEATH {
         // params = { guid } — fired by the engine when that object dies (Object.Kill / damage).
         // The handle inside the params table is whatever the producing binding pushed, i.e. now
         // lightuserdata; reading it as `Guid` accepts that (and, transitionally, an integer).
         let g = params.get::<Guid>(1).unwrap_or(Guid::NONE);
-        (None, None, None, None, g.opt(), None, None)
+        (None, None, None, None, g.opt(), None)
     } else if kind == KIND_OBJECT_HIBERNATION {
-        // params = { guid, phase } — fired by the streaming system when that object wakes/sleeps.
-        // The awake-gate every real object script opens with:
+        // params = { [layer name], [guid], [phase], [detail] } — polled by `__pump` against the
+        // host, see [`HibernationCondition`]. The awake-gate every real object script opens with:
         //   Event.Create(Event.ObjectHibernation, {uGuid, "awake"}, SetupEvents, {uGuid})
-        // The phase is CANONICALISED here — see [`canon_phase`]; the corpus spells two phases five
-        // different ways and storing them verbatim made 28 of 109 registrations unmatchable.
-        let g = params.get::<Guid>(1).unwrap_or(Guid::NONE);
-        let ph = params
-            .get::<String>(2)
-            .ok()
-            .map(|s| canon_phase(&s).map(str::to_string).unwrap_or(s));
-        (None, None, None, None, g.opt(), ph, None)
+        // Neither a guid nor a layer name: no handler, and `Create` returns nil.
+        let Some(c) = parse_hibernation(&params)? else { return Ok(None) };
+        hibernation = Some(c);
+        (None, None, None, None, None, None)
     } else if kind == KIND_OBJECT_IN_SEAT {
         // params = { occupant, vehicle, seat, action } — see [`InSeatFilter`] for the vocabulary.
         //
@@ -226,23 +296,23 @@ fn make(
             action: params.get::<String>(4).ok().map(|s| s.to_ascii_lowercase()).filter(|s| !s.is_empty()),
         };
         in_seat = Some(f);
-        (None, None, None, None, occ.opt(), None, None)
+        (None, None, None, None, occ.opt(), None)
     } else if kind == KIND_GAME_STATE_CHANGE {
         // params = { stateName, phase } — fired by the engine's state machine (e.g. {"WaitForStreaming","exit"}).
         let st = params.get::<String>(1).ok();
         let ph = params.get::<String>(2).ok();
-        (None, None, None, None, None, None, st.map(|s| (s, ph.unwrap_or_default())))
+        (None, None, None, None, None, st.map(|s| (s, ph.unwrap_or_default())))
     } else {
-        (None, None, None, None, None, None, None)
+        (None, None, None, None, None, None)
     };
     let mut m = mgr.borrow_mut();
     m.next += 1;
     let h = m.next;
     m.regs.insert(
         h,
-        EventReg { kind, persistent, callback, cbargs, script_name, filter, timer_remaining, timer_period, subject, phase, in_seat, state_match },
+        EventReg { kind, persistent, callback, cbargs, script_name, filter, timer_remaining, timer_period, subject, hibernation, in_seat, state_match },
     );
-    Ok(h)
+    Ok(Some(h))
 }
 
 /// `Event.Post(name, data)` body: fire every `ScriptEvent` handler for `name` whose filter (if any)
@@ -271,6 +341,36 @@ fn post(mgr: &Mgr, name: &str, data: Value) -> LuaResult<()> {
                 mgr.borrow_mut().regs.remove(&h);
             }
         }
+    }
+    Ok(())
+}
+
+/// Poll every `ObjectHibernation` condition against the host and fire the ones that hold; one-shot
+/// handlers are removed (`FUN_005EB560`). The host borrow is dropped before any callback runs.
+fn poll_hibernation(mgr: &Mgr, host: &SharedHost) -> LuaResult<()> {
+    let regs: Vec<(i64, HibernationCondition)> = {
+        let m = mgr.borrow();
+        m.regs.iter().filter_map(|(h, r)| r.hibernation.clone().map(|c| (*h, c))).collect()
+    };
+    let due: Vec<i64> = {
+        let host = host.borrow();
+        regs.into_iter()
+            .filter(|(_, c)| match &c.subject {
+                HibernationSubject::Guid(g) => host.object_hibernation_passes(*g, c.state, c.detail),
+                HibernationSubject::Layer(l) => host.layer_hibernation_passes(l, c.state, c.detail),
+            })
+            .map(|(h, _)| h)
+            .collect()
+    };
+    for h in due {
+        // A callback fired earlier this poll may have deleted this handler.
+        let Some((callback, cbargs, persistent)) = mgr.borrow().regs.get(&h).map(|r| (r.callback.clone(), r.cbargs.clone(), r.persistent)) else {
+            continue;
+        };
+        if !persistent {
+            mgr.borrow_mut().regs.remove(&h);
+        }
+        callback.call_attr::<()>(Variadic::from_iter(cbargs), "Event.ObjectHibernation")?;
     }
     Ok(())
 }
@@ -306,7 +406,6 @@ fn pump(mgr: &Mgr, dt: f32) -> LuaResult<()> {
 }
 
 pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
-    let _ = host; // Event is script-side (holds Lua callbacks); condition kinds feed in via the engine later.
     let mut b = NsBuilder::new(lua)?;
 
     // Event-kind enum values (constants, not coverage-tracked cfuncs).
@@ -373,14 +472,16 @@ pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
 
     // Engine-driven timer pump (not a game cfunc — the render/sim loop calls this each tick). It is
     // also the one place game time advances: the clock moves first, so a timer callback that reads
-    // `Sys.MainTime` sees the tick it fired on.
+    // `Sys.MainTime` sees the tick it fired on. Then the polled conditions.
     let m = mgr.clone();
     let clock = super::script_clock(lua);
+    let h = host.clone();
     b.extra(
         "__pump",
         lua.create_function(move |_, dt: f32| {
             clock.advance(dt as f64);
-            pump(&m, dt)
+            pump(&m, dt)?;
+            poll_hibernation(&m, &h)
         })?,
     )?;
 
@@ -441,96 +542,6 @@ pub fn fire_object_death(lua: &Lua, guid: u64) -> LuaResult<()> {
     Ok(())
 }
 
-/// The canonical `ObjectHibernation` phase for whatever spelling a script used.
-///
-/// # Why this is needed
-///
-/// The shipped corpus spells the phase **five** ways across 109 registrations:
-///
-/// | spelling | sites | meaning |
-/// |---|--:|---|
-/// | `"awake"` | 80 | object woke |
-/// | `"a"` | 4 | object woke |
-/// | `"hibernated"` | 19 | object went to sleep |
-/// | `"s"` | 5 | object went to sleep |
-/// | `"asleep"` | 1 | object went to sleep |
-///
-/// That there are exactly **two** phases is settled by what the handlers do, not by the strings:
-/// every `"s"`/`"hibernated"`/`"asleep"` site is a sleep handler (`_OnAsleep` `wifpmcgarage.lua:364`,
-/// `_OnHqHibernation` `mrxhqmanager.lua:185`, `_OnPmcHibernation` `wifpmcinterior.lua:2069`, and
-/// `Object.Remove` on stream-out at `oilcon001.lua:1727`/`pircon001.lua:193`), and every
-/// `"a"`/`"awake"` site is a wake handler.
-///
-/// Storing the raw string and comparing it exactly — which is what this did before — meant a producer
-/// firing any single spelling could match at most one group. **28 of the 109 registrations could never
-/// fire**, including `vzacon001.lua:120`, the boat gate the whole world-load state machine waits on.
-///
-/// # Confidence: the grouping is proven, the retail predicate is NOT recovered
-///
-/// `event_bus_code_map.md:36` gets as far as "installs match predicate via `vt[0](filter_args)`" and
-/// does not disassemble the per-type predicate, so retail's actual comparison is unknown. What is
-/// certain is that it is **not** an exact match (that would break 28 shipped sites) and **not** a
-/// first-character match (`"awake"` and `"asleep"` share `'a'` yet mean opposites).
-///
-/// This maps by author intent, which is the observable ground truth. The one place that could differ
-/// from retail is `"asleep"` — the single outlier, at `gurcon002.lua:194`. If retail happens to
-/// first-char match, that site registers as *awake* and is a shipped bug; we would then be fixing a
-/// bug rather than reproducing it. One site, flagged in `DEFERRED.md`, needs a live read of the
-/// predicate to settle. Do not raise this to a claim of oracle grounding.
-///
-/// Returns `None` for a spelling not in the table above. The caller then stores the raw string, so an
-/// unknown phase keeps the old exact-match behaviour instead of being forced into a bucket it may not
-/// belong to — guessing which of two opposite meanings a novel spelling has is exactly the error this
-/// function exists to fix.
-pub fn canon_phase(raw: &str) -> Option<&'static str> {
-    match raw.trim().to_ascii_lowercase().as_str() {
-        "a" | "awake" => Some(PHASE_AWAKE),
-        "s" | "asleep" | "hibernated" => Some(PHASE_ASLEEP),
-        _ => None,
-    }
-}
-
-/// Canonical "the object woke" phase. Producers fire this; [`canon_phase`] folds `"a"`/`"awake"` onto it.
-pub const PHASE_AWAKE: &str = "awake";
-/// Canonical "the object went to sleep / streamed out" phase. [`canon_phase`] folds
-/// `"s"`/`"asleep"`/`"hibernated"` onto it.
-pub const PHASE_ASLEEP: &str = "hibernated";
-
-/// Fire every `ObjectHibernation` handler registered for `(guid, phase)` — the streaming system calls
-/// this when an object wakes (`"awake"`) or hibernates (`"asleep"`). This is the condition behind the
-/// awake-gate that opens essentially every object script in the corpus:
-/// `Event.Create(Event.ObjectHibernation, {uGuid, "awake"}, SetupEvents, {uGuid})` — `OnActivate` runs
-/// while the object is still asleep, so real setup has to wait for this.
-pub fn fire_object_hibernation(lua: &Lua, guid: u64, phase: &str) -> LuaResult<()> {
-    // Canonicalise the PRODUCER's spelling too, not just the registration's. Callers reasonably pass
-    // whatever the corpus reads like at the call site they are mirroring (`"a"`, `"awake"`), and a
-    // producer saying `"a"` against a registration canonicalised to `"awake"` would match nothing —
-    // the same failure this canonicalisation exists to remove, just moved to the other side.
-    let phase = canon_phase(phase).unwrap_or(phase);
-    let mgr: Mgr = match lua.app_data_ref::<Mgr>() {
-        Some(m) => (*m).clone(),
-        None => return Ok(()),
-    };
-    let fired: Vec<(i64, Function, Vec<Value>, bool)> = {
-        let m = mgr.borrow();
-        m.regs
-            .iter()
-            .filter(|(_, r)| {
-                r.kind == KIND_OBJECT_HIBERNATION
-                    && r.subject == Some(guid)
-                    && r.phase.as_deref() == Some(phase)
-            })
-            .map(|(h, r)| (*h, r.callback.clone(), r.cbargs.clone(), r.persistent))
-            .collect()
-    };
-    for (h, callback, cbargs, persistent) in fired {
-        callback.call_attr::<()>(Variadic::from_iter(cbargs), "Event.ObjectHibernation")?;
-        if !persistent {
-            mgr.borrow_mut().regs.remove(&h);
-        }
-    }
-    Ok(())
-}
 
 /// Fire every `ObjectInSeat` handler matching `(occupant, vehicle, seat, action)` — the engine calls
 /// this when a character takes or leaves a seat (`Vehicle.Enter` / `Vehicle.Exit`).
@@ -602,36 +613,46 @@ pub fn live_handle_count(lua: &Lua) -> usize {
 }
 
 #[cfg(test)]
-mod phase_tests {
+mod hibernation_parse_tests {
     use super::*;
 
-    /// Both spellings of each phase fold together, and the two phases stay apart.
-    ///
-    /// The separation matters more than the folding: `"awake"` and `"asleep"` differ by three letters
-    /// in the middle and share a first character, so any matcher keyed on a prefix would collapse
-    /// opposites — a wake handler firing on stream-OUT would run mission setup for an object that just
-    /// left the world.
-    #[test]
-    fn the_five_corpus_spellings_fold_to_two_phases() {
-        for wake in ["a", "awake", "AWAKE", " Awake "] {
-            assert_eq!(canon_phase(wake), Some(PHASE_AWAKE), "{wake:?} means awake");
-        }
-        for sleep in ["s", "asleep", "hibernated", "HIBERNATED"] {
-            assert_eq!(canon_phase(sleep), Some(PHASE_ASLEEP), "{sleep:?} means asleep");
-        }
-        assert_ne!(PHASE_AWAKE, PHASE_ASLEEP, "the two phases must never compare equal");
-        // The canonical forms are themselves stable under folding, so a producer firing a canonical
-        // phase matches a registration that was already canonicalised.
-        assert_eq!(canon_phase(PHASE_AWAKE), Some(PHASE_AWAKE));
-        assert_eq!(canon_phase(PHASE_ASLEEP), Some(PHASE_ASLEEP));
+    fn parse(lua: &Lua, src: &str) -> Option<HibernationCondition> {
+        lua.globals().set("__g", Guid(0x4000_0010)).unwrap();
+        let t: Table = lua.load(&format!("return {src}")).eval().unwrap();
+        parse_hibernation(&t).unwrap()
     }
 
-    /// An unrecognised spelling is reported as unknown rather than guessed into a bucket. Registration
-    /// then keeps the raw string, preserving the old exact-match behaviour for it.
+    /// The phase's first letter, case-folded, picks the state — so `"asleep"` waits for AWAKE, as
+    /// retail's `tolower(phase[0]) == 'a'` (`0x5F240B`) does — and a missing phase means awake.
     #[test]
-    fn an_unknown_spelling_is_not_guessed() {
-        for odd in ["", "wake", "sleeping", "dormant", "0"] {
-            assert_eq!(canon_phase(odd), None, "{odd:?} is not a spelling we have evidence for");
+    fn the_phase_is_its_first_letter() {
+        let lua = Lua::new().unwrap();
+        for (p, state) in [("\"awake\"", 2), ("\"a\"", 2), ("\"Awake\"", 2), ("\"asleep\"", 2), ("\"hibernated\"", 0), ("\"s\"", 0)] {
+            let c = parse(&lua, &format!("{{__g, {p}}}")).unwrap();
+            assert_eq!((c.subject, c.state), (HibernationSubject::Guid(0x4000_0010), state), "{p}");
         }
+        assert_eq!(parse(&lua, "{__g}").unwrap().state, 2, "no phase: awake");
+    }
+
+    /// The detail is the argument after the phase, truncated toward zero, and only the awake form
+    /// keeps it (`0x5F241A` forces -1 otherwise).
+    #[test]
+    fn the_detail_follows_the_phase_and_only_for_awake() {
+        let lua = Lua::new().unwrap();
+        assert_eq!(parse(&lua, "{__g, \"awake\", 2.9}").unwrap().detail, Some(2));
+        assert_eq!(parse(&lua, "{__g, \"awake\"}").unwrap().detail, None);
+        assert_eq!(parse(&lua, "{__g, \"hibernated\", 2}").unwrap().detail, None);
+    }
+
+    /// A string first is a layer name; the guid read after it does not consume a non-guid argument,
+    /// so the phase is the second argument. Neither guid nor layer: no condition.
+    #[test]
+    fn the_layer_form_and_the_empty_form() {
+        let lua = Lua::new().unwrap();
+        let c = parse(&lua, "{\"Vz_State_X\", \"hibernated\"}").unwrap();
+        assert_eq!((c.subject, c.state), (HibernationSubject::Layer("Vz_State_X".into()), 0));
+        let c = parse(&lua, "{\"Vz_State_X\", __g}").unwrap();
+        assert_eq!(c.subject, HibernationSubject::Guid(0x4000_0010), "a guid wins over the layer");
+        assert_eq!(parse(&lua, "{nil, \"awake\"}"), None);
     }
 }

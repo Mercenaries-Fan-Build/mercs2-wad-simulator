@@ -25,8 +25,8 @@ the oracle; only `[faithful-blocker: yes]` items can change observable game beha
 - **Scaleform AS2 method tables excluded from the harness.** `[faithful-blocker: no]` The live trace
   flags 53 `.rdata` tables "game", but ~18 are the GFx 2.0.48 ActionScript runtime (MovieClip, TextField,
   Array, XML, geom.*, ColorTransform, Selection, Stage, Mouse, Key, …) — a *separate* scripting VM the
-  game Lua does not call directly (Flash calls them). The harness scopes to the **35 engine namespaces /
-  1086 cfuncs** the game Lua binds against. If a system ever needs the AS2 surface it should live under a
+  game Lua does not call directly (Flash calls them). The harness scopes to the **37 engine namespaces /
+  1092 cfuncs** the game Lua binds against. If a system ever needs the AS2 surface it should live under a
   distinct `bindings_gfx` tree, not here.
 
 - **`Debug.Printf` is intentionally a real body, not the retail stub.** `[faithful-blocker: no]` On
@@ -34,33 +34,12 @@ the oracle; only `[faithful-blocker: yes]` items can change observable game beha
   log sink because the `[lua]` stream is load-bearing for bring-up; the other five `Debug.*` are faithful
   no-ops. This is a deliberate, bring-up-only divergence (pre-existing).
 
-- **`ObjectHibernation` phase matching folds five spellings to two phases; retail's predicate is
-  unrecovered.** `[faithful-blocker: no]` The corpus spells the phase five ways across 109
-  registrations — `"awake"`×80, `"a"`×4, `"hibernated"`×19, `"s"`×5, `"asleep"`×1. That these are
-  exactly **two** phases is settled by what the handlers do (`_OnAsleep` `wifpmcgarage.lua:364`,
-  `_OnHqHibernation` `mrxhqmanager.lua:185`, `Object.Remove` on stream-out `oilcon001.lua:1727`, versus
-  the wake-gates), so `bindings::event::canon_phase` folds by author intent. Retail's actual comparison
-  is **not** recovered: `event_bus_code_map.md:36` reaches "installs match predicate via
-  `vt[0](filter_args)`" and stops before the per-type predicate. What is certain is that retail cannot
-  be doing an exact match (that would strand 28 shipped registrations, including `vzacon001.lua:120`,
-  the gate the world-load machine waits on) nor a first-character match (`"awake"` and `"asleep"` share
-  `'a'` and mean opposites).
-
-  **The one site that could differ:** `gurcon002.lua:194` is the lone `"asleep"`. If retail's predicate
-  happens to key on `'a'`, that registration fires on *wake* and is a shipped bug — in which case we are
-  fixing a bug rather than reproducing it, contrary to the standing rule. UNBLOCK: a live read of the
-  `KIND_OBJECT_HIBERNATION` match predicate installed by `FUN_005eb480`'s per-type factory
-  (`PTR_LAB_00d12274[type*3]`). One site; do not raise `canon_phase`'s confidence without that read.
-
-- **Layer objects wake on layer-load completion, not on a per-object streaming tick.**
-  `[faithful-blocker: no]` `worldutil::layer_index` + the pending-wake drain in `pump_resident` fire
-  `ObjectHibernation`/`"awake"` for every named object in a layer, one pump after that layer's load
-  completes. Retail wakes each object as its own `HibernationControl` distance is crossed
-  (`world_streaming_code_map.md` §4), so retail's wakes are spread over time and gated on player
-  proximity while ours arrive together. The event set is the same; the timing and ordering within a
-  layer are not. The per-entity distance path already exists in the engine (`StreamDiff.wake` from
-  `mercs2_core::streaming`) for `layers_static` props — joining the two so layer objects also enter the
-  distance-driven manager is the follow-up.
+- **`Event.ObjectHibernation`'s model-detail gate is not modelled.** `[faithful-blocker: no]` The
+  condition's optional fourth argument (`+0x2C`, awake form only) makes retail's entity test also
+  require the entity's model resource loaded at that detail level (`0x0246F220`,
+  `docs/reverse_engineer/hibernation_grid.md` §6a). No shipped script passes one — the only site that
+  forwards a detail, `MrxUtil.SpawnActor`'s `nDetail`, passes nil — so `EngineHost::object_hibernation_passes`
+  makes a detail a hard error instead.
 
 - **`Vehicle.Enter`/`Exit` are instantaneous; retail plays a mount/dismount animation.**
   `[faithful-blocker: no]` `GameScriptHost::vehicle_enter` records occupancy and queues the

@@ -52,7 +52,7 @@ fn main() {
         Some(sm) => {
             let chosen: Vec<usize> =
                 sm.nodes.iter().map(orchestrator::default_state_index).collect();
-            orchestrator::machine_node_enable(sm, &hier, &chosen)
+            orchestrator::machine_node_enable(sm, &hier, &chosen).unwrap_or_else(|e| panic!("{e}"))
         }
         None => Vec::new(),
     };

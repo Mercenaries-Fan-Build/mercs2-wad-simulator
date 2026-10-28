@@ -1,24 +1,14 @@
-//! Layer-2 == Layer-3 — the control-driven world-streaming DECISION core.
+//! The world-streaming decision core for geometry blocks and the population region cache.
 //!
-//! This is PURE data + logic: given the player position and a catalog of loadable units
-//! (coarse blocks from the world index, and per-entity placements carrying their own
-//! `HibernationControl` distances), it decides — per tick — which blocks are resident, and
-//! per loaded entity whether it is awake or hibernated and which LOD tier it renders at.
-//! The output is a [`StreamDiff`] the engine executes (load/unload blocks, wake/hibernate
-//! entities, tier changes). There is NO wgpu, no file I/O and no asset knowledge here — the
-//! engine adapts `WorldIndex`/`ModelPlacement` into the neutral inputs below and performs the
-//! actual GPU work. See `docs/modernization/world_streaming_spec.md` §10.
+//! PURE data + logic: given the player position and a catalog of coarse blocks from the world index,
+//! it decides per tick which blocks are resident, emitting a [`StreamDiff`] the engine executes. Each
+//! placed entity's wake/sleep is the hibernation grid's ([`crate::hibernation`]), not this module's.
+//! There is NO wgpu, no file I/O and no asset knowledge here. See
+//! `docs/modernization/world_streaming_spec.md` §10.
 //!
-//! Coordinates are native game space (left-handed, +Y up); proximity is measured in world
-//! metres. Distances default to the class hibernation/LOD distances **100 / 160 / 60 / 20**
-//! (spec §10) when a placement carries no directive of its own.
+//! Coordinates are native game space (left-handed, +Y up); proximity is measured in world metres.
 
 use std::collections::{HashMap, HashSet};
-
-/// Class-default hibernation/LOD distances (spec §10): `dist[0]` = stream-out (hibernation)
-/// distance; `dist[1..4]` = the three LOD-tier distances. A placement with no
-/// `HibernationControl` directive falls back to these.
-pub const DEFAULT_DISTANCES: [u16; 4] = [100, 160, 60, 20];
 
 /// An axis-aligned box on the ground plane (XZ), native game metres. Used for a block's spatial
 /// extent; streaming proximity is horizontal (Y ignored — matches `WorldIndex::Aabb::overlaps_xz`).
@@ -52,19 +42,6 @@ pub struct StreamingConfig {
     pub block_unload_margin: f32,
     /// Max block LOADs emitted per update (I/O throttle). Unloads are never throttled.
     pub block_budget: usize,
-    /// Max entity WAKEs emitted per update (I/O throttle). Hibernations are never throttled.
-    pub entity_budget: usize,
-    /// Wake/hibernate hysteresis band: an awake entity is only hibernated once the player is beyond
-    /// `stream_out + entity_hysteresis`, and a hibernated entity only wakes within `stream_out`.
-    pub entity_hysteresis: f32,
-    /// Spatial-grid gather cap: entities whose stream-out distance is within this are bucketed into
-    /// the grid and queried by proximity; the rare long-range outliers (stream-out > cap) are held
-    /// in a separate always-tested list so correctness is preserved without a map-wide grid sweep.
-    pub entity_scan_cap: f32,
-    /// Spatial-grid cell size (bucket edge, metres).
-    pub grid_cell: f32,
-    /// Fallback hibernation/LOD distances for placements with no directive.
-    pub default_distances: [u16; 4],
     /// Per-object geometry-block stream-out distance BY c3 chain tier `[c0, c1, c2, c3]`. The c3
     /// chain is a loose-quadtree spatial index keyed by object SIZE (verified: `tier` is index depth,
     /// NOT a LOD detail level — big landmarks bucket shallow at c3, small props deep at c1), so a
@@ -78,11 +55,6 @@ impl Default for StreamingConfig {
         StreamingConfig {
             block_unload_margin: 120.0,
             block_budget: 8,
-            entity_budget: 24,
-            entity_hysteresis: 15.0,
-            entity_scan_cap: 650.0,
-            grid_cell: 128.0,
-            default_distances: DEFAULT_DISTANCES,
             tier_stream_out: [350.0, 350.0, 700.0, 1200.0],
         }
     }
@@ -105,70 +77,6 @@ pub struct BlockUnit {
     pub always_resident: bool,
 }
 
-/// A streamable per-entity placement (prop / furniture / light / gameplay object), keyed by its
-/// `u32` entity key. `dist` is its `HibernationControl` directive (or the class defaults): `dist[0]`
-/// stream-out, `dist[1..4]` LOD-tier distances (finest boundary is `dist[3]`).
-#[derive(Debug, Clone, Copy)]
-pub struct EntityUnit {
-    pub key: u32,
-    pub pos: [f32; 3],
-    pub dist: [u16; 4],
-}
-
-impl EntityUnit {
-    /// The stream-out (hibernation) distance — past this the object is cached out.
-    pub fn stream_out(&self) -> f32 {
-        self.dist[0] as f32
-    }
-}
-
-/// The PER-ENTITY LOD tier for a player distance `d` given a placement's `HibernationControl`
-/// LOD-tier distances `dist` (0 = finest .. 3 = coarsest). Boundaries: `dist[3]` (0/1), `dist[2]`
-/// (1/2), `dist[1]` (2/3).
-///
-/// NOTE (fidelity, world_streaming_code_map §2.1/§6): this is the `HibernationControl` distance
-/// path (`FUN_00640a40` descriptor, class defaults 100/160/60/20 — verified, no drift). It is
-/// **distinct** from the engine's *global* LOD-budget tier `FUN_0084ae70` (a memory-pressure
-/// governor modeled by [`GlobalLodGovernor`]); the two compose (the global tier is a coarseness
-/// FLOOR on this per-entity tier — see `StreamingManager::update`).
-pub fn lod_tier(dist: &[u16; 4], d: f32) -> u8 {
-    if d <= dist[3] as f32 {
-        0
-    } else if d <= dist[2] as f32 {
-        1
-    } else if d <= dist[1] as f32 {
-        2
-    } else {
-        3
-    }
-}
-
-/// LOD tier with a hysteresis dead-band around each boundary so an entity hovering on a boundary
-/// does not thrash between tiers. `current` is the tier the entity holds now.
-fn lod_tier_hyst(dist: &[u16; 4], d: f32, current: u8, h: f32) -> u8 {
-    let raw = lod_tier(dist, d);
-    if raw == current {
-        return current;
-    }
-    // Boundary between tier t and t+1 (moving coarser as t grows): [0/1, 1/2, 2/3].
-    let boundary = [dist[3] as f32, dist[2] as f32, dist[1] as f32];
-    if raw > current {
-        // Getting coarser: only commit once past the current boundary + h.
-        if d > boundary[current as usize] + h {
-            raw
-        } else {
-            current
-        }
-    } else {
-        // Getting finer: only commit once below the target boundary - h.
-        if d < boundary[raw as usize] - h {
-            raw
-        } else {
-            current
-        }
-    }
-}
-
 /// The per-update decision the engine executes. Empty when nothing changed this tick.
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct StreamDiff {
@@ -176,44 +84,21 @@ pub struct StreamDiff {
     pub load_blocks: Vec<u16>,
     /// Blocks to despawn + free (net-new GPU unload).
     pub unload_blocks: Vec<u16>,
-    /// Entity keys to instantiate (throttled to `entity_budget`).
-    pub wake: Vec<u32>,
-    /// Entity keys to despawn + free.
-    pub hibernate: Vec<u32>,
-    /// Entity key -> new LOD tier (0 finest .. 3 coarsest), including the tier of a freshly-woken
-    /// entity.
-    pub tier_changes: Vec<(u32, u8)>,
 }
 
 impl StreamDiff {
     pub fn is_empty(&self) -> bool {
-        self.load_blocks.is_empty()
-            && self.unload_blocks.is_empty()
-            && self.wake.is_empty()
-            && self.hibernate.is_empty()
-            && self.tier_changes.is_empty()
+        self.load_blocks.is_empty() && self.unload_blocks.is_empty()
     }
 }
 
-/// The streaming decision manager: owns the static catalog (blocks + a spatially-bucketed entity
-/// set) and the live residency/awake state, and turns a player position into a [`StreamDiff`] each
-/// tick. Pure — no wgpu, no I/O.
+/// The streaming decision manager: owns the block catalog and its residency, and the population region
+/// cache, and turns a player position into a [`StreamDiff`] each tick. Pure — no wgpu, no I/O.
 pub struct StreamingManager {
     cfg: StreamingConfig,
     blocks: Vec<BlockUnit>,
-    entities: Vec<EntityUnit>,
-    /// Spatial grid: cell (i, j) -> entity indices with stream-out <= scan_cap.
-    grid: HashMap<(i32, i32), Vec<u32>>,
-    /// Entity indices whose stream-out exceeds `entity_scan_cap` (always tested; the ~222 outliers).
-    long_range: Vec<u32>,
-    key_to_idx: HashMap<u32, u32>,
     // ---- live state ----
     resident: HashSet<u16>,
-    /// Awake entity key -> its current LOD tier.
-    awake: HashMap<u32, u8>,
-    /// Global memory-pressure LOD-budget governor (engine `FUN_0084ae70`) — a coarseness FLOOR on
-    /// the per-entity `HibernationControl` tiers. Defaults to tier 0 (no clamp) until fed pressure.
-    lod_gov: GlobalLodGovernor,
     /// Region cache (PgSysPopulation CacheIn/CacheOut, row 9) — a coarser decision layer than
     /// per-object hibernation: caches a whole region's population lump in/out by region containment.
     region_cache: RegionCache,
@@ -224,13 +109,7 @@ impl StreamingManager {
         StreamingManager {
             cfg,
             blocks: Vec::new(),
-            entities: Vec::new(),
-            grid: HashMap::new(),
-            long_range: Vec::new(),
-            key_to_idx: HashMap::new(),
             resident: HashSet::new(),
-            awake: HashMap::new(),
-            lod_gov: GlobalLodGovernor::new(GlobalLodConfig::default()),
             region_cache: RegionCache::new(RegionCacheConfig::default()),
         }
     }
@@ -244,59 +123,15 @@ impl StreamingManager {
         self.blocks.push(unit);
     }
 
-    fn cell_of(&self, x: f32, z: f32) -> (i32, i32) {
-        (
-            (x / self.cfg.grid_cell).floor() as i32,
-            (z / self.cfg.grid_cell).floor() as i32,
-        )
-    }
-
-    /// Register a per-entity placement, bucketing it into the spatial grid (at index time, per
-    /// spec §10's prop-granularity requirement — `layers_static` is one map-spanning block).
-    pub fn add_entity(&mut self, unit: EntityUnit) {
-        let idx = self.entities.len() as u32;
-        self.key_to_idx.insert(unit.key, idx);
-        if unit.stream_out() > self.cfg.entity_scan_cap {
-            self.long_range.push(idx);
-        } else {
-            let c = self.cell_of(unit.pos[0], unit.pos[2]);
-            self.grid.entry(c).or_default().push(idx);
-        }
-        self.entities.push(unit);
-    }
-
     pub fn block_count(&self) -> usize {
         self.blocks.len()
-    }
-    pub fn entity_count(&self) -> usize {
-        self.entities.len()
     }
     /// Number of resident geometry blocks.
     pub fn resident_count(&self) -> usize {
         self.resident.len()
     }
-    pub fn awake_count(&self) -> usize {
-        self.awake.len()
-    }
     pub fn is_resident(&self, block: u16) -> bool {
         self.resident.contains(&block)
-    }
-    pub fn is_awake(&self, key: u32) -> bool {
-        self.awake.contains_key(&key)
-    }
-
-    // ---- global LOD-budget governor (engine `FUN_0084ae70`) ----
-
-    /// Feed the global streaming LOD-budget governor the current memory/budget `pressure` at
-    /// fixed-sim `step` (called once per frame from the master update, before [`update`]). Returns
-    /// `Some(new_tier)` when the global tier changed — the value the engine broadcasts to subscribers
-    /// — else `None`. The tier acts as a coarseness FLOOR on every entity's per-entity LOD tier.
-    pub fn set_lod_budget(&mut self, pressure: f32, step: u64) -> Option<u8> {
-        self.lod_gov.update(pressure, step)
-    }
-    /// The current global LOD-budget tier (0 = full detail .. 3 = coarsest).
-    pub fn global_lod_tier(&self) -> u8 {
-        self.lod_gov.tier()
     }
 
     // ---- region cache (PgSysPopulation CacheIn/CacheOut, row 9) ----
@@ -332,23 +167,11 @@ impl StreamingManager {
         &self.region_cache
     }
 
-    /// Histogram of awake entities by current LOD tier `[t0, t1, t2, t3]`.
-    pub fn tier_histogram(&self) -> [usize; 4] {
-        let mut h = [0usize; 4];
-        for &t in self.awake.values() {
-            if (t as usize) < 4 {
-                h[t as usize] += 1;
-            }
-        }
-        h
-    }
-
-    /// Compute the per-tick streaming decision for `player` (world XYZ) and apply it to the live
-    /// state. The returned diff is what the engine should execute.
+    /// Compute the per-tick block decision for `player` (world XYZ) and apply it to the live state.
+    /// The returned diff is what the engine should execute.
     pub fn update(&mut self, player: [f32; 3]) -> StreamDiff {
         let mut diff = StreamDiff::default();
         self.update_blocks(player, &mut diff);
-        self.update_entities(player, &mut diff);
         diff
     }
 
@@ -384,174 +207,6 @@ impl StreamingManager {
             self.resident.insert(block);
             diff.load_blocks.push(block);
         }
-    }
-
-    fn update_entities(&mut self, player: [f32; 3], diff: &mut StreamDiff) {
-        let h = self.cfg.entity_hysteresis;
-        // Global LOD-budget FLOOR (engine `FUN_0084ae70`): under memory pressure the governor forces
-        // a minimum coarseness on every entity, on top of its per-entity `HibernationControl` tier.
-        // Default pressure keeps this at 0 (no clamp). `max` = never render finer than the budget.
-        let floor = self.lod_gov.tier();
-        // Gather candidate entity indices: grid cells within the scan cap + the long-range list.
-        let mut candidates: Vec<u32> = Vec::new();
-        let r = self.cfg.entity_scan_cap;
-        let (cx0, cz0) = self.cell_of(player[0] - r, player[2] - r);
-        let (cx1, cz1) = self.cell_of(player[0] + r, player[2] + r);
-        for ci in cx0..=cx1 {
-            for cj in cz0..=cz1 {
-                if let Some(v) = self.grid.get(&(ci, cj)) {
-                    candidates.extend_from_slice(v);
-                }
-            }
-        }
-        candidates.extend_from_slice(&self.long_range);
-
-        // First pass: decide wake/hibernate/tier for every candidate; collect wake requests so the
-        // budget can pick the nearest. `visited` keys let us hibernate awake entities that fell out
-        // of the candidate set entirely.
-        let mut visited: HashSet<u32> = HashSet::new();
-        let mut wake_req: Vec<(f32, u32, u8)> = Vec::new(); // (dist, key, tier)
-        for &idx in &candidates {
-            let e = &self.entities[idx as usize];
-            visited.insert(e.key);
-            let d = dist3(player, e.pos);
-            let out = e.stream_out();
-            match self.awake.get(&e.key).copied() {
-                Some(cur_tier) => {
-                    if d > out + h {
-                        diff.hibernate.push(e.key);
-                    } else {
-                        let nt = lod_tier_hyst(&e.dist, d, cur_tier, h).max(floor);
-                        if nt != cur_tier {
-                            diff.tier_changes.push((e.key, nt));
-                            self.awake.insert(e.key, nt);
-                        }
-                    }
-                }
-                None => {
-                    if d <= out {
-                        wake_req.push((d, e.key, lod_tier(&e.dist, d).max(floor)));
-                    }
-                }
-            }
-        }
-        // Any awake entity not seen this tick is beyond the scan cap -> hibernate it.
-        let stale: Vec<u32> = self
-            .awake
-            .keys()
-            .copied()
-            .filter(|k| !visited.contains(k))
-            .collect();
-        for k in stale {
-            diff.hibernate.push(k);
-        }
-        for k in &diff.hibernate {
-            self.awake.remove(k);
-        }
-        // Throttle wakes: nearest first, up to the budget. Deferred entities stay hibernated and are
-        // reconsidered next tick.
-        wake_req.sort_by(|a, b| a.0.total_cmp(&b.0));
-        for (_d, key, tier) in wake_req.into_iter().take(self.cfg.entity_budget) {
-            self.awake.insert(key, tier);
-            diff.wake.push(key);
-            diff.tier_changes.push((key, tier));
-        }
-    }
-}
-
-/// Full 3-D distance between two world points.
-fn dist3(a: [f32; 3], b: [f32; 3]) -> f32 {
-    let (dx, dy, dz) = (a[0] - b[0], a[1] - b[1], a[2] - b[2]);
-    (dx * dx + dy * dy + dz * dz).sqrt()
-}
-
-// ===========================================================================================
-//  Global LOD-budget governor — engine `FUN_0084ae70` (world_streaming_code_map §2.1)
-// ===========================================================================================
-
-/// Tunables for the global LOD-budget governor.
-#[derive(Debug, Clone, Copy)]
-pub struct GlobalLodConfig {
-    /// Ascending memory/budget-pressure thresholds (climb points) for tiers 1/2/3. A pressure at or
-    /// above `climb[k]` forces the governor to at least tier `k+1` (0 = full detail). The engine
-    /// (`FUN_0084ae70`) compares the live budget pressure against `DAT_00ce8dd8` / `PTR_DAT_00ce8ddc`
-    /// / `PTR_FUN_00ce8de0`.
-    ///
-    /// CONFIRM-LIVE: only the tier COUNT (0..3) and the compare ORDER are proven from the decompiled
-    /// body; the concrete threshold values are not read out — these normalized defaults are a
-    /// stand-in until the three `DAT_00ce8dd*` constants are read live (x32dbg, §5 item 2).
-    pub climb: [f32; 3],
-    /// Hysteresis band (`FUN_0084ae70` `DAT_00ce8dd4`): the governor DROPS a tier only once pressure
-    /// falls below `climb[tier-1] - band`, and commits at most ONE drop per fixed-sim step
-    /// (rate-limited via the step counter `DAT_011765cc`). Climbs apply immediately so memory
-    /// pressure is relieved promptly.
-    pub band: f32,
-}
-
-impl Default for GlobalLodConfig {
-    fn default() -> Self {
-        // Normalized pressure in [0,1] (e.g. resident-bytes / budget). CONFIRM-LIVE values.
-        GlobalLodConfig { climb: [0.60, 0.80, 0.92], band: 0.08 }
-    }
-}
-
-/// The global memory-pressure LOD-budget tier (engine `FUN_0084ae70`), 0 (full detail) .. 3
-/// (coarsest). Ticked once per frame from the master update with the current budget pressure and the
-/// fixed-sim step; a tier change is what the engine broadcasts (`vtable+4(newTier)`) to subscribers.
-/// This is a *global governor* distinct from the per-entity `HibernationControl` distances; the two
-/// compose as a FLOOR (see [`StreamingManager::update`]).
-#[derive(Debug, Clone)]
-pub struct GlobalLodGovernor {
-    cfg: GlobalLodConfig,
-    tier: u8,
-    /// The fixed-sim step at which the last DROP committed (rate-limits drops to one/step).
-    last_drop_step: u64,
-}
-
-impl GlobalLodGovernor {
-    pub fn new(cfg: GlobalLodConfig) -> GlobalLodGovernor {
-        GlobalLodGovernor { cfg, tier: 0, last_drop_step: 0 }
-    }
-
-    /// The tier `pressure` alone maps to (ignoring hysteresis/rate-limit).
-    fn raw_tier(&self, pressure: f32) -> u8 {
-        if pressure >= self.cfg.climb[2] {
-            3
-        } else if pressure >= self.cfg.climb[1] {
-            2
-        } else if pressure >= self.cfg.climb[0] {
-            1
-        } else {
-            0
-        }
-    }
-
-    /// Update from the current budget `pressure` at fixed-sim `step`. Climbs immediately (possibly
-    /// several tiers on a spike); drops one tier at a time, only past the hysteresis band and at most
-    /// once per fixed-sim step. Returns `Some(new_tier)` when the tier changed (the engine broadcasts
-    /// it), else `None`.
-    pub fn update(&mut self, pressure: f32, step: u64) -> Option<u8> {
-        let raw = self.raw_tier(pressure);
-        if raw > self.tier {
-            self.tier = raw; // climb immediately
-            return Some(self.tier);
-        }
-        if raw < self.tier {
-            let cur = self.tier as usize; // dropping from `cur` needs pressure < climb[cur-1] - band
-            if pressure < self.cfg.climb[cur - 1] - self.cfg.band && step != self.last_drop_step {
-                self.tier -= 1;
-                self.last_drop_step = step;
-                return Some(self.tier);
-            }
-        }
-        None
-    }
-
-    pub fn tier(&self) -> u8 {
-        self.tier
-    }
-    pub fn config(&self) -> &GlobalLodConfig {
-        &self.cfg
     }
 }
 
@@ -796,81 +451,12 @@ impl RegionCache {
 mod tests {
     use super::*;
 
-    fn ent(key: u32, x: f32, z: f32, dist: [u16; 4]) -> EntityUnit {
-        EntityUnit { key, pos: [x, 0.0, z], dist }
-    }
-
     #[test]
     fn extent_distance() {
         let e = Extent2::from_center_half(100.0, 200.0, 40.0); // [60..140] x [160..240]
         assert_eq!(e.dist_xz(100.0, 200.0), 0.0); // inside
         assert_eq!(e.dist_xz(150.0, 200.0), 10.0); // 10 past the +X face
         assert!((e.dist_xz(150.0, 250.0) - (100f32 + 100.0).sqrt()).abs() < 1e-4);
-    }
-
-    #[test]
-    fn lod_tier_boundaries() {
-        let d = DEFAULT_DISTANCES; // [100,160,60,20]
-        assert_eq!(lod_tier(&d, 10.0), 0); // <=20 finest
-        assert_eq!(lod_tier(&d, 20.0), 0);
-        assert_eq!(lod_tier(&d, 40.0), 1); // <=60
-        assert_eq!(lod_tier(&d, 100.0), 2); // <=160
-        assert_eq!(lod_tier(&d, 200.0), 3); // coarsest
-    }
-
-    #[test]
-    fn entity_wakes_within_stream_out_and_gets_initial_tier() {
-        let mut m = StreamingManager::new(StreamingConfig::default());
-        m.add_entity(ent(1, 0.0, 0.0, DEFAULT_DISTANCES)); // stream-out 100, finest <=20
-        // Player 50 m away: within stream-out (100) -> wake, tier 1 (<=60).
-        let d = m.update([50.0, 0.0, 0.0]);
-        assert_eq!(d.wake, vec![1]);
-        assert_eq!(d.tier_changes, vec![(1, 1)]);
-        assert!(m.is_awake(1));
-        assert_eq!(m.tier_histogram(), [0, 1, 0, 0]);
-    }
-
-    #[test]
-    fn entity_hibernates_beyond_stream_out_plus_hysteresis() {
-        let mut m = StreamingManager::new(StreamingConfig::default());
-        m.add_entity(ent(1, 0.0, 0.0, DEFAULT_DISTANCES));
-        m.update([50.0, 0.0, 0.0]); // wake
-        assert!(m.is_awake(1));
-        // 110 m: past stream-out (100) but within +hysteresis (15) -> stays awake.
-        let d = m.update([110.0, 0.0, 0.0]);
-        assert!(d.hibernate.is_empty());
-        assert!(m.is_awake(1));
-        // 130 m: past 100 + 15 -> hibernate.
-        let d = m.update([130.0, 0.0, 0.0]);
-        assert_eq!(d.hibernate, vec![1]);
-        assert!(!m.is_awake(1));
-    }
-
-    #[test]
-    fn default_fallback_vs_custom_directive() {
-        let mut m = StreamingManager::new(StreamingConfig::default());
-        m.add_entity(ent(1, 0.0, 0.0, DEFAULT_DISTANCES)); // out 100
-        m.add_entity(ent(2, 0.0, 0.0, [300, 160, 60, 20])); // custom out 300
-        // 200 m away: default entity stays hibernated, custom one wakes.
-        let d = m.update([200.0, 0.0, 0.0]);
-        assert_eq!(d.wake, vec![2]);
-        assert!(!m.is_awake(1));
-        assert!(m.is_awake(2));
-    }
-
-    #[test]
-    fn tier_hysteresis_prevents_thrash() {
-        let mut m = StreamingManager::new(StreamingConfig::default());
-        m.add_entity(ent(1, 0.0, 0.0, DEFAULT_DISTANCES)); // boundary 0/1 at 20
-        // Wake at 18 -> tier 0.
-        let d = m.update([18.0, 0.0, 0.0]);
-        assert_eq!(d.tier_changes, vec![(1, 0)]);
-        // 24 m: past the 20 boundary but within +15 dead-band -> tier stays 0 (no change emitted).
-        let d = m.update([24.0, 0.0, 0.0]);
-        assert!(d.tier_changes.is_empty());
-        // 40 m: clearly past 20 + 15 -> tier 1.
-        let d = m.update([40.0, 0.0, 0.0]);
-        assert_eq!(d.tier_changes, vec![(1, 1)]);
     }
 
     fn blk(id: u16, cx: f32, cz: f32, stream_out: f32) -> BlockUnit {
@@ -933,82 +519,6 @@ mod tests {
         let d = m.update([9000.0, 0.0, 9000.0]);
         assert!(d.unload_blocks.is_empty());
         assert!(m.is_resident(29));
-    }
-
-    #[test]
-    fn wake_budget_defers_far_entities() {
-        let mut cfg = StreamingConfig::default();
-        cfg.entity_budget = 1;
-        let mut m = StreamingManager::new(cfg);
-        m.add_entity(ent(1, 10.0, 0.0, [400, 160, 60, 20]));
-        m.add_entity(ent(2, 20.0, 0.0, [400, 160, 60, 20]));
-        // Both within stream-out but budget 1 -> nearest (key 1) wakes first.
-        let d = m.update([0.0, 0.0, 0.0]);
-        assert_eq!(d.wake, vec![1]);
-        let d = m.update([0.0, 0.0, 0.0]);
-        assert_eq!(d.wake, vec![2]);
-    }
-
-    #[test]
-    fn long_range_entity_is_tracked_and_wakes() {
-        // stream-out beyond the scan cap must still be considered (the 222 >400 outliers).
-        let mut cfg = StreamingConfig::default();
-        cfg.entity_scan_cap = 200.0;
-        let mut m = StreamingManager::new(cfg);
-        m.add_entity(ent(7, 0.0, 0.0, [800, 160, 60, 20]));
-        let d = m.update([500.0, 0.0, 0.0]); // 500 m: past scan cap but within stream-out 800
-        assert_eq!(d.wake, vec![7]);
-        assert!(m.is_awake(7));
-    }
-
-    // ---- global LOD-budget governor (FUN_0084ae70) ----
-
-    #[test]
-    fn global_lod_governor_climbs_bands_and_broadcasts_on_change() {
-        let mut g = GlobalLodGovernor::new(GlobalLodConfig::default()); // climb [0.60,0.80,0.92]
-        assert_eq!(g.tier(), 0);
-        assert_eq!(g.update(0.10, 0), None); // low pressure: stays tier 0, no broadcast
-        assert_eq!(g.update(0.65, 1), Some(1)); // crosses climb[0] -> tier 1, broadcast
-        assert_eq!(g.update(0.65, 2), None); // unchanged -> no broadcast
-        assert_eq!(g.update(0.85, 3), Some(2)); // crosses climb[1]
-        assert_eq!(g.update(0.99, 4), Some(3)); // crosses climb[2] (coarsest)
-    }
-
-    #[test]
-    fn global_lod_governor_climbs_immediately_but_drops_are_banded_and_rate_limited() {
-        let mut g = GlobalLodGovernor::new(GlobalLodConfig::default());
-        assert_eq!(g.update(0.99, 0), Some(3)); // spike straight to tier 3 (multi-tier climb)
-        // Pressure collapses to 0, but drops are ONE tier per fixed-sim step.
-        assert_eq!(g.update(0.0, 1), Some(2));
-        assert_eq!(g.update(0.0, 1), None); // same step -> no further drop (rate-limited)
-        assert_eq!(g.update(0.0, 2), Some(1));
-        assert_eq!(g.update(0.0, 3), Some(0));
-        assert_eq!(g.update(0.0, 4), None); // already at floor
-    }
-
-    #[test]
-    fn global_lod_governor_hysteresis_holds_tier_inside_the_band() {
-        let mut g = GlobalLodGovernor::new(GlobalLodConfig::default()); // band 0.08
-        assert_eq!(g.update(0.65, 0), Some(1)); // climb to tier 1 at climb[0]=0.60
-        // 0.55 is below climb[0] but within the band (0.60 - 0.08 = 0.52): do NOT drop.
-        assert_eq!(g.update(0.55, 1), None);
-        assert!(g.tier() == 1);
-        // 0.50 is below the band -> drop.
-        assert_eq!(g.update(0.50, 2), Some(0));
-    }
-
-    #[test]
-    fn global_budget_tier_floors_per_entity_lod_tier() {
-        let mut m = StreamingManager::new(StreamingConfig::default());
-        m.add_entity(ent(1, 0.0, 0.0, [400, 160, 60, 20])); // finest <=20
-        // Force the global governor to tier 2 (memory pressure); it becomes a coarseness floor.
-        assert_eq!(m.set_lod_budget(0.85, 0), Some(2));
-        assert_eq!(m.global_lod_tier(), 2);
-        // Player 5 m away: per-entity tier would be 0, but the floor clamps it to 2.
-        let d = m.update([5.0, 0.0, 0.0]);
-        assert_eq!(d.wake, vec![1]);
-        assert_eq!(d.tier_changes, vec![(1, 2)]);
-        assert_eq!(m.tier_histogram(), [0, 0, 1, 0]);
     }
 
     // ---- region cache (PgSysPopulation CacheIn/CacheOut, row 9) ----

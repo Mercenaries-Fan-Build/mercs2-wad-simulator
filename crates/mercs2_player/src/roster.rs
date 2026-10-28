@@ -7,7 +7,7 @@
 //! not have, and would also imply a capacity: the container's own capacity word `0x00DF9B9C` has **zero
 //! references binary-wide**, so nothing bounds it there.
 //!
-//! **Three player counts, three independent answers.** This is the trap the map calls out (§2.3), and
+//! **Four player counts, four independent answers — plus the real joined count.** This is the trap the map calls out (§2.3), and
 //! it is the reason each has its own constant here rather than one shared number:
 //!
 //! | question | retail | answer |
@@ -67,8 +67,8 @@ pub const CURRENT_LOCAL_PLAYERS_CONST: f32 = 1.0;
 /// resolve. With 223 call sites it is the single most-used `Player` binding in the game, and modelling
 /// it as a real query is wrong.
 ///
-/// Sits far above `mercs2_core::FIRST_DYNAMIC_GUID` (`0x1000_0000`), so it can never collide with a
-/// minted GUID. The resolve to a concrete character happens in the **engine host**
+/// Outside the runtime key class (`mercs2_core::RUNTIME_KEY_BASE`, `0x4000_0000`), so it can never
+/// collide with a minted key. The resolve to a concrete character happens in the **engine host**
 /// (`mercs2_engine::script_host::GameScriptHost::resolve_guid`), not in `GuidMap` — `GuidMap` has no
 /// knowledge of this sentinel.
 pub const ANY_CHARACTER_SENTINEL: u64 = 0xF000_0000;
@@ -89,11 +89,11 @@ impl PlayerRoster {
         Self::default()
     }
 
-    /// The single-player boot roster: one joined local player in slot 0 carrying
-    /// `mercs2_core::LOCAL_PLAYER_GUID`.
-    pub fn single_player() -> Self {
+    /// The single-player boot roster: one joined local player in slot 0 whose player object is `key`
+    /// (a runtime key the caller minted).
+    pub fn single_player(key: u64) -> Self {
         PlayerRoster {
-            records: vec![PlayerObject::joined_local(0, mercs2_core::LOCAL_PLAYER_GUID)],
+            records: vec![PlayerObject::joined_local(0, key)],
         }
     }
 
@@ -203,7 +203,9 @@ impl PlayerRoster {
     }
 
     /// `Player.CreatePlayer(iPlayerId)` — ensure a record exists for **slot** `slot`, joined and local.
-    /// Returns its GUID, or `0` past the cap (which the binding pushes as nil).
+    /// Returns its GUID, or `0` past the cap (which the binding pushes as nil). A new record's player
+    /// object takes the runtime key `mint` returns; `mint` is not called when the slot is occupied or
+    /// past the cap.
     ///
     /// ⚠ The argument is a **slot index, not a GUID**: `mrxplayer.lua:114-118` is
     /// `for i = 0, Player.GetMaximumPlayers() - 1 do Player.CreatePlayer(i) end`.
@@ -212,7 +214,7 @@ impl PlayerRoster {
     /// re-creating an occupied slot returns the existing GUID and leaves its possession link alone. A
     /// non-idempotent version silently produced a second record whose `character` was 0, and
     /// `Player.GetCharacter` on it returned nil into `Human.Inventory.ReloadAll`.
-    pub fn create(&mut self, slot: u32) -> u64 {
+    pub fn create(&mut self, slot: u32, mint: impl FnOnce() -> u64) -> u64 {
         if slot as usize >= ROSTER_CAP {
             return 0;
         }
@@ -224,7 +226,7 @@ impl PlayerRoster {
         // only slot 0 is ever bound — so `GetAllPlayers` must yield one player, not two. Auto-joining
         // here put an unpossessed slot 1 into that list, and `GetCharacter` on it returned nil into
         // `Human.Inventory.ReloadAll`.
-        let guid = Self::guid_for_slot(slot);
+        let guid = mint();
         self.records.push(PlayerObject {
             slot: slot as u8,
             guid,
@@ -232,15 +234,6 @@ impl PlayerRoster {
             ..Default::default()
         });
         guid
-    }
-
-    /// The GUID a given slot's player record carries at `+0x1C`.
-    ///
-    /// Slot 0 is `mercs2_core::LOCAL_PLAYER_GUID`, which the rest of the engine already treats as the
-    /// local player's handle; further slots follow it. Deterministic rather than minted from
-    /// `GuidMap`, so a re-created slot keeps the handle any script is still holding.
-    pub fn guid_for_slot(slot: u32) -> u64 {
-        mercs2_core::LOCAL_PLAYER_GUID + u64::from(slot)
     }
 
     /// `Player.DestroyPlayer(iPlayerId)` — drop the record in **slot** `slot`.
@@ -305,7 +298,7 @@ mod tests {
     /// The four player counts are independent numbers, and conflating any two of them is a divergence.
     #[test]
     fn the_player_counts_are_independent() {
-        let r = PlayerRoster::single_player();
+        let r = PlayerRoster::single_player(0x4000_0001);
         assert_eq!(r.current_players(), 1, "one joined record");
         assert_eq!(REPORTED_MAX_PLAYERS, 2, "GetMaximumPlayers reports a global nothing enforces");
         assert_eq!(ROSTER_CAP, 2, "the real cap is three compile-time immediates");
@@ -335,7 +328,7 @@ mod tests {
     /// `index_for_local` is the third compile-time cap, and reports `-1` rather than panicking.
     #[test]
     fn index_for_local_rejects_out_of_range_locals() {
-        let r = PlayerRoster::single_player();
+        let r = PlayerRoster::single_player(0x4000_0001);
         assert_eq!(r.index_for_local(0), 0);
         assert_eq!(r.index_for_local(2), -1, "local slots >= 2 are rejected (FUN_006CD960)");
         assert_eq!(r.index_for_local(-1), -1);
@@ -363,19 +356,20 @@ mod tests {
     /// which aborted the gameplay-setup callback chain and stalled the boot in `STATE_WAITFORGAME`.
     #[test]
     fn create_is_slot_indexed_and_idempotent() {
-        let mut r = PlayerRoster::single_player();
+        let mut r = PlayerRoster::single_player(0x4000_0001);
         // Slot 0 already exists and is possessing something.
         r.get_mut(0).unwrap().character = 0xC0FFEE;
 
-        let g0 = r.create(0);
-        assert_eq!(g0, PlayerRoster::guid_for_slot(0), "re-creating returns the existing handle");
+        let unminted = || -> u64 { panic!("an occupied slot or one past the cap mints no key") };
+        let g0 = r.create(0, unminted);
+        assert_eq!(g0, 0x4000_0001, "re-creating returns the existing handle");
         assert_eq!(r.len(), 1, "and does NOT add a second record");
         assert_eq!(r.get(0).unwrap().character, 0xC0FFEE, "nor disturb its possession link");
 
-        let g1 = r.create(1);
-        assert_eq!(g1, PlayerRoster::guid_for_slot(1));
+        let g1 = r.create(1, || 0x4000_0002);
+        assert_eq!(g1, 0x4000_0002, "a new record takes the minted key");
         assert_eq!(r.len(), 2);
-        assert_eq!(r.create(2), 0, "past the cap -> 0 -> Lua nil");
+        assert_eq!(r.create(2, unminted), 0, "past the cap -> 0 -> Lua nil");
 
         // Every joined record has a real handle, so `GetAllPlayers` can never yield a 0.
         assert!(r.all_players().iter().all(|&g| g != 0));
@@ -385,16 +379,16 @@ mod tests {
         assert_eq!(r.get(1).map(|p| p.guid), Some(g1), "and leaves the other slot alone");
     }
 
-    /// The `GetAnyCharacter` sentinel is a value, and it must sit clear of the minted-GUID range or a
-    /// real entity could shadow it.
+    /// The `GetAnyCharacter` sentinel is a value, and it must sit outside the runtime key class or a
+    /// minted entity could shadow it.
     ///
-    /// The range check is a **compile-time** assertion: if either constant ever moves such that they
+    /// The class check is a **compile-time** assertion: if either constant ever moves such that they
     /// overlap, the crate should fail to build rather than fail a test run.
     #[test]
     fn any_character_sentinel_cannot_collide_with_a_minted_guid() {
         const _: () = assert!(
-            ANY_CHARACTER_SENTINEL > mercs2_core::FIRST_DYNAMIC_GUID,
-            "the GetAnyCharacter sentinel must sit above the dynamic GUID mint range"
+            ANY_CHARACTER_SENTINEL & 0xF000_0000 != mercs2_core::RUNTIME_KEY_BASE as u64,
+            "the GetAnyCharacter sentinel must sit outside the runtime key class"
         );
         assert_eq!(ANY_CHARACTER_SENTINEL, 0xF000_0000, "the constant retail pushes at 0x005DE27A");
     }

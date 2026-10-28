@@ -44,7 +44,7 @@ fn main() {
             if let Some(sm) = &sm {
                 for (label, health) in [("intact", 1.0f32), ("wrecked", 0.0)] {
                     let chosen = orch::node_states_for_health(sm, health, 0.99);
-                    let en = orch::machine_node_enable(sm, &hier, &chosen);
+                    let en = orch::machine_node_enable(sm, &hier, &chosen).unwrap_or_else(|e| panic!("{e}"));
                     let t: u32 = draws
                         .iter()
                         .filter(|d| d.node < 0 || en.get(d.node as usize).copied().unwrap_or(true))

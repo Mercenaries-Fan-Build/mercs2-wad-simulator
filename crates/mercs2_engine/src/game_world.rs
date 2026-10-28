@@ -394,38 +394,275 @@ pub fn load_model_props(
 //   Animation clip loaders
 // ---------------------------------------------------------------------------
 
-/// Resolve a character's primary idle clip through the resident AnimationLookup (data-driven:
-/// `ActionTable → Handle → AnimationLookup[CharacterName] → ASTO → clip`, see
-/// `docs/modernization/human_animation_selection.md`). Tries the base resident block (3185) first,
-/// then any `resident`-named block; `None` if the tables aren't present. Relocated from
-/// `mercs2_game::world::resolve_player_idle` — a WAD-scan wrapper over
-/// `mercs2_formats::anim_select::AnimSelector` (the anim crate's `ClipPicker` cannot name `wad`).
-pub fn resolve_player_idle(w: &mut wad::Wad, character: u32) -> Option<u32> {
-    use mercs2_formats::anim_select::AnimSelector;
-    if let Ok(dec) = wad::decompress_block_index(w, 3185) {
-        if let Some(c) = AnimSelector::from_resident_block(&dec).and_then(|s| s.primary_idle(character)) {
-            return Some(c);
+/// The data the engine selects human clips with, resolved by asset name through the WAD stack
+/// (overlays first) — never by block number: the AnimationLookup + ActionTable
+/// (`animationtable` `0xE00B080C` / `0x6802C321`), and every worldentity template's animation
+/// identity (`HumanAnimationSet`) with the template names that lead to it.
+///
+/// Selection is `(handle, template identity, equipment) → AnimationLookup row → ASTO → clip`
+/// (`docs/modernization/human_animation_selection.md`); every miss is an error naming what failed.
+pub struct HumanAnimData {
+    pub selector: mercs2_formats::anim_select::AnimSelector,
+    identities: std::collections::BTreeMap<u32, mercs2_formats::anim_select::AnimIdentity>,
+    /// Lower-cased template `Name` → its keys.
+    names: std::collections::HashMap<String, Vec<u32>>,
+}
+
+impl HumanAnimData {
+    pub fn load(assets: &mut crate::asset::AssetSource) -> Result<HumanAnimData, String> {
+        use mercs2_formats::anim_select::{human_animation_sets, AnimSelector, ACTIONTABLE, ANIMLOOKUP, TYPE_ANIMTABLE};
+        use mercs2_formats::worldentity::{WorldEntity, RETAIL_WORLDENTITY_NAME_HASH, WORLDENTITY_TYPE_HASH};
+        let lookup = assets
+            .resolve(TYPE_ANIMTABLE, ANIMLOOKUP)
+            .ok_or("AnimationLookup 0xE00B080C: in no open wad")?;
+        let actions = assets
+            .resolve(TYPE_ANIMTABLE, ACTIONTABLE)
+            .ok_or("ActionTable 0x6802C321: in no open wad")?;
+        let selector = AnimSelector::from_containers(&lookup, Some(&actions))?;
+        let we = assets
+            .resolve(WORLDENTITY_TYPE_HASH, RETAIL_WORLDENTITY_NAME_HASH)
+            .ok_or("worldentity 0x50075B3B: in no open wad")?;
+        let we = WorldEntity::parse(&we).map_err(|e| format!("worldentity: {e}"))?;
+        let identities = human_animation_sets(&we)?;
+        let mut names: std::collections::HashMap<String, Vec<u32>> = Default::default();
+        for (n, keys) in we.names().map_err(|e| format!("worldentity: {e}"))? {
+            names.entry(n.to_ascii_lowercase()).or_default().extend_from_slice(keys);
         }
+        Ok(HumanAnimData { selector, identities, names })
     }
-    // Collect resident-named block indices first (ends the block_paths borrow before we take `w`
-    // mutably to decompress).
-    let resident: Vec<usize> = {
-        let paths = wad::block_paths(w);
-        paths
-            .iter()
-            .enumerate()
-            .filter(|(i, p)| *i != 3185 && p.to_ascii_lowercase().contains("resident"))
-            .map(|(i, _)| i)
-            .collect()
-    };
-    for i in resident {
-        if let Ok(dec) = wad::decompress_block_index(w, i as u16) {
-            if let Some(c) = AnimSelector::from_resident_block(&dec).and_then(|s| s.primary_idle(character)) {
-                return Some(c);
+
+    /// The animation identity of the template `name` (e.g. the hero templates `mattias`/`chris`/`jen`).
+    pub fn identity_of_template(&self, name: &str) -> Result<mercs2_formats::anim_select::AnimIdentity, String> {
+        let keys = self
+            .names
+            .get(&name.to_ascii_lowercase())
+            .ok_or_else(|| format!("template {name:?}: no worldentity Name"))?;
+        self.agreed_identity(keys, &format!("template {name:?}"))
+    }
+
+    /// The animation identity (`HumanAnimationSet`) of the template with key `key`.
+    pub fn identity_of_key(&self, key: u32) -> Result<mercs2_formats::anim_select::AnimIdentity, String> {
+        self.identities
+            .get(&key)
+            .copied()
+            .ok_or_else(|| format!("template 0x{key:08X}: no HumanAnimationSet"))
+    }
+
+    fn agreed_identity(&self, keys: &[u32], what: &str) -> Result<mercs2_formats::anim_select::AnimIdentity, String> {
+        let mut found: Option<(u32, mercs2_formats::anim_select::AnimIdentity)> = None;
+        for &k in keys {
+            if let Some(&id) = self.identities.get(&k) {
+                match found {
+                    Some((k0, id0)) if id0 != id => {
+                        return Err(format!("{what}: templates 0x{k0:08X} and 0x{k:08X} disagree ({id0:?} vs {id:?})"))
+                    }
+                    _ => found = Some((k, id)),
+                }
             }
         }
+        found
+            .map(|(_, id)| id)
+            .ok_or_else(|| format!("{what}: no template ({keys:08X?}) carries a HumanAnimationSet"))
     }
-    None
+
+    /// The AnimationLookup row retail's query picks for `handle` and `key`
+    /// ([`AnimSelector::query`](mercs2_formats::anim_select::AnimSelector::query)). An error when no
+    /// row survives the query.
+    pub fn row(
+        &self,
+        handle: u32,
+        key: &mercs2_formats::anim_select::LookupKey,
+    ) -> Result<mercs2_formats::anim_select::LookupRow, String> {
+        self.selector
+            .query(handle, key)
+            .ok_or_else(|| format!("handle 0x{handle:08X}: no AnimationLookup row survives the query for {key:08X?}"))
+    }
+
+    /// The one clip `handle` resolves to for `key`. An error when no row survives the query, or when
+    /// the row lists several clips — retail draws one of those per play, which a clip resolved once
+    /// cannot stand for.
+    pub fn clip(&self, handle: u32, key: &mercs2_formats::anim_select::LookupKey) -> Result<u32, String> {
+        match self.row(handle, key)?.clips.as_slice() {
+            [c] => Ok(*c),
+            many => Err(format!(
+                "handle 0x{handle:08X}: the row for {key:08X?} lists {many:08X?}; retail draws one per play"
+            )),
+        }
+    }
+
+    /// The Upright locomotion clips (idle / walk / run) for an identity carrying `equipment_class`.
+    pub fn locomotion(
+        &self,
+        identity: mercs2_formats::anim_select::AnimIdentity,
+        equipment_class: u32,
+    ) -> Result<mercs2_player::LocomotionClips, String> {
+        use mercs2_anim::select::{UPRIGHT_IDLE_HANDLE, UPRIGHT_RUN_HANDLE, UPRIGHT_WALK_HANDLE};
+        let key = mercs2_formats::anim_select::LookupKey::new(identity, equipment_class);
+        Ok(mercs2_player::LocomotionClips {
+            idle: self.clip(UPRIGHT_IDLE_HANDLE, &key)?,
+            walk: self.clip(UPRIGHT_WALK_HANDLE, &key)?,
+            run: self.clip(UPRIGHT_RUN_HANDLE, &key)?,
+        })
+    }
+}
+
+/// One population unit template as the spawn path realizes it: its archetype (from the physics
+/// component it carries), its `ModelName`, and its faction — `Association`, a faction template such as
+/// "Guerilla" (`0x80002CF1`); 0 when the template has none.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct UnitTemplate {
+    pub archetype: crate::spawn::Archetype,
+    pub model: u32,
+    pub faction: u32,
+}
+
+/// The physics components that give a template its archetype. `_HelicopterPhysicsAi` rides
+/// alongside `_HelicopterPhysics` on the same templates, so it does not count separately.
+pub(crate) fn unit_archetype(classes: &[&str]) -> Result<crate::spawn::Archetype, String> {
+    use crate::spawn::Archetype;
+    use crate::vehicle::components::VehicleClass;
+    let found: Vec<Archetype> = classes
+        .iter()
+        .filter_map(|c| match *c {
+            "_HumanPhysics" => Some(Archetype::Character),
+            "_CarPhysicsV2" => Some(Archetype::Vehicle(VehicleClass::Car)),
+            "_TankPhysics" => Some(Archetype::Vehicle(VehicleClass::Tank)),
+            "_BoatPhysics" => Some(Archetype::Vehicle(VehicleClass::Boat)),
+            "_HelicopterPhysics" => Some(Archetype::Vehicle(VehicleClass::Helicopter)),
+            "_JetPhysics" => Some(Archetype::Vehicle(VehicleClass::Jet)),
+            _ => None,
+        })
+        .collect();
+    match found.as_slice() {
+        [] => Ok(Archetype::Prop),
+        [a] => Ok(*a),
+        many => Err(format!("carries several archetype physics components {many:?}")),
+    }
+}
+
+/// What the ambient population spawns from, read from the retail `worldentity` by asset name: the
+/// `PopulationList` unit lists (as a [`crate::population::UnitCatalog`]) and every unit template they
+/// name.
+pub struct PopulationData {
+    pub catalog: crate::population::UnitCatalog,
+    pub units: std::collections::HashMap<u32, UnitTemplate>,
+}
+
+impl PopulationData {
+    pub fn load(assets: &mut crate::asset::AssetSource) -> Result<PopulationData, String> {
+        use mercs2_formats::worldentity::{WorldEntity, RETAIL_WORLDENTITY_NAME_HASH, WORLDENTITY_TYPE_HASH};
+        let we = assets
+            .resolve(WORLDENTITY_TYPE_HASH, RETAIL_WORLDENTITY_NAME_HASH)
+            .ok_or("worldentity 0x50075B3B: in no open wad")?;
+        Self::from_worldentity(&WorldEntity::parse(&we).map_err(|e| format!("worldentity: {e}"))?)
+    }
+
+    /// Build from a parsed `worldentity`. An error when a listed unit (other than 0, which spawns
+    /// nothing) has no template `ModelName` or several archetype physics components.
+    pub fn from_worldentity(we: &mercs2_formats::worldentity::WorldEntity) -> Result<PopulationData, String> {
+        use mercs2_formats::worldentity::Payload;
+        let lists = mercs2_formats::unit_list::unit_lists(we)?;
+        let wanted: std::collections::BTreeSet<u32> = lists.values().flatten().map(|e| e.unit).filter(|&u| u != 0).collect();
+        let mut classes: std::collections::HashMap<u32, Vec<&str>> = Default::default();
+        let mut words: std::collections::HashMap<(u32, &str), u32> = Default::default();
+        for c in &we.components {
+            for r in &c.records {
+                for &k in r.keys.iter().filter(|k| wanted.contains(k)) {
+                    classes.entry(k).or_default().push(c.class.as_str());
+                    if let ("ModelName" | "Association", Payload::Fixed(b)) = (c.class.as_str(), &r.payload) {
+                        if b.len() != 4 {
+                            return Err(format!("unit 0x{k:08X}: {} payload is {} bytes, not one u32", c.class, b.len()));
+                        }
+                        words.insert((k, c.class.as_str()), u32::from_le_bytes([b[0], b[1], b[2], b[3]]));
+                    }
+                }
+            }
+        }
+        let mut units = std::collections::HashMap::new();
+        let mut vehicles = std::collections::BTreeSet::new();
+        for &u in &wanted {
+            let cls = classes.get(&u).map(Vec::as_slice).unwrap_or_default();
+            let archetype = unit_archetype(cls).map_err(|e| format!("unit 0x{u:08X}: {e}"))?;
+            let model = *words
+                .get(&(u, "ModelName"))
+                .ok_or_else(|| format!("unit 0x{u:08X}: the template has no ModelName"))?;
+            if matches!(archetype, crate::spawn::Archetype::Vehicle(_)) {
+                vehicles.insert(u);
+            }
+            units.insert(u, UnitTemplate { archetype, model, faction: words.get(&(u, "Association")).copied().unwrap_or(0) });
+        }
+        Ok(PopulationData { catalog: crate::population::UnitCatalog::new(lists, vehicles)?, units })
+    }
+}
+
+/// Every unit the registered spawners' lists can spawn (unit 0, which spawns nothing, excluded) — the
+/// set a population preload makes resident.
+pub fn population_units(pop: &crate::population::PopulationWorld) -> std::collections::BTreeSet<u32> {
+    pop.spawners
+        .spawners()
+        .iter()
+        .flat_map(|s| pop.units.units_of(s.choice.unit_list))
+        .filter(|&u| u != 0)
+        .collect()
+}
+
+/// One population model made resident: the model (identity fit — world metres, as the hero) and each
+/// unit template that draws it, with the unarmed Upright idle a Character of that template starts in
+/// (`None` for a vehicle or prop unit).
+pub struct PopulationModel {
+    pub model: LoadedModel,
+    pub units: Vec<(u32, Option<u32>)>,
+}
+
+/// Build every model `units` draws, once per model, with each Character unit's idle
+/// (`UPRIGHT_IDLE_HANDLE`, its own `HumanAnimationSet` identity, `Bare`) bound to the model's HIER. An
+/// error naming the unit or model when a template is missing, a model does not build, or an idle does
+/// not resolve or bind.
+pub fn load_population_models(
+    w: &mut wad::Wad,
+    anim: &HumanAnimData,
+    data: &PopulationData,
+    units: &std::collections::BTreeSet<u32>,
+) -> Result<Vec<PopulationModel>, String> {
+    use mercs2_formats::anim_select::{LookupKey, EQUIPMENT_BARE};
+    let mut by_model: std::collections::BTreeMap<u32, Vec<u32>> = Default::default();
+    for &u in units {
+        let t = data.units.get(&u).ok_or_else(|| format!("unit 0x{u:08X}: no unit template"))?;
+        by_model.entry(t.model).or_default().push(u);
+    }
+    let mut out = Vec::new();
+    for (model, templates) in by_model {
+        let (mut m, _, _) = load_model_by_hash(w, model)
+            .ok_or_else(|| format!("units {templates:08X?}: model 0x{model:08X} does not build"))?;
+        m.skin.center = [0.0, 0.0, 0.0];
+        m.skin.scale = 1.0;
+        m.hier = Vec::new();
+        let mut units = Vec::new();
+        let mut idles: Vec<u32> = Vec::new();
+        for u in templates {
+            let idle = if data.units[&u].archetype == crate::spawn::Archetype::Character {
+                let id = anim.identity_of_key(u)?;
+                let idle = anim
+                    .clip(mercs2_anim::select::UPRIGHT_IDLE_HANDLE, &LookupKey::new(id, EQUIPMENT_BARE))
+                    .map_err(|e| format!("unit 0x{u:08X}: {e}"))?;
+                if !idles.contains(&idle) {
+                    idles.push(idle);
+                }
+                Some(idle)
+            } else {
+                None
+            };
+            units.push((u, idle));
+        }
+        let hier: Vec<u32> = m.skin.rig.iter().map(|b| b.name_hash).collect();
+        m.clips = load_clips_for_rig(w, &hier, &idles)
+            .into_iter()
+            .zip(&idles)
+            .map(|(c, idle)| c.ok_or_else(|| format!("model 0x{model:08X}: idle 0x{idle:08X} is in no animgroup that binds to it")))
+            .collect::<Result<_, _>>()?;
+        out.push(PopulationModel { model: m, units });
+    }
+    Ok(out)
 }
 
 /// Resolve a swimming locomotion clip through the real ActionTable + AnimationLookup (resident block
@@ -439,7 +676,7 @@ pub fn resolve_player_swim(w: &mut wad::Wad) -> Option<u32> {
     const NONE_KEY: u32 = 0x27DE_7135; // shared/character-agnostic AnimationLookup key
     const DIVE_CLIP: u32 = 0x64B3_CC44; // the m2("Dive") swim clip — a plunge, not surface locomotion
     let dec = wad::decompress_block_index(w, 3185).ok()?;
-    let sel = AnimSelector::from_resident_block(&dec)?;
+    let sel = AnimSelector::from_resident_block(&dec).unwrap_or_else(|e| panic!("block 3185: {e}"))?;
     let swim = mercs2_formats::hash::pandemic_hash_m2("Swim");
     let mut fallback = None;
     for (st, ac) in sel.action_states() {
@@ -447,7 +684,7 @@ pub fn resolve_player_swim(w: &mut wad::Wad) -> Option<u32> {
             continue;
         }
         for h in sel.handles_for_state(st, ac) {
-            if let Some(c) = sel.resolve_handle(h, NONE_KEY) {
+            for c in sel.handle_clips(h).into_iter().filter(|&(ch, _)| ch == NONE_KEY).map(|(_, c)| c) {
                 if c != DIVE_CLIP {
                     return Some(c);
                 }
@@ -726,9 +963,9 @@ pub fn load_clips_for_model(w: &mut wad::Wad, rig: &[mesh::BoneRig]) -> Vec<Clip
 // ---------------------------------------------------------------------------
 
 /// Everything the streaming runtime needs, produced on the background loader thread (all `Send`):
-/// the WAD handle (moved to the render thread for on-demand wake extraction), the base terrain, its
-/// heightmap, the pure streaming decision manager (blocks + per-entity props with hibernation), and
-/// the key->spawn recipe map the executor uses on WAKE.
+/// the WAD handle (moved to the render thread for on-demand activation extraction), the base terrain,
+/// the block/region decision manager, and the worldentity template records placed entities fall back
+/// to. Placed entities themselves arrive by layer loads ([`StreamingWorld`]).
 ///
 /// **Opaque cross-crate handle** (K2 unification, `docs/modernization/k2_streaming_unification_plan.md`):
 /// the type is `pub` so `mercs2_game`'s TPS boot can hold the loader output and hand it to the
@@ -738,35 +975,39 @@ pub struct StreamingWorldData {
     wad: wad::Wad,
     terrain: LoadedModel,
     manager: mercs2_core::streaming::StreamingManager,
-    props: std::collections::HashMap<u32, PropSpawn>,
-    terrain_tiles: std::collections::HashMap<u32, (u32, [f32; 3])>,
+    templates: TemplateRecords,
     /// Low-res terrain grid cell (row*20+col) -> its draw-group index in the `terrain` model, so the
     /// executor can hide that tile when the hi-res terrainmesh at the same cell is resident.
     lowres_draw_by_cell: std::collections::HashMap<usize, usize>,
-    /// Dynamic lights harvested from `LightObject` COMPs (base `layers_static` + active overlays),
-    /// in world space. Handed to `Scene::set_lights`; the scene uploads the nearest set each frame.
-    lights: Vec<crate::render::GpuLight>,
+    /// The layers whose containers the `layers_static` block carries, in block order.
+    static_block_layers: Vec<u32>,
 }
 
 impl StreamingWorldData {
-    /// Consume the loader output into the reusable [`StreamingWorld`] executor, handing back the base
-    /// (low-res) terrain model (for the one-time upload) and the world lights (for `Scene::set_lights`).
+    /// The layers whose containers the `layers_static` block carries, in block order.
+    pub fn static_block_layers(&self) -> &[u32] {
+        &self.static_block_layers
+    }
+
+    /// Consume the loader output into the reusable [`StreamingWorld`] executor over the world's
+    /// entity-key registry `guids`, handing back the base (low-res) terrain model for the one-time
+    /// upload.
     ///
     /// This is the K2-unification hand-off for a caller in ANOTHER crate: `mercs2_game`'s TPS boot holds
     /// the opaque `StreamingWorldData` and cannot read its crate-private fields, so this method does the
     /// same boot glue `FreeFlyGame::setup` does inline (upload terrain, take ownership of the streamer)
     /// and returns the pieces the caller must wire into its own `Scene`/`World`.
-    pub fn into_streaming_world(self) -> (LoadedModel, Vec<crate::render::GpuLight>, StreamingWorld) {
-        let StreamingWorldData { wad, terrain, manager, props, terrain_tiles, lowres_draw_by_cell, lights } = self;
+    pub fn into_streaming_world(self, guids: std::rc::Rc<std::cell::RefCell<mercs2_core::GuidMap>>) -> (LoadedModel, StreamingWorld) {
+        let StreamingWorldData { wad, terrain, manager, templates, lowres_draw_by_cell, static_block_layers: _ } = self;
         let terrain_hash = terrain.hash;
-        let sw = StreamingWorld::new(wad, manager, props, terrain_tiles, lowres_draw_by_cell, terrain_hash);
-        (terrain, lights, sw)
+        let sw = StreamingWorld::new(wad, manager, templates, lowres_draw_by_cell, terrain_hash, guids);
+        (terrain, sw)
     }
 }
 
 /// Convert a harvested `LightObject` placement to a GPU point light, dropping degenerate lights
-/// (non-positive / non-finite radius) so the inferred `params[0]=intensity`/`params[1]=radius`
-/// mapping can never flood the scene. Color/intensity/radius are the authored on-disk values.
+/// (non-positive / non-finite radius) so the inferred `params[0]=intensity` mapping can never flood the
+/// scene. Color/intensity/radius are the authored on-disk values.
 pub fn placed_lights_to_gpu(placed: &[mercs2_formats::placement::PlacedLight]) -> Vec<crate::render::GpuLight> {
     placed
         .iter()
@@ -787,7 +1028,8 @@ pub fn placed_lights_to_gpu(placed: &[mercs2_formats::placement::PlacedLight]) -
 ///
 /// Data-driven from the pinned `LightObject` layout (see `placement::LightObject::is_spot` /
 /// `PlacedLight::cone_axis`): type 3 = spot, aimed along the placement's local −Y, with
-/// `params[2]` = throw range and `params[4]`/`params[5]` = inner/outer cone half-angles. Before this,
+/// `params[2]` = throw range, `params[5]` = the full cone angle (the edge is half of it) and
+/// `params[4]` = the inner edge (its retail role is not decoded). Before this,
 /// every authored spot was silently dropped (its `params[1]` is 0, and the old `radius()` read that
 /// slot, so the `radius <= 0` guard discarded it).
 pub fn placed_spot_lights_to_gpu(
@@ -802,8 +1044,9 @@ pub fn placed_spot_lights_to_gpu(
             if !range.is_finite() || range <= 0.0 || !intensity.is_finite() {
                 return None;
             }
-            // Authored inner/outer half-angles; keep inner <= outer so the cone edge fades inward.
-            let outer = pl.light.cone_outer();
+            // The cone edge is half the authored cone angle (`FUN_004A7660`); keep inner <= outer so
+            // the edge fades inward.
+            let outer = pl.light.cone_angle() * 0.5;
             let inner = pl.light.cone_inner().min(outer);
             Some(crate::scene::SpotLightGpu::new(
                 pl.pos,
@@ -934,16 +1177,15 @@ fn colr_peak(colr: &mercs2_formats::fxdict::Colr) -> ([f32; 3], f32) {
     ([c[0], c[1], c[2]], c[3])
 }
 
-/// Load the streaming world off-thread: open the WAD, merge the base terrain, build the world block
-/// index + Layer-2 streaming catalog (c3-cell LOAD units + per-entity `ModelName` props with their
-/// `HibernationControl` distances). Returns the data (incl. the WAD handle) for the render thread.
-/// Load the streaming world (block index + `StreamingManager` + wake recipes + WAD handle) on the
-/// background thread. `pub` for the K2 unification: `mercs2_game`'s playable boot calls this to get the
-/// same streaming runtime the free-fly path uses (see `k2_streaming_unification_plan.md`).
+/// Load the streaming world (the base terrain, the block/region `StreamingManager`, the template
+/// records, the WAD handle) on the background thread. Placed entities are not loaded here: they arrive
+/// by layer loads ([`StreamingWorld`]). `pub` for the K2 unification: `mercs2_game`'s playable boot
+/// calls this to get the same streaming runtime the free-fly path uses (see
+/// `k2_streaming_unification_plan.md`).
 pub fn load_streaming_world_data(
     wadpath: &str,
     cfg: mercs2_core::streaming::StreamingConfig,
-    overlays: &[String],
+    templates: TemplateRecords,
     progress: &LoadProgress,
 ) -> Result<StreamingWorldData, String> {
     let mut w = wad::open(wadpath)?;
@@ -984,40 +1226,14 @@ pub fn load_streaming_world_data(
     println!("[stream] terrain: {} verts / {} tris / {} tiles", terrain.verts.len(), terrain.indices.len() / 3, tm.tiles_placed);
     progress.step("terrain");
 
-    // World block index (c3-cell extents) + the streaming catalog.
+    // World block index (c3-cell extents) + the block/region manager.
     let idx = {
         let (archive, file) = wad::archive_and_file(&mut w);
         mercs2_formats::world_index::WorldIndex::build(archive, file)
     };
     progress.step("world index");
-    let (mut manager, mut props, terrain_tiles) = build_streaming_catalog(&idx, &ls, cfg)?;
-    let base_props = props.len();
-
-    // Dynamic lights: harvest LightObject COMPs (joined to their entity Transform for a world
-    // position) from the base layers_static block; overlays fold theirs in below.
-    let mut lights = placed_lights_to_gpu(&mercs2_formats::placement::light_inventory(&ls));
-
-    // Activate the save's vz_state OVERLAYS on top of the always-loaded base: resolve each active
-    // layer name -> its WAD block, then fold its placements into the same streaming catalog so they
-    // stream by proximity like the base. This is the game-state world (destruction/staging/faction +
-    // the PMC interior) the save selects. Empty `overlays` = base world only.
-    let (mut ov_resolved, mut ov_entities) = (0usize, 0usize);
-    for layer in overlays {
-        let Some(bi) = resolve_overlay_block(&w, layer) else { continue };
-        let Ok(dec) = wad::decompress_block_index(&mut w, bi) else { continue };
-        let (mn, nm) = add_overlay_to_catalog(&dec, cfg.default_distances, &mut manager, &mut props);
-        lights.extend(placed_lights_to_gpu(&mercs2_formats::placement::light_inventory(&dec)));
-        ov_resolved += 1;
-        ov_entities += mn + nm;
-    }
-    if !overlays.is_empty() {
-        println!("[stream] overlays: {ov_resolved}/{} vz_state layers resolved, +{ov_entities} entities", overlays.len());
-    }
-
-    println!(
-        "[stream] catalog: {} c3-cell blocks, {} per-entity props ({base_props} base + {} overlay), {} hi-res terrain tiles, {} population regions",
-        manager.block_count(), props.len(), props.len() - base_props, terrain_tiles.len(), manager.region_count()
-    );
+    let manager = build_streaming_catalog(&idx, cfg);
+    println!("[stream] manager: {} c3-cell blocks", manager.block_count());
 
     // Seam A — E1 schema-driven component pass (ADDITIVE, alongside the oracle-driven catalog above):
     // build the kernel ComponentRegistry from the block's `schm` field schemas and deserialize its
@@ -1025,21 +1241,92 @@ pub fn load_streaming_world_data(
     // field-schema deserializer into the live loader; it does not change what streams.
     let (comp_reg, sstats) = load_schema_components(&ls);
     println!(
-        "[stream] schema (seam A): {} classes registered (pool budget {}), {} generic COMP groups / {} records deserialized; oracle agreement: HibernationControl {}/{}, ModelName {}/{}",
+        "[stream] schema (seam A): {} classes registered (pool budget {}), {} generic COMP groups / {} records deserialized; oracle agreement: ModelName {}/{}",
         sstats.classes, comp_reg.total_budget(), sstats.generic_groups, sstats.generic_records,
-        sstats.hib_agree, sstats.hib_checked, sstats.model_agree, sstats.model_checked
+        sstats.model_agree, sstats.model_checked
     );
-    if sstats.hib_agree != sstats.hib_checked || sstats.model_agree != sstats.model_checked {
+    if sstats.model_agree != sstats.model_checked {
         eprintln!(
-            "[stream] WARNING: schema path disagreed with the placement oracle (HibernationControl {}/{}, ModelName {}/{}) — investigate before trusting schema-driven instantiation",
-            sstats.hib_agree, sstats.hib_checked, sstats.model_agree, sstats.model_checked
+            "[stream] WARNING: schema path disagreed with the placement oracle (ModelName {}/{}) — investigate before trusting schema-driven instantiation",
+            sstats.model_agree, sstats.model_checked
         );
     }
     progress.step("streaming catalog");
 
-    println!("[stream] dynamic lights: {} LightObject placements harvested", lights.len());
-    Ok(StreamingWorldData { wad: w, terrain, manager, props, terrain_tiles, lowres_draw_by_cell, lights })
+    let static_block_layers = block_layers(&ls);
+    Ok(StreamingWorldData { wad: w, terrain, manager, templates, lowres_draw_by_cell, static_block_layers })
 }
+
+/// The scene and ECS world a step presents entities in; `None` for a headless step.
+type Presentation<'a> = Option<(&'a mut crate::scene::Scene, &'a mut mercs2_core::World)>;
+
+/// A placed entity's activation side ([`mercs2_core::activation::ActivationHost`]) over the streaming
+/// executor: begin requests its model, `CanActivate` is that model resident, complete spawns it. A
+/// headless activation (no presentation) loads and spawns nothing: an asset the archive carries counts
+/// as resident.
+struct Activator<'a> {
+    sw: &'a mut StreamingWorld,
+    present: Presentation<'a>,
+}
+
+impl mercs2_core::activation::ActivationHost for Activator<'_> {
+    /// From asleep → waking; an asset the archive does not carry cancels it (`0xED3B18`).
+    fn begin(&mut self, key: u32) -> Result<bool, String> {
+        if self.sw.state(key) != 0 {
+            return Ok(true);
+        }
+        self.sw.guids.borrow_mut().set_state(key, 1);
+        Ok(self.sw.assets_present(key))
+    }
+
+    /// The model is resident: loaded here, synchronously, so a poll of a present asset succeeds.
+    fn can_activate(&mut self, key: u32, _forced: bool) -> Result<bool, String> {
+        match &mut self.present {
+            Some((scene, _)) => self.sw.load_assets(key, scene),
+            None => Ok(self.sw.assets_present(key)),
+        }
+    }
+
+    /// Waking → awake; then, as retail's complete calls SetTransform after the listeners
+    /// (`0x4F8171`), the grid entry is re-celled with the render node the ModelName listener made.
+    fn complete(&mut self, key: u32) -> Result<(), String> {
+        if self.sw.state(key) != 1 {
+            return Ok(());
+        }
+        self.sw.guids.borrow_mut().set_state(key, 2);
+        self.sw.recell(key)?;
+        match &mut self.present {
+            Some((scene, world)) => self.sw.sync_visual(key, scene, world),
+            None => Ok(()),
+        }
+    }
+
+    fn deactivate(&mut self, key: u32) {
+        if self.sw.state(key) != 0 {
+            self.sw.guids.borrow_mut().set_state(key, 0);
+            if let Some((scene, world)) = &mut self.present {
+                self.sw.despawn_visual(key, scene, world);
+            }
+        }
+    }
+
+    fn now_us(&mut self) -> u64 {
+        self.sw.epoch.elapsed().as_micros() as u64
+    }
+
+    /// Nothing waits on I/O: assets load synchronously in the poll.
+    fn io_busy(&mut self) -> bool {
+        false
+    }
+}
+
+/// The one-bone identity palette of a static streamed model.
+const IDENTITY: [[f32; 4]; 4] = [
+    [1.0, 0.0, 0.0, 0.0],
+    [0.0, 1.0, 0.0, 0.0],
+    [0.0, 0.0, 1.0, 0.0],
+    [0.0, 0.0, 0.0, 1.0],
+];
 
 /// A per-frame stats snapshot for the streaming console/HUD line.
 pub struct StreamStats {
@@ -1274,24 +1561,49 @@ impl TerrainHeightField {
 }
 
 /// The reusable streaming-runtime **executor** (K2 unification,
-/// `docs/modernization/k2_streaming_unification_plan.md`). Owns the decision [`StreamingManager`], the
-/// WAD handle (for on-demand wake extraction), the wake recipes, and all live-executor bookkeeping, and
-/// performs the per-frame GPU/ECS LOAD/WAKE/UNLOAD/HIBERNATE work in [`step`](Self::step). Extracted
-/// **verbatim** from `run_game_world`'s closure so BOTH the free-fly boot and the playable TPS boot can
-/// drive one streaming path — each layering its own camera/player on top. The one-time boot glue (base
-/// terrain upload, the game populate hook, world lights) stays in the caller; [`new`](Self::new) takes
-/// ownership of the streaming state after that.
+/// `docs/modernization/k2_streaming_unification_plan.md`). Owns the block/region [`StreamingManager`],
+/// the hibernation grid every placed entity is registered in, the WAD handle (for on-demand
+/// activation extraction) and all live-executor bookkeeping, and performs the per-frame GPU/ECS work in
+/// [`step`](Self::step). Both the free-fly boot and the playable TPS boot drive this one path. The
+/// one-time boot glue (base terrain upload, the game populate hook, world lights) stays in the caller;
+/// [`new`](Self::new) takes ownership of the streaming state after that.
 pub struct StreamingWorld {
     wad: wad::Wad,
     manager: mercs2_core::streaming::StreamingManager,
-    props: std::collections::HashMap<u32, PropSpawn>,
-    terrain_tiles: std::collections::HashMap<u32, (u32, [f32; 3])>,
+    /// The worldentity template records placed entities fall back to.
+    templates: TemplateRecords,
+    /// Every placed entity of the loaded layers.
+    catalog: PlacedCatalog,
+    grid: mercs2_core::hibernation::HibernationGrid,
+    /// The world's entity-key registry, shared with the script host: SceneObject rows (and their
+    /// activation state, `+0x18` bits 12..13), names, layer records, LandingZone rows.
+    guids: std::rc::Rc<std::cell::RefCell<mercs2_core::GuidMap>>,
+    /// The point and spot lights each loaded layer's `LightObject`s make.
+    layer_lights: std::collections::BTreeMap<u32, (Vec<crate::render::GpuLight>, Vec<crate::scene::SpotLightGpu>)>,
+    /// The scene's light set no longer matches `layer_lights`.
+    lights_dirty: bool,
+    /// Destroyed entities whose visual (and catalog record) the next step removes.
+    destroyed_visuals: Vec<u32>,
+    /// Entities whose visual the next presented step brings in line with their state: runtime spawns
+    /// a `Pg.Spawn` activated inside the call, and adopted keys.
+    pending_visuals: Vec<u32>,
+    /// Keys whose ECS entity the caller owns ([`adopt`](Self::adopt)): the executor builds none.
+    external: std::collections::HashSet<u32>,
+    /// Entities `Object.Remove` took out (SceneObject `+0x1A` bit3): the grid never wakes them again.
+    removed: std::collections::HashSet<u32>,
+    /// How many events the grid emitted in the last step.
+    last_events: usize,
+    /// The pending activations (`0xDF9C10`).
+    queue: mercs2_core::activation::ActivationQueue,
+    /// The activation clock's epoch.
+    epoch: std::time::Instant,
+    /// Render-node spheres, by source.
+    node_spheres: NodeSpheres,
     lowres_draw_by_cell: std::collections::HashMap<usize, usize>,
     terrain_hash: u32,
     prop_ents: std::collections::HashMap<u32, mercs2_core::Entity>,
     block_ents: std::collections::HashMap<u16, mercs2_core::Entity>,
     model_refs: std::collections::HashMap<u32, u32>,
-    wake_failed: std::collections::HashSet<u32>,
     anim_store: std::collections::HashMap<u32, crate::scene::ModelAnim>,
     // --- collision delta (K2 S2) ---
     /// Per-model **local-space** render triangles for the TERRAIN tiles only — cached on first load and
@@ -1325,28 +1637,48 @@ pub struct StreamingWorld {
 }
 
 impl StreamingWorld {
-    /// Take ownership of the loaded streaming state. The caller has already uploaded the base terrain,
-    /// run its populate hook, and set the world lights (one-time boot glue, not per-frame). `terrain_hash`
-    /// is the low-res terrain model hash (for the tile LOD swap).
+    /// Take ownership of the loaded streaming state. The caller has already uploaded the base terrain
+    /// and run its populate hook (one-time boot glue, not per-frame). `terrain_hash` is the low-res
+    /// terrain model hash (for the tile LOD swap). The world starts with no layer loaded: placed
+    /// entities arrive through the layer requests queued on `guids` ([`step`](Self::step)). The
+    /// templates' `Name` records enter the name index first, so a layer's later registration of a
+    /// template's name does not displace it.
     pub fn new(
         wad: wad::Wad,
         manager: mercs2_core::streaming::StreamingManager,
-        props: std::collections::HashMap<u32, PropSpawn>,
-        terrain_tiles: std::collections::HashMap<u32, (u32, [f32; 3])>,
+        templates: TemplateRecords,
         lowres_draw_by_cell: std::collections::HashMap<usize, usize>,
         terrain_hash: u32,
+        guids: std::rc::Rc<std::cell::RefCell<mercs2_core::GuidMap>>,
     ) -> Self {
+        {
+            let gm = &mut *guids.borrow_mut();
+            for (k, name) in &templates.names {
+                gm.register_name(mercs2_formats::hash::pandemic_hash_m2(name), *k);
+            }
+        }
         StreamingWorld {
             wad,
             manager,
-            props,
-            terrain_tiles,
+            templates,
+            catalog: PlacedCatalog::default(),
+            grid: mercs2_core::hibernation::HibernationGrid::new(mercs2_core::hibernation::HibernationScale::single_player()),
+            guids,
+            layer_lights: std::collections::BTreeMap::new(),
+            lights_dirty: false,
+            destroyed_visuals: Vec::new(),
+            pending_visuals: Vec::new(),
+            external: std::collections::HashSet::new(),
+            removed: std::collections::HashSet::new(),
+            last_events: 0,
+            queue: mercs2_core::activation::ActivationQueue::default(),
+            epoch: std::time::Instant::now(),
+            node_spheres: NodeSpheres::default(),
             lowres_draw_by_cell,
             terrain_hash,
             prop_ents: std::collections::HashMap::new(),
             block_ents: std::collections::HashMap::new(),
             model_refs: std::collections::HashMap::new(),
-            wake_failed: std::collections::HashSet::new(),
             anim_store: std::collections::HashMap::new(),
             local_tris: std::collections::HashMap::new(),
             phy2_local: std::collections::HashMap::new(),
@@ -1376,11 +1708,22 @@ impl StreamingWorld {
         std::mem::take(&mut self.collision_ops)
     }
 
+    /// Whether the last step changed nothing and nothing waits: the grid emitted no event and no
+    /// activation is pending (the world-ready check `0x4BA2A7` waits for an empty queue).
+    pub fn settled(&self) -> bool {
+        self.last_events == 0 && self.queue.is_empty()
+    }
+
+    /// The live entity of the awake streamed object with entity key `key`, if it is awake.
+    pub fn entity_of_key(&self, key: u32) -> Option<mercs2_core::Entity> {
+        self.prop_ents.get(&key).copied()
+    }
+
     /// Live executor counts for the periodic stat line.
     pub fn stats(&self) -> StreamStats {
         StreamStats {
             resident: self.manager.resident_count(),
-            awake: self.manager.awake_count(),
+            awake: self.catalog.iter().filter(|o| self.state(o.key) == 2).count(),
             cached_regions: self.manager.cached_region_count(),
             regions: self.manager.region_count(),
             block_ents: self.block_ents.len(),
@@ -1391,43 +1734,290 @@ impl StreamingWorld {
         }
     }
 
-    /// One streaming step at camera position `cam`: run the manager decision (block/prop diff + the
-    /// RegionCache CacheIn/CacheOut layer), then execute the diff on the GPU/ECS — UNLOAD blocks that
-    /// left the working radius, HIBERNATE far props, LOAD c3-cell geometry, and WAKE props/terrain tiles
-    /// at their authored transforms. Verbatim from the original free-fly executor.
-    pub fn step(&mut self, scene: &mut crate::scene::Scene, world: &mut mercs2_core::World, cam: [f32; 3]) {
+    /// `key`'s activation state: 0 asleep, 1 waking, 2 awake.
+    fn state(&self, key: u32) -> u8 {
+        self.guids.borrow().state(key).unwrap_or(0)
+    }
+
+    /// Perform the layer requests queued on the registry since the last call
+    /// (`docs/reverse_engineer/layer_load_code_map.md` §2–3). A load of a layer that is already loaded
+    /// or has failed does nothing. `exempt` names the entities a dynamic layer's unload must not
+    /// destroy: the player-controlled entity and what is linked to it (`FUN_82437CF8`). Needs no scene:
+    /// the visuals of destroyed entities and the scene's light set follow in the next
+    /// [`step`](Self::step).
+    pub fn apply_layer_ops(&mut self, exempt: &dyn Fn(u32) -> bool) -> Result<(), String> {
+        use mercs2_core::LayerOp;
+        let ops = self.guids.borrow_mut().take_layer_ops();
+        for (op, layer) in ops {
+            match op {
+                LayerOp::Load => {
+                    if self.guids.borrow().layer(layer).is_some_and(|r| r.status == 0) {
+                        self.load_layer(layer)?;
+                    }
+                }
+                LayerOp::Reload => self.load_layer(layer)?,
+                LayerOp::Unload => self.unload_layer(layer, exempt),
+            }
+        }
+        Ok(())
+    }
+
+    /// The scene side of the layer requests: despawn destroyed entities' visuals, and set the scene's
+    /// lights to the loaded layers' when they changed.
+    fn sync_layer_scene(&mut self, scene: &mut crate::scene::Scene, world: &mut mercs2_core::World) {
+        for k in std::mem::take(&mut self.destroyed_visuals) {
+            self.despawn_visual(k, scene, world);
+            // A layer loaded after the destroy may have placed the key again.
+            if !self.grid.contains(k) {
+                self.catalog.remove(&[k]);
+            }
+        }
+        if std::mem::take(&mut self.lights_dirty) {
+            self.present_lights(scene);
+        }
+    }
+
+    /// Set the scene's point and spot lights to the loaded layers' `LightObject`s.
+    pub fn present_lights(&self, scene: &mut crate::scene::Scene) {
+        let points = self.layer_lights.values().flat_map(|(p, _)| p.iter().cloned()).collect();
+        let spots = self.layer_lights.values().flat_map(|(_, s)| s.iter().cloned()).collect();
+        scene.set_lights(points);
+        scene.set_spot_lights(spots);
+    }
+
+    /// A layer's `OnLoad` (`0x45E5F0`): instantiate its container — every placed entity into the
+    /// catalog and the hibernation grid (asleep), its SceneObject row, its names into the name index,
+    /// its LandingZone rows, its population regions and its lights; a dynamic layer's entities get its
+    /// RuntimeLayerId — then status 2. A layer the archive does not carry fails (status 3). A reload
+    /// re-reads the container over the entities already placed (whether retail destroys them first is
+    /// UNPROVEN); a key already registered keeps its grid entry.
+    fn load_layer(&mut self, layer: u32) -> Result<(), String> {
+        use mercs2_formats::hash::pandemic_hash_m2;
+        let Some(c) = layer_container(&mut self.wad, layer)? else {
+            let r = &mut *self.guids.borrow_mut();
+            let rec = r.layer_mut(layer);
+            rec.status = 3;
+            rec.reloading = false;
+            return Ok(());
+        };
+        let keys = self.catalog.add_block(&c, &self.templates).map_err(|e| format!("layer 0x{layer:08X}: {e}"))?;
+        let names = mercs2_formats::placement::placed_names(&c);
+        let pads = mercs2_formats::placement::load_landing_zones(&c);
+        register_population_regions(&c, &mut self.manager);
+        let inventory = mercs2_formats::placement::light_inventory(&c);
+        self.layer_lights.insert(layer, (placed_lights_to_gpu(&inventory), placed_spot_lights_to_gpu(&inventory)));
+        self.lights_dirty = true;
+
+        let gm = &mut *self.guids.borrow_mut();
+        let dynamic = gm.layer(layer).is_some_and(|r| r.dynamic);
+        for &k in &keys {
+            let o = *self.catalog.get(k).expect("add_block returned a catalogued key");
+            if !self.grid.contains(k) {
+                self.grid.insert(&o.registration(), false);
+            }
+            let state = gm.state(k).unwrap_or(0);
+            gm.set_scene(k, mercs2_core::SceneRow { pos: o.pos, quat: o.quat, template: o.parent, state });
+            if dynamic {
+                gm.set_runtime_layer(k, layer);
+            }
+        }
+        for (k, raw) in names {
+            gm.register_name(pandemic_hash_m2(&raw), k);
+        }
+        for p in pads {
+            gm.set_landing_zone(p.key, p.zone, p.slot);
+        }
+        let rec = gm.layer_mut(layer);
+        rec.status = 2;
+        rec.reloading = false;
+        rec.keys = keys;
+        Ok(())
+    }
+
+    /// A layer's `Unload` (`0x45E4E0`, Xbox `FUN_821AE540`): a dynamic layer destroys every entity whose
+    /// RuntimeLayerId is this layer, except `exempt` ones, and drops its lights; then status 0. A
+    /// static layer's entities stay.
+    fn unload_layer(&mut self, layer: u32, exempt: &dyn Fn(u32) -> bool) {
+        let dynamic = self.guids.borrow().layer(layer).is_some_and(|r| r.dynamic);
+        if dynamic {
+            let mut keys = self.guids.borrow().keys_of_runtime_layer(layer);
+            keys.sort_unstable();
+            for k in keys.into_iter().filter(|&k| !exempt(k)) {
+                self.destroy(k);
+            }
+            if self.layer_lights.remove(&layer).is_some() {
+                self.lights_dirty = true;
+            }
+        }
+        self.guids.borrow_mut().layer_mut(layer).status = 0;
+    }
+
+    /// Destroy a placed entity (`FUN_82255FF0`): deactivate it (its visual goes in the next step), then
+    /// drop it from the activation queue, the grid, the catalog and the registry (its row, names, layer
+    /// link, LandingZone row).
+    fn destroy(&mut self, key: u32) {
+        if self.state(key) != 0 {
+            self.guids.borrow_mut().set_state(key, 0);
+        }
+        self.queue.remove(key);
+        self.grid.remove(key);
+        self.removed.remove(&key);
+        self.guids.borrow_mut().remove(key);
+        // A visual's despawn reads the entity's catalog record, so the record goes with the visual.
+        if self.prop_ents.contains_key(&key) {
+            self.destroyed_visuals.push(key);
+        } else {
+            self.catalog.remove(&[key]);
+        }
+    }
+
+    /// One streaming step with `viewer` — the local player's camera target (the character on foot, the
+    /// vehicle when riding): the queued layer requests ([`apply_layer_ops`](Self::apply_layer_ops), with
+    /// `exempt` as there), the block/region decision, then one frame of the hibernation grid and its
+    /// event consumer (`FUN_004F8460`): deactivate entities whose viewer mask cleared, activate those
+    /// whose mask was set (largest own `HibernationControl.Distance` first, deferred), pump the pending
+    /// activations, and follow each ring-tier change with the entity's model residency.
+    pub fn step(&mut self, scene: &mut crate::scene::Scene, world: &mut mercs2_core::World, viewer: [f32; 3], exempt: &dyn Fn(u32) -> bool) -> Result<(), String> {
+        self.apply_layer_ops(exempt)?;
+        self.apply_moved()?;
+        self.sync_layer_scene(scene, world);
+        for k in std::mem::take(&mut self.pending_visuals) {
+            self.sync_visual(k, scene, world)?;
+        }
+        self.step_blocks(scene, world, viewer);
+        self.step_grid(Some((scene, world)), viewer)
+    }
+
+    /// [`step`](Self::step) without presentation: the layer requests, the grid and the activations run
+    /// as in a presented step, but nothing is loaded, drawn or collided — the world-state simulation a
+    /// headless run of the scripts drives (`mercs2_autoplay`, the boot tests).
+    pub fn step_headless(&mut self, viewer: [f32; 3], exempt: &dyn Fn(u32) -> bool) -> Result<(), String> {
+        self.apply_layer_ops(exempt)?;
+        self.apply_moved()?;
+        self.pending_visuals.clear();
+        self.step_grid(None, viewer)
+    }
+
+    /// The grid re-cells of the SetTransforms since the last step (`0x518140` → `FUN_00516F00`): the
+    /// catalog takes the row's transform, and a registered entity is re-celled from the render node it
+    /// has now — an awake one's, else none (the bare position, `base` 0).
+    fn apply_moved(&mut self) -> Result<(), String> {
+        let moved = self.guids.borrow_mut().take_moved();
+        for k in moved {
+            let Some(row) = self.guids.borrow().scene(k).copied() else { continue };
+            self.catalog.set_transform(k, row.pos, row.quat);
+            if !self.grid.contains(k) {
+                continue;
+            }
+            let o = *self.catalog.get(k).ok_or_else(|| format!("0x{k:08X}: moved and in the grid, but not catalogued"))?;
+            let node = match row.state {
+                2 => self.node_spheres.sphere(&mut self.wad, o.node).map_err(|e| format!("0x{k:08X}: {e}"))?,
+                _ => None,
+            };
+            self.grid.moved(&o.activated_registration(node));
+        }
+        Ok(())
+    }
+
+    /// `Pg.Spawn`'s spawn of `template` (`FUN_006746D0` → `FUN_00673070`;
+    /// `docs/reverse_engineer/hibernation_grid.md` §6 "Runtime spawns"), inside the call:
+    /// - the key is taken first, so a spawn that fails below still consumes one;
+    /// - `flags` = `net` && `net_enabled` && the template's NetCategoryInfo low nibble; the entity
+    ///   registers non-static with `flags`, else with NetCategoryInfo bit 9;
+    /// - the SceneObject row (position, the yaw quaternion, the template, asleep), then the grid insert
+    ///   with the current viewers' mask;
+    /// - out of every viewer's range with the template's `HibernationControl` Flags set, the entity is
+    ///   removed again and the spawn returns `None`;
+    /// - in range, it activates now (begin, then complete when its assets are present); its visual
+    ///   follows at the next presented step.
+    ///
+    /// An error for a key that is not a worldentity template.
+    pub fn spawn(&mut self, template: u32, pos: [f32; 3], yaw_degrees: f32, net: bool, net_enabled: bool) -> Result<Option<u32>, String> {
+        use mercs2_core::glam::Quat;
+        if !self.templates.keys.contains(&template) {
+            return Err(format!("Pg.Spawn: 0x{template:08X} is not a worldentity template"));
+        }
+        let key = self.guids.borrow_mut().mint_runtime();
+        let nci = self.templates.net_category.get(&template).copied().unwrap_or(0);
+        let flags = net && net_enabled && nci & 0xF != 0;
+        let non_static = flags || nci & (1 << 9) != 0;
+        let q = Quat::from_rotation_y(yaw_degrees.to_radians());
+        let quat = [q.x, q.y, q.z, q.w];
+        let o = self.catalog.add_spawn(key, template, pos, quat, !non_static, &self.templates)?;
+        self.guids.borrow_mut().set_scene(key, mercs2_core::SceneRow { pos, quat, template, state: 0 });
+        let mask = self.grid.insert(&o.registration(), true) & 0x0F;
+        if mask == 0 {
+            if o.hibernation.is_some_and(|h| h.flags) {
+                self.grid.remove(key);
+                self.catalog.remove(&[key]);
+                self.guids.borrow_mut().remove(key);
+                return Ok(None);
+            }
+            return Ok(Some(key));
+        }
+        let mut queue = std::mem::take(&mut self.queue);
+        let result = queue.activate(&mut Activator { sw: &mut *self, present: None }, key, false, true, true);
+        self.queue = queue;
+        result?;
+        self.pending_visuals.push(key);
+        Ok(Some(key))
+    }
+
+    /// The caller owns `key`'s ECS entity (the player's character, which the game builds itself): the
+    /// executor builds no entity for it, and removes the one it built at the next presented step.
+    pub fn adopt(&mut self, key: u32) {
+        if self.external.insert(key) {
+            self.pending_visuals.push(key);
+        }
+    }
+
+    /// One frame of the hibernation grid and its event consumer, then the visuals of ring-tier changes.
+    fn step_grid(&mut self, mut present: Presentation<'_>, viewer: [f32; 3]) -> Result<(), String> {
+        use mercs2_core::hibernation::{wake_decisions, Viewer, MAX_VIEWERS};
+        let mut viewers = [None; MAX_VIEWERS];
+        viewers[0] = Some(Viewer { position: viewer, local: true });
+        self.grid.set_viewers(viewers);
+        let events = self.grid.step();
+        self.last_events = events.len();
+        let (catalog, removed) = (&self.catalog, &self.removed);
+        let decisions = wake_decisions(
+            &events,
+            |k| catalog.get(k).is_some(),
+            |k| removed.contains(&k),
+            |k| catalog.get(k).and_then(|o| o.own_hibernation).map(|h| h.distance),
+        );
+        let mut queue = std::mem::take(&mut self.queue);
+        let result = (|| {
+            let present = present.as_mut().map(|(s, w)| (&mut **s, &mut **w));
+            let mut host = Activator { sw: &mut *self, present };
+            for k in decisions.deactivate {
+                queue.deactivate(&mut host, k);
+            }
+            for k in decisions.activate {
+                queue.activate(&mut host, k, true, false, true)?;
+            }
+            queue.pump(&mut host)
+        })();
+        self.queue = queue;
+        result?;
+        if let Some((scene, world)) = present {
+            for ev in events.iter().filter(|e| (e.old ^ e.new) & 0xF0 != 0) {
+                self.sync_visual(ev.key, scene, world)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// The block/region decision and its GPU/ECS work: UNLOAD blocks that left the working radius,
+    /// LOAD c3-cell geometry.
+    fn step_blocks(&mut self, scene: &mut crate::scene::Scene, world: &mut mercs2_core::World, viewer: [f32; 3]) {
         use mercs2_core::glam::{Quat, Vec3};
         use mercs2_core::{AnimState, ModelRef, SkinPalette, Transform};
-        const IDENTITY: [[f32; 4]; 4] = [
-            [1.0, 0.0, 0.0, 0.0],
-            [0.0, 1.0, 0.0, 0.0],
-            [0.0, 0.0, 1.0, 0.0],
-            [0.0, 0.0, 0.0, 1.0],
-        ];
-        let Self {
-            wad,
-            manager,
-            props,
-            terrain_tiles,
-            lowres_draw_by_cell,
-            terrain_hash,
-            prop_ents,
-            block_ents,
-            model_refs,
-            wake_failed,
-            anim_store,
-            local_tris,
-            phy2_local,
-            collision_ops,
-            terrain_field,
-            coll_authored,
-            coll_no_authored,
-        } = self;
-        let terrain_hash = *terrain_hash;
+        let Self { wad, manager, block_ents, model_refs, phy2_local, collision_ops, coll_authored, coll_no_authored, .. } = self;
 
-        let diff = manager.update(cam);
+        let diff = manager.update(viewer);
         // Seam B — drive the RegionCache decision layer each tick (PgSysPopulation CacheIn/CacheOut).
-        let _region_diff = manager.update_regions(cam);
+        let _region_diff = manager.update_regions(viewer);
 
         // UNLOAD first (free GPU): blocks that left the working radius.
         for b in &diff.unload_blocks {
@@ -1439,30 +2029,6 @@ impl StreamingWorld {
                 scene.forget_entity(e);
             }
             collision_ops.push(CollisionOp::Remove(block_key(*b)));
-        }
-        // HIBERNATE (free GPU): props beyond their stream-out distance.
-        for k in &diff.hibernate {
-            // If a hi-res terrain tile hibernates, un-hide its low-res tile again and drop its baked
-            // heightfield grid. Dropping a terrain tile touches ONLY the heightfield — never `collision`
-            // — so it does not flip `collision_dirty` and never triggers a full-collider regrid.
-            if let Some(&(_, pos)) = terrain_tiles.get(k) {
-                if let Some(di) = pos_to_cell(pos).and_then(|c| lowres_draw_by_cell.get(&c)) {
-                    scene.set_draw_hidden(terrain_hash, *di, false);
-                }
-                terrain_field.remove(*k);
-            }
-            if let Some(e) = prop_ents.remove(k) {
-                if let Ok(mr) = world.get::<&ModelRef>(e).map(|m| m.model) {
-                    dec_model_ref(model_refs, mr, scene);
-                }
-                let _ = world.despawn(e);
-                scene.forget_entity(e);
-            }
-            // Terrain tiles never entered the broadphase (they bake into `terrain_field`), so only a real
-            // prop unit emits a Remove — a hibernating terrain tile must not mark the broadphase dirty.
-            if !terrain_tiles.contains_key(k) {
-                collision_ops.push(CollisionOp::Remove(prop_key(*k)));
-            }
         }
         // LOAD c3-cell blocks (throttled by the manager's block budget).
         for b in &diff.load_blocks {
@@ -1498,108 +2064,184 @@ impl StreamingWorld {
                 block_ents.insert(*b, e);
             }
         }
-        // WAKE props (throttled by the manager's entity budget): instantiate the ModelName mesh at the
-        // authored Transform (identity fit + bone-count palette).
-        for k in &diff.wake {
-            if prop_ents.contains_key(k) {
-                continue;
-            }
-            // Hi-res terrain tile? Load the terrainmesh (POFF-composed, world-placed via
-            // TerrainObject->Transform) and spawn at identity (verts already world-space).
-            if let Some(&(tm_hash, pos)) = terrain_tiles.get(k) {
-                if !scene.has_model(tm_hash) {
-                    match load_terrainmesh_tile(wad, tm_hash, pos) {
-                        Some(m) => {
-                            scene.load_terrain_model(m.hash, &m.verts, &m.indices, &m.draws, &m.textures, &m.skin);
-                            local_tris.entry(m.hash).or_insert_with(|| extract_local_tris(&m));
-                        }
-                        None => {
-                            wake_failed.insert(*k);
-                            continue;
-                        }
-                    }
-                }
-                // Collision (K3): terrain is a baked HEIGHTFIELD, not collision triangles (retail
-                // `hkpHeightFieldShape`). Bake the tile's surface into the persistent `terrain_field`
-                // ONCE — do NOT feed its ~thousands of triangles into `collision` and do NOT flip
-                // `collision_dirty`, so a waking terrain tile never rebuilds the broadphase. The
-                // terrainmesh's `local_tris` are already world-space (its world pos is baked into verts).
-                if let Some(lt) = local_tris.get(&tm_hash) {
-                    if let Some(grid) = TileHeightGrid::bake(lt) {
-                        terrain_field.insert(*k, grid);
-                    }
-                }
-                let e = world.spawn((
-                    Transform::IDENTITY,
-                    ModelRef { model: tm_hash },
-                    AnimState::default(),
-                    SkinPalette { mats: vec![IDENTITY] },
-                ));
-                *model_refs.entry(tm_hash).or_insert(0) += 1;
-                prop_ents.insert(*k, e);
-                // Hide the low-res tile beneath this hi-res tile (the LOD swap).
-                if let Some(di) = pos_to_cell(pos).and_then(|c| lowres_draw_by_cell.get(&c)) {
-                    scene.set_draw_hidden(terrain_hash, *di, true);
-                }
-                continue;
-            }
-            let Some(spawn) = props.get(k).copied() else { continue };
-            if !scene.has_model(spawn.model_hash) {
-                match load_model_by_hash(wad, spawn.model_hash) {
-                    Some((m, _, _)) => {
-                        scene.load_model(m.hash, &m.verts, &m.indices, &m.draws, &m.textures, &m.skin);
-                        // No render-mesh collision extraction: props collide via AUTHORED PHY2 only (or
-                        // not at all). A rigged model that ships clips registers its rig + clips so the
-                        // per-frame animation pass can pose it (no-op for clip-less props).
-                        if !m.clips.is_empty() {
-                            anim_store.entry(m.hash).or_insert_with(|| crate::scene::ModelAnim {
-                                rig: m.skin.rig.clone(),
-                                clips: m.clips.into_iter().map(|c| (c.name_hash, c)).collect(),
-                            });
-                        }
-                    }
-                    None => {
-                        wake_failed.insert(*k);
-                        continue;
-                    }
-                }
-            }
-            // Collision: AUTHORED PHY2 only, placed at the prop's authored pos+quat. Computed once per
-            // model hash (the model→PHY2 linkage: `PHY2` sub-chunk in the model's resident container).
-            // `None` = no complete authored collider → the prop gets NO collision, exactly as retail
-            // authored it: the vast majority of ModelName props (439/446) ship no PHY2 and are meant to
-            // be walked through. Never a render-mesh substitute.
-            if !phy2_local.contains_key(&spawn.model_hash) {
-                let a = load_authored_collision(wad, spawn.model_hash);
-                phy2_local.insert(spawn.model_hash, a);
-            }
-            if let Some(a) = phy2_local.get(&spawn.model_hash).and_then(|o| o.as_ref()) {
-                *coll_authored += 1;
-                let q = Quat::from_xyzw(spawn.quat[0], spawn.quat[1], spawn.quat[2], spawn.quat[3]);
-                let p = Vec3::new(spawn.pos[0], spawn.pos[1], spawn.pos[2]);
-                collision_ops.push(CollisionOp::Insert(prop_key(*k), placed_tris(a, p, q)));
-            } else {
-                *coll_no_authored += 1;
-            }
-            let nbones = scene.model_bone_count(spawn.model_hash).max(1);
-            let mut t = Transform::from_translation(Vec3::new(spawn.pos[0], spawn.pos[1], spawn.pos[2]));
-            t.rotation = Quat::from_xyzw(spawn.quat[0], spawn.quat[1], spawn.quat[2], spawn.quat[3]);
-            // Play the first discovered clip if this model has any; else stay static.
-            let anim = match anim_store.get(&spawn.model_hash).and_then(|ma| ma.clips.keys().next()) {
-                Some(&clip) => AnimState::playing(clip),
-                None => AnimState::default(),
-            };
-            let e = world.spawn((
-                t,
-                ModelRef { model: spawn.model_hash },
-                anim,
-                SkinPalette { mats: vec![IDENTITY; nbones] },
-            ));
-            *model_refs.entry(spawn.model_hash).or_insert(0) += 1;
-            prop_ents.insert(*k, e);
+    }
+
+    /// The grid re-cell an activation's SetTransform causes (`0x518140` → `FUN_00515F60` →
+    /// `FUN_00516F00`): with a render node, the quantiser's input becomes pos + R(q)·centre (the
+    /// SceneObject's i16 quaternion) and `base` cvtt(radius); without one, the bare position and `base`
+    /// 0. Mask, state and rings stay.
+    fn recell(&mut self, key: u32) -> Result<(), String> {
+        let o = *self.catalog.get(key).ok_or_else(|| format!("0x{key:08X}: not a placed entity"))?;
+        let node = self.node_spheres.sphere(&mut self.wad, o.node).map_err(|e| format!("0x{key:08X}: {e}"))?;
+        self.grid.moved(&o.activated_registration(node));
+        Ok(())
+    }
+
+    /// Whether the archive carries the entity's model (or terrainmesh) — the asset its activation
+    /// requests. A placed entity without one has nothing to request.
+    fn assets_present(&self, key: u32) -> bool {
+        match self.catalog.get(key) {
+            Some(o) if o.terrain_mesh.is_some() => true,
+            Some(o) => o.model.is_none_or(|m| wad::has_model(&self.wad, m)),
+            None => false,
         }
-        // diff.tier_changes carries the per-PROP hibernation LOD tier — informational only; props don't
-        // ship alternate-LOD meshes (verified --lod-probe: 2/446).
+    }
+
+    /// Make an entity's model (or terrainmesh) resident in the scene. `Ok(false)` when the archive
+    /// carries no model of that hash (retail cancels the activation); an error when it carries one
+    /// that does not load.
+    fn load_assets(&mut self, key: u32, scene: &mut crate::scene::Scene) -> Result<bool, String> {
+        let o = *self.catalog.get(key).ok_or_else(|| format!("0x{key:08X}: not a placed entity"))?;
+        if let Some(tm) = o.terrain_mesh {
+            if !scene.has_model(tm) {
+                let m = load_terrainmesh_tile(&mut self.wad, tm, o.pos)
+                    .ok_or_else(|| format!("0x{key:08X}: terrainmesh 0x{tm:08X} did not load"))?;
+                scene.load_terrain_model(m.hash, &m.verts, &m.indices, &m.draws, &m.textures, &m.skin);
+                self.local_tris.entry(m.hash).or_insert_with(|| extract_local_tris(&m));
+            }
+            return Ok(true);
+        }
+        let Some(model) = o.model else { return Ok(true) };
+        if scene.has_model(model) {
+            return Ok(true);
+        }
+        if !wad::has_model(&self.wad, model) {
+            return Ok(false);
+        }
+        let (m, _, _) = load_model_by_hash(&mut self.wad, model)
+            .ok_or_else(|| format!("0x{key:08X}: model 0x{model:08X} is in the archive but did not load"))?;
+        scene.load_model(m.hash, &m.verts, &m.indices, &m.draws, &m.textures, &m.skin);
+        // A rigged model that ships clips registers its rig + clips so the per-frame animation pass can
+        // pose it (no-op for clip-less props).
+        if !m.clips.is_empty() {
+            self.anim_store.entry(m.hash).or_insert_with(|| crate::scene::ModelAnim {
+                rig: m.skin.rig.clone(),
+                clips: m.clips.into_iter().map(|c| (c.name_hash, c)).collect(),
+            });
+        }
+        Ok(true)
+    }
+
+    /// A placed entity's model is resident while it is awake and its ring tier is non-zero
+    /// (`FUN_0050C530`: streaming level `4 − tier`, level 4 removes it). A runtime spawn's entity is its
+    /// gameplay entity, which retail's component listeners keep from activation complete to deactivate,
+    /// so it exists while it is awake. An adopted key gets none. Spawn or despawn to match.
+    fn sync_visual(&mut self, key: u32, scene: &mut crate::scene::Scene, world: &mut mercs2_core::World) -> Result<(), String> {
+        let Some(o) = self.catalog.get(key) else { return Ok(()) };
+        let has_visual = o.terrain_mesh.is_some() || o.model.is_some();
+        let ringed = self.grid.entry(key).is_some_and(|e| e.state & 0xF0 != 0);
+        let present = o.runtime.is_some() || ringed;
+        let want = has_visual && present && self.state(key) == 2 && !self.external.contains(&key);
+        match (want, self.prop_ents.contains_key(&key)) {
+            (true, false) => {
+                if self.load_assets(key, scene)? {
+                    self.spawn_visual(key, scene, world);
+                }
+            }
+            (false, true) => self.despawn_visual(key, scene, world),
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// Spawn a placed entity's resident model at its authored transform.
+    fn spawn_visual(&mut self, key: u32, scene: &mut crate::scene::Scene, world: &mut mercs2_core::World) {
+        use mercs2_core::glam::{Quat, Vec3};
+        use mercs2_core::{AnimState, ModelRef, SkinPalette, Transform};
+        let o = self.catalog.get(key).copied().expect("a catalogued key");
+        if let Some(tm) = o.terrain_mesh {
+            // Terrain is a baked HEIGHTFIELD, not collision triangles (retail `hkpHeightFieldShape`):
+            // bake the tile's world-space surface into `terrain_field`, never the broadphase.
+            if let Some(lt) = self.local_tris.get(&tm) {
+                if let Some(grid) = TileHeightGrid::bake(lt) {
+                    self.terrain_field.insert(key, grid);
+                }
+            }
+            let e = world.spawn((Transform::IDENTITY, ModelRef { model: tm }, AnimState::default(), SkinPalette { mats: vec![IDENTITY] }));
+            *self.model_refs.entry(tm).or_insert(0) += 1;
+            self.prop_ents.insert(key, e);
+            self.guids.borrow_mut().bind(key, e);
+            // Hide the low-res tile beneath this hi-res tile (the LOD swap).
+            if let Some(di) = pos_to_cell(o.pos).and_then(|c| self.lowres_draw_by_cell.get(&c)) {
+                scene.set_draw_hidden(self.terrain_hash, *di, true);
+            }
+            return;
+        }
+        let model = o.model.expect("sync_visual spawns only an entity with a model");
+        let q = Quat::from_xyzw(o.quat[0], o.quat[1], o.quat[2], o.quat[3]);
+        let p = Vec3::new(o.pos[0], o.pos[1], o.pos[2]);
+        let nbones = scene.model_bone_count(model).max(1);
+        let mut t = Transform::from_translation(p);
+        t.rotation = q;
+        // A runtime spawn of a vehicle or character template is its gameplay entity, which moves: no
+        // static collision.
+        match o.runtime.map(|r| (r.archetype, r.faction)) {
+            Some((crate::spawn::Archetype::Character, faction)) => {
+                let e = crate::spawn::spawn_character(world, o.parent, model, t);
+                crate::spawn::set_faction(world, e, faction);
+                let _ = world.insert_one(e, SkinPalette { mats: vec![IDENTITY; nbones] });
+                self.bind_visual(key, model, e);
+                return;
+            }
+            Some((crate::spawn::Archetype::Vehicle(class), _)) => {
+                let e = crate::spawn::spawn_default_vehicle(world, class, key, t);
+                let _ = world.insert_one(e, ModelRef { model });
+                let _ = world.insert_one(e, SkinPalette { mats: vec![IDENTITY; nbones] });
+                self.bind_visual(key, model, e);
+                return;
+            }
+            Some((crate::spawn::Archetype::Prop, _)) | None => {}
+        }
+        // Collision: AUTHORED PHY2 only, placed at the authored pos+quat, computed once per model hash.
+        // `None` = no complete authored collider → no collision, as retail authored it. Never a
+        // render-mesh substitute.
+        if !self.phy2_local.contains_key(&model) {
+            let a = load_authored_collision(&mut self.wad, model);
+            self.phy2_local.insert(model, a);
+        }
+        if let Some(a) = self.phy2_local.get(&model).and_then(|o| o.as_ref()) {
+            self.coll_authored += 1;
+            self.collision_ops.push(CollisionOp::Insert(prop_key(key), placed_tris(a, p, q)));
+        } else {
+            self.coll_no_authored += 1;
+        }
+        // Play the first discovered clip if this model has any; else stay static.
+        let anim = match self.anim_store.get(&model).and_then(|ma| ma.clips.keys().next()) {
+            Some(&clip) => AnimState::playing(clip),
+            None => AnimState::default(),
+        };
+        let e = world.spawn((t, ModelRef { model }, anim, SkinPalette { mats: vec![IDENTITY; nbones] }));
+        self.bind_visual(key, model, e);
+    }
+
+    /// Record `key`'s entity `e` drawing `model`.
+    fn bind_visual(&mut self, key: u32, model: u32, e: mercs2_core::Entity) {
+        *self.model_refs.entry(model).or_insert(0) += 1;
+        self.prop_ents.insert(key, e);
+        self.guids.borrow_mut().bind(key, e);
+    }
+
+    /// Despawn a placed entity's model and release what it held.
+    fn despawn_visual(&mut self, key: u32, scene: &mut crate::scene::Scene, world: &mut mercs2_core::World) {
+        use mercs2_core::ModelRef;
+        let Some(e) = self.prop_ents.remove(&key) else { return };
+        self.guids.borrow_mut().unbind(e);
+        if let Ok(mr) = world.get::<&ModelRef>(e).map(|m| m.model) {
+            dec_model_ref(&mut self.model_refs, mr, scene);
+        }
+        let _ = world.despawn(e);
+        scene.forget_entity(e);
+        match self.catalog.get(key).copied() {
+            Some(o) if o.terrain_mesh.is_some() => {
+                // A terrain tile un-hides its low-res tile and drops its heightfield; it never entered
+                // the broadphase.
+                if let Some(di) = pos_to_cell(o.pos).and_then(|c| self.lowres_draw_by_cell.get(&c)) {
+                    scene.set_draw_hidden(self.terrain_hash, *di, false);
+                }
+                self.terrain_field.remove(key);
+            }
+            _ => self.collision_ops.push(CollisionOp::Remove(prop_key(key))),
+        }
     }
 
     /// The fixed-timestep animation pass for woken rigged props: advance each playing clip by `sim_dt`
@@ -1674,7 +2316,6 @@ pub async fn run_game_world(
 /// generic and knows about neither).
 struct FreeFlyGame<P> {
     wadpath: String,
-    spawn: Option<[f32; 3]>,
     overlays: Vec<String>,
     populate: P,
     free_pos: mercs2_core::glam::Vec3,
@@ -1703,7 +2344,6 @@ impl<P> FreeFlyGame<P> {
         };
         FreeFlyGame {
             wadpath,
-            spawn,
             overlays,
             populate,
             free_pos,
@@ -1745,18 +2385,15 @@ where
         let cfg = StreamingConfig {
             block_unload_margin: 200.0,
             block_budget: 2,
-            entity_budget: 6,
-            entity_hysteresis: 15.0,
-            entity_scan_cap: 700.0,
-            grid_cell: 128.0,
             ..StreamingConfig::default()
         };
         let (tx, rx) = std::sync::mpsc::channel();
         let wadpath = self.wadpath.clone();
-        let overlays = self.overlays.clone();
         std::thread::spawn(move || {
             let t0 = std::time::Instant::now();
-            let r = load_streaming_world_data(&wadpath, cfg, &overlays, &progress);
+            let r = crate::asset::AssetSource::discover(&wadpath, &[])
+                .and_then(|mut assets| TemplateRecords::load(&mut assets))
+                .and_then(|templates| load_streaming_world_data(&wadpath, cfg, templates, &progress));
             if r.is_ok() {
                 println!("[stream] loaded in {:.1}s", t0.elapsed().as_secs_f64());
             }
@@ -1767,8 +2404,6 @@ where
 
     fn setup(&mut self, ctx: &mut crate::app::Ctx, mut data: StreamingWorldData) {
         use mercs2_core::{AnimState, ModelRef, SkinPalette, Transform};
-        const IDENTITY: [[f32; 4]; 4] =
-            [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0]];
         // Base terrain: one static entity at identity (verts already world-space).
         let terrain = data.terrain;
         let terrain_hash = terrain.hash;
@@ -1794,16 +2429,25 @@ where
             let mut w = ctx.world.borrow_mut();
             (self.populate)(&mut w, ctx.scene, &mut data.wad);
         }
-        ctx.scene.set_lights(std::mem::take(&mut data.lights));
+        // This boot runs no level script, so it makes the layer requests the script would: the level's
+        // base layer (`Sys.RequiredAsset("vz_base", "layer")`, `levelbootstrap.lua:14`), the static
+        // layers — here every layer the `layers_static` block carries, which is 169 of the 170 in
+        // `xQ!L.lua`'s `_tStaticLayers` (the 170th, `vz_mar_roads`, lives in block 5 and is not
+        // loaded here) plus 4 that list never names — and the requested overlays as dynamic layers
+        // (`MrxLayerManager` loads a save's layers with `bDynamic = true`).
+        let guids = std::rc::Rc::new(std::cell::RefCell::new(mercs2_core::GuidMap::new()));
+        {
+            let mut gm = guids.borrow_mut();
+            gm.request_layer(mercs2_core::LayerOp::Load, mercs2_formats::hash::pandemic_hash_m2("vz_base"), false);
+            for &l in &data.static_block_layers {
+                gm.request_layer(mercs2_core::LayerOp::Load, l, false);
+            }
+            for l in &self.overlays {
+                gm.request_layer(mercs2_core::LayerOp::Load, mercs2_formats::hash::pandemic_hash_m2(l), true);
+            }
+        }
         // Take ownership of the streaming state into the reusable executor.
-        self.stream = Some(StreamingWorld::new(
-            data.wad,
-            data.manager,
-            data.props,
-            data.terrain_tiles,
-            data.lowres_draw_by_cell,
-            terrain_hash,
-        ));
+        self.stream = Some(StreamingWorld::new(data.wad, data.manager, data.templates, data.lowres_draw_by_cell, terrain_hash, guids));
     }
 
     fn update(&mut self, ctx: &mut crate::app::Ctx) -> crate::app::Camera {
@@ -1862,11 +2506,11 @@ where
         }
         let view = Mat4::look_to_lh(self.free_pos, fwd, Vec3::Y);
 
-        // Streaming tick: decide + execute the diff around the (now final) camera position.
+        // Streaming tick around the (now final) camera position — the free camera is its own target.
         if let Some(sw) = self.stream.as_mut() {
             let pos = [self.free_pos.x, self.free_pos.y, self.free_pos.z];
             let mut w = ctx.world.borrow_mut();
-            sw.step(&mut *ctx.scene, &mut w, pos);
+            sw.step(&mut *ctx.scene, &mut w, pos, &|_| false).unwrap_or_else(|e| panic!("[stream] {e}"));
             drop(w);
             if self.stat_last.elapsed().as_secs_f32() >= 1.0 {
                 self.stat_last = std::time::Instant::now();
@@ -1908,6 +2552,27 @@ fn dec_model_ref(refs: &mut std::collections::HashMap<u32, u32>, hash: u32, scen
 #[cfg(test)]
 mod glow_card_tests {
     use super::*;
+
+    /// A spot's cone edge is half its authored cone angle (`params[5]`, `FUN_004A7660`), clamped to π;
+    /// the inner edge stays inside it.
+    #[test]
+    fn spot_cone_edge_is_half_the_authored_angle() {
+        use mercs2_formats::placement::{LightObject, PlacedLight};
+        let mut params = [0.0f32; 9];
+        params[0] = 5.0;
+        params[2] = 20.0;
+        params[4] = 0.9;
+        params[5] = 1.2;
+        let light = LightObject { light_type: LightObject::TYPE_SPOT, color: [1.0; 3], params };
+        let pl = PlacedLight { key: 1, name: None, pos: [0.0; 3], quat: [0.0, 0.0, 0.0, 1.0], light, sub_block: 0 };
+        let s = placed_spot_lights_to_gpu(&[pl.clone()]);
+        assert_eq!(s.len(), 1);
+        assert_eq!(s[0].dir_cos[3], 0.6f32.cos(), "outer edge = 1.2 / 2");
+        assert_eq!(s[0].params[0], 0.6f32.cos(), "inner edge capped at the outer one");
+        let mut wide = pl;
+        wide.light.params[5] = 10.0;
+        assert_eq!(placed_spot_lights_to_gpu(&[wide])[0].dir_cos[3], (std::f32::consts::PI * 0.5).cos(), "clamped to π");
+    }
 
     #[test]
     fn colr_peak_picks_the_first_brightest_key() {
@@ -2048,6 +2713,173 @@ mod prop_anim_tests {
             // Every populated clip actually decoded to sampleable frames.
             for c in &m.clips {
                 assert!(c.clip.num_tracks > 0, "clip 0x{:08X} decoded 0 tracks", c.name_hash);
+            }
+        }
+
+        /// Each hero template resolves its own unarmed (`Bare`) Upright locomotion through its
+        /// `HumanAnimationSet` identity — never another merc's clips, never an armed variant — and
+        /// Chris with a Rifle idles on `0xED37BC56`, the clip a live `LtSampleWave` capture shows.
+        #[test]
+        fn hero_templates_resolve_their_own_unarmed_locomotion() {
+            use mercs2_anim::select::{UPRIGHT_IDLE_HANDLE, UPRIGHT_SPRINT_HANDLE, UPRIGHT_FULL_SPRINT_HANDLE};
+            use mercs2_formats::anim_select::{LookupKey, EQUIPMENT_BARE};
+            let mut assets = crate::asset::AssetSource::discover(
+                &crate::worldutil::schema_wire_tests::retail::vz_wad_path(),
+                &[],
+            )
+            .expect("asset source");
+            let data = HumanAnimData::load(&mut assets).unwrap_or_else(|e| panic!("{e}"));
+            for (template, idle, walk, run) in [
+                ("mattias", 0x6EA8_8E00u32, 0xBBA4_7DC4u32, 0x1938_79ADu32),
+                ("chris", 0x835D_A06A, 0x3EFF_5F5B, 0xB567_9590),
+                ("jen", 0x24F8_C8E6, 0xEB36_DB0F, 0x94B1_E4AC),
+            ] {
+                let id = data.identity_of_template(template).unwrap_or_else(|e| panic!("{e}"));
+                let clips = data.locomotion(id, EQUIPMENT_BARE).unwrap_or_else(|e| panic!("{e}"));
+                assert_eq!(clips, mercs2_player::LocomotionClips { idle, walk, run }, "template {template:?}");
+            }
+            const RIFLE: u32 = 0xD045_9A41;
+            let mattias = data.identity_of_template("mattias").unwrap_or_else(|e| panic!("{e}"));
+            let rifle = LookupKey::new(mattias, RIFLE);
+            // The three running speeds as played in the workshop (Rifle: run, sprint, full sprint).
+            assert_eq!(data.clip(mercs2_anim::select::UPRIGHT_RUN_HANDLE, &rifle), Ok(0x1091_2665));
+            assert_eq!(data.clip(UPRIGHT_SPRINT_HANDLE, &rifle), Ok(0xD233_46BC));
+            assert_eq!(data.clip(UPRIGHT_FULL_SPRINT_HANDLE, &rifle), Ok(0x35E0_7B11));
+            let chris = data.identity_of_template("chris").unwrap_or_else(|e| panic!("{e}"));
+            assert_eq!(data.clip(UPRIGHT_IDLE_HANDLE, &LookupKey::new(chris, RIFLE)), Ok(0xED37_BC56));
+        }
+
+        /// Every unit the `layers_static` spawners' lists can spawn has a model that builds, and every
+        /// Character among them has its unarmed idle in an animgroup that binds to that model — what
+        /// the game's population preload loads.
+        #[test]
+        fn layers_static_population_units_load() {
+            let path = crate::worldutil::schema_wire_tests::retail::vz_wad_path();
+            let mut assets = crate::asset::AssetSource::discover(&path, &[]).expect("asset source");
+            let anim = HumanAnimData::load(&mut assets).unwrap_or_else(|e| panic!("{e}"));
+            let PopulationData { catalog, units } = PopulationData::load(&mut assets).unwrap_or_else(|e| panic!("{e}"));
+            let mut pop = crate::population::PopulationWorld::new();
+            pop.units = catalog;
+            let ls = crate::worldutil::schema_wire_tests::retail::retail_layers_static();
+            crate::worldutil::register_population_spawners(&ls, &mut pop).unwrap_or_else(|e| panic!("{e}"));
+            let reachable = population_units(&pop);
+            assert!(!reachable.is_empty(), "the layers_static spawners can spawn something");
+            let data = PopulationData { catalog: std::mem::take(&mut pop.units), units };
+            let mut w = crate::worldutil::schema_wire_tests::retail::open_vz_wad();
+            let models = load_population_models(&mut w, &anim, &data, &reachable).unwrap_or_else(|e| panic!("{e}"));
+            let loaded: std::collections::BTreeSet<u32> = models.iter().flat_map(|m| m.units.iter().map(|&(u, _)| u)).collect();
+            assert_eq!(loaded, reachable, "every reachable unit has its model");
+            for m in &models {
+                for &(u, idle) in &m.units {
+                    let character = data.units[&u].archetype == crate::spawn::Archetype::Character;
+                    assert_eq!(idle.is_some(), character, "unit 0x{u:08X}: an idle exactly for a Character");
+                    if let Some(idle) = idle {
+                        assert!(
+                            m.model.clips.iter().any(|c| c.name_hash == idle),
+                            "unit 0x{u:08X}: idle 0x{idle:08X} bound on model 0x{:08X}",
+                            m.model.hash
+                        );
+                    }
+                }
+            }
+        }
+
+        /// Every Character unit the shipped `PopulationList`s can spawn carries its own animation
+        /// identity, and the AnimationLookup query gives it one unarmed idle clip.
+        #[test]
+        fn population_characters_resolve_an_identity_and_an_idle() {
+            use mercs2_formats::anim_select::{LookupKey, EQUIPMENT_BARE};
+            let mut assets = crate::asset::AssetSource::discover(
+                &crate::worldutil::schema_wire_tests::retail::vz_wad_path(),
+                &[],
+            )
+            .expect("asset source");
+            let anim = HumanAnimData::load(&mut assets).unwrap_or_else(|e| panic!("{e}"));
+            let pop = PopulationData::load(&mut assets).unwrap_or_else(|e| panic!("{e}"));
+            let mut characters = 0;
+            for (&key, unit) in &pop.units {
+                if unit.archetype != crate::spawn::Archetype::Character {
+                    continue;
+                }
+                characters += 1;
+                let id = anim.identity_of_key(key).unwrap_or_else(|e| panic!("{e}"));
+                anim.clip(mercs2_anim::select::UPRIGHT_IDLE_HANDLE, &LookupKey::new(id, EQUIPMENT_BARE))
+                    .unwrap_or_else(|e| panic!("unit 0x{key:08X} {id:08X?}: {e}"));
+            }
+            assert_eq!(characters, 122, "the lists name 122 human unit templates");
+        }
+
+        /// The skin does not tear under animation. For each hero and its own Bare-class idle and walk
+        /// (AnimationLookup rows, `human_animation_selection.md`), pose the palette the way the game
+        /// does (`pose::havok_palette_in_place`) and check JOINT CONTINUITY: for every parent→child
+        /// pair where both bones carry skinned vertex weight, the child's bind joint must land on the
+        /// same point under the child's skin matrix and under the parent's. A skin bind that
+        /// disagrees with the clips separates them — with the old `+16`-chain bind,
+        /// `pmc_hum_chris`'s forearm / forearm-roll joint came apart by 143 mm.
+        ///
+        /// The bounds are the measured worst separations with the raw `+80` skin bind (2026-10-21:
+        /// mattias 0.57 mm, chris 2.82 mm, jen 9.47 mm at bone #23 `0xF3D12F3C`), so this guards
+        /// regressions rather than asserting perfection. Those residuals are retail's too: retail
+        /// skins with exactly the raw `+80` (solved from its live palette —
+        /// `docs/reverse_engineer/animation_code_map.md` §2).
+        #[test]
+        fn skin_joints_stay_together_under_animation() {
+            use mercs2_formats::skeleton::transform_point;
+            let mut w = crate::worldutil::schema_wire_tests::retail::open_vz_wad();
+            for (model, name, clips, bound_mm) in [
+                (0x0BBA_3066u32, "pmc_hum_mattias", [0x6EA8_8E00u32, 0xBBA4_7DC4], 1.0f32),
+                (0x39F4_7E08, "pmc_hum_chris", [0x835D_A06A, 0x3EFF_5F5B], 3.0),
+                (0x15D8_9832, "pmc_hum_jen", [0x24F8_C8E6, 0xEB36_DB0F], 10.0),
+            ] {
+                let (m, _, _) = load_model_by_hash(&mut w, model).unwrap_or_else(|| panic!("{name} loads"));
+                let rig = &m.skin.rig;
+                let mut weighted = vec![false; rig.len()];
+                for v in &m.verts {
+                    for k in 0..4 {
+                        if v.weights[k] > 0 {
+                            weighted[v.joints[k] as usize] = true;
+                        }
+                    }
+                }
+                let hier: Vec<u32> = rig.iter().map(|b| b.name_hash).collect();
+                for (want, got) in clips.iter().zip(load_clips_for_rig(&mut w, &hier, &clips)) {
+                    let ca = got.unwrap_or_else(|| panic!("{name}: clip 0x{want:08X} binds"));
+                    for t in [0.0, ca.clip.duration * 0.5] {
+                        let pal = crate::pose::havok_palette_in_place(
+                            rig,
+                            &ca.clip.sample_local(t),
+                            &ca.track_to_hier,
+                            ca.num_transform_tracks,
+                        );
+                        let mut worst = (0.0f32, 0usize);
+                        for b in 0..rig.len() {
+                            let p = rig[b].parent;
+                            if p < 0 || !weighted[b] || !weighted[p as usize] {
+                                continue;
+                            }
+                            // A child whose `+80` IS its parent's is a rigid accessory piece retail
+                            // places offset from its authored spot on purpose (live palette:
+                            // `mercs2_probe` `retail_skin_matches_the_live_palette`) — not a joint.
+                            let (wb, wp) = (&rig[b].world_bind, &rig[p as usize].world_bind);
+                            if (0..4).all(|r| (0..4).all(|c| (wb[r][c] - wp[r][c]).abs() <= 1e-5)) {
+                                continue;
+                            }
+                            let j = [rig[b].world_bind[3][0], rig[b].world_bind[3][1], rig[b].world_bind[3][2]];
+                            let (a, c) = (transform_point(&pal[b], j), transform_point(&pal[p as usize], j));
+                            let d = (0..3).map(|k| (a[k] - c[k]).powi(2)).sum::<f32>().sqrt();
+                            if d > worst.0 {
+                                worst = (d, b);
+                            }
+                        }
+                        assert!(
+                            worst.0 * 1000.0 < bound_mm,
+                            "{name} clip 0x{want:08X} t={t:.2}: joint of bone #{} 0x{:08X} separates by {:.2} mm (bound {bound_mm} mm)",
+                            worst.1,
+                            rig[worst.1].name_hash,
+                            worst.0 * 1000.0
+                        );
+                    }
+                }
             }
         }
     }

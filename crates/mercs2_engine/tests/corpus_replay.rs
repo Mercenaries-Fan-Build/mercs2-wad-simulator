@@ -36,9 +36,9 @@ use mercs2_script::ScriptHost;
 
 /// Bind a handle to a Lua global as lightuserdata — the way the engine really hands one to a script.
 ///
-/// These are roster guids, minted from `mercs2_core::FIRST_DYNAMIC_GUID` (2^28) upward. They cannot
-/// be interpolated into Lua source as numbers: this VM's `lua_Number` is f32, whose steps at 2^28
-/// are 32 wide, so the script would receive a *different* handle. `mercs2_script::Guid` refuses to
+/// These are runtime keys, minted from `mercs2_core::RUNTIME_KEY_BASE` (2^30) upward. They cannot
+/// be interpolated into Lua source as numbers: this VM's `lua_Number` is f32, whose steps at 2^30
+/// are 128 wide, so the script would receive a *different* handle. `mercs2_script::Guid` refuses to
 /// read one out of a number for exactly that reason.
 fn set_guid(sh: &ScriptHost, name: &str, g: u64) {
     sh.lua().globals().set(name, mercs2_script::Guid(g)).unwrap();

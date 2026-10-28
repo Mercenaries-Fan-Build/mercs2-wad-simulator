@@ -20,7 +20,9 @@
 //! | [`registry`] | **Keystone A** — the reflection / component-descriptor table (type-hash → class, `cdbsizes.ini` pool budgets, reflected field layout). |
 //! | [`event`] | **Keystone B** — the name-hash event / RPC bus shared by GUI, Net and AI (typed args ≤ 7, immediate dispatch + a bounded deferred queue). |
 //! | [`frame`] | **Keystone C** — the master frame spine: the 5-slot application-[`LayerStack`](frame::LayerStack) the engine's master tick climbs 0→4. |
-//! | [`streaming`] | The world-streaming DECISION core: block residency, entity wake/hibernate, LOD tiers, the global LOD-budget governor and the population region cache. Emits a `StreamDiff` the host executes. |
+//! | [`streaming`] | The world-streaming decision core for geometry blocks and the population region cache. Emits a `StreamDiff` the host executes. |
+//! | [`hibernation`] | Retail's hibernation grid: every entity's wake/sleep (viewer mask) and ring tier, the registration radius and quantisation, the event consumer's wake order. |
+//! | [`activation`] | Retail's entity activation (`FUN_004F8DA0`) and its pending queue: begin, the readiness poll, complete within a time budget, the stall breaker. |
 //! | [`guidmap`] | Name-hash → `Entity` and guid ↔ `Entity` (the engine's resident guidmap singleton). |
 //! | [`object_filter`] | The `ObjectFilter.*` script query: label boolean-expression + include/exclude sets. |
 //! | [`render_state`] | The `Atmosphere` / `Bloom` / `Graphics` / `Fade` parameter state the render passes read. |
@@ -47,12 +49,14 @@ pub use components::{AnimState, Destructible, Health, ModelRef, SkinPalette, Tra
 /// the player crate.
 pub use components::{Human, HumanState, PlayerControlled, ANY_STATE, MAX_PLAYERS};
 
-/// The `GuidMap` (see `guidmap.rs`): the name-hash → `Entity` + guid ↔ `Entity` registry modelling the
-/// engine's resident guidmap singleton (`0x385EA82C`). `Pg.GetGuidByName` / `Object.*` resolve against
-/// it to reach live entities instead of a side table parsed up front.
+/// The `GuidMap` (see `guidmap.rs`): the entity-key world a script guid (the entity's u32 key)
+/// addresses — the `Name` index `Pg.GetGuidByName` reads, the SceneObject rows with their activation
+/// state, the key ↔ ECS-entity link and the runtime key counter.
 pub mod guidmap;
-pub use guidmap::{GuidMap, FIRST_DYNAMIC_GUID, HERO_GUID, LOCAL_PLAYER_GUID};
+pub use guidmap::{GuidMap, LayerOp, LayerRecord, SceneRow, RUNTIME_KEY_BASE};
 
+pub mod activation;
+pub mod hibernation;
 pub mod streaming;
 
 /// The `PhysicsQuery` seam (see `physics_query.rs`): the collision-query interface the sim systems

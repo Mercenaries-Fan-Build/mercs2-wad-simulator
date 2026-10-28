@@ -27,16 +27,16 @@ Asset access is behind the `AnimAssets` trait (rig / clip duration / sampled pos
 drives entities without depending on the renderer or the loader. Its only dependencies are
 `mercs2_core` and `mercs2_formats`.
 
-**Ragdoll and FaceFX are NOT implemented** — see `DEFERRED.md`. (The `Cargo.toml` description still
-lists them as crate content; they are backlog, not code.)
+**FaceFX is NOT implemented** — see `DEFERRED.md`. The ragdoll sim lives in `mercs2_physics::ragdoll`;
+this crate supplies its physics-free skeleton seam (`ragdoll`: `body_seeds` / `write_back_model_pose`).
 
 ## Where it comes from
 
 The exe is the oracle:
 
-* The selection chain (`ActionTable 0x6802C321` → `AnimationLookup 0xE00B080C` → `ASTO`) was reverse
-  engineered and validated against a live x32dbg capture — Chris's idle clip `0xED37BC56`. Spec:
-  `docs/modernization/human_animation_selection.md`. The parse itself lives in
+* The selection chain (`ActionTable 0x6802C321` → `AnimationLookup 0xE00B080C` query → `ASTO` clip
+  list) is read from the exe and checked against live captures — Chris idling with a Rifle plays
+  `0xED37BC56`. Spec: `docs/modernization/human_animation_selection.md`. The parse itself lives in
   `mercs2_formats::anim_select::AnimSelector`; this crate composes the two halves of the join into
   the forward direction the engine uses.
 * The pose math is the Havok Animation 5.5 pipeline the retail engine runs, ported verbatim from the
@@ -59,6 +59,7 @@ use mercs2_anim::{ClipPicker, StateKey};
 // (mercs2_formats::sges::decompress_block + ffcs::load_ffcs_archive).
 let chris = ClipPicker::character_name("chris");
 let picker = ClipPicker::from_resident_block(&resident, &[chris])
+    .expect("the block's animation tables parse")
     .expect("block carries the AnimationLookup");
 
 let resolved = picker.resolve_indexed(chris, StateKey::idle()).unwrap();

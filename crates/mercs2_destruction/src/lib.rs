@@ -38,15 +38,15 @@
 //!
 //! # Faithfulness notes (read before trusting output)
 //!
-//! - The **node-enable seed is not ground truth.** `NodeSeed`'s two variants are a choice validated
-//!   against real models, because the engine constructor's `memset` sits behind a register alias in
-//!   the decomp (`model_render_gate_spec.md` §6). Everything here inherits that caveat.
+//! - The **node-enable table** is retail's machine (`machine_node_enable`): `InitState`, then each
+//!   node's chosen state entered directly — the intermediate states a damage path passes through are
+//!   not replayed.
 //! - The **health→message band thresholds are ours**; the *states* reached are the engine's. Retail
 //!   posts real damage messages with live HP math we have not recovered. [`DamageBands`] makes the
 //!   approximation explicit and tunable rather than burying it.
 
 /// Live destruction control — Lua generation for poking a running game's destructibles over the
-/// bridge (the console consumes this). See the module for why it lives here.
+/// bridge. See the module for why it lives here.
 pub mod live;
 
 use std::collections::HashSet;
@@ -144,12 +144,12 @@ fn cmd_start_emitter() -> u32 {
 ///
 /// Entities whose model has no state machine are skipped (they are simply indestructible), as are
 /// those whose delivered set did not change — recomputation is not free and the machine only moves
-/// when a new message lands.
+/// when a new message lands. A machine whose `SetState`s cycle is an error naming the entity.
 pub fn destruction_system(
     world: &mut World,
     assets: &dyn DestructionAssets,
     bands: DamageBands,
-) -> Vec<DestructionIntent> {
+) -> Result<Vec<DestructionIntent>, String> {
     let mut intents = Vec::new();
 
     for (entity, (health, model, d)) in
@@ -180,7 +180,8 @@ pub fn destruction_system(
         d.chosen = node_states_for_delivered(sm, &delivered);
 
         if let Some(hier) = assets.hier(model.model) {
-            d.node_enable = machine_node_enable(sm, hier, &d.chosen);
+            d.node_enable = machine_node_enable(sm, hier, &d.chosen)
+                .map_err(|e| format!("entity {entity:?} model 0x{:08X}: {e}", model.model))?;
         }
 
         // Side effects fire once, on the tick a switch node ENTERS a new state.
@@ -202,7 +203,7 @@ pub fn destruction_system(
             }
         }
     }
-    intents
+    Ok(intents)
 }
 
 #[cfg(test)]
@@ -261,16 +262,16 @@ mod tests {
         let e = spawn(&mut w, 100.0);
         let bands = DamageBands::default();
 
-        destruction_system(&mut w, &assets, bands);
+        destruction_system(&mut w, &assets, bands).unwrap();
         let pristine = w.get::<&Destructible>(e).unwrap().chosen.clone();
 
         w.get::<&mut Health>(e).unwrap().cur = 0.0; // destroyed
-        destruction_system(&mut w, &assets, bands);
+        destruction_system(&mut w, &assets, bands).unwrap();
         let wrecked = w.get::<&Destructible>(e).unwrap().chosen.clone();
         assert_ne!(pristine, wrecked, "zero health must move the machine");
 
         w.get::<&mut Health>(e).unwrap().cur = 100.0; // fully repaired
-        destruction_system(&mut w, &assets, bands);
+        destruction_system(&mut w, &assets, bands).unwrap();
         let after = w.get::<&Destructible>(e).unwrap();
         assert_eq!(after.chosen, wrecked, "restoring health must NOT un-wreck the machine");
         assert!(after.delivered.contains(&0xC650_7EE1), "delivered set is monotonic");
@@ -282,7 +283,7 @@ mod tests {
         let assets = wreck_on(0xC650_7EE1);
         let mut w = World::new();
         let e = spawn(&mut w, 100.0);
-        destruction_system(&mut w, &assets, DamageBands::default());
+        destruction_system(&mut w, &assets, DamageBands::default()).unwrap();
         let d = w.get::<&Destructible>(e).unwrap();
         assert_eq!(d.chosen, vec![0], "pristine is state index 0");
         assert!(d.delivered.is_empty(), "no message delivered at full health");
@@ -332,7 +333,7 @@ mod tests {
 
         let mut w = World::new();
         let e = spawn(&mut w, 0.0); // dead on arrival
-        let intents = destruction_system(&mut w, &assets, DamageBands::default());
+        let intents = destruction_system(&mut w, &assets, DamageBands::default()).unwrap();
 
         let co_intents: Vec<_> =
             intents.iter().filter(|i| i.kind == IntentKind::CreateObject).collect();
@@ -358,7 +359,7 @@ mod tests {
         }
         let mut w = World::new();
         let e = spawn(&mut w, 0.0);
-        let intents = destruction_system(&mut w, &NoMachine, DamageBands::default());
+        let intents = destruction_system(&mut w, &NoMachine, DamageBands::default()).unwrap();
         assert!(intents.is_empty());
         assert!(w.get::<&Destructible>(e).unwrap().chosen.is_empty());
     }

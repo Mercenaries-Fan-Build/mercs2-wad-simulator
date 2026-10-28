@@ -331,30 +331,388 @@ pub fn report_interior_hunt(placements: &[mercs2_formats::placement::Placement])
     );
 }
 
-/// Build the Layer-2 streaming DECISION catalog (spec §10) from a WAD's world index + the
-/// decompressed `layers_static` block. Returns the pure `StreamingManager` (blocks + per-entity
-/// placements, with each entity's own `HibernationControl` distances — class defaults 100/160/60/20
-/// when absent) plus the key->`PropSpawn` map the executor needs to instantiate a prop on WAKE.
-///
-/// - **Coarse LOAD units:** every c3 cell that carries model-format geometry (buildings are baked
-///   into c3 cells — spec §2B), with its grid-square extent. `layers_static` (block 29) is the
-///   always-resident base layer; its entities stream PER-ENTITY (below), never by block.
-/// - **Per-entity placements:** every `ModelName` prop in `layers_static` (the entity->mesh recipe,
-///   spec §2A), each carrying its own hibernation/LOD distances or the class defaults.
+/// The worldentity template records a placed entity falls back to through its `Transform.Parent`, and
+/// a runtime spawn is made from.
+pub struct TemplateRecords {
+    /// Every key a worldentity record names.
+    pub keys: std::collections::BTreeSet<u32>,
+    /// The `Name` records (6,126 in retail, one key each), in data order: what the name index holds
+    /// before any layer loads.
+    pub names: Vec<(u32, String)>,
+    pub hibernation: std::collections::BTreeMap<u32, mercs2_formats::hibernation_control::HibernationControl>,
+    pub models: std::collections::BTreeMap<u32, u32>,
+    /// Templates with a `TinyGeometryObject` record.
+    pub tiny_geometry: std::collections::BTreeSet<u32>,
+    pub lights: std::collections::BTreeMap<u32, mercs2_formats::placement::LightObject>,
+    pub light_scales: std::collections::BTreeMap<u32, mercs2_formats::render_node::LightScales>,
+    /// `NetCategoryInfo` (the packed u16): `Pg.Spawn` reads its low nibble and bit 9.
+    pub net_category: std::collections::BTreeMap<u32, u16>,
+    /// The archetype each template's physics component gives it (templates without one are props).
+    pub archetypes: std::collections::BTreeMap<u32, crate::spawn::Archetype>,
+    /// `Association`: the faction template.
+    pub factions: std::collections::BTreeMap<u32, u32>,
+    /// Templates with a `TerrainObject` or `LowResTerrainObject` record.
+    pub terrain: std::collections::BTreeSet<u32>,
+}
+
+impl TemplateRecords {
+    /// From the `worldentity` the asset stack resolves.
+    pub fn load(assets: &mut crate::asset::AssetSource) -> Result<TemplateRecords, String> {
+        use mercs2_formats::worldentity::{WorldEntity, RETAIL_WORLDENTITY_NAME_HASH, WORLDENTITY_TYPE_HASH};
+        let we = assets
+            .resolve(WORLDENTITY_TYPE_HASH, RETAIL_WORLDENTITY_NAME_HASH)
+            .ok_or("worldentity 0x50075B3B: in no open wad")?;
+        Self::from_worldentity(&WorldEntity::parse(&we).map_err(|e| format!("worldentity: {e}"))?)
+    }
+
+    /// An error when a key carries two `Name`, `NetCategoryInfo` or `Association` records, a payload
+    /// of another shape, or several archetype physics components.
+    pub fn from_worldentity(we: &mercs2_formats::worldentity::WorldEntity) -> Result<TemplateRecords, String> {
+        use mercs2_formats::worldentity::Payload;
+        use std::collections::{BTreeMap, BTreeSet};
+        let keys_of = |class: &str| -> BTreeSet<u32> { we.groups_of(class).flat_map(|c| c.records.iter().flat_map(|r| r.keys.iter().copied())).collect() };
+        let mut names = Vec::new();
+        let mut net_category = BTreeMap::new();
+        let mut factions = BTreeMap::new();
+        let mut classes: BTreeMap<u32, Vec<&str>> = BTreeMap::new();
+        for c in &we.components {
+            for r in &c.records {
+                for &k in &r.keys {
+                    classes.entry(k).or_default().push(c.class.as_str());
+                    let dup = match (c.class.as_str(), &r.payload) {
+                        ("Name", Payload::Name { name, .. }) => {
+                            names.push((k, name.clone()));
+                            false
+                        }
+                        ("NetCategoryInfo", Payload::PackedU16(v)) => net_category.insert(k, *v).is_some(),
+                        ("Association", Payload::Fixed(b)) if b.len() == 4 => factions.insert(k, u32::from_le_bytes([b[0], b[1], b[2], b[3]])).is_some(),
+                        ("Name" | "NetCategoryInfo" | "Association", p) => return Err(format!("template 0x{k:08X}: {} payload {p:?} is not the native layout", c.class)),
+                        _ => false,
+                    };
+                    if dup {
+                        return Err(format!("template 0x{k:08X}: two {} records", c.class));
+                    }
+                }
+            }
+        }
+        let mut archetypes = BTreeMap::new();
+        for (&k, cls) in &classes {
+            let a = crate::game_world::unit_archetype(cls).map_err(|e| format!("template 0x{k:08X}: {e}"))?;
+            if a != crate::spawn::Archetype::Prop {
+                archetypes.insert(k, a);
+            }
+        }
+        let mut terrain = keys_of("TerrainObject");
+        terrain.extend(keys_of("LowResTerrainObject"));
+        Ok(TemplateRecords {
+            keys: classes.keys().copied().collect(),
+            names,
+            hibernation: mercs2_formats::hibernation_control::template_hibernation(we)?,
+            models: mercs2_formats::model_name::template_model_names(we)?,
+            tiny_geometry: keys_of("TinyGeometryObject"),
+            lights: mercs2_formats::render_node::template_lights(we)?,
+            light_scales: mercs2_formats::render_node::template_light_scales(we)?,
+            net_category,
+            archetypes,
+            factions,
+            terrain,
+        })
+    }
+}
+
+/// What makes a placed entity's render node when its activation completes — the source of the sphere
+/// its grid entry is re-celled with (`docs/reverse_engineer/hibernation_grid.md` §2).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum NodeSource {
+    /// No node: the re-cell writes the bare position and base 0 (TerrainObject and every entity
+    /// without one of the components below).
+    None,
+    /// The ModelName listener's node: the `INFO` sphere with `TinyGeometryObject`, else the posed box.
+    Model { model: u32, tiny_geometry: bool },
+    /// The LowResTerrainObject listener's node: the tile's `BNDS` sphere.
+    LowResTile(u32),
+    /// The LightObject listener's node.
+    Light(mercs2_formats::placement::LightObject, mercs2_formats::render_node::LightScales),
+}
+
+/// One placed entity — a `Transform` record of a placement block — as the hibernation grid and the
+/// activation executor see it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PlacedObject {
+    pub key: u32,
+    pub pos: [f32; 3],
+    pub quat: [f32; 4],
+    /// `Transform.Parent`, 0 for none.
+    pub parent: u32,
+    /// Its own `HibernationControl`.
+    pub own_hibernation: Option<mercs2_formats::hibernation_control::HibernationControl>,
+    /// Its own, else its template's.
+    pub hibernation: Option<mercs2_formats::hibernation_control::HibernationControl>,
+    /// Its `TerrainObject` terrainmesh.
+    pub terrain_mesh: Option<u32>,
+    /// It has a `TerrainObject` or `LowResTerrainObject` record.
+    pub terrain: bool,
+    /// Its `LowResTerrainObject` tile mesh.
+    pub low_res_mesh: Option<u32>,
+    /// Registered static ([`mercs2_formats::placement::PlacedEntity::is_static`]).
+    pub is_static: bool,
+    /// Its own `ModelName`, else its template's.
+    pub model: Option<u32>,
+    /// What makes its render node.
+    pub node: NodeSource,
+    /// What a runtime spawn's activation builds; `None` for a placed entity.
+    pub runtime: Option<RuntimeSpawn>,
+}
+
+/// The gameplay side of a runtime spawn, from its template.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RuntimeSpawn {
+    pub archetype: crate::spawn::Archetype,
+    /// `Association`, 0 for none.
+    pub faction: u32,
+}
+
+/// The one render-node source an entity has (`docs/reverse_engineer/hibernation_grid.md` §2): its
+/// model, its low-res tile or its light; a terrain tile has none here. More than one is an error.
+fn node_source(
+    key: u32,
+    model: Option<u32>,
+    tiny_geometry: bool,
+    low_res: Option<u32>,
+    light: Option<(mercs2_formats::placement::LightObject, mercs2_formats::render_node::LightScales)>,
+    terrain: Option<u32>,
+) -> Result<NodeSource, String> {
+    let mut sources = Vec::new();
+    if let Some(m) = model {
+        sources.push(NodeSource::Model { model: m, tiny_geometry });
+    }
+    if let Some(t) = low_res {
+        sources.push(NodeSource::LowResTile(t));
+    }
+    if let Some((l, s)) = light {
+        sources.push(NodeSource::Light(l, s));
+    }
+    if sources.len() > 1 || (terrain.is_some() && !sources.is_empty()) {
+        return Err(format!("entity 0x{key:08X}: more than one render-node source ({sources:?}, terrainmesh {terrain:?})"));
+    }
+    Ok(sources.pop().unwrap_or(NodeSource::None))
+}
+
+impl PlacedObject {
+    /// Its grid registration (`FUN_00516280`): `HibernationControl` own → template → defaults; static
+    /// unless terrain or Transform flag bit 9; a `TerrainObject` registers with base 10000.
+    pub fn registration(&self) -> mercs2_core::hibernation::Registration {
+        use mercs2_core::hibernation::{Registration, DEFAULT_DISTANCE, DEFAULT_RINGS};
+        let (distance, rings) = self.hibernation.map_or((DEFAULT_DISTANCE, DEFAULT_RINGS), |h| (h.distance, h.rings()));
+        Registration {
+            key: self.key,
+            position: self.pos,
+            distance,
+            rings,
+            base: if self.terrain_mesh.is_some() { 10_000 } else { 0 },
+            is_static: self.is_static,
+        }
+    }
+}
+
+impl PlacedObject {
+    /// Its registration after an activation completes: the SetTransform re-cell (`0x518140` →
+    /// `FUN_00515F60` → `FUN_00516F00`) moves the quantiser's input to pos + R(q)·centre (the
+    /// SceneObject's i16 quaternion) and sets `base` = cvtt(radius) when `node` is its render node's
+    /// sphere; without a node, the bare position and `base` 0.
+    pub fn activated_registration(&self, node: Option<mercs2_formats::render_node::Sphere>) -> mercs2_core::hibernation::Registration {
+        use mercs2_core::hibernation::{node_input, scene_object_quat};
+        let mut r = self.registration();
+        r.base = 0;
+        if let Some((centre, radius)) = node {
+            r.position = node_input(self.pos, scene_object_quat(self.quat), centre);
+            r.base = radius as i32 as u16;
+        }
+        r
+    }
+}
+
+/// Render-node spheres of placed entities, computed from the shipped assets and cached by source.
+#[derive(Default)]
+pub struct NodeSpheres {
+    cache: std::collections::HashMap<(u32, u32, bool), mercs2_formats::render_node::Sphere>,
+}
+
+impl NodeSpheres {
+    /// The sphere of the node `source` makes; `None` for no node.
+    pub fn sphere(&mut self, w: &mut wad::Wad, source: NodeSource) -> Result<Option<mercs2_formats::render_node::Sphere>, String> {
+        use mercs2_formats::render_node::{activation_enable, info_sphere, light_sphere, posed_sphere};
+        let k = match source {
+            NodeSource::None => return Ok(None),
+            NodeSource::Light(light, scales) => return light_sphere(&light, scales).map(Some),
+            NodeSource::Model { model, tiny_geometry } => (wad::MODEL_TYPE_HASH, model, tiny_geometry),
+            NodeSource::LowResTile(mesh) => (mercs2_formats::types::TYPE_HASH_LOWRES_TERRAIN, mesh, false),
+        };
+        if let Some(&s) = self.cache.get(&k) {
+            return Ok(Some(s));
+        }
+        let (ty, hash, tiny) = k;
+        let s = if ty == wad::MODEL_TYPE_HASH {
+            let c = wad::extract_container(w, hash)?;
+            if tiny { info_sphere(&c) } else { activation_enable(&c).and_then(|en| posed_sphere(&c, &en)) }.map_err(|e| format!("model 0x{hash:08X}: {e}"))?
+        } else {
+            let c = wad::extract_container_typed(w, hash, ty)?;
+            mercs2_formats::terrain::lowres_tile_sphere(&c).map_err(|e| format!("low-res tile 0x{hash:08X}: {e}"))?
+        };
+        self.cache.insert(k, s);
+        Ok(Some(s))
+    }
+}
+
+/// Every placed entity of the loaded layers, by key, in load order.
+#[derive(Default)]
+pub struct PlacedCatalog {
+    objects: std::collections::HashMap<u32, PlacedObject>,
+    order: Vec<u32>,
+}
+
+impl PlacedCatalog {
+    /// Add every placed entity of one layer container (or a whole placement block) and return their
+    /// keys in data order. A key already in the catalog is overwritten in place, as retail's container
+    /// add is set-or-overwrite (`FUN_0064A600`; PROVEN for RuntimeLayerId, INFERRED for the rest —
+    /// `docs/reverse_engineer/layer_load_code_map.md` §2). An entity with two node sources, or a placed
+    /// `LightAnimation` (only templates carry one), is an error.
+    pub fn add_block(&mut self, block: &[u8], templates: &TemplateRecords) -> Result<Vec<u32>, String> {
+        use mercs2_formats::placement::{component_keys, load_terrain_tiles, placed_entities, placed_light_objects};
+        let own_hib = mercs2_formats::hibernation_control::placed_hibernation(block)?;
+        let own_model = mercs2_formats::model_name::placed_model_names(block)?;
+        let own_tiny = component_keys(block, "TinyGeometryObject")?;
+        let own_light = placed_light_objects(block)?;
+        if let Some(k) = component_keys(block, "LightAnimation")?.into_iter().next() {
+            return Err(format!("placed entity 0x{k:08X} has its own LightAnimation, which is not handled"));
+        }
+        let terrain_mesh: std::collections::HashMap<u32, u32> =
+            load_terrain_tiles(block)?.into_iter().map(|t| (t.key, t.terrainmesh_hash)).collect();
+        let ents = placed_entities(block)?;
+        for e in &ents {
+            let own_hibernation = own_hib.get(&e.key).copied();
+            let model = own_model.get(&e.key).or_else(|| templates.models.get(&e.parent)).copied();
+            let light = own_light.get(&e.key).or_else(|| templates.lights.get(&e.parent)).copied();
+            let terrain = terrain_mesh.get(&e.key).copied();
+            let tiny = own_tiny.contains(&e.key) || templates.tiny_geometry.contains(&e.parent);
+            let node = node_source(e.key, model, tiny, e.low_res_mesh, light.map(|l| (l, templates.light_scales.get(&e.parent).copied().unwrap_or_default())), terrain)?;
+            let replaced = self.objects.insert(e.key, PlacedObject {
+                key: e.key,
+                pos: e.pos,
+                quat: e.quat,
+                parent: e.parent,
+                own_hibernation,
+                hibernation: own_hibernation.or_else(|| templates.hibernation.get(&e.parent).copied()),
+                terrain_mesh: terrain,
+                terrain: e.terrain,
+                low_res_mesh: e.low_res_mesh,
+                is_static: e.is_static(),
+                model,
+                node,
+                runtime: None,
+            });
+            if replaced.is_none() {
+                self.order.push(e.key);
+            }
+        }
+        Ok(ents.iter().map(|e| e.key).collect())
+    }
+
+    /// Add a runtime spawn of `template` as key `key` (the spawn worker `FUN_00673070`): its template's
+    /// model, light, `HibernationControl`, archetype and faction. An error for a terrain template, whose
+    /// spawn is not modelled.
+    pub fn add_spawn(&mut self, key: u32, template: u32, pos: [f32; 3], quat: [f32; 4], is_static: bool, templates: &TemplateRecords) -> Result<PlacedObject, String> {
+        if templates.terrain.contains(&template) {
+            return Err(format!("spawn of template 0x{template:08X}: it carries a TerrainObject or LowResTerrainObject, whose spawn is not modelled"));
+        }
+        let model = templates.models.get(&template).copied();
+        let light = templates.lights.get(&template).map(|&l| (l, templates.light_scales.get(&template).copied().unwrap_or_default()));
+        let o = PlacedObject {
+            key,
+            pos,
+            quat,
+            parent: template,
+            own_hibernation: None,
+            hibernation: templates.hibernation.get(&template).copied(),
+            terrain_mesh: None,
+            terrain: false,
+            low_res_mesh: None,
+            is_static,
+            model,
+            node: node_source(key, model, templates.tiny_geometry.contains(&template), None, light, None)?,
+            runtime: Some(RuntimeSpawn {
+                archetype: templates.archetypes.get(&template).copied().unwrap_or(crate::spawn::Archetype::Prop),
+                faction: templates.factions.get(&template).copied().unwrap_or(0),
+            }),
+        };
+        if self.objects.insert(key, o).is_some() {
+            return Err(format!("spawn key 0x{key:08X} is already catalogued"));
+        }
+        self.order.push(key);
+        Ok(o)
+    }
+
+    /// Set a catalogued entity's transform (the SceneObject row a SetTransform wrote).
+    pub fn set_transform(&mut self, key: u32, pos: [f32; 3], quat: [f32; 4]) {
+        if let Some(o) = self.objects.get_mut(&key) {
+            o.pos = pos;
+            o.quat = quat;
+        }
+    }
+
+    /// Remove placed entities.
+    pub fn remove(&mut self, keys: &[u32]) {
+        let gone: std::collections::HashSet<u32> = keys.iter().copied().filter(|k| self.objects.remove(k).is_some()).collect();
+        self.order.retain(|k| !gone.contains(k));
+    }
+
+    pub fn get(&self, key: u32) -> Option<&PlacedObject> {
+        self.objects.get(&key)
+    }
+
+    pub fn len(&self) -> usize {
+        self.order.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.order.is_empty()
+    }
+
+    /// In load order.
+    pub fn iter(&self) -> impl Iterator<Item = &PlacedObject> + '_ {
+        self.order.iter().map(|k| &self.objects[k])
+    }
+}
+
+/// The asset type of a layer (`pandemic_hash_m2("layer")`).
+pub const LAYER_TYPE_HASH: u32 = 0xE6B8_1A54;
+
+/// A layer's container — its placed entities — by layer name hash; `None` when the archive carries no
+/// such layer (retail's load then fails, status 3).
+pub fn layer_container(w: &mut wad::Wad, layer: u32) -> Result<Option<Vec<u8>>, String> {
+    if !wad::aset_types(w, layer).iter().any(|(ty, _, _)| *ty == 9) {
+        return Ok(None);
+    }
+    wad::extract_container_typed(w, layer, LAYER_TYPE_HASH).map(Some)
+}
+
+/// The layers whose containers a decompressed block carries (entries of type [`LAYER_TYPE_HASH`]), in
+/// block order.
+pub fn block_layers(block: &[u8]) -> Vec<u32> {
+    mercs2_formats::ucfx::parse_block_entry_table(block)
+        .1
+        .iter()
+        .filter(|e| e.type_hash == LAYER_TYPE_HASH)
+        .map(|e| e.name_hash)
+        .collect()
+}
+
+/// The world-streaming decision manager (geometry blocks and the population region cache). Placed
+/// entities arrive by layer loads (`StreamingWorld`), not here.
 pub fn build_streaming_catalog(
     _idx: &mercs2_formats::world_index::WorldIndex,
-    layers_static: &[u8],
     cfg: mercs2_core::streaming::StreamingConfig,
-) -> Result<(
-    mercs2_core::streaming::StreamingManager,
-    std::collections::HashMap<u32, PropSpawn>,
-    std::collections::HashMap<u32, (u32, [f32; 3])>,
-), String> {
-    use mercs2_core::streaming::{EntityUnit, StreamingManager};
-
-    let mut mgr = StreamingManager::new(cfg);
-    let default_dist = cfg.default_distances;
-
+) -> mercs2_core::streaming::StreamingManager {
     // NOTE (2026-07-02): the c3-block residency path (`load_one_c3_cell` → the small 0x5B724250
     // building `Model`) is DISABLED. That path placed the Model with a SYNTHESIZED position (c3-grid
     // XZ + Y=0), which floated ~80 m off the terrain — the misalignment the user reported. The real
@@ -386,109 +744,7 @@ pub fn build_streaming_catalog(
     //         `TerrainObject->Transform` composition used for the 0x7C569307 tiles below.
     //   Deriving Y from a terrain-height sample would be a FABRICATION (a building may sit on a roof /
     //   in a pit) and is explicitly declined. Until (a) or (b) lands, do NOT stream it.
-
-    // Per-entity placements: ModelName props in layers_static, keyed by entity key with their own
-    // hibernation directive (or the class defaults).
-    let mut props: std::collections::HashMap<u32, PropSpawn> = std::collections::HashMap::new();
-    for p in mercs2_formats::placement::load_model_placements(layers_static) {
-        let dist = p.hibernation.map(|h| h.dist).unwrap_or(default_dist);
-        mgr.add_entity(EntityUnit { key: p.key, pos: p.pos, dist });
-        props.insert(p.key, PropSpawn { model_hash: p.model_hash, pos: p.pos, quat: p.quat });
-    }
-
-    // Hi-res terrain tiles: the 400 `0x7C569307` terrainmesh tiles, placed via TerrainObject->Transform
-    // (POFF-composed 400 m tiles). Streamed per-tile with a large stream-out (terrain reads from far).
-    // Added BEFORE the named pass so a terrain-tile entity (which also has a Name) is never
-    // double-added with a smaller stream-out — that double-add made the manager emit conflicting
-    // wake(d<1000)/hibernate(d>400) for the same key each tick, flickering the low-res hide/show.
-    let mut terrain_tiles: std::collections::HashMap<u32, (u32, [f32; 3])> = std::collections::HashMap::new();
-    for t in mercs2_formats::placement::load_terrain_tiles(layers_static)? {
-        mgr.add_entity(EntityUnit { key: t.key, pos: t.pos, dist: [1000, 160, 60, 20] });
-        terrain_tiles.insert(t.key, (t.terrainmesh_hash, t.pos));
-    }
-
-    // Named world content — the INSTANCED trees/rocks/bushes/fences/lamps/props: ~5,000 distinct
-    // models referenced 60k+ times (e.g. jungle_env_plantlarge04 ×1912), placed via Name + Transform
-    // with the mesh resolved by NAME-HASH (`pandemic_hash_m2`). These have a Name but no ModelName, so
-    // they were never loaded before. Add every such entity; the executor resolves the mesh on WAKE
-    // (caching non-mesh names like Road/Light/Lane as wake-failures). Instances of the same model
-    // share one GPU upload (`scene.has_model`). Env objects get a larger stream-out (visible farther).
-    for p in mercs2_formats::placement::load_placements(layers_static).unwrap_or_default() {
-        if props.contains_key(&p.key) || terrain_tiles.contains_key(&p.key) {
-            continue; // already a ModelName prop or a hi-res terrain tile
-        }
-        let Some(name) = &p.name else { continue };
-        let base = name.trim_start_matches('_');
-        let h = mercs2_formats::hash::pandemic_hash_m2(base);
-        // Big env props (rocks/plants/trees) read from farther; small props use the class default.
-        let lname = base.to_ascii_lowercase();
-        let far = lname.contains("env") || lname.contains("rock") || lname.contains("huge")
-            || lname.contains("large") || lname.contains("tree") || lname.contains("building");
-        let dist = if far { [400, 160, 60, 20] } else { default_dist };
-        mgr.add_entity(EntityUnit { key: p.key, pos: p.pos, dist });
-        props.insert(p.key, PropSpawn { model_hash: h, pos: p.pos, quat: p.quat });
-    }
-
-    // Region cache (PgSysPopulation CacheIn/CacheOut — row 9), SEAM B: the streaming manager carries
-    // the decision layer (`mgr.add_region` / `update_regions`); this now POPULATES it from the world's
-    // authored `PopulationDensity` COMPs (E1 schema path — `register_population_regions`). See that
-    // function for the grounding + the confirm-live note on why the extent is the authored Transform
-    // anchor (a point) rather than an on-disk rect (region geometry is NOT authored in the placed
-    // COMP; the runtime rect `FUN_004d60e0` +0x10..+0x1c is computed at load).
-    let n_regions = register_population_regions(layers_static, &mut mgr);
-    if n_regions > 0 {
-        println!("[stream] region cache (seam B): {n_regions} PopulationDensity anchors registered");
-    }
-
-    Ok((mgr, props, terrain_tiles))
-}
-
-/// Fold one `vz_state` OVERLAY block's placements into an existing streaming catalog, using the SAME
-/// recipe [`build_streaming_catalog`] applies to `layers_static`: the overlay's `ModelName` props +
-/// named-hash props are registered with `mgr` (proximity streaming) and `props` (the wake recipe).
-/// Overlays carry no terrain tiles. Returns `(modelname_added, named_added)`. Any key already present
-/// (the base layer or a previously-folded overlay) is skipped, so an overlay never double-streams an
-/// entity — matching the game's model where vz_state overlays layer ON TOP of the always-loaded base.
-pub fn add_overlay_to_catalog(
-    block: &[u8],
-    default_dist: [u16; 4],
-    mgr: &mut mercs2_core::streaming::StreamingManager,
-    props: &mut std::collections::HashMap<u32, PropSpawn>,
-) -> (usize, usize) {
-    use mercs2_core::streaming::EntityUnit;
-
-    let mut n_mn = 0usize;
-    for p in mercs2_formats::placement::load_model_placements(block) {
-        if props.contains_key(&p.key) {
-            continue;
-        }
-        let dist = p.hibernation.map(|h| h.dist).unwrap_or(default_dist);
-        mgr.add_entity(EntityUnit { key: p.key, pos: p.pos, dist });
-        props.insert(p.key, PropSpawn { model_hash: p.model_hash, pos: p.pos, quat: p.quat });
-        n_mn += 1;
-    }
-
-    let mut n_named = 0usize;
-    for p in mercs2_formats::placement::load_placements(block).unwrap_or_default() {
-        if props.contains_key(&p.key) {
-            continue;
-        }
-        let Some(name) = &p.name else { continue };
-        let base = name.trim_start_matches('_');
-        let h = mercs2_formats::hash::pandemic_hash_m2(base);
-        let lname = base.to_ascii_lowercase();
-        let far = lname.contains("env") || lname.contains("rock") || lname.contains("huge")
-            || lname.contains("large") || lname.contains("tree") || lname.contains("building");
-        let dist = if far { [400, 160, 60, 20] } else { default_dist };
-        mgr.add_entity(EntityUnit { key: p.key, pos: p.pos, dist });
-        props.insert(p.key, PropSpawn { model_hash: h, pos: p.pos, quat: p.quat });
-        n_named += 1;
-    }
-
-    // Fold the overlay's population regions into the same region cache (seam B), on top of the base.
-    let _ = register_population_regions(block, mgr);
-
-    (n_mn, n_named)
+    mercs2_core::streaming::StreamingManager::new(cfg)
 }
 
 // ===========================================================================================
@@ -499,8 +755,8 @@ pub fn add_overlay_to_catalog(
 //  adds the schema-DRIVEN path ALONGSIDE them: it walks each streamed block's `COMP` groups through
 //  `mercs2_formats::schema` (`parse_comp_groups` → `ComponentSchema` → `deserialize_records`), builds
 //  the kernel `ComponentRegistry` (`register_with_fields`), and reads typed field values by
-//  name-hash — validating agreement with the oracle where they overlap (HibernationControl dist0,
-//  ModelName hash) so drift is caught, and sourcing the population regions the RegionCache needs.
+//  name-hash — validating agreement with the oracle where they overlap (ModelName hash) so drift is
+//  caught, and sourcing the population regions the RegionCache needs.
 // ===========================================================================================
 
 /// Population-region cache radii (streaming tunables, native game metres) — the proximity band at
@@ -513,14 +769,14 @@ pub fn add_overlay_to_catalog(
 pub const POPULATION_REGION_CACHE_IN: f32 = 250.0;
 pub const POPULATION_REGION_CACHE_OUT: f32 = 400.0;
 
-/// Walk every `COMP` group across a decompressed world block's UCFX containers (the same entry-table
-/// framing `ucfx::walk_decompressed_block` uses), grouped into `{info, schm, data}` triples by the E1
+/// Walk every `COMP` group across the UCFX containers of a decompressed world block or a layer
+/// container (`ucfx::placement_containers`), grouped into `{info, schm, data}` triples by the E1
 /// `parse_comp_groups` (the `FUN_00654940` COMP arm). This is the single entry point both the schema
 /// registry build and the region registration consume.
 fn walk_comp_groups(block: &[u8]) -> Vec<mercs2_formats::schema::CompGroup> {
-    let parsed = mercs2_formats::ucfx::walk_decompressed_block(block, "stream-world").0;
+    let containers = mercs2_formats::ucfx::placement_containers(block, "stream-world").0;
     let mut out = Vec::new();
-    for c in &parsed.containers {
+    for c in &containers {
         out.extend(mercs2_formats::schema::parse_comp_groups(c));
     }
     out
@@ -556,10 +812,6 @@ pub struct SchemaLoadStats {
     pub generic_groups: usize,
     /// Total per-entity records deserialized across those generic groups.
     pub generic_records: usize,
-    /// HibernationControl dist0 values cross-checked against the `placement` oracle, and how many
-    /// agreed (the schema path must match the oracle exactly where they overlap).
-    pub hib_checked: usize,
-    pub hib_agree: usize,
     /// ModelName hashes cross-checked against the oracle, and how many agreed.
     pub model_checked: usize,
     pub model_agree: usize,
@@ -577,13 +829,11 @@ pub fn load_schema_components(block: &[u8]) -> (mercs2_core::ComponentRegistry, 
     let mut stats = SchemaLoadStats::default();
 
     // Oracle references for the agreement cross-check.
-    let oracle_hib = mercs2_formats::placement::load_hibernation(block);
     let oracle_models: std::collections::HashMap<u32, u32> =
         mercs2_formats::placement::load_model_placements(block)
             .iter()
             .map(|m| (m.key, m.model_hash))
             .collect();
-    let mut schema_hib: std::collections::HashMap<u32, u16> = std::collections::HashMap::new();
     let mut schema_model: std::collections::HashMap<u32, u32> = std::collections::HashMap::new();
 
     for g in walk_comp_groups(block) {
@@ -620,16 +870,8 @@ pub fn load_schema_components(block: &[u8]) -> (mercs2_core::ComponentRegistry, 
         stats.generic_groups += 1;
         stats.generic_records += recs.len();
 
-        // Read typed field values by name-hash for the two classes the oracle also decodes.
+        // Read typed field values by name-hash for the class the oracle also decodes.
         match name.as_str() {
-            "HibernationControl" => {
-                let nh = schema.fields[0].name_hash;
-                for r in &recs {
-                    if let Some(FieldValue::U16(d0)) = r.get(nh) {
-                        schema_hib.entry(r.entity_key).or_insert(d0);
-                    }
-                }
-            }
             "ModelName" => {
                 let nh = schema.fields[0].name_hash;
                 for r in &recs {
@@ -642,12 +884,6 @@ pub fn load_schema_components(block: &[u8]) -> (mercs2_core::ComponentRegistry, 
         }
     }
 
-    for (k, h) in &oracle_hib {
-        stats.hib_checked += 1;
-        if schema_hib.get(k) == Some(&h.dist[0]) {
-            stats.hib_agree += 1;
-        }
-    }
     for (k, h) in &oracle_models {
         stats.model_checked += 1;
         if schema_model.get(k) == Some(h) {
@@ -672,7 +908,7 @@ pub fn load_schema_components(block: &[u8]) -> (mercs2_core::ComponentRegistry, 
 /// point and the cache in/out band is the streaming tunable [`POPULATION_REGION_CACHE_IN`]/`_OUT`.
 /// Fabricating a rect from terrain/heuristics is explicitly declined; the real runtime rect
 /// (`FUN_004d60e0` +0x10..+0x1c) is a confirm-live capture.
-fn register_population_regions(
+pub(crate) fn register_population_regions(
     block: &[u8],
     mgr: &mut mercs2_core::streaming::StreamingManager,
 ) -> usize {
@@ -733,40 +969,46 @@ fn register_population_regions(
 //                                                            matches `SPAWNER_GROUP_COUNT`).
 //   * `SpawnerRadiusType` 0xC377497D  Flags  @ payload+76  — `SpawnerRadiusTypeEnum` (radius mode).
 //   * `Hardpoint`         0xC780F3A8  U32    @ payload+36  — hardpoint id/ref.
-// The schema has ZERO f32 fields: the runtime interval/countdown/reload/radii (`+0x5c..+0x7c`) and the
-// faction/list index (`+0x58`) are NOT authored per-instance on disk — they are runtime/type-default
-// values, consistent with code map §10.2. Those are the CONFIRM-LIVE gaps below.
+//   * `UnitList`          0xB63E903F  Hash   @ payload+44  — the `PopulationList` the spawner's units
+//                                                            come from.
+//   * `UnitListWeighting` 0x87F967E5  Enum   @ payload+72  — `SpawnerWeightTypeEnum`, the choice rule
+//                                                            (`mercs2_population::units`).
+// (Field names: `mercs2_probe we-template --class PopulationSimpleSpawner`; the runtime spawner these
+// records become is the table in code map §6.)
 
 /// Recovered `PopulationSimpleSpawner` field name-hashes (see the block comment above).
 pub const PSS_FIELD_POSITION: u32 = 0x05D7_FC60;
 pub const PSS_FIELD_SPAWNER_TYPE: u32 = 0x6FF2_03C7;
 pub const PSS_FIELD_SPAWNER_GROUP: u32 = 0xD1A0_3B34;
 pub const PSS_FIELD_SPAWNER_RADIUS_TYPE: u32 = 0xC377_497D;
+pub const PSS_FIELD_UNIT_LIST: u32 = 0xB63E_903F;
+pub const PSS_FIELD_UNIT_LIST_WEIGHTING: u32 = 0x87F9_67E5;
 
 /// Read the world block's authored `PopulationSimpleSpawner` COMP and register each spawner instance
 /// into `mgr` (the ambient-population content feed — Task B). Mirrors [`register_population_regions`]:
 /// walks the block's `COMP` groups, deserializes each `PopulationSimpleSpawner` record through the
 /// recovered `schm` (plain keyed, stride 112 — see the block comment above), joins each record by
 /// entity key to the `Transform` oracle for its world anchor, and reads the grounded `SpawnerGroup` /
-/// `SpawnerType` fields by name-hash. Returns how many spawners were registered (bounded by the 768-cap
-/// pool — a full pool refuses further registers, exactly as `cdbsizes.ini` bounds it).
+/// `SpawnerType` / `UnitList` / `UnitListWeighting` fields by name-hash; the spawner's owner is the
+/// entity key. Returns how many spawners were registered (bounded by the 768-cap pool — a full pool
+/// refuses further registers, exactly as `cdbsizes.ini` bounds it); an error when a spawner's
+/// `UnitList` is no `PopulationList` of `pop.units` or its `UnitListWeighting` is no
+/// `SpawnerWeightTypeEnum` value.
 ///
-/// GROUNDING / FIDELITY: the transform anchor and the group/type discriminators are recovered from the
-/// shipped block. Three things are deliberately left at their defaults with a **CONFIRM-LIVE** marker,
-/// because they are provably NOT in the placed COMP (the `schm` has no f32 fields and no cracked
-/// faction field — they are runtime/type defaults, code map §10.2):
+/// GROUNDING / FIDELITY: the transform anchor, the group/type discriminators and the unit choice are
+/// recovered from the shipped block. Two things are deliberately left at their defaults with a
+/// **CONFIRM-LIVE** marker (code map §10.2):
 ///   1. **family** (Window/NoModel/Hardpoint/Path) — the `SpawnerType`→family fold is unproven
 ///      (§10.2, the four updaters are structurally interchangeable); registered as `NoModel` (the
 ///      neutral ambient/off-screen family) pending a live capture of the fold.
-///   2. **interval/countdown/reload** — not authored on disk; kept at the [`SimpleSpawner`] defaults.
-///   3. **faction/list index** — not a cracked on-disk field (runtime `+0x58`); kept at the default.
+///   2. **interval/countdown/reload** — kept at the [`SimpleSpawner`] defaults.
 /// Fabricating these from heuristics is declined, exactly as `register_population_regions` declines to
 /// fabricate a region rect.
 pub fn register_population_spawners(
     block: &[u8],
-    mgr: &mut crate::population::SimpleSpawnerManager,
-) -> usize {
-    use crate::population::{SimpleSpawner, SpawnerFamily};
+    pop: &mut crate::population::PopulationWorld,
+) -> Result<usize, String> {
+    use crate::population::{SimpleSpawner, SpawnerFamily, UnitChoice};
     use mercs2_core::glam::{Quat, Vec3};
     use mercs2_core::Transform;
     use mercs2_formats::schema::FieldValue;
@@ -780,14 +1022,6 @@ pub fn register_population_spawners(
         centers.entry(p.key).or_insert(p.pos);
         yaws.entry(p.key).or_insert_with(|| mercs2_formats::placement::yaw_from_quat(&p.quat));
     }
-
-    // CF-2 — per-spawner faction from the attached `SkirmishSpawnList` (the spawn-list channel), NOT a
-    // hardcoded `Vz`. The on-disk `PopulationSimpleSpawner` schm has no faction field (the runtime
-    // `+0x58` list index is not authored per-instance), so the faithful source is the joined
-    // `SkirmishSpawnList` COMP: its first slot int is the faction/list channel. Build a
-    // entity_key → SpawnFaction map from any `SkirmishSpawnList` group in the block; spawners with no
-    // joined list fall back to the civilian `Ped` ambient default (below), never a fabricated faction.
-    let faction_by_key = read_spawn_list_factions(block);
 
     let mut n = 0usize;
     for g in walk_comp_groups(block) {
@@ -804,105 +1038,48 @@ pub fn register_population_spawners(
             let mut transform = Transform::from_translation(Vec3::from(*c));
             transform.rotation = Quat::from_rotation_y(yaw);
 
-            // Grounded discriminators (by recovered name-hash).
-            let group = match r.get(PSS_FIELD_SPAWNER_GROUP) {
-                Some(FieldValue::U32(v)) => (v & 0xFF) as u8,
-                _ => 0,
+            let word = |field: u32, name: &str| match r.get(field) {
+                Some(FieldValue::U32(v)) => Ok(v),
+                other => Err(format!("PopulationSimpleSpawner 0x{:08X}: {name} is {other:?}", r.entity_key)),
             };
-            let spawner_type = match r.get(PSS_FIELD_SPAWNER_TYPE) {
-                Some(FieldValue::U32(v)) => (v & 0xFF) as u8,
-                _ => 0,
+            // `SpawnerGroup` lands byte-for-byte in the runtime `+0x8b` (`FUN_004E2840` `0x004E289A`).
+            let group = word(PSS_FIELD_SPAWNER_GROUP, "SpawnerGroup")?;
+            if group >= u32::from(crate::population::SPAWNER_GROUP_ENUM_COUNT) {
+                return Err(format!("PopulationSimpleSpawner 0x{:08X}: SpawnerGroup {group} is no SimpleSpawnerGroupEnum value", r.entity_key));
+            }
+            let spawner_type = word(PSS_FIELD_SPAWNER_TYPE, "SpawnerType")?;
+            let spawner_type = u8::try_from(spawner_type).map_err(|_| {
+                format!("PopulationSimpleSpawner 0x{:08X}: SpawnerType {spawner_type} is past a byte", r.entity_key)
+            })?;
+            let choice = UnitChoice {
+                owner: r.entity_key,
+                unit_list: word(PSS_FIELD_UNIT_LIST, "UnitList")?,
+                weighting: word(PSS_FIELD_UNIT_LIST_WEIGHTING, "UnitListWeighting")?,
             };
-
-            // CF-2 faction: the joined SkirmishSpawnList channel if present, else the civilian Ped
-            // ambient default (the living world is crowds; faction troops arrive via vz_state overlays
-            // / SetSpawnList tweaks). This replaces the old blanket `Vz` default.
-            let faction = faction_by_key
-                .get(&r.entity_key)
-                .copied()
-                .unwrap_or(crate::population::SpawnFaction::Ped);
+            pop.units
+                .check(&choice)
+                .map_err(|e| format!("PopulationSimpleSpawner 0x{:08X}: {e}", r.entity_key))?;
 
             let spawner = SimpleSpawner {
-                group: group.min(crate::population::SPAWNER_GROUP_COUNT - 1),
+                group: group as u8,
                 // CONFIRM-LIVE: SpawnerType→family fold unproven (§10.2). Kept as the raw type
                 // discriminator; family defaulted to the neutral NoModel ambient updater.
                 type_disc: [spawner_type, 0, 0],
                 family: SpawnerFamily::NoModel,
-                faction,
+                choice,
                 transform,
-                // CONFIRM-LIVE: interval/reload not authored on disk (no f32 fields; runtime/type
-                // defaults). Kept at the SimpleSpawner defaults until the type-default table or a live
-                // capture supplies them.
+                // CONFIRM-LIVE: interval/reload kept at the SimpleSpawner defaults until the type-default
+                // table or a live capture supplies them.
                 ..SimpleSpawner::default()
             };
-            if mgr.register(spawner).is_some() {
+            if pop.spawners.register(spawner).is_some() {
                 n += 1;
             } else {
                 break; // 768-cap pool full — stop, matching cdbsizes.ini bound
             }
         }
     }
-    n
-}
-
-/// Read the block's `SkirmishSpawnList` COMP and map each carrying entity key → its [`SpawnFaction`]
-/// channel (CF-2). The list's six ints are documented as "faction/unit/count indices"
-/// (`mercs2_population::components::SkirmishSpawnList`); we take the FIRST field as the faction/list
-/// index and map it via [`mercs2_population::slot_table::faction_from_list_slot`] (clamping unknowns to
-/// the civilian `Ped` ambient default). Returns an empty map when the block carries no such COMP —
-/// then every spawner falls back to `Ped` at the call site.
-///
-/// CONFIRM-LIVE: the exact slot ordering (which of the six ints is the faction channel) is not
-/// instruction-proven; the first-int reading is the honest, documented assumption, and any out-of-range
-/// value degrades to `Ped` rather than a fabricated faction.
-fn read_spawn_list_factions(
-    block: &[u8],
-) -> std::collections::HashMap<u32, crate::population::SpawnFaction> {
-    use mercs2_formats::schema::FieldValue;
-    let mut out = std::collections::HashMap::new();
-    for g in walk_comp_groups(block) {
-        if g.name.as_deref() != Some("SkirmishSpawnList") {
-            continue;
-        }
-        let Some(schema) = g.schema() else { continue };
-        let Some(data) = g.data.as_ref() else { continue };
-        let Some(recs) = schema.deserialize_records(data) else { continue };
-        for r in &recs {
-            // First schema field = the faction/list channel int (slot 0).
-            let slot0 = match r.fields.first() {
-                Some((_, FieldValue::U32(v))) => *v as i32,
-                Some((_, FieldValue::U16(v))) => *v as i32,
-                Some((_, FieldValue::U8(v))) => *v as i32,
-                _ => continue,
-            };
-            out.insert(
-                r.entity_key,
-                crate::population::slot_table::faction_from_list_slot(slot0),
-            );
-        }
-    }
-    out
-}
-
-/// Resolve a vz_state overlay LAYER name to its WAD block, matching the PTHS filename
-/// `<layer>_P###_Q#.block` — i.e. the layer name immediately followed by the `_P` quality suffix.
-/// This avoids the prefix ambiguity a loose substring ([`find_block_by_path`]) has: `vz_state_pmc`
-/// must NOT match `vz_state_pmcinterior_...`. Returns the lowest matching block index, or `None`.
-pub fn resolve_overlay_block(w: &wad::Wad, layer: &str) -> Option<u16> {
-    let needle = format!("{}_p", layer.to_ascii_lowercase());
-    wad::block_paths(w)
-        .iter()
-        .position(|p| p.to_ascii_lowercase().contains(&needle))
-        .map(|i| i as u16)
-}
-
-/// Keyed by entity key in the map `build_streaming_catalog` returns, so the streaming executor can
-/// instantiate the prop on WAKE.
-#[derive(Clone, Copy)]
-pub struct PropSpawn {
-    pub model_hash: u32,
-    pub pos: [f32; 3],
-    pub quat: [f32; 4],
+    Ok(n)
 }
 
 /// Ground height lookup for the third-person walk, built from the SAME triangle data the renderer
@@ -1166,316 +1343,12 @@ pub fn c3_cell_centre(cell_id: u32) -> (f32, f32) {
     (x, z)
 }
 
-/// One transit landing pad, as the world data authors it: the `LandingZone` COMP record joined to the
-/// same entity's `Transform` (+ `Name`, when it carries one).
-///
-/// This is what `Pg.GetAllLandingZones(nSlot)` enumerates. `MrxTransit.Reset`
-/// (`corpus/mercs2-luacd/src/resident/mrxtransit.lua:328-342`) calls it twice — once per co-op player
-/// slot — and zips the two returned lists **by table key** into
-/// `{uLocation1 = tZones1[k], uLocation2 = tZones2[k]}`, so the key is the landing-zone number
-/// ([`zone`](LandingZonePad::zone)), not a dense 1..n position: mission Lua hard-codes absolute zone
-/// numbers (`MrxTransit.SetLocationIsNuked(30, true)`, `vz/wifmissionflow.lua:1245`) and `wifhqdata`'s
-/// `nLandingZone`/`nAltLandingZone` fields enumerate 2..30.
-#[derive(Debug, Clone, PartialEq)]
-pub struct LandingZonePad {
-    /// Landing-zone number — the Lua's `nIndex` / the key of `_tLandingZones`. Sparse.
-    pub zone: u32,
-    /// Co-op player slot the pad serves (`1` or `2`) — the argument to `Pg.GetAllLandingZones`.
-    pub slot: u32,
-    /// World-data entity key of the pad object.
-    pub key: u32,
-    /// The pad's authored `Name` COMP, lowercased, when it has one. Retail vz names all 46 of its pads
-    /// `<zone>_<faction>_<site>_lz_player{one,two}` — the names the shipped Lua also resolves directly
-    /// (`Pg.GetGuidByName("01_pmc_hq_lz_playerone")`, `vz/wifpmcinterior.lua:2108`;
-    /// `sParkingLot = "12_chi_hq_lz_playerone"`, `vz/wifhqdata.lua:128`). Optional because a pad is
-    /// a `LandingZone` record joined to its `Transform`, and the COMP — not the name convention — is
-    /// the enumeration authority.
-    pub name: Option<String>,
-    /// Authored world position (native game space, +Y up) from the entity's `Transform`.
-    pub pos: [f32; 3],
-}
-
 /// The highest WAD block index that carries placed entities.
 ///
 /// Measured, not guessed: a census over `0..4000` finds **749** placement-bearing blocks and every one
 /// of them lands in `0..=750`. Bounding the scan here keeps the boot cost at a few seconds instead of
 /// the ~14 s a full 12k-block sweep takes; raise it if a future archive places entities higher.
 pub const MAX_PLACEMENT_BLOCK: u16 = 750;
-
-/// The WAD block a **layer** lives in, by layer name.
-///
-/// Layers are ordinary named assets: ASET type **9** (`aset_type_ids.rs` — `0xE6B81A54` = `layer`),
-/// keyed by `pandemic_hash_m2` of the lowercased name, exactly like models and scripts. So
-/// `Pg.LoadLayer("Vz_State_VzaCon001")` is a direct archive lookup, not something needing a side
-/// table: it resolves to **block 179**, which is where `world_name_index` finds
-/// `VzaCon001_StartingBoat`. `vz_state_VzaCon001_Pristine` → 335, `Vz_State_VzaCon001_CP01` → 247.
-///
-/// Name matching is case-insensitive because `pandemic_hash_m2` case-folds; the corpus spells the same
-/// layer `Vz_State_VzaCon001` and `vz_state_vzacon001` in different places and both must resolve.
-pub fn layer_block(w: &wad::Wad, layer_name: &str) -> Option<u16> {
-    const ASET_TYPE_LAYER: u32 = 9;
-    let h = mercs2_formats::hash::pandemic_hash_m2(&layer_name.to_ascii_lowercase());
-    wad::aset_types(w, h)
-        .into_iter()
-        .find(|(ty, _, _)| *ty == ASET_TYPE_LAYER)
-        .map(|(_, _, block)| block)
-}
-
-/// Every **named** entity in a layer, as lowercased names — the objects that "wake" when the layer
-/// streams in.
-///
-/// Returns an empty vec for a layer that does not resolve or whose block holds no placements, so a
-/// caller can treat "no such layer" and "layer with nothing named in it" alike: neither wakes anything.
-pub fn layer_object_names(w: &mut wad::Wad, layer_name: &str) -> Vec<String> {
-    let Some(block) = layer_block(w, layer_name) else { return Vec::new() };
-    let Ok(bytes) = wad::decompress_block_index(w, block) else { return Vec::new() };
-    let Ok(placements) = mercs2_formats::placement::load_placements(&bytes) else { return Vec::new() };
-    placements.into_iter().filter_map(|p| p.name.map(|n| n.to_ascii_lowercase())).collect()
-}
-
-/// Layer name → the objects it contains, precomputed so the **script host needs no WAD at runtime**.
-///
-/// `Pg.LoadLayer` arrives as a name on the Lua thread, in a host that deliberately owns no archive
-/// handle. Resolving it live would mean handing the host a `Wad` (and re-decompressing a block inside
-/// the pump); precomputing at world load keeps the seam and the frame cost where they belong.
-///
-/// Keyed by `pandemic_hash_m2` of the lowercased name rather than the string, because the corpus
-/// spells the same layer several ways (`Vz_State_VzaCon001` at `vzacon001.lua:58` vs
-/// `vz_state_vzacon001` in the layer-manager logs) and the hash is what makes those one key.
-#[derive(Debug, Default, Clone)]
-pub struct LayerIndex {
-    by_hash: std::collections::HashMap<u32, Vec<String>>,
-}
-
-impl LayerIndex {
-    /// The lowercased names of every named object in `layer_name`, or empty if unknown.
-    pub fn objects_in(&self, layer_name: &str) -> &[String] {
-        let h = mercs2_formats::hash::pandemic_hash_m2(&layer_name.to_ascii_lowercase());
-        self.by_hash.get(&h).map(Vec::as_slice).unwrap_or(&[])
-    }
-
-    /// Number of layers indexed.
-    pub fn len(&self) -> usize {
-        self.by_hash.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.by_hash.is_empty()
-    }
-}
-
-/// Build the [`LayerIndex`] by walking every ASET **layer** entry (type 9) and reading that layer's
-/// block once.
-///
-/// Only layer blocks are decompressed — a few hundred, not the full archive — because the ASET table
-/// already says which blocks are layers. This is the same data `world_name_index` reads; the split is
-/// that this one preserves *which layer* each name came from, which is what turns a `Pg.LoadLayer`
-/// into a set of objects to wake.
-pub fn layer_index(w: &mut wad::Wad) -> LayerIndex {
-    const ASET_TYPE_LAYER: u32 = 9;
-    // Distinct (hash, block) layer entries. `all_asets` is already sorted+deduped.
-    let layers: Vec<(u32, u16)> = wad::all_asets(w)
-        .into_iter()
-        .filter(|(_, ty, _)| *ty == ASET_TYPE_LAYER)
-        .filter_map(|(h, _, _)| {
-            wad::aset_types(w, h)
-                .into_iter()
-                .find(|(t, _, _)| *t == ASET_TYPE_LAYER)
-                .map(|(_, _, b)| (h, b))
-        })
-        .collect();
-
-    // Group by block so each is decompressed once — 921 layers occupy only 751 blocks, and a block is
-    // multi-megabyte.
-    let mut by_block: std::collections::HashMap<u16, Vec<u32>> = std::collections::HashMap::new();
-    for (h, b) in layers {
-        by_block.entry(b).or_default().push(h);
-    }
-
-    let mut by_hash: std::collections::HashMap<u32, Vec<String>> = std::collections::HashMap::new();
-    let mut shared_blocks = 0usize;
-    for (block, hashes) in by_block {
-        let Ok(dec) = wad::decompress_block_index(w, block) else { continue };
-        if hashes.len() > 1 {
-            shared_blocks += 1;
-        }
-        // Slice each layer's OWN container out of the block rather than reading the block whole.
-        //
-        // This is the difference between exact and wildly over-firing: a shared block holds several
-        // layers' containers laid end to end, so attributing the whole block to each of its layers made
-        // `vz_sfx_ambience` and `vz_poi_lineregions` each claim 5,315 objects — every named entity in
-        // the block, not the handful each actually owns. Waking objects that did not stream in fires
-        // awake-gates for missions that are not running.
-        //
-        // The block entry table (`ucfx::parse_block_entry_table`) gives `(name_hash, chunk_size)` per
-        // container, laid sequentially after the 4 + 16·N header — so a layer's bytes are addressable
-        // by its own asset hash.
-        let (count, entries) = mercs2_formats::ucfx::parse_block_entry_table(&dec);
-        let mut pos = 4 + (count as usize) * 16;
-        for e in &entries {
-            let size = e.chunk_size as usize;
-            let end = pos.saturating_add(size);
-            if end > dec.len() {
-                break;
-            }
-            if hashes.contains(&e.name_hash) {
-                if let Ok(ps) = mercs2_formats::placement::load_placements(&dec[pos..end]) {
-                    let names: Vec<String> =
-                        ps.into_iter().filter_map(|p| p.name.map(|s| s.to_ascii_lowercase())).collect();
-                    if !names.is_empty() {
-                        by_hash.insert(e.name_hash, names);
-                    }
-                }
-            }
-            pos = end;
-        }
-    }
-    println!(
-        "[world] layer index: {} layers with named objects ({shared_blocks} block(s) hold more than one \
-         layer; each layer reads only its own container)",
-        by_hash.len()
-    );
-    LayerIndex { by_hash }
-}
-
-/// The world's **complete** name → position index, across every placement-bearing block.
-///
-/// # Why this exists
-///
-/// `Pg.GetGuidByName` is the engine's universal object lookup — **1240 corpus call sites**, more than
-/// any other binding. We were building its index from `layers_static` (block 29) alone, which is
-/// 62,143 of the world's 100,535 named entities. The other ~38,000 live in the 748 *streamed-layer*
-/// blocks, and every one of them silently resolved to nil.
-///
-/// That is not an abstract gap. `VzaCon001` gates its `AssetsLoaded` on an `ObjectHibernation` event
-/// for `Pg.GetGuidByName("VzaCon001_StartingBoat")`
-/// (`corpus/mercs2-luacd/src/vz/vzacon001.lua:66-119`); the boat is in **block 179** at
-/// `[-1726.98, -36.35, 2068.80]`, so the boot parked forever on a name the archive had all along.
-///
-/// No new parsing was needed — `placement::load_placements` reads a streamed-layer block unchanged
-/// (block 179: 116 placements, 116 named). The reader was never the gap; the caller was.
-///
-/// # Precedence
-///
-/// `layers_static` wins a name collision: it is the always-resident set, and a streamed layer that
-/// reuses a name is the transient one. Later blocks otherwise do not overwrite earlier ones, so the
-/// index is deterministic regardless of iteration order.
-///
-/// # Case
-///
-/// Keys are lowercased. This is not a convenience — it is what the engine does. `pandemic_hash_m2`
-/// ORs `0x20` into every byte before mixing (`FUN_00824270`), so retail's name lookup cannot tell
-/// `Vza_Boat` from `vza_boat`; they are one name to it. A case-sensitive index would hold two entries
-/// where the engine holds one, and which of them a script reached would depend on the caller's
-/// spelling. Callers key on the lowercase form (`mercs2_game::world` does at the hero-spawn marker
-/// resolve); the authored spelling is not preserved because nothing downstream can act on it.
-pub fn world_name_index(
-    w: &mut wad::Wad,
-    layers_static: &[u8],
-) -> std::collections::HashMap<String, [f32; 3]> {
-    let mut index: std::collections::HashMap<String, [f32; 3]> = std::collections::HashMap::new();
-    let mut blocks = 0usize;
-
-    // Seed from `layers_static` FIRST so it wins every collision — `or_insert` below is
-    // first-writer-wins, and seeding here is what makes the precedence rule true rather than an
-    // accident of block ordering.
-    if let Ok(p) = mercs2_formats::placement::load_placements(layers_static) {
-        for x in p {
-            if let Some(name) = x.name {
-                index.insert(name.to_ascii_lowercase(), x.pos);
-            }
-        }
-        blocks += 1;
-    }
-
-    for idx in 0..=MAX_PLACEMENT_BLOCK {
-        let Ok(b) = wad::decompress_block_index(w, idx) else { continue };
-        // Cheap reject before the (much more expensive) COMP walk.
-        if !b.windows(4).any(|x| x == b"UCFX") {
-            continue;
-        }
-        let Ok(placements) = mercs2_formats::placement::load_placements(&b) else { continue };
-        let mut named_here = 0usize;
-        for p in placements {
-            let Some(name) = p.name else { continue };
-            named_here += 1;
-            index.entry(name.to_ascii_lowercase()).or_insert(p.pos);
-        }
-        if named_here > 0 {
-            blocks += 1;
-        }
-    }
-    println!("[world] name index: {} names across {blocks} placement blocks", index.len());
-    index
-}
-
-/// **TEST FIXTURE ONLY** — the retail `vz` landing pads, from `data/retail_landing_zones.tsv`.
-///
-/// `#[cfg(test)]` deliberately, and it must stay that way: this cannot be compiled into the shipping
-/// game, so extracted world data can never become a route to playing without owning the game. The
-/// game reads its pads from the player's own archive via [`landing_zone_pads`]
-/// (`mercs2_game::world`), and never consults this. If a runtime path ever wants these, read the
-/// WAD — do not reach for this function.
-///
-/// It exists because `Pg.GetAllLandingZones` is answered from WORLD DATA while the Lua corpus holds
-/// only references to it (a zone number, a name to resolve). A test host with the corpus and no
-/// archive therefore cannot get past `MrxTransit.Reset`. See the file header for full provenance.
-///
-/// [`landing_zone_pads_match_the_vendored_table`](self::schema_wire_tests) (game-gated, built by the
-/// `retail` feature) re-derives the table from the WAD and fails on any drift, so it cannot silently
-/// diverge.
-#[cfg(test)]
-pub fn retail_landing_zone_pads() -> Vec<LandingZonePad> {
-    let mut out: Vec<LandingZonePad> = include_str!("../data/retail_landing_zones.tsv")
-        .lines()
-        .map(str::trim_end)
-        .filter(|l| !l.is_empty() && !l.starts_with('#'))
-        .filter_map(|line| {
-            let mut f = line.split('\t');
-            let zone = f.next()?.parse().ok()?;
-            let slot = f.next()?.parse().ok()?;
-            let key = f.next()?.parse().ok()?;
-            let name = f.next()?;
-            let pos = [
-                f.next()?.parse().ok()?,
-                f.next()?.parse().ok()?,
-                f.next()?.parse().ok()?,
-            ];
-            // An EMPTY name column is a pad with no `Name` record; collapsing it to `Some("")` would
-            // invent a name the archive does not have.
-            let name = (!name.is_empty()).then(|| name.to_string());
-            Some(LandingZonePad { zone, slot, key, name, pos })
-        })
-        .collect();
-    out.sort_by_key(|p| (p.zone, p.slot));
-    out
-}
-
-/// Every transit landing pad in a decompressed `layers_static` block, sorted by `(zone, slot)`.
-///
-/// The `LandingZone` COMP (`mercs2_formats::placement::load_landing_zones`) is the authority on which
-/// entities are pads and what zone/slot each serves; this joins each record to its `Transform`/`Name`
-/// by entity key so the caller can entity-ize it. Records whose key has no `Transform` are dropped —
-/// a pad with no world position is not addressable by `Object.GetPosition`, which every consumer of
-/// `Pg.GetAllLandingZones` reaches for (`mrxtransit.lua:104,189`).
-///
-/// Retail vz yields 46 pads: 23 zones (`1..8, 12, 15..18, 20..25, 27..30`) × 2 player slots.
-pub fn landing_zone_pads(layers_static: &[u8]) -> Vec<LandingZonePad> {
-    let mut xf: std::collections::HashMap<u32, ([f32; 3], Option<String>)> =
-        std::collections::HashMap::new();
-    for p in mercs2_formats::placement::load_placements(layers_static).unwrap_or_default() {
-        xf.entry(p.key).or_insert((p.pos, p.name.map(|n| n.to_ascii_lowercase())));
-    }
-    let mut out: Vec<LandingZonePad> = mercs2_formats::placement::load_landing_zones(layers_static)
-        .into_iter()
-        .filter_map(|r| {
-            let (pos, name) = xf.get(&r.key)?.clone();
-            Some(LandingZonePad { zone: r.zone, slot: r.slot, key: r.key, name, pos })
-        })
-        .collect();
-    out.sort_by_key(|p| (p.zone, p.slot));
-    out
-}
 
 /// Interior STATE/placement overlay (`vz_state_pmcinterior_P000_Q3.block`): 104 Transform records,
 /// authored around the spawn (floor Y≈450.8), each keying a named interior instance (cots, planters,
@@ -1498,41 +1371,6 @@ pub const PMC_INTERIOR_ENTITIES: &[(u32, &str)] = &[
 #[cfg(test)]
 pub(crate) mod schema_wire_tests {
     use super::*;
-
-    /// The vendored table stands on its own without a WAD: it really is the full retail set.
-    ///
-    /// Runs everywhere — this is the invariant the corpus-only boot depends on.
-    #[test]
-    fn vendored_landing_zones_are_the_full_retail_set() {
-        let pads = retail_landing_zone_pads();
-        assert_eq!(pads.len(), 46, "23 zones × 2 co-op player slots");
-        let zones: Vec<u32> = {
-            let mut z: Vec<u32> = pads.iter().map(|p| p.zone).collect();
-            z.dedup();
-            z
-        };
-        assert_eq!(
-            zones,
-            vec![1, 2, 3, 4, 5, 6, 7, 8, 12, 15, 16, 17, 18, 20, 21, 22, 23, 24, 25, 27, 28, 29, 30],
-            "the sparse zone set the shipped Lua indexes by absolute number"
-        );
-        for z in &zones {
-            let mut slots: Vec<u32> = pads.iter().filter(|p| p.zone == *z).map(|p| p.slot).collect();
-            slots.sort_unstable();
-            assert_eq!(slots, vec![1, 2], "zone {z} must have one pad per player slot");
-        }
-        // All 46 named; zone 12 slot 1 is the `12_chi_hq_lz_playerone` `vz/wifhqdata.lua:128` resolves.
-        let unnamed: Vec<(u32, u32)> =
-            pads.iter().filter(|p| p.name.is_none()).map(|p| (p.zone, p.slot)).collect();
-        assert_eq!(unnamed, Vec::<(u32, u32)>::new(), "every retail pad carries a Name");
-        let zone12: Vec<Option<&str>> = pads.iter().filter(|p| p.zone == 12).map(|p| p.name.as_deref()).collect();
-        assert_eq!(zone12, vec![Some("12_chi_hq_lz_playerone"), Some("12_chi_hq_lz_playertwo")]);
-        // Distinct authored positions — they are physical touchdown spots, not placeholders.
-        let mut seen = std::collections::HashSet::new();
-        for p in &pads {
-            assert!(seen.insert(p.pos.map(f32::to_bits)), "two vendored pads share a position: {p:?}");
-        }
-    }
 
     /// The game-gated tests: built by the `retail` feature, they read the retail `vz.wad` named by the
     /// repo-root `.mercs2-local.toml` and fail when it is absent. `pub(crate)` because
@@ -1567,6 +1405,63 @@ pub(crate) mod schema_wire_tests {
                 .1
         }
 
+        /// Loading the `layers_static` block's 173 layers one container at a time places exactly what
+        /// reading the block whole places: the same entities with the same node sources, terrain
+        /// tiles, lights, landing pads, names and population regions. Every placement reader must
+        /// accept a lone layer container (`ucfx::placement_containers`); one that read nothing from a
+        /// container would surface here as a missing record, not as an error.
+        #[test]
+        fn static_layer_containers_place_what_the_whole_block_places() {
+            use mercs2_formats::placement::{light_inventory, load_landing_zones, load_terrain_tiles, placed_names};
+            let mut w = open_vz_wad();
+            let ls = retail_layers_static();
+            let templates = TemplateRecords::load(&mut crate::asset::AssetSource::discover(&vz_wad_path(), &[]).unwrap())
+                .unwrap_or_else(|e| panic!("{e}"));
+            let layers = block_layers(&ls);
+            assert_eq!(layers.len(), 173, "layers_static carries 173 layer containers");
+
+            let mut whole = PlacedCatalog::default();
+            whole.add_block(&ls, &templates).unwrap_or_else(|e| panic!("whole block: {e}"));
+            let mut per = PlacedCatalog::default();
+            let (mut tiles, mut lights, mut pads, mut names) = (0usize, 0usize, 0usize, 0usize);
+            let mut regions = StreamingManagerCounter::default();
+            for &l in &layers {
+                let c = layer_container(&mut w, l)
+                    .unwrap_or_else(|e| panic!("layer 0x{l:08X}: {e}"))
+                    .unwrap_or_else(|| panic!("layer 0x{l:08X} has no type-9 asset"));
+                assert!(c.starts_with(b"UCFX"), "a layer asset is one UCFX container");
+                per.add_block(&c, &templates).unwrap_or_else(|e| panic!("layer 0x{l:08X}: {e}"));
+                tiles += load_terrain_tiles(&c).unwrap_or_else(|e| panic!("{e}")).len();
+                lights += light_inventory(&c).len();
+                pads += load_landing_zones(&c).len();
+                names += placed_names(&c).len();
+                regions.add(&c);
+            }
+            assert_eq!(per.len(), whole.len(), "the same number of placed entities");
+            for o in whole.iter() {
+                assert_eq!(per.get(o.key), Some(o), "entity 0x{:08X} differs between the two reads", o.key);
+            }
+            assert_eq!(tiles, load_terrain_tiles(&ls).unwrap_or_else(|e| panic!("{e}")).len(), "terrain tiles");
+            assert_eq!(lights, light_inventory(&ls).len(), "lights");
+            assert_eq!(pads, load_landing_zones(&ls).len(), "landing pads");
+            assert_eq!(names, placed_names(&ls).len(), "names");
+            let mut whole_regions = StreamingManagerCounter::default();
+            whole_regions.add(&ls);
+            assert_eq!(regions.0, whole_regions.0, "population regions");
+            assert!(tiles > 0 && lights > 0 && pads > 0 && names > 0 && regions.0 > 0, "every record kind is present");
+        }
+
+        /// Population regions a block or container registers.
+        #[derive(Default)]
+        struct StreamingManagerCounter(usize);
+
+        impl StreamingManagerCounter {
+            fn add(&mut self, block: &[u8]) {
+                let mut m = mercs2_core::streaming::StreamingManager::new(mercs2_core::streaming::StreamingConfig::default());
+                self.0 += register_population_regions(block, &mut m);
+            }
+        }
+
         /// TASK-B confirm: `PopulationSimpleSpawner` is a plain keyed COMP in the retail `layers_static`
         /// block and the content loader feeds real spawner instances (at joined-Transform anchors, with the
         /// recovered SpawnerGroup) into an empty `SimpleSpawnerManager`.
@@ -1590,19 +1485,27 @@ pub(crate) mod schema_wire_tests {
             }
             assert!(pss_groups > 0, "layers_static must carry PopulationSimpleSpawner COMPs");
 
-            // The loader feeds real spawners into a fresh (empty) manager.
-            let mut mgr = crate::population::SimpleSpawnerManager::new();
-            assert_eq!(mgr.spawners().len(), 0, "starts empty (the bug this fixes)");
-            let n = register_population_spawners(&ls, &mut mgr);
+            // The loader feeds real spawners into a fresh (empty) population, checked against the shipped
+            // unit lists.
+            let mut assets = crate::asset::AssetSource::discover(&vz_wad_path(), &[]).expect("asset source");
+            let data = crate::game_world::PopulationData::load(&mut assets).unwrap_or_else(|e| panic!("{e}"));
+            let mut pop = crate::population::PopulationWorld::new();
+            pop.units = data.catalog;
+            assert_eq!(pop.spawners.spawners().len(), 0, "starts empty (the bug this fixes)");
+            let n = register_population_spawners(&ls, &mut pop).unwrap_or_else(|e| panic!("{e}"));
             assert!(n >= 1, "must register at least one spawner from world data");
-            assert_eq!(mgr.spawners().len(), n, "every registered spawner lands in the pool");
-            // Every registered spawner sits at a real (non-origin) world anchor and a valid group.
-            for sp in mgr.spawners() {
-                assert!(sp.group < crate::population::SPAWNER_GROUP_COUNT, "group index in range");
+            assert_eq!(pop.spawners.spawners().len(), n, "every registered spawner lands in the pool");
+            // Every registered spawner sits at a real (non-origin) world anchor and a valid group, and
+            // its units come from a shipped list whose every unit is a loaded template.
+            for sp in pop.spawners.spawners() {
+                assert!(sp.group < crate::population::SPAWNER_GROUP_ENUM_COUNT, "a SimpleSpawnerGroupEnum value");
                 assert!(
                     sp.transform.translation != mercs2_core::glam::Vec3::ZERO,
                     "spawner anchored at its joined Transform, not the identity Position blob"
                 );
+                for u in pop.units.units_of(sp.choice.unit_list).filter(|&u| u != 0) {
+                    assert!(data.units.contains_key(&u), "unit 0x{u:08X} of list 0x{:08X} has a template", sp.choice.unit_list);
+                }
             }
             eprintln!("[task-b] registered {n} PopulationSimpleSpawner instances from layers_static");
         }
@@ -1618,63 +1521,31 @@ pub(crate) mod schema_wire_tests {
         /// - All 46 pads carry a `Name` of the form `<zone>_<faction>_<site>_lz_player{one,two}` — the
         ///   names the shipped Lua also resolves by hand (`resident/mrxsupport.lua:606-610`,
         ///   `vz/wifpmcinterior.lua:2108`, `vz/wifhqdata.lua:128` for zone 12 slot 1).
-        /// The world name index spans **streamed-layer blocks**, not just `layers_static`.
-        ///
-        /// The regression this pins: `Pg.GetGuidByName("VzaCon001_StartingBoat")` returned nil, which
-        /// parked the boot forever — `VzaCon001` gates `AssetsLoaded` on an `ObjectHibernation` event for
-        /// that boat (`corpus/mercs2-luacd/src/vz/vzacon001.lua:66-119`). The name was in the archive the
-        /// whole time, in block 179; we were only ever reading block 29.
-        #[test]
-        fn live_world_name_index_spans_streamed_layers() {
-            let mut w = open_vz_wad();
-            let ls = retail_layers_static();
-            let index = world_name_index(&mut w, &ls);
+        /// One `LandingZone` record joined by key to its entity's `Transform` and `Name`.
+        #[derive(Debug)]
+        struct Pad {
+            zone: u32,
+            slot: u32,
+            name: Option<String>,
+            pos: [f32; 3],
+        }
 
-            // Keys are case-folded the way `pandemic_hash_m2` folds them, so the authored spelling misses
-            // and the lowercase form hits. Pinning both directions keeps the contract from drifting.
-            assert!(index.get("VzaCon001_StartingBoat").is_none(), "keys are lowercased, not as-authored");
-
-            // A `layers_static` name still resolves — the streamed blocks must not displace the resident set.
-            let start = index.get("vzacon001_start1").copied();
-            assert!(start.is_some(), "layers_static names survive the merge");
-
-            // ...and the streamed-layer name that was stalling the boot now resolves, at its authored spot.
-            let boat = index
-                .get("vzacon001_startingboat")
-                .copied()
-                .expect("VzaCon001_StartingBoat lives in block 179 and must be indexed");
-            assert!(
-                (boat[0] - -1726.98).abs() < 1.0
-                    && (boat[1] - -36.35).abs() < 1.0
-                    && (boat[2] - 2068.80).abs() < 1.0,
-                "the boat's authored position, not a placeholder; got {boat:?}"
-            );
-
-            // The boat sits beside the mission's own start marker — a sanity check that the two blocks'
-            // coordinates share one space rather than being independently plausible.
-            let start = start.unwrap();
-            let d = ((boat[0] - start[0]).powi(2) + (boat[2] - start[2]).powi(2)).sqrt();
-            assert!(d < 50.0, "boat and VzaCon001_Start1 should be adjacent; {d} m apart");
-
-            // Strictly richer than `layers_static` alone. Compare UNIQUE NAMES to unique names: the census
-            // figures (62,143 named placements in block 29, 100,535 across all 749) count *placements*, and
-            // world names repeat heavily across blocks — the merged index is ~10k distinct names, not 100k.
-            let static_only: std::collections::HashSet<String> =
-                mercs2_formats::placement::load_placements(&ls)
-                    .unwrap_or_else(|e| panic!("layers_static placements: {e}"))
-                    .into_iter()
-                    .filter_map(|p| p.name.map(|n| n.to_ascii_lowercase()))
-                    .collect();
-            assert!(
-                index.len() > static_only.len(),
-                "merged index ({}) must exceed layers_static alone ({})",
-                index.len(),
-                static_only.len()
-            );
-            assert!(
-                !static_only.contains("vzacon001_startingboat"),
-                "the boat must NOT be in layers_static — that is the whole point of scanning further"
-            );
+        /// Every landing pad of a placement block, sorted by `(zone, slot)`. A record whose key has no
+        /// `Transform` is an error: every pad is an addressable world object.
+        fn landing_zone_pads(block: &[u8]) -> Vec<Pad> {
+            let mut xf: std::collections::HashMap<u32, ([f32; 3], Option<String>)> = std::collections::HashMap::new();
+            for p in mercs2_formats::placement::load_placements(block).unwrap_or_else(|e| panic!("placements: {e}")) {
+                xf.entry(p.key).or_insert((p.pos, p.name.map(|n| n.to_ascii_lowercase())));
+            }
+            let mut out: Vec<Pad> = mercs2_formats::placement::load_landing_zones(block)
+                .into_iter()
+                .map(|r| {
+                    let (pos, name) = xf.get(&r.key).cloned().unwrap_or_else(|| panic!("pad 0x{:08X} has no Transform", r.key));
+                    Pad { zone: r.zone, slot: r.slot, name, pos }
+                })
+                .collect();
+            out.sort_by_key(|p| (p.zone, p.slot));
+            out
         }
 
         #[test]
@@ -1744,41 +1615,6 @@ pub(crate) mod schema_wire_tests {
             (30, "Chi"),
         ];
 
-        /// **The vendored pad table is byte-for-byte what the archive holds.**
-        ///
-        /// `retail_landing_zone_pads()` exists so a checkout without vz.wad still boots against REAL
-        /// world data. That is only true while the file actually matches the archive, so this re-derives
-        /// it from the WAD and compares every field of every record — zone, slot, entity key, name and
-        /// authored position. Any drift (a re-extraction, a hand edit, a change in
-        /// `load_landing_zones`) fails here rather than silently turning the vendored copy into fiction.
-        #[test]
-        fn landing_zone_pads_match_the_vendored_table() {
-            let ls = retail_layers_static();
-            let from_wad = landing_zone_pads(&ls);
-            let vendored = retail_landing_zone_pads();
-            assert_eq!(
-                vendored.len(),
-                from_wad.len(),
-                "vendored table has {} pads, the archive has {}",
-                vendored.len(),
-                from_wad.len()
-            );
-            for (v, w) in vendored.iter().zip(from_wad.iter()) {
-                assert_eq!((v.zone, v.slot), (w.zone, w.slot), "pad identity drifted");
-                assert_eq!(v.key, w.key, "zone {} slot {}: entity key drifted", v.zone, v.slot);
-                assert_eq!(v.name, w.name, "zone {} slot {}: name drifted", v.zone, v.slot);
-                // Positions round-trip through 7 significant digits in the TSV, so compare at that
-                // precision rather than demanding exact bit equality of a reparsed float.
-                for k in 0..3 {
-                    assert!(
-                        (v.pos[k] - w.pos[k]).abs() <= w.pos[k].abs() * 1e-6 + 1e-3,
-                        "zone {} slot {}: axis {k} drifted ({} vs {})",
-                        v.zone, v.slot, v.pos[k], w.pos[k]
-                    );
-                }
-            }
-        }
-
         /// **Cross-check of the `LandingZone` COMP against a live retail run.**
         ///
         /// `live_landing_zone_pads_if_wad_present` above proves what the shipped WORLD DATA authors. This
@@ -1835,8 +1671,8 @@ pub(crate) mod schema_wire_tests {
         ///
         /// Asserts, against the real retail `layers_static` block:
         ///   1. the schema path deserializes many generic COMP records (≥ 2000) across many classes,
-        ///   2. every value it reads for HibernationControl dist0 + ModelName hash AGREES with the bespoke
-        ///      `placement` oracle (no drift on the overlap),
+        ///   2. every ModelName hash it reads AGREES with the bespoke `placement` oracle (no drift on the
+        ///      overlap),
         ///   3. ≥ 1 population region registers into the streaming manager's RegionCache, and driving
         ///      `update_regions` at a region's anchor caches that region IN.
         #[test]
@@ -1846,9 +1682,9 @@ pub(crate) mod schema_wire_tests {
             // Seam A — schema-driven generic COMP deserialize + oracle agreement.
             let (reg, stats) = load_schema_components(&ls);
             println!(
-                "[schema-test] classes={} generic_groups={} generic_records={} | HibernationControl {}/{} agree, ModelName {}/{} agree | pool_budget_total={}",
+                "[schema-test] classes={} generic_groups={} generic_records={} | ModelName {}/{} agree | pool_budget_total={}",
                 stats.classes, stats.generic_groups, stats.generic_records,
-                stats.hib_agree, stats.hib_checked, stats.model_agree, stats.model_checked, reg.total_budget()
+                stats.model_agree, stats.model_checked, reg.total_budget()
             );
             assert!(stats.classes >= 10, "expected many registered classes, got {}", stats.classes);
             assert!(
@@ -1857,8 +1693,6 @@ pub(crate) mod schema_wire_tests {
                 stats.generic_records
             );
             // The schema path must agree with the oracle exactly where they overlap.
-            assert!(stats.hib_checked > 0 && stats.hib_agree == stats.hib_checked,
-                "HibernationControl dist0 disagreed with oracle: {}/{}", stats.hib_agree, stats.hib_checked);
             assert!(stats.model_checked > 0 && stats.model_agree == stats.model_checked,
                 "ModelName hash disagreed with oracle: {}/{}", stats.model_agree, stats.model_checked);
 

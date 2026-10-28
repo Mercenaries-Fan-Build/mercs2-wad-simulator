@@ -64,7 +64,7 @@ owns possession and the profile, and reaches weapons through the character GUID.
 ```rust
 use mercs2_player::{CheatFlags, PlayerWorld, possession};
 
-let mut w = PlayerWorld::single_player();          // one joined local player in slot 0
+let mut w = PlayerWorld::single_player(0x4000_0001); // one joined local player in slot 0 (a runtime key)
 possession::attach_to_character(&mut w.roster, 0, 0xC0FFEE, CheatFlags::default());
 
 // Possession is a field on the player, not a component on the character.
@@ -74,7 +74,7 @@ assert_eq!(w.roster.by_character(0xC0FFEE).map(|p| p.guid), Some(player_guid));
 
 // The profile is ONE global, shared across the co-op pair.
 w.profile.set_cash(75_000, false);
-w.roster.create(1);                                 // a slot INDEX, not a guid — and idempotent
+w.roster.create(1, || 0x4000_0002);                 // a slot INDEX, not a guid — and idempotent; a new record takes the minted key
 assert_eq!(w.profile.cash, 75_000);                 // no second wallet for a second player
 
 // ...and `SetCash` does not arm the autosave. That is retail's bug, reproduced on purpose.

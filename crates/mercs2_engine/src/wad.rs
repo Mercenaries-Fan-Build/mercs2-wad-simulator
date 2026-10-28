@@ -474,6 +474,11 @@ pub fn archive_and_file(wad: &mut Wad) -> (&FfcsArchive, &mut File) {
     (&wad.archive, &mut wad.file)
 }
 
+/// Whether the archive carries a model of `name_hash` (any ASET row of the model type).
+pub fn has_model(wad: &Wad, name_hash: u32) -> bool {
+    wad.archive.aset.iter().any(|e| e.asset_hash == name_hash && e.type_id == MODEL_ASET_TYPE_ID)
+}
+
 /// Extract the UCFX model container for `name_hash` via its ASET block. Prefers the PRIMARY model
 /// entry, but falls back to a SUB-ENTRY (`is_primary == false`) — the instanced world content
 /// (trees/rocks/bushes/lamps like `jungle_env_plantlarge04`) is a shared model carried as a sub-entry

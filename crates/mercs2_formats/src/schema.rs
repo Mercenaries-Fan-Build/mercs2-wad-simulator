@@ -278,16 +278,15 @@ impl ComponentSchema {
         let mut records = Vec::with_capacity(data.len() / stride);
         for rec in data.chunks_exact(stride) {
             let entity_key = u32::from_le_bytes([rec[0], rec[1], rec[2], rec[3]]);
-            let payload = &rec[4..];
-            let mut fields = Vec::with_capacity(self.fields.len());
-            for f in &self.fields {
-                if let Some(v) = read_field(f, payload) {
-                    fields.push((f.name_hash, v));
-                }
-            }
-            records.push(ComponentRecord { entity_key, fields });
+            records.push(ComponentRecord { entity_key, fields: self.read_payload(&rec[4..]) });
         }
         Some(records)
+    }
+
+    /// Every field of one record payload (no key prefix), `(field-name-hash, value)` in schema order;
+    /// a field that would run past the end of `payload` is left out.
+    pub fn read_payload(&self, payload: &[u8]) -> Vec<(u32, FieldValue)> {
+        self.fields.iter().filter_map(|f| read_field(f, payload).map(|v| (f.name_hash, v))).collect()
     }
 }
 

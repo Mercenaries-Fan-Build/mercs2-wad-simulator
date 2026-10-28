@@ -45,9 +45,8 @@ struct MissionHost {
     /// Localized-token check: the game's UI strings are `[Some.Token]` keys resolved from a string
     /// table. A bare English sentence renders as that literal sentence, untranslated.
     raw_strings: Vec<String>,
-    layers: Vec<String>,
-    layers_removed: Vec<String>,
     next_guid: u64,
+    guids: Rc<RefCell<mercs2_core::GuidMap>>,
 }
 
 impl MissionHost {
@@ -86,21 +85,20 @@ impl EngineHost for MissionHost {
         self.next_guid += 1;
         self.next_guid
     }
-    fn pg_spawn(&mut self, template: &str, _pos: [f32; 3], _yaw: f32, _high: bool) -> u64 {
+    fn pg_spawn(&mut self, spawn: &mercs2_script::SpawnArgs) -> Result<u64, String> {
         self.next_guid += 1;
-        self.note("\x1b[36mengine \x1b[0m", &format!("Pg.Spawn(\"{template}\") → guid {}", self.next_guid));
-        self.next_guid
+        self.note("\x1b[36mengine \x1b[0m", &format!("Pg.Spawn({:?}) → guid {}", spawn.template, self.next_guid));
+        Ok(self.next_guid)
     }
     fn object_set_name(&mut self, _guid: u64, _name: &str) {}
     fn object_set_position(&mut self, _guid: u64, _pos: [f32; 3]) {}
     fn object_set_yaw(&mut self, _guid: u64, _yaw: f32) {}
     fn teleport_hero(&mut self, _pos: [f32; 3]) {}
-
-    fn add_layers(&mut self, layers: &[String]) {
-        for l in layers {
-            self.note("\x1b[36mengine \x1b[0m", &format!("world layer \x1b[32mADDED\x1b[0m: {l}"));
-            self.layers.push(l.clone());
-        }
+    fn guids(&self) -> Rc<RefCell<mercs2_core::GuidMap>> {
+        self.guids.clone()
+    }
+    fn object_activation_state(&self, guid: u64) -> Option<u8> {
+        self.guids.borrow().state(u32::try_from(guid).ok()?)
     }
 }
 

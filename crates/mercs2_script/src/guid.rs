@@ -36,9 +36,9 @@
 //! `Value::Number`, so the surface could convert namespace by namespace. It is gone, and it had to
 //! go the moment the host moved onto the game's own VM.
 //!
-//! This Lua has one numeric type and it is `f32`. `mercs2_core::FIRST_DYNAMIC_GUID` is
-//! `0x1000_0000` (2^28) and handles mint upward from there, but f32 carries only 24 bits of
-//! mantissa — at 2^28 the representable values are 32 apart. So `2^28 + 1` rounds to `2^28`: a
+//! This Lua has one numeric type and it is `f32`. Runtime keys mint upward from
+//! `mercs2_core::RUNTIME_KEY_BASE` (`0x4000_0000`, 2^30), but f32 carries only 24 bits of
+//! mantissa — at 2^30 the representable values are 128 apart. So `2^30 + 1` rounds to `2^30`: a
 //! number-shaped handle does not merely lose precision, it **aliases a different live object**.
 //! Returning `NONE` for a number is the honest answer, and it matches retail, whose reader accepts
 //! only Lua type tags 2 and 7.
@@ -59,9 +59,9 @@
 //! [`LightUserData`] wraps a `*mut c_void`, so a GUID has to fit in a pointer. On the 64-bit
 //! targets this workspace builds for that is lossless for the full `u64`. On a 32-bit target it is
 //! not, so [`Guid::into_lua`] converts through `usize::try_from` and **raises rather than
-//! truncating** — see [`Guid::as_ptr`]. In practice nothing trips it: `mercs2_core::GuidMap` mints
-//! from `FIRST_DYNAMIC_GUID` (`0x1000_0000`) upward and retail's own handles were 32-bit pointers,
-//! so every GUID the game can observe fits in 32 bits.
+//! truncating** — see [`Guid::as_ptr`]. In practice nothing trips it: a GUID is a u32 entity key
+//! (`mercs2_core::GuidMap`; runtime keys from `RUNTIME_KEY_BASE`, `0x4000_0000`, upward), so every
+//! GUID the game can observe fits in 32 bits.
 
 use std::ffi::c_void;
 
@@ -117,8 +117,8 @@ impl Guid {
         match value {
             Value::LightUserData(ud) => Guid(ud.0 as usize as u64),
             // Everything else, INCLUDING a number. This VM's only numeric type is f32, whose
-            // 24-bit mantissa cannot hold a handle — at FIRST_DYNAMIC_GUID (2^28) the representable
-            // values are 32 apart, so reading one back would name a *different* live object. See
+            // 24-bit mantissa cannot hold a handle — at RUNTIME_KEY_BASE (2^30) the representable
+            // values are 128 apart, so reading one back would name a *different* live object. See
             // the module docs. A full userdata is tag 7, which `FUN_0059FF50` also accepts, but we
             // mint none of our own, so it is an unrecognised handle rather than something to read
             // through.
@@ -296,7 +296,7 @@ mod tests {
 
     /// A number is NOT a handle on this VM, and the reason is worth a test rather than a comment.
     ///
-    /// `lua_Number` is f32. At `FIRST_DYNAMIC_GUID` (2^28) the representable values are 32 apart,
+    /// `lua_Number` is f32. At `RUNTIME_KEY_BASE` (2^30) the representable values are 128 apart,
     /// so a number-shaped handle cannot round-trip — it would name a different live object. The
     /// old transitional arm accepted one; this asserts it no longer does.
     #[test]

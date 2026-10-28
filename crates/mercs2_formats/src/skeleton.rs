@@ -57,6 +57,14 @@ pub struct Bone {
     /// conformed to the corrected pose is wrong in exactly the way that hides at rest and shows
     /// under animation. Retaining the raw value lets that be settled by measurement against shipped
     /// geometry rather than asserted.
+    ///
+    /// Settled 2026-10-21 for SKINNING: retail's live skin palette (`mercs2_probe` test
+    /// `retail_skin_matches_the_live_palette`) uses this RAW record on every bone, the rejected ones
+    /// included, so `mercs2_mesh` skins with it. AUTHORING is the other side of it: retail's own
+    /// geometry on a rejected bone sits at the DEFAULT-pose position (`pmc_hum_mattias` bone #5's
+    /// 26 vertices centre 2.8 cm from its `+16` position, 16 cm from the raw `+80` one), and retail
+    /// then places it offset by skinning with the raw record. So conforming new geometry to
+    /// [`Bone::bind_world`] (default pose on rejected bones) follows the shipped convention.
     pub bind_world_raw: Option<[[f32; 4]; 4]>,
     pub bind_stale: bool,
 }

@@ -24,15 +24,6 @@ NOT yet, needed for parity) belong in the code maps' confirm-live lists, not her
   (DensityUpdate 10/10/2/2, DeathCheck 20/frame) as tunables once the population system exists. Pure
   ergonomics; the exe's values are fixed constants.
 
-- **Global LOD-budget thresholds from live capture** `[faithful-blocker: partial]` — the
-  `GlobalLodGovernor` (engine `FUN_0084ae70`) mechanics (tier 0..3, immediate climb, banded +
-  step-rate-limited drop, broadcast-on-change) are faithful, but the three concrete pressure
-  thresholds (`DAT_00ce8dd8`/`PTR_DAT_00ce8ddc`/`PTR_FUN_00ce8de0`) + band (`DAT_00ce8dd4`) are not
-  read from the decomp — the normalized defaults are a stand-in. Reading them (x32dbg, read-only
-  while PAUSED) tightens fidelity; the composition (global tier = coarseness floor on the per-entity
-  `HibernationControl` tier) is a reasoned choice pending live confirmation of the broadcast
-  application.
-
 - **Kept-ring capacity 8 vs 64** `[faithful-blocker: no]` — `RegionCacheConfig::kept_ring` defaults
   to the PC build's 8-slot ring (`DAT_00ed55d4`, cursor `& 7`); the Xbox build keeps 64. The
   discrepancy is an open confirm-live item (population_spawner_code_map §5). Configurable already; the

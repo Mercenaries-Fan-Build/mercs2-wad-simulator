@@ -122,6 +122,18 @@ pub fn walk_decompressed_block(
     )
 }
 
+/// The UCFX containers of placement data: a whole decompressed block (its entry table, then the
+/// containers [`walk_decompressed_block`] reads), or one container on its own — a layer asset's
+/// container, which begins with the `UCFX` magic where a block begins with its entry count.
+pub fn placement_containers(bytes: &[u8], label: &str) -> (Vec<Vec<u8>>, Vec<UcfxWalkIssue>) {
+    if bytes.starts_with(b"UCFX") {
+        let issues = verify_ucfx_container(bytes, label, crate::types::TYPE_HASH_LAYER).unwrap_or_default();
+        return (vec![bytes.to_vec()], issues);
+    }
+    let (parsed, issues) = walk_decompressed_block(bytes, label);
+    (parsed.containers, issues)
+}
+
 /// Container types whose internal layout at offset 16 is NOT a descriptor
 /// count.  The standard UCFX descriptor table (tag+offset+size rows at +20)
 /// does not apply to these; validating them as such produces false positives.

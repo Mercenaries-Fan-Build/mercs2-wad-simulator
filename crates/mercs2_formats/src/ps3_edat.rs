@@ -154,3 +154,34 @@ pub fn decrypt_block0(blob: &[u8], klic: &[u8; 16]) -> Result<Vec<u8>, String> {
     let npd = parse_headers(blob)?;
     decrypt_block(blob, &npd, klic, 0, npd.total_blocks())
 }
+
+#[cfg(all(test, feature = "retail"))]
+mod tests {
+    use super::*;
+
+    /// The retail PSN Blow It Up Again Pack (NA), named by the `ps3_dlc_biua_pkg` key of
+    /// `.mercs2-local.toml`: its `DLC01.EDAT`, decrypted with the DLC01 klicensee, is the inner WAD
+    /// the exe-map Lua corpus catalogues (`crates/mercs2_exemap/data/wads.tsv`, corpus
+    /// `dlc-biua-ps3-na`): 271,089,664 bytes, sha256 `cc58b68d…`, a big-endian `SCFF` archive. A
+    /// missing key or file fails the test naming it.
+    #[test]
+    fn retail_biua_package_yields_the_catalogued_wad() {
+        use sha2::{Digest, Sha256};
+        let path = crate::game_paths::local_config_ps3_dlc_biua_pkg(std::path::Path::new(env!("CARGO_MANIFEST_DIR")))
+            .unwrap_or_else(|e| panic!("{e}"));
+        let blob = std::fs::read(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+        let pkg = crate::ps3_pkg::parse_pkg(&blob).unwrap_or_else(|e| panic!("{e}"));
+        let edat = pkg.file_bytes("USRDIR/DLC/DLC01/DLC01.EDAT").expect("DLC01.EDAT in the package");
+        let wad = decrypt_edat(edat, &crate::ps3_keys::dlc01_klicensee()).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(wad.len(), 271_089_664, "inner WAD length");
+        assert_eq!(
+            format!("{:x}", Sha256::digest(&wad)),
+            "cc58b68d614786ebbab79e0129a6def0c31adebdc897b2c623892935ab5fca00",
+            "inner WAD sha256"
+        );
+        let (version, rows) = crate::dlc_input::parse_be_ffcs(&wad).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(version, 2);
+        let tags: Vec<&str> = rows.iter().map(|r| r.tag.as_str()).collect();
+        assert_eq!(tags, ["INDX", "DATA", "CSUM", "ASET", "PTHS"]);
+    }
+}

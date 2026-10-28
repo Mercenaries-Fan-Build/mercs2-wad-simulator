@@ -17,24 +17,31 @@ use mercs2_script::{EngineHost, ScriptHost, SharedHost};
 /// bodies; everything else inherits the trait defaults). This test is about binding PRESENCE, not host
 /// behavior, so every method is a trivial default.
 #[derive(Default)]
-struct SmokeHost;
+struct SmokeHost {
+    guids: Rc<RefCell<mercs2_core::GuidMap>>,
+}
 
 impl EngineHost for SmokeHost {
     fn log(&mut self, _source: &str, _msg: &str) {}
+    fn guids(&self) -> Rc<RefCell<mercs2_core::GuidMap>> {
+        self.guids.clone()
+    }
+    fn object_activation_state(&self, guid: u64) -> Option<u8> {
+        self.guids.borrow().state(u32::try_from(guid).ok()?)
+    }
     fn get_level_name(&self) -> String {
         "vz".into()
     }
     fn guid_by_name(&mut self, _name: &str) -> u64 {
         0
     }
-    fn pg_spawn(&mut self, _template: &str, _pos: [f32; 3], _yaw: f32, _high_detail: bool) -> u64 {
-        1
+    fn pg_spawn(&mut self, _spawn: &mercs2_script::SpawnArgs) -> Result<u64, String> {
+        Ok(1)
     }
     fn object_set_name(&mut self, _guid: u64, _name: &str) {}
     fn object_set_position(&mut self, _guid: u64, _pos: [f32; 3]) {}
     fn object_set_yaw(&mut self, _guid: u64, _yaw: f32) {}
     fn teleport_hero(&mut self, _pos: [f32; 3]) {}
-    fn add_layers(&mut self, _layers: &[String]) {}
 }
 
 /// Every `Required` binding resolves to a callable Lua function (not `nil`, and its namespace global is

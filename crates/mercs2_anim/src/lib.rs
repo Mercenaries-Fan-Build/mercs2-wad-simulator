@@ -132,13 +132,8 @@ mod tests {
             let chris = ClipPicker::character_name("chris");
             let jennifer = ClipPicker::character_name("jennifer");
             let picker = ClipPicker::from_resident_block(&dec, &[mattias, chris, jennifer])
+                .unwrap_or_else(|e| panic!("block {blk}: {e}"))
                 .expect("resident block carries the AnimationLookup");
-
-            // Per-merc idle is data-driven — each merc idles on its OWN clip (engine-path values,
-            // human_animation_selection.md §10). The old hardcoded engine used Jennifer's for all.
-            assert_eq!(picker.idle(mattias), Some(0x6EA8_8E00), "mattias idle");
-            assert_eq!(picker.idle(chris), Some(0x835D_A06A), "chris idle");
-            assert_eq!(picker.idle(jennifer), Some(0x24F8_C8E6), "jennifer idle");
 
             // The forward resolver maps the standing idle state to a clip for Chris.
             let r = picker

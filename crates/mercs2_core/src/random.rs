@@ -58,6 +58,16 @@ impl Lcg {
         self.state = x;
         f32::from_bits((((x & 0xFFFF_01FF) | (u >> 16)) >> 9) | 0x3F80_0000) - 1.0
     }
+
+    /// One integer draw, advancing the state twice: `(x & 0xFFFF0000) | (u >> 16)` — the value the exe
+    /// takes `% n` of where it picks one of `n` things (the AnimationLookup clip list `FUN_00743CD0`,
+    /// the population unit lists `FUN_004E8730`/`FUN_004E8AB0`).
+    pub fn next_draw(&mut self) -> u32 {
+        let u = self.state.wrapping_mul(LCG_MUL).wrapping_add(LCG_ADD);
+        let x = u.wrapping_mul(LCG_MUL).wrapping_add(LCG_ADD);
+        self.state = x;
+        (x & 0xFFFF_0000) | (u >> 16)
+    }
 }
 
 #[cfg(test)]
@@ -74,6 +84,17 @@ mod tests {
         assert_eq!(r.state, x);
         assert_eq!(v.to_bits(), (f32::from_bits((((x & 0xFFFF_01FF) | (u >> 16)) >> 9) | 0x3F80_0000) - 1.0).to_bits());
         assert!((0.0..1.0).contains(&v));
+    }
+
+    /// An integer draw steps the state twice and joins the high half of the second state to the high
+    /// half of the first.
+    #[test]
+    fn an_integer_draw_joins_both_states_high_halves() {
+        let mut r = Lcg::new(1);
+        let u = 1u32.wrapping_mul(LCG_MUL).wrapping_add(LCG_ADD);
+        let x = u.wrapping_mul(LCG_MUL).wrapping_add(LCG_ADD);
+        assert_eq!(r.next_draw(), (x & 0xFFFF_0000) | (u >> 16));
+        assert_eq!(r.state, x);
     }
 
     /// `image.bin`'s `DAT_00DFCBAC` (`0xD36E7EE6`) is the seed after 257 draws.

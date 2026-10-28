@@ -12,17 +12,19 @@
 //! The world it simulates is the real one an object script lives in:
 //!
 //! * **Two** objects share the script — because one object script serves every placement of its
-//!   kind, which is what makes module-level globals a trap (`tEvents[uGuid]`-style per-guid tables
-//!   are all over the resident corpus for exactly this reason).
-//! * Both `OnActivate`s run while both objects are still **asleep**, before either wakes. That
-//!   ordering is what turns a shared global into a silent identity swap.
+//!   kind (one module env per script resource), which is what makes module-level globals a trap
+//!   (`tEvents[uGuid]`-style per-guid tables are all over the resident corpus for exactly this reason).
+//! * Each `OnActivate` runs when its object's activation completes — the object is already awake
+//!   (`docs/reverse_engineer/hibernation_grid.md` §6a: the ObjectScript listener runs after state 2).
+//!   Both objects are activated before any `Event.ObjectHibernation` condition is polled, which is
+//!   what turns a shared global into a silent identity swap.
 //! * The block streams **out and back in**, so anything you registered runs again. Most real script
 //!   bugs only surface on that second pass.
 //!
-//! Hook signature is the corpus-canonical `OnActivate(uGuid, uRuntimeOwner, iArg)`
-//! (`docs/mercs2-luacd/06_ai_world_entities.md` §1.1) — `iArg` is the per-placement variant integer.
-//! The `Ai.*`-drops-while-asleep behaviour modelled here is why the game's `mrxai` module wraps every
-//! AI command in an awake-gate (ibid. §5).
+//! Hook arguments are retail's (`0x5A0F10` → `0x6C6F00` → `0x5A0CC0`): `OnActivate(uGuid,
+//! uRuntimeOwner or nil, fArg)` and `OnDeactivate` with the same three, `fArg` being the placement's
+//! `iArg` pushed as a float. Retail also appends the module env as a hidden fourth argument; this lab
+//! runs the lesson in the global environment, so it has none to pass.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -78,6 +80,7 @@ impl DropReason {
 
 #[derive(Default)]
 struct LabHost {
+    guids: Rc<RefCell<mercs2_core::GuidMap>>,
     now: f32,
     objs: HashMap<u64, Obj>,
     order: Vec<u64>,
@@ -196,12 +199,15 @@ impl EngineHost for LabHost {
         }
         g
     }
-    fn pg_spawn(&mut self, template: &str, _pos: [f32; 3], _yaw: f32, _high: bool) -> u64 {
+    fn pg_spawn(&mut self, spawn: &mercs2_script::SpawnArgs) -> Result<u64, String> {
+        let mercs2_script::SpawnTemplate::Name(template) = &spawn.template else {
+            return Err(format!("lua_lab: spawn by template guid {:?} is not modelled", spawn.template));
+        };
         let g = self.stream_in(template, 0);
         // A spawn arrives awake — unlike a streamed-in placement.
         self.wake(g);
         self.call(&format!("Pg.Spawn(\"{template}\") → guid {g}"), true, "");
-        g
+        Ok(g)
     }
     fn object_set_name(&mut self, guid: u64, name: &str) {
         if self.gated(&format!("Object.SetName({guid}, \"{name}\")"), guid) {
@@ -217,17 +223,15 @@ impl EngineHost for LabHost {
     fn teleport_hero(&mut self, pos: [f32; 3]) {
         self.call(&format!("Player.Teleport({:?})", pos), true, "");
     }
-    fn add_layers(&mut self, layers: &[String]) {
-        self.call(&format!("World.AddLayers({:?})", layers), true, "");
+    fn guids(&self) -> Rc<RefCell<mercs2_core::GuidMap>> {
+        self.guids.clone()
+    }
+    /// Awake is state 2, asleep 0; no object, no row.
+    fn object_activation_state(&self, guid: u64) -> Option<u8> {
+        self.objs.get(&guid).map(|o| if o.awake { 2 } else { 0 })
     }
 
     // --- the ones this lab is actually about --------------------------------------
-    fn object_is_awake(&self, guid: u64) -> bool {
-        self.objs.get(&guid).is_some_and(|o| o.awake)
-    }
-    fn object_is_hibernated(&self, guid: u64) -> bool {
-        !self.objs.get(&guid).is_some_and(|o| o.awake)
-    }
     fn object_is_alive(&self, guid: u64) -> bool {
         self.objs.get(&guid).is_some_and(|o| o.alive)
     }
@@ -269,10 +273,35 @@ impl EngineHost for LabHost {
 /// there. If it isn't, nothing happens and nothing is reported. (`06_ai_world_entities.md` §1.1)
 const HOOKS: &[(&str, &str)] = &[
     ("Init", "script module loaded"),
-    ("OnActivate", "object streamed in — NOTE: it is still ASLEEP here"),
+    ("OnActivate", "object's activation completed — it is awake here"),
     ("OnDeath", "object killed"),
     ("OnDeactivate", "object hibernates / streams out — your only chance to clean up"),
 ];
+
+/// A hook argument, pushed the way the engine pushes it.
+#[derive(Clone, Copy)]
+enum Arg {
+    /// A handle, as lightuserdata.
+    Guid(u64),
+    Nil,
+    /// `iArg` crosses as a float (`cvtsi2ss`, `0x4B29D8`).
+    Float(f32),
+}
+
+impl std::fmt::Display for Arg {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Arg::Guid(g) => write!(f, "{g}"),
+            Arg::Nil => write!(f, "nil"),
+            Arg::Float(x) => write!(f, "{x:?}"),
+        }
+    }
+}
+
+/// `OnActivate` / `OnDeactivate`'s arguments: the guid, no runtime owner, the placement's `iArg`.
+fn lifecycle_args(guid: u64, iarg: i64) -> [Arg; 3] {
+    [Arg::Guid(guid), Arg::Nil, Arg::Float(iarg as f32)]
+}
 
 struct Dispatcher<'a> {
     sh: &'a ScriptHost,
@@ -284,7 +313,7 @@ impl Dispatcher<'_> {
     /// Call hook `name` with `args` if the script defines it. If it doesn't, say so out loud — and if
     /// the script defined something that differs only in case, name it. That miscased-global mistake
     /// is invisible in the real engine and costs people entire evenings.
-    fn call(&mut self, host: &Rc<RefCell<LabHost>>, name: &str, args: &[i64]) {
+    fn call(&mut self, host: &Rc<RefCell<LabHost>>, name: &str, args: &[Arg]) {
         let shown = format!(
             "{name}({})",
             args.iter().map(|a| a.to_string()).collect::<Vec<_>>().join(", ")
@@ -310,7 +339,16 @@ impl Dispatcher<'_> {
         };
 
         println!("  t={:<5.2} │ \x1b[36mengine\x1b[0m   → \x1b[1m{shown}\x1b[0m", host.borrow().now);
-        if let Err(e) = f.call::<()>(mercs2_luac::rt::Variadic::from_iter(args.iter().copied())) {
+        let values: Vec<mercs2_luac::rt::Value> = args
+            .iter()
+            .map(|a| match *a {
+                Arg::Guid(g) => mercs2_luac::rt::IntoLua::into_lua(mercs2_script::Guid(g), self.sh.lua()),
+                Arg::Nil => Ok(mercs2_luac::rt::Value::Nil),
+                Arg::Float(x) => Ok(mercs2_luac::rt::Value::Number(x.into())),
+            })
+            .collect::<Result<_, _>>()
+            .expect("hook arguments convert");
+        if let Err(e) = f.call::<()>(mercs2_luac::rt::Variadic::from_iter(values)) {
             println!("  t={:<5.2} │ \x1b[31mLUA ERROR\x1b[0m in {name}: {e}", host.borrow().now);
         }
         *self.called.entry(name.to_string()).or_default() += 1;
@@ -373,35 +411,27 @@ fn main() {
 
     println!("\n  ── the objects' lives ──────────────────────────────────────");
 
-    // Both objects stream in and get OnActivate'd while BOTH are still asleep. That ordering is not
-    // an artificial cruelty — it's how a block arrives, and it's exactly what makes a module-level
-    // global silently take on the *last* object's identity for *both* of them.
+    // Each object's activation completes — it is awake — and its OnActivate runs, one after the
+    // other, in the same frame. Only on the next script update are the Event.ObjectHibernation
+    // conditions polled. So both OnActivates have run before any awake-gate fires: a module-level
+    // global silently holds the *last* object's identity when *both* gates fire. Because every
+    // object is awake by then, a callback acting on the wrong object LANDS — on the wrong target —
+    // and the bug shows up as "the wrong object got served", which is exactly what it is.
     let mut guids = Vec::new();
     for (i, (name, iarg)) in PLACEMENTS.iter().enumerate() {
         host.borrow_mut().set_now(i as f32 * 0.1);
         let g = host.borrow_mut().stream_in(name, *iarg);
         guids.push(g);
+        host.borrow_mut().wake(g);
         host.borrow().engine(&format!(
-            "block streams in — '{name}' is guid \x1b[1m{g}\x1b[0m, iArg=\x1b[1m{iarg}\x1b[0m, state=\x1b[31mASLEEP\x1b[0m"
+            "'{name}' activates — guid \x1b[1m{g}\x1b[0m, iArg=\x1b[1m{iarg}\x1b[0m, state=\x1b[32mAWAKE\x1b[0m"
         ));
-        d.call(&host, "OnActivate", &[g as i64, 0, *iarg]);
+        d.call(&host, "OnActivate", &lifecycle_args(g, *iarg));
     }
 
-    // The streaming system wakes the block's objects, and *then* dispatches their hibernation
-    // events. Waking everything first matters: it means a callback that fires for guid A can still
-    // legally act on guid B. So when a shared global makes a callback act on the wrong object, the
-    // call LANDS — on the wrong target — instead of being dropped for being asleep. The bug shows up
-    // as "the wrong object got served", which is exactly what it is.
     host.borrow_mut().set_now(0.6);
-    for &g in &guids {
-        host.borrow_mut().wake(g);
-        host.borrow().engine(&format!("guid {g} → \x1b[32mAWAKE\x1b[0m"));
-    }
-    for &g in &guids {
-        host.borrow()
-            .engine(&format!("dispatch Event.ObjectHibernation {{{g}, \"awake\"}}"));
-        sh.fire_object_hibernation(g, "awake").ok();
-    }
+    host.borrow().engine("script update — Event.ObjectHibernation conditions polled");
+    sh.pump_events(0.0).ok();
 
     // Time passes; timers advance.
     for i in 1..=8 {
@@ -418,17 +448,18 @@ fn main() {
         o.hp = 0.0;
     }
     sh.fire_object_death(dead).ok();
-    d.call(&host, "OnDeath", &[dead as i64]);
+    d.call(&host, "OnDeath", &[Arg::Guid(dead)]);
 
     // The player drives away; the block streams out.
     host.borrow_mut().set_now(3.5);
     host.borrow().engine("player drives away — block streams \x1b[31mOUT\x1b[0m");
     let before = sh.live_event_handles();
-    for &g in &guids {
-        d.call(&host, "OnDeactivate", &[g as i64]);
+    for (i, &g) in guids.iter().enumerate() {
+        // The deactivate listeners set state 0 before OnDeactivate runs.
         if let Some(o) = host.borrow_mut().objs.get_mut(&g) {
             o.awake = false;
         }
+        d.call(&host, "OnDeactivate", &lifecycle_args(g, PLACEMENTS[i].1));
     }
     let after_deact = sh.live_event_handles();
 
@@ -439,18 +470,12 @@ fn main() {
         if let Some(o) = host.borrow_mut().objs.get_mut(&g) {
             o.alive = true;
             o.hp = 100.0;
-            o.awake = false;
         }
-        d.call(&host, "OnActivate", &[g as i64, 0, PLACEMENTS[i].1]);
-    }
-    host.borrow_mut().set_now(4.6);
-    for &g in &guids {
         host.borrow_mut().wake(g);
         host.borrow().engine(&format!("guid {g} → \x1b[32mAWAKE\x1b[0m again"));
+        d.call(&host, "OnActivate", &lifecycle_args(g, PLACEMENTS[i].1));
     }
-    for &g in &guids {
-        sh.fire_object_hibernation(g, "awake").ok();
-    }
+    host.borrow_mut().set_now(4.6);
     for _ in 0..4 {
         sh.pump_events(0.3).ok();
     }

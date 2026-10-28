@@ -32,8 +32,11 @@ serde = { version = "1", features = ["derive"] }
 # `mopp_swap` verifies its patched PHY2 artifacts BY sha256 (mandate: verify-artifacts-by-hash).
 sha2 = "0.10"
 # `prof-samples` finds the code image of a profiled exe (catalogue, images, canonical tree) and reads its
-# Ghidra functions export.
+# Ghidra functions export. `dump-*` refuses a capture whose exe is not a catalogued v1.0 build (the
+# decomp's addresses).
 mercs2_exemap = { workspace = true }
+# `dump-*` reads the retail game's memory out of the x32dbg captures in game-files/memory-dumps.
+minidump = "0.27"
 
 [features]
 # Builds the game-gated tests, which read the retail vz.wad named by the repo-root .mercs2-local.toml;

@@ -25,11 +25,15 @@ use std::f32::consts::PI;
 use mercs2_core::glam::{Quat, Vec3};
 use mercs2_core::{AnimState, Entity, LocomotionQuery, SwimConfig, SwimState, Transform, World};
 
-/// Player locomotion clip hashes (the per-merc idle is resolved at load; the FSM switches between
-/// these walk/run and the resolved idle).
-pub const CLIP_IDLE: u32 = 0x24F8_C8E6;
-pub const CLIP_WALK: u32 = 0x5368_2784;
-pub const CLIP_RUN: u32 = 0x867B_166D;
+/// The character's on-foot locomotion clips, resolved from its template's animation identity and
+/// what it carries (`mercs2_engine::game_world::HumanAnimData`) — never fixed hashes: every merc and
+/// every equipment class has its own.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LocomotionClips {
+    pub idle: u32,
+    pub walk: u32,
+    pub run: u32,
+}
 
 // Locomotion feel tunables (human scale; the 1.0 s walk cycle strides ~2 m, so ~2 m/s keeps feet
 // planted under FOOT_SYNC). **Gameplay-derived, not exe-recovered** — see the module docs.
@@ -68,7 +72,7 @@ pub struct LocomotionInput {
 
 /// The third-person player: locomotion state + the entity it drives.
 ///
-/// `walk_speed`/`run_speed`/`dur_walk`/`dur_run`/`foot`/`idle`/`has_run`/`entity` are filled when the
+/// `walk_speed`/`run_speed`/`dur_walk`/`dur_run`/`foot`/`clips`/`entity` are filled when the
 /// avatar loads (the ground speeds are derived from each clip's baked root stride so the model advances
 /// exactly as fast as its feet).
 pub struct PlayerController {
@@ -82,8 +86,9 @@ pub struct PlayerController {
     pub run_speed: f32,
     pub dur_walk: f32,
     pub dur_run: f32,
-    pub has_run: bool,
-    pub idle: u32,
+    /// The resolved locomotion clips. `None` until the avatar loads; [`PlayerController::update`]
+    /// refuses to run without them.
+    pub clips: Option<LocomotionClips>,
     /// Swimming locomotion clip (shared human swim anim, resolved at load). `0` = none loaded → the
     /// locomotion clips are used as a fallback while swimming.
     pub swim_clip: u32,
@@ -111,8 +116,7 @@ impl PlayerController {
             run_speed: RUN_SPEED,
             dur_walk: 1.0,
             dur_run: 1.0,
-            has_run: false,
-            idle: CLIP_IDLE,
+            clips: None,
             swim_clip: 0,
             entity: None,
             vel_y: 0.0,
@@ -208,6 +212,9 @@ impl PlayerController {
         self.jump_latch = jump;
 
         let Some(e) = self.entity else { return };
+        let clips = self
+            .clips
+            .expect("PlayerController::update: the avatar's locomotion clips were never resolved");
         if let Ok(mut t) = world.get::<&mut Transform>(e) {
             t.translation = self.pos;
             if moving {
@@ -226,17 +233,17 @@ impl PlayerController {
                 // stroking forward and treading in place.
                 self.swim_clip
             } else if mv != Vec3::ZERO {
-                if sprint && self.has_run { CLIP_RUN } else { CLIP_WALK }
+                if sprint { clips.run } else { clips.walk }
             } else {
-                self.idle
+                clips.idle
             };
             if a.clip != want {
                 a.prev_clip = a.clip;
                 a.prev_time = a.time;
                 a.blend = 0.0;
-                a.time = if a.clip == CLIP_WALK && want == CLIP_RUN {
+                a.time = if a.clip == clips.walk && want == clips.run {
                     a.time / self.dur_walk * self.dur_run
-                } else if a.clip == CLIP_RUN && want == CLIP_WALK {
+                } else if a.clip == clips.run && want == clips.walk {
                     a.time / self.dur_run * self.dur_walk
                 } else {
                     0.0
@@ -244,7 +251,7 @@ impl PlayerController {
                 a.clip = want;
             }
             // Foot-slide reduction: playback rate tracks the eased speed.
-            a.speed = if FOOT_SYNC && want != self.idle && target_sp > 0.0 {
+            a.speed = if FOOT_SYNC && want != clips.idle && target_sp > 0.0 {
                 (self.speed / target_sp).clamp(0.8, 1.2)
             } else {
                 1.0
@@ -301,8 +308,19 @@ mod tests {
         TestWorld { floor: None, water: Some(surface) }
     }
 
+    /// Synthetic clip hashes standing in for a resolved locomotion set.
+    const CLIPS: LocomotionClips = LocomotionClips { idle: 0x1D1E, walk: 0x3A1C, run: 0x2B2B };
+
     fn spawn_player(world: &mut World, pos: Vec3) -> Entity {
-        world.spawn((Transform::from_translation(pos), AnimState::playing(CLIP_IDLE)))
+        world.spawn((Transform::from_translation(pos), AnimState::playing(CLIPS.idle)))
+    }
+
+    /// A controller at `pos` driving `e`, with the synthetic clips resolved.
+    fn controller(pos: Vec3, e: Entity) -> PlayerController {
+        let mut p = PlayerController::new(pos);
+        p.entity = Some(e);
+        p.clips = Some(CLIPS);
+        p
     }
 
     fn walk(dir: Vec3) -> LocomotionInput {
@@ -315,14 +333,13 @@ mod tests {
     fn walks_forward_and_plays_walk_clip() {
         let mut world = World::new();
         let e = spawn_player(&mut world, Vec3::ZERO);
-        let mut p = PlayerController::new(Vec3::ZERO);
-        p.entity = Some(e);
+        let mut p = controller(Vec3::ZERO, e);
         let q = flat_floor(0.0);
         for _ in 0..120 {
             p.update(&mut world, walk(Vec3::new(0.0, 0.0, 1.0)), &q, 1.0 / 60.0);
         }
         assert!(p.pos.z > 1.0, "player should walk forward; z = {}", p.pos.z);
-        assert_eq!(world.get::<&AnimState>(e).unwrap().clip, CLIP_WALK);
+        assert_eq!(world.get::<&AnimState>(e).unwrap().clip, CLIPS.walk);
     }
 
     /// No input → speed decays to zero and the clip returns to idle.
@@ -330,35 +347,31 @@ mod tests {
     fn idle_when_no_input() {
         let mut world = World::new();
         let e = spawn_player(&mut world, Vec3::ZERO);
-        let mut p = PlayerController::new(Vec3::ZERO);
-        p.entity = Some(e);
+        let mut p = controller(Vec3::ZERO, e);
         p.speed = 5.0; // moving
         let q = flat_floor(0.0);
         for _ in 0..60 {
             p.update(&mut world, walk(Vec3::ZERO), &q, 1.0 / 60.0);
         }
         assert!(p.speed < 1e-2, "no input must decay speed to ~0, got {}", p.speed);
-        assert_eq!(world.get::<&AnimState>(e).unwrap().clip, CLIP_IDLE);
+        assert_eq!(world.get::<&AnimState>(e).unwrap().clip, CLIPS.idle);
     }
 
-    /// Sprinting with a run clip available uses RUN and covers more ground than a walk.
+    /// Sprinting uses RUN and covers more ground than a walk.
     #[test]
     fn sprint_uses_run_clip_and_is_faster() {
         let mut world = World::new();
         let ew = spawn_player(&mut world, Vec3::ZERO);
         let er = spawn_player(&mut world, Vec3::ZERO);
-        let mut w = PlayerController::new(Vec3::ZERO);
-        w.entity = Some(ew);
-        let mut r = PlayerController::new(Vec3::ZERO);
-        r.entity = Some(er);
-        r.has_run = true;
+        let mut w = controller(Vec3::ZERO, ew);
+        let mut r = controller(Vec3::ZERO, er);
         let q = flat_floor(0.0);
         let fwd = Vec3::new(0.0, 0.0, 1.0);
         for _ in 0..120 {
             w.update(&mut world, walk(fwd), &q, 1.0 / 60.0);
             r.update(&mut world, LocomotionInput { move_dir: fwd, sprint: true, jump: false }, &q, 1.0 / 60.0);
         }
-        assert_eq!(world.get::<&AnimState>(er).unwrap().clip, CLIP_RUN);
+        assert_eq!(world.get::<&AnimState>(er).unwrap().clip, CLIPS.run);
         assert!(r.pos.z > w.pos.z, "sprint should cover more ground: run {} vs walk {}", r.pos.z, w.pos.z);
     }
 
@@ -368,8 +381,7 @@ mod tests {
     fn jump_launches_and_lands() {
         let mut world = World::new();
         let e = spawn_player(&mut world, Vec3::ZERO);
-        let mut p = PlayerController::new(Vec3::ZERO);
-        p.entity = Some(e);
+        let mut p = controller(Vec3::ZERO, e);
         let q = flat_floor(0.0);
 
         p.update(&mut world, walk(Vec3::ZERO), &q, 1.0 / 60.0);
@@ -397,8 +409,7 @@ mod tests {
         let mut world = World::new();
         let start = Vec3::new(0.0, -3.0, 0.0);
         let e = spawn_player(&mut world, start);
-        let mut p = PlayerController::new(start);
-        p.entity = Some(e);
+        let mut p = controller(start, e);
         let q = deep_water(0.0);
         for _ in 0..240 {
             p.update(&mut world, walk(Vec3::ZERO), &q, 1.0 / 60.0);
@@ -418,8 +429,7 @@ mod tests {
         let mut world = World::new();
         let start = Vec3::new(0.0, -3.0, 0.0);
         let e = spawn_player(&mut world, start);
-        let mut p = PlayerController::new(start);
-        p.entity = Some(e);
+        let mut p = controller(start, e);
         p.swim_clip = SWIM;
 
         let wet = deep_water(0.0);
@@ -434,7 +444,7 @@ mod tests {
             p.update(&mut world, walk(Vec3::new(0.0, 0.0, 1.0)), &dry, 1.0 / 60.0);
         }
         assert!(!p.swim.in_water());
-        assert_eq!(world.get::<&AnimState>(e).unwrap().clip, CLIP_WALK, "on land the walk clip returns");
+        assert_eq!(world.get::<&AnimState>(e).unwrap().clip, CLIPS.walk, "on land the walk clip returns");
     }
 
     // ---- Deliverable 7, test 2: the seam's "no ground" contract ----
@@ -444,8 +454,7 @@ mod tests {
     fn no_ground_means_falling() {
         let mut world = World::new();
         let e = spawn_player(&mut world, Vec3::ZERO);
-        let mut p = PlayerController::new(Vec3::ZERO);
-        p.entity = Some(e);
+        let mut p = controller(Vec3::ZERO, e);
         let q = open_air();
         for _ in 0..60 {
             p.update(&mut world, walk(Vec3::ZERO), &q, 1.0 / 60.0);

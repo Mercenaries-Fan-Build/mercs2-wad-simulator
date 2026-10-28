@@ -142,10 +142,10 @@ pub fn destruction_frame(
     scene: &mut dyn EntityRenderStates,
     store: &DestructionStore,
     bands: DamageBands,
-) -> Vec<DestructionIntent> {
-    let intents = mercs2_destruction::destruction_system(world, store, bands);
+) -> Result<Vec<DestructionIntent>, String> {
+    let intents = mercs2_destruction::destruction_system(world, store, bands)?;
     sync_destruction_to_scene(world, scene);
-    intents
+    Ok(intents)
 }
 
 #[cfg(test)]
@@ -164,10 +164,13 @@ mod tests {
     /// HIDEs the switch node's own subtree (which is what makes the enable table change).
     fn store_with_machine(model: u32) -> DestructionStore {
         let hide = mercs2_formats::hash::pandemic_hash_m2("hide");
-        let enter = set_state_on_msg(STATE_WRECK, 0xC650_7EE1);
+        let show = mercs2_formats::hash::pandemic_hash_m2("show");
+        // A `SWIT` participant is hidden until a state shows it: pristine shows it, the wreck hides it.
+        let mut enter = vec![1u32, 0xAAAA_0001, 2, show];
+        enter.extend(set_state_on_msg(STATE_WRECK, 0xC650_7EE1));
         let wreck_enter = vec![1u32, 0xAAAA_0001, 2, hide, 3];
         let sm = StateMachine {
-            switch_slots: vec![0],
+            switch_slots: vec![0xAAAA_0001],
             nodes: vec![SwitchNodeDef {
                 name_hash: 0xAAAA_0001,
                 states: vec![
@@ -249,14 +252,14 @@ mod tests {
         let bands = DamageBands::default();
 
         // Pristine: the machine has not moved, so nothing is hidden.
-        mercs2_destruction::destruction_system(&mut w, &store, bands);
+        mercs2_destruction::destruction_system(&mut w, &store, bands).unwrap();
         let d = w.get::<&Destructible>(e).unwrap();
         assert!(d.draws(0), "a pristine object must draw");
         drop(d);
 
         // Dead: the wreck state's HIDE runs over the HIER.
         w.get::<&mut Health>(e).unwrap().cur = 0.0;
-        mercs2_destruction::destruction_system(&mut w, &store, bands);
+        mercs2_destruction::destruction_system(&mut w, &store, bands).unwrap();
         let d = w.get::<&Destructible>(e).unwrap();
         assert!(!d.node_enable.is_empty(), "the machine must have produced a table");
         assert!(!d.draws(0), "the governed subtree must be hidden once destroyed");

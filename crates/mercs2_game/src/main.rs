@@ -63,7 +63,7 @@ mod bridge_host; // Serve the live-bridge REPL protocol from the reimpl engine
 mod hero; // GAME character identity: 3 heroes + wardrobe outfit lists (_tCharacterMap/_tOutfits)
 mod menu; // GAME shell menu: main menu + save browser (native ChangeShellState reimpl)
 mod pmc; // GAME-specific PMC interior assembly (constants + load_pmc_interior)
-mod world; // GAME render/boot: full TPS/free world render path (player avatar, 10-stage load)
+mod world; // GAME render/boot: full TPS/free world render path (player avatar, 19-stage load)
 // The Lua host + fleet-sim cluster (script_host/runtime/gameplay/spawn) moved INTO the engine — Lua is a
 // core engine pillar, married to the live engine systems. The game reaches it via `mercs2_engine::…`.
 
@@ -329,7 +329,7 @@ fn main() {
         }
     }
 
-    // The engine consumes the original game's assets from vz.wad (EA Games registry install dir).
+    // The engine consumes the original game's assets from vz.wad (the install `resolve_roots` found).
     let wadpath = wadpath.clone();
     // Default boot = the FULL game world: player + third-person camera + PMC interior + c3 cells +
     // placements + props — all core components ON. `--stream` selects the alternate streaming free-fly
@@ -382,12 +382,8 @@ const VALUE_FLAGS: &[&str] = &["--game-dir", "--wad", "--saves-dir", "--saves"];
 
 /// GAME world population: once the engine's streaming world has loaded, spawn the PMC interior into
 /// the engine's World/Scene. The interior spawns because the GAME asks for it — the engine has no
-/// concept of a "PMC interior". Runs the authentic `MrxUtil.SpawnActor` path (`run_interior_boot`)
-/// then realizes the resolved geometry (`load_pmc_interior`) as ECS entities.
-///
-/// (Seam: `load_pmc_interior` / `run_interior_boot` still physically live in `mercs2_engine`
-/// and are called here through its public API; a follow-up moves those bodies into this crate so the
-/// engine holds none of it.)
+/// concept of a "PMC interior". Realizes the resolved geometry (`load_pmc_interior`, this crate's
+/// `pmc.rs`) as ECS entities.
 fn populate_pmc_interior(
     world: &mut mercs2_core::World,
     scene: &mut mercs2_engine::scene::Scene,
@@ -404,19 +400,6 @@ fn populate_pmc_interior(
         [0.0, 0.0, 0.0, 1.0],
     ];
 
-    let intents = mercs2_engine::script_host::run_interior_boot();
-    for r in &intents {
-        println!(
-            "[lua] Pg.Spawn '{}' (name={}) at ({:.1},{:.1},{:.1}) -> guid 0x{:x}",
-            r.template, r.name, r.pos[0], r.pos[1], r.pos[2], r.guid
-        );
-    }
-    let want = intents
-        .iter()
-        .any(|r| r.template.eq_ignore_ascii_case(mercs2_engine::script_host::PMC_INTERIOR_TEMPLATE));
-    if !want {
-        return;
-    }
     match pmc::load_pmc_interior(wad, recruits, stockpile) {
         Ok(pieces) => {
             let n = pieces.len();

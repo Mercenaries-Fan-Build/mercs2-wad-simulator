@@ -118,6 +118,9 @@ pub fn vz_wad_from_env() -> Option<PathBuf> {
 /// * `lua51_src_dir` — a **directory**: the pristine Lua 5.1 `src` tree the vendored copy is
 ///   checked against. Read only by the `mercs2_luac` vendor-vs-upstream test
 ///   (`tests/vendor_upstream_retail.rs`, `retail` feature; [`local_config_lua51_src_dir`]).
+/// * `memory_dumps_dir` — a **directory**: `game-files/memory-dumps`, the x32dbg live-process
+///   captures (`<build>/<state>/process.dmp`). Read only by the `mercs2_probe` `dump-*` tests
+///   ([`local_config_memory_dumps_dir`]).
 ///
 /// The console keys and the executable keys are never inferred from `vz_wad`'s folder: each lives
 /// wherever it is kept, and a test that needs one fails naming the missing key.
@@ -179,6 +182,8 @@ pub const JAVA_BINARY_KEY: &str = "java_binary";
 pub const UNRAR_BINARY_KEY: &str = "unrar_binary";
 /// The `lua51_src_dir` key of [`LOCAL_CONFIG`]: the Lua 5.1 source tree.
 pub const LUA51_SRC_DIR_KEY: &str = "lua51_src_dir";
+/// The `memory_dumps_dir` key of [`LOCAL_CONFIG`]: the live-process captures folder.
+pub const MEMORY_DUMPS_DIR_KEY: &str = "memory_dumps_dir";
 
 /// The `<key> = "…"` value in one [`LOCAL_CONFIG`]'s text, or `None` when the key is absent.
 ///
@@ -447,6 +452,19 @@ pub fn local_config_unrar_binary(start: &Path) -> Result<PathBuf, String> {
 /// must be a directory. No script writes this key.
 pub fn local_config_lua51_src_dir(start: &Path) -> Result<PathBuf, String> {
     local_config_path(start, LUA51_SRC_DIR_KEY, Want::Dir, "write `lua51_src_dir = \"/path/to/tools/lua51-src/src\"` into it by hand")
+}
+
+/// The live-process captures for a **game-gated test**: `memory_dumps_dir` in the nearest [`LOCAL_CONFIG`].
+///
+/// Same rules and the same three distinct errors as [`local_config_vz_wad`], except that the path
+/// must be a directory. No script writes this key.
+pub fn local_config_memory_dumps_dir(start: &Path) -> Result<PathBuf, String> {
+    local_config_path(
+        start,
+        MEMORY_DUMPS_DIR_KEY,
+        Want::Dir,
+        "write `memory_dumps_dir = \"/path/to/game-files/memory-dumps\"` into it by hand",
+    )
 }
 
 /// What a [`LOCAL_CONFIG`] key must name.

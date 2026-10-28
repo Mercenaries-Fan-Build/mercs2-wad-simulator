@@ -2218,36 +2218,35 @@ pub fn world_index_probe(wadpath: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Headless streaming-runtime probe (spec §10 verification): build the Layer-2 decision core over a
-/// scripted camera path from the PMC exterior spawn outward, and log per-step resident-block count,
-/// awake/hibernated entity counts, and the awake LOD-tier distribution — WITHOUT opening a window.
-/// This proves the control-driven runtime independently of the GPU executor.
+/// Headless streaming-runtime probe (spec §10 verification): catalog every placed entity of the
+/// `layers_static` block (block 29: the containers of the 173 static layers, read whole) and register
+/// them in a hibernation grid, walk a scripted viewer path from the PMC exterior spawn outward, and log
+/// per waypoint the grid's wake/sleep decisions, the masked entity count and the ring-tier histogram —
+/// WITHOUT opening a window.
 pub fn stream_probe(wadpath: &str) -> Result<(), String> {
-    use mercs2_core::streaming::StreamingConfig;
+    use mercs2_core::hibernation::{wake_decisions, HibernationGrid, HibernationScale, Viewer, MAX_VIEWERS};
     use std::time::Instant;
 
     let mut w = wad::open(wadpath)?;
     let t0 = Instant::now();
-    let idx = {
-        let (archive, file) = wad::archive_and_file(&mut w);
-        mercs2_formats::world_index::WorldIndex::build(archive, file)
-    };
-    // layers_static (block 29) — the always-loaded base placement layer.
     let (_low, ls) = find_terrain_blocks(&mut w)?;
-    let cfg = StreamingConfig::default();
-    let (mut mgr, props, _terrain_tiles) = build_streaming_catalog(&idx, &ls, cfg)?;
+    let templates = TemplateRecords::load(&mut crate::asset::AssetSource::discover(wadpath, &[])?)?;
+    let mut catalog = PlacedCatalog::default();
+    catalog.add_block(&ls, &templates)?;
+    let mut grid = HibernationGrid::new(HibernationScale::single_player());
+    for o in catalog.iter() {
+        grid.insert(&o.registration(), false);
+    }
     let build_ms = t0.elapsed().as_secs_f64() * 1000.0;
-
-    println!("[stream-probe] catalog: {} geometry blocks (per-object, tier-scaled distance), {} per-entity props (of {} keyed spawns)", mgr.block_count(), mgr.entity_count(), props.len());
     println!(
-        "[stream-probe] config: tier_stream_out(c0..c3)={:?} unload_margin={:.0} block_budget={} entity_budget={} scan_cap={:.0} hysteresis={:.0}",
-        cfg.tier_stream_out, cfg.block_unload_margin, cfg.block_budget, cfg.entity_budget, cfg.entity_scan_cap, cfg.entity_hysteresis
+        "[stream-probe] catalog: {} placed entities ({} with a model, {} terrain tiles), built in {build_ms:.1} ms",
+        catalog.len(),
+        catalog.iter().filter(|o| o.model.is_some()).count(),
+        catalog.iter().filter(|o| o.terrain_mesh.is_some()).count()
     );
-    println!("[stream-probe] built in {build_ms:.1} ms");
 
-    // Scripted camera path: start at the PMC exterior/pool spawn, sweep outward (roughly NE across
-    // the map) so blocks/entities load then hibernate as the camera passes. Each waypoint is settled
-    // over several ticks so the throttled load budget can catch up before we read counts.
+    // Scripted viewer path: start at the PMC exterior/pool spawn and sweep outward (roughly NE across
+    // the map) so entities wake then sleep as the viewer passes; each waypoint runs a few frames.
     let start = EXTERIOR_SPAWN; // (2560.26, -13.18, -926.25)
     let path: [[f32; 3]; 8] = [
         [start[0], start[1], start[2]],
@@ -2259,31 +2258,36 @@ pub fn stream_probe(wadpath: &str) -> Result<(), String> {
         [-1500.0, 0.0, -1500.0],
         [-3000.0, 50.0, -3000.0],
     ];
-    const SETTLE_TICKS: u32 = 12; // enough for the per-frame budgets to converge at each waypoint
+    const FRAMES: u32 = 3; // the grid settles in two frames (this frame's and last frame's viewer)
 
     for (wi, p) in path.iter().enumerate() {
-        let mut last = mercs2_core::streaming::StreamDiff::default();
-        let (mut loaded, mut unloaded, mut woke, mut hib) = (0usize, 0usize, 0usize, 0usize);
-        for _ in 0..SETTLE_TICKS {
-            let d = mgr.update(*p);
-            loaded += d.load_blocks.len();
-            unloaded += d.unload_blocks.len();
-            woke += d.wake.len();
-            hib += d.hibernate.len();
-            last = d;
+        let (mut woke, mut slept, mut settled) = (0usize, 0usize, true);
+        for f in 0..FRAMES {
+            let mut viewers = [None; MAX_VIEWERS];
+            viewers[0] = Some(Viewer { position: *p, local: true });
+            grid.set_viewers(viewers);
+            let events = grid.step();
+            let d = wake_decisions(&events, |k| catalog.get(k).is_some(), |_| false, |k| {
+                catalog.get(k).and_then(|o| o.own_hibernation).map(|h| h.distance)
+            });
+            woke += d.activate.len();
+            slept += d.deactivate.len();
+            settled = f + 1 < FRAMES || events.is_empty();
+        }
+        let mut tiers = [0usize; 5];
+        let mut masked = 0usize;
+        for o in catalog.iter() {
+            let st = grid.entry(o.key).map_or(0, |e| e.state);
+            if st & 0x0F != 0 {
+                masked += 1;
+                tiers[usize::from(st >> 4).min(4)] += 1;
+            }
         }
         println!(
-            "[stream-probe] wp{} ({:>7.0},{:>7.0}): resident={:<4} awake={:<5} | +load {:<3} -load {:<3} +wake {:<4} -hib {:<4} | settled_diff_empty={}",
-            wi, p[0], p[2],
-            mgr.resident_count(), mgr.awake_count(),
-            loaded, unloaded, woke, hib,
-            last.is_empty()
+            "[stream-probe] wp{} ({:>7.0},{:>7.0}): masked={masked:<5} tiers(0..4)={tiers:?} | +wake {woke:<5} -sleep {slept:<5} | settled={settled}",
+            wi, p[0], p[2]
         );
     }
-    println!(
-        "[stream-probe] final: resident={} awake={} (of {} props / {} blocks)",
-        mgr.resident_count(), mgr.awake_count(), mgr.entity_count(), mgr.block_count()
-    );
     Ok(())
 }
 
@@ -2528,9 +2532,10 @@ pub fn comp_dump(wadpath: &str, target: &str) -> Result<(), String> {
     // World-wide summary for HibernationControl: the per-entity distance distribution + how many
     // props (ModelName placements) actually carry one vs fall back to class defaults.
     if target == "HibernationControl" {
-        use mercs2_formats::placement::{load_hibernation, load_model_placements};
-        let hib = load_hibernation(&ls);
-        let mut d0: Vec<u16> = hib.values().map(|h| h.dist[0]).collect();
+        use mercs2_core::hibernation::DEFAULT_RINGS;
+        use mercs2_formats::placement::load_model_placements;
+        let hib = mercs2_formats::hibernation_control::placed_hibernation(&ls)?;
+        let mut d0: Vec<u16> = hib.values().map(|h| h.distance).collect();
         d0.sort_unstable();
         let n = d0.len();
         if n > 0 {
@@ -2538,22 +2543,19 @@ pub fn comp_dump(wadpath: &str, target: &str) -> Result<(), String> {
             let max = d0[n - 1];
             let med = d0[n / 2];
             let over400 = d0.iter().filter(|&&v| v > 400).count();
-            // Confirm dist[1..4] are the constant class defaults across every record.
-            let non_default = hib
-                .values()
-                .filter(|h| h.dist[1] != 160 || h.dist[2] != 60 || h.dist[3] != 20)
-                .count();
-            let flagged = hib.values().filter(|h| h.flag != 0).count();
+            let non_default = hib.values().filter(|h| h.rings() != DEFAULT_RINGS).count();
+            let flagged = hib.values().filter(|h| h.flags).count();
+            let no_del = hib.values().filter(|h| h.no_del_on_hibernate_if_preplaced).count();
             println!(
                 "[comp-dump] --- HibernationControl world summary (layers_static) ---\n\
-                 [comp-dump]   entities with directive: {n}\n\
-                 [comp-dump]   dist0 (hibernation): min={min} median={med} max={max}  (>400: {over400})\n\
-                 [comp-dump]   dist1..3 != default(160/60/20): {non_default} entities\n\
-                 [comp-dump]   flag != 0: {flagged} entities"
+                 [comp-dump]   entities with a record: {n}\n\
+                 [comp-dump]   Distance: min={min} median={med} max={max}  (>400: {over400})\n\
+                 [comp-dump]   Q2/Q1/Q0 != default(160/60/20): {non_default} entities\n\
+                 [comp-dump]   Flags set: {flagged}, NoDelOnHibernateIfPreplaced set: {no_del}"
             );
         }
         let props = load_model_placements(&ls);
-        let with = props.iter().filter(|p| p.hibernation.is_some()).count();
+        let with = props.iter().filter(|p| hib.contains_key(&p.key)).count();
         println!(
             "[comp-dump]   ModelName props: {} total, {with} carry a HibernationControl \
              (rest use class defaults)",

@@ -61,23 +61,31 @@ kept-ring (streaming-coupled). These are represented as inputs and seams, never 
 ## Usage
 
 ```rust
-use mercs2_population::{
-    PopulationWorld, SimpleSpawner, SpawnFaction, SpawnerAdjust, SpawnerFamily,
-    SPAWNER_STATE_TERMINAL,
-};
+use mercs2_population::{PopulationWorld, SimpleSpawner, SpawnerFamily, UnitCatalog, UnitChoice};
+use mercs2_formats::unit_list::{weighting, UnitListEntry};
 use mercs2_core::glam::Vec3;
 use mercs2_core::{Time, Transform, World};
+use std::collections::{BTreeMap, BTreeSet};
 
 let mut world = World::new();
 let mut pop = PopulationWorld::new();
 
-// Register a window spawner: fires every 1.0s on the VZ spawn-list channel, group 3.
+// The PopulationList data: one list of two unit templates, neither a vehicle.
+let lists = BTreeMap::from([(0x8000_0100, vec![
+    UnitListEntry { unit: 0x8000_0001, weight: 2 },
+    UnitListEntry { unit: 0x8000_0002, weight: 1 },
+])]);
+pop.units = UnitCatalog::new(lists, BTreeSet::new()).unwrap();
+
+// Register a window spawner: fires every 1.0s, group 3, choosing from that list by weight.
+let choice = UnitChoice { owner: 0x0001_0000, unit_list: 0x8000_0100, weighting: weighting::SIMPLE };
+pop.units.check(&choice).unwrap();
 pop.spawners
     .register(SimpleSpawner {
         interval: 1.0,
         countdown: 1.0,
         reload: 1.0,
-        faction: SpawnFaction::Vz,
+        choice,
         family: SpawnerFamily::Window,
         group: 3,
         transform: Transform::from_translation(Vec3::new(10.0, 0.0, 0.0)),
@@ -85,13 +93,14 @@ pop.spawners
     })
     .unwrap();
 
-// Tick the system. `viewports` are the camera anchors the death distance gate measures against.
+// Tick the system. `viewports` are the camera anchors the death distance gate measures against;
+// `next` is the game's random draw; `owner_health` serves the Health* rules.
 let time = Time::new(60.0);
-pop.tick(&mut world, &time, &[Vec3::ZERO]);
+pop.tick(&mut world, &time, &[Vec3::ZERO], &mut || 0, &|_world, _owner| 1.0);
 
-// The resolver seam: realize each request into an entity (and post SPAWN_EVENT_HASH).
+// The resolver seam: realize each chosen unit template into an entity (and post SPAWN_EVENT_HASH).
 for req in pop.take_requests() {
-    let _ = (req.template, req.transform, req.faction, req.group, req.family);
+    let _ = (req.template, req.transform, req.group, req.family, req.owner);
 }
 // The caller despawns whatever the death system retired.
 for e in pop.take_retired() {
@@ -132,7 +141,9 @@ assert_eq!(decay_spawn_history(0xFFFF_FFFF), 0x7F7F_7F7F);                 // pe
 | (crate root) | `PopulationWorld` — the host-owned bundle (`deaths` / `density` / `spawners`), the `tick` fan-out, the `take_requests` / `take_retired` drains, `tweak_attached_spawners`, and `SPAWN_EVENT_HASH`. |
 | `death` | `DeathQueue` / `PendingDeath` + `DEATH_BUDGET_PER_FRAME` (20) and `DEATH_DISTANCE_SQ_TABLE` (9 squared radii) — the round-robin, distance-gated retirement of aged-out bodies. |
 | `density` | `DensityController` / `DensityBudget` + `decay_spawn_history`, `traffic_allows`, `density_faction_participates` — the per-tick ambient budgets, the spawn-history decay op, and the traffic-control gate. |
-| `spawner` | `SimpleSpawnerManager` / `SimpleSpawner` / `SpawnQueue` / `SpawnRequest` / `SpawnerAdjust` / `SpawnerFamily` + the recovered caps (`SIMPLE_SPAWNER_POOL` 768, `SPAWN_QUEUE_CAP` 128, `SPAWNER_GROUP_COUNT` 8, `SPAWNER_STATE_TERMINAL` 5, `WINDOW_RADIUS_SQ` 160²). |
+| `spawner` | `SimpleSpawnerManager` / `SimpleSpawner` / `SpawnQueue` / `SpawnRequest` / `SpawnerAdjust` / `SpawnerFamily` + `SIMPLE_SPAWNER_POOL` 768, `SPAWN_QUEUE_CAP`, `SPAWNER_GROUP_COUNT` 8, `SPAWNER_STATE_TERMINAL` 5, `WINDOW_RADIUS_SQ` 160². |
+| `units` | `UnitCatalog` / `UnitChoice` — what a fired spawner spawns (`FUN_004E4150`): its `UnitList` drawn by its `UnitListWeighting` over the `PopulationList` data (`mercs2_formats::unit_list`), with the `Exhaustive*` bags and the vehicle set the density gate budgets by. |
+| `slot_table` | The pursuit/skirmish seed-table constants (`FUN_004d9840` / `FUN_004d742c`). |
 | `components` | The population reflection components with their m2 hashes, strides, pool budgets and recovered defaults, plus the `TrafficControl` / `DynamicRoadType` / `FlowControlType` / `NeedType` enums and the `SpawnFaction` spawn-list channels. |
 
 ## Notes / gotchas
@@ -143,20 +154,14 @@ assert_eq!(decay_spawn_history(0xFFFF_FFFF), 0x7F7F_7F7F);                 // pe
 * **Confirm-live items are flagged in the source, not smoothed over.**
   * The death distance table's numeric constants were read on **Xbox** (`FUN_8235efc0`); the PC gate
     uses the same distance-select logic but the values were not read out on PC (§10.4).
-  * The PC family-proc ↔ queue ↔ family pairing is by size/position, **not proven** — the four procs
-    are structurally interchangeable. `Window` is the safest anchor (its Xbox fn carries the
-    `'Have %d window Spawners'` string and the `OccupiedBuildingSpawnCallback` dispatch) (§10.2).
-  * The fold from the 3 raw type discriminators (`+0x63/+0x64/+0x68`) to the 4-member
-    `SimpleSpawnerTypeEnum` is confirm-live, so `SimpleSpawner::type_disc` is kept raw (§10.2).
 * **`PopulationDensity::caps` is five opaque ints.** The exact per-slot meaning lives in the unread
   ambient driver `FUN_00503020`, so the columns are carried verbatim and consumed as caps by
   `DensityController`. Likewise `SkirmishSpawnList::slots` is six raw ints — the engine mechanism picks
   *a slot*, the *meaning* is content-authored data.
 * **Which region contains the player is the caller's decision.** The "best-priority containing region"
   select is a spatial data query; this crate owns only the budgeted, traffic-gated *count* decision.
-* **Bounds behave like the exe.** The 128-cap spawn queue **drops** overflow (counted by
-  `SpawnQueue::dropped()`), it does not overwrite; `SimpleSpawnerManager::register` **refuses** the
-  769th spawner (returns `None`).
+* **Bounds.** A full spawn queue **drops** overflow (counted by `SpawnQueue::dropped()`), it does not
+  overwrite; `SimpleSpawnerManager::register` **refuses** the 769th spawner (returns `None`).
 * **`PopulationSimpleSpawner` is a class-manager, not a flat descriptor** — which is why it never
   appeared in the 231-class registry TSVs.
 * The density faction loop **skips faction types 7 and 8** (`DENSITY_SKIP_FACTION_TYPES`); those channel

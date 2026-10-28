@@ -411,8 +411,9 @@ pub fn parse_state_machine(buf: &[u8]) -> Option<StateMachine> {
 /// The regeneration follows retail's exact canonical layout, measured across all 1,311 destructibles
 /// (`tests/state_machine_layout_survey.rs`): `INFO[5, switch_count, node_count]`; `SWIT` either right
 /// after `INFO` or last (its original position is preserved); per node a `NODE[hash, state_count]`;
-/// per state a `STAT[hash]`, always an Enter `CHDR`+`CEXE`, and an Exit `CHDR`+`CEXE` **iff** the exit
-/// list is non-empty (no retail state has an empty Exit, or an empty Enter). Because that layout is
+/// per state a `STAT[hash]`, then an Enter `CHDR`+`CEXE` **iff** the enter list is non-empty and an
+/// Exit `CHDR`+`CEXE` **iff** the exit list is non-empty (no retail state carries a leaf for an empty
+/// list; many carry no leaves at all). Because that layout is
 /// exactly what retail emits, a no-op — `sm` parsed straight back out — reproduces the container
 /// byte-for-byte (proven in `tests/state_machine_writer.rs`).
 pub fn serialize_state_machine(original: &[u8], sm: &StateMachine) -> Result<Vec<u8>, String> {
@@ -817,164 +818,187 @@ pub fn enter_commands(state: &StateDef) -> Vec<(u32, Vec<u32>)> {
     commands(&state.enter)
 }
 
-/// GROUND-TRUTH per-**HIER-node** enable flags from the engine state machine — the runtime's
-/// `OBJ+0x2a0` node-enable table, which SEGM records index by their signed `node` field (clause 3 of
-/// the draw gate; see `mercs2_engine::render_state`).
+/// `InitState`: the state every switch node enters when its machine is built at activation.
+pub const STATE_INIT: u32 = 0x0ACE_072A;
+/// The `SetState` target that loads the node's saved state (pool `0xDF8B90`), else `PristineState`.
+pub const STATE_SAVED: u32 = 0xCDE0_B80F;
+
+/// The per-**HIER-node** enable table — the render node's `+0x2A0` / `+0x2A8`, which SEGM records
+/// index by their signed `node` field (clause 3 of the draw gate; see `mercs2_engine::render_state`) —
+/// for a model whose switch nodes stand in the states `chosen[i]` (indices into `sm.nodes[i].states`).
 ///
-/// No classification heuristics. The seeding is DATA: every `SWIT` participant subtree starts
-/// **hidden**, everything else starts visible; then each switch node's CHOSEN state executes its
-/// enter-script `SHOW`/`Hide` commands over the HIER, flipping whole subtrees. So a pristine body
-/// (not under a switch slot) is enabled by default and break pieces stay disabled until a state shows
-/// them. `chosen[i]` = state index for `sm.nodes[i]` (see [`default_state_index`]).
-pub fn machine_node_enable(sm: &StateMachine, hier: &[HierNode], chosen: &[usize]) -> Vec<bool> {
-    machine_node_enable_seeded(sm, hier, chosen, NodeSeed::default(), NodeScope::default())
-}
-
-/// How the node-enable table (`OBJ+0x2a0`) is INITIALISED before any state's enter script runs.
+/// The machine runs as retail's (`docs/reverse_engineer/hibernation_grid.md` §2):
+/// - activation builds it (`FUN_004CFED0` / `FUN_004D3E10`): the `SWIT` participants are controlled
+///   and not shown, and each switch node, last to first, enters `InitState`;
+/// - then each node enters its chosen state;
+/// - `FUN_004D4010` runs the old state's Exit, then the new state's Enter;
+/// - scripts run through `FUN_004D1B00`: `Show` / `Hide` set or clear "shown" on a controlled node and
+///   ignore any other; `SetState` pops the node, then the state, and enters it;
+/// - a node is visible unless it or an ancestor is controlled and not shown (`FUN_00690AC0`);
+/// - the table is what `FUN_00476BB0` / `FUN_004727B0` build from that visibility: `[+0x29C]` =
+///   vis(node 0), a record `(vis, inherit)` for every node whose visibility differs from its parent's,
+///   and a node with no record under an inheriting parent copies its parent.
 ///
-/// **This is not settled from the exe.** The constructor's `memset` sits behind a register alias in
-/// the decomp (see `docs/modernization/model_render_gate_spec.md` §6), so the seed is chosen here and
-/// validated against real models. Do not describe either variant as "ground truth".
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
-pub enum NodeSeed {
-    /// Every node starts ENABLED; only an explicit `Hide` in an entered state's script turns one off.
-    AllEnabled,
-    /// Every `SWIT` participant subtree starts HIDDEN; a `SHOW` must turn it back on.
-    ///
-    /// The DEFAULT, on evidence rather than proof: `oc_veh_helicopter_md500`'s default states contain
-    /// no `Hide` command at all, so under [`NodeSeed::AllEnabled`] its wreck renders on top of the
-    /// intact body. Only this seeding suppresses it. `ch_veh_tank_ztz98` is indifferent (its default
-    /// state Hides its break pieces explicitly).
-    #[default]
-    SwitchSlotsHidden,
-}
-
-/// Whether a `SHOW`/`Hide` command applies to the named HIER node alone, or to its whole subtree.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
-pub enum NodeScope {
-    /// The command marks only the node it names.
-    NodeOnly,
-    /// The command marks the node and every descendant.
-    ///
-    /// THE DEFAULT, and it must be. A switch slot names a *grouping* node; the geometry hangs on its
-    /// CHILDREN. `ch_veh_tank_ztz98`'s turret slot is node 4 (`0x54C595F0`, no geometry of its own) and
-    /// the turret/barrel meshes live on child nodes 5 and 11. Marking node-only leaves those children
-    /// untouched, so the turret renders identically at 100% and 0% health while the hull (whose mesh
-    /// IS on the named node) switches — the exact symptom that exposed this.
-    #[default]
-    Subtree,
-}
-
-/// [`machine_node_enable`] with an explicit seed — the knob for comparing the variants against real
-/// models rather than asserting one.
-pub fn machine_node_enable_seeded(
-    sm: &StateMachine,
-    hier: &[HierNode],
-    chosen: &[usize],
-    seed: NodeSeed,
-    scope: NodeScope,
-) -> Vec<bool> {
-    machine_node_hidden(sm, hier, chosen, seed, scope)
-        .into_iter()
-        .map(|h| !h)
-        .collect()
-}
-
-/// Per-mesh-group visibility: [`machine_node_enable`] resolved through `INDX` (mesh group → HIER
-/// node). Kept for callers that reason in draw groups; the engine itself gates per SEGM record.
-pub fn machine_group_visibility(
-    sm: &StateMachine,
-    hier: &[HierNode],
-    indx: &[usize],
-    chosen: &[usize],
-) -> Vec<bool> {
-    let hidden = machine_node_hidden(sm, hier, chosen, NodeSeed::default(), NodeScope::default());
-    indx.iter()
-        .map(|&n| hidden.get(n).map(|h| !h).unwrap_or(true))
-        .collect()
-}
-
-fn machine_node_hidden(
-    sm: &StateMachine,
-    hier: &[HierNode],
-    chosen: &[usize],
-    seed: NodeSeed,
-    scope: NodeScope,
-) -> Vec<bool> {
-    let show = crate::hash::pandemic_hash_m2("show");
-    let hide = crate::hash::pandemic_hash_m2("hide");
-    let hash_to_idx: std::collections::HashMap<u32, usize> =
-        hier.iter().map(|h| (h.hash, h.index)).collect();
-    let mut children: Vec<Vec<usize>> = vec![Vec::new(); hier.len()];
-    for h in hier {
-        if let Some(p) = h.parent {
-            if p < hier.len() {
-                children[p].push(h.index);
-            }
+/// With the default states (`InitState`'s targets) this is the activation table; it reproduces every
+/// live table of the two fresh captures (`mercs2_probe` `live_node_enables_follow_the_activation_rule`).
+/// "Shown" starting empty rests on a SecuROM-decrypted bind flag read as 0 (INFERRED). A saved state
+/// takes `PristineState`. `SetState` nested past 64 levels is an error (a cycle in the data).
+pub fn machine_node_enable(sm: &StateMachine, hier: &[HierNode], chosen: &[usize]) -> Result<Vec<bool>, String> {
+    let mut m = Machine::new(sm, hier);
+    for i in (0..sm.nodes.len()).rev() {
+        m.enter(i, STATE_INIT)?;
+    }
+    for (i, node) in sm.nodes.iter().enumerate() {
+        if let Some(st) = chosen.get(i).and_then(|&s| node.states.get(s)) {
+            m.enter(i, st.name_hash)?;
         }
     }
-    fn mark(children: &[Vec<usize>], hidden: &mut [bool], root: usize, v: bool, scope: NodeScope) {
-        if scope == NodeScope::NodeOnly {
-            if root < hidden.len() {
-                hidden[root] = v;
-            }
-            return;
+    Ok(m.enable_table())
+}
+
+/// The table at activation: every switch node in the state `InitState` takes it to.
+pub fn activation_node_enable(sm: &StateMachine, hier: &[HierNode]) -> Result<Vec<bool>, String> {
+    machine_node_enable(sm, hier, &[])
+}
+
+/// The model state machine with its model-instance visibility (`FUN_0068F750`).
+struct Machine<'a> {
+    sm: &'a StateMachine,
+    hier: &'a [HierNode],
+    /// Each switch node's current state (0 before its first `SetState`).
+    cur: Vec<u32>,
+    nodes: std::collections::HashMap<u32, usize>,
+    index: std::collections::HashMap<u32, usize>,
+    /// `SWIT` participants (the bind `0x2472980`).
+    ctl: Vec<bool>,
+    shown: Vec<bool>,
+    depth: usize,
+}
+
+impl<'a> Machine<'a> {
+    fn new(sm: &'a StateMachine, hier: &'a [HierNode]) -> Machine<'a> {
+        let index: std::collections::HashMap<u32, usize> = hier.iter().map(|h| (h.hash, h.index)).collect();
+        let mut ctl = vec![false; hier.len()];
+        for i in sm.switch_slots.iter().filter_map(|h| index.get(h)) {
+            ctl[*i] = true;
         }
-        let mut stack = vec![root];
-        while let Some(x) = stack.pop() {
-            if x < hidden.len() {
-                hidden[x] = v;
-                stack.extend_from_slice(&children[x]);
-            }
+        Machine {
+            sm,
+            hier,
+            cur: vec![0; sm.nodes.len()],
+            nodes: sm.nodes.iter().enumerate().map(|(i, nd)| (nd.name_hash, i)).collect(),
+            index,
+            ctl,
+            shown: vec![false; hier.len()],
+            depth: 0,
         }
     }
-    let mut hidden = vec![false; hier.len()];
-    if seed == NodeSeed::SwitchSlotsHidden {
-        for &slot in &sm.switch_slots {
-            if let Some(&i) = hash_to_idx.get(&slot) {
-                mark(&children, &mut hidden, i, true, scope);
-            }
+
+    /// `FUN_004D4010`: no-op when already in `state`; else the old state's Exit, then the new state's
+    /// Enter.
+    fn enter(&mut self, node: usize, state: u32) -> Result<(), String> {
+        if self.cur[node] == state {
+            return Ok(());
         }
+        self.depth += 1;
+        if self.depth > 64 {
+            return Err(format!("SetState nested past 64 levels at switch node 0x{:08X}", self.sm.nodes[node].name_hash));
+        }
+        let def = &self.sm.nodes[node];
+        let exit = def.states.iter().find(|s| s.name_hash == self.cur[node]).map(|s| s.exit.clone());
+        let enter = def.states.iter().find(|s| s.name_hash == state).map(|s| s.enter.clone());
+        if let Some(x) = exit {
+            self.run(&x)?;
+        }
+        self.cur[node] = state;
+        if let Some(e) = enter {
+            self.run(&e)?;
+        }
+        self.depth -= 1;
+        Ok(())
     }
-    for (ni, node) in sm.nodes.iter().enumerate() {
-        let si = chosen
-            .get(ni)
-            .copied()
-            .unwrap_or(0)
-            .min(node.states.len().saturating_sub(1));
-        let Some(st) = node.states.get(si) else {
-            continue;
-        };
-        let mut args: Vec<u32> = Vec::new();
-        let l = &st.enter;
-        let mut i = 0;
-        while i < l.len() {
-            match l[i] {
-                1 if i + 1 < l.len() => {
-                    args.push(l[i + 1]);
-                    i += 2;
+
+    /// `FUN_004D1B00`: token 1 pushes an argument, token 2 dispatches a command, token 3 returns once
+    /// the argument stack is empty.
+    fn run(&mut self, script: &[u32]) -> Result<(), String> {
+        let show = crate::hash::pandemic_hash_m2("show");
+        let hide = crate::hash::pandemic_hash_m2("hide");
+        let setstate = crate::hash::pandemic_hash_m2("setstate");
+        let mut stack: Vec<u32> = Vec::new();
+        let mut pc = 0;
+        while pc < script.len() {
+            match script[pc] {
+                1 if pc + 1 < script.len() => {
+                    stack.push(script[pc + 1]);
+                    pc += 2;
                 }
-                2 if i + 1 < l.len() => {
-                    let cmd = l[i + 1];
-                    if cmd == show || cmd == hide {
-                        for a in &args {
-                            if let Some(&idx) = hash_to_idx.get(a) {
-                                mark(&children, &mut hidden, idx, cmd == hide, scope);
+                2 if pc + 1 < script.len() => {
+                    let c = script[pc + 1];
+                    pc += 2;
+                    if c == show || c == hide {
+                        if let Some(&i) = stack.pop().and_then(|a| self.index.get(&a)) {
+                            if self.ctl[i] {
+                                self.shown[i] = c == show;
                             }
                         }
+                    } else if c == setstate {
+                        let node = stack.pop();
+                        let state = stack.pop().map(|s| if s == STATE_SAVED { STATE_PRISTINE } else { s });
+                        if let (Some(&ni), Some(st)) = (node.and_then(|n| self.nodes.get(&n)), state) {
+                            self.enter(ni, st)?;
+                        }
+                    } else {
+                        stack.clear();
                     }
-                    args.clear();
-                    i += 2;
                 }
-                3 => i += 1,
-                _ => {
-                    args.push(l[i]);
-                    i += 1;
+                3 => {
+                    if stack.is_empty() {
+                        return Ok(());
+                    }
+                    pc += 1;
+                }
+                _ => pc += 1,
+            }
+        }
+        Ok(())
+    }
+
+    /// The table `FUN_00476BB0` + `FUN_004727B0` build from the current visibility.
+    fn enable_table(&self) -> Vec<bool> {
+        let hier = self.hier;
+        let n = hier.len();
+        let mut vis: Vec<Option<bool>> = vec![None; n];
+        fn visible(i: usize, hier: &[HierNode], ctl: &[bool], shown: &[bool], vis: &mut [Option<bool>]) -> bool {
+            if let Some(v) = vis[i] {
+                return v;
+            }
+            let own = !(ctl[i] && !shown[i]);
+            let v = own && hier[i].parent.map_or(true, |p| visible(p, hier, ctl, shown, vis));
+            vis[i] = Some(v);
+            v
+        }
+        let vis: Vec<bool> = (0..n).map(|i| visible(i, hier, &self.ctl, &self.shown, &mut vis)).collect();
+        let base = vis.first().copied().unwrap_or(true);
+        let (mut en, mut inherit, mut listed) = (vec![base; n], vec![false; n], vec![false; n]);
+        for i in 0..n {
+            if let Some(p) = hier[i].parent {
+                if vis[i] != vis[p] {
+                    en[i] = vis[i];
+                    inherit[i] = true;
+                    listed[i] = true;
                 }
             }
         }
+        for i in 0..n {
+            if let Some(p) = hier[i].parent {
+                if inherit[p] && !listed[i] {
+                    en[i] = en[p];
+                    inherit[i] = true;
+                }
+            }
+        }
+        en
     }
-    hidden
 }
 
 /// Parse the first `SWIT` chunk as a flat u32 node-hash list.
