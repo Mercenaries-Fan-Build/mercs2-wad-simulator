@@ -344,12 +344,58 @@ fn install_pinned(
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
     }
-    remove_tree(dest, "replace the installed bundle")?;
-    std::fs::rename(&root, dest).map_err(|e| format!("install to {}: {e}", dest.display()))?;
+    swap_in(&root, dest, |from, to| std::fs::rename(from, to))?;
     // When the archive's root was the staging folder itself, the rename moved it and this finds
     // nothing; otherwise it removes the emptied staging folder.
     remove_tree(&staging, "clear the staging folder after the install")?;
     Ok(dest.to_path_buf())
+}
+
+/// Put the folder `new` in place as `dest` through `rename`. An installed `dest` is first renamed
+/// aside to `<dest>.previous` and removed only once `new` is in place, so a failed move never
+/// leaves the user without a bundle: the previous one is renamed back, and the error says it was
+/// kept — or names both failures when that restore fails too. A `.previous` folder left by an
+/// earlier run is cleared first.
+fn swap_in(
+    new: &Path,
+    dest: &Path,
+    rename: impl Fn(&Path, &Path) -> std::io::Result<()>,
+) -> Result<(), String> {
+    let previous = dest.with_extension("previous");
+    remove_tree(&previous, "clear a replaced bundle left by an earlier install")?;
+    let installed = match std::fs::symlink_metadata(dest) {
+        Ok(_) => true,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+        Err(e) => return Err(format!("{}: {e}", dest.display())),
+    };
+    if installed {
+        rename(dest, &previous).map_err(|e| {
+            format!(
+                "set the installed bundle aside: rename {} to {}: {e}",
+                dest.display(),
+                previous.display()
+            )
+        })?;
+    }
+    if let Err(e) = rename(new, dest) {
+        let failed = format!("install: rename {} to {}: {e}", new.display(), dest.display());
+        if !installed {
+            return Err(failed);
+        }
+        return Err(match rename(&previous, dest) {
+            Ok(()) => format!("{failed}; the previous bundle was kept at {}", dest.display()),
+            Err(e2) => format!(
+                "{failed}; restoring the previous bundle (rename {} to {}) also failed: {e2}; it is at {}",
+                previous.display(),
+                dest.display(),
+                previous.display()
+            ),
+        });
+    }
+    if installed {
+        remove_tree(&previous, "remove the replaced bundle (the new one is installed)")?;
+    }
+    Ok(())
 }
 
 /// Remove the directory tree at `path`. A path that does not exist is already gone; any other
@@ -420,7 +466,7 @@ mod tests {
     #[test]
     fn unzip_round_trips_a_bundle() {
         let dir = std::env::temp_dir().join("m2ws_unzip_ok");
-        let _ = std::fs::remove_dir_all(&dir);
+        remove_tree(&dir, "clear the test folder").unwrap();
         let z = zip_of(&[
             ("workshop_data/names.bin", b"M2NAMES1____"),
             ("workshop_data/lua/a.lua", b"-- hi"),
@@ -428,7 +474,7 @@ mod tests {
         unzip(&z, &dir).unwrap();
         assert_eq!(std::fs::read(dir.join("workshop_data/names.bin")).unwrap(), b"M2NAMES1____");
         assert!(dir.join("workshop_data/lua/a.lua").is_file());
-        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     /// Zip slip: an entry escaping the destination must be REFUSED, not written. A bundle we fetch
@@ -436,12 +482,13 @@ mod tests {
     #[test]
     fn unzip_refuses_path_traversal() {
         let dir = std::env::temp_dir().join("m2ws_unzip_evil");
-        let _ = std::fs::remove_dir_all(&dir);
+        remove_tree(&dir, "clear the test folder").unwrap();
         let z = zip_of(&[("../../escaped.txt", b"pwned")]);
         let err = unzip(&z, &dir).unwrap_err();
         assert!(err.contains("unsafe path"), "expected refusal, got: {err}");
         assert!(!dir.parent().unwrap().join("escaped.txt").exists());
-        let _ = std::fs::remove_dir_all(&dir);
+        // The refusal comes at the first entry, before anything is created, so `dir` may not exist.
+        remove_tree(&dir, "clear the test folder").unwrap();
     }
 
     /// An empty scratch directory unique to this test and process; `install_pinned` writes
@@ -645,25 +692,119 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
-    /// An installed bundle that cannot be removed stops the install with an error naming it,
-    /// rather than the new bundle being dropped in silence. (Unix, as above.)
+    /// A replaced bundle that cannot be removed once the new one is in place is an error naming
+    /// its set-aside folder; the new bundle is installed. (Unix, as above.)
     #[cfg(unix)]
     #[test]
-    fn install_reports_an_installed_bundle_it_cannot_replace() {
+    fn install_reports_a_replaced_bundle_it_cannot_remove() {
         let dir = scratch("stuckdest");
         let dest = dir.join("workshop_data");
-        let locked = lock_inside(&dest);
+        lock_inside(&dest);
+        let previous = dest.with_extension("previous");
         let zip = bundle_zip();
         let sha = crate::publish::sha256_hex(&zip);
         let pin = Pin { url: PINNED.url, tag: PINNED.tag, sha256: &sha };
         let res = install_pinned(&pin, &dest, |_| Ok(zip.clone()), &mut |_| {});
-        unlock(&locked);
-        let err = res.expect_err("an unremovable installed bundle must stop the install");
+        unlock(&previous.join("locked"));
+        let err = res.expect_err("an unremovable replaced bundle must be reported");
         assert!(
-            err.starts_with(&format!("remove {} (to replace the installed bundle): ", dest.display())),
+            err.starts_with(&format!(
+                "remove {} (to remove the replaced bundle (the new one is installed)): ",
+                previous.display()
+            )),
             "{err}"
         );
-        assert!(locked.join("held").is_file());
+        assert_eq!(std::fs::read(dest.join("names.bin")).unwrap(), b"M2NAMES1____");
+        assert!(previous.join("locked/held").is_file());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// An installed bundle at `<dir>/workshop_data` (`names.bin` = "previous") and a new one at
+    /// `<dir>/new` (`names.bin` = "new"); returns (new, dest).
+    fn swap_fixture(dir: &Path) -> (PathBuf, PathBuf) {
+        let dest = dir.join("workshop_data");
+        std::fs::create_dir_all(&dest).unwrap();
+        std::fs::write(dest.join("names.bin"), b"previous").unwrap();
+        let new = dir.join("new");
+        std::fs::create_dir_all(&new).unwrap();
+        std::fs::write(new.join("names.bin"), b"new").unwrap();
+        (new, dest)
+    }
+
+    /// `std::fs::rename`, failing the calls whose 1-based numbers are in `fail`.
+    fn rename_failing(fail: &'static [usize]) -> impl Fn(&Path, &Path) -> std::io::Result<()> {
+        let n = std::cell::Cell::new(0);
+        move |from, to| {
+            n.set(n.get() + 1);
+            if fail.contains(&n.get()) {
+                return Err(std::io::Error::other(format!("injected failure of rename #{}", n.get())));
+            }
+            std::fs::rename(from, to)
+        }
+    }
+
+    #[test]
+    fn swap_replaces_the_installed_bundle_and_removes_the_old_one() {
+        let dir = scratch("swapok");
+        let (new, dest) = swap_fixture(&dir);
+        swap_in(&new, &dest, rename_failing(&[])).unwrap();
+        assert_eq!(std::fs::read(dest.join("names.bin")).unwrap(), b"new");
+        assert!(!new.exists() && !dest.with_extension("previous").exists());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The move of the new bundle (rename #2, after #1 set the old one aside) fails: the old
+    /// bundle is renamed back and still installed, and the error says it was kept.
+    #[test]
+    fn swap_keeps_the_old_bundle_when_the_move_fails() {
+        let dir = scratch("swapmove");
+        let (new, dest) = swap_fixture(&dir);
+        let err = swap_in(&new, &dest, rename_failing(&[2])).expect_err("the move failed");
+        assert_eq!(std::fs::read(dest.join("names.bin")).unwrap(), b"previous");
+        assert!(!dest.with_extension("previous").exists());
+        assert_eq!(
+            err,
+            format!(
+                "install: rename {} to {}: injected failure of rename #2; the previous bundle was kept at {}",
+                new.display(),
+                dest.display(),
+                dest.display()
+            )
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The move and the restore (rename #3) both fail: the error names both failures and where
+    /// the old bundle is, and the old bundle is there.
+    #[test]
+    fn swap_names_both_failures_when_the_restore_fails_too() {
+        let dir = scratch("swaprestore");
+        let (new, dest) = swap_fixture(&dir);
+        let previous = dest.with_extension("previous");
+        let err = swap_in(&new, &dest, rename_failing(&[2, 3])).expect_err("both failed");
+        assert!(err.contains("injected failure of rename #2"), "{err}");
+        assert!(err.contains("injected failure of rename #3"), "{err}");
+        assert!(err.ends_with(&format!("it is at {}", previous.display())), "{err}");
+        assert_eq!(std::fs::read(previous.join("names.bin")).unwrap(), b"previous");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// With nothing installed, a failed move is that error alone.
+    #[test]
+    fn swap_with_nothing_installed_reports_the_move() {
+        let dir = scratch("swapfresh");
+        let (new, dest) = swap_fixture(&dir);
+        std::fs::remove_dir_all(&dest).unwrap();
+        let err = swap_in(&new, &dest, rename_failing(&[1])).expect_err("the move failed");
+        assert_eq!(
+            err,
+            format!(
+                "install: rename {} to {}: injected failure of rename #1",
+                new.display(),
+                dest.display()
+            )
+        );
+        assert!(!dest.exists() && new.is_dir());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
