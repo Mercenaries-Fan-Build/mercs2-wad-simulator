@@ -210,8 +210,9 @@ pub const M0194_LAYER_UNKNOWN: Rule = Rule {
 /// engine finds a script by `{name hash, script type}` and the registry keeps the first one, so one
 /// of the two is not the one that loads. Hermetic half ([`lint`]): `qm_modloader`,
 /// `qm_shell_modloader` and the Shipment's own novel shop modules. Game half ([`game_checks`]): a
-/// script row (type id 35) in a WAD of the game stack or in a game WAD present beside `vz.wad`
-/// ([`GameStack::present_side_wads`]). Registered here, with M0199, as one rule with two halves.
+/// script row (type id 35) in the base `vz.wad` or in a game WAD present beside it
+/// ([`GameStack::present_side_wads`]); the stack's overlays are not read. Registered here, with
+/// M0199, as one rule with two halves.
 pub const M0197_SCRIPT_NAME_TAKEN: Rule = Rule {
     code: "M0197",
     title: "an add_script name or novel shop module is already a script's name",
@@ -1815,14 +1816,17 @@ fn novel_shop_modules(manifest: &Manifest) -> Vec<(usize, &str)> {
 }
 
 /// M0197's game-gated half: each script name the Shipment mints — `add_script` names and novel shop
-/// modules, `(index, name, what)` — against the script rows (type id 35) of every WAD of `game` and
-/// of every game WAD present beside its base ([`GameStack::present_side_wads`]). A side WAD that is
-/// present and does not read, or a folder that cannot be listed, is an M0197 error: the check could
-/// not be made.
+/// modules, `(index, name, what)` — against the script rows (type id 35) of the game's own WADs:
+/// the stack's base `vz.wad` and every game WAD present beside it ([`GameStack::present_side_wads`]:
+/// `shell.wad`, `Loading.wad`, the language WADs). The overlays of the stack are not read: a
+/// `-patch.wad` is mod output — the Shipment's own installed build among them — and a name another
+/// Shipment mints is M0207. A side WAD that is present and does not read, or a folder that cannot
+/// be listed, is an M0197 error: the check could not be made.
 fn script_name_checks(minted: &[(usize, &str, &str)], game: &GameStack) -> Vec<Diagnostic> {
     use mercs2_formats::types::TYPE_ID_SCRIPT;
     let mut out = Vec::new();
     let file_name = |p: &Path| p.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_else(|| p.display().to_string());
+    let base = game.paths().first().map(|p| file_name(p)).unwrap_or_else(|| "vz.wad".into());
     let mut side: Vec<(String, GameStack)> = Vec::new();
     match game.present_side_wads() {
         Ok(paths) => {
@@ -1856,7 +1860,10 @@ fn script_name_checks(minted: &[(usize, &str, &str)], game: &GameStack) -> Vec<D
     }
     for &(index, name, what) in minted {
         let hash = crate::manifest::asset_hash(name);
-        let mut holders: Vec<String> = game.wads_holding(hash, TYPE_ID_SCRIPT).into_iter().map(file_name).collect();
+        let mut holders: Vec<String> = Vec::new();
+        if game.base_has_asset(hash, TYPE_ID_SCRIPT) {
+            holders.push(base.clone());
+        }
         holders.extend(side.iter().filter(|(_, s)| s.has_asset(hash, TYPE_ID_SCRIPT)).map(|(f, _)| f.clone()));
         if holders.is_empty() {
             continue;
@@ -2336,23 +2343,6 @@ pub fn fx_game_checks(manifest: &Manifest, root: &Path, game: &mut GameStack) ->
     Ok(out)
 }
 
-/// An `add_placement` / `add_layer` entity file [`placement_game_checks`] could not read: the same
-/// refusal the lowering makes of it ([`crate::build::read_entities_file`]).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct EntityFileError {
-    pub index: usize,
-    pub kind: &'static str,
-    pub message: String,
-}
-
-impl std::fmt::Display for EntityFileError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "contributions[{}] ({}): {}", self.index, self.kind, self.message)
-    }
-}
-
-impl std::error::Error for EntityFileError {}
-
 /// M0198 for a Shipment's `add_placement` and `add_layer`: a key two records of one entity file
 /// share, and an `add_placement` key the target layer's block (the block the lowering re-emits,
 /// [`GameStack::layer_block_for_edit`]) already places in a `Transform`, `ModelName` or `Name`
@@ -2360,9 +2350,10 @@ impl std::error::Error for EntityFileError {}
 /// A contribution whose entity path is already an error (M0110 missing, M0111 escaping) is not
 /// read: an escaping path would be read outside the Shipment.
 ///
-/// `Err` when an entity file does not read or parse — what the lowering refuses, refused here too
-/// so `qm lint --with-game` does not pass a Shipment `qm build` cannot build.
-pub fn placement_game_checks(manifest: &Manifest, root: &Path, game: &mut GameStack) -> Result<Vec<Diagnostic>, EntityFileError> {
+/// An entity file that does not read or parse is not checked here: the lowering refuses it
+/// ([`crate::build::read_entities_file`]), as it refuses an `edit_world` edits file, which no lint
+/// reads either.
+pub fn placement_game_checks(manifest: &Manifest, root: &Path, game: &mut GameStack) -> Vec<Diagnostic> {
     let mut out = Vec::new();
     let unreadable: Vec<usize> = discover::check_sources(manifest, root)
         .iter()
@@ -2383,8 +2374,7 @@ pub fn placement_game_checks(manifest: &Manifest, root: &Path, game: &mut GameSt
             continue;
         }
         let kind = c.kind();
-        let ents = crate::build::read_entities_file(&root.join(file))
-            .map_err(|message| EntityFileError { index, kind, message })?;
+        let Ok(ents) = crate::build::read_entities_file(&root.join(file)) else { continue };
         let mut seen = std::collections::BTreeSet::new();
         let mut twice = std::collections::BTreeSet::new();
         for e in &ents {
@@ -2426,7 +2416,7 @@ pub fn placement_game_checks(manifest: &Manifest, root: &Path, game: &mut GameSt
             });
         }
     }
-    Ok(out)
+    out
 }
 
 /// Run every hermetic rule.
