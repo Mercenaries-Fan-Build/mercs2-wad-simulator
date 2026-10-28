@@ -182,7 +182,7 @@ jobs:
       # HIER; the pack covers 5,309. So without this step every released workshop drew its skeletons
       # and exported its glTF nodes as `bone0`, `bone1`, … and name-based retarget had nothing to
       # match on. Built ONCE (the pack is OS-independent) from the committed
-      # `data/production_names.json`, which needs neither the parent-repo rainbow table nor a game
+      # `crates/mercs2_workshop/data/production_names.json`, which needs neither the parent-repo rainbow table nor a game
       # install — that self-containment is the whole reason the pack can be built on a CI runner.
       # The bundle's OTHER four sources live in the research repo, not this one: the registry rows,
       # the spawnable templates, the 220-class ECS schemas and the two decompiled-Lua corpora. They
@@ -214,7 +214,7 @@ jobs:
           # `--pack-data` reads its out-of-repo sources from the keys of a `.mercs2-local.toml`
           # found upward from its working directory. This step writes one at the workspace root with
           # `notes_docs_dir` set to the corpora checked out above, and runs from there. The names come
-          # from this repo's `data/production_names.json` and the five Ess / ECS / audio files from its
+          # from this repo's `crates/mercs2_workshop/data/production_names.json` and the five Ess / ECS / audio files from its
           # committed `workshop_data/`, both read from the checkout the binary was built from. The
           # raw-names keys (`rainbow_table`, `jul08_strings`) are read only when
           # production_names.json is absent.
