@@ -64,7 +64,7 @@ leading `_` before hashing (the `_dm`/`_nm`/`_sm` texture-suffix convention), so
 
 | Var | Effect |
 |-----|--------|
-| `MERCS2_WORKSHOP_DATA` | The second step of the reference-data chain (this run's choice from Settings → `MERCS2_WORKSHOP_DATA` → the Settings data folder → `workshop_data/` next to the exe → a `workshop_data/` found walking up from the CWD → the downloaded copy in the cache; first match wins). It must name a complete reference bundle (a directory holding `manifest.json`): one that does not is an error naming it, never passed over for a later step. With nothing set and nothing found, the tool downloads the release bundle into the cache; if that fails it exits with the download link and the folder to unpack it into. |
+| `MERCS2_WORKSHOP_DATA` | The second step of the reference-data chain (this run's choice from Settings → `MERCS2_WORKSHOP_DATA` → the Settings data folder → `workshop_data/` next to the exe → a `workshop_data/` found walking up from the CWD → the downloaded copy in the cache, used only when its `installed_pin.env` names the pin; first match wins). It must name a complete reference bundle (a directory holding `manifest.json`): one that does not is an error naming it, never passed over for a later step. With nothing set and nothing found, the tool downloads the pinned bundle (`crates/mercs2_workshop/data/workshop_data_pin.env`) into the cache after checking its sha256; if that fails it exits with the download URL, its sha256 and the folder to unpack it into. |
 | `MERCS2_GAME_DIR`, `VZ_WAD` | A game-archive chain step (see `--wad`): the install root, its `data` folder, or the file. The first one set is the source; set but holding no `vz.wad`, it stops the chain. |
 
 ## How the options combine
@@ -218,8 +218,9 @@ mercs2_workshop --wad D:/mercs2/vz.wad --pack-data workshop_data
   path that does not exist, or one of the source files under it is missing or unreadable; or
   `audio_manifest.json`, committed in the repo's `workshop_data/`, is missing from the checkout the
   binary was built from. The error names the key or the file; nothing is written.
-- **No reference bundle** — no complete `workshop_data/` was found and the download failed. The error
-  gives the release page to download `mercs2-workshop-data.zip` from and the folder to unpack it into.
+- **No reference bundle** — no complete `workshop_data/` was found and the download failed, or the
+  archive's sha256 did not match the pin (the error gives both digests; nothing was installed). The
+  error gives the pinned `mercs2-workshop-data.zip` URL, its sha256 and the folder to unpack it into.
 - **`workshop: <path>/<file>: <err>`** at boot — the complete bundle in use is missing, or holds a
-  malformed, `audio_manifest.json`. Rebuild it with `--pack-data` or download the release bundle again.
+  malformed, `audio_manifest.json`. Rebuild it with `--pack-data` or download the pinned bundle again.
 ```
