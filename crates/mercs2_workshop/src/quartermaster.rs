@@ -973,24 +973,41 @@ pub fn kind_title(kind: &str) -> &'static str {
 /// materials and state machine are borrowed, read-only); a shipped texture becomes a **target**.
 /// That distinction is the `no-destructive-replacements` mandate expressed as a menu: nothing here
 /// can produce a contribution that overwrites the asset you right-clicked.
-pub fn routes_for(is_texture: bool) -> &'static [(&'static str, &'static str)] {
-    if is_texture {
-        &[("replace_texture", "Replace this texture")]
-    } else {
-        &[
+pub fn routes_for(subject: Subject) -> &'static [(&'static str, &'static str)] {
+    match subject {
+        Subject::Model { .. } => &[
             ("add_outfit", "New outfit on this donor"),
             ("add_model", "New model on this donor"),
-        ]
+        ],
+        Subject::Texture => &[("replace_texture", "Replace this texture")],
+        Subject::Animation => &[("replace_animation", "Replace this animation")],
+        Subject::Effect => &[("replace_fx", "Edit this effect")],
+        Subject::StringTable => &[("edit_stringdb", "Edit this text")],
+        Subject::Other => &[],
     }
 }
 
-/// The route "Start a Shipment from this…" takes for an asset: a texture is replaced, a character
-/// becomes the donor of a wearable outfit, any other model the donor of a new model.
-pub fn first_route(is_texture: bool, is_character: bool) -> &'static str {
-    match (is_texture, is_character) {
-        (true, _) => "replace_texture",
-        (false, true) => "add_outfit",
-        (false, false) => "add_model",
+/// What a shipped asset is, as far as routing it into a Shipment goes: the kinds that take it as a
+/// donor or target ([`routes_for`]). A font, a UI movie, a FaceFX asset or a fxdict is `Other`: no
+/// kind targets one.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Subject {
+    Model { character: bool },
+    Texture,
+    Animation,
+    Effect,
+    StringTable,
+    Other,
+}
+
+/// The route "Start a Shipment from this…" takes for an asset: a character becomes the donor of a
+/// wearable outfit, any other model the donor of a new model, anything else its first route.
+/// `None`: no kind takes the asset.
+pub fn first_route(subject: Subject) -> Option<&'static str> {
+    match subject {
+        Subject::Model { character: true } => Some("add_outfit"),
+        Subject::Model { character: false } => Some("add_model"),
+        s => routes_for(s).first().map(|(k, _)| *k),
     }
 }
 
@@ -1006,7 +1023,12 @@ pub fn seeded(kind: &str, asset: &str, n: usize) -> Option<Contribution> {
         Contribution::AddOutfit { donor, .. } | Contribution::AddModel { donor, .. } => {
             *donor = Some(asset.to_string());
         }
-        Contribution::ReplaceTexture { target, .. } => *target = asset.to_string(),
+        Contribution::ReplaceTexture { target, .. } | Contribution::ReplaceAnimation { target, .. } => {
+            *target = asset.to_string()
+        }
+        Contribution::ReplaceFx { target, .. } => {
+            *target = mercs2_quartermaster::manifest::FxTarget::Effect { effect: asset.to_string() }
+        }
         // A layer routed from the World domain: `asset` is the layer NAME, so seed the field the kind
         // actually operates on (the stub's placeholder replaces/edits stay as authored defaults).
         Contribution::EditWorld { layer, .. } | Contribution::ActivateLayer { layer, .. } => {
@@ -4426,7 +4448,7 @@ mod tests {
         let mut p = Panel::default();
         p.scaffold(&tmp("start_old"), None).unwrap();
         let d = tmp("start_new");
-        let kind = first_route(false, true);
+        let kind = first_route(Subject::Model { character: true }).unwrap();
         let at = p.start_from(&d, None, kind, "pmc_hum_mattias").unwrap();
         assert_eq!(p.root(), Some(d.as_path()), "the new Shipment is not the open one");
         let cs = &p.shipment.as_ref().unwrap().manifest.contributions;
@@ -4439,9 +4461,41 @@ mod tests {
 
     #[test]
     fn the_first_route_follows_what_the_asset_is() {
-        assert_eq!(first_route(true, false), "replace_texture");
-        assert_eq!(first_route(false, true), "add_outfit");
-        assert_eq!(first_route(false, false), "add_model");
+        assert_eq!(first_route(Subject::Texture), Some("replace_texture"));
+        assert_eq!(first_route(Subject::Model { character: true }), Some("add_outfit"));
+        assert_eq!(first_route(Subject::Model { character: false }), Some("add_model"));
+        assert_eq!(first_route(Subject::Animation), Some("replace_animation"));
+        assert_eq!(first_route(Subject::Effect), Some("replace_fx"));
+        assert_eq!(first_route(Subject::StringTable), Some("edit_stringdb"));
+        assert_eq!(first_route(Subject::Other), None);
+    }
+
+    /// Every route a subject offers seeds its asset into the field the kind operates on.
+    #[test]
+    fn each_route_seeds_the_asset_it_was_offered_for() {
+        use mercs2_quartermaster::manifest::FxTarget;
+        let subjects = [
+            Subject::Model { character: false },
+            Subject::Texture,
+            Subject::Animation,
+            Subject::Effect,
+            Subject::StringTable,
+        ];
+        for s in subjects {
+            for (kind, _) in routes_for(s) {
+                let c = seeded(kind, "the_asset", 0).unwrap_or_else(|| panic!("no stub for {kind}"));
+                let seeded_with = match &c {
+                    Contribution::AddOutfit { donor, .. } | Contribution::AddModel { donor, .. } => donor.clone(),
+                    Contribution::ReplaceTexture { target, .. }
+                    | Contribution::ReplaceAnimation { target, .. }
+                    | Contribution::EditStringDb { target, .. } => Some(target.clone()),
+                    Contribution::ReplaceFx { target: FxTarget::Effect { effect }, .. } => Some(effect.clone()),
+                    c => panic!("{kind} seeded {}", c.kind()),
+                };
+                assert_eq!(seeded_with.as_deref(), Some("the_asset"), "{kind}");
+            }
+        }
+        assert!(routes_for(Subject::Other).is_empty());
     }
 
     #[test]
