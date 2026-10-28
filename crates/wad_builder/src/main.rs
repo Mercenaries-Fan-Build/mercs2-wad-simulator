@@ -1,6 +1,6 @@
 //! wad_builder — generic "raw asset → engine format → vz-patch.wad" builder.
 //!
-//! Jumping off from `dlc_port`/`cube_mod`, this crate adds the build-side
+//! Jumping off from `dlc_port`/`mercs2_smuggler`, this crate adds the build-side
 //! editing those lack. It started with Lua-script replacement inside a
 //! multi-entry `scripts_vz` block (compile-from-source → re-wrap BINN/UCFX → fix
 //! CSUM + chunk_size) and now covers model, texture and whole-WAD surgery too.
