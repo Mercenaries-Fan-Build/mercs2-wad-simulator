@@ -199,7 +199,9 @@ or a digest other than 64 lowercase hex digits stops the build. The install down
 nothing else, and checks the archive's sha256 against `BUNDLE_SHA256` before unpacking; a mismatch
 stops the install with both digests, unpacks nothing, and leaves the installed copy as it was. A
 staging folder or installed copy the install cannot remove stops it with an error naming the folder
-and the removal. When
+and the removal. The installed copy is renamed aside to `workshop_data.previous` before the new one
+is moved in, and removed only after: when the move fails, the previous copy is renamed back and the
+error says it was kept, or names both failures and where the previous copy is. When
 the download fails, the run stops with an error giving the URL, its sha256 and the folder to unpack
 the zip into. A complete bundle missing `audio_manifest.json`, or holding a malformed one, stops the
 boot with an error naming the file.
