@@ -393,12 +393,6 @@ fn populate_pmc_interior(
 ) {
     use mercs2_core::glam::{Quat, Vec3};
     use mercs2_core::{AnimState, ModelRef, SkinPalette, Transform};
-    const IDENTITY: [[f32; 4]; 4] = [
-        [1.0, 0.0, 0.0, 0.0],
-        [0.0, 1.0, 0.0, 0.0],
-        [0.0, 0.0, 1.0, 0.0],
-        [0.0, 0.0, 0.0, 1.0],
-    ];
 
     match pmc::load_pmc_interior(wad, recruits, stockpile) {
         Ok(pieces) => {
@@ -407,7 +401,7 @@ fn populate_pmc_interior(
                 if !scene.has_model(m.hash) {
                     scene.load_model(m.hash, &m.verts, &m.indices, &m.draws, &m.textures, &m.skin);
                 }
-                let nbones = scene.model_bone_count(m.hash).max(1);
+                let rest = scene.model_rest_palette(m.hash);
                 world.spawn((
                     Transform {
                         translation: Vec3::new(pos[0], pos[1], pos[2]),
@@ -416,7 +410,7 @@ fn populate_pmc_interior(
                     },
                     ModelRef { model: m.hash },
                     AnimState::default(),
-                    SkinPalette { mats: vec![IDENTITY; nbones] },
+                    SkinPalette { mats: rest },
                 ));
             }
             println!("[game] PMC interior: {n} pieces placed");
