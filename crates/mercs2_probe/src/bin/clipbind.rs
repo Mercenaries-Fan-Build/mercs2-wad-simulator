@@ -61,7 +61,7 @@ fn main() {
         if tags > with_binding {
             "UNCONSUMED binding chunk(s) exist — the mapping IS in the data"
         } else {
-            "no spare binding — the 50-track clips ship no trnm at all"
+            "every `trnm` tag in the block is a clip's parsed binding"
         }
     );
 
@@ -92,14 +92,22 @@ fn main() {
                     println!("    row {r}: {tag:<6} u0={u0:<12} size={size:<8}{}",
                         if u0 == 0xFFFF_FFFF { "  (container marker -> reader SKIPS this row)" } else { "" });
                     if &c[ro..ro + 4] == b"trnm" && u0 != 0xFFFF_FFFF {
-                        // The body the reader parses as [u32 count][u32 leading][count x u32 hash].
+                        // The body the reader parses as [u16 count|u16 flags][u32 leading][count x u32 hash].
                         let s = data_off as usize + u0 as usize;
-                        let body = &c[s..(s + size as usize).min(c.len())];
+                        let Some(body) = c.get(s..(s + size as usize).min(c.len())) else {
+                            println!("      trnm body at {s} lies past the container's {} bytes", c.len());
+                            continue;
+                        };
                         println!("      trnm body: size={} => implies count {} if size==8+4*count",
                             body.len(), (body.len().saturating_sub(8)) / 4);
-                        println!("      first 6 words: {:?}",
-                            (0..6).map(|k| format!("0x{:08X}", rd(body, k * 4))).collect::<Vec<_>>());
-                        println!("      READER READS count = {} (word 0)", rd(body, 0));
+                        println!("      first {} words: {:?}", (body.len() / 4).min(6),
+                            (0..(body.len() / 4).min(6)).map(|k| format!("0x{:08X}", rd(body, k * 4))).collect::<Vec<_>>());
+                        if body.len() >= 4 {
+                            println!("      READER READS count = {} (word 0 low half; high half 0x{:04X} is flags)",
+                                rd(body, 0) & 0xFFFF, rd(body, 0) >> 16);
+                        } else {
+                            println!("      body is {} bytes — shorter than the count word", body.len());
+                        }
                     }
                 }
                 break;
