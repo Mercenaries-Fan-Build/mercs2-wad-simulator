@@ -31,10 +31,11 @@
 //! asserts byte-exact equality before writing (`sges` is lossless).
 //!
 //! Output goes to `--out` (default `crates/anim_patch/out/vz-patch.wad`); the real
-//! game vz-patch.wad is only touched when `--deploy` is passed. The source vz.wad
+//! game vz-patch.wad is only touched when `--deploy` is passed, and `--deploy`
+//! together with `--out` is refused (two destinations). The source vz.wad
 //! and the deploy target come from the install named by `$MERCS2_GAME_DIR` or
 //! `$VZ_WAD`, then the EA Games registry key on Windows; with none of those,
-//! `--wad` is mandatory.
+//! `--wad` is mandatory and `--deploy` fails.
 //!
 //! Module map:
 //!   `main`     — CLI, FFCS load, block selection, patch-WAD build/verify/write.
@@ -68,7 +69,8 @@ struct Cli {
     /// vz.wad found via $MERCS2_GAME_DIR / $VZ_WAD / the registry, if present.
     #[arg(long)]
     wad: Option<PathBuf>,
-    /// Output patch WAD path (default: crates/anim_patch/out/vz-patch.wad).
+    /// Output patch WAD path (default: crates/anim_patch/out/vz-patch.wad). Refused together
+    /// with --deploy.
     #[arg(short, long)]
     out: Option<PathBuf>,
     /// Select the animgroup block whose path_string contains this substring
@@ -96,9 +98,9 @@ struct Cli {
     /// Zero every clip's dynamic wavelet coefficient data (static/near-bind pose).
     #[arg(long)]
     freeze: bool,
-    /// Write the result to the game's data/vz-patch.wad instead of the default --out path
-    /// (an explicit --out is still used).
-    #[arg(long)]
+    /// Write the result to the game's data/vz-patch.wad (the install from $MERCS2_GAME_DIR /
+    /// $VZ_WAD / the registry) instead of the default --out path. Refused together with --out.
+    #[arg(long, conflicts_with = "out")]
     deploy: bool,
     /// Just report which block holds the clip (and its clips) and exit.
     #[arg(long)]
@@ -585,10 +587,12 @@ fn run() -> Result<(), String> {
         println!("verify: recompressed block re-decompresses byte-exact ({} bytes)", work.len());
     }
 
-    // Resolve output path (scratch by default; game dir only with --deploy).
+    // Resolve output path (scratch by default; game dir only with --deploy, which clap refuses
+    // alongside --out).
     let out = if cli.deploy {
-        cli.out.clone().or_else(registry_vz_patch_wad).ok_or(
-            "--deploy given but game vz-patch.wad path not found via MERCS2_GAME_DIR / VZ_WAD / registry (pass --out)",
+        registry_vz_patch_wad().ok_or(
+            "--deploy given but game vz-patch.wad path not found via MERCS2_GAME_DIR / VZ_WAD / registry \
+             (set MERCS2_GAME_DIR or VZ_WAD, or drop --deploy and pass --out)",
         )?
     } else {
         cli.out.clone().unwrap_or_else(|| {
@@ -614,5 +618,34 @@ fn main() -> ExitCode {
             eprintln!("anim_patch error: {e}");
             ExitCode::FAILURE
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Cli;
+    use clap::error::ErrorKind;
+    use clap::Parser;
+
+    /// `--deploy` names the game's own `vz-patch.wad` as the destination and `--out` names another;
+    /// given both, the tool must refuse rather than pick one, and the refusal names both flags.
+    #[test]
+    fn deploy_with_an_explicit_out_is_refused_naming_both_flags() {
+        let err = Cli::try_parse_from(["anim_patch", "--roundtrip", "--deploy", "--out", "x.wad"])
+            .err()
+            .expect("--deploy with --out must not parse");
+        assert_eq!(err.kind(), ErrorKind::ArgumentConflict);
+        let text = err.to_string();
+        assert!(text.contains("--deploy"), "the error names --deploy: {text}");
+        assert!(text.contains("--out"), "the error names --out: {text}");
+    }
+
+    /// Each flag alone still parses: the refusal is about the pair, not either flag.
+    #[test]
+    fn deploy_alone_and_out_alone_parse() {
+        let deploy = Cli::try_parse_from(["anim_patch", "--roundtrip", "--deploy"]).expect("--deploy alone");
+        assert!(deploy.deploy && deploy.out.is_none());
+        let out = Cli::try_parse_from(["anim_patch", "--roundtrip", "--out", "x.wad"]).expect("--out alone");
+        assert!(!out.deploy && out.out.as_deref() == Some(std::path::Path::new("x.wad")));
     }
 }
