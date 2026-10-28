@@ -177,8 +177,15 @@ pub struct ClipEntry {
     pub name: String,
     /// The clip's `name_hash` (numeric form of `name`).
     pub name_hash: u32,
-    /// Byte offset of the embedded Havok packfile within `block_bytes`.
+    /// The clip's whole `animation` container within `block_bytes`: start and length.
+    pub container_offset: usize,
+    pub container_len: usize,
+    /// Byte offset of the embedded Havok packfile within `block_bytes` — the container's `data`
+    /// body; the container's own start when it has no `data` row (see [`Self::havok_len`]).
     pub havok_offset: usize,
+    /// Length of that `data` body; 0 when the container has none (the 29 MANM material
+    /// animations, whose rows are `MANM`/`MINF`/`TRCK`, not a Havok packfile).
+    pub havok_len: usize,
     /// Compression class of the clip's animation object.
     pub class: String,
     /// Number of transform tracks (`hkaAnimation::numTransformTracks`, equals the
@@ -193,6 +200,29 @@ pub struct ClipEntry {
     pub num_poses: u32,
     /// Per-track bone name-hash binding for this clip (from `trnm`).
     pub binding: AnimBinding,
+}
+
+impl ClipEntry {
+    /// The clip's Havok packfile inside `block_bytes` (the block [`parse_animgroup`] read), bounded
+    /// to its `data` body. An error when the container has no `data` row: reading from
+    /// `havok_offset` to the end of the block would scan into the next clip's packfile and decode
+    /// that clip instead.
+    pub fn packfile<'a>(&self, block_bytes: &'a [u8]) -> Result<&'a [u8], String> {
+        if self.havok_len == 0 {
+            return Err(format!("clip 0x{:08X} carries no Havok packfile (no `data` row)", self.name_hash));
+        }
+        block_bytes
+            .get(self.havok_offset..self.havok_offset + self.havok_len)
+            .ok_or_else(|| format!("clip 0x{:08X}: packfile runs past the block", self.name_hash))
+    }
+
+    /// The clip's whole `animation` container inside `block_bytes` (what
+    /// [`crate::manm::parse_material_anim`] reads for a container with no `data` row).
+    pub fn container<'a>(&self, block_bytes: &'a [u8]) -> Result<&'a [u8], String> {
+        block_bytes
+            .get(self.container_offset..self.container_offset + self.container_len)
+            .ok_or_else(|| format!("clip 0x{:08X}: container runs past the block", self.name_hash))
+    }
 }
 
 /// A parsed animgroup.
@@ -518,7 +548,7 @@ pub fn parse_animgroup(block_bytes: &[u8]) -> Result<AnimGroup, String> {
         let track_to_bone_hash = read_trnm(container).unwrap_or_default();
 
         // data = the Havok packfile; read its animation header.
-        let (class, class_name, duration, ntt, nft, poses, havok_offset) =
+        let (class, class_name, duration, ntt, nft, poses, havok_offset, havok_len) =
             match find_data_body(container) {
                 Some((data_rel, data_body)) => match read_anim_header(data_body) {
                     Some(h) => (
@@ -529,6 +559,7 @@ pub fn parse_animgroup(block_bytes: &[u8]) -> Result<AnimGroup, String> {
                         h.num_float_tracks,
                         h.num_poses,
                         container_start + data_rel,
+                        data_body.len(),
                     ),
                     None => (
                         ClipClass::Other,
@@ -538,6 +569,7 @@ pub fn parse_animgroup(block_bytes: &[u8]) -> Result<AnimGroup, String> {
                         0,
                         0,
                         container_start + data_rel,
+                        data_body.len(),
                     ),
                 },
                 None => (
@@ -548,6 +580,7 @@ pub fn parse_animgroup(block_bytes: &[u8]) -> Result<AnimGroup, String> {
                     0,
                     0,
                     container_start,
+                    0,
                 ),
             };
         let _ = class_name;
@@ -555,7 +588,10 @@ pub fn parse_animgroup(block_bytes: &[u8]) -> Result<AnimGroup, String> {
         clips.push(ClipEntry {
             name: format!("0x{name_hash:08X}"),
             name_hash: *name_hash,
+            container_offset: container_start,
+            container_len: size,
             havok_offset,
+            havok_len,
             class: class.key().to_string(),
             num_transform_tracks: ntt,
             num_float_tracks: nft,
