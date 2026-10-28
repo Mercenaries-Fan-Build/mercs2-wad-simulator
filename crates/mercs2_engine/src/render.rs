@@ -161,6 +161,25 @@ pub fn make_bc_view(
     Some(tex.create_view(&wgpu::TextureViewDescriptor::default()))
 }
 
+/// A material's alpha-test uniform (shader `MaterialParams`): `x` = the reference alpha a pixel must
+/// exceed, or -1 for a material that is not alpha-tested; `y` = the alpha multiplier (c98.w). Retail
+/// tests `diffuse.a × c98.w > ALPHAREF/255` with `ALPHAFUNC` GREATER, and only for a material whose
+/// flags carry the alpha-test bit (`mercs2_formats::texture::material_alpha_tested`).
+pub fn material_params(device: &wgpu::Device, material_flags: u16, material_alpha: f32) -> wgpu::Buffer {
+    use mercs2_formats::texture::{material_alpha_tested, MATERIAL_ALPHA_REF};
+    let alpha_ref = if material_alpha_tested(material_flags) { MATERIAL_ALPHA_REF as f32 / 255.0 } else { -1.0 };
+    let data = [alpha_ref, material_alpha, 0.0, 0.0];
+    let buf = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("material params"),
+        size: 16,
+        usage: wgpu::BufferUsages::UNIFORM,
+        mapped_at_creation: true,
+    });
+    buf.slice(..).get_mapped_range_mut().copy_from_slice(bytemuck::cast_slice(&data));
+    buf.unmap();
+    buf
+}
+
 pub fn make_tex_bind(
     device: &wgpu::Device,
     bgl: &wgpu::BindGroupLayout,
@@ -168,11 +187,14 @@ pub fn make_tex_bind(
     diffuse: &wgpu::TextureView,
     normal: &wgpu::TextureView,
     specular: &wgpu::TextureView,
+    params: &wgpu::Buffer,
 ) -> wgpu::BindGroup {
     device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("material bind"),
         layout: bgl,
         entries: &[
+            // binding 4 = the material's alpha-test parameters ([`material_params`]).
+            wgpu::BindGroupEntry { binding: 4, resource: params.as_entire_binding() },
             wgpu::BindGroupEntry {
                 binding: 0,
                 resource: wgpu::BindingResource::TextureView(diffuse),
