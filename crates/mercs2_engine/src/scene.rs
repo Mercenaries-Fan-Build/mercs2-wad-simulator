@@ -257,6 +257,9 @@ struct ModelGpu {
     tex_binds: Vec<wgpu::BindGroup>,
     /// Number of bones in this model's palette (>=1; 1 = unskinned identity).
     bone_count: usize,
+    /// The palette an instance no clip drives rests at, `bone_count` long
+    /// ([`mesh::SkinData::rest_palette`]).
+    rest: Vec<[[f32; 4]; 4]>,
     /// Model-fit (centre + uniform scale) so each model is normalised for viewing.
     fit: glam::Mat4,
     /// Baked-lighting flag: this model bakes its lighting into vertex color, so the shader must NOT
@@ -1564,12 +1567,10 @@ impl Scene {
 
         let fit = glam::Mat4::from_scale(glam::Vec3::splat(skin.scale))
             * glam::Mat4::from_translation(-glam::Vec3::from(skin.center));
-        // Size the palette to cover every joint the VERTS actually reference, not just the entries
-        // the skin ships. Imported rigged meshes carry a 1-entry identity skin but their verts index
-        // a full source/target palette; clamping the per-entity palette to 1 makes those verts read
-        // a zero matrix on the GPU and collapse onto the origin (the "smooshed spike").
-        let max_joint = verts.iter().flat_map(|v| v.joints).map(|j| j as usize).max().unwrap_or(0);
-        let bone_count = skin.bones.len().max(max_joint + 1).max(1);
+        // The palette covers every joint the VERTS reference (see `rest_palette`): a short one makes
+        // those verts read a zero matrix on the GPU and collapse onto the origin (the "smooshed spike").
+        let rest = skin.rest_palette(verts).unwrap_or_else(|e| panic!("model 0x{hash:08X}: {e}"));
+        let bone_count = rest.len();
 
         self.models.insert(
             hash,
@@ -1581,6 +1582,7 @@ impl Scene {
                 draw_calls,
                 tex_binds,
                 bone_count,
+                rest,
                 fit,
                 prelit: skin.prelit,
                 terrain_blend,
@@ -1620,11 +1622,15 @@ impl Scene {
         self.entity_state.remove(&e);
     }
 
-    /// Bone count of a loaded model (>=1; 1 = unskinned identity). 0 if the model isn't loaded.
-    /// The streaming executor sizes a woken prop's identity `SkinPalette` to this so a rigged prop's
-    /// verts (weighted to bone >= 1) don't collapse to the origin under a 1-bone palette.
-    pub fn model_bone_count(&self, hash: u32) -> usize {
-        self.models.get(&hash).map(|m| m.bone_count).unwrap_or(0)
+    /// The `SkinPalette` an instance of a loaded model starts at: its rest palette, one entry per bone
+    /// the verts reference (identity for an unrigged model). A rigged prop or vehicle no clip drives
+    /// keeps it — retail holds such a node at its `+16` reference pose, which an identity palette (the
+    /// `+80` bind) is not. Panics if the model isn't loaded: an entity is spawned after its model.
+    pub fn model_rest_palette(&self, hash: u32) -> Vec<[[f32; 4]; 4]> {
+        match self.models.get(&hash) {
+            Some(m) => m.rest.clone(),
+            None => panic!("model 0x{hash:08X}: an instance is spawned before the model is loaded"),
+        }
     }
 
     /// Free a model's GPU resources (geometry + material bind groups), if loaded. The streaming
