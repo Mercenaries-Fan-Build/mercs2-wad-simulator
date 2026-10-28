@@ -170,19 +170,27 @@ struct Cli {
     limit: usize,
 }
 
-/// `rainbow_table` from `.mercs2-local.toml` and the `data/aset_discovered_names.json`,
-/// `data/aset_block_strings.json` and `data/aset_expanded_names.json` fragments under its
-/// `notes_docs_dir`. Every table must load.
+/// `rainbow_table` from `.mercs2-local.toml`, the workshop crate's `data/aset_discovered_names.json`,
+/// the identifier-shaped `data/aset_block_strings.json` names under its `notes_docs_dir` (minus the
+/// workshop crate's `data/rejected_names.json`), and its `data/aset_expanded_names.json`. Every
+/// table must load.
 fn rainbow() -> Result<RainbowTable, String> {
     let start = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-    let data = mercs2_formats::game_paths::local_config_notes_docs_dir(start)?.join("data");
+    let notes = mercs2_formats::game_paths::local_config_notes_docs_dir(start)?.join("data");
+    let names = start.join("../mercs2_workshop/data");
     let tables: Vec<PathBuf> = vec![
         mercs2_formats::game_paths::local_config_rainbow_table(start)?,
-        data.join("aset_discovered_names.json"),
-        data.join("aset_block_strings.json"),
-        data.join("aset_expanded_names.json"),
+        names.join("aset_discovered_names.json"),
     ];
-    RainbowTable::load_many(&tables).map_err(|e| format!("load rainbow tables {tables:?}: {e}"))
+    let mut rb = RainbowTable::load_many(&tables).map_err(|e| format!("load rainbow tables {tables:?}: {e}"))?;
+    let harvested = notes.join("aset_block_strings.json");
+    rb.merge(
+        RainbowTable::load_harvested(&harvested, &names.join("rejected_names.json"))
+            .map_err(|e| format!("load {}: {e}", harvested.display()))?,
+    );
+    let expanded = names.join("aset_expanded_names.json");
+    rb.merge(RainbowTable::load(&expanded).map_err(|e| format!("load {}: {e}", expanded.display()))?);
+    Ok(rb)
 }
 
 /// Sanitize a cue name into a filename.
