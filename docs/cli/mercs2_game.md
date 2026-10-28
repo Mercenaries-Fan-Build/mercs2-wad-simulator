@@ -2,8 +2,7 @@
 
 `mercs2_game` **is** the Mercenaries 2 game exe: it configures the asset-agnostic `mercs2_engine`
 from the player's real `.profile` save and boots the full third-person world in-process (there is no
-separate engine binary). It also carries a set of headless dev tools that inspect `vz.wad` and the
-interior/collision/texture pipelines without opening a window.
+separate engine binary).
 
 The tool hand-rolls its argument parsing with `std::env::args()` — there is **no `--help`, no `-h`,
 and no `--version`**. Flags are matched literally, most in `main.rs` but a few directly in
@@ -19,23 +18,14 @@ mercs2_game --plan [SAVE.profile]            # print boot-state banner, do not r
 mercs2_game --stream [SAVE.profile]          # alternate free-fly streaming world
 mercs2_game --interior-orbit                 # menu/world boot + debug orbit camera
 
-mercs2_game --time-load                      # dev: headless timed interior load
-mercs2_game --interior-assemble              # dev: headless interior assembly + floor Ys
-mercs2_game --find-mesh <name|0xHASH>        # dev: locate a mesh across every WAD
-mercs2_game --dump-asets                     # dev: dump every ASET row in vz.wad
-mercs2_game --comps [BLOCK]                  # dev: COMP inventory of a block
-mercs2_game --interior-placements [BLOCK]    # dev: ModelName placements of a block
-mercs2_game --hall-hunt                      # dev: find the interior hall shell mesh
-mercs2_game --tex-audit <0xMODEL>            # dev: per-texture streaming audit for a model
-mercs2_game --tex-locate <0xHASH>            # dev: find every block carrying a texture chunk
-mercs2_game --coll-probe                     # dev: walk the player through the hall collision soup
-mercs2_game --c3-flat                        # dev: scan c3 models for flat floor-sized meshes
+mercs2_game --game-dir <INSTALL> ...         # any of the above, against that install
+mercs2_game --saves-dir <FOLDER> ...         # any of the above, against that saves folder
 ```
 
 When run from source: `cargo run -p mercs2_game -- <args>`.
 
-Every boot mode requires the game to be installed so the EA Games registry key resolves to a folder
-containing `data\vz.wad` (see [Failure modes](#failure-modes)).
+Every mode needs `vz.wad`. The install resolves from `--game-dir`, then `MERCS2_GAME_DIR`, then
+`VZ_WAD`, then (Windows only) the EA Games registry key (see [Failure modes](#failure-modes)).
 
 ## Options
 
@@ -49,66 +39,62 @@ shell menu.
 
 | Argument | Type | Default | Required | What it does |
 | --- | --- | --- | --- | --- |
-| `<SAVE.profile>` | path | newest `.profile` in the save folder | no | The first argument that does **not** start with `--` (after argv[0]) is taken as an explicit save path. Its presence suppresses the shell menu and boots that save directly. If omitted (and not in menu mode), the newest `.profile` in `%USERPROFILE%\Documents\My Games\Mercenaries 2\SaveGames` is used. |
+| `<SAVE.profile>` | path | newest `.profile` in the saves folder | no | The first argument that does **not** start with `--` (after argv[0]) and is not the value of `--game-dir`/`--wad`/`--saves-dir`/`--saves` is taken as an explicit save path. Its presence suppresses the shell menu and boots that save directly. If omitted (and not in menu mode), the newest `.profile` in the resolved saves folder (see [Root flags](#root-flags)) is used. |
+
+### Root flags
+
+Both take the **next** argument as their value; a next argument that starts with `--` is not taken.
+
+| Flag | Value | Default | What it does |
+| --- | --- | --- | --- |
+| `--game-dir` (alias `--wad`) | install root, its `data` folder, or `vz.wad` itself | `MERCS2_GAME_DIR`, then `VZ_WAD`, then (Windows only) `HKLM\SOFTWARE\WOW6432Node\EA Games\Mercenaries 2 World in Flames\Install Dir` | The install the assets are read from. |
+| `--saves-dir` (alias `--saves`) | folder | `MERCS2_SAVES_DIR`, then `Documents/My Games/Mercenaries 2/SaveGames` under `$USERPROFILE` / `$HOME`, then `<install>/SaveGames` | The folder `*.profile` saves are listed from. An explicit folder is used whether or not it exists; every other source must exist. |
 
 ### Boot-mode flags
 
 | Flag | Value | Default | What it does |
 | --- | --- | --- | --- |
 | *(none)* | — | — | **Retail flow.** Scans `SaveGames\*.profile` (header-only) and opens the main menu (`menu::Menu`); the player picks Continue / New Game / Load Game / Quit and the chosen save drives the world boot in-loop. New Game uses Mattias, upgrade tier 0, default skin. Only reached when there is no explicit profile, no `--plan`, and no `--stream`. |
-| `--plan` | — | off | Resolve the profile (explicit or newest), parse it to header + `SaveState`, print the boot-state banner (profile name, active contract, playtime/cash/fuel, flow chain, active missions, `vz_state` overlay layers, PMC-interior spawn), then **return without rendering**. No window opens. |
+| `--plan` | — | off | Resolve the profile (explicit or newest), parse it to header + `SaveState`, print the boot-state banner (profile name, active contract, playtime/cash/fuel, flow chain, active missions, `vz_state` overlay layers, and the resume-branch spawn marker `Pmc_Entry1`), then **return without rendering**. No window opens. |
 | `--stream` | — | off | Boot the alternate **free-fly streaming world** (`mercs2_engine::game_world::run_game_world`) at the PMC-interior spawn with the save's overlay layers, populating the PMC interior via `populate_pmc_interior`. Suppresses the shell menu. |
 | `--interior-orbit` | — | off | Adds the engine's **debug orbit camera** to the interior. Read only in the shell-menu boot and the default full-world boot; **ignored under `--stream`** (that branch never consults it). |
-| `--interior` | — | off | **Skips loading the terrain model** during the world boot (checked in `world.rs`, not `main.rs`). The terrain sits above the SE terrain peak and would occlude the interior room, so this hides it. Active in the default full-world boot and the shell-menu boot. |
+| `--interior` | — | off | **Skips the streaming world** (base streaming terrain, overlay-layer lights and the streamer) during the world boot (checked in `world.rs`, not `main.rs`). The interior room sits above the SE terrain peak and the exterior would occlude it, so the boot stays fully static. Active in the default full-world boot and the shell-menu boot. |
 | `--markers` | — | off | Spawns the placement-marker **debug glyphs** for the loaded block (checked in `world.rs`). Only has an effect when the boot has placement data (`data.placements`); otherwise silently does nothing. |
-
-### Dev-tool flags (headless, no window)
-
-Each of these short-circuits `main` — it runs, prints to stdout, and returns before any boot logic.
-They are checked in the source order listed here; if you pass two, the **first in this list wins**.
-
-| Flag | Value | What it does |
-| --- | --- | --- |
-| `--time-load` | — | Runs the full interior `load_world_data` (all core systems on) headless and prints the total wall-clock time; the loader itself prints `stage k/n` timings for the 14 `LOAD_STAGES`. A repeatable benchmark for the load path. |
-| `--interior-assemble` | — | Assembles the PMC interior from the **newest** save (`load_pmc_interior`) and reports floor/furniture Y extents. No window. |
-| `--find-mesh` | `<name\|0xHASH>` (next arg) | Resolves the arg to a hash (`0x…` parsed as hex, else `pandemic_hash_m2` of the name with a leading `_` stripped) and searches **every `.wad`** beside `vz.wad` (vz/English/shell/Loading) for that mesh, reporting per-WAD model count, presence, ASET types, and whether a mesh / typed-model builds. Missing next arg hashes the empty string. |
-| `--dump-asets` | — | Dumps every ASET row in `vz.wad` as `name_hash type_id primary(1/0)`, one per line — for reverse-name hunts over non-primary assets. |
-| `--comps` | `[BLOCK]` (next arg, default `667`) | Prints the COMP-type inventory of one WAD block (which components each placement carries). Default block 667 = the PMC interior overlay. |
-| `--interior-placements` | `[BLOCK]` (next arg, default `667`) | Lists every `ModelName` placement in a block — hash, pos, quat-derived yaw, and offset from the interior spawn — sorted by X. Default block 667. |
-| `--hall-hunt` | — | Scans every `vz.wad` model for a room-sized hollow mesh whose local bbox encloses the player-enter hardpoint, to positively ID the PMC interior hall shell. Prints up to 40 candidates, enclosing ones first. |
-| `--tex-audit` | `<0xMODEL>` (next arg) | For a model hash, builds it, collects its distinct diffuse textures, and for each shows every ASET texture-row (block + primary), per-block dims/format/body size, whether that block holds the FULL mip0 or only the streamed resident tail, and the hi-res assembly across the cell subtree. Same hash-parsing rule as `--find-mesh`. |
-| `--tex-locate` | `<0xHASH>` (next arg) | Scans **every block's entry table** (not just the ASET table) for a texture chunk (`type_hash 0xF011157A`) with that name hash, to find streaming copies that are not ASET-indexed. Reports `(block, chunk_size, path)` big-first and dumps the leading chunk bytes of each hit. Same hash-parsing rule as `--find-mesh`. |
-| `--coll-probe` | — | Builds the hall collision soup (mesh `0x39AF17DC`, state `0x01`, at actor origin `(3750,450,-3840)`), then walks the player character in each cardinal direction from the spawn, reporting metres travelled before it sticks (`physics::soup::move_character`). |
-| `--c3-flat` | — | Scans c3 models for flat, floor-sized meshes (PMC-floor candidates) via `mercs2_engine::diag::c3_flat_report`. |
 
 ### Environment variables
 
-These are read inside `load_pmc_interior`, so they affect **both** `--interior-assemble` **and** any
-real boot that assembles the PMC interior (default full-world and `--stream`). They are diagnostic
-toggles — presence of the variable (any value) enables them.
+The root variables stand in for the root flags when those are absent:
+
+| Variable | Effect |
+| --- | --- |
+| `MERCS2_GAME_DIR` | The install, in any form `--game-dir` takes. |
+| `VZ_WAD` | Same forms as `MERCS2_GAME_DIR`; read after it. |
+| `MERCS2_SAVES_DIR` | The saves folder; used only if it exists. |
+| `USERPROFILE` / `HOME` | Home directories probed for `Documents/My Games/Mercenaries 2/SaveGames`. |
+
+These are read inside `load_pmc_interior`, so they affect any boot that assembles the PMC interior
+(default full-world and `--stream`). They are diagnostic toggles — presence of the variable (any
+value) enables them.
 
 | Variable | Effect |
 | --- | --- |
 | `MERCS2_FURNDBG` | Prints a `[furn]` per-item floor-Y line for each furniture placement (`pos.y + mesh bmin.y`). |
 | `MERCS2_ALLNAMES` | Prints a `[name]` line for every placement name in each interior state block. |
 | `MERCS2_ALLBLOCKS` | Overrides recruit-driven block selection and loads **every** interior variant block `[667, 711, 461, 703, 291]` — shows every recruit's bay regardless of the save. |
-| `USERPROFILE` | Standard Windows var; used to locate the `SaveGames` folder. If unset, no save folder is found. |
 
 ## How the options combine
 
 The single most important thing to understand is the **decision order in `main`**, because it is
 strictly first-match-wins and several flags shadow each other:
 
-1. **Dev-tool flags are checked first, in the fixed order** listed in the table above
-   (`--time-load` → `--interior-assemble` → `--find-mesh` → `--dump-asets` → `--comps` →
-   `--interior-placements` → `--hall-hunt` → `--tex-audit` → `--tex-locate` → `--coll-probe` →
-   `--c3-flat`). The first one present runs and the process returns. **All boot flags and the
-   positional profile are ignored** when any dev tool is present. Passing two dev tools runs only the
-   earlier one.
+1. **The roots are resolved first** — install (`--game-dir` → `MERCS2_GAME_DIR` → `VZ_WAD` →
+   registry) and saves (`--saves-dir` → `MERCS2_SAVES_DIR` → home probes → `<install>/SaveGames`).
+   No `vz.wad` ends the run here with exit 1, before any other flag is looked at (`--plan` included).
 
-2. **If no dev tool matched**, three things are computed:
+2. **Then** three things are computed:
    - `plan_only` = `--plan` present;
-   - `explicit` = the first non-`--` argument = the positional profile path (or none);
+   - `explicit` = the first non-`--` argument that is not a root flag's value = the positional
+     profile path (or none);
    - `--stream` presence.
 
 3. **Shell-menu boot is taken only when all three are false**: no explicit profile **and** no
@@ -144,10 +130,9 @@ Flag-interaction summary:
   `RecruitUnlocks` picks which recruit-bay state blocks load, and `cash` seeds the stockpile so only
   the stockpile tiers the save has reached are shown. `MERCS2_ALLBLOCKS` overrides the recruit-driven
   block choice.
-- **Dev-tool value args do not collide with the positional profile.** `--find-mesh`, `--tex-audit`,
-  `--tex-locate`, `--comps`, and `--interior-placements` read their value as the *next* arg, but
-  those tools return before the positional-profile scan runs, so e.g. `mercs2_game --comps 667` never
-  treats `667` as a save path.
+- **Root-flag values do not collide with the positional profile.** The argument after `--game-dir`,
+  `--wad`, `--saves-dir` or `--saves` is skipped by the positional-profile scan (`VALUE_FLAGS` in
+  `main.rs`), so `mercs2_game --game-dir <install>` never treats the install folder as a save.
 
 ## Examples
 
@@ -178,39 +163,21 @@ mercs2_game --stream
 ```
 
 ```sh
-# Profile the load path: prints per-stage timings for the 14 load stages plus a total.
-mercs2_game --time-load
+# Point at an install and a saves folder explicitly (no registry, no environment).
+mercs2_game --game-dir "C:\Program Files (x86)\EA Games\Mercenaries 2 World in Flames" --saves-dir "D:\m2saves"
 ```
 
 ```sh
-# Find where a mesh lives across every WAD in the install (by name or hash).
-mercs2_game --find-mesh vehicle_tank_leopard
-mercs2_game --find-mesh 0x39AF17DC
-```
-
-```sh
-# Audit texture streaming for a model: which blocks hold full mip0 vs only the resident tail.
-mercs2_game --tex-audit 0x39AF17DC
-```
-
-```sh
-# List the authored furniture layout of the PMC interior overlay (block 667), with per-item floor Ys.
-MERCS2_FURNDBG=1 mercs2_game --interior-assemble
-```
-
-```sh
-# Diagnose why the player sticks in the interior: walk the collision soup in all 4 directions.
-mercs2_game --coll-probe
+# Boot a save and print a per-item floor-Y line for each PMC interior furniture placement.
+MERCS2_FURNDBG=1 mercs2_game "C:\...\SaveGames\slot1.profile"
 ```
 
 ## Failure modes
 
-- **No `vz.wad` found.** Every rendering/boot mode and most dev tools resolve the install via the EA
-  Games registry key. If it does not point at a folder containing `data\vz.wad`, the tool prints
-  `mercs2_game: no vz.wad found — install Mercenaries 2 …` and **exits with code 1**
-  (`require_vz_wad`). Some dev tools (`--interior-assemble`, `--comps`, `--interior-placements`,
-  `--hall-hunt`, `--tex-audit`, `--tex-locate`, `--coll-probe`, `--c3-flat`) instead resolve `vz.wad`
-  best-effort and simply **do nothing / print a "no vz.wad" line** rather than exiting.
+- **No `vz.wad` found.** If no source (`--game-dir`, `MERCS2_GAME_DIR`, `VZ_WAD`, the registry key)
+  yields an install holding `data/vz.wad`, the tool prints `mercs2_game: no vz.wad found. Point it at
+  your install with any of: …` (listing every source) and **exits with code 1** (`resolve_roots`).
+  This happens before every mode, `--plan` included.
 - **No save found.** In a direct boot with no explicit path and no `.profile` in the SaveGames
   folder, the tool prints `mercs2_game: no .profile save found …` and **exits 1**. (The shell-menu
   path tolerates zero saves — it just reports "0 save(s) available".)
@@ -219,12 +186,6 @@ mercs2_game --coll-probe
   could not be decoded). A profile whose header parses but whose Lua `SaveState` does not still boots
   — the banner prints `(SaveSingleton Lua state unavailable - header only)` and the world loads with
   no overlays.
-- **Missing dev-tool value.** `--find-mesh` / `--tex-audit` / `--tex-locate` with no following arg
-  hash the empty string (a benign but useless lookup). `--comps` / `--interior-placements` with a
-  non-numeric or missing next arg fall back to block **667**.
-- **`--interior-assemble` reads the newest save**, not any explicit path; if that save fails to parse
-  it prints `[save] parse FAILED` / `[save] save_state FAILED` and proceeds with default
-  recruit/stockpile state.
 - **Unknown flags are silent.** A misspelled flag (e.g. `--Plan`, `--interior_orbit`) is neither an
   error nor a warning — it is ignored, and if it lacks the `--` prefix it may be mistaken for a
   profile path. There is no usage message.
