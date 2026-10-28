@@ -11,13 +11,15 @@ fresh engine and opens the window itself.
 
 Default boot is the retail shell flow:
 
-1. enumerate `%USERPROFILE%\Documents\My Games\Mercenaries 2\SaveGames\*.profile` (header-only parse)
-   and open on the native main menu / save browser (`menu.rs`);
+1. enumerate `*.profile` in the saves folder (`--saves-dir`, else `MERCS2_SAVES_DIR`, else
+   `Documents/My Games/Mercenaries 2/SaveGames` under `$USERPROFILE`/`$HOME`, else
+   `<install>/SaveGames`; header-only parse) and open on the native main menu / save browser
+   (`menu.rs`);
 2. the picked slot's profile is parsed to header + `SaveState` (active contract, mission flow chain,
    the `vz_state_*` world-state overlays to activate, playtime) via `mercs2_formats::save`;
 3. the game hands `mercs2_engine::app::run` a `world::Mercs2Game` — the full third-person world:
    terrain, heightmap, player avatar + clips, c3 cells, placements, the PMC HQ interior and its
-   furniture, exterior props, lights/FX, watermap, resident audio, hero spawn (14 load phases,
+   furniture, exterior props, lights/FX, watermap, resident audio, hero spawn (19 load phases,
    `LOAD_PHASES` in `world.rs` is the loading bar's single source of truth).
 
 The spawn is the authentic game-start **PMC interior**, `(3794.0427, 450.7505, -3911.0322)`
@@ -53,8 +55,10 @@ through `mercs2_engine::…`, which owns and re-exports them.
   `wavebank` (PCM) + a `sounddb` (cue→wave routing) under the same asset name.
 * **Engine/game split** — `docs/modernization/pangea_engine_alignment.md`.
 
-Assets come from the installed retail `vz.wad`, resolved through the EA Games registry key
-(`mercs2_engine::wad::registry_vz_wad`); with no install the binary exits with that hint.
+Assets come from the installed retail `vz.wad`, resolved from `--game-dir` (alias `--wad`), else
+`MERCS2_GAME_DIR`, else `VZ_WAD`, else (Windows only) the EA Games registry key
+(`mercs2_engine::paths::resolve_game_dir`); with no install the binary exits 1 with a hint listing
+those sources.
 
 ## Usage
 
@@ -76,36 +80,16 @@ Other boot modes:
 | --- | --- |
 | `--stream` | alternate free-fly streaming world (`mercs2_engine::game_world::run_game_world`) at the PMC spawn, with the save's overlays |
 | `--interior-orbit` | adds the debug orbit camera to the interior |
+| `--game-dir <path>` (alias `--wad`) | the install root, its `data` folder, or `vz.wad` itself |
+| `--saves-dir <path>` (alias `--saves`) | the folder `*.profile` saves are listed from |
 
-Dev tools (headless unless noted — all parse args in `main.rs`; the *engine* never parses args):
-
-| flag | effect |
-| --- | --- |
-| `--time-load` | full interior load with no window, timing each of the 14 load stages |
-| `--interior-assemble` | assemble the PMC interior from the newest save and report floor/furniture Ys (`MERCS2_FURNDBG=1` adds per-item floor Ys) |
-| `--find-mesh <name\|0xHASH>` | search every WAD in the install (vz/English/shell/Loading) for a mesh |
-| `--dump-asets` | dump every ASET row in vz.wad as `name_hash type_id primary` |
-| `--comps [block]` | COMP-type inventory of a block (default 667, the PMC interior overlay) |
-| `--interior-placements [block]` | every `ModelName` placement in a block: hash, pos, quat, yaw, offset from spawn |
-| `--hall-hunt` | scan vz.wad models for the room-sized mesh whose local bbox encloses the player-enter hardpoint (IDs the interior hall shell) |
-| `--tex-audit <0xMODEL>` | per-texture ASET rows for a model, per-block dims/body size, and whether a block carries the FULL mip0 or only the resident tail |
-| `--tex-locate <0xHASH>` | scan every block's entry table for a texture chunk (finds streaming copies that aren't ASET-indexed) |
-| `--coll-probe` | build the hall collision set and walk the player in each cardinal direction, reporting distance travelled before sticking |
-| `--c3-flat` | scan c3 models for flat, floor-sized meshes |
-
-Ignored probe tests (need the real install):
-
-```sh
-cargo test -p mercs2_game --test hardpoint_probe    -- --ignored --nocapture
-cargo test -p mercs2_game --test spawn_marker_probe -- --ignored --nocapture
-cargo test -p mercs2_game --test audio_wad_probe    -- --ignored --nocapture
-```
+Full flag reference: `docs/cli/mercs2_game.md`.
 
 ## Modules
 
 Internal (binary crate — no public API surface):
 
-* `world` — the render/boot path: `Mercs2Game` (the engine's `Game` impl), `WorldData`, the 14-phase
+* `world` — the render/boot path: `Mercs2Game` (the engine's `Game` impl), `WorldData`, the 19-phase
   `load_world_data`, TPS/free camera toggle, player controller wiring, collision, audio hand-off.
 * `pmc` — PMC HQ interior: spawn/actor constants, `derive_interior_spawn`, `load_pmc_interior`,
   `RecruitUnlocks`, `Stockpile`.
@@ -127,6 +111,5 @@ Internal (binary crate — no public API surface):
   (`+0x63`) is proven, the file byte is not.
 * The interior boot still runs `mercs2_engine::script_host::run_interior_boot` (the authentic
   `MrxUtil.SpawnActor` path) through the engine's public API; only the geometry realization
-  (`pmc::load_pmc_interior`) lives in this crate. (`main.rs`'s `populate_pmc_interior` doc comment
-  still describes both as engine-side — the `load_pmc_interior` half has since moved here.)
+  (`pmc::load_pmc_interior`) lives in this crate.
 * Exterior props are bounded: only meshes within 400 m of the spawn, capped at 200 distinct meshes.
