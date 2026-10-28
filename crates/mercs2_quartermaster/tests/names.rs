@@ -236,7 +236,7 @@ contributions:
 // The real table
 // ---------------------------------------------------------------------------
 
-/// Against the committed 23,110-entry lookup. Skips rather than fails when the crate is built
+/// Against the committed 23,106-entry lookup. Skips rather than fails when the crate is built
 /// outside the workspace, since a missing table degrades diagnostics but is never fatal.
 #[test]
 fn the_committed_table_reverses_a_known_asset() {
