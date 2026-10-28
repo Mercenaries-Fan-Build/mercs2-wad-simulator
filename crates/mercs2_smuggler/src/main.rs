@@ -27,7 +27,7 @@
 //!   * `--no-cubeize`: identity passthrough.
 //!
 //! # Inspect / extract modes
-//!   * `--list`: list blocks matching `--target-name` that contain a model, and exit.
+//!   * `--list`: list every block whose path matches `--target-name`, and exit.
 //!   * `--dump-container <file>`: write the donor model's raw UCFX bytes (ASET-primary
 //!     source) — the structural donor a mesh converter needs.
 //!   * `--dump-block <file>`: write the whole raw decompressed block. Needed because
@@ -63,7 +63,8 @@ struct Cli {
     /// Source vz.wad to read the target block(s) from.
     #[arg(long)]
     source_wad: PathBuf,
-    /// Output patch WAD path (typically <game>/data/vz-patch.wad). Not needed with --dump-container.
+    /// Output patch WAD path (typically <game>/data/vz-patch.wad). Not needed with --list,
+    /// --dump-container or --dump-block.
     #[arg(short, long)]
     output: Option<PathBuf>,
     /// Extract the donor model container (raw UCFX bytes) to this file and exit. Reads the model
@@ -97,7 +98,7 @@ struct Cli {
     /// Comma-separated path substrings to auto-select when --block-index is absent.
     #[arg(long, default_value = "deliverycrate,crateaid")]
     target_name: String,
-    /// List blocks matching --target-name (that contain a model) and exit.
+    /// List every block whose path matches --target-name and exit.
     #[arg(long)]
     list: bool,
     /// Identity passthrough (no cube-ize) — isolates geometry vs plumbing issues.
@@ -286,7 +287,7 @@ fn build_extra(spec: &str) -> Result<PatchBlock, String> {
         .map_err(|e| format!("bad hash in '{spec}': {e}"))?;
     let type_id: u32 = parts[1].parse().map_err(|e| format!("bad type_id in '{spec}': {e}"))?;
     let type_hash = type_hash_for_type_id(type_id)
-        .ok_or_else(|| format!("unsupported type_id {type_id} (need 19 model / 27 texture)"))?;
+        .ok_or_else(|| format!("unsupported type_id {type_id} (need 19 model / 27 texture / 35 script)"))?;
     let container = std::fs::read(parts[2]).map_err(|e| format!("read {}: {e}", parts[2]))?;
     if container.len() < 20 || &container[0..4] != b"UCFX" {
         return Err(format!("{} is not a UCFX container", parts[2]));
@@ -441,7 +442,7 @@ fn run() -> Result<(), String> {
         .collect();
 
     if cli.list {
-        println!("Blocks matching {needles:?} that contain a model:");
+        println!("Blocks matching {needles:?}:");
         for (i, p) in archive.paths.iter().enumerate() {
             let lp = p.to_lowercase();
             if needles.iter().any(|n| lp.contains(n)) {
@@ -529,7 +530,7 @@ fn run() -> Result<(), String> {
     let output = cli
         .output
         .clone()
-        .ok_or_else(|| "--output is required (unless --dump-container)".to_string())?;
+        .ok_or_else(|| "--output is required (unless --list, --dump-container or --dump-block)".to_string())?;
 
     let mut blocks: Vec<PatchBlock> = Vec::new();
     let mut seen: std::collections::HashSet<u32> = std::collections::HashSet::new();
