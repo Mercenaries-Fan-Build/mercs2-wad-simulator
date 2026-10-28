@@ -9,6 +9,9 @@
 //! An entity is addressed by its `key` (a bare `0xHHHHHHHH`, the `Transform` record key the extract
 //! prints) or by its `name` (matched against the layer's `Name` COMP). Key is unambiguous; name is
 //! the convenience.
+//!
+//! [`parse_entities`] reads the other placement file: the NEW entities an `add_placement` or
+//! `add_layer` places, closed to the fields a placement has.
 
 use serde::{Deserialize, Serialize};
 
@@ -39,6 +42,76 @@ pub struct WorldDoc {
 /// Read an edited world file.
 pub fn parse(yaml: &str) -> Result<WorldDoc, String> {
     serde_norway::from_str(yaml).map_err(|e| format!("edit_world file is not valid YAML: {e}"))
+}
+
+/// One entity record of an `add_placement` / `add_layer` entity file: the key, the model, the
+/// position, an optional orientation (`quat` or `yaw`, never both) and an optional name. A field
+/// outside these is refused by name.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EntityRecord {
+    key: u32,
+    model: String,
+    pos: [f32; 3],
+    #[serde(default)]
+    quat: Option<[f32; 4]>,
+    /// Degrees about Y.
+    #[serde(default)]
+    yaw: Option<f32>,
+    #[serde(default)]
+    name: Option<String>,
+}
+
+/// Read an `add_placement` / `add_layer` entity file: one [`EntityRecord`] mapping, or a list of
+/// them. Each record is read on its own, so a refused field is named with the record it is in. A
+/// record without an orientation is unrotated; one without a name is named `modent_<key>`.
+pub fn parse_entities(yaml: &str) -> Result<Vec<mercs2_formats::placement_build::NewEntity>, String> {
+    let doc: serde_norway::Value =
+        serde_norway::from_str(yaml).map_err(|e| format!("entity file is not valid YAML: {e}"))?;
+    let records: Vec<EntityRecord> = match doc {
+        serde_norway::Value::Sequence(items) => items
+            .into_iter()
+            .enumerate()
+            .map(|(i, v)| serde_norway::from_value(v).map_err(|e| format!("entity {i}: {e}")))
+            .collect::<Result<_, _>>()?,
+        serde_norway::Value::Mapping(_) => {
+            vec![serde_norway::from_value(doc).map_err(|e| format!("the entity: {e}"))?]
+        }
+        _ => {
+            return Err("an entity file is one entity record (a mapping) or a list of them".into());
+        }
+    };
+    if records.is_empty() {
+        return Err("the entity file lists no entities".into());
+    }
+    records
+        .into_iter()
+        .enumerate()
+        .map(|(i, e)| {
+            let quat = match (e.quat, e.yaw) {
+                (Some(_), Some(_)) => {
+                    return Err(format!(
+                        "entity {i} (key 0x{:08X}) gives both `quat` and `yaw`; give one — \
+                         `quat: [x, y, z, w]` or `yaw: <degrees>`",
+                        e.key
+                    ))
+                }
+                (Some(q), None) => q,
+                (None, Some(yaw)) => {
+                    let h = yaw.to_radians() * 0.5;
+                    [0.0, h.sin(), 0.0, h.cos()]
+                }
+                (None, None) => [0.0, 0.0, 0.0, 1.0],
+            };
+            Ok(mercs2_formats::placement_build::NewEntity {
+                key: e.key,
+                model_hash: crate::manifest::asset_hash(&e.model),
+                pos: e.pos,
+                quat,
+                name: e.name.unwrap_or_else(|| format!("modent_{:08x}", e.key)),
+            })
+        })
+        .collect()
 }
 
 /// A placement as the extractor sees it — enough to write a baseline the author edits.
@@ -104,6 +177,56 @@ mod tests {
         assert_eq!(d.edits[0].pos, Some([1.0, 2.0, 3.0]));
         assert!(d.edits[0].quat.is_none() && d.edits[0].model.is_none());
         assert_eq!(d.edits[1].model.as_deref(), Some("pmc_hum_mattias"));
+    }
+
+    /// One record or a list; `yaw` turns about Y; a record with no orientation is unrotated and one
+    /// with no name is named by its key.
+    #[test]
+    fn an_entity_file_is_one_record_or_a_list() {
+        let one = parse_entities("key: 0x0F00A001\nmodel: al_prop_barrel_red\npos: [1, 2, 3]\n").unwrap();
+        assert_eq!(one.len(), 1);
+        assert_eq!(one[0].key, 0x0F00_A001);
+        assert_eq!(one[0].model_hash, crate::manifest::asset_hash("al_prop_barrel_red"));
+        assert_eq!(one[0].pos, [1.0, 2.0, 3.0]);
+        assert_eq!(one[0].quat, [0.0, 0.0, 0.0, 1.0]);
+        assert_eq!(one[0].name, "modent_0f00a001");
+
+        let list = parse_entities(
+            "- { key: 1, model: a, pos: [0, 0, 0], yaw: 180, name: first }\n\
+             - { key: 2, model: b, pos: [0, 0, 0], quat: [0, 0, 1, 0] }\n",
+        )
+        .unwrap();
+        assert_eq!(list.len(), 2);
+        assert_eq!(list[0].name, "first");
+        assert!((list[0].quat[1] - 1.0).abs() < 1e-6 && list[0].quat[3].abs() < 1e-6, "{:?}", list[0].quat);
+        assert_eq!(list[1].quat, [0.0, 0.0, 1.0, 0.0]);
+    }
+
+    /// The schema is closed: a field a placement does not have is refused BY NAME, in a single
+    /// record and in a list — `position` / `orientation` are not fields.
+    #[test]
+    fn an_unknown_entity_field_is_refused_by_name() {
+        let e = parse_entities("key: 1\nmodel: a\npos: [0, 0, 0]\nposition: [0, 0, 0]\n").unwrap_err();
+        assert!(e.contains("unknown field `position`"), "{e}");
+        let e = parse_entities("- { key: 1, model: a, pos: [0, 0, 0] }\n- { key: 2, model: a, pos: [0, 0, 0], orientation: 9 }\n")
+            .unwrap_err();
+        assert!(e.starts_with("entity 1:") && e.contains("unknown field `orientation`"), "{e}");
+    }
+
+    /// `quat` and `yaw` together are refused rather than one silently winning.
+    #[test]
+    fn quat_and_yaw_together_are_refused() {
+        let e = parse_entities("key: 7\nmodel: a\npos: [0, 0, 0]\nquat: [0, 0, 0, 1]\nyaw: 90\n").unwrap_err();
+        assert!(e.contains("both `quat` and `yaw`") && e.contains("0x00000007"), "{e}");
+    }
+
+    /// A file that is not YAML, an empty list, and a scalar are refused.
+    #[test]
+    fn an_unusable_entity_file_is_refused() {
+        assert!(parse_entities("key: [\n").unwrap_err().contains("not valid YAML"));
+        assert!(parse_entities("[]\n").unwrap_err().contains("no entities"));
+        assert!(parse_entities("42\n").unwrap_err().contains("one entity record"));
+        assert!(parse_entities("key: 1\nmodel: a\n").unwrap_err().contains("missing field `pos`"));
     }
 
     #[test]
