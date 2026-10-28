@@ -57,6 +57,36 @@ impl RainbowTable {
         Ok(Self { m2 })
     }
 
+    /// Load a table of names HARVESTED from block bytes (`aset_block_strings.json`), keeping only
+    /// the identifier-shaped ones ([`mercs2_formats::hash::is_identifier_shaped`]) and dropping
+    /// every `(hash, name)` pair listed in `rejected` (`crates/mercs2_workshop/data/rejected_names.json`).
+    /// A rejected entry whose name does not hash to its key is an error.
+    pub fn load_harvested(path: &Path, rejected: &Path) -> Result<Self, Box<dyn std::error::Error>> {
+        let rejected = Self::load(rejected).map_err(|e| format!("{}: {e}", rejected.display()))?;
+        for (hash, names) in &rejected.m2 {
+            for n in names {
+                if mercs2_formats::hash::pandemic_hash_m2(n) != *hash {
+                    return Err(format!("rejected name {n} does not hash to 0x{hash:08X}").into());
+                }
+            }
+        }
+        let mut t = Self::load(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        t.m2.retain(|hash, names| {
+            let bad = rejected.candidates(*hash);
+            names.retain(|n| mercs2_formats::hash::is_identifier_shaped(n) && !bad.contains(n));
+            !names.is_empty()
+        });
+        Ok(t)
+    }
+
+    /// Add `other`'s names for the hashes this table does not have yet (existing entries win, as in
+    /// [`Self::load_many`]).
+    pub fn merge(&mut self, other: RainbowTable) {
+        for (hash, names) in other.m2 {
+            self.m2.entry(hash).or_insert(names);
+        }
+    }
+
     /// Resolve a hash to the first (best) candidate name.
     pub fn resolve(&self, hash: u32) -> Option<&str> {
         self.m2.get(&hash).and_then(|v| v.first()).map(|s| s.as_str())
