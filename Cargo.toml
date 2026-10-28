@@ -13,8 +13,9 @@ repository = "https://github.com/Mercenaries-Fan-Build/notes-on-the-released-gam
 # Internal crate versions for publishing. Each publishable member references its intra-workspace
 # deps as `<name> = { workspace = true }`; the version here is what crates.io resolves against.
 # Bump sized by commit count since the crate's last release: <=2 patch, <20 minor, >=20 major.
-# NOTE: mercs2_formats crossed to 3.0.0, so every dependent's `workspace = true` requirement moved
-# with it — a `^2.1` consumer (e.g. mercs2-modkit) will NOT pick 3.0.0 up until it is edited too.
+# NOTE: mercs2_formats crossed to 5.0.0, so every dependent's `workspace = true` requirement moved
+# with it — a consumer pinned to an earlier major (e.g. mercs2-modkit) will NOT pick 5.0.0 up until it
+# is edited too.
 [workspace.dependencies]
 mercs2_formats = { path = "crates/mercs2_formats", version = "5.0" }
 loadprobe = { path = "crates/loadprobe", version = "2.3.2" }
