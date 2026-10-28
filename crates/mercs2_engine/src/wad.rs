@@ -183,6 +183,49 @@ pub fn model_list_all(wad: &Wad) -> Vec<(u32, u16)> {
     v
 }
 
+/// Every model of `wad` ([`model_list_all`]) with its container and HIER nodes, block by block so
+/// each block decompresses once. A model is sliced out of its decompressed block; one that slice
+/// cannot resolve (a multi-block model, e.g. `al_veh_boat_destroyer`) is extracted whole
+/// ([`extract_container`]). `each(model, read)`: `Ok((container, hier))` (`hier` empty when the
+/// model has none), `Err` naming why neither read found it — a block that does not decompress fails
+/// each of its models. `progress(done_blocks, total_blocks)` after each block.
+pub fn for_each_model_hier(
+    wad: &mut Wad,
+    mut progress: impl FnMut(usize, usize),
+    mut each: impl FnMut(u32, Result<(&[u8], Vec<mercs2_formats::orchestrator::HierNode>), String>),
+) {
+    use mercs2_formats::orchestrator::parse_hier;
+    let mut by_block: std::collections::BTreeMap<u16, Vec<u32>> = std::collections::BTreeMap::new();
+    for (hash, block) in model_list_all(wad) {
+        by_block.entry(block).or_default().push(hash);
+    }
+    let total = by_block.len();
+    for (bi, (block, models)) in by_block.into_iter().enumerate() {
+        let dec = decompress_block_index(wad, block);
+        for m in models {
+            let sliced = dec.as_ref().ok().and_then(|d| model_span_in(d, m));
+            let hier = sliced.as_deref().map(parse_hier).unwrap_or_default();
+            if let (Some(c), false) = (&sliced, hier.is_empty()) {
+                each(m, Ok((c, hier)));
+                continue;
+            }
+            match extract_container(wad, m) {
+                Ok(c) => {
+                    let hier = parse_hier(&c);
+                    each(m, Ok((&c, hier)));
+                }
+                Err(e) => match (&dec, sliced) {
+                    // The block read, the slice found the model, it has no HIER: that is the answer.
+                    (Ok(_), Some(c)) => each(m, Ok((&c, Vec::new()))),
+                    (Err(be), _) => each(m, Err(format!("block {block}: {be}; whole extract: {e}"))),
+                    (Ok(_), None) => each(m, Err(e)),
+                },
+            }
+        }
+        progress(bi + 1, total);
+    }
+}
+
 /// Slice the model container (`type_hash == "model"`) out of a decompressed block.
 /// The model container for `name_hash` inside an already-decompressed block, if that block carries
 /// one. A model's LODs are not all in its primary ASET block (see `extract_texture_hires` for the
