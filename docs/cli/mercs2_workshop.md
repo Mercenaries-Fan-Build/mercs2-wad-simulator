@@ -28,7 +28,7 @@ leading `_` before hashing (the `_dm`/`_nm`/`_sm` texture-suffix convention), so
 
 | Flag | Value | Default | Required | Repeatable | Effect |
 |------|-------|---------|----------|------------|--------|
-| `--wad <path>` | path (the install root, its `data` folder, or the file) | the game-archive chain's answer | See note | No | The base WAD every mode reads: the first step of the game-archive chain (`--wad` → the saved setting → an install the workshop sits inside → `MERCS2_GAME_DIR` / `VZ_WAD` → the Windows registry key; first match wins). **A source that is set but broken (here, a `--wad` with no `vz.wad`) stops the chain: it is never passed over for the next source.** A headless mode with the chain unresolved exits 2 printing every step and why it was not used; the window opens on Settings instead. |
+| `--wad <path>` | path (the install root, its `data` folder, or the file) | the game-archive chain's answer | See note | No | The base WAD every mode reads: the first step of the game-archive chain (`--wad` → this run's choice in Settings → the saved setting → an install the workshop sits inside (the exe's directory, then the working directory, when it holds `Mercenaries2.exe`) → `MERCS2_GAME_DIR` / `VZ_WAD` → the Windows registry key; first match wins). **A source that is set but broken (here, a `--wad` with no `vz.wad`) stops the chain: it is never passed over for the next source.** `--gpu-check` and `--pack-data` run before an archive is required; every other mode needs one — including `--hash` and `--hash-file`, which never open it. A headless mode with the chain unresolved exits 2 printing every step and why it was not used; the window opens on Settings instead. |
 | `--overlay <path>` | path | none | No | **Yes** | Opens a patch WAD *on top of* the base (the retail exe's `vz-patch.wad` last-opened-wins mechanism). Used to layer DLC-ported content (obama, sarah, DLC world blocks) into the workbench. Applied in argument order. Only consulted by the overlay-aware modes (see combining section). |
 | `--no-auto-patch` | flag | off (auto-patch on) | No | n/a | Disables the automatic loading of a `vz-patch.wad` found next to the base WAD. By default that sibling patch is auto-opened as the first overlay, exactly as the retail exe does. |
 
@@ -45,9 +45,19 @@ leading `_` before hashing (the `_dm`/`_nm`/`_sm` texture-suffix convention), so
 | `--export <name\|0xHASH>` | one asset | No | Writes OBJ + MTL + PNG textures to `workshop_export/<name>/`. Overlay-aware. |
 | `--export-bundle <name\|0xHASH\|class:X>` | one asset or a class | No | Writes a **lossless** bundle per target: editable glTF + PNG skins + every LOD rung's original container bytes + a reassembly manifest. `class:helicopter` (etc.) bundles every model in that class. Output root set by `--out` (default `workshop_export`). Overlay-aware. |
 | `--out <dir>` | path | No | Output root for `--export-bundle` only. Default `workshop_export`. Ignored by every other mode. |
-| `--mod-new <name> <donor\|0xHASH> <mesh>` | 3 positional | No | Publishes a NOVEL new-hash model into a patch WAD: imports `mesh` (`.obj`/`.gltf`/`.glb`), grafts it onto the `donor` model's container, injects under `hash(name)`, compresses, SHA-256s and runs a load self-test. Overlay-aware (base + overlays form the source stack). |
-| `--mod-group <N>` | usize | No | Target draw-group index for `--mod-new` only. Default `0`; an unparseable value silently falls back to `0`. |
-| `--mod-out <path>` | path | No | Output patch-WAD path for `--mod-new` only. Default `vz-mod.wad` next to the base WAD. |
+| `--mod-new <name> <donor\|0xHASH> <mesh>` | 3 positional | No | Publishes a NOVEL new-hash model into a patch WAD: imports `mesh` (a glTF file, `.gltf`/`.glb`, one part per primitive), keeps the `donor` model's skeleton, routes each glTF material to its own donor drawing group and repoints that group's MTRL slots at the material's own textures, injects under `hash(name)`, compresses, SHA-256s and runs a load self-test. Overlay-aware (base + overlays form the source stack). |
+| `--mod-group <N>` | usize | No | Parsed by `--mod-new` and not used: `--mod-new` picks a drawing group per glTF material. |
+| `--mod-out <path>` | path | No | Output patch-WAD path for `--mod-new` and `--mod-skel`. Default `vz-mod.wad` (`--mod-new`) or `vz-mod-skel.wad` (`--mod-skel`) next to the base WAD. |
+| `--mod-skel <name> <donor\|0xHASH> <mesh.glb>` | 3 positional | No | Conforms a NOVEL multi-part model onto a fresh skeleton (one authored HIER node per glTF primitive) minted under `hash(name)` — the donor is not overwritten; large parts split across donor draw groups, and a part whose material or node name contains `rotor` (any case) rides the donor's main-rotor node. Writes the patch WAD, its sha256 and a self-test line per target. Overlay-aware. |
+| `--dump-bindings` | flag | n/a | One TSV row per catalog model (`hash`, `resolves`, `bones`, `skinned_groups`, `verts`, `tris`, the texture hashes it binds) in one WAD open, for name recovery; a model that does not resolve is reported with `resolves=0`. Overlay-aware. |
+| `--dump-mtrl <donor\|0xHASH>` | one asset | No | Prints the donor container's MTRL records (flags and per-slot texture hashes). Overlay-aware. |
+| `--export-shipment <file.glb>` | one file | No | Writes (or appends to) a Shipment: scaffolds `--shipment-out` (default `shipment`) when it holds no manifest, copies the source in, and upserts an outfit contribution with the derived bone map. Sub-flags: `--rebind-target` (default `pmc_hum_mattias`), `--shipment-name` (default `my_outfit`), `--shipment-wearer` (default `mattias`). Overlay-aware. |
+| `--faithful <file.glb>` | one file | No | Runs the Skeleton workbench's faithful retarget onto `--rebind-target` (default `pmc_hum_mattias`) headlessly, prints the draw-group and material binding and a conform audit, and renders the result flat white offscreen to `<out>_front/_side/_threeq.png`. Sub-flags: `--faithful-out` (default `faithful`), `--faithful-t` (default `0.35`), `--faithful-clip`. Overlay-aware. |
+| `--shot <file.glb>` | one file | No | Offscreen render of a retargeted glTF import to `<out>_front/_side/_threeq.png`. Sub-flags: `--rebind-target` (default `pmc_hum_jen_v2`), `--shot-out` (default `shot`), `--shot-clip`. Overlay-aware. |
+| `--render <name\|0xHASH>` | one asset | No | Loads the full LOD-block chain and renders the asset offscreen on the engine renderer to `<out>_front/_side/_threeq.png`. Sub-flags: `--render-out` (default `render`), `--render-clips` (list the clips that bind the rig), `--render-clip`, `--render-t` (default `0.35`), `--render-flat`, `--render-flip-green`, `--render-outfits` / `--render-outfit "<template>"[#n]` (character kits), `--render-view-state 0xNN` (force the draw gate's view state). Overlay-aware. |
+| `--rebind-check <file.glb>` | one file | No | Rebinds the import onto `--rebind-target` (default `pmc_hum_jen_v2`) both ways and reports, per key body part, where its vertices land against the target bone. Sub-flag: `--rebind-clip`. Overlay-aware. |
+| `--bones <name\|0xHASH>` | one asset | No | Prints the model's HIER bone names and positions in index order. Overlay-aware. |
+| `--gpu-check` | flag | n/a | Reports whether wgpu gets an adapter (real GPU, then software fallback). Runs before the game-archive chain is resolved; reads no WAD. |
 | `--import-check <file>` | one file | No | Parses a foreign `.obj`/`.gltf`/`.glb` and prints what *would* import (verts, tris, draw groups, textures, bbox). Does not write anything. Does not open the WAD. |
 | `--tex-check <name\|0xHASH>` | one asset | No | Prints one texture's dims / format / mip count / byte size. **Base WAD only — ignores overlays.** |
 | `--tex-png <name\|0xHASH> <out.png>` | asset + path | No | Decodes a texture to PNG, assembling the full mip chain from the finer LOD blocks (falls back to the resident tail). **Base WAD only.** |
@@ -57,8 +67,8 @@ leading `_` before hashing (the `_dm`/`_nm`/`_sm` texture-suffix convention), so
 | `--block-strings <blk>` | block index | No | Prints printable ASCII runs (≥5 chars) from a decompressed block — pairs with `--hash-file` for hash-hunting names embedded in game data. Unparseable `blk` becomes `0`. Opens the overlay stack but decompresses **only the base WAD (`wads[0]`)**. |
 | `--hash <names…>` | one or more | consumes rest | m2-hashes every following argument and prints `0xHASH  name`. Consumes ALL remaining args. Does not open the WAD (but WAD resolution must still succeed — see `--wad`). |
 | `--hash-file <file>` | one file | No | m2-hashes every non-empty line of `file`. Same WAD-resolution caveat as `--hash`. |
-| `--pack-data [dir]` | optional dir | No | Builds the redistributable `workshop_data/` reference bundle (packed `names.bin`, registry CSVs, ECS schemas, decompiled Lua, and `audio_manifest.json`, committed in the repo's `workshop_data/`) and writes its `manifest.json` last. `dir` defaults to `workshop_data`; a following token starting with `--` is not consumed as the dir. In-repo sources are read from the checkout the binary was built from: names come from the committed `crates/mercs2_workshop/data/production_names.json` (with no such file, from the raw corpora, including the name fragments committed beside it), and `audio_manifest.json` from the committed `workshop_data/` (packing into that folder leaves it in place); a missing one fails before anything is written. Every other source is named by the `notes_docs_dir` key of `.mercs2-local.toml` (and, when `production_names.json` is absent, the `rainbow_table` and `jul08_strings` keys). A missing key or source file fails before anything is written. Does not read the WAD. |
-| *(no mode flag)* | — | — | Opens the GUI window (`app::run`). When the game archive or the reference data has no answer, the window opens on Settings with that chain in red and every other page locked; fixing it there loads the game without a restart. |
+| `--pack-data [dir]` | optional dir | No | Builds the redistributable `workshop_data/` reference bundle (packed `names.bin`, registry CSVs, ECS schemas, decompiled Lua, and `audio_manifest.json`, committed in the repo's `workshop_data/`) and writes its `manifest.json` last. `dir` defaults to `workshop_data`; a following token starting with `--` is not consumed as the dir. In-repo sources are read from the checkout the binary was built from: names come from the committed `crates/mercs2_workshop/data/production_names.json` (with no such file, from the raw corpora, including the name fragments committed beside it), and `audio_manifest.json` from the committed `workshop_data/` (packing into that folder leaves it in place); a missing one fails before anything is written. Every other source is named by the `notes_docs_dir` key of `.mercs2-local.toml` (and, when `production_names.json` is absent, the `rainbow_table` and `jul08_strings` keys). A missing key or source file fails before anything is written. Runs before an archive is required: the WAD (and overlays) is read only on the raw-corpora path, to trim `names.bin` to the referenced hashes; with no archive found that path writes an untrimmed `names.bin`. |
+| *(no mode flag)* | — | — | Opens the GUI window (`app::run`). `--shipment <dir>` opens that Shipment in it, on the Shipment page. When the game archive or the reference data has no answer, the window opens on Settings with that chain in red and every other page locked; fixing it there loads the game without a restart. |
 
 ### Environment variables
 
@@ -74,9 +84,11 @@ mode flags in a fixed sequence and the FIRST one present wins; all later ones ar
 is:
 
 ```
---pack-data → --list → --inventory → --mod-new → --audio-export → --export → --export-bundle →
---hash → --block-strings → --hash-file → --states → --import-check →
---tex-check → --tex-scan → --tex-scan-blocks → --tex-png-block → --tex-png → --check
+--gpu-check → --pack-data → (archive required from here) → --dump-bindings → --list →
+--inventory → --mod-new → --mod-skel → --audio-export → --export → --export-bundle → --hash →
+--dump-mtrl → --block-strings → --hash-file → --states → --import-check → --tex-check →
+--tex-scan → --tex-scan-blocks → --tex-png-block → --tex-png → --export-shipment → --faithful →
+--shot → --render → --rebind-check → --bones → --check
 ```
 
 So `mercs2_workshop --check foo --list` runs `--list` (it is earlier in the order), and
@@ -84,7 +96,7 @@ So `mercs2_workshop --check foo --list` runs `--list` (it is earlier in the orde
 is present at all, the GUI opens. There is no diagnostic for "you passed two modes"; the loser is
 just silently dropped.
 
-**WAD selection is global and evaluated first, before any mode.** `--wad`, `--overlay`,
+**WAD selection is global and evaluated before every mode but `--gpu-check`.** `--wad`, `--overlay`,
 `--no-auto-patch` are read up front, and the game-archive chain is resolved up front. `--pack-data`
 runs without an archive (it only trims names against one) unless a set source is broken, which exits
 2. Every other mode — `--hash` and `--hash-file` included, though they never read the WAD — exits 2
@@ -94,20 +106,28 @@ when the chain has no answer, printing each step and why it was not used.
 auto-loaded sibling `vz-patch.wad` (unless `--no-auto-patch`), then every `--overlay` in argument
 order. Later overlays win on hash collisions (last-opened-wins).
 - **Overlay-aware** (resolve through the full stack): `--list`, `--inventory`, `--check`,
-  `--states`, `--export`, `--export-bundle`, `--mod-new`.
+  `--states`, `--export`, `--export-bundle`, `--mod-new`, `--mod-skel`, `--dump-bindings`,
+  `--dump-mtrl`, `--export-shipment`, `--faithful`, `--shot`, `--render`, `--rebind-check`,
+  `--bones`.
 - **Base-WAD-only** (overlays are ignored entirely — they open `wad::open(--wad)` directly): all the
   texture modes — `--tex-check`, `--tex-png`, `--tex-png-block`, `--tex-scan`, `--tex-scan-blocks`.
   To inspect a texture that lives in a patch WAD, pass that patch as `--wad`, not `--overlay`.
 - **Partial**: `--block-strings` opens the overlay stack (and logs each overlay) but then dumps
   strings from the base WAD only.
-- **Neither**: `--hash`, `--hash-file`, `--import-check`, `--pack-data` do not read the WAD.
+- **Beside the base WAD**: `--audio-export` is handed the base WAD's path alone (no overlays) and
+  reads `English.wad` and `Audios/vo_stream.english.pws` from that install.
+- **Neither**: `--hash`, `--hash-file`, `--import-check`, `--gpu-check` do not read the WAD.
+  `--pack-data` reads the base WAD and overlays only on its raw-corpora path (the `names.bin` trim).
 
 **`--no-auto-patch` only matters when a `vz-patch.wad` sits next to the base WAD.** With it, the
 auto-patch overlay is dropped from the stack; explicit `--overlay` flags are unaffected. It changes
 output only for overlay-aware modes, and only when that sibling file exists.
 
-**Sub-flags are scoped to their mode and inert elsewhere.** `--mod-group` and `--mod-out` are read
-only by `--mod-new`; `--out` only by `--export-bundle`. Passing them to any other mode has no effect.
+**Sub-flags are scoped to their mode and inert elsewhere.** `--mod-out` is read by `--mod-new` and
+`--mod-skel`; `--out` only by `--export-bundle`; `--rebind-target` by `--export-shipment`,
+`--faithful`, `--shot` and `--rebind-check`; each `--shipment-*`, `--faithful-*`, `--shot-*`,
+`--render-*` and `--rebind-clip` flag only by its own mode. `--mod-group` is parsed by `--mod-new`
+and not used. Passing a sub-flag to any other mode has no effect.
 
 **Names change labels, not resolution of your input.** The reference bundle's `names.bin` (plus the
 embedded curated ASET dictionary) turns hashes into names in the *output* and labels the catalog.
@@ -186,8 +206,9 @@ mercs2_workshop --wad D:/mercs2/vz.wad --pack-data workshop_data
 
 - **`workshop: the game archive is not set and was not found`** /
   **`workshop: the game archive is not usable: <step> — <why>`**, followed by one line per chain step
-  — the game-archive chain has no answer (exit 2). Emitted up front, so it blocks even non-WAD modes
-  (`--hash`, `--hash-file`); fix or clear the step named, or give a valid `--wad`.
+  — the game-archive chain has no answer (exit 2). Emitted before mode dispatch, so it blocks even
+  the non-WAD modes `--hash` and `--hash-file` (not `--gpu-check` or `--pack-data`, which run
+  first); fix or clear the step named, or give a valid `--wad`.
 - **`workshop: cannot open <wad>: <err>`** — the base (or, for the stack, a required) WAD could not
   be opened/parsed. A failing `--overlay` is *not* fatal — it prints `[workshop] overlay <p>: <err>
   (skipped)` and continues without it.
@@ -200,9 +221,9 @@ mercs2_workshop --wad D:/mercs2/vz.wad --pack-data workshop_data
   lines; the run continues and prints an `exported N bundle(s), M failed` tally.
   `--export-bundle: nothing matched '<arg>'` means the name/hash/class selected zero models.
 - **`--mod-new <name> <donor name|0xHASH> <mesh file>`** — fewer than three positional args were
-  given. `--mod-new: import <mesh>: <err>` means the mesh file would not parse; `--mod-new: <err>` /
-  `--mod-new: worker died` come from the background publish/self-test failing. A `self-test ...: FAIL
-  <err>` line means the injected model did not load back cleanly.
+  given. `--mod-new: import <mesh>: <err>` means the mesh file would not parse; `--mod-new: <err>`
+  comes from the publish failing. A `self-test ...: FAIL <err>` line means the injected model did not
+  load back cleanly. `--mod-skel` reports the same three ways, prefixed `--mod-skel`.
 - **`--import-check <file>: <err>`** — the foreign model would not parse.
 - **`--tex-check '<arg>' (0x...): <err>` / `--tex-png '<arg>' (0x...): <err>`** — no texture at that
   hash in the **base** WAD (remember these modes ignore overlays). `--tex-png-block: no texture
