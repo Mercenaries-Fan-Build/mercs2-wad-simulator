@@ -116,11 +116,7 @@ impl Kind {
         match self {
             Kind::Model => Preview::Render,
             Kind::Texture => Preview::Plate,
-            // A clip needs a rig to play on, and the Library has no subject of its own. The
-            // per-character catalog on a loaded model's Animation card is where clips play today.
-            Kind::Animation => Preview::None(
-                "a clip needs a rig — load a character and use its Animation card",
-            ),
+            Kind::Animation => Preview::View("plays on the hero, the model you choose for clips"),
             Kind::Effect => Preview::None(
                 "the effect format is decoded but its parameters are still hash-only",
             ),
@@ -860,7 +856,7 @@ fn load_name_lines(path: &Path) -> Result<HashMap<u32, String>, String> {
 }
 
 /// Parse the rainbow table (`{"pandemic_hash_m2": {"0xHEX": ["name", …]}}`) into hash → first name.
-fn load_rainbow_json(path: &Path) -> Result<HashMap<u32, String>, String> {
+pub(crate) fn load_rainbow_json(path: &Path) -> Result<HashMap<u32, String>, String> {
     load_rainbow_json_where(path, |_, _| true)
 }
 
@@ -959,7 +955,7 @@ mod tests {
     #[test]
     fn harvested_names_drop_debris() {
         let rejected = super::load_rainbow_json(&super::crate_data_file("rejected_names.json").unwrap()).unwrap();
-        assert_eq!(rejected.len(), 3);
+        assert_eq!(rejected.len(), 4);
         for (h, n) in &rejected {
             assert_eq!(m2(n), *h, "{n}");
         }
@@ -980,6 +976,19 @@ mod tests {
         assert!(!got.contains_key(&0xEB74_016B));
         assert!(!got.contains_key(&0x8621_55E2));
         assert_eq!(got.get(&0x0000_BEEF).map(String::as_str), Some("telephone"));
+    }
+
+    /// The production table `names.bin` is packed from holds none of the rejected debris.
+    #[test]
+    fn the_production_table_holds_no_rejected_name() {
+        let rejected = super::load_rainbow_json(&super::crate_data_file("rejected_names.json").unwrap()).unwrap();
+        let p = super::crate_data_file("production_names.json").unwrap();
+        let doc: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&p).unwrap()).unwrap();
+        let table = doc["pandemic_hash_m2"].as_object().expect("pandemic_hash_m2 object");
+        assert_eq!(doc["count"].as_u64(), Some(table.len() as u64), "the count field is the table's size");
+        for (h, n) in &rejected {
+            assert_ne!(table.get(&format!("0x{h:08X}")).and_then(|v| v.as_str()), Some(n.as_str()), "{n}");
+        }
     }
 
     use mercs2_formats::hash::pandemic_hash_m2 as m2;
