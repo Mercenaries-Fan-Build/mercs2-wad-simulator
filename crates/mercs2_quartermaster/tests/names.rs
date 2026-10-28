@@ -9,7 +9,7 @@
 
 use mercs2_formats::hash::pandemic_hash_m2;
 use mercs2_quartermaster::blast::{self, Claim};
-use mercs2_quartermaster::names::{bare_hash_suggestions, NameTable};
+use mercs2_quartermaster::names::{bare_hash_suggestions, NameTable, PRODUCTION_NAMES};
 use mercs2_quartermaster::{from_str, Format, Manifest};
 
 const DESTROYER: &str = "al_veh_boat_destroyer";
@@ -241,10 +241,9 @@ contributions:
 #[test]
 fn the_committed_table_reverses_a_known_asset() {
     let here = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let Some(names) = NameTable::find_from(here) else {
-        eprintln!("no data/production_names.json found; skipping");
-        return;
-    };
+    // The table is committed in this workspace, so not finding it is a failure, not a skip.
+    let names = NameTable::find_from(here)
+        .unwrap_or_else(|| panic!("no {} found walking up from {}", PRODUCTION_NAMES, here.display()));
     assert!(
         names.len() > 20_000,
         "expected the full table, got {}",
