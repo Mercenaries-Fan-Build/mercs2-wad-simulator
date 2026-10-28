@@ -4413,10 +4413,7 @@ pub fn build(
             lint::fx_game_checks(manifest, &shipment.root, g)
                 .map_err(|message| BuildError::Lower { index: 0, kind: "fx", message })?,
         );
-        diagnostics.extend(
-            lint::placement_game_checks(manifest, &shipment.root, g)
-                .map_err(|e| BuildError::Lower { index: e.index, kind: e.kind, message: e.message })?,
-        );
+        diagnostics.extend(lint::placement_game_checks(manifest, &shipment.root, g));
     }
     // The shader kinds read the original stores from `--original-data` and the game's VT and R2VB
     // pairs from its `data` folder, so both are required, never skipped.
