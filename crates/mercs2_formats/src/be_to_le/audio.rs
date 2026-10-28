@@ -347,9 +347,9 @@ pub fn transcode_pws_xbox_to_pc(xbox: &[u8], channels: usize) -> Result<Vec<u8>,
 ///    `tools/ffmpeg/bin/ffmpeg(.exe)` — the repo-local bundle at
 ///    `tools/ffmpeg/` ships ffmpeg 2026-06 (gyan.dev essentials build)
 ///    with native `xma1`/`xma2` decoders enabled.
-/// 3. `tools/ffmpeg/bin/ffmpeg(.exe)` resolved relative to the current
-///    working directory (useful under `cargo test`, which runs from the
-///    package root).
+/// 3. Walk up from the current working directory looking for
+///    `tools/ffmpeg/bin/ffmpeg(.exe)` (useful under `cargo test`, which runs
+///    from the package root).
 /// 4. `ffmpeg` on `$PATH`.
 ///
 /// Fails loudly (`AudioError`) if none of the above resolve.
