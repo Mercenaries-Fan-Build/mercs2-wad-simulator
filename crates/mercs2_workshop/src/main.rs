@@ -252,7 +252,7 @@ fn main() {
             Err(e) => return eprintln!("workshop: cannot open {wadpath}: {e}"),
         };
         let hashes: Vec<u32> = {
-            let idx = index::AssetIndex::build(&w.wads, names_or_exit());
+            let idx = index::AssetIndex::build(&w.wads, &w.side, names_or_exit());
             idx.models().iter().map(|r| r.hash).collect()
         };
         println!("hash\tresolves\tbones\tskinned_groups\tverts\ttris\ttextures");
@@ -293,7 +293,7 @@ fn main() {
             Ok(s) => s,
             Err(e) => return eprintln!("workshop: cannot open {wadpath}: {e}"),
         };
-        let mut idx = index::AssetIndex::build(&stack.wads, names_or_exit());
+        let mut idx = index::AssetIndex::build(&stack.wads, &stack.side, names_or_exit());
         // The kit template rows, as the GUI catalog lists them.
         match app::load_kit_templates(&mut stack) {
             Ok(t) => {
@@ -324,7 +324,7 @@ fn main() {
             Ok(s) => s,
             Err(e) => return eprintln!("workshop: cannot open {wadpath}: {e}"),
         };
-        let idx = index::AssetIndex::build(&stack.wads, names_or_exit());
+        let idx = index::AssetIndex::build(&stack.wads, &stack.side, names_or_exit());
         let mut by_class: std::collections::BTreeMap<&'static str, Vec<&index::AssetRow>> =
             std::collections::BTreeMap::new();
         for r in idx.models() {
@@ -492,7 +492,7 @@ fn main() {
             Ok(s) => s,
             Err(e) => return eprintln!("workshop: cannot open {wadpath}: {e}"),
         };
-        let mut idx = index::AssetIndex::build(&stack.wads, names_or_exit());
+        let mut idx = index::AssetIndex::build(&stack.wads, &stack.side, names_or_exit());
         match app::load_kit_templates(&mut stack) {
             Ok(t) => {
                 idx.add_kit_templates(&t.kits, &t.all);
@@ -1193,7 +1193,7 @@ exported {ok} bundle(s), {fail} failed -> {}", outroot.display());
         // List the clips this model's rig can bind, so a clip can be chosen by name rather than
         // guessed at. Names come from the same index the GUI uses.
         if args.iter().any(|a| a == "--render-clips") {
-            let idx = index::AssetIndex::build(&w.wads, names_or_exit());
+            let idx = index::AssetIndex::build(&w.wads, &w.side, names_or_exit());
             let (clips, names) = app::clips_for_export(&mut w, &arg, &md.skin.rig, &idx);
             println!("--render-clips 0x{hash:08X}: {} clip(s) bind this rig", clips.len());
             for c in &clips {
