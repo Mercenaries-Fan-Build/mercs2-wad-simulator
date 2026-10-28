@@ -1,0 +1,955 @@
+{
+  "pandemic_hash_m2": {
+    "0x000BF11E": [
+      "residential_bld_corner110x126_ruin"
+    ],
+    "0x00978EE4": [
+      "vzoutpost_bld_guardtower_pr"
+    ],
+    "0x02195587": [
+      "civ_veh_truck_transport"
+    ],
+    "0x026B1B6F": [
+      "groutpost_bld_shackperm02_wood_head"
+    ],
+    "0x02704083": [
+      "global_munitions_gbu16"
+    ],
+    "0x029FDC10": [
+      "industrial_bld_warehousesmall02_ub"
+    ],
+    "0x02DC645F": [
+      "global_env_rocksbeach03"
+    ],
+    "0x0485FA05": [
+      "jungle_env_treesmall03"
+    ],
+    "0x054E92D8": [
+      "jungle_smokestacks_treetall02_sm"
+    ],
+    "0x07B30024": [
+      "vz_hum_blanco"
+    ],
+    "0x07F5F9A9": [
+      "english_base"
+    ],
+    "0x0B7CC1B7": [
+      "island_bld_fortress01"
+    ],
+    "0x0C3F24CC": [
+      "al_sandbags2_nm"
+    ],
+    "0x0CB2C6B5": [
+      "ch_hum_starter02"
+    ],
+    "0x0D53AC26": [
+      "commercial_road20cross"
+    ],
+    "0x0DB74EDC": [
+      "vz_veh_truck_m42_guntruck_75cal"
+    ],
+    "0x0DDED923": [
+      "vzoutpost_wallb_oc"
+    ],
+    "0x0EB12B28": [
+      "al_veh_vtol_f35b_hair"
+    ],
+    "0x0F2DEF5E": [
+      "vzoutpost_walla_pr"
+    ],
+    "0x11755AC4": [
+      "global_lampposta"
+    ],
+    "0x11DAC902": [
+      "village_combat_housestilts04"
+    ],
+    "0x11E6DFCC": [
+      "city_bld_corner95x2c"
+    ],
+    "0x129F3BA9": [
+      "proutpost_fueltanks"
+    ],
+    "0x12EC5831": [
+      "civ_hum_journalist_b"
+    ],
+    "0x13B204C7": [
+      "global_env_rocksmoss02"
+    ],
+    "0x14219A70": [
+      "residential_bld_segment16x16b"
+    ],
+    "0x1495BF4E": [
+      "commercial_bld_corner18x106a_signs"
+    ],
+    "0x14A8AB17": [
+      "shanty_bld_apartment01_glass_sm"
+    ],
+    "0x151BB0A9": [
+      "all01_contract_briefing_yes_herochair-jennifer"
+    ],
+    "0x15A341B3": [
+      "residential_bld_segment17x23b03_ruin_lod"
+    ],
+    "0x165F7C10": [
+      "proutpost_bld_bunker"
+    ],
+    "0x16B2F4E3": [
+      "village_bld_docks02"
+    ],
+    "0x1786A9AE": [
+      "chi04_bld_commbunker01_pristine_lod"
+    ],
+    "0x184188DA": [
+      "caracas_wallshort"
+    ],
+    "0x1869AC93": [
+      "groutpost_bld_shacktall80_wall47_nm"
+    ],
+    "0x191D5D76": [
+      "vz_veh_truck_m35_aa"
+    ],
+    "0x1923143C": [
+      "jungle_wallgate"
+    ],
+    "0x195F4A54": [
+      "global_playgroundride02"
+    ],
+    "0x1BD68810": [
+      "aloutpost_concretewall02"
+    ],
+    "0x1C00DEFE": [
+      "white_road5t"
+    ],
+    "0x1C85BD73": [
+      "global_weapon_pda"
+    ],
+    "0x1E2EB15B": [
+      "civ_hum_doctorfemale_b"
+    ],
+    "0x1F60E7C1": [
+      "groutpost_bld_shackcave250_sm"
+    ],
+    "0x21658291": [
+      "maracaibo_bld_corner110x61a_floorwindows_dm"
+    ],
+    "0x2232D1D6": [
+      "commercial_road10t5"
+    ],
+    "0x22DDBE22": [
+      "commercial_road20t"
+    ],
+    "0x22ED3032": [
+      "jungle_bld_ruinshotelback_wall55_ruin_nm"
+    ],
+    "0x23522367": [
+      "aloutpost_interior_hq"
+    ],
+    "0x25108666": [
+      "vzoutpost_walla_oc"
+    ],
+    "0x2682F731": [
+      "global_sign_road"
+    ],
+    "0x268F9808": [
+      "chinaoutpost_bld_hangar0_wall120_ruin_nm"
+    ],
+    "0x26A095BE": [
+      "vzoutpost_bld_garagebunker_pr"
+    ],
+    "0x2742D157": [
+      "vehicles_towed_m058a41"
+    ],
+    "0x27EB22E9": [
+      "_gr_font"
+    ],
+    "0x2858999D": [
+      "gr_hum_starter04"
+    ],
+    "0x2864D0AD": [
+      "all01_contract_briefing_yes_herochair-mattias"
+    ],
+    "0x29DF0042": [
+      "pmc_hum_ewan"
+    ],
+    "0x2A6E963C": [
+      "vzoutpost_bld_barrackbunker_ch"
+    ],
+    "0x2AB6FFD8": [
+      "vz_terrainglobal_r17_c14_0x000746f8"
+    ],
+    "0x2B5BA84C": [
+      "pmc_hum_fiona"
+    ],
+    "0x2FC38412": [
+      "village_bld_hangar"
+    ],
+    "0x306CDAC8": [
+      "ch_hum_pilot_a"
+    ],
+    "0x312588D0": [
+      "vz_angel_falls_scrub"
+    ],
+    "0x31EDA16E": [
+      "white_road10cross"
+    ],
+    "0x33FF824F": [
+      "shanty_bld_housegroup05_wall63_sm"
+    ],
+    "0x3474A547": [
+      "global_shell"
+    ],
+    "0x34C3EE5D": [
+      "all_aisoldiermale_bare_upright_idle_fb"
+    ],
+    "0x34FF6DBD": [
+      "commercial_bld_corner04x26a"
+    ],
+    "0x37869999": [
+      "al_hum_starter04"
+    ],
+    "0x37DC6DFD": [
+      "aloutpost_bld_guardtowertall"
+    ],
+    "0x38A53CDA": [
+      "outskirt_road20cross10"
+    ],
+    "0x390124D2": [
+      "global_market01"
+    ],
+    "0x39AF17DC": [
+      "pmcoutpost_interior_hq"
+    ],
+    "0x3A6AABEF": [
+      "ch_hum_pilot_b"
+    ],
+    "0x3B210F1B": [
+      "commercial_road5t"
+    ],
+    "0x3B5A5AD2": [
+      "groutpost_fueltanks"
+    ],
+    "0x3B779713": [
+      "white_bld_segment84x62a_sm"
+    ],
+    "0x3F8B235F": [
+      "al_hum_starter02"
+    ],
+    "0x40672A26": [
+      "vz_pirate_isles_grassjungle_r14_c11_0x00143be8"
+    ],
+    "0x40832109": [
+      "jungle_road10cross5"
+    ],
+    "0x426DC83E": [
+      "maracaibo_bld_corner98x122a_clock_sm"
+    ],
+    "0x4349E32A": [
+      "proutpost_bld_hq_act1all_ruin"
+    ],
+    "0x44895741": [
+      "commercial_road20cross10"
+    ],
+    "0x47A45054": [
+      "jet01_contract_briefing_woodenfloor_starter-chris"
+    ],
+    "0x47D7429D": [
+      "maracaibo_bld_corner64x62b_wall_ruin_dm"
+    ],
+    "0x48180286": [
+      "icon_hijack_beams02_a"
+    ],
+    "0x48BA9C65": [
+      "global_waterpuddle05"
+    ],
+    "0x48CB840C": [
+      "city_bld_segment21x4c_wall16_ruin_dm"
+    ],
+    "0x4985FF3E": [
+      "al_hum_pilot"
+    ],
+    "0x4B51C150": [
+      "vz_chi_job005_b"
+    ],
+    "0x4B6285D9": [
+      "white_road5t10"
+    ],
+    "0x4C758C1E": [
+      "all_plz50_driverdoor_actionhijack_getin_section124_fb"
+    ],
+    "0x4D5126CD": [
+      "jungle_lightstadiuma_leaves01"
+    ],
+    "0x4E4114C7": [
+      "fanfare_new_contact_an_businesscard"
+    ],
+    "0x4F6993AD": [
+      "vzoutpost_bld_guardtower_gr"
+    ],
+    "0x4FFDD31D": [
+      "vz_chi_job010_wheel"
+    ],
+    "0x5056E183": [
+      "civ_veh_trailerhut02_thunder_wheel_nm"
+    ],
+    "0x515E90D3": [
+      "all_m18a17_driverhatch_actionhijack_getin_section02failure_fb"
+    ],
+    "0x51FBFC5D": [
+      "weapons_covert_bank"
+    ],
+    "0x52278DB9": [
+      "global_env_rocksmine03"
+    ],
+    "0x522C9455": [
+      "al_veh_tank_m42a115_nm"
+    ],
+    "0x524C9536": [
+      "outskirt_road20t10"
+    ],
+    "0x5487BA6B": [
+      "proutpost_fencewood01"
+    ],
+    "0x54DBAF9A": [
+      "all_mi35_drivervehicle_solanoactionhijack_getin_section08failure_fb"
+    ],
+    "0x554030BD": [
+      "commercial_road20t10"
+    ],
+    "0x57DF8B93": [
+      "city_bld_apartment124_wall41_dm"
+    ],
+    "0x5B8EF7DB": [
+      "ch_aisoldiermale_bare_upright_idle_fb"
+    ],
+    "0x5B962C17": [
+      "vz_state_warehouselarge01_hel"
+    ],
+    "0x5D891402": [
+      "al_hum_starter03"
+    ],
+    "0x5DC2D1E2": [
+      "caracas_walllong"
+    ],
+    "0x5F43C7C1": [
+      "pmcoutpost_bld_guardtower"
+    ],
+    "0x600A1F99": [
+      "vzoutpost_bld_hangar_oc"
+    ],
+    "0x601A1292": [
+      "island_bld_tower01"
+    ],
+    "0x6084B140": [
+      "outskirt_road10t20"
+    ],
+    "0x60ABB7A3": [
+      "global_waterpuddle03"
+    ],
+    "0x60E0BBBC": [
+      "commercial_grassymedian_fishing"
+    ],
+    "0x629EC74B": [
+      "global_env_tree24_imposter_nm"
+    ],
+    "0x633B2914": [
+      "hud_07_support_helicopter"
+    ],
+    "0x64A446B3": [
+      "ch_hum_starter04"
+    ],
+    "0x64B65867": [
+      "caracas_bld_cathedral_iron12_nm"
+    ],
+    "0x64F12309": [
+      "maracaibo_bld_segment19x06a_wall06_dm"
+    ],
+    "0x6619CF60": [
+      "global_trafficlight02"
+    ],
+    "0x669A77F4": [
+      "global_waterpuddle08"
+    ],
+    "0x6953850E": [
+      "civ_hum_journalistfemale_a"
+    ],
+    "0x69773EB8": [
+      "maracaibo_bld_corner88x54a_pristine_lod"
+    ],
+    "0x6A50CBE4": [
+      "estate_stairs02"
+    ],
+    "0x6BA801F3": [
+      "global_env_rocksmoss06"
+    ],
+    "0x6BB28363": [
+      "all01_contract_briefing_yes_herochair-chris"
+    ],
+    "0x6C766963": [
+      "al_hum_boss"
+    ],
+    "0x6D2DEA67": [
+      "pmc02_contract_oc_no_starter-mattias"
+    ],
+    "0x6D4DD222": [
+      "oc_hum_starter02"
+    ],
+    "0x6F6505B5": [
+      "city_bld_corner20x20a_wall09_sm"
+    ],
+    "0x6F7C17C2": [
+      "city_bld_corner92x34d_wall"
+    ],
+    "0x6FE9FC55": [
+      "commercial_road10t"
+    ],
+    "0x6FFD840D": [
+      "commercial_road10l"
+    ],
+    "0x735E3205": [
+      "cumana_bld_corner13x100b_walls_ruin_dm"
+    ],
+    "0x73A93856": [
+      "ch_veh_fordf150_zbd2000_sm"
+    ],
+    "0x7513C27E": [
+      "ocoutpost_interior_job"
+    ],
+    "0x7649F6D1": [
+      "global_chairwoodf_i13f"
+    ],
+    "0x77A20DC0": [
+      "residential_bld_corner16x16d"
+    ],
+    "0x78258AF4": [
+      "global_env_rocksmine02"
+    ],
+    "0x782A0822": [
+      "global_env_rocksmine04"
+    ],
+    "0x783561C5": [
+      "village_bld_house99_roof09_ruin_sm"
+    ],
+    "0x79905D82": [
+      "gr_veh_boat_cigarette"
+    ],
+    "0x7A73E3C7": [
+      "outskirt_road10t5"
+    ],
+    "0x7A8A34D4": [
+      "proutpost_fencewood02"
+    ],
+    "0x7AAD3D98": [
+      "global_env_palmtree01_imposter"
+    ],
+    "0x7C0BEDAA": [
+      "vz_hum_soldierelite_a"
+    ],
+    "0x7C2FB806": [
+      "global_munitions_fae"
+    ],
+    "0x7D923650": [
+      "maracaibo_bld_segment12x17a_wall11_dm"
+    ],
+    "0x7F7B5B6B": [
+      "global_weapon_camera"
+    ],
+    "0x815FE254": [
+      "jungle_road10merge"
+    ],
+    "0x84533369": [
+      "estate_stairs03"
+    ],
+    "0x8456CC17": [
+      "chinaoutpost_interior_hq"
+    ],
+    "0x86DC8658": [
+      "city_bld_apartment28_wall114_ruin_dm"
+    ],
+    "0x89F8CB2F": [
+      "fanfare_new_contact_ch_businesscard"
+    ],
+    "0x8A79D59F": [
+      "gr_veh_truck_m77_softtop_lod_dm41"
+    ],
+    "0x8AA6C11C": [
+      "ch_hum_starter07"
+    ],
+    "0x8B60D4CA": [
+      "pr_veh_semi_swamp_damage_sm"
+    ],
+    "0x8B83BB5A": [
+      "white_road10t"
+    ],
+    "0x8B97318E": [
+      "estate_bld_tower02"
+    ],
+    "0x8BACB181": [
+      "global_env_rocksmoss04"
+    ],
+    "0x8C53A598": [
+      "estate_freeway_mansion02_floor"
+    ],
+    "0x8D7C78FF": [
+      "vz_veh_apc_m113_50cal"
+    ],
+    "0x8EA5AB43": [
+      "gr_hum_starter_3"
+    ],
+    "0x8EDF5903": [
+      "oilrig_towerblowout_1"
+    ],
+    "0x8F1C5DBE": [
+      "cumana_bld_corner90x47b_ruin_lod"
+    ],
+    "0x8F542D84": [
+      "global_chairwoodb_tentlargetarp03"
+    ],
+    "0x90E4CFC6": [
+      "civ_hum_journalist_a"
+    ],
+    "0x9172AB6B": [
+      "village_bld_toolshed"
+    ],
+    "0x9188AD20": [
+      "pmc_veh_car_w27_z79_racer_wheel_dm"
+    ],
+    "0x91AA7C5C": [
+      "global_env_rocksmoss05"
+    ],
+    "0x9217E7DB": [
+      "white_road10t5"
+    ],
+    "0x92E24227": [
+      "ocoutpost_bld_radiotower"
+    ],
+    "0x930343BD": [
+      "cumana_bld_segment83x93d_pristine_lod"
+    ],
+    "0x931C3D10": [
+      "global_munitions_artillery"
+    ],
+    "0x93496888": [
+      "gr_hum_starter5_ub_nm"
+    ],
+    "0x968CE876": [
+      "gr_veh_truck_m35_guntruck_50cal"
+    ],
+    "0x978C3A49": [
+      "pmcoutpost_generator"
+    ],
+    "0x97ABE4DF": [
+      "pr_hum_starter03"
+    ],
+    "0x980E8FEA": [
+      "gr_veh_motorcycle_railway_wheel_nm"
+    ],
+    "0x987460A9": [
+      "jungle_road10t5"
+    ],
+    "0x98D0848E": [
+      "global_env_rocksbeach06"
+    ],
+    "0x9B55AA25": [
+      "outskirt_road5t10"
+    ],
+    "0x9C3C3FA6": [
+      "white_road5l"
+    ],
+    "0x9C9A9937": [
+      "cumana_bld_corner38x96c_pristine_lod"
+    ],
+    "0x9DCAB90C": [
+      "caracas_bld_parquecentral03_roof_0x0007465a"
+    ],
+    "0x9FC89D46": [
+      "_oc_font"
+    ],
+    "0xA0D50E54": [
+      "global_env_rocksbeach04"
+    ],
+    "0xA0FB693A": [
+      "outskirt_road10cross"
+    ],
+    "0xA1846C79": [
+      "chinaoutpost_bld_prison_fence"
+    ],
+    "0xA1F20385": [
+      "vzoutpost_bld_guardtower_al"
+    ],
+    "0xA2EB8265": [
+      "al_veh_truck_mtv_cargo_50cal"
+    ],
+    "0xA5F9486F": [
+      "cumana_bld_segment8x19a_11_nm"
+    ],
+    "0xA64C9404": [
+      "gr_hum_starter01"
+    ],
+    "0xA66F41EE": [
+      "groutpostinterior_earthmover_bush01_dm"
+    ],
+    "0xA76D0DA1": [
+      "outpost_bld_plantation02"
+    ],
+    "0xAA6DD7F3": [
+      "chinaoutpost_obelisk_tentgrnd"
+    ],
+    "0xAB1D7420": [
+      "gr_att_soldierfemale_heavy_band_sm"
+    ],
+    "0xAB727B9B": [
+      "global_lamppostb"
+    ],
+    "0xABD39ACB": [
+      "jungle_env_bushlarge03"
+    ],
+    "0xAC74ED90": [
+      "vzoutpost_bld_guardtower_oc"
+    ],
+    "0xACD54F3A": [
+      "shanty_bld_r19_wall06_sm"
+    ],
+    "0xAD3C2DB1": [
+      "village_bencha"
+    ],
+    "0xAE1DA53C": [
+      "outskirt_road10t02"
+    ],
+    "0xB0078949": [
+      "ocoutpost_fueltanks"
+    ],
+    "0xB16248A0": [
+      "japanese_bld_bar01"
+    ],
+    "0xB19C5FE4": [
+      "ocoutpost_interior_hq"
+    ],
+    "0xB20EABC4": [
+      "city_bld_chicon001_parts01_ruin"
+    ],
+    "0xB2F7E552": [
+      "vz_hum_deathsquad_b"
+    ],
+    "0xB43ED766": [
+      "caracasruins_bld_corner94x75b"
+    ],
+    "0xB5521114": [
+      "jungle_road5merge"
+    ],
+    "0xB58E1BB8": [
+      "al_hum_starter01"
+    ],
+    "0xB5A9D582": [
+      "pr_hum_starter02"
+    ],
+    "0xB6188BAB": [
+      "aloutpost_bld_barracks76_door_126_ruin_sm"
+    ],
+    "0xB6FE28B5": [
+      "vz_veh_truck_m35_tanker"
+    ],
+    "0xB706D293": [
+      "aloutpost_bld_command_mattias_dm"
+    ],
+    "0xB9E881F2": [
+      "white_bld_segment6x7a_sm"
+    ],
+    "0xBA05D5BA": [
+      "all01_contract_refinery01_herochair-chris"
+    ],
+    "0xBA140D25": [
+      "global_trashpile02"
+    ],
+    "0xBA1F2839": [
+      "vz_veh_truck_m38_cab116_damage_nm"
+    ],
+    "0xBA3F14B9": [
+      "white_walllong"
+    ],
+    "0xBB08AD3D": [
+      "global_market02"
+    ],
+    "0xBBC0DF1E": [
+      "global_munitions_bunkerbuster"
+    ],
+    "0xBD660F82": [
+      "global_env_treeplaza01"
+    ],
+    "0xBD95DAAF": [
+      "chinaoutpost_interior_job"
+    ],
+    "0xBDED558F": [
+      "ch_veh_truck_nglv_armored_50cal"
+    ],
+    "0xBEBE1FB1": [
+      "vz_veh_truck_m115_cab013_damage_nm"
+    ],
+    "0xBF6E4812": [
+      "font_bld_corner8x16a_sm"
+    ],
+    "0xBFDE4252": [
+      "vz_state_chijob058_12_defenses"
+    ],
+    "0xBFE24A41": [
+      "ocoutpost_bld_guardpost01"
+    ],
+    "0xC0B0CBF1": [
+      "global_waterpuddle01"
+    ],
+    "0xC16D6907": [
+      "pmc_hum_eva"
+    ],
+    "0xC192AA09": [
+      "vz_veh_helicopter_mi26_cargo_dm"
+    ],
+    "0xC21CA227": [
+      "gr_hum_boss"
+    ],
+    "0xC3227E46": [
+      "shanty_wallstraight03"
+    ],
+    "0xC3F92D74": [
+      "village_bld_plantation01"
+    ],
+    "0xC42F6D31": [
+      "minimap_icon_treetropical01_oc"
+    ],
+    "0xC434F449": [
+      "all_ah18z_driverdoor_actionhijack_getin_section128_fb"
+    ],
+    "0xC4CC8C5B": [
+      "city_bld_corner58x2b_ruin_lod"
+    ],
+    "0xC6142B2A": [
+      "shanty_bld_housegroup20_wall23_ruin_nm"
+    ],
+    "0xC67A68BF": [
+      "vzoutpost_fueltanks"
+    ],
+    "0xC6A0272A": [
+      "mar_commercial_road10t"
+    ],
+    "0xC6E266D0": [
+      "aloutpost_gateentrance"
+    ],
+    "0xC791CC4E": [
+      "_pr_font"
+    ],
+    "0xC8B555B7": [
+      "global_waterpuddle07"
+    ],
+    "0xCA1F8AF1": [
+      "icon_hijack_beams02_b"
+    ],
+    "0xCA7B60DF": [
+      "pmc_hum_fire"
+    ],
+    "0xCB27080C": [
+      "shanty_wallstraight01"
+    ],
+    "0xCCF5DA2C": [
+      "vz_angel_falls_base"
+    ],
+    "0xCD1E5625": [
+      "maracaibo_bld_historical90_wall18_nm"
+    ],
+    "0xCE3649E7": [
+      "commercial_road10t20"
+    ],
+    "0xCE4F13BB": [
+      "jungle_env_treemedium01_cuffs_dm"
+    ],
+    "0xCE77D4CB": [
+      "al_veh_tank_m1a2"
+    ],
+    "0xCE8165DE": [
+      "proutpost_interior_job"
+    ],
+    "0xCF50AAFF": [
+      "oc_hum_starter03"
+    ],
+    "0xD02F0FD8": [
+      "global_env_rocksmine06"
+    ],
+    "0xD14E2809": [
+      "pmc_hum_misha"
+    ],
+    "0xD296A7B8": [
+      "vzoutpost_bld_hangar_al"
+    ],
+    "0xD2DA5205": [
+      "global_env_treetropical02"
+    ],
+    "0xD3CB2912": [
+      "maracaibo_bld_segment101x52a_roof_nm"
+    ],
+    "0xD4075E95": [
+      "vz_terrainglobal_r17_c14_0x000746fa"
+    ],
+    "0xD4FA596F": [
+      "vz_hum_deathsquad_c"
+    ],
+    "0xD6691890": [
+      "all_ah7z_driverdoor_actionhijack_getin_section43loopc_fb"
+    ],
+    "0xD6D7964E": [
+      "mar_commercial_road5t"
+    ],
+    "0xD872C822": [
+      "outpost_bld_farming01"
+    ],
+    "0xD9D945D4": [
+      "proutpost_bld_garageboat_wall08_sm"
+    ],
+    "0xDA1D8548": [
+      "commercial_wallshort"
+    ],
+    "0xDA2CE0FF": [
+      "global_env_rocksmine05"
+    ],
+    "0xDA8262A0": [
+      "chinaoutpost_concretewall02"
+    ],
+    "0xDAB9FE00": [
+      "oc_hum_boss"
+    ],
+    "0xDC342BB8": [
+      "al_veh_tank_m106a35_sm"
+    ],
+    "0xDC9D150A": [
+      "cumana_att_hoteltwostar01_floor_ruin_nm"
+    ],
+    "0xDDBA557D": [
+      "ocoutpost_bld_warehouse01"
+    ],
+    "0xDEB5FA67": [
+      "vzoutpost_bld_barrackbunker_oc"
+    ],
+    "0xDEB7B6F0": [
+      "global_waterpuddle04"
+    ],
+    "0xDEF8FDFF": [
+      "aloutpost_interior_job"
+    ],
+    "0xE2B04600": [
+      "ch_hum_starter03"
+    ],
+    "0xE3BC5FAA": [
+      "outskirt_road5t"
+    ],
+    "0xE41DA942": [
+      "maracaibo_bld_skyscraper99_stripe115_dm"
+    ],
+    "0xE45965E8": [
+      "global_weapon_binoculars"
+    ],
+    "0xE4B1B90B": [
+      "cumana_bld_segment18x109a"
+    ],
+    "0xE59723FD": [
+      "pmcoutpost_planter01"
+    ],
+    "0xE6B3465A": [
+      "global_waterpuddle06"
+    ],
+    "0xEB482852": [
+      "white_road10l"
+    ],
+    "0xEB7EE8CC": [
+      "all_ztz60a_driverhatch_actionhijack_getin_section113_fb"
+    ],
+    "0xEC6686F0": [
+      "ocoutpost_wallshort"
+    ],
+    "0xEED93939": [
+      "industrial_machineparts01"
+    ],
+    "0xEF17CA9B": [
+      "gr_hum_soldier_impact_lba_nm"
+    ],
+    "0xEF48238A": [
+      "global_bonfire89_10_sm"
+    ],
+    "0xEF8B5676": [
+      "aloutpost_fueltanks"
+    ],
+    "0xF03E2347": [
+      "vzoutpost_bld_barrackbunker_pr"
+    ],
+    "0xF0438DFB": [
+      "city_bld_segment111x101d_pristine_lod"
+    ],
+    "0xF09FFE8D": [
+      "all_ztz5a_driverhatch_actionhijack_getin_section9fail_fb"
+    ],
+    "0xF1AF90AA": [
+      "global_env_rocksmoss03"
+    ],
+    "0xF1EFCD36": [
+      "outskirt_road10t"
+    ],
+    "0xF1F84BEB": [
+      "village_bld_housestilts12_door84_ruin_nm"
+    ],
+    "0xF2485070": [
+      "global_weapon_c4land_15thsec"
+    ],
+    "0xF26EE105": [
+      "caracas_bld_shacksemiperm01_statue_dm"
+    ],
+    "0xF2EFB74B": [
+      "vzoutpost_bld_guardtower_ch"
+    ],
+    "0xF4E636CC": [
+      "proutpost_bld_guardtower01"
+    ],
+    "0xF51AAB61": [
+      "vz_terrainglobal_r13_elitea_0x000746b3"
+    ],
+    "0xF7052E85": [
+      "merida_bld_pmcautoshop_interior"
+    ],
+    "0xF732B368": [
+      "civ_veh_gurcon003_ambulance_damage_dm"
+    ],
+    "0xF93B02BC": [
+      "city_bld_apartment18_parts102_ruin"
+    ],
+    "0xFA1E0227": [
+      "white_wallshort"
+    ],
+    "0xFA821B70": [
+      "global_gateentrance"
+    ],
+    "0xFAD7DA99": [
+      "global_env_rocksbeach05"
+    ],
+    "0xFAF10B01": [
+      "commercial_bld_segment68x100b_ruin_sm"
+    ],
+    "0xFB89A3B1": [
+      "pmc_veh_boat_cigarette"
+    ],
+    "0xFBA78BB4": [
+      "jungle_road10cross"
+    ],
+    "0xFEE1382F": [
+      "white_road10cross5"
+    ],
+    "0xFEFBC483": [
+      "vz_gur_job012_e"
+    ],
+    "0xFF61AB75": [
+      "ch_hum_boss"
+    ],
+    "0xFF73D8E4": [
+      "ocoutpost_walllong"
+    ],
+    "0xFF93EAC3": [
+      "city_bld_corner60x73d_doors"
+    ],
+    "0xFFB8E492": [
+      "white_road5cross"
+    ]
+  }
+}
