@@ -435,7 +435,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("m2ws_settingspage_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let file = dir.join("settings.json");
-        let mut s = Settings { wad_path: Some(PathBuf::from("/old/vz.wad")), data_dir: None };
+        let mut s = Settings { wad_path: Some(PathBuf::from("/old/vz.wad")), data_dir: None, hero: None };
         assert!(edit_saved(&mut s, Act::SaveRunPath(Which::Game), Some(Path::new("/g/vz.wad"))));
         s.save_to(&file).expect("save");
         assert_eq!(crate::settings::load_from(&file).wad_path, Some(PathBuf::from("/g/vz.wad")));
