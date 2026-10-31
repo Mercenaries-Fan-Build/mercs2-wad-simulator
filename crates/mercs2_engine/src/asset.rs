@@ -193,6 +193,11 @@ impl AssetSource {
         self.slots.iter().position(|s| *s == slot)
     }
 
+    /// The mounted archives' paths, in mount order.
+    pub fn paths(&self) -> &[String] {
+        &self.labels
+    }
+
     /// The base WAD path (for sibling-archive resolution).
     pub fn base_path(&self) -> &str {
         &self.base_path
