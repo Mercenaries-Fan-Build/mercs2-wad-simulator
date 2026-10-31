@@ -13,6 +13,8 @@
 //!   render pass yet — that's the follow-up; this one still round-trips through CPU + a new
 //!   `TextureHandle::set` so the pipeline stays single-threaded against the egui context.)
 
+use std::collections::HashMap;
+
 use glam::{Mat4, Vec3};
 
 /// A spherical-coordinates orbit camera (yaw/pitch around the bbox centre + a radius multiplier).
@@ -75,6 +77,8 @@ pub struct SV {
     pub uv: [f32; 2],
     pub _p2: [f32; 2],
     pub tangent: [f32; 4],
+    /// The vertex COLOR, RGBA (`mesh::Vertex::color`); its alpha feeds the `*AmbOcc*` output alpha.
+    pub color: [f32; 4],
 }
 
 /// One draw range and the diffuse it binds, already decoded to RGBA8.
@@ -91,13 +95,17 @@ pub struct DrawTex {
     pub diffuse: Option<(u32, u32, Vec<u8>)>,
     /// The `_nm` normal map, decoded to RGBA8. DXT5nm: X in ALPHA, Y in GREEN. `None` = flat.
     pub normal: Option<(u32, u32, Vec<u8>)>,
-    /// The `_sm` specular mask, decoded to RGBA8. `None` = black = matte (no highlight).
-    pub specular: Option<(u32, u32, Vec<u8>)>,
-    /// The material's on-disk flags and alpha multiplier (`DrawGroup::material_flags` /
-    /// `material_alpha`): they decide the alpha test exactly as the engine's draw does. 0 / 1.0 for a
-    /// draw with no material.
+    /// Material slot 1 decoded to RGBA8: the `_sm` specular mask or the emissive map, as `slot1_role`
+    /// says (`mercs2_engine::render::material_slots`). `None` = black.
+    pub slot1: Option<(u32, u32, Vec<u8>)>,
+    pub slot1_role: mercs2_engine::render::Slot1Role,
+    /// The material's on-disk flags and `materialData` (`DrawGroup::material_flags` /
+    /// `material_data`): the alpha test, the diffuse/ambient scales and the emissive colour, exactly as
+    /// the engine's draw uses them. 0 / `mesh::NO_MATERIAL_DATA` for a draw with no material.
     pub material_flags: u16,
-    pub material_alpha: f32,
+    pub material_data: [[f32; 4]; 6],
+    /// A blended material's output alpha (`MaterialSlots::output_alpha`); `None` draws opaque.
+    pub output_alpha: Option<mercs2_formats::shader_registrations::OutputAlpha>,
 }
 
 const WGSL: &str = r#"
@@ -108,8 +116,10 @@ struct Cam { mvp: mat4x4<f32>, cam_pos: vec4<f32> };
 @group(2) @binding(1) var s_diffuse: sampler;
 @group(2) @binding(2) var t_normal: texture_2d<f32>;
 @group(2) @binding(3) var t_specular: texture_2d<f32>;
-// The material's alpha test, as shader.wgsl: x = reference (or -1 = not tested), y = multiplier.
-struct MaterialParams { alpha: vec4<f32> };
+// The material, as shader.wgsl: alpha.x = alpha reference (or -1 = not tested), alpha.y = a blended
+// material's output alpha code (or -1 = opaque), alpha.z = slot 1's role (0 nothing, 1 specular,
+// 2 emissive), data = materialData c93..c98.
+struct MaterialParams { alpha: vec4<f32>, data: array<vec4<f32>, 6> };
 @group(2) @binding(4) var<uniform> material: MaterialParams;
 struct VIn {
   @location(0) pos: vec3<f32>,
@@ -118,6 +128,7 @@ struct VIn {
   @location(3) weights: vec4<f32>,
   @location(4) uv: vec2<f32>,
   @location(5) tangent: vec4<f32>,
+  @location(6) color: vec4<f32>,
 };
 struct VOut {
   @builtin(position) clip: vec4<f32>,
@@ -126,6 +137,7 @@ struct VOut {
   @location(2) t: vec3<f32>,
   @location(3) b: vec3<f32>,
   @location(4) wpos: vec3<f32>,
+  @location(5) color: vec4<f32>,
 };
 @vertex fn vs(in: VIn) -> VOut {
   var wsum = in.weights.x + in.weights.y + in.weights.z + in.weights.w;
@@ -152,6 +164,7 @@ struct VOut {
   o.b = cross(nn, tt) * in.tangent.w;
   o.uv = in.uv;
   o.wpos = p.xyz;
+  o.color = in.color;
   return o;
 }
 @fragment fn fs(in: VOut) -> @location(0) vec4<f32> {
@@ -164,7 +177,7 @@ struct VOut {
   let tbn = mat3x3<f32>(normalize(in.t), normalize(in.b), normalize(in.n));
   let N = normalize(tbn * vec3<f32>(nx, ny, nz));
   let dtex = textureSample(t_diffuse, s_diffuse, in.uv);
-  if (material.alpha.x >= 0.0 && !(dtex.a * material.alpha.y > material.alpha.x)) { discard; }
+  if (material.alpha.x >= 0.0 && !(dtex.a * material.data[5].w > material.alpha.x)) { discard; }
   let albedo = dtex.rgb;
 
   // Lighting matched to shader.wgsl's DYNAMIC (non-prelit) branch: an ambient floor plus a single
@@ -177,16 +190,49 @@ struct VOut {
   let ambient = 0.35;
   let spec_power = 48.0;
   let ndl = max(dot(N, sun_dir), 0.0);
-  let spec_mask = textureSample(t_specular, s_diffuse, in.uv).rgb;
+  // Slot 1 is the specular mask or the emissive map; materialData c93/c95 scale the direct and ambient
+  // light and the emissive map adds `× c96` after lighting, as shader.wgsl does.
+  let slot1 = textureSample(t_specular, s_diffuse, in.uv).rgb;
+  var spec_mask = vec3<f32>(0.0);
+  var emissive = vec3<f32>(0.0);
+  if (material.alpha.z > 1.5) {
+    emissive = slot1 * material.data[3].rgb;
+  } else if (material.alpha.z > 0.5) {
+    spec_mask = slot1;
+  }
   let V = normalize(cam.cam_pos.xyz - in.wpos);
-  var col = albedo * ambient + albedo * (sun_i * ndl);
+  var col = albedo * material.data[2].rgb * ambient + albedo * material.data[0].rgb * (sun_i * ndl);
+  var spec_light = vec3<f32>(0.0);
   if (ndl > 0.0) {
     let H = normalize(sun_dir + V);
-    col += spec_mask * pow(max(dot(N, H), 0.0), spec_power);
+    spec_light = spec_mask * pow(max(dot(N, H), 0.0), spec_power);
   }
-  return vec4<f32>(col, 1.0);
+  // A blended material's output alpha, as shader.wgsl computes it (`OutputAlpha`).
+  var alpha = 1.0;
+  if (material.alpha.y >= 0.0) {
+    let code = u32(material.alpha.y + 0.5);
+    alpha = material.data[5].w;
+    if (code >= 1u) { alpha = alpha * dtex.a; }
+    if (code == 2u || code == 4u) { alpha = alpha * in.color.a; }
+    if (code >= 3u) {
+      alpha = clamp(max(alpha, dot(spec_light, vec3<f32>(0.299, 0.587, 0.114))), 0.0, 1.0);
+    }
+  }
+  return vec4<f32>(col + spec_light + emissive, alpha);
 }
 "#;
+
+/// A blended draw's pipeline key: the material's D3D blend state and cull mode.
+type BlendKey = (mercs2_formats::texture::MaterialBlend, Option<wgpu::Face>);
+
+/// One draw: its index range, its bind (the `DrawTex` it came from) and, for a blended material,
+/// its pipeline key.
+struct ShotDraw {
+    start: u32,
+    count: u32,
+    bind: usize,
+    blend: Option<BlendKey>,
+}
 
 /// A stateful offscreen hero renderer. One `wgpu::Device` + pipeline + mesh/texture upload per
 /// instance, kept across frames so the Workshop's orbit-drag UI pays the ~500 ms setup cost once
@@ -200,13 +246,14 @@ pub struct HeroRenderer {
     device: wgpu::Device,
     queue: wgpu::Queue,
     pipeline: wgpu::RenderPipeline,
+    blend_pipelines: HashMap<BlendKey, wgpu::RenderPipeline>,
     cam_buf: wgpu::Buffer,
     cam_bind: wgpu::BindGroup,
     bone_bind: wgpu::BindGroup,
     vbuf: wgpu::Buffer,
     ibuf: wgpu::Buffer,
     tex_binds: Vec<wgpu::BindGroup>,
-    draws: Vec<(u32, u32)>,
+    draws: Vec<ShotDraw>,
     color: wgpu::Texture,
     color_v: wgpu::TextureView,
     depth_v: wgpu::TextureView,
@@ -353,7 +400,9 @@ impl HeroRenderer {
     let flat_nm = upload(1, 1, &[0u8, 128, 255, 128]);
     let black = upload(1, 1, &[0u8, 0, 0, 255]); // matte fallback where a group has no _sm
     let bind_of = |diff: &wgpu::TextureView, nrm: &wgpu::TextureView, spc: &wgpu::TextureView, d: &DrawTex| -> wgpu::BindGroup {
-        let params = mercs2_engine::render::material_params(&device, d.material_flags, d.material_alpha);
+        let params = mercs2_engine::render::material_params(
+            &device, d.material_flags, &d.material_data, d.slot1_role, d.output_alpha,
+        );
         device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: None,
             layout: &tex_bgl,
@@ -371,7 +420,7 @@ impl HeroRenderer {
         .map(|d| {
             let dv = d.diffuse.as_ref().map(|(w, h, r)| upload(*w, *h, r));
             let nv = d.normal.as_ref().map(|(w, h, r)| upload(*w, *h, r));
-            let sv = d.specular.as_ref().map(|(w, h, r)| upload(*w, *h, r));
+            let sv = d.slot1.as_ref().map(|(w, h, r)| upload(*w, *h, r));
             bind_of(dv.as_ref().unwrap_or(&white), nv.as_ref().unwrap_or(&flat_nm), sv.as_ref().unwrap_or(&black), d)
         })
         .collect();
@@ -388,18 +437,50 @@ impl HeroRenderer {
             wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset: 48, shader_location: 3 },
             wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x2, offset: 64, shader_location: 4 },
             wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset: 80, shader_location: 5 },
+            wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset: 96, shader_location: 6 },
         ],
     };
-    let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-        label: None,
-        layout: Some(&pl),
-        vertex: wgpu::VertexState { module: &shader, entry_point: "vs", buffers: &[vlayout], compilation_options: Default::default() },
-        primitive: wgpu::PrimitiveState { cull_mode: None, ..Default::default() },
-        depth_stencil: Some(wgpu::DepthStencilState { format: wgpu::TextureFormat::Depth32Float, depth_write_enabled: true, depth_compare: wgpu::CompareFunction::Less, stencil: Default::default(), bias: Default::default() }),
-        multisample: Default::default(),
-        fragment: Some(wgpu::FragmentState { module: &shader, entry_point: "fs", targets: &[Some(wgpu::TextureFormat::Rgba8Unorm.into())], compilation_options: Default::default() }),
-        multiview: None,
-    });
+    // The engine's geometry pipelines, as `scene.rs` builds them: opaque draws REPLACE with Z write and
+    // no culling; a blended material's draw blends with its own state, Z write off, culled by
+    // `render::material_cull`. Outward faces are clockwise on screen under this RH view (the engine's
+    // LH one mirrors it): culling `Back` draws a closed model whole, `Front` shows its inside.
+    let make_pipeline = |blend: wgpu::BlendState, depth_write: bool, cull: Option<wgpu::Face>| {
+        device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: None,
+            layout: Some(&pl),
+            vertex: wgpu::VertexState { module: &shader, entry_point: "vs", buffers: &[vlayout.clone()], compilation_options: Default::default() },
+            primitive: wgpu::PrimitiveState { front_face: wgpu::FrontFace::Cw, cull_mode: cull, ..Default::default() },
+            depth_stencil: Some(wgpu::DepthStencilState { format: wgpu::TextureFormat::Depth32Float, depth_write_enabled: depth_write, depth_compare: wgpu::CompareFunction::Less, stencil: Default::default(), bias: Default::default() }),
+            multisample: Default::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: "fs",
+                targets: &[Some(wgpu::ColorTargetState { format: wgpu::TextureFormat::Rgba8Unorm, blend: Some(blend), write_mask: wgpu::ColorWrites::ALL })],
+                compilation_options: Default::default(),
+            }),
+            multiview: None,
+        })
+    };
+    let pipeline = make_pipeline(wgpu::BlendState::REPLACE, true, None);
+    let draw_list: Vec<ShotDraw> = draws
+        .iter()
+        .enumerate()
+        .map(|(bind, d)| {
+            let end = (d.index_start + d.index_count).min(indices.len() as u32);
+            let blend = d.output_alpha.map(|_| {
+                let rt = mercs2_formats::texture::runtime_material_flags(d.material_flags);
+                (mercs2_formats::texture::material_blend_state(rt), mercs2_engine::render::material_cull(d.material_flags))
+            });
+            ShotDraw { start: d.index_start, count: end.saturating_sub(d.index_start), bind, blend }
+        })
+        .collect();
+    let mut blend_pipelines: HashMap<BlendKey, wgpu::RenderPipeline> = HashMap::new();
+    for key in draw_list.iter().filter_map(|d| d.blend) {
+        if let std::collections::hash_map::Entry::Vacant(v) = blend_pipelines.entry(key) {
+            let state = mercs2_engine::render::wgpu_blend(key.0).unwrap_or_else(|e| panic!("{e}"));
+            v.insert(make_pipeline(state, false, key.1));
+        }
+    }
 
     let bbox_center = Vec3::from((Vec3::from(bbox.0) + Vec3::from(bbox.1)) * 0.5);
     let bbox_radius = ((Vec3::from(bbox.1) - Vec3::from(bbox.0)).length() * 0.5).max(0.1);
@@ -407,26 +488,18 @@ impl HeroRenderer {
     let flip_x = Mat4::from_cols_array(&[-1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0]);
     let (color, color_v, depth_v, read_buf, bpr, proj) = size_targets(&device, w, h, bbox_radius);
 
-    let draw_ranges: Vec<(u32, u32)> = draws
-        .iter()
-        .filter(|d| d.index_count > 0)
-        .map(|d| {
-            let end = (d.index_start + d.index_count).min(indices.len() as u32);
-            (d.index_start, end.saturating_sub(d.index_start))
-        })
-        .collect();
-
     HeroRenderer {
         device,
         queue,
         pipeline,
+        blend_pipelines,
         cam_buf,
         cam_bind,
         bone_bind,
         vbuf,
         ibuf,
         tex_binds,
-        draws: draw_ranges,
+        draws: draw_list,
         color,
         color_v,
         depth_v,
@@ -475,10 +548,14 @@ impl HeroRenderer {
             rp.set_bind_group(1, &self.bone_bind, &[]);
             rp.set_vertex_buffer(0, self.vbuf.slice(..));
             rp.set_index_buffer(self.ibuf.slice(..), wgpu::IndexFormat::Uint32);
-            for (i, (start, count)) in self.draws.iter().enumerate() {
-                rp.set_bind_group(2, &self.tex_binds[i], &[]);
-                if *count > 0 {
-                    rp.draw_indexed(*start..(*start + *count), 0, 0..1);
+            // Opaque draws, then the blended ones in draw order (`Scene::draw_geometry`).
+            for blended in [false, true] {
+                for d in self.draws.iter().filter(|d| d.blend.is_some() == blended && d.count > 0) {
+                    if let Some(key) = d.blend {
+                        rp.set_pipeline(&self.blend_pipelines[&key]);
+                    }
+                    rp.set_bind_group(2, &self.tex_binds[d.bind], &[]);
+                    rp.draw_indexed(d.start..(d.start + d.count), 0, 0..1);
                 }
             }
         }
@@ -562,6 +639,7 @@ mod tests {
             uv: [0.0, 0.0],
             _p2: [0.0; 2],
             tangent: [1.0, 0.0, 0.0, 1.0],
+            color: [1.0; 4],
         };
         (vec![v(-1.0, -1.0), v(1.0, -1.0), v(0.0, 1.0)], vec![0, 1, 2])
     }
@@ -575,7 +653,17 @@ mod tests {
     fn hero_renderer_resizes_to_the_requested_frame() {
         let (verts, indices) = tri();
         let ident = [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0]];
-        let draws = [DrawTex { index_start: 0, index_count: 3, diffuse: None, normal: None, specular: None, material_flags: 0, material_alpha: 1.0 }];
+        let draws = [DrawTex {
+            index_start: 0,
+            index_count: 3,
+            diffuse: None,
+            normal: None,
+            slot1: None,
+            slot1_role: mercs2_engine::render::Slot1Role::None,
+            material_flags: 0,
+            material_data: mercs2_engine::mesh::NO_MATERIAL_DATA,
+            output_alpha: None,
+        }];
         let mut r = HeroRenderer::new(&verts, &indices, &[ident], ([-1.0, -1.0, 0.0], [1.0, 1.0, 0.0]), &draws);
         let cam = OrbitCam { yaw: 0.0, pitch: 0.0, zoom: 1.0 };
         let clear = [26u8, 26, 31, 255];
