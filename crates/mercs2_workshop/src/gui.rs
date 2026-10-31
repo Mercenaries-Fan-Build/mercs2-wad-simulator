@@ -232,6 +232,249 @@ impl Gui {
     }
 }
 
+/// A resizable side panel held at `width`, which only a drag of the panel's edge changes.
+///
+/// egui 0.28 sizes a side panel by its content: it stores the content rect as the next width
+/// (`panel.rs:283,328`), so a row wider than the panel ratchets it wider up to the top of its range
+/// and narrow content shrinks it back to the bottom. Here the panel is shown at exactly `width`
+/// (`exact_width`), so content can neither widen nor shrink it; a widget that does not fit is
+/// clipped at the edge, where it can be seen. A drag of the edge — read at the start of the pass,
+/// as egui reads it — sets `width` within `range`, and the resize cursor is the one `range` gives.
+pub fn held_side_panel<R>(
+    ctx: &egui::Context,
+    side: egui::panel::Side,
+    id: impl Into<egui::Id>,
+    range: egui::Rangef,
+    width: &mut f32,
+    frame: egui::Frame,
+    add: impl FnOnce(&mut egui::Ui) -> R,
+) -> egui::InnerResponse<R> {
+    let id = id.into();
+    let avail = ctx.available_rect();
+    let edge = match side {
+        egui::panel::Side::Left => avail.left(),
+        egui::panel::Side::Right => avail.right(),
+    };
+    let resize_id = id.with("__resize");
+    let drag = ctx.read_response(resize_id);
+    if let Some(r) = &drag {
+        if r.dragged() {
+            if let Some(p) = r.interact_pointer_pos() {
+                *width = (p.x - edge).abs();
+            }
+        }
+    }
+    *width = width.clamp(range.min, range.max).min(avail.width());
+    let out = egui::SidePanel::new(side, id).resizable(true).exact_width(*width).frame(frame).show(ctx, add);
+    // egui picks the cursor from the panel's own range, which `exact_width` collapses to one
+    // width; pick it from the real range instead.
+    if ctx.read_response(resize_id).is_some_and(|r| r.hovered() || r.dragged()) {
+        use egui::panel::Side::{Left, Right};
+        let icon = if *width <= range.min {
+            if side == Left { egui::CursorIcon::ResizeEast } else { egui::CursorIcon::ResizeWest }
+        } else if *width < range.max {
+            egui::CursorIcon::ResizeHorizontal
+        } else if side == Right {
+            egui::CursorIcon::ResizeEast
+        } else {
+            egui::CursorIcon::ResizeWest
+        };
+        ctx.set_cursor_icon(icon);
+    }
+    out
+}
+
+#[cfg(test)]
+mod held_side_panel_tests {
+    use super::held_side_panel;
+
+    fn range() -> egui::Rangef {
+        egui::Rangef::new(300.0, 480.0)
+    }
+
+    /// Run `frames` passes of a right panel with content `content_w` wide, held at `width`;
+    /// returns the panel's width on each pass, measured from the screen's right edge to the
+    /// panel's left edge (content wider than the panel runs past the right edge, clipped).
+    fn run(width: &mut f32, content_w: f32, frames: usize) -> Vec<f32> {
+        let ctx = egui::Context::default();
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1600.0, 1000.0));
+        let mut shown = Vec::new();
+        for _ in 0..frames {
+            let input = egui::RawInput { screen_rect: Some(screen), ..Default::default() };
+            let _ = ctx.run(input, |ctx| {
+                let r = held_side_panel(ctx, egui::panel::Side::Right, "held", range(), width, egui::Frame::none(), |ui| {
+                    ui.allocate_space(egui::vec2(content_w, 10.0));
+                });
+                shown.push(screen.right() - r.response.rect.left());
+            });
+        }
+        shown
+    }
+
+    /// Without the hold, egui 0.28 widens the panel to its content and keeps it there. Held, its
+    /// edge stays put every pass; the content overflows and is clipped.
+    #[test]
+    fn content_wider_than_the_panel_does_not_widen_it() {
+        let mut width = 372.0;
+        let shown = run(&mut width, 450.0, 30);
+        assert_eq!(width, 372.0, "held width moved to {width}");
+        assert!(shown.iter().all(|w| (w - 372.0).abs() < 0.5), "drawn at {shown:?}");
+    }
+
+    /// Without the hold, narrow content shrinks it to the bottom of its range; held, it stays.
+    #[test]
+    fn content_narrower_than_the_panel_does_not_shrink_it() {
+        let mut width = 372.0;
+        let shown = run(&mut width, 50.0, 30);
+        assert_eq!(width, 372.0);
+        assert!(shown.iter().all(|w| (w - 372.0).abs() < 0.5), "drawn at {shown:?}");
+    }
+
+    /// Dragging the edge is what changes the width, and the panel keeps the dragged width.
+    #[test]
+    fn a_drag_of_the_edge_sets_the_width() {
+        let ctx = egui::Context::default();
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1600.0, 1000.0));
+        let mut width = 372.0f32;
+        let edge = egui::pos2(1600.0 - 372.0, 500.0);
+        let press = |pressed| egui::Event::PointerButton {
+            pos: edge,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: Default::default(),
+        };
+        let steps = vec![
+            vec![egui::Event::PointerMoved(edge)],
+            vec![press(true)],
+            vec![egui::Event::PointerMoved(edge - egui::vec2(40.0, 0.0))],
+            vec![egui::Event::PointerMoved(edge - egui::vec2(80.0, 0.0))],
+            vec![egui::Event::PointerMoved(edge - egui::vec2(80.0, 0.0))],
+            vec![egui::Event::PointerButton {
+                pos: edge - egui::vec2(80.0, 0.0),
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: Default::default(),
+            }],
+            vec![],
+            vec![],
+        ];
+        let mut shown = 0.0;
+        for events in steps {
+            let input = egui::RawInput { screen_rect: Some(screen), events, ..Default::default() };
+            let _ = ctx.run(input, |ctx| {
+                let r = held_side_panel(ctx, egui::panel::Side::Right, "held", range(), &mut width, egui::Frame::none(), |ui| {
+                    ui.allocate_space(egui::vec2(50.0, 10.0));
+                });
+                shown = r.response.rect.width();
+            });
+        }
+        assert!((width - 452.0).abs() < 0.5, "dragged width is {width}");
+        assert!((shown - 452.0).abs() < 0.5, "panel shows {shown}");
+    }
+
+    /// A width outside the range is brought into it.
+    #[test]
+    fn the_held_width_stays_in_range() {
+        let mut width = 900.0;
+        let shown = run(&mut width, 10.0, 2);
+        assert_eq!(width, 480.0);
+        assert!(shown.iter().all(|w| (w - 480.0).abs() < 0.5), "drawn at {shown:?}");
+    }
+}
+
+#[cfg(test)]
+mod cjk_font_tests {
+    use super::theme;
+
+    /// Lines from the retail Japanese string table (`japanese_P000_Q3`): kanji, hiragana,
+    /// katakana, full-width `！` and the ideographic space and full stop.
+    const RETAIL: &str = "素敵だねえ。取引成立だ。ビバ！\u{3000}ベネズエラ！対戦車地雷";
+
+    fn frame(ctx: &egui::Context) {
+        let _ = ctx.run(egui::RawInput::default(), |_| {});
+    }
+
+    fn covers(ctx: &egui::Context, style: &egui::TextStyle) -> bool {
+        ctx.fonts(|f| f.has_glyphs(&theme::font(style), RETAIL))
+    }
+
+    /// The repo's committed face, the one `--pack-data` copies into the bundle.
+    fn committed_face() -> Vec<u8> {
+        let home = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../workshop_data");
+        theme::read_cjk_font(&home).unwrap_or_else(|e| panic!("{e}"))
+    }
+
+    #[test]
+    fn the_bundle_face_draws_the_japanese_table_in_every_style() {
+        let ctx = egui::Context::default();
+        theme::install(&ctx);
+        frame(&ctx);
+        assert!(!covers(&ctx, &egui::TextStyle::Body), "the platform faces already cover the table");
+        theme::add_cjk_font(&ctx, committed_face());
+        frame(&ctx);
+        for (style, _) in theme::type_scale() {
+            assert!(covers(&ctx, &style), "{style:?} still lacks glyphs of {RETAIL:?}");
+        }
+    }
+
+    /// After every text face of each family and before egui's icon face (the platform faces keep
+    /// every glyph they have), and once even when the boot adds it again (a second boot after the
+    /// data folder changes).
+    #[test]
+    fn the_face_comes_once_after_every_familys_text_faces() {
+        let ctx = egui::Context::default();
+        theme::install(&ctx);
+        frame(&ctx);
+        theme::add_cjk_font(&ctx, committed_face());
+        theme::add_cjk_font(&ctx, committed_face());
+        frame(&ctx);
+        let defs = ctx.fonts(|f| f.lock().fonts.definitions().clone());
+        for (family, faces) in &defs.families {
+            let n = faces.iter().filter(|f| f.as_str() == "noto_sans_jp").count();
+            assert_eq!(n, 1, "{family:?} lists the face {n} times: {faces:?}");
+            let at = faces.iter().position(|f| f == "noto_sans_jp").unwrap();
+            let rest: Vec<&str> = faces[at + 1..].iter().map(String::as_str).collect();
+            assert!(rest.is_empty() || rest == ["emoji-icon-font"], "{family:?}: {faces:?}");
+        }
+    }
+
+    /// Full-width `！` and `？` draw from the Japanese face, not from egui's icon face, which maps
+    /// icon glyphs to both and drew them heavier than the text around them.
+    #[test]
+    fn full_width_punctuation_comes_from_the_japanese_face() {
+        let ctx = egui::Context::default();
+        theme::install(&ctx);
+        theme::add_cjk_font(&ctx, committed_face());
+        frame(&ctx);
+        let defs = ctx.fonts(|f| f.lock().fonts.definitions().clone());
+        for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
+            // The first face of the family that has the glyph is the one that draws it.
+            for c in ['！', '？'] {
+                let first = defs.families[&family]
+                    .iter()
+                    .find(|face| {
+                        let one = egui::Context::default();
+                        let mut d = defs.clone();
+                        d.families.insert(egui::FontFamily::Proportional, vec![(*face).clone()]);
+                        one.set_fonts(d);
+                        frame(&one);
+                        one.fonts(|f| f.has_glyph(&theme::font(&egui::TextStyle::Body), c))
+                    })
+                    .map(String::as_str);
+                assert_eq!(first, Some("noto_sans_jp"), "{family:?} draws {c} from {first:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_bundle_without_the_face_is_an_error_naming_it() {
+        let dir = std::env::temp_dir().join("m2ws_no_cjk_face");
+        let _ = std::fs::create_dir_all(&dir);
+        let e = theme::read_cjk_font(&dir).unwrap_err();
+        assert!(e.contains(&dir.join(theme::CJK_FONT).display().to_string()), "{e}");
+    }
+}
+
 /// The workshop's visual system — one place for the palette + type + spacing so every panel reads
 /// as one tool. Colours and roles mirror the approved redesign mockup: warm gunmetal neutrals,
 /// **brass** for what's live/selected, **hazard-orange** reserved for the irreversible.
@@ -318,8 +561,53 @@ pub mod theme {
         false
     }
 
+    /// The Japanese face the reference bundle carries (Noto Sans JP Regular, SIL Open Font License
+    /// 1.1; the license ships beside it as `NotoSansJP-OFL.txt`). None of the platform faces
+    /// `install` loads has CJK glyphs, so without it the Japanese string table draws as boxes.
+    pub const CJK_FONT: &str = "NotoSansJP-Regular.otf";
+
+    /// [`CJK_FONT`] read from the bundle at `home`; an error naming the path when it cannot be read.
+    pub fn read_cjk_font(home: &std::path::Path) -> Result<Vec<u8>, String> {
+        let p = home.join(CJK_FONT);
+        std::fs::read(&p).map_err(|e| {
+            format!("{}: {e} (the reference bundle's Japanese face, which the Text page draws with)", p.display())
+        })
+    }
+
+    /// Set `install`'s faces with the Japanese face after each family's text faces. egui looks
+    /// each glyph up face by face in family order, so text the other faces cover draws exactly as
+    /// before and only what they lack (kana, kanji, full-width punctuation) comes from it. It goes
+    /// ahead of egui's icon face (`emoji-icon-font`), which maps icon glyphs to the full-width `！`
+    /// and `？` and would draw them in the middle of Japanese lines. Built from the platform faces
+    /// rather than read back from `ctx`, which has no fonts before its first frame (the boot
+    /// screen is drawn by the engine, not egui).
+    pub fn add_cjk_font(ctx: &egui::Context, bytes: Vec<u8>) {
+        const KEY: &str = "noto_sans_jp";
+        const EGUI_ICONS: &str = "emoji-icon-font";
+        let mut defs = platform_fonts();
+        defs.font_data.insert(KEY.to_owned(), egui::FontData::from_owned(bytes));
+        for faces in defs.families.values_mut() {
+            let at = faces.iter().position(|f| f == EGUI_ICONS).unwrap_or(faces.len());
+            faces.insert(at, KEY.to_owned());
+        }
+        ctx.set_fonts(defs);
+    }
+
     pub fn install(ctx: &egui::Context) {
         // ── fonts ──
+        ctx.set_fonts(platform_fonts());
+        // The Japanese face comes from the reference bundle once the boot has it (`add_cjk_font`).
+
+        // ── type scale + visuals ──
+        let mut style = (*ctx.style()).clone();
+        for (s, f) in type_scale() {
+            style.text_styles.insert(s, f);
+        }
+        install_visuals(ctx, style);
+    }
+
+    /// The platform faces `install` sets: the native body face, the display face, egui's own.
+    fn platform_fonts() -> egui::FontDefinitions {
         let mut fonts = egui::FontDefinitions::default();
         // Body: prefer the platform's native UI face ahead of egui's default proportional.
         //
@@ -363,14 +651,10 @@ pub mod theme {
             fonts.families.get(&FontFamily::Proportional).cloned().unwrap_or_default()
         };
         fonts.families.insert(FontFamily::Name("disp".into()), disp_key);
-        ctx.set_fonts(fonts);
+        fonts
+    }
 
-        // ── type scale + visuals ──
-        let mut style = (*ctx.style()).clone();
-        for (s, f) in type_scale() {
-            style.text_styles.insert(s, f);
-        }
-
+    fn install_visuals(ctx: &egui::Context, mut style: egui::Style) {
         let mut v = egui::Visuals::dark();
         v.panel_fill = G1;
         v.window_fill = G2;
@@ -553,7 +837,8 @@ pub mod theme {
                         ui.label(disp_text(title.to_uppercase(), style_eyebrow(), DIM));
                         if let Some(b) = badge {
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                ui.label(egui::RichText::new(b).monospace().color(FAINT));
+                                // Cut to the width the title leaves, so a narrow panel does not overflow.
+                                ui.add(egui::Label::new(egui::RichText::new(b).monospace().color(FAINT)).truncate());
                             });
                         }
                     })
@@ -618,19 +903,29 @@ pub mod theme {
     }
 
     /// A small rounded toggle pill (destruction states, filters). Brass when `on`, dim when off.
+    ///
+    /// Measured and painted rather than built on a `Frame`: a `Frame` starts at the cursor and
+    /// reserves its rect with `allocate_rect`, which never wraps, so a row of them in
+    /// `horizontal_wrapped` runs off the panel. Reserving the measured size wraps like any widget.
     pub fn pill(ui: &mut egui::Ui, label: &str, on: bool) -> egui::Response {
         let (fill, stroke, txt) = if on { (BRASS_SOFT, BRASS_DK, BRASS) } else { (G0, LINE, DIM) };
-        egui::Frame::none()
-            .fill(fill)
-            .stroke(egui::Stroke::new(1.0, stroke))
-            .rounding(egui::Rounding::same(4.0))
-            .inner_margin(egui::Margin::symmetric(8.0, 3.0))
-            .outer_margin(egui::Margin { right: 4.0, bottom: 4.0, ..Default::default() })
-            .show(ui, |ui| {
-                ui.label(disp_text(label, style_eyebrow(), txt));
-            })
-            .response
-            .interact(egui::Sense::click())
+        let pad = egui::vec2(8.0, 3.0);
+        let galley = egui::WidgetText::from(disp_text(label, style_eyebrow(), txt)).into_galley(
+            ui,
+            Some(egui::TextWrapMode::Extend),
+            f32::INFINITY,
+            style_eyebrow(),
+        );
+        let size = galley.size() + 2.0 * pad;
+        // The 4 px right/bottom margin is reserved with the pill so a row breaks between pills.
+        let (id, space) = ui.allocate_space(size + egui::vec2(4.0, 4.0));
+        let rect = egui::Rect::from_min_size(space.min, size);
+        let resp = ui.interact(rect, id, egui::Sense::click());
+        if ui.is_rect_visible(rect) {
+            ui.painter().rect(rect, egui::Rounding::same(4.0), fill, egui::Stroke::new(1.0, stroke));
+            ui.painter().galley(rect.min + pad, galley, txt);
+        }
+        resp
     }
 
     /// A key → value row inside a card body: dim label left, tabular mono value right-aligned.
