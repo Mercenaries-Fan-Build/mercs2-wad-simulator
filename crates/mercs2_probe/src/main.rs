@@ -20,7 +20,7 @@
 //!   mercs2_probe scan-hash 0xA3CD72A7 0x..
 //!   mercs2_probe block-probe 1234
 //!   mercs2_probe hier --model 0x.. [names.txt] --csv hier.csv
-//!   mercs2_probe extract --model 0x.. out.bin
+//!   mercs2_probe extract --model 0x.. [--type 0x..] out.bin
 //!   mercs2_probe dump-block 667 block667.bin
 //!   mercs2_probe find-placement villa
 //!   mercs2_probe save-dump <profile> [grep-needle]
@@ -40,12 +40,14 @@
 
 mod anim_table;
 mod bone_census;
+mod clip_names;
 mod clip_pose;
 mod dump;
 mod dump_hibernation;
 mod dump_spawnlists;
 mod ess_live;
 mod ess_menu_check;
+mod facefx;
 mod gfx_golden;
 mod prof_samples;
 mod we_template;
@@ -73,9 +75,11 @@ fn usage() -> ! {
          \x20 gfx-golden <movies_dir> --md <report.md> --json <index.json>   (no WAD needed)\n\
          \x20 ess-live [--addr host:port] [--menu <scripts-rel path>] [--spawn <template>] [--spawn-dist <m>]   (live game, no WAD)\n\
          \x20 ess-menu-check --ess <Ess.lua> <menu.lua> [<menu.lua> ...]   (exact Lua 5.1, engine stubbed, no WAD)\n\
-         \x20 extract --model H <out.bin>   dump-block <index> <out.bin>  find-placement <substring>\n\
+         \x20 extract --model H [--type T] <out.bin>   dump-block <index> <out.bin>  find-placement <substring>\n\
          \x20 save-dump <profile> [needle]  overlays <profile>\n\
          \x20 anim-table <name|0xH> [--handle 0xH] [--list <column>]   (an animationtable's rows verbatim)\n\
+         \x20 clip-names <review.tsv>       (name AnimationLookup clips from their rows; a review file, merges nothing)\n\
+         \x20 facefx <name|0xH> | --all     (a FaceFX actor / anim set by name; --all reads every one and prints the census)\n\
          \x20 we-template <name|0xKEY>... | --class <Class> | --uses <0xU32>   (worldentity templates / records)\n\
          \x20 clip-pose --model H --clip H --bones 0xA,0xB.. --ref 0xR [--frames N]   (bone positions over a clip)\n\
          \x20 dump-read <capture-dir> <0xVA> [len]          (retail memory from a v1.0 x32dbg capture, no WAD)\n\
@@ -124,6 +128,7 @@ fn first_positional(args: &[String]) -> Option<String> {
             || a == "--skeleton-csv"
             || a == "--md"
             || a == "--json"
+            || a == "--type"
         {
             skip_next = true;
             continue;
@@ -686,13 +691,24 @@ fn main() {
         },
         "extract" => {
             let mh = model.as_deref().and_then(parse_hash).unwrap_or_else(|| {
-                eprintln!("extract: usage: mercs2_probe extract --model 0xHASH <out.bin>");
+                eprintln!("extract: usage: mercs2_probe extract --model 0xHASH [--type 0xTYPEHASH] <out.bin>");
                 std::process::exit(2);
+            });
+            // A name can be several assets (a character's model and its facefxactor share it): with
+            // --type the chunk of that CHDR class is read instead of the model.
+            let ty = flag_val(&args, "--type").map(|t| {
+                parse_hash(&t).unwrap_or_else(|| {
+                    eprintln!("extract: --type {t:?} is not a hex hash");
+                    std::process::exit(2);
+                })
             });
             let out = first_positional(&args).unwrap_or_else(|| format!("{mh:08X}.bin"));
             run((|| -> Result<(), String> {
                 let mut w = wad::open(&wadpath).map_err(|e| format!("open {wadpath}: {e}"))?;
-                let c = wad::extract_container(&mut w, mh).map_err(|e| format!("extract_container: {e}"))?;
+                let c = match ty {
+                    Some(t) => wad::extract_container_typed(&mut w, mh, t).map_err(|e| format!("extract_container_typed: {e}"))?,
+                    None => wad::extract_container(&mut w, mh).map_err(|e| format!("extract_container: {e}"))?,
+                };
                 std::fs::write(&out, &c).map_err(|e| format!("write {out}: {e}"))?;
                 println!("0x{mh:08X}: {} bytes -> {out}", c.len());
                 Ok(())
@@ -840,6 +856,25 @@ fn main() {
                 None => None,
             };
             run(anim_table::anim_table(&wadpath, hash, handle, flag_val(&args, "--list").as_deref()));
+        }
+        "facefx" => {
+            if args.iter().any(|a| a == "--all") {
+                run(facefx::facefx_all(&wadpath));
+            } else {
+                let name = first_positional(&args).unwrap_or_else(|| {
+                    eprintln!("facefx: usage: mercs2_probe facefx <name|0xH> | --all");
+                    std::process::exit(2);
+                });
+                let hash = parse_hash(&name).unwrap_or_else(|| mercs2_formats::hash::pandemic_hash_m2(&name));
+                run(facefx::facefx(&wadpath, hash));
+            }
+        }
+        "clip-names" => {
+            let out = first_positional(&args).unwrap_or_else(|| {
+                eprintln!("clip-names: usage: mercs2_probe clip-names <review.tsv>");
+                std::process::exit(2);
+            });
+            run(clip_names::clip_names(&wadpath, std::path::Path::new(&out)));
         }
         "clip-pose" => {
             let usage = "clip-pose: usage: mercs2_probe clip-pose --model 0xH --clip 0xH --bones 0xA,0xB.. --ref 0xR [--frames N]";
