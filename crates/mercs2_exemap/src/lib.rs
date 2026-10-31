@@ -55,6 +55,8 @@ pub mod canonical;
 pub mod catalogue;
 pub mod corpus;
 mod dtor;
+pub mod hashjoin;
+pub mod hashsites;
 pub mod image;
 pub mod images;
 pub mod iso9660;
