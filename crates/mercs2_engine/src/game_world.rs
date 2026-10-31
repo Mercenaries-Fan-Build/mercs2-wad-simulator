@@ -45,7 +45,7 @@ pub fn terrain_to_vertices(tm: &mercs2_formats::terrain::TerrainMesh, textured: 
             };
             Vertex {
                 pos: p,
-                color: [1.0, 1.0, 1.0],
+                color: [1.0, 1.0, 1.0, 1.0],
                 uv,
                 normal: tm.normals.get(i).copied().unwrap_or(up),
                 tangent: [1.0, 0.0, 0.0, 1.0],
@@ -2361,7 +2361,7 @@ where
             fog: ([0.55, 0.62, 0.70], 0.00016, 60.0),
             sun: None,
             atmosphere: Some(mercs2_formats::atmosphere::Atmosphere::default()),
-            loading_plate_wad: Some(self.wadpath.clone()),
+            vz_wad: self.wadpath.clone(),
             load_stages: 4,
             bindings: crate::input::Bindings::default(),
         }
