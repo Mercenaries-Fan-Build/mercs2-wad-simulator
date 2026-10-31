@@ -59,6 +59,8 @@
 //!   encode.
 //! - [`tiny_model`] — the TINY far-distance stand-in model container: full decode, byte-identical
 //!   encode.
+//! - [`facefx`] — the `facefxactor` / `facefxanimationset` FaceFX SDK archives: face bones, the
+//!   face graph and its bone poses, anim curves.
 //! - [`orchestrator`], [`fxdict`], [`atmosphere`], [`gfx`] — destruction state machines; FX
 //!   dictionaries; the `Graphics.Atmosphere.*` sky/HDR parameter model; Scaleform GFx/SWF.
 //! - [`save`], [`save_write`] — the PC `.profile` save (13,404 bytes, zlib Lua payload at `0x468`).
@@ -120,6 +122,7 @@ pub mod dlc_input;
 pub mod dlc_stfs;
 pub mod exe_image;
 pub mod donor;
+pub mod facefx;
 pub mod ffcs;
 pub mod font;
 pub mod fxdict;
@@ -168,6 +171,7 @@ pub mod script_meta;
 pub mod scripts_block;
 pub mod scrub;
 pub mod shader3;
+pub mod shader_registrations;
 pub mod shader_registry;
 pub mod shader_sites;
 pub mod sm3asm;
@@ -196,6 +200,7 @@ pub mod spawner_record;
 pub mod hibernation_control;
 pub mod model_name;
 pub mod render_node;
+pub mod rotor;
 pub mod unit_list;
 pub mod veg;
 pub mod world;
