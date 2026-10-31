@@ -246,6 +246,66 @@ struct DrawCall {
     bind: usize,
     lod_mask: u8,
     node: i16,
+    /// A blended material's blend state and cull mode; `None` draws in the opaque pass.
+    blend: Option<BlendKey>,
+}
+
+/// What a blended draw's pipeline is built from: the material's D3D blend state and its cull mode
+/// (`render::material_cull`).
+type BlendKey = (mercs2_formats::texture::MaterialBlend, Option<wgpu::Face>);
+
+/// The geometry pipeline: `shader.wgsl` over the model vertex layout into a `format` target, with
+/// `blend`, Z write `depth_write` (the depth test is always on: `FUN_00858320` sets `ZENABLE` from a
+/// runtime bit no material carries) and `cull`.
+fn geom_pipeline(
+    device: &wgpu::Device,
+    layout: &wgpu::PipelineLayout,
+    shader: &wgpu::ShaderModule,
+    format: wgpu::TextureFormat,
+    blend: wgpu::BlendState,
+    depth_write: bool,
+    cull: Option<wgpu::Face>,
+) -> wgpu::RenderPipeline {
+    let vbuf_layout = wgpu::VertexBufferLayout {
+        array_stride: std::mem::size_of::<Vertex>() as wgpu::BufferAddress,
+        step_mode: wgpu::VertexStepMode::Vertex,
+        attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x4, 2 => Float32x2, 3 => Float32x3, 4 => Float32x4, 5 => Uint8x4, 6 => Unorm8x4],
+    };
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("scene geometry pipeline"),
+        layout: Some(layout),
+        vertex: wgpu::VertexState {
+            module: shader,
+            entry_point: "vs_main",
+            buffers: &[vbuf_layout],
+            compilation_options: Default::default(),
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: shader,
+            entry_point: "fs_main",
+            targets: &[Some(wgpu::ColorTargetState { format, blend: Some(blend), write_mask: wgpu::ColorWrites::ALL })],
+            compilation_options: Default::default(),
+        }),
+        // A model's outward faces are counter-clockwise on screen under this view (`look_at_lh` ·
+        // `perspective_lh`, X mirrored): culling `Back` with `Ccw` front faces draws a closed model
+        // whole from outside, culling `Front` shows its inside (checked on `al_veh_tank_m1a2` through
+        // `--ui-state` captures).
+        primitive: wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::TriangleList,
+            front_face: wgpu::FrontFace::Ccw,
+            cull_mode: cull,
+            ..Default::default()
+        },
+        depth_stencil: Some(wgpu::DepthStencilState {
+            format: DEPTH_FORMAT,
+            depth_write_enabled: depth_write,
+            depth_compare: wgpu::CompareFunction::Less,
+            stencil: wgpu::StencilState::default(),
+            bias: wgpu::DepthBiasState::default(),
+        }),
+        multisample: wgpu::MultisampleState::default(),
+        multiview: None,
+    })
 }
 
 struct ModelGpu {
@@ -317,6 +377,9 @@ pub struct Scene {
     tex_bgl: wgpu::BindGroupLayout,
     /// The material parameters (binding 4) of a bind with no material: not alpha-tested.
     no_material_params: wgpu::Buffer,
+    /// Every retail pixel shader's samplers, which decide what each material slot binds
+    /// ([`Scene::set_pixel_samplers`]). Required before a model with materials is loaded.
+    pixel_samplers: Option<mercs2_formats::shader_registrations::PixelSamplers>,
     sampler: wgpu::Sampler,
     white: wgpu::TextureView,
     flat_normal: wgpu::TextureView,
@@ -403,6 +466,13 @@ pub struct Scene {
     /// Geometry pipeline targeting the HDR format (world path). `None` if the post chain is unavailable.
     world_pipeline: Option<wgpu::RenderPipeline>,
     world_pipeline_t: Option<wgpu::RenderPipeline>,
+    /// The geometry shader and its layout, kept to build a blended material's pipeline when a model
+    /// that needs it loads.
+    geom_shader: wgpu::ShaderModule,
+    geom_layout: wgpu::PipelineLayout,
+    /// The blended pipelines (`render::wgpu_blend`, Z write off), one per target format, blend state
+    /// and cull mode a loaded material draws with.
+    blend_pipelines: HashMap<(wgpu::TextureFormat, BlendKey), wgpu::RenderPipeline>,
     /// HDR + bloom post chain. `None` = fall back to direct swapchain present.
     post: Option<crate::post::Post>,
     sky_buf: wgpu::Buffer,
@@ -533,8 +603,9 @@ impl Scene {
                 },
             ],
         });
-        // The parameters of a draw with no material: not alpha-tested.
-        let no_material_params = crate::render::material_params(&device, 0, 1.0);
+        // The parameters of a bind with no material: not alpha-tested, neutral materialData.
+        let no_material_params =
+            crate::render::material_params(&device, 0, &mesh::NO_MATERIAL_DATA, crate::render::Slot1Role::None, None);
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("material sampler"),
             address_mode_u: wgpu::AddressMode::Repeat,
@@ -711,54 +782,12 @@ impl Scene {
         // `transparent` builds the see-through variant (workshop model-alpha inspection): alpha-blend
         // and DON'T write depth, so a semi-transparent mesh neither self-occludes nor hides the bone
         // markers behind it. Opaque path is unchanged (REPLACE + depth write).
+        // Opaque draws are double-sided — the building shells are wound outward-facing, so back-face
+        // culling would hide their floor+walls when viewed from inside. (Interim: per-material two-sided
+        // flag from MTRL; negligible perf cost at this scale.)
         let build_geom_pipeline = |format: wgpu::TextureFormat, transparent: bool| {
-            let vbuf_layout = wgpu::VertexBufferLayout {
-                array_stride: std::mem::size_of::<Vertex>() as wgpu::BufferAddress,
-                step_mode: wgpu::VertexStepMode::Vertex,
-                attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x2, 3 => Float32x3, 4 => Float32x4, 5 => Uint8x4, 6 => Unorm8x4],
-            };
-            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some("scene geometry pipeline"),
-                layout: Some(&layout),
-                vertex: wgpu::VertexState {
-                    module: &shader,
-                    entry_point: "vs_main",
-                    buffers: &[vbuf_layout],
-                    compilation_options: Default::default(),
-                },
-                fragment: Some(wgpu::FragmentState {
-                    module: &shader,
-                    entry_point: "fs_main",
-                    targets: &[Some(wgpu::ColorTargetState {
-                        format,
-                        blend: Some(if transparent {
-                            wgpu::BlendState::ALPHA_BLENDING
-                        } else {
-                            wgpu::BlendState::REPLACE
-                        }),
-                        write_mask: wgpu::ColorWrites::ALL,
-                    })],
-                    compilation_options: Default::default(),
-                }),
-                primitive: wgpu::PrimitiveState {
-                    topology: wgpu::PrimitiveTopology::TriangleList,
-                    front_face: wgpu::FrontFace::Cw,
-                    // Double-sided — the building shells are wound outward-facing, so back-face culling
-                    // would hide their floor+walls when viewed from inside. (Interim: per-material
-                    // two-sided flag from MTRL; negligible perf cost at this scale.)
-                    cull_mode: None,
-                    ..Default::default()
-                },
-                depth_stencil: Some(wgpu::DepthStencilState {
-                    format: DEPTH_FORMAT,
-                    depth_write_enabled: !transparent,
-                    depth_compare: wgpu::CompareFunction::Less,
-                    stencil: wgpu::StencilState::default(),
-                    bias: wgpu::DepthBiasState::default(),
-                }),
-                multisample: wgpu::MultisampleState::default(),
-                multiview: None,
-            })
+            let blend = if transparent { wgpu::BlendState::ALPHA_BLENDING } else { wgpu::BlendState::REPLACE };
+            geom_pipeline(&device, &layout, &shader, format, blend, !transparent, None)
         };
         let pipeline = build_geom_pipeline(config.format, false);
         let pipeline_t = build_geom_pipeline(config.format, true);
@@ -809,7 +838,7 @@ impl Scene {
                 buffers: &[wgpu::VertexBufferLayout {
                     array_stride: std::mem::size_of::<Vertex>() as wgpu::BufferAddress,
                     step_mode: wgpu::VertexStepMode::Vertex,
-                    attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x2, 3 => Float32x3, 4 => Float32x4, 5 => Uint8x4, 6 => Unorm8x4],
+                    attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x4, 2 => Float32x2, 3 => Float32x3, 4 => Float32x4, 5 => Uint8x4, 6 => Unorm8x4],
                 }],
                 compilation_options: Default::default(),
             },
@@ -1107,6 +1136,7 @@ impl Scene {
             bone_bgl,
             tex_bgl,
             no_material_params,
+            pixel_samplers: None,
             sampler,
             white,
             flat_normal,
@@ -1147,6 +1177,9 @@ impl Scene {
             sky_pipeline_hdr,
             world_pipeline,
             world_pipeline_t,
+            geom_shader: shader,
+            geom_layout: layout,
+            blend_pipelines: HashMap::new(),
             post,
             sky_buf,
             sky_bind,
@@ -1520,15 +1553,42 @@ impl Scene {
         // (~0.17 authored luma) that must NOT go through sRGB→linear, or its albedo collapses to ~0.014
         // and the ground renders near-black — so force its diffuse LINEAR. See BASE_TERRAIN_MODEL_HASH.
         let terrain_atlas = hash == BASE_TERRAIN_MODEL_HASH;
-        // Terrain-blend tiles repurpose the normal/specular slots as extra DIFFUSE detail layers, so
-        // they must decode sRGB like any albedo — never through the linear normal/spec path.
-        let normal_hashes: HashSet<u32> =
-            if terrain_blend { HashSet::new() } else { draws.iter().filter_map(|d| d.normal).collect() };
-        let spec_hashes: HashSet<u32> =
-            if terrain_blend { HashSet::new() } else { draws.iter().filter_map(|d| d.specular).collect() };
+        // What each draw binds, by its pixel shader's samplers (`render::material_slots`). Terrain-blend
+        // tiles repurpose the normal/specular slots as extra DIFFUSE detail layers instead.
+        let slots: Vec<crate::render::MaterialSlots> = draws
+            .iter()
+            .map(|d| {
+                if terrain_blend {
+                    return crate::render::MaterialSlots {
+                        diffuse: d.diffuse,
+                        normal: d.normal,
+                        slot1: d.specular,
+                        slot1_role: crate::render::Slot1Role::Specular,
+                        output_alpha: None,
+                    };
+                }
+                let samplers = self.pixel_samplers.as_ref().unwrap_or_else(|| {
+                    panic!("model 0x{hash:08X}: Scene::set_pixel_samplers was not called before loading a model")
+                });
+                crate::render::material_slots(d, samplers).unwrap_or_else(|e| panic!("model 0x{hash:08X}: {e}"))
+            })
+            .collect();
+        // Normal and specular maps decode linear; diffuse and emissive maps sRGB. Terrain-blend layers
+        // are all diffuse, so they decode sRGB like any albedo.
+        let linear: HashSet<u32> = if terrain_blend {
+            HashSet::new()
+        } else {
+            slots
+                .iter()
+                .flat_map(|s| {
+                    let spec = if s.slot1_role == crate::render::Slot1Role::Specular { s.slot1 } else { None };
+                    s.normal.into_iter().chain(spec)
+                })
+                .collect()
+        };
         let mut views: HashMap<u32, wgpu::TextureView> = HashMap::new();
         for (h, td) in textures {
-            let srgb = !terrain_atlas && !normal_hashes.contains(h) && !spec_hashes.contains(h);
+            let srgb = !terrain_atlas && !linear.contains(h);
             if let Some(v) = make_bc_view(&self.device, &self.queue, td, srgb) {
                 views.insert(*h, v);
             } else if std::env::var("MERCS2_TEXDBG").is_ok() {
@@ -1543,19 +1603,29 @@ impl Scene {
             &self.no_material_params,
         )];
         let mut draw_calls: Vec<DrawCall> = Vec::new();
-        for d in draws {
-            let diff = d.diffuse.and_then(|h| views.get(&h)).unwrap_or(&self.white);
-            let norm = d.normal.and_then(|h| views.get(&h)).unwrap_or(&self.flat_normal);
-            let spec = d.specular.and_then(|h| views.get(&h)).unwrap_or(&self.black);
+        for (d, s) in draws.iter().zip(&slots) {
+            let diff = s.diffuse.and_then(|h| views.get(&h)).unwrap_or(&self.white);
+            let norm = s.normal.and_then(|h| views.get(&h)).unwrap_or(&self.flat_normal);
+            let slot1 = s.slot1.and_then(|h| views.get(&h)).unwrap_or(&self.black);
             let idx = tex_binds.len();
-            let params = crate::render::material_params(&self.device, d.material_flags, d.material_alpha);
-            tex_binds.push(make_tex_bind(&self.device, &self.tex_bgl, &self.sampler, diff, norm, spec, &params));
+            let params = crate::render::material_params(
+                &self.device, d.material_flags, &d.material_data, s.slot1_role, s.output_alpha,
+            );
+            tex_binds.push(make_tex_bind(&self.device, &self.tex_bgl, &self.sampler, diff, norm, slot1, &params));
+            let blend = s.output_alpha.map(|_| {
+                let rt = mercs2_formats::texture::runtime_material_flags(d.material_flags);
+                (mercs2_formats::texture::material_blend_state(rt), crate::render::material_cull(d.material_flags))
+            });
+            if let Some(key) = blend {
+                self.ensure_blend_pipelines(key).unwrap_or_else(|e| panic!("model 0x{hash:08X}: {e}"));
+            }
             draw_calls.push(DrawCall {
                 index_start: d.index_start,
                 index_count: d.index_count,
                 bind: idx,
                 lod_mask: d.lod_mask,
                 node: d.node,
+                blend,
             });
         }
 
@@ -1607,6 +1677,27 @@ impl Scene {
                 terrain_blend,
             },
         );
+    }
+
+    /// Build the blended pipelines for `key` in every target format the colour pass draws into (the
+    /// swapchain, and the HDR target when the post chain is up), once.
+    fn ensure_blend_pipelines(&mut self, key: BlendKey) -> Result<(), String> {
+        let blend = crate::render::wgpu_blend(key.0)?;
+        let formats: Vec<wgpu::TextureFormat> =
+            std::iter::once(self.config.format).chain(self.post.as_ref().map(|_| crate::post::HDR_FORMAT)).collect();
+        for format in formats {
+            if !self.blend_pipelines.contains_key(&(format, key)) {
+                let p = geom_pipeline(&self.device, &self.geom_layout, &self.geom_shader, format, blend, false, key.1);
+                self.blend_pipelines.insert((format, key), p);
+            }
+        }
+        Ok(())
+    }
+
+    /// Give the scene the retail pixel shaders' samplers ([`crate::render::pixel_samplers`]), which decide
+    /// what each material texture slot binds. Must be called before loading a model with materials.
+    pub fn set_pixel_samplers(&mut self, samplers: mercs2_formats::shader_registrations::PixelSamplers) {
+        self.pixel_samplers = Some(samplers);
     }
 
     /// Whether a model is currently uploaded (keyed by hash).
@@ -1794,48 +1885,67 @@ impl Scene {
         }
     }
 
-    /// Record the entity draws into an already-begun render pass with the given geometry pipeline.
-    /// Shared by the direct-swapchain path and the HDR world path (they differ only in target
-    /// format, hence pipeline). Per-entity uniforms/palettes must already be uploaded.
+    /// Record the entity draws into an already-begun render pass: every opaque draw with the given
+    /// geometry pipeline, then every blended material's draw with its own (`blend_pipelines` for
+    /// `format`). Retail sorts a blended material's colour packet into class 8, after the opaque
+    /// classes 5 and 6 of the same phase, with blending on and Z write off (render_core_code_map.md
+    /// §6a). Blended draws keep item order, and within an object draw order: the retail key's
+    /// cross-object term is not decoded yet. Shared by the direct-swapchain path and the HDR world
+    /// path. Per-entity uniforms/palettes must already be uploaded.
     fn draw_geometry<'a>(
         &'a self,
         pass: &mut wgpu::RenderPass<'a>,
         items: &[DrawItem],
         pipeline: &'a wgpu::RenderPipeline,
+        format: wgpu::TextureFormat,
     ) {
-        pass.set_pipeline(pipeline);
         // Group 3 = the per-frame dynamic light array (uploaded before the pass). Set once for all draws.
+        pass.set_pipeline(pipeline);
         pass.set_bind_group(3, &self.lights_bind, &[]);
-        for (e, _m, model_hash, _p) in items {
-            let Some(mg) = self.models.get(model_hash) else { continue };
-            let Some(eg) = self.entities.get(e) else { continue };
-            pass.set_bind_group(0, &eg.mvp_bind, &[]);
-            pass.set_bind_group(2, &eg.bone_bind, &[]);
-            pass.set_vertex_buffer(0, mg.vbuf.slice(..));
-            if let Some(ib) = &mg.ibuf {
-                pass.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint32);
-                let hidden = self.hidden_draws.get(model_hash);
-                // The engine's per-segment draw gate, evaluated against THIS ENTITY's render state:
-                // clause 2 (LOD-rung overlap) and clause 3 (destruction node-enable). An entity with
-                // no state draws everything, which is what unskinned/synthetic geometry wants.
-                let rs = self.entity_state.get(e);
-                for (di, dc) in mg.draw_calls.iter().enumerate() {
-                    if hidden.is_some_and(|h| h.contains(&di)) {
-                        continue; // low-res terrain tile hidden under resident hi-res; workshop isolate
-                    }
-                    if rs.is_some_and(|rs| !rs.segment_visible(dc.lod_mask, dc.node)) {
-                        continue;
-                    }
-                    pass.set_bind_group(1, &mg.tex_binds[dc.bind], &[]);
-                    pass.draw_indexed(dc.index_start..dc.index_start + dc.index_count, 0, 0..1);
+        for blended in [false, true] {
+            for (e, _m, model_hash, _p) in items {
+                let Some(mg) = self.models.get(model_hash) else { continue };
+                let Some(eg) = self.entities.get(e) else { continue };
+                if blended && !mg.draw_calls.iter().any(|dc| dc.blend.is_some()) {
+                    continue;
                 }
-                if mg.draw_calls.is_empty() {
+                pass.set_bind_group(0, &eg.mvp_bind, &[]);
+                pass.set_bind_group(2, &eg.bone_bind, &[]);
+                pass.set_vertex_buffer(0, mg.vbuf.slice(..));
+                if let Some(ib) = &mg.ibuf {
+                    pass.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint32);
+                    let hidden = self.hidden_draws.get(model_hash);
+                    // The engine's per-segment draw gate, evaluated against THIS ENTITY's render state:
+                    // clause 2 (LOD-rung overlap) and clause 3 (destruction node-enable). An entity with
+                    // no state draws everything, which is what unskinned/synthetic geometry wants.
+                    let rs = self.entity_state.get(e);
+                    for (di, dc) in mg.draw_calls.iter().enumerate() {
+                        if dc.blend.is_some() != blended {
+                            continue;
+                        }
+                        if hidden.is_some_and(|h| h.contains(&di)) {
+                            continue; // low-res terrain tile hidden under resident hi-res; workshop isolate
+                        }
+                        if rs.is_some_and(|rs| !rs.segment_visible(dc.lod_mask, dc.node)) {
+                            continue;
+                        }
+                        if let Some(key) = dc.blend {
+                            let Some(p) = self.blend_pipelines.get(&(format, key)) else {
+                                panic!("model 0x{model_hash:08X}: no blended pipeline for {key:?} into {format:?}")
+                            };
+                            pass.set_pipeline(p);
+                        }
+                        pass.set_bind_group(1, &mg.tex_binds[dc.bind], &[]);
+                        pass.draw_indexed(dc.index_start..dc.index_start + dc.index_count, 0, 0..1);
+                    }
+                    if mg.draw_calls.is_empty() && !blended {
+                        pass.set_bind_group(1, &mg.tex_binds[0], &[]);
+                        pass.draw_indexed(0..mg.nindices, 0, 0..1);
+                    }
+                } else if !blended {
                     pass.set_bind_group(1, &mg.tex_binds[0], &[]);
-                    pass.draw_indexed(0..mg.nindices, 0, 0..1);
+                    pass.draw(0..mg.nverts, 0..1);
                 }
-            } else {
-                pass.set_bind_group(1, &mg.tex_binds[0], &[]);
-                pass.draw(0..mg.nverts, 0..1);
             }
         }
     }
@@ -2005,7 +2115,7 @@ impl Scene {
                 } else {
                     self.world_pipeline.as_ref().unwrap()
                 };
-                self.draw_geometry(&mut pass, items, pl);
+                self.draw_geometry(&mut pass, items, pl, crate::post::HDR_FORMAT);
             }
             post.run(encoder, view_tex); // bright-pass → blur → composite + tone-map → swapchain
         } else {
@@ -2033,7 +2143,7 @@ impl Scene {
                 pass.draw(0..3, 0..1);
             }
             let pl = if self.model_alpha < 0.999 { &self.pipeline_t } else { &self.pipeline };
-            self.draw_geometry(&mut pass, items, pl);
+            self.draw_geometry(&mut pass, items, pl, self.config.format);
         }
     }
 
