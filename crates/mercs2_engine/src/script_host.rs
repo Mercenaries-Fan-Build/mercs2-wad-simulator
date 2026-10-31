@@ -3122,35 +3122,6 @@ mod tests {
         assert!(host.borrow_mut().take_hero_teleport().is_none());
     }
 
-    /// The full base-game spawn chain, host-side: `Pg.GetGuidByName(marker)` → `Object.GetPosition(guid)`
-    /// → `Pg.Spawn(hero, x,y,z)` — exactly what `MrxPlayer.CreatePlayerCharacter` runs. The marker is a
-    /// LIVE entity in the World + guidmap (the loader entity-izes named markers the same way), so the name
-    /// resolves to a real entity and the position comes from its `Transform`. No shadow table, no const.
-    #[test]
-    fn boot_spawn_chain_resolves_marker_to_hero_spawn() {
-        let host = Rc::new(RefCell::new(GameScriptHost::new("vz")));
-        // Attach a live World and place the spawn-location marker as a real entity.
-        let world = Rc::new(RefCell::new(World::new()));
-        host.borrow_mut().attach_world(world.clone());
-        place_named(&host, &world, 0x000C_0001, "PmcCon001_Start1", [10.0, 20.0, 30.0]);
-        host.borrow_mut().set_boot_context("chris");
-        let sh = resident_script_host(host.clone()).expect("resident host");
-
-        // The CreatePlayerCharacter chain (name → guid → live position → Pg.Spawn(hero)).
-        sh.exec(
-            "local g = Pg.GetGuidByName('PmcCon001_Start1')\n\
-             local x, y, z = Object.GetPosition(g)\n\
-             Pg.Spawn('chris', x, y, z, 0, false, false, false)",
-            "@spawn_chain",
-        )
-        .unwrap();
-        assert_eq!(
-            host.borrow_mut().take_hero_spawn(),
-            Some([10.0, 20.0, 30.0]),
-            "the hero must spawn at the marker the name resolved to — from the LIVE guidmap, no const"
-        );
-    }
-
     /// `install_boot_save_state` publishes exactly the table `xQ!L.LoadSingleton` reads — and publishes
     /// **nothing** for a new game, because "no save" is the signal that picks the new-game branch.
     #[test]
@@ -3347,6 +3318,38 @@ mod tests {
                 .unwrap_or_else(|e| panic!("[stream] {e}"));
                 sw.settled()
             });
+        }
+
+        /// The full base-game spawn chain, host-side: `Pg.GetGuidByName(marker)` → `Object.GetPosition(guid)`
+        /// → `Pg.Spawn(hero, x,y,z)` — exactly what `MrxPlayer.CreatePlayerCharacter` runs. The marker is a
+        /// LIVE entity in the World + guidmap (the loader entity-izes named markers the same way), so the name
+        /// resolves to a real entity and the position comes from its `Transform`. No shadow table, no const.
+        /// `Pg.Spawn` takes a template the world knows and a streaming world to spawn it into, which is why
+        /// this runs on retail data.
+        #[test]
+        fn boot_spawn_chain_resolves_marker_to_hero_spawn() {
+            let host = Rc::new(RefCell::new(GameScriptHost::new("vz")));
+            // Attach a live World and place the spawn-location marker as a real entity.
+            let world = Rc::new(RefCell::new(World::new()));
+            host.borrow_mut().attach_world(world.clone());
+            let (_sw, _statics) = retail_world(&host);
+            place_named(&host, &world, 0x000C_0001, "PmcCon001_Start1", [10.0, 20.0, 30.0]);
+            host.borrow_mut().set_boot_context("chris");
+            let sh = resident_script_host(host.clone()).expect("resident host");
+
+            // The CreatePlayerCharacter chain (name → guid → live position → Pg.Spawn(hero)).
+            sh.exec(
+                "local g = Pg.GetGuidByName('PmcCon001_Start1')\n\
+                 local x, y, z = Object.GetPosition(g)\n\
+                 Pg.Spawn('chris', x, y, z, 0, false, false, false)",
+                "@spawn_chain",
+            )
+            .unwrap();
+            assert_eq!(
+                host.borrow_mut().take_hero_spawn(),
+                Some([10.0, 20.0, 30.0]),
+                "the hero must spawn at the marker the name resolved to — from the LIVE guidmap, no const"
+            );
         }
 
         /// The real `MrxTransit` boot path, end to end, against the REAL retail landing-zone data: `Reset()`
