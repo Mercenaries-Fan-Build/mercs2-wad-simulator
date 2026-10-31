@@ -11,7 +11,9 @@ use mercs2_formats::model_cubeize::{read_model_meshes, read_model_positions};
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct Vertex {
     pub pos: [f32; 3],
-    pub color: [f32; 3],
+    /// The vertex COLOR, RGBA. `PgMeshVP` passes it to COLOR0 unchanged; the `*AmbOcc*` pixel shaders
+    /// multiply their output alpha by its alpha.
+    pub color: [f32; 4],
     pub uv: [f32; 2],
     pub normal: [f32; 3],
     pub tangent: [f32; 4],
@@ -181,9 +183,10 @@ pub struct DrawGroup {
     /// The material's pixel-shader key (`pandemic_hash_m2` of a registered pixel shader name, e.g.
     /// `PgDiffEmisFP`), which decides what the texture slots mean. 0 = no material.
     pub shader_key: u32,
-    /// The material's alpha multiplier (`MtrlMaterial::alpha_multiplier`, `materialData` c98.w): the
-    /// pixel alpha is `diffuse.a × this`. 1.0 for a draw with no material.
-    pub material_alpha: f32,
+    /// The material's pixel constants `materialData` c93..c98 (diffuse, specular, ambient, emissive,
+    /// subsurface, constant0; `MtrlMaterial::material_data`): c98.w is the alpha multiplier (pixel
+    /// alpha = `diffuse.a × c98.w`). [`NO_MATERIAL_DATA`] for a draw with no material.
+    pub material_data: [[f32; 4]; 6],
     /// The container's drawing-group (PRMG) index this draw came from — the MESH-order index that
     /// `INDX`/destruction (`orchestrator::Destruction::state_of_mesh`) keys on. Lets a caller hide a
     /// group by destruction state (e.g. drop the `break_piece` rubble to show the pristine building).
@@ -220,6 +223,18 @@ pub struct DrawGroup {
     /// a real skin + inverse-bind matrices can reproduce them.
     pub skinned: bool,
 }
+/// The `materialData` of a draw with no material (terrain tiles, imports, debug draws): no retail value
+/// exists for it, so it is the block that leaves the renderer's lighting unchanged — diffuse and ambient
+/// 1, no emissive, alpha multiplier 1.
+pub const NO_MATERIAL_DATA: [[f32; 4]; 6] = [
+    [1.0, 1.0, 1.0, 1.0],
+    [1.0, 1.0, 1.0, 1.0],
+    [1.0, 1.0, 1.0, 0.0],
+    [0.0, 0.0, 0.0, 1.0],
+    [0.0, 0.0, 0.0, 0.0],
+    [0.0, 1.0, 0.0, 1.0],
+];
+
 impl Default for DrawGroup {
     /// An unconditionally-visible group: present at every LOD rung, bound to no HIER node. This is
     /// the right shape for geometry that has no `SEGM` record at all — terrain tiles, imported
@@ -234,7 +249,7 @@ impl Default for DrawGroup {
             textures: Vec::new(),
             material_flags: 0,
             shader_key: 0,
-            material_alpha: 1.0,
+            material_data: NO_MATERIAL_DATA,
             group_index: 0,
             lod_mask: 0xFF,
             node: -1,
@@ -653,15 +668,15 @@ fn build_indexed_source(
             };
             verts.push(Vertex {
                 pos: [p[0], p[1], p[2]],
-                // Per-vertex COLOR (D3DCOLOR, stored B,G,R,A) → RGB. For static interior/building meshes
+                // Per-vertex COLOR (D3DCOLOR, stored B,G,R,A) → RGBA. For static interior/building meshes
                 // this is BAKED vertex lighting (the Pandemic-era interior light); the shader multiplies
                 // it into albedo. Default WHITE (no-op) for meshes with no COLOR element — NOT 0.5, which
                 // was silently halving every texture.
                 color: m
                     .colors
                     .get(vi)
-                    .map(|c| [c[2] as f32 / 255.0, c[1] as f32 / 255.0, c[0] as f32 / 255.0])
-                    .unwrap_or([1.0, 1.0, 1.0]),
+                    .map(|c| [c[2] as f32 / 255.0, c[1] as f32 / 255.0, c[0] as f32 / 255.0, c[3] as f32 / 255.0])
+                    .unwrap_or([1.0, 1.0, 1.0, 1.0]),
                 uv: m.uvs.get(vi).copied().unwrap_or([0.0, 0.0]),
                 normal: pl.normals.get(vi).copied().unwrap_or([0.0, 1.0, 0.0]),
                 tangent: pl.tangents.get(vi).copied().unwrap_or([1.0, 0.0, 0.0, 1.0]),
@@ -694,7 +709,7 @@ fn build_indexed_source(
                 textures: mat.map(|m| m.textures.clone()).unwrap_or_default(),
                 material_flags: mat.map_or(0, |m| m.flags),
                 shader_key: mat.map_or(0, |m| m.shader_key),
-                material_alpha: mat.map_or(1.0, |m| m.alpha_multiplier()),
+                material_data: mat.map_or(NO_MATERIAL_DATA, |m| m.material_data()),
                 group_index: m.group_index,
                 lod_mask: pl.lod_mask,
                 // SEGM +0 is a SIGNED i16: 0xFFFF is node -1 ("no node"), not node 65535.
@@ -836,6 +851,7 @@ pub fn build_from_container(container: &[u8]) -> Result<(Vec<Vertex>, ModelStats
                     (x * 0.5 + 0.5).clamp(0.0, 1.0),
                     (y * 0.5 + 0.5).clamp(0.0, 1.0),
                     (z * 0.5 + 0.5).clamp(0.0, 1.0),
+                    1.0,
                 ],
                 uv: [0.0, 0.0],
                 normal: [0.0, 1.0, 0.0],
@@ -872,7 +888,7 @@ mod tests {
     fn vert(joint: u8) -> Vertex {
         Vertex {
             pos: [0.0; 3],
-            color: [1.0; 3],
+            color: [1.0; 4],
             uv: [0.0; 2],
             normal: [0.0, 1.0, 0.0],
             tangent: [1.0, 0.0, 0.0, 1.0],
