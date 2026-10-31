@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Extract the retail shader registry into the two committed TSVs qm reads.
+"""Extract the retail shader registry into the two committed TSVs.
 
     extract_shader_registry.py --exe <SecuROM-unpacked mercs2 exe> --data <game data dir> --out <dir>
 
-Writes `<out>/shader_families.tsv` and `<out>/registered_shaders.tsv`.
+Writes `<out>/shader_families.tsv` and `<out>/registered_shaders.tsv`. The committed copies live in
+`mercs2_quartermaster/data/shader_families.tsv` and `mercs2_formats/data/registered_shaders.tsv`.
 
 The exe is the SecuROM-unpacked image (`mercs2_unpacked.exe`, the runtime dump in `securom_dump/`);
 `--data` is the game's `data` folder holding the six `shader*.bin` stores. Needs `pefile` and
