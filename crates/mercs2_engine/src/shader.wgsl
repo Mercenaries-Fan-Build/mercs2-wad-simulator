@@ -17,11 +17,15 @@ struct Camera {
 @group(1) @binding(1) var t_normal:   texture_2d<f32>;
 @group(1) @binding(2) var s_linear:   sampler;
 @group(1) @binding(3) var t_specular: texture_2d<f32>; // MTRL slot 1 (`_sm`); black = matte
-// The material's alpha test (`render::material_params`): x = the alpha a pixel must exceed (retail
-// ALPHAREF 77/255, ALPHAFUNC GREATER), or -1 when the material is not alpha-tested; y = the alpha
-// multiplier (materialData c98.w), so the tested alpha is `diffuse.a × y` as in the retail shaders.
+// The material (`render::material_params`): alpha.x = the alpha a pixel must exceed (retail ALPHAREF
+// 77/255, ALPHAFUNC GREATER), or -1 when the material is not alpha-tested; alpha.y = a blended
+// material's output alpha (`OutputAlpha::code`: 0 c98.w, 1 diffuse.a·c98.w, 2 that ·COLOR0.a, 3 and 4
+// those maxed with the specular luminance), or -1 for an opaque draw; alpha.z = what binding 3
+// (material slot 1) is: 0 nothing, 1 the specular mask, 2 the emissive map. data = materialData
+// c93..c98 (diffuse, specular, ambient, emissive, subsurface, constant0), uploaded raw.
 struct MaterialParams {
     alpha: vec4<f32>,
+    data: array<vec4<f32>, 6>,
 };
 @group(1) @binding(4) var<uniform> material: MaterialParams;
 
@@ -116,14 +120,14 @@ struct VSOut {
     @location(2) t: vec3<f32>,       // WORLD-space tangent
     @location(3) b: vec3<f32>,       // WORLD-space bitangent
     @location(4) view_depth: f32,    // clip.w = view-space depth (LH perspective proj)
-    @location(5) color: vec3<f32>,   // vertex color (albedo modulation; markers category-tint)
+    @location(5) color: vec4<f32>,   // vertex color (albedo modulation; markers category-tint), alpha
     @location(6) wpos: vec3<f32>,    // WORLD-space fragment position (point-light attenuation)
 };
 
 @vertex
 fn vs_main(
     @location(0) pos: vec3<f32>,
-    @location(1) color: vec3<f32>,
+    @location(1) color: vec4<f32>,
     @location(2) uv: vec2<f32>,
     @location(3) normal: vec3<f32>,
     @location(4) tangent: vec4<f32>,
@@ -172,6 +176,8 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     var albedo: vec3<f32>;
     var N: vec3<f32>;
     var spec_mask: vec3<f32>;
+    var emissive = vec3<f32>(0.0);
+    var diffuse_a = 1.0;
     let spec_power = 48.0; // fixed Blinn-Phong gloss exponent (per-material gloss is a later refinement)
 
     // TERRAIN SPLAT BLEND (`overlay.y` = 1). The hi-res terrainmesh carries per-vertex D3DCOLOR SPLAT
@@ -187,7 +193,7 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
         let l0 = textureSample(t_diffuse,  s_linear, in.uv).rgb;
         let l1 = textureSample(t_normal,   s_linear, in.uv).rgb;
         let l2 = textureSample(t_specular, s_linear, in.uv).rgb;
-        let w = in.color; // R,G,B splat weights in [0,1]
+        let w = in.color.rgb; // R,G,B splat weights in [0,1]
         let wsum = w.x + w.y + w.z;
         if (wsum < 0.001) {
             albedo = l0; // degenerate weights -> representative layer (graceful fallback, never black)
@@ -204,8 +210,9 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
         // Alpha-tested cutout, only for a material whose flags carry the alpha-test bit (foliage,
         // railings, fences, window/arch openings): a pixel survives when diffuse.a × c98.w exceeds the
         // reference. Every other material ignores its diffuse alpha here.
-        if (material.alpha.x >= 0.0 && !(tex.a * material.alpha.y > material.alpha.x)) { discard; }
-        albedo = tex.rgb * in.color;
+        if (material.alpha.x >= 0.0 && !(tex.a * material.data[5].w > material.alpha.x)) { discard; }
+        diffuse_a = tex.a;
+        albedo = tex.rgb * in.color.rgb;
 
         // Normal maps are DXT5nm/swizzled: X in ALPHA (DXT5's 8-bit alpha), Y in GREEN, Z reconstructed.
         let nsamp = textureSample(t_normal, s_linear, in.uv);
@@ -216,8 +223,18 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
         let tbn = mat3x3<f32>(normalize(in.t), normalize(in.b), normalize(in.n));
         N = normalize(tbn * n_tan);
 
-        // Specular mask from the `_sm` map (slot 1). Black fallback -> no highlight (matte).
-        spec_mask = textureSample(t_specular, s_linear, in.uv).rgb;
+        // Material slot 1: the specular mask (`specularMap`), or the emissive map (`emissiveMap`, the
+        // `PgDiffEmis*` shaders, which have no specular term): `PgDiffEmisFP` adds
+        // `emissiveMap.rgb × c96.rgb` after the lit diffuse, untouched by shadow or N·L.
+        let slot1 = textureSample(t_specular, s_linear, in.uv).rgb;
+        if (material.alpha.z > 1.5) {
+            emissive = slot1 * material.data[3].rgb;
+            spec_mask = vec3<f32>(0.0);
+        } else if (material.alpha.z > 0.5) {
+            spec_mask = slot1;
+        } else {
+            spec_mask = vec3<f32>(0.0);
+        }
     }
 
     // View vector (world space) for Blinn-Phong.
@@ -245,11 +262,18 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     // Baked vertex lighting reads bright (hall mean ~0.79); scale the prelit baked term down so
     // interiors aren't washed out. (0.7 = baked-lighting brightness knob.)
     let baked_scale = 0.21;
-    let ambient_floor = mix(albedo * ambient, albedo * baked_scale, prelit);
-    var direct = albedo * (sun_i * sun_ndl) * (1.0 - prelit);
+    // The retail pixel shaders scale the direct light by materialData c93 (`diffuse`) and the ambient by
+    // c95 (`ambient`) before multiplying by the diffuse texture: 1 on ordinary materials, 0 on the
+    // bullet trail's, whose only light is its emissive term.
+    let kd = albedo * material.data[0].rgb;
+    let ambient_floor = mix(albedo * material.data[2].rgb * ambient, albedo * baked_scale, prelit);
+    var direct = kd * (sun_i * sun_ndl) * (1.0 - prelit);
+    // The direct specular light on its own as well: the `*Spec*` shaders' output alpha is its luminance
+    // when that exceeds the diffuse alpha.
+    var spec_light = vec3<f32>(0.0);
     if (sun_ndl > 0.0 && prelit < 0.5 && sun_i > 0.0) {
         let sun_h = normalize(sun_dir + V);
-        direct += spec_mask * pow(max(dot(N, sun_h), 0.0), spec_power);
+        spec_light += spec_mask * pow(max(dot(N, sun_h), 0.0), spec_power);
     }
 
     // Per-pixel dynamic lights, gated by the ShaderLevel light-class permutation (the `DAT_00dfc345`
@@ -283,11 +307,11 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
             let atten = (1.0 - x * x);
             let att = atten * atten;
             let ndl = max(dot(N, Ld), 0.0);
-            direct += albedo * lcol * (linten * ndl * att);
+            direct += kd * lcol * (linten * ndl * att);
             if (ndl > 0.0) {
                 let H = normalize(Ld + V);
                 let ndh = max(dot(N, H), 0.0);
-                direct += spec_mask * lcol * (linten * att * pow(ndh, spec_power));
+                spec_light += spec_mask * lcol * (linten * att * pow(ndh, spec_power));
             }
         }
     }
@@ -317,11 +341,11 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
             let atten = (1.0 - x * x);
             let att = atten * atten * cone;
             let ndl = max(dot(N, Ld), 0.0);
-            direct += albedo * scol * (sinten * ndl * att);
+            direct += kd * scol * (sinten * ndl * att);
             if (ndl > 0.0) {
                 let H = normalize(Ld + V);
                 let ndh = max(dot(N, H), 0.0);
-                direct += spec_mask * scol * (sinten * att * pow(ndh, spec_power));
+                spec_light += spec_mask * scol * (sinten * att * pow(ndh, spec_power));
             }
         }
     }
@@ -334,7 +358,7 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     if (sun_i > 0.0) {
         shadow = max(shadow_factor(in.wpos), shadowp.params.x);
     }
-    var lit = (ambient_floor + direct) * shadow;
+    var lit = (ambient_floor + direct + spec_light) * shadow + emissive;
 
     // Distance fog (PLACEHOLDER for PgSky/PgSun/PgCloud): exponential falloff past the start distance.
     var rgb = lit;
@@ -345,5 +369,16 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
         );
         rgb = mix(rgb, cam.fog_color_density.rgb, f);
     }
-    return vec4<f32>(rgb, cam.overlay.x);
+    // A blended material's output alpha, as its retail pixel shader writes oC0.w (`OutputAlpha`).
+    var alpha = 1.0;
+    if (material.alpha.y >= 0.0) {
+        let code = u32(material.alpha.y + 0.5);
+        alpha = material.data[5].w;
+        if (code >= 1u) { alpha = alpha * diffuse_a; }
+        if (code == 2u || code == 4u) { alpha = alpha * in.color.a; }
+        if (code >= 3u) {
+            alpha = clamp(max(alpha, dot(spec_light * shadow, vec3<f32>(0.299, 0.587, 0.114))), 0.0, 1.0);
+        }
+    }
+    return vec4<f32>(rgb, alpha * cam.overlay.x);
 }
