@@ -2583,6 +2583,9 @@
     "0x29D561EE": [
       "vz_state_chicon054_pristine"
     ],
+    "0x29DF0042": [
+      "pmc_hum_ewan"
+    ],
     "0x29ED97C3": [
       "jungle_env_treesmall01_imposter"
     ],
@@ -7608,6 +7611,9 @@
     "0x80F39CED": [
       "vz_hum_soldier_a_ub"
     ],
+    "0x80F7BF4D": [
+      "oc_hum_lifestylestarter"
+    ],
     "0x811872A8": [
       "ocoutpostinterior_interiorfloor"
     ],
@@ -9812,6 +9818,9 @@
     ],
     "0xA6489D3A": [
       "village_bld_windmill01"
+    ],
+    "0xA64C9404": [
+      "gr_hum_starter01"
     ],
     "0xA65E06D1": [
       "vz_terrainglobal_r13_c00_0x000746aa"
@@ -12104,6 +12113,9 @@
     ],
     "0xD13AD580": [
       "vz_state_oiljob008_k_ruined_tinygeometry_0x00143ce9"
+    ],
+    "0xD14E2809": [
+      "pmc_hum_misha"
     ],
     "0xD1574A09": [
       "industrial_bld_warehouselarge01"
@@ -15050,6 +15062,21 @@
     ],
     "0xF9EA3B44": [
       "civ_hum_super_industrial"
+    ],
+    "0x182624E1": [
+      "VehicleAnimationLookup"
+    ],
+    "0x4BE8214B": [
+      "scuba"
+    ],
+    "0xC8886020": [
+      "crouched"
+    ],
+    "0xE7B64876": [
+      "carrying"
+    ],
+    "0xFC8D859D": [
+      "prone"
     ]
   }
 }
