@@ -161,23 +161,170 @@ pub fn make_bc_view(
     Some(tex.create_view(&wgpu::TextureViewDescriptor::default()))
 }
 
-/// A material's alpha-test uniform (shader `MaterialParams`): `x` = the reference alpha a pixel must
-/// exceed, or -1 for a material that is not alpha-tested; `y` = the alpha multiplier (c98.w). Retail
-/// tests `diffuse.a × c98.w > ALPHAREF/255` with `ALPHAFUNC` GREATER, and only for a material whose
-/// flags carry the alpha-test bit (`mercs2_formats::texture::material_alpha_tested`).
-pub fn material_params(device: &wgpu::Device, material_flags: u16, material_alpha: f32) -> wgpu::Buffer {
+/// The retail pixel shaders' samplers, read from `shader3.bin` in the game's data folder, beside
+/// `vz_wad`. Every pixel shader a retail model material names declares the same samplers in
+/// `shader3Low.bin` (`tests/material_shaders.rs`), so the ShaderLevel choice of store does not change
+/// what a slot binds.
+pub fn pixel_samplers(vz_wad: &std::path::Path) -> Result<mercs2_formats::shader_registrations::PixelSamplers, String> {
+    let path = vz_wad.with_file_name("shader3.bin");
+    let bytes = std::fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let store = mercs2_formats::shader3::Store::parse(bytes).map_err(|e| format!("{}: {e:?}", path.display()))?;
+    mercs2_formats::shader_registrations::PixelSamplers::from_store(&store, false)
+        .map_err(|e| format!("{}: {e}", path.display()))
+}
+
+/// What a material's slot 1 is to its pixel shader: the sampler the shader declares at stage 1.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Slot1Role {
+    /// The shader samples nothing at stage 1 (e.g. `PgDiffFP`).
+    None,
+    /// `specularMap`: the highlight mask.
+    Specular,
+    /// `emissiveMap`: added after lighting, times the material's emissive colour (`PgDiffEmis*`).
+    Emissive,
+}
+
+/// The textures one draw binds and what its slot 1 is for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MaterialSlots {
+    pub diffuse: Option<u32>,
+    pub normal: Option<u32>,
+    pub slot1: Option<u32>,
+    pub slot1_role: Slot1Role,
+    /// For a blended material ([`mercs2_formats::texture::material_blended`]), what its pixel shader
+    /// writes to `oC0.w`: the source alpha the blend reads. `None` for an opaque draw.
+    pub output_alpha: Option<mercs2_formats::shader_registrations::OutputAlpha>,
+}
+
+/// The textures a draw binds, by what its pixel shader samples. `FUN_00858320` binds material slot
+/// `i` to texture stage `i` (`FUN_00484280(i, …)`, `0x858390`), so a slot's meaning is the sampler the
+/// shader declares at that stage: `diffuseMap` at 0, `specularMap` or `emissiveMap` at 1, `normalMap`
+/// at 2 for every retail model material (`tests/material_shaders.rs`). A slot the shader does not
+/// sample binds nothing; any other sampler name is an error, as is a key the registry does not
+/// register. A draw with no material (`shader_key` 0: the hand-built terrain, imports, debug draws)
+/// binds its own `diffuse`/`specular`/`normal` and draws opaque. A blended material whose shader's
+/// output alpha is not one `OutputAlpha` names is an error.
+pub fn material_slots(
+    d: &mesh::DrawGroup,
+    samplers: &mercs2_formats::shader_registrations::PixelSamplers,
+) -> Result<MaterialSlots, String> {
+    if d.shader_key == 0 {
+        if mercs2_formats::texture::material_blended(d.material_flags) {
+            return Err(format!("a draw with no pixel shader has blended flags 0x{:04X}", d.material_flags));
+        }
+        return Ok(MaterialSlots {
+            diffuse: d.diffuse,
+            normal: d.normal,
+            slot1: d.specular,
+            slot1_role: if d.specular.is_some() { Slot1Role::Specular } else { Slot1Role::None },
+            output_alpha: None,
+        });
+    }
+    let slot = |i: usize| d.textures.get(i).copied().filter(|&h| h != 0);
+    let role = |i: u8| samplers.sampler_at(d.shader_key, i);
+    let key = d.shader_key;
+    let diffuse = match role(0)? {
+        Some("diffuseMap") => slot(0),
+        None => None,
+        Some(other) => return Err(format!("pixel shader 0x{key:08X}: stage 0 is `{other}`, not a material role")),
+    };
+    let (slot1, slot1_role) = match role(1)? {
+        Some("specularMap") => (slot(1), Slot1Role::Specular),
+        Some("emissiveMap") => (slot(1), Slot1Role::Emissive),
+        None => (None, Slot1Role::None),
+        Some(other) => return Err(format!("pixel shader 0x{key:08X}: stage 1 is `{other}`, not a material role")),
+    };
+    let normal = match role(2)? {
+        Some("normalMap") => slot(2),
+        None => None,
+        Some(other) => return Err(format!("pixel shader 0x{key:08X}: stage 2 is `{other}`, not a material role")),
+    };
+    let output_alpha = if mercs2_formats::texture::material_blended(d.material_flags) {
+        Some(samplers.output_alpha(key)?)
+    } else {
+        None
+    };
+    Ok(MaterialSlots { diffuse, normal, slot1, slot1_role, output_alpha })
+}
+
+/// A material's uniform (shader `MaterialParams`): `alpha` = (the reference alpha a pixel must
+/// exceed, or -1 for a material that is not alpha-tested; the blended material's output alpha
+/// (`OutputAlpha::code`), or -1 for an opaque draw; the slot-1 role: 0 none, 1 specular,
+/// 2 emissive; unused), then `materialData` c93..c98 as the draw uploads it raw. Retail tests
+/// `diffuse.a × c98.w > ALPHAREF/255` with `ALPHAFUNC` GREATER, and only for a material whose flags
+/// carry the alpha-test bit (`mercs2_formats::texture::material_alpha_tested`).
+pub fn material_params(
+    device: &wgpu::Device,
+    material_flags: u16,
+    material_data: &[[f32; 4]; 6],
+    slot1_role: Slot1Role,
+    output_alpha: Option<mercs2_formats::shader_registrations::OutputAlpha>,
+) -> wgpu::Buffer {
     use mercs2_formats::texture::{material_alpha_tested, MATERIAL_ALPHA_REF};
     let alpha_ref = if material_alpha_tested(material_flags) { MATERIAL_ALPHA_REF as f32 / 255.0 } else { -1.0 };
-    let data = [alpha_ref, material_alpha, 0.0, 0.0];
+    let role = match slot1_role {
+        Slot1Role::None => 0.0,
+        Slot1Role::Specular => 1.0,
+        Slot1Role::Emissive => 2.0,
+    };
+    let mut data = [0f32; 28];
+    let out_alpha = output_alpha.map_or(-1.0, |a| a.code() as f32);
+    data[..4].copy_from_slice(&[alpha_ref, out_alpha, role, 0.0]);
+    for (i, reg) in material_data.iter().enumerate() {
+        data[4 + i * 4..8 + i * 4].copy_from_slice(reg);
+    }
     let buf = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("material params"),
-        size: 16,
+        size: std::mem::size_of_val(&data) as wgpu::BufferAddress,
         usage: wgpu::BufferUsages::UNIFORM,
         mapped_at_creation: true,
     });
     buf.slice(..).get_mapped_range_mut().copy_from_slice(bytemuck::cast_slice(&data));
     buf.unmap();
     buf
+}
+
+/// The cull mode of a blended material's draw. `FUN_00858320` sets `CULLMODE` NONE for a two-sided
+/// material (runtime bit `0x80`, on-disk `0x010`) and otherwise the value at
+/// `*(PTR_00dfc2fc) + 0x3fd0`, which reads 2 (`D3DCULL_CW`) in the v1.0 capture
+/// `updated-chris-exports/20261021_chris-jacobs-flying-winch.dmp`; no instruction writing it was found.
+/// Retail applies that default to every one-sided material, opaque ones included, so it is the cull
+/// that keeps a model's outward faces: `Back`, in renderers whose front face is the outward one.
+pub fn material_cull(material_flags: u16) -> Option<wgpu::Face> {
+    if mercs2_formats::texture::runtime_material_flags(material_flags) & 0x80 != 0 {
+        None
+    } else {
+        Some(wgpu::Face::Back)
+    }
+}
+
+/// The wgpu blend state for a D3D9 one ([`mercs2_formats::texture::material_blend_state`]): the
+/// colour blends with the material's op and factors. D3D9 would blend the backbuffer's alpha with the
+/// same factors, but retail never displays that alpha, and the targets here are read back with it (the
+/// `--render` PNGs, the Workshop portrait), so the destination alpha is kept as it is: blending it
+/// would punch see-through holes where glass or a rotor disc draws. A D3D value outside the material
+/// tables is an error.
+pub fn wgpu_blend(b: mercs2_formats::texture::MaterialBlend) -> Result<wgpu::BlendState, String> {
+    let factor = |f: u32| match f {
+        2 => Ok(wgpu::BlendFactor::One),
+        5 => Ok(wgpu::BlendFactor::SrcAlpha),
+        6 => Ok(wgpu::BlendFactor::OneMinusSrcAlpha),
+        7 => Ok(wgpu::BlendFactor::DstAlpha),
+        other => Err(format!("D3DBLEND {other} is not a material blend factor")),
+    };
+    let operation = match b.op {
+        1 => wgpu::BlendOperation::Add,
+        2 => wgpu::BlendOperation::Subtract,
+        3 => wgpu::BlendOperation::ReverseSubtract,
+        other => return Err(format!("D3DBLENDOP {other} is not a material blend op")),
+    };
+    let color = wgpu::BlendComponent { src_factor: factor(b.src)?, dst_factor: factor(b.dest)?, operation };
+    let alpha = wgpu::BlendComponent {
+        src_factor: wgpu::BlendFactor::Zero,
+        dst_factor: wgpu::BlendFactor::One,
+        operation: wgpu::BlendOperation::Add,
+    };
+    Ok(wgpu::BlendState { color, alpha })
 }
 
 pub fn make_tex_bind(
