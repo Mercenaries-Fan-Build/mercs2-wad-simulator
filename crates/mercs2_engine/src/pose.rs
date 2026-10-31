@@ -157,12 +157,28 @@ pub fn havok_palette_in_place(
     track_to_hier: &[Option<usize>],
     num_transform_tracks: usize,
 ) -> Vec<[[f32; 4]; 4]> {
+    havok_palette_in_place_replacing(rig, sample, track_to_hier, num_transform_tracks, &[])
+}
+
+/// [`havok_palette_in_place`] with the local transforms of some bones replaced after the clip is
+/// sampled, the way the FaceFX solve writes its face bones over the clip's (`FUN_00686ce0`). An
+/// empty `sample` leaves every other bone at its bind local.
+pub fn havok_palette_in_place_replacing(
+    rig: &[BoneRig],
+    sample: &[QsTransform],
+    track_to_hier: &[Option<usize>],
+    num_transform_tracks: usize,
+    replace: &[(usize, QsTransform)],
+) -> Vec<[[f32; 4]; 4]> {
     let mut local = havok_locals(rig, sample, track_to_hier, num_transform_tracks);
     for b in 0..rig.len() {
         if rig[b].parent < 0 {
             let lb = rig[b].local_bind;
             local[b].translation = [lb[3][0], lb[3][1], lb[3][2]];
         }
+    }
+    for &(b, qs) in replace {
+        local[b] = qs;
     }
     skin_palette(rig, &model_poses(rig, &local))
 }
