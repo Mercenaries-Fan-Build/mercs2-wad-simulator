@@ -62,9 +62,15 @@ pass (align toe bone to `RayHit::normal`) and a pelvis-drop pre-pass across both
 ## FaceFX facial animation
 `[faithful-blocker: yes]`
 
-FaceFX evaluator `FUN_00686ce0` (`animation_code_map.md`) drives face/lip-sync bones from audio
-cues — a separate curve-eval path from skeletal clips. Out of scope for the body-animation
-runtime; add a `facefx` module when the FaceFX curve format is decoded.
+[`facefx`](src/facefx.rs) solves an actor's face graph under an anim's curves into face-bone local
+transforms (`FUN_00686ce0`). Not yet carried over from the exe:
+- no ECS component plays it on an entity: the game's component (ctor `0x686a60`, PlayFaceAnim
+  handler `0x687890`) starts an anim by name hash and advances its time by the frame's dt, open-loop
+  from the audio;
+- the register "user values" the game feeds nodes (`0x7276f0`);
+- the link functions other than `linear`, and the corrective-link branch of a node's value (each
+  formula is in `animation_code_map.md` §6b; their archive spellings are unread, and only `linear`
+  occurs in retail archives).
 
 ## Perf — precomputed state→clip acceleration structure
 `[faithful-blocker: no]`
