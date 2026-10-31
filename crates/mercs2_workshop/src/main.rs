@@ -69,6 +69,7 @@ mod audiopage; // Inspect's AUDIO tab: banks, clips, preview, export, Add to Shi
 mod textpage; // Inspect's TEXT tab: every string table side by side by key
 mod heroidx; // every model's skeleton, for ranking the hero clips and faces play on
 mod vostream; // Stream VO PCM straight from the game's vo_stream.english.pws
+mod voiceidx; // Every wavebank clip by its hash: a FaceFX take's voice line
 mod bundle;
 mod chains; // Where the game archive and the reference bundle come from, first match wins
 mod domain;
@@ -96,6 +97,7 @@ mod settings;
 mod settingspage; // Settings' navigator and its Game archive / Reference data sections
 mod shipment;
 mod shot;
+mod statenamer; // Name a clip's unnamed table values while it plays, written to both name homes
 mod texenc;
 mod texpng;
 mod ui_state;
@@ -299,7 +301,7 @@ fn main() {
         // The kit template rows, as the GUI catalog lists them.
         match app::load_kit_templates(&mut stack) {
             Ok(t) => {
-                idx.add_kit_templates(&t.kits, &t.all);
+                idx.add_kit_templates(&t);
             }
             Err(e) => {
                 eprintln!("--list: cannot read the world's templates (worldentity): {e}");
@@ -497,7 +499,7 @@ fn main() {
         let mut idx = index::AssetIndex::build(&stack.wads, &stack.side, names_or_exit());
         match app::load_kit_templates(&mut stack) {
             Ok(t) => {
-                idx.add_kit_templates(&t.kits, &t.all);
+                idx.add_kit_templates(&t);
             }
             Err(e) => {
                 eprintln!("--export-bundle: cannot read the world's templates (worldentity): {e}");
@@ -1003,10 +1005,21 @@ exported {ok} bundle(s), {fail} failed -> {}", outroot.display());
             shot::SV { pos: v.pos, _p0: 0.0, normal: v.normal, _p1: 0.0, uv: v.uv, _p2: [0.0,0.0],
                 tangent: v.tangent,
                 joints: [v.joints[0] as u32, v.joints[1] as u32, v.joints[2] as u32, v.joints[3] as u32],
-                weights: [v.weights[0] as f32/255.0, v.weights[1] as f32/255.0, v.weights[2] as f32/255.0, v.weights[3] as f32/255.0] }
+                weights: [v.weights[0] as f32/255.0, v.weights[1] as f32/255.0, v.weights[2] as f32/255.0, v.weights[3] as f32/255.0],
+                color: v.color }
         }).collect();
         // Flat white geometry, matching the workshop white-mesh view (the surface where the break shows).
-        let draws = vec![shot::DrawTex { index_start: 0, index_count: im.indices.len() as u32, diffuse: None, normal: None, specular: None, material_flags: 0, material_alpha: 1.0 }];
+        let draws = vec![shot::DrawTex {
+            index_start: 0,
+            index_count: im.indices.len() as u32,
+            diffuse: None,
+            normal: None,
+            slot1: None,
+            slot1_role: mercs2_engine::render::Slot1Role::None,
+            material_flags: 0,
+            material_data: mercs2_engine::mesh::NO_MATERIAL_DATA,
+            output_alpha: None,
+        }];
         println!("--faithful: {} verts, {} tris, target {target}", im.verts.len(), im.indices.len()/3);
         // The renderer FRAMES the bbox, so a conform that got the proportions wrong still fills the
         // image and reads as correct. Print the conformed extent in METRES beside the target rig's
@@ -1142,6 +1155,7 @@ exported {ok} bundle(s), {fail} failed -> {}", outroot.display());
                     v.weights[0] as f32 / 255.0, v.weights[1] as f32 / 255.0,
                     v.weights[2] as f32 / 255.0, v.weights[3] as f32 / 255.0,
                 ],
+                color: v.color,
             });
         }
         // Palette indexed by the IMPORT's own bones. Bind pose (no clip) = identity. With a clip, drive
@@ -1167,7 +1181,17 @@ exported {ok} bundle(s), {fail} failed -> {}", outroot.display());
             None => vec![IDENT; bone_count],
         };
         // One untextured range: --shot previews a raw glTF import, which carries no WAD material.
-        let draws = vec![shot::DrawTex { index_start: 0, index_count: im.indices.len() as u32, diffuse: None, normal: None, specular: None, material_flags: 0, material_alpha: 1.0 }];
+        let draws = vec![shot::DrawTex {
+            index_start: 0,
+            index_count: im.indices.len() as u32,
+            diffuse: None,
+            normal: None,
+            slot1: None,
+            slot1_role: mercs2_engine::render::Slot1Role::None,
+            material_flags: 0,
+            material_data: mercs2_engine::mesh::NO_MATERIAL_DATA,
+            output_alpha: None,
+        }];
         shot::render(&sv, &im.indices, &palette, (lo, hi), &out, &draws);
         return;
     }
@@ -1191,6 +1215,12 @@ exported {ok} bundle(s), {fail} failed -> {}", outroot.display());
             Err(e) => return eprintln!("--render '{arg}' (0x{hash:08X}): {e}"),
         };
         let hier: Vec<u32> = md.skin.rig.iter().map(|b| b.name_hash).collect();
+        // What each material slot binds comes from the retail pixel shaders (`shader3.bin` beside the
+        // archive).
+        let samplers = mercs2_engine::render::pixel_samplers(std::path::Path::new(&wadpath)).unwrap_or_else(|e| {
+            eprintln!("--render: {e}");
+            std::process::exit(2)
+        });
 
         // List the clips this model's rig can bind, so a clip can be chosen by name rather than
         // guessed at. Names come from the same index the GUI uses.
@@ -1232,6 +1262,7 @@ exported {ok} bundle(s), {fail} failed -> {}", outroot.display());
                     v.weights[2] as f32 / 255.0,
                     v.weights[3] as f32 / 255.0,
                 ],
+                color: v.color,
             })
             .collect();
 
@@ -1299,8 +1330,7 @@ exported {ok} bundle(s), {fail} failed -> {}", outroot.display());
                 Err(e) => die(e),
             };
             if list_outfits {
-                println!("--render-outfits 0x{hash:08X}: {} parts, {} profiles", kit.mixr.parts.len(), kit.mixr.profiles.len());
-                for t in &kit.templates {
+                println!("--render-outfits 0x{hash:08X}: {} parts, {} profiles", kit.mixr.parts.len(), kit.mixr.profiles.len());                for t in &kit.templates {
                     let name = t.label();
                     match kit.mixr.template_outfits(t) {
                         Ok((pi, outfits)) => {
@@ -1392,14 +1422,20 @@ exported {ok} bundle(s), {fail} failed -> {}", outroot.display());
             // a build whose torso and arms were invisible in game while rendering perfectly here -
             // the host group sat in the 0x02 tier and nothing looked.
             .filter(|d| gate.contains(&(d.rung, d.group_index)) && rs.segment_visible(d.lod_mask, d.node))
-            .map(|d| shot::DrawTex {
+            .map(|d| {
+                let s = mercs2_engine::render::material_slots(d, &samplers).unwrap_or_else(|e| {
+                    eprintln!("--render 0x{hash:08X}: {e}");
+                    std::process::exit(1)
+                });
+                shot::DrawTex {
                 index_start: d.index_start,
                 index_count: d.index_count,
                 // --render-flat: pure geometry (no diffuse/normal/specular), matching the workshop
                 // white-mesh view, so a deformation defect cannot hide behind texture or relief.
-                diffuse: if flat { None } else { d.diffuse.and_then(|h| md.textures.get(&h)).map(texpng::decode_bc) },
-                specular: if flat { None } else { d.specular.and_then(|h| md.textures.get(&h)).map(texpng::decode_bc) },
-                normal: if flat { None } else { d.normal.and_then(|h| md.textures.get(&h)).map(|td| {
+                diffuse: if flat { None } else { s.diffuse.and_then(|h| md.textures.get(&h)).map(texpng::decode_bc) },
+                slot1: if flat { None } else { s.slot1.and_then(|h| md.textures.get(&h)).map(texpng::decode_bc) },
+                slot1_role: if flat { mercs2_engine::render::Slot1Role::None } else { s.slot1_role },
+                normal: if flat { None } else { s.normal.and_then(|h| md.textures.get(&h)).map(|td| {
                     let (w, h, mut rgba) = texpng::decode_bc(td);
                     // --render-flip-green tests the OpenGL(+Y up)/DirectX(+Y down) convention gap:
                     // glTF authors normal maps +Y up, a DX-era engine samples +Y down, and the
@@ -1412,7 +1448,9 @@ exported {ok} bundle(s), {fail} failed -> {}", outroot.display());
                     (w, h, rgba)
                 }) },
                 material_flags: d.material_flags,
-                material_alpha: d.material_alpha,
+                material_data: d.material_data,
+                output_alpha: s.output_alpha,
+                }
             })
             .collect();
         let untextured = draws.iter().filter(|d| d.diffuse.is_none()).count();
@@ -2132,7 +2170,7 @@ fn extract_skel_parts(
 /// ever displayed, so intersecting against this set drops the speculative-candidate bulk. Returns an
 /// EMPTY set if the WAD can't be opened (released binary with no game data) — the caller then skips
 /// trimming rather than writing an empty pack.
-fn referenced_hashes(wadpath: &str, overlays: &[String]) -> std::collections::HashSet<u32> {
+fn referenced_hashes(wadpath: &str, overlays: &[String]) -> Result<std::collections::HashSet<u32>, String> {
     use std::collections::HashSet;
     // Scan the WHOLE open stack, not just the base. A patch WAD carries its own assets (260 models /
     // 1,259 textures in the retail vz-patch), and a hash that lives ONLY there was previously absent
@@ -2141,19 +2179,20 @@ fn referenced_hashes(wadpath: &str, overlays: &[String]) -> std::collections::Ha
     // the name was in the corpus, hash-verified, and just never appeared.
     let mut set: HashSet<u32> = HashSet::new();
     for p in std::iter::once(wadpath).chain(overlays.iter().map(|s| s.as_str())) {
-        set.extend(referenced_hashes_one(p));
+        set.extend(referenced_hashes_one(p)?);
     }
-    set
+    Ok(set)
 }
 
-/// The per-WAD scan behind [`referenced_hashes`].
-fn referenced_hashes_one(wadpath: &str) -> std::collections::HashSet<u32> {
+/// The per-WAD scan behind [`referenced_hashes`]. An error when an `animationtable` asset does not
+/// extract or parse ([`animtable_values`]).
+fn referenced_hashes_one(wadpath: &str) -> Result<std::collections::HashSet<u32>, String> {
     use mercs2_engine::wad;
     use std::collections::{BTreeMap, HashSet};
     let mut set: HashSet<u32> = HashSet::new();
     let Ok(mut w) = wad::open(wadpath) else {
         eprintln!("[pack] no WAD at {wadpath} — writing UNTRIMMED names.bin");
-        return set;
+        return Ok(set);
     };
     for (asset_hash, _type, _prim) in wad::all_asets(&w) {
         set.insert(asset_hash);
@@ -2195,7 +2234,35 @@ fn referenced_hashes_one(wadpath: &str) -> std::collections::HashSet<u32> {
             }
         }
     }
-    set
+    // The animation tables' values (Stance, Action, equipment class, CharacterName, …), which the
+    // model preview's clip list names its clips by.
+    set.extend(animtable_values(&mut w)?);
+    Ok(set)
+}
+
+/// Every value an `animationtable` asset of `w` holds: each column name's hash, every `VALU` cell
+/// (the defaults row and the data rows), and the `ASTO` pool. An error naming the table when one
+/// does not extract or parse.
+fn animtable_values(w: &mut mercs2_engine::wad::Wad) -> Result<std::collections::HashSet<u32>, String> {
+    use mercs2_formats::anim_select::{AnimTable, TYPE_ANIMTABLE};
+    let type_id = mercs2_formats::aset_type_ids::type_id_for_type_hash(TYPE_ANIMTABLE)
+        .ok_or_else(|| format!("no ASET type id for the animationtable type 0x{TYPE_ANIMTABLE:08X}"))?;
+    let tables: std::collections::BTreeSet<u32> = mercs2_engine::wad::all_asets(w)
+        .into_iter()
+        .filter(|&(_, t, _)| t == type_id)
+        .map(|(h, _, _)| h)
+        .collect();
+    let mut set = std::collections::HashSet::new();
+    for h in tables {
+        let cont = mercs2_engine::wad::extract_container_typed(w, h, TYPE_ANIMTABLE)
+            .map_err(|e| format!("animationtable 0x{h:08X}: {e}"))?;
+        let t = AnimTable::parse(&cont).map_err(|e| format!("animationtable 0x{h:08X}: {e}"))?;
+        set.extend(t.cols().iter().map(|c| mercs2_formats::hash::pandemic_hash_m2(c)));
+        set.extend(t.defaults().iter().copied());
+        set.extend(t.data_rows().flatten().copied());
+        set.extend(t.pool().iter().copied());
+    }
+    Ok(set)
 }
 
 /// The checkout this binary was built from (the workspace root, two levels above this crate's
@@ -2205,8 +2272,9 @@ fn repo_root() -> std::path::PathBuf {
 }
 
 /// The reference files committed in the repo's `workshop_data/` that `--pack-data` copies into
-/// every bundle: the captioned audio inventory (`audioidx`).
-const REPO_BUNDLE_FILES: [&str; 1] = ["audio_manifest.json"];
+/// every bundle: the captioned audio inventory (`audioidx`), and the Japanese face the Text page
+/// draws with (`gui::theme::CJK_FONT`) with its license.
+const REPO_BUNDLE_FILES: [&str; 3] = ["audio_manifest.json", gui::theme::CJK_FONT, "NotoSansJP-OFL.txt"];
 
 /// The committed production lookup: this crate's `data/production_names.json` (curated,
 /// hash-verified node/asset names) in the checkout this binary was built from. `Ok(None)` when
@@ -2367,10 +2435,10 @@ fn pack_data(
             let referenced = match wadpath {
                 Some(w) => {
                     eprintln!(
-                        "[pack] scanning WAD + {} overlay(s) for referenced hashes (assets + clips + bone nodes)…",
+                        "[pack] scanning WAD + {} overlay(s) for referenced hashes (assets + clips + bone nodes + animation tables)…",
                         overlays.len()
                     );
-                    referenced_hashes(w, overlays)
+                    referenced_hashes(w, overlays)?
                 }
                 // No install: ship the whole pool rather than nothing. Untrimmed is bigger, never wrong.
                 None => {
@@ -2430,6 +2498,20 @@ fn copy_tree(src: &std::path::Path, dst: &std::path::Path) -> Result<usize, Stri
         }
     }
     Ok(n)
+}
+
+#[cfg(all(test, feature = "retail"))]
+mod pack_retail_tests {
+    /// The trim keeps the animation tables' values, which the clip list names clips by: Upright,
+    /// Rifle, InVehicle (state and equipment cells) and mattias (a CharacterName cell).
+    #[test]
+    fn the_trim_keeps_the_animation_table_values() {
+        let set = super::referenced_hashes(&crate::app::retail_vz_wad(), &[]).unwrap_or_else(|e| panic!("{e}"));
+        for name in ["Upright", "Rifle", "InVehicle", "mattias"] {
+            let h = mercs2_formats::hash::pandemic_hash_m2(name);
+            assert!(set.contains(&h), "the trim drops {name} 0x{h:08X}");
+        }
+    }
 }
 
 #[cfg(test)]
