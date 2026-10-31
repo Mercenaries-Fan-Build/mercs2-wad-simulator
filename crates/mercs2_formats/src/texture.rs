@@ -120,6 +120,29 @@ impl MtrlMaterial {
     pub fn alpha_multiplier(&self) -> f32 {
         self.preamble[13]
     }
+
+    /// The pixel-shader constant block `materialData` (c93..c98: diffuse, specular, ambient, emissive,
+    /// subsurface, constant0) as the draw uploads it raw (`0x855f4e`, the draw entry's `+0x3a` = 1
+    /// mode), from the on-disk preamble words `w` (`Mtrl_Parse`'s stores, material_shader_spec.md §1c
+    /// and §1e): c93 = (w1, w2, w3, 1), c94 = (w4, w5, w6, 1), c95 = (w7, w8, w9, F0) with
+    /// F0 = ((w16 − 1)/(w16 + 1))², c96 = (w10, w11, w12, 1), c97 = (w17, w18, w19, w20),
+    /// c98 = (w15, w16, max(w14, 9.99e-5), w13). The draw's other mode scales these by a per-instance
+    /// colour whose source is not decoded yet.
+    pub fn material_data(&self) -> [[f32; 4]; 6] {
+        let w = &self.preamble;
+        // DAT_00b977f8 = 0x38D1B717, the floor Mtrl_Parse clamps word 14 to.
+        let floor = f32::from_bits(0x38D1_B717);
+        let ior = w[16];
+        let f0 = ((ior - 1.0) / (ior + 1.0)).powf(2.0);
+        [
+            [w[1], w[2], w[3], 1.0],
+            [w[4], w[5], w[6], 1.0],
+            [w[7], w[8], w[9], f0],
+            [w[10], w[11], w[12], 1.0],
+            [w[17], w[18], w[19], w[20]],
+            [w[15], ior, w[14].max(floor), w[13]],
+        ]
+    }
 }
 
 /// The `ALPHAREF` retail sets for an alpha-tested material, with `ALPHAFUNC` 5 (GREATER): a pixel
@@ -148,6 +171,43 @@ pub fn runtime_material_flags(disk: u16) -> u16 {
         _ => 0,
     };
     ((((d & 0x818) * 4 | d & 0x780) * 2) | (d >> 1) & 0x30 | mode) as u16
+}
+
+/// Whether a material with on-disk flags `disk` draws blended: its blend nibble (runtime `F & 0xf`)
+/// is set. Every such colour packet in a retail frame is class 8 (render_core_code_map.md §6a), the
+/// one class `FUN_008565b0` turns `ALPHABLENDENABLE` on for, with Z write off; nibble 0 draws are the
+/// opaque classes 5 and 6, blending off.
+pub fn material_blended(disk: u16) -> bool {
+    runtime_material_flags(disk) & 0xF != 0
+}
+
+/// D3D9 blend state, in D3D's own numbers: `op` a `D3DBLENDOP` (1 ADD, 2 SUBTRACT, 3 REVSUBTRACT),
+/// `src`/`dest` a `D3DBLEND` (2 ONE, 5 SRCALPHA, 6 INVSRCALPHA, 7 DESTALPHA).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct MaterialBlend {
+    pub op: u32,
+    pub src: u32,
+    pub dest: u32,
+}
+
+/// `DAT_00ce8d28`, `DAT_00ce8d38`: SRCBLEND and DESTBLEND by `(F >> 4) & 3`.
+const BLEND_SRC: [u32; 4] = [2, 5, 7, 2];
+const BLEND_DEST: [u32; 4] = [2, 2, 2, 6];
+/// `DAT_00ce8d48`: BLENDOP by the blend nibble (indices 0..8).
+const BLEND_OP: [u32; 9] = [1, 1, 1, 1, 2, 1, 1, 1, 3];
+
+/// The blend state `FUN_00858320` sets for a material whose runtime flags are `runtime`
+/// ([`runtime_material_flags`]). A nibble of 0 reads as 1. With both `0x10` and `0x20` set the state
+/// is ADD, ONE, INVSRCALPHA; otherwise BLENDOP comes from the nibble and, when the nibble's bit 0 is
+/// set, SRCALPHA/INVSRCALPHA, else the `(F >> 4) & 3` tables. It only takes effect where blending is
+/// on ([`material_blended`]).
+pub fn material_blend_state(runtime: u16) -> MaterialBlend {
+    let u = if runtime & 0xF == 0 { 1 } else { (runtime & 0x3F) as usize };
+    if u & 0x30 == 0x30 {
+        return MaterialBlend { op: 1, src: 2, dest: 6 };
+    }
+    let (src, dest) = if u & 1 != 0 { (5, 6) } else { (BLEND_SRC[u >> 4], BLEND_DEST[u >> 4]) };
+    MaterialBlend { op: BLEND_OP[u & 0xF], src, dest }
 }
 
 /// A ready-to-upload texture: raw DXT/BC bytes plus dimensions and format.
@@ -1494,6 +1554,48 @@ mod tests {
         // A blend mode alone does not alpha-test in FUN_00858320.
         assert!(!material_alpha_tested(0x0001));
         assert!(!material_alpha_tested(0x0090));
+    }
+
+    #[test]
+    fn blend_state_is_fun_00858320() {
+        let state = |disk: u16| material_blend_state(runtime_material_flags(disk));
+        // Mode 1 (503 retail materials): alpha blend, whatever the 0x10/0x20 selector says.
+        assert_eq!(state(0x0001), MaterialBlend { op: 1, src: 5, dest: 6 });
+        assert_eq!(state(0x0091), MaterialBlend { op: 1, src: 5, dest: 6 });
+        assert_eq!(state(0x0021), MaterialBlend { op: 1, src: 5, dest: 6 });
+        // Mode 2 (72 materials, the additive PgDiffEmis* glows): ONE/ONE by selector 0.
+        assert_eq!(state(0x0002), MaterialBlend { op: 1, src: 2, dest: 2 });
+        // Modes 3 and 4 subtract and reverse-subtract; the selector picks the factors.
+        assert_eq!(state(0x0003), MaterialBlend { op: 2, src: 2, dest: 2 });
+        assert_eq!(state(0x0004), MaterialBlend { op: 3, src: 2, dest: 2 });
+        assert_eq!(state(0x0022), MaterialBlend { op: 1, src: 5, dest: 2 });
+        assert_eq!(state(0x0042), MaterialBlend { op: 1, src: 7, dest: 2 });
+        // Both selector bits: ADD, ONE, INVSRCALPHA whatever the nibble.
+        assert_eq!(state(0x0064), MaterialBlend { op: 1, src: 2, dest: 6 });
+        // Nibble 0 reads as 1 (an instance-alpha fade of an opaque material); the selector is masked off.
+        assert_eq!(state(0x0060), MaterialBlend { op: 1, src: 5, dest: 6 });
+        assert!(material_blended(0x0081) && material_blended(0x0002));
+        assert!(!material_blended(0x0080) && !material_blended(0x0100));
+    }
+
+    #[test]
+    fn material_data_is_mtrl_parse_s_register_map() {
+        let preamble: Vec<f32> = (0..26).map(|k| k as f32 * 0.5).collect();
+        let m = MtrlMaterial { preamble, ..Default::default() };
+        let d = m.material_data();
+        assert_eq!(d[0], [0.5, 1.0, 1.5, 1.0]);
+        assert_eq!(d[1], [2.0, 2.5, 3.0, 1.0]);
+        assert_eq!(&d[2][..3], &[3.5, 4.0, 4.5]);
+        // F0 from IOR = word 16 = 8.0: ((8 - 1) / (8 + 1))².
+        assert!((d[2][3] - (7.0f32 / 9.0).powi(2)).abs() < 1e-6);
+        assert_eq!(d[3], [5.0, 5.5, 6.0, 1.0]);
+        assert_eq!(d[4], [8.5, 9.0, 9.5, 10.0]);
+        assert_eq!(d[5], [7.5, 8.0, 7.0, 6.5]);
+        // Word 14 is clamped up to 9.99e-5.
+        let mut p = vec![0.0f32; 26];
+        p[16] = 1.5;
+        let m = MtrlMaterial { preamble: p, ..Default::default() };
+        assert_eq!(m.material_data()[5][2], f32::from_bits(0x38D1_B717));
     }
 
     #[test]
