@@ -1774,7 +1774,7 @@ pub fn build_placement_markers(
         for l in &local {
             verts.push(crate::mesh::Vertex {
                 pos: [p.pos[0] + l[0], p.pos[1] + l[1], p.pos[2] + l[2]],
-                color,
+                color: [color[0], color[1], color[2], 1.0],
                 uv: [0.0, 0.0],
                 normal: [0.0, 1.0, 0.0],
                 tangent: [1.0, 0.0, 0.0, 1.0],
