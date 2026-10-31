@@ -90,5 +90,13 @@ name = "model_assembly"
 required-features = ["retail"]
 
 [[test]]
+name = "material_shaders"
+required-features = ["retail"]
+
+[[test]]
+name = "rotor_retail"
+required-features = ["retail"]
+
+[[test]]
 name = "gate_invariant_probe"
 required-features = ["retail"]
