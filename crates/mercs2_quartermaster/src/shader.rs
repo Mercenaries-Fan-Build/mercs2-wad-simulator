@@ -8,11 +8,9 @@
 //! * `data/shader_families.tsv` — one row per shader record vtable: its stage (the load handler at
 //!   vtable `+8` is `FUN_0085af00` for a vertex shader, `FUN_0085b1a0` for a pixel shader), its
 //!   record size, and the constant names its binder (vtable `+0x10`) resolves.
-//! * `data/registered_shaders.tsv` — every registration `FUN_0084f130` and its sub-registrars make,
-//!   with the configurations (resident store pair × ShaderLevel) it is made in, plus `PgCompositeFP`,
-//!   which the composite pass constructor registers outside `FUN_0084f130` (site `0x0246A443`; its
-//!   class argument comes from a SecuROM call, so the row's class is `-`). A vertex shader's row
-//!   also lists, per store holding its record, the inputs and the CTAB constants the record declares.
+//! * `mercs2_formats/data/registered_shaders.tsv` — every registration the retail registry makes
+//!   (`mercs2_formats::shader_registrations`, re-exported here), which the engine also reads to find a
+//!   material's pixel shader.
 //!
 //! The stores themselves are read only from the `--original-data` directory, never from the game
 //! folder: the game's copy is whatever the last deploy left there.
@@ -22,7 +20,7 @@ use std::path::Path;
 use std::sync::OnceLock;
 
 use mercs2_formats::hash::pandemic_hash_m2;
-use mercs2_formats::shader3::{self, ShaderKind, Store, StoreBuilder};
+use mercs2_formats::shader3::{self, Store, StoreBuilder};
 use mercs2_formats::sm3asm;
 use serde::{Deserialize, Serialize};
 
@@ -33,10 +31,10 @@ pub const CAPABILITY: &str = "shader-registry";
 
 /// Names the pixel registry holds: `FUN_0085ab70` indexes `0x0197ba40[0x800]` and its insert
 /// (`FUN_0085b7c0`, a linear probe for a free slot, `& 0x7ff`) never gives up on a full table.
-pub const PIXEL_CAPACITY: usize = 0x800;
+pub const PIXEL_CAPACITY: usize = mercs2_formats::shader_registry::PS_CAPACITY as usize;
 /// Names the vertex registry holds: `FUN_0085abd0` indexes `0x0197e248[0x100]` and its insert
 /// (`FUN_00632250`, a linear probe for a free slot, `& 0xff`) never gives up on a full table.
-pub const VERTEX_CAPACITY: usize = 0x100;
+pub const VERTEX_CAPACITY: usize = mercs2_formats::shader_registry::VS_CAPACITY as usize;
 
 /// The vertex-family constant an AmbientWind shader reads: `PgMeshVPAmbientWind_3.sho` builds its
 /// sway from `WindMatrix` and scales it by `POSITION.w` (`mad r0, v0.w, r0, r2`), so a group drawn
@@ -44,54 +42,13 @@ pub const VERTEX_CAPACITY: usize = 0x100;
 pub const WIND_CONSTANT: &str = "WindMatrix";
 
 const FAMILIES_TSV: &str = include_str!("../data/shader_families.tsv");
-const REGISTERED_TSV: &str = include_str!("../data/registered_shaders.tsv");
 
-/// Which registry a shader is in, and which D3D create call its store record takes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Stage {
-    Vertex,
-    Pixel,
-}
-
-impl Stage {
-    pub fn kind(self) -> ShaderKind {
-        match self {
-            Stage::Vertex => ShaderKind::Vertex,
-            Stage::Pixel => ShaderKind::Pixel,
-        }
-    }
-
-    pub fn token(self) -> &'static str {
-        match self {
-            Stage::Vertex => "vertex",
-            Stage::Pixel => "pixel",
-        }
-    }
-
-    fn from_kind(kind: ShaderKind) -> Stage {
-        match kind {
-            ShaderKind::Vertex => Stage::Vertex,
-            ShaderKind::Pixel => Stage::Pixel,
-        }
-    }
-
-    /// The stage a blob's version token names.
-    pub fn of_version(token: u32) -> Option<Stage> {
-        match token {
-            sm3asm::VS_3_0 => Some(Stage::Vertex),
-            sm3asm::PS_3_0 => Some(Stage::Pixel),
-            _ => None,
-        }
-    }
-
-    fn capacity(self) -> usize {
-        match self {
-            Stage::Vertex => VERTEX_CAPACITY,
-            Stage::Pixel => PIXEL_CAPACITY,
-        }
-    }
-}
+pub use mercs2_formats::shader_registrations::{
+    registered, retail_count, retail_families_of_stem, retail_keys_everywhere, retail_name, retail_vertex_declares,
+    Config, ExtraStores, Registered,
+};
+pub use mercs2_formats::shader_registry::Stage;
+use mercs2_formats::shader_registrations::{parse_hex, parse_stage, tsv_rows};
 
 /// The shader record families: one per record vtable in the retail exe. The declaration order is
 /// the row order of `data/shader_families.tsv`, and the m2-sdk's `m2_shader_family` enumerator
@@ -229,214 +186,6 @@ pub fn families() -> &'static [FamilyInfo] {
         }
         rows
     })
-}
-
-/// A resident configuration of the registry: which extra store pair the caps word loads
-/// (`DAT_01176288 + 0x5e4` bit 2: the VT pair; bit 2 clear and bit 3 set: the R2VB pair; neither:
-/// none) and the ShaderLevel byte `DAT_00dfc345`, which gates the `_pl`/`_sl`/`_pl_sl`
-/// registrations and selects the `_3.sho` or `_3l.sho` store records.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct Config {
-    pub extra: ExtraStores,
-    pub shader_level: bool,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum ExtraStores {
-    None,
-    R2vb,
-    Vt,
-}
-
-impl Config {
-    pub const ALL: [Config; 6] = [
-        Config { extra: ExtraStores::None, shader_level: false },
-        Config { extra: ExtraStores::None, shader_level: true },
-        Config { extra: ExtraStores::R2vb, shader_level: false },
-        Config { extra: ExtraStores::R2vb, shader_level: true },
-        Config { extra: ExtraStores::Vt, shader_level: false },
-        Config { extra: ExtraStores::Vt, shader_level: true },
-    ];
-
-    /// The `registered_shaders.tsv` spelling: `none0` … `vt1`.
-    pub fn token(self) -> String {
-        let e = match self.extra {
-            ExtraStores::None => "none",
-            ExtraStores::R2vb => "r2vb",
-            ExtraStores::Vt => "vt",
-        };
-        format!("{e}{}", u8::from(self.shader_level))
-    }
-
-    fn parse(s: &str) -> Config {
-        *Config::ALL
-            .iter()
-            .find(|c| c.token() == s)
-            .unwrap_or_else(|| panic!("data/registered_shaders.tsv names configuration {s:?}"))
-    }
-
-    /// Whether a registration of light class `class` is made: class 0 always, classes 1-3 only with
-    /// ShaderLevel on (`FUN_0084f130`'s `DAT_00dfc345 != 0` blocks).
-    pub fn registers_class(self, class: u32) -> bool {
-        class == 0 || self.shader_level
-    }
-}
-
-/// One row of `data/registered_shaders.tsv`: a registration the retail registry makes.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Registered {
-    pub name: String,
-    pub key: u32,
-    pub sho: String,
-    pub stage: Stage,
-    pub family: String,
-    /// The class argument of the registration call. `None` for `PgCompositeFP`, whose class a
-    /// SecuROM call computes.
-    pub class: Option<u32>,
-    pub configs: BTreeSet<Config>,
-    /// For a vertex shader: each store holding a record for its stem, with the `(usage, index)` of
-    /// every input that record's bytecode declares.
-    pub inputs: Vec<(String, Vec<(u8, u8)>)>,
-    /// For a vertex shader: each store holding a record for its stem, with the constant names that
-    /// record's CTAB declares.
-    pub constants: Vec<(String, Vec<String>)>,
-}
-
-/// Every retail registration.
-pub fn registered() -> &'static [Registered] {
-    static R: OnceLock<Vec<Registered>> = OnceLock::new();
-    R.get_or_init(|| {
-        tsv_rows(REGISTERED_TSV, &["name", "key", "sho", "stage", "family", "class", "configs", "inputs", "constants"])
-            .map(|f| Registered {
-                name: f[0].to_string(),
-                key: parse_hex(f[1]),
-                sho: f[2].to_string(),
-                stage: parse_stage(f[3]),
-                family: f[4].to_string(),
-                class: match f[5] {
-                    "-" => None,
-                    c => Some(c.parse().unwrap_or_else(|_| panic!("registered_shaders.tsv class {c:?}"))),
-                },
-                configs: f[6].split(',').map(Config::parse).collect(),
-                inputs: parse_inputs(f[7]),
-                constants: parse_constants(f[8]),
-            })
-            .collect()
-    })
-}
-
-/// The retail keys of `stage` registered in every configuration. One key can be registered by
-/// several rows, each in some configurations (`PgMeshNoTangentAmbientWindVP` loads a different
-/// `.sho` with the VT pair resident), so the configurations are united per key.
-pub fn retail_keys_everywhere(stage: Stage) -> BTreeSet<u32> {
-    let mut by_key: BTreeMap<u32, BTreeSet<Config>> = BTreeMap::new();
-    for r in registered().iter().filter(|r| r.stage == stage) {
-        by_key.entry(r.key).or_default().extend(r.configs.iter().copied());
-    }
-    by_key.into_iter().filter(|(_, c)| c.len() == Config::ALL.len()).map(|(k, _)| k).collect()
-}
-
-/// Whether the retail vertex shader `key` declares `constant` in the CTAB of its record in any
-/// store, in any configuration.
-pub fn retail_vertex_declares(key: u32, constant: &str) -> bool {
-    registered()
-        .iter()
-        .filter(|r| r.key == key && r.stage == Stage::Vertex)
-        .flat_map(|r| r.constants.iter())
-        .any(|(_, names)| names.iter().any(|n| n == constant))
-}
-
-/// The retail registration name for `key`, when there is one.
-pub fn retail_name(key: u32) -> Option<&'static str> {
-    registered().iter().find(|r| r.key == key).map(|r| r.name.as_str())
-}
-
-/// The store stems the retail registry loads for `stem`'s registrations, case-folded like the
-/// engine's hash.
-fn stem_of(sho: &str) -> &str {
-    &sho[..sho.len() - 4]
-}
-
-/// The families of every retail registration that loads `<stem>.sho`.
-pub fn retail_families_of_stem(stem: &str) -> BTreeSet<&'static str> {
-    let key = pandemic_hash_m2(stem);
-    registered()
-        .iter()
-        .filter(|r| pandemic_hash_m2(stem_of(&r.sho)) == key)
-        .map(|r| r.family.as_str())
-        .collect()
-}
-
-/// Retail registrations made in `config`, per stage.
-pub fn retail_count(config: Config, stage: Stage) -> usize {
-    let keys: BTreeSet<u32> = registered()
-        .iter()
-        .filter(|r| r.stage == stage && r.configs.contains(&config))
-        .map(|r| r.key)
-        .collect();
-    keys.len()
-}
-
-fn tsv_rows<'a>(text: &'a str, header: &[&str]) -> impl Iterator<Item = Vec<&'a str>> + 'a {
-    let mut lines = text.lines();
-    let head: Vec<&str> = lines.next().unwrap_or_default().split('\t').collect();
-    if head != header {
-        panic!("TSV header {head:?} is not {header:?}");
-    }
-    let n = header.len();
-    lines.map(move |l| {
-        let f: Vec<&str> = l.split('\t').collect();
-        if f.len() != n {
-            panic!("TSV row {l:?} has {} fields, not {n}", f.len());
-        }
-        f
-    })
-}
-
-/// `-`, or `<store>=<usage>.<index>+…` per store, `;`-separated.
-fn parse_inputs(s: &str) -> Vec<(String, Vec<(u8, u8)>)> {
-    if s == "-" {
-        return Vec::new();
-    }
-    s.split(';')
-        .map(|entry| {
-            let (store, list) = entry.split_once('=').unwrap_or_else(|| panic!("registered_shaders.tsv inputs {entry:?}"));
-            let inputs = list
-                .split('+')
-                .filter(|x| !x.is_empty())
-                .map(|ui| {
-                    let (u, i) = ui.split_once('.').unwrap_or_else(|| panic!("registered_shaders.tsv input {ui:?}"));
-                    (u.parse().expect("usage"), i.parse().expect("usage index"))
-                })
-                .collect();
-            (store.to_string(), inputs)
-        })
-        .collect()
-}
-
-/// `-`, or `<store>=<name>+…` per store, `;`-separated.
-fn parse_constants(s: &str) -> Vec<(String, Vec<String>)> {
-    if s == "-" {
-        return Vec::new();
-    }
-    s.split(';')
-        .map(|entry| {
-            let (store, list) = entry.split_once('=').unwrap_or_else(|| panic!("registered_shaders.tsv constants {entry:?}"));
-            (store.to_string(), list.split('+').filter(|x| !x.is_empty()).map(str::to_string).collect())
-        })
-        .collect()
-}
-
-fn parse_hex(s: &str) -> u32 {
-    u32::from_str_radix(s.trim_start_matches("0x"), 16).unwrap_or_else(|_| panic!("TSV hex field {s:?}"))
-}
-
-fn parse_stage(s: &str) -> Stage {
-    match s {
-        "vertex" => Stage::Vertex,
-        "pixel" => Stage::Pixel,
-        other => panic!("TSV stage {other:?}"),
-    }
 }
 
 // ── data files ─────────────────────────────────────────────────────────────────────────────────
