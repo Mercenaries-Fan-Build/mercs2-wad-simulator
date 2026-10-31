@@ -28,7 +28,7 @@ its foot:
   retail cue's values, by name or guid) and *Replace its bank*; the EXPORT card (F10) writes the
   selection, the bank or the search hits as 16-bit WAVs plus `captions.csv`.
 - **Anims** plays a clip on the **hero**, the one model you choose for clips (kept in
-  `settings.json`, shared with FaceFX). With no hero the picker opens, ranking every model by how
+  `settings.json`). With no hero the picker opens, ranking every model by how
   many of the clip's bones its skeleton holds (`heroidx`, read on a worker). The clip card gives
   the codec (wavelet, interleaved and delta-compressed all decode), length, tracks and the bones
   bound on the hero. The 29 MANM material animations open a card of their tracks instead: each
@@ -156,7 +156,7 @@ cargo run -p mercs2_workshop -- --ui-state crates/mercs2_workshop/ui_states/insp
 ```
 
 The JSON names the state by the words the window shows — `page` (a rail label or `Live`),
-`settings_section`, `tab`, `lens`, `filter`, `load` (a model name, or on another tab that tab's row by its label), `hero` (a model name, set before `load`), `shipment` + `contribution`,
+`settings_section`, `tab`, `lens`, `filter`, `load` (a model name, or on another tab that tab's row by its label), `hero` (a model name, set before `load`), on `"tab": "FACEFX"` with a `load` `face_pose` (a pose of the opened actor, held at full weight) or `face_time` (seconds into the opened set's first anim, paused), `shipment` + `contribution`,
 `bench` + `donor`, and on the AUDIO tab `bank`, `clip`, `search` and `select` (record indices),
 applied once the tab's routing is read (`ui_states/audio.json`), `run_wad` / `run_data` (a path
 used for this run as Settings' "Use for this run only…" does, after the first load; the capture
