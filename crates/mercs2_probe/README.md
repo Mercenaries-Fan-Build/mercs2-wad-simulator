@@ -33,13 +33,15 @@ set, exactly as matched in `main()`:
 | `tree-census <out.json>` | `diag::tree_census` — c3-cell canopy trees; writes the per-instance list JSON to `out.json` |
 | `gfx-extract <outdir>` | `diag::gfx_extract` — writes every `cfx_pack` movie of `--wad` (the container's `data` body, verbatim) |
 | `gfx-golden <movies_dir> --md <report.md> --json <index.json>` | inventories extracted movies into the GFx golden reference set; reads files, needs no WAD |
-| `extract --model 0xHASH [out.bin]` | `wad::extract_container` → file |
+| `extract --model 0xHASH [--type 0xTYPEHASH] [out.bin]` | `wad::extract_container` → file; with `--type`, `wad::extract_container_typed` reads the chunk of that CHDR class (a character's model and its facefxactor can share one name) |
+| `facefx <name\|0xH>` / `facefx --all` | a FaceFX actor (face bones, reference pose beside the model's HIER local, poses) and anim set (anims, curves with their value range) by name; `--all` reads every FaceFX container of every mounted WAD, prints the census (node classes, link functions, curve names), how many takes name a voice clip and an `english` string, and each set's speaker as the shipped scripts bind it (`mercs2_engine::facecast`), and exits 1 if any container fails |
 | `dump-block <index> [out.bin]` | `wad::decompress_block_index` → file |
 | `find-placement <name-substring>` | scans blocks `0..6000`, prints every placement whose name matches |
 | `hier --model 0xHASH [names.txt] [--csv path]` | HIER bone tree with name resolution (see below) |
 | `overlays <profile-path>` | resolves a save's active `vz_state` layers and folds them through the real streaming catalog |
 | `save-dump <profile-path> [grep-needle]` | parsed `.profile` header + the decompressed SaveSingleton Lua payload |
 | `anim-table <name\|0xH> [--handle 0xH] [--list <column>]` | an `animationtable` as the loader holds it: columns, defaults row, data rows, and each row's `ASTO` list |
+| `clip-names <review.tsv>` | names the AnimationLookup's clips from the rows that list them (`player_mattias_rifle_upright_run_forward_fb`): the row's character and equipment, then a stance and action from words the data supplies. Writes a review file, each name with its expected chance matches, whether its stance agrees with the stance tables, and how many clips share its stance and action; merges nothing. Reads `rainbow_table`, `jul08_strings` and `notes_docs_dir` from `.mercs2-local.toml` |
 | `we-template <name\|0xKEY>...` · `--class <Class>` · `--uses <0xU32>` · `--enums` | the retail `worldentity`: a template's component records, a class's schema (field names) and records, every record holding a value, or the enum tables |
 | `clip-pose --model H --clip H --bones 0xA,0xB.. --ref 0xR [--frames N]` | a clip posed on a model as the engine poses it: the bones' model-space positions per frame and their positions in the reference bone's frame |
 | `dump-read <capture-dir> <0xVA> [len]` | retail memory from an x32dbg capture (`game-files/memory-dumps/<build>/<state>`); no WAD |
@@ -147,6 +149,7 @@ cargo run -p mercs2_probe -- hier --model 0x39AF17DC --csv hier.csv
 
 # pull one container / one block out to disk
 cargo run -p mercs2_probe -- extract --model 0x39AF17DC model.bin
+cargo run -p mercs2_probe -- extract --model 0x0BBA3066 --type 0x1CF649BB actor.bin   # pmc_hum_mattias's facefxactor
 cargo run -p mercs2_probe -- dump-block 667 block667.bin
 
 # hunt a hash / a string / a placement across every block
