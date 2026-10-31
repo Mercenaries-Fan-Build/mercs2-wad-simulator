@@ -112,6 +112,16 @@ impl Mixr {
     /// part bitmasks (`1 << part`), in the order the exe stores them. Empty when the profile allows
     /// no part (the exe makes no call then).
     pub fn outfits(&self, profile: usize) -> Vec<u32> {
+        self.outfit_picks(profile).iter().map(|picks| picks.iter().fold(0, |m, p| m | (1 << p.part))).collect()
+    }
+
+    /// [`Self::outfits`] as the picks each outfit makes, in the order the enumerator makes them:
+    /// one part from each exclusion class it branched on, with that class's pivot as its slot
+    /// ([`Pick`]). The classes an outfit passes through depend on its earlier picks — a head that
+    /// rules out every hat has no hat class, and since `EXMX` is not symmetric a part can open a
+    /// class of its own after a pick that leaves it available — so outfits differ in how many
+    /// picks they make and at which position a slot comes.
+    pub fn outfit_picks(&self, profile: usize) -> Vec<Vec<Pick>> {
         let n = self.parts.len();
         // Outer loop (0x006A1C03): start from every bit set, clear the parts the profile disallows,
         // pivot on the lowest allowed part.
@@ -123,14 +133,15 @@ impl Mixr {
         }
         let mut out = Vec::new();
         if let Some(pivot) = (0..n).find(|&c| avail & (1 << c) != 0) {
-            self.enumerate(avail, 0, pivot, &mut out);
+            self.enumerate(avail, &mut Vec::new(), pivot, &mut out);
         }
         out
     }
 
     /// `FUN_00460710(avail, chosen, pivot, profile, top)`: collect the pivot's exclusion class from
-    /// the available parts, then branch on each member.
-    fn enumerate(&self, avail: u32, chosen: u32, pivot: usize, out: &mut Vec<u32>) {
+    /// the available parts, then branch on each member. `chosen` is the exe's part mask kept as the
+    /// picks in the order they were made.
+    fn enumerate(&self, avail: u32, chosen: &mut Vec<Pick>, pivot: usize, out: &mut Vec<Vec<Pick>>) {
         let n = self.parts.len();
         if pivot >= n {
             return;
@@ -156,11 +167,13 @@ impl Mixr {
         }
         if class.is_empty() {
             // 0x004607DC: the pivot's bit is added whether or not it was available.
-            out.push(chosen | (1 << pivot));
+            let mut worn = chosen.clone();
+            worn.push(Pick { slot: pivot, part: pivot });
+            out.push(worn);
             return;
         }
         for &c in &class {
-            let worn = chosen | (1 << c);
+            chosen.push(Pick { slot: pivot, part: c });
             let mut rest = avail;
             for k in 0..n {
                 if !self.compatible[c][k] {
@@ -168,9 +181,10 @@ impl Mixr {
                 }
             }
             match next {
-                Some(p) => self.enumerate(rest, worn, p, out),
-                None => out.push(worn),
+                Some(p) => self.enumerate(rest, chosen, p, out),
+                None => out.push(chosen.clone()),
             }
+            chosen.pop();
         }
     }
 
@@ -187,6 +201,12 @@ impl Mixr {
             format!("template {:?} picks profile 0x{:08X}, which this kit does not carry", t.label(), t.profile)
         })?;
         Ok((pi, self.outfits(pi)))
+    }
+
+    /// [`Self::template_outfits`] as [`Self::outfit_picks`].
+    pub fn template_picks(&self, t: &KitTemplate) -> Result<(usize, Vec<Vec<Pick>>), String> {
+        let (pi, _) = self.template_outfits(t)?;
+        Ok((pi, self.outfit_picks(pi)))
     }
 
     /// Outfit number `n` — counted from 1, as `--render-outfit "<template>#n"` takes it — as one
@@ -223,9 +243,72 @@ impl Mixr {
     }
 }
 
+/// One pick of an outfit ([`Mixr::outfit_picks`]): `part`, from the exclusion class whose pivot is
+/// `slot` (the part the enumerator collected the class around).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Pick {
+    pub slot: usize,
+    pub part: usize,
+}
+
+/// The part `outfit` picks from the slot holding `slot` (a slot of [`slots`]), or `None` when it
+/// makes no pick there.
+pub fn pick_in(outfit: &[Pick], slot: &[usize]) -> Option<usize> {
+    outfit.iter().find(|p| slot.contains(&p.part)).map(|p| p.part)
+}
+
+/// The slots of a profile's outfits ([`Mixr::outfit_picks`]): the exclusion classes the outfits
+/// pick from, a class being the parts picked with one pivot, and classes that share a part joined
+/// into one slot. Which parts are left for a class depends on earlier picks, so one class can be
+/// reached through different pivots (retail `pr_hum_super_thug`: `{12, 13, 14}` from pivot 12,
+/// just `{14}` from pivot 14 after a head that rules out 12 and 13). In order of their lowest
+/// part, each holding its parts in the order the outfits first pick them.
+pub fn slots(picks: &[Vec<Pick>]) -> Vec<Vec<usize>> {
+    let mut classes: Vec<(usize, Vec<usize>)> = Vec::new();
+    for p in picks.iter().flatten() {
+        match classes.iter_mut().find(|(s, _)| *s == p.slot) {
+            Some((_, parts)) if parts.contains(&p.part) => {}
+            Some((_, parts)) => parts.push(p.part),
+            None => classes.push((p.slot, vec![p.part])),
+        }
+    }
+    let mut out: Vec<Vec<usize>> = Vec::new();
+    for (_, class) in classes {
+        let (shared, mut rest): (Vec<Vec<usize>>, Vec<Vec<usize>>) =
+            out.into_iter().partition(|s| s.iter().any(|p| class.contains(p)));
+        let mut joined: Vec<usize> = Vec::new();
+        for p in shared.into_iter().flatten().chain(class) {
+            if !joined.contains(&p) {
+                joined.push(p);
+            }
+        }
+        rest.push(joined);
+        out = rest;
+    }
+    out.sort_by_key(|s| s.iter().min().copied());
+    out
+}
+
+/// The outfit (an index into `picks`) whose pick from `slot` (a slot of [`slots`]) is `part` —
+/// `None` for no pick from it — and that keeps the most of `from`'s picks from the other `slots`;
+/// the first such outfit in the exe's order. `None` when no outfit picks `part` from `slot`.
+pub fn nearest_pick(picks: &[Vec<Pick>], slots: &[Vec<usize>], from: &[Pick], slot: &[usize], part: Option<usize>) -> Option<usize> {
+    let kept = |outfit: &[Pick]| {
+        slots.iter().filter(|s| s.as_slice() != slot && pick_in(outfit, s) == pick_in(from, s)).count()
+    };
+    picks
+        .iter()
+        .enumerate()
+        .filter(|(_, o)| pick_in(o, slot) == part)
+        // `max_by_key` keeps the LAST of equal keys; the reversal makes it the first.
+        .rev()
+        .max_by_key(|(_, o)| kept(o))
+        .map(|(i, _)| i)
+}
+
 /// One template of the resident `worldentity` that names a model: its key, `Name`, `ModelName`,
-/// `ModelMixerProfile` (0 when it carries none) and `FactionMarker`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// `ModelMixerProfile` (0 when it carries none), `FactionMarker`, `FaceFXActor` and riders.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct KitTemplate {
     pub key: u32,
     pub name: Option<String>,
@@ -235,6 +318,14 @@ pub struct KitTemplate {
     /// (`HUD_faction_AN`, `_CH`, `_CV`, `_GR`, `_OC`, `_PR`, `_VZ` in retail). It belongs to the
     /// template, not the model: one kit model is worn by templates of different factions.
     pub faction: Option<u32>,
+    /// The `facefxactor` asset of the template's face: `HumanAnimationSystem` record `+8`, which PC
+    /// `0x65ae10` reads as `FaceFXActor` and every actor resolver of the exe asks for (bind
+    /// `0x5adb4d`, the component ctor `0x686aa6`). `None` when the field is 0 or the template has no
+    /// such record: the game then has no face to bind. It is not the model's name: `pmc_hum_jen`
+    /// wears `pmc_hum_jennifer`.
+    pub face_actor: Option<u32>,
+    /// The template keys its `Rider` records seat (record `+4`), in record order.
+    pub riders: Vec<u32>,
 }
 
 impl KitTemplate {
@@ -276,6 +367,34 @@ pub fn kit_templates(we: &WorldEntity) -> Result<Vec<KitTemplate>, String> {
             names.insert(k, n.clone());
         }
     }
+    let mut faces: BTreeMap<u32, u32> = BTreeMap::new();
+    for c in we.groups_of("HumanAnimationSystem") {
+        for r in &c.records {
+            let face = match &r.payload {
+                Payload::Fixed(b) if b.len() == 0x34 => u32_at(b, 8),
+                p => return Err(format!("HumanAnimationSystem: payload {p:?} is not the 0x34-byte record")),
+            };
+            for &k in &r.keys {
+                if let Some(old) = faces.insert(k, face) {
+                    if old != face {
+                        return Err(format!("HumanAnimationSystem: key 0x{k:08X} has FaceFXActor 0x{old:08X} and 0x{face:08X}"));
+                    }
+                }
+            }
+        }
+    }
+    let mut riders: BTreeMap<u32, Vec<u32>> = BTreeMap::new();
+    for c in we.groups_of("Rider") {
+        for r in &c.records {
+            let rider = match &r.payload {
+                Payload::Fixed(b) if b.len() == 8 => u32_at(b, 4),
+                p => return Err(format!("Rider: payload {p:?} is not a seat hash and a template key")),
+            };
+            for &k in &r.keys {
+                riders.entry(k).or_default().push(rider);
+            }
+        }
+    }
     Ok(models
         .iter()
         .map(|(&key, &model)| KitTemplate {
@@ -284,6 +403,8 @@ pub fn kit_templates(we: &WorldEntity) -> Result<Vec<KitTemplate>, String> {
             model,
             profile: profiles.get(&key).copied().unwrap_or(0),
             faction: factions.get(&key).copied(),
+            face_actor: faces.get(&key).copied().filter(|&f| f != 0),
+            riders: riders.remove(&key).unwrap_or_default(),
         })
         .collect())
 }
@@ -358,12 +479,12 @@ mod tests {
     #[test]
     fn a_template_resolves_to_its_profile_outfits() {
         let m = elite();
-        let jungle = KitTemplate { key: 0x8000_6E40, name: Some("Jungle Elite".into()), model: 0x4D4F_42B5, profile: 0x3510_13C5, faction: None };
+        let jungle = KitTemplate { key: 0x8000_6E40, name: Some("Jungle Elite".into()), model: 0x4D4F_42B5, profile: 0x3510_13C5, ..Default::default() };
         let (pi, outfits) = m.template_outfits(&jungle).unwrap();
         assert_eq!((pi, outfits.len()), (0, 4));
         assert_eq!(m.outfit_line(1, outfits[0]), "#1: parts [3, 5, 7, 8, 10, 12, 13]");
 
-        let stray = KitTemplate { key: 0x1234, name: None, model: 0x4D4F_42B5, profile: 0xDEAD_BEEF, faction: None };
+        let stray = KitTemplate { key: 0x1234, model: 0x4D4F_42B5, profile: 0xDEAD_BEEF, ..Default::default() };
         assert_eq!(stray.label(), "0x00001234");
         assert_eq!(
             m.template_outfits(&stray).unwrap_err(),
@@ -418,6 +539,88 @@ mod tests {
                 })
                 .collect(),
         }
+    }
+
+    #[test]
+    fn picks_are_the_outfits_in_pick_order() {
+        let m = elite();
+        for profile in 0..m.profiles.len() {
+            let picks = m.outfit_picks(profile);
+            let masks: Vec<u32> = picks.iter().map(|o| o.iter().fold(0, |m, p| m | (1 << p.part))).collect();
+            assert_eq!(masks, m.outfits(profile));
+        }
+        // Night vision: a head, an upper body, the lower body, a gear piece, the night-vision piece
+        // and 13, picked in that order, each from the class of the lowest part it could be.
+        let first: Vec<(usize, usize)> = m.outfit_picks(1)[0].iter().map(|p| (p.slot, p.part)).collect();
+        assert_eq!(first, vec![(0, 0), (5, 5), (7, 7), (8, 8), (11, 11), (13, 13)]);
+    }
+
+    #[test]
+    fn slots_are_the_classes_in_pivot_order() {
+        let m = elite();
+        assert_eq!(slots(&m.outfit_picks(1)), vec![vec![0, 1, 2, 3, 4], vec![5, 6], vec![7], vec![8, 9], vec![11], vec![13]]);
+    }
+
+    /// `pr_hum_super_thug` in small: one class reached from pivot 12 as `{12, 14}` and, after a
+    /// head that rules out 12, from pivot 14 as `{14}` — one slot.
+    #[test]
+    fn classes_sharing_a_part_are_one_slot() {
+        let o = |parts: &[(usize, usize)]| parts.iter().map(|&(slot, part)| Pick { slot, part }).collect::<Vec<_>>();
+        let picks = vec![o(&[(0, 0), (12, 12)]), o(&[(0, 0), (12, 14)]), o(&[(0, 2), (14, 14)])];
+        assert_eq!(slots(&picks), vec![vec![0, 2], vec![12, 14]]);
+        assert_eq!(pick_in(&picks[2], &[12, 14]), Some(14));
+    }
+
+    /// Retail `civ_hum_super_business`'s hats in small: heads 0/1, body 2, hat 3, part 4. Hat 3
+    /// allows 4 but 4 rules out 3 (`EXMX` is not symmetric), so after the hat 4 opens a class of
+    /// its own: head 1 picks `[1, 2, 3, 4]`. Head 0 rules out the hat, so 4 follows the body:
+    /// `[0, 2, 4]`. 4 is one slot either way.
+    #[test]
+    fn a_part_keeps_its_slot_at_any_pick_position() {
+        let c = |rows: [[u8; 5]; 5]| rows.iter().map(|r| r.iter().map(|&b| b != 0).collect()).collect();
+        let m = Mixr {
+            info_word: 1,
+            parts: vec![0; 5],
+            compatible: c([
+                [0, 0, 1, 0, 1],
+                [0, 0, 1, 1, 1],
+                [1, 1, 0, 1, 1],
+                [0, 1, 1, 0, 1],
+                [1, 1, 1, 0, 0],
+            ]),
+            profiles: vec![Profile { hash: 0, allowed: vec![true; 5] }],
+        };
+        let picks = m.outfit_picks(0);
+        let parts: Vec<Vec<usize>> = picks.iter().map(|o| o.iter().map(|p| p.part).collect()).collect();
+        assert_eq!(parts, vec![vec![0, 2, 4], vec![1, 2, 3, 4]]);
+        assert_eq!(slots(&picks), vec![vec![0, 1], vec![2], vec![3], vec![4]]);
+        assert_eq!(pick_in(&picks[0], &[3]), None);
+        assert_eq!(pick_in(&picks[0], &[4]), Some(4));
+        assert_eq!(pick_in(&picks[1], &[4]), Some(4));
+    }
+
+    #[test]
+    fn nearest_pick_keeps_the_other_slots() {
+        // Slots 0 (heads 0/1), 2 (2/3), 4 (4/5/6).
+        let o = |parts: &[(usize, usize)]| parts.iter().map(|&(slot, part)| Pick { slot, part }).collect::<Vec<_>>();
+        let picks = vec![
+            o(&[(0, 0), (2, 2), (4, 4)]),
+            o(&[(0, 0), (2, 3), (4, 4)]),
+            o(&[(0, 1), (2, 2)]),
+            o(&[(0, 1), (2, 3), (4, 5)]),
+            o(&[(0, 1), (2, 3), (4, 6)]),
+        ];
+        let s = slots(&picks);
+        assert_eq!(s, vec![vec![0, 1], vec![2, 3], vec![4, 5, 6]]);
+        // From [0, 3, 4], head 1 keeps the 3: the first outfit doing so is [1, 3, 5].
+        assert_eq!(nearest_pick(&picks, &s, &picks[1], &s[0], Some(1)), Some(3));
+        // From [1, 3, 6], 2 keeps head 1: [1, 2].
+        assert_eq!(nearest_pick(&picks, &s, &picks[4], &s[1], Some(2)), Some(2));
+        // "No pick from the last slot" is [1, 2].
+        assert_eq!(nearest_pick(&picks, &s, &picks[4], &s[2], None), Some(2));
+        // Ties go to the first outfit in the exe's order.
+        assert_eq!(nearest_pick(&picks, &s, &[], &s[2], Some(4)), Some(0));
+        assert_eq!(nearest_pick(&picks, &s, &picks[0], &s[0], Some(7)), None);
     }
 
     #[test]
