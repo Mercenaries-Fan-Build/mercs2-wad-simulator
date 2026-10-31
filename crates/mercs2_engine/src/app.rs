@@ -66,9 +66,10 @@ pub struct GameConfig {
     /// Sky/atmosphere tunables (game content; engine renders them). `None` leaves the scene's default
     /// atmosphere untouched (the TPS boot relies on fog-only, no explicit atmosphere).
     pub atmosphere: Option<mercs2_formats::atmosphere::Atmosphere>,
-    /// Path to the base `vz.wad`; the engine resolves the `shell.wad` loading plate as a sibling. `None`
-    /// = spinner only.
-    pub loading_plate_wad: Option<String>,
+    /// Path to the base `vz.wad`. The engine reads its siblings in the game's data folder: the
+    /// `shell.wad` loading plate and `shader3.bin`, whose pixel shaders decide what each material
+    /// texture slot binds ([`crate::render::pixel_samplers`]).
+    pub vz_wad: String,
     /// Number of load stages for the progress bar.
     pub load_stages: u32,
     /// The action→key/pad binding table (data-driven from `Mercs2.ini`). `Bindings::default()` is fine
@@ -195,12 +196,13 @@ pub async fn run<G: Game + 'static>(mut game: G) {
     if let Some(atmos) = cfg.atmosphere.clone() {
         scene.set_atmosphere(atmos);
     }
-    if let Some(wadpath) = &cfg.loading_plate_wad {
-        match crate::wad::shell_loading_plate(wadpath) {
-            Ok(td) => scene.set_loading_art(&td),
-            Err(e) => eprintln!("[app] loading art unavailable ({e}); spinner only"),
-        }
+    match crate::wad::shell_loading_plate(&cfg.vz_wad) {
+        Ok(td) => scene.set_loading_art(&td),
+        Err(e) => eprintln!("[app] loading art unavailable ({e}); spinner only"),
     }
+    scene.set_pixel_samplers(
+        crate::render::pixel_samplers(std::path::Path::new(&cfg.vz_wad)).unwrap_or_else(|e| panic!("[app] {e}")),
+    );
 
     let progress = Arc::new(LoadProgress::new(cfg.load_stages));
     // A menu boot defers the loader until the player picks a save (`StartLoad`); a direct boot starts it
