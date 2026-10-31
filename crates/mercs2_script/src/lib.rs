@@ -2026,6 +2026,45 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// `0x5D3220` reads a handle as the key of the `Name` hash index, the same probe a name's hash
+    /// makes, so a handle resolves only if its value is a registered name hash; it is neither an
+    /// error nor an identity. Anything neither reader takes pushes nil.
+    #[test]
+    fn get_guid_by_name_probes_the_name_index_with_a_handle() {
+        const KEY: u64 = 0x8000_9AD2;
+        let name_hash = mercs2_formats::hash::pandemic_hash_m2("Support Vehicle (Mig27)");
+
+        let host = Rc::new(RefCell::new(RecordingHost::default()));
+        host.borrow().guids.borrow_mut().register_name(name_hash, KEY as u32);
+        let h = ScriptHost::bare().unwrap();
+        h.register_engine(host.clone()).unwrap();
+
+        let name_hash_handle = h.lua.create_function(move |_, ()| Ok(Guid(u64::from(name_hash)))).unwrap();
+        let key_handle = h.lua.create_function(|_, ()| Ok(Guid(KEY))).unwrap();
+        h.lua.globals().set("NameHashHandle", name_hash_handle).unwrap();
+        h.lua.globals().set("KeyHandle", key_handle).unwrap();
+
+        // The value is a registered name hash: the probe finds its owner.
+        let found: Guid = h.eval("return Pg.GetGuidByName(NameHashHandle())").unwrap();
+        assert_eq!(found, Guid(KEY));
+
+        // The shipped case: a template's own key is not a name hash, so the probe misses.
+        let missed: bool = h.eval("return Pg.GetGuidByName(KeyHandle()) == nil").unwrap();
+        assert!(missed, "a handle no name hashes to must push nil, not itself");
+
+        for arg in ["", "nil", "true", "false", "{}", "print"] {
+            let src = format!("return Pg.GetGuidByName({arg}) == nil");
+            let is_nil: bool = h.eval(&src).unwrap_or_else(|e| panic!("{src}: {e}"));
+            assert!(is_nil, "{src}");
+        }
+        let empty: bool = h.eval("return Pg.GetGuidByName('') == nil").unwrap();
+        assert!(empty, "\"\" hashes to 0, which fails the string read");
+
+        // Retail keys a full userdata by its payload address, which this host has no equivalent of.
+        let err = h.eval::<bool>("return Pg.GetGuidByName(newproxy()) == nil").unwrap_err();
+        assert!(err.to_string().contains("full-userdata"), "{err}");
+    }
+
     #[test]
     fn authentic_spawnactor_recipe_routes_to_host() {
         let host = Rc::new(RefCell::new(RecordingHost::default()));
