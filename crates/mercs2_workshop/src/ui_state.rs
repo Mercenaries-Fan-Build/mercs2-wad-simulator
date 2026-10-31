@@ -31,6 +31,10 @@ pub struct UiState {
     /// `load`, so an ANIMS row plays on it; without one, an ANIMS row opens the hero picker, which
     /// is captured once every skeleton has read.
     pub hero: Option<String>,
+    /// On the FACEFX tab: the pose of the opened actor to hold at full weight, by its node name.
+    pub face_pose: Option<String>,
+    /// On the FACEFX tab: the time (seconds) to pause the opened set's first anim at.
+    pub face_time: Option<f32>,
     /// A Shipment folder to open.
     pub shipment: Option<PathBuf>,
     /// The contribution to select in that Shipment, by index.
@@ -72,6 +76,12 @@ impl UiState {
         }
         if st.contribution.is_some() && st.shipment.is_none() {
             return Err(format!("{}: `contribution` needs a `shipment`", path.display()));
+        }
+        let facefx_load = st.load.is_some() && st.tab.as_deref().is_some_and(|t| t.eq_ignore_ascii_case("FACEFX"));
+        for (key, set) in [("face_pose", st.face_pose.is_some()), ("face_time", st.face_time.is_some())] {
+            if set && !facefx_load {
+                return Err(format!("{}: `{key}` needs `\"tab\": \"FACEFX\"` and a `load`", path.display()));
+            }
         }
         if st.audio() && !st.tab.as_deref().is_some_and(|t| t.eq_ignore_ascii_case("AUDIO")) {
             return Err(format!("{}: `bank`, `clip`, `search` and `select` need `\"tab\": \"AUDIO\"`", path.display()));
@@ -126,6 +136,21 @@ mod tests {
         assert!(UiState::load(&p).unwrap_err().contains("pgae"));
         let p = write("nocap.json", r#"{ "page": "Inspect" }"#);
         assert!(UiState::load(&p).unwrap_err().contains("capture"));
+    }
+
+    /// A face pose is held on an actor the FACEFX tab opens, so it needs that tab and a `load`.
+    #[test]
+    fn a_face_pose_needs_the_facefx_tab_and_a_load() {
+        let p = write("face_tab.json", r#"{ "load": "pmc_hum_mattias", "face_pose": "Eat", "capture": "out.png" }"#);
+        assert!(UiState::load(&p).unwrap_err().contains("face_pose"));
+        let p = write("face_load.json", r#"{ "tab": "FACEFX", "face_pose": "Eat", "capture": "out.png" }"#);
+        assert!(UiState::load(&p).unwrap_err().contains("face_pose"));
+        let p = write("face_ok.json", r#"{ "tab": "FACEFX", "load": "pmc_hum_mattias", "face_pose": "Eat", "capture": "out.png" }"#);
+        assert_eq!(UiState::load(&p).unwrap().face_pose.as_deref(), Some("Eat"));
+        let p = write("face_time_tab.json", r#"{ "load": "Global_Job_Briefing_Mattias", "face_time": 0.5, "capture": "out.png" }"#);
+        assert!(UiState::load(&p).unwrap_err().contains("face_time"));
+        let p = write("face_time_ok.json", r#"{ "tab": "FACEFX", "load": "Global_Job_Briefing_Mattias", "face_time": 0.5, "capture": "out.png" }"#);
+        assert_eq!(UiState::load(&p).unwrap().face_time, Some(0.5));
     }
 
     #[test]
