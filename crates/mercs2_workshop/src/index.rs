@@ -122,7 +122,7 @@ impl Kind {
             ),
             Kind::Audio => Preview::None("playback is not wired into the Library yet"),
             Kind::UiGfx => Preview::None("no Scaleform renderer in the workshop"),
-            Kind::FaceFx => Preview::None("needs a head to drive"),
+            Kind::FaceFx => Preview::View("an actor shows its face poses; a set plays on the character it belongs to"),
             Kind::Text => Preview::View("a string table opens every table side by side; a font, its pages and glyphs"),
             Kind::Layer => Preview::None(
                 "a layer is a placement set — browse it, then edit_world / activate_layer",
@@ -232,6 +232,109 @@ impl AssetRow {
     }
 }
 
+/// Where an ANIMS or FACEFX row lists: its group header, an optional sub-group under it, and the
+/// row's text within them (the name with what the groups already say taken off). [`name_group`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NameGroup {
+    pub header: String,
+    pub sub: Option<String>,
+    pub short: String,
+}
+
+/// The header of the named rows that follow none of [`name_group`]'s conventions.
+pub const GROUP_OTHER: &str = "OTHER";
+/// The header of the hash-only rows.
+pub const GROUP_UNNAMED: &str = "UNNAMED";
+/// The header of the vehicle-hijack clips.
+pub const GROUP_HIJACK: &str = "HIJACK";
+
+/// The group of an animation or FaceFX name, from the naming conventions the retail names follow
+/// (tokens split on `_`, matched ignoring case), tried in this order:
+///
+/// * `<PREFIX><n>_<Job|Contract>_<rest>` — a briefing (`ALL01_Contract_Briefing_No_Starter-Chris`,
+///   `GUR_Job_Briefing_Diaz`): under `PREFIX`, in `Contract 01` / `Job`, the row reading `rest`.
+/// * `<prefix>_<who>_<job|contract>_<rest>` — one character's briefing set
+///   (`player_chris_job_briefing_idle`, `all_starter02_job_briefing_spiel`): under `PREFIX`, in `who`.
+/// * any later token ending in `hijack` — a vehicle hijack (`all_ah1z_driverdoor_actionhijack_…`,
+///   `pmc04_solano_actionhijack_chris`): under [`GROUP_HIJACK`], in the second token.
+/// * `<prefix>_hum_<who>` — a character's face rig (`pmc_hum_mattias`): under `PREFIX`.
+///
+/// Anything else is under [`GROUP_OTHER`] with its whole name; no name, [`GROUP_UNNAMED`].
+pub fn name_group(name: Option<&str>) -> NameGroup {
+    let Some(name) = name else {
+        return NameGroup { header: GROUP_UNNAMED.into(), sub: None, short: String::new() };
+    };
+    let t: Vec<&str> = name.split('_').collect();
+    let is = |i: usize, words: &[&str]| t.get(i).is_some_and(|w| words.iter().any(|x| w.eq_ignore_ascii_case(x)));
+    let rest = |from: usize| t[from..].join(" · ");
+    let title = |w: &str| {
+        let lower = w.to_ascii_lowercase();
+        let mut c = lower.chars();
+        c.next().map(|f| f.to_ascii_uppercase().to_string() + c.as_str()).unwrap_or_default()
+    };
+    const JOB: &[&str] = &["job", "contract"];
+    if t.len() > 2 && is(1, JOB) {
+        let (letters, digits) = t[0].split_at(t[0].find(|c: char| c.is_ascii_digit()).unwrap_or(t[0].len()));
+        if !letters.is_empty() && letters.chars().all(|c| c.is_ascii_alphabetic()) && digits.chars().all(|c| c.is_ascii_digit()) {
+            let sub = if digits.is_empty() { title(t[1]) } else { format!("{} {digits}", title(t[1])) };
+            return NameGroup { header: letters.to_ascii_uppercase(), sub: Some(sub), short: rest(2) };
+        }
+    }
+    if t.len() > 3 && is(2, JOB) {
+        return NameGroup { header: t[0].to_ascii_uppercase(), sub: Some(t[1].to_ascii_lowercase()), short: rest(2) };
+    }
+    if t.len() > 2 && t[2..].iter().any(|w| w.to_ascii_lowercase().ends_with("hijack")) {
+        return NameGroup { header: GROUP_HIJACK.into(), sub: Some(t[1].to_ascii_lowercase()), short: rest(2) };
+    }
+    if t.len() > 2 && is(1, &["hum"]) {
+        return NameGroup { header: t[0].to_ascii_uppercase(), sub: None, short: rest(1) };
+    }
+    NameGroup { header: GROUP_OTHER.into(), sub: None, short: name.to_string() }
+}
+
+/// The order [`name_group`] headers list in: by name, then [`GROUP_OTHER`], then [`GROUP_UNNAMED`].
+pub fn name_group_rank(header: &str) -> (u8, &str) {
+    match header {
+        GROUP_OTHER => (1, header),
+        GROUP_UNNAMED => (2, header),
+        _ => (0, header),
+    }
+}
+
+#[cfg(test)]
+mod name_group_tests {
+    use super::{name_group, NameGroup};
+
+    fn g(name: &str) -> (String, Option<String>, String) {
+        let NameGroup { header, sub, short } = name_group(Some(name));
+        (header, sub, short)
+    }
+
+    /// Retail ANIMS and FACEFX names, one per convention.
+    #[test]
+    fn retail_names_group_by_their_convention() {
+        let s = |x: &str| Some(x.to_string());
+        assert_eq!(g("ALL01_Contract_Briefing_No_Starter-Chris"), ("ALL".into(), s("Contract 01"), "Briefing · No · Starter-Chris".into()));
+        assert_eq!(g("all01_contract_briefing_yes_herochair-chris").1, s("Contract 01"));
+        assert_eq!(g("ALL_Job_Briefing_Conrad"), ("ALL".into(), s("Job"), "Briefing · Conrad".into()));
+        // The number is kept as written: GUR001 and GUR01 are two contracts as far as the names say.
+        assert_eq!(g("GUR001_Contract_Briefing_Chris").1, s("Contract 001"));
+        assert_eq!(g("player_chris_job_briefing_idle"), ("PLAYER".into(), s("chris"), "job · briefing · idle".into()));
+        assert_eq!(g("all_starter02_job_briefing_greeting_angry"), ("ALL".into(), s("starter02"), "job · briefing · greeting · angry".into()));
+        assert_eq!(
+            g("all_ah1z_driverdoor_actionhijack_getin_section01_fb"),
+            ("HIJACK".into(), s("ah1z"), "driverdoor · actionhijack · getin · section01 · fb".into())
+        );
+        assert_eq!(g("all_mi35_drivervehicle_solanoactionhijack_getin_section01_fb").1, s("mi35"));
+        assert_eq!(g("pmc04_solano_actionhijack_chris"), ("HIJACK".into(), s("solano"), "actionhijack · chris".into()));
+        assert_eq!(g("pmc_hum_mattias"), ("PMC".into(), None, "hum · mattias".into()));
+        assert_eq!(g("gr_hum_boss_fake"), ("GR".into(), None, "hum · boss · fake".into()));
+        assert_eq!(g("all_aisoldiermale_bare_upright_idle_fb"), ("OTHER".into(), None, "all_aisoldiermale_bare_upright_idle_fb".into()));
+        assert_eq!(g("wxfm0u"), ("OTHER".into(), None, "wxfm0u".into()));
+        assert_eq!(name_group(None).header, "UNNAMED");
+    }
+}
+
 /// Display-cased category name for a `vehicle_class()` token.
 fn vehicle_display(c: &str) -> &'static str {
     match c {
@@ -309,6 +412,12 @@ pub struct AssetIndex {
     pub kit_templates: Vec<mercs2_formats::mixr::KitTemplate>,
     /// Every world template that names a model — what [`faction_labels`] learns its pairs from.
     pub world_templates: Vec<mercs2_formats::mixr::KitTemplate>,
+    /// Every template's `Rotor` records with the keys that carry them — what a vehicle preview reads
+    /// its rotors from (`mercs2_formats::rotor::model_rotors_in` over [`Self::world_templates`]).
+    pub rotor_records: Vec<(Vec<u32>, mercs2_formats::rotor::RotorRecord)>,
+    /// The keys of the templates carrying `_HelicopterPhysics` (`mercs2_formats::rotor::helicopter_keys`):
+    /// a model one of them names spins its rotors at that physics' rotor speed.
+    pub helicopter_keys: std::collections::BTreeSet<u32>,
     /// Each `FactionMarker`'s group label ([`faction_labels`]), kept current with the names.
     pub faction_labels: HashMap<u32, String>,
 }
@@ -417,6 +526,8 @@ impl AssetIndex {
             names: HashMap::new(),
             kit_templates: Vec::new(),
             world_templates: Vec::new(),
+            rotor_records: Vec::new(),
+            helicopter_keys: std::collections::BTreeSet::new(),
             faction_labels: HashMap::new(),
         };
         idx.apply_names(names);
@@ -426,14 +537,14 @@ impl AssetIndex {
     /// Add one model row per kit template (`app::load_kit_templates`: a template that picks a
     /// character-kit outfit), labelled by the template's `Name`, beside its kit's own row. A template
     /// whose model has no row in the catalog adds nothing. `world` is every template that names a
-    /// model, which the faction labels are learned from. Returns how many rows were added.
-    pub fn add_kit_templates(
-        &mut self,
-        templates: &[mercs2_formats::mixr::KitTemplate],
-        world: &[mercs2_formats::mixr::KitTemplate],
-    ) -> usize {
+    /// model, which the faction labels are learned from. The rotor records and helicopter keys are
+    /// kept for vehicle previews. Returns how many rows were added.
+    pub fn add_kit_templates(&mut self, t: &crate::app::KitTemplates) -> usize {
+        let (templates, world) = (&t.kits, &t.all);
         let Some(mi) = Kind::ALL.iter().position(|k| *k == Kind::Model) else { return 0 };
         self.world_templates = world.to_vec();
+        self.rotor_records = t.rotors.clone();
+        self.helicopter_keys = t.helicopters.clone();
         let mut added = Vec::new();
         for t in templates {
             let (Some(name), Some(kit)) = (&t.name, self.rows[mi].iter().find(|r| r.hash == t.model && r.template.is_none()))
@@ -1017,7 +1128,7 @@ mod tests {
     #[test]
     fn harvested_names_drop_debris() {
         let rejected = super::load_rainbow_json(&super::crate_data_file("rejected_names.json").unwrap()).unwrap();
-        assert_eq!(rejected.len(), 4);
+        assert_eq!(rejected.len(), 8);
         for (h, n) in &rejected {
             assert_eq!(m2(n), *h, "{n}");
         }
@@ -1058,7 +1169,7 @@ mod tests {
     use std::collections::HashMap;
 
     fn template(model: u32, faction: &str, name: &str) -> KitTemplate {
-        KitTemplate { key: 0, name: Some(name.into()), model, profile: 0, faction: Some(m2(faction)) }
+        KitTemplate { name: Some(name.into()), model, faction: Some(m2(faction)), ..Default::default() }
     }
 
     /// Retail pairs, from `kit_templates --factions`: the oc executive kit is worn by OC executives
