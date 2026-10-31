@@ -591,7 +591,8 @@ impl PlacedCatalog {
         let ents = placed_entities(block)?;
         for e in &ents {
             let own_hibernation = own_hib.get(&e.key).copied();
-            let model = own_model.get(&e.key).or_else(|| templates.models.get(&e.parent)).copied();
+            // A `Model` of 0 is no model: the ModelName activation requests nothing for it (`0x669633`).
+            let model = own_model.get(&e.key).or_else(|| templates.models.get(&e.parent)).copied().filter(|&m| m != 0);
             let light = own_light.get(&e.key).or_else(|| templates.lights.get(&e.parent)).copied();
             let terrain = terrain_mesh.get(&e.key).copied();
             let tiny = own_tiny.contains(&e.key) || templates.tiny_geometry.contains(&e.parent);
@@ -625,7 +626,7 @@ impl PlacedCatalog {
         if templates.terrain.contains(&template) {
             return Err(format!("spawn of template 0x{template:08X}: it carries a TerrainObject or LowResTerrainObject, whose spawn is not modelled"));
         }
-        let model = templates.models.get(&template).copied();
+        let model = templates.models.get(&template).copied().filter(|&m| m != 0);
         let light = templates.lights.get(&template).map(|&l| (l, templates.light_scales.get(&template).copied().unwrap_or_default()));
         let o = PlacedObject {
             key,
