@@ -3410,6 +3410,33 @@ mod tests {
             assert!(d2 > 0.0, "the pads report their authored world position, not the origin");
         }
 
+        /// `mrxbunkerbuster.lua:31` (`:21` in the decompile) hands `Pg.GetGuidByName` its inherited
+        /// `uDeliveryVehicle`, the Mig27 template's key, where every sibling hands it the name. Retail
+        /// probes the name index with that key (`0x5D3220`) and misses, so the instance's own field stays
+        /// nil and every later read falls through its metatable to the handle it passed in.
+        #[test]
+        fn bunker_buster_create_keeps_the_inherited_delivery_vehicle() {
+            let host = Rc::new(RefCell::new(GameScriptHost::new("vz")));
+            let (_sw, _) = retail_world(&host);
+            let sh = resident_script_host(host.clone())
+                .expect("the resident script host starts over the vendored Lua corpus");
+
+            let key = host.borrow_mut().guid_by_name("Support Vehicle (Mig27)");
+            assert_eq!(key, 0x8000_9AD2, "the Mig27 template's key");
+
+            sh.exec(r#"MrxBunkerBuster = import("MrxBunkerBuster")"#, "@bunker")
+                .expect("MrxBunkerBuster loads");
+            let (own_is_nil, inherited): (bool, bool) = sh
+                .eval(
+                    "local o = MrxBunkerBuster:Create()\n\
+                     return rawget(o, 'uDeliveryVehicle') == nil,\n\
+                     o.uDeliveryVehicle == Pg.GetGuidByName('Support Vehicle (Mig27)')",
+                )
+                .unwrap();
+            assert!(own_is_nil, "the handle is not a name hash, so the probe pushes nil");
+            assert!(inherited, "the instance reads the Mig27 through its metatable");
+        }
+
         /// The boot flow against the retail world: every layer the scripts request (`vz_base` through
         /// `LevelBootstrap`, the static list, the opening contract's dynamic layers) is loaded from the
         /// archive, and the world around the hero activates.
@@ -3690,18 +3717,28 @@ mod tests {
             assert!(sh.eval::<bool>("return _woke == true").unwrap(), "the awake boat fires the gate");
         }
 
-        /// The retail worldentity templates, and the first named template (by key) whose
-        /// `HibernationControl` Flags bit is `flags`.
-        fn named_template_with_hc_flags(flags: bool) -> (u32, String) {
+        /// The first named template (by key) whose `HibernationControl` Flags bit is `flags` and whose
+        /// `Model`, with the archive that would serve it, passes `model`.
+        fn named_template_with_hc_flags(
+            flags: bool,
+            model: impl Fn(&crate::wad::Wad, Option<u32>) -> bool,
+        ) -> (u32, String) {
             let path = crate::worldutil::schema_wire_tests::retail::vz_wad_path();
             let mut assets = crate::asset::AssetSource::discover(&path, &[]).unwrap_or_else(|e| panic!("{e}"));
             let t = crate::worldutil::TemplateRecords::load(&mut assets).unwrap_or_else(|e| panic!("{e}"));
+            let w = crate::wad::open(&path).unwrap_or_else(|e| panic!("{e}"));
             t.names
                 .iter()
                 .filter(|(k, _)| t.hibernation.get(k).is_some_and(|h| h.flags == flags))
+                .filter(|(k, _)| model(&w, t.models.get(k).copied()))
                 .min_by_key(|(k, _)| *k)
                 .cloned()
-                .unwrap_or_else(|| panic!("no named template with HibernationControl Flags = {flags}"))
+                .unwrap_or_else(|| panic!("no named template with HibernationControl Flags = {flags} and that model"))
+        }
+
+        /// A `Model` the archive carries.
+        fn model_ships(w: &crate::wad::Wad, model: Option<u32>) -> bool {
+            model.is_some_and(|m| crate::wad::has_model(w, m))
         }
 
         /// `Pg.Spawn` registers the entity inside the call (`hibernation_grid.md` §6 "Runtime spawns"):
@@ -3716,8 +3753,8 @@ mod tests {
             let at = [100.0f32, 0.0, 100.0];
             sw.borrow_mut().step_headless(at, &|_| false).unwrap_or_else(|e| panic!("{e}"));
             let sh = resident_script_host(host.clone()).expect("the resident script host starts");
-            let (plain, plain_name) = named_template_with_hc_flags(false);
-            let (flagged, flagged_name) = named_template_with_hc_flags(true);
+            let (plain, plain_name) = named_template_with_hc_flags(false, model_ships);
+            let (flagged, flagged_name) = named_template_with_hc_flags(true, |_, _| true);
             println!("[spawn] HC Flags clear: 0x{plain:08X} {plain_name:?}; set: 0x{flagged:08X} {flagged_name:?}");
             let lua_name = |n: &str| format!("{n:?}");
 
@@ -3756,6 +3793,43 @@ mod tests {
                 sw.borrow_mut().step_headless(at, &|_| false).unwrap_or_else(|e| panic!("{e}"));
             }
             assert!(sh.eval::<bool>("return Object.IsAwake(__far)").unwrap(), "re-celled next to the viewer, it activates");
+        }
+
+        /// A template whose `Model` no archive carries (`box`, whose `0xEFCBBD98` has no ASET row and no
+        /// chunk) keeps its entity asleep in range: the model request fails, so the activation that began
+        /// inside `Pg.Spawn` is cancelled and the row stays, its guid still returned.
+        #[test]
+        fn pg_spawn_of_a_model_no_archive_carries_stays_asleep() {
+            let host = Rc::new(RefCell::new(GameScriptHost::new("vz")));
+            let (sw, _) = retail_world(&host);
+            let at = [100.0f32, 0.0, 100.0];
+            sw.borrow_mut().step_headless(at, &|_| false).unwrap_or_else(|e| panic!("{e}"));
+            let sh = resident_script_host(host.clone()).expect("the resident script host starts");
+            let (template, name) = named_template_with_hc_flags(false, |w, m| m.is_some_and(|m| m != 0 && !crate::wad::has_model(w, m)));
+            let guid: mercs2_script::Guid = sh
+                .eval(&format!("return Pg.Spawn({name:?}, {}, {}, {})", at[0], at[1], at[2]))
+                .unwrap();
+            let key = u32::try_from(guid.raw()).unwrap();
+            let row = host.borrow().guids().borrow().scene(key).copied().expect("a SceneObject row");
+            assert_eq!((row.template, row.state), (template, 0), "{name}: its row, asleep on return");
+        }
+
+        /// A `Model` of 0 is no model, not a missing one: the ModelName activation requests nothing for
+        /// it (`0x669633`), so the entity activates in range with nothing to draw.
+        #[test]
+        fn pg_spawn_of_a_model_of_zero_activates() {
+            let host = Rc::new(RefCell::new(GameScriptHost::new("vz")));
+            let (sw, _) = retail_world(&host);
+            let at = [100.0f32, 0.0, 100.0];
+            sw.borrow_mut().step_headless(at, &|_| false).unwrap_or_else(|e| panic!("{e}"));
+            let sh = resident_script_host(host.clone()).expect("the resident script host starts");
+            let (template, name) = named_template_with_hc_flags(false, |_, m| m == Some(0));
+            let guid: mercs2_script::Guid = sh
+                .eval(&format!("return Pg.Spawn({name:?}, {}, {}, {})", at[0], at[1], at[2]))
+                .unwrap();
+            let key = u32::try_from(guid.raw()).unwrap();
+            let row = host.borrow().guids().borrow().scene(key).copied().expect("a SceneObject row");
+            assert_eq!((row.template, row.state), (template, 2), "{name}: awake on return");
         }
 
         /// GAP-2 regression, second half: `CreatePlayerCharacter → AttachToCharacter` possesses the
