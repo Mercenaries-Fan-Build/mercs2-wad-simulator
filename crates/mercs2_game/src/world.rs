@@ -1226,7 +1226,7 @@ impl mercs2_engine::app::Game for Mercs2Game {
             fog,
             sun,
             atmosphere: None, // TPS boot is fog-only (no explicit atmosphere), preserved
-            loading_plate_wad: Some(self.wadpath.clone()),
+            vz_wad: self.wadpath.clone(),
             load_stages: LOAD_STAGES,
             bindings,
         }
