@@ -64,6 +64,9 @@ pub const TYPE_HASH_FX_DICTIONARY: u32 = 0xFA46D8A8;
 /// Scaleform GFx movie — see [`TYPE_ID_CFX_PACK`].
 pub const TYPE_HASH_CFX_PACK: u32 = 0xFE0E8320;
 pub const TYPE_HASH_WATERMAP: u32 = 0x4D7D30C4;
+/// FaceFX actor and anim set — see [`crate::facefx`].
+pub const TYPE_HASH_FACEFX_ACTOR: u32 = 0x1CF649BB;
+pub const TYPE_HASH_FACEFX_ANIMSET: u32 = 0x665EF13E;
 
 /// Every `type_hash → type_id` pair, in `type_id` order — a copy of the WAD's own type table (the
 /// `type_hash` u32 array at file offset `0x48`, 36 entries in retail, identical across the shipped
