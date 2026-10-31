@@ -6,7 +6,7 @@ name, and every entry satisfies `m2(name) == hash`.
 | File | What it is | Made by |
 |---|---|---|
 | `production_names.json` | The **official, committed source of node/asset name lookups**: a curated, hash-verified map that `mercs2_workshop --pack-data` builds the redistributable `names.bin` from, and that `qm` (M0130), `mercs2_probe --bin skin_census` and the release workflow read. Brute-force `_gen_` handles, hex literals and collision debris are excluded. Do NOT hand-edit — regenerate it | `tools/build_production_names.py` |
-| `aset_discovered_names.json` | Names cracked from the WAD itself (texture-base → model convention, audio names, character kits …). The home for newly cracked names: append, matching its `indent=2` | `asset_gap_probe --emit`, the crackers, by hand after a hash check |
+| `aset_discovered_names.json` | Names cracked from the WAD itself (texture-base → model convention, audio names, character kits …). The home for newly cracked names: append, matching its `indent=2` | `asset_gap_probe --emit`, the crackers, by hand after a hash check, the model preview's Animation card (**Accept**, which also writes the notes repo's `docs/data/` copy and refuses when the two differ) |
 | `aset_expanded_names.json` | Slot-grammar expansion of seed names | `wad_simulator --bin name_expand` |
 | `aset_external_names.json` | Block-path stems mined from the console WADs | `wad_simulator --bin aset_external_mine` |
 | `aset_roster_names.json` | Model roots from the vehicle/weapon roster × the `<faction>_veh_<class>_<name>` grammar | `aset_external_mine --roster` |
@@ -24,10 +24,16 @@ parent repo's `tools/rainbow_table.json`.
 ## Regenerate `production_names.json` (after new names land)
 1. Fold verified names into `aset_discovered_names.json` here (and `tools/rainbow_table.json` in the
    parent repo).
-2. `mercs2_workshop --pack-data <dir>` once WITHOUT `production_names.json` present. It then builds
-   `names.bin` from the raw corpora: the fragments in this folder, and the `rainbow_table`,
-   `jul08_strings` and `notes_docs_dir` keys of `.mercs2-local.toml` (trimmed to the hashes the WAD
-   references when a WAD opens); then
-3. `python tools/build_production_names.py` to re-export `production_names.json` from that `names.bin`.
+2. Rename `production_names.json` to `production_names.base.json`, then run
+   `mercs2_workshop --pack-data target/release/workshop_data`. With no `production_names.json` present
+   it builds `names.bin` from the raw corpora: the fragments in this folder, and the `rainbow_table`,
+   `jul08_strings` and `notes_docs_dir` keys of `.mercs2-local.toml` (trimmed to the hashes the open
+   archives reference: assets, model nodes, clips and their bones, and every animation-table value);
+   then
+3. `python tools/build_production_names.py`. It writes `production_names.json` as the base table plus
+   the verified, non-junk names of that `names.bin` the base lacks, drops every `rejected_names.json`
+   pair, and deletes `production_names.base.json`. The base is kept whole because the pack reaches only
+   the archives at hand: a rebuild from `names.bin` alone loses every name of an archive it did not
+   open.
 4. Commit `crates/mercs2_workshop/data/production_names.json`. Subsequent `--pack-data` runs build
    straight from it.
