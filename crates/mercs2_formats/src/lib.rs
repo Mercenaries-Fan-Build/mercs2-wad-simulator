@@ -151,6 +151,7 @@ pub mod patch_wad;
 pub mod phy2_build;
 pub mod phy2_container;
 pub mod phy2_moppswap;
+pub mod physical_link;
 pub mod placement;
 pub mod placement_build;
 pub mod prof_samples;
