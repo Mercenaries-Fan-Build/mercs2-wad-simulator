@@ -14,6 +14,7 @@
 pub mod aset;
 pub mod audio;
 pub mod convert;
+pub mod ecs;
 pub mod havok;
 pub mod lua;
 pub mod ps3_native;
