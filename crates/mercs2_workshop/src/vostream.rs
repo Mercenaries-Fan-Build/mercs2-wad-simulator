@@ -24,6 +24,8 @@ const REC_SIZE: usize = 36;
 struct Rec {
     offset: u64,
     size: u32,
+    /// `+0x10`: decoded PCM16 bytes. A clip's last block runs past them.
+    decoded: u32,
     rate: u32,
     channels: u8,
     /// The wavebank format byte at `+6`: `2` (bytes-per-sample) / `CODEC_PCM` = embedded PCM16. VO in
@@ -32,6 +34,7 @@ struct Rec {
 }
 
 /// Decoded PCM for one clip, ready to hand to an output stream.
+#[derive(Debug)]
 pub struct Pcm {
     /// Interleaved int16 samples.
     pub samples: Vec<i16>,
@@ -106,11 +109,12 @@ impl VoStream {
         // the bytes as PCM produces static at ~1/3.6 the true length. Decode with the game's own IMA
         // decoders, the ones `vo_stream_extract` proved against the retail stream.
         let channels = rec.channels.max(1);
-        let samples = if channels >= 2 {
+        let mut samples = if channels >= 2 {
             mercs2_audio::wave::decode_ima_stereo(&buf)
         } else {
             mercs2_audio::wave::decode_ima_mono(&buf)
         };
+        samples.truncate(rec.decoded as usize / 2);
         let rate = if rec.rate == 0 { 44100 } else { rec.rate };
         Ok(Pcm { samples, rate, channels })
     }
@@ -138,6 +142,7 @@ fn parse_records(body: &[u8]) -> Result<Vec<Rec>, String> {
             codec: body[r + 6],
             rate: rd(8),
             size: rd(12),
+            decoded: rd(16),
             offset: rd(32) as u64,
         });
     }
