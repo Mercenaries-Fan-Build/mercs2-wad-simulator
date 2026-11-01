@@ -422,12 +422,21 @@ pub(super) fn convert_container_ps3(
         }
         let be_body = &container[abs..abs + sz];
         let group_tag = parent_group[di];
+        let terrain_materials = if type_hash == crate::types::TYPE_HASH_TERRAIN_MESH {
+            let info = descs.iter().find(|d| d.tag == ChunkTag::InfoUpper).ok_or("ps3_native: a terrainmesh has no INFO")?;
+            let start = data_start + info.row_u0 as usize;
+            let body = container.get(start..start + info.body_size as usize).ok_or("ps3_native: INFO out of range")?;
+            Some(super::convert::terrain_material_count(body)?)
+        } else {
+            None
+        };
         let pc_body = super::convert::ps3_native_translate_body(
             be_body,
             descs[di].tag,
             descs[di].tag_le,
             group_tag,
             type_hash,
+            terrain_materials,
         )?;
         new_body.insert(di, pc_body);
     }
