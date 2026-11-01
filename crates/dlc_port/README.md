@@ -1,6 +1,8 @@
 # dlc_port
 
-All-Rust porter that turns an Xbox 360 Mercenaries 2 DLC package (RAR or STFS/DOH) into a PC `vz-patch.wad`.
+All-Rust porter that turns an Xbox 360 Mercenaries 2 DLC package (RAR or STFS/DOH) into a PC patch WAD
+and its streams. `shipments/blow-it-up-again/` builds on its output: point `--output` at that
+Shipment's `src/level/dlc01.wad`, then `qm build` places it.
 
 ## What it is
 
@@ -12,12 +14,17 @@ The pipeline, in the order `src/main.rs` runs it:
 
 1. **Load DOH bytes** — either `extract_stfs_from_rar` (RAR → STFS → `DLC01.doh`, unpacked by the
    `--unrar` or `--bsdtar` program named on the command line) or
-   `load_stfs_or_doh` (an STFS container, or a raw `.doh` passed straight through).
+   `load_stfs_or_doh_with_streams` (an STFS container and its `.pws` files, or a raw `.doh` passed
+   straight through, which brings none).
 2. **Parse the BE FFCS header** — `parse_be_ffcs` yields the chunk rows; `INDX`, `ASET`, `PTHS`
    and `CSUM` are pulled out by tag. `--list-blocks` stops here and prints page count, packed
    field and path per block.
 3. **Per-block convert** — `TextureTable::from_doh` first reads every block, because a texture's
-   `INFO` sits in one block and its rungs in others. Then each block is either `segs`-decompressed
+   `INFO` sits in one block and its rungs in others. `StreamTable::read` then re-encodes each `.pws`:
+   XMA2 or MP3 decoded by ffmpeg, IMA ADPCM written the way a retail `.pws` lays it out, and the
+   bank's records rewritten to match, so a streamed bank needs its file. A bank finds its file by
+   hash: `vo_stream_dlctest.english.pws` is the entry `vo_stream_dlctest.english`. A streamed bank
+   with no file, or a file no bank claims, fails the run. Then each block is either `segs`-decompressed
    (`decompress_be_sges`) or passed through when it is a bare `XFCU` entry table (trailing zeros
    trimmed, length rounded up to 4). The decompressed bytes go through
    `ucfx_byteswap::convert::convert_block` (BE→LE), are
@@ -34,6 +41,7 @@ The pipeline, in the order `src/main.rs` runs it:
 6. **Synthesise missing ASET rows** — any `SCRIPT_TYPE_HASH` or `STRINGDB_TYPE_HASH` entry in a
    block's table that has no ASET row gets one (`u1 = 0xFFFFFFFF`, `u2 = 0xFFFF`).
 7. **Assemble** — `build_patch_wad_multi` with the source `CSUM` value/meta and `FFCS_CERT_BLOB`.
+   Each stream is written to `Audios/<bank entry>.pws` beside the output, where the game keeps them.
 
 ## Where it comes from
 
