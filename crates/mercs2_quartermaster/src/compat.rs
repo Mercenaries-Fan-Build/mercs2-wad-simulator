@@ -906,6 +906,18 @@ fn item_files(
                 dest: None,
                 relative: format!("data/{name}.wad"),
             }),
+            Contribution::AddLevel { name, .. } => {
+                for relative in [crate::level::patch_relative(name), crate::level::base_relative(name)] {
+                    placed.push(PlacedFileEntry {
+                        contribution,
+                        file_name: relative.rsplit('/').next().unwrap_or(&relative).to_string(),
+                        source: None,
+                        destination: PlacedDestination::DataWad,
+                        dest: None,
+                        relative,
+                    });
+                }
+            }
             _ => {}
         }
     }
