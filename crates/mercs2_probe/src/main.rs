@@ -48,6 +48,7 @@ mod dump_spawnlists;
 mod ess_live;
 mod ess_menu_check;
 mod facefx;
+mod layer;
 mod gfx_golden;
 mod prof_samples;
 mod we_template;
@@ -80,6 +81,7 @@ fn usage() -> ! {
          \x20 anim-table <name|0xH> [--handle 0xH] [--list <column>]   (an animationtable's rows verbatim)\n\
          \x20 clip-names <review.tsv>       (name AnimationLookup clips from their rows; a review file, merges nothing)\n\
          \x20 facefx <name|0xH> | --all     (a FaceFX actor / anim set by name; --all reads every one and prints the census)\n\
+         \x20 layer <name|0xH> | --all      (a placement layer's entities with their models and classes; --all prints the census)\n\
          \x20 we-template <name|0xKEY>... | --class <Class> | --uses <0xU32>   (worldentity templates / records)\n\
          \x20 clip-pose --model H --clip H --bones 0xA,0xB.. --ref 0xR [--frames N]   (bone positions over a clip)\n\
          \x20 dump-read <capture-dir> <0xVA> [len]          (retail memory from a v1.0 x32dbg capture, no WAD)\n\
@@ -867,6 +869,18 @@ fn main() {
                 });
                 let hash = parse_hash(&name).unwrap_or_else(|| mercs2_formats::hash::pandemic_hash_m2(&name));
                 run(facefx::facefx(&wadpath, hash));
+            }
+        }
+        "layer" => {
+            if args.iter().any(|a| a == "--all") {
+                run(layer::layer_all(&wadpath));
+            } else {
+                let name = first_positional(&args).unwrap_or_else(|| {
+                    eprintln!("layer: usage: mercs2_probe layer <name|0xH> | --all");
+                    std::process::exit(2);
+                });
+                let hash = parse_hash(&name).unwrap_or_else(|| mercs2_formats::hash::pandemic_hash_m2(&name));
+                run(layer::layer(&wadpath, hash));
             }
         }
         "clip-names" => {
