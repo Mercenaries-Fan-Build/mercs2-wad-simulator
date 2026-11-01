@@ -753,6 +753,11 @@ pub fn claims(manifest: &Manifest) -> Vec<ClaimRecord> {
             Contribution::AddLanguage { name, .. } => {
                 push(Access::Write, Claim::asset(name), Intent::Additive);
             }
+            // A NEW level: its master script's hash, in two WADs of its own. Two Shipments adding
+            // one level collide, the same shape as a language.
+            Contribution::AddLevel { name, .. } => {
+                push(Access::Write, Claim::asset(name), Intent::Additive);
+            }
             Contribution::NativeHook {
                 plugin,
                 symbol,
