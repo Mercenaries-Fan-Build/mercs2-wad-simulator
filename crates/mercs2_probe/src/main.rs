@@ -81,7 +81,7 @@ fn usage() -> ! {
          \x20 anim-table <name|0xH> [--handle 0xH] [--list <column>]   (an animationtable's rows verbatim)\n\
          \x20 clip-names <review.tsv>       (name AnimationLookup clips from their rows; a review file, merges nothing)\n\
          \x20 facefx <name|0xH> | --all     (a FaceFX actor / anim set by name; --all reads every one and prints the census)\n\
-         \x20 layer <name|0xH> | --all | --frames <capture>  (a placement layer's entities with their models and classes; --all prints the census; --frames tests Transforms against a capture's live positions)\n\
+         \x20 layer <name|0xH> | --all | --frames <capture> | --catalog <out.tsv> [--also <archives>]  (a placement layer's entities with their models and classes; --all prints the census; --frames tests Transforms against a capture's live positions; --catalog writes a row per layer)\n\
          \x20 we-template <name|0xKEY>... | --class <Class> | --uses <0xU32>   (worldentity templates / records)\n\
          \x20 clip-pose --model H --clip H --bones 0xA,0xB.. --ref 0xR [--frames N]   (bone positions over a clip)\n\
          \x20 dump-read <capture-dir> <0xVA> [len]          (retail memory from a v1.0 x32dbg capture, no WAD)\n\
@@ -872,7 +872,14 @@ fn main() {
             }
         }
         "layer" => {
-            if args.iter().any(|a| a == "--frames") {
+            if args.iter().any(|a| a == "--catalog") {
+                let out = flag_val(&args, "--catalog").unwrap_or_else(|| {
+                    eprintln!("layer: usage: mercs2_probe layer --catalog <out.tsv> [--also <archive,archive>]");
+                    std::process::exit(2);
+                });
+                let also: Vec<String> = flag_val(&args, "--also").map_or(Vec::new(), |v| v.split(',').map(str::to_string).collect());
+                run(layer::layer_catalog(&wadpath, std::path::Path::new(&out), &also));
+            } else if args.iter().any(|a| a == "--frames") {
                 let capture = flag_val(&args, "--frames").unwrap_or_else(|| {
                     eprintln!("layer: usage: mercs2_probe layer --frames <capture>");
                     std::process::exit(2);
