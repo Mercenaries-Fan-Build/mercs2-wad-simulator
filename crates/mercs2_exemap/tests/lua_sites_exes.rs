@@ -1,4 +1,4 @@
-//! The Lua host's sites, the shader sites and the profiler sites resolve exactly once, at the addresses read from the
+//! The Lua host's sites, the shader sites, the profiler sites and pmc_bb's sites resolve exactly once, at the addresses read from the
 //! disassembly, in the reference executables: the v1.0-code builds `v10-securom-unwrap`,
 //! `v10-drmfree-laa` and `dump-v10-pmcbb-unpacked` (one layout) and the v1.1 dump
 //! `dump-v11-securom-unpacked` (code at other addresses).
@@ -94,6 +94,36 @@ fn shader_sites_resolve_in_every_reference_build() {
             let want = if v11 { V11_VTABLES[f] } else { family(f as i32).unwrap().vtable };
             assert_eq!(s.vtable[f], want, "{id} family {f}");
         }
+    }
+}
+
+/// `(site, v1.0 value, v1.1 value)`, read from the instruction bytes of both dumps.
+const PMC_EXPECTED: [(mercs2_formats::pmc_sites::Site, u32, u32); 8] = [
+    (mercs2_formats::pmc_sites::Site::EntityVtable, 0xbdb410, 0xbdb348),
+    (mercs2_formats::pmc_sites::Site::PrmgKeys, 0x197de48, 0x197ce48),
+    (mercs2_formats::pmc_sites::Site::PrmgHandles, 0x197da48, 0x197ca48),
+    (mercs2_formats::pmc_sites::Site::SpawnWalk, 0x4ab0d0, 0x4ab0d0),
+    (mercs2_formats::pmc_sites::Site::PrmgDrawA, 0x47a6c0, 0x47a7a0),
+    (mercs2_formats::pmc_sites::Site::PrmgDrawB, 0x47aa20, 0x47ab00),
+    (mercs2_formats::pmc_sites::Site::TextureFree, 0x116a7cc, 0x11697cc),
+    (mercs2_formats::pmc_sites::Site::TextureInUse, 0x1174fe8, 0x1173fe8),
+];
+
+#[test]
+fn pmc_sites_resolve_in_every_reference_build() {
+    use mercs2_formats::pmc_sites::resolve as resolve_pmc;
+    for (id, v11, bytes) in images() {
+        let s = resolve_pmc(&Image::from_file(&bytes).unwrap_or_else(|e| panic!("{id}: {e}"))).unwrap_or_else(|e| panic!("{id}: {e}"));
+        for (site, va, va11) in PMC_EXPECTED {
+            assert_eq!(s.value(site), if v11 { va11 } else { va }, "{id} {}", site.name());
+        }
+        // The operands of the IB and VB lookups, which no signature can tell apart.
+        let lists = s.pool_lists();
+        assert_eq!(
+            (lists.ib_in_use, lists.vb_in_use, lists.ib_free, lists.vb_free),
+            if v11 { (0x1173fec, 0x1173ff0, 0x1173ff4, 0x1173ff8) } else { (0x1174fec, 0x1174ff0, 0x1174ff4, 0x1174ff8) },
+            "{id}"
+        );
     }
 }
 
