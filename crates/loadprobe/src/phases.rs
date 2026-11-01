@@ -93,7 +93,7 @@ pub static INIT_NOISE: &[&str] = &["blackbox", "compat", "lualog"];
 pub static KNOWN_SOURCES: &[&str] = &[
     "lua", "world", "pool", "blackbox", "compat", "lualog",
     "crash", "mtrl", "cc", "stall", "seg", "prmg", "prmg-bw", "prmg-key", "prmg-key2", "heap",
-    "raw",
+    "raw", "vmem",
     "mod-crash", "trace-base", "trace-fault",
 ];
 
@@ -121,11 +121,19 @@ pub static KNOWN_EIPS: &[KnownEip] = &[
     KnownEip { eip: 0x0084DD5B, label: "MTRL texture-handle overrun", teardown: false },
     KnownEip { eip: 0x004CC064, label: "render/texture-component pool NULL-fallback", teardown: false },
     KnownEip { eip: 0x007E045E, label: "ECS texture-component type-confusion", teardown: false },
-    // 0x0085C8D0: texture-bind / null-surface fault in the wardrobe-preview (menu-open) path.
-    // Neighbor of the 0x750BD9 null-DXT1 site and the 0x84DD5B tex-handle-overrun; reached via
-    // model-instantiation frames 0x4A483B/0x479775/0x4796A9/0x471A83 → 0x84DDCB. AV READ target=0
-    // with EAX = a texture handle/hash being looked up and not found. NOT a teardown artifact.
-    KnownEip { eip: 0x0085C8D0, label: "texture-bind/null-surface fault on wardrobe preview (menu-open)", teardown: false },
+    // The D3D pool's three trackers, one per resource kind. Each starts by dereferencing the object a
+    // create wrapper hands it, and no wrapper tests the create's HRESULT, so a failed create faults here
+    // with AV READ target=0 and, when it is the create's own failure, EAX=8007000E (E_OUTOFMEMORY).
+    // BUG-013 in docs/fixpack/bug_register.md; layouts in docs/reverse_engineer/d3d_resource_pool.md.
+    // Both E_OUTOFMEMORY crashes on record came in mid-game, after 18 and 29 minutes. 0x0085C8D0 was also
+    // seen earlier on the wardrobe preview (menu-open), reached via model-instantiation frames
+    // 0x4A483B/0x479775/0x4796A9/0x471A83 → 0x84DDCB. NOT teardown artifacts.
+    KnownEip { eip: 0x0085C779, label: "D3D pool: a failed CreateTexture reached the tracker unchecked, v1.0 code (BUG-013; EAX=8007000E = out of memory)", teardown: false },
+    KnownEip { eip: 0x0085C830, label: "D3D pool: a failed CreateIndexBuffer reached the tracker unchecked, v1.0 code (BUG-013; EAX=8007000E = out of memory)", teardown: false },
+    KnownEip { eip: 0x0085C8D0, label: "D3D pool: a failed CreateVertexBuffer reached the tracker unchecked, v1.0 code (BUG-013; EAX=8007000E = out of memory)", teardown: false },
+    KnownEip { eip: 0x0085C999, label: "D3D pool: a failed CreateTexture reached the tracker unchecked, v1.1 code (BUG-013; EAX=8007000E = out of memory)", teardown: false },
+    KnownEip { eip: 0x0085CA50, label: "D3D pool: a failed CreateIndexBuffer reached the tracker unchecked, v1.1 code (BUG-013; EAX=8007000E = out of memory)", teardown: false },
+    KnownEip { eip: 0x0085CAF0, label: "D3D pool: a failed CreateVertexBuffer reached the tracker unchecked, v1.1 code (BUG-013; EAX=8007000E = out of memory)", teardown: false },
     // 0x00478E43: mesh-geometry handler (cluster of 0x00478F2A/0x004719C0). AV READ with ECX/ESI =
     // "CSUM" (0x4D555343) — the per-piece geometry read of a DESTRUCTIBLE model runs off the end of
     // the replaced geometry into the container's CSUM trailer. Seen when a custom mesh is injected
