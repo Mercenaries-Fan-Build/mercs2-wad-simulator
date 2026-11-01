@@ -117,9 +117,7 @@ impl Kind {
             Kind::Model => Preview::Render,
             Kind::Texture => Preview::Plate,
             Kind::Animation => Preview::View("plays on the hero, the model you choose for clips"),
-            Kind::Effect => Preview::None(
-                "the effect format is decoded but its parameters are still hash-only",
-            ),
+            Kind::Effect => Preview::View("plays on the pedestal, in the game's own particle sim"),
             Kind::Audio => Preview::None("playback is not wired into the Library yet"),
             Kind::UiGfx => Preview::None("no Scaleform renderer in the workshop"),
             Kind::FaceFx => Preview::View("an actor shows its face poses; a set plays on the character it belongs to"),
@@ -149,6 +147,8 @@ pub struct AssetRow {
     /// A template row's `FactionMarker` (`mercs2_formats::mixr::KitTemplate::faction`): the faction
     /// is the template's, not its kit's. `None` for an asset row.
     pub faction: Option<u32>,
+    /// An effect row with no name: the `Name`s of the templates that start it.
+    pub started_by: Option<String>,
 }
 
 impl AssetRow {
@@ -158,9 +158,10 @@ impl AssetRow {
         if let Some(t) = &self.template {
             return t.clone();
         }
-        match &self.name {
-            Some(n) => n.clone(),
-            None => format!("0x{:08X}", self.hash),
+        match (&self.name, &self.started_by) {
+            (Some(n), _) => n.clone(),
+            (None, Some(s)) => format!("started by {s}"),
+            (None, None) => format!("0x{:08X}", self.hash),
         }
     }
 
@@ -398,6 +399,15 @@ pub fn classify_vehicle_token(cls: &str) -> &'static str {
     }
 }
 
+/// The names of an effect's templates for its row: the first, then how many more.
+fn started_by_label(starters: &[crate::vfxview::StartedBy]) -> Option<String> {
+    let first = &starters.first()?.template;
+    Some(match starters.len() {
+        1 => first.clone(),
+        n => format!("{first} +{}", n - 1),
+    })
+}
+
 #[derive(Clone)]
 pub struct AssetIndex {
     /// One row list per [`Kind`], parallel to `Kind::ALL`. A `Vec` of lists rather than a field
@@ -418,6 +428,8 @@ pub struct AssetIndex {
     pub helicopter_keys: std::collections::BTreeSet<u32>,
     /// Each `FactionMarker`'s group label ([`faction_labels`]), kept current with the names.
     pub faction_labels: HashMap<u32, String>,
+    /// The templates that start each effect, by the effect's hash.
+    pub effect_starters: HashMap<u32, Vec<crate::vfxview::StartedBy>>,
 }
 
 /// Each `FactionMarker` value, labelled with the model-name prefix it pairs with most often across
@@ -499,7 +511,7 @@ impl AssetIndex {
                 } else {
                     0
                 };
-                let fresh = AssetRow { hash, type_id: ty, block, src, others: Vec::new(), name: None, template: None, faction: None };
+                let fresh = AssetRow { hash, type_id: ty, block, src, others: Vec::new(), name: None, template: None, faction: None, started_by: None };
                 match buckets[i].get_mut(&hash) {
                     None => {
                         buckets[i].insert(hash, fresh);
@@ -527,6 +539,7 @@ impl AssetIndex {
             rotor_records: Vec::new(),
             helicopter_keys: std::collections::BTreeSet::new(),
             faction_labels: HashMap::new(),
+            effect_starters: HashMap::new(),
         };
         idx.apply_names(names);
         idx
@@ -543,6 +556,7 @@ impl AssetIndex {
         self.world_templates = world.to_vec();
         self.rotor_records = t.rotors.clone();
         self.helicopter_keys = t.helicopters.clone();
+        self.effect_starters = t.effect_starters.clone();
         let mut added = Vec::new();
         for t in templates {
             let (Some(name), Some(kit)) = (&t.name, self.rows[mi].iter().find(|r| r.hash == t.model && r.template.is_none()))
@@ -572,6 +586,7 @@ impl AssetIndex {
         for rows in self.rows.iter_mut() {
             for r in rows.iter_mut() {
                 r.name = self.names.get(&r.hash).cloned();
+                r.started_by = self.effect_starters.get(&r.hash).and_then(|s| started_by_label(s));
             }
             rows.sort_by(order);
         }
@@ -1088,8 +1103,24 @@ mod download_note_tests {
 mod tests {
     use super::AssetRow;
 
+    /// An effect row with no name reads as its templates, and a name wins.
+    #[test]
+    fn an_unnamed_effect_labels_by_the_templates_that_start_it() {
+        use super::started_by_label;
+        let by = |t: &str| crate::vfxview::StartedBy { template: t.to_string(), starter: Default::default(), duration_var: 0.0 };
+        assert_eq!(started_by_label(&[]), None);
+        assert_eq!(started_by_label(&[by("VZ C4 Explosion")]).as_deref(), Some("VZ C4 Explosion"));
+        assert_eq!(started_by_label(&[by("A"), by("B"), by("C")]).as_deref(), Some("A +2"));
+        let mut r = row(0x1234, None);
+        assert_eq!(r.label(), "0x00001234");
+        r.started_by = Some("VZ C4 Explosion".into());
+        assert_eq!(r.label(), "started by VZ C4 Explosion");
+        r.name = Some("global_explosion_c4".into());
+        assert_eq!(r.label(), "global_explosion_c4");
+    }
+
     fn row(hash: u32, template: Option<&str>) -> AssetRow {
-        AssetRow { hash, type_id: 0, block: 0, src: 0, others: Vec::new(), name: None, template: template.map(str::to_string), faction: None }
+        AssetRow { hash, type_id: 0, block: 0, src: 0, others: Vec::new(), name: None, template: template.map(str::to_string), faction: None, started_by: None }
     }
 
     #[test]
