@@ -45,34 +45,36 @@ From an Xbox 360 DLC RAR:
 
 ```
 cargo run -p dlc_port -- --x360-rar DLC01.rar --unrar /path/to/UnRAR.exe \
-  --java /path/to/java --unluac /path/to/unluac.jar --output vz-patch.wad
+  --java /path/to/java --unluac /path/to/unluac.jar --vz-wad /path/to/vz.wad --output vz-patch.wad
 ```
 
 From an STFS container or a raw `DLC01.doh`:
 
 ```
 cargo run -p dlc_port -- --x360-stfs DLC01.doh \
-  --java /path/to/java --unluac /path/to/unluac.jar --output vz-patch.wad
+  --java /path/to/java --unluac /path/to/unluac.jar --vz-wad /path/to/vz.wad --output vz-patch.wad
 ```
 
 Inspect the block table without converting anything:
 
 ```
 cargo run -p dlc_port -- --x360-stfs DLC01.doh \
-  --java /path/to/java --unluac /path/to/unluac.jar --list-blocks
+  --java /path/to/java --unluac /path/to/unluac.jar --vz-wad /path/to/vz.wad --list-blocks
 ```
 
 Convert a slice of the block range while iterating:
 
 ```
-cargo run -p dlc_port -- --x360-stfs DLC01.doh \
-  --java /path/to/java --unluac /path/to/unluac.jar --start-block 100 --max-blocks 20 -o test.wad
+cargo run -p dlc_port -- --x360-stfs DLC01.doh --java /path/to/java --unluac /path/to/unluac.jar \
+  --vz-wad /path/to/vz.wad --start-block 100 --max-blocks 20 -o test.wad
 ```
 
 Flags: `--x360-rar`, `--x360-stfs` (one is required), `--unrar PATH` / `--bsdtar PATH` (exactly
 one is required with `--x360-rar`), `--java PATH` and `--unluac PATH` (required: the java
-executable and unluac jar that convert Lua bytecode blocks), `-o/--output` (required unless
-`--list-blocks`), `--list-blocks`, `--max-blocks N`, `--start-block N`, `-v/--verbose`.
+executable and unluac jar that convert Lua bytecode blocks), `--vz-wad PATH` (required: the
+player's PC `vz.wad`, whose `schm` chunks lay out the DLC's compact ECS containers, see
+`mercs2_formats::be_to_le::ecs`), `-o/--output` (required unless `--list-blocks`),
+`--list-blocks`, `--max-blocks N`, `--start-block N`, `-v/--verbose`.
 
 ## Notes / gotchas
 
