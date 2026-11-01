@@ -2,6 +2,7 @@ use clap::Parser;
 use std::io::{self, Read, Write};
 use std::path::PathBuf;
 
+use ucfx_byteswap::ecs::ComponentSchemas;
 use ucfx_byteswap::{aset, convert, lua, report, validate};
 
 use report::SchemaCoverageReport;
@@ -74,6 +75,11 @@ struct Cli {
     /// unluac jar that round-trips Lua bytecode (`BINN`). Given together with --java.
     #[arg(long, value_name = "UNLUAC_JAR", requires = "java")]
     unluac: Option<PathBuf>,
+
+    /// PC vz.wad whose `schm` chunks lay out compact ECS containers. Converting a block that holds
+    /// one (every console `worldentity`) requires it; such a block fails to convert without it.
+    #[arg(long, value_name = "VZ_WAD")]
+    vz_wad: Option<PathBuf>,
 }
 
 /// Handle `--aset-recompute`: read the per-block protocol from `input`, run the
@@ -225,7 +231,15 @@ fn main() {
         }
     };
 
-    match convert::convert_block(&input_data, cli.dry_run, report.as_mut(), lua_tools.as_ref()) {
+    let schemas = match cli.vz_wad.as_deref().map(ComponentSchemas::from_vz_wad).transpose() {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("Error: {e}");
+            std::process::exit(1);
+        }
+    };
+
+    match convert::convert_block(&input_data, cli.dry_run, report.as_mut(), lua_tools.as_ref(), schemas.as_ref()) {
         Ok(output) => {
             if let Some(rpt) = &report {
                 rpt.print_report();
