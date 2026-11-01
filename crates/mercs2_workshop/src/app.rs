@@ -854,6 +854,7 @@ enum Act {
     FaceHold(Option<String>),
     /// Pause the FaceFX set's playing anim at this time (seconds).
     FaceTime(f32),
+    FxTime(f32),
     /// Select the entity of the open layer with this label (the `entity` capture key).
     LayerEntity(String),
     /// Frame the whole open layer.
@@ -1985,6 +1986,13 @@ pub fn run(opts: Options) {
     // The layer open in the viewport, and the world's templates it reads, built the first time one
     // opens.
     let mut layer_view: Option<crate::layerview::LayerView> = None;
+    // The VFX tab's open effect, and the atlas and `fxdict` every effect draws from: read on the first
+    // open, and decoded once for the card's thumbnails.
+    let mut vfx_view: Option<crate::vfxview::VfxView> = None;
+    let mut vfx_rects: HashMap<u32, mercs2_formats::fxdict::FxRect> = HashMap::new();
+    let mut vfx_atlas: Option<mercs2_formats::texture::TextureData> = None;
+    let mut vfx_atlas_tex: Option<egui::TextureHandle> = None;
+    let mut vfx_acts: Vec<crate::vfxview::VfxAct> = Vec::new();
     let mut layer_templates: Option<Result<crate::layerview::Templates, String>> = None;
     // A click on the viewport that did not drag: where it was pressed, and the click to pick with.
     let mut viewport_press: Option<(f64, f64)> = None;
@@ -2382,6 +2390,12 @@ pub fn run(opts: Options) {
                                 v.teardown(&mut scene, &mut world, &[]);
                             }
                             layer_templates = None;
+                            if let Some(v) = vfx_view.take() {
+                                v.close(&mut scene);
+                            }
+                            vfx_atlas = None;
+                            vfx_atlas_tex = None;
+                            vfx_rects.clear();
                             w = WadStack::empty();
                             index = AssetIndex::build(&[], &[], HashMap::new());
                             anim_sel = None;
@@ -3038,6 +3052,9 @@ pub fn run(opts: Options) {
                             }
                             if let Some(t) = st.face_time {
                                 actions.push(Act::FaceTime(t));
+                            }
+                            if let Some(t) = st.fx_time {
+                                actions.push(Act::FxTime(t));
                             }
                             if let Some(n) = &st.entity {
                                 actions.push(Act::LayerEntity(n.clone()));
@@ -4323,7 +4340,19 @@ pub fn run(opts: Options) {
                                       layer_acts.extend(crate::layerview::inspector(ui, v, &index));
                                   }
                               }
-                              if eff.inspect_like() && !is_missions_bench && !audio_tab && !text_tab && !layer_tab {
+                              // The VFX tab with an effect open.
+                              let vfx_tab = eff == Workbench::Inspect && kind == Kind::Effect && vfx_view.is_some();
+                              if vfx_tab {
+                                  if let Some(v) = &vfx_view {
+                                      if let (None, Some(a)) = (&vfx_atlas_tex, &vfx_atlas) {
+                                          let (tw, th, rgba) = crate::texpng::decode_bc(a);
+                                          let img = egui::ColorImage::from_rgba_unmultiplied([tw as usize, th as usize], &rgba);
+                                          vfx_atlas_tex = Some(ui.ctx().load_texture("vfx_atlas", img, egui::TextureOptions::LINEAR));
+                                      }
+                                      vfx_acts.extend(crate::vfxview::inspector(ui, v, &vfx_rects, vfx_atlas_tex.as_ref()));
+                                  }
+                              }
+                              if eff.inspect_like() && !is_missions_bench && !audio_tab && !text_tab && !layer_tab && !vfx_tab {
                                 match &mut preview {
                                     None => {
                                         ui.weak("No model loaded — pick one in the browser at left.");
@@ -5949,6 +5978,16 @@ pub fn run(opts: Options) {
                                     Workbench::Inspect if kind == Kind::Layer => {
                                         if ui.add_enabled(layer_view.is_some(), egui::Button::new("Frame layer")).clicked() {
                                             actions.push(Act::LayerFrame);
+                                        }
+                                    }
+                                    Workbench::Inspect if kind == Kind::Effect => {
+                                        if ui.add_enabled(vfx_view.is_some(), egui::Button::new("Restart")).clicked() {
+                                            vfx_acts.push(crate::vfxview::VfxAct::Restart);
+                                        }
+                                        ui.separator();
+                                        let paused = vfx_view.as_ref().is_some_and(|v| v.paused);
+                                        if ui.add_enabled(vfx_view.is_some(), egui::Button::new(if paused { "Play  Space" } else { "Pause  Space" })).clicked() {
+                                            vfx_acts.push(crate::vfxview::VfxAct::Pause);
                                         }
                                     }
                                     // A domain page shares Inspect's verbs — it is Inspect narrowed to
@@ -7635,6 +7674,49 @@ pub fn run(opts: Options) {
                                             Err(e) => status = format!("LAYER FAILED: {label}: {e}"),
                                         }
                                     }
+                                    // An effect: it plays on the pedestal, in the retail sim.
+                                    Kind::Effect if row.type_id == mercs2_formats::types::TYPE_ID_EFFECT => {
+                                        let (hash, label, src) = (row.hash, row.label(), row.src);
+                                        let opened = (|| -> Result<crate::vfxview::VfxView, String> {
+                                            if !scene.fx_has_atlas() {
+                                                let base = w.wads.first_mut().ok_or("no archive open")?;
+                                                let (atlas, rects) = mercs2_engine::game_world::load_fx_atlas(base)?;
+                                                scene.fx_set_atlas(&atlas, &rects)?;
+                                                vfx_rects = rects.into_iter().map(|r| (r.key, r)).collect();
+                                                vfx_atlas = Some(atlas);
+                                            }
+                                            let started_by = index.effect_starters.get(&hash).cloned().unwrap_or_default();
+                                            let source = w.source_mut(src).ok_or("the row's archive is not open")?;
+                                            let effect = mercs2_engine::game_world::load_effect(source, hash)?
+                                                .ok_or_else(|| format!("0x{hash:08X} is no effect of its archive"))?;
+                                            if let Some(old) = vfx_view.take() {
+                                                old.close(&mut scene);
+                                            }
+                                            crate::vfxview::VfxView::open(hash, label.clone(), effect, started_by, &vfx_rects, &mut scene)
+                                        })();
+                                        match opened {
+                                            Ok(v) => {
+                                                if let Some(old) = layer_view.take() {
+                                                    old.teardown(&mut scene, &mut world, &[]);
+                                                }
+                                                if let Some(p) = preview.take() {
+                                                    world.despawn(p.entity).ok();
+                                                    scene.forget_entity(p.entity);
+                                                    if donor_ref.map(|(h, _)| h) != Some(p.hash) {
+                                                        scene.unload_model(p.hash);
+                                                    }
+                                                }
+                                                face = None;
+                                                tex_view = None;
+                                                (cam_target, cam_dist) = v.framing();
+                                                status = format!("effect {label}: {} emitters, {} forces", v.effect.emitters.len(), v.effect.forces.len());
+                                                vfx_view = Some(v);
+                                            }
+                                            Err(e) => status = format!("EFFECT FAILED: {label}: {e}"),
+                                        }
+                                    }
+                                    // The other row of the tab: the `fxdict`, which nothing plays.
+                                    Kind::Effect => status = format!("{}: the sprite rectangles of the vfx atlas", row.label()),
                                     // A category with no faithful preview SAYS so rather than silently doing
                                     // nothing. It is browsable, and that is the honest state of it — the
                                     // standing rule against affordances that look like they work.
@@ -7748,6 +7830,8 @@ pub fn run(opts: Options) {
                                     (cam_target, cam_dist) = v.framing();
                                 }
                             }
+                            // Run the open effect to a time and pause (the `fx_time` capture key).
+                            Act::FxTime(t) => vfx_acts.push(crate::vfxview::VfxAct::Seek(t)),
                             // Pause at a time of the playing anim (the `face_time` capture key).
                             Act::FaceTime(t) => {
                                 if let Some(f) = &mut face {
@@ -7910,6 +7994,9 @@ pub fn run(opts: Options) {
                                 }
                             }
                             Act::PlayPause => {
+                                if vfx_view.is_some() {
+                                    vfx_acts.push(crate::vfxview::VfxAct::Pause);
+                                }
                                 if let Some(p) = &mut preview {
                                     let on_face = face.as_mut().filter(|f| f.model == p.hash);
                                     match on_face {
@@ -8641,6 +8728,22 @@ pub fn run(opts: Options) {
                             v.teardown(&mut scene, &mut world, &keep);
                         }
                     }
+                    // ── The open effect: anything else opened since, or leaving its tab, closes it;
+                    // its transport applies. ──
+                    if preview.is_some() || layer_view.is_some() || !(wb == Workbench::Inspect && kind == Kind::Effect) {
+                        if let Some(v) = vfx_view.take() {
+                            v.close(&mut scene);
+                        }
+                    }
+                    if let Some(v) = &mut vfx_view {
+                        for a in vfx_acts.drain(..) {
+                            if let Err(e) = v.act(a, &vfx_rects, &mut scene) {
+                                status = format!("EFFECT FAILED: {}: {e}", v.label);
+                            }
+                        }
+                        v.frame(dt, &mut scene);
+                    }
+                    vfx_acts.clear();
                     let picked = viewport_click.take();
                     if let Some(v) = &mut layer_view {
                         let fwd = dir_from(cam_yaw, cam_pitch);
@@ -8700,7 +8803,7 @@ pub fn run(opts: Options) {
                             capture_asked = true;
                         }
                     }
-                    let r = if tex_view.is_some() || (preview.is_none() && donor_ref.is_none() && layer_view.is_none()) {
+                    let r = if tex_view.is_some() || (preview.is_none() && donor_ref.is_none() && layer_view.is_none() && vfx_view.is_none()) {
                         scene.render_menu_with(t, Some(&mut overlay))
                     } else {
                         let fwd = dir_from(cam_yaw, cam_pitch);
@@ -9425,6 +9528,10 @@ pub(crate) fn load_kit_templates(w: &mut WadStack) -> Result<KitTemplates, Strin
         all,
         rotors: mercs2_formats::rotor::rotor_records(&we)?,
         helicopters: mercs2_formats::rotor::helicopter_keys(&we),
+        effect_starters: {
+            let names: HashMap<u32, String> = mercs2_engine::worldutil::TemplateRecords::from_worldentity(&we)?.names.into_iter().collect();
+            crate::vfxview::starters(&we, &names)?
+        },
     })
 }
 
@@ -9437,6 +9544,7 @@ pub(crate) struct KitTemplates {
     pub all: Vec<mercs2_formats::mixr::KitTemplate>,
     pub rotors: Vec<(Vec<u32>, mercs2_formats::rotor::RotorRecord)>,
     pub helicopters: std::collections::BTreeSet<u32>,
+    pub effect_starters: HashMap<u32, Vec<crate::vfxview::StartedBy>>,
 }
 
 /// The render state that shows exactly `outfit` of kit `hash` at rung 0: the spawn path's per-part
@@ -10695,7 +10803,7 @@ mod rail_tests {
     }
 
     fn row(name: &str) -> AssetRow {
-        AssetRow { hash: 0, type_id: 0, block: 0, src: 0, others: Vec::new(), name: Some(name.to_string()), template: None, faction: None }
+        AssetRow { hash: 0, type_id: 0, block: 0, src: 0, others: Vec::new(), name: Some(name.to_string()), template: None, faction: None, started_by: None }
     }
 
     /// A Lens pill's count is the number of rows the list shows under it, and the Lenses never
@@ -10798,6 +10906,7 @@ mod inspect_tests {
             name: Some("x".into()),
             template: None,
             faction: None,
+            started_by: None,
         };
         assert_eq!(subject_of(Kind::Text, &row(TYPE_ID_STRINGDB)), Subject::StringTable);
         assert_eq!(subject_of(Kind::Text, &row(TYPE_ID_FONT)), Subject::Other);
