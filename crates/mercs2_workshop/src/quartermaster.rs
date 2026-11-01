@@ -1030,9 +1030,13 @@ pub fn seeded(kind: &str, asset: &str, n: usize) -> Option<Contribution> {
             *target = mercs2_quartermaster::manifest::FxTarget::Effect { effect: asset.to_string() }
         }
         // A layer routed from the World domain: `asset` is the layer NAME, so seed the field the kind
-        // actually operates on (the stub's placeholder replaces/edits stay as authored defaults).
-        Contribution::EditWorld { layer, .. } | Contribution::ActivateLayer { layer, .. } => {
-            *layer = asset.to_string()
+        // actually operates on. The stub's `replaces` names a layer of its own example, which would
+        // remove an unrelated layer from a routed one: a routed layer replaces nothing until the
+        // author says so.
+        Contribution::EditWorld { layer, .. } => *layer = asset.to_string(),
+        Contribution::ActivateLayer { layer, replaces } => {
+            *layer = asset.to_string();
+            replaces.clear();
         }
         // A script routed from the Missions / Systems domain, or a table from anywhere: `asset` is the
         // script / table name, so it becomes the patch target. The sound kinds take no seed: the
@@ -3962,8 +3966,9 @@ mod tests {
         assert_eq!(kinds, vec!["activate_layer", "edit_world"]);
 
         match seeded("activate_layer", "vz_state_pmccon004_destroyed", 1).unwrap() {
-            Contribution::ActivateLayer { layer, .. } => {
-                assert_eq!(layer, "vz_state_pmccon004_destroyed", "the routed layer name must seed `layer`")
+            Contribution::ActivateLayer { layer, replaces } => {
+                assert_eq!(layer, "vz_state_pmccon004_destroyed", "the routed layer name must seed `layer`");
+                assert!(replaces.is_empty(), "a routed layer must not remove the stub's example layer: {replaces:?}");
             }
             other => panic!("activate_layer seeded the wrong kind: {other:?}"),
         }
