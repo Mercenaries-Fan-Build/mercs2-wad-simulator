@@ -360,7 +360,7 @@ impl TemplateRecords {
     pub fn load(assets: &mut crate::asset::AssetSource) -> Result<TemplateRecords, String> {
         use mercs2_formats::worldentity::{WorldEntity, RETAIL_WORLDENTITY_NAME_HASH, WORLDENTITY_TYPE_HASH};
         let we = assets
-            .resolve(WORLDENTITY_TYPE_HASH, RETAIL_WORLDENTITY_NAME_HASH)
+            .ecs_container(WORLDENTITY_TYPE_HASH, RETAIL_WORLDENTITY_NAME_HASH)?
             .ok_or("worldentity 0x50075B3B: in no open wad")?;
         Self::from_worldentity(&WorldEntity::parse(&we).map_err(|e| format!("worldentity: {e}"))?)
     }
@@ -382,6 +382,10 @@ impl TemplateRecords {
                     let dup = match (c.class.as_str(), &r.payload) {
                         ("Name", Payload::Name { name, .. }) => {
                             names.push((k, name.clone()));
+                            false
+                        }
+                        ("Name", Payload::NameHash(h)) => {
+                            names.push((k, format!("0x{h:08X}")));
                             false
                         }
                         ("NetCategoryInfo", Payload::PackedU16(v)) => net_category.insert(k, *v).is_some(),
