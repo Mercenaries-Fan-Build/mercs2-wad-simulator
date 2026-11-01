@@ -89,7 +89,9 @@ zeros. Their tests are game-gated (`--features retail`) and read `memory_dumps_d
   cites, `--all` including named models), `tex_orphans` (every texture chunk no `MTRL` of any loader
   cites — model, terrainmesh, font, lowresterrain, scrub — grouped by block, with any other chunk
   that holds the hash as a raw u32). Both read names from `docs/data/aset_names.csv` under the
-  `notes_docs_dir` key of `.mercs2-local.toml`.
+  `notes_docs_dir` key of `.mercs2-local.toml`. Subcommands `tex-rungs` (every texture chunk of a
+  big-endian archive and its PC twin, a row per block) and `tex-compare` (an Xbox archive's textures,
+  converted and decoded mip by mip against PC, or a PS3 archive with `--ps3`).
 * **Archive / naming**: `aset_probe` (every ASET row a name-hash owns + a multi-block striping
   census), `model_namer` (derives a model's name from the textures it uses, and can emit a rainbow-
   table name fragment), `kit_templates` (the resident worldentity's spawn templates that wear a given
