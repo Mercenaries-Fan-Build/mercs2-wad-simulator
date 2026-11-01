@@ -756,6 +756,7 @@ fn contribution_name(c: &Contribution) -> String {
         | Contribution::AddTexture { name, .. }
         | Contribution::AddMovie { name, .. }
         | Contribution::AddLanguage { name, .. }
+        | Contribution::AddLevel { name, .. }
         | Contribution::AddUi { name, .. } => name.clone(),
         Contribution::AddShopItem { id, .. } => id.clone(),
         Contribution::AddSound { bank, .. } => bank.clone(),
@@ -931,6 +932,7 @@ pub const KINDS: &[(&str, &[(&str, &str, &str)])] = &[
             ("add_stringdb_keys", "New text keys", "Add brand-new string-table keys"),
             ("replace_stringdb_text", "Rewrite text", "Rewrite strings by exact text match"),
             ("add_language", "New language", "Add a new selectable language (new base WAD)"),
+            ("add_level", "New level", "Add a level the game boots by name (new base WAD)"),
         ],
     ),
     (
@@ -1276,6 +1278,12 @@ fn stub(kind: &str, n: usize) -> Option<Contribution> {
             display: "My Language".into(),
             strings: PathBuf::from("src/strings.txt"),
             base: None,
+        },
+        "add_level" => Contribution::AddLevel {
+            name,
+            display: "My Level".into(),
+            wad: PathBuf::from("src/level.wad"),
+            streams: Vec::new(),
         },
         "add_shop_item" => Contribution::AddShopItem {
             id: format!("my_item_{n}"),
@@ -2584,6 +2592,19 @@ fn contribution_form(
                 "forks `base` (default english) into a new `.\\Data\\<name>.wad` + overlay stringdb.",
             );
         }
+        Contribution::AddLevel { name, display, wad, streams } => {
+            commit |= theme::text_field(ui, "Level", name, "dlc01", theme::FieldState::Neutral).lost_focus();
+            commit |= theme::text_field(ui, "Display", display, "My Level", theme::FieldState::Neutral).lost_focus();
+            commit |= source_row(ui, "WAD", wad, root, &["wad"]);
+            for s in streams.iter_mut() {
+                commit |= source_row(ui, "Stream", s, root, &["pws"]);
+            }
+            theme::field_note(
+                ui,
+                theme::FieldState::Neutral,
+                "ships as `.\\Data\\<name>-patch.wad` above a copy of vz.wad.",
+            );
+        }
         Contribution::NativeHook { target, plugin, symbol, touches, signature_guard: _ } => {
             // `both` is reserved and rejected in v1, so it is not offered.
             commit |= theme::combo_field(
@@ -3316,6 +3337,13 @@ fn blast_rows(c: &Contribution) -> Vec<(String, String)> {
             (
                 "Merge".to_string(),
                 "new base .\\Data\\<name>.wad + overlay stringdb \u{2014} additive".to_string(),
+            ),
+        ],
+        Contribution::AddLevel { name, .. } => vec![
+            ("Adds".to_string(), format!("level {name}")),
+            (
+                "Merge".to_string(),
+                "new .\\Data\\<name>-patch.wad above a copy of vz.wad \u{2014} additive".to_string(),
             ),
         ],
         // Discovery is filesystem order, so two plugins on one address have no load order that
