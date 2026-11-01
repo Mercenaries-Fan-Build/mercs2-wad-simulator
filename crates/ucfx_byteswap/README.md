@@ -130,7 +130,8 @@ ucfx_byteswap --stdin --aset-recompute < aset_protocol.bin > updated_u32_2.bin
 
 | Module | Owns |
 | --- | --- |
-| `convert` | Block-level BE→LE conversion. `convert_block` is the public entry point; also exposes `untile_tiled_dxt_body` and the `QUIET` diagnostics flag. |
+| `convert` | Block-level BE→LE conversion. `convert_block` is the public entry point; also exposes the `QUIET` diagnostics flag. |
+| `texture` | Xbox textures: `TextureTable` reads an archive's rungs, `untile_dxt_chain` untiles one body. |
 | `validate` | Post-conversion checks on an LE block; returns `Vec<ValidationError>`. |
 | `havok` | Havok 5.5.0-r1 (HK550) packfile conversion: `convert_havok_be_to_le`, `convert_phy2_be_to_le`, `validate_phy2`. |
 | `audio` | Console wavebank → PC PCM16 wavebank: `convert_wavebank_data`, `normalize_embedded_wavebank_clip`, `transcode_xma_to_pcm16`, `transcode_xma2_raw_to_pcm16`, `transcode_mp3_raw_to_pcm16`, `find_ffmpeg`; plus the Xbox-ADPCM → PC IMA `transcode_pws_xbox_to_pc`. |
