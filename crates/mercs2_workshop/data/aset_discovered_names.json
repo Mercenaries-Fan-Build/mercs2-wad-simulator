@@ -15077,6 +15077,651 @@
     ],
     "0xFC8D859D": [
       "prone"
+    ],
+    "0x41B4326E": [
+      "global_explosion_c4"
+    ],
+    "0xDB331999": [
+      "global_env_godray2"
+    ],
+    "0x0E6A7F61": [
+      "global_flaresmoke_lightblue"
+    ],
+    "0x0EB6A796": [
+      "global_airstrike_fuelairbomb"
+    ],
+    "0x12EC2C29": [
+      "global_muzzleflash_tank"
+    ],
+    "0x207D7D43": [
+      "global_shatteringglass_vehicle"
+    ],
+    "0x2E16705D": [
+      "global_airstrike_tactnuke"
+    ],
+    "0x3A4EE60F": [
+      "global_explosion_tankhatch"
+    ],
+    "0x49D65F2E": [
+      "global_exp_shockwave_ground_tactnuke"
+    ],
+    "0x4A87D9DF": [
+      "global_flaresmoke_green_fail"
+    ],
+    "0x4C611289": [
+      "global_explosion_money_large"
+    ],
+    "0x4DE2FC54": [
+      "global_dustfall"
+    ],
+    "0x50A1BDD5": [
+      "global_exp_shockwave_ground_bunkerbuster"
+    ],
+    "0x57FDFDDB": [
+      "global_flaresmoke_fail"
+    ],
+    "0x5DFB19C0": [
+      "global_flaresmoke_lightblue_fail"
+    ],
+    "0x91A23B32": [
+      "global_exp_shockwave_ground"
+    ],
+    "0x91BC7DD8": [
+      "global_flaresmoke"
+    ],
+    "0xB8B4E0D5": [
+      "global_exp_falling_debris_airstrike"
+    ],
+    "0xD0187C80": [
+      "global_impact_blood"
+    ],
+    "0xD6066462": [
+      "global_shellhandgun"
+    ],
+    "0xEB31B8EB": [
+      "global_flaresmoke_yellow"
+    ],
+    "0xF13A14A6": [
+      "global_flaresmoke_yellow_fail"
+    ],
+    "0xF8D30940": [
+      "global_muzzleflash_handgun"
+    ],
+    "0xC558C9D8": [
+      "forcegravity"
+    ],
+    "0xD80DF37F": [
+      "forcegravityvar"
+    ],
+    "0x6CF0BE14": [
+      "forcedrag"
+    ],
+    "0xBE968D3B": [
+      "forcedragvar"
+    ],
+    "0xB3DBB6C0": [
+      "forcewind"
+    ],
+    "0x4C49B137": [
+      "forcewindvar"
+    ],
+    "0x0116A7FC": [
+      "global_impact_sweat"
+    ],
+    "0x02D849BD": [
+      "global_firehydrant_spray"
+    ],
+    "0x044D5400": [
+      "global_waterfall_bottom_tiny"
+    ],
+    "0x04B6FC7F": [
+      "global_exp_shockwave_ground_tiny"
+    ],
+    "0x059DD524": [
+      "global_explosion_money_large_fire"
+    ],
+    "0x07102C7C": [
+      "global_explosion_rpg_center"
+    ],
+    "0x07BA28D1": [
+      "global_firesmallsmoke_smoke"
+    ],
+    "0x0B480F23": [
+      "global_exp_shockwave_ground_tiny_concrete"
+    ],
+    "0x0EF1280C": [
+      "global_impact_leaves"
+    ],
+    "0x0F3468B3": [
+      "global_explosion_watertower"
+    ],
+    "0x0F3783D6": [
+      "global_muzzleflash_rpg"
+    ],
+    "0x105FAD71": [
+      "global_impact_glass_nodamage"
+    ],
+    "0x106D24F3": [
+      "global_shellmg"
+    ],
+    "0x10AD30BA": [
+      "global_impact_metal_point"
+    ],
+    "0x1115DE7C": [
+      "global_flotsum_birds"
+    ],
+    "0x12F4A101": [
+      "global_boatwake_small"
+    ],
+    "0x13156C36": [
+      "global_explosion_pickup_money_small"
+    ],
+    "0x131FFE91": [
+      "global_muzzleflash_artillery"
+    ],
+    "0x16AD0C23": [
+      "global_explosion_tankturretseam"
+    ],
+    "0x16E3E54E": [
+      "global_exp_shockwave_ground_lrg"
+    ],
+    "0x17CB0E4D": [
+      "global_explosion_clothes_a"
+    ],
+    "0x1A6C4F1C": [
+      "global_exp_shockwave_ground_pep"
+    ],
+    "0x1C8CFA8E": [
+      "global_airstrike_missile"
+    ],
+    "0x1DC8342C": [
+      "global_flotsum_ash"
+    ],
+    "0x1DEC11A1": [
+      "global_impact_slide_dirt"
+    ],
+    "0x1F31CA06": [
+      "global_veh_exhaust_tank"
+    ],
+    "0x1F7435DF": [
+      "global_explosion_feathers"
+    ],
+    "0x1FB76E9D": [
+      "global_waterfall_smoke_large"
+    ],
+    "0x1FC2C9CC": [
+      "global_explosion_water_large"
+    ],
+    "0x205B8D4B": [
+      "global_waterfall_bottom_small"
+    ],
+    "0x22E8D7ED": [
+      "global_veh_smoke_dust"
+    ],
+    "0x23FB986D": [
+      "global_flotsum_bugs"
+    ],
+    "0x24D45F35": [
+      "global_explosion_money_small"
+    ],
+    "0x25C0369A": [
+      "global_firesmall_smoke"
+    ],
+    "0x261C2D1E": [
+      "global_explosion_vehicle_weakpoint"
+    ],
+    "0x26517D5C": [
+      "global_airstrike_clusterbomb"
+    ],
+    "0x2822050C": [
+      "global_explosion_pickup_grenade"
+    ],
+    "0x28BE49C5": [
+      "global_firelargesmoke_smoke"
+    ],
+    "0x2A082C74": [
+      "global_explosion_rpg"
+    ],
+    "0x2C4E0D3C": [
+      "global_flaresmoke_green"
+    ],
+    "0x2F635102": [
+      "global_impact_metal_nodamage"
+    ],
+    "0x2FA70559": [
+      "global_impact_metal"
+    ],
+    "0x302C8794": [
+      "global_impact_glass"
+    ],
+    "0x30BFB4CB": [
+      "global_shellshotgun"
+    ],
+    "0x32A81E7F": [
+      "global_explosion_pickup_large"
+    ],
+    "0x32CF2109": [
+      "global_boatwake_drift"
+    ],
+    "0x33821655": [
+      "global_muzzleflash_mg"
+    ],
+    "0x34E7570A": [
+      "global_blastdoors_tunneltop_smoke"
+    ],
+    "0x36162D5D": [
+      "global_muzzleflash_shotgun"
+    ],
+    "0x364CEE60": [
+      "global_impact_brick_point"
+    ],
+    "0x37EFDC61": [
+      "global_explosion_vehicle_ground"
+    ],
+    "0x3E75CA5F": [
+      "global_impact_bullet_leaves"
+    ],
+    "0x3F87D2DB": [
+      "global_boatwake_slow"
+    ],
+    "0x3FE1C432": [
+      "global_airstrike_bunkerbuster"
+    ],
+    "0x40059931": [
+      "global_impact_concrete"
+    ],
+    "0x41988B00": [
+      "global_rotorwash_water"
+    ],
+    "0x463D2D42": [
+      "global_impact_slide_leaves"
+    ],
+    "0x4B2396F1": [
+      "global_env_mist_light_placeable"
+    ],
+    "0x4BDCE4F5": [
+      "global_impact_bullet_blood"
+    ],
+    "0x4BEABCCA": [
+      "global_exp_falling_debris_lrg_special"
+    ],
+    "0x4D131C6E": [
+      "global_impact_bullet_stone"
+    ],
+    "0x4FE2C159": [
+      "global_explosion_flag_red"
+    ],
+    "0x505FA799": [
+      "global_veh_smoke_brakes"
+    ],
+    "0x50BB624F": [
+      "global_boatroostertail_small_slow"
+    ],
+    "0x5259B8B8": [
+      "global_impact_bullet_water"
+    ],
+    "0x531723C7": [
+      "global_airstrike_bunkerbuster_initial"
+    ],
+    "0x531ED778": [
+      "global_exp_falling_debris_huge"
+    ],
+    "0x542F23D5": [
+      "global_airstrike_cruisemissile"
+    ],
+    "0x54562290": [
+      "global_firelargesmoke_smoke_vehicle"
+    ],
+    "0x580B0448": [
+      "global_flotsum_leaves"
+    ],
+    "0x5836C664": [
+      "global_veh_exhaust_car"
+    ],
+    "0x59A24324": [
+      "global_rotorwash"
+    ],
+    "0x5EEB2E58": [
+      "global_impact_bullet_dirt"
+    ],
+    "0x604149F9": [
+      "global_explosion_waterbumper"
+    ],
+    "0x6363295D": [
+      "global_boatroostertail"
+    ],
+    "0x645FC940": [
+      "global_explosion_flag_blue"
+    ],
+    "0x64C2146B": [
+      "global_firetreetrunkb"
+    ],
+    "0x66763803": [
+      "global_splash_dive"
+    ],
+    "0x696B12C3": [
+      "global_explosion_parrotfeathers"
+    ],
+    "0x69DB24F9": [
+      "global_boatwake"
+    ],
+    "0x6ADEED35": [
+      "global_muzzleflash_blue"
+    ],
+    "0x6BA1C64C": [
+      "global_explosion_pickup_ammo"
+    ],
+    "0x6C1987C7": [
+      "global_impact_dirt"
+    ],
+    "0x6E41757A": [
+      "global_firemediumsmoke_smoke_vehicle"
+    ],
+    "0x6E495DD0": [
+      "global_blastdoors_ext_smoke"
+    ],
+    "0x76406639": [
+      "global_muzzleflash_grenadelauncher"
+    ],
+    "0x77C065AA": [
+      "global_impact_concrete_nodamage"
+    ],
+    "0x78452950": [
+      "global_grenadeexplosion"
+    ],
+    "0x78B52082": [
+      "global_flotsum_dust_ground"
+    ],
+    "0x7A06B1D3": [
+      "global_exp_sparks_sphere_lrg"
+    ],
+    "0x7A621612": [
+      "global_dustshanty"
+    ],
+    "0x7AC505EC": [
+      "global_dustexplosion"
+    ],
+    "0x7C58682C": [
+      "global_airstrike_artillery"
+    ],
+    "0x7DDDE32B": [
+      "global_firelargesmoke"
+    ],
+    "0x815A118F": [
+      "global_firegrandesmoke"
+    ],
+    "0x81CE84A6": [
+      "global_explosion_tankturretflame"
+    ],
+    "0x81D11198": [
+      "global_impact_brick_nodamage"
+    ],
+    "0x82C0050E": [
+      "global_firetreetrunkc"
+    ],
+    "0x858C9393": [
+      "global_flotsum_bugs_pirate"
+    ],
+    "0x8603FEC9": [
+      "global_exp_falling_debris_med"
+    ],
+    "0x869EEC70": [
+      "global_exp_shockwave_ground_tiny_grass"
+    ],
+    "0x87CD0FFF": [
+      "global_exp_shockwave_ground_sml"
+    ],
+    "0x88196FDD": [
+      "global_airstrike_smartbomb"
+    ],
+    "0x88659726": [
+      "global_splash_lrg"
+    ],
+    "0x8986FF53": [
+      "global_boatwake_slow_small"
+    ],
+    "0x8AC48ED4": [
+      "global_firetreetrunka"
+    ],
+    "0x8BF62E47": [
+      "global_boatroostertail_slow"
+    ],
+    "0x8C49A9C1": [
+      "global_flotsum_papers"
+    ],
+    "0x8CD15DED": [
+      "global_firetreetrunkd"
+    ],
+    "0x91FFD501": [
+      "global_airstrike_daisycutter"
+    ],
+    "0x933CAAAB": [
+      "global_impact_brick"
+    ],
+    "0x9420F6DB": [
+      "global_exp_shockwave_ground_tiny_asphalt"
+    ],
+    "0x946F39FC": [
+      "global_gritexplosion"
+    ],
+    "0x955831F6": [
+      "global_smokeblack_tank"
+    ],
+    "0x9942D6BA": [
+      "global_explosion_tankhull"
+    ],
+    "0x9AA8A55B": [
+      "global_explosion_treetrunk"
+    ],
+    "0x9ACB2E34": [
+      "global_firesmallsmoke_smoke_vehicle"
+    ],
+    "0x9D6FCD99": [
+      "global_impact_bullet_glass"
+    ],
+    "0xA1D0CC65": [
+      "global_veh_smoke_grass"
+    ],
+    "0xA7D304AF": [
+      "global_dirtexplosion_fan_large"
+    ],
+    "0xAB4726EC": [
+      "global_airstrike_clusterbomb_flame"
+    ],
+    "0xAC9FD6A3": [
+      "global_explosion_canvas"
+    ],
+    "0xACA34FF2": [
+      "global_waterfall_wall"
+    ],
+    "0xAD59D6A5": [
+      "global_boatroostertail_small"
+    ],
+    "0xADA75AF5": [
+      "global_impact_water"
+    ],
+    "0xB05A0554": [
+      "global_impact_bullet_metal"
+    ],
+    "0xB0629CBC": [
+      "global_blastdoors_tunnelbottom_smoke"
+    ],
+    "0xB071B22D": [
+      "global_impact_slide_brick"
+    ],
+    "0xB0A59044": [
+      "global_explosion_pickup_health"
+    ],
+    "0xB14FF43E": [
+      "global_explosion_pickup_rocket"
+    ],
+    "0xB3FAEAE7": [
+      "global_buildingdebrislarge"
+    ],
+    "0xB5005570": [
+      "global_impact_wood_nodamage"
+    ],
+    "0xB5A26BB5": [
+      "global_impact_slide_stone"
+    ],
+    "0xB78B1A8A": [
+      "global_veh_smoke_rock"
+    ],
+    "0xB7CB91A4": [
+      "global_splash_huge"
+    ],
+    "0xBA85C659": [
+      "global_impact_bullet_metal_flare"
+    ],
+    "0xBADDE308": [
+      "global_flotsum_dandy"
+    ],
+    "0xBBC97313": [
+      "global_flotsum_smoke_ground"
+    ],
+    "0xBFC96EC7": [
+      "global_smokeblack"
+    ],
+    "0xC01C7255": [
+      "global_boatroostertail_small_drift"
+    ],
+    "0xC104640A": [
+      "global_veh_smoke_asphalt"
+    ],
+    "0xC340B5D2": [
+      "global_teargas"
+    ],
+    "0xC6102811": [
+      "global_boatwake_drift_small"
+    ],
+    "0xC6B24F44": [
+      "global_tree_destruction_leaves_palm"
+    ],
+    "0xC72807AA": [
+      "global_explosion_pickup_fuel"
+    ],
+    "0xC7BFFB0B": [
+      "global_airstrike_distance"
+    ],
+    "0xC894A387": [
+      "global_firesmallsmoke"
+    ],
+    "0xCA39A3FC": [
+      "global_muzzleflash_25mm"
+    ],
+    "0xCC3C286E": [
+      "global_sparkslarge"
+    ],
+    "0xD2E54786": [
+      "global_muzzleflash"
+    ],
+    "0xD5FB4502": [
+      "global_firehedge"
+    ],
+    "0xD73A4F67": [
+      "global_splash_sml"
+    ],
+    "0xD75F90F5": [
+      "global_shellaa_large"
+    ],
+    "0xD8AAC146": [
+      "global_smoke_heli_tailrotor"
+    ],
+    "0xDA73B4F9": [
+      "global_firemediumsmoke"
+    ],
+    "0xDAA05ADA": [
+      "global_boatwake_point"
+    ],
+    "0xDB16CE6D": [
+      "global_splash_med"
+    ],
+    "0xDE930606": [
+      "global_explosion_papers"
+    ],
+    "0xDF39E357": [
+      "global_muzzleflash_aa"
+    ],
+    "0xDF94C4B3": [
+      "global_impact_metal_nodamage_flare"
+    ],
+    "0xE0A3A859": [
+      "global_firegrandesmoke_smoke"
+    ],
+    "0xE0A64900": [
+      "global_impact_rpg_glass"
+    ],
+    "0xE1E905BA": [
+      "global_exp_falling_debris_lrg"
+    ],
+    "0xE238BACC": [
+      "global_shellsam"
+    ],
+    "0xE46F780A": [
+      "global_explosion_pickup_money"
+    ],
+    "0xE4CFAA6D": [
+      "global_airstrike_tactnuke_distance"
+    ],
+    "0xE5EA998E": [
+      "global_bunker_top_smoke"
+    ],
+    "0xE74B5BBC": [
+      "global_flotsum_dust"
+    ],
+    "0xEBBC6B45": [
+      "global_flotsum"
+    ],
+    "0xECDE84DD": [
+      "global_dirtexplosion"
+    ],
+    "0xEF006CBB": [
+      "global_sparks_rpg_decal"
+    ],
+    "0xF31B6592": [
+      "global_impact_concrete_point"
+    ],
+    "0xF3855287": [
+      "global_explosion_pickup_c4"
+    ],
+    "0xF4C9B410": [
+      "global_sparksmedium"
+    ],
+    "0xF513C460": [
+      "global_exp_falling_debris_lrg_tall"
+    ],
+    "0xF5B0D703": [
+      "global_firemediumsmoke_smoke"
+    ],
+    "0xF75C155C": [
+      "global_firesmall"
+    ],
+    "0xF7EF74E5": [
+      "global_explosion_heli_bladeflame"
+    ],
+    "0xF9236EBA": [
+      "global_impact_bullet_brick"
+    ],
+    "0xF96279B0": [
+      "global_explosion_vehicle_air"
+    ],
+    "0xFB465F27": [
+      "global_shellgrenade"
+    ],
+    "0xFCC5C024": [
+      "global_shellsmall"
+    ],
+    "0xFDF1E1C3": [
+      "global_explosion_canvas_large"
+    ],
+    "0xFE1E7109": [
+      "global_shellaa"
+    ],
+    "0xFEDA1A51": [
+      "global_waterfall_smoke"
+    ],
+    "0xFF2C47DE": [
+      "global_waterfall_wall_small"
     ]
   }
 }
