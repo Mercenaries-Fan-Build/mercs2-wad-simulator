@@ -32,7 +32,7 @@ fn template_classes(we: &WorldEntity) -> HashMap<u32, BTreeSet<String>> {
 
 fn world(assets: &mut AssetSource) -> Result<WorldEntity, String> {
     let c = assets
-        .resolve(WORLDENTITY_TYPE_HASH, RETAIL_WORLDENTITY_NAME_HASH)
+        .ecs_container(WORLDENTITY_TYPE_HASH, RETAIL_WORLDENTITY_NAME_HASH)?
         .ok_or("worldentity: in no open wad")?;
     WorldEntity::parse(&c).map_err(|e| format!("worldentity: {e}"))
 }
@@ -43,7 +43,7 @@ pub fn layer(wadpath: &str, hash: u32) -> Result<(), String> {
     let templates = TemplateRecords::from_worldentity(&we)?;
     let names: HashMap<u32, &str> = templates.names.iter().map(|(k, n)| (*k, n.as_str())).collect();
     let classes = template_classes(&we);
-    let block = assets.resolve(LAYER_TYPE_HASH, hash).ok_or_else(|| format!("0x{hash:08X}: no layer in {:?}", assets.paths()))?;
+    let block = assets.ecs_container(LAYER_TYPE_HASH, hash)?.ok_or_else(|| format!("0x{hash:08X}: no layer in {:?}", assets.paths()))?;
     let mut catalog = PlacedCatalog::default();
     let keys = catalog.add_block(&block, &templates)?;
     let own = entity_classes(&block)?;
@@ -84,7 +84,7 @@ pub fn layer_all(wadpath: &str) -> Result<(), String> {
     let mut signatures: BTreeMap<String, usize> = BTreeMap::new();
     let mut failed = Vec::new();
     for &h in &hashes {
-        let Some(block) = assets.resolve(LAYER_TYPE_HASH, h) else {
+        let Some(block) = assets.ecs_container(LAYER_TYPE_HASH, h)? else {
             failed.push(format!("0x{h:08X}: no container"));
             continue;
         };
@@ -209,7 +209,7 @@ pub fn layer_frames(wadpath: &str, capture: &Path) -> Result<(), String> {
     let (mut child_misses, mut rest_misses) = (Vec::new(), Vec::new());
     let mut nodes: HashMap<u32, HashMap<u32, Mat4>> = HashMap::new();
     for &h in &hashes {
-        let block = assets.resolve(LAYER_TYPE_HASH, h).ok_or_else(|| format!("0x{h:08X}: no container"))?;
+        let block = assets.ecs_container(LAYER_TYPE_HASH, h)?.ok_or_else(|| format!("0x{h:08X}: no container"))?;
         let mut catalog = PlacedCatalog::default();
         catalog.add_block(&block, &templates)?;
         let entities: HashMap<u32, PlacedEntity> = placed_entities(&block)?.into_iter().map(|e| (e.key, e)).collect();
@@ -301,8 +301,8 @@ pub fn layer_frames(wadpath: &str, capture: &Path) -> Result<(), String> {
 /// the archive that resolves it, its block's path, and its entities, models, link children and class
 /// counts. A layer of an `--also` archive, which may be another platform's and is not read further,
 /// gets a row with its archive and path alone.
-pub fn layer_catalog(wadpath: &str, out: &Path, also: &[String]) -> Result<(), String> {
-    let mut assets = AssetSource::discover(wadpath, &[])?;
+pub fn layer_catalog(wadpath: &str, out: &Path, also: &[String], overlays: &[String]) -> Result<(), String> {
+    let mut assets = AssetSource::discover(wadpath, overlays)?;
     let we = world(&mut assets)?;
     let templates = TemplateRecords::from_worldentity(&we)?;
     let classes = template_classes(&we);
@@ -327,7 +327,7 @@ pub fn layer_catalog(wadpath: &str, out: &Path, also: &[String]) -> Result<(), S
         }
     }
     for (&h, (file, block_index, path)) in &homes {
-        let block = assets.resolve(LAYER_TYPE_HASH, h).ok_or_else(|| format!("0x{h:08X}: no container"))?;
+        let block = assets.ecs_container(LAYER_TYPE_HASH, h)?.ok_or_else(|| format!("0x{h:08X}: no container"))?;
         let mut catalog = PlacedCatalog::default();
         let keys = catalog.add_block(&block, &templates)?;
         let own = entity_classes(&block)?;
