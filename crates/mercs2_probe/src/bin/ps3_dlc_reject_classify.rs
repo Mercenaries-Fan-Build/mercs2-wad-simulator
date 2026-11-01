@@ -19,6 +19,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use mercs2_formats::be_to_le::convert::{convert_block, QUIET};
+use mercs2_formats::be_to_le::ecs::ComponentSchemas;
 use mercs2_formats::be_to_le::lua::LuaTools;
 use mercs2_formats::dlc_input::{
     decompress_be_sges, parse_be_ffcs, parse_be_indx, parse_be_pths, PAGE_SIZE,
@@ -87,8 +88,17 @@ fn lua_tools() -> LuaTools {
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    let usage = "usage: ps3_dlc_reject_classify --scff <path> --vz-wad <path> [--out <dir>] [--limit-fixtures N]";
+    let vz_wad = arg_str(&args, "--vz-wad").unwrap_or_else(|| {
+        eprintln!("{usage}");
+        std::process::exit(2);
+    });
+    let schemas = ComponentSchemas::from_vz_wad(std::path::Path::new(&vz_wad)).unwrap_or_else(|e| {
+        eprintln!("{e}");
+        std::process::exit(1);
+    });
     let scff = arg_str(&args, "--scff").unwrap_or_else(|| {
-        eprintln!("usage: ps3_dlc_reject_classify --scff <path> [--out <dir>] [--limit-fixtures N]");
+        eprintln!("{usage}");
         std::process::exit(2);
     });
     let out_dir: Option<PathBuf> = arg_str(&args, "--out").map(PathBuf::from);
@@ -165,7 +175,7 @@ fn main() {
             continue;
         }
 
-        match convert_block(&decompressed, false, None, Some(&lua_tools)) {
+        match convert_block(&decompressed, false, None, Some(&lua_tools), Some(&schemas)) {
             Ok(_) => {
                 converted += 1;
                 per_block_tsv.push_str(&format!(
