@@ -15722,6 +15722,480 @@
     ],
     "0xFF2C47DE": [
       "global_waterfall_wall_small"
+    ],
+    "0x0015AA6C": [
+      "_DLC_outskirt_interior_sound_SmFan"
+    ],
+    "0x01B6136A": [
+      "_global_freewayelevatedlong SUPER"
+    ],
+    "0x04E8D08C": [
+      "_DLC_mar_commercial_wallterrain01"
+    ],
+    "0x07E8A4B0": [
+      "SX2150 (MLRS) (Driver) (Allied)"
+    ],
+    "0x0985E3A9": [
+      "_DLC_outskirt_interior_sound_CeilingFan"
+    ],
+    "0x0997554D": [
+      "PathSpawner_Heli_DLC_China"
+    ],
+    "0x0EBCE2F0": [
+      "_DLC_outskirt_interior_HQ"
+    ],
+    "0x1279DA78": [
+      "DLC_Explosion (Daisy Cutter)"
+    ],
+    "0x12F06BBF": [
+      "Mounted TOW Missile (1) (hp_barreltip_missile_le) (dlc)"
+    ],
+    "0x15E966E2": [
+      "DLC_MonsterRTR_Driver"
+    ],
+    "0x173CBA95": [
+      "Tank Shell (Railgun Slug) (DLC)"
+    ],
+    "0x19C7CCE5": [
+      "_dlc_global_scaffoldA"
+    ],
+    "0x1B984D76": [
+      "DLC_Mounted AT Missile (Veyron)"
+    ],
+    "0x1D7D2460": [
+      "Mine (AlTest)"
+    ],
+    "0x1DABD51F": [
+      "DLC__maracaibo_freewaytrenchbridge01_overpass"
+    ],
+    "0x1EDE8624": [
+      "ZTZ63a (DLC) (LongHib) (Prototype)"
+    ],
+    "0x1EFA5EFC": [
+      "M1A2_DLC"
+    ],
+    "0x218B404A": [
+      "Light_tiny_orange_dim"
+    ],
+    "0x246A927F": [
+      "M2A3 (Driver) (DLC)"
+    ],
+    "0x24D709F7": [
+      "_maracaibo_freewaytrenchbridge01_overpass_DLC"
+    ],
+    "0x27DFEAF2": [
+      "DLC_M1A1 (Driver)"
+    ],
+    "0x27FB8380": [
+      "_DLC_maracaibo_freewaytrenchbridge02_underpass"
+    ],
+    "0x28FBA4B5": [
+      "DLC_M1A3"
+    ],
+    "0x31431E20": [
+      "Mounted Panhard Recoiless (DLCCon002)b"
+    ],
+    "0x31A3DEB1": [
+      "PedList_Caicara_DLC"
+    ],
+    "0x31F274D0": [
+      "_DLC_vzoutpost_bld_garagebunker_CH"
+    ],
+    "0x35347F5A": [
+      "Mi26 (CH) (Driver) (MercsWars) (LongHib)"
+    ],
+    "0x355E3728": [
+      "_DLC_outskirt_interior_chair"
+    ],
+    "0x3571540F": [
+      "_DLC_vzoutpost_bld_garage_GR"
+    ],
+    "0x3730A165": [
+      "_commercial_wallbeachlong_health"
+    ],
+    "0x38067366": [
+      "_DLC_maracaibo_freewayascender02"
+    ],
+    "0x3B77DB7A": [
+      "_DLC_vzoutpost_bld_garage_PR"
+    ],
+    "0x3BAE9B7A": [
+      "dlc_global_particle_sparks_vehicle_box_blue"
+    ],
+    "0x3CF20AA3": [
+      "VehList_Caicara_DLC"
+    ],
+    "0x3E199063": [
+      "DLC_Light_airstrike_moab_flash"
+    ],
+    "0x3F221584": [
+      "DLC_AT Rocket"
+    ],
+    "0x457B75D7": [
+      "_DLC_maracaibo_freewaystraight02"
+    ],
+    "0x460062B0": [
+      "_merida_lightstadiumb_invincible"
+    ],
+    "0x49FC1CDF": [
+      "DLCCon004_Cash_M_02"
+    ],
+    "0x4BFEA076": [
+      "Mounted TOW Missile (1) (hp_barreltip_missile_lb) (dlc)"
+    ],
+    "0x4CD0BFE3": [
+      "_DLC_vzoutpost_bld_garagebunker_OC"
+    ],
+    "0x4D00045A": [
+      "_DLC_vzoutpost_bld_garage_OC"
+    ],
+    "0x4D3B94EB": [
+      "AlTest Explosion"
+    ],
+    "0x4D827905": [
+      "Mounted TOW Missile (1) (hp_barreltip_missile_ra) (dlc)"
+    ],
+    "0x52848B2B": [
+      "DLC_Allied Destroyer_Invincible"
+    ],
+    "0x54D60021": [
+      "Mounted TOW Missile (1) (hp_barreltip_missile_lc) (dlc)"
+    ],
+    "0x550F1571": [
+      "DLC__global_barricaded"
+    ],
+    "0x56723616": [
+      "dlc_global_particle_airstrike_distance"
+    ],
+    "0x58CC7A08": [
+      "_merida_bld_soccerstadium_invincible"
+    ],
+    "0x5B234BF2": [
+      "Mounted Panhard Recoiless (DLCCon002)"
+    ],
+    "0x5C8701A1": [
+      "M1A2 (DLC) (LongHib) (Prototype)"
+    ],
+    "0x5C905D92": [
+      "Grenade MG Projectile (DLCCon002)"
+    ],
+    "0x5DB66BB0": [
+      "DLC_Vehicle AT Missile"
+    ],
+    "0x60815D41": [
+      "_DLC_outskirt_interior_sound_Jukebox"
+    ],
+    "0x6119467F": [
+      "DLC_global_particle_fire_jetengine_boost_infinite"
+    ],
+    "0x6282DE02": [
+      "DLC_SoccerBall_car"
+    ],
+    "0x63C00C6E": [
+      "_DLC_vzoutpost_bld_garagebunker_GR"
+    ],
+    "0x64A00A0E": [
+      "Mounted TOW Missile (1) (hp_barreltip_missile_rd) (dlc)"
+    ],
+    "0x6A8AA997": [
+      "DLC_mar_global_freewayelevatedlong"
+    ],
+    "0x6D236566": [
+      "Mounted SAM (DLC2)"
+    ],
+    "0x6DCFB4CB": [
+      "DLC SUPER TOW Missile"
+    ],
+    "0x6E03E654": [
+      "Mounted TOW Missile (1) (hp_barreltip_missile_rb) (dlc)"
+    ],
+    "0x6E83AEDC": [
+      "Mounted TOW Missile (1) (hp_barreltip_missile_ld) (dlc)"
+    ],
+    "0x715B8A9B": [
+      "PLZ45 (DLC) (LongHib) (Prototype)"
+    ],
+    "0x788BB1E5": [
+      "DLCCon004_Timer_Pickup"
+    ],
+    "0x79E97719": [
+      "Mounted Tank Gun (Railgun Slug) (DLC)"
+    ],
+    "0x7BF0E9AC": [
+      "_DLC_vzoutpost_bld_guardtower"
+    ],
+    "0x7E9E8F5A": [
+      "_DLC_vzoutpost_bld_garagebunker"
+    ],
+    "0x7EDCF417": [
+      "Mounted TOW Missile (1) (hp_barreltip_missile_rc) (dlc)"
+    ],
+    "0x7FCAF48C": [
+      "WaterMineBall"
+    ],
+    "0x81C781DC": [
+      "SX2150 (Fuel) (Driver) (MercsWars) (LongHib)"
+    ],
+    "0x829372CA": [
+      "Explosion (Super TOW) "
+    ],
+    "0x836F0624": [
+      "global_particle_firehydrant_spray_placeable"
+    ],
+    "0x841AD085": [
+      "Emplaced TOW (Allied) (seatbelt)"
+    ],
+    "0x845D1E82": [
+      "DLC RTR PLOW"
+    ],
+    "0x8671B71D": [
+      "_DLC_global_bld_guardtower"
+    ],
+    "0x8697DF6C": [
+      "Munitions (Cluster Bomb)(prop only)"
+    ],
+    "0x874A08B4": [
+      "DLCCon004_Cash_XL_04"
+    ],
+    "0x882ABAD2": [
+      "Mounted TOW Missile (1) (hp_barreltip_missile_lf) (dlc)"
+    ],
+    "0x88ED83F8": [
+      "Mine Spawner"
+    ],
+    "0x89888F81": [
+      "_DLC_vzoutpost_bld_garage"
+    ],
+    "0x8A936735": [
+      "Vehicle Seat (DLC M1A3) (Driver)"
+    ],
+    "0x8BD83B2F": [
+      "PLZ45 (Driver) (MercsWars) (LongHib)"
+    ],
+    "0x8CF9786A": [
+      "DLCCon004_Cash_S_01"
+    ],
+    "0x8D53ED40": [
+      "PLZ45 0x8000b2e7"
+    ],
+    "0x8DA5BD99": [
+      "Mounted TOW Missile (1) (hp_barreltip_missile_re) (dlc)"
+    ],
+    "0x8FD54317": [
+      "_merida_bld_pmcautoshop_unkillable"
+    ],
+    "0x90BB90D2": [
+      "ZTZ98 0x8000b2e9"
+    ],
+    "0x933F34F1": [
+      "Panhard (DLCCON004)"
+    ],
+    "0x93F6E08D": [
+      "DLC__mar_global_freewayelevatedcurve"
+    ],
+    "0x94887BD8": [
+      "_DLC_industrial_machinepartsramp01"
+    ],
+    "0x9A4B8D77": [
+      "Roadblock (Horizontal)"
+    ],
+    "0x9A81C0BC": [
+      "Light_tiny_yellow_dim"
+    ],
+    "0x9AE57771": [
+      "Civ Bartender (male)1"
+    ],
+    "0x9B8F0307": [
+      "Explosion (Water Mine)_Ball"
+    ],
+    "0x9BE367A3": [
+      "Mounted TOW Missile (1) (hp_barreltip_missile_la) (dlc)"
+    ],
+    "0x9F3E061C": [
+      "_global_soccergoal_invincible"
+    ],
+    "0xA1A04C9D": [
+      "Alouette3 Superiority_Light"
+    ],
+    "0xA57E26AC": [
+      "DLC_Veyron (Assault)"
+    ],
+    "0xA5DEDA9F": [
+      "dlc_global_particle_sparks_vehicle_box_red"
+    ],
+    "0xA81AB1D7": [
+      "Light_tiny_red_dim"
+    ],
+    "0xA849CD68": [
+      "Light_large_green_dim"
+    ],
+    "0xA9AD7823": [
+      "DLC_SoccerBall_prop"
+    ],
+    "0xAAC52C08": [
+      "TankBuster_Instant"
+    ],
+    "0xAB1F0473": [
+      "DLC Minigun B"
+    ],
+    "0xABA97842": [
+      "Vehicle Seat (2 Seat) (seat_front_left) DLC (armoredmonster)"
+    ],
+    "0xABF7C000": [
+      "Light_tiny_yellow_verydim"
+    ],
+    "0xAECC54EB": [
+      "M1A2 (DLCCon003)"
+    ],
+    "0xB0FA6BA9": [
+      "AlTest Explosion Frag"
+    ],
+    "0xB1841D15": [
+      "DLCCon004_Cash_L_03"
+    ],
+    "0xB1B0F263": [
+      "DLC_M151.50Cal(VZ) (DriverGunner)"
+    ],
+    "0xB1C9B946": [
+      "ZTZ63a 0x8000b2e8"
+    ],
+    "0xB6D4CA0F": [
+      "Munitions (Tank Buster)(prop only)"
+    ],
+    "0xB765357E": [
+      "_city_bld_skyscraper01 SUPER"
+    ],
+    "0xB8DF3402": [
+      "_DLC_global_freewayelevatedlongramp_ruin"
+    ],
+    "0xBC8CF937": [
+      "_DLC_vzoutpost_bld_garage_AL"
+    ],
+    "0xBD36C06A": [
+      "dlc_global_particle_tracer_AA"
+    ],
+    "0xBE7E4F8D": [
+      "Chinese Heavy (lesser RPG)"
+    ],
+    "0xBFD47C65": [
+      "Roadblock (Vertical)"
+    ],
+    "0xC1C8048A": [
+      "_DLC_outskirt_interior_stool"
+    ],
+    "0xC21592BB": [
+      "Light_medium_orange_soft"
+    ],
+    "0xC38DD8AF": [
+      "_white_freewaytrenchbridge01_overpass_autobridge SUPER"
+    ],
+    "0xC3D00C7F": [
+      "DLC_mar_global_freewayelevatedlongramp"
+    ],
+    "0xC6672DB8": [
+      "DLC Armored Monster"
+    ],
+    "0xC6C30E2A": [
+      "_dlc_maracaibo_freewaytrenchbridge02_overpass"
+    ],
+    "0xC72DD0FB": [
+      "ZTZ98 (Driver) (MercsWars) (LongHib)"
+    ],
+    "0xC834A3DC": [
+      "SX2150 (Fuel) 0x8000bb47"
+    ],
+    "0xC8B35541": [
+      "_city_bld_skyscraper02 SUPER"
+    ],
+    "0xCD91045B": [
+      "DLCCon004_Cash_XXL_05"
+    ],
+    "0xCF852AC0": [
+      "Civ Bartender (male)"
+    ],
+    "0xD07894C7": [
+      "Emplaced M101A1 (China)"
+    ],
+    "0xD1217EDC": [
+      "DLC Minigun A"
+    ],
+    "0xD37A46FF": [
+      "Tank Shell (Railgun Slug) (DLC2)"
+    ],
+    "0xD616EFED": [
+      "_DLC_global_wallshort_ruin"
+    ],
+    "0xD811DA70": [
+      "dlc_global_particle_explosion_pickup_timer"
+    ],
+    "0xD8A97B5D": [
+      "_DLC_mar_commercial_roadstraight10_crater"
+    ],
+    "0xD8B477DD": [
+      "MissionHub_Interior"
+    ],
+    "0xDB916567": [
+      "DLC_Speed_Boost_Pickup"
+    ],
+    "0xDCE566D9": [
+      "_commercial_wallbeachshort_health"
+    ],
+    "0xDE53489A": [
+      "_DLC_vzoutpost_bld_garagebunker_AL"
+    ],
+    "0xDF37AA98": [
+      "Mounted TOW Missile (1) (hp_barreltip_missile_rf) (dlc)"
+    ],
+    "0xE3789CFA": [
+      "_DLC_maracaibo_freewaystraight03"
+    ],
+    "0xE3BFF391": [
+      "Allied Heavy (AT) (seatbelted)"
+    ],
+    "0xE7CF023B": [
+      "Mounted Tank Gun (Sabot) (DLC)"
+    ],
+    "0xE9D2F907": [
+      "ZTZ98 (DLC) (LongHib) (Prototype)"
+    ],
+    "0xEB66788C": [
+      "_DLC_industrial_bld_gasstationpump"
+    ],
+    "0xED612516": [
+      "DLCCon004_Cash_XXXL_06"
+    ],
+    "0xEDBB2B14": [
+      "Mounted Panhard Recoiless (DLCCon004)"
+    ],
+    "0xEF169C93": [
+      "Vehicle Seat (2 Seat) (seat_front_right) DLC (armoredmonster)"
+    ],
+    "0xEF3A4626": [
+      "VehList_DLCCon003_test"
+    ],
+    "0xF0095776": [
+      "Munitions (Artillery) (prop only)"
+    ],
+    "0xF02E66E9": [
+      "_DLC_global_walllong_ruin"
+    ],
+    "0xF6EAB306": [
+      "_DLC_global_freewayelevatedlong_ruin"
+    ],
+    "0xF7229E1B": [
+      "_DLC_vzoutpost_bld_garagebunker_PR"
+    ],
+    "0xF793815F": [
+      "DLC_Buggy (Hellfire)"
+    ],
+    "0xF9294342": [
+      "ZTZ63a (Driver) (MercsWars) (LongHib)"
+    ],
+    "0xFB2CEE89": [
+      "_DLC_vzoutpost_bld_garage_CH"
+    ],
+    "0xFE10F51B": [
+      "Explosion (Handheld RPG) DLC_nolight"
     ]
   }
 }
