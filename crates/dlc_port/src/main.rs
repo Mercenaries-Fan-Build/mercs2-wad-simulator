@@ -381,8 +381,8 @@ fn run() -> Result<(), String> {
         xbox_doh_sourced_count,
         skips.len()
     );
-    for s in &skips {
-        println!("  skipped {s}");
+    if !skips.is_empty() {
+        return Err(format!("{} blocks did not convert, so no WAD was written:\n  {}", skips.len(), skips.join("\n  ")));
     }
     if converted.is_empty() {
         return Err("No blocks converted".into());
