@@ -1,4 +1,5 @@
-//! Verify every ASET row's LOD block references resolve inside the WAD's OWN block table.
+//! Verify every ASET row's LOD block references resolve inside the WAD's OWN block table, and that
+//! each block a chain names holds that asset exactly once.
 //!
 //! A patch WAD carries ASET rows copied out of a source WAD. Each row packs up to four block
 //! indices — `_P000` (`packed_block_ref` hi16) plus `_P001`/`_P002`/`_P003` — and those indices are
@@ -6,9 +7,8 @@
 //! 29-block patch therefore leaves the finer LOD rungs pointing at indices that do not exist in the
 //! patch. The engine reads INDX out of range, decodes whatever bytes sit there as a page index and
 //! `packed_field`, and can end up sizing a streaming buffer at hundreds of gigabytes. That request
-//! can never be satisfied, the node never reaches provider-status 4, `Stream_Manager_Tick`
-//! (`FUN_008739e0`) only unlinks on 4, so the pending count never drains and the world-streaming
-//! gate (`FUN_004b9af0`) never releases — a spinning hang with no crash and no error.
+//! can never be satisfied, the node stays pending, so the pending count never drains and the
+//! world-streaming gate (`FUN_004b9af0`) never releases — a spinning hang with no crash and no error.
 //!
 //! Every WAD that loads has zero dangling refs (measured: retail base `vz.wad` 30645 rows; our
 //! WORKING dlc01 port patch 5451 rows), while the wardrobe builds that hang carry 22 each.
@@ -16,7 +16,11 @@
 //!
 //! Usage: `aset_refcheck <wad> [<wad> ...]`  — exit code 1 if any WAD has a violation.
 
+use mercs2_formats::aset_type_ids::type_id_for_type_hash;
 use mercs2_formats::ffcs::load_ffcs_archive;
+use mercs2_formats::sges::decompress_block;
+use mercs2_formats::ucfx::parse_block_entry_table;
+use std::collections::HashMap;
 use std::fs::File;
 
 fn main() {
@@ -62,8 +66,55 @@ fn main() {
             .file_name()
             .map(|s| s.to_string_lossy().to_string())
             .unwrap_or_else(|| path.clone());
+
+        // Every rung of a chain has to hold its asset exactly once. Rungs install coarsest first, and
+        // the ring consumer (`0x4b1160`) re-queues a rung that arrives before the one above it.
+        let mut held: HashMap<u16, HashMap<(u32, u32), usize>> = HashMap::new();
+        let (mut unheld, mut rungs) = (Vec::new(), 0usize);
         if violations.is_empty() {
-            println!("OK   {name}: {} rows / {nblocks} blocks — all LOD refs resolve", archive.aset.len());
+            for (row, e) in archive.aset.iter().enumerate() {
+                let chain = e.lod_chain();
+                if chain.len() < 2 {
+                    continue;
+                }
+                for (rung, blk) in chain.iter().enumerate() {
+                    if !held.contains_key(blk) {
+                        let dec = match decompress_block(&mut file, &archive.indx, *blk) {
+                            Ok(d) => d,
+                            Err(err) => {
+                                println!("{name}: block {blk}: {err}");
+                                std::process::exit(1);
+                            }
+                        };
+                        let (_, entries) = parse_block_entry_table(&dec);
+                        let mut counts = HashMap::new();
+                        for ent in entries {
+                            if let Some(type_id) = type_id_for_type_hash(ent.type_hash) {
+                                *counts.entry((ent.name_hash, type_id)).or_insert(0usize) += 1;
+                            }
+                        }
+                        held.insert(*blk, counts);
+                    }
+                    rungs += 1;
+                    let count = held[blk].get(&(e.asset_hash, e.type_id)).copied().unwrap_or(0);
+                    if count != 1 {
+                        unheld.push((row, e.asset_hash, rung, *blk, count));
+                    }
+                }
+            }
+        }
+
+        if violations.is_empty() && unheld.is_empty() {
+            println!(
+                "OK   {name}: {} rows / {nblocks} blocks — all LOD refs resolve, {rungs} rungs each hold their asset once",
+                archive.aset.len()
+            );
+        } else if violations.is_empty() {
+            any_bad = true;
+            println!("FAIL {name}: {} of {rungs} rungs do not hold their asset exactly once", unheld.len());
+            for (row, hash, rung, blk, count) in unheld.iter().take(12) {
+                println!("       row {row}: asset 0x{hash:08X} rung[{rung}] -> block {blk} holds it {count} time(s)");
+            }
         } else {
             any_bad = true;
             println!(
