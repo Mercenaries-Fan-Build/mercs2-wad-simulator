@@ -22,7 +22,7 @@
 //! # use mercs2_formats::be_to_le::convert;
 //! # fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! let be_block: Vec<u8> = vec![/* raw big-endian UCFX bytes */];
-//! let le_block = convert::convert_block(&be_block, false, None, None, None)?;
+//! let le_block = convert::convert_block(&be_block, false, None, None, None, None)?;
 //! # Ok(())
 //! # }
 //! ```
@@ -30,13 +30,13 @@
 use crate::crc32::crc32_mercs2;
 use crate::ffcs::{read_u16_be, read_u32_be};
 use crate::tags::ChunkTag;
-use crate::texsize::{dxt_format, dxt_mip_count, linear_mip_chain_size, tex_mip_levels};
 use crate::types;
 
 use super::ecs::{convert_ecs_bodies, convert_guidmap_body, ComponentSchemas};
 use super::havok;
 use super::lua;
 use super::report::SchemaCoverageReport;
+use super::texture::BlockTextures;
 
 /// When `true`, the per-block / per-entry diagnostics below are suppressed.
 /// The in-process `dlc_port` driver sets this (it converts thousands of blocks);
@@ -84,12 +84,15 @@ pub(super) struct Descriptor {
 /// holding a `BINN` chunk errors when it is `None`.
 /// `schemas` is the PC bake's class layouts ([`ComponentSchemas::from_vz_wad`]); a block holding a
 /// compact ECS container errors when it is `None`.
+/// `textures` is the archive's [`TextureTable`] and this block's rung; a block holding a big-endian
+/// texture errors when it is `None`.
 pub fn convert_block(
     be_data: &[u8],
     dry_run: bool,
     mut report: Option<&mut SchemaCoverageReport>,
     lua_tools: Option<&lua::LuaTools>,
     schemas: Option<&ComponentSchemas>,
+    textures: Option<BlockTextures>,
 ) -> Result<Vec<u8>, String> {
     if be_data.len() < 4 {
         return Err("Block too small".into());
@@ -159,6 +162,7 @@ pub fn convert_block(
     // chunk_size INCLUDES the 8-byte CSUM trailer on both Xbox and PC,
     // so strip it before converting and re-add a fresh one afterwards.
     let mut converted_containers: Vec<Vec<u8>> = Vec::with_capacity(entry_count);
+    let mut kept: Vec<&EntryInfo> = Vec::with_capacity(entry_count);
     let mut offset = header_size;
     for (ei, entry) in entries.iter().enumerate() {
         let container_end = offset + entry.chunk_size as usize;
@@ -172,14 +176,27 @@ pub fn convert_block(
         vlog!("  Converting entry {}: type=0x{:08x} ({}) size={} (UCFX={})",
             ei, entry.type_hash, type_name, entry.chunk_size, container.len());
 
+        offset = container_end;
+        if entry.type_hash == types::TYPE_HASH_TEXTURE && container.starts_with(b"XFCU") {
+            let t = textures.ok_or_else(|| format!("Entry {ei} 0x{:08x}: a texture needs the archive's TextureTable", entry.name_hash))?;
+            if t.table.is_empty_stub(entry.name_hash) {
+                continue;
+            }
+            let rung = t.rung.ok_or_else(|| format!("Entry {ei} 0x{:08x}: this block's path names no rung", entry.name_hash))?;
+            let converted = t.table.convert_chunk(entry.name_hash, rung, container)
+                .map_err(|e| format!("Entry {ei} 0x{:08x}: {e}", entry.name_hash))?;
+            converted_containers.push(converted);
+            kept.push(entry);
+            continue;
+        }
+
         let is_ecs = entry.type_hash == TYPE_HASH_ECS_NODE
             || entry.type_hash == TYPE_HASH_WORLD_ENTITY
             || entry.type_hash == TYPE_HASH_GUIDMAP;
         let converted = convert_container(container, is_ecs, ei, entry.type_hash, report.as_deref_mut(), lua_tools, schemas)
             .map_err(|e| format!("Entry {ei} 0x{:08x}: {e}", entry.name_hash))?;
         converted_containers.push(converted);
-
-        offset = container_end;
+        kept.push(entry);
     }
 
     // Pass 2: Compute correct chunk_sizes (UCFX + 8 for CSUM trailer).
@@ -198,8 +215,8 @@ pub fn convert_block(
     let mut output = Vec::with_capacity(be_data.len());
 
     // Write LE entry table
-    output.extend_from_slice(&(entry_count as u32).to_le_bytes());
-    for (ei, entry) in entries.iter().enumerate() {
+    output.extend_from_slice(&(kept.len() as u32).to_le_bytes());
+    for (ei, entry) in kept.iter().enumerate() {
         output.extend_from_slice(&entry.name_hash.to_le_bytes());
         output.extend_from_slice(&entry.type_hash.to_le_bytes());
         output.extend_from_slice(&entry.field_c.to_le_bytes());
@@ -356,15 +373,6 @@ fn convert_container(
     // match `container` 1:1 when the byteswap preserves size (animation bodies).
     if is_be && out.len() == container.len() {
         fix_embedded_havok_layoutrules(container, &mut out);
-    }
-
-    // Xbox 360 textures: rebuild INFO + untile the GPU-tiled DXT BODY. The
-    // generic pass left INFO basic-swapped and BODY as tiled passthrough; this
-    // reframes the container (BODY shrinks tiled->linear). Full (non-streamed)
-    // DXT entries only; stubs / non-DXT / non-trailing BODY fall through
-    // unchanged. convert_block recomputes chunk_size + CSUM from the new length.
-    if is_be && type_hash == types::TYPE_HASH_TEXTURE {
-        apply_texture_untile(&mut out, &descriptors, data_area_off, desc_table_end);
     }
 
     // Xbox 360 wavebanks: transcode embedded audio clips (PCM byte swap / XMA, XMA2
@@ -1383,33 +1391,10 @@ fn convert_texture_info(body: &mut [u8]) {
 
 // ── Xbox 360 texture untile + INFO rebuild ───────────────────────────
 //
-// Ports tools/xbox_texture_codec.py. The generic body pass already runs
-// `convert_texture_info` on the INFO chunk (basic field swap = the "rust xi"
-// form) and leaves the BODY as raw tiled passthrough. The post-process below
-// (a) rebuilds the 34-byte PC INFO from that swapped INFO and (b) untiles the
-// GPU-tiled DXT BODY into the PC-linear mip chain, then reframes the container.
-// Validated byte-exact (pixel data + INFO header) against the Rosetta corpus;
-// the [12:14] field and [32:34] streaming tail are non-reconstructible PC
-// metadata (see .cursor/notes/rosetta_oracle_baseline.md).
-
-/// (block_px, texel_pitch, log2(bytes_per_block)) for a DXT FourCC.
-/// Xbox D3D format word low byte (INFO[17]) -> PC FourCC.
-fn fourcc_from_format_byte(b: u8) -> Option<[u8; 4]> {
-    match b {
-        0x52 => Some(*b"DXT1"),
-        0x54 => Some(*b"DXT5"),
-        0x53 => Some(*b"DXT3"),
-        _ => None,
-    }
-}
-
-#[inline]
-fn read_u16_le(d: &[u8], off: usize) -> usize {
-    u16::from_le_bytes([d[off], d[off + 1]]) as usize
-}
+// What a rung's bytes are and how they split is `super::texture`; these two read one surface.
 
 /// XGAddress2DTiledOffset returning a *block* index (gildor/Noesis form).
-fn tiled_block_index(x: usize, y: usize, width_blocks: usize, log_bpb: usize) -> usize {
+pub(super) fn tiled_block_index(x: usize, y: usize, width_blocks: usize, log_bpb: usize) -> usize {
     let aligned_w = (width_blocks + 31) & !31;
     let macro_ = ((x >> 5) + (y >> 5) * (aligned_w >> 5)) << (log_bpb + 7);
     let micro = ((x & 7) + ((y & 0xE) << 2)) << log_bpb;
@@ -1423,7 +1408,7 @@ fn tiled_block_index(x: usize, y: usize, width_blocks: usize, log_bpb: usize) ->
 }
 
 /// Untile one mip surface (block granularity) to linear block order.
-fn untile_surface(
+pub(super) fn untile_surface(
     tiled: &[u8],
     width_blocks: usize,
     height_blocks: usize,
@@ -1447,351 +1432,11 @@ fn untile_surface(
 }
 
 /// Byte-swap every 16-bit word (Xbox DXT block words are big-endian).
-fn swap16_blocks(data: &mut [u8]) {
+pub(super) fn swap16_blocks(data: &mut [u8]) {
     let n = data.len() / 2;
     for i in 0..n {
         data.swap(i * 2, i * 2 + 1);
     }
-}
-
-/// Drop the 32-block width/height padding, yielding the wb x hb surface.
-fn crop_blocks(linear: &[u8], aligned_wb: usize, wb: usize, hb: usize, texel_pitch: usize) -> Vec<u8> {
-    if aligned_wb == wb {
-        return linear[..wb * hb * texel_pitch].to_vec();
-    }
-    let mut out = vec![0u8; wb * hb * texel_pitch];
-    for j in 0..hb {
-        let s = j * aligned_wb * texel_pitch;
-        let d = j * wb * texel_pitch;
-        out[d..d + wb * texel_pitch].copy_from_slice(&linear[s..s + wb * texel_pitch]);
-    }
-    out
-}
-
-fn untile_own_surface(tiled: &[u8], width_px: usize, height_px: usize, fourcc: &[u8; 4]) -> Option<Vec<u8>> {
-    let (block_px, texel_pitch, log_bpb) = dxt_format(fourcc)?;
-    let wb = ((width_px + block_px - 1) / block_px).max(1);
-    let hb = ((height_px + block_px - 1) / block_px).max(1);
-    let awb = (wb + 31) & !31;
-    let ahb = (hb + 31) & !31;
-    let need = (awb * ahb * texel_pitch).min(tiled.len());
-    let mut lin = untile_surface(&tiled[..need], awb, ahb, texel_pitch, log_bpb);
-    swap16_blocks(&mut lin);
-    Some(crop_blocks(&lin, awb, wb, hb, texel_pitch))
-}
-
-/// Bytes the Xbox tiled BODY occupies for a full (non-streamed) texture.
-fn tiled_body_size(width: usize, height: usize, fourcc: &[u8; 4], mips: usize) -> usize {
-    let (block_px, texel_pitch, _) = dxt_format(fourcc).unwrap();
-    let n = if mips > 0 { mips } else { tex_mip_levels(width, height) };
-    let mut total = 0;
-    let mut tail_added = false;
-    for m in 0..n {
-        let wpx = (width >> m).max(1);
-        let hpx = (height >> m).max(1);
-        if wpx.min(hpx) >= 32 {
-            let wb = ((wpx + block_px - 1) / block_px).max(1);
-            let hb = ((hpx + block_px - 1) / block_px).max(1);
-            let awb = (wb + 31) & !31;
-            let ahb = (hb + 31) & !31;
-            total += awb * ahb * texel_pitch;
-        } else if !tail_added {
-            total += 32 * 32 * texel_pitch;
-            tail_added = true;
-        }
-    }
-    total
-}
-
-/// Assemble a full PC-linear DXT mip chain from a tiled Xbox BODY (incl. the
-/// packed sub-32 "mip tail"). Returns None if the body is too short.
-fn untile_dxt_body(tiled: &[u8], width: usize, height: usize, fourcc: &[u8; 4], mips: usize) -> Option<Vec<u8>> {
-    let (block_px, texel_pitch, log_bpb) = dxt_format(fourcc)?;
-    let n = if mips > 0 { mips } else { tex_mip_levels(width, height) };
-    let mut out: Vec<u8> = Vec::new();
-    let mut pos = 0usize;
-    let mut tail_lin: Option<Vec<u8>> = None;
-    for m in 0..n {
-        let wpx = (width >> m).max(1);
-        let hpx = (height >> m).max(1);
-        let wb = ((wpx + block_px - 1) / block_px).max(1);
-        let hb = ((hpx + block_px - 1) / block_px).max(1);
-        if wpx.min(hpx) >= 32 {
-            let awb = (wb + 31) & !31;
-            let ahb = (hb + 31) & !31;
-            let size = awb * ahb * texel_pitch;
-            if pos + size > tiled.len() {
-                break;
-            }
-            let mut lin = untile_surface(&tiled[pos..pos + size], awb, ahb, texel_pitch, log_bpb);
-            swap16_blocks(&mut lin);
-            out.extend_from_slice(&crop_blocks(&lin, awb, wb, hb, texel_pitch));
-            pos += size;
-        } else {
-            if tail_lin.is_none() {
-                let size = 32 * 32 * texel_pitch;
-                if pos + size > tiled.len() {
-                    break;
-                }
-                let mut t = untile_surface(&tiled[pos..pos + size], 32, 32, texel_pitch, log_bpb);
-                swap16_blocks(&mut t);
-                tail_lin = Some(t);
-                pos += size;
-            }
-            let tl = tail_lin.as_ref().unwrap();
-            let (bx, by) = if wb >= hb { (wb, 0) } else { (0, hb) };
-            for r in 0..hb {
-                let base = ((by + r) * 32 + bx) * texel_pitch;
-                if base + wb * texel_pitch <= tl.len() {
-                    out.extend_from_slice(&tl[base..base + wb * texel_pitch]);
-                }
-            }
-        }
-    }
-    Some(out)
-}
-
-/// Public wrapper: untile a raw tiled Xbox DXT BODY into the PC-linear mip chain.
-pub fn untile_tiled_dxt_body(
-    tiled: &[u8], width: usize, height: usize, fourcc: &[u8; 4], mips: usize,
-) -> Option<Vec<u8>> {
-    untile_dxt_body(tiled, width, height, fourcc, mips)
-}
-
-/// Nearest-neighbour scale a DXT surface at *block* granularity (each 4x4 DXT
-/// block is copied whole, so no decode/recompress is needed and the result is a
-/// valid DXT surface). Works in either direction (up- or down-scale).
-fn scale_dxt_blocks(
-    src: &[u8], src_wb: usize, src_hb: usize, dst_wb: usize, dst_hb: usize, texel_pitch: usize,
-) -> Vec<u8> {
-    let mut out = vec![0u8; dst_wb * dst_hb * texel_pitch];
-    if src_wb == 0 || src_hb == 0 {
-        return out;
-    }
-    for dy in 0..dst_hb {
-        let sy = (dy * src_hb / dst_hb).min(src_hb - 1);
-        for dx in 0..dst_wb {
-            let sx = (dx * src_wb / dst_wb).min(src_wb - 1);
-            let s = (sy * src_wb + sx) * texel_pitch;
-            let d = (dy * dst_wb + dx) * texel_pitch;
-            if s + texel_pitch <= src.len() && d + texel_pitch <= out.len() {
-                out[d..d + texel_pitch].copy_from_slice(&src[s..s + texel_pitch]);
-            }
-        }
-    }
-    out
-}
-
-/// Recover the largest decodable DXT surface from a (possibly partial/stub)
-/// tiled Xbox body. The body always begins with its largest contained mip, so
-/// we iterate levels from largest to smallest and untile the first whose tiled
-/// own-surface fits. Returns (linear blocks, width_blocks, height_blocks).
-fn recover_best_surface(
-    tiled: &[u8], width: usize, height: usize, fourcc: &[u8; 4], mips: usize,
-) -> Option<(Vec<u8>, usize, usize)> {
-    let (block_px, texel_pitch, _) = dxt_format(fourcc)?;
-    let n = if mips > 0 { mips } else { tex_mip_levels(width, height) };
-    for m in 0..n.max(1) {
-        let wpx = (width >> m).max(1);
-        let hpx = (height >> m).max(1);
-        let wb = ((wpx + block_px - 1) / block_px).max(1);
-        let hb = ((hpx + block_px - 1) / block_px).max(1);
-        let awb = (wb + 31) & !31;
-        let ahb = (hb + 31) & !31;
-        // First level whose full aligned surface is present in the body.
-        if tiled.len() >= awb * ahb * texel_pitch {
-            return untile_own_surface(tiled, wpx, hpx, fourcc).map(|s| (s, wb, hb));
-        }
-    }
-    None
-}
-
-/// Build a COMPLETE PC-linear DXT mip chain at the ORIGINAL (width,height,mips)
-/// from a partial/stub tiled body: recover the best available surface and
-/// block-nearest scale it into every mip level. The chain is exactly
-/// `linear_mip_chain_size(width,height,fourcc,mips)` bytes — fully resident, so
-/// the engine reads it and is done (no over-read, no streaming wait). Detail
-/// below the recovered surface's resolution is interpolated, not original.
-fn synthesize_resident_chain(
-    tiled: &[u8], width: usize, height: usize, fourcc: &[u8; 4], mips: usize,
-) -> Option<Vec<u8>> {
-    let (block_px, texel_pitch, _) = dxt_format(fourcc)?;
-    let (src, src_wb, src_hb) = recover_best_surface(tiled, width, height, fourcc, mips)?;
-    let n = if mips > 0 { mips } else { tex_mip_levels(width, height) };
-    let mut out = Vec::with_capacity(linear_mip_chain_size(width, height, fourcc, n));
-    for l in 0..n.max(1) {
-        let wpx = (width >> l).max(1);
-        let hpx = (height >> l).max(1);
-        let wb = ((wpx + block_px - 1) / block_px).max(1);
-        let hb = ((hpx + block_px - 1) / block_px).max(1);
-        out.extend_from_slice(&scale_dxt_blocks(&src, src_wb, src_hb, wb, hb, texel_pitch));
-    }
-    Some(out)
-}
-
-/// Rebuild a 34-byte PC texture INFO from the basic-swapped ("rust xi") INFO.
-/// Mirrors `xbox_texture_codec.rebuild_texture_info`.
-fn rebuild_texture_info(xi: &[u8], fourcc: &[u8; 4], mips: usize, linear_total: u32) -> [u8; 34] {
-    let mut out = [0u8; 34];
-    out[0..4].copy_from_slice(&xi[0..4]);
-    // transpose [4:6]<->[6:8]
-    out[4..6].copy_from_slice(&xi[6..8]);
-    out[6..8].copy_from_slice(&(mips as u16).to_le_bytes());
-    // [8:10]<->[10:12] transpose; clear the Xbox 0x10 "tiled" flag bit.
-    let f8 = (u16::from_le_bytes([xi[10], xi[11]]) & !0x10).to_le_bytes();
-    out[8..10].copy_from_slice(&f8);
-    out[10..12].copy_from_slice(&xi[8..10]);
-    out[12..14].copy_from_slice(&xi[12..14]);
-    out[14..18].copy_from_slice(fourcc);
-    // LOD-bias float is big-endian on Xbox (passthrough in the basic swap) -> LE.
-    out[18] = xi[21];
-    out[19] = xi[20];
-    out[20] = xi[19];
-    out[21] = xi[18];
-    out[22..26].copy_from_slice(&linear_total.to_le_bytes());
-    // Streaming-residency descriptor [26:34]: the fully-resident sentinel
-    // 00 00 00 00 00 00 FF FF (retail's most common resident value; trailing
-    // word is a 2^n-1 mip-residency bitmask, 0xffff = all mips resident). Every
-    // texture we emit is a complete resident mip chain, so it is always resident.
-    out[26..34].copy_from_slice(&[0, 0, 0, 0, 0, 0, 0xFF, 0xFF]);
-    out
-}
-
-/// Post-process a converted texture container: rebuild INFO + untile BODY and
-/// reframe. Handles full, prefix, single-mip, streamed pages, and INFO-only
-/// stubs (sentinel BODY). Returns true when INFO was rebuilt to PC FourCC form.
-fn apply_texture_untile(
-    out: &mut Vec<u8>,
-    descriptors: &[Descriptor],
-    data_area_off: usize,
-    desc_table_end: usize,
-) -> bool {
-    let data_start = if data_area_off > 0 { data_area_off } else { desc_table_end };
-
-    let mut info_idx = None;
-    let mut body_idx = None;
-    for (i, d) in descriptors.iter().enumerate() {
-        if d.row_u0 == 0xFFFFFFFF {
-            continue;
-        }
-        if d.tag == ChunkTag::InfoUpper && info_idx.is_none() {
-            info_idx = Some(i);
-        } else if d.tag == ChunkTag::Body && body_idx.is_none() && d.body_size > 0 {
-            body_idx = Some(i);
-        }
-    }
-    let info_idx = match info_idx {
-        Some(i) => i,
-        None => return false,
-    };
-
-    let info = &descriptors[info_idx];
-    if info.body_size < 34 {
-        return false;
-    }
-    let info_abs = data_start + info.row_u0 as usize;
-    if info_abs + 34 > out.len() {
-        return false;
-    }
-
-    let xi = out[info_abs..info_abs + 34].to_vec();
-    let fourcc = match fourcc_from_format_byte(xi[17]) {
-        Some(f) => f,
-        None => return false,
-    };
-    let width = read_u16_le(&xi, 0);
-    let height = read_u16_le(&xi, 2);
-    if width == 0 || height == 0 {
-        return false;
-    }
-    // Claim the STANDARD full mip chain (down to 1x1), NOT the Xbox-authored count.
-    // Live x32dbg proved the engine instantiates the full chain from the texture's
-    // dimensions regardless of the header's mip field: a 64x64 DXT1 had 5 populated
-    // mip surfaces (+ 0xABABABAB overrun) while its header claimed 3, so the engine
-    // read past the body -> STATUS_BUFFER_TOO_SMALL -> the page never reached ready
-    // state 4 -> world-load livelock (dlc01_dlccon002_roads). DLC stub textures carry
-    // a reduced count; honoring it under-claims and hangs. Claim the retail PC chain
-    // (down to the 4x4 DXT minimum, governed by the smaller dim — base vz.wad's
-    // convention) so the engine's surface count, the INFO mip count and the body agree.
-    let mips = dxt_mip_count(width, height);
-
-    // Build a COMPLETE, fully-resident PC mip chain at the texture's ORIGINAL
-    // dimensions. An earlier pass REDUCED the dimensions to fit a partial Xbox stub
-    // body; that made each texture internally consistent but desynced it from the
-    // layer/material data that references it at full size, so its streaming node
-    // never reached ready-state 4. Now we keep (width,height) + the full mip count
-    // and, for a partial/stub body, synthesize the missing mips by block-nearest
-    // scaling the best surface recovered from the stub: full-size + complete +
-    // resident, so references stay valid, there is no over-read (BUFFER_TOO_SMALL)
-    // and no streaming wait. Synthesized mips are lower-detail, not pixel-accurate.
-    let tlinear = linear_mip_chain_size(width, height, &fourcc, mips);
-    let (pc_body, body_idx, body_abs_val) = if let Some(body_idx) = body_idx {
-        let body = &descriptors[body_idx];
-        let body_abs = data_start + body.row_u0 as usize;
-        if body_abs + body.body_size as usize > out.len() {
-            return false;
-        }
-        let tiled = out[body_abs..body_abs + body.body_size as usize].to_vec();
-        // A full body untiles directly; a partial/stub body is synthesized to a
-        // complete resident chain at full dimensions.
-        let complete = if tiled.len() >= tiled_body_size(width, height, &fourcc, mips) {
-            untile_dxt_body(&tiled, width, height, &fourcc, mips)
-        } else {
-            synthesize_resident_chain(&tiled, width, height, &fourcc, mips)
-        };
-        match complete {
-            Some(b) => (Some(b), Some(body_idx), Some(body_abs)),
-            None => return false,
-        }
-    } else {
-        (None, None, None)
-    };
-
-    // INFO at ORIGINAL dimensions, fully resident.
-    let pc_info = rebuild_texture_info(&xi, &fourcc, mips, tlinear as u32);
-    out[info_abs..info_abs + 34].copy_from_slice(&pc_info);
-
-    let mut body_abs_val = body_abs_val;
-    let info_size_field = 20 + info_idx * 20 + 8;
-    if info.body_size as usize > 34 {
-        let shrink = info.body_size as usize - 34;
-        let info_end = info_abs + info.body_size as usize;
-        if info_end <= out.len() {
-            let tail = out[info_end..].to_vec();
-            out.truncate(info_abs + 34);
-            out.extend_from_slice(&tail);
-            if let Some(ref mut abs) = body_abs_val {
-                if *abs >= info_end {
-                    *abs -= shrink;
-                }
-            }
-            for (i, d) in descriptors.iter().enumerate() {
-                if i == info_idx || d.row_u0 == 0xFFFFFFFF {
-                    continue;
-                }
-                if d.row_u0 as usize + data_start >= info_end {
-                    let row_field = 20 + i * 20 + 4;
-                    let new_u0 = d.row_u0 - shrink as u32;
-                    out[row_field..row_field + 4].copy_from_slice(&new_u0.to_le_bytes());
-                }
-            }
-        }
-        out[info_size_field..info_size_field + 4].copy_from_slice(&34u32.to_le_bytes());
-    }
-
-    if let (Some(body_idx), Some(body_abs_val)) = (body_idx, body_abs_val) {
-        if let Some(mut untiled) = pc_body {
-            // Body length == INFO mip chain at full dimensions: pad short, trim long.
-            untiled.resize(tlinear, 0);
-            let body_size_field = 20 + body_idx * 20 + 8;
-            out[body_size_field..body_size_field + 4]
-                .copy_from_slice(&(tlinear as u32).to_le_bytes());
-            out.truncate(body_abs_val);
-            out.extend_from_slice(&untiled);
-        }
-    }
-
-    true
 }
 
 /// Xbox-360 vertex-fetch format byte (`(b >> 8) & 0xFF`) -> PC D3DDECLTYPE.
@@ -3485,7 +3130,7 @@ mod tests {
         block.extend_from_slice(&be32(chunk_size));
         block.extend_from_slice(&container);
 
-        let out = convert_block(&block, false, None, None, None).expect("convert_block must succeed");
+        let out = convert_block(&block, false, None, None, None, None).expect("convert_block must succeed");
 
         // LE entry table row 0: [0..4]=count, [4..8]=name, [8..12]=type, [12..16]=field_c.
         assert_eq!(
@@ -3500,7 +3145,7 @@ mod tests {
         // Also confirm base-game blocks (field_c == 0) stay 0 — swapping 0 is a no-op.
         let mut block0 = block.clone();
         block0[12..16].copy_from_slice(&be32(0)); // field_c = 0
-        let out0 = convert_block(&block0, false, None, None, None).expect("convert_block must succeed");
+        let out0 = convert_block(&block0, false, None, None, None, None).expect("convert_block must succeed");
         assert_eq!(
             u32::from_le_bytes([out0[12], out0[13], out0[14], out0[15]]),
             0,
