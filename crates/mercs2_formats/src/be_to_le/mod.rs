@@ -19,4 +19,5 @@ pub mod havok;
 pub mod lua;
 pub mod ps3_native;
 pub mod report;
+pub mod texture;
 pub mod validate;
