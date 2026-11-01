@@ -36,7 +36,7 @@ use super::ecs::{convert_ecs_bodies, convert_guidmap_body, ComponentSchemas};
 use super::havok;
 use super::lua;
 use super::report::SchemaCoverageReport;
-use super::texture::BlockTextures;
+use super::texture::BlockTables;
 
 /// When `true`, the per-block / per-entry diagnostics below are suppressed.
 /// The in-process `dlc_port` driver sets this (it converts thousands of blocks);
@@ -84,15 +84,15 @@ pub(super) struct Descriptor {
 /// holding a `BINN` chunk errors when it is `None`.
 /// `schemas` is the PC bake's class layouts ([`ComponentSchemas::from_vz_wad`]); a block holding a
 /// compact ECS container errors when it is `None`.
-/// `textures` is the archive's [`TextureTable`] and this block's rung; a block holding a big-endian
-/// texture errors when it is `None`.
+/// `tables` is the archive's [`TextureTable`], this block's rung and its streamed banks; a block
+/// holding a big-endian texture errors when it is `None`, a streamed bank when it holds none.
 pub fn convert_block(
     be_data: &[u8],
     dry_run: bool,
     mut report: Option<&mut SchemaCoverageReport>,
     lua_tools: Option<&lua::LuaTools>,
     schemas: Option<&ComponentSchemas>,
-    textures: Option<BlockTextures>,
+    tables: Option<BlockTables>,
 ) -> Result<Vec<u8>, String> {
     if be_data.len() < 4 {
         return Err("Block too small".into());
@@ -178,12 +178,12 @@ pub fn convert_block(
 
         offset = container_end;
         if entry.type_hash == types::TYPE_HASH_TEXTURE && container.starts_with(b"XFCU") {
-            let t = textures.ok_or_else(|| format!("Entry {ei} 0x{:08x}: a texture needs the archive's TextureTable", entry.name_hash))?;
-            if t.table.is_empty_stub(entry.name_hash) {
+            let t = tables.ok_or_else(|| format!("Entry {ei} 0x{:08x}: a texture needs the archive's TextureTable", entry.name_hash))?;
+            if t.textures.is_empty_stub(entry.name_hash) {
                 continue;
             }
             let rung = t.rung.ok_or_else(|| format!("Entry {ei} 0x{:08x}: this block's path names no rung", entry.name_hash))?;
-            let converted = t.table.convert_chunk(entry.name_hash, rung, container)
+            let converted = t.textures.convert_chunk(entry.name_hash, rung, container)
                 .map_err(|e| format!("Entry {ei} 0x{:08x}: {e}", entry.name_hash))?;
             converted_containers.push(converted);
             kept.push(entry);
@@ -193,7 +193,8 @@ pub fn convert_block(
         let is_ecs = entry.type_hash == TYPE_HASH_ECS_NODE
             || entry.type_hash == TYPE_HASH_WORLD_ENTITY
             || entry.type_hash == TYPE_HASH_GUIDMAP;
-        let converted = convert_container(container, is_ecs, ei, entry.type_hash, report.as_deref_mut(), lua_tools, schemas)
+        let stream = tables.and_then(|t| t.streams).and_then(|s| s.get(entry.name_hash));
+        let converted = convert_container(container, is_ecs, ei, entry.type_hash, report.as_deref_mut(), lua_tools, schemas, stream)
             .map_err(|e| format!("Entry {ei} 0x{:08x}: {e}", entry.name_hash))?;
         converted_containers.push(converted);
         kept.push(entry);
@@ -243,7 +244,7 @@ pub fn convert_ecs_container(
     type_hash: u32,
     schemas: Option<&ComponentSchemas>,
 ) -> Result<Vec<u8>, String> {
-    let mut out = convert_container(strip_csum_trailer(container), true, 0, type_hash, None, None, schemas)?;
+    let mut out = convert_container(strip_csum_trailer(container), true, 0, type_hash, None, None, schemas, None)?;
     let crc = crc32_mercs2(&out);
     out.extend_from_slice(b"CSUM");
     out.extend_from_slice(&crc.to_le_bytes());
@@ -258,6 +259,7 @@ fn convert_container(
     report: Option<&mut SchemaCoverageReport>,
     lua_tools: Option<&lua::LuaTools>,
     schemas: Option<&ComponentSchemas>,
+    stream: Option<&super::audio::PcStream>,
 ) -> Result<Vec<u8>, String> {
     if container.len() < 20 {
         return Err(format!("Entry {} container too small ({})", entry_idx, container.len()));
@@ -379,7 +381,7 @@ fn convert_container(
     // and MP3 via ffmpeg → PC PCM16) and reframe the container (the audio body resizes).
     // The generic pass left the `data` chunk raw BE for this.
     if is_be && type_hash == types::TYPE_HASH_WAVEBANK {
-        apply_wavebank_transcode(&mut out, &descriptors, data_area_off, desc_table_end)?;
+        apply_wavebank_transcode(&mut out, &descriptors, data_area_off, desc_table_end, stream)?;
     }
 
     // Xbox 360 mesh vertex declarations: translate each `decl` chunk from the
@@ -505,6 +507,7 @@ fn apply_wavebank_transcode(
     descriptors: &[Descriptor],
     data_area_off: usize,
     desc_table_end: usize,
+    stream: Option<&super::audio::PcStream>,
 ) -> Result<(), String> {
     let data_start = if data_area_off > 0 { data_area_off } else { desc_table_end };
     let Some(data_idx) = descriptors
@@ -520,7 +523,7 @@ fn apply_wavebank_transcode(
         return Ok(());
     }
     let body_be = out[body_abs..old_end].to_vec();
-    let new_body = super::audio::convert_wavebank_data(&body_be)
+    let new_body = super::audio::convert_wavebank_data(&body_be, stream)
         .map_err(|e| format!("wavebank transcode: {e}"))?;
 
     // Update this chunk's body_size field (descriptor row layout: tag@0, row_u0@+4,
@@ -992,6 +995,12 @@ fn convert_generic_bodies(
                     }
                     ChunkTag::Emtr => {
                         // EMTR: 2-byte emitter count (genuine u16).
+                        swap_u16_array(&mut data_area[body_local_start..body_local_end]);
+                    }
+                    ChunkTag::Geom if type_hash == types::TYPE_HASH_EFFECT && body_local_end - body_local_start == 4 => {
+                        // An emitter's GEOM: u16 shape index, u16 count. EMTR's GEOM children, a
+                        // u32 count and its records, are longer unless the count is 0, which reads
+                        // the same either way.
                         swap_u16_array(&mut data_area[body_local_start..body_local_end]);
                     }
                     // SEGM/BSHI removed: they were lumped with HIER on the same (now
@@ -3326,12 +3335,40 @@ mod tests {
             c.extend_from_slice(&v.to_be_bytes());
         }
         c.extend_from_slice(&be_body);
-        let out = convert_container(&c, false, 0, crate::types::TYPE_HASH_EFFECT, None, None, None).expect("convert");
+        let out = convert_container(&c, false, 0, crate::types::TYPE_HASH_EFFECT, None, None, None, None).expect("convert");
         assert_eq!(&out[20..24], b"EFCT");
         let mut want = be_body;
         convert_efct_header_inplace(&mut want);
         assert_eq!(&out[40..58], &want, "EFCT body must take the u16 header swap");
         assert_eq!(u16::from_le_bytes([out[42], out[43]]), 0x0226);
+    }
+
+    /// One row of `body` tagged `GEOM`, as Xbox stores it.
+    fn effect_geom(body: &[u8]) -> Vec<u8> {
+        let mut c = Vec::new();
+        c.extend_from_slice(b"XFCU");
+        for v in [40u32, 0, 0, 1] {
+            c.extend_from_slice(&v.to_be_bytes());
+        }
+        c.extend_from_slice(b"MOEG");
+        for v in [0u32, body.len() as u32, 0, 0] {
+            c.extend_from_slice(&v.to_be_bytes());
+        }
+        c.extend_from_slice(body);
+        c
+    }
+
+    /// An emitter's `GEOM` keeps its two u16s in order, where the u32 sweep would trade the shape
+    /// index for the count. A shape table's `GEOM` stays u32 and f32.
+    #[test]
+    fn an_emitter_geom_is_two_u16s() {
+        let e = crate::types::TYPE_HASH_EFFECT;
+        let out = convert_container(&effect_geom(&[0, 1, 0, 2]), false, 0, e, None, None, None, None).expect("convert");
+        assert_eq!(&out[40..44], &[1, 0, 2, 0]);
+        let mut shapes = 1u32.to_be_bytes().to_vec();
+        shapes.extend_from_slice(&[0x3F, 0x80, 0, 0].repeat(13));
+        let out = convert_container(&effect_geom(&shapes), false, 0, e, None, None, None, None).expect("convert");
+        assert_eq!(&out[40..48], &[1, 0, 0, 0, 0, 0, 0x80, 0x3F]);
     }
 
     #[test]
