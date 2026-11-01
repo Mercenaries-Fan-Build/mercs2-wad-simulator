@@ -3,4 +3,4 @@
 //! as a driver / CLI wrapper for the module tree, and existing callers
 //! (`use ucfx_byteswap::convert::…`) keep working via the re-exports below.
 
-pub use mercs2_formats::be_to_le::{aset, audio, convert, ecs, havok, lua, report, validate};
+pub use mercs2_formats::be_to_le::{aset, audio, convert, ecs, havok, lua, report, texture, validate};
