@@ -91,9 +91,9 @@ pub struct Templates {
     world: TemplateRecords,
     classes: HashMap<u32, BTreeSet<String>>,
     links: BTreeMap<u32, Vec<PhysicalLink>>,
-    names: HashMap<u32, String>,
+    pub(crate) names: HashMap<u32, String>,
     profiles: HashMap<u32, u32>,
-    we: WorldEntity,
+    pub(crate) we: WorldEntity,
 }
 
 impl Templates {
