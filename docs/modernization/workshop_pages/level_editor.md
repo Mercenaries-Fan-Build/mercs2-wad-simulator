@@ -53,7 +53,7 @@ Decided with the user (2026-11-01), for now: the rail reads LEVEL at 02 and DEPO
 | Rail (`RailLevel`) | Adds **LEVEL** at 02 and **DEPOT** at 07; every label 11 px. The later numbers move up by one or two | `app.rs` `Workbench::ALL`, `gui::theme::RailIcon` | — | `Workbench::Level`, `Workbench::Depot`. "depot" has no hit in `crates/mercs2_workshop/src` | the rail tests in `app.rs`; capture |
 | Inspect tab strip | `LAYERS` leaves. Its row menu routes (`quartermaster.rs:1057`) move to the outliner's row menu | `index::Kind::ALL`, `app.rs:4320`, `app.rs:5949`, `app.rs:7604` | — | `Kind::Layer` stays an index kind; only the tab goes | test: Inspect tabs omit Layers; seeded routes unchanged |
 | `--ui-state` | `tab: "WORLD LAYERS"` becomes `page: "Level"`, and `load` folds case. Today the row match is exact, so `vz_lowresterrain` fails where `vz_LowResTerrain` is the row's label | `ui_state.rs`, `app.rs:3025` | — | case-folded match | test: both spellings open one row |
-| Level picker (header) | Lists levels by name: `vz`, each other level WAD found, the Depot's new levels. Choosing one reloads the page's catalog | `index`, `game_paths` | `settings.json` | a level is a page argument, not a constant | test: catalog per level |
+| Level picker (header) | Lists levels by name: `vz`, each other level WAD found, the Depot's new levels. Choosing one reloads the page's catalog | `levels::found`, Inspect's picker | `settings.json` `level` | the Depot's levels | test: catalog per level |
 | World state picker (header) | Lists New game, each profile in the Saves folder, each saved state, the current scrub. Choosing one sets which layers count as on, everywhere on the page | see world-state model | `settings.json` last state | — | test: 421, 410, 413 layers; 75,263, 75,829, 76,040 entities |
 | Panel widths | Left and right panels use `gui::held_side_panel`; only a drag sets a width; rows cut text | `gui.rs` | `settings.json` | — | capture at the narrowest width |
 | Type | Every size from `theme::type_scale()`: 11, 13, 15, 18 | `gui.rs` | — | — | `no_hard_coded_font_sizes_in_the_workshop_sources` |
@@ -275,12 +275,12 @@ Layer, model and template names are real names hashed by `pandemic_hash_m2`.
 | Boot by name, `Sys.StartSingleplayer(level, master)` | PROVEN live for dlc01 | — |
 | `<level>_base` layer, master script asset | PROVEN | — |
 | Static and default lists | PROVEN, `dlc01.lua` 11 and 3 | — |
-| Self-contained WAD | wedge seen: `dlc01.wad` alone spins on "1 outstanding asset" | merge base globals into the level WAD, boot |
+| Level over the base | wedge seen: `dlc01.wad` alone spins on "1 outstanding asset". `add_level` places `<name>-patch.wad` above a copy of `vz.wad` | boot |
 | Terrain cells load | UNPROVEN: no edited cell has been run | U7 |
 | Collider loads | UNPROVEN | U7 |
 | Road graph | built at run time from Road, RoadIntersection, LaneData, `path` | one road on a test level, a traffic spawner |
 | AI ground navigation | undecoded; no nav asset; DLC ships `_pathfinding` stems | read `dlc01_state_dlccon003_pathfinding` |
-| Delivery | needs P5 | — |
+| Delivery | `add_level` | boot |
 
 ## How a modder builds
 
