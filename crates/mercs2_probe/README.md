@@ -92,6 +92,10 @@ zeros. Their tests are game-gated (`--features retail`) and read `memory_dumps_d
   `notes_docs_dir` key of `.mercs2-local.toml`. Subcommands `tex-rungs` (every texture chunk of a
   big-endian archive and its PC twin, a row per block) and `tex-compare` (an Xbox archive's textures,
   converted and decoded mip by mip against PC, or a PS3 archive with `--ps3`).
+* **Audio**: subcommands `stfs-list` (the files of an Xbox package), `pws-survey` (every wavebank
+  record of a console package or big-endian WAD, each streamed one against the bytes it addresses;
+  `--extract <dir>` writes the `.pws` files) and `pws-pc` (every streamed record of a PC WAD with the
+  first bytes of its range).
 * **Archive / naming**: `aset_probe` (every ASET row a name-hash owns + a multi-block striping
   census), `model_namer` (derives a model's name from the textures it uses, and can emit a rainbow-
   table name fragment), `kit_templates` (the resident worldentity's spawn templates that wear a given
