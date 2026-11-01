@@ -41,6 +41,7 @@
 mod anim_table;
 mod bone_census;
 mod chunk_compare;
+mod pws_survey;
 mod tex_compare;
 mod tex_rungs;
 mod clip_names;
@@ -613,6 +614,46 @@ fn main() {
         if let Err(e) = chunk_compare::chunk_compare(inputs, std::path::Path::new(out)) {
             eprintln!("chunk-compare failed: {e}");
             std::process::exit(1);
+        }
+        return;
+    }
+    if cmd == "pws-pc" {
+        let (Some(wad), Some(audios), Some(out)) = (args.first(), args.get(1), args.get(2)) else {
+            eprintln!("pws-pc: usage: mercs2_probe pws-pc <pc wad> <Audios dir> <out.tsv>");
+            std::process::exit(2);
+        };
+        if let Err(e) = pws_survey::pc_streams(std::path::Path::new(wad), std::path::Path::new(audios), std::path::Path::new(out)) {
+            eprintln!("pws-pc failed: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    if cmd == "pws-survey" {
+        let (Some(package), Some(out)) = (args.first(), args.get(1)) else {
+            eprintln!("pws-survey: usage: mercs2_probe pws-survey <stfs package> <out.tsv> [--extract <dir>]");
+            std::process::exit(2);
+        };
+        let extract = flag_val(&args, "--extract");
+        if let Err(e) = pws_survey::pws_survey(std::path::Path::new(package), std::path::Path::new(out), extract.as_deref().map(std::path::Path::new)) {
+            eprintln!("pws-survey failed: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    if cmd == "stfs-list" {
+        let Some(package) = args.first() else {
+            eprintln!("stfs-list: usage: mercs2_probe stfs-list <stfs package>");
+            std::process::exit(2);
+        };
+        let reader = match std::fs::read(package) {
+            Ok(data) => mercs2_formats::dlc_stfs::StfsReader::new(data),
+            Err(e) => {
+                eprintln!("stfs-list: {package}: {e}");
+                std::process::exit(1);
+            }
+        };
+        for e in reader.file_table.iter().filter(|e| !e.is_dir) {
+            println!("{}\t{}\t{}", e.path_ind, e.file_size, e.name);
         }
         return;
     }
