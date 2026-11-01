@@ -4,7 +4,8 @@
 //! [`LayerView::read`] resolves the layer's entities as the world's activation does
 //! (`worldutil::PlacedCatalog`): a placed entity's model is its own `ModelName`, else its template's.
 //! The template's `PhysicalLink` children come with it, each at its parent's node plus its own offset
-//! ([`Part`]). An entity with nothing to draw is a labelled marker of its [`kind`].
+//! ([`Part`]). An entity a placed `PhysicalLink` names as its child sits at that link, not at its own
+//! `Transform` ([`EntityLink`]). An entity with nothing to draw is a labelled marker of its [`kind`].
 //!
 //! [`LayerView::step`] loads the models a few at a time, so a layer of thousands of entities fills in
 //! while the window stays live. Each instance is drawn in its template's state: the template's
@@ -24,7 +25,7 @@ use mercs2_engine::wad;
 use mercs2_engine::worldutil::{PlacedCatalog, TemplateRecords};
 use mercs2_formats::mixr::Mixr;
 use mercs2_formats::orchestrator as orch;
-use mercs2_formats::physical_link::{placed_physical_links, template_physical_links, PhysicalLink};
+use mercs2_formats::physical_link::{placed_links_in_order, placed_physical_links, template_physical_links, PhysicalLink};
 use mercs2_formats::placement::{entity_classes, placed_names};
 use mercs2_formats::worldentity::WorldEntity;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
@@ -131,6 +132,18 @@ pub struct Part {
     pub problem: Option<String>,
 }
 
+/// The placed `PhysicalLink` an entity hangs from. Its `Transform` then says nothing about where it
+/// is: `layer --frames` finds every one of them at the link in four captures, and at its `Transform`
+/// only by chance. When two records name one child the last wins.
+#[derive(Clone, Debug)]
+pub struct EntityLink {
+    /// The parent's index in [`LayerView::entities`].
+    pub parent: usize,
+    /// A node of the parent's model, which counts once that model is there; 0 for the entity itself.
+    pub hard_point: u32,
+    pub offset: Mat4,
+}
+
 /// One entity of the layer.
 #[derive(Clone, Debug)]
 pub struct LayerEntity {
@@ -139,8 +152,12 @@ pub struct LayerEntity {
     /// `Transform.Parent`, 0 for none, and its `Name`.
     pub parent: u32,
     pub template: Option<String>,
+    /// Where it sits: its `Transform`, or for a linked entity where the link puts it.
     pub pos: [f32; 3],
     pub quat: [f32; 4],
+    /// The position its `Transform` stores.
+    pub stored_pos: [f32; 3],
+    pub link: Option<EntityLink>,
     pub kind: &'static str,
     pub parts: Vec<Part>,
     /// The `terrainmesh` of a terrain tile; its vertices are in world space.
@@ -164,8 +181,19 @@ impl LayerEntity {
     }
 }
 
+/// Where a linked chain puts `entities[i]` before any model has loaded: parent × offset, as retail
+/// does while the parent sleeps.
+fn resting_world(entities: &[LayerEntity], i: usize, depth: usize) -> Result<Mat4, String> {
+    let e = &entities[i];
+    let Some(link) = &e.link else { return Ok(e.matrix()) };
+    if depth > MAX_LINK_DEPTH {
+        return Err(format!("a PhysicalLink chain deeper than {MAX_LINK_DEPTH}, at entity 0x{:08X}", e.key));
+    }
+    Ok(resting_world(entities, link.parent, depth + 1)? * link.offset)
+}
+
 /// Add the children of `links` under part `parent`, then theirs. A child that is an entity of the
-/// layer is left out: the layer places it itself (891 of the 901 placed links in retail).
+/// layer is left out: it is an entity with its [`EntityLink`] (891 of the 901 placed links in retail).
 fn walk_links(t: &Templates, links: &[PhysicalLink], placed: &impl Fn(u32) -> bool, parent: usize, depth: usize, parts: &mut Vec<Part>) -> Result<(), String> {
     if depth > MAX_LINK_DEPTH {
         return Err(format!("a PhysicalLink chain deeper than {MAX_LINK_DEPTH}, at child 0x{:08X}", links[0].child));
@@ -242,6 +270,9 @@ pub struct LayerView {
     pub selected: Option<usize>,
     /// Scroll the entity table to the selection on the next draw.
     pub follow: bool,
+    /// The entity the camera was last framed on, and whether it has moved since.
+    framed: Option<usize>,
+    reframe: bool,
     /// Models no archive carries, and what did not load, with why.
     pub missing: BTreeSet<u32>,
     pub errors: Vec<String>,
@@ -306,9 +337,6 @@ impl LayerView {
             if let Some(tm) = o.terrain_mesh {
                 pending.push(Job::Terrain(tm, o.pos));
             }
-            let p = Vec3::from(o.pos);
-            min = min.min(p);
-            max = max.max(p);
             entities.push(LayerEntity {
                 key: k,
                 name: names.get(&k).cloned(),
@@ -316,11 +344,29 @@ impl LayerView {
                 template: t.names.get(&o.parent).cloned(),
                 pos: o.pos,
                 quat: o.quat,
+                stored_pos: o.pos,
+                link: None,
                 kind,
                 parts,
                 terrain: o.terrain_mesh,
                 bounds: None,
             });
+        }
+        let index_of: HashMap<u32, usize> = entities.iter().enumerate().map(|(i, e)| (e.key, i)).collect();
+        for (parent, l) in placed_links_in_order(block_data)? {
+            let (Some(&child), Some(&parent)) = (index_of.get(&l.child), index_of.get(&parent)) else { continue };
+            let offset = Mat4::from_rotation_translation(Quat::from_array(l.quat), Vec3::from(l.pos));
+            entities[child].link = Some(EntityLink { parent, hard_point: l.hard_point, offset });
+        }
+        for i in 0..entities.len() {
+            if entities[i].link.is_some() {
+                let (_, rotation, translation) = resting_world(&entities, i, 0)?.to_scale_rotation_translation();
+                entities[i].pos = translation.to_array();
+                entities[i].quat = rotation.to_array();
+            }
+            let p = Vec3::from(entities[i].pos);
+            min = min.min(p);
+            max = max.max(p);
         }
         if entities.is_empty() {
             (min, max) = (Vec3::ZERO, Vec3::ZERO);
@@ -336,6 +382,8 @@ impl LayerView {
             models,
             selected: None,
             follow: false,
+            framed: None,
+            reframe: false,
             missing: BTreeSet::new(),
             errors: Vec::new(),
             jobs: pending.len(),
@@ -470,7 +518,17 @@ impl LayerView {
     /// Spawn every part whose model and parent are ready.
     fn spawn_ready(&mut self, scene: &mut Scene, world: &mut World, t: &Templates, index: &AssetIndex) {
         for ei in 0..self.entities.len() {
-            let root = self.entities[ei].matrix();
+            let root = match self.entity_world(ei, 0) {
+                None => continue,
+                Some(Ok(root)) => root,
+                Some(Err(e)) => {
+                    self.entities[ei].parts[0].problem = Some(e);
+                    continue;
+                }
+            };
+            if self.entities[ei].link.is_some() {
+                self.place_linked(ei, root);
+            }
             let mut changed = false;
             for pi in 0..self.entities[ei].parts.len() {
                 if self.entities[ei].parts[pi].spawned || self.entities[ei].parts[pi].problem.is_some() {
@@ -526,6 +584,60 @@ impl LayerView {
         for e in &self.entities {
             *self.kinds.entry(e.kind).or_default() += 1;
         }
+    }
+
+    /// Move linked entity `ei` to `at`. The entity the camera was framed on asks to be framed again:
+    /// its hard point can put it out of the shot.
+    fn place_linked(&mut self, ei: usize, at: Mat4) {
+        let (_, rotation, translation) = at.to_scale_rotation_translation();
+        let e = &mut self.entities[ei];
+        let moved = Vec3::from(e.pos).distance(translation) > 0.01;
+        e.pos = translation.to_array();
+        e.quat = rotation.to_array();
+        self.reframe |= moved && self.framed == Some(ei);
+    }
+
+    /// Frame entity `i`, now and again if it moves while its parent's model loads.
+    pub fn frame_entity(&mut self, i: usize) -> Option<(Vec3, f32)> {
+        self.framed = Some(i);
+        self.entity_framing(i)
+    }
+
+    /// The new framing of the entity asked for by [`Self::frame_entity`], once, when it has moved.
+    pub fn take_reframe(&mut self) -> Option<(Vec3, f32)> {
+        if !std::mem::take(&mut self.reframe) {
+            return None;
+        }
+        self.framed.and_then(|i| self.entity_framing(i))
+    }
+
+    /// Where entity `ei` sits with its parents awake: `None` until their models have loaded, an error
+    /// when a hard point cannot be found. A parent whose model no archive carries never wakes, so its
+    /// child stays at parent × offset, as retail leaves the child of any sleeping parent.
+    fn entity_world(&self, ei: usize, depth: usize) -> Option<Result<Mat4, String>> {
+        let e = &self.entities[ei];
+        let Some(link) = &e.link else { return Some(Ok(e.matrix())) };
+        if depth > MAX_LINK_DEPTH {
+            return Some(Err(format!("a PhysicalLink chain deeper than {MAX_LINK_DEPTH}, at entity 0x{:08X}", e.key)));
+        }
+        let parent = match self.entity_world(link.parent, depth + 1)? {
+            Ok(parent) => parent,
+            Err(e) => return Some(Err(e)),
+        };
+        if link.hard_point == 0 {
+            return Some(Ok(parent * link.offset));
+        }
+        let Some(model) = self.entities[link.parent].parts[0].model else {
+            return Some(Err(format!("hard point 0x{:08X} on a parent with no model", link.hard_point)));
+        };
+        if self.missing.contains(&model) {
+            return Some(Ok(parent * link.offset));
+        }
+        let node = self.loaded.get(&model)?.nodes.get(&link.hard_point);
+        Some(match node {
+            Some(node) => Ok(parent * *node * link.offset),
+            None => Err(format!("model 0x{model:08X} has no node 0x{:08X}", link.hard_point)),
+        })
     }
 
     /// Where part `pi` of entity `ei` sits: `None` until what it depends on has loaded, an error when
@@ -659,6 +771,10 @@ pub fn inspector(ui: &mut egui::Ui, view: &mut LayerView, index: &AssetIndex) ->
         ui.add(egui::Label::new(egui::RichText::new(&view.label).color(theme::TX)).truncate());
         theme::kv(ui, "block", egui::RichText::new(view.block.to_string()));
         theme::kv(ui, "entities", egui::RichText::new(view.entities.len().to_string()));
+        let linked = view.entities.iter().filter(|e| e.link.is_some()).count();
+        if linked > 0 {
+            theme::kv(ui, "linked", egui::RichText::new(linked.to_string()));
+        }
         let (done, all) = view.progress();
         if done < all {
             theme::kv(ui, "loading", egui::RichText::new(format!("{done} / {all}")));
@@ -695,6 +811,17 @@ pub fn inspector(ui: &mut egui::Ui, view: &mut LayerView, index: &AssetIndex) ->
             let template = e.template.clone().unwrap_or_else(|| if e.parent == 0 { "none".into() } else { format!("0x{:08X}", e.parent) });
             theme::kv(ui, "template", egui::RichText::new(template));
             theme::kv(ui, "position", egui::RichText::new(format!("{:.1}, {:.1}, {:.1}", e.pos[0], e.pos[1], e.pos[2])));
+            match &e.link {
+                None => theme::kv(ui, "frame", egui::RichText::new("world")),
+                Some(link) => {
+                    theme::kv(ui, "frame", egui::RichText::new("linked"));
+                    theme::kv(ui, "linked to", egui::RichText::new(view.entities[link.parent].label()));
+                    if link.hard_point != 0 {
+                        theme::kv(ui, "hard point", egui::RichText::new(name(link.hard_point)));
+                    }
+                    theme::kv(ui, "stored", egui::RichText::new(format!("{:.1}, {:.1}, {:.1}", e.stored_pos[0], e.stored_pos[1], e.stored_pos[2])));
+                }
+            }
             for p in &e.parts {
                 if let Some(m) = p.model {
                     let col = if p.problem.is_some() { theme::BAD } else { theme::DIM };
@@ -765,11 +892,38 @@ mod tests {
             template: None,
             pos,
             quat: [0.0, 0.0, 0.0, 1.0],
+            stored_pos: pos,
+            link: None,
             kind: KIND_LOCATION,
             parts: Vec::new(),
             terrain: None,
             bounds,
         }
+    }
+
+    /// A chain of links resolves from its root, whatever the children's own `Transform`s say.
+    #[test]
+    fn a_linked_chain_resolves_from_its_root_before_any_model() {
+        let mut root = entity(1, [10.0, 0.0, 0.0], None);
+        root.quat = Quat::from_rotation_y(std::f32::consts::FRAC_PI_2).to_array();
+        let mut mid = entity(2, [0.0, 99.0, 0.0], None);
+        mid.link = Some(EntityLink { parent: 0, hard_point: 0, offset: Mat4::from_translation(Vec3::new(0.0, 0.0, 1.0)) });
+        let mut tip = entity(3, [0.0, 0.0, 0.0], None);
+        tip.link = Some(EntityLink { parent: 1, hard_point: 0x125C_0227, offset: Mat4::from_translation(Vec3::new(0.0, -2.0, 0.0)) });
+        let list = [root, mid, tip];
+        let (_, _, at) = resting_world(&list, 2, 0).unwrap().to_scale_rotation_translation();
+        assert!((at - Vec3::new(11.0, -2.0, 0.0)).length() < 1e-5, "{at}");
+    }
+
+    /// A cycle of links fails by name instead of recursing for ever.
+    #[test]
+    fn a_cycle_of_links_is_an_error() {
+        let link = |parent| Some(EntityLink { parent, hard_point: 0, offset: Mat4::IDENTITY });
+        let mut a = entity(1, [0.0; 3], None);
+        a.link = link(1);
+        let mut b = entity(2, [0.0; 3], None);
+        b.link = link(0);
+        assert!(resting_world(&[a, b], 0, 0).unwrap_err().contains("deeper than"));
     }
 
     /// A patrol's spawner reads as a spawner though it carries a `Path`; a bare name is a location.
@@ -837,6 +991,8 @@ mod tests {
             models: BTreeMap::new(),
             selected: None,
             follow: false,
+            framed: None,
+            reframe: false,
             missing: BTreeSet::new(),
             errors: Vec::new(),
             pending: VecDeque::new(),
@@ -903,6 +1059,48 @@ mod retail_tests {
             let n: f32 = l.quat.iter().map(|q| q * q).sum();
             assert!((n - 1.0).abs() < 1e-3, "{l:?}");
         }
+    }
+
+    /// Retail's own positions, from the `updated-chris-exports` captures. Light `0x0010D532` stores
+    /// (0, 5.97, 0) and sits at its telephone pole's link, 4 m below the pole's root, while the pole
+    /// sleeps. Light `0x000CC64D` sits at pump `0x000F809F`'s hard point once the pump has woken. The
+    /// layer's bounds hold no entity at the origin.
+    #[test]
+    fn linked_entities_sit_where_retail_puts_them() {
+        let mut w = stack();
+        let t = Templates::read(&mut w).unwrap_or_else(|e| panic!("{e}"));
+        let view = |w: &mut WadStack, layer: u32| {
+            let c = w.typed_container(TYPE_HASH_LAYER, layer).unwrap_or_else(|e| panic!("{e}"));
+            LayerView::read(layer, String::new(), 0, &c, &t).unwrap_or_else(|e| panic!("{e}"))
+        };
+        let near = |a: [f32; 3], b: [f32; 3]| (Vec3::from(a) - Vec3::from(b)).length() < 0.01;
+
+        let poles = view(&mut w, 0xC9DC992F);
+        let light = poles.entities.iter().find(|e| e.key == 0x0010_D532).expect("the light");
+        assert!(light.link.is_some());
+        assert!(near(light.stored_pos, [-0.000488, 5.967201, 0.0]), "{:?}", light.stored_pos);
+        assert!(near(light.pos, [2424.3787, -37.7539, 1062.9254]), "{:?}", light.pos);
+        assert!(poles.entities.iter().all(|e| Vec3::from(e.pos).length() > 100.0));
+
+        let mut pumps = view(&mut w, 0x2A6B3A36);
+        let i = pumps.entities.iter().position(|e| e.key == 0x000C_C64D).expect("the light");
+        let link = pumps.entities[i].link.clone().expect("linked");
+        let model = pumps.entities[link.parent].parts[0].model.expect("a model");
+        assert!(pumps.entity_world(i, 0).is_none(), "waits for the pump's model");
+        let c = w.extract_container(model).unwrap_or_else(|e| panic!("{e}"));
+        let hier = orch::parse_hier(&c);
+        pumps.loaded.insert(model, LoadedModel { nodes: node_worlds(&hier), bounds: (Vec3::ZERO, 1.0), machine: None, hier, mixr: None });
+        let at = pumps.entity_world(i, 0).expect("the model is there").unwrap_or_else(|e| panic!("{e}"));
+        let (_, _, translation) = at.to_scale_rotation_translation();
+        assert!(near(translation.to_array(), [1935.6718, -31.433954, 1498.9756]), "{translation}");
+
+        // Framed before the pump's model arrived, the light asks to be framed where it ended up, once.
+        let (before, _) = pumps.frame_entity(i).expect("the entity");
+        assert!(pumps.take_reframe().is_none());
+        pumps.place_linked(i, at);
+        let (after, _) = pumps.take_reframe().expect("it moved");
+        assert!(near(after.to_array(), [1935.6718, -31.433954, 1498.9756]) && !near(before.to_array(), after.to_array()));
+        assert!(pumps.take_reframe().is_none());
     }
 
     /// Every link's hard point names a node of its parent's model, so the view places every child
