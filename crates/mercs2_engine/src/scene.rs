@@ -1383,8 +1383,43 @@ impl Scene {
         self.sky_enabled = true;
     }
 
+    /// Set what effects draw from: the `vfx` atlas and the `fxdict`'s rectangles. An error when the
+    /// atlas will not upload.
+    pub fn fx_set_atlas(&mut self, atlas: &mercs2_formats::texture::TextureData, rects: &[mercs2_formats::fxdict::FxRect]) -> Result<(), String> {
+        let view = make_bc_view(&self.device, &self.queue, atlas, false)
+            .ok_or_else(|| format!("the vfx atlas ({}x{}) will not upload", atlas.width, atlas.height))?;
+        self.particles.set_atlas(&self.device, &view, rects);
+        Ok(())
+    }
+
+    /// Whether [`Self::fx_set_atlas`] has run.
+    pub fn fx_has_atlas(&self) -> bool {
+        self.particles.has_atlas()
+    }
+
+    /// Start an authored effect ([`crate::fx_sim`]) at `pos`.
+    pub fn fx_start_effect(
+        &mut self,
+        effect: &mercs2_formats::fxdict::EffectContainer,
+        starter: crate::fx_sim::Starter,
+        pos: [f32; 3],
+        repeat: bool,
+    ) -> Result<crate::particles::EmitterId, String> {
+        self.particles.start_effect(effect, starter, glam::Vec3::from(pos), glam::Quat::IDENTITY, repeat)
+    }
+
+    /// A started effect, for its transport.
+    pub fn fx_effect_mut(&mut self, id: crate::particles::EmitterId) -> Option<&mut crate::particles::ActiveEffect> {
+        self.particles.effect_mut(id)
+    }
+
+    /// Take a started effect away at once.
+    pub fn fx_remove_effect(&mut self, id: crate::particles::EmitterId) {
+        self.particles.remove_effect(id);
+    }
+
     /// Register a named particle-effect template (key = effect name hash, as Lua's `StartEmitter`
-    /// names them). Populate `desc` from a parsed effect (`particles::EmitterDesc::from_effect`).
+    /// names them).
     pub fn fx_register(&mut self, name_hash: u32, desc: crate::particles::EmitterDesc) {
         self.particles.register_template(name_hash, desc);
     }
@@ -2477,9 +2512,10 @@ impl Scene {
         let view_inv = view.inverse();
         let cam_right = view_inv.transform_vector3(glam::Vec3::X);
         let cam_up = view_inv.transform_vector3(glam::Vec3::Y);
+        let cam_forward = view_inv.transform_vector3(glam::Vec3::Z);
         let eye = view_inv.transform_point3(glam::Vec3::ZERO);
         self.particles
-            .prepare(&self.device, &self.queue, view_proj, cam_right, cam_up, eye);
+            .prepare(&self.device, &self.queue, view_proj, cam_right, cam_up, cam_forward, eye);
 
         // Phase 2: record the frame's passes by walking the canonical per-viewport scene order
         // (`render_graph::SCENE_ORDER`, the recovered `FUN_00466d40` body sequence — render_core §5).
