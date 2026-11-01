@@ -49,13 +49,14 @@ use mercs2_formats::aset_type_ids::{
     STRINGDB_TYPE_HASH,
 };
 use mercs2_formats::dlc_input::{
-    decompress_be_sges, parse_be_aset, parse_be_ffcs, parse_be_indx, parse_be_pths, PAGE_SIZE,
+    parse_be_aset, parse_be_ffcs, parse_be_indx, parse_be_pths, read_be_block,
 };
 use mercs2_formats::dlc_stfs::{extract_stfs_from_rar, load_stfs_or_doh, RarExtractor};
 use mercs2_formats::patch_wad::{build_patch_wad_multi, AsetEntry, PatchBlock, FFCS_CERT_BLOB};
 use mercs2_formats::sges::{compress_sges, decompress_sges};
 use mercs2_formats::ucfx::parse_block_entry_table;
 use ucfx_byteswap::convert::{convert_block, QUIET};
+use ucfx_byteswap::ecs::ComponentSchemas;
 use ucfx_byteswap::lua::LuaTools;
 
 use dlc_port::xbox_doh_oracle::{is_ps3_compact_decl_rejection, primary_name_hash_be, XboxDohOracle};
@@ -79,6 +80,9 @@ struct Cli {
     /// unluac jar that converts the DLC's Lua bytecode
     #[arg(long, value_name = "UNLUAC_JAR")]
     unluac: PathBuf,
+    /// The player's PC vz.wad, whose `schm` chunks lay out the DLC's compact ECS containers
+    #[arg(long, value_name = "VZ_WAD")]
+    vz_wad: PathBuf,
     /// STFS container, raw DLC01.doh, or PS3 BE SCFF file
     #[arg(long)]
     x360_stfs: Option<PathBuf>,
@@ -137,6 +141,9 @@ enum BlockDecode {
 fn run() -> Result<(), String> {
     let cli = Cli::parse();
     let lua_tools = LuaTools { java: cli.java.clone(), unluac: cli.unluac.clone() };
+    println!("Reading class layouts from {}...", cli.vz_wad.display());
+    let schemas = ComponentSchemas::from_vz_wad(&cli.vz_wad)?;
+    println!("  {} classes", schemas.len());
 
     // ── Step 1: load DOH bytes ──
     let doh: Vec<u8> = if let Some(rar) = &cli.x360_rar {
@@ -170,7 +177,7 @@ fn run() -> Result<(), String> {
     let xbox_doh_oracle: Option<XboxDohOracle> = match &cli.xbox_doh_oracle {
         Some(p) => {
             println!("Step 1b: Loading Xbox-DOH side oracle from {}...", p.display());
-            Some(XboxDohOracle::load(p, &lua_tools)?)
+            Some(XboxDohOracle::load(p, &lua_tools, &schemas)?)
         }
         None => None,
     };
@@ -227,50 +234,20 @@ fn run() -> Result<(), String> {
     for blk_idx in cli.start_block..end {
         let e = &indx[blk_idx];
         let path = pths.get(blk_idx).cloned().unwrap_or_else(|| format!("block_{blk_idx:05}"));
-        let block_offset = e.file_offset();
-        let block_size = e.page_count as usize * PAGE_SIZE;
-        if block_offset + 4 > doh.len() {
-            skips.push(format!("[{blk_idx}] {path}: offset {block_offset} is past the container"));
-            continue;
-        }
-        let slice = &doh[block_offset..(block_offset + block_size).min(doh.len())];
-
         // Decompress (segs) or XFCU passthrough.
-        let decompressed: Vec<u8> = if slice.len() >= 4 && &slice[..4] == b"segs" {
-            match decompress_be_sges(slice, 0, slice.len()) {
-                Ok(d) => d,
-                Err(err) => {
-                    skips.push(format!("[{blk_idx}] {path}: sges: {err}"));
-                    continue;
-                }
-            }
-        } else if slice.len() >= 8 {
-            let rec = u32::from_be_bytes([slice[0], slice[1], slice[2], slice[3]]) as usize;
-            let header_end = 4 + rec * 16;
-            let first_tag = slice.get(header_end..header_end + 4);
-            if rec > 0 && rec < 5000 && first_tag == Some(b"XFCU") {
-                let mut d = slice.to_vec();
-                let mut z = d.len();
-                while z > 4 && d[z - 1] == 0 {
-                    z -= 1;
-                }
-                z = (z + 3) & !3;
-                d.truncate(z);
-                d
-            } else {
-                skips.push(format!("[{blk_idx}] {path}: neither segs nor an XFCU entry table ({rec} records)"));
+        let decompressed: Vec<u8> = match read_be_block(&doh, e) {
+            Ok(d) => d,
+            Err(err) => {
+                skips.push(format!("[{blk_idx}] {path}: {err}"));
                 continue;
             }
-        } else {
-            skips.push(format!("[{blk_idx}] {path}: {} bytes, too short for a block", slice.len()));
-            continue;
         };
 
         // Convert BE→LE, routing a PS3-compact-decl rejection through the
         // optional Xbox-DOH side oracle. Anything the oracle cannot resolve
         // fails the whole run — no silent fallback — so the output WAD is
         // either 100 % resolved or does not exist.
-        let decode = match convert_block(&decompressed, false, None, Some(&lua_tools)) {
+        let decode = match convert_block(&decompressed, false, None, Some(&lua_tools), Some(&schemas)) {
             Ok(s) => BlockDecode::Ps3Direct(s),
             Err(err) => {
                 if is_ps3_compact_decl_rejection(&err) {
