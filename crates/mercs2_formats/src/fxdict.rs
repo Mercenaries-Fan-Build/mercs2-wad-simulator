@@ -60,6 +60,9 @@ fn put_f32s(out: &mut Vec<u8>, v: &[f32]) {
 // fxdict (INFO + DICT) — the sprite rectangles of the `vfx` atlas, one per frame key.
 // ------------------------------------------------------------------------------------------------
 
+/// The `vfx` atlas every particle samples: `pandemic_hash_m2("vfx")`.
+pub const VFX_ATLAS: u32 = 0x89E2_11AF;
+
 /// On-disk DICT record stride (630 × 20 = 12600 bytes in retail, zero slack).
 pub const DICT_RECORD_BYTES: usize = 20;
 /// Retail fxdict record count (`resident_P000_Q3`).
@@ -479,14 +482,14 @@ pub const PTYP_ATTRIBUTES_BEFORE_COLR: [AttrDef; 19] = [
     def(0x1792B524, None, F32, Refused),
     def(0x10831673, None, F32, Refused),
     def(0xB6197EFE, None, F32, Refused),
-    def(0x6CF0BE14, None, F32, Refused),
-    def(0xBE968D3B, None, F32, Refused),
-    def(0xC558C9D8, None, F32, Refused),
-    def(0xD80DF37F, None, F32, Refused),
+    def(0x6CF0BE14, Some("forcedrag"), F32, Refused),
+    def(0xBE968D3B, Some("forcedragvar"), F32, Refused),
+    def(0xC558C9D8, Some("forcegravity"), F32, Refused),
+    def(0xD80DF37F, Some("forcegravityvar"), F32, Refused),
     def(0x720F22F8, None, F32, Refused),
     def(0x4712719F, None, F32, Refused),
-    def(0xB3DBB6C0, None, F32, Refused),
-    def(0x4C49B137, None, F32, Refused),
+    def(0xB3DBB6C0, Some("forcewind"), F32, Refused),
+    def(0x4C49B137, Some("forcewindvar"), F32, Refused),
 ];
 
 /// The 13 `PTYP` attributes after `COLR`, in file order (820/820 retail PTYPs).
