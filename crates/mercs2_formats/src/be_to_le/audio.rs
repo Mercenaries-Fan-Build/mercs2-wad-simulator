@@ -52,10 +52,10 @@ pub const PC_FORMAT_STREAM: u8 = 0x04;
 
 /// Embedded (`+0x0A` = 0) wavebank header stride — same on Xbox and PC.
 const HEADER_SIZE: usize = 24;
-/// Streamed (`+0x0A` = 1) wavebank adds a 16-byte NUL-padded `.pws` name
-/// field at `+0x18`, so the record table starts at `+0x28`.
-const STREAM_NAME_FIELD: usize = 16;
-const STREAM_HEADER_SIZE: usize = HEADER_SIZE + STREAM_NAME_FIELD;
+/// Streamed (`+0x0A` = 1) wavebank adds a NUL-padded `.pws` name field at
+/// `+0x18`, 16 bytes in the retail banks and 32 in the DLC's, so the record table
+/// starts at `+0x28` or `+0x38`. The bank's `+0x10` says which.
+const STREAM_HEADER_SIZES: [usize; 2] = [HEADER_SIZE + 16, HEADER_SIZE + 32];
 
 /// Every record is 36 bytes (same stride on Xbox and PC).
 const WAVEBANK_RECORD_SIZE: usize = 36;
@@ -757,9 +757,9 @@ impl WbRecord {
 /// * `+0x08 u16 BE` record count.
 /// * `+0x0A u8` kind flag (0 = embedded, non-zero = streamed; `+0x0B` padding).
 /// * `+0x0C u32 BE` bank_hash (repeats `+0x04`).
-/// * `+0x10 u32 BE` records_off (24 embedded / 40 streamed).
+/// * `+0x10 u32 BE` records_off (24 embedded / 40 or 56 streamed).
 /// * `+0x14 u32 BE` zero.
-/// * `+0x18..+0x27` streamed only: 16-byte NUL-padded `.pws` name.
+/// * `+0x18..records_off` streamed only: NUL-padded `.pws` name.
 /// * `+records_off` 36-byte records ([`WbRecord`]).
 ///
 /// Embedded clips are decoded to interleaved LE PCM16 and emitted with
@@ -790,11 +790,10 @@ pub fn convert_wavebank_data(body_be: &[u8]) -> Result<Vec<u8>, AudioError> {
         )));
     }
     let xbox_records_offset = read_u32_be(body_be, 16) as usize;
-    let expected_off = if streamed { STREAM_HEADER_SIZE } else { HEADER_SIZE };
-    if xbox_records_offset != expected_off {
+    let offset_known = if streamed { STREAM_HEADER_SIZES.contains(&xbox_records_offset) } else { xbox_records_offset == HEADER_SIZE };
+    if !offset_known {
         return Err(AudioError(format!(
-            "wavebank records_offset {xbox_records_offset}, expected {expected_off} \
-             (streamed={streamed})"
+            "wavebank records_offset {xbox_records_offset} is not one the format has (streamed={streamed})"
         )));
     }
     if count == 0 {
@@ -810,14 +809,7 @@ pub fn convert_wavebank_data(body_be: &[u8]) -> Result<Vec<u8>, AudioError> {
         )));
     }
 
-    let stream_name: Option<&[u8]> = if streamed {
-        if body_be.len() < STREAM_HEADER_SIZE {
-            return Err(AudioError("wavebank is streamed but body too short for .pws name".into()));
-        }
-        Some(&body_be[HEADER_SIZE..STREAM_HEADER_SIZE])
-    } else {
-        None
-    };
+    let stream_name: Option<&[u8]> = streamed.then(|| &body_be[HEADER_SIZE..xbox_records_offset]);
 
     let mut records: Vec<WbRecord> = Vec::with_capacity(count);
     for i in 0..count {
@@ -832,7 +824,7 @@ pub fn convert_wavebank_data(body_be: &[u8]) -> Result<Vec<u8>, AudioError> {
         xbox_records_offset + i * WAVEBANK_RECORD_SIZE + records[i].data_offset as usize
     });
 
-    let pc_records_offset: u32 = if streamed { STREAM_HEADER_SIZE } else { HEADER_SIZE } as u32;
+    let pc_records_offset = xbox_records_offset as u32;
     let pc_table_end: usize = pc_records_offset as usize + count * WAVEBANK_RECORD_SIZE;
     let pc_audio_start: usize = align_up(pc_table_end, PC_BLOB_ALIGN);
 
@@ -916,7 +908,7 @@ pub fn convert_wavebank_data(body_be: &[u8]) -> Result<Vec<u8>, AudioError> {
     out[20..24].copy_from_slice(&0u32.to_le_bytes());
 
     if let Some(name) = stream_name {
-        out[HEADER_SIZE..STREAM_HEADER_SIZE].copy_from_slice(name);
+        out[HEADER_SIZE..xbox_records_offset].copy_from_slice(name);
     }
 
     for (i, rec) in records.iter().enumerate() {
