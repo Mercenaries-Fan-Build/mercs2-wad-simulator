@@ -37,6 +37,8 @@ pub struct Settings {
     pub data_dir: Option<PathBuf>,
     /// The hero: the model Inspect's Anims and FaceFX tabs play on, kept across tabs and launches.
     pub hero: Option<Hero>,
+    /// The level Inspect lists, by name; absent is the base game's.
+    pub level: Option<String>,
 }
 
 /// A model chosen as the hero, by its catalog row: the model's hash and the row's label (a
