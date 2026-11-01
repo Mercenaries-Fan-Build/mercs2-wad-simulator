@@ -23,7 +23,12 @@
 //! flgt         [u32 n][n × (u32 class hash, cstring class name)][u32 trailer]
 //! flgs         [u32 n][n × (u32 key, 32-byte class-membership bitset)]
 //! ```
+//!
+//! A console bake is compact (CHDR bit 2): no `enum` row, a `COMP` holds `info` and `data` only,
+//! `info` is `[u32 hash][u32 version][u32 count][u32 flags]`, and a `Name` record holds a hash.
+//! [`WorldEntity::parse_compact`] reads it with the class layouts of a PC `vz.wad`.
 
+use crate::be_to_le::ecs::ComponentSchemas;
 use crate::hash::pandemic_hash_m2;
 use crate::schema::{ComponentSchema, FieldValue, SchemaField, SchemaFieldType};
 use crate::ucfx::{parse_ucfx_tree, write_ucfx_tree, UcfxNode};
@@ -177,19 +182,17 @@ impl Chdr {
                 h.flags
             ));
         }
-        if h.flags & CHDR_NAMES_AS_HASHES != 0 {
+        if h.flags & !(CHDR_GROUPED | CHDR_NAMES_AS_HASHES) != 0 {
             return Err(format!(
-                "CHDR flags 0x{:08X}: bit 2 stores names as hashes; that layout is not decoded",
-                h.flags
-            ));
-        }
-        if h.flags & !(CHDR_GROUPED) != 0 {
-            return Err(format!(
-                "CHDR flags 0x{:08X}: bits other than 0 are set and their effect is not decoded",
+                "CHDR flags 0x{:08X}: bits other than 0 and 2 are set and their effect is not decoded",
                 h.flags
             ));
         }
         Ok(h)
+    }
+    /// Bit 2: the compact form.
+    pub fn is_compact(&self) -> bool {
+        self.flags & CHDR_NAMES_AS_HASHES != 0
     }
     fn write(&self) -> Vec<u8> {
         let mut o = Vec::with_capacity(8);
@@ -415,6 +418,8 @@ pub enum Value {
 pub enum Payload {
     Fixed(Vec<u8>),
     Name { name: String, flag: u8 },
+    /// A `Name` record of the compact form: the name's hash, read as is by `FUN_006569B0`.
+    NameHash(u32),
     PointLocation { blob: [u8; 32], text: String },
     PackedU16(u16),
 }
@@ -439,7 +444,7 @@ pub struct Component {
     pub records: Vec<Record>,
 }
 
-fn layout_for(class: &str, version: u32, schema: &ComponentSchema) -> Res<Layout> {
+pub(crate) fn layout_for(class: &str, version: u32, schema: &ComponentSchema) -> Res<Layout> {
     if let Some(&(_, v, layout)) = NATIVE_LAYOUTS.iter().find(|(c, _, _)| *c == class) {
         if v != version {
             return Err(format!(
@@ -559,15 +564,42 @@ impl Component {
         let count = c.u32()?;
         let flags = c.u32()?;
         c.end()?;
-        if flags > 1 {
-            return Err(format!(
-                "{class}: info flags 0x{flags:08X}; only bit 0 (keyed records) is decoded"
-            ));
-        }
         let schema = ComponentSchema::from_schm_body(schm, false)
             .ok_or_else(|| format!("{class}: schm does not parse"))?;
         if schema.to_schm_body() != schm {
             return Err(format!("{class}: schm does not re-write to its own bytes"));
+        }
+        Self::read_records(class, version, count, flags, schema, data, false)
+    }
+
+    /// Read a group of the compact form: its class and layout come from `schemas`.
+    fn parse_compact(info: &[u8], data: &[u8], schemas: &ComponentSchemas) -> Res<Self> {
+        let mut c = Cursor::new(info, "info");
+        let hash = c.u32()?;
+        let version = c.u32()?;
+        let count = c.u32()?;
+        let flags = c.u32()?;
+        c.end()?;
+        let class = schemas.get(hash, version).ok_or_else(|| match schemas.name_of(hash) {
+            Some(n) => format!("{n}: info version {version} has no schm in the PC bake"),
+            None => format!("class 0x{hash:08X}: no schm in the PC bake"),
+        })?;
+        Self::read_records(class.name.clone(), version, count, flags, class.schema.clone(), data, true)
+    }
+
+    fn read_records(
+        class: String,
+        version: u32,
+        count: u32,
+        flags: u32,
+        schema: ComponentSchema,
+        data: &[u8],
+        compact: bool,
+    ) -> Res<Self> {
+        if flags > 1 {
+            return Err(format!(
+                "{class}: info flags 0x{flags:08X}; only bit 0 (keyed records) is decoded"
+            ));
         }
         let layout = layout_for(&class, version, &schema)?;
         let what = format!("{class} data");
@@ -581,6 +613,7 @@ impl Component {
             let keys = (0..n).map(|_| d.u32()).collect::<Res<Vec<u32>>>()?;
             let payload = match layout {
                 Layout::Fixed => Payload::Fixed(d.take(schema.payload_stride as usize)?.to_vec()),
+                Layout::Name if compact => Payload::NameHash(d.u32()?),
                 Layout::Name => {
                     let name = d.cstring()?;
                     Payload::Name { name, flag: d.u8()? }
@@ -613,9 +646,11 @@ impl Component {
         pandemic_hash_m2(&self.class)
     }
 
-    fn write(&self) -> Res<(Vec<u8>, Vec<u8>, Vec<u8>)> {
+    fn write(&self, compact: bool) -> Res<(Vec<u8>, Vec<u8>, Vec<u8>)> {
         let mut info = Vec::new();
-        push_cstring(&mut info, &self.class, "class name")?;
+        if !compact {
+            push_cstring(&mut info, &self.class, "class name")?;
+        }
         push_u32(&mut info, self.type_hash());
         push_u32(&mut info, self.version);
         push_u32(&mut info, self.records.len() as u32);
@@ -641,10 +676,11 @@ impl Component {
                     }
                     data.extend_from_slice(b);
                 }
-                (Payload::Name { name, flag }, Layout::Name) => {
+                (Payload::Name { name, flag }, Layout::Name) if !compact => {
                     push_cstring(&mut data, name, "Name")?;
                     data.push(*flag);
                 }
+                (Payload::NameHash(h), Layout::Name) if compact => push_u32(&mut data, *h),
                 (Payload::PointLocation { blob, text }, Layout::PointLocation) => {
                     data.extend_from_slice(blob);
                     push_cstring(&mut data, text, "PointLocation text")?;
@@ -678,6 +714,9 @@ impl Component {
                 .collect(),
             (Layout::Name, Payload::Name { name, flag }) => {
                 Ok(vec![Value::Text(name.clone()), Value::Field(FieldValue::U8(*flag))])
+            }
+            (Layout::Name, Payload::NameHash(h)) => {
+                Ok(vec![Value::Field(FieldValue::U32(*h)), Value::Field(FieldValue::U8(0))])
             }
             (Layout::PointLocation, Payload::PointLocation { blob, text }) => {
                 let mut a = [0f32; 8];
@@ -733,6 +772,7 @@ impl Component {
                     check_string(name, "Name")?;
                     Ok(Payload::Name { name: name.clone(), flag: *flag })
                 }
+                (Value::Field(FieldValue::U32(h)), Value::Field(FieldValue::U8(0))) => Ok(Payload::NameHash(*h)),
                 _ => Err(format!("{}: takes [text, u8], got {values:?}", self.class)),
             },
             Layout::PointLocation => match (&values[0], &values[1]) {
@@ -850,8 +890,19 @@ pub fn derived_template_key(name: &str) -> u32 {
 }
 
 impl WorldEntity {
-    /// Parse a container. Strict: anything [`Self::write`] would not reproduce is an error.
+    /// Parse a container. Strict: anything [`Self::write`] would not reproduce is an error. A
+    /// compact container fails here: it takes [`Self::parse_compact`], or
+    /// [`ComponentSchemas::inflate`] first.
     pub fn parse(container: &[u8]) -> Res<Self> {
+        Self::parse_form(container, None)
+    }
+
+    /// Parse a container of either form, a compact one by the class layouts of a PC `vz.wad`.
+    pub fn parse_compact(container: &[u8], schemas: &ComponentSchemas) -> Res<Self> {
+        Self::parse_form(container, Some(schemas))
+    }
+
+    fn parse_form(container: &[u8], schemas: Option<&ComponentSchemas>) -> Res<Self> {
         let roots = parse_ucfx_tree(container)?;
         let tags: Vec<String> = roots.iter().map(UcfxNode::tag_str).collect();
         let body = |i: usize, tag: &[u8; 4]| -> Res<&[u8]> {
@@ -867,32 +918,41 @@ impl WorldEntity {
             n.body.as_deref().ok_or_else(|| format!("top-level row {i} '{}' is a marker", n.tag_str()))
         };
         let header = Chdr::parse(body(0, b"CHDR")?)?;
-        let enums = parse_enums(body(1, b"enum")?)?;
-        let instances = parse_u32_list(body(2, b"UNIQ")?, "UNIQ")?;
+        let compact = header.is_compact();
+        if compact && schemas.is_none() {
+            return Err("a compact container (CHDR bit 2) needs the class layouts of a PC vz.wad".into());
+        }
+        let first = if compact { 1 } else { 2 };
+        let enums = if compact { Vec::new() } else { parse_enums(body(1, b"enum")?)? };
+        let instances = parse_u32_list(body(first, b"UNIQ")?, "UNIQ")?;
         let n = roots.len();
-        if n < 5 {
-            return Err(format!("{n} top-level rows; the layout needs at least 5 ({tags:?})"));
+        if n < first + 3 {
+            return Err(format!("{n} top-level rows; the layout needs at least {} ({tags:?})", first + 3));
         }
         let mut components = Vec::new();
-        for (i, node) in roots[3..n - 2].iter().enumerate() {
+        for (i, node) in roots[first + 1..n - 2].iter().enumerate() {
             let kids: Vec<&[u8; 4]> = node.children.iter().map(|c| &c.tag).collect();
+            let want: &[&[u8; 4]] = if compact { &[b"info", b"data"] } else { &[b"info", b"schm", b"data"] };
             if &node.tag != b"COMP"
                 || node.body.is_some()
-                || kids != [b"info", b"schm", b"data"]
+                || kids != want
                 || node.children.iter().any(|c| c.body.is_none() || !c.children.is_empty())
             {
                 return Err(format!(
                     "top-level row {} is '{}' with children {:?}; a component is a COMP marker \
-                     with info, schm, data",
-                    i + 3,
+                     with {}",
+                    i + first + 1,
                     node.tag_str(),
-                    node.children.iter().map(UcfxNode::tag_str).collect::<Vec<_>>()
+                    node.children.iter().map(UcfxNode::tag_str).collect::<Vec<_>>(),
+                    if compact { "info, data" } else { "info, schm, data" }
                 ));
             }
             let b = |k: usize| node.children[k].body.as_deref().unwrap_or_default();
-            components.push(
-                Component::parse(b(0), b(1), b(2)).map_err(|e| format!("COMP {i}: {e}"))?,
-            );
+            let comp = match schemas.filter(|_| compact) {
+                Some(table) => Component::parse_compact(b(0), b(1), table),
+                None => Component::parse(b(0), b(1), b(2)),
+            };
+            components.push(comp.map_err(|e| format!("COMP {i}: {e}"))?);
         }
         let flag_table = FlagTable::parse(body(n - 2, b"flgt")?)?;
         let flags = parse_flags(body(n - 1, b"flgs")?, &flag_table)?;
@@ -903,19 +963,20 @@ impl WorldEntity {
     pub fn write(&self) -> Res<Vec<u8>> {
         let mut roots = vec![
             UcfxNode::leaf(*b"CHDR", self.header.write()),
-            UcfxNode::leaf(*b"enum", write_enums(&self.enums)?),
-            UcfxNode::leaf(*b"UNIQ", write_u32_list(&self.instances)),
         ];
+        let compact = self.header.is_compact();
+        if !compact {
+            roots.push(UcfxNode::leaf(*b"enum", write_enums(&self.enums)?));
+        }
+        roots.push(UcfxNode::leaf(*b"UNIQ", write_u32_list(&self.instances)));
         for c in &self.components {
-            let (info, schm, data) = c.write()?;
-            roots.push(UcfxNode::marker(
-                *b"COMP",
-                vec![
-                    UcfxNode::leaf(*b"info", info),
-                    UcfxNode::leaf(*b"schm", schm),
-                    UcfxNode::leaf(*b"data", data),
-                ],
-            ));
+            let (info, schm, data) = c.write(compact)?;
+            let mut kids = vec![UcfxNode::leaf(*b"info", info)];
+            if !compact {
+                kids.push(UcfxNode::leaf(*b"schm", schm));
+            }
+            kids.push(UcfxNode::leaf(*b"data", data));
+            roots.push(UcfxNode::marker(*b"COMP", kids));
         }
         roots.push(UcfxNode::leaf(*b"flgt", self.flag_table.write()?));
         roots.push(UcfxNode::leaf(*b"flgs", write_flags(&self.flags)));
@@ -937,7 +998,8 @@ impl WorldEntity {
         }
     }
 
-    /// Every template name with its keys.
+    /// Every template name with its keys. A compact container stores no string, so its names are
+    /// their hashes written `0xHHHHHHHH`; [`Self::name_hashes`] is the same list as hashes.
     pub fn names(&self) -> Res<Vec<(String, &[u32])>> {
         Ok(self
             .name_group()?
@@ -945,6 +1007,21 @@ impl WorldEntity {
             .iter()
             .filter_map(|r| match &r.payload {
                 Payload::Name { name, .. } => Some((name.clone(), r.keys.as_slice())),
+                Payload::NameHash(h) => Some((format!("0x{h:08X}"), r.keys.as_slice())),
+                _ => None,
+            })
+            .collect())
+    }
+
+    /// Every template name's hash with its keys.
+    pub fn name_hashes(&self) -> Res<Vec<(u32, &[u32])>> {
+        Ok(self
+            .name_group()?
+            .records
+            .iter()
+            .filter_map(|r| match &r.payload {
+                Payload::Name { name, .. } => Some((pandemic_hash_m2(name), r.keys.as_slice())),
+                Payload::NameHash(h) => Some((*h, r.keys.as_slice())),
                 _ => None,
             })
             .collect())
@@ -1022,7 +1099,8 @@ impl WorldEntity {
             return Err("the template name is empty".into());
         }
         let h = pandemic_hash_m2(&t.name);
-        if let Some((n, _)) = self.names()?.into_iter().find(|(n, _)| pandemic_hash_m2(n) == h) {
+        if let Some(i) = self.name_hashes()?.iter().position(|(n, _)| *n == h) {
+            let (n, _) = self.names()?.swap_remove(i);
             return Err(format!(
                 "template name {:?} hashes to 0x{h:08X}, the same as the existing name {n:?}",
                 t.name
@@ -1051,10 +1129,12 @@ impl WorldEntity {
         for (i, payload) in planned {
             self.components[i].records.push(Record { keys: vec![t.key], payload });
         }
-        self.components[name_idx].records.push(Record {
-            keys: vec![t.key],
-            payload: Payload::Name { name: t.name.clone(), flag: t.name_flag },
-        });
+        let payload = if self.header.is_compact() {
+            Payload::NameHash(h)
+        } else {
+            Payload::Name { name: t.name.clone(), flag: t.name_flag }
+        };
+        self.components[name_idx].records.push(Record { keys: vec![t.key], payload });
         let at = self.instances.partition_point(|&k| k < t.key);
         self.instances.insert(at, t.key);
         let bits = self.derived_flag_bits(t.key);
@@ -1218,6 +1298,29 @@ mod tests {
         t2.key = 0x8000_0077;
         t2.name = "QM_GATE_C4".into();
         assert!(we.append_template(&t2).unwrap_err().contains("same as the existing name"));
+    }
+
+    #[test]
+    fn the_compact_form_reads_through_the_pc_layouts_and_rewrites_to_its_bytes() {
+        let named = WorldEntity::parse(&sample()).unwrap();
+        let mut schemas = ComponentSchemas::default();
+        schemas.add_container(&sample()).unwrap();
+        let mut compact = named.clone();
+        compact.header.flags |= CHDR_NAMES_AS_HASHES;
+        compact.enums.clear();
+        for c in compact.components.iter_mut().filter(|c| c.layout == Layout::Name) {
+            for r in &mut c.records {
+                let Payload::Name { name, .. } = &r.payload else { unreachable!("a Name group") };
+                r.payload = Payload::NameHash(pandemic_hash_m2(name));
+            }
+        }
+        let bytes = compact.write().unwrap();
+        assert!(WorldEntity::parse(&bytes).unwrap_err().contains("class layouts"));
+        let back = WorldEntity::parse_compact(&bytes, &schemas).unwrap();
+        assert_eq!(back.write().unwrap(), bytes);
+        assert_eq!(back.name_hashes().unwrap(), named.name_hashes().unwrap());
+        let inflated = WorldEntity::parse(&schemas.inflate(&bytes).unwrap()).unwrap();
+        assert_eq!(inflated.names().unwrap(), named.names().unwrap());
     }
 
     #[test]
