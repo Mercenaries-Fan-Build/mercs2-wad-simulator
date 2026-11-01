@@ -50,6 +50,7 @@ pub mod camera;
 pub mod destruction;
 pub mod diag;
 pub mod facecast;
+pub mod fx_sim;
 // The Lua host + simulation cluster. Lua is a core engine pillar, not just WAD content: the VM binding
 // surface (`Pg.*`/`Object.*`/`Player.*`/`Ai.*`/…) marries the scripts to the live engine systems (World,
 // physics, audio, AI). `script_host` implements `mercs2_script`'s `EngineHost`; `runtime`/`gameplay`/
