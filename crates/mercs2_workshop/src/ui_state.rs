@@ -60,6 +60,9 @@ pub struct UiState {
     pub run_wad: Option<PathBuf>,
     /// The same for the reference bundle.
     pub run_data: Option<PathBuf>,
+    /// Once the state is applied: choose this level, as the picker does, for this run, and capture
+    /// after the reload it starts has landed.
+    pub pick_level: Option<String>,
     /// Where to write the captured frame (PNG).
     pub capture: PathBuf,
     /// Frames to let the window settle after the state is applied, before the capture.
