@@ -40,11 +40,14 @@
 
 mod anim_table;
 mod bone_census;
+mod chunk_compare;
 mod clip_names;
 mod clip_pose;
 mod dump;
 mod dump_hibernation;
 mod dump_spawnlists;
+mod ecs_compare;
+mod ecs_survey;
 mod ess_live;
 mod ess_menu_check;
 mod facefx;
@@ -81,8 +84,12 @@ fn usage() -> ! {
          \x20 anim-table <name|0xH> [--handle 0xH] [--list <column>]   (an animationtable's rows verbatim)\n\
          \x20 clip-names <review.tsv>       (name AnimationLookup clips from their rows; a review file, merges nothing)\n\
          \x20 facefx <name|0xH> | --all     (a FaceFX actor / anim set by name; --all reads every one and prints the census)\n\
-         \x20 layer <name|0xH> | --all | --frames <capture> | --catalog <out.tsv> [--also <archives>]  (a placement layer's entities with their models and classes; --all prints the census; --frames tests Transforms against a capture's live positions; --catalog writes a row per layer)\n\
+         \x20 layer <name|0xH> | --all | --frames <capture> | --catalog <out.tsv> [--also <archives>] [--overlay <wad>]  (a placement layer's entities with their models and classes; --all prints the census; --frames tests Transforms against a capture's live positions; --catalog writes a row per layer, --overlay mounts a level such as the DLC above the base)\n\
          \x20 we-template <name|0xKEY>... | --class <Class> | --uses <0xU32>   (worldentity templates / records)\n\
+         \x20 ecs-survey <big-endian archive> <out.tsv> [--raw <dir>]   (a console archive's ECS containers as stored; no --wad)\n\
+         \x20 ecs-compare <archive a> <archive b> <out.tsv> --vz-wad <pc vz.wad> [--diffs <file>]   (two archives' ECS containers, converted, record by record; no --wad)\n\
+         \x20 ecs-names <archive> <out.tsv> --vz-wad <pc vz.wad>   (every Name string of an archive's named containers; no --wad)\n\
+         \x20 chunk-compare <big-endian archive> <out.tsv> --vz-wad <pc vz.wad> --java <java> --unluac <jar> [--only <type>]   (every chunk converted against its PC twin, row by row; no --wad)\n\
          \x20 clip-pose --model H --clip H --bones 0xA,0xB.. --ref 0xR [--frames N]   (bone positions over a clip)\n\
          \x20 dump-read <capture-dir> <0xVA> [len]          (retail memory from a v1.0 x32dbg capture, no WAD)\n\
          \x20 dump-chain <capture-dir> <0xVA> <0xOFF>...    ([[VA]+o0]+o1 ... ; last offset added, not read)\n\
@@ -570,6 +577,72 @@ fn main() {
         }
         return;
     }
+    if cmd == "ecs-survey" {
+        let (Some(archive), Some(out)) = (args.first(), args.get(1)) else {
+            eprintln!("ecs-survey: usage: mercs2_probe ecs-survey <big-endian archive> <out.tsv> [--raw <dir>]");
+            std::process::exit(2);
+        };
+        let raw = flag_val(&args, "--raw");
+        if let Err(e) = ecs_survey::ecs_survey(
+            std::path::Path::new(archive),
+            std::path::Path::new(out),
+            raw.as_deref().map(std::path::Path::new),
+        ) {
+            eprintln!("ecs-survey failed: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    if cmd == "chunk-compare" {
+        let (Some(archive), Some(out), Some(vz), Some(java), Some(unluac)) =
+            (args.first(), args.get(1), flag_val(&args, "--vz-wad"), flag_val(&args, "--java"), flag_val(&args, "--unluac"))
+        else {
+            eprintln!("chunk-compare: usage: mercs2_probe chunk-compare <big-endian archive> <out.tsv> --vz-wad <pc vz.wad> --java <java> --unluac <jar> [--only <type>]");
+            std::process::exit(2);
+        };
+        let only = flag_val(&args, "--only");
+        let inputs = chunk_compare::Inputs {
+            archive: std::path::Path::new(archive),
+            vz_wad: std::path::Path::new(&vz),
+            java: std::path::Path::new(&java),
+            unluac: std::path::Path::new(&unluac),
+            only: only.as_deref(),
+        };
+        if let Err(e) = chunk_compare::chunk_compare(inputs, std::path::Path::new(out)) {
+            eprintln!("chunk-compare failed: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    if cmd == "ecs-names" {
+        let (Some(archive), Some(out), Some(vz)) = (args.first(), args.get(1), flag_val(&args, "--vz-wad")) else {
+            eprintln!("ecs-names: usage: mercs2_probe ecs-names <archive> <out.tsv> --vz-wad <pc vz.wad>");
+            std::process::exit(2);
+        };
+        if let Err(e) = ecs_compare::ecs_names(std::path::Path::new(archive), std::path::Path::new(&vz), std::path::Path::new(out)) {
+            eprintln!("ecs-names failed: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    if cmd == "ecs-compare" {
+        let (Some(a), Some(b), Some(out), Some(vz)) = (args.first(), args.get(1), args.get(2), flag_val(&args, "--vz-wad")) else {
+            eprintln!("ecs-compare: usage: mercs2_probe ecs-compare <archive a> <archive b> <out.tsv> --vz-wad <pc vz.wad> [--diffs <file>]");
+            std::process::exit(2);
+        };
+        let diffs = flag_val(&args, "--diffs");
+        if let Err(e) = ecs_compare::ecs_compare(
+            std::path::Path::new(a),
+            std::path::Path::new(b),
+            std::path::Path::new(&vz),
+            std::path::Path::new(out),
+            diffs.as_deref().map(std::path::Path::new),
+        ) {
+            eprintln!("ecs-compare failed: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
     if cmd == "ess-menu-check" {
         std::process::exit(ess_menu_check::main(&args));
     }
@@ -874,11 +947,12 @@ fn main() {
         "layer" => {
             if args.iter().any(|a| a == "--catalog") {
                 let out = flag_val(&args, "--catalog").unwrap_or_else(|| {
-                    eprintln!("layer: usage: mercs2_probe layer --catalog <out.tsv> [--also <archive,archive>]");
+                    eprintln!("layer: usage: mercs2_probe layer --catalog <out.tsv> [--also <archive,archive>] [--overlay <wad>]");
                     std::process::exit(2);
                 });
                 let also: Vec<String> = flag_val(&args, "--also").map_or(Vec::new(), |v| v.split(',').map(str::to_string).collect());
-                run(layer::layer_catalog(&wadpath, std::path::Path::new(&out), &also));
+                let overlays: Vec<String> = flag_val(&args, "--overlay").into_iter().collect();
+                run(layer::layer_catalog(&wadpath, std::path::Path::new(&out), &also, &overlays));
             } else if args.iter().any(|a| a == "--frames") {
                 let capture = flag_val(&args, "--frames").unwrap_or_else(|| {
                     eprintln!("layer: usage: mercs2_probe layer --frames <capture>");
