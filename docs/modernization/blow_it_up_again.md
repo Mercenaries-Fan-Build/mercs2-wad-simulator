@@ -18,7 +18,12 @@ and the player's copy supplies the content: `dlc_port` converts the player's own
 gitignored folder the manifest builds from. A file we author, such as a master-script change or a
 ported shader, is tracked.
 
-The folder starts when a manifest for it can pass `qm lint`, which needs step 3's `add_level`.
+`dlc_port` writes into the Shipment's gitignored `src/level/`, and `qm build` places three things: the
+converted WAD as `data/dlc01-patch.wad`, its 7 streams in `data/Audios`, and a copy of `vz.wad`, made at
+deploy, as `data/dlc01.wad`. The engine opens those two WADs and no more for a level, and the DLC does
+not run alone: the PS3 archive lacks 25 of the 32 modules `dlc01.lua` imports, and on PS3's `IsDLC` path
+the archive mounts above level `vz` (`FUN_00382e48`). That the retail menu path on console does the same
+was not read to the end.
 
 ## What is measured
 
@@ -34,10 +39,13 @@ The folder starts when a manifest for it can pass `qm lint`, which needs step 3'
 | Textures | Each rung converts to its own mips, as `INFO`'s masks declare (`docs/format_reference.md` §4.3). All 1,268 DLC textures are converted; 7 have no pixels on Xbox, are in the base game, and leave their stubs out, so a `dlc01.wad` mounted alone lacks them until step 3's closure. Decoded against PS3 DLC, DXT5 is identical at the 99th percentile, DXT1 differs by codec noise, and the 9 normal maps PS3 keeps in DXT1 match on X within 3.3 of 255 and Y within 7.5; PC twins agree over 88,448 mips of the Xbox retail bake. `dlc_al_veh_tank_m1a3` and `dlc_pmc_veh_truck_armoredmonster` draw fully textured in `--render` |
 | ASET rungs | 1,045 rows chain to their finer rungs, derived from which blocks hold each asset, and every rung of all 5,334 rows agrees with the Xbox row, which `dlc_port` now enforces. Before this `_P001` was blanked and `_P002`/`_P003` kept Xbox block indices wherever they happened to fall in range |
 | Layers | 20 layers, 8,312 entities, 3.2 km square (`layer --catalog --overlay`). `dlc01.lua` asks for 14. `dlc01_SpeedCity_scrub` and `dlc01_SpeedCity_foliage` are in no build we hold |
-| Streamed wavebanks | 7, `vo_stream_dlctest.<language>` ×6 and `dlctest_streaming`, with a 32-byte `.pws` name slot and records at `+0x38`. PC reads the offset from the bank (`audio_code_map.md` §11.5) |
+| Streamed wavebanks | 7, `vo_stream_dlctest.<language>` ×6 and `dlctest_streaming`, 4,096 clips, with a 32-byte `.pws` name slot and records at `+0x38`. PC reads the offset from the bank (`audio_code_map.md` §11.5). `dlc_port` re-encodes their XMA2 streams to the IMA a retail `.pws` holds and writes them to `Audios/` beside the WAD. Decoded, our IMA matches ffmpeg's XMA decode at a median correlation of 0.9996 at lag 0, the lowest 0.9977, over 120 clips. Against PS3 the 30 clips sampled are the same take: envelopes correlate at 0.985, and waveforms at 0.71 in 8,192-sample windows and 0.34 over a whole clip, so the two bakes are not sample-identical and why was not read |
 | ASET rows | 5,334 routed, 7 dropped with their pixel-less stubs; `aset_refcheck` passes, every one of 3,499 rungs holding its asset once |
 | `wad_simulator` | All 9 wavebanks and every asset type consume with 0 issues. Exit 1 from the one flag notes already rule out, the `ActionTable` row count of 1,036 |
-| `.pws` files | Not converted by `dlc_port`. 7 June-built PC files in `output/data/Audios` pass the simulator's audit; the Rust path is `transcode_pws_xbox_to_pc`. That the game finds them under the bank's name is unread |
+| `.pws` files | The 7 June-built files in `output/data/Audios` are nibble-swapped XMA, not audio. That PC's `Sound.OpenStreamFile` path finds the new ones is unread: `dlctest01_soundbootstrap.lua` opens them under `Net.DLCGetMountPoint()` |
+| Workshop | The picker lists `vz` and `dlc01`. `dlc01` lists 312 models, 1,261 textures, 2,609 anims, 4 effects, 18 audio assets, 3 UI, 7 text and 20 layers, no FaceFX. A model, material animation, effect, string table, layer and sound each open from the converted WAD |
+| Audio tab | 11 banks, 4,126 lines. All 681 English lines, the 10 streamed and the 27 embedded `dlctest_resident` clips export with sound in them. English peaks reach full scale on 400, and on 59 of 120 PS3 twins sampled, against 1 of 300 retail `vo_Chris` lines, so the level is in the DLC's master. A line has no speaker or caption, and no cue reads it yet |
+| Effects | 314 of 314 retail effects convert to PC's bytes, 51,593 chunks. An emitter's `GEOM` is two u16s, which the u32 sweep traded |
 | Shaders | 2 of 21 keys are not registered on PC, `0x3973c300` among them, on 219 of 1,020 materials (`docs/_dlc01_shader_triage.md`) |
 | Live | `dlc01` boots by name, then hangs in `WAITFORSTREAMING` with `dlc01.wad` mounted alone, about 26k base assets absent. Which asset the "1 outstanding asset" is was not read. Every WAD of that run carried a damaged `worldentity`, compact layers and guidmap, and predates these banks converting |
 
@@ -46,13 +54,13 @@ The folder starts when a manifest for it can pass `qm lint`, which needs step 3'
 `mercs2_probe chunk-compare <xbox-vz.wad> <out.tsv> --vz-wad <vz.wad> --java … --unluac …` converts every
 Xbox retail chunk and compares each row with its PC twin, joined by name and type. `--only <type>`
 limits a re-run. A difference is either a converter gap or a real difference between the bakes, and
-each row below has to be read to say which. Of 11,087 blocks one is refused, `wpn_sniperrifle`, whose
-wavebank fails ffmpeg's decode.
+each row below has to be read to say which. Of 11,087 blocks `wpn_sniperrifle` is refused, whose
+wavebank fails ffmpeg's decode, and so is each streamed bank, whose `.pws` this tool is not given.
 
 | Rows differing, of those on both sides | Chunk |
 |---|---|
 | Every one | `lineregion` `data` 625, `anim_state_machine` `AINF` 394, `sequencetable` `ITEM` 102 and `SINF` 51, `soundbank` 75, `sounddb` 76, `facefxanimationset` 86, `facefxactor` 31, `font` `INFO` and `CHAR` 6 |
-| Most | `EFCT/EMIT/GEOM` 795 of 811, `wavebank` `data` 94 of 94 (sizes differ), `PHY2` 998 of 1,564 |
+| Most | `wavebank` `data` 94 of 94 (sizes differ), `PHY2` 998 of 1,564 |
 | Some | `animation` `data` 1,435 of 4,232, `model` `INFO` 230 of 3,007, `binary` 14 of 14, `chatter` 6 of 22, `cfx_pack` 14 of 64 |
 | Unread | mesh `STRM`, `IBUF`, `PRMT`; `script` `BINN` |
 
@@ -75,10 +83,12 @@ Each step ends with something the user can look at.
    - `mercs2_probe layer --catalog` over the DLC, with the 11 static and 3 default layers of `dlc01.lua`.
    - The Workshop opens a level WAD: every Inspect tab lists the DLC beside the base game, in a level
      picker, and an effect, model, clip, sound and string plays from the converted WAD.
-   - The DLC's Xbox-side audio plays in the Audio tab.
-3. **The Shipment exists.** P5 `add_level`, then `shipments/blow-it-up-again/` passes `qm lint`.
-   `qm build` writes a self-contained `dlc01.wad`: DLC blocks plus exactly the base assets their
-   references reach (`aset_closure`, `aset_refcheck`), so a missing asset is a build error naming it.
+   - The DLC's Xbox-side audio plays in the Audio tab, with its streams re-encoded for PC.
+3. **The Shipment exists.** P5 `add_level`, and `shipments/blow-it-up-again/` passes `qm lint` and
+   `qm build`. What a script's `DEPS` or a model's `MTRL` names that neither the level nor the game
+   holds is a build error naming it: 1,123 references, 70 of them only in the base. What Lua asks for by
+   a name it computes is not visible to a build, which is why the level sits over a whole copy of the
+   base rather than a computed subset of it.
 4. **The level loads in our own engine.**
    - The Level page opens `dlc01` as a level: terrain, entities, layer states.
    - `mercs2_autoplay` runs `dlc01.lua` on the script host, so the load's every asset request and
@@ -96,7 +106,11 @@ Each step ends with something the user can look at.
 
 ## Not settled
 
-- Whether the wedge is the base assets, the audio or both; steps 3 and 8 separate them.
+- Whether the wedge was the base assets, the audio or both; step 8 separates them.
+- How a player starts the level. `Sys.StartSingleplayer("dlc01", "dlc01")` boots it through the Lua
+  bridge; nothing in the Shipment calls it yet.
+- `Net.DLCGetMountPoint` is not in the PC exe, and `dlctest01_soundbootstrap.lua:188` calls it to open the
+  streams. Whether `dlc01` reaches that module was not read: `dlc01.lua` imports `MrxSoundBootstrap`.
 - What `Pg.LoadLayer` (`0x005D4C80`) does with a layer in no WAD, and so whether the two absent
   SpeedCity layers can hold `_tStaticLayers` open.
 - Whether the real rungs stream in the game. The scaled resident chain they replace was added to end
