@@ -10,9 +10,9 @@
 //!   +0x08 u16  record count
 //!   +0x0A u16  0 = embedded bank; 1 = streamed bank (the records address a named .pws file)
 //!   +0x0C u32  the bank hash again
-//!   +0x10 u32  records offset: 24 for an embedded bank, 40 for a streamed bank
+//!   +0x10 u32  records offset: 24 for an embedded bank; 40 for a streamed bank, 56 in the DLC's
 //!   +0x14 u32  0
-//!   +0x18      streamed banks only: the .pws file name, NUL-padded to 16 bytes
+//!   +0x18      streamed banks only: the .pws file name, NUL-padded to 16 bytes, 32 in the DLC's
 //! record (36 bytes each, in index order)
 //!   +0x00 u32  clip hash
 //!   +0x04 u8x4 [0, channels, format, 0]; format = bytes per sample (2) when embedded, 4 when streamed
@@ -51,10 +51,16 @@ pub const TABLE_VERSION: u32 = 0x1D;
 pub const RECORD_SIZE: usize = 36;
 /// Header size of an embedded bank — where its record table starts.
 pub const HEADER_SIZE: usize = 24;
-/// Size of the NUL-padded `.pws` file-name field a streamed bank carries at `+0x18`.
+/// Size of the NUL-padded `.pws` file-name field in the retail banks at `+0x18`.
 pub const STREAM_NAME_FIELD: usize = 16;
-/// Header size of a streamed bank (header + file-name field) — where its record table starts.
+/// Header size of a retail streamed bank (header + file-name field) — where its record table starts.
 pub const STREAM_HEADER_SIZE: usize = HEADER_SIZE + STREAM_NAME_FIELD;
+/// The longest name field seen: the DLC's, whose names (`vo_stream_DLCTest.pws`) outgrow 16 bytes.
+pub const MAX_STREAM_NAME_FIELD: usize = 2 * STREAM_NAME_FIELD;
+/// The name field a `.pws` name of `len` bytes takes: the first multiple of 16 that holds it and a NUL.
+pub const fn stream_name_field(len: usize) -> usize {
+    (len / STREAM_NAME_FIELD + 1) * STREAM_NAME_FIELD
+}
 /// Every embedded blob starts on, and the body ends on, a multiple of this.
 pub const BLOB_ALIGN: usize = 16;
 
@@ -277,7 +283,7 @@ impl std::fmt::Display for WaveError {
             WaveError::TooManyRecords(n) => write!(f, "wavebank: {n} records exceed the u16 count"),
             WaveError::BadStreamName => write!(f, "wavebank: .pws name field is not ASCII + NUL padding"),
             WaveError::StreamNameTooLong(n) => {
-                write!(f, "wavebank: .pws name {n:?} does not fit the 16-byte NUL-terminated field")
+                write!(f, "wavebank: .pws name {n:?} does not fit the {MAX_STREAM_NAME_FIELD}-byte NUL-terminated field")
             }
             WaveError::UnsupportedChannels { record, channels } => {
                 write!(f, "wavebank: record {record} has {channels} channels, expected 1 or 2")
@@ -394,20 +400,23 @@ impl WavebankFile {
             1 => true,
             k => return Err(WaveError::UnknownBankKind(k)),
         };
-        let expected_off = if streamed { STREAM_HEADER_SIZE } else { HEADER_SIZE } as u32;
-        if records_off != expected_off {
-            return Err(WaveError::BadRecordsOffset { found: records_off, expected: expected_off });
+        if !streamed && records_off != HEADER_SIZE as u32 {
+            return Err(WaveError::BadRecordsOffset { found: records_off, expected: HEADER_SIZE as u32 });
         }
         if count == 0 {
             return Err(WaveError::Empty);
         }
         let stream_name = if streamed {
             let field = body
-                .get(HEADER_SIZE..STREAM_HEADER_SIZE)
+                .get(HEADER_SIZE..(records_off as usize).max(HEADER_SIZE))
                 .ok_or(WaveError::Truncated { field: ".pws name", offset: HEADER_SIZE, len: body.len() })?;
             let n = field.iter().position(|&c| c == 0).ok_or(WaveError::BadStreamName)?;
             if n == 0 || !field[..n].is_ascii() || field[n..].iter().any(|&c| c != 0) {
                 return Err(WaveError::BadStreamName);
+            }
+            let expected = (HEADER_SIZE + stream_name_field(n)) as u32;
+            if records_off != expected {
+                return Err(WaveError::BadRecordsOffset { found: records_off, expected });
             }
             Some(String::from_utf8(field[..n].to_vec()).map_err(|_| WaveError::BadStreamName)?)
         } else {
@@ -487,7 +496,7 @@ impl WavebankFile {
             return Err(WaveError::TooManyRecords(count));
         }
         let streamed = self.stream_name.is_some();
-        let records_off = if streamed { STREAM_HEADER_SIZE } else { HEADER_SIZE };
+        let records_off = HEADER_SIZE + self.stream_name.as_ref().map_or(0, |n| stream_name_field(n.len()));
         let table_end = records_off + count * RECORD_SIZE;
 
         // Place every embedded blob first: record i's data offset is relative to record i's start.
@@ -542,11 +551,11 @@ impl WavebankFile {
             if name.is_empty() || !name.is_ascii() || name.as_bytes().contains(&0) {
                 return Err(WaveError::BadStreamName);
             }
-            if name.len() >= STREAM_NAME_FIELD {
+            if name.len() >= MAX_STREAM_NAME_FIELD {
                 return Err(WaveError::StreamNameTooLong(name.clone()));
             }
             out.extend_from_slice(name.as_bytes());
-            out.resize(STREAM_HEADER_SIZE, 0);
+            out.resize(records_off, 0);
         }
         for (i, rec) in self.records.iter().enumerate() {
             let r = out.len();
@@ -796,13 +805,42 @@ mod tests {
         assert!(bank.clips[0].samples.is_empty());
     }
 
+    /// The DLC's streamed banks declare their records at `+0x38`: `vo_stream_DLCTest.pws` takes the
+    /// 32-byte name slot.
+    #[test]
+    fn a_long_pws_name_takes_the_longer_slot() {
+        let file = WavebankFile {
+            bank_hash: 0xF53C_3969,
+            stream_name: Some("vo_stream_DLCTest.pws".to_string()),
+            records: vec![WaveRecord {
+                clip_hash: 1,
+                channels: 1,
+                format: CODEC_STREAM,
+                sample_rate: 44100,
+                frames: 9,
+                data: WaveData::Streamed { offset: 0, size: 2, word_1c: 0 },
+            }],
+        };
+        let bytes = file.to_bytes().expect("encodes");
+        assert_eq!(u32::from_le_bytes([bytes[16], bytes[17], bytes[18], bytes[19]]), 56);
+        assert_eq!(bytes.len(), 56 + RECORD_SIZE);
+        assert_eq!(WavebankFile::parse(&bytes).expect("parses"), file);
+
+        // A short name in the long slot is not a layout any bank has, and would not re-encode.
+        let mut padded = bytes[..24].to_vec();
+        padded.extend_from_slice(b"short.pws");
+        padded.resize(56, 0);
+        padded.extend_from_slice(&bytes[56..]);
+        assert!(matches!(WavebankFile::parse(&padded), Err(WaveError::BadRecordsOffset { found: 56, expected: 40 })));
+    }
+
     #[test]
     fn the_encoder_refuses_what_it_cannot_lay_out() {
         let none = WavebankFile { bank_hash: 1, stream_name: None, records: vec![] };
         assert_eq!(none.to_bytes(), Err(WaveError::Empty));
         let long = WavebankFile {
             bank_hash: 1,
-            stream_name: Some("sixteen_chars.pw".to_string()),
+            stream_name: Some("a_name_of_thirty_two_characters_".to_string()),
             records: vec![WaveRecord {
                 clip_hash: 1,
                 channels: 1,
