@@ -6,8 +6,9 @@
 //! sample-rate) lives in the wavebank clip record, NOT the `.pws`. That is a
 //! space-saving "assumed codec / no per-blob header" design — verified on retail
 //! `music.pws` / `ambience.pws` / `vo_stream.english.pws`, which contain no
-//! `RIFF` / `OggS` / IMA-version markers and are not block-aligned to any IMA
-//! stride.
+//! `RIFF` / `OggS` / IMA-version markers. Every clip is whole 36-byte (mono) or
+//! 72-byte (stereo) IMA blocks starting on a 16-byte boundary, with 0 or 8 bytes
+//! of padding between clips, so the file as a whole has no fixed stride.
 //!
 //! Consequently there is nothing to parse standalone (the old IMA-block
 //! `detect_pws_payload_layout` model false-positived as "unrecognized layout").
