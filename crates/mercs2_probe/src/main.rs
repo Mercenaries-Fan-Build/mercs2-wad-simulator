@@ -41,6 +41,8 @@
 mod anim_table;
 mod bone_census;
 mod chunk_compare;
+mod tex_compare;
+mod tex_rungs;
 mod clip_names;
 mod clip_pose;
 mod dump;
@@ -610,6 +612,39 @@ fn main() {
         };
         if let Err(e) = chunk_compare::chunk_compare(inputs, std::path::Path::new(out)) {
             eprintln!("chunk-compare failed: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    if cmd == "tex-compare" {
+        let (Some(archive), Some(out), Some(vz)) = (args.first(), args.get(1), flag_val(&args, "--vz-wad")) else {
+            eprintln!("tex-compare: usage: mercs2_probe tex-compare <xbox archive> <out.tsv> --vz-wad <pc vz.wad> [--ps3 <ps3 archive>]");
+            std::process::exit(2);
+        };
+        let ps3 = flag_val(&args, "--ps3");
+        if let Err(e) = tex_compare::tex_compare(std::path::Path::new(archive), std::path::Path::new(&vz), ps3.as_deref().map(std::path::Path::new), std::path::Path::new(out)) {
+            eprintln!("tex-compare failed: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    if cmd == "tex-rungs" {
+        let (Some(archive), Some(out), Some(vz)) = (args.first(), args.get(1), flag_val(&args, "--vz-wad")) else {
+            eprintln!("tex-rungs: usage: mercs2_probe tex-rungs <big-endian archive> <out.tsv> --vz-wad <pc vz.wad> [--raw <dir> --hash <0xHASH>]");
+            std::process::exit(2);
+        };
+        let dir = flag_val(&args, "--raw");
+        let hash = flag_val(&args, "--hash").and_then(|h| u32::from_str_radix(h.trim_start_matches("0x"), 16).ok());
+        let raw = match (&dir, hash) {
+            (Some(d), Some(hash)) => Some(tex_rungs::Raw { hash, dir: std::path::Path::new(d) }),
+            (None, None) => None,
+            _ => {
+                eprintln!("tex-rungs: --raw and --hash go together, and --hash is hex");
+                std::process::exit(2);
+            }
+        };
+        if let Err(e) = tex_rungs::tex_rungs(std::path::Path::new(archive), std::path::Path::new(&vz), std::path::Path::new(out), raw.as_ref()) {
+            eprintln!("tex-rungs failed: {e}");
             std::process::exit(1);
         }
         return;
