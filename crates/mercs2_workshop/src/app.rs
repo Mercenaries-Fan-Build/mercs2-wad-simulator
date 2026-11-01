@@ -85,6 +85,8 @@ pub(crate) struct WadStack {
     pub side_labels: Vec<String>,
     /// Every side WAD looked for and what became of it — what Settings' "What it opened" lists.
     pub side_report: Vec<(String, SideWad)>,
+    /// The layouts compact containers inflate through, read from the base WAD at the first one.
+    schemas: Option<mercs2_formats::be_to_le::ecs::ComponentSchemas>,
 }
 
 /// What became of one side WAD ([`mercs2_quartermaster::game::side_wad_files`]).
@@ -133,7 +135,7 @@ impl WadStack {
                 Err(e) => side_report.push((file, SideWad::Unreadable(format!("{path}: {e}")))),
             }
         }
-        Ok(WadStack { wads, labels, registry: Default::default(), tex_cache: HashMap::new(), side, side_labels, side_report })
+        Ok(WadStack { wads, labels, registry: Default::default(), tex_cache: HashMap::new(), side, side_labels, side_report, schemas: None })
     }
 
     /// No archive open: the window's state before a boot brings one in.
@@ -146,6 +148,7 @@ impl WadStack {
             side: Vec::new(),
             side_labels: Vec::new(),
             side_report: Vec::new(),
+            schemas: None,
         }
     }
 
@@ -199,10 +202,35 @@ impl WadStack {
     /// every other asset (overlays first).
     pub fn typed_container(&mut self, type_hash: u32, hash: u32) -> Result<Vec<u8>, String> {
         let WadStack { wads, registry, .. } = self;
-        registry
+        let c = registry
             .resolve(wads, type_hash, hash)
             .and_then(|c| registry.slice(c).map(<[u8]>::to_vec))
-            .ok_or_else(|| format!("0x{hash:08X}: no chunk of type 0x{type_hash:08X} in any open wad"))
+            .ok_or_else(|| format!("0x{hash:08X}: no chunk of type 0x{type_hash:08X} in any open wad"))?;
+        if type_hash == mercs2_formats::types::TYPE_HASH_LAYER {
+            return self.named_ecs(c);
+        }
+        Ok(c)
+    }
+
+    /// An ECS container in the named form its readers take. A compact one, as the DLC stores it,
+    /// inflates through the layouts of the game's `vz.wad` beside the base, whichever level is open,
+    /// with the names boot resolves: the bundle's, then the checkout's name homes where there is one.
+    fn named_ecs(&mut self, container: Vec<u8>) -> Result<Vec<u8>, String> {
+        use mercs2_formats::be_to_le::ecs::{is_compact, ComponentSchemas};
+        if !is_compact(&container) {
+            return Ok(container);
+        }
+        if self.schemas.is_none() {
+            let base = self.labels.first().ok_or("no base WAD is open")?;
+            let vz = mercs2_quartermaster::sound::sibling_wad(std::path::Path::new(base), "vz.wad")?;
+            let mut schemas = ComponentSchemas::from_vz_wad(&vz)?;
+            schemas.add_names(crate::index::load_all_names()?.into_values());
+            if let Ok((_, held)) = crate::statenamer::StateNamer::open() {
+                schemas.add_names(held.into_values());
+            }
+            self.schemas = Some(schemas);
+        }
+        self.schemas.as_ref().expect("set above").inflate(&container)
     }
 
     /// A string table by asset name (`english`, `french`, …) as `key_hash -> text`, resolved through
@@ -264,6 +292,7 @@ impl WadStack {
             .resolve(wads, WORLDENTITY_TYPE_HASH, RETAIL_WORLDENTITY_NAME_HASH)
             .and_then(|c| registry.slice(c).map(<[u8]>::to_vec))
             .ok_or("worldentity: not in any open wad")?;
+        let container = self.named_ecs(container)?;
         let we = WorldEntity::parse(&container).map_err(|e| format!("worldentity: {e}"))?;
         let mut out = HashMap::new();
         for (name, keys) in we.names().map_err(|e| format!("worldentity: {e}"))? {
@@ -278,10 +307,11 @@ impl WadStack {
     /// through the same residency registry.
     pub fn worldentity(&mut self) -> Result<Vec<u8>, String> {
         let WadStack { wads, registry, .. } = self;
-        registry
+        let c = registry
             .resolve_singleton(wads, mercs2_formats::worldentity::WORLDENTITY_TYPE_HASH)
             .and_then(|(_, c)| registry.slice(c).map(<[u8]>::to_vec))
-            .ok_or_else(|| "no worldentity chunk in any open wad".to_string())
+            .ok_or_else(|| "no worldentity chunk in any open wad".to_string())?;
+        self.named_ecs(c)
     }
 
     /// Every source in resolution order: the stack last-opened first, then the side WADs.
@@ -297,6 +327,9 @@ impl WadStack {
         let mut last = format!("0x{hash:08X}: no model chunk in any open wad");
         for src in self.resolution_order() {
             let Some(w) = self.source_mut(src) else { continue };
+            if !wad::has_model(w, hash) {
+                continue;
+            }
             match wad::extract_model_lods(w, hash) {
                 Ok(l) => return Ok(l),
                 Err(e) => last = e,
@@ -311,6 +344,9 @@ impl WadStack {
         let mut last = format!("0x{hash:08X}: no model chunk in any open wad");
         for src in self.resolution_order() {
             let Some(w) = self.source_mut(src) else { continue };
+            if !wad::has_model(w, hash) {
+                continue;
+            }
             match mercs2_engine::model::Model::load(w, hash) {
                 Ok(m) => return Ok(m),
                 Err(e) => last = e,
@@ -321,14 +357,14 @@ impl WadStack {
 
     /// Resident-mip texture (fast path — model loads).
     pub fn texture_resident(&mut self, hash: u32) -> Result<mercs2_formats::texture::TextureData, String> {
-        let mut last = format!("0x{hash:08X}: not in any open wad");
         for i in (0..self.wads.len()).rev() {
             match wad::extract_texture(&mut self.wads[i], hash) {
                 Ok(t) => return Ok(t),
-                Err(e) => last = e,
+                Err(e) if i == 0 => return Err(e),
+                Err(_) => {}
             }
         }
-        Err(last)
+        Err(format!("0x{hash:08X}: not in any open wad"))
     }
 
     /// Full streamed resolution — the texture's higher mips assembled from the finer LOD blocks of
