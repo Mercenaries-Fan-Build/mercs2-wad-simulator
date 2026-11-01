@@ -28,7 +28,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 
-use mercs2_formats::be_to_le::texture::{rung_of_path, BlockTextures, TextureTable};
+use mercs2_formats::be_to_le::texture::{rung_of_path, BlockTables, TextureTable};
 use mercs2_formats::dlc_input::{parse_be_ffcs, parse_be_indx, parse_be_pths, read_be_block};
 use mercs2_formats::dlc_stfs::load_stfs_or_doh;
 use mercs2_formats::ucfx::parse_block_entry_table;
@@ -136,7 +136,7 @@ impl XboxDohOracle {
                 }
             };
 
-            let block_textures = BlockTextures { table: &textures, rung: rung_of_path(&path_s) };
+            let block_textures = BlockTables { textures: &textures, rung: rung_of_path(&path_s), streams: None };
             let swapped = match convert_block(&decompressed, false, None, Some(lua_tools), Some(schemas), Some(block_textures)) {
                 Ok(s) => s,
                 Err(err) => {
