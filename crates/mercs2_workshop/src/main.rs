@@ -741,11 +741,11 @@ exported {ok} bundle(s), {fail} failed -> {}", outroot.display());
             .strip_prefix("0x")
             .and_then(|h| u32::from_str_radix(h, 16).ok())
             .unwrap_or_else(|| mercs2_formats::hash::pandemic_hash_m2(arg.trim_start_matches('_')));
-        let mut w = match wad::open(&wadpath) {
+        let mut w = match app::WadStack::open(&wadpath, &overlays) {
             Ok(w) => w,
             Err(e) => return eprintln!("workshop: cannot open {wadpath}: {e}"),
         };
-        match wad::extract_texture(&mut w, hash) {
+        match w.texture_resident(hash) {
             Ok(td) => println!(
                 "0x{hash:08X}: {}x{}  {:?}  {} mips  {} bytes",
                 td.width, td.height, td.format, td.mip_count, td.all_mips.len()
@@ -846,13 +846,13 @@ exported {ok} bundle(s), {fail} failed -> {}", outroot.display());
             .strip_prefix("0x")
             .and_then(|h| u32::from_str_radix(h, 16).ok())
             .unwrap_or_else(|| mercs2_formats::hash::pandemic_hash_m2(arg.trim_start_matches('_')));
-        let mut w = match wad::open(&wadpath) {
+        let mut w = match app::WadStack::open(&wadpath, &overlays) {
             Ok(w) => w,
             Err(e) => return eprintln!("workshop: cannot open {wadpath}: {e}"),
         };
         // Full mip chain assembled from the finer LOD blocks, falling back to the resident tail —
         // a texture dump should hand back the real image, not the coarse residency budget.
-        match wad::extract_texture_hires(&mut w, hash).or_else(|_| wad::extract_texture(&mut w, hash)) {
+        match w.texture_best(hash) {
             Ok(td) => {
                 let (pw, ph, rgba) = texpng::decode_bc(&td);
                 match texpng::write_png(out, pw, ph, &rgba) {
