@@ -26,19 +26,21 @@ The folder starts when a manifest for it can pass `qm lint`, which needs step 3'
 
 | Check | Result |
 |---|---|
-| Blocks | 2,189 of 2,196 convert |
-| Skipped | 7, all streamed wavebanks: `vo_stream_dlctest.<language>` ×6 and `dlctest_streaming`: `wavebank records_offset 56, expected 40 (streamed=true)` |
-| ASET rows | 5,332 routed, 9 dropped, 7 LOD rungs sentinelled, all from those 7 blocks (INFERRED) |
+| Blocks | 2,196 of 2,196 convert; a block that does not fails the run |
+| Streamed wavebanks | 7, `vo_stream_dlctest.<language>` ×6 and `dlctest_streaming`, with a 32-byte `.pws` name slot and records at `+0x38`. PC reads the offset from the bank (`audio_code_map.md` §11.5) |
+| ASET rows | 5,341 routed, 0 dropped; `aset_refcheck` passes |
+| `wad_simulator` | All 9 wavebanks and every asset type consume with 0 issues. Exit 1 from the one flag notes already rule out, the `ActionTable` row count of 1,036 |
+| `.pws` files | Not converted by `dlc_port`. 7 June-built PC files in `output/data/Audios` pass the simulator's audit; the Rust path is `transcode_pws_xbox_to_pc`. That the game finds them under the bank's name is unread |
 | Reader | `WorldEntity::parse` refuses the DLC's `worldentity`: CHDR flags 5, bit 2 stores names as hashes, so `mercs2_probe layer` cannot read one DLC layer |
 | Shaders | 2 of 21 keys are not registered on PC, `0x3973c300` among them, on 219 of 1,020 materials (`docs/_dlc01_shader_triage.md`) |
-| Live | `dlc01` boots by name, then hangs in `WAITFORSTREAMING` with `dlc01.wad` mounted alone, about 26k base assets absent. Which asset the "1 outstanding asset" is was not read, and the skipped banks are candidates (SPECULATIVE) |
+| Live | `dlc01` boots by name, then hangs in `WAITFORSTREAMING` with `dlc01.wad` mounted alone, about 26k base assets absent. Which asset the "1 outstanding asset" is was not read. Every WAD of that run predates these banks converting, or carried them in an older form (SPECULATIVE) |
 
 ## Order of work
 
 Each step ends with something the user can look at.
 
-1. **Every block converts.** Decode the streamed wavebank layout and convert all 7 blocks. A skipped
-   block then fails the run. Test: 2,196 of 2,196, 5,341 rows, 0 sentinelled.
+1. **Every block converts.** The streamed wavebank layout. Test: 2,196 of 2,196, 5,341 rows, 0
+   sentinelled, `a_dlc_streamed_bank_converts_with_its_long_name`.
 2. **Every byte reads.**
    - `worldentity` with names as hashes, proven by a parse that re-encodes byte for byte.
    - `mercs2_probe layer --catalog` over the DLC, with the 11 static and 3 default layers of `dlc01.lua`.
@@ -65,6 +67,6 @@ Each step ends with something the user can look at.
 
 ## Not settled
 
-- Whether the wedge is the base assets, the skipped banks or both; steps 1, 3 and 8 separate them.
+- Whether the wedge is the base assets, the audio or both; steps 3 and 8 separate them.
 - `dlc_pc_port_status.md` and `dlc_arena_loading_analysis.md` still describe the overlay route.
 - The PS3 package skips 472 blocks; this plan uses the Xbox package, which holds the same names.
