@@ -916,7 +916,8 @@ fn parse_light_records(data: &[u8], off: usize, size: usize) -> Vec<(u32, LightO
 }
 
 /// The keys of every record of component `class` in a decompressed placement block (records
-/// `[u32 key][payload]` at the class's `schm` stride). A chunk that does not divide into records is an
+/// `[u32 key][payload]` at the class's `schm` stride; `PointLocation`, the one class here with a string
+/// in its records, `[u32 key][32 bytes][cstring]`). A chunk that does not divide into records is an
 /// error.
 pub fn component_keys(block: &[u8], class: &str) -> Result<std::collections::HashSet<u32>, String> {
     let ucfx_positions = find_all(block, b"UCFX");
@@ -928,12 +929,44 @@ pub fn component_keys(block: &[u8], class: &str) -> Result<std::collections::Has
                 continue;
             }
             let Some((off, size)) = c.data else { continue };
+            if class == "PointLocation" {
+                out.extend(point_location_keys(block.get(off..off + size).ok_or_else(|| format!("sub-block {si}: {class} data of {size} bytes at {off} is past the block"))?).map_err(|e| format!("sub-block {si}: {e}"))?);
+                continue;
+            }
             let stride = 4 + c.payload_stride.ok_or_else(|| format!("sub-block {si}: {class} has no schm"))? as usize;
             if size % stride != 0 || off + size > block.len() {
                 return Err(format!("sub-block {si}: {class} data of {size} bytes is not whole {stride}-byte records"));
             }
             out.extend((0..size / stride).map(|i| read_u32_le(block, off + i * stride)));
         }
+    }
+    Ok(out)
+}
+
+/// The component classes of every entity key a placement block's records name. `Transform` and `Name`
+/// have their own readers ([`placed_entities`], [`placed_names`]) and are left out.
+pub fn entity_classes(block: &[u8]) -> Result<std::collections::HashMap<u32, std::collections::BTreeSet<String>>, String> {
+    let classes: std::collections::BTreeSet<String> = comp_inventory(block).into_iter().filter_map(|c| c.info_name).collect();
+    let mut out: std::collections::HashMap<u32, std::collections::BTreeSet<String>> = std::collections::HashMap::new();
+    for class in classes.iter().filter(|c| !matches!(c.as_str(), "Transform" | "Name")) {
+        for k in component_keys(block, class)? {
+            out.entry(k).or_default().insert(class.clone());
+        }
+    }
+    Ok(out)
+}
+
+/// The keys of a `PointLocation` data chunk (native reader `FUN_00656AD0`). An unterminated string or a
+/// cut record is an error.
+fn point_location_keys(data: &[u8]) -> Result<Vec<u32>, String> {
+    const FIXED: usize = 4 + 32;
+    let mut out = Vec::new();
+    let mut at = 0;
+    while at < data.len() {
+        let text = data.get(at + FIXED..).ok_or_else(|| format!("PointLocation record at {at}: cut short"))?;
+        let len = text.iter().position(|&b| b == 0).ok_or_else(|| format!("PointLocation record at {at}: its text is not terminated"))?;
+        out.push(read_u32_le(data, at));
+        at += FIXED + len + 1;
     }
     Ok(out)
 }
@@ -1274,6 +1307,23 @@ mod tests {
             0xee, 0x21, 0x55, 0x3e, 0xa5, 0x4d, 0x00, 0x80, 0x16, 0x04,
         ];
         assert_eq!(parse_transform_parents(&d, 0, d.len()), [(0x0008_6E85, 0x8000_4DA5)]);
+    }
+
+    /// A `PointLocation` record's length follows its text, so the next record starts past the
+    /// terminator; a record cut short or with no terminator is an error.
+    #[test]
+    fn point_location_records_end_at_their_text() {
+        let record = |key: u32, text: &str| {
+            let mut r = key.to_le_bytes().to_vec();
+            r.extend_from_slice(&[0; 32]);
+            r.extend_from_slice(text.as_bytes());
+            r.push(0);
+            r
+        };
+        let d = [record(0x0A, "door"), record(0x0B, ""), record(0x0C, "gate")].concat();
+        assert_eq!(point_location_keys(&d).unwrap(), [0x0A, 0x0B, 0x0C]);
+        assert!(point_location_keys(&d[..d.len() - 1]).unwrap_err().contains("not terminated"));
+        assert!(point_location_keys(&d[..10]).unwrap_err().contains("cut short"));
     }
 
     /// A LandingZone record is 12 bytes `{u32 key, u32 slot, u32 zone}`. Bytes are the first three
