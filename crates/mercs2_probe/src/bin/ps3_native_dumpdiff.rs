@@ -86,8 +86,8 @@ fn main() {
     fs::write(out_dir.join("xbox_be.bin"), &xb_raw).ok();
 
     let lua_tools = lua_tools();
-    let p3_out = convert_block(&p3_raw, false, None, Some(&lua_tools)).expect("ps3 convert");
-    let xb_out = convert_block(&xb_raw, false, None, Some(&lua_tools)).expect("xbox convert");
+    let p3_out = convert_block(&p3_raw, false, None, Some(&lua_tools), None).expect("ps3 convert");
+    let xb_out = convert_block(&xb_raw, false, None, Some(&lua_tools), None).expect("xbox convert");
 
     fs::write(out_dir.join("ps3_le.bin"), &p3_out).ok();
     fs::write(out_dir.join("xbox_le.bin"), &xb_out).ok();
