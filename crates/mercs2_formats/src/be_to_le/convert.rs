@@ -22,18 +22,18 @@
 //! # use mercs2_formats::be_to_le::convert;
 //! # fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! let be_block: Vec<u8> = vec![/* raw big-endian UCFX bytes */];
-//! let le_block = convert::convert_block(&be_block, false, None, None)?;
+//! let le_block = convert::convert_block(&be_block, false, None, None, None)?;
 //! # Ok(())
 //! # }
 //! ```
 
 use crate::crc32::crc32_mercs2;
-use crate::ffcs::read_u32_be;
-use crate::schema::{ComponentSchema, SchemaFieldType};
+use crate::ffcs::{read_u16_be, read_u32_be};
 use crate::tags::ChunkTag;
 use crate::texsize::{dxt_format, dxt_mip_count, linear_mip_chain_size, tex_mip_levels};
 use crate::types;
 
+use super::ecs::{convert_ecs_bodies, convert_guidmap_body, ComponentSchemas};
 use super::havok;
 use super::lua;
 use super::report::SchemaCoverageReport;
@@ -69,24 +69,27 @@ fn strip_csum_trailer(raw: &[u8]) -> &[u8] {
 }
 
 /// Descriptor row parsed from a UCFX container's descriptor table.
-struct Descriptor {
-    tag: ChunkTag,
-    tag_bytes_le: [u8; 4],
-    row_u0: u32,
-    body_size: u32,
-    row_u3: u32,
-    row_u4: u32,
+pub(super) struct Descriptor {
+    pub(super) tag: ChunkTag,
+    pub(super) tag_bytes_le: [u8; 4],
+    pub(super) row_u0: u32,
+    pub(super) body_size: u32,
+    pub(super) row_u3: u32,
+    pub(super) row_u4: u32,
 }
 
 /// Convert a decompressed BE block to LE format.
 /// When `report` is `Some`, collects schema field coverage stats.
 /// `lua_tools` is the java + unluac pair that converts `BINN` (Lua bytecode) chunks; a block
 /// holding a `BINN` chunk errors when it is `None`.
+/// `schemas` is the PC bake's class layouts ([`ComponentSchemas::from_vz_wad`]); a block holding a
+/// compact ECS container errors when it is `None`.
 pub fn convert_block(
     be_data: &[u8],
     dry_run: bool,
     mut report: Option<&mut SchemaCoverageReport>,
     lua_tools: Option<&lua::LuaTools>,
+    schemas: Option<&ComponentSchemas>,
 ) -> Result<Vec<u8>, String> {
     if be_data.len() < 4 {
         return Err("Block too small".into());
@@ -172,7 +175,8 @@ pub fn convert_block(
         let is_ecs = entry.type_hash == TYPE_HASH_ECS_NODE
             || entry.type_hash == TYPE_HASH_WORLD_ENTITY
             || entry.type_hash == TYPE_HASH_GUIDMAP;
-        let converted = convert_container(container, is_ecs, ei, entry.type_hash, report.as_deref_mut(), lua_tools)?;
+        let converted = convert_container(container, is_ecs, ei, entry.type_hash, report.as_deref_mut(), lua_tools, schemas)
+            .map_err(|e| format!("Entry {ei} 0x{:08x}: {e}", entry.name_hash))?;
         converted_containers.push(converted);
 
         offset = container_end;
@@ -215,6 +219,20 @@ pub fn convert_block(
 }
 
 /// Convert a single BE UCFX container to LE.
+/// One big-endian ECS container, converted on its own: `worldentity`, a layer, a guidmap. The
+/// result ends in its `CSUM` trailer, as a chunk of [`convert_block`]'s output does.
+pub fn convert_ecs_container(
+    container: &[u8],
+    type_hash: u32,
+    schemas: Option<&ComponentSchemas>,
+) -> Result<Vec<u8>, String> {
+    let mut out = convert_container(strip_csum_trailer(container), true, 0, type_hash, None, None, schemas)?;
+    let crc = crc32_mercs2(&out);
+    out.extend_from_slice(b"CSUM");
+    out.extend_from_slice(&crc.to_le_bytes());
+    Ok(out)
+}
+
 fn convert_container(
     container: &[u8],
     is_ecs: bool,
@@ -222,6 +240,7 @@ fn convert_container(
     type_hash: u32,
     report: Option<&mut SchemaCoverageReport>,
     lua_tools: Option<&lua::LuaTools>,
+    schemas: Option<&ComponentSchemas>,
 ) -> Result<Vec<u8>, String> {
     if container.len() < 20 {
         return Err(format!("Entry {} container too small ({})", entry_idx, container.len()));
@@ -313,11 +332,22 @@ fn convert_container(
         out.extend_from_slice(&container[desc_table_end..data_start]);
     }
 
-    // For ECS containers, we need to identify COMP groups and convert them using schemas
     if is_ecs {
-        convert_ecs_bodies(&mut out, container, &descriptors, data_area_off, is_be, entry_idx, report)?;
+        if !is_be || data_area_off == 0 {
+            return Err(format!("Entry {entry_idx}: an ECS container must be big-endian with a data area"));
+        }
+        let mut data_area = container[data_start..].to_vec();
+        if type_hash == TYPE_HASH_GUIDMAP {
+            convert_guidmap_body(&mut data_area, &descriptors)?;
+        } else {
+            convert_ecs_bodies(&mut data_area, &descriptors, schemas, report)?;
+        }
+        out.extend_from_slice(&data_area);
     } else {
         convert_generic_bodies(&mut out, container, &descriptors, data_area_off, is_be, type_hash, entry_idx, report)?;
+        if is_be {
+            apply_mixr_swap(&mut out, container, &descriptors, data_area_off)?;
+        }
     }
 
     // Repair embedded Havok packfile headers whose 4 × u8 `layoutRules` were
@@ -563,11 +593,49 @@ fn body_range(container: &[u8], row_u0: u32, body_size: u32, data_area_off: usiz
     }
 }
 
-/// Convert bodies for ECS (layer / ECS_NODE) containers.
-/// Identifies COMP triplets (info/schm/data) and applies schema-driven swap.
-/// Convert an ECS `info` descriptor body from BE to LE, in place.
+/// Rewrite a kit model's `MIXR` from its big-endian source, at the widths its loader reads
+/// (`mercs2_formats::mixr`): `INFO` three u16, `NAME` one u32 per part, `EXMX` bytes, `PROF` a u32 and
+/// a byte per part for each profile. The generic pass knows those tags from other chunks. It runs
+/// before anything reframes `out`, so a body sits at the same offset in both.
+fn apply_mixr_swap(
+    out: &mut [u8],
+    container: &[u8],
+    descriptors: &[Descriptor],
+    data_area_off: usize,
+) -> Result<(), String> {
+    for (i, d) in descriptors.iter().enumerate().filter(|(_, d)| &d.tag_bytes_le == b"MIXR") {
+        let kids = descriptors.get(i + 1..i + 1 + d.row_u4 as usize).ok_or("MIXR claims more children than rows")?;
+        let tags: Vec<&[u8; 4]> = kids.iter().map(|k| &k.tag_bytes_le).collect();
+        if tags != [b"INFO", b"NAME", b"EXMX", b"PROF"] {
+            return Err(format!("MIXR children are {tags:?}"));
+        }
+        let mut ranges = Vec::with_capacity(4);
+        for k in kids {
+            let r = body_range(container, k.row_u0, k.body_size, data_area_off).ok_or("a MIXR child runs past the container")?;
+            out[r.0..r.1].copy_from_slice(&container[r.0..r.1]);
+            ranges.push(r);
+        }
+        let (info, name, prof) = (ranges[0], ranges[1], ranges[3]);
+        if info.1 - info.0 != 6 {
+            return Err(format!("MIXR INFO is {} bytes", info.1 - info.0));
+        }
+        let parts = read_u16_be(container, info.0 + 2) as usize;
+        let profiles = read_u16_be(container, info.0 + 4) as usize;
+        if name.1 - name.0 != 4 * parts || prof.1 - prof.0 != profiles * (4 + parts) {
+            return Err(format!("MIXR of {parts} parts and {profiles} profiles: NAME {}, PROF {}", name.1 - name.0, prof.1 - prof.0));
+        }
+        (0..3).for_each(|w| swap_u16(out, info.0 + 2 * w));
+        swap_u32_array(&mut out[name.0..name.1]);
+        for p in 0..profiles {
+            swap_u32(out, prof.0 + p * (4 + parts));
+        }
+    }
+    Ok(())
+}
+
+/// Convert an `info` descriptor body outside an ECS container from BE to LE, in place.
 ///
-/// Two on-disk shapes (see `extract_comp_name`):
+/// Two on-disk shapes:
 ///   - ASCII/named: `[name\0][u32 hash][u32 a][u32 b][u32 c]` — swap only the trailing
 ///     u32 fields, leave the name string bytes untouched.
 ///   - Compact binary (no name, e.g. `[u32 comp_hash][u32][u32][u32]`) — swap all u32s.
@@ -593,337 +661,6 @@ fn convert_info_body_inplace(info_body: &mut [u8]) {
     }
 }
 
-fn convert_ecs_bodies(
-    out: &mut Vec<u8>,
-    container: &[u8],
-    descriptors: &[Descriptor],
-    data_area_off: usize,
-    is_be: bool,
-    _entry_idx: usize,
-    mut report: Option<&mut SchemaCoverageReport>,
-) -> Result<(), String> {
-    // We need to write body data at the correct offsets.
-    // Strategy: build the entire data area as a mutable copy, then do in-place swaps.
-    let data_start = if data_area_off > 0 { data_area_off } else {
-        20 + descriptors.len() * 20
-    };
-
-    if data_start >= container.len() {
-        return Ok(());
-    }
-
-    let mut data_area = container[data_start..].to_vec();
-
-    // Identify COMP groups: a COMP sentinel followed by info, schm, data children
-    let mut i = 0;
-    while i < descriptors.len() {
-        let desc = &descriptors[i];
-
-        if desc.tag == ChunkTag::Comp && desc.row_u0 == 0xFFFFFFFF {
-            // Found COMP group sentinel — look for info/schm/data triplet
-            let _group_start = i;
-            i += 1;
-
-            let mut info_idx: Option<usize> = None;
-            let mut schm_idx: Option<usize> = None;
-            let mut data_idx: Option<usize> = None;
-
-            // Scan children until next group sentinel or end
-            while i < descriptors.len() && descriptors[i].row_u0 != 0xFFFFFFFF {
-                match descriptors[i].tag {
-                    ChunkTag::Info => { info_idx = Some(i); }
-                    ChunkTag::Schm => { schm_idx = Some(i); }
-                    ChunkTag::Data => { data_idx = Some(i); }
-                    _ => {}
-                }
-                i += 1;
-            }
-
-            // Extract component name from info body
-            let comp_name = if let Some(ii) = info_idx {
-                extract_comp_name(container, &descriptors[ii], data_area_off, is_be)
-            } else {
-                None
-            };
-            let comp_name_str = comp_name.as_deref().unwrap_or("unknown");
-
-            // Parse schema from schm body; pre-scan type codes for reporting
-            let schm_body_range = schm_idx.and_then(|si| {
-                body_range(container, descriptors[si].row_u0, descriptors[si].body_size, data_area_off)
-            });
-
-            let schema = schm_body_range.and_then(|(start, end)| {
-                ComponentSchema::from_schm_body(&container[start..end], is_be)
-            });
-
-            // Report schema field type codes
-            if let Some(ref mut rpt) = report {
-                if let Some((start, end)) = schm_body_range {
-                    let scanned = scan_schm_type_codes(&container[start..end], is_be);
-                    let mut unknown_in_body = Vec::new();
-                    for &(type_code, name_hash, byte_offset) in &scanned {
-                        rpt.record_field(type_code);
-                        if SchemaFieldType::from_code(type_code).is_none() {
-                            rpt.record_unknown_field(comp_name_str, type_code, name_hash, byte_offset);
-                            unknown_in_body.push(type_code);
-                        }
-                    }
-                    if schema.is_none() && !scanned.is_empty() {
-                        rpt.record_schema_parse_failure(comp_name_str, unknown_in_body);
-                    }
-                }
-            }
-
-            // Convert the data body using the schema
-            if let Some(di) = data_idx {
-                let d = &descriptors[di];
-                if let Some((start, end)) = body_range(container, d.row_u0, d.body_size, data_area_off) {
-                    let body_local_start = start - data_start;
-                    let body_local_end = end - data_start;
-                    if body_local_end <= data_area.len() {
-                        let data_size = body_local_end - body_local_start;
-                        let body_slice = &mut data_area[body_local_start..body_local_end];
-                        convert_comp_data_inplace(body_slice, schema.as_ref(), comp_name_str, report.as_deref_mut(), data_size);
-                    }
-                }
-            }
-
-            // Swap the info body:
-            //   ASCII format: [name\0][u32 hash][u32 a][u32 b][u32 c] — swap trailing u32s
-            //   Compact binary (16B): [u32 hash][u32][u32][u32] — swap all u32s
-            if let Some(ii) = info_idx {
-                let d = &descriptors[ii];
-                if let Some((start, end)) = body_range(container, d.row_u0, d.body_size, data_area_off) {
-                    let body_local_start = start - data_start;
-                    let body_local_end = end - data_start;
-                    if body_local_end <= data_area.len() {
-                        convert_info_body_inplace(&mut data_area[body_local_start..body_local_end]);
-                    }
-                }
-            }
-
-            // Swap the schm body. NOTE: the per-field offset word is
-            // { u16 byte_offset; u8; u8 }, NOT a u32 — swap only the
-            // byte_offset u16 (see swap_schm_body_inplace).
-            if let Some(si) = schm_idx {
-                let d = &descriptors[si];
-                if let Some((start, end)) = body_range(container, d.row_u0, d.body_size, data_area_off) {
-                    let body_local_start = start - data_start;
-                    let body_local_end = end - data_start;
-                    if body_local_end <= data_area.len() {
-                        swap_schm_body_inplace(&mut data_area[body_local_start..body_local_end]);
-                    }
-                }
-            }
-
-            vlog!("    COMP group: '{}' (schema: {})",
-                comp_name_str,
-                if schema.is_some() { "yes" } else { "no" });
-        } else {
-            // Non-COMP descriptor in an ECS container — swap as appropriate
-            if desc.row_u0 != 0xFFFFFFFF {
-                if let Some((start, end)) = body_range(container, desc.row_u0, desc.body_size, data_area_off) {
-                    let body_local_start = start - data_start;
-                    let body_local_end = end - data_start;
-                    if body_local_end <= data_area.len() {
-                        if desc.tag == ChunkTag::Enum {
-                            convert_enum_body_inplace(&mut data_area[body_local_start..body_local_end]);
-                        } else if desc.tag == ChunkTag::Deps {
-                            let body_len = body_local_end - body_local_start;
-                            if body_len > 1 {
-                                swap_u32_array(&mut data_area[body_local_start + 1..body_local_end]);
-                            }
-                        } else if desc.tag == ChunkTag::Flgs {
-                            convert_vz_state_flgs_inplace(
-                                &mut data_area[body_local_start..body_local_end],
-                            );
-                        } else if desc.tag == ChunkTag::Chdr {
-                            convert_chdr_body_inplace(
-                                &mut data_area[body_local_start..body_local_end],
-                            );
-                        } else if desc.tag == ChunkTag::Info {
-                            // Standalone `info` (outside a COMP group): same named/compact
-                            // rules as the COMP-group path.
-                            convert_info_body_inplace(&mut data_area[body_local_start..body_local_end]);
-                        } else if desc.tag.is_native_be() {
-                            // No swap
-                        } else {
-                            swap_u32_array(&mut data_area[body_local_start..body_local_end]);
-                        }
-                    }
-                }
-            }
-            i += 1;
-        }
-    }
-
-    out.extend_from_slice(&data_area);
-    Ok(())
-}
-
-/// Component-name hash → name lookup for compact-format info bodies (16-byte
-/// binary, no ASCII string). Values are pandemic_hash_m2(component_name).
-const COMP_HASH_TO_NAME: &[(u32, &str)] = &[
-    (0x753EB623, "Transform"),
-    (0x1DE5C824, "Name"),
-    (0x5CF81991, "ModelName"),
-    (0x97E8EE92, "LightObject"),
-    (0xEA0F3AA3, "Road"),
-    (0x6FD048F4, "RoadIntersection"),
-    (0xBCE6FAD7, "DestructionLink"),
-    (0x7FBCE14E, "PhysicalLink"),
-    (0xD81512A1, "ObjectScript"),
-    (0x99C2B81F, "ModifierKey"),
-    (0xAB92C697, "ScrubObject"),
-    (0x6310807F, "LineRegion"),
-    (0x49F0D0EC, "MaterialMapping"),
-    (0x2A20B640, "LandingZone"),
-    (0x06DA8775, "Label"),
-    (0xFA55F6BA, "Anchor"),
-    (0x2D8D2435, "LowResTerrainObject"),
-    (0xE18AFD65, "HibernationControl"),
-    (0xB8D2B506, "AtmosphereBase"),
-    (0xEB6DE962, "IntersectionToIntersection"),
-    (0x514CAD3A, "SoundAmbience"),
-    (0xDECD8889, "AiBehavior"),
-    (0xBCFE6314, "Path"),
-    (0x6FA2F9D4, "LaneData"),
-    (0x60B7ABE0, "PointLocation"),
-];
-
-/// "Keyed-group" ECS components whose `data` body is a sequence of
-/// `[u32 count][count × record][u8 flag]` groups (mixed u8/u32). Returns the
-/// per-record byte size. Mirrors `_ECS_GROUP_RECORD_COMPONENTS` in
-/// ucfx_be_to_le.py. PointLocation: 36-byte records; 0x2E2659F0: 4-byte
-/// entity-reference keys (component name not yet recovered).
-fn keyed_group_record_size(comp_name: &str) -> Option<usize> {
-    match comp_name {
-        "PointLocation" => Some(36),
-        "__hash_0x2E2659F0" => Some(4),
-        _ => None,
-    }
-}
-
-/// True if `b` looks like a full-format ECS component *name* (C++-style
-/// identifier): starts with a letter/underscore, only `[A-Za-z0-9_]`, len >= 2.
-/// Rejects compact 4-byte BE hashes that happen to be printable but contain
-/// punctuation (e.g. `b"N+lT"`, `b"iV~b"`). Mirrors `_is_ecs_name_identifier`.
-fn is_ecs_name_identifier(b: &[u8]) -> bool {
-    if b.len() < 2 {
-        return false;
-    }
-    let c0 = b[0];
-    if !(c0.is_ascii_alphabetic() || c0 == b'_') {
-        return false;
-    }
-    b.iter().all(|&c| c.is_ascii_alphanumeric() || c == b'_')
-}
-
-/// In-place BE->LE conversion for a keyed-group component body.
-///
-/// Each 4-byte field (count + every record word) is byte-reversed; the
-/// per-group trailing `u8` flag is left untouched. Returns `true` only if the
-/// structure consumes the buffer *exactly* (in which case the swap was
-/// applied); on any layout mismatch it leaves `data` unchanged and returns
-/// `false` so the caller can fall back / report (never silently corrupts).
-fn convert_keyed_group_records_inplace(data: &mut [u8], record_size: usize) -> bool {
-    if record_size == 0 || record_size % 4 != 0 {
-        return false;
-    }
-    let n = data.len();
-    // Validation pass (counts are still big-endian here).
-    let mut pos = 0usize;
-    while pos < n {
-        if pos + 4 > n {
-            return false;
-        }
-        let count =
-            u32::from_be_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]) as usize;
-        pos += 4;
-        let span = match count.checked_mul(record_size) {
-            Some(s) => s,
-            None => return false,
-        };
-        if pos + span + 1 > n {
-            return false;
-        }
-        pos += span + 1;
-    }
-    if pos != n {
-        return false;
-    }
-    // Apply pass.
-    pos = 0;
-    while pos < n {
-        data[pos..pos + 4].reverse();
-        let count =
-            u32::from_le_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]) as usize;
-        pos += 4;
-        let span = count * record_size;
-        let mut off = pos;
-        while off < pos + span {
-            data[off..off + 4].reverse();
-            off += 4;
-        }
-        pos += span + 1; // skip the endian-neutral u8 flag
-    }
-    true
-}
-
-/// Extract component name from an `info` descriptor body.
-///
-/// Two formats exist:
-///   1. ASCII format: `[null-terminated name][u32 hash][u32 a][u32 b][u32 c]`
-///   2. Compact binary format (16 bytes): `[u32 comp_hash][u32][u32][u32]`
-///      Used in blocks without `schm`/`enum` descriptors.
-fn extract_comp_name(
-    container: &[u8],
-    desc: &Descriptor,
-    data_area_off: usize,
-    is_be: bool,
-) -> Option<String> {
-    let (start, end) = body_range(container, desc.row_u0, desc.body_size, data_area_off)?;
-    let body = &container[start..end];
-
-    // Resolve in priority order (mirrors _build_ecs_comp_map in ucfx_be_to_le.py):
-    //   (a) recognized component hash  -> named (even if first 4 bytes printable)
-    //   (b) valid C++-style identifier -> full-format name string
-    //   (c) otherwise                  -> compact unrecognized hash
-    // A compact 4-byte BE hash can be coincidentally printable (e.g.
-    // 0x4E2B6C54 = "N+lT", 0x69567E62 = "iV~b" in the DLC resident block), so
-    // "first bytes printable => name" is NOT a valid discriminator.
-    let hash = if body.len() >= 4 {
-        if is_be {
-            read_u32_be(body, 0)
-        } else {
-            crate::ffcs::read_u32_le(body, 0)
-        }
-    } else {
-        0
-    };
-
-    if body.len() >= 4 {
-        for &(h, name) in COMP_HASH_TO_NAME {
-            if h == hash {
-                return Some(name.to_string());
-            }
-        }
-    }
-
-    let nul_pos = body.iter().position(|&b| b == 0).unwrap_or(body.len());
-    if is_ecs_name_identifier(&body[..nul_pos]) {
-        if let Ok(name) = String::from_utf8(body[..nul_pos].to_vec()) {
-            return Some(name);
-        }
-    }
-
-    if body.len() >= 4 {
-        return Some(format!("__hash_0x{:08X}", hash));
-    }
-
-    None
-}
-
 /// Convert a `schm` (component schema) body in place from BE to LE.
 ///
 /// Layout (verified against retail PC `layers_static` / `vz_mar_roads`):
@@ -942,7 +679,7 @@ fn extract_comp_name(
 /// leave the trailing two bytes in place. (swap-first-u16 reproduces retail
 /// 47/47 on vz_mar_roads and 12/12 on layers_static; full u32 swap matches
 /// only zero-offset fields.) Mirrors `_convert_schm_body` in ucfx_be_to_le.py.
-fn swap_schm_body_inplace(buf: &mut [u8]) {
+pub(super) fn swap_schm_body_inplace(buf: &mut [u8]) {
     if buf.len() < 8 {
         swap_u32_array(buf);
         return;
@@ -965,251 +702,6 @@ fn swap_schm_body_inplace(buf: &mut [u8]) {
         buf.swap(off + 12, off + 13);
     }
     // Any trailing bytes (none expected) are left untouched.
-}
-
-/// Pre-scan a schm body to extract raw type codes for reporting.
-/// Unlike ComponentSchema::from_schm_body, this does NOT bail on unknown codes.
-/// Returns Vec<(type_code, name_hash, byte_offset)>.
-fn scan_schm_type_codes(body: &[u8], is_be: bool) -> Vec<(u32, u32, u16)> {
-    if body.len() < 8 {
-        return vec![];
-    }
-
-    let n_fields = if is_be {
-        u32::from_be_bytes([body[0], body[1], body[2], body[3]])
-    } else {
-        u32::from_le_bytes([body[0], body[1], body[2], body[3]])
-    };
-
-    if n_fields > 200 || (8 + n_fields as usize * 16) > body.len() {
-        return vec![];
-    }
-
-    let mut result = Vec::with_capacity(n_fields as usize);
-    for i in 0..n_fields as usize {
-        let off = 8 + i * 16;
-        let (type_code, name_hash, raw_offset) = if is_be {
-            (
-                u32::from_be_bytes([body[off], body[off + 1], body[off + 2], body[off + 3]]),
-                u32::from_be_bytes([body[off + 4], body[off + 5], body[off + 6], body[off + 7]]),
-                u32::from_be_bytes([body[off + 12], body[off + 13], body[off + 14], body[off + 15]]),
-            )
-        } else {
-            (
-                u32::from_le_bytes([body[off], body[off + 1], body[off + 2], body[off + 3]]),
-                u32::from_le_bytes([body[off + 4], body[off + 5], body[off + 6], body[off + 7]]),
-                u32::from_le_bytes([body[off + 12], body[off + 13], body[off + 14], body[off + 15]]),
-            )
-        };
-        let byte_offset = ((raw_offset >> 16) & 0xFFFF) as u16;
-        result.push((type_code, name_hash, byte_offset));
-    }
-    result
-}
-
-/// Convert a COMP data body in-place using schema-driven field swaps.
-fn convert_comp_data_inplace(
-    data: &mut [u8],
-    schema: Option<&ComponentSchema>,
-    comp_name: &str,
-    mut report: Option<&mut SchemaCoverageReport>,
-    data_size: usize,
-) {
-    if data.is_empty() {
-        return;
-    }
-
-    // Special cases
-    match comp_name {
-        "Name" => {
-            if let Some(ref mut rpt) = report {
-                rpt.record_no_schema(comp_name, data_size, "hardcoded handler");
-            }
-            convert_name_data_inplace(data);
-            return;
-        }
-        "ModelName" => {
-            if let Some(ref mut rpt) = report {
-                rpt.record_no_schema(comp_name, data_size, "hardcoded handler");
-            }
-            convert_modelname_data_inplace(data);
-            return;
-        }
-        "HibernationControl" if data.len() % 10 == 0 => {
-            // Sub-u32 layout (u16 + u8 + u8 + u8 + bitflags, stride 10). A
-            // blanket u32 sweep reverses a word across the u16+u8+u8 region and
-            // corrupts the u16; swap only the entity-key u32 and the payload u16.
-            if let Some(ref mut rpt) = report {
-                rpt.record_no_schema(comp_name, data_size, "hardcoded handler");
-            }
-            convert_hibernation_data_inplace(data);
-            return;
-        }
-        _ => {}
-    }
-
-    // Keyed-group components ([u32 count][count×record][u8 flag]*) — mixed
-    // u8/u32 layout that a blanket u32 sweep would corrupt. Only the compact /
-    // no-schm form (resident / worldentity META) uses this layout; a schm'd
-    // instance (layers_static) is a plain keyed-record array. Self-validating:
-    // only applies when the structure consumes the body exactly.
-    if schema.is_none() {
-        if let Some(rec) = keyed_group_record_size(comp_name) {
-            if convert_keyed_group_records_inplace(data, rec) {
-                if let Some(ref mut rpt) = report {
-                    rpt.record_no_schema(comp_name, data_size, "keyed-group records");
-                }
-                return;
-            }
-            // Structure mismatch — fall through to generic handling (and report).
-        }
-    }
-
-    // Compact-format COMP groups have info (hash) but no schm; mirror Python
-    // `_ECS_COMP_DEFAULT_STRIDE` — do not blind-sweep whole bodies.
-    let stride = if comp_name == "Transform" {
-        42
-    } else if let Some(s) = schema {
-        // schm[4:8] is payload_stride; record = 4-byte entity key + payload (docs/ecs_components.md)
-        4 + s.payload_stride as usize
-    } else if let Some(s) = compact_default_stride(comp_name) {
-        s
-    } else {
-        if let Some(ref mut rpt) = report {
-            rpt.record_no_schema(comp_name, data_size, "u32_array sweep (unknown stride)");
-        }
-        swap_u32_array(data);
-        return;
-    };
-
-    if stride == 0 {
-        if let Some(ref mut rpt) = report {
-            rpt.record_no_schema(comp_name, data_size, "u32_array sweep (stride=0)");
-        }
-        swap_u32_array(data);
-        return;
-    }
-
-    // Non-Transform ECS components: record-aligned u32 (and u16 tail) swap.
-    if comp_name != "Transform" && (schema.is_none() || is_ecs_numeric_component(comp_name)) {
-        if let Some(ref mut rpt) = report {
-            rpt.record_no_schema(comp_name, data_size, "numeric records (compact stride)");
-        }
-        swap_numeric_records_inplace(data, stride);
-        return;
-    }
-
-    let record_count = data.len() / stride;
-
-    for ri in 0..record_count {
-        let rec_start = ri * stride;
-
-        // Always swap the u32 entity_key at record start
-        if rec_start + 4 <= data.len() {
-            swap_u32(data, rec_start);
-        }
-
-        if comp_name == "Transform" {
-            // On-disk Transform payload (38 bytes) per schm: blob32 (8×f32) at
-            // payload+0, f32 at payload+32, u16 at payload+36. Swap the 9 u32
-            // words (key already swapped above, then payload 0..36) and the
-            // trailing u16. Matches `_convert_transform_records` (10×u32 + u16)
-            // in ucfx_be_to_le.py and the retail PC byte layout.
-            for field_off in [0, 4, 8, 12, 16, 20, 24, 28, 32] {
-                let off = rec_start + 4 + field_off;
-                if off + 4 <= data.len() {
-                    swap_u32(data, off);
-                }
-            }
-            let u16_off = rec_start + 4 + 36;
-            if u16_off + 2 <= data.len() {
-                swap_u16(data, u16_off);
-            }
-        } else {
-            // Schema-driven swap
-            let schema = schema.unwrap();
-            for field in &schema.fields {
-                if !field.field_type.needs_swap() {
-                    continue;
-                }
-                let payload_off = rec_start + 4 + field.byte_offset as usize;
-                let unit = field.field_type.swap_unit();
-                let count = field.field_type.swap_count();
-                for fi in 0..count {
-                    let off = payload_off + fi * unit;
-                    if off + unit <= data.len() {
-                        match unit {
-                            2 => swap_u16(data, off),
-                            4 => swap_u32(data, off),
-                            _ => {}
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
-/// Convert Name component data in-place (variable-length records).
-///
-/// Layout: `[u32 entity_key][null-terminated ASCII name]` repeated.
-/// Only the u32 keys need byte-swapping; string bytes are order-independent.
-///
-/// IMPORTANT: Skip exactly ONE null byte (the terminator) after each string.
-/// Do NOT skip additional nulls — the next entity key may start with 0x00
-/// (high byte of a small BE u32 like 0x0014E333 → bytes [00 14 E3 33]).
-/// Skipping that leading 0x00 shifts the swap by one byte, corrupting all
-/// subsequent records.
-fn convert_name_data_inplace(data: &mut [u8]) {
-    let mut pos = 0;
-    while pos + 4 <= data.len() {
-        swap_u32(data, pos);
-        pos += 4;
-        // Skip string bytes until null terminator
-        while pos < data.len() && data[pos] != 0 {
-            pos += 1;
-        }
-        // Skip exactly one null terminator
-        if pos < data.len() {
-            pos += 1;
-        }
-    }
-}
-
-/// Convert ModelName component data in-place.
-///
-/// ModelName is a pure-u32 stream — besides the fixed (key, hash) pair shape it
-/// also appears as variable records `[u32 count][count×u32 keys][u32 hash]`
-/// (u32- but not 8-aligned) in resident/worldentity META blocks. Every field
-/// is a u32 either way, so swap the whole body as a u32 array. Mirrors the
-/// relaxed (`% 4`) handler in ucfx_be_to_le.py.
-fn convert_modelname_data_inplace(data: &mut [u8]) {
-    swap_u32_array(data);
-}
-
-/// Convert HibernationControl component data in-place (stride 10).
-///
-/// schm-declared payload layout (verified byte-identical to retail PC
-/// `layers_static` block 29 and DLC block 18):
-///   +0  u32 entity_key
-///   +4  u16 field (type 4, name_hash 0xCBE8ED58)
-///   +6  u8 / +7 u8 / +8 u8 (type 2)
-///   +9  u8 bit-flags (two type-1 bits)
-///
-/// The payload is NOT a u32 array — a blanket u32 sweep reverses a 4-byte word
-/// across the `u16 + u8 + u8` region (and a u16 across the `u8 + bitflags`
-/// tail), corrupting the u16 into a constant (0xA03C). Swap only the entity-key
-/// u32 and the payload u16; the trailing u8/bit fields are endian-neutral.
-/// Mirrors `_convert_hibernation_records` in ucfx_be_to_le.py.
-fn convert_hibernation_data_inplace(data: &mut [u8]) {
-    const STRIDE: usize = 10;
-    let mut pos = 0usize;
-    while pos + STRIDE <= data.len() {
-        swap_u32(data, pos); // entity key
-        swap_u16(data, pos + 4); // u16 field at payload+0
-        // pos+6..pos+10 (u8 + u8 + u8 + bitflags) are endian-neutral.
-        pos += STRIDE;
-    }
 }
 
 /// Convert bodies for non-ECS (generic) containers with tag-aware dispatch.
@@ -1341,7 +833,17 @@ fn convert_generic_bodies(
                         // AV 0x0084DD5B). Per-field swap — see convert_mtrl. Previously this tag had
                         // NO arm and fell through to the generic u32 swap (the divergence from the
                         // Python converter that caused the crash).
-                        convert_mtrl(&mut data_area[body_local_start..body_local_end]);
+                        let records = if type_hash == types::TYPE_HASH_TERRAIN_MESH {
+                            let info = descriptors
+                                .iter()
+                                .find(|d| d.tag == ChunkTag::InfoUpper)
+                                .and_then(|d| body_range(container, d.row_u0, d.body_size, data_area_off))
+                                .ok_or("a terrainmesh has no INFO")?;
+                            Some(terrain_material_count(&container[info.0..info.1])?)
+                        } else {
+                            None
+                        };
+                        convert_mtrl(&mut data_area[body_local_start..body_local_end], records)?;
                     }
                     ChunkTag::Enum => {
                         // Enum definitions: mixed strings + u32 fields
@@ -1631,11 +1133,11 @@ fn is_string_tag(tag: ChunkTag) -> bool {
 
 // --- Byte swap primitives ---
 
-fn swap_u32(data: &mut [u8], offset: usize) {
+pub(super) fn swap_u32(data: &mut [u8], offset: usize) {
     data[offset..offset + 4].reverse();
 }
 
-fn swap_u16(data: &mut [u8], offset: usize) {
+pub(super) fn swap_u16(data: &mut [u8], offset: usize) {
     data[offset..offset + 2].reverse();
 }
 
@@ -1658,8 +1160,7 @@ fn swap_u16_array(data: &mut [u8]) {
 //   stride, and count source — see docs in the per-type specs). `walk_records`
 //   interprets it, swapping each field at its native width. It is non-destructive:
 //   it returns `false` WITHOUT mutating if the body does not match the declared
-//   layout, so the caller can fall back to a count-safe swap (mirrors the
-//   validate-first discipline of `convert_keyed_group_records_inplace`).
+//   layout, so the caller can fall back to a count-safe swap.
 // ---------------------------------------------------------------------------
 
 /// Field width/semantics within a record.
@@ -3083,52 +2584,6 @@ fn degen_stitch_with_map(src: &[u8]) -> (Vec<u8>, Vec<u32>) {
     (bytes, posmap)
 }
 
-/// Fix transposed `[u16 flags][u16 count]` count pairs in an MTRL body that the
-/// generic `convert_mtrl` only corrected for the FIRST material record. Walks the
-/// material array and, for every record beyond the first, restores the count pair
-/// from a u32-transposition (`count,0` ↔ `0,count`) to the in-place u16 form PC
-/// uses. Engine-correctness only — MTRL is not made byte-exact (PC also drops
-/// sub-records / shrinks the body, which is not reproducible here).
-///
-/// Deterministic material-record walk (pinned from the retail PC MTRL of the
-/// worked terrainmeshes): each material record is `[104-byte param block]
-/// [u16 flags][u16 count][count × u32 tex-hash][12-byte tail]`, so the record
-/// stride is `116 + count*4` and the count pair sits at `record_start + 104`.
-/// `convert_mtrl` already fixed record 0's pair; this walks the rest and restores
-/// each transposed `[count][0]` → `[0][count]` (flags is 0 in every observed
-/// record). If a record's layout doesn't match (count out of 1..=64 or the next
-/// stride would run off the end), we stop walking — never corrupting trailing data.
-fn mtrl_fix_transposed_counts(body: &mut [u8]) {
-    const PARAM_BLOCK: usize = 104;
-    // Record stride = 116 + count*4 (pinned from retail PC: count pairs at material
-    // offsets 104, 236, 376, … → strides 132, 140, … for counts 4, 6, …). The
-    // fixed overhead beyond the param block is the 4-byte count pair + an 8-byte tail.
-    const TAIL: usize = 8;
-    let mut rec = 0usize;
-    while rec + PARAM_BLOCK + 4 <= body.len() {
-        let cp = rec + PARAM_BLOCK; // count-pair offset
-        let lo = u16::from_le_bytes([body[cp], body[cp + 1]]);
-        let hi = u16::from_le_bytes([body[cp + 2], body[cp + 3]]);
-        // Determine the true count. PC form is [flags=0][count]; the generic u32
-        // swap may have transposed it to [count][0]. Accept either and normalize.
-        let (flags, count) = if lo == 0 && (1..=64).contains(&hi) {
-            (0u16, hi) // already PC-form (e.g. record 0, fixed by convert_mtrl)
-        } else if hi == 0 && (1..=64).contains(&lo) {
-            // transposed → fix in place to [0][count]
-            body[cp] = 0;
-            body[cp + 1] = 0;
-            body[cp + 2] = (lo & 0xff) as u8;
-            body[cp + 3] = (lo >> 8) as u8;
-            (0u16, lo)
-        } else {
-            break; // unrecognized record layout — stop, leave the rest untouched
-        };
-        let _ = flags;
-        let stride = PARAM_BLOCK + 4 + count as usize * 4 + TAIL;
-        rec += stride;
-    }
-}
-
 /// Terrainmesh (`0x7C569307`) re-encode pass. Runs LAST (after the generic body
 /// sweep, `apply_decl_translate`, and `apply_strm_vertex_fix`), gated on the
 /// terrainmesh type_hash. Rebuilds the container's data area with PC-format chunk
@@ -3230,7 +2685,6 @@ fn apply_terrainmesh_reencode(
         StrmInfoStride { pc_stride: u32 },
         IbufData,
         IbufInfoCount,
-        Mtrl,
     }
     let mut plans: HashMap<usize, Plan> = HashMap::new();
 
@@ -3273,13 +2727,6 @@ fn apply_terrainmesh_reencode(
             let (Some(ii), Some(vi)) = (info_idx, data_idx) else { continue };
             plans.insert(vi, Plan::IbufData);
             plans.insert(ii, Plan::IbufInfoCount);
-        }
-    }
-    if terrainmesh {
-        for (idx, d) in descriptors.iter().enumerate() {
-            if d.tag == ChunkTag::Mtrl && d.row_u0 != 0xFFFF_FFFF {
-                plans.entry(idx).or_insert(Plan::Mtrl);
-            }
         }
     }
 
@@ -3341,11 +2788,6 @@ fn apply_terrainmesh_reencode(
                 }
                 ibuf_posmaps.push((b.bytes.len() / 2, posmap));
                 new_bytes.insert(b.idx, out_idx);
-            }
-            Some(Plan::Mtrl) => {
-                let mut m = b.bytes.clone();
-                mtrl_fix_transposed_counts(&mut m);
-                new_bytes.insert(b.idx, m);
             }
             _ => {}
         }
@@ -3454,7 +2896,7 @@ fn apply_terrainmesh_reencode(
 ///       [null-terminated ASCII value name]
 ///       [u32 value_hash]
 ///       [u32 ordinal]
-fn convert_enum_body_inplace(data: &mut [u8]) {
+pub(super) fn convert_enum_body_inplace(data: &mut [u8]) {
     if data.len() < 4 {
         return;
     }
@@ -3533,138 +2975,8 @@ fn convert_stance_type_names_inplace(data: &mut [u8]) {
     }
 }
 
-/// vz_state `flgs` body: variable header (ASCII names, endian-neutral) + 42-byte records.
-///
-/// Record layout (BE input, matches `tools/ucfx_be_to_le._convert_vz_state_flgs`):
-///   [0:12]  3×u32, [12:14] u16, [14:42] 7×u32 (entity_id, pos xyz, rot fields).
-const FLGS_RECORD_STRIDE: usize = 42;
-const BE_ONE_F: [u8; 4] = [0x3F, 0x80, 0x00, 0x00];
-
-fn convert_vz_state_flgs_inplace(data: &mut [u8]) {
-    if data.is_empty() {
-        return;
-    }
-
-    let marker_pos = data
-        .windows(BE_ONE_F.len())
-        .position(|w| w == BE_ONE_F);
-    let rec_start = match marker_pos {
-        Some(p) if p >= 4 => p - 4,
-        Some(_) => 0,
-        None => {
-            if data.len().is_multiple_of(4) {
-                swap_u32_array(data);
-            }
-            return;
-        }
-    };
-
-    let rec_data = &mut data[rec_start..];
-    let n_full = rec_data.len() / FLGS_RECORD_STRIDE;
-    let mut pos = 0usize;
-    for _ in 0..n_full {
-        if pos + FLGS_RECORD_STRIDE > rec_data.len() {
-            break;
-        }
-        for off in (0..12).step_by(4) {
-            swap_u32(rec_data, pos + off);
-        }
-        swap_u16(rec_data, pos + 12);
-        for off in (14..42).step_by(4) {
-            swap_u32(rec_data, pos + off);
-        }
-        pos += FLGS_RECORD_STRIDE;
-    }
-    if pos < rec_data.len() && rec_data.len().is_multiple_of(4) {
-        swap_u32_array(&mut rec_data[pos..]);
-    }
-}
-
-/// Compact `info` bodies without `schm` — full record strides (4 + payload_stride).
-/// Values match `docs/ecs_components.md` (not raw schm payload_stride alone).
-fn compact_default_stride(comp_name: &str) -> Option<usize> {
-    match comp_name {
-        "Transform" => Some(42),
-        // Name is variable-length; handled by convert_name_data_inplace
-        "Name" => None,
-        "HibernationControl" => Some(10),
-        "Label" => Some(8),
-        "ScrubObject" => Some(8),
-        "LineRegion" => Some(8),
-        "Road" => Some(44),
-        "RoadIntersection" => Some(128),
-        "ObjectScript" => Some(12),
-        "Anchor" => Some(20),
-        "AiBehavior" => Some(52),
-        "SoundAmbience" => Some(24),
-        "AtmosphereBase" => Some(744),
-        "IntersectionToIntersection" => Some(12),
-        // ModelName handled by convert_modelname_data_inplace (stride 8)
-        "ModelName" => None,
-        "LightObject" => Some(56),
-        "DestructionLink" => Some(20),
-        "PhysicalLink" => Some(20),
-        "ModifierKey" => Some(12),
-        "MaterialMapping" => Some(8),
-        "LandingZone" => Some(8),
-        "LowResTerrainObject" => Some(12),
-        "Path" => Some(8),
-        "LaneData" => Some(8),
-        _ => None,
-    }
-}
-
-fn is_ecs_numeric_component(comp_name: &str) -> bool {
-    matches!(
-        comp_name,
-        "LightObject"
-            | "Road"
-            | "RoadIntersection"
-            | "DestructionLink"
-            | "PhysicalLink"
-            | "ObjectScript"
-            | "ModifierKey"
-            | "ScrubObject"
-            | "LineRegion"
-            | "MaterialMapping"
-            | "LandingZone"
-            | "Label"
-            | "Anchor"
-            | "LowResTerrainObject"
-            | "HibernationControl"
-            | "AtmosphereBase"
-            | "IntersectionToIntersection"
-            | "SoundAmbience"
-            | "AiBehavior"
-            | "Path"
-            | "LaneData"
-    )
-}
-
-/// Fixed-stride numeric ECS records (Python `_convert_numeric_records`).
-fn swap_numeric_records_inplace(data: &mut [u8], stride: usize) {
-    if stride == 0 {
-        return;
-    }
-    let mut pos = 0usize;
-    while pos + stride <= data.len() {
-        let n_u32 = stride / 4;
-        for i in 0..n_u32 {
-            swap_u32(data, pos + i * 4);
-        }
-        let tail = stride % 4;
-        if tail >= 2 {
-            swap_u16(data, pos + n_u32 * 4);
-        }
-        pos += stride;
-    }
-    if pos < data.len() && data[pos..].len().is_multiple_of(4) {
-        swap_u32_array(&mut data[pos..]);
-    }
-}
-
 /// Swap every aligned 4-byte word in a slice. Trailing bytes (< 4) are left untouched.
-fn swap_u32_array(data: &mut [u8]) {
+pub(super) fn swap_u32_array(data: &mut [u8]) {
     let n = data.len() / 4;
     for i in 0..n {
         let off = i * 4;
@@ -3685,97 +2997,50 @@ fn swap_u32_array(data: &mut [u8]) {
 /// arena → world-load AV at 0x0084DD5B. (Python's blanket *u16* swap kept the count right but wrecked
 /// the u32/f32 colour block — the opposite error. This per-field swap fixes both.)
 ///
-/// The structure is validated against the body length (`count` derived from `len` must equal the
-/// on-wire u16 count). If it does not match (an unexpected material variant), fall back to a
-/// count-preserving u16 swap — `swap_u16_array` still byte-reverses the u16 count correctly at any
-/// even offset, so the engine's count stays valid and we never reintroduce the overrun.
+/// A model's body holds records of this layout end to end, and one that does not tile fails. A
+/// terrainmesh's holds `records` of them ([`terrain_material_count`]), then 256 bytes of 4-byte words
+/// for each (retail PC tile `0xCA67E07B`: 267 records end at 39,652 of 108,004 bytes).
 /// 26-dword (104-byte) colour/scalar preamble that precedes each material's flag word.
 const MTRL_PRE: usize = 26 * 4; // 104
+/// Texture slots `FUN_00858790` fills.
+const MTRL_MAX_TEXTURES: usize = 10;
+/// A terrainmesh's `INFO` holds six floats of bounds, then this word: its material count.
+const TERRAIN_INFO_MATERIALS: usize = 0x18;
+/// Bytes a terrainmesh's `MTRL` holds for each material after the records.
+const TERRAIN_MATERIAL_TABLE: usize = 256;
 
-/// The BE `count` field of a flag word at `body[at..]` if plausible: `[u16 flags]
-/// [u16 count]` (FUN_00858790 reads count@+2) with `count ∈ 1..=10` (the engine's
-/// fixed 10-slot hash array). In BE that is a zero high byte followed by 1..=10 —
-/// a strong signature texture hashes (large u32) and IEEE-float props rarely hit.
-/// `flags` is unconstrained here: real materials carry flags up to ~0x418.
-fn mtrl_be_count(body: &[u8], at: usize) -> Option<usize> {
-    if at + 4 <= body.len() && body[at + 2] == 0 && (1..=10).contains(&body[at + 3]) {
-        Some(body[at + 3] as usize)
-    } else {
-        None
+/// The material count in a big-endian terrainmesh `INFO` body.
+pub(super) fn terrain_material_count(info: &[u8]) -> Result<usize, String> {
+    if info.len() < TERRAIN_INFO_MATERIALS + 4 {
+        return Err(format!("terrainmesh INFO is {} bytes", info.len()));
     }
+    Ok(read_u32_be(info, TERRAIN_INFO_MATERIALS) as usize)
 }
 
-/// Do the materials tile the body EXACTLY on the standard `116 + count*4` stride,
-/// with a valid `count ∈ 1..=10` flag word at every record's `+104`? This is the only
-/// layout we trust to rewrite as a multi-material array.
-fn mtrl_tiles_standard(body: &[u8]) -> Option<Vec<usize>> {
-    let len = body.len();
-    let mut off = 0usize;
-    let mut flags = Vec::new();
-    while off < len {
-        let f = off + MTRL_PRE;
-        let count = mtrl_be_count(body, f)?; // flag word must be valid here
-        flags.push(f);
-        off += 116 + count * 4;
-        if off > len {
-            return None;
+fn convert_mtrl(body: &mut [u8], records: Option<usize>) -> Result<(), String> {
+    let mut p = 0usize;
+    let mut done = 0usize;
+    while records.map_or(p < body.len(), |n| done < n) {
+        done += 1;
+        if p + MTRL_PRE + 4 > body.len() {
+            return Err(format!("MTRL record at +{p}: the {}-byte body ends in its header", body.len()));
         }
-    }
-    if off == len && !flags.is_empty() {
-        Some(flags)
-    } else {
-        None
-    }
-}
-
-/// Convert ONLY material[0]'s `[flags|count]` per-field; u32-swap everything else.
-/// This is the pre-2026-06-16 behaviour. The multi-material array walk
-/// (`mtrl_convert_array`) is RETAINED below but currently UNUSED while we bisect a
-/// world-load HANG regression: correctly converting `material[1..]` (vs leaving them
-/// transposed, as this single-material path does) changed engine behaviour into the
-/// hang — i.e. the transposed materials[1..] were accidentally MASKING a deeper bug.
-/// Reverted to restore the known-good load; re-enable per-block once the masked issue
-/// (streaming/texture dependency exposed by the real material refs) is understood.
-fn convert_mtrl(body: &mut [u8]) {
-    let len = body.len();
-    if len < MTRL_PRE + 4 {
-        swap_u16_array(body);
-        return;
-    }
-    swap_u32_array(&mut body[..MTRL_PRE]); // 26-dword colour/scalar preamble
-    body[MTRL_PRE..MTRL_PRE + 2].reverse(); // u16 flags @104
-    body[MTRL_PRE + 2..MTRL_PRE + 4].reverse(); // u16 count @106 (in place — no transpose)
-    swap_u32_array(&mut body[MTRL_PRE + 4..]); // hashes + trailing (material[1..] left as-is)
-}
-
-/// Multi-material array walk (the 0x61981F c4land fix). PARKED — see `convert_mtrl`.
-/// Only safe for bodies that tile exactly on the standard `116 + count*4` stride.
-#[allow(dead_code)]
-fn mtrl_convert_array(body: &mut [u8]) {
-    let len = body.len();
-    if len < MTRL_PRE + 4 {
-        swap_u16_array(body);
-        return;
-    }
-    let flag_offs = match mtrl_tiles_standard(body) {
-        Some(f) => f,
-        None => {
-            swap_u32_array(&mut body[..MTRL_PRE]);
-            body[MTRL_PRE..MTRL_PRE + 2].reverse();
-            body[MTRL_PRE + 2..MTRL_PRE + 4].reverse();
-            swap_u32_array(&mut body[MTRL_PRE + 4..]);
-            return;
+        let count = read_u16_be(body, p + MTRL_PRE + 2) as usize;
+        let end = p + 116 + count * 4;
+        if count > MTRL_MAX_TEXTURES || end > body.len() {
+            return Err(format!("MTRL record at +{p} names {count} textures in a {}-byte body", body.len()));
         }
-    };
-    for i in 0..flag_offs.len() {
-        let f = flag_offs[i];
-        let pre_start = f - MTRL_PRE;
-        let region_end = if i + 1 < flag_offs.len() { flag_offs[i + 1] - MTRL_PRE } else { len };
-        swap_u32_array(&mut body[pre_start..f]);
-        body[f..f + 2].reverse();
-        body[f + 2..f + 4].reverse();
-        swap_u32_array(&mut body[f + 4..region_end]);
+        swap_u32_array(&mut body[p..p + MTRL_PRE]);
+        swap_u16(body, p + MTRL_PRE);
+        swap_u16(body, p + MTRL_PRE + 2);
+        swap_u32_array(&mut body[p + MTRL_PRE + 4..end]);
+        p = end;
     }
+    if body.len() - p != records.unwrap_or(0) * TERRAIN_MATERIAL_TABLE {
+        return Err(format!("MTRL: {} bytes after its {done} records", body.len() - p));
+    }
+    swap_u32_array(&mut body[p..]);
+    Ok(())
 }
 
 /// EFCT particle-effect header: an array of u16 fields. Mirrors
@@ -3950,7 +3215,7 @@ fn swap_chdr_header_inplace(data: &mut [u8]) {
 /// The header is `{ u16; u16; u32 }` in BOTH the small and large/guidmap
 /// branches (the engine's CHDR reader is generic); only the handling of bytes
 /// beyond the 8-byte header differs.
-fn convert_chdr_body_inplace(data: &mut [u8]) {
+pub(super) fn convert_chdr_body_inplace(data: &mut [u8]) {
     if data.len() <= 16 {
         swap_chdr_header_inplace(data);
         // Words beyond the 8-byte header are plain u32 scalars.
@@ -4029,10 +3294,8 @@ fn walk_container_tags(container: &[u8], entry_idx: usize) -> Result<(), String>
 mod tests {
     use super::{
         convert_block, convert_cfx_inplace, convert_container, convert_chdr_body_inplace, convert_decl,
-        convert_efct_header_inplace, convert_hibernation_data_inplace, convert_info_body_inplace,
-        convert_keyed_group_records_inplace, convert_mtrl,
-        fix_embedded_havok_layoutrules, is_ecs_name_identifier,
-        HAVOK_PACKFILE_MAGIC,
+        convert_efct_header_inplace, convert_info_body_inplace, convert_mtrl,
+        fix_embedded_havok_layoutrules, HAVOK_PACKFILE_MAGIC,
     };
 
     // Build a synthetic BE MTRL body: [u32*26][u16 flags][u16 count][u32*count][u32*2 tail].
@@ -4056,7 +3319,7 @@ mod tests {
     fn mtrl_u16_count_survives_swap() {
         let count: u16 = 4;
         let mut body = make_mtrl_be(0x1234, count);
-        convert_mtrl(&mut body);
+        convert_mtrl(&mut body, None).unwrap();
 
         // THE invariant: the u16 texture-count @offset 106 must read back as 4 in LE, NOT transposed.
         // Transposing it (the old Rust u32 fall-through) makes the engine write `count` 12-byte
@@ -4080,7 +3343,7 @@ mod tests {
     #[test]
     fn mtrl_count_zero_ok() {
         let mut body = make_mtrl_be(0x0001, 0); // 116 bytes, no hashes
-        convert_mtrl(&mut body);
+        convert_mtrl(&mut body, None).unwrap();
         assert_eq!(u16::from_le_bytes([body[106], body[107]]), 0);
         assert_eq!(u32::from_le_bytes([body[0], body[1], body[2], body[3]]), 0x01020304);
     }
@@ -4121,14 +3384,27 @@ mod tests {
     }
 
     #[test]
-    fn mtrl_unknown_layout_falls_back_count_safe() {
-        // A body that does NOT satisfy len == 116 + count*4 -> count-safe u16 fallback.
-        let mut body = vec![0u8; 50];
-        body[10] = 0xAB;
-        body[11] = 0xCD;
-        convert_mtrl(&mut body);
-        assert_eq!(body[10], 0xCD, "fallback must u16-swap (count-safe at any even offset)");
-        assert_eq!(body[11], 0xAB);
+    fn a_body_records_do_not_tile_fails() {
+        assert!(convert_mtrl(&mut vec![0u8; 50], None).unwrap_err().contains("ends in its header"));
+        let mut body = make_mtrl_be(0, 2);
+        body.truncate(body.len() - 1);
+        assert!(convert_mtrl(&mut body, None).unwrap_err().contains("names 2 textures"));
+        assert!(convert_mtrl(&mut make_mtrl_be(0, 11), None).unwrap_err().contains("names 11 textures"));
+    }
+
+    #[test]
+    fn a_terrain_body_is_its_records_then_a_table_for_each() {
+        let mut body = make_mtrl_be(0, 1);
+        for _ in 0..64 {
+            body.extend_from_slice(&1.0f32.to_be_bytes());
+        }
+        convert_mtrl(&mut body, Some(1)).unwrap();
+        assert_eq!(u16::from_le_bytes([body[106], body[107]]), 1);
+        assert_eq!(&body[120..124], &1.0f32.to_le_bytes());
+        assert_eq!(&body[372..376], &1.0f32.to_le_bytes());
+        let mut short = make_mtrl_be(0, 1);
+        short.extend_from_slice(&[0; 252]);
+        assert!(convert_mtrl(&mut short, Some(1)).unwrap_err().contains("252 bytes after its 1 records"));
     }
 
     #[test]
@@ -4209,7 +3485,7 @@ mod tests {
         block.extend_from_slice(&be32(chunk_size));
         block.extend_from_slice(&container);
 
-        let out = convert_block(&block, false, None, None).expect("convert_block must succeed");
+        let out = convert_block(&block, false, None, None, None).expect("convert_block must succeed");
 
         // LE entry table row 0: [0..4]=count, [4..8]=name, [8..12]=type, [12..16]=field_c.
         assert_eq!(
@@ -4224,7 +3500,7 @@ mod tests {
         // Also confirm base-game blocks (field_c == 0) stay 0 — swapping 0 is a no-op.
         let mut block0 = block.clone();
         block0[12..16].copy_from_slice(&be32(0)); // field_c = 0
-        let out0 = convert_block(&block0, false, None, None).expect("convert_block must succeed");
+        let out0 = convert_block(&block0, false, None, None, None).expect("convert_block must succeed");
         assert_eq!(
             u32::from_le_bytes([out0[12], out0[13], out0[14], out0[15]]),
             0,
@@ -4405,7 +3681,7 @@ mod tests {
             c.extend_from_slice(&v.to_be_bytes());
         }
         c.extend_from_slice(&be_body);
-        let out = convert_container(&c, false, 0, crate::types::TYPE_HASH_EFFECT, None, None).expect("convert");
+        let out = convert_container(&c, false, 0, crate::types::TYPE_HASH_EFFECT, None, None, None).expect("convert");
         assert_eq!(&out[20..24], b"EFCT");
         let mut want = be_body;
         convert_efct_header_inplace(&mut want);
@@ -4450,93 +3726,6 @@ mod tests {
         assert_ne!(buggy, correct_le);
         assert_eq!(u16::from_le_bytes([buggy[0], buggy[1]]), 0x0226); // magic moved to +0
         assert_eq!(u16::from_le_bytes([buggy[14], buggy[15]]), 0x0000); // count zeroed
-    }
-
-    #[test]
-    fn hibernation_typed_swap_matches_retail_layout() {
-        // BE source: key, u16 field, then constant u8 params a0/3c/14/00.
-        let mut data = Vec::new();
-        data.extend_from_slice(&0x0015_0626u32.to_be_bytes());
-        data.extend_from_slice(&0x00FEu16.to_be_bytes());
-        data.extend_from_slice(&[0xA0, 0x3C, 0x14, 0x00]);
-        assert_eq!(data.len(), 10);
-
-        convert_hibernation_data_inplace(&mut data);
-        // entity key + payload u16 swapped; u8/bit tail untouched.
-        assert_eq!(&data[0..4], &0x0015_0626u32.to_le_bytes());
-        assert_eq!(&data[4..6], &0x00FEu16.to_le_bytes());
-        assert_eq!(&data[6..10], &[0xA0, 0x3C, 0x14, 0x00]);
-        // Matches retail PC byte pattern `XX 00 a0 3c 14 00`.
-        assert_eq!(&data[4..10], &[0xFE, 0x00, 0xA0, 0x3C, 0x14, 0x00]);
-    }
-
-    #[test]
-    fn ecs_name_identifier_rejects_binary_hashes() {
-        // Real component names are valid identifiers.
-        assert!(is_ecs_name_identifier(b"Transform"));
-        assert!(is_ecs_name_identifier(b"ModelName"));
-        assert!(is_ecs_name_identifier(b"PointLocation"));
-        // Printable compact hashes (with punctuation) are NOT names.
-        assert!(!is_ecs_name_identifier(b"N+lT")); // 0x4E2B6C54
-        assert!(!is_ecs_name_identifier(b"iV~b")); // 0x69567E62
-        assert!(!is_ecs_name_identifier(b"")); // empty
-        assert!(!is_ecs_name_identifier(b"A")); // too short
-    }
-
-    #[test]
-    fn keyed_group_pointlocation_record36() {
-        // [u32 count=1][1×36-byte record][u8 flag=0]
-        let mut data = Vec::new();
-        data.extend_from_slice(&1u32.to_be_bytes());
-        data.extend_from_slice(&0x80005B9Fu32.to_be_bytes()); // key
-        for _ in 0..7 {
-            data.extend_from_slice(&0u32.to_be_bytes());
-        }
-        data.extend_from_slice(&0x3F800000u32.to_be_bytes()); // 1.0f
-        data.push(0x00); // flag
-        assert_eq!(data.len(), 41);
-
-        let mut out = data.clone();
-        assert!(convert_keyed_group_records_inplace(&mut out, 36));
-        // count and key now little-endian; trailing flag byte unchanged.
-        assert_eq!(&out[0..4], &1u32.to_le_bytes());
-        assert_eq!(&out[4..8], &0x80005B9Fu32.to_le_bytes());
-        assert_eq!(out[40], 0x00);
-    }
-
-    #[test]
-    fn keyed_group_entity_ref_list_record4() {
-        // Two groups: [count=2][k0][k1][flag][count=1][k2][flag]
-        let mut data = Vec::new();
-        data.extend_from_slice(&2u32.to_be_bytes());
-        data.extend_from_slice(&0x8000_0001u32.to_be_bytes());
-        data.extend_from_slice(&0x8000_0002u32.to_be_bytes());
-        data.push(0x01);
-        data.extend_from_slice(&1u32.to_be_bytes());
-        data.extend_from_slice(&0x8000_0003u32.to_be_bytes());
-        data.push(0x01);
-
-        let mut out = data.clone();
-        assert!(convert_keyed_group_records_inplace(&mut out, 4));
-        assert_eq!(&out[0..4], &2u32.to_le_bytes());
-        assert_eq!(&out[4..8], &0x8000_0001u32.to_le_bytes());
-        assert_eq!(out[12], 0x01, "group-0 flag preserved");
-        // group 1
-        assert_eq!(&out[13..17], &1u32.to_le_bytes());
-        assert_eq!(out[21], 0x01, "group-1 flag preserved");
-    }
-
-    #[test]
-    fn keyed_group_rejects_mismatched_layout() {
-        // record_size=4 but a trailing byte makes consumption inexact.
-        let mut data = Vec::new();
-        data.extend_from_slice(&1u32.to_be_bytes());
-        data.extend_from_slice(&0x8000_0001u32.to_be_bytes());
-        data.push(0x01);
-        data.push(0xFF); // extra junk -> must NOT consume exactly
-        let mut out = data.clone();
-        assert!(!convert_keyed_group_records_inplace(&mut out, 4));
-        assert_eq!(out, data, "buffer left unchanged on mismatch");
     }
 
     #[test]
@@ -4750,28 +3939,6 @@ mod tests {
     }
 
     #[test]
-    fn mtrl_transposed_count_walker() {
-        // Two material records. Record 0: count=4 (PC-form [0][4]); record 1:
-        // count=6 but transposed to [6][0] (the generic-u32-swap bug). The walker
-        // must restore record 1 to [0][6] and leave record 0 alone.
-        const PB: usize = 104;
-        let stride0 = 116 + 4 * 4; // 132
-        let mut body = vec![0u8; stride0 + 116 + 6 * 4];
-        // record 0 count pair @104 = [flags=0][count=4]
-        body[PB + 2..PB + 4].copy_from_slice(&4u16.to_le_bytes());
-        // record 1 count pair @ stride0+104, transposed: [count=6][0]
-        let cp1 = stride0 + PB;
-        body[cp1..cp1 + 2].copy_from_slice(&6u16.to_le_bytes()); // lo = 6 (wrong)
-        super::mtrl_fix_transposed_counts(&mut body);
-        // record 0 untouched
-        assert_eq!(u16::from_le_bytes([body[PB], body[PB + 1]]), 0);
-        assert_eq!(u16::from_le_bytes([body[PB + 2], body[PB + 3]]), 4);
-        // record 1 fixed to [0][6]
-        assert_eq!(u16::from_le_bytes([body[cp1], body[cp1 + 1]]), 0);
-        assert_eq!(u16::from_le_bytes([body[cp1 + 2], body[cp1 + 3]]), 6);
-    }
-
-    #[test]
     fn prmt_walker_swaps_u32_then_u16_per_record() {
         // One 16-byte BE PRMT record: material_index=0x00000007, start_index=0x10,
         // index_count=0x0203, base=0x0405, max=0x0607, span=0x0809.
@@ -4827,9 +3994,7 @@ mod tests {
         be[m2..m2 + 2].copy_from_slice(&0x0000u16.to_be_bytes());
         be[m2 + 2..m2 + 4].copy_from_slice(&2u16.to_be_bytes());
 
-        // The multi-material array walk is PARKED in convert_mtrl (single-material) while we
-        // bisect the world-load hang regression; test the parked walker directly.
-        super::mtrl_convert_array(&mut be);
+        convert_mtrl(&mut be, None).unwrap();
 
         // preamble dword 0 u32-swapped
         assert_eq!(&be[0..4], &[0x44, 0x33, 0x22, 0x11]);
@@ -4848,14 +4013,13 @@ mod tests {
 
     #[test]
     fn convert_mtrl_single_material_no_regression() {
-        // One material (count=1) + float props: behaves exactly as the old per-field
-        // path — flags/count in place, preamble + hash + props u32-swapped.
+        // One material (count=1): flags/count in place, preamble + hash + tail u32-swapped.
         const PB: usize = 104;
-        let mut be = vec![0u8; PB + 4 + 4 + 16];
+        let mut be = vec![0u8; 120];
         be[PB..PB + 2].copy_from_slice(&0x0001u16.to_be_bytes()); // flags
         be[PB + 2..PB + 4].copy_from_slice(&1u16.to_be_bytes()); // count
         be[PB + 4..PB + 8].copy_from_slice(&0x01020304u32.to_be_bytes()); // hash
-        super::convert_mtrl(&mut be);
+        convert_mtrl(&mut be, None).unwrap();
         assert_eq!(u16::from_le_bytes([be[PB], be[PB + 1]]), 0x0001);
         assert_eq!(u16::from_le_bytes([be[PB + 2], be[PB + 3]]), 1);
         assert_eq!(&be[PB + 4..PB + 8], &[0x04, 0x03, 0x02, 0x01]);
@@ -4900,6 +4064,7 @@ pub(super) fn ps3_native_translate_body(
     tag_le: [u8; 4],
     group_tag: ChunkTag,
     type_hash: u32,
+    terrain_materials: Option<usize>,
 ) -> Result<Vec<u8>, String> {
     let _ = tag_le; // reserved for future tag-byte-sensitive arms
     let mut body = be_body.to_vec();
@@ -4939,7 +4104,7 @@ pub(super) fn ps3_native_translate_body(
                 swap_u32_array(&mut body);
             }
         }
-        ChunkTag::Mtrl => convert_mtrl(&mut body),
+        ChunkTag::Mtrl => convert_mtrl(&mut body, terrain_materials)?,
         ChunkTag::Enum => convert_enum_body_inplace(&mut body),
         ChunkTag::Ibuf => swap_u16_array(&mut body),
         ChunkTag::Indx => swap_u16_array(&mut body),
