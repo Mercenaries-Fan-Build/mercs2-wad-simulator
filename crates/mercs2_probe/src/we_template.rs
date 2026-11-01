@@ -32,6 +32,7 @@ fn payload_str(p: &Payload) -> String {
             .collect::<Vec<_>>()
             .join(" "),
         Payload::Name { name, flag } => format!("{name:?} flag {flag}"),
+        Payload::NameHash(h) => format!("name hash 0x{h:08X}"),
         Payload::PointLocation { text, .. } => format!("point {text:?}"),
         Payload::PackedU16(v) => format!("u16 {v:#06X}"),
     }
