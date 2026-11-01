@@ -25,9 +25,12 @@ const IMA_STEP_TABLE: [i32; 89] = [
     10442, 11487, 12635, 13899, 15289, 16818, 18500, 20350, 22385, 24623, 27086, 29794, 32767,
 ];
 
-const XBOX_MONO_BLOCK: usize = 36;
-const XBOX_STEREO_BLOCK: usize = 72;
-const XBOX_HEADER_SIZE: usize = 4; // int16 predictor + u8 step_index + u8 reserved
+/// One channel of a PC `.pws` block: a predictor, a step index and a reserved byte, then the nibbles.
+const PWS_MONO_BLOCK: usize = 36;
+/// Frames a PC `.pws` block holds.
+const PWS_BLOCK_FRAMES: usize = 64;
+/// A PC `.pws` clip starts on this boundary, and the file ends on it.
+const PWS_ALIGN: usize = 16;
 
 pub const TABLE_VERSION: u32 = 0x1D;
 
@@ -68,9 +71,6 @@ const XMA2_PACKET: usize = 0x800;
 /// PC wavebank blobs must start on, and the body must end on, a 16-byte
 /// boundary (`mercs2_audio::wave::BLOB_ALIGN`).
 const PC_BLOB_ALIGN: usize = 16;
-
-/// `.pws` file carries a 4-byte header the PC path pins the first clip past.
-const PC_PWS_HEADER_SIZE: u32 = 4;
 
 #[derive(Debug)]
 pub struct AudioError(pub String);
@@ -135,205 +135,53 @@ fn encode_sample(sample: i32, predictor: i32, step_index: i32) -> (u8, i32, i32)
     (nibble, new_predictor, new_step_index)
 }
 
-/// Swap high/low nibbles in every byte (Xbox high-first ↔ MS-IMA low-first).
-fn swap_nibbles_block(data: &[u8]) -> Vec<u8> {
-    data.iter().map(|b| ((b >> 4) & 0x0F) | ((b & 0x0F) << 4)).collect()
-}
-
-/// One 36-byte Xbox ADPCM mono block → MS-IMA (lossless nibble swap; 4-byte
-/// header kept). NOTE: Xbox-ADPCM is NOT observed in retail Xbox wavebanks
-/// (every record carries codec `0x05 = XMA2`; see
-/// `docs/_phase3a_inferred_claims_verified.md` §A.2). This helper is kept
-/// because the Python-golden parity test still exercises it, and because the
-/// VO-stream path (`crate::pws`) may still produce Xbox ADPCM bitstreams.
-pub fn transcode_mono_block(block: &[u8]) -> Result<Vec<u8>, AudioError> {
-    if block.len() < XBOX_MONO_BLOCK {
-        return Err(AudioError(format!(
-            "mono ADPCM block undersized: {} bytes (need {XBOX_MONO_BLOCK})",
-            block.len()
-        )));
-    }
-    let mut out = Vec::with_capacity(XBOX_MONO_BLOCK);
-    out.extend_from_slice(&block[..XBOX_HEADER_SIZE]);
-    out.extend_from_slice(&swap_nibbles_block(&block[XBOX_HEADER_SIZE..XBOX_MONO_BLOCK]));
-    Ok(out)
-}
-
-fn read_i16_le(b: &[u8], off: usize) -> i32 {
-    i16::from_le_bytes([b[off], b[off + 1]]) as i32
-}
-
-/// Fully decode a 72-byte Xbox ADPCM stereo block → (left, right) PCM16.
-/// Same provenance / status note as [`transcode_mono_block`].
-pub fn decode_xbox_stereo_block(block: &[u8]) -> (Vec<i32>, Vec<i32>) {
-    let mut l_pred = read_i16_le(block, 0);
-    let mut l_step = (block[2] as i32).clamp(0, 88);
-    let mut r_pred = read_i16_le(block, 4);
-    let mut r_step = (block[6] as i32).clamp(0, 88);
-    let mut left = vec![l_pred];
-    let mut right = vec![r_pred];
-    let data = &block[8..72]; // 64 bytes
-    for group in 0..4 {
-        let l_start = group * 16;
-        for i in 0..8 {
-            let byte_val = data[l_start + i];
-            let hi = (byte_val >> 4) & 0x0F;
-            let lo = byte_val & 0x0F;
-            let (p, s) = decode_nibble(hi, l_pred, l_step);
-            l_pred = p;
-            l_step = s;
-            left.push(l_pred);
-            let (p, s) = decode_nibble(lo, l_pred, l_step);
-            l_pred = p;
-            l_step = s;
-            left.push(l_pred);
-        }
-        let r_start = l_start + 8;
-        for i in 0..8 {
-            let byte_val = data[r_start + i];
-            let hi = (byte_val >> 4) & 0x0F;
-            let lo = byte_val & 0x0F;
-            let (p, s) = decode_nibble(hi, r_pred, r_step);
-            r_pred = p;
-            r_step = s;
-            right.push(r_pred);
-            let (p, s) = decode_nibble(lo, r_pred, r_step);
-            r_pred = p;
-            r_step = s;
-            right.push(r_pred);
-        }
-    }
-    left.truncate(65);
-    right.truncate(65);
-    (left, right)
-}
-
-#[cfg(test)]
-fn initial_step_index(samples: &[i32]) -> i32 {
-    if samples.len() <= 1 {
-        return 0;
-    }
-    let first_diff = (samples[1] - samples[0]).abs();
-    for (i, &step_val) in IMA_STEP_TABLE.iter().enumerate() {
-        if step_val >= first_diff {
-            return (i as i32 - 1).max(0);
-        }
-    }
-    88
-}
-
-#[cfg(test)]
-fn encode_ima_mono_block(samples: &[i32]) -> Vec<u8> {
-    if samples.is_empty() {
-        return vec![0u8; XBOX_MONO_BLOCK];
-    }
-    let mut predictor = clamp_i16(samples[0]);
-    let mut step_index = initial_step_index(samples);
-    let mut out = Vec::with_capacity(XBOX_MONO_BLOCK);
-    out.extend_from_slice(&(predictor as i16).to_le_bytes());
-    out.push(step_index as u8);
-    out.push(0);
-    let mut nibbles: Vec<u8> = Vec::with_capacity(64);
-    for &s in samples.iter().take(65).skip(1) {
-        let (nib, p, si) = encode_sample(s, predictor, step_index);
+/// One channel's nibbles for a block, each low nibble first: the 63 frames after the header sample at
+/// `frame`, the last repeated past the clip's end. The 64th nibble stays 0, as it is in retail. `step`
+/// carries on from the block before.
+fn encode_channel(pcm: &[i16], channels: usize, ch: usize, frame: usize, step: &mut i32) -> (i16, u8, [u8; PWS_BLOCK_FRAMES / 2]) {
+    let frames = pcm.len() / channels;
+    let at = |f: usize| i32::from(pcm[f.min(frames - 1) * channels + ch]);
+    let header = at(frame);
+    let (mut predictor, start) = (header, *step);
+    let mut data = [0u8; PWS_BLOCK_FRAMES / 2];
+    for n in 0..PWS_BLOCK_FRAMES - 1 {
+        let (nibble, p, s) = encode_sample(at(frame + 1 + n), predictor, *step);
         predictor = p;
-        step_index = si;
-        nibbles.push(nib);
+        *step = s;
+        data[n / 2] |= nibble << (4 * (n % 2));
     }
-    nibbles.resize(64, 0);
-    let mut data = vec![0u8; 32];
-    for i in 0..32 {
-        let lo = nibbles[i * 2];
-        let hi = nibbles[i * 2 + 1];
-        data[i] = (hi << 4) | (lo & 0x0F);
-    }
-    out.extend_from_slice(&data);
-    out
+    (header as i16, start as u8, data)
 }
 
-/// Encode stereo PCM16 → 72-byte MS-IMA stereo block.
-fn encode_ima_stereo_block(left: &[i32], right: &[i32]) -> Vec<u8> {
-    let l_pred0 = left.first().copied().map(clamp_i16).unwrap_or(0);
-    let r_pred0 = right.first().copied().map(clamp_i16).unwrap_or(0);
-    let mut l_pred = l_pred0;
-    let mut r_pred = r_pred0;
-    let mut l_step = 0i32;
-    let mut r_step = 0i32;
-
-    let mut l_nibbles: Vec<u8> = Vec::with_capacity(64);
-    for &s in left.iter().take(65).skip(1) {
-        let (nib, p, si) = encode_sample(s, l_pred, l_step);
-        l_pred = p;
-        l_step = si;
-        l_nibbles.push(nib);
+/// Interleaved PCM16 as the IMA ADPCM a PC `.pws` holds: blocks of 64 frames each, 36 bytes mono and
+/// 72 stereo. In every record of the 12,988 of `vo_stream`, the 145 of `music` and the 20 of `ambience`,
+/// `size` is a whole number of those blocks, and a 56,692-block clip's `+0x10` is 16 bytes short of 64
+/// frames a block. Each block carries the header sample and 63 nibbles: the 64th was 0 in all 1,053,712
+/// blocks of 600 `vo_stream` clips read.
+pub fn encode_pws_clip(pcm: &[i16], channels: usize) -> Result<Vec<u8>, AudioError> {
+    if !matches!(channels, 1 | 2) {
+        return Err(AudioError(format!("a .pws clip is mono or stereo, not {channels} channels")));
     }
-    l_nibbles.resize(64, 0);
-    let mut r_nibbles: Vec<u8> = Vec::with_capacity(64);
-    for &s in right.iter().take(65).skip(1) {
-        let (nib, p, si) = encode_sample(s, r_pred, r_step);
-        r_pred = p;
-        r_step = si;
-        r_nibbles.push(nib);
-    }
-    r_nibbles.resize(64, 0);
-
-    let mut out = Vec::with_capacity(XBOX_STEREO_BLOCK);
-    out.extend_from_slice(&(l_pred0 as i16).to_le_bytes());
-    out.push(0);
-    out.push(0);
-    out.extend_from_slice(&(r_pred0 as i16).to_le_bytes());
-    out.push(0);
-    out.push(0);
-    let mut data = vec![0u8; 64];
-    for group in 0..8 {
-        let l_base = group * 8;
-        for i in 0..4 {
-            let nib_idx = l_base + i * 2;
-            let lo = l_nibbles[nib_idx];
-            let hi = l_nibbles[nib_idx + 1];
-            data[group * 8 + i] = (hi << 4) | (lo & 0x0F);
-        }
-        let r_base = group * 8;
-        for i in 0..4 {
-            let nib_idx = r_base + i * 2;
-            let lo = r_nibbles[nib_idx];
-            let hi = r_nibbles[nib_idx + 1];
-            data[group * 8 + 4 + i] = (hi << 4) | (lo & 0x0F);
-        }
-    }
-    out.extend_from_slice(&data);
-    out
-}
-
-/// Transcode a raw Xbox-ADPCM stream → PC MS-IMA (mono = nibble-swap, stereo
-/// = re-encode). Still exported for the PWS/VO path; **not** called from the
-/// wavebank path any more (retail wavebanks don't carry Xbox-ADPCM — see
-/// Phase 3.A sweep).
-pub fn transcode_pws_xbox_to_pc(xbox: &[u8], channels: usize) -> Result<Vec<u8>, AudioError> {
-    if xbox.is_empty() {
-        return Ok(xbox.to_vec());
-    }
-    let block_size = if channels == 1 { XBOX_MONO_BLOCK } else { XBOX_STEREO_BLOCK };
-    let n_blocks = xbox.len() / block_size;
-    let remainder = xbox.len() % block_size;
-    let mut out = Vec::with_capacity(xbox.len());
-    for i in 0..n_blocks {
-        let block = &xbox[i * block_size..(i + 1) * block_size];
+    let frames = pcm.len() / channels;
+    let blocks = frames.div_ceil(PWS_BLOCK_FRAMES);
+    let mut out = Vec::with_capacity(blocks * PWS_MONO_BLOCK * channels);
+    let mut steps = [0i32; 2];
+    for k in 0..blocks {
+        let frame = k * PWS_BLOCK_FRAMES;
+        let (hl, sl, dl) = encode_channel(pcm, channels, 0, frame, &mut steps[0]);
+        out.extend_from_slice(&hl.to_le_bytes());
+        out.extend_from_slice(&[sl, 0]);
         if channels == 1 {
-            out.extend_from_slice(&transcode_mono_block(block)?);
-        } else {
-            let (l, r) = decode_xbox_stereo_block(block);
-            out.extend_from_slice(&encode_ima_stereo_block(&l, &r));
+            out.extend_from_slice(&dl);
+            continue;
         }
-    }
-    if remainder != 0 {
-        let mut padded = xbox[n_blocks * block_size..].to_vec();
-        padded.resize(block_size, 0);
-        if channels == 1 {
-            out.extend_from_slice(&transcode_mono_block(&padded)?);
-        } else {
-            let (l, r) = decode_xbox_stereo_block(&padded);
-            out.extend_from_slice(&encode_ima_stereo_block(&l, &r));
+        let (hr, sr, dr) = encode_channel(pcm, channels, 1, frame, &mut steps[1]);
+        out.extend_from_slice(&hr.to_le_bytes());
+        out.extend_from_slice(&[sr, 0]);
+        // Four bytes of the left channel, then four of the right.
+        for (l, r) in dl.chunks(4).zip(dr.chunks(4)) {
+            out.extend_from_slice(l);
+            out.extend_from_slice(r);
         }
     }
     Ok(out)
@@ -717,7 +565,6 @@ struct WbRecord {
     sample_rate: u32,
     data_size: u32,
     decoded_samples: u32,
-    word_1c: u32,
     data_offset: u32,
 }
 
@@ -743,7 +590,6 @@ impl WbRecord {
             sample_rate: read_u32_be(body, rec_abs + 0x08),
             data_size: read_u32_be(body, rec_abs + 0x0C),
             decoded_samples: read_u32_be(body, rec_abs + 0x10),
-            word_1c: read_u32_be(body, rec_abs + 0x1C),
             data_offset: read_u32_be(body, rec_abs + 0x20),
         })
     }
@@ -763,59 +609,13 @@ impl WbRecord {
 /// * `+records_off` 36-byte records ([`WbRecord`]).
 ///
 /// Embedded clips are decoded to interleaved LE PCM16 and emitted with
-/// `format = PC_FORMAT_PCM16` and `data_size = frames × channels × 2`;
-/// streamed records carry their `.pws` offset forward with the PC 4-byte
-/// `.pws` header shift.
-pub fn convert_wavebank_data(body_be: &[u8]) -> Result<Vec<u8>, AudioError> {
-    if body_be.len() < HEADER_SIZE {
-        return Err(AudioError(format!(
-            "wavebank body too short for header: {} bytes (need {HEADER_SIZE})",
-            body_be.len()
-        )));
-    }
-    let version = read_u32_le(body_be, 0);
-    if version != TABLE_VERSION {
-        return Err(AudioError(format!(
-            "wavebank version 0x{version:X}, expected 0x{TABLE_VERSION:X} (TABLE_VERSION)"
-        )));
-    }
-    let bank_hash = read_u32_be(body_be, 4);
-    let count = read_u16_be(body_be, 8) as usize;
-    let kind_flag = body_be[0x0A];
-    let streamed = kind_flag != 0;
-    let bank_hash2 = read_u32_be(body_be, 12);
-    if bank_hash2 != bank_hash {
-        return Err(AudioError(format!(
-            "wavebank bank_hash mismatch: +0x04=0x{bank_hash:08X} +0x0C=0x{bank_hash2:08X}"
-        )));
-    }
-    let xbox_records_offset = read_u32_be(body_be, 16) as usize;
-    let offset_known = if streamed { STREAM_HEADER_SIZES.contains(&xbox_records_offset) } else { xbox_records_offset == HEADER_SIZE };
-    if !offset_known {
-        return Err(AudioError(format!(
-            "wavebank records_offset {xbox_records_offset} is not one the format has (streamed={streamed})"
-        )));
-    }
-    if count == 0 {
-        return Err(AudioError("wavebank has 0 records (empty-bank layout is unmeasured)".into()));
-    }
-    if count > 10000 {
-        return Err(AudioError(format!("wavebank record count implausible: {count}")));
-    }
-    if xbox_records_offset + count * WAVEBANK_RECORD_SIZE > body_be.len() {
-        return Err(AudioError(format!(
-            "wavebank records table (count={count} @+0x{xbox_records_offset:X}) runs past the {}-byte body",
-            body_be.len()
-        )));
-    }
-
+/// `format = PC_FORMAT_PCM16` and `data_size = frames × channels × 2`.
+/// A streamed bank needs its [`PcStream`], whose records replace the
+/// console's: the audio moved when it was re-encoded.
+pub fn convert_wavebank_data(body_be: &[u8], stream: Option<&PcStream>) -> Result<Vec<u8>, AudioError> {
+    let (bank_hash, streamed, xbox_records_offset, records) = read_bank(body_be)?;
+    let count = records.len();
     let stream_name: Option<&[u8]> = streamed.then(|| &body_be[HEADER_SIZE..xbox_records_offset]);
-
-    let mut records: Vec<WbRecord> = Vec::with_capacity(count);
-    for i in 0..count {
-        let rec_abs = xbox_records_offset + i * WAVEBANK_RECORD_SIZE;
-        records.push(WbRecord::read(body_be, rec_abs)?);
-    }
 
     let mut order: Vec<usize> = (0..records.len())
         .filter(|&i| records[i].data_size > 0)
@@ -832,16 +632,22 @@ pub fn convert_wavebank_data(body_be: &[u8]) -> Result<Vec<u8>, AudioError> {
     let mut new_placement: std::collections::HashMap<usize, (u32, u32, u8)> =
         std::collections::HashMap::new();
 
+    let mut decoded: Option<Vec<u32>> = None;
     if streamed {
-        for i in 0..records.len() {
-            let r = &records[i];
-            if r.data_size == 0 {
-                new_placement.insert(i, (0, 0, PC_FORMAT_STREAM));
-                continue;
-            }
-            let pc_off = r.data_offset.saturating_add(PC_PWS_HEADER_SIZE);
-            new_placement.insert(i, (pc_off, r.data_size, PC_FORMAT_STREAM));
+        let stream = stream.ok_or_else(|| {
+            AudioError(format!("streamed wavebank 0x{bank_hash:08X} needs its .pws: this conversion was given no StreamTable"))
+        })?;
+        if stream.records.len() != records.len() {
+            return Err(AudioError(format!(
+                "streamed wavebank 0x{bank_hash:08X} has {} records and its PC stream {}",
+                records.len(),
+                stream.records.len()
+            )));
         }
+        for (i, r) in stream.records.iter().enumerate() {
+            new_placement.insert(i, (r.offset, r.size, PC_FORMAT_STREAM));
+        }
+        decoded = Some(stream.records.iter().map(|r| r.decoded_bytes).collect());
     } else {
         for &idx in &order {
             let r = &records[idx];
@@ -923,8 +729,9 @@ pub fn convert_wavebank_data(body_be: &[u8]) -> Result<Vec<u8>, AudioError> {
         out[pc_r + 7] = 0;
         out[pc_r + 8..pc_r + 12].copy_from_slice(&rec.sample_rate.to_le_bytes());
         out[pc_r + 12..pc_r + 16].copy_from_slice(&pc_size.to_le_bytes());
-        out[pc_r + 16..pc_r + 20].copy_from_slice(&rec.decoded_samples.to_le_bytes());
-        out[pc_r + 28..pc_r + 32].copy_from_slice(&rec.word_1c.to_le_bytes());
+        let decoded_field = decoded.as_ref().map_or(rec.decoded_samples, |d| d[i]);
+        out[pc_r + 16..pc_r + 20].copy_from_slice(&decoded_field.to_le_bytes());
+        // The console's word counts its 64 KB XMA blocks; every `vo_stream` record holds 0.
         out[pc_r + 32..pc_r + 36].copy_from_slice(&pc_off.to_le_bytes());
     }
 
@@ -934,6 +741,203 @@ pub fn convert_wavebank_data(body_be: &[u8]) -> Result<Vec<u8>, AudioError> {
     }
 
     Ok(out)
+}
+
+/// One record of a streamed bank as PC holds it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PcStreamRecord {
+    pub offset: u32,
+    pub size: u32,
+    /// `+0x10`: decoded PCM16 bytes, not frames, on a streamed record (`audio_code_map.md` §11.4).
+    pub decoded_bytes: u32,
+}
+
+/// A streamed bank's audio re-encoded for PC: the `.pws` file and where each record landed in it.
+#[derive(Debug)]
+pub struct PcStream {
+    pub pws: Vec<u8>,
+    pub records: Vec<PcStreamRecord>,
+    /// Frames ffmpeg's decode differed from the records' counts by, over the bank.
+    pub fitted_frames: u64,
+}
+
+/// Clips one after another on [`PWS_ALIGN`] boundaries, the file ending on one. Every one of the 13,153
+/// retail streamed records starts on one, with 0 or 8 bytes between neighbours.
+fn lay_out_stream(clips: &mut [Vec<u8>]) -> (Vec<u8>, Vec<u32>) {
+    let mut pws = Vec::new();
+    let mut at = Vec::with_capacity(clips.len());
+    for clip in clips.iter() {
+        at.push(pws.len() as u32);
+        pws.extend_from_slice(clip);
+        pws.resize(align_up(pws.len(), PWS_ALIGN), 0);
+    }
+    (pws, at)
+}
+
+impl PcStream {
+    /// Decode every clip `body_be` addresses in `console_pws` and encode it as PC stores a stream.
+    pub fn convert(body_be: &[u8], console_pws: &[u8]) -> Result<PcStream, AudioError> {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let (bank_hash, streamed, _, records) = read_bank(body_be)?;
+        if !streamed {
+            return Err(AudioError(format!("wavebank 0x{bank_hash:08X} is embedded, so it has no stream")));
+        }
+        let clip = |r: &WbRecord| -> Result<(Vec<u8>, u64), AudioError> {
+            let (start, size) = (r.data_offset as usize, r.data_size as usize);
+            let bytes = start
+                .checked_add(size)
+                .and_then(|end| console_pws.get(start..end))
+                .ok_or_else(|| AudioError(format!("clip 0x{:08X}: {size} bytes at {start} run past the {}-byte .pws", r.clip_hash, console_pws.len())))?;
+            let ch = usize::from(r.channels());
+            let pcm = normalize_embedded_wavebank_clip(bytes, r.codec(), ch, r.sample_rate, r.decoded_samples)?;
+            let want = r.decoded_samples as usize * ch * 2;
+            let fitted = (pcm.len().abs_diff(want) / (ch * 2)) as u64;
+            let pcm = pad_or_trim_pcm16(pcm, want);
+            let samples: Vec<i16> = pcm.chunks_exact(2).map(|b| i16::from_le_bytes([b[0], b[1]])).collect();
+            Ok((encode_pws_clip(&samples, ch)?, fitted))
+        };
+        let next = AtomicUsize::new(0);
+        let done = std::sync::Mutex::new(Vec::with_capacity(records.len()));
+        let workers = std::thread::available_parallelism().map_or(1, |n| n.get());
+        std::thread::scope(|s| {
+            for _ in 0..workers {
+                s.spawn(|| loop {
+                    let i = next.fetch_add(1, Ordering::Relaxed);
+                    let Some(r) = records.get(i) else { return };
+                    let got = clip(r);
+                    done.lock().expect("no worker panics holding the list").push((i, got));
+                });
+            }
+        });
+        let mut done = done.into_inner().expect("no worker panicked");
+        done.sort_by_key(|(i, _)| *i);
+        let mut clips = Vec::with_capacity(records.len());
+        let mut fitted_frames = 0;
+        for (_, got) in done {
+            let (c, fitted) = got?;
+            clips.push(c);
+            fitted_frames += fitted;
+        }
+        let (pws, at) = lay_out_stream(&mut clips);
+        let records = records
+            .iter()
+            .zip(at)
+            .zip(&clips)
+            .map(|((r, offset), c)| PcStreamRecord {
+                offset,
+                size: c.len() as u32,
+                decoded_bytes: r.decoded_samples * u32::from(r.channels()) * 2,
+            })
+            .collect();
+        Ok(PcStream { pws, records, fitted_frames })
+    }
+}
+
+/// An archive's streamed banks, by the bank entry's hash, each with its PC stream.
+#[derive(Debug, Default)]
+pub struct StreamTable {
+    banks: std::collections::HashMap<u32, (String, PcStream)>,
+}
+
+impl StreamTable {
+    /// Convert every streamed bank of a big-endian archive's `n` blocks. `files` are the package's
+    /// `.pws` files as `(name, bytes)`. A language's file is named for its bank's entry
+    /// (`vo_stream_dlctest.english.pws`), so a bank finds its file by hash; a streamed bank without a
+    /// file, or a file no bank claims, is an error.
+    pub fn read(n: usize, mut block: impl FnMut(usize) -> Result<Vec<u8>, String>, files: &[(String, Vec<u8>)]) -> Result<StreamTable, String> {
+        let stem = |name: &str| name.rsplit_once('.').map_or(name, |(s, _)| s).to_ascii_lowercase();
+        let by_hash: std::collections::HashMap<u32, usize> =
+            files.iter().enumerate().map(|(i, (name, _))| (crate::hash::pandemic_hash_m2(&stem(name)), i)).collect();
+        let mut banks = std::collections::HashMap::new();
+        for i in 0..n {
+            let bytes = block(i).map_err(|e| format!("block {i}: {e}"))?;
+            for (hash, chunk) in super::texture::typed_chunks(&bytes, crate::types::TYPE_HASH_WAVEBANK).map_err(|e| format!("block {i}: {e}"))? {
+                let (_, off, size) = super::texture::container_rows(chunk)?
+                    .into_iter()
+                    .find(|(t, ..)| t == b"data")
+                    .ok_or_else(|| format!("wavebank 0x{hash:08X} has no data chunk"))?;
+                let body = chunk.get(off..off + size).ok_or_else(|| format!("wavebank 0x{hash:08X}: data runs past the chunk"))?;
+                if read_bank(body).map_err(|e| format!("wavebank 0x{hash:08X}: {e}"))?.1 {
+                    let Some(&file) = by_hash.get(&hash) else {
+                        return Err(format!("streamed wavebank 0x{hash:08X} is named by no .pws of the {} in the package", files.len()));
+                    };
+                    let (name, console) = &files[file];
+                    let stream = PcStream::convert(body, console).map_err(|e| format!("{name}: {e}"))?;
+                    banks.insert(hash, (format!("{}.pws", stem(name)), stream));
+                }
+            }
+        }
+        for (hash, i) in &by_hash {
+            if !banks.contains_key(hash) {
+                return Err(format!("{}: no streamed wavebank claims it", files[*i].0));
+            }
+        }
+        Ok(StreamTable { banks })
+    }
+
+    /// The bank with entry hash `hash`.
+    pub fn get(&self, hash: u32) -> Option<&PcStream> {
+        self.banks.get(&hash).map(|(_, s)| s)
+    }
+
+    /// Every `.pws` file to write, `(name, stream)`, by name.
+    pub fn streams(&self) -> Vec<(&str, &PcStream)> {
+        let mut v: Vec<_> = self.banks.values().map(|(n, s)| (n.as_str(), s)).collect();
+        v.sort_by_key(|(n, _)| *n);
+        v
+    }
+}
+
+/// A console bank's header: its hash, whether it streams, where its records start, and the records.
+fn read_bank(body_be: &[u8]) -> Result<(u32, bool, usize, Vec<WbRecord>), AudioError> {
+    if body_be.len() < HEADER_SIZE {
+        return Err(AudioError(format!(
+            "wavebank body too short for header: {} bytes (need {HEADER_SIZE})",
+            body_be.len()
+        )));
+    }
+    let version = read_u32_le(body_be, 0);
+    if version != TABLE_VERSION {
+        return Err(AudioError(format!(
+            "wavebank version 0x{version:X}, expected 0x{TABLE_VERSION:X} (TABLE_VERSION)"
+        )));
+    }
+    let bank_hash = read_u32_be(body_be, 4);
+    let count = read_u16_be(body_be, 8) as usize;
+    let kind_flag = body_be[0x0A];
+    let streamed = kind_flag != 0;
+    let bank_hash2 = read_u32_be(body_be, 12);
+    if bank_hash2 != bank_hash {
+        return Err(AudioError(format!(
+            "wavebank bank_hash mismatch: +0x04=0x{bank_hash:08X} +0x0C=0x{bank_hash2:08X}"
+        )));
+    }
+    let xbox_records_offset = read_u32_be(body_be, 16) as usize;
+    let offset_known = if streamed { STREAM_HEADER_SIZES.contains(&xbox_records_offset) } else { xbox_records_offset == HEADER_SIZE };
+    if !offset_known {
+        return Err(AudioError(format!(
+            "wavebank records_offset {xbox_records_offset} is not one the format has (streamed={streamed})"
+        )));
+    }
+    if count == 0 {
+        return Err(AudioError("wavebank has 0 records (empty-bank layout is unmeasured)".into()));
+    }
+    if count > 10000 {
+        return Err(AudioError(format!("wavebank record count implausible: {count}")));
+    }
+    if xbox_records_offset + count * WAVEBANK_RECORD_SIZE > body_be.len() {
+        return Err(AudioError(format!(
+            "wavebank records table (count={count} @+0x{xbox_records_offset:X}) runs past the {}-byte body",
+            body_be.len()
+        )));
+    }
+
+    let mut records: Vec<WbRecord> = Vec::with_capacity(count);
+    for i in 0..count {
+        let rec_abs = xbox_records_offset + i * WAVEBANK_RECORD_SIZE;
+        records.push(WbRecord::read(body_be, rec_abs)?);
+    }
+    Ok((bank_hash, streamed, xbox_records_offset, records))
 }
 
 fn align_up(x: usize, align: usize) -> usize {
@@ -956,86 +960,83 @@ fn scopeguard(p: &std::path::Path) -> ScopeGuard {
 mod tests {
     use super::*;
 
-    #[test]
-    fn mono_block_is_lossless_nibble_swap() {
-        // Header preserved; data nibbles swapped (Xbox high-first ↔ MS-IMA low-first).
-        let mut block = vec![0x34u8, 0x12, 0x05, 0x00]; // predictor=0x1234, step=5
-        for i in 0..32 {
-            block.push((i as u8) << 4 | 0x0A); // hi=i, lo=0xA
+    /// A clip decoded the way the header and nibbles are laid out, 64 frames a block per channel.
+    fn decode_channel(clip: &[u8], channels: usize, ch: usize) -> Vec<i32> {
+        let mut out = Vec::new();
+        for block in clip.chunks(PWS_MONO_BLOCK * channels) {
+            let head = 4 * ch;
+            let mut predictor = i32::from(i16::from_le_bytes([block[head], block[head + 1]]));
+            let mut step = i32::from(block[head + 2]);
+            let data: Vec<u8> = if channels == 1 {
+                block[4..].to_vec()
+            } else {
+                block[8..].chunks(4).skip(ch).step_by(2).flatten().copied().collect()
+            };
+            out.push(predictor);
+            for n in 0..PWS_BLOCK_FRAMES - 1 {
+                let nibble = (data[n / 2] >> (4 * (n % 2))) & 0x0F;
+                (predictor, step) = decode_nibble(nibble, predictor, step);
+                out.push(predictor);
+            }
         }
-        let out = transcode_mono_block(&block).unwrap();
-        assert_eq!(&out[..4], &block[..4]); // header unchanged
-        for i in 0..32 {
-            // swapped: hi<->lo
-            assert_eq!(out[4 + i], (0x0A << 4) | (i as u8 & 0x0F));
-        }
-        // Double swap returns the original data area.
-        let back = transcode_mono_block(&out).unwrap();
-        assert_eq!(back, block);
+        out
     }
 
     #[test]
-    fn ima_roundtrip_tracks_signal() {
-        // Encode a ramp then decode; IMA is lossy but should track a smooth signal.
-        let samples: Vec<i32> = (0..64).map(|i| (i as i32 - 32) * 200).collect();
-        let block = encode_ima_mono_block(&samples);
-        assert_eq!(block.len(), XBOX_MONO_BLOCK);
-        // Decode it back via the standard IMA path.
-        let mut predictor = read_i16_le(&block, 0);
-        let mut step = block[2] as i32;
-        let mut decoded = vec![predictor];
-        for &byte in &block[4..36] {
-            let lo = byte & 0x0F;
-            let hi = (byte >> 4) & 0x0F;
-            let (p, s) = decode_nibble(lo, predictor, step);
-            predictor = p;
-            step = s;
-            decoded.push(predictor);
-            let (p, s) = decode_nibble(hi, predictor, step);
-            predictor = p;
-            step = s;
-            decoded.push(predictor);
+    fn a_clip_encodes_to_whole_blocks_and_tracks_its_signal() {
+        let tone = |f: f32, frames: usize| -> Vec<i16> {
+            (0..frames).map(|i| ((i as f32 * f).sin() * 12000.0) as i16).collect()
+        };
+        for frames in [64, 65, 1000] {
+            let clip = encode_pws_clip(&tone(0.05, frames), 1).unwrap();
+            assert_eq!(clip.len(), frames.div_ceil(64) * 36);
+            assert!(clip.chunks(36).all(|b| b[35] >> 4 == 0), "the 64th nibble is 0");
+            let back = decode_channel(&clip, 1, 0);
+            let mae: f32 = tone(0.05, frames).iter().zip(&back).map(|(a, b)| (i32::from(*a) - b).abs() as f32).sum::<f32>() / frames as f32;
+            // The first block ramps up from step 0; the signal spans 24,000.
+            assert!(mae < 900.0, "{frames} frames: mean error {mae}");
         }
-        // Mean abs error should be small relative to the signal range (~12800).
-        let err: i64 = samples
-            .iter()
-            .skip(1)
-            .zip(decoded.iter().skip(1))
-            .map(|(a, b)| (a - b).unsigned_abs() as i64)
-            .sum();
-        let mae = err / (samples.len() as i64 - 1);
-        assert!(mae < 1500, "IMA mean-abs-error too high: {mae}");
+    }
+
+    #[test]
+    fn stereo_keeps_its_channels_apart() {
+        let frames = 2000;
+        let pcm: Vec<i16> = (0..frames)
+            .flat_map(|i| [((i as f32 * 0.05).sin() * 12000.0) as i16, ((i as f32 * 0.011).cos() * 9000.0) as i16])
+            .collect();
+        let clip = encode_pws_clip(&pcm, 2).unwrap();
+        assert_eq!(clip.len(), 2000usize.div_ceil(64) * 72);
+        for ch in 0..2 {
+            let back = decode_channel(&clip, 2, ch);
+            let late: f32 = pcm.chunks(2).zip(&back).skip(200).map(|(p, b)| (i32::from(p[ch]) - b).abs() as f32).sum::<f32>() / 1800.0;
+            assert!(late < 300.0, "channel {ch}: mean error {late}");
+        }
+    }
+
+    #[test]
+    fn a_stream_lays_clips_on_16_byte_boundaries() {
+        let mut clips = vec![vec![1u8; 36], vec![2u8; 72], vec![3u8; 36]];
+        let (pws, at) = lay_out_stream(&mut clips);
+        assert_eq!(at, [0, 48, 128]);
+        assert_eq!(pws.len(), 176);
+        assert_eq!(pws[48], 2);
+    }
+
+    #[test]
+    fn a_streamed_bank_without_its_stream_is_refused() {
+        let mut b = vec![0u8; 24 + 16 + 36];
+        b[0] = 0x1D;
+        b[8..10].copy_from_slice(&1u16.to_be_bytes());
+        b[10] = 1;
+        b[16..20].copy_from_slice(&40u32.to_be_bytes());
+        let e = convert_wavebank_data(&b, None).unwrap_err();
+        assert!(e.0.contains("needs its .pws"), "{e}");
     }
 
     #[test]
     fn step_table_has_89_entries() {
         assert_eq!(IMA_STEP_TABLE.len(), 89);
         assert_eq!(IMA_STEP_TABLE[88], 32767);
-    }
-
-    fn hex(s: &str) -> Vec<u8> {
-        (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap()).collect()
-    }
-
-    /// PWS/VO Xbox-ADPCM transcode goldens for `transcode_pws_xbox_to_pc`.
-    #[test]
-    fn xbox_adpcm_matches_python_byte_exact() {
-        // (input_hex, output_hex, channels)
-        let cases = [
-            // MONO 36B → nibble-swap
-            ("3412050000070e151c232a31383f464d545b626970777e858c939aa1a8afb6bdc4cbd2d9",
-             "341205000070e051c132a21383f364d445b526960777e758c839a91a8afa6bdb4cbc2d9d", 1),
-            // STEREO 72B → full decode/re-encode
-            ("10270900f0d80c0005121f2c394653606d7a8794a1aebbc8d5e2effc091623303d4a5764717e8b98a5b2bfccd9e6f3000d1a2734414e5b6875828f9ca9b6c3d0ddeaf704111e2b38",
-             "10270000f0d800007134f1d2f7977970935426061aeabb8c5d2efddfd3a475469051420217e7b809492bfbcc88a273070c783b0000f0b4840508f80aad80780288703c0c00f0b283", 2),
-            // MONO 2-block stream (72B) → nibble-swap per block
-            ("3412050000070e151c232a31383f464d545b626970777e858c939aa1a8afb6bdc4cbd2d900802c00000306090c0f1215181b1e2124272a2d303336393c3f4245484b4e5154575a5d",
-             "341205000070e051c132a21383f364d445b526960777e758c839a91a8afa6bdb4cbc2d9d00802c0000306090c0f0215181b1e1124272a2d203336393c3f3245484b4e4154575a5d5", 1),
-        ];
-        for (i, (inp, out, ch)) in cases.iter().enumerate() {
-            let got = transcode_pws_xbox_to_pc(&hex(inp), *ch).unwrap();
-            assert_eq!(got, hex(out), "case {i} (ch={ch}) diverged from Python golden");
-        }
     }
 
     const RETAIL_FIXTURE: &[u8] =
@@ -1078,7 +1079,7 @@ mod tests {
             assert_eq!(rec.sample_rate, 44100);
             assert_eq!(rec.data_size, *xsize);
             assert_eq!(rec.decoded_samples, *xframes);
-            assert_eq!(rec.word_1c, 0);
+            assert_eq!(read_u32_be(b, rec_abs + 0x1C), 0);
             assert_eq!(rec.data_offset, *xdoff);
             let blob_abs = rec_abs + rec.data_offset as usize;
             assert_eq!(blob_abs, *xabs);
@@ -1141,7 +1142,7 @@ mod tests {
             assert_eq!(rec.sample_rate, 44100);
             assert_eq!(rec.data_size, *xsize);
             assert_eq!(rec.decoded_samples, *xframes);
-            assert_eq!(rec.word_1c, 0);
+            assert_eq!(read_u32_be(b, rec_abs + 0x1C), 0);
             assert_eq!(rec.data_offset, *xdoff);
             let blob_abs = rec_abs + rec.data_offset as usize;
             assert_eq!(blob_abs, *xabs);
