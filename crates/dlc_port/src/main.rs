@@ -8,9 +8,9 @@
 //! ASET routing is by *content*, not by index: the Xbox `block_index` cannot be
 //! rebased arithmetically (the DLC's blocks are not a contiguous run in the
 //! source index space), so every row — per-block and `0xFFFF` "global" alike —
-//! is routed to whichever converted block actually owns its `asset_hash`, and
-//! its `type_id` is refined from that entry's `type_hash`. Rows owned by no
-//! shipped block are dropped so the retail WAD resolves them instead.
+//! is routed to the converted blocks that actually own its `asset_hash`, one per
+//! rung, and then has to agree with them. Rows owned by no shipped block are
+//! dropped so the retail WAD resolves them instead.
 //!
 //! The bootstrap / import-chain injection is deliberately *not* performed: those
 //! passes existed to graft the DLC contracts into the *vz* master script, but the
@@ -55,6 +55,7 @@ use mercs2_formats::dlc_stfs::{extract_stfs_from_rar, load_stfs_or_doh, RarExtra
 use mercs2_formats::patch_wad::{build_patch_wad_multi, AsetEntry, PatchBlock, FFCS_CERT_BLOB};
 use mercs2_formats::sges::{compress_sges, decompress_sges};
 use mercs2_formats::ucfx::parse_block_entry_table;
+use mercs2_formats::be_to_le::texture::{archive_textures, rung_of_path, BlockTextures, TextureTable};
 use ucfx_byteswap::convert::{convert_block, QUIET};
 use ucfx_byteswap::ecs::ComponentSchemas;
 use ucfx_byteswap::lua::LuaTools;
@@ -115,10 +116,6 @@ struct Cli {
     verbose: bool,
 }
 
-fn strip_xbox_sub_entry(u2: u32) -> u32 {
-    (u2 & 0xFFFF_0000) | 0xFFFF
-}
-
 /// Per-block decode result the main loop then recompresses + verifies +
 /// stores in a `PatchBlock`. Separating the dispatch from the output
 /// assembly keeps the loop readable and makes the side-oracle a pure
@@ -144,6 +141,7 @@ fn run() -> Result<(), String> {
     println!("Reading class layouts from {}...", cli.vz_wad.display());
     let schemas = ComponentSchemas::from_vz_wad(&cli.vz_wad)?;
     println!("  {} classes", schemas.len());
+    let base_textures = archive_textures(&cli.vz_wad)?;
 
     // ── Step 1: load DOH bytes ──
     let doh: Vec<u8> = if let Some(rar) = &cli.x360_rar {
@@ -177,7 +175,7 @@ fn run() -> Result<(), String> {
     let xbox_doh_oracle: Option<XboxDohOracle> = match &cli.xbox_doh_oracle {
         Some(p) => {
             println!("Step 1b: Loading Xbox-DOH side oracle from {}...", p.display());
-            Some(XboxDohOracle::load(p, &lua_tools, &schemas)?)
+            Some(XboxDohOracle::load(p, &lua_tools, &schemas, &base_textures)?)
         }
         None => None,
     };
@@ -211,16 +209,16 @@ fn run() -> Result<(), String> {
 
     // ── Normalize every ASET row; routing is resolved from block CONTENT below.
     //
-    // The Xbox block_index cannot be rebased arithmetically: the DLC's blocks are
+    // The Xbox block indices cannot be rebased arithmetically: the DLC's blocks are
     // not a contiguous run in the source index space, so `idx - min(idx)` misroutes
     // (measured: 1045 texture rows landing on the wrong block). Instead every row —
-    // both per-block and the 0xFFFF "global" ones — is routed to whichever converted
-    // block actually contains its asset_hash.
-    let pending_aset: Vec<AsetEntry> = aset
-        .iter()
-        .map(|ae| AsetEntry::new(ae.asset_hash, ae.u1, strip_xbox_sub_entry(ae.u2), ae.u3))
-        .collect();
-    println!("  ASET rows to route by content: {}", pending_aset.len());
+    // both per-block and the 0xFFFF "global" ones — is routed to the converted blocks
+    // that actually contain its asset_hash, one per rung.
+    println!("  ASET rows to route by content: {}", aset.len());
+
+    println!("Reading texture rungs...");
+    let textures = TextureTable::from_doh(&doh, &indx, &pths, &base_textures)?;
+    println!("  {} textures", textures.textures.len());
 
     // ── Step 3: per-block convert + recompress ──
     QUIET.store(true, Ordering::Relaxed); // silence convert_block's per-block diagnostics
@@ -247,7 +245,8 @@ fn run() -> Result<(), String> {
         // optional Xbox-DOH side oracle. Anything the oracle cannot resolve
         // fails the whole run — no silent fallback — so the output WAD is
         // either 100 % resolved or does not exist.
-        let decode = match convert_block(&decompressed, false, None, Some(&lua_tools), Some(&schemas)) {
+        let block_textures = BlockTextures { table: &textures, rung: rung_of_path(&path) };
+        let decode = match convert_block(&decompressed, false, None, Some(&lua_tools), Some(&schemas), Some(block_textures)) {
             Ok(s) => BlockDecode::Ps3Direct(s),
             Err(err) => {
                 if is_ps3_compact_decl_rejection(&err) {
@@ -344,7 +343,7 @@ fn run() -> Result<(), String> {
             aset_entries: Vec::new(),
             packed_field: recomputed_packed,
             flags: e.flags,
-            source_block_index: None, // carries no ASET rows, so no rungs to remap
+            source_block_index: Some(blk_idx as u32),
         });
 
         if (converted.len() + skips.len()) % 200 == 0 {
@@ -365,39 +364,60 @@ fn run() -> Result<(), String> {
         return Err("No blocks converted".into());
     }
 
-    // ── ASET resolution: route every row to the block that actually owns its hash ──
-    // Owner map + the owning entry's type_hash, built once from the converted blocks.
+    // ── ASET resolution: route every row to the blocks that actually own its hash ──
+    // Owner map, built once from the converted blocks: each asset's block per rung.
     // Xbox-DOH-sourced blocks contribute their entries' name_hashes here the same
     // way PS3-direct blocks do: the LE entry table is already in `compressed_data`
     // on both paths, so the PS3-side ASET rows for assets that lived in a rejected
     // PS3 block still route correctly against the Xbox-DOH-sourced body.
-    let mut hash_owner: HashMap<u32, (usize, u32)> = HashMap::new();
+    let mut owners: HashMap<u32, Vec<(u32, [Option<usize>; 4])>> = HashMap::new();
     for (i, blk) in converted.iter().enumerate() {
-        if let Ok(raw) = decompress_sges(&blk.compressed_data) {
-            let (_, entries) = parse_block_entry_table(&raw);
-            for ent in entries {
-                hash_owner.entry(ent.name_hash).or_insert((i, ent.type_hash));
+        let raw = decompress_sges(&blk.compressed_data)?;
+        let rung = rung_of_path(&blk.path_string).ok_or_else(|| format!("{} names no rung", blk.path_string))?;
+        let (_, entries) = parse_block_entry_table(&raw);
+        for ent in entries {
+            let types = owners.entry(ent.name_hash).or_default();
+            if !types.iter().any(|(t, _)| *t == ent.type_hash) {
+                types.push((ent.type_hash, [None; 4]));
+            }
+            let slots = &mut types.iter_mut().find(|(t, _)| *t == ent.type_hash).expect("pushed above").1;
+            if slots[rung].replace(i).is_some() {
+                return Err(format!("0x{:08X} is twice in rung {rung}, the second in {}", ent.name_hash, blk.path_string));
             }
         }
     }
-    let (mut resolved, mut unresolved) = (0usize, 0usize);
-    for mut ae in pending_aset {
-        match hash_owner.get(&ae.asset_hash) {
-            Some(&(i, type_hash)) => {
-                // Refine type_id from the owning entry rather than trusting the Xbox row.
-                if let Some(tid) = type_id_for_type_hash(type_hash) {
-                    ae.u32_3 = tid;
-                }
-                converted[i].aset_entries.push(ae);
-                resolved += 1;
-            }
+    let (mut resolved, mut unresolved, mut chained) = (0usize, 0usize, 0usize);
+    let mut source_blocks: HashMap<u16, usize> = HashMap::new();
+    for ae in &aset {
+        let Some(types) = owners.get(&ae.asset_hash) else {
             // Hash owned by no shipped block: an Xbox row for a base-game asset that
             // lives in the retail WAD. Dropping it lets the base WAD resolve it instead
             // of shadowing it with a dangling patch row.
-            None => unresolved += 1,
+            unresolved += 1;
+            continue;
+        };
+        let (_, slots) = types
+            .iter()
+            .find(|(t, _)| type_id_for_type_hash(*t) == Some(ae.u3))
+            .ok_or_else(|| format!("0x{:08X}: no block holds it as type {}", ae.asset_hash, ae.u3))?;
+        let resident = slots[0].ok_or_else(|| format!("0x{:08X} has no block of rung 0", ae.asset_hash))?;
+        // The row's own indices are in another space, but each must name one block throughout.
+        for (r, source) in xbox_row_rungs(ae.u1, ae.u2).into_iter().enumerate() {
+            let agrees = match (source, slots[r]) {
+                (0xFFFF, block) => block.is_none(),
+                (_, None) => false,
+                (s, Some(i)) => *source_blocks.entry(s).or_insert(i) == i,
+            };
+            if !agrees {
+                return Err(format!("0x{:08X} rung {r}: the Xbox row says {source:#06X}, the blocks say {:?}", ae.asset_hash, slots[r]));
+            }
         }
+        let (secondary, finer) = rung_chain(slots.map(|s| s.and_then(|i| converted[i].source_block_index)));
+        chained += usize::from(finer != 0xFFFF);
+        converted[resident].aset_entries.push(AsetEntry::new(ae.asset_hash, secondary, finer, ae.u3));
+        resolved += 1;
     }
-    println!("  ASET routed by content: {resolved}, dropped (not owned by any shipped block): {unresolved}");
+    println!("  ASET routed by content: {resolved}, {chained} with finer rungs, dropped (not owned by any shipped block): {unresolved}");
 
     // ── Synthetic ASET for script / stringdb entries lacking a row ──
     let (mut script_added, mut stringdb_added) = (0usize, 0usize);
@@ -454,6 +474,19 @@ fn run() -> Result<(), String> {
     Ok(())
 }
 
+/// An Xbox ASET row's block indices, `[_P000, _P001, _P002, _P003]`. Each word's halves are the
+/// reverse of PC's (`docs/aset_format.md`).
+fn xbox_row_rungs(u1: u32, u2: u32) -> [u16; 4] {
+    [u2 as u16, (u2 >> 16) as u16, u1 as u16, (u1 >> 16) as u16]
+}
+
+/// An asset's source block per rung as ASET words: `([_P002 | _P003], _P001)`, `0xFFFF` for an absent
+/// rung. The engine stops at the first absent rung, so a rung past a gap is absent too.
+fn rung_chain(blocks: [Option<u32>; 4]) -> (u32, u32) {
+    let rung = |r: usize| if blocks[..=r].iter().all(Option::is_some) { blocks[r].map_or(0xFFFF, |b| b & 0xFFFF) } else { 0xFFFF };
+    ((rung(2) << 16) | rung(3), rung(1))
+}
+
 fn main() -> ExitCode {
     match run() {
         Ok(()) => ExitCode::SUCCESS,
@@ -461,5 +494,17 @@ fn main() -> ExitCode {
             eprintln!("dlc_port: error: {e}");
             ExitCode::FAILURE
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::rung_chain;
+
+    #[test]
+    fn a_chain_packs_its_rungs_and_stops_at_a_gap() {
+        assert_eq!(rung_chain([Some(1), Some(2), Some(3), Some(4)]), (0x0003_0004, 2));
+        assert_eq!(rung_chain([Some(1), Some(2), None, None]), (0xFFFF_FFFF, 2));
+        assert_eq!(rung_chain([Some(1), None, Some(3), Some(4)]), (0xFFFF_FFFF, 0xFFFF));
     }
 }
