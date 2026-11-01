@@ -156,7 +156,7 @@ cargo run -p mercs2_workshop -- --ui-state crates/mercs2_workshop/ui_states/insp
 ```
 
 The JSON names the state by the words the window shows — `page` (a rail label or `Live`),
-`settings_section`, `tab`, `lens`, `filter`, `load` (a model name, or on another tab that tab's row by its label), `hero` (a model name, set before `load`), on `"tab": "FACEFX"` with a `load` `face_pose` (a pose of the opened actor, held at full weight) or `face_time` (seconds into the opened set's first anim, paused), `shipment` + `contribution`,
+`settings_section`, `tab`, `lens`, `filter`, `load` (a model name, or on another tab that tab's row by its label), `hero` (a model name, set before `load`), on `"tab": "FACEFX"` with a `load` `face_pose` (a pose of the opened actor, held at full weight) or `face_time` (seconds into the opened set's first anim, paused), on `"tab": "WORLD LAYERS"` with a `load` `entity` (an entity of the opened layer by its label, selected and framed), `shipment` + `contribution`,
 `bench` + `donor`, and on the AUDIO tab `bank`, `clip`, `search` and `select` (record indices),
 applied once the tab's routing is read (`ui_states/audio.json`), `run_wad` / `run_data` (a path
 used for this run as Settings' "Use for this run only…" does, after the first load; the capture
