@@ -20,8 +20,9 @@ The pipeline, in the order `src/main.rs` runs it:
    passed through when it is a bare `XFCU` entry table (trailing zeros trimmed, length rounded up
    to 4). The decompressed bytes go through `ucfx_byteswap::convert::convert_block` (BE→LE), are
    recompressed with `compress_sges`, and the result is immediately decompressed again and
-   compared — a round-trip mismatch is a hard error. Blocks that fail to decompress or convert are
-   skipped, not fatal; the run lists each with its reason.
+   compared — a round-trip mismatch is a hard error. A block that fails to decompress or convert
+   fails the run after the rest are tried, and the error lists every such block with its reason, so
+   a WAD on disk holds every block in the range asked for.
 4. **Rebuild `packed_field`** — `(xbox_tier << 24) | ceil(size / 0x8000)`, keeping the source
    block's tier byte but recomputing the page count for the converted (LE) payload.
 5. **Route ASET by content** — see the gotcha below. Each row's `type_id` is refined from the
