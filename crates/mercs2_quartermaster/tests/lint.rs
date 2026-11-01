@@ -746,6 +746,39 @@ fn a_language_name_that_collides_with_a_shipped_wad_is_an_error() {
     }
 }
 
+/// An `add_level` can only add: a name the game ships, a name that is no token, a `wad` that is no
+/// `.wad` and a stream the game ships are each M0311, and a clean one is not.
+#[test]
+fn an_add_level_that_could_overwrite_is_an_error() {
+    let level = |name: &str, wad: &str, stream: &str| {
+        lint::lint(
+            &shipment_with(&format!(
+                "  - kind: add_level
+    name: {name}
+    display: X
+    wad: {wad}
+    streams:
+      - {stream}
+"
+            )),
+            None,
+            None,
+        )
+    };
+    for bad in [
+        level("vz", "src/a.wad", "src/a.pws"),
+        level("Dlc-01", "src/a.wad", "src/a.pws"),
+        level("dlc01", "src/a.bin", "src/a.pws"),
+        level("dlc01", "src/a.wad", "src/music.pws"),
+        level("dlc01", "src/a.wad", "src/vo_stream.english.pws"),
+        level("dlc01", "src/a.wad", "src/a.txt"),
+    ] {
+        assert!(codes(&bad).contains(&"M0311"), "{bad:?}");
+        assert!(lint::blocks_build(&bad));
+    }
+    assert!(!codes(&level("dlc01", "src/a.wad", "src/a.pws")).contains(&"M0311"));
+}
+
 /// A name that is not a lowercase `[a-z0-9_]` token cannot be a filename / stringdb key — M0200.
 #[test]
 fn a_language_name_that_is_not_a_token_is_an_error() {
