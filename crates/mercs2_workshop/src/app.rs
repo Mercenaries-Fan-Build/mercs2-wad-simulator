@@ -8657,13 +8657,17 @@ pub fn run(opts: Options) {
                         for a in layer_acts.drain(..) {
                             let crate::layerview::LayerAct::Select(i) = a;
                             v.selected = Some(i);
-                            if let Some((c, d)) = v.entity_framing(i) {
+                            if let Some((c, d)) = v.frame_entity(i) {
                                 cam_target = c;
                                 cam_dist = d;
                             }
                         }
                         if let Some(Ok(t)) = &layer_templates {
                             v.step(&mut w, &mut scene, &mut world, t, &index);
+                        }
+                        if let Some((c, d)) = v.take_reframe() {
+                            cam_target = c;
+                            cam_dist = d;
                         }
                     }
                     // ── Session log: record `status` whenever it CHANGED this frame. Runs after the
