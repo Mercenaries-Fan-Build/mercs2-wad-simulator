@@ -16196,6 +16196,27 @@
     ],
     "0xFE10F51B": [
       "Explosion (Handheld RPG) DLC_nolight"
+    ],
+    "0x05C70EC3": [
+      "vo_stream_dlctest.italian"
+    ],
+    "0x1096B693": [
+      "vo_stream_dlctest.spanish"
+    ],
+    "0x35D82199": [
+      "dlctest_streaming"
+    ],
+    "0xA1E9532D": [
+      "vo_stream_dlctest.french"
+    ],
+    "0xA56BD66B": [
+      "vo_stream_dlctest.german"
+    ],
+    "0xCBF5F673": [
+      "vo_stream_dlctest.english"
+    ],
+    "0xEB3B3C14": [
+      "vo_stream_dlctest.russian"
     ]
   }
 }
