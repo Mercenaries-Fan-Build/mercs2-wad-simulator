@@ -19,6 +19,7 @@ flate2 = "1"
 # The diagnostics + shared world helpers live in the engine library.
 mercs2_engine = { workspace = true }
 mercs2_formats = { workspace = true }
+glam = "0.27"
 # `ess-menu-check` runs Ess and a menu script on the game's exact Lua 5.1 (float lua_Number).
 mercs2_luac = { workspace = true }
 # `ess-live` drives the running game through lua-bridge's REPL.
