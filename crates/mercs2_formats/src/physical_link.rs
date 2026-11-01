@@ -55,9 +55,18 @@ pub fn template_physical_links(we: &WorldEntity) -> Result<BTreeMap<u32, Vec<Phy
 }
 
 /// Every placed entity's own links in a decompressed placement block, in record order, by entity key.
-/// A chunk that does not divide into `[u32 key][record]` is an error.
 pub fn placed_physical_links(block: &[u8]) -> Result<HashMap<u32, Vec<PhysicalLink>>, String> {
     let mut out: HashMap<u32, Vec<PhysicalLink>> = HashMap::new();
+    for (key, link) in placed_links_in_order(block)? {
+        out.entry(key).or_default().push(link);
+    }
+    Ok(out)
+}
+
+/// Every placed link in a decompressed placement block with the key of the entity it is on, in record
+/// order. A chunk that does not divide into `[u32 key][record]` is an error.
+pub fn placed_links_in_order(block: &[u8]) -> Result<Vec<(u32, PhysicalLink)>, String> {
+    let mut out = Vec::new();
     for c in crate::placement::comp_inventory(block) {
         if c.info_name.as_deref() != Some(CLASS) {
             continue;
@@ -68,8 +77,7 @@ pub fn placed_physical_links(block: &[u8]) -> Result<HashMap<u32, Vec<PhysicalLi
             return Err(format!("{CLASS}: {} data bytes are not whole {}-byte records", data.len(), 4 + RECORD));
         }
         for r in data.chunks_exact(4 + RECORD) {
-            let key = u32::from_le_bytes([r[0], r[1], r[2], r[3]]);
-            out.entry(key).or_default().push(parse(&r[4..])?);
+            out.push((u32::from_le_bytes([r[0], r[1], r[2], r[3]]), parse(&r[4..])?));
         }
     }
     Ok(out)
