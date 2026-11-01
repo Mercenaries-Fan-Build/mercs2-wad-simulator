@@ -166,6 +166,13 @@ contributions:
     display: Polski
     strings: src/text/polski.txt
 
+  - kind: add_level
+    name: arena
+    display: The Arena
+    wad: src/level/arena.wad
+    streams:
+      - src/level/arena_streaming.pws
+
   - kind: add_movie
     name: my_hud_widgets
     movie: src/ui/widgets.gfx
@@ -410,6 +417,13 @@ const JSON: &str = r#"
       "name": "polski",
       "display": "Polski",
       "strings": "src/text/polski.txt"
+    },
+    {
+      "kind": "add_level",
+      "name": "arena",
+      "display": "The Arena",
+      "wad": "src/level/arena.wad",
+      "streams": ["src/level/arena_streaming.pws"]
     },
     {
       "kind": "add_movie",
@@ -685,6 +699,13 @@ display = "Polski"
 strings = "src/text/polski.txt"
 
 [[contributions]]
+kind = "add_level"
+name = "arena"
+display = "The Arena"
+wad = "src/level/arena.wad"
+streams = ["src/level/arena_streaming.pws"]
+
+[[contributions]]
 kind = "add_movie"
 name = "my_hud_widgets"
 movie = "src/ui/widgets.gfx"
@@ -868,6 +889,7 @@ fn toml_carries_the_kind_tag_for_every_v1_kind() {
             "activate_layer",
             "edit_stringdb",
             "add_language",
+            "add_level",
             "add_movie",
             "add_ui",
             "patch_lua",
