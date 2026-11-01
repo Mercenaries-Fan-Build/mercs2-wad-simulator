@@ -24,10 +24,11 @@
 //! CSUM / ASET layout is rebuilt by `build_patch_wad_multi` regardless of
 //! which input the LE body came from.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 
+use mercs2_formats::be_to_le::texture::{rung_of_path, BlockTextures, TextureTable};
 use mercs2_formats::dlc_input::{parse_be_ffcs, parse_be_indx, parse_be_pths, read_be_block};
 use mercs2_formats::dlc_stfs::load_stfs_or_doh;
 use mercs2_formats::ucfx::parse_block_entry_table;
@@ -87,7 +88,7 @@ impl XboxDohOracle {
     /// contract is on the caller — if the PS3 side later asks for a hash the
     /// oracle does not hold, [`XboxDohOracle::lookup`] returns `None` and the
     /// caller must fail the run.
-    pub fn load(path: &Path, lua_tools: &LuaTools, schemas: &ComponentSchemas) -> Result<Self, String> {
+    pub fn load(path: &Path, lua_tools: &LuaTools, schemas: &ComponentSchemas, base_textures: &HashSet<u32>) -> Result<Self, String> {
         let (doh, src) = load_stfs_or_doh(path)
             .map_err(|e| format!("xbox-doh-oracle: open {}: {e}", path.display()))?;
         println!(
@@ -107,6 +108,8 @@ impl XboxDohOracle {
         let pths = chunk("PTHS")
             .map(|r| parse_be_pths(&doh, r.offset as usize, r.meta as usize))
             .unwrap_or_default();
+        let textures = TextureTable::from_doh(&doh, &indx, &pths, base_textures)
+            .map_err(|e| format!("xbox-doh-oracle: textures of {}: {e}", path.display()))?;
 
         // The main loop toggles QUIET to silence per-block logging; mirror that
         // here. Harmless to leave set — the caller sets it unconditionally.
@@ -133,7 +136,8 @@ impl XboxDohOracle {
                 }
             };
 
-            let swapped = match convert_block(&decompressed, false, None, Some(lua_tools), Some(schemas)) {
+            let block_textures = BlockTextures { table: &textures, rung: rung_of_path(&path_s) };
+            let swapped = match convert_block(&decompressed, false, None, Some(lua_tools), Some(schemas), Some(block_textures)) {
                 Ok(s) => s,
                 Err(err) => {
                     eprintln!("  xbox-doh-oracle: convert_block {path_s}: {err}");
