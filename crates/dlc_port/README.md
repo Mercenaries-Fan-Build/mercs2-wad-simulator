@@ -16,17 +16,21 @@ The pipeline, in the order `src/main.rs` runs it:
 2. **Parse the BE FFCS header** — `parse_be_ffcs` yields the chunk rows; `INDX`, `ASET`, `PTHS`
    and `CSUM` are pulled out by tag. `--list-blocks` stops here and prints page count, packed
    field and path per block.
-3. **Per-block convert** — each block is either `segs`-decompressed (`decompress_be_sges`) or
-   passed through when it is a bare `XFCU` entry table (trailing zeros trimmed, length rounded up
-   to 4). The decompressed bytes go through `ucfx_byteswap::convert::convert_block` (BE→LE), are
+3. **Per-block convert** — `TextureTable::from_doh` first reads every block, because a texture's
+   `INFO` sits in one block and its rungs in others. Then each block is either `segs`-decompressed
+   (`decompress_be_sges`) or passed through when it is a bare `XFCU` entry table (trailing zeros
+   trimmed, length rounded up to 4). The decompressed bytes go through
+   `ucfx_byteswap::convert::convert_block` (BE→LE), are
    recompressed with `compress_sges`, and the result is immediately decompressed again and
    compared — a round-trip mismatch is a hard error. A block that fails to decompress or convert
    fails the run after the rest are tried, and the error lists every such block with its reason, so
    a WAD on disk holds every block in the range asked for.
 4. **Rebuild `packed_field`** — `(xbox_tier << 24) | ceil(size / 0x8000)`, keeping the source
    block's tier byte but recomputing the page count for the converted (LE) payload.
-5. **Route ASET by content** — see the gotcha below. Each row's `type_id` is refined from the
-   owning entry's `type_hash` via `type_id_for_type_hash` rather than trusting the Xbox row.
+5. **Route ASET by content** — see the gotcha below. Each row goes to the block of `_P000` holding
+   its asset and names the blocks of `_P001`..`_P003` holding it, up to the first gap. The Xbox row
+   is then an oracle: its type must be the entry's, and each of its block indices must name the same
+   block throughout and be absent exactly where the content has no rung. A disagreement fails the run.
 6. **Synthesise missing ASET rows** — any `SCRIPT_TYPE_HASH` or `STRINGDB_TYPE_HASH` entry in a
    block's table that has no ASET row gets one (`u1 = 0xFFFFFFFF`, `u2 = 0xFFFF`).
 7. **Assemble** — `build_patch_wad_multi` with the source `CSUM` value/meta and `FFCS_CERT_BLOB`.
@@ -73,7 +77,8 @@ Flags: `--x360-rar`, `--x360-stfs` (one is required), `--unrar PATH` / `--bsdtar
 one is required with `--x360-rar`), `--java PATH` and `--unluac PATH` (required: the java
 executable and unluac jar that convert Lua bytecode blocks), `--vz-wad PATH` (required: the
 player's PC `vz.wad`, whose `schm` chunks lay out the DLC's compact ECS containers, see
-`mercs2_formats::be_to_le::ecs`), `-o/--output` (required unless `--list-blocks`),
+`mercs2_formats::be_to_le::ecs`, and whose texture list decides which pixel-less DLC textures the
+base game serves), `-o/--output` (required unless `--list-blocks`),
 `--list-blocks`, `--max-blocks N`, `--start-block N`, `-v/--verbose`.
 
 ## Notes / gotchas
