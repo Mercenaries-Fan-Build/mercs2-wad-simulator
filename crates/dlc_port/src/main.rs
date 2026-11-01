@@ -219,7 +219,7 @@ fn run() -> Result<(), String> {
     QUIET.store(true, Ordering::Relaxed); // silence convert_block's per-block diagnostics
     let end = num_blocks.min(cli.start_block + cli.max_blocks.unwrap_or(num_blocks));
     let mut converted: Vec<PatchBlock> = Vec::new();
-    let mut skipped = 0usize;
+    let mut skips: Vec<String> = Vec::new();
     let mut ps3_direct_count = 0usize;
     let mut xbox_doh_sourced_count = 0usize;
     let total = end - cli.start_block;
@@ -230,7 +230,7 @@ fn run() -> Result<(), String> {
         let block_offset = e.file_offset();
         let block_size = e.page_count as usize * PAGE_SIZE;
         if block_offset + 4 > doh.len() {
-            skipped += 1;
+            skips.push(format!("[{blk_idx}] {path}: offset {block_offset} is past the container"));
             continue;
         }
         let slice = &doh[block_offset..(block_offset + block_size).min(doh.len())];
@@ -239,8 +239,8 @@ fn run() -> Result<(), String> {
         let decompressed: Vec<u8> = if slice.len() >= 4 && &slice[..4] == b"segs" {
             match decompress_be_sges(slice, 0, slice.len()) {
                 Ok(d) => d,
-                Err(_) => {
-                    skipped += 1;
+                Err(err) => {
+                    skips.push(format!("[{blk_idx}] {path}: sges: {err}"));
                     continue;
                 }
             }
@@ -258,11 +258,11 @@ fn run() -> Result<(), String> {
                 d.truncate(z);
                 d
             } else {
-                skipped += 1;
+                skips.push(format!("[{blk_idx}] {path}: neither segs nor an XFCU entry table ({rec} records)"));
                 continue;
             }
         } else {
-            skipped += 1;
+            skips.push(format!("[{blk_idx}] {path}: {} bytes, too short for a block", slice.len()));
             continue;
         };
 
@@ -308,7 +308,7 @@ fn run() -> Result<(), String> {
                             // No oracle supplied: keep the historical skip
                             // behaviour so running without `--xbox-doh-oracle`
                             // is identical to the pre-change build.
-                            skipped += 1;
+                            skips.push(format!("[{blk_idx}] {path}: {err}"));
                             continue;
                         }
                     }
@@ -317,7 +317,7 @@ fn run() -> Result<(), String> {
                     // truncated UCFX…) is shared between PS3 and Xbox DOH inputs
                     // on the DLC01 corpus and is out of scope for the oracle.
                     // Keep the historical skip path for parity with pre-change.
-                    skipped += 1;
+                    skips.push(format!("[{blk_idx}] {path}: {err}"));
                     continue;
                 }
             }
@@ -370,16 +370,20 @@ fn run() -> Result<(), String> {
             source_block_index: None, // carries no ASET rows, so no rungs to remap
         });
 
-        if (converted.len() + skipped) % 200 == 0 {
-            println!("  [{}/{total}] converting...", converted.len() + skipped);
+        if (converted.len() + skips.len()) % 200 == 0 {
+            println!("  [{}/{total}] converting...", converted.len() + skips.len());
         }
     }
     println!(
-        "  Converted: {} (ps3-direct: {}, xbox-doh-side-oracle: {}), Skipped: {skipped}",
+        "  Converted: {} (ps3-direct: {}, xbox-doh-side-oracle: {}), Skipped: {}",
         converted.len(),
         ps3_direct_count,
-        xbox_doh_sourced_count
+        xbox_doh_sourced_count,
+        skips.len()
     );
+    for s in &skips {
+        println!("  skipped {s}");
+    }
     if converted.is_empty() {
         return Err("No blocks converted".into());
     }
