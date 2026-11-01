@@ -420,7 +420,7 @@ impl HumanAnimData {
             .ok_or("ActionTable 0x6802C321: in no open wad")?;
         let selector = AnimSelector::from_containers(&lookup, Some(&actions))?;
         let we = assets
-            .resolve(WORLDENTITY_TYPE_HASH, RETAIL_WORLDENTITY_NAME_HASH)
+            .ecs_container(WORLDENTITY_TYPE_HASH, RETAIL_WORLDENTITY_NAME_HASH)?
             .ok_or("worldentity 0x50075B3B: in no open wad")?;
         let we = WorldEntity::parse(&we).map_err(|e| format!("worldentity: {e}"))?;
         let identities = human_animation_sets(&we)?;
@@ -552,7 +552,7 @@ impl PopulationData {
     pub fn load(assets: &mut crate::asset::AssetSource) -> Result<PopulationData, String> {
         use mercs2_formats::worldentity::{WorldEntity, RETAIL_WORLDENTITY_NAME_HASH, WORLDENTITY_TYPE_HASH};
         let we = assets
-            .resolve(WORLDENTITY_TYPE_HASH, RETAIL_WORLDENTITY_NAME_HASH)
+            .ecs_container(WORLDENTITY_TYPE_HASH, RETAIL_WORLDENTITY_NAME_HASH)?
             .ok_or("worldentity 0x50075B3B: in no open wad")?;
         Self::from_worldentity(&WorldEntity::parse(&we).map_err(|e| format!("worldentity: {e}"))?)
     }
