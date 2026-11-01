@@ -21,6 +21,44 @@ const RETAIL_FIXTURE_PS3: &[u8] = include_bytes!(concat!(
 ));
 const RETAIL_FIXTURE_PS3_SHA256: &str = "e9d8967c91c953700a327d9e307eacf7b994cc5f093ebd6b7937cae075fc66a1";
 
+/// A DLC streamed bank's header as it ships, big-endian, with `vo_stream_DLCTest.pws` in the 32-byte
+/// slot (`docs/_descriptor_walker_rejected_bodies.md`, class C), and one record.
+fn dlc_streamed_body() -> Vec<u8> {
+    let mut b = Vec::new();
+    b.extend_from_slice(&0x1Du32.to_le_bytes());
+    b.extend_from_slice(&0xF53C_3969u32.to_be_bytes());
+    b.extend_from_slice(&1u16.to_be_bytes());
+    b.extend_from_slice(&[1, 0]);
+    b.extend_from_slice(&0xF53C_3969u32.to_be_bytes());
+    b.extend_from_slice(&56u32.to_be_bytes());
+    b.extend_from_slice(&0u32.to_be_bytes());
+    b.extend_from_slice(b"vo_stream_DLCTest.pws");
+    b.resize(56, 0);
+    b.extend_from_slice(&0x1234_5678u32.to_be_bytes()); // clip hash
+    b.extend_from_slice(&[0, 1, 5, 0]); // channels, codec
+    b.extend_from_slice(&44100u32.to_be_bytes());
+    b.extend_from_slice(&0x800u32.to_be_bytes()); // data size
+    b.extend_from_slice(&0x1000u32.to_be_bytes()); // decoded samples
+    b.extend_from_slice(&[0; 8]);
+    b.extend_from_slice(&7u32.to_be_bytes()); // word_1c
+    b.extend_from_slice(&0x4000u32.to_be_bytes()); // .pws offset
+    b
+}
+
+/// The 7 blocks `dlc_port` used to skip: the header keeps its long name slot and the PC reader takes
+/// the result, the record pointing past the `.pws` file's 4-byte PC header.
+#[test]
+fn a_dlc_streamed_bank_converts_with_its_long_name() {
+    use mercs2_audio::wave::{WaveData, WavebankFile};
+    let pc = convert_wavebank_data(&dlc_streamed_body()).expect("converts");
+    let file = WavebankFile::parse(&pc).expect("the PC reader takes it");
+    assert_eq!(file.stream_name.as_deref(), Some("vo_stream_DLCTest.pws"));
+    assert_eq!(file.bank_hash, 0xF53C_3969);
+    let [record] = file.records.as_slice() else { panic!("one record") };
+    assert_eq!(record.data, WaveData::Streamed { offset: 0x4004, size: 0x800, word_1c: 7 });
+    assert_eq!(file.to_bytes().expect("re-encodes"), pc);
+}
+
 fn sha256_hex(data: &[u8]) -> String {
     Sha256::digest(data).iter().map(|b| format!("{b:02x}")).collect()
 }
