@@ -3119,6 +3119,92 @@ mod sound {
         }
     }
 
+    /// A level WAD holding script `name`, importing `dep`, and the layer `<name>_base`.
+    fn level_wad(path: &Path, name: &str, base_layer: bool, dep: &str) {
+        use mercs2_formats::script_meta::{Dep, ScriptMeta};
+        use mercs2_formats::types::{TYPE_HASH_LAYER, TYPE_HASH_SCRIPT, TYPE_ID_LAYER, TYPE_ID_SCRIPT};
+        use mercs2_formats::ucfx::{write_ucfx_tree, UcfxNode};
+        use mercs2_quartermaster::language::{assets_block, Asset};
+        let meta = ScriptMeta {
+            name: name.to_string(),
+            globals: 0,
+            inherits: 0,
+            deps: vec![Dep { name: dep.to_string(), hash: m2(dep), inherit: false }],
+        };
+        let luaq = mercs2_luac::compile("return 1", name).expect("compiles");
+        let script = mercs2_formats::scripts_block::build_container(&meta, &luaq);
+        let mut assets = vec![Asset { name_hash: m2(name), type_hash: TYPE_HASH_SCRIPT, type_id: TYPE_ID_SCRIPT, container: script }];
+        if base_layer {
+            assets.push(Asset {
+                name_hash: m2(&format!("{name}_base")),
+                type_hash: TYPE_HASH_LAYER,
+                type_id: TYPE_ID_LAYER,
+                container: write_ucfx_tree(&[UcfxNode::leaf(*b"info", vec![0; 4])]),
+            });
+        }
+        let block = assets_block(format!("blocks\\{name}\\{name}.block"), &assets).expect("block");
+        let wad = mercs2_formats::patch_wad::build_patch_wad_multi(&[block], 0, None, &mercs2_formats::patch_wad::FFCS_CERT_BLOB).expect("wad");
+        std::fs::write(path, wad).unwrap();
+    }
+
+    fn level_shipment(dir: &Path) -> LoadedShipment {
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        named_shipment(dir, "qmlevel", "  - kind: add_level\n    name: qmlevel\n    display: A Level\n    wad: src/qmlevel.wad\n")
+    }
+
+    /// ★ `add_level`: the WAD lands in the patch slot, stamped with `vz.wad`'s CSUM, over a copy of
+    /// `vz.wad` made at deploy with the digest of the file read, and nothing ships in an overlay. A
+    /// script's import the game holds resolves from the base.
+    #[test]
+    fn add_level_places_the_level_above_a_copy_of_vz() {
+        let dir = scratch("add_level");
+        let s = level_shipment(&dir);
+        level_wad(&dir.join("src/qmlevel.wad"), "qmlevel", true, "mrxtask");
+        let mut game = stack_for(&[&s]);
+        let vz = game.paths()[0].to_path_buf();
+        let out = dir.join("_build");
+        let report = build::build(&s, Some(&mut game), None, Some(&out), None, None).expect("builds");
+        assert!(report.wad.is_none(), "nothing ships in an overlay");
+        let patch = report
+            .placements
+            .iter()
+            .find(|p| matches!(&p.destination, Destination::DataWad { relative, display } if relative == "data/qmlevel-patch.wad" && display == "A Level"))
+            .expect("the level's WAD");
+        let raw = std::fs::read(out.join("data/qmlevel-patch.wad")).unwrap();
+        assert_eq!(patch.sha256, build::sha256_hex(&raw));
+        let (csum, _) = mercs2_formats::donor::base_csum(&vz).unwrap();
+        assert_eq!(read_patch_wad(&raw).unwrap().csum_value, csum, "an overlay carries its base's CSUM");
+        let copy = report
+            .placements
+            .iter()
+            .find(|p| matches!(&p.destination, Destination::StreamCopy { from, to } if from == "data/vz.wad" && to == "data/qmlevel.wad"))
+            .expect("the base copy");
+        assert_eq!(copy.bytes as u64, std::fs::metadata(&vz).unwrap().len());
+    }
+
+    /// An import neither the level nor the game holds fails the build, naming it and its importer.
+    #[test]
+    fn add_level_refuses_a_reference_nothing_holds() {
+        let dir = scratch("add_level_missing");
+        let s = level_shipment(&dir);
+        level_wad(&dir.join("src/qmlevel.wad"), "qmlevel", true, "qm_no_such_module");
+        let mut game = stack_for(&[&s]);
+        let e = build::build(&s, Some(&mut game), None, Some(&dir.join("_build")), None, None).unwrap_err();
+        let text = format!("{e:?}");
+        assert!(text.contains(&format!("script 0x{:08X}, named by 0x{:08X}", m2("qm_no_such_module"), m2("qmlevel"))), "{text}");
+    }
+
+    /// A WAD without `<name>_base` is no level, whatever its file is called.
+    #[test]
+    fn add_level_refuses_a_wad_that_is_not_the_level() {
+        let dir = scratch("add_level_not");
+        let s = level_shipment(&dir);
+        level_wad(&dir.join("src/qmlevel.wad"), "qmlevel", false, "mrxtask");
+        let mut game = stack_for(&[&s]);
+        let e = build::build(&s, Some(&mut game), None, Some(&dir.join("_build")), None, None).unwrap_err();
+        assert!(format!("{e:?}").contains("is not level"), "{e:?}");
+    }
+
     /// ★ `add_language`: `data/<name>.wad` carries the string table, the fonts forked with their atlas
     /// repointed, the atlases, and English's voice-over tables re-keyed to `<bank>.<name>` (streamed
     /// and embedded wavebanks both); nothing ships in an overlay; and the record copies the
