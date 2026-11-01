@@ -15,7 +15,7 @@ use std::path::Path;
 
 use mercs2_formats::be_to_le::convert::convert_block;
 use mercs2_formats::be_to_le::ecs::{ecs_containers, is_compact, read_records, ComponentSchemas};
-use mercs2_formats::be_to_le::texture::{archive_textures, rung_of_path, BlockTextures, TextureTable};
+use mercs2_formats::be_to_le::texture::{archive_textures, rung_of_path, BlockTables, TextureTable};
 use mercs2_formats::dlc_input::{parse_be_ffcs, parse_be_indx, parse_be_pths, read_be_block};
 use mercs2_formats::ffcs::load_ffcs_archive;
 use mercs2_formats::game_paths::{local_config_ps3_vz_wad, local_config_vz_wad, local_config_xbox_vz_wad};
@@ -93,7 +93,7 @@ fn every_xbox_mixr_equals_its_pc_twin() {
         if !contains(&be, b"RXIM") {
             continue;
         }
-        let textures = BlockTextures { table: &table, rung: rung_of_path(&paths[i]) };
+        let textures = BlockTables { textures: &table, rung: rung_of_path(&paths[i]), streams: None };
         let le = convert_block(&be, false, None, None, None, Some(textures)).unwrap();
         for (entry, r) in block_chunk_spans(&le).unwrap() {
             let Some(m) = Mixr::find(&le[r]).unwrap() else { continue };
