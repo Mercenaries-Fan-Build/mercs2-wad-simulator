@@ -247,6 +247,15 @@ pub const M0200_LANGUAGE_NAME_UNUSABLE: Rule = Rule {
     doc: "docs/modding/manifest_format.md#add_language",
 };
 
+/// An `add_level` that could only overwrite: a name that is not a lowercase token or is a WAD the game
+/// ships ([`crate::build::wad_name_refusal`]), a `wad` that is no `.wad`, or a stream the game ships
+/// ([`crate::level::stream_name_refusal`]). The lowering refuses the same names.
+pub const M0311_LEVEL_UNUSABLE: Rule = Rule {
+    code: "M0311",
+    title: "an add_level name or stream is unusable, or collides with one the game ships",
+    doc: "docs/modding/manifest_format.md#m0311",
+};
+
 /// `collision: follow_geometry` set alongside `retarget:` on the same `add_model`. `retarget` takes
 /// the SKINNED lowering (character rig → ragdoll/capsule collision), where the rigid static-collision
 /// regeneration never runs — so `follow_geometry` is silently ignored. It is a rigid-path-only option.
@@ -859,6 +868,7 @@ pub const RULES: &[Rule] = &[
     M0308_RAW_SPRITES,
     M0309_EMITTER_SHAPE,
     M0310_SHOP_BEHAVIOUR_AFTER_PMC,
+    M0311_LEVEL_UNUSABLE,
 ];
 
 /// Every rule [`game_checks`] (or a lowering that holds the game stack) reports.
@@ -2764,6 +2774,23 @@ pub fn lint(
                         at: Some(index),
                         fix: None,
                     });
+                }
+            }
+            Contribution::AddLevel { name, wad, streams, .. } => {
+                let mut refuse = |message: String| {
+                    out.push(Diagnostic { rule: M0311_LEVEL_UNUSABLE, severity: Severity::Error, message, at: Some(index), fix: None })
+                };
+                if let Some(why) = crate::build::wad_name_refusal("add_level", name) {
+                    refuse(format!("add_level name {name:?}: {why}"));
+                }
+                if !wad.extension().is_some_and(|e| e.eq_ignore_ascii_case("wad")) {
+                    refuse(format!("add_level wad {}: not a .wad file", wad.display()));
+                }
+                for s in streams {
+                    let file = s.file_name().and_then(|f| f.to_str()).unwrap_or_default().to_ascii_lowercase();
+                    if let Some(why) = crate::level::stream_name_refusal(&file) {
+                        refuse(format!("add_level stream {}: {why}", s.display()));
+                    }
                 }
             }
             Contribution::AddAnimation {
