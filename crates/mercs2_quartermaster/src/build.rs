@@ -349,9 +349,9 @@ pub enum Destination {
     /// A file placed in the game folder, at this path relative to it — an `.asi` in the loader's
     /// search path, or a companion beside it.
     GameFolder { relative: String },
-    /// A NEW base WAD in `data/`, at this path relative to the game folder (`data/<name>.wad`). Only
-    /// `add_language` produces one; it is ADDITIVE and collision-checked, never over a shipped WAD.
-    /// `display` is the label a language selector shows for it.
+    /// A NEW WAD in `data/`, at this path relative to the game folder: `data/<name>.wad` for
+    /// `add_language`, `data/<name>-patch.wad` for `add_level`. It is ADDITIVE and collision-checked,
+    /// never over a shipped WAD. `display` is the label a selector shows for it.
     DataWad { relative: String, display: String },
     /// A patch WAD, at `relative` under the output directory, whose blocks a deploy step merges —
     /// with every other installed Shipment's for the same `language`, a link output last — into
@@ -430,22 +430,26 @@ pub const RESERVED_WAD_BASENAMES: &[&str] = &[
 /// name. Called by the linter (M0200, so template CI says so) AND the lowering (so the refusal
 /// survives a suppressed rule).
 pub fn language_name_refusal(name: &str) -> Option<String> {
+    wad_name_refusal("add_language", name)
+}
+
+/// Refuse a name `kind` would turn into a new base WAD: [`language_name_refusal`]'s two failure modes.
+pub fn wad_name_refusal(kind: &str, name: &str) -> Option<String> {
     let n = name.trim();
     if n.is_empty() {
         return Some("it is empty".into());
     }
     if !n.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_') {
         return Some(format!(
-            "{n:?} is not a language token — expected lowercase a-z, digits and underscore only. It \
-             becomes the filename `.\\Data\\{n}.wad` and hashes to the stringdb key, so a separator, \
-             an uppercase letter or punctuation cannot appear in it"
+            "{n:?} is not a token — expected lowercase a-z, digits and underscore only. It becomes the \
+             filename `.\\Data\\{n}.wad` and is hashed by name, so a separator, an uppercase letter or \
+             punctuation cannot appear in it"
         ));
     }
     if RESERVED_WAD_BASENAMES.contains(&n) {
         return Some(format!(
-            "{n:?} is a WAD the game already ships (`.\\Data\\{n}.wad`). add_language only ADDS a \
-             language it never shipped and must never overwrite a base WAD — pick a name that is not \
-             one of: {}",
+            "{n:?} is a WAD the game already ships (`.\\Data\\{n}.wad`). {kind} only ADDS and must never \
+             overwrite a base WAD — pick a name that is not one of: {}",
             RESERVED_WAD_BASENAMES.join(", ")
         ));
     }
@@ -640,7 +644,7 @@ enum Lowering {
     /// block plus one `TYPE_ID_TEXTURE` block per supplied map, and they have to travel together —
     /// the model's MTRL repoints name hashes that only resolve if these ship alongside it.
     Blocks(Vec<PatchBlock>),
-    /// A NEW base WAD placed in `data/`: `add_language` is the only producer. The engine mounts
+    /// A NEW language's base WAD placed in `data/`. The engine mounts
     /// `.\Data\<language>.wad` in its language slot, above the level WAD (`FUN_004BFE20`), so its
     /// string table, fonts and voice-over tables resolve from there. `stream_copy` is the voice
     /// stream the language plays from, as `(from, to)` under the game folder.
@@ -649,6 +653,13 @@ enum Lowering {
         display: String,
         blocks: Vec<PatchBlock>,
         stream_copy: (String, String),
+    },
+    /// A level ([`crate::level`]): `blocks` become `data/<name>-patch.wad`, and the game file
+    /// [`crate::level::BASE_FROM`] is copied to `data/<name>.wad` at deploy.
+    LevelWad {
+        name: String,
+        display: String,
+        level: crate::level::Level,
     },
     /// A file placed in the game folder. Carries its bytes so the caller writes them exactly once,
     /// next to the digest it records for them.
@@ -4102,6 +4113,26 @@ fn lower(
         | Contribution::AddStringDbKeys { .. }
         | Contribution::ReplaceStringDbText { .. } => Ok(Lowering::Nothing),
 
+        // A NEW level: its own WAD above a copy of `vz.wad` (`crate::level`).
+        Contribution::AddLevel { name, display, wad, streams } => {
+            let Some(game) = game else {
+                return Err(BuildError::GameRequired { index, kind });
+            };
+            if let Some(why) = wad_name_refusal(kind, name) {
+                return Err(BuildError::Lower { index, kind, message: format!("add_level name {name:?} is not usable: {why}") });
+            }
+            let level = crate::level::read(root, name, wad, streams, game)
+                .map_err(|message| BuildError::Lower { index, kind, message })?;
+            log.push(format!(
+                "contributions[{index}] add_level {name}: {} block(s), {} stream(s), {} script and texture reference(s), {} of them only in the base → .\\Data\\{name}-patch.wad above a copy of vz.wad",
+                level.blocks.len(),
+                level.streams.len(),
+                level.references,
+                level.from_base,
+            ));
+            Ok(Lowering::LevelWad { name: name.clone(), display: display.clone(), level })
+        }
+
         // A NEW language: `data/<name>.wad` carries its string table (the base table forked, the
         // translation applied, re-keyed to `m2(name)`), its fonts and atlases (forked from the
         // base's, `language::fork_fonts`) and English's voice-over tables re-keyed to
@@ -4491,6 +4522,7 @@ pub fn build(
     let mut blocks = Vec::new();
     let mut files = Vec::new();
     let mut lang_wads: Vec<(String, String, Vec<PatchBlock>, (String, String))> = Vec::new();
+    let mut level_wads: Vec<(String, String, crate::level::Level)> = Vec::new();
     for (index, c) in manifest.contributions.iter().enumerate() {
         match lower(
             index,
@@ -4511,6 +4543,7 @@ pub fn build(
                 blocks: bs,
                 stream_copy,
             } => lang_wads.push((language, display, bs, stream_copy)),
+            Lowering::LevelWad { name, display, level } => level_wads.push((name, display, level)),
             Lowering::File {
                 name,
                 relative,
@@ -4853,6 +4886,64 @@ pub fn build(
             sha256,
             destination: Destination::StreamCopy { from, to },
         });
+    }
+
+    // Levels. The level's own WAD is the patch slot above a copy of `vz.wad`, so it carries
+    // `vz.wad`'s CSUM row, as every overlay does. Its streams keep the game's own layout, and the
+    // output mirrors the tree a deploy copies into.
+    for (name, display, level) in level_wads {
+        let fail = |message: String| BuildError::Lower { index: 0, kind: "add_level", message };
+        let wad = build_patch_wad_multi(&level.blocks, csum.0, csum.1, &FFCS_CERT_BLOB).map_err(fail)?;
+        let found = verify_emitted(&wad, &shader_keys)?;
+        for d in &found {
+            log.push(format!("self-check ({name}-patch.wad): {d}"));
+        }
+        diagnostics.extend(found);
+        let write = |relative: &str, bytes: &[u8]| -> Result<(), BuildError> {
+            let path = out_dir.join(relative);
+            let io = |e: std::io::Error, path: &Path| BuildError::Io { path: path.to_path_buf(), message: e.to_string() };
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).map_err(|e| io(e, parent))?;
+            }
+            std::fs::write(&path, bytes).map_err(|e| io(e, &path))
+        };
+        let relative = crate::level::patch_relative(&name);
+        write(&relative, &wad)?;
+        let digest = sha256_hex(&wad);
+        log.push(format!("wrote {relative}: {} bytes, sha256 {digest} → the level above a copy of vz.wad", wad.len()));
+        placements.push(Placement {
+            name: format!("{name}-patch.wad"),
+            bytes: wad.len(),
+            sha256: digest,
+            destination: Destination::DataWad { relative, display },
+        });
+
+        let vz = game
+            .as_deref()
+            .and_then(|g| g.paths().first().map(|p| p.to_path_buf()))
+            .ok_or(BuildError::GameRequired { index: 0, kind: "add_level" })?;
+        let (bytes, sha256) = sha256_file(&vz)?;
+        let to = crate::level::base_relative(&name);
+        log.push(format!("{to} ← copy of {} at deploy: {bytes} bytes, sha256 {sha256}", crate::level::BASE_FROM));
+        placements.push(Placement {
+            name: format!("{name}.wad"),
+            bytes,
+            sha256,
+            destination: Destination::StreamCopy { from: crate::level::BASE_FROM.to_string(), to },
+        });
+
+        for (file, stream) in &level.streams {
+            let relative = format!("data/Audios/{file}");
+            write(&relative, stream)?;
+            let digest = sha256_hex(stream);
+            log.push(format!("wrote {relative}: {} bytes, sha256 {digest}", stream.len()));
+            placements.push(Placement {
+                name: file.clone(),
+                bytes: stream.len(),
+                sha256: digest,
+                destination: Destination::GameFolder { relative },
+            });
+        }
     }
 
     // The shell patch and the language patches: patch WADs a deploy step merges into
