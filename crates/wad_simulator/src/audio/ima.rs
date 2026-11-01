@@ -72,6 +72,8 @@ pub fn decode_ima_mono(data: &[u8]) -> Result<Vec<i16>, DecodeError> {
                 samples.push(predictor_i as i16);
             }
         }
+        // The engine stops a nibble short: a block is 64 frames (`FUN_0083efd0`).
+        samples.pop();
         offset += MONO_BLOCK_SIZE;
     }
     if samples.is_empty() && !data.is_empty() {
@@ -119,6 +121,9 @@ pub fn decode_ima_stereo(data: &[u8]) -> Result<(Vec<i16>, Vec<i16>), DecodeErro
                 }
             }
         }
+        // The engine stops a nibble short per channel: a block is 64 frames (`FUN_0083f110`).
+        left.pop();
+        right.pop();
         offset += STEREO_BLOCK_SIZE;
     }
     if left.is_empty() && !data.is_empty() {
@@ -135,5 +140,17 @@ pub fn validate_ima_payload(data: &[u8], channels: u8) -> Result<usize, DecodeEr
     } else {
         let (l, r) = decode_ima_stereo(data)?;
         Ok(l.len().max(r.len()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A block is 64 frames, mono or stereo per channel, as the engine decodes it.
+    #[test]
+    fn a_block_is_64_frames() {
+        assert_eq!(validate_ima_payload(&[0; 2 * MONO_BLOCK_SIZE], 1).unwrap(), 128);
+        assert_eq!(validate_ima_payload(&[0; STEREO_BLOCK_SIZE], 2).unwrap(), 64);
     }
 }
