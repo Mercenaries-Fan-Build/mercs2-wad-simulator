@@ -296,3 +296,80 @@ pub fn layer_frames(wadpath: &str, capture: &Path) -> Result<(), String> {
     }
     Ok(())
 }
+
+/// `layer --catalog <out.tsv> [--also <archive,archive>]`: one row per layer of the mounted stack, with
+/// the archive that resolves it, its block's path, and its entities, models, link children and class
+/// counts. A layer of an `--also` archive, which may be another platform's and is not read further,
+/// gets a row with its archive and path alone.
+pub fn layer_catalog(wadpath: &str, out: &Path, also: &[String]) -> Result<(), String> {
+    let mut assets = AssetSource::discover(wadpath, &[])?;
+    let we = world(&mut assets)?;
+    let templates = TemplateRecords::from_worldentity(&we)?;
+    let classes = template_classes(&we);
+    let mut rows = vec!["hash\tarchive\tblock\tpath\tentities\ttemplated\tmodels\tlink_children\tbounds_xz\ttop_names\tclasses".to_string()];
+    let mut homes: BTreeMap<u32, (String, u16, String)> = BTreeMap::new();
+    let read_layers = |path: &str| -> Result<Vec<(u32, String, u16, String)>, String> {
+        let mut f = File::open(path).map_err(|e| format!("{path}: {e}"))?;
+        let size = f.metadata().map_err(|e| format!("{path}: {e}"))?.len();
+        let arch = mercs2_formats::ffcs::load_ffcs_archive(&mut f, size).map_err(|e| format!("{path}: {e}"))?;
+        let file = Path::new(path).file_name().map_or(path.to_string(), |n| n.to_string_lossy().into_owned());
+        Ok(arch
+            .aset
+            .iter()
+            .filter(|e| e.type_id == TYPE_ID_LAYER)
+            .map(|e| (e.asset_hash, file.clone(), e.block_index(), arch.paths.get(e.block_index() as usize).cloned().unwrap_or_default()))
+            .collect())
+    };
+    // The stack resolves last-mounted first, so a later archive's row replaces an earlier one's.
+    for path in assets.paths().to_vec() {
+        for (hash, file, block, block_path) in read_layers(&path)? {
+            homes.insert(hash, (file, block, block_path));
+        }
+    }
+    for (&h, (file, block_index, path)) in &homes {
+        let block = assets.resolve(LAYER_TYPE_HASH, h).ok_or_else(|| format!("0x{h:08X}: no container"))?;
+        let mut catalog = PlacedCatalog::default();
+        let keys = catalog.add_block(&block, &templates)?;
+        let own = entity_classes(&block)?;
+        let entities: BTreeSet<u32> = keys.iter().copied().collect();
+        let linked = mercs2_formats::physical_link::placed_links_in_order(&block)?.into_iter().map(|(_, l)| l.child).filter(|c| entities.contains(c)).collect::<BTreeSet<u32>>().len();
+        let children: BTreeSet<u32> = mercs2_formats::physical_link::placed_links_in_order(&block)?.into_iter().map(|(_, l)| l.child).collect();
+        let (mut templated, mut models) = (0usize, 0usize);
+        let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
+        let (mut lo, mut hi) = ([f32::MAX; 2], [f32::MIN; 2]);
+        let mut stems: BTreeMap<String, usize> = BTreeMap::new();
+        let entity_names: HashMap<u32, String> = placed_names(&block).into_iter().collect();
+        for &k in &keys {
+            let o = catalog.get(k).expect("add_block returned the key");
+            templated += usize::from(o.parent != 0);
+            models += usize::from(o.model.is_some());
+            if !children.contains(&k) {
+                lo = [lo[0].min(o.pos[0]), lo[1].min(o.pos[2])];
+                hi = [hi[0].max(o.pos[0]), hi[1].max(o.pos[2])];
+            }
+            if let Some(n) = entity_names.get(&k) {
+                let stem = n.split(" 0x").next().unwrap_or(n).trim_end_matches(|c: char| c.is_ascii_digit() || c == ' ' || c == '_');
+                *stems.entry(stem.to_string()).or_default() += 1;
+            }
+            let set: BTreeSet<&str> = own.get(&k).into_iter().chain(classes.get(&o.parent)).flatten().map(String::as_str).collect();
+            for c in set {
+                *counts.entry(c).or_default() += 1;
+            }
+        }
+        let mut listed: Vec<(&str, usize)> = counts.into_iter().filter(|(c, _)| !matches!(*c, "Name" | "HibernationControl")).collect();
+        listed.sort_by_key(|(_, n)| std::cmp::Reverse(*n));
+        let listed: Vec<String> = listed.iter().map(|(c, n)| format!("{c}:{n}")).collect();
+        let mut names: Vec<(String, usize)> = stems.into_iter().collect();
+        names.sort_by_key(|(_, n)| std::cmp::Reverse(*n));
+        let names: Vec<String> = names.iter().take(6).map(|(s, n)| format!("{s}:{n}")).collect();
+        let bounds = if keys.is_empty() || lo[0] > hi[0] { String::new() } else { format!("{:.0},{:.0},{:.0},{:.0}", lo[0], lo[1], hi[0], hi[1]) };
+        rows.push(format!("0x{h:08X}\t{file}\t{block_index}\t{path}\t{}\t{templated}\t{models}\t{linked}\t{bounds}\t{}\t{}", keys.len(), names.join(","), listed.join(",")));
+    }
+    for path in also {
+        for (hash, file, block, block_path) in read_layers(path)? {
+            rows.push(format!("0x{hash:08X}\t{file}\t{block}\t{block_path}\t\t\t\t\t\t\t"));
+        }
+    }
+    println!("{} rows, {} of the mounted stack", rows.len() - 1, homes.len());
+    std::fs::write(out, rows.join("\n") + "\n").map_err(|e| format!("{}: {e}", out.display()))
+}
