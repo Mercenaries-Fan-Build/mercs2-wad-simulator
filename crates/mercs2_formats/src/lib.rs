@@ -154,6 +154,7 @@ pub mod phy2_moppswap;
 pub mod physical_link;
 pub mod placement;
 pub mod placement_build;
+pub mod pmc_sites;
 pub mod prof_samples;
 pub mod profd;
 pub mod profiler_sites;
