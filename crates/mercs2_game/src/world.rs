@@ -139,10 +139,14 @@ pub struct WorldData {
     /// The HQ-interior hero spawn, derived the base-game way (actor position + `hp_playerA_enter`
     /// hardpoint) when `spawn_interior`. `None` for the exterior boot (the hero uses a named marker).
     interior_spawn: Option<[f32; 3]>,
-    /// Authored `global_particle_*` FX placements (effect name + world position) — each starts an
-    /// emitter (classified by name). The faithful producer for environmental particle effects
-    /// (fire/smoke/steam). Static environmental *glows* (god-ray light shafts) are split out into
+    /// Authored `global_particle_*` FX placements: the effect and where it stands, run by
+    /// `mercs2_engine::fx_sim`. Static environmental *glows* (god-ray light shafts) are split out into
     /// `glow_cards` at load, where the WAD is open to read their effect template.
+    effects: Vec<(mercs2_formats::fxdict::EffectContainer, [f32; 3])>,
+    /// What `effects` draw from: the `vfx` atlas and the `fxdict`. `None` when there are none.
+    fx_atlas: Option<(mercs2_formats::texture::TextureData, Vec<mercs2_formats::fxdict::FxRect>)>,
+    /// `global_particle_*` placements whose effect the archive does not carry, as a stand-in shape
+    /// classified by name.
     particle_fx: Vec<(mercs2_engine::particles::EmitterDesc, [f32; 3])>,
     /// Static additive glow cards for the environmental light-shaft FX (`global_particle_env_godray2`
     /// — the PMC hall god rays descending from the dome). Position/size/tint are data-driven from the
@@ -496,7 +500,8 @@ pub(crate) fn load_world_data(
     // loaded layer's `LightObject`s. Environmental FX placements (Name-keyed `global_particle_*`
     // Transforms) in the interior split by kind: static environmental light-shaft glows (god rays)
     // become additive glow cards resolved against their effect template here (WAD open); fire/smoke/
-    // steam stay as particle emitters classified by name at render-thread start.
+    // steam run as their effects, resolved here and started at render-thread start.
+    let mut effects: Vec<(mercs2_formats::fxdict::EffectContainer, [f32; 3])> = Vec::new();
     let mut particle_fx: Vec<(mercs2_engine::particles::EmitterDesc, [f32; 3])> = Vec::new();
     let mut glow_cards: Vec<mercs2_engine::particles::GlowCard> = Vec::new();
     if spawn_interior {
@@ -509,26 +514,23 @@ pub(crate) fn load_world_data(
                 }
                 if is_light_shaft_fx(name) {
                     glow_cards.push(mercs2_engine::game_world::glow_card_for_effect(assets.base_mut(), name, p.pos)?);
-                } else if let Some(base) = classify_particle(name) {
-                    // Real authored effect params (COLR/FRCE/PTYP), one desc per emitter, if the
-                    // effect resolves; else the name-heuristic base shape. Resolved here where the WAD
-                    // is open, once at load. An effect that resolves but does not parse fails the load.
+                } else {
+                    // The authored effect if it resolves, else the name-heuristic shape. Resolved
+                    // here where the WAD is open, once at load. An effect that resolves but does not
+                    // parse fails the load.
                     let hash = mercs2_formats::hash::pandemic_hash_m2(&name.replace("particle_", ""));
                     match mercs2_engine::game_world::load_effect(assets.base_mut(), hash)? {
-                        Some(effect) => {
-                            for desc in mercs2_engine::particles::EmitterDesc::from_effect(&effect, &base) {
-                                particle_fx.push((desc, p.pos));
-                            }
-                        }
-                        None => particle_fx.push((base, p.pos)),
+                        Some(effect) => effects.push((effect, p.pos)),
+                        None => particle_fx.extend(classify_particle(name).map(|base| (base, p.pos))),
                     }
                 }
             }
         }
     }
+    let fx_atlas = if effects.is_empty() { None } else { Some(mercs2_engine::game_world::load_fx_atlas(assets.base_mut())?) };
     println!(
-        "[world] particle placements: {}; light-shaft glows: {}",
-        particle_fx.len(), glow_cards.len()
+        "[world] effect placements: {}; stand-ins: {}; light-shaft glows: {}",
+        effects.len(), particle_fx.len(), glow_cards.len()
     );
     // The lights/FX harvest above (incl. the interior state-block decompress) is real load work that
     // used to run AFTER the bar hit 100% — count it as the final stage so the progress reflects reality.
@@ -586,7 +588,7 @@ pub(crate) fn load_world_data(
     let templates = mercs2_engine::worldutil::TemplateRecords::load(&mut assets)?;
     let streaming = mercs2_engine::game_world::load_streaming_world_data(wadpath, stream_cfg, templates, progress)?;
 
-    Ok(WorldData { terrain, player, player_clips, player_swim_clip, weapon, weapon_hand_bone, cells, placements, pmc_models, interior, props, interior_props, hmap, watermap, interior_spawn, particle_fx, glow_cards, resident_audio, streaming, population_block: ls, population, population_models })
+    Ok(WorldData { terrain, player, player_clips, player_swim_clip, weapon, weapon_hand_bone, cells, placements, pmc_models, interior, props, interior_props, hmap, watermap, interior_spawn, effects, fx_atlas, particle_fx, glow_cards, resident_audio, streaming, population_block: ls, population, population_models })
 }
 
 /// Whether a `global_particle_*` name is a static environmental light-shaft ("god ray") FX. These are
@@ -1760,8 +1762,16 @@ impl mercs2_engine::app::Game for Mercs2Game {
             let glows = cards.len();
             scene.set_glow_cards(&cards);
             let mut started = 0usize;
-            // Emitters were resolved to real (or heuristic-base) descriptors at load (WAD open); just
-            // start each at its placement here on the render thread.
+            // Resolved at load (WAD open); started at their placements here on the render thread.
+            if let Some((atlas, rects)) = data.fx_atlas.take() {
+                scene.fx_set_atlas(&atlas, &rects).unwrap_or_else(|e| panic!("{e}"));
+            }
+            for (effect, pos) in std::mem::take(&mut data.effects) {
+                scene
+                    .fx_start_effect(&effect, mercs2_engine::fx_sim::Starter::default(), pos, false)
+                    .unwrap_or_else(|e| panic!("an effect placement at {pos:?}: {e}"));
+                started += 1;
+            }
             for (desc, pos) in std::mem::take(&mut data.particle_fx) {
                 scene.fx_start_desc(desc, pos);
                 started += 1;
