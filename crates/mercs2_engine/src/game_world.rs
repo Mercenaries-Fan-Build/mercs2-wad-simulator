@@ -1097,9 +1097,8 @@ pub fn glow_card_for_effect(
 }
 
 /// Load and parse an effect by name-hash
-/// ([`parse_effect_container`](mercs2_formats::fxdict::parse_effect_container)). Feeds
-/// [`EmitterDesc::from_effect`](crate::particles::EmitterDesc::from_effect) so authored
-/// fire/smoke/steam effects drive the particle sim with real params.
+/// ([`parse_effect_container`](mercs2_formats::fxdict::parse_effect_container)), for
+/// [`crate::fx_sim`] to run.
 ///
 /// The block comes from the effect's own ASET row (`asset_hash == name_hash`,
 /// `type_id == TYPE_ID_EFFECT`) — the WAD's index of where the asset lives — not from a block path.
@@ -1148,6 +1147,19 @@ pub fn load_effect(
     Err(format!(
         "the ASET row for effect 0x{name_hash:08X} names blocks {blocks:?}, and none holds the container"
     ))
+}
+
+/// What every effect draws from: the `vfx` atlas and the `fxdict`'s rectangles.
+pub fn load_fx_atlas(w: &mut wad::Wad) -> Result<(mercs2_formats::texture::TextureData, Vec<mercs2_formats::fxdict::FxRect>), String> {
+    use mercs2_formats::types::{TYPE_HASH_FX_DICTIONARY, TYPE_ID_FX_DICTIONARY};
+    let dict = {
+        let (archive, _) = wad::archive_and_file(w);
+        archive.aset.iter().find(|a| a.type_id == TYPE_ID_FX_DICTIONARY).map(|a| a.asset_hash).ok_or("no fxdict row in the archive")?
+    };
+    let c = wad::extract_container_typed(w, dict, TYPE_HASH_FX_DICTIONARY).map_err(|e| format!("fxdict: {e}"))?;
+    let rects = mercs2_formats::fxdict::parse_fxdict_container(&c).map_err(|e| format!("fxdict: {e}"))?;
+    let atlas = wad::extract_texture_hires(w, mercs2_formats::fxdict::VFX_ATLAS).map_err(|e| format!("vfx atlas: {e}"))?;
+    Ok((atlas, rects))
 }
 
 /// Read an environmental light-shaft effect and recover `(TRFM scale, COLR peak colour, COLR peak
