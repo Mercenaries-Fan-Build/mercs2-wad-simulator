@@ -51,11 +51,12 @@ use mercs2_formats::aset_type_ids::{
 use mercs2_formats::dlc_input::{
     parse_be_aset, parse_be_ffcs, parse_be_indx, parse_be_pths, read_be_block,
 };
-use mercs2_formats::dlc_stfs::{extract_stfs_from_rar, load_stfs_or_doh, RarExtractor};
+use mercs2_formats::dlc_stfs::{extract_stfs_from_rar, load_stfs_or_doh_with_streams, RarExtractor};
 use mercs2_formats::patch_wad::{build_patch_wad_multi, AsetEntry, PatchBlock, FFCS_CERT_BLOB};
 use mercs2_formats::sges::{compress_sges, decompress_sges};
 use mercs2_formats::ucfx::parse_block_entry_table;
-use mercs2_formats::be_to_le::texture::{archive_textures, rung_of_path, BlockTextures, TextureTable};
+use mercs2_formats::be_to_le::audio::StreamTable;
+use mercs2_formats::be_to_le::texture::{archive_textures, rung_of_path, BlockTables, TextureTable};
 use ucfx_byteswap::convert::{convert_block, QUIET};
 use ucfx_byteswap::ecs::ComponentSchemas;
 use ucfx_byteswap::lua::LuaTools;
@@ -143,8 +144,8 @@ fn run() -> Result<(), String> {
     println!("  {} classes", schemas.len());
     let base_textures = archive_textures(&cli.vz_wad)?;
 
-    // ── Step 1: load DOH bytes ──
-    let doh: Vec<u8> = if let Some(rar) = &cli.x360_rar {
+    // ── Step 1: load DOH bytes and the package's streams ──
+    let (doh, package_files): (Vec<u8>, Vec<(String, Vec<u8>)>) = if let Some(rar) = &cli.x360_rar {
         println!("Step 1: Extracting STFS from RAR...");
         let work = std::env::temp_dir().join("dlc_port_rs");
         // clap's `requires = "rar_extractor"` on --x360-rar guarantees exactly one of these.
@@ -156,12 +157,12 @@ fn run() -> Result<(), String> {
         let reader = extract_stfs_from_rar(rar, &work, &extractor)?;
         let entry = reader.doh_entry().ok_or("No DOH in STFS")?;
         println!("  Reading DOH ({} bytes)...", entry.file_size);
-        reader.read_doh()?
+        (reader.read_doh()?, reader.read_pws()?)
     } else if let Some(p) = &cli.x360_stfs {
         println!("Step 1: Loading {}...", p.display());
-        let (doh, src) = load_stfs_or_doh(p)?;
+        let (doh, src, files) = load_stfs_or_doh_with_streams(p)?;
         println!("  Source: {src}, size: {} bytes", doh.len());
-        doh
+        (doh, files)
     } else {
         return Err("Provide --x360-rar or --x360-stfs".into());
     };
@@ -220,6 +221,11 @@ fn run() -> Result<(), String> {
     let textures = TextureTable::from_doh(&doh, &indx, &pths, &base_textures)?;
     println!("  {} textures", textures.textures.len());
 
+    println!("Re-encoding the {} streams...", package_files.len());
+    let streams = StreamTable::read(num_blocks, |i| read_be_block(&doh, &indx[i]), &package_files)?;
+    let fitted: u64 = streams.streams().iter().map(|(_, s)| s.fitted_frames).sum();
+    println!("  {} streams, ffmpeg's decode off the records' frame counts by {fitted} frames in all", streams.streams().len());
+
     // ── Step 3: per-block convert + recompress ──
     QUIET.store(true, Ordering::Relaxed); // silence convert_block's per-block diagnostics
     let end = num_blocks.min(cli.start_block + cli.max_blocks.unwrap_or(num_blocks));
@@ -245,7 +251,7 @@ fn run() -> Result<(), String> {
         // optional Xbox-DOH side oracle. Anything the oracle cannot resolve
         // fails the whole run — no silent fallback — so the output WAD is
         // either 100 % resolved or does not exist.
-        let block_textures = BlockTextures { table: &textures, rung: rung_of_path(&path) };
+        let block_textures = BlockTables { textures: &textures, rung: rung_of_path(&path), streams: Some(&streams) };
         let decode = match convert_block(&decompressed, false, None, Some(&lua_tools), Some(&schemas), Some(block_textures)) {
             Ok(s) => BlockDecode::Ps3Direct(s),
             Err(err) => {
@@ -462,6 +468,14 @@ fn run() -> Result<(), String> {
         std::fs::create_dir_all(parent).map_err(|e| format!("mkdir: {e}"))?;
     }
     std::fs::write(&output, &wad).map_err(|e| format!("write: {e}"))?;
+    // The game keeps its streams in `Audios` beside the WAD.
+    let audios = output.with_file_name("Audios");
+    for (name, stream) in streams.streams() {
+        std::fs::create_dir_all(&audios).map_err(|e| format!("mkdir {}: {e}", audios.display()))?;
+        let to = audios.join(name);
+        std::fs::write(&to, &stream.pws).map_err(|e| format!("write {}: {e}", to.display()))?;
+        println!("  Stream: {} ({} clips, {} bytes)", to.display(), stream.records.len(), stream.pws.len());
+    }
     println!(
         "  Output: {} ({} bytes / {:.1} MB), {} blocks (ps3-direct {}, xbox-doh-side-oracle {})",
         output.display(),
