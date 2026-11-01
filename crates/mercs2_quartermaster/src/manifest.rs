@@ -1377,6 +1377,22 @@ pub enum Contribution {
         #[serde(default)]
         base: Option<String>,
     },
+    /// A level the game boots by name: `wad` placed as `.\Data\<name>-patch.wad`, above a copy of
+    /// `vz.wad` made at deploy as `.\Data\<name>.wad`, and its streams in `.\Data\Audios`. The names
+    /// are builder-derived and refused if they collide with a shipped WAD or stream, so it can only
+    /// add ([`crate::level`]).
+    AddLevel {
+        /// The name the game boots it by: the WAD's master script and `<name>_base` layer. A
+        /// lowercase `[a-z0-9_]` token, never a name the game ships (`build::wad_name_refusal`, M0311).
+        name: String,
+        /// The label a level selector shows. Metadata, not lowered into the WAD.
+        display: String,
+        /// A `src/`-relative little-endian level WAD.
+        wad: PathBuf,
+        /// `src/`-relative `.pws` files, one per streamed wavebank of the WAD, named for its entry.
+        #[serde(default)]
+        streams: Vec<PathBuf>,
+    },
     /// Code. Retail: a prebuilt ASI placed in `pmc_bb.dll`'s search path. To DEPEND on someone
     /// else's ASI, require the Shipment that ships it in `load.requires` — never vendor a
     /// third-party binary. `dest` is deliberately absent: the author cannot name a path, so the exe
@@ -1542,6 +1558,7 @@ impl Contribution {
         "add_stringdb_keys",
         "replace_stringdb_text",
         "add_language",
+        "add_level",
         "native_hook",
         "place_file",
         "add_runtime_dll",
@@ -1602,6 +1619,7 @@ impl Contribution {
             Contribution::AddStringDbKeys { .. } => "add_stringdb_keys",
             Contribution::ReplaceStringDbText { .. } => "replace_stringdb_text",
             Contribution::AddLanguage { .. } => "add_language",
+            Contribution::AddLevel { .. } => "add_level",
             Contribution::NativeHook { .. } => "native_hook",
             Contribution::PlaceFile { .. } => "place_file",
             Contribution::AddRuntimeDll { .. } => "add_runtime_dll",
