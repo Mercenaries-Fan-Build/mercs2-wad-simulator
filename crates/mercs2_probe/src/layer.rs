@@ -3,14 +3,18 @@
 //! `layer <name|0xH>` prints every entity of the layer: its key, name, template, model and component
 //! classes (its own, then its template's). `layer --all` reads all of them and prints how many
 //! entities draw a model and which classes the rest carry, and fails when a layer does not read.
+//! `layer --frames <capture>` tests placed `Transform`s against a capture's live positions.
 
+use glam::{Mat4, Quat, Vec3};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs::File;
+use std::path::Path;
 
 use mercs2_engine::asset::AssetSource;
 use mercs2_engine::worldutil::{PlacedCatalog, TemplateRecords, LAYER_TYPE_HASH};
-use mercs2_formats::placement::{entity_classes, placed_names};
-use mercs2_formats::types::TYPE_ID_LAYER;
+use mercs2_formats::physical_link::PhysicalLink;
+use mercs2_formats::placement::{entity_classes, placed_entities, placed_names, PlacedEntity};
+use mercs2_formats::types::{TYPE_HASH_MODEL, TYPE_ID_LAYER};
 use mercs2_formats::worldentity::{WorldEntity, RETAIL_WORLDENTITY_NAME_HASH, WORLDENTITY_TYPE_HASH};
 
 /// The classes of every key the world's templates name.
@@ -149,4 +153,146 @@ pub fn layer_all(wadpath: &str) -> Result<(), String> {
     } else {
         Err(format!("{} layers did not read:\n{}", failed.len(), failed.join("\n")))
     }
+}
+
+/// A model's HIER nodes at rest, by name hash.
+fn node_worlds(container: &[u8]) -> HashMap<u32, Mat4> {
+    let hier = mercs2_formats::orchestrator::parse_hier(container);
+    let mut worlds: Vec<Mat4> = Vec::with_capacity(hier.len());
+    let mut out = HashMap::with_capacity(hier.len());
+    for n in &hier {
+        let local = Mat4::from_cols_array(&n.local);
+        let world = n.parent.and_then(|p| worlds.get(p).copied()).map_or(local, |p| p * local);
+        worlds.push(world);
+        out.insert(n.hash, world);
+    }
+    out
+}
+
+fn transform(pos: [f32; 3], quat: [f32; 4]) -> Mat4 {
+    Mat4::from_rotation_translation(Quat::from_array(quat), Vec3::from(pos))
+}
+
+/// `layer --frames <capture>`: which placed entities sit at their `Transform`, tested against a v1.0
+/// capture's live SceneObject positions (`+0`). An entity a placed `PhysicalLink` names as its child is
+/// compared with its `Transform` and with its parent × hard point × offset, up the chain of links;
+/// every other entity with its `Transform`. An entity the capture does not hold is not compared.
+pub fn layer_frames(wadpath: &str, capture: &Path) -> Result<(), String> {
+    let cap = crate::dump::Capture::open(capture)?;
+    let mem = cap.mem()?;
+    let scene_objects = mem.container_named("SceneObject")?;
+    let mut live: HashMap<u32, Vec3> = HashMap::new();
+    let mut awake: BTreeSet<u32> = BTreeSet::new();
+    for r in mem.records(&scene_objects)? {
+        let b = mem.read(r.va, 12)?;
+        let float = |i: usize| f32::from_le_bytes([b[i], b[i + 1], b[i + 2], b[i + 3]]);
+        live.insert(r.key, Vec3::new(float(0), float(4), float(8)));
+        if (mem.u16(r.va + 0x18)? >> 12) & 3 == 2 {
+            awake.insert(r.key);
+        }
+    }
+    let mut assets = AssetSource::discover(wadpath, &[])?;
+    let we = world(&mut assets)?;
+    let templates = TemplateRecords::from_worldentity(&we)?;
+    let mut hashes = BTreeSet::new();
+    for path in assets.paths() {
+        let mut f = File::open(path).map_err(|e| format!("{path}: {e}"))?;
+        let size = f.metadata().map_err(|e| format!("{path}: {e}"))?.len();
+        let arch = mercs2_formats::ffcs::load_ffcs_archive(&mut f, size).map_err(|e| format!("{path}: {e}"))?;
+        hashes.extend(arch.aset.iter().filter(|e| e.type_id == TYPE_ID_LAYER).map(|e| e.asset_hash));
+    }
+    const BUCKETS: [f32; 5] = [0.01, 0.1, 1.0, 10.0, 100.0];
+    let bucket = |d: f32| BUCKETS.iter().position(|&b| d <= b).unwrap_or(BUCKETS.len());
+    let (mut child_stored, mut child_linked, mut rest_stored) = ([0usize; 6], [0usize; 6], [0usize; 6]);
+    let (mut held, mut not_held, mut two_parents) = (0usize, 0usize, 0usize);
+    let mut flags: BTreeMap<(u16, bool), usize> = BTreeMap::new();
+    let (mut child_misses, mut rest_misses) = (Vec::new(), Vec::new());
+    let mut nodes: HashMap<u32, HashMap<u32, Mat4>> = HashMap::new();
+    for &h in &hashes {
+        let block = assets.resolve(LAYER_TYPE_HASH, h).ok_or_else(|| format!("0x{h:08X}: no container"))?;
+        let mut catalog = PlacedCatalog::default();
+        catalog.add_block(&block, &templates)?;
+        let entities: HashMap<u32, PlacedEntity> = placed_entities(&block)?.into_iter().map(|e| (e.key, e)).collect();
+        let entity_names: HashMap<u32, String> = placed_names(&block).into_iter().collect();
+        let links = mercs2_formats::physical_link::placed_links_in_order(&block)?;
+        let mut incoming: HashMap<u32, (u32, PhysicalLink)> = HashMap::new();
+        for (parent, l) in links.iter().filter(|(_, l)| entities.contains_key(&l.child)) {
+            if let Some((was, _)) = incoming.insert(l.child, (*parent, *l)) {
+                two_parents += 1;
+                let at = live.get(&l.child);
+                let parent_at = |k: u32| live.get(&k).copied();
+                println!("two parents of 0x{:08X} live {at:?}: first 0x{was:08X} {:?}, last 0x{parent:08X} {:?}", l.child, parent_at(was), parent_at(*parent));
+            }
+            if l.hard_point != 0 {
+                let model = catalog.get(*parent).and_then(|o| o.model).ok_or_else(|| format!("parent 0x{parent:08X}: a hard point and no model"))?;
+                if !nodes.contains_key(&model) {
+                    let c = assets.resolve(TYPE_HASH_MODEL, model).ok_or_else(|| format!("model 0x{model:08X}: in no open wad"))?;
+                    nodes.insert(model, node_worlds(&c));
+                }
+            }
+        }
+        let resolved = |key: u32, use_node: &dyn Fn(u32) -> bool| -> Result<Mat4, String> {
+            let (mut chain, mut at) = (Vec::new(), key);
+            while let Some(&(parent, l)) = incoming.get(&at) {
+                chain.push((parent, l));
+                at = parent;
+                if chain.len() > 8 {
+                    return Err(format!("0x{key:08X}: a chain of links deeper than 8"));
+                }
+            }
+            let root = entities.get(&at).ok_or_else(|| format!("0x{at:08X}: a link's parent with no Transform"))?;
+            let mut out = transform(root.pos, root.quat);
+            for (parent, l) in chain.iter().rev() {
+                let node = if l.hard_point == 0 || !use_node(*parent) {
+                    Mat4::IDENTITY
+                } else {
+                    let model = catalog.get(*parent).and_then(|o| o.model).expect("a hard point's model was read above");
+                    *nodes[&model].get(&l.hard_point).ok_or_else(|| format!("model 0x{model:08X}: no node 0x{:08X}", l.hard_point))?
+                };
+                out = out * node * transform(l.pos, l.quat);
+            }
+            Ok(out)
+        };
+        for e in entities.values() {
+            let child = incoming.get(&e.key);
+            *flags.entry((e.flags, child.is_some())).or_default() += 1;
+            let Some(&at) = live.get(&e.key) else {
+                not_held += 1;
+                continue;
+            };
+            held += 1;
+            let stored = (at - Vec3::from(e.pos)).length();
+            let name = entity_names.get(&e.key);
+            if child.is_some() {
+                let (_, _, translation) = resolved(e.key, &|p| awake.contains(&p))?.to_scale_rotation_translation();
+                let (_, _, with_nodes) = resolved(e.key, &|_| true)?.to_scale_rotation_translation();
+                let linked = (at - translation).length().min((at - with_nodes).length());
+                child_stored[bucket(stored)] += 1;
+                child_linked[bucket(linked)] += 1;
+                if linked > 0.1 {
+                    child_misses.push(format!("0x{h:08X} 0x{:08X} {name:?} live {at} stored {:?} linked {translation} off by {linked:.3}", e.key, e.pos));
+                }
+            } else {
+                rest_stored[bucket(stored)] += 1;
+                if stored > 0.1 {
+                    rest_misses.push(format!("0x{h:08X} 0x{:08X} {name:?} live {at} stored {:?} off by {stored:.3}", e.key, e.pos));
+                }
+            }
+        }
+    }
+    println!("{held} placed entities held by the capture, {not_held} not; {two_parents} children of two parents");
+    println!("bucket upper bounds, metres: {BUCKETS:?} and beyond");
+    println!("link children, live against Transform:        {child_stored:?}");
+    println!("link children, live against the link's chain: {child_linked:?}");
+    println!("every other entity, live against Transform:   {rest_stored:?}");
+    println!("flag words (value, is a link child): {flags:04X?}");
+    println!("{} link children off the chain by more than 0.1 m:", child_misses.len());
+    for l in &child_misses {
+        println!("  {l}");
+    }
+    println!("{} other entities off their Transform by more than 0.1 m:", rest_misses.len());
+    for l in &rest_misses {
+        println!("  {l}");
+    }
+    Ok(())
 }
