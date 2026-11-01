@@ -142,6 +142,32 @@ pub fn decompress_be_sges(data: &[u8], offset: usize, max_size: usize) -> Result
     crate::sges::decompress_sges(&data[offset..end])
 }
 
+/// The decompressed bytes of one block of a big-endian archive: a `segs` block, or a bare `XFCU`
+/// entry table without its trailing page padding.
+pub fn read_be_block(doh: &[u8], e: &IndxEntry) -> Result<Vec<u8>, String> {
+    let start = e.file_offset();
+    if start + 4 > doh.len() {
+        return Err(format!("offset {start} is past the container"));
+    }
+    let slice = &doh[start..(start + e.page_count as usize * PAGE_SIZE).min(doh.len())];
+    if slice.len() >= 4 && &slice[..4] == SEGS_MAGIC {
+        return decompress_be_sges(slice, 0, slice.len()).map_err(|err| format!("sges: {err}"));
+    }
+    if slice.len() < 8 {
+        return Err(format!("{} bytes, too short for a block", slice.len()));
+    }
+    let rec = read_u32_be(slice, 0) as usize;
+    let header_end = 4 + rec * 16;
+    if rec == 0 || rec >= 5000 || slice.get(header_end..header_end + 4) != Some(b"XFCU") {
+        return Err(format!("neither segs nor an XFCU entry table ({rec} records)"));
+    }
+    let mut z = slice.len();
+    while z > 4 && slice[z - 1] == 0 {
+        z -= 1;
+    }
+    Ok(slice[..(z + 3) & !3].to_vec())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
