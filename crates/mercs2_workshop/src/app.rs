@@ -658,7 +658,7 @@ impl Preview {
         let speed = self.rotor_speed();
         let mut rotors: Vec<_> = self.rotors.iter().map(|(c, _)| *c).collect();
         let (node_enable, events) =
-            node_enable_with_rotors(self.machine.as_ref(), &self.hier_nodes, &self.node_state, &mut rotors, speed)?;
+            node_enable_with_rotors(self.machine.as_ref(), &self.hier_nodes, &self.node_state, &mut rotors, speed, &Default::default())?;
         for ((c, _), r) in self.rotors.iter_mut().zip(rotors) {
             c.killed = r.killed;
         }
@@ -688,18 +688,20 @@ impl Preview {
 /// The node-enable table of a model whose destruction machine stands in `node_state`, with `rotors`
 /// at rotor `speed` over it: the machine's records, each rotor latched by the machine's controller
 /// events and recording its blur and blade nodes, rebuilt as `FUN_004727B0` does; and those events.
+/// `template` is the entity's `OSMStateParameter` records, empty for a model shown on its own.
 /// A model with neither a machine nor rotors gets no table, which passes clause 3 for every segment.
-fn node_enable_with_rotors(
+pub(crate) fn node_enable_with_rotors(
     machine: Option<&mercs2_formats::orchestrator::StateMachine>,
     hier: &[mercs2_formats::orchestrator::HierNode],
     node_state: &[usize],
     rotors: &mut [mercs2_engine::vehicle::rotor::RotorController],
     speed: f32,
+    template: &mercs2_formats::orchestrator::TemplateStates,
 ) -> Result<(Vec<bool>, Vec<(u32, u32)>), String> {
     use mercs2_formats::orchestrator as orch;
     let (mut records, events) = match machine {
         Some(sm) => {
-            let run = orch::machine_run(sm, hier, node_state)?;
+            let run = orch::machine_run_in(sm, hier, node_state, template)?;
             (run.records, run.controller_events)
         }
         None if rotors.is_empty() => return Ok((Vec::new(), Vec::new())),
@@ -852,6 +854,10 @@ enum Act {
     FaceHold(Option<String>),
     /// Pause the FaceFX set's playing anim at this time (seconds).
     FaceTime(f32),
+    /// Select the entity of the open layer with this label (the `entity` capture key).
+    LayerEntity(String),
+    /// Frame the whole open layer.
+    LayerFrame,
     /// Stop the FaceFX set's playing anim: the face goes to rest and its line ends.
     FaceStop,
     /// Open the hero picker for the clip the Anims tab shows.
@@ -1373,19 +1379,24 @@ fn model_subject(index: &AssetIndex, hash: u32, label: &str) -> crate::quarterma
 /// only be switched on (`activate_layer`) or have its placements moved (`edit_world`). Both route the
 /// layer by NAME through the same `Act::AddToShipment` path assets use — `seeded` seeds the layer
 /// field from the label, so the resulting contribution names this exact layer.
-fn layer_menu(ui: &mut egui::Ui, hash: u32, label: &str, actions: &mut Vec<Act>) {
+///
+/// A layer known only by its hash has no routes: neither the path search nor `MarkForAddition` can
+/// resolve a hash.
+fn layer_menu(ui: &mut egui::Ui, hash: u32, label: &str, named: bool, actions: &mut Vec<Act>) {
     use crate::gui::theme;
     ui.label(theme::disp_text(label.to_uppercase(), theme::style_eyebrow(), theme::BRASS));
     ui.separator();
-    ui.menu_button("Add to Shipment", |ui| {
-        for (kind, what) in crate::quartermaster::routes_for_layer() {
-            if ui.button(*what).clicked() {
-                actions.push(Act::AddToShipment(kind, hash, label.to_string()));
-                ui.close_menu();
+    if named {
+        ui.menu_button("Add to Shipment", |ui| {
+            for (kind, what) in crate::quartermaster::routes_for_layer() {
+                if ui.button(*what).clicked() {
+                    actions.push(Act::AddToShipment(kind, hash, label.to_string()));
+                    ui.close_menu();
+                }
             }
-        }
-    });
-    ui.separator();
+        });
+        ui.separator();
+    }
     if ui.button("Copy name").clicked() {
         ui.ctx().copy_text(label.to_string());
         ui.close_menu();
@@ -1971,6 +1982,13 @@ pub fn run(opts: Options) {
     // FaceFX on the preview, opened from the FaceFX tab, and the wavebank clips by hash its takes'
     // voice lines are found by (read on a worker the first time a take plays).
     let mut face: Option<FacePlay> = None;
+    // The layer open in the viewport, and the world's templates it reads, built the first time one
+    // opens.
+    let mut layer_view: Option<crate::layerview::LayerView> = None;
+    let mut layer_templates: Option<Result<crate::layerview::Templates, String>> = None;
+    // A click on the viewport that did not drag: where it was pressed, and the click to pick with.
+    let mut viewport_press: Option<(f64, f64)> = None;
+    let mut viewport_click: Option<(f64, f64)> = None;
     // Whether a take goes back to its start at its end (the card's Repeat); kept across takes.
     let mut face_repeat = false;
     // Who speaks each set, read the first time a set opens.
@@ -2003,6 +2021,9 @@ pub fn run(opts: Options) {
     // A `--ui-state` that opened a string table: its capture (path, settle frames), taken once the
     // tables have read.
     let mut text_ui: Option<(PathBuf, u32)> = None;
+    // A `--ui-state` that opened a layer: its capture (path, settle frames), taken once its models
+    // have loaded.
+    let mut layer_ui: Option<(PathBuf, u32)> = None;
     // A `--ui-state` that opened a clip: (capture, settle frames, clip, on a hero, frames waited).
     let mut anim_ui: Option<(PathBuf, u32, u32, bool, u32)> = None;
     let mut capture_to: Option<(PathBuf, u32)> = None;
@@ -2015,6 +2036,9 @@ pub fn run(opts: Options) {
     // The Text tab's string tables: read on a worker the first time a table is opened.
     let mut text_page = crate::textpage::Panel::default();
     let mut text_acts: Vec<crate::textpage::Act> = Vec::new();
+    // The Layers tab's inspector acts, and the window's size in points the viewport is projected to.
+    let mut layer_acts: Vec<crate::layerview::LayerAct> = Vec::new();
+    let mut layer_screen = egui::vec2(1.0, 1.0);
     // Ctrl (or Cmd) held: the Audio tab's select-all.
     let mut ctrl = false;
     // VO playback, both opened LAZILY on the first ▶ (English.wad + the output device are heavy, and
@@ -2123,6 +2147,11 @@ pub fn run(opts: Options) {
                 }
                 WindowEvent::MouseInput { state, button: MouseButton::Left, .. } => {
                     lmb = state == ElementState::Pressed;
+                    if lmb {
+                        viewport_press = last_cursor;
+                    } else if let Some(p) = viewport_press.take() {
+                        viewport_click = last_cursor.filter(|c| (c.0 - p.0).hypot(c.1 - p.1) < 4.0);
+                    }
                 }
                 WindowEvent::CursorMoved { position, .. } => {
                     // Absolute-position deltas (no cursor grab): works with normal mice AND
@@ -2349,6 +2378,10 @@ pub fn run(opts: Options) {
                             face_cast = None;
                             voices = None;
                             voice_error = None;
+                            if let Some(v) = layer_view.take() {
+                                v.teardown(&mut scene, &mut world, &[]);
+                            }
+                            layer_templates = None;
                             w = WadStack::empty();
                             index = AssetIndex::build(&[], &[], HashMap::new());
                             anim_sel = None;
@@ -2937,6 +2970,7 @@ pub fn run(opts: Options) {
                     if let Some(st) = ui_state.take() {
                         // The state opens a string table, which reads on a worker before the capture.
                         let mut waits_on_text = false;
+                        let mut waits_on_layer = false;
                         // The state opens a clip: (its hash, whether a hero plays it) — the capture waits
                         // for the clip's load on the hero, or for the picker's skeletons.
                         let mut waits_on_clip: Option<(u32, bool)> = None;
@@ -2993,6 +3027,7 @@ pub fn run(opts: Options) {
                                     sel = vi;
                                     actions.push(Act::LoadRow(vi));
                                     waits_on_text = rows[filtered[vi]].type_id == mercs2_formats::types::TYPE_ID_STRINGDB;
+                                    waits_on_layer = kind == Kind::Layer;
                                     if kind == Kind::Animation {
                                         waits_on_clip = Some((rows[filtered[vi]].hash, hero.is_some()));
                                     }
@@ -3003,6 +3038,9 @@ pub fn run(opts: Options) {
                             }
                             if let Some(t) = st.face_time {
                                 actions.push(Act::FaceTime(t));
+                            }
+                            if let Some(n) = &st.entity {
+                                actions.push(Act::LayerEntity(n.clone()));
                             }
                             if let Some(dir) = &st.shipment {
                                 qm.open_shipment(dir, qm_names.as_ref());
@@ -3052,6 +3090,9 @@ pub fn run(opts: Options) {
                         } else if waits_on_text {
                             // A string table reads on a worker; the capture waits for it.
                             text_ui = Some((st.capture.clone(), st.settle_frames));
+                        } else if waits_on_layer {
+                            // A layer's models load over frames; the capture waits for them.
+                            layer_ui = Some((st.capture.clone(), st.settle_frames));
                         } else if let Some((clip, on_hero)) = waits_on_clip {
                             anim_ui = Some((st.capture.clone(), st.settle_frames, clip, on_hero, 0));
                         } else {
@@ -3087,6 +3128,12 @@ pub fn run(opts: Options) {
                         if text_page.tables().is_some() {
                             capture_to = Some((to.clone(), *settle));
                             text_ui = None;
+                        }
+                    }
+                    if let Some((to, settle)) = &layer_ui {
+                        if layer_view.as_ref().is_some_and(|v| !v.is_loading()) {
+                            capture_to = Some((to.clone(), *settle));
+                            layer_ui = None;
                         }
                     }
                     if let Some((to, settle, at)) = &reload_capture {
@@ -3859,7 +3906,7 @@ pub fn run(opts: Options) {
                                             // A layer is a set of placements you switch on or move,
                                             // not an asset you preview or donate.
                                             if kind == Kind::Layer {
-                                                layer_menu(ui, hash, &label, &mut actions);
+                                                layer_menu(ui, hash, &label, r.name.is_some(), &mut actions);
                                                 return;
                                             }
                                             // ONE menu, shared with the inspector heading — the
@@ -4269,7 +4316,14 @@ pub fn run(opts: Options) {
                                       text_acts.extend(crate::textpage::inspector(ui, &text_page));
                                   }
                               }
-                              if eff.inspect_like() && !is_missions_bench && !audio_tab && !text_tab {
+                              // The Layers tab with a layer open.
+                              let layer_tab = eff == Workbench::Inspect && kind == Kind::Layer && layer_view.is_some();
+                              if layer_tab {
+                                  if let Some(v) = &mut layer_view {
+                                      layer_acts.extend(crate::layerview::inspector(ui, v, &index));
+                                  }
+                              }
+                              if eff.inspect_like() && !is_missions_bench && !audio_tab && !text_tab && !layer_tab {
                                 match &mut preview {
                                     None => {
                                         ui.weak("No model loaded — pick one in the browser at left.");
@@ -5892,6 +5946,11 @@ pub fn run(opts: Options) {
                                         let playing = vo_player.as_ref().and_then(|p| p.status());
                                         audio_acts.extend(crate::audiopage::verbs(ui, &audio_page, playing));
                                     }
+                                    Workbench::Inspect if kind == Kind::Layer => {
+                                        if ui.add_enabled(layer_view.is_some(), egui::Button::new("Frame layer")).clicked() {
+                                            actions.push(Act::LayerFrame);
+                                        }
+                                    }
                                     // A domain page shares Inspect's verbs — it is Inspect narrowed to
                                     // a lens, so Export / textures / clip act on the same loaded
                                     // model. (For a non-model domain there is no preview, so these
@@ -6382,6 +6441,14 @@ pub fn run(opts: Options) {
                         // than as `!= Quartermaster`, which silently stopped being the whole answer
                         // the moment Settings also took the centre.
                         let vp = ctx.available_rect();
+                        layer_screen = ctx.screen_rect().size();
+                        if let (Some(v), None) = (&layer_view, &tex_view) {
+                            if eff.has_viewport() && wb != Workbench::Settings && !audio_tab && !text_tab {
+                                let eye = cam_target - dir_from(cam_yaw, cam_pitch) * cam_dist;
+                                let aspect = layer_screen.x / layer_screen.y.max(1.0);
+                                crate::layerview::overlay(ctx, v, crate::layerview::view_proj(eye, cam_target, aspect), vp);
+                            }
+                        }
                         if eff.has_viewport() && wb != Workbench::Settings && !audio_tab && !text_tab {
                         egui::Area::new(egui::Id::new("vp_hud"))
                             .fixed_pos(vp.left_top() + egui::vec2(14.0, 12.0))
@@ -6389,6 +6456,10 @@ pub fn run(opts: Options) {
                             .show(ctx, |ui| {
                                 ui.horizontal(|ui| {
                                     theme::chip(ui, "Orbit", true, Some(theme::BRASS));
+                                    if let Some(v) = layer_view.as_ref().filter(|v| v.is_loading()) {
+                                        let (done, all) = v.progress();
+                                        theme::chip(ui, &format!("loading {done}/{all}"), false, None);
+                                    }
                                     if let Some(p) = &preview {
                                         // Clip position — name (or bind pose) + n/total + play state.
                                         let n = p.clip_catalog.len();
@@ -7528,6 +7599,42 @@ pub fn run(opts: Options) {
                                             Err(e) => status = format!("FONT FAILED: {label}: {e}"),
                                         }
                                     }
+                                    // A layer: every entity where the layer places it, its models loading
+                                    // over the next frames.
+                                    Kind::Layer => {
+                                        let (hash, label, src) = (row.hash, row.label(), row.src);
+                                        let block = w
+                                            .source_mut(src)
+                                            .and_then(|x| wad::aset_types(x, hash).into_iter().find(|(ty, _, _)| *ty == mercs2_formats::types::TYPE_ID_LAYER))
+                                            .map_or(0, |(_, _, b)| b);
+                                        let templates = layer_templates.get_or_insert_with(|| crate::layerview::Templates::read(&mut w));
+                                        let opened = match templates {
+                                            Ok(t) => w
+                                                .typed_container(mercs2_formats::types::TYPE_HASH_LAYER, hash)
+                                                .and_then(|c| crate::layerview::LayerView::read(hash, label.clone(), block, &c, t)),
+                                            Err(e) => Err(format!("the world's templates: {e}")),
+                                        };
+                                        match opened {
+                                            Ok(v) => {
+                                                if let Some(old) = layer_view.take() {
+                                                    old.teardown(&mut scene, &mut world, &[]);
+                                                }
+                                                if let Some(p) = preview.take() {
+                                                    world.despawn(p.entity).ok();
+                                                    scene.forget_entity(p.entity);
+                                                    if donor_ref.map(|(h, _)| h) != Some(p.hash) {
+                                                        scene.unload_model(p.hash);
+                                                    }
+                                                }
+                                                face = None;
+                                                tex_view = None;
+                                                (cam_target, cam_dist) = v.framing();
+                                                status = format!("layer {label}: {} entities, {} models", v.entities.len(), v.models.len());
+                                                layer_view = Some(v);
+                                            }
+                                            Err(e) => status = format!("LAYER FAILED: {label}: {e}"),
+                                        }
+                                    }
                                     // A category with no faithful preview SAYS so rather than silently doing
                                     // nothing. It is browsable, and that is the honest state of it — the
                                     // standing rule against affordances that look like they work.
@@ -7623,6 +7730,22 @@ pub fn run(opts: Options) {
                                     if let Some(p) = preview.as_mut().filter(|p| p.hash == f.model && p.cur_clip.is_none()) {
                                         p.playing = false;
                                     }
+                                }
+                            }
+                            Act::LayerEntity(name) => {
+                                let at = layer_view.as_ref().and_then(|v| v.entities.iter().position(|e| e.label() == name));
+                                match at {
+                                    Some(i) => layer_acts.push(crate::layerview::LayerAct::Select(i)),
+                                    None => {
+                                        eprintln!("--ui-state: no entity named {name:?} in the open layer");
+                                        std::process::exit(2);
+                                    }
+                                }
+                            }
+                            Act::LayerFrame => {
+                                if let Some(v) = &mut layer_view {
+                                    v.selected = None;
+                                    (cam_target, cam_dist) = v.framing();
                                 }
                             }
                             // Pause at a time of the playing anim (the `face_time` capture key).
@@ -8510,6 +8633,39 @@ pub fn run(opts: Options) {
                     // highlighted bone reads through it; fully opaque otherwise.
                     scene.set_model_alpha(if hover_skel.is_some() || hovered_bone.is_some() { 0.4 } else { 1.0 });
 
+                    // ── The open layer: a model opened since leaves it, its row's picks and framing
+                    // apply, and its models load a few a frame. ──
+                    if preview.is_some() {
+                        if let Some(v) = layer_view.take() {
+                            let keep: Vec<u32> = preview.iter().map(|p| p.hash).chain(donor_ref.map(|(h, _)| h)).collect();
+                            v.teardown(&mut scene, &mut world, &keep);
+                        }
+                    }
+                    let picked = viewport_click.take();
+                    if let Some(v) = &mut layer_view {
+                        let fwd = dir_from(cam_yaw, cam_pitch);
+                        let eye = cam_target - fwd * cam_dist;
+                        let aspect = scene.size.width as f32 / scene.size.height.max(1) as f32;
+                        let vp = crate::layerview::view_proj(eye, cam_target, aspect);
+                        if let Some((x, y)) = picked.filter(|_| tex_view.is_none()) {
+                            let ppp = scene.size.width as f32 / layer_screen.x.max(1.0);
+                            if let Some(i) = crate::layerview::pick(&v.entities, vp, layer_screen, egui::pos2(x as f32 / ppp, y as f32 / ppp)) {
+                                v.selected = Some(i);
+                                v.follow = true;
+                            }
+                        }
+                        for a in layer_acts.drain(..) {
+                            let crate::layerview::LayerAct::Select(i) = a;
+                            v.selected = Some(i);
+                            if let Some((c, d)) = v.entity_framing(i) {
+                                cam_target = c;
+                                cam_dist = d;
+                            }
+                        }
+                        if let Some(Ok(t)) = &layer_templates {
+                            v.step(&mut w, &mut scene, &mut world, t, &index);
+                        }
+                    }
                     // ── Session log: record `status` whenever it CHANGED this frame. Runs after the
                     // action processor, so a click and the outcome it produced land on one line.
                     if status != last_status {
@@ -8540,7 +8696,7 @@ pub fn run(opts: Options) {
                             capture_asked = true;
                         }
                     }
-                    let r = if tex_view.is_some() || (preview.is_none() && donor_ref.is_none()) {
+                    let r = if tex_view.is_some() || (preview.is_none() && donor_ref.is_none() && layer_view.is_none()) {
                         scene.render_menu_with(t, Some(&mut overlay))
                     } else {
                         let fwd = dir_from(cam_yaw, cam_pitch);
@@ -8958,14 +9114,14 @@ pub(crate) struct ModelData {
     /// docs/destruction_orchestrator_format.md. None = non-destructible. Together with
     /// `hier_nodes` + `indx` it drives GROUND-TRUTH group visibility (no heuristics): break
     /// pieces hide because the entered state's script says so.
-    machine: Option<mercs2_formats::orchestrator::StateMachine>,
-    hier_nodes: Vec<mercs2_formats::orchestrator::HierNode>,
+    pub(crate) machine: Option<mercs2_formats::orchestrator::StateMachine>,
+    pub(crate) hier_nodes: Vec<mercs2_formats::orchestrator::HierNode>,
     indx: Vec<usize>,
     /// The container's top-level model header (authored AABB, node count, LOD-level count, LOD
     /// distance) — the per-model data the engine's LOD selector reads. `None` for imports. This is
     /// what makes the workshop AWARE of the model instead of assuming one global rule; the authored
     /// AABB frames the camera correctly (break-piece anchors no longer inflate the radius).
-    header: Option<mercs2_formats::model_cubeize::ModelHeader>,
+    pub(crate) header: Option<mercs2_formats::model_cubeize::ModelHeader>,
 }
 
 impl From<crate::import::Imported> for ModelData {
@@ -9184,7 +9340,7 @@ pub(crate) fn default_render_state(w: &mut WadStack, hash: u32) -> mercs2_engine
         .iter()
         .map(mercs2_engine::vehicle::rotor::RotorController::new)
         .collect();
-    let (node_enable, _) = node_enable_with_rotors(sm.as_ref(), &hier, &chosen, &mut rotors, 0.0)
+    let (node_enable, _) = node_enable_with_rotors(sm.as_ref(), &hier, &chosen, &mut rotors, 0.0, &Default::default())
         .unwrap_or_else(|e| panic!("model 0x{hash:08X}: {e}"));
     mercs2_engine::render_state::RenderState { lod: 0, view_state: 0x01, node_enable }
 }
