@@ -499,9 +499,8 @@ pub fn build_patch_wad_multi(
     // a patch has tens. The engine then reads INDX out of range, decodes whatever bytes sit there as
     // a page index + `packed_field`, and can size a streaming buffer at hundreds of gigabytes. That
     // request can never be satisfied (`FUN_00875b00` only issues when the declared size fits the
-    // largest free run), so the node never reaches provider-status 4, `Stream_Manager_Tick`
-    // (`FUN_008739e0`) unlinks only on 4, the pending count never drains, and world streaming hangs
-    // with no crash and no error. Every WAD that LOADS has zero dangling rungs (measured: retail base
+    // largest free run), so the node stays pending and is retried forever, the pending count never
+    // drains, and world streaming hangs with no crash and no error. Every WAD that LOADS has zero dangling rungs (measured: retail base
     // `vz.wad` 30645 rows; our working dlc01 port patch 5451 rows) while both wardrobe builds that
     // hang carry 22 — `aset_refcheck` enforces this.
     //
@@ -918,9 +917,8 @@ mod tests {
     /// retail base `vz.wad` (30645 rows) and our WORKING dlc01 port patch (5451 rows) have ZERO.
     /// (There is no Pandemic-shipped `vz-patch.wad`; every vz-patch is one of ours.) The engine then
     /// reads INDX out of range, decodes whatever bytes sit there as a page index + `packed_field`,
-    /// and sizes a streaming buffer it can never satisfy — so the node never reaches provider-status
-    /// 4, `Stream_Manager_Tick` (`FUN_008739e0`) unlinks only on 4, the pending count never drains,
-    /// and world streaming hangs with no crash. Byte-parity on those fields is a bug-for-bug
+    /// and sizes a streaming buffer it can never satisfy — so the node stays pending, the pending
+    /// count never drains, and world streaming hangs with no crash. Byte-parity on those fields is a bug-for-bug
     /// guarantee, so it is dropped on purpose; `aset_refcheck` is the gate for the correct shape.
     #[test]
     fn python_parity_on_framing_and_lod_rungs_never_dangle() {
