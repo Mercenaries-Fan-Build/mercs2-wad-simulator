@@ -124,9 +124,7 @@ impl Kind {
             Kind::UiGfx => Preview::None("no Scaleform renderer in the workshop"),
             Kind::FaceFx => Preview::View("an actor shows its face poses; a set plays on the character it belongs to"),
             Kind::Text => Preview::View("a string table opens every table side by side; a font, its pages and glyphs"),
-            Kind::Layer => Preview::None(
-                "a layer is a placement set — browse it, then edit_world / activate_layer",
-            ),
+            Kind::Layer => Preview::View("every entity of the layer, where the layer places it"),
         }
     }
 }
