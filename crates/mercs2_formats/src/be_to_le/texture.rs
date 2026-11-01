@@ -279,8 +279,8 @@ pub fn container_rows(container: &[u8]) -> Result<Vec<ChunkRow>, String> {
         .collect()
 }
 
-/// The texture chunks of a big-endian block, `(hash, chunk bytes)`.
-pub fn texture_chunks(block: &[u8]) -> Result<Vec<(u32, &[u8])>, String> {
+/// The chunks of type `ty` in a big-endian block, `(hash, chunk bytes)`.
+pub fn typed_chunks(block: &[u8], ty: u32) -> Result<Vec<(u32, &[u8])>, String> {
     let word = |o: usize| block.get(o..o + 4).map(|s| u32::from_be_bytes([s[0], s[1], s[2], s[3]])).ok_or("block table is short");
     let n = word(0)? as usize;
     let (mut off, mut out) = (4 + n * 16, Vec::new());
@@ -288,12 +288,17 @@ pub fn texture_chunks(block: &[u8]) -> Result<Vec<(u32, &[u8])>, String> {
         let r = 4 + i * 16;
         let size = word(r + 12)? as usize;
         let chunk = block.get(off..off + size).ok_or_else(|| format!("chunk {i} runs past the block"))?;
-        if word(r + 4)? == TYPE_HASH_TEXTURE {
+        if word(r + 4)? == ty {
             out.push((word(r)?, chunk));
         }
         off += size;
     }
     Ok(out)
+}
+
+/// The texture chunks of a big-endian block, `(hash, chunk bytes)`.
+pub fn texture_chunks(block: &[u8]) -> Result<Vec<(u32, &[u8])>, String> {
+    typed_chunks(block, TYPE_HASH_TEXTURE)
 }
 
 fn row_bytes<'a>(chunk: &'a [u8], tag: &[u8; 4]) -> Result<Option<&'a [u8]>, String> {
@@ -442,12 +447,14 @@ impl TextureTable {
     }
 }
 
-/// What [`super::convert::convert_block`] needs for the textures of one block.
+/// What [`super::convert::convert_block`] needs from the whole archive for one block.
 #[derive(Clone, Copy)]
-pub struct BlockTextures<'a> {
-    pub table: &'a TextureTable,
+pub struct BlockTables<'a> {
+    pub textures: &'a TextureTable,
     /// The rung the block's path names.
     pub rung: Option<usize>,
+    /// The archive's streamed banks. A big-endian streamed bank errors without one.
+    pub streams: Option<&'a super::audio::StreamTable>,
 }
 
 /// Untile a whole tiled DXT chain, every mip in one body.
