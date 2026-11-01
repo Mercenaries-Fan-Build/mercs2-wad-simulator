@@ -35,6 +35,8 @@ pub struct UiState {
     pub face_pose: Option<String>,
     /// On the FACEFX tab: the time (seconds) to pause the opened set's first anim at.
     pub face_time: Option<f32>,
+    /// On the EFFECTS tab: the time (seconds) to run the opened effect to and pause at.
+    pub fx_time: Option<f32>,
     /// On the WORLD LAYERS tab: the entity of the opened layer to select and frame, by its label.
     pub entity: Option<String>,
     /// A Shipment folder to open.
@@ -81,6 +83,9 @@ impl UiState {
         }
         if st.entity.is_some() && !(st.load.is_some() && st.tab.as_deref().is_some_and(|t| t.eq_ignore_ascii_case("WORLD LAYERS"))) {
             return Err(format!("{}: `entity` needs `\"tab\": \"WORLD LAYERS\"` and a `load`", path.display()));
+        }
+        if st.fx_time.is_some() && !(st.load.is_some() && st.tab.as_deref().is_some_and(|t| t.eq_ignore_ascii_case("EFFECTS"))) {
+            return Err(format!("{}: `fx_time` needs `\"tab\": \"EFFECTS\"` and a `load`", path.display()));
         }
         let facefx_load = st.load.is_some() && st.tab.as_deref().is_some_and(|t| t.eq_ignore_ascii_case("FACEFX"));
         for (key, set) in [("face_pose", st.face_pose.is_some()), ("face_time", st.face_time.is_some())] {
@@ -167,6 +172,10 @@ mod tests {
         assert!(UiState::load(&p).unwrap_err().contains("face_time"));
         let p = write("face_time_ok.json", r#"{ "tab": "FACEFX", "load": "Global_Job_Briefing_Mattias", "face_time": 0.5, "capture": "out.png" }"#);
         assert_eq!(UiState::load(&p).unwrap().face_time, Some(0.5));
+        let p = write("fx_time_tab.json", r#"{ "load": "global_explosion_c4", "fx_time": 0.5, "capture": "out.png" }"#);
+        assert!(UiState::load(&p).unwrap_err().contains("fx_time"));
+        let p = write("fx_time_ok.json", r#"{ "tab": "EFFECTS", "load": "global_explosion_c4", "fx_time": 0.5, "capture": "out.png" }"#);
+        assert_eq!(UiState::load(&p).unwrap().fx_time, Some(0.5));
     }
 
     #[test]
