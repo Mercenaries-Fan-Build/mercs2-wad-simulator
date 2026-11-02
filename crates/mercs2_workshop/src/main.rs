@@ -133,19 +133,20 @@ fn main() {
     // Probe: can wgpu get ANY adapter here (real GPU or software fallback)? Decides whether an
     // offscreen render can run in this environment at all.
     if args.iter().any(|a| a == "--gpu-check") {
-        let instance = wgpu::Instance::default();
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
         for fb in [false, true] {
             let a = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
                 power_preference: wgpu::PowerPreference::HighPerformance,
                 compatible_surface: None,
                 force_fallback_adapter: fb,
+                apply_limit_buckets: false,
             }));
             match a {
-                Some(a) => {
+                Ok(a) => {
                     let i = a.get_info();
                     println!("adapter(fallback={fb}): {} type={:?} backend={:?}", i.name, i.device_type, i.backend);
                 }
-                None => println!("adapter(fallback={fb}): NONE"),
+                Err(e) => println!("adapter(fallback={fb}): NONE ({e})"),
             }
         }
         return;
