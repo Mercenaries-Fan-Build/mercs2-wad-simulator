@@ -184,9 +184,9 @@ pub struct WorldData {
 const LOAD_PHASES: &[&str] = &[
     "terrain", "heightmap", "vertices", "player", "clips", "population units", "cells", "placements", "interior", "props",
     "interior props", "lights + fx", "watermap", "resident audio", "hero spawn",
-    // The streaming-world build (`load_streaming_world_data`) steps these four itself — the K2
-    // executor's block index + Layer-2 catalog, produced on this same load thread.
-    "stream blocks", "stream terrain", "stream index", "stream catalog",
+    // The streaming-world build (`load_streaming_world_data`) steps these five itself — the K2
+    // executor's block index + Layer-2 catalog, and the trees, produced on this same load thread.
+    "stream blocks", "stream terrain", "stream index", "stream catalog", "stream foliage",
 ];
 pub(crate) const LOAD_STAGES: u32 = LOAD_PHASES.len() as u32;
 
