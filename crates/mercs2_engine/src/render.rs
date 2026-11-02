@@ -96,14 +96,14 @@ pub fn make_bc_view(
             let bh = (h + 3) / 4;
             let sz = (bw * block_bytes * bh) as usize;
             queue.write_texture(
-                wgpu::ImageCopyTexture {
+                wgpu::TexelCopyTextureInfo {
                     texture: &tex,
                     mip_level: l,
                     origin: wgpu::Origin3d::ZERO,
                     aspect: wgpu::TextureAspect::All,
                 },
                 &td.all_mips[off..off + sz],
-                wgpu::ImageDataLayout {
+                wgpu::TexelCopyBufferLayout {
                     offset: 0,
                     bytes_per_row: Some(bw * block_bytes),
                     rows_per_image: Some(bh),
@@ -144,14 +144,14 @@ pub fn make_bc_view(
         view_formats: &[],
     });
     queue.write_texture(
-        wgpu::ImageCopyTexture {
+        wgpu::TexelCopyTextureInfo {
             texture: &tex,
             mip_level: 0,
             origin: wgpu::Origin3d::ZERO,
             aspect: wgpu::TextureAspect::All,
         },
         &td.all_mips[..base_bytes],
-        wgpu::ImageDataLayout {
+        wgpu::TexelCopyBufferLayout {
             offset: 0,
             bytes_per_row: Some(blocks_wide * block_bytes),
             rows_per_image: Some(blocks_high),
@@ -347,7 +347,7 @@ fn params_buffer(
         usage: wgpu::BufferUsages::UNIFORM,
         mapped_at_creation: true,
     });
-    buf.slice(..).get_mapped_range_mut().copy_from_slice(bytemuck::cast_slice(&data));
+    buf.slice(..).get_mapped_range_mut().expect("material params are mapped at creation").copy_from_slice(bytemuck::cast_slice(&data));
     buf.unmap();
     buf
 }
@@ -443,14 +443,14 @@ pub fn make_flat_normal_view(device: &wgpu::Device, queue: &wgpu::Queue) -> wgpu
         view_formats: &[],
     });
     queue.write_texture(
-        wgpu::ImageCopyTexture {
+        wgpu::TexelCopyTextureInfo {
             texture: &tex,
             mip_level: 0,
             origin: wgpu::Origin3d::ZERO,
             aspect: wgpu::TextureAspect::All,
         },
         &[128u8, 128, 255, 128], // green=128 (Y=0), alpha=128 (X=0) -> flat (0,0,1)
-        wgpu::ImageDataLayout {
+        wgpu::TexelCopyBufferLayout {
             offset: 0,
             bytes_per_row: Some(4),
             rows_per_image: Some(1),
@@ -478,14 +478,14 @@ pub fn make_black_view(device: &wgpu::Device, queue: &wgpu::Queue) -> wgpu::Text
         view_formats: &[],
     });
     queue.write_texture(
-        wgpu::ImageCopyTexture {
+        wgpu::TexelCopyTextureInfo {
             texture: &tex,
             mip_level: 0,
             origin: wgpu::Origin3d::ZERO,
             aspect: wgpu::TextureAspect::All,
         },
         &[0u8, 0, 0, 0],
-        wgpu::ImageDataLayout { offset: 0, bytes_per_row: Some(4), rows_per_image: Some(1) },
+        wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(4), rows_per_image: Some(1) },
         wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
     );
     tex.create_view(&wgpu::TextureViewDescriptor::default())
@@ -508,14 +508,14 @@ pub fn make_white_view(device: &wgpu::Device, queue: &wgpu::Queue) -> wgpu::Text
         view_formats: &[],
     });
     queue.write_texture(
-        wgpu::ImageCopyTexture {
+        wgpu::TexelCopyTextureInfo {
             texture: &tex,
             mip_level: 0,
             origin: wgpu::Origin3d::ZERO,
             aspect: wgpu::TextureAspect::All,
         },
         &[255u8, 255, 255, 255],
-        wgpu::ImageDataLayout {
+        wgpu::TexelCopyBufferLayout {
             offset: 0,
             bytes_per_row: Some(4),
             rows_per_image: Some(1),
