@@ -1808,9 +1808,11 @@ impl mercs2_engine::app::Game for Mercs2Game {
                         "local __f = function() {} end\nlocal __ok, __r = pcall(__f)\nif not __ok then error(__r, 0) end\nreturn tostring(__r)",
                         req.chunk()
                     );
+                    // Framed as the bridge frames it (`mercs2_formats::lua_exec`), so a client reads one
+                    // format from either host.
                     match sh.eval::<String>(&wrapped) {
-                        Ok(s) => s,
-                        Err(e) => format!("error: {e}"),
+                        Ok(s) => format!("[ok]\t\"{s}\""),
+                        Err(e) => format!("[runtime] \"{e}\""),
                     }
                 }
                 None => "<no script host loaded>".to_string(),
