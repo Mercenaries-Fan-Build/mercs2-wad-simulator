@@ -776,6 +776,16 @@ impl GameScriptHost {
         std::mem::take(&mut self.pending_game_states)
     }
 
+    /// The widget tree the scripts drive.
+    pub fn widgets(&mut self) -> &mut crate::widgets::WidgetTree {
+        &mut self.hud
+    }
+
+    /// Whether a script called `Sys.StartSingleplayer`.
+    pub fn singleplayer_started(&self) -> bool {
+        self.settings.singleplayer
+    }
+
     /// The hero spawn position the game's Lua requested via `MrxUtil._TeleportHero`, if any. The boot
     /// places the player here — the spawn is Lua-authored (no engine-constant fallback).
     pub fn take_hero_teleport(&mut self) -> Option<[f32; 3]> {
