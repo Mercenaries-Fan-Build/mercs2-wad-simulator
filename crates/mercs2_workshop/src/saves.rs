@@ -481,7 +481,7 @@ fn tail(p: &Path) -> String {
 pub fn navigator(ui: &mut egui::Ui, p: &Panel) -> Vec<Act> {
     let mut acts: Vec<Act> = Vec::new();
 
-    // Geometry follows the mockup (Saves.dc.html). The SidePanel's inner margins (13 left,
+    // Geometry follows the mockup (Saves.dc.html). The Panel's inner margins (13 left,
     // 10 right, 12 top, 0 bottom) are the mockup's header padding, so offsets below are
     // relative to the panel's content rect.
     //
@@ -493,7 +493,7 @@ pub fn navigator(ui: &mut egui::Ui, p: &Panel) -> Vec<Act> {
         let h = 24.0;
         let gap = 4.0;
         let label = |s: &str| egui::RichText::new(s).small().color(theme::TX);
-        let open_text_w = ui.fonts(|f| {
+        let open_text_w = ui.fonts_mut(|f| {
             f.layout_no_wrap("Open file…".into(), theme::font(&egui::TextStyle::Small), theme::TX)
                 .size()
                 .x
@@ -510,12 +510,12 @@ pub fn navigator(ui: &mut egui::Ui, p: &Panel) -> Vec<Act> {
             egui::pos2(open_rect.left() - gap, row.bottom()),
         );
         // Placed through a child UI: `ui.put` on the panel's own UI would grow the panel's
-        // measured content by the 3px overhang, and egui's SidePanel stores that measured width
+        // measured content by the 3px overhang, and egui's Panel stores that measured width
         // for the next frame, so the panel crept wider every frame and undid any drag.
-        let mut verbs_ui = ui.child_ui(
-            reveal_rect.union(open_rect),
-            egui::Layout::left_to_right(egui::Align::Center),
-            None,
+        let mut verbs_ui = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(reveal_rect.union(open_rect))
+                .layout(egui::Layout::left_to_right(egui::Align::Center)),
         );
         let reveal = verbs_ui.add_enabled_ui(p.saves_dir.is_some(), |ui| {
             ui.put(
@@ -523,7 +523,7 @@ pub fn navigator(ui: &mut egui::Ui, p: &Panel) -> Vec<Act> {
                 egui::Button::new(label("Reveal folder"))
                     .fill(theme::G3)
                     .stroke(egui::Stroke::new(1.0, theme::LINE2))
-                    .rounding(egui::Rounding::same(4.0)),
+                    .corner_radius(egui::CornerRadius::same(4)),
             )
         });
         if reveal.inner.clicked() {
@@ -535,7 +535,7 @@ pub fn navigator(ui: &mut egui::Ui, p: &Panel) -> Vec<Act> {
                 egui::Button::new(label("Open file…"))
                     .fill(theme::G2)
                     .stroke(egui::Stroke::new(1.0, theme::LINE))
-                    .rounding(egui::Rounding::same(4.0)),
+                    .corner_radius(egui::CornerRadius::same(4)),
             )
             .clicked()
         {
@@ -593,7 +593,7 @@ fn navigator_head_and_list(ui: &mut egui::Ui, p: &Panel, acts: &mut Vec<Act>) {
                 if resp.clicked() {
                     acts.push(Act::Select(e.path.clone()));
                 }
-                resp.context_menu(|ui| save_context_menu(ui, &e.path, acts));
+                theme::context_menu(&resp, |ui| save_context_menu(ui, &e.path, acts));
             }
         }
     }
@@ -603,15 +603,15 @@ fn navigator_head_and_list(ui: &mut egui::Ui, p: &Panel, acts: &mut Vec<Act>) {
 fn save_context_menu(ui: &mut egui::Ui, path: &Path, acts: &mut Vec<Act>) {
     if ui.button("Inspect…").clicked() {
         acts.push(Act::Inspect(path.to_path_buf()));
-        ui.close_menu();
+        ui.close();
     }
     if ui.button("Back up").clicked() {
         acts.push(Act::Backup(path.to_path_buf()));
-        ui.close_menu();
+        ui.close();
     }
     if ui.button("Delete…").clicked() {
         acts.push(Act::RequestDelete(path.to_path_buf()));
-        ui.close_menu();
+        ui.close();
     }
     ui.separator();
     ui.add_enabled(false, egui::Button::new("New"))
@@ -624,9 +624,10 @@ pub fn windows(ctx: &egui::Context, p: &Panel) -> Vec<Act> {
     if let Some(path) = &p.confirm_delete {
         let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         egui::Window::new("Delete save?")
-            .id(egui::Id::new("saves.confirm_delete"))
+            .id(egui::Id::unique("saves.confirm_delete"))
             .collapsible(false)
-            .resizable(false)
+            .auto_sized()
+            .max_width(theme::FIT_WINDOW_W)
             .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
             .show(ctx, |ui| {
                 ui.label(egui::RichText::new(format!("Move “{name}” to the trash?")).color(theme::TX));
@@ -650,9 +651,9 @@ pub fn windows(ctx: &egui::Context, p: &Panel) -> Vec<Act> {
     if let Some(ci) = &p.contract_inspect {
         let mut open = true;
         egui::Window::new(format!("Contract — {}", ci.id))
-            .id(egui::Id::new("saves.contract_inspect"))
+            .id(egui::Id::unique("saves.contract_inspect"))
             .open(&mut open)
-            .default_size([460.0, 520.0])
+            .default_size(theme::window_size(460.0, 520.0))
             .vscroll(true)
             .show(ctx, |ui| contract_window(ui, ci, p));
         if !open {
@@ -661,9 +662,9 @@ pub fn windows(ctx: &egui::Context, p: &Panel) -> Vec<Act> {
     }
     if let Some(ch) = &p.contract_change {
         egui::Window::new(format!("{} → {}", ch.id, ch.to.label()))
-            .id(egui::Id::new("saves.contract_change"))
+            .id(egui::Id::unique("saves.contract_change"))
             .collapsible(false)
-            .default_size([520.0, 420.0])
+            .default_size(theme::window_size(520.0, 420.0))
             .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
             .show(ctx, |ui| {
                 match &ch.outcome {
@@ -672,7 +673,7 @@ pub fn windows(ctx: &egui::Context, p: &Panel) -> Vec<Act> {
                             egui::RichText::new(format!("{} changes to the pending save", out.changes.len())).color(theme::TX),
                         );
                         ui.add_space(4.0);
-                        egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
+                        theme::scroll_vertical().max_height(320.0).show(ui, |ui| {
                             for line in &out.changes {
                                 ui.label(egui::RichText::new(line).monospace().color(theme::DIM));
                             }
@@ -845,7 +846,7 @@ fn contract_window(ui: &mut egui::Ui, ci: &ContractInspect, p: &Panel) {
     if let Some(entry) = flow("tActiveMissions").and_then(|a| a.get(&m.id)) {
         section(ui, "ACTIVE ENTRY");
         let mut text = save_lua::serialize(entry);
-        ui.add(egui::TextEdit::multiline(&mut text).font(egui::TextStyle::Monospace).desired_width(f32::INFINITY).interactive(false));
+        ui.add(egui::TextEdit::multiline(&mut text).font(egui::TextStyle::Monospace).margin(theme::TEXT_EDIT_MARGIN).desired_width(f32::INFINITY).interactive(false));
     }
 }
 
@@ -897,7 +898,7 @@ fn save_row(ui: &mut egui::Ui, e: &ProfileEntry, selected: bool) -> egui::Respon
         egui::pos2(top.x - BLEED + PAD_X, top.y + PAD_Y),
         egui::pos2(top.x + width + BLEED - PAD_X, top.y + PAD_Y + 1000.0),
     );
-    let mut child = ui.child_ui(content_max, egui::Layout::top_down(egui::Align::LEFT), None);
+    let mut child = ui.new_child(egui::UiBuilder::new().max_rect(content_max).layout(egui::Layout::top_down(egui::Align::LEFT)));
     child.spacing_mut().item_spacing.y = 2.0;
     // horizontal() otherwise pads its row to interact_size.y and centres the text in it,
     // which pushes the name line down and makes the top padding look heavier.
@@ -907,10 +908,10 @@ fn save_row(ui: &mut egui::Ui, e: &ProfileEntry, selected: bool) -> egui::Respon
     child.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 6.0;
         let badge_fg = if selected { theme::BRASS } else { theme::DIM };
-        egui::Frame::none()
-            .stroke(egui::Stroke::new(1.0, theme::LINE2))
-            .rounding(egui::Rounding::same(2.0))
-            .inner_margin(egui::Margin::symmetric(4.0, 0.0))
+        egui::Frame::NONE
+            .corner_radius(egui::CornerRadius::same(2))
+            .inner_margin(egui::Margin::symmetric(4, 0))
+            .apply_stroke_and_expansion_without_layout_shift(egui::Stroke::new(1.0, theme::LINE2), 0.0)
             .show(ui, |ui| {
                 ui.label(theme::disp_text(e.hero_letter().to_string(), theme::style_eyebrow(), badge_fg));
             });
@@ -946,7 +947,7 @@ fn save_row(ui: &mut egui::Ui, e: &ProfileEntry, selected: bool) -> egui::Respon
         None
     };
     if let Some(f) = fill {
-        ui.painter().set(bg_slot, egui::Shape::rect_filled(paint_rect, egui::Rounding::ZERO, f));
+        ui.painter().set(bg_slot, egui::Shape::rect_filled(paint_rect, egui::CornerRadius::ZERO, f));
     }
     let accent = match (&e.header, selected) {
         (Err(_), _) => Some(theme::BAD),
@@ -955,7 +956,7 @@ fn save_row(ui: &mut egui::Ui, e: &ProfileEntry, selected: bool) -> egui::Respon
     };
     if let Some(c) = accent {
         let bar = egui::Rect::from_min_size(paint_rect.min, egui::vec2(3.0, row_h));
-        ui.painter().set(bar_slot, egui::Shape::rect_filled(bar, egui::Rounding::ZERO, c));
+        ui.painter().set(bar_slot, egui::Shape::rect_filled(bar, egui::CornerRadius::ZERO, c));
     }
 
     if resp.hovered() {
@@ -969,15 +970,15 @@ fn save_row(ui: &mut egui::Ui, e: &ProfileEntry, selected: bool) -> egui::Respon
 /// Read-only this commit — the tabs show what the engine serialised, and the next commit
 /// turns the grid into clickable state-toggle chips (via `save_lua::parse_chunk` + surgical
 /// edits + `save_write::set_lua_payload` + `write_profile`, the `save_rollback` pattern).
-pub fn center(ctx: &egui::Context, p: &Panel) -> Vec<Act> {
+pub fn center(root: &mut egui::Ui, p: &Panel) -> Vec<Act> {
     let mut acts: Vec<Act> = Vec::new();
     egui::CentralPanel::default()
         .frame(
-            egui::Frame::none()
+            egui::Frame::NONE
                 .fill(theme::G0)
-                .inner_margin(egui::Margin::symmetric(22.0, 18.0)),
+                .inner_margin(egui::Margin::symmetric(22, 18)),
         )
-        .show(ctx, |ui| {
+        .show(root, |ui| {
             let Some(sel) = p.selected.as_ref() else {
                 ui.label(theme::disp_text("NO SAVE OPEN", egui::TextStyle::Heading, theme::DIM));
                 ui.label(
@@ -1103,7 +1104,7 @@ pub fn center(ctx: &egui::Context, p: &Panel) -> Vec<Act> {
             }
             ui.add_space(10.0);
 
-            egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+            theme::scroll_vertical().auto_shrink([false, false]).show(ui, |ui| {
                 match p.mission_tab {
                     MissionTab::All => acts.extend(render_all_missions(ui, p)),
                     MissionTab::FlowKeys => acts.extend(render_flow_keys(ui, &state.completed_flow, p)),
@@ -1132,7 +1133,7 @@ struct HeroReq {
 
 /// Centre viewport: hero portrait with four HUD overlays — ORBIT + model chip top-left,
 /// AT-A-GLANCE top-right, identity chip bottom-left. Chips paint on top via
-/// `allocate_ui_at_rect`. Drag orbits, scroll zooms; each change emits `SetHeroCam` +
+/// `scope_builder`. Drag orbits, scroll zooms; each change emits `SetHeroCam` +
 /// `EnsureHeroRender`.
 ///
 /// `h` drives the preview (pending edit, so inspector changes repose immediately).
@@ -1168,12 +1169,12 @@ fn hero_viewport(ui: &mut egui::Ui, h: &Profile, on_disk: &Profile, p: &Panel) -
         h.character_index,
         h.upgrade_index
     );
-    egui::Frame::none()
+    egui::Frame::NONE
         .fill(theme::G0)
-        .stroke(egui::Stroke::new(1.0, theme::LINE))
-        .rounding(egui::Rounding::same(6.0))
+        .corner_radius(egui::CornerRadius::same(6))
         // 1px so the frame's own border stays visible around the render.
-        .inner_margin(egui::Margin::same(1.0))
+        .inner_margin(egui::Margin::same(1))
+        .apply_stroke_and_expansion_without_layout_shift(egui::Stroke::new(1.0, theme::LINE), 0.0)
         .show(ui, |ui| {
             // Pin exact height — min alone lets the Frame absorb the whole column.
             ui.set_width(ui.available_width());
@@ -1203,7 +1204,7 @@ fn hero_viewport(ui: &mut egui::Ui, h: &Profile, on_disk: &Profile, p: &Panel) -
             // Whole frame is the drag/scroll region; chips allocated after this paint over it.
             let drag_response = ui.interact(
                 frame_rect,
-                ui.id().with(("hero_drag", hash)),
+                ui.scope_id().with(("hero_drag", hash)),
                 egui::Sense::click_and_drag(),
             );
 
@@ -1215,7 +1216,7 @@ fn hero_viewport(ui: &mut egui::Ui, h: &Profile, on_disk: &Profile, p: &Panel) -
             match (&cached_tex, &failed_err, in_flight) {
                 (Some(tex), _, _) => {
                     egui::Image::from_texture(egui::load::SizedTexture::from_handle(tex))
-                        .rounding(egui::Rounding::same(5.0))
+                        .corner_radius(egui::CornerRadius::same(5))
                         .paint_at(ui, frame_rect);
                     // Mouse-drag → yaw / pitch. 0.01 rad per pixel: a 300 px horizontal
                     // drag spins the hero one full turn-ish (3 rad), which is the "spin
@@ -1250,8 +1251,8 @@ fn hero_viewport(ui: &mut egui::Ui, h: &Profile, on_disk: &Profile, p: &Panel) -
                 }
                 (None, Some(err), _) => {
                     let box_rect = egui::Rect::from_center_size(frame_rect.center(), box_size);
-                    painter.rect_filled(box_rect, egui::Rounding::same(4.0), theme::G2);
-                    painter.rect_stroke(box_rect, egui::Rounding::same(4.0), egui::Stroke::new(1.0, theme::BAD));
+                    painter.rect_filled(box_rect, egui::CornerRadius::same(4), theme::G2);
+                    painter.rect_stroke(box_rect, egui::CornerRadius::same(4), egui::Stroke::new(1.0, theme::BAD), egui::StrokeKind::Middle);
                     painter.text(
                         box_rect.center() - egui::vec2(0.0, 14.0),
                         egui::Align2::CENTER_CENTER,
@@ -1276,18 +1277,19 @@ fn hero_viewport(ui: &mut egui::Ui, h: &Profile, on_disk: &Profile, p: &Panel) -
                 }
                 (None, None, _) => {
                     let box_rect = egui::Rect::from_center_size(frame_rect.center(), box_size);
-                    painter.rect_filled(box_rect, egui::Rounding::same(4.0), theme::G2);
+                    painter.rect_filled(box_rect, egui::CornerRadius::same(4), theme::G2);
                     painter.rect_stroke(
                         box_rect,
-                        egui::Rounding::same(4.0),
+                        egui::CornerRadius::same(4),
                         egui::Stroke::new(1.0, egui::Color32::from_rgb(0x42, 0x47, 0x4f)),
+                        egui::StrokeKind::Middle,
                     );
                     // Spinner needs a real widget — allocate a small UI centred on the box.
                     let spinner_rect = egui::Rect::from_center_size(
                         box_rect.center() - egui::vec2(0.0, 10.0),
                         egui::vec2(32.0, 32.0),
                     );
-                    ui.allocate_ui_at_rect(spinner_rect, |ui| {
+                    ui.scope_builder(egui::UiBuilder::new().max_rect(spinner_rect), |ui| {
                         ui.add(egui::Spinner::new().size(28.0));
                     });
                     painter.text(
@@ -1308,7 +1310,7 @@ fn hero_viewport(ui: &mut egui::Ui, h: &Profile, on_disk: &Profile, p: &Panel) -
             }
 
             // ── Overlay layer: HUD chips and the AT-A-GLANCE card, placed at absolute
-            // positions INSIDE the viewport frame via `allocate_ui_at_rect`. These paint ON
+            // positions INSIDE the viewport frame via `scope_builder`. These paint ON
             // TOP of the hero render, as proper HUD overlays rather than siblings laid out
             // above it. ──
 
@@ -1326,8 +1328,8 @@ fn hero_viewport(ui: &mut egui::Ui, h: &Profile, on_disk: &Profile, p: &Panel) -
             // Overlays sit 10px in from the frame edges (mockup).
             const INSET: f32 = 10.0;
             let topleft = frame_rect.min + egui::vec2(INSET, INSET);
-            ui.allocate_ui_at_rect(
-                egui::Rect::from_min_size(topleft, egui::vec2(500.0, 30.0)),
+            ui.scope_builder(
+                egui::UiBuilder::new().max_rect(egui::Rect::from_min_size(topleft, egui::vec2(500.0, 30.0))),
                 |ui| {
                     ui.horizontal(|ui| {
                         chip(ui, orbit_label, orbit_fg, orbit_bg, orbit_stroke);
@@ -1341,8 +1343,8 @@ fn hero_viewport(ui: &mut egui::Ui, h: &Profile, on_disk: &Profile, p: &Panel) -
             let overlay_w = glance_card_width(ui, &rows);
             let topright =
                 egui::pos2(frame_rect.right() - overlay_w - INSET, frame_rect.top() + INSET);
-            ui.allocate_ui_at_rect(
-                egui::Rect::from_min_size(topright, egui::vec2(overlay_w, 200.0)),
+            ui.scope_builder(
+                egui::UiBuilder::new().max_rect(egui::Rect::from_min_size(topright, egui::vec2(overlay_w, 200.0))),
                 |ui| at_a_glance(ui, &rows, overlay_w),
             );
 
@@ -1352,11 +1354,11 @@ fn hero_viewport(ui: &mut egui::Ui, h: &Profile, on_disk: &Profile, p: &Panel) -
                 frame_rect.left() + INSET,
                 frame_rect.bottom() - identity_h - INSET,
             );
-            ui.allocate_ui_at_rect(
-                egui::Rect::from_min_size(
+            ui.scope_builder(
+                egui::UiBuilder::new().max_rect(egui::Rect::from_min_size(
                     bottomleft,
                     egui::vec2(frame_rect.width() - 2.0 * INSET, identity_h),
-                ),
+                )),
                 |ui| {
                     ui.horizontal(|ui| {
                         chip(ui, &identity_label, theme::DIM, theme::G2, theme::LINE);
@@ -1370,11 +1372,11 @@ fn hero_viewport(ui: &mut egui::Ui, h: &Profile, on_disk: &Profile, p: &Panel) -
 /// A small rounded HUD chip — label text with a background fill + border stroke. Used by the
 /// viewport overlays (ORBIT, model, identity) so they share a visual vocabulary.
 fn chip(ui: &mut egui::Ui, label: &str, fg: egui::Color32, bg: egui::Color32, border: egui::Color32) {
-    egui::Frame::none()
+    egui::Frame::NONE
         .fill(bg)
-        .stroke(egui::Stroke::new(1.0, border))
-        .rounding(egui::Rounding::same(3.0))
-        .inner_margin(egui::Margin::symmetric(8.0, 3.0))
+        .corner_radius(egui::CornerRadius::same(3))
+        .inner_margin(egui::Margin::symmetric(8, 3))
+        .apply_stroke_and_expansion_without_layout_shift(egui::Stroke::new(1.0, border), 0.0)
         .show(ui, |ui| {
             ui.label(theme::disp_text(label, theme::style_eyebrow(), fg));
         });
@@ -1424,7 +1426,7 @@ fn glance_rows(h: &Profile) -> [(&'static str, String); 5] {
 
 /// Card width: padding + label column + gap + the widest value, at least `GLANCE_MIN_W`.
 fn glance_card_width(ui: &egui::Ui, rows: &[(&'static str, String)]) -> f32 {
-    let widest = ui.fonts(|f| {
+    let widest = ui.fonts_mut(|f| {
         rows.iter()
             .map(|(_, v)| {
                 f.layout_no_wrap(v.clone(), theme::font(&egui::TextStyle::Monospace), theme::TX)
@@ -1439,11 +1441,11 @@ fn glance_card_width(ui: &egui::Ui, rows: &[(&'static str, String)]) -> f32 {
 /// The AT-A-GLANCE HUD card in the viewport's top-right slot: title, divider, then label/value
 /// rows with values left-aligned in their own column.
 fn at_a_glance(ui: &mut egui::Ui, rows: &[(&'static str, String)], width: f32) {
-    egui::Frame::none()
+    egui::Frame::NONE
         .fill(egui::Color32::from_rgba_unmultiplied(14, 16, 20, 217))
-        .stroke(egui::Stroke::new(1.0, theme::LINE))
-        .rounding(egui::Rounding::same(5.0))
-        .inner_margin(egui::Margin::symmetric(GLANCE_PAD_X, GLANCE_PAD_Y))
+        .corner_radius(egui::CornerRadius::same(5))
+        .inner_margin(egui::Margin::symmetric(GLANCE_PAD_X as i8, GLANCE_PAD_Y as i8))
+        .apply_stroke_and_expansion_without_layout_shift(egui::Stroke::new(1.0, theme::LINE), 0.0)
         .show(ui, |ui| {
             ui.with_layout(egui::Layout::top_down(egui::Align::LEFT), |ui| {
                 let inner_w = width - 2.0 * GLANCE_PAD_X;
@@ -1455,7 +1457,7 @@ fn at_a_glance(ui: &mut egui::Ui, rows: &[(&'static str, String)], width: f32) {
                 ui.add_space(3.0);
                 let (line, _) =
                     ui.allocate_exact_size(egui::vec2(inner_w, 1.0), egui::Sense::hover());
-                ui.painter().rect_filled(line, egui::Rounding::ZERO, theme::LINE);
+                ui.painter().rect_filled(line, egui::CornerRadius::ZERO, theme::LINE);
                 ui.add_space(5.0);
                 for (label, value) in rows {
                     ui.horizontal(|ui| {
@@ -1578,10 +1580,10 @@ fn contract_menu(resp: &egui::Response, id: &str, p: &Panel, acts: &mut Vec<Act>
     if !rules.missions.contains_key(id) {
         return;
     }
-    resp.context_menu(|ui| {
+    theme::context_menu(&resp, |ui| {
         if ui.button("Inspect contract…").clicked() {
             acts.push(Act::InspectContract(id.to_string()));
-            ui.close_menu();
+            ui.close();
         }
         ui.separator();
         ui.label(theme::disp_text("SET STATE", theme::style_eyebrow(), theme::FAINT));
@@ -1590,7 +1592,7 @@ fn contract_menu(resp: &egui::Response, id: &str, p: &Panel, acts: &mut Vec<Act>
                 None => {
                     if ui.button(s.label()).clicked() {
                         acts.push(Act::PreviewContractState(id.to_string(), s));
-                        ui.close_menu();
+                        ui.close();
                     }
                 }
                 Some(why) => {
@@ -1646,21 +1648,21 @@ fn mission_chip_grid(ui: &mut egui::Ui, salt: &str, items: &[Chip]) -> Vec<(Stri
         .spacing(egui::vec2(gutter, gutter))
         .show(ui, |ui| {
             for (i, Chip { id, hover, style: s }) in items.iter().enumerate() {
-                let resp = egui::Frame::none()
+                let resp = egui::Frame::NONE
                     .fill(s.bg)
-                    .stroke(egui::Stroke::new(1.0, s.bd))
-                    .rounding(egui::Rounding::same(4.0))
-                    .inner_margin(egui::Margin::symmetric(7.0, 4.0))
+                    .corner_radius(egui::CornerRadius::same(4))
+                    .inner_margin(egui::Margin::symmetric(7, 4))
+                    .apply_stroke_and_expansion_without_layout_shift(egui::Stroke::new(1.0, s.bd), 0.0)
                     .show(ui, |ui| {
                         ui.horizontal(|ui| {
                             ui.set_width(row_inner);
                             ui.with_layout(
                                 egui::Layout::right_to_left(egui::Align::Center),
                                 |ui| {
-                                    egui::Frame::none()
+                                    egui::Frame::NONE
                                         .fill(s.tag_bg)
-                                        .rounding(egui::Rounding::same(2.0))
-                                        .inner_margin(egui::Margin::symmetric(5.0, 1.0))
+                                        .corner_radius(egui::CornerRadius::same(2))
+                                        .inner_margin(egui::Margin::symmetric(5, 1))
                                         .show(ui, |ui| {
                                             ui.label(theme::disp_text(s.tag, theme::style_eyebrow(), s.tag_fg));
                                         });
@@ -1992,12 +1994,12 @@ pub fn inspector(ui: &mut egui::Ui, p: &Panel) -> Vec<Act> {
     } else {
         (theme::BAD, "CHECKSUM MISMATCH")
     };
-    egui::Frame::none()
+    egui::Frame::NONE
         .fill(theme::G2)
-        .stroke(egui::Stroke::new(1.0, if on_disk.hash_ok() { theme::GOOD_DK } else { theme::BAD }))
-        .rounding(egui::Rounding::same(6.0))
-        .inner_margin(egui::Margin::symmetric(10.0, 7.0))
-        .outer_margin(egui::Margin { bottom: 10.0, ..Default::default() })
+        .corner_radius(egui::CornerRadius::same(6))
+        .inner_margin(egui::Margin::symmetric(10, 7))
+        .apply_stroke_and_expansion_without_layout_shift(egui::Stroke::new(1.0, if on_disk.hash_ok() { theme::GOOD_DK } else { theme::BAD }), 0.0)
+        .outer_margin(egui::Margin { bottom: 10, ..Default::default() })
         .show(ui, |ui| {
             ui.horizontal(|ui| {
                 theme::status_dot(ui, ht, hc);
@@ -2027,7 +2029,7 @@ pub fn inspector(ui: &mut egui::Ui, p: &Panel) -> Vec<Act> {
             egui::RichText::new("Playing as").small()
                 .color(theme::FAINT),
         );
-        egui::ComboBox::from_id_source("saves.hero")
+        egui::ComboBox::from_id_salt("saves.hero")
             .selected_text(format!(
                 "{} · {}",
                 hero_name(pending.character_index),
@@ -2171,7 +2173,8 @@ pub fn inspector(ui: &mut egui::Ui, p: &Panel) -> Vec<Act> {
                 let resp = ui.add(
                     egui::TextEdit::singleline(&mut buf)
                         .char_limit(15)
-                        .desired_width(140.0)
+                        .margin(theme::TEXT_EDIT_MARGIN)
+                        .desired_width(140.0 + theme::TEXT_EDIT_MARGIN.sum().x)
                         .font(egui::TextStyle::Monospace),
                 );
                 if resp.changed() {
@@ -2816,9 +2819,9 @@ mod contract_menu_retail_tests {
         let ctx = egui::Context::default();
         crate::gui::theme::install(&ctx);
         for _ in 0..2 {
-            let _ = ctx.run(egui::RawInput::default(), |c| {
-                let _ = center(c, &p);
-                let _ = windows(c, &p);
+            let _ = ctx.run_ui(egui::RawInput::default(), |root| {
+                let _ = center(root, &p);
+                let _ = windows(root.ctx(), &p);
             });
         }
     }
@@ -2828,7 +2831,7 @@ mod contract_menu_retail_tests {
 mod navigator_layout_tests {
     use super::{navigator, Panel};
 
-    /// The navigator must not report content wider than its panel: egui's SidePanel stores the
+    /// The navigator must not report content wider than its panel: egui's Panel stores the
     /// measured width for the next frame, so any overhang makes the panel grow every frame.
     #[test]
     fn navigator_keeps_a_resizable_panel_at_its_width() {
@@ -2840,12 +2843,12 @@ mod navigator_layout_tests {
         };
         let mut width = 0.0;
         for _ in 0..30 {
-            let _ = ctx.run(egui::RawInput::default(), |ctx| {
-                let r = egui::SidePanel::left("nav_test")
+            let _ = ctx.run_ui(egui::RawInput::default(), |root| {
+                let r = egui::Panel::left("nav_test")
                     .resizable(true)
-                    .default_width(300.0)
-                    .width_range(egui::Rangef::new(220.0, 360.0))
-                    .show(ctx, |ui| {
+                    .default_size(300.0)
+                    .size_range(egui::Rangef::new(220.0, 360.0))
+                    .show(root, |ui| {
                         let _ = navigator(ui, &panel);
                     });
                 width = r.response.rect.width();
