@@ -943,6 +943,28 @@ pub fn component_keys(block: &[u8], class: &str) -> Result<std::collections::Has
     Ok(out)
 }
 
+/// Each record of component `class`: its key and the first word of its payload, the asset hash in the
+/// classes that name one (`Path`, `LineRegion`). A chunk that does not divide into records is an error.
+pub fn component_words(block: &[u8], class: &str) -> Result<Vec<(u32, u32)>, String> {
+    let ucfx_positions = find_all(block, b"UCFX");
+    let mut out = Vec::new();
+    for (si, &ucfx_pos) in ucfx_positions.iter().enumerate() {
+        let block_end = ucfx_positions.get(si + 1).copied().unwrap_or(block.len());
+        for c in walk_sub_block_comps_full(block, ucfx_pos, block_end) {
+            if c.info_name.as_deref() != Some(class) {
+                continue;
+            }
+            let Some((off, size)) = c.data else { continue };
+            let stride = 4 + c.payload_stride.ok_or_else(|| format!("sub-block {si}: {class} has no schm"))? as usize;
+            if stride < 8 || size % stride != 0 || off + size > block.len() {
+                return Err(format!("sub-block {si}: {class} data of {size} bytes is not whole {stride}-byte records"));
+            }
+            out.extend((0..size / stride).map(|i| (read_u32_le(block, off + i * stride), read_u32_le(block, off + i * stride + 4))));
+        }
+    }
+    Ok(out)
+}
+
 /// The component classes of every entity key a placement block's records name. `Transform` and `Name`
 /// have their own readers ([`placed_entities`], [`placed_names`]) and are left out.
 pub fn entity_classes(block: &[u8]) -> Result<std::collections::HashMap<u32, std::collections::BTreeSet<String>>, String> {
