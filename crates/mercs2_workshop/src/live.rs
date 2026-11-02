@@ -284,11 +284,11 @@ fn link_text(live: &Live) -> (String, Color32) {
 }
 
 fn pill(ui: &mut egui::Ui, text: String, color: Color32, dot: bool) -> egui::Response {
-    egui::Frame::none()
-        .stroke(egui::Stroke::new(1.0, color.gamma_multiply(0.4)))
+    egui::Frame::NONE
         .fill(color.gamma_multiply(0.08))
-        .rounding(egui::Rounding::same(999.0))
-        .inner_margin(egui::Margin::symmetric(9.0, 3.0))
+        .corner_radius(egui::CornerRadius::same(255))
+        .inner_margin(egui::Margin::symmetric(9, 3))
+        .apply_stroke_and_expansion_without_layout_shift(egui::Stroke::new(1.0, color.gamma_multiply(0.4)), 0.0)
         .show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 6.0;
@@ -309,11 +309,14 @@ fn tool_button(ui: &mut egui::Ui, text: &str, on: bool) -> bool {
 }
 
 /// The header strip: link, read-only promise, session, camera mode, Snapshot and Record.
-pub fn header(ctx: &egui::Context, p: &mut Page) {
+pub fn header(root: &mut egui::Ui, p: &mut Page) {
     let live = p.link.snapshot();
-    egui::TopBottomPanel::top("live_header")
-        .frame(egui::Frame::none().fill(theme::live::HEAD).inner_margin(egui::Margin::symmetric(14.0, 6.0)))
-        .show(ctx, |ui| {
+    egui::Panel::top("live_header")
+        .frame(crate::gui::panel_frame(
+            egui::Frame::NONE.fill(theme::live::HEAD).inner_margin(egui::Margin::symmetric(14, 6)),
+            crate::gui::SeparatorEdge::Bottom,
+        ))
+        .show(root, |ui| {
             ui.horizontal(|ui| {
                 ui.label(theme::disp_text("LIVE WORLD", theme::style_title(), theme::live::TX));
                 ui.separator();
@@ -435,7 +438,7 @@ fn row(ui: &mut egui::Ui, dot: Option<Color32>, key: &str, value: String, color:
 }
 
 /// The left panel: connection, the mirror against retail, the overlays.
-pub fn left(ctx: &egui::Context, p: &mut Page) {
+pub fn left(root: &mut egui::Ui, p: &mut Page) {
     let live = p.link.snapshot();
     let log = p.log.snapshot();
     let fps = 1.0 / p.frame_s.max(1e-4);
@@ -444,14 +447,14 @@ pub fn left(ctx: &egui::Context, p: &mut Page) {
     problems.extend(p.layers.iter().flat_map(|l| l.errors()));
     let mut width = p.left_width;
     crate::gui::held_side_panel(
-        ctx,
-        egui::panel::Side::Left,
+        root,
+        crate::gui::Side::Left,
         "live_mirror",
         egui::Rangef::new(220.0, 360.0),
         &mut width,
-        egui::Frame::none().fill(theme::live::PANEL).inner_margin(egui::Margin::same(13.0)),
+        egui::Frame::NONE.fill(theme::live::PANEL).inner_margin(egui::Margin::same(13)),
         |ui| {
-            egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+            theme::scroll_vertical().auto_shrink([false, false]).show(ui, |ui| {
                 section_title(ui, "CONNECTION");
                 let port = live.addr.rsplit(':').next().unwrap_or_default();
                 let bridge = match &live.state {
@@ -581,7 +584,7 @@ fn swatch(e: &Entity) -> Color32 {
 }
 
 /// The right panel: the inspected entity, what is near, the log.
-pub fn right(ctx: &egui::Context, p: &mut Page, index: &HashMap<u32, String>) -> Vec<Act> {
+pub fn right(root: &mut egui::Ui, p: &mut Page, index: &HashMap<u32, String>) -> Vec<Act> {
     let mut acts = Vec::new();
     let live = p.link.snapshot();
     let log = p.log.snapshot();
@@ -596,12 +599,12 @@ pub fn right(ctx: &egui::Context, p: &mut Page, index: &HashMap<u32, String>) ->
     let shown = selected.or(if is_gone { p.gone.as_ref() } else { None });
     let mut width = p.right_width;
     crate::gui::held_side_panel(
-        ctx,
-        egui::panel::Side::Right,
+        root,
+        crate::gui::Side::Right,
         "live_inspector",
         egui::Rangef::new(300.0, 480.0),
         &mut width,
-        egui::Frame::none().fill(theme::live::PANEL).inner_margin(egui::Margin::same(13.0)),
+        egui::Frame::NONE.fill(theme::live::PANEL).inner_margin(egui::Margin::same(13)),
         |ui| {
             ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
                 // The foot first, so it keeps its place however tall the log is.
@@ -617,7 +620,7 @@ pub fn right(ctx: &egui::Context, p: &mut Page, index: &HashMap<u32, String>) ->
                     }
                     let wanted = selection_lock(p.selection.as_deref());
                     let on = p.lock == wanted;
-                    if ui.add_enabled(there, egui::SelectableLabel::new(on, "Lock-on")).on_hover_text("Keep this entity centred as it moves (local only)").clicked() {
+                    if ui.add_enabled(there, egui::Button::selectable(on, "Lock-on")).on_hover_text("Keep this entity centred as it moves (local only)").clicked() {
                         p.lock = if on { Lock::None } else { wanted };
                         p.cam.mode = Mode::FreeOrbit;
                     }
@@ -637,14 +640,14 @@ pub fn right(ctx: &egui::Context, p: &mut Page, index: &HashMap<u32, String>) ->
                     let hero_pos = live.poses.last().map(|(_, p)| p.pos).unwrap_or_default();
                     let rows = nearby(&live, hero_pos);
                     section_title(ui, &format!("NEARBY ENTITIES · {}", rows.len()));
-                    egui::ScrollArea::vertical().id_source("live_nearby").max_height(150.0).auto_shrink([false, true]).show(ui, |ui| {
+                    theme::scroll_vertical().id_salt("live_nearby").max_height(150.0).auto_shrink([false, true]).show(ui, |ui| {
                         for (d, e) in rows {
                             let on = p.selection.as_deref() == Some(e.guid.as_str());
                             let r = ui.horizontal(|ui| {
                                 let (s, _) = ui.allocate_exact_size(egui::vec2(8.0, 8.0), egui::Sense::hover());
                                 ui.painter().rect_filled(s, 2.0, swatch(e));
                                 let label = format!("{} · {}", name(e.template), e.class.label());
-                                let r = ui.add(egui::SelectableLabel::new(on, RichText::new(label).small()));
+                                let r = ui.add(egui::Button::selectable(on, RichText::new(label).small()));
                                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                     ui.label(RichText::new(format!("{d:.0} m")).small().monospace().color(theme::live::FAINT));
                                 });
@@ -670,8 +673,8 @@ pub fn right(ctx: &egui::Context, p: &mut Page, index: &HashMap<u32, String>) ->
                             ui.label(RichText::new(t).small().monospace().color(theme::live::FAINT));
                         });
                     });
-                    egui::Frame::none().fill(theme::live::WELL).inner_margin(egui::Margin::same(7.0)).rounding(egui::Rounding::same(6.0)).show(ui, |ui| {
-                        egui::ScrollArea::vertical().id_source("live_log").auto_shrink([false, false]).stick_to_bottom(true).show(ui, |ui| {
+                    egui::Frame::NONE.fill(theme::live::WELL).inner_margin(egui::Margin::same(7)).corner_radius(egui::CornerRadius::same(6)).show(ui, |ui| {
+                        theme::scroll_vertical().id_salt("live_log").auto_shrink([false, false]).stick_to_bottom(true).show(ui, |ui| {
                             let font = theme::font(&egui::TextStyle::Small);
                             let part = |c: Color32| egui::TextFormat { font_id: font.clone(), color: c, ..Default::default() };
                             for l in &log.lines {
@@ -793,8 +796,8 @@ pub fn floats(ctx: &egui::Context, p: &mut Page, index: &HashMap<u32, String>, f
     let now = Now { pose: live.poses.last().map(|(_, q)| q.clone()), names: p.names(), index, live };
     markers(ctx, p, &now, fv);
     let rect = fv.rect;
-    let area = |id: &'static str, at: egui::Pos2, pivot: egui::Align2| egui::Area::new(egui::Id::new(id)).order(egui::Order::Foreground).fixed_pos(at).pivot(pivot);
-    let glass = || egui::Frame::none().fill(theme::live::GLASS).stroke(egui::Stroke::new(1.0, theme::live::LINE)).rounding(egui::Rounding::same(9.0)).inner_margin(egui::Margin::same(9.0));
+    let area = |id: &'static str, at: egui::Pos2, pivot: egui::Align2| egui::Area::new(egui::Id::unique(id)).order(egui::Order::Foreground).fixed_pos(at).pivot(pivot);
+    let glass = || egui::Frame::NONE.fill(theme::live::GLASS).corner_radius(egui::CornerRadius::same(9)).inner_margin(egui::Margin::same(9)).apply_stroke_and_expansion_without_layout_shift(egui::Stroke::new(1.0, theme::live::LINE), 0.0);
 
     area("live_mission", rect.left_top() + egui::vec2(14.0, 14.0), egui::Align2::LEFT_TOP).show(ctx, |ui| {
         glass().show(ui, |ui| {
@@ -813,7 +816,7 @@ pub fn floats(ctx: &egui::Context, p: &mut Page, index: &HashMap<u32, String>, f
             ui.horizontal(|ui| {
                 let o = &mut p.overlays;
                 let mut pill = |ui: &mut egui::Ui, on: &mut bool, label: &str, hover: &str| {
-                    if ui.add(egui::SelectableLabel::new(*on, RichText::new(label).small())).on_hover_text(hover).clicked() {
+                    if ui.add(egui::Button::selectable(*on, RichText::new(label).small())).on_hover_text(hover).clicked() {
                         *on = !*on;
                     }
                 };
@@ -853,7 +856,7 @@ pub fn floats(ctx: &egui::Context, p: &mut Page, index: &HashMap<u32, String>, f
         .or_else(|| p.mirror.note())
         .or_else(|| no_eye.then(|| "Mirror in-game needs an m2-sdk with M2Live: the game's Lua has no camera position".to_string()));
     if let Some(text) = waiting {
-        egui::Area::new(egui::Id::new("live_wait")).order(egui::Order::Middle).fixed_pos(rect.center()).pivot(egui::Align2::CENTER_CENTER).show(ctx, |ui| {
+        egui::Area::new(egui::Id::unique("live_wait")).order(egui::Order::Middle).fixed_pos(rect.center()).pivot(egui::Align2::CENTER_CENTER).show(ctx, |ui| {
             glass().show(ui, |ui| {
                 ui.label(RichText::new(text).color(theme::live::DIM));
             });
@@ -898,7 +901,7 @@ fn mmss(t: i32) -> String {
 
 /// The world-space markers, and the click that picks one.
 fn markers(ctx: &egui::Context, p: &mut Page, now: &Now<'_>, fv: FrameView) {
-    let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Background, egui::Id::new("live_markers"))).with_clip_rect(fv.rect);
+    let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Background, egui::Id::unique("live_markers"))).with_clip_rect(fv.rect);
     let font = theme::font(&egui::TextStyle::Small);
     p.picked = None;
     let pointer = ctx.pointer_latest_pos();
