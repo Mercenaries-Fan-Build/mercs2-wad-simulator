@@ -39,6 +39,8 @@ pub struct UiState {
     pub fx_time: Option<f32>,
     /// On the WORLD LAYERS tab: the entity of the opened layer to select and frame, by its label.
     pub entity: Option<String>,
+    /// On the Live page: a `.replay` to play in place of the game, so the page captures with none running.
+    pub live_replay: Option<PathBuf>,
     /// A Shipment folder to open.
     pub shipment: Option<PathBuf>,
     /// The contribution to select in that Shipment, by index.
