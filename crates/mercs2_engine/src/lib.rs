@@ -61,6 +61,8 @@ pub mod runtime;
 pub mod script_host;
 pub mod spawn;
 pub mod game_world;
+pub mod flash;
+pub mod gfx_pass;
 pub mod input;
 /// Model container → indexed triangle geometry.
 ///
@@ -79,6 +81,7 @@ pub mod render;
 pub mod render_graph;
 pub mod render_state;
 pub mod scene;
+pub mod shell;
 pub mod ui;
 pub mod wad;
 pub mod water;
@@ -95,6 +98,7 @@ pub use mercs2_audio as audio;
 pub use mercs2_combat as combat;
 pub use mercs2_decal as decal;
 pub use mercs2_faction as faction;
+pub use mercs2_gfx as gfx;
 pub use mercs2_physics as physics;
 pub use mercs2_player as player;
 pub use mercs2_population as population;
