@@ -15,6 +15,7 @@
 //!   | [`Site::LuaLRegister`] | `0x0085F500` | `luaL_register`, `ECX = L`, `EAX = libname`, table pushed, caller pops |
 //!   | [`Site::LuaSNewLStr`] | `0x0086A2B0` | `luaS_newlstr(L, str, len)`, cdecl, returns the interned `TString*` |
 //!   | [`Site::LuaGErrorMsg`] | `0x0085EEA0` | `luaG_errormsg(L)` with `L` in `EAX`; `longjmp`s to the enclosing `lua_pcall` |
+//!   | [`Site::FrameStep`] | `0x004C16E0` | `void (void)`: RunFrame's timestep compute, called once a frame from RunFrame alone (`0x4C1690` in v1.1). RunFrame itself is the profiler's to detour, and MinHook takes a target once |
 //!
 //! * **By name** from the `luaL_Reg` tables in `.rdata` (`{ const char* name; lua_CFunction func; }`): the
 //!   row whose name pointer points at the exact string and whose function lies in `.text`. The base
@@ -39,10 +40,11 @@ pub enum Site {
     LuaBLoadString,
     LuaBPcall,
     CreateTextWidget,
+    FrameStep,
 }
 
 impl Site {
-    pub const ALL: [Site; 11] = [
+    pub const ALL: [Site; 12] = [
         Site::RegisterNamespaces,
         Site::ScriptHostInit,
         Site::ScriptHostCtor,
@@ -54,6 +56,7 @@ impl Site {
         Site::LuaBLoadString,
         Site::LuaBPcall,
         Site::CreateTextWidget,
+        Site::FrameStep,
     ];
 
     pub fn name(self) -> &'static str {
@@ -69,6 +72,7 @@ impl Site {
             Site::LuaBLoadString => "luaB_loadstring",
             Site::LuaBPcall => "luaB_pcall",
             Site::CreateTextWidget => "CreateTextWidget",
+            Site::FrameStep => "frame timestep",
         }
     }
 
@@ -128,6 +132,12 @@ impl Site {
                 "56 8b f0 8b 46 60 85 c0 57 74 6f 8b 7e 20 03 f8 83 7f 04 06 74 0b 6a 05 56 e8 ?? ?? ?? ?? \
                  83 c4 08 8b 46 08 8b 48 f8 89 08 8b 50 fc 89 50 04 8b 46 08 8b 0f 83 e8 08 89 08 8b 57 04 \
                  89 50 04"
+            }
+            // push ecx; mov ecx,[…]; test ecx,ecx; movss xmm0,[…]; movss [esp],xmm0; jz …; mov eax,[…];
+            // test eax,eax; jz +0x23; mov eax,[eax+4]; cmp eax,0x57B5E35A
+            Site::FrameStep => {
+                "51 8b 0d ?? ?? ?? ?? 85 c9 f3 0f 10 05 ?? ?? ?? ?? f3 0f 11 04 24 0f 84 ?? ?? ?? ?? a1 ?? ?? ?? ?? \
+                 85 c0 74 23 8b 40 04 3d 5a e3 b5 57"
             }
             _ => return None,
         })
@@ -217,7 +227,7 @@ impl Pattern {
 /// Where every site was found, and the script host's address.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LuaSites {
-    va: [u32; 11],
+    va: [u32; 12],
     host: u32,
 }
 
@@ -322,7 +332,7 @@ pub fn resolve(img: &Image) -> Result<LuaSites, LuaSitesError> {
     if !found.iter().all(|(_, v, _)| v.len() == 1) {
         return Err(LuaSitesError::Matches(found.iter().map(|(s, v, _)| (*s, v.len())).collect()));
     }
-    let mut va = [0u32; 11];
+    let mut va = [0u32; 12];
     for (s, v, _) in &found {
         va[*s as usize] = v[0];
     }
