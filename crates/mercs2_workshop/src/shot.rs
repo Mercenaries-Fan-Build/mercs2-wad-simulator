@@ -180,7 +180,7 @@ struct VOut {
   if (material.alpha.x >= 0.0 && !(dtex.a * material.data[5].w > material.alpha.x)) { discard; }
   let albedo = dtex.rgb;
 
-  // Lighting matched to shader.wgsl's DYNAMIC (non-prelit) branch: an ambient floor plus a single
+  // Lighting matched to shader.wgsl: an ambient floor plus a single
   // sun key light, and Blinn-Phong specular masked by the _sm map. The exterior sun values are
   // baked in here (sun_i ~1, ambient ~0.35) so a character previews as it does outdoors, which is
   // where the arm's harsh specular shows. This is the term that was missing while the arms looked
