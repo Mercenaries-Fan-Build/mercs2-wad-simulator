@@ -59,6 +59,10 @@ const KIND_OBJECT_HIBERNATION: i64 = 9;
 const KIND_OBJECT_PHYSICS_EVENT: i64 = 10;
 const KIND_BUTTON: i64 = 11;
 const KIND_CONTEXT_ACTION: i64 = 12;
+/// `Widget:SetEventHandler` registers its handlers through `Event[EventType]` (`mrxguibase.lua:518`),
+/// and they read the state name and the action as positional arguments
+/// (`mrxguishell.lua:212`, `HandleGameStateChangeEvent(oWidget, sStateName, sStateAction)`).
+const KIND_GUI_GAME_STATE_CHANGE: i64 = 41;
 
 /// The Lua-facing event constants (`Event.ScriptEvent`, …). Kept in one place so `install` and any
 /// engine-side condition feeder agree.
@@ -107,6 +111,7 @@ const KINDS: &[(&str, i64)] = &[
     ("Player", 38),
     ("PosX", 39),
     ("PosZ", 40),
+    ("GuiGameStateChange", KIND_GUI_GAME_STATE_CHANGE),
 ];
 
 /// The `Event.ObjectInSeat` filter: `{occupant, vehicle, seat, action}`.
@@ -513,6 +518,32 @@ pub fn fire_game_state_change(lua: &Lua, state: &str, phase: &str) -> LuaResult<
     };
     for (h, callback, cbargs, persistent) in fired {
         callback.call_attr::<()>(Variadic::from_iter(cbargs), "Event.GameStateChange")?;
+        if !persistent {
+            mgr.borrow_mut().regs.remove(&h);
+        }
+    }
+    Ok(())
+}
+
+/// Fire `GuiGameStateChange` for `(state, action)` at every widget registered for it. `action` is the
+/// spelling the handlers compare, `"Enter"` or `"Exit"`.
+pub fn fire_gui_game_state_change(lua: &Lua, state: &str, action: &str) -> LuaResult<()> {
+    let mgr: Mgr = match lua.app_data_ref::<Mgr>() {
+        Some(m) => (*m).clone(),
+        None => return Ok(()),
+    };
+    let fired: Vec<(i64, Function, Vec<Value>, bool)> = {
+        let m = mgr.borrow();
+        m.regs
+            .iter()
+            .filter(|(_, r)| r.kind == KIND_GUI_GAME_STATE_CHANGE)
+            .map(|(h, r)| (*h, r.callback.clone(), r.cbargs.clone(), r.persistent))
+            .collect()
+    };
+    for (h, callback, mut args, persistent) in fired {
+        args.push(Value::String(lua.create_string(state)?));
+        args.push(Value::String(lua.create_string(action)?));
+        callback.call_attr::<()>(Variadic::from_iter(args), "Event.GuiGameStateChange")?;
         if !persistent {
             mgr.borrow_mut().regs.remove(&h);
         }
