@@ -259,12 +259,12 @@ pub fn glyph_char(code: u16) -> String {
 
 /// The centre for an open font: one page at a time, scaled to fit with whole-pixel zoom, every
 /// glyph's box drawn on it; a click on a box chooses that glyph.
-pub fn font_center(ctx: &egui::Context, p: &mut Panel) -> Vec<Act> {
+pub fn font_center(root: &mut egui::Ui, p: &mut Panel) -> Vec<Act> {
     let mut acts = Vec::new();
     let Some(f) = &mut p.font else { return acts };
     egui::CentralPanel::default()
-        .frame(egui::Frame::none().fill(theme::G0).inner_margin(egui::Margin::symmetric(16.0, 12.0)))
-        .show(ctx, |ui| {
+        .frame(egui::Frame::NONE.fill(theme::G0).inner_margin(egui::Margin::symmetric(16, 12)))
+        .show(root, |ui| {
             ui.horizontal(|ui| {
                 ui.label(theme::disp_text(format!("FONT \u{b7} {}", f.label).to_uppercase(), theme::style_title(), theme::TX));
                 ui.label(
@@ -293,12 +293,12 @@ pub fn font_center(ctx: &egui::Context, p: &mut Panel) -> Vec<Act> {
             };
             let tex = f.textures.entry(f.page).or_insert_with(|| {
                 let img = egui::ColorImage::from_rgba_unmultiplied([*w as usize, *h as usize], rgba);
-                ctx.load_texture(format!("font_{:08X}_{}", f.hash, f.page), img, egui::TextureOptions::NEAREST)
+                ui.ctx().load_texture(format!("font_{:08X}_{}", f.hash, f.page), img, egui::TextureOptions::NEAREST)
             });
             // Whole-pixel zoom, as large as the width allows; a tall page scrolls.
             let zoom = (ui.available_width() / *w as f32).floor().clamp(1.0, 8.0);
             let size = egui::vec2(*w as f32 * zoom, *h as f32 * zoom);
-            egui::ScrollArea::both().auto_shrink([false, false]).show(ui, |ui| {
+            theme::scroll_both().auto_shrink([false, false]).show(ui, |ui| {
                 let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
                 let painter = ui.painter_at(rect);
                 painter.rect_filled(rect, 0.0, theme::G2);
@@ -314,8 +314,8 @@ pub fn font_center(ctx: &egui::Context, p: &mut Panel) -> Vec<Act> {
                     );
                     let chosen = f.glyph == Some(gi);
                     let col = if chosen { theme::BRASS } else { theme::BRASS.gamma_multiply(0.45) };
-                    painter.rect_stroke(r, 0.0, egui::Stroke::new(if chosen { 2.0 } else { 1.0 }, col));
-                    let resp = ui.interact(r, egui::Id::new(("font_glyph", f.hash, gi)), egui::Sense::click());
+                    painter.rect_stroke(r, 0.0, egui::Stroke::new(if chosen { 2.0 } else { 1.0 }, col), egui::StrokeKind::Middle);
+                    let resp = ui.interact(r, egui::Id::unique(("font_glyph", f.hash, gi)), egui::Sense::click());
                     let resp = resp.on_hover_text(format!("{} (U+{:04X}) {}\u{d7}{}", glyph_char(g.code), g.code, g.advance, g.height));
                     if resp.clicked() {
                         acts.push(Act::Glyph(gi));
@@ -351,7 +351,7 @@ pub fn font_inspector(ui: &mut egui::Ui, p: &Panel) -> Vec<Act> {
     }
     theme::section(ui, "Glyphs", Some(&f.font.glyphs.len().to_string()), true, |ui| {
         let row_h = 20.0;
-        egui::ScrollArea::vertical().max_height(320.0).show_rows(ui, row_h, f.font.glyphs.len(), |ui, range| {
+        theme::scroll_vertical().max_height(320.0).show_rows(ui, row_h, f.font.glyphs.len(), |ui, range| {
             for gi in range {
                 let g = &f.font.glyphs[gi];
                 // A code point with no printable form shows only its number.
@@ -473,11 +473,11 @@ pub fn string_literals(src: &str) -> impl Iterator<Item = &str> {
 }
 
 /// The centre: the table of keys and every table's text.
-pub fn center(ctx: &egui::Context, p: &Panel) -> Vec<Act> {
+pub fn center(root: &mut egui::Ui, p: &Panel) -> Vec<Act> {
     let mut acts = Vec::new();
     egui::CentralPanel::default()
-        .frame(egui::Frame::none().fill(theme::G0).inner_margin(egui::Margin::symmetric(16.0, 12.0)))
-        .show(ctx, |ui| {
+        .frame(egui::Frame::NONE.fill(theme::G0).inner_margin(egui::Margin::symmetric(16, 12)))
+        .show(root, |ui| {
             if let Some(e) = p.error() {
                 ui.label(egui::RichText::new(e).color(theme::BAD));
                 return;
@@ -500,7 +500,7 @@ pub fn center(ctx: &egui::Context, p: &Panel) -> Vec<Act> {
                 );
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let mut f = p.filter.clone();
-                    if ui.add(egui::TextEdit::singleline(&mut f).hint_text("Filter keys and text").desired_width(220.0)).changed() {
+                    if ui.add(egui::TextEdit::singleline(&mut f).hint_text("Filter keys and text").margin(theme::TEXT_EDIT_MARGIN).desired_width(220.0 + theme::TEXT_EDIT_MARGIN.sum().x)).changed() {
                         acts.push(Act::Filter(f));
                     }
                 });
@@ -520,7 +520,7 @@ pub fn center(ctx: &egui::Context, p: &Panel) -> Vec<Act> {
                     add(ui);
                 });
             }
-            egui::ScrollArea::horizontal().auto_shrink([false, false]).show(ui, |ui| {
+            theme::scroll_horizontal().auto_shrink([false, false]).show(ui, |ui| {
             ui.set_width(total);
             ui.horizontal(|ui| {
                 cell(ui, key_w, 16.0, |ui| {
@@ -537,12 +537,12 @@ pub fn center(ctx: &egui::Context, p: &Panel) -> Vec<Act> {
             });
             let row_h = 22.0;
             let rows = p.rows();
-            egui::ScrollArea::vertical().auto_shrink([false, false]).show_rows(ui, row_h, rows.len(), |ui, range| {
+            theme::scroll_vertical().auto_shrink([false, false]).show_rows(ui, row_h, rows.len(), |ui, range| {
                 for &k in &rows[range] {
                     let (rect, row) = ui.allocate_exact_size(egui::vec2(ui.available_width(), row_h - 2.0), egui::Sense::click());
                     let fill = if p.key == Some(k) { theme::G2 } else { egui::Color32::TRANSPARENT };
-                    ui.painter().rect_filled(rect, egui::Rounding::same(3.0), fill);
-                    let mut content = ui.child_ui(rect, egui::Layout::left_to_right(egui::Align::Center), None);
+                    ui.painter().rect_filled(rect, egui::CornerRadius::same(3), fill);
+                    let mut content = ui.new_child(egui::UiBuilder::new().max_rect(rect).layout(egui::Layout::left_to_right(egui::Align::Center)));
                     let ui = &mut content;
                     let named = t.key_names.contains_key(&k);
                     cell(ui, key_w, row_h - 4.0, |ui| {
