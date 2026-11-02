@@ -129,6 +129,7 @@ pub mod font;
 pub mod fxdict;
 pub mod game_paths;
 pub mod gfx;
+pub mod gfx_def;
 pub mod hash;
 pub mod havok;
 pub mod havok_write;
