@@ -246,7 +246,9 @@ fn node_worlds(hier: &[orch::HierNode]) -> HashMap<u32, Mat4> {
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Job {
     Model(u32),
-    Terrain(u32, [f32; 3]),
+    Terrain(u32, [f32; 3], mercs2_formats::terrainmesh::TerrainFade),
+    /// An entity's ground cover: its key, its pack and its position.
+    Scrub(u32, u32, [f32; 3]),
 }
 
 /// One action of the layer's inspector.
@@ -282,6 +284,8 @@ pub struct LayerView {
     /// What the scene loaded for this view, and every entity it spawned.
     owned: Vec<u32>,
     spawned: Vec<Entity>,
+    /// The keys of the ground cover it placed.
+    scrubs: Vec<u32>,
     states: HashMap<(u32, u32), RenderState>,
 }
 
@@ -335,7 +339,10 @@ impl LayerView {
                 *n += 1;
             }
             if let Some(tm) = o.terrain_mesh {
-                pending.push(Job::Terrain(tm, o.pos));
+                pending.push(Job::Terrain(tm, o.pos, t.world.terrain_fade.get(&o.parent).copied().unwrap_or_default()));
+            }
+            if let Some(scrub) = o.scrub {
+                pending.push(Job::Scrub(k, scrub, o.pos));
             }
             entities.push(LayerEntity {
                 key: k,
@@ -391,6 +398,7 @@ impl LayerView {
             loaded: HashMap::new(),
             owned: Vec::new(),
             spawned: Vec::new(),
+            scrubs: Vec::new(),
             states: HashMap::new(),
         })
     }
@@ -427,7 +435,8 @@ impl LayerView {
             let Some(job) = self.pending.pop_front() else { break };
             match job {
                 Job::Model(m) => self.load_model(m, w, scene),
-                Job::Terrain(tm, pos) => self.spawn_terrain(tm, pos, w, scene, world),
+                Job::Terrain(tm, pos, fade) => self.spawn_terrain(tm, pos, fade, w, scene, world),
+                Job::Scrub(key, hash, pos) => self.place_scrub(key, hash, pos, w, scene),
             }
         }
         self.spawn_ready(scene, world, t, index);
@@ -471,10 +480,21 @@ impl LayerView {
         );
     }
 
-    fn spawn_terrain(&mut self, tm: u32, pos: [f32; 3], w: &mut WadStack, scene: &mut Scene, world: &mut World) {
-        let m = w.wads.iter_mut().rev().find_map(|x| mercs2_engine::game_world::load_terrainmesh_tile(x, tm, pos));
+    fn spawn_terrain(
+        &mut self,
+        tm: u32,
+        pos: [f32; 3],
+        fade: mercs2_formats::terrainmesh::TerrainFade,
+        w: &mut WadStack,
+        scene: &mut Scene,
+        world: &mut World,
+    ) {
+        let mut failed = Vec::new();
+        let m = w.wads.iter_mut().rev().find_map(|x| {
+            mercs2_engine::game_world::load_terrainmesh_tile(x, tm, pos, fade, &|h| scene.has_terrain_view(h)).map_err(|e| failed.push(e)).ok()
+        });
         let Some(m) = m else {
-            self.errors.push(format!("terrainmesh 0x{tm:08X}: did not load"));
+            self.errors.push(failed.join("; "));
             return;
         };
         let radius = m.verts.iter().map(|v| (Vec3::from(v.pos) - Vec3::from(pos)).length()).fold(1.0, f32::max);
@@ -487,6 +507,25 @@ impl LayerView {
         if let Some(e) = self.entities.iter_mut().find(|e| e.terrain == Some(tm) && e.bounds.is_none()) {
             e.bounds = Some((Vec3::from(pos), radius));
         }
+    }
+
+    fn place_scrub(&mut self, key: u32, hash: u32, pos: [f32; 3], w: &mut WadStack, scene: &mut Scene) {
+        if !scene.has_scrub(hash) {
+            let shipped = w.wads.iter_mut().rev().find(|x| wad::has_scrub(x, hash));
+            let Some(x) = shipped else {
+                self.missing.insert(hash);
+                return;
+            };
+            match mercs2_engine::game_world::load_scrub(x, hash, &|h| scene.has_terrain_view(h)) {
+                Ok((geometry, textures)) => scene.load_scrub(hash, geometry, &textures),
+                Err(e) => {
+                    self.errors.push(e);
+                    return;
+                }
+            }
+        }
+        scene.place_scrub(key, hash, pos);
+        self.scrubs.push(key);
     }
 
     /// The render state of `model` on an entity of `template`.
@@ -682,6 +721,9 @@ impl LayerView {
         for e in self.spawned {
             world.despawn(e).ok();
             scene.forget_entity(e);
+        }
+        for key in self.scrubs {
+            scene.remove_scrub(key);
         }
         for m in self.owned {
             if !keep.contains(&m) {
@@ -1000,6 +1042,7 @@ mod tests {
             loaded: HashMap::new(),
             owned: Vec::new(),
             spawned: Vec::new(),
+            scrubs: Vec::new(),
             states: HashMap::new(),
         };
         let (target, dist) = v.framing();
