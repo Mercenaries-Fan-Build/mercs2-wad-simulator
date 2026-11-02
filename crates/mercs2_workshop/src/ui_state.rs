@@ -41,6 +41,8 @@ pub struct UiState {
     pub entity: Option<String>,
     /// On the Live page: a `.replay` to play in place of the game, so the page captures with none running.
     pub live_replay: Option<PathBuf>,
+    /// On the Live page: the camera's yaw, pitch (radians) and zoom, so a capture can aim it.
+    pub live_camera: Option<[f32; 3]>,
     /// A Shipment folder to open.
     pub shipment: Option<PathBuf>,
     /// The contribution to select in that Shipment, by index.
