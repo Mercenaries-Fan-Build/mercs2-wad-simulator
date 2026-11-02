@@ -11,6 +11,7 @@ compile_error!("m2-sdk.dll is a 32-bit Windows DLL: build it with --target i686-
 
 mod hook;
 mod ini;
+mod live;
 mod loadtrigger;
 mod log;
 mod loghook;
