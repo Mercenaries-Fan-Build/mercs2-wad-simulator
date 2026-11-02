@@ -30,7 +30,7 @@ use winit::window::{CursorGrabMode, Window, WindowBuilder};
 
 use crate::input::{Bindings, Gamepad, Input};
 use crate::render::LoadProgress;
-use crate::scene::Scene;
+use crate::scene::{Scene, SurfaceError};
 
 /// The loading layer sits one below the game layer (the recovered 0→4 climb, `FUN_004c15e0`): the
 /// background loader runs while it is active, then loader-completion raises the target to `LAYER_GAME`.
@@ -99,6 +99,8 @@ pub struct Ctx<'a> {
     pub input: &'a Input<'a>,
     /// Keys that transitioned to pressed THIS frame (rising edges) — for menu nav + the Tab cam toggle.
     pub pressed: &'a std::collections::HashSet<KeyCode>,
+    /// Keys that went back up THIS frame.
+    pub released: &'a std::collections::HashSet<KeyCode>,
     /// This frame's selected-source mouse delta in pixels (dual-source raw/absolute already resolved).
     /// The game applies its own sensitivity/inversion.
     pub mouse_delta: (f32, f32),
@@ -280,6 +282,7 @@ pub async fn run<G: Game + 'static>(mut game: G) {
                     // Rising key edges this frame (menu nav + Tab toggle) + poll the gamepad up front so
                     // both the menu and the game layers see fresh input.
                     let pressed: std::collections::HashSet<KeyCode> = held.difference(&prev_held).copied().collect();
+                    let released: std::collections::HashSet<KeyCode> = prev_held.difference(&held).copied().collect();
                     prev_held = held.clone();
                     gamepad.update();
 
@@ -288,7 +291,7 @@ pub async fn run<G: Game + 'static>(mut game: G) {
                     // reset the loading clock, and climb.
                     if layers.active() == LAYER_MENU {
                         let input = Input { bindings: &bindings, keys: &held, mouse: &mouse_btns, gamepad: &gamepad };
-                        let mut ctx = Ctx { world: &world, scene: &mut scene, input: &input, pressed: &pressed, mouse_delta: (0.0, 0.0), time: &time, window: &window, dt: real_dt };
+                        let mut ctx = Ctx { world: &world, scene: &mut scene, input: &input, pressed: &pressed, released: &released, mouse_delta: (0.0, 0.0), time: &time, window: &window, dt: real_dt };
                         match game.menu(&mut ctx) {
                             MenuOutcome::Stay => return,
                             MenuOutcome::Exit => {
@@ -342,7 +345,7 @@ pub async fn run<G: Game + 'static>(mut game: G) {
                         if let Some(LayerTransition::Ascending(LAYER_GAME)) = layers.advance() {
                             let Some(data) = pending.take() else { continue };
                             let input = Input { bindings: &bindings, keys: &held, mouse: &mouse_btns, gamepad: &gamepad };
-                            let mut ctx = Ctx { world: &world, scene: &mut scene, input: &input, pressed: &pressed, mouse_delta: (0.0, 0.0), time: &time, window: &window, dt: real_dt };
+                            let mut ctx = Ctx { world: &world, scene: &mut scene, input: &input, pressed: &pressed, released: &released, mouse_delta: (0.0, 0.0), time: &time, window: &window, dt: real_dt };
                             game.setup(&mut ctx, data);
                         }
                     }
@@ -355,8 +358,8 @@ pub async fn run<G: Game + 'static>(mut game: G) {
                         bar_shown += (progress.fraction() - bar_shown) * (1.0 - (-6.0 * dt).exp());
                         match scene.render_loading(t, bar_shown) {
                             Ok(()) => {}
-                            Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => scene.resize(scene.size),
-                            Err(wgpu::SurfaceError::OutOfMemory) => elwt.exit(),
+                            Err(SurfaceError::Lost | SurfaceError::Outdated) => scene.resize(scene.size),
+                            Err(SurfaceError::Occluded) => {}
                             Err(e) => eprintln!("surface error: {e:?}"),
                         }
                         return;
@@ -370,7 +373,7 @@ pub async fn run<G: Game + 'static>(mut game: G) {
                     mouse_raw_acc = (0.0, 0.0);
 
                     let input = Input { bindings: &bindings, keys: &held, mouse: &mouse_btns, gamepad: &gamepad };
-                    let mut ctx = Ctx { world: &world, scene: &mut scene, input: &input, pressed: &pressed, mouse_delta, time: &time, window: &window, dt: real_dt };
+                    let mut ctx = Ctx { world: &world, scene: &mut scene, input: &input, pressed: &pressed, released: &released, mouse_delta, time: &time, window: &window, dt: real_dt };
                     let cam = game.update(&mut ctx);
                     for _ in 0..steps {
                         game.fixed_update(&mut ctx);
@@ -381,8 +384,8 @@ pub async fn run<G: Game + 'static>(mut game: G) {
                     scene.set_view(cam.view, cam.near, cam.far);
                     match scene.render(&world.borrow()) {
                         Ok(()) => {}
-                        Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => scene.resize(scene.size),
-                        Err(wgpu::SurfaceError::OutOfMemory) => elwt.exit(),
+                        Err(SurfaceError::Lost | SurfaceError::Outdated) => scene.resize(scene.size),
+                        Err(SurfaceError::Occluded) => {}
                         Err(e) => eprintln!("surface error: {e:?}"),
                     }
                 }
