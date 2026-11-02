@@ -113,6 +113,130 @@ fn print_batches(mem: &Mem) -> Result<(), String> {
     Ok(())
 }
 
+/// `foliage`: each species of the `foliage` chunk: its template, atlas, range, billboard words, textures,
+/// and how many leaves carry each flag value.
+pub fn foliage_list(wadpath: &str) -> Result<(), String> {
+    let mut assets = mercs2_engine::asset::AssetSource::discover(wadpath, &[])?;
+    let (name, chunk) = assets
+        .extract_singleton(mercs2_formats::foliage::TYPE_HASH)
+        .ok_or("no foliage chunk in any open wad")?;
+    let foliage = mercs2_formats::foliage::Foliage::decode(&chunk)?;
+    let templates = mercs2_engine::worldutil::TemplateRecords::load(&mut assets)?;
+    println!("[foliage] chunk 0x{name:08X} version {} {} species", foliage.version, foliage.species.len());
+    for s in &foliage.species {
+        let model = *templates.models.get(&s.template).ok_or_else(|| format!("0x{:08X}: no model", s.template))?;
+        let wad = assets.base_mut();
+        let m = mercs2_engine::model::Model::load(wad, model).map_err(|e| format!("model 0x{model:08X}: {e}"))?;
+        let (_, _, draws, _) = m.flatten();
+        let hashes: std::collections::BTreeSet<u32> = draws.iter().flat_map(|d| [d.diffuse, d.normal]).flatten().collect();
+        for h in hashes {
+            if let Err(e) = mercs2_engine::wad::extract_texture_hires(wad, h) {
+                println!("0x{:08X} model 0x{model:08X}: texture 0x{h:08X}: {e}", s.template);
+            }
+        }
+        println!("0x{:08X} model 0x{model:08X}: {} draws", s.template, draws.len());
+        let leaves = s.tree.leaves()?;
+        let mut flags = [0usize; 16];
+        for l in &leaves {
+            flags[l.flags as usize] += 1;
+        }
+        let words: Vec<f32> = s.basis[..24].iter().map(|w| f32::from_bits(*w)).collect();
+        println!(
+            "0x{:08X} trees {} atlas {:?} range {} flag {} params {:?} views {} tail {:?} root0 {} flags {:?}",
+            s.template,
+            leaves.len(),
+            s.atlas,
+            s.range(),
+            s.flag,
+            s.params,
+            s.basis[24],
+            s.tail_words.map(f32::from_bits),
+            s.tree.root[0],
+            flags.iter().enumerate().filter(|(_, n)| **n > 0).collect::<Vec<_>>(),
+        );
+        println!("  corners {:?}\n  uvs {:?}", &words[..12], &words[12..]);
+        println!(
+            "  material textures {:08X?} tail {:08X?} word0 {:08X} flags {:#06x} params {:?}",
+            s.material.textures, s.material.tail, s.material.word_0, s.material.flags, s.material.params
+        );
+        if let Some(m) = &s.modelled {
+            println!(
+                "  modelled {} vertices {:?} indices {:?} textures {:08X?} tail {:08X?}",
+                m.vertices.len(),
+                m.vertices,
+                m.indices,
+                m.material.textures,
+                m.material.tail
+            );
+        }
+    }
+    Ok(())
+}
+
+/// `foliage-check`: every tree a capture holds as an entity against the `foliage` chunk: each resident
+/// row of each batch must lie on a decoded leaf of its species. An error names the first that does not.
+pub fn foliage_check(wadpath: &str, capture: &str) -> Result<(), String> {
+    /// A row's float is the leaf's; x87 rounds them a little differently from this decoder.
+    const SAME_PLACE: f32 = 0.01;
+    let mut assets = mercs2_engine::asset::AssetSource::discover(wadpath, &[])?;
+    let (_, chunk) = assets
+        .extract_singleton(mercs2_formats::foliage::TYPE_HASH)
+        .ok_or("no foliage chunk in any open wad")?;
+    let foliage = mercs2_formats::foliage::Foliage::decode(&chunk)?;
+    let cap = Capture::open(std::path::Path::new(capture))?;
+    let mem = cap.mem()?;
+    let (base, count) = (mem.u32(BATCHES)?, mem.u32(BATCH_COUNT)?);
+    if count as usize != foliage.species.len() {
+        return Err(format!("{count} batches, the chunk holds {} species", foliage.species.len()));
+    }
+    let mut rows_seen = 0usize;
+    for (i, species) in foliage.species.iter().enumerate() {
+        let b = base + i as u32 * BATCH_STRIDE;
+        let template = mem.u32(b + 0x6D0)?;
+        if template != species.template {
+            return Err(format!("batch {i}: template 0x{template:08X}, species 0x{:08X}", species.template));
+        }
+        let leaves = species.tree.leaves()?;
+        if mem.u32(b)? as usize != leaves.len() + 1 {
+            return Err(format!("batch {i}: {} in retail, {} leaves", mem.u32(b)?, leaves.len()));
+        }
+        let (table, rows) = (mem.u32(b + 0x708)?, mem.u16(b + 0x70C)? as u32);
+        let eye = floats::<3>(&mem, mem.u32(VIEW)? + VIEW_STRIDE + 0xB20)?;
+        let inside = leaves
+            .iter()
+            .filter(|l| (0..3).map(|k| (l.position[k] - eye[k]).powi(2)).sum::<f32>() < species.range().powi(2))
+            .count();
+        if rows > 0 || inside > 0 {
+            println!("batch {i:2} range {}: {rows} rows, {inside} leaves in range of the camera", species.range());
+        }
+        for r in 0..rows {
+            let row = table + r * INSTANCE_STRIDE;
+            let p = floats::<3>(&mem, row)?;
+            let (d, leaf) = leaves
+                .iter()
+                .map(|l| ((0..3).map(|k| (l.position[k] - p[k]).powi(2)).sum::<f32>().sqrt(), l))
+                .min_by(|a, b| a.0.total_cmp(&b.0))
+                .ok_or_else(|| format!("batch {i}: no leaves"))?;
+            println!(
+                "batch {i:2} row {r:2} id 0x{:08X} at {p:?} w {} leaf off by {d:.4} flags {:#06b} yaw {:.3}",
+                mem.u32(row + 0x10)?,
+                f32_at(&mem, row + 0xC)?,
+                leaf.flags,
+                leaf.yaw
+            );
+            if d > SAME_PLACE {
+                return Err(format!("batch {i} row {r} at {p:?}: nearest leaf is {d} m away"));
+            }
+            if (f32_at(&mem, row + 0xC)? - leaf.yaw).abs() > 1e-5 {
+                return Err(format!("batch {i} row {r}: yaw {} in retail, {} decoded", f32_at(&mem, row + 0xC)?, leaf.yaw));
+            }
+            rows_seen += 1;
+        }
+    }
+    println!("[foliage-check] {rows_seen} rows lie on decoded leaves");
+    Ok(())
+}
+
 /// `dump-model`: the runtime model `M` of `hash` (`M+0x08` the model type hash) with its LOD fields, and
 /// every render object `OBJ` drawing it (`OBJ+0x1e0` = `M`): flags, rung and `view_state`.
 pub fn dump_model(capture: &str, hash: u32) -> Result<(), String> {
@@ -145,18 +269,29 @@ pub fn dump_near(capture: &str, at: [f32; 3], radius: f32) -> Result<(), String>
     let cap = Capture::open(std::path::Path::new(capture))?;
     let mem = cap.mem()?;
     let table = mem.container_named("SceneObject")?;
+    // `Object.SetVisible` (`0x5D03B0`): the entity's `RuntimeSceneObject +0x34` is its render object, and
+    // bit 0 of that object's `+0x10` set means hidden. An entity asleep has no record.
+    let runtime = mem.container_named("RuntimeSceneObject")?;
+    let render: std::collections::HashMap<u32, u32> =
+        mem.records(&runtime)?.iter().map(|r| Ok((r.key, mem.u32(r.va + 0x34)?))).collect::<Result<_, String>>()?;
     let mut near = Vec::new();
     for r in mem.records(&table)? {
         let p = floats::<3>(&mem, r.va)?;
         let d = (0..3).map(|k| (p[k] - at[k]).powi(2)).sum::<f32>().sqrt();
         if d <= radius {
-            near.push((d, r.key, p, mem.u32(r.va + 0x14)?));
+            let state = match render.get(&r.key) {
+                None => "asleep",
+                Some(0) => "no render object",
+                Some(&o) if mem.u16(o + 0x10)? & 1 != 0 => "hidden",
+                Some(_) => "shown",
+            };
+            near.push((d, r.key, p, mem.u32(r.va + 0x14)?, state));
         }
     }
     near.sort_by(|a, b| a.0.total_cmp(&b.0));
     println!("[dump-near] {} objects within {radius} of {at:?}", near.len());
-    for (d, key, p, template) in near {
-        println!("{d:8.1} m  0x{key:08X} at {p:?} template 0x{template:08X}");
+    for (d, key, p, template, state) in near {
+        println!("{d:8.1} m  0x{key:08X} at {p:?} {state} template 0x{template:08X}");
     }
     Ok(())
 }
