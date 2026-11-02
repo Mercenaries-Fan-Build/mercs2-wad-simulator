@@ -42,6 +42,7 @@
 //!   `ctx:spawn(template, dist)` (`49_ui_menu.lua:78-95`), then `Ess.Object.remove` and
 //!   `Ess.Object.alive` polled until false (`11_object.lua:224-239`: removal is deferred ~0.5 s).
 
+use mercs2_bridge::reply::{parse_reply, Reply, Value};
 use mercs2_bridge::{Bridge, BridgeError};
 use std::time::{Duration, Instant};
 
@@ -83,69 +84,6 @@ pub const DEFAULT_REMOVE_DEADLINE: Duration = Duration::from_secs(5);
 pub const DEFAULT_POLL_INTERVAL: Duration = Duration::from_millis(250);
 /// The default spawn distance: the menu's own distance for a car (`AllInOneSpawnMenu.lua:19`).
 pub const DEFAULT_SPAWN_DIST: f64 = 10.0;
-
-/// One value of an `[ok]` reply, as `mercs2_formats::lua_exec::format_value` renders it.
-#[derive(Debug, Clone, PartialEq)]
-pub enum Value {
-    Nil,
-    Bool(bool),
-    Num(f64),
-    Str(String),
-    Table,
-    Function,
-    /// Anything else (`<tt=… val=…>`, unreadable strings, or a token a tab inside a string split).
-    Other(String),
-}
-
-/// A whole REPL reply.
-#[derive(Debug, Clone, PartialEq)]
-pub enum Reply {
-    Ok(Vec<Value>),
-    Runtime(String),
-    Compile(String),
-    Bridge(String),
-    Unrecognized(String),
-}
-
-fn is_number_text(t: &str) -> bool {
-    t.bytes().any(|b| b.is_ascii_digit()) && t.bytes().all(|b| b.is_ascii_digit() || b"+-.e".contains(&b))
-}
-
-/// One tab-separated token of an `[ok]` reply.
-pub fn parse_value(tok: &str) -> Value {
-    match tok {
-        "nil" => Value::Nil,
-        "true" => Value::Bool(true),
-        "false" => Value::Bool(false),
-        "<table>" => Value::Table,
-        "<function>" => Value::Function,
-        "1.#INF" => Value::Num(f64::INFINITY),
-        "-1.#INF" => Value::Num(f64::NEG_INFINITY),
-        "1.#QNAN" | "-1.#IND" => Value::Num(f64::NAN),
-        _ if tok.len() >= 2 && tok.starts_with('"') && tok.ends_with('"') => {
-            Value::Str(tok[1..tok.len() - 1].to_string())
-        }
-        _ if is_number_text(tok) => tok.parse::<f64>().map(Value::Num).unwrap_or_else(|_| Value::Other(tok.to_string())),
-        _ => Value::Other(tok.to_string()),
-    }
-}
-
-/// Parse the text [`Bridge::eval`] returned.
-pub fn parse_reply(text: &str) -> Reply {
-    if text == "[ok]" {
-        Reply::Ok(Vec::new())
-    } else if let Some(rest) = text.strip_prefix("[ok]\t") {
-        Reply::Ok(rest.split('\t').map(parse_value).collect())
-    } else if let Some(rest) = text.strip_prefix("[runtime]") {
-        Reply::Runtime(rest.trim_start().to_string())
-    } else if let Some(rest) = text.strip_prefix("[compile]") {
-        Reply::Compile(rest.trim_start().to_string())
-    } else if let Some(rest) = text.strip_prefix("[bridge]") {
-        Reply::Bridge(rest.trim_start().to_string())
-    } else {
-        Reply::Unrecognized(text.to_string())
-    }
-}
 
 /// The shape one returned value must have.
 #[derive(Debug, Clone)]
