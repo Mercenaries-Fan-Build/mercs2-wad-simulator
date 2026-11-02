@@ -30,7 +30,8 @@ pub mod widget;
 
 pub use marker::{Marker, MarkerKind, MarkerSet};
 pub use widget::{
-    FlashData, ImageData, MinimapData, MovieData, SpriteData, TextData, Widget, WidgetAnim, WidgetKind,
+    FlashAction, FlashArg, FlashData, FlashRequest, ImageData, MinimapData, MovieData, SpriteData, TextData,
+    Widget, WidgetAnim, WidgetKind, SHELL_MOVIE,
     WidgetTree, COLOR_UNCHANGED,
 };
 
