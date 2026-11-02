@@ -508,6 +508,31 @@ pub mod theme {
     pub const BAD: Color32 = Color32::from_rgb(0xd5, 0x60, 0x4c);
     pub const INFO: Color32 = Color32::from_rgb(0x63, 0xa6, 0xcf);
 
+    /// The Live page's own palette: the board draws it cold and blue, apart from the workbenches.
+    pub mod live {
+        use egui::Color32;
+
+        pub const HEAD: Color32 = Color32::from_rgb(0x12, 0x17, 0x1f);
+        pub const PANEL: Color32 = Color32::from_rgb(0x15, 0x1a, 0x22);
+        pub const WELL: Color32 = Color32::from_rgb(0x0b, 0x0e, 0x13);
+        pub const RAISED: Color32 = Color32::from_rgb(0x22, 0x30, 0x3f);
+        pub const GLASS: Color32 = Color32::from_rgba_premultiplied(8, 10, 14, 205);
+        pub const LINE: Color32 = Color32::from_rgb(0x28, 0x30, 0x3d);
+        pub const TX: Color32 = Color32::from_rgb(0xe7, 0xec, 0xf3);
+        pub const DIM: Color32 = Color32::from_rgb(0xaa, 0xb4, 0xc2);
+        pub const FAINT: Color32 = Color32::from_rgb(0x6f, 0x7d, 0x8e);
+        pub const GREEN: Color32 = Color32::from_rgb(0x37, 0xd6, 0x7a);
+        pub const BLUE: Color32 = Color32::from_rgb(0x1e, 0x9b, 0xff);
+        pub const AMBER: Color32 = Color32::from_rgb(0xf0, 0xa9, 0x2b);
+        pub const GOLD: Color32 = Color32::from_rgb(0xf6, 0xd9, 0x8a);
+        pub const RED: Color32 = Color32::from_rgb(0xef, 0x50, 0x64);
+        pub const PINK: Color32 = Color32::from_rgb(0xec, 0x48, 0x99);
+        pub const ORANGE: Color32 = Color32::from_rgb(0xf9, 0x73, 0x16);
+        pub const TEAL: Color32 = Color32::from_rgb(0x74, 0xdd, 0xc8);
+        pub const VIOLET: Color32 = Color32::from_rgb(0xc3, 0xb1, 0xfb);
+        pub const OLIVE: Color32 = Color32::from_rgb(0x8f, 0xbf, 0x4f);
+    }
+
     /// The condensed industrial display family (Bahnschrift, shipped on Windows). Falls back to the
     /// proportional stack when absent so `FontFamily::Name("disp")` always resolves.
     pub fn disp() -> FontFamily {
