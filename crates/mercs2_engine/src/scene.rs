@@ -356,23 +356,23 @@ fn geom_pipeline(
             attributes: &wgpu::vertex_attr_array![7 => Float32x4, 8 => Float32x4, 9 => Float32x4, 10 => Float32x4],
         },
     };
-    let buffers = [vbuf_layout, instance_layout];
+    let buffers = [Some(vbuf_layout), Some(instance_layout)];
     device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
         label: Some("scene geometry pipeline"),
         layout: Some(layout),
         vertex: wgpu::VertexState {
             module: shader,
-            entry_point: match kind {
+            entry_point: Some(match kind {
                 GeomKind::Model => "vs_main",
                 GeomKind::Scrub => "vs_scrub",
                 GeomKind::Billboard => "vs_billboard",
-            },
+            }),
             buffers: if kind == GeomKind::Model { &buffers[..1] } else { &buffers },
             compilation_options: Default::default(),
         },
         fragment: Some(wgpu::FragmentState {
             module: shader,
-            entry_point: if kind == GeomKind::Billboard { "fs_billboard" } else { "fs_main" },
+            entry_point: Some(if kind == GeomKind::Billboard { "fs_billboard" } else { "fs_main" }),
             targets: &[Some(wgpu::ColorTargetState { format, blend: Some(blend), write_mask: wgpu::ColorWrites::ALL })],
             compilation_options: Default::default(),
         }),
@@ -388,13 +388,14 @@ fn geom_pipeline(
         },
         depth_stencil: Some(wgpu::DepthStencilState {
             format: DEPTH_FORMAT,
-            depth_write_enabled: depth_write,
-            depth_compare: wgpu::CompareFunction::Less,
+            depth_write_enabled: Some(depth_write),
+            depth_compare: Some(wgpu::CompareFunction::Less),
             stencil: wgpu::StencilState::default(),
             bias: wgpu::DepthBiasState::default(),
         }),
         multisample: wgpu::MultisampleState::default(),
-        multiview: None,
+        multiview_mask: None,
+        cache: None,
     })
 }
 
@@ -630,6 +631,9 @@ pub struct Scene {
     /// 2D UI overlay (quads + bitmap text, `crate::ui`). Staged via `ui_rect`/`ui_text`, drawn on
     /// top of the shell/loading pass each frame (`render_loading`/`render_menu`). Empty = zero cost.
     ui: crate::ui::UiPass,
+    /// The Flash pass, made when a movie first needs it, and its stencil at the surface's size.
+    gfx: Option<crate::gfx_pass::GfxPass>,
+    gfx_stencil: Option<([u32; 2], wgpu::TextureView)>,
     /// Billboard particle / FX runtime (registry §7). Drawn AFTER the opaque forward pass.
     /// Empty by default (zero cost) until an effect is started via `fx_start*`.
     particles: crate::particles::ParticleSystem,
@@ -647,31 +651,91 @@ pub struct Scene {
     decal_feed: Option<Rc<RefCell<Vec<DecalVertex>>>>,
 }
 
+/// Why a frame found no surface texture to draw into; see [`wgpu::CurrentSurfaceTexture`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SurfaceError {
+    Timeout,
+    Occluded,
+    Outdated,
+    Lost,
+    Validation,
+}
+
+/// What a frame draws into.
+enum FrameTarget {
+    Surface(wgpu::SurfaceTexture),
+    /// A texture shaped like the surface, for a capture asked of a hidden window.
+    Offscreen(wgpu::Texture),
+}
+
+impl FrameTarget {
+    fn texture(&self) -> &wgpu::Texture {
+        match self {
+            FrameTarget::Surface(surface) => &surface.texture,
+            FrameTarget::Offscreen(texture) => texture,
+        }
+    }
+}
+
 impl Scene {
+    /// The target of this frame. wgpu gives a fully covered macOS window no surface texture, and a
+    /// capture still needs its frame, so that one frame draws offscreen.
+    fn acquire(&mut self) -> Result<FrameTarget, SurfaceError> {
+        use wgpu::CurrentSurfaceTexture as Current;
+        let skipped = match self.surface.get_current_texture() {
+            Current::Success(texture) | Current::Suboptimal(texture) => return Ok(FrameTarget::Surface(texture)),
+            Current::Occluded if matches!(self.capture, Capture::Pending) => {
+                return Ok(FrameTarget::Offscreen(self.device.create_texture(&wgpu::TextureDescriptor {
+                    label: Some("hidden window frame"),
+                    size: wgpu::Extent3d {
+                        width: self.config.width,
+                        height: self.config.height,
+                        depth_or_array_layers: 1,
+                    },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: self.config.format,
+                    usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+                    view_formats: &self.config.view_formats,
+                })));
+            }
+            Current::Timeout => SurfaceError::Timeout,
+            Current::Occluded => {
+                // A hidden window has no present to pace its frames.
+                std::thread::sleep(std::time::Duration::from_millis(16));
+                SurfaceError::Occluded
+            }
+            Current::Outdated => SurfaceError::Outdated,
+            Current::Lost => SurfaceError::Lost,
+            Current::Validation => SurfaceError::Validation,
+        };
+        // Nothing draws this frame, so nothing else consumes what it staged.
+        self.ui.discard();
+        Err(skipped)
+    }
+
     pub async fn new(window: Arc<Window>) -> Scene {
         let size = window.inner_size();
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::PRIMARY,
-            ..Default::default()
-        });
+        let mut instance_desc = wgpu::InstanceDescriptor::new_with_display_handle(Box::new(window.clone()));
+        instance_desc.backends = wgpu::Backends::PRIMARY;
+        let instance = wgpu::Instance::new(instance_desc);
         let surface = instance.create_surface(window.clone()).expect("create_surface");
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions {
                 power_preference: wgpu::PowerPreference::HighPerformance,
                 compatible_surface: Some(&surface),
                 force_fallback_adapter: false,
+                apply_limit_buckets: false,
             })
             .await
             .expect("no suitable GPU adapter");
         let (device, queue) = adapter
-            .request_device(
-                &wgpu::DeviceDescriptor {
-                    label: Some("mercs2_engine scene device"),
-                    required_features: wgpu::Features::TEXTURE_COMPRESSION_BC,
-                    ..Default::default()
-                },
-                None,
-            )
+            .request_device(&wgpu::DeviceDescriptor {
+                label: Some("mercs2_engine scene device"),
+                required_features: wgpu::Features::TEXTURE_COMPRESSION_BC,
+                ..Default::default()
+            })
             .await
             .expect("request_device");
 
@@ -679,6 +743,8 @@ impl Scene {
             .get_default_config(&adapter, size.width.max(1), size.height.max(1))
             .expect("surface unsupported by adapter");
         config.usage = wgpu::TextureUsages::RENDER_ATTACHMENT;
+        // Flash blends in the space its colours were authored in, so it draws through a plain view.
+        config.view_formats.push(config.format.remove_srgb_suffix());
         surface.configure(&device, &config);
         let surface_usages = surface.get_capabilities(&adapter).usages;
 
@@ -760,7 +826,7 @@ impl Scene {
             address_mode_w: wgpu::AddressMode::Repeat,
             mag_filter: wgpu::FilterMode::Linear,
             min_filter: wgpu::FilterMode::Linear,
-            mipmap_filter: wgpu::FilterMode::Linear, // trilinear: blend across the uploaded mip chain
+            mipmap_filter: wgpu::MipmapFilterMode::Linear, // trilinear: blend across the uploaded mip chain
             ..Default::default()
         });
         let white = make_white_view(&device, &queue);
@@ -943,8 +1009,8 @@ impl Scene {
         let shader = device.create_shader_module(wgpu::include_wgsl!("shader.wgsl"));
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("scene pipeline layout"),
-            bind_group_layouts: &[&camera_bgl, &tex_bgl, &bone_bgl, &lights_bgl],
-            push_constant_ranges: &[],
+            bind_group_layouts: &[Some(&camera_bgl), Some(&tex_bgl), Some(&bone_bgl), Some(&lights_bgl)],
+            immediate_size: 0,
         });
         // Geometry pipeline builder, parameterised by color-target format so the SAME shader/layout
         // (incl. the group-3 lights) serve BOTH the direct-to-swapchain path (default `--ecs`/
@@ -996,20 +1062,20 @@ impl Scene {
         let shadow_shader = device.create_shader_module(wgpu::include_wgsl!("shadow.wgsl"));
         let shadow_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("shadow pipeline layout"),
-            bind_group_layouts: &[&camera_bgl, &shadow_vp_bgl, &bone_bgl],
-            push_constant_ranges: &[],
+            bind_group_layouts: &[Some(&camera_bgl), Some(&shadow_vp_bgl), Some(&bone_bgl)],
+            immediate_size: 0,
         });
         let shadow_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("shadow pipeline"),
             layout: Some(&shadow_pipeline_layout),
             vertex: wgpu::VertexState {
                 module: &shadow_shader,
-                entry_point: "vs_shadow",
-                buffers: &[wgpu::VertexBufferLayout {
+                entry_point: Some("vs_shadow"),
+                buffers: &[Some(wgpu::VertexBufferLayout {
                     array_stride: std::mem::size_of::<Vertex>() as wgpu::BufferAddress,
                     step_mode: wgpu::VertexStepMode::Vertex,
                     attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x4, 2 => Float32x2, 3 => Float32x3, 4 => Float32x4, 5 => Uint8x4, 6 => Unorm8x4],
-                }],
+                })],
                 compilation_options: Default::default(),
             },
             fragment: None,
@@ -1021,13 +1087,14 @@ impl Scene {
             },
             depth_stencil: Some(wgpu::DepthStencilState {
                 format: DEPTH_FORMAT,
-                depth_write_enabled: true,
-                depth_compare: wgpu::CompareFunction::Less,
+                depth_write_enabled: Some(true),
+                depth_compare: Some(wgpu::CompareFunction::Less),
                 stencil: wgpu::StencilState::default(),
                 bias: wgpu::DepthBiasState { constant: 2, slope_scale: 2.0, clamp: 0.0 },
             }),
             multisample: wgpu::MultisampleState::default(),
-            multiview: None,
+            multiview_mask: None,
+            cache: None,
         });
 
         // Blob / contact-shadow fallback pass (`FUN_00853710`, shadow_code_map.md §5). A darken-blend
@@ -1068,25 +1135,25 @@ impl Scene {
         });
         let blob_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("blob pipeline layout"),
-            bind_group_layouts: &[&blob_bgl],
-            push_constant_ranges: &[],
+            bind_group_layouts: &[Some(&blob_bgl)],
+            immediate_size: 0,
         });
         let blob_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("blob pipeline"),
             layout: Some(&blob_layout),
             vertex: wgpu::VertexState {
                 module: &blob_shader,
-                entry_point: "vs_blob",
-                buffers: &[wgpu::VertexBufferLayout {
+                entry_point: Some("vs_blob"),
+                buffers: &[Some(wgpu::VertexBufferLayout {
                     array_stride: std::mem::size_of::<BlobVertex>() as wgpu::BufferAddress,
                     step_mode: wgpu::VertexStepMode::Vertex,
                     attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x2, 2 => Float32],
-                }],
+                })],
                 compilation_options: Default::default(),
             },
             fragment: Some(wgpu::FragmentState {
                 module: &blob_shader,
-                entry_point: "fs_blob",
+                entry_point: Some("fs_blob"),
                 targets: &[Some(wgpu::ColorTargetState {
                     format: config.format,
                     // Darken blend: out = dst*(1 - a). Blob outputs a = darkness*radial-falloff.
@@ -1109,13 +1176,14 @@ impl Scene {
             },
             depth_stencil: Some(wgpu::DepthStencilState {
                 format: DEPTH_FORMAT,
-                depth_write_enabled: false, // a shadow decal, not occluding geometry
-                depth_compare: wgpu::CompareFunction::LessEqual,
+                depth_write_enabled: Some(false), // a shadow decal, not occluding geometry
+                depth_compare: Some(wgpu::CompareFunction::LessEqual),
                 stencil: wgpu::StencilState::default(),
                 bias: wgpu::DepthBiasState::default(),
             }),
             multisample: wgpu::MultisampleState::default(),
-            multiview: None,
+            multiview_mask: None,
+            cache: None,
         });
 
         // Sky pass (PLACEHOLDER for the game's PgSky/PgSun/PgCloud shader stack): a fullscreen
@@ -1149,8 +1217,8 @@ impl Scene {
         });
         let sky_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("sky pipeline layout"),
-            bind_group_layouts: &[&sky_bgl],
-            push_constant_ranges: &[],
+            bind_group_layouts: &[Some(&sky_bgl)],
+            immediate_size: 0,
         });
         // Sky pipeline builder, parameterised by color-target format (swapchain for the fallback
         // path, HDR for the tone-mapped world path).
@@ -1160,13 +1228,13 @@ impl Scene {
                 layout: Some(&sky_layout),
                 vertex: wgpu::VertexState {
                     module: &sky_shader,
-                    entry_point: "vs_main",
+                    entry_point: Some("vs_main"),
                     buffers: &[],
                     compilation_options: Default::default(),
                 },
                 fragment: Some(wgpu::FragmentState {
                     module: &sky_shader,
-                    entry_point: "fs_main",
+                    entry_point: Some("fs_main"),
                     targets: &[Some(wgpu::ColorTargetState {
                         format,
                         blend: Some(wgpu::BlendState::REPLACE),
@@ -1181,13 +1249,14 @@ impl Scene {
                 },
                 depth_stencil: Some(wgpu::DepthStencilState {
                     format: DEPTH_FORMAT,
-                    depth_write_enabled: false,
-                    depth_compare: wgpu::CompareFunction::LessEqual,
+                    depth_write_enabled: Some(false),
+                    depth_compare: Some(wgpu::CompareFunction::LessEqual),
                     stencil: wgpu::StencilState::default(),
                     bias: wgpu::DepthBiasState::default(),
                 }),
                 multisample: wgpu::MultisampleState::default(),
-                multiview: None,
+                multiview_mask: None,
+                cache: None,
             })
         };
         let sky_pipeline = build_sky_pipeline(config.format);
@@ -1239,21 +1308,21 @@ impl Scene {
             make_tex_bind(&device, &tex_bgl, &sampler, [&white, &flat_normal, &black, &black, &black, &black], &no_material_params);
         let loading_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("loading pipeline layout"),
-            bind_group_layouts: &[&loading_bgl, &tex_bgl],
-            push_constant_ranges: &[],
+            bind_group_layouts: &[Some(&loading_bgl), Some(&tex_bgl)],
+            immediate_size: 0,
         });
         let loading_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("loading pipeline"),
             layout: Some(&loading_layout),
             vertex: wgpu::VertexState {
                 module: &loading_shader,
-                entry_point: "vs_main",
+                entry_point: Some("vs_main"),
                 buffers: &[],
                 compilation_options: Default::default(),
             },
             fragment: Some(wgpu::FragmentState {
                 module: &loading_shader,
-                entry_point: "fs_main",
+                entry_point: Some("fs_main"),
                 targets: &[Some(wgpu::ColorTargetState {
                     format: config.format,
                     blend: Some(wgpu::BlendState::REPLACE),
@@ -1268,13 +1337,14 @@ impl Scene {
             },
             depth_stencil: Some(wgpu::DepthStencilState {
                 format: DEPTH_FORMAT,
-                depth_write_enabled: false,
-                depth_compare: wgpu::CompareFunction::LessEqual,
+                depth_write_enabled: Some(false),
+                depth_compare: Some(wgpu::CompareFunction::LessEqual),
                 stencil: wgpu::StencilState::default(),
                 bias: wgpu::DepthBiasState::default(),
             }),
             multisample: wgpu::MultisampleState::default(),
-            multiview: None,
+            multiview_mask: None,
+            cache: None,
         });
 
         let ui = crate::ui::UiPass::new(&device, &queue, config.format);
@@ -1298,6 +1368,8 @@ impl Scene {
             config,
             surface_usages,
             capture: Capture::Idle,
+            gfx: None,
+            gfx_stencil: None,
             size,
             pipeline,
             pipeline_t,
@@ -1446,9 +1518,76 @@ impl Scene {
         self.ui.text(x, y, scale, color, s)
     }
 
+    /// Build this frame's movies, back to front, for [`Self::render_flash`].
+    pub fn prepare_flash(&mut self, draws: &[crate::flash::FlashDraw], images: &mut dyn crate::gfx_pass::GfxImages) -> Result<(), String> {
+        let format = self.config.format.remove_srgb_suffix();
+        let gfx = self.gfx.get_or_insert_with(|| crate::gfx_pass::GfxPass::new(&self.device, &self.queue, format));
+        gfx.begin();
+        for draw in draws {
+            gfx.prepare(&self.device, &self.queue, &draw.def, &draw.items, images)?;
+        }
+        Ok(())
+    }
+
+    /// Draw the prepared movies on black, with nothing else on screen.
+    pub fn render_flash(&mut self) -> Result<(), SurfaceError> {
+        let size = [self.config.width, self.config.height];
+        if self.gfx_stencil.as_ref().is_none_or(|(at, _)| *at != size) {
+            let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("flash stencil"),
+                size: wgpu::Extent3d { width: size[0], height: size[1], depth_or_array_layers: 1 },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: crate::gfx_pass::GfxPass::depth_format(),
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                view_formats: &[],
+            });
+            self.gfx_stencil = Some((size, texture.create_view(&wgpu::TextureViewDescriptor::default())));
+        }
+        let output = self.acquire()?;
+        let view = output.texture().create_view(&wgpu::TextureViewDescriptor {
+            format: Some(self.config.format.remove_srgb_suffix()),
+            ..Default::default()
+        });
+        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("flash frame") });
+        {
+            let stencil = &self.gfx_stencil.as_ref().expect("made above").1;
+            let mut pass = encoder
+                .begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("flash pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &view,
+                        depth_slice: None,
+                        resolve_target: None,
+                        ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::BLACK), store: wgpu::StoreOp::Store },
+                    })],
+                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                        view: stencil,
+                        depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(1.0), store: wgpu::StoreOp::Discard }),
+                        stencil_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(0), store: wgpu::StoreOp::Discard }),
+                    }),
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                    multiview_mask: None,
+                })
+                .forget_lifetime();
+            if let Some(gfx) = &self.gfx {
+                gfx.record(&mut pass);
+            }
+        }
+        let readback = self.encode_capture(&mut encoder, output.texture());
+        self.queue.submit(std::iter::once(encoder.finish()));
+        self.finish_capture(readback);
+        if let FrameTarget::Surface(surface) = output {
+            self.queue.present(surface);
+        }
+        Ok(())
+    }
+
     /// Render the shell MENU frame: the letterboxed plate dimmed (no spinner/bar — the WGSL menu
     /// mode, progress = -1) + this frame's staged UI overlay (`ui_rect`/`ui_text`).
-    pub fn render_menu(&mut self, t: f32) -> Result<(), wgpu::SurfaceError> {
+    pub fn render_menu(&mut self, t: f32) -> Result<(), SurfaceError> {
         self.render_loading(t, -1.0)
     }
 
@@ -1457,13 +1596,13 @@ impl Scene {
     /// `t` = seconds since the loading screen appeared (drives the rotation);
     /// `progress` = 0..1 staged-load fraction (fills the plate's bar frame); any staged UI
     /// overlay (`ui_rect`/`ui_text`) is drawn on top (that is how `render_menu` draws the menu).
-    pub fn render_loading(&mut self, t: f32, progress: f32) -> Result<(), wgpu::SurfaceError> {
+    pub fn render_loading(&mut self, t: f32, progress: f32) -> Result<(), SurfaceError> {
         self.render_loading_mode(t, progress, 0.0, None)
     }
 
     /// [`Self::render_menu`] with the external overlay hook (see [`Self::render_with`]) — the
     /// workshop's browse screen draws its GUI over the shell plate through this.
-    pub fn render_menu_with(&mut self, t: f32, overlay: Option<Overlay<'_>>) -> Result<(), wgpu::SurfaceError> {
+    pub fn render_menu_with(&mut self, t: f32, overlay: Option<Overlay<'_>>) -> Result<(), SurfaceError> {
         self.render_loading_mode(t, -1.0, 0.0, overlay)
     }
 
@@ -1471,7 +1610,7 @@ impl Scene {
     /// pulsing icon (bind the Loading.wad `global_loading_skull`) under an animated gold→green
     /// sheen, arc spinner + gold progress bar (see `loading.wgsl` mode 1). Staged UI overlay
     /// draws on top exactly like `render_loading`.
-    pub fn render_boot(&mut self, t: f32, progress: f32) -> Result<(), wgpu::SurfaceError> {
+    pub fn render_boot(&mut self, t: f32, progress: f32) -> Result<(), SurfaceError> {
         self.render_loading_mode(t, progress, 1.0, None)
     }
 
@@ -1481,7 +1620,7 @@ impl Scene {
         progress: f32,
         mode: f32,
         overlay: Option<Overlay<'_>>,
-    ) -> Result<(), wgpu::SurfaceError> {
+    ) -> Result<(), SurfaceError> {
         let aspect = self.config.width as f32 / self.config.height.max(1) as f32;
         self.queue.write_buffer(
             &self.loading_buf,
@@ -1491,8 +1630,8 @@ impl Scene {
                 mode, 0.0, 0.0, 0.0,
             ]),
         );
-        let output = self.surface.get_current_texture()?;
-        let view_tex = output.texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let output = self.acquire()?;
+        let view_tex = output.texture().create_view(&wgpu::TextureViewDescriptor::default());
         // Upload this frame's staged UI overlay (menu text etc.) before the pass opens.
         let ui_count = self.ui.prepare(&self.device, &self.queue, self.config.width, self.config.height);
         let mut encoder = self
@@ -1503,6 +1642,7 @@ impl Scene {
                 label: Some("loading pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: &view_tex,
+                    depth_slice: None,
                     resolve_target: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color { r: 0.02, g: 0.02, b: 0.04, a: 1.0 }),
@@ -1519,6 +1659,7 @@ impl Scene {
                 }),
                 timestamp_writes: None,
                 occlusion_query_set: None,
+                multiview_mask: None,
             });
             pass.set_pipeline(&self.loading_pipeline);
             pass.set_bind_group(0, &self.loading_bind, &[]);
@@ -1529,10 +1670,12 @@ impl Scene {
         if let Some(f) = overlay {
             f(&self.device, &self.queue, &mut encoder, &view_tex, [self.config.width, self.config.height]);
         }
-        let readback = self.encode_capture(&mut encoder, &output.texture);
+        let readback = self.encode_capture(&mut encoder, output.texture());
         self.queue.submit(std::iter::once(encoder.finish()));
         self.finish_capture(readback);
-        output.present();
+        if let FrameTarget::Surface(surface) = output {
+            self.queue.present(surface);
+        }
         Ok(())
     }
 
@@ -1913,7 +2056,7 @@ impl Scene {
             usage: wgpu::BufferUsages::VERTEX,
             mapped_at_creation: true,
         });
-        vbuf.slice(..).get_mapped_range_mut().copy_from_slice(vbytes);
+        vbuf.slice(..).get_mapped_range_mut().expect("the vertex buffer is mapped at creation").copy_from_slice(vbytes);
         vbuf.unmap();
 
         let (ibuf, nindices) = if indices.is_empty() {
@@ -1926,7 +2069,7 @@ impl Scene {
                 usage: wgpu::BufferUsages::INDEX,
                 mapped_at_creation: true,
             });
-            b.slice(..).get_mapped_range_mut().copy_from_slice(ibytes);
+            b.slice(..).get_mapped_range_mut().expect("the index buffer is mapped at creation").copy_from_slice(ibytes);
             b.unmap();
             (Some(b), indices.len() as u32)
         };
@@ -1997,7 +2140,7 @@ impl Scene {
             usage: wgpu::BufferUsages::VERTEX,
             mapped_at_creation: true,
         });
-        buffer.slice(..).get_mapped_range_mut().copy_from_slice(bytes);
+        buffer.slice(..).get_mapped_range_mut().expect("the buffer is mapped at creation").copy_from_slice(bytes);
         buffer.unmap();
         let meshes: Vec<ScrubMeshGpu> = draws
             .iter()
@@ -2347,10 +2490,10 @@ impl Scene {
             mapped_at_creation: false,
         });
         encoder.copy_texture_to_buffer(
-            wgpu::ImageCopyTexture { texture, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
-            wgpu::ImageCopyBuffer {
+            wgpu::TexelCopyTextureInfo { texture, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+            wgpu::TexelCopyBufferInfo {
                 buffer: &buffer,
-                layout: wgpu::ImageDataLayout { offset: 0, bytes_per_row: Some(padded), rows_per_image: Some(h) },
+                layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(padded), rows_per_image: Some(h) },
             },
             wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
         );
@@ -2366,12 +2509,16 @@ impl Scene {
         slice.map_async(wgpu::MapMode::Read, move |r| {
             let _ = tx.send(r);
         });
-        self.device.poll(wgpu::Maintain::Wait);
+        if let Err(e) = self.device.poll(wgpu::PollType::wait_indefinitely()) {
+            self.capture = Capture::Done(Err(format!("waiting for the frame capture failed: {e}")));
+            return;
+        }
         let result = match rx.recv() {
             Ok(Ok(())) => {
-                let data = slice.get_mapped_range();
-                let rgba = unpad_to_rgba(&data, w, h, padded, self.config.format);
-                drop(data);
+                let rgba = slice
+                    .get_mapped_range()
+                    .map_err(|e| format!("reading the frame capture failed: {e}"))
+                    .and_then(|data| unpad_to_rgba(&data, w, h, padded, self.config.format));
                 buffer.unmap();
                 rgba.map(|rgba| CapturedFrame { width: w, height: h, rgba })
             }
@@ -2496,6 +2643,7 @@ impl Scene {
             }),
             timestamp_writes: None,
             occlusion_query_set: None,
+            multiview_mask: None,
         });
         spass.set_pipeline(&self.shadow_pipeline);
         let tile = SHADOW_TILE as f32;
@@ -2549,6 +2697,7 @@ impl Scene {
             label: Some("blob shadow pass"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                 view: view_tex,
+                depth_slice: None,
                 resolve_target: None,
                 ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
             })],
@@ -2559,6 +2708,7 @@ impl Scene {
             }),
             timestamp_writes: None,
             occlusion_query_set: None,
+            multiview_mask: None,
         });
         pass.set_pipeline(&self.blob_pipeline);
         pass.set_bind_group(0, &self.blob_bind, &[]);
@@ -2599,6 +2749,7 @@ impl Scene {
                     label: Some("scene hdr pass"),
                     color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                         view: post.hdr_view(),
+                        depth_slice: None,
                         resolve_target: None,
                         ops: wgpu::Operations {
                             load: wgpu::LoadOp::Clear(wgpu::Color { r: 0.02, g: 0.02, b: 0.04, a: 1.0 }),
@@ -2612,6 +2763,7 @@ impl Scene {
                     }),
                     timestamp_writes: None,
                     occlusion_query_set: None,
+                    multiview_mask: None,
                 });
                 pass.set_pipeline(self.sky_pipeline_hdr.as_ref().unwrap());
                 pass.set_bind_group(0, &self.sky_bind, &[]);
@@ -2629,6 +2781,7 @@ impl Scene {
                 label: Some("scene pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: view_tex,
+                    depth_slice: None,
                     resolve_target: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color { r: 0.02, g: 0.02, b: 0.04, a: 1.0 }),
@@ -2642,6 +2795,7 @@ impl Scene {
                 }),
                 timestamp_writes: None,
                 occlusion_query_set: None,
+                multiview_mask: None,
             });
             if self.sky_enabled {
                 pass.set_pipeline(&self.sky_pipeline);
@@ -2666,6 +2820,7 @@ impl Scene {
                 label: Some("transparent fx pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: view_tex,
+                    depth_slice: None,
                     resolve_target: None,
                     ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
                 })],
@@ -2676,6 +2831,7 @@ impl Scene {
                 }),
                 timestamp_writes: None,
                 occlusion_query_set: None,
+                multiview_mask: None,
             });
             self.particles.draw(&mut ppass);
         }
@@ -2690,6 +2846,7 @@ impl Scene {
             label: Some("ui overlay pass"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                 view: view_tex,
+                depth_slice: None,
                 resolve_target: None,
                 ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
             })],
@@ -2700,6 +2857,7 @@ impl Scene {
             }),
             timestamp_writes: None,
             occlusion_query_set: None,
+            multiview_mask: None,
         });
         self.ui.draw(&mut upass, ui_count);
     }
@@ -2745,7 +2903,7 @@ impl Scene {
     }
 
     /// Draw every drawable entity in the world. Auto-orbit camera framing the origin.
-    pub fn render(&mut self, world: &World) -> Result<(), wgpu::SurfaceError> {
+    pub fn render(&mut self, world: &World) -> Result<(), SurfaceError> {
         self.render_with(world, None)
     }
 
@@ -2757,7 +2915,7 @@ impl Scene {
         &mut self,
         world: &World,
         mut overlay: Option<Overlay<'_>>,
-    ) -> Result<(), wgpu::SurfaceError> {
+    ) -> Result<(), SurfaceError> {
         let t = self.start.elapsed().as_secs_f32();
         // Advance the particle sim by the real inter-frame dt (clamped so a stall doesn't teleport
         // particles), then reap finished emitters. No-op when no effect is active.
@@ -2789,9 +2947,9 @@ impl Scene {
         // negating clip-space X. VERIFIED against retail: interior prop sides (light heads left, coolers
         // right, wardrobe placement) match only with this applied — without it the whole game renders
         // horizontally MIRRORED. cull_mode is None everywhere, so the winding this flips is a no-op; if
-        // backface culling is enabled later, flip front_face to compensate. (Movement strafe is likewise
-        // built in the LH frame and negates its right vector to match — see world.rs.)
-        let view_proj = glam::Mat4::from_scale(glam::Vec3::new(-1.0, 1.0, 1.0)) * raw_vp;
+        // backface culling is enabled later, flip front_face to compensate. (Movement strafe and look are
+        // likewise built in the LH frame and match through `camera::screen_right` and `camera::turn_right`.)
+        let view_proj = crate::camera::clip_mirror() * raw_vp;
 
         // Snapshot the drawable entities (copy out to release the world borrow before touching self).
         let mut items: Vec<DrawItem> = Vec::new();
@@ -3013,8 +3171,8 @@ impl Scene {
         // NOTHING today, so this loop reduces to the engine's prior command sequence (shadow-depth →
         // color → transparent-fx → ui → overlay) — a behaviour-preserving carve. Each node's Xbox↔PC
         // anchor lives on `render_graph::PassId::anchor`.
-        let output = self.surface.get_current_texture()?;
-        let view_tex = output.texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let output = self.acquire()?;
+        let view_tex = output.texture().create_view(&wgpu::TextureViewDescriptor::default());
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("scene frame") });
@@ -3079,10 +3237,12 @@ impl Scene {
             self.dispatch_nodes(node, &mut encoder, &view_tex, &items, view_proj, view, cam_world, t);
         }
 
-        let readback = self.encode_capture(&mut encoder, &output.texture);
+        let readback = self.encode_capture(&mut encoder, output.texture());
         self.queue.submit(std::iter::once(encoder.finish()));
         self.finish_capture(readback);
-        output.present();
+        if let FrameTarget::Surface(surface) = output {
+            self.queue.present(surface);
+        }
         Ok(())
     }
 }
@@ -3245,25 +3405,25 @@ impl DecalNode {
         });
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("decal pipeline layout"),
-            bind_group_layouts: &[&cam_bgl],
-            push_constant_ranges: &[],
+            bind_group_layouts: &[Some(&cam_bgl)],
+            immediate_size: 0,
         });
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("decal pipeline"),
             layout: Some(&layout),
             vertex: wgpu::VertexState {
                 module: &shader,
-                entry_point: "vs_decal",
-                buffers: &[wgpu::VertexBufferLayout {
+                entry_point: Some("vs_decal"),
+                buffers: &[Some(wgpu::VertexBufferLayout {
                     array_stride: std::mem::size_of::<DecalVertex>() as wgpu::BufferAddress,
                     step_mode: wgpu::VertexStepMode::Vertex,
                     attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x2, 2 => Float32, 3 => Float32],
-                }],
+                })],
                 compilation_options: Default::default(),
             },
             fragment: Some(wgpu::FragmentState {
                 module: &shader,
-                entry_point: "fs_decal",
+                entry_point: Some("fs_decal"),
                 targets: &[Some(wgpu::ColorTargetState {
                     format,
                     blend: Some(wgpu::BlendState::ALPHA_BLENDING),
@@ -3278,13 +3438,14 @@ impl DecalNode {
             },
             depth_stencil: Some(wgpu::DepthStencilState {
                 format: DEPTH_FORMAT,
-                depth_write_enabled: false, // a surface overlay, not occluding geometry
-                depth_compare: wgpu::CompareFunction::LessEqual,
+                depth_write_enabled: Some(false), // a surface overlay, not occluding geometry
+                depth_compare: Some(wgpu::CompareFunction::LessEqual),
                 stencil: wgpu::StencilState::default(),
                 bias: wgpu::DepthBiasState::default(),
             }),
             multisample: wgpu::MultisampleState::default(),
-            multiview: None,
+            multiview_mask: None,
+            cache: None,
         });
         let cap = 6 * 64; // 64 decals worth of verts to start
         let vbuf = device.create_buffer(&wgpu::BufferDescriptor {
@@ -3333,6 +3494,7 @@ impl crate::render_graph::RenderNode for DecalNode {
             label: Some("decal pass"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                 view: ctx.color,
+                depth_slice: None,
                 resolve_target: None,
                 ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
             })],
@@ -3343,6 +3505,7 @@ impl crate::render_graph::RenderNode for DecalNode {
             }),
             timestamp_writes: None,
             occlusion_query_set: None,
+            multiview_mask: None,
         });
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, &self.cam_bind, &[]);
