@@ -28,6 +28,8 @@
 //! block). It is a blocking client meant to be driven from a **worker thread**, off the UI's frame
 //! loop — the same shape as the Workshop's other background loaders.
 
+pub mod reply;
+
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream, ToSocketAddrs};
 use std::time::{Duration, Instant};
