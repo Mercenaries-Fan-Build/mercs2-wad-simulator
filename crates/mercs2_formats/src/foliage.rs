@@ -27,8 +27,43 @@
 //!
 //! The order is the retail loader's: `FUN_004a0c40` reads everything up to the materials, and
 //! `FUN_004a01e0` the tree.
+//!
+//! # The position tree
+//!
+//! A balanced binary tree packed into the bit stream in depth-first order, read through `FUN_0049fd70`
+//! (one split) and `FUN_0049f700` (one leaf). Bits run most-significant first in little-endian `u32`s.
+//!
+//! A split at depth `d` is one quantized plane: `axis = axes[d]`, `q = read(leaf_words[axis])`, and with
+//! `step = extent[axis] / (2^width − 1)` the first child's `max[axis]` is `min[axis] + (q + 1)·step` and
+//! the second's `min[axis]` is `min[axis] + q·step`, so the children overlap by one step. The first
+//! child follows the split in the stream. The second follows the first's whole subtree, which is why a
+//! node carries the counts that size it, split between its children with the odd one going to the first
+//! or second as [`Tree::leaves`] shows:
+//!
+//! ```text
+//! root[1]  leaves under the node
+//! root[2]  of those, leaves on the shallower of the two leaf levels
+//! root[3]  splits on the last split level
+//! root[4]  bits of the splits above that level
+//! root[5..8]  bits of a deep leaf, of a shallow leaf, of a last-level split
+//! ```
+//!
+//! A node is a leaf when `root[3] + root[4]` have reached 0. A leaf is
+//! `{4 bits flags, x, y, z, 4 bits yaw}`, with `x`, `y` and `z` as wide as `levels` says for its depth,
+//! quantized to the box the splits above it left: `min + v · extent / (2^width − 1)`. `FUN_004a2ce0`
+//! counts the leaves, and retail's `+0x00` holds that count plus 1.
+//!
+//! Every position and yaw of the 112 tree entities in two retail captures is a leaf of its species
+//! (`mercs2_probe foliage-check`), within 0.3 mm.
+//!
+//! # Drawing
+//!
+//! A tree within [`Species::range`] of a viewer is an entity of [`Species::template`] (`FUN_004a2ef0`).
+//! The rest are `PgBillboardTreeVP`: each of the species' [`Species::views`] is a quad turned about +Y to
+//! face the camera, and the view angle less the tree's yaw picks two neighbouring atlas tiles to blend.
 
 use crate::terrainmesh::{decode_material, f32_at, leaf, parse_tree, u16_at, u32_at, Material};
+use crate::texture::MtrlMaterial;
 
 /// UCFX `type_hash` of the `foliage` chunk.
 pub const TYPE_HASH: u32 = 0x3461_2F86;
@@ -88,6 +123,159 @@ impl Species {
     /// Distance at which a tree is a full entity rather than a billboard.
     pub fn range(&self) -> f32 {
         self.authored_range * RANGE_SCALE
+    }
+
+    /// The billboard's quads. Up to 3: `basis` holds 3 rectangles `{x0, y0, x1, y1}` of offsets, then 3
+    /// of texture coordinates `{u1, v0, u0, v1}`, then their count.
+    pub fn views(&self) -> Vec<BillboardView> {
+        let word = |i: usize| f32::from_bits(self.basis[i]);
+        (0..self.basis[BASIS_WORDS - 1] as usize)
+            .map(|k| {
+                let [x0, y0, x1, y1] = [0, 1, 2, 3].map(|i| word(k * 4 + i));
+                let [u1, v0, u0, v1] = [0, 1, 2, 3].map(|i| word(12 + k * 4 + i));
+                BillboardView {
+                    corners: [[x0, y1], [x0, y0], [x1, y0], [x1, y1]],
+                    uvs: [[u0, v1], [u0, v0], [u1, v0], [u1, v1]],
+                }
+            })
+            .collect()
+    }
+
+    /// The billboard's material as the renderer's material record.
+    pub fn billboard_material(&self) -> MtrlMaterial {
+        let m = &self.material;
+        let mut preamble = vec![f32::from_bits(m.word_0)];
+        preamble.extend_from_slice(&m.params);
+        MtrlMaterial { textures: m.textures.clone(), flags: m.flags, preamble, shader_key: m.tail[0] }
+    }
+}
+
+/// One tree of a species.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Leaf {
+    pub position: [f32; 3],
+    /// The leaf's 4 flag bits as stored: 2 on every retail tree. `FUN_0049f700`'s mask tests them, and
+    /// `FUN_0049f900` rewrites them as a tree changes state.
+    pub flags: u8,
+    /// Yaw as a fraction of a turn, in 15ths: `value / 15`. A tree's entity rotates by this about +Y
+    /// (retail: 0.7333 is the quaternion `(0, 0.743, 0, -0.669)`, 264°), and it is the fraction
+    /// `PgBillboardTreeVP` subtracts from the view angle.
+    pub yaw: f32,
+}
+
+/// One billboard quad of a species: a corner's offset (across, up) and its texture coordinate within an
+/// atlas tile, as `FUN_004a24a0` builds `vCornerPosOffset` and `vCornerTexCoords`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BillboardView {
+    pub corners: [[f32; 2]; 4],
+    pub uvs: [[f32; 2]; 4],
+}
+
+/// `1 / (2^width − 1)`, the `.rdata` table at `0xB9C538`.
+fn step_of(width: u32) -> f32 {
+    1.0 / ((1u64 << width) - 1) as f32
+}
+
+/// A node on the way down: its box, its depth, the counts that size its subtree, and where its first
+/// bit is.
+#[derive(Clone, Copy)]
+struct Cursor {
+    min: [f32; 3],
+    max: [f32; 3],
+    depth: usize,
+    leaves: u32,
+    shallow_leaves: u32,
+    last_splits: u32,
+    upper_bits: u32,
+    bit: u32,
+}
+
+impl Tree {
+    /// `width` bits at `bit`, as `FUN_0049f700` reads a field: most significant first, from two
+    /// consecutive little-endian words.
+    fn read(&self, bit: u32, width: u32) -> Result<u32, String> {
+        if bit + width > self.bit_count {
+            return Err(format!("{width} bits at {bit} run past the {} of the tree", self.bit_count));
+        }
+        let word = |i: usize| -> u32 {
+            match self.bits.get(i * 4..i * 4 + 4) {
+                Some(w) => u32::from_le_bytes([w[0], w[1], w[2], w[3]]),
+                None => 0,
+            }
+        };
+        let i = (bit >> 5) as usize;
+        let joined = (word(i) as u64) << 32 | word(i + 1) as u64;
+        Ok((joined >> (64 - (bit & 31) - width)) as u32 & ((1u32 << width) - 1))
+    }
+
+    /// The bits of a subtree with these counts, as `FUN_0049fd70` skips it.
+    fn subtree_bits(&self, leaves: u32, shallow_leaves: u32, last_splits: u32, upper_bits: u32) -> u32 {
+        let [deep, shallow, split] = [self.root[5], self.root[6], self.root[7]];
+        shallow * shallow_leaves + split * last_splits + deep * (leaves - shallow_leaves) + upper_bits
+    }
+
+    fn walk(&self, c: Cursor, out: &mut Vec<Leaf>) -> Result<(), String> {
+        if c.last_splits + c.upper_bits == 0 {
+            let flags = self.read(c.bit, 4)?;
+            let mut bit = c.bit + 4;
+            let mut position = [0.0; 3];
+            for (k, p) in position.iter_mut().enumerate() {
+                let width = *self.levels.get(c.depth * 3 + k).ok_or_else(|| format!("no level {}", c.depth))?;
+                let v = self.read(bit, width)?;
+                *p = c.min[k] + v as f32 * ((c.max[k] - c.min[k]) * step_of(width));
+                bit += width;
+            }
+            let yaw = self.read(bit, 4)? as f32 * step_of(4);
+            out.push(Leaf { position, flags: flags as u8, yaw });
+            return Ok(());
+        }
+        let axis = *self.axes.get(c.depth).ok_or_else(|| format!("no axis at depth {}", c.depth))? as usize;
+        let width = *self.leaf_words.get(axis).ok_or_else(|| format!("axis {axis}"))?;
+        let q = self.read(c.bit, width)?;
+        let step = (c.max[axis] - c.min[axis]) * step_of(width);
+        let (mut first, mut second) = (c, c);
+        first.max[axis] = c.min[axis] + (q + 1) as f32 * step;
+        second.min[axis] = c.min[axis] + q as f32 * step;
+        let upper_bits = if c.upper_bits != 0 { (c.upper_bits - width) >> 1 } else { 0 };
+        let first_splits = if c.upper_bits != 0 { c.last_splits.div_ceil(2) } else { 0 };
+        first.leaves = c.leaves.div_ceil(2);
+        first.shallow_leaves = c.shallow_leaves >> 1;
+        first.last_splits = first_splits;
+        second.leaves = c.leaves >> 1;
+        second.shallow_leaves = c.shallow_leaves.div_ceil(2);
+        second.last_splits = c.last_splits >> 1;
+        first.upper_bits = upper_bits;
+        second.upper_bits = upper_bits;
+        first.depth = c.depth + 1;
+        second.depth = c.depth + 1;
+        first.bit = c.bit + width;
+        second.bit = first.bit + self.subtree_bits(first.leaves, first.shallow_leaves, first.last_splits, upper_bits);
+        self.walk(first, out)?;
+        self.walk(second, out)
+    }
+
+    /// Every tree of the species, in stream order.
+    pub fn leaves(&self) -> Result<Vec<Leaf>, String> {
+        let mut out = Vec::with_capacity(self.root[1] as usize);
+        let root = Cursor {
+            min: self.root_min,
+            max: self.root_max,
+            depth: 0,
+            leaves: self.root[1],
+            shallow_leaves: self.root[2],
+            last_splits: self.root[3],
+            upper_bits: self.root[4],
+            bit: 0,
+        };
+        self.walk(root, &mut out)?;
+        if out.len() != self.root[1] as usize {
+            return Err(format!("{} leaves, the root says {}", out.len(), self.root[1]));
+        }
+        let held = self.subtree_bits(root.leaves, root.shallow_leaves, root.last_splits, root.upper_bits);
+        if held != self.bit_count {
+            return Err(format!("the root sizes {held} bits, the stream holds {}", self.bit_count));
+        }
+        Ok(out)
     }
 }
 
