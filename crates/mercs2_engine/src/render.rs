@@ -239,7 +239,10 @@ pub fn material_slots(
         None => None,
         Some(other) => return Err(format!("pixel shader 0x{key:08X}: stage 2 is `{other}`, not a material role")),
     };
-    let output_alpha = if mercs2_formats::texture::material_blended(d.material_flags) {
+    // Ground cover that is not a cutout draws blended past its fade start whatever its flags say
+    // (`FUN_004a5830`).
+    let fades = d.scrub.is_some() && !mercs2_formats::texture::material_alpha_tested(d.material_flags);
+    let output_alpha = if mercs2_formats::texture::material_blended(d.material_flags) || fades {
         Some(samplers.output_alpha(key)?)
     } else {
         None
@@ -260,6 +263,16 @@ pub fn material_params(
     slot1_role: Slot1Role,
     output_alpha: Option<mercs2_formats::shader_registrations::OutputAlpha>,
 ) -> wgpu::Buffer {
+    params_buffer(device, material_alpha(material_flags, slot1_role, output_alpha, 0.0), material_data, [[0.0; 4]; GROUND_ROWS])
+}
+
+/// `MaterialParams.alpha` of a draw, `kind` its `w`: 0 a model, 1 terrain ground, 2 ground cover.
+fn material_alpha(
+    material_flags: u16,
+    slot1_role: Slot1Role,
+    output_alpha: Option<mercs2_formats::shader_registrations::OutputAlpha>,
+    kind: f32,
+) -> [f32; 4] {
     use mercs2_formats::texture::{material_alpha_tested, MATERIAL_ALPHA_REF};
     let alpha_ref = if material_alpha_tested(material_flags) { MATERIAL_ALPHA_REF as f32 / 255.0 } else { -1.0 };
     let role = match slot1_role {
@@ -267,11 +280,66 @@ pub fn material_params(
         Slot1Role::Specular => 1.0,
         Slot1Role::Emissive => 2.0,
     };
-    let mut data = [0f32; 28];
-    let out_alpha = output_alpha.map_or(-1.0, |a| a.code() as f32);
-    data[..4].copy_from_slice(&[alpha_ref, out_alpha, role, 0.0]);
+    [alpha_ref, output_alpha.map_or(-1.0, |a| a.code() as f32), role, kind]
+}
+
+/// The rows of `MaterialParams.ground`.
+const GROUND_ROWS: usize = 11;
+
+/// A ground cover draw's uniform: [`material_params`] with `alpha.w` = 2 and, in `ground` row 0, its
+/// fade (the depth alpha reaches 0, 1 / its range). `PgScrub*VP` writes
+/// `COLOR0.w = dp4_sat(world, AlphaVec)`, and `AlphaVec` (`FUN_004a5480`) is the view depth plane
+/// `(alpha_zero − depth) / range`, so `shader.wgsl` reads the same value from a pixel's own depth. Its
+/// pixel shaders multiply that into their output alpha (`PgScrubLightFP`: `tex.a × COLOR0.w × c98.w`),
+/// which the alpha test compares.
+pub fn scrub_params(
+    device: &wgpu::Device,
+    d: &mesh::DrawGroup,
+    depths: mesh::ScrubDepths,
+    slot1_role: Slot1Role,
+    output_alpha: Option<mercs2_formats::shader_registrations::OutputAlpha>,
+) -> wgpu::Buffer {
+    let mut rows = [[0.0; 4]; GROUND_ROWS];
+    rows[0] = [depths.alpha_zero, 1.0 / (depths.cull - depths.alpha_zero), 0.0, 0.0];
+    params_buffer(device, material_alpha(d.material_flags, slot1_role, output_alpha, 2.0), &d.material_data, rows)
+}
+
+/// A terrain ground draw's uniform: `alpha.w` = 1, and in `ground` the constants of its
+/// `PgTerrainMeshVP*`, which `shader.wgsl` reads per pixel: rows 0..8 = each layer's two projection
+/// rows, row 8 = (cell centre x, z, UV scale u, v), row 9 = the `FadeDistances` it uses, (global
+/// start, 1 / global range, detail start, 1 / detail range), row 10 = (1 / detail tile, 1 when the
+/// material has a detail map).
+pub fn ground_params(device: &wgpu::Device, material_data: &[[f32; 4]; 6], g: &mesh::TerrainGround) -> wgpu::Buffer {
+    let f = g.fade;
+    let mut rows = [[0.0; 4]; GROUND_ROWS];
+    for (i, uv) in g.layer_uv.iter().enumerate() {
+        rows[2 * i] = uv[0];
+        rows[2 * i + 1] = uv[1];
+    }
+    rows[8] = [g.centre[0], g.centre[1], g.uv_scale[0], g.uv_scale[1]];
+    rows[9] = [
+        f.global_start,
+        1.0 / (f.global_end - f.global_start),
+        f.detail_start,
+        1.0 / (f.detail_end - f.detail_start),
+    ];
+    rows[10] = [1.0 / f.detail_size, if g.detail.is_some() { 1.0 } else { 0.0 }, 0.0, 0.0];
+    params_buffer(device, [-1.0, -1.0, 0.0, 1.0], material_data, rows)
+}
+
+fn params_buffer(
+    device: &wgpu::Device,
+    alpha: [f32; 4],
+    material_data: &[[f32; 4]; 6],
+    ground: [[f32; 4]; GROUND_ROWS],
+) -> wgpu::Buffer {
+    let mut data = [0f32; 28 + 4 * GROUND_ROWS];
+    data[..4].copy_from_slice(&alpha);
     for (i, reg) in material_data.iter().enumerate() {
         data[4 + i * 4..8 + i * 4].copy_from_slice(reg);
+    }
+    for (i, reg) in ground.iter().enumerate() {
+        data[28 + i * 4..32 + i * 4].copy_from_slice(reg);
     }
     let buf = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("material params"),
@@ -327,38 +395,32 @@ pub fn wgpu_blend(b: mercs2_formats::texture::MaterialBlend) -> Result<wgpu::Ble
     Ok(wgpu::BlendState { color, alpha })
 }
 
+/// A material's bind group. `views` = diffuse, normal, specular (`_sm`, MTRL slot 1; black = no
+/// highlight), then the three further textures only a terrain ground draw reads (`shader.wgsl`
+/// bindings 5, 6 and 7).
 pub fn make_tex_bind(
     device: &wgpu::Device,
     bgl: &wgpu::BindGroupLayout,
     sampler: &wgpu::Sampler,
-    diffuse: &wgpu::TextureView,
-    normal: &wgpu::TextureView,
-    specular: &wgpu::TextureView,
+    views: [&wgpu::TextureView; 6],
     params: &wgpu::Buffer,
 ) -> wgpu::BindGroup {
+    fn view(binding: u32, v: &wgpu::TextureView) -> wgpu::BindGroupEntry<'_> {
+        wgpu::BindGroupEntry { binding, resource: wgpu::BindingResource::TextureView(v) }
+    }
     device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("material bind"),
         layout: bgl,
         entries: &[
             // binding 4 = the material's alpha-test parameters ([`material_params`]).
             wgpu::BindGroupEntry { binding: 4, resource: params.as_entire_binding() },
-            wgpu::BindGroupEntry {
-                binding: 0,
-                resource: wgpu::BindingResource::TextureView(diffuse),
-            },
-            wgpu::BindGroupEntry {
-                binding: 1,
-                resource: wgpu::BindingResource::TextureView(normal),
-            },
-            wgpu::BindGroupEntry {
-                binding: 2,
-                resource: wgpu::BindingResource::Sampler(sampler),
-            },
-            // binding 3 = specular/gloss (`_sm`, MTRL slot 1). Black fallback = no highlight.
-            wgpu::BindGroupEntry {
-                binding: 3,
-                resource: wgpu::BindingResource::TextureView(specular),
-            },
+            wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(sampler) },
+            view(0, views[0]),
+            view(1, views[1]),
+            view(3, views[2]),
+            view(5, views[3]),
+            view(6, views[4]),
+            view(7, views[5]),
         ],
     })
 }
