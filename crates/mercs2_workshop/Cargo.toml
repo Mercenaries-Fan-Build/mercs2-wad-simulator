@@ -57,6 +57,8 @@ mercs2_formats = { workspace = true }
 mercs2_quartermaster = { workspace = true }
 mercs2_bridge = { workspace = true }
 mercs2_destruction = { workspace = true }
+# The Live page reads pmc_blackbox.log with loadprobe's own parser and ladder.
+loadprobe = { workspace = true }
 # Saves page Delete: moves a .profile to the OS trash (recoverable) rather than removing it.
 trash = "5"
 
