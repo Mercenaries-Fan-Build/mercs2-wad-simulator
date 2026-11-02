@@ -318,7 +318,7 @@ pub fn inspector(ui: &mut egui::Ui, view: &VfxView, rects: &HashMap<u32, FxRect>
     });
     if !view.started_by.is_empty() {
         theme::card(ui, "Started by", Some(&view.started_by.len().to_string()), |ui| {
-            egui::ScrollArea::vertical().id_source("vfx_started_by").max_height(120.0).auto_shrink([false, true]).show(ui, |ui| {
+            theme::scroll_vertical().id_salt("vfx_started_by").max_height(120.0).auto_shrink([false, true]).show(ui, |ui| {
                 for (i, s) in view.started_by.iter().enumerate() {
                     let text = egui::RichText::new(&s.template).small();
                     if ui.selectable_label(view.chosen == Some(i), text).clicked() {
@@ -346,7 +346,7 @@ pub fn inspector(ui: &mut egui::Ui, view: &VfxView, rects: &HashMap<u32, FxRect>
             theme::kv(ui, "blend", egui::RichText::new(if half { "adds" } else { "alpha" }));
             theme::kv(ui, "facing", egui::RichText::new(if e.particle.flags & 1 != 0 { "velocity" } else { "camera" }));
             theme::kv(ui, "frames", egui::RichText::new(if e.particle.flags & 2 != 0 { "flipbook" } else { "over life" }));
-            egui::CollapsingHeader::new("Attributes").id_source(("vfx_attributes", i)).show(ui, |ui| {
+            egui::CollapsingHeader::new("Attributes").id_salt(("vfx_attributes", i)).show(ui, |ui| {
                 for a in e.particle.attributes.iter().chain(e.channels.iter()) {
                     attribute_row(ui, a);
                 }
@@ -363,7 +363,7 @@ pub fn inspector(ui: &mut egui::Ui, view: &VfxView, rects: &HashMap<u32, FxRect>
                     ForceKind::Attractor { .. } => "Attractor",
                     ForceKind::Vortex { .. } => "Vortex",
                 };
-                egui::CollapsingHeader::new(kind).id_source(("vfx_force", i)).show(ui, |ui| {
+                egui::CollapsingHeader::new(kind).id_salt(("vfx_force", i)).show(ui, |ui| {
                     for a in &f.attributes {
                         attribute_row(ui, a);
                     }
