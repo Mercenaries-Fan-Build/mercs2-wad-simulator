@@ -19,7 +19,7 @@ const HEADER_BYTES: usize = 0x1000;
 static SITES: OnceLock<LuaSites> = OnceLock::new();
 static SHADERS: OnceLock<ShaderSites> = OnceLock::new();
 
-fn mapped() -> Result<Image<'static>, String> {
+pub(crate) fn mapped() -> Result<Image<'static>, String> {
     let base = unsafe { GetModuleHandleA(core::ptr::null()) } as *const u8;
     if base.is_null() {
         return Err("GetModuleHandleA(NULL) returned no module".into());
