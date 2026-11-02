@@ -218,9 +218,9 @@ impl LuaView {
     pub fn show(&mut self, ctx: &egui::Context) {
         let mut open = self.open;
         egui::Window::new(format!("Lua — {}", self.path))
-            .id(egui::Id::new("lua_view"))
+            .id(egui::Id::unique("lua_view"))
             .open(&mut open)
-            .default_size([760.0, 500.0])
+            .default_size(crate::gui::theme::window_size(760.0, 500.0))
             .resizable(true)
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
@@ -245,7 +245,7 @@ impl LuaView {
                 });
                 ui.separator();
                 let row_h = ui.text_style_height(&egui::TextStyle::Monospace);
-                let mut area = egui::ScrollArea::both().auto_shrink([false, false]);
+                let mut area = crate::gui::theme::scroll_both().auto_shrink([false, false]);
                 if let Some(line) = self.scroll_to.take() {
                     // Park the target a few rows below the top edge.
                     area = area.vertical_scroll_offset((line as f32 - 6.0).max(0.0) * row_h);
