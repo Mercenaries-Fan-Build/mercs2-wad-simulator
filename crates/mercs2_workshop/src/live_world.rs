@@ -20,7 +20,7 @@ use std::sync::mpsc::{Receiver, TryRecvError};
 use std::sync::Arc;
 
 /// The stages `load_streaming_world_data` reports.
-const LOAD_STAGES: u32 = 5;
+const LOAD_STAGES: u32 = 6;
 /// How many actor models may load in one frame: a load is a synchronous archive read.
 const MODELS_PER_FRAME: usize = 1;
 /// How far an actor moves toward its newest sample each frame, for a 2 Hz feed.
@@ -65,6 +65,8 @@ pub struct Mirror {
     /// The dynamic layers asked of the executor.
     dynamic: HashSet<u32>,
     statics_asked: bool,
+    /// The entities the game has hidden, as the executor was told.
+    hidden: HashSet<u32>,
     /// Template names, by the hash `Object.GetName` returns.
     pub names: Rc<HashMap<u32, String>>,
     /// The decoded map image, until the page uploads it.
@@ -85,6 +87,7 @@ impl Default for Mirror {
             failed: HashMap::new(),
             dynamic: HashSet::new(),
             statics_asked: false,
+            hidden: HashSet::new(),
             names: Rc::new(HashMap::new()),
             map: None,
             wad: String::new(),
@@ -201,6 +204,7 @@ impl Mirror {
         }
         let Some(viewer) = hero else { return };
         self.ask_layers(live);
+        self.hide_piles(live);
         self.sync_actors(scene, w, live);
         let State::Ready(stream, _) = &mut self.state else { return };
         if let Err(e) = stream.step(scene, &mut self.world, viewer.to_array(), &|_| false) {
@@ -222,6 +226,19 @@ impl Mirror {
     }
 
     /// The edges of the collision around `at`, at most `max`: the overlay draws these.
+    /// How many entities the game has hidden here.
+    pub fn hidden_count(&self) -> usize {
+        self.hidden.len()
+    }
+
+    /// Entities waiting to wake and assets on their way.
+    pub fn loading(&self) -> Option<(usize, usize)> {
+        match &self.state {
+            State::Ready(stream, _) => Some(stream.loading()),
+            _ => None,
+        }
+    }
+
     pub fn collision_edges(&self, at: Vec3, radius: f32, max: usize) -> Vec<[Vec3; 2]> {
         let mut out = Vec::new();
         for tri in self.collision.values().flatten() {
@@ -262,6 +279,22 @@ impl Mirror {
             g.request_layer(LayerOp::Unload, l, true);
         }
         self.dynamic = wanted;
+    }
+
+    /// Hide what the game hid. A name reaches a key only once its layer has loaded, so this runs each
+    /// frame.
+    fn hide_piles(&mut self, live: &Live) {
+        let State::Ready(stream, guids) = &mut self.state else { return };
+        let g = guids.borrow();
+        let wanted: HashSet<u32> = live.hidden_piles.iter().filter_map(|n| g.key_by_name_hash(pandemic_hash_m2(n))).collect();
+        drop(g);
+        for &k in wanted.difference(&self.hidden) {
+            stream.set_visible(k, false);
+        }
+        for &k in self.hidden.difference(&wanted) {
+            stream.set_visible(k, true);
+        }
+        self.hidden = wanted;
     }
 
     fn sync_actors(&mut self, scene: &mut Scene, w: &mut WadStack, live: &Live) {
