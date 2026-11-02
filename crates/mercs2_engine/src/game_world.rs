@@ -2753,7 +2753,7 @@ where
         const MOUSE_SENS: f32 = 0.0008;
         let mdx = ctx.mouse_delta.0.clamp(-80.0, 80.0) * MOUSE_SENS;
         let mdy = ctx.mouse_delta.1.clamp(-80.0, 80.0) * MOUSE_SENS;
-        self.free_yaw += mdx;
+        self.free_yaw = crate::camera::turn_right(self.free_yaw, mdx);
         self.free_pitch = (self.free_pitch - mdy).clamp(-1.5, 1.5);
         let look = 1.6 * ctx.dt;
         let k = ctx.input.keys;
@@ -2764,10 +2764,10 @@ where
             self.free_pitch -= look;
         }
         if k.contains(&KeyCode::ArrowLeft) {
-            self.free_yaw -= look;
+            self.free_yaw = crate::camera::turn_right(self.free_yaw, -look);
         }
         if k.contains(&KeyCode::ArrowRight) {
-            self.free_yaw += look;
+            self.free_yaw = crate::camera::turn_right(self.free_yaw, look);
         }
         self.free_pitch = self.free_pitch.clamp(-1.5, 1.5);
         let fwd = Vec3::new(
@@ -2776,7 +2776,7 @@ where
             self.free_pitch.cos() * self.free_yaw.cos(),
         )
         .normalize();
-        let right = Vec3::Y.cross(fwd).normalize();
+        let right = crate::camera::screen_right(fwd);
         let mut mv = Vec3::ZERO;
         if k.contains(&KeyCode::KeyW) {
             mv += fwd;
