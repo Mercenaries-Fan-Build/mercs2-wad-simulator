@@ -2055,8 +2055,10 @@ pub fn run(opts: Options) {
     // edit land back on the RIGHT contribution instead of appending a new one — `Act::Craft` used to
     // carry no index at all, so a bench had no idea what it was editing and no way back.
     let mut craft_subject: Option<usize> = None;
-    // Whether the running game answers on its lua-bridge port: the Live rail cell's dot.
-    let live_probe = crate::live::Probe::spawn(mercs2_bridge::DEFAULT_ADDR.to_string());
+    // The Live page. Its link owns the lua-bridge connection, and the rail cell's dot reads it.
+    let mut live_page = crate::live::Page::new(std::env::temp_dir().join("mercs2_workshop_live"));
+    let mut live_was_open = false;
+    let mut live_acts: Vec<crate::live::Act> = Vec::new();
     // `--ui-state`: applied once the reference data is in; then frames to settle before the capture,
     // and whether the capture has been asked of the scene.
     let mut ui_state = opts.ui_state.clone();
@@ -2203,7 +2205,10 @@ pub fn run(opts: Options) {
                     // `shadow-pc-absolute-mouse-input`).
                     if let Some((lx, ly)) = last_cursor {
                         let (dx, dy) = ((position.x - lx) as f32, (position.y - ly) as f32);
-                        if lmb && tex_view.is_none() {
+                        if lmb && wb == Workbench::Live {
+                            let from = live_page.frame.map_or(Vec3::ZERO, |f| f.view.target);
+                            live_page.drag(dx, dy, shift, from);
+                        } else if lmb && tex_view.is_none() {
                             if shift {
                                 // Pan the orbit target in the view plane.
                                 let fwd = dir_from(cam_yaw, cam_pitch);
@@ -2227,7 +2232,11 @@ pub fn run(opts: Options) {
                         MouseScrollDelta::LineDelta(_, y) => y,
                         MouseScrollDelta::PixelDelta(p) => p.y as f32 / 40.0,
                     };
-                    cam_dist = (cam_dist * 0.9f32.powf(lines)).clamp(0.3, 20000.0);
+                    if wb == Workbench::Live {
+                        live_page.cam.wheel(lines);
+                    } else {
+                        cam_dist = (cam_dist * 0.9f32.powf(lines)).clamp(0.3, 20000.0);
+                    }
                 }
                 WindowEvent::KeyboardInput {
                     event: KeyEvent { physical_key: PhysicalKey::Code(code), state, text, .. },
@@ -3040,6 +3049,9 @@ pub fn run(opts: Options) {
                                 pages.push((Workbench::Live.label(), Workbench::Live));
                                 wb = pick("page", p, &pages)?;
                             }
+                            if let Some(r) = &st.live_replay {
+                                live_page.link.replay(r.clone());
+                            }
                             if let Some(s) = &st.settings_section {
                                 let sections: Vec<(&str, SettingsSection)> =
                                     SettingsSection::ALL.iter().map(|s| (s.label(), *s)).collect();
@@ -3230,6 +3242,18 @@ pub fn run(opts: Options) {
                     let eff = wb;
                     let rail_lit = wb.rail_entry();
                     use crate::gui::theme;
+                    if !wadpath.is_empty() {
+                        live_page.set_wad(&wadpath);
+                    }
+                    if (eff == Workbench::Live) != live_was_open {
+                        live_was_open = eff == Workbench::Live;
+                        live_page.set_open(live_was_open);
+                        if live_was_open {
+                            live_page.mirror.enter(&mut scene);
+                        } else {
+                            live_page.mirror.leave(&mut scene);
+                        }
+                    }
                     gui.run(|ctx| {
                         // ── COMMAND BAR: identity + breadcrumb (left) · scene I/O (right). Only
                         // GLOBAL actions live here; contextual verbs are on the viewport verb-bar. ──
@@ -3446,7 +3470,7 @@ pub fn run(opts: Options) {
                                         icon: Workbench::Live.icon(),
                                         on: wb == Workbench::Live,
                                         badge: None,
-                                        dot: Some(if live_probe.reachable() { theme::GOOD } else { theme::LINE2 }),
+                                        dot: Some(if live_page.link.up() { theme::GOOD } else { theme::LINE2 }),
                                         locked: lock,
                                     };
                                     if theme::rail_item(ui, &live_item) {
@@ -3491,7 +3515,9 @@ pub fn run(opts: Options) {
                                 let saves_banner = (wb == Workbench::Saves)
                                     .then(|| crate::saves::saves_status_banner(&saves))
                                     .flatten();
-                                if let Some((dot_color, dot_text, detail)) = saves_banner {
+                                if wb == Workbench::Live {
+                                    crate::live::status(ui, &live_page);
+                                } else if let Some((dot_color, dot_text, detail)) = saves_banner {
                                     theme::status_dot(ui, dot_text, dot_color);
                                     ui.separator();
                                     ui.label(egui::RichText::new(detail).color(theme::DIM).small());
@@ -3557,9 +3583,12 @@ pub fn run(opts: Options) {
                         });
                         // ── NAVIGATOR (left): the current workbench's list. The viewport keeps its
                         // camera when the workbench changes; only this + the inspector reconfigure. ──
-                        // Not on Live: that page is blank until it is built to its design.
+                        // Live has its own header and panels, and its own camera.
                         // Held at the width the user dragged it to: content never resizes it.
-                        if eff != Workbench::Live {
+                        if eff == Workbench::Live {
+                            crate::live::header(ctx, &mut live_page);
+                            crate::live::left(ctx, &mut live_page);
+                        } else {
                           crate::gui::held_side_panel(
                             ctx,
                             egui::panel::Side::Left,
@@ -4238,7 +4267,9 @@ pub fn run(opts: Options) {
                         // navigator and a centre and nothing a detail panel would hold, and an
                         // empty registered panel reads as something that failed to load rather
                         // than something that was never meant to be there.
-                        if eff != Workbench::Settings && eff != Workbench::Live {
+                        if eff == Workbench::Live {
+                            live_acts.extend(crate::live::right(ctx, &mut live_page, &index.names));
+                        } else if eff != Workbench::Settings {
                           crate::gui::held_side_panel(
                             ctx,
                             egui::panel::Side::Right,
@@ -5975,7 +6006,7 @@ pub fn run(opts: Options) {
                         // whole app rather than verbs belonging to the page.
                         //
                         // brass = go, hazard = the irreversible. Every verb shows its shortcut.
-                        // Not on Live: that page is blank until it is built to its design. ──
+                        // Not on Live: its header holds its verbs. ──
                         if eff != Workbench::Live {
                         egui::TopBottomPanel::top("verbs")
                             .frame(
@@ -6132,8 +6163,11 @@ pub fn run(opts: Options) {
                         // inspector registered and EMPTY -- two blank panels on the one page with nothing to put
                         // in them. Settings is now shaped like every other page, and the inspector is simply not
                         // registered here (see its `wb != Settings` guard) rather than being drawn blank.
+                        // No central panel on Live: the void between its panels is the 3D view, so the
+                        // camera keeps the pointer there.
                         if eff == Workbench::Live {
-                            crate::live::center(ctx);
+                            let fv = crate::live::frame_view(&mut live_page, ctx.screen_rect().size(), ctx.available_rect());
+                            crate::live::floats(ctx, &mut live_page, &index.names, fv);
                         }
                         if wb == Workbench::Settings {
                             egui::CentralPanel::default()
@@ -7093,6 +7127,11 @@ pub fn run(opts: Options) {
                     // `saves`; it is a long-lived piece of app state, not a per-frame scratchpad.
                     for act in std::mem::take(&mut saves_acts) {
                         crate::saves::apply(act, &mut saves);
+                    }
+                    for act in live_acts.drain(..) {
+                        match act {
+                            crate::live::Act::OpenInShipment(label, subject) => actions.push(Act::StartShipment(label, subject)),
+                        }
                     }
                     // ── Saves hero render: the Panel's own reducer only stamps a request slot;
                     // the real `load_model_data` + `shot::HeroRenderer::render_rgba` +
@@ -8781,6 +8820,12 @@ pub fn run(opts: Options) {
                     }
                     vfx_acts.clear();
                     let picked = viewport_click.take();
+                    if wb == Workbench::Live {
+                        if picked.is_some() {
+                            crate::live::click(&mut live_page);
+                        }
+                        live_page.step_mirror(&mut scene, &mut w, &wadpath);
+                    }
                     if let Some(v) = &mut layer_view {
                         let fwd = dir_from(cam_yaw, cam_pitch);
                         let eye = cam_target - fwd * cam_dist;
@@ -8839,7 +8884,17 @@ pub fn run(opts: Options) {
                             capture_asked = true;
                         }
                     }
-                    let r = if tex_view.is_some() || (preview.is_none() && donor_ref.is_none() && layer_view.is_none() && vfx_view.is_none()) {
+                    let r = if wb == Workbench::Live {
+                        match live_page.frame.filter(|_| live_page.mirror.ready()) {
+                            Some(f) => {
+                                scene.set_view(f.view.matrix(), crate::live_cam::NEAR, crate::live_cam::FAR);
+                                scene.set_view_shift(f.shift);
+                                scene.set_shadow(f.view.target.into(), [-0.45, -1.0, -0.35], (f.view.eye.distance(f.view.target) * 1.5).clamp(18.0, 400.0));
+                                scene.render_with(&live_page.mirror.world, Some(&mut overlay))
+                            }
+                            None => scene.render_menu_with(t, Some(&mut overlay)),
+                        }
+                    } else if tex_view.is_some() || (preview.is_none() && donor_ref.is_none() && layer_view.is_none() && vfx_view.is_none()) {
                         scene.render_menu_with(t, Some(&mut overlay))
                     } else {
                         let fwd = dir_from(cam_yaw, cam_pitch);
