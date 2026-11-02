@@ -222,7 +222,11 @@ pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
     b.real("MemUsage", lua.create_function(|_, ()| Ok(0i64))?)?;
     b.real("HaveActiveProfile", lua.create_function(|_, ()| Ok(true))?)?;
     b.real("IsAutosaveEnabled", lua.create_function(|_, ()| Ok(true))?)?;
-    b.real("LTIGetPrecacheBypass", lua.create_function(|_, ()| Ok(false))?)?;
+    // `FUN_005E4F70` pushes a number, 1 or 0, and `ShellBootstrap.StartPrecache` compares it with `0`.
+    // 1 skips the shader precache screen, which warms retail's D3D cache and has nothing to warm here.
+    b.real("LTIGetPrecacheBypass", lua.create_function(|_, ()| Ok(1.0f32))?)?;
+    // `FUN_005E5F80` reads a global no plain code clears; the retail boot plays them.
+    b.real("PlayIntroMovies", lua.create_function(|_, ()| Ok(true))?)?;
     b.real("GetAssetRequestMax", lua.create_function(|_, ()| Ok(0i64))?)?;
     // Shell / flow getters — fresh boot: nothing finished, nothing to auto-load or skip.
     b.real("FinishedShell", lua.create_function(|_, ()| Ok(false))?)?;
@@ -310,7 +314,7 @@ pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
     // mission-skip need the asset/streaming + localization subsystems. Honest no-ops. ---
     super::record_all(&mut b, lua, host, "Sys", &[
         "Callback", "SetSkipMission", "SetINIBriefing", "DisableAssetPreload",
-        "FlushAssets", "PlayIntroMovies", "AddStringDb", "ClearStringDb", "ForceNextAutosave",
+        "FlushAssets", "AddStringDb", "ClearStringDb", "ForceNextAutosave",
     ])?;
 
     b.install_global(GLOBAL)
