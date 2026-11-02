@@ -135,7 +135,6 @@ pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
         "LTIInputJoystickExit",
         "LTIInputJoystickReEnter",
         "LTIJoystickOverBoundResponse",
-        "LTIGetStartButton",
         "ChangeShellState",
         "LTIProfileEnter",
         "LTIProfileExit",
@@ -147,6 +146,20 @@ pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
         "LTICamera",
         "LTIupdateSupportQuickSlot",
     ])?;
+    // `FUN_005C36D0`: hands the shell's movie the press-start line.
+    let h = host.clone();
+    b.real("LTIGetStartButton", lua.create_function(move |_, _: mercs2_luac::rt::MultiValue| {
+        if let Some(tree) = h.borrow_mut().hud() {
+            tree.request_flash(
+                mercs2_ui::SHELL_MOVIE,
+                mercs2_ui::FlashRequest::Invoke {
+                    name: "LTIPressStart".into(),
+                    args: vec![mercs2_ui::FlashArg::Text("[0x5085D0F3:[0x72a00bd4]]".into())],
+                },
+            );
+        }
+        Ok(())
+    })?)?;
     // Shell first-boot gate: `if FirstRun() == 1` — report a normal (non-first) session.
     b.real(
         "FirstRun",
