@@ -538,7 +538,7 @@ pub fn navigator(ui: &mut egui::Ui, p: &Panel) -> Vec<Act> {
     let mut acts = Vec::new();
     let mut search = p.search.clone();
     if ui
-        .add(egui::TextEdit::singleline(&mut search).hint_text("Search every clip").desired_width(f32::INFINITY))
+        .add(egui::TextEdit::singleline(&mut search).hint_text("Search every clip").margin(theme::TEXT_EDIT_MARGIN).desired_width(f32::INFINITY))
         .changed()
     {
         acts.push(Act::Search(search));
@@ -574,13 +574,13 @@ pub fn navigator(ui: &mut egui::Ui, p: &Panel) -> Vec<Act> {
                         });
                     })
                     .response;
-                let resp = ui.interact(resp.rect, egui::Id::new(("audio-bank", name)), egui::Sense::click());
+                let resp = ui.interact(resp.rect, egui::Id::unique(("audio-bank", name)), egui::Sense::click());
                 if on {
-                    ui.painter().rect_filled(resp.rect, egui::Rounding::same(4.0), theme::BRASS_SOFT.gamma_multiply(0.6));
+                    ui.painter().rect_filled(resp.rect, egui::CornerRadius::same(4), theme::BRASS_SOFT.gamma_multiply(0.6));
                 }
                 resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked()
             };
-            egui::ScrollArea::vertical().max_height(ui.available_height() - 150.0).auto_shrink([false, false]).show(ui, |ui| {
+            theme::scroll_vertical().max_height(ui.available_height() - 150.0).auto_shrink([false, false]).show(ui, |ui| {
                 for (i, b) in r.banks.iter().enumerate() {
                     if row(ui, &b.name, b.lines.len(), !p.searching() && p.open == Some(Open::Bank(i))) {
                         acts.push(Act::Open(Open::Bank(i)));
@@ -598,7 +598,7 @@ pub fn navigator(ui: &mut egui::Ui, p: &Panel) -> Vec<Act> {
         for k in KINDS {
             // A pill goes to the next row whole rather than breaking its label: its width is the
             // label's plus `theme::pill`'s margins (8 each side, 4 after).
-            let label = ui.fonts(|f| f.layout_no_wrap(k.to_string(), theme::font(&theme::style_eyebrow()), theme::TX).size().x);
+            let label = ui.fonts_mut(|f| f.layout_no_wrap(k.to_string(), theme::font(&theme::style_eyebrow()), theme::TX).size().x);
             if ui.available_size_before_wrap().x < label + 20.0 {
                 ui.end_row();
             }
@@ -611,11 +611,11 @@ pub fn navigator(ui: &mut egui::Ui, p: &Panel) -> Vec<Act> {
 }
 
 /// The centre: the open bank's (or the search's) clips, the selection bar and the now-playing card.
-pub fn center(ctx: &egui::Context, p: &Panel, playing: Option<audioplay::Status>) -> Vec<Act> {
+pub fn center(root: &mut egui::Ui, p: &Panel, playing: Option<audioplay::Status>) -> Vec<Act> {
     let mut acts = Vec::new();
     egui::CentralPanel::default()
-        .frame(egui::Frame::none().fill(theme::G0).inner_margin(egui::Margin::symmetric(16.0, 12.0)))
-        .show(ctx, |ui| {
+        .frame(egui::Frame::NONE.fill(theme::G0).inner_margin(egui::Margin::symmetric(16, 12)))
+        .show(root, |ui| {
             if let Some(e) = p.routes_error() {
                 ui.label(egui::RichText::new(format!("English.wad: {e}")).color(theme::BAD));
                 return;
@@ -629,7 +629,7 @@ pub fn center(ctx: &egui::Context, p: &Panel, playing: Option<audioplay::Status>
                 if !p.searching() {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         let mut f = p.filter.clone();
-                        if ui.add(egui::TextEdit::singleline(&mut f).hint_text("Filter this bank").desired_width(200.0)).changed() {
+                        if ui.add(egui::TextEdit::singleline(&mut f).hint_text("Filter this bank").margin(theme::TEXT_EDIT_MARGIN).desired_width(200.0 + theme::TEXT_EDIT_MARGIN.sum().x)).changed() {
                             acts.push(Act::Filter(f));
                         }
                     });
@@ -686,7 +686,7 @@ pub fn center(ctx: &egui::Context, p: &Panel, playing: Option<audioplay::Status>
                 });
             });
             let row_h = 26.0;
-            egui::ScrollArea::vertical().max_height(ui.available_height() - card_h).auto_shrink([false, false]).show_rows(
+            theme::scroll_vertical().max_height(ui.available_height() - card_h).auto_shrink([false, false]).show_rows(
                 ui,
                 row_h,
                 rows.len(),
@@ -711,8 +711,8 @@ pub fn center(ctx: &egui::Context, p: &Panel, playing: Option<audioplay::Status>
                         // centred, and the taller ▶ hung out of the row's foot.
                         let (rect, row) =
                             ui.allocate_exact_size(egui::vec2(ui.available_width(), row_h - 2.0), egui::Sense::click());
-                        ui.painter().rect_filled(rect, egui::Rounding::same(3.0), fill);
-                        let mut content = ui.child_ui(rect, egui::Layout::left_to_right(egui::Align::Center), None);
+                        ui.painter().rect_filled(rect, egui::CornerRadius::same(3), fill);
+                        let mut content = ui.new_child(egui::UiBuilder::new().max_rect(rect).layout(egui::Layout::left_to_right(egui::Align::Center)));
                         {
                                 let ui = &mut content;
                                 let mut checked = on;
@@ -877,7 +877,7 @@ pub fn verbs(ui: &mut egui::Ui, p: &Panel, playing: Option<audioplay::Status>) -
     }
     ui.separator();
     ui.add_enabled_ui(cur.is_some() && p.routes().is_some(), |ui| {
-        ui.menu_button("Add to Shipment", |ui| {
+        theme::menu_button(ui, "Add to Shipment", |ui| {
             let (Some(w), Some(r)) = (cur, p.routes()) else { return };
             let refusal = p.line_refusal(w);
             let line = ui.add_enabled(refusal.is_none(), egui::Button::new("Replace this line"));
@@ -887,21 +887,21 @@ pub fn verbs(ui: &mut egui::Ui, p: &Panel, playing: Option<audioplay::Status>) -
             };
             if line.clicked() {
                 acts.push(Act::AddLine(w));
-                ui.close_menu();
+                ui.close();
             }
             let mut banks = BTreeSet::new();
             for (i, play) in r.plays.get(&w).into_iter().flatten().enumerate() {
                 let name = p.cue_name(play).map(str::to_string).unwrap_or_else(|| format!("0x{:08X}", play.guid));
                 if ui.button(format!("Replace cue {name} (plays {} wave(s))", play.waves)).clicked() {
                     acts.push(Act::AddCue(w, i));
-                    ui.close_menu();
+                    ui.close();
                 }
                 banks.insert(play.entry);
             }
             for entry in banks {
                 if ui.button(format!("Replace its bank {}", r.bank_name(entry))).clicked() {
                     acts.push(Act::AddBank(entry));
-                    ui.close_menu();
+                    ui.close();
                 }
             }
         });
@@ -1023,7 +1023,7 @@ mod tests {
         let mut acts = Vec::new();
         for events in [vec![], vec![egui::Event::PointerMoved(pos)], vec![button(true)], vec![button(false)]] {
             let input = egui::RawInput { screen_rect: Some(screen), events, ..Default::default() };
-            let _ = ctx.run(input, |ctx| acts.extend(center(ctx, p, None)));
+            let _ = ctx.run_ui(input, |root| acts.extend(center(root, p, None)));
         }
         acts
     }
