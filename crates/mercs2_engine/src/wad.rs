@@ -144,6 +144,21 @@ pub fn aset_blocks_for_type_id(wad: &Wad, type_id: u32) -> Vec<u16> {
     v
 }
 
+/// The chunk of a singleton class, found as [`aset_blocks_for_type_id`] says the engine finds one. `None`
+/// when no block of this archive carries the class, as a level with no trees has no `foliage`.
+pub fn singleton_chunk(wad: &mut Wad, type_hash: u32) -> Result<Option<Vec<u8>>, String> {
+    let type_id = mercs2_formats::types::type_id_for_type_hash(type_hash)
+        .ok_or_else(|| format!("0x{type_hash:08X} is not an asset class"))?;
+    for block in aset_blocks_for_type_id(wad, type_id) {
+        let dec = cached_block(wad, block)?;
+        let spans = mercs2_formats::ucfx::block_chunk_spans(&dec).map_err(|e| format!("block {block}: {e}"))?;
+        if let Some((_, range)) = spans.iter().find(|(e, _)| e.type_hash == type_hash) {
+            return Ok(Some(dec[range.clone()].to_vec()));
+        }
+    }
+    Ok(None)
+}
+
 /// Every distinct ASET `(name_hash, type_id, is_primary)` in the archive — for reverse-name hunts over
 /// assets that aren't primary models (e.g. props whose mesh isn't a type-19 primary ASET, like the
 /// recruitheli mesh). Sorted + deduped.
