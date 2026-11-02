@@ -22,6 +22,7 @@
 //!   mercs2_probe gfx-golden <movies_dir> --md <report.md> --json <index.json>
 
 use mercs2_formats::gfx::{tag_name, Features, GfxMovie};
+use mercs2_formats::gfx_def::{Character, MovieDef};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -36,6 +37,375 @@ struct MovieRow {
     tag_total: usize,
     feat: Features,
     error: Option<String>,
+}
+
+/// `gfx-decode`: decode every movie under `dir` to its [`MovieDef`]; any failure fails the run.
+pub fn gfx_decode(dir: &Path) -> Result<(), String> {
+    let mut files = Vec::new();
+    collect_gfx(dir, &mut files)?;
+    files.sort();
+    if files.is_empty() {
+        return Err(format!("no .gfx/.swf files under {}", dir.display()));
+    }
+    let mut failed = 0;
+    let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
+    for path in &files {
+        let bytes = std::fs::read(path).map_err(|e| format!("read {}: {e}", path.display()))?;
+        match GfxMovie::parse(&bytes).and_then(|movie| MovieDef::decode(&movie)) {
+            Ok(def) => {
+                for c in def.characters.values() {
+                    let kind = match c {
+                        Character::Shape(_) => "shape",
+                        Character::Morph(_) => "morph",
+                        Character::Sprite(_) => "sprite",
+                        Character::EditText(_) => "edit text",
+                        Character::Font(_) => "font",
+                        Character::Image(_) => "image",
+                    };
+                    *counts.entry(kind).or_default() += 1;
+                }
+            }
+            Err(e) => {
+                failed += 1;
+                println!("{}: {e}", path.display());
+            }
+        }
+    }
+    println!("{} movies, {failed} failed, characters {counts:?}", files.len());
+    if failed != 0 {
+        return Err(format!("{failed} movies did not decode"));
+    }
+    Ok(())
+}
+
+/// `gfx-run`: play every movie under `dir` for `frames` frames, then report script failures and the
+/// library calls the scripts reached for that do not exist.
+pub fn gfx_run(dir: &Path, frames: u32) -> Result<(), String> {
+    use mercs2_engine::gfx::avm::Player;
+    use mercs2_engine::gfx::stage::Movie;
+
+    let mut files = Vec::new();
+    collect_gfx(dir, &mut files)?;
+    files.sort();
+    let mut failed = 0;
+    let mut commands: BTreeMap<String, usize> = BTreeMap::new();
+    let mut missing: BTreeMap<String, usize> = BTreeMap::new();
+    for path in &files {
+        let bytes = std::fs::read(path).map_err(|e| format!("read {}: {e}", path.display()))?;
+        let def = std::rc::Rc::new(GfxMovie::parse(&bytes).and_then(|m| MovieDef::decode(&m))?);
+        let frame_ms = 1000.0 / def.frame_rate.max(1.0) as f64;
+        let run = (|| -> Result<(Vec<(String, String)>, Vec<String>), String> {
+            let mut player = Player::new(Movie::new(def.clone())?)?;
+            for _ in 1..frames {
+                player.advance(frame_ms)?;
+            }
+            player.movie.draw()?;
+            Ok((player.fscommands.clone(), player.missing.iter().cloned().collect()))
+        })();
+        match run {
+            Ok((fs, gaps)) => {
+                for (c, _) in fs {
+                    *commands.entry(c).or_default() += 1;
+                }
+                for g in gaps {
+                    *missing.entry(g).or_default() += 1;
+                }
+            }
+            Err(e) => {
+                failed += 1;
+                println!("{}: {e}", path.display());
+            }
+        }
+    }
+    println!("{} movies, {failed} failed", files.len());
+    println!("fscommands {commands:?}");
+    for (name, count) in &missing {
+        println!("missing in {count:>3}: {name}");
+    }
+    if failed != 0 {
+        return Err(format!("{failed} movies failed"));
+    }
+    Ok(())
+}
+
+/// `gfx-render`: play `movie` for `frames` frames and write the last as a PNG. Images come from `wads`.
+pub fn gfx_render(movie: &Path, frames: u32, png_path: &Path, wads: &[String], fonts: Option<&Path>, label: Option<&str>) -> Result<(), String> {
+    use mercs2_engine::gfx::avm::{Player, Value};
+    use mercs2_engine::gfx::stage::Movie;
+    use mercs2_engine::gfx::text::FontLib;
+    use mercs2_engine::gfx_pass::{render_to_rgba, WadImages};
+
+    let load = |path: &Path| -> Result<MovieDef, String> {
+        let bytes = std::fs::read(path).map_err(|e| format!("read {}: {e}", path.display()))?;
+        GfxMovie::parse(&bytes).and_then(|m| MovieDef::decode(&m))
+    };
+    let def = std::rc::Rc::new(load(movie)?);
+    let mut images = WadImages::open(wads)?;
+    let mut stage = Movie::new(def.clone())?;
+    if let Some(path) = fonts {
+        stage.font_lib = Some(std::rc::Rc::new(FontLib::from_movie(&load(path)?)?));
+    }
+    stage.strings = Some(std::rc::Rc::new(images.strings("english")?));
+    let mut player = Player::new(stage)?;
+    let frame_ms = 1000.0 / def.frame_rate.max(1.0) as f64;
+    for i in 1..frames {
+        player.advance(frame_ms)?;
+        if let (Some(label), 4) = (label, i) {
+            player.invoke("gotoAndPlay", &[Value::Str(label.into())])?;
+        }
+    }
+    println!("traces {:?}", player.traces);
+    println!("fscommands {:?}", player.fscommands);
+    println!("missing {:?}", player.missing);
+    let items = player.movie.draw()?;
+    for item in &items {
+        if let mercs2_engine::gfx::stage::Item::Draw(d) = item {
+            for part in d.parts.iter() {
+                let (mut lo, mut hi) = ([f32::MAX; 2], [f32::MIN; 2]);
+                for [x, y] in &part.vertices {
+                    let p = d.matrix.apply(*x, *y);
+                    for k in 0..2 {
+                        lo[k] = lo[k].min(p[k]);
+                        hi[k] = hi[k].max(p[k]);
+                    }
+                }
+                let paint = match &part.paint {
+                    mercs2_engine::gfx::tess::Paint::Solid(c) => format!("solid {c:?}"),
+                    mercs2_engine::gfx::tess::Paint::Gradient { kind, .. } => format!("gradient {kind:?}"),
+                    mercs2_engine::gfx::tess::Paint::Bitmap { id, .. } => format!("bitmap {id}"),
+                    mercs2_engine::gfx::tess::Paint::Glyphs { atlas, color, .. } => format!("text {atlas} {color:?}"),
+                };
+                println!("{lo:.0?}..{hi:.0?} {paint} blend {} mul {:.2?} add {:.2?}", d.blend, d.cxform.mul, d.cxform.add);
+            }
+        } else {
+            println!("{}", match item {
+                mercs2_engine::gfx::stage::Item::MaskBegin => "mask begin",
+                mercs2_engine::gfx::stage::Item::MaskEnd => "mask end",
+                _ => "mask pop",
+            });
+        }
+    }
+    let size = [(def.stage[1] - def.stage[0]) as u32 / 20, (def.stage[3] - def.stage[2]) as u32 / 20];
+    // The movie's own background is not painted: `MrxGuiShell` puts a Bink widget behind the shell's
+    // Flash widget, which could not show through it.
+    let count = items.len();
+    let draw = mercs2_engine::flash::FlashDraw { def, items };
+    let rgba = render_to_rgba(std::slice::from_ref(&draw), &mut images, size, [0.0, 0.0, 0.0, 1.0])?;
+    write_png(png_path, size, &rgba)?;
+    println!("{}: {count} items, {}x{}", png_path.display(), size[0], size[1]);
+    Ok(())
+}
+
+/// Print a block of action bytes, one action a line, with pool strings written in.
+fn print_actions(code: &[u8], out: &mut String) {
+    fn zstr(b: &[u8]) -> (String, usize) {
+        let end = b.iter().position(|c| *c == 0).unwrap_or(b.len());
+        (String::from_utf8_lossy(&b[..end]).into_owned(), end + 1)
+    }
+    let op_name = |op: u8| match op {
+        0x04 => "NextFrame", 0x05 => "PrevFrame", 0x06 => "Play", 0x07 => "Stop", 0x0A => "Add", 0x0B => "Subtract",
+        0x0C => "Multiply", 0x0D => "Divide", 0x0E => "Equals", 0x0F => "Less", 0x10 => "And", 0x11 => "Or", 0x12 => "Not",
+        0x17 => "Pop", 0x18 => "ToInteger", 0x1C => "GetVariable", 0x1D => "SetVariable", 0x20 => "SetTarget2",
+        0x21 => "StringAdd", 0x22 => "GetProperty", 0x23 => "SetProperty", 0x26 => "Trace", 0x30 => "RandomNumber",
+        0x3A => "Delete", 0x3B => "Delete2", 0x3C => "DefineLocal", 0x3D => "CallFunction", 0x3E => "Return", 0x3F => "Modulo",
+        0x40 => "NewObject", 0x41 => "DefineLocal2", 0x42 => "InitArray", 0x43 => "InitObject", 0x44 => "TypeOf",
+        0x46 => "Enumerate", 0x47 => "Add2", 0x48 => "Less2", 0x49 => "Equals2", 0x4A => "ToNumber", 0x4B => "ToString",
+        0x4C => "PushDuplicate", 0x4E => "GetMember", 0x4F => "SetMember", 0x50 => "Increment", 0x51 => "Decrement",
+        0x52 => "CallMethod", 0x53 => "NewMethod", 0x60 => "BitAnd", 0x61 => "BitOr", 0x62 => "BitXor", 0x66 => "StrictEquals",
+        0x67 => "Greater", 0x81 => "GotoFrame", 0x83 => "GetURL", 0x87 => "StoreRegister", 0x88 => "ConstantPool",
+        0x8C => "GotoLabel", 0x8E => "DefineFunction2", 0x94 => "With", 0x96 => "Push", 0x99 => "Jump", 0x9A => "GetURL2",
+        0x9B => "DefineFunction", 0x9D => "If", 0x9E => "Call", 0x9F => "GotoFrame2",
+        _ => "?",
+    };
+    let mut pool: Vec<String> = Vec::new();
+    let mut at = 0;
+    while at < code.len() {
+        let op = code[at];
+        at += 1;
+        if op == 0 {
+            out.push_str("  End\n");
+            continue;
+        }
+        let mut body: &[u8] = &[];
+        if op >= 0x80 {
+            let Some(len) = code.get(at..at + 2).map(|b| u16::from_le_bytes([b[0], b[1]]) as usize) else { return };
+            at += 2;
+            body = code.get(at..at + len).unwrap_or(&[]);
+            at += len;
+        }
+        let arg = match op {
+            0x88 => {
+                pool.clear();
+                let mut p = 2;
+                for _ in 0..u16::from_le_bytes([body[0], body[1]]) {
+                    let (s, n) = zstr(&body[p..]);
+                    p += n;
+                    pool.push(s);
+                }
+                format!("{} strings", pool.len())
+            }
+            0x96 => {
+                let mut p = 0;
+                let mut parts = Vec::new();
+                while p < body.len() {
+                    let kind = body[p];
+                    p += 1;
+                    match kind {
+                        0 => {
+                            let (s, n) = zstr(&body[p..]);
+                            p += n;
+                            parts.push(format!("{s:?}"));
+                        }
+                        1 => {
+                            parts.push(f32::from_le_bytes(body[p..p + 4].try_into().unwrap_or_default()).to_string());
+                            p += 4;
+                        }
+                        2 => parts.push("null".into()),
+                        3 => parts.push("undefined".into()),
+                        4 => {
+                            parts.push(format!("r{}", body[p]));
+                            p += 1;
+                        }
+                        5 => {
+                            parts.push((body[p] != 0).to_string());
+                            p += 1;
+                        }
+                        6 => {
+                            let b = &body[p..p + 8];
+                            parts.push(f64::from_le_bytes([b[4], b[5], b[6], b[7], b[0], b[1], b[2], b[3]]).to_string());
+                            p += 8;
+                        }
+                        7 => {
+                            parts.push(i32::from_le_bytes(body[p..p + 4].try_into().unwrap_or_default()).to_string());
+                            p += 4;
+                        }
+                        8 => {
+                            parts.push(format!("{:?}", pool.get(body[p] as usize).map_or("?", |s| s)));
+                            p += 1;
+                        }
+                        9 => {
+                            parts.push(format!("{:?}", pool.get(u16::from_le_bytes([body[p], body[p + 1]]) as usize).map_or("?", |s| s)));
+                            p += 2;
+                        }
+                        other => {
+                            parts.push(format!("<kind {other}>"));
+                            break;
+                        }
+                    }
+                }
+                parts.join(", ")
+            }
+            0x8C => zstr(body).0,
+            0x9B | 0x8E => format!("FUNCTION {}", zstr(body).0),
+            0x83 => {
+                let (url, n) = zstr(body);
+                format!("{url} {}", zstr(&body[n..]).0)
+            }
+            0x99 | 0x9D => i16::from_le_bytes([body[0], body[1]]).to_string(),
+            0x81 => u16::from_le_bytes([body[0], body[1]]).to_string(),
+            0x87 => format!("r{}", body[0]),
+            _ => String::new(),
+        };
+        out.push_str(&format!("  {} {arg}\n", op_name(op)));
+    }
+}
+
+/// Write every action block of a movie as text, each headed by where it lives.
+pub fn gfx_actions(movie: &Path, out_path: &Path) -> Result<(), String> {
+    let bytes = std::fs::read(movie).map_err(|e| format!("read {}: {e}", movie.display()))?;
+    let def = GfxMovie::parse(&bytes).and_then(|m| MovieDef::decode(&m))?;
+    let mut out = String::new();
+    let mut timeline = |name: String, t: &mercs2_formats::gfx_def::Timeline| {
+        for (index, frame) in t.frames.iter().enumerate() {
+            for control in frame {
+                match control {
+                    mercs2_formats::gfx_def::Control::Action(code) => {
+                        out.push_str(&format!("== {name} frame {index}\n"));
+                        print_actions(code, &mut out);
+                    }
+                    mercs2_formats::gfx_def::Control::Place(place) => {
+                        for action in &place.clip_actions {
+                            out.push_str(&format!("== {name} frame {index} depth {} clip event {:#x}\n", place.depth, action.events));
+                            print_actions(&action.code, &mut out);
+                        }
+                    }
+                    mercs2_formats::gfx_def::Control::Remove { .. } => {}
+                }
+            }
+        }
+    };
+    timeline("root".into(), &def.timeline);
+    let mut ids: Vec<u16> = def.characters.keys().copied().collect();
+    ids.sort();
+    for id in ids {
+        if let Some(Character::Sprite(sprite)) = def.characters.get(&id) {
+            timeline(format!("sprite {id}"), sprite);
+        }
+    }
+    std::fs::write(out_path, out).map_err(|e| format!("write {}: {e}", out_path.display()))
+}
+
+fn write_png(path: &Path, size: [u32; 2], rgba: &[u8]) -> Result<(), String> {
+    let file = std::fs::File::create(path).map_err(|e| format!("create {}: {e}", path.display()))?;
+    let mut enc = png::Encoder::new(std::io::BufWriter::new(file), size[0], size[1]);
+    enc.set_color(png::ColorType::Rgba);
+    enc.set_depth(png::BitDepth::Eight);
+    enc.write_header().and_then(|mut w| w.write_image_data(rgba)).map_err(|e| format!("write {}: {e}", path.display()))
+}
+
+/// Boot the shipped shell headless and walk it: each step is `wait:<frames>`, `down:<button>` or
+/// `up:<button>`, at 60 frames a second. The final frame goes to `png_path`.
+pub fn gfx_shell(png_path: &Path, steps: &[String], wads: &[String]) -> Result<(), String> {
+    use mercs2_engine::gfx_pass::render_to_rgba;
+    use mercs2_engine::shell::Shell;
+
+    const DT: f32 = 1.0 / 60.0;
+    let saves = vec![mercs2_engine::shell::ShellSave {
+        path: PathBuf::from("probe.profile"),
+        date: "05:41:11 | 07/23/2008".into(),
+        character: 1,
+        cash: 58174568,
+        fuel: 240,
+        play_time: "13:33:33".into(),
+        contract: "PirCon003".into(),
+    }];
+    let mut shell = Shell::open(wads, saves)?;
+    let mut frame = 0u32;
+    for step in steps {
+        let (verb, value) = step.split_once(':').ok_or_else(|| format!("step {step:?} is not verb:value"))?;
+        let number = || value.parse::<i64>().map_err(|e| format!("step {step:?}: {e}"));
+        let frames = match verb {
+            "wait" => number()?,
+            "down" | "up" => {
+                shell.button(number()?, verb == "down")?;
+                1
+            }
+            "call" => {
+                let mut parts = value.split(',');
+                let name = parts.next().ok_or("a call with no name")?;
+                let args = parts.map(|a| a.parse::<f64>().map_err(|e| format!("step {step:?}: {e}"))).collect::<Result<Vec<_>, _>>()?;
+                println!("{value} -> {}", shell.call_movies(name, &args)?);
+                1
+            }
+            other => return Err(format!("no step verb {other:?}")),
+        };
+        for _ in 0..frames {
+            frame += 1;
+            if let Some(exit) = shell.tick(DT).map_err(|e| format!("frame {frame}: {e}"))? {
+                println!("frame {frame}: the shell exits: {exit:?}");
+                return Ok(());
+            }
+        }
+        println!("frame {frame}: after {step}: {:?}", shell.describe());
+    }
+    let (draws, images) = shell.draws()?;
+    println!("{} movies on screen", draws.len());
+    let Some(first) = draws.first() else {
+        return Err("no movie on screen".into());
+    };
+    let size = [(first.def.stage[1] - first.def.stage[0]) as u32 / 20, (first.def.stage[3] - first.def.stage[2]) as u32 / 20];
+    let rgba = render_to_rgba(&draws, images, size, [0.0, 0.0, 0.0, 1.0])?;
+    write_png(png_path, size, &rgba)
 }
 
 pub fn gfx_golden(dir: &Path, md_out: &Path, json_out: &Path) -> Result<(), String> {
