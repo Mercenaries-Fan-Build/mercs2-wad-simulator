@@ -23,7 +23,7 @@ jobs:
 
       # Pin to the toolchain the repo declares in .tool-versions, so CI exercises the
       # same compiler developers use rather than whatever "stable" happens to be.
-      - uses: dtolnay/rust-toolchain@1.94.1
+      - uses: dtolnay/rust-toolchain@1.98.1
 
       # mercs2_engine links two C system libraries on Linux: gilrs -> libudev-sys
       # (gamepad hotplug via evdev) and cpal -> alsa-sys (audio output). The workspace
