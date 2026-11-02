@@ -941,6 +941,58 @@ pub struct StreamingWorldData {
     lowres_draw_by_cell: std::collections::HashMap<usize, usize>,
     /// The layers whose containers the `layers_static` block carries, in block order.
     static_block_layers: Vec<u32>,
+    trees: Vec<TreeSpecies>,
+}
+
+/// One species of the `foliage` chunk. A tree within `range` of the viewer is an entity of `template`
+/// (`FUN_004a2ef0`); every other draws as a billboard.
+struct TreeSpecies {
+    template: u32,
+    range: f32,
+    /// Position and yaw, in the chunk's order.
+    trees: Vec<mesh::TreeInstance>,
+    /// The trees that are entities now, by index, with their keys.
+    entities: std::collections::HashMap<usize, TreeEntity>,
+    /// The upload: taken at the first presented step.
+    billboard: Option<(mesh::TreeGeometry, TexMap)>,
+    /// The scene's billboard list no longer matches `entities`.
+    dirty: bool,
+}
+
+/// A tree in range.
+#[derive(Clone, Copy)]
+struct TreeEntity {
+    /// `None` when its spawn was refused for the hibernation grid's range, which leaves it a billboard.
+    key: Option<u32>,
+    /// Its model has drawn, so its billboard has stopped.
+    shown: bool,
+}
+
+/// Every species of the level's `foliage` chunk with its billboard's textures. No chunk, no trees.
+fn load_trees(w: &mut wad::Wad) -> Result<Vec<TreeSpecies>, String> {
+    use mercs2_formats::foliage::{Foliage, TYPE_HASH};
+    let Some(chunk) = wad::singleton_chunk(w, TYPE_HASH)? else { return Ok(Vec::new()) };
+    let foliage = Foliage::decode(&chunk).map_err(|e| format!("foliage: {e}"))?;
+    let mut out = Vec::with_capacity(foliage.species.len());
+    for s in &foliage.species {
+        let leaves = s.tree.leaves().map_err(|e| format!("foliage 0x{:08X}: {e}", s.template))?;
+        let geometry = mesh::build_billboard(s);
+        let mut textures: TexMap = std::collections::HashMap::new();
+        for h in [geometry.draw.diffuse, geometry.draw.normal].into_iter().flatten() {
+            let t = wad::extract_texture(w, h).map_err(|e| format!("foliage 0x{:08X}: texture 0x{h:08X}: {e}", s.template))?;
+            textures.insert(h, t);
+        }
+        out.push(TreeSpecies {
+            template: s.template,
+            range: s.range(),
+            trees: leaves.iter().map(|l| mesh::TreeInstance { position: l.position, yaw: l.yaw }).collect(),
+            entities: std::collections::HashMap::new(),
+            billboard: Some((geometry, textures)),
+            dirty: true,
+        });
+    }
+    println!("[stream] foliage: {} species, {} trees", out.len(), out.iter().map(|s| s.trees.len()).sum::<usize>());
+    Ok(out)
 }
 
 impl StreamingWorldData {
@@ -968,9 +1020,10 @@ impl StreamingWorldData {
     /// same boot glue `FreeFlyGame::setup` does inline (upload terrain, take ownership of the streamer)
     /// and returns the pieces the caller must wire into its own `Scene`/`World`.
     pub fn into_streaming_world(self, guids: std::rc::Rc<std::cell::RefCell<mercs2_core::GuidMap>>) -> (LoadedModel, StreamingWorld) {
-        let StreamingWorldData { wad, terrain, manager, templates, lowres_draw_by_cell, static_block_layers: _ } = self;
+        let StreamingWorldData { wad, terrain, manager, templates, lowres_draw_by_cell, static_block_layers: _, trees } = self;
         let terrain_hash = terrain.hash;
-        let sw = StreamingWorld::new(wad, manager, templates, lowres_draw_by_cell, terrain_hash, guids);
+        let mut sw = StreamingWorld::new(wad, manager, templates, lowres_draw_by_cell, terrain_hash, guids);
+        sw.trees = trees;
         (terrain, sw)
     }
 }
@@ -1235,8 +1288,11 @@ pub fn load_streaming_world_data(
     }
     progress.step("streaming catalog");
 
+    let trees = load_trees(&mut w)?;
+    progress.step("foliage");
+
     let static_block_layers = block_layers(&ls);
-    Ok(StreamingWorldData { wad: w, terrain, manager, templates, lowres_draw_by_cell, static_block_layers })
+    Ok(StreamingWorldData { wad: w, terrain, manager, templates, lowres_draw_by_cell, static_block_layers, trees })
 }
 
 /// The scene and ECS world a step presents entities in; `None` for a headless step.
@@ -1699,6 +1755,10 @@ pub struct StreamingWorld {
     prop_ents: std::collections::HashMap<u32, mercs2_core::Entity>,
     /// Entities whose ground cover the scene has placed.
     scrub_placed: std::collections::HashSet<u32>,
+    /// The level's tree species.
+    trees: Vec<TreeSpecies>,
+    /// Entities `Object.SetVisible` turned off: no visual while they stay here.
+    hidden: std::collections::HashSet<u32>,
     block_ents: std::collections::HashMap<u16, mercs2_core::Entity>,
     model_refs: std::collections::HashMap<u32, u32>,
     anim_store: std::collections::HashMap<u32, crate::scene::ModelAnim>,
@@ -1776,6 +1836,8 @@ impl StreamingWorld {
             terrain_hash,
             prop_ents: std::collections::HashMap::new(),
             scrub_placed: std::collections::HashSet::new(),
+            trees: Vec::new(),
+            hidden: std::collections::HashSet::new(),
             block_ents: std::collections::HashMap::new(),
             model_refs: std::collections::HashMap::new(),
             anim_store: std::collections::HashMap::new(),
@@ -1831,6 +1893,11 @@ impl StreamingWorld {
             coll_authored: self.coll_authored,
             coll_no_authored: self.coll_no_authored,
         }
+    }
+
+    /// What is still on its way: entities waiting to wake, and assets requested and not yet uploaded.
+    pub fn loading(&self) -> (usize, usize) {
+        (self.queue.len(), self.assets.as_ref().map_or(0, |a| a.pending.len()))
     }
 
     /// `key`'s activation state: 0 asleep, 1 waking, 2 awake.
@@ -1985,7 +2052,60 @@ impl StreamingWorld {
             self.sync_visual(k, scene, world)?;
         }
         self.step_blocks(scene, world, viewer);
-        self.step_grid(Some((scene, world)), viewer)
+        self.step_grid(Some((scene, world)), viewer)?;
+        self.step_trees(scene, viewer)
+    }
+
+    /// The trees' side of a step (`FUN_004a4060`): a tree inside its species' range becomes an entity, one
+    /// outside it goes back to a billboard. A tree keeps its billboard until its model has drawn, so one
+    /// whose assets are still loading stays visible.
+    fn step_trees(&mut self, scene: &mut crate::scene::Scene, viewer: [f32; 3]) -> Result<(), String> {
+        use mercs2_core::glam::Vec3;
+        let viewer = Vec3::from(viewer);
+        let mut species = std::mem::take(&mut self.trees);
+        let result = (|| {
+            for s in &mut species {
+                if let Some((geometry, textures)) = s.billboard.take() {
+                    scene.load_trees(s.template, &geometry, &textures, s.trees.len());
+                }
+                for (i, tree) in s.trees.iter().enumerate() {
+                    let inside = Vec3::from(tree.position).distance_squared(viewer) < s.range * s.range;
+                    match (inside, s.entities.get(&i).copied()) {
+                        (true, None) => {
+                            let key = self.spawn(s.template, tree.position, tree.yaw * 360.0, false, false)?;
+                            s.entities.insert(i, TreeEntity { key, shown: false });
+                        }
+                        (false, Some(e)) => {
+                            if let Some(key) = e.key {
+                                self.destroy(key);
+                            }
+                            s.entities.remove(&i);
+                            s.dirty |= e.shown;
+                        }
+                        _ => {}
+                    }
+                }
+                for e in s.entities.values_mut().filter(|e| !e.shown) {
+                    if e.key.is_some_and(|k| self.prop_ents.contains_key(&k)) {
+                        e.shown = true;
+                        s.dirty = true;
+                    }
+                }
+                if std::mem::take(&mut s.dirty) {
+                    let drawn: Vec<mesh::TreeInstance> = s
+                        .trees
+                        .iter()
+                        .enumerate()
+                        .filter(|(i, _)| !s.entities.get(i).is_some_and(|e| e.shown))
+                        .map(|(_, t)| *t)
+                        .collect();
+                    scene.set_trees(s.template, &drawn);
+                }
+            }
+            Ok(())
+        })();
+        self.trees = species;
+        result
     }
 
     /// [`step`](Self::step) without presentation: the layer requests, the grid and the activations run
@@ -2061,6 +2181,16 @@ impl StreamingWorld {
         result?;
         self.pending_visuals.push(key);
         Ok(Some(key))
+    }
+
+    /// `Object.SetVisible` (`0x5D03B0`): show or hide `key`. Its visual follows at the next presented
+    /// step, and a hidden entity keeps no collision, which `_SetStockpileCategoryQty` asks for with
+    /// `Object.DisablePhysics` beside it.
+    pub fn set_visible(&mut self, key: u32, on: bool) {
+        let changed = if on { self.hidden.remove(&key) } else { self.hidden.insert(key) };
+        if changed {
+            self.pending_visuals.push(key);
+        }
     }
 
     /// The caller owns `key`'s ECS entity (the player's character, which the game builds itself): the
@@ -2283,7 +2413,7 @@ impl StreamingWorld {
         let has_visual = o.terrain_mesh.is_some() || o.model.is_some() || o.scrub.is_some();
         let ringed = self.grid.entry(key).is_some_and(|e| e.state & 0xF0 != 0);
         let present = o.runtime.is_some() || ringed;
-        let want = has_visual && present && self.state(key) == 2 && !self.external.contains(&key);
+        let want = has_visual && present && self.state(key) == 2 && !self.external.contains(&key) && !self.hidden.contains(&key);
         match (want, self.prop_ents.contains_key(&key) || self.scrub_placed.contains(&key)) {
             (true, false) => {
                 if self.load_assets(key, scene)? {
@@ -2611,7 +2741,9 @@ where
             }
         }
         // Take ownership of the streaming state into the reusable executor.
-        self.stream = Some(StreamingWorld::new(data.wad, data.manager, data.templates, data.lowres_draw_by_cell, terrain_hash, guids));
+        let mut stream = StreamingWorld::new(data.wad, data.manager, data.templates, data.lowres_draw_by_cell, terrain_hash, guids);
+        stream.trees = data.trees;
+        self.stream = Some(stream);
     }
 
     fn update(&mut self, ctx: &mut crate::app::Ctx) -> crate::app::Camera {
