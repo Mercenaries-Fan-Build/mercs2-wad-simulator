@@ -374,7 +374,7 @@ fn grid(ui: &mut egui::Ui, id: &str, headers: &[&str], rows: &[Vec<String>]) {
         ui.label(RichText::new("none").small().color(theme::FAINT));
         return;
     }
-    egui::ScrollArea::horizontal().id_source(("grid.scroll", id)).show(ui, |ui| {
+    theme::scroll_horizontal().id_salt(("grid.scroll", id)).show(ui, |ui| {
         egui::Grid::new(("grid", id)).striped(true).spacing([12.0, 3.0]).num_columns(headers.len()).show(ui, |ui| {
             for h in headers {
                 ui.label(RichText::new(*h).small().color(theme::DIM));
@@ -831,7 +831,7 @@ fn factions(ui: &mut egui::Ui, ctx: &Ctx) {
                 }
             }
         }
-        egui::ScrollArea::horizontal().id_source("factions.grid").show(ui, |ui| {
+        theme::scroll_horizontal().id_salt("factions.grid").show(ui, |ui| {
             egui::Grid::new("factions.grid.cells").striped(true).spacing([8.0, 2.0]).show(ui, |ui| {
                 ui.label(RichText::new("from \\ to").small().color(theme::FAINT));
                 for c in &cols {
@@ -1265,7 +1265,7 @@ mod tests {
             let root = tree_of(name);
             let root = root.as_table().unwrap();
             let profile = save::parse(&std::fs::read(game_paths::save_fixtures().join(name)).unwrap()).unwrap();
-            let _ = ctx_egui.run(egui::RawInput::default(), |c| {
+            let _ = ctx_egui.run_ui(egui::RawInput::default(), |c| {
                 egui::CentralPanel::default().show(c, |ui| {
                     let ctx = Ctx { root, profile: Some(&profile), lk: Lookups::default() };
                     for t in TOPICS {
