@@ -1786,6 +1786,16 @@ impl ScriptHost {
         crate::bindings::event::fire_game_state_change(&self.lua, state, phase)
     }
 
+    /// Tell the widgets a game state changed (`GuiGameStateChange`); `action` is `"Enter"` or `"Exit"`.
+    pub fn fire_gui_state_change(&self, state: &str, action: &str) -> LuaResult<()> {
+        crate::bindings::event::fire_gui_game_state_change(&self.lua, state, action)
+    }
+
+    /// Run every awake widget's update callback.
+    pub fn pump_widget_updates(&self, host: &SharedHost, dt: f32) -> LuaResult<()> {
+        crate::bindings::hud::pump_widget_updates(&self.lua, host, dt)
+    }
+
     /// Dispatch every engine-side callback the host has queued this tick — the counterpart to the
     /// `fire_*` entry points above, for callbacks the *engine* completes rather than the script.
     ///
