@@ -80,6 +80,11 @@ fn usage() -> ! {
          \x20 bone-census [names.txt] [--csv P] [--wads a.wad,b.wad]      (every HIER node in every model)\n\
          \x20 gfx-extract <outdir>          (every cfx_pack movie of --wad, verbatim)\n\
          \x20 gfx-golden <movies_dir> --md <report.md> --json <index.json>   (no WAD needed)\n\
+         \x20 gfx-decode <movies_dir>                       (decode every movie's definitions; no WAD needed)\n\
+         \x20 gfx-render <movie.gfx> <frames> <out.png> [--fonts <font.gfx>] [--goto <label>] <images.wad>...   (play a movie, write its last frame)\n\
+         \x20 gfx-shell <out.png> [wait:<frames>|down:<button>|up:<button>|call:<name>]... <wad, last mounted first>...   (boot the shipped shell headless)\n\
+         \x20 gfx-actions <movie.gfx> <out.txt>   (write a movie's ActionScript as text)\n\
+         \x20 gfx-run <movies_dir> <frames>                 (play every movie; report script failures and gaps)\n\
          \x20 ess-live [--addr host:port] [--menu <scripts-rel path>] [--spawn <template>] [--spawn-dist <m>]   (live game, no WAD)\n\
          \x20 ess-menu-check --ess <Ess.lua> <menu.lua> [<menu.lua> ...]   (exact Lua 5.1, engine stubbed, no WAD)\n\
          \x20 extract --model H [--type T] <out.bin>   dump-block <index> <out.bin>  find-placement <substring>\n\
@@ -704,6 +709,73 @@ fn main() {
     }
     if cmd == "prof-samples" {
         std::process::exit(prof_samples::main(&args));
+    }
+    if cmd == "gfx-run" {
+        let (Some(dir), Some(frames)) = (args.first(), args.get(1).and_then(|f| f.parse::<u32>().ok())) else {
+            eprintln!("gfx-run: usage: mercs2_probe gfx-run <movies_dir> <frames>");
+            std::process::exit(2);
+        };
+        if let Err(e) = gfx_golden::gfx_run(std::path::Path::new(dir), frames) {
+            eprintln!("gfx-run failed: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    if cmd == "gfx-actions" {
+        let (Some(movie), Some(out)) = (args.first(), args.get(1)) else {
+            eprintln!("gfx-actions: usage: mercs2_probe gfx-actions <movie.gfx> <out.txt>");
+            std::process::exit(2);
+        };
+        if let Err(e) = gfx_golden::gfx_actions(std::path::Path::new(movie), std::path::Path::new(out)) {
+            eprintln!("gfx-actions failed: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    if cmd == "gfx-shell" {
+        let Some(out) = args.first() else {
+            eprintln!("gfx-shell: usage: mercs2_probe gfx-shell <out.png> [wait:<frames>|down:<button>|up:<button>]... <wad, last mounted first>...");
+            std::process::exit(2);
+        };
+        let (wads, steps): (Vec<String>, Vec<String>) = args[1..].iter().cloned().partition(|a| a.ends_with(".wad"));
+        if let Err(e) = gfx_golden::gfx_shell(std::path::Path::new(out), &steps, &wads) {
+            eprintln!("gfx-shell failed: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    if cmd == "gfx-render" {
+        let usage = "gfx-render: usage: mercs2_probe gfx-render <movie.gfx> <frames> <out.png> [--fonts <font.gfx>] [--goto <label>] <images.wad>...";
+        let (Some(movie), Some(frames), Some(out)) = (args.first(), args.get(1).and_then(|f| f.parse::<u32>().ok()), args.get(2)) else {
+            eprintln!("{usage}");
+            std::process::exit(2);
+        };
+        let fonts = flag_val(&args, "--fonts");
+        let label = flag_val(&args, "--goto");
+        let wads: Vec<String> = args[3..].iter().filter(|a| a.ends_with(".wad")).cloned().collect();
+        if let Err(e) = gfx_golden::gfx_render(
+            std::path::Path::new(movie),
+            frames,
+            std::path::Path::new(out),
+            &wads,
+            fonts.as_deref().map(std::path::Path::new),
+            label.as_deref(),
+        ) {
+            eprintln!("gfx-render failed: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    if cmd == "gfx-decode" {
+        let Some(dir) = first_positional(&args) else {
+            eprintln!("gfx-decode: usage: mercs2_probe gfx-decode <movies_dir>");
+            std::process::exit(2);
+        };
+        if let Err(e) = gfx_golden::gfx_decode(std::path::Path::new(&dir)) {
+            eprintln!("gfx-decode failed: {e}");
+            std::process::exit(1);
+        }
+        return;
     }
     if cmd == "gfx-golden" {
         let usage = "gfx-golden: usage: mercs2_probe gfx-golden <movies_dir> --md <report.md> --json <index.json>";
