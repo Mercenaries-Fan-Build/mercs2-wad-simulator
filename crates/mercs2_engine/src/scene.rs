@@ -311,13 +311,31 @@ struct GeomTarget {
     cull: Option<wgpu::Face>,
 }
 
-/// The geometry pipeline: `shader.wgsl` over the model vertex layout, from `vs_main`, or from
-/// `vs_scrub` with a [`mesh::ScrubInstance`] stream beside it.
+/// What a geometry pipeline's vertex stage reads.
+#[derive(Clone, Copy, PartialEq)]
+enum GeomKind {
+    /// `vs_main` over the model vertex layout.
+    Model,
+    /// `vs_scrub`, with a [`mesh::ScrubInstance`] stream beside it.
+    Scrub,
+    /// `vs_billboard` and `fs_billboard`, with a [`mesh::TreeInstance`] stream beside it.
+    Billboard,
+}
+
+/// One tree species' billboards.
+struct TreeBatch {
+    /// The model its quads are uploaded under.
+    key: u32,
+    instances: wgpu::Buffer,
+    count: u32,
+}
+
+/// The geometry pipeline: `shader.wgsl` over the model vertex layout, of `kind`.
 fn geom_pipeline(
     device: &wgpu::Device,
     layout: &wgpu::PipelineLayout,
     shader: &wgpu::ShaderModule,
-    scrub: bool,
+    kind: GeomKind,
     target: GeomTarget,
 ) -> wgpu::RenderPipeline {
     let GeomTarget { format, blend, depth_write, cull } = target;
@@ -326,10 +344,17 @@ fn geom_pipeline(
         step_mode: wgpu::VertexStepMode::Vertex,
         attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x4, 2 => Float32x2, 3 => Float32x3, 4 => Float32x4, 5 => Uint8x4, 6 => Unorm8x4],
     };
-    let instance_layout = wgpu::VertexBufferLayout {
-        array_stride: std::mem::size_of::<mesh::ScrubInstance>() as wgpu::BufferAddress,
-        step_mode: wgpu::VertexStepMode::Instance,
-        attributes: &wgpu::vertex_attr_array![7 => Float32x4, 8 => Float32x4, 9 => Float32x4, 10 => Float32x4],
+    let instance_layout = match kind {
+        GeomKind::Billboard => wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<mesh::TreeInstance>() as wgpu::BufferAddress,
+            step_mode: wgpu::VertexStepMode::Instance,
+            attributes: &wgpu::vertex_attr_array![7 => Float32x4],
+        },
+        _ => wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<mesh::ScrubInstance>() as wgpu::BufferAddress,
+            step_mode: wgpu::VertexStepMode::Instance,
+            attributes: &wgpu::vertex_attr_array![7 => Float32x4, 8 => Float32x4, 9 => Float32x4, 10 => Float32x4],
+        },
     };
     let buffers = [vbuf_layout, instance_layout];
     device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -337,13 +362,17 @@ fn geom_pipeline(
         layout: Some(layout),
         vertex: wgpu::VertexState {
             module: shader,
-            entry_point: if scrub { "vs_scrub" } else { "vs_main" },
-            buffers: if scrub { &buffers } else { &buffers[..1] },
+            entry_point: match kind {
+                GeomKind::Model => "vs_main",
+                GeomKind::Scrub => "vs_scrub",
+                GeomKind::Billboard => "vs_billboard",
+            },
+            buffers: if kind == GeomKind::Model { &buffers[..1] } else { &buffers },
             compilation_options: Default::default(),
         },
         fragment: Some(wgpu::FragmentState {
             module: shader,
-            entry_point: "fs_main",
+            entry_point: if kind == GeomKind::Billboard { "fs_billboard" } else { "fs_main" },
             targets: &[Some(wgpu::ColorTargetState { format, blend: Some(blend), write_mask: wgpu::ColorWrites::ALL })],
             compilation_options: Default::default(),
         }),
@@ -581,8 +610,12 @@ pub struct Scene {
     /// By entity key.
     scrub_placed: HashMap<u32, PlacedScrub>,
     scrub_frame: Vec<ScrubFrameDraw>,
-    /// Group 2 of a ground cover draw, whose matrices are per instance.
+    /// Group 2 of a ground cover or billboard draw, whose matrices are per instance.
     scrub_bones: wgpu::BindGroup,
+    tree_pipelines: HashMap<wgpu::TextureFormat, wgpu::RenderPipeline>,
+    trees: Vec<TreeBatch>,
+    tree_camera: wgpu::Buffer,
+    tree_camera_bind: wgpu::BindGroup,
     /// HDR + bloom post chain. `None` = fall back to direct swapchain present.
     post: Option<crate::post::Post>,
     sky_buf: wgpu::Buffer,
@@ -895,6 +928,17 @@ impl Scene {
             layout: &bone_bgl,
             entries: &[wgpu::BindGroupEntry { binding: 0, resource: scrub_bones_buf.as_entire_binding() }],
         });
+        let tree_camera = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("tree camera"),
+            size: 192,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let tree_camera_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("tree camera bind"),
+            layout: &camera_bgl,
+            entries: &[wgpu::BindGroupEntry { binding: 0, resource: tree_camera.as_entire_binding() }],
+        });
 
         let shader = device.create_shader_module(wgpu::include_wgsl!("shader.wgsl"));
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -913,7 +957,7 @@ impl Scene {
         // flag from MTRL; negligible perf cost at this scale.)
         let build_geom_pipeline = |format: wgpu::TextureFormat, transparent: bool| {
             let blend = if transparent { wgpu::BlendState::ALPHA_BLENDING } else { wgpu::BlendState::REPLACE };
-            geom_pipeline(&device, &layout, &shader, false, GeomTarget { format, blend, depth_write: !transparent, cull: None })
+            geom_pipeline(&device, &layout, &shader, GeomKind::Model, GeomTarget { format, blend, depth_write: !transparent, cull: None })
         };
         let pipeline = build_geom_pipeline(config.format, false);
         let pipeline_t = build_geom_pipeline(config.format, true);
@@ -1314,6 +1358,10 @@ impl Scene {
             scrub_placed: HashMap::new(),
             scrub_frame: Vec::new(),
             scrub_bones,
+            tree_pipelines: HashMap::new(),
+            trees: Vec::new(),
+            tree_camera,
+            tree_camera_bind,
             post,
             sky_buf,
             sky_bind,
@@ -1918,7 +1966,7 @@ impl Scene {
         for format in formats {
             if !self.blend_pipelines.contains_key(&(format, key)) {
                 let target = GeomTarget { format, blend, depth_write: false, cull: key.1 };
-                let p = geom_pipeline(&self.device, &self.geom_layout, &self.geom_shader, false, target);
+                let p = geom_pipeline(&self.device, &self.geom_layout, &self.geom_shader, GeomKind::Model, target);
                 self.blend_pipelines.insert((format, key), p);
             }
         }
@@ -1994,8 +2042,67 @@ impl Scene {
                 },
             };
             let target = GeomTarget { format, blend: state, depth_write: blend.is_none(), cull };
-            let p = geom_pipeline(&self.device, &self.geom_layout, &self.geom_shader, true, target);
+            let p = geom_pipeline(&self.device, &self.geom_layout, &self.geom_shader, GeomKind::Scrub, target);
             self.scrub_pipelines.insert((format, key), p);
+        }
+    }
+
+    /// Upload a tree species' billboard, as model `key`, with room for `capacity` trees. Billboards are
+    /// alpha-tested and keep the target's alpha, as solid ground cover does.
+    pub fn load_trees(&mut self, key: u32, geometry: &mesh::TreeGeometry, textures: &TexMap, capacity: usize) {
+        assert!(!self.models.contains_key(&key), "tree species 0x{key:08X} collides with a loaded model");
+        let draws = std::slice::from_ref(&geometry.draw);
+        self.load_model(key, &geometry.verts, &geometry.indices, draws, textures, &mesh::SkinData::identity());
+        let formats: Vec<wgpu::TextureFormat> =
+            std::iter::once(self.config.format).chain(self.post.as_ref().map(|_| crate::post::HDR_FORMAT)).collect();
+        for format in formats {
+            if self.tree_pipelines.contains_key(&format) {
+                continue;
+            }
+            let blend = wgpu::BlendState {
+                color: wgpu::BlendComponent::REPLACE,
+                alpha: wgpu::BlendComponent {
+                    src_factor: wgpu::BlendFactor::Zero,
+                    dst_factor: wgpu::BlendFactor::One,
+                    operation: wgpu::BlendOperation::Add,
+                },
+            };
+            let target = GeomTarget { format, blend, depth_write: true, cull: None };
+            let p = geom_pipeline(&self.device, &self.geom_layout, &self.geom_shader, GeomKind::Billboard, target);
+            self.tree_pipelines.insert(format, p);
+        }
+        let instances = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("tree instances"),
+            size: (capacity * std::mem::size_of::<mesh::TreeInstance>()) as wgpu::BufferAddress,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        self.trees.push(TreeBatch { key, instances, count: 0 });
+    }
+
+    /// The trees of species `key` that draw as billboards.
+    pub fn set_trees(&mut self, key: u32, trees: &[mesh::TreeInstance]) {
+        let batch = self.trees.iter_mut().find(|t| t.key == key).unwrap_or_else(|| panic!("tree species 0x{key:08X} set before it loaded"));
+        batch.count = trees.len() as u32;
+        self.queue.write_buffer(&batch.instances, 0, bytemuck::cast_slice(trees));
+    }
+
+    /// Record the billboards into `pass`.
+    fn draw_trees<'a>(&'a self, pass: &mut wgpu::RenderPass<'a>, format: wgpu::TextureFormat) {
+        for t in self.trees.iter().filter(|t| t.count > 0) {
+            let Some(p) = self.tree_pipelines.get(&format) else {
+                panic!("no billboard pipeline into {format:?}")
+            };
+            let model = &self.models[&t.key];
+            let dc = &model.draw_calls[0];
+            pass.set_pipeline(p);
+            pass.set_bind_group(0, &self.tree_camera_bind, &[]);
+            pass.set_bind_group(1, &model.tex_binds[dc.bind], &[]);
+            pass.set_bind_group(2, &self.scrub_bones, &[]);
+            pass.set_vertex_buffer(0, model.vbuf.slice(..));
+            pass.set_vertex_buffer(1, t.instances.slice(..));
+            pass.set_index_buffer(model.ibuf.as_ref().expect("a billboard has indices").slice(..), wgpu::IndexFormat::Uint32);
+            pass.draw_indexed(dc.index_start..dc.index_start + dc.index_count, 0, 0..t.count);
         }
     }
 
@@ -2350,6 +2457,9 @@ impl Scene {
                 }
             }
             self.draw_scrub(pass, format, blended);
+            if !blended {
+                self.draw_trees(pass, format);
+            }
         }
     }
 
@@ -2736,6 +2846,10 @@ impl Scene {
         }
 
         self.prepare_scrub(view, view_proj, cam_world, &planes);
+        if !self.trees.is_empty() {
+            let uniform = self.camera_uniform(view_proj, glam::Mat4::IDENTITY, cam_world);
+            self.queue.write_buffer(&self.tree_camera, 0, bytemuck::cast_slice(&uniform));
+        }
 
         // Sky uniform (128 B): inverse view-proj (per-pixel ray reconstruction) + sun direction +
         // horizon/zenith colors + Rayleigh/Mie scattering, from the atmosphere model. Fog color, if
