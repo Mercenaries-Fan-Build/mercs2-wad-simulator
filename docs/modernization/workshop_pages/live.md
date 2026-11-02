@@ -66,7 +66,7 @@ runs were against v1.1 (`7a348847…`) under Wine, 2026-11-01.
 | Address | Host and port from `<install>/scripts/lua_bridge.ini`, as the ASI resolves them; `DEFAULT_ADDR` only where the ASI itself would use it. `install` is the folder above the active `data/vz.wad` | `settings.wad_path` | ini read | test over a temp install |
 | Page closed | Connect-and-close reachability every 3 s, as today | `mercs2_bridge::reachable` | — | existing test |
 | Page open | Holds a session. It closes and reopens every 5 s, so a REPL client gets its turn and `lua_bridge.log` gains under one line a second. Connecting per tick would write 20 lines a second | `repl.rs:145,149` | — | test: a second client gets a turn within one rotation |
-| Tiers | Pose every 100 ms. Entities every 500 ms. World (layers, mission, streaming) every 2 s. Serial: the next chunk waits for the last reply, so a slow game slows the poll and never queues | `Bridge::eval` (60 ms floor) | tier scheduler | test with a fake clock |
+| Tiers | Pose every 100 ms. Entities every 500 ms. World (layers, mission, streaming) and stock (the storage piles the game hid) every 2 s. Serial: the next chunk waits for the last reply, so a slow game slows the poll and never queues | `Bridge::eval` (60 ms floor) | tier scheduler | test with a fake clock |
 | Reply | Each chunk returns one string built with `string.format`, ending in a sentinel. No sentinel, a bare `[ok]`, or `[runtime]` / `[compile]` / `[bridge]` is a hard, shown error, never empty data | `ess_live.rs` `Reply` parser | Move the parser to `mercs2_bridge`; `ess_live` calls it | tests: truncated reply, each error tag |
 | Read-only | Chunks are constants in one module. Every call in them is on an allowlist. A test scans them and fails on anything else, and names `Debug.Printf`, `Sys.MainTimeStamp`, `Loader.PopKeyEvents`, `import` as banned | new `live_chunks.rs` | allowlist test | the test |
 | Guard | Every chunk first checks `_MODULES ~= nil and _MODULES.mrxplaystate ~= nil`; false reads "no world", not an error | — | — | test |
@@ -105,6 +105,8 @@ kept for this page as `theme` tokens, not literals.
 | NPC poses | `n / m` per **D7** | entity tier | **D7** | fixture |
 | Resident chunks | Per **D3**. No Lua read | none today | **D3** | — |
 | Active layers | Count of `_tLoadedLayers` entries that are not marked for removal, plus the static list. Static list is found by scanning `_MODULES` for `_tStaticLayers` with `rawget`; its module key is unknown | world tier | — | fixture; `level_editor.md` 410 / 413 layers against a save |
+| Mirror loading | Entities waiting to wake, then assets requested and not yet uploaded. Amber while either is above 0 | `StreamingWorld::loading` | — | capture |
+| Piles hidden | Entities the mirror hid, of the names the stock tier reported; green when all resolved. Shown when the game hides any | stock tier, name index | — | capture: 29 / 29 for `auto_48E12F36` |
 | Blocking seq | `_nBlockingSequences`; nil reads 0 (idle), as the module's own reset leaves it | world tier | — | fixture |
 | Surface-A divergence | Per **D5**. `surface_a.asi` is not deployed in the install | none today | **D5** | — |
 
@@ -133,6 +135,8 @@ at the position the game reports.
 | Element | Action → effect | Data / code | Missing | Proof |
 |---|---|---|---|---|
 | Mirror world | Starts on the first pose sample. `StreamingWorld::step` is driven with viewer = the hero. Requested layers come from retail's own lists, so the mirror shows the state the game is in, and a mission's layer swap appears in the mirror | `game_world.rs:1884`; world tier | Overlay stack on `load_streaming_world_data`; without it a modded game diverges | capture at two positions |
+| Trees | Every tree of the `foliage` chunk. Inside its species' range a tree is an entity of the species' template, the rest are billboards, and a tree keeps its billboard until its model has drawn | `mercs2_formats::foliage`, `StreamingWorld::step_trees` | Wind on the billboards; retail's far-plane fade is a constant here | `mercs2_probe foliage-check` over 2 captures: 112 / 112 rows on leaves |
+| Storage piles | The stock tier reads `WifPmcInterior._tStockpile` and `_tStockpileQty` and lists what `_SetStockpileCategoryQty` hid; the mirror hides those by name with `StreamingWorld::set_visible` | stock tier | — | capture; retail state from `mercs2_probe dump-near` |
 | Page hosting | Live registers no `CentralPanel`, so the camera keeps its input. It keeps its own camera | `app.rs:1078,3562,4241,6135,8842` | guards lifted | input test |
 | Visible centre | The side columns cover the 3D, so the projection is shifted so the hero sits at the centre of the visible rect | `scene.rs:2301` | off-axis term on `set_view` | test: projected hero at rect centre |
 | Default | The page opens in **Free orbit locked on the hero**, as drawn, so it follows from the first sample with no click | — | — | capture |
