@@ -501,6 +501,14 @@ pub fn left(ctx: &egui::Context, p: &mut Page) {
                         .response
                         .on_hover_text("Records in the game's asset registry, and resident blocks: M2Live, in m2-sdk");
                     row(ui, None, "Active layers", (w.layers.len() + live.statics.len()).to_string(), theme::live::GREEN);
+                    if let Some((waking, assets)) = p.mirror.loading() {
+                        let busy = waking + assets > 0;
+                        row(ui, None, "Mirror loading", format!("{waking} · {assets} assets"), if busy { theme::live::AMBER } else { theme::live::DIM });
+                    }
+                    if !live.hidden_piles.is_empty() {
+                        let (shown, of) = (p.mirror.hidden_count(), live.hidden_piles.len());
+                        row(ui, None, "Piles hidden", format!("{shown} / {of}"), if shown == of { theme::live::GREEN } else { theme::live::AMBER });
+                    }
                     let seq = if w.blocking == 0 { "0 (idle)".to_string() } else { w.blocking.to_string() };
                     row(ui, None, "Blocking seq", seq, if w.blocking == 0 { theme::live::DIM } else { theme::live::AMBER });
                     if w.streaming {
