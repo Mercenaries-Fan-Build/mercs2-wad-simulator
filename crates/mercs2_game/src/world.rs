@@ -17,7 +17,7 @@ use mercs2_core::{AnimState, Entity, ModelRef, SkinPalette, Transform, World};
 use mercs2_engine::game_world::*;
 use mercs2_engine::mesh::Vertex;
 use mercs2_engine::render::*;
-use mercs2_engine::scene::{AssetStore, ModelAnim};
+use mercs2_engine::scene::{AssetStore, ModelAnim, SurfaceError};
 use mercs2_engine::worldutil::*;
 use mercs2_engine::{mesh, pose, wad};
 use winit::keyboard::KeyCode;
@@ -1031,6 +1031,12 @@ pub struct Mercs2Game {
     test_world: bool,
     menu_gp_prev: [bool; 4],
     menu_open: std::time::Instant,
+    /// The shipped front end, while it runs.
+    shell: Option<mercs2_engine::shell::Shell>,
+    shell_pad: [bool; 4],
+    /// `--shell-shot`: seconds into the front end, and where to write that frame.
+    shell_shot: Option<(f32, std::path::PathBuf)>,
+    shell_clock: f32,
     // Input bindings (Mercs2.ini) — for mouse sensitivity / invert-Y in `update`.
     bindings: mercs2_engine::input::Bindings,
     // The ECS World is owned by the engine (`app::run`) and lent via `Ctx` — the game does NOT keep its
@@ -1135,6 +1141,10 @@ impl Mercs2Game {
             test_world: false,
             menu_gp_prev: [false; 4],
             menu_open: std::time::Instant::now(),
+            shell: None,
+            shell_pad: [false; 4],
+            shell_shot: None,
+            shell_clock: 0.0,
             bindings,
             guids,
             script_host,
@@ -1181,6 +1191,12 @@ impl Mercs2Game {
         }
     }
 
+    /// Open on the shipped front end instead of the native menu.
+    pub(crate) fn set_shell(&mut self, shell: mercs2_engine::shell::Shell, shot: Option<(f32, std::path::PathBuf)>) {
+        self.shell = Some(shell);
+        self.shell_shot = shot;
+    }
+
     /// Resolve a picked save into the boot configuration and store it for `spawn_loader`.
     ///
     /// `sel = None` is **New Game**: no save reaches the script host, so the master script takes its
@@ -1206,6 +1222,112 @@ impl Mercs2Game {
         // (`tLayerData`) are requested by `MrxLayerManager.LoadSingleton` during that boot.
         self.script_host.borrow_mut().set_boot_save_state(cfg.save);
         println!("[shell] boot: {} [contract {}]", cfg.label, cfg.contract);
+    }
+
+    /// One frame of the shipped front end. Keys and the pad become the controller events its scripts
+    /// read; a script error or a movie the player cannot run stops the game rather than limp on.
+    fn shell_frame(&mut self, ctx: &mut mercs2_engine::app::Ctx) -> mercs2_engine::app::MenuOutcome {
+        use mercs2_engine::app::MenuOutcome;
+        use mercs2_engine::input::Action;
+        use mercs2_engine::shell::ShellExit;
+
+        let shell = self.shell.as_mut().expect("shell_frame runs with a shell");
+        let fatal = |e: String| -> ! {
+            eprintln!("[shell] FATAL: {e}");
+            panic!("the front end stopped: {e}");
+        };
+        for code in ctx.pressed.iter() {
+            if let Some(button) = shell_button(*code) {
+                shell.button(button, true).unwrap_or_else(|e| fatal(e));
+            }
+        }
+        for code in ctx.released.iter() {
+            if let Some(button) = shell_button(*code) {
+                shell.button(button, false).unwrap_or_else(|e| fatal(e));
+            }
+        }
+        let pad = [
+            (1, ctx.input.held(Action::SelectUp)),
+            (2, ctx.input.held(Action::SelectDown)),
+            (6, ctx.input.held(Action::Jump)),
+            (8, ctx.input.held(Action::Crouch)),
+        ];
+        for (index, (button, held)) in pad.into_iter().enumerate() {
+            if held != self.shell_pad[index] {
+                self.shell_pad[index] = held;
+                shell.button(button, held).unwrap_or_else(|e| fatal(e));
+            }
+        }
+        let exit = shell.tick(ctx.dt).unwrap_or_else(|e| fatal(e));
+        let (draws, images) = shell.draws().unwrap_or_else(|e| fatal(e));
+        ctx.scene.prepare_flash(&draws, images).unwrap_or_else(|e| fatal(e));
+        self.shell_clock += ctx.dt;
+        if self.shell_shot.as_ref().is_some_and(|(at, _)| self.shell_clock >= *at) {
+            ctx.scene.request_capture().unwrap_or_else(|e| fatal(e));
+        }
+        match ctx.scene.render_flash() {
+            Ok(()) => {}
+            Err(SurfaceError::Lost | SurfaceError::Outdated) => ctx.scene.resize(ctx.scene.size),
+            Err(SurfaceError::Occluded) => {}
+            Err(e) => println!("surface error: {e:?}"),
+        }
+        if let (Some(frame), Some((_, path))) = (ctx.scene.take_capture(), self.shell_shot.as_ref()) {
+            let frame = frame.unwrap_or_else(|e| fatal(e));
+            let written = std::fs::File::create(path).map_err(|e| e.to_string()).and_then(|file| {
+                let mut enc = png::Encoder::new(std::io::BufWriter::new(file), frame.width, frame.height);
+                enc.set_color(png::ColorType::Rgba);
+                enc.set_depth(png::BitDepth::Eight);
+                enc.write_header().and_then(|mut w| w.write_image_data(&frame.rgba)).map_err(|e| e.to_string())
+            });
+            written.unwrap_or_else(|e| fatal(format!("write {}: {e}", path.display())));
+            println!("[shell] captured {}", path.display());
+            return MenuOutcome::Exit;
+        }
+        match exit {
+            None => MenuOutcome::Stay,
+            Some(ShellExit::Quit) => MenuOutcome::Exit,
+            Some(ShellExit::Load(path)) => {
+                self.shell = None;
+                self.apply_boot(Some(path));
+                MenuOutcome::StartLoad
+            }
+            Some(ShellExit::NewGame { character }) => {
+                self.shell = None;
+                self.apply_boot(None);
+                let hero = hero_index(character.as_deref());
+                self.player_models = crate::hero::player_model_candidates(hero, 0, 0);
+                self.hero_character = hero_character_name(hero).to_string();
+                MenuOutcome::StartLoad
+            }
+        }
+    }
+}
+
+/// The controller button a key stands in for on the front end.
+fn shell_button(code: KeyCode) -> Option<i64> {
+    match code {
+        KeyCode::ArrowUp => Some(1),
+        KeyCode::ArrowDown => Some(2),
+        KeyCode::ArrowLeft => Some(3),
+        KeyCode::ArrowRight => Some(4),
+        KeyCode::Enter | KeyCode::NumpadEnter | KeyCode::Space => Some(6),
+        KeyCode::Backspace => Some(7),
+        KeyCode::Escape => Some(8),
+        KeyCode::KeyA => Some(9),
+        KeyCode::KeyD => Some(10),
+        KeyCode::KeyW => Some(11),
+        KeyCode::KeyS => Some(12),
+        _ => None,
+    }
+}
+
+/// The 1-based hero of `MrxGuiShellBootstrap.GetSelectedCharacter`'s answer, which is `Chris`, `Jen`
+/// or `mattias` (`mrxguishell.lua:610`).
+fn hero_index(character: Option<&str>) -> u8 {
+    match character {
+        Some(c) if c.eq_ignore_ascii_case("chris") => 2,
+        Some(c) if c.eq_ignore_ascii_case("jen") => 3,
+        _ => 1,
     }
 }
 
@@ -1235,12 +1357,15 @@ impl mercs2_engine::app::Game for Mercs2Game {
     }
 
     fn starts_at_menu(&self) -> bool {
-        self.menu.is_some()
+        self.menu.is_some() || self.shell.is_some()
     }
 
     fn menu(&mut self, ctx: &mut mercs2_engine::app::Ctx) -> mercs2_engine::app::MenuOutcome {
         use mercs2_engine::app::MenuOutcome;
         use mercs2_engine::input::Action;
+        if self.shell.is_some() {
+            return self.shell_frame(ctx);
+        }
         const MENU_ARM_DELAY: f32 = 0.4;
         let armed = self.menu_open.elapsed().as_secs_f32() > MENU_ARM_DELAY;
         // Gamepad edge nav (dpad/stick + A/Start select, B back), edge-detected vs last frame.
@@ -1297,7 +1422,8 @@ impl mercs2_engine::app::Game for Mercs2Game {
             m.draw(ctx.scene, t);
             match ctx.scene.render_menu(t) {
                 Ok(()) => {}
-                Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => ctx.scene.resize(ctx.scene.size),
+                Err(SurfaceError::Lost | SurfaceError::Outdated) => ctx.scene.resize(ctx.scene.size),
+                Err(SurfaceError::Occluded) => {}
                 Err(e) => println!("surface error: {e:?}"),
             }
             action
@@ -1838,7 +1964,7 @@ impl mercs2_engine::app::Game for Mercs2Game {
         match self.mode {
             CamMode::Free => self.free_cam.apply_mouse(mdx, mdy),
             CamMode::ThirdPerson => {
-                self.tp_yaw += mdx;
+                self.tp_yaw = mercs2_engine::camera::turn_right(self.tp_yaw, mdx);
                 self.tp_pitch = (self.tp_pitch - mdy).clamp(-1.2, 0.6);
             }
         }
@@ -1858,7 +1984,7 @@ impl mercs2_engine::app::Game for Mercs2Game {
                 if inp.keys.contains(&KeyCode::ArrowRight) || inp.kb_held(Action::LookRight) { dyaw += look; }
                 self.free_cam.add_look(dyaw, dpitch);
                 let fwd = self.free_cam.forward();
-                let right = fwd.cross(Vec3::Y).normalize();
+                let right = mercs2_engine::camera::screen_right(fwd);
                 let (mx, my) = inp.move_vec();
                 let mut mv = fwd * my + right * mx;
                 if inp.held(Action::Jump) { mv += Vec3::Y; }
@@ -1870,9 +1996,9 @@ impl mercs2_engine::app::Game for Mercs2Game {
             CamMode::ThirdPerson => {
                 if inp.keys.contains(&KeyCode::ArrowUp) || inp.kb_held(Action::LookUp) { self.tp_pitch += look; }
                 if inp.keys.contains(&KeyCode::ArrowDown) || inp.kb_held(Action::LookDown) { self.tp_pitch -= look; }
-                if inp.keys.contains(&KeyCode::ArrowLeft) || inp.kb_held(Action::LookLeft) { self.tp_yaw -= look; }
-                if inp.keys.contains(&KeyCode::ArrowRight) || inp.kb_held(Action::LookRight) { self.tp_yaw += look; }
-                self.tp_yaw += gp_yaw;
+                if inp.keys.contains(&KeyCode::ArrowLeft) || inp.kb_held(Action::LookLeft) { self.tp_yaw = mercs2_engine::camera::turn_right(self.tp_yaw, -look); }
+                if inp.keys.contains(&KeyCode::ArrowRight) || inp.kb_held(Action::LookRight) { self.tp_yaw = mercs2_engine::camera::turn_right(self.tp_yaw, look); }
+                self.tp_yaw = mercs2_engine::camera::turn_right(self.tp_yaw, gp_yaw);
                 self.tp_pitch = (self.tp_pitch + gp_pitch).clamp(-1.2, 0.6);
                 let (mx, my) = inp.move_vec();
                 // ── Vehicle ride (W4). `ridden` is the seated vehicle entity, or `None` on foot.
@@ -1946,7 +2072,7 @@ impl mercs2_engine::app::Game for Mercs2Game {
                 } else {
                     // ── On foot ──
                     let fwd_flat = Vec3::new(self.tp_yaw.sin(), 0.0, self.tp_yaw.cos()).normalize();
-                    let right_flat = fwd_flat.cross(Vec3::Y).normalize();
+                    let right_flat = mercs2_engine::camera::screen_right(fwd_flat);
                     let mv = fwd_flat * my + right_flat * mx;
                     // The controller reads the world through `LocomotionQuery` rather than taking the collider,
                     // heightmap and watermap as separate parameters — it lives in `mercs2_player` now, and a
