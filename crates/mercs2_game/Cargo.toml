@@ -27,7 +27,7 @@ mercs2_bridge = { workspace = true }
 # (runtime/gameplay/spawn/script_host) are the Mrx *rules* layer implementing the engine's seams
 # (`EngineHost`, `Game`) — content driving mechanism, not the mechanism itself.
 pollster = "0.3" # block_on the engine's async app::run entry point on the main thread
-# Shared external deps (windowing / GPU) — used by the game's shell error handling + key enums, same as
-# the engine; not part of the mercs2_* graph the refactor inverted.
+png = "0.17" # --shell-shot: write a captured front-end frame
+# Shared external dep (windowing) — used by the game's key enums, same as the engine; not part of the
+# mercs2_* graph the refactor inverted.
 winit = "0.29"
-wgpu = "0.20"
