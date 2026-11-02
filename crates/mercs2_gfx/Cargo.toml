@@ -1,0 +1,13 @@
+[package]
+name = "mercs2_gfx"
+version = "0.1.0"
+edition = "2021"
+description = "Mercenaries 2 modernization — the Scaleform GFx movie player: timeline, display list and ActionScript 2, drawing nothing itself."
+readme = "README.md"
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+mercs2_formats = { workspace = true }
+# Triangulates the vector fills and strokes of a movie's shapes.
+lyon_tessellation = "1"
