@@ -254,30 +254,91 @@ struct DrawCall {
 /// (`render::material_cull`).
 type BlendKey = (mercs2_formats::texture::MaterialBlend, Option<wgpu::Face>);
 
-/// The geometry pipeline: `shader.wgsl` over the model vertex layout into a `format` target, with
-/// `blend`, Z write `depth_write` (the depth test is always on: `FUN_00858320` sets `ZENABLE` from a
-/// runtime bit no material carries) and `cull`.
-fn geom_pipeline(
-    device: &wgpu::Device,
-    layout: &wgpu::PipelineLayout,
-    shader: &wgpu::ShaderModule,
+/// A ground cover pipeline: a blended draw's blend (`None` writes solid), and its cull.
+type ScrubPipelineKey = (Option<mercs2_formats::texture::MaterialBlend>, Option<wgpu::Face>);
+
+/// One mesh of an uploaded ground cover pack.
+struct ScrubMeshGpu {
+    depths: mesh::ScrubDepths,
+    /// Into its model's `tex_binds`.
+    bind: usize,
+    indices: std::ops::Range<u32>,
+    cull: Option<wgpu::Face>,
+    /// How it blends past its fade start; `None` for a cutout.
+    blend: Option<mercs2_formats::texture::MaterialBlend>,
+}
+
+/// An uploaded ground cover pack. Its geometry and bind groups are the model of the same hash.
+struct ScrubPack {
+    /// `None` for a pack with nothing in it.
+    instances: Option<wgpu::Buffer>,
+    meshes: Vec<ScrubMeshGpu>,
+    patches: Vec<mesh::ScrubPatch>,
+    /// Entities placing it.
+    placed: u32,
+}
+
+/// A pack placed by a `ScrubObject` entity at its cell's position.
+struct PlacedScrub {
+    hash: u32,
+    pos: glam::Vec3,
+    buffer: wgpu::Buffer,
+    bind: wgpu::BindGroup,
+}
+
+/// One range of instances the frame draws.
+struct ScrubFrameDraw {
+    key: u32,
+    range: mesh::ScrubRange,
+    blended: bool,
+}
+
+/// How `FUN_004a5830` draws a mesh in a patch of `radius` whose origin is at view depth `depth`: `None`
+/// when the patch's near side is past the mesh's cull depth, else whether it blends. A cutout never
+/// does. Any other mesh draws solid until the patch's far side passes the depth its alpha reaches 0.
+fn scrub_blended(d: mesh::ScrubDepths, depth: f32, radius: f32) -> Option<bool> {
+    (depth - radius <= d.cull).then_some(!d.cutout && depth + radius > d.alpha_zero)
+}
+
+/// What a geometry pipeline draws into: a `format` target, with `blend`, Z write `depth_write` (the
+/// depth test is always on: `FUN_00858320` sets `ZENABLE` from a runtime bit no material carries) and
+/// `cull`.
+#[derive(Clone, Copy)]
+struct GeomTarget {
     format: wgpu::TextureFormat,
     blend: wgpu::BlendState,
     depth_write: bool,
     cull: Option<wgpu::Face>,
+}
+
+/// The geometry pipeline: `shader.wgsl` over the model vertex layout, from `vs_main`, or from
+/// `vs_scrub` with a [`mesh::ScrubInstance`] stream beside it.
+fn geom_pipeline(
+    device: &wgpu::Device,
+    layout: &wgpu::PipelineLayout,
+    shader: &wgpu::ShaderModule,
+    scrub: bool,
+    target: GeomTarget,
 ) -> wgpu::RenderPipeline {
+    let GeomTarget { format, blend, depth_write, cull } = target;
     let vbuf_layout = wgpu::VertexBufferLayout {
         array_stride: std::mem::size_of::<Vertex>() as wgpu::BufferAddress,
         step_mode: wgpu::VertexStepMode::Vertex,
         attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x4, 2 => Float32x2, 3 => Float32x3, 4 => Float32x4, 5 => Uint8x4, 6 => Unorm8x4],
     };
+    let instance_layout = wgpu::VertexBufferLayout {
+        array_stride: std::mem::size_of::<mesh::ScrubInstance>() as wgpu::BufferAddress,
+        step_mode: wgpu::VertexStepMode::Instance,
+        attributes: &wgpu::vertex_attr_array![7 => Float32x4, 8 => Float32x4, 9 => Float32x4, 10 => Float32x4],
+    };
+    let buffers = [vbuf_layout, instance_layout];
     device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
         label: Some("scene geometry pipeline"),
         layout: Some(layout),
         vertex: wgpu::VertexState {
             module: shader,
-            entry_point: "vs_main",
-            buffers: &[vbuf_layout],
+            entry_point: if scrub { "vs_scrub" } else { "vs_main" },
+            buffers: if scrub { &buffers } else { &buffers[..1] },
             compilation_options: Default::default(),
         },
         fragment: Some(wgpu::FragmentState {
@@ -322,14 +383,10 @@ struct ModelGpu {
     rest: Vec<[[f32; 4]; 4]>,
     /// Model-fit (centre + uniform scale) so each model is normalised for viewing.
     fit: glam::Mat4,
-    /// Baked-lighting flag: this model bakes its lighting into vertex color, so the shader must NOT
-    /// stamp the fixed exterior sun over it (fed to the per-entity uniform `fog_misc.z`).
-    prelit: bool,
-    /// Terrain SPLAT-BLEND flag: this model is a hi-res terrainmesh tile whose per-vertex COLOR is
-    /// SPLAT WEIGHTS (not albedo modulation) and whose draws bind up to 3 diffuse detail layers into
-    /// the diffuse/normal/specular slots. Fed to the per-entity uniform `overlay.y` so the fragment
-    /// shader blends the layers by the weights instead of the normal-map/specular material path.
+    /// This model is a hi-res terrainmesh tile, which [`Scene::set_terrain_hidden`] hides.
     terrain_blend: bool,
+    /// The model-space sphere the colour pass culls by ([`rest_bounds`]).
+    bounds: (glam::Vec3, f32),
 }
 
 /// Per-entity GPU resources: its own MVP uniform (group 0) and skinning palette (group 2).
@@ -339,6 +396,46 @@ struct EntityGpu {
     bone_buf: wgpu::Buffer,
     bone_bind: wgpu::BindGroup,
     bone_count: usize,
+    /// What `mvp_buf` holds as the model matrix, and `bone_buf` as the palette: a write that would not
+    /// change them is skipped, and each costs a staging allocation.
+    written_model: Option<glam::Mat4>,
+    written_palette: Vec<[[f32; 4]; 4]>,
+}
+
+/// How far a rigged model's sphere is grown past its rest pose, for the reach of a clip or a destruction
+/// state. An unrigged model only ever draws where it rests.
+const RIGGED_BOUNDS_PAD: f32 = 1.5;
+
+/// The sphere around a model's vertices at rest, in model space: each vertex through its first
+/// weighted joint of the rest palette, as the vertex shader places it with no clip.
+fn rest_bounds(verts: &[Vertex], rest: &[[[f32; 4]; 4]], rigged: bool) -> (glam::Vec3, f32) {
+    let at = |v: &Vertex| {
+        let joint = v.weights.iter().position(|&w| w != 0).map_or(0, |k| v.joints[k] as usize);
+        glam::Mat4::from_cols_array_2d(&rest[joint]).transform_point3(glam::Vec3::from(v.pos))
+    };
+    let (mut lo, mut hi) = (glam::Vec3::splat(f32::MAX), glam::Vec3::splat(f32::MIN));
+    for v in verts {
+        let p = at(v);
+        lo = lo.min(p);
+        hi = hi.max(p);
+    }
+    if verts.is_empty() {
+        return (glam::Vec3::ZERO, 0.0);
+    }
+    let centre = (lo + hi) * 0.5;
+    let radius = verts.iter().map(|v| at(v).distance(centre)).fold(0.0, f32::max);
+    (centre, if rigged { radius * RIGGED_BOUNDS_PAD } else { radius })
+}
+
+/// The six planes of a world-to-clip matrix (clip z 0..1), each with its inside positive and unit normal.
+fn frustum_planes(view_proj: glam::Mat4) -> [glam::Vec4; 6] {
+    let [r0, r1, r2, r3] = [0, 1, 2, 3].map(|i| view_proj.row(i));
+    [r3 + r0, r3 - r0, r3 + r1, r3 - r1, r2, r3 - r2].map(|p| p / p.truncate().length())
+}
+
+/// Whether a sphere reaches inside the planes.
+fn sphere_in_view(planes: &[glam::Vec4; 6], centre: glam::Vec3, radius: f32) -> bool {
+    planes.iter().all(|p| p.truncate().dot(centre) + p.w >= -radius)
 }
 
 /// One presented frame read back to the CPU: tightly packed RGBA8, top row first.
@@ -375,6 +472,8 @@ pub struct Scene {
     camera_bgl: wgpu::BindGroupLayout,
     bone_bgl: wgpu::BindGroupLayout,
     tex_bgl: wgpu::BindGroupLayout,
+    /// The textures terrain cells share, by hash ([`Self::load_terrain_model`]).
+    terrain_views: HashMap<u32, wgpu::TextureView>,
     /// The material parameters (binding 4) of a bind with no material: not alpha-tested.
     no_material_params: wgpu::Buffer,
     /// Every retail pixel shader's samplers, which decide what each material slot binds
@@ -446,6 +545,10 @@ pub struct Scene {
     /// Explicit view matrix + (near, far) supplied per frame by a caller-driven camera
     /// (the fly / third-person camera). `None` = default close orbit around the origin (`--ecs`).
     view_cam: Option<(glam::Mat4, f32, f32)>,
+    /// The image centre's move in clip units ([`set_view_shift`](Self::set_view_shift)).
+    view_shift: glam::Vec2,
+    /// Terrain is not drawn: the base mesh's model ([`set_terrain_hidden`](Self::set_terrain_hidden)).
+    terrain_hidden: Option<u32>,
     /// Distance-fog params (color, density, start). `None` = fog + sky pass disabled, so the
     /// `--ecs` / `--animate` visuals are unchanged. PLACEHOLDER for PgSky/PgSun/PgCloud.
     fog: Option<([f32; 3], f32, f32)>,
@@ -473,6 +576,13 @@ pub struct Scene {
     /// The blended pipelines (`render::wgpu_blend`, Z write off), one per target format, blend state
     /// and cull mode a loaded material draws with.
     blend_pipelines: HashMap<(wgpu::TextureFormat, BlendKey), wgpu::RenderPipeline>,
+    scrub_pipelines: HashMap<(wgpu::TextureFormat, ScrubPipelineKey), wgpu::RenderPipeline>,
+    scrub_packs: HashMap<u32, ScrubPack>,
+    /// By entity key.
+    scrub_placed: HashMap<u32, PlacedScrub>,
+    scrub_frame: Vec<ScrubFrameDraw>,
+    /// Group 2 of a ground cover draw, whose matrices are per instance.
+    scrub_bones: wgpu::BindGroup,
     /// HDR + bloom post chain. `None` = fall back to direct swapchain present.
     post: Option<crate::post::Post>,
     sky_buf: wgpu::Buffer,
@@ -601,6 +711,10 @@ impl Scene {
                     },
                     count: None,
                 },
+                // a terrain ground draw's further stages (`shader.wgsl`)
+                tex_entry(5),
+                tex_entry(6),
+                tex_entry(7),
             ],
         });
         // The parameters of a bind with no material: not alpha-tested, neutral materialData.
@@ -770,6 +884,18 @@ impl Scene {
             ],
         });
 
+        let scrub_bones_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("scrub bones"),
+            size: 64,
+            usage: wgpu::BufferUsages::STORAGE,
+            mapped_at_creation: false,
+        });
+        let scrub_bones = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("scrub bones bind"),
+            layout: &bone_bgl,
+            entries: &[wgpu::BindGroupEntry { binding: 0, resource: scrub_bones_buf.as_entire_binding() }],
+        });
+
         let shader = device.create_shader_module(wgpu::include_wgsl!("shader.wgsl"));
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("scene pipeline layout"),
@@ -787,7 +913,7 @@ impl Scene {
         // flag from MTRL; negligible perf cost at this scale.)
         let build_geom_pipeline = |format: wgpu::TextureFormat, transparent: bool| {
             let blend = if transparent { wgpu::BlendState::ALPHA_BLENDING } else { wgpu::BlendState::REPLACE };
-            geom_pipeline(&device, &layout, &shader, format, blend, !transparent, None)
+            geom_pipeline(&device, &layout, &shader, false, GeomTarget { format, blend, depth_write: !transparent, cull: None })
         };
         let pipeline = build_geom_pipeline(config.format, false);
         let pipeline_t = build_geom_pipeline(config.format, true);
@@ -1066,7 +1192,7 @@ impl Scene {
             entries: &[wgpu::BindGroupEntry { binding: 0, resource: loading_buf.as_entire_binding() }],
         });
         let loading_art_bind =
-            make_tex_bind(&device, &tex_bgl, &sampler, &white, &flat_normal, &black, &no_material_params);
+            make_tex_bind(&device, &tex_bgl, &sampler, [&white, &flat_normal, &black, &black, &black, &black], &no_material_params);
         let loading_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("loading pipeline layout"),
             bind_group_layouts: &[&loading_bgl, &tex_bgl],
@@ -1135,6 +1261,7 @@ impl Scene {
             camera_bgl,
             bone_bgl,
             tex_bgl,
+            terrain_views: HashMap::new(),
             no_material_params,
             pixel_samplers: None,
             sampler,
@@ -1168,6 +1295,8 @@ impl Scene {
             entities: HashMap::new(),
             start: std::time::Instant::now(),
             view_cam: None,
+            view_shift: glam::Vec2::ZERO,
+            terrain_hidden: None,
             fog: None,
             sun_intensity: 0.9, // exterior default (matches the previous hardcoded key light)
             ambient: 0.35,
@@ -1180,6 +1309,11 @@ impl Scene {
             geom_shader: shader,
             geom_layout: layout,
             blend_pipelines: HashMap::new(),
+            scrub_pipelines: HashMap::new(),
+            scrub_packs: HashMap::new(),
+            scrub_placed: HashMap::new(),
+            scrub_frame: Vec::new(),
+            scrub_bones,
             post,
             sky_buf,
             sky_bind,
@@ -1245,8 +1379,9 @@ impl Scene {
     /// record its aspect; `render_loading` letterboxes it behind the spinner from then on.
     pub fn set_loading_art(&mut self, td: &mercs2_formats::texture::TextureData) {
         if let Some(v) = make_bc_view(&self.device, &self.queue, td, true) {
+            let black = &self.black;
             self.loading_art_bind = make_tex_bind(
-                &self.device, &self.tex_bgl, &self.sampler, &v, &self.flat_normal, &self.black,
+                &self.device, &self.tex_bgl, &self.sampler, [&v, &self.flat_normal, black, black, black, black],
                 &self.no_material_params,
             );
             self.loading_art_aspect = td.width as f32 / td.height.max(1) as f32;
@@ -1358,6 +1493,20 @@ impl Scene {
     /// the current aspect ratio.
     pub fn set_view(&mut self, view: glam::Mat4, near: f32, far: f32) {
         self.view_cam = Some((view, near, far));
+        self.view_shift = glam::Vec2::ZERO;
+    }
+
+    /// Move this frame's image centre by `shift` in clip units, so what the camera looks at lands at the
+    /// middle of the area side panels leave rather than of the window. Follows [`set_view`](Self::set_view),
+    /// which clears it.
+    pub fn set_view_shift(&mut self, shift: glam::Vec2) {
+        self.view_shift = shift;
+    }
+
+    /// Stop drawing terrain, `base` being the base mesh's model, the only terrain not loaded through
+    /// [`load_terrain_model`](Self::load_terrain_model); `None` draws it again.
+    pub fn set_terrain_hidden(&mut self, base: Option<u32>) {
+        self.terrain_hidden = base;
     }
 
     /// Enable distance fog + the sky pass (PLACEHOLDER for PgSky/PgSun/PgCloud).
@@ -1365,6 +1514,12 @@ impl Scene {
     pub fn set_fog(&mut self, color: [f32; 3], density: f32, start: f32) {
         self.fog = Some((color, density, start));
         self.sky_enabled = true;
+    }
+
+    /// Undo [`set_fog`](Self::set_fog): no fog, no sky.
+    pub fn clear_fog(&mut self) {
+        self.fog = None;
+        self.sky_enabled = false;
     }
 
     /// Directional-sun intensity + ambient fill. `intensity = 0` disables the sun entirely (interiors:
@@ -1554,10 +1709,14 @@ impl Scene {
         self.load_model_inner(hash, verts, indices, draws, textures, skin, false);
     }
 
-    /// Upload a hi-res terrainmesh TILE — same as [`Self::load_model`] but flags the model for the
-    /// terrain SPLAT-BLEND path: its draws carry up to 3 diffuse detail layers (in the diffuse/normal/
-    /// specular slots, all decoded sRGB — terrain has no linear normal/spec map) and the per-vertex
-    /// COLOR is SPLAT WEIGHTS the fragment shader blends by (see `shader.wgsl` `overlay.y`).
+    /// Whether a terrain cell's texture `hash` is already uploaded, so a later cell need not read it.
+    pub fn has_terrain_view(&self, hash: u32) -> bool {
+        self.terrain_views.contains_key(&hash)
+    }
+
+    /// Upload a hi-res terrainmesh TILE — same as [`Self::load_model`], and hidden with the terrain by
+    /// [`Self::set_terrain_hidden`]. Its ground draws ([`mesh::DrawGroup::ground`]) bind their
+    /// `PgTerrainMesh*` textures and constants; its overlays are ordinary material draws.
     pub fn load_terrain_model(
         &mut self,
         hash: u32,
@@ -1588,17 +1747,18 @@ impl Scene {
         // (~0.17 authored luma) that must NOT go through sRGB→linear, or its albedo collapses to ~0.014
         // and the ground renders near-black — so force its diffuse LINEAR. See BASE_TERRAIN_MODEL_HASH.
         let terrain_atlas = hash == BASE_TERRAIN_MODEL_HASH;
-        // What each draw binds, by its pixel shader's samplers (`render::material_slots`). Terrain-blend
-        // tiles repurpose the normal/specular slots as extra DIFFUSE detail layers instead.
+        // What each draw binds, by its pixel shader's samplers (`render::material_slots`). A terrain
+        // ground draw's stages are not a model material's: it binds its global map and layers in the
+        // diffuse, normal and specular slots.
         let slots: Vec<crate::render::MaterialSlots> = draws
             .iter()
             .map(|d| {
-                if terrain_blend {
+                if let Some(g) = &d.ground {
                     return crate::render::MaterialSlots {
-                        diffuse: d.diffuse,
-                        normal: d.normal,
-                        slot1: d.specular,
-                        slot1_role: crate::render::Slot1Role::Specular,
+                        diffuse: Some(g.global),
+                        normal: g.layers[0],
+                        slot1: g.layers[1],
+                        slot1_role: crate::render::Slot1Role::None,
                         output_alpha: None,
                     };
                 }
@@ -1608,24 +1768,30 @@ impl Scene {
                 crate::render::material_slots(d, samplers).unwrap_or_else(|e| panic!("model 0x{hash:08X}: {e}"))
             })
             .collect();
-        // Normal and specular maps decode linear; diffuse and emissive maps sRGB. Terrain-blend layers
-        // are all diffuse, so they decode sRGB like any albedo.
-        let linear: HashSet<u32> = if terrain_blend {
-            HashSet::new()
-        } else {
-            slots
-                .iter()
-                .flat_map(|s| {
-                    let spec = if s.slot1_role == crate::render::Slot1Role::Specular { s.slot1 } else { None };
-                    s.normal.into_iter().chain(spec)
-                })
-                .collect()
-        };
+        // Normal and specular maps decode linear; diffuse and emissive maps sRGB. So does terrain's
+        // shared detail map, whose texels are signed about 0.5 (`PgTerrainMeshFP*`); its layers are
+        // albedo.
+        let linear: HashSet<u32> = draws
+            .iter()
+            .zip(&slots)
+            .flat_map(|(d, s)| match &d.ground {
+                Some(g) => [g.detail, None],
+                None => [s.normal, Some(s.slot1).filter(|_| s.slot1_role == crate::render::Slot1Role::Specular).flatten()],
+            })
+            .flatten()
+            .collect();
+        // Cells share their layers, detail map and overlay textures, and hold them for the scene's life.
+        // A cell's global map is its own.
+        let own: HashSet<u32> = draws.iter().filter_map(|d| Some(d.ground.as_ref()?.global)).collect();
         let mut views: HashMap<u32, wgpu::TextureView> = HashMap::new();
         for (h, td) in textures {
             let srgb = !terrain_atlas && !linear.contains(h);
             if let Some(v) = make_bc_view(&self.device, &self.queue, td, srgb) {
-                views.insert(*h, v);
+                if terrain_blend && !own.contains(h) {
+                    self.terrain_views.insert(*h, v);
+                } else {
+                    views.insert(*h, v);
+                }
             } else if std::env::var("MERCS2_TEXDBG").is_ok() {
                 eprintln!(
                     "[texdbg] make_bc_view FAILED for 0x{h:08X}: {}x{} fmt={:?} {}mips {}B",
@@ -1633,25 +1799,53 @@ impl Scene {
                 );
             }
         }
-        let mut tex_binds = vec![make_tex_bind(
-            &self.device, &self.tex_bgl, &self.sampler, &self.white, &self.flat_normal, &self.black,
-            &self.no_material_params,
-        )];
+        let mut tex_binds = vec![{
+            let black = &self.black;
+            make_tex_bind(
+                &self.device, &self.tex_bgl, &self.sampler, [&self.white, &self.flat_normal, black, black, black, black],
+                &self.no_material_params,
+            )
+        }];
         let mut draw_calls: Vec<DrawCall> = Vec::new();
         for (d, s) in draws.iter().zip(&slots) {
-            let diff = s.diffuse.and_then(|h| views.get(&h)).unwrap_or(&self.white);
-            let norm = s.normal.and_then(|h| views.get(&h)).unwrap_or(&self.flat_normal);
-            let slot1 = s.slot1.and_then(|h| views.get(&h)).unwrap_or(&self.black);
             let idx = tex_binds.len();
-            let params = crate::render::material_params(
-                &self.device, d.material_flags, &d.material_data, s.slot1_role, s.output_alpha,
-            );
-            tex_binds.push(make_tex_bind(&self.device, &self.tex_bgl, &self.sampler, diff, norm, slot1, &params));
+            {
+                let view = |h: Option<u32>| h.and_then(|h| views.get(&h).or_else(|| self.terrain_views.get(&h)));
+                let black = &self.black;
+                let (bound, params) = match &d.ground {
+                    Some(g) => (
+                        [
+                            view(s.diffuse).unwrap_or(&self.white),
+                            view(s.normal).unwrap_or(black),
+                            view(s.slot1).unwrap_or(black),
+                            view(g.layers[2]).unwrap_or(black),
+                            view(g.layers[3]).unwrap_or(black),
+                            view(g.detail).unwrap_or(black),
+                        ],
+                        crate::render::ground_params(&self.device, &d.material_data, g),
+                    ),
+                    None => (
+                        [
+                            view(s.diffuse).unwrap_or(&self.white),
+                            view(s.normal).unwrap_or(&self.flat_normal),
+                            view(s.slot1).unwrap_or(black),
+                            black,
+                            black,
+                            black,
+                        ],
+                        match d.scrub {
+                            Some(depths) => crate::render::scrub_params(&self.device, d, depths, s.slot1_role, s.output_alpha),
+                            None => crate::render::material_params(&self.device, d.material_flags, &d.material_data, s.slot1_role, s.output_alpha),
+                        },
+                    ),
+                };
+                tex_binds.push(make_tex_bind(&self.device, &self.tex_bgl, &self.sampler, bound, &params));
+            }
             let blend = s.output_alpha.map(|_| {
                 let rt = mercs2_formats::texture::runtime_material_flags(d.material_flags);
                 (mercs2_formats::texture::material_blend_state(rt), crate::render::material_cull(d.material_flags))
             });
-            if let Some(key) = blend {
+            if let Some(key) = blend.filter(|_| d.scrub.is_none()) {
                 self.ensure_blend_pipelines(key).unwrap_or_else(|e| panic!("model 0x{hash:08X}: {e}"));
             }
             draw_calls.push(DrawCall {
@@ -1695,6 +1889,7 @@ impl Scene {
         // those verts read a zero matrix on the GPU and collapse onto the origin (the "smooshed spike").
         let rest = skin.rest_palette(verts).unwrap_or_else(|e| panic!("model 0x{hash:08X}: {e}"));
         let bone_count = rest.len();
+        let bounds = rest_bounds(verts, &rest, !skin.rig.is_empty());
 
         self.models.insert(
             hash,
@@ -1708,8 +1903,8 @@ impl Scene {
                 bone_count,
                 rest,
                 fit,
-                prelit: skin.prelit,
                 terrain_blend,
+                bounds,
             },
         );
     }
@@ -1722,11 +1917,181 @@ impl Scene {
             std::iter::once(self.config.format).chain(self.post.as_ref().map(|_| crate::post::HDR_FORMAT)).collect();
         for format in formats {
             if !self.blend_pipelines.contains_key(&(format, key)) {
-                let p = geom_pipeline(&self.device, &self.geom_layout, &self.geom_shader, format, blend, false, key.1);
+                let target = GeomTarget { format, blend, depth_write: false, cull: key.1 };
+                let p = geom_pipeline(&self.device, &self.geom_layout, &self.geom_shader, false, target);
                 self.blend_pipelines.insert((format, key), p);
             }
         }
         Ok(())
+    }
+
+    /// Whether a ground cover pack is uploaded.
+    pub fn has_scrub(&self, hash: u32) -> bool {
+        self.scrub_packs.contains_key(&hash)
+    }
+
+    /// Upload a ground cover pack. Its textures join the ones terrain cells share, for the scene's
+    /// life; `textures` holds those no earlier cell or pack brought.
+    pub fn load_scrub(&mut self, hash: u32, geometry: mesh::ScrubGeometry, textures: &TexMap) {
+        if self.scrub_packs.contains_key(&hash) {
+            return;
+        }
+        let mesh::ScrubGeometry { verts, indices, draws, instances, patches } = geometry;
+        if instances.is_empty() {
+            self.scrub_packs.insert(hash, ScrubPack { instances: None, meshes: Vec::new(), patches, placed: 0 });
+            return;
+        }
+        self.load_model_inner(hash, &verts, &indices, &draws, textures, &mesh::SkinData::identity(), true);
+        let bytes: &[u8] = bytemuck::cast_slice(&instances);
+        let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("scrub instances"),
+            size: bytes.len() as wgpu::BufferAddress,
+            usage: wgpu::BufferUsages::VERTEX,
+            mapped_at_creation: true,
+        });
+        buffer.slice(..).get_mapped_range_mut().copy_from_slice(bytes);
+        buffer.unmap();
+        let meshes: Vec<ScrubMeshGpu> = draws
+            .iter()
+            .zip(&self.models[&hash].draw_calls)
+            .map(|(d, dc)| ScrubMeshGpu {
+                depths: d.scrub.expect("build_scrub marks every draw"),
+                bind: dc.bind,
+                indices: dc.index_start..dc.index_start + dc.index_count,
+                cull: crate::render::material_cull(d.material_flags),
+                blend: dc.blend.map(|(blend, _)| blend),
+            })
+            .collect();
+        for m in &meshes {
+            self.ensure_scrub_pipelines(hash, (None, m.cull));
+            if m.blend.is_some() {
+                self.ensure_scrub_pipelines(hash, (m.blend, m.cull));
+            }
+        }
+        self.scrub_packs.insert(hash, ScrubPack { instances: Some(buffer), meshes, patches, placed: 0 });
+    }
+
+    /// Build the ground cover pipelines for `key` in every target format the colour pass draws into, once.
+    fn ensure_scrub_pipelines(&mut self, hash: u32, key: ScrubPipelineKey) {
+        let formats: Vec<wgpu::TextureFormat> =
+            std::iter::once(self.config.format).chain(self.post.as_ref().map(|_| crate::post::HDR_FORMAT)).collect();
+        for format in formats {
+            if self.scrub_pipelines.contains_key(&(format, key)) {
+                continue;
+            }
+            let (blend, cull) = key;
+            // A mesh that can blend carries its fade in its output alpha on solid draws too, where it
+            // means nothing: those keep the target's alpha, as a blended draw does (`render::wgpu_blend`).
+            let state = match blend {
+                Some(b) => crate::render::wgpu_blend(b).unwrap_or_else(|e| panic!("scrub 0x{hash:08X}: {e}")),
+                None => wgpu::BlendState {
+                    color: wgpu::BlendComponent::REPLACE,
+                    alpha: wgpu::BlendComponent {
+                        src_factor: wgpu::BlendFactor::Zero,
+                        dst_factor: wgpu::BlendFactor::One,
+                        operation: wgpu::BlendOperation::Add,
+                    },
+                },
+            };
+            let target = GeomTarget { format, blend: state, depth_write: blend.is_none(), cull };
+            let p = geom_pipeline(&self.device, &self.geom_layout, &self.geom_shader, true, target);
+            self.scrub_pipelines.insert((format, key), p);
+        }
+    }
+
+    /// Place a loaded ground cover pack as entity `key`, at its cell's position.
+    pub fn place_scrub(&mut self, key: u32, hash: u32, pos: [f32; 3]) {
+        let pack = self.scrub_packs.get_mut(&hash).unwrap_or_else(|| panic!("ground cover 0x{hash:08X} placed before it loaded"));
+        pack.placed += 1;
+        let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("scrub camera"),
+            size: 192,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let bind = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("scrub camera bind"),
+            layout: &self.camera_bgl,
+            entries: &[wgpu::BindGroupEntry { binding: 0, resource: buffer.as_entire_binding() }],
+        });
+        self.scrub_placed.insert(key, PlacedScrub { hash, pos: glam::Vec3::from(pos), buffer, bind });
+    }
+
+    /// Take entity `key`'s ground cover away, and its pack with the last placement of it.
+    pub fn remove_scrub(&mut self, key: u32) {
+        let Some(placed) = self.scrub_placed.remove(&key) else { return };
+        let Some(pack) = self.scrub_packs.get_mut(&placed.hash) else { return };
+        pack.placed -= 1;
+        if pack.placed == 0 {
+            self.scrub_packs.remove(&placed.hash);
+            self.unload_model(placed.hash);
+        }
+    }
+
+    /// The ground cover draws of this frame ([`scrub_blended`]), and their camera uniforms.
+    fn prepare_scrub(&mut self, view: glam::Mat4, view_proj: glam::Mat4, cam_world: glam::Vec3, planes: &[glam::Vec4; 6]) {
+        let mut draws = std::mem::take(&mut self.scrub_frame);
+        draws.clear();
+        for (key, placed) in &self.scrub_placed {
+            let Some(pack) = self.scrub_packs.get(&placed.hash) else { continue };
+            let first = draws.len();
+            for patch in &pack.patches {
+                if !sphere_in_view(planes, placed.pos + glam::Vec3::from(patch.centre), patch.radius) {
+                    continue;
+                }
+                let depth = view.transform_point3(placed.pos + glam::Vec3::from(patch.origin)).z;
+                for range in &patch.ranges {
+                    if let Some(blended) = scrub_blended(pack.meshes[range.mesh as usize].depths, depth, patch.radius) {
+                        draws.push(ScrubFrameDraw { key: *key, range: *range, blended });
+                    }
+                }
+            }
+            if draws.len() > first {
+                let model = glam::Mat4::from_translation(placed.pos);
+                self.queue.write_buffer(&placed.buffer, 0, bytemuck::cast_slice(&self.camera_uniform(view_proj * model, model, cam_world)));
+            }
+        }
+        self.scrub_frame = draws;
+    }
+
+    /// Record this frame's ground cover into `pass`: the solid draws, or the blended ones.
+    fn draw_scrub<'a>(&'a self, pass: &mut wgpu::RenderPass<'a>, format: wgpu::TextureFormat, blended: bool) {
+        for d in self.scrub_frame.iter().filter(|d| d.blended == blended) {
+            let placed = &self.scrub_placed[&d.key];
+            let pack = &self.scrub_packs[&placed.hash];
+            let (Some(model), Some(instances)) = (self.models.get(&placed.hash), &pack.instances) else { continue };
+            let m = &pack.meshes[d.range.mesh as usize];
+            let key = (if blended { m.blend } else { None }, m.cull);
+            let Some(p) = self.scrub_pipelines.get(&(format, key)) else {
+                panic!("ground cover 0x{:08X}: no pipeline for {key:?} into {format:?}", placed.hash)
+            };
+            pass.set_pipeline(p);
+            pass.set_bind_group(0, &placed.bind, &[]);
+            pass.set_bind_group(1, &model.tex_binds[m.bind], &[]);
+            pass.set_bind_group(2, &self.scrub_bones, &[]);
+            pass.set_vertex_buffer(0, model.vbuf.slice(..));
+            pass.set_vertex_buffer(1, instances.slice(..));
+            pass.set_index_buffer(model.ibuf.as_ref().expect("a pack has indices").slice(..), wgpu::IndexFormat::Uint32);
+            pass.draw_indexed(m.indices.clone(), 0, d.range.first_instance..d.range.first_instance + d.range.instance_count);
+        }
+    }
+
+    /// A drawn thing's camera uniform (192 B, the shader's `Camera`): mvp(16) + model(16) + cam_pos(4)
+    /// + fog_color_density(4) + fog_misc(4) + overlay(4). Fog stays disabled unless set_fog was called.
+    fn camera_uniform(&self, mvp: glam::Mat4, model: glam::Mat4, cam_world: glam::Vec3) -> [f32; 48] {
+        let mut uni = [0f32; 48];
+        uni[..16].copy_from_slice(&mvp.to_cols_array());
+        uni[16..32].copy_from_slice(&model.to_cols_array());
+        uni[32..35].copy_from_slice(&[cam_world.x, cam_world.y, cam_world.z]);
+        uni[35] = self.ambient; // cam_pos.w = ambient fill (scene-controlled)
+        if let Some((color, density, fog_start)) = self.fog {
+            uni[36..40].copy_from_slice(&[color[0], color[1], color[2], density]);
+            uni[40] = 1.0; // fog enable
+            uni[41] = fog_start;
+        }
+        uni[43] = self.sun_intensity; // fog_misc.w = sun intensity (0 indoors)
+        uni[44] = self.model_alpha; // overlay.x = model opacity (1 = opaque)
+        uni
     }
 
     /// Give the scene the retail pixel shaders' samplers ([`crate::render::pixel_samplers`]), which decide
@@ -1823,8 +2188,10 @@ impl Scene {
             layout: &self.bone_bgl,
             entries: &[wgpu::BindGroupEntry { binding: 0, resource: bone_buf.as_entire_binding() }],
         });
-        self.entities
-            .insert(e, EntityGpu { mvp_buf, mvp_bind, bone_buf, bone_bind, bone_count });
+        self.entities.insert(
+            e,
+            EntityGpu { mvp_buf, mvp_bind, bone_buf, bone_bind, bone_count, written_model: None, written_palette: Vec::new() },
+        );
     }
 
     /// Read back the next presented frame: everything drawn, overlays included. Collect it with
@@ -1982,6 +2349,7 @@ impl Scene {
                     pass.draw(0..mg.nverts, 0..1);
                 }
             }
+            self.draw_scrub(pass, format, blended);
         }
     }
 
@@ -1996,8 +2364,7 @@ impl Scene {
     /// One depth-only render of the DYNAMIC scene per cascade, into that cascade's 1024² tile of the
     /// atlas (via a per-tile viewport + the cascade's light-VP dynamic offset); the color pass selects
     /// + PCF-samples the tightest cascade per fragment. SKIPPED when the sun is off (interiors) — the
-    /// shader gates on the same condition. Only non-prelit geometry casts (the building shell bakes its
-    /// own shadow into vertex colour), and each caster is gated into ONLY the cascades whose box
+    /// shader gates on the same condition. Each caster is gated into ONLY the cascades whose box
     /// contains it (the distance-LOD caster gate, `FUN_00858150` analog) — near casters land in the
     /// tight cascades, far ones only in the wide ones, mirroring the per-cascade caster list.
     fn record_shadow_cascade(&self, encoder: &mut wgpu::CommandEncoder, items: &[DrawItem]) {
@@ -2029,12 +2396,6 @@ impl Scene {
             spass.set_bind_group(1, &self.shadow_vp_bind, &[offset]);
             for (e, entity_model, model_hash, _p) in items {
                 let Some(mg) = self.models.get(model_hash) else { continue };
-                // Only DYNAMIC geometry casts: the prelit building shell already bakes its own light +
-                // shadow into vertex colour, so casting it into the map would double-darken the baked
-                // walls. Casting only characters/props gives clean contact shadows on the baked floor.
-                if mg.prelit {
-                    continue;
-                }
                 // Distance-LOD caster gate: skip this caster in cascade `c` unless its ground point is
                 // inside cascade `c`'s box (near casters → tight cascades, far → wide only). `shadow_configured`
                 // guarantees `cascade_vps` are real (not identity) here.
@@ -2298,7 +2659,9 @@ impl Scene {
             // Caller-driven fly / third-person camera: explicit view, projection from aspect.
             // Vertical FOV tuned to the retail over-the-shoulder framing (60° and 55° both read too
             // wide-angle vs vanilla). 45° gives the tighter, more zoomed retail look.
-            let proj = glam::Mat4::perspective_lh(45f32.to_radians(), aspect, near, far);
+            let mut proj = glam::Mat4::perspective_lh(45f32.to_radians(), aspect, near, far);
+            proj.z_axis.x = self.view_shift.x;
+            proj.z_axis.y = self.view_shift.y;
             (proj * view, view)
         } else {
             let angle = t * 0.5;
@@ -2323,41 +2686,56 @@ impl Scene {
         // Snapshot the drawable entities (copy out to release the world borrow before touching self).
         let mut items: Vec<DrawItem> = Vec::new();
         for (e, (xform, mref, pal)) in world.query::<(&Transform, &ModelRef, &SkinPalette)>().iter() {
+            if let Some(base) = self.terrain_hidden {
+                if mref.model == base || self.models.get(&mref.model).is_some_and(|m| m.terrain_blend) {
+                    continue;
+                }
+            }
             items.push((e, xform.matrix(), mref.model, pal.mats.clone()));
         }
 
+        // The colour pass draws what the camera can see, `items[..in_view]`, in the order they were
+        // collected; the shadow, blob and node passes see every item, as a caster behind the camera
+        // still shadows what is in front of it.
+        let planes = frustum_planes(view_proj);
+        let (mut seen, unseen): (Vec<DrawItem>, Vec<DrawItem>) = items.into_iter().partition(|(_, entity_model, model_hash, _)| {
+            self.models.get(model_hash).is_none_or(|mg| {
+                let world = *entity_model * mg.fit;
+                let scale = world.x_axis.truncate().length().max(world.y_axis.truncate().length()).max(world.z_axis.truncate().length());
+                sphere_in_view(&planes, world.transform_point3(mg.bounds.0), mg.bounds.1 * scale)
+            })
+        });
+        let in_view = seen.len();
+        seen.extend(unseen);
+        let items = seen;
+
         // Phase 1: ensure per-entity resources and upload their MVP + palette.
-        for (e, entity_model, model_hash, palette) in &items {
+        for (i, (e, entity_model, model_hash, palette)) in items.iter().enumerate() {
             let Some(mg) = self.models.get(model_hash) else { continue };
-            let (bone_count, fit, prelit, terrain_blend) = (mg.bone_count, mg.fit, mg.prelit, mg.terrain_blend);
+            let (bone_count, fit) = (mg.bone_count, mg.fit);
             self.ensure_entity(*e, bone_count);
             let model = *entity_model * fit; // model -> world (fit=identity in the streaming/world path)
-            let mvp = view_proj * model; // entity transform placed in fitted world space, + handedness flip
-            let eg = &self.entities[e];
-            // Camera uniform (176 B = 44 f32): mvp(16) + model(16) + cam_pos(4) + fog_color_density(4)
-            // + fog_misc(4). Fog stays disabled unless set_fog was called.
-            let mut uni = [0f32; 48];
-            uni[..16].copy_from_slice(&mvp.to_cols_array());
-            uni[16..32].copy_from_slice(&model.to_cols_array());
-            uni[32..35].copy_from_slice(&[cam_world.x, cam_world.y, cam_world.z]);
-            uni[35] = self.ambient; // cam_pos.w = ambient fill (scene-controlled)
-            if let Some((color, density, fog_start)) = self.fog {
-                uni[36..40].copy_from_slice(&[color[0], color[1], color[2], density]);
-                uni[40] = 1.0; // fog enable
-                uni[41] = fog_start;
+            // Entity transform placed in fitted world space, + handedness flip.
+            let uni = self.camera_uniform(view_proj * model, model, cam_world);
+            let eg = self.entities.get_mut(e).expect("ensure_entity made it");
+            // Out of view only the shadow pass reads this entity, and it reads the model matrix alone.
+            if i < in_view || eg.written_model != Some(model) {
+                eg.written_model = Some(model);
+                self.queue.write_buffer(&eg.mvp_buf, 0, bytemuck::cast_slice(&uni));
             }
-            uni[42] = if prelit { 1.0 } else { 0.0 }; // fog_misc.z = prelit (skip exterior sun)
-            uni[43] = self.sun_intensity; // fog_misc.w = sun intensity (0 indoors)
-            uni[44] = self.model_alpha; // overlay.x = model opacity (1 = opaque)
-            uni[45] = if terrain_blend { 1.0 } else { 0.0 }; // overlay.y = terrain splat-blend path
-            self.queue.write_buffer(&eg.mvp_buf, 0, bytemuck::cast_slice(&uni));
             if !palette.is_empty() {
                 // Clamp to the entity's allocated bone count so a mismatched palette can't overflow.
                 let n = palette.len().min(eg.bone_count);
-                self.queue
-                    .write_buffer(&eg.bone_buf, 0, bytemuck::cast_slice(&pose::flatten(&palette[..n])));
+                if eg.written_palette[..] != palette[..n] {
+                    self.queue
+                        .write_buffer(&eg.bone_buf, 0, bytemuck::cast_slice(&pose::flatten(&palette[..n])));
+                    eg.written_palette.clear();
+                    eg.written_palette.extend_from_slice(&palette[..n]);
+                }
             }
         }
+
+        self.prepare_scrub(view, view_proj, cam_world, &planes);
 
         // Sky uniform (128 B): inverse view-proj (per-pixel ray reconstruction) + sun direction +
         // horizon/zenith colors + Rayleigh/Mie scattering, from the atmosphere model. Fog color, if
@@ -2452,7 +2830,7 @@ impl Scene {
             .write_buffer(&self.blob_params_buf, 0, bytemuck::cast_slice(&view_proj.to_cols_array()));
 
         // Blob / contact-shadow collection (the exe's cheap fallback for casters the depth atlas can't
-        // cover — `FUN_00853710`, shadow_code_map.md §5). A dynamic (non-prelit) caster whose ground
+        // cover — `FUN_00853710`, shadow_code_map.md §5). A caster whose ground
         // point falls OUTSIDE every cascade box (beyond shadow distance) gets a projected dark disc
         // instead of a real cascade shadow. Only active when the cascades are configured AND the sun is
         // on (outdoors) — interiors/default paths keep their prior no-blob behaviour (graceful degrade).
@@ -2460,9 +2838,6 @@ impl Scene {
         if self.shadow_configured && self.sun_intensity > 0.0 {
             for (_e, entity_model, model_hash, _pal) in &items {
                 let Some(mg) = self.models.get(model_hash) else { continue };
-                if mg.prelit {
-                    continue; // baked geometry is not a dynamic caster
-                }
                 let world = *entity_model * mg.fit;
                 let wpos = world.w_axis.truncate();
                 if select_cascade(&self.cascade_vps, wpos).is_none() {
@@ -2547,7 +2922,7 @@ impl Scene {
             match node {
                 // --- realized world passes ---
                 PassId::ShadowCascade => self.record_shadow_cascade(&mut encoder, &items),
-                PassId::Color => self.record_color(&mut encoder, &view_tex, &items, hdr_world),
+                PassId::Color => self.record_color(&mut encoder, &view_tex, &items[..in_view], hdr_world),
                 // --- engine composite tail ---
                 PassId::TransparentFx => self.record_transparent_fx(&mut encoder, &view_tex),
                 PassId::Ui => {
@@ -2903,6 +3278,49 @@ fn light_anim_factor(a: &LightAnim, t: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A sphere is in view when any of it is: in front of the camera it passes, behind or wholly off to
+    /// the side it does not, and a sphere whose edge crosses the side plane still passes.
+    #[test]
+    fn spheres_cull_against_the_frustum() {
+        let view = glam::Mat4::look_at_lh(glam::Vec3::ZERO, glam::Vec3::Z, glam::Vec3::Y);
+        let proj = glam::Mat4::perspective_lh(45f32.to_radians(), 1.0, 0.5, 1000.0);
+        let planes = frustum_planes(proj * view);
+        let at = |x: f32, z: f32| glam::Vec3::new(x, 0.0, z);
+        assert!(sphere_in_view(&planes, at(0.0, 100.0), 1.0), "straight ahead");
+        assert!(!sphere_in_view(&planes, at(0.0, -100.0), 1.0), "behind");
+        assert!(!sphere_in_view(&planes, at(0.0, 2000.0), 1.0), "past the far plane");
+        // tan 22.5° × 100 = 41.4 m is the edge of the view at 100 m.
+        assert!(!sphere_in_view(&planes, at(60.0, 100.0), 5.0), "off to the side");
+        assert!(sphere_in_view(&planes, at(60.0, 100.0), 30.0), "reaches into view");
+    }
+
+    #[test]
+    fn ground_cover_culls_at_its_near_side_and_blends_at_its_far_side() {
+        let rock = mesh::ScrubDepths { alpha_zero: 50.0, cull: 70.0, cutout: false };
+        assert_eq!(scrub_blended(rock, 30.0, 10.0), Some(false), "wholly nearer than alpha 0");
+        assert_eq!(scrub_blended(rock, 45.0, 10.0), Some(true), "its far side crosses");
+        assert_eq!(scrub_blended(rock, 79.0, 10.0), Some(true), "its near side is still in range");
+        assert_eq!(scrub_blended(rock, 81.0, 10.0), None, "its near side is past the cull depth");
+        let grass = mesh::ScrubDepths { cutout: true, ..rock };
+        assert_eq!(scrub_blended(grass, 45.0, 10.0), Some(false), "a cutout never blends");
+        assert_eq!(scrub_blended(grass, 81.0, 10.0), None);
+    }
+
+    /// Bounds follow the rest palette, not the bind pose, and a rigged model's sphere is grown.
+    #[test]
+    fn rest_bounds_follow_the_palette() {
+        let vert = |x: f32| Vertex { pos: [x, 0.0, 0.0], color: [1.0; 4], uv: [0.0; 2], normal: [0.0, 1.0, 0.0], tangent: [1.0, 0.0, 0.0, 1.0], joints: [0; 4], weights: [255, 0, 0, 0] };
+        let identity = [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0]];
+        let verts = [vert(-1.0), vert(1.0)];
+        assert_eq!(rest_bounds(&verts, &[identity], false), (glam::Vec3::ZERO, 1.0));
+        let (_, rigged) = rest_bounds(&verts, &[identity], true);
+        assert_eq!(rigged, RIGGED_BOUNDS_PAD);
+        let mut moved = identity;
+        moved[3] = [10.0, 0.0, 0.0, 1.0]; // row-vector translation
+        assert_eq!(rest_bounds(&verts, &[moved], false).0, glam::Vec3::new(10.0, 0.0, 0.0));
+        assert_eq!(rest_bounds(&[], &[identity], false), (glam::Vec3::ZERO, 0.0));
+    }
 
     /// A row is padded to the next 256-byte boundary, and an exact multiple is left as it is.
     #[test]
