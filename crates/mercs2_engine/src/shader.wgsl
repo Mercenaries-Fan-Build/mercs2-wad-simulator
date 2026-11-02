@@ -212,6 +212,92 @@ fn vs_scrub(
     return out;
 }
 
+struct BillboardOut {
+    @builtin(position) clip_pos: vec4<f32>,
+    @location(0) uvs: vec4<f32>,      // the two atlas tiles' coordinates
+    @location(1) tile_a: vec4<f32>,   // the first tile's facing, and in w the blend to the second
+    @location(2) tile_b: vec3<f32>,   // the second tile's facing
+    @location(3) view_depth: f32,
+    @location(4) wpos: vec3<f32>,
+};
+
+// Which way a tile of a billboard atlas faces, for a tile `at` of the way round the tree.
+fn tile_facing(at: f32, yaw: f32) -> vec3<f32> {
+    let angle = fract(fract(at + yaw) + 0.5) * 6.2831855 - 3.1415927;
+    return vec3<f32>(sin(angle), 0.0, cos(angle));
+}
+
+// A far tree, `PgBillboardTreeVP`. Each quad of the species turns about +Y to face the camera. The view
+// angle round the tree, less the tree's yaw, falls between two of the atlas's tiles, read left to right
+// and top to bottom. Corner offsets are `pos`, the atlas's tiles across and down are `color`, and `uv`
+// is a corner's place in a tile.
+@vertex
+fn vs_billboard(
+    @location(0) pos: vec3<f32>,
+    @location(1) atlas: vec4<f32>,
+    @location(2) uv: vec2<f32>,
+    @location(7) tree: vec4<f32>,
+) -> BillboardOut {
+    var out: BillboardOut;
+    let to_camera = cam.cam_pos.xyz - tree.xyz;
+    let round = fract(atan2(to_camera.x, to_camera.z) * 0.15915494 - tree.w);
+    let tiles = atlas.x * atlas.y;
+    let tile = floor(round * tiles);
+    out.tile_a = vec4<f32>(tile_facing(tile / tiles, tree.w), round * tiles - tile);
+    out.tile_b = tile_facing(fract((tile + 1.0) / tiles), tree.w);
+    let scale = vec2<f32>(1.0 / atlas.x, 1.0 / atlas.y);
+    let next = (tile + 1.0) % tiles;
+    let cell_a = vec2<f32>(tile % atlas.x, floor(tile / atlas.x));
+    let cell_b = vec2<f32>(next % atlas.x, floor(next / atlas.x));
+    out.uvs = vec4<f32>(cell_a * scale + uv, cell_b * scale + uv);
+
+    let view = normalize(-to_camera);
+    let across = normalize(vec3<f32>(view.z, 0.0, -view.x));
+    out.wpos = tree.xyz + across * pos.x + vec3<f32>(0.0, pos.y, 0.0);
+    out.clip_pos = cam.mvp * vec4<f32>(out.wpos, 1.0);
+    out.view_depth = out.clip_pos.w;
+    return out;
+}
+
+// A normal-map texel in the world, for a tile facing `facing`: `PgBillboardTreeFP` rotates x and z about
+// +Y with the tile.
+fn tile_normal(texel: vec3<f32>, facing: vec3<f32>) -> vec3<f32> {
+    let n = texel * 2.0 - 1.0;
+    return vec3<f32>(n.x * facing.z + n.z * facing.x, n.y, n.z * facing.z - n.x * facing.x);
+}
+
+// `PgBillboardTreeFP`: the two tiles blended, lit like every other draw, gone by the far plane. The
+// retail far plane is 2,400 m (the captures' projection), and `gBillboardData.vFarPlane` · position ×
+// 0.004 starts the fade 250 m before it.
+@fragment
+fn fs_billboard(in: BillboardOut) -> @location(0) vec4<f32> {
+    let blend = in.tile_a.w;
+    let tex = mix(textureSample(t_diffuse, s_linear, in.uvs.xy), textureSample(t_diffuse, s_linear, in.uvs.zw), blend);
+    let fade = saturate((2400.0 - in.view_depth) * 0.004);
+    if (material.alpha.x >= 0.0 && !(tex.a * fade > material.alpha.x)) { discard; }
+    let N = normalize(mix(
+        tile_normal(textureSample(t_normal, s_linear, in.uvs.xy).rgb, in.tile_a.xyz),
+        tile_normal(textureSample(t_normal, s_linear, in.uvs.zw).rgb, in.tile_b),
+        blend,
+    ));
+    let sun_i = cam.fog_misc.w;
+    let sun_dir = normalize(vec3<f32>(0.4, 0.7, -0.5));
+    var shadow = 1.0;
+    if (sun_i > 0.0) {
+        shadow = max(shadow_factor(in.wpos), shadowp.params.x);
+    }
+    var rgb = (tex.rgb * material.data[2].rgb * cam.cam_pos.w
+        + tex.rgb * material.data[0].rgb * sun_i * max(dot(N, sun_dir), 0.0)) * shadow;
+    if (cam.fog_misc.x > 0.5) {
+        let f = clamp(
+            1.0 - exp(-cam.fog_color_density.w * max(in.view_depth - cam.fog_misc.y, 0.0)),
+            0.0, 1.0,
+        );
+        rgb = mix(rgb, cam.fog_color_density.rgb, f);
+    }
+    return vec4<f32>(rgb, tex.a * fade);
+}
+
 @fragment
 fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     var albedo: vec3<f32>;
