@@ -50,12 +50,13 @@ pub enum Tier {
     Entities,
     Mission,
     World,
+    Stock,
     Assets,
     Statics,
 }
 
 impl Tier {
-    const ALL: [Tier; 6] = [Tier::Statics, Tier::Pose, Tier::Entities, Tier::World, Tier::Mission, Tier::Assets];
+    const ALL: [Tier; 7] = [Tier::Statics, Tier::Pose, Tier::Entities, Tier::World, Tier::Stock, Tier::Mission, Tier::Assets];
 
     /// How often this tier is asked; `None` = once per session of the page.
     fn period(self) -> Option<Duration> {
@@ -63,7 +64,7 @@ impl Tier {
             Tier::Pose => Some(Duration::from_millis(100)),
             Tier::Entities => Some(Duration::from_millis(500)),
             Tier::Mission => Some(Duration::from_secs(1)),
-            Tier::World | Tier::Assets => Some(Duration::from_secs(2)),
+            Tier::World | Tier::Stock | Tier::Assets => Some(Duration::from_secs(2)),
             Tier::Statics => None,
         }
     }
@@ -75,6 +76,7 @@ impl Tier {
             Tier::Entities => ENTITIES_CHUNK,
             Tier::Mission => MISSION_CHUNK,
             Tier::World => WORLD_CHUNK,
+            Tier::Stock => STOCK_CHUNK,
             Tier::Statics => STATICS_CHUNK,
             Tier::Assets => unreachable!("the assets chunk is built per slice"),
         }
@@ -277,6 +279,26 @@ pub const STATICS_CHUNK: &str = concat!(
   if t then return "statics|"..table.concat(t,",").."|$" end
 end
 return "statics||$"
+"#
+);
+
+/// The storage piles the game has hidden. `WifPmcInterior._SetStockpileCategoryQty` hides pile `i` of a
+/// category when its quantity is under limit `i`, and this reads the same two tables. A category with
+/// no quantity yet has not been through it, so it hides nothing.
+pub const STOCK_CHUNK: &str = concat!(
+    "-- live:stock\n",
+    guard!(),
+    r#"local p=M.wifpmcinterior
+local l={}
+for c,t in pairs(p._tStockpile) do
+  local q=p._tStockpileQty[c]
+  if q then
+    for i,n in ipairs(t) do
+      if q<n then l[#l+1]="pmcoutpost_stockpile_"..c.." "..i end
+    end
+  end
+end
+return "stock|"..table.concat(l,",").."|$"
 "#
 );
 
@@ -524,6 +546,7 @@ pub enum Sample {
     World(WorldState),
     Mission(Mission),
     Statics(Vec<String>),
+    Stock(Vec<String>),
     /// In the order asked; `None` on an m2-sdk without `M2Live`.
     Assets(Option<Vec<AssetState>>),
 }
@@ -717,6 +740,7 @@ pub fn parse_sample(text: &str) -> Result<Sample, String> {
         "world" => parse_world(&mut it),
         "mission" => parse_mission(&mut it),
         "statics" => Ok(Sample::Statics(list(field(&mut it, "static layers")?))),
+        "stock" => Ok(Sample::Stock(list(field(&mut it, "hidden piles")?))),
         "assets" => match field(&mut it, "assets")? {
             "-" if body == "assets|-" => Ok(Sample::Assets(None)),
             rows => rows.split(',').map(parse_asset).collect::<Result<_, _>>().map(|v| Sample::Assets(Some(v))),
@@ -737,6 +761,8 @@ pub struct Live {
     pub world: Option<WorldState>,
     pub mission: Mission,
     pub statics: Vec<String>,
+    /// The storage piles the game has hidden, by name.
+    pub hidden_piles: Vec<String>,
     /// Which address was asked.
     pub addr: String,
     /// The recording in progress.
@@ -841,6 +867,7 @@ impl Live {
             Sample::World(w) => self.world = Some(w),
             Sample::Mission(m) => self.mission = m,
             Sample::Statics(l) => self.statics = l,
+            Sample::Stock(l) => self.hidden_piles = l,
             // The worker keeps the book, which needs the slice the reply answers.
             Sample::Assets(_) => {}
         }
@@ -1189,7 +1216,7 @@ mod tests {
     }
 
     fn chunks() -> Vec<String> {
-        let mut c: Vec<String> = [POSE_CHUNK, ENTITIES_CHUNK, WORLD_CHUNK, MISSION_CHUNK, STATICS_CHUNK].map(str::to_string).to_vec();
+        let mut c: Vec<String> = [POSE_CHUNK, ENTITIES_CHUNK, WORLD_CHUNK, STOCK_CHUNK, MISSION_CHUNK, STATICS_CHUNK].map(str::to_string).to_vec();
         c.push(assets_chunk(&[(0x25C9_8327, 0x5B72_4250)]));
         c
     }
@@ -1250,6 +1277,15 @@ mod tests {
             assert!(chunk.contains("M.mrxplaystate==nil"), "a chunk has no world guard");
             assert!(chunk.lines().next().expect("a first line").starts_with("-- live:"), "a chunk has no name for lua_bridge.log");
         }
+    }
+
+    #[test]
+    fn a_stock_reply_names_the_hidden_piles() {
+        let s = parse_sample(&ok("stock|pmcoutpost_stockpile_money 8,pmcoutpost_stockpile_moab 1|$")).unwrap();
+        let Sample::Stock(l) = s else { panic!("not stock: {s:?}") };
+        assert_eq!(l, ["pmcoutpost_stockpile_money 8", "pmcoutpost_stockpile_moab 1"]);
+        let Sample::Stock(none) = parse_sample(&ok("stock||$")).unwrap() else { panic!("not stock") };
+        assert!(none.is_empty());
     }
 
     #[test]
@@ -1391,6 +1427,7 @@ mod tests {
         assert_eq!(s.due(t0), Some(Tier::Entities));
         s.asked(Tier::Entities, t0);
         s.asked(Tier::World, t0);
+        s.asked(Tier::Stock, t0);
         s.asked(Tier::Mission, t0);
         s.asked(Tier::Assets, t0);
         assert_eq!(s.due(t0), None, "the statics are asked once");
