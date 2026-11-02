@@ -155,6 +155,62 @@ pub fn layer_all(wadpath: &str) -> Result<(), String> {
     }
 }
 
+/// `layer --near <x> <z> <radius>`: every placed entity of every layer within `radius` metres of the XZ
+/// point: the layer, what it draws, and its classes, nearest first. The question "what is under this
+/// spot" across all 900-odd layers, which `layer <name>` cannot ask.
+pub fn layer_near(wadpath: &str, x: f32, z: f32, radius: f32) -> Result<(), String> {
+    let mut assets = AssetSource::discover(wadpath, &[])?;
+    let we = world(&mut assets)?;
+    let templates = TemplateRecords::from_worldentity(&we)?;
+    let names: HashMap<u32, &str> = templates.names.iter().map(|(k, n)| (*k, n.as_str())).collect();
+    let classes = template_classes(&we);
+    let mut hashes = BTreeSet::new();
+    for path in assets.paths() {
+        let mut f = File::open(path).map_err(|e| format!("{path}: {e}"))?;
+        let size = f.metadata().map_err(|e| format!("{path}: {e}"))?.len();
+        let arch = mercs2_formats::ffcs::load_ffcs_archive(&mut f, size).map_err(|e| format!("{path}: {e}"))?;
+        hashes.extend(arch.aset.iter().filter(|e| e.type_id == TYPE_ID_LAYER).map(|e| e.asset_hash));
+    }
+    let mut rows: Vec<(f32, String)> = Vec::new();
+    for &h in &hashes {
+        let Some(block) = assets.ecs_container(LAYER_TYPE_HASH, h)? else {
+            return Err(format!("0x{h:08X}: no container"));
+        };
+        let mut catalog = PlacedCatalog::default();
+        let keys = catalog.add_block(&block, &templates).map_err(|e| format!("0x{h:08X}: {e}"))?;
+        let own = entity_classes(&block).map_err(|e| format!("0x{h:08X}: {e}"))?;
+        let entity_names: HashMap<u32, String> = placed_names(&block).into_iter().collect();
+        for k in keys {
+            let o = catalog.get(k).expect("add_block returned the key");
+            let d = (o.pos[0] - x).hypot(o.pos[2] - z);
+            if d > radius {
+                continue;
+            }
+            let mut set: BTreeSet<&str> = BTreeSet::new();
+            for c in own.get(&k).into_iter().chain(classes.get(&o.parent)).flatten() {
+                set.insert(c);
+            }
+            rows.push((
+                d,
+                format!(
+                    "{d:7.1} layer 0x{h:08X} 0x{k:08X} {:?} template {} model {:?} mesh {:?} pos {:?} {set:?}",
+                    entity_names.get(&k).map(String::as_str).unwrap_or("-"),
+                    names.get(&o.parent).copied().unwrap_or("-"),
+                    o.model.map(|m| format!("0x{m:08X}")),
+                    o.terrain_mesh.or(o.low_res_mesh).map(|m| format!("0x{m:08X}")),
+                    o.pos,
+                ),
+            ));
+        }
+    }
+    rows.sort_by(|a, b| a.0.total_cmp(&b.0));
+    println!("{} entities within {radius} m of {x}, {z}, over {} layers", rows.len(), hashes.len());
+    for (_, r) in rows {
+        println!("{r}");
+    }
+    Ok(())
+}
+
 /// A model's HIER nodes at rest, by name hash.
 fn node_worlds(container: &[u8]) -> HashMap<u32, Mat4> {
     let hier = mercs2_formats::orchestrator::parse_hier(container);
