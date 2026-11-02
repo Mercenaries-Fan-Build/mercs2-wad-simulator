@@ -87,7 +87,7 @@ fn usage() -> ! {
          \x20 anim-table <name|0xH> [--handle 0xH] [--list <column>]   (an animationtable's rows verbatim)\n\
          \x20 clip-names <review.tsv>       (name AnimationLookup clips from their rows; a review file, merges nothing)\n\
          \x20 facefx <name|0xH> | --all     (a FaceFX actor / anim set by name; --all reads every one and prints the census)\n\
-         \x20 layer <name|0xH> | --all | --frames <capture> | --catalog <out.tsv> [--also <archives>] [--overlay <wad>]  (a placement layer's entities with their models and classes; --all prints the census; --frames tests Transforms against a capture's live positions; --catalog writes a row per layer, --overlay mounts a level such as the DLC above the base)\n\
+         \x20 layer <name|0xH> | --all | --frames <capture> | --loaded <capture> | --near <x> <z> <radius> | --catalog <out.tsv> [--also <archives>] [--overlay <wad>]  (a placement layer's entities with their models and classes; --all prints the census; --frames tests Transforms against a capture's live positions; --loaded measures which layers a capture holds; --near lists what every layer places around a point; --catalog writes a row per layer, --overlay mounts a level such as the DLC above the base)\n\
          \x20 we-template <name|0xKEY>... | --class <Class> | --uses <0xU32>   (worldentity templates / records)\n\
          \x20 ecs-survey <big-endian archive> <out.tsv> [--raw <dir>]   (a console archive's ECS containers as stored; no --wad)\n\
          \x20 ecs-compare <archive a> <archive b> <out.tsv> --vz-wad <pc vz.wad> [--diffs <file>]   (two archives' ECS containers, converted, record by record; no --wad)\n\
@@ -98,6 +98,8 @@ fn usage() -> ! {
          \x20 dump-chain <capture-dir> <0xVA> <0xOFF>...    ([[VA]+o0]+o1 ... ; last offset added, not read)\n\
          \x20 dump-find <capture-dir> <0xU32> [0xU32...]    (every aligned address holding a value)\n\
          \x20 dump-render <capture>                         (camera, wind and tree batches of the last frame)\n\
+         \x20 foliage                                       (every tree species of the foliage chunk)\n\
+         \x20 foliage-check <capture>                       (every tree entity of a capture against the decoded foliage chunk)\n\
          \x20 dump-entity <capture> <0xKEY>                 (every live component record of one key)\n\
          \x20 dump-near <capture> <x> <y> <z> <radius>      (every SceneObject around a point)\n\
          \x20 dump-model <capture> <0xHASH>                 (a runtime model's LOD range and its render objects)\n\
@@ -1015,6 +1017,8 @@ fn main() {
                 run(layer::layer_frames(&wadpath, std::path::Path::new(&capture)));
             } else if args.iter().any(|a| a == "--all") {
                 run(layer::layer_all(&wadpath));
+            } else if let Some(capture) = flag_val(&args, "--loaded") {
+                run(layer::layer_loaded(&wadpath, std::path::Path::new(&capture)));
             } else if let Some(at) = args.iter().position(|a| a == "--near") {
                 let point: Vec<f32> = args[at + 1..].iter().take(3).filter_map(|a| a.parse().ok()).collect();
                 let [x, z, radius] = point[..] else {
@@ -1031,6 +1035,14 @@ fn main() {
                 run(layer::layer(&wadpath, hash));
             }
         }
+        "foliage" => run(dump_render::foliage_list(&wadpath)),
+        "foliage-check" => match first_positional(&args) {
+            Some(capture) => run(dump_render::foliage_check(&wadpath, &capture)),
+            None => {
+                eprintln!("foliage-check: usage: mercs2_probe foliage-check <capture>");
+                std::process::exit(2);
+            }
+        },
         "terrain-cell" => {
             let usage = "terrain-cell: usage: mercs2_probe terrain-cell <0xH> [--at <centre_x> <centre_z> <x> <z>]";
             let name = first_positional(&args).unwrap_or_else(|| {
