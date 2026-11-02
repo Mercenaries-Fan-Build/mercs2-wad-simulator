@@ -22,7 +22,7 @@ use mercs2_core::{AnimState, Entity, ModelRef, SkinPalette, Transform, World};
 use mercs2_engine::mesh::{self, BoneRig, DrawGroup};
 use mercs2_formats::anim_select::AnimSelector;
 use mercs2_engine::render::{ClipAnim, TexMap};
-use mercs2_engine::scene::Scene;
+use mercs2_engine::scene::{Scene, SurfaceError};
 use mercs2_engine::{game_world, pose, wad};
 use winit::event::{ElementState, Event, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::EventLoop;
@@ -1224,23 +1224,23 @@ fn asset_menu(
     if subject == Subject::Texture {
         if ui.add(egui::Button::new("View plate").shortcut_text("Enter")).clicked() {
             actions.push(Act::LoadTexture(hash, label.to_string()));
-            ui.close_menu();
+            ui.close();
         }
     } else if !matches!(subject, Subject::Model { .. }) {
         if let Some(p) = preview {
             if ui.add(egui::Button::new("Preview").shortcut_text("Enter")).clicked() {
                 actions.push(p);
-                ui.close_menu();
+                ui.close();
             }
         }
     } else {
         if ui.add(egui::Button::new("Load in viewport").shortcut_text("Enter")).clicked() {
             actions.push(Act::LoadModelHash(hash, label.to_string()));
-            ui.close_menu();
+            ui.close();
         }
         if ui.add(egui::Button::new("Export\u{2026}").shortcut_text("F10")).clicked() {
             actions.push(Act::OpenExport(hash, label.to_string()));
-            ui.close_menu();
+            ui.close();
         }
         ui.separator();
         // A bench borrows this model — its rig, materials and state machine — and writes a NEW
@@ -1256,7 +1256,7 @@ fn asset_menu(
             job.append(&format!("\n{what}"), 0.0, egui::TextFormat::simple(theme::font(&egui::TextStyle::Small), theme::DIM));
             if ui.add(egui::Button::new(job)).clicked() {
                 actions.push(Act::Bench(bench, hash, label.to_string()));
-                ui.close_menu();
+                ui.close();
             }
         }
     }
@@ -1270,29 +1270,29 @@ fn asset_menu(
             for (kind, what) in routes {
                 if ui.button(*what).clicked() {
                     actions.push(Act::AddToShipment(kind, hash, label.to_string()));
-                    ui.close_menu();
+                    ui.close();
                 }
             }
         });
         if ui.button("Start a Shipment from this\u{2026}").clicked() {
             actions.push(Act::StartShipment(label.to_string(), subject));
-            ui.close_menu();
+            ui.close();
         }
         ui.separator();
     }
     if ui.button("Copy name").clicked() {
         ui.ctx().copy_text(label.to_string());
-        ui.close_menu();
+        ui.close();
     }
     if ui.button(format!("Copy hash 0x{hash:08X}")).clicked() {
         ui.ctx().copy_text(format!("0x{hash:08X}"));
-        ui.close_menu();
+        ui.close();
     }
     // What you would paste into a manifest — a NAME where one is known, because a hash is one-way
     // and a manifest full of them cannot be reviewed (the M0130 preference, offered up front).
     if ui.button("Copy as manifest reference").clicked() {
         ui.ctx().copy_text(label.to_string());
-        ui.close_menu();
+        ui.close();
     }
 }
 
@@ -1428,7 +1428,7 @@ fn layer_menu(ui: &mut egui::Ui, hash: u32, label: &str, named: bool, actions: &
             for (kind, what) in crate::quartermaster::routes_for_layer() {
                 if ui.button(*what).clicked() {
                     actions.push(Act::AddToShipment(kind, hash, label.to_string()));
-                    ui.close_menu();
+                    ui.close();
                 }
             }
         });
@@ -1436,11 +1436,11 @@ fn layer_menu(ui: &mut egui::Ui, hash: u32, label: &str, named: bool, actions: &
     }
     if ui.button("Copy name").clicked() {
         ui.ctx().copy_text(label.to_string());
-        ui.close_menu();
+        ui.close();
     }
     if ui.button(format!("Copy hash 0x{hash:08X}")).clicked() {
         ui.ctx().copy_text(format!("0x{hash:08X}"));
-        ui.close_menu();
+        ui.close();
     }
 }
 
@@ -2644,8 +2644,7 @@ pub fn run(opts: Options) {
                             text_sh(&mut scene, wpx - lw - 56.0, hpx * 0.84, ls, oc, "Loading");
                             match scene.render_boot(t, boot_shown.min(0.98)) {
                                 Ok(())
-                                | Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {}
-                                Err(wgpu::SurfaceError::OutOfMemory) => elwt.exit(),
+                                | Err(SurfaceError::Lost | SurfaceError::Outdated | SurfaceError::Occluded) => {}
                                 Err(e) => eprintln!("surface error: {e:?}"),
                             }
                             return;
@@ -3259,16 +3258,18 @@ pub fn run(opts: Options) {
                             live_page.mirror.leave(&mut scene);
                         }
                     }
-                    gui.run(|ctx| {
+                    gui.run(|root| {
+                        let ctx = &root.ctx().clone();
                         // ── COMMAND BAR: identity + breadcrumb (left) · scene I/O (right). Only
                         // GLOBAL actions live here; contextual verbs are on the viewport verb-bar. ──
-                        egui::TopBottomPanel::top("cmdbar")
-                            .exact_height(48.0)
-                            .frame(
-                                egui::Frame::side_top_panel(&ctx.style())
-                                    .inner_margin(egui::Margin { left: 14.0, right: 14.0, top: 0.0, bottom: 0.0 }),
-                            )
-                            .show(ctx, |ui| {
+                        egui::Panel::top("cmdbar")
+                            .exact_size(48.0)
+                            .frame(crate::gui::panel_frame(
+                                egui::Frame::side_top_panel(&ctx.global_style())
+                                    .inner_margin(egui::Margin { left: 14, right: 14, top: 0, bottom: 0 }),
+                                crate::gui::SeparatorEdge::Bottom,
+                            ))
+                            .show(root, |ui| {
                             ui.horizontal_centered(|ui| {
                                 theme::brand_mark(ui);
                                 ui.add_space(6.0);
@@ -3358,9 +3359,10 @@ pub fn run(opts: Options) {
                         if let Some(d) = export_dialog.as_mut() {
                             let mut open = true;
                             egui::Window::new("Export")
-                                .id(egui::Id::new("export_dialog"))
+                                .id(egui::Id::unique("export_dialog"))
                                 .collapsible(false)
-                                .resizable(false)
+                                .auto_sized()
+                                .max_width(theme::FIT_WINDOW_W)
                                 .open(&mut open)
                                 .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
                                 .show(ctx, |ui| {
@@ -3420,7 +3422,8 @@ pub fn run(opts: Options) {
                             ctx.request_repaint();
                             egui::Window::new("Exporting")
                                 .collapsible(false)
-                                .resizable(false)
+                                .auto_sized()
+                                .max_width(theme::FIT_WINDOW_W)
                                 .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
                                 .show(ctx, |ui| {
                                     ui.horizontal(|ui| {
@@ -3439,11 +3442,14 @@ pub fn run(opts: Options) {
                         // this changes — only the navigator + inspector reconfigure. ──
                         // As the Rail design draws it: the numbered workbenches from the top, Live
                         // and Log pinned to the foot.
-                        egui::SidePanel::left("rail")
-                            .exact_width(theme::RAIL_W)
+                        egui::Panel::left("rail")
+                            .exact_size(theme::RAIL_W)
                             .resizable(false)
-                            .frame(egui::Frame::none().fill(theme::G0).inner_margin(egui::Margin::symmetric(0.0, 6.0)))
-                            .show(ctx, |ui| {
+                            .frame(crate::gui::panel_frame(
+                                egui::Frame::NONE.fill(theme::G0).inner_margin(egui::Margin::symmetric(0, 6)),
+                                crate::gui::SeparatorEdge::Right,
+                            ))
+                            .show(root, |ui| {
                                 ui.spacing_mut().item_spacing.y = 1.0;
                                 // The foot is laid out first so it keeps its place however tall the
                                 // window is.
@@ -3482,7 +3488,7 @@ pub fn run(opts: Options) {
                                         wb = Workbench::Live;
                                     }
                                     ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
-                                        egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+                                        theme::scroll_vertical().auto_shrink([false, false]).show(ui, |ui| {
                                             ui.spacing_mut().item_spacing.y = 1.0;
                                             for (i, w) in Workbench::ALL.iter().enumerate() {
                                                 let item = theme::RailItem {
@@ -3504,12 +3510,13 @@ pub fn run(opts: Options) {
                                     });
                                 });
                             });
-                        egui::TopBottomPanel::bottom("status")
-                            .frame(
-                                egui::Frame::side_top_panel(&ctx.style())
-                                    .inner_margin(egui::Margin::symmetric(14.0, 4.0)),
-                            )
-                            .show(ctx, |ui| {
+                        egui::Panel::bottom("status")
+                            .frame(crate::gui::panel_frame(
+                                egui::Frame::side_top_panel(&ctx.global_style())
+                                    .inner_margin(egui::Margin::symmetric(14, 4)),
+                                crate::gui::SeparatorEdge::Top,
+                            ))
+                            .show(root, |ui| {
                             ui.horizontal(|ui| {
                                 // On the Saves workbench with a selection, the status bar
                                 // speaks about the loaded `.profile` instead of the workshop's
@@ -3591,17 +3598,17 @@ pub fn run(opts: Options) {
                         // Live has its own header and panels, and its own camera.
                         // Held at the width the user dragged it to: content never resizes it.
                         if eff == Workbench::Live {
-                            crate::live::header(ctx, &mut live_page);
-                            crate::live::left(ctx, &mut live_page);
+                            crate::live::header(root, &mut live_page);
+                            crate::live::left(root, &mut live_page);
                         } else {
                           crate::gui::held_side_panel(
-                            ctx,
-                            egui::panel::Side::Left,
+                            root,
+                            crate::gui::Side::Left,
                             "navigator",
                             egui::Rangef::new(220.0, 360.0),
                             &mut navigator_width,
-                            egui::Frame::side_top_panel(&ctx.style())
-                                .inner_margin(egui::Margin { left: 13.0, right: 10.0, top: 12.0, bottom: 0.0 }),
+                            egui::Frame::side_top_panel(&ctx.global_style())
+                                .inner_margin(egui::Margin { left: 13, right: 10, top: 12, bottom: 0 }),
                             |ui| {
                           match eff {
                             Workbench::Live => unreachable!("Live has no navigator"),
@@ -3622,11 +3629,11 @@ pub fn run(opts: Options) {
                             // fit: they WRAP, and an empty category is dimmed but still listed —
                             // "this game has no X" is information, and hiding it would make the
                             // catalog look like it only knows about the types it happens to have.
-                            egui::Frame::none()
+                            egui::Frame::NONE
                                 .fill(theme::G0)
-                                .stroke(egui::Stroke::new(1.0, theme::LINE))
-                                .rounding(egui::Rounding::same(7.0))
-                                .inner_margin(egui::Margin::same(4.0))
+                                .corner_radius(egui::CornerRadius::same(7))
+                                .inner_margin(egui::Margin::same(4))
+                                .apply_stroke_and_expansion_without_layout_shift(egui::Stroke::new(1.0, theme::LINE), 0.0)
                                 .show(ui, |ui| {
                                     ui.spacing_mut().item_spacing = egui::vec2(3.0, 3.0);
                                     ui.horizontal_wrapped(|ui| {
@@ -3660,7 +3667,7 @@ pub fn run(opts: Options) {
                                             } else {
                                                 egui::Color32::TRANSPARENT
                                             };
-                                            p.rect_filled(rect, egui::Rounding::same(5.0), fill);
+                                            p.rect_filled(rect, egui::CornerRadius::same(5), fill);
                                             let name_col = if on {
                                                 theme::TX
                                             } else if empty {
@@ -3718,11 +3725,11 @@ pub fn run(opts: Options) {
                             ui.add_space(7.0);
                             // Filter with a search glyph. The Audio tab searches its clips instead.
                             if kind != Kind::Audio {
-                            egui::Frame::none()
+                            egui::Frame::NONE
                                 .fill(theme::G0)
-                                .stroke(egui::Stroke::new(1.0, theme::LINE))
-                                .rounding(egui::Rounding::same(6.0))
-                                .inner_margin(egui::Margin::symmetric(8.0, 4.0))
+                                .corner_radius(egui::CornerRadius::same(6))
+                                .inner_margin(egui::Margin::symmetric(8, 4))
+                                .apply_stroke_and_expansion_without_layout_shift(egui::Stroke::new(1.0, theme::LINE), 0.0)
                                 .show(ui, |ui| {
                                     ui.horizontal(|ui| {
                                         let (r, _) = ui.allocate_exact_size(
@@ -3742,7 +3749,7 @@ pub fn run(opts: Options) {
                                         ui.add(
                                             egui::TextEdit::singleline(&mut filter)
                                                 .hint_text("filter…")
-                                                .frame(false)
+                                                .frame(egui::Frame::NONE.inner_margin(theme::TEXT_EDIT_MARGIN))
                                                 .desired_width(f32::INFINITY),
                                         );
                                     });
@@ -3843,7 +3850,7 @@ pub fn run(opts: Options) {
                             let row_h = 19.0_f32.max(ui.text_style_height(&egui::TextStyle::Body));
                             // A selection that moved since the last frame (keys, F4, a state file)
                             // is scrolled just into view; a click lands on a row already in view.
-                            let mut list_area = egui::ScrollArea::vertical().auto_shrink([false, false]);
+                            let mut list_area = theme::scroll_vertical().auto_shrink([false, false]);
                             if list_follow.0 != Some(sel) {
                                 if let Some(di) = display.iter().position(|d| matches!(d, Disp::Row(v) if *v == sel)) {
                                     let step = row_h + ui.spacing().item_spacing.y;
@@ -3919,7 +3926,7 @@ pub fn run(opts: Options) {
                                                 let resp = ui
                                                     .interact(
                                                         ir.response.rect,
-                                                        egui::Id::new(("asset_cat_hdr", cat)),
+                                                        egui::Id::unique(("asset_cat_hdr", cat)),
                                                         egui::Sense::click(),
                                                     )
                                                     .on_hover_cursor(
@@ -3970,7 +3977,7 @@ pub fn run(opts: Options) {
                                                 // A row is never wider than the list: a long name is cut
                                                 // at the edge, and its hover shows it whole.
                                                 let full = text.text.clone();
-                                                let needed = ui.fonts(|f| f.layout_job(text.clone())).size().x
+                                                let needed = ui.fonts_mut(|f| f.layout_job(text.clone())).size().x
                                                     + 2.0 * ui.spacing().button_padding.x;
                                                 let cut = needed > ui.available_width();
                                                 ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Truncate);
@@ -3989,7 +3996,7 @@ pub fn run(opts: Options) {
                                             sel = vi;
                                             actions.push(Act::LoadRow(vi));
                                         }
-                                        row.context_menu(|ui| {
+                                        theme::context_menu(&row, |ui| {
                                             // A layer is a set of placements you switch on or move,
                                             // not an asset you preview or donate.
                                             if kind == Kind::Layer {
@@ -4010,7 +4017,7 @@ pub fn run(opts: Options) {
                                     }
                                 },
                             );
-                            list_follow = (Some(sel), (list_out.state.offset.y, list_out.inner_rect.height()));
+                            list_follow = (Some(sel), (list_out.state.clamped_offset().y, list_out.inner_rect.height()));
                             }
                             } // ── end Inspect navigator (asset browser) ──
                             Workbench::Mods => {
@@ -4019,7 +4026,7 @@ pub fn run(opts: Options) {
                                          — it becomes the conform donor whose container hosts the \
                                          injected geometry.");
                                 ui.separator();
-                                egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+                                theme::scroll_vertical().auto_shrink([false, false]).show(ui, |ui| {
                                     if vehicle_inventory.is_empty() {
                                         ui.weak("(loading catalog…)");
                                     }
@@ -4072,14 +4079,14 @@ pub fn run(opts: Options) {
                                         // Split the height between the two trees.
                                         let half = (ui.available_height() - 30.0) * 0.5;
                                         theme::eyebrow(ui, &format!("Donor \u{2014} {tl}"));
-                                        egui::ScrollArea::vertical().id_source("donor_tree").max_height(half).auto_shrink([false, false]).show(ui, |ui| {
+                                        theme::scroll_vertical().id_salt("donor_tree").max_height(half).auto_shrink([false, false]).show(ui, |ui| {
                                             if let Some(h) = bone_tree(ui, &r.target_bones, &r.target_parents, "donor") {
                                                 hover_skel = Some((h, false)); // false = donor/target tree
                                             }
                                         });
                                         ui.separator();
                                         theme::eyebrow(ui, &format!("Imported \u{2014} {}", r.convention.label()));
-                                        egui::ScrollArea::vertical().id_source("import_tree").auto_shrink([false, false]).show(ui, |ui| {
+                                        theme::scroll_vertical().id_salt("import_tree").auto_shrink([false, false]).show(ui, |ui| {
                                             if let Some(h) = bone_tree(ui, &r.source_bones, &r.source_parents, "imported") {
                                                 hover_skel = Some((h, true)); // true = imported/source tree
                                             }
@@ -4105,10 +4112,11 @@ pub fn run(opts: Options) {
                                     ui.add(
                                         egui::TextEdit::singleline(&mut filter)
                                             .hint_text("filter characters…")
+                                            .margin(theme::TEXT_EDIT_MARGIN)
                                             .desired_width(f32::INFINITY),
                                     );
                                     let f = filter.to_ascii_lowercase();
-                                    egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+                                    theme::scroll_vertical().auto_shrink([false, false]).show(ui, |ui| {
                                         for r in index.models().iter() {
                                             let label = r.label();
                                             let ll = label.to_ascii_lowercase();
@@ -4156,7 +4164,7 @@ pub fn run(opts: Options) {
                                         theme::FAINT,
                                     ));
                                     ui.add_space(4.0);
-                                    egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+                                    theme::scroll_vertical().auto_shrink([false, false]).show(ui, |ui| {
                                         let mut last_cat = "";
                                         for r in rows {
                                             let cat = r.category();
@@ -4183,7 +4191,7 @@ pub fn run(opts: Options) {
                                             }
                                             // Route an asset into a Shipment or a bench — the same menu
                                             // the Library uses, so the two cannot drift.
-                                            resp.context_menu(|ui| {
+                                            theme::context_menu(&resp, |ui| {
                                                 asset_menu(ui, r.hash, &r.label(), subject_of(Kind::Model, r), None, &mut actions);
                                             });
                                         }
@@ -4202,7 +4210,7 @@ pub fn run(opts: Options) {
                                         hits.sort_by(|a, b| a.0.cmp(&b.0));
                                         ui.label(theme::disp_text(format!("{} script(s)", hits.len()), theme::style_eyebrow(), theme::FAINT));
                                         ui.add_space(3.0);
-                                        egui::ScrollArea::vertical().max_height(list_h).auto_shrink([false, false]).show(ui, |ui| {
+                                        theme::scroll_vertical().max_height(list_h).auto_shrink([false, false]).show(ui, |ui| {
                                             for (path, _, _) in hits {
                                                 let stem = path.rsplit(['/', '\\']).next().unwrap_or(path).trim_end_matches(".lua").to_string();
                                                 let resp = theme::row_chip(ui, egui::Color32::TRANSPARENT, theme::LINE, |ui| {
@@ -4213,18 +4221,18 @@ pub fn run(opts: Options) {
                                                 }
                                                 let stem2 = stem.clone();
                                                 let kinds = d.kinds();
-                                                resp.context_menu(|ui| {
+                                                theme::context_menu(&resp, |ui| {
                                                     ui.label(theme::disp_text(stem2.to_uppercase(), theme::style_eyebrow(), theme::BRASS));
                                                     ui.separator();
                                                     if ui.button("Open in Lua viewer").clicked() {
                                                         actions.push(Act::LuaOpen(path.clone()));
-                                                        ui.close_menu();
+                                                        ui.close();
                                                     }
                                                     ui.menu_button("Add to Shipment", |ui| {
                                                         for kind in kinds {
                                                             if ui.button(*kind).clicked() {
                                                                 actions.push(Act::AddToShipment(kind, 0, stem2.clone()));
-                                                                ui.close_menu();
+                                                                ui.close();
                                                             }
                                                         }
                                                     });
@@ -4273,18 +4281,18 @@ pub fn run(opts: Options) {
                         // empty registered panel reads as something that failed to load rather
                         // than something that was never meant to be there.
                         if eff == Workbench::Live {
-                            live_acts.extend(crate::live::right(ctx, &mut live_page, &index.names));
+                            live_acts.extend(crate::live::right(root, &mut live_page, &index.names));
                         } else if eff != Workbench::Settings {
                           crate::gui::held_side_panel(
-                            ctx,
-                            egui::panel::Side::Right,
+                            root,
+                            crate::gui::Side::Right,
                             "inspector",
                             egui::Rangef::new(300.0, 480.0),
                             &mut inspector_width,
-                            egui::Frame::side_top_panel(&ctx.style())
-                                .inner_margin(egui::Margin { left: 13.0, right: 12.0, top: 12.0, bottom: 0.0 }),
+                            egui::Frame::side_top_panel(&ctx.global_style())
+                                .inner_margin(egui::Margin { left: 13, right: 12, top: 12, bottom: 0 }),
                             |ui| {
-                            egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+                            theme::scroll_vertical().auto_shrink([false, false]).show(ui, |ui| {
                               if eff == Workbench::Quartermaster {
                                   qm_acts.extend(crate::quartermaster::inspector(ui, &qm, &qm_stack, true));
                               }
@@ -4521,7 +4529,7 @@ pub fn run(opts: Options) {
                                                     }
                                                 }
                                                 if let Some((_, s)) = &f.set {
-                                                    egui::ScrollArea::vertical().max_height(260.0).id_source("facefx_anims").show(ui, |ui| {
+                                                    theme::scroll_vertical().max_height(260.0).id_salt("facefx_anims").show(ui, |ui| {
                                                         for (i, a) in s.group.anims.iter().enumerate() {
                                                             let mark = match voiced(&a.name) {
                                                                 Some(true) => "♪ ",
@@ -4530,7 +4538,7 @@ pub fn run(opts: Options) {
                                                             };
                                                             let row = format!("{mark}{}  {:.2}s", a.name, a.bounds().1);
                                                             let text = f.texts.as_ref().ok().and_then(|t| t.get(i)).and_then(|t| t.as_deref());
-                                                            let mut r = ui.add(egui::SelectableLabel::new(f.anim == Some(i), row));
+                                                            let mut r = ui.add(egui::Button::selectable(f.anim == Some(i), row));
                                                             if let Some(text) = text {
                                                                 ui.add(egui::Label::new(egui::RichText::new(text).small().color(theme::FAINT)).truncate());
                                                                 r = r.on_hover_text(text);
@@ -4542,10 +4550,10 @@ pub fn run(opts: Options) {
                                                     });
                                                 }
                                                 ui.label(egui::RichText::new("Poses").small().color(theme::TX));
-                                                egui::ScrollArea::vertical().max_height(200.0).id_source("facefx_poses").show(ui, |ui| {
+                                                theme::scroll_vertical().max_height(200.0).id_salt("facefx_poses").show(ui, |ui| {
                                                     for n in f.rig.pose_names() {
                                                         let held = f.hold.as_deref() == Some(n);
-                                                        if ui.add(egui::SelectableLabel::new(held, n)).clicked() {
+                                                        if ui.add(egui::Button::selectable(held, n)).clicked() {
                                                             actions.push(Act::FaceHold((!held).then(|| n.to_string())));
                                                         }
                                                     }
@@ -4567,7 +4575,7 @@ pub fn run(opts: Options) {
                                                 .color(theme::DIM),
                                         );
                                         ui.add_space(8.0);
-                                        head.context_menu(|ui| {
+                                        theme::context_menu(&head, |ui| {
                                             // The SAME menu as the browser row. These were two
                                             // copies: this one offered only OBJ export, and neither
                                             // had been revisited since before Shipments existed.
@@ -4754,12 +4762,12 @@ pub fn run(opts: Options) {
                                                     } else {
                                                         (theme::G0, theme::LINE)
                                                     };
-                                                    let r = egui::Frame::none()
+                                                    let r = egui::Frame::NONE
                                                         .fill(fill)
-                                                        .stroke(egui::Stroke::new(1.0, border))
-                                                        .rounding(egui::Rounding::same(5.0))
-                                                        .inner_margin(egui::Margin::symmetric(9.0, 5.0))
-                                                        .outer_margin(egui::Margin { bottom: 5.0, ..Default::default() })
+                                                        .corner_radius(egui::CornerRadius::same(5))
+                                                        .inner_margin(egui::Margin::symmetric(9, 5))
+                                                        .apply_stroke_and_expansion_without_layout_shift(egui::Stroke::new(1.0, border), 0.0)
+                                                        .outer_margin(egui::Margin { bottom: 5, ..Default::default() })
                                                         .show(ui, |ui| {
                                                             ui.horizontal(|ui| {
                                                                 ui.set_width(ui.available_width());
@@ -4887,7 +4895,7 @@ pub fn run(opts: Options) {
                                                             let column = egui::vec2(combo_w, ui.spacing().interact_size.y);
                                                             let combo = ui
                                                                 .allocate_ui_with_layout(column, egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                                                    egui::ComboBox::from_id_source(("kit_slot", &name, n_slot))
+                                                                    egui::ComboBox::from_id_salt(("kit_slot", &name, n_slot))
                                                                         .selected_text(egui::RichText::new(shown_text).monospace().color(theme::TX))
                                                                         .width(combo_w)
                                                                         .truncate()
@@ -4988,7 +4996,7 @@ pub fn run(opts: Options) {
                                                 // for its widest reading ("100%").
                                                 let value_w = {
                                                     let s = ui.spacing();
-                                                    let text = ui.fonts(|f| {
+                                                    let text = ui.fonts_mut(|f| {
                                                         f.layout_no_wrap(
                                                             "100%".into(),
                                                             egui::TextStyle::Button.resolve(ui.style()),
@@ -5052,7 +5060,7 @@ pub fn run(opts: Options) {
                                                         // `truncate` fits the combo to the width it is given, so give it only its column.
                                                         let column = egui::vec2(combo_w, ui.spacing().interact_size.y);
                                                         ui.allocate_ui_with_layout(column, egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                                            egui::ComboBox::from_id_source(("machine_state", ni))
+                                                            egui::ComboBox::from_id_salt(("machine_state", ni))
                                                                 .selected_text(egui::RichText::new(shown).monospace().color(theme::TX))
                                                                 .width(combo_w)
                                                                 .truncate()
@@ -5244,18 +5252,18 @@ pub fn run(opts: Options) {
                                                 if resp.clicked() {
                                                     p.sel_group = gi;
                                                 }
-                                                resp.context_menu(|ui| {
+                                                theme::context_menu(&resp, |ui| {
                                                         if ui.button("Isolate (hide others)").clicked() {
                                                             actions.push(Act::IsolateGroup(gi));
-                                                            ui.close_menu();
+                                                            ui.close();
                                                         }
                                                         if ui.button("Show all groups").clicked() {
                                                             actions.push(Act::ShowAllGroups);
-                                                            ui.close_menu();
+                                                            ui.close();
                                                         }
                                                         if ui.button("Toggle visibility").clicked() {
                                                             actions.push(Act::GroupToggle(gi));
-                                                            ui.close_menu();
+                                                            ui.close();
                                                         }
                                                         ui.separator();
                                                         for (slot, h) in [
@@ -5271,14 +5279,14 @@ pub fn run(opts: Options) {
                                                                     .clicked()
                                                                 {
                                                                     ui.ctx().copy_text(format!("0x{h:08X}"));
-                                                                    ui.close_menu();
+                                                                    ui.close();
                                                                 }
                                                             }
                                                         }
                                                         if let Some(h) = diff {
                                                             if ui.button("Copy diffuse name").clicked() {
                                                                 ui.ctx().copy_text(name_or_hash(&index, h));
-                                                                ui.close_menu();
+                                                                ui.close();
                                                             }
                                                         }
                                                     });
@@ -5405,9 +5413,9 @@ pub fn run(opts: Options) {
                                             // One clip chip: its content row, 5 px inner margin above and
                                             // below, a 1 px border each side and its 4 px bottom margin.
                                             let row_h = ui.spacing().interact_size.y + 16.0;
-                                            egui::ScrollArea::vertical()
+                                            theme::scroll_vertical()
                                                 .max_height(580.0)
-                                                .id_source("clip_scroll")
+                                                .id_salt("clip_scroll")
                                                 .show_rows(ui, row_h, shown.len(), |ui, range| {
                                                     for &i in &shown[range] {
                                                         let e = &p.clip_catalog[i];
@@ -5470,22 +5478,22 @@ pub fn run(opts: Options) {
                                                         if resp.clicked() {
                                                             actions.push(Act::ClipSel(i));
                                                         }
-                                                        resp.context_menu(|ui| {
+                                                        theme::context_menu(&resp, |ui| {
                                                             if ui.button("Play").clicked() {
                                                                 actions.push(Act::ClipSel(i));
-                                                                ui.close_menu();
+                                                                ui.close();
                                                             }
                                                             ui.separator();
                                                             if ui.button("Copy clip name").clicked() {
                                                                 ui.ctx().copy_text(clabel.clone());
-                                                                ui.close_menu();
+                                                                ui.close();
                                                             }
                                                             if ui
                                                                 .button(format!("Copy clip hash 0x{chash:08X}"))
                                                                 .clicked()
                                                             {
                                                                 ui.ctx().copy_text(format!("0x{chash:08X}"));
-                                                                ui.close_menu();
+                                                                ui.close();
                                                             }
                                                             if let Some(h) = chandle {
                                                                 if ui
@@ -5493,7 +5501,7 @@ pub fn run(opts: Options) {
                                                                     .clicked()
                                                                 {
                                                                     ui.ctx().copy_text(format!("0x{h:08X}"));
-                                                                    ui.close_menu();
+                                                                    ui.close();
                                                                 }
                                                             }
                                                         });
@@ -5507,9 +5515,9 @@ pub fn run(opts: Options) {
                                             let lua_badge =
                                                 format!("\"{}\" · {}", p.lua_needle, p.lua_refs.len());
                                             theme::section(ui, "Game scripts", Some(&lua_badge), false, |ui| {
-                                                egui::ScrollArea::vertical()
+                                                theme::scroll_vertical()
                                                     .max_height(520.0)
-                                                    .id_source("lua_refs_scroll")
+                                                    .id_salt("lua_refs_scroll")
                                                     .show(ui, |ui| {
                                                         for (path, lines) in &p.lua_refs {
                                                             // Click = open the whole script in
@@ -5530,16 +5538,16 @@ pub fn run(opts: Options) {
                                                                     path.clone(),
                                                                 ));
                                                             }
-                                                            row.context_menu(|ui| {
+                                                            theme::context_menu(&row, |ui| {
                                                                 if ui.button("Open script").clicked() {
                                                                     actions.push(Act::LuaOpen(
                                                                         path.clone(),
                                                                     ));
-                                                                    ui.close_menu();
+                                                                    ui.close();
                                                                 }
                                                                 if ui.button("Copy script path").clicked() {
                                                                     ui.ctx().copy_text(path.clone());
-                                                                    ui.close_menu();
+                                                                    ui.close();
                                                                 }
                                                             });
                                                             for l in lines {
@@ -5552,9 +5560,9 @@ pub fn run(opts: Options) {
                                         let skel_badge = format!("{} bones", p.rig.len());
                                         theme::section(ui, "Skeleton", Some(&skel_badge), false, |ui| {
                                             ui.weak("hover = highlight in view, click = pin");
-                                            egui::ScrollArea::vertical()
+                                            theme::scroll_vertical()
                                                 .max_height(620.0)
-                                                .id_source("hier_scroll")
+                                                .id_salt("hier_scroll")
                                                 .show(ui, |ui| {
                                                     for (i, b) in p.rig.iter().enumerate() {
                                                         let mut depth = 0usize;
@@ -5589,17 +5597,17 @@ pub fn run(opts: Options) {
                                                                 Some(i)
                                                             };
                                                         }
-                                                        row.context_menu(|ui| {
+                                                        theme::context_menu(&row, |ui| {
                                                             if ui
                                                                 .button(format!("Copy hash 0x{bhash:08X}"))
                                                                 .clicked()
                                                             {
                                                                 ui.ctx().copy_text(format!("0x{bhash:08X}"));
-                                                                ui.close_menu();
+                                                                ui.close();
                                                             }
                                                             if ui.button("Copy bone name").clicked() {
                                                                 ui.ctx().copy_text(bname.clone());
-                                                                ui.close_menu();
+                                                                ui.close();
                                                             }
                                                             ui.separator();
                                                             if ui
@@ -5615,7 +5623,7 @@ pub fn run(opts: Options) {
                                                                 } else {
                                                                     Some(i)
                                                                 };
-                                                                ui.close_menu();
+                                                                ui.close();
                                                             }
                                                         });
                                                     }
@@ -5671,9 +5679,9 @@ pub fn run(opts: Options) {
                                                     } else {
                                                         theme::row_stripe(ri % 2 == 1)
                                                     };
-                                                    egui::Frame::none()
+                                                    egui::Frame::NONE
                                                         .fill(band)
-                                                        .inner_margin(egui::Margin { left: 0.0, right: 0.0, top: 2.0, bottom: 2.0 })
+                                                        .inner_margin(egui::Margin { left: 0, right: 0, top: 2, bottom: 2 })
                                                         .show(ui, |ui| {
                                                         ui.horizontal(|ui| {
                                                         ui.spacing_mut().item_spacing.x = 4.0;
@@ -5727,7 +5735,7 @@ pub fn run(opts: Options) {
                                                             .map(|(n, v)| format!("--node-at {n}:{:.3},{:.3},{:.3}", v[0], v[1], v[2]))
                                                             .collect();
                                                         let joined = args.join(" ");
-                                                        ui.output_mut(|o| o.copied_text = joined.clone());
+                                                        ui.ctx().copy_text(joined.clone());
                                                         status = if joined.is_empty() {
                                                             "no hardpoint edits to copy".to_string()
                                                         } else {
@@ -5814,7 +5822,7 @@ pub fn run(opts: Options) {
                                     ui.separator();
                                     ui.horizontal(|ui| {
                                         ui.label("name:");
-                                        ui.text_edit_singleline(&mut mod_name);
+                                        ui.add(egui::TextEdit::singleline(&mut mod_name).margin(theme::TEXT_EDIT_MARGIN));
                                     });
                                     if !mod_name.is_empty() {
                                         let h = mercs2_formats::hash::pandemic_hash_m2(&mod_name);
@@ -5866,7 +5874,7 @@ pub fn run(opts: Options) {
                                     }
                                     ui.horizontal(|ui| {
                                         ui.label("output:");
-                                        ui.text_edit_singleline(&mut mod_out);
+                                        ui.add(egui::TextEdit::singleline(&mut mod_out).margin(theme::TEXT_EDIT_MARGIN));
                                     });
                                     let busy = publisher.is_some();
                                     if ui
@@ -5924,9 +5932,9 @@ pub fn run(opts: Options) {
                                             r.mapped_count(),
                                             r.source_bones.len()
                                         ));
-                                        egui::ScrollArea::vertical()
+                                        theme::scroll_vertical()
                                             .max_height(340.0)
-                                            .id_source("retarget_map_scroll")
+                                            .id_salt("retarget_map_scroll")
                                             .show(ui, |ui| {
                                                 egui::Grid::new("retarget_map")
                                                     .num_columns(3)
@@ -5944,11 +5952,11 @@ pub fn run(opts: Options) {
                                                                 .target_name
                                                                 .clone()
                                                                 .unwrap_or_else(|| "— none —".into());
-                                                            egui::ComboBox::from_id_source(("tmap", m.source_index))
+                                                            egui::ComboBox::from_id_salt(("tmap", m.source_index))
                                                                 .selected_text(cur)
                                                                 .width(160.0)
                                                                 .show_ui(ui, |ui| {
-                                                                    egui::ScrollArea::vertical()
+                                                                    theme::scroll_vertical()
                                                                         .max_height(260.0)
                                                                         .show(ui, |ui| {
                                                                             if ui
@@ -6013,12 +6021,13 @@ pub fn run(opts: Options) {
                         // brass = go, hazard = the irreversible. Every verb shows its shortcut.
                         // Not on Live: its header holds its verbs. ──
                         if eff != Workbench::Live {
-                        egui::TopBottomPanel::top("verbs")
-                            .frame(
-                                egui::Frame::side_top_panel(&ctx.style())
-                                    .inner_margin(egui::Margin::symmetric(13.0, 5.0)),
-                            )
-                            .show(ctx, |ui| {
+                        egui::Panel::top("verbs")
+                            .frame(crate::gui::panel_frame(
+                                egui::Frame::side_top_panel(&ctx.global_style())
+                                    .inner_margin(egui::Margin::symmetric(13, 5)),
+                                crate::gui::SeparatorEdge::Bottom,
+                            ))
+                            .show(root, |ui| {
                             ui.horizontal(|ui| {
                                 let has_preview = preview.is_some();
                                 match eff {
@@ -6171,20 +6180,20 @@ pub fn run(opts: Options) {
                         // No central panel on Live: the void between its panels is the 3D view, so the
                         // camera keeps the pointer there.
                         if eff == Workbench::Live {
-                            let fv = crate::live::frame_view(&mut live_page, ctx.screen_rect().size(), ctx.available_rect());
+                            let fv = crate::live::frame_view(&mut live_page, ctx.content_rect().size(), root.available_rect_before_wrap());
                             crate::live::floats(ctx, &mut live_page, &index.names, fv);
                         }
                         if wb == Workbench::Settings {
                             egui::CentralPanel::default()
                                 .frame(
-                                    egui::Frame::none()
+                                    egui::Frame::NONE
                                         .fill(theme::G0)
-                                        .inner_margin(egui::Margin::symmetric(22.0, 18.0)),
+                                        .inner_margin(egui::Margin::symmetric(22, 18)),
                                 )
-                                .show(ctx, |ui| {
+                                .show(root, |ui| {
                                     ui.label(theme::disp_text(settings_section.label().to_uppercase(), egui::TextStyle::Heading, theme::TX));
                                     ui.add_space(12.0);
-                                    egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+                                    theme::scroll_vertical().auto_shrink([false, false]).show(ui, |ui| {
 
                                     // Tail of a path — the part that identifies it. The full string is
                                     // always one hover away, so the chip never has to carry 80 characters.
@@ -6510,12 +6519,12 @@ pub fn run(opts: Options) {
                         // CentralPanel rather than the 3D viewport, because a Shipment is read, not
                         // orbited. Added last so the side panels have already claimed their space.
                         if wb == Workbench::Quartermaster {
-                            qm_acts.extend(crate::quartermaster::center(ctx, &qm, qm_names.as_ref()));
+                            qm_acts.extend(crate::quartermaster::center(root, &qm, qm_names.as_ref()));
                         }
                         // Saves owns its own centre too: a composed card (hero preview + at-a-glance
                         // HUD + progression grid), not the 3D viewport (see `has_viewport`).
                         if wb == Workbench::Saves {
-                            saves_acts.extend(crate::saves::center(ctx, &saves));
+                            saves_acts.extend(crate::saves::center(root, &saves));
                             // Floating windows: the Inspect view and the delete confirmation.
                             saves_acts.extend(crate::saves::windows(ctx, &saves));
                         }
@@ -6524,13 +6533,13 @@ pub fn run(opts: Options) {
                         // full centre, not a viewport pass, so the dot-grid and node cards sit
                         // where the 3D would.
                         if wb == Workbench::Domain(crate::domain::Domain::Missions) {
-                            missions_acts.extend(crate::missions::center(ctx, &missions_panel));
+                            missions_acts.extend(crate::missions::center(root, &missions_panel));
                         }
                         // ── AUDIO main content: the clip table, not the 3D viewport.
                         let audio_tab = wb == Workbench::Inspect && kind == Kind::Audio;
                         if audio_tab {
                             let playing = vo_player.as_ref().and_then(|p| p.status());
-                            audio_acts.extend(crate::audiopage::center(ctx, &audio_page, playing));
+                            audio_acts.extend(crate::audiopage::center(root, &audio_page, playing));
                         }
                         // ── TEXT main content: an open string table, every language side by side, or
                         // an open font's pages.
@@ -6539,14 +6548,14 @@ pub fn run(opts: Options) {
                             && (text_page.table.is_some() || text_page.font.is_some());
                         if text_tab {
                             if text_page.font.is_some() {
-                                text_acts.extend(crate::textpage::font_center(ctx, &mut text_page));
+                                text_acts.extend(crate::textpage::font_center(root, &mut text_page));
                             } else {
-                                text_acts.extend(crate::textpage::center(ctx, &text_page));
+                                text_acts.extend(crate::textpage::center(root, &text_page));
                             }
                         }
 
                         // ── VIEWPORT HUD: status chips over the 3D (the panels are all placed now, so
-                        // `available_rect` is the viewport region). Non-interactable so the camera drag
+                        // the root's `available_rect_before_wrap` is the viewport region). Non-interactable so the camera drag
                         // works underneath. ──
                         //
                         // Suppressed on every page that does NOT own the viewport — there is no 3D
@@ -6554,8 +6563,8 @@ pub fn run(opts: Options) {
                         // rather than over a scene. Asked as a question about the workbench rather
                         // than as `!= Quartermaster`, which silently stopped being the whole answer
                         // the moment Settings also took the centre.
-                        let vp = ctx.available_rect();
-                        layer_screen = ctx.screen_rect().size();
+                        let vp = root.available_rect_before_wrap();
+                        layer_screen = ctx.content_rect().size();
                         if let (Some(v), None) = (&layer_view, &tex_view) {
                             if eff.has_viewport() && wb != Workbench::Settings && !audio_tab && !text_tab {
                                 let eye = cam_target - dir_from(cam_yaw, cam_pitch) * cam_dist;
@@ -6564,7 +6573,7 @@ pub fn run(opts: Options) {
                             }
                         }
                         if eff.has_viewport() && wb != Workbench::Settings && !audio_tab && !text_tab {
-                        egui::Area::new(egui::Id::new("vp_hud"))
+                        egui::Area::new(egui::Id::unique("vp_hud"))
                             .fixed_pos(vp.left_top() + egui::vec2(14.0, 12.0))
                             .interactable(false)
                             .show(ctx, |ui| {
@@ -6604,15 +6613,15 @@ pub fn run(opts: Options) {
                         let hp_legend = eff == Workbench::Mods && show_hardpoints;
                         let node_legend = eff == Workbench::Mods && show_nodes;
                         if hp_legend || node_legend || sel_bone.is_some() {
-                            egui::Area::new(egui::Id::new("vp_legend"))
+                            egui::Area::new(egui::Id::unique("vp_legend"))
                                 .fixed_pos(vp.right_top() + egui::vec2(-166.0, 12.0))
                                 .interactable(false)
                                 .show(ctx, |ui| {
-                                    egui::Frame::none()
+                                    egui::Frame::NONE
                                         .fill(egui::Color32::from_rgba_unmultiplied(14, 16, 20, 205))
-                                        .stroke(egui::Stroke::new(1.0, theme::LINE))
-                                        .rounding(egui::Rounding::same(5.0))
-                                        .inner_margin(egui::Margin::symmetric(10.0, 8.0))
+                                        .corner_radius(egui::CornerRadius::same(5))
+                                        .inner_margin(egui::Margin::symmetric(10, 8))
+                                        .apply_stroke_and_expansion_without_layout_shift(egui::Stroke::new(1.0, theme::LINE), 0.0)
                                         .show(ui, |ui| {
                                             ui.spacing_mut().item_spacing.y = 5.0;
                                             let dot = |ui: &mut egui::Ui, c: egui::Color32, t: &str| {
@@ -6623,7 +6632,7 @@ pub fn run(opts: Options) {
                                                     );
                                                     ui.painter().rect_filled(
                                                         r,
-                                                        egui::Rounding::same(1.0),
+                                                        egui::CornerRadius::same(1),
                                                         c,
                                                     );
                                                     ui.label(
@@ -6652,9 +6661,9 @@ pub fn run(opts: Options) {
                         if let Some(hp) = &mut hero_picker {
                             let mut open = true;
                             egui::Window::new("Choose the hero")
-                                .id(egui::Id::new("hero_picker"))
+                                .id(egui::Id::unique("hero_picker"))
                                 .open(&mut open)
-                                .default_size([480.0, 540.0])
+                                .default_size(theme::window_size(480.0, 540.0))
                                 .resizable(true)
                                 .show(ctx, |ui| {
                                     ui.label(egui::RichText::new(format!("The model {} plays on, kept across tabs and launches.", hp.what)).color(theme::DIM));
@@ -6668,7 +6677,7 @@ pub fn run(opts: Options) {
                                             .color(theme::DIM),
                                         );
                                     }
-                                    ui.add(egui::TextEdit::singleline(&mut hp.filter).hint_text("filter models").desired_width(f32::INFINITY));
+                                    ui.add(egui::TextEdit::singleline(&mut hp.filter).hint_text("filter models").margin(theme::TEXT_EDIT_MARGIN).desired_width(f32::INFINITY));
                                     ui.add_space(4.0);
                                     if !hp.want.is_empty() && skeletons.is_none() {
                                         match &skel_error {
@@ -6705,7 +6714,7 @@ pub fn run(opts: Options) {
                                             .then_with(|| models[a.0].label().to_lowercase().cmp(&models[b.0].label().to_lowercase()))
                                     });
                                     let row_h = 20.0;
-                                    egui::ScrollArea::vertical().auto_shrink([false, false]).show_rows(ui, row_h, rows.len(), |ui, range| {
+                                    theme::scroll_vertical().auto_shrink([false, false]).show_rows(ui, row_h, rows.len(), |ui, range| {
                                         for &(mi, cov) in &rows[range] {
                                             let r = &models[mi];
                                             let fits = hp.want.is_empty() || cov.unwrap_or(0) > 0;
@@ -6728,7 +6737,8 @@ pub fn run(opts: Options) {
                         if let Some(tv) = &tex_view {
                             egui::Window::new("Texture")
                                 .anchor(egui::Align2::CENTER_BOTTOM, [0.0, -48.0])
-                                .resizable(false)
+                                .auto_sized()
+                                .max_width(theme::FIT_WINDOW_W)
                                 .collapsible(false)
                                 .show(ctx, |ui| {
                                     ui.label(format!(
@@ -6773,9 +6783,9 @@ pub fn run(opts: Options) {
                         if log_open {
                             let mut open = true;
                             egui::Window::new("Log")
-                                .id(egui::Id::new("log_view"))
+                                .id(egui::Id::unique("log_view"))
                                 .open(&mut open)
-                                .default_size([720.0, 420.0])
+                                .default_size(theme::window_size(720.0, 420.0))
                                 .resizable(true)
                                 .show(ctx, |ui| {
                                     let errs = log.iter().filter(|l| l.level == LogLevel::Error).count();
@@ -6833,7 +6843,7 @@ pub fn run(opts: Options) {
                                         return;
                                     }
                                     let h = ui.text_style_height(&egui::TextStyle::Monospace);
-                                    egui::ScrollArea::vertical()
+                                    theme::scroll_vertical()
                                         .auto_shrink([false, false])
                                         // Newest line is the interesting one, so open at the end.
                                         .stick_to_bottom(true)
@@ -8915,10 +8925,10 @@ pub fn run(opts: Options) {
                     };
                     match r {
                         Ok(()) => {}
-                        Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
+                        Err(SurfaceError::Lost | SurfaceError::Outdated) => {
                             scene.resize(scene.size)
                         }
-                        Err(wgpu::SurfaceError::OutOfMemory) => elwt.exit(),
+                        Err(SurfaceError::Occluded) => {}
                         Err(e) => eprintln!("surface error: {e:?}"),
                     }
                     if let Some(frame) = scene.take_capture() {
@@ -9169,7 +9179,7 @@ fn clip_cells(
 /// The naming field of one value: the typed words, and an Accept for each word order whose hash is
 /// the value (`statenamer::matches`).
 fn name_field(ui: &mut egui::Ui, draft: &mut String, v: u32, actions: &mut Vec<Act>) {
-    ui.add(egui::TextEdit::singleline(draft).id_source(("name_value", v)).desired_width(ui.available_width()));
+    ui.add(egui::TextEdit::singleline(draft).id_salt(("name_value", v)).margin(crate::gui::theme::TEXT_EDIT_MARGIN).desired_width(ui.available_width()));
     for m in crate::statenamer::matches(draft, v) {
         ui.horizontal(|ui| {
             if ui.button("Accept").clicked() {
@@ -10093,7 +10103,7 @@ fn bone_tree(ui: &mut egui::Ui, names: &[String], parents: &[i32], id: &str) -> 
             }
         } else {
             let r = egui::CollapsingHeader::new(egui::RichText::new(names[i].as_str()).monospace())
-                .id_source((id, i))
+                .id_salt((id, i))
                 .default_open(true)
                 .show(ui, |ui| {
                     for &c in &kids[i] {
@@ -10143,9 +10153,9 @@ fn clip_player_compact(ui: &mut egui::Ui, p: &Preview, actions: &mut Vec<Act>) {
             }
         }
     }
-    egui::ScrollArea::vertical()
+    crate::gui::theme::scroll_vertical()
         .max_height(340.0)
-        .id_source("skel_clip_scroll")
+        .id_salt("skel_clip_scroll")
         .show(ui, |ui| {
             for i in 0..p.clip_catalog.len() {
                 let sel = p.cur_clip == Some(i);
