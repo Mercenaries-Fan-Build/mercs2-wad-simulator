@@ -245,14 +245,12 @@ pub fn char_skin_to_imported(
         fit_scale: 1.0,
         bones: vec![IDENT; bone_count],
         rig: target_rig.clone(),
-        prelit: false,
     };
     let skin = SkinData {
         center: [0.0; 3],
         scale: 1.0,
         bones: vec![IDENT; bone_count],
         rig: target_rig,
-        prelit: false,
     };
     Imported {
         verts,
@@ -348,7 +346,6 @@ fn finish(
         fit_scale: 1.0,
         bones: Vec::new(),
         rig: Vec::new(),
-        prelit: false,
     };
     let mut skin = SkinData::identity();
     skin.center = [0.0; 3];
