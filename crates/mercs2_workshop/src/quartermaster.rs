@@ -738,11 +738,11 @@ fn sev_chip(ui: &mut egui::Ui, s: Severity) {
     } else {
         (theme::G2, c)
     };
-    egui::Frame::none()
+    egui::Frame::NONE
         .fill(bg)
-        .stroke(egui::Stroke::new(1.0, c))
-        .rounding(3.0)
-        .inner_margin(egui::Margin::symmetric(5.0, 1.0))
+        .corner_radius(3)
+        .inner_margin(egui::Margin::symmetric(5, 1))
+        .apply_stroke_and_expansion_without_layout_shift(egui::Stroke::new(1.0, c), 0.0)
         .show(ui, |ui| {
             ui.label(theme::disp_text(sev_label(s).to_uppercase(), theme::style_eyebrow(), fg));
         });
@@ -1337,7 +1337,7 @@ pub fn navigator(ui: &mut egui::Ui, p: &Panel) -> Vec<Act> {
             for (kind, _, blurb) in *kinds {
                 if ui.button(*kind).on_hover_text(*blurb).clicked() {
                     out.push(Act::Add(kind));
-                    ui.close_menu();
+                    ui.close();
                 }
             }
             ui.separator();
@@ -1352,9 +1352,9 @@ pub fn navigator(ui: &mut egui::Ui, p: &Panel) -> Vec<Act> {
             None => theme::LINE2,
         };
         let selected = p.selected == Some(i);
-        let resp = egui::Frame::none()
+        let resp = egui::Frame::NONE
             .fill(if selected { theme::BRASS_SOFT } else { Color32::TRANSPARENT })
-            .inner_margin(egui::Margin { left: 9.0, right: 8.0, top: 6.0, bottom: 7.0 })
+            .inner_margin(egui::Margin { left: 9, right: 8, top: 6, bottom: 7 })
             .show(ui, |ui| {
                 ui.set_width(ui.available_width());
                 ui.label(theme::disp_text(c.kind().to_uppercase(), theme::style_eyebrow(), theme::DIM));
@@ -1383,11 +1383,11 @@ pub fn navigator(ui: &mut egui::Ui, p: &Panel) -> Vec<Act> {
             acts.push(Act::Select(i));
         }
         let mut menu: Vec<Act> = Vec::new();
-        resp.context_menu(|ui| {
+        theme::context_menu(&resp, |ui| {
             add_menu(ui, &mut menu);
             if ui.button("Remove this contribution").clicked() {
                 menu.push(Act::Remove(i));
-                ui.close_menu();
+                ui.close();
             }
         });
         acts.extend(menu);
@@ -1397,9 +1397,9 @@ pub fn navigator(ui: &mut egui::Ui, p: &Panel) -> Vec<Act> {
     // an empty Shipment would have nothing to right-click at all.
     let rest = ui.available_rect_before_wrap();
     if rest.height() > 4.0 {
-        let bg = ui.interact(rest, ui.id().with("qm_queue_bg"), egui::Sense::click());
+        let bg = ui.interact(rest, ui.scope_id().with("qm_queue_bg"), egui::Sense::click());
         let mut menu: Vec<Act> = Vec::new();
-        bg.context_menu(|ui| add_menu(ui, &mut menu));
+        theme::context_menu(&bg, |ui| add_menu(ui, &mut menu));
         acts.extend(menu);
     }
     acts
@@ -1412,15 +1412,15 @@ pub fn navigator(ui: &mut egui::Ui, p: &Panel) -> Vec<Act> {
 /// The blast radius here is COMPUTED, never authored — only `raw` declares its own, and it is the
 /// one kind that can. Showing it is the point of giving this a main area: it answers "can this
 /// coexist with someone else's Shipment", which a modder cannot work out alone.
-pub fn center(ctx: &egui::Context, p: &Panel, names: Option<&NameTable>) -> Vec<Act> {
+pub fn center(root: &mut egui::Ui, p: &Panel, names: Option<&NameTable>) -> Vec<Act> {
     let mut acts: Vec<Act> = Vec::new();
     egui::CentralPanel::default()
         .frame(
-            egui::Frame::none()
+            egui::Frame::NONE
                 .fill(theme::G0)
-                .inner_margin(egui::Margin::symmetric(22.0, 18.0)),
+                .inner_margin(egui::Margin::symmetric(22, 18)),
         )
-        .show(ctx, |ui| {
+        .show(root, |ui| {
             let Some(s) = &p.shipment else {
                 return empty_middle(
                     ui,
@@ -1441,7 +1441,7 @@ pub fn center(ctx: &egui::Context, p: &Panel, names: Option<&NameTable>) -> Vec<
                         .color(theme::FAINT),
                 );
                 ui.add_space(14.0);
-                egui::ScrollArea::vertical().show(ui, |ui| {
+                theme::scroll_vertical().show(ui, |ui| {
                     let mut sh = s.manifest.shipment.clone();
                     let mut load = s.manifest.load.clone();
                     if identity_form(ui, &mut sh, &mut load)
@@ -1465,7 +1465,7 @@ pub fn center(ctx: &egui::Context, p: &Panel, names: Option<&NameTable>) -> Vec<
             );
             ui.add_space(14.0);
 
-            egui::ScrollArea::vertical().show(ui, |ui| {
+            theme::scroll_vertical().show(ui, |ui| {
                 // ── WARDROBE ────────────────────────────────────────────────────────────────
                 //
                 // Moved off Modkit, which is Tier 1 — install, load order, deploy. Choosing which
@@ -3353,11 +3353,11 @@ pub fn inspector(ui: &mut egui::Ui, p: &Panel, wad_stack: &[String], has_game: b
     let gc = gate.colour();
 
     // The gate first, because it decides whether Build is even live.
-    egui::Frame::none()
+    egui::Frame::NONE
         .fill(theme::G2)
-        .stroke(egui::Stroke::new(1.0, gc))
-        .rounding(6.0)
-        .inner_margin(egui::Margin::symmetric(11.0, 9.0))
+        .corner_radius(6)
+        .inner_margin(egui::Margin::symmetric(11, 9))
+        .apply_stroke_and_expansion_without_layout_shift(egui::Stroke::new(1.0, gc), 0.0)
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.horizontal(|ui| {
