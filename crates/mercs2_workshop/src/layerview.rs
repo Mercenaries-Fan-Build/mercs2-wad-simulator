@@ -766,8 +766,8 @@ pub fn pick(entities: &[LayerEntity], vp: Mat4, size: egui::Vec2, cursor: egui::
 
 /// The markers, their labels and the selection ring, over the viewport `rect`.
 pub fn overlay(ctx: &egui::Context, view: &LayerView, vp: Mat4, rect: egui::Rect) {
-    let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Background, egui::Id::new("layer_markers"))).with_clip_rect(rect);
-    let size = ctx.screen_rect().size();
+    let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Background, egui::Id::unique("layer_markers"))).with_clip_rect(rect);
+    let size = ctx.content_rect().size();
     let font = theme::font(&egui::TextStyle::Small);
     let px_per_unit = size.y * 0.5 / (FOV_Y.to_radians() * 0.5).tan();
     let mut labels: Vec<(f32, egui::Pos2, &str)> = Vec::new();
@@ -835,7 +835,7 @@ pub fn inspector(ui: &mut egui::Ui, view: &mut LayerView, index: &AssetIndex) ->
     });
     if !view.models.is_empty() {
         theme::card(ui, "Models", Some(&view.models.len().to_string()), |ui| {
-            egui::ScrollArea::vertical().id_source("layer_models").max_height(150.0).auto_shrink([false, true]).show(ui, |ui| {
+            theme::scroll_vertical().id_salt("layer_models").max_height(150.0).auto_shrink([false, true]).show(ui, |ui| {
                 let mut rows: Vec<(u32, usize)> = view.models.iter().map(|(m, n)| (*m, *n)).collect();
                 rows.sort_by_key(|(_, n)| std::cmp::Reverse(*n));
                 for (m, n) in rows {
@@ -879,7 +879,7 @@ pub fn inspector(ui: &mut egui::Ui, view: &mut LayerView, index: &AssetIndex) ->
     let follow = std::mem::take(&mut view.follow);
     theme::card(ui, "Entities", Some(&view.entities.len().to_string()), |ui| {
         const ROW: f32 = 20.0;
-        let mut area = egui::ScrollArea::vertical().id_source("layer_entities").max_height(320.0).auto_shrink([false, true]);
+        let mut area = theme::scroll_vertical().id_salt("layer_entities").max_height(320.0).auto_shrink([false, true]);
         if let (true, Some(i)) = (follow, selected) {
             area = area.vertical_scroll_offset(i as f32 * ROW);
         }
