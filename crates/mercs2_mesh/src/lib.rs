@@ -327,6 +327,54 @@ pub struct ScrubGeometry {
     pub patches: Vec<ScrubPatch>,
 }
 
+/// One billboard tree as the GPU reads it: `PgBillboardTreeVP`'s `POSITION`, less the corner index its
+/// `w` also carries.
+#[repr(C)]
+#[derive(Copy, Clone, Debug, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct TreeInstance {
+    pub position: [f32; 3],
+    /// A fraction of a turn ([`mercs2_formats::foliage::Leaf::yaw`]).
+    pub yaw: f32,
+}
+
+/// A species' billboard, ready to upload: its quads, each corner's `pos` the offset (across, up, 0) and
+/// `color` the atlas tiles (across, down, 0, 0), and one draw over them all.
+#[derive(Clone)]
+pub struct TreeGeometry {
+    pub verts: Vec<Vertex>,
+    pub indices: Vec<u32>,
+    pub draw: DrawGroup,
+}
+
+/// Build a tree species' billboard.
+pub fn build_billboard(species: &mercs2_formats::foliage::Species) -> TreeGeometry {
+    let m = species.billboard_material();
+    let (mut verts, mut indices) = (Vec::new(), Vec::new());
+    for view in species.views() {
+        let base = verts.len() as u32;
+        verts.extend(view.corners.iter().zip(&view.uvs).map(|(c, uv)| Vertex {
+            pos: [c[0], c[1], 0.0],
+            color: [species.atlas[0] as f32, species.atlas[1] as f32, 0.0, 0.0],
+            uv: *uv,
+            normal: [0.0; 3],
+            tangent: [0.0; 4],
+            joints: [0; 4],
+            weights: [255, 0, 0, 0],
+        }));
+        indices.extend([0, 1, 2, 0, 2, 3].map(|i| base + i));
+    }
+    let draw = DrawGroup {
+        index_count: indices.len() as u32,
+        diffuse: m.diffuse(),
+        normal: m.slot(2),
+        textures: m.textures.clone(),
+        material_flags: m.flags,
+        material_data: m.material_data(),
+        ..Default::default()
+    };
+    TreeGeometry { verts, indices, draw }
+}
+
 /// Build a ground cover container's geometry. An empty container builds none.
 pub fn build_scrub(container: &[u8]) -> Result<ScrubGeometry, String> {
     use mercs2_formats::scrub::{ScrubPack, Tuft};
