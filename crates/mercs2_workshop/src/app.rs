@@ -3052,6 +3052,11 @@ pub fn run(opts: Options) {
                             if let Some(r) = &st.live_replay {
                                 live_page.link.replay(r.clone());
                             }
+                            if let Some([yaw, pitch, zoom]) = st.live_camera {
+                                live_page.cam.yaw = yaw;
+                                live_page.cam.pitch = pitch;
+                                live_page.cam.zoom = zoom;
+                            }
                             if let Some(s) = &st.settings_section {
                                 let sections: Vec<(&str, SettingsSection)> =
                                     SettingsSection::ALL.iter().map(|s| (s.label(), *s)).collect();
