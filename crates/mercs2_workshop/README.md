@@ -46,8 +46,10 @@ its foot:
   and **Fit an import to this** open their bench with the model as donor, lit under Shipment with
   a `SHIPMENTS › shipment › contribution › bench` breadcrumb. The work happens in the bench and
   nothing is written until it saves; the donor is never written.
-- **Live** is a blank page; its rail dot is lit while the game's lua-bridge (`127.0.0.1:27050`)
-  accepts a connection.
+- **Live** mirrors a running game, read-only: the world the game is in on this renderer, with a free
+  camera that follows the player, the entities it reports, its mission, layers and log. The contract is
+  `docs/modernization/workshop_pages/live.md`. It reads over lua-bridge; Mirror in-game and residency
+  need the `M2Live` namespace of m2-sdk. Record writes a `.replay`, and Open replay plays one back.
 - read-only Lua source viewer with a hand-rolled highlighter, opened from corpus hits
 - import a foreign mesh (`.obj` / `.gltf` / `.glb`) and preview it on the engine renderer
 - publish a NOVEL (new-hash) model into a patch WAD
@@ -246,8 +248,11 @@ Binary crate — these are private modules, listed for orientation:
   match wins, a broken set source stopping it; the rows Settings draws and headless runs print.
 - `settingspage` — Settings' navigator (with each chain's badge) and its Game archive / Reference
   data sections: the chain rows, the "saved path not found" banner, what it opened, the buttons.
-- `live` — the Live page and the probe behind its rail dot (`mercs2_bridge::reachable`, polled off
-  the frame loop).
+- `live` — the Live page. `live_link` owns the bridge connection and every chunk the page sends, all
+  reads (a test fails on any call off its list), and records and replays replies. `live_cam` is the
+  camera, `live_log` the tail of `pmc_blackbox.log`, `live_world` the mirror (the engine's streaming
+  executor with the hero as viewer, on the layers the game reports), `live_overlay` the marks read from
+  layer data on a worker, `live_map` the mini-map.
 - `textpage` — Inspect's Text tab: every string table of every WAD side by side by key (read on a
   worker, keys named from `names.bin` and the Lua corpus), and a font's pages with every glyph's box
   (`mercs2_formats::font`).
