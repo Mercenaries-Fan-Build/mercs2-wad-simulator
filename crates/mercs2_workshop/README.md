@@ -59,7 +59,7 @@ line (catalog dumps, model load checks, texture PNG dumps, lossless export bundl
 
 The GUI is egui painted through the engine's `Scene` overlay hook (`render_with` /
 `render_menu_with`); the winit-0.29 → egui event bridge is hand-rolled in `gui.rs` because
-`egui-winit` 0.28 targets winit 0.30 while the engine is still on 0.29.
+`egui-winit` 0.37 targets winit 0.30 while the engine is still on 0.29.
 
 ## Where it comes from
 
