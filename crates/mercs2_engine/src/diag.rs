@@ -533,26 +533,28 @@ pub fn terrainmesh_probe(wadpath: &str, block: Option<u16>) -> Result<(), String
                     }
                 }
             }
-            // Per-draw splat layers (the reversed model): each group's material -> detail layers.
+            // The materials the draws name, and the textures those bind.
             {
-                let layers = mercs2_formats::texture::terrain_group_layers(container)
-                    .map_err(|e| format!("terrainmesh block {bi} MTRL: {e}"))?;
-                let midx = mercs2_formats::texture::terrain_group_material_index(container);
-                let all: std::collections::HashSet<u32> = layers.iter().flatten().copied().collect();
+                let cell = mercs2_formats::terrainmesh::TerrainCell::decode(container)
+                    .map_err(|e| format!("terrainmesh block {bi}: {e}"))?;
+                let named: Vec<u32> =
+                    cell.geoms.iter().flat_map(|g| &g.prmgs).flat_map(|p| &p.draws).map(|d| d.material).collect();
+                let all: std::collections::HashSet<u32> = named
+                    .iter()
+                    .flat_map(|&m| &cell.mtrl.materials[m as usize].textures)
+                    .copied()
+                    .filter(|&h| h != mercs2_formats::texture::TERRAIN_LAYER_MARKER)
+                    .collect();
                 let mut resolvable = 0usize;
                 for &h in &all {
                     if wad::extract_texture(&mut w, h).is_ok() {
                         resolvable += 1;
                     }
                 }
-                let counts: Vec<usize> = layers.iter().map(|l| l.len()).collect();
                 println!(
-                    "[terrainmesh]   SPLAT LAYERS: {} draws, material idx (first 8) {:?}; layers/draw (first 8) {:?}; {} distinct layer textures, {resolvable} resolve",
-                    layers.len(), &midx.iter().take(8).collect::<Vec<_>>(), &counts.iter().take(8).collect::<Vec<_>>(), all.len()
+                    "[terrainmesh]   {} draws, materials (first 8) {:?}; {} distinct textures, {resolvable} resolve",
+                    named.len(), &named.iter().take(8).collect::<Vec<_>>(), all.len()
                 );
-                for l in layers.iter().take(4) {
-                    println!("[terrainmesh]     draw layers: {:08X?}", l);
-                }
             }
             // Vertex COLOR (splat weights)?
             if let Ok(meshes) = mercs2_formats::model_cubeize::read_model_meshes(container) {
@@ -568,14 +570,21 @@ pub fn terrainmesh_probe(wadpath: &str, block: Option<u16>) -> Result<(), String
                 println!("[terrainmesh]   vertex COLOR (splat weights): {}/{} groups carry it; {} distinct values; sample {:?}", with_col, meshes.len(), distinct.len(), sample);
             }
         }
-        match mesh::build_indexed_from_terrainmesh(&dec[s0..s1]) {
-            Ok((verts, indices, draws, stats)) => {
+        match mesh::build_terrain_cell(&dec[s0..s1], [0.0; 3], mercs2_formats::terrainmesh::TerrainFade::default()) {
+            Ok((verts, indices, draws)) => {
                 let cell = c3_cell_id_from_path(&path);
                 let cc = cell.map(c3_cell_centre);
+                let (mut bbox_min, mut bbox_max) = ([f32::MAX; 3], [f32::MIN; 3]);
+                for v in &verts {
+                    for k in 0..3 {
+                        bbox_min[k] = bbox_min[k].min(v.pos[k]);
+                        bbox_max[k] = bbox_max[k].max(v.pos[k]);
+                    }
+                }
                 println!(
                     "[terrainmesh] block={bi} {path}: {} verts / {} tris / {} draws | bbox X[{:.1},{:.1}] Y[{:.1},{:.1}] Z[{:.1},{:.1}]",
                     verts.len(), indices.len() / 3, draws.len(),
-                    stats.bbox_min[0], stats.bbox_max[0], stats.bbox_min[1], stats.bbox_max[1], stats.bbox_min[2], stats.bbox_max[2]
+                    bbox_min[0], bbox_max[0], bbox_min[1], bbox_max[1], bbox_min[2], bbox_max[2]
                 );
                 let _ = cc;
                 // REAL placement from the TerrainObject->Transform map (not the c3 cell-id).
@@ -585,18 +594,17 @@ pub fn terrainmesh_probe(wadpath: &str, block: Option<u16>) -> Result<(), String
                         // Test Y: low-res ground at the tile position should fall within the
                         // terrainmesh Y range (Y is world-absolute) once placed at (pos.x, pos.z).
                         let lo = hmap.height_at(p[0], p[2]);
-                        let straddles = lo.is_finite() && lo >= stats.bbox_min[1] - 8.0 && lo <= stats.bbox_max[1] + 8.0;
+                        let straddles = lo.is_finite() && lo >= bbox_min[1] - 8.0 && lo <= bbox_max[1] + 8.0;
                         println!(
                             "[terrainmesh]   TerrainObject pos=({:.0},{:.0},{:.0}); low-res ground there={lo:.1}; terrainmesh Y[{:.1},{:.1}] -> {}",
-                            p[0], p[1], p[2], stats.bbox_min[1], stats.bbox_max[1],
+                            p[0], p[1], p[2], bbox_min[1], bbox_max[1],
                             if straddles { "MATCH (placement correct, Y world-absolute)" } else { "MISMATCH" }
                         );
                     }
                     None => println!("[terrainmesh]   mesh 0x{tm_hash:08X} not in TerrainObject map"),
                 }
-                // Material/diffuse hashes = the splat set.
-                let diffuse: Vec<u32> = draws.iter().filter_map(|d| d.diffuse).collect();
-                println!("[terrainmesh]   {} draws carry a diffuse texture (multi-material = the splat)", diffuse.len());
+                let ground = draws.iter().filter(|d| d.ground.is_some()).count();
+                println!("[terrainmesh]   {ground} ground draws, {} overlay draws", draws.len() - ground);
                 // POFF (Position OFFset) chunks — the suspected per-GEOM world anchor the builder
                 // ignores. Walk the UCFX descriptor table of the terrainmesh chunk and read each
                 // POFF's 3 floats; compare to the grid cell centre.
@@ -2939,18 +2947,15 @@ pub fn find_ref(wadpath: &str, wants: &[u32]) {
         for &want in wants {
             let mut hits = 0;
             for bi in 0..nblocks as u16 {
-                let Ok(dec) = wad::decompress_block_index(&mut w, bi) else { continue };
-                if dec.len() > 6_000_000 { continue; } // skip huge terrainmesh/geom blocks
-                let mut i = 0usize;
-                let mut found = false;
-                while i + 4 <= dec.len() {
-                    if u32::from_le_bytes([dec[i], dec[i + 1], dec[i + 2], dec[i + 3]]) == want {
-                        found = true;
-                        break;
+                let dec = match wad::decompress_block_index(&mut w, bi) {
+                    Ok(dec) => dec,
+                    Err(e) => {
+                        println!("[find-ref] block={bi} unreadable: {e}");
+                        continue;
                     }
-                    i += 1;
-                }
-                if found {
+                };
+                let bytes = want.to_le_bytes();
+                if dec.windows(4).any(|w| w == bytes) {
                     let path = wad::block_paths(&w).get(bi as usize).cloned().unwrap_or_default();
                     println!("[find-ref] 0x{want:08X} in block={bi} {path}");
                     hits += 1;
