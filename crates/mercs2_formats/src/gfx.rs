@@ -14,8 +14,8 @@
 //! a frame-size `RECT`, `u16` frame-rate, `u16` frame-count, then the tag records.
 //!
 //! Scope: the container + the top-level tag stream are parsed exactly; shape bodies are parsed only
-//! as far as the **fill-style array** (all that's needed to flag gradient/bitmap fills). Anything
-//! deeper (edge/curve records, timeline semantics) is out of scope and intentionally not guessed.
+//! as far as the **fill-style array** (all that's needed to flag gradient/bitmap fills). The tag
+//! bodies a player needs are decoded by [`crate::gfx_def`].
 
 use std::collections::BTreeMap;
 use std::io::Read;
@@ -92,35 +92,35 @@ pub struct Features {
 }
 
 /// A byte cursor with MSB-first bit reading, for `RECT`/`MATRIX` (SWF bit-packed) fields.
-struct Cursor<'a> {
-    data: &'a [u8],
+pub(crate) struct Cursor<'a> {
+    pub(crate) data: &'a [u8],
     /// Byte position.
-    pos: usize,
+    pub(crate) pos: usize,
     /// Bit position within the current byte (0 = MSB), 0..8; `0` means byte-aligned.
     bit: u8,
 }
 
 impl<'a> Cursor<'a> {
-    fn new(data: &'a [u8], pos: usize) -> Self {
+    pub(crate) fn new(data: &'a [u8], pos: usize) -> Self {
         Cursor { data, pos, bit: 0 }
     }
-    fn align(&mut self) {
+    pub(crate) fn align(&mut self) {
         if self.bit != 0 {
             self.bit = 0;
             self.pos += 1;
         }
     }
-    fn u8(&mut self) -> Result<u8, String> {
+    pub(crate) fn u8(&mut self) -> Result<u8, String> {
         self.align();
         let b = *self.data.get(self.pos).ok_or("eof:u8")?;
         self.pos += 1;
         Ok(b)
     }
-    fn u16(&mut self) -> Result<u16, String> {
+    pub(crate) fn u16(&mut self) -> Result<u16, String> {
         Ok(u16::from_le_bytes([self.u8()?, self.u8()?]))
     }
     /// Read `n` unsigned bits (MSB-first). `n` ≤ 32.
-    fn ubits(&mut self, n: u32) -> Result<u32, String> {
+    pub(crate) fn ubits(&mut self, n: u32) -> Result<u32, String> {
         let mut v = 0u32;
         for _ in 0..n {
             let byte = *self.data.get(self.pos).ok_or("eof:bits")?;
@@ -142,7 +142,7 @@ impl<'a> Cursor<'a> {
         Ok(())
     }
     /// Read a `RECT` into `[xmin,xmax,ymin,ymax]` (twips), then byte-align.
-    fn read_rect(&mut self) -> Result<[i32; 4], String> {
+    pub(crate) fn read_rect(&mut self) -> Result<[i32; 4], String> {
         let nbits = self.ubits(5)?;
         let sext = |v: u32, n: u32| -> i32 {
             if n == 0 {
@@ -320,6 +320,11 @@ impl GfxMovie {
             body,
             tag_body_offsets,
         })
+    }
+
+    /// Every tag in stream order with its body.
+    pub fn tag_bodies(&self) -> impl Iterator<Item = (u16, &[u8])> {
+        self.tags.iter().zip(&self.tag_body_offsets).map(|(&(code, len), &off)| (code, &self.body[off..off + len]))
     }
 
     /// Frame size in pixels `[w, h]` (twips ÷ 20).
