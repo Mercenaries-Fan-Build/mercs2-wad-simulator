@@ -172,12 +172,27 @@ pub fn layer_near(wadpath: &str, x: f32, z: f32, radius: f32) -> Result<(), Stri
         hashes.extend(arch.aset.iter().filter(|e| e.type_id == TYPE_ID_LAYER).map(|e| e.asset_hash));
     }
     let mut rows: Vec<(f32, String)> = Vec::new();
+    let mut unread = 0usize;
     for &h in &hashes {
         let Some(block) = assets.ecs_container(LAYER_TYPE_HASH, h)? else {
             return Err(format!("0x{h:08X}: no container"));
         };
         let mut catalog = PlacedCatalog::default();
-        let keys = catalog.add_block(&block, &templates).map_err(|e| format!("0x{h:08X}: {e}"))?;
+        let keys = match catalog.add_block(&block, &templates) {
+            Ok(keys) => keys,
+            Err(e) => {
+                println!("0x{h:08X}: unreadable: {e}");
+                for path in assets.paths() {
+                    let mut w = mercs2_engine::wad::open(path)?;
+                    let rows = mercs2_engine::wad::aset_types(&w, h);
+                    let Some(c) = mercs2_engine::worldutil::layer_container(&mut w, h)? else { continue };
+                    let issues = mercs2_formats::ucfx::verify_ucfx_container(&c, "layer", LAYER_TYPE_HASH);
+                    println!("  {path}: rows {rows:?}, {} bytes, issues {issues:?}", c.len());
+                }
+                unread += 1;
+                continue;
+            }
+        };
         let own = entity_classes(&block).map_err(|e| format!("0x{h:08X}: {e}"))?;
         let entity_names: HashMap<u32, String> = placed_names(&block).into_iter().collect();
         for k in keys {
@@ -204,9 +219,39 @@ pub fn layer_near(wadpath: &str, x: f32, z: f32, radius: f32) -> Result<(), Stri
         }
     }
     rows.sort_by(|a, b| a.0.total_cmp(&b.0));
-    println!("{} entities within {radius} m of {x}, {z}, over {} layers", rows.len(), hashes.len());
+    println!("{} entities within {radius} m of {x}, {z}, over {} layers, {unread} unreadable", rows.len(), hashes.len());
     for (_, r) in rows {
         println!("{r}");
+    }
+    Ok(())
+}
+
+/// `layer --loaded <capture>`: which of `wadpath`'s own layers a retail capture has in memory, measured by
+/// how many of each layer's placed keys are live `SceneObject` rows. Prints `live/placed` per layer that
+/// has any, most complete first. Reads the archive at `wadpath` alone, no overlay.
+pub fn layer_loaded(wadpath: &str, capture: &Path) -> Result<(), String> {
+    let cap = crate::dump::Capture::open(capture)?;
+    let mem = cap.mem()?;
+    let table = mem.container_named("SceneObject")?;
+    let live: BTreeSet<u32> = mem.records(&table)?.iter().map(|r| r.key).collect();
+    let mut assets = AssetSource::discover(wadpath, &[])?;
+    let templates = TemplateRecords::from_worldentity(&world(&mut assets)?)?;
+    let mut w = mercs2_engine::wad::open(wadpath)?;
+    let hashes: BTreeSet<u32> = mercs2_engine::wad::aset_entries(&w).iter().filter(|e| e.type_id == TYPE_ID_LAYER).map(|e| e.asset_hash).collect();
+    let mut rows = Vec::new();
+    for &h in &hashes {
+        let block = mercs2_engine::worldutil::layer_container(&mut w, h)?.ok_or_else(|| format!("0x{h:08X}: no container"))?;
+        let mut catalog = PlacedCatalog::default();
+        let keys = catalog.add_block(&block, &templates).map_err(|e| format!("0x{h:08X}: {e}"))?;
+        let present = keys.iter().filter(|k| live.contains(k)).count();
+        if present > 0 {
+            rows.push((present as f32 / keys.len() as f32, present, keys.len(), h));
+        }
+    }
+    rows.sort_by(|a, b| b.0.total_cmp(&a.0).then(b.1.cmp(&a.1)));
+    println!("{} of {} layers have live keys, {} live keys", rows.len(), hashes.len(), live.len());
+    for (_, present, total, h) in rows {
+        println!("{present:6}/{total:<6} 0x{h:08X}");
     }
     Ok(())
 }
