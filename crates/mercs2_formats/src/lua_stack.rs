@@ -9,6 +9,8 @@ pub const OFF_BASE: u32 = 0x0C;
 pub const OFF_CI: u32 = 0x14;
 pub const OFF_STACK_LAST: u32 = 0x1C;
 pub const OFF_STACK: u32 = 0x20;
+/// `L->base_ci`: `L->ci` equals it while no function runs on the state.
+pub const OFF_BASE_CI: u32 = 0x28;
 pub const CI_OFF_BASE: u32 = 0x00;
 pub const CI_OFF_FUNC: u32 = 0x04;
 
