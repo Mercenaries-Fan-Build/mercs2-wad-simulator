@@ -203,7 +203,7 @@ fn main() {
         .iter()
         .enumerate()
         .skip(1)
-        .find(|(i, a)| !a.starts_with("--") && !value_idxs.contains(i))
+        .find(|(i, a)| !a.starts_with("--") && !value_idxs.contains(i) && !is_shot_value(&args, *i))
         .map(|(_, a)| PathBuf::from(a));
 
     // ── Default boot = the SHELL MENU (retail flow) ──────────────────────────
@@ -212,12 +212,15 @@ fn main() {
     // world boot in-loop. An explicit .profile arg, `--plan` and `--stream` keep the direct
     // no-menu boots (dev workflows).
     if explicit.is_none() && !plan_only && !args.iter().any(|a| a == "--stream") {
+        let dev_menu = args.iter().any(|a| a == "--dev-menu");
         let slots = menu::scan_slots(save_games_dir());
-        println!("[shell] main menu: {} save(s) available", slots.len());
+        println!("[shell] {} save(s) available", slots.len());
+        let saves = menu::shell_saves(&slots);
+        let menu = dev_menu.then(|| menu::Menu::new(slots));
         let wadpath = wadpath.clone();
         let orbit = args.iter().any(|a| a == "--interior-orbit");
-        pollster::block_on(mercs2_engine::app::run(world::Mercs2Game::new(
-            wadpath,
+        let mut game = world::Mercs2Game::new(
+            wadpath.clone(),
             true,
             true,
             true,
@@ -227,8 +230,29 @@ fn main() {
             pmc::RecruitUnlocks::default(),
             pmc::Stockpile::default(),
             hero::player_model_candidates(1, 0, 0), // retail new game: Mattias, tier 0, default skin
-            Some(menu::Menu::new(slots)),
-        )));
+            menu,
+        );
+        if !dev_menu {
+            let shell = mercs2_engine::shell::shell_wads(&wadpath)
+                .and_then(|wads| mercs2_engine::shell::Shell::open(&wads, saves))
+                .unwrap_or_else(|e| {
+                    eprintln!("mercs2_game: the front end did not start: {e}");
+                    std::process::exit(1);
+                });
+            // A diagnostic: run the front end for this long, write that frame and exit.
+            let shot = args.iter().position(|a| a == "--shell-shot").map(|at| {
+                let seconds = args.get(at + 1).and_then(|s| s.parse::<f32>().ok());
+                match (seconds, args.get(at + 2)) {
+                    (Some(seconds), Some(path)) => (seconds, PathBuf::from(path)),
+                    _ => {
+                        eprintln!("mercs2_game: --shell-shot takes <seconds> <out.png>");
+                        std::process::exit(2);
+                    }
+                }
+            });
+            game.set_shell(shell, shot);
+        }
+        pollster::block_on(mercs2_engine::app::run(game));
         return;
     }
 
@@ -379,6 +403,11 @@ fn main() {
 /// The flags that take a VALUE. Their values must not be mistaken for the positional `.profile` path
 /// — without this, `mercs2_game --game-dir <install>` would try to load the install folder as a save.
 const VALUE_FLAGS: &[&str] = &["--game-dir", "--wad", "--saves-dir", "--saves"];
+
+/// Whether `arg` is a value of `--shell-shot`, which takes two.
+fn is_shot_value(args: &[String], index: usize) -> bool {
+    args.iter().position(|a| a == "--shell-shot").is_some_and(|at| index == at + 1 || index == at + 2)
+}
 
 /// GAME world population: once the engine's streaming world has loaded, spawn the PMC interior into
 /// the engine's World/Scene. The interior spawns because the GAME asks for it — the engine has no
