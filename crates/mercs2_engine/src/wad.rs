@@ -28,6 +28,18 @@ pub struct Wad {
     block_cache: Vec<(u16, std::sync::Arc<Vec<u8>>)>,
 }
 
+impl Wad {
+    /// How many blocks the archive holds.
+    pub fn block_count(&self) -> u16 {
+        self.archive.paths.len() as u16
+    }
+
+    /// The archive path of a block.
+    pub fn block_path(&self, block: u16) -> &str {
+        self.archive.paths.get(block as usize).map_or("", String::as_str)
+    }
+}
+
 /// Discover `vz.wad` from the game's EA Games registry key
 /// (`HKLM\SOFTWARE\WOW6432Node\EA Games\Mercenaries 2 World in Flames` → `Install Dir` + `data\vz.wad`).
 /// Returns the path only if the file actually exists.
