@@ -89,12 +89,51 @@ pub struct FlashData {
     pub swf: String,
     pub play_speed: f32,
     pub playing: bool,
+    /// FSCommand name → the retained callback `SetFlashCallback` registered for it, as an opaque id.
+    pub callbacks: BTreeMap<String, u32>,
 }
 
 impl Default for FlashData {
     fn default() -> Self {
-        FlashData { swf: String::new(), play_speed: 1.0, playing: true }
+        FlashData { swf: String::new(), play_speed: 1.0, playing: true, callbacks: BTreeMap::new() }
     }
+}
+
+/// An argument a script hands a movie's ActionScript.
+#[derive(Clone, Debug, PartialEq)]
+pub enum FlashArg {
+    Nil,
+    Bool(bool),
+    Number(f64),
+    Text(String),
+}
+
+/// The widget a request names to mean the shell's movie, for an engine call that addresses it by role.
+pub const SHELL_MOVIE: u64 = 0;
+
+/// What a script asked of a movie. Queued in call order; the player that serves them lives in the
+/// engine, so this crate stays free of it.
+#[derive(Clone, Debug, PartialEq)]
+pub enum FlashRequest {
+    /// `SetFlashSwfFile(uId, sName, fCallback, tData)`; `None` unloads. `done` fires once the movie is up.
+    Open { file: Option<String>, done: Option<u32> },
+    /// `CallFlashScriptFunction(uId, sName, ...)`.
+    Invoke { name: String, args: Vec<FlashArg> },
+    /// `SendFlashInput(uId, nButton, sAction)`.
+    Input { button: i64, action: FlashAction },
+    /// `SendFlashLeftAnalogInput` / `SendFlashRightAnalogInput`.
+    Analog { right: bool, x: f32, y: f32 },
+    /// `RestartFlash(uId)`.
+    Restart,
+}
+
+/// The third argument of `SendFlashInput`, by its first letter (`FUN_005BAC20`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FlashAction {
+    /// Anything but `h` or `r`; the scripts pass `"p"`.
+    Press,
+    Hold,
+    Release,
 }
 
 /// `Minimap` widget data.
@@ -173,6 +212,8 @@ pub struct Widget {
     pub minimap: Option<MinimapData>,
     /// The in-flight `InterpolateWidget` animation, if any. See [`WidgetAnim`].
     pub anim: Option<WidgetAnim>,
+    /// `SetWidgetUpdateCallback`'s retained callback, as an opaque id; `nil` clears it (`0x005B6460`).
+    pub update_callback: Option<u32>,
 }
 
 impl Widget {
@@ -199,6 +240,7 @@ impl Widget {
             flash: matches!(kind, WidgetKind::Flash).then(FlashData::default),
             minimap: matches!(kind, WidgetKind::Minimap).then(MinimapData::default),
             anim: None,
+            update_callback: None,
         }
     }
 }
@@ -219,11 +261,64 @@ pub struct WidgetTree {
     pending_movie_ends: Vec<u32>,
     /// Animation completion ids awaiting dispatch by the script layer.
     pending_anim_completions: Vec<u32>,
+    /// What scripts asked of Flash widgets, in call order, for the engine's player.
+    flash_requests: Vec<(u64, FlashRequest)>,
+    /// Flash callbacks to run, with the FSCommand's argument when there is one.
+    flash_fires: Vec<(u32, Option<String>)>,
+    /// `Gui.DoSigninCheck` was called and the engine has not picked it up.
+    signin: bool,
 }
 
 impl WidgetTree {
     pub fn new() -> Self {
         WidgetTree { widgets: BTreeMap::new(), next: 1, z_top: 0, ..Default::default() }
+    }
+
+    /// Queue a script's request of a Flash widget for the engine's player.
+    pub fn request_flash(&mut self, handle: u64, request: FlashRequest) {
+        self.flash_requests.push((handle, request));
+    }
+
+    /// Drain the requests, in call order.
+    pub fn take_flash_requests(&mut self) -> Vec<(u64, FlashRequest)> {
+        std::mem::take(&mut self.flash_requests)
+    }
+
+    /// `Gui.DoSigninCheck`: the player pressed start.
+    pub fn request_signin(&mut self) {
+        self.signin = true;
+    }
+
+    /// Whether a sign-in was asked for since the last look.
+    pub fn take_signin(&mut self) -> bool {
+        std::mem::take(&mut self.signin)
+    }
+
+    /// Queue a Flash callback for the script layer.
+    pub fn fire_flash(&mut self, callback: u32, param: Option<String>) {
+        self.flash_fires.push((callback, param));
+    }
+
+    /// Drain the Flash callbacks awaiting dispatch.
+    pub fn take_flash_fires(&mut self) -> Vec<(u32, Option<String>)> {
+        std::mem::take(&mut self.flash_fires)
+    }
+
+    /// Whether a widget and everything above it is visible.
+    pub fn shown(&self, handle: u64) -> bool {
+        let mut at = Some(handle);
+        while let Some(id) = at {
+            match self.widgets.get(&id) {
+                Some(w) if w.visible => at = w.parent,
+                _ => return false,
+            }
+        }
+        true
+    }
+
+    /// The update callbacks of every widget that is awake, in creation order.
+    pub fn update_callbacks(&self) -> Vec<u32> {
+        self.widgets.values().filter(|w| !w.sleep).filter_map(|w| w.update_callback).collect()
     }
 
     /// Mint an opaque callback id for the script layer to associate with a retained Lua function.
