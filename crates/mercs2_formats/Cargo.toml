@@ -64,6 +64,10 @@ name = "effect_retail_roundtrip"
 required-features = ["retail"]
 
 [[test]]
+name = "foliage_retail"
+required-features = ["retail"]
+
+[[test]]
 name = "fxdict_atlas_retail"
 required-features = ["retail"]
 
