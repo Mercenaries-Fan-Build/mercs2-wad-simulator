@@ -45,6 +45,7 @@ mod clip_names;
 mod clip_pose;
 mod dump;
 mod dump_hibernation;
+mod dump_render;
 mod dump_spawnlists;
 mod ecs_compare;
 mod ecs_survey;
@@ -52,6 +53,7 @@ mod ess_live;
 mod ess_menu_check;
 mod facefx;
 mod layer;
+mod terrain_cell;
 mod gfx_golden;
 mod prof_samples;
 mod we_template;
@@ -66,6 +68,7 @@ fn usage() -> ! {
          subcommands:\n\
          \x20 c3-meta <out.ndjson>          placement-hashes <out.json>   export-c3-obj <outdir>\n\
          \x20 terrainmesh-probe [block]     terrain-probe                 terrain-consumer\n\
+         \x20 terrain-cell <0xH> [--at <cx> <cz> <x> <z>]                 (one cell's materials and a patch's draws)\n\
          \x20 wad-list                      wad-meshes [--model H]        placement-probe\n\
          \x20 world-index                   stream-probe                  lod is engine-only\n\
          \x20 animdiag/animcheck/skincheck [--model H] [--index I]        trackmap [... --clip H]\n\
@@ -94,6 +97,10 @@ fn usage() -> ! {
          \x20 dump-read <capture-dir> <0xVA> [len]          (retail memory from a v1.0 x32dbg capture, no WAD)\n\
          \x20 dump-chain <capture-dir> <0xVA> <0xOFF>...    ([[VA]+o0]+o1 ... ; last offset added, not read)\n\
          \x20 dump-find <capture-dir> <0xU32> [0xU32...]    (every aligned address holding a value)\n\
+         \x20 dump-render <capture>                         (camera, wind and tree batches of the last frame)\n\
+         \x20 dump-entity <capture> <0xKEY>                 (every live component record of one key)\n\
+         \x20 dump-near <capture> <x> <y> <z> <radius>      (every SceneObject around a point)\n\
+         \x20 dump-model <capture> <0xHASH>                 (a runtime model's LOD range and its render objects)\n\
          \x20 dump-find-vec3 <capture> <x> <y> <z> [--tol T]   (three consecutive f32 within T)\n\
          \x20 dump-containers <capture-dir>                 (all 334 live component containers)\n\
          \x20 dump-pool <capture-dir> <name|0xVA> [--key 0xK] [--bytes N] [--limit N]   (one container's live records)\n\
@@ -566,6 +573,53 @@ fn main() {
         }
         return;
     }
+    if cmd == "dump-model" {
+        let hash = args.get(1).and_then(|k| u32::from_str_radix(k.trim_start_matches("0x"), 16).ok());
+        let (Some(capture), Some(hash)) = (args.first(), hash) else {
+            eprintln!("dump-model: usage: mercs2_probe dump-model <capture> <0xHASH>");
+            std::process::exit(2);
+        };
+        if let Err(e) = dump_render::dump_model(capture, hash) {
+            eprintln!("dump-model failed: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    if cmd == "dump-near" {
+        let n: Vec<f32> = args[1.min(args.len())..].iter().filter_map(|a| a.parse().ok()).collect();
+        let (Some(capture), [x, y, z, radius]) = (args.first(), n.as_slice()) else {
+            eprintln!("dump-near: usage: mercs2_probe dump-near <capture> <x> <y> <z> <radius>");
+            std::process::exit(2);
+        };
+        if let Err(e) = dump_render::dump_near(capture, [*x, *y, *z], *radius) {
+            eprintln!("dump-near failed: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    if cmd == "dump-entity" {
+        let key = args.get(1).and_then(|k| u32::from_str_radix(k.trim_start_matches("0x"), 16).ok());
+        let (Some(capture), Some(key)) = (args.first(), key) else {
+            eprintln!("dump-entity: usage: mercs2_probe dump-entity <capture> <0xKEY>");
+            std::process::exit(2);
+        };
+        if let Err(e) = dump_render::dump_entity(capture, key) {
+            eprintln!("dump-entity failed: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    if cmd == "dump-render" {
+        let Some(capture) = args.first() else {
+            eprintln!("dump-render: usage: mercs2_probe dump-render <capture>");
+            std::process::exit(2);
+        };
+        if let Err(e) = dump_render::dump_render(capture) {
+            eprintln!("dump-render failed: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
     if cmd == "dump-spawnlists" {
         let Some(capture) = args.first() else {
             eprintln!("dump-spawnlists: usage: mercs2_probe dump-spawnlists <capture>");
@@ -961,14 +1015,41 @@ fn main() {
                 run(layer::layer_frames(&wadpath, std::path::Path::new(&capture)));
             } else if args.iter().any(|a| a == "--all") {
                 run(layer::layer_all(&wadpath));
+            } else if let Some(at) = args.iter().position(|a| a == "--near") {
+                let point: Vec<f32> = args[at + 1..].iter().take(3).filter_map(|a| a.parse().ok()).collect();
+                let [x, z, radius] = point[..] else {
+                    eprintln!("layer: usage: mercs2_probe layer --near <x> <z> <radius>");
+                    std::process::exit(2);
+                };
+                run(layer::layer_near(&wadpath, x, z, radius));
             } else {
                 let name = first_positional(&args).unwrap_or_else(|| {
-                    eprintln!("layer: usage: mercs2_probe layer <name|0xH> | --all | --frames");
+                    eprintln!("layer: usage: mercs2_probe layer <name|0xH> | --all | --frames | --near <x> <z> <radius>");
                     std::process::exit(2);
                 });
                 let hash = parse_hash(&name).unwrap_or_else(|| mercs2_formats::hash::pandemic_hash_m2(&name));
                 run(layer::layer(&wadpath, hash));
             }
+        }
+        "terrain-cell" => {
+            let usage = "terrain-cell: usage: mercs2_probe terrain-cell <0xH> [--at <centre_x> <centre_z> <x> <z>]";
+            let name = first_positional(&args).unwrap_or_else(|| {
+                eprintln!("{usage}");
+                std::process::exit(2);
+            });
+            let hash = parse_hash(&name).unwrap_or_else(|| mercs2_formats::hash::pandemic_hash_m2(&name));
+            let (centre, point) = match args.iter().position(|a| a == "--at") {
+                Some(at) => {
+                    let p: Vec<f32> = args[at + 1..].iter().take(4).filter_map(|a| a.parse().ok()).collect();
+                    let [cx, cz, x, z] = p[..] else {
+                        eprintln!("{usage}");
+                        std::process::exit(2);
+                    };
+                    (Some([cx, cz]), Some([x, z]))
+                }
+                None => (None, None),
+            };
+            run(terrain_cell::terrain_cell(&wadpath, hash, centre, point));
         }
         "clip-names" => {
             let out = first_positional(&args).unwrap_or_else(|| {
