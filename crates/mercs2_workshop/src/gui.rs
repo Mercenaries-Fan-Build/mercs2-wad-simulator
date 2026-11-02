@@ -1,6 +1,6 @@
 //! egui host for the workshop: a hand-rolled winit-0.29 → egui event bridge plus the egui-wgpu
 //! paint path, rendered through the engine's `Scene` overlay hook (`render_with` /
-//! `render_menu_with`). Hand-rolled because `egui-winit` 0.28 targets winit 0.30 while the
+//! `render_menu_with`). Hand-rolled because `egui-winit` 0.37 targets winit 0.30 while the
 //! engine is on 0.29 — the bridge below is the ~10% of it this tool needs.
 
 use std::sync::Arc;
@@ -41,10 +41,18 @@ impl Gui {
         // The workshop's "field-workbench" identity: warm gunmetal, Bahnschrift stencil headings,
         // brass = live/selected, hazard-orange = irreversible. See theme.rs values below.
         theme::install(&ctx);
+        // `run`'s build closure carries the frame's one-shot state (taken requests, drained
+        // queues), so it runs exactly once a frame; egui's default of 2 would repeat it on a
+        // discarded pass.
+        ctx.options_mut(|o| o.max_passes = std::num::NonZeroUsize::MIN);
         let size = window.inner_size();
         Gui {
             ctx,
-            renderer: egui_wgpu::Renderer::new(device, format, None, 1),
+            renderer: egui_wgpu::Renderer::new(
+                device,
+                format,
+                egui_wgpu::RendererOptions { msaa_samples: 1, dithering: false, ..Default::default() },
+            ),
             events: Vec::new(),
             modifiers: egui::Modifiers::default(),
             pointer: egui::Pos2::ZERO,
@@ -80,12 +88,13 @@ impl Gui {
                     mac_cmd: false,
                     command: s.control_key(),
                 };
+                self.events.push(egui::Event::ModifiersChanged(self.modifiers));
                 false
             }
             WindowEvent::CursorMoved { position, .. } => {
                 self.pointer = egui::pos2(position.x as f32 / self.ppp, position.y as f32 / self.ppp);
                 self.events.push(egui::Event::PointerMoved(self.pointer));
-                self.ctx.is_using_pointer()
+                self.ctx.egui_is_using_pointer()
             }
             WindowEvent::MouseInput { state, button, .. } => {
                 let button = match button {
@@ -101,9 +110,9 @@ impl Gui {
                     pressed,
                     modifiers: self.modifiers,
                 });
-                // Hover-based: `wants_pointer_input` alone misses the PRESS (its any-down state
+                // Hover-based: `egui_wants_pointer_input` alone misses the PRESS (its any-down state
                 // is a frame behind), which would start a camera drag under the panel.
-                self.ctx.is_pointer_over_area() || self.ctx.wants_pointer_input()
+                self.ctx.is_pointer_over_egui() || self.ctx.egui_wants_pointer_input()
             }
             WindowEvent::MouseWheel { delta, .. } => {
                 let (unit, d) = match delta {
@@ -115,8 +124,14 @@ impl Gui {
                         egui::vec2(p.x as f32 / self.ppp, p.y as f32 / self.ppp),
                     ),
                 };
-                self.events.push(egui::Event::MouseWheel { unit, delta: d, modifiers: self.modifiers });
-                self.ctx.is_pointer_over_area() || self.ctx.wants_pointer_input()
+                self.events.push(egui::Event::MouseWheel {
+                    unit,
+                    delta: d,
+                    phase: egui::TouchPhase::Move,
+                    source: egui::MouseWheelSource::Unknown,
+                    modifiers: self.modifiers,
+                });
+                self.ctx.is_pointer_over_egui() || self.ctx.egui_wants_pointer_input()
             }
             WindowEvent::KeyboardInput {
                 event: KeyEvent { physical_key: PhysicalKey::Code(code), state, text, repeat, .. },
@@ -131,7 +146,7 @@ impl Gui {
                         modifiers: self.modifiers,
                     });
                 }
-                if *state == ElementState::Pressed && self.ctx.wants_keyboard_input() {
+                if *state == ElementState::Pressed && self.ctx.egui_wants_keyboard_input() {
                     if let Some(t) = text {
                         let printable: String =
                             t.chars().filter(|c| !c.is_control()).collect();
@@ -140,49 +155,49 @@ impl Gui {
                         }
                     }
                 }
-                self.ctx.wants_keyboard_input()
+                self.ctx.egui_wants_keyboard_input()
             }
             _ => false,
         }
     }
 
     /// Run one GUI frame: `build` lays out the panels; the paint jobs are stashed for `paint`.
-    pub fn run(&mut self, build: impl FnOnce(&egui::Context)) {
+    pub fn run(&mut self, build: impl FnMut(&mut egui::Ui)) {
         let screen =
             egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(self.size[0] as f32, self.size[1] as f32) / self.ppp);
         let mut raw = egui::RawInput {
             screen_rect: Some(screen),
             time: Some(self.start.elapsed().as_secs_f64()),
-            modifiers: self.modifiers,
             events: std::mem::take(&mut self.events),
             focused: true,
             ..Default::default()
         };
         raw.viewports.entry(egui::ViewportId::ROOT).or_default().native_pixels_per_point =
             Some(self.ppp);
-        let out = self.ctx.run(raw, |ctx| build(ctx));
+        let out = self.ctx.run_ui(raw, build);
         // Deliver copy actions (context menus, Ctrl+C in text fields) to the OS clipboard.
-        if !out.platform_output.copied_text.is_empty() {
+        for command in &out.platform_output.commands {
+            let egui::OutputCommand::CopyText(text) = command else { continue };
             if self.clipboard.is_none() {
                 self.clipboard = arboard::Clipboard::new()
                     .map_err(|e| eprintln!("[gui] clipboard unavailable: {e}"))
                     .ok();
             }
             if let Some(cb) = &mut self.clipboard {
-                if let Err(e) = cb.set_text(out.platform_output.copied_text.clone()) {
+                if let Err(e) = cb.set_text(text.clone()) {
                     eprintln!("[gui] clipboard write failed: {e}");
                 }
             }
         }
         // Deliver the cursor: egui sets IBeam over text, resize cursors over panel splitters, etc.;
         // where it leaves Default but the pointer is over an interactive widget, show a hand so
-        // clickable elements read as clickable. (`wants_pointer_input()` alone is too broad — it is
+        // clickable elements read as clickable. (`egui_wants_pointer_input()` alone is too broad — it is
         // true over empty panel background — so gate on egui NOT already asking for a cursor AND a
         // widget wanting the click.)
         let mut want = out.platform_output.cursor_icon;
         if want == egui::CursorIcon::Default
-            && self.ctx.wants_pointer_input()
-            && !self.ctx.wants_keyboard_input()
+            && self.ctx.egui_wants_pointer_input()
+            && !self.ctx.egui_wants_keyboard_input()
         {
             want = egui::CursorIcon::PointingHand;
         }
@@ -191,7 +206,8 @@ impl Gui {
             self.window.set_cursor_icon(to_winit_cursor(want));
         }
         self.jobs = self.ctx.tessellate(out.shapes, out.pixels_per_point);
-        self.tex_delta = out.textures_delta;
+        // Kept until `paint`, which a hidden window's frames never reach.
+        self.tex_delta.append(out.textures_delta);
     }
 
     /// Paint the last `run` inside the engine's overlay hook (own render pass on the swapchain).
@@ -203,8 +219,10 @@ impl Gui {
         view: &wgpu::TextureView,
         size: [u32; 2],
     ) {
-        for (id, delta) in &self.tex_delta.set {
-            self.renderer.update_texture(device, queue, *id, delta);
+        for (id, deltas) in &self.tex_delta.set {
+            for delta in deltas {
+                self.renderer.update_texture(device, queue, *id, delta);
+            }
         }
         let desc = egui_wgpu::ScreenDescriptor {
             size_in_pixels: size,
@@ -216,47 +234,64 @@ impl Gui {
                 label: Some("egui pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view,
+                    depth_slice: None,
                     resolve_target: None,
                     ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
                 })],
                 depth_stencil_attachment: None,
                 timestamp_writes: None,
                 occlusion_query_set: None,
-            });
+                multiview_mask: None,
+            }).forget_lifetime();
             self.renderer.render(&mut pass, &self.jobs, &desc);
         }
         for id in &self.tex_delta.free {
             self.renderer.free_texture(id);
         }
-        self.tex_delta = egui::TexturesDelta::default();
+        self.tex_delta.clear();
     }
+}
+
+impl Drop for Gui {
+    /// Deltas a hidden window never painted have no renderer left to go to.
+    fn drop(&mut self) {
+        self.tex_delta.clear();
+    }
+}
+
+/// The edge of the screen a [`held_side_panel`] sits on (egui keeps its own side type private).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Side {
+    Left,
+    Right,
 }
 
 /// A resizable side panel held at `width`, which only a drag of the panel's edge changes.
 ///
-/// egui 0.28 sizes a side panel by its content: it stores the content rect as the next width
-/// (`panel.rs:283,328`), so a row wider than the panel ratchets it wider up to the top of its range
+/// egui 0.37 sizes a side panel by its content: it stores the frame's rect as the next size
+/// (`panel.rs:869,919`), so a row wider than the panel ratchets it wider up to the top of its range
 /// and narrow content shrinks it back to the bottom. Here the panel is shown at exactly `width`
-/// (`exact_width`), so content can neither widen nor shrink it; a widget that does not fit is
+/// (`exact_size`), so content can neither widen nor shrink it; a widget that does not fit is
 /// clipped at the edge, where it can be seen. A drag of the edge — read at the start of the pass,
 /// as egui reads it — sets `width` within `range`, and the resize cursor is the one `range` gives.
 pub fn held_side_panel<R>(
-    ctx: &egui::Context,
-    side: egui::panel::Side,
-    id: impl Into<egui::Id>,
+    root: &mut egui::Ui,
+    side: Side,
+    id: impl egui::AsIdSalt,
     range: egui::Rangef,
     width: &mut f32,
     frame: egui::Frame,
     add: impl FnOnce(&mut egui::Ui) -> R,
 ) -> egui::InnerResponse<R> {
-    let id = id.into();
-    let avail = ctx.available_rect();
+    let salt = egui::IdSalt::new(id);
+    let avail = root.available_rect_before_wrap();
     let edge = match side {
-        egui::panel::Side::Left => avail.left(),
-        egui::panel::Side::Right => avail.right(),
+        Side::Left => avail.left(),
+        Side::Right => avail.right(),
     };
-    let resize_id = id.with("__resize");
-    let drag = ctx.read_response(resize_id);
+    // The panel's own id and resize handle (`Panel::id`, `resize_widget_id` in `panel.rs`).
+    let resize_id = root.scope_id().with(salt).with("__resize");
+    let drag = root.read_response(resize_id);
     if let Some(r) = &drag {
         if r.dragged() {
             if let Some(p) = r.interact_pointer_pos() {
@@ -265,11 +300,20 @@ pub fn held_side_panel<R>(
         }
     }
     *width = width.clamp(range.min, range.max).min(avail.width());
-    let out = egui::SidePanel::new(side, id).resizable(true).exact_width(*width).frame(frame).show(ctx, add);
-    // egui picks the cursor from the panel's own range, which `exact_width` collapses to one
+    let (panel, separator) = match side {
+        Side::Left => (egui::Panel::left(salt), SeparatorEdge::Right),
+        Side::Right => (egui::Panel::right(salt), SeparatorEdge::Left),
+    };
+    let out = panel.resizable(true).exact_size(*width).frame(panel_frame(frame, separator)).show(root, |ui| {
+        // In a child the panel does not measure: egui cuts a panel's rect back to its range from
+        // the left edge (`panel.rs:863`), so a right panel's overflow would carry its edge with it.
+        let mut content = ui.new_child(egui::UiBuilder::new().max_rect(ui.max_rect()));
+        add(&mut content)
+    });
+    // egui picks the cursor from the panel's own range, which `exact_size` collapses to one
     // width; pick it from the real range instead.
-    if ctx.read_response(resize_id).is_some_and(|r| r.hovered() || r.dragged()) {
-        use egui::panel::Side::{Left, Right};
+    if root.read_response(resize_id).is_some_and(|r| r.hovered() || r.dragged()) {
+        use Side::{Left, Right};
         let icon = if *width <= range.min {
             if side == Left { egui::CursorIcon::ResizeEast } else { egui::CursorIcon::ResizeWest }
         } else if *width < range.max {
@@ -279,14 +323,36 @@ pub fn held_side_panel<R>(
         } else {
             egui::CursorIcon::ResizeWest
         };
-        ctx.set_cursor_icon(icon);
+        root.set_cursor_icon(icon);
     }
     out
 }
 
+/// The edge of a panel its separator line lies on.
+#[derive(Clone, Copy)]
+pub enum SeparatorEdge {
+    Left,
+    Right,
+    Top,
+    Bottom,
+}
+
+/// `frame` for a panel with a separator line on `edge`, so the content keeps the panel's full size:
+/// egui's panel takes the line's pixel out of the frame's outer margin (`Panel::resolve_frame`), so
+/// the same pixel is given back from the inner margin.
+pub fn panel_frame(mut frame: egui::Frame, edge: SeparatorEdge) -> egui::Frame {
+    match edge {
+        SeparatorEdge::Left => frame.inner_margin.left -= 1,
+        SeparatorEdge::Right => frame.inner_margin.right -= 1,
+        SeparatorEdge::Top => frame.inner_margin.top -= 1,
+        SeparatorEdge::Bottom => frame.inner_margin.bottom -= 1,
+    }
+    frame
+}
+
 #[cfg(test)]
 mod held_side_panel_tests {
-    use super::held_side_panel;
+    use super::{held_side_panel, Side};
 
     fn range() -> egui::Rangef {
         egui::Rangef::new(300.0, 480.0)
@@ -301,8 +367,8 @@ mod held_side_panel_tests {
         let mut shown = Vec::new();
         for _ in 0..frames {
             let input = egui::RawInput { screen_rect: Some(screen), ..Default::default() };
-            let _ = ctx.run(input, |ctx| {
-                let r = held_side_panel(ctx, egui::panel::Side::Right, "held", range(), width, egui::Frame::none(), |ui| {
+            let _ = ctx.run_ui(input, |root| {
+                let r = held_side_panel(root, Side::Right, "held", range(), width, egui::Frame::NONE, |ui| {
                     ui.allocate_space(egui::vec2(content_w, 10.0));
                 });
                 shown.push(screen.right() - r.response.rect.left());
@@ -311,7 +377,7 @@ mod held_side_panel_tests {
         shown
     }
 
-    /// Without the hold, egui 0.28 widens the panel to its content and keeps it there. Held, its
+    /// Without the hold, egui 0.37 widens the panel to its content and keeps it there. Held, its
     /// edge stays put every pass; the content overflows and is clipped.
     #[test]
     fn content_wider_than_the_panel_does_not_widen_it() {
@@ -361,8 +427,8 @@ mod held_side_panel_tests {
         let mut shown = 0.0;
         for events in steps {
             let input = egui::RawInput { screen_rect: Some(screen), events, ..Default::default() };
-            let _ = ctx.run(input, |ctx| {
-                let r = held_side_panel(ctx, egui::panel::Side::Right, "held", range(), &mut width, egui::Frame::none(), |ui| {
+            let _ = ctx.run_ui(input, |root| {
+                let r = held_side_panel(root, Side::Right, "held", range(), &mut width, egui::Frame::NONE, |ui| {
                     ui.allocate_space(egui::vec2(50.0, 10.0));
                 });
                 shown = r.response.rect.width();
@@ -391,11 +457,11 @@ mod cjk_font_tests {
     const RETAIL: &str = "素敵だねえ。取引成立だ。ビバ！\u{3000}ベネズエラ！対戦車地雷";
 
     fn frame(ctx: &egui::Context) {
-        let _ = ctx.run(egui::RawInput::default(), |_| {});
+        let _ = ctx.run_ui(egui::RawInput::default(), |_| {});
     }
 
     fn covers(ctx: &egui::Context, style: &egui::TextStyle) -> bool {
-        ctx.fonts(|f| f.has_glyphs(&theme::font(style), RETAIL))
+        ctx.fonts_mut(|f| f.has_glyphs(&theme::font(style), RETAIL))
     }
 
     /// The repo's committed face, the one `--pack-data` copies into the bundle.
@@ -428,7 +494,7 @@ mod cjk_font_tests {
         theme::add_cjk_font(&ctx, committed_face());
         theme::add_cjk_font(&ctx, committed_face());
         frame(&ctx);
-        let defs = ctx.fonts(|f| f.lock().fonts.definitions().clone());
+        let defs = ctx.fonts(|f| f.definitions().clone());
         for (family, faces) in &defs.families {
             let n = faces.iter().filter(|f| f.as_str() == "noto_sans_jp").count();
             assert_eq!(n, 1, "{family:?} lists the face {n} times: {faces:?}");
@@ -446,7 +512,7 @@ mod cjk_font_tests {
         theme::install(&ctx);
         theme::add_cjk_font(&ctx, committed_face());
         frame(&ctx);
-        let defs = ctx.fonts(|f| f.lock().fonts.definitions().clone());
+        let defs = ctx.fonts(|f| f.definitions().clone());
         for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
             // The first face of the family that has the glyph is the one that draws it.
             for c in ['！', '？'] {
@@ -458,7 +524,7 @@ mod cjk_font_tests {
                         d.families.insert(egui::FontFamily::Proportional, vec![(*face).clone()]);
                         one.set_fonts(d);
                         frame(&one);
-                        one.fonts(|f| f.has_glyph(&theme::font(&egui::TextStyle::Body), c))
+                        one.fonts_mut(|f| f.has_glyph(&theme::font(&egui::TextStyle::Body), c))
                     })
                     .map(String::as_str);
                 assert_eq!(first, Some("noto_sans_jp"), "{family:?} draws {c} from {first:?}");
@@ -480,7 +546,7 @@ mod cjk_font_tests {
 /// **brass** for what's live/selected, **hazard-orange** reserved for the irreversible.
 #[allow(dead_code)] // the palette is a complete token set; not every token is wired yet
 pub mod theme {
-    use egui::{Color32, FontFamily, FontId, Rounding, Stroke, TextStyle};
+    use egui::{Color32, CornerRadius, FontFamily, FontId, Stroke, TextStyle};
 
     // ── palette (warm gunmetal / painted metal) ──
     pub const G0: Color32 = Color32::from_rgb(0x12, 0x13, 0x16); // app ground
@@ -579,7 +645,7 @@ pub mod theme {
     fn load_font(defs: &mut egui::FontDefinitions, key: &str, paths: &[&str]) -> bool {
         for p in paths {
             if let Ok(bytes) = std::fs::read(p) {
-                defs.font_data.insert(key.to_owned(), egui::FontData::from_owned(bytes));
+                defs.font_data.insert(key.to_owned(), std::sync::Arc::new(egui::FontData::from_owned(bytes)));
                 return true;
             }
         }
@@ -610,7 +676,7 @@ pub mod theme {
         const KEY: &str = "noto_sans_jp";
         const EGUI_ICONS: &str = "emoji-icon-font";
         let mut defs = platform_fonts();
-        defs.font_data.insert(KEY.to_owned(), egui::FontData::from_owned(bytes));
+        defs.font_data.insert(KEY.to_owned(), std::sync::Arc::new(egui::FontData::from_owned(bytes)));
         for faces in defs.families.values_mut() {
             let at = faces.iter().position(|f| f == EGUI_ICONS).unwrap_or(faces.len());
             faces.insert(at, KEY.to_owned());
@@ -624,7 +690,7 @@ pub mod theme {
         // The Japanese face comes from the reference bundle once the boot has it (`add_cjk_font`).
 
         // ── type scale + visuals ──
-        let mut style = (*ctx.style()).clone();
+        let mut style = (*ctx.global_style()).clone();
         for (s, f) in type_scale() {
             style.text_styles.insert(s, f);
         }
@@ -668,7 +734,7 @@ pub mod theme {
             // to whichever display face loaded. The non-Windows cuts have not been measured, so on
             // those platforms treat it as an approximation, not a tuned value.
             if let Some(fd) = fonts.font_data.get_mut("disp_ttf") {
-                fd.tweak.y_offset_factor = 0.09;
+                std::sync::Arc::make_mut(fd).tweak.y_offset_factor = 0.09;
             }
             vec!["disp_ttf".to_owned()]
         } else {
@@ -690,40 +756,63 @@ pub mod theme {
         v.hyperlink_color = BRASS;
         v.selection.bg_fill = BRASS_SOFT;
         v.selection.stroke = Stroke::new(1.0, BRASS);
-        v.window_rounding = Rounding::same(7.0);
-        let round = Rounding::same(5.0);
+        v.window_corner_radius = CornerRadius::same(7);
+        let round = CornerRadius::same(5);
         // widgets
         v.widgets.noninteractive.bg_fill = G1;
         v.widgets.noninteractive.weak_bg_fill = G1;
         v.widgets.noninteractive.bg_stroke = Stroke::new(1.0, LINE);
         v.widgets.noninteractive.fg_stroke = Stroke::new(1.0, DIM);
-        v.widgets.noninteractive.rounding = round;
+        v.widgets.noninteractive.corner_radius = round;
         v.widgets.inactive.bg_fill = G2;
         v.widgets.inactive.weak_bg_fill = G2;
         v.widgets.inactive.bg_stroke = Stroke::new(1.0, LINE);
         v.widgets.inactive.fg_stroke = Stroke::new(1.0, TX);
-        v.widgets.inactive.rounding = round;
+        v.widgets.inactive.corner_radius = round;
         v.widgets.hovered.bg_fill = G3;
         v.widgets.hovered.weak_bg_fill = G3;
         v.widgets.hovered.bg_stroke = Stroke::new(1.0, LINE2);
         v.widgets.hovered.fg_stroke = Stroke::new(1.0, TX);
-        v.widgets.hovered.rounding = round;
+        v.widgets.hovered.corner_radius = round;
+        v.widgets.hovered.expansion = 1.0;
         v.widgets.active.bg_fill = G3;
         v.widgets.active.weak_bg_fill = G3;
         v.widgets.active.bg_stroke = Stroke::new(1.0, BRASS_DK);
         v.widgets.active.fg_stroke = Stroke::new(1.0, BRASS);
-        v.widgets.active.rounding = round;
+        v.widgets.active.corner_radius = round;
+        v.widgets.active.expansion = 1.0;
         v.widgets.open.bg_fill = G2;
         v.widgets.open.weak_bg_fill = G2;
         v.widgets.open.bg_stroke = Stroke::new(1.0, LINE);
-        v.widgets.open.rounding = round;
+        v.widgets.open.corner_radius = round;
+        v.handle_shape = egui::style::HandleShape::Circle;
+        v.weak_text_color = Some(v.gray_out(TX));
+        // Unhinted glyphs on whole pixels, with the coverage curve the atlas has always had.
+        v.text_options.color_transfer_function = egui::epaint::FontColorTransferFunction::Gamma(0.55);
+        v.text_options.font_hinting = false;
+        v.text_options.subpixel_binning = false;
         style.visuals = v;
 
         style.spacing.item_spacing = egui::vec2(8.0, 6.0);
         style.spacing.button_padding = egui::vec2(9.0, 4.0);
-        style.spacing.window_margin = egui::Margin::same(10.0);
-        style.spacing.menu_margin = egui::Margin::same(6.0);
-        ctx.set_style(style);
+        style.spacing.interact_size = egui::vec2(40.0, 18.0);
+        // egui's `text_edit_width` now includes the text edit's margin (4 each side).
+        style.spacing.text_edit_width = 288.0;
+        style.spacing.scroll.fade.strength = 0.0;
+        style.spacing.scroll.kinetic.rubber_band = false;
+        // A window's or popup's 1px stroke counts in egui's frame layout; these are its content
+        // insets (10 and 6) less that pixel.
+        style.spacing.window_margin = egui::Margin::same(9);
+        style.spacing.menu_margin = egui::Margin::same(5);
+        style.interaction.resize_grab_radius_side = 5.0;
+        style.animation_time = 1.0 / 12.0;
+        style.override_text_valign = None;
+        ctx.set_global_style(style);
+        // Edges fall where the layout puts them, not on the nearest pixel.
+        ctx.tessellation_options_mut(|o| {
+            o.round_rects_to_pixels = false;
+            o.round_line_segments_to_pixels = false;
+        });
     }
 
     /// A HUD chip drawn over the viewport (Orbit / clip position / legend). `on` = lit brass;
@@ -734,17 +823,17 @@ pub mod theme {
         } else {
             (DIM, Color32::from_rgba_unmultiplied(14, 16, 20, 205), LINE)
         };
-        egui::Frame::none()
+        egui::Frame::NONE
             .fill(bg)
-            .stroke(egui::Stroke::new(1.0, stroke))
-            .rounding(egui::Rounding::same(3.0))
-            .inner_margin(egui::Margin::symmetric(9.0, 4.0))
+            .corner_radius(egui::CornerRadius::same(3))
+            .inner_margin(egui::Margin::symmetric(9, 4))
+            .apply_stroke_and_expansion_without_layout_shift(egui::Stroke::new(1.0, stroke), 0.0)
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 5.0;
                     if let Some(c) = dot {
                         let (r, _) = ui.allocate_exact_size(egui::vec2(6.0, 6.0), egui::Sense::hover());
-                        ui.painter().rect_filled(r, egui::Rounding::same(1.0), c);
+                        ui.painter().rect_filled(r, egui::CornerRadius::same(1), c);
                     }
                     ui.label(disp_text(label.to_uppercase(), style_eyebrow(), fg));
                 });
@@ -774,16 +863,16 @@ pub mod theme {
         badge: Option<&str>,
         add: impl FnOnce(&mut egui::Ui) -> R,
     ) -> R {
-        egui::Frame::none()
+        egui::Frame::NONE
             .fill(G2)
-            .stroke(egui::Stroke::new(1.0, LINE))
-            .rounding(egui::Rounding::same(6.0))
-            .inner_margin(egui::Margin::symmetric(11.0, 9.0))
-            .outer_margin(egui::Margin { bottom: 10.0, ..Default::default() })
+            .corner_radius(egui::CornerRadius::same(6))
+            .inner_margin(egui::Margin::symmetric(11, 9))
+            .apply_stroke_and_expansion_without_layout_shift(egui::Stroke::new(1.0, LINE), 0.0)
+            .outer_margin(egui::Margin { bottom: 10, ..Default::default() })
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
                     let (r, _) = ui.allocate_exact_size(egui::vec2(6.0, 6.0), egui::Sense::hover());
-                    ui.painter().rect_filled(r, egui::Rounding::ZERO, BRASS_DK);
+                    ui.painter().rect_filled(r, egui::CornerRadius::ZERO, BRASS_DK);
                     ui.add_space(3.0);
                     ui.label(disp_text(title.to_uppercase(), style_eyebrow(), DIM));
                     if let Some(b) = badge {
@@ -803,12 +892,12 @@ pub mod theme {
     /// A framed panel with no eyebrow header — wraps a collapsible section so it reads as a card
     /// alongside the `card()`s while keeping its own collapse control.
     pub fn panel<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
-        egui::Frame::none()
+        egui::Frame::NONE
             .fill(G2)
-            .stroke(egui::Stroke::new(1.0, LINE))
-            .rounding(egui::Rounding::same(6.0))
-            .inner_margin(egui::Margin::symmetric(10.0, 7.0))
-            .outer_margin(egui::Margin { bottom: 10.0, ..Default::default() })
+            .corner_radius(egui::CornerRadius::same(6))
+            .inner_margin(egui::Margin::symmetric(10, 7))
+            .apply_stroke_and_expansion_without_layout_shift(egui::Stroke::new(1.0, LINE), 0.0)
+            .outer_margin(egui::Margin { bottom: 10, ..Default::default() })
             .show(ui, add)
             .inner
     }
@@ -817,11 +906,11 @@ pub mod theme {
     /// verbatim format dump. Selectable so the author can copy it. Wraps rather than scrolls, since
     /// callers put it inside the inspector's own scroll.
     pub fn code_block(ui: &mut egui::Ui, text: &str) {
-        egui::Frame::none()
+        egui::Frame::NONE
             .fill(G0)
-            .stroke(egui::Stroke::new(1.0, LINE))
-            .rounding(egui::Rounding::same(4.0))
-            .inner_margin(egui::Margin::symmetric(8.0, 6.0))
+            .corner_radius(egui::CornerRadius::same(4))
+            .inner_margin(egui::Margin::symmetric(8, 6))
+            .apply_stroke_and_expansion_without_layout_shift(egui::Stroke::new(1.0, LINE), 0.0)
             .show(ui, |ui| {
                 ui.add(
                     egui::Label::new(egui::RichText::new(text).monospace().color(DIM))
@@ -843,12 +932,12 @@ pub mod theme {
         default_open: bool,
         add: impl FnOnce(&mut egui::Ui),
     ) {
-        egui::Frame::none()
+        egui::Frame::NONE
             .fill(G2)
-            .stroke(egui::Stroke::new(1.0, LINE))
-            .rounding(egui::Rounding::same(6.0))
-            .inner_margin(egui::Margin::symmetric(11.0, 8.0))
-            .outer_margin(egui::Margin { bottom: 10.0, ..Default::default() })
+            .corner_radius(egui::CornerRadius::same(6))
+            .inner_margin(egui::Margin::symmetric(11, 8))
+            .apply_stroke_and_expansion_without_layout_shift(egui::Stroke::new(1.0, LINE), 0.0)
+            .outer_margin(egui::Margin { bottom: 10, ..Default::default() })
             .show(ui, |ui| {
                 // A collapsed section has only its header inside; without this the card
                 // shrinks to the header's width instead of spanning the panel.
@@ -857,7 +946,7 @@ pub mod theme {
                 egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, default_open)
                     .show_header(ui, |ui| {
                         let (r, _) = ui.allocate_exact_size(egui::vec2(6.0, 6.0), egui::Sense::hover());
-                        ui.painter().rect_filled(r, egui::Rounding::ZERO, BRASS_DK);
+                        ui.painter().rect_filled(r, egui::CornerRadius::ZERO, BRASS_DK);
                         ui.add_space(3.0);
                         ui.label(disp_text(title.to_uppercase(), style_eyebrow(), DIM));
                         if let Some(b) = badge {
@@ -912,12 +1001,12 @@ pub mod theme {
         border: egui::Color32,
         add: impl FnOnce(&mut egui::Ui) -> R,
     ) -> egui::Response {
-        let ir = egui::Frame::none()
+        let ir = egui::Frame::NONE
             .fill(fill)
-            .stroke(egui::Stroke::new(1.0, border))
-            .rounding(egui::Rounding::same(5.0))
-            .inner_margin(egui::Margin::symmetric(9.0, 5.0))
-            .outer_margin(egui::Margin { bottom: 4.0, ..Default::default() })
+            .corner_radius(egui::CornerRadius::same(5))
+            .inner_margin(egui::Margin::symmetric(9, 5))
+            .apply_stroke_and_expansion_without_layout_shift(egui::Stroke::new(1.0, border), 0.0)
+            .outer_margin(egui::Margin { bottom: 4, ..Default::default() })
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.set_width(ui.available_width());
@@ -947,7 +1036,7 @@ pub mod theme {
         let rect = egui::Rect::from_min_size(space.min, size);
         let resp = ui.interact(rect, id, egui::Sense::click());
         if ui.is_rect_visible(rect) {
-            ui.painter().rect(rect, egui::Rounding::same(4.0), fill, egui::Stroke::new(1.0, stroke));
+            ui.painter().rect(rect, egui::CornerRadius::same(4), fill, egui::Stroke::new(1.0, stroke), egui::StrokeKind::Middle);
             ui.painter().galley(rect.min + pad, galley, txt);
         }
         resp
@@ -981,7 +1070,7 @@ pub mod theme {
         let (rect, resp) =
             ui.allocate_exact_size(egui::vec2(ui.available_width(), height), egui::Sense::click_and_drag());
         let p = ui.painter_at(rect);
-        p.rect(rect, egui::Rounding::same(3.0), G0, egui::Stroke::new(1.0, LINE));
+        p.rect(rect, egui::CornerRadius::same(3), G0, egui::Stroke::new(1.0, LINE), egui::StrokeKind::Middle);
         let inner = rect.shrink(4.0);
         let span = (x1 - x0).max(f32::EPSILON);
         let cols = inner.width().max(2.0) as usize;
@@ -1007,7 +1096,7 @@ pub mod theme {
         let (fill, stroke, txt) =
             if on { (BRASS_SOFT, BRASS_DK, BRASS) } else { (G0, LINE, FAINT) };
         let p = ui.painter();
-        p.rect(rect, egui::Rounding::same(4.0), fill, egui::Stroke::new(1.0, stroke));
+        p.rect(rect, egui::CornerRadius::same(4), fill, egui::Stroke::new(1.0, stroke), egui::StrokeKind::Middle);
         p.text(
             rect.center(),
             egui::Align2::CENTER_CENTER,
@@ -1034,20 +1123,20 @@ pub mod theme {
         // (UE style) — every column's digits then start at the same x. add_sized would centre them.
         let (rect, _) = ui.allocate_exact_size(egui::vec2(total_w, 22.0), egui::Sense::hover());
         let p = ui.painter();
-        p.rect(rect, egui::Rounding::same(3.0), G0, egui::Stroke::new(1.0, LINE));
+        p.rect(rect, egui::CornerRadius::same(3), G0, egui::Stroke::new(1.0, LINE), egui::StrokeKind::Middle);
         p.rect_filled(
             egui::Rect::from_min_size(
                 egui::pos2(rect.left(), rect.top() + 2.0),
                 egui::vec2(3.0, rect.height() - 4.0),
             ),
-            egui::Rounding { nw: 2.0, sw: 2.0, ne: 0.0, se: 0.0 },
+            egui::CornerRadius { nw: 2, sw: 2, ne: 0, se: 0 },
             strip,
         );
         let inner = egui::Rect::from_min_max(
             egui::pos2(rect.left() + 9.0, rect.top()),
             egui::pos2(rect.right() - 4.0, rect.bottom()),
         );
-        ui.allocate_ui_at_rect(inner, |ui| {
+        ui.scope_builder(egui::UiBuilder::new().max_rect(inner), |ui| {
             ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
                 // Flatten the DragValue chrome so it reads as a field, not a button.
                 let w = ui.visuals_mut();
@@ -1057,7 +1146,6 @@ pub mod theme {
                 w.widgets.hovered.bg_stroke = egui::Stroke::NONE;
                 w.widgets.active.weak_bg_fill = Color32::TRANSPARENT;
                 w.widgets.active.bg_stroke = egui::Stroke::NONE;
-                ui.style_mut().override_font_id = Some(font(&TextStyle::Monospace));
                 ui.add(
                     egui::DragValue::new(value)
                         .speed(speed)
@@ -1222,15 +1310,61 @@ pub mod theme {
         let (rect, _) = ui.allocate_exact_size(egui::vec2(w, h), egui::Sense::hover());
         ui.painter().rect(
             rect,
-            egui::Rounding::same(3.0),
+            egui::CornerRadius::same(3),
             G0,
             egui::Stroke::new(1.0, state.border()),
+            egui::StrokeKind::Middle,
         );
         let inner = egui::Rect::from_min_max(
             egui::pos2(rect.left() + 6.0, rect.top()),
             egui::pos2(rect.right() - 5.0, rect.bottom()),
         );
         (rect, inner)
+    }
+
+    /// The padding around a `TextEdit`'s text. egui's own default is `button_padding`, which this
+    /// theme sets for buttons.
+    pub const TEXT_EDIT_MARGIN: egui::Margin = egui::Margin::symmetric(4, 2);
+
+    /// A right-click menu on `response`. A click inside leaves it open until an item closes it with
+    /// `ui.close()`; egui's default would close it on any click.
+    pub fn context_menu(response: &egui::Response, add: impl FnOnce(&mut egui::Ui)) {
+        egui::Popup::context_menu(response)
+            .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+            .show(add);
+    }
+
+    /// A button opening a menu, with the same click rule as [`context_menu`].
+    pub fn menu_button(ui: &mut egui::Ui, title: &str, add: impl FnOnce(&mut egui::Ui)) {
+        egui::containers::menu::MenuButton::new(title)
+            .config(egui::containers::menu::MenuConfig::new().close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside))
+            .ui(ui, add);
+    }
+
+    /// The widest a window that fits its content gets (`Window::auto_sized`): text wraps at 340, its
+    /// frame's 21 outside that.
+    pub const FIT_WINDOW_W: f32 = 361.0;
+
+    /// The outer `Window::default_size` that gives a `w` × `h` content area: what the window's frame
+    /// (21 × 21) and title bar (40.7) add to it.
+    pub fn window_size(w: f32, h: f32) -> [f32; 2] {
+        [w + 21.0, h + 61.7]
+    }
+
+    /// A vertical `ScrollArea` that also scrolls when its content is dragged with the mouse; egui's
+    /// default is only on a touch screen.
+    pub fn scroll_vertical() -> egui::ScrollArea {
+        egui::ScrollArea::vertical().scroll_source(egui::scroll_area::ScrollSource::ALL)
+    }
+
+    /// [`scroll_vertical`], horizontally.
+    pub fn scroll_horizontal() -> egui::ScrollArea {
+        egui::ScrollArea::horizontal().scroll_source(egui::scroll_area::ScrollSource::ALL)
+    }
+
+    /// [`scroll_vertical`], both ways.
+    pub fn scroll_both() -> egui::ScrollArea {
+        egui::ScrollArea::both().scroll_source(egui::scroll_area::ScrollSource::ALL)
     }
 
     /// Strip a widget's own background/border so it reads as text sitting in our well.
@@ -1262,13 +1396,13 @@ pub mod theme {
             }
             let w = (ui.available_width() - 4.0).max(60.0);
             let (_, inner) = well(ui, w, 22.0, state);
-            ui.allocate_ui_at_rect(inner, |ui| {
+            ui.scope_builder(egui::UiBuilder::new().max_rect(inner), |ui| {
                 ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
                     flatten(ui);
                     ui.add(
                         egui::TextEdit::singleline(value)
                             .hint_text(hint)
-                            .frame(false)
+                            .frame(egui::Frame::NONE.inner_margin(TEXT_EDIT_MARGIN))
                             .font(font(&TextStyle::Monospace))
                             .desired_width(f32::INFINITY),
                     )
@@ -1305,10 +1439,10 @@ pub mod theme {
                 .find(|(v, _)| v == value)
                 .map(|(_, t)| *t)
                 .unwrap_or("—");
-            ui.allocate_ui_at_rect(inner, |ui| {
+            ui.scope_builder(egui::UiBuilder::new().max_rect(inner), |ui| {
                 ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
                     flatten(ui);
-                    egui::ComboBox::from_id_source(ui.auto_id_with(label))
+                    egui::ComboBox::from_id_salt(ui.auto_id_with(label))
                         .selected_text(
                             egui::RichText::new(shown).monospace().color(TX),
                         )
@@ -1340,7 +1474,7 @@ pub mod theme {
     /// Draw one path row: label, a well with the path painted into it, `Choose`, optional clear.
     ///
     /// The text is painted with the PAINTER rather than by nesting a `Ui` inside the well. That is
-    /// not a style choice: `allocate_ui_at_rect` restores the parent cursor when it returns, so a
+    /// not a style choice: `scope_builder` restores the parent cursor when it returns, so a
     /// nested widget leaves the cursor at the START of the well and the next widget -- the button --
     /// gets drawn INSIDE it. `scrub_cell` paints its own chrome for exactly the same reason.
     ///
@@ -1588,6 +1722,7 @@ pub mod theme {
                     egui::Rect::from_center_size(c, vec2(15.0, 13.0)),
                     1.0,
                     s,
+                    egui::StrokeKind::Middle,
                 );
                 p.line_segment([c + vec2(-7.5, -2.0), c + vec2(7.5, -2.0)], s);
                 p.line_segment([c + vec2(-2.5, -2.0), c + vec2(-2.5, 6.5)], s);
@@ -1647,11 +1782,13 @@ pub mod theme {
                     egui::Rect::from_min_max(c + vec2(-4.0, -6.0), c + vec2(2.0, -3.0)),
                     0.0,
                     s,
+                    egui::StrokeKind::Middle,
                 );
                 p.rect_stroke(
                     egui::Rect::from_min_max(c + vec2(-4.0, 1.0), c + vec2(2.0, 6.0)),
                     0.0,
                     s,
+                    egui::StrokeKind::Middle,
                 );
             }
             // World — a globe: circle with an equator, two latitudes and a meridian.
@@ -1711,8 +1848,8 @@ pub mod theme {
             }
             // Systems — a microchip: body, die and pins on all four sides.
             RailIcon::Systems => {
-                p.rect_stroke(egui::Rect::from_center_size(c, vec2(9.5, 9.5)), 1.0, s);
-                p.rect_stroke(egui::Rect::from_center_size(c, vec2(3.6, 3.6)), 0.0, s);
+                p.rect_stroke(egui::Rect::from_center_size(c, vec2(9.5, 9.5)), 1.0, s, egui::StrokeKind::Middle);
+                p.rect_stroke(egui::Rect::from_center_size(c, vec2(3.6, 3.6)), 0.0, s, egui::StrokeKind::Middle);
                 for k in 0..2 {
                     let o = -2.2 + k as f32 * 4.4;
                     p.line_segment([c + vec2(o, -4.75), c + vec2(o, -6.6)], s); // top
@@ -1776,11 +1913,11 @@ pub mod theme {
         let p = ui.painter();
         let at = |x: f32, y: f32| rect.left_top() + egui::vec2(x, y);
         if item.on {
-            p.rect_filled(rect, egui::Rounding::ZERO, BRASS_SOFT);
+            p.rect_filled(rect, egui::CornerRadius::ZERO, BRASS_SOFT);
             let bar = egui::Rect::from_min_max(at(0.0, 6.0), at(3.0, RAIL_CELL_H - 6.0));
-            p.rect_filled(bar, egui::Rounding { ne: 2.0, se: 2.0, ..Default::default() }, BRASS);
+            p.rect_filled(bar, egui::CornerRadius { ne: 2, se: 2, ..Default::default() }, BRASS);
         } else if resp.hovered() {
-            p.rect_filled(rect, egui::Rounding::ZERO, Color32::from_rgba_unmultiplied(255, 255, 255, 6));
+            p.rect_filled(rect, egui::CornerRadius::ZERO, Color32::from_rgba_unmultiplied(255, 255, 255, 6));
         }
         if let Some(i) = item.index {
             p.text(at(7.0, 5.0), egui::Align2::LEFT_TOP, format!("{i:02}"), font(&TextStyle::Monospace), col);
@@ -1817,7 +1954,7 @@ pub mod theme {
         let (fill, stroke, ink) = if on { (BRASS_SOFT, BRASS_DK, BRASS) } else { (Color32::TRANSPARENT, LINE, DIM) };
         // One allocation for the whole pill, so a wrapping row moves it to the next line whole.
         let (pad_x, pad_y, gap) = (7.0, 1.0, 4.0);
-        let fonts = ui.fonts(|f| {
+        let fonts = ui.fonts_mut(|f| {
             (
                 f.layout_no_wrap(name.to_string(), font(&TextStyle::Small), ink),
                 f.layout_no_wrap(count.to_string(), font(&TextStyle::Monospace), if on { BRASS_DK } else { FAINT }),
@@ -1829,7 +1966,7 @@ pub mod theme {
         let (rect, resp) = ui.allocate_exact_size(egui::vec2(w, h), egui::Sense::click());
         if ui.is_rect_visible(rect) {
             let p = ui.painter();
-            p.rect(rect, egui::Rounding::same(10.0), fill, egui::Stroke::new(1.0, stroke));
+            p.rect(rect, egui::CornerRadius::same(10), fill, egui::Stroke::new(1.0, stroke), egui::StrokeKind::Middle);
             let x = rect.left() + pad_x;
             p.galley(egui::pos2(x, rect.center().y - name_g.size().y / 2.0), name_g.clone(), ink);
             let cx = x + name_g.size().x + gap;
@@ -1841,7 +1978,7 @@ pub mod theme {
     /// A small square status dot + label (the "READY" pill in the status bar).
     pub fn status_dot(ui: &mut egui::Ui, label: &str, color: Color32) {
         let (r, _) = ui.allocate_exact_size(egui::vec2(6.0, 6.0), egui::Sense::hover());
-        ui.painter().rect_filled(r, egui::Rounding::same(1.0), color);
+        ui.painter().rect_filled(r, egui::CornerRadius::same(1), color);
         ui.add_space(2.0);
         ui.label(disp_text(label.to_uppercase(), style_eyebrow(), color));
     }
