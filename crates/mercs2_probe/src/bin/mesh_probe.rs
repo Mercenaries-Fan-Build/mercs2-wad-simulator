@@ -109,8 +109,7 @@ fn main() {
     // After the multi-material fix: build_indexed_state emits one draw per PRMT sub-strip material.
     // Dump the resulting draw count + the distinct diffuse texture NAMES actually bound (the floor
     // material should now appear).
-    if let Ok((_v, _i, draws, s)) = mercs2_engine::mesh::build_indexed_from_container(&c) {
-        println!("== prelit (baked vertex lighting): {} ==", s.prelit);
+    if let Ok((_v, _i, draws, _)) = mercs2_engine::mesh::build_indexed_from_container(&c) {
         let mut counts: BTreeMap<u32, usize> = BTreeMap::new();
         for d in &draws {
             if let Some(h) = d.diffuse {
