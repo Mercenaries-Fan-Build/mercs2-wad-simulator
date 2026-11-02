@@ -37,7 +37,7 @@ pub struct Rung {
     /// Draw groups, each carrying the node + LOD mask from the RESIDENT `SEGM` record its `INDX`
     /// row named.
     pub draws: Vec<DrawGroup>,
-    /// Bounds/rig/prelit for this rung's geometry (the rig comes from the resident skeleton).
+    /// Bounds and rig for this rung's geometry (the rig comes from the resident skeleton).
     pub stats: crate::mesh::ModelStats,
 }
 
@@ -168,37 +168,127 @@ impl Model {
 /// masked for tier 0. Draw both and you get two detail levels of the same panel fighting for the
 /// same pixels; on that car it was 11,604 of 19,107 triangles drawn twice.
 ///
-/// So for each (node, tier), only the FINEST rung that covers it survives — the coarser block's bit
-/// for that tier is cleared. Baking it into `lod_mask` means every downstream consumer (the draw
-/// gate, the workshop, the scene) gets the right answer without knowing rungs exist. This mirrors
-/// the texture chain: a finer mip block replaces the top of the resident chain rather than adding
-/// to it (see [`crate::wad::extract_texture_hires`]).
+/// So a coarser draw loses a tier when a finer rung's draws on its node, at that tier, cover what it
+/// draws. Covering matters: a finer block can also ADD to a node. `pmcoutpost_interior_hq` carries its
+/// walls and floor on node 6 as 75,686 triangles at every tier, and its `P001` puts 2,848 triangles of
+/// trim on the same node at tiers 0 and 1. Retail draws both: its render object reads `view_state` 3 in
+/// the `23fe7f38_cracked-cruise/pmc` capture, with the walls on screen. No `SEGM` row spans two blocks,
+/// and the triangle ratio across the 914 overlapping (node, tier) pairs in retail is a continuum, so
+/// the measure is the draws' bounds (INFERRED; retail's own rule for the van is not decoded).
+///
+/// Baking it into `lod_mask` means every downstream consumer (the draw gate, the workshop, the scene)
+/// gets the right answer without knowing rungs exist.
 ///
 /// Geometry bound to no node (`node < 0`) is never superseded — nothing re-authors it.
 fn apply_supersede(rungs: &mut [Rung]) {
-    // (node, tier) -> finest rung level that carries it.
-    let mut finest: HashMap<(i16, u8), u8> = HashMap::new();
+    let bounds_of = |r: &Rung, d: &DrawGroup| {
+        let range = d.index_start as usize..(d.index_start + d.index_count) as usize;
+        let mut b = (glam::Vec3::splat(f32::MAX), glam::Vec3::splat(f32::MIN));
+        for &i in &r.indices[range] {
+            let p = glam::Vec3::from(r.vertices[i as usize].pos);
+            b = (b.0.min(p), b.1.max(p));
+        }
+        b
+    };
+    // (node, tier) -> each rung's bounds of what it draws there.
+    let mut covered: HashMap<(i16, u8), HashMap<u8, Bounds>> = HashMap::new();
     for r in rungs.iter() {
         for d in r.draws.iter().filter(|d| d.node >= 0) {
-            for tier in 0..8u8 {
-                if d.lod_mask & (1 << tier) != 0 {
-                    let e = finest.entry((d.node, tier)).or_insert(r.level);
-                    *e = (*e).max(r.level);
+            let b = bounds_of(r, d);
+            for tier in (0..8u8).filter(|t| d.lod_mask & (1 << t) != 0) {
+                let e = covered.entry((d.node, tier)).or_default().entry(r.level).or_insert(b);
+                *e = (e.0.min(b.0), e.1.max(b.1));
+            }
+        }
+    }
+    let mut cleared: Vec<(usize, usize, u8)> = Vec::new();
+    for (ri, r) in rungs.iter().enumerate() {
+        for (di, d) in r.draws.iter().enumerate().filter(|(_, d)| d.node >= 0) {
+            let b = bounds_of(r, d);
+            for tier in (0..8u8).filter(|t| d.lod_mask & (1 << t) != 0) {
+                let finer = covered[&(d.node, tier)].iter().filter(|(level, _)| **level > r.level);
+                if finer.into_iter().any(|(_, f)| covers(*f, b)) {
+                    cleared.push((ri, di, tier));
                 }
             }
         }
     }
-    for r in rungs.iter_mut() {
-        let level = r.level;
-        for d in r.draws.iter_mut().filter(|d| d.node >= 0) {
-            for tier in 0..8u8 {
-                let bit = 1u8 << tier;
-                if d.lod_mask & bit != 0
-                    && finest.get(&(d.node, tier)).copied().unwrap_or(level) > level
-                {
-                    d.lod_mask &= !bit;
-                }
+    for (ri, di, tier) in cleared {
+        rungs[ri].draws[di].lod_mask &= !(1 << tier);
+    }
+}
+
+/// An axis-aligned box: min, max.
+type Bounds = (glam::Vec3, glam::Vec3);
+
+/// How much of a coarse draw's extent, per axis, a finer rung must span to stand in for it.
+const COVERED_EXTENT: f32 = 0.9;
+
+/// Whether `fine` spans at least [`COVERED_EXTENT`] of `coarse` on every axis.
+fn covers(fine: Bounds, coarse: Bounds) -> bool {
+    (0..3).all(|k| {
+        let extent = coarse.1[k] - coarse.0[k];
+        fine.1[k].min(coarse.1[k]) - fine.0[k].max(coarse.0[k]) >= COVERED_EXTENT * extent
+    })
+}
+
+#[cfg(test)]
+mod supersede_tests {
+    use super::*;
+
+    fn rung(level: u8, tris: &[(i16, u8, [f32; 3], [f32; 3])]) -> Rung {
+        let (mut vertices, mut indices, mut draws) = (Vec::new(), Vec::new(), Vec::new());
+        for &(node, lod_mask, lo, hi) in tris {
+            let base = vertices.len() as u32;
+            let index_start = indices.len() as u32;
+            for pos in [lo, hi, [lo[0], hi[1], lo[2]]] {
+                vertices.push(Vertex { pos, color: [1.0; 4], uv: [0.0; 2], normal: [0.0, 1.0, 0.0], tangent: [1.0, 0.0, 0.0, 1.0], joints: [0; 4], weights: [255, 0, 0, 0] });
             }
+            indices.extend([base, base + 1, base + 2]);
+            draws.push(DrawGroup { index_start, index_count: 3, lod_mask, node, ..Default::default() });
         }
+        let stats = mesh::ModelStats {
+            meshes: 0,
+            vertices: 0,
+            skipped: 0,
+            bbox_min: [0.0; 3],
+            bbox_max: [0.0; 3],
+            fit_center: [0.0; 3],
+            fit_scale: 1.0,
+            bones: Vec::new(),
+            rig: Vec::new(),
+        };
+        Rung { level, block: 0, vertices, indices, draws, stats }
+    }
+
+    /// The van: the finer block re-authors the same panel, so the coarse one gives up that tier.
+    #[test]
+    fn a_finer_rung_over_the_same_surface_takes_the_tier() {
+        let mut r = [
+            rung(0, &[(3, 0x03, [0.0; 3], [2.0, 1.0, 4.0])]),
+            rung(1, &[(3, 0x01, [-0.01, 0.0, 0.0], [2.0, 1.01, 3.95])]),
+        ];
+        apply_supersede(&mut r);
+        assert_eq!(r[0].draws[0].lod_mask, 0x02);
+        assert_eq!(r[1].draws[0].lod_mask, 0x01);
+    }
+
+    /// The PMC hall: a little trim on a node takes nothing from the walls it sits on.
+    #[test]
+    fn a_finer_rung_adding_to_a_node_takes_nothing() {
+        let mut r = [
+            rung(0, &[(6, 0x07, [-85.0, 0.0, -88.0], [99.0, 35.0, 41.0])]),
+            rung(1, &[(6, 0x03, [10.0, 2.0, 10.0], [14.0, 4.0, 12.0])]),
+        ];
+        apply_supersede(&mut r);
+        assert_eq!(r[0].draws[0].lod_mask, 0x07);
+        assert_eq!(r[1].draws[0].lod_mask, 0x03);
+    }
+
+    #[test]
+    fn a_draw_on_no_node_is_never_superseded() {
+        let mut r = [rung(0, &[(-1, 0x01, [0.0; 3], [1.0; 3])]), rung(1, &[(-1, 0x01, [0.0; 3], [1.0; 3])])];
+        apply_supersede(&mut r);
+        assert_eq!(r[0].draws[0].lod_mask, 0x01);
     }
 }
