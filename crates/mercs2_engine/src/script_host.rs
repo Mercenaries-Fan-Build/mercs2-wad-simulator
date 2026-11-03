@@ -167,6 +167,10 @@ pub struct GameScriptHost {
     attachments: HashMap<u64, u64>,
     /// The retained-mode HUD widget tree the `_GuiInternal.*` Lua drives (`crate::widgets::WidgetTree`).
     hud: crate::widgets::WidgetTree,
+    /// The option pages' record (`crate::options`), once the front end attaches it.
+    options: Option<crate::options::Options>,
+    /// Display changes the option pages asked for, waiting for the window and the renderer.
+    display_effects: Vec<crate::options::Effect>,
     /// The HUD world-marker set the `Gui._Marker*` Lua drives.
     markers: crate::widgets::MarkerSet,
     /// Global render/post-FX parameter state the `Atmosphere`/`Bloom`/`Graphics`/`Fade` Lua drives.
@@ -473,6 +477,8 @@ impl GameScriptHost {
             object_filters: mercs2_core::ObjectFilterRegistry::new(),
             attachments: HashMap::new(),
             hud: crate::widgets::WidgetTree::new(),
+            options: None,
+            display_effects: Vec::new(),
             markers: crate::widgets::MarkerSet::new(),
             render: mercs2_core::RenderSettings::new(),
             camera_fx: CameraFxState::default(),
@@ -781,6 +787,64 @@ impl GameScriptHost {
         &mut self.hud
     }
 
+    pub fn widgets_ref(&self) -> &crate::widgets::WidgetTree {
+        &self.hud
+    }
+
+    /// Give the option pages their record, read from the install's `Mercs2.ini`.
+    pub fn attach_options(&mut self, options: crate::options::Options) {
+        self.options = Some(options);
+    }
+
+    /// The display's modes and the adapter, for the video pages.
+    pub fn attach_display(&mut self, modes: &[(u32, u32, u32)], device: crate::options::Device) -> Result<(), String> {
+        self.options.as_mut().ok_or("no options loaded")?.attach_display(modes, device)
+    }
+
+    /// The display changes the option pages asked for since the last call, for the window and the
+    /// renderer to make.
+    pub fn take_display_effects(&mut self) -> Vec<crate::options::Effect> {
+        std::mem::take(&mut self.display_effects)
+    }
+
+    /// Whether a key down now answers a rebind on the remap page.
+    pub fn capturing_key(&self) -> bool {
+        self.options.as_ref().is_some_and(|o| o.capturing_key())
+    }
+
+    /// The key down, by its id in retail's key table, that answers a rebind.
+    pub fn key_down(&mut self, key: u16) -> Result<(), String> {
+        let reply = self.options.as_mut().ok_or("no options loaded")?.key_down(key)?;
+        self.apply_options(reply);
+        Ok(())
+    }
+
+    /// The pads, for the control pages.
+    pub fn attach_pads(&mut self, pads: &[crate::controls::Pad]) -> Result<(), String> {
+        self.options.as_mut().ok_or("no options loaded")?.attach_pads(pads)
+    }
+
+    /// One frame of the first pad's inputs held, by joystick vocabulary index.
+    pub fn pad_frame(&mut self, held: &[u8]) -> Result<(), String> {
+        let reply = self.options.as_mut().ok_or("no options loaded")?.pad_frame(held)?;
+        self.apply_options(reply);
+        Ok(())
+    }
+
+    /// Push an options reply's values into the shell movie and make its changes: sound here, the
+    /// display's through [`Self::take_display_effects`].
+    fn apply_options(&mut self, reply: crate::options::Reply) {
+        for (name, args) in reply.invokes {
+            self.hud.request_flash(mercs2_ui::SHELL_MOVIE, mercs2_ui::FlashRequest::Invoke { name: name.into(), args });
+        }
+        for effect in reply.effects {
+            match effect {
+                crate::options::Effect::CategoryVolume { category, volume } => self.audio.borrow_mut().set_category_volume(category, volume, 0.0),
+                display => self.display_effects.push(display),
+            }
+        }
+    }
+
     /// Whether a script called `Sys.StartSingleplayer`.
     pub fn singleplayer_started(&self) -> bool {
         self.settings.singleplayer
@@ -1044,6 +1108,14 @@ impl EngineHost for GameScriptHost {
     }
     fn sound_unload_bank(&mut self, name: &str) -> bool {
         self.audio.borrow_mut().unload_bank(name, None)
+    }
+    fn sound_bank_op_with_callback(&mut self, name: &str, wave: bool, load: bool, callback: u32) -> bool {
+        let kind = if wave { crate::audio::banks::BankKind::Wave } else { crate::audio::banks::BankKind::Sound };
+        let mut a = self.audio.borrow_mut();
+        if load { a.load_bank_with_callback(name, kind, callback) } else { a.unload_bank(name, Some(callback)) }
+    }
+    fn sound_take_bank_callbacks(&mut self) -> Vec<u32> {
+        self.audio.borrow_mut().banks.drain_callbacks()
     }
     fn sound_request_ambience_bank(&mut self, name: &str) -> bool {
         self.audio.borrow_mut().request_ambience_bank(name)
@@ -1751,6 +1823,18 @@ impl EngineHost for GameScriptHost {
         let (ns, v) = verb.split_once('.').unwrap_or(("Script", verb));
         log_binding(ns, v, &args);
         self.script_cmds.push((verb.to_string(), args));
+    }
+    fn options_item_changed(&mut self, item: &str) -> Result<(), String> {
+        let options = self.options.as_mut().ok_or_else(|| format!("PauseItemChanged {item:?}: no options loaded"))?;
+        let reply = options.pause_item_changed(item)?;
+        self.apply_options(reply);
+        Ok(())
+    }
+    fn options_call(&mut self, name: &str, arg: Option<String>) -> Result<(), String> {
+        let options = self.options.as_mut().ok_or_else(|| format!("LTILibName.{name}: no options loaded"))?;
+        let reply = options.call(name, arg.as_deref())?;
+        self.apply_options(reply);
+        Ok(())
     }
 }
 
