@@ -152,6 +152,29 @@ impl ScriptsBlock {
         Ok(())
     }
 
+    /// Replace entry `idx`'s LuaQ with `new_luaq`, which is the old chunk with `appended` spliced into
+    /// its end. The entry keeps its own INFO and DEPS and gains `appended`'s. Unlike [`Self::replace_lua`]
+    /// nothing is derived from the old code: a level's script calls `import("x", false)`, which the
+    /// retail scan does not read as a dependency, so a derived DEPS would lose its imports.
+    pub fn append_lua(&mut self, idx: usize, new_luaq: &[u8], appended: &[u8]) -> Result<(), String> {
+        let old = &self.entries[idx].bytes;
+        let info = container_info(old)?;
+        let gained = script_meta::derive(&info.name, appended)?;
+        let mut deps: Vec<script_meta::Dep> = container_deps(old)?
+            .into_iter()
+            .map(|hash| script_meta::Dep { name: String::new(), hash, inherit: false })
+            .collect();
+        deps.extend(gained.deps);
+        if deps.len() > script_meta::MAX_DEPS {
+            return Err(format!("script {}: {} dependencies; DEPS holds at most {}", info.name, deps.len(), script_meta::MAX_DEPS));
+        }
+        let inherits = info.tail_u8.checked_add(gained.inherits).ok_or_else(|| format!("script {}: too many inherits", info.name))?;
+        let globals = info.tail_u16.checked_add(gained.globals).ok_or_else(|| format!("script {}: too many globals", info.name))?;
+        let meta = script_meta::ScriptMeta { name: info.name, globals, inherits, deps };
+        self.entries[idx].bytes = build_container(&meta, new_luaq);
+        Ok(())
+    }
+
     /// Add a BRAND-NEW script entry carrying `luaq`, named `name`. Returns its index.
     ///
     /// This is what lets a Shipment ship a new resident script (a mod loader) instead of only
