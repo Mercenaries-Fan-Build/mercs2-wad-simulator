@@ -5,7 +5,7 @@ use std::rc::Rc;
 
 use mercs2_formats::gfx_def::Character;
 
-use crate::avm::{to_number, Kind, Native, Obj, Player, Text, Value};
+use crate::avm::{to_number, Kind, Listeners, Native, Obj, Player, Text, Value};
 use crate::stage::Node;
 
 fn arg(args: &[Value], i: usize) -> Value {
@@ -416,35 +416,48 @@ fn key_get_ascii(p: &mut Player, _: &Value, _: &[Value]) -> Result<Value, String
 }
 
 /// A listener is held once however often it is added, or a frame script that re-runs doubles its keys.
-fn add_listener(p: &mut Player, stage: bool, who: Value) -> Result<Value, String> {
-    remove_listener(p, stage, &who)?;
-    p.listeners(stage).push(who);
+fn add_listener(p: &mut Player, of: Listeners, who: Value) -> Result<Value, String> {
+    remove_listener(p, of, &who)?;
+    p.listeners(of).push(who);
     Ok(Value::Undefined)
 }
 
 fn key_add_listener(p: &mut Player, _: &Value, args: &[Value]) -> Result<Value, String> {
-    add_listener(p, false, arg(args, 0))
+    add_listener(p, Listeners::Key, arg(args, 0))
 }
 
 fn key_remove_listener(p: &mut Player, _: &Value, args: &[Value]) -> Result<Value, String> {
-    remove_listener(p, false, &arg(args, 0))
+    remove_listener(p, Listeners::Key, &arg(args, 0))
 }
 
 fn stage_add_listener(p: &mut Player, _: &Value, args: &[Value]) -> Result<Value, String> {
-    add_listener(p, true, arg(args, 0))
+    add_listener(p, Listeners::Stage, arg(args, 0))
 }
 
 fn stage_remove_listener(p: &mut Player, _: &Value, args: &[Value]) -> Result<Value, String> {
-    remove_listener(p, true, &arg(args, 0))
+    remove_listener(p, Listeners::Stage, &arg(args, 0))
 }
 
-fn remove_listener(p: &mut Player, stage: bool, who: &Value) -> Result<Value, String> {
+fn mouse_add_listener(p: &mut Player, _: &Value, args: &[Value]) -> Result<Value, String> {
+    add_listener(p, Listeners::Mouse, arg(args, 0))
+}
+
+fn mouse_remove_listener(p: &mut Player, _: &Value, args: &[Value]) -> Result<Value, String> {
+    remove_listener(p, Listeners::Mouse, &arg(args, 0))
+}
+
+/// `Mouse.show()` / `Mouse.hide()`: the cursor is the host's, so these answer and change nothing here.
+fn mouse_visibility(_: &mut Player, _: &Value, _: &[Value]) -> Result<Value, String> {
+    Ok(Value::Undefined)
+}
+
+fn remove_listener(p: &mut Player, of: Listeners, who: &Value) -> Result<Value, String> {
     let same = |a: &Value, b: &Value| match (a, b) {
         (Value::Object(x), Value::Object(y)) => Rc::ptr_eq(&x.0, &y.0),
         (Value::Clip(x), Value::Clip(y)) => x == y,
         _ => false,
     };
-    let list = p.listeners(stage);
+    let list = p.listeners(of);
     let before = list.len();
     list.retain(|l| !same(l, who));
     Ok(Value::Bool(list.len() != before))
@@ -529,7 +542,7 @@ fn field_set_format(p: &mut Player, this: &Value, args: &[Value]) -> Result<Valu
 pub fn field_get(p: &mut Player, parent: usize, depth: i32, name: &str) -> Result<Value, String> {
     let child = p.field(parent, depth)?.clone();
     let def = match p.movie.def.characters.get(&child.character) {
-        Some(Character::EditText(t)) => Some(t.clone()),
+        Some(Character::EditText(_)) => Some(p.movie.edit_text(&child)?),
         _ => None,
     };
     Ok(match (name, &child.node) {
@@ -561,9 +574,53 @@ pub fn field_set(p: &mut Player, parent: usize, depth: i32, name: &str, value: V
             let text = p.to_text(&value)?.to_string();
             let child = p.movie.clip_mut(parent)?.children.get_mut(&depth).ok_or("the field is gone")?;
             child.node = Node::Text(text);
+            fit_field(p, parent, depth)?;
+        }
+        "autoSize" => {
+            p.field_vars_of(parent, depth).set(name, value);
+            fit_field(p, parent, depth)?;
         }
         _ => p.field_vars_of(parent, depth).set(name, value),
     }
+    Ok(())
+}
+
+/// A field whose `autoSize` is `"left"`, `"center"`, `"right"` or `true` (left) takes its text's
+/// size plus the gutters, keeping that edge or its center where it was; one that wraps keeps its
+/// width.
+fn fit_field(p: &mut Player, parent: usize, depth: i32) -> Result<(), String> {
+    let anchor = match p.field_vars_of(parent, depth).get("autoSize") {
+        Some(Value::Bool(true)) => "left".to_string(),
+        Some(v @ Value::Str(_)) => p.to_text(&v)?.to_string(),
+        _ => return Ok(()),
+    };
+    let child = p.field(parent, depth)?.clone();
+    let Node::Text(text) = &child.node else { return Ok(()) };
+    let field = p.movie.edit_text(&child)?;
+    let Some(font) = p.movie.font_of(&field)? else {
+        p.movie.fontless = true;
+        return Ok(());
+    };
+    let [w, h] = crate::text::measure(&field, text, &font);
+    let gutters = crate::text::GUTTER * 2.0;
+    let [mut xmin, mut xmax, ymin, _] = field.bounds;
+    if !field.word_wrap {
+        let width = (w + gutters).round() as i32;
+        match anchor.as_str() {
+            "left" => xmax = xmin + width,
+            "center" => {
+                let middle = (xmin + xmax) / 2;
+                xmin = middle - width / 2;
+                xmax = xmin + width;
+            }
+            "right" => xmin = xmax - width,
+            _ => return Ok(()),
+        }
+    } else if !matches!(anchor.as_str(), "left" | "center" | "right") {
+        return Ok(());
+    }
+    let ymax = ymin + (h + gutters).round() as i32;
+    p.field_mut(parent, depth)?.bounds = Some([xmin, xmax, ymin, ymax]);
     Ok(())
 }
 
@@ -666,6 +723,17 @@ pub fn install(p: &mut Player) {
     method(p, &stage, "addListener", stage_add_listener);
     method(p, &stage, "removeListener", stage_remove_listener);
     global.set("Stage", Value::Object(stage));
+
+    let mouse = p.new_object();
+    for (name, f) in [
+        ("addListener", mouse_add_listener as Native),
+        ("removeListener", mouse_remove_listener),
+        ("show", mouse_visibility),
+        ("hide", mouse_visibility),
+    ] {
+        method(p, &mouse, name, f);
+    }
+    global.set("Mouse", Value::Object(mouse));
 
     for (name, f) in [
         ("isNaN", is_nan as Native),
