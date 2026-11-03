@@ -204,7 +204,7 @@ mod tests {
         for name in game_paths::SAVE_FIXTURES {
             let ins = Inspected::load(&game_paths::save_fixtures().join(name));
             assert!(ins.tree.is_ok(), "{name}");
-            let _ = ctx.run_ui(egui::RawInput::default(), |c| {
+            crate::gui::run_headless(&ctx, egui::RawInput::default(), |c| {
                 assert!(show(c.ctx(), &ins, &panel));
             });
         }
