@@ -5,17 +5,20 @@
 //! from its jump table at `0x0061CD50`: every button sends a key event, Press and Hold a key down and
 //! Release a key up.
 
+use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
 use std::rc::Rc;
 
 use mercs2_formats::gfx::GfxMovie;
 use mercs2_formats::gfx_def::MovieDef;
-use mercs2_gfx::avm::{Player, Value};
+use mercs2_gfx::avm::{FsCommandHook, Player, Value};
 use mercs2_gfx::stage::{Item, Movie};
 use mercs2_gfx::text::FontLib;
+use mercs2_script::ScriptHost;
 use mercs2_ui::{FlashAction, FlashArg, FlashRequest, WidgetTree};
 
 use crate::gfx_pass::WadImages;
+use crate::script_host::GameScriptHost;
 
 /// `[0x00BBC7EC]`: how long an axis holds before its key repeats.
 const REPEAT_DELAY: f32 = 0.25;
@@ -86,9 +89,37 @@ struct Live {
     player: Player,
     axes: [Axis; 4],
     analog: [Analog; 2],
+    /// The pointer the movie last saw, in stage pixels, and the left button.
+    pointer: Option<([f32; 2], bool)>,
+}
+
+/// The window's pointer, as `FlashWidget::Update` (`0x0061B600`) hands every running movie each frame
+/// through `NotifyMouseState`: where it is across the viewport, `0..1` each way, and the buttons, bit
+/// 0 left. Only the left button acts unless a movie turns more on, which none of the shipped do.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Pointer {
+    pub at: [f32; 2],
+    pub buttons: u32,
 }
 
 impl Live {
+    fn notify_pointer(&mut self, pointer: Pointer) -> Result<(), String> {
+        let stage = [(self.def.stage[1] - self.def.stage[0]) as f32 / 20.0, (self.def.stage[3] - self.def.stage[2]) as f32 / 20.0];
+        let at = [pointer.at[0] * stage[0], pointer.at[1] * stage[1]];
+        let left = pointer.buttons & 1 != 0;
+        let (was_at, was_left) = self.pointer.unwrap_or(([f32::NAN; 2], false));
+        if at != was_at {
+            self.player.mouse_move(at[0], at[1])?;
+        }
+        match (was_left, left) {
+            (false, true) => self.player.mouse_down()?,
+            (true, false) => self.player.mouse_up()?,
+            _ => {}
+        }
+        self.pointer = Some((at, left));
+        Ok(())
+    }
+
     fn button(&mut self, button: i64, action: FlashAction) -> Result<(), String> {
         if let Some((index, way)) = axis_of(button) {
             let axis = &mut self.axes[index];
@@ -160,6 +191,40 @@ impl Live {
     }
 }
 
+/// The script host the movies' FSCommand handlers live in.
+pub type Host = Rc<RefCell<GameScriptHost>>;
+
+fn value_of(arg: FlashArg) -> Value {
+    match arg {
+        FlashArg::Nil => Value::Undefined,
+        FlashArg::Bool(b) => Value::Bool(b),
+        FlashArg::Number(n) => Value::Number(n),
+        FlashArg::Text(t) => Value::Str(t.into()),
+    }
+}
+
+/// Whether a movie file is the shell's, the one `SHELL_MOVIE` requests reach.
+fn is_shell_movie(file: &str) -> bool {
+    file.to_ascii_lowercase().starts_with("shell")
+}
+
+/// The FSCommand handler of `widget`'s movie: as GFx calls the engine's handler inside the action
+/// (`FUN_0060DE80` → the Lua function `SetFlashEventHandler` registered), the handler runs at once,
+/// and the functions it has the engine call in this movie (`LTIAudioSFXVolume` for `audioEnter`, …)
+/// run before the movie's next action. The audio page needs that order: its first frame places the
+/// sliders from the values `audioEnter` sets in the frame before it.
+fn fscommand_hook(host: &Host, script: &Rc<ScriptHost>, widget: u64, is_shell: bool) -> FsCommandHook {
+    let (host, script) = (host.clone(), script.clone());
+    Rc::new(move |command: &str, argument: &str| {
+        let callback = host.borrow().widgets_ref().get(widget).and_then(|w| w.flash.as_ref()?.callbacks.get(command).copied());
+        if let Some(callback) = callback {
+            script.fire_flash_now(callback, Some(argument.to_string())).map_err(|e| format!("the {command} handler: {e:?}"))?;
+        }
+        let invokes = host.borrow_mut().widgets().take_flash_invokes(widget, is_shell);
+        Ok(invokes.into_iter().map(|(name, args)| (name, args.into_iter().map(value_of).collect())).collect())
+    })
+}
+
 /// One movie to draw this frame.
 pub struct FlashDraw {
     pub def: Rc<MovieDef>,
@@ -178,7 +243,16 @@ pub struct FlashStage {
 }
 
 /// The commands [`FlashStage::take_commands`] hands over.
-const ENGINE_COMMANDS: [&str; 5] = ["onlineLTIIsConnected", "preoperation", "onlineSaveProfile", "LoadSaveGame", "DeleteSaveGame"];
+const ENGINE_COMMANDS: [&str; 8] = [
+    "onlineLTIIsConnected",
+    "preoperation",
+    "onlineSaveProfile",
+    "LoadSaveGame",
+    "DeleteSaveGame",
+    "Sound.Play",
+    "Sound.Loop",
+    "Sound.Stop",
+];
 
 impl FlashStage {
     /// `wads` in lookup order, the last mounted first. Every language but Russian reads `fonts_enext`
@@ -193,9 +267,7 @@ impl FlashStage {
 
     /// The widget showing the shell's movie.
     fn shell_widget(&self, tree: &WidgetTree) -> Option<u64> {
-        self.movies.keys().copied().find(|id| {
-            tree.get(*id).and_then(|w| w.flash.as_ref()).is_some_and(|f| f.swf.to_ascii_lowercase().starts_with("shell"))
-        })
+        self.movies.keys().copied().find(|id| tree.get(*id).and_then(|w| w.flash.as_ref()).is_some_and(|f| is_shell_movie(&f.swf)))
     }
 
     /// Whether the shell's movie is up.
@@ -204,8 +276,8 @@ impl FlashStage {
     }
 
     /// Call a function of the shell's movie, if it has one, as the engine's `Invoke` does.
-    pub fn call_shell(&mut self, tree: &WidgetTree, name: &str, args: &[Value]) -> Result<(), String> {
-        let id = self.shell_widget(tree).ok_or_else(|| format!("{name}: the shell's movie is not up"))?;
+    pub fn call_shell(&mut self, host: &Host, name: &str, args: &[Value]) -> Result<(), String> {
+        let id = self.shell_widget(host.borrow().widgets_ref()).ok_or_else(|| format!("{name}: the shell's movie is not up"))?;
         self.movies.get_mut(&id).ok_or("the shell's movie vanished")?.invoke(name, args)
     }
 
@@ -216,6 +288,11 @@ impl FlashStage {
 
     pub fn images(&mut self) -> &mut WadImages {
         &mut self.assets
+    }
+
+    /// The string table the movies' `[0x…]` keys read from.
+    pub fn strings(&self) -> Rc<HashMap<u32, String>> {
+        self.strings.clone()
     }
 
     fn open_movie(&mut self, name: &str) -> Result<Live, String> {
@@ -231,12 +308,22 @@ impl FlashStage {
         let mut movie = Movie::new(def.clone())?;
         movie.font_lib = Some(self.fonts.clone());
         movie.strings = Some(self.strings.clone());
-        Ok(Live { def, player: Player::new(movie)?, axes: Default::default(), analog: Default::default() })
+        Ok(Live { def, player: Player::new(movie)?, axes: Default::default(), analog: Default::default(), pointer: None })
     }
 
-    fn serve(&mut self, tree: &mut WidgetTree, widget: u64, request: FlashRequest) -> Result<(), String> {
+    /// A movie opened for `widget`, with the scripts' FSCommand handlers wired into its player.
+    fn open_live(&mut self, host: &Host, script: &Rc<ScriptHost>, widget: u64, file: &str) -> Result<Live, String> {
+        let mut live = self.open_movie(file)?;
+        live.player.fscommand_hook = Some(fscommand_hook(host, script, widget, is_shell_movie(file)));
+        live.setup()?;
+        Ok(live)
+    }
+
+    /// Serve one script request. The host is only borrowed between movie calls: a movie's FSCommand
+    /// runs its Lua handler from inside the movie, and that handler reaches the host itself.
+    fn serve(&mut self, host: &Host, script: &Rc<ScriptHost>, widget: u64, request: FlashRequest) -> Result<(), String> {
         let widget = match widget {
-            mercs2_ui::SHELL_MOVIE => self.shell_widget(tree).ok_or_else(|| format!("no shell movie for {request:?}"))?,
+            mercs2_ui::SHELL_MOVIE => self.shell_widget(host.borrow().widgets_ref()).ok_or_else(|| format!("no shell movie for {request:?}"))?,
             other => other,
         };
         match request {
@@ -244,18 +331,16 @@ impl FlashStage {
                 self.movies.remove(&widget);
             }
             FlashRequest::Open { file: Some(file), done } => {
-                let mut live = self.open_movie(&file)?;
-                live.setup()?;
+                let live = self.open_live(host, script, widget, &file)?;
                 self.movies.insert(widget, live);
                 if let Some(done) = done {
-                    tree.fire_flash(done, None);
+                    host.borrow_mut().widgets().fire_flash(done, None);
                 }
             }
             FlashRequest::Restart => {
-                let name = tree.get(widget).and_then(|w| w.flash.as_ref()).map(|f| f.swf.clone()).unwrap_or_default();
+                let name = host.borrow().widgets_ref().get(widget).and_then(|w| w.flash.as_ref()).map(|f| f.swf.clone()).unwrap_or_default();
                 if self.movies.contains_key(&widget) {
-                    let mut live = self.open_movie(&name)?;
-                    live.setup()?;
+                    let live = self.open_live(host, script, widget, &name)?;
                     self.movies.insert(widget, live);
                 }
             }
@@ -263,15 +348,7 @@ impl FlashStage {
                 let live = self.movies.get_mut(&widget).ok_or_else(|| format!("a script drove flash widget {widget}, which holds no movie: {request:?}"))?;
                 match request {
                     FlashRequest::Invoke { name, args } => {
-                        let args: Vec<Value> = args
-                            .into_iter()
-                            .map(|a| match a {
-                                FlashArg::Nil => Value::Undefined,
-                                FlashArg::Bool(b) => Value::Bool(b),
-                                FlashArg::Number(n) => Value::Number(n),
-                                FlashArg::Text(t) => Value::Str(t.into()),
-                            })
-                            .collect();
+                        let args: Vec<Value> = args.into_iter().map(value_of).collect();
                         live.invoke(&name, &args)?;
                     }
                     FlashRequest::Input { button, action } => live.button(button, action)?,
@@ -283,21 +360,23 @@ impl FlashStage {
         Ok(())
     }
 
-    /// Serve the scripts' requests, step the movies, and hand their FSCommands to the callbacks
-    /// registered for them. A command nobody registered goes nowhere, as in retail.
-    pub fn advance(&mut self, tree: &mut WidgetTree, dt: f32) -> Result<(), String> {
-        for (widget, request) in tree.take_flash_requests() {
-            self.serve(tree, widget, request)?;
+    /// Serve the scripts' requests and step the movies. A movie's FSCommand reaches the handler a
+    /// script registered for it while the movie runs (see [`fscommand_hook`]); the ones the engine
+    /// answers itself are kept for [`Self::take_commands`].
+    pub fn advance(&mut self, host: &Host, script: &Rc<ScriptHost>, dt: f32, pointer: Pointer) -> Result<(), String> {
+        let requests = host.borrow_mut().widgets().take_flash_requests();
+        for (widget, request) in requests {
+            self.serve(host, script, widget, request)?;
         }
         let ids: Vec<u64> = self.movies.keys().copied().collect();
         for id in ids {
-            let Some((visible, playing, speed)) =
-                tree.get(id).and_then(|w| Some((w.visible, w.flash.as_ref()?.playing, w.flash.as_ref()?.play_speed)))
-            else {
+            let state = host.borrow().widgets_ref().get(id).and_then(|w| Some((w.visible, w.flash.as_ref()?.playing, w.flash.as_ref()?.play_speed)));
+            let Some((visible, playing, speed)) = state else {
                 self.movies.remove(&id);
                 continue;
             };
             let live = self.movies.get_mut(&id).ok_or("a movie vanished mid-frame")?;
+            live.notify_pointer(pointer)?;
             live.analog()?;
             live.repeat(dt)?;
             if playing && visible {
@@ -309,11 +388,7 @@ impl FlashStage {
             for (command, argument) in std::mem::take(&mut live.player.fscommands) {
                 println!("[flash] fscommand {command}({argument})");
                 if ENGINE_COMMANDS.contains(&command.as_str()) {
-                    self.commands.push((command.clone(), argument.clone()));
-                }
-                let callback = tree.get(id).and_then(|w| w.flash.as_ref()?.callbacks.get(&command).copied());
-                if let Some(callback) = callback {
-                    tree.fire_flash(callback, Some(argument));
+                    self.commands.push((command, argument));
                 }
             }
         }
@@ -332,6 +407,15 @@ impl FlashStage {
         Ok(out)
     }
 
+    /// Read `path` in every live movie, for a probe.
+    pub fn get_all(&mut self, path: &str) -> Result<String, String> {
+        let mut out = String::new();
+        for (id, live) in &mut self.movies {
+            out.push_str(&format!("{id}:{:?} ", live.player.get_variable(path)?));
+        }
+        Ok(out)
+    }
+
     /// A line per live movie, for a probe.
     pub fn describe(&self, tree: &WidgetTree) -> Vec<String> {
         self.movies
@@ -343,14 +427,14 @@ impl FlashStage {
             .collect()
     }
 
-    /// The movies on screen, back to front.
-    pub fn draws(&mut self, tree: &WidgetTree) -> Result<Vec<FlashDraw>, String> {
-        let mut order: Vec<(i32, u64)> = self.movies.keys().filter(|id| tree.shown(**id)).filter_map(|id| Some((tree.get(*id)?.z, *id))).collect();
-        order.sort();
-        let mut out = Vec::with_capacity(order.len());
-        for (_, id) in order {
-            let live = self.movies.get_mut(&id).ok_or("a movie vanished mid-frame")?;
-            out.push(FlashDraw { def: live.def.clone(), items: live.player.movie.draw()? });
+    /// The movies on screen, each with the z its widget draws at.
+    pub fn draws(&mut self, tree: &WidgetTree) -> Result<Vec<(i32, FlashDraw)>, String> {
+        let mut out = Vec::new();
+        for (id, live) in self.movies.iter_mut() {
+            let Some(w) = tree.get(*id) else { continue };
+            if tree.shown(*id) {
+                out.push((w.z, FlashDraw { def: live.def.clone(), items: live.player.movie.draw()? }));
+            }
         }
         Ok(out)
     }
