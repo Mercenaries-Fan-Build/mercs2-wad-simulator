@@ -259,6 +259,13 @@ impl Drop for Gui {
     }
 }
 
+/// One frame with no painter, as the tests draw it: the frame's texture uploads (the font atlas)
+/// have no renderer to go to, so they are cleared here, as [`Gui`]'s drop clears a hidden window's.
+#[cfg(test)]
+pub(crate) fn run_headless(ctx: &egui::Context, input: egui::RawInput, build: impl FnMut(&mut egui::Ui)) {
+    ctx.run_ui(input, build).textures_delta.clear();
+}
+
 /// The edge of the screen a [`held_side_panel`] sits on (egui keeps its own side type private).
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Side {
@@ -367,7 +374,7 @@ mod held_side_panel_tests {
         let mut shown = Vec::new();
         for _ in 0..frames {
             let input = egui::RawInput { screen_rect: Some(screen), ..Default::default() };
-            let _ = ctx.run_ui(input, |root| {
+            super::run_headless(&ctx, input, |root| {
                 let r = held_side_panel(root, Side::Right, "held", range(), width, egui::Frame::NONE, |ui| {
                     ui.allocate_space(egui::vec2(content_w, 10.0));
                 });
@@ -427,7 +434,7 @@ mod held_side_panel_tests {
         let mut shown = 0.0;
         for events in steps {
             let input = egui::RawInput { screen_rect: Some(screen), events, ..Default::default() };
-            let _ = ctx.run_ui(input, |root| {
+            super::run_headless(&ctx, input, |root| {
                 let r = held_side_panel(root, Side::Right, "held", range(), &mut width, egui::Frame::NONE, |ui| {
                     ui.allocate_space(egui::vec2(50.0, 10.0));
                 });
@@ -457,7 +464,7 @@ mod cjk_font_tests {
     const RETAIL: &str = "素敵だねえ。取引成立だ。ビバ！\u{3000}ベネズエラ！対戦車地雷";
 
     fn frame(ctx: &egui::Context) {
-        let _ = ctx.run_ui(egui::RawInput::default(), |_| {});
+        super::run_headless(ctx, egui::RawInput::default(), |_| {});
     }
 
     fn covers(ctx: &egui::Context, style: &egui::TextStyle) -> bool {
