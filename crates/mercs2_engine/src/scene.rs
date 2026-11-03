@@ -201,7 +201,7 @@ pub fn animate_assetstore(
     blend_sec: f32,
 ) {
     use mercs2_core::{AnimState, ModelRef, SkinPalette};
-    for (_e, (state, palette, mref)) in world
+    for (state, palette, mref) in world
         .query::<(&mut AnimState, &mut SkinPalette, &ModelRef)>()
         .iter()
     {
@@ -2998,7 +2998,7 @@ impl Scene {
 
         // Snapshot the drawable entities (copy out to release the world borrow before touching self).
         let mut items: Vec<DrawItem> = Vec::new();
-        for (e, (xform, mref, pal)) in world.query::<(&Transform, &ModelRef, &SkinPalette)>().iter() {
+        for (e, xform, mref, pal) in world.query::<(Entity, &Transform, &ModelRef, &SkinPalette)>().iter() {
             if let Some(base) = self.terrain_hidden {
                 if mref.model == base || self.models.get(&mref.model).is_some_and(|m| m.terrain_blend) {
                     continue;
