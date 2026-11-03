@@ -213,6 +213,8 @@ pub struct Player {
     /// Milliseconds of movie time.
     pub now: f64,
     pub fscommands: Vec<(String, String)>,
+    /// The host's FSCommand handler, run inside the `getURL` action that sends one.
+    pub fscommand_hook: Option<FsCommandHook>,
     pub traces: Vec<String>,
     /// Methods scripts called that do not exist here, for the gate to report.
     pub missing: BTreeSet<String>,
@@ -220,13 +222,30 @@ pub struct Player {
     pub keys: BTreeSet<u32>,
     last_key: u32,
     last_ascii: u32,
-    /// Listeners of `Key` and `Mouse`, the objects to send `onKeyDown` and the like.
+    /// Listeners of `Key`, `Stage` and `Mouse`, the objects to send `onKeyDown` and the like.
     key_listeners: Vec<Value>,
     stage_listeners: Vec<Value>,
+    mouse_listeners: Vec<Value>,
+    /// The pointer, in stage pixels.
     pub mouse: [f32; 2],
+    /// The button clip under the pointer, and the one the button went down on.
+    hover: Option<ClipId>,
+    pressed: Option<ClipId>,
     depth: u32,
     budget: u64,
     random: u64,
+}
+
+/// A host's FSCommand handler: given the command and its argument, it answers with the movie
+/// functions to call now (dotted paths from the root) and their arguments.
+pub type FsCommandHook = Rc<dyn Fn(&str, &str) -> Result<Vec<(String, Vec<Value>)>, String>>;
+
+/// The broadcasters a script registers listeners with.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Listeners {
+    Key,
+    Stage,
+    Mouse,
 }
 
 impl Player {
@@ -256,6 +275,7 @@ impl Player {
             next_interval: 1,
             now: 0.0,
             fscommands: Vec::new(),
+            fscommand_hook: None,
             traces: Vec::new(),
             missing: BTreeSet::new(),
             keys: BTreeSet::new(),
@@ -263,7 +283,10 @@ impl Player {
             last_ascii: 0,
             key_listeners: Vec::new(),
             stage_listeners: Vec::new(),
+            mouse_listeners: Vec::new(),
             mouse: [0.0; 2],
+            hover: None,
+            pressed: None,
             depth: 0,
             budget: MAX_ACTIONS,
             random: 0x2545_F491_4F6C_DD1D,
@@ -369,7 +392,7 @@ impl Player {
         self.movie.clip(parent)?.children.get(&depth).ok_or_else(|| format!("no object at depth {depth}"))
     }
 
-    fn field_mut(&mut self, parent: ClipId, depth: i32) -> Result<&mut Child, String> {
+    pub(crate) fn field_mut(&mut self, parent: ClipId, depth: i32) -> Result<&mut Child, String> {
         self.movie.clip_mut(parent)?.children.get_mut(&depth).ok_or_else(|| format!("no object at depth {depth}"))
     }
 
@@ -439,6 +462,18 @@ impl Player {
             return Ok(false);
         }
         let Some((parent, depth)) = self.child_slot(target)? else { return Ok(true) };
+        // A text field's size is its box: the text keeps its scale, the box's right or bottom edge moves.
+        if (name == "_width" || name == "_height") && matches!(target, Value::Field(..)) {
+            let child = self.field(parent, depth)?.clone();
+            let mut box_ = self.movie.edit_text(&child)?.bounds;
+            let m = child.matrix;
+            let (scale, lo, hi) = if name == "_width" { ((m.a * m.a + m.b * m.b).sqrt(), 0, 1) } else { ((m.c * m.c + m.d * m.d).sqrt(), 2, 3) };
+            if scale > 0.0 {
+                box_[hi] = box_[lo] + (number as f32 * 20.0 / scale).round() as i32;
+            }
+            self.field_mut(parent, depth)?.bounds = Some(box_);
+            return Ok(true);
+        }
         if name == "_width" || name == "_height" {
             let [xmin, xmax, ymin, ymax] = self.bounds(target)?;
             let (span, wide) = if name == "_width" { (xmax - xmin, true) } else { (ymax - ymin, false) };
@@ -517,10 +552,7 @@ impl Player {
                 let child = self.field(*p, *d)?.clone();
                 match &child.node {
                     Node::Text(_) => {
-                        let bounds = match self.movie.def.characters.get(&child.character) {
-                            Some(mercs2_formats::gfx_def::Character::EditText(t)) => t.bounds,
-                            _ => [0; 4],
-                        };
+                        let bounds = self.movie.edit_text(&child)?.bounds;
                         let m = child.matrix;
                         let corners = [(bounds[0], bounds[2]), (bounds[1], bounds[3])].map(|(x, y)| m.apply(x as f32, y as f32));
                         return Ok([corners[0][0], corners[1][0], corners[0][1], corners[1][1]]);
@@ -1020,14 +1052,19 @@ impl Player {
         Ok(if x.is_nan() || y.is_nan() { Value::Undefined } else { Value::Bool(x < y) })
     }
 
-    fn fscommand(&mut self, url: &str, target: &str) -> bool {
-        match url.strip_prefix("FSCommand:") {
-            Some(command) => {
-                self.fscommands.push((command.to_string(), target.to_string()));
-                true
+    /// `getURL "FSCommand:<command>" <argument>`. The host's handler runs here, inside the action, as
+    /// GFx calls its `FSCommandHandler`: the functions it asks for run before the next action does.
+    fn fscommand(&mut self, url: &str, target: &str) -> Result<bool, String> {
+        let Some(command) = url.strip_prefix("FSCommand:") else { return Ok(false) };
+        self.fscommands.push((command.to_string(), target.to_string()));
+        if let Some(hook) = self.fscommand_hook.clone() {
+            for (name, args) in hook(command, target)? {
+                if self.available(&name)? {
+                    self.call_path(&name, &args)?;
+                }
             }
-            None => false,
         }
+        Ok(true)
     }
 
     fn type_of(v: &Value) -> &'static str {
@@ -1330,7 +1367,7 @@ impl Player {
                     let mut parts = body.split(|b| *b == 0);
                     let url = String::from_utf8_lossy(parts.next().unwrap_or(&[])).into_owned();
                     let target = String::from_utf8_lossy(parts.next().unwrap_or(&[])).into_owned();
-                    if !self.fscommand(&url, &target) {
+                    if !self.fscommand(&url, &target)? {
                         return Err(format!("GetURL {url} {target}"));
                     }
                 }
@@ -1375,7 +1412,7 @@ impl Player {
                     let target = Self::pop(&mut stack);
                     let url = Self::pop(&mut stack);
                     let (url, target) = (self.to_text(&url)?, self.to_text(&target)?);
-                    if !self.fscommand(&url, &target) {
+                    if !self.fscommand(&url, &target)? {
                         return Err(format!("GetURL2 {url} {target}"));
                     }
                 }
@@ -1430,12 +1467,117 @@ impl Player {
         self.intervals.retain(|i| i.id != id);
     }
 
-    pub fn listeners(&mut self, stage: bool) -> &mut Vec<Value> {
-        if stage {
-            &mut self.stage_listeners
-        } else {
-            &mut self.key_listeners
+    pub fn listeners(&mut self, of: Listeners) -> &mut Vec<Value> {
+        match of {
+            Listeners::Key => &mut self.key_listeners,
+            Listeners::Stage => &mut self.stage_listeners,
+            Listeners::Mouse => &mut self.mouse_listeners,
         }
+    }
+
+    /// Every live clip, back to front: a clip, then what it holds by depth.
+    fn clips_back_to_front(&self, clip: ClipId, visible_only: bool, out: &mut Vec<ClipId>) -> Result<(), String> {
+        out.push(clip);
+        for child in self.movie.clip(clip)?.children.values() {
+            if let Node::Clip(id) = child.node {
+                if child.visible || !visible_only {
+                    self.clips_back_to_front(id, visible_only, out)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Whether the stage point, in twips, falls on what `clip` draws.
+    fn clip_hit(&mut self, clip: ClipId, x: f32, y: f32) -> Result<bool, String> {
+        let to_stage = self.global_matrix(&Value::Clip(clip))?;
+        for item in self.movie.draw_of(clip)? {
+            let Item::Draw(draw) = item else { continue };
+            let m = to_stage.then(&draw.matrix);
+            for part in draw.parts.iter() {
+                for tri in part.indices.chunks_exact(3) {
+                    let [a, b, c] = [tri[0], tri[1], tri[2]].map(|i| {
+                        let [vx, vy] = part.vertices[i as usize];
+                        m.apply(vx, vy)
+                    });
+                    let side = |p: [f32; 2], q: [f32; 2]| (q[0] - p[0]) * (y - p[1]) - (q[1] - p[1]) * (x - p[0]);
+                    let (d1, d2, d3) = (side(a, b), side(b, c), side(c, a));
+                    let negative = d1 < 0.0 || d2 < 0.0 || d3 < 0.0;
+                    let positive = d1 > 0.0 || d2 > 0.0 || d3 > 0.0;
+                    if !(negative && positive) {
+                        return Ok(true);
+                    }
+                }
+            }
+        }
+        Ok(false)
+    }
+
+    /// The topmost clip under the pointer that acts as a button: one with a press, release or roll
+    /// handler.
+    fn button_under_mouse(&mut self) -> Result<Option<ClipId>, String> {
+        const HANDLERS: [&str; 6] = ["onPress", "onRelease", "onReleaseOutside", "onRollOver", "onRollOut", "onDragOut"];
+        let mut order = Vec::new();
+        self.clips_back_to_front(self.movie.root, true, &mut order)?;
+        let [x, y] = [self.mouse[0] * 20.0, self.mouse[1] * 20.0];
+        for clip in order.into_iter().rev() {
+            let vars = self.vars(clip);
+            if HANDLERS.iter().any(|h| vars.own(h).is_some()) && self.clip_hit(clip, x, y)? {
+                return Ok(Some(clip));
+            }
+        }
+        Ok(None)
+    }
+
+    fn every_clip_event(&mut self, name: &str) -> Result<(), String> {
+        for clip in self.all_clips()? {
+            self.clip_event(clip, name)?;
+            self.run_queued()?;
+        }
+        Ok(())
+    }
+
+    /// The pointer moved to `(x, y)` in stage pixels.
+    pub fn mouse_move(&mut self, x: f32, y: f32) -> Result<(), String> {
+        self.mouse = [x, y];
+        self.notify(self.mouse_listeners.clone(), "onMouseMove")?;
+        self.every_clip_event("onMouseMove")?;
+        let now = self.button_under_mouse()?;
+        if now != self.hover {
+            let dragging = self.pressed.is_some();
+            if let Some(old) = self.hover {
+                self.clip_event(old, if dragging && self.pressed == Some(old) { "onDragOut" } else { "onRollOut" })?;
+            }
+            if let Some(new) = now {
+                self.clip_event(new, if dragging && self.pressed == Some(new) { "onDragOver" } else { "onRollOver" })?;
+            }
+            self.hover = now;
+            self.run_queued()?;
+        }
+        Ok(())
+    }
+
+    /// The primary button went down.
+    pub fn mouse_down(&mut self) -> Result<(), String> {
+        self.notify(self.mouse_listeners.clone(), "onMouseDown")?;
+        self.every_clip_event("onMouseDown")?;
+        self.pressed = self.hover;
+        if let Some(clip) = self.pressed {
+            self.clip_event(clip, "onPress")?;
+            self.run_queued()?;
+        }
+        Ok(())
+    }
+
+    /// The primary button came up.
+    pub fn mouse_up(&mut self) -> Result<(), String> {
+        self.notify(self.mouse_listeners.clone(), "onMouseUp")?;
+        self.every_clip_event("onMouseUp")?;
+        if let Some(clip) = self.pressed.take() {
+            self.clip_event(clip, if self.hover == Some(clip) { "onRelease" } else { "onReleaseOutside" })?;
+            self.run_queued()?;
+        }
+        Ok(())
     }
 
     pub fn last_key(&self) -> (u32, u32) {
@@ -1511,6 +1653,14 @@ impl Player {
 
     /// Call the function a dotted path names, the way the host's `Invoke` does.
     pub fn invoke(&mut self, path: &str, args: &[Value]) -> Result<Value, String> {
+        self.budget = MAX_ACTIONS;
+        let result = self.call_path(path, args)?;
+        self.run_queued()?;
+        Ok(result)
+    }
+
+    /// Call the function a dotted path names from the root, within whatever is running.
+    fn call_path(&mut self, path: &str, args: &[Value]) -> Result<Value, String> {
         let root = self.movie.root;
         let frame = Activation {
             code: Rc::new(Vec::new()),
@@ -1527,10 +1677,7 @@ impl Player {
             Some(at) => (self.resolve_path(&frame, &path[..at])?, &path[at + 1..]),
             None => (Value::Clip(root), path),
         };
-        self.budget = MAX_ACTIONS;
-        let result = self.call_method(&owner, name, args)?;
-        self.run_queued()?;
-        Ok(result)
+        self.call_method(&owner, name, args)
     }
 
     /// Whether a function can be called by this path, as the host's `IsAvailable`.
@@ -1552,6 +1699,27 @@ impl Player {
             None => (Value::Clip(root), path),
         };
         Ok(!matches!(self.get_member(&owner, name)?, Value::Undefined))
+    }
+
+    /// Read a value by dotted path from the root, as the host's `GetVariable`.
+    pub fn get_variable(&mut self, path: &str) -> Result<Value, String> {
+        let root = self.movie.root;
+        let frame = Activation {
+            code: Rc::new(Vec::new()),
+            pc: 0,
+            end: 0,
+            pool: Rc::new(Vec::new()),
+            registers: Vec::new(),
+            scope: Vec::new(),
+            function: false,
+            this: Value::Clip(root),
+            clip: root,
+        };
+        let (owner, name) = match path.rfind('.') {
+            Some(at) => (self.resolve_path(&frame, &path[..at])?, &path[at + 1..]),
+            None => (Value::Clip(root), path),
+        };
+        self.get_member(&owner, name)
     }
 
     /// Set a variable by path, as the host's `SetVariable`.
@@ -1637,7 +1805,47 @@ mod tests {
         let root = Value::Clip(p.movie.root);
         p.call(&add, &key, std::slice::from_ref(&root)).unwrap();
         p.call(&add, &key, std::slice::from_ref(&root)).unwrap();
-        assert_eq!(p.listeners(false).len(), 1);
+        assert_eq!(p.listeners(Listeners::Key).len(), 1);
+    }
+
+    #[test]
+    fn a_clip_with_a_press_handler_is_a_button_under_the_pointer() {
+        use mercs2_formats::gfx_def::{Fill, Record, Shape};
+        // A 100x100 px square (2000 twips) placed at depth 1 of the root as clip 2's only shape.
+        let square = Shape {
+            bounds: [0, 2000, 0, 2000],
+            fills: vec![Fill::Solid([255, 0, 0, 255])],
+            lines: Vec::new(),
+            records: vec![
+                Record::Style { move_to: Some((0, 0)), fill0: None, fill1: Some(1), line: None, styles: None },
+                Record::Line { dx: 2000, dy: 0 },
+                Record::Line { dx: 0, dy: 2000 },
+                Record::Line { dx: -2000, dy: 0 },
+                Record::Line { dx: 0, dy: -2000 },
+            ],
+        };
+        let sprite = Timeline {
+            declared_frames: 1,
+            frames: vec![vec![Control::Place(Place { depth: 1, character: Some(1), ..Place::default() })]],
+            ..Timeline::default()
+        };
+        let mut def = MovieDef { stage: [0, 12800, 0, 7200], frame_rate: 30.0, ..MovieDef::default() };
+        def.characters.insert(1, Character::Shape(square));
+        def.characters.insert(2, Character::Sprite(sprite));
+        def.timeline = Timeline {
+            declared_frames: 1,
+            frames: vec![vec![Control::Place(Place { depth: 1, character: Some(2), name: Some("b".into()), ..Place::default() })]],
+            ..Timeline::default()
+        };
+        let mut p = Player::new(Movie::new(Rc::new(def)).unwrap()).unwrap();
+        let (_, child) = p.movie.find_child(p.movie.root, "b").unwrap().expect("the clip is placed");
+        let Node::Clip(b) = child.node else { panic!("b is a clip") };
+        let handler = p.global.get("isNaN").unwrap();
+        p.vars(b).set("onPress", handler);
+        p.mouse_move(50.0, 50.0).unwrap();
+        assert_eq!(p.hover, Some(b));
+        p.mouse_move(150.0, 50.0).unwrap();
+        assert_eq!(p.hover, None);
     }
 
     #[test]
@@ -1720,6 +1928,22 @@ mod tests {
         assert_eq!(p.fscommands, [("hello".to_string(), "world".to_string())]);
     }
 
+    /// The handler's calls land between the `getURL` and the action after it: here its `stop()`
+    /// comes before the movie's own `play()`, so the clip ends up playing.
+    #[test]
+    fn an_fscommand_handler_runs_before_the_next_action() {
+        let mut p = player(vec![vec![]]);
+        p.fscommand_hook = Some(Rc::new(|command, _| Ok(if command == "halt" { vec![("stop".to_string(), Vec::new())] } else { Vec::new() })));
+        let mut code = vec![0x83];
+        let body = b"FSCommand:halt\0\0";
+        code.extend((body.len() as u16).to_le_bytes());
+        code.extend(body);
+        code.push(0x06);
+        let root = p.movie.root;
+        p.run_action(root, Rc::new(code)).expect("run");
+        assert!(p.movie.clip(root).expect("root").playing);
+    }
+
     #[test]
     fn attach_movie_makes_a_named_clip_above_the_timeline() {
         let mut p = player(vec![vec![]]);
@@ -1741,6 +1965,23 @@ mod tests {
         assert_eq!(num(p.get_member(&kid, "_alpha").expect("get")), 50.0);
         assert!(matches!(p.get_member(&kid, "_visible").expect("get"), Value::Bool(false)));
         assert!(matches!(p.get_member(&kid, "_parent").expect("get"), Value::Clip(0)));
+    }
+
+    #[test]
+    fn a_text_fields_width_is_its_box_not_its_scale() {
+        use mercs2_formats::gfx_def::EditText;
+        let mut def = MovieDef::default();
+        def.stage = [0, 25600, 0, 14400];
+        let field = EditText { bounds: [-100, 4300, 0, 400], height: 240, text: "W".into(), ..EditText::default() };
+        def.characters.insert(3, Character::EditText(field));
+        def.timeline.frames = vec![vec![Control::Place(Place { depth: 1, character: Some(3), name: Some("t".into()), ..Place::default() })]];
+        let mut p = Player::new(Movie::new(Rc::new(def)).expect("movie")).expect("player");
+        let t = get(&mut p, "t");
+        p.set_member(&t, "_width", Value::Number(25.0)).expect("set");
+        assert_eq!(num(p.get_member(&t, "_width").expect("get")), 25.0);
+        assert_eq!(num(p.get_member(&t, "_xscale").expect("get")), 100.0);
+        let Value::Field(parent, depth) = t else { panic!("a field") };
+        assert_eq!(p.field(parent, depth).expect("field").bounds, Some([-100, 400, 0, 400]));
     }
 
     #[test]
