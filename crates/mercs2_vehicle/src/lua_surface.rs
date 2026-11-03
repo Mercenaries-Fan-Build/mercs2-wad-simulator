@@ -41,7 +41,7 @@ use crate::components::{
 /// Resolve a gameplay handle (`uGuid`) to its ECS entity.
 pub fn resolve(world: &World, handle: u32) -> Option<Entity> {
     world
-        .query::<&Vehicle>()
+        .query::<(Entity, &Vehicle)>()
         .iter()
         .find(|(_e, v)| v.handle == handle)
         .map(|(e, _)| e)
@@ -65,7 +65,7 @@ pub fn get_riders(world: &World, vehicle: Entity) -> Vec<Entity> {
 /// `Vehicle.GetFromRider(uRider)` — which vehicle an actor is riding (scan seats).
 pub fn get_from_rider(world: &World, rider: Entity) -> Option<Entity> {
     world
-        .query::<&Seating>()
+        .query::<(Entity, &Seating)>()
         .iter()
         .find(|(_v, s)| s.seats.iter().any(|seat| seat.occupant == Some(rider)))
         .map(|(v, _)| v)
@@ -73,7 +73,7 @@ pub fn get_from_rider(world: &World, rider: Entity) -> Option<Entity> {
 
 /// `Vehicle.GetSeatFromRider(uRider)` — `(vehicle, seat index)` the actor occupies.
 pub fn get_seat_from_rider(world: &World, rider: Entity) -> Option<(Entity, usize)> {
-    for (v, s) in world.query::<&Seating>().iter() {
+    for (v, s) in world.query::<(Entity, &Seating)>().iter() {
         if let Some(i) = s.seats.iter().position(|seat| seat.occupant == Some(rider)) {
             return Some((v, i));
         }
