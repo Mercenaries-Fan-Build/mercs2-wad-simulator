@@ -757,6 +757,7 @@ fn contribution_name(c: &Contribution) -> String {
         | Contribution::AddMovie { name, .. }
         | Contribution::AddLanguage { name, .. }
         | Contribution::AddLevel { name, .. }
+        | Contribution::LevelAsset { name, .. }
         | Contribution::AddUi { name, .. } => name.clone(),
         Contribution::AddShopItem { id, .. } => id.clone(),
         Contribution::AddSound { bank, .. } => bank.clone(),
@@ -933,6 +934,7 @@ pub const KINDS: &[(&str, &[(&str, &str, &str)])] = &[
             ("replace_stringdb_text", "Rewrite text", "Rewrite strings by exact text match"),
             ("add_language", "New language", "Add a new selectable language (new base WAD)"),
             ("add_level", "New level", "Add a level the game boots by name (new base WAD)"),
+            ("level_asset", "Level asset", "One asset of a level, in its PC form"),
         ],
     ),
     (
@@ -1282,8 +1284,13 @@ fn stub(kind: &str, n: usize) -> Option<Contribution> {
         "add_level" => Contribution::AddLevel {
             name,
             display: "My Level".into(),
-            wad: PathBuf::from("src/level.wad"),
             streams: Vec::new(),
+        },
+        "level_asset" => Contribution::LevelAsset {
+            level: "my_level".into(),
+            asset_type: "model".into(),
+            name,
+            rungs: Vec::new(),
         },
         "add_shop_item" => Contribution::AddShopItem {
             id: format!("my_item_{n}"),
@@ -2592,10 +2599,17 @@ fn contribution_form(
                 "forks `base` (default english) into a new `.\\Data\\<name>.wad` + overlay stringdb.",
             );
         }
-        Contribution::AddLevel { name, display, wad, streams } => {
+        Contribution::LevelAsset { level, asset_type, name, rungs } => {
+            commit |= theme::text_field(ui, "Level", level, "dlc01", theme::FieldState::Neutral).lost_focus();
+            commit |= theme::text_field(ui, "Type", asset_type, "model", theme::FieldState::Neutral).lost_focus();
+            commit |= theme::text_field(ui, "Name", name, "0x00000000", theme::FieldState::Neutral).lost_focus();
+            for r in rungs.iter_mut() {
+                commit |= source_row(ui, "Rung", &mut r.file, root, &["ucfx"]);
+            }
+        }
+        Contribution::AddLevel { name, display, streams } => {
             commit |= theme::text_field(ui, "Level", name, "dlc01", theme::FieldState::Neutral).lost_focus();
             commit |= theme::text_field(ui, "Display", display, "My Level", theme::FieldState::Neutral).lost_focus();
-            commit |= source_row(ui, "WAD", wad, root, &["wad"]);
             for s in streams.iter_mut() {
                 commit |= source_row(ui, "Stream", s, root, &["pws"]);
             }
@@ -3345,6 +3359,10 @@ fn blast_rows(c: &Contribution) -> Vec<(String, String)> {
                 "Merge".to_string(),
                 "new .\\Data\\<name>-patch.wad above a copy of vz.wad \u{2014} additive".to_string(),
             ),
+        ],
+        Contribution::LevelAsset { level, asset_type, .. } => vec![
+            ("Adds".to_string(), format!("{asset_type} to level {level}")),
+            ("Merge".to_string(), "compiled into its level's patch".to_string()),
         ],
         // Discovery is filesystem order, so two plugins on one address have no load order that
         // resolves them — it has to be exclusive.
