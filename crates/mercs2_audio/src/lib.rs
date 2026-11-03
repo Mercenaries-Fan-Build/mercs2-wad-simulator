@@ -304,6 +304,20 @@ mod tests {
     // ---- 5. facade smoke: banks, categories, VO, lib version ------------------------------------
 
     #[test]
+    fn a_banks_soundbank_and_wavebank_complete_apart() {
+        use crate::banks::BankKind;
+        let mut eng = AudioEngine::default();
+        assert!(eng.load_bank_with_callback("ui_shell", BankKind::Sound, 1));
+        assert!(eng.load_bank_with_callback("ui_shell", BankKind::Wave, 2));
+        assert_eq!(eng.banks.pending(), vec![("ui_shell".to_string(), BankKind::Sound), ("ui_shell".to_string(), BankKind::Wave)]);
+        eng.banks.complete_load("ui_shell", BankKind::Sound);
+        assert_eq!(eng.banks.drain_callbacks(), vec![1]);
+        eng.banks.complete_load("ui_shell", BankKind::Wave);
+        assert_eq!(eng.banks.drain_callbacks(), vec![2]);
+        assert!(eng.banks.pending().is_empty());
+    }
+
+    #[test]
     fn facade_surface_smoke() {
         let mut eng = AudioEngine::default();
         assert_eq!(eng.get_lib_version(), 12.0);
@@ -311,7 +325,7 @@ mod tests {
         // Banks: request → tick → complete → resident, and the callback fires.
         assert!(eng.load_sound_bank("sfx_common", Some(7)));
         eng.tick(0.016);
-        eng.banks.complete_load("sfx_common");
+        eng.banks.complete_load("sfx_common", crate::banks::BankKind::Sound);
         assert!(eng.banks.is_loaded("sfx_common"));
         assert_eq!(eng.banks.drain_callbacks(), vec![7]);
 
