@@ -2556,7 +2556,7 @@ mod tests {
             ..Default::default()
         };
         let mut acts = Vec::new();
-        let _ = ctx.run_ui(input, |root| {
+        crate::gui::run_headless(ctx, input, |root| {
             egui::Panel::left("nav").show(root, |ui| acts.extend(navigator(ui, p)));
             egui::Panel::right("inspector").show(root, |ui| acts.extend(inspector(ui, p)));
             egui::Panel::bottom("verbs").show(root, |ui| ui.horizontal(|ui| acts.extend(verbs(ui, p))));
