@@ -19,7 +19,7 @@ use crate::lut::DonutLut;
 /// component set and dispatches by [`Vehicle::class`] to the matching actor (`applyAction`). Wheel
 /// rays are grounded on `phys` (the `PhysicsQuery` seam).
 pub fn drive_step_system(world: &mut World, phys: &dyn PhysicsQuery, lut: &DonutLut, dt: f32) {
-    for (_e, (veh, xform, body, ctrl, wheels, tuning, rt)) in world
+    for (veh, xform, body, ctrl, wheels, tuning, rt) in world
         .query::<(
             &Vehicle,
             &mut Transform,
@@ -63,7 +63,7 @@ fn pump_ring(world: &mut World, ring: &mut CommandRing, channel: u8) {
         return;
     }
     for rec in records {
-        for (_e, (veh, ctrl)) in world.query::<(&Vehicle, &mut VehicleControls)>().iter() {
+        for (veh, ctrl) in world.query::<(&Vehicle, &mut VehicleControls)>().iter() {
             if veh.handle == rec.target {
                 handle_command(veh.class, ctrl, &rec);
             }
