@@ -1,6 +1,6 @@
 [package]
 name = "mercs2_mod_runtime"
-version = "0.4.0"
+version = "0.5.0"
 description = "m2-sdk.dll: the one runtime every Mercenaries 2 mod shares in the game process"
 edition = "2024"
 license = "MIT"
