@@ -2547,7 +2547,7 @@ impl StreamingWorld {
         if self.anim_store.is_empty() {
             return;
         }
-        for (_e, (state, palette, mref)) in world
+        for (state, palette, mref) in world
             .query::<(&mut AnimState, &mut SkinPalette, &ModelRef)>()
             .iter()
         {
