@@ -753,24 +753,7 @@ pub(crate) struct BootConfig {
     pub save: Option<mercs2_engine::script_host::BootSaveState>,
 }
 
-/// Translate a parsed save into the boot payload the master script's `LoadSingleton` reads. The field
-/// mapping is one-to-one with `MrxMissionFlow.SaveSingleton` (`mrxmissionflow.lua:597`), which is where
-/// these same fields were serialized from.
-fn boot_save_from(state: &mercs2_formats::save::SaveState) -> mercs2_engine::script_host::BootSaveState {
-    mercs2_engine::script_host::BootSaveState {
-        flow_keys: state.completed_flow.iter().map(|(k, v)| (k.clone(), *v)).collect(),
-        culled_bindings: state.flow_chain.clone(),
-        active_missions: state.active_missions.iter().map(|m| m.id.clone()).collect(),
-        // The resume-spawn gate: a mid-contract save carries its checkpoint marker(s), which keeps the
-        // master script off the `Pmc_Entry1` (PMC hub) path. See `BootSaveState::retry_locations`.
-        retry_locations: state.retry_locations.clone(),
-        layers: state.layers.clone(),
-        transit_enabled: state.transit_enabled,
-        transit_zones: state.transit_zones.clone(),
-    }
-}
-
-fn boot_config_from(sel: Option<&std::path::Path>) -> BootConfig {
+fn boot_config_from(sel: Option<&std::path::Path>) -> Result<BootConfig, String> {
     // Retail new game = Mattias, upgrade tier 0, wardrobe untouched → his base/default skin
     // (matches the user's observed fresh retail saves).
     //
@@ -787,7 +770,7 @@ fn boot_config_from(sel: Option<&std::path::Path>) -> BootConfig {
         hero_character: "mattias".into(),
         save: None,
     };
-    let Some(path) = sel else { return new_game("new game") };
+    let Some(path) = sel else { return Ok(new_game("new game")) };
     let parsed = std::fs::read(path)
         .map_err(|e| e.to_string())
         .and_then(|b| mercs2_formats::save::parse(&b));
@@ -812,23 +795,22 @@ fn boot_config_from(sel: Option<&std::path::Path>) -> BootConfig {
                 crate::hero::hero(hero_idx).display,
                 crate::hero::look_label(hero_idx, prof.upgrade_index, 0),
             );
-            // A save whose Lua payload wouldn't decode still RESUMES — it is not a new game. Handing the
-            // master script an empty-but-present table keeps it on the resume branch (Pmc_Entry1) rather
-            // than silently replaying the intro.
-            let save = Some(state.as_ref().map(boot_save_from).unwrap_or_default());
-            BootConfig {
+            // The master script loads the save's own payload; one that won't decode cannot be resumed.
+            let save = mercs2_engine::script_host::BootSaveState::from_profile(&prof)
+                .map_err(|e| format!("save {}: {e}", path.display()))?;
+            Ok(BootConfig {
                 recruits,
                 stockpile,
                 models,
                 label,
                 contract: prof.active_contract().to_string(),
                 hero_character: hero_character_name(hero_idx).to_string(),
-                save,
-            }
+                save: Some(save),
+            })
         }
         Err(e) => {
             println!("[shell] save {} unreadable ({e}) — booting new game", path.display());
-            new_game("new game (save unreadable)")
+            Ok(new_game("new game (save unreadable)"))
         }
     }
 }
@@ -1224,7 +1206,10 @@ impl Mercs2Game {
     /// `sel = None` is **New Game**: no save reaches the script host, so the master script takes its
     /// new-game branch and the hero starts at the opening contract instead of inside the PMC HQ.
     pub(crate) fn apply_boot(&mut self, sel: Option<std::path::PathBuf>) {
-        let cfg = boot_config_from(sel.as_deref());
+        let cfg = boot_config_from(sel.as_deref()).unwrap_or_else(|e| {
+            eprintln!("[shell] FATAL: {e}");
+            panic!("the picked save cannot be loaded: {e}");
+        });
         // The PMC interior is the HQ the player only occupies once they own it — the HUB resume
         // (between contracts). That is exactly the branch `xQ!L.LoadSingleton` marks `_bPmcRequired`:
         // a save with NO `retry_locations` (no live mid-contract checkpoint). A MID-CONTRACT save
@@ -1669,20 +1654,21 @@ impl mercs2_engine::app::Game for Mercs2Game {
                 .unwrap_or_else(|e| panic!("[stream] {e}"));
                 stream.settled()
             });
-            // The game's own answer, unconditionally. `Pg.Spawn(hero, x,y,z)` at the end of
-            // `CreatePlayerCharacter` is where retail places the hero, so whatever it produced wins over
-            // the provisional guess above — including on the interior boot, where the flow resolves
-            // `Pmc_Entry1` against the live marker entity rather than a derived hardpoint.
-            match self.script_host.borrow_mut().take_hero_spawn() {
-                Some(p) => {
-                    self.player.pos = Vec3::new(p[0], p[1], p[2]);
-                    println!("[world] hero spawn via boot Lua flow: ({:.1}, {:.1}, {:.1})", p[0], p[1], p[2]);
-                }
-                None => println!(
-                    "[world] boot Lua flow produced no hero spawn — keeping the provisional position \
-                     ({:.1}, {:.1}, {:.1}). The flow's CreatePlayerCharacter never reached Pg.Spawn.",
-                    self.player.pos.x, self.player.pos.y, self.player.pos.z
+            // The game's own answer, unconditionally: where the boot left the hero — spawned at its
+            // start marker, then wherever the scripts moved it (the HQ's `_TeleportHero` into the
+            // interior), or the vehicle they seated it in (a New Game's opening boat). It wins over the
+            // provisional guess above.
+            let host = self.script_host.borrow();
+            let p = host.hero_position().unwrap_or_else(|| {
+                panic!("the boot settled without placing the hero: CreatePlayerCharacter never reached Pg.Spawn")
+            });
+            self.player.pos = Vec3::new(p[0], p[1], p[2]);
+            match host.hero_seat() {
+                Some((vehicle, seat)) => println!(
+                    "[world] hero after the boot: ({:.1}, {:.1}, {:.1}), seated {seat:?} in {vehicle:#x}",
+                    p[0], p[1], p[2]
                 ),
+                None => println!("[world] hero after the boot: ({:.1}, {:.1}, {:.1})", p[0], p[1], p[2]),
             }
         }
 
