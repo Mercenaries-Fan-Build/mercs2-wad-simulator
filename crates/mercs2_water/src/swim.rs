@@ -47,7 +47,7 @@ pub fn update_swim_state(
 ) -> usize {
     use mercs2_core::Transform;
     let mut n = 0;
-    for (_e, (sw, tf)) in world.query::<(&mut Swimmer, &Transform)>().iter() {
+    for (sw, tf) in world.query::<(&mut Swimmer, &Transform)>().iter() {
         let p = tf.translation;
         let sample = watermap.sample(p.x, p.z);
         let feet_y = p.y + sw.feet_offset;
