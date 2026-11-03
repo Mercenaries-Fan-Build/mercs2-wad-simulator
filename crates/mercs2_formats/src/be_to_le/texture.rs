@@ -22,7 +22,7 @@ use super::convert::{swap16_blocks, untile_surface};
 use crate::dlc_input::{read_be_block, IndxEntry};
 use crate::ffcs::load_ffcs_archive;
 use crate::texture_encode::{decode_dxt_surface, encode_bc3};
-use crate::types::{TYPE_HASH_TEXTURE, TYPE_ID_TEXTURE};
+use crate::types::{TYPE_HASH_MODEL, TYPE_HASH_TEXTURE, TYPE_ID_TEXTURE};
 
 /// `INFO +8` bit of a normal map. An Xbox one in DXT1 is DXT5 on PC, all 2,770 of them.
 const FLAG_NORMAL: u16 = 0x10;
@@ -76,13 +76,45 @@ pub struct ConsoleTexture {
     pub masks: [u16; 4],
     /// The split of the second table of a 42-byte `INFO`, in the same order.
     pub split: Option<[u16; 4]>,
+    /// A PS3 body: PC's mips, linear and in PC's byte order.
+    pub linear: bool,
 }
 
 impl ConsoleTexture {
-    /// Read a 34- or 42-byte big-endian `INFO`.
+    /// Read a 25-byte PS3 `INFO`. Bit `0x20` of PC's flags is not on PS3; PC reads only bit 0.
+    fn parse_ps3(info: &[u8]) -> Result<Self, String> {
+        let word = |o: usize| u16::from_be_bytes([info[o], info[o + 1]]);
+        if word(8) != 2 {
+            return Err(format!("PS3 kind {} is not one a DLC texture was seen to use", word(8)));
+        }
+        let format = match info[11] {
+            0x86 => 0x52,
+            0x88 => 0x54,
+            b => return Err(format!("PS3 format byte 0x{b:02X} is not one a DLC texture was seen to use")),
+        };
+        Ok(Self {
+            width: word(0) as usize,
+            height: word(2) as usize,
+            depth: word(4),
+            mips: word(6) as usize,
+            flags: u16::from(info[12]),
+            kind: 1,
+            reserved: 1,
+            format,
+            bias: [info[13], info[14], info[15], info[16]],
+            masks: [word(23), word(21), word(19), word(17)],
+            split: None,
+            linear: true,
+        })
+    }
+
+    /// Read a big-endian `INFO`: 34 or 42 bytes from Xbox, 25 from PS3.
     pub fn parse(info: &[u8]) -> Result<Self, String> {
+        if info.len() == 25 {
+            return Self::parse_ps3(info);
+        }
         if info.len() != 34 && info.len() != 42 {
-            return Err(format!("an Xbox texture INFO is 34 or 42 bytes, not {}", info.len()));
+            return Err(format!("a console texture INFO is 25, 34 or 42 bytes, not {}", info.len()));
         }
         let word = |o: usize| u16::from_be_bytes([info[o], info[o + 1]]);
         let table = |o: usize| [word(o + 6), word(o + 4), word(o + 2), word(o)];
@@ -98,6 +130,7 @@ impl ConsoleTexture {
             bias: [info[18], info[19], info[20], info[21]],
             masks: table(26),
             split: (info.len() == 42).then(|| table(34)),
+            linear: false,
         })
     }
 
@@ -155,6 +188,9 @@ impl ConsoleTexture {
     /// after another, every face of a cube at each, with the faces' tails last.
     pub fn untile(&self, mask: u16, tiled: &[u8]) -> Result<Vec<Mip>, String> {
         let f = xbox_format(self.format)?;
+        if self.linear {
+            return self.split_linear(mask, tiled, &f);
+        }
         let first_tail = self.first_tail_mip();
         let (mut out, mut pos) = (Vec::new(), 0usize);
         let mut tails = vec![None::<(Vec<u8>, usize)>; self.faces()];
@@ -204,6 +240,24 @@ impl ConsoleTexture {
         Ok(out)
     }
 
+    /// A linear rung's `BODY` as its mips, largest first, a texture of one face.
+    fn split_linear(&self, mask: u16, body: &[u8], f: &Format) -> Result<Vec<Mip>, String> {
+        let (mut out, mut pos) = (Vec::new(), 0usize);
+        for mip in (0..self.mips).filter(|m| mask >> m & 1 != 0) {
+            let (wpx, hpx) = self.mip_px(mip);
+            let size = wpx.div_ceil(f.block_px) * hpx.div_ceil(f.block_px) * f.pitch;
+            let bytes = body.get(pos..pos + size).ok_or_else(|| {
+                format!("mip {mip} of a {}x{} texture runs past a {} byte body", self.width, self.height, body.len())
+            })?;
+            out.push(Mip { face: 0, mip, bytes: bytes.to_vec() });
+            pos += size;
+        }
+        if pos != body.len() {
+            return Err(format!("mask 0x{mask:X} of a {}x{} texture covers {pos} of a {} byte body", self.width, self.height, body.len()));
+        }
+        Ok(out)
+    }
+
     /// One mip's bytes as PC stores them. A DXT1 normal keeps X and Y in red and green; PC keeps Y in
     /// the colour block and X in alpha.
     fn pc_mip(&self, mip: &Mip) -> Result<Vec<u8>, String> {
@@ -246,6 +300,10 @@ impl ConsoleTexture {
         put(30, p1);
         put(32, p0);
         out[14..18].copy_from_slice(&format);
+        // A PS3 bake keeps PC's 0x10.
+        if self.linear {
+            out[8..10].copy_from_slice(&self.flags.to_le_bytes());
+        }
         out[18..22].copy_from_slice(&[self.bias[3], self.bias[2], self.bias[1], self.bias[0]]);
         out[22..26].copy_from_slice(&(total as u32).to_le_bytes());
         Ok(out)
@@ -325,6 +383,8 @@ pub struct TextureTable {
     folded: HashMap<u32, Vec<Mip>>,
     /// Textures with a 42-byte `INFO` and no `_P001`: no pixels in this archive. The base game has them.
     empty: HashSet<u32>,
+    /// Each model's material flags, which its lower rungs' chunks do not hold.
+    material_flags: HashMap<u32, Vec<u16>>,
 }
 
 impl TextureTable {
@@ -339,6 +399,11 @@ impl TextureTable {
         let mut present: HashMap<u32, [bool; 4]> = HashMap::new();
         for i in 0..n {
             let (bytes, rung) = block(i)?;
+            for (hash, chunk) in typed_chunks(&bytes, TYPE_HASH_MODEL).map_err(|e| format!("block {i}: {e}"))? {
+                if let Some(mtrl) = row_bytes(chunk, b"MTRL")? {
+                    table.material_flags.insert(hash, super::ps3_model::material_flags(mtrl).map_err(|e| format!("0x{hash:08X}: {e}"))?);
+                }
+            }
             for (hash, chunk) in texture_chunks(&bytes).map_err(|e| format!("block {i}: {e}"))? {
                 let rung = rung.ok_or_else(|| format!("block {i} holds texture 0x{hash:08X} and names no rung"))?;
                 if row_bytes(chunk, b"BODY")?.is_some_and(|b| !b.is_empty()) {
@@ -394,9 +459,25 @@ impl TextureTable {
         )
     }
 
+    /// A table of big-endian model chunks' materials alone, for converting models with no textures.
+    pub fn of_models<'a>(chunks: impl Iterator<Item = (u32, &'a [u8])>) -> Result<Self, String> {
+        let mut table = Self::default();
+        for (hash, chunk) in chunks {
+            if let Some(mtrl) = row_bytes(chunk, b"MTRL")? {
+                table.material_flags.insert(hash, super::ps3_model::material_flags(mtrl).map_err(|e| format!("0x{hash:08X}: {e}"))?);
+            }
+        }
+        Ok(table)
+    }
+
     /// A texture whose chunk has nothing to carry, left for the base game to serve.
     pub fn is_empty_stub(&self, hash: u32) -> bool {
         self.empty.contains(&hash)
+    }
+
+    /// The flags of a model's materials, from whichever of its chunks holds `MTRL`.
+    pub fn material_flags(&self, hash: u32) -> Option<&[u16]> {
+        self.material_flags.get(&hash).map(Vec::as_slice)
     }
 
     /// The mips of a rung in PC order and form.
@@ -477,6 +558,7 @@ pub fn untile_dxt_chain(tiled: &[u8], width: usize, height: usize, fourcc: &[u8;
         bias: [0; 4],
         masks: [0xFFFF, 0, 0, 0],
         split: None,
+        linear: false,
     };
     Ok(tex.untile((1u32 << mips) as u16 - 1, tiled)?.into_iter().flat_map(|m| m.bytes).collect())
 }
@@ -487,7 +569,58 @@ mod tests {
     use super::*;
 
     fn tex(w: usize, h: usize, mips: usize, masks: [u16; 4], split: Option<[u16; 4]>) -> ConsoleTexture {
-        ConsoleTexture { width: w, height: h, depth: 1, mips, flags: 0, kind: 1, reserved: 1, format: 0x52, bias: [0; 4], masks, split }
+        ConsoleTexture { width: w, height: h, depth: 1, mips, flags: 0, kind: 1, reserved: 1, format: 0x52, bias: [0; 4], masks, split, linear: false }
+    }
+
+    /// A 25-byte PS3 `INFO` of a 16x16 DXT1 with mips 0 and 1 in `_P001`, mip 2 in `_P000`.
+    fn ps3_info(flags: u8) -> Vec<u8> {
+        let mut info = vec![0u8; 25];
+        for (o, v) in [(0, 16u16), (2, 16), (4, 1), (6, 3), (8, 2), (10, 0x86), (17, 0), (19, 0), (21, 3), (23, 4)] {
+            info[o..o + 2].copy_from_slice(&v.to_be_bytes());
+        }
+        info[12] = flags;
+        info[13..17].copy_from_slice(&[0x40, 0x80, 0, 0]);
+        info
+    }
+
+    #[test]
+    fn a_ps3_info_reads_as_pc_fields() {
+        let t = ConsoleTexture::parse(&ps3_info(0x0E)).unwrap();
+        assert_eq!((t.width, t.mips, t.flags, t.format), (16, 3, 0x0E, 0x52));
+        assert_eq!(t.masks, [4, 3, 0, 0]);
+        let pc = t.pc_info().unwrap();
+        assert_eq!(&pc[14..18], b"DXT1");
+        assert_eq!(&pc[18..22], &[0, 0, 0x80, 0x40], "the float reverses");
+        assert_eq!(u16::from_le_bytes([pc[8], pc[9]]), 0x0E);
+        assert_eq!(u16::from_le_bytes([pc[32], pc[33]]), 4, "_P000's mask");
+    }
+
+    #[test]
+    fn a_ps3_rung_is_its_mips_as_stored() {
+        let t = ConsoleTexture::parse(&ps3_info(0)).unwrap();
+        let body: Vec<u8> = (0..160).collect();
+        let mips = t.untile(3, &body).unwrap();
+        assert_eq!(mips.iter().map(|m| m.bytes.len()).collect::<Vec<_>>(), [128, 32]);
+        assert_eq!(mips[1].bytes[0], 128);
+        assert!(t.untile(3, &body[..159]).is_err());
+    }
+
+    #[test]
+    fn a_ps3_dxt1_normal_stays_flagged_and_turns_dxt5() {
+        let t = ConsoleTexture::parse(&ps3_info(0x10)).unwrap();
+        let pc = t.pc_info().unwrap();
+        assert_eq!(&pc[14..18], b"DXT5");
+        assert_eq!(u16::from_le_bytes([pc[8], pc[9]]), 0x10);
+    }
+
+    #[test]
+    fn a_ps3_kind_or_format_no_dlc_texture_uses_is_an_error() {
+        let mut cube = ps3_info(0);
+        cube[9] = 4;
+        assert!(ConsoleTexture::parse(&cube).is_err());
+        let mut other = ps3_info(0);
+        other[11] = 0x85;
+        assert!(ConsoleTexture::parse(&other).is_err());
     }
 
     /// Write one DXT1 block of `value` into a tiled surface at block `(x, y)`, words big-endian.
@@ -511,7 +644,7 @@ mod tests {
         assert_eq!(t.masks, [0, 0x7C, 3, 0]);
         assert_eq!(t.split, Some([0x78, 4, 3, 0]));
         assert_eq!(t.pc_masks(), [0x78, 4, 3, 0]);
-        assert!(ConsoleTexture::parse(&info[..25]).is_err());
+        assert!(ConsoleTexture::parse(&info[..26]).is_err());
     }
 
     #[test]
