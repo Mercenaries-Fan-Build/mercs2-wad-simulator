@@ -429,10 +429,10 @@ mod tests {
         tick(&mut rt, &mut world);
 
         // Exactly one Character-bundle actor was realized (a person, not a prop).
-        let mut people = world.query::<(&Human, &Transform, &Perception, &PerceptionRecord, &Health, &HumanAnimationSet, &AnimController, &AiFaction)>();
+        let mut people = world.query::<(Entity, &Human, &Transform, &Perception, &PerceptionRecord, &Health, &HumanAnimationSet, &AnimController, &AiFaction)>();
         let realized: Vec<_> = people.iter().collect();
         assert_eq!(realized.len(), 1, "a fired population spawner must realize ONE full Character");
-        let (e, (_hum, t, _perc, _rec, health, anim, _ctrl, faction)) = realized[0];
+        let (e, _hum, t, _perc, _rec, health, anim, _ctrl, faction) = realized[0];
         assert_eq!(t.translation, Vec3::new(10.0, 0.0, 0.0), "placed at the spawner's anchor");
         assert_eq!(health.max, 100.0, "killable (combat bundle)");
         assert_eq!(anim.character, PERSON, "the animation set is keyed to the unit template");
@@ -450,7 +450,7 @@ mod tests {
         let mut world = World::new();
         tick(&mut rt, &mut world);
         let mut q = world.query::<(&Vehicle, &ModelRef)>();
-        let hits: Vec<_> = q.iter().map(|(_, (v, m))| (v.class, m.model)).collect();
+        let hits: Vec<_> = q.iter().map(|(v, m)| (v.class, m.model)).collect();
         assert_eq!(hits, vec![(VehicleClass::Car, CAR_MODEL)]);
     }
 
@@ -478,7 +478,7 @@ mod tests {
         let mut q = world.query::<(&ModelRef, &SkinPalette, &AnimController)>();
         let hits: Vec<_> = q.iter().collect();
         assert_eq!(hits.len(), 1, "one spawned Character with the render+anim attach");
-        let (_e, (mref, pal, ctrl)) = hits[0];
+        let (mref, pal, ctrl) = hits[0];
         assert_eq!(mref.model, PERSON_MODEL, "ModelRef names the resident template model");
         assert_eq!(pal.mats.len(), 3, "SkinPalette sized to the template's bone count");
         assert_eq!(ctrl.clip, idle, "AnimController started on the resident idle clip");
@@ -497,7 +497,7 @@ mod tests {
         let mut world = World::new();
         tick(&mut rt, &mut world);
 
-        let mut q = world.query::<&ModelRef>();
+        let mut q = world.query::<(Entity, &ModelRef)>();
         let hits: Vec<_> = q.iter().collect();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].1.model, PERSON_MODEL, "the Character still references its template model");
