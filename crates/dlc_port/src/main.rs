@@ -51,8 +51,8 @@ use mercs2_formats::aset_type_ids::{
 use mercs2_formats::dlc_input::{
     parse_be_aset, parse_be_ffcs, parse_be_indx, parse_be_pths, read_be_block,
 };
-use mercs2_formats::dlc_stfs::{extract_stfs_from_rar, load_stfs_or_doh_with_streams, RarExtractor};
-use mercs2_formats::patch_wad::{build_patch_wad_multi, AsetEntry, PatchBlock, FFCS_CERT_BLOB};
+use mercs2_formats::dlc_stfs::{extract_stfs_from_rar, load_stfs_or_doh, load_stfs_or_doh_with_streams, RarExtractor};
+use mercs2_formats::patch_wad::{build_patch_wad_multi, rung_chain, AsetEntry, PatchBlock, FFCS_CERT_BLOB};
 use mercs2_formats::sges::{compress_sges, decompress_sges};
 use mercs2_formats::ucfx::parse_block_entry_table;
 use mercs2_formats::be_to_le::audio::StreamTable;
@@ -61,6 +61,7 @@ use ucfx_byteswap::convert::{convert_block, QUIET};
 use ucfx_byteswap::ecs::ComponentSchemas;
 use ucfx_byteswap::lua::LuaTools;
 
+use dlc_port::components;
 use dlc_port::xbox_doh_oracle::{is_ps3_compact_decl_rejection, primary_name_hash_be, XboxDohOracle};
 
 #[derive(Parser)]
@@ -85,12 +86,23 @@ struct Cli {
     /// The player's PC vz.wad, whose `schm` chunks lay out the DLC's compact ECS containers
     #[arg(long, value_name = "VZ_WAD")]
     vz_wad: PathBuf,
-    /// STFS container, raw DLC01.doh, or PS3 BE SCFF file
-    #[arg(long)]
+    /// PS3 .pkg, STFS container, raw DLC01.doh, or PS3 BE SCFF file
+    #[arg(long, alias = "package")]
     x360_stfs: Option<PathBuf>,
     /// Output vz-patch.wad path
     #[arg(short, long)]
     output: Option<PathBuf>,
+    /// A Shipment folder to write the DLC into as components, instead of a WAD: one file per asset
+    /// rung under `src/level`, and the manifest's contributions. PS3 is read first; `--xbox-doh-oracle`
+    /// supplies the models PS3 cannot.
+    #[arg(long, value_name = "FOLDER", conflicts_with = "output")]
+    shipment: Option<PathBuf>,
+    /// The level the Shipment adds, its master script and `<name>_base` layer
+    #[arg(long, default_value = "dlc01")]
+    level: String,
+    /// The label a level selector shows
+    #[arg(long, default_value = "Blow It Up Again")]
+    display: String,
     /// List blocks and exit
     #[arg(long)]
     list_blocks: bool,
@@ -174,11 +186,11 @@ fn run() -> Result<(), String> {
     // ucfx_byteswap so its own BE→LE pass is silent; the main loop
     // re-asserts QUIET below anyway for the same reason.
     let xbox_doh_oracle: Option<XboxDohOracle> = match &cli.xbox_doh_oracle {
-        Some(p) => {
+        Some(p) if cli.shipment.is_none() => {
             println!("Step 1b: Loading Xbox-DOH side oracle from {}...", p.display());
             Some(XboxDohOracle::load(p, &lua_tools, &schemas, &base_textures)?)
         }
-        None => None,
+        _ => None,
     };
 
     // ── Step 2: parse BE FFCS ──
@@ -203,6 +215,42 @@ fn run() -> Result<(), String> {
             let p = pths.get(i).map(String::as_str).unwrap_or("?");
             println!("  [{i}] pages={} packed=0x{:08X} {p}", e.page_count, e.packed_field);
         }
+        return Ok(());
+    }
+
+    if let Some(root) = &cli.shipment {
+        println!("Reading texture rungs...");
+        let textures = TextureTable::from_doh(&doh, &indx, &pths, &base_textures)?;
+        println!("Re-encoding the {} streams...", package_files.len());
+        let streams = StreamTable::read(num_blocks, |i| read_be_block(&doh, &indx[i]), &package_files)?;
+        QUIET.store(true, Ordering::Relaxed);
+        let source = components::Archive { doh: &doh, indx: &indx, paths: &pths, textures: &textures, streams: Some(&streams) };
+        let mut converted = components::convert(&source, &lua_tools, &schemas, |_, _| true)?;
+        println!("  {} chunks converted, {} assets refused", converted.chunks.len(), converted.refused.len());
+        let mut kinds = std::collections::BTreeMap::new();
+        for (_, ty) in &converted.refused {
+            *kinds.entry(mercs2_formats::types::type_name_from_hash(*ty)).or_insert(0usize) += 1;
+        }
+        for (kind, n) in &kinds {
+            println!("    {n} {kind}");
+        }
+        if !converted.refused.is_empty() {
+            let second = cli.xbox_doh_oracle.as_ref().ok_or("some PS3 chunks do not convert: name the Xbox package with --xbox-doh-oracle")?;
+            let (xbox, _) = load_stfs_or_doh(second)?;
+            let (_, tables) = parse_be_ffcs(&xbox)?;
+            let row = tables.iter().find(|r| r.tag == "INDX").ok_or("Missing INDX")?;
+            let x_indx = parse_be_indx(&xbox, row.offset as usize, row.meta as usize);
+            let x_pths = tables.iter().find(|r| r.tag == "PTHS").map(|r| parse_be_pths(&xbox, r.offset as usize, r.meta as usize)).unwrap_or_default();
+            let x_textures = TextureTable::from_doh(&xbox, &x_indx, &x_pths, &base_textures)?;
+            let x = components::Archive { doh: &xbox, indx: &x_indx, paths: &x_pths, textures: &x_textures, streams: None };
+            let refused = converted.refused.clone();
+            let donor = components::convert(&x, &lua_tools, &schemas, |n, t| refused.contains(&(n, t)))?;
+            println!("  {} chunks of those assets from {}", donor.chunks.len(), second.display());
+            components::substitute(&mut converted.chunks, &refused, donor.chunks)?;
+        }
+        let carried = components::carried(converted.chunks, &cli.vz_wad)?;
+        println!("  {} chunks carried", carried.len());
+        components::write_shipment(root, &cli.level, &cli.display, &carried, &streams)?;
         return Ok(());
     }
 
@@ -492,13 +540,6 @@ fn run() -> Result<(), String> {
 /// reverse of PC's (`docs/aset_format.md`).
 fn xbox_row_rungs(u1: u32, u2: u32) -> [u16; 4] {
     [u2 as u16, (u2 >> 16) as u16, u1 as u16, (u1 >> 16) as u16]
-}
-
-/// An asset's source block per rung as ASET words: `([_P002 | _P003], _P001)`, `0xFFFF` for an absent
-/// rung. The engine stops at the first absent rung, so a rung past a gap is absent too.
-fn rung_chain(blocks: [Option<u32>; 4]) -> (u32, u32) {
-    let rung = |r: usize| if blocks[..=r].iter().all(Option::is_some) { blocks[r].map_or(0xFFFF, |b| b & 0xFFFF) } else { 0xFFFF };
-    ((rung(2) << 16) | rung(3), rung(1))
 }
 
 fn main() -> ExitCode {
