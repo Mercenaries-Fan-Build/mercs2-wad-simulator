@@ -387,9 +387,9 @@ mod tests {
         assert_eq!(all_humans, 3, "every human is visible to a humanoid system");
 
         let driven: Vec<_> = w
-            .query::<(&HumanState, &PlayerControlled)>()
+            .query::<(crate::Entity, &HumanState, &PlayerControlled)>()
             .iter()
-            .map(|(e, (_, p))| (e, p.slot))
+            .map(|(e, _, p)| (e, p.slot))
             .collect();
         assert_eq!(driven, vec![(hero, 0)], "only the annotated human is player-driven");
     }
