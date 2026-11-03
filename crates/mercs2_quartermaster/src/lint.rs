@@ -2776,15 +2776,35 @@ pub fn lint(
                     });
                 }
             }
-            Contribution::AddLevel { name, wad, streams, .. } => {
+            Contribution::LevelAsset { level, asset_type, name, rungs } => {
+                let mut refuse = |message: String| {
+                    out.push(Diagnostic { rule: M0311_LEVEL_UNUSABLE, severity: Severity::Error, message, at: Some(index), fix: None })
+                };
+                if !manifest.contributions.iter().any(|c| matches!(c, Contribution::AddLevel { name: n, .. } if n == level)) {
+                    refuse(format!("level_asset {name:?}: this Shipment has no add_level {level:?}"));
+                }
+                if mercs2_formats::types::type_by_name(asset_type).is_none() {
+                    refuse(format!("level_asset {name:?}: no asset type is named {asset_type:?}"));
+                }
+                if rungs.is_empty() {
+                    refuse(format!("level_asset {name:?}: it has no rungs"));
+                }
+                for (i, r) in rungs.iter().enumerate() {
+                    match crate::level::block_refusal(&r.block) {
+                        Some(why) => refuse(format!("level_asset {name:?}: {why}")),
+                        None if mercs2_formats::be_to_le::texture::rung_of_path(&r.block) != Some(i) => {
+                            refuse(format!("level_asset {name:?}: rung {i} of its chain is in {}", r.block));
+                        }
+                        None => {}
+                    }
+                }
+            }
+            Contribution::AddLevel { name, streams, .. } => {
                 let mut refuse = |message: String| {
                     out.push(Diagnostic { rule: M0311_LEVEL_UNUSABLE, severity: Severity::Error, message, at: Some(index), fix: None })
                 };
                 if let Some(why) = crate::build::wad_name_refusal("add_level", name) {
                     refuse(format!("add_level name {name:?}: {why}"));
-                }
-                if !wad.extension().is_some_and(|e| e.eq_ignore_ascii_case("wad")) {
-                    refuse(format!("add_level wad {}: not a .wad file", wad.display()));
                 }
                 for s in streams {
                     let file = s.file_name().and_then(|f| f.to_str()).unwrap_or_default().to_ascii_lowercase();
