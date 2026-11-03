@@ -59,7 +59,7 @@ pub fn projectile_system_impacts(
 ) -> u32 {
     let mut outcomes: Vec<Outcome> = Vec::new();
 
-    for (pe, p) in world.query::<&mut RuntimeProjectile>().iter() {
+    for (pe, p) in world.query::<(Entity, &mut RuntimeProjectile)>().iter() {
         // Update::Gravity — +Y up, so gravity subtracts from vy.
         p.vel.y -= p.gravity * dt;
         // Update::Movement — integrate.
@@ -163,7 +163,7 @@ pub fn explosion_system_impacts(
     //    gather borrows the world immutably.
     let mut to_gather: Vec<(Entity, Option<Entity>, Vec3, crate::stats::ExplosiveStats, crate::damage::DamageKey)> =
         Vec::new();
-    for (ee, ex) in world.query::<&RuntimeExplosion>().iter() {
+    for (ee, ex) in world.query::<(Entity, &RuntimeExplosion)>().iter() {
         if !ex.applied {
             to_gather.push((ee, ex.owner, ex.pos, ex.stats, ex.damage_key));
         }
@@ -182,7 +182,7 @@ pub fn explosion_system_impacts(
     // 2) Update pass: age every gathered blast, apply victims whose distance-stagger countdown elapsed,
     //    and despawn a blast once every victim is applied or its lifetime is spent.
     let mut blasts: Vec<(Entity, Option<Entity>, Vec3, crate::damage::DamageKey)> = Vec::new();
-    for (ee, ex) in world.query::<&RuntimeExplosion>().iter() {
+    for (ee, ex) in world.query::<(Entity, &RuntimeExplosion)>().iter() {
         if ex.applied {
             blasts.push((ee, ex.owner, ex.pos, ex.damage_key));
         }
