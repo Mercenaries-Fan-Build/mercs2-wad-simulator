@@ -50,7 +50,7 @@ fn best_target(
     let aim = aim.normalize_or_zero();
     let max_angle = max_angle_deg.to_radians();
     let mut best: Option<(Entity, f32)> = None;
-    for (e, (tf, _h)) in world.query::<(&Transform, &Health)>().iter() {
+    for (e, tf, _h) in world.query::<(Entity, &Transform, &Health)>().iter() {
         if e == shooter {
             continue;
         }
@@ -84,7 +84,7 @@ pub fn homing_lock_system(world: &mut World, dt: f32, bus: &mut EventBus) {
     }
     let mut decisions = Vec::new();
 
-    for (we, w) in world.query::<&RuntimeWeapon>().iter() {
+    for (we, w) in world.query::<(Entity, &RuntimeWeapon)>().iter() {
         let Some(h) = w.stats.homing else { continue };
         let cand = best_target(world, w.owner, w.muzzle, w.aim_dir, h.lock_on_max_angle, h.lock_on_max_distance);
 
@@ -191,7 +191,7 @@ pub fn homing_flight_system(
     }
     let mut steps = Vec::new();
 
-    for (me, m) in world.query::<&RuntimeHomingWeapon>().iter() {
+    for (me, m) in world.query::<(Entity, &RuntimeHomingWeapon)>().iter() {
         // Refresh the target handle (it may have moved or died).
         let target_pos = world.get::<&Transform>(m.target).ok().map(|t| t.translation);
 
