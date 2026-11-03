@@ -56,6 +56,7 @@ mod layer;
 mod terrain_cell;
 mod gfx_golden;
 mod prof_samples;
+mod splice_emu;
 mod we_template;
 
 use mercs2_engine::diag;
@@ -82,8 +83,13 @@ fn usage() -> ! {
          \x20 gfx-golden <movies_dir> --md <report.md> --json <index.json>   (no WAD needed)\n\
          \x20 gfx-decode <movies_dir>                       (decode every movie's definitions; no WAD needed)\n\
          \x20 gfx-render <movie.gfx> <frames> <out.png> [--fonts <font.gfx>] [--goto <label>] <images.wad>...   (play a movie, write its last frame)\n\
-         \x20 gfx-shell <out.png> [wait:<frames>|down:<button>|up:<button>|call:<name>]... <wad, last mounted first>...   (boot the shipped shell headless)\n\
+         \x20 gfx-shell <out.png> <width>x<height> [wait:<frames>|down:<button>|up:<button>|mouse:<x>,<y>,<buttons>|call:<name>|key:<id>|pad:<vendor>,<product>,<name>|held:<input>,...|get:<path>]... <wad, last mounted first>...   (boot the shipped shell headless, movies from the last WAD's Movies folder)\n\
          \x20 gfx-actions <movie.gfx> <out.txt>   (write a movie's ActionScript as text)\n\
+         \x20 gfx-tags <movie.gfx> <out.txt>   (write a movie's display lists as text: places, removes, scripts, labels per frame)\n\
+         \x20 bink-audio <movie.bik> <track index> <out.s16> [<other.s16>]   (decode a track; compare with another decode)\n\
+         \x20 bink-video <movie.bik> <frames> <reference.yuv>   (decode the first frames; compare with a yuv420p decode)\n\
+         \x20 splice-emulate <image.bin> <start VA> [--reg name=value]... [--arg value]... [--byte address=value]... [--dword address=value]... [--steps N]   (run a SecuROM splice through a decrypted dump with sentinel registers; report what it read, wrote, called and returned)\n\
+         \x20 bink-frame <movie.bik> <frame> <out.png>   (one frame as the game's movie widget draws it, with decode and colour-conversion times)\n\
          \x20 gfx-run <movies_dir> <frames>                 (play every movie; report script failures and gaps)\n\
          \x20 ess-live [--addr host:port] [--menu <scripts-rel path>] [--spawn <template>] [--spawn-dist <m>]   (live game, no WAD)\n\
          \x20 ess-menu-check --ess <Ess.lua> <menu.lua> [<menu.lua> ...]   (exact Lua 5.1, engine stubbed, no WAD)\n\
@@ -721,6 +727,47 @@ fn main() {
         }
         return;
     }
+    if cmd == "bink-audio" {
+        let (Some(movie), Some(track), Some(out)) = (args.first(), args.get(1).and_then(|t| t.parse::<usize>().ok()), args.get(2)) else {
+            eprintln!("bink-audio: usage: mercs2_probe bink-audio <movie.bik> <track index> <out.s16> [<other.s16>]");
+            std::process::exit(2);
+        };
+        let against = args.get(3).map(std::path::Path::new);
+        if let Err(e) = gfx_golden::bink_audio(std::path::Path::new(movie), track, std::path::Path::new(out), against) {
+            eprintln!("bink-audio failed: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    if cmd == "bink-video" {
+        let (Some(movie), Some(frames), Some(against)) = (args.first(), args.get(1).and_then(|f| f.parse::<u32>().ok()), args.get(2)) else {
+            eprintln!("bink-video: usage: mercs2_probe bink-video <movie.bik> <frames> <reference.yuv>");
+            std::process::exit(2);
+        };
+        if let Err(e) = gfx_golden::bink_video(std::path::Path::new(movie), frames, std::path::Path::new(against)) {
+            eprintln!("bink-video failed: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    if cmd == "splice-emulate" {
+        if let Err(e) = splice_emu::run(&args) {
+            eprintln!("splice-emulate failed: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    if cmd == "bink-frame" {
+        let (Some(movie), Some(index), Some(out)) = (args.first(), args.get(1).and_then(|f| f.parse::<u32>().ok()), args.get(2)) else {
+            eprintln!("bink-frame: usage: mercs2_probe bink-frame <movie.bik> <frame> <out.png>");
+            std::process::exit(2);
+        };
+        if let Err(e) = gfx_golden::bink_frame(std::path::Path::new(movie), index, std::path::Path::new(out)) {
+            eprintln!("bink-frame failed: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
     if cmd == "gfx-actions" {
         let (Some(movie), Some(out)) = (args.first(), args.get(1)) else {
             eprintln!("gfx-actions: usage: mercs2_probe gfx-actions <movie.gfx> <out.txt>");
@@ -732,13 +779,25 @@ fn main() {
         }
         return;
     }
-    if cmd == "gfx-shell" {
-        let Some(out) = args.first() else {
-            eprintln!("gfx-shell: usage: mercs2_probe gfx-shell <out.png> [wait:<frames>|down:<button>|up:<button>]... <wad, last mounted first>...");
+    if cmd == "gfx-tags" {
+        let (Some(movie), Some(out)) = (args.first(), args.get(1)) else {
+            eprintln!("gfx-tags: usage: mercs2_probe gfx-tags <movie.gfx> <out.txt>");
             std::process::exit(2);
         };
-        let (wads, steps): (Vec<String>, Vec<String>) = args[1..].iter().cloned().partition(|a| a.ends_with(".wad"));
-        if let Err(e) = gfx_golden::gfx_shell(std::path::Path::new(out), &steps, &wads) {
+        if let Err(e) = gfx_golden::gfx_tags(std::path::Path::new(movie), std::path::Path::new(out)) {
+            eprintln!("gfx-tags failed: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    if cmd == "gfx-shell" {
+        let screen = args.get(1).and_then(|s| s.split_once('x')).and_then(|(w, h)| Some([w.parse::<u32>().ok()?, h.parse::<u32>().ok()?]));
+        let (Some(out), Some(screen)) = (args.first(), screen) else {
+            eprintln!("gfx-shell: usage: mercs2_probe gfx-shell <out.png> <width>x<height> [wait:<frames>|down:<button>|up:<button>|mouse:<x>,<y>,<buttons>|call:<name>|key:<id>|pad:<vendor>,<product>,<name>|held:<input>,...|get:<path>]... <wad, last mounted first>...");
+            std::process::exit(2);
+        };
+        let (wads, steps): (Vec<String>, Vec<String>) = args[2..].iter().cloned().partition(|a| a.ends_with(".wad"));
+        if let Err(e) = gfx_golden::gfx_shell(std::path::Path::new(out), screen, &steps, &wads) {
             eprintln!("gfx-shell failed: {e}");
             std::process::exit(1);
         }
