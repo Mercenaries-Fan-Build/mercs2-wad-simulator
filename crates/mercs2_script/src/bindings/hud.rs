@@ -67,13 +67,20 @@ pub fn pump_hud_callbacks(lua: &Lua, host: &SharedHost, dt: f32) -> LuaResult<()
     }
     let flash = host.borrow_mut().hud().map(|t| t.take_flash_fires()).unwrap_or_default();
     for (id, param) in flash {
-        let entry = cbs.borrow().fns.get(&id).cloned();
-        if let Some((f, mut args)) = entry {
-            if let Some(param) = param {
-                args.push(Value::String(lua.create_string(&param)?));
-            }
-            f.call_attr::<()>(mercs2_luac::rt::MultiValue::from_vec(args), "Hud.Flash")?;
+        fire_flash(lua, id, param)?;
+    }
+    Ok(())
+}
+
+/// Run one Flash event handler (`SetFlashEventHandler`) as `fCallback(unpack(tData), sParam)`.
+pub fn fire_flash(lua: &Lua, id: u32, param: Option<String>) -> LuaResult<()> {
+    let Some(cbs) = lua.app_data_ref::<Cbs>().map(|c| c.clone()) else { return Ok(()) };
+    let entry = cbs.borrow().fns.get(&id).cloned();
+    if let Some((f, mut args)) = entry {
+        if let Some(param) = param {
+            args.push(Value::String(lua.create_string(&param)?));
         }
+        f.call_attr::<()>(mercs2_luac::rt::MultiValue::from_vec(args), "Hud.Flash")?;
     }
     Ok(())
 }
@@ -441,9 +448,42 @@ pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
     wset!("SetWidgetIgnoresPause", bool, |w, v| { w.ignores_pause = v; });
     wset!("SetWidgetSleep", bool, |w, v| { w.sleep = v; });
     wset!("SetWidgetHighlightable", bool, |w, v| { w.highlightable = v; });
-    wset!("SetWidgetAnchoring", i64, |w, v| { w.anchoring = v as u32; });
+    // `Widget:SetAnchoring` passes both axes (`mrxguibase.lua:808`). `0x005B5E70`: below −0.5 is
+    // left/top, above 0.5 right/bottom, anything else centre; a missing axis keeps its value.
+    let hh = host.clone();
+    b.real("SetWidgetAnchoring", lua.create_function(move |_, (wid, h, v): (i64, Option<f64>, Option<f64>)| {
+        let side = |n: f64| if n < -0.5 { -1 } else if n > 0.5 { 1 } else { 0 };
+        if let Some(w) = hh.borrow_mut().hud().and_then(|t| t.get_mut(wid as u64)) {
+            if let Some(h) = h {
+                w.anchoring[0] = side(h);
+            }
+            if let Some(v) = v {
+                w.anchoring[1] = side(v);
+            }
+        }
+        Ok(())
+    })?)?;
+    // `0x005B6E10` takes a boolean and raises without one.
+    wset!("SetWidgetUseResolutionCorrection", bool, |w, v| { w.use_resolution_correction = v; });
     wset!("SetWidgetViewport", i64, |w, v| { w.viewport = v as i32; });
-    wset!("SetWidgetFullscreen", bool, |w, v| { w.fullscreen = v; });
+    let hh = host.clone();
+    b.real("SetWidgetFullscreen", lua.create_function(move |_, (wid, mode): (i64, Value)| {
+        use mercs2_ui::Fullscreen;
+        let mode = match &mode {
+            Value::Nil | Value::Boolean(false) => Fullscreen::Off,
+            Value::Boolean(true) => Fullscreen::On,
+            Value::String(s) => match s.to_string_lossy().to_ascii_lowercase().as_str() {
+                "pan and scan" => Fullscreen::PanAndScan,
+                "letterbox" => Fullscreen::Letterbox,
+                other => return Err(mercs2_luac::rt::Error::RuntimeError(format!("SetWidgetFullscreen: no mode {other:?}"))),
+            },
+            other => return Err(mercs2_luac::rt::Error::RuntimeError(format!("SetWidgetFullscreen: a {} is not a mode", other.type_name()))),
+        };
+        if let Some(w) = hh.borrow_mut().hud().and_then(|t| t.get_mut(wid as u64)) {
+            w.fullscreen = mode;
+        }
+        Ok(())
+    })?)?;
 
     // --- tree / z-order ---
     for (name, front) in [("PushWidgetToFront", true), ("PushWidgetToBack", false)] {
@@ -533,8 +573,8 @@ pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
     });
     // `MovieWidget:Play(bLoop)` (`mrxguibase.lua:1391`). Starting playback re-arms the end latch, so a
     // widget replayed after its callback already fired can complete again.
-    wset!("PlayMovie", Option<bool>, |w, _v| {
-        if let Some(m) = w.movie.as_mut() { m.playing = true; m.end_fired = false; }
+    wset!("PlayMovie", Option<bool>, |w, v| {
+        if let Some(m) = w.movie.as_mut() { m.playing = true; m.end_fired = false; m.looping = v.unwrap_or(false); }
     });
     wset!("PauseMovie", Option<bool>, |w, _v| { if let Some(m) = w.movie.as_mut() { m.playing = false; } });
     // Stop is an explicit cancel: it must NOT fire the end callback, or a script that stops a movie
@@ -790,7 +830,7 @@ pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
     wget!("GetWidgetHighlightable", |w| w.highlightable, false);
     wget!("GetWidgetIgnoresPause", |w| w.ignores_pause, false);
     wget!("GetWidgetSleep", |w| w.sleep, false);
-    wget!("GetWidgetAnchoring", |w| w.anchoring as i64, 0i64);
+    wget!("GetWidgetAnchoring", |w| (w.anchoring[0] as i64, w.anchoring[1] as i64), (0i64, 0i64));
     // Four returns, not two — see the `SetWidgetLocation` note above.
     wget!("GetWidgetLocation",
         |w| (w.location[0], w.location[1], w.location[2], w.location[3]),
@@ -838,7 +878,7 @@ pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
         "SetSpriteFrameSize", "SetMovieFile", "PlayMovie", "PauseMovie", "StopMovie", "SetFlashSwfFile",
         "SetFlashPlaySpeed", "PlayFlash", "PauseFlash", "RestartFlash", "SetFlashCallback",
         "CallFlashScriptFunction", "SendFlashInput", "SendFlashLeftAnalogInput", "SendFlashRightAnalogInput",
-        "SetWidgetUpdateCallback", "MinimapSetRotation",
+        "SetWidgetUpdateCallback", "SetWidgetUseResolutionCorrection", "MinimapSetRotation",
         "MinimapSetRange", "SetMinimapRadius", "SetMinimapOwner", "MinimapSetPlayerLocation",
         "MinimapSetFocusLocation", "MinimapAddObjective", "MinimapRemoveObjective",
     ];
