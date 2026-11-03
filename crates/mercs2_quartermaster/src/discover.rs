@@ -366,10 +366,10 @@ impl Contribution {
             // The translation file, checked by the same source rules as every other `src/` path. `base`
             // is a table NAME, not a file, so there is nothing else to pack.
             Contribution::AddLanguage { strings, .. } => out.push(("strings", strings.as_path())),
-            Contribution::AddLevel { wad, streams, .. } => {
-                out.push(("wad", wad.as_path()));
+            Contribution::AddLevel { streams, .. } => {
                 out.extend(streams.iter().map(|s| ("streams", s.as_path())));
             }
+            Contribution::LevelAsset { rungs, .. } => out.extend(rungs.iter().map(|r| ("rungs", r.file.as_path()))),
             Contribution::NativeHook { plugin, .. } => {
                 if let Some(p) = plugin {
                     out.push(("plugin", p.as_path()));
