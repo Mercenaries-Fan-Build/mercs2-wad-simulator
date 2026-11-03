@@ -93,6 +93,20 @@ impl Decoded {
 /// LEFT child inline — pre-order). The dispatch mirrors the HCT VM switch exactly; see the opcode
 /// table in the module docs. A clean tree yields `error = None` and `consumed == code.len()`.
 pub fn decode(code: &[u8]) -> Decoded {
+    walk(code, false)
+}
+
+/// Bytes of a chunk of a [`decode_chunked`] MOPP.
+const CHUNK: usize = 512;
+
+/// [`decode`] of a PS3 MOPP: 512-byte chunks padded with `0xCD`, joined by opcode `0x0C`, a jump to the
+/// chunk numbered by its BE16 operand, with the walk's key base unchanged. The PC VM has no such opcode,
+/// so a PC body never holds this form: [`crate::phy2_moppswap::rebake_phy2_mopps`] replaces it.
+pub fn decode_chunked(code: &[u8]) -> Decoded {
+    walk(code, true)
+}
+
+fn walk(code: &[u8], chunked: bool) -> Decoded {
     let mut keys = Vec::new();
     let mut consumed = vec![false; code.len()];
     let mut error: Option<String> = None;
@@ -154,6 +168,10 @@ pub fn decode(code: &[u8]) -> Decoded {
                     kb = be(code, pc + 1, 4);
                     pc += 5;
                 } // key_base = BE32 (absolute)
+                0x0c if chunked => {
+                    need!(3);
+                    pc = be(code, pc + 1, 2) as usize * CHUNK;
+                } // JUMP to a chunk
                 0x10..=0x1c => {
                     // SPLIT (axis 0x10–0x12; 26-DOP 0x13–0x1c share this layout): hdr 4, RIGHT @ +code[+3].
                     need!(4);
@@ -359,7 +377,7 @@ pub struct MoppInfo {
 /// The leaf shape-key emitted for triangle `t` is exactly `t` (its index into `tris`), so
 /// `decode(encode(tris, verts).0)` recovers the input triangle-index set. Structure: an axis-aligned
 /// median-split BVH; internal nodes are axis splits (`0x10–0x12`, or `0x23–0x25` when the inline
-/// subtree exceeds 255 bytes), leaves are `0x0b <BE32 idx>` + `0x30` (absolute key, delta 0).
+/// subtree exceeds 255 bytes), leaves are [`leaf`]s.
 ///
 /// The smaller child is always placed inline and the larger at the encoded offset, which bounds every
 /// offset by half the tree size. Past 65,535 bytes the offset child is reached through a JUMP24
@@ -370,6 +388,25 @@ pub struct MoppInfo {
 /// of range of `verts` still encodes (its centroid falls back to the origin) — the decoder is
 /// geometry-agnostic. Returns an empty-tree `[0x00]` for zero triangles.
 pub fn encode(tris: &[[u32; 3]], verts: &[[f32; 3]]) -> (Vec<u8>, MoppInfo) {
+    let keys: Vec<u32> = (0..tris.len() as u32).collect();
+    encode_keyed(tris, verts, &keys)
+}
+
+/// The shortest terminal that emits `key` over the root's key base of 0.
+fn leaf(key: u32) -> Vec<u8> {
+    let [a, b, c, d] = key.to_be_bytes();
+    match key {
+        0..=0x1F => vec![0x30 + d],
+        0x20..=0xFF => vec![0x50, d],
+        0x100..=0xFFFF => vec![0x51, c, d],
+        0x1_0000..=0xFF_FFFF => vec![0x52, b, c, d],
+        _ => vec![0x53, a, b, c, d],
+    }
+}
+
+/// [`encode`] where triangle `t` emits `keys[t]`: a mesh of several subparts keys a triangle by its
+/// subpart and its place there, not by its place in the mesh.
+pub fn encode_keyed(tris: &[[u32; 3]], verts: &[[f32; 3]], keys: &[u32]) -> (Vec<u8>, MoppInfo) {
     // Quantization frame from the vertex AABB (uniform scale on the widest axis).
     let (mut lo, mut hi) = ([f32::MAX; 3], [f32::MIN; 3]);
     for v in verts {
@@ -449,6 +486,7 @@ pub fn encode(tris: &[[u32; 3]], verts: &[[f32; 3]]) -> (Vec<u8>, MoppInfo) {
     fn emit(
         idx: &mut [usize],
         tri: &[Tri],
+        keys: &[u32],
         q_up: &dyn Fn(f32, usize) -> u8,
         q_down: &dyn Fn(f32, usize) -> u8,
     ) -> (Vec<u8>, [f32; 3], [f32; 3]) {
@@ -460,17 +498,7 @@ pub fn encode(tris: &[[u32; 3]], verts: &[[f32; 3]]) -> (Vec<u8>, MoppInfo) {
             }
         }
         if idx.len() == 1 {
-            // Leaf: absolute key = triangle index. 0x0b <BE32 idx> then 0x30 (delta 0).
-            let t = idx[0] as u32;
-            let bytes = vec![
-                0x0b,
-                (t >> 24) as u8,
-                (t >> 16) as u8,
-                (t >> 8) as u8,
-                t as u8,
-                0x30,
-            ];
-            return (bytes, slo, shi);
+            return (leaf(keys[idx[0]]), slo, shi);
         }
 
         // Split axis = widest centroid spread; median split keeps the tree balanced.
@@ -488,8 +516,8 @@ pub fn encode(tris: &[[u32; 3]], verts: &[[f32; 3]]) -> (Vec<u8>, MoppInfo) {
         let mid = idx.len() / 2;
         let (left, right) = idx.split_at_mut(mid);
 
-        let (lb, llo, lhi) = emit(left, tri, q_up, q_down);
-        let (rb, rlo, rhi) = emit(right, tri, q_up, q_down);
+        let (lb, llo, lhi) = emit(left, tri, keys, q_up, q_down);
+        let (rb, rlo, rhi) = emit(right, tri, keys, q_up, q_down);
         // Place the SMALLER subtree inline (offset 0) so the offset field stays ≤ half the tree —
         // keeps the u8/BE16 offset valid for large meshes. `first` = inline (LEFT position → its MAX
         // is `code[+1]`); `second` = offset (RIGHT position → its MIN is `code[+2]`).
@@ -506,7 +534,7 @@ pub fn encode(tris: &[[u32; 3]], verts: &[[f32; 3]]) -> (Vec<u8>, MoppInfo) {
     }
 
     let mut idx: Vec<usize> = (0..tris.len()).collect();
-    let (code, _lo, _hi) = emit(&mut idx, &tri, &q_up, &q_down);
+    let (code, _lo, _hi) = emit(&mut idx, &tri, keys, &q_up, &q_down);
     (code, info)
 }
 
@@ -523,8 +551,7 @@ pub fn encode(tris: &[[u32; 3]], verts: &[[f32; 3]]) -> (Vec<u8>, MoppInfo) {
 /// and `Rmin = 0x00` (offset child's lower bound = bottom). Under any paired [`MoppInfo`] whose frame
 /// brackets the query, both slab tests `qmin ≤ Lmax` and `qmax ≥ Rmin` hold, so [`query_aabb`] prunes
 /// nothing; [`decode`]'s FindAll walk visits both children unconditionally regardless of the frame, so
-/// `decode(encode_return_all(n)).keys == 0..n` always. Leaves are `0x0b <BE32 idx>` + `0x30` (absolute
-/// key = triangle index, delta 0) — the same MVP-safe terminal [`encode`] emits. The smaller subtree is
+/// `decode(encode_return_all(n)).keys == 0..n` always. Leaves are the [`leaf`]s [`encode`] emits. The smaller subtree is
 /// placed inline so the child offset stays ≤ half the tree (u8 form `0x10`, or the BE16 form `0x23`
 /// once an inline subtree exceeds 255 bytes). Returns `[0x00]` (empty tree) for `n_tris == 0`.
 pub fn encode_return_all(n_tris: u32) -> Vec<u8> {
@@ -534,8 +561,7 @@ pub fn encode_return_all(n_tris: u32) -> Vec<u8> {
     // Emit the subtree covering triangle indices `[lo, hi)` (hi > lo) into `out`.
     fn emit(lo: u32, hi: u32, out: &mut Vec<u8>) {
         if hi - lo == 1 {
-            let t = lo;
-            out.extend_from_slice(&[0x0b, (t >> 24) as u8, (t >> 16) as u8, (t >> 8) as u8, t as u8, 0x30]);
+            out.extend_from_slice(&leaf(lo));
             return;
         }
         let mid = lo + (hi - lo) / 2;
@@ -1169,6 +1195,38 @@ mod tests {
         let (code, _info) = encode(&[], &[]);
         assert_eq!(code, vec![0x00]);
         assert!(decode(&code).keys.is_empty());
+    }
+
+    /// A subpart's triangles key past 24 bits, and every terminal width reads back.
+    #[test]
+    fn encode_keyed_emits_each_triangle_its_key() {
+        let verts: Vec<[f32; 3]> = (0..7).map(|i| [i as f32, (i % 2) as f32, 0.0]).collect();
+        let tris: Vec<[u32; 3]> = (0..5).map(|i| [i, i + 1, i + 2]).collect();
+        let keys = [0x1F, 0x20, 0x100, 0x1_0000, 0x0200_0127];
+        let (code, _) = encode_keyed(&tris, &verts, &keys);
+        let d = decode(&code);
+        assert_eq!(d.error, None);
+        assert_eq!(d.consumed, code.len());
+        let mut got = d.keys;
+        got.sort_unstable();
+        assert_eq!(got, keys);
+    }
+
+    /// A chunk jump keeps the walk's key base, and only the chunked walk knows it: PC has no such opcode.
+    #[test]
+    fn a_chunked_code_is_walked_across_its_jumps() {
+        let mut code = vec![0xCDu8; 1024];
+        code[..3].copy_from_slice(&[0x09, 0x20, 0x10]);
+        code[3..6].copy_from_slice(&[0x80, 0x70, 0x03]);
+        code[6..9].copy_from_slice(&[0x0C, 0x00, 0x01]);
+        code[9] = 0x31;
+        code[512] = 0x32;
+        let d = decode_chunked(&code);
+        assert_eq!(d.error, None);
+        let mut got = d.keys;
+        got.sort_unstable();
+        assert_eq!(got, [0x21, 0x22]);
+        assert!(decode(&code).error.is_some());
     }
 
     // ── return-all (universal-collision) MOPP gate ──
