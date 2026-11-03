@@ -7,4 +7,5 @@
 //! this library — the binary links the module source in-tree with `mod
 //! xbox_doh_oracle;` as before.
 
+pub mod components;
 pub mod xbox_doh_oracle;
