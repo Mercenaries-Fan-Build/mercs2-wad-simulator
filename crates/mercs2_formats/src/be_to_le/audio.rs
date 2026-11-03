@@ -940,6 +940,410 @@ fn read_bank(body_be: &[u8]) -> Result<(u32, bool, usize, Vec<WbRecord>), AudioE
     Ok((bank_hash, streamed, xbox_records_offset, records))
 }
 
+/// A console sound table put in PC byte order one field at a time (`audio_code_map.md` §11.3, §11.4,
+/// §11.7). Offsets and counts are read from the console bytes before they are swapped. Every byte of
+/// the body belongs to exactly one field: a byte no field claims, or two fields claim, is an error, so a
+/// layout this walk does not know cannot pass through.
+struct SoundTable<'a> {
+    be: &'a [u8],
+    out: Vec<u8>,
+    claimed: Vec<bool>,
+    what: &'static str,
+}
+
+impl<'a> SoundTable<'a> {
+    fn new(be: &'a [u8], what: &'static str) -> Self {
+        SoundTable { be, out: be.to_vec(), claimed: vec![false; be.len()], what }
+    }
+
+    fn claim(&mut self, o: usize, n: usize, field: &str) -> Result<(), AudioError> {
+        let end = o.checked_add(n).filter(|&e| e <= self.be.len()).ok_or_else(|| {
+            AudioError(format!("{}: {field} at +0x{o:X} runs past the {}-byte body", self.what, self.be.len()))
+        })?;
+        if let Some(i) = (o..end).find(|&i| self.claimed[i]) {
+            return Err(AudioError(format!("{}: {field} at +0x{o:X} overlaps another field at +0x{i:X}", self.what)));
+        }
+        self.claimed[o..end].fill(true);
+        Ok(())
+    }
+
+    fn peek32(&self, o: usize, field: &str) -> Result<u32, AudioError> {
+        self.be
+            .get(o..o + 4)
+            .map(|s| u32::from_be_bytes([s[0], s[1], s[2], s[3]]))
+            .ok_or_else(|| AudioError(format!("{}: {field} at +0x{o:X} runs past the {}-byte body", self.what, self.be.len())))
+    }
+
+    fn peek8(&self, o: usize, field: &str) -> Result<u8, AudioError> {
+        self.be
+            .get(o)
+            .copied()
+            .ok_or_else(|| AudioError(format!("{}: {field} at +0x{o:X} runs past the {}-byte body", self.what, self.be.len())))
+    }
+
+    /// A u32 or f32: swapped; returns its value.
+    fn word(&mut self, o: usize, field: &str) -> Result<u32, AudioError> {
+        let v = self.peek32(o, field)?;
+        self.claim(o, 4, field)?;
+        self.out[o..o + 4].reverse();
+        Ok(v)
+    }
+
+    /// A word that must hold `want`.
+    fn word_is(&mut self, o: usize, want: u32, field: &str) -> Result<(), AudioError> {
+        let v = self.word(o, field)?;
+        if v != want {
+            return Err(AudioError(format!("{}: {field} at +0x{o:X} is 0x{v:X}, the layout puts 0x{want:X} there", self.what)));
+        }
+        Ok(())
+    }
+
+    /// A u16: swapped; returns its value.
+    fn half(&mut self, o: usize, field: &str) -> Result<u16, AudioError> {
+        self.claim(o, 2, field)?;
+        let v = u16::from_be_bytes([self.be[o], self.be[o + 1]]);
+        self.out[o..o + 2].reverse();
+        Ok(v)
+    }
+
+    /// Single bytes, kept in order.
+    fn bytes(&mut self, o: usize, n: usize, field: &str) -> Result<(), AudioError> {
+        self.claim(o, n, field)
+    }
+
+    /// The table version, which both platforms store little-endian.
+    fn version(&mut self) -> Result<(), AudioError> {
+        self.claim(0, 4, "version")?;
+        let v = read_u32_le(self.be, 0);
+        if v != TABLE_VERSION {
+            return Err(AudioError(format!("{}: version 0x{v:X}, expected 0x{TABLE_VERSION:X}", self.what)));
+        }
+        Ok(())
+    }
+
+    /// A `{u32 table hash, u16 index, u16 0, f32 weight}` reference: a wave in a group, a group in a
+    /// multi-track sound's entry.
+    fn reference(&mut self, o: usize, field: &str) -> Result<(), AudioError> {
+        self.word(o, field)?;
+        self.half(o + 4, field)?;
+        let pad = self.half(o + 6, field)?;
+        if pad != 0 {
+            return Err(AudioError(format!("{}: {field} at +0x{o:X} carries 0x{pad:X} after its index", self.what)));
+        }
+        self.word(o + 8, field)?;
+        Ok(())
+    }
+
+    /// `count` records back to back from `recs`, each record's offset from `recs` in the u32 table at
+    /// `table`; the last record ends at `table`. Returns each record's `(start, end)`.
+    fn records(&mut self, recs: usize, table: usize, count: usize, field: &str) -> Result<Vec<(usize, usize)>, AudioError> {
+        let mut starts = Vec::with_capacity(count);
+        for k in 0..count {
+            starts.push(recs + self.word(table + 4 * k, field)? as usize);
+        }
+        let mut spans = Vec::with_capacity(count);
+        let mut at = recs;
+        for k in 0..count {
+            let end = starts.get(k + 1).copied().unwrap_or(table);
+            if starts[k] != at || end < at {
+                return Err(AudioError(format!("{}: {field} record {k} at +0x{:X}, the contiguous layout puts it at +0x{at:X}", self.what, starts[k])));
+            }
+            spans.push((at, end));
+            at = end;
+        }
+        if at != table {
+            return Err(AudioError(format!("{}: {field} records end at +0x{at:X}, their offset table is at +0x{table:X}", self.what)));
+        }
+        Ok(spans)
+    }
+
+    /// An automation record (§11.7): a `u32` kind and the fields that kind has.
+    fn automation(&mut self, s: usize, e: usize) -> Result<(), AudioError> {
+        let kind = self.word(s, "automation kind")?;
+        let (size, what) = (e - s, self.what);
+        let sized = |n: usize| -> Result<(), AudioError> {
+            if size != n {
+                return Err(AudioError(format!("{what}: an automation record of kind {kind} at +0x{s:X} spans {size} bytes, not {n}")));
+            }
+            Ok(())
+        };
+        match kind {
+            0..=3 => {
+                sized(28)?;
+                self.word(s + 4, "ramp start")?;
+                // The mode: a byte and three of 0 on both platforms (§11.7, "low byte of mode").
+                self.bytes(s + 8, 4, "ramp mode")?;
+                for o in (s + 12..e).step_by(4) {
+                    self.word(o, "ramp field")?;
+                }
+            }
+            7 | 9 => {
+                sized(if kind == 7 { 12 } else { 16 })?;
+                for o in (s + 4..e).step_by(4) {
+                    self.word(o, "automation field")?;
+                }
+            }
+            4 => {
+                sized(72)?;
+                self.word(s + 4, "kind-4 start")?;
+                self.bytes(s + 8, 6, "kind-4 jitter flags")?;
+                self.half(s + 14, "kind-4 +0x0E")?;
+                for o in (s + 16..e).step_by(4) {
+                    self.word(o, "kind-4 field")?;
+                }
+            }
+            5 | 6 | 8 => {
+                self.word(s + 4, "curve +0x04")?;
+                // The point count: a byte and three of 0 on both platforms.
+                self.bytes(s + 8, 4, "curve point count")?;
+                let n = read_u32_le(self.be, s + 8) as usize;
+                self.word(s + 12, "curve parameter")?;
+                self.word_is(s + 16, 0x14, "curve points offset")?;
+                sized(0x14 + 8 * n)?;
+                for o in (s + 0x14..e).step_by(4) {
+                    self.word(o, "curve point")?;
+                }
+            }
+            _ => return Err(AudioError(format!("{}: automation kind {kind} at +0x{s:X} is not one the format has", self.what))),
+        }
+        Ok(())
+    }
+
+    /// A multi-track cue's body (§11.7), `c` the cue's start and `end` its end.
+    fn multi_track(&mut self, c: usize, end: usize) -> Result<(), AudioError> {
+        let count = |t: &Self, rel: usize, field| t.peek8(c + rel, field).map(usize::from);
+        let (events, tracks, params, curves) =
+            (count(self, 0x11, "event count")?, count(self, 0x12, "track count")?, count(self, 0x13, "parameter count")?, count(self, 0x14, "curve count")?);
+        self.bytes(c + 0x10, 6, "multi-track counts")?;
+        self.half(c + 0x16, "multi-track +0x16")?;
+        for rel in (0x18..0x28).step_by(4) {
+            self.word(c + rel, "multi-track field")?;
+        }
+        let mut o = [0usize; 7];
+        for (k, v) in o.iter_mut().enumerate() {
+            *v = c + self.word(c + 0x28 + 4 * k, "multi-track table offset")? as usize;
+        }
+        let [ev, ev_t, tr, tr_t, par, cv, cv_t] = o;
+        if par + 4 * params != end {
+            return Err(AudioError(format!("{}: multi-track cue at +0x{c:X} ends at +0x{end:X}, its parameters at +0x{:X}", self.what, par + 4 * params)));
+        }
+        for (s, e) in self.records(ev, ev_t, events, "event")? {
+            self.automation(s, e)?;
+        }
+        for (s, e) in self.records(cv, cv_t, curves, "cue curve")? {
+            self.automation(s, e)?;
+        }
+        for (s, e) in self.records(tr, tr_t, tracks, "track")? {
+            self.track(s, e)?;
+        }
+        for k in 0..params {
+            self.word(par + 4 * k, "parameter hash")?;
+        }
+        Ok(())
+    }
+
+    fn track(&mut self, s: usize, e: usize) -> Result<(), AudioError> {
+        let (autos, sounds) = (usize::from(self.peek8(s + 1, "automation count")?), usize::from(self.peek8(s + 2, "sound count")?));
+        self.bytes(s, 4, "track counts")?;
+        self.word(s + 4, "track loop start")?;
+        self.word(s + 8, "track loop end")?;
+        let mut o = [0usize; 4];
+        for (k, v) in o.iter_mut().enumerate() {
+            *v = s + self.word(s + 0x0C + 4 * k, "track table offset")? as usize;
+        }
+        let [au, au_t, so, so_t] = o;
+        if so_t + 4 * sounds != e {
+            return Err(AudioError(format!("{}: track at +0x{s:X} ends at +0x{e:X}, its sound table at +0x{:X}", self.what, so_t + 4 * sounds)));
+        }
+        for (a, z) in self.records(au, au_t, autos, "track automation")? {
+            self.automation(a, z)?;
+        }
+        for (a, z) in self.records(so, so_t, sounds, "track sound")? {
+            let n = usize::from(self.peek8(a + 4, "sound entry count")?);
+            self.bytes(a, 8, "sound bytes")?;
+            self.word(a + 8, "sound start time")?;
+            self.word_is(a + 0x0C, 0x10, "sound entry offset")?;
+            if z - a != 0x10 + 12 * n {
+                return Err(AudioError(format!("{}: sound at +0x{a:X} spans {} bytes for {n} entries", self.what, z - a)));
+            }
+            for k in 0..n {
+                self.reference(a + 0x10 + 12 * k, "sound entry")?;
+            }
+        }
+        Ok(())
+    }
+
+    fn group(&mut self, g: usize, end: usize, i: usize) -> Result<(), AudioError> {
+        self.word(g, "group sound id")?;
+        self.word(g + 0x04, "group category")?;
+        self.word_is(g + 0x08, 0, "group +0x08")?;
+        // The form: a byte and three of 0 on both platforms, so PC's u32 read gets the same value.
+        self.bytes(g + 0x0C, 4, "group form")?;
+        let form = read_u32_le(self.be, g + 0x0C);
+        self.word(g + 0x10, "group priority")?;
+        // The positional flag: a byte, which the engine reads as one (`FUN_00837830`, `0x008378A9`).
+        self.bytes(g + 0x14, 4, "group positional flag")?;
+        for rel in (0x18..0x2C).step_by(4) {
+            self.word(g + rel, "group distance field")?;
+        }
+        let size = match form {
+            0 => {
+                self.word(g + 0x2C, "group volume")?;
+                self.word(g + 0x30, "group pitch")?;
+                self.reference(g + 0x34, "group wave")?;
+                0x40
+            }
+            1 => {
+                let waves = usize::from(self.peek8(g + 0x2D, "group wave count")?);
+                self.bytes(g + 0x2C, 4, "group loop, count, selection")?;
+                for rel in (0x30..0x48).step_by(4) {
+                    self.word(g + rel, "group field")?;
+                }
+                self.bytes(g + 0x48, 4, "group flag bytes")?;
+                for rel in (0x4C..0x68).step_by(4) {
+                    self.word(g + rel, "group field")?;
+                }
+                for k in 0..waves {
+                    self.reference(g + 0x68 + 12 * k, "group wave")?;
+                }
+                0x68 + 12 * waves
+            }
+            _ => return Err(AudioError(format!("{}: group {i} has form {form}, not 0 or 1", self.what))),
+        };
+        if end - g != size {
+            return Err(AudioError(format!("{}: group {i} spans {} bytes, its form {size}", self.what, end - g)));
+        }
+        Ok(())
+    }
+
+    fn cue(&mut self, c: usize, end: usize, i: usize) -> Result<(), AudioError> {
+        let form = self.peek8(c + 5, "cue form")?;
+        self.word(c, "cue guid")?;
+        self.bytes(c + 4, 4, "cue form and limit")?;
+        self.word(c + 0x08, "cue gain")?;
+        self.word(c + 0x0C, "cue length")?;
+        match form {
+            0 => {
+                if end - c != 24 {
+                    return Err(AudioError(format!("{}: single-track cue {i} spans {} bytes, not 24", self.what, end - c)));
+                }
+                self.word(c + 0x10, "cue soundbank")?;
+                self.half(c + 0x14, "cue group index")?;
+                self.half(c + 0x16, "cue +0x16")?;
+            }
+            1 => self.multi_track(c, end)?,
+            _ => return Err(AudioError(format!("{}: cue {i} has form {form}, not 0 or 1", self.what))),
+        }
+        Ok(())
+    }
+
+    fn finish(self) -> Result<Vec<u8>, AudioError> {
+        match self.claimed.iter().position(|c| !c) {
+            Some(i) => Err(AudioError(format!("{}: byte +0x{i:X} of {} belongs to no field", self.what, self.be.len()))),
+            None => Ok(self.out),
+        }
+    }
+}
+
+/// A console `soundbank` body in PC form (`audio_code_map.md` §11.4, §11.7). Its counts are two u16s,
+/// a single-track cue's group index a u16 beside another, a wave reference `{u32, u16, u16, f32}`, and
+/// the flag and count bytes single bytes, so a word swap of the whole body sends every cue to group 0.
+pub fn convert_soundbank_data(be: &[u8]) -> Result<Vec<u8>, AudioError> {
+    let mut t = SoundTable::new(be, "soundbank");
+    t.version()?;
+    let hash = t.word(0x04, "bank hash")?;
+    let groups = usize::from(t.half(0x08, "group count")?);
+    let cues = usize::from(t.half(0x0A, "cue count")?);
+    t.word_is(0x0C, hash, "bank hash repeat")?;
+    let group_section = t.word(0x10, "group section")? as usize;
+    let group_table = t.word(0x14, "group table")? as usize;
+    let cue_section = t.word(0x18, "cue section")? as usize;
+    let cue_table = t.word(0x1C, "cue table")? as usize;
+    if group_section != 0x20 || cue_section != group_table + 4 * groups || cue_table + 4 * cues != be.len() {
+        return Err(AudioError(format!(
+            "soundbank 0x{hash:08X}: sections at 0x{group_section:X}, 0x{group_table:X}, 0x{cue_section:X}, 0x{cue_table:X} for {groups} groups and {cues} cues in {} bytes are not contiguous",
+            be.len()
+        )));
+    }
+    for (i, (s, e)) in t.records(group_section, group_table, groups, "group")?.into_iter().enumerate() {
+        t.group(s, e, i)?;
+    }
+    for (i, (s, e)) in t.records(cue_section, cue_table, cues, "cue")?.into_iter().enumerate() {
+        t.cue(s, e, i)?;
+    }
+    t.finish()
+}
+
+/// A console `sounddb` body in PC form (`audio_code_map.md` §11.3). Its cue and category counts are two
+/// u16s, its parameter count a u16 and a u16 of 0, and each cue entry's soundbank cue index a u16 and a
+/// u16 of 0, so a word swap of the whole body reads 0 cues: `FUN_0083c610`, the search FindCue
+/// (`FUN_00835a70`) runs over a table of at most 0x400 cues, is bounded by the u16 at `+0x08`.
+pub fn convert_sounddb_data(be: &[u8]) -> Result<Vec<u8>, AudioError> {
+    let mut t = SoundTable::new(be, "sounddb");
+    t.version()?;
+    let hash = t.word(0x04, "bank hash")?;
+    let cues = usize::from(t.half(0x08, "cue count")?);
+    let categories = usize::from(t.half(0x0A, "category count")?);
+    let params = usize::from(t.half(0x0C, "parameter count")?);
+    if t.half(0x0E, "parameter count high half")? != 0 {
+        return Err(AudioError(format!("sounddb 0x{hash:08X}: +0x0E is not 0, so the parameter count is not one u16")));
+    }
+    let cue_table = 0x1C;
+    let category_table = cue_table + 12 * cues;
+    let param_table = category_table + 8 * categories;
+    t.word_is(0x10, cue_table as u32, "cue table offset")?;
+    t.word_is(0x14, category_table as u32, "category table offset")?;
+    t.word_is(0x18, param_table as u32, "parameter table offset")?;
+    if param_table + 4 * params != be.len() {
+        return Err(AudioError(format!(
+            "sounddb 0x{hash:08X}: {cues} cues, {categories} categories and {params} parameters in {} bytes",
+            be.len()
+        )));
+    }
+    for k in 0..cues {
+        let e = cue_table + 12 * k;
+        t.word(e, "cue guid")?;
+        t.word(e + 4, "cue soundbank")?;
+        t.half(e + 8, "soundbank cue index")?;
+        if t.half(e + 10, "soundbank cue index high half")? != 0 {
+            return Err(AudioError(format!("sounddb 0x{hash:08X}: cue entry {k}'s index is not one u16")));
+        }
+    }
+    for k in 0..categories {
+        t.word(category_table + 8 * k, "category")?;
+        t.word(category_table + 8 * k + 4, "parent category")?;
+    }
+    for k in 0..params {
+        t.word(param_table + 4 * k, "parameter hash")?;
+    }
+    t.finish()
+}
+
+/// A big-endian sound-table chunk (one `data` row) in PC form, without its `CSUM` trailer.
+fn convert_sound_table(container: &[u8], body: fn(&[u8]) -> Result<Vec<u8>, AudioError>) -> Result<Vec<u8>, String> {
+    let roots = super::ps3_model::be_tree(container)?;
+    let [root] = roots.as_slice() else {
+        return Err(format!("a sound table with {} root rows, expected 1", roots.len()));
+    };
+    if &root.tag != b"data" || !root.children.is_empty() {
+        return Err(format!("a sound table whose root row is {}, expected one data row", root.tag_str()));
+    }
+    let be = root.body.as_deref().ok_or("a sound table's data row has no body")?;
+    let mut out = crate::ucfx::write_ucfx_tree(&[crate::ucfx::UcfxNode::leaf(*b"data", body(be).map_err(|e| e.0)?)]);
+    out.truncate(out.len() - crate::ucfx::UCFX_CSUM_BYTES);
+    Ok(out)
+}
+
+/// Convert a big-endian `soundbank` chunk, without its `CSUM` trailer.
+pub fn convert_soundbank(container: &[u8]) -> Result<Vec<u8>, String> {
+    convert_sound_table(container, convert_soundbank_data)
+}
+
+/// Convert a big-endian `sounddb` chunk, without its `CSUM` trailer.
+pub fn convert_sounddb(container: &[u8]) -> Result<Vec<u8>, String> {
+    convert_sound_table(container, convert_sounddb_data)
+}
+
 fn align_up(x: usize, align: usize) -> usize {
     debug_assert!(align.is_power_of_two());
     (x + align - 1) & !(align - 1)
@@ -1031,6 +1435,166 @@ mod tests {
         b[16..20].copy_from_slice(&40u32.to_be_bytes());
         let e = convert_wavebank_data(&b, None).unwrap_err();
         assert!(e.0.contains("needs its .pws"), "{e}");
+    }
+
+    /// The word swap `convert_block` gave every sound table before it had a converter of its own.
+    fn word_sweep(be: &[u8]) -> Vec<u8> {
+        be.chunks(4).flat_map(|w| w.iter().rev().copied().collect::<Vec<_>>()).collect()
+    }
+
+    /// A console sounddb of the shape the DLC's VO tables have: `cues` entries, no categories or
+    /// parameters, each entry `{guid, bank, u16 index, u16 0}`.
+    fn console_sounddb(bank: u32, cues: &[(u32, u16)]) -> Vec<u8> {
+        let mut b = TABLE_VERSION.to_le_bytes().to_vec();
+        b.extend_from_slice(&bank.to_be_bytes());
+        b.extend_from_slice(&(cues.len() as u16).to_be_bytes());
+        b.extend_from_slice(&[0, 0, 0, 0, 0, 0]);
+        let end = 0x1C + 12 * cues.len() as u32;
+        for v in [0x1C, end, end] {
+            b.extend_from_slice(&u32::to_be_bytes(v));
+        }
+        for &(guid, index) in cues {
+            b.extend_from_slice(&guid.to_be_bytes());
+            b.extend_from_slice(&bank.to_be_bytes());
+            b.extend_from_slice(&index.to_be_bytes());
+            b.extend_from_slice(&[0, 0]);
+        }
+        b
+    }
+
+    #[test]
+    fn a_console_sounddb_keeps_its_cue_count_and_indices() {
+        let be = console_sounddb(0xAD2A_9B89, &[(0x34AA_F50C, 62), (0x480C_25F2, 75)]);
+        let pc = convert_sounddb_data(&be).unwrap();
+        assert_eq!(&pc[..4], &TABLE_VERSION.to_le_bytes());
+        assert_eq!(u16::from_le_bytes([pc[8], pc[9]]), 2, "cue count");
+        assert_eq!(u16::from_le_bytes([pc[10], pc[11]]), 0, "category count");
+        assert_eq!(read_u32_le(&pc, 0x1C), 0x34AA_F50C);
+        assert_eq!(read_u32_le(&pc, 0x1C + 8), 62, "the soundbank cue index, as PC reads it");
+        assert_eq!(read_u32_le(&pc, 0x1C + 12 + 8), 75);
+        // The word swap reads no cues, so FindCue's binary search over the u16 at +0x08 misses every guid.
+        let swept = word_sweep(&be);
+        assert_eq!(u16::from_le_bytes([swept[8], swept[9]]), 0);
+        assert_eq!(read_u32_le(&swept, 0x1C + 8), 62 << 16);
+    }
+
+    /// A console soundbank of `groups` single-wave groups and one single-track cue for each `(guid, group)`.
+    fn console_soundbank(bank: u32, wavebank: u32, groups: usize, cues: &[(u32, u16)]) -> Vec<u8> {
+        let group_table = 0x20 + 0x40 * groups;
+        let cue_section = group_table + 4 * groups;
+        let cue_table = cue_section + 24 * cues.len();
+        let mut b = TABLE_VERSION.to_le_bytes().to_vec();
+        b.extend_from_slice(&bank.to_be_bytes());
+        b.extend_from_slice(&(groups as u16).to_be_bytes());
+        b.extend_from_slice(&(cues.len() as u16).to_be_bytes());
+        b.extend_from_slice(&bank.to_be_bytes());
+        for v in [0x20, group_table, cue_section, cue_table] {
+            b.extend_from_slice(&(v as u32).to_be_bytes());
+        }
+        for i in 0..groups {
+            for w in [0x9D63_2E49u32, 0xD221_DBE8, 0] {
+                b.extend_from_slice(&w.to_be_bytes());
+            }
+            b.extend_from_slice(&[0, 0, 0, 0]); // form 0
+            b.extend_from_slice(&0.98f32.to_be_bytes());
+            b.extend_from_slice(&[1, 0, 0, 0]); // positional
+            for f in [20.0f32, 120.0, 1.0, 1.0, 1.0, 0.75, 0.0] {
+                b.extend_from_slice(&f.to_be_bytes());
+            }
+            b.extend_from_slice(&wavebank.to_be_bytes());
+            b.extend_from_slice(&(i as u16).to_be_bytes());
+            b.extend_from_slice(&[0, 0]);
+            b.extend_from_slice(&1.0f32.to_be_bytes());
+        }
+        for i in 0..groups {
+            b.extend_from_slice(&(0x40 * i as u32).to_be_bytes());
+        }
+        for &(guid, group) in cues {
+            b.extend_from_slice(&guid.to_be_bytes());
+            b.extend_from_slice(&[0, 0, 0, 0]);
+            b.extend_from_slice(&1.0f32.to_be_bytes());
+            b.extend_from_slice(&1.18f32.to_be_bytes());
+            b.extend_from_slice(&bank.to_be_bytes());
+            b.extend_from_slice(&group.to_be_bytes());
+            b.extend_from_slice(&[0, 0]);
+        }
+        for i in 0..cues.len() {
+            b.extend_from_slice(&(24 * i as u32).to_be_bytes());
+        }
+        b
+    }
+
+    #[test]
+    fn a_console_soundbank_cue_keeps_its_group_and_its_waves_their_index() {
+        let be = console_soundbank(0xAD2A_9B89, 0xF53C_3969, 3, &[(0x34AA_F50C, 2), (0x480C_25F2, 1)]);
+        let pc = convert_soundbank_data(&be).unwrap();
+        let cue_section = read_u32_le(&pc, 0x18) as usize;
+        let group = |c: usize| u16::from_le_bytes([pc[c + 0x14], pc[c + 0x15]]);
+        assert_eq!((read_u32_le(&pc, cue_section), group(cue_section)), (0x34AA_F50C, 2));
+        assert_eq!(group(cue_section + 24), 1);
+        let g2 = 0x20 + 2 * 0x40;
+        assert_eq!(read_u32_le(&pc, g2 + 0x0C), 0, "form");
+        assert_eq!(pc[g2 + 0x14], 1, "the positional flag byte, which FUN_00837830 reads as a char");
+        assert_eq!((read_u32_le(&pc, g2 + 0x34), read_u32_le(&pc, g2 + 0x38)), (0xF53C_3969, 2));
+        // The word swap puts the group index at +0x16, so every cue plays group 0.
+        let swept = word_sweep(&be);
+        assert_eq!(u16::from_le_bytes([swept[cue_section + 0x14], swept[cue_section + 0x15]]), 0);
+    }
+
+    /// A big-endian block of one-row `data` containers, as a console archive stores sound tables.
+    fn console_block(entries: &[(u32, u32, &[u8])]) -> Vec<u8> {
+        let mut block = (entries.len() as u32).to_be_bytes().to_vec();
+        let containers: Vec<Vec<u8>> = entries
+            .iter()
+            .map(|(_, _, body)| {
+                let mut c = b"XFCU".to_vec();
+                for w in [40u32, 0, 0, 1] {
+                    c.extend_from_slice(&w.to_be_bytes());
+                }
+                c.extend_from_slice(b"atad");
+                for w in [0u32, body.len() as u32, 0, 0] {
+                    c.extend_from_slice(&w.to_be_bytes());
+                }
+                c.extend_from_slice(body);
+                c.extend_from_slice(b"MUSC\0\0\0\0");
+                c
+            })
+            .collect();
+        for ((name, ty, _), c) in entries.iter().zip(&containers) {
+            for w in [*name, *ty, 0, c.len() as u32] {
+                block.extend_from_slice(&w.to_be_bytes());
+            }
+        }
+        containers.iter().for_each(|c| block.extend_from_slice(c));
+        block
+    }
+
+    #[test]
+    fn convert_block_sends_sound_tables_to_their_converters() {
+        use crate::types::{TYPE_HASH_SOUNDBANK, TYPE_HASH_SOUNDDB};
+        let db = console_sounddb(0xAD2A_9B89, &[(0x34AA_F50C, 1), (0x480C_25F2, 0)]);
+        let bank = console_soundbank(0xAD2A_9B89, 0xF53C_3969, 2, &[(0x480C_25F2, 0), (0x34AA_F50C, 1)]);
+        let block = console_block(&[(0x1084_AE93, TYPE_HASH_SOUNDDB, &db), (0x1084_AE93, TYPE_HASH_SOUNDBANK, &bank)]);
+        let le = super::super::convert::convert_block(&block, false, None, None, None, None).unwrap();
+        let bodies: Vec<Vec<u8>> = crate::ucfx::block_chunk_spans(&le)
+            .unwrap()
+            .into_iter()
+            .map(|(_, r)| crate::ucfx::parse_ucfx_tree(&le[r]).unwrap().remove(0).body.unwrap())
+            .collect();
+        assert_eq!(bodies, [convert_sounddb_data(&db).unwrap(), convert_soundbank_data(&bank).unwrap()]);
+        assert_eq!(u16::from_le_bytes([bodies[0][8], bodies[0][9]]), 2, "the sounddb's cue count");
+    }
+
+    #[test]
+    fn a_sound_table_byte_no_field_claims_is_refused() {
+        let mut be = console_sounddb(1, &[(2, 0)]);
+        be.extend_from_slice(&[0, 0, 0, 0]);
+        let e = convert_sounddb_data(&be).unwrap_err();
+        assert!(e.0.contains("1 cues, 0 categories and 0 parameters in 44 bytes"), "{e}");
+        let mut be = console_soundbank(1, 2, 1, &[(3, 0)]);
+        be[0x20 + 0x0C] = 2;
+        let e = convert_soundbank_data(&be).unwrap_err();
+        assert!(e.0.contains("group 0 has form 2"), "{e}");
     }
 
     #[test]
