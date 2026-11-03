@@ -54,6 +54,7 @@ mercs2_combat = { workspace = true }
 mercs2_faction = { workspace = true }
 mercs2_ui = { workspace = true }
 mercs2_gfx = { workspace = true }
+mercs2_bink = { workspace = true }
 # The player concern (roster + profile singleton) the script host owns and the tick reaches.
 mercs2_player = { workspace = true }
 
