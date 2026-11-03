@@ -11,4 +11,4 @@ repository.workspace = true
 mercs2_core = { workspace = true }
 mercs2_formats = { workspace = true }
 glam = "0.27"   # same version as mercs2_core so Transform's Vec3/Quat types unify
-hecs = "0.10"   # ECS substrate, matches mercs2_core
+hecs = "0.11"   # ECS substrate, matches mercs2_core
