@@ -397,7 +397,7 @@ pub fn parse_packfile_raw(pk: &[u8]) -> Result<RawPackfile, String> {
 /// the mesh object are the inline subpart pointer (`+28`, self-relative to `obj+48`) and the two u16 index
 /// arrays (`+80`/`+88`); the quantized pool lives in the engine MOPP wrapper past the packfile with no fixed
 /// offset — hence a content scan. See the FALLBACK block below and [`MeshShape`].
-fn decode_mesh_shape16(pk: &[u8], raw: &RawPackfile, obj_src: usize) -> Option<MeshShape> {
+pub(crate) fn decode_mesh_shape16(pk: &[u8], raw: &RawPackfile, obj_src: usize) -> Option<MeshShape> {
     let obj = raw.data_pk + obj_src;
     let nsub = u32_le(pk, obj + 32) as usize;
     if nsub == 0 || nsub > 256 {
@@ -500,6 +500,19 @@ fn decode_mesh_shape16(pk: &[u8], raw: &RawPackfile, obj_src: usize) -> Option<M
     // `pk[B-48]`; the score gate keeps this from ever regressing a container whose wrapper is a different form.
     const PHY2_PREFIX: usize = 48;
     {
+        // One pool in the whole wrapper leaves no choice to score: a cell's long triangles would fail it.
+        let mut pools: Vec<(usize, usize)> = (trail..pk.len().saturating_sub(108))
+            .step_by(4)
+            .filter(|&o| mk(o) == 0xEEEE_EEEE && mk(o + 76) != 0)
+            .map(|o| (mk(o + 76) as usize, mk(o + 68) as usize))
+            .collect();
+        pools.dedup();
+        if let [(body_off, count)] = pools[..] {
+            if let Some(pool) = body_off.checked_sub(PHY2_PREFIX).filter(|p| count >= nverts && p + nverts * 6 <= pk.len()) {
+                let vertices: Vec<[f32; 3]> = (0..nverts).map(|v| getb(pool, v)).collect();
+                return Some(MeshShape { vertices, indices });
+            }
+        }
         let mut o = trail;
         while o + 108 <= pk.len() {
             if mk(o) == 0xEEEE_EEEE {
