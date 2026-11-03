@@ -16,6 +16,7 @@ mod log;
 mod loghook;
 mod lua_host;
 mod luastack;
+mod render;
 mod rt_log;
 mod shader;
 mod sites;
