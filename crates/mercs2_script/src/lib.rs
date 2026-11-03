@@ -862,6 +862,16 @@ pub trait EngineHost {
         let _ = name;
         false
     }
+    /// `Sound.LoadBankWithCallback(name, sType, fCallback, tData)` / `UnloadBankWithCallback`: the same
+    /// request, with a completion the binding keeps under `callback`. `wave` is `sType == "wavebank"`.
+    fn sound_bank_op_with_callback(&mut self, name: &str, wave: bool, load: bool, callback: u32) -> bool {
+        let _ = (name, wave, load, callback);
+        false
+    }
+    /// The bank callbacks whose operation finished since the last call.
+    fn sound_take_bank_callbacks(&mut self) -> Vec<u32> {
+        Vec::new()
+    }
     /// `Sound.RequestAmbienceBank(name)` — load a bank as an ambience bank.
     fn sound_request_ambience_bank(&mut self, name: &str) -> bool {
         let _ = name;
@@ -1320,6 +1330,18 @@ pub trait EngineHost {
     /// is namespaced (`"Ns.Verb"`) so one log serves every remaining action surface.
     fn script_cmd(&mut self, verb: &str, args: Vec<String>) {
         let _ = (verb, args);
+    }
+
+    /// `LTILibName.LTIPauseItemChanged(item)`: the option pages' `key=value` dispatcher
+    /// (`FUN_005C37E0`). A host without option pages refuses it.
+    fn options_item_changed(&mut self, item: &str) -> Result<(), String> {
+        Err(format!("PauseItemChanged {item:?}: this host has no option pages"))
+    }
+
+    /// An option page's `LTILibName` call (`LTIVideoEnter`, `LTIVideoSwitchOpt1(n)`, …) with its one
+    /// argument as text when it takes one. A host without option pages refuses it.
+    fn options_call(&mut self, name: &str, arg: Option<String>) -> Result<(), String> {
+        Err(format!("LTILibName.{name}({arg:?}): this host has no option pages"))
     }
 }
 
@@ -1808,7 +1830,14 @@ impl ScriptHost {
     /// were destroyed at registration and pushed into a Vec nothing drained.
     pub fn pump_callbacks(&self, host: &SharedHost, dt: f32) -> LuaResult<()> {
         crate::bindings::hud::pump_hud_callbacks(&self.lua, host, dt)?;
+        crate::bindings::sound::pump_bank_callbacks(&self.lua, host)?;
         crate::bindings::player::pump_player_callbacks(&self.lua, host)
+    }
+
+    /// Run the Flash event handler `callback` now, as a movie's FSCommand does inside the action that
+    /// sends it.
+    pub fn fire_flash_now(&self, callback: u32, param: Option<String>) -> LuaResult<()> {
+        crate::bindings::hud::fire_flash(&self.lua, callback, param)
     }
 
     /// Fire the `ObjectDeath` handlers registered for `guid`.
