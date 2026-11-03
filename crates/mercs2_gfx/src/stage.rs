@@ -46,6 +46,9 @@ pub struct Child {
     pub scripted: bool,
     /// Placed by a timeline, so a goto may take it away.
     pub timeline: bool,
+    /// A text field's own box once a script sized it (`_width`, `_height`, `autoSize`), twips
+    /// `[xmin, xmax, ymin, ymax]`; else its definition's.
+    pub bounds: Option<[i32; 4]>,
     pub node: Node,
 }
 
@@ -196,6 +199,7 @@ impl Movie {
             visible: true,
             scripted: false,
             timeline: true,
+            bounds: None,
             node,
         };
         self.clip_mut(parent)?.children.insert(depth, child);
@@ -453,8 +457,9 @@ impl Movie {
         }
         let matrix = matrix.then(&child.matrix);
         let cxform = cxform.then(&child.cxform);
-        // A clip's blend mode reaches what it holds; 0 and 1 are both "normal".
-        let blend = if child.blend > 1 { child.blend } else { blend };
+        // A clip's blend mode reaches what it holds; 0 normal, 1 normal and 2 layer keep the one in force
+        // (retail's push, `0x004AF70D`, only switches for a mode above 2).
+        let blend = if child.blend > 2 { child.blend } else { blend };
         match &child.node {
             Node::Shape | Node::Morph => {
                 let parts = self.parts(child.character, child.ratio)?;
@@ -462,7 +467,7 @@ impl Movie {
             }
             Node::Clip(id) => self.draw_clip(*id, matrix, cxform, blend, out)?,
             Node::Text(text) => {
-                if let Some(part) = self.text_part(child.character, text)? {
+                if let Some(part) = self.text_part(child, text)? {
                     out.push(Item::Draw(Draw { parts: Rc::new(vec![part]), matrix, cxform, blend }));
                 }
             }
@@ -478,12 +483,21 @@ impl Movie {
         Ok(self.font_lib.clone())
     }
 
-    fn text_part(&mut self, character: u16, text: &str) -> Result<Option<Part>, String> {
-        let def = self.def.clone();
-        let Some(Character::EditText(field)) = def.characters.get(&character) else {
-            return Err(format!("character {character} is not a text field"));
+    /// A placed text field's definition, with the box a script gave it.
+    pub fn edit_text(&self, child: &Child) -> Result<EditText, String> {
+        let Some(Character::EditText(field)) = self.def.characters.get(&child.character) else {
+            return Err(format!("character {} is not a text field", child.character));
         };
-        let Some(font) = self.font_of(field)? else {
+        let mut field = field.clone();
+        if let Some(bounds) = child.bounds {
+            field.bounds = bounds;
+        }
+        Ok(field)
+    }
+
+    fn text_part(&mut self, child: &Child, text: &str) -> Result<Option<Part>, String> {
+        let field = self.edit_text(child)?;
+        let Some(font) = self.font_of(&field)? else {
             self.fontless = true;
             return Ok(None);
         };
@@ -491,7 +505,7 @@ impl Movie {
             Some(strings) => crate::text::translate(text, &|key| strings.get(&key).cloned()),
             None => text.to_string(),
         };
-        Ok(crate::text::layout(field, &shown, &font))
+        Ok(crate::text::layout(&field, &shown, &font))
     }
 
     fn draw_clip(&mut self, clip: ClipId, matrix: Matrix, cxform: Cxform, blend: u8, out: &mut Vec<Item>) -> Result<(), String> {
@@ -693,6 +707,15 @@ mod tests {
         let items = m.draw().expect("draw");
         let Item::Draw(d) = &items[0] else { panic!("a draw") };
         assert_eq!(d.blend, 3);
+    }
+
+    #[test]
+    fn a_layer_clip_keeps_no_mode_of_its_own() {
+        let place = Control::Place(Place { depth: 1, character: Some(2), blend_mode: Some(2), ..Place::default() });
+        let mut m = movie(vec![vec![place]]);
+        let items = m.draw().expect("draw");
+        let Item::Draw(d) = &items[0] else { panic!("a draw") };
+        assert_eq!(d.blend, 0);
     }
 
     #[test]
