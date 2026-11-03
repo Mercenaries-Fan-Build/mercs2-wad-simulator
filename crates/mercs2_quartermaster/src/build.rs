@@ -363,6 +363,11 @@ pub enum Destination {
     /// `data/shell-patch.wad`, which the engine mounts directly above `shell.wad` in the front end
     /// (`FUN_004BFDA0`: `%s\%s-patch.wad` with the level name `FUN_004C1280` sets to `shell`).
     ShellPatch,
+    /// A level's patch WAD, at `relative` (`data/<level>-patch.wad`) under the output directory, the
+    /// same path it takes under the game folder. `vz-patch.wad` is not mounted in a level, so a deploy
+    /// step merges every installed Shipment's overlay under it. `qm link`'s supersedes `qm build`'s:
+    /// it has the set's scripts in it. `display` is the label a selector shows.
+    LevelPatch { level: String, relative: String, display: String },
     /// A copy, made by the deploy step, of the game file at `from` to `to` (both relative to the game
     /// folder). No bytes are written to the output directory; [`Placement::sha256`] and
     /// [`Placement::bytes`] describe `from` as the build read it.
@@ -4113,22 +4118,27 @@ fn lower(
         | Contribution::AddStringDbKeys { .. }
         | Contribution::ReplaceStringDbText { .. } => Ok(Lowering::Nothing),
 
-        // A NEW level: its own WAD above a copy of `vz.wad` (`crate::level`).
-        Contribution::AddLevel { name, display, wad, streams } => {
+        // Compiled with its `add_level`.
+        Contribution::LevelAsset { .. } => Ok(Lowering::Nothing),
+
+        // A NEW level: its assets compiled into a WAD above a copy of `vz.wad` (`crate::level`).
+        Contribution::AddLevel { name, display, streams } => {
             let Some(game) = game else {
                 return Err(BuildError::GameRequired { index, kind });
             };
             if let Some(why) = wad_name_refusal(kind, name) {
                 return Err(BuildError::Lower { index, kind, message: format!("add_level name {name:?} is not usable: {why}") });
             }
-            let level = crate::level::read(root, name, wad, streams, game)
+            let level = crate::level::read(root, name, &crate::level::assets_of(manifest, name), streams, game)
                 .map_err(|message| BuildError::Lower { index, kind, message })?;
             log.push(format!(
-                "contributions[{index}] add_level {name}: {} block(s), {} stream(s), {} script and texture reference(s), {} of them only in the base → .\\Data\\{name}-patch.wad above a copy of vz.wad",
+                "contributions[{index}] add_level {name}: {} block(s), {} stream(s), {} script and texture reference(s), {} of them only in the base, {} pixel and {} vertex shader(s) → .\\Data\\{name}-patch.wad above a copy of vz.wad",
                 level.blocks.len(),
                 level.streams.len(),
                 level.references,
                 level.from_base,
+                level.pixel_shaders,
+                level.vertex_shaders,
             ));
             Ok(Lowering::LevelWad { name: name.clone(), display: display.clone(), level })
         }
@@ -4889,8 +4899,8 @@ pub fn build(
     }
 
     // Levels. The level's own WAD is the patch slot above a copy of `vz.wad`, so it carries
-    // `vz.wad`'s CSUM row, as every overlay does. Its streams keep the game's own layout, and the
-    // output mirrors the tree a deploy copies into.
+    // `vz.wad`'s CSUM row, as every overlay does. Its streams go to the level's own folder
+    // (`level::stream_relative`), and the output mirrors the tree a deploy copies into.
     for (name, display, level) in level_wads {
         let fail = |message: String| BuildError::Lower { index: 0, kind: "add_level", message };
         let wad = build_patch_wad_multi(&level.blocks, csum.0, csum.1, &FFCS_CERT_BLOB).map_err(fail)?;
@@ -4915,7 +4925,7 @@ pub fn build(
             name: format!("{name}-patch.wad"),
             bytes: wad.len(),
             sha256: digest,
-            destination: Destination::DataWad { relative, display },
+            destination: Destination::LevelPatch { level: name.clone(), relative, display },
         });
 
         let vz = game
@@ -4933,7 +4943,7 @@ pub fn build(
         });
 
         for (file, stream) in &level.streams {
-            let relative = format!("data/Audios/{file}");
+            let relative = crate::level::stream_relative(&name, file);
             write(&relative, stream)?;
             let digest = sha256_hex(stream);
             log.push(format!("wrote {relative}: {} bytes, sha256 {digest}", stream.len()));
@@ -5455,6 +5465,116 @@ fn merge_string_tables(
     Ok(blocks)
 }
 
+/// What the set's link compiles, handed to [`link_level`] for each level.
+struct LinkSet<'a> {
+    shipments: &'a [&'a LoadedShipment],
+    corpus_root: &'a Path,
+    mutations: &'a [link::ScriptMutation],
+    ui_regs: &'a [link::UiRegistration],
+    layer_regs: &'a [link::LayerRegistration],
+    support_regs: &'a [link::SupportRegistration],
+    sound_regs: &'a [link::SoundBankRegistration],
+    additions: &'a [link::ScriptAddition],
+    replacements: &'a [link::ScriptReplacement],
+    order: &'a [String],
+    touches_scripts: bool,
+    fx: bool,
+}
+
+/// The blocks of one level's whole patch.
+///
+/// The engine mounts no `vz-patch.wad` in a level, so the set's link has to be in the level's own
+/// patch, and linked against what the level runs. `vz.wad`'s scripts blocks are read with the level's
+/// assets in place of their twins, the set's scripts and effects are linked into those, and a script
+/// the level overrides takes its appends by splicing ([`link::link_into_level_blocks`]). A block the
+/// link touched ships whole, under its own path, so an asset of the level in it leaves the level's
+/// own blocks: one WAD holds one row of a key. The link's other blocks, `linked`, ship as they are.
+fn link_level(
+    level: &crate::level::LevelOf<'_>,
+    set: &LinkSet<'_>,
+    linked: &[PatchBlock],
+    game: &mut GameStack,
+    log: &mut Vec<String>,
+) -> Result<Vec<PatchBlock>, BuildError> {
+    let fail = |message: String| BuildError::Lower { index: 0, kind: "link", message };
+    let assets = crate::level::assets_of(level.manifest, level.name);
+    let mut own = std::collections::BTreeMap::new();
+    for a in &assets {
+        own.insert(a.key().map_err(fail)?, *a);
+    }
+    let mut loaded = load_script_blocks(game, link::SCRIPT_BLOCKS, "link")?;
+    let mut spliced = std::collections::BTreeSet::new();
+    let mut placed: Vec<(usize, (u32, u32))> = Vec::new();
+    for (bi, lb) in loaded.iter_mut().enumerate() {
+        for e in &mut lb.block.entries {
+            let key = (e.name_hash, e.type_hash);
+            let Some(a) = own.get(&key) else { continue };
+            let [r] = a.rungs else {
+                return Err(fail(format!("{}: an asset of {} has {} rungs, and an entry has one", a.name, lb.path, a.rungs.len())));
+            };
+            let at = level.root.join(&r.file);
+            e.bytes = std::fs::read(&at).map_err(|err| fail(format!("{}: {err}", at.display())))?;
+            e.field_c = 0;
+            if e.type_hash == mercs2_formats::types::TYPE_HASH_SCRIPT {
+                spliced.insert(e.name_hash);
+            }
+            placed.push((bi, key));
+        }
+    }
+    let mut touched = std::collections::BTreeSet::new();
+    if set.touches_scripts {
+        let mut targets: Vec<link::TargetBlock<'_>> =
+            loaded.iter_mut().map(|lb| link::TargetBlock { path: lb.path.clone(), block: &mut lb.block }).collect();
+        let out = link::link_into_level_blocks(
+            &mut targets,
+            set.corpus_root,
+            set.mutations,
+            set.ui_regs,
+            set.layer_regs,
+            set.support_regs,
+            set.sound_regs,
+            set.additions,
+            set.replacements,
+            set.order,
+            &spliced,
+        )
+        .map_err(|e| fail(format!("level {}: {e}", level.name)))?;
+        touched.extend(out.scripts.iter().map(|l| l.block));
+    }
+    let mut effects = None;
+    if set.fx {
+        let (block, resident) = lower_fx(set.shipments, game, &mut loaded, crate::fx::Scope::Link, "link", log)?;
+        effects = block;
+        touched.extend(resident);
+    }
+    let moved: std::collections::BTreeSet<(u32, u32)> =
+        placed.iter().filter(|(bi, _)| touched.contains(bi)).map(|(_, key)| *key).collect();
+    let mut kept = Vec::with_capacity(assets.len());
+    for a in &assets {
+        if !moved.contains(&a.key().map_err(fail)?) {
+            kept.push(*a);
+        }
+    }
+    let mut blocks = script_patch_blocks(&loaded, &touched, "link")?;
+    blocks.extend(effects);
+    blocks.extend(
+        linked
+            .iter()
+            .filter(|b| b.path_string != crate::fx::EFFECTS_BLOCK.1 && !link::SCRIPT_BLOCKS.iter().any(|(_, p)| *p == b.path_string))
+            .cloned(),
+    );
+    blocks.extend(crate::level::compile(level.root, level.name, &kept).map_err(fail)?);
+    log.push(format!(
+        "level {}: {} block(s), {} of its assets moved into the {} linked block(s), {} script(s) of its own open to appends",
+        level.name,
+        blocks.len(),
+        moved.len(),
+        touched.len(),
+        spliced.len()
+    ));
+    Ok(blocks)
+}
+
 /// The filename of the deploy-time link overlay. Named to sort and read as "last".
 pub const LINK_WAD_NAME: &str = "zz-quartermaster-link.wad";
 
@@ -5763,7 +5883,8 @@ pub fn link_installed(
     // Every effect, template and sprite, into one effects block, one worldentity, one fxdict and
     // one atlas.
     let fx = shipments.iter().any(|s| crate::fx::merges_fx(&s.manifest));
-    if !touches_scripts && !front_end_sounds && tables.is_empty() && sound_entries.is_empty() && !fx {
+    let levels = crate::level::levels_of(&shipments);
+    if !touches_scripts && !front_end_sounds && tables.is_empty() && sound_entries.is_empty() && !fx && levels.is_empty() {
         log.push(
             "no installed Shipment touches a script, a string table, a sound bank, an effect, a \
              sprite or the vfx atlas — nothing to link"
@@ -6021,6 +6142,39 @@ pub fn link_installed(
             &mut diagnostics,
         )?);
     }
+    // Each level's whole patch: the WAD a Shipment's `vz.wad` overlay cannot reach by mounting.
+    let set = LinkSet {
+        shipments: &shipments,
+        corpus_root,
+        mutations: &mutations,
+        ui_regs: &ui_regs,
+        layer_regs: &layer_regs,
+        support_regs: &support_regs,
+        sound_regs: &sound_regs,
+        additions: &additions,
+        replacements: &replacements,
+        order: &order,
+        touches_scripts,
+        fx,
+    };
+    for level in &levels {
+        let blocks = link_level(level, &set, &patches, game, &mut log)?;
+        let relative = crate::level::patch_relative(level.name);
+        placements.push(write_patch_wad(
+            out_dir,
+            &relative,
+            &blocks,
+            csum,
+            Destination::LevelPatch {
+                level: level.name.to_string(),
+                relative: relative.clone(),
+                display: level.display.to_string(),
+            },
+            &shader_keys,
+            &mut log,
+            &mut diagnostics,
+        )?);
+    }
     if patches.is_empty() {
         write_plan(&plan)?;
         write_placement_record(out_dir, &placements)?;
@@ -6098,8 +6252,8 @@ pub fn link_installed(
 pub const PLACEMENT_RECORD: &str = "placement.json";
 
 /// The `placement.json` format this build writes. Its destination kinds are `overlay`,
-/// `game_folder`, `data_wad`, `language_patch`, `shell_patch`, `stream_copy` and `data_file`
-/// ([`Destination`]).
+/// `game_folder`, `data_wad`, `language_patch`, `shell_patch`, `level_patch`, `stream_copy` and
+/// `data_file` ([`Destination`]).
 pub const PLACEMENT_FORMAT: u32 = 2;
 
 /// Write `placement.json` into `out_dir`, creating it if needed.
@@ -6144,6 +6298,9 @@ fn placement_json(placements: &[Placement]) -> String {
                     serde_json::json!({ "kind": "language_patch", "language": language, "relative": relative })
                 }
                 Destination::ShellPatch => serde_json::json!({ "kind": "shell_patch" }),
+                Destination::LevelPatch { level, relative, display } => {
+                    serde_json::json!({ "kind": "level_patch", "level": level, "relative": relative, "display": display })
+                }
                 Destination::StreamCopy { from, to } => {
                     serde_json::json!({ "kind": "stream_copy", "from": from, "to": to })
                 }
