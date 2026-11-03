@@ -88,12 +88,9 @@ impl Action {
     ];
 }
 
-/// A keyboard/mouse binding.
+/// A keyboard/mouse binding: a [`crate::keys`] id.
 #[derive(Clone, Copy, PartialEq)]
-enum Bind {
-    Key(KeyCode),
-    Mouse(winit::event::MouseButton),
-}
+struct Bind(u16);
 
 /// A gamepad binding (a button, or a stick axis past a threshold in one direction).
 #[derive(Clone, Copy, PartialEq)]
@@ -144,8 +141,13 @@ impl Default for Bindings {
 }
 
 impl Bindings {
-    /// Load from a `Mercs2.ini` path; falls back to [`Bindings::default`] on any problem.
-    pub fn load(path: &std::path::Path) -> Bindings {
+    /// The section of the pad retail's own install writes for an Xbox 360 pad, which boots without a
+    /// pad attached read.
+    pub const XBOX_360_SECTION: &'static str = "Controller (XBOX 360 For Windows)";
+
+    /// Load from a `Mercs2.ini` path, the pad's binds from section `pad` (a pad's name); falls back to
+    /// [`Bindings::default`] on any problem.
+    pub fn load(path: &std::path::Path, pad: &str) -> Bindings {
         let Ok(text) = std::fs::read_to_string(path) else {
             eprintln!("[input] Mercs2.ini not found at {} — using retail defaults", path.display());
             return Bindings::default();
@@ -163,10 +165,10 @@ impl Bindings {
                 }
             }
         }
-        // Gamepad: honour the XBOX 360 section (DInput indices == gilrs' normalised Xbox layout); else
+        // Gamepad: honour the pad's section (DInput indices == gilrs' normalised Xbox layout); else
         // fall back to the standard layout so a pad always works.
         let mut pads: HashMap<Action, Vec<GpBind>> = HashMap::new();
-        if let Some(map) = sections.get("Controller (XBOX 360 For Windows)") {
+        if let Some(map) = sections.get(pad) {
             for a in Action::ALL {
                 if let Some(v) = map.get(a.ini_name()) {
                     if let Some(b) = parse_gp_bind(v) {
@@ -276,6 +278,84 @@ impl Gamepad {
         self.active.is_some()
     }
 
+    /// The pads connected, in the backend's order: each named as the OS names it.
+    pub fn pads(&self) -> Vec<crate::controls::Pad> {
+        let Some(g) = self.gilrs.as_ref() else { return Vec::new() };
+        g.gamepads()
+            .map(|(_, pad)| crate::controls::Pad {
+                name: pad.os_name().to_string(),
+                vendor: pad.vendor_id().unwrap_or(0),
+                product: pad.product_id().unwrap_or(0),
+            })
+            .collect()
+    }
+
+    /// The first pad's inputs held, as retail's joystick vocabulary indices (`crate::controls::PAD_NAMES`),
+    /// listed as `FUN_0082A2A0` reads an XInput pad: the sticks, then the buttons and triggers, at most 6.
+    /// A stick counts past its dead zone (40 of 255, `+0x344`); a trigger above 16.
+    pub fn retail_inputs(&self) -> Vec<u8> {
+        use gilrs::{Axis, Button};
+        const DEAD_ZONE: u8 = 0x28;
+        const MOST: usize = 6;
+        let Some((_, pad)) = self.gilrs.as_ref().and_then(|g| g.gamepads().next()) else { return Vec::new() };
+        // The XInput thumb value, its magnitude's high byte, through the dead zone's rescale.
+        let past = |value: f32, negative: bool| -> bool {
+            let raw = (value * 32767.0).round().clamp(-32768.0, 32767.0) as i32;
+            let m = if negative {
+                if raw >= 0 {
+                    return false;
+                }
+                ((-1 - raw) >> 7) as u8
+            } else {
+                if raw <= 0 {
+                    return false;
+                }
+                (raw >> 7) as u8
+            };
+            m >= DEAD_ZONE && ((m - DEAD_ZONE) as f32 / (255 - DEAD_ZONE) as f32 * 255.0) as i32 as u8 != 0
+        };
+        let trigger = |b: Button| pad.button_data(b).is_some_and(|d| (d.value() * 255.0) as u8 > 0x10);
+        let mut out = Vec::new();
+        for (axis, low, high) in [(Axis::LeftStickX, 0, 1), (Axis::LeftStickY, 2, 3), (Axis::RightStickX, 4, 5), (Axis::RightStickY, 6, 7)] {
+            let v = pad.value(axis);
+            if past(v, true) {
+                out.push(low);
+            }
+            if past(v, false) {
+                out.push(high);
+            }
+        }
+        let held = [
+            (Button::North, 0x17),
+            (Button::South, 0x14),
+            (Button::West, 0x16),
+            (Button::East, 0x15),
+            (Button::LeftTrigger2, crate::controls::PAD_LEFT_TRIGGER),
+            (Button::LeftTrigger, 0x18),
+            (Button::LeftThumb, 0x1C),
+            (Button::RightTrigger2, crate::controls::PAD_RIGHT_TRIGGER),
+            (Button::RightTrigger, 0x19),
+            (Button::RightThumb, 0x1D),
+            (Button::Start, 0x1B),
+            (Button::Select, 0x1A),
+            (Button::DPadUp, 0x13),
+            (Button::DPadRight, 0x11),
+            (Button::DPadDown, 0x12),
+            (Button::DPadLeft, 0x10),
+        ];
+        for (button, input) in held {
+            let down = match button {
+                Button::LeftTrigger2 | Button::RightTrigger2 => trigger(button),
+                _ => pad.is_pressed(button),
+            };
+            if down {
+                out.push(input);
+            }
+        }
+        out.truncate(MOST);
+        out
+    }
+
     fn pressed(&self, b: gilrs::Button) -> bool {
         match (self.gilrs.as_ref(), self.active) {
             (Some(g), Some(id)) => g.gamepad(id).is_pressed(b),
@@ -311,9 +391,9 @@ impl Input<'_> {
     /// double-counted.
     pub fn kb_held(&self, a: Action) -> bool {
         self.bindings.keys.get(&a).is_some_and(|bs| {
-            bs.iter().any(|b| match b {
-                Bind::Key(k) => self.keys.contains(k),
-                Bind::Mouse(m) => self.mouse.contains(m),
+            bs.iter().any(|&Bind(id)| {
+                self.keys.iter().any(|&k| crate::keys::of_key(k) == Some(id))
+                    || self.mouse.iter().any(|&m| crate::keys::of_mouse(m) == Some(id))
             })
         })
     }
@@ -383,15 +463,10 @@ fn sensitivity_to_rad(s: f32) -> f32 {
     0.0008 * (s.clamp(1.0, 20.0) / 9.0)
 }
 
-/// Parse a keyboard/mouse ini token (`W`, `SPACE`, `LSHIFT`, `MOUSE1`). `NULL`/`EMPTY`/unknown → None.
+/// Parse a keyboard/mouse ini token (`W`, `SPACE`, `LSHIFT`, `MOUSE1`) by retail's key table;
+/// `NULL` and a name the table lacks bind nothing, as `FUN_004FB6B0` reads them.
 fn parse_bind(s: &str) -> Option<Bind> {
-    match s.trim().to_ascii_uppercase().as_str() {
-        "NULL" | "EMPTY" | "" | "MWHEEL" => None,
-        "MOUSE1" => Some(Bind::Mouse(winit::event::MouseButton::Left)),
-        "MOUSE2" => Some(Bind::Mouse(winit::event::MouseButton::Right)),
-        "MOUSE3" => Some(Bind::Mouse(winit::event::MouseButton::Middle)),
-        other => key_from_name(other).map(Bind::Key),
-    }
+    crate::keys::id(s.trim()).filter(|&id| id != crate::keys::NULL).map(Bind)
 }
 
 /// Parse a gamepad ini token from the `[Controller (XBOX 360 …)]` section.
@@ -452,47 +527,6 @@ fn parse_gp_bind(s: &str) -> Option<GpBind> {
         };
     }
     None
-}
-
-/// Map an ini key name to a winit [`KeyCode`].
-fn key_from_name(s: &str) -> Option<KeyCode> {
-    use KeyCode::*;
-    if s.len() == 1 {
-        let c = s.chars().next().unwrap();
-        if c.is_ascii_alphabetic() {
-            return Some(match c {
-                'A' => KeyA, 'B' => KeyB, 'C' => KeyC, 'D' => KeyD, 'E' => KeyE, 'F' => KeyF,
-                'G' => KeyG, 'H' => KeyH, 'I' => KeyI, 'J' => KeyJ, 'K' => KeyK, 'L' => KeyL,
-                'M' => KeyM, 'N' => KeyN, 'O' => KeyO, 'P' => KeyP, 'Q' => KeyQ, 'R' => KeyR,
-                'S' => KeyS, 'T' => KeyT, 'U' => KeyU, 'V' => KeyV, 'W' => KeyW, 'X' => KeyX,
-                'Y' => KeyY, 'Z' => KeyZ, _ => return None,
-            });
-        }
-        if c.is_ascii_digit() {
-            return Some(match c {
-                '0' => Digit0, '1' => Digit1, '2' => Digit2, '3' => Digit3, '4' => Digit4,
-                '5' => Digit5, '6' => Digit6, '7' => Digit7, '8' => Digit8, '9' => Digit9,
-                _ => return None,
-            });
-        }
-    }
-    Some(match s {
-        "SPACE" => Space,
-        "TAB" => Tab,
-        "LSHIFT" => ShiftLeft,
-        "RSHIFT" => ShiftRight,
-        "LCTRL" => ControlLeft,
-        "RCTRL" => ControlRight,
-        "LALT" => AltLeft,
-        "RALT" => AltRight,
-        "ENTER" | "RETURN" => Enter,
-        "ESC" | "ESCAPE" => Escape,
-        "UP" => ArrowUp,
-        "DOWN" => ArrowDown,
-        "LEFT" => ArrowLeft,
-        "RIGHT" => ArrowRight,
-        _ => return None,
-    })
 }
 
 /// Locate `Mercs2.ini` next to the game install (sibling of the `data/` dir that holds `vz.wad`).
