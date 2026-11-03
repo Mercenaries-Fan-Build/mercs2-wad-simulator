@@ -758,6 +758,9 @@ pub fn claims(manifest: &Manifest) -> Vec<ClaimRecord> {
             Contribution::AddLevel { name, .. } => {
                 push(Access::Write, Claim::asset(name), Intent::Additive);
             }
+            // Inside its own level's patch: it can only meet another Shipment that adds that level,
+            // which the `add_level` claim above already refuses.
+            Contribution::LevelAsset { .. } => {}
             Contribution::NativeHook {
                 plugin,
                 symbol,
