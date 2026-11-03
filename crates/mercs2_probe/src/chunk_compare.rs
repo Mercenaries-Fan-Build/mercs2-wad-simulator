@@ -140,6 +140,11 @@ pub fn chunk_compare(i: Inputs, out: &Path) -> Result<(), String> {
                     match twins.get(i) {
                         None => t.only_console += 1,
                         Some(w) if w == body => t.equal += 1,
+                        // A collider's only padding bytes differ per bake, unread by anything.
+                        Some(w) if p.ends_with("PHY2") && w.len() == body.len() && {
+                            let pads = mercs2_formats::be_to_le::havok::phy2_pool_padding(w);
+                            (0..w.len()).all(|o| w[o] == body[o] || pads.binary_search(&o).is_ok())
+                        } => t.equal += 1,
                         Some(w) if w.len() != body.len() => {
                             t.size += 1;
                             t.example.get_or_insert(entry.name_hash);
