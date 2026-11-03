@@ -270,7 +270,7 @@ mod tests {
         let mut time = Time::new(60.0);
         let mut sched = Schedule::new();
         sched.add_system("animation", |world, time| {
-            for (_e, (st, pal)) in world.query::<(&mut AnimState, &mut SkinPalette)>().iter() {
+            for (st, pal) in world.query::<(&mut AnimState, &mut SkinPalette)>().iter() {
                 if !st.playing {
                     continue;
                 }
