@@ -377,7 +377,7 @@ pub fn gather_explosion_victims(
     _key: DamageKey,
 ) -> Vec<PendingBlastVictim> {
     let mut victims: Vec<PendingBlastVictim> = Vec::new();
-    for (e, (tf, h)) in world.query::<(&Transform, &Health)>().iter() {
+    for (e, tf, h) in world.query::<(Entity, &Transform, &Health)>().iter() {
         if victims.len() >= wildstar::MAX_VICTIMS {
             break; // MAX_VICTIM cap
         }
