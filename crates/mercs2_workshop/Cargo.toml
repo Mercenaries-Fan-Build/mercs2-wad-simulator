@@ -29,7 +29,7 @@ egui-wgpu = "0.37"
 # OutputCommand::CopyText itself (egui-winit would normally do this).
 arboard = "3"
 # Native file-open dialog for the "Import model…" button (same import path as drag-drop).
-rfd = "0.14"
+rfd = "0.17"
 # Self-service reference data: fetch the release's workshop_data bundle when none is installed, so a
 # bare downloaded binary is not stuck showing bare 0x… hashes for every bone. `ureq` (blocking,
 # rustls) rather than reqwest — a winit event loop wants no async runtime, and rustls keeps the
