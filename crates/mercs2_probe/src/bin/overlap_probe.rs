@@ -59,6 +59,32 @@ fn main() {
                     }
                 }
                 println!("          node {n:3}  {}", parts.join("   |   "));
+                // Each draw on the contested node: whether the rungs re-author one part or add parts.
+                for r in &m.rungs {
+                    for d in r.draws.iter().filter(|d| d.node == *n && d.lod_mask & bit != 0) {
+                        let (mut lo, mut hi) = ([f32::MAX; 3], [f32::MIN; 3]);
+                        for &i in &r.indices[d.index_start as usize..(d.index_start + d.index_count) as usize] {
+                            let p = r.vertices[i as usize].pos;
+                            for k in 0..3 {
+                                lo[k] = lo[k].min(p[k]);
+                                hi[k] = hi[k].max(p[k]);
+                            }
+                        }
+                        println!(
+                            "              P{:03} seg {:3} row {:3} mask {:02X} {:5} tri  diffuse {:08X?}  {lo:.3?}..{hi:.3?}",
+                            r.level, d.seg_id, d.segm_row, d.lod_mask, d.index_count / 3, d.diffuse
+                        );
+                        // The same material on another node at this tier: a re-authored copy of this part.
+                        for o in &m.rungs {
+                            for e in o.draws.iter().filter(|e| e.node != *n && e.lod_mask & bit != 0 && e.diffuse == d.diffuse) {
+                                println!(
+                                    "                  same diffuse: P{:03} node {} seg {} mask {:02X} {} tri",
+                                    o.level, e.node, e.seg_id, e.lod_mask, e.index_count / 3
+                                );
+                            }
+                        }
+                    }
+                }
             }
         }
         println!();

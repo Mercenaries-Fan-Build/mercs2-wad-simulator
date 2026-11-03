@@ -15,5 +15,5 @@ path = "src/main.rs"
 
 [dependencies]
 mercs2_formats = { workspace = true }
-ucfx_byteswap = { path = "../ucfx_byteswap" }
+ucfx_byteswap = { workspace = true }
 clap = { version = "4", features = ["derive"] }

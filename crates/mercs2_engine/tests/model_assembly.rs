@@ -109,28 +109,44 @@ fn rungs_refine_each_other_instead_of_double_drawing() {
     let mut w = open_vz_wad();
     // The resident block is a COMPLETE low-detail model spanning every tier; the finer blocks
     // re-author some of its nodes. Pooling them draws the same part twice at two detail levels — on
-    // the car van that was 11,604 of 19,107 triangles. `apply_supersede` clears the coarser block's
-    // bit for any (node, tier) a finer block covers, so no node may be drawn by two rungs at once.
+    // the car van that was 11,604 of 19,107 triangles. A finer block can also ADD a part to a node
+    // (the PMC hall's trim on its walls; the ztz98's node 19 below), so two rungs on one node at one
+    // tier is not by itself a double draw. One part at two detail levels is: the same material on the
+    // same node from two rungs at once.
     for name in ["civ_veh_car_van_crappy", "ch_veh_tank_ztz98", "vz_veh_tank_scorpion90"] {
         let hash = mercs2_formats::hash::pandemic_hash_m2(name);
         let m = Model::load(&mut w, hash).expect("assembles");
         for tier in 0..8u8 {
             let bit = 1u8 << tier;
-            let mut owner: std::collections::HashMap<i16, u8> = Default::default();
+            let mut owner: std::collections::HashMap<(i16, Option<u32>), u8> = Default::default();
             for r in &m.rungs {
                 for d in r.draws.iter().filter(|d| d.node >= 0 && d.lod_mask & bit != 0) {
-                    if let Some(&prev) = owner.get(&d.node) {
+                    if let Some(&prev) = owner.get(&(d.node, d.diffuse)) {
                         assert_eq!(
                             prev, r.level,
-                            "{name}: node {} at tier {tier} is drawn by rung {prev} AND rung {} \
+                            "{name}: node {} at tier {tier} draws diffuse {:08X?} from rung {prev} AND rung {} \
                              — two detail levels of one part in the same space",
-                            d.node, r.level
+                            d.node, d.diffuse, r.level
                         );
                     }
-                    owner.insert(d.node, r.level);
+                    owner.insert((d.node, d.diffuse), r.level);
                 }
             }
         }
+    }
+
+    // The ztz98's node 19 carries P001's two tracks (segs 11/12, diffuse 0xAC8E8446, |x| 1.22..1.77)
+    // and P002's part between them (segs 52/53, diffuse 0x8C4A7D9D, |x| <= 1.29). P002 ships no tracks
+    // of its own on that node, so clearing node 19 from P001 at the near tiers takes the tracks off the
+    // tank up close.
+    let m = Model::load(&mut w, mercs2_formats::hash::pandemic_hash_m2("ch_veh_tank_ztz98")).expect("tank assembles");
+    for tier in [0u8, 1] {
+        let segs = |level: u8| -> std::collections::BTreeSet<usize> {
+            let r = m.rungs.iter().find(|r| r.level == level).expect("rung");
+            r.draws.iter().filter(|d| d.node == 19 && d.lod_mask & (1 << tier) != 0).map(|d| d.seg_id).collect()
+        };
+        assert_eq!(segs(1), [11, 12].into(), "tier {tier}: P001 draws both tracks");
+        assert_eq!(segs(2), [52 + tier as usize].into(), "tier {tier}: P002 draws its own part beside them");
     }
 }
 

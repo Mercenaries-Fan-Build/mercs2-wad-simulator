@@ -1,9 +1,11 @@
 [package]
 name = "securom_unwrap"
 version = "0.1.0"
-publish = false                # excluded from the crates.io release set
 readme = "README.md"
 edition = "2021"
+description = "Turn a decrypted Mercenaries 2 PC executable into a SecuROM-free one by restoring the original entry point and a clean import table, keeping every section byte-for-byte."
+license.workspace = true
+repository.workspace = true
 
 [lib]
 name = "securom_unwrap"
