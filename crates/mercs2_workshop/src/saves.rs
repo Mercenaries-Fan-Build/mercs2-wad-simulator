@@ -2819,7 +2819,7 @@ mod contract_menu_retail_tests {
         let ctx = egui::Context::default();
         crate::gui::theme::install(&ctx);
         for _ in 0..2 {
-            let _ = ctx.run_ui(egui::RawInput::default(), |root| {
+            crate::gui::run_headless(&ctx, egui::RawInput::default(), |root| {
                 let _ = center(root, &p);
                 let _ = windows(root.ctx(), &p);
             });
@@ -2843,7 +2843,7 @@ mod navigator_layout_tests {
         };
         let mut width = 0.0;
         for _ in 0..30 {
-            let _ = ctx.run_ui(egui::RawInput::default(), |root| {
+            crate::gui::run_headless(&ctx, egui::RawInput::default(), |root| {
                 let r = egui::Panel::left("nav_test")
                     .resizable(true)
                     .default_size(300.0)
