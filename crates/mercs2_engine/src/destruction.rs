@@ -16,7 +16,7 @@
 
 use std::collections::HashMap;
 
-use mercs2_core::{Destructible, World};
+use mercs2_core::{Destructible, Entity, World};
 use mercs2_destruction::{DamageBands, DestructionAssets, DestructionIntent};
 
 /// Re-exported so consumers (the game crate, tools) can name the destruction vocabulary through
@@ -121,7 +121,7 @@ impl EntityRenderStates for crate::scene::Scene {
 /// so a pristine object needs no special case. Returns how many entities were synced.
 pub fn sync_destruction_to_scene(world: &World, scene: &mut dyn EntityRenderStates) -> usize {
     let mut n = 0;
-    for (e, d) in world.query::<&Destructible>().iter() {
+    for (e, d) in world.query::<(Entity, &Destructible)>().iter() {
         if d.node_enable.is_empty() {
             continue;
         }
