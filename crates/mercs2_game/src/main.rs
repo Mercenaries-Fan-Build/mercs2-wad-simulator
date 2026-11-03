@@ -234,7 +234,7 @@ fn main() {
         );
         if !dev_menu {
             let shell = mercs2_engine::shell::shell_wads(&wadpath)
-                .and_then(|wads| mercs2_engine::shell::Shell::open(&wads, saves))
+                .and_then(|wads| mercs2_engine::shell::Shell::open(&wads, saves, &wadpath))
                 .unwrap_or_else(|e| {
                     eprintln!("mercs2_game: the front end did not start: {e}");
                     std::process::exit(1);
