@@ -99,6 +99,32 @@ pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
         "LTIMovieStop",
         "LTIMoviePause",
         "LTIMovieResume",
+        "ChangeShellState",
+        "LTIProfileEnter",
+        "LTIProfileExit",
+        "LTIPrecacheDone",
+        "LTIPrecacheSmokeDone",
+        "LTIChoseOnline",
+        "LTIGetDateFormat",
+        "LTICamera",
+        "LTIupdateSupportQuickSlot",
+    ])?;
+    // `FUN_005C36D0`: hands the shell's movie the press-start line.
+    let h = host.clone();
+    b.real("LTIGetStartButton", lua.create_function(move |_, _: mercs2_luac::rt::MultiValue| {
+        if let Some(tree) = h.borrow_mut().hud() {
+            tree.request_flash(
+                mercs2_ui::SHELL_MOVIE,
+                mercs2_ui::FlashRequest::Invoke {
+                    name: "LTIPressStart".into(),
+                    args: vec![mercs2_ui::FlashArg::Text("[0x5085D0F3:[0x72a00bd4]]".into())],
+                },
+            );
+        }
+        Ok(())
+    })?)?;
+    // The video and control pages (`FUN_005C0A20`..`FUN_005C36B0`): the host's options answer them.
+    for name in [
         "LTIVideoEnter",
         "LTIVideoSwitchMode",
         "LTIVideoNextRes",
@@ -135,30 +161,17 @@ pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
         "LTIInputJoystickExit",
         "LTIInputJoystickReEnter",
         "LTIJoystickOverBoundResponse",
-        "ChangeShellState",
-        "LTIProfileEnter",
-        "LTIProfileExit",
-        "LTIPauseItemChanged",
-        "LTIPrecacheDone",
-        "LTIPrecacheSmokeDone",
-        "LTIChoseOnline",
-        "LTIGetDateFormat",
-        "LTICamera",
-        "LTIupdateSupportQuickSlot",
-    ])?;
-    // `FUN_005C36D0`: hands the shell's movie the press-start line.
+    ] {
+        let h = host.clone();
+        b.real(name, lua.create_function(move |_, args: mercs2_luac::rt::MultiValue| {
+            let arg = args.iter().next().map(super::stringify_arg);
+            h.borrow_mut().options_call(name, arg).map_err(mercs2_luac::rt::Error::RuntimeError)
+        })?)?;
+    }
+    // `FUN_005C37E0`: one string, a control word or `key=value`, for the option pages.
     let h = host.clone();
-    b.real("LTIGetStartButton", lua.create_function(move |_, _: mercs2_luac::rt::MultiValue| {
-        if let Some(tree) = h.borrow_mut().hud() {
-            tree.request_flash(
-                mercs2_ui::SHELL_MOVIE,
-                mercs2_ui::FlashRequest::Invoke {
-                    name: "LTIPressStart".into(),
-                    args: vec![mercs2_ui::FlashArg::Text("[0x5085D0F3:[0x72a00bd4]]".into())],
-                },
-            );
-        }
-        Ok(())
+    b.real("LTIPauseItemChanged", lua.create_function(move |_, item: String| {
+        h.borrow_mut().options_item_changed(&item).map_err(mercs2_luac::rt::Error::RuntimeError)
     })?)?;
     // Shell first-boot gate: `if FirstRun() == 1` — report a normal (non-first) session.
     b.real(
