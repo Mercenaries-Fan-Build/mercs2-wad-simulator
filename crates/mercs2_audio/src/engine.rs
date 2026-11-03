@@ -1279,9 +1279,9 @@ impl AudioEngine {
     pub fn load_wave_bank(&mut self, name: &str, cb: Option<CallbackId>) -> bool {
         self.banks.load(name, BankKind::Wave, cb)
     }
-    /// `Sound.LoadBankWithCallback(name, callback)` — generic; kind inferred by caller (defaults Sound).
-    pub fn load_bank_with_callback(&mut self, name: &str, cb: CallbackId) -> bool {
-        self.banks.load(name, BankKind::Sound, Some(cb))
+    /// `Sound.LoadBankWithCallback(name, sType, fCallback, tData)`; `kind` comes from `sType`.
+    pub fn load_bank_with_callback(&mut self, name: &str, kind: BankKind, cb: CallbackId) -> bool {
+        self.banks.load(name, kind, Some(cb))
     }
     /// `Sound.RequestAmbienceBank(name)`.
     pub fn request_ambience_bank(&mut self, name: &str) -> bool {
