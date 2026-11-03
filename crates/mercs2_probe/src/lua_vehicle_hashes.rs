@@ -14,8 +14,8 @@
 //!   `GetGuidByName("NAME")`          -> named   (only if it classifies as a vehicle)
 //!
 //! Usage (from the repo root):
-//!   cargo run --manifest-path tools/wad_simulator/Cargo.toml -p mercs2_formats \
-//!       --bin lua_vehicle_hashes [-- <out.csv>]
+//!   cargo run --manifest-path tools/wad_simulator/Cargo.toml -p mercs2_probe \
+//!       -- lua-vehicle-hashes [<out.csv>]
 
 use mercs2_formats::hash::pandemic_hash_m2;
 use std::collections::{BTreeMap, BTreeSet};
@@ -217,9 +217,10 @@ struct Entry {
     files: BTreeSet<String>,
 }
 
-fn main() {
-    let out_path = std::env::args()
-        .nth(1)
+pub fn run(args: &[String]) {
+    let out_path = args
+        .first()
+        .cloned()
         .unwrap_or_else(|| DEFAULT_OUT.to_string());
 
     let mut files = Vec::new();

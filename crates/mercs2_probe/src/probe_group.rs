@@ -1,20 +1,19 @@
 //! STEP-1 evidence probe: for given (block, ordinal) pairs, decode the DECL64
 //! group and report vert/tri counts, weight-sum-to-255 fraction, decl stride,
 //! distinct dominant bones (resolved to name-hash + world Y), and Y-bbox.
-//! Read-only. Usage: probe_group <block.bin> <ord> [<ord> ...]
+//! Read-only. Usage: mercs2_probe probe-group <block.bin> <ord> [<ord> ...]
 
 use mercs2_formats::model_inject::{extract_group_mesh, survey_groups};
 use mercs2_formats::skeleton::Skeleton;
 use std::collections::HashMap;
 
-fn main() {
-    let a: Vec<String> = std::env::args().collect();
-    let path = &a[1];
+pub fn run(a: &[String]) {
+    let path = &a[0];
     let block = std::fs::read(path).expect("read");
     let skel = Skeleton::from_block(&block).expect("skel");
     let groups = survey_groups(&block).expect("survey");
     eprintln!("{path}  ({} bones)", skel.bones.len());
-    for ord_s in &a[2..] {
+    for ord_s in &a[1..] {
         let ord: usize = ord_s.parse().unwrap();
         let g = &groups[ord];
         // weight sanity from extracted mesh

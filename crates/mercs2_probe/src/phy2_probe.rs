@@ -4,14 +4,13 @@
 //! §15.2). Conforming a novel model into a donor leaves the DONOR's collision hull behind — so if
 //! the new model is a different SIZE, the visible vehicle and the thing bullets hit disagree.
 //!
-//! Usage:  phy2_probe <container.ucfx>
+//! Usage:  mercs2_probe phy2-probe <container.ucfx>
 
 use mercs2_formats::havok::{parse_phy2_body, Shape};
 
-fn main() {
-    let args: Vec<String> = std::env::args().skip(1).collect();
+pub fn run(args: &[String]) {
     if args.len() != 1 {
-        eprintln!("usage: phy2_probe <container.ucfx>");
+        eprintln!("usage: mercs2_probe phy2-probe <container.ucfx>");
         std::process::exit(2);
     }
     let ucfx = std::fs::read(&args[0]).expect("read container");

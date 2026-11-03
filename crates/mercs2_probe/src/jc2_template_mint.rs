@@ -7,7 +7,7 @@
 //! Stage gate: a byte-identical UCFX round-trip self-test runs first — if rebuilding the worldentity
 //! container with NO changes does not reproduce the original bytes, we abort before any surgery.
 //!
-//! Usage: jc2_template_mint [vz.wad path]
+//! Usage: mercs2_probe jc2-template-mint [vz.wad path]
 
 use std::fs::File;
 
@@ -246,9 +246,9 @@ fn parse_info_name(info: &[u8]) -> Option<String> {
     }
 }
 
-fn main() {
-    let path = std::env::args()
-        .nth(1)
+pub fn run(args: &[String]) {
+    let path = args
+        .first()
         .map(std::path::PathBuf::from)
         .or_else(mercs2_formats::game_paths::vz_wad_from_env)
         .map(|p| p.to_string_lossy().into_owned())

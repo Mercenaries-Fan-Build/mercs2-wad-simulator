@@ -14,15 +14,14 @@
 //! Collapsing is byte-size-preserving, so the block is patched in place and each container's CSUM
 //! recomputed; everything else stays verbatim.
 //!
-//! Usage:  block_neuter <block.bin> <out.bin>
+//! Usage:  mercs2_probe block-neuter <block.bin> <out.bin>
 
 use mercs2_formats::model_inject::collapse_drawing_groups_in_place;
 use mercs2_formats::ucfx::parse_block_entry_table;
 
-fn main() {
-    let a: Vec<String> = std::env::args().skip(1).collect();
+pub fn run(a: &[String]) {
     if a.len() != 2 {
-        eprintln!("usage: block_neuter <block.bin> <out.bin>");
+        eprintln!("usage: mercs2_probe block-neuter <block.bin> <out.bin>");
         std::process::exit(2);
     }
     let mut blk = std::fs::read(&a[0]).expect("read block");
