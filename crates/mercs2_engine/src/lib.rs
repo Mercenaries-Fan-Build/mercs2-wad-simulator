@@ -47,6 +47,7 @@
 pub mod app;
 pub mod asset;
 pub mod camera;
+pub mod controls;
 pub mod destruction;
 pub mod diag;
 pub mod facecast;
@@ -63,7 +64,9 @@ pub mod spawn;
 pub mod game_world;
 pub mod flash;
 pub mod gfx_pass;
+pub mod ini;
 pub mod input;
+pub mod keys;
 /// Model container → indexed triangle geometry.
 ///
 /// Carved out into its own crate (`mercs2_mesh`) because it is pure decode — no GPU, no
@@ -72,6 +75,9 @@ pub mod input;
 /// `crate::mesh::…` path keeps working unchanged.
 pub use mercs2_mesh as mesh;
 pub mod model;
+pub mod movie;
+pub mod movie_pass;
+pub mod options;
 pub mod particles;
 pub mod paths;
 pub mod pose;
