@@ -1,15 +1,15 @@
 //! jc2_script_probe — dump resident-script chunk structure (INFO/DEPS/BINN) from block 3185, so we
 //! can author a new mrxjc2sportscar script chunk + wire mrxshop's DEPS.
-//! Usage: jc2_script_probe [vz.wad] [name1 name2 ...]
+//! Usage: mercs2_probe jc2-script-probe [vz.wad] [name1 name2 ...]
 
 use mercs2_formats::ffcs::{load_ffcs_archive, read_u32_le};
 use mercs2_formats::hash::pandemic_hash_m2;
 use mercs2_formats::sges::decompress_block;
 use std::fs::File;
 
-fn main() {
-    let path = std::env::args()
-        .nth(1)
+pub fn run(args: &[String]) {
+    let path = args
+        .first()
         .map(std::path::PathBuf::from)
         .or_else(mercs2_formats::game_paths::vz_wad_from_env)
         .map(|p| p.to_string_lossy().into_owned())
@@ -17,7 +17,7 @@ fn main() {
             eprintln!("usage: <this> <vz.wad> [...]  — or set MERCS2_GAME_DIR / VZ_WAD");
             std::process::exit(1)
         });
-    let names: Vec<String> = std::env::args().skip(2).collect();
+    let names: Vec<String> = args.iter().skip(1).cloned().collect();
     let names = if names.is_empty() {
         vec![
             "mrxshop".into(),

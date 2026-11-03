@@ -4,14 +4,13 @@
 //! histogram, with each dominant bone's NAME-HASH resolved from that model's HIER.
 //! Read-only survey; emits no model. DO NOT deploy.
 //!
-//! Usage: survey_frankenstein <block.bin> [<block.bin> ...]
+//! Usage: mercs2_probe survey-frankenstein <block.bin> [<block.bin> ...]
 
 use mercs2_formats::model_inject::survey_groups;
 use mercs2_formats::skeleton::Skeleton;
 
-fn main() {
-    let args: Vec<String> = std::env::args().collect();
-    for path in &args[1..] {
+pub fn run(args: &[String]) {
+    for path in args {
         let block = std::fs::read(path).expect("read block");
         let skel = Skeleton::from_block(&block).expect("skeleton");
         let groups = survey_groups(&block).expect("survey");

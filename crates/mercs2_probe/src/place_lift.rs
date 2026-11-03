@@ -21,8 +21,8 @@
 //!   [36..42] 6-byte tail
 //!
 //! Usage:
-//!   place_lift <in_block.bin> <out_block.bin> --key 0x000C73C2 [--key ...] --dy 3.0
-//!   place_lift <in_block.bin> --list --key 0x000C73C2        (read-only report)
+//!   mercs2_probe place-lift <in_block.bin> <out_block.bin> --key 0x000C73C2 [--key ...] --dy 3.0
+//!   mercs2_probe place-lift <in_block.bin> --list --key 0x000C73C2        (read-only report)
 
 const REC: usize = 42;
 
@@ -71,12 +71,7 @@ fn parse_key(s: &str) -> Option<u32> {
     }
 }
 
-fn main() {
-    std::process::exit(run());
-}
-
-fn run() -> i32 {
-    let argv: Vec<String> = std::env::args().skip(1).collect();
+pub fn run(argv: &[String]) -> i32 {
     let mut pos: Vec<String> = Vec::new();
     let mut keys: Vec<u32> = Vec::new();
     let mut dy = 0.0f32;
@@ -100,8 +95,8 @@ fn run() -> i32 {
         }
     }
     if pos.is_empty() || keys.is_empty() || (!list && pos.len() != 2) {
-        eprintln!("usage: place_lift <in.bin> <out.bin> --key 0xKEY [--key ...] --dy <f32>");
-        eprintln!("       place_lift <in.bin> --list --key 0xKEY [--key ...]");
+        eprintln!("usage: mercs2_probe place-lift <in.bin> <out.bin> --key 0xKEY [--key ...] --dy <f32>");
+        eprintln!("       mercs2_probe place-lift <in.bin> --list --key 0xKEY [--key ...]");
         return 2;
     }
     let mut block = match std::fs::read(&pos[0]) {

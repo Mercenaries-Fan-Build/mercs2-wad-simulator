@@ -1,10 +1,10 @@
 //! Probe MTRL materials + per-group material binding. Read-only.
-//! Usage: probe_mtrl <block.bin>
+//! Usage: mercs2_probe probe-mtrl <block.bin>
 
 use mercs2_formats::ffcs::read_u32_le;
 
-fn main() {
-    let path = std::env::args().nth(1).expect("block path");
+pub fn run(args: &[String]) {
+    let path = args.first().cloned().expect("block path");
     let block = std::fs::read(&path).expect("read");
     let ulen = read_u32_le(&block, 16) as usize;
     let ucfx = &block[20..20 + ulen];

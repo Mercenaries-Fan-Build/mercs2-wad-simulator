@@ -3,7 +3,7 @@
 //! hkaRagdollInstance, hkpConstraintInstance, motions, …). Answers: does the
 //! retail PC WAD *serialize* ragdoll physics, or is it built procedurally?
 //!
-//! Usage:  MERCS2_GAME_DIR=<install> cargo run -p mercs2_formats --bin ragdoll_probe
+//! Usage:  MERCS2_GAME_DIR=<install> cargo run -p mercs2_probe -- ragdoll-probe
 
 use std::collections::BTreeMap;
 
@@ -64,9 +64,8 @@ fn dump_capsules(dec: &[u8], extract_fixture: bool) {
     }
 }
 
-fn main() {
+pub fn run(args: &[String]) {
     use mercs2_formats::hash::{pandemic_hash, pandemic_hash_m2};
-    let args: Vec<String> = std::env::args().collect();
     let extract_fixture = args.iter().any(|a| a == "--extract-fixture");
     let bones = [
         "Bone_Hips", "Bone_Chest", "Bone_Head",

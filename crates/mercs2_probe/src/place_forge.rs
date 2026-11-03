@@ -2,7 +2,7 @@
 //! block and round-trip-verify it via the reader.
 //!
 //! Usage:
-//!   place_forge <in_block.bin> <out_block.bin> --template <sub_idx> \
+//!   mercs2_probe place-forge <in_block.bin> <out_block.bin> --template <sub_idx> \
 //!       --name <entity_name> --model 0x<hash> --pos X,Y,Z [--quat X,Y,Z,W] \
 //!       [--layer-name <layer> | --layer-hash 0x<H>]
 //!
@@ -26,11 +26,7 @@ fn parse_vec3(s: &str) -> [f32; 3] {
     ]
 }
 
-fn main() {
-    std::process::exit(run());
-}
-
-/// `place_forge --list <block.bin> [near X,Z] [radius R]` — dump existing model
+/// `mercs2_probe place-forge --list <block.bin> [near X,Z] [radius R]` — dump existing model
 /// placements (key, model hash, pos, name), optionally only those within R of an
 /// XZ point. Used to pick a known-good base-game model hash + a valid exterior
 /// spot for an isolation test, without inventing anything.
@@ -97,12 +93,11 @@ fn list_mode(argv: &[String]) -> i32 {
     0
 }
 
-fn run() -> i32 {
-    let argv: Vec<String> = std::env::args().skip(1).collect();
+pub fn run(argv: &[String]) -> i32 {
     if argv.iter().any(|a| a == "--list") {
-        return list_mode(&argv);
+        return list_mode(argv);
     }
-    let mut args = std::env::args().skip(1);
+    let mut args = argv.iter().cloned();
     let mut pos_args: Vec<String> = Vec::new();
     let mut positions: Vec<[f32; 3]> = Vec::new();
     let (mut template, mut name, mut model, mut quat) = (
@@ -157,7 +152,7 @@ fn run() -> i32 {
         }
     }
     if pos_args.len() != 2 || name.is_empty() || model == 0 || positions.is_empty() {
-        eprintln!("usage: place_forge <in.bin> <out.bin> --template <sub> --name <n> --model 0x<h> --pos X,Y,Z [--pos ...] [--pos-list X,Y,Z;X,Y,Z] [--quat X,Y,Z,W]");
+        eprintln!("usage: mercs2_probe place-forge <in.bin> <out.bin> --template <sub> --name <n> --model 0x<h> --pos X,Y,Z [--pos ...] [--pos-list X,Y,Z;X,Y,Z] [--quat X,Y,Z,W]");
         return 2;
     }
     let block = match std::fs::read(&pos_args[0]) {
