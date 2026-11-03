@@ -21,7 +21,7 @@ use mercs2_formats::sges::decompress_block;
 use mercs2_formats::texture::texture_body;
 use mercs2_formats::texture_encode::decode_dxt_surface;
 use mercs2_formats::types::TYPE_HASH_TEXTURE;
-use mercs2_formats::ucfx::{block_chunk_spans, parse_ucfx_tree};
+use mercs2_formats::ucfx::{block_chunk_spans, extract_chunk_body, parse_ucfx_tree};
 
 /// Every mip of one PC texture: dimensions, FourCC and each mip's bytes.
 struct PcTexture {
@@ -153,6 +153,46 @@ fn ps3_textures(archive: &Path) -> Result<HashMap<u32, PcTexture>, String> {
         }
     }
     split_rungs(&infos, bodies)
+}
+
+/// Every texture `INFO` of a big-endian archive as stored, a row per texture, with its PC twin's when
+/// `pc` holds one, so a console `INFO` reads against the fields PC's has.
+pub fn tex_info(archive: &Path, pc: &Path, out: &Path) -> Result<(), String> {
+    let (doh, _) = load_stfs_or_doh(archive)?;
+    let (_, tables) = parse_be_ffcs(&doh)?;
+    let indx = tables.iter().find(|r| r.tag == "INDX").ok_or("no INDX")?;
+    let entries = parse_be_indx(&doh, indx.offset as usize, indx.meta as usize);
+    let mut infos: HashMap<u32, Vec<u8>> = HashMap::new();
+    for (bi, e) in entries.iter().enumerate() {
+        let be = read_be_block(&doh, e).map_err(|err| format!("block {bi}: {err}"))?;
+        for (hash, chunk) in texture_chunks(&be).map_err(|err| format!("block {bi}: {err}"))? {
+            for (tag, off, size) in container_rows(chunk)? {
+                if &tag == b"INFO" {
+                    infos.insert(hash, chunk.get(off..off + size).ok_or("INFO runs past its chunk")?.to_vec());
+                }
+            }
+        }
+    }
+    let mut f = File::open(pc).map_err(|e| format!("{}: {e}", pc.display()))?;
+    let size = f.metadata().map_err(|e| e.to_string())?.len();
+    let wad = load_ffcs_archive(&mut f, size).map_err(|e| format!("{}: {e}", pc.display()))?;
+    let mut twins: HashMap<u32, Vec<u8>> = HashMap::new();
+    for b in 0..wad.indx.len() {
+        let dec = decompress_block(&mut f, &wad.indx, b as u16).map_err(|e| format!("pc block {b}: {e}"))?;
+        for (e, range) in block_chunk_spans(&dec).map_err(|e| format!("pc block {b}: {e}"))? {
+            if e.type_hash == TYPE_HASH_TEXTURE && infos.contains_key(&e.name_hash) {
+                if let Some(info) = extract_chunk_body(&dec[range], b"INFO") {
+                    twins.insert(e.name_hash, info);
+                }
+            }
+        }
+    }
+    let hex = |b: &[u8]| b.iter().map(|x| format!("{x:02x}")).collect::<String>();
+    let mut rows = String::from("hash\tconsole\tpc\n");
+    for (hash, info) in &infos {
+        rows += &format!("0x{hash:08X}\t{}\t{}\n", hex(info), twins.get(hash).map_or(String::new(), |t| hex(t)));
+    }
+    std::fs::write(out, rows).map_err(|e| format!("write {}: {e}", out.display()))
 }
 
 fn block_format(fourcc: &[u8; 4]) -> Option<()> {
