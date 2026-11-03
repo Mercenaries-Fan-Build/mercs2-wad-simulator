@@ -14,6 +14,7 @@ use std::sync::atomic::Ordering;
 use mercs2_formats::be_to_le::convert::{convert_block, QUIET};
 use mercs2_formats::be_to_le::ecs::ComponentSchemas;
 use mercs2_formats::be_to_le::lua::LuaTools;
+use mercs2_formats::be_to_le::texture::{archive_textures, rung_of_path, BlockTables, TextureTable};
 use mercs2_formats::dlc_input::{parse_be_ffcs, parse_be_indx, parse_be_pths, read_be_block};
 use mercs2_formats::dlc_stfs::load_stfs_or_doh;
 use mercs2_formats::ffcs::load_ffcs_archive;
@@ -74,6 +75,7 @@ pub fn chunk_compare(i: Inputs, out: &Path) -> Result<(), String> {
     let indx = rows.iter().find(|r| r.tag == "INDX").ok_or("no INDX")?;
     let entries = parse_be_indx(&doh, indx.offset as usize, indx.meta as usize);
     let paths = rows.iter().find(|r| r.tag == "PTHS").map_or(Vec::new(), |r| parse_be_pths(&doh, r.offset as usize, r.meta as usize));
+    let textures = TextureTable::from_doh(&doh, &entries, &paths, &archive_textures(vz_wad)?)?;
     let mut tallies: BTreeMap<(String, String), Tally> = BTreeMap::new();
     let mut refused: BTreeMap<String, Vec<String>> = BTreeMap::new();
     let mut pc_block: Option<(u16, Vec<u8>)> = None;
@@ -92,7 +94,8 @@ pub fn chunk_compare(i: Inputs, out: &Path) -> Result<(), String> {
             Ok(b) if !wanted(&b) => continue,
             other => other,
         };
-        let le = match be.and_then(|b| convert_block(&b, false, None, Some(&lua), Some(&schemas))) {
+        let block_textures = BlockTables { textures: &textures, rung: rung_of_path(path), streams: None };
+        let le = match be.and_then(|b| convert_block(&b, false, None, Some(&lua), Some(&schemas), Some(block_textures))) {
             Ok(le) => le,
             Err(err) => {
                 let class: String = err.chars().take(60).collect();
@@ -137,6 +140,11 @@ pub fn chunk_compare(i: Inputs, out: &Path) -> Result<(), String> {
                     match twins.get(i) {
                         None => t.only_console += 1,
                         Some(w) if w == body => t.equal += 1,
+                        // A collider's only padding bytes differ per bake, unread by anything.
+                        Some(w) if p.ends_with("PHY2") && w.len() == body.len() && {
+                            let pads = mercs2_formats::be_to_le::havok::phy2_pool_padding(w);
+                            (0..w.len()).all(|o| w[o] == body[o] || pads.binary_search(&o).is_ok())
+                        } => t.equal += 1,
                         Some(w) if w.len() != body.len() => {
                             t.size += 1;
                             t.example.get_or_insert(entry.name_hash);

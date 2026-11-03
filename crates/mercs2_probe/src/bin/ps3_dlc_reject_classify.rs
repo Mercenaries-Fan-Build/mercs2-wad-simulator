@@ -175,7 +175,7 @@ fn main() {
             continue;
         }
 
-        match convert_block(&decompressed, false, None, Some(&lua_tools), Some(&schemas)) {
+        match convert_block(&decompressed, false, None, Some(&lua_tools), Some(&schemas), None) {
             Ok(_) => {
                 converted += 1;
                 per_block_tsv.push_str(&format!(

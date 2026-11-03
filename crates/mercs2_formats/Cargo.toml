@@ -56,7 +56,15 @@ name = "char_lowering"
 required-features = ["retail"]
 
 [[test]]
+name = "texture_console_retail"
+required-features = ["retail"]
+
+[[test]]
 name = "ecs_console_retail"
+required-features = ["retail"]
+
+[[test]]
+name = "sound_console_retail"
 required-features = ["retail"]
 
 [[test]]

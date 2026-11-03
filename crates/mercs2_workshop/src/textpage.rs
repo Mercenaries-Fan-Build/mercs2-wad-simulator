@@ -173,6 +173,12 @@ impl Panel {
         matches!(self.load, Load::Loading(_))
     }
 
+    /// Open the table with this hash.
+    pub fn open_table(&mut self, table: u32) {
+        self.table = Some(table);
+        self.refilter();
+    }
+
     /// The keys the filter keeps.
     pub fn rows(&self) -> &[u32] {
         &self.rows
@@ -201,7 +207,7 @@ impl Panel {
         let Some(t) = self.tables() else { return };
         let needle = self.filter.trim().to_lowercase();
         let shown: Vec<usize> = t.tables().iter().filter_map(|&h| self.shown_copy(h)).collect();
-        let rows = t
+        let mut rows: Vec<u32> = t
             .keys
             .iter()
             .copied()
@@ -211,6 +217,10 @@ impl Panel {
                     || shown.iter().any(|&c| t.copies[c].text.get(k).is_some_and(|s| s.to_lowercase().contains(&needle)))
             })
             .collect();
+        // The opened table's own keys come first: the DLC's 628 otherwise sit among 18,000 others.
+        if let Some(c) = self.table.and_then(|h| self.shown_copy(h)) {
+            rows.sort_by_key(|k| !t.copies[c].text.contains_key(k));
+        }
         self.rows = rows;
     }
 }
@@ -681,6 +691,18 @@ mod tests {
         apply(Act::Copy(2), &mut p);
         assert_eq!(p.shown_copy(2), Some(2));
         assert_eq!(p.rows(), &[10]);
+    }
+
+    /// A table's own keys list first, each group in key order.
+    #[test]
+    fn the_opened_tables_keys_come_first() {
+        let mut t = tables();
+        t.keys = vec![9, 10, 11];
+        let mut p = Panel { load: Load::Ready(Box::new(t)), ..Panel::default() };
+        p.open_table(2);
+        assert_eq!(p.rows(), &[10, 9, 11]);
+        p.open_table(1);
+        assert_eq!(p.rows(), &[10, 11, 9]);
     }
 }
 

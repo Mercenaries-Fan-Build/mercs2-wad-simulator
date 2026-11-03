@@ -93,7 +93,7 @@ pub static INIT_NOISE: &[&str] = &["blackbox", "compat", "lualog"];
 pub static KNOWN_SOURCES: &[&str] = &[
     "lua", "world", "pool", "blackbox", "compat", "lualog",
     "crash", "mtrl", "cc", "stall", "seg", "prmg", "prmg-bw", "prmg-key", "prmg-key2", "heap",
-    "raw",
+    "raw", "vmem",
     "mod-crash", "trace-base", "trace-fault",
 ];
 
@@ -121,11 +121,19 @@ pub static KNOWN_EIPS: &[KnownEip] = &[
     KnownEip { eip: 0x0084DD5B, label: "MTRL texture-handle overrun", teardown: false },
     KnownEip { eip: 0x004CC064, label: "render/texture-component pool NULL-fallback", teardown: false },
     KnownEip { eip: 0x007E045E, label: "ECS texture-component type-confusion", teardown: false },
-    // 0x0085C8D0: texture-bind / null-surface fault in the wardrobe-preview (menu-open) path.
-    // Neighbor of the 0x750BD9 null-DXT1 site and the 0x84DD5B tex-handle-overrun; reached via
-    // model-instantiation frames 0x4A483B/0x479775/0x4796A9/0x471A83 → 0x84DDCB. AV READ target=0
-    // with EAX = a texture handle/hash being looked up and not found. NOT a teardown artifact.
-    KnownEip { eip: 0x0085C8D0, label: "texture-bind/null-surface fault on wardrobe preview (menu-open)", teardown: false },
+    // The D3D pool's three trackers, one per resource kind. Each starts by dereferencing the object a
+    // create wrapper hands it, and no wrapper tests the create's HRESULT, so a failed create faults here
+    // with AV READ target=0 and, when it is the create's own failure, EAX=8007000E (E_OUTOFMEMORY).
+    // BUG-013 in docs/fixpack/bug_register.md; layouts in docs/reverse_engineer/d3d_resource_pool.md.
+    // Both E_OUTOFMEMORY crashes on record came in mid-game, after 18 and 29 minutes. 0x0085C8D0 was also
+    // seen earlier on the wardrobe preview (menu-open), reached via model-instantiation frames
+    // 0x4A483B/0x479775/0x4796A9/0x471A83 → 0x84DDCB. NOT teardown artifacts.
+    KnownEip { eip: 0x0085C779, label: "D3D pool: a failed CreateTexture reached the tracker unchecked, v1.0 code (BUG-013; EAX=8007000E = out of memory)", teardown: false },
+    KnownEip { eip: 0x0085C830, label: "D3D pool: a failed CreateIndexBuffer reached the tracker unchecked, v1.0 code (BUG-013; EAX=8007000E = out of memory)", teardown: false },
+    KnownEip { eip: 0x0085C8D0, label: "D3D pool: a failed CreateVertexBuffer reached the tracker unchecked, v1.0 code (BUG-013; EAX=8007000E = out of memory)", teardown: false },
+    KnownEip { eip: 0x0085C999, label: "D3D pool: a failed CreateTexture reached the tracker unchecked, v1.1 code (BUG-013; EAX=8007000E = out of memory)", teardown: false },
+    KnownEip { eip: 0x0085CA50, label: "D3D pool: a failed CreateIndexBuffer reached the tracker unchecked, v1.1 code (BUG-013; EAX=8007000E = out of memory)", teardown: false },
+    KnownEip { eip: 0x0085CAF0, label: "D3D pool: a failed CreateVertexBuffer reached the tracker unchecked, v1.1 code (BUG-013; EAX=8007000E = out of memory)", teardown: false },
     // 0x00478E43: mesh-geometry handler (cluster of 0x00478F2A/0x004719C0). AV READ with ECX/ESI =
     // "CSUM" (0x4D555343) — the per-piece geometry read of a DESTRUCTIBLE model runs off the end of
     // the replaced geometry into the container's CSUM trailer. Seen when a custom mesh is injected
@@ -187,6 +195,15 @@ pub static KNOWN_EIPS: &[KnownEip] = &[
     // check, so `import("x")` of a script no loaded WAD holds faults with AV READ 0x00000040.
     // Seen live 2026-10-19 when lua-bridge's `preimport = ess` ran against an overlay without `ess`.
     KnownEip { eip: 0x005AE372, label: "_SYS._IMPORT (v1.0) of a script no loaded WAD holds — import() of a missing module (NULL resource +0x40)", teardown: false },
+    // 0x00859028: Mtrl_Parse (FUN_00858790) called by the foliage species reader FUN_004A0C40 on a
+    // material whose u16 flags/texture-count pair was transposed by a u32 sweep of a console `foliage`
+    // `tree` body. Seen 2026-11-02 booting dlc01 before `be_to_le::foliage` existed.
+    KnownEip { eip: 0x00859028, label: "Mtrl_Parse (FUN_00858790) from the foliage species reader FUN_004A0C40 — a foliage material's u16 pair transposed (console tree body swapped as u32)", teardown: false },
+    // 0x004AADBA: TerrainMeshRenderable::Render's draw loop (FUN_004AAAB0) reads a draw's vertex-shader
+    // entry at +8 for draws [terrain_end, first_draw + draw_count) without a check; a draw-group INFO whose
+    // pass-group u16s were transposed sends it past the group's records to a null entry.
+    // Seen 2026-11-02 on dlc01's first rendered frame (docs/terrain_cell_format.md §4.4).
+    KnownEip { eip: 0x004AADBA, label: "terrain draw loop (FUN_004AAAB0) — a draw-group INFO's pass-group u16s transposed, so it draws past the group's PRMT records (null shader entry +8)", teardown: false },
 ];
 
 pub fn eip_label(eip: u32) -> Option<&'static str> {

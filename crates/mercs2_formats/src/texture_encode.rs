@@ -285,6 +285,29 @@ pub fn decode_bc3_block(b: &[u8]) -> [[u8; 4]; 16] {
     out
 }
 
+/// A DXT1 or DXT5 surface of `wb` by `hb` blocks → its RGBA texels, row-major.
+pub fn decode_dxt_surface(fourcc: &[u8; 4], wb: usize, hb: usize, bytes: &[u8]) -> Result<Vec<[u8; 4]>, String> {
+    let pitch = match fourcc {
+        b"DXT1" => 8,
+        b"DXT5" => 16,
+        _ => return Err(format!("{} is not DXT1 or DXT5", String::from_utf8_lossy(fourcc))),
+    };
+    if bytes.len() < wb * hb * pitch {
+        return Err(format!("{} bytes do not fill {wb}x{hb} blocks", bytes.len()));
+    }
+    let mut out = vec![[0u8; 4]; wb * 4 * hb * 4];
+    for y in 0..hb {
+        for x in 0..wb {
+            let b = &bytes[(y * wb + x) * pitch..][..pitch];
+            let px = if pitch == 8 { decode_bc1_block(b, true) } else { decode_bc3_block(b) };
+            for (t, texel) in px.iter().enumerate() {
+                out[(y * 4 + t / 4) * wb * 4 + x * 4 + t % 4] = *texel;
+            }
+        }
+    }
+    Ok(out)
+}
+
 /// Box-downsample by 2x, `ch` channels interleaved.
 pub fn box_down(w: usize, h: usize, ch: usize, px: &[f32]) -> (usize, usize, Vec<f32>) {
     let (nw, nh) = ((w / 2).max(1), (h / 2).max(1));

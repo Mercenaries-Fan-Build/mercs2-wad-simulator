@@ -56,6 +56,13 @@ impl AsetEntry {
     }
 }
 
+/// An asset's block per rung as ASET words: `([_P002 | _P003], _P001)`, `0xFFFF` for an absent rung.
+/// The engine stops at the first absent rung, so a rung past a gap is absent too.
+pub fn rung_chain(blocks: [Option<u32>; 4]) -> (u32, u32) {
+    let rung = |r: usize| if blocks[..=r].iter().all(Option::is_some) { blocks[r].map_or(0xFFFF, |b| b & 0xFFFF) } else { 0xFFFF };
+    ((rung(2) << 16) | rung(3), rung(1))
+}
+
 /// One block destined for a patch WAD.
 #[derive(Clone, Debug)]
 pub struct PatchBlock {
@@ -499,9 +506,8 @@ pub fn build_patch_wad_multi(
     // a patch has tens. The engine then reads INDX out of range, decodes whatever bytes sit there as
     // a page index + `packed_field`, and can size a streaming buffer at hundreds of gigabytes. That
     // request can never be satisfied (`FUN_00875b00` only issues when the declared size fits the
-    // largest free run), so the node never reaches provider-status 4, `Stream_Manager_Tick`
-    // (`FUN_008739e0`) unlinks only on 4, the pending count never drains, and world streaming hangs
-    // with no crash and no error. Every WAD that LOADS has zero dangling rungs (measured: retail base
+    // largest free run), so the node stays pending and is retried forever, the pending count never
+    // drains, and world streaming hangs with no crash and no error. Every WAD that LOADS has zero dangling rungs (measured: retail base
     // `vz.wad` 30645 rows; our working dlc01 port patch 5451 rows) while both wardrobe builds that
     // hang carry 22 — `aset_refcheck` enforces this.
     //
@@ -918,9 +924,8 @@ mod tests {
     /// retail base `vz.wad` (30645 rows) and our WORKING dlc01 port patch (5451 rows) have ZERO.
     /// (There is no Pandemic-shipped `vz-patch.wad`; every vz-patch is one of ours.) The engine then
     /// reads INDX out of range, decodes whatever bytes sit there as a page index + `packed_field`,
-    /// and sizes a streaming buffer it can never satisfy — so the node never reaches provider-status
-    /// 4, `Stream_Manager_Tick` (`FUN_008739e0`) unlinks only on 4, the pending count never drains,
-    /// and world streaming hangs with no crash. Byte-parity on those fields is a bug-for-bug
+    /// and sizes a streaming buffer it can never satisfy — so the node stays pending, the pending
+    /// count never drains, and world streaming hangs with no crash. Byte-parity on those fields is a bug-for-bug
     /// guarantee, so it is dropped on purpose; `aset_refcheck` is the gate for the correct shape.
     #[test]
     fn python_parity_on_framing_and_lod_rungs_never_dangle() {

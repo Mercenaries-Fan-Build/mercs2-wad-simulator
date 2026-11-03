@@ -91,10 +91,14 @@ const STEP_TABLE: [i32; 89] = [
     11487, 12635, 13899, 15289, 16818, 18500, 20350, 22385, 24623, 27086, 29794, 32767,
 ];
 
-/// Mono IMA block: 4-byte header (predictor + step index) + 32 nibble bytes → 65 samples.
+/// Mono IMA block: 4-byte header (predictor + step index) + 32 nibble bytes.
 pub const MONO_BLOCK_SIZE: usize = 36;
 /// Stereo IMA block: 8-byte dual header + 64 interleaved nibble bytes.
 pub const STEREO_BLOCK_SIZE: usize = 72;
+/// Frames a block holds: the header sample and 63 nibbles. The 64th nibble is padding, 0 in all
+/// 1,053,712 blocks of 600 `vo_stream` clips read, and a retail `+0x10` runs at 64 frames a block, a
+/// 56,692-block `music` clip's being 16 bytes short of it.
+pub const BLOCK_FRAMES: usize = 64;
 
 #[inline]
 fn clamp_step_index(step_index: i32) -> i32 {
@@ -140,6 +144,8 @@ pub fn decode_ima_mono(data: &[u8]) -> Vec<i16> {
                 samples.push(predictor_i as i16);
             }
         }
+        // The 64th nibble is padding ([`BLOCK_FRAMES`]).
+        samples.pop();
         offset += MONO_BLOCK_SIZE;
     }
     samples
@@ -182,7 +188,7 @@ pub fn decode_ima_stereo(data: &[u8]) -> Vec<i16> {
                 }
             }
         }
-        for (l, r) in lbuf.into_iter().zip(rbuf.into_iter()) {
+        for (l, r) in lbuf.into_iter().zip(rbuf.into_iter()).take(BLOCK_FRAMES - 1) {
             out.push(l);
             out.push(r);
         }
@@ -658,11 +664,11 @@ mod tests {
     }
 
     #[test]
-    fn ima_mono_block_decodes_to_65_samples() {
+    fn ima_mono_block_decodes_to_its_64_samples() {
         let blk = mono_block(1000);
         let s = decode_ima_mono(&blk);
-        // 1 header sample + 64 nibble samples.
-        assert_eq!(s.len(), 65);
+        // The header sample and 63 nibble samples; the 64th nibble is padding.
+        assert_eq!(s.len(), BLOCK_FRAMES);
         assert_eq!(s[0], 1000, "first sample is the block predictor");
         // With all-zero nibbles the predictor drifts by only ±(step>>3); it stays in a tight band.
         assert!(s.iter().all(|&x| (x - 1000).abs() < 40), "near-constant run");

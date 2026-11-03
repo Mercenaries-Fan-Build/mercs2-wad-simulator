@@ -41,7 +41,7 @@ set, exactly as matched in `main()`:
 | `overlays <profile-path>` | resolves a save's active `vz_state` layers and folds them through the real streaming catalog |
 | `save-dump <profile-path> [grep-needle]` | parsed `.profile` header + the decompressed SaveSingleton Lua payload |
 | `anim-table <name\|0xH> [--handle 0xH] [--list <column>]` | an `animationtable` as the loader holds it: columns, defaults row, data rows, and each row's `ASTO` list |
-| `layer <name\|0xH>` / `layer --all` / `layer --frames <capture>` / `layer --catalog <out.tsv> [--also <archives>]` | every entity of a placement layer with its template, model and component classes; `--all` reads every layer of the stack, prints how many entities draw a model, how placed `PhysicalLink` records resolve and which classes the rest carry, and exits 1 if a layer does not read; `--frames` compares every placed entity a v1.0 capture holds with its live SceneObject position: a link child against its chain of links, the rest against their `Transform`; `--catalog` writes one TSV row per layer of the stack with its archive, block path, entity, model and link counts and class counts, plus a bare row per layer of each `--also` archive, of any platform |
+| `layer <name\|0xH> [--overlay <wad>]` / `layer --all` / `layer --frames <capture>` / `layer --catalog <out.tsv> [--also <archives>]` | every entity of a placement layer with its template, model and component classes, and the `lineregion` hash a `LineRegion` names; `--overlay` mounts a WAD over the stack, e.g. a level's patch over `vz.wad`; `--all` reads every layer of the stack, prints how many entities draw a model, how placed `PhysicalLink` records resolve and which classes the rest carry, and exits 1 if a layer does not read; `--frames` compares every placed entity a v1.0 capture holds with its live SceneObject position: a link child against its chain of links, the rest against their `Transform`; `--catalog` writes one TSV row per layer of the stack with its archive, block path, entity, model and link counts and class counts, plus a bare row per layer of each `--also` archive, of any platform |
 | `clip-names <review.tsv>` | names the AnimationLookup's clips from the rows that list them (`player_mattias_rifle_upright_run_forward_fb`): the row's character and equipment, then a stance and action from words the data supplies. Writes a review file, each name with its expected chance matches, whether its stance agrees with the stance tables, and how many clips share its stance and action; merges nothing. Reads `rainbow_table`, `jul08_strings` and `notes_docs_dir` from `.mercs2-local.toml` |
 | `we-template <name\|0xKEY>...` · `--class <Class>` · `--uses <0xU32>` · `--enums` | the retail `worldentity`: a template's component records, a class's schema (field names) and records, every record holding a value, or the enum tables |
 | `clip-pose --model H --clip H --bones 0xA,0xB.. --ref 0xR [--frames N]` | a clip posed on a model as the engine poses it: the bones' model-space positions per frame and their positions in the reference bone's frame |
@@ -89,7 +89,21 @@ zeros. Their tests are game-gated (`--features retail`) and read `memory_dumps_d
   cites, `--all` including named models), `tex_orphans` (every texture chunk no `MTRL` of any loader
   cites — model, terrainmesh, font, lowresterrain, scrub — grouped by block, with any other chunk
   that holds the hash as a raw u32). Both read names from `docs/data/aset_names.csv` under the
-  `notes_docs_dir` key of `.mercs2-local.toml`.
+  `notes_docs_dir` key of `.mercs2-local.toml`. Subcommands `tex-rungs` (every texture chunk of a
+  big-endian archive and its PC twin, a row per block) and `tex-compare` (an Xbox archive's textures,
+  converted and decoded mip by mip against PC, or a PS3 archive with `--ps3`).
+* **DLC**: subcommand `dlc-census` (every chunk of a big-endian DLC archive against the retail build of
+  its platform, each `new`, `same` or `changed`, with the UCFX rows and bytes a `changed` one differs in),
+  `clip-compare` (every clip of a converted WAD decoded against PC), `pc-diff` (every chunk of a
+  converted WAD against its PC twin, row by row), `model-compare` (every model of a big-endian archive
+  converted against PC over its whole rung chain, triangles, list B and skin), `scrub-compare` (the same
+  for ground cover, its kept rows, triangles and translations), `terrain-compare` (two
+  WADs' terrain as wound triangles), `phy2-diff` (one collider converted, its differences by region) and
+  `rung-words` (a PC WAD's chunk table words against the rule for them).
+* **Audio**: subcommands `stfs-list` (the files of an Xbox package), `pws-survey` (every wavebank
+  record of a console package or big-endian WAD, each streamed one against the bytes it addresses;
+  `--extract <dir>` writes the `.pws` files) and `pws-pc` (every streamed record of a PC WAD with the
+  first bytes of its range).
 * **Archive / naming**: `aset_probe` (every ASET row a name-hash owns + a multi-block striping
   census), `model_namer` (derives a model's name from the textures it uses, and can emit a rainbow-
   table name fragment), `kit_templates` (the resident worldentity's spawn templates that wear a given

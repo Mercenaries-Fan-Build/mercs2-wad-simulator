@@ -69,6 +69,11 @@ exe subsystem. What its source explicitly claims as provenance:
 - **Overlay / patch stack** — `--overlay` and the auto-loaded `vz-patch.wad` sitting next to the
   base WAD reproduce the retail exe's own patch-WAD lookup (last-opened wins). That is how
   DLC-ported content reaches the workbench.
+- **Levels** — a `<name>-patch.wad` or `<name>.wad` beside the base, or an `--overlay`, that holds the
+  script `<name>` and the layer `<name>_base` is a level (`levels.rs`). Inspect's picker lists them. Choosing one mounts it
+  over the base and reloads, and every tab lists only that WAD's rows; the base still resolves what
+  they reference. The Audio tab then lists the level's wavebanks and plays them from the `.pws` files
+  in the `Audios` folder beside the WAD (`levelaudio.rs`). The choice is kept in the settings.
 - **The game's other WADs** — `shell.wad`, `Loading.wad` and each language's `<token>.wad` (the
   engine's language table, `mercs2_quartermaster::manifest::Language`) are opened read-only beside
   the stack. The game loads each in its own slot, so they never shadow it: Inspect lists what only
@@ -132,7 +137,7 @@ cargo run -p mercs2_workshop -- --mod-new my_tank tank_donor_name mesh.glb --mod
 
 Global options: `--wad <path>` (the first step of the game-archive chain, below), `--overlay <path>`
 (repeatable, stacks patch WADs on top of the base), `--no-auto-patch` (suppress the automatic
-`vz-patch.wad` pickup).
+`vz-patch.wad` pickup), `--level <name>` (open that level, in the window and for `--audio-export`).
 
 ## Where the game and the reference data come from
 

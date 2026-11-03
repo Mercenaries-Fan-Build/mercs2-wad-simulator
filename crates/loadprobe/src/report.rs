@@ -132,6 +132,48 @@ pub enum Verdict {
     Truncated { furthest: usize, name: String },
 }
 
+/// One measurement of the process's free address space, in KiB.
+#[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct VmSample {
+    pub free_kib: i64,
+    pub largest_kib: i64,
+}
+
+/// pmc_bb's address-space record: the `ADDRSPACE` line, the periodic `[vmem]` samples, and the
+/// `vmem` line inside a crash block. `low` is the fewest KiB free across the samples and `tightest`
+/// the smallest largest-hole, each from its own sample.
+#[derive(Serialize, Default, Debug)]
+pub struct AddressSpace {
+    pub laa: Option<bool>,
+    pub limit: Option<u32>,
+    pub samples: usize,
+    pub low: Option<VmSample>,
+    pub tightest: Option<VmSample>,
+    pub at_crash: Option<VmSample>,
+}
+
+fn vm_sample(msg: &str) -> Option<VmSample> {
+    Some(VmSample { free_kib: dec_after(msg, "free_kib=")?, largest_kib: dec_after(msg, "largest_kib=")? })
+}
+
+fn analyze_address_space(lines: &[LogLine]) -> AddressSpace {
+    let mut a = AddressSpace::default();
+    for l in lines {
+        if l.source == "blackbox" && l.msg.trim_start().starts_with("ADDRSPACE ") {
+            a.laa = dec_after(&l.msg, "laa=").map(|v| v != 0);
+            a.limit = hex_after(&l.msg, "limit=");
+        } else if l.source == "vmem" {
+            let Some(s) = vm_sample(&l.msg) else { continue };
+            a.samples += 1;
+            a.low = Some(a.low.map_or(s, |b| if s.free_kib < b.free_kib { s } else { b }));
+            a.tightest = Some(a.tightest.map_or(s, |b| if s.largest_kib < b.largest_kib { s } else { b }));
+        } else if l.source == "crash" && l.msg.trim_start().starts_with("vmem ") {
+            a.at_crash = vm_sample(&l.msg);
+        }
+    }
+    a
+}
+
 /// One game artifact fingerprinted by pmc_bb's `[blackbox] BUILD` lines — the
 /// objective binding from this run to the exact bytes that produced it.
 #[derive(Serialize, Clone)]
@@ -189,6 +231,10 @@ pub struct Report {
     /// arrives as an ordinal into an unidentified table, and `pct` rescales silently the next
     /// time a rung is added. Neither may be aggregated across differing values.
     pub ladder_version: usize,
+    /// Whether the log holds any `[lua]` or `[world]` line. Without one the ladder measured nothing:
+    /// `pct` is 0 because the run was not logged, not because the load got nowhere, which is every
+    /// run without `PMC_VERBOSE_LOG`.
+    pub milestones_logged: bool,
     pub verdict: Verdict,
     pub phases: Vec<PhaseHit>,
     pub streaming: Option<StreamSummary>,
@@ -199,6 +245,7 @@ pub struct Report {
     pub players: Vec<(String, String)>,
     pub pool: PoolHealth,
     pub crash: Option<CrashInfo>,
+    pub address_space: AddressSpace,
     pub mtrl_overcounts: Vec<String>,
     pub stall_dumps: Vec<String>,
     pub flagged: Vec<SourceGroup>,
@@ -339,11 +386,14 @@ pub fn analyze(file: &str, log_sha256: String, lines: &[LogLine], routine: &[Str
         Verdict::Truncated { furthest: furthest_idx, name: furthest_name.clone() }
     };
 
+    let milestones_logged = last_prog.is_some();
+    let address_space = analyze_address_space(&lines);
+
     Report {
         file: file.to_string(), log_sha256, build,
         records: real.len(), first_ts, last_ts, wall_ms,
-        furthest_idx, furthest_name, pct, ladder_version: LADDER_VERSION, verdict, phases, streaming,
-        acts, jobs, all_modules, portals, players, pool, crash,
+        furthest_idx, furthest_name, pct, ladder_version: LADDER_VERSION, milestones_logged, verdict, phases, streaming,
+        acts, jobs, all_modules, portals, players, pool, crash, address_space,
         mtrl_overcounts, stall_dumps, flagged, signals: signals_out, gaps,
         unknown_sources, unparsed_lines, tail, last_progress_ts, last_progress_msg,
     }
@@ -510,6 +560,9 @@ fn parse_module_offset(msg: &str) -> (Option<String>, Option<u32>) {
     (named.then(|| name.to_string()), off)
 }
 
+/// The most lines kept from a crash block: its detail lines, 48 stack lines and the register windows.
+const CRASH_BLOCK_MAX: usize = 80;
+
 fn analyze_crash(lines: &[LogLine], phases: &[PhaseHit]) -> Option<CrashInfo> {
     // The LAST banner in the file. `pmc_log` opens the log with `"w"`, so a file holds exactly
     // one run — and within a run the fatal `UNHANDLED` record follows the first-chance `VEH` one
@@ -530,13 +583,22 @@ fn analyze_crash(lines: &[LogLine], phases: &[PhaseHit]) -> Option<CrashInfo> {
         // indent on `msg`. Matching `"AV "` against the raw message never fired, so `av` was
         // always None and every consumer of it read "no access violation recorded".
         let body = l.msg.trim_start();
+        // The raw stack closes the record; its lines are for a person reading the log.
+        if body.starts_with("raw+") { break; }
         if let Some(rest) = body.strip_prefix("AV ") { av = Some(rest.to_string()); }
         block.push(l.msg.clone());
-        if block.len() >= 40 { break; }
+        if block.len() >= CRASH_BLOCK_MAX { break; }
     }
-    // terminal if no lua/world progress after the crash ts
+    // terminal if no lua/world progress after the crash ts. A run without milestones has no such
+    // progress to see, so there a first-chance record is terminal only if the log stops with it: any
+    // later line, such as the `[vmem]` heartbeat, shows the process lived on.
     let crash_ms = head.ts_ms;
-    let terminal = !lines.iter().any(|l| (l.source == "lua" || l.source == "world") && l.ts_ms > crash_ms);
+    let milestones = lines.iter().any(|l| l.source == "lua" || l.source == "world");
+    let terminal = if milestones {
+        !lines.iter().any(|l| (l.source == "lua" || l.source == "world") && l.ts_ms > crash_ms)
+    } else {
+        head.msg.contains("UNHANDLED") || !lines[idx..].iter().any(|l| l.source != "crash" && l.ts_ms > crash_ms)
+    };
     let world_ms = phases.iter().find(|p| p.idx == 10).map(|p| p.ts_ms);
     let since = world_ms.map(|w| (crash_ms - w) as i64);
     Some(CrashInfo {
@@ -636,7 +698,12 @@ pub fn print_text(r: &Report) {
     let pbar = format!("{}{}", "█".repeat(filled), "░".repeat(30 - filled));
     let pct_str = format!("LOADED {:>3}%", r.pct);
     let colored_pct = if r.pct >= 100 { pct_str.bold().green() } else if r.pct >= 50 { pct_str.bold().yellow() } else { pct_str.bold().red() };
-    println!("{}  {}  (phase {}/{}: {})", colored_pct, pbar, r.furthest_idx, LADDER.len() - 1, r.furthest_name);
+    if r.milestones_logged {
+        println!("{}  {}  (phase {}/{}: {})", colored_pct, pbar, r.furthest_idx, LADDER.len() - 1, r.furthest_name);
+    } else {
+        println!("{}  no [lua] or [world] lines, so how far the load got is unknown (run with PMC_VERBOSE_LOG=1 to log it)",
+                 "LOADED  n/a".bold().yellow());
+    }
 
     let hard_closed = r.crash.as_ref().map(|c| phases::is_teardown_eip(c.eip)).unwrap_or(false);
 
@@ -663,7 +730,8 @@ pub fn print_text(r: &Report) {
                 Some(l) => format!(" — {}", l),
                 None => " — UNRECOGNIZED EIP (candidate NEW crash site — add to KNOWN_EIPS)".to_string(),
             };
-            let when = if *furthest >= phases::REACHED_WORLD_IDX { " (after full world load)".to_string() }
+            let when = if !r.milestones_logged { " (load stage unknown)".to_string() }
+                       else if *furthest >= phases::REACHED_WORLD_IDX { " (after full world load)".to_string() }
                        else if *furthest >= phases::ENTERED_WORLD_IDX { " (after entering world)".to_string() }
                        else { String::new() };
             ("CRASH".bold().red(), format!("@ EIP=0x{:08X}{}{}", eip, lbl, when))
@@ -733,6 +801,7 @@ pub fn print_text(r: &Report) {
         let term = if !c.terminal { "VEH-recovered (load continued)".yellow().to_string() }
                    else if teardown { "process teardown — you force-closed the game".yellow().to_string() }
                    else if post_load { "terminal, but AFTER load completed".yellow().to_string() }
+                   else if !r.milestones_logged { "TERMINAL (load stage unknown: no milestones logged)".red().to_string() }
                    else { "TERMINAL (blocked the load)".red().to_string() };
         println!("  [{}] {} @ EIP=0x{:08X}  ({})", c.raw_ts, c.code, c.eip, term);
         match &c.eip_label {
@@ -750,7 +819,24 @@ pub fn print_text(r: &Report) {
             _ => println!("  module: {}", "not resolved (first-chance record; only the fatal UNHANDLED record resolves modules)".dimmed()),
         }
         if let Some(s) = c.since_world_load_ms { println!("  {} after world-load start", fmt_dur(s)); }
-        for line in c.block.iter().take(24) { println!("    {}", line.dimmed()); }
+        for line in c.block.iter() { println!("    {}", line.dimmed()); }
+    }
+
+    // address space, when this pmc_bb reports it
+    let a = &r.address_space;
+    if a.laa.is_some() || a.samples > 0 || a.at_crash.is_some() {
+        println!("\n{}", "── ADDRESS SPACE ──────────────────────────────".cyan().bold());
+        match (a.laa, a.limit) {
+            (Some(laa), Some(limit)) => println!("  large-address-aware: {}   limit {:#010x}", if laa { "yes" } else { "no" }, limit),
+            _ => println!("  {} no ADDRSPACE line in this log", "⚠".yellow()),
+        }
+        let mib = |kib: i64| format!("{:.1} MiB", kib as f64 / 1024.0);
+        if let (Some(l), Some(t)) = (a.low, a.tightest) {
+            println!("  {} samples: lowest free {}, smallest largest-hole {}", a.samples, mib(l.free_kib), mib(t.largest_kib));
+        }
+        if let Some(s) = a.at_crash {
+            println!("  at the crash: free {}, largest hole {}", mib(s.free_kib), mib(s.largest_kib));
+        }
     }
 
     // phase timeline
@@ -933,6 +1019,60 @@ mod crash_tests {
         assert_eq!(c.offset, None);
         assert!(!c.terminal, "lua progress after it means the load carried on");
         assert!(!matches!(r.verdict, Verdict::Crash { .. }), "a recovered fault is not a CRASH verdict");
+    }
+
+    /// A run without `PMC_VERBOSE_LOG` has no milestones: its ladder says 0 because nothing was logged.
+    #[test]
+    fn a_log_without_milestones_says_so() {
+        let r = report(
+            "[07:45:56.000] [blackbox] Lua log hook: OFF (set PMC_VERBOSE_LOG=1 to capture the game log)\n\
+             [08:15:34.762] [crash] ==== VEH EXCEPTION C0000005 ACCESS_VIOLATION @ EIP=0085C999 (unknown module) (flags=0) ====\n",
+        );
+        assert!(!r.milestones_logged);
+        assert!(matches!(r.verdict, Verdict::Crash { .. }), "a fatal fault is still a crash");
+        assert!(report(&log_with("")).milestones_logged);
+    }
+
+    /// Without milestones, the line after a first-chance record is what shows the process lived on.
+    #[test]
+    fn without_milestones_a_later_line_means_the_fault_was_survived() {
+        let r = report(
+            "[08:15:34.762] [crash] ==== VEH EXCEPTION C0000005 ACCESS_VIOLATION @ EIP=0085C999 (unknown module) (flags=0) ====\n\
+             [08:16:00.000] [vmem] sample free_kib=1 largest_kib=1 private_kib=1 image_kib=2 mapped_kib=3 reserved_kib=4 regions=5\n",
+        );
+        assert!(!r.crash.expect("a crash record").terminal);
+        assert!(!matches!(r.verdict, Verdict::Crash { .. }));
+
+        let r = report(
+            "[08:15:34.762] [crash] ==== VEH EXCEPTION C0000005 ACCESS_VIOLATION @ EIP=0085C999 (unknown module) (flags=0) ====\n\
+             [08:15:34.800] [crash] ==== UNHANDLED EXCEPTION C0000005 ACCESS_VIOLATION @ EIP=0085C999 (Mercenaries2.exe+0x45C999) (flags=0) ====\n\
+             [08:15:35.000] [vmem] sample free_kib=1 largest_kib=1 private_kib=1 image_kib=2 mapped_kib=3 reserved_kib=4 regions=5\n",
+        );
+        assert!(r.crash.expect("a crash record").terminal, "an UNHANDLED record is terminal whatever follows");
+    }
+
+    #[test]
+    fn the_address_space_record_is_read_and_the_crash_block_stays_whole() {
+        let r = report(&log_with(
+            "[00:00:04.500] [blackbox] ADDRSPACE laa=0 limit=7FFEFFFF\n\
+             [00:00:04.600] [vmem] sample free_kib=468172 largest_kib=242278 private_kib=1 image_kib=2 mapped_kib=3 reserved_kib=4 regions=5\n\
+             [00:00:04.700] [vmem] sample free_kib=380313 largest_kib=250000 private_kib=1 image_kib=2 mapped_kib=3 reserved_kib=4 regions=5\n\
+             [00:00:04.800] [vmem] sample free_kib=400000 largest_kib=143360 private_kib=1 image_kib=2 mapped_kib=3 reserved_kib=4 regions=5\n\
+             [00:00:05.000] [crash] ==== VEH EXCEPTION C0000005 ACCESS_VIOLATION @ EIP=0085C999 (unknown module) (flags=0) ====\n\
+             [00:00:05.001] [crash]   AV READ target=00000000\n\
+             [00:00:05.002] [crash]   vmem free_kib=2048 largest_kib=1024 private_kib=1 image_kib=2 mapped_kib=3 reserved_kib=4 regions=5\n\
+             [00:00:05.003] [crash]   stk+010 = 0085CECA after-call\n\
+             [00:00:05.004] [crash]   raw+000: 00000000 00000000 |........|\n",
+        ));
+        let a = &r.address_space;
+        assert_eq!(a.laa, Some(false));
+        assert_eq!(a.limit, Some(0x7FFE_FFFF));
+        assert_eq!(a.samples, 3, "the crash line is not a periodic sample");
+        assert_eq!(a.low.map(|s| s.free_kib), Some(380313));
+        assert_eq!(a.tightest.map(|s| s.largest_kib), Some(143360));
+        assert_eq!(a.at_crash, Some(super::VmSample { free_kib: 2048, largest_kib: 1024 }));
+        let c = r.crash.expect("a crash");
+        assert_eq!(c.block.len(), 4, "the header, AV, vmem and stack lines, without the raw stack: {:?}", c.block);
     }
 
     /// Both records for one fault: the fatal one wins, because it is the one that knows where it landed.

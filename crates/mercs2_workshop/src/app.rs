@@ -51,6 +51,8 @@ pub struct Options {
     pub auto_patch: bool,
     /// Every `--overlay`, in argument order. See [`overlays_for`].
     pub extra_overlays: Vec<String>,
+    /// `--level`: the level to open, ahead of the saved one.
+    pub level: Option<String>,
     /// A Shipment folder to open in the Quartermaster dock at startup.
     ///
     /// The dock is otherwise only reachable by clicking, which makes it unverifiable from a script —
@@ -1628,13 +1630,38 @@ struct Archive {
     /// The retail pixel shaders' samplers (`shader3.bin` beside the archive): what each material
     /// texture slot binds, for the scene and the offscreen renderer.
     pixel_samplers: mercs2_formats::shader_registrations::PixelSamplers,
+    /// The levels found beside the base, the base's own first.
+    levels: Vec<crate::levels::Level>,
+    /// The level Inspect lists, when it is not the base's.
+    level: Option<crate::levels::Level>,
 }
 
-/// Open the game archive at `wadpath` with `overlays` and build its catalog.
-fn open_archive(wadpath: &str, overlays: &[String]) -> Result<Archive, String> {
+/// The source index of `level`'s WAD in the stack.
+fn level_source(w: &WadStack, level: &Option<crate::levels::Level>) -> Option<usize> {
+    let l = level.as_ref()?;
+    w.labels.iter().position(|p| std::path::Path::new(p) == l.wad)
+}
+
+/// Open the game archive at `wadpath` with `overlays` and `wanted`, a level to mount over them when
+/// it is not the base's, and build its catalog.
+fn open_archive(wadpath: &str, overlays: &[String], wanted: Option<&str>) -> Result<Archive, String> {
+    let levels = crate::levels::found(std::path::Path::new(wadpath), overlays)?;
+    let level = match wanted {
+        Some(name) => Some(crate::levels::pick(&levels, name)?.clone()).filter(|l| l.wad != std::path::Path::new(wadpath)),
+        None => None,
+    };
+    let mut overlays = overlays.to_vec();
+    if let Some(l) = &level {
+        let path = l.wad.to_string_lossy().into_owned();
+        // The stack reads last-opened first, so the level goes on top whichever way it got here.
+        overlays.retain(|o| *o != path);
+        overlays.push(path);
+    }
+    let overlays = &overlays;
     let mut w = WadStack::open(wadpath, overlays).map_err(|e| format!("cannot open {wadpath}: {e}"))?;
     // The catalog builds here (hashes only); names land later through `apply_names`.
     let mut index = AssetIndex::build(&w.wads, &w.side, HashMap::new());
+    index.level_src = level_source(&w, &level);
     // The world's templates: each spawn template that picks a character-kit outfit gets its own
     // catalog row ("Jungle Elite", "VZ Sniper", …). Required — the catalog is wrong without them.
     let kit_templates = load_kit_templates(&mut w)
@@ -1680,6 +1707,8 @@ fn open_archive(wadpath: &str, overlays: &[String]) -> Result<Archive, String> {
         shell_plate,
         boot_skull,
         pixel_samplers,
+        levels,
+        level,
     })
 }
 
@@ -1711,15 +1740,15 @@ enum Boot {
     Failed(Which, String),
 }
 
-/// Start a boot: open `archive` (base and overlays) when given, then load the reference bundle
-/// when `data`. Messages arrive in that order; `Done` (or `Failed`) is the last.
-fn spawn_boot(archive: Option<(String, Vec<String>)>, data: bool) -> std::sync::mpsc::Receiver<Boot> {
+/// Start a boot: open `archive` (base and overlays) with level `level` when given, then load the
+/// reference bundle when `data`. Messages arrive in that order; `Done` (or `Failed`) is the last.
+fn spawn_boot(archive: Option<(String, Vec<String>)>, level: Option<String>, data: bool) -> std::sync::mpsc::Receiver<Boot> {
     let (tx, rx) = std::sync::mpsc::channel::<Boot>();
     std::thread::spawn(move || {
         let t0 = std::time::Instant::now();
         if let Some((wadpath, overlays)) = archive {
             let _ = tx.send(Boot::Prog(0.01, "asset catalog"));
-            match open_archive(&wadpath, &overlays) {
+            match open_archive(&wadpath, &overlays, level.as_deref()) {
                 Ok(a) => {
                     let _ = tx.send(Boot::Archive(Box::new(a)));
                 }
@@ -1866,18 +1895,24 @@ pub fn run(opts: Options) {
         let o = overlays_for(&s, auto_patch, extra);
         (s, o)
     };
+    // The level asked for, and those found beside the archive. Inspect lists `level` when it is set.
+    let mut level_want: Option<String> = opts.level.clone().or_else(|| crate::settings::load().level);
+    let mut levels: Vec<crate::levels::Level> = Vec::new();
+    let mut level: Option<crate::levels::Level> = None;
     // Where the window starts: loading both, or Settings on the chain with no answer.
     let first = next_step(None, None, &game_chain, &data_chain);
     let (mut phase, mut boot_rx) = match &first {
         Next::Boot { archive, data } => (
             Phase::Booting,
-            Some(spawn_boot(archive.as_deref().map(|p| stack_of(p, opts.auto_patch, &opts.extra_overlays)), *data)),
+            Some(spawn_boot(archive.as_deref().map(|p| stack_of(p, opts.auto_patch, &opts.extra_overlays)), level_want.clone(), *data)),
         ),
         Next::Setup(_) => (Phase::Setup, None),
         Next::Stay => unreachable!("nothing is loaded at startup"),
     };
     // Set when Settings changed a source: the chains are re-resolved at the top of the next frame.
     let mut chains_dirty = false;
+    // Set when the level picker chose: the same step reloads the archive with it.
+    let mut level_dirty = false;
     // Decompiled-Lua reference corpus (path, content, lowercased) — loaded on the boot thread.
     let mut lua_corpus: Vec<(String, String, String)> = Vec::new();
     let mut boot_target = 0.02f32; // stage-start fraction from the loader thread
@@ -2149,7 +2184,10 @@ pub fn run(opts: Options) {
     let mut last_frame = std::time::Instant::now();
 
     let refilter = |index: &AssetIndex, kind: Kind, filter: &str, lens: Option<crate::domain::Domain>| -> Vec<usize> {
-        filter_rows(index.rows(kind), kind, filter, lens, &index.faction_labels)
+        let rows = index.rows(kind);
+        let mut v = filter_rows(rows, kind, filter, lens, &index.faction_labels);
+        v.retain(|&i| index.in_level(&rows[i]));
+        v
     };
 
     event_loop
@@ -2390,12 +2428,17 @@ pub fn run(opts: Options) {
                     // nothing, unload into Settings, or reload in place. Anything tied to what is
                     // being replaced is dropped first, so no page keeps state from the old archive
                     // or bundle. ──
-                    if chains_dirty && phase != Phase::Booting {
+                    if (chains_dirty || level_dirty) && phase != Phase::Booting {
                         chains_dirty = false;
                         game_chain = crate::chains::game(opts.wad_flag.as_deref());
                         data_chain = crate::chains::data();
                         let loaded_wad = (!wadpath.is_empty()).then(|| PathBuf::from(&wadpath));
-                        let next = next_step(loaded_wad.as_deref(), loaded_data.as_deref(), &game_chain, &data_chain);
+                        let mut next = next_step(loaded_wad.as_deref(), loaded_data.as_deref(), &game_chain, &data_chain);
+                        // A level is a different stack over the same base, so it reloads as a new
+                        // archive does.
+                        if std::mem::take(&mut level_dirty) && next == Next::Stay {
+                            next = Next::Boot { archive: loaded_wad.clone(), data: true };
+                        }
                         if reload_capture.is_some() && !matches!(next, Next::Boot { .. }) {
                             eprintln!("--ui-state: run_wad / run_data started no reload ({next:?}): it names what is already loaded, or leaves a chain with no answer");
                             std::process::exit(2);
@@ -2486,6 +2529,7 @@ pub fn run(opts: Options) {
                                 boot_stage = if archive.is_some() { "asset catalog" } else { "reference data" };
                                 boot_rx = Some(spawn_boot(
                                     archive.as_deref().map(|p| stack_of(p, opts.auto_patch, &opts.extra_overlays)),
+                                    level_want.clone(),
                                     data,
                                 ));
                                 phase = Phase::Booting;
@@ -2506,7 +2550,9 @@ pub fn run(opts: Options) {
                                         boot_stage = stage;
                                     }
                                     Ok(Boot::Archive(a)) => {
-                                        let Archive { wadpath: p, overlays: o, w: nw, index: ni, anim_sel: asel, shell_plate: sp, boot_skull, pixel_samplers: ps } = *a;
+                                        let Archive { wadpath: p, overlays: o, w: nw, index: ni, anim_sel: asel, shell_plate: sp, boot_skull, pixel_samplers: ps, levels: found, level: open } = *a;
+                                        levels = found;
+                                        level = open;
                                         scene.set_pixel_samplers(ps.clone());
                                         pixel_samplers = Some(ps);
                                         clip_loader = ClipLoader::spawn(p.clone(), o.clone());
@@ -2540,6 +2586,7 @@ pub fn run(opts: Options) {
                                             // come from the corpus the boot thread indexed.
                                             missions_panel.set_reference(missions, &lua_corpus);
                                             audio_page.set_index(audio);
+                                            audio_page.set_level(level.as_ref().map(|l| l.wad.clone()), index.names.clone());
                                             loaded_data = Some(home);
                                             qm_corpus = crate::quartermaster::corpus_root();
                                             status = format!(
@@ -2729,6 +2776,7 @@ pub fn run(opts: Options) {
                                         w.labels.push(path_str);
                                         let names = std::mem::take(&mut index.names);
                                         index = AssetIndex::build(&w.wads, &w.side, names);
+                                        index.level_src = level_source(&w, &level);
                                         // The new overlay may carry its own worldentity.
                                         let kit_templates = match load_kit_templates(&mut w) {
                                             Ok(t) => t,
@@ -3152,6 +3200,10 @@ pub fn run(opts: Options) {
                                 crate::chains::set_run_data(p.clone());
                             }
                             chains_dirty = true;
+                            reload_capture = Some((st.capture.clone(), st.settle_frames, boots_done));
+                        } else if st.pick_level.is_some() {
+                            level_want = st.pick_level.clone();
+                            level_dirty = true;
                             reload_capture = Some((st.capture.clone(), st.settle_frames, boots_done));
                         } else if st.audio() {
                             audio_page.ensure_routes(std::path::Path::new(&wadpath));
@@ -3620,7 +3672,30 @@ pub fn run(opts: Options) {
                             }
                             Workbench::Inspect => {
                             let before = (kind, filter.clone(), lens);
-                            ui.label(theme::disp_text("ASSETS", theme::style_title(), theme::TX));
+                            ui.horizontal(|ui| {
+                                ui.label(theme::disp_text("ASSETS", theme::style_title(), theme::TX));
+                                if levels.len() > 1 {
+                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                        let open = level.as_ref().map_or(levels[0].name.as_str(), |l| l.name.as_str());
+                                        let mut chosen = None;
+                                        egui::ComboBox::from_id_salt("level-picker").selected_text(open).show_ui(ui, |ui| {
+                                            for l in &levels {
+                                                if ui.selectable_label(l.name == open, &l.name).clicked() && l.name != open {
+                                                    chosen = Some(l.name.clone());
+                                                }
+                                            }
+                                        });
+                                        if let Some(name) = chosen {
+                                            cfg.level = Some(name.clone());
+                                            if let Err(e) = cfg.save() {
+                                                status = format!("the level is not saved: {e}");
+                                            }
+                                            level_want = Some(name);
+                                            level_dirty = true;
+                                        }
+                                    });
+                                }
+                            });
                             ui.add_space(8.0);
                             // Segmented Models / Textures toggle — two EQUAL-width segments, each a
                             // centred "LABEL  count" unit, the active one filled. Custom-drawn so the
@@ -3714,7 +3789,7 @@ pub fn run(opts: Options) {
                                     ui.add_space(4.0);
                                     let models = index.models();
                                     for d in std::iter::once(None).chain(Workbench::lenses().into_iter().map(Some)) {
-                                        let n = models.iter().filter(|r| in_lens(d, r)).count();
+                                        let n = models.iter().filter(|r| index.in_level(r) && in_lens(d, r)).count();
                                         let name = d.map_or("All", |d| d.label());
                                         if theme::lens_pill(ui, name, &commafy(n), lens == d).clicked() {
                                             lens = d;
@@ -4440,7 +4515,7 @@ pub fn run(opts: Options) {
                                         // starts.
                                         if let (Workbench::Inspect, Kind::Model, Some(d)) = (eff, kind, lens) {
                                             ui.add_space(10.0);
-                                            let n = index.models().iter().filter(|r| in_lens(Some(d), r)).count();
+                                            let n = index.models().iter().filter(|r| index.in_level(r) && in_lens(Some(d), r)).count();
                                             theme::section(ui, &format!("{} lens", d.label()), Some(&format!("{n} models")), true, |ui| {
                                                 ui.label(egui::RichText::new(d.blurb()).small().color(theme::DIM));
                                                 ui.add_space(8.0);
@@ -7021,9 +7096,10 @@ pub fn run(opts: Options) {
                         skel_rx = None;
                     }
                     if let Some(wave) = audio_page.play.take() {
+                        let level_audio = audio_page.level_audio();
                         // Lazily open the record index (English.wad + .pws) and the device on the
                         // first play — both are heavy and most sessions never play audio.
-                        if vo_error.is_none() && vo_stream.is_none() {
+                        if level_audio.is_none() && vo_error.is_none() && vo_stream.is_none() {
                             let data_dir = std::path::Path::new(&wadpath)
                                 .parent()
                                 .map(|p| p.to_path_buf())
@@ -7039,16 +7115,26 @@ pub fn run(opts: Options) {
                                 None => vo_error = Some("no audio output device".into()),
                             }
                         }
-                        match (&vo_stream, &vo_player, &vo_error) {
-                            (_, _, Some(e)) => status = format!("AUDIO: {e}"),
-                            (Some(vo), Some(player), None) => match player.status() {
+                        match (&vo_player, &vo_error) {
+                            (_, Some(e)) => status = format!("AUDIO: {e}"),
+                            (Some(player), None) => match player.status() {
                                 // The clip already playing pauses, and a paused one resumes.
                                 Some(s) if s.clip == wave && !s.paused => player.pause(),
                                 Some(s) if s.clip == wave => player.resume(),
-                                _ => match vo.clip_pcm(wave) {
-                                    Ok(pcm) => player.play(wave, pcm.samples, pcm.rate, pcm.channels),
-                                    Err(e) => status = format!("AUDIO: {e}"),
-                                },
+                                _ => {
+                                    let pcm = match (&level_audio, &vo_stream) {
+                                        (Some(a), _) => a.clip_pcm(wave),
+                                        (None, Some(vo)) => vo.clip_pcm(wave),
+                                        (None, None) => Err("the voice-over stream is not open".to_string()),
+                                    };
+                                    match pcm {
+                                        Ok(pcm) => {
+                                            vo_from = level_audio.as_ref().map(|a| (wave, a.from_label(wave)));
+                                            player.play(wave, pcm.samples, pcm.rate, pcm.channels);
+                                        }
+                                        Err(e) => status = format!("AUDIO: {e}"),
+                                    }
+                                }
                             },
                             _ => {}
                         }
@@ -7695,7 +7781,7 @@ pub fn run(opts: Options) {
                                         }
                                         let lua: Vec<String> = lua_corpus.iter().map(|(_, c, _)| c.clone()).collect();
                                         text_page.ensure(sources, index.names.clone(), lua);
-                                        text_page.table = Some(row.hash);
+                                        text_page.open_table(row.hash);
                                         text_page.font = None;
                                         tex_view = None;
                                         status = format!("string table {}", row.label());
@@ -8498,6 +8584,7 @@ pub fn run(opts: Options) {
                                     w.labels.remove(i);
                                     let names = std::mem::take(&mut index.names);
                                     index = AssetIndex::build(&w.wads, &w.side, names);
+                                    index.level_src = level_source(&w, &level);
                                     // The dropped overlay may have carried the worldentity in use.
                                     let kit_templates = match load_kit_templates(&mut w) {
                                         Ok(t) => t,

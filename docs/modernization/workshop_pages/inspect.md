@@ -9,6 +9,7 @@ it writes, and what proves it. Nothing on the page is drawn without its row bein
 | Element | Action → effect | Data / code | Writes | Proof |
 |---|---|---|---|---|
 | Header crumb | none; shows `INSPECTING` then the tab, the Lens (Models tab with a Lens on), and the loaded model with its hash — e.g. `Models › Characters › pmc_hum_mattias 0x…` | `kind`, `lens`, `preview` in `app.rs` | — | test: crumb text for no lens / lens / loaded |
+| Level picker | beside ASSETS, listed when a level other than the base's is found. Choosing one mounts its WAD over the base and reloads; each tab then lists that WAD's rows and the base still resolves what they reference | `levels::found`, `AssetIndex::in_level` | `settings.json` `level` | test: `a_level_needs_its_script_and_its_base_layer`; capture `pick_level` |
 | Tab strip | click a tab → the list shows that kind; each count is the live row count | `index::AssetIndex::count`, `Kind::ALL` | — | capture |
 | Lens row (Models tab) | click a pill → the list narrows to that domain; counts live; the Lens is kept when you switch tabs and come back | `domain::Domain::model_lens`, `app::in_lens` | — | test (exists: `a_lens_count_is_what_the_lens_lists`) + capture |
 | Filter | typing narrows the list by name, live; Enter loads the cursor row | `app::filter_rows` | — | existing behaviour |

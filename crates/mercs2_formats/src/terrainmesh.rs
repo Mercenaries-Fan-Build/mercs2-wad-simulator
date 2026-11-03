@@ -537,7 +537,7 @@ pub(crate) fn exact_len(b: &[u8], want: usize, ctx: &str) -> Result<(), String> 
 }
 
 /// Byte size of a `D3DDECLTYPE`.
-fn decl_type_size(ty: u8) -> Result<usize, String> {
+pub(crate) fn decl_type_size(ty: u8) -> Result<usize, String> {
     Ok(match ty {
         0 => 4,                      // FLOAT1
         1 => 8,                      // FLOAT2

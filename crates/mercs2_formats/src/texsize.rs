@@ -1,19 +1,12 @@
 //! Texture mip-chain sizing — the single source of truth for how the engine
 //! instantiates a DXT texture's surfaces from its dimensions.
 //!
-//! Used by BOTH the converter (`ucfx_byteswap::convert`, which builds the BODY
-//! to match) and the `wad_simulator` validator (which flags a BODY too short for
-//! the chain the engine will read). Keeping ONE copy avoids the Rust/Python-style
-//! drift that previously mis-sized mip counts and caused the `dlc01_dlccon002`
-//! roads world-load livelock (see docs / memory `converter-rust-python-drift`).
+//! Used by the `wad_simulator` validator, which flags a BODY too short for the
+//! chain the engine will read, and by the texture readers.
 //!
-//! Live x32dbg proved the engine reads the FULL mip chain derived from the
-//! texture's dimensions (`dxt_mip_count`, down to the 4x4 DXT minimum) regardless
-//! of the header's mip field. A BODY shorter than that chain makes the streaming
-//! worker over-read → `STATUS_BUFFER_TOO_SMALL` → the page never reaches ready
-//! state 4 → the load livelocks. So the converter sizes the BODY to exactly
-//! `linear_mip_chain_size(w, h, fourcc, dxt_mip_count(w, h))`, and the validator
-//! flags any texture whose BODY is shorter than that.
+//! A rung's `BODY` is the mips its `INFO` mask names (`docs/format_reference.md`
+//! §4.3), and the engine's reader does not check its size: a resident `BODY`
+//! shorter than its mips over-reads the block buffer.
 
 /// `(block_px, texel_pitch_bytes, log2_bytes_per_block)` for a DXT FourCC.
 /// `None` for non-DXT (uncompressed) formats.
@@ -47,12 +40,11 @@ pub fn dxt_mip_count(width: usize, height: usize) -> usize {
 /// chain inline in BODY) vs STREAMED (only a small resident tail inline, the rest
 /// paged in from the streaming store).
 ///
-/// INFO[26:34] is an 8-byte mip-residency / streaming descriptor. When the first
-/// six bytes (INFO[26:32]) are all zero the texture is fully resident — the
-/// trailing u16 is a resident sentinel (`FFFF`) or all-mips mask (`0001`). A
-/// non-zero [26:32] is a partial-residency descriptor: the inline BODY is a
-/// resident tail and a BODY shorter than the full dimension-derived chain is
-/// CORRECT, not a fault — the engine streams the remainder rather than over-reading.
+/// INFO[26:34] is four u16 mip masks, `_P003` to `_P000`. When the first three are
+/// zero every mip is in `_P000`, so the texture is fully resident and the last mask
+/// is `FFFF` or the chain's own bits. Otherwise the inline BODY is a resident tail
+/// and a BODY shorter than the full dimension-derived chain is CORRECT, not a
+/// fault — the finer rungs hold the rest.
 ///
 /// Verified against retail vz.wad (loads in-game): of 13339 textures, all 3776
 /// fully-resident ones have a complete BODY and all 9562 streamed ones have a

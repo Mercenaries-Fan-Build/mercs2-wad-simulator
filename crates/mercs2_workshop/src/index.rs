@@ -430,6 +430,9 @@ pub struct AssetIndex {
     pub faction_labels: HashMap<u32, String>,
     /// The templates that start each effect, by the effect's hash.
     pub effect_starters: HashMap<u32, Vec<crate::vfxview::StartedBy>>,
+    /// The source a level is open from: Inspect lists only that source's rows, while the rest of the
+    /// stack still resolves what those rows reference. `None` lists everything.
+    pub level_src: Option<usize>,
 }
 
 /// Each `FactionMarker` value, labelled with the model-name prefix it pairs with most often across
@@ -473,9 +476,17 @@ impl AssetIndex {
         self.rows(Kind::Texture)
     }
 
-    /// How many assets a category holds — for the category strip's counts.
+    /// Whether Inspect lists `row`: everything, or with a level open, what that level's WAD holds.
+    pub fn in_level(&self, row: &AssetRow) -> bool {
+        self.level_src.is_none_or(|s| row.src == s)
+    }
+
+    /// How many assets a category lists — for the category strip's counts.
     pub fn count(&self, kind: Kind) -> usize {
-        self.rows(kind).len()
+        match self.level_src {
+            None => self.rows(kind).len(),
+            Some(_) => self.rows(kind).iter().filter(|r| self.in_level(r)).count(),
+        }
     }
 
     /// Build the catalog from EVERY open WAD's ASET table (base + overlays, in stack order — a
@@ -540,6 +551,7 @@ impl AssetIndex {
             helicopter_keys: std::collections::BTreeSet::new(),
             faction_labels: HashMap::new(),
             effect_starters: HashMap::new(),
+            level_src: None,
         };
         idx.apply_names(names);
         idx

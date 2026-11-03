@@ -41,6 +41,10 @@
 mod anim_table;
 mod bone_census;
 mod chunk_compare;
+mod dlc_census;
+mod pws_survey;
+mod tex_compare;
+mod tex_rungs;
 mod clip_names;
 mod clip_pose;
 mod dump;
@@ -104,6 +108,10 @@ fn usage() -> ! {
          \x20 ecs-compare <archive a> <archive b> <out.tsv> --vz-wad <pc vz.wad> [--diffs <file>]   (two archives' ECS containers, converted, record by record; no --wad)\n\
          \x20 ecs-names <archive> <out.tsv> --vz-wad <pc vz.wad>   (every Name string of an archive's named containers; no --wad)\n\
          \x20 chunk-compare <big-endian archive> <out.tsv> --vz-wad <pc vz.wad> --java <java> --unluac <jar> [--only <type>]   (every chunk converted against its PC twin, row by row; no --wad)\n\
+         \x20 model-compare <big-endian archive> <pc vz.wad> <out.tsv>   (every model converted against PC over its whole chain; no --wad)\n\
+         \x20 scrub-compare <big-endian archive> <pc vz.wad> <out.tsv>   (every scrub converted against PC; no --wad)\n\
+         \x20 phy2-diff <big-endian PHY2 body> <PC body or container>   (a collider converted, its differences by region; no --wad)\n\
+         \x20 rung-words <pc wad>   (each type's chains against the rule for their table words; no --wad)\n\
          \x20 clip-pose --model H --clip H --bones 0xA,0xB.. --ref 0xR [--frames N]   (bone positions over a clip)\n\
          \x20 dump-read <capture-dir> <0xVA> [len]          (retail memory from a v1.0 x32dbg capture, no WAD)\n\
          \x20 dump-chain <capture-dir> <0xVA> <0xOFF>...    ([[VA]+o0]+o1 ... ; last offset added, not read)\n\
@@ -681,6 +689,366 @@ fn main() {
         }
         return;
     }
+    if cmd == "terrain-position-w" {
+        let (Some(wad), Some(out)) = (args.first(), args.get(1)) else {
+            eprintln!("terrain-position-w: usage: mercs2_probe terrain-position-w <PC wad> <out.tsv>");
+            std::process::exit(2);
+        };
+        if let Err(e) = dlc_census::terrain_position_w(std::path::Path::new(wad), std::path::Path::new(out)) {
+            eprintln!("terrain-position-w failed: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    if cmd == "terrain-alt-strips" {
+        let (Some(wad), Some(out)) = (args.first(), args.get(1)) else {
+            eprintln!("terrain-alt-strips: usage: mercs2_probe terrain-alt-strips <PC wad> <out.tsv>");
+            std::process::exit(2);
+        };
+        if let Err(e) = dlc_census::terrain_alt_strips(std::path::Path::new(wad), std::path::Path::new(out)) {
+            eprintln!("terrain-alt-strips failed: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    if cmd == "terrain-decls" {
+        let (Some(wad), Some(out)) = (args.first(), args.get(1)) else {
+            eprintln!("terrain-decls: usage: mercs2_probe terrain-decls <PC wad> <out.tsv>");
+            std::process::exit(2);
+        };
+        if let Err(e) = dlc_census::terrain_decls(std::path::Path::new(wad), std::path::Path::new(out)) {
+            eprintln!("terrain-decls failed: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    if cmd == "terrain-half-tally" {
+        let (Some(wad), Some(usage), Some(component), Some(out)) = (args.first(), args.get(1).and_then(|u| u.parse::<u8>().ok()), args.get(2).and_then(|c| c.parse::<usize>().ok()), args.get(3)) else {
+            eprintln!("terrain-half-tally: usage: mercs2_probe terrain-half-tally <PC wad> <decl usage> <component 0-3> <out.tsv>");
+            std::process::exit(2);
+        };
+        if let Err(e) = dlc_census::terrain_half_tally(std::path::Path::new(wad), usage, component, std::path::Path::new(out)) {
+            eprintln!("terrain-half-tally failed: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    if cmd == "terrain-vertex-compare" {
+        let (Some(a), Some(b), Some(out)) = (args.first(), args.get(1), args.get(2)) else {
+            eprintln!("terrain-vertex-compare: usage: mercs2_probe terrain-vertex-compare <PC wad> <PC wad> <out.tsv>");
+            std::process::exit(2);
+        };
+        if let Err(e) = dlc_census::terrain_vertex_compare(std::path::Path::new(a), std::path::Path::new(b), std::path::Path::new(out)) {
+            eprintln!("terrain-vertex-compare failed: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    if cmd == "terrain-draw-ranges" {
+        let (Some(wad), Some(out)) = (args.first(), args.get(1)) else {
+            eprintln!("terrain-draw-ranges: usage: mercs2_probe terrain-draw-ranges <PC wad> <out.tsv>");
+            std::process::exit(2);
+        };
+        if let Err(e) = dlc_census::terrain_draw_ranges(std::path::Path::new(wad), std::path::Path::new(out)) {
+            eprintln!("terrain-draw-ranges failed: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    if cmd == "terrain-compare" {
+        let (Some(a), Some(b), Some(out)) = (args.first(), args.get(1), args.get(2)) else {
+            eprintln!("terrain-compare: usage: mercs2_probe terrain-compare <wad a> <wad b> <out.tsv>");
+            std::process::exit(2);
+        };
+        if let Err(e) = dlc_census::terrain_compare(std::path::Path::new(a), std::path::Path::new(b), std::path::Path::new(out)) {
+            eprintln!("terrain-compare failed: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    if cmd == "scrub-compare" {
+        let (Some(archive), Some(pc), Some(out)) = (args.first(), args.get(1), args.get(2)) else {
+            eprintln!("scrub-compare: usage: mercs2_probe scrub-compare <big-endian archive> <PC vz.wad> <out.tsv>");
+            std::process::exit(2);
+        };
+        if let Err(e) = dlc_census::scrub_compare(std::path::Path::new(archive), std::path::Path::new(pc), std::path::Path::new(out)) {
+            eprintln!("scrub-compare failed: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    if cmd == "rung-words" {
+        let Some(wad) = args.first() else {
+            eprintln!("rung-words: usage: mercs2_probe rung-words <PC wad>");
+            std::process::exit(2);
+        };
+        if let Err(e) = dlc_census::rung_words(std::path::Path::new(wad)) {
+            eprintln!("rung-words failed: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    if cmd == "model-compare" {
+        let (Some(archive), Some(pc), Some(out)) = (args.first(), args.get(1), args.get(2)) else {
+            eprintln!("model-compare: usage: mercs2_probe model-compare <big-endian archive> <PC vz.wad> <out.tsv>");
+            std::process::exit(2);
+        };
+        if let Err(e) = dlc_census::model_compare(std::path::Path::new(archive), std::path::Path::new(pc), std::path::Path::new(out)) {
+            eprintln!("model-compare failed: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    if cmd == "pixel-shaders" {
+        let (Some(dir), Some(pc)) = (args.first(), args.get(1)) else {
+            eprintln!("pixel-shaders: usage: mercs2_probe pixel-shaders <dir of model .ucfx> <PC wad>");
+            std::process::exit(2);
+        };
+        if let Err(e) = dlc_census::pixel_shaders(std::path::Path::new(dir), std::path::Path::new(pc)) {
+            eprintln!("pixel-shaders failed: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    if cmd == "vs-compare" {
+        let (Some(archive), Some(pc), Some(out)) = (args.first(), args.get(1), args.get(2)) else {
+            eprintln!("vs-compare: usage: mercs2_probe vs-compare <big-endian archive> <PC vz.wad> <out.tsv>");
+            std::process::exit(2);
+        };
+        if let Err(e) = dlc_census::vs_compare(std::path::Path::new(archive), std::path::Path::new(pc), std::path::Path::new(out)) {
+            eprintln!("vs-compare failed: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    if cmd == "type-compare" {
+        let (Some(archive), Some(pc), Some(ty)) = (args.first(), args.get(1), args.get(2)) else {
+            eprintln!("type-compare: usage: mercs2_probe type-compare <big-endian archive> <PC wad> <type name>");
+            std::process::exit(2);
+        };
+        if let Err(e) = dlc_census::type_compare(std::path::Path::new(archive), std::path::Path::new(pc), ty) {
+            eprintln!("type-compare failed: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    if cmd == "frame-capture" {
+        let (Some(file), Some(out)) = (args.first(), args.get(1)) else {
+            eprintln!("frame-capture: usage: mercs2_probe frame-capture <mercs2_profiler_frame_N.bin> <matrices.tsv>");
+            std::process::exit(2);
+        };
+        if let Err(e) = dlc_census::frame_capture(std::path::Path::new(file), std::path::Path::new(out)) {
+            eprintln!("frame-capture failed: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    if cmd == "terrain-bounds" {
+        let (Some(input), Some(out)) = (args.first(), args.get(1)) else {
+            eprintln!("terrain-bounds: usage: mercs2_probe terrain-bounds <PC wad | dir holding terrainmesh/ and lowresterrain/> <out.tsv>");
+            std::process::exit(2);
+        };
+        if let Err(e) = dlc_census::terrain_bounds(std::path::Path::new(input), std::path::Path::new(out)) {
+            eprintln!("terrain-bounds failed: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    if cmd == "model-bounds" {
+        let (Some(dir), Some(out)) = (args.first(), args.get(1)) else {
+            eprintln!("model-bounds: usage: mercs2_probe model-bounds <dir of model .ucfx> <out.tsv>");
+            std::process::exit(2);
+        };
+        if let Err(e) = dlc_census::model_bounds(std::path::Path::new(dir), std::path::Path::new(out)) {
+            eprintln!("model-bounds failed: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    if cmd == "ucfx-tree" {
+        let (Some(file), Some(max)) = (args.first(), args.get(1).map_or(Some(64), |v| v.parse::<usize>().ok())) else {
+            eprintln!("ucfx-tree: usage: mercs2_probe ucfx-tree <container .ucfx> [bytes shown per row, default 64]");
+            std::process::exit(2);
+        };
+        if let Err(e) = dlc_census::ucfx_tree(std::path::Path::new(file), max) {
+            eprintln!("ucfx-tree failed: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    if cmd == "water-at" {
+        let (Some(file), Some(x), Some(z)) = (args.first(), args.get(1).and_then(|v| v.parse::<f32>().ok()), args.get(2).and_then(|v| v.parse::<f32>().ok())) else {
+            eprintln!("water-at: usage: mercs2_probe water-at <watermap .ucfx | PC wad> <x> <z>");
+            std::process::exit(2);
+        };
+        if let Err(e) = dlc_census::water_at(std::path::Path::new(file), x, z) {
+            eprintln!("water-at failed: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    if cmd == "tiny-slots" {
+        let Some((out, inputs)) = args.split_last().filter(|(_, i)| !i.is_empty()) else {
+            eprintln!("tiny-slots: usage: mercs2_probe tiny-slots <PC wad | dir of .ucfx | --be <big-endian archive>>... <out.tsv>");
+            std::process::exit(2);
+        };
+        if let Err(e) = dlc_census::tiny_slots(inputs, std::path::Path::new(out)) {
+            eprintln!("tiny-slots failed: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    if cmd == "phy2-diff" {
+        let (Some(be), Some(pc)) = (args.first(), args.get(1)) else {
+            eprintln!("phy2-diff: usage: mercs2_probe phy2-diff <big-endian PHY2 body> <PC body or container>");
+            std::process::exit(2);
+        };
+        if let Err(e) = dlc_census::phy2_diff(std::path::Path::new(be), std::path::Path::new(pc)) {
+            eprintln!("phy2-diff failed: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    if cmd == "chunk-rows" {
+        let (Some(archive), Some(name), Some(dir)) = (args.first(), args.get(1).and_then(|h| parse_hash(h)), args.get(2)) else {
+            eprintln!("chunk-rows: usage: mercs2_probe chunk-rows <big-endian archive> <0xNAME> <out dir>");
+            std::process::exit(2);
+        };
+        if let Err(e) = dlc_census::chunk_rows(std::path::Path::new(archive), name, std::path::Path::new(dir)) {
+            eprintln!("chunk-rows failed: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    if cmd == "decl-table" {
+        let (Some(ps3), Some(converted), Some(out)) = (args.first(), args.get(1), args.get(2)) else {
+            eprintln!("decl-table: usage: mercs2_probe decl-table <ps3 archive> <converted wad> <out.tsv>");
+            std::process::exit(2);
+        };
+        if let Err(e) = dlc_census::decl_table(std::path::Path::new(ps3), std::path::Path::new(converted), std::path::Path::new(out)) {
+            eprintln!("decl-table failed: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    if cmd == "tex-info" {
+        let (Some(archive), Some(pc), Some(out)) = (args.first(), args.get(1), args.get(2)) else {
+            eprintln!("tex-info: usage: mercs2_probe tex-info <big-endian archive> <pc vz.wad> <out.tsv>");
+            std::process::exit(2);
+        };
+        if let Err(e) = tex_compare::tex_info(std::path::Path::new(archive), std::path::Path::new(pc), std::path::Path::new(out)) {
+            eprintln!("tex-info failed: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    if cmd == "pc-diff" {
+        let (Some(converted), Some(pc), Some(out)) = (args.first(), args.get(1), args.get(2)) else {
+            eprintln!("pc-diff: usage: mercs2_probe pc-diff <converted wad> <pc vz.wad> <out.tsv> [--type 0xHASH]");
+            std::process::exit(2);
+        };
+        let only = flag_val(&args, "--type").and_then(|h| parse_hash(&h));
+        if let Err(e) = dlc_census::pc_diff(std::path::Path::new(converted), std::path::Path::new(pc), only, std::path::Path::new(out)) {
+            eprintln!("pc-diff failed: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    if cmd == "clip-compare" {
+        let (Some(converted), Some(pc), Some(out)) = (args.first(), args.get(1), args.get(2)) else {
+            eprintln!("clip-compare: usage: mercs2_probe clip-compare <converted wad> <pc vz.wad> <out.tsv>");
+            std::process::exit(2);
+        };
+        if let Err(e) = dlc_census::clip_compare(std::path::Path::new(converted), std::path::Path::new(pc), std::path::Path::new(out)) {
+            eprintln!("clip-compare failed: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    if cmd == "dlc-census" {
+        let (Some(package), Some(base), Some(pc), Some(out)) = (args.first(), args.get(1), args.get(2), args.get(3)) else {
+            eprintln!("dlc-census: usage: mercs2_probe dlc-census <big-endian dlc archive> <big-endian retail wad> <pc vz.wad> <out.tsv>");
+            std::process::exit(2);
+        };
+        if let Err(e) = dlc_census::dlc_census(std::path::Path::new(package), std::path::Path::new(base), std::path::Path::new(pc), std::path::Path::new(out)) {
+            eprintln!("dlc-census failed: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    if cmd == "pws-pc" {
+        let (Some(wad), Some(audios), Some(out)) = (args.first(), args.get(1), args.get(2)) else {
+            eprintln!("pws-pc: usage: mercs2_probe pws-pc <pc wad> <Audios dir> <out.tsv>");
+            std::process::exit(2);
+        };
+        if let Err(e) = pws_survey::pc_streams(std::path::Path::new(wad), std::path::Path::new(audios), std::path::Path::new(out)) {
+            eprintln!("pws-pc failed: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    if cmd == "pws-survey" {
+        let (Some(package), Some(out)) = (args.first(), args.get(1)) else {
+            eprintln!("pws-survey: usage: mercs2_probe pws-survey <stfs package> <out.tsv> [--extract <dir>]");
+            std::process::exit(2);
+        };
+        let extract = flag_val(&args, "--extract");
+        if let Err(e) = pws_survey::pws_survey(std::path::Path::new(package), std::path::Path::new(out), extract.as_deref().map(std::path::Path::new)) {
+            eprintln!("pws-survey failed: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    if cmd == "stfs-list" {
+        let Some(package) = args.first() else {
+            eprintln!("stfs-list: usage: mercs2_probe stfs-list <stfs package>");
+            std::process::exit(2);
+        };
+        let reader = match std::fs::read(package) {
+            Ok(data) => mercs2_formats::dlc_stfs::StfsReader::new(data),
+            Err(e) => {
+                eprintln!("stfs-list: {package}: {e}");
+                std::process::exit(1);
+            }
+        };
+        for e in reader.file_table.iter().filter(|e| !e.is_dir) {
+            println!("{}\t{}\t{}", e.path_ind, e.file_size, e.name);
+        }
+        return;
+    }
+    if cmd == "tex-compare" {
+        let (Some(archive), Some(out), Some(vz)) = (args.first(), args.get(1), flag_val(&args, "--vz-wad")) else {
+            eprintln!("tex-compare: usage: mercs2_probe tex-compare <xbox archive> <out.tsv> --vz-wad <pc vz.wad> [--ps3 <ps3 archive>]");
+            std::process::exit(2);
+        };
+        let ps3 = flag_val(&args, "--ps3");
+        if let Err(e) = tex_compare::tex_compare(std::path::Path::new(archive), std::path::Path::new(&vz), ps3.as_deref().map(std::path::Path::new), std::path::Path::new(out)) {
+            eprintln!("tex-compare failed: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    if cmd == "tex-rungs" {
+        let (Some(archive), Some(out), Some(vz)) = (args.first(), args.get(1), flag_val(&args, "--vz-wad")) else {
+            eprintln!("tex-rungs: usage: mercs2_probe tex-rungs <big-endian archive> <out.tsv> --vz-wad <pc vz.wad> [--raw <dir> --hash <0xHASH>]");
+            std::process::exit(2);
+        };
+        let dir = flag_val(&args, "--raw");
+        let hash = flag_val(&args, "--hash").and_then(|h| u32::from_str_radix(h.trim_start_matches("0x"), 16).ok());
+        let raw = match (&dir, hash) {
+            (Some(d), Some(hash)) => Some(tex_rungs::Raw { hash, dir: std::path::Path::new(d) }),
+            (None, None) => None,
+            _ => {
+                eprintln!("tex-rungs: --raw and --hash go together, and --hash is hex");
+                std::process::exit(2);
+            }
+        };
+        if let Err(e) = tex_rungs::tex_rungs(std::path::Path::new(archive), std::path::Path::new(&vz), std::path::Path::new(out), raw.as_ref()) {
+            eprintln!("tex-rungs failed: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
     if cmd == "ecs-names" {
         let (Some(archive), Some(out), Some(vz)) = (args.first(), args.get(1), flag_val(&args, "--vz-wad")) else {
             eprintln!("ecs-names: usage: mercs2_probe ecs-names <archive> <out.tsv> --vz-wad <pc vz.wad>");
@@ -1159,11 +1527,12 @@ fn main() {
                 run(layer::layer_near(&wadpath, x, z, radius));
             } else {
                 let name = first_positional(&args).unwrap_or_else(|| {
-                    eprintln!("layer: usage: mercs2_probe layer <name|0xH> | --all | --frames | --near <x> <z> <radius>");
+                    eprintln!("layer: usage: mercs2_probe layer <name|0xH> [--overlay <wad>] | --all | --frames | --near <x> <z> <radius>");
                     std::process::exit(2);
                 });
                 let hash = parse_hash(&name).unwrap_or_else(|| mercs2_formats::hash::pandemic_hash_m2(&name));
-                run(layer::layer(&wadpath, hash));
+                let overlays: Vec<String> = flag_val(&args, "--overlay").into_iter().collect();
+                run(layer::layer(&wadpath, hash, &overlays));
             }
         }
         "foliage" => run(dump_render::foliage_list(&wadpath)),

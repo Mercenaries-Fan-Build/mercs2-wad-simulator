@@ -11,6 +11,7 @@
 //! * `watr` header (36 B): `u32 layer_count`, `u32 grid_w`, `u32 grid_h`, then six `f32`
 //!   metadata floats (offsets 12..36).
 //! * Layer 0: `f32` height field, `grid_w × grid_h` samples (257×257 on retail).
+//! * Two `f32` words after the heights (retail: both −36.0156); their role is not decoded.
 //! * Layers 1..3: `u8` masks, same resolution — wet mask (confirmed) + two hypothesis layers.
 //! * Trailing ~33 KiB footer — does NOT divide the grid, so it is **not** a fourth full-grid
 //!   raster; hypothesis is that `layer_count = 5` counts height + three u8 grids + this blob.
@@ -28,6 +29,9 @@ pub const TYPE_ID_WATERMAP: u32 = 25;
 
 /// Size of the `watr` fixed header before the first raster layer.
 pub const WATR_HEADER_SIZE: usize = 36;
+
+/// Bytes between the height layer and the first mask: two `f32` words.
+pub const WATR_AFTER_HEIGHTS: usize = 8;
 
 /// UCFX chunk header stride.
 const CHUNK_HDR: usize = 20;
@@ -76,6 +80,8 @@ pub struct Watermap {
     pub header_u32_at_28: [u32; 2],
     /// Layer 0 — `f32` height field, `grid_width * grid_height` samples in metres.
     pub heights: Vec<f32>,
+    /// The two `f32` words between the heights and the masks (retail: both −36.0156).
+    pub after_heights: [f32; 2],
     /// Layer 1 — wet mask. Confirmed: `0 = dry (-50 m sentinel)`, `255 = wet (~-36 m)`.
     pub wet_mask: Vec<u8>,
     /// Layer 2 — coastal variant (hypothesis; `255` = default, other = sparse shore codes).
@@ -128,10 +134,10 @@ impl Watermap {
         self.footer.len() >= FOOTER_MIN_SIZE && self.footer.len() <= FOOTER_MAX_SIZE
     }
 
-    /// Expected bytes for header + four full-grid layers (height f32 + 3 × u8 masks).
-    /// Actual payload length is this plus [`Self::footer`].
+    /// Expected bytes for header + four full-grid layers (height f32 + 3 × u8 masks) and the two
+    /// words after the heights. Actual payload length is this plus [`Self::footer`].
     pub fn expected_pre_footer_bytes(&self) -> usize {
-        WATR_HEADER_SIZE + self.grid_cells() * (4 + 3)
+        WATR_HEADER_SIZE + self.grid_cells() * (4 + 3) + WATR_AFTER_HEIGHTS
     }
 
     /// Sample height at `(ix, iz)`; returns `None` on out-of-bounds.
@@ -302,6 +308,8 @@ pub fn parse_watr_payload(payload: &[u8]) -> Result<Watermap, String> {
         ));
     }
     off = end0;
+    let after_heights = [read_f32_le(payload, off)?, read_f32_le(payload, off + 4)?];
+    off += WATR_AFTER_HEIGHTS;
 
     // Layers 1..3 — u8 masks (same topology)
     let read_mask = |src_off: usize, name: &str| -> Result<Vec<u8>, String> {
@@ -329,6 +337,7 @@ pub fn parse_watr_payload(payload: &[u8]) -> Result<Watermap, String> {
         header_floats,
         header_u32_at_28,
         heights,
+        after_heights,
         wet_mask,
         coastal_variant,
         override_sparse,
@@ -371,8 +380,8 @@ mod tests {
 
     #[test]
     fn tiny_grid_roundtrip() {
-        // 2x2 grid: header + 4*f32 heights + 4*3 u8 masks = 36 + 16 + 12 = 64 B
-        let mut buf = Vec::with_capacity(64);
+        // 2x2 grid: header + 4*f32 heights + 2*f32 + 4*3 u8 masks = 36 + 16 + 8 + 12 = 72 B
+        let mut buf = Vec::with_capacity(72);
         buf.extend_from_slice(&5u32.to_le_bytes()); // layer_count
         buf.extend_from_slice(&2u32.to_le_bytes()); // grid_w
         buf.extend_from_slice(&2u32.to_le_bytes()); // grid_h
@@ -382,7 +391,7 @@ mod tests {
         buf.extend_from_slice(&64.0f32.to_le_bytes()); // field_b
         buf.extend_from_slice(&0.0f32.to_le_bytes()); // field_c
         buf.extend_from_slice(&0.0f32.to_le_bytes()); // field_d
-        for v in [-36.0f32, -50.0, -36.0, 0.0] {
+        for v in [-36.0f32, -50.0, -36.0, 0.0, -36.0156, -36.0156] {
             buf.extend_from_slice(&v.to_le_bytes());
         }
         buf.extend_from_slice(&[255u8, 0, 255, 0]); // wet_mask
@@ -393,7 +402,9 @@ mod tests {
         assert_eq!(wm.grid_height, 2);
         assert_eq!(wm.grid_cells(), 4);
         assert_eq!(wm.heights.len(), 4);
-        assert_eq!(wm.wet_mask, vec![255, 0, 255, 0]);
+        assert_eq!(wm.after_heights, [-36.0156, -36.0156]);
+        assert_eq!(wm.wet_mask, vec![255, 0, 255, 0], "the masks start after the two words");
+        assert_eq!(wm.expected_pre_footer_bytes(), buf.len());
         assert_eq!(wm.cell_size_m(), Some(32.0));
         assert_eq!(wm.world_span_m(), Some((32.0, 32.0)));
         assert_eq!(wm.height_at(1, 1), Some(0.0));

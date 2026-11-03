@@ -15,7 +15,8 @@ use std::path::Path;
 
 use mercs2_formats::be_to_le::convert::convert_block;
 use mercs2_formats::be_to_le::ecs::{ecs_containers, is_compact, read_records, ComponentSchemas};
-use mercs2_formats::dlc_input::{parse_be_ffcs, parse_be_indx, read_be_block};
+use mercs2_formats::be_to_le::texture::{archive_textures, rung_of_path, BlockTables, TextureTable};
+use mercs2_formats::dlc_input::{parse_be_ffcs, parse_be_indx, parse_be_pths, read_be_block};
 use mercs2_formats::ffcs::load_ffcs_archive;
 use mercs2_formats::game_paths::{local_config_ps3_vz_wad, local_config_vz_wad, local_config_xbox_vz_wad};
 use mercs2_formats::mixr::Mixr;
@@ -82,13 +83,18 @@ fn every_xbox_mixr_equals_its_pc_twin() {
     let doh = std::fs::read(&xbox).unwrap();
     let (_, rows) = parse_be_ffcs(&doh).unwrap();
     let indx = rows.iter().find(|r| r.tag == "INDX").unwrap();
+    let entries = parse_be_indx(&doh, indx.offset as usize, indx.meta as usize);
+    let paths_row = rows.iter().find(|r| r.tag == "PTHS").unwrap();
+    let paths = parse_be_pths(&doh, paths_row.offset as usize, paths_row.meta as usize);
+    let table = TextureTable::from_doh(&doh, &entries, &paths, &archive_textures(&pc).unwrap()).unwrap();
     let mut compared = 0usize;
-    for e in parse_be_indx(&doh, indx.offset as usize, indx.meta as usize) {
-        let be = read_be_block(&doh, &e).unwrap();
+    for (i, e) in entries.iter().enumerate() {
+        let be = read_be_block(&doh, e).unwrap();
         if !contains(&be, b"RXIM") {
             continue;
         }
-        let le = convert_block(&be, false, None, None, None).unwrap();
+        let textures = BlockTables { textures: &table, rung: rung_of_path(&paths[i]), streams: None };
+        let le = convert_block(&be, false, None, None, None, Some(textures)).unwrap();
         for (entry, r) in block_chunk_spans(&le).unwrap() {
             let Some(m) = Mixr::find(&le[r]).unwrap() else { continue };
             assert_eq!(twins.get(&(entry.name_hash, entry.type_hash)), Some(&m), "0x{:08X}", entry.name_hash);

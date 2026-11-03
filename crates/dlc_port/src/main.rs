@@ -8,9 +8,9 @@
 //! ASET routing is by *content*, not by index: the Xbox `block_index` cannot be
 //! rebased arithmetically (the DLC's blocks are not a contiguous run in the
 //! source index space), so every row — per-block and `0xFFFF` "global" alike —
-//! is routed to whichever converted block actually owns its `asset_hash`, and
-//! its `type_id` is refined from that entry's `type_hash`. Rows owned by no
-//! shipped block are dropped so the retail WAD resolves them instead.
+//! is routed to the converted blocks that actually own its `asset_hash`, one per
+//! rung, and then has to agree with them. Rows owned by no shipped block are
+//! dropped so the retail WAD resolves them instead.
 //!
 //! The bootstrap / import-chain injection is deliberately *not* performed: those
 //! passes existed to graft the DLC contracts into the *vz* master script, but the
@@ -51,14 +51,17 @@ use mercs2_formats::aset_type_ids::{
 use mercs2_formats::dlc_input::{
     parse_be_aset, parse_be_ffcs, parse_be_indx, parse_be_pths, read_be_block,
 };
-use mercs2_formats::dlc_stfs::{extract_stfs_from_rar, load_stfs_or_doh, RarExtractor};
-use mercs2_formats::patch_wad::{build_patch_wad_multi, AsetEntry, PatchBlock, FFCS_CERT_BLOB};
+use mercs2_formats::dlc_stfs::{extract_stfs_from_rar, load_stfs_or_doh, load_stfs_or_doh_with_streams, RarExtractor};
+use mercs2_formats::patch_wad::{build_patch_wad_multi, rung_chain, AsetEntry, PatchBlock, FFCS_CERT_BLOB};
 use mercs2_formats::sges::{compress_sges, decompress_sges};
 use mercs2_formats::ucfx::parse_block_entry_table;
+use mercs2_formats::be_to_le::audio::StreamTable;
+use mercs2_formats::be_to_le::texture::{archive_textures, rung_of_path, BlockTables, TextureTable};
 use ucfx_byteswap::convert::{convert_block, QUIET};
 use ucfx_byteswap::ecs::ComponentSchemas;
 use ucfx_byteswap::lua::LuaTools;
 
+use dlc_port::components;
 use dlc_port::xbox_doh_oracle::{is_ps3_compact_decl_rejection, primary_name_hash_be, XboxDohOracle};
 
 #[derive(Parser)]
@@ -83,12 +86,23 @@ struct Cli {
     /// The player's PC vz.wad, whose `schm` chunks lay out the DLC's compact ECS containers
     #[arg(long, value_name = "VZ_WAD")]
     vz_wad: PathBuf,
-    /// STFS container, raw DLC01.doh, or PS3 BE SCFF file
-    #[arg(long)]
+    /// PS3 .pkg, STFS container, raw DLC01.doh, or PS3 BE SCFF file
+    #[arg(long, alias = "package")]
     x360_stfs: Option<PathBuf>,
     /// Output vz-patch.wad path
     #[arg(short, long)]
     output: Option<PathBuf>,
+    /// A Shipment folder to write the DLC into as components, instead of a WAD: one file per asset
+    /// rung under `src/level`, and the manifest's contributions. PS3 is read first; `--xbox-doh-oracle`
+    /// supplies the models PS3 cannot.
+    #[arg(long, value_name = "FOLDER", conflicts_with = "output")]
+    shipment: Option<PathBuf>,
+    /// The level the Shipment adds, its master script and `<name>_base` layer
+    #[arg(long, default_value = "dlc01")]
+    level: String,
+    /// The label a level selector shows
+    #[arg(long, default_value = "Blow It Up Again")]
+    display: String,
     /// List blocks and exit
     #[arg(long)]
     list_blocks: bool,
@@ -113,10 +127,6 @@ struct Cli {
     xbox_doh_oracle: Option<PathBuf>,
     #[arg(short, long)]
     verbose: bool,
-}
-
-fn strip_xbox_sub_entry(u2: u32) -> u32 {
-    (u2 & 0xFFFF_0000) | 0xFFFF
 }
 
 /// Per-block decode result the main loop then recompresses + verifies +
@@ -144,9 +154,10 @@ fn run() -> Result<(), String> {
     println!("Reading class layouts from {}...", cli.vz_wad.display());
     let schemas = ComponentSchemas::from_vz_wad(&cli.vz_wad)?;
     println!("  {} classes", schemas.len());
+    let base_textures = archive_textures(&cli.vz_wad)?;
 
-    // ── Step 1: load DOH bytes ──
-    let doh: Vec<u8> = if let Some(rar) = &cli.x360_rar {
+    // ── Step 1: load DOH bytes and the package's streams ──
+    let (doh, package_files): (Vec<u8>, Vec<(String, Vec<u8>)>) = if let Some(rar) = &cli.x360_rar {
         println!("Step 1: Extracting STFS from RAR...");
         let work = std::env::temp_dir().join("dlc_port_rs");
         // clap's `requires = "rar_extractor"` on --x360-rar guarantees exactly one of these.
@@ -158,12 +169,12 @@ fn run() -> Result<(), String> {
         let reader = extract_stfs_from_rar(rar, &work, &extractor)?;
         let entry = reader.doh_entry().ok_or("No DOH in STFS")?;
         println!("  Reading DOH ({} bytes)...", entry.file_size);
-        reader.read_doh()?
+        (reader.read_doh()?, reader.read_pws()?)
     } else if let Some(p) = &cli.x360_stfs {
         println!("Step 1: Loading {}...", p.display());
-        let (doh, src) = load_stfs_or_doh(p)?;
+        let (doh, src, files) = load_stfs_or_doh_with_streams(p)?;
         println!("  Source: {src}, size: {} bytes", doh.len());
-        doh
+        (doh, files)
     } else {
         return Err("Provide --x360-rar or --x360-stfs".into());
     };
@@ -175,11 +186,11 @@ fn run() -> Result<(), String> {
     // ucfx_byteswap so its own BE→LE pass is silent; the main loop
     // re-asserts QUIET below anyway for the same reason.
     let xbox_doh_oracle: Option<XboxDohOracle> = match &cli.xbox_doh_oracle {
-        Some(p) => {
+        Some(p) if cli.shipment.is_none() => {
             println!("Step 1b: Loading Xbox-DOH side oracle from {}...", p.display());
-            Some(XboxDohOracle::load(p, &lua_tools, &schemas)?)
+            Some(XboxDohOracle::load(p, &lua_tools, &schemas, &base_textures)?)
         }
-        None => None,
+        _ => None,
     };
 
     // ── Step 2: parse BE FFCS ──
@@ -207,20 +218,61 @@ fn run() -> Result<(), String> {
         return Ok(());
     }
 
+    if let Some(root) = &cli.shipment {
+        println!("Reading texture rungs...");
+        let textures = TextureTable::from_doh(&doh, &indx, &pths, &base_textures)?;
+        println!("Re-encoding the {} streams...", package_files.len());
+        let streams = StreamTable::read(num_blocks, |i| read_be_block(&doh, &indx[i]), &package_files)?;
+        QUIET.store(true, Ordering::Relaxed);
+        let source = components::Archive { doh: &doh, indx: &indx, paths: &pths, textures: &textures, streams: Some(&streams) };
+        let mut converted = components::convert(&source, &lua_tools, &schemas, |_, _| true)?;
+        println!("  {} chunks converted, {} assets refused", converted.chunks.len(), converted.refused.len());
+        let mut kinds = std::collections::BTreeMap::new();
+        for (_, ty) in &converted.refused {
+            *kinds.entry(mercs2_formats::types::type_name_from_hash(*ty)).or_insert(0usize) += 1;
+        }
+        for (kind, n) in &kinds {
+            println!("    {n} {kind}");
+        }
+        if !converted.refused.is_empty() {
+            let second = cli.xbox_doh_oracle.as_ref().ok_or("some PS3 chunks do not convert: name the Xbox package with --xbox-doh-oracle")?;
+            let (xbox, _) = load_stfs_or_doh(second)?;
+            let (_, tables) = parse_be_ffcs(&xbox)?;
+            let row = tables.iter().find(|r| r.tag == "INDX").ok_or("Missing INDX")?;
+            let x_indx = parse_be_indx(&xbox, row.offset as usize, row.meta as usize);
+            let x_pths = tables.iter().find(|r| r.tag == "PTHS").map(|r| parse_be_pths(&xbox, r.offset as usize, r.meta as usize)).unwrap_or_default();
+            let x_textures = TextureTable::from_doh(&xbox, &x_indx, &x_pths, &base_textures)?;
+            let x = components::Archive { doh: &xbox, indx: &x_indx, paths: &x_pths, textures: &x_textures, streams: None };
+            let refused = converted.refused.clone();
+            let donor = components::convert(&x, &lua_tools, &schemas, |n, t| refused.contains(&(n, t)))?;
+            println!("  {} chunks of those assets from {}", donor.chunks.len(), second.display());
+            components::substitute(&mut converted.chunks, &refused, donor.chunks)?;
+        }
+        let carried = components::carried(converted.chunks, &cli.vz_wad)?;
+        println!("  {} chunks carried", carried.len());
+        components::write_shipment(root, &cli.level, &cli.display, &carried, &streams)?;
+        return Ok(());
+    }
+
     let output = cli.output.ok_or("--output is required")?;
 
     // ── Normalize every ASET row; routing is resolved from block CONTENT below.
     //
-    // The Xbox block_index cannot be rebased arithmetically: the DLC's blocks are
+    // The Xbox block indices cannot be rebased arithmetically: the DLC's blocks are
     // not a contiguous run in the source index space, so `idx - min(idx)` misroutes
     // (measured: 1045 texture rows landing on the wrong block). Instead every row —
-    // both per-block and the 0xFFFF "global" ones — is routed to whichever converted
-    // block actually contains its asset_hash.
-    let pending_aset: Vec<AsetEntry> = aset
-        .iter()
-        .map(|ae| AsetEntry::new(ae.asset_hash, ae.u1, strip_xbox_sub_entry(ae.u2), ae.u3))
-        .collect();
-    println!("  ASET rows to route by content: {}", pending_aset.len());
+    // both per-block and the 0xFFFF "global" ones — is routed to the converted blocks
+    // that actually contain its asset_hash, one per rung.
+    println!("  ASET rows to route by content: {}", aset.len());
+
+    println!("Reading texture rungs...");
+    let textures = TextureTable::from_doh(&doh, &indx, &pths, &base_textures)?;
+    println!("  {} textures", textures.textures.len());
+
+    println!("Re-encoding the {} streams...", package_files.len());
+    let streams = StreamTable::read(num_blocks, |i| read_be_block(&doh, &indx[i]), &package_files)?;
+    let fitted: u64 = streams.streams().iter().map(|(_, s)| s.fitted_frames).sum();
+    println!("  {} streams, ffmpeg's decode off the records' frame counts by {fitted} frames in all", streams.streams().len());
 
     // ── Step 3: per-block convert + recompress ──
     QUIET.store(true, Ordering::Relaxed); // silence convert_block's per-block diagnostics
@@ -247,7 +299,8 @@ fn run() -> Result<(), String> {
         // optional Xbox-DOH side oracle. Anything the oracle cannot resolve
         // fails the whole run — no silent fallback — so the output WAD is
         // either 100 % resolved or does not exist.
-        let decode = match convert_block(&decompressed, false, None, Some(&lua_tools), Some(&schemas)) {
+        let block_textures = BlockTables { textures: &textures, rung: rung_of_path(&path), streams: Some(&streams) };
+        let decode = match convert_block(&decompressed, false, None, Some(&lua_tools), Some(&schemas), Some(block_textures)) {
             Ok(s) => BlockDecode::Ps3Direct(s),
             Err(err) => {
                 if is_ps3_compact_decl_rejection(&err) {
@@ -344,7 +397,7 @@ fn run() -> Result<(), String> {
             aset_entries: Vec::new(),
             packed_field: recomputed_packed,
             flags: e.flags,
-            source_block_index: None, // carries no ASET rows, so no rungs to remap
+            source_block_index: Some(blk_idx as u32),
         });
 
         if (converted.len() + skips.len()) % 200 == 0 {
@@ -365,39 +418,60 @@ fn run() -> Result<(), String> {
         return Err("No blocks converted".into());
     }
 
-    // ── ASET resolution: route every row to the block that actually owns its hash ──
-    // Owner map + the owning entry's type_hash, built once from the converted blocks.
+    // ── ASET resolution: route every row to the blocks that actually own its hash ──
+    // Owner map, built once from the converted blocks: each asset's block per rung.
     // Xbox-DOH-sourced blocks contribute their entries' name_hashes here the same
     // way PS3-direct blocks do: the LE entry table is already in `compressed_data`
     // on both paths, so the PS3-side ASET rows for assets that lived in a rejected
     // PS3 block still route correctly against the Xbox-DOH-sourced body.
-    let mut hash_owner: HashMap<u32, (usize, u32)> = HashMap::new();
+    let mut owners: HashMap<u32, Vec<(u32, [Option<usize>; 4])>> = HashMap::new();
     for (i, blk) in converted.iter().enumerate() {
-        if let Ok(raw) = decompress_sges(&blk.compressed_data) {
-            let (_, entries) = parse_block_entry_table(&raw);
-            for ent in entries {
-                hash_owner.entry(ent.name_hash).or_insert((i, ent.type_hash));
+        let raw = decompress_sges(&blk.compressed_data)?;
+        let rung = rung_of_path(&blk.path_string).ok_or_else(|| format!("{} names no rung", blk.path_string))?;
+        let (_, entries) = parse_block_entry_table(&raw);
+        for ent in entries {
+            let types = owners.entry(ent.name_hash).or_default();
+            if !types.iter().any(|(t, _)| *t == ent.type_hash) {
+                types.push((ent.type_hash, [None; 4]));
+            }
+            let slots = &mut types.iter_mut().find(|(t, _)| *t == ent.type_hash).expect("pushed above").1;
+            if slots[rung].replace(i).is_some() {
+                return Err(format!("0x{:08X} is twice in rung {rung}, the second in {}", ent.name_hash, blk.path_string));
             }
         }
     }
-    let (mut resolved, mut unresolved) = (0usize, 0usize);
-    for mut ae in pending_aset {
-        match hash_owner.get(&ae.asset_hash) {
-            Some(&(i, type_hash)) => {
-                // Refine type_id from the owning entry rather than trusting the Xbox row.
-                if let Some(tid) = type_id_for_type_hash(type_hash) {
-                    ae.u32_3 = tid;
-                }
-                converted[i].aset_entries.push(ae);
-                resolved += 1;
-            }
+    let (mut resolved, mut unresolved, mut chained) = (0usize, 0usize, 0usize);
+    let mut source_blocks: HashMap<u16, usize> = HashMap::new();
+    for ae in &aset {
+        let Some(types) = owners.get(&ae.asset_hash) else {
             // Hash owned by no shipped block: an Xbox row for a base-game asset that
             // lives in the retail WAD. Dropping it lets the base WAD resolve it instead
             // of shadowing it with a dangling patch row.
-            None => unresolved += 1,
+            unresolved += 1;
+            continue;
+        };
+        let (_, slots) = types
+            .iter()
+            .find(|(t, _)| type_id_for_type_hash(*t) == Some(ae.u3))
+            .ok_or_else(|| format!("0x{:08X}: no block holds it as type {}", ae.asset_hash, ae.u3))?;
+        let resident = slots[0].ok_or_else(|| format!("0x{:08X} has no block of rung 0", ae.asset_hash))?;
+        // The row's own indices are in another space, but each must name one block throughout.
+        for (r, source) in xbox_row_rungs(ae.u1, ae.u2).into_iter().enumerate() {
+            let agrees = match (source, slots[r]) {
+                (0xFFFF, block) => block.is_none(),
+                (_, None) => false,
+                (s, Some(i)) => *source_blocks.entry(s).or_insert(i) == i,
+            };
+            if !agrees {
+                return Err(format!("0x{:08X} rung {r}: the Xbox row says {source:#06X}, the blocks say {:?}", ae.asset_hash, slots[r]));
+            }
         }
+        let (secondary, finer) = rung_chain(slots.map(|s| s.and_then(|i| converted[i].source_block_index)));
+        chained += usize::from(finer != 0xFFFF);
+        converted[resident].aset_entries.push(AsetEntry::new(ae.asset_hash, secondary, finer, ae.u3));
+        resolved += 1;
     }
-    println!("  ASET routed by content: {resolved}, dropped (not owned by any shipped block): {unresolved}");
+    println!("  ASET routed by content: {resolved}, {chained} with finer rungs, dropped (not owned by any shipped block): {unresolved}");
 
     // ── Synthetic ASET for script / stringdb entries lacking a row ──
     let (mut script_added, mut stringdb_added) = (0usize, 0usize);
@@ -442,6 +516,14 @@ fn run() -> Result<(), String> {
         std::fs::create_dir_all(parent).map_err(|e| format!("mkdir: {e}"))?;
     }
     std::fs::write(&output, &wad).map_err(|e| format!("write: {e}"))?;
+    // The game keeps its streams in `Audios` beside the WAD.
+    let audios = output.with_file_name("Audios");
+    for (name, stream) in streams.streams() {
+        std::fs::create_dir_all(&audios).map_err(|e| format!("mkdir {}: {e}", audios.display()))?;
+        let to = audios.join(name);
+        std::fs::write(&to, &stream.pws).map_err(|e| format!("write {}: {e}", to.display()))?;
+        println!("  Stream: {} ({} clips, {} bytes)", to.display(), stream.records.len(), stream.pws.len());
+    }
     println!(
         "  Output: {} ({} bytes / {:.1} MB), {} blocks (ps3-direct {}, xbox-doh-side-oracle {})",
         output.display(),
@@ -454,6 +536,12 @@ fn run() -> Result<(), String> {
     Ok(())
 }
 
+/// An Xbox ASET row's block indices, `[_P000, _P001, _P002, _P003]`. Each word's halves are the
+/// reverse of PC's (`docs/aset_format.md`).
+fn xbox_row_rungs(u1: u32, u2: u32) -> [u16; 4] {
+    [u2 as u16, (u2 >> 16) as u16, u1 as u16, (u1 >> 16) as u16]
+}
+
 fn main() -> ExitCode {
     match run() {
         Ok(()) => ExitCode::SUCCESS,
@@ -461,5 +549,17 @@ fn main() -> ExitCode {
             eprintln!("dlc_port: error: {e}");
             ExitCode::FAILURE
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::rung_chain;
+
+    #[test]
+    fn a_chain_packs_its_rungs_and_stops_at_a_gap() {
+        assert_eq!(rung_chain([Some(1), Some(2), Some(3), Some(4)]), (0x0003_0004, 2));
+        assert_eq!(rung_chain([Some(1), Some(2), None, None]), (0xFFFF_FFFF, 2));
+        assert_eq!(rung_chain([Some(1), None, Some(3), Some(4)]), (0xFFFF_FFFF, 0xFFFF));
     }
 }

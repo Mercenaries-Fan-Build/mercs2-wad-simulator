@@ -36,6 +36,8 @@ pub const TYPE_ID_WATERMAP: u32 = 25;
 
 pub const TYPE_HASH_WAVEBANK: u32 = 0xF753F6D0;
 pub const TYPE_HASH_SOUNDBANK: u32 = 0x9F8BCA10;
+/// A cue routing table (`audio_code_map.md` §11.3), one `data` chunk.
+pub const TYPE_HASH_SOUNDDB: u32 = 0xE5273C14;
 pub const TYPE_HASH_LAYER: u32 = 0xE6B81A54;
 pub const TYPE_HASH_MODEL: u32 = 0x5B724250;
 pub const TYPE_HASH_TEXTURE: u32 = 0xF011157A;
@@ -45,6 +47,8 @@ pub const TYPE_HASH_LOWRES_TERRAIN: u32 = 0x1602815C;
 pub const TYPE_HASH_TERRAIN_MESH: u32 = 0x7C569307;
 pub const TYPE_HASH_FONT: u32 = 0x99E77ACE;
 pub const TYPE_HASH_PATH: u32 = 0xBCFE6314;
+/// A region polygon, one `data` chunk (`docs/format_reference.md`, `lineregion`).
+pub const TYPE_HASH_LINEREGION: u32 = 0x6310807F;
 pub const TYPE_HASH_EFFECT: u32 = 0x5608BD5A;
 pub const TYPE_HASH_STRINGDB: u32 = 0x39E5E978;
 pub const TYPE_HASH_LEVEL: u32 = 0xEA4829D5;
@@ -64,6 +68,8 @@ pub const TYPE_HASH_FX_DICTIONARY: u32 = 0xFA46D8A8;
 /// Scaleform GFx movie — see [`TYPE_ID_CFX_PACK`].
 pub const TYPE_HASH_CFX_PACK: u32 = 0xFE0E8320;
 pub const TYPE_HASH_WATERMAP: u32 = 0x4D7D30C4;
+/// The resident foliage singleton, chunk `tree`.
+pub const TYPE_HASH_FOLIAGE: u32 = 0x34612F86;
 /// FaceFX actor and anim set — see [`crate::facefx`].
 pub const TYPE_HASH_FACEFX_ACTOR: u32 = 0x1CF649BB;
 pub const TYPE_HASH_FACEFX_ANIMSET: u32 = 0x665EF13E;
@@ -96,7 +102,7 @@ pub const TYPE_HASH_REGISTRY: &[(u32, u32)] = &[
     (0x5647C35D, 17), // worldentity
     (0xFA0B8DBC, 18), // chatter
     (0x5B724250, 19), // model
-    (0x34612F86, 20),
+    (TYPE_HASH_FOLIAGE, 20),
     (0x9F8BCA10, 21), // soundbank
     (0x1602815C, 22), // lowresterrain
     (0xFE0E8320, 23), // cfx_pack
@@ -126,6 +132,11 @@ pub fn type_id_for_type_hash(type_hash: u32) -> Option<u32> {
         .iter()
         .find(|(h, _)| *h == type_hash)
         .map(|(_, id)| *id)
+}
+
+/// The `(type_hash, type_id)` of a [`type_name`].
+pub fn type_by_name(name: &str) -> Option<(u32, u32)> {
+    TYPE_HASH_REGISTRY.iter().copied().find(|(_, id)| type_name(*id) == name)
 }
 
 pub fn type_name_from_hash(hash: u32) -> &'static str {
@@ -166,6 +177,7 @@ pub fn type_name(type_id: u32) -> &'static str {
         17 => "world_entity_data",
         18 => "chatter",
         19 => "model",
+        20 => "foliage",
         21 => "soundbank",
         22 => "lowresterrain",
         23 => "cfx_pack",

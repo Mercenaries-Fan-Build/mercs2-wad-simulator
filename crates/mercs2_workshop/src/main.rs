@@ -70,6 +70,8 @@ mod layerview; // Inspect's LAYERS tab: every entity of a layer in 3D, where the
 mod textpage; // Inspect's TEXT tab: every string table side by side by key
 mod vfxview; // Inspect's VFX tab: an effect playing on the pedestal, run by the retail sim
 mod heroidx; // every model's skeleton, for ranking the hero clips and faces play on
+mod levelaudio; // A level's wavebanks as the Audio page's lines
+mod levels; // The levels the game can boot by name, found beside the base WAD
 mod vostream; // Stream VO PCM straight from the game's vo_stream.english.pws
 mod voiceidx; // Every wavebank clip by its hash: a FaceFX take's voice line
 mod bundle;
@@ -217,8 +219,8 @@ fn main() {
     // up ahead of winit's event loop, and winit then panicked.)
     // `--shipment` CONFIGURES the GUI run rather than replacing it, so it belongs here: treating it
     // as a mode flag would open a Shipment into a window that never appears. `--ui-state` likewise.
-    const PASSIVE_FLAGS: [&str; 6] =
-        ["--wad", "--names", "--overlay", "--no-auto-patch", "--shipment", "--ui-state"];
+    const PASSIVE_FLAGS: [&str; 7] =
+        ["--wad", "--names", "--overlay", "--no-auto-patch", "--shipment", "--ui-state", "--level"];
     let headless =
         args[1..].iter().any(|a| a.starts_with("--") && !PASSIVE_FLAGS.contains(&a.as_str()));
     let shipment = get("--shipment").map(std::path::PathBuf::from);
@@ -234,6 +236,7 @@ fn main() {
         wad_flag: wad_flag.clone(),
         auto_patch,
         extra_overlays: extra_overlays.clone(),
+        level: get("--level"),
         shipment: shipment.clone(),
         ui_state: ui_state.clone(),
     };
@@ -469,7 +472,17 @@ fn main() {
             eprintln!("--audio-export: usage: --audio-export <bank|query> <dir>");
             std::process::exit(2);
         };
-        match audiopage::export_headless(std::path::Path::new(&wadpath), what, std::path::Path::new(dir)) {
+        let level = match get("--level") {
+            None => None,
+            Some(name) => match levels::found(std::path::Path::new(&wadpath), &extra_overlays).and_then(|l| Ok(levels::pick(&l, &name)?.clone())) {
+                Ok(l) => Some(l),
+                Err(e) => {
+                    eprintln!("--level: {e}");
+                    std::process::exit(2);
+                }
+            },
+        };
+        match audiopage::export_headless(std::path::Path::new(&wadpath), level.as_ref(), what, std::path::Path::new(dir)) {
             Ok(r) => println!("exported {} clip(s) and captions.csv -> {}", r.clips, r.dir.display()),
             Err(e) => {
                 eprintln!("--audio-export {what}: {e}");

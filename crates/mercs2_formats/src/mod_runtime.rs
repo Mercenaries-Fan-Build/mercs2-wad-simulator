@@ -64,6 +64,7 @@ pub mod ffi {
         pub fn m2_lua_arg_type(l: *mut c_void, idx0: c_int) -> c_int;
         pub fn m2_lua_arg_number(l: *mut c_void, idx0: c_int, out: *mut f64) -> c_int;
         pub fn m2_lua_arg_bool(l: *mut c_void, idx0: c_int, out: *mut c_int) -> c_int;
+        pub fn m2_lua_arg_object(l: *mut c_void, idx0: c_int, out: *mut u32) -> c_int;
         pub fn m2_lua_join_strings(l: *mut c_void, out: *mut c_char, out_max: c_int) -> c_int;
         pub fn m2_loghook_add_listener(cb: Option<LogListener>, ud: *mut c_void) -> c_int;
         pub fn m2_loghook_install() -> c_int;
@@ -262,6 +263,9 @@ pub mod lua {
         fn arg_bool(&self, i: i32) -> Option<bool>;
         /// A string argument's bytes, up to its first NUL and [`MAX_ARG_STRING`].
         fn arg_string(&self, i: i32) -> Option<Vec<u8>>;
+        /// An object argument as the game's bindings read it: a light userdata's value (the guid), or a full
+        /// userdata's payload address (`crate::lua_stack::arg_object`).
+        fn arg_object(&self, i: i32) -> Option<u32>;
         fn push_nil(&mut self);
         fn push_bool(&mut self, b: bool);
         fn push_number(&mut self, n: f64);
@@ -323,6 +327,10 @@ pub mod lua {
                 buf.truncate(n.max(0) as usize);
                 Some(buf)
             }
+            fn arg_object(&self, i: i32) -> Option<u32> {
+                let mut v = 0u32;
+                (unsafe { ffi::m2_lua_arg_object(self.0, i, &mut v) } == 1).then_some(v)
+            }
             fn push_nil(&mut self) {
                 unsafe { ffi::m2_lua_push_nil(self.0) }
             }
@@ -366,6 +374,10 @@ pub mod lua {
             Num(f64),
             Str(Vec<u8>),
             Table,
+            /// A light userdata holding this value (how the game passes an object's guid).
+            Light(u32),
+            /// A full userdata at this address.
+            Userdata(u32),
         }
 
         #[derive(Default)]
@@ -396,6 +408,8 @@ pub mod lua {
                     Some(Val::Num(_)) => TNUMBER,
                     Some(Val::Str(_)) => TSTRING,
                     Some(Val::Table) => TTABLE,
+                    Some(Val::Light(_)) => crate::lua_stack::LUA_TLIGHTUSERDATA as i32,
+                    Some(Val::Userdata(_)) => crate::lua_stack::LUA_TUSERDATA as i32,
                 }
             }
             /// The game's `lua_Number` is a 32-bit float: values round through `f32` as they would there.
@@ -414,6 +428,13 @@ pub mod lua {
                         let end = b.iter().position(|&c| c == 0).unwrap_or(b.len()).min(MAX_ARG_STRING);
                         Some(b[..end].to_vec())
                     }
+                    _ => None,
+                }
+            }
+            fn arg_object(&self, i: i32) -> Option<u32> {
+                match self.arg(i) {
+                    Some(Val::Light(v)) => Some(*v),
+                    Some(Val::Userdata(a)) => Some(a.wrapping_add(crate::lua_stack::UDATA_PAYLOAD)),
                     _ => None,
                 }
             }

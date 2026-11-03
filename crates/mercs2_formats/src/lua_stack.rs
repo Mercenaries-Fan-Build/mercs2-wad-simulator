@@ -26,7 +26,11 @@ pub const MAX_ARGS: u32 = 32;
 
 pub const LUA_TNIL: u32 = 0;
 pub const LUA_TBOOLEAN: u32 = 1;
+pub const LUA_TLIGHTUSERDATA: u32 = 2;
 pub const LUA_TNUMBER: u32 = 3;
+/// A full userdata; its payload starts [`UDATA_PAYLOAD`] bytes into the `Udata`.
+pub const LUA_TUSERDATA: u32 = 7;
+pub const UDATA_PAYLOAD: u32 = 0x18;
 pub const LUA_TSTRING: u32 = 4;
 pub const LUA_TTABLE: u32 = 5;
 pub const LUA_TFUNCTION: u32 = 6;
@@ -159,6 +163,16 @@ pub fn arg_bool<M: Mem>(m: &M, l: u32, idx0: i32) -> Option<bool> {
         LUA_TBOOLEAN => v != 0,
         _ => true,
     })
+}
+
+/// `m2_lua_arg_object`: an object argument as the game's own bindings read it (PC v1.1 `FUN_0059FF40`): a
+/// light userdata's value (the object's guid), or a full userdata's payload address; `None` for any other type.
+pub fn arg_object<M: Mem>(m: &M, l: u32, idx0: i32) -> Option<u32> {
+    match resolve(m, l).and_then(|f| arg_at(m, f, idx0))? {
+        (v, LUA_TLIGHTUSERDATA) => Some(v),
+        (v, LUA_TUSERDATA) => Some(v.wrapping_add(UDATA_PAYLOAD)),
+        _ => None,
+    }
 }
 
 /// `m2_lua_arg_string`: copies a string argument into `out`; returns its length, 0 otherwise.
@@ -312,6 +326,15 @@ mod tests {
         let mut out = [0xAAu8; 32];
         assert_eq!(join_strings(&m, L, &mut out), 2);
         assert_eq!(&out[..12], b"hello\tworld\0");
+    }
+
+    #[test]
+    fn an_object_argument_reads_as_the_game_reads_it() {
+        let m = state(&[(0x4000_0915, LUA_TLIGHTUSERDATA), (0x0050_0000, LUA_TUSERDATA), (1.5f32.to_bits(), LUA_TNUMBER)], true);
+        assert_eq!(arg_object(&m, L, 0), Some(0x4000_0915), "a light userdata is the object's guid");
+        assert_eq!(arg_object(&m, L, 1), Some(0x0050_0018), "a full userdata is its payload address");
+        assert_eq!(arg_object(&m, L, 2), None, "a number is not an object");
+        assert_eq!(arg_object(&m, L, 3), None, "an absent argument is not an object");
     }
 
     #[test]

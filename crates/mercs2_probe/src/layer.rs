@@ -13,7 +13,7 @@ use std::path::Path;
 use mercs2_engine::asset::AssetSource;
 use mercs2_engine::worldutil::{PlacedCatalog, TemplateRecords, LAYER_TYPE_HASH};
 use mercs2_formats::physical_link::PhysicalLink;
-use mercs2_formats::placement::{entity_classes, placed_entities, placed_names, PlacedEntity};
+use mercs2_formats::placement::{comp_inventory, entity_classes, placed_entities, placed_names, PlacedEntity};
 use mercs2_formats::types::{TYPE_HASH_MODEL, TYPE_ID_LAYER};
 use mercs2_formats::worldentity::{WorldEntity, RETAIL_WORLDENTITY_NAME_HASH, WORLDENTITY_TYPE_HASH};
 
@@ -37,8 +37,31 @@ fn world(assets: &mut AssetSource) -> Result<WorldEntity, String> {
     WorldEntity::parse(&c).map_err(|e| format!("worldentity: {e}"))
 }
 
-pub fn layer(wadpath: &str, hash: u32) -> Result<(), String> {
-    let mut assets = AssetSource::discover(wadpath, &[])?;
+/// Each placed `LineRegion` record's region: its entity key and the `lineregion` asset hash it names
+/// (the component's one u32, which the engine looks up as `(hash, 0x6310807F)`).
+fn line_regions(block: &[u8]) -> Result<HashMap<u32, u32>, String> {
+    let mut out = HashMap::new();
+    for c in comp_inventory(block).into_iter().filter(|c| c.info_name.as_deref() == Some("LineRegion")) {
+        let (Some(off), Some(size)) = (c.data_off, c.data_size) else { continue };
+        if c.payload_stride != Some(4) {
+            return Err(format!("LineRegion with a {:?}-byte record payload, not 4", c.payload_stride));
+        }
+        let data = block.get(off..off + size).ok_or("LineRegion data past the block")?;
+        if data.len() % 8 != 0 {
+            return Err(format!("LineRegion data of {} bytes is not whole 8-byte records", data.len()));
+        }
+        for r in data.chunks_exact(8) {
+            let (key, region) = (u32::from_le_bytes([r[0], r[1], r[2], r[3]]), u32::from_le_bytes([r[4], r[5], r[6], r[7]]));
+            if out.insert(key, region).is_some_and(|prev| prev != region) {
+                return Err(format!("entity 0x{key:08X} has two different LineRegion records"));
+            }
+        }
+    }
+    Ok(out)
+}
+
+pub fn layer(wadpath: &str, hash: u32, overlays: &[String]) -> Result<(), String> {
+    let mut assets = AssetSource::discover(wadpath, overlays)?;
     let we = world(&mut assets)?;
     let templates = TemplateRecords::from_worldentity(&we)?;
     let names: HashMap<u32, &str> = templates.names.iter().map(|(k, n)| (*k, n.as_str())).collect();
@@ -48,6 +71,7 @@ pub fn layer(wadpath: &str, hash: u32) -> Result<(), String> {
     let keys = catalog.add_block(&block, &templates)?;
     let own = entity_classes(&block)?;
     let entity_names: HashMap<u32, String> = placed_names(&block).into_iter().collect();
+    let regions = line_regions(&block)?;
     println!("layer 0x{hash:08X}: {} entities", keys.len());
     for k in keys {
         let o = catalog.get(k).expect("add_block returned the key");
@@ -61,6 +85,9 @@ pub fn layer(wadpath: &str, hash: u32) -> Result<(), String> {
         );
         println!("    own {:?}", own.get(&k));
         println!("    template {:?}", classes.get(&o.parent));
+        if let Some(r) = regions.get(&k) {
+            println!("    lineregion 0x{r:08X}");
+        }
     }
     Ok(())
 }

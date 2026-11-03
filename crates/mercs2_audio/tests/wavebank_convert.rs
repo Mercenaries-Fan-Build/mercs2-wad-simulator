@@ -45,18 +45,32 @@ fn dlc_streamed_body() -> Vec<u8> {
     b
 }
 
-/// The 7 blocks `dlc_port` used to skip: the header keeps its long name slot and the PC reader takes
-/// the result, the record pointing past the `.pws` file's 4-byte PC header.
+/// The 7 blocks `dlc_port` used to skip: the header keeps its long name slot, the PC reader takes the
+/// result, and the record addresses the re-encoded stream, not the console's.
 #[test]
 fn a_dlc_streamed_bank_converts_with_its_long_name() {
     use mercs2_audio::wave::{WaveData, WavebankFile};
-    let pc = convert_wavebank_data(&dlc_streamed_body()).expect("converts");
+    use mercs2_formats::be_to_le::audio::{PcStream, PcStreamRecord};
+    let stream = PcStream {
+        pws: vec![0; 72],
+        records: vec![PcStreamRecord { offset: 16, size: 36, decoded_bytes: 128 }],
+        fitted_frames: 0,
+    };
+    let pc = convert_wavebank_data(&dlc_streamed_body(), Some(&stream)).expect("converts");
     let file = WavebankFile::parse(&pc).expect("the PC reader takes it");
     assert_eq!(file.stream_name.as_deref(), Some("vo_stream_DLCTest.pws"));
     assert_eq!(file.bank_hash, 0xF53C_3969);
     let [record] = file.records.as_slice() else { panic!("one record") };
-    assert_eq!(record.data, WaveData::Streamed { offset: 0x4004, size: 0x800, word_1c: 7 });
+    assert_eq!(record.data, WaveData::Streamed { offset: 16, size: 36, word_1c: 0 });
+    assert_eq!(record.frames, 128);
     assert_eq!(file.to_bytes().expect("re-encodes"), pc);
+}
+
+/// A streamed bank without its stream is refused, not written with the console's sizes.
+#[test]
+fn a_dlc_streamed_bank_needs_its_stream() {
+    let e = convert_wavebank_data(&dlc_streamed_body(), None).unwrap_err();
+    assert!(e.0.contains("needs its .pws"), "{e}");
 }
 
 fn sha256_hex(data: &[u8]) -> String {
@@ -86,7 +100,7 @@ fn retail_wavebank_block_3322_roundtrips_through_pc_parser() {
         );
     }
 
-    let pc = convert_wavebank_data(RETAIL_FIXTURE).expect("Xbox→PC convert succeeds");
+    let pc = convert_wavebank_data(RETAIL_FIXTURE, None).expect("Xbox→PC convert succeeds");
 
     assert_eq!(pc.len() % mercs2_audio::wave::BLOB_ALIGN, 0);
     assert_eq!(
@@ -141,7 +155,7 @@ fn retail_ps3_wavebank_block_4243_roundtrips_through_pc_parser() {
         );
     }
 
-    let pc = convert_wavebank_data(RETAIL_FIXTURE_PS3).expect("PS3→PC convert succeeds");
+    let pc = convert_wavebank_data(RETAIL_FIXTURE_PS3, None).expect("PS3→PC convert succeeds");
 
     assert_eq!(pc.len() % mercs2_audio::wave::BLOB_ALIGN, 0);
     assert_eq!(

@@ -89,6 +89,10 @@
 //! - [`lua_exec`] — the result text and status rules of the DLL's chunk executor.
 //! - [`shader_sites`] — the shader registry's functions, pool, ShaderLevel and 45 family vtables, found in the
 //!   game image by signature and structure.
+//! - [`tree_sites`] — the billboard-tree render loops the BUG-014 fix detours and repeats, found in the game
+//!   image by signature and checked against the frame stores.
+//! - [`chatter_sites`] — the `ChatterSet` component's container and its lookup, add and mask functions, for a
+//!   `Human.SetChatterSet` binding (PS3 v1.03 only).
 //! - [`mod_runtime`] — bindings a Rust mod calls the loaded `m2-sdk.dll` through (`raw-dylib`, 32-bit
 //!   Windows), so nothing of the runtime is compiled into the mod.
 //!
@@ -119,6 +123,7 @@ pub mod retarget;
 pub mod chunk_validate;
 pub mod crc32;
 pub mod dlc_input;
+pub mod dlc_mount;
 pub mod dlc_stfs;
 pub mod exe_image;
 pub mod donor;
@@ -126,6 +131,7 @@ pub mod facefx;
 pub mod ffcs;
 pub mod foliage;
 pub mod font;
+pub mod frame_capture;
 pub mod fxdict;
 pub mod game_paths;
 pub mod gfx;
@@ -157,6 +163,7 @@ pub mod phy2_moppswap;
 pub mod physical_link;
 pub mod placement;
 pub mod placement_build;
+pub mod pmc_sites;
 pub mod prof_samples;
 pub mod profd;
 pub mod profiler_sites;
@@ -190,6 +197,8 @@ pub mod texsize;
 pub mod texture;
 pub mod texture_encode;
 pub mod tiny_model;
+pub mod tree_sites;
+pub mod chatter_sites;
 pub mod be_to_le;
 pub mod lua_scan;
 pub mod luachunk;
