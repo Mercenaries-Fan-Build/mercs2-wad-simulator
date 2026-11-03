@@ -3147,19 +3147,40 @@ mod sound {
         std::fs::write(path, wad).unwrap();
     }
 
-    fn level_shipment(dir: &Path) -> LoadedShipment {
-        std::fs::create_dir_all(dir.join("src")).unwrap();
-        named_shipment(dir, "qmlevel", "  - kind: add_level\n    name: qmlevel\n    display: A Level\n    wad: src/qmlevel.wad\n")
+    /// A Shipment whose `level_asset` rows are the chunks of `level_wad`'s block.
+    fn level_shipment(dir: &Path, imports: &str, with_base: bool) -> LoadedShipment {
+        level_shipment_with(dir, imports, with_base, "")
     }
 
-    /// ★ `add_level`: the WAD lands in the patch slot, stamped with `vz.wad`'s CSUM, over a copy of
-    /// `vz.wad` made at deploy with the digest of the file read, and nothing ships in an overlay. A
-    /// script's import the game holds resolves from the base.
+    /// [`level_shipment`] with more rows after the chunks'.
+    fn level_shipment_with(dir: &Path, imports: &str, with_base: bool, more: &str) -> LoadedShipment {
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        let wad = dir.join("src/level.wad");
+        level_wad(&wad, "qmlevel", with_base, imports);
+        let block = read_patch_wad(&std::fs::read(&wad).unwrap()).unwrap().blocks.remove(0);
+        let raw = mercs2_formats::sges::decompress_sges(&block.compressed_data).unwrap();
+        let mut rows = String::from("  - kind: add_level\n    name: qmlevel\n    display: A Level\n");
+        rows += more;
+        for (i, (e, range)) in mercs2_formats::ucfx::block_chunk_spans(&raw).unwrap().into_iter().enumerate() {
+            let file = format!("src/{i}.ucfx");
+            std::fs::write(dir.join(&file), &raw[range]).unwrap();
+            let ty = mercs2_formats::types::type_name_from_hash(e.type_hash);
+            rows += &format!(
+                "  - kind: level_asset\n    level: qmlevel\n    type: {ty}\n    name: \"0x{:08X}\"\n    rungs:\n      - {{ block: resident_P000_Q3, file: {file} }}\n",
+                e.name_hash
+            );
+        }
+        std::fs::remove_file(&wad).unwrap();
+        named_shipment(dir, "qmlevel", &rows)
+    }
+
+    /// ★ `add_level`: its assets compile into one WAD in the patch slot, stamped with `vz.wad`'s CSUM,
+    /// over a copy of `vz.wad` made at deploy with the digest of the file read, and nothing ships in
+    /// an overlay. A script's import the game holds resolves from the base.
     #[test]
     fn add_level_places_the_level_above_a_copy_of_vz() {
         let dir = scratch("add_level");
-        let s = level_shipment(&dir);
-        level_wad(&dir.join("src/qmlevel.wad"), "qmlevel", true, "mrxtask");
+        let s = level_shipment(&dir, "mrxtask", true);
         let mut game = stack_for(&[&s]);
         let vz = game.paths()[0].to_path_buf();
         let out = dir.join("_build");
@@ -3168,12 +3189,16 @@ mod sound {
         let patch = report
             .placements
             .iter()
-            .find(|p| matches!(&p.destination, Destination::DataWad { relative, display } if relative == "data/qmlevel-patch.wad" && display == "A Level"))
+            .find(|p| matches!(&p.destination, Destination::LevelPatch { relative, display, .. } if relative == "data/qmlevel-patch.wad" && display == "A Level"))
             .expect("the level's WAD");
         let raw = std::fs::read(out.join("data/qmlevel-patch.wad")).unwrap();
         assert_eq!(patch.sha256, build::sha256_hex(&raw));
         let (csum, _) = mercs2_formats::donor::base_csum(&vz).unwrap();
-        assert_eq!(read_patch_wad(&raw).unwrap().csum_value, csum, "an overlay carries its base's CSUM");
+        let wad = read_patch_wad(&raw).unwrap();
+        assert_eq!(wad.csum_value, csum, "an overlay carries its base's CSUM");
+        assert_eq!(wad.blocks.len(), 1, "assets naming one block ship in it");
+        assert_eq!(wad.blocks[0].path_string, "blocks\\qmlevel\\resident_P000_Q3.block");
+        assert_eq!(wad.blocks[0].aset_entries.len(), 2, "a row for each asset");
         let copy = report
             .placements
             .iter()
@@ -3182,27 +3207,87 @@ mod sound {
         assert_eq!(copy.bytes as u64, std::fs::metadata(&vz).unwrap().len());
     }
 
+    /// ★ `qm link` compiles a level's whole patch. A Shipment patching a script the level overrides
+    /// reaches the level's script, not retail's: its code is spliced into the level's bytecode, which
+    /// keeps its own name and DEPS. The linked block holds that script, so the level's own block no
+    /// longer does, and the WAD has one row of the key. `vz`'s link overlay still patches retail's.
+    #[test]
+    fn link_compiles_the_set_into_the_level() {
+        use mercs2_formats::script_meta::{Dep, ScriptMeta};
+        use mercs2_formats::scripts_block::{build_container, container_deps, container_info, ScriptsBlock};
+        let dir = scratch("link_level");
+        let lvl = dir.join("level");
+        std::fs::create_dir_all(lvl.join("src")).unwrap();
+        // The level's own `mrxtask`, in another name, importing what a retail scan would not read.
+        let name = "qmlevel_task";
+        let meta = ScriptMeta { name: name.to_string(), globals: 3, inherits: 0, deps: vec![Dep { name: "mrxutil".into(), hash: m2("mrxutil"), inherit: false }] };
+        let own = mercs2_luac::compile("qm_level_own = 1", name).unwrap();
+        std::fs::write(lvl.join("src/task.ucfx"), build_container(&meta, &own)).unwrap();
+        let s = level_shipment_with(
+            &lvl,
+            "mrxtask",
+            true,
+            "  - kind: level_asset\n    level: qmlevel\n    type: script\n    name: mrxtask\n    rungs:\n      - { block: resident_P000_Q3, file: src/task.ucfx }\n",
+        );
+        let mine = dir.join("mine");
+        std::fs::create_dir_all(mine.join("src")).unwrap();
+        std::fs::write(mine.join("src/a.lua"), "qm_level_probe = 7\n").unwrap();
+        let p = named_shipment(&mine, "qmpatcher", "  - kind: patch_lua\n    target: mrxtask\n    append: src/a.lua\n");
+
+        let mut game = stack_for(&[&s, &p]);
+        let ids = super::arg_ids(2);
+        let out = dir.join("_link");
+        let report = build::link_installed(&super::request(&[&s, &p], &ids), &mut game, &corpus(), &out, None).expect("links");
+        let patch = report
+            .placements
+            .iter()
+            .find(|q| matches!(&q.destination, Destination::LevelPatch { level, relative, display } if level == "qmlevel" && relative == "data/qmlevel-patch.wad" && display == "A Level"))
+            .expect("the level's patch");
+        assert_eq!(patch.sha256, build::sha256_hex(&std::fs::read(out.join("data/qmlevel-patch.wad")).unwrap()));
+
+        let wad = read_patch_wad(&std::fs::read(out.join("data/qmlevel-patch.wad")).unwrap()).unwrap();
+        let raw = |b: &PatchBlock| ScriptsBlock::parse(&mercs2_formats::sges::decompress_sges(&b.compressed_data).unwrap()).unwrap();
+        let holding: Vec<&PatchBlock> = wad.blocks.iter().filter(|b| b.aset_entries.iter().any(|e| e.asset_hash == m2("mrxtask"))).collect();
+        assert_eq!(holding.len(), 1, "one row of the key");
+        assert_eq!(holding[0].path_string, r"blocks\VZ\resident_P000_Q3.block");
+        let linked = raw(holding[0]);
+        let entry = &linked.entries[linked.find_script_by_name("mrxtask").unwrap()].bytes;
+        assert_eq!(container_info(entry).unwrap().name, name, "the level's script keeps its name");
+        assert_eq!(container_deps(entry).unwrap(), vec![m2("mrxutil")], "and its DEPS");
+        let lua = linked.extract_lua(linked.find_script_by_name("mrxtask").unwrap()).unwrap();
+        assert!(lua.windows(12).any(|w| w == b"qm_level_own"), "its own code");
+        assert!(lua.windows(14).any(|w| w == b"qm_level_probe"), "and the Shipment's");
+        mercs2_luac::check_loads(&lua).unwrap();
+        let own_block = wad.blocks.iter().find(|b| b.path_string == r"blocks\qmlevel\resident_P000_Q3.block").expect("the level's block");
+        assert!(raw(own_block).find_script_by_name("qmlevel").is_some(), "the level's other assets stay in its block");
+
+        let vz = report.wad.as_ref().expect("the vz link overlay");
+        let vz_blocks = read_patch_wad(&std::fs::read(vz).unwrap()).unwrap().blocks;
+        let resident = vz_blocks.iter().find(|b| b.path_string == r"blocks\VZ\resident_P000_Q3.block").expect("linked resident");
+        let block = raw(resident);
+        let at = block.find_script_by_name("mrxtask").unwrap();
+        assert_eq!(container_info(&block.entries[at].bytes).unwrap().name, "mrxtask", "retail's stays retail's in vz");
+    }
+
     /// An import neither the level nor the game holds fails the build, naming it and its importer.
     #[test]
     fn add_level_refuses_a_reference_nothing_holds() {
         let dir = scratch("add_level_missing");
-        let s = level_shipment(&dir);
-        level_wad(&dir.join("src/qmlevel.wad"), "qmlevel", true, "qm_no_such_module");
+        let s = level_shipment(&dir, "qm_no_such_module", true);
         let mut game = stack_for(&[&s]);
         let e = build::build(&s, Some(&mut game), None, Some(&dir.join("_build")), None, None).unwrap_err();
         let text = format!("{e:?}");
         assert!(text.contains(&format!("script 0x{:08X}, named by 0x{:08X}", m2("qm_no_such_module"), m2("qmlevel"))), "{text}");
     }
 
-    /// A WAD without `<name>_base` is no level, whatever its file is called.
+    /// Assets without `<name>_base` are no level.
     #[test]
-    fn add_level_refuses_a_wad_that_is_not_the_level() {
+    fn add_level_refuses_assets_that_are_not_the_level() {
         let dir = scratch("add_level_not");
-        let s = level_shipment(&dir);
-        level_wad(&dir.join("src/qmlevel.wad"), "qmlevel", false, "mrxtask");
+        let s = level_shipment(&dir, "mrxtask", false);
         let mut game = stack_for(&[&s]);
         let e = build::build(&s, Some(&mut game), None, Some(&dir.join("_build")), None, None).unwrap_err();
-        assert!(format!("{e:?}").contains("is not level"), "{e:?}");
+        assert!(format!("{e:?}").contains("are not level"), "{e:?}");
     }
 
     /// ★ `add_language`: `data/<name>.wad` carries the string table, the fonts forked with their atlas
