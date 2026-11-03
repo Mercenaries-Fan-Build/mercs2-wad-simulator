@@ -746,17 +746,16 @@ fn a_language_name_that_collides_with_a_shipped_wad_is_an_error() {
     }
 }
 
-/// An `add_level` can only add: a name the game ships, a name that is no token, a `wad` that is no
-/// `.wad` and a stream the game ships are each M0311, and a clean one is not.
+/// An `add_level` can only add: a name the game ships, a name that is no token and a stream the game
+/// ships are each M0311, and a clean one is not.
 #[test]
 fn an_add_level_that_could_overwrite_is_an_error() {
-    let level = |name: &str, wad: &str, stream: &str| {
+    let level = |name: &str, stream: &str| {
         lint::lint(
             &shipment_with(&format!(
                 "  - kind: add_level
     name: {name}
     display: X
-    wad: {wad}
     streams:
       - {stream}
 "
@@ -766,17 +765,52 @@ fn an_add_level_that_could_overwrite_is_an_error() {
         )
     };
     for bad in [
-        level("vz", "src/a.wad", "src/a.pws"),
-        level("Dlc-01", "src/a.wad", "src/a.pws"),
-        level("dlc01", "src/a.bin", "src/a.pws"),
-        level("dlc01", "src/a.wad", "src/music.pws"),
-        level("dlc01", "src/a.wad", "src/vo_stream.english.pws"),
-        level("dlc01", "src/a.wad", "src/a.txt"),
+        level("vz", "src/a.pws"),
+        level("Dlc-01", "src/a.pws"),
+        level("dlc01", "src/music.pws"),
+        level("dlc01", "src/vo_stream.english.pws"),
+        level("dlc01", "src/a.txt"),
     ] {
         assert!(codes(&bad).contains(&"M0311"), "{bad:?}");
         assert!(lint::blocks_build(&bad));
     }
-    assert!(!codes(&level("dlc01", "src/a.wad", "src/a.pws")).contains(&"M0311"));
+    assert!(!codes(&level("dlc01", "src/a.pws")).contains(&"M0311"));
+}
+
+/// A `level_asset` needs its level in this Shipment, a type the WAD's table names, and rungs that start
+/// at `_P000` and run in order, each one path component.
+#[test]
+fn a_level_asset_that_cannot_compile_is_an_error() {
+    let asset = |level: &str, ty: &str, rungs: &str| {
+        lint::lint(
+            &shipment_with(&format!(
+                "  - kind: add_level
+    name: dlc01
+    display: X
+  - kind: level_asset
+    level: {level}
+    type: {ty}
+    name: a
+    rungs: {rungs}
+"
+            )),
+            None,
+            None,
+        )
+    };
+    let good = "[{ block: a_P000_Q3, file: src/a.ucfx }, { block: b&c_P001_Q2, file: src/b.ucfx }]";
+    for bad in [
+        asset("other", "model", good),
+        asset("dlc01", "nothing", good),
+        asset("dlc01", "model", "[]"),
+        asset("dlc01", "model", "[{ block: a_P001_Q2, file: src/a.ucfx }]"),
+        asset("dlc01", "model", "[{ block: a, file: src/a.ucfx }]"),
+        asset("dlc01", "model", "[{ block: \"a\\\\b_P000_Q3\", file: src/a.ucfx }]"),
+    ] {
+        assert!(codes(&bad).contains(&"M0311"), "{bad:?}");
+        assert!(lint::blocks_build(&bad));
+    }
+    assert!(!codes(&asset("dlc01", "model", good)).contains(&"M0311"));
 }
 
 /// A name that is not a lowercase `[a-z0-9_]` token cannot be a filename / stringdb key — M0200.
