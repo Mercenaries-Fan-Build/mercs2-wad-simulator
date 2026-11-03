@@ -1319,12 +1319,17 @@ pub fn link_into(
 /// Compile each target of `mutations` once, its base source (found under `subfolders`,
 /// [`base_source_path`]) followed by every append in load `order`, and splice it into whichever of
 /// `blocks` carries the target first.
+///
+/// A target in `spliced` has no source to compile: it is a level's own script, whose bytecode stays as
+/// it is, and the appends compile on their own and run at its end
+/// ([`mercs2_luac::splice::append_chunk`]).
 fn link_appends(
     blocks: &mut [TargetBlock<'_>],
     corpus_root: &Path,
     subfolders: &[&str],
     mutations: &[ScriptMutation],
     order: &[String],
+    spliced: &BTreeSet<u32>,
 ) -> Result<Vec<LinkedScript>, LinkError> {
     // Group by target so each script is compiled ONCE with all its appends, which is the entire
     // point — compiling per Shipment would mean the last one wins again, just more slowly.
@@ -1346,6 +1351,32 @@ fn link_appends(
                 shipment: group[0].shipment.clone(),
             })?;
         let block = &mut *blocks[bi].block;
+        if spliced.contains(&crate::manifest::asset_hash(target)) {
+            let (mut source, contributors) = linked_source("", &group, order)?;
+            if let Some(epilogue) = derived_epilogue(target) {
+                source.push_str(&epilogue);
+            }
+            let fail = |message: String| LinkError::Compile { target: target.to_string(), message };
+            // A level's script can keep a name of its own under a retail asset: `mrxplayer` is
+            // `dlc01_player` in the DLC.
+            let name = mercs2_formats::scripts_block::container_info(&block.entries[idx].bytes).map_err(&fail)?.name;
+            let appended = mercs2_luac::compile(&source, &name).map_err(|e| fail(e.to_string()))?;
+            let base = block.extract_lua(idx).map_err(&fail)?;
+            let bytecode = mercs2_luac::splice::append_chunk(&base, &appended, &name).map_err(|e| fail(e.to_string()))?;
+            block.append_lua(idx, &bytecode, &appended).map_err(|e| LinkError::Splice {
+                target: target.to_string(),
+                message: e,
+            })?;
+            linked.push(LinkedScript {
+                target: target.to_string(),
+                contributors,
+                base_source_bytes: 0,
+                linked_source_bytes: source.len(),
+                bytecode_bytes: bytecode.len(),
+                block: bi,
+            });
+            continue;
+        }
         let source_path = base_source_path(corpus_root, subfolders, target).map_err(|tried| LinkError::NoBaseSource {
             target: target.to_string(),
             tried,
@@ -1405,7 +1436,7 @@ pub fn link_front_end(
         target: "mrxsound".into(),
         append: qm_shell_trampoline_append(),
     };
-    let mut linked = link_appends(blocks, corpus_root, SHELL_SOURCE_DIRS, &[trampoline], order)?;
+    let mut linked = link_appends(blocks, corpus_root, SHELL_SOURCE_DIRS, &[trampoline], order, &BTreeSet::new())?;
     let bi = linked[0].block;
 
     let source = qm_shell_modloader_source(sound_regs, order)?;
@@ -1480,6 +1511,35 @@ pub fn link_into_blocks(
     replacements: &[ScriptReplacement],
     order: &[String],
 ) -> Result<LinkOutput, LinkError> {
+    link_into_level_blocks(
+        blocks,
+        corpus_root,
+        mutations,
+        ui_regs,
+        layer_regs,
+        support_regs,
+        sound_regs,
+        additions,
+        replacements,
+        order,
+        &BTreeSet::new(),
+    )
+}
+
+/// [`link_into_blocks`] over a level's blocks, in which the scripts of `spliced` are the level's own.
+pub fn link_into_level_blocks(
+    blocks: &mut [TargetBlock<'_>],
+    corpus_root: &Path,
+    mutations: &[ScriptMutation],
+    ui_regs: &[UiRegistration],
+    layer_regs: &[LayerRegistration],
+    support_regs: &[SupportRegistration],
+    sound_regs: &[SoundBankRegistration],
+    additions: &[ScriptAddition],
+    replacements: &[ScriptReplacement],
+    order: &[String],
+    spliced: &BTreeSet<u32>,
+) -> Result<LinkOutput, LinkError> {
     // Anything that lives in the load space — a UI widget, a layer activation, a novel support
     // behaviour or a sound bank to load in gameplay — needs the loader minted and the
     // `wifpmcinterior` trampoline installed.
@@ -1505,7 +1565,7 @@ pub fn link_into_blocks(
         });
     }
 
-    let mut linked = link_appends(blocks, corpus_root, VZ_SOURCE_DIRS, &all_mutations, order)?;
+    let mut linked = link_appends(blocks, corpus_root, VZ_SOURCE_DIRS, &all_mutations, order, spliced)?;
 
     // Apply each `replace_lua` wholesale swap. Same asset hash, new bytecode -- every existing
     // `import(<target>)` call site now returns the new module without rebinding. Applied in load
