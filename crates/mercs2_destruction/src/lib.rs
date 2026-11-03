@@ -152,8 +152,8 @@ pub fn destruction_system(
 ) -> Result<Vec<DestructionIntent>, String> {
     let mut intents = Vec::new();
 
-    for (entity, (health, model, d)) in
-        world.query::<(&Health, &ModelRef, &mut Destructible)>().iter()
+    for (entity, health, model, d) in
+        world.query::<(Entity, &Health, &ModelRef, &mut Destructible)>().iter()
     {
         let Some(sm) = assets.machine(model.model) else { continue };
         let (minor, terminal) = damage_messages(sm);
