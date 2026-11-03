@@ -23,41 +23,6 @@ const NEW_HANDLE: u32 = 0x8000_B3C5;
 const JC2_MODEL: u32 = 0xB89B_2F9A;
 const NEW_NAME: &str = "JC2 Sportscar";
 const SCRIPT_TYPE: u32 = 0x4249_8680; // resident-script type_hash
-const SCRIPT_NAME: &str = "mrxjc2sportscar";
-const DEPS_HOST: &str = "mrxshop"; // non-cyclic parent whose DEPS pulls our chunk (heli recipe)
-
-/// Build a resident-script container: UCFX(data_area_off=80) + INFO/DEPS/BINN + CSUM.
-/// INFO = [0x05][u16 name_len][name][0x00][0x00 0x00 0x00]; DEPS = [u8 count][count u32]; BINN = LuaQ.
-fn build_script_chunk(name: &str, deps: &[u32], luaq: &[u8]) -> Vec<u8> {
-    let mut info = vec![0x05u8];
-    info.extend_from_slice(&(name.len() as u16).to_le_bytes());
-    info.extend_from_slice(name.as_bytes());
-    info.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]); // terminator + 3-byte metadata (0 = no reflection entries)
-    let mut deps_body = vec![deps.len() as u8];
-    for &d in deps {
-        deps_body.extend_from_slice(&d.to_le_bytes());
-    }
-    let binn = luaq.to_vec();
-    let u = Ucfx {
-        data_area_off: 80,
-        w8: 0,
-        w12: 0,
-        descs: vec![
-            (*b"INFO", 0, info.len() as u32, 2, 0),
-            (*b"DEPS", info.len() as u32, deps_body.len() as u32, 1, 0),
-            (
-                *b"BINN",
-                (info.len() + deps_body.len()) as u32,
-                binn.len() as u32,
-                0,
-                0,
-            ),
-        ],
-        bodies: vec![Some(info), Some(deps_body), Some(binn)],
-        trailer: b"CSUM\0\0\0\0".to_vec(),
-    };
-    u.build()
-}
 
 /// Replace a script container's BINN body (the LuaQ bytecode) in place, rebuilding UCFX + CSUM.
 /// INFO/DEPS are untouched — an in-place bytecode swap (no new asset, no DEPS wiring), which loads
@@ -67,24 +32,6 @@ fn replace_binn(container: &[u8], new_luaq: &[u8]) -> Vec<u8> {
     for i in 0..u.descs.len() {
         if &u.descs[i].0 == b"BINN" {
             u.bodies[i] = Some(new_luaq.to_vec());
-            break;
-        }
-    }
-    u.build()
-}
-
-/// Append `new_hash` to a script container's DEPS list (count++), rebuilding the UCFX + CSUM.
-#[allow(dead_code)]
-fn add_dep(container: &[u8], new_hash: u32) -> Vec<u8> {
-    let mut u = Ucfx::parse(container);
-    for i in 0..u.descs.len() {
-        if &u.descs[i].0 == b"DEPS" {
-            let body = u.bodies[i].as_ref().unwrap();
-            let count = body[0] as usize;
-            let mut nb = vec![(count + 1) as u8];
-            nb.extend_from_slice(&body[1..1 + count * 4]);
-            nb.extend_from_slice(&new_hash.to_le_bytes());
-            u.bodies[i] = Some(nb);
             break;
         }
     }
@@ -234,10 +181,6 @@ impl Ucfx {
             }
         }
         None
-    }
-
-    fn comp_data_index(&self, class_name: &str) -> Option<usize> {
-        self.comp_group(class_name).map(|(_, d)| d)
     }
 }
 
@@ -701,5 +644,4 @@ fn main() {
         full.len(), entries.len());
     println!("\nPACKAGE: smuggler --source-wad vz.wad --extra-only \\");
     println!("  --inject-block \"resident_P000_Q3:output/jc2_block3185_minted.bin\" --output output/jc2_sportscar_template.wad");
-    let _ = (SCRIPT_NAME, DEPS_HOST); // retained for reference; no longer used in the loadable path
 }
