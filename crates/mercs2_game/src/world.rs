@@ -1037,6 +1037,20 @@ pub struct Mercs2Game {
     /// `--shell-shot`: seconds into the front end, and where to write that frame.
     shell_shot: Option<(f32, std::path::PathBuf)>,
     shell_clock: f32,
+    /// Front-end frames run, and the longest, for `--shell-shot`'s report.
+    shell_frames: u32,
+    shell_worst: f32,
+    /// Whether the front end has the display's modes and the adapter for its video pages.
+    shell_display: bool,
+    /// The mouse buttons down last front-end frame, and the keys and buttons a rebind took, which the
+    /// menu does not see until they come up.
+    shell_mouse: std::collections::HashSet<winit::event::MouseButton>,
+    shell_keys_taken: std::collections::HashSet<winit::keyboard::KeyCode>,
+    shell_mouse_taken: std::collections::HashSet<winit::event::MouseButton>,
+    /// Binds read again after the remap page saved, for the engine's input.
+    shell_bindings: Option<mercs2_engine::input::Bindings>,
+    /// The pads the front end's control pages have.
+    shell_pads: Vec<mercs2_engine::controls::Pad>,
     // Input bindings (Mercs2.ini) — for mouse sensitivity / invert-Y in `update`.
     bindings: mercs2_engine::input::Bindings,
     // The ECS World is owned by the engine (`app::run`) and lent via `Ctx` — the game does NOT keep its
@@ -1121,7 +1135,7 @@ impl Mercs2Game {
         }
         let runtime = mercs2_engine::runtime::GameRuntime::new(audio.clone());
         let bindings = mercs2_engine::input::find_mercs2_ini()
-            .map(|p| mercs2_engine::input::Bindings::load(&p))
+            .map(|p| mercs2_engine::input::Bindings::load(&p, mercs2_engine::input::Bindings::XBOX_360_SECTION))
             .unwrap_or_default();
         Mercs2Game {
             debris_unresident: 0,
@@ -1145,6 +1159,14 @@ impl Mercs2Game {
             shell_pad: [false; 4],
             shell_shot: None,
             shell_clock: 0.0,
+            shell_frames: 0,
+            shell_worst: 0.0,
+            shell_display: false,
+            shell_mouse: Default::default(),
+            shell_keys_taken: Default::default(),
+            shell_mouse_taken: Default::default(),
+            shell_bindings: None,
+            shell_pads: Vec::new(),
             bindings,
             guids,
             script_host,
@@ -1236,12 +1258,34 @@ impl Mercs2Game {
             eprintln!("[shell] FATAL: {e}");
             panic!("the front end stopped: {e}");
         };
+        // A rebind on the remap page takes the lowest id that went down, as `FUN_004FA570` scans them.
+        use mercs2_engine::keys;
+        use winit::event::MouseButton;
+        let new_mouse: Vec<MouseButton> = ctx.input.mouse.difference(&self.shell_mouse).copied().collect();
+        self.shell_mouse = ctx.input.mouse.clone();
+        self.shell_mouse_taken.retain(|b| ctx.input.mouse.contains(b));
+        let mut downs: Vec<u16> = ctx.pressed.iter().filter_map(|&c| keys::of_key(c)).collect();
+        downs.extend(new_mouse.iter().filter_map(|&b| keys::of_mouse(b)));
+        downs.extend(ctx.wheel_up.then_some(keys::MWUP));
+        downs.extend(ctx.wheel_down.then_some(keys::MWDOWN));
+        if let Some(&first) = downs.iter().min() {
+            if shell.key_down(first).unwrap_or_else(|e| fatal(e)) {
+                self.shell_keys_taken.extend(ctx.pressed.iter().filter(|&&c| keys::of_key(c) == Some(first)));
+                self.shell_mouse_taken.extend(new_mouse.iter().filter(|&&b| keys::of_mouse(b) == Some(first)));
+            }
+        }
         for code in ctx.pressed.iter() {
+            if self.shell_keys_taken.contains(code) {
+                continue;
+            }
             if let Some(button) = shell_button(*code) {
                 shell.button(button, true).unwrap_or_else(|e| fatal(e));
             }
         }
         for code in ctx.released.iter() {
+            if self.shell_keys_taken.remove(code) {
+                continue;
+            }
             if let Some(button) = shell_button(*code) {
                 shell.button(button, false).unwrap_or_else(|e| fatal(e));
             }
@@ -1258,14 +1302,71 @@ impl Mercs2Game {
                 shell.button(button, held).unwrap_or_else(|e| fatal(e));
             }
         }
-        let exit = shell.tick(ctx.dt).unwrap_or_else(|e| fatal(e));
-        let (draws, images) = shell.draws().unwrap_or_else(|e| fatal(e));
-        ctx.scene.prepare_flash(&draws, images).unwrap_or_else(|e| fatal(e));
+        let size = ctx.scene.size;
+        let buttons = [MouseButton::Left, MouseButton::Right, MouseButton::Middle]
+            .iter()
+            .enumerate()
+            .filter(|(_, b)| ctx.input.mouse.contains(b) && !self.shell_mouse_taken.contains(b))
+            .fold(0u32, |mask, (bit, _)| mask | 1 << bit);
+        let pointer = mercs2_engine::flash::Pointer {
+            at: [ctx.cursor[0] / size.width.max(1) as f32, ctx.cursor[1] / size.height.max(1) as f32],
+            buttons,
+        };
+        let screen = [size.width as f32, size.height as f32];
+        if !self.shell_display {
+            // The monitor's modes stand in for the adapter's (`IDirect3D9::EnumAdapterModes`).
+            let monitor = ctx.window.current_monitor().unwrap_or_else(|| fatal("the window is on no monitor".into()));
+            let modes: Vec<(u32, u32, u32)> =
+                monitor.video_modes().map(|m| (m.size().width, m.size().height, (m.refresh_rate_millihertz() + 500) / 1000)).collect();
+            let gpu = &ctx.scene.gpu;
+            let device = mercs2_engine::options::Device {
+                vendor: gpu.vendor,
+                device: gpu.device,
+                aa_levels: gpu.sample_counts.len() as u32,
+                high_shaders: true,
+            };
+            shell.attach_display(&modes, device).unwrap_or_else(|e| fatal(e));
+            self.shell_display = true;
+        }
+        // The pads as the control pages see them, read again when one comes or goes, and the first
+        // pad's inputs this frame.
+        let pads = ctx.input.gamepad.pads();
+        if pads != self.shell_pads {
+            shell.attach_pads(&pads).unwrap_or_else(|e| fatal(e));
+            self.shell_pads = pads;
+            self.bindings = read_bindings(&self.wadpath, &self.shell_pads).unwrap_or_else(|e| fatal(e));
+            self.shell_bindings = Some(read_bindings(&self.wadpath, &self.shell_pads).unwrap_or_else(|e| fatal(e)));
+        }
+        shell.pad_frame(&ctx.input.gamepad.retail_inputs()).unwrap_or_else(|e| fatal(e));
+        let exit = shell.tick(ctx.dt, pointer, screen).unwrap_or_else(|e| fatal(e));
+        for effect in shell.take_display_effects() {
+            use mercs2_engine::options::Effect;
+            match effect {
+                Effect::Display { width, height, present_immediate, .. } => {
+                    if ctx.window.fullscreen().is_some() {
+                        fatal(format!("a {width}x{height} display mode in fullscreen: rendering at a chosen size is not built"));
+                    }
+                    let _ = ctx.window.request_inner_size(winit::dpi::PhysicalSize::new(width, height));
+                    ctx.scene.set_present_immediate(present_immediate).unwrap_or_else(|e| fatal(e));
+                }
+                Effect::Gamma(gamma) => println!("[options] gamma {gamma}: the gamma ramp is not drawn yet"),
+                Effect::Bindings => {
+                    self.bindings = read_bindings(&self.wadpath, &self.shell_pads).unwrap_or_else(|e| fatal(e));
+                    self.shell_bindings = Some(read_bindings(&self.wadpath, &self.shell_pads).unwrap_or_else(|e| fatal(e)));
+                }
+                Effect::CategoryVolume { .. } => unreachable!("the script host plays volume changes itself"),
+            }
+        }
+        let front = shell.draws().unwrap_or_else(|e| fatal(e));
+        ctx.scene.prepare_front_end(&front.flash, front.images, &front.movies).unwrap_or_else(|e| fatal(e));
+        let layers = front.layers;
         self.shell_clock += ctx.dt;
+        self.shell_frames += 1;
+        self.shell_worst = self.shell_worst.max(ctx.dt);
         if self.shell_shot.as_ref().is_some_and(|(at, _)| self.shell_clock >= *at) {
             ctx.scene.request_capture().unwrap_or_else(|e| fatal(e));
         }
-        match ctx.scene.render_flash() {
+        match ctx.scene.render_front_end(&layers) {
             Ok(()) => {}
             Err(SurfaceError::Lost | SurfaceError::Outdated) => ctx.scene.resize(ctx.scene.size),
             Err(SurfaceError::Occluded) => {}
@@ -1281,6 +1382,15 @@ impl Mercs2Game {
             });
             written.unwrap_or_else(|e| fatal(format!("write {}: {e}", path.display())));
             println!("[shell] captured {}", path.display());
+            println!(
+                "[shell] {} frames in {:.2} s: {:.2} ms a frame, the longest {:.2} ms; surface {}x{}",
+                self.shell_frames,
+                self.shell_clock,
+                self.shell_clock * 1000.0 / self.shell_frames as f32,
+                self.shell_worst * 1000.0,
+                ctx.scene.size.width,
+                ctx.scene.size.height
+            );
             return MenuOutcome::Exit;
         }
         match exit {
@@ -1301,6 +1411,14 @@ impl Mercs2Game {
             }
         }
     }
+}
+
+/// The install's binds, a pad's from the first pad's own section (its name), as the control pages
+/// save them.
+fn read_bindings(vz_wad: &str, pads: &[mercs2_engine::controls::Pad]) -> Result<mercs2_engine::input::Bindings, String> {
+    let ini = mercs2_engine::ini::path(vz_wad)?;
+    let pad = pads.first().map_or(mercs2_engine::input::Bindings::XBOX_360_SECTION, |p| p.name.as_str());
+    Ok(mercs2_engine::input::Bindings::load(&ini, pad))
 }
 
 /// The controller button a key stands in for on the front end.
@@ -1341,7 +1459,7 @@ impl mercs2_engine::app::Game for Mercs2Game {
         // chosen here is just the opening value.
         let (fog, sun) = atmosphere_for(self.spawn_interior);
         let bindings = mercs2_engine::input::find_mercs2_ini()
-            .map(|p| mercs2_engine::input::Bindings::load(&p))
+            .map(|p| mercs2_engine::input::Bindings::load(&p, mercs2_engine::input::Bindings::XBOX_360_SECTION))
             .unwrap_or_default();
         mercs2_engine::app::GameConfig {
             title: "Mercenaries 2 — world (Tab: free / third-person)".into(),
@@ -1358,6 +1476,10 @@ impl mercs2_engine::app::Game for Mercs2Game {
 
     fn starts_at_menu(&self) -> bool {
         self.menu.is_some() || self.shell.is_some()
+    }
+
+    fn take_bindings(&mut self) -> Option<mercs2_engine::input::Bindings> {
+        self.shell_bindings.take()
     }
 
     fn menu(&mut self, ctx: &mut mercs2_engine::app::Ctx) -> mercs2_engine::app::MenuOutcome {
