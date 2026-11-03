@@ -10,6 +10,14 @@
 //! | [`Site::JobRegister`] | `0x0084B230` | the Pimp job system registering the jobtype `0xEC7AA7F0` (handler `0x0084B200`): `i = count; cpu0.handlers[i] = {fn, hash}; cpu1.handlers[i] = {fn, hash}; count = i + 1`. Read, not detoured: its operands name the jobtype count global and the two per-CPU handler tables ([`ProfilerSites::jobs`]) |
 //! | [`Site::JobWait`] | `0x008765C0` | `void __cdecl (int fence[2])`: wait until `fence[0] == fence[1]`, running jobs from the calling thread's CPU queues meanwhile (`cpu = TLS+8`, control block `cpu*300`). Its prologue jumps through a SecuROM island back into the body at `0x008765CF`; every caller enters at the prologue. Its control-block operand must be [`JobTables::handlers`]`[0] - JOB_HANDLERS_AT` |
 //! | [`Site::CellsChangeRing`] | `0x00735AEF` | The jobtype-`0xECAED415` change-list append (inside `FUN_00735640`): `ring[counter++] = (entity_id, old_new, extra[0], extra[1])`. Read, not detoured: its operands name the ring counter global and the ring base ([`ProfilerSites::cells_change`]), which the profiler reads before and after each `0xECAED415` invocation to count the changes it produced |
+//! | [`Site::PacketProducer`] | `0x008546A0` | The render packet producer (`FUN_008546A0`): `if (count == 0x2000) return;`, then fills packet `count` of the frame's buffer (stride `0x58`) and adds to `count` at `+0x236`. A frame's packets past the cap are dropped. Read, not detoured: its operands name the packet count global and the cap ([`ProfilerSites::frame_stores`]) |
+//! | [`Site::PacketFrameEnd`] | `0x00854B38` | The frame's packet hand-off (`FUN_00854B38`, which hashes `"PgPrimitive::Sort()"`): sorts and submits the frame's packets, then tail-jumps to the begin-frame at `+0x8D9`. Read, not detoured: it must read the producer's count, and its jump names the begin-frame |
+//! | [`Site::FrameBegin`] | `0x00853FBD` | Inside the begin-frame `FUN_00853E00` (`+0x1BD`), `void __cdecl (void)`: flips the frame's buffers and zeroes the packet count, the display-list cursor (dwords) and the constant sidecar's cursor (bytes); `+0x64C` resets the world-matrix counter to 2. Its function is detoured: at its entry every counter still holds the finished frame's total ([`FrameStores::begin`]) |
+//! | [`Site::StoreAlloc`] | `0x00853CEE` | The frame stores' allocator (`FUN_00853C70`), per buffer parity: the display list (`0x50000` bytes) and the constant sidecar (`0x20000` bytes). Read, not detoured: its immediates are the two capacities |
+//! | [`Site::MatrixIndex`] | `0x00477E20` | A world-matrix push (`FUN_00477E20`): `i = counter++`, the entry at `(parity · 0x1400 + i) · 0x40`. Read, not detoured: it must use the counter the begin-frame resets, and its multiplier is the table's capacity per parity |
+//!
+//! Nothing that writes the display list, the sidecar or the matrix table checks its capacity
+//! (`docs/reverse_engineer/render_frame_stores.md`).
 //!
 //! The Pimp per-CPU control block (`0x019F9040` in `mercs2_unpacked.exe`, stride 300) is `+0x00` busy flag,
 //! `+0x04` high-priority queue, `+0x08` low-priority queue, `+0x0C` the handler table: [`JOB_SLOTS`] entries of
@@ -27,6 +35,11 @@ pub enum Site {
     JobRegister,
     JobWait,
     CellsChangeRing,
+    PacketProducer,
+    PacketFrameEnd,
+    FrameBegin,
+    StoreAlloc,
+    MatrixIndex,
 }
 
 /// The Pimp per-CPU control block's size.
@@ -54,6 +67,89 @@ const JOB_WAIT_BLOCK_AT: usize = 31;
 const CELLS_COUNTER_AT: usize = 1;
 const CELLS_RING_AT: usize = 23;
 const CELLS_COUNTER_STORE_AT: usize = 54;
+/// Offsets in the [`Site::PacketProducer`] pattern of the count global (`mov ecx, [count]`) and of the cap
+/// (`cmp ecx, imm32`), and the offset from the site of its `add [count], ebx` (`01 1d disp32`).
+const PACKET_COUNT_AT: usize = 2;
+const PACKET_CAP_AT: usize = 8;
+const PACKET_COUNT_ADD_AT: usize = 0x236;
+/// Offset in the [`Site::PacketFrameEnd`] pattern of the count global (`mov ebx, [count]`), and the
+/// offset from the site of its transfer to the begin-frame (`e9 rel32` or `e8 rel32`).
+const FRAME_END_COUNT_AT: usize = 3;
+const FRAME_END_BEGIN_CALL_AT: usize = 0x8D9;
+/// The [`Site::FrameBegin`] site's offset in its function, and offsets in its pattern of the packet count,
+/// the display-list cursor and the sidecar cursor (each `mov [global], esi`). The matrix counter's reset
+/// (`66 c7 05 disp32 02 00`) sits at `+0x64C` in the function.
+const BEGIN_SITE_IN_FUNCTION: u32 = 0x1BD;
+const BEGIN_PACKETS_AT: usize = 2;
+const BEGIN_LIST_AT: usize = 15;
+const BEGIN_SIDECAR_AT: usize = 21;
+/// Offsets in the [`Site::FrameBegin`] pattern of the parity global (`mov [parity], ebx`) and the
+/// display-list base pointer (`mov [list base], ecx`), both written after the counters are zeroed.
+const BEGIN_PARITY_AT: usize = 36;
+const BEGIN_LIST_BASE_AT: usize = 42;
+const BEGIN_MATRIX_RESET_IN_FUNCTION: u32 = 0x64C;
+/// The begin-frame's `mov [sidecar base], eax` (`a3 moffs32`), from the function's start.
+const BEGIN_SIDECAR_BASE_IN_FUNCTION: u32 = 0x10D;
+/// From the [`Site::PacketProducer`] site: its `mov ebp, [parity]` (`8b 2d disp32`), its
+/// `imul eax, eax, stride` (`6b c0 imm8`) and its `add eax, packet array` (`05 imm32`). A packet's address is
+/// `array + (parity · cap + index) · stride`.
+const PACKET_PARITY_AT: usize = 0x4D;
+const PACKET_STRIDE_AT: usize = 0x5E;
+const PACKET_ARRAY_AT: usize = 0x61;
+/// Offsets in the [`Site::PacketProducer`] pattern of the class global (`cmp byte [class], 0`), and from the site
+/// of the producer's reads of the program global (`movzx edx, word [program]`, `0f b7 15 disp32`, stored at packet
+/// `+0x40`) and of the class global again (`mov dl, [class]`, `8a 15 disp32`, stored at `+0x44`).
+const PACKET_CLASS_AT: usize = 26;
+const PACKET_PROGRAM_READ_AT: usize = 0xEF;
+const PACKET_CLASS_READ_AT: usize = 0x104;
+/// Offsets in the [`Site::StoreAlloc`] pattern of the display list's size (`mov eax, imm32`, then
+/// `push imm32` on the second allocation path) and of the sidecar's.
+const ALLOC_LIST_AT: [usize; 2] = [1, 24];
+const ALLOC_SIDECAR_AT: [usize; 2] = [113, 136];
+/// Offsets in the [`Site::MatrixIndex`] pattern of the counter (read `mov ax, [moffs]`, then written back
+/// `mov [moffs], ax`) and of the per-parity capacity (`imul eax, eax, imm32`).
+const MATRIX_COUNTER_AT: usize = 21;
+const MATRIX_COUNTER_STORE_AT: usize = 35;
+const MATRIX_PARITY_AT: usize = 40;
+const MATRIX_CAP_AT: usize = 46;
+/// Offset in the [`Site::MatrixIndex`] pattern of the table's base (`add eax, imm32`); an entry is
+/// `base + (parity · cap + index) · 0x40`.
+const MATRIX_BASE_AT: usize = 69;
+
+/// The frame's render stores, from [`Site::PacketProducer`], [`Site::PacketFrameEnd`], [`Site::FrameBegin`],
+/// [`Site::StoreAlloc`] and [`Site::MatrixIndex`]: each counter's address and its capacity. At the entry of
+/// [`FrameStores::begin`] every counter holds the finished frame's total.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FrameStores {
+    /// The begin-frame function (`void __cdecl (void)`).
+    pub begin: u32,
+    /// The packet count; the producer drops every packet once it reaches `packet_cap`.
+    pub packets: u32,
+    pub packet_cap: u32,
+    /// The display-list cursor, in dwords, and the list's size in bytes.
+    pub list_dwords: u32,
+    pub list_bytes: u32,
+    /// The constant sidecar's cursor and size, in bytes.
+    pub sidecar_bytes_used: u32,
+    pub sidecar_bytes: u32,
+    /// The world-matrix counter (`u16`, reset to 2) and the table's entries per parity.
+    pub matrices: u32,
+    pub matrix_cap: u32,
+    /// The buffer parity global (0 or 1): which half of the packet array and matrix table the frame fills.
+    pub parity: u32,
+    /// The packet array (`packet_cap` per parity) and a packet's size.
+    pub packet_array: u32,
+    pub packet_bytes: u32,
+    /// The world-matrix table (`matrix_cap` 4×4 `f32` entries per parity).
+    pub matrix_table: u32,
+    /// The globals holding the frame's display-list and constant-sidecar base pointers.
+    pub list_base: u32,
+    pub sidecar_base: u32,
+    /// The globals the producer copies into each packet: the draw's program (`u16`, packet `+0x40`) and its class
+    /// (`u8`, packet `+0x44`; the producer then rewrites some classes, so a packet can show another).
+    pub draw_program: u32,
+    pub draw_class: u32,
+}
 
 /// Jobtype `0xECAED415`'s change-list ring, from [`Site::CellsChangeRing`]: a `u32` counter and the ring base.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -96,8 +192,18 @@ const BIND_RENDER_SYSTEM_AT: usize = 35;
 const BIND_DEVICE_FIELD_AT: usize = 45;
 
 impl Site {
-    pub const ALL: [Site; 5] =
-        [Site::RunFrame, Site::BindDevice, Site::JobRegister, Site::JobWait, Site::CellsChangeRing];
+    pub const ALL: [Site; 10] = [
+        Site::RunFrame,
+        Site::BindDevice,
+        Site::JobRegister,
+        Site::JobWait,
+        Site::CellsChangeRing,
+        Site::PacketProducer,
+        Site::PacketFrameEnd,
+        Site::FrameBegin,
+        Site::StoreAlloc,
+        Site::MatrixIndex,
+    ];
 
     pub fn name(self) -> &'static str {
         match self {
@@ -106,6 +212,11 @@ impl Site {
             Site::JobRegister => "JobRegister",
             Site::JobWait => "JobWait",
             Site::CellsChangeRing => "CellsChangeRing",
+            Site::PacketProducer => "PacketProducer",
+            Site::PacketFrameEnd => "PacketFrameEnd",
+            Site::FrameBegin => "FrameBegin",
+            Site::StoreAlloc => "StoreAlloc",
+            Site::MatrixIndex => "MatrixIndex",
         }
     }
 
@@ -150,6 +261,46 @@ impl Site {
                  89 08 8b 8c 24 88 00 00 00 89 50 04 8b 94 24 8c 00 00 00 89 48 08 89 50 0c \
                  83 05 ?? ?? ?? ?? 01"
             }
+            // mov ecx,[count]; cmp ecx,0x2000; push esi; mov esi,eax; je <return>; push edi; xor edi,edi;
+            // cmp byte [state],0; jne +0x20
+            Site::PacketProducer => "8b 0d ?? ?? ?? ?? 81 f9 00 20 00 00 56 8b f0 0f 84 ?? ?? ?? ?? 57 33 ff 80 3d ?? ?? ?? ?? 00 75 20",
+            // push ebx; mov ebx,[count]; sete al; xor ecx,ecx; cmp [a],ecx; push esi; sete cl; xor edx,edx;
+            // cmp [b],edx; mov [c],eax; sete dl; xor eax,eax; cmp [d],eax; push edi; mov edi,[buffer index];
+            // sete al; test ebx,ebx; mov [a],ecx; mov [b],edx; mov [last frame],ebx; mov [d],eax; jg +9
+            Site::PacketFrameEnd => {
+                "53 8b 1d ?? ?? ?? ?? 0f 94 c0 33 c9 39 0d ?? ?? ?? ?? 56 0f 94 c1 33 d2 39 15 ?? ?? ?? ?? \
+                 a3 ?? ?? ?? ?? 0f 94 c2 33 c0 39 05 ?? ?? ?? ?? 57 8b 3d ?? ?? ?? ?? 0f 94 c0 85 db \
+                 89 0d ?? ?? ?? ?? 89 15 ?? ?? ?? ?? 89 1d ?? ?? ?? ?? a3 ?? ?? ?? ?? 7f 09"
+            }
+            // mov [packets],esi; mov word [a],si; mov [list cursor],esi; mov [sidecar cursor],esi;
+            // mov word [b],0xc00
+            // mov word [b],0xc00; mov [parity],ebx; mov [list base],ecx
+            Site::FrameBegin => {
+                "89 35 ?? ?? ?? ?? 66 89 35 ?? ?? ?? ?? 89 35 ?? ?? ?? ?? 89 35 ?? ?? ?? ?? 66 c7 05 ?? ?? ?? ?? 00 0c \
+                 89 1d ?? ?? ?? ?? 89 0d ?? ?? ?? ??"
+            }
+            // mov eax,<list size>; call <pool alloc>; mov edi,eax; test edi,edi; jne +0x1a; mov ecx,[heap];
+            // push esi; push <list size>; push <heap>; mov al,1; call <heap alloc>; mov edi,eax; push <cs>;
+            // call ebx; mov esi,[n]; cmp esi,1; mov [ebp+list slots],edi; jle +0xf; cmp esi,0x20000; jle +7;
+            // sar esi,1; cmp esi,1; jg -0xf; push <cs>; call [LeaveCriticalSection]; cmp byte [a],0; je +0x1b;
+            // cmp byte [b],0; je +0x12; mov ecx,esi; mov eax,<sidecar size>; call <pool alloc>; mov edi,eax;
+            // test edi,edi; jne +0x1a; mov ecx,[heap]; push esi; push <sidecar size>
+            Site::StoreAlloc => {
+                "b8 ?? ?? ?? ?? e8 ?? ?? ?? ?? 8b f8 85 ff 75 1a 8b 0d ?? ?? ?? ?? 56 68 ?? ?? ?? ?? 68 ?? ?? ?? ?? \
+                 b0 01 e8 ?? ?? ?? ?? 8b f8 68 ?? ?? ?? ?? ff d3 8b 35 ?? ?? ?? ?? 83 fe 01 89 bd ?? ?? ?? ?? \
+                 7e 0f 81 fe 00 00 02 00 7e 07 d1 fe 83 fe 01 7f f1 68 ?? ?? ?? ?? ff 15 ?? ?? ?? ?? \
+                 80 3d ?? ?? ?? ?? 00 74 1b 80 3d ?? ?? ?? ?? 00 74 12 8b ce b8 ?? ?? ?? ?? e8 ?? ?? ?? ?? \
+                 8b f8 85 ff 75 1a 8b 0d ?? ?? ?? ?? 56 68 ?? ?? ?? ??"
+            }
+            // push ebx; push esi; mov esi,ecx; movzx eax,word [esi+0x1c2]; mov cx,[esi+eax*4+0x1c4];
+            // mov ax,[counter]; push edi; movzx edi,ax; add ax,1; mov [counter],ax; mov eax,[parity];
+            // imul eax,eax,<per parity>; movzx edx,di; add eax,edx; shl eax,6; mov [a],cx; lea ecx,[esi+0x40]
+            // (a twin push, `FUN_004A8B70`, has `lea ebx,[esi+0x40]` there)
+            Site::MatrixIndex => {
+                "53 56 8b f1 0f b7 86 c2 01 00 00 66 8b 8c 86 c4 01 00 00 66 a1 ?? ?? ?? ?? 57 0f b7 f8 \
+                 66 05 01 00 66 a3 ?? ?? ?? ?? a1 ?? ?? ?? ?? 69 c0 ?? ?? ?? ?? 0f b7 d7 03 c2 c1 e0 06 \
+                 66 89 0d ?? ?? ?? ?? 8d 4e 40 05 ?? ?? ?? ??"
+            }
         }
     }
 }
@@ -157,10 +308,11 @@ impl Site {
 /// Where every site was found, and the globals read out of them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ProfilerSites {
-    va: [u32; 5],
+    va: [u32; 10],
     render_system: u32,
     jobs: JobTables,
     cells_change: CellsChangeRing,
+    frame_stores: FrameStores,
 }
 
 impl ProfilerSites {
@@ -181,6 +333,10 @@ impl ProfilerSites {
     pub fn cells_change(&self) -> CellsChangeRing {
         self.cells_change
     }
+
+    pub fn frame_stores(&self) -> FrameStores {
+        self.frame_stores
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -196,6 +352,8 @@ pub enum ProfilerSitesError {
     JobWait { site: u32, why: String },
     /// [`Site::CellsChangeRing`]'s operands are not a counter and a ring 8 bytes apart.
     CellsChangeRing { site: u32, why: String },
+    /// The frame-store sites do not name one set of counters.
+    FrameStores { site: u32, why: String },
 }
 
 impl std::fmt::Display for ProfilerSitesError {
@@ -211,6 +369,7 @@ impl std::fmt::Display for ProfilerSitesError {
             ProfilerSitesError::JobRegister { site, why } => write!(f, "JobRegister at {site:#x} is inconsistent: {why}"),
             ProfilerSitesError::JobWait { site, why } => write!(f, "JobWait at {site:#x} is inconsistent: {why}"),
             ProfilerSitesError::CellsChangeRing { site, why } => write!(f, "CellsChangeRing at {site:#x} is inconsistent: {why}"),
+            ProfilerSitesError::FrameStores { site, why } => write!(f, "the frame-store sites at {site:#x} are inconsistent: {why}"),
         }
     }
 }
@@ -262,7 +421,7 @@ pub fn resolve(img: &Image) -> Result<ProfilerSites, ProfilerSitesError> {
     if !found.iter().all(|(_, v)| v.len() == 1) {
         return Err(ProfilerSitesError::Matches(found.iter().map(|(s, v)| (*s, v.len())).collect()));
     }
-    let mut va = [0u32; 5];
+    let mut va = [0u32; 10];
     for (s, v) in &found {
         va[*s as usize] = v[0];
     }
@@ -300,7 +459,152 @@ pub fn resolve(img: &Image) -> Result<ProfilerSites, ProfilerSitesError> {
     }
     let ring = va[Site::CellsChangeRing as usize];
     let cells_change = cells_change_ring(img, ring, &text.bytes[(ring - text.va) as usize..])?;
-    Ok(ProfilerSites { va, render_system, jobs, cells_change })
+    let frame_stores = frame_stores(img, text.va, text.bytes, &va)?;
+    Ok(ProfilerSites { va, render_system, jobs, cells_change, frame_stores })
+}
+
+/// The frame stores' counters and capacities out of the five frame-store sites, each checked against the
+/// others: the producer adds to the count it compares, the hand-off reads it and calls the function the
+/// begin-frame site sits in, that function zeroes it and resets the matrix counter the matrix push uses,
+/// and each allocation path of the allocator names one size.
+fn frame_stores(img: &Image, text_va: u32, text: &[u8], va: &[u32; 10]) -> Result<FrameStores, ProfilerSitesError> {
+    let at = |s: Site| va[s as usize];
+    let bytes = |v: u32, n: usize| text.get((v.wrapping_sub(text_va)) as usize..).and_then(|b| b.get(..n));
+    let producer = at(Site::PacketProducer);
+    let bad = |why: String| ProfilerSitesError::FrameStores { site: producer, why };
+    let b = bytes(producer, PACKET_COUNT_ADD_AT + 6).ok_or_else(|| bad("the producer runs past .text".into()))?;
+    let packets = u32_at(b, PACKET_COUNT_AT);
+    let packet_cap = u32_at(b, PACKET_CAP_AT);
+    match &b[PACKET_COUNT_ADD_AT..] {
+        [0x01, 0x1d, d @ ..] if u32::from_le_bytes([d[0], d[1], d[2], d[3]]) == packets => {}
+        other => {
+            return Err(bad(format!("the producer reads the count at {packets:#x}, but +{PACKET_COUNT_ADD_AT:#x} is {other:02x?}, not add [{packets:#x}], ebx")));
+        }
+    }
+
+    let end = at(Site::PacketFrameEnd);
+    let e = bytes(end, FRAME_END_BEGIN_CALL_AT + 5).ok_or_else(|| bad(format!("the hand-off at {end:#x} runs past .text")))?;
+    if u32_at(e, FRAME_END_COUNT_AT) != packets {
+        return Err(bad(format!("the producer counts at {packets:#x}, the frame hand-off reads {:#x}", u32_at(e, FRAME_END_COUNT_AT))));
+    }
+    // The begin-frame is the hand-off's last act: a tail `jmp rel32` in the retail builds, `call rel32` in
+    // others; both transfer through the same rel32.
+    if !matches!(e[FRAME_END_BEGIN_CALL_AT], 0xe8 | 0xe9) {
+        return Err(bad(format!("the hand-off's +{FRAME_END_BEGIN_CALL_AT:#x} is {:#04x}, not call or jmp rel32", e[FRAME_END_BEGIN_CALL_AT])));
+    }
+    let call_end = end + FRAME_END_BEGIN_CALL_AT as u32 + 5;
+    let called = call_end.wrapping_add(u32_at(e, FRAME_END_BEGIN_CALL_AT + 1));
+
+    let site = at(Site::FrameBegin);
+    let begin = site.wrapping_sub(BEGIN_SITE_IN_FUNCTION);
+    if called != begin {
+        return Err(bad(format!("the hand-off calls {called:#x}, but the begin-frame site {site:#x} puts its function at {begin:#x}")));
+    }
+    let r = bytes(site, BEGIN_LIST_BASE_AT + 4).ok_or_else(|| bad(format!("the begin-frame site {site:#x} runs past .text")))?;
+    if u32_at(r, BEGIN_PACKETS_AT) != packets {
+        return Err(bad(format!("the begin-frame zeroes {:#x}, not the packet count {packets:#x}", u32_at(r, BEGIN_PACKETS_AT))));
+    }
+    let list_dwords = u32_at(r, BEGIN_LIST_AT);
+    let sidecar_bytes_used = u32_at(r, BEGIN_SIDECAR_AT);
+    let parity = u32_at(r, BEGIN_PARITY_AT);
+    let list_base = u32_at(r, BEGIN_LIST_BASE_AT);
+    let side = begin + BEGIN_SIDECAR_BASE_IN_FUNCTION;
+    let sb = bytes(side, 5).ok_or_else(|| bad(format!("the sidecar base store {side:#x} runs past .text")))?;
+    if sb[0] != 0xa3 {
+        return Err(bad(format!("the begin-frame's +{BEGIN_SIDECAR_BASE_IN_FUNCTION:#x} is {:#04x}, not mov [moffs32], eax", sb[0])));
+    }
+    let sidecar_base = u32_at(sb, 1);
+
+    let (pp, ps, pa) = (&b[PACKET_PARITY_AT..], &b[PACKET_STRIDE_AT..], &b[PACKET_ARRAY_AT..]);
+    if pp[..2] != [0x8b, 0x2d] || u32_at(pp, 2) != parity {
+        return Err(bad(format!("the producer's +{PACKET_PARITY_AT:#x} is {:02x?}, not mov ebp, [{parity:#x}]", &pp[..6])));
+    }
+    if ps[..2] != [0x6b, 0xc0] {
+        return Err(bad(format!("the producer's +{PACKET_STRIDE_AT:#x} is {:02x?}, not imul eax, eax, imm8", &ps[..3])));
+    }
+    let packet_bytes = u32::from(ps[2]);
+    if pa[0] != 0x05 {
+        return Err(bad(format!("the producer's +{PACKET_ARRAY_AT:#x} is {:#04x}, not add eax, imm32", pa[0])));
+    }
+    let packet_array = u32_at(pa, 1);
+    let draw_class = u32_at(b, PACKET_CLASS_AT);
+    let (pr, cr) = (&b[PACKET_PROGRAM_READ_AT..], &b[PACKET_CLASS_READ_AT..]);
+    if pr[..3] != [0x0f, 0xb7, 0x15] {
+        return Err(bad(format!("the producer's +{PACKET_PROGRAM_READ_AT:#x} is {:02x?}, not movzx edx, word [moffs32]", &pr[..7])));
+    }
+    let draw_program = u32_at(pr, 3);
+    if cr[..2] != [0x8a, 0x15] || u32_at(cr, 2) != draw_class {
+        return Err(bad(format!("the producer's +{PACKET_CLASS_READ_AT:#x} is {:02x?}, not mov dl, [{draw_class:#x}]", &cr[..6])));
+    }
+    let reset = begin + BEGIN_MATRIX_RESET_IN_FUNCTION;
+    let m = bytes(reset, 9).ok_or_else(|| bad(format!("the matrix reset {reset:#x} runs past .text")))?;
+    if m[..3] != [0x66, 0xc7, 0x05] || m[7..] != [0x02, 0x00] {
+        return Err(bad(format!("the begin-frame's +{BEGIN_MATRIX_RESET_IN_FUNCTION:#x} is {m:02x?}, not mov word [counter], 2")));
+    }
+    let matrices = u32_at(m, 3);
+
+    let push = at(Site::MatrixIndex);
+    let p = bytes(push, MATRIX_BASE_AT + 4).ok_or_else(|| bad(format!("the matrix push {push:#x} runs past .text")))?;
+    for o in [MATRIX_COUNTER_AT, MATRIX_COUNTER_STORE_AT] {
+        if u32_at(p, o) != matrices {
+            return Err(bad(format!("the matrix push uses {:#x}, the begin-frame resets {matrices:#x}", u32_at(p, o))));
+        }
+    }
+    if u32_at(p, MATRIX_PARITY_AT) != parity {
+        return Err(bad(format!("the matrix push reads the parity at {:#x}, the begin-frame writes {parity:#x}", u32_at(p, MATRIX_PARITY_AT))));
+    }
+    let matrix_cap = u32_at(p, MATRIX_CAP_AT);
+    let matrix_table = u32_at(p, MATRIX_BASE_AT);
+
+    let alloc = at(Site::StoreAlloc);
+    let a = bytes(alloc, ALLOC_SIDECAR_AT[1] + 4).ok_or_else(|| bad(format!("the allocator {alloc:#x} runs past .text")))?;
+    let size = |offsets: [usize; 2], what: &str| {
+        let (x, y) = (u32_at(a, offsets[0]), u32_at(a, offsets[1]));
+        if x == y { Ok(x) } else { Err(bad(format!("the allocator's two {what} paths take {x:#x} and {y:#x}"))) }
+    };
+    let list_bytes = size(ALLOC_LIST_AT, "display-list")?;
+    let sidecar_bytes = size(ALLOC_SIDECAR_AT, "sidecar")?;
+
+    let packet_end = packet_array as u64 + 2 * u64::from(packet_cap) * u64::from(packet_bytes) - 4;
+    let matrix_end = matrix_table as u64 + 2 * u64::from(matrix_cap) * 0x40 - 4;
+    for (what, v) in [
+        ("the packet count", packets as u64),
+        ("the list cursor", list_dwords as u64),
+        ("the sidecar cursor", sidecar_bytes_used as u64),
+        ("the matrix counter", matrices as u64),
+        ("the parity", parity as u64),
+        ("the list base pointer", list_base as u64),
+        ("the sidecar base pointer", sidecar_base as u64),
+        ("the draw program", draw_program as u64),
+        ("the draw class", draw_class as u64),
+        ("the packet array", packet_array as u64),
+        ("the packet array's end", packet_end),
+        ("the matrix table", matrix_table as u64),
+        ("the matrix table's end", matrix_end),
+    ] {
+        if u32::try_from(v).ok().and_then(|v| img.u32_at(v)).is_none() {
+            return Err(bad(format!("{what} {v:#x} is not in the image")));
+        }
+    }
+    Ok(FrameStores {
+        begin,
+        packets,
+        packet_cap,
+        list_dwords,
+        list_bytes,
+        sidecar_bytes_used,
+        sidecar_bytes,
+        matrices,
+        matrix_cap,
+        parity,
+        packet_array,
+        packet_bytes,
+        matrix_table,
+        list_base,
+        sidecar_base,
+        draw_program,
+        draw_class,
+    })
 }
 
 /// The counter and ring addresses out of [`Site::CellsChangeRing`] at `site` (`b` is its bytes).
@@ -355,6 +659,148 @@ mod tests {
         assert_eq!(ring[CELLS_COUNTER_AT - 1], "a1");
         assert_eq!(ring[CELLS_RING_AT - 1], "05");
         assert_eq!(ring[CELLS_COUNTER_STORE_AT - 2..CELLS_COUNTER_STORE_AT], ["83", "05"]);
+        let producer: Vec<&str> = Site::PacketProducer.pattern().split_whitespace().collect();
+        assert_eq!(producer[PACKET_COUNT_AT - 2..PACKET_COUNT_AT], ["8b", "0d"]);
+        assert_eq!(producer[PACKET_CAP_AT - 2..PACKET_CAP_AT + 4], ["81", "f9", "00", "20", "00", "00"]);
+        let end: Vec<&str> = Site::PacketFrameEnd.pattern().split_whitespace().collect();
+        assert_eq!(end[FRAME_END_COUNT_AT - 2..FRAME_END_COUNT_AT], ["8b", "1d"]);
+        let begin: Vec<&str> = Site::FrameBegin.pattern().split_whitespace().collect();
+        for at in [BEGIN_PACKETS_AT, BEGIN_LIST_AT, BEGIN_SIDECAR_AT] {
+            assert_eq!(begin[at - 2..at], ["89", "35"], "mov [global], esi before {at}");
+        }
+        let alloc: Vec<&str> = Site::StoreAlloc.pattern().split_whitespace().collect();
+        for (at, op) in [(ALLOC_LIST_AT[0], "b8"), (ALLOC_LIST_AT[1], "68"), (ALLOC_SIDECAR_AT[0], "b8"), (ALLOC_SIDECAR_AT[1], "68")] {
+            assert_eq!(alloc[at - 1], op, "the size operand at {at}");
+            assert_eq!(alloc[at], "??", "the size at {at} is read, not matched");
+        }
+        assert_eq!(alloc.len(), ALLOC_SIDECAR_AT[1] + 4);
+        let push: Vec<&str> = Site::MatrixIndex.pattern().split_whitespace().collect();
+        assert_eq!(push[MATRIX_COUNTER_AT - 2..MATRIX_COUNTER_AT], ["66", "a1"]);
+        assert_eq!(push[MATRIX_COUNTER_STORE_AT - 2..MATRIX_COUNTER_STORE_AT], ["66", "a3"]);
+        assert_eq!(push[MATRIX_CAP_AT - 2..MATRIX_CAP_AT], ["69", "c0"]);
+    }
+
+    /// Where the frame-store sites sit in the synthetic `.text`.
+    const PRODUCER_AT: usize = 0x500;
+    const END_AT: usize = 0x800;
+    const BEGIN_FN_AT: usize = 0x1200;
+    const ALLOC_AT: usize = 0x1900;
+    const PUSH_AT: usize = 0x1A00;
+
+    /// What the five frame-store sites name: each counter's address in `.data`, the sizes, and the
+    /// hand-off's call target (an offset in `.text`).
+    #[derive(Clone)]
+    struct Stores {
+        producer_count: u32,
+        producer_add: u32,
+        end_count: u32,
+        /// The hand-off's transfer opcode (`e9` tail jump, as retail, or `e8` call) and its target.
+        transfer: u8,
+        call_to: usize,
+        begin_packets: u32,
+        list: u32,
+        sidecar: u32,
+        reset_matrices: u32,
+        push_matrices: u32,
+        list_sizes: [u32; 2],
+        sidecar_sizes: [u32; 2],
+        matrix_cap: u32,
+        /// The parity the begin-frame writes, the producer reads and the matrix push reads.
+        begin_parity: u32,
+        producer_parity: u32,
+        push_parity: u32,
+        packet_array: u32,
+        matrix_table: u32,
+        list_base: u32,
+        sidecar_base: u32,
+        /// The class global as the producer's first read (the pattern) and its second read name it.
+        draw_class: u32,
+        draw_class_read: u32,
+        draw_program: u32,
+    }
+
+    fn stores() -> Stores {
+        Stores {
+            producer_count: 0x403030,
+            producer_add: 0x403030,
+            end_count: 0x403030,
+            transfer: 0xe9,
+            call_to: BEGIN_FN_AT,
+            begin_packets: 0x403030,
+            list: 0x403034,
+            sidecar: 0x403038,
+            reset_matrices: 0x40303c,
+            push_matrices: 0x40303c,
+            list_sizes: [0x50000; 2],
+            sidecar_sizes: [0x20000; 2],
+            matrix_cap: 0x1400,
+            begin_parity: 0x403050,
+            producer_parity: 0x403050,
+            push_parity: 0x403050,
+            packet_array: 0x1400000,
+            matrix_table: 0x1570000,
+            list_base: 0x403054,
+            sidecar_base: 0x403058,
+            draw_class: 0x403060,
+            draw_class_read: 0x403060,
+            draw_program: 0x40305c,
+        }
+    }
+
+    fn put(b: &mut [u8], at: usize, v: u32) {
+        b[at..at + 4].copy_from_slice(&v.to_le_bytes());
+    }
+
+    /// The frame-store sites written into `text` (already at least `PUSH_AT` long).
+    fn place_stores(text: &mut Vec<u8>, s: &Stores) {
+        let mut producer = concrete(Site::PacketProducer, 0x66);
+        put(&mut producer, PACKET_COUNT_AT, s.producer_count);
+        producer.resize(PACKET_COUNT_ADD_AT, 0x90);
+        producer[PACKET_PARITY_AT..PACKET_PARITY_AT + 2].copy_from_slice(&[0x8b, 0x2d]);
+        put(&mut producer, PACKET_PARITY_AT + 2, s.producer_parity);
+        producer[PACKET_STRIDE_AT..PACKET_STRIDE_AT + 3].copy_from_slice(&[0x6b, 0xc0, 0x58]);
+        producer[PACKET_ARRAY_AT] = 0x05;
+        put(&mut producer, PACKET_ARRAY_AT + 1, s.packet_array);
+        put(&mut producer, PACKET_CLASS_AT, s.draw_class);
+        producer[PACKET_PROGRAM_READ_AT..PACKET_PROGRAM_READ_AT + 3].copy_from_slice(&[0x0f, 0xb7, 0x15]);
+        put(&mut producer, PACKET_PROGRAM_READ_AT + 3, s.draw_program);
+        producer[PACKET_CLASS_READ_AT..PACKET_CLASS_READ_AT + 2].copy_from_slice(&[0x8a, 0x15]);
+        put(&mut producer, PACKET_CLASS_READ_AT + 2, s.draw_class_read);
+        producer.extend([0x01, 0x1d]);
+        producer.extend(s.producer_add.to_le_bytes());
+        let mut end = concrete(Site::PacketFrameEnd, 0x88);
+        put(&mut end, FRAME_END_COUNT_AT, s.end_count);
+        end.resize(FRAME_END_BEGIN_CALL_AT, 0x90);
+        end.push(s.transfer);
+        let rel = (s.call_to as i64 - (END_AT + FRAME_END_BEGIN_CALL_AT + 5) as i64) as i32;
+        end.extend(rel.to_le_bytes());
+        let mut begin = concrete(Site::FrameBegin, 0x99);
+        put(&mut begin, BEGIN_PACKETS_AT, s.begin_packets);
+        put(&mut begin, BEGIN_LIST_AT, s.list);
+        put(&mut begin, BEGIN_SIDECAR_AT, s.sidecar);
+        put(&mut begin, BEGIN_PARITY_AT, s.begin_parity);
+        put(&mut begin, BEGIN_LIST_BASE_AT, s.list_base);
+        let mut side = vec![0xa3];
+        side.extend(s.sidecar_base.to_le_bytes());
+        let mut reset = vec![0x66, 0xc7, 0x05];
+        reset.extend(s.reset_matrices.to_le_bytes());
+        reset.extend([0x02, 0x00]);
+        let mut alloc = concrete(Site::StoreAlloc, 0x11);
+        for (at, v) in ALLOC_LIST_AT.into_iter().zip(s.list_sizes).chain(ALLOC_SIDECAR_AT.into_iter().zip(s.sidecar_sizes)) {
+            put(&mut alloc, at, v);
+        }
+        let mut push = concrete(Site::MatrixIndex, 0x22);
+        put(&mut push, MATRIX_COUNTER_AT, s.push_matrices);
+        put(&mut push, MATRIX_COUNTER_STORE_AT, s.push_matrices);
+        put(&mut push, MATRIX_CAP_AT, s.matrix_cap);
+        put(&mut push, MATRIX_PARITY_AT, s.push_parity);
+        put(&mut push, MATRIX_BASE_AT, s.matrix_table);
+        let site = BEGIN_FN_AT + BEGIN_SITE_IN_FUNCTION as usize;
+        let reset_at = BEGIN_FN_AT + BEGIN_MATRIX_RESET_IN_FUNCTION as usize;
+        let side_at = BEGIN_FN_AT + BEGIN_SIDECAR_BASE_IN_FUNCTION as usize;
+        for (at, bytes) in [(PRODUCER_AT, producer), (END_AT, end), (side_at, side), (site, begin), (reset_at, reset), (ALLOC_AT, alloc), (PUSH_AT, push)] {
+            text[at..at + bytes.len()].copy_from_slice(&bytes);
+        }
     }
 
     /// The [`Site::CellsChangeRing`] bytes with counter at `counter` and ring at `counter + 8`.
@@ -395,9 +841,13 @@ mod tests {
     }
 
     /// `.text` holding RunFrame at +0x40, BindDevice at +0x100 reading the globals `d3d` and `rs`,
-    /// JobRegister at +0x200 (`reg`), JobWait at +0x300 (`wait`) and CellsChangeRing at +0x400 (`ring`);
-    /// a `.data` at 0x403000 of 0x400 bytes.
+    /// JobRegister at +0x200 (`reg`), JobWait at +0x300 (`wait`), CellsChangeRing at +0x400 (`ring`) and
+    /// the frame-store sites of [`stores`]; a `.data` at 0x403000 of 0x400 bytes.
     fn image_with(d3d: u32, rs: u32, reg: Vec<u8>, wait: Vec<u8>, ring: Vec<u8>) -> Vec<u8> {
+        image_with_stores(d3d, rs, reg, wait, ring, &stores())
+    }
+
+    fn image_with_stores(d3d: u32, rs: u32, reg: Vec<u8>, wait: Vec<u8>, ring: Vec<u8>, s: &Stores) -> Vec<u8> {
         let mut text = vec![0xcc; 0x40];
         text.extend(concrete(Site::RunFrame, 0x5a));
         text.resize(0x100, 0xcc);
@@ -411,8 +861,11 @@ mod tests {
         text.extend(wait);
         text.resize(0x400, 0xcc);
         text.extend(ring);
-        text.resize(0x500, 0xcc);
-        synth::pe(0x400000, &[(".text", 0x1000, text), (".data", 0x3000, vec![0; 0x400])])
+        text.resize(0x1B00, 0xcc);
+        place_stores(&mut text, s);
+        // `.frame` holds both parities of the packet array (0x1400000) and of the matrix table (0x1570000), clear
+        // of the addresses the other tests use as outside the image.
+        synth::pe(0x400000, &[(".text", 0x1000, text), (".data", 0x3000, vec![0; 0x400]), (".frame", 0x1000000, vec![0; 0x300000])])
     }
 
     fn image(d3d: u32, rs: u32) -> Vec<u8> {
@@ -438,6 +891,76 @@ mod tests {
         assert_eq!(s.jobs(), JobTables { count: 0x403010, handlers: [0x40304c, 0x403178] });
         assert_eq!(s.cells_change(), CellsChangeRing { counter: 0x403020, ring: 0x403028 });
         assert_eq!(s.cells_change().critical_section(), 0x403008);
+        assert_eq!(s.va(Site::PacketProducer), 0x401500);
+        assert_eq!(s.va(Site::PacketFrameEnd), 0x401800);
+        assert_eq!(s.va(Site::FrameBegin), 0x402200 + BEGIN_SITE_IN_FUNCTION);
+        assert_eq!(s.va(Site::StoreAlloc), 0x402900);
+        assert_eq!(s.va(Site::MatrixIndex), 0x402a00);
+        assert_eq!(
+            s.frame_stores(),
+            FrameStores {
+                begin: 0x402200,
+                packets: 0x403030,
+                packet_cap: 0x2000,
+                list_dwords: 0x403034,
+                list_bytes: 0x50000,
+                sidecar_bytes_used: 0x403038,
+                sidecar_bytes: 0x20000,
+                matrices: 0x40303c,
+                matrix_cap: 0x1400,
+                parity: 0x403050,
+                packet_array: 0x1400000,
+                packet_bytes: 0x58,
+                matrix_table: 0x1570000,
+                list_base: 0x403054,
+                sidecar_base: 0x403058,
+                draw_program: 0x40305c,
+                draw_class: 0x403060,
+            }
+        );
+    }
+
+    #[test]
+    fn the_frame_store_sites_must_name_one_set_of_counters() {
+        let check = |s: Stores| {
+            let file = image_with_stores(0x403004, 0x403008, job_register(0x403010, 0x40304c, 0x403178), job_wait(0x403040), cells_ring(0x403020), &s);
+            resolve(&Image::from_file(&file).unwrap()).unwrap_err().to_string()
+        };
+        let e = check(Stores { producer_add: 0x403038, ..stores() });
+        assert!(e.contains("not add [0x403030], ebx"), "{e}");
+        let e = check(Stores { end_count: 0x40303c, ..stores() });
+        assert!(e.contains("the frame hand-off reads 0x40303c"), "{e}");
+        let e = check(Stores { call_to: BEGIN_FN_AT + 0x10, ..stores() });
+        assert!(e.contains("the hand-off calls 0x402210"), "{e}");
+        let e = check(Stores { transfer: 0x90, ..stores() });
+        assert!(e.contains("is 0x90, not call or jmp rel32"), "{e}");
+        let as_call = image_with_stores(
+            0x403004,
+            0x403008,
+            job_register(0x403010, 0x40304c, 0x403178),
+            job_wait(0x403040),
+            cells_ring(0x403020),
+            &Stores { transfer: 0xe8, ..stores() },
+        );
+        assert_eq!(resolve(&Image::from_file(&as_call).unwrap()).unwrap().frame_stores().begin, 0x402200, "a call reaches the begin-frame too");
+        let e = check(Stores { begin_packets: 0x403034, ..stores() });
+        assert!(e.contains("the begin-frame zeroes 0x403034"), "{e}");
+        let e = check(Stores { push_matrices: 0x403038, ..stores() });
+        assert!(e.contains("the matrix push uses 0x403038"), "{e}");
+        let e = check(Stores { sidecar_sizes: [0x20000, 0x40000], ..stores() });
+        assert!(e.contains("two sidecar paths take 0x20000 and 0x40000"), "{e}");
+        let e = check(Stores { list: 0xc00000, ..stores() });
+        assert!(e.contains("the list cursor 0xc00000 is not in the image"), "{e}");
+        let e = check(Stores { producer_parity: 0x403054, ..stores() });
+        assert!(e.contains("not mov ebp, [0x403050]"), "{e}");
+        let e = check(Stores { push_parity: 0x403054, ..stores() });
+        assert!(e.contains("the matrix push reads the parity at 0x403054"), "{e}");
+        let e = check(Stores { matrix_table: 0x1670000, ..stores() });
+        assert!(e.contains("the matrix table's end"), "{e}");
+        let e = check(Stores { draw_class_read: 0x403064, ..stores() });
+        assert!(e.contains("not mov dl, [0x403060]"), "{e}");
+        let e = check(Stores { draw_program: 0x900000, ..stores() });
+        assert!(e.contains("the draw program 0x900000 is not in the image"), "{e}");
     }
 
     #[test]
@@ -515,17 +1038,21 @@ mod tests {
                 (Site::BindDevice, 0),
                 (Site::JobRegister, 0),
                 (Site::JobWait, 0),
-                (Site::CellsChangeRing, 0)
+                (Site::CellsChangeRing, 0),
+                (Site::PacketProducer, 0),
+                (Site::PacketFrameEnd, 0),
+                (Site::FrameBegin, 0),
+                (Site::StoreAlloc, 0),
+                (Site::MatrixIndex, 0)
             ])
         );
         assert!(e.to_string().contains("RunFrame=0 match(es)"), "{e}");
 
         let mut text = concrete(Site::RunFrame, 0);
         text.extend(concrete(Site::RunFrame, 0xff));
-        text.extend(concrete(Site::BindDevice, 0));
-        text.extend(concrete(Site::JobRegister, 0));
-        text.extend(concrete(Site::JobWait, 0));
-        text.extend(concrete(Site::CellsChangeRing, 0));
+        for s in &Site::ALL[1..] {
+            text.extend(concrete(*s, 0));
+        }
         let doubled = synth::pe(0x400000, &[(".text", 0x1000, text)]);
         let e = resolve(&Image::from_file(&doubled).unwrap()).unwrap_err();
         assert_eq!(
@@ -535,7 +1062,12 @@ mod tests {
                 (Site::BindDevice, 1),
                 (Site::JobRegister, 1),
                 (Site::JobWait, 1),
-                (Site::CellsChangeRing, 1)
+                (Site::CellsChangeRing, 1),
+                (Site::PacketProducer, 1),
+                (Site::PacketFrameEnd, 1),
+                (Site::FrameBegin, 1),
+                (Site::StoreAlloc, 1),
+                (Site::MatrixIndex, 1)
             ])
         );
     }
