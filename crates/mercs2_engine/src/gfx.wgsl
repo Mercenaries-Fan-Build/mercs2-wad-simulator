@@ -62,8 +62,7 @@ fn spread_position(t: f32, spread: f32) -> f32 {
     return clamp(t, 0.0, 1.0);
 }
 
-@fragment
-fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
+fn paint(in: VertexOut) -> vec4<f32> {
     var coord = in.uv;
     if (in.kind.x > 1.5) {
         coord = vec2<f32>(spread_position(gradient_position(in.kind.x, in.uv, in.kind.z), in.kind.y), 0.5);
@@ -71,4 +70,17 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     let texel = textureSample(image, image_sampler, coord);
     let base = select(texel, vec4<f32>(1.0), in.kind.x < 0.5);
     return clamp(base * in.mul + in.add, vec4<f32>(0.0), vec4<f32>(1.0));
+}
+
+@fragment
+fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
+    return paint(in);
+}
+
+// Multiply and darken: the colour pulled toward white by its alpha, so a transparent part of the
+// source leaves the destination as it was.
+@fragment
+fn fs_toward_white(in: VertexOut) -> @location(0) vec4<f32> {
+    let c = paint(in);
+    return vec4<f32>((c.rgb - vec3<f32>(1.0)) * c.a + vec3<f32>(1.0), c.a);
 }
