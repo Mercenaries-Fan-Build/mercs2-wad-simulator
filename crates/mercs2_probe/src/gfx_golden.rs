@@ -190,7 +190,8 @@ pub fn gfx_render(movie: &Path, frames: u32, png_path: &Path, wads: &[String], f
     // Flash widget, which could not show through it.
     let count = items.len();
     let draw = mercs2_engine::flash::FlashDraw { def, items };
-    let rgba = render_to_rgba(std::slice::from_ref(&draw), &mut images, size, [0.0, 0.0, 0.0, 1.0])?;
+    let layers = [mercs2_engine::scene::FrontLayer::Flash(0)];
+    let rgba = render_to_rgba(std::slice::from_ref(&draw), &mut images, &[], &layers, size, [0.0, 0.0, 0.0, 1.0])?;
     write_png(png_path, size, &rgba)?;
     println!("{}: {count} items, {}x{}", png_path.display(), size[0], size[1]);
     Ok(())
@@ -345,6 +346,171 @@ pub fn gfx_actions(movie: &Path, out_path: &Path) -> Result<(), String> {
     std::fs::write(out_path, out).map_err(|e| format!("write {}: {e}", out_path.display()))
 }
 
+/// Write a movie's display lists as text: every timeline's frames with their places (depth, move or
+/// new, character, name, ratio, clip depth), removes, scripts and labels.
+pub fn gfx_tags(movie: &Path, out_path: &Path) -> Result<(), String> {
+    use mercs2_formats::gfx_def::{Control, Timeline};
+    let bytes = std::fs::read(movie).map_err(|e| format!("read {}: {e}", movie.display()))?;
+    let def = GfxMovie::parse(&bytes).and_then(|m| MovieDef::decode(&m))?;
+    let mut out = String::new();
+    let mut timeline = |name: String, t: &Timeline| {
+        out.push_str(&format!("== {name}: {} frames (declares {})\n", t.frames.len(), t.declared_frames));
+        for (label, frame) in &t.labels {
+            out.push_str(&format!("  label {label:?} -> frame {frame}\n"));
+        }
+        for (index, frame) in t.frames.iter().enumerate() {
+            for control in frame {
+                match control {
+                    Control::Place(p) => out.push_str(&format!(
+                        "  frame {index}: {} depth {} character {:?} name {:?} ratio {:?} clip_depth {:?} events {}\n",
+                        if p.is_move { "move" } else { "place" },
+                        p.depth,
+                        p.character,
+                        p.name,
+                        p.ratio,
+                        p.clip_depth,
+                        p.clip_actions.len()
+                    )),
+                    Control::Remove { depth } => out.push_str(&format!("  frame {index}: remove depth {depth}\n")),
+                    Control::Action(code) => out.push_str(&format!("  frame {index}: script ({} bytes)\n", code.len())),
+                }
+            }
+        }
+    };
+    timeline("root".into(), &def.timeline);
+    let mut ids: Vec<u16> = def.characters.keys().copied().collect();
+    ids.sort();
+    for id in ids {
+        if let Some(Character::Sprite(sprite)) = def.characters.get(&id) {
+            timeline(format!("sprite {id}"), sprite);
+        }
+    }
+    std::fs::write(out_path, out).map_err(|e| format!("write {}: {e}", out_path.display()))
+}
+
+/// Decode one audio track of a movie to 16-bit PCM and, given another decode of it (ffmpeg's, as a
+/// black box), say how far apart they are.
+pub fn bink_audio(movie: &Path, track: usize, out: &Path, against: Option<&Path>) -> Result<(), String> {
+    let bytes = std::fs::read(movie).map_err(|e| format!("read {}: {e}", movie.display()))?;
+    let m = mercs2_bink::Movie::parse(&bytes)?;
+    let info = *m.tracks.get(track).ok_or_else(|| format!("track {track} of {}", m.tracks.len()))?;
+    let mut decoder = mercs2_bink::AudioDecoder::new(&info)?;
+    let mut pcm: Vec<i16> = Vec::new();
+    for frame in 0..m.frame_count {
+        let (records, _) = m.split(frame)?;
+        pcm.extend(decoder.decode_record(records[track]).map_err(|e| format!("frame {frame}: {e}"))?);
+    }
+    let raw: Vec<u8> = pcm.iter().flat_map(|s| s.to_le_bytes()).collect();
+    std::fs::write(out, &raw).map_err(|e| format!("write {}: {e}", out.display()))?;
+    println!("track {track} id {} {} Hz {} ch: {} samples -> {}", info.id, info.rate(), info.channels(), pcm.len(), out.display());
+    if let Some(path) = against {
+        let other: Vec<i16> = std::fs::read(path)
+            .map_err(|e| format!("read {}: {e}", path.display()))?
+            .chunks_exact(2)
+            .map(|b| i16::from_le_bytes([b[0], b[1]]))
+            .collect();
+        let common = pcm.len().min(other.len());
+        let diffs: Vec<i32> = (0..common).map(|i| (pcm[i] as i32 - other[i] as i32).abs()).collect();
+        let max = diffs.iter().copied().max().unwrap_or(0);
+        let differing = diffs.iter().filter(|d| **d != 0).count();
+        println!("against {}: {} samples there, {common} compared, {differing} differ, max |difference| {max}", path.display(), other.len());
+    }
+    Ok(())
+}
+
+/// Decode the first `frames` video frames of a movie and compare each frame's Y, U and V with the
+/// matching frame of a raw `yuv420p` file (ffmpeg's decode, as a black box). Writes nothing; fails
+/// when any plane differs.
+pub fn bink_video(movie: &Path, frames: u32, against: &Path) -> Result<(), String> {
+    use std::io::Read;
+    let bytes = std::fs::read(movie).map_err(|e| format!("read {}: {e}", movie.display()))?;
+    let m = mercs2_bink::Movie::parse(&bytes)?;
+    if frames > m.frame_count {
+        return Err(format!("{frames} frames asked for, the movie has {}", m.frame_count));
+    }
+    let (w, h) = (m.width as usize, m.height as usize);
+    let chroma = w.div_ceil(2) * h.div_ceil(2);
+    let frame_size = w * h + 2 * chroma;
+    let reference_len = std::fs::metadata(against).map_err(|e| format!("stat {}: {e}", against.display()))?.len();
+    if reference_len < frames as u64 * frame_size as u64 {
+        return Err(format!("{} holds {reference_len} bytes, fewer than {frames} frames of {frame_size}", against.display()));
+    }
+    let mut reference = std::io::BufReader::new(std::fs::File::open(against).map_err(|e| format!("open {}: {e}", against.display()))?);
+    let mut expected = vec![0u8; frame_size];
+    let mut decoder = mercs2_bink::VideoDecoder::new(&m)?;
+    let mut decode_time = std::time::Duration::ZERO;
+    let mut first_diff: Option<String> = None;
+    let mut differing = 0u32;
+    for i in 0..frames {
+        reference.read_exact(&mut expected).map_err(|e| format!("read frame {i} of {}: {e}", against.display()))?;
+        let started = std::time::Instant::now();
+        let frame = decoder.decode(&m, i)?;
+        decode_time += started.elapsed();
+        let planes = [("Y", &frame.y, &expected[..w * h]), ("U", &frame.u, &expected[w * h..w * h + chroma]), ("V", &frame.v, &expected[w * h + chroma..])];
+        let mut line = format!("frame {i}:");
+        let mut equal = true;
+        for (name, ours, theirs) in planes {
+            match ours.iter().zip(theirs.iter()).position(|(a, b)| a != b) {
+                None => line.push_str(&format!(" {name} equal")),
+                Some(at) => {
+                    equal = false;
+                    let differ = ours.iter().zip(theirs.iter()).filter(|(a, b)| a != b).count();
+                    line.push_str(&format!(" {name} DIFFERS ({differ} bytes, first at offset {at}: ours {} reference {})", ours[at], theirs[at]));
+                    if first_diff.is_none() {
+                        let stride = if name == "Y" { w } else { w.div_ceil(2) };
+                        first_diff = Some(format!("frame {i} plane {name} offset {at} (row {}, column {})", at / stride, at % stride));
+                    }
+                }
+            }
+        }
+        if !equal {
+            differing += 1;
+        }
+        println!("{line}");
+    }
+    let secs = decode_time.as_secs_f64();
+    println!(
+        "{frames} frames {w}x{h} decoded in {secs:.3} s ({:.1} frames/s; movie rate {:.3} frames/s); {differing} frames differ",
+        frames as f64 / secs,
+        m.fps.0 as f64 / m.fps.1 as f64
+    );
+    match first_diff {
+        None => Ok(()),
+        Some(at) => Err(format!("{differing} of {frames} frames differ; first difference: {at}")),
+    }
+}
+
+/// Decode a movie up to `index` and write that frame as RGBA, converted as the movie widget converts
+/// it; prints the mean time a frame takes to decode and to convert.
+pub fn bink_frame(movie: &Path, index: u32, out: &Path) -> Result<(), String> {
+    let bytes = std::fs::read(movie).map_err(|e| format!("read {}: {e}", movie.display()))?;
+    let m = mercs2_bink::Movie::parse(&bytes)?;
+    if index >= m.frame_count {
+        return Err(format!("frame {index} asked for, the movie has {}", m.frame_count));
+    }
+    let mut decoder = mercs2_bink::VideoDecoder::new(&m)?;
+    let (mut decode, mut convert) = (std::time::Duration::ZERO, std::time::Duration::ZERO);
+    let mut rgba = Vec::new();
+    for i in 0..=index {
+        let started = std::time::Instant::now();
+        let frame = decoder.decode(&m, i)?;
+        decode += started.elapsed();
+        let started = std::time::Instant::now();
+        rgba = mercs2_bink::rgb::to_rgba(frame);
+        convert += started.elapsed();
+    }
+    let n = (index + 1) as f64;
+    println!(
+        "{} frames {}x{}: decode {:.3} ms/frame, convert {:.3} ms/frame",
+        index + 1,
+        m.width,
+        m.height,
+        decode.as_secs_f64() * 1000.0 / n,
+        convert.as_secs_f64() * 1000.0 / n
+    );
+    write_png(out, [m.width, m.height], &rgba)
+}
+
 fn write_png(path: &Path, size: [u32; 2], rgba: &[u8]) -> Result<(), String> {
     let file = std::fs::File::create(path).map_err(|e| format!("create {}: {e}", path.display()))?;
     let mut enc = png::Encoder::new(std::io::BufWriter::new(file), size[0], size[1]);
@@ -353,9 +519,10 @@ fn write_png(path: &Path, size: [u32; 2], rgba: &[u8]) -> Result<(), String> {
     enc.write_header().and_then(|mut w| w.write_image_data(rgba)).map_err(|e| format!("write {}: {e}", path.display()))
 }
 
-/// Boot the shipped shell headless and walk it: each step is `wait:<frames>`, `down:<button>` or
-/// `up:<button>`, at 60 frames a second. The final frame goes to `png_path`.
-pub fn gfx_shell(png_path: &Path, steps: &[String], wads: &[String]) -> Result<(), String> {
+/// Boot the shipped shell headless on a `screen` of that many pixels and walk it: each step is
+/// `wait:<frames>`, `down:<button>`, `up:<button>`, `mouse:<x>,<y>,<buttons>` or `call:<name>,<args>`,
+/// at 60 frames a second. The final frame goes to `png_path`.
+pub fn gfx_shell(png_path: &Path, screen: [u32; 2], steps: &[String], wads: &[String]) -> Result<(), String> {
     use mercs2_engine::gfx_pass::render_to_rgba;
     use mercs2_engine::shell::Shell;
 
@@ -369,8 +536,18 @@ pub fn gfx_shell(png_path: &Path, steps: &[String], wads: &[String]) -> Result<(
         play_time: "13:33:33".into(),
         contract: "PirCon003".into(),
     }];
-    let mut shell = Shell::open(wads, saves)?;
+    let base = wads.last().ok_or("no WAD to boot the shell from")?;
+    let mut shell = Shell::open(wads, saves, base)?;
+    let screen_px = [screen[0] as f32, screen[1] as f32];
+    // No window here: a stand-in display with the common 4:3 and 16:9 modes and the screen's.
+    let modes = [(640, 480, 60), (800, 600, 60), (1024, 768, 60), (1280, 720, 60), (1280, 960, 60), (1600, 900, 60), (1920, 1080, 60), (screen[0], screen[1], 60)];
+    let device = mercs2_engine::options::Device { vendor: 0, device: 0, aa_levels: 4, high_shaders: true };
+    println!("stand-in display: modes {modes:?}, adapter {device:?}");
+    shell.attach_display(&modes, device)?;
     let mut frame = 0u32;
+    let mut pointer = mercs2_engine::flash::Pointer::default();
+    // The stand-in pad's inputs held each frame, by joystick vocabulary index.
+    let mut held: Vec<u8> = Vec::new();
     for step in steps {
         let (verb, value) = step.split_once(':').ok_or_else(|| format!("step {step:?} is not verb:value"))?;
         let number = || value.parse::<i64>().map_err(|e| format!("step {step:?}: {e}"));
@@ -380,6 +557,14 @@ pub fn gfx_shell(png_path: &Path, steps: &[String], wads: &[String]) -> Result<(
                 shell.button(number()?, verb == "down")?;
                 1
             }
+            // `mouse:<x>,<y>,<buttons>`: the pointer across the viewport, 0..1 each way.
+            "mouse" => {
+                let parts: Vec<&str> = value.split(',').collect();
+                let [x, y, b] = parts[..] else { return Err(format!("step {step:?} is not mouse:x,y,buttons")) };
+                let f = |s: &str| s.parse::<f32>().map_err(|e| format!("step {step:?}: {e}"));
+                pointer = mercs2_engine::flash::Pointer { at: [f(x)?, f(y)?], buttons: b.parse().map_err(|e| format!("step {step:?}: {e}"))? };
+                1
+            }
             "call" => {
                 let mut parts = value.split(',');
                 let name = parts.next().ok_or("a call with no name")?;
@@ -387,25 +572,60 @@ pub fn gfx_shell(png_path: &Path, steps: &[String], wads: &[String]) -> Result<(
                 println!("{value} -> {}", shell.call_movies(name, &args)?);
                 1
             }
+            // `key:<id>`: a key or mouse button down by its id in retail's key table (hex with `0x`).
+            "key" => {
+                let id = match value.strip_prefix("0x") {
+                    Some(hex) => u16::from_str_radix(hex, 16),
+                    None => value.parse::<u16>(),
+                }
+                .map_err(|e| format!("step {step:?}: {e}"))?;
+                println!("key {id:#x} taken by a rebind: {}", shell.key_down(id)?);
+                1
+            }
+            // `pad:<vendor>,<product>,<name>`: a stand-in pad attached (ids in hex), its section `<name>`.
+            "pad" => {
+                let mut parts = value.splitn(3, ',');
+                let hex = |s: Option<&str>| u16::from_str_radix(s.ok_or(format!("step {step:?} is not pad:vendor,product,name"))?, 16).map_err(|e| format!("step {step:?}: {e}"));
+                let pad = mercs2_engine::controls::Pad { vendor: hex(parts.next())?, product: hex(parts.next())?, name: parts.next().ok_or(format!("step {step:?} has no name"))?.to_string() };
+                shell.attach_pads(&[pad])?;
+                0
+            }
+            // `held:<input>,...`: the stand-in pad's inputs held from now on (empty for none).
+            "held" => {
+                held = value.split(',').filter(|s| !s.is_empty()).map(|s| s.parse::<u8>().map_err(|e| format!("step {step:?}: {e}"))).collect::<Result<_, _>>()?;
+                1
+            }
+            // `get:<path>`: print a value of every live movie, read by dotted path from its root.
+            "get" => {
+                println!("{value} = {}", shell.get_movies(value)?);
+                0
+            }
             other => return Err(format!("no step verb {other:?}")),
         };
         for _ in 0..frames {
             frame += 1;
-            if let Some(exit) = shell.tick(DT).map_err(|e| format!("frame {frame}: {e}"))? {
+            shell.pad_frame(&held)?;
+            if let Some(exit) = shell.tick(DT, pointer, screen_px).map_err(|e| format!("frame {frame}: {e}"))? {
                 println!("frame {frame}: the shell exits: {exit:?}");
                 return Ok(());
             }
         }
         println!("frame {frame}: after {step}: {:?}", shell.describe());
     }
-    let (draws, images) = shell.draws()?;
-    println!("{} movies on screen", draws.len());
-    let Some(first) = draws.first() else {
+    // What building the draw lists costs a frame, as the game builds them every frame.
+    const TIMED: u32 = 30;
+    let started = std::time::Instant::now();
+    for _ in 0..TIMED {
+        shell.draws()?;
+    }
+    println!("building the draw lists: {:.3} ms/frame", started.elapsed().as_secs_f64() * 1000.0 / TIMED as f64);
+    let front = shell.draws()?;
+    println!("{} Flash and {} Bink movies on screen", front.flash.len(), front.movies.len());
+    if front.layers.is_empty() {
         return Err("no movie on screen".into());
-    };
-    let size = [(first.def.stage[1] - first.def.stage[0]) as u32 / 20, (first.def.stage[3] - first.def.stage[2]) as u32 / 20];
-    let rgba = render_to_rgba(&draws, images, size, [0.0, 0.0, 0.0, 1.0])?;
-    write_png(png_path, size, &rgba)
+    }
+    let rgba = render_to_rgba(&front.flash, front.images, &front.movies, &front.layers, screen, [0.0, 0.0, 0.0, 1.0])?;
+    write_png(png_path, screen, &rgba)
 }
 
 pub fn gfx_golden(dir: &Path, md_out: &Path, json_out: &Path) -> Result<(), String> {
