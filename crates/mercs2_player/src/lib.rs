@@ -142,8 +142,7 @@ pub struct PlayerWorld {
     /// [`take_camera_teleports`](Self::take_camera_teleports).
     ///
     /// This is the **only** `Player` verb that still queues an intent rather than mutating state — and
-    /// unlike the 24 verbs it replaces, it has a public accessor and a real consumer. Follows the
-    /// existing `take_hero_teleport` convention on the script host.
+    /// unlike the 24 verbs it replaces, it has a public accessor and a real consumer.
     camera_teleports: Vec<u64>,
 }
 
