@@ -65,7 +65,7 @@ pub fn weapon_firing_system_impacts(
     let mut launches: Vec<Entity> = Vec::new(); // homing weapons that fired this tick
     let mut shots_fired = 0u32;
 
-    for (we, w) in world.query::<&mut RuntimeWeapon>().iter() {
+    for (we, w) in world.query::<(Entity, &mut RuntimeWeapon)>().iter() {
         // --- reload in progress ---
         if w.reloading {
             w.reload_timer -= dt;
