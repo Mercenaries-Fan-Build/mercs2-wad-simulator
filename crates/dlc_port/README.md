@@ -1,8 +1,17 @@
 # dlc_port
 
-All-Rust porter that turns an Xbox 360 Mercenaries 2 DLC package (RAR or STFS/DOH) into a PC patch WAD
-and its streams. `shipments/blow-it-up-again/` builds on its output: point `--output` at that
-Shipment's `src/level/dlc01.wad`, then `qm build` places it.
+All-Rust porter that turns a Mercenaries 2 DLC package (PS3 `.pkg`, or Xbox 360 RAR or STFS/DOH) into PC
+form. `--shipment <folder>` writes it into a Shipment as components: one file per asset rung under
+`src/level`, the streams under `src/level/Audios`, and one generated `level_asset` row per asset after the
+manifest's `contributions:` line. `qm build` compiles those, so `shipments/blow-it-up-again/` holds no WAD.
+
+```
+dlc_port --package <ps3.pkg> --java <java> --unluac <unluac.jar> --vz-wad <game>/data/vz.wad --shipment <folder>
+```
+
+The PS3 package needs no other input: every one of its 7,770 chunks converts. `--xbox-doh-oracle <xbox package>`
+names a further source, whose chain replaces any chunk PS3 cannot convert. A chunk is carried when the base lacks
+its (name, type), or when its type is one a level overrides and its bytes are not PC's (`src/components.rs`).
 
 ## What it is
 
