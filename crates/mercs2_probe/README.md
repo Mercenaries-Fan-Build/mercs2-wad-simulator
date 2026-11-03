@@ -55,6 +55,29 @@ set, exactly as matched in `main()`:
 | `dump-hibernation <capture>` | the hibernation grid (`0x0179C7B0`): viewers, every row (via each SceneObject's block index), awake count; its retail test checks `mercs2_core::hibernation` against every row |
 | `dump-spawnlists <capture>` | the runtime unit lists the game built from `PopulationList` data (table `0x016E51F0`): units and weights in stored order |
 
+Sixteen standalone tools are subcommands too. They are matched in `main()` before `vz.wad` is
+resolved: each parses the arguments after its name itself and opens its own inputs, so `--wad`
+does not apply to them. Their full usage is in each module's header (`src/<name>.rs`).
+
+| subcommand | what it does |
+|---|---|
+| `block-neuter <block.bin> <out.bin>` | collapses the drawing groups of every UCFX container in a raw decompressed block (positions to the origin, `PRMT` draw counts to 0), byte-size preserving, each `CSUM` recomputed |
+| `lod-neuter <rung.ucfx> <out.ucfx> --name-hash 0xH` | empties every drawing group of a model's finer LOD rung |
+| `phy2-probe <container.ucfx>` | the collision shapes of a container's `PHY2` chunk and their extent |
+| `probe-group <block.bin> <ord>...` | per DECL64 drawing group: vertex/triangle counts, weights summing to 255, dominant bones, Y range |
+| `probe-mtrl <block.bin>` | the `MTRL` materials' diffuse textures and each `PRMG` group's material index |
+| `survey-frankenstein <block.bin>...` | every drawing group of each block with its counts, bounds and dominant bones |
+| `place-forge <in.bin> <out.bin> --template <sub> --name <n> --model 0x<h> --pos X,Y,Z ...` / `place-forge --list <block.bin> [--near X,Z] [--radius R]` | appends new SceneObject placements to a placement block and reads them back; `--list` prints the block's model placements |
+| `place-lift <in.bin> <out.bin> --key 0xKEY ... --dy <f32>` / `place-lift <in.bin> --list --key 0xKEY ...` | moves the Y of the `Transform` records of the given entity keys in place |
+| `c3-veg-forge --base-wad <vz.wad> --out <overlay.wad> ...` | appends a cluster veg model to the c3 cells around a point and writes them as an overlay WAD |
+| `jc2-blockrt [vz.wad]` | the worldentity block's entry-table round trip; writes the block to `../../output/block3185_original.bin` |
+| `jc2-script-probe [vz.wad\|block.bin] [name ...\|--summary]` | resident-script `INFO`/`DEPS`/`BINN` structure |
+| `jc2-template-mint [vz.wad]` | mints the JC2 vehicle template into the worldentity block; reads `../../output/mrx*_edited.luaq` and writes `../../output/jc2_block3185_minted.bin` |
+| `worldentity-probe [vz.wad] [0xHANDLE ...]` | the worldentity container's COMP groups and the component recipe of each handle |
+| `ragdoll-probe [--hashes] [--extract-fixture]` | Havok physics/ragdoll classes across every block of `vz.wad` (`MERCS2_GAME_DIR` / `VZ_WAD`, else `./.mercs2-local.toml`) |
+| `lua-vehicle-hashes [out.csv]` | vehicle names in the decompiled Lua corpora with their `pandemic_hash_m2`; reads `docs/mercs2-luacd/src` and `docs/mercs2-dlc-luacd/src` from the current directory and writes `docs/data/lua_vehicle_hashes.csv` there by default |
+| `shaderforge <list\|static-vs\|consts\|splice\|bundle\|disasm\|roles> <shader3.bin> ...` / `shaderforge asm <in.asm> <out.sho> [--target T]` / `shaderforge store-id <stem> [--low]` | `shader3.bin` inventory, CTAB constants, SM3 disassembly and assembly, the instancing splice, store record ids |
+
 `<capture>` is either a capture folder (`<build>/<state>/` with `process.dmp`, `SHA256SUMS.txt`,
 `capture.log`) or a `<yyyymmdd>_<label>.dmp` listed in a sibling `MANIFEST.md`. The `dump-*` commands
 refuse a dump whose bytes do not match the recorded sha256, a folder capture whose exe (`capture.log`
@@ -186,6 +209,12 @@ cargo run -p mercs2_probe -- gfx-golden output/gfx_movies \
 
 # explicit WAD
 cargo run -p mercs2_probe -- --wad D:/game/data/vz.wad comp-probe
+
+# standalone tools
+cargo run -p mercs2_probe -- phy2-probe <model_block.bin>
+cargo run -p mercs2_probe -- shaderforge asm magenta.asm magenta.sho --target ps_3_0
+cargo run -p mercs2_probe -- shaderforge store-id PgSkyFP          # 0xc91c0187, shader3.bin
+cargo run -p mercs2_probe -- shaderforge store-id PgSkyFP --low    # 0xa759fdb9, shader3Low.bin
 ```
 
 The dev bins take a **model name** (hashed with `pandemic_hash_m2`) or a `0xHASH`, positionally:
