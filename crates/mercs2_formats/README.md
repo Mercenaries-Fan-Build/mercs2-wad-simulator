@@ -25,7 +25,7 @@ rendering, no simulation and no I/O policy — just format code:
   `placement_build` (append a new world placement), `patch_wad` (serialize a PC `vz-patch.wad`),
   `save_write`, and the DLC-port readers `dlc_input` / `dlc_stfs`.
 
-Nineteen binaries and five examples in the crate drive those paths from the command line (see
+Three binaries and five examples in the crate drive those paths from the command line (see
 [Usage](#usage)).
 
 The crate's dependencies are `flate2`, `gltf` (the import readers), `loadprobe` (`load_ladder`), and
@@ -93,19 +93,20 @@ let _ = texture::parse_texture_container(&container)?;
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
-As tools — the crate's binaries are auto-discovered from `src/bin/`:
+As tools — the crate's binaries (`model_forge`, `inject_parts`, `inject_static`) are
+auto-discovered from `src/bin/`; the probes built on this crate are `mercs2_probe` subcommands:
 
 ```sh
 # dump the collision hulls in a model container's PHY2 chunk
-cargo run -p mercs2_formats --bin phy2_probe -- <model_block.bin>
+cargo run -p mercs2_probe -- phy2-probe <model_block.bin>
 
 # conform a novel rigid mesh into a real vehicle/static donor container
 cargo run -p mercs2_formats --bin inject_static -- --help
 
 # assemble SM3 text into a .sho blob, and name the store record a registered .sho lives under
-cargo run -p mercs2_formats --bin shaderforge -- asm magenta.asm magenta.sho --target ps_3_0
-cargo run -p mercs2_formats --bin shaderforge -- store-id PgSkyFP          # 0xc91c0187, shader3.bin
-cargo run -p mercs2_formats --bin shaderforge -- store-id PgSkyFP --low    # 0xa759fdb9, shader3Low.bin
+cargo run -p mercs2_probe -- shaderforge asm magenta.asm magenta.sho --target ps_3_0
+cargo run -p mercs2_probe -- shaderforge store-id PgSkyFP          # 0xc91c0187, shader3.bin
+cargo run -p mercs2_probe -- shaderforge store-id PgSkyFP --low    # 0xa759fdb9, shader3Low.bin
 ```
 
 ## Modules
