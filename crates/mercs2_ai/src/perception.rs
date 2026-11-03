@@ -26,13 +26,13 @@ pub fn update_perception(world: &mut World, relations: &RelationMatrix) {
     // Snapshot observers first (position, effective sight range, faction) so the target pass can borrow
     // PerceptionRecord mutably without aliasing the observer query.
     let observers: Vec<(Entity, mercs2_core::glam::Vec3, f32, u32)> = world
-        .query::<(&Perception, &Transform, &AiFaction)>()
+        .query::<(Entity, &Perception, &Transform, &AiFaction)>()
         .iter()
-        .map(|(e, (p, t, f))| (e, t.translation, p.range * p.unit_mult[0], f.0))
+        .map(|(e, p, t, f)| (e, t.translation, p.range * p.unit_mult[0], f.0))
         .collect();
 
-    for (te, (rec, tgt, stim, tf, tfac)) in world
-        .query::<(&mut PerceptionRecord, &Target, &Stimulus, &Transform, &AiFaction)>()
+    for (te, rec, tgt, stim, tf, tfac) in world
+        .query::<(Entity, &mut PerceptionRecord, &Target, &Stimulus, &Transform, &AiFaction)>()
         .iter()
     {
         *rec = PerceptionRecord::default();
