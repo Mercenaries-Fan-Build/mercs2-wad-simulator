@@ -56,6 +56,13 @@ impl AsetEntry {
     }
 }
 
+/// An asset's block per rung as ASET words: `([_P002 | _P003], _P001)`, `0xFFFF` for an absent rung.
+/// The engine stops at the first absent rung, so a rung past a gap is absent too.
+pub fn rung_chain(blocks: [Option<u32>; 4]) -> (u32, u32) {
+    let rung = |r: usize| if blocks[..=r].iter().all(Option::is_some) { blocks[r].map_or(0xFFFF, |b| b & 0xFFFF) } else { 0xFFFF };
+    ((rung(2) << 16) | rung(3), rung(1))
+}
+
 /// One block destined for a patch WAD.
 #[derive(Clone, Debug)]
 pub struct PatchBlock {
