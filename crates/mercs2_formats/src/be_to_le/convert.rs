@@ -190,6 +190,40 @@ pub fn convert_block(
             continue;
         }
 
+        if entry.type_hash == types::TYPE_HASH_MODEL && super::ps3_model::has_sspu(container) {
+            let flags = tables
+                .and_then(|t| t.textures.material_flags(entry.name_hash))
+                .ok_or_else(|| format!("Entry {ei} 0x{:08x}: a PS3 model needs its materials from the archive", entry.name_hash))?;
+            let converted = super::ps3_model::convert(container, flags, |rest| {
+                convert_container(rest, false, ei, entry.type_hash, report.as_deref_mut(), lua_tools, schemas, None)
+            })
+            .map_err(|e| format!("Entry {ei} 0x{:08x}: {e}", entry.name_hash))?;
+            converted_containers.push(converted);
+            kept.push(entry);
+            continue;
+        }
+
+        let fields = match entry.type_hash {
+            types::TYPE_HASH_FOLIAGE => Some(super::foliage::convert as fn(&[u8]) -> Result<Vec<u8>, String>),
+            types::TYPE_HASH_WATERMAP => Some(super::watermap::convert as fn(&[u8]) -> Result<Vec<u8>, String>),
+            types::TYPE_HASH_SOUNDBANK => Some(super::audio::convert_soundbank as fn(&[u8]) -> Result<Vec<u8>, String>),
+            types::TYPE_HASH_SOUNDDB => Some(super::audio::convert_sounddb as fn(&[u8]) -> Result<Vec<u8>, String>),
+            _ => None,
+        };
+        if let Some(convert) = fields.filter(|_| container.starts_with(b"XFCU")) {
+            let converted = convert(container).map_err(|e| format!("Entry {ei} 0x{:08x}: {e}", entry.name_hash))?;
+            converted_containers.push(converted);
+            kept.push(entry);
+            continue;
+        }
+
+        if entry.type_hash == crate::scrub::TYPE_HASH && super::ps3_model::has_sspu(container) {
+            let converted = super::ps3_scrub::convert(container).map_err(|e| format!("Entry {ei} 0x{:08x}: {e}", entry.name_hash))?;
+            converted_containers.push(converted);
+            kept.push(entry);
+            continue;
+        }
+
         let is_ecs = entry.type_hash == TYPE_HASH_ECS_NODE
             || entry.type_hash == TYPE_HASH_WORLD_ENTITY
             || entry.type_hash == TYPE_HASH_GUIDMAP;
@@ -416,7 +450,7 @@ fn convert_container(
         // list over-inflates it (9500 BE → 13472 vs PC's 11852). It was never gated in at
         // all, so its tiles kept the Xbox vertex format and their decoded positions fell
         // outside their own BNDS envelope.
-        apply_terrainmesh_reencode(&mut out, &descriptors, data_area_off, desc_table_end, false)?;
+        apply_terrainmesh_reencode(&mut out, &descriptors, data_area_off, desc_table_end, true)?;
     } else if is_be && type_hash == types::TYPE_HASH_MODEL {
         // Skinned character MODEL: the decl translation widened its DEC3N normals/tangents
         // to FLOAT16_4 (stride 32→40) but the data/info stayed 32, so the decl over-runs the
@@ -738,8 +772,10 @@ fn convert_generic_bodies(
     let is_texture = type_hash == types::TYPE_HASH_TEXTURE;
 
     let mut ctx = ContainerCtx::None;
+    let mut group = ChunkTag::Unknown(*b"????");
     for desc in descriptors {
         if desc.row_u0 == 0xFFFFFFFF {
+            group = desc.tag;
             // Group sentinel: open a container context (mirrors _classify_contexts).
             ctx = match desc.tag {
                 ChunkTag::Strm | ChunkTag::Geom => ContainerCtx::Strm,
@@ -761,6 +797,9 @@ fn convert_generic_bodies(
                     ChunkTag::Syek | ChunkTag::Srts => {
                         // Native BE on all platforms — no swap
                     }
+                    ChunkTag::Strs => {
+                        convert_strs_inplace(&mut data_area[body_local_start..body_local_end], type_hash)?;
+                    }
                     tag if is_string_tag(tag) => {
                         // String data — no swap
                     }
@@ -772,7 +811,7 @@ fn convert_generic_bodies(
                         // walk_records bails to the count-safe u16 swap on any body
                         // that isn't a clean 16-byte multiple.
                         let body = &mut data_area[body_local_start..body_local_end];
-                        if !walk_records(body, &PRMT_WALKER) {
+                        if !walk_records(body, prmt_walker(type_hash)) {
                             swap_u16_array(body);
                         }
                     }
@@ -881,14 +920,19 @@ fn convert_generic_bodies(
                     ChunkTag::InfoUpper if is_texture => {
                         convert_texture_info(&mut data_area[body_local_start..body_local_end]);
                     }
+                    ChunkTag::InfoUpper
+                        if type_hash == types::TYPE_HASH_TERRAIN_MESH && group == ChunkTag::Prmg =>
+                    {
+                        convert_terrain_draw_group_info(&mut data_area[body_local_start..body_local_end])?;
+                    }
                     ChunkTag::InfoUpper if type_hash == types::TYPE_HASH_MODEL => {
                         // Model INFO. Buffer at entry = RAW big-endian body. The generic
                         // u32 sweep is byte-exact for the 4B scalar and 60B all-f32 shapes,
                         // but WRONG for two shapes whose tails are u16 fields — a blanket
                         // 4-byte reversal TRANSPOSES each u16 pair:
-                        //   72B model-bbox header : u32/f32 fields [0:68] + a trailing
-                        //     [u16][u16] pair [68:72] (generic gave BE 0x0000FFFF ->
-                        //     0xFFFF0000; retail keeps the two LE u16).
+                        //   72B model-bbox header : u32/f32 fields [0:64] + four trailing
+                        //     u16 [64:72] (generic gave BE 0x0000FFFF -> 0xFFFF0000;
+                        //     retail keeps each LE u16 in place).
                         //   56B PRMG/sub-mesh record : 6×u32 header [0:24] (flags, 2 hashes,
                         //     count) + a u16 (value,count) tail [24:56] (generic transposes
                         //     each pair).
@@ -903,8 +947,8 @@ fn convert_generic_bodies(
                         let body = &mut data_area[body_local_start..body_local_end];
                         match body.len() {
                             72 => {
-                                swap_u32_array(&mut body[0..68]);
-                                swap_u16_array(&mut body[68..72]);
+                                swap_u32_array(&mut body[0..64]);
+                                swap_u16_array(&mut body[64..72]);
                             }
                             56 => {
                                 swap_u32_array(&mut body[0..24]);
@@ -1096,6 +1140,9 @@ fn convert_generic_bodies(
                         swap_u16_array(&mut data_area[body_local_start..split]);
                         swap_u32_array(&mut data_area[split..body_local_end]);
                     }
+                    ChunkTag::Data if type_hash == types::TYPE_HASH_LINEREGION => {
+                        convert_lineregion_data(&mut data_area[body_local_start..body_local_end])?;
+                    }
                     ChunkTag::Data if type_hash == TYPE_HASH_CFX_PACK => {
                         // CFX data: u32 prefix + zlib stream (copy deflate verbatim).
                         convert_cfx_inplace(&mut data_area[body_local_start..body_local_end]);
@@ -1145,7 +1192,26 @@ fn convert_generic_bodies(
 
 /// Tags whose bodies are string data (no swap needed).
 fn is_string_tag(tag: ChunkTag) -> bool {
-    matches!(tag, ChunkTag::Name | ChunkTag::Strs)
+    matches!(tag, ChunkTag::Name)
+}
+
+/// A `stringdb`'s `STRS`: a u32 count of UTF-16 code units, then the heap of NUL-terminated
+/// UTF-16 strings (`crate::stringdb`). A console table is big-endian in both, the heap included,
+/// and PC reads the heap as UTF-16LE, so each code unit is swapped.
+fn convert_strs_inplace(body: &mut [u8], type_hash: u32) -> Result<(), String> {
+    if type_hash != types::TYPE_HASH_STRINGDB {
+        return Err(format!(
+            "STRS in a {} chunk: only a stringdb's STRS is known",
+            types::type_name_from_hash(type_hash)
+        ));
+    }
+    let units = body.get(..4).map(|w| u32::from_be_bytes([w[0], w[1], w[2], w[3]]) as usize);
+    if units.and_then(|u| u.checked_mul(2)).map(|b| 4 + b) != Some(body.len()) {
+        return Err(format!("STRS: a {}-byte body for a heap of {units:?} code units", body.len()));
+    }
+    swap_u32(body, 0);
+    swap_u16_array(&mut body[4..]);
+    Ok(())
 }
 
 // --- Byte swap primitives ---
@@ -1292,6 +1358,34 @@ fn walk_records(data: &mut [u8], w: &RecordWalker) -> bool {
 /// from PC by *value* (the IBUF strip->list re-encode), so this fixes the field
 /// FORMAT (the u32 transposition) but `size_eq_diff` may not reach 0 for meshes
 /// whose index buffer PC re-encoded.
+/// PRMT of a terrain chunk: 20-byte draw records, `docs/terrain_cell_format.md`:
+///   u32 vertex shader, u32 material, u32 start_index, u16 prim_count, u16 min, u16 max, u16.
+const TERRAIN_PRMT_WALKER: RecordWalker = RecordWalker {
+    fields: &[
+        FieldSpec { width: 4, kind: FieldKind::U32 },
+        FieldSpec { width: 4, kind: FieldKind::U32 },
+        FieldSpec { width: 4, kind: FieldKind::U32 },
+        FieldSpec { width: 2, kind: FieldKind::U16 },
+        FieldSpec { width: 2, kind: FieldKind::U16 },
+        FieldSpec { width: 2, kind: FieldKind::U16 },
+        FieldSpec { width: 2, kind: FieldKind::U16 },
+    ],
+    stride: TERRAIN_DRAW,
+    count: CountSource::BodyLenDivStride,
+};
+
+/// Bytes of a terrain draw record.
+const TERRAIN_DRAW: usize = 20;
+
+/// The PRMT walker of a chunk of `type_hash`: a body in 16-byte multiples can hold 20-byte records.
+fn prmt_walker(type_hash: u32) -> &'static RecordWalker {
+    if type_hash == types::TYPE_HASH_TERRAIN_MESH || type_hash == types::TYPE_HASH_LOWRES_TERRAIN {
+        &TERRAIN_PRMT_WALKER
+    } else {
+        &PRMT_WALKER
+    }
+}
+
 const PRMT_WALKER: RecordWalker = RecordWalker {
     fields: &[
         FieldSpec { width: 4, kind: FieldKind::U32 },
@@ -1929,15 +2023,17 @@ fn f32_to_f16_bits(f: f32) -> u16 {
 }
 
 /// Decode an Xbox-360 DEC3N-packed normal/tangent (4 BE bytes, read here as a
-/// big-endian u32) into a PC `FLOAT16_4` (4 little-endian half-floats, W = 1.0).
+/// big-endian u32) into a PC `FLOAT16_4` (4 little-endian half-floats; a normal's W
+/// is 1.0, a tangent's W its handedness).
 ///
 /// **Bit layout (pinned empirically from 24,282 base-terrainmesh NORMAL pairs;
 /// mean angular error 0.05°, max 0.12° — see the implementation doc):**
 ///   * NORMAL (HEND3N, 11-11-10): X=sx(bits[0:11])/1023, Y=sx(bits[11:22])/1023,
 ///     Z=sx(bits[22:32])/511.
 ///   * TANGENT/BINORMAL (DEC3N, 10-10-10-2): X=sx(bits[0:10])/511,
-///     Y=sx(bits[10:20])/511, Z=sx(bits[20:30])/511 (top 2 W bits ignored).
-///   * W = 1.0
+///     Y=sx(bits[10:20])/511, Z=sx(bits[20:30])/511, W = −1 when sx(bits[30:32]) < 0,
+///     else +1 (the handedness, ±1 as on retail PC terrain).
+///   * A NORMAL's W = 1.0
 /// The two share a stream-0 4-byte slot but use **different bit splits** — NORMAL is
 /// Xbox HEND3N (11-11-10), TANGENT/BINORMAL is D3DDECLTYPE_DEC3N (10-10-10-2). Using
 /// the normal's 11-11-10 split for a tangent garbles it (~125° error → broken
@@ -1970,11 +2066,14 @@ fn dec3n_to_half4_le(u: u32, ten_ten_ten: bool) -> [u8; 8] {
     } else {
         (0.0, 0.0, 0.0)
     };
+    // A tangent's handedness is the sign of its top two bits, read as a signed 2-bit value: 0 and 1 are +1, -1 is
+    // -1. On DLC01 terrain this gives every vertex the w its PS3 copy carries (`mercs2_probe terrain-vertex-compare`).
+    let w = if ten_ten_ten && sx(u >> 30, 2) < 0 { -1.0 } else { 1.0 };
     let mut out = [0u8; 8];
     out[0..2].copy_from_slice(&f32_to_f16_bits(nx).to_le_bytes());
     out[2..4].copy_from_slice(&f32_to_f16_bits(ny).to_le_bytes());
     out[4..6].copy_from_slice(&f32_to_f16_bits(nz).to_le_bytes());
-    out[6..8].copy_from_slice(&f32_to_f16_bits(1.0).to_le_bytes());
+    out[6..8].copy_from_slice(&f32_to_f16_bits(w).to_le_bytes());
     out
 }
 
@@ -2128,65 +2227,6 @@ fn rebuild_terrain_vertices(
     out
 }
 
-/// De-strip an Xbox triangle strip (u16 indices, `0xFFFF` primitive-restart) into
-/// a flat triangle list. Geometry-correct (every non-degenerate triangle of the
-/// strip is emitted with consistent winding); NOT byte-exact vs PC, which uses a
-/// single degenerate-stitched strip with a vertex-cache re-index (see the doc).
-///
-/// `src` is the generic-swapped (u16-swap-corrected) Xbox index body. Returns the
-/// PC triangle-list index bytes (LE u16).
-#[cfg(test)]
-fn destrip_indices(src: &[u8]) -> Vec<u8> {
-    destrip_indices_with_map(src).0
-}
-
-/// Like `destrip_indices`, but also returns a position map `posmap` of length
-/// `n_strip_indices + 1`, where `posmap[p]` = the number of LIST indices emitted
-/// by the time strip-index position `p` is reached. Used to remap PRMT draw-call
-/// ranges `{start_index, index_count}` from strip-index space into the new
-/// triangle-list index space: `new_start = posmap[start]`,
-/// `new_count = posmap[start + count] - posmap[start]`.
-///
-/// Emits byte-identical output to the per-run `destrip_indices`: when the current
-/// run reaches length L (after pushing the L-th vertex), it emits the (L-3)-th
-/// triangle with winding `(L-3) % 2`, exactly matching the per-run flush.
-fn destrip_indices_with_map(src: &[u8]) -> (Vec<u8>, Vec<u32>) {
-    let n = src.len() / 2;
-    let idx: Vec<u16> = (0..n)
-        .map(|i| u16::from_le_bytes([src[i * 2], src[i * 2 + 1]]))
-        .collect();
-    let mut out: Vec<u16> = Vec::with_capacity(n * 3);
-    let mut posmap: Vec<u32> = vec![0u32; n + 1];
-    let mut run: Vec<u16> = Vec::new();
-    for p in 0..n {
-        posmap[p] = out.len() as u32;
-        let x = idx[p];
-        if x == 0xffff {
-            run.clear();
-        } else {
-            run.push(x);
-            if run.len() >= 3 {
-                let l = run.len();
-                let (a, b, c) = (run[l - 3], run[l - 2], run[l - 1]);
-                if a != b && b != c && a != c {
-                    let k = l - 3;
-                    if k % 2 == 0 {
-                        out.extend_from_slice(&[a, b, c]);
-                    } else {
-                        out.extend_from_slice(&[a, c, b]);
-                    }
-                }
-            }
-        }
-    }
-    posmap[n] = out.len() as u32;
-    let mut bytes = Vec::with_capacity(out.len() * 2);
-    for x in out {
-        bytes.extend_from_slice(&x.to_le_bytes());
-    }
-    (bytes, posmap)
-}
-
 /// Convert an Xbox triangle strip (u16 indices, `0xFFFF` primitive-restart) into a
 /// SINGLE PC degenerate-stitched triangle strip (`D3DPT_TRIANGLESTRIP` — the form
 /// retail character models use), dropping the 0xFFFF markers. Adjacent strip
@@ -2238,6 +2278,108 @@ fn degen_stitch_with_map(src: &[u8]) -> (Vec<u8>, Vec<u32>) {
     (bytes, posmap)
 }
 
+/// One terrain group's strip and draws in PC form, from the little-endian Xbox ones.
+///
+/// PC draws each `PRMT` record as its own strip with no primitive restart
+/// (`docs/terrain_cell_format.md` §5.2), `[start, start + prim_count + 2)`. An Xbox draw's range holds
+/// `0xFFFF` restarts, so each is rebuilt on its own: a restart becomes degenerate triangles, padded so
+/// the next segment lands on an even position counted from the draw's start, which keeps its winding.
+/// A range two records share is emitted once. A record of no triangles stays as it is.
+fn terrain_strips(ibuf: &[u8], prmt: &[u8]) -> Result<(Vec<u8>, Vec<u8>), String> {
+    let idx: Vec<u16> = ibuf.chunks_exact(2).map(|b| u16::from_le_bytes([b[0], b[1]])).collect();
+    let (mut strip, mut draws) = (Vec::with_capacity(idx.len()), prmt.to_vec());
+    let mut placed: std::collections::HashMap<(usize, usize), (u32, u16)> = std::collections::HashMap::new();
+    for rec in draws.chunks_exact_mut(TERRAIN_DRAW) {
+        let start = u32::from_le_bytes([rec[8], rec[9], rec[10], rec[11]]) as usize;
+        let prims = u16::from_le_bytes([rec[12], rec[13]]) as usize;
+        if prims == 0 {
+            continue;
+        }
+        let (new_start, new_prims) = match placed.get(&(start, prims)) {
+            Some(p) => *p,
+            None => {
+                let range = idx.get(start..start + prims + 2).ok_or_else(|| {
+                    format!("a terrain draw of {prims} triangles at {start} runs past a strip of {}", idx.len())
+                })?;
+                let at = strip.len();
+                for (i, seg) in range.split(|x| *x == 0xFFFF).filter(|s| !s.is_empty()).enumerate() {
+                    if i > 0 {
+                        let last = *strip.last().ok_or("a terrain segment follows nothing")?;
+                        let odd = (strip.len() - at) % 2 == 1;
+                        strip.push(last);
+                        if odd {
+                            strip.push(last);
+                        }
+                        strip.push(seg[0]);
+                    }
+                    strip.extend_from_slice(seg);
+                }
+                let count = u16::try_from((strip.len() - at).saturating_sub(2))
+                    .map_err(|_| format!("a terrain draw at {start} grew past 65,535 triangles"))?;
+                let p = (at as u32, count);
+                placed.insert((start, prims), p);
+                p
+            }
+        };
+        rec[8..12].copy_from_slice(&new_start.to_le_bytes());
+        rec[12..14].copy_from_slice(&new_prims.to_le_bytes());
+    }
+    Ok((strip.iter().flat_map(|x| x.to_le_bytes()).collect(), draws))
+}
+
+/// One terrain group's strip and draws in PC form, from the big-endian PS3 ones.
+///
+/// A PS3 `PRMT` record is `{u32 vertex shader, u32 material, u32 start, u32 index count, u16 min, u16 max}`
+/// over a triangle list. Each range becomes a strip of the same triangles at the same winding
+/// ([`crate::terrainmesh::stripify`]). A range two records share is emitted once. `vertex_shader` gives a
+/// record's PC key. PS3 has no field for a PC record's last u16, which `FUN_004AAAB0`'s draws do not read:
+/// it takes the distinct index count, Xbox's value on all 20,230 draws of the DLC's terrain.
+pub(super) fn terrain_strips_of_lists(
+    ibuf: &[u8],
+    prmt: &[u8],
+    vertex_shader: impl Fn(u32) -> u32,
+) -> Result<(Vec<u8>, Vec<u8>), String> {
+    if prmt.len() % TERRAIN_DRAW != 0 {
+        return Err(format!("a terrain PRMT of {} bytes is not {TERRAIN_DRAW}-byte records", prmt.len()));
+    }
+    let idx: Vec<u16> = ibuf.chunks_exact(2).map(|b| u16::from_be_bytes([b[0], b[1]])).collect();
+    let (mut strip, mut draws) = (Vec::with_capacity(idx.len()), Vec::with_capacity(prmt.len()));
+    let mut placed: std::collections::HashMap<(usize, usize), (u32, u16)> = std::collections::HashMap::new();
+    for rec in prmt.chunks_exact(TERRAIN_DRAW) {
+        let word = |o: usize| u32::from_be_bytes([rec[o], rec[o + 1], rec[o + 2], rec[o + 3]]);
+        let (start, count) = (word(8) as usize, word(12) as usize);
+        let list = idx
+            .get(start..start + count)
+            .filter(|_| count % 3 == 0)
+            .ok_or_else(|| format!("a terrain draw of {count} indices at {start} is no list in {} indices", idx.len()))?;
+        let (at, prims) = match placed.get(&(start, count)) {
+            Some(p) => *p,
+            None => {
+                let tris: Vec<[u16; 3]> = list
+                    .chunks_exact(3)
+                    .map(|t| [t[0], t[1], t[2]])
+                    .filter(|t| t[0] != t[1] && t[1] != t[2] && t[0] != t[2])
+                    .collect();
+                let run = crate::terrainmesh::stripify(&tris)?;
+                let at = strip.len() as u32;
+                let prims = u16::try_from(run.len().saturating_sub(2))
+                    .map_err(|_| format!("a terrain draw at {start} grew past 65,535 triangles"))?;
+                strip.extend_from_slice(&run);
+                placed.insert((start, count), (at, prims));
+                (at, prims)
+            }
+        };
+        let distinct = list.iter().collect::<std::collections::HashSet<_>>().len() as u16;
+        draws.extend_from_slice(&vertex_shader(word(0)).to_le_bytes());
+        draws.extend_from_slice(&word(4).to_le_bytes());
+        draws.extend_from_slice(&at.to_le_bytes());
+        for field in [prims, *list.iter().min().unwrap_or(&0), *list.iter().max().unwrap_or(&0), distinct] {
+            draws.extend_from_slice(&field.to_le_bytes());
+        }
+    }
+    Ok((strip.iter().flat_map(|x| x.to_le_bytes()).collect(), draws))
+}
+
 /// Terrainmesh (`0x7C569307`) re-encode pass. Runs LAST (after the generic body
 /// sweep, `apply_decl_translate`, and `apply_strm_vertex_fix`), gated on the
 /// terrainmesh type_hash. Rebuilds the container's data area with PC-format chunk
@@ -2255,10 +2397,10 @@ fn apply_terrainmesh_reencode(
     descriptors: &[Descriptor],
     data_area_off: usize,
     desc_table_end: usize,
-    // true = terrainmesh (also de-strip IBUF indices + re-encode MTRL); false = a
-    // skinned character MODEL, which needs ONLY the STRM vertex widening + info-stride
+    // true = a terrain kind, whose every 20-byte PRMT draw is its own strip (`terrain_strips`);
+    // false = a skinned character MODEL, which needs ONLY the STRM vertex widening + info-stride
     // rewrite (its IBUF is already a list, and its MTRL is already correct).
-    terrainmesh: bool,
+    terrain_draws: bool,
 ) -> Result<(), String> {
     let data_start = if data_area_off > 0 { data_area_off } else { desc_table_end };
     if data_start > out.len() {
@@ -2375,9 +2517,8 @@ fn apply_terrainmesh_reencode(
         } else if *gtag == ChunkTag::Ibuf {
             // Both terrainmesh AND character-model index buffers are Xbox triangle
             // strips with 0xFFFF primitive-restart, which D3D9 cannot parse (it reads
-            // 0xFFFF as a literal vertex index -> exploded mesh). De-strip both to a
-            // triangle list; for models the paired PRMT draw-call ranges are remapped
-            // from strip-index space to list-index space below (see ibuf_posmaps).
+            // 0xFFFF as a literal vertex index -> exploded mesh). Both become strips with
+            // no restart; their PRMT draw-call ranges follow them below.
             let (Some(ii), Some(vi)) = (info_idx, data_idx) else { continue };
             plans.insert(vi, Plan::IbufData);
             plans.insert(ii, Plan::IbufInfoCount);
@@ -2426,16 +2567,13 @@ fn apply_terrainmesh_reencode(
                 }
                 new_bytes.insert(b.idx, info);
             }
+            // A terrain group's strip is rebuilt with its draws, below.
+            Some(Plan::IbufData) if terrain_draws => {}
             Some(Plan::IbufData) => {
-                // terrainmesh renders as a triangle LIST (D3DPT_TRIANGLELIST); character
-                // models render as a triangle STRIP (D3DPT_TRIANGLESTRIP, like retail
-                // base_v2's degenerate-stitched strips). De-strip accordingly: emitting a
-                // list for a model makes the engine read list data as a strip -> spikes.
-                let (out_idx, posmap) = if terrainmesh {
-                    destrip_indices_with_map(&b.bytes)
-                } else {
-                    degen_stitch_with_map(&b.bytes)
-                };
+                // Character models render as a triangle STRIP (D3DPT_TRIANGLESTRIP, like retail
+                // base_v2's degenerate-stitched strips): emitting a list for a model makes the
+                // engine read list data as a strip -> spikes.
+                let (out_idx, posmap) = degen_stitch_with_map(&b.bytes);
                 let count = (out_idx.len() / 2) as u32;
                 if let Some(&ii) = ibuf_info_of_data.get(&b.idx) {
                     ibuf_count_for_info.insert(ii, count);
@@ -2444,6 +2582,21 @@ fn apply_terrainmesh_reencode(
                 new_bytes.insert(b.idx, out_idx);
             }
             _ => {}
+        }
+    }
+    // Each terrain group's PRMT comes before its IBUF in row order.
+    if terrain_draws {
+        for (idx, d) in descriptors.iter().enumerate() {
+            if d.tag != ChunkTag::Prmt || d.row_u0 == 0xFFFF_FFFF {
+                continue;
+            }
+            let draws = bodies.iter().find(|b| b.idx == idx).ok_or("a terrain PRMT has no body")?;
+            let &vi = ibuf_info_of_data.keys().filter(|v| **v > idx).min().ok_or("a terrain PRMT has no IBUF after it")?;
+            let ibuf = bodies.iter().find(|b| b.idx == vi).ok_or("a terrain IBUF has no body")?;
+            let (strip, prmt) = terrain_strips(&ibuf.bytes, &draws.bytes)?;
+            ibuf_count_for_info.insert(ibuf_info_of_data[&vi], (strip.len() / 2) as u32);
+            new_bytes.insert(vi, strip);
+            new_bytes.insert(idx, prmt);
         }
     }
     // Patch IBUF info bodies with the new index count.
@@ -2459,11 +2612,10 @@ fn apply_terrainmesh_reencode(
         }
     }
 
-    // Remap PRMT draw-call records {start_index, index_count} from Xbox-strip index
-    // space into the de-stripped PC index space (a triangle list for terrainmesh, a
-    // degenerate-stitched strip for models — the posmap encodes whichever was emitted;
-    // for the strip the parity pad guarantees each range start lands on an even strip
-    // position so the sub-range draw resets winding correctly). Record layout (16 bytes):
+    // Remap a model's PRMT draw-call records {start_index, index_count} from Xbox-strip index
+    // space into the degenerate-stitched PC strip (the parity pad guarantees each range start
+    // lands on an even strip position so the sub-range draw resets winding correctly). A
+    // terrain group has no posmap: its draws are 20 bytes, rebuilt above. Record layout (16 bytes):
     //   u32 material_index, u32 start_index, u16 index_count, u16 base_vertex,
     //   u16 max_vertex_index, u16 vertex_span. start/count index into the paired
     //   IBUF; base/max/span are vertex-space (unchanged by the index reorder). Match
@@ -2662,6 +2814,53 @@ const MTRL_MAX_TEXTURES: usize = 10;
 const TERRAIN_INFO_MATERIALS: usize = 0x18;
 /// Bytes a terrainmesh's `MTRL` holds for each material after the records.
 const TERRAIN_MATERIAL_TABLE: usize = 256;
+
+/// Bytes of a terrain draw group's `INFO`.
+const TERRAIN_DRAW_GROUP_INFO: usize = 44;
+
+/// A terrain draw group's `INFO` (`docs/terrain_cell_format.md` §4.4): two u32 draw counts, then three
+/// pass groups of `{u32 draw_count, u16 first_draw, u16 terrain_end, u16 alt_draw_count, u16 index}`.
+/// A word swap transposes each u16 pair, and `FUN_004AAAB0` then draws past the group's records.
+fn convert_terrain_draw_group_info(body: &mut [u8]) -> Result<(), String> {
+    if body.len() != TERRAIN_DRAW_GROUP_INFO {
+        return Err(format!("a terrain draw group INFO of {} bytes, not {TERRAIN_DRAW_GROUP_INFO}", body.len()));
+    }
+    swap_u32_array(&mut body[..8]);
+    for tier in body[8..].chunks_exact_mut(12) {
+        swap_u32(tier, 0);
+        swap_u16_array(&mut tier[4..]);
+    }
+    Ok(())
+}
+
+/// Bytes of a `lineregion` `data` header, and of each of its points.
+const LINEREGION_HEADER: usize = 8;
+const LINEREGION_POINT: usize = 8;
+/// The one `lineregion` kind any shipped region holds (625 of 625 on PC).
+const LINEREGION_KIND_POLYGON: u16 = 2;
+
+/// A `lineregion`'s `data`: four u16s, then `count` points of `{f32 x, f32 z}`. The loader
+/// (`0x0045E8A0`, slot 4 of the lineregion vtable `0x00BAA8B0`) skips the u16 at +0, reads the count
+/// at +2 and a signed u16 at +4, skips +6, then the points. A word swap of the header trades the
+/// kind and the count, so every region reads as 2 points and no point is inside it. The kind is
+/// one the loader skips, not checks; another kind is refused because no shipped region has one to
+/// show its layout.
+fn convert_lineregion_data(body: &mut [u8]) -> Result<(), String> {
+    if body.len() < LINEREGION_HEADER {
+        return Err(format!("a lineregion data of {} bytes, shorter than its header", body.len()));
+    }
+    let kind = read_u16_be(body, 0);
+    let count = read_u16_be(body, 2) as usize;
+    if kind != LINEREGION_KIND_POLYGON {
+        return Err(format!("a lineregion of kind {kind}: only kind {LINEREGION_KIND_POLYGON} is known"));
+    }
+    if LINEREGION_HEADER + count * LINEREGION_POINT != body.len() {
+        return Err(format!("a lineregion data of {} bytes for {count} points", body.len()));
+    }
+    swap_u16_array(&mut body[..LINEREGION_HEADER]);
+    swap_u32_array(&mut body[LINEREGION_HEADER..]);
+    Ok(())
+}
 
 /// The material count in a big-endian terrainmesh `INFO` body.
 pub(super) fn terrain_material_count(info: &[u8]) -> Result<usize, String> {
@@ -2948,8 +3147,9 @@ fn walk_container_tags(container: &[u8], entry_idx: usize) -> Result<(), String>
 mod tests {
     use super::{
         convert_block, convert_cfx_inplace, convert_container, convert_chdr_body_inplace, convert_decl,
-        convert_efct_header_inplace, convert_info_body_inplace, convert_mtrl,
-        fix_embedded_havok_layoutrules, HAVOK_PACKFILE_MAGIC,
+        convert_efct_header_inplace, convert_info_body_inplace, convert_mtrl, convert_strs_inplace,
+        convert_lineregion_data, convert_terrain_draw_group_info,
+        fix_embedded_havok_layoutrules, types, HAVOK_PACKFILE_MAGIC,
     };
 
     // Build a synthetic BE MTRL body: [u32*26][u16 flags][u16 count][u32*count][u32*2 tail].
@@ -2992,6 +3192,58 @@ mod tests {
         // trailing u32 @ 108+count*4 survived as a u32
         let t = 108 + count as usize * 4;
         assert_eq!(u32::from_le_bytes([body[t], body[t + 1], body[t + 2], body[t + 3]]), 0xDEADBEEF);
+    }
+
+    #[test]
+    fn a_console_strs_heap_becomes_utf16le() {
+        // "Hi\0" + "\0": 4 code units, big-endian.
+        let mut body = 4u32.to_be_bytes().to_vec();
+        body.extend_from_slice(&[0, b'H', 0, b'i', 0, 0, 0, 0]);
+        convert_strs_inplace(&mut body, types::TYPE_HASH_STRINGDB).unwrap();
+        assert_eq!(&body[..4], &4u32.to_le_bytes());
+        assert_eq!(&body[4..], &[b'H', 0, b'i', 0, 0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn a_strs_whose_count_is_not_its_heap_or_not_of_a_stringdb_is_refused() {
+        let mut body = 5u32.to_be_bytes().to_vec();
+        body.extend_from_slice(&[0, b'H', 0, 0]);
+        assert!(convert_strs_inplace(&mut body.clone(), types::TYPE_HASH_STRINGDB).is_err());
+        body[3] = 2;
+        assert!(convert_strs_inplace(&mut body, types::TYPE_HASH_TEXTURE).is_err());
+    }
+
+    #[test]
+    fn a_terrain_draw_group_info_keeps_its_pass_group_u16s() {
+        let mut body = [3u32.to_be_bytes(), 1u32.to_be_bytes()].concat();
+        for (count, first, end, alt, index) in [(1u32, 0u16, 1u16, 1u16, 0u16), (1, 1, 2, 0, 1), (1, 2, 3, 0, 2)] {
+            body.extend_from_slice(&count.to_be_bytes());
+            for v in [first, end, alt, index] {
+                body.extend_from_slice(&v.to_be_bytes());
+            }
+        }
+        convert_terrain_draw_group_info(&mut body).unwrap();
+        assert_eq!(&body[..8], &[3, 0, 0, 0, 1, 0, 0, 0]);
+        assert_eq!(&body[20..32], &[1, 0, 0, 0, 1, 0, 2, 0, 0, 0, 1, 0], "tier 1: count, first 1, end 2, alt 0, index 1");
+        assert!(convert_terrain_draw_group_info(&mut body[..40]).is_err());
+    }
+
+    #[test]
+    fn a_lineregion_keeps_its_kind_and_point_count_apart() {
+        // Kind 2, 3 points, +4 = 0x0102, +6 = 0, then (x, z) per point.
+        let mut body = [2u16, 3, 0x0102, 0].iter().flat_map(|v| v.to_be_bytes()).collect::<Vec<u8>>();
+        for v in [1.5f32, -2.0, 300.25, 4.0, -5.5, 6.0] {
+            body.extend_from_slice(&v.to_be_bytes());
+        }
+        let mut be = body.clone();
+        convert_lineregion_data(&mut be).unwrap();
+        assert_eq!(&be[..8], &[2, 0, 3, 0, 2, 1, 0, 0], "kind 2, count 3, the +4 u16 in place");
+        assert_eq!(f32::from_le_bytes([be[16], be[17], be[18], be[19]]), 300.25);
+        assert_eq!(f32::from_le_bytes([be[28], be[29], be[30], be[31]]), 6.0);
+
+        assert!(convert_lineregion_data(&mut body.clone()[..24]).is_err(), "a body short of its points");
+        body[1] = 3;
+        assert!(convert_lineregion_data(&mut body).is_err(), "a kind no shipped region has");
     }
 
     #[test]
@@ -3585,39 +3837,20 @@ mod tests {
         assert!(wang > 30.0, "11-11-10 should garble this tangent, got {wang}°");
     }
 
+    /// A tangent's top two bits, as a signed 2-bit value, give its w: negative is −1, 0 and 1 are +1. A normal's w
+    /// is 1.0 whatever its top bits hold.
     #[test]
-    fn destrip_simple_strip() {
-        // Strip 0,1,2,3 | 4,5,6 with a 0xFFFF restart -> two runs.
-        // Run1 (4 verts) = 2 tris: (0,1,2),(1,3,2). Run2 (3 verts) = 1 tri (4,5,6).
-        let idx: [u16; 8] = [0, 1, 2, 3, 0xffff, 4, 5, 6];
-        let mut src = Vec::new();
-        for x in idx {
-            src.extend_from_slice(&x.to_le_bytes());
-        }
-        let out = super::destrip_indices(&src);
-        let tris: Vec<u16> = out
-            .chunks_exact(2)
-            .map(|c| u16::from_le_bytes([c[0], c[1]]))
-            .collect();
-        assert_eq!(tris, vec![0, 1, 2, 1, 3, 2, 4, 5, 6]);
-    }
-
-    #[test]
-    fn destrip_drops_degenerates() {
-        // A strip with a repeated index produces a degenerate triangle that must
-        // be dropped (PC contains no zero-area triangles in a list).
-        let idx: [u16; 5] = [0, 1, 1, 2, 3];
-        let mut src = Vec::new();
-        for x in idx {
-            src.extend_from_slice(&x.to_le_bytes());
-        }
-        let out = super::destrip_indices(&src);
-        let tris: Vec<u16> = out
-            .chunks_exact(2)
-            .map(|c| u16::from_le_bytes([c[0], c[1]]))
-            .collect();
-        // k=0:(0,1,1) degen drop; k=1:(1,1,2) degen drop; k=2:(1,2,3) even-> keep order.
-        assert_eq!(tris, vec![1, 2, 3]);
+    fn a_tangents_top_bits_are_its_handedness() {
+        let w = |u: u32, tangent: bool| {
+            let h = super::dec3n_to_half4_le(u, tangent);
+            half_to_f32(u16::from_le_bytes([h[6], h[7]]))
+        };
+        let xyz = 0x0030_0a25u32 & 0x3fff_ffff;
+        assert_eq!(w(xyz | 0xc000_0000, true), -1.0, "top bits 11");
+        assert_eq!(w(xyz | 0x8000_0000, true), -1.0, "top bits 10");
+        assert_eq!(w(xyz | 0x4000_0000, true), 1.0, "top bits 01");
+        assert_eq!(w(xyz, true), 1.0, "top bits 00");
+        assert_eq!(w(xyz | 0xc000_0000, false), 1.0, "a normal");
     }
 
     #[test]
@@ -3640,6 +3873,137 @@ mod tests {
         assert_eq!(u16::from_le_bytes([out[8], out[9]]), 0x0203);
         assert_eq!(u16::from_le_bytes([out[10], out[11]]), 0x0405);
         assert_eq!(u16::from_le_bytes([out[14], out[15]]), 0x0809);
+    }
+
+    /// A little-endian 20-byte terrain draw.
+    fn terrain_draw(start: u32, prims: u16) -> Vec<u8> {
+        let mut r = vec![0u8; 20];
+        r[8..12].copy_from_slice(&start.to_le_bytes());
+        r[12..14].copy_from_slice(&prims.to_le_bytes());
+        r
+    }
+
+    fn strip_bytes(idx: &[u16]) -> Vec<u8> {
+        idx.iter().flat_map(|x| x.to_le_bytes()).collect()
+    }
+
+    /// The triangles of a strip range with their winding, degenerates dropped, each rotated so its
+    /// lowest index leads, the way a strip's alternating order is read.
+    fn wound(strip: &[u16]) -> Vec<[u16; 3]> {
+        strip
+            .windows(3)
+            .enumerate()
+            .filter(|(_, t)| t[0] != t[1] && t[1] != t[2] && t[0] != t[2])
+            .map(|(i, t)| {
+                let t = if i % 2 == 0 { [t[0], t[1], t[2]] } else { [t[1], t[0], t[2]] };
+                let at = (0..3).min_by_key(|&k| t[k]).expect("three");
+                [t[at], t[(at + 1) % 3], t[(at + 2) % 3]]
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_terrain_draw_swaps_as_twenty_bytes_whole_words() {
+        let mut be = vec![0u8; 80];
+        be[8..12].copy_from_slice(&10u32.to_be_bytes());
+        be[28..32].copy_from_slice(&0x025Eu32.to_be_bytes());
+        // Four records are 80 bytes, a multiple of the model's 16.
+        assert!(super::walk_records(&mut be, super::prmt_walker(crate::types::TYPE_HASH_TERRAIN_MESH)));
+        assert_eq!(u32::from_le_bytes([be[8], be[9], be[10], be[11]]), 10);
+        assert_eq!(u32::from_le_bytes([be[28], be[29], be[30], be[31]]), 0x025E);
+    }
+
+    #[test]
+    fn a_terrain_draw_keeps_its_triangles_and_winding_across_a_restart() {
+        // Two segments of a draw, the first of an odd length, then a second draw of its own.
+        let source = [0u16, 1, 2, 3, 4, 0xFFFF, 5, 6, 7, 8, 9, 10, 11];
+        let draws = [terrain_draw(0, 8), terrain_draw(10, 1)].concat();
+        let (strip, prmt) = super::terrain_strips(&strip_bytes(&source), &draws).unwrap();
+        let idx: Vec<u16> = strip.chunks_exact(2).map(|b| u16::from_le_bytes([b[0], b[1]])).collect();
+        assert!(!idx.contains(&0xFFFF), "PC has no restart");
+        let read = |r: usize| {
+            let at = r * 20;
+            let start = u32::from_le_bytes([prmt[at + 8], prmt[at + 9], prmt[at + 10], prmt[at + 11]]) as usize;
+            let prims = u16::from_le_bytes([prmt[at + 12], prmt[at + 13]]) as usize;
+            &idx[start..start + prims + 2]
+        };
+        let want = [wound(&[0, 1, 2, 3, 4]), wound(&[5, 6, 7, 8])].concat();
+        assert_eq!(wound(read(0)), want);
+        assert_eq!(wound(read(1)), wound(&[9, 10, 11]));
+    }
+
+    #[test]
+    fn terrain_draws_of_one_range_share_it() {
+        let draws = [terrain_draw(0, 1), terrain_draw(0, 1)].concat();
+        let (strip, prmt) = super::terrain_strips(&strip_bytes(&[0, 1, 2]), &draws).unwrap();
+        assert_eq!(strip.len(), 6);
+        assert_eq!(prmt[..20], prmt[20..]);
+    }
+
+    #[test]
+    fn a_terrain_draw_past_its_strip_is_an_error() {
+        assert!(super::terrain_strips(&strip_bytes(&[0, 1, 2]), &terrain_draw(0, 4)).is_err());
+    }
+
+    /// A PS3 draw record, big-endian.
+    fn ps3_draw(vs: u32, start: u32, count: u32) -> Vec<u8> {
+        [vs.to_be_bytes(), 7u32.to_be_bytes(), start.to_be_bytes(), count.to_be_bytes(), [0, 0, 0, 0]].concat()
+    }
+
+    fn be_indices(i: &[u16]) -> Vec<u8> {
+        i.iter().flat_map(|v| v.to_be_bytes()).collect()
+    }
+
+    /// The triangles a PC strip draws, each rotated to its lowest index, winding kept, degenerates gone.
+    fn strip_triangles(s: &[u16]) -> Vec<[u16; 3]> {
+        let mut out: Vec<[u16; 3]> = wound(s);
+        out.retain(|t| t[0] != t[1] && t[1] != t[2] && t[0] != t[2]);
+        out
+    }
+
+    #[test]
+    fn a_ps3_draw_keeps_its_triangles_and_winding_as_a_strip() {
+        // A run that continues as a strip, then a triangle that shares no edge, at both parities.
+        let list = [0u16, 1, 2, 2, 1, 3, 2, 3, 4, 8, 9, 10, 9, 11, 10, 20, 21, 22];
+        let (strip, prmt) = super::terrain_strips_of_lists(&be_indices(&list), &ps3_draw(0xAA, 0, 18), |k| k).unwrap();
+        let idx: Vec<u16> = strip.chunks_exact(2).map(|b| u16::from_le_bytes([b[0], b[1]])).collect();
+        let prims = u16::from_le_bytes([prmt[12], prmt[13]]) as usize;
+        assert_eq!(idx.len(), prims + 2);
+        let mut want: Vec<[u16; 3]> = list
+            .chunks_exact(3)
+            .map(|t| {
+                let at = (0..3).min_by_key(|&i| t[i]).unwrap();
+                [t[at], t[(at + 1) % 3], t[(at + 2) % 3]]
+            })
+            .collect();
+        want.sort_unstable();
+        let mut got = strip_triangles(&idx);
+        got.sort_unstable();
+        assert_eq!(got, want);
+    }
+
+    #[test]
+    fn a_ps3_record_becomes_a_pc_record() {
+        let (strip, prmt) = super::terrain_strips_of_lists(&be_indices(&[5, 6, 7, 6, 8, 7]), &ps3_draw(0xAA, 0, 6), |k| k + 1).unwrap();
+        assert_eq!(strip.len(), 8, "one strip of 4");
+        assert_eq!(u32::from_le_bytes([prmt[0], prmt[1], prmt[2], prmt[3]]), 0xAB, "the PC key");
+        assert_eq!(u32::from_le_bytes([prmt[4], prmt[5], prmt[6], prmt[7]]), 7, "the material");
+        let tail: Vec<u16> = prmt[12..20].chunks_exact(2).map(|b| u16::from_le_bytes([b[0], b[1]])).collect();
+        assert_eq!(tail, [2, 5, 8, 4], "triangles, min, max, distinct indices");
+    }
+
+    #[test]
+    fn ps3_draws_of_one_range_share_it() {
+        let draws = [ps3_draw(1, 0, 3), ps3_draw(2, 0, 3)].concat();
+        let (strip, prmt) = super::terrain_strips_of_lists(&be_indices(&[0, 1, 2]), &draws, |k| k).unwrap();
+        assert_eq!(strip.len(), 6);
+        assert_eq!(prmt[8..20], prmt[28..40]);
+    }
+
+    #[test]
+    fn a_ps3_draw_past_its_list_or_not_of_triangles_is_an_error() {
+        assert!(super::terrain_strips_of_lists(&be_indices(&[0, 1, 2]), &ps3_draw(1, 0, 6), |k| k).is_err());
+        assert!(super::terrain_strips_of_lists(&be_indices(&[0, 1, 2, 3]), &ps3_draw(1, 0, 4), |k| k).is_err());
     }
 
     #[test]
@@ -3755,9 +4119,10 @@ pub(super) fn ps3_native_translate_body(
     // so the ECS-only arms (`convert_ecs_bodies`) are not needed.
     match tag {
         ChunkTag::Syek | ChunkTag::Srts => { /* native BE on all platforms */ }
+        ChunkTag::Strs => convert_strs_inplace(&mut body, type_hash)?,
         _ if is_string_tag(tag) => { /* string data */ }
         ChunkTag::Prmt => {
-            if !walk_records(&mut body, &PRMT_WALKER) {
+            if !walk_records(&mut body, prmt_walker(type_hash)) {
                 swap_u16_array(&mut body);
             }
         }
@@ -3793,6 +4158,9 @@ pub(super) fn ps3_native_translate_body(
         ChunkTag::Info if type_hash == types::TYPE_HASH_ANIMATION => swap_u16_array(&mut body),
         ChunkTag::Info => convert_info_body_inplace(&mut body),
         ChunkTag::InfoUpper if type_hash == types::TYPE_HASH_STANCE => swap_u16_array(&mut body),
+        ChunkTag::InfoUpper if type_hash == types::TYPE_HASH_TERRAIN_MESH && group_tag == ChunkTag::Prmg => {
+            convert_terrain_draw_group_info(&mut body)?
+        }
         ChunkTag::Type if type_hash == types::TYPE_HASH_STANCE => {
             convert_stance_type_names_inplace(&mut body)
         }
