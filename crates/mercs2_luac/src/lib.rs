@@ -30,6 +30,7 @@
 //! engine's script host and this compiler share one library rather than each vendoring their own.
 
 pub mod rt;
+pub mod splice;
 pub mod sys;
 
 use std::os::raw::{c_char, c_int, c_void};
@@ -171,6 +172,32 @@ pub fn compile(source: &str, chunk_name: &str) -> Result<Vec<u8>, CompileError> 
         check_header(&out)?;
 
         Ok(out)
+    }
+}
+
+/// Load a binary chunk on the game's VM, which runs Lua's bytecode verifier over it, without running
+/// it. [`splice::append_chunk`] checks every chunk it makes with this.
+pub fn check_loads(chunk: &[u8]) -> Result<(), CompileError> {
+    // SAFETY: a state of our own, closed before returning; `chunk` outlives the call.
+    unsafe {
+        let l = luaL_newstate();
+        if l.is_null() {
+            return Err(CompileError::Internal("could not create a Lua state (out of memory)".into()));
+        }
+        let status = luaL_loadbuffer(l, chunk.as_ptr() as *const c_char, chunk.len(), c"chunk".as_ptr());
+        let message = if status == 0 {
+            None
+        } else {
+            let mut len: usize = 0;
+            let msg = lua_tolstring(l, -1, &mut len);
+            Some(if msg.is_null() {
+                format!("status {status}")
+            } else {
+                String::from_utf8_lossy(std::slice::from_raw_parts(msg as *const u8, len)).into_owned()
+            })
+        };
+        lua_close(l);
+        message.map_or(Ok(()), |m| Err(CompileError::Internal(format!("the VM refused a chunk: {m}"))))
     }
 }
 
