@@ -81,6 +81,8 @@ pub struct MovieData {
     /// Whether this movie's end callback has already been queued, so a still-`playing` movie cannot
     /// fire it twice.
     pub end_fired: bool,
+    /// `MovieWidget:Play(bLoop)`'s loop flag (`PlayMovie` `0x005BC330`, stored at `+0x144`).
+    pub looping: bool,
 }
 
 /// `Flash` (Scaleform) widget data.
@@ -106,6 +108,16 @@ pub enum FlashArg {
     Bool(bool),
     Number(f64),
     Text(String),
+}
+
+/// What `Widget:SetFullscreen(sType)` asked for: the scripts pass `true`, `"pan and scan"` or
+/// `"Letterbox"`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Fullscreen {
+    Off,
+    On,
+    PanAndScan,
+    Letterbox,
 }
 
 /// The widget a request names to mean the shell's movie, for an engine call that addresses it by role.
@@ -196,10 +208,14 @@ pub struct Widget {
     pub sleep: bool,
     pub ignores_pause: bool,
     pub highlightable: bool,
-    /// Anchoring flag bits (`SetWidgetAnchoring`).
-    pub anchoring: u32,
+    /// `SetWidgetAnchoring(uId, h, v)`: each −1 left/top, 0 centre, 1 right/bottom
+    /// (`Widget:SetAnchoring`, `mrxguibase.lua:792`); a new widget is left/top (ctor `0x00626DA0`).
+    pub anchoring: [i32; 2],
     pub viewport: i32,
-    pub fullscreen: bool,
+    pub fullscreen: Fullscreen,
+    /// `SetWidgetUseResolutionCorrection` (`+0x60`), on for a new widget: an anchored edge sits where
+    /// it sits in the 640×480 frame scaled onto its parent, rather than at its raw coordinate.
+    pub use_resolution_correction: bool,
     pub parent: Option<u64>,
     pub children: Vec<u64>,
     /// Draw order (higher = front); `PushWidgetToFront/Back` restamp it.
@@ -220,16 +236,18 @@ impl Widget {
     fn new(kind: WidgetKind, z: i32) -> Self {
         Widget {
             kind,
-            location: [0.0; 4],
+            // The Flash ctor (`0x0061B0A0`) places itself at (0, 0, 100, 100); every other kind at 0.
+            location: if matches!(kind, WidgetKind::Flash) { [0.0, 0.0, 100.0, 100.0] } else { [0.0; 4] },
             corrected_location: [0.0; 4],
             color: [255.0, 255.0, 255.0, 255.0],
             visible: true,
             sleep: false,
             ignores_pause: false,
             highlightable: false,
-            anchoring: 0,
+            anchoring: [-1, -1],
             viewport: 0,
-            fullscreen: false,
+            fullscreen: Fullscreen::Off,
+            use_resolution_correction: true,
             parent: None,
             children: Vec::new(),
             z,
@@ -267,6 +285,8 @@ pub struct WidgetTree {
     flash_fires: Vec<(u32, Option<String>)>,
     /// `Gui.DoSigninCheck` was called and the engine has not picked it up.
     signin: bool,
+    /// An engine player plays the movie widgets; see [`Self::attach_movie_player`].
+    movie_player: bool,
 }
 
 impl WidgetTree {
@@ -282,6 +302,44 @@ impl WidgetTree {
     /// Drain the requests, in call order.
     pub fn take_flash_requests(&mut self) -> Vec<(u64, FlashRequest)> {
         std::mem::take(&mut self.flash_requests)
+    }
+
+    /// Take the `Invoke`s queued for one movie (by widget, or by [`SHELL_MOVIE`] when `is_shell`), in
+    /// order, as `(function, arguments)`; every other request stays queued.
+    pub fn take_flash_invokes(&mut self, widget: u64, is_shell: bool) -> Vec<(String, Vec<FlashArg>)> {
+        let mut taken = Vec::new();
+        let mut kept = Vec::new();
+        for (target, request) in std::mem::take(&mut self.flash_requests) {
+            match request {
+                FlashRequest::Invoke { name, args } if target == widget || (is_shell && target == SHELL_MOVIE) => taken.push((name, args)),
+                request => kept.push((target, request)),
+            }
+        }
+        self.flash_requests = kept;
+        taken
+    }
+
+    /// An engine movie player now plays the movie widgets: [`Self::tick_movies`] stops ending them, and
+    /// the player calls [`Self::movie_finished`] when one runs out.
+    pub fn attach_movie_player(&mut self) {
+        self.movie_player = true;
+    }
+
+    /// A playing, unlooped movie ran out of frames: it stops and its end callback is queued once.
+    pub fn movie_finished(&mut self, handle: u64) {
+        let Some(m) = self.widgets.get_mut(&handle).and_then(|w| w.movie.as_mut()) else { return };
+        m.playing = false;
+        if !m.end_fired {
+            m.end_fired = true;
+            if let Some(id) = m.end_callback {
+                self.pending_movie_ends.push(id);
+            }
+        }
+    }
+
+    /// The movie widgets, by handle.
+    pub fn movies(&self) -> impl Iterator<Item = (u64, &MovieData)> {
+        self.widgets.iter().filter_map(|(id, w)| Some((*id, w.movie.as_ref()?)))
     }
 
     /// `Gui.DoSigninCheck`: the player pressed start.
@@ -302,6 +360,66 @@ impl WidgetTree {
     /// Drain the Flash callbacks awaiting dispatch.
     pub fn take_flash_fires(&mut self) -> Vec<(u32, Option<String>)> {
         std::mem::take(&mut self.flash_fires)
+    }
+
+    /// Where a widget lands on a `screen` of `[W, H]` pixels: the rescale core `0x00627DA0`, as
+    /// `CorrectWidgetForResolution` runs it. `aspect` is the display aspect over the content aspect
+    /// (`[[0xDFC2F8]+0x2BD0]`, 1.0 unless a script sets a screen ratio). A widget with a parent is placed
+    /// in its parent's rect; one without, in the 640×480 virtual screen mapped onto the whole screen.
+    pub fn corrected_rect(&self, handle: u64, screen: [f32; 2], aspect: f32) -> Option<[f32; 4]> {
+        let w = self.widgets.get(&handle)?;
+        let [width, height] = screen;
+        let (frame_a, frame_b) = match w.parent.and_then(|p| Some((self.widgets.get(&p)?.location, self.corrected_rect(p, screen, aspect)?))) {
+            Some(parent) => parent,
+            None => ([0.0, 0.0, 640.0, 480.0], [0.0, 0.0, width, height]),
+        };
+        let sx = (frame_b[2] - frame_b[0]) / (frame_a[2] - frame_a[0]);
+        let sy = (frame_b[3] - frame_b[1]) / (frame_a[3] - frame_a[1]);
+        let u = height / 480.0;
+        let rect = match w.fullscreen {
+            Fullscreen::On => [0.0, 0.0, width, height],
+            Fullscreen::Letterbox => {
+                let half = 0.5 * 0.5625 * width / aspect;
+                [0.0, height / 2.0 - half, width, height / 2.0 + half]
+            }
+            Fullscreen::PanAndScan => [(width / 2.0 * (1.0 - aspect)).min(0.0), 0.0, (width / 2.0 * (1.0 + aspect)).max(width), height],
+            Fullscreen::Off => {
+                let l = w.location;
+                let c = w.use_resolution_correction;
+                let wp = (l[2] - l[0]) * aspect * u;
+                let hp = (l[3] - l[1]) * u;
+                let (x1, x2) = match w.anchoring[0] {
+                    -1 => {
+                        let x1 = if c { (l[0] - frame_a[0]) * sx + frame_b[0] } else { l[0] };
+                        (x1, x1 + wp)
+                    }
+                    1 => {
+                        let x2 = if c { frame_b[2] - (frame_a[2] - l[2]) * sx } else { l[2] };
+                        (x2 - wp, x2)
+                    }
+                    _ => {
+                        let cx = if c { ((l[0] + l[2]) / 2.0 - (frame_a[0] + frame_a[2]) / 2.0) * sx + (frame_b[0] + frame_b[2]) / 2.0 } else { (l[0] + l[2]) / 2.0 };
+                        (cx - wp / 2.0, cx + wp / 2.0)
+                    }
+                };
+                let (y1, y2) = match w.anchoring[1] {
+                    -1 => {
+                        let y1 = if c { (l[1] - frame_a[1]) * sy + frame_b[1] } else { l[1] };
+                        (y1, y1 + hp)
+                    }
+                    1 => {
+                        let y2 = if c { frame_b[3] - (frame_a[3] - l[3]) * sy } else { l[3] };
+                        (y2 - hp, y2)
+                    }
+                    _ => {
+                        let cy = if c { ((l[1] + l[3]) / 2.0 - (frame_a[1] + frame_a[3]) / 2.0) * sy + (frame_b[1] + frame_b[3]) / 2.0 } else { (l[1] + l[3]) / 2.0 };
+                        (cy - hp / 2.0, cy + hp / 2.0)
+                    }
+                };
+                [x1, y1, x2, y2]
+            }
+        };
+        Some(rect)
     }
 
     /// Whether a widget and everything above it is visible.
@@ -350,8 +468,12 @@ impl WidgetTree {
     /// skipping it.
     ///
     /// The frame counter still advances so `Hud.GetMovieCurrentFrameNumber` moves rather than sitting
-    /// at 0. When a real decoder lands, this is the one function that changes.
+    /// at 0. A host with an engine movie player attached ([`Self::attach_movie_player`]) plays them
+    /// for real instead, and this does nothing.
     pub fn tick_movies(&mut self) {
+        if self.movie_player {
+            return;
+        }
         for w in self.widgets.values_mut() {
             let Some(m) = w.movie.as_mut() else { continue };
             if !m.playing {
@@ -712,6 +834,28 @@ mod tests {
         }
         t.tick_movies();
         assert!(t.take_movie_end_fires().is_empty(), "a stopped movie does not report completion");
+    }
+
+    /// The shell's movie pane: a child of a pan-and-scan fullscreen widget, at x 243.33..640, anchored
+    /// right and centre. At 1600×900 retail puts it at (856.25, 0, 1600, 900).
+    #[test]
+    fn the_shell_movie_pane_lands_where_retail_puts_it() {
+        let mut t = WidgetTree::new();
+        let shell = t.create(WidgetKind::Container);
+        let movie = t.create(WidgetKind::Movie);
+        t.add_child(shell, movie);
+        {
+            let s = t.get_mut(shell).unwrap();
+            s.location = [0.0, 0.0, 640.0, 480.0];
+            s.fullscreen = Fullscreen::PanAndScan;
+        }
+        let m = t.get_mut(movie).unwrap();
+        m.location = [640.0 - 396.6667, 0.0, 640.0, 480.0];
+        m.anchoring = [1, 0];
+        let rect = t.corrected_rect(movie, [1600.0, 900.0], 1.0).unwrap();
+        for (got, want) in rect.iter().zip([856.25, 0.0, 1600.0, 900.0]) {
+            assert!((got - want).abs() < 0.01, "{rect:?}");
+        }
     }
 
     /// A callback registered against a non-movie widget is rejected rather than silently accepted, so a
