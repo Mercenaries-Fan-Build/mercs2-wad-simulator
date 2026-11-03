@@ -204,7 +204,7 @@ pub fn char_skin_to_imported(
         }
         verts.push(Vertex {
             pos: cs.pos[i],
-            color: [1.0, 1.0, 1.0],
+            color: [1.0, 1.0, 1.0, 1.0],
             uv: glb.uvs.get(i).copied().unwrap_or([0.0, 0.0]),
             // CONFORMED normal. The preview renders `cs.pos`, so it must light them with the
             // normals of THAT surface; the source glTF's field belongs to the pre-conform mesh.
@@ -245,14 +245,12 @@ pub fn char_skin_to_imported(
         fit_scale: 1.0,
         bones: vec![IDENT; bone_count],
         rig: target_rig.clone(),
-        prelit: false,
     };
     let skin = SkinData {
         center: [0.0; 3],
         scale: 1.0,
         bones: vec![IDENT; bone_count],
         rig: target_rig,
-        prelit: false,
     };
     Imported {
         verts,
@@ -284,7 +282,7 @@ pub fn import_model(path: &Path) -> Result<Imported, String> {
 fn base_vertex(pos: [f32; 3], normal: [f32; 3], uv: [f32; 2], color: [f32; 3]) -> Vertex {
     Vertex {
         pos,
-        color,
+        color: [color[0], color[1], color[2], 1.0],
         uv,
         normal,
         tangent: [1.0, 0.0, 0.0, 1.0],
@@ -348,7 +346,6 @@ fn finish(
         fit_scale: 1.0,
         bones: Vec::new(),
         rig: Vec::new(),
-        prelit: false,
     };
     let mut skin = SkinData::identity();
     skin.center = [0.0; 3];

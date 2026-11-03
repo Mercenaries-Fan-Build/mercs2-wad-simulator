@@ -271,25 +271,25 @@ impl UiPass {
         let shader = device.create_shader_module(wgpu::include_wgsl!("ui.wgsl"));
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("ui pipeline layout"),
-            bind_group_layouts: &[&bgl],
-            push_constant_ranges: &[],
+            bind_group_layouts: &[Some(&bgl)],
+            immediate_size: 0,
         });
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("ui pipeline"),
             layout: Some(&layout),
             vertex: wgpu::VertexState {
                 module: &shader,
-                entry_point: "vs_main",
+                entry_point: Some("vs_main"),
                 compilation_options: Default::default(),
-                buffers: &[wgpu::VertexBufferLayout {
+                buffers: &[Some(wgpu::VertexBufferLayout {
                     array_stride: std::mem::size_of::<UiInst>() as u64,
                     step_mode: wgpu::VertexStepMode::Instance,
                     attributes: &wgpu::vertex_attr_array![0 => Float32x4, 1 => Float32x4, 2 => Float32x4],
-                }],
+                })],
             },
             fragment: Some(wgpu::FragmentState {
                 module: &shader,
-                entry_point: "fs_main",
+                entry_point: Some("fs_main"),
                 compilation_options: Default::default(),
                 targets: &[Some(wgpu::ColorTargetState {
                     format,
@@ -306,13 +306,14 @@ impl UiPass {
             // present but never test/write (the overlay always wins).
             depth_stencil: Some(wgpu::DepthStencilState {
                 format: crate::render::DEPTH_FORMAT,
-                depth_write_enabled: false,
-                depth_compare: wgpu::CompareFunction::Always,
+                depth_write_enabled: Some(false),
+                depth_compare: Some(wgpu::CompareFunction::Always),
                 stencil: wgpu::StencilState::default(),
                 bias: wgpu::DepthBiasState::default(),
             }),
             multisample: wgpu::MultisampleState::default(),
-            multiview: None,
+            multiview_mask: None,
+            cache: None,
         });
         let inst_cap = 1024;
         let inst_buf = device.create_buffer(&wgpu::BufferDescriptor {
@@ -392,6 +393,10 @@ impl UiPass {
 
     /// Phase 1 (BEFORE `begin_render_pass`): upload this frame's staged quads and clear the stage.
     /// Returns the instance count to hand to `draw` (0 = nothing staged, skip `draw`).
+    pub fn discard(&mut self) {
+        self.staged.clear();
+    }
+
     pub fn prepare(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, surface_w: u32, surface_h: u32) -> u32 {
         if self.staged.is_empty() {
             return 0;

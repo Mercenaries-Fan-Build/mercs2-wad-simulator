@@ -28,6 +28,7 @@ pub mod effect;
 pub mod fx;
 pub mod game;
 pub mod language;
+pub mod level;
 pub mod link;
 pub mod lint;
 pub mod manifest;

@@ -45,7 +45,7 @@ pub fn terrain_to_vertices(tm: &mercs2_formats::terrain::TerrainMesh, textured: 
             };
             Vertex {
                 pos: p,
-                color: [1.0, 1.0, 1.0],
+                color: [1.0, 1.0, 1.0, 1.0],
                 uv,
                 normal: tm.normals.get(i).copied().unwrap_or(up),
                 tangent: [1.0, 0.0, 0.0, 1.0],
@@ -60,85 +60,45 @@ pub fn terrain_to_vertices(tm: &mercs2_formats::terrain::TerrainMesh, textured: 
 //   Render-coupled WAD loaders
 // ---------------------------------------------------------------------------
 
-/// Load one hi-res terrainmesh by its `0x7C569307` asset hash, built with POFF (16 sub-tiles) and
-/// translated to its world tile position `pos`. Y is world-absolute (pos.y is 0); XZ shifts by pos.
-/// Returns the placed `LoadedModel`. Each draw is bound to its PRMG group's representative
-/// `terraintextures` detail layer and those textures are resolved here (they live in separate
-/// `terraintextures_*` blocks but carry their own texture ASET rows, so `extract_texture` finds them).
-pub fn load_terrainmesh_tile(w: &mut wad::Wad, terrainmesh_hash: u32, pos: [f32; 3]) -> Option<LoadedModel> {
-    let container = wad::extract_container_typed(w, terrainmesh_hash, TERRAINMESH_TYPE_HASH).ok()?;
-    let (mut verts, indices, mut draws, stats) = mesh::build_indexed_from_terrainmesh(&container).ok()?;
-    // World-place verts + synthesize a tiled world-XZ UV (the terrainmesh has no UV; detail materials
-    // tile every ~12 m via the Repeat sampler).
-    const UV_SCALE: f32 = 1.0 / 12.0;
-    for v in verts.iter_mut() {
-        v.pos[0] += pos[0];
-        v.pos[1] += pos[1];
-        v.pos[2] += pos[2];
-        v.uv = [v.pos[0] * UV_SCALE, v.pos[2] * UV_SCALE];
-    }
-    // SPLAT (multi-layer per-vertex blend). Each draw's PRMG group binds a terrain MATERIAL whose
-    // texture slots are (byte-verified over vz.wad): [0]=base0 (per-tile dominant diffuse), [1]=3B030C8A
-    // (a GLOBAL constant across EVERY tile — a shared detail/normal overlay, NOT a per-region diffuse),
-    // then N×{detail_diffuse, A3CD72A7-marker} marker-delimited terraintextures details. `terrain_group_
-    // layers` returns the marker-filtered slots: [base0, 3B030C8A, detail0, detail1, ...].
-    //
-    // The per-vertex COLOR is D3DCOLOR SPLAT WEIGHTS (R,G,B; the 4th/alpha channel is empirically
-    // always 0 across 77k+ sampled verts, weights sum to ~255). We carry up to 3 DIFFUSE blend layers
-    // per draw into the material's diffuse/normal/specular texture slots (terrain has no tangent normal
-    // map or spec map here, so those slots are free) and the shader blends them by the normalized
-    // weights: layer0 weighted by R, layer1 by G, layer2 by B (see `shader.wgsl` `overlay.y`).
-    //
-    // Layer ORDER: the representative layer (index 2 = detail0 when present, else base0) goes FIRST so
-    // the DOMINANT weight channel (R, ~96% of the weight mass) drives the SAME texture the pre-blend
-    // single-layer bind showed — i.e. no visual regression in the dominant case, with the other real
-    // layers blending in where G/B fire. Absent layers ALIAS layer0 so a missing detail blends the base
-    // again (never white/flat). `terrain_group_layers` is indexed by PRMG group ORDINAL, but the builder
-    // emits multiple draws per group (sub-strip split), so map each draw via `DrawGroup::group_index`.
-    let layers = mercs2_formats::texture::terrain_group_layers(&container).ok()?;
-    for d in draws.iter_mut() {
-        if let Some(l) = layers.get(d.group_index).filter(|l| !l.is_empty()) {
-            let rep_i = if l.len() > 2 { 2 } else { 0 }; // representative: detail0 else base0
-            let mut blend: Vec<u32> = Vec::with_capacity(3);
-            blend.push(l[rep_i]);
-            for (i, &h) in l.iter().enumerate() {
-                if i == 1 || i == rep_i {
-                    continue; // skip 3B030C8A (global const) and the already-added representative
-                }
-                if blend.len() >= 3 {
-                    break;
-                }
-                blend.push(h);
-            }
-            let l0 = blend[0];
-            d.diffuse = Some(l0);
-            d.normal = Some(blend.get(1).copied().unwrap_or(l0)); // slot repurposed = detail layer 1
-            d.specular = Some(blend.get(2).copied().unwrap_or(l0)); // slot repurposed = detail layer 2
-        } else {
-            d.normal = None;
-            d.specular = None;
-        }
-    }
-    // Resolve the terraintextures detail layers (all three blend slots), in their separate blocks.
+/// Load one hi-res terrainmesh by its `0x7C569307` asset hash, its vertices in world space at the tile
+/// position `pos` ([`mesh::build_terrain_cell`]), with the textures its draws sample. A ground draw's
+/// layers live in `terraintextures_*` blocks, an overlay's in the cell's own, and each has its own
+/// texture ASET row. `fade` is the entity's `TerrainFade`. Cells share most of their textures:
+/// `resident` says which are already uploaded ([`crate::scene::Scene::has_terrain_view`]), and
+/// assembling a texture's mips is what makes loading a cell slow, so those are left out.
+pub fn load_terrainmesh_tile(
+    w: &mut wad::Wad,
+    terrainmesh_hash: u32,
+    pos: [f32; 3],
+    fade: mercs2_formats::terrainmesh::TerrainFade,
+    resident: &dyn Fn(u32) -> bool,
+) -> Result<LoadedModel, String> {
+    let what = |e: String| format!("terrainmesh 0x{terrainmesh_hash:08X}: {e}");
+    let container = wad::extract_container_typed(w, terrainmesh_hash, TERRAINMESH_TYPE_HASH).map_err(what)?;
+    let (verts, indices, draws) = mesh::build_terrain_cell(&container, pos, fade).map_err(what)?;
     let mut textures: TexMap = std::collections::HashMap::new();
     for d in &draws {
-        for h in [d.diffuse, d.normal, d.specular].into_iter().flatten() {
-            if !textures.contains_key(&h) {
-                if let Ok(t) = wad::extract_texture(w, h) {
-                    textures.insert(h, t);
-                }
+        let wanted: Vec<u32> = match &d.ground {
+            Some(g) => std::iter::once(g.global).chain(g.detail).chain(g.layers.into_iter().flatten()).collect(),
+            None => d.textures.iter().copied().filter(|&h| h != 0).collect(),
+        };
+        for h in wanted {
+            if !textures.contains_key(&h) && !resident(h) {
+                textures.insert(h, wad::extract_texture_hires(w, h).map_err(|e| what(format!("texture 0x{h:08X}: {e}")))?);
             }
         }
     }
-    // The vertex COLOR stays the raw per-vertex SPLAT WEIGHTS (R,G,B in [0,1]) — the terrain shader
-    // path reads it as blend weights, NOT as an albedo multiply, so it must NOT be whited out. `prelit`
-    // is force-cleared: terrain is sun-lit, and its near-gray weights would otherwise trip the
-    // interior-shell baked-lighting heuristic.
-    let mut skin = stats.skin_data();
-    skin.center = [0.0, 0.0, 0.0];
-    skin.scale = 1.0;
-    skin.prelit = false; // terrain is never prelit — its COLOR is splat weights, not baked light
-    Some(LoadedModel { hash: terrainmesh_hash, verts, indices, draws, textures, skin, clips: Vec::new(), machine: None, hier: Vec::new() })
+    Ok(LoadedModel {
+        hash: terrainmesh_hash,
+        verts,
+        indices,
+        draws,
+        textures,
+        skin: mesh::SkinData::identity(),
+        clips: Vec::new(),
+        machine: None,
+        hier: Vec::new(),
+    })
 }
 
 /// The **model→PHY2 linkage**, verified against retail vz.wad: a model's authored Havok collision is a
@@ -420,7 +380,7 @@ impl HumanAnimData {
             .ok_or("ActionTable 0x6802C321: in no open wad")?;
         let selector = AnimSelector::from_containers(&lookup, Some(&actions))?;
         let we = assets
-            .resolve(WORLDENTITY_TYPE_HASH, RETAIL_WORLDENTITY_NAME_HASH)
+            .ecs_container(WORLDENTITY_TYPE_HASH, RETAIL_WORLDENTITY_NAME_HASH)?
             .ok_or("worldentity 0x50075B3B: in no open wad")?;
         let we = WorldEntity::parse(&we).map_err(|e| format!("worldentity: {e}"))?;
         let identities = human_animation_sets(&we)?;
@@ -552,7 +512,7 @@ impl PopulationData {
     pub fn load(assets: &mut crate::asset::AssetSource) -> Result<PopulationData, String> {
         use mercs2_formats::worldentity::{WorldEntity, RETAIL_WORLDENTITY_NAME_HASH, WORLDENTITY_TYPE_HASH};
         let we = assets
-            .resolve(WORLDENTITY_TYPE_HASH, RETAIL_WORLDENTITY_NAME_HASH)
+            .ecs_container(WORLDENTITY_TYPE_HASH, RETAIL_WORLDENTITY_NAME_HASH)?
             .ok_or("worldentity 0x50075B3B: in no open wad")?;
         Self::from_worldentity(&WorldEntity::parse(&we).map_err(|e| format!("worldentity: {e}"))?)
     }
@@ -981,12 +941,74 @@ pub struct StreamingWorldData {
     lowres_draw_by_cell: std::collections::HashMap<usize, usize>,
     /// The layers whose containers the `layers_static` block carries, in block order.
     static_block_layers: Vec<u32>,
+    trees: Vec<TreeSpecies>,
+}
+
+/// One species of the `foliage` chunk. A tree within `range` of the viewer is an entity of `template`
+/// (`FUN_004a2ef0`); every other draws as a billboard.
+struct TreeSpecies {
+    template: u32,
+    range: f32,
+    /// Position and yaw, in the chunk's order.
+    trees: Vec<mesh::TreeInstance>,
+    /// The trees that are entities now, by index, with their keys.
+    entities: std::collections::HashMap<usize, TreeEntity>,
+    /// The upload: taken at the first presented step.
+    billboard: Option<(mesh::TreeGeometry, TexMap)>,
+    /// The scene's billboard list no longer matches `entities`.
+    dirty: bool,
+}
+
+/// A tree in range.
+#[derive(Clone, Copy)]
+struct TreeEntity {
+    /// `None` when its spawn was refused for the hibernation grid's range, which leaves it a billboard.
+    key: Option<u32>,
+    /// Its model has drawn, so its billboard has stopped.
+    shown: bool,
+}
+
+/// Every species of the level's `foliage` chunk with its billboard's textures. No chunk, no trees.
+fn load_trees(w: &mut wad::Wad) -> Result<Vec<TreeSpecies>, String> {
+    use mercs2_formats::foliage::{Foliage, TYPE_HASH};
+    let Some(chunk) = wad::singleton_chunk(w, TYPE_HASH)? else { return Ok(Vec::new()) };
+    let foliage = Foliage::decode(&chunk).map_err(|e| format!("foliage: {e}"))?;
+    let mut out = Vec::with_capacity(foliage.species.len());
+    for s in &foliage.species {
+        let leaves = s.tree.leaves().map_err(|e| format!("foliage 0x{:08X}: {e}", s.template))?;
+        let geometry = mesh::build_billboard(s);
+        let mut textures: TexMap = std::collections::HashMap::new();
+        for h in [geometry.draw.diffuse, geometry.draw.normal].into_iter().flatten() {
+            let t = wad::extract_texture(w, h).map_err(|e| format!("foliage 0x{:08X}: texture 0x{h:08X}: {e}", s.template))?;
+            textures.insert(h, t);
+        }
+        out.push(TreeSpecies {
+            template: s.template,
+            range: s.range(),
+            trees: leaves.iter().map(|l| mesh::TreeInstance { position: l.position, yaw: l.yaw }).collect(),
+            entities: std::collections::HashMap::new(),
+            billboard: Some((geometry, textures)),
+            dirty: true,
+        });
+    }
+    println!("[stream] foliage: {} species, {} trees", out.len(), out.iter().map(|s| s.trees.len()).sum::<usize>());
+    Ok(out)
 }
 
 impl StreamingWorldData {
     /// The layers whose containers the `layers_static` block carries, in block order.
     pub fn static_block_layers(&self) -> &[u32] {
         &self.static_block_layers
+    }
+
+    /// The worldentity templates' `Name` records, in data order.
+    pub fn template_names(&self) -> &[(u32, String)] {
+        &self.templates.names
+    }
+
+    /// The `vz_lrterrain` map image the base terrain wears; `None` when the atlas did not parse.
+    pub fn terrain_texture(&self) -> Option<&mercs2_formats::texture::TextureData> {
+        self.terrain.textures.get(&0)
     }
 
     /// Consume the loader output into the reusable [`StreamingWorld`] executor over the world's
@@ -998,9 +1020,10 @@ impl StreamingWorldData {
     /// same boot glue `FreeFlyGame::setup` does inline (upload terrain, take ownership of the streamer)
     /// and returns the pieces the caller must wire into its own `Scene`/`World`.
     pub fn into_streaming_world(self, guids: std::rc::Rc<std::cell::RefCell<mercs2_core::GuidMap>>) -> (LoadedModel, StreamingWorld) {
-        let StreamingWorldData { wad, terrain, manager, templates, lowres_draw_by_cell, static_block_layers: _ } = self;
+        let StreamingWorldData { wad, terrain, manager, templates, lowres_draw_by_cell, static_block_layers: _, trees } = self;
         let terrain_hash = terrain.hash;
-        let sw = StreamingWorld::new(wad, manager, templates, lowres_draw_by_cell, terrain_hash, guids);
+        let mut sw = StreamingWorld::new(wad, manager, templates, lowres_draw_by_cell, terrain_hash, guids);
+        sw.trees = trees;
         (terrain, sw)
     }
 }
@@ -1097,9 +1120,8 @@ pub fn glow_card_for_effect(
 }
 
 /// Load and parse an effect by name-hash
-/// ([`parse_effect_container`](mercs2_formats::fxdict::parse_effect_container)). Feeds
-/// [`EmitterDesc::from_effect`](crate::particles::EmitterDesc::from_effect) so authored
-/// fire/smoke/steam effects drive the particle sim with real params.
+/// ([`parse_effect_container`](mercs2_formats::fxdict::parse_effect_container)), for
+/// [`crate::fx_sim`] to run.
 ///
 /// The block comes from the effect's own ASET row (`asset_hash == name_hash`,
 /// `type_id == TYPE_ID_EFFECT`) — the WAD's index of where the asset lives — not from a block path.
@@ -1148,6 +1170,19 @@ pub fn load_effect(
     Err(format!(
         "the ASET row for effect 0x{name_hash:08X} names blocks {blocks:?}, and none holds the container"
     ))
+}
+
+/// What every effect draws from: the `vfx` atlas and the `fxdict`'s rectangles.
+pub fn load_fx_atlas(w: &mut wad::Wad) -> Result<(mercs2_formats::texture::TextureData, Vec<mercs2_formats::fxdict::FxRect>), String> {
+    use mercs2_formats::types::{TYPE_HASH_FX_DICTIONARY, TYPE_ID_FX_DICTIONARY};
+    let dict = {
+        let (archive, _) = wad::archive_and_file(w);
+        archive.aset.iter().find(|a| a.type_id == TYPE_ID_FX_DICTIONARY).map(|a| a.asset_hash).ok_or("no fxdict row in the archive")?
+    };
+    let c = wad::extract_container_typed(w, dict, TYPE_HASH_FX_DICTIONARY).map_err(|e| format!("fxdict: {e}"))?;
+    let rects = mercs2_formats::fxdict::parse_fxdict_container(&c).map_err(|e| format!("fxdict: {e}"))?;
+    let atlas = wad::extract_texture_hires(w, mercs2_formats::fxdict::VFX_ATLAS).map_err(|e| format!("vfx atlas: {e}"))?;
+    Ok((atlas, rects))
 }
 
 /// Read an environmental light-shaft effect and recover `(TRFM scale, COLR peak colour, COLR peak
@@ -1253,8 +1288,11 @@ pub fn load_streaming_world_data(
     }
     progress.step("streaming catalog");
 
+    let trees = load_trees(&mut w)?;
+    progress.step("foliage");
+
     let static_block_layers = block_layers(&ls);
-    Ok(StreamingWorldData { wad: w, terrain, manager, templates, lowres_draw_by_cell, static_block_layers })
+    Ok(StreamingWorldData { wad: w, terrain, manager, templates, lowres_draw_by_cell, static_block_layers, trees })
 }
 
 /// The scene and ECS world a step presents entities in; `None` for a headless step.
@@ -1279,7 +1317,7 @@ impl mercs2_core::activation::ActivationHost for Activator<'_> {
         Ok(self.sw.assets_present(key))
     }
 
-    /// The model is resident: loaded here, synchronously, so a poll of a present asset succeeds.
+    /// The model is resident: the first poll asks the asset thread for it, later ones find it uploaded.
     fn can_activate(&mut self, key: u32, _forced: bool) -> Result<bool, String> {
         match &mut self.present {
             Some((scene, _)) => self.sw.load_assets(key, scene),
@@ -1314,19 +1352,11 @@ impl mercs2_core::activation::ActivationHost for Activator<'_> {
         self.sw.epoch.elapsed().as_micros() as u64
     }
 
-    /// Nothing waits on I/O: assets load synchronously in the poll.
+    /// The asset thread has work out: an entity waiting on it is not stalled.
     fn io_busy(&mut self) -> bool {
-        false
+        self.sw.assets.as_ref().is_some_and(|a| !a.pending.is_empty())
     }
 }
-
-/// The one-bone identity palette of a static streamed model.
-const IDENTITY: [[f32; 4]; 4] = [
-    [1.0, 0.0, 0.0, 0.0],
-    [0.0, 1.0, 0.0, 0.0],
-    [0.0, 0.0, 1.0, 0.0],
-    [0.0, 0.0, 0.0, 1.0],
-];
 
 /// A per-frame stats snapshot for the streaming console/HUD line.
 pub struct StreamStats {
@@ -1567,8 +1597,129 @@ impl TerrainHeightField {
 /// [`step`](Self::step). Both the free-fly boot and the playable TPS boot drive this one path. The
 /// one-time boot glue (base terrain upload, the game populate hook, world lights) stays in the caller;
 /// [`new`](Self::new) takes ownership of the streaming state after that.
+/// How long one presented step may spend uploading finished assets. Uploading is the only part of a
+/// load that needs the main thread; the step always takes at least one when one is ready.
+const ASSET_UPLOAD_BUDGET: std::time::Duration = std::time::Duration::from_millis(4);
+
+/// One asset for the [`AssetThread`] to read.
+enum AssetJob {
+    Model { hash: u32, node: NodeSource },
+    Terrain { hash: u32, pos: [f32; 3], fade: mercs2_formats::terrainmesh::TerrainFade },
+    Scrub { hash: u32 },
+}
+
+/// What a job leaves ready for the main thread to upload and keep.
+enum AssetReady {
+    Model {
+        model: Box<LoadedModel>,
+        /// Its authored collision ([`load_authored_collision`]) and its render-node sphere: both read
+        /// the block the model is in.
+        collision: Option<Vec<[mercs2_core::glam::Vec3; 3]>>,
+        node: NodeSource,
+        sphere: Option<mercs2_formats::render_node::Sphere>,
+    },
+    Terrain {
+        model: Box<LoadedModel>,
+        /// Its world-space triangles, for its heightfield.
+        tris: Vec<[mercs2_core::glam::Vec3; 3]>,
+    },
+    Scrub { hash: u32, geometry: mesh::ScrubGeometry, textures: TexMap },
+}
+
+/// Streaming's reader: its own [`wad::Wad`] handle on a thread, so decompressing a block and assembling a
+/// texture's mips never hold up a frame. Retail streams the same way, which is why `CanActivate` is a
+/// poll. Results arrive in request order, so a cell always uploads after the cells whose textures it
+/// shares.
+struct AssetThread {
+    jobs: std::sync::mpsc::Sender<AssetJob>,
+    ready: std::sync::mpsc::Receiver<Result<AssetReady, String>>,
+    /// Requested and not yet uploaded, by asset hash.
+    pending: std::collections::HashSet<u32>,
+}
+
+impl AssetThread {
+    fn start(path: String) -> AssetThread {
+        let (jobs, inbox) = std::sync::mpsc::channel();
+        let (outbox, ready) = std::sync::mpsc::channel();
+        std::thread::Builder::new()
+            .name("streaming assets".into())
+            .spawn(move || {
+                let mut w = match wad::open(&path) {
+                    Ok(w) => w,
+                    Err(e) => {
+                        let _ = outbox.send(Err(format!("the asset thread: {e}")));
+                        return;
+                    }
+                };
+                let mut spheres = NodeSpheres::default();
+                let mut uploaded = std::collections::HashSet::new();
+                for job in inbox {
+                    if outbox.send(read_asset(&mut w, &mut spheres, &mut uploaded, job)).is_err() {
+                        return;
+                    }
+                }
+            })
+            .expect("the OS starts a thread");
+        AssetThread { jobs, ready, pending: std::collections::HashSet::new() }
+    }
+
+    /// Ask for `hash`, unless it is already on its way.
+    fn request(&mut self, hash: u32, job: AssetJob) -> Result<(), String> {
+        if self.pending.insert(hash) {
+            self.jobs.send(job).map_err(|_| "the asset thread stopped".to_string())?;
+        }
+        Ok(())
+    }
+}
+
+/// One job's work. `uploaded` holds the textures an earlier terrain cell already brought, which the
+/// scene keeps ([`crate::scene::Scene::has_terrain_view`]); a cell's global map is its own.
+fn read_asset(
+    w: &mut wad::Wad,
+    spheres: &mut NodeSpheres,
+    uploaded: &mut std::collections::HashSet<u32>,
+    job: AssetJob,
+) -> Result<AssetReady, String> {
+    match job {
+        AssetJob::Terrain { hash, pos, fade } => {
+            let model = load_terrainmesh_tile(w, hash, pos, fade, &|h| uploaded.contains(&h))?;
+            let own: std::collections::HashSet<u32> = model.draws.iter().filter_map(|d| Some(d.ground.as_ref()?.global)).collect();
+            uploaded.extend(model.textures.keys().copied().filter(|h| !own.contains(h)));
+            let tris = extract_local_tris(&model);
+            Ok(AssetReady::Terrain { model: Box::new(model), tris })
+        }
+        AssetJob::Model { hash, node } => {
+            let (model, _, _) =
+                load_model_by_hash(w, hash).ok_or_else(|| format!("model 0x{hash:08X} is in the archive but did not load"))?;
+            let sphere = spheres.sphere(w, node)?;
+            Ok(AssetReady::Model { model: Box::new(model), collision: load_authored_collision(w, hash), node, sphere })
+        }
+        AssetJob::Scrub { hash } => {
+            let (geometry, textures) = load_scrub(w, hash, &|h| uploaded.contains(&h))?;
+            uploaded.extend(textures.keys().copied());
+            Ok(AssetReady::Scrub { hash, geometry, textures })
+        }
+    }
+}
+
+/// A ground cover pack and its textures, but for those `resident` says the scene holds.
+pub fn load_scrub(w: &mut wad::Wad, hash: u32, resident: &dyn Fn(u32) -> bool) -> Result<(mesh::ScrubGeometry, TexMap), String> {
+    let what = |e: String| format!("scrub 0x{hash:08X}: {e}");
+    let container = wad::extract_container_typed(w, hash, mercs2_formats::scrub::TYPE_HASH).map_err(what)?;
+    let geometry = mesh::build_scrub(&container).map_err(what)?;
+    let mut textures: TexMap = std::collections::HashMap::new();
+    for h in geometry.draws.iter().flat_map(|d| d.textures.iter().copied()).filter(|&h| h != 0) {
+        if !textures.contains_key(&h) && !resident(h) {
+            textures.insert(h, wad::extract_texture_hires(w, h).map_err(|e| what(format!("texture 0x{h:08X}: {e}")))?);
+        }
+    }
+    Ok((geometry, textures))
+}
+
 pub struct StreamingWorld {
     wad: wad::Wad,
+    /// Started by the first presented load; a headless step never loads.
+    assets: Option<AssetThread>,
     manager: mercs2_core::streaming::StreamingManager,
     /// The worldentity template records placed entities fall back to.
     templates: TemplateRecords,
@@ -1602,6 +1753,12 @@ pub struct StreamingWorld {
     lowres_draw_by_cell: std::collections::HashMap<usize, usize>,
     terrain_hash: u32,
     prop_ents: std::collections::HashMap<u32, mercs2_core::Entity>,
+    /// Entities whose ground cover the scene has placed.
+    scrub_placed: std::collections::HashSet<u32>,
+    /// The level's tree species.
+    trees: Vec<TreeSpecies>,
+    /// Entities `Object.SetVisible` turned off: no visual while they stay here.
+    hidden: std::collections::HashSet<u32>,
     block_ents: std::collections::HashMap<u16, mercs2_core::Entity>,
     model_refs: std::collections::HashMap<u32, u32>,
     anim_store: std::collections::HashMap<u32, crate::scene::ModelAnim>,
@@ -1659,6 +1816,7 @@ impl StreamingWorld {
         }
         StreamingWorld {
             wad,
+            assets: None,
             manager,
             templates,
             catalog: PlacedCatalog::default(),
@@ -1677,6 +1835,9 @@ impl StreamingWorld {
             lowres_draw_by_cell,
             terrain_hash,
             prop_ents: std::collections::HashMap::new(),
+            scrub_placed: std::collections::HashSet::new(),
+            trees: Vec::new(),
+            hidden: std::collections::HashSet::new(),
             block_ents: std::collections::HashMap::new(),
             model_refs: std::collections::HashMap::new(),
             anim_store: std::collections::HashMap::new(),
@@ -1732,6 +1893,11 @@ impl StreamingWorld {
             coll_authored: self.coll_authored,
             coll_no_authored: self.coll_no_authored,
         }
+    }
+
+    /// What is still on its way: entities waiting to wake, and assets requested and not yet uploaded.
+    pub fn loading(&self) -> (usize, usize) {
+        (self.queue.len(), self.assets.as_ref().map_or(0, |a| a.pending.len()))
     }
 
     /// `key`'s activation state: 0 asleep, 1 waking, 2 awake.
@@ -1881,11 +2047,65 @@ impl StreamingWorld {
         self.apply_layer_ops(exempt)?;
         self.apply_moved()?;
         self.sync_layer_scene(scene, world);
+        self.receive_assets(scene)?;
         for k in std::mem::take(&mut self.pending_visuals) {
             self.sync_visual(k, scene, world)?;
         }
         self.step_blocks(scene, world, viewer);
-        self.step_grid(Some((scene, world)), viewer)
+        self.step_grid(Some((scene, world)), viewer)?;
+        self.step_trees(scene, viewer)
+    }
+
+    /// The trees' side of a step (`FUN_004a4060`): a tree inside its species' range becomes an entity, one
+    /// outside it goes back to a billboard. A tree keeps its billboard until its model has drawn, so one
+    /// whose assets are still loading stays visible.
+    fn step_trees(&mut self, scene: &mut crate::scene::Scene, viewer: [f32; 3]) -> Result<(), String> {
+        use mercs2_core::glam::Vec3;
+        let viewer = Vec3::from(viewer);
+        let mut species = std::mem::take(&mut self.trees);
+        let result = (|| {
+            for s in &mut species {
+                if let Some((geometry, textures)) = s.billboard.take() {
+                    scene.load_trees(s.template, &geometry, &textures, s.trees.len());
+                }
+                for (i, tree) in s.trees.iter().enumerate() {
+                    let inside = Vec3::from(tree.position).distance_squared(viewer) < s.range * s.range;
+                    match (inside, s.entities.get(&i).copied()) {
+                        (true, None) => {
+                            let key = self.spawn(s.template, tree.position, tree.yaw * 360.0, false, false)?;
+                            s.entities.insert(i, TreeEntity { key, shown: false });
+                        }
+                        (false, Some(e)) => {
+                            if let Some(key) = e.key {
+                                self.destroy(key);
+                            }
+                            s.entities.remove(&i);
+                            s.dirty |= e.shown;
+                        }
+                        _ => {}
+                    }
+                }
+                for e in s.entities.values_mut().filter(|e| !e.shown) {
+                    if e.key.is_some_and(|k| self.prop_ents.contains_key(&k)) {
+                        e.shown = true;
+                        s.dirty = true;
+                    }
+                }
+                if std::mem::take(&mut s.dirty) {
+                    let drawn: Vec<mesh::TreeInstance> = s
+                        .trees
+                        .iter()
+                        .enumerate()
+                        .filter(|(i, _)| !s.entities.get(i).is_some_and(|e| e.shown))
+                        .map(|(_, t)| *t)
+                        .collect();
+                    scene.set_trees(s.template, &drawn);
+                }
+            }
+            Ok(())
+        })();
+        self.trees = species;
+        result
     }
 
     /// [`step`](Self::step) without presentation: the layer requests, the grid and the activations run
@@ -1961,6 +2181,16 @@ impl StreamingWorld {
         result?;
         self.pending_visuals.push(key);
         Ok(Some(key))
+    }
+
+    /// `Object.SetVisible` (`0x5D03B0`): show or hide `key`. Its visual follows at the next presented
+    /// step, and a hidden entity keeps no collision, which `_SetStockpileCategoryQty` asks for with
+    /// `Object.DisablePhysics` beside it.
+    pub fn set_visible(&mut self, key: u32, on: bool) {
+        let changed = if on { self.hidden.remove(&key) } else { self.hidden.insert(key) };
+        if changed {
+            self.pending_visuals.push(key);
+        }
     }
 
     /// The caller owns `key`'s ECS entity (the player's character, which the game builds itself): the
@@ -2058,7 +2288,7 @@ impl StreamingWorld {
                     Transform::from_translation(Vec3::new(off[0], off[1], off[2])),
                     ModelRef { model: m.hash },
                     AnimState::default(),
-                    SkinPalette { mats: vec![IDENTITY] },
+                    SkinPalette { mats: scene.model_rest_palette(m.hash) },
                 ));
                 *model_refs.entry(m.hash).or_insert(0) += 1;
                 block_ents.insert(*b, e);
@@ -2082,44 +2312,96 @@ impl StreamingWorld {
     fn assets_present(&self, key: u32) -> bool {
         match self.catalog.get(key) {
             Some(o) if o.terrain_mesh.is_some() => true,
-            Some(o) => o.model.is_none_or(|m| wad::has_model(&self.wad, m)),
+            Some(o) => o.model.is_none_or(|m| wad::has_model(&self.wad, m)) && o.scrub.is_none_or(|s| wad::has_scrub(&self.wad, s)),
             None => false,
         }
     }
 
-    /// Make an entity's model (or terrainmesh) resident in the scene. `Ok(false)` when the archive
-    /// carries no model of that hash (retail cancels the activation); an error when it carries one
-    /// that does not load.
-    fn load_assets(&mut self, key: u32, scene: &mut crate::scene::Scene) -> Result<bool, String> {
+    /// Whether an entity's model (or terrainmesh) is resident in the scene, asking the asset thread for
+    /// it when it is not. `Ok(false)` while it loads, and for a model the archive does not carry (retail
+    /// cancels that activation).
+    fn load_assets(&mut self, key: u32, scene: &crate::scene::Scene) -> Result<bool, String> {
         let o = *self.catalog.get(key).ok_or_else(|| format!("0x{key:08X}: not a placed entity"))?;
-        if let Some(tm) = o.terrain_mesh {
-            if !scene.has_model(tm) {
-                let m = load_terrainmesh_tile(&mut self.wad, tm, o.pos)
-                    .ok_or_else(|| format!("0x{key:08X}: terrainmesh 0x{tm:08X} did not load"))?;
-                scene.load_terrain_model(m.hash, &m.verts, &m.indices, &m.draws, &m.textures, &m.skin);
-                self.local_tris.entry(m.hash).or_insert_with(|| extract_local_tris(&m));
+        let job = if let Some(hash) = o.terrain_mesh {
+            if scene.has_model(hash) {
+                return Ok(true);
             }
-            return Ok(true);
+            let fade = self.templates.terrain_fade.get(&o.parent).copied().unwrap_or_default();
+            AssetJob::Terrain { hash, pos: o.pos, fade }
+        } else if let Some(hash) = o.scrub {
+            if scene.has_scrub(hash) {
+                return Ok(true);
+            }
+            if !wad::has_scrub(&self.wad, hash) {
+                return Ok(false);
+            }
+            AssetJob::Scrub { hash }
+        } else {
+            let Some(hash) = o.model else { return Ok(true) };
+            if scene.has_model(hash) {
+                return Ok(true);
+            }
+            if !wad::has_model(&self.wad, hash) {
+                return Ok(false);
+            }
+            AssetJob::Model { hash, node: o.node }
+        };
+        let hash = match job {
+            AssetJob::Terrain { hash, .. } | AssetJob::Model { hash, .. } | AssetJob::Scrub { hash } => hash,
+        };
+        let path = wad::path(&self.wad).to_string();
+        self.assets.get_or_insert_with(|| AssetThread::start(path)).request(hash, job)?;
+        Ok(false)
+    }
+
+    /// Whether an entity's model is on its way from the asset thread.
+    fn asset_pending(&self, key: u32) -> bool {
+        let asset = self.catalog.get(key).and_then(|o| o.terrain_mesh.or(o.scrub).or(o.model));
+        asset.is_some_and(|h| self.assets.as_ref().is_some_and(|a| a.pending.contains(&h)))
+    }
+
+    /// Upload what the asset thread has finished, within [`ASSET_UPLOAD_BUDGET`]. An asset that failed
+    /// to load, or a thread that stopped, is an error.
+    fn receive_assets(&mut self, scene: &mut crate::scene::Scene) -> Result<(), String> {
+        use std::sync::mpsc::TryRecvError;
+        let start = std::time::Instant::now();
+        while let Some(thread) = self.assets.as_mut() {
+            let ready = match thread.ready.try_recv() {
+                Ok(ready) => ready?,
+                Err(TryRecvError::Empty) => return Ok(()),
+                Err(TryRecvError::Disconnected) => return Err("the asset thread stopped".to_string()),
+            };
+            match ready {
+                AssetReady::Terrain { model: m, tris } => {
+                    thread.pending.remove(&m.hash);
+                    scene.load_terrain_model(m.hash, &m.verts, &m.indices, &m.draws, &m.textures, &m.skin);
+                    self.local_tris.entry(m.hash).or_insert(tris);
+                }
+                AssetReady::Scrub { hash, geometry, textures } => {
+                    thread.pending.remove(&hash);
+                    scene.load_scrub(hash, geometry, &textures);
+                }
+                AssetReady::Model { model: m, collision, node, sphere } => {
+                    let m = *m;
+                    thread.pending.remove(&m.hash);
+                    scene.load_model(m.hash, &m.verts, &m.indices, &m.draws, &m.textures, &m.skin);
+                    self.phy2_local.entry(m.hash).or_insert(collision);
+                    self.node_spheres.remember(node, sphere);
+                    // A rigged model that ships clips registers its rig + clips so the per-frame animation
+                    // pass can pose it (no-op for clip-less props).
+                    if !m.clips.is_empty() {
+                        self.anim_store.entry(m.hash).or_insert_with(|| crate::scene::ModelAnim {
+                            rig: m.skin.rig.clone(),
+                            clips: m.clips.into_iter().map(|c| (c.name_hash, c)).collect(),
+                        });
+                    }
+                }
+            }
+            if start.elapsed() >= ASSET_UPLOAD_BUDGET {
+                return Ok(());
+            }
         }
-        let Some(model) = o.model else { return Ok(true) };
-        if scene.has_model(model) {
-            return Ok(true);
-        }
-        if !wad::has_model(&self.wad, model) {
-            return Ok(false);
-        }
-        let (m, _, _) = load_model_by_hash(&mut self.wad, model)
-            .ok_or_else(|| format!("0x{key:08X}: model 0x{model:08X} is in the archive but did not load"))?;
-        scene.load_model(m.hash, &m.verts, &m.indices, &m.draws, &m.textures, &m.skin);
-        // A rigged model that ships clips registers its rig + clips so the per-frame animation pass can
-        // pose it (no-op for clip-less props).
-        if !m.clips.is_empty() {
-            self.anim_store.entry(m.hash).or_insert_with(|| crate::scene::ModelAnim {
-                rig: m.skin.rig.clone(),
-                clips: m.clips.into_iter().map(|c| (c.name_hash, c)).collect(),
-            });
-        }
-        Ok(true)
+        Ok(())
     }
 
     /// A placed entity's model is resident while it is awake and its ring tier is non-zero
@@ -2128,14 +2410,16 @@ impl StreamingWorld {
     /// so it exists while it is awake. An adopted key gets none. Spawn or despawn to match.
     fn sync_visual(&mut self, key: u32, scene: &mut crate::scene::Scene, world: &mut mercs2_core::World) -> Result<(), String> {
         let Some(o) = self.catalog.get(key) else { return Ok(()) };
-        let has_visual = o.terrain_mesh.is_some() || o.model.is_some();
+        let has_visual = o.terrain_mesh.is_some() || o.model.is_some() || o.scrub.is_some();
         let ringed = self.grid.entry(key).is_some_and(|e| e.state & 0xF0 != 0);
         let present = o.runtime.is_some() || ringed;
-        let want = has_visual && present && self.state(key) == 2 && !self.external.contains(&key);
-        match (want, self.prop_ents.contains_key(&key)) {
+        let want = has_visual && present && self.state(key) == 2 && !self.external.contains(&key) && !self.hidden.contains(&key);
+        match (want, self.prop_ents.contains_key(&key) || self.scrub_placed.contains(&key)) {
             (true, false) => {
                 if self.load_assets(key, scene)? {
                     self.spawn_visual(key, scene, world);
+                } else if self.asset_pending(key) {
+                    self.pending_visuals.push(key);
                 }
             }
             (false, true) => self.despawn_visual(key, scene, world),
@@ -2149,6 +2433,12 @@ impl StreamingWorld {
         use mercs2_core::glam::{Quat, Vec3};
         use mercs2_core::{AnimState, ModelRef, SkinPalette, Transform};
         let o = self.catalog.get(key).copied().expect("a catalogued key");
+        // Ground cover has no gameplay side: no entity, no collision.
+        if let Some(hash) = o.scrub {
+            scene.place_scrub(key, hash, o.pos);
+            self.scrub_placed.insert(key);
+            return;
+        }
         if let Some(tm) = o.terrain_mesh {
             // Terrain is a baked HEIGHTFIELD, not collision triangles (retail `hkpHeightFieldShape`):
             // bake the tile's world-space surface into `terrain_field`, never the broadphase.
@@ -2157,7 +2447,7 @@ impl StreamingWorld {
                     self.terrain_field.insert(key, grid);
                 }
             }
-            let e = world.spawn((Transform::IDENTITY, ModelRef { model: tm }, AnimState::default(), SkinPalette { mats: vec![IDENTITY] }));
+            let e = world.spawn((Transform::IDENTITY, ModelRef { model: tm }, AnimState::default(), SkinPalette { mats: scene.model_rest_palette(tm) }));
             *self.model_refs.entry(tm).or_insert(0) += 1;
             self.prop_ents.insert(key, e);
             self.guids.borrow_mut().bind(key, e);
@@ -2170,7 +2460,7 @@ impl StreamingWorld {
         let model = o.model.expect("sync_visual spawns only an entity with a model");
         let q = Quat::from_xyzw(o.quat[0], o.quat[1], o.quat[2], o.quat[3]);
         let p = Vec3::new(o.pos[0], o.pos[1], o.pos[2]);
-        let nbones = scene.model_bone_count(model).max(1);
+        let rest = scene.model_rest_palette(model);
         let mut t = Transform::from_translation(p);
         t.rotation = q;
         // A runtime spawn of a vehicle or character template is its gameplay entity, which moves: no
@@ -2179,14 +2469,14 @@ impl StreamingWorld {
             Some((crate::spawn::Archetype::Character, faction)) => {
                 let e = crate::spawn::spawn_character(world, o.parent, model, t);
                 crate::spawn::set_faction(world, e, faction);
-                let _ = world.insert_one(e, SkinPalette { mats: vec![IDENTITY; nbones] });
+                let _ = world.insert_one(e, SkinPalette { mats: rest });
                 self.bind_visual(key, model, e);
                 return;
             }
             Some((crate::spawn::Archetype::Vehicle(class), _)) => {
                 let e = crate::spawn::spawn_default_vehicle(world, class, key, t);
                 let _ = world.insert_one(e, ModelRef { model });
-                let _ = world.insert_one(e, SkinPalette { mats: vec![IDENTITY; nbones] });
+                let _ = world.insert_one(e, SkinPalette { mats: rest });
                 self.bind_visual(key, model, e);
                 return;
             }
@@ -2210,7 +2500,7 @@ impl StreamingWorld {
             Some(&clip) => AnimState::playing(clip),
             None => AnimState::default(),
         };
-        let e = world.spawn((t, ModelRef { model }, anim, SkinPalette { mats: vec![IDENTITY; nbones] }));
+        let e = world.spawn((t, ModelRef { model }, anim, SkinPalette { mats: rest }));
         self.bind_visual(key, model, e);
     }
 
@@ -2224,6 +2514,10 @@ impl StreamingWorld {
     /// Despawn a placed entity's model and release what it held.
     fn despawn_visual(&mut self, key: u32, scene: &mut crate::scene::Scene, world: &mut mercs2_core::World) {
         use mercs2_core::ModelRef;
+        if self.scrub_placed.remove(&key) {
+            scene.remove_scrub(key);
+            return;
+        }
         let Some(e) = self.prop_ents.remove(&key) else { return };
         self.guids.borrow_mut().unbind(e);
         if let Ok(mr) = world.get::<&ModelRef>(e).map(|m| m.model) {
@@ -2369,7 +2663,7 @@ where
             fog: ([0.55, 0.62, 0.70], 0.00016, 60.0),
             sun: None,
             atmosphere: Some(mercs2_formats::atmosphere::Atmosphere::default()),
-            loading_plate_wad: Some(self.wadpath.clone()),
+            vz_wad: self.wadpath.clone(),
             load_stages: 4,
             bindings: crate::input::Bindings::default(),
         }
@@ -2421,7 +2715,7 @@ where
                 Transform::IDENTITY,
                 ModelRef { model: terrain.hash },
                 AnimState::default(),
-                SkinPalette { mats: vec![IDENTITY] },
+                SkinPalette { mats: ctx.scene.model_rest_palette(terrain.hash) },
             ));
         }
         // GAME population hook: hand the game the live World/Scene/Wad so it can spawn its own entities.
@@ -2447,7 +2741,9 @@ where
             }
         }
         // Take ownership of the streaming state into the reusable executor.
-        self.stream = Some(StreamingWorld::new(data.wad, data.manager, data.templates, data.lowres_draw_by_cell, terrain_hash, guids));
+        let mut stream = StreamingWorld::new(data.wad, data.manager, data.templates, data.lowres_draw_by_cell, terrain_hash, guids);
+        stream.trees = data.trees;
+        self.stream = Some(stream);
     }
 
     fn update(&mut self, ctx: &mut crate::app::Ctx) -> crate::app::Camera {
@@ -2457,7 +2753,7 @@ where
         const MOUSE_SENS: f32 = 0.0008;
         let mdx = ctx.mouse_delta.0.clamp(-80.0, 80.0) * MOUSE_SENS;
         let mdy = ctx.mouse_delta.1.clamp(-80.0, 80.0) * MOUSE_SENS;
-        self.free_yaw += mdx;
+        self.free_yaw = crate::camera::turn_right(self.free_yaw, mdx);
         self.free_pitch = (self.free_pitch - mdy).clamp(-1.5, 1.5);
         let look = 1.6 * ctx.dt;
         let k = ctx.input.keys;
@@ -2468,10 +2764,10 @@ where
             self.free_pitch -= look;
         }
         if k.contains(&KeyCode::ArrowLeft) {
-            self.free_yaw -= look;
+            self.free_yaw = crate::camera::turn_right(self.free_yaw, -look);
         }
         if k.contains(&KeyCode::ArrowRight) {
-            self.free_yaw += look;
+            self.free_yaw = crate::camera::turn_right(self.free_yaw, look);
         }
         self.free_pitch = self.free_pitch.clamp(-1.5, 1.5);
         let fwd = Vec3::new(
@@ -2480,7 +2776,7 @@ where
             self.free_pitch.cos() * self.free_yaw.cos(),
         )
         .normalize();
-        let right = Vec3::Y.cross(fwd).normalize();
+        let right = crate::camera::screen_right(fwd);
         let mut mv = Vec3::ZERO;
         if k.contains(&KeyCode::KeyW) {
             mv += fwd;
@@ -3042,158 +3338,110 @@ mod terrain_texture_tests {
     mod retail {
         use super::super::*;
 
-        /// Live: a real hi-res terrainmesh tile must come back TEXTURED, not white. Loading a tile binds
-        /// each draw's PRMG-group representative `terraintextures` detail layer (via `DrawGroup::group_index`
-        /// → `terrain_group_layers`) and resolves those hashes into the tile's texture map. Binding must
-        /// hold across the multi-material sub-strip split, where `layers.len() != draws.len()`, or the
-        /// ground renders white.
+        /// The asset thread reads a cell and a neighbour off the main thread, in request order, and the
+        /// second cell leaves out the textures the first already brought, but never its own global map.
         #[test]
-        fn live_terrainmesh_tile_is_textured() {
-            let mut w = crate::worldutil::schema_wire_tests::retail::open_vz_wad();
-            // The TerrainObject->Transform tile map (terrainmesh_hash -> world pos) lives in layers_static.
-            let (_low, ls) = find_terrain_blocks(&mut w)
-                .unwrap_or_else(|e| panic!("the retail vz.wad's terrain blocks: {e}"));
-            let tiles = mercs2_formats::placement::load_terrain_tiles(&ls)
-                .expect("every TerrainObject has a Transform");
-            let tile = tiles.into_iter().next().expect("the retail vz.wad places at least one TerrainObject tile");
-            wad::extract_container_typed(&mut w, tile.terrainmesh_hash, TERRAINMESH_TYPE_HASH)
-                .unwrap_or_else(|e| panic!("terrainmesh 0x{:08X}: {e}", tile.terrainmesh_hash));
-
-            let m = load_terrainmesh_tile(&mut w, tile.terrainmesh_hash, tile.pos)
-                .expect("terrainmesh tile must load");
-            assert!(!m.draws.is_empty(), "tile has no draws");
-
-            // Every draw should carry a detail diffuse, and that hash must be a real, decoded
-            // terraintextures texture present in the tile's resolved texture map.
-            let with_diffuse = m.draws.iter().filter(|d| d.diffuse.is_some()).count();
-            let resolved = m
-                .draws
-                .iter()
-                .filter(|d| d.diffuse.map_or(false, |h| m.textures.contains_key(&h)))
-                .count();
-            assert!(!m.textures.is_empty(), "no terrain textures were loaded (terrain would render white)");
-            assert!(
-                with_diffuse * 100 >= m.draws.len() * 95,
-                "expected ~all draws bound to a detail layer, got {with_diffuse}/{} — the group_index \
-                 mapping regressed and the terrain would render white",
-                m.draws.len()
-            );
-            assert!(
-                resolved * 100 >= m.draws.len() * 95,
-                "expected ~all bound draws to resolve to a loaded terraintextures texture, got \
-                 {resolved}/{} resolved",
-                m.draws.len()
-            );
-            eprintln!(
-                "terrainmesh 0x{:08X}: {} draws, {with_diffuse} bound, {resolved} resolve, {} distinct textures",
-                tile.terrainmesh_hash, m.draws.len(), m.textures.len()
-            );
+        fn the_asset_thread_loads_cells_in_order_and_shares_their_textures() {
+            let w = crate::worldutil::schema_wire_tests::retail::open_vz_wad();
+            let mut thread = AssetThread::start(wad::path(&w).to_string());
+            let cells = [(0x4514_DE1Fu32, [2200.0, 0.0, -1800.0]), (0x40C2_1352, [2200.0, 0.0, -1400.0])];
+            for (hash, pos) in cells {
+                thread.request(hash, AssetJob::Terrain { hash, pos, fade: Default::default() }).unwrap();
+                thread.request(hash, AssetJob::Terrain { hash, pos, fade: Default::default() }).unwrap();
+            }
+            assert_eq!(thread.pending.len(), 2, "a repeated request is one job");
+            let cell = |r: AssetReady| match r {
+                AssetReady::Terrain { model, tris } => (model, tris),
+                _ => panic!("a terrain job left something else"),
+            };
+            let (first, tris) = cell(thread.ready.recv().unwrap().unwrap());
+            let (second, _) = cell(thread.ready.recv().unwrap().unwrap());
+            assert_eq!((first.hash, second.hash), (cells[0].0, cells[1].0), "results keep request order");
+            assert!(!tris.is_empty());
+            let global = |m: &LoadedModel| m.draws.iter().find_map(|d| d.ground.as_ref().map(|g| g.global)).unwrap();
+            assert!(first.textures.contains_key(&global(&first)));
+            assert!(second.textures.contains_key(&global(&second)), "a cell brings its own global map");
+            let shared = second.textures.keys().filter(|h| first.textures.contains_key(h)).count();
+            assert_eq!(shared, 0, "the second cell read a texture the first brought");
         }
 
-        /// Live: the multi-layer SPLAT BLEND is faithful and non-degenerate. Over real vz.wad tiles this
-        /// asserts (a) a terrainmesh group material carries >=2 blendable DETAIL diffuses beyond the base
-        /// (so the blend has real layers to mix); (b) the per-vertex D3DCOLOR weights decode to a sane,
-        /// non-degenerate distribution (dominant R, weights normalize to ~1, NOT all-equal); (c) after
-        /// binding, every blend draw carries a representative diffuse AND its aliased detail slots, all
-        /// resolving to loaded textures — the anti-white-terrain guarantee.
+        /// The two pixel shaders ground cover blends with read `COLOR0.a` into their output alpha, where
+        /// `shader.wgsl` puts the fade: under any other alpha they would draw whole, then pop out at the
+        /// cull depth.
         #[test]
-        fn live_terrainmesh_splat_blend_is_faithful() {
+        fn ground_cover_that_blends_fades_through_its_output_alpha() {
+            use mercs2_formats::shader_registrations::OutputAlpha;
+            let path = crate::worldutil::schema_wire_tests::retail::vz_wad_path();
+            let samplers = crate::render::pixel_samplers(std::path::Path::new(&path)).unwrap();
+            let alpha = |name: &str| samplers.output_alpha(mercs2_formats::hash::pandemic_hash_m2(name)).unwrap();
+            assert_eq!(alpha("PgDiffAmbOccFP"), OutputAlpha::DiffuseVertex);
+            assert_eq!(alpha("PgDiffSpecNormAmbOccFP"), OutputAlpha::DiffuseVertexOrSpecular);
+        }
+
+        /// A pack read through the asset thread is whole: its draws, the instances its patches name and
+        /// its textures, each read once across packs.
+        #[test]
+        fn the_asset_thread_builds_ground_cover() {
             let mut w = crate::worldutil::schema_wire_tests::retail::open_vz_wad();
-            let (_low, ls) = find_terrain_blocks(&mut w)
-                .unwrap_or_else(|e| panic!("the retail vz.wad's terrain blocks: {e}"));
-            let tiles = mercs2_formats::placement::load_terrain_tiles(&ls)
-                .expect("every TerrainObject has a Transform");
-
-            // (a) Find a tile whose material set carries >=2 blendable detail diffuses beyond base0 +
-            // the global 3B030C8A constant — i.e. a group layerset of len >= 4 — while AGGREGATING the
-            // per-vertex weight distribution across every scanned tile (a single sparse edge tile can be
-            // near-uniform; the corpus-wide distribution is what proves the weights are real splat data).
-            let mut multi_layer_tile = None;
-            let mut max_len_seen = 0usize;
-            let (mut nverts, mut sum_r, mut sum_g, mut sum_b) = (0u64, 0u64, 0u64, 0u64);
-            let mut sum_ok = 0u64; // verts whose R+G+B normalizes to ~1
-            let mut distinct: std::collections::HashSet<[u8; 4]> = std::collections::HashSet::new();
-            let mut scanned = 0usize;
-            for t in &tiles {
-                let container =
-                    wad::extract_container_typed(&mut w, t.terrainmesh_hash, TERRAINMESH_TYPE_HASH)
-                        .unwrap_or_else(|e| panic!("terrainmesh 0x{:08X}: {e}", t.terrainmesh_hash));
-                let layers = mercs2_formats::texture::terrain_group_layers(&container)
-                    .unwrap_or_else(|e| panic!("terrainmesh 0x{:08X} MTRL: {e}", t.terrainmesh_hash));
-                let ml = layers.iter().map(|l| l.len()).max().unwrap_or(0);
-                max_len_seen = max_len_seen.max(ml);
-                if ml >= 4 && multi_layer_tile.is_none() {
-                    let best = layers.iter().max_by_key(|l| l.len()).unwrap().clone();
-                    multi_layer_tile = Some((t.terrainmesh_hash, t.pos, best));
-                }
-                let meshes = mercs2_formats::model_cubeize::read_model_meshes(&container)
-                    .unwrap_or_else(|e| panic!("terrainmesh 0x{:08X} meshes: {e}", t.terrainmesh_hash));
-                for m in &meshes {
-                    for c in &m.colors {
-                        // D3DCOLOR stored B,G,R,A: c[2]=R, c[1]=G, c[0]=B.
-                        let (r, g, b) = (c[2] as u64, c[1] as u64, c[0] as u64);
-                        sum_r += r; sum_g += g; sum_b += b;
-                        let s = (r + g + b) as f32 / 255.0;
-                        if (s - 1.0).abs() < 0.15 { sum_ok += 1; }
-                        distinct.insert(*c);
-                        nverts += 1;
-                    }
-                }
-                scanned += 1;
-                if scanned >= 24 && multi_layer_tile.is_some() {
-                    break;
+            let (archive, _) = wad::archive_and_file(&mut w);
+            let packs: Vec<u32> =
+                archive.aset.iter().filter(|e| e.type_id == wad::SCRUB_ASET_TYPE_ID).map(|e| e.asset_hash).take(3).collect();
+            assert_eq!(packs.len(), 3);
+            let mut thread = AssetThread::start(wad::path(&w).to_string());
+            for &hash in &packs {
+                thread.request(hash, AssetJob::Scrub { hash }).unwrap();
+            }
+            let mut read = std::collections::HashSet::new();
+            let mut built = 0;
+            for &hash in &packs {
+                let AssetReady::Scrub { hash: got, geometry, textures } = thread.ready.recv().unwrap().unwrap() else {
+                    panic!("a scrub job left something else");
+                };
+                assert_eq!(got, hash);
+                assert!(textures.keys().all(|h| read.insert(*h)), "a texture was read twice");
+                let g = geometry;
+                built += usize::from(!g.draws.is_empty());
+                assert!(g.draws.iter().all(|d| d.scrub.is_some() && d.index_count > 0 && d.diffuse.is_some()));
+                assert!(g.draws.iter().flat_map(|d| d.textures.iter()).all(|h| read.contains(h)));
+                for r in g.patches.iter().flat_map(|p| &p.ranges) {
+                    assert!((r.mesh as usize) < g.draws.len());
+                    assert!((r.first_instance + r.instance_count) as usize <= g.instances.len());
                 }
             }
-            let Some((tile_hash, tile_pos, best)) = multi_layer_tile else {
-                panic!(
-                    "no multi-layer terrain tile in the retail vz.wad (scanned {scanned} tiles, max layerset \
-                     len {max_len_seen})"
-                );
-            };
-            // base0 + 3B030C8A + >=2 details => at least 2 blendable diffuses after dropping the base
-            // and the global constant (index 1).
-            let blendable_details = best.len().saturating_sub(2);
-            assert!(
-                blendable_details >= 2,
-                "expected a group to carry >=2 blendable detail diffuses, got layerset {best:08X?}"
-            );
+            assert!(built > 0, "none of the packs held anything");
+        }
 
-            // (b) Per-vertex weight distribution (aggregated): dominant R, sum normalizes to ~1, varied.
-            assert!(nverts > 0, "terrain tiles carried no per-vertex splat weights");
-            assert!(
-                distinct.len() > 16,
-                "weights are degenerate (all-equal): only {} distinct values over {nverts} verts",
-                distinct.len()
-            );
-            assert!(
-                sum_ok * 100 >= nverts * 90,
-                "expected >=90% of vertices' R+G+B to normalize to ~1, got {sum_ok}/{nverts}"
-            );
-            assert!(
-                sum_r > sum_g && sum_r > sum_b,
-                "expected the R channel to dominate the splat weights (means R {} G {} B {})",
-                sum_r / nverts, sum_g / nverts, sum_b / nverts
-            );
+        /// The cell under the Mérida plaza, `Terrain_r05_c15`: its overlay draws bind the paving with
+        /// their authored coordinates, and its ground draws sample their stages, every one resolved.
+        #[test]
+        fn live_terrain_cell_binds_its_paving_and_its_ground() {
+            const CELL: u32 = 0x4514_DE1F;
+            const PAVING_NORMAL: u32 = 0x0E44_1044; // caracas_bld_plazaparquecentral01_ground01_nm
+            let mut w = crate::worldutil::schema_wire_tests::retail::open_vz_wad();
+            let m = load_terrainmesh_tile(&mut w, CELL, [2200.0, 0.0, -1800.0], Default::default(), &|_| false)
+                .unwrap_or_else(|e| panic!("{e}"));
 
-            // (c) Binding: every blend draw carries a representative diffuse + aliased detail slots, all
-            // resolving to a loaded terraintextures texture (anti-white-terrain).
-            let m = load_terrainmesh_tile(&mut w, tile_hash, tile_pos).expect("tile loads");
-            let blend_draws: Vec<_> = m.draws.iter().filter(|d| d.diffuse.is_some()).collect();
-            assert!(!blend_draws.is_empty(), "no draw bound a detail layer");
-            for d in &blend_draws {
-                for slot in [d.diffuse, d.normal, d.specular] {
-                    let h = slot.expect("a blend draw must bind all three diffuse slots (aliased if absent)");
-                    assert!(
-                        m.textures.contains_key(&h),
-                        "blend layer 0x{h:08X} did not resolve to a loaded texture (white-terrain risk)"
-                    );
-                }
+            let paving: Vec<_> = m.draws.iter().filter(|d| d.textures.contains(&PAVING_NORMAL)).collect();
+            assert!(!paving.is_empty(), "no draw binds the plaza's paving");
+            for d in &paving {
+                assert!(d.ground.is_none(), "the paving is a material draw");
+                let tris = &m.indices[d.index_start as usize..(d.index_start + d.index_count) as usize];
+                assert!(tris.iter().any(|&i| m.verts[i as usize].uv != [0.0; 2]), "the paving lost its coordinates");
+                assert!(d.textures.iter().all(|h| m.textures.contains_key(h)), "the paving's textures did not resolve");
             }
-            eprintln!(
-                "splat 0x{:08X}: layerset {:08X?} ({blendable_details} blendable details); {} distinct \
-                 weights over {nverts} verts, {sum_ok} normalize; {} blend draws all resolve",
-                tile_hash, best, distinct.len(), blend_draws.len()
-            );
+
+            let ground: Vec<_> = m.draws.iter().filter_map(|d| d.ground.as_ref()).collect();
+            assert!(ground.iter().any(|g| g.layers[1].is_some()), "no ground draw blends two layers");
+            for g in &ground {
+                assert_eq!(g.centre, [2200.0, -1800.0]);
+                assert_eq!(g.uv_scale, [-0.0025, -0.0025], "a ground material's map does not span the cell");
+                let stages = [Some(g.global), g.detail].into_iter().chain(g.layers).flatten();
+                assert!(stages.into_iter().all(|h| m.textures.contains_key(&h)), "a ground stage did not resolve");
+            }
+            // A layer's projection is the material's own, not a shared constant.
+            let two = ground.iter().find(|g| g.layers[1].is_some()).expect("found above");
+            assert_ne!(two.layer_uv[0], [[0.0; 4]; 2], "a layer with no projection");
+            eprintln!("{} draws, {} ground, {} textures", m.draws.len(), ground.len(), m.textures.len());
         }
 
         /// Live proof of the K3 collision savings: a real terrainmesh tile carries thousands of triangles that
@@ -3210,7 +3458,7 @@ mod terrain_texture_tests {
             let tile = tiles.into_iter().next().expect("the retail vz.wad places at least one TerrainObject tile");
             wad::extract_container_typed(&mut w, tile.terrainmesh_hash, TERRAINMESH_TYPE_HASH)
                 .unwrap_or_else(|e| panic!("terrainmesh 0x{:08X}: {e}", tile.terrainmesh_hash));
-            let m = load_terrainmesh_tile(&mut w, tile.terrainmesh_hash, tile.pos).expect("tile loads");
+            let m = load_terrainmesh_tile(&mut w, tile.terrainmesh_hash, tile.pos, Default::default(), &|_| false).expect("tile loads");
             let world_tris = extract_local_tris(&m); // already world-space
             let tris_avoided = world_tris.len();
             assert!(

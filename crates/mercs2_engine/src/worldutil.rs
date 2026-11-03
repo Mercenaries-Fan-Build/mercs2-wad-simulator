@@ -353,6 +353,8 @@ pub struct TemplateRecords {
     pub factions: std::collections::BTreeMap<u32, u32>,
     /// Templates with a `TerrainObject` or `LowResTerrainObject` record.
     pub terrain: std::collections::BTreeSet<u32>,
+    /// `TerrainFade`: the fade distances of a template's terrain patches.
+    pub terrain_fade: std::collections::BTreeMap<u32, mercs2_formats::terrainmesh::TerrainFade>,
 }
 
 impl TemplateRecords {
@@ -360,12 +362,12 @@ impl TemplateRecords {
     pub fn load(assets: &mut crate::asset::AssetSource) -> Result<TemplateRecords, String> {
         use mercs2_formats::worldentity::{WorldEntity, RETAIL_WORLDENTITY_NAME_HASH, WORLDENTITY_TYPE_HASH};
         let we = assets
-            .resolve(WORLDENTITY_TYPE_HASH, RETAIL_WORLDENTITY_NAME_HASH)
+            .ecs_container(WORLDENTITY_TYPE_HASH, RETAIL_WORLDENTITY_NAME_HASH)?
             .ok_or("worldentity 0x50075B3B: in no open wad")?;
         Self::from_worldentity(&WorldEntity::parse(&we).map_err(|e| format!("worldentity: {e}"))?)
     }
 
-    /// An error when a key carries two `Name`, `NetCategoryInfo` or `Association` records, a payload
+    /// An error when a key carries two `Name`, `NetCategoryInfo`, `Association` or `TerrainFade` records, a payload
     /// of another shape, or several archetype physics components.
     pub fn from_worldentity(we: &mercs2_formats::worldentity::WorldEntity) -> Result<TemplateRecords, String> {
         use mercs2_formats::worldentity::Payload;
@@ -374,6 +376,7 @@ impl TemplateRecords {
         let mut names = Vec::new();
         let mut net_category = BTreeMap::new();
         let mut factions = BTreeMap::new();
+        let mut terrain_fade = BTreeMap::new();
         let mut classes: BTreeMap<u32, Vec<&str>> = BTreeMap::new();
         for c in &we.components {
             for r in &c.records {
@@ -384,9 +387,24 @@ impl TemplateRecords {
                             names.push((k, name.clone()));
                             false
                         }
+                        ("Name", Payload::NameHash(h)) => {
+                            names.push((k, format!("0x{h:08X}")));
+                            false
+                        }
                         ("NetCategoryInfo", Payload::PackedU16(v)) => net_category.insert(k, *v).is_some(),
                         ("Association", Payload::Fixed(b)) if b.len() == 4 => factions.insert(k, u32::from_le_bytes([b[0], b[1], b[2], b[3]])).is_some(),
-                        ("Name" | "NetCategoryInfo" | "Association", p) => return Err(format!("template 0x{k:08X}: {} payload {p:?} is not the native layout", c.class)),
+                        ("TerrainFade", Payload::Fixed(b)) if b.len() == 20 => {
+                            let word = |i: usize| f32::from_le_bytes([b[i], b[i + 1], b[i + 2], b[i + 3]]);
+                            let fade = mercs2_formats::terrainmesh::TerrainFade {
+                                global_start: word(0),
+                                global_end: word(4),
+                                detail_start: word(8),
+                                detail_end: word(12),
+                                detail_size: word(16),
+                            };
+                            terrain_fade.insert(k, fade).is_some()
+                        }
+                        ("Name" | "NetCategoryInfo" | "Association" | "TerrainFade", p) => return Err(format!("template 0x{k:08X}: {} payload {p:?} is not the native layout", c.class)),
                         _ => false,
                     };
                     if dup {
@@ -416,6 +434,7 @@ impl TemplateRecords {
             archetypes,
             factions,
             terrain,
+            terrain_fade,
         })
     }
 }
@@ -454,6 +473,8 @@ pub struct PlacedObject {
     pub terrain: bool,
     /// Its `LowResTerrainObject` tile mesh.
     pub low_res_mesh: Option<u32>,
+    /// Its `ScrubObject` ground cover.
+    pub scrub: Option<u32>,
     /// Registered static ([`mercs2_formats::placement::PlacedEntity::is_static`]).
     pub is_static: bool,
     /// Its own `ModelName`, else its template's.
@@ -539,6 +560,15 @@ pub struct NodeSpheres {
 }
 
 impl NodeSpheres {
+    /// Keep a sphere read elsewhere, so [`Self::sphere`] need not read it again. The cache key is the
+    /// source's asset: a source with no asset has nothing to keep.
+    pub fn remember(&mut self, source: NodeSource, sphere: Option<mercs2_formats::render_node::Sphere>) {
+        let NodeSource::Model { model, tiny_geometry } = source else { return };
+        if let Some(s) = sphere {
+            self.cache.insert((wad::MODEL_TYPE_HASH, model, tiny_geometry), s);
+        }
+    }
+
     /// The sphere of the node `source` makes; `None` for no node.
     pub fn sphere(&mut self, w: &mut wad::Wad, source: NodeSource) -> Result<Option<mercs2_formats::render_node::Sphere>, String> {
         use mercs2_formats::render_node::{activation_enable, info_sphere, light_sphere, posed_sphere};
@@ -578,7 +608,7 @@ impl PlacedCatalog {
     /// `docs/reverse_engineer/layer_load_code_map.md` §2). An entity with two node sources, or a placed
     /// `LightAnimation` (only templates carry one), is an error.
     pub fn add_block(&mut self, block: &[u8], templates: &TemplateRecords) -> Result<Vec<u32>, String> {
-        use mercs2_formats::placement::{component_keys, load_terrain_tiles, placed_entities, placed_light_objects};
+        use mercs2_formats::placement::{component_keys, load_scrub_placements, load_terrain_tiles, placed_entities, placed_light_objects};
         let own_hib = mercs2_formats::hibernation_control::placed_hibernation(block)?;
         let own_model = mercs2_formats::model_name::placed_model_names(block)?;
         let own_tiny = component_keys(block, "TinyGeometryObject")?;
@@ -588,12 +618,18 @@ impl PlacedCatalog {
         }
         let terrain_mesh: std::collections::HashMap<u32, u32> =
             load_terrain_tiles(block)?.into_iter().map(|t| (t.key, t.terrainmesh_hash)).collect();
+        let scrub: std::collections::HashMap<u32, u32> =
+            load_scrub_placements(block)?.into_iter().map(|s| (s.key, s.scrub_hash)).collect();
         let ents = placed_entities(block)?;
         for e in &ents {
             let own_hibernation = own_hib.get(&e.key).copied();
-            let model = own_model.get(&e.key).or_else(|| templates.models.get(&e.parent)).copied();
+            // A `Model` of 0 is no model: the ModelName activation requests nothing for it (`0x669633`).
+            let model = own_model.get(&e.key).or_else(|| templates.models.get(&e.parent)).copied().filter(|&m| m != 0);
             let light = own_light.get(&e.key).or_else(|| templates.lights.get(&e.parent)).copied();
             let terrain = terrain_mesh.get(&e.key).copied();
+            if scrub.contains_key(&e.key) && (model.is_some() || terrain.is_some()) {
+                return Err(format!("placed entity 0x{:08X} has a ScrubObject and another visual, which is not handled", e.key));
+            }
             let tiny = own_tiny.contains(&e.key) || templates.tiny_geometry.contains(&e.parent);
             let node = node_source(e.key, model, tiny, e.low_res_mesh, light.map(|l| (l, templates.light_scales.get(&e.parent).copied().unwrap_or_default())), terrain)?;
             let replaced = self.objects.insert(e.key, PlacedObject {
@@ -606,6 +642,7 @@ impl PlacedCatalog {
                 terrain_mesh: terrain,
                 terrain: e.terrain,
                 low_res_mesh: e.low_res_mesh,
+                scrub: scrub.get(&e.key).copied(),
                 is_static: e.is_static(),
                 model,
                 node,
@@ -625,7 +662,7 @@ impl PlacedCatalog {
         if templates.terrain.contains(&template) {
             return Err(format!("spawn of template 0x{template:08X}: it carries a TerrainObject or LowResTerrainObject, whose spawn is not modelled"));
         }
-        let model = templates.models.get(&template).copied();
+        let model = templates.models.get(&template).copied().filter(|&m| m != 0);
         let light = templates.lights.get(&template).map(|&l| (l, templates.light_scales.get(&template).copied().unwrap_or_default()));
         let o = PlacedObject {
             key,
@@ -637,6 +674,7 @@ impl PlacedCatalog {
             terrain_mesh: None,
             terrain: false,
             low_res_mesh: None,
+            scrub: None,
             is_static,
             model,
             node: node_source(key, model, templates.tiny_geometry.contains(&template), None, light, None)?,
@@ -1405,6 +1443,47 @@ pub(crate) mod schema_wire_tests {
                 .1
         }
 
+        /// The PMC hall at the `view_state` retail draws it with (3, read off its render object in the
+        /// `23fe7f38_cracked-cruise/pmc` capture): the finer block's trim adds to the walls of the same
+        /// node, which keep their tiers. Of the 134,682 triangles at those tiers, the 1,450 inside the
+        /// trim's bounds give way to it; whether retail draws those as well is not known.
+        #[test]
+        fn the_pmc_hall_keeps_its_walls_beside_the_finer_blocks_trim() {
+            let mut w = open_vz_wad();
+            let m = crate::model::Model::load(&mut w, 0x39AF17DC).unwrap();
+            let (_, _, draws, _) = m.flatten();
+            let drawn: u32 = draws.iter().filter(|d| d.lod_mask & 3 != 0).map(|d| d.index_count / 3).sum();
+            assert_eq!(drawn, 133_232);
+        }
+
+        /// Every retail layer block catalogues, and no entity carrying ground cover carries another
+        /// visual, which `add_block` refuses: the executor gives an entity one or the other.
+        #[test]
+        fn every_retail_layer_block_catalogues_its_ground_cover() {
+            let mut w = open_vz_wad();
+            let templates = TemplateRecords::load(&mut crate::asset::AssetSource::discover(&vz_wad_path(), &[]).unwrap())
+                .unwrap_or_else(|e| panic!("{e}"));
+            let (archive, _) = crate::wad::archive_and_file(&mut w);
+            let blocks: Vec<(u16, String)> = archive
+                .paths
+                .iter()
+                .enumerate()
+                .filter(|(_, p)| {
+                    let p = p.to_lowercase();
+                    p.contains("layers_static") || p.contains("vz_state")
+                })
+                .map(|(i, p)| (i as u16, p.clone()))
+                .collect();
+            let mut scrubs = 0;
+            for (block, path) in &blocks {
+                let data = crate::wad::decompress_block_index(&mut w, *block).unwrap_or_else(|e| panic!("{path}: {e}"));
+                let mut catalog = PlacedCatalog::default();
+                let keys = catalog.add_block(&data, &templates).unwrap_or_else(|e| panic!("{path}: {e}"));
+                scrubs += keys.iter().filter(|k| catalog.get(**k).is_some_and(|o| o.scrub.is_some())).count();
+            }
+            assert_eq!(scrubs, 1043, "{} layer blocks", blocks.len());
+        }
+
         /// Loading the `layers_static` block's 173 layers one container at a time places exactly what
         /// reading the block whole places: the same entities with the same node sources, terrain
         /// tiles, lights, landing pads, names and population regions. Every placement reader must
@@ -1774,7 +1853,7 @@ pub fn build_placement_markers(
         for l in &local {
             verts.push(crate::mesh::Vertex {
                 pos: [p.pos[0] + l[0], p.pos[1] + l[1], p.pos[2] + l[2]],
-                color,
+                color: [color[0], color[1], color[2], 1.0],
                 uv: [0.0, 0.0],
                 normal: [0.0, 1.0, 0.0],
                 tangent: [1.0, 0.0, 0.0, 1.0],

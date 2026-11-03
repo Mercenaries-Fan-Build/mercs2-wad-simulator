@@ -459,9 +459,9 @@ pub fn adds_templates(manifest: &Manifest) -> bool {
 pub fn template_keys(we: &WorldEntity, name: &str) -> Result<Vec<u32>, String> {
     let h = pandemic_hash_m2(name);
     let mut keys: Vec<u32> = we
-        .names()?
+        .name_hashes()?
         .into_iter()
-        .filter(|(n, _)| pandemic_hash_m2(n) == h)
+        .filter(|(n, _)| *n == h)
         .flat_map(|(_, k)| k.iter().copied().filter(|k| k & TEMPLATE_KEY_BIT != 0).collect::<Vec<_>>())
         .collect();
     keys.sort_unstable();

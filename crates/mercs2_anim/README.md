@@ -27,7 +27,8 @@ Asset access is behind the `AnimAssets` trait (rig / clip duration / sampled pos
 drives entities without depending on the renderer or the loader. Its only dependencies are
 `mercs2_core` and `mercs2_formats`.
 
-**FaceFX is NOT implemented** — see `DEFERRED.md`. The ragdoll sim lives in `mercs2_physics::ragdoll`;
+`facefx` solves a FaceFX actor's face bones under an anim; what of the game's FaceFX runtime is
+not carried over is in `DEFERRED.md`. The ragdoll sim lives in `mercs2_physics::ragdoll`;
 this crate supplies its physics-free skeleton seam (`ragdoll`: `body_seeds` / `write_back_model_pose`).
 
 ## Where it comes from

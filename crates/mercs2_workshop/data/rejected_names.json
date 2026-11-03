@@ -1,6 +1,12 @@
 {
-  "note": "Names harvested from block bytes (aset_block_strings.json) that hash to an asset but are collision debris: ones with an identifier's shape, and ones the production table (production_names.json) took in before the harvest was filtered. Every reader of the harvest, and --pack-data's read of the production table, drops these (hash, name) pairs. Each hash is pandemic_hash_m2 of its name.",
+  "note": "Names that hash to a referenced value but are collision debris: block-byte harvest names (aset_block_strings.json) with an identifier's shape, ones the production table (production_names.json) took in before the harvest was filtered, and rainbow-table names that matched an animation-table cell by chance. Every reader of the harvest, --pack-data's read of the production table, and tools/build_production_names.py drop these (hash, name) pairs. Each hash is pandemic_hash_m2 of its name.",
   "pandemic_hash_m2": {
+    "0x417E20EF": [
+      "xZIQDWw\\VZ"
+    ],
+    "0x73F8145E": [
+      "U//f"
+    ],
     "0x845FF0E6": [
       "j-cfe"
     ],
@@ -9,6 +15,12 @@
     ],
     "0x8AD3F7B7": [
       "i4e2"
+    ],
+    "0xE0E7ABB2": [
+      "Y7EzN3L7"
+    ],
+    "0xE25098E4": [
+      "Y8n\\"
     ],
     "0xE74E1413": [
       "csumoe9mucfxp"

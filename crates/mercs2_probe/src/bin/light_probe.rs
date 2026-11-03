@@ -314,7 +314,7 @@ fn main() {
                     pmn[c] = pmn[c].min(v.pos[c]);
                     pmx[c] = pmx[c].max(v.pos[c]);
                 }
-                if v.color.iter().any(|&c| c < 0.95) {
+                if v.color[..3].iter().any(|&c| c < 0.95) {
                     nonwhite += 1;
                 }
             }

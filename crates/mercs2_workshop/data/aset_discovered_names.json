@@ -2583,6 +2583,9 @@
     "0x29D561EE": [
       "vz_state_chicon054_pristine"
     ],
+    "0x29DF0042": [
+      "pmc_hum_ewan"
+    ],
     "0x29ED97C3": [
       "jungle_env_treesmall01_imposter"
     ],
@@ -7608,6 +7611,9 @@
     "0x80F39CED": [
       "vz_hum_soldier_a_ub"
     ],
+    "0x80F7BF4D": [
+      "oc_hum_lifestylestarter"
+    ],
     "0x811872A8": [
       "ocoutpostinterior_interiorfloor"
     ],
@@ -9812,6 +9818,9 @@
     ],
     "0xA6489D3A": [
       "village_bld_windmill01"
+    ],
+    "0xA64C9404": [
+      "gr_hum_starter01"
     ],
     "0xA65E06D1": [
       "vz_terrainglobal_r13_c00_0x000746aa"
@@ -12104,6 +12113,9 @@
     ],
     "0xD13AD580": [
       "vz_state_oiljob008_k_ruined_tinygeometry_0x00143ce9"
+    ],
+    "0xD14E2809": [
+      "pmc_hum_misha"
     ],
     "0xD1574A09": [
       "industrial_bld_warehouselarge01"
@@ -15050,6 +15062,1161 @@
     ],
     "0xF9EA3B44": [
       "civ_hum_super_industrial"
+    ],
+    "0x182624E1": [
+      "VehicleAnimationLookup"
+    ],
+    "0x4BE8214B": [
+      "scuba"
+    ],
+    "0xC8886020": [
+      "crouched"
+    ],
+    "0xE7B64876": [
+      "carrying"
+    ],
+    "0xFC8D859D": [
+      "prone"
+    ],
+    "0x41B4326E": [
+      "global_explosion_c4"
+    ],
+    "0xDB331999": [
+      "global_env_godray2"
+    ],
+    "0x0E6A7F61": [
+      "global_flaresmoke_lightblue"
+    ],
+    "0x0EB6A796": [
+      "global_airstrike_fuelairbomb"
+    ],
+    "0x12EC2C29": [
+      "global_muzzleflash_tank"
+    ],
+    "0x207D7D43": [
+      "global_shatteringglass_vehicle"
+    ],
+    "0x2E16705D": [
+      "global_airstrike_tactnuke"
+    ],
+    "0x3A4EE60F": [
+      "global_explosion_tankhatch"
+    ],
+    "0x49D65F2E": [
+      "global_exp_shockwave_ground_tactnuke"
+    ],
+    "0x4A87D9DF": [
+      "global_flaresmoke_green_fail"
+    ],
+    "0x4C611289": [
+      "global_explosion_money_large"
+    ],
+    "0x4DE2FC54": [
+      "global_dustfall"
+    ],
+    "0x50A1BDD5": [
+      "global_exp_shockwave_ground_bunkerbuster"
+    ],
+    "0x57FDFDDB": [
+      "global_flaresmoke_fail"
+    ],
+    "0x5DFB19C0": [
+      "global_flaresmoke_lightblue_fail"
+    ],
+    "0x91A23B32": [
+      "global_exp_shockwave_ground"
+    ],
+    "0x91BC7DD8": [
+      "global_flaresmoke"
+    ],
+    "0xB8B4E0D5": [
+      "global_exp_falling_debris_airstrike"
+    ],
+    "0xD0187C80": [
+      "global_impact_blood"
+    ],
+    "0xD6066462": [
+      "global_shellhandgun"
+    ],
+    "0xEB31B8EB": [
+      "global_flaresmoke_yellow"
+    ],
+    "0xF13A14A6": [
+      "global_flaresmoke_yellow_fail"
+    ],
+    "0xF8D30940": [
+      "global_muzzleflash_handgun"
+    ],
+    "0xC558C9D8": [
+      "forcegravity"
+    ],
+    "0xD80DF37F": [
+      "forcegravityvar"
+    ],
+    "0x6CF0BE14": [
+      "forcedrag"
+    ],
+    "0xBE968D3B": [
+      "forcedragvar"
+    ],
+    "0xB3DBB6C0": [
+      "forcewind"
+    ],
+    "0x4C49B137": [
+      "forcewindvar"
+    ],
+    "0x0116A7FC": [
+      "global_impact_sweat"
+    ],
+    "0x02D849BD": [
+      "global_firehydrant_spray"
+    ],
+    "0x044D5400": [
+      "global_waterfall_bottom_tiny"
+    ],
+    "0x04B6FC7F": [
+      "global_exp_shockwave_ground_tiny"
+    ],
+    "0x059DD524": [
+      "global_explosion_money_large_fire"
+    ],
+    "0x07102C7C": [
+      "global_explosion_rpg_center"
+    ],
+    "0x07BA28D1": [
+      "global_firesmallsmoke_smoke"
+    ],
+    "0x0B480F23": [
+      "global_exp_shockwave_ground_tiny_concrete"
+    ],
+    "0x0EF1280C": [
+      "global_impact_leaves"
+    ],
+    "0x0F3468B3": [
+      "global_explosion_watertower"
+    ],
+    "0x0F3783D6": [
+      "global_muzzleflash_rpg"
+    ],
+    "0x105FAD71": [
+      "global_impact_glass_nodamage"
+    ],
+    "0x106D24F3": [
+      "global_shellmg"
+    ],
+    "0x10AD30BA": [
+      "global_impact_metal_point"
+    ],
+    "0x1115DE7C": [
+      "global_flotsum_birds"
+    ],
+    "0x12F4A101": [
+      "global_boatwake_small"
+    ],
+    "0x13156C36": [
+      "global_explosion_pickup_money_small"
+    ],
+    "0x131FFE91": [
+      "global_muzzleflash_artillery"
+    ],
+    "0x16AD0C23": [
+      "global_explosion_tankturretseam"
+    ],
+    "0x16E3E54E": [
+      "global_exp_shockwave_ground_lrg"
+    ],
+    "0x17CB0E4D": [
+      "global_explosion_clothes_a"
+    ],
+    "0x1A6C4F1C": [
+      "global_exp_shockwave_ground_pep"
+    ],
+    "0x1C8CFA8E": [
+      "global_airstrike_missile"
+    ],
+    "0x1DC8342C": [
+      "global_flotsum_ash"
+    ],
+    "0x1DEC11A1": [
+      "global_impact_slide_dirt"
+    ],
+    "0x1F31CA06": [
+      "global_veh_exhaust_tank"
+    ],
+    "0x1F7435DF": [
+      "global_explosion_feathers"
+    ],
+    "0x1FB76E9D": [
+      "global_waterfall_smoke_large"
+    ],
+    "0x1FC2C9CC": [
+      "global_explosion_water_large"
+    ],
+    "0x205B8D4B": [
+      "global_waterfall_bottom_small"
+    ],
+    "0x22E8D7ED": [
+      "global_veh_smoke_dust"
+    ],
+    "0x23FB986D": [
+      "global_flotsum_bugs"
+    ],
+    "0x24D45F35": [
+      "global_explosion_money_small"
+    ],
+    "0x25C0369A": [
+      "global_firesmall_smoke"
+    ],
+    "0x261C2D1E": [
+      "global_explosion_vehicle_weakpoint"
+    ],
+    "0x26517D5C": [
+      "global_airstrike_clusterbomb"
+    ],
+    "0x2822050C": [
+      "global_explosion_pickup_grenade"
+    ],
+    "0x28BE49C5": [
+      "global_firelargesmoke_smoke"
+    ],
+    "0x2A082C74": [
+      "global_explosion_rpg"
+    ],
+    "0x2C4E0D3C": [
+      "global_flaresmoke_green"
+    ],
+    "0x2F635102": [
+      "global_impact_metal_nodamage"
+    ],
+    "0x2FA70559": [
+      "global_impact_metal"
+    ],
+    "0x302C8794": [
+      "global_impact_glass"
+    ],
+    "0x30BFB4CB": [
+      "global_shellshotgun"
+    ],
+    "0x32A81E7F": [
+      "global_explosion_pickup_large"
+    ],
+    "0x32CF2109": [
+      "global_boatwake_drift"
+    ],
+    "0x33821655": [
+      "global_muzzleflash_mg"
+    ],
+    "0x34E7570A": [
+      "global_blastdoors_tunneltop_smoke"
+    ],
+    "0x36162D5D": [
+      "global_muzzleflash_shotgun"
+    ],
+    "0x364CEE60": [
+      "global_impact_brick_point"
+    ],
+    "0x37EFDC61": [
+      "global_explosion_vehicle_ground"
+    ],
+    "0x3E75CA5F": [
+      "global_impact_bullet_leaves"
+    ],
+    "0x3F87D2DB": [
+      "global_boatwake_slow"
+    ],
+    "0x3FE1C432": [
+      "global_airstrike_bunkerbuster"
+    ],
+    "0x40059931": [
+      "global_impact_concrete"
+    ],
+    "0x41988B00": [
+      "global_rotorwash_water"
+    ],
+    "0x463D2D42": [
+      "global_impact_slide_leaves"
+    ],
+    "0x4B2396F1": [
+      "global_env_mist_light_placeable"
+    ],
+    "0x4BDCE4F5": [
+      "global_impact_bullet_blood"
+    ],
+    "0x4BEABCCA": [
+      "global_exp_falling_debris_lrg_special"
+    ],
+    "0x4D131C6E": [
+      "global_impact_bullet_stone"
+    ],
+    "0x4FE2C159": [
+      "global_explosion_flag_red"
+    ],
+    "0x505FA799": [
+      "global_veh_smoke_brakes"
+    ],
+    "0x50BB624F": [
+      "global_boatroostertail_small_slow"
+    ],
+    "0x5259B8B8": [
+      "global_impact_bullet_water"
+    ],
+    "0x531723C7": [
+      "global_airstrike_bunkerbuster_initial"
+    ],
+    "0x531ED778": [
+      "global_exp_falling_debris_huge"
+    ],
+    "0x542F23D5": [
+      "global_airstrike_cruisemissile"
+    ],
+    "0x54562290": [
+      "global_firelargesmoke_smoke_vehicle"
+    ],
+    "0x580B0448": [
+      "global_flotsum_leaves"
+    ],
+    "0x5836C664": [
+      "global_veh_exhaust_car"
+    ],
+    "0x59A24324": [
+      "global_rotorwash"
+    ],
+    "0x5EEB2E58": [
+      "global_impact_bullet_dirt"
+    ],
+    "0x604149F9": [
+      "global_explosion_waterbumper"
+    ],
+    "0x6363295D": [
+      "global_boatroostertail"
+    ],
+    "0x645FC940": [
+      "global_explosion_flag_blue"
+    ],
+    "0x64C2146B": [
+      "global_firetreetrunkb"
+    ],
+    "0x66763803": [
+      "global_splash_dive"
+    ],
+    "0x696B12C3": [
+      "global_explosion_parrotfeathers"
+    ],
+    "0x69DB24F9": [
+      "global_boatwake"
+    ],
+    "0x6ADEED35": [
+      "global_muzzleflash_blue"
+    ],
+    "0x6BA1C64C": [
+      "global_explosion_pickup_ammo"
+    ],
+    "0x6C1987C7": [
+      "global_impact_dirt"
+    ],
+    "0x6E41757A": [
+      "global_firemediumsmoke_smoke_vehicle"
+    ],
+    "0x6E495DD0": [
+      "global_blastdoors_ext_smoke"
+    ],
+    "0x76406639": [
+      "global_muzzleflash_grenadelauncher"
+    ],
+    "0x77C065AA": [
+      "global_impact_concrete_nodamage"
+    ],
+    "0x78452950": [
+      "global_grenadeexplosion"
+    ],
+    "0x78B52082": [
+      "global_flotsum_dust_ground"
+    ],
+    "0x7A06B1D3": [
+      "global_exp_sparks_sphere_lrg"
+    ],
+    "0x7A621612": [
+      "global_dustshanty"
+    ],
+    "0x7AC505EC": [
+      "global_dustexplosion"
+    ],
+    "0x7C58682C": [
+      "global_airstrike_artillery"
+    ],
+    "0x7DDDE32B": [
+      "global_firelargesmoke"
+    ],
+    "0x815A118F": [
+      "global_firegrandesmoke"
+    ],
+    "0x81CE84A6": [
+      "global_explosion_tankturretflame"
+    ],
+    "0x81D11198": [
+      "global_impact_brick_nodamage"
+    ],
+    "0x82C0050E": [
+      "global_firetreetrunkc"
+    ],
+    "0x858C9393": [
+      "global_flotsum_bugs_pirate"
+    ],
+    "0x8603FEC9": [
+      "global_exp_falling_debris_med"
+    ],
+    "0x869EEC70": [
+      "global_exp_shockwave_ground_tiny_grass"
+    ],
+    "0x87CD0FFF": [
+      "global_exp_shockwave_ground_sml"
+    ],
+    "0x88196FDD": [
+      "global_airstrike_smartbomb"
+    ],
+    "0x88659726": [
+      "global_splash_lrg"
+    ],
+    "0x8986FF53": [
+      "global_boatwake_slow_small"
+    ],
+    "0x8AC48ED4": [
+      "global_firetreetrunka"
+    ],
+    "0x8BF62E47": [
+      "global_boatroostertail_slow"
+    ],
+    "0x8C49A9C1": [
+      "global_flotsum_papers"
+    ],
+    "0x8CD15DED": [
+      "global_firetreetrunkd"
+    ],
+    "0x91FFD501": [
+      "global_airstrike_daisycutter"
+    ],
+    "0x933CAAAB": [
+      "global_impact_brick"
+    ],
+    "0x9420F6DB": [
+      "global_exp_shockwave_ground_tiny_asphalt"
+    ],
+    "0x946F39FC": [
+      "global_gritexplosion"
+    ],
+    "0x955831F6": [
+      "global_smokeblack_tank"
+    ],
+    "0x9942D6BA": [
+      "global_explosion_tankhull"
+    ],
+    "0x9AA8A55B": [
+      "global_explosion_treetrunk"
+    ],
+    "0x9ACB2E34": [
+      "global_firesmallsmoke_smoke_vehicle"
+    ],
+    "0x9D6FCD99": [
+      "global_impact_bullet_glass"
+    ],
+    "0xA1D0CC65": [
+      "global_veh_smoke_grass"
+    ],
+    "0xA7D304AF": [
+      "global_dirtexplosion_fan_large"
+    ],
+    "0xAB4726EC": [
+      "global_airstrike_clusterbomb_flame"
+    ],
+    "0xAC9FD6A3": [
+      "global_explosion_canvas"
+    ],
+    "0xACA34FF2": [
+      "global_waterfall_wall"
+    ],
+    "0xAD59D6A5": [
+      "global_boatroostertail_small"
+    ],
+    "0xADA75AF5": [
+      "global_impact_water"
+    ],
+    "0xB05A0554": [
+      "global_impact_bullet_metal"
+    ],
+    "0xB0629CBC": [
+      "global_blastdoors_tunnelbottom_smoke"
+    ],
+    "0xB071B22D": [
+      "global_impact_slide_brick"
+    ],
+    "0xB0A59044": [
+      "global_explosion_pickup_health"
+    ],
+    "0xB14FF43E": [
+      "global_explosion_pickup_rocket"
+    ],
+    "0xB3FAEAE7": [
+      "global_buildingdebrislarge"
+    ],
+    "0xB5005570": [
+      "global_impact_wood_nodamage"
+    ],
+    "0xB5A26BB5": [
+      "global_impact_slide_stone"
+    ],
+    "0xB78B1A8A": [
+      "global_veh_smoke_rock"
+    ],
+    "0xB7CB91A4": [
+      "global_splash_huge"
+    ],
+    "0xBA85C659": [
+      "global_impact_bullet_metal_flare"
+    ],
+    "0xBADDE308": [
+      "global_flotsum_dandy"
+    ],
+    "0xBBC97313": [
+      "global_flotsum_smoke_ground"
+    ],
+    "0xBFC96EC7": [
+      "global_smokeblack"
+    ],
+    "0xC01C7255": [
+      "global_boatroostertail_small_drift"
+    ],
+    "0xC104640A": [
+      "global_veh_smoke_asphalt"
+    ],
+    "0xC340B5D2": [
+      "global_teargas"
+    ],
+    "0xC6102811": [
+      "global_boatwake_drift_small"
+    ],
+    "0xC6B24F44": [
+      "global_tree_destruction_leaves_palm"
+    ],
+    "0xC72807AA": [
+      "global_explosion_pickup_fuel"
+    ],
+    "0xC7BFFB0B": [
+      "global_airstrike_distance"
+    ],
+    "0xC894A387": [
+      "global_firesmallsmoke"
+    ],
+    "0xCA39A3FC": [
+      "global_muzzleflash_25mm"
+    ],
+    "0xCC3C286E": [
+      "global_sparkslarge"
+    ],
+    "0xD2E54786": [
+      "global_muzzleflash"
+    ],
+    "0xD5FB4502": [
+      "global_firehedge"
+    ],
+    "0xD73A4F67": [
+      "global_splash_sml"
+    ],
+    "0xD75F90F5": [
+      "global_shellaa_large"
+    ],
+    "0xD8AAC146": [
+      "global_smoke_heli_tailrotor"
+    ],
+    "0xDA73B4F9": [
+      "global_firemediumsmoke"
+    ],
+    "0xDAA05ADA": [
+      "global_boatwake_point"
+    ],
+    "0xDB16CE6D": [
+      "global_splash_med"
+    ],
+    "0xDE930606": [
+      "global_explosion_papers"
+    ],
+    "0xDF39E357": [
+      "global_muzzleflash_aa"
+    ],
+    "0xDF94C4B3": [
+      "global_impact_metal_nodamage_flare"
+    ],
+    "0xE0A3A859": [
+      "global_firegrandesmoke_smoke"
+    ],
+    "0xE0A64900": [
+      "global_impact_rpg_glass"
+    ],
+    "0xE1E905BA": [
+      "global_exp_falling_debris_lrg"
+    ],
+    "0xE238BACC": [
+      "global_shellsam"
+    ],
+    "0xE46F780A": [
+      "global_explosion_pickup_money"
+    ],
+    "0xE4CFAA6D": [
+      "global_airstrike_tactnuke_distance"
+    ],
+    "0xE5EA998E": [
+      "global_bunker_top_smoke"
+    ],
+    "0xE74B5BBC": [
+      "global_flotsum_dust"
+    ],
+    "0xEBBC6B45": [
+      "global_flotsum"
+    ],
+    "0xECDE84DD": [
+      "global_dirtexplosion"
+    ],
+    "0xEF006CBB": [
+      "global_sparks_rpg_decal"
+    ],
+    "0xF31B6592": [
+      "global_impact_concrete_point"
+    ],
+    "0xF3855287": [
+      "global_explosion_pickup_c4"
+    ],
+    "0xF4C9B410": [
+      "global_sparksmedium"
+    ],
+    "0xF513C460": [
+      "global_exp_falling_debris_lrg_tall"
+    ],
+    "0xF5B0D703": [
+      "global_firemediumsmoke_smoke"
+    ],
+    "0xF75C155C": [
+      "global_firesmall"
+    ],
+    "0xF7EF74E5": [
+      "global_explosion_heli_bladeflame"
+    ],
+    "0xF9236EBA": [
+      "global_impact_bullet_brick"
+    ],
+    "0xF96279B0": [
+      "global_explosion_vehicle_air"
+    ],
+    "0xFB465F27": [
+      "global_shellgrenade"
+    ],
+    "0xFCC5C024": [
+      "global_shellsmall"
+    ],
+    "0xFDF1E1C3": [
+      "global_explosion_canvas_large"
+    ],
+    "0xFE1E7109": [
+      "global_shellaa"
+    ],
+    "0xFEDA1A51": [
+      "global_waterfall_smoke"
+    ],
+    "0xFF2C47DE": [
+      "global_waterfall_wall_small"
+    ],
+    "0x0015AA6C": [
+      "_DLC_outskirt_interior_sound_SmFan"
+    ],
+    "0x01B6136A": [
+      "_global_freewayelevatedlong SUPER"
+    ],
+    "0x04E8D08C": [
+      "_DLC_mar_commercial_wallterrain01"
+    ],
+    "0x07E8A4B0": [
+      "SX2150 (MLRS) (Driver) (Allied)"
+    ],
+    "0x0985E3A9": [
+      "_DLC_outskirt_interior_sound_CeilingFan"
+    ],
+    "0x0997554D": [
+      "PathSpawner_Heli_DLC_China"
+    ],
+    "0x0EBCE2F0": [
+      "_DLC_outskirt_interior_HQ"
+    ],
+    "0x1279DA78": [
+      "DLC_Explosion (Daisy Cutter)"
+    ],
+    "0x12F06BBF": [
+      "Mounted TOW Missile (1) (hp_barreltip_missile_le) (dlc)"
+    ],
+    "0x15E966E2": [
+      "DLC_MonsterRTR_Driver"
+    ],
+    "0x173CBA95": [
+      "Tank Shell (Railgun Slug) (DLC)"
+    ],
+    "0x19C7CCE5": [
+      "_dlc_global_scaffoldA"
+    ],
+    "0x1B984D76": [
+      "DLC_Mounted AT Missile (Veyron)"
+    ],
+    "0x1D7D2460": [
+      "Mine (AlTest)"
+    ],
+    "0x1DABD51F": [
+      "DLC__maracaibo_freewaytrenchbridge01_overpass"
+    ],
+    "0x1EDE8624": [
+      "ZTZ63a (DLC) (LongHib) (Prototype)"
+    ],
+    "0x1EFA5EFC": [
+      "M1A2_DLC"
+    ],
+    "0x218B404A": [
+      "Light_tiny_orange_dim"
+    ],
+    "0x246A927F": [
+      "M2A3 (Driver) (DLC)"
+    ],
+    "0x24D709F7": [
+      "_maracaibo_freewaytrenchbridge01_overpass_DLC"
+    ],
+    "0x27DFEAF2": [
+      "DLC_M1A1 (Driver)"
+    ],
+    "0x27FB8380": [
+      "_DLC_maracaibo_freewaytrenchbridge02_underpass"
+    ],
+    "0x28FBA4B5": [
+      "DLC_M1A3"
+    ],
+    "0x31431E20": [
+      "Mounted Panhard Recoiless (DLCCon002)b"
+    ],
+    "0x31A3DEB1": [
+      "PedList_Caicara_DLC"
+    ],
+    "0x31F274D0": [
+      "_DLC_vzoutpost_bld_garagebunker_CH"
+    ],
+    "0x35347F5A": [
+      "Mi26 (CH) (Driver) (MercsWars) (LongHib)"
+    ],
+    "0x355E3728": [
+      "_DLC_outskirt_interior_chair"
+    ],
+    "0x3571540F": [
+      "_DLC_vzoutpost_bld_garage_GR"
+    ],
+    "0x3730A165": [
+      "_commercial_wallbeachlong_health"
+    ],
+    "0x38067366": [
+      "_DLC_maracaibo_freewayascender02"
+    ],
+    "0x3B77DB7A": [
+      "_DLC_vzoutpost_bld_garage_PR"
+    ],
+    "0x3BAE9B7A": [
+      "dlc_global_particle_sparks_vehicle_box_blue"
+    ],
+    "0x3CF20AA3": [
+      "VehList_Caicara_DLC"
+    ],
+    "0x3E199063": [
+      "DLC_Light_airstrike_moab_flash"
+    ],
+    "0x3F221584": [
+      "DLC_AT Rocket"
+    ],
+    "0x457B75D7": [
+      "_DLC_maracaibo_freewaystraight02"
+    ],
+    "0x460062B0": [
+      "_merida_lightstadiumb_invincible"
+    ],
+    "0x49FC1CDF": [
+      "DLCCon004_Cash_M_02"
+    ],
+    "0x4BFEA076": [
+      "Mounted TOW Missile (1) (hp_barreltip_missile_lb) (dlc)"
+    ],
+    "0x4CD0BFE3": [
+      "_DLC_vzoutpost_bld_garagebunker_OC"
+    ],
+    "0x4D00045A": [
+      "_DLC_vzoutpost_bld_garage_OC"
+    ],
+    "0x4D3B94EB": [
+      "AlTest Explosion"
+    ],
+    "0x4D827905": [
+      "Mounted TOW Missile (1) (hp_barreltip_missile_ra) (dlc)"
+    ],
+    "0x52848B2B": [
+      "DLC_Allied Destroyer_Invincible"
+    ],
+    "0x54D60021": [
+      "Mounted TOW Missile (1) (hp_barreltip_missile_lc) (dlc)"
+    ],
+    "0x550F1571": [
+      "DLC__global_barricaded"
+    ],
+    "0x56723616": [
+      "dlc_global_particle_airstrike_distance"
+    ],
+    "0x58CC7A08": [
+      "_merida_bld_soccerstadium_invincible"
+    ],
+    "0x5B234BF2": [
+      "Mounted Panhard Recoiless (DLCCon002)"
+    ],
+    "0x5C8701A1": [
+      "M1A2 (DLC) (LongHib) (Prototype)"
+    ],
+    "0x5C905D92": [
+      "Grenade MG Projectile (DLCCon002)"
+    ],
+    "0x5DB66BB0": [
+      "DLC_Vehicle AT Missile"
+    ],
+    "0x60815D41": [
+      "_DLC_outskirt_interior_sound_Jukebox"
+    ],
+    "0x6119467F": [
+      "DLC_global_particle_fire_jetengine_boost_infinite"
+    ],
+    "0x6282DE02": [
+      "DLC_SoccerBall_car"
+    ],
+    "0x63C00C6E": [
+      "_DLC_vzoutpost_bld_garagebunker_GR"
+    ],
+    "0x64A00A0E": [
+      "Mounted TOW Missile (1) (hp_barreltip_missile_rd) (dlc)"
+    ],
+    "0x6A8AA997": [
+      "DLC_mar_global_freewayelevatedlong"
+    ],
+    "0x6D236566": [
+      "Mounted SAM (DLC2)"
+    ],
+    "0x6DCFB4CB": [
+      "DLC SUPER TOW Missile"
+    ],
+    "0x6E03E654": [
+      "Mounted TOW Missile (1) (hp_barreltip_missile_rb) (dlc)"
+    ],
+    "0x6E83AEDC": [
+      "Mounted TOW Missile (1) (hp_barreltip_missile_ld) (dlc)"
+    ],
+    "0x715B8A9B": [
+      "PLZ45 (DLC) (LongHib) (Prototype)"
+    ],
+    "0x788BB1E5": [
+      "DLCCon004_Timer_Pickup"
+    ],
+    "0x79E97719": [
+      "Mounted Tank Gun (Railgun Slug) (DLC)"
+    ],
+    "0x7BF0E9AC": [
+      "_DLC_vzoutpost_bld_guardtower"
+    ],
+    "0x7E9E8F5A": [
+      "_DLC_vzoutpost_bld_garagebunker"
+    ],
+    "0x7EDCF417": [
+      "Mounted TOW Missile (1) (hp_barreltip_missile_rc) (dlc)"
+    ],
+    "0x7FCAF48C": [
+      "WaterMineBall"
+    ],
+    "0x81C781DC": [
+      "SX2150 (Fuel) (Driver) (MercsWars) (LongHib)"
+    ],
+    "0x829372CA": [
+      "Explosion (Super TOW) "
+    ],
+    "0x836F0624": [
+      "global_particle_firehydrant_spray_placeable"
+    ],
+    "0x841AD085": [
+      "Emplaced TOW (Allied) (seatbelt)"
+    ],
+    "0x845D1E82": [
+      "DLC RTR PLOW"
+    ],
+    "0x8671B71D": [
+      "_DLC_global_bld_guardtower"
+    ],
+    "0x8697DF6C": [
+      "Munitions (Cluster Bomb)(prop only)"
+    ],
+    "0x874A08B4": [
+      "DLCCon004_Cash_XL_04"
+    ],
+    "0x882ABAD2": [
+      "Mounted TOW Missile (1) (hp_barreltip_missile_lf) (dlc)"
+    ],
+    "0x88ED83F8": [
+      "Mine Spawner"
+    ],
+    "0x89888F81": [
+      "_DLC_vzoutpost_bld_garage"
+    ],
+    "0x8A936735": [
+      "Vehicle Seat (DLC M1A3) (Driver)"
+    ],
+    "0x8BD83B2F": [
+      "PLZ45 (Driver) (MercsWars) (LongHib)"
+    ],
+    "0x8CF9786A": [
+      "DLCCon004_Cash_S_01"
+    ],
+    "0x8D53ED40": [
+      "PLZ45 0x8000b2e7"
+    ],
+    "0x8DA5BD99": [
+      "Mounted TOW Missile (1) (hp_barreltip_missile_re) (dlc)"
+    ],
+    "0x8FD54317": [
+      "_merida_bld_pmcautoshop_unkillable"
+    ],
+    "0x90BB90D2": [
+      "ZTZ98 0x8000b2e9"
+    ],
+    "0x933F34F1": [
+      "Panhard (DLCCON004)"
+    ],
+    "0x93F6E08D": [
+      "DLC__mar_global_freewayelevatedcurve"
+    ],
+    "0x94887BD8": [
+      "_DLC_industrial_machinepartsramp01"
+    ],
+    "0x9A4B8D77": [
+      "Roadblock (Horizontal)"
+    ],
+    "0x9A81C0BC": [
+      "Light_tiny_yellow_dim"
+    ],
+    "0x9AE57771": [
+      "Civ Bartender (male)1"
+    ],
+    "0x9B8F0307": [
+      "Explosion (Water Mine)_Ball"
+    ],
+    "0x9BE367A3": [
+      "Mounted TOW Missile (1) (hp_barreltip_missile_la) (dlc)"
+    ],
+    "0x9F3E061C": [
+      "_global_soccergoal_invincible"
+    ],
+    "0xA1A04C9D": [
+      "Alouette3 Superiority_Light"
+    ],
+    "0xA57E26AC": [
+      "DLC_Veyron (Assault)"
+    ],
+    "0xA5DEDA9F": [
+      "dlc_global_particle_sparks_vehicle_box_red"
+    ],
+    "0xA81AB1D7": [
+      "Light_tiny_red_dim"
+    ],
+    "0xA849CD68": [
+      "Light_large_green_dim"
+    ],
+    "0xA9AD7823": [
+      "DLC_SoccerBall_prop"
+    ],
+    "0xAAC52C08": [
+      "TankBuster_Instant"
+    ],
+    "0xAB1F0473": [
+      "DLC Minigun B"
+    ],
+    "0xABA97842": [
+      "Vehicle Seat (2 Seat) (seat_front_left) DLC (armoredmonster)"
+    ],
+    "0xABF7C000": [
+      "Light_tiny_yellow_verydim"
+    ],
+    "0xAECC54EB": [
+      "M1A2 (DLCCon003)"
+    ],
+    "0xB0FA6BA9": [
+      "AlTest Explosion Frag"
+    ],
+    "0xB1841D15": [
+      "DLCCon004_Cash_L_03"
+    ],
+    "0xB1B0F263": [
+      "DLC_M151.50Cal(VZ) (DriverGunner)"
+    ],
+    "0xB1C9B946": [
+      "ZTZ63a 0x8000b2e8"
+    ],
+    "0xB6D4CA0F": [
+      "Munitions (Tank Buster)(prop only)"
+    ],
+    "0xB765357E": [
+      "_city_bld_skyscraper01 SUPER"
+    ],
+    "0xB8DF3402": [
+      "_DLC_global_freewayelevatedlongramp_ruin"
+    ],
+    "0xBC8CF937": [
+      "_DLC_vzoutpost_bld_garage_AL"
+    ],
+    "0xBD36C06A": [
+      "dlc_global_particle_tracer_AA"
+    ],
+    "0xBE7E4F8D": [
+      "Chinese Heavy (lesser RPG)"
+    ],
+    "0xBFD47C65": [
+      "Roadblock (Vertical)"
+    ],
+    "0xC1C8048A": [
+      "_DLC_outskirt_interior_stool"
+    ],
+    "0xC21592BB": [
+      "Light_medium_orange_soft"
+    ],
+    "0xC38DD8AF": [
+      "_white_freewaytrenchbridge01_overpass_autobridge SUPER"
+    ],
+    "0xC3D00C7F": [
+      "DLC_mar_global_freewayelevatedlongramp"
+    ],
+    "0xC6672DB8": [
+      "DLC Armored Monster"
+    ],
+    "0xC6C30E2A": [
+      "_dlc_maracaibo_freewaytrenchbridge02_overpass"
+    ],
+    "0xC72DD0FB": [
+      "ZTZ98 (Driver) (MercsWars) (LongHib)"
+    ],
+    "0xC834A3DC": [
+      "SX2150 (Fuel) 0x8000bb47"
+    ],
+    "0xC8B35541": [
+      "_city_bld_skyscraper02 SUPER"
+    ],
+    "0xCD91045B": [
+      "DLCCon004_Cash_XXL_05"
+    ],
+    "0xCF852AC0": [
+      "Civ Bartender (male)"
+    ],
+    "0xD07894C7": [
+      "Emplaced M101A1 (China)"
+    ],
+    "0xD1217EDC": [
+      "DLC Minigun A"
+    ],
+    "0xD37A46FF": [
+      "Tank Shell (Railgun Slug) (DLC2)"
+    ],
+    "0xD616EFED": [
+      "_DLC_global_wallshort_ruin"
+    ],
+    "0xD811DA70": [
+      "dlc_global_particle_explosion_pickup_timer"
+    ],
+    "0xD8A97B5D": [
+      "_DLC_mar_commercial_roadstraight10_crater"
+    ],
+    "0xD8B477DD": [
+      "MissionHub_Interior"
+    ],
+    "0xDB916567": [
+      "DLC_Speed_Boost_Pickup"
+    ],
+    "0xDCE566D9": [
+      "_commercial_wallbeachshort_health"
+    ],
+    "0xDE53489A": [
+      "_DLC_vzoutpost_bld_garagebunker_AL"
+    ],
+    "0xDF37AA98": [
+      "Mounted TOW Missile (1) (hp_barreltip_missile_rf) (dlc)"
+    ],
+    "0xE3789CFA": [
+      "_DLC_maracaibo_freewaystraight03"
+    ],
+    "0xE3BFF391": [
+      "Allied Heavy (AT) (seatbelted)"
+    ],
+    "0xE7CF023B": [
+      "Mounted Tank Gun (Sabot) (DLC)"
+    ],
+    "0xE9D2F907": [
+      "ZTZ98 (DLC) (LongHib) (Prototype)"
+    ],
+    "0xEB66788C": [
+      "_DLC_industrial_bld_gasstationpump"
+    ],
+    "0xED612516": [
+      "DLCCon004_Cash_XXXL_06"
+    ],
+    "0xEDBB2B14": [
+      "Mounted Panhard Recoiless (DLCCon004)"
+    ],
+    "0xEF169C93": [
+      "Vehicle Seat (2 Seat) (seat_front_right) DLC (armoredmonster)"
+    ],
+    "0xEF3A4626": [
+      "VehList_DLCCon003_test"
+    ],
+    "0xF0095776": [
+      "Munitions (Artillery) (prop only)"
+    ],
+    "0xF02E66E9": [
+      "_DLC_global_walllong_ruin"
+    ],
+    "0xF6EAB306": [
+      "_DLC_global_freewayelevatedlong_ruin"
+    ],
+    "0xF7229E1B": [
+      "_DLC_vzoutpost_bld_garagebunker_PR"
+    ],
+    "0xF793815F": [
+      "DLC_Buggy (Hellfire)"
+    ],
+    "0xF9294342": [
+      "ZTZ63a (Driver) (MercsWars) (LongHib)"
+    ],
+    "0xFB2CEE89": [
+      "_DLC_vzoutpost_bld_garage_CH"
+    ],
+    "0xFE10F51B": [
+      "Explosion (Handheld RPG) DLC_nolight"
+    ],
+    "0x05C70EC3": [
+      "vo_stream_dlctest.italian"
+    ],
+    "0x1096B693": [
+      "vo_stream_dlctest.spanish"
+    ],
+    "0x35D82199": [
+      "dlctest_streaming"
+    ],
+    "0xA1E9532D": [
+      "vo_stream_dlctest.french"
+    ],
+    "0xA56BD66B": [
+      "vo_stream_dlctest.german"
+    ],
+    "0xCBF5F673": [
+      "vo_stream_dlctest.english"
+    ],
+    "0xEB3B3C14": [
+      "vo_stream_dlctest.russian"
     ]
   }
 }

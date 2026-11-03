@@ -20,7 +20,7 @@
 //!   mercs2_probe scan-hash 0xA3CD72A7 0x..
 //!   mercs2_probe block-probe 1234
 //!   mercs2_probe hier --model 0x.. [names.txt] --csv hier.csv
-//!   mercs2_probe extract --model 0x.. out.bin
+//!   mercs2_probe extract --model 0x.. [--type 0x..] out.bin
 //!   mercs2_probe dump-block 667 block667.bin
 //!   mercs2_probe find-placement villa
 //!   mercs2_probe save-dump <profile> [grep-needle]
@@ -40,14 +40,27 @@
 
 mod anim_table;
 mod bone_census;
+mod chunk_compare;
+mod dlc_census;
+mod pws_survey;
+mod tex_compare;
+mod tex_rungs;
+mod clip_names;
 mod clip_pose;
 mod dump;
 mod dump_hibernation;
+mod dump_render;
 mod dump_spawnlists;
+mod ecs_compare;
+mod ecs_survey;
 mod ess_live;
 mod ess_menu_check;
+mod facefx;
+mod layer;
+mod terrain_cell;
 mod gfx_golden;
 mod prof_samples;
+mod splice_emu;
 mod we_template;
 
 use mercs2_engine::diag;
@@ -60,6 +73,7 @@ fn usage() -> ! {
          subcommands:\n\
          \x20 c3-meta <out.ndjson>          placement-hashes <out.json>   export-c3-obj <outdir>\n\
          \x20 terrainmesh-probe [block]     terrain-probe                 terrain-consumer\n\
+         \x20 terrain-cell <0xH> [--at <cx> <cz> <x> <z>]                 (one cell's materials and a patch's draws)\n\
          \x20 wad-list                      wad-meshes [--model H]        placement-probe\n\
          \x20 world-index                   stream-probe                  lod is engine-only\n\
          \x20 animdiag/animcheck/skincheck [--model H] [--index I]        trackmap [... --clip H]\n\
@@ -71,16 +85,43 @@ fn usage() -> ! {
          \x20 bone-census [names.txt] [--csv P] [--wads a.wad,b.wad]      (every HIER node in every model)\n\
          \x20 gfx-extract <outdir>          (every cfx_pack movie of --wad, verbatim)\n\
          \x20 gfx-golden <movies_dir> --md <report.md> --json <index.json>   (no WAD needed)\n\
+         \x20 gfx-decode <movies_dir>                       (decode every movie's definitions; no WAD needed)\n\
+         \x20 gfx-render <movie.gfx> <frames> <out.png> [--fonts <font.gfx>] [--goto <label>] <images.wad>...   (play a movie, write its last frame)\n\
+         \x20 gfx-shell <out.png> <width>x<height> [wait:<frames>|down:<button>|up:<button>|mouse:<x>,<y>,<buttons>|call:<name>|key:<id>|pad:<vendor>,<product>,<name>|held:<input>,...|get:<path>]... <wad, last mounted first>...   (boot the shipped shell headless, movies from the last WAD's Movies folder)\n\
+         \x20 gfx-actions <movie.gfx> <out.txt>   (write a movie's ActionScript as text)\n\
+         \x20 gfx-tags <movie.gfx> <out.txt>   (write a movie's display lists as text: places, removes, scripts, labels per frame)\n\
+         \x20 bink-audio <movie.bik> <track index> <out.s16> [<other.s16>]   (decode a track; compare with another decode)\n\
+         \x20 bink-video <movie.bik> <frames> <reference.yuv>   (decode the first frames; compare with a yuv420p decode)\n\
+         \x20 splice-emulate <image.bin> <start VA> [--reg name=value]... [--arg value]... [--byte address=value]... [--dword address=value]... [--steps N]   (run a SecuROM splice through a decrypted dump with sentinel registers; report what it read, wrote, called and returned)\n\
+         \x20 bink-frame <movie.bik> <frame> <out.png>   (one frame as the game's movie widget draws it, with decode and colour-conversion times)\n\
+         \x20 gfx-run <movies_dir> <frames>                 (play every movie; report script failures and gaps)\n\
          \x20 ess-live [--addr host:port] [--menu <scripts-rel path>] [--spawn <template>] [--spawn-dist <m>]   (live game, no WAD)\n\
          \x20 ess-menu-check --ess <Ess.lua> <menu.lua> [<menu.lua> ...]   (exact Lua 5.1, engine stubbed, no WAD)\n\
-         \x20 extract --model H <out.bin>   dump-block <index> <out.bin>  find-placement <substring>\n\
+         \x20 extract --model H [--type T] <out.bin>   dump-block <index> <out.bin>  find-placement <substring>\n\
          \x20 save-dump <profile> [needle]  overlays <profile>\n\
          \x20 anim-table <name|0xH> [--handle 0xH] [--list <column>]   (an animationtable's rows verbatim)\n\
+         \x20 clip-names <review.tsv>       (name AnimationLookup clips from their rows; a review file, merges nothing)\n\
+         \x20 facefx <name|0xH> | --all     (a FaceFX actor / anim set by name; --all reads every one and prints the census)\n\
+         \x20 layer <name|0xH> | --all | --frames <capture> | --loaded <capture> | --near <x> <z> <radius> | --catalog <out.tsv> [--also <archives>] [--overlay <wad>]  (a placement layer's entities with their models and classes; --all prints the census; --frames tests Transforms against a capture's live positions; --loaded measures which layers a capture holds; --near lists what every layer places around a point; --catalog writes a row per layer, --overlay mounts a level such as the DLC above the base)\n\
          \x20 we-template <name|0xKEY>... | --class <Class> | --uses <0xU32>   (worldentity templates / records)\n\
+         \x20 ecs-survey <big-endian archive> <out.tsv> [--raw <dir>]   (a console archive's ECS containers as stored; no --wad)\n\
+         \x20 ecs-compare <archive a> <archive b> <out.tsv> --vz-wad <pc vz.wad> [--diffs <file>]   (two archives' ECS containers, converted, record by record; no --wad)\n\
+         \x20 ecs-names <archive> <out.tsv> --vz-wad <pc vz.wad>   (every Name string of an archive's named containers; no --wad)\n\
+         \x20 chunk-compare <big-endian archive> <out.tsv> --vz-wad <pc vz.wad> --java <java> --unluac <jar> [--only <type>]   (every chunk converted against its PC twin, row by row; no --wad)\n\
+         \x20 model-compare <big-endian archive> <pc vz.wad> <out.tsv>   (every model converted against PC over its whole chain; no --wad)\n\
+         \x20 scrub-compare <big-endian archive> <pc vz.wad> <out.tsv>   (every scrub converted against PC; no --wad)\n\
+         \x20 phy2-diff <big-endian PHY2 body> <PC body or container>   (a collider converted, its differences by region; no --wad)\n\
+         \x20 rung-words <pc wad>   (each type's chains against the rule for their table words; no --wad)\n\
          \x20 clip-pose --model H --clip H --bones 0xA,0xB.. --ref 0xR [--frames N]   (bone positions over a clip)\n\
          \x20 dump-read <capture-dir> <0xVA> [len]          (retail memory from a v1.0 x32dbg capture, no WAD)\n\
          \x20 dump-chain <capture-dir> <0xVA> <0xOFF>...    ([[VA]+o0]+o1 ... ; last offset added, not read)\n\
          \x20 dump-find <capture-dir> <0xU32> [0xU32...]    (every aligned address holding a value)\n\
+         \x20 dump-render <capture>                         (camera, wind and tree batches of the last frame)\n\
+         \x20 foliage                                       (every tree species of the foliage chunk)\n\
+         \x20 foliage-check <capture>                       (every tree entity of a capture against the decoded foliage chunk)\n\
+         \x20 dump-entity <capture> <0xKEY>                 (every live component record of one key)\n\
+         \x20 dump-near <capture> <x> <y> <z> <radius>      (every SceneObject around a point)\n\
+         \x20 dump-model <capture> <0xHASH>                 (a runtime model's LOD range and its render objects)\n\
          \x20 dump-find-vec3 <capture> <x> <y> <z> [--tol T]   (three consecutive f32 within T)\n\
          \x20 dump-containers <capture-dir>                 (all 334 live component containers)\n\
          \x20 dump-pool <capture-dir> <name|0xVA> [--key 0xK] [--bytes N] [--limit N]   (one container's live records)\n\
@@ -124,6 +165,7 @@ fn first_positional(args: &[String]) -> Option<String> {
             || a == "--skeleton-csv"
             || a == "--md"
             || a == "--json"
+            || a == "--type"
         {
             skip_next = true;
             continue;
@@ -552,6 +594,53 @@ fn main() {
         }
         return;
     }
+    if cmd == "dump-model" {
+        let hash = args.get(1).and_then(|k| u32::from_str_radix(k.trim_start_matches("0x"), 16).ok());
+        let (Some(capture), Some(hash)) = (args.first(), hash) else {
+            eprintln!("dump-model: usage: mercs2_probe dump-model <capture> <0xHASH>");
+            std::process::exit(2);
+        };
+        if let Err(e) = dump_render::dump_model(capture, hash) {
+            eprintln!("dump-model failed: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    if cmd == "dump-near" {
+        let n: Vec<f32> = args[1.min(args.len())..].iter().filter_map(|a| a.parse().ok()).collect();
+        let (Some(capture), [x, y, z, radius]) = (args.first(), n.as_slice()) else {
+            eprintln!("dump-near: usage: mercs2_probe dump-near <capture> <x> <y> <z> <radius>");
+            std::process::exit(2);
+        };
+        if let Err(e) = dump_render::dump_near(capture, [*x, *y, *z], *radius) {
+            eprintln!("dump-near failed: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    if cmd == "dump-entity" {
+        let key = args.get(1).and_then(|k| u32::from_str_radix(k.trim_start_matches("0x"), 16).ok());
+        let (Some(capture), Some(key)) = (args.first(), key) else {
+            eprintln!("dump-entity: usage: mercs2_probe dump-entity <capture> <0xKEY>");
+            std::process::exit(2);
+        };
+        if let Err(e) = dump_render::dump_entity(capture, key) {
+            eprintln!("dump-entity failed: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    if cmd == "dump-render" {
+        let Some(capture) = args.first() else {
+            eprintln!("dump-render: usage: mercs2_probe dump-render <capture>");
+            std::process::exit(2);
+        };
+        if let Err(e) = dump_render::dump_render(capture) {
+            eprintln!("dump-render failed: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
     if cmd == "dump-spawnlists" {
         let Some(capture) = args.first() else {
             eprintln!("dump-spawnlists: usage: mercs2_probe dump-spawnlists <capture>");
@@ -563,11 +652,557 @@ fn main() {
         }
         return;
     }
+    if cmd == "ecs-survey" {
+        let (Some(archive), Some(out)) = (args.first(), args.get(1)) else {
+            eprintln!("ecs-survey: usage: mercs2_probe ecs-survey <big-endian archive> <out.tsv> [--raw <dir>]");
+            std::process::exit(2);
+        };
+        let raw = flag_val(&args, "--raw");
+        if let Err(e) = ecs_survey::ecs_survey(
+            std::path::Path::new(archive),
+            std::path::Path::new(out),
+            raw.as_deref().map(std::path::Path::new),
+        ) {
+            eprintln!("ecs-survey failed: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    if cmd == "chunk-compare" {
+        let (Some(archive), Some(out), Some(vz), Some(java), Some(unluac)) =
+            (args.first(), args.get(1), flag_val(&args, "--vz-wad"), flag_val(&args, "--java"), flag_val(&args, "--unluac"))
+        else {
+            eprintln!("chunk-compare: usage: mercs2_probe chunk-compare <big-endian archive> <out.tsv> --vz-wad <pc vz.wad> --java <java> --unluac <jar> [--only <type>]");
+            std::process::exit(2);
+        };
+        let only = flag_val(&args, "--only");
+        let inputs = chunk_compare::Inputs {
+            archive: std::path::Path::new(archive),
+            vz_wad: std::path::Path::new(&vz),
+            java: std::path::Path::new(&java),
+            unluac: std::path::Path::new(&unluac),
+            only: only.as_deref(),
+        };
+        if let Err(e) = chunk_compare::chunk_compare(inputs, std::path::Path::new(out)) {
+            eprintln!("chunk-compare failed: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    if cmd == "terrain-position-w" {
+        let (Some(wad), Some(out)) = (args.first(), args.get(1)) else {
+            eprintln!("terrain-position-w: usage: mercs2_probe terrain-position-w <PC wad> <out.tsv>");
+            std::process::exit(2);
+        };
+        if let Err(e) = dlc_census::terrain_position_w(std::path::Path::new(wad), std::path::Path::new(out)) {
+            eprintln!("terrain-position-w failed: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    if cmd == "terrain-alt-strips" {
+        let (Some(wad), Some(out)) = (args.first(), args.get(1)) else {
+            eprintln!("terrain-alt-strips: usage: mercs2_probe terrain-alt-strips <PC wad> <out.tsv>");
+            std::process::exit(2);
+        };
+        if let Err(e) = dlc_census::terrain_alt_strips(std::path::Path::new(wad), std::path::Path::new(out)) {
+            eprintln!("terrain-alt-strips failed: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    if cmd == "terrain-decls" {
+        let (Some(wad), Some(out)) = (args.first(), args.get(1)) else {
+            eprintln!("terrain-decls: usage: mercs2_probe terrain-decls <PC wad> <out.tsv>");
+            std::process::exit(2);
+        };
+        if let Err(e) = dlc_census::terrain_decls(std::path::Path::new(wad), std::path::Path::new(out)) {
+            eprintln!("terrain-decls failed: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    if cmd == "terrain-half-tally" {
+        let (Some(wad), Some(usage), Some(component), Some(out)) = (args.first(), args.get(1).and_then(|u| u.parse::<u8>().ok()), args.get(2).and_then(|c| c.parse::<usize>().ok()), args.get(3)) else {
+            eprintln!("terrain-half-tally: usage: mercs2_probe terrain-half-tally <PC wad> <decl usage> <component 0-3> <out.tsv>");
+            std::process::exit(2);
+        };
+        if let Err(e) = dlc_census::terrain_half_tally(std::path::Path::new(wad), usage, component, std::path::Path::new(out)) {
+            eprintln!("terrain-half-tally failed: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    if cmd == "terrain-vertex-compare" {
+        let (Some(a), Some(b), Some(out)) = (args.first(), args.get(1), args.get(2)) else {
+            eprintln!("terrain-vertex-compare: usage: mercs2_probe terrain-vertex-compare <PC wad> <PC wad> <out.tsv>");
+            std::process::exit(2);
+        };
+        if let Err(e) = dlc_census::terrain_vertex_compare(std::path::Path::new(a), std::path::Path::new(b), std::path::Path::new(out)) {
+            eprintln!("terrain-vertex-compare failed: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    if cmd == "terrain-draw-ranges" {
+        let (Some(wad), Some(out)) = (args.first(), args.get(1)) else {
+            eprintln!("terrain-draw-ranges: usage: mercs2_probe terrain-draw-ranges <PC wad> <out.tsv>");
+            std::process::exit(2);
+        };
+        if let Err(e) = dlc_census::terrain_draw_ranges(std::path::Path::new(wad), std::path::Path::new(out)) {
+            eprintln!("terrain-draw-ranges failed: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    if cmd == "terrain-compare" {
+        let (Some(a), Some(b), Some(out)) = (args.first(), args.get(1), args.get(2)) else {
+            eprintln!("terrain-compare: usage: mercs2_probe terrain-compare <wad a> <wad b> <out.tsv>");
+            std::process::exit(2);
+        };
+        if let Err(e) = dlc_census::terrain_compare(std::path::Path::new(a), std::path::Path::new(b), std::path::Path::new(out)) {
+            eprintln!("terrain-compare failed: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    if cmd == "scrub-compare" {
+        let (Some(archive), Some(pc), Some(out)) = (args.first(), args.get(1), args.get(2)) else {
+            eprintln!("scrub-compare: usage: mercs2_probe scrub-compare <big-endian archive> <PC vz.wad> <out.tsv>");
+            std::process::exit(2);
+        };
+        if let Err(e) = dlc_census::scrub_compare(std::path::Path::new(archive), std::path::Path::new(pc), std::path::Path::new(out)) {
+            eprintln!("scrub-compare failed: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    if cmd == "rung-words" {
+        let Some(wad) = args.first() else {
+            eprintln!("rung-words: usage: mercs2_probe rung-words <PC wad>");
+            std::process::exit(2);
+        };
+        if let Err(e) = dlc_census::rung_words(std::path::Path::new(wad)) {
+            eprintln!("rung-words failed: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    if cmd == "model-compare" {
+        let (Some(archive), Some(pc), Some(out)) = (args.first(), args.get(1), args.get(2)) else {
+            eprintln!("model-compare: usage: mercs2_probe model-compare <big-endian archive> <PC vz.wad> <out.tsv>");
+            std::process::exit(2);
+        };
+        if let Err(e) = dlc_census::model_compare(std::path::Path::new(archive), std::path::Path::new(pc), std::path::Path::new(out)) {
+            eprintln!("model-compare failed: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    if cmd == "pixel-shaders" {
+        let (Some(dir), Some(pc)) = (args.first(), args.get(1)) else {
+            eprintln!("pixel-shaders: usage: mercs2_probe pixel-shaders <dir of model .ucfx> <PC wad>");
+            std::process::exit(2);
+        };
+        if let Err(e) = dlc_census::pixel_shaders(std::path::Path::new(dir), std::path::Path::new(pc)) {
+            eprintln!("pixel-shaders failed: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    if cmd == "vs-compare" {
+        let (Some(archive), Some(pc), Some(out)) = (args.first(), args.get(1), args.get(2)) else {
+            eprintln!("vs-compare: usage: mercs2_probe vs-compare <big-endian archive> <PC vz.wad> <out.tsv>");
+            std::process::exit(2);
+        };
+        if let Err(e) = dlc_census::vs_compare(std::path::Path::new(archive), std::path::Path::new(pc), std::path::Path::new(out)) {
+            eprintln!("vs-compare failed: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    if cmd == "type-compare" {
+        let (Some(archive), Some(pc), Some(ty)) = (args.first(), args.get(1), args.get(2)) else {
+            eprintln!("type-compare: usage: mercs2_probe type-compare <big-endian archive> <PC wad> <type name>");
+            std::process::exit(2);
+        };
+        if let Err(e) = dlc_census::type_compare(std::path::Path::new(archive), std::path::Path::new(pc), ty) {
+            eprintln!("type-compare failed: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    if cmd == "frame-capture" {
+        let (Some(file), Some(out)) = (args.first(), args.get(1)) else {
+            eprintln!("frame-capture: usage: mercs2_probe frame-capture <mercs2_profiler_frame_N.bin> <matrices.tsv>");
+            std::process::exit(2);
+        };
+        if let Err(e) = dlc_census::frame_capture(std::path::Path::new(file), std::path::Path::new(out)) {
+            eprintln!("frame-capture failed: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    if cmd == "terrain-bounds" {
+        let (Some(input), Some(out)) = (args.first(), args.get(1)) else {
+            eprintln!("terrain-bounds: usage: mercs2_probe terrain-bounds <PC wad | dir holding terrainmesh/ and lowresterrain/> <out.tsv>");
+            std::process::exit(2);
+        };
+        if let Err(e) = dlc_census::terrain_bounds(std::path::Path::new(input), std::path::Path::new(out)) {
+            eprintln!("terrain-bounds failed: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    if cmd == "model-bounds" {
+        let (Some(dir), Some(out)) = (args.first(), args.get(1)) else {
+            eprintln!("model-bounds: usage: mercs2_probe model-bounds <dir of model .ucfx> <out.tsv>");
+            std::process::exit(2);
+        };
+        if let Err(e) = dlc_census::model_bounds(std::path::Path::new(dir), std::path::Path::new(out)) {
+            eprintln!("model-bounds failed: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    if cmd == "ucfx-tree" {
+        let (Some(file), Some(max)) = (args.first(), args.get(1).map_or(Some(64), |v| v.parse::<usize>().ok())) else {
+            eprintln!("ucfx-tree: usage: mercs2_probe ucfx-tree <container .ucfx> [bytes shown per row, default 64]");
+            std::process::exit(2);
+        };
+        if let Err(e) = dlc_census::ucfx_tree(std::path::Path::new(file), max) {
+            eprintln!("ucfx-tree failed: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    if cmd == "water-at" {
+        let (Some(file), Some(x), Some(z)) = (args.first(), args.get(1).and_then(|v| v.parse::<f32>().ok()), args.get(2).and_then(|v| v.parse::<f32>().ok())) else {
+            eprintln!("water-at: usage: mercs2_probe water-at <watermap .ucfx | PC wad> <x> <z>");
+            std::process::exit(2);
+        };
+        if let Err(e) = dlc_census::water_at(std::path::Path::new(file), x, z) {
+            eprintln!("water-at failed: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    if cmd == "tiny-slots" {
+        let Some((out, inputs)) = args.split_last().filter(|(_, i)| !i.is_empty()) else {
+            eprintln!("tiny-slots: usage: mercs2_probe tiny-slots <PC wad | dir of .ucfx | --be <big-endian archive>>... <out.tsv>");
+            std::process::exit(2);
+        };
+        if let Err(e) = dlc_census::tiny_slots(inputs, std::path::Path::new(out)) {
+            eprintln!("tiny-slots failed: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    if cmd == "phy2-diff" {
+        let (Some(be), Some(pc)) = (args.first(), args.get(1)) else {
+            eprintln!("phy2-diff: usage: mercs2_probe phy2-diff <big-endian PHY2 body> <PC body or container>");
+            std::process::exit(2);
+        };
+        if let Err(e) = dlc_census::phy2_diff(std::path::Path::new(be), std::path::Path::new(pc)) {
+            eprintln!("phy2-diff failed: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    if cmd == "chunk-rows" {
+        let (Some(archive), Some(name), Some(dir)) = (args.first(), args.get(1).and_then(|h| parse_hash(h)), args.get(2)) else {
+            eprintln!("chunk-rows: usage: mercs2_probe chunk-rows <big-endian archive> <0xNAME> <out dir>");
+            std::process::exit(2);
+        };
+        if let Err(e) = dlc_census::chunk_rows(std::path::Path::new(archive), name, std::path::Path::new(dir)) {
+            eprintln!("chunk-rows failed: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    if cmd == "decl-table" {
+        let (Some(ps3), Some(converted), Some(out)) = (args.first(), args.get(1), args.get(2)) else {
+            eprintln!("decl-table: usage: mercs2_probe decl-table <ps3 archive> <converted wad> <out.tsv>");
+            std::process::exit(2);
+        };
+        if let Err(e) = dlc_census::decl_table(std::path::Path::new(ps3), std::path::Path::new(converted), std::path::Path::new(out)) {
+            eprintln!("decl-table failed: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    if cmd == "tex-info" {
+        let (Some(archive), Some(pc), Some(out)) = (args.first(), args.get(1), args.get(2)) else {
+            eprintln!("tex-info: usage: mercs2_probe tex-info <big-endian archive> <pc vz.wad> <out.tsv>");
+            std::process::exit(2);
+        };
+        if let Err(e) = tex_compare::tex_info(std::path::Path::new(archive), std::path::Path::new(pc), std::path::Path::new(out)) {
+            eprintln!("tex-info failed: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    if cmd == "pc-diff" {
+        let (Some(converted), Some(pc), Some(out)) = (args.first(), args.get(1), args.get(2)) else {
+            eprintln!("pc-diff: usage: mercs2_probe pc-diff <converted wad> <pc vz.wad> <out.tsv> [--type 0xHASH]");
+            std::process::exit(2);
+        };
+        let only = flag_val(&args, "--type").and_then(|h| parse_hash(&h));
+        if let Err(e) = dlc_census::pc_diff(std::path::Path::new(converted), std::path::Path::new(pc), only, std::path::Path::new(out)) {
+            eprintln!("pc-diff failed: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    if cmd == "clip-compare" {
+        let (Some(converted), Some(pc), Some(out)) = (args.first(), args.get(1), args.get(2)) else {
+            eprintln!("clip-compare: usage: mercs2_probe clip-compare <converted wad> <pc vz.wad> <out.tsv>");
+            std::process::exit(2);
+        };
+        if let Err(e) = dlc_census::clip_compare(std::path::Path::new(converted), std::path::Path::new(pc), std::path::Path::new(out)) {
+            eprintln!("clip-compare failed: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    if cmd == "dlc-census" {
+        let (Some(package), Some(base), Some(pc), Some(out)) = (args.first(), args.get(1), args.get(2), args.get(3)) else {
+            eprintln!("dlc-census: usage: mercs2_probe dlc-census <big-endian dlc archive> <big-endian retail wad> <pc vz.wad> <out.tsv>");
+            std::process::exit(2);
+        };
+        if let Err(e) = dlc_census::dlc_census(std::path::Path::new(package), std::path::Path::new(base), std::path::Path::new(pc), std::path::Path::new(out)) {
+            eprintln!("dlc-census failed: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    if cmd == "pws-pc" {
+        let (Some(wad), Some(audios), Some(out)) = (args.first(), args.get(1), args.get(2)) else {
+            eprintln!("pws-pc: usage: mercs2_probe pws-pc <pc wad> <Audios dir> <out.tsv>");
+            std::process::exit(2);
+        };
+        if let Err(e) = pws_survey::pc_streams(std::path::Path::new(wad), std::path::Path::new(audios), std::path::Path::new(out)) {
+            eprintln!("pws-pc failed: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    if cmd == "pws-survey" {
+        let (Some(package), Some(out)) = (args.first(), args.get(1)) else {
+            eprintln!("pws-survey: usage: mercs2_probe pws-survey <stfs package> <out.tsv> [--extract <dir>]");
+            std::process::exit(2);
+        };
+        let extract = flag_val(&args, "--extract");
+        if let Err(e) = pws_survey::pws_survey(std::path::Path::new(package), std::path::Path::new(out), extract.as_deref().map(std::path::Path::new)) {
+            eprintln!("pws-survey failed: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    if cmd == "stfs-list" {
+        let Some(package) = args.first() else {
+            eprintln!("stfs-list: usage: mercs2_probe stfs-list <stfs package>");
+            std::process::exit(2);
+        };
+        let reader = match std::fs::read(package) {
+            Ok(data) => mercs2_formats::dlc_stfs::StfsReader::new(data),
+            Err(e) => {
+                eprintln!("stfs-list: {package}: {e}");
+                std::process::exit(1);
+            }
+        };
+        for e in reader.file_table.iter().filter(|e| !e.is_dir) {
+            println!("{}\t{}\t{}", e.path_ind, e.file_size, e.name);
+        }
+        return;
+    }
+    if cmd == "tex-compare" {
+        let (Some(archive), Some(out), Some(vz)) = (args.first(), args.get(1), flag_val(&args, "--vz-wad")) else {
+            eprintln!("tex-compare: usage: mercs2_probe tex-compare <xbox archive> <out.tsv> --vz-wad <pc vz.wad> [--ps3 <ps3 archive>]");
+            std::process::exit(2);
+        };
+        let ps3 = flag_val(&args, "--ps3");
+        if let Err(e) = tex_compare::tex_compare(std::path::Path::new(archive), std::path::Path::new(&vz), ps3.as_deref().map(std::path::Path::new), std::path::Path::new(out)) {
+            eprintln!("tex-compare failed: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    if cmd == "tex-rungs" {
+        let (Some(archive), Some(out), Some(vz)) = (args.first(), args.get(1), flag_val(&args, "--vz-wad")) else {
+            eprintln!("tex-rungs: usage: mercs2_probe tex-rungs <big-endian archive> <out.tsv> --vz-wad <pc vz.wad> [--raw <dir> --hash <0xHASH>]");
+            std::process::exit(2);
+        };
+        let dir = flag_val(&args, "--raw");
+        let hash = flag_val(&args, "--hash").and_then(|h| u32::from_str_radix(h.trim_start_matches("0x"), 16).ok());
+        let raw = match (&dir, hash) {
+            (Some(d), Some(hash)) => Some(tex_rungs::Raw { hash, dir: std::path::Path::new(d) }),
+            (None, None) => None,
+            _ => {
+                eprintln!("tex-rungs: --raw and --hash go together, and --hash is hex");
+                std::process::exit(2);
+            }
+        };
+        if let Err(e) = tex_rungs::tex_rungs(std::path::Path::new(archive), std::path::Path::new(&vz), std::path::Path::new(out), raw.as_ref()) {
+            eprintln!("tex-rungs failed: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    if cmd == "ecs-names" {
+        let (Some(archive), Some(out), Some(vz)) = (args.first(), args.get(1), flag_val(&args, "--vz-wad")) else {
+            eprintln!("ecs-names: usage: mercs2_probe ecs-names <archive> <out.tsv> --vz-wad <pc vz.wad>");
+            std::process::exit(2);
+        };
+        if let Err(e) = ecs_compare::ecs_names(std::path::Path::new(archive), std::path::Path::new(&vz), std::path::Path::new(out)) {
+            eprintln!("ecs-names failed: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    if cmd == "ecs-compare" {
+        let (Some(a), Some(b), Some(out), Some(vz)) = (args.first(), args.get(1), args.get(2), flag_val(&args, "--vz-wad")) else {
+            eprintln!("ecs-compare: usage: mercs2_probe ecs-compare <archive a> <archive b> <out.tsv> --vz-wad <pc vz.wad> [--diffs <file>]");
+            std::process::exit(2);
+        };
+        let diffs = flag_val(&args, "--diffs");
+        if let Err(e) = ecs_compare::ecs_compare(
+            std::path::Path::new(a),
+            std::path::Path::new(b),
+            std::path::Path::new(&vz),
+            std::path::Path::new(out),
+            diffs.as_deref().map(std::path::Path::new),
+        ) {
+            eprintln!("ecs-compare failed: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
     if cmd == "ess-menu-check" {
         std::process::exit(ess_menu_check::main(&args));
     }
     if cmd == "prof-samples" {
         std::process::exit(prof_samples::main(&args));
+    }
+    if cmd == "gfx-run" {
+        let (Some(dir), Some(frames)) = (args.first(), args.get(1).and_then(|f| f.parse::<u32>().ok())) else {
+            eprintln!("gfx-run: usage: mercs2_probe gfx-run <movies_dir> <frames>");
+            std::process::exit(2);
+        };
+        if let Err(e) = gfx_golden::gfx_run(std::path::Path::new(dir), frames) {
+            eprintln!("gfx-run failed: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    if cmd == "bink-audio" {
+        let (Some(movie), Some(track), Some(out)) = (args.first(), args.get(1).and_then(|t| t.parse::<usize>().ok()), args.get(2)) else {
+            eprintln!("bink-audio: usage: mercs2_probe bink-audio <movie.bik> <track index> <out.s16> [<other.s16>]");
+            std::process::exit(2);
+        };
+        let against = args.get(3).map(std::path::Path::new);
+        if let Err(e) = gfx_golden::bink_audio(std::path::Path::new(movie), track, std::path::Path::new(out), against) {
+            eprintln!("bink-audio failed: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    if cmd == "bink-video" {
+        let (Some(movie), Some(frames), Some(against)) = (args.first(), args.get(1).and_then(|f| f.parse::<u32>().ok()), args.get(2)) else {
+            eprintln!("bink-video: usage: mercs2_probe bink-video <movie.bik> <frames> <reference.yuv>");
+            std::process::exit(2);
+        };
+        if let Err(e) = gfx_golden::bink_video(std::path::Path::new(movie), frames, std::path::Path::new(against)) {
+            eprintln!("bink-video failed: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    if cmd == "splice-emulate" {
+        if let Err(e) = splice_emu::run(&args) {
+            eprintln!("splice-emulate failed: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    if cmd == "bink-frame" {
+        let (Some(movie), Some(index), Some(out)) = (args.first(), args.get(1).and_then(|f| f.parse::<u32>().ok()), args.get(2)) else {
+            eprintln!("bink-frame: usage: mercs2_probe bink-frame <movie.bik> <frame> <out.png>");
+            std::process::exit(2);
+        };
+        if let Err(e) = gfx_golden::bink_frame(std::path::Path::new(movie), index, std::path::Path::new(out)) {
+            eprintln!("bink-frame failed: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    if cmd == "gfx-actions" {
+        let (Some(movie), Some(out)) = (args.first(), args.get(1)) else {
+            eprintln!("gfx-actions: usage: mercs2_probe gfx-actions <movie.gfx> <out.txt>");
+            std::process::exit(2);
+        };
+        if let Err(e) = gfx_golden::gfx_actions(std::path::Path::new(movie), std::path::Path::new(out)) {
+            eprintln!("gfx-actions failed: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    if cmd == "gfx-tags" {
+        let (Some(movie), Some(out)) = (args.first(), args.get(1)) else {
+            eprintln!("gfx-tags: usage: mercs2_probe gfx-tags <movie.gfx> <out.txt>");
+            std::process::exit(2);
+        };
+        if let Err(e) = gfx_golden::gfx_tags(std::path::Path::new(movie), std::path::Path::new(out)) {
+            eprintln!("gfx-tags failed: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    if cmd == "gfx-shell" {
+        let screen = args.get(1).and_then(|s| s.split_once('x')).and_then(|(w, h)| Some([w.parse::<u32>().ok()?, h.parse::<u32>().ok()?]));
+        let (Some(out), Some(screen)) = (args.first(), screen) else {
+            eprintln!("gfx-shell: usage: mercs2_probe gfx-shell <out.png> <width>x<height> [wait:<frames>|down:<button>|up:<button>|mouse:<x>,<y>,<buttons>|call:<name>|key:<id>|pad:<vendor>,<product>,<name>|held:<input>,...|get:<path>]... <wad, last mounted first>...");
+            std::process::exit(2);
+        };
+        let (wads, steps): (Vec<String>, Vec<String>) = args[2..].iter().cloned().partition(|a| a.ends_with(".wad"));
+        if let Err(e) = gfx_golden::gfx_shell(std::path::Path::new(out), screen, &steps, &wads) {
+            eprintln!("gfx-shell failed: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    if cmd == "gfx-render" {
+        let usage = "gfx-render: usage: mercs2_probe gfx-render <movie.gfx> <frames> <out.png> [--fonts <font.gfx>] [--goto <label>] <images.wad>...";
+        let (Some(movie), Some(frames), Some(out)) = (args.first(), args.get(1).and_then(|f| f.parse::<u32>().ok()), args.get(2)) else {
+            eprintln!("{usage}");
+            std::process::exit(2);
+        };
+        let fonts = flag_val(&args, "--fonts");
+        let label = flag_val(&args, "--goto");
+        let wads: Vec<String> = args[3..].iter().filter(|a| a.ends_with(".wad")).cloned().collect();
+        if let Err(e) = gfx_golden::gfx_render(
+            std::path::Path::new(movie),
+            frames,
+            std::path::Path::new(out),
+            &wads,
+            fonts.as_deref().map(std::path::Path::new),
+            label.as_deref(),
+        ) {
+            eprintln!("gfx-render failed: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    if cmd == "gfx-decode" {
+        let Some(dir) = first_positional(&args) else {
+            eprintln!("gfx-decode: usage: mercs2_probe gfx-decode <movies_dir>");
+            std::process::exit(2);
+        };
+        if let Err(e) = gfx_golden::gfx_decode(std::path::Path::new(&dir)) {
+            eprintln!("gfx-decode failed: {e}");
+            std::process::exit(1);
+        }
+        return;
     }
     if cmd == "gfx-golden" {
         let usage = "gfx-golden: usage: mercs2_probe gfx-golden <movies_dir> --md <report.md> --json <index.json>";
@@ -686,13 +1321,24 @@ fn main() {
         },
         "extract" => {
             let mh = model.as_deref().and_then(parse_hash).unwrap_or_else(|| {
-                eprintln!("extract: usage: mercs2_probe extract --model 0xHASH <out.bin>");
+                eprintln!("extract: usage: mercs2_probe extract --model 0xHASH [--type 0xTYPEHASH] <out.bin>");
                 std::process::exit(2);
+            });
+            // A name can be several assets (a character's model and its facefxactor share it): with
+            // --type the chunk of that CHDR class is read instead of the model.
+            let ty = flag_val(&args, "--type").map(|t| {
+                parse_hash(&t).unwrap_or_else(|| {
+                    eprintln!("extract: --type {t:?} is not a hex hash");
+                    std::process::exit(2);
+                })
             });
             let out = first_positional(&args).unwrap_or_else(|| format!("{mh:08X}.bin"));
             run((|| -> Result<(), String> {
                 let mut w = wad::open(&wadpath).map_err(|e| format!("open {wadpath}: {e}"))?;
-                let c = wad::extract_container(&mut w, mh).map_err(|e| format!("extract_container: {e}"))?;
+                let c = match ty {
+                    Some(t) => wad::extract_container_typed(&mut w, mh, t).map_err(|e| format!("extract_container_typed: {e}"))?,
+                    None => wad::extract_container(&mut w, mh).map_err(|e| format!("extract_container: {e}"))?,
+                };
                 std::fs::write(&out, &c).map_err(|e| format!("write {out}: {e}"))?;
                 println!("0x{mh:08X}: {} bytes -> {out}", c.len());
                 Ok(())
@@ -840,6 +1486,89 @@ fn main() {
                 None => None,
             };
             run(anim_table::anim_table(&wadpath, hash, handle, flag_val(&args, "--list").as_deref()));
+        }
+        "facefx" => {
+            if args.iter().any(|a| a == "--all") {
+                run(facefx::facefx_all(&wadpath));
+            } else {
+                let name = first_positional(&args).unwrap_or_else(|| {
+                    eprintln!("facefx: usage: mercs2_probe facefx <name|0xH> | --all");
+                    std::process::exit(2);
+                });
+                let hash = parse_hash(&name).unwrap_or_else(|| mercs2_formats::hash::pandemic_hash_m2(&name));
+                run(facefx::facefx(&wadpath, hash));
+            }
+        }
+        "layer" => {
+            if args.iter().any(|a| a == "--catalog") {
+                let out = flag_val(&args, "--catalog").unwrap_or_else(|| {
+                    eprintln!("layer: usage: mercs2_probe layer --catalog <out.tsv> [--also <archive,archive>] [--overlay <wad>]");
+                    std::process::exit(2);
+                });
+                let also: Vec<String> = flag_val(&args, "--also").map_or(Vec::new(), |v| v.split(',').map(str::to_string).collect());
+                let overlays: Vec<String> = flag_val(&args, "--overlay").into_iter().collect();
+                run(layer::layer_catalog(&wadpath, std::path::Path::new(&out), &also, &overlays));
+            } else if args.iter().any(|a| a == "--frames") {
+                let capture = flag_val(&args, "--frames").unwrap_or_else(|| {
+                    eprintln!("layer: usage: mercs2_probe layer --frames <capture>");
+                    std::process::exit(2);
+                });
+                run(layer::layer_frames(&wadpath, std::path::Path::new(&capture)));
+            } else if args.iter().any(|a| a == "--all") {
+                run(layer::layer_all(&wadpath));
+            } else if let Some(capture) = flag_val(&args, "--loaded") {
+                run(layer::layer_loaded(&wadpath, std::path::Path::new(&capture)));
+            } else if let Some(at) = args.iter().position(|a| a == "--near") {
+                let point: Vec<f32> = args[at + 1..].iter().take(3).filter_map(|a| a.parse().ok()).collect();
+                let [x, z, radius] = point[..] else {
+                    eprintln!("layer: usage: mercs2_probe layer --near <x> <z> <radius>");
+                    std::process::exit(2);
+                };
+                run(layer::layer_near(&wadpath, x, z, radius));
+            } else {
+                let name = first_positional(&args).unwrap_or_else(|| {
+                    eprintln!("layer: usage: mercs2_probe layer <name|0xH> [--overlay <wad>] | --all | --frames | --near <x> <z> <radius>");
+                    std::process::exit(2);
+                });
+                let hash = parse_hash(&name).unwrap_or_else(|| mercs2_formats::hash::pandemic_hash_m2(&name));
+                let overlays: Vec<String> = flag_val(&args, "--overlay").into_iter().collect();
+                run(layer::layer(&wadpath, hash, &overlays));
+            }
+        }
+        "foliage" => run(dump_render::foliage_list(&wadpath)),
+        "foliage-check" => match first_positional(&args) {
+            Some(capture) => run(dump_render::foliage_check(&wadpath, &capture)),
+            None => {
+                eprintln!("foliage-check: usage: mercs2_probe foliage-check <capture>");
+                std::process::exit(2);
+            }
+        },
+        "terrain-cell" => {
+            let usage = "terrain-cell: usage: mercs2_probe terrain-cell <0xH> [--at <centre_x> <centre_z> <x> <z>]";
+            let name = first_positional(&args).unwrap_or_else(|| {
+                eprintln!("{usage}");
+                std::process::exit(2);
+            });
+            let hash = parse_hash(&name).unwrap_or_else(|| mercs2_formats::hash::pandemic_hash_m2(&name));
+            let (centre, point) = match args.iter().position(|a| a == "--at") {
+                Some(at) => {
+                    let p: Vec<f32> = args[at + 1..].iter().take(4).filter_map(|a| a.parse().ok()).collect();
+                    let [cx, cz, x, z] = p[..] else {
+                        eprintln!("{usage}");
+                        std::process::exit(2);
+                    };
+                    (Some([cx, cz]), Some([x, z]))
+                }
+                None => (None, None),
+            };
+            run(terrain_cell::terrain_cell(&wadpath, hash, centre, point));
+        }
+        "clip-names" => {
+            let out = first_positional(&args).unwrap_or_else(|| {
+                eprintln!("clip-names: usage: mercs2_probe clip-names <review.tsv>");
+                std::process::exit(2);
+            });
+            run(clip_names::clip_names(&wadpath, std::path::Path::new(&out)));
         }
         "clip-pose" => {
             let usage = "clip-pose: usage: mercs2_probe clip-pose --model 0xH --clip 0xH --bones 0xA,0xB.. --ref 0xR [--frames N]";

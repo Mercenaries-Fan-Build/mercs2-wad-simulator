@@ -40,8 +40,8 @@ use mercs2_formats::fxdict::{sort_fxdict, FxRect};
 use mercs2_formats::texture::{parse_texture_container, replace_body, TexFormat};
 use mercs2_formats::texture_encode::{box_down, decode_bc3_block, encode_bc3, mip_chain, mip_count};
 
-/// The `vfx` atlas: `pandemic_hash_m2("vfx")`, the texture `PgFX` requests at init (`FUN_0048a170`).
-pub const VFX_ATLAS: u32 = 0x89E2_11AF;
+/// The `vfx` atlas: the texture `PgFX` requests at init (`FUN_0048a170`).
+pub use mercs2_formats::fxdict::VFX_ATLAS;
 
 /// The smallest sprite side: one BC3 block.
 pub const MIN_SIDE: usize = 4;

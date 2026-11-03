@@ -40,9 +40,9 @@ pub fn show(ctx: &egui::Context, ins: &Inspected, p: &Panel) -> bool {
     let mut open = true;
     let stem = ins.path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
     egui::Window::new(format!("Inspect — {stem}"))
-        .id(egui::Id::new("saves.inspect"))
+        .id(egui::Id::unique("saves.inspect"))
         .open(&mut open)
-        .default_size([720.0, 780.0])
+        .default_size(theme::window_size(720.0, 780.0))
         .vscroll(true)
         .show(ctx, |ui| body(ui, ins, p));
     open
@@ -94,7 +94,7 @@ fn topic(
         );
     }
     egui::CollapsingHeader::new(job)
-        .id_source(("inspect.topic", title))
+        .id_salt(("inspect.topic", title))
         .default_open(open)
         .show(ui, |ui| {
             view(ui);
@@ -114,10 +114,11 @@ fn topic(
                     .map(|(k, v)| format!("[\"{k}\"] = {}", save_lua::serialize(v)))
                     .collect::<Vec<_>>()
                     .join(",\n");
-                egui::ScrollArea::vertical().max_height(320.0).id_source(("inspect.raw.scroll", title)).show(ui, |ui| {
+                theme::scroll_vertical().max_height(320.0).id_salt(("inspect.raw.scroll", title)).show(ui, |ui| {
                     ui.add(
                         egui::TextEdit::multiline(&mut text)
                             .font(egui::TextStyle::Monospace)
+                            .margin(theme::TEXT_EDIT_MARGIN)
                             .desired_width(f32::INFINITY)
                             .interactive(false),
                     );
@@ -129,7 +130,7 @@ fn topic(
 /// The file and its fixed-layout header: offset, field, value.
 fn file(ui: &mut egui::Ui, ins: &Inspected) {
     egui::CollapsingHeader::new(RichText::new("FILE").text_style(theme::style_title()).color(theme::TX))
-        .id_source("inspect.file")
+        .id_salt("inspect.file")
         .default_open(false)
         .show(ui, |ui| {
             let mut rows: Vec<[String; 3]> = vec![["".into(), "Path".into(), ins.path.display().to_string()]];
@@ -203,8 +204,8 @@ mod tests {
         for name in game_paths::SAVE_FIXTURES {
             let ins = Inspected::load(&game_paths::save_fixtures().join(name));
             assert!(ins.tree.is_ok(), "{name}");
-            let _ = ctx.run(egui::RawInput::default(), |c| {
-                assert!(show(c, &ins, &panel));
+            crate::gui::run_headless(&ctx, egui::RawInput::default(), |c| {
+                assert!(show(c.ctx(), &ins, &panel));
             });
         }
     }

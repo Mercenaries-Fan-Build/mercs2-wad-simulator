@@ -126,6 +126,14 @@ repaints it, and two conflict.
 and `resident` (~240 always-loaded framework modules, `Mrx*` and the world-entity scripts). A target
 is resolved against both, and only the block it lands in is republished.
 
+A level's patch is compiled the same way. The engine mounts no `vz-patch.wad` in a level, so `qm link`
+reads vz's script blocks with the level's assets in place of their twins, links the set into those, and
+writes `data/<level>-patch.wad`, with the level's own blocks last. A key the link's blocks now hold leaves
+the level's, so it has one row. A level script overrides a stripped one and its decompile may not compile
+(`lbl_NN` gotos), so an append to it is spliced into its bytecode by `mercs2_luac::splice`, which keeps
+its name and DEPS; the appended Lua runs at the end of the module's main chunk. A deploy step merges every
+Shipment's overlay beneath that patch, the `level_patch` placement saying which file it is.
+
 The resident block is **mixed** — those ~240 Lua chunks sit among ~7,000 entries of other types — so
 two things there are not optional. The lookup is type-aware, or a 32-bit name-hash collision would
 splice compiled Lua into a texture. And the republished block carries an ASET row for **every**

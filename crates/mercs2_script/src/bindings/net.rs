@@ -165,12 +165,10 @@ pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
     b.real("ConnectToServer", lua.create_function(move |_, hn: Option<String>| { h.borrow_mut().net_session_start("client", hn.as_deref()); Ok(()) })?)?;
     let h = host.clone();
     b.real("EnterLobby", lua.create_function(move |_, _: mercs2_luac::rt::MultiValue| { h.borrow_mut().net_session_start("lobby", None); Ok(()) })?)?;
-    let h = host.clone();
-    b.real("AutoServer", lua.create_function(move |_, _: mercs2_luac::rt::MultiValue| { h.borrow_mut().net_session_start("server", None); Ok(true) })?)?;
-    let h = host.clone();
-    b.real("AutoClient", lua.create_function(move |_, _: mercs2_luac::rt::MultiValue| { h.borrow_mut().net_session_start("client", None); Ok(true) })?)?;
-    let h = host.clone();
-    b.real("AutoLobby", lua.create_function(move |_, _: mercs2_luac::rt::MultiValue| { h.borrow_mut().net_session_start("lobby", None); Ok(true) })?)?;
+    // Questions, not commands: `0x5C6850` answers false and `ShellBootstrap.Start` branches on it.
+    for name in ["AutoServer", "AutoClient", "AutoLobby"] {
+        b.real(name, lua.create_function(|_, _: mercs2_luac::rt::MultiValue| Ok(false))?)?;
+    }
     let h = host.clone();
     b.real("Stop", lua.create_function(move |_, _: mercs2_luac::rt::MultiValue| { h.borrow_mut().net_stop(); Ok(()) })?)?;
 

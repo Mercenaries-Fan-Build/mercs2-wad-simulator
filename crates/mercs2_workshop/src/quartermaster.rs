@@ -738,11 +738,11 @@ fn sev_chip(ui: &mut egui::Ui, s: Severity) {
     } else {
         (theme::G2, c)
     };
-    egui::Frame::none()
+    egui::Frame::NONE
         .fill(bg)
-        .stroke(egui::Stroke::new(1.0, c))
-        .rounding(3.0)
-        .inner_margin(egui::Margin::symmetric(5.0, 1.0))
+        .corner_radius(3)
+        .inner_margin(egui::Margin::symmetric(5, 1))
+        .apply_stroke_and_expansion_without_layout_shift(egui::Stroke::new(1.0, c), 0.0)
         .show(ui, |ui| {
             ui.label(theme::disp_text(sev_label(s).to_uppercase(), theme::style_eyebrow(), fg));
         });
@@ -756,6 +756,8 @@ fn contribution_name(c: &Contribution) -> String {
         | Contribution::AddTexture { name, .. }
         | Contribution::AddMovie { name, .. }
         | Contribution::AddLanguage { name, .. }
+        | Contribution::AddLevel { name, .. }
+        | Contribution::LevelAsset { name, .. }
         | Contribution::AddUi { name, .. } => name.clone(),
         Contribution::AddShopItem { id, .. } => id.clone(),
         Contribution::AddSound { bank, .. } => bank.clone(),
@@ -931,6 +933,8 @@ pub const KINDS: &[(&str, &[(&str, &str, &str)])] = &[
             ("add_stringdb_keys", "New text keys", "Add brand-new string-table keys"),
             ("replace_stringdb_text", "Rewrite text", "Rewrite strings by exact text match"),
             ("add_language", "New language", "Add a new selectable language (new base WAD)"),
+            ("add_level", "New level", "Add a level the game boots by name (new base WAD)"),
+            ("level_asset", "Level asset", "One asset of a level, in its PC form"),
         ],
     ),
     (
@@ -1030,9 +1034,13 @@ pub fn seeded(kind: &str, asset: &str, n: usize) -> Option<Contribution> {
             *target = mercs2_quartermaster::manifest::FxTarget::Effect { effect: asset.to_string() }
         }
         // A layer routed from the World domain: `asset` is the layer NAME, so seed the field the kind
-        // actually operates on (the stub's placeholder replaces/edits stay as authored defaults).
-        Contribution::EditWorld { layer, .. } | Contribution::ActivateLayer { layer, .. } => {
-            *layer = asset.to_string()
+        // actually operates on. The stub's `replaces` names a layer of its own example, which would
+        // remove an unrelated layer from a routed one: a routed layer replaces nothing until the
+        // author says so.
+        Contribution::EditWorld { layer, .. } => *layer = asset.to_string(),
+        Contribution::ActivateLayer { layer, replaces } => {
+            *layer = asset.to_string();
+            replaces.clear();
         }
         // A script routed from the Missions / Systems domain, or a table from anywhere: `asset` is the
         // script / table name, so it becomes the patch target. The sound kinds take no seed: the
@@ -1273,6 +1281,17 @@ fn stub(kind: &str, n: usize) -> Option<Contribution> {
             strings: PathBuf::from("src/strings.txt"),
             base: None,
         },
+        "add_level" => Contribution::AddLevel {
+            name,
+            display: "My Level".into(),
+            streams: Vec::new(),
+        },
+        "level_asset" => Contribution::LevelAsset {
+            level: "my_level".into(),
+            asset_type: "model".into(),
+            name,
+            rungs: Vec::new(),
+        },
         "add_shop_item" => Contribution::AddShopItem {
             id: format!("my_item_{n}"),
             name: "[my.item]".into(),
@@ -1333,7 +1352,7 @@ pub fn navigator(ui: &mut egui::Ui, p: &Panel) -> Vec<Act> {
             for (kind, _, blurb) in *kinds {
                 if ui.button(*kind).on_hover_text(*blurb).clicked() {
                     out.push(Act::Add(kind));
-                    ui.close_menu();
+                    ui.close();
                 }
             }
             ui.separator();
@@ -1348,9 +1367,9 @@ pub fn navigator(ui: &mut egui::Ui, p: &Panel) -> Vec<Act> {
             None => theme::LINE2,
         };
         let selected = p.selected == Some(i);
-        let resp = egui::Frame::none()
+        let resp = egui::Frame::NONE
             .fill(if selected { theme::BRASS_SOFT } else { Color32::TRANSPARENT })
-            .inner_margin(egui::Margin { left: 9.0, right: 8.0, top: 6.0, bottom: 7.0 })
+            .inner_margin(egui::Margin { left: 9, right: 8, top: 6, bottom: 7 })
             .show(ui, |ui| {
                 ui.set_width(ui.available_width());
                 ui.label(theme::disp_text(c.kind().to_uppercase(), theme::style_eyebrow(), theme::DIM));
@@ -1379,11 +1398,11 @@ pub fn navigator(ui: &mut egui::Ui, p: &Panel) -> Vec<Act> {
             acts.push(Act::Select(i));
         }
         let mut menu: Vec<Act> = Vec::new();
-        resp.context_menu(|ui| {
+        theme::context_menu(&resp, |ui| {
             add_menu(ui, &mut menu);
             if ui.button("Remove this contribution").clicked() {
                 menu.push(Act::Remove(i));
-                ui.close_menu();
+                ui.close();
             }
         });
         acts.extend(menu);
@@ -1393,9 +1412,9 @@ pub fn navigator(ui: &mut egui::Ui, p: &Panel) -> Vec<Act> {
     // an empty Shipment would have nothing to right-click at all.
     let rest = ui.available_rect_before_wrap();
     if rest.height() > 4.0 {
-        let bg = ui.interact(rest, ui.id().with("qm_queue_bg"), egui::Sense::click());
+        let bg = ui.interact(rest, ui.scope_id().with("qm_queue_bg"), egui::Sense::click());
         let mut menu: Vec<Act> = Vec::new();
-        bg.context_menu(|ui| add_menu(ui, &mut menu));
+        theme::context_menu(&bg, |ui| add_menu(ui, &mut menu));
         acts.extend(menu);
     }
     acts
@@ -1408,15 +1427,15 @@ pub fn navigator(ui: &mut egui::Ui, p: &Panel) -> Vec<Act> {
 /// The blast radius here is COMPUTED, never authored — only `raw` declares its own, and it is the
 /// one kind that can. Showing it is the point of giving this a main area: it answers "can this
 /// coexist with someone else's Shipment", which a modder cannot work out alone.
-pub fn center(ctx: &egui::Context, p: &Panel, names: Option<&NameTable>) -> Vec<Act> {
+pub fn center(root: &mut egui::Ui, p: &Panel, names: Option<&NameTable>) -> Vec<Act> {
     let mut acts: Vec<Act> = Vec::new();
     egui::CentralPanel::default()
         .frame(
-            egui::Frame::none()
+            egui::Frame::NONE
                 .fill(theme::G0)
-                .inner_margin(egui::Margin::symmetric(22.0, 18.0)),
+                .inner_margin(egui::Margin::symmetric(22, 18)),
         )
-        .show(ctx, |ui| {
+        .show(root, |ui| {
             let Some(s) = &p.shipment else {
                 return empty_middle(
                     ui,
@@ -1437,7 +1456,7 @@ pub fn center(ctx: &egui::Context, p: &Panel, names: Option<&NameTable>) -> Vec<
                         .color(theme::FAINT),
                 );
                 ui.add_space(14.0);
-                egui::ScrollArea::vertical().show(ui, |ui| {
+                theme::scroll_vertical().show(ui, |ui| {
                     let mut sh = s.manifest.shipment.clone();
                     let mut load = s.manifest.load.clone();
                     if identity_form(ui, &mut sh, &mut load)
@@ -1461,7 +1480,7 @@ pub fn center(ctx: &egui::Context, p: &Panel, names: Option<&NameTable>) -> Vec<
             );
             ui.add_space(14.0);
 
-            egui::ScrollArea::vertical().show(ui, |ui| {
+            theme::scroll_vertical().show(ui, |ui| {
                 // ── WARDROBE ────────────────────────────────────────────────────────────────
                 //
                 // Moved off Modkit, which is Tier 1 — install, load order, deploy. Choosing which
@@ -2580,6 +2599,26 @@ fn contribution_form(
                 "forks `base` (default english) into a new `.\\Data\\<name>.wad` + overlay stringdb.",
             );
         }
+        Contribution::LevelAsset { level, asset_type, name, rungs } => {
+            commit |= theme::text_field(ui, "Level", level, "dlc01", theme::FieldState::Neutral).lost_focus();
+            commit |= theme::text_field(ui, "Type", asset_type, "model", theme::FieldState::Neutral).lost_focus();
+            commit |= theme::text_field(ui, "Name", name, "0x00000000", theme::FieldState::Neutral).lost_focus();
+            for r in rungs.iter_mut() {
+                commit |= source_row(ui, "Rung", &mut r.file, root, &["ucfx"]);
+            }
+        }
+        Contribution::AddLevel { name, display, streams } => {
+            commit |= theme::text_field(ui, "Level", name, "dlc01", theme::FieldState::Neutral).lost_focus();
+            commit |= theme::text_field(ui, "Display", display, "My Level", theme::FieldState::Neutral).lost_focus();
+            for s in streams.iter_mut() {
+                commit |= source_row(ui, "Stream", s, root, &["pws"]);
+            }
+            theme::field_note(
+                ui,
+                theme::FieldState::Neutral,
+                "ships as `.\\Data\\<name>-patch.wad` above a copy of vz.wad.",
+            );
+        }
         Contribution::NativeHook { target, plugin, symbol, touches, signature_guard: _ } => {
             // `both` is reserved and rejected in v1, so it is not offered.
             commit |= theme::combo_field(
@@ -3314,6 +3353,17 @@ fn blast_rows(c: &Contribution) -> Vec<(String, String)> {
                 "new base .\\Data\\<name>.wad + overlay stringdb \u{2014} additive".to_string(),
             ),
         ],
+        Contribution::AddLevel { name, .. } => vec![
+            ("Adds".to_string(), format!("level {name}")),
+            (
+                "Merge".to_string(),
+                "new .\\Data\\<name>-patch.wad above a copy of vz.wad \u{2014} additive".to_string(),
+            ),
+        ],
+        Contribution::LevelAsset { level, asset_type, .. } => vec![
+            ("Adds".to_string(), format!("{asset_type} to level {level}")),
+            ("Merge".to_string(), "compiled into its level's patch".to_string()),
+        ],
         // Discovery is filesystem order, so two plugins on one address have no load order that
         // resolves them — it has to be exclusive.
         Contribution::NativeHook { symbol, .. } => vec![(
@@ -3349,11 +3399,11 @@ pub fn inspector(ui: &mut egui::Ui, p: &Panel, wad_stack: &[String], has_game: b
     let gc = gate.colour();
 
     // The gate first, because it decides whether Build is even live.
-    egui::Frame::none()
+    egui::Frame::NONE
         .fill(theme::G2)
-        .stroke(egui::Stroke::new(1.0, gc))
-        .rounding(6.0)
-        .inner_margin(egui::Margin::symmetric(11.0, 9.0))
+        .corner_radius(6)
+        .inner_margin(egui::Margin::symmetric(11, 9))
+        .apply_stroke_and_expansion_without_layout_shift(egui::Stroke::new(1.0, gc), 0.0)
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.horizontal(|ui| {
@@ -3962,8 +4012,9 @@ mod tests {
         assert_eq!(kinds, vec!["activate_layer", "edit_world"]);
 
         match seeded("activate_layer", "vz_state_pmccon004_destroyed", 1).unwrap() {
-            Contribution::ActivateLayer { layer, .. } => {
-                assert_eq!(layer, "vz_state_pmccon004_destroyed", "the routed layer name must seed `layer`")
+            Contribution::ActivateLayer { layer, replaces } => {
+                assert_eq!(layer, "vz_state_pmccon004_destroyed", "the routed layer name must seed `layer`");
+                assert!(replaces.is_empty(), "a routed layer must not remove the stub's example layer: {replaces:?}");
             }
             other => panic!("activate_layer seeded the wrong kind: {other:?}"),
         }

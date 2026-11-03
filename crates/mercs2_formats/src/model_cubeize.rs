@@ -238,7 +238,8 @@ pub struct SegRec {
 }
 
 /// Parse the `SEGM` chunk into records `{u16 bone@0, u8 seg_id@2, u8 state_mask@3}` (4 bytes each).
-/// The k-th top-level `SKIN`/`MESH` sub-object under `GEOM` binds to record `k` (seg_id == k).
+/// Sub-object `k` binds to record `INDX[k]`, whose `seg_id` names itself; an INSTANCE record names
+/// another record's `seg_id` and re-draws that geometry at its own bone (`vehicle_model_spec.md` §2a).
 /// The model container's top-level header — the 72-byte `INFO` leaf that is descriptor row 0, read
 /// into the runtime model-resource struct at load. These are the fields the LOD selector
 /// (`FUN_00470740`) reads as `M+0x7c` (LOD count), `M+0x84` (distance scale), etc.

@@ -43,6 +43,7 @@ pub mod drive;
 pub mod hijack;
 pub mod lua_surface;
 pub mod lut;
+pub mod rotor;
 pub mod system;
 pub mod tuning;
 

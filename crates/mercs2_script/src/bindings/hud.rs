@@ -65,6 +65,37 @@ pub fn pump_hud_callbacks(lua: &Lua, host: &SharedHost, dt: f32) -> LuaResult<()
             f.call_attr::<()>(mercs2_luac::rt::MultiValue::from_vec(ctx), "Hud.MovieEnd")?;
         }
     }
+    let flash = host.borrow_mut().hud().map(|t| t.take_flash_fires()).unwrap_or_default();
+    for (id, param) in flash {
+        fire_flash(lua, id, param)?;
+    }
+    Ok(())
+}
+
+/// Run one Flash event handler (`SetFlashEventHandler`) as `fCallback(unpack(tData), sParam)`.
+pub fn fire_flash(lua: &Lua, id: u32, param: Option<String>) -> LuaResult<()> {
+    let Some(cbs) = lua.app_data_ref::<Cbs>().map(|c| c.clone()) else { return Ok(()) };
+    let entry = cbs.borrow().fns.get(&id).cloned();
+    if let Some((f, mut args)) = entry {
+        if let Some(param) = param {
+            args.push(Value::String(lua.create_string(&param)?));
+        }
+        f.call_attr::<()>(mercs2_luac::rt::MultiValue::from_vec(args), "Hud.Flash")?;
+    }
+    Ok(())
+}
+
+/// Run every awake widget's update callback as `fCallback(unpack(tData), nDeltaTime)`.
+pub fn pump_widget_updates(lua: &Lua, host: &SharedHost, dt: f32) -> LuaResult<()> {
+    let Some(cbs) = lua.app_data_ref::<Cbs>().map(|c| c.clone()) else { return Ok(()) };
+    let updates = host.borrow().hud_ref().map(|t| t.update_callbacks()).unwrap_or_default();
+    for id in updates {
+        let entry = cbs.borrow().fns.get(&id).cloned();
+        if let Some((f, mut args)) = entry {
+            args.push(Value::Number(dt));
+            f.call_attr::<()>(mercs2_luac::rt::MultiValue::from_vec(args), "Hud.WidgetUpdate")?;
+        }
+    }
     Ok(())
 }
 
@@ -417,9 +448,42 @@ pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
     wset!("SetWidgetIgnoresPause", bool, |w, v| { w.ignores_pause = v; });
     wset!("SetWidgetSleep", bool, |w, v| { w.sleep = v; });
     wset!("SetWidgetHighlightable", bool, |w, v| { w.highlightable = v; });
-    wset!("SetWidgetAnchoring", i64, |w, v| { w.anchoring = v as u32; });
+    // `Widget:SetAnchoring` passes both axes (`mrxguibase.lua:808`). `0x005B5E70`: below −0.5 is
+    // left/top, above 0.5 right/bottom, anything else centre; a missing axis keeps its value.
+    let hh = host.clone();
+    b.real("SetWidgetAnchoring", lua.create_function(move |_, (wid, h, v): (i64, Option<f64>, Option<f64>)| {
+        let side = |n: f64| if n < -0.5 { -1 } else if n > 0.5 { 1 } else { 0 };
+        if let Some(w) = hh.borrow_mut().hud().and_then(|t| t.get_mut(wid as u64)) {
+            if let Some(h) = h {
+                w.anchoring[0] = side(h);
+            }
+            if let Some(v) = v {
+                w.anchoring[1] = side(v);
+            }
+        }
+        Ok(())
+    })?)?;
+    // `0x005B6E10` takes a boolean and raises without one.
+    wset!("SetWidgetUseResolutionCorrection", bool, |w, v| { w.use_resolution_correction = v; });
     wset!("SetWidgetViewport", i64, |w, v| { w.viewport = v as i32; });
-    wset!("SetWidgetFullscreen", bool, |w, v| { w.fullscreen = v; });
+    let hh = host.clone();
+    b.real("SetWidgetFullscreen", lua.create_function(move |_, (wid, mode): (i64, Value)| {
+        use mercs2_ui::Fullscreen;
+        let mode = match &mode {
+            Value::Nil | Value::Boolean(false) => Fullscreen::Off,
+            Value::Boolean(true) => Fullscreen::On,
+            Value::String(s) => match s.to_string_lossy().to_ascii_lowercase().as_str() {
+                "pan and scan" => Fullscreen::PanAndScan,
+                "letterbox" => Fullscreen::Letterbox,
+                other => return Err(mercs2_luac::rt::Error::RuntimeError(format!("SetWidgetFullscreen: no mode {other:?}"))),
+            },
+            other => return Err(mercs2_luac::rt::Error::RuntimeError(format!("SetWidgetFullscreen: a {} is not a mode", other.type_name()))),
+        };
+        if let Some(w) = hh.borrow_mut().hud().and_then(|t| t.get_mut(wid as u64)) {
+            w.fullscreen = mode;
+        }
+        Ok(())
+    })?)?;
 
     // --- tree / z-order ---
     for (name, front) in [("PushWidgetToFront", true), ("PushWidgetToBack", false)] {
@@ -509,8 +573,8 @@ pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
     });
     // `MovieWidget:Play(bLoop)` (`mrxguibase.lua:1391`). Starting playback re-arms the end latch, so a
     // widget replayed after its callback already fired can complete again.
-    wset!("PlayMovie", Option<bool>, |w, _v| {
-        if let Some(m) = w.movie.as_mut() { m.playing = true; m.end_fired = false; }
+    wset!("PlayMovie", Option<bool>, |w, v| {
+        if let Some(m) = w.movie.as_mut() { m.playing = true; m.end_fired = false; m.looping = v.unwrap_or(false); }
     });
     wset!("PauseMovie", Option<bool>, |w, _v| { if let Some(m) = w.movie.as_mut() { m.playing = false; } });
     // Stop is an explicit cancel: it must NOT fire the end callback, or a script that stops a movie
@@ -601,12 +665,124 @@ pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
         Ok(())
     })?)?;
 
+    // `_GuiInternal.SetWidgetUpdateCallback(uId, fCallback, tData)` `0x005B6460` — `mrxguibase.lua:517`.
+    // A nil callback clears it. `pump_widget_updates` runs it as `fCallback(unpack(tData), nDeltaTime)`,
+    // which is `HandleUpdate(oWidget, nDeltaTime)` (`mrxguishell.lua:331`).
+    let hh = host.clone();
+    let cbs_update = cbs.clone();
+    b.real("SetWidgetUpdateCallback", lua.create_function(move |_, (wid, f, ctx): (Option<i64>, Option<Function>, Option<Value>)| {
+        let mut g = hh.borrow_mut();
+        let Some(tree) = g.hud() else { return Ok(()) };
+        let id = f.as_ref().map(|_| tree.mint_callback());
+        if let Some(w) = tree.get_mut(wid.unwrap_or(0) as u64) {
+            w.update_callback = id;
+        }
+        if let (Some(id), Some(f)) = (id, f) {
+            cbs_update.borrow_mut().fns.insert(id, (f, super::unpack_ctx(ctx)));
+        }
+        Ok(())
+    })?)?;
+
     // --- flash widget ---
-    wset!("SetFlashSwfFile", String, |w, v| { if let Some(f) = w.flash.as_mut() { f.swf = v; } });
+    // `SetFlashSwfFile(uId, sName, fCallback, tData)` `FUN_005BA720`; `oFlash:SetSwfFile(nil)` unloads
+    // (`mrxguishell.lua:584`). The callback runs once the movie is up.
+    let hh = host.clone();
+    let cbs_swf = cbs.clone();
+    b.real("SetFlashSwfFile", lua.create_function(move |_, (wid, file, f, ctx): (i64, Option<String>, Option<Function>, Option<Value>)| {
+        let mut g = hh.borrow_mut();
+        let Some(tree) = g.hud() else { return Ok(()) };
+        let done = f.as_ref().map(|_| tree.mint_callback());
+        if let Some(w) = tree.get_mut(wid as u64).and_then(|w| w.flash.as_mut()) {
+            w.swf = file.clone().unwrap_or_default();
+        }
+        tree.request_flash(wid as u64, mercs2_ui::FlashRequest::Open { file, done });
+        if let (Some(id), Some(f)) = (done, f) {
+            cbs_swf.borrow_mut().fns.insert(id, (f, super::unpack_ctx(ctx)));
+        }
+        Ok(())
+    })?)?;
     wset!("SetFlashPlaySpeed", f32, |w, v| { if let Some(f) = w.flash.as_mut() { f.play_speed = v; } });
     wset!("PlayFlash", Option<bool>, |w, _v| { if let Some(f) = w.flash.as_mut() { f.playing = true; } });
     wset!("PauseFlash", Option<bool>, |w, _v| { if let Some(f) = w.flash.as_mut() { f.playing = false; } });
-    wset!("RestartFlash", Option<bool>, |w, _v| { if let Some(f) = w.flash.as_mut() { f.playing = true; } });
+    let hh = host.clone();
+    b.real("RestartFlash", lua.create_function(move |_, wid: i64| {
+        if let Some(tree) = hh.borrow_mut().hud() {
+            if let Some(f) = tree.get_mut(wid as u64).and_then(|w| w.flash.as_mut()) {
+                f.playing = true;
+            }
+            tree.request_flash(wid as u64, mercs2_ui::FlashRequest::Restart);
+        }
+        Ok(())
+    })?)?;
+    // `SetFlashCallback(uId, sEvent, fCallback, tData)` `FUN_005BAF90`. The context is what
+    // `FlashWidget:SetFlashEventHandler` packs for `_FlashCallback` (`mrxguibase.lua:1266`).
+    let hh = host.clone();
+    let cbs_flash = cbs.clone();
+    b.real("SetFlashCallback", lua.create_function(move |_, (wid, event, f, ctx): (i64, String, Option<Function>, Option<Value>)| {
+        let mut g = hh.borrow_mut();
+        let Some(tree) = g.hud() else { return Ok(()) };
+        let id = f.as_ref().map(|_| tree.mint_callback());
+        if let Some(flash) = tree.get_mut(wid as u64).and_then(|w| w.flash.as_mut()) {
+            match id {
+                Some(id) => {
+                    flash.callbacks.insert(event, id);
+                }
+                None => {
+                    flash.callbacks.remove(&event);
+                }
+            }
+        }
+        if let (Some(id), Some(f)) = (id, f) {
+            cbs_flash.borrow_mut().fns.insert(id, (f, super::unpack_ctx(ctx)));
+        }
+        Ok(())
+    })?)?;
+    // `CallFlashScriptFunction(uId, sName, ...)` `FUN_005BB170`; `FlashWidget:CallActionScriptCallback`
+    // unpacks its argument table after the widget and the name (`mrxguibase.lua:1274`).
+    let hh = host.clone();
+    b.real("CallFlashScriptFunction", lua.create_function(move |_, (wid, name, rest): (i64, String, MultiValue)| {
+        let args = rest
+            .into_iter()
+            .map(|v| match v {
+                Value::Nil => Ok(mercs2_ui::FlashArg::Nil),
+                Value::Boolean(b) => Ok(mercs2_ui::FlashArg::Bool(b)),
+                Value::Number(n) => Ok(mercs2_ui::FlashArg::Number(n as f64)),
+                Value::String(s) => Ok(mercs2_ui::FlashArg::Text(s.to_string_lossy().to_string())),
+                other => Err(mercs2_luac::rt::Error::RuntimeError(format!(
+                    "CallFlashScriptFunction({name}): cannot hand a movie a {}",
+                    other.type_name()
+                ))),
+            })
+            .collect::<LuaResult<Vec<_>>>()?;
+        if let Some(tree) = hh.borrow_mut().hud() {
+            tree.request_flash(wid as u64, mercs2_ui::FlashRequest::Invoke { name, args });
+        }
+        Ok(())
+    })?)?;
+    // `SendFlashInput(uId, nButton, sAction)` `FUN_005BAC20`: `h` holds, `r` releases, anything else
+    // presses.
+    let hh = host.clone();
+    b.real("SendFlashInput", lua.create_function(move |_, (wid, button, action): (i64, i64, Option<String>)| {
+        use mercs2_ui::FlashAction;
+        let action = match action.as_deref().and_then(|a| a.chars().next()) {
+            Some('h') => FlashAction::Hold,
+            Some('r') => FlashAction::Release,
+            _ => FlashAction::Press,
+        };
+        if let Some(tree) = hh.borrow_mut().hud() {
+            tree.request_flash(wid as u64, mercs2_ui::FlashRequest::Input { button, action });
+        }
+        Ok(())
+    })?)?;
+    for (name, right) in [("SendFlashLeftAnalogInput", false), ("SendFlashRightAnalogInput", true)] {
+        let hh = host.clone();
+        b.real(name, lua.create_function(move |_, (wid, x, y): (i64, f32, f32)| {
+            if let Some(tree) = hh.borrow_mut().hud() {
+                tree.request_flash(wid as u64, mercs2_ui::FlashRequest::Analog { right, x, y });
+            }
+            Ok(())
+        })?)?;
+    }
 
     // --- minimap ---
     wset!("MinimapSetRotation", f32, |w, v| { if let Some(m) = w.minimap.as_mut() { m.rotation = v; } });
@@ -654,7 +830,7 @@ pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
     wget!("GetWidgetHighlightable", |w| w.highlightable, false);
     wget!("GetWidgetIgnoresPause", |w| w.ignores_pause, false);
     wget!("GetWidgetSleep", |w| w.sleep, false);
-    wget!("GetWidgetAnchoring", |w| w.anchoring as i64, 0i64);
+    wget!("GetWidgetAnchoring", |w| (w.anchoring[0] as i64, w.anchoring[1] as i64), (0i64, 0i64));
     // Four returns, not two — see the `SetWidgetLocation` note above.
     wget!("GetWidgetLocation",
         |w| (w.location[0], w.location[1], w.location[2], w.location[3]),
@@ -700,7 +876,9 @@ pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
         "SetImageTiling", "SetImageTextureCoordinates", "SetTextText", "SetTextFont", "SetTextWrapping",
         "SetTextJustification", "SetTextScale", "SetSpriteTexture", "SetSpriteFrame", "SetSpriteTextureSize",
         "SetSpriteFrameSize", "SetMovieFile", "PlayMovie", "PauseMovie", "StopMovie", "SetFlashSwfFile",
-        "SetFlashPlaySpeed", "PlayFlash", "PauseFlash", "RestartFlash", "MinimapSetRotation",
+        "SetFlashPlaySpeed", "PlayFlash", "PauseFlash", "RestartFlash", "SetFlashCallback",
+        "CallFlashScriptFunction", "SendFlashInput", "SendFlashLeftAnalogInput", "SendFlashRightAnalogInput",
+        "SetWidgetUpdateCallback", "SetWidgetUseResolutionCorrection", "MinimapSetRotation",
         "MinimapSetRange", "SetMinimapRadius", "SetMinimapOwner", "MinimapSetPlayerLocation",
         "MinimapSetFocusLocation", "MinimapAddObjective", "MinimapRemoveObjective",
     ];

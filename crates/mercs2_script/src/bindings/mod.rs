@@ -92,7 +92,7 @@ mod pg_world;
 pub(crate) mod player;
 mod report;
 mod socket;
-mod sound;
+pub(crate) mod sound;
 mod string_ext;
 mod table_ext;
 mod sys;

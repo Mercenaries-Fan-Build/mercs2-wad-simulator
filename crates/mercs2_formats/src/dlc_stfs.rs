@@ -276,6 +276,15 @@ impl StfsReader {
         let chain = self.build_chain(entry.first_block, entry.alloc_blocks);
         self.read_with_chain(&chain, 0, entry.file_size as usize)
     }
+
+    /// Every `.pws` file of the package, `(name, bytes)`.
+    pub fn read_pws(&self) -> Result<Vec<(String, Vec<u8>)>, String> {
+        self.file_table
+            .iter()
+            .filter(|e| !e.is_dir && e.name.to_ascii_lowercase().ends_with(".pws"))
+            .map(|e| Ok((e.name.clone(), self.read_entry(e)?)))
+            .collect()
+    }
 }
 
 /// The program that unpacks a RAR'd DLC download, with the path of its executable. The caller
@@ -442,13 +451,39 @@ fn collect_extracted_files(dir: &Path, out: &mut Vec<ExtractedFile>) -> Result<(
 
 /// Load an STFS container or a raw DOH file → (doh_bytes, source_type).
 pub fn load_stfs_or_doh(path: &Path) -> Result<(Vec<u8>, &'static str), String> {
+    load_stfs_or_doh_with_streams(path).map(|(doh, src, _)| (doh, src))
+}
+
+/// A PS3 package's archive, decrypted from its one `.EDAT`, and its `.PWS` files, `(file name, bytes)`.
+fn read_ps3_package(data: &[u8]) -> Result<(Vec<u8>, Vec<(String, Vec<u8>)>), String> {
+    let pkg = crate::ps3_pkg::parse_pkg(data)?;
+    let named = |suffix: &str| -> Vec<(String, Vec<u8>)> {
+        pkg.entries
+            .iter()
+            .filter(|e| !e.is_dir() && e.name.to_ascii_uppercase().ends_with(suffix))
+            .filter_map(|e| Some((e.name.rsplit('/').next()?.to_string(), pkg.file_bytes(&e.name)?.to_vec())))
+            .collect()
+    };
+    let edats = named(".EDAT");
+    let [(_, edat)] = edats.as_slice() else {
+        return Err(format!("a PS3 package holds one .EDAT, this one {}", edats.len()));
+    };
+    Ok((crate::ps3_edat::decrypt_edat(edat, &crate::ps3_keys::dlc01_klicensee())?, named(".PWS")))
+}
+
+/// [`load_stfs_or_doh`], with every `.pws` an STFS container or a PS3 package holds; a raw archive
+/// brings none.
+pub fn load_stfs_or_doh_with_streams(path: &Path) -> Result<(Vec<u8>, &'static str, Vec<(String, Vec<u8>)>), String> {
     let data = std::fs::read(path).map_err(|e| format!("read {}: {e}", path.display()))?;
     let magic = &data[..4.min(data.len())];
     if magic == STFS_MAGIC_LIVE || magic == STFS_MAGIC_PIRS || magic == STFS_MAGIC_CON {
         let reader = StfsReader::new(data);
-        Ok((reader.read_doh()?, "stfs"))
+        Ok((reader.read_doh()?, "stfs", reader.read_pws()?))
+    } else if magic == crate::ps3_pkg::PKG_MAGIC {
+        let (archive, streams) = read_ps3_package(&data)?;
+        Ok((archive, "pkg", streams))
     } else if magic == SCFF_MAGIC {
-        Ok((data, "doh"))
+        Ok((data, "doh", Vec::new()))
     } else {
         Err(format!("Unknown file format: {magic:?}"))
     }

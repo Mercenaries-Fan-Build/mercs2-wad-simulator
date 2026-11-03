@@ -1,0 +1,9 @@
+[package]
+name = "mercs2_bink"
+version = "0.1.0"
+edition = "2021"
+description = "Bink 1 (BIKi) movie decoding for the shipped Mercenaries 2 movies, written from the specifications beside it, which were read out of binkw32.dll."
+license.workspace = true
+repository.workspace = true
+
+[dependencies]

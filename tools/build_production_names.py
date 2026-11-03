@@ -9,10 +9,13 @@ This produces the PRODUCTION lookup — `crates/mercs2_workshop/data/production_
 inside the wad_simulator repo so it bundles with the workshop and needs no cross-repo file and no game
 WAD to rebuild the pack.
 
-It is built from the current `names.bin` (already trimmed to hashes the workshop actually resolves),
-then every entry is:
+It is the previous table (`production_names.base.json`, the committed file set aside before the
+raw-corpora pack) plus every entry of the current `names.bin` (already trimmed to hashes the workshop
+actually resolves) the previous table lacks. The pack opens only the archives at hand, so a name
+the previous table holds is kept even when this `names.bin` does not reach it. Every new entry is:
   * hash-VERIFIED — m2(name) must equal its hash, or it is dropped; and
   * junk-FILTERED — generated `_gen_` handles, illegal characters, and consonant/mixed blobs are dropped.
+A (hash, name) pair on `data/rejected_names.json` is dropped from both.
 
 Output is sorted by hash for stable diffs. Run from the wad_simulator repo root.
 """
@@ -89,9 +92,24 @@ def main() -> int:
     if not binp:
         print("no names.bin found — run `mercs2_workshop --pack-data` first", file=sys.stderr)
         return 1
+    data = here / "crates/mercs2_workshop/data"
+    basep = data / "production_names.base.json"
+    if not basep.is_file():
+        print(f"no {basep.relative_to(here)} — set the committed production_names.json aside under that "
+              "name before the raw-corpora pack (data/README.md)", file=sys.stderr)
+        return 1
+    base = {int(k, 16): v for k, v in json.loads(basep.read_text())["pandemic_hash_m2"].items()}
+    rejected = {(int(k, 16), n) for k, ns in json.loads((data / "rejected_names.json").read_text())["pandemic_hash_m2"].items()
+                for n in ns}
     raw = parse_names_bin(binp)
-    kept, bad_hash, junk = {}, 0, 0
+    kept = {h: n for h, n in base.items() if (h, n) not in rejected}
+    added, bad_hash, junk, dropped = 0, 0, 0, 0
     for h, n in raw.items():
+        if h in kept:
+            continue
+        if (h, n) in rejected:
+            dropped += 1
+            continue
         if m2(n) != h:
             bad_hash += 1
             continue
@@ -99,8 +117,8 @@ def main() -> int:
             junk += 1
             continue
         kept[h] = n
-    outp = here / "crates/mercs2_workshop/data/production_names.json"
-    outp.parent.mkdir(parents=True, exist_ok=True)
+        added += 1
+    outp = data / "production_names.json"
     payload = {
         "format": 1,
         "note": "Curated, hash-verified node/asset name lookup for the Mercs2 workshop. "
@@ -109,8 +127,9 @@ def main() -> int:
         "pandemic_hash_m2": {f"0x{h:08X}": n for h, n in sorted(kept.items())},
     }
     outp.write_text(json.dumps(payload, indent=0))
-    print(f"names.bin: {len(raw)} entries")
-    print(f"  dropped {bad_hash} bad-hash, {junk} junk")
+    basep.unlink()
+    print(f"previous table: {len(base)} names; names.bin: {len(raw)} entries")
+    print(f"  added {added}; dropped {bad_hash} bad-hash, {junk} junk, {dropped} rejected")
     print(f"  -> {outp.relative_to(here)}: {len(kept)} verified names")
     return 0
 

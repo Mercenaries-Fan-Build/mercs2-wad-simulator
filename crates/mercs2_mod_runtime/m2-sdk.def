@@ -16,6 +16,7 @@ EXPORTS
     m2_lua_arg_type
     m2_lua_arg_number
     m2_lua_arg_bool
+    m2_lua_arg_object
     m2_lua_join_strings
     m2_loghook_add_listener
     m2_loghook_install
@@ -41,3 +42,5 @@ EXPORTS
     m2_lua_push_bool
     m2_lua_push_number
     m2_lua_push_string
+    m2_render_tree_sites
+    m2_render_last_error

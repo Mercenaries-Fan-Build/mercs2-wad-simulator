@@ -154,6 +154,23 @@ const CAM_RADIUS: f32 = 0.35;
 /// Minimum eye distance the boom may retract to (so the eye never ends up inside the focus).
 const MIN_BOOM: f32 = 0.6;
 
+/// What the render applies last to every view-projection: negate clip X. Retail's projection carries the
+/// same mirror: `+0xB30` of the live viewport has `m00` = -1.92 with the camera's right vector at +X
+/// (`23fe7f38` PMC capture), so looking along +Z, +X is on the left of the screen.
+pub fn clip_mirror() -> Mat4 {
+    Mat4::from_scale(Vec3::new(-1.0, 1.0, 1.0))
+}
+
+/// The world direction on the right of the screen for a camera looking along `forward`.
+pub fn screen_right(forward: Vec3) -> Vec3 {
+    forward.cross(Vec3::Y).normalize()
+}
+
+/// `yaw` after turning `right` radians towards the right of the screen (negative turns left).
+pub fn turn_right(yaw: f32, right: f32) -> f32 {
+    yaw - right
+}
+
 /// The over-the-shoulder view matrix for a follow camera at `player_pos` looking at (`yaw`, `pitch`),
 /// using `preset`'s reflected offset + rest pitch. The eye sits a boom behind + above the focus; when
 /// `collision` is non-empty the boom is cast from the focus toward the desired eye and pulled in to just
@@ -168,8 +185,7 @@ pub fn view_with_preset(
     let p = pitch + preset.pitch_offset;
     let dir = Vec3::new(p.cos() * yaw.sin(), p.sin(), p.cos() * yaw.cos()).normalize();
     let focus = player_pos + Vec3::Y * preset.offset.y;
-    let right = Vec3::Y.cross(dir).normalize();
-    let want_eye = focus - dir * preset.offset.z + right * preset.offset.x;
+    let want_eye = focus - dir * preset.offset.z + screen_right(dir) * preset.offset.x;
     let eye = if collision.is_empty() {
         want_eye
     } else {
@@ -210,17 +226,17 @@ impl FreeCamera {
     }
 
     /// Apply a mouse-look delta (already scaled to radians by the caller's sensitivity/invert-Y):
-    /// yaw += `dyaw`, pitch −= `dpitch` (clamped). Matches the mouse-look convention where a downward
-    /// mouse move lowers the pitch.
+    /// turn right by `dyaw`, pitch −= `dpitch` (clamped). Matches the mouse-look convention where a
+    /// downward mouse move lowers the pitch.
     pub fn apply_mouse(&mut self, dyaw: f32, dpitch: f32) {
-        self.yaw += dyaw;
+        self.yaw = turn_right(self.yaw, dyaw);
         self.pitch = (self.pitch - dpitch).clamp(-Self::PITCH_LIMIT, Self::PITCH_LIMIT);
     }
 
-    /// Add a look delta from keys / gamepad (yaw += `dyaw`, pitch += `dpitch`), clamping pitch once at
-    /// the end — equivalent to the game's per-key adjust followed by a single clamp.
+    /// Add a look delta from keys / gamepad (turn right by `dyaw`, pitch += `dpitch`), clamping pitch
+    /// once at the end — equivalent to the game's per-key adjust followed by a single clamp.
     pub fn add_look(&mut self, dyaw: f32, dpitch: f32) {
-        self.yaw += dyaw;
+        self.yaw = turn_right(self.yaw, dyaw);
         self.pitch = (self.pitch + dpitch).clamp(-Self::PITCH_LIMIT, Self::PITCH_LIMIT);
     }
 
@@ -276,6 +292,28 @@ mod tests {
         assert_eq!(p.far, 500.0, "PMC far from wifpmcinterior.lua SetNearFar");
         assert_eq!(p.blend_time, 0.5, "HumanCameraModifier DAT_00bbb99c");
         assert!((p.pitch_offset + 0.1309).abs() < 1e-3, "−7.5° live rest pitch");
+    }
+
+    /// A point on the right of the screen moves towards the centre when the camera turns right, through
+    /// both of the camera's look inputs, under the render's own mirror.
+    #[test]
+    fn a_right_turn_goes_to_the_right_of_the_screen() {
+        let proj = Mat4::perspective_lh(45f32.to_radians(), 1.0, 0.5, 1000.0);
+        let screen_x = |cam: &FreeCamera, at: Vec3| {
+            let clip = clip_mirror() * proj * cam.view() * at.extend(1.0);
+            clip.x / clip.w
+        };
+        let start = FreeCamera::new(Vec3::ZERO, 0.4, 0.0);
+        let target = start.forward() * 10.0 + screen_right(start.forward()) * 2.0;
+        let before = screen_x(&start, target);
+        assert!(before > 0.0, "screen_right is on the right of the screen: {before}");
+
+        let mut mouse = start;
+        mouse.apply_mouse(0.05, 0.0);
+        assert!(screen_x(&mouse, target) < before, "mouse: {} from {before}", screen_x(&mouse, target));
+        let mut keys = start;
+        keys.add_look(0.05, 0.0);
+        assert!(screen_x(&keys, target) < before, "keys: {} from {before}", screen_x(&keys, target));
     }
 
     /// Nothing ridden → on foot; a `Tank`-class ridden object selects the tank mode.

@@ -22,21 +22,21 @@
 //! # use mercs2_formats::be_to_le::convert;
 //! # fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! let be_block: Vec<u8> = vec![/* raw big-endian UCFX bytes */];
-//! let le_block = convert::convert_block(&be_block, false, None, None)?;
+//! let le_block = convert::convert_block(&be_block, false, None, None, None, None)?;
 //! # Ok(())
 //! # }
 //! ```
 
 use crate::crc32::crc32_mercs2;
-use crate::ffcs::read_u32_be;
-use crate::schema::{ComponentSchema, SchemaFieldType};
+use crate::ffcs::{read_u16_be, read_u32_be};
 use crate::tags::ChunkTag;
-use crate::texsize::{dxt_format, dxt_mip_count, linear_mip_chain_size, tex_mip_levels};
 use crate::types;
 
+use super::ecs::{convert_ecs_bodies, convert_guidmap_body, ComponentSchemas};
 use super::havok;
 use super::lua;
 use super::report::SchemaCoverageReport;
+use super::texture::BlockTables;
 
 /// When `true`, the per-block / per-entry diagnostics below are suppressed.
 /// The in-process `dlc_port` driver sets this (it converts thousands of blocks);
@@ -69,24 +69,30 @@ fn strip_csum_trailer(raw: &[u8]) -> &[u8] {
 }
 
 /// Descriptor row parsed from a UCFX container's descriptor table.
-struct Descriptor {
-    tag: ChunkTag,
-    tag_bytes_le: [u8; 4],
-    row_u0: u32,
-    body_size: u32,
-    row_u3: u32,
-    row_u4: u32,
+pub(super) struct Descriptor {
+    pub(super) tag: ChunkTag,
+    pub(super) tag_bytes_le: [u8; 4],
+    pub(super) row_u0: u32,
+    pub(super) body_size: u32,
+    pub(super) row_u3: u32,
+    pub(super) row_u4: u32,
 }
 
 /// Convert a decompressed BE block to LE format.
 /// When `report` is `Some`, collects schema field coverage stats.
 /// `lua_tools` is the java + unluac pair that converts `BINN` (Lua bytecode) chunks; a block
 /// holding a `BINN` chunk errors when it is `None`.
+/// `schemas` is the PC bake's class layouts ([`ComponentSchemas::from_vz_wad`]); a block holding a
+/// compact ECS container errors when it is `None`.
+/// `tables` is the archive's [`TextureTable`], this block's rung and its streamed banks; a block
+/// holding a big-endian texture errors when it is `None`, a streamed bank when it holds none.
 pub fn convert_block(
     be_data: &[u8],
     dry_run: bool,
     mut report: Option<&mut SchemaCoverageReport>,
     lua_tools: Option<&lua::LuaTools>,
+    schemas: Option<&ComponentSchemas>,
+    tables: Option<BlockTables>,
 ) -> Result<Vec<u8>, String> {
     if be_data.len() < 4 {
         return Err("Block too small".into());
@@ -156,6 +162,7 @@ pub fn convert_block(
     // chunk_size INCLUDES the 8-byte CSUM trailer on both Xbox and PC,
     // so strip it before converting and re-add a fresh one afterwards.
     let mut converted_containers: Vec<Vec<u8>> = Vec::with_capacity(entry_count);
+    let mut kept: Vec<&EntryInfo> = Vec::with_capacity(entry_count);
     let mut offset = header_size;
     for (ei, entry) in entries.iter().enumerate() {
         let container_end = offset + entry.chunk_size as usize;
@@ -169,13 +176,62 @@ pub fn convert_block(
         vlog!("  Converting entry {}: type=0x{:08x} ({}) size={} (UCFX={})",
             ei, entry.type_hash, type_name, entry.chunk_size, container.len());
 
+        offset = container_end;
+        if entry.type_hash == types::TYPE_HASH_TEXTURE && container.starts_with(b"XFCU") {
+            let t = tables.ok_or_else(|| format!("Entry {ei} 0x{:08x}: a texture needs the archive's TextureTable", entry.name_hash))?;
+            if t.textures.is_empty_stub(entry.name_hash) {
+                continue;
+            }
+            let rung = t.rung.ok_or_else(|| format!("Entry {ei} 0x{:08x}: this block's path names no rung", entry.name_hash))?;
+            let converted = t.textures.convert_chunk(entry.name_hash, rung, container)
+                .map_err(|e| format!("Entry {ei} 0x{:08x}: {e}", entry.name_hash))?;
+            converted_containers.push(converted);
+            kept.push(entry);
+            continue;
+        }
+
+        if entry.type_hash == types::TYPE_HASH_MODEL && super::ps3_model::has_sspu(container) {
+            let flags = tables
+                .and_then(|t| t.textures.material_flags(entry.name_hash))
+                .ok_or_else(|| format!("Entry {ei} 0x{:08x}: a PS3 model needs its materials from the archive", entry.name_hash))?;
+            let converted = super::ps3_model::convert(container, flags, |rest| {
+                convert_container(rest, false, ei, entry.type_hash, report.as_deref_mut(), lua_tools, schemas, None)
+            })
+            .map_err(|e| format!("Entry {ei} 0x{:08x}: {e}", entry.name_hash))?;
+            converted_containers.push(converted);
+            kept.push(entry);
+            continue;
+        }
+
+        let fields = match entry.type_hash {
+            types::TYPE_HASH_FOLIAGE => Some(super::foliage::convert as fn(&[u8]) -> Result<Vec<u8>, String>),
+            types::TYPE_HASH_WATERMAP => Some(super::watermap::convert as fn(&[u8]) -> Result<Vec<u8>, String>),
+            types::TYPE_HASH_SOUNDBANK => Some(super::audio::convert_soundbank as fn(&[u8]) -> Result<Vec<u8>, String>),
+            types::TYPE_HASH_SOUNDDB => Some(super::audio::convert_sounddb as fn(&[u8]) -> Result<Vec<u8>, String>),
+            _ => None,
+        };
+        if let Some(convert) = fields.filter(|_| container.starts_with(b"XFCU")) {
+            let converted = convert(container).map_err(|e| format!("Entry {ei} 0x{:08x}: {e}", entry.name_hash))?;
+            converted_containers.push(converted);
+            kept.push(entry);
+            continue;
+        }
+
+        if entry.type_hash == crate::scrub::TYPE_HASH && super::ps3_model::has_sspu(container) {
+            let converted = super::ps3_scrub::convert(container).map_err(|e| format!("Entry {ei} 0x{:08x}: {e}", entry.name_hash))?;
+            converted_containers.push(converted);
+            kept.push(entry);
+            continue;
+        }
+
         let is_ecs = entry.type_hash == TYPE_HASH_ECS_NODE
             || entry.type_hash == TYPE_HASH_WORLD_ENTITY
             || entry.type_hash == TYPE_HASH_GUIDMAP;
-        let converted = convert_container(container, is_ecs, ei, entry.type_hash, report.as_deref_mut(), lua_tools)?;
+        let stream = tables.and_then(|t| t.streams).and_then(|s| s.get(entry.name_hash));
+        let converted = convert_container(container, is_ecs, ei, entry.type_hash, report.as_deref_mut(), lua_tools, schemas, stream)
+            .map_err(|e| format!("Entry {ei} 0x{:08x}: {e}", entry.name_hash))?;
         converted_containers.push(converted);
-
-        offset = container_end;
+        kept.push(entry);
     }
 
     // Pass 2: Compute correct chunk_sizes (UCFX + 8 for CSUM trailer).
@@ -194,8 +250,8 @@ pub fn convert_block(
     let mut output = Vec::with_capacity(be_data.len());
 
     // Write LE entry table
-    output.extend_from_slice(&(entry_count as u32).to_le_bytes());
-    for (ei, entry) in entries.iter().enumerate() {
+    output.extend_from_slice(&(kept.len() as u32).to_le_bytes());
+    for (ei, entry) in kept.iter().enumerate() {
         output.extend_from_slice(&entry.name_hash.to_le_bytes());
         output.extend_from_slice(&entry.type_hash.to_le_bytes());
         output.extend_from_slice(&entry.field_c.to_le_bytes());
@@ -215,6 +271,20 @@ pub fn convert_block(
 }
 
 /// Convert a single BE UCFX container to LE.
+/// One big-endian ECS container, converted on its own: `worldentity`, a layer, a guidmap. The
+/// result ends in its `CSUM` trailer, as a chunk of [`convert_block`]'s output does.
+pub fn convert_ecs_container(
+    container: &[u8],
+    type_hash: u32,
+    schemas: Option<&ComponentSchemas>,
+) -> Result<Vec<u8>, String> {
+    let mut out = convert_container(strip_csum_trailer(container), true, 0, type_hash, None, None, schemas, None)?;
+    let crc = crc32_mercs2(&out);
+    out.extend_from_slice(b"CSUM");
+    out.extend_from_slice(&crc.to_le_bytes());
+    Ok(out)
+}
+
 fn convert_container(
     container: &[u8],
     is_ecs: bool,
@@ -222,6 +292,8 @@ fn convert_container(
     type_hash: u32,
     report: Option<&mut SchemaCoverageReport>,
     lua_tools: Option<&lua::LuaTools>,
+    schemas: Option<&ComponentSchemas>,
+    stream: Option<&super::audio::PcStream>,
 ) -> Result<Vec<u8>, String> {
     if container.len() < 20 {
         return Err(format!("Entry {} container too small ({})", entry_idx, container.len()));
@@ -313,11 +385,22 @@ fn convert_container(
         out.extend_from_slice(&container[desc_table_end..data_start]);
     }
 
-    // For ECS containers, we need to identify COMP groups and convert them using schemas
     if is_ecs {
-        convert_ecs_bodies(&mut out, container, &descriptors, data_area_off, is_be, entry_idx, report)?;
+        if !is_be || data_area_off == 0 {
+            return Err(format!("Entry {entry_idx}: an ECS container must be big-endian with a data area"));
+        }
+        let mut data_area = container[data_start..].to_vec();
+        if type_hash == TYPE_HASH_GUIDMAP {
+            convert_guidmap_body(&mut data_area, &descriptors)?;
+        } else {
+            convert_ecs_bodies(&mut data_area, &descriptors, schemas, report)?;
+        }
+        out.extend_from_slice(&data_area);
     } else {
         convert_generic_bodies(&mut out, container, &descriptors, data_area_off, is_be, type_hash, entry_idx, report)?;
+        if is_be {
+            apply_mixr_swap(&mut out, container, &descriptors, data_area_off)?;
+        }
     }
 
     // Repair embedded Havok packfile headers whose 4 × u8 `layoutRules` were
@@ -328,20 +411,11 @@ fn convert_container(
         fix_embedded_havok_layoutrules(container, &mut out);
     }
 
-    // Xbox 360 textures: rebuild INFO + untile the GPU-tiled DXT BODY. The
-    // generic pass left INFO basic-swapped and BODY as tiled passthrough; this
-    // reframes the container (BODY shrinks tiled->linear). Full (non-streamed)
-    // DXT entries only; stubs / non-DXT / non-trailing BODY fall through
-    // unchanged. convert_block recomputes chunk_size + CSUM from the new length.
-    if is_be && type_hash == types::TYPE_HASH_TEXTURE {
-        apply_texture_untile(&mut out, &descriptors, data_area_off, desc_table_end);
-    }
-
     // Xbox 360 wavebanks: transcode embedded audio clips (PCM byte swap / XMA, XMA2
     // and MP3 via ffmpeg → PC PCM16) and reframe the container (the audio body resizes).
     // The generic pass left the `data` chunk raw BE for this.
     if is_be && type_hash == types::TYPE_HASH_WAVEBANK {
-        apply_wavebank_transcode(&mut out, &descriptors, data_area_off, desc_table_end)?;
+        apply_wavebank_transcode(&mut out, &descriptors, data_area_off, desc_table_end, stream)?;
     }
 
     // Xbox 360 mesh vertex declarations: translate each `decl` chunk from the
@@ -376,7 +450,7 @@ fn convert_container(
         // list over-inflates it (9500 BE → 13472 vs PC's 11852). It was never gated in at
         // all, so its tiles kept the Xbox vertex format and their decoded positions fell
         // outside their own BNDS envelope.
-        apply_terrainmesh_reencode(&mut out, &descriptors, data_area_off, desc_table_end, false)?;
+        apply_terrainmesh_reencode(&mut out, &descriptors, data_area_off, desc_table_end, true)?;
     } else if is_be && type_hash == types::TYPE_HASH_MODEL {
         // Skinned character MODEL: the decl translation widened its DEC3N normals/tangents
         // to FLOAT16_4 (stride 32→40) but the data/info stayed 32, so the decl over-runs the
@@ -467,6 +541,7 @@ fn apply_wavebank_transcode(
     descriptors: &[Descriptor],
     data_area_off: usize,
     desc_table_end: usize,
+    stream: Option<&super::audio::PcStream>,
 ) -> Result<(), String> {
     let data_start = if data_area_off > 0 { data_area_off } else { desc_table_end };
     let Some(data_idx) = descriptors
@@ -482,7 +557,7 @@ fn apply_wavebank_transcode(
         return Ok(());
     }
     let body_be = out[body_abs..old_end].to_vec();
-    let new_body = super::audio::convert_wavebank_data(&body_be)
+    let new_body = super::audio::convert_wavebank_data(&body_be, stream)
         .map_err(|e| format!("wavebank transcode: {e}"))?;
 
     // Update this chunk's body_size field (descriptor row layout: tag@0, row_u0@+4,
@@ -563,11 +638,49 @@ fn body_range(container: &[u8], row_u0: u32, body_size: u32, data_area_off: usiz
     }
 }
 
-/// Convert bodies for ECS (layer / ECS_NODE) containers.
-/// Identifies COMP triplets (info/schm/data) and applies schema-driven swap.
-/// Convert an ECS `info` descriptor body from BE to LE, in place.
+/// Rewrite a kit model's `MIXR` from its big-endian source, at the widths its loader reads
+/// (`mercs2_formats::mixr`): `INFO` three u16, `NAME` one u32 per part, `EXMX` bytes, `PROF` a u32 and
+/// a byte per part for each profile. The generic pass knows those tags from other chunks. It runs
+/// before anything reframes `out`, so a body sits at the same offset in both.
+fn apply_mixr_swap(
+    out: &mut [u8],
+    container: &[u8],
+    descriptors: &[Descriptor],
+    data_area_off: usize,
+) -> Result<(), String> {
+    for (i, d) in descriptors.iter().enumerate().filter(|(_, d)| &d.tag_bytes_le == b"MIXR") {
+        let kids = descriptors.get(i + 1..i + 1 + d.row_u4 as usize).ok_or("MIXR claims more children than rows")?;
+        let tags: Vec<&[u8; 4]> = kids.iter().map(|k| &k.tag_bytes_le).collect();
+        if tags != [b"INFO", b"NAME", b"EXMX", b"PROF"] {
+            return Err(format!("MIXR children are {tags:?}"));
+        }
+        let mut ranges = Vec::with_capacity(4);
+        for k in kids {
+            let r = body_range(container, k.row_u0, k.body_size, data_area_off).ok_or("a MIXR child runs past the container")?;
+            out[r.0..r.1].copy_from_slice(&container[r.0..r.1]);
+            ranges.push(r);
+        }
+        let (info, name, prof) = (ranges[0], ranges[1], ranges[3]);
+        if info.1 - info.0 != 6 {
+            return Err(format!("MIXR INFO is {} bytes", info.1 - info.0));
+        }
+        let parts = read_u16_be(container, info.0 + 2) as usize;
+        let profiles = read_u16_be(container, info.0 + 4) as usize;
+        if name.1 - name.0 != 4 * parts || prof.1 - prof.0 != profiles * (4 + parts) {
+            return Err(format!("MIXR of {parts} parts and {profiles} profiles: NAME {}, PROF {}", name.1 - name.0, prof.1 - prof.0));
+        }
+        (0..3).for_each(|w| swap_u16(out, info.0 + 2 * w));
+        swap_u32_array(&mut out[name.0..name.1]);
+        for p in 0..profiles {
+            swap_u32(out, prof.0 + p * (4 + parts));
+        }
+    }
+    Ok(())
+}
+
+/// Convert an `info` descriptor body outside an ECS container from BE to LE, in place.
 ///
-/// Two on-disk shapes (see `extract_comp_name`):
+/// Two on-disk shapes:
 ///   - ASCII/named: `[name\0][u32 hash][u32 a][u32 b][u32 c]` — swap only the trailing
 ///     u32 fields, leave the name string bytes untouched.
 ///   - Compact binary (no name, e.g. `[u32 comp_hash][u32][u32][u32]`) — swap all u32s.
@@ -593,337 +706,6 @@ fn convert_info_body_inplace(info_body: &mut [u8]) {
     }
 }
 
-fn convert_ecs_bodies(
-    out: &mut Vec<u8>,
-    container: &[u8],
-    descriptors: &[Descriptor],
-    data_area_off: usize,
-    is_be: bool,
-    _entry_idx: usize,
-    mut report: Option<&mut SchemaCoverageReport>,
-) -> Result<(), String> {
-    // We need to write body data at the correct offsets.
-    // Strategy: build the entire data area as a mutable copy, then do in-place swaps.
-    let data_start = if data_area_off > 0 { data_area_off } else {
-        20 + descriptors.len() * 20
-    };
-
-    if data_start >= container.len() {
-        return Ok(());
-    }
-
-    let mut data_area = container[data_start..].to_vec();
-
-    // Identify COMP groups: a COMP sentinel followed by info, schm, data children
-    let mut i = 0;
-    while i < descriptors.len() {
-        let desc = &descriptors[i];
-
-        if desc.tag == ChunkTag::Comp && desc.row_u0 == 0xFFFFFFFF {
-            // Found COMP group sentinel — look for info/schm/data triplet
-            let _group_start = i;
-            i += 1;
-
-            let mut info_idx: Option<usize> = None;
-            let mut schm_idx: Option<usize> = None;
-            let mut data_idx: Option<usize> = None;
-
-            // Scan children until next group sentinel or end
-            while i < descriptors.len() && descriptors[i].row_u0 != 0xFFFFFFFF {
-                match descriptors[i].tag {
-                    ChunkTag::Info => { info_idx = Some(i); }
-                    ChunkTag::Schm => { schm_idx = Some(i); }
-                    ChunkTag::Data => { data_idx = Some(i); }
-                    _ => {}
-                }
-                i += 1;
-            }
-
-            // Extract component name from info body
-            let comp_name = if let Some(ii) = info_idx {
-                extract_comp_name(container, &descriptors[ii], data_area_off, is_be)
-            } else {
-                None
-            };
-            let comp_name_str = comp_name.as_deref().unwrap_or("unknown");
-
-            // Parse schema from schm body; pre-scan type codes for reporting
-            let schm_body_range = schm_idx.and_then(|si| {
-                body_range(container, descriptors[si].row_u0, descriptors[si].body_size, data_area_off)
-            });
-
-            let schema = schm_body_range.and_then(|(start, end)| {
-                ComponentSchema::from_schm_body(&container[start..end], is_be)
-            });
-
-            // Report schema field type codes
-            if let Some(ref mut rpt) = report {
-                if let Some((start, end)) = schm_body_range {
-                    let scanned = scan_schm_type_codes(&container[start..end], is_be);
-                    let mut unknown_in_body = Vec::new();
-                    for &(type_code, name_hash, byte_offset) in &scanned {
-                        rpt.record_field(type_code);
-                        if SchemaFieldType::from_code(type_code).is_none() {
-                            rpt.record_unknown_field(comp_name_str, type_code, name_hash, byte_offset);
-                            unknown_in_body.push(type_code);
-                        }
-                    }
-                    if schema.is_none() && !scanned.is_empty() {
-                        rpt.record_schema_parse_failure(comp_name_str, unknown_in_body);
-                    }
-                }
-            }
-
-            // Convert the data body using the schema
-            if let Some(di) = data_idx {
-                let d = &descriptors[di];
-                if let Some((start, end)) = body_range(container, d.row_u0, d.body_size, data_area_off) {
-                    let body_local_start = start - data_start;
-                    let body_local_end = end - data_start;
-                    if body_local_end <= data_area.len() {
-                        let data_size = body_local_end - body_local_start;
-                        let body_slice = &mut data_area[body_local_start..body_local_end];
-                        convert_comp_data_inplace(body_slice, schema.as_ref(), comp_name_str, report.as_deref_mut(), data_size);
-                    }
-                }
-            }
-
-            // Swap the info body:
-            //   ASCII format: [name\0][u32 hash][u32 a][u32 b][u32 c] — swap trailing u32s
-            //   Compact binary (16B): [u32 hash][u32][u32][u32] — swap all u32s
-            if let Some(ii) = info_idx {
-                let d = &descriptors[ii];
-                if let Some((start, end)) = body_range(container, d.row_u0, d.body_size, data_area_off) {
-                    let body_local_start = start - data_start;
-                    let body_local_end = end - data_start;
-                    if body_local_end <= data_area.len() {
-                        convert_info_body_inplace(&mut data_area[body_local_start..body_local_end]);
-                    }
-                }
-            }
-
-            // Swap the schm body. NOTE: the per-field offset word is
-            // { u16 byte_offset; u8; u8 }, NOT a u32 — swap only the
-            // byte_offset u16 (see swap_schm_body_inplace).
-            if let Some(si) = schm_idx {
-                let d = &descriptors[si];
-                if let Some((start, end)) = body_range(container, d.row_u0, d.body_size, data_area_off) {
-                    let body_local_start = start - data_start;
-                    let body_local_end = end - data_start;
-                    if body_local_end <= data_area.len() {
-                        swap_schm_body_inplace(&mut data_area[body_local_start..body_local_end]);
-                    }
-                }
-            }
-
-            vlog!("    COMP group: '{}' (schema: {})",
-                comp_name_str,
-                if schema.is_some() { "yes" } else { "no" });
-        } else {
-            // Non-COMP descriptor in an ECS container — swap as appropriate
-            if desc.row_u0 != 0xFFFFFFFF {
-                if let Some((start, end)) = body_range(container, desc.row_u0, desc.body_size, data_area_off) {
-                    let body_local_start = start - data_start;
-                    let body_local_end = end - data_start;
-                    if body_local_end <= data_area.len() {
-                        if desc.tag == ChunkTag::Enum {
-                            convert_enum_body_inplace(&mut data_area[body_local_start..body_local_end]);
-                        } else if desc.tag == ChunkTag::Deps {
-                            let body_len = body_local_end - body_local_start;
-                            if body_len > 1 {
-                                swap_u32_array(&mut data_area[body_local_start + 1..body_local_end]);
-                            }
-                        } else if desc.tag == ChunkTag::Flgs {
-                            convert_vz_state_flgs_inplace(
-                                &mut data_area[body_local_start..body_local_end],
-                            );
-                        } else if desc.tag == ChunkTag::Chdr {
-                            convert_chdr_body_inplace(
-                                &mut data_area[body_local_start..body_local_end],
-                            );
-                        } else if desc.tag == ChunkTag::Info {
-                            // Standalone `info` (outside a COMP group): same named/compact
-                            // rules as the COMP-group path.
-                            convert_info_body_inplace(&mut data_area[body_local_start..body_local_end]);
-                        } else if desc.tag.is_native_be() {
-                            // No swap
-                        } else {
-                            swap_u32_array(&mut data_area[body_local_start..body_local_end]);
-                        }
-                    }
-                }
-            }
-            i += 1;
-        }
-    }
-
-    out.extend_from_slice(&data_area);
-    Ok(())
-}
-
-/// Component-name hash → name lookup for compact-format info bodies (16-byte
-/// binary, no ASCII string). Values are pandemic_hash_m2(component_name).
-const COMP_HASH_TO_NAME: &[(u32, &str)] = &[
-    (0x753EB623, "Transform"),
-    (0x1DE5C824, "Name"),
-    (0x5CF81991, "ModelName"),
-    (0x97E8EE92, "LightObject"),
-    (0xEA0F3AA3, "Road"),
-    (0x6FD048F4, "RoadIntersection"),
-    (0xBCE6FAD7, "DestructionLink"),
-    (0x7FBCE14E, "PhysicalLink"),
-    (0xD81512A1, "ObjectScript"),
-    (0x99C2B81F, "ModifierKey"),
-    (0xAB92C697, "ScrubObject"),
-    (0x6310807F, "LineRegion"),
-    (0x49F0D0EC, "MaterialMapping"),
-    (0x2A20B640, "LandingZone"),
-    (0x06DA8775, "Label"),
-    (0xFA55F6BA, "Anchor"),
-    (0x2D8D2435, "LowResTerrainObject"),
-    (0xE18AFD65, "HibernationControl"),
-    (0xB8D2B506, "AtmosphereBase"),
-    (0xEB6DE962, "IntersectionToIntersection"),
-    (0x514CAD3A, "SoundAmbience"),
-    (0xDECD8889, "AiBehavior"),
-    (0xBCFE6314, "Path"),
-    (0x6FA2F9D4, "LaneData"),
-    (0x60B7ABE0, "PointLocation"),
-];
-
-/// "Keyed-group" ECS components whose `data` body is a sequence of
-/// `[u32 count][count × record][u8 flag]` groups (mixed u8/u32). Returns the
-/// per-record byte size. Mirrors `_ECS_GROUP_RECORD_COMPONENTS` in
-/// ucfx_be_to_le.py. PointLocation: 36-byte records; 0x2E2659F0: 4-byte
-/// entity-reference keys (component name not yet recovered).
-fn keyed_group_record_size(comp_name: &str) -> Option<usize> {
-    match comp_name {
-        "PointLocation" => Some(36),
-        "__hash_0x2E2659F0" => Some(4),
-        _ => None,
-    }
-}
-
-/// True if `b` looks like a full-format ECS component *name* (C++-style
-/// identifier): starts with a letter/underscore, only `[A-Za-z0-9_]`, len >= 2.
-/// Rejects compact 4-byte BE hashes that happen to be printable but contain
-/// punctuation (e.g. `b"N+lT"`, `b"iV~b"`). Mirrors `_is_ecs_name_identifier`.
-fn is_ecs_name_identifier(b: &[u8]) -> bool {
-    if b.len() < 2 {
-        return false;
-    }
-    let c0 = b[0];
-    if !(c0.is_ascii_alphabetic() || c0 == b'_') {
-        return false;
-    }
-    b.iter().all(|&c| c.is_ascii_alphanumeric() || c == b'_')
-}
-
-/// In-place BE->LE conversion for a keyed-group component body.
-///
-/// Each 4-byte field (count + every record word) is byte-reversed; the
-/// per-group trailing `u8` flag is left untouched. Returns `true` only if the
-/// structure consumes the buffer *exactly* (in which case the swap was
-/// applied); on any layout mismatch it leaves `data` unchanged and returns
-/// `false` so the caller can fall back / report (never silently corrupts).
-fn convert_keyed_group_records_inplace(data: &mut [u8], record_size: usize) -> bool {
-    if record_size == 0 || record_size % 4 != 0 {
-        return false;
-    }
-    let n = data.len();
-    // Validation pass (counts are still big-endian here).
-    let mut pos = 0usize;
-    while pos < n {
-        if pos + 4 > n {
-            return false;
-        }
-        let count =
-            u32::from_be_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]) as usize;
-        pos += 4;
-        let span = match count.checked_mul(record_size) {
-            Some(s) => s,
-            None => return false,
-        };
-        if pos + span + 1 > n {
-            return false;
-        }
-        pos += span + 1;
-    }
-    if pos != n {
-        return false;
-    }
-    // Apply pass.
-    pos = 0;
-    while pos < n {
-        data[pos..pos + 4].reverse();
-        let count =
-            u32::from_le_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]) as usize;
-        pos += 4;
-        let span = count * record_size;
-        let mut off = pos;
-        while off < pos + span {
-            data[off..off + 4].reverse();
-            off += 4;
-        }
-        pos += span + 1; // skip the endian-neutral u8 flag
-    }
-    true
-}
-
-/// Extract component name from an `info` descriptor body.
-///
-/// Two formats exist:
-///   1. ASCII format: `[null-terminated name][u32 hash][u32 a][u32 b][u32 c]`
-///   2. Compact binary format (16 bytes): `[u32 comp_hash][u32][u32][u32]`
-///      Used in blocks without `schm`/`enum` descriptors.
-fn extract_comp_name(
-    container: &[u8],
-    desc: &Descriptor,
-    data_area_off: usize,
-    is_be: bool,
-) -> Option<String> {
-    let (start, end) = body_range(container, desc.row_u0, desc.body_size, data_area_off)?;
-    let body = &container[start..end];
-
-    // Resolve in priority order (mirrors _build_ecs_comp_map in ucfx_be_to_le.py):
-    //   (a) recognized component hash  -> named (even if first 4 bytes printable)
-    //   (b) valid C++-style identifier -> full-format name string
-    //   (c) otherwise                  -> compact unrecognized hash
-    // A compact 4-byte BE hash can be coincidentally printable (e.g.
-    // 0x4E2B6C54 = "N+lT", 0x69567E62 = "iV~b" in the DLC resident block), so
-    // "first bytes printable => name" is NOT a valid discriminator.
-    let hash = if body.len() >= 4 {
-        if is_be {
-            read_u32_be(body, 0)
-        } else {
-            crate::ffcs::read_u32_le(body, 0)
-        }
-    } else {
-        0
-    };
-
-    if body.len() >= 4 {
-        for &(h, name) in COMP_HASH_TO_NAME {
-            if h == hash {
-                return Some(name.to_string());
-            }
-        }
-    }
-
-    let nul_pos = body.iter().position(|&b| b == 0).unwrap_or(body.len());
-    if is_ecs_name_identifier(&body[..nul_pos]) {
-        if let Ok(name) = String::from_utf8(body[..nul_pos].to_vec()) {
-            return Some(name);
-        }
-    }
-
-    if body.len() >= 4 {
-        return Some(format!("__hash_0x{:08X}", hash));
-    }
-
-    None
-}
-
 /// Convert a `schm` (component schema) body in place from BE to LE.
 ///
 /// Layout (verified against retail PC `layers_static` / `vz_mar_roads`):
@@ -942,7 +724,7 @@ fn extract_comp_name(
 /// leave the trailing two bytes in place. (swap-first-u16 reproduces retail
 /// 47/47 on vz_mar_roads and 12/12 on layers_static; full u32 swap matches
 /// only zero-offset fields.) Mirrors `_convert_schm_body` in ucfx_be_to_le.py.
-fn swap_schm_body_inplace(buf: &mut [u8]) {
+pub(super) fn swap_schm_body_inplace(buf: &mut [u8]) {
     if buf.len() < 8 {
         swap_u32_array(buf);
         return;
@@ -965,251 +747,6 @@ fn swap_schm_body_inplace(buf: &mut [u8]) {
         buf.swap(off + 12, off + 13);
     }
     // Any trailing bytes (none expected) are left untouched.
-}
-
-/// Pre-scan a schm body to extract raw type codes for reporting.
-/// Unlike ComponentSchema::from_schm_body, this does NOT bail on unknown codes.
-/// Returns Vec<(type_code, name_hash, byte_offset)>.
-fn scan_schm_type_codes(body: &[u8], is_be: bool) -> Vec<(u32, u32, u16)> {
-    if body.len() < 8 {
-        return vec![];
-    }
-
-    let n_fields = if is_be {
-        u32::from_be_bytes([body[0], body[1], body[2], body[3]])
-    } else {
-        u32::from_le_bytes([body[0], body[1], body[2], body[3]])
-    };
-
-    if n_fields > 200 || (8 + n_fields as usize * 16) > body.len() {
-        return vec![];
-    }
-
-    let mut result = Vec::with_capacity(n_fields as usize);
-    for i in 0..n_fields as usize {
-        let off = 8 + i * 16;
-        let (type_code, name_hash, raw_offset) = if is_be {
-            (
-                u32::from_be_bytes([body[off], body[off + 1], body[off + 2], body[off + 3]]),
-                u32::from_be_bytes([body[off + 4], body[off + 5], body[off + 6], body[off + 7]]),
-                u32::from_be_bytes([body[off + 12], body[off + 13], body[off + 14], body[off + 15]]),
-            )
-        } else {
-            (
-                u32::from_le_bytes([body[off], body[off + 1], body[off + 2], body[off + 3]]),
-                u32::from_le_bytes([body[off + 4], body[off + 5], body[off + 6], body[off + 7]]),
-                u32::from_le_bytes([body[off + 12], body[off + 13], body[off + 14], body[off + 15]]),
-            )
-        };
-        let byte_offset = ((raw_offset >> 16) & 0xFFFF) as u16;
-        result.push((type_code, name_hash, byte_offset));
-    }
-    result
-}
-
-/// Convert a COMP data body in-place using schema-driven field swaps.
-fn convert_comp_data_inplace(
-    data: &mut [u8],
-    schema: Option<&ComponentSchema>,
-    comp_name: &str,
-    mut report: Option<&mut SchemaCoverageReport>,
-    data_size: usize,
-) {
-    if data.is_empty() {
-        return;
-    }
-
-    // Special cases
-    match comp_name {
-        "Name" => {
-            if let Some(ref mut rpt) = report {
-                rpt.record_no_schema(comp_name, data_size, "hardcoded handler");
-            }
-            convert_name_data_inplace(data);
-            return;
-        }
-        "ModelName" => {
-            if let Some(ref mut rpt) = report {
-                rpt.record_no_schema(comp_name, data_size, "hardcoded handler");
-            }
-            convert_modelname_data_inplace(data);
-            return;
-        }
-        "HibernationControl" if data.len() % 10 == 0 => {
-            // Sub-u32 layout (u16 + u8 + u8 + u8 + bitflags, stride 10). A
-            // blanket u32 sweep reverses a word across the u16+u8+u8 region and
-            // corrupts the u16; swap only the entity-key u32 and the payload u16.
-            if let Some(ref mut rpt) = report {
-                rpt.record_no_schema(comp_name, data_size, "hardcoded handler");
-            }
-            convert_hibernation_data_inplace(data);
-            return;
-        }
-        _ => {}
-    }
-
-    // Keyed-group components ([u32 count][count×record][u8 flag]*) — mixed
-    // u8/u32 layout that a blanket u32 sweep would corrupt. Only the compact /
-    // no-schm form (resident / worldentity META) uses this layout; a schm'd
-    // instance (layers_static) is a plain keyed-record array. Self-validating:
-    // only applies when the structure consumes the body exactly.
-    if schema.is_none() {
-        if let Some(rec) = keyed_group_record_size(comp_name) {
-            if convert_keyed_group_records_inplace(data, rec) {
-                if let Some(ref mut rpt) = report {
-                    rpt.record_no_schema(comp_name, data_size, "keyed-group records");
-                }
-                return;
-            }
-            // Structure mismatch — fall through to generic handling (and report).
-        }
-    }
-
-    // Compact-format COMP groups have info (hash) but no schm; mirror Python
-    // `_ECS_COMP_DEFAULT_STRIDE` — do not blind-sweep whole bodies.
-    let stride = if comp_name == "Transform" {
-        42
-    } else if let Some(s) = schema {
-        // schm[4:8] is payload_stride; record = 4-byte entity key + payload (docs/ecs_components.md)
-        4 + s.payload_stride as usize
-    } else if let Some(s) = compact_default_stride(comp_name) {
-        s
-    } else {
-        if let Some(ref mut rpt) = report {
-            rpt.record_no_schema(comp_name, data_size, "u32_array sweep (unknown stride)");
-        }
-        swap_u32_array(data);
-        return;
-    };
-
-    if stride == 0 {
-        if let Some(ref mut rpt) = report {
-            rpt.record_no_schema(comp_name, data_size, "u32_array sweep (stride=0)");
-        }
-        swap_u32_array(data);
-        return;
-    }
-
-    // Non-Transform ECS components: record-aligned u32 (and u16 tail) swap.
-    if comp_name != "Transform" && (schema.is_none() || is_ecs_numeric_component(comp_name)) {
-        if let Some(ref mut rpt) = report {
-            rpt.record_no_schema(comp_name, data_size, "numeric records (compact stride)");
-        }
-        swap_numeric_records_inplace(data, stride);
-        return;
-    }
-
-    let record_count = data.len() / stride;
-
-    for ri in 0..record_count {
-        let rec_start = ri * stride;
-
-        // Always swap the u32 entity_key at record start
-        if rec_start + 4 <= data.len() {
-            swap_u32(data, rec_start);
-        }
-
-        if comp_name == "Transform" {
-            // On-disk Transform payload (38 bytes) per schm: blob32 (8×f32) at
-            // payload+0, f32 at payload+32, u16 at payload+36. Swap the 9 u32
-            // words (key already swapped above, then payload 0..36) and the
-            // trailing u16. Matches `_convert_transform_records` (10×u32 + u16)
-            // in ucfx_be_to_le.py and the retail PC byte layout.
-            for field_off in [0, 4, 8, 12, 16, 20, 24, 28, 32] {
-                let off = rec_start + 4 + field_off;
-                if off + 4 <= data.len() {
-                    swap_u32(data, off);
-                }
-            }
-            let u16_off = rec_start + 4 + 36;
-            if u16_off + 2 <= data.len() {
-                swap_u16(data, u16_off);
-            }
-        } else {
-            // Schema-driven swap
-            let schema = schema.unwrap();
-            for field in &schema.fields {
-                if !field.field_type.needs_swap() {
-                    continue;
-                }
-                let payload_off = rec_start + 4 + field.byte_offset as usize;
-                let unit = field.field_type.swap_unit();
-                let count = field.field_type.swap_count();
-                for fi in 0..count {
-                    let off = payload_off + fi * unit;
-                    if off + unit <= data.len() {
-                        match unit {
-                            2 => swap_u16(data, off),
-                            4 => swap_u32(data, off),
-                            _ => {}
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
-/// Convert Name component data in-place (variable-length records).
-///
-/// Layout: `[u32 entity_key][null-terminated ASCII name]` repeated.
-/// Only the u32 keys need byte-swapping; string bytes are order-independent.
-///
-/// IMPORTANT: Skip exactly ONE null byte (the terminator) after each string.
-/// Do NOT skip additional nulls — the next entity key may start with 0x00
-/// (high byte of a small BE u32 like 0x0014E333 → bytes [00 14 E3 33]).
-/// Skipping that leading 0x00 shifts the swap by one byte, corrupting all
-/// subsequent records.
-fn convert_name_data_inplace(data: &mut [u8]) {
-    let mut pos = 0;
-    while pos + 4 <= data.len() {
-        swap_u32(data, pos);
-        pos += 4;
-        // Skip string bytes until null terminator
-        while pos < data.len() && data[pos] != 0 {
-            pos += 1;
-        }
-        // Skip exactly one null terminator
-        if pos < data.len() {
-            pos += 1;
-        }
-    }
-}
-
-/// Convert ModelName component data in-place.
-///
-/// ModelName is a pure-u32 stream — besides the fixed (key, hash) pair shape it
-/// also appears as variable records `[u32 count][count×u32 keys][u32 hash]`
-/// (u32- but not 8-aligned) in resident/worldentity META blocks. Every field
-/// is a u32 either way, so swap the whole body as a u32 array. Mirrors the
-/// relaxed (`% 4`) handler in ucfx_be_to_le.py.
-fn convert_modelname_data_inplace(data: &mut [u8]) {
-    swap_u32_array(data);
-}
-
-/// Convert HibernationControl component data in-place (stride 10).
-///
-/// schm-declared payload layout (verified byte-identical to retail PC
-/// `layers_static` block 29 and DLC block 18):
-///   +0  u32 entity_key
-///   +4  u16 field (type 4, name_hash 0xCBE8ED58)
-///   +6  u8 / +7 u8 / +8 u8 (type 2)
-///   +9  u8 bit-flags (two type-1 bits)
-///
-/// The payload is NOT a u32 array — a blanket u32 sweep reverses a 4-byte word
-/// across the `u16 + u8 + u8` region (and a u16 across the `u8 + bitflags`
-/// tail), corrupting the u16 into a constant (0xA03C). Swap only the entity-key
-/// u32 and the payload u16; the trailing u8/bit fields are endian-neutral.
-/// Mirrors `_convert_hibernation_records` in ucfx_be_to_le.py.
-fn convert_hibernation_data_inplace(data: &mut [u8]) {
-    const STRIDE: usize = 10;
-    let mut pos = 0usize;
-    while pos + STRIDE <= data.len() {
-        swap_u32(data, pos); // entity key
-        swap_u16(data, pos + 4); // u16 field at payload+0
-        // pos+6..pos+10 (u8 + u8 + u8 + bitflags) are endian-neutral.
-        pos += STRIDE;
-    }
 }
 
 /// Convert bodies for non-ECS (generic) containers with tag-aware dispatch.
@@ -1235,8 +772,10 @@ fn convert_generic_bodies(
     let is_texture = type_hash == types::TYPE_HASH_TEXTURE;
 
     let mut ctx = ContainerCtx::None;
+    let mut group = ChunkTag::Unknown(*b"????");
     for desc in descriptors {
         if desc.row_u0 == 0xFFFFFFFF {
+            group = desc.tag;
             // Group sentinel: open a container context (mirrors _classify_contexts).
             ctx = match desc.tag {
                 ChunkTag::Strm | ChunkTag::Geom => ContainerCtx::Strm,
@@ -1258,6 +797,9 @@ fn convert_generic_bodies(
                     ChunkTag::Syek | ChunkTag::Srts => {
                         // Native BE on all platforms — no swap
                     }
+                    ChunkTag::Strs => {
+                        convert_strs_inplace(&mut data_area[body_local_start..body_local_end], type_hash)?;
+                    }
                     tag if is_string_tag(tag) => {
                         // String data — no swap
                     }
@@ -1269,7 +811,7 @@ fn convert_generic_bodies(
                         // walk_records bails to the count-safe u16 swap on any body
                         // that isn't a clean 16-byte multiple.
                         let body = &mut data_area[body_local_start..body_local_end];
-                        if !walk_records(body, &PRMT_WALKER) {
+                        if !walk_records(body, prmt_walker(type_hash)) {
                             swap_u16_array(body);
                         }
                     }
@@ -1341,7 +883,17 @@ fn convert_generic_bodies(
                         // AV 0x0084DD5B). Per-field swap — see convert_mtrl. Previously this tag had
                         // NO arm and fell through to the generic u32 swap (the divergence from the
                         // Python converter that caused the crash).
-                        convert_mtrl(&mut data_area[body_local_start..body_local_end]);
+                        let records = if type_hash == types::TYPE_HASH_TERRAIN_MESH {
+                            let info = descriptors
+                                .iter()
+                                .find(|d| d.tag == ChunkTag::InfoUpper)
+                                .and_then(|d| body_range(container, d.row_u0, d.body_size, data_area_off))
+                                .ok_or("a terrainmesh has no INFO")?;
+                            Some(terrain_material_count(&container[info.0..info.1])?)
+                        } else {
+                            None
+                        };
+                        convert_mtrl(&mut data_area[body_local_start..body_local_end], records)?;
                     }
                     ChunkTag::Enum => {
                         // Enum definitions: mixed strings + u32 fields
@@ -1368,14 +920,19 @@ fn convert_generic_bodies(
                     ChunkTag::InfoUpper if is_texture => {
                         convert_texture_info(&mut data_area[body_local_start..body_local_end]);
                     }
+                    ChunkTag::InfoUpper
+                        if type_hash == types::TYPE_HASH_TERRAIN_MESH && group == ChunkTag::Prmg =>
+                    {
+                        convert_terrain_draw_group_info(&mut data_area[body_local_start..body_local_end])?;
+                    }
                     ChunkTag::InfoUpper if type_hash == types::TYPE_HASH_MODEL => {
                         // Model INFO. Buffer at entry = RAW big-endian body. The generic
                         // u32 sweep is byte-exact for the 4B scalar and 60B all-f32 shapes,
                         // but WRONG for two shapes whose tails are u16 fields — a blanket
                         // 4-byte reversal TRANSPOSES each u16 pair:
-                        //   72B model-bbox header : u32/f32 fields [0:68] + a trailing
-                        //     [u16][u16] pair [68:72] (generic gave BE 0x0000FFFF ->
-                        //     0xFFFF0000; retail keeps the two LE u16).
+                        //   72B model-bbox header : u32/f32 fields [0:64] + four trailing
+                        //     u16 [64:72] (generic gave BE 0x0000FFFF -> 0xFFFF0000;
+                        //     retail keeps each LE u16 in place).
                         //   56B PRMG/sub-mesh record : 6×u32 header [0:24] (flags, 2 hashes,
                         //     count) + a u16 (value,count) tail [24:56] (generic transposes
                         //     each pair).
@@ -1390,8 +947,8 @@ fn convert_generic_bodies(
                         let body = &mut data_area[body_local_start..body_local_end];
                         match body.len() {
                             72 => {
-                                swap_u32_array(&mut body[0..68]);
-                                swap_u16_array(&mut body[68..72]);
+                                swap_u32_array(&mut body[0..64]);
+                                swap_u16_array(&mut body[64..72]);
                             }
                             56 => {
                                 swap_u32_array(&mut body[0..24]);
@@ -1482,6 +1039,12 @@ fn convert_generic_bodies(
                     }
                     ChunkTag::Emtr => {
                         // EMTR: 2-byte emitter count (genuine u16).
+                        swap_u16_array(&mut data_area[body_local_start..body_local_end]);
+                    }
+                    ChunkTag::Geom if type_hash == types::TYPE_HASH_EFFECT && body_local_end - body_local_start == 4 => {
+                        // An emitter's GEOM: u16 shape index, u16 count. EMTR's GEOM children, a
+                        // u32 count and its records, are longer unless the count is 0, which reads
+                        // the same either way.
                         swap_u16_array(&mut data_area[body_local_start..body_local_end]);
                     }
                     // SEGM/BSHI removed: they were lumped with HIER on the same (now
@@ -1577,6 +1140,9 @@ fn convert_generic_bodies(
                         swap_u16_array(&mut data_area[body_local_start..split]);
                         swap_u32_array(&mut data_area[split..body_local_end]);
                     }
+                    ChunkTag::Data if type_hash == types::TYPE_HASH_LINEREGION => {
+                        convert_lineregion_data(&mut data_area[body_local_start..body_local_end])?;
+                    }
                     ChunkTag::Data if type_hash == TYPE_HASH_CFX_PACK => {
                         // CFX data: u32 prefix + zlib stream (copy deflate verbatim).
                         convert_cfx_inplace(&mut data_area[body_local_start..body_local_end]);
@@ -1626,16 +1192,35 @@ fn convert_generic_bodies(
 
 /// Tags whose bodies are string data (no swap needed).
 fn is_string_tag(tag: ChunkTag) -> bool {
-    matches!(tag, ChunkTag::Name | ChunkTag::Strs)
+    matches!(tag, ChunkTag::Name)
+}
+
+/// A `stringdb`'s `STRS`: a u32 count of UTF-16 code units, then the heap of NUL-terminated
+/// UTF-16 strings (`crate::stringdb`). A console table is big-endian in both, the heap included,
+/// and PC reads the heap as UTF-16LE, so each code unit is swapped.
+fn convert_strs_inplace(body: &mut [u8], type_hash: u32) -> Result<(), String> {
+    if type_hash != types::TYPE_HASH_STRINGDB {
+        return Err(format!(
+            "STRS in a {} chunk: only a stringdb's STRS is known",
+            types::type_name_from_hash(type_hash)
+        ));
+    }
+    let units = body.get(..4).map(|w| u32::from_be_bytes([w[0], w[1], w[2], w[3]]) as usize);
+    if units.and_then(|u| u.checked_mul(2)).map(|b| 4 + b) != Some(body.len()) {
+        return Err(format!("STRS: a {}-byte body for a heap of {units:?} code units", body.len()));
+    }
+    swap_u32(body, 0);
+    swap_u16_array(&mut body[4..]);
+    Ok(())
 }
 
 // --- Byte swap primitives ---
 
-fn swap_u32(data: &mut [u8], offset: usize) {
+pub(super) fn swap_u32(data: &mut [u8], offset: usize) {
     data[offset..offset + 4].reverse();
 }
 
-fn swap_u16(data: &mut [u8], offset: usize) {
+pub(super) fn swap_u16(data: &mut [u8], offset: usize) {
     data[offset..offset + 2].reverse();
 }
 
@@ -1658,8 +1243,7 @@ fn swap_u16_array(data: &mut [u8]) {
 //   stride, and count source — see docs in the per-type specs). `walk_records`
 //   interprets it, swapping each field at its native width. It is non-destructive:
 //   it returns `false` WITHOUT mutating if the body does not match the declared
-//   layout, so the caller can fall back to a count-safe swap (mirrors the
-//   validate-first discipline of `convert_keyed_group_records_inplace`).
+//   layout, so the caller can fall back to a count-safe swap.
 // ---------------------------------------------------------------------------
 
 /// Field width/semantics within a record.
@@ -1774,6 +1358,34 @@ fn walk_records(data: &mut [u8], w: &RecordWalker) -> bool {
 /// from PC by *value* (the IBUF strip->list re-encode), so this fixes the field
 /// FORMAT (the u32 transposition) but `size_eq_diff` may not reach 0 for meshes
 /// whose index buffer PC re-encoded.
+/// PRMT of a terrain chunk: 20-byte draw records, `docs/terrain_cell_format.md`:
+///   u32 vertex shader, u32 material, u32 start_index, u16 prim_count, u16 min, u16 max, u16.
+const TERRAIN_PRMT_WALKER: RecordWalker = RecordWalker {
+    fields: &[
+        FieldSpec { width: 4, kind: FieldKind::U32 },
+        FieldSpec { width: 4, kind: FieldKind::U32 },
+        FieldSpec { width: 4, kind: FieldKind::U32 },
+        FieldSpec { width: 2, kind: FieldKind::U16 },
+        FieldSpec { width: 2, kind: FieldKind::U16 },
+        FieldSpec { width: 2, kind: FieldKind::U16 },
+        FieldSpec { width: 2, kind: FieldKind::U16 },
+    ],
+    stride: TERRAIN_DRAW,
+    count: CountSource::BodyLenDivStride,
+};
+
+/// Bytes of a terrain draw record.
+const TERRAIN_DRAW: usize = 20;
+
+/// The PRMT walker of a chunk of `type_hash`: a body in 16-byte multiples can hold 20-byte records.
+fn prmt_walker(type_hash: u32) -> &'static RecordWalker {
+    if type_hash == types::TYPE_HASH_TERRAIN_MESH || type_hash == types::TYPE_HASH_LOWRES_TERRAIN {
+        &TERRAIN_PRMT_WALKER
+    } else {
+        &PRMT_WALKER
+    }
+}
+
 const PRMT_WALKER: RecordWalker = RecordWalker {
     fields: &[
         FieldSpec { width: 4, kind: FieldKind::U32 },
@@ -1882,33 +1494,10 @@ fn convert_texture_info(body: &mut [u8]) {
 
 // ── Xbox 360 texture untile + INFO rebuild ───────────────────────────
 //
-// Ports tools/xbox_texture_codec.py. The generic body pass already runs
-// `convert_texture_info` on the INFO chunk (basic field swap = the "rust xi"
-// form) and leaves the BODY as raw tiled passthrough. The post-process below
-// (a) rebuilds the 34-byte PC INFO from that swapped INFO and (b) untiles the
-// GPU-tiled DXT BODY into the PC-linear mip chain, then reframes the container.
-// Validated byte-exact (pixel data + INFO header) against the Rosetta corpus;
-// the [12:14] field and [32:34] streaming tail are non-reconstructible PC
-// metadata (see .cursor/notes/rosetta_oracle_baseline.md).
-
-/// (block_px, texel_pitch, log2(bytes_per_block)) for a DXT FourCC.
-/// Xbox D3D format word low byte (INFO[17]) -> PC FourCC.
-fn fourcc_from_format_byte(b: u8) -> Option<[u8; 4]> {
-    match b {
-        0x52 => Some(*b"DXT1"),
-        0x54 => Some(*b"DXT5"),
-        0x53 => Some(*b"DXT3"),
-        _ => None,
-    }
-}
-
-#[inline]
-fn read_u16_le(d: &[u8], off: usize) -> usize {
-    u16::from_le_bytes([d[off], d[off + 1]]) as usize
-}
+// What a rung's bytes are and how they split is `super::texture`; these two read one surface.
 
 /// XGAddress2DTiledOffset returning a *block* index (gildor/Noesis form).
-fn tiled_block_index(x: usize, y: usize, width_blocks: usize, log_bpb: usize) -> usize {
+pub(super) fn tiled_block_index(x: usize, y: usize, width_blocks: usize, log_bpb: usize) -> usize {
     let aligned_w = (width_blocks + 31) & !31;
     let macro_ = ((x >> 5) + (y >> 5) * (aligned_w >> 5)) << (log_bpb + 7);
     let micro = ((x & 7) + ((y & 0xE) << 2)) << log_bpb;
@@ -1922,7 +1511,7 @@ fn tiled_block_index(x: usize, y: usize, width_blocks: usize, log_bpb: usize) ->
 }
 
 /// Untile one mip surface (block granularity) to linear block order.
-fn untile_surface(
+pub(super) fn untile_surface(
     tiled: &[u8],
     width_blocks: usize,
     height_blocks: usize,
@@ -1946,351 +1535,11 @@ fn untile_surface(
 }
 
 /// Byte-swap every 16-bit word (Xbox DXT block words are big-endian).
-fn swap16_blocks(data: &mut [u8]) {
+pub(super) fn swap16_blocks(data: &mut [u8]) {
     let n = data.len() / 2;
     for i in 0..n {
         data.swap(i * 2, i * 2 + 1);
     }
-}
-
-/// Drop the 32-block width/height padding, yielding the wb x hb surface.
-fn crop_blocks(linear: &[u8], aligned_wb: usize, wb: usize, hb: usize, texel_pitch: usize) -> Vec<u8> {
-    if aligned_wb == wb {
-        return linear[..wb * hb * texel_pitch].to_vec();
-    }
-    let mut out = vec![0u8; wb * hb * texel_pitch];
-    for j in 0..hb {
-        let s = j * aligned_wb * texel_pitch;
-        let d = j * wb * texel_pitch;
-        out[d..d + wb * texel_pitch].copy_from_slice(&linear[s..s + wb * texel_pitch]);
-    }
-    out
-}
-
-fn untile_own_surface(tiled: &[u8], width_px: usize, height_px: usize, fourcc: &[u8; 4]) -> Option<Vec<u8>> {
-    let (block_px, texel_pitch, log_bpb) = dxt_format(fourcc)?;
-    let wb = ((width_px + block_px - 1) / block_px).max(1);
-    let hb = ((height_px + block_px - 1) / block_px).max(1);
-    let awb = (wb + 31) & !31;
-    let ahb = (hb + 31) & !31;
-    let need = (awb * ahb * texel_pitch).min(tiled.len());
-    let mut lin = untile_surface(&tiled[..need], awb, ahb, texel_pitch, log_bpb);
-    swap16_blocks(&mut lin);
-    Some(crop_blocks(&lin, awb, wb, hb, texel_pitch))
-}
-
-/// Bytes the Xbox tiled BODY occupies for a full (non-streamed) texture.
-fn tiled_body_size(width: usize, height: usize, fourcc: &[u8; 4], mips: usize) -> usize {
-    let (block_px, texel_pitch, _) = dxt_format(fourcc).unwrap();
-    let n = if mips > 0 { mips } else { tex_mip_levels(width, height) };
-    let mut total = 0;
-    let mut tail_added = false;
-    for m in 0..n {
-        let wpx = (width >> m).max(1);
-        let hpx = (height >> m).max(1);
-        if wpx.min(hpx) >= 32 {
-            let wb = ((wpx + block_px - 1) / block_px).max(1);
-            let hb = ((hpx + block_px - 1) / block_px).max(1);
-            let awb = (wb + 31) & !31;
-            let ahb = (hb + 31) & !31;
-            total += awb * ahb * texel_pitch;
-        } else if !tail_added {
-            total += 32 * 32 * texel_pitch;
-            tail_added = true;
-        }
-    }
-    total
-}
-
-/// Assemble a full PC-linear DXT mip chain from a tiled Xbox BODY (incl. the
-/// packed sub-32 "mip tail"). Returns None if the body is too short.
-fn untile_dxt_body(tiled: &[u8], width: usize, height: usize, fourcc: &[u8; 4], mips: usize) -> Option<Vec<u8>> {
-    let (block_px, texel_pitch, log_bpb) = dxt_format(fourcc)?;
-    let n = if mips > 0 { mips } else { tex_mip_levels(width, height) };
-    let mut out: Vec<u8> = Vec::new();
-    let mut pos = 0usize;
-    let mut tail_lin: Option<Vec<u8>> = None;
-    for m in 0..n {
-        let wpx = (width >> m).max(1);
-        let hpx = (height >> m).max(1);
-        let wb = ((wpx + block_px - 1) / block_px).max(1);
-        let hb = ((hpx + block_px - 1) / block_px).max(1);
-        if wpx.min(hpx) >= 32 {
-            let awb = (wb + 31) & !31;
-            let ahb = (hb + 31) & !31;
-            let size = awb * ahb * texel_pitch;
-            if pos + size > tiled.len() {
-                break;
-            }
-            let mut lin = untile_surface(&tiled[pos..pos + size], awb, ahb, texel_pitch, log_bpb);
-            swap16_blocks(&mut lin);
-            out.extend_from_slice(&crop_blocks(&lin, awb, wb, hb, texel_pitch));
-            pos += size;
-        } else {
-            if tail_lin.is_none() {
-                let size = 32 * 32 * texel_pitch;
-                if pos + size > tiled.len() {
-                    break;
-                }
-                let mut t = untile_surface(&tiled[pos..pos + size], 32, 32, texel_pitch, log_bpb);
-                swap16_blocks(&mut t);
-                tail_lin = Some(t);
-                pos += size;
-            }
-            let tl = tail_lin.as_ref().unwrap();
-            let (bx, by) = if wb >= hb { (wb, 0) } else { (0, hb) };
-            for r in 0..hb {
-                let base = ((by + r) * 32 + bx) * texel_pitch;
-                if base + wb * texel_pitch <= tl.len() {
-                    out.extend_from_slice(&tl[base..base + wb * texel_pitch]);
-                }
-            }
-        }
-    }
-    Some(out)
-}
-
-/// Public wrapper: untile a raw tiled Xbox DXT BODY into the PC-linear mip chain.
-pub fn untile_tiled_dxt_body(
-    tiled: &[u8], width: usize, height: usize, fourcc: &[u8; 4], mips: usize,
-) -> Option<Vec<u8>> {
-    untile_dxt_body(tiled, width, height, fourcc, mips)
-}
-
-/// Nearest-neighbour scale a DXT surface at *block* granularity (each 4x4 DXT
-/// block is copied whole, so no decode/recompress is needed and the result is a
-/// valid DXT surface). Works in either direction (up- or down-scale).
-fn scale_dxt_blocks(
-    src: &[u8], src_wb: usize, src_hb: usize, dst_wb: usize, dst_hb: usize, texel_pitch: usize,
-) -> Vec<u8> {
-    let mut out = vec![0u8; dst_wb * dst_hb * texel_pitch];
-    if src_wb == 0 || src_hb == 0 {
-        return out;
-    }
-    for dy in 0..dst_hb {
-        let sy = (dy * src_hb / dst_hb).min(src_hb - 1);
-        for dx in 0..dst_wb {
-            let sx = (dx * src_wb / dst_wb).min(src_wb - 1);
-            let s = (sy * src_wb + sx) * texel_pitch;
-            let d = (dy * dst_wb + dx) * texel_pitch;
-            if s + texel_pitch <= src.len() && d + texel_pitch <= out.len() {
-                out[d..d + texel_pitch].copy_from_slice(&src[s..s + texel_pitch]);
-            }
-        }
-    }
-    out
-}
-
-/// Recover the largest decodable DXT surface from a (possibly partial/stub)
-/// tiled Xbox body. The body always begins with its largest contained mip, so
-/// we iterate levels from largest to smallest and untile the first whose tiled
-/// own-surface fits. Returns (linear blocks, width_blocks, height_blocks).
-fn recover_best_surface(
-    tiled: &[u8], width: usize, height: usize, fourcc: &[u8; 4], mips: usize,
-) -> Option<(Vec<u8>, usize, usize)> {
-    let (block_px, texel_pitch, _) = dxt_format(fourcc)?;
-    let n = if mips > 0 { mips } else { tex_mip_levels(width, height) };
-    for m in 0..n.max(1) {
-        let wpx = (width >> m).max(1);
-        let hpx = (height >> m).max(1);
-        let wb = ((wpx + block_px - 1) / block_px).max(1);
-        let hb = ((hpx + block_px - 1) / block_px).max(1);
-        let awb = (wb + 31) & !31;
-        let ahb = (hb + 31) & !31;
-        // First level whose full aligned surface is present in the body.
-        if tiled.len() >= awb * ahb * texel_pitch {
-            return untile_own_surface(tiled, wpx, hpx, fourcc).map(|s| (s, wb, hb));
-        }
-    }
-    None
-}
-
-/// Build a COMPLETE PC-linear DXT mip chain at the ORIGINAL (width,height,mips)
-/// from a partial/stub tiled body: recover the best available surface and
-/// block-nearest scale it into every mip level. The chain is exactly
-/// `linear_mip_chain_size(width,height,fourcc,mips)` bytes — fully resident, so
-/// the engine reads it and is done (no over-read, no streaming wait). Detail
-/// below the recovered surface's resolution is interpolated, not original.
-fn synthesize_resident_chain(
-    tiled: &[u8], width: usize, height: usize, fourcc: &[u8; 4], mips: usize,
-) -> Option<Vec<u8>> {
-    let (block_px, texel_pitch, _) = dxt_format(fourcc)?;
-    let (src, src_wb, src_hb) = recover_best_surface(tiled, width, height, fourcc, mips)?;
-    let n = if mips > 0 { mips } else { tex_mip_levels(width, height) };
-    let mut out = Vec::with_capacity(linear_mip_chain_size(width, height, fourcc, n));
-    for l in 0..n.max(1) {
-        let wpx = (width >> l).max(1);
-        let hpx = (height >> l).max(1);
-        let wb = ((wpx + block_px - 1) / block_px).max(1);
-        let hb = ((hpx + block_px - 1) / block_px).max(1);
-        out.extend_from_slice(&scale_dxt_blocks(&src, src_wb, src_hb, wb, hb, texel_pitch));
-    }
-    Some(out)
-}
-
-/// Rebuild a 34-byte PC texture INFO from the basic-swapped ("rust xi") INFO.
-/// Mirrors `xbox_texture_codec.rebuild_texture_info`.
-fn rebuild_texture_info(xi: &[u8], fourcc: &[u8; 4], mips: usize, linear_total: u32) -> [u8; 34] {
-    let mut out = [0u8; 34];
-    out[0..4].copy_from_slice(&xi[0..4]);
-    // transpose [4:6]<->[6:8]
-    out[4..6].copy_from_slice(&xi[6..8]);
-    out[6..8].copy_from_slice(&(mips as u16).to_le_bytes());
-    // [8:10]<->[10:12] transpose; clear the Xbox 0x10 "tiled" flag bit.
-    let f8 = (u16::from_le_bytes([xi[10], xi[11]]) & !0x10).to_le_bytes();
-    out[8..10].copy_from_slice(&f8);
-    out[10..12].copy_from_slice(&xi[8..10]);
-    out[12..14].copy_from_slice(&xi[12..14]);
-    out[14..18].copy_from_slice(fourcc);
-    // LOD-bias float is big-endian on Xbox (passthrough in the basic swap) -> LE.
-    out[18] = xi[21];
-    out[19] = xi[20];
-    out[20] = xi[19];
-    out[21] = xi[18];
-    out[22..26].copy_from_slice(&linear_total.to_le_bytes());
-    // Streaming-residency descriptor [26:34]: the fully-resident sentinel
-    // 00 00 00 00 00 00 FF FF (retail's most common resident value; trailing
-    // word is a 2^n-1 mip-residency bitmask, 0xffff = all mips resident). Every
-    // texture we emit is a complete resident mip chain, so it is always resident.
-    out[26..34].copy_from_slice(&[0, 0, 0, 0, 0, 0, 0xFF, 0xFF]);
-    out
-}
-
-/// Post-process a converted texture container: rebuild INFO + untile BODY and
-/// reframe. Handles full, prefix, single-mip, streamed pages, and INFO-only
-/// stubs (sentinel BODY). Returns true when INFO was rebuilt to PC FourCC form.
-fn apply_texture_untile(
-    out: &mut Vec<u8>,
-    descriptors: &[Descriptor],
-    data_area_off: usize,
-    desc_table_end: usize,
-) -> bool {
-    let data_start = if data_area_off > 0 { data_area_off } else { desc_table_end };
-
-    let mut info_idx = None;
-    let mut body_idx = None;
-    for (i, d) in descriptors.iter().enumerate() {
-        if d.row_u0 == 0xFFFFFFFF {
-            continue;
-        }
-        if d.tag == ChunkTag::InfoUpper && info_idx.is_none() {
-            info_idx = Some(i);
-        } else if d.tag == ChunkTag::Body && body_idx.is_none() && d.body_size > 0 {
-            body_idx = Some(i);
-        }
-    }
-    let info_idx = match info_idx {
-        Some(i) => i,
-        None => return false,
-    };
-
-    let info = &descriptors[info_idx];
-    if info.body_size < 34 {
-        return false;
-    }
-    let info_abs = data_start + info.row_u0 as usize;
-    if info_abs + 34 > out.len() {
-        return false;
-    }
-
-    let xi = out[info_abs..info_abs + 34].to_vec();
-    let fourcc = match fourcc_from_format_byte(xi[17]) {
-        Some(f) => f,
-        None => return false,
-    };
-    let width = read_u16_le(&xi, 0);
-    let height = read_u16_le(&xi, 2);
-    if width == 0 || height == 0 {
-        return false;
-    }
-    // Claim the STANDARD full mip chain (down to 1x1), NOT the Xbox-authored count.
-    // Live x32dbg proved the engine instantiates the full chain from the texture's
-    // dimensions regardless of the header's mip field: a 64x64 DXT1 had 5 populated
-    // mip surfaces (+ 0xABABABAB overrun) while its header claimed 3, so the engine
-    // read past the body -> STATUS_BUFFER_TOO_SMALL -> the page never reached ready
-    // state 4 -> world-load livelock (dlc01_dlccon002_roads). DLC stub textures carry
-    // a reduced count; honoring it under-claims and hangs. Claim the retail PC chain
-    // (down to the 4x4 DXT minimum, governed by the smaller dim — base vz.wad's
-    // convention) so the engine's surface count, the INFO mip count and the body agree.
-    let mips = dxt_mip_count(width, height);
-
-    // Build a COMPLETE, fully-resident PC mip chain at the texture's ORIGINAL
-    // dimensions. An earlier pass REDUCED the dimensions to fit a partial Xbox stub
-    // body; that made each texture internally consistent but desynced it from the
-    // layer/material data that references it at full size, so its streaming node
-    // never reached ready-state 4. Now we keep (width,height) + the full mip count
-    // and, for a partial/stub body, synthesize the missing mips by block-nearest
-    // scaling the best surface recovered from the stub: full-size + complete +
-    // resident, so references stay valid, there is no over-read (BUFFER_TOO_SMALL)
-    // and no streaming wait. Synthesized mips are lower-detail, not pixel-accurate.
-    let tlinear = linear_mip_chain_size(width, height, &fourcc, mips);
-    let (pc_body, body_idx, body_abs_val) = if let Some(body_idx) = body_idx {
-        let body = &descriptors[body_idx];
-        let body_abs = data_start + body.row_u0 as usize;
-        if body_abs + body.body_size as usize > out.len() {
-            return false;
-        }
-        let tiled = out[body_abs..body_abs + body.body_size as usize].to_vec();
-        // A full body untiles directly; a partial/stub body is synthesized to a
-        // complete resident chain at full dimensions.
-        let complete = if tiled.len() >= tiled_body_size(width, height, &fourcc, mips) {
-            untile_dxt_body(&tiled, width, height, &fourcc, mips)
-        } else {
-            synthesize_resident_chain(&tiled, width, height, &fourcc, mips)
-        };
-        match complete {
-            Some(b) => (Some(b), Some(body_idx), Some(body_abs)),
-            None => return false,
-        }
-    } else {
-        (None, None, None)
-    };
-
-    // INFO at ORIGINAL dimensions, fully resident.
-    let pc_info = rebuild_texture_info(&xi, &fourcc, mips, tlinear as u32);
-    out[info_abs..info_abs + 34].copy_from_slice(&pc_info);
-
-    let mut body_abs_val = body_abs_val;
-    let info_size_field = 20 + info_idx * 20 + 8;
-    if info.body_size as usize > 34 {
-        let shrink = info.body_size as usize - 34;
-        let info_end = info_abs + info.body_size as usize;
-        if info_end <= out.len() {
-            let tail = out[info_end..].to_vec();
-            out.truncate(info_abs + 34);
-            out.extend_from_slice(&tail);
-            if let Some(ref mut abs) = body_abs_val {
-                if *abs >= info_end {
-                    *abs -= shrink;
-                }
-            }
-            for (i, d) in descriptors.iter().enumerate() {
-                if i == info_idx || d.row_u0 == 0xFFFFFFFF {
-                    continue;
-                }
-                if d.row_u0 as usize + data_start >= info_end {
-                    let row_field = 20 + i * 20 + 4;
-                    let new_u0 = d.row_u0 - shrink as u32;
-                    out[row_field..row_field + 4].copy_from_slice(&new_u0.to_le_bytes());
-                }
-            }
-        }
-        out[info_size_field..info_size_field + 4].copy_from_slice(&34u32.to_le_bytes());
-    }
-
-    if let (Some(body_idx), Some(body_abs_val)) = (body_idx, body_abs_val) {
-        if let Some(mut untiled) = pc_body {
-            // Body length == INFO mip chain at full dimensions: pad short, trim long.
-            untiled.resize(tlinear, 0);
-            let body_size_field = 20 + body_idx * 20 + 8;
-            out[body_size_field..body_size_field + 4]
-                .copy_from_slice(&(tlinear as u32).to_le_bytes());
-            out.truncate(body_abs_val);
-            out.extend_from_slice(&untiled);
-        }
-    }
-
-    true
 }
 
 /// Xbox-360 vertex-fetch format byte (`(b >> 8) & 0xFF`) -> PC D3DDECLTYPE.
@@ -2774,15 +2023,17 @@ fn f32_to_f16_bits(f: f32) -> u16 {
 }
 
 /// Decode an Xbox-360 DEC3N-packed normal/tangent (4 BE bytes, read here as a
-/// big-endian u32) into a PC `FLOAT16_4` (4 little-endian half-floats, W = 1.0).
+/// big-endian u32) into a PC `FLOAT16_4` (4 little-endian half-floats; a normal's W
+/// is 1.0, a tangent's W its handedness).
 ///
 /// **Bit layout (pinned empirically from 24,282 base-terrainmesh NORMAL pairs;
 /// mean angular error 0.05°, max 0.12° — see the implementation doc):**
 ///   * NORMAL (HEND3N, 11-11-10): X=sx(bits[0:11])/1023, Y=sx(bits[11:22])/1023,
 ///     Z=sx(bits[22:32])/511.
 ///   * TANGENT/BINORMAL (DEC3N, 10-10-10-2): X=sx(bits[0:10])/511,
-///     Y=sx(bits[10:20])/511, Z=sx(bits[20:30])/511 (top 2 W bits ignored).
-///   * W = 1.0
+///     Y=sx(bits[10:20])/511, Z=sx(bits[20:30])/511, W = −1 when sx(bits[30:32]) < 0,
+///     else +1 (the handedness, ±1 as on retail PC terrain).
+///   * A NORMAL's W = 1.0
 /// The two share a stream-0 4-byte slot but use **different bit splits** — NORMAL is
 /// Xbox HEND3N (11-11-10), TANGENT/BINORMAL is D3DDECLTYPE_DEC3N (10-10-10-2). Using
 /// the normal's 11-11-10 split for a tangent garbles it (~125° error → broken
@@ -2815,11 +2066,14 @@ fn dec3n_to_half4_le(u: u32, ten_ten_ten: bool) -> [u8; 8] {
     } else {
         (0.0, 0.0, 0.0)
     };
+    // A tangent's handedness is the sign of its top two bits, read as a signed 2-bit value: 0 and 1 are +1, -1 is
+    // -1. On DLC01 terrain this gives every vertex the w its PS3 copy carries (`mercs2_probe terrain-vertex-compare`).
+    let w = if ten_ten_ten && sx(u >> 30, 2) < 0 { -1.0 } else { 1.0 };
     let mut out = [0u8; 8];
     out[0..2].copy_from_slice(&f32_to_f16_bits(nx).to_le_bytes());
     out[2..4].copy_from_slice(&f32_to_f16_bits(ny).to_le_bytes());
     out[4..6].copy_from_slice(&f32_to_f16_bits(nz).to_le_bytes());
-    out[6..8].copy_from_slice(&f32_to_f16_bits(1.0).to_le_bytes());
+    out[6..8].copy_from_slice(&f32_to_f16_bits(w).to_le_bytes());
     out
 }
 
@@ -2973,65 +2227,6 @@ fn rebuild_terrain_vertices(
     out
 }
 
-/// De-strip an Xbox triangle strip (u16 indices, `0xFFFF` primitive-restart) into
-/// a flat triangle list. Geometry-correct (every non-degenerate triangle of the
-/// strip is emitted with consistent winding); NOT byte-exact vs PC, which uses a
-/// single degenerate-stitched strip with a vertex-cache re-index (see the doc).
-///
-/// `src` is the generic-swapped (u16-swap-corrected) Xbox index body. Returns the
-/// PC triangle-list index bytes (LE u16).
-#[cfg(test)]
-fn destrip_indices(src: &[u8]) -> Vec<u8> {
-    destrip_indices_with_map(src).0
-}
-
-/// Like `destrip_indices`, but also returns a position map `posmap` of length
-/// `n_strip_indices + 1`, where `posmap[p]` = the number of LIST indices emitted
-/// by the time strip-index position `p` is reached. Used to remap PRMT draw-call
-/// ranges `{start_index, index_count}` from strip-index space into the new
-/// triangle-list index space: `new_start = posmap[start]`,
-/// `new_count = posmap[start + count] - posmap[start]`.
-///
-/// Emits byte-identical output to the per-run `destrip_indices`: when the current
-/// run reaches length L (after pushing the L-th vertex), it emits the (L-3)-th
-/// triangle with winding `(L-3) % 2`, exactly matching the per-run flush.
-fn destrip_indices_with_map(src: &[u8]) -> (Vec<u8>, Vec<u32>) {
-    let n = src.len() / 2;
-    let idx: Vec<u16> = (0..n)
-        .map(|i| u16::from_le_bytes([src[i * 2], src[i * 2 + 1]]))
-        .collect();
-    let mut out: Vec<u16> = Vec::with_capacity(n * 3);
-    let mut posmap: Vec<u32> = vec![0u32; n + 1];
-    let mut run: Vec<u16> = Vec::new();
-    for p in 0..n {
-        posmap[p] = out.len() as u32;
-        let x = idx[p];
-        if x == 0xffff {
-            run.clear();
-        } else {
-            run.push(x);
-            if run.len() >= 3 {
-                let l = run.len();
-                let (a, b, c) = (run[l - 3], run[l - 2], run[l - 1]);
-                if a != b && b != c && a != c {
-                    let k = l - 3;
-                    if k % 2 == 0 {
-                        out.extend_from_slice(&[a, b, c]);
-                    } else {
-                        out.extend_from_slice(&[a, c, b]);
-                    }
-                }
-            }
-        }
-    }
-    posmap[n] = out.len() as u32;
-    let mut bytes = Vec::with_capacity(out.len() * 2);
-    for x in out {
-        bytes.extend_from_slice(&x.to_le_bytes());
-    }
-    (bytes, posmap)
-}
-
 /// Convert an Xbox triangle strip (u16 indices, `0xFFFF` primitive-restart) into a
 /// SINGLE PC degenerate-stitched triangle strip (`D3DPT_TRIANGLESTRIP` — the form
 /// retail character models use), dropping the 0xFFFF markers. Adjacent strip
@@ -3083,50 +2278,106 @@ fn degen_stitch_with_map(src: &[u8]) -> (Vec<u8>, Vec<u32>) {
     (bytes, posmap)
 }
 
-/// Fix transposed `[u16 flags][u16 count]` count pairs in an MTRL body that the
-/// generic `convert_mtrl` only corrected for the FIRST material record. Walks the
-/// material array and, for every record beyond the first, restores the count pair
-/// from a u32-transposition (`count,0` ↔ `0,count`) to the in-place u16 form PC
-/// uses. Engine-correctness only — MTRL is not made byte-exact (PC also drops
-/// sub-records / shrinks the body, which is not reproducible here).
+/// One terrain group's strip and draws in PC form, from the little-endian Xbox ones.
 ///
-/// Deterministic material-record walk (pinned from the retail PC MTRL of the
-/// worked terrainmeshes): each material record is `[104-byte param block]
-/// [u16 flags][u16 count][count × u32 tex-hash][12-byte tail]`, so the record
-/// stride is `116 + count*4` and the count pair sits at `record_start + 104`.
-/// `convert_mtrl` already fixed record 0's pair; this walks the rest and restores
-/// each transposed `[count][0]` → `[0][count]` (flags is 0 in every observed
-/// record). If a record's layout doesn't match (count out of 1..=64 or the next
-/// stride would run off the end), we stop walking — never corrupting trailing data.
-fn mtrl_fix_transposed_counts(body: &mut [u8]) {
-    const PARAM_BLOCK: usize = 104;
-    // Record stride = 116 + count*4 (pinned from retail PC: count pairs at material
-    // offsets 104, 236, 376, … → strides 132, 140, … for counts 4, 6, …). The
-    // fixed overhead beyond the param block is the 4-byte count pair + an 8-byte tail.
-    const TAIL: usize = 8;
-    let mut rec = 0usize;
-    while rec + PARAM_BLOCK + 4 <= body.len() {
-        let cp = rec + PARAM_BLOCK; // count-pair offset
-        let lo = u16::from_le_bytes([body[cp], body[cp + 1]]);
-        let hi = u16::from_le_bytes([body[cp + 2], body[cp + 3]]);
-        // Determine the true count. PC form is [flags=0][count]; the generic u32
-        // swap may have transposed it to [count][0]. Accept either and normalize.
-        let (flags, count) = if lo == 0 && (1..=64).contains(&hi) {
-            (0u16, hi) // already PC-form (e.g. record 0, fixed by convert_mtrl)
-        } else if hi == 0 && (1..=64).contains(&lo) {
-            // transposed → fix in place to [0][count]
-            body[cp] = 0;
-            body[cp + 1] = 0;
-            body[cp + 2] = (lo & 0xff) as u8;
-            body[cp + 3] = (lo >> 8) as u8;
-            (0u16, lo)
-        } else {
-            break; // unrecognized record layout — stop, leave the rest untouched
+/// PC draws each `PRMT` record as its own strip with no primitive restart
+/// (`docs/terrain_cell_format.md` §5.2), `[start, start + prim_count + 2)`. An Xbox draw's range holds
+/// `0xFFFF` restarts, so each is rebuilt on its own: a restart becomes degenerate triangles, padded so
+/// the next segment lands on an even position counted from the draw's start, which keeps its winding.
+/// A range two records share is emitted once. A record of no triangles stays as it is.
+fn terrain_strips(ibuf: &[u8], prmt: &[u8]) -> Result<(Vec<u8>, Vec<u8>), String> {
+    let idx: Vec<u16> = ibuf.chunks_exact(2).map(|b| u16::from_le_bytes([b[0], b[1]])).collect();
+    let (mut strip, mut draws) = (Vec::with_capacity(idx.len()), prmt.to_vec());
+    let mut placed: std::collections::HashMap<(usize, usize), (u32, u16)> = std::collections::HashMap::new();
+    for rec in draws.chunks_exact_mut(TERRAIN_DRAW) {
+        let start = u32::from_le_bytes([rec[8], rec[9], rec[10], rec[11]]) as usize;
+        let prims = u16::from_le_bytes([rec[12], rec[13]]) as usize;
+        if prims == 0 {
+            continue;
+        }
+        let (new_start, new_prims) = match placed.get(&(start, prims)) {
+            Some(p) => *p,
+            None => {
+                let range = idx.get(start..start + prims + 2).ok_or_else(|| {
+                    format!("a terrain draw of {prims} triangles at {start} runs past a strip of {}", idx.len())
+                })?;
+                let at = strip.len();
+                for (i, seg) in range.split(|x| *x == 0xFFFF).filter(|s| !s.is_empty()).enumerate() {
+                    if i > 0 {
+                        let last = *strip.last().ok_or("a terrain segment follows nothing")?;
+                        let odd = (strip.len() - at) % 2 == 1;
+                        strip.push(last);
+                        if odd {
+                            strip.push(last);
+                        }
+                        strip.push(seg[0]);
+                    }
+                    strip.extend_from_slice(seg);
+                }
+                let count = u16::try_from((strip.len() - at).saturating_sub(2))
+                    .map_err(|_| format!("a terrain draw at {start} grew past 65,535 triangles"))?;
+                let p = (at as u32, count);
+                placed.insert((start, prims), p);
+                p
+            }
         };
-        let _ = flags;
-        let stride = PARAM_BLOCK + 4 + count as usize * 4 + TAIL;
-        rec += stride;
+        rec[8..12].copy_from_slice(&new_start.to_le_bytes());
+        rec[12..14].copy_from_slice(&new_prims.to_le_bytes());
     }
+    Ok((strip.iter().flat_map(|x| x.to_le_bytes()).collect(), draws))
+}
+
+/// One terrain group's strip and draws in PC form, from the big-endian PS3 ones.
+///
+/// A PS3 `PRMT` record is `{u32 vertex shader, u32 material, u32 start, u32 index count, u16 min, u16 max}`
+/// over a triangle list. Each range becomes a strip of the same triangles at the same winding
+/// ([`crate::terrainmesh::stripify`]). A range two records share is emitted once. `vertex_shader` gives a
+/// record's PC key. PS3 has no field for a PC record's last u16, which `FUN_004AAAB0`'s draws do not read:
+/// it takes the distinct index count, Xbox's value on all 20,230 draws of the DLC's terrain.
+pub(super) fn terrain_strips_of_lists(
+    ibuf: &[u8],
+    prmt: &[u8],
+    vertex_shader: impl Fn(u32) -> u32,
+) -> Result<(Vec<u8>, Vec<u8>), String> {
+    if prmt.len() % TERRAIN_DRAW != 0 {
+        return Err(format!("a terrain PRMT of {} bytes is not {TERRAIN_DRAW}-byte records", prmt.len()));
+    }
+    let idx: Vec<u16> = ibuf.chunks_exact(2).map(|b| u16::from_be_bytes([b[0], b[1]])).collect();
+    let (mut strip, mut draws) = (Vec::with_capacity(idx.len()), Vec::with_capacity(prmt.len()));
+    let mut placed: std::collections::HashMap<(usize, usize), (u32, u16)> = std::collections::HashMap::new();
+    for rec in prmt.chunks_exact(TERRAIN_DRAW) {
+        let word = |o: usize| u32::from_be_bytes([rec[o], rec[o + 1], rec[o + 2], rec[o + 3]]);
+        let (start, count) = (word(8) as usize, word(12) as usize);
+        let list = idx
+            .get(start..start + count)
+            .filter(|_| count % 3 == 0)
+            .ok_or_else(|| format!("a terrain draw of {count} indices at {start} is no list in {} indices", idx.len()))?;
+        let (at, prims) = match placed.get(&(start, count)) {
+            Some(p) => *p,
+            None => {
+                let tris: Vec<[u16; 3]> = list
+                    .chunks_exact(3)
+                    .map(|t| [t[0], t[1], t[2]])
+                    .filter(|t| t[0] != t[1] && t[1] != t[2] && t[0] != t[2])
+                    .collect();
+                let run = crate::terrainmesh::stripify(&tris)?;
+                let at = strip.len() as u32;
+                let prims = u16::try_from(run.len().saturating_sub(2))
+                    .map_err(|_| format!("a terrain draw at {start} grew past 65,535 triangles"))?;
+                strip.extend_from_slice(&run);
+                placed.insert((start, count), (at, prims));
+                (at, prims)
+            }
+        };
+        let distinct = list.iter().collect::<std::collections::HashSet<_>>().len() as u16;
+        draws.extend_from_slice(&vertex_shader(word(0)).to_le_bytes());
+        draws.extend_from_slice(&word(4).to_le_bytes());
+        draws.extend_from_slice(&at.to_le_bytes());
+        for field in [prims, *list.iter().min().unwrap_or(&0), *list.iter().max().unwrap_or(&0), distinct] {
+            draws.extend_from_slice(&field.to_le_bytes());
+        }
+    }
+    Ok((strip.iter().flat_map(|x| x.to_le_bytes()).collect(), draws))
 }
 
 /// Terrainmesh (`0x7C569307`) re-encode pass. Runs LAST (after the generic body
@@ -3146,10 +2397,10 @@ fn apply_terrainmesh_reencode(
     descriptors: &[Descriptor],
     data_area_off: usize,
     desc_table_end: usize,
-    // true = terrainmesh (also de-strip IBUF indices + re-encode MTRL); false = a
-    // skinned character MODEL, which needs ONLY the STRM vertex widening + info-stride
+    // true = a terrain kind, whose every 20-byte PRMT draw is its own strip (`terrain_strips`);
+    // false = a skinned character MODEL, which needs ONLY the STRM vertex widening + info-stride
     // rewrite (its IBUF is already a list, and its MTRL is already correct).
-    terrainmesh: bool,
+    terrain_draws: bool,
 ) -> Result<(), String> {
     let data_start = if data_area_off > 0 { data_area_off } else { desc_table_end };
     if data_start > out.len() {
@@ -3230,7 +2481,6 @@ fn apply_terrainmesh_reencode(
         StrmInfoStride { pc_stride: u32 },
         IbufData,
         IbufInfoCount,
-        Mtrl,
     }
     let mut plans: HashMap<usize, Plan> = HashMap::new();
 
@@ -3267,19 +2517,11 @@ fn apply_terrainmesh_reencode(
         } else if *gtag == ChunkTag::Ibuf {
             // Both terrainmesh AND character-model index buffers are Xbox triangle
             // strips with 0xFFFF primitive-restart, which D3D9 cannot parse (it reads
-            // 0xFFFF as a literal vertex index -> exploded mesh). De-strip both to a
-            // triangle list; for models the paired PRMT draw-call ranges are remapped
-            // from strip-index space to list-index space below (see ibuf_posmaps).
+            // 0xFFFF as a literal vertex index -> exploded mesh). Both become strips with
+            // no restart; their PRMT draw-call ranges follow them below.
             let (Some(ii), Some(vi)) = (info_idx, data_idx) else { continue };
             plans.insert(vi, Plan::IbufData);
             plans.insert(ii, Plan::IbufInfoCount);
-        }
-    }
-    if terrainmesh {
-        for (idx, d) in descriptors.iter().enumerate() {
-            if d.tag == ChunkTag::Mtrl && d.row_u0 != 0xFFFF_FFFF {
-                plans.entry(idx).or_insert(Plan::Mtrl);
-            }
         }
     }
 
@@ -3325,16 +2567,13 @@ fn apply_terrainmesh_reencode(
                 }
                 new_bytes.insert(b.idx, info);
             }
+            // A terrain group's strip is rebuilt with its draws, below.
+            Some(Plan::IbufData) if terrain_draws => {}
             Some(Plan::IbufData) => {
-                // terrainmesh renders as a triangle LIST (D3DPT_TRIANGLELIST); character
-                // models render as a triangle STRIP (D3DPT_TRIANGLESTRIP, like retail
-                // base_v2's degenerate-stitched strips). De-strip accordingly: emitting a
-                // list for a model makes the engine read list data as a strip -> spikes.
-                let (out_idx, posmap) = if terrainmesh {
-                    destrip_indices_with_map(&b.bytes)
-                } else {
-                    degen_stitch_with_map(&b.bytes)
-                };
+                // Character models render as a triangle STRIP (D3DPT_TRIANGLESTRIP, like retail
+                // base_v2's degenerate-stitched strips): emitting a list for a model makes the
+                // engine read list data as a strip -> spikes.
+                let (out_idx, posmap) = degen_stitch_with_map(&b.bytes);
                 let count = (out_idx.len() / 2) as u32;
                 if let Some(&ii) = ibuf_info_of_data.get(&b.idx) {
                     ibuf_count_for_info.insert(ii, count);
@@ -3342,12 +2581,22 @@ fn apply_terrainmesh_reencode(
                 ibuf_posmaps.push((b.bytes.len() / 2, posmap));
                 new_bytes.insert(b.idx, out_idx);
             }
-            Some(Plan::Mtrl) => {
-                let mut m = b.bytes.clone();
-                mtrl_fix_transposed_counts(&mut m);
-                new_bytes.insert(b.idx, m);
-            }
             _ => {}
+        }
+    }
+    // Each terrain group's PRMT comes before its IBUF in row order.
+    if terrain_draws {
+        for (idx, d) in descriptors.iter().enumerate() {
+            if d.tag != ChunkTag::Prmt || d.row_u0 == 0xFFFF_FFFF {
+                continue;
+            }
+            let draws = bodies.iter().find(|b| b.idx == idx).ok_or("a terrain PRMT has no body")?;
+            let &vi = ibuf_info_of_data.keys().filter(|v| **v > idx).min().ok_or("a terrain PRMT has no IBUF after it")?;
+            let ibuf = bodies.iter().find(|b| b.idx == vi).ok_or("a terrain IBUF has no body")?;
+            let (strip, prmt) = terrain_strips(&ibuf.bytes, &draws.bytes)?;
+            ibuf_count_for_info.insert(ibuf_info_of_data[&vi], (strip.len() / 2) as u32);
+            new_bytes.insert(vi, strip);
+            new_bytes.insert(idx, prmt);
         }
     }
     // Patch IBUF info bodies with the new index count.
@@ -3363,11 +2612,10 @@ fn apply_terrainmesh_reencode(
         }
     }
 
-    // Remap PRMT draw-call records {start_index, index_count} from Xbox-strip index
-    // space into the de-stripped PC index space (a triangle list for terrainmesh, a
-    // degenerate-stitched strip for models — the posmap encodes whichever was emitted;
-    // for the strip the parity pad guarantees each range start lands on an even strip
-    // position so the sub-range draw resets winding correctly). Record layout (16 bytes):
+    // Remap a model's PRMT draw-call records {start_index, index_count} from Xbox-strip index
+    // space into the degenerate-stitched PC strip (the parity pad guarantees each range start
+    // lands on an even strip position so the sub-range draw resets winding correctly). A
+    // terrain group has no posmap: its draws are 20 bytes, rebuilt above. Record layout (16 bytes):
     //   u32 material_index, u32 start_index, u16 index_count, u16 base_vertex,
     //   u16 max_vertex_index, u16 vertex_span. start/count index into the paired
     //   IBUF; base/max/span are vertex-space (unchanged by the index reorder). Match
@@ -3454,7 +2702,7 @@ fn apply_terrainmesh_reencode(
 ///       [null-terminated ASCII value name]
 ///       [u32 value_hash]
 ///       [u32 ordinal]
-fn convert_enum_body_inplace(data: &mut [u8]) {
+pub(super) fn convert_enum_body_inplace(data: &mut [u8]) {
     if data.len() < 4 {
         return;
     }
@@ -3533,138 +2781,8 @@ fn convert_stance_type_names_inplace(data: &mut [u8]) {
     }
 }
 
-/// vz_state `flgs` body: variable header (ASCII names, endian-neutral) + 42-byte records.
-///
-/// Record layout (BE input, matches `tools/ucfx_be_to_le._convert_vz_state_flgs`):
-///   [0:12]  3×u32, [12:14] u16, [14:42] 7×u32 (entity_id, pos xyz, rot fields).
-const FLGS_RECORD_STRIDE: usize = 42;
-const BE_ONE_F: [u8; 4] = [0x3F, 0x80, 0x00, 0x00];
-
-fn convert_vz_state_flgs_inplace(data: &mut [u8]) {
-    if data.is_empty() {
-        return;
-    }
-
-    let marker_pos = data
-        .windows(BE_ONE_F.len())
-        .position(|w| w == BE_ONE_F);
-    let rec_start = match marker_pos {
-        Some(p) if p >= 4 => p - 4,
-        Some(_) => 0,
-        None => {
-            if data.len().is_multiple_of(4) {
-                swap_u32_array(data);
-            }
-            return;
-        }
-    };
-
-    let rec_data = &mut data[rec_start..];
-    let n_full = rec_data.len() / FLGS_RECORD_STRIDE;
-    let mut pos = 0usize;
-    for _ in 0..n_full {
-        if pos + FLGS_RECORD_STRIDE > rec_data.len() {
-            break;
-        }
-        for off in (0..12).step_by(4) {
-            swap_u32(rec_data, pos + off);
-        }
-        swap_u16(rec_data, pos + 12);
-        for off in (14..42).step_by(4) {
-            swap_u32(rec_data, pos + off);
-        }
-        pos += FLGS_RECORD_STRIDE;
-    }
-    if pos < rec_data.len() && rec_data.len().is_multiple_of(4) {
-        swap_u32_array(&mut rec_data[pos..]);
-    }
-}
-
-/// Compact `info` bodies without `schm` — full record strides (4 + payload_stride).
-/// Values match `docs/ecs_components.md` (not raw schm payload_stride alone).
-fn compact_default_stride(comp_name: &str) -> Option<usize> {
-    match comp_name {
-        "Transform" => Some(42),
-        // Name is variable-length; handled by convert_name_data_inplace
-        "Name" => None,
-        "HibernationControl" => Some(10),
-        "Label" => Some(8),
-        "ScrubObject" => Some(8),
-        "LineRegion" => Some(8),
-        "Road" => Some(44),
-        "RoadIntersection" => Some(128),
-        "ObjectScript" => Some(12),
-        "Anchor" => Some(20),
-        "AiBehavior" => Some(52),
-        "SoundAmbience" => Some(24),
-        "AtmosphereBase" => Some(744),
-        "IntersectionToIntersection" => Some(12),
-        // ModelName handled by convert_modelname_data_inplace (stride 8)
-        "ModelName" => None,
-        "LightObject" => Some(56),
-        "DestructionLink" => Some(20),
-        "PhysicalLink" => Some(20),
-        "ModifierKey" => Some(12),
-        "MaterialMapping" => Some(8),
-        "LandingZone" => Some(8),
-        "LowResTerrainObject" => Some(12),
-        "Path" => Some(8),
-        "LaneData" => Some(8),
-        _ => None,
-    }
-}
-
-fn is_ecs_numeric_component(comp_name: &str) -> bool {
-    matches!(
-        comp_name,
-        "LightObject"
-            | "Road"
-            | "RoadIntersection"
-            | "DestructionLink"
-            | "PhysicalLink"
-            | "ObjectScript"
-            | "ModifierKey"
-            | "ScrubObject"
-            | "LineRegion"
-            | "MaterialMapping"
-            | "LandingZone"
-            | "Label"
-            | "Anchor"
-            | "LowResTerrainObject"
-            | "HibernationControl"
-            | "AtmosphereBase"
-            | "IntersectionToIntersection"
-            | "SoundAmbience"
-            | "AiBehavior"
-            | "Path"
-            | "LaneData"
-    )
-}
-
-/// Fixed-stride numeric ECS records (Python `_convert_numeric_records`).
-fn swap_numeric_records_inplace(data: &mut [u8], stride: usize) {
-    if stride == 0 {
-        return;
-    }
-    let mut pos = 0usize;
-    while pos + stride <= data.len() {
-        let n_u32 = stride / 4;
-        for i in 0..n_u32 {
-            swap_u32(data, pos + i * 4);
-        }
-        let tail = stride % 4;
-        if tail >= 2 {
-            swap_u16(data, pos + n_u32 * 4);
-        }
-        pos += stride;
-    }
-    if pos < data.len() && data[pos..].len().is_multiple_of(4) {
-        swap_u32_array(&mut data[pos..]);
-    }
-}
-
 /// Swap every aligned 4-byte word in a slice. Trailing bytes (< 4) are left untouched.
-fn swap_u32_array(data: &mut [u8]) {
+pub(super) fn swap_u32_array(data: &mut [u8]) {
     let n = data.len() / 4;
     for i in 0..n {
         let off = i * 4;
@@ -3685,97 +2803,97 @@ fn swap_u32_array(data: &mut [u8]) {
 /// arena → world-load AV at 0x0084DD5B. (Python's blanket *u16* swap kept the count right but wrecked
 /// the u32/f32 colour block — the opposite error. This per-field swap fixes both.)
 ///
-/// The structure is validated against the body length (`count` derived from `len` must equal the
-/// on-wire u16 count). If it does not match (an unexpected material variant), fall back to a
-/// count-preserving u16 swap — `swap_u16_array` still byte-reverses the u16 count correctly at any
-/// even offset, so the engine's count stays valid and we never reintroduce the overrun.
+/// A model's body holds records of this layout end to end, and one that does not tile fails. A
+/// terrainmesh's holds `records` of them ([`terrain_material_count`]), then 256 bytes of 4-byte words
+/// for each (retail PC tile `0xCA67E07B`: 267 records end at 39,652 of 108,004 bytes).
 /// 26-dword (104-byte) colour/scalar preamble that precedes each material's flag word.
 const MTRL_PRE: usize = 26 * 4; // 104
+/// Texture slots `FUN_00858790` fills.
+const MTRL_MAX_TEXTURES: usize = 10;
+/// A terrainmesh's `INFO` holds six floats of bounds, then this word: its material count.
+const TERRAIN_INFO_MATERIALS: usize = 0x18;
+/// Bytes a terrainmesh's `MTRL` holds for each material after the records.
+const TERRAIN_MATERIAL_TABLE: usize = 256;
 
-/// The BE `count` field of a flag word at `body[at..]` if plausible: `[u16 flags]
-/// [u16 count]` (FUN_00858790 reads count@+2) with `count ∈ 1..=10` (the engine's
-/// fixed 10-slot hash array). In BE that is a zero high byte followed by 1..=10 —
-/// a strong signature texture hashes (large u32) and IEEE-float props rarely hit.
-/// `flags` is unconstrained here: real materials carry flags up to ~0x418.
-fn mtrl_be_count(body: &[u8], at: usize) -> Option<usize> {
-    if at + 4 <= body.len() && body[at + 2] == 0 && (1..=10).contains(&body[at + 3]) {
-        Some(body[at + 3] as usize)
-    } else {
-        None
+/// Bytes of a terrain draw group's `INFO`.
+const TERRAIN_DRAW_GROUP_INFO: usize = 44;
+
+/// A terrain draw group's `INFO` (`docs/terrain_cell_format.md` §4.4): two u32 draw counts, then three
+/// pass groups of `{u32 draw_count, u16 first_draw, u16 terrain_end, u16 alt_draw_count, u16 index}`.
+/// A word swap transposes each u16 pair, and `FUN_004AAAB0` then draws past the group's records.
+fn convert_terrain_draw_group_info(body: &mut [u8]) -> Result<(), String> {
+    if body.len() != TERRAIN_DRAW_GROUP_INFO {
+        return Err(format!("a terrain draw group INFO of {} bytes, not {TERRAIN_DRAW_GROUP_INFO}", body.len()));
     }
+    swap_u32_array(&mut body[..8]);
+    for tier in body[8..].chunks_exact_mut(12) {
+        swap_u32(tier, 0);
+        swap_u16_array(&mut tier[4..]);
+    }
+    Ok(())
 }
 
-/// Do the materials tile the body EXACTLY on the standard `116 + count*4` stride,
-/// with a valid `count ∈ 1..=10` flag word at every record's `+104`? This is the only
-/// layout we trust to rewrite as a multi-material array.
-fn mtrl_tiles_standard(body: &[u8]) -> Option<Vec<usize>> {
-    let len = body.len();
-    let mut off = 0usize;
-    let mut flags = Vec::new();
-    while off < len {
-        let f = off + MTRL_PRE;
-        let count = mtrl_be_count(body, f)?; // flag word must be valid here
-        flags.push(f);
-        off += 116 + count * 4;
-        if off > len {
-            return None;
+/// Bytes of a `lineregion` `data` header, and of each of its points.
+const LINEREGION_HEADER: usize = 8;
+const LINEREGION_POINT: usize = 8;
+/// The one `lineregion` kind any shipped region holds (625 of 625 on PC).
+const LINEREGION_KIND_POLYGON: u16 = 2;
+
+/// A `lineregion`'s `data`: four u16s, then `count` points of `{f32 x, f32 z}`. The loader
+/// (`0x0045E8A0`, slot 4 of the lineregion vtable `0x00BAA8B0`) skips the u16 at +0, reads the count
+/// at +2 and a signed u16 at +4, skips +6, then the points. A word swap of the header trades the
+/// kind and the count, so every region reads as 2 points and no point is inside it. The kind is
+/// one the loader skips, not checks; another kind is refused because no shipped region has one to
+/// show its layout.
+fn convert_lineregion_data(body: &mut [u8]) -> Result<(), String> {
+    if body.len() < LINEREGION_HEADER {
+        return Err(format!("a lineregion data of {} bytes, shorter than its header", body.len()));
+    }
+    let kind = read_u16_be(body, 0);
+    let count = read_u16_be(body, 2) as usize;
+    if kind != LINEREGION_KIND_POLYGON {
+        return Err(format!("a lineregion of kind {kind}: only kind {LINEREGION_KIND_POLYGON} is known"));
+    }
+    if LINEREGION_HEADER + count * LINEREGION_POINT != body.len() {
+        return Err(format!("a lineregion data of {} bytes for {count} points", body.len()));
+    }
+    swap_u16_array(&mut body[..LINEREGION_HEADER]);
+    swap_u32_array(&mut body[LINEREGION_HEADER..]);
+    Ok(())
+}
+
+/// The material count in a big-endian terrainmesh `INFO` body.
+pub(super) fn terrain_material_count(info: &[u8]) -> Result<usize, String> {
+    if info.len() < TERRAIN_INFO_MATERIALS + 4 {
+        return Err(format!("terrainmesh INFO is {} bytes", info.len()));
+    }
+    Ok(read_u32_be(info, TERRAIN_INFO_MATERIALS) as usize)
+}
+
+fn convert_mtrl(body: &mut [u8], records: Option<usize>) -> Result<(), String> {
+    let mut p = 0usize;
+    let mut done = 0usize;
+    while records.map_or(p < body.len(), |n| done < n) {
+        done += 1;
+        if p + MTRL_PRE + 4 > body.len() {
+            return Err(format!("MTRL record at +{p}: the {}-byte body ends in its header", body.len()));
         }
-    }
-    if off == len && !flags.is_empty() {
-        Some(flags)
-    } else {
-        None
-    }
-}
-
-/// Convert ONLY material[0]'s `[flags|count]` per-field; u32-swap everything else.
-/// This is the pre-2026-06-16 behaviour. The multi-material array walk
-/// (`mtrl_convert_array`) is RETAINED below but currently UNUSED while we bisect a
-/// world-load HANG regression: correctly converting `material[1..]` (vs leaving them
-/// transposed, as this single-material path does) changed engine behaviour into the
-/// hang — i.e. the transposed materials[1..] were accidentally MASKING a deeper bug.
-/// Reverted to restore the known-good load; re-enable per-block once the masked issue
-/// (streaming/texture dependency exposed by the real material refs) is understood.
-fn convert_mtrl(body: &mut [u8]) {
-    let len = body.len();
-    if len < MTRL_PRE + 4 {
-        swap_u16_array(body);
-        return;
-    }
-    swap_u32_array(&mut body[..MTRL_PRE]); // 26-dword colour/scalar preamble
-    body[MTRL_PRE..MTRL_PRE + 2].reverse(); // u16 flags @104
-    body[MTRL_PRE + 2..MTRL_PRE + 4].reverse(); // u16 count @106 (in place — no transpose)
-    swap_u32_array(&mut body[MTRL_PRE + 4..]); // hashes + trailing (material[1..] left as-is)
-}
-
-/// Multi-material array walk (the 0x61981F c4land fix). PARKED — see `convert_mtrl`.
-/// Only safe for bodies that tile exactly on the standard `116 + count*4` stride.
-#[allow(dead_code)]
-fn mtrl_convert_array(body: &mut [u8]) {
-    let len = body.len();
-    if len < MTRL_PRE + 4 {
-        swap_u16_array(body);
-        return;
-    }
-    let flag_offs = match mtrl_tiles_standard(body) {
-        Some(f) => f,
-        None => {
-            swap_u32_array(&mut body[..MTRL_PRE]);
-            body[MTRL_PRE..MTRL_PRE + 2].reverse();
-            body[MTRL_PRE + 2..MTRL_PRE + 4].reverse();
-            swap_u32_array(&mut body[MTRL_PRE + 4..]);
-            return;
+        let count = read_u16_be(body, p + MTRL_PRE + 2) as usize;
+        let end = p + 116 + count * 4;
+        if count > MTRL_MAX_TEXTURES || end > body.len() {
+            return Err(format!("MTRL record at +{p} names {count} textures in a {}-byte body", body.len()));
         }
-    };
-    for i in 0..flag_offs.len() {
-        let f = flag_offs[i];
-        let pre_start = f - MTRL_PRE;
-        let region_end = if i + 1 < flag_offs.len() { flag_offs[i + 1] - MTRL_PRE } else { len };
-        swap_u32_array(&mut body[pre_start..f]);
-        body[f..f + 2].reverse();
-        body[f + 2..f + 4].reverse();
-        swap_u32_array(&mut body[f + 4..region_end]);
+        swap_u32_array(&mut body[p..p + MTRL_PRE]);
+        swap_u16(body, p + MTRL_PRE);
+        swap_u16(body, p + MTRL_PRE + 2);
+        swap_u32_array(&mut body[p + MTRL_PRE + 4..end]);
+        p = end;
     }
+    if body.len() - p != records.unwrap_or(0) * TERRAIN_MATERIAL_TABLE {
+        return Err(format!("MTRL: {} bytes after its {done} records", body.len() - p));
+    }
+    swap_u32_array(&mut body[p..]);
+    Ok(())
 }
 
 /// EFCT particle-effect header: an array of u16 fields. Mirrors
@@ -3950,7 +3068,7 @@ fn swap_chdr_header_inplace(data: &mut [u8]) {
 /// The header is `{ u16; u16; u32 }` in BOTH the small and large/guidmap
 /// branches (the engine's CHDR reader is generic); only the handling of bytes
 /// beyond the 8-byte header differs.
-fn convert_chdr_body_inplace(data: &mut [u8]) {
+pub(super) fn convert_chdr_body_inplace(data: &mut [u8]) {
     if data.len() <= 16 {
         swap_chdr_header_inplace(data);
         // Words beyond the 8-byte header are plain u32 scalars.
@@ -4029,10 +3147,9 @@ fn walk_container_tags(container: &[u8], entry_idx: usize) -> Result<(), String>
 mod tests {
     use super::{
         convert_block, convert_cfx_inplace, convert_container, convert_chdr_body_inplace, convert_decl,
-        convert_efct_header_inplace, convert_hibernation_data_inplace, convert_info_body_inplace,
-        convert_keyed_group_records_inplace, convert_mtrl,
-        fix_embedded_havok_layoutrules, is_ecs_name_identifier,
-        HAVOK_PACKFILE_MAGIC,
+        convert_efct_header_inplace, convert_info_body_inplace, convert_mtrl, convert_strs_inplace,
+        convert_lineregion_data, convert_terrain_draw_group_info,
+        fix_embedded_havok_layoutrules, types, HAVOK_PACKFILE_MAGIC,
     };
 
     // Build a synthetic BE MTRL body: [u32*26][u16 flags][u16 count][u32*count][u32*2 tail].
@@ -4056,7 +3173,7 @@ mod tests {
     fn mtrl_u16_count_survives_swap() {
         let count: u16 = 4;
         let mut body = make_mtrl_be(0x1234, count);
-        convert_mtrl(&mut body);
+        convert_mtrl(&mut body, None).unwrap();
 
         // THE invariant: the u16 texture-count @offset 106 must read back as 4 in LE, NOT transposed.
         // Transposing it (the old Rust u32 fall-through) makes the engine write `count` 12-byte
@@ -4078,9 +3195,61 @@ mod tests {
     }
 
     #[test]
+    fn a_console_strs_heap_becomes_utf16le() {
+        // "Hi\0" + "\0": 4 code units, big-endian.
+        let mut body = 4u32.to_be_bytes().to_vec();
+        body.extend_from_slice(&[0, b'H', 0, b'i', 0, 0, 0, 0]);
+        convert_strs_inplace(&mut body, types::TYPE_HASH_STRINGDB).unwrap();
+        assert_eq!(&body[..4], &4u32.to_le_bytes());
+        assert_eq!(&body[4..], &[b'H', 0, b'i', 0, 0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn a_strs_whose_count_is_not_its_heap_or_not_of_a_stringdb_is_refused() {
+        let mut body = 5u32.to_be_bytes().to_vec();
+        body.extend_from_slice(&[0, b'H', 0, 0]);
+        assert!(convert_strs_inplace(&mut body.clone(), types::TYPE_HASH_STRINGDB).is_err());
+        body[3] = 2;
+        assert!(convert_strs_inplace(&mut body, types::TYPE_HASH_TEXTURE).is_err());
+    }
+
+    #[test]
+    fn a_terrain_draw_group_info_keeps_its_pass_group_u16s() {
+        let mut body = [3u32.to_be_bytes(), 1u32.to_be_bytes()].concat();
+        for (count, first, end, alt, index) in [(1u32, 0u16, 1u16, 1u16, 0u16), (1, 1, 2, 0, 1), (1, 2, 3, 0, 2)] {
+            body.extend_from_slice(&count.to_be_bytes());
+            for v in [first, end, alt, index] {
+                body.extend_from_slice(&v.to_be_bytes());
+            }
+        }
+        convert_terrain_draw_group_info(&mut body).unwrap();
+        assert_eq!(&body[..8], &[3, 0, 0, 0, 1, 0, 0, 0]);
+        assert_eq!(&body[20..32], &[1, 0, 0, 0, 1, 0, 2, 0, 0, 0, 1, 0], "tier 1: count, first 1, end 2, alt 0, index 1");
+        assert!(convert_terrain_draw_group_info(&mut body[..40]).is_err());
+    }
+
+    #[test]
+    fn a_lineregion_keeps_its_kind_and_point_count_apart() {
+        // Kind 2, 3 points, +4 = 0x0102, +6 = 0, then (x, z) per point.
+        let mut body = [2u16, 3, 0x0102, 0].iter().flat_map(|v| v.to_be_bytes()).collect::<Vec<u8>>();
+        for v in [1.5f32, -2.0, 300.25, 4.0, -5.5, 6.0] {
+            body.extend_from_slice(&v.to_be_bytes());
+        }
+        let mut be = body.clone();
+        convert_lineregion_data(&mut be).unwrap();
+        assert_eq!(&be[..8], &[2, 0, 3, 0, 2, 1, 0, 0], "kind 2, count 3, the +4 u16 in place");
+        assert_eq!(f32::from_le_bytes([be[16], be[17], be[18], be[19]]), 300.25);
+        assert_eq!(f32::from_le_bytes([be[28], be[29], be[30], be[31]]), 6.0);
+
+        assert!(convert_lineregion_data(&mut body.clone()[..24]).is_err(), "a body short of its points");
+        body[1] = 3;
+        assert!(convert_lineregion_data(&mut body).is_err(), "a kind no shipped region has");
+    }
+
+    #[test]
     fn mtrl_count_zero_ok() {
         let mut body = make_mtrl_be(0x0001, 0); // 116 bytes, no hashes
-        convert_mtrl(&mut body);
+        convert_mtrl(&mut body, None).unwrap();
         assert_eq!(u16::from_le_bytes([body[106], body[107]]), 0);
         assert_eq!(u32::from_le_bytes([body[0], body[1], body[2], body[3]]), 0x01020304);
     }
@@ -4121,14 +3290,27 @@ mod tests {
     }
 
     #[test]
-    fn mtrl_unknown_layout_falls_back_count_safe() {
-        // A body that does NOT satisfy len == 116 + count*4 -> count-safe u16 fallback.
-        let mut body = vec![0u8; 50];
-        body[10] = 0xAB;
-        body[11] = 0xCD;
-        convert_mtrl(&mut body);
-        assert_eq!(body[10], 0xCD, "fallback must u16-swap (count-safe at any even offset)");
-        assert_eq!(body[11], 0xAB);
+    fn a_body_records_do_not_tile_fails() {
+        assert!(convert_mtrl(&mut vec![0u8; 50], None).unwrap_err().contains("ends in its header"));
+        let mut body = make_mtrl_be(0, 2);
+        body.truncate(body.len() - 1);
+        assert!(convert_mtrl(&mut body, None).unwrap_err().contains("names 2 textures"));
+        assert!(convert_mtrl(&mut make_mtrl_be(0, 11), None).unwrap_err().contains("names 11 textures"));
+    }
+
+    #[test]
+    fn a_terrain_body_is_its_records_then_a_table_for_each() {
+        let mut body = make_mtrl_be(0, 1);
+        for _ in 0..64 {
+            body.extend_from_slice(&1.0f32.to_be_bytes());
+        }
+        convert_mtrl(&mut body, Some(1)).unwrap();
+        assert_eq!(u16::from_le_bytes([body[106], body[107]]), 1);
+        assert_eq!(&body[120..124], &1.0f32.to_le_bytes());
+        assert_eq!(&body[372..376], &1.0f32.to_le_bytes());
+        let mut short = make_mtrl_be(0, 1);
+        short.extend_from_slice(&[0; 252]);
+        assert!(convert_mtrl(&mut short, Some(1)).unwrap_err().contains("252 bytes after its 1 records"));
     }
 
     #[test]
@@ -4209,7 +3391,7 @@ mod tests {
         block.extend_from_slice(&be32(chunk_size));
         block.extend_from_slice(&container);
 
-        let out = convert_block(&block, false, None, None).expect("convert_block must succeed");
+        let out = convert_block(&block, false, None, None, None, None).expect("convert_block must succeed");
 
         // LE entry table row 0: [0..4]=count, [4..8]=name, [8..12]=type, [12..16]=field_c.
         assert_eq!(
@@ -4224,7 +3406,7 @@ mod tests {
         // Also confirm base-game blocks (field_c == 0) stay 0 — swapping 0 is a no-op.
         let mut block0 = block.clone();
         block0[12..16].copy_from_slice(&be32(0)); // field_c = 0
-        let out0 = convert_block(&block0, false, None, None).expect("convert_block must succeed");
+        let out0 = convert_block(&block0, false, None, None, None, None).expect("convert_block must succeed");
         assert_eq!(
             u32::from_le_bytes([out0[12], out0[13], out0[14], out0[15]]),
             0,
@@ -4405,12 +3587,40 @@ mod tests {
             c.extend_from_slice(&v.to_be_bytes());
         }
         c.extend_from_slice(&be_body);
-        let out = convert_container(&c, false, 0, crate::types::TYPE_HASH_EFFECT, None, None).expect("convert");
+        let out = convert_container(&c, false, 0, crate::types::TYPE_HASH_EFFECT, None, None, None, None).expect("convert");
         assert_eq!(&out[20..24], b"EFCT");
         let mut want = be_body;
         convert_efct_header_inplace(&mut want);
         assert_eq!(&out[40..58], &want, "EFCT body must take the u16 header swap");
         assert_eq!(u16::from_le_bytes([out[42], out[43]]), 0x0226);
+    }
+
+    /// One row of `body` tagged `GEOM`, as Xbox stores it.
+    fn effect_geom(body: &[u8]) -> Vec<u8> {
+        let mut c = Vec::new();
+        c.extend_from_slice(b"XFCU");
+        for v in [40u32, 0, 0, 1] {
+            c.extend_from_slice(&v.to_be_bytes());
+        }
+        c.extend_from_slice(b"MOEG");
+        for v in [0u32, body.len() as u32, 0, 0] {
+            c.extend_from_slice(&v.to_be_bytes());
+        }
+        c.extend_from_slice(body);
+        c
+    }
+
+    /// An emitter's `GEOM` keeps its two u16s in order, where the u32 sweep would trade the shape
+    /// index for the count. A shape table's `GEOM` stays u32 and f32.
+    #[test]
+    fn an_emitter_geom_is_two_u16s() {
+        let e = crate::types::TYPE_HASH_EFFECT;
+        let out = convert_container(&effect_geom(&[0, 1, 0, 2]), false, 0, e, None, None, None, None).expect("convert");
+        assert_eq!(&out[40..44], &[1, 0, 2, 0]);
+        let mut shapes = 1u32.to_be_bytes().to_vec();
+        shapes.extend_from_slice(&[0x3F, 0x80, 0, 0].repeat(13));
+        let out = convert_container(&effect_geom(&shapes), false, 0, e, None, None, None, None).expect("convert");
+        assert_eq!(&out[40..48], &[1, 0, 0, 0, 0, 0, 0x80, 0x3F]);
     }
 
     #[test]
@@ -4450,93 +3660,6 @@ mod tests {
         assert_ne!(buggy, correct_le);
         assert_eq!(u16::from_le_bytes([buggy[0], buggy[1]]), 0x0226); // magic moved to +0
         assert_eq!(u16::from_le_bytes([buggy[14], buggy[15]]), 0x0000); // count zeroed
-    }
-
-    #[test]
-    fn hibernation_typed_swap_matches_retail_layout() {
-        // BE source: key, u16 field, then constant u8 params a0/3c/14/00.
-        let mut data = Vec::new();
-        data.extend_from_slice(&0x0015_0626u32.to_be_bytes());
-        data.extend_from_slice(&0x00FEu16.to_be_bytes());
-        data.extend_from_slice(&[0xA0, 0x3C, 0x14, 0x00]);
-        assert_eq!(data.len(), 10);
-
-        convert_hibernation_data_inplace(&mut data);
-        // entity key + payload u16 swapped; u8/bit tail untouched.
-        assert_eq!(&data[0..4], &0x0015_0626u32.to_le_bytes());
-        assert_eq!(&data[4..6], &0x00FEu16.to_le_bytes());
-        assert_eq!(&data[6..10], &[0xA0, 0x3C, 0x14, 0x00]);
-        // Matches retail PC byte pattern `XX 00 a0 3c 14 00`.
-        assert_eq!(&data[4..10], &[0xFE, 0x00, 0xA0, 0x3C, 0x14, 0x00]);
-    }
-
-    #[test]
-    fn ecs_name_identifier_rejects_binary_hashes() {
-        // Real component names are valid identifiers.
-        assert!(is_ecs_name_identifier(b"Transform"));
-        assert!(is_ecs_name_identifier(b"ModelName"));
-        assert!(is_ecs_name_identifier(b"PointLocation"));
-        // Printable compact hashes (with punctuation) are NOT names.
-        assert!(!is_ecs_name_identifier(b"N+lT")); // 0x4E2B6C54
-        assert!(!is_ecs_name_identifier(b"iV~b")); // 0x69567E62
-        assert!(!is_ecs_name_identifier(b"")); // empty
-        assert!(!is_ecs_name_identifier(b"A")); // too short
-    }
-
-    #[test]
-    fn keyed_group_pointlocation_record36() {
-        // [u32 count=1][1×36-byte record][u8 flag=0]
-        let mut data = Vec::new();
-        data.extend_from_slice(&1u32.to_be_bytes());
-        data.extend_from_slice(&0x80005B9Fu32.to_be_bytes()); // key
-        for _ in 0..7 {
-            data.extend_from_slice(&0u32.to_be_bytes());
-        }
-        data.extend_from_slice(&0x3F800000u32.to_be_bytes()); // 1.0f
-        data.push(0x00); // flag
-        assert_eq!(data.len(), 41);
-
-        let mut out = data.clone();
-        assert!(convert_keyed_group_records_inplace(&mut out, 36));
-        // count and key now little-endian; trailing flag byte unchanged.
-        assert_eq!(&out[0..4], &1u32.to_le_bytes());
-        assert_eq!(&out[4..8], &0x80005B9Fu32.to_le_bytes());
-        assert_eq!(out[40], 0x00);
-    }
-
-    #[test]
-    fn keyed_group_entity_ref_list_record4() {
-        // Two groups: [count=2][k0][k1][flag][count=1][k2][flag]
-        let mut data = Vec::new();
-        data.extend_from_slice(&2u32.to_be_bytes());
-        data.extend_from_slice(&0x8000_0001u32.to_be_bytes());
-        data.extend_from_slice(&0x8000_0002u32.to_be_bytes());
-        data.push(0x01);
-        data.extend_from_slice(&1u32.to_be_bytes());
-        data.extend_from_slice(&0x8000_0003u32.to_be_bytes());
-        data.push(0x01);
-
-        let mut out = data.clone();
-        assert!(convert_keyed_group_records_inplace(&mut out, 4));
-        assert_eq!(&out[0..4], &2u32.to_le_bytes());
-        assert_eq!(&out[4..8], &0x8000_0001u32.to_le_bytes());
-        assert_eq!(out[12], 0x01, "group-0 flag preserved");
-        // group 1
-        assert_eq!(&out[13..17], &1u32.to_le_bytes());
-        assert_eq!(out[21], 0x01, "group-1 flag preserved");
-    }
-
-    #[test]
-    fn keyed_group_rejects_mismatched_layout() {
-        // record_size=4 but a trailing byte makes consumption inexact.
-        let mut data = Vec::new();
-        data.extend_from_slice(&1u32.to_be_bytes());
-        data.extend_from_slice(&0x8000_0001u32.to_be_bytes());
-        data.push(0x01);
-        data.push(0xFF); // extra junk -> must NOT consume exactly
-        let mut out = data.clone();
-        assert!(!convert_keyed_group_records_inplace(&mut out, 4));
-        assert_eq!(out, data, "buffer left unchanged on mismatch");
     }
 
     #[test]
@@ -4714,61 +3837,20 @@ mod tests {
         assert!(wang > 30.0, "11-11-10 should garble this tangent, got {wang}°");
     }
 
+    /// A tangent's top two bits, as a signed 2-bit value, give its w: negative is −1, 0 and 1 are +1. A normal's w
+    /// is 1.0 whatever its top bits hold.
     #[test]
-    fn destrip_simple_strip() {
-        // Strip 0,1,2,3 | 4,5,6 with a 0xFFFF restart -> two runs.
-        // Run1 (4 verts) = 2 tris: (0,1,2),(1,3,2). Run2 (3 verts) = 1 tri (4,5,6).
-        let idx: [u16; 8] = [0, 1, 2, 3, 0xffff, 4, 5, 6];
-        let mut src = Vec::new();
-        for x in idx {
-            src.extend_from_slice(&x.to_le_bytes());
-        }
-        let out = super::destrip_indices(&src);
-        let tris: Vec<u16> = out
-            .chunks_exact(2)
-            .map(|c| u16::from_le_bytes([c[0], c[1]]))
-            .collect();
-        assert_eq!(tris, vec![0, 1, 2, 1, 3, 2, 4, 5, 6]);
-    }
-
-    #[test]
-    fn destrip_drops_degenerates() {
-        // A strip with a repeated index produces a degenerate triangle that must
-        // be dropped (PC contains no zero-area triangles in a list).
-        let idx: [u16; 5] = [0, 1, 1, 2, 3];
-        let mut src = Vec::new();
-        for x in idx {
-            src.extend_from_slice(&x.to_le_bytes());
-        }
-        let out = super::destrip_indices(&src);
-        let tris: Vec<u16> = out
-            .chunks_exact(2)
-            .map(|c| u16::from_le_bytes([c[0], c[1]]))
-            .collect();
-        // k=0:(0,1,1) degen drop; k=1:(1,1,2) degen drop; k=2:(1,2,3) even-> keep order.
-        assert_eq!(tris, vec![1, 2, 3]);
-    }
-
-    #[test]
-    fn mtrl_transposed_count_walker() {
-        // Two material records. Record 0: count=4 (PC-form [0][4]); record 1:
-        // count=6 but transposed to [6][0] (the generic-u32-swap bug). The walker
-        // must restore record 1 to [0][6] and leave record 0 alone.
-        const PB: usize = 104;
-        let stride0 = 116 + 4 * 4; // 132
-        let mut body = vec![0u8; stride0 + 116 + 6 * 4];
-        // record 0 count pair @104 = [flags=0][count=4]
-        body[PB + 2..PB + 4].copy_from_slice(&4u16.to_le_bytes());
-        // record 1 count pair @ stride0+104, transposed: [count=6][0]
-        let cp1 = stride0 + PB;
-        body[cp1..cp1 + 2].copy_from_slice(&6u16.to_le_bytes()); // lo = 6 (wrong)
-        super::mtrl_fix_transposed_counts(&mut body);
-        // record 0 untouched
-        assert_eq!(u16::from_le_bytes([body[PB], body[PB + 1]]), 0);
-        assert_eq!(u16::from_le_bytes([body[PB + 2], body[PB + 3]]), 4);
-        // record 1 fixed to [0][6]
-        assert_eq!(u16::from_le_bytes([body[cp1], body[cp1 + 1]]), 0);
-        assert_eq!(u16::from_le_bytes([body[cp1 + 2], body[cp1 + 3]]), 6);
+    fn a_tangents_top_bits_are_its_handedness() {
+        let w = |u: u32, tangent: bool| {
+            let h = super::dec3n_to_half4_le(u, tangent);
+            half_to_f32(u16::from_le_bytes([h[6], h[7]]))
+        };
+        let xyz = 0x0030_0a25u32 & 0x3fff_ffff;
+        assert_eq!(w(xyz | 0xc000_0000, true), -1.0, "top bits 11");
+        assert_eq!(w(xyz | 0x8000_0000, true), -1.0, "top bits 10");
+        assert_eq!(w(xyz | 0x4000_0000, true), 1.0, "top bits 01");
+        assert_eq!(w(xyz, true), 1.0, "top bits 00");
+        assert_eq!(w(xyz | 0xc000_0000, false), 1.0, "a normal");
     }
 
     #[test]
@@ -4791,6 +3873,137 @@ mod tests {
         assert_eq!(u16::from_le_bytes([out[8], out[9]]), 0x0203);
         assert_eq!(u16::from_le_bytes([out[10], out[11]]), 0x0405);
         assert_eq!(u16::from_le_bytes([out[14], out[15]]), 0x0809);
+    }
+
+    /// A little-endian 20-byte terrain draw.
+    fn terrain_draw(start: u32, prims: u16) -> Vec<u8> {
+        let mut r = vec![0u8; 20];
+        r[8..12].copy_from_slice(&start.to_le_bytes());
+        r[12..14].copy_from_slice(&prims.to_le_bytes());
+        r
+    }
+
+    fn strip_bytes(idx: &[u16]) -> Vec<u8> {
+        idx.iter().flat_map(|x| x.to_le_bytes()).collect()
+    }
+
+    /// The triangles of a strip range with their winding, degenerates dropped, each rotated so its
+    /// lowest index leads, the way a strip's alternating order is read.
+    fn wound(strip: &[u16]) -> Vec<[u16; 3]> {
+        strip
+            .windows(3)
+            .enumerate()
+            .filter(|(_, t)| t[0] != t[1] && t[1] != t[2] && t[0] != t[2])
+            .map(|(i, t)| {
+                let t = if i % 2 == 0 { [t[0], t[1], t[2]] } else { [t[1], t[0], t[2]] };
+                let at = (0..3).min_by_key(|&k| t[k]).expect("three");
+                [t[at], t[(at + 1) % 3], t[(at + 2) % 3]]
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_terrain_draw_swaps_as_twenty_bytes_whole_words() {
+        let mut be = vec![0u8; 80];
+        be[8..12].copy_from_slice(&10u32.to_be_bytes());
+        be[28..32].copy_from_slice(&0x025Eu32.to_be_bytes());
+        // Four records are 80 bytes, a multiple of the model's 16.
+        assert!(super::walk_records(&mut be, super::prmt_walker(crate::types::TYPE_HASH_TERRAIN_MESH)));
+        assert_eq!(u32::from_le_bytes([be[8], be[9], be[10], be[11]]), 10);
+        assert_eq!(u32::from_le_bytes([be[28], be[29], be[30], be[31]]), 0x025E);
+    }
+
+    #[test]
+    fn a_terrain_draw_keeps_its_triangles_and_winding_across_a_restart() {
+        // Two segments of a draw, the first of an odd length, then a second draw of its own.
+        let source = [0u16, 1, 2, 3, 4, 0xFFFF, 5, 6, 7, 8, 9, 10, 11];
+        let draws = [terrain_draw(0, 8), terrain_draw(10, 1)].concat();
+        let (strip, prmt) = super::terrain_strips(&strip_bytes(&source), &draws).unwrap();
+        let idx: Vec<u16> = strip.chunks_exact(2).map(|b| u16::from_le_bytes([b[0], b[1]])).collect();
+        assert!(!idx.contains(&0xFFFF), "PC has no restart");
+        let read = |r: usize| {
+            let at = r * 20;
+            let start = u32::from_le_bytes([prmt[at + 8], prmt[at + 9], prmt[at + 10], prmt[at + 11]]) as usize;
+            let prims = u16::from_le_bytes([prmt[at + 12], prmt[at + 13]]) as usize;
+            &idx[start..start + prims + 2]
+        };
+        let want = [wound(&[0, 1, 2, 3, 4]), wound(&[5, 6, 7, 8])].concat();
+        assert_eq!(wound(read(0)), want);
+        assert_eq!(wound(read(1)), wound(&[9, 10, 11]));
+    }
+
+    #[test]
+    fn terrain_draws_of_one_range_share_it() {
+        let draws = [terrain_draw(0, 1), terrain_draw(0, 1)].concat();
+        let (strip, prmt) = super::terrain_strips(&strip_bytes(&[0, 1, 2]), &draws).unwrap();
+        assert_eq!(strip.len(), 6);
+        assert_eq!(prmt[..20], prmt[20..]);
+    }
+
+    #[test]
+    fn a_terrain_draw_past_its_strip_is_an_error() {
+        assert!(super::terrain_strips(&strip_bytes(&[0, 1, 2]), &terrain_draw(0, 4)).is_err());
+    }
+
+    /// A PS3 draw record, big-endian.
+    fn ps3_draw(vs: u32, start: u32, count: u32) -> Vec<u8> {
+        [vs.to_be_bytes(), 7u32.to_be_bytes(), start.to_be_bytes(), count.to_be_bytes(), [0, 0, 0, 0]].concat()
+    }
+
+    fn be_indices(i: &[u16]) -> Vec<u8> {
+        i.iter().flat_map(|v| v.to_be_bytes()).collect()
+    }
+
+    /// The triangles a PC strip draws, each rotated to its lowest index, winding kept, degenerates gone.
+    fn strip_triangles(s: &[u16]) -> Vec<[u16; 3]> {
+        let mut out: Vec<[u16; 3]> = wound(s);
+        out.retain(|t| t[0] != t[1] && t[1] != t[2] && t[0] != t[2]);
+        out
+    }
+
+    #[test]
+    fn a_ps3_draw_keeps_its_triangles_and_winding_as_a_strip() {
+        // A run that continues as a strip, then a triangle that shares no edge, at both parities.
+        let list = [0u16, 1, 2, 2, 1, 3, 2, 3, 4, 8, 9, 10, 9, 11, 10, 20, 21, 22];
+        let (strip, prmt) = super::terrain_strips_of_lists(&be_indices(&list), &ps3_draw(0xAA, 0, 18), |k| k).unwrap();
+        let idx: Vec<u16> = strip.chunks_exact(2).map(|b| u16::from_le_bytes([b[0], b[1]])).collect();
+        let prims = u16::from_le_bytes([prmt[12], prmt[13]]) as usize;
+        assert_eq!(idx.len(), prims + 2);
+        let mut want: Vec<[u16; 3]> = list
+            .chunks_exact(3)
+            .map(|t| {
+                let at = (0..3).min_by_key(|&i| t[i]).unwrap();
+                [t[at], t[(at + 1) % 3], t[(at + 2) % 3]]
+            })
+            .collect();
+        want.sort_unstable();
+        let mut got = strip_triangles(&idx);
+        got.sort_unstable();
+        assert_eq!(got, want);
+    }
+
+    #[test]
+    fn a_ps3_record_becomes_a_pc_record() {
+        let (strip, prmt) = super::terrain_strips_of_lists(&be_indices(&[5, 6, 7, 6, 8, 7]), &ps3_draw(0xAA, 0, 6), |k| k + 1).unwrap();
+        assert_eq!(strip.len(), 8, "one strip of 4");
+        assert_eq!(u32::from_le_bytes([prmt[0], prmt[1], prmt[2], prmt[3]]), 0xAB, "the PC key");
+        assert_eq!(u32::from_le_bytes([prmt[4], prmt[5], prmt[6], prmt[7]]), 7, "the material");
+        let tail: Vec<u16> = prmt[12..20].chunks_exact(2).map(|b| u16::from_le_bytes([b[0], b[1]])).collect();
+        assert_eq!(tail, [2, 5, 8, 4], "triangles, min, max, distinct indices");
+    }
+
+    #[test]
+    fn ps3_draws_of_one_range_share_it() {
+        let draws = [ps3_draw(1, 0, 3), ps3_draw(2, 0, 3)].concat();
+        let (strip, prmt) = super::terrain_strips_of_lists(&be_indices(&[0, 1, 2]), &draws, |k| k).unwrap();
+        assert_eq!(strip.len(), 6);
+        assert_eq!(prmt[8..20], prmt[28..40]);
+    }
+
+    #[test]
+    fn a_ps3_draw_past_its_list_or_not_of_triangles_is_an_error() {
+        assert!(super::terrain_strips_of_lists(&be_indices(&[0, 1, 2]), &ps3_draw(1, 0, 6), |k| k).is_err());
+        assert!(super::terrain_strips_of_lists(&be_indices(&[0, 1, 2, 3]), &ps3_draw(1, 0, 4), |k| k).is_err());
     }
 
     #[test]
@@ -4827,9 +4040,7 @@ mod tests {
         be[m2..m2 + 2].copy_from_slice(&0x0000u16.to_be_bytes());
         be[m2 + 2..m2 + 4].copy_from_slice(&2u16.to_be_bytes());
 
-        // The multi-material array walk is PARKED in convert_mtrl (single-material) while we
-        // bisect the world-load hang regression; test the parked walker directly.
-        super::mtrl_convert_array(&mut be);
+        convert_mtrl(&mut be, None).unwrap();
 
         // preamble dword 0 u32-swapped
         assert_eq!(&be[0..4], &[0x44, 0x33, 0x22, 0x11]);
@@ -4848,14 +4059,13 @@ mod tests {
 
     #[test]
     fn convert_mtrl_single_material_no_regression() {
-        // One material (count=1) + float props: behaves exactly as the old per-field
-        // path — flags/count in place, preamble + hash + props u32-swapped.
+        // One material (count=1): flags/count in place, preamble + hash + tail u32-swapped.
         const PB: usize = 104;
-        let mut be = vec![0u8; PB + 4 + 4 + 16];
+        let mut be = vec![0u8; 120];
         be[PB..PB + 2].copy_from_slice(&0x0001u16.to_be_bytes()); // flags
         be[PB + 2..PB + 4].copy_from_slice(&1u16.to_be_bytes()); // count
         be[PB + 4..PB + 8].copy_from_slice(&0x01020304u32.to_be_bytes()); // hash
-        super::convert_mtrl(&mut be);
+        convert_mtrl(&mut be, None).unwrap();
         assert_eq!(u16::from_le_bytes([be[PB], be[PB + 1]]), 0x0001);
         assert_eq!(u16::from_le_bytes([be[PB + 2], be[PB + 3]]), 1);
         assert_eq!(&be[PB + 4..PB + 8], &[0x04, 0x03, 0x02, 0x01]);
@@ -4900,6 +4110,7 @@ pub(super) fn ps3_native_translate_body(
     tag_le: [u8; 4],
     group_tag: ChunkTag,
     type_hash: u32,
+    terrain_materials: Option<usize>,
 ) -> Result<Vec<u8>, String> {
     let _ = tag_le; // reserved for future tag-byte-sensitive arms
     let mut body = be_body.to_vec();
@@ -4908,9 +4119,10 @@ pub(super) fn ps3_native_translate_body(
     // so the ECS-only arms (`convert_ecs_bodies`) are not needed.
     match tag {
         ChunkTag::Syek | ChunkTag::Srts => { /* native BE on all platforms */ }
+        ChunkTag::Strs => convert_strs_inplace(&mut body, type_hash)?,
         _ if is_string_tag(tag) => { /* string data */ }
         ChunkTag::Prmt => {
-            if !walk_records(&mut body, &PRMT_WALKER) {
+            if !walk_records(&mut body, prmt_walker(type_hash)) {
                 swap_u16_array(&mut body);
             }
         }
@@ -4939,13 +4151,16 @@ pub(super) fn ps3_native_translate_body(
                 swap_u32_array(&mut body);
             }
         }
-        ChunkTag::Mtrl => convert_mtrl(&mut body),
+        ChunkTag::Mtrl => convert_mtrl(&mut body, terrain_materials)?,
         ChunkTag::Enum => convert_enum_body_inplace(&mut body),
         ChunkTag::Ibuf => swap_u16_array(&mut body),
         ChunkTag::Indx => swap_u16_array(&mut body),
         ChunkTag::Info if type_hash == types::TYPE_HASH_ANIMATION => swap_u16_array(&mut body),
         ChunkTag::Info => convert_info_body_inplace(&mut body),
         ChunkTag::InfoUpper if type_hash == types::TYPE_HASH_STANCE => swap_u16_array(&mut body),
+        ChunkTag::InfoUpper if type_hash == types::TYPE_HASH_TERRAIN_MESH && group_tag == ChunkTag::Prmg => {
+            convert_terrain_draw_group_info(&mut body)?
+        }
         ChunkTag::Type if type_hash == types::TYPE_HASH_STANCE => {
             convert_stance_type_names_inplace(&mut body)
         }

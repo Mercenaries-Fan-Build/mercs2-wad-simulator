@@ -35,10 +35,52 @@ pub fn status_name(s: i32) -> Option<&'static CStr> {
     usize::try_from(s).ok().and_then(|i| STATUS_NAMES.get(i).copied())
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// Which registry a shader is in, and which D3D create call its store record takes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Stage {
     Pixel,
     Vertex,
+}
+
+impl Stage {
+    pub fn kind(self) -> crate::shader3::ShaderKind {
+        match self {
+            Stage::Vertex => crate::shader3::ShaderKind::Vertex,
+            Stage::Pixel => crate::shader3::ShaderKind::Pixel,
+        }
+    }
+
+    pub fn from_kind(kind: crate::shader3::ShaderKind) -> Stage {
+        match kind {
+            crate::shader3::ShaderKind::Vertex => Stage::Vertex,
+            crate::shader3::ShaderKind::Pixel => Stage::Pixel,
+        }
+    }
+
+    pub fn token(self) -> &'static str {
+        match self {
+            Stage::Vertex => "vertex",
+            Stage::Pixel => "pixel",
+        }
+    }
+
+    /// The stage a blob's version token names.
+    pub fn of_version(token: u32) -> Option<Stage> {
+        match token {
+            crate::sm3asm::VS_3_0 => Some(Stage::Vertex),
+            crate::sm3asm::PS_3_0 => Some(Stage::Pixel),
+            _ => None,
+        }
+    }
+
+    /// Names the stage's key table holds ([`PS_CAPACITY`] / [`VS_CAPACITY`]).
+    pub fn capacity(self) -> usize {
+        match self {
+            Stage::Vertex => VS_CAPACITY as usize,
+            Stage::Pixel => PS_CAPACITY as usize,
+        }
+    }
 }
 
 pub struct FamilyInfo {

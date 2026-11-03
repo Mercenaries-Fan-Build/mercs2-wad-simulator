@@ -17,7 +17,7 @@ use mercs2_core::{AnimState, Entity, ModelRef, SkinPalette, Transform, World};
 use mercs2_engine::game_world::*;
 use mercs2_engine::mesh::Vertex;
 use mercs2_engine::render::*;
-use mercs2_engine::scene::{AssetStore, ModelAnim};
+use mercs2_engine::scene::{AssetStore, ModelAnim, SurfaceError};
 use mercs2_engine::worldutil::*;
 use mercs2_engine::{mesh, pose, wad};
 use winit::keyboard::KeyCode;
@@ -139,10 +139,14 @@ pub struct WorldData {
     /// The HQ-interior hero spawn, derived the base-game way (actor position + `hp_playerA_enter`
     /// hardpoint) when `spawn_interior`. `None` for the exterior boot (the hero uses a named marker).
     interior_spawn: Option<[f32; 3]>,
-    /// Authored `global_particle_*` FX placements (effect name + world position) — each starts an
-    /// emitter (classified by name). The faithful producer for environmental particle effects
-    /// (fire/smoke/steam). Static environmental *glows* (god-ray light shafts) are split out into
+    /// Authored `global_particle_*` FX placements: the effect and where it stands, run by
+    /// `mercs2_engine::fx_sim`. Static environmental *glows* (god-ray light shafts) are split out into
     /// `glow_cards` at load, where the WAD is open to read their effect template.
+    effects: Vec<(mercs2_formats::fxdict::EffectContainer, [f32; 3])>,
+    /// What `effects` draw from: the `vfx` atlas and the `fxdict`. `None` when there are none.
+    fx_atlas: Option<(mercs2_formats::texture::TextureData, Vec<mercs2_formats::fxdict::FxRect>)>,
+    /// `global_particle_*` placements whose effect the archive does not carry, as a stand-in shape
+    /// classified by name.
     particle_fx: Vec<(mercs2_engine::particles::EmitterDesc, [f32; 3])>,
     /// Static additive glow cards for the environmental light-shaft FX (`global_particle_env_godray2`
     /// — the PMC hall god rays descending from the dome). Position/size/tint are data-driven from the
@@ -180,9 +184,9 @@ pub struct WorldData {
 const LOAD_PHASES: &[&str] = &[
     "terrain", "heightmap", "vertices", "player", "clips", "population units", "cells", "placements", "interior", "props",
     "interior props", "lights + fx", "watermap", "resident audio", "hero spawn",
-    // The streaming-world build (`load_streaming_world_data`) steps these four itself — the K2
-    // executor's block index + Layer-2 catalog, produced on this same load thread.
-    "stream blocks", "stream terrain", "stream index", "stream catalog",
+    // The streaming-world build (`load_streaming_world_data`) steps these five itself — the K2
+    // executor's block index + Layer-2 catalog, and the trees, produced on this same load thread.
+    "stream blocks", "stream terrain", "stream index", "stream catalog", "stream foliage",
 ];
 pub(crate) const LOAD_STAGES: u32 = LOAD_PHASES.len() as u32;
 
@@ -496,7 +500,8 @@ pub(crate) fn load_world_data(
     // loaded layer's `LightObject`s. Environmental FX placements (Name-keyed `global_particle_*`
     // Transforms) in the interior split by kind: static environmental light-shaft glows (god rays)
     // become additive glow cards resolved against their effect template here (WAD open); fire/smoke/
-    // steam stay as particle emitters classified by name at render-thread start.
+    // steam run as their effects, resolved here and started at render-thread start.
+    let mut effects: Vec<(mercs2_formats::fxdict::EffectContainer, [f32; 3])> = Vec::new();
     let mut particle_fx: Vec<(mercs2_engine::particles::EmitterDesc, [f32; 3])> = Vec::new();
     let mut glow_cards: Vec<mercs2_engine::particles::GlowCard> = Vec::new();
     if spawn_interior {
@@ -509,26 +514,23 @@ pub(crate) fn load_world_data(
                 }
                 if is_light_shaft_fx(name) {
                     glow_cards.push(mercs2_engine::game_world::glow_card_for_effect(assets.base_mut(), name, p.pos)?);
-                } else if let Some(base) = classify_particle(name) {
-                    // Real authored effect params (COLR/FRCE/PTYP), one desc per emitter, if the
-                    // effect resolves; else the name-heuristic base shape. Resolved here where the WAD
-                    // is open, once at load. An effect that resolves but does not parse fails the load.
+                } else {
+                    // The authored effect if it resolves, else the name-heuristic shape. Resolved
+                    // here where the WAD is open, once at load. An effect that resolves but does not
+                    // parse fails the load.
                     let hash = mercs2_formats::hash::pandemic_hash_m2(&name.replace("particle_", ""));
                     match mercs2_engine::game_world::load_effect(assets.base_mut(), hash)? {
-                        Some(effect) => {
-                            for desc in mercs2_engine::particles::EmitterDesc::from_effect(&effect, &base) {
-                                particle_fx.push((desc, p.pos));
-                            }
-                        }
-                        None => particle_fx.push((base, p.pos)),
+                        Some(effect) => effects.push((effect, p.pos)),
+                        None => particle_fx.extend(classify_particle(name).map(|base| (base, p.pos))),
                     }
                 }
             }
         }
     }
+    let fx_atlas = if effects.is_empty() { None } else { Some(mercs2_engine::game_world::load_fx_atlas(assets.base_mut())?) };
     println!(
-        "[world] particle placements: {}; light-shaft glows: {}",
-        particle_fx.len(), glow_cards.len()
+        "[world] effect placements: {}; stand-ins: {}; light-shaft glows: {}",
+        effects.len(), particle_fx.len(), glow_cards.len()
     );
     // The lights/FX harvest above (incl. the interior state-block decompress) is real load work that
     // used to run AFTER the bar hit 100% — count it as the final stage so the progress reflects reality.
@@ -586,7 +588,7 @@ pub(crate) fn load_world_data(
     let templates = mercs2_engine::worldutil::TemplateRecords::load(&mut assets)?;
     let streaming = mercs2_engine::game_world::load_streaming_world_data(wadpath, stream_cfg, templates, progress)?;
 
-    Ok(WorldData { terrain, player, player_clips, player_swim_clip, weapon, weapon_hand_bone, cells, placements, pmc_models, interior, props, interior_props, hmap, watermap, interior_spawn, particle_fx, glow_cards, resident_audio, streaming, population_block: ls, population, population_models })
+    Ok(WorldData { terrain, player, player_clips, player_swim_clip, weapon, weapon_hand_bone, cells, placements, pmc_models, interior, props, interior_props, hmap, watermap, interior_spawn, effects, fx_atlas, particle_fx, glow_cards, resident_audio, streaming, population_block: ls, population, population_models })
 }
 
 /// Whether a `global_particle_*` name is a static environmental light-shaft ("god ray") FX. These are
@@ -751,24 +753,7 @@ pub(crate) struct BootConfig {
     pub save: Option<mercs2_engine::script_host::BootSaveState>,
 }
 
-/// Translate a parsed save into the boot payload the master script's `LoadSingleton` reads. The field
-/// mapping is one-to-one with `MrxMissionFlow.SaveSingleton` (`mrxmissionflow.lua:597`), which is where
-/// these same fields were serialized from.
-fn boot_save_from(state: &mercs2_formats::save::SaveState) -> mercs2_engine::script_host::BootSaveState {
-    mercs2_engine::script_host::BootSaveState {
-        flow_keys: state.completed_flow.iter().map(|(k, v)| (k.clone(), *v)).collect(),
-        culled_bindings: state.flow_chain.clone(),
-        active_missions: state.active_missions.iter().map(|m| m.id.clone()).collect(),
-        // The resume-spawn gate: a mid-contract save carries its checkpoint marker(s), which keeps the
-        // master script off the `Pmc_Entry1` (PMC hub) path. See `BootSaveState::retry_locations`.
-        retry_locations: state.retry_locations.clone(),
-        layers: state.layers.clone(),
-        transit_enabled: state.transit_enabled,
-        transit_zones: state.transit_zones.clone(),
-    }
-}
-
-fn boot_config_from(sel: Option<&std::path::Path>) -> BootConfig {
+fn boot_config_from(sel: Option<&std::path::Path>) -> Result<BootConfig, String> {
     // Retail new game = Mattias, upgrade tier 0, wardrobe untouched → his base/default skin
     // (matches the user's observed fresh retail saves).
     //
@@ -785,7 +770,7 @@ fn boot_config_from(sel: Option<&std::path::Path>) -> BootConfig {
         hero_character: "mattias".into(),
         save: None,
     };
-    let Some(path) = sel else { return new_game("new game") };
+    let Some(path) = sel else { return Ok(new_game("new game")) };
     let parsed = std::fs::read(path)
         .map_err(|e| e.to_string())
         .and_then(|b| mercs2_formats::save::parse(&b));
@@ -810,23 +795,22 @@ fn boot_config_from(sel: Option<&std::path::Path>) -> BootConfig {
                 crate::hero::hero(hero_idx).display,
                 crate::hero::look_label(hero_idx, prof.upgrade_index, 0),
             );
-            // A save whose Lua payload wouldn't decode still RESUMES — it is not a new game. Handing the
-            // master script an empty-but-present table keeps it on the resume branch (Pmc_Entry1) rather
-            // than silently replaying the intro.
-            let save = Some(state.as_ref().map(boot_save_from).unwrap_or_default());
-            BootConfig {
+            // The master script loads the save's own payload; one that won't decode cannot be resumed.
+            let save = mercs2_engine::script_host::BootSaveState::from_profile(&prof)
+                .map_err(|e| format!("save {}: {e}", path.display()))?;
+            Ok(BootConfig {
                 recruits,
                 stockpile,
                 models,
                 label,
                 contract: prof.active_contract().to_string(),
                 hero_character: hero_character_name(hero_idx).to_string(),
-                save,
-            }
+                save: Some(save),
+            })
         }
         Err(e) => {
             println!("[shell] save {} unreadable ({e}) — booting new game", path.display());
-            new_game("new game (save unreadable)")
+            Ok(new_game("new game (save unreadable)"))
         }
     }
 }
@@ -1029,6 +1013,26 @@ pub struct Mercs2Game {
     test_world: bool,
     menu_gp_prev: [bool; 4],
     menu_open: std::time::Instant,
+    /// The shipped front end, while it runs.
+    shell: Option<mercs2_engine::shell::Shell>,
+    shell_pad: [bool; 4],
+    /// `--shell-shot`: seconds into the front end, and where to write that frame.
+    shell_shot: Option<(f32, std::path::PathBuf)>,
+    shell_clock: f32,
+    /// Front-end frames run, and the longest, for `--shell-shot`'s report.
+    shell_frames: u32,
+    shell_worst: f32,
+    /// Whether the front end has the display's modes and the adapter for its video pages.
+    shell_display: bool,
+    /// The mouse buttons down last front-end frame, and the keys and buttons a rebind took, which the
+    /// menu does not see until they come up.
+    shell_mouse: std::collections::HashSet<winit::event::MouseButton>,
+    shell_keys_taken: std::collections::HashSet<winit::keyboard::KeyCode>,
+    shell_mouse_taken: std::collections::HashSet<winit::event::MouseButton>,
+    /// Binds read again after the remap page saved, for the engine's input.
+    shell_bindings: Option<mercs2_engine::input::Bindings>,
+    /// The pads the front end's control pages have.
+    shell_pads: Vec<mercs2_engine::controls::Pad>,
     // Input bindings (Mercs2.ini) — for mouse sensitivity / invert-Y in `update`.
     bindings: mercs2_engine::input::Bindings,
     // The ECS World is owned by the engine (`app::run`) and lent via `Ctx` — the game does NOT keep its
@@ -1113,7 +1117,7 @@ impl Mercs2Game {
         }
         let runtime = mercs2_engine::runtime::GameRuntime::new(audio.clone());
         let bindings = mercs2_engine::input::find_mercs2_ini()
-            .map(|p| mercs2_engine::input::Bindings::load(&p))
+            .map(|p| mercs2_engine::input::Bindings::load(&p, mercs2_engine::input::Bindings::XBOX_360_SECTION))
             .unwrap_or_default();
         Mercs2Game {
             debris_unresident: 0,
@@ -1133,6 +1137,18 @@ impl Mercs2Game {
             test_world: false,
             menu_gp_prev: [false; 4],
             menu_open: std::time::Instant::now(),
+            shell: None,
+            shell_pad: [false; 4],
+            shell_shot: None,
+            shell_clock: 0.0,
+            shell_frames: 0,
+            shell_worst: 0.0,
+            shell_display: false,
+            shell_mouse: Default::default(),
+            shell_keys_taken: Default::default(),
+            shell_mouse_taken: Default::default(),
+            shell_bindings: None,
+            shell_pads: Vec::new(),
             bindings,
             guids,
             script_host,
@@ -1179,12 +1195,21 @@ impl Mercs2Game {
         }
     }
 
+    /// Open on the shipped front end instead of the native menu.
+    pub(crate) fn set_shell(&mut self, shell: mercs2_engine::shell::Shell, shot: Option<(f32, std::path::PathBuf)>) {
+        self.shell = Some(shell);
+        self.shell_shot = shot;
+    }
+
     /// Resolve a picked save into the boot configuration and store it for `spawn_loader`.
     ///
     /// `sel = None` is **New Game**: no save reaches the script host, so the master script takes its
     /// new-game branch and the hero starts at the opening contract instead of inside the PMC HQ.
     pub(crate) fn apply_boot(&mut self, sel: Option<std::path::PathBuf>) {
-        let cfg = boot_config_from(sel.as_deref());
+        let cfg = boot_config_from(sel.as_deref()).unwrap_or_else(|e| {
+            eprintln!("[shell] FATAL: {e}");
+            panic!("the picked save cannot be loaded: {e}");
+        });
         // The PMC interior is the HQ the player only occupies once they own it — the HUB resume
         // (between contracts). That is exactly the branch `xQ!L.LoadSingleton` marks `_bPmcRequired`:
         // a save with NO `retry_locations` (no live mid-contract checkpoint). A MID-CONTRACT save
@@ -1205,6 +1230,208 @@ impl Mercs2Game {
         self.script_host.borrow_mut().set_boot_save_state(cfg.save);
         println!("[shell] boot: {} [contract {}]", cfg.label, cfg.contract);
     }
+
+    /// One frame of the shipped front end. Keys and the pad become the controller events its scripts
+    /// read; a script error or a movie the player cannot run stops the game rather than limp on.
+    fn shell_frame(&mut self, ctx: &mut mercs2_engine::app::Ctx) -> mercs2_engine::app::MenuOutcome {
+        use mercs2_engine::app::MenuOutcome;
+        use mercs2_engine::input::Action;
+        use mercs2_engine::shell::ShellExit;
+
+        let shell = self.shell.as_mut().expect("shell_frame runs with a shell");
+        let fatal = |e: String| -> ! {
+            eprintln!("[shell] FATAL: {e}");
+            panic!("the front end stopped: {e}");
+        };
+        // A rebind on the remap page takes the lowest id that went down, as `FUN_004FA570` scans them.
+        use mercs2_engine::keys;
+        use winit::event::MouseButton;
+        let new_mouse: Vec<MouseButton> = ctx.input.mouse.difference(&self.shell_mouse).copied().collect();
+        self.shell_mouse = ctx.input.mouse.clone();
+        self.shell_mouse_taken.retain(|b| ctx.input.mouse.contains(b));
+        let mut downs: Vec<u16> = ctx.pressed.iter().filter_map(|&c| keys::of_key(c)).collect();
+        downs.extend(new_mouse.iter().filter_map(|&b| keys::of_mouse(b)));
+        downs.extend(ctx.wheel_up.then_some(keys::MWUP));
+        downs.extend(ctx.wheel_down.then_some(keys::MWDOWN));
+        if let Some(&first) = downs.iter().min() {
+            if shell.key_down(first).unwrap_or_else(|e| fatal(e)) {
+                self.shell_keys_taken.extend(ctx.pressed.iter().filter(|&&c| keys::of_key(c) == Some(first)));
+                self.shell_mouse_taken.extend(new_mouse.iter().filter(|&&b| keys::of_mouse(b) == Some(first)));
+            }
+        }
+        for code in ctx.pressed.iter() {
+            if self.shell_keys_taken.contains(code) {
+                continue;
+            }
+            if let Some(button) = shell_button(*code) {
+                shell.button(button, true).unwrap_or_else(|e| fatal(e));
+            }
+        }
+        for code in ctx.released.iter() {
+            if self.shell_keys_taken.remove(code) {
+                continue;
+            }
+            if let Some(button) = shell_button(*code) {
+                shell.button(button, false).unwrap_or_else(|e| fatal(e));
+            }
+        }
+        let pad = [
+            (1, ctx.input.held(Action::SelectUp)),
+            (2, ctx.input.held(Action::SelectDown)),
+            (6, ctx.input.held(Action::Jump)),
+            (8, ctx.input.held(Action::Crouch)),
+        ];
+        for (index, (button, held)) in pad.into_iter().enumerate() {
+            if held != self.shell_pad[index] {
+                self.shell_pad[index] = held;
+                shell.button(button, held).unwrap_or_else(|e| fatal(e));
+            }
+        }
+        let size = ctx.scene.size;
+        let buttons = [MouseButton::Left, MouseButton::Right, MouseButton::Middle]
+            .iter()
+            .enumerate()
+            .filter(|(_, b)| ctx.input.mouse.contains(b) && !self.shell_mouse_taken.contains(b))
+            .fold(0u32, |mask, (bit, _)| mask | 1 << bit);
+        let pointer = mercs2_engine::flash::Pointer {
+            at: [ctx.cursor[0] / size.width.max(1) as f32, ctx.cursor[1] / size.height.max(1) as f32],
+            buttons,
+        };
+        let screen = [size.width as f32, size.height as f32];
+        if !self.shell_display {
+            // The monitor's modes stand in for the adapter's (`IDirect3D9::EnumAdapterModes`).
+            let monitor = ctx.window.current_monitor().unwrap_or_else(|| fatal("the window is on no monitor".into()));
+            let modes: Vec<(u32, u32, u32)> =
+                monitor.video_modes().map(|m| (m.size().width, m.size().height, (m.refresh_rate_millihertz() + 500) / 1000)).collect();
+            let gpu = &ctx.scene.gpu;
+            let device = mercs2_engine::options::Device {
+                vendor: gpu.vendor,
+                device: gpu.device,
+                aa_levels: gpu.sample_counts.len() as u32,
+                high_shaders: true,
+            };
+            shell.attach_display(&modes, device).unwrap_or_else(|e| fatal(e));
+            self.shell_display = true;
+        }
+        // The pads as the control pages see them, read again when one comes or goes, and the first
+        // pad's inputs this frame.
+        let pads = ctx.input.gamepad.pads();
+        if pads != self.shell_pads {
+            shell.attach_pads(&pads).unwrap_or_else(|e| fatal(e));
+            self.shell_pads = pads;
+            self.bindings = read_bindings(&self.wadpath, &self.shell_pads).unwrap_or_else(|e| fatal(e));
+            self.shell_bindings = Some(read_bindings(&self.wadpath, &self.shell_pads).unwrap_or_else(|e| fatal(e)));
+        }
+        shell.pad_frame(&ctx.input.gamepad.retail_inputs()).unwrap_or_else(|e| fatal(e));
+        let exit = shell.tick(ctx.dt, pointer, screen).unwrap_or_else(|e| fatal(e));
+        for effect in shell.take_display_effects() {
+            use mercs2_engine::options::Effect;
+            match effect {
+                Effect::Display { width, height, present_immediate, .. } => {
+                    if ctx.window.fullscreen().is_some() {
+                        fatal(format!("a {width}x{height} display mode in fullscreen: rendering at a chosen size is not built"));
+                    }
+                    let _ = ctx.window.request_inner_size(winit::dpi::PhysicalSize::new(width, height));
+                    ctx.scene.set_present_immediate(present_immediate).unwrap_or_else(|e| fatal(e));
+                }
+                Effect::Gamma(gamma) => println!("[options] gamma {gamma}: the gamma ramp is not drawn yet"),
+                Effect::Bindings => {
+                    self.bindings = read_bindings(&self.wadpath, &self.shell_pads).unwrap_or_else(|e| fatal(e));
+                    self.shell_bindings = Some(read_bindings(&self.wadpath, &self.shell_pads).unwrap_or_else(|e| fatal(e)));
+                }
+                Effect::CategoryVolume { .. } => unreachable!("the script host plays volume changes itself"),
+            }
+        }
+        let front = shell.draws().unwrap_or_else(|e| fatal(e));
+        ctx.scene.prepare_front_end(&front.flash, front.images, &front.movies).unwrap_or_else(|e| fatal(e));
+        let layers = front.layers;
+        self.shell_clock += ctx.dt;
+        self.shell_frames += 1;
+        self.shell_worst = self.shell_worst.max(ctx.dt);
+        if self.shell_shot.as_ref().is_some_and(|(at, _)| self.shell_clock >= *at) {
+            ctx.scene.request_capture().unwrap_or_else(|e| fatal(e));
+        }
+        match ctx.scene.render_front_end(&layers) {
+            Ok(()) => {}
+            Err(SurfaceError::Lost | SurfaceError::Outdated) => ctx.scene.resize(ctx.scene.size),
+            Err(SurfaceError::Occluded) => {}
+            Err(e) => println!("surface error: {e:?}"),
+        }
+        if let (Some(frame), Some((_, path))) = (ctx.scene.take_capture(), self.shell_shot.as_ref()) {
+            let frame = frame.unwrap_or_else(|e| fatal(e));
+            let written = std::fs::File::create(path).map_err(|e| e.to_string()).and_then(|file| {
+                let mut enc = png::Encoder::new(std::io::BufWriter::new(file), frame.width, frame.height);
+                enc.set_color(png::ColorType::Rgba);
+                enc.set_depth(png::BitDepth::Eight);
+                enc.write_header().and_then(|mut w| w.write_image_data(&frame.rgba)).map_err(|e| e.to_string())
+            });
+            written.unwrap_or_else(|e| fatal(format!("write {}: {e}", path.display())));
+            println!("[shell] captured {}", path.display());
+            println!(
+                "[shell] {} frames in {:.2} s: {:.2} ms a frame, the longest {:.2} ms; surface {}x{}",
+                self.shell_frames,
+                self.shell_clock,
+                self.shell_clock * 1000.0 / self.shell_frames as f32,
+                self.shell_worst * 1000.0,
+                ctx.scene.size.width,
+                ctx.scene.size.height
+            );
+            return MenuOutcome::Exit;
+        }
+        match exit {
+            None => MenuOutcome::Stay,
+            Some(ShellExit::Quit) => MenuOutcome::Exit,
+            Some(ShellExit::Load(path)) => {
+                self.shell = None;
+                self.apply_boot(Some(path));
+                MenuOutcome::StartLoad
+            }
+            Some(ShellExit::NewGame { character }) => {
+                self.shell = None;
+                self.apply_boot(None);
+                let hero = hero_index(character.as_deref());
+                self.player_models = crate::hero::player_model_candidates(hero, 0, 0);
+                self.hero_character = hero_character_name(hero).to_string();
+                MenuOutcome::StartLoad
+            }
+        }
+    }
+}
+
+/// The install's binds, a pad's from the first pad's own section (its name), as the control pages
+/// save them.
+fn read_bindings(vz_wad: &str, pads: &[mercs2_engine::controls::Pad]) -> Result<mercs2_engine::input::Bindings, String> {
+    let ini = mercs2_engine::ini::path(vz_wad)?;
+    let pad = pads.first().map_or(mercs2_engine::input::Bindings::XBOX_360_SECTION, |p| p.name.as_str());
+    Ok(mercs2_engine::input::Bindings::load(&ini, pad))
+}
+
+/// The controller button a key stands in for on the front end.
+fn shell_button(code: KeyCode) -> Option<i64> {
+    match code {
+        KeyCode::ArrowUp => Some(1),
+        KeyCode::ArrowDown => Some(2),
+        KeyCode::ArrowLeft => Some(3),
+        KeyCode::ArrowRight => Some(4),
+        KeyCode::Enter | KeyCode::NumpadEnter | KeyCode::Space => Some(6),
+        KeyCode::Backspace => Some(7),
+        KeyCode::Escape => Some(8),
+        KeyCode::KeyA => Some(9),
+        KeyCode::KeyD => Some(10),
+        KeyCode::KeyW => Some(11),
+        KeyCode::KeyS => Some(12),
+        _ => None,
+    }
+}
+
+/// The 1-based hero of `MrxGuiShellBootstrap.GetSelectedCharacter`'s answer, which is `Chris`, `Jen`
+/// or `mattias` (`mrxguishell.lua:610`).
+fn hero_index(character: Option<&str>) -> u8 {
+    match character {
+        Some(c) if c.eq_ignore_ascii_case("chris") => 2,
+        Some(c) if c.eq_ignore_ascii_case("jen") => 3,
+        _ => 1,
+    }
 }
 
 impl mercs2_engine::app::Game for Mercs2Game {
@@ -1217,7 +1444,7 @@ impl mercs2_engine::app::Game for Mercs2Game {
         // chosen here is just the opening value.
         let (fog, sun) = atmosphere_for(self.spawn_interior);
         let bindings = mercs2_engine::input::find_mercs2_ini()
-            .map(|p| mercs2_engine::input::Bindings::load(&p))
+            .map(|p| mercs2_engine::input::Bindings::load(&p, mercs2_engine::input::Bindings::XBOX_360_SECTION))
             .unwrap_or_default();
         mercs2_engine::app::GameConfig {
             title: "Mercenaries 2 — world (Tab: free / third-person)".into(),
@@ -1226,19 +1453,26 @@ impl mercs2_engine::app::Game for Mercs2Game {
             fog,
             sun,
             atmosphere: None, // TPS boot is fog-only (no explicit atmosphere), preserved
-            loading_plate_wad: Some(self.wadpath.clone()),
+            vz_wad: self.wadpath.clone(),
             load_stages: LOAD_STAGES,
             bindings,
         }
     }
 
     fn starts_at_menu(&self) -> bool {
-        self.menu.is_some()
+        self.menu.is_some() || self.shell.is_some()
+    }
+
+    fn take_bindings(&mut self) -> Option<mercs2_engine::input::Bindings> {
+        self.shell_bindings.take()
     }
 
     fn menu(&mut self, ctx: &mut mercs2_engine::app::Ctx) -> mercs2_engine::app::MenuOutcome {
         use mercs2_engine::app::MenuOutcome;
         use mercs2_engine::input::Action;
+        if self.shell.is_some() {
+            return self.shell_frame(ctx);
+        }
         const MENU_ARM_DELAY: f32 = 0.4;
         let armed = self.menu_open.elapsed().as_secs_f32() > MENU_ARM_DELAY;
         // Gamepad edge nav (dpad/stick + A/Start select, B back), edge-detected vs last frame.
@@ -1295,7 +1529,8 @@ impl mercs2_engine::app::Game for Mercs2Game {
             m.draw(ctx.scene, t);
             match ctx.scene.render_menu(t) {
                 Ok(()) => {}
-                Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => ctx.scene.resize(ctx.scene.size),
+                Err(SurfaceError::Lost | SurfaceError::Outdated) => ctx.scene.resize(ctx.scene.size),
+                Err(SurfaceError::Occluded) => {}
                 Err(e) => println!("surface error: {e:?}"),
             }
             action
@@ -1398,7 +1633,7 @@ impl mercs2_engine::app::Game for Mercs2Game {
                 Transform::IDENTITY,
                 ModelRef { model: stream_terrain.hash },
                 AnimState::default(),
-                SkinPalette { mats: vec![IDENTITY] },
+                SkinPalette { mats: scene.model_rest_palette(stream_terrain.hash) },
             ));
         }
         if let Some(sh) = &self.script {
@@ -1419,20 +1654,21 @@ impl mercs2_engine::app::Game for Mercs2Game {
                 .unwrap_or_else(|e| panic!("[stream] {e}"));
                 stream.settled()
             });
-            // The game's own answer, unconditionally. `Pg.Spawn(hero, x,y,z)` at the end of
-            // `CreatePlayerCharacter` is where retail places the hero, so whatever it produced wins over
-            // the provisional guess above — including on the interior boot, where the flow resolves
-            // `Pmc_Entry1` against the live marker entity rather than a derived hardpoint.
-            match self.script_host.borrow_mut().take_hero_spawn() {
-                Some(p) => {
-                    self.player.pos = Vec3::new(p[0], p[1], p[2]);
-                    println!("[world] hero spawn via boot Lua flow: ({:.1}, {:.1}, {:.1})", p[0], p[1], p[2]);
-                }
-                None => println!(
-                    "[world] boot Lua flow produced no hero spawn — keeping the provisional position \
-                     ({:.1}, {:.1}, {:.1}). The flow's CreatePlayerCharacter never reached Pg.Spawn.",
-                    self.player.pos.x, self.player.pos.y, self.player.pos.z
+            // The game's own answer, unconditionally: where the boot left the hero — spawned at its
+            // start marker, then wherever the scripts moved it (the HQ's `_TeleportHero` into the
+            // interior), or the vehicle they seated it in (a New Game's opening boat). It wins over the
+            // provisional guess above.
+            let host = self.script_host.borrow();
+            let p = host.hero_position().unwrap_or_else(|| {
+                panic!("the boot settled without placing the hero: CreatePlayerCharacter never reached Pg.Spawn")
+            });
+            self.player.pos = Vec3::new(p[0], p[1], p[2]);
+            match host.hero_seat() {
+                Some((vehicle, seat)) => println!(
+                    "[world] hero after the boot: ({:.1}, {:.1}, {:.1}), seated {seat:?} in {vehicle:#x}",
+                    p[0], p[1], p[2]
                 ),
+                None => println!("[world] hero after the boot: ({:.1}, {:.1}, {:.1})", p[0], p[1], p[2]),
             }
         }
 
@@ -1450,7 +1686,7 @@ impl mercs2_engine::app::Game for Mercs2Game {
                 Transform::IDENTITY,
                 ModelRef { model: pm.hash },
                 AnimState::default(),
-                SkinPalette { mats: vec![IDENTITY] },
+                SkinPalette { mats: scene.model_rest_palette(pm.hash) },
             ));
         }
 
@@ -1459,7 +1695,7 @@ impl mercs2_engine::app::Game for Mercs2Game {
             scene.load_model(m.hash, &m.verts, &m.indices, &m.draws, &m.textures, &m.skin);
             let mut t = Transform::from_translation(Vec3::new(pos[0], pos[1], pos[2]));
             t.rotation = Quat::from_rotation_y(yaw);
-            ctx.world.borrow_mut().spawn((t, ModelRef { model: m.hash }, AnimState::default(), SkinPalette { mats: vec![IDENTITY] }));
+            ctx.world.borrow_mut().spawn((t, ModelRef { model: m.hash }, AnimState::default(), SkinPalette { mats: scene.model_rest_palette(m.hash) }));
         }
 
         // Hi-res c3 cell geometry (`--cells`) — collect world-space triangles for collision.
@@ -1473,7 +1709,7 @@ impl mercs2_engine::app::Game for Mercs2Game {
                 Transform::from_translation(tr),
                 ModelRef { model: m.hash },
                 AnimState::default(),
-                SkinPalette { mats: vec![IDENTITY] },
+                SkinPalette { mats: scene.model_rest_palette(m.hash) },
             ));
         }
 
@@ -1487,8 +1723,7 @@ impl mercs2_engine::app::Game for Mercs2Game {
             self.collision_tris.extend(mercs2_engine::worldutil::mesh_collision_tris(
                 &m.verts, &m.indices, pos, quat,
             ));
-            let nbones = m.skin.bones.len().max(1);
-            ctx.world.borrow_mut().spawn((t, ModelRef { model: m.hash }, AnimState::default(), SkinPalette { mats: vec![IDENTITY; nbones] }));
+            ctx.world.borrow_mut().spawn((t, ModelRef { model: m.hash }, AnimState::default(), SkinPalette { mats: scene.model_rest_palette(m.hash) }));
         }
 
         // ModelName props (exterior + interior furniture) — each non-water instance blocks → collision.
@@ -1510,7 +1745,7 @@ impl mercs2_engine::app::Game for Mercs2Game {
             if destructible {
                 prop_destructibles += 1;
             }
-            let nbones = m.skin.bones.len().max(1);
+            let rest = scene.model_rest_palette(hash);
             for (pos, quat) in instances {
                 let tr = Vec3::new(pos[0], pos[1], pos[2]);
                 let q = Quat::from_xyzw(quat[0], quat[1], quat[2], quat[3]);
@@ -1519,7 +1754,7 @@ impl mercs2_engine::app::Game for Mercs2Game {
                 ));
                 let mut t = Transform::from_translation(tr);
                 t.rotation = q;
-                let e = ctx.world.borrow_mut().spawn((t, ModelRef { model: hash }, AnimState::default(), SkinPalette { mats: vec![IDENTITY; nbones] }));
+                let e = ctx.world.borrow_mut().spawn((t, ModelRef { model: hash }, AnimState::default(), SkinPalette { mats: rest.clone() }));
                 if destructible {
                     // `Health` is the destruction system's INPUT; `Destructible` is where the machine
                     // keeps its position and the node-enable table the draw gate reads.
@@ -1610,12 +1845,11 @@ impl mercs2_engine::app::Game for Mercs2Game {
             if let (Some(mut wm), Some(hb)) = (data.weapon, data.weapon_hand_bone) {
                 wm.skin.center = [0.0, 0.0, 0.0];
                 wm.skin.scale = 1.0;
-                let ident = vec![IDENTITY; wm.skin.rig.len().max(1)];
                 scene.load_model(wm.hash, &wm.verts, &wm.indices, &wm.draws, &wm.textures, &wm.skin);
                 self.weapon_entity = Some(ctx.world.borrow_mut().spawn((
                     Transform::from_translation(self.player.pos),
                     ModelRef { model: wm.hash },
-                    SkinPalette { mats: ident },
+                    SkinPalette { mats: scene.model_rest_palette(wm.hash) },
                 )));
                 self.weapon_hand_bone = hb;
                 self.weapon_player_model = p.hash;
@@ -1762,8 +1996,16 @@ impl mercs2_engine::app::Game for Mercs2Game {
             let glows = cards.len();
             scene.set_glow_cards(&cards);
             let mut started = 0usize;
-            // Emitters were resolved to real (or heuristic-base) descriptors at load (WAD open); just
-            // start each at its placement here on the render thread.
+            // Resolved at load (WAD open); started at their placements here on the render thread.
+            if let Some((atlas, rects)) = data.fx_atlas.take() {
+                scene.fx_set_atlas(&atlas, &rects).unwrap_or_else(|e| panic!("{e}"));
+            }
+            for (effect, pos) in std::mem::take(&mut data.effects) {
+                scene
+                    .fx_start_effect(&effect, mercs2_engine::fx_sim::Starter::default(), pos, false)
+                    .unwrap_or_else(|e| panic!("an effect placement at {pos:?}: {e}"));
+                started += 1;
+            }
             for (desc, pos) in std::mem::take(&mut data.particle_fx) {
                 scene.fx_start_desc(desc, pos);
                 started += 1;
@@ -1800,9 +2042,11 @@ impl mercs2_engine::app::Game for Mercs2Game {
                         "local __f = function() {} end\nlocal __ok, __r = pcall(__f)\nif not __ok then error(__r, 0) end\nreturn tostring(__r)",
                         req.chunk()
                     );
+                    // Framed as the bridge frames it (`mercs2_formats::lua_exec`), so a client reads one
+                    // format from either host.
                     match sh.eval::<String>(&wrapped) {
-                        Ok(s) => s,
-                        Err(e) => format!("error: {e}"),
+                        Ok(s) => format!("[ok]\t\"{s}\""),
+                        Err(e) => format!("[runtime] \"{e}\""),
                     }
                 }
                 None => "<no script host loaded>".to_string(),
@@ -1828,7 +2072,7 @@ impl mercs2_engine::app::Game for Mercs2Game {
         match self.mode {
             CamMode::Free => self.free_cam.apply_mouse(mdx, mdy),
             CamMode::ThirdPerson => {
-                self.tp_yaw += mdx;
+                self.tp_yaw = mercs2_engine::camera::turn_right(self.tp_yaw, mdx);
                 self.tp_pitch = (self.tp_pitch - mdy).clamp(-1.2, 0.6);
             }
         }
@@ -1848,7 +2092,7 @@ impl mercs2_engine::app::Game for Mercs2Game {
                 if inp.keys.contains(&KeyCode::ArrowRight) || inp.kb_held(Action::LookRight) { dyaw += look; }
                 self.free_cam.add_look(dyaw, dpitch);
                 let fwd = self.free_cam.forward();
-                let right = fwd.cross(Vec3::Y).normalize();
+                let right = mercs2_engine::camera::screen_right(fwd);
                 let (mx, my) = inp.move_vec();
                 let mut mv = fwd * my + right * mx;
                 if inp.held(Action::Jump) { mv += Vec3::Y; }
@@ -1860,9 +2104,9 @@ impl mercs2_engine::app::Game for Mercs2Game {
             CamMode::ThirdPerson => {
                 if inp.keys.contains(&KeyCode::ArrowUp) || inp.kb_held(Action::LookUp) { self.tp_pitch += look; }
                 if inp.keys.contains(&KeyCode::ArrowDown) || inp.kb_held(Action::LookDown) { self.tp_pitch -= look; }
-                if inp.keys.contains(&KeyCode::ArrowLeft) || inp.kb_held(Action::LookLeft) { self.tp_yaw -= look; }
-                if inp.keys.contains(&KeyCode::ArrowRight) || inp.kb_held(Action::LookRight) { self.tp_yaw += look; }
-                self.tp_yaw += gp_yaw;
+                if inp.keys.contains(&KeyCode::ArrowLeft) || inp.kb_held(Action::LookLeft) { self.tp_yaw = mercs2_engine::camera::turn_right(self.tp_yaw, -look); }
+                if inp.keys.contains(&KeyCode::ArrowRight) || inp.kb_held(Action::LookRight) { self.tp_yaw = mercs2_engine::camera::turn_right(self.tp_yaw, look); }
+                self.tp_yaw = mercs2_engine::camera::turn_right(self.tp_yaw, gp_yaw);
                 self.tp_pitch = (self.tp_pitch + gp_pitch).clamp(-1.2, 0.6);
                 let (mx, my) = inp.move_vec();
                 // ── Vehicle ride (W4). `ridden` is the seated vehicle entity, or `None` on foot.
@@ -1936,7 +2180,7 @@ impl mercs2_engine::app::Game for Mercs2Game {
                 } else {
                     // ── On foot ──
                     let fwd_flat = Vec3::new(self.tp_yaw.sin(), 0.0, self.tp_yaw.cos()).normalize();
-                    let right_flat = fwd_flat.cross(Vec3::Y).normalize();
+                    let right_flat = mercs2_engine::camera::screen_right(fwd_flat);
                     let mv = fwd_flat * my + right_flat * mx;
                     // The controller reads the world through `LocomotionQuery` rather than taking the collider,
                     // heightmap and watermap as separate parameters — it lives in `mercs2_player` now, and a

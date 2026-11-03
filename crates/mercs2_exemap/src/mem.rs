@@ -103,6 +103,22 @@ impl<'a> Mem<'a> {
         self.exec(p).then_some(p)
     }
 
+    /// The TOC word of every `.opd` descriptor, keyed by the code address it describes (PS3);
+    /// empty for an image without `.opd`.
+    pub(crate) fn opd_tocs(&self) -> std::collections::HashMap<u32, u32> {
+        let mut out = std::collections::HashMap::new();
+        if let Some((lo, hi)) = self.opd {
+            let mut p = lo;
+            while p + 8 <= hi {
+                if let (Some(code), Some(toc)) = (self.word(p), self.word(p + 4)) {
+                    out.insert(code, toc);
+                }
+                p += 8;
+            }
+        }
+        out
+    }
+
     /// The NUL-terminated bytes at `va`, when the terminator comes within `max` bytes.
     pub(crate) fn cstr(&self, va: u32, max: usize) -> Option<&'a [u8]> {
         let o = self.off(va)?;

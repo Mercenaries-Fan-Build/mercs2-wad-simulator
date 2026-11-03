@@ -28,7 +28,7 @@ its foot:
   retail cue's values, by name or guid) and *Replace its bank*; the EXPORT card (F10) writes the
   selection, the bank or the search hits as 16-bit WAVs plus `captions.csv`.
 - **Anims** plays a clip on the **hero**, the one model you choose for clips (kept in
-  `settings.json`, shared with FaceFX). With no hero the picker opens, ranking every model by how
+  `settings.json`). With no hero the picker opens, ranking every model by how
   many of the clip's bones its skeleton holds (`heroidx`, read on a worker). The clip card gives
   the codec (wavelet, interleaved and delta-compressed all decode), length, tracks and the bones
   bound on the hero. The 29 MANM material animations open a card of their tracks instead: each
@@ -46,8 +46,10 @@ its foot:
   and **Fit an import to this** open their bench with the model as donor, lit under Shipment with
   a `SHIPMENTS › shipment › contribution › bench` breadcrumb. The work happens in the bench and
   nothing is written until it saves; the donor is never written.
-- **Live** is a blank page; its rail dot is lit while the game's lua-bridge (`127.0.0.1:27050`)
-  accepts a connection.
+- **Live** mirrors a running game, read-only: the world the game is in on this renderer, with a free
+  camera that follows the player, the entities it reports, its mission, layers and log. The contract is
+  `docs/modernization/workshop_pages/live.md`. It reads over lua-bridge; Mirror in-game and residency
+  need the `M2Live` namespace of m2-sdk. Record writes a `.replay`, and Open replay plays one back.
 - read-only Lua source viewer with a hand-rolled highlighter, opened from corpus hits
 - import a foreign mesh (`.obj` / `.gltf` / `.glb`) and preview it on the engine renderer
 - publish a NOVEL (new-hash) model into a patch WAD
@@ -57,7 +59,7 @@ line (catalog dumps, model load checks, texture PNG dumps, lossless export bundl
 
 The GUI is egui painted through the engine's `Scene` overlay hook (`render_with` /
 `render_menu_with`); the winit-0.29 → egui event bridge is hand-rolled in `gui.rs` because
-`egui-winit` 0.28 targets winit 0.30 while the engine is still on 0.29.
+`egui-winit` 0.37 targets winit 0.30 while the engine is still on 0.29.
 
 ## Where it comes from
 
@@ -67,6 +69,11 @@ exe subsystem. What its source explicitly claims as provenance:
 - **Overlay / patch stack** — `--overlay` and the auto-loaded `vz-patch.wad` sitting next to the
   base WAD reproduce the retail exe's own patch-WAD lookup (last-opened wins). That is how
   DLC-ported content reaches the workbench.
+- **Levels** — a `<name>-patch.wad` or `<name>.wad` beside the base, or an `--overlay`, that holds the
+  script `<name>` and the layer `<name>_base` is a level (`levels.rs`). Inspect's picker lists them. Choosing one mounts it
+  over the base and reloads, and every tab lists only that WAD's rows; the base still resolves what
+  they reference. The Audio tab then lists the level's wavebanks and plays them from the `.pws` files
+  in the `Audios` folder beside the WAD (`levelaudio.rs`). The choice is kept in the settings.
 - **The game's other WADs** — `shell.wad`, `Loading.wad` and each language's `<token>.wad` (the
   engine's language table, `mercs2_quartermaster::manifest::Language`) are opened read-only beside
   the stack. The game loads each in its own slot, so they never shadow it: Inspect lists what only
@@ -130,7 +137,7 @@ cargo run -p mercs2_workshop -- --mod-new my_tank tank_donor_name mesh.glb --mod
 
 Global options: `--wad <path>` (the first step of the game-archive chain, below), `--overlay <path>`
 (repeatable, stacks patch WADs on top of the base), `--no-auto-patch` (suppress the automatic
-`vz-patch.wad` pickup).
+`vz-patch.wad` pickup), `--level <name>` (open that level, in the window and for `--audio-export`).
 
 ## Where the game and the reference data come from
 
@@ -156,7 +163,7 @@ cargo run -p mercs2_workshop -- --ui-state crates/mercs2_workshop/ui_states/insp
 ```
 
 The JSON names the state by the words the window shows — `page` (a rail label or `Live`),
-`settings_section`, `tab`, `lens`, `filter`, `load` (a model name, or on another tab that tab's row by its label), `hero` (a model name, set before `load`), `shipment` + `contribution`,
+`settings_section`, `tab`, `lens`, `filter`, `load` (a model name, or on another tab that tab's row by its label), `hero` (a model name, set before `load`), on `"tab": "FACEFX"` with a `load` `face_pose` (a pose of the opened actor, held at full weight) or `face_time` (seconds into the opened set's first anim, paused), on `"tab": "WORLD LAYERS"` with a `load` `entity` (an entity of the opened layer by its label, selected and framed), `shipment` + `contribution`,
 `bench` + `donor`, and on the AUDIO tab `bank`, `clip`, `search` and `select` (record indices),
 applied once the tab's routing is read (`ui_states/audio.json`), `run_wad` / `run_data` (a path
 used for this run as Settings' "Use for this run only…" does, after the first load; the capture
@@ -246,8 +253,11 @@ Binary crate — these are private modules, listed for orientation:
   match wins, a broken set source stopping it; the rows Settings draws and headless runs print.
 - `settingspage` — Settings' navigator (with each chain's badge) and its Game archive / Reference
   data sections: the chain rows, the "saved path not found" banner, what it opened, the buttons.
-- `live` — the Live page and the probe behind its rail dot (`mercs2_bridge::reachable`, polled off
-  the frame loop).
+- `live` — the Live page. `live_link` owns the bridge connection and every chunk the page sends, all
+  reads (a test fails on any call off its list), and records and replays replies. `live_cam` is the
+  camera, `live_log` the tail of `pmc_blackbox.log`, `live_world` the mirror (the engine's streaming
+  executor with the hero as viewer, on the layers the game reports), `live_overlay` the marks read from
+  layer data on a worker, `live_map` the mini-map.
 - `textpage` — Inspect's Text tab: every string table of every WAD side by side by key (read on a
   worker, keys named from `names.bin` and the Lua corpus), and a font's pages with every glyph's box
   (`mercs2_formats::font`).

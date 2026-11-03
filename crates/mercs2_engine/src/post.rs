@@ -160,7 +160,7 @@ impl Post {
             address_mode_w: wgpu::AddressMode::ClampToEdge,
             mag_filter: wgpu::FilterMode::Linear,
             min_filter: wgpu::FilterMode::Linear,
-            mipmap_filter: wgpu::FilterMode::Nearest,
+            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
             ..Default::default()
         });
 
@@ -204,8 +204,8 @@ impl Post {
         let shader = device.create_shader_module(wgpu::include_wgsl!("post.wgsl"));
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("post pipeline layout"),
-            bind_group_layouts: &[&postu_bgl, &tex2_bgl],
-            push_constant_ranges: &[],
+            bind_group_layouts: &[Some(&postu_bgl), Some(&tex2_bgl)],
+            immediate_size: 0,
         });
         let make_pipe = |entry: &str, fmt: wgpu::TextureFormat, label: &str| {
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -213,13 +213,13 @@ impl Post {
                 layout: Some(&layout),
                 vertex: wgpu::VertexState {
                     module: &shader,
-                    entry_point: "vs_main",
+                    entry_point: Some("vs_main"),
                     buffers: &[],
                     compilation_options: Default::default(),
                 },
                 fragment: Some(wgpu::FragmentState {
                     module: &shader,
-                    entry_point: entry,
+                    entry_point: Some(entry),
                     targets: &[Some(wgpu::ColorTargetState {
                         format: fmt,
                         blend: Some(wgpu::BlendState::REPLACE),
@@ -234,7 +234,8 @@ impl Post {
                 },
                 depth_stencil: None,
                 multisample: wgpu::MultisampleState::default(),
-                multiview: None,
+                multiview_mask: None,
+                cache: None,
             })
         };
         let pipe_bright = make_pipe("fs_bright", HDR_FORMAT, "post bright");
@@ -348,12 +349,14 @@ impl Post {
             label: Some(label),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                 view: target,
+                depth_slice: None,
                 resolve_target: None,
                 ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::BLACK), store: wgpu::StoreOp::Store },
             })],
             depth_stencil_attachment: None,
             timestamp_writes: None,
             occlusion_query_set: None,
+            multiview_mask: None,
         });
         pass.set_pipeline(pipe);
         pass.set_bind_group(0, u_bind, &[]);

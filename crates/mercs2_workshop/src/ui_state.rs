@@ -31,6 +31,18 @@ pub struct UiState {
     /// `load`, so an ANIMS row plays on it; without one, an ANIMS row opens the hero picker, which
     /// is captured once every skeleton has read.
     pub hero: Option<String>,
+    /// On the FACEFX tab: the pose of the opened actor to hold at full weight, by its node name.
+    pub face_pose: Option<String>,
+    /// On the FACEFX tab: the time (seconds) to pause the opened set's first anim at.
+    pub face_time: Option<f32>,
+    /// On the EFFECTS tab: the time (seconds) to run the opened effect to and pause at.
+    pub fx_time: Option<f32>,
+    /// On the WORLD LAYERS tab: the entity of the opened layer to select and frame, by its label.
+    pub entity: Option<String>,
+    /// On the Live page: a `.replay` to play in place of the game, so the page captures with none running.
+    pub live_replay: Option<PathBuf>,
+    /// On the Live page: the camera's yaw, pitch (radians) and zoom, so a capture can aim it.
+    pub live_camera: Option<[f32; 3]>,
     /// A Shipment folder to open.
     pub shipment: Option<PathBuf>,
     /// The contribution to select in that Shipment, by index.
@@ -52,6 +64,9 @@ pub struct UiState {
     pub run_wad: Option<PathBuf>,
     /// The same for the reference bundle.
     pub run_data: Option<PathBuf>,
+    /// Once the state is applied: choose this level, as the picker does, for this run, and capture
+    /// after the reload it starts has landed.
+    pub pick_level: Option<String>,
     /// Where to write the captured frame (PNG).
     pub capture: PathBuf,
     /// Frames to let the window settle after the state is applied, before the capture.
@@ -72,6 +87,18 @@ impl UiState {
         }
         if st.contribution.is_some() && st.shipment.is_none() {
             return Err(format!("{}: `contribution` needs a `shipment`", path.display()));
+        }
+        if st.entity.is_some() && !(st.load.is_some() && st.tab.as_deref().is_some_and(|t| t.eq_ignore_ascii_case("WORLD LAYERS"))) {
+            return Err(format!("{}: `entity` needs `\"tab\": \"WORLD LAYERS\"` and a `load`", path.display()));
+        }
+        if st.fx_time.is_some() && !(st.load.is_some() && st.tab.as_deref().is_some_and(|t| t.eq_ignore_ascii_case("EFFECTS"))) {
+            return Err(format!("{}: `fx_time` needs `\"tab\": \"EFFECTS\"` and a `load`", path.display()));
+        }
+        let facefx_load = st.load.is_some() && st.tab.as_deref().is_some_and(|t| t.eq_ignore_ascii_case("FACEFX"));
+        for (key, set) in [("face_pose", st.face_pose.is_some()), ("face_time", st.face_time.is_some())] {
+            if set && !facefx_load {
+                return Err(format!("{}: `{key}` needs `\"tab\": \"FACEFX\"` and a `load`", path.display()));
+            }
         }
         if st.audio() && !st.tab.as_deref().is_some_and(|t| t.eq_ignore_ascii_case("AUDIO")) {
             return Err(format!("{}: `bank`, `clip`, `search` and `select` need `\"tab\": \"AUDIO\"`", path.display()));
@@ -126,6 +153,36 @@ mod tests {
         assert!(UiState::load(&p).unwrap_err().contains("pgae"));
         let p = write("nocap.json", r#"{ "page": "Inspect" }"#);
         assert!(UiState::load(&p).unwrap_err().contains("capture"));
+    }
+
+    /// An entity is selected in a layer the WORLD LAYERS tab opens, so it needs that tab and a `load`.
+    #[test]
+    fn an_entity_needs_the_layers_tab_and_a_load() {
+        let p = write("entity_tab.json", r#"{ "load": "vz_state_pmccon004", "entity": "a", "capture": "out.png" }"#);
+        assert!(UiState::load(&p).unwrap_err().contains("entity"));
+        let p = write("entity_load.json", r#"{ "tab": "WORLD LAYERS", "entity": "a", "capture": "out.png" }"#);
+        assert!(UiState::load(&p).unwrap_err().contains("entity"));
+        let p = write("entity_ok.json", r#"{ "tab": "WORLD LAYERS", "load": "vz_state_pmccon004", "entity": "a", "capture": "out.png" }"#);
+        assert_eq!(UiState::load(&p).unwrap().entity.as_deref(), Some("a"));
+    }
+
+    /// A face pose is held on an actor the FACEFX tab opens, so it needs that tab and a `load`.
+    #[test]
+    fn a_face_pose_needs_the_facefx_tab_and_a_load() {
+        let p = write("face_tab.json", r#"{ "load": "pmc_hum_mattias", "face_pose": "Eat", "capture": "out.png" }"#);
+        assert!(UiState::load(&p).unwrap_err().contains("face_pose"));
+        let p = write("face_load.json", r#"{ "tab": "FACEFX", "face_pose": "Eat", "capture": "out.png" }"#);
+        assert!(UiState::load(&p).unwrap_err().contains("face_pose"));
+        let p = write("face_ok.json", r#"{ "tab": "FACEFX", "load": "pmc_hum_mattias", "face_pose": "Eat", "capture": "out.png" }"#);
+        assert_eq!(UiState::load(&p).unwrap().face_pose.as_deref(), Some("Eat"));
+        let p = write("face_time_tab.json", r#"{ "load": "Global_Job_Briefing_Mattias", "face_time": 0.5, "capture": "out.png" }"#);
+        assert!(UiState::load(&p).unwrap_err().contains("face_time"));
+        let p = write("face_time_ok.json", r#"{ "tab": "FACEFX", "load": "Global_Job_Briefing_Mattias", "face_time": 0.5, "capture": "out.png" }"#);
+        assert_eq!(UiState::load(&p).unwrap().face_time, Some(0.5));
+        let p = write("fx_time_tab.json", r#"{ "load": "global_explosion_c4", "fx_time": 0.5, "capture": "out.png" }"#);
+        assert!(UiState::load(&p).unwrap_err().contains("fx_time"));
+        let p = write("fx_time_ok.json", r#"{ "tab": "EFFECTS", "load": "global_explosion_c4", "fx_time": 0.5, "capture": "out.png" }"#);
+        assert_eq!(UiState::load(&p).unwrap().fx_time, Some(0.5));
     }
 
     #[test]

@@ -59,6 +59,8 @@
 //!   encode.
 //! - [`tiny_model`] — the TINY far-distance stand-in model container: full decode, byte-identical
 //!   encode.
+//! - [`facefx`] — the `facefxactor` / `facefxanimationset` FaceFX SDK archives: face bones, the
+//!   face graph and its bone poses, anim curves.
 //! - [`orchestrator`], [`fxdict`], [`atmosphere`], [`gfx`] — destruction state machines; FX
 //!   dictionaries; the `Graphics.Atmosphere.*` sky/HDR parameter model; Scaleform GFx/SWF.
 //! - [`save`], [`save_write`] — the PC `.profile` save (13,404 bytes, zlib Lua payload at `0x468`).
@@ -87,6 +89,10 @@
 //! - [`lua_exec`] — the result text and status rules of the DLL's chunk executor.
 //! - [`shader_sites`] — the shader registry's functions, pool, ShaderLevel and 45 family vtables, found in the
 //!   game image by signature and structure.
+//! - [`tree_sites`] — the billboard-tree render loops the BUG-014 fix detours and repeats, found in the game
+//!   image by signature and checked against the frame stores.
+//! - [`chatter_sites`] — the `ChatterSet` component's container and its lookup, add and mask functions, for a
+//!   `Human.SetChatterSet` binding (PS3 v1.03 only).
 //! - [`mod_runtime`] — bindings a Rust mod calls the loaded `m2-sdk.dll` through (`raw-dylib`, 32-bit
 //!   Windows), so nothing of the runtime is compiled into the mod.
 //!
@@ -117,14 +123,19 @@ pub mod retarget;
 pub mod chunk_validate;
 pub mod crc32;
 pub mod dlc_input;
+pub mod dlc_mount;
 pub mod dlc_stfs;
 pub mod exe_image;
 pub mod donor;
+pub mod facefx;
 pub mod ffcs;
+pub mod foliage;
 pub mod font;
+pub mod frame_capture;
 pub mod fxdict;
 pub mod game_paths;
 pub mod gfx;
+pub mod gfx_def;
 pub mod hash;
 pub mod havok;
 pub mod havok_write;
@@ -133,6 +144,7 @@ pub mod keys;
 pub mod load_ladder;
 pub mod manm;
 pub mod lua_exec;
+pub mod live_reads;
 pub mod lua_sites;
 pub mod lua_stack;
 pub mod mesh_import;
@@ -148,8 +160,10 @@ pub mod patch_wad;
 pub mod phy2_build;
 pub mod phy2_container;
 pub mod phy2_moppswap;
+pub mod physical_link;
 pub mod placement;
 pub mod placement_build;
+pub mod pmc_sites;
 pub mod prof_samples;
 pub mod profd;
 pub mod profiler_sites;
@@ -168,6 +182,7 @@ pub mod script_meta;
 pub mod scripts_block;
 pub mod scrub;
 pub mod shader3;
+pub mod shader_registrations;
 pub mod shader_registry;
 pub mod shader_sites;
 pub mod sm3asm;
@@ -182,6 +197,8 @@ pub mod texsize;
 pub mod texture;
 pub mod texture_encode;
 pub mod tiny_model;
+pub mod tree_sites;
+pub mod chatter_sites;
 pub mod be_to_le;
 pub mod lua_scan;
 pub mod luachunk;
@@ -196,6 +213,7 @@ pub mod spawner_record;
 pub mod hibernation_control;
 pub mod model_name;
 pub mod render_node;
+pub mod rotor;
 pub mod unit_list;
 pub mod veg;
 pub mod world;

@@ -25,6 +25,7 @@ pub struct SaveSlot {
     pub contract: String,
     pub play_time_seconds: u32,
     pub cash: u32,
+    pub fuel: u32,
     /// Unix save timestamp from the header (FACT field @0x24).
     pub timestamp: u32,
     /// Hero index @0x4D (1 mattias / 2 chris / 3 jen) — see `crate::hero`.
@@ -55,6 +56,7 @@ pub fn scan_slots(dir: Option<PathBuf>) -> Vec<SaveSlot> {
                 contract: p.active_contract().to_string(),
                 play_time_seconds: p.play_time_seconds,
                 cash: p.cash,
+                fuel: p.fuel,
                 timestamp: p.timestamp,
                 character_index: p.character_index,
                 upgrade_index: p.upgrade_index,
@@ -65,6 +67,41 @@ pub fn scan_slots(dir: Option<PathBuf>) -> Vec<SaveSlot> {
     }
     slots.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
     slots
+}
+
+/// `hh:mm:ss` of a count of seconds.
+fn clock(seconds: u32) -> String {
+    format!("{:02}:{:02}:{:02}", seconds / 3600, seconds / 60 % 60, seconds % 60)
+}
+
+/// `hh:mm:ss | mm/dd/yyyy` of a Unix time, in UTC: the civil date is Howard Hinnant's `civil_from_days`.
+fn stamp(unix: u32) -> String {
+    let days = (unix / 86_400) as i64 + 719_468;
+    let era = days / 146_097;
+    let of_era = days - era * 146_097;
+    let year_of_era = (of_era - of_era / 1460 + of_era / 36_524 - of_era / 146_096) / 365;
+    let of_year = of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let shifted = (5 * of_year + 2) / 153;
+    let day = of_year - (153 * shifted + 2) / 5 + 1;
+    let month = if shifted < 10 { shifted + 3 } else { shifted - 9 };
+    let year = year_of_era + era * 400 + (month <= 2) as i64;
+    format!("{} | {month:02}/{day:02}/{year}", clock(unix % 86_400))
+}
+
+/// The saves as the shipped menu's load-game list reads them, newest first.
+pub fn shell_saves(slots: &[SaveSlot]) -> Vec<mercs2_engine::shell::ShellSave> {
+    slots
+        .iter()
+        .map(|s| mercs2_engine::shell::ShellSave {
+            path: s.path.clone(),
+            date: stamp(s.timestamp),
+            character: s.character_index,
+            cash: s.cash,
+            fuel: s.fuel,
+            play_time: clock(s.play_time_seconds),
+            contract: s.contract.clone(),
+        })
+        .collect()
 }
 
 /// What the shell asks the game loop to do (the native `ChangeShellState` verbs).
@@ -346,6 +383,13 @@ mod tests {
     }
 
     #[test]
+    fn the_load_list_writes_dates_and_clocks_as_the_movie_shows_them() {
+        // 2008-07-23 05:41:11 UTC, the date in `SHELL.gfx`'s own test row.
+        assert_eq!(stamp(1_216_791_671), "05:41:11 | 07/23/2008");
+        assert_eq!(clock(48_813), "13:33:33");
+    }
+
+    #[test]
     fn load_screen_selects_a_slot() {
         let slot = |n: &str, ts: u32| SaveSlot {
             path: PathBuf::from(format!("{n}.profile")),
@@ -353,6 +397,7 @@ mod tests {
             contract: "PmcCon001".into(),
             play_time_seconds: 3600,
             cash: 1_000_000,
+            fuel: 240,
             timestamp: ts,
             character_index: 1,
             upgrade_index: 0,

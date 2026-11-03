@@ -256,12 +256,12 @@ pub enum PlacedDestination {
     DataWad,
 }
 
-/// One `place_file`, or one `add_language` WAD.
+/// One `place_file`, or one WAD of an `add_language` or `add_level`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct PlacedFileEntry {
     pub contribution: usize,
     pub file_name: String,
-    /// `src/`-relative; `None` for `add_language`, which generates its WAD.
+    /// `src/`-relative; `None` for `add_language` and `add_level`, which generate their WADs.
     pub source: Option<String>,
     pub destination: PlacedDestination,
     /// `None` for `data_wad`.

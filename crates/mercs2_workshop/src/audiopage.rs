@@ -12,10 +12,12 @@ use crate::audioidx::{AudioClip, AudioIndex};
 use crate::audioplay;
 use crate::audioroute::{Play, Routes};
 use crate::gui::theme;
+use crate::levelaudio::LevelAudio;
 use mercs2_quartermaster::manifest::Contribution;
 use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, TryRecvError};
+use std::sync::Arc;
 use winit::keyboard::KeyCode;
 
 /// Which list the centre shows when no search is typed.
@@ -37,12 +39,26 @@ pub enum Scope {
     Hits,
 }
 
+/// What the routing worker brings: a level also brings its own clips in place of the inventory.
+struct Loaded {
+    routes: Routes,
+    level: Option<(Arc<LevelAudio>, AudioIndex)>,
+}
+
 /// Where the routing is.
 enum RouteLoad {
     NotStarted,
-    Loading(Receiver<Result<Routes, String>>),
+    Loading(Receiver<Result<Loaded, String>>),
     Ready(Box<Routes>),
     Failed(String),
+}
+
+/// Where a page's samples come from.
+#[derive(Clone)]
+pub enum Source {
+    /// `vo_stream.english.pws` beside this `vz.wad`.
+    Retail(PathBuf),
+    Level(Arc<LevelAudio>),
 }
 
 enum ExportMsg {
@@ -58,6 +74,10 @@ pub struct Panel {
     routes: RouteLoad,
     /// The configured `vz.wad`: `English.wad` and `Audios/` sit beside it.
     vz: Option<PathBuf>,
+    /// The level WAD the page lists instead of `vz.wad`'s voice-over, and the names to label it with.
+    level: Option<(PathBuf, HashMap<u32, String>)>,
+    /// That level's banks, once read.
+    level_audio: Option<Arc<LevelAudio>>,
     pub open: Option<Open>,
     /// The search over every clip; non-empty puts the centre in search mode.
     pub search: String,
@@ -89,6 +109,8 @@ impl Default for Panel {
             by_wave: HashMap::new(),
             routes: RouteLoad::NotStarted,
             vz: None,
+            level: None,
+            level_audio: None,
             open: None,
             search: String::new(),
             filter: String::new(),
@@ -143,7 +165,25 @@ impl Panel {
         self.index = index;
     }
 
-    /// Start reading the routing from `English.wad` beside `vz` (once).
+    /// List the level WAD at `wad` instead of the base game's voice-over; `None` keeps the base's.
+    pub fn set_level(&mut self, wad: Option<PathBuf>, names: HashMap<u32, String>) {
+        self.level = wad.map(|w| (w, names));
+    }
+
+    /// The open level's banks, once read.
+    pub fn level_audio(&self) -> Option<Arc<LevelAudio>> {
+        self.level_audio.clone()
+    }
+
+    /// What the page reads, for what it says about it.
+    fn source_name(&self) -> String {
+        match &self.level {
+            Some((wad, _)) => wad.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
+            None => "English.wad".to_string(),
+        }
+    }
+
+    /// Start reading the routing from `English.wad` beside `vz`, or the open level's banks (once).
     pub fn ensure_routes(&mut self, vz: &Path) {
         if !matches!(self.routes, RouteLoad::NotStarted) {
             return;
@@ -151,18 +191,33 @@ impl Panel {
         self.vz = Some(vz.to_path_buf());
         let labels: Vec<String> = self.index.banks().into_iter().map(|(b, _)| b).collect();
         let vz = vz.to_path_buf();
+        let level = self.level.clone();
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            let _ = tx.send(Routes::build(&vz, &labels));
+            let _ = tx.send(match level {
+                Some((wad, names)) => LevelAudio::read(&wad, &names).map(|a| {
+                    let (routes, index) = (a.routes(), AudioIndex::from_clips(a.clips()));
+                    Loaded { routes, level: Some((Arc::new(a), index)) }
+                }),
+                None => Routes::build(&vz, &labels).map(|routes| Loaded { routes, level: None }),
+            });
         });
         self.routes = RouteLoad::Loading(rx);
+    }
+
+    fn land(&mut self, l: Loaded) {
+        if let Some((audio, index)) = l.level {
+            self.level_audio = Some(audio);
+            self.set_index(index);
+        }
+        self.set_routes(l.routes);
     }
 
     /// Take in what the workers have finished.
     pub fn poll(&mut self) {
         if let RouteLoad::Loading(rx) = &self.routes {
             match rx.try_recv() {
-                Ok(Ok(r)) => self.set_routes(r),
+                Ok(Ok(l)) => self.land(l),
                 Ok(Err(e)) => self.routes = RouteLoad::Failed(e),
                 Err(TryRecvError::Empty) => {}
                 Err(TryRecvError::Disconnected) => {
@@ -193,6 +248,12 @@ impl Panel {
     }
 
     fn set_routes(&mut self, r: Routes) {
+        // The records say how long a line is; the inventory's lengths are a sample a block long.
+        for (w, &i) in &self.by_wave {
+            if let Some(l) = r.lengths_s.get(*w as usize) {
+                self.index.clips[i].duration_s = *l;
+            }
+        }
         if self.open.is_none() {
             self.open = (!r.banks.is_empty()).then_some(Open::Bank(0));
         }
@@ -265,6 +326,9 @@ impl Panel {
 
     /// The banks that play `wave`, joined, or `—`.
     pub fn banks_of(&self, wave: u32) -> String {
+        if self.level_audio.is_some() {
+            return self.clip(wave).map(|c| c.bank.clone()).unwrap_or_default();
+        }
         let Some(r) = self.routes() else { return String::new() };
         let names: BTreeSet<String> = r.plays.get(&wave).into_iter().flatten().map(|p| r.bank_name(p.entry)).collect();
         if names.is_empty() {
@@ -452,9 +516,13 @@ fn start_export(p: &mut Panel) {
         return;
     }
     let lines = p.scope_lines(p.scope);
-    let Some(vz) = p.vz.clone() else {
-        p.note = Some(Err("the game's vz.wad is not known yet".into()));
-        return;
+    let source = match (&p.level_audio, &p.vz) {
+        (Some(a), _) => Source::Level(a.clone()),
+        (None, Some(vz)) => Source::Retail(vz.clone()),
+        (None, None) => {
+            p.note = Some(Err("the game's vz.wad is not known yet".into()));
+            return;
+        }
     };
     if lines.is_empty() {
         p.note = Some(Err("nothing to export: no clips are in the chosen scope".into()));
@@ -464,7 +532,7 @@ fn start_export(p: &mut Panel) {
     let (folder, name) = (p.folder.clone(), p.scope_name(p.scope));
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
-        let r = export_items(&vz, &items, &folder, &name, |d, t| {
+        let r = export_items(&source, &items, &folder, &name, |d, t| {
             let _ = tx.send(ExportMsg::Progress(d, t));
         });
         let _ = tx.send(ExportMsg::Done(r));
@@ -474,22 +542,31 @@ fn start_export(p: &mut Panel) {
     p.export = Some(rx);
 }
 
-/// Export `items`, reading their samples from `vo_stream.english.pws` beside `vz`.
+/// Export `items`, reading their samples from `source`.
 pub fn export_items(
-    vz: &Path,
+    source: &Source,
     items: &[Item],
     folder: &Path,
     name: &str,
     progress: impl FnMut(usize, usize),
 ) -> Result<audioexport::Report, String> {
-    let data = vz.parent().ok_or_else(|| format!("{} has no folder", vz.display()))?;
-    let vo = crate::vostream::VoStream::open(data)?;
+    let read: Box<dyn Fn(u32) -> Result<crate::vostream::Pcm, String>> = match source {
+        Source::Retail(vz) => {
+            let data = vz.parent().ok_or_else(|| format!("{} has no folder", vz.display()))?;
+            let vo = crate::vostream::VoStream::open(data)?;
+            Box::new(move |w| vo.clip_pcm(w))
+        }
+        Source::Level(a) => {
+            let a = a.clone();
+            Box::new(move |w| a.clip_pcm(w))
+        }
+    };
     audioexport::export(
         items,
         folder,
         name,
         |w| {
-            vo.clip_pcm(w).map(|pcm| mercs2_audio::encode::Pcm16 {
+            read(w).map(|pcm| mercs2_audio::encode::Pcm16 {
                 channels: pcm.channels,
                 sample_rate: pcm.rate,
                 samples: pcm.samples,
@@ -500,16 +577,32 @@ pub fn export_items(
 }
 
 /// The headless `--audio-export <bank|query> <dir>`: the bank of that name (as the page lists it),
-/// or else every clip the query finds, exported to `<dir>/<bank or query>`. Returns what was written.
-pub fn export_headless(vz: &Path, what: &str, dir: &Path) -> Result<audioexport::Report, String> {
+/// or else every clip the query finds, exported to `<dir>/<bank or query>`, from `level` when one is
+/// given. Returns what was written.
+pub fn export_headless(vz: &Path, level: Option<&crate::levels::Level>, what: &str, dir: &Path) -> Result<audioexport::Report, String> {
     let home = crate::index::require_data_home(&mut |_, _| {})?;
     let mut p = Panel::default();
-    p.set_index(AudioIndex::load(&home)?);
-    let labels: Vec<String> = p.index.banks().into_iter().map(|(b, _)| b).collect();
-    let routes = Routes::build(vz, &labels)?;
     p.vz = Some(vz.to_path_buf());
+    let routes = match level {
+        Some(l) => {
+            let audio = LevelAudio::read(&l.wad, &crate::index::load_all_names()?)?;
+            p.set_index(AudioIndex::from_clips(audio.clips()));
+            let routes = audio.routes();
+            p.level_audio = Some(Arc::new(audio));
+            routes
+        }
+        None => {
+            p.set_index(AudioIndex::load(&home)?);
+            let labels: Vec<String> = p.index.banks().into_iter().map(|(b, _)| b).collect();
+            Routes::build(vz, &labels)?
+        }
+    };
     let bank = routes.banks.iter().position(|b| b.name.eq_ignore_ascii_case(what));
     p.routes = RouteLoad::Ready(Box::new(routes));
+    let source = match &p.level_audio {
+        Some(a) => Source::Level(a.clone()),
+        None => Source::Retail(vz.to_path_buf()),
+    };
     let (lines, name) = match bank {
         Some(i) => {
             p.open = Some(Open::Bank(i));
@@ -523,7 +616,7 @@ pub fn export_headless(vz: &Path, what: &str, dir: &Path) -> Result<audioexport:
     if lines.is_empty() {
         return Err(format!("{what:?} is no bank and finds no clip"));
     }
-    export_items(vz, &items(&p, &lines), dir, &name, |d, t| eprintln!("[audio-export] {d}/{t}"))
+    export_items(&source, &items(&p, &lines), dir, &name, |d, t| eprintln!("[audio-export] {d}/{t}"))
 }
 
 // ───────────────────────────────────────────────────────────────────── views
@@ -538,7 +631,7 @@ pub fn navigator(ui: &mut egui::Ui, p: &Panel) -> Vec<Act> {
     let mut acts = Vec::new();
     let mut search = p.search.clone();
     if ui
-        .add(egui::TextEdit::singleline(&mut search).hint_text("Search every clip").desired_width(f32::INFINITY))
+        .add(egui::TextEdit::singleline(&mut search).hint_text("Search every clip").margin(theme::TEXT_EDIT_MARGIN).desired_width(f32::INFINITY))
         .changed()
     {
         acts.push(Act::Search(search));
@@ -553,14 +646,14 @@ pub fn navigator(ui: &mut egui::Ui, p: &Panel) -> Vec<Act> {
     ui.add_space(4.0);
     match (&p.routes, p.routes()) {
         (RouteLoad::Failed(e), _) => {
-            ui.label(egui::RichText::new(format!("English.wad could not be routed: {e}")).color(theme::BAD));
+            ui.label(egui::RichText::new(format!("{} could not be routed: {e}", p.source_name())).color(theme::BAD));
         }
         (_, None) => {
             // The spinner also keeps egui repainting, so `poll` runs each frame and the banks
             // appear the frame the worker lands, not on the next pointer move.
             ui.horizontal(|ui| {
                 ui.add(egui::Spinner::new().size(13.0));
-                ui.label(egui::RichText::new("Reading English.wad's soundbanks…").color(theme::FAINT));
+                ui.label(egui::RichText::new(format!("Reading {}'s banks…", p.source_name())).color(theme::FAINT));
             });
         }
         (_, Some(r)) => {
@@ -574,13 +667,13 @@ pub fn navigator(ui: &mut egui::Ui, p: &Panel) -> Vec<Act> {
                         });
                     })
                     .response;
-                let resp = ui.interact(resp.rect, egui::Id::new(("audio-bank", name)), egui::Sense::click());
+                let resp = ui.interact(resp.rect, egui::Id::unique(("audio-bank", name)), egui::Sense::click());
                 if on {
-                    ui.painter().rect_filled(resp.rect, egui::Rounding::same(4.0), theme::BRASS_SOFT.gamma_multiply(0.6));
+                    ui.painter().rect_filled(resp.rect, egui::CornerRadius::same(4), theme::BRASS_SOFT.gamma_multiply(0.6));
                 }
                 resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked()
             };
-            egui::ScrollArea::vertical().max_height(ui.available_height() - 150.0).auto_shrink([false, false]).show(ui, |ui| {
+            theme::scroll_vertical().max_height(ui.available_height() - 150.0).auto_shrink([false, false]).show(ui, |ui| {
                 for (i, b) in r.banks.iter().enumerate() {
                     if row(ui, &b.name, b.lines.len(), !p.searching() && p.open == Some(Open::Bank(i))) {
                         acts.push(Act::Open(Open::Bank(i)));
@@ -592,13 +685,16 @@ pub fn navigator(ui: &mut egui::Ui, p: &Panel) -> Vec<Act> {
             });
         }
     }
+    if p.level_audio.is_some() {
+        return acts;
+    }
     ui.add_space(8.0);
     theme::eyebrow(ui, "Add to this domain");
     ui.horizontal_wrapped(|ui| {
         for k in KINDS {
             // A pill goes to the next row whole rather than breaking its label: its width is the
             // label's plus `theme::pill`'s margins (8 each side, 4 after).
-            let label = ui.fonts(|f| f.layout_no_wrap(k.to_string(), theme::font(&theme::style_eyebrow()), theme::TX).size().x);
+            let label = ui.fonts_mut(|f| f.layout_no_wrap(k.to_string(), theme::font(&theme::style_eyebrow()), theme::TX).size().x);
             if ui.available_size_before_wrap().x < label + 20.0 {
                 ui.end_row();
             }
@@ -611,13 +707,13 @@ pub fn navigator(ui: &mut egui::Ui, p: &Panel) -> Vec<Act> {
 }
 
 /// The centre: the open bank's (or the search's) clips, the selection bar and the now-playing card.
-pub fn center(ctx: &egui::Context, p: &Panel, playing: Option<audioplay::Status>) -> Vec<Act> {
+pub fn center(root: &mut egui::Ui, p: &Panel, playing: Option<audioplay::Status>) -> Vec<Act> {
     let mut acts = Vec::new();
     egui::CentralPanel::default()
-        .frame(egui::Frame::none().fill(theme::G0).inner_margin(egui::Margin::symmetric(16.0, 12.0)))
-        .show(ctx, |ui| {
+        .frame(egui::Frame::NONE.fill(theme::G0).inner_margin(egui::Margin::symmetric(16, 12)))
+        .show(root, |ui| {
             if let Some(e) = p.routes_error() {
-                ui.label(egui::RichText::new(format!("English.wad: {e}")).color(theme::BAD));
+                ui.label(egui::RichText::new(format!("{}: {e}", p.source_name())).color(theme::BAD));
                 return;
             }
             let rows = p.rows();
@@ -629,7 +725,7 @@ pub fn center(ctx: &egui::Context, p: &Panel, playing: Option<audioplay::Status>
                 if !p.searching() {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         let mut f = p.filter.clone();
-                        if ui.add(egui::TextEdit::singleline(&mut f).hint_text("Filter this bank").desired_width(200.0)).changed() {
+                        if ui.add(egui::TextEdit::singleline(&mut f).hint_text("Filter this bank").margin(theme::TEXT_EDIT_MARGIN).desired_width(200.0 + theme::TEXT_EDIT_MARGIN.sum().x)).changed() {
                             acts.push(Act::Filter(f));
                         }
                     });
@@ -686,7 +782,7 @@ pub fn center(ctx: &egui::Context, p: &Panel, playing: Option<audioplay::Status>
                 });
             });
             let row_h = 26.0;
-            egui::ScrollArea::vertical().max_height(ui.available_height() - card_h).auto_shrink([false, false]).show_rows(
+            theme::scroll_vertical().max_height(ui.available_height() - card_h).auto_shrink([false, false]).show_rows(
                 ui,
                 row_h,
                 rows.len(),
@@ -711,8 +807,8 @@ pub fn center(ctx: &egui::Context, p: &Panel, playing: Option<audioplay::Status>
                         // centred, and the taller ▶ hung out of the row's foot.
                         let (rect, row) =
                             ui.allocate_exact_size(egui::vec2(ui.available_width(), row_h - 2.0), egui::Sense::click());
-                        ui.painter().rect_filled(rect, egui::Rounding::same(3.0), fill);
-                        let mut content = ui.child_ui(rect, egui::Layout::left_to_right(egui::Align::Center), None);
+                        ui.painter().rect_filled(rect, egui::CornerRadius::same(3), fill);
+                        let mut content = ui.new_child(egui::UiBuilder::new().max_rect(rect).layout(egui::Layout::left_to_right(egui::Align::Center)));
                         {
                                 let ui = &mut content;
                                 let mut checked = on;
@@ -788,9 +884,10 @@ pub fn inspector(ui: &mut egui::Ui, p: &Panel) -> Vec<Act> {
                     egui::Label::new(egui::RichText::new(c.original.rsplit('/').next().unwrap_or(&c.original)).monospace())
                         .wrap(),
                 );
-                theme::kv(ui, "stream", egui::RichText::new("vo_stream.english.pws"));
+                let stream = p.level_audio.as_ref().map_or("vo_stream.english.pws".to_string(), |a| a.stream_of(w));
+                theme::kv(ui, "stream", egui::RichText::new(stream));
                 theme::kv(ui, "length", egui::RichText::new(secs(c.duration_s)));
-                if let Some(r) = p.routes() {
+                if let Some(r) = p.routes().filter(|_| p.level_audio.is_none()) {
                     ui.add_space(4.0);
                     theme::eyebrow(ui, "Cues that play it");
                     match r.plays.get(&w) {
@@ -876,8 +973,13 @@ pub fn verbs(ui: &mut egui::Ui, p: &Panel, playing: Option<audioplay::Status>) -
         acts.push(Act::SelectAll);
     }
     ui.separator();
-    ui.add_enabled_ui(cur.is_some() && p.routes().is_some(), |ui| {
-        ui.menu_button("Add to Shipment", |ui| {
+    // A level's audio has no contribution kind yet, so there is nothing to add.
+    ui.scope(|ui| {
+        if p.level_audio.is_some() {
+            ui.set_invisible();
+        }
+        ui.add_enabled_ui(cur.is_some() && p.routes().is_some(), |ui| {
+        theme::menu_button(ui, "Add to Shipment", |ui| {
             let (Some(w), Some(r)) = (cur, p.routes()) else { return };
             let refusal = p.line_refusal(w);
             let line = ui.add_enabled(refusal.is_none(), egui::Button::new("Replace this line"));
@@ -887,23 +989,24 @@ pub fn verbs(ui: &mut egui::Ui, p: &Panel, playing: Option<audioplay::Status>) -
             };
             if line.clicked() {
                 acts.push(Act::AddLine(w));
-                ui.close_menu();
+                ui.close();
             }
             let mut banks = BTreeSet::new();
             for (i, play) in r.plays.get(&w).into_iter().flatten().enumerate() {
                 let name = p.cue_name(play).map(str::to_string).unwrap_or_else(|| format!("0x{:08X}", play.guid));
                 if ui.button(format!("Replace cue {name} (plays {} wave(s))", play.waves)).clicked() {
                     acts.push(Act::AddCue(w, i));
-                    ui.close_menu();
+                    ui.close();
                 }
                 banks.insert(play.entry);
             }
             for entry in banks {
                 if ui.button(format!("Replace its bank {}", r.bank_name(entry))).clicked() {
                     acts.push(Act::AddBank(entry));
-                    ui.close_menu();
+                    ui.close();
                 }
             }
+        });
         });
     });
     let k = p.scope_lines(p.scope).len();
@@ -1023,7 +1126,7 @@ mod tests {
         let mut acts = Vec::new();
         for events in [vec![], vec![egui::Event::PointerMoved(pos)], vec![button(true)], vec![button(false)]] {
             let input = egui::RawInput { screen_rect: Some(screen), events, ..Default::default() };
-            let _ = ctx.run(input, |ctx| acts.extend(center(ctx, p, None)));
+            crate::gui::run_headless(&ctx, input, |root| acts.extend(center(root, p, None)));
         }
         acts
     }

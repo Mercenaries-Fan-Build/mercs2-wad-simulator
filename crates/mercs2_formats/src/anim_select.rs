@@ -15,7 +15,8 @@
 //! lookup's `ASTO` pool that points at a **list** — `[count][count clip hashes]` — and retail draws
 //! one of them per query ([`LookupRow::clip_at`]). Layout + live proof: [`AnimTable`].
 //!
-//! This module parses the `AnimationLookup` and the `ActionTable`.
+//! This module parses the `AnimationLookup`, the `ActionTable` and the `VehicleAnimationLookup` (the
+//! in-vehicle states' clips, keyed by vehicle and seat instead of character).
 
 use std::collections::BTreeMap;
 
@@ -29,8 +30,74 @@ pub const TYPE_ANIMTABLE: u32 = 0x2073_59C7;
 pub const ANIMLOOKUP: u32 = 0xE00B_080C;
 /// `pandemic_hash_m2("ActionTable")` — game state (Stance/Action/AimState/…) → AnimationHandles.
 pub const ACTIONTABLE: u32 = 0x6802_C321;
+/// `pandemic_hash_m2("VehicleAnimationLookup")` — the in-vehicle analogue of the AnimationLookup:
+/// (Handle, VehicleClass, VehicleName, SeatName, MountedEquipment) → clip. No CharacterName: every
+/// human shares it.
+pub const VEHICLE_LOOKUP: u32 = 0x1826_24E1;
 /// The tables' none-sentinel (`0x27DE7135`, `"*"`) — "any"/unset in key columns.
 pub const NONE_SENTINEL: u32 = 0x27DE_7135;
+/// The stance locomotion tables compiled into the PC v1.0 exe (image `pc-v10`, sha256 `8c179a99…`),
+/// as `(stance, table VA, words)`. The stance dispatcher at `0x00689B9D` hands the stance's
+/// locomotion controller one of them through the controller's vtable `+0x50` init: Upright's by
+/// `push 0x00CFFE58` (`0x00689CD1`, and in the shared join at `0x00689D7E`); the class thunks
+/// `0x00741230`, `0x00741190`, `0x00741180` and `0x00741040` overwrite that argument with scuba's,
+/// Swim's, crouched's and carrying's (`mov [esp+0xC], imm32; jmp 0x0073B550`). Each table ends at
+/// the word `0x00BBCF80`, a pointer that is not part of it. Upright's other list, `0x00CFFECC`
+/// (pushed at `0x00689C9D`), is its entries 29–32. InVehicle builds no controller. Which entries are
+/// animation Handles is identified only for Upright's 0–13 (`human_animation_selection.md` §4);
+/// [`AnimSelector::locomotion_handles`] keeps the words the AnimationLookup has rows for.
+pub const STANCE_LOCOMOTION_TABLES: [(u32, u32, &[u32]); 5] = [
+    (
+        0x12C0_7B18, // Upright
+        0x00CF_FE58,
+        &[
+            0xE20D8D5B, 0x5F0CD0E3, 0x93C5DE3A, 0x8ECE17D0, 0x61149BC1, 0x13DE8D5D, 0x9F4EB947, 0x5CC77D41, 0xF71C4238,
+            0xB99AD3B3, 0x695F945A, 0x5AAC9B8D, 0x2403F715, 0x700D4DE0, 0x0E10BE02, 0x168D8989, 0xF341CF84, 0xB33294EB,
+            0xEFD70F0A, 0x63F6BAD5, 0x0C11CEA4, 0x8D9E02A7, 0x69F33658, 0xE180EA54, 0xB1CBF7AD, 0x59EC84C6, 0xB011E74F,
+            0xDAF1C53A, 0x3024FD38, 0xF71C4238, 0xB99AD3B3, 0x695F945A, 0x5AAC9B8D,
+        ],
+    ),
+    (
+        0x4BE8_214B, // scuba
+        0x00CF_FC78,
+        &[
+            0xDB0C2069, 0x03649BF7, 0x57A42476, 0xA1CBB176, 0x81A61CF8, 0xBD8B8EBC, 0xA2415CF6, 0xDB0C2069, 0xDB0C2069,
+            0x57A42476, 0x81A61CF8, 0xA2415CF6, 0xA2415CF6, 0xA2415CF6, 0x28FC8AD9, 0xDF291074, 0xB33294EB, 0xF341CF84,
+            0xB19EABC5, 0xB0B85FB4, 0x8D9E02A7, 0x0C11CEA4, 0x69F33658, 0x4AB3573D, 0x1D88E276, 0xB011E74F, 0x59EC84C6,
+            0x0CE8E58E, 0xFE8E28A7,
+        ],
+    ),
+    (
+        0x614D_B965, // Swim
+        0x00CF_FCF0,
+        &[
+            0x65A19525, 0x047CDE0B, 0x980DA78A, 0xB5295FA2, 0x410AACBC, 0x291E70B8, 0x3DCB9682, 0x65A19525, 0x65A19525,
+            0x980DA78A, 0x410AACBC, 0x3DCB9682, 0x3DCB9682, 0x3DCB9682, 0x28FC8AD9, 0xDF291074, 0xB33294EB, 0xF341CF84,
+            0xB19EABC5, 0xB0B85FB4, 0x8D9E02A7, 0x0C11CEA4, 0x69F33658, 0x4AB3573D, 0x1D88E276, 0xB011E74F, 0x59EC84C6,
+            0x0CE8E58E, 0xFE8E28A7,
+        ],
+    ),
+    (
+        0xC888_6020, // crouched
+        0x00CF_FD68,
+        &[
+            0x1E07933A, 0x343E06D0, 0x614B2E07, 0x23A7C407, 0xCDB6B2CA, 0x3A9730A0, 0x850901F6, 0xBBF6AF9F, 0xBBF6AF9F,
+            0x3C165288, 0x5E7ADCC3, 0xD491DD44, 0xD491DD44, 0x9B20B655, 0x28FC8AD9, 0xDF291074, 0xAEF9664B, 0xB96D6AF0,
+            0xB19EABC5, 0xB0B85FB4, 0x8BDF3D07, 0x992499F8, 0x69F33658, 0x4AB3573D, 0x1D88E276, 0x6207B72F, 0xFB7A8E1A,
+            0x84235D7E, 0x407B6FA3,
+        ],
+    ),
+    (
+        0xE7B6_4876, // carrying
+        0x00CF_FDE0,
+        &[
+            0xE20D8D5B, 0x5F0CD0E3, 0x93C5DE3A, 0x8ECE17D0, 0x61149BC1, 0x13DE8D5D, 0x9F4EB947, 0x2015A258, 0x2015A258,
+            0x2015A258, 0xDE4D3907, 0x53AEEDEB, 0x53AEEDEB, 0x53AEEDEB, 0x0E10BE02, 0x168D8989, 0xF341CF84, 0xB33294EB,
+            0xEFD70F0A, 0x63F6BAD5, 0x0C11CEA4, 0x8D9E02A7, 0x69F33658, 0xE180EA54, 0xB1CBF7AD, 0x59EC84C6, 0xB011E74F,
+            0xDAF1C53A, 0x3024FD38,
+        ],
+    ),
+];
 /// `pandemic_hash_m2("TRUE")` — the ActionTable's true flag value.
 pub const FLAG_TRUE: u32 = 0x1E52_08DD;
 /// The second ActionTable `Driven` value retail treats as driven (33 rows; name not recovered).
@@ -220,6 +287,24 @@ const COL_ANIMATION: usize = 7;
 const COL_MIN_TIME_SCALE: usize = 8;
 const COL_MAX_TIME_SCALE: usize = 9;
 
+/// The VehicleAnimationLookup's columns, as shipped. It has no `ASTO` pool: its `Animation` cell is
+/// the clip hash itself (the defaults row holds `0x9D886544`, the clip retail plays when a lookup
+/// finds nothing).
+const VEHICLE_LOOKUP_COLUMNS: [&str; 9] = [
+    "Handle",
+    "VehicleClass",
+    "VehicleName",
+    "SeatName",
+    "MountedEquipmentClass",
+    "MountedEquipmentName",
+    "Animation",
+    "MinTimeScale",
+    "MaxTimeScale",
+];
+const VCOL_ANIMATION: usize = 6;
+const VCOL_MIN_TIME_SCALE: usize = 7;
+const VCOL_MAX_TIME_SCALE: usize = 8;
+
 /// Column indices of the ActionTable (resolved by TYPE name, not position).
 #[derive(Debug)]
 struct ActCols {
@@ -245,17 +330,42 @@ pub struct AnimSelector {
     lookup: AnimTable,
     /// The ActionTable (same resident block) + its column indices, when present.
     actions: Option<(AnimTable, ActCols)>,
+    /// The VehicleAnimationLookup ([`Self::with_vehicle_lookup`]), when present.
+    vehicle: Option<AnimTable>,
 }
 
 impl AnimSelector {
     /// Build from a decompressed resident block. `None` when the block does not hold the
-    /// AnimationLookup (`0xE00B080C`); an error when it holds a table that does not parse.
+    /// AnimationLookup (`0xE00B080C`); an error when it holds a table that does not parse. The
+    /// VehicleAnimationLookup is attached when the block holds it.
     pub fn from_resident_block(dec: &[u8]) -> Result<Option<AnimSelector>, String> {
         let Some(lookup) = find_container(dec, ANIMLOOKUP) else {
             return Ok(None);
         };
         let actions = find_container(dec, ACTIONTABLE);
-        Self::from_containers(&lookup, actions.as_deref()).map(Some)
+        let sel = Self::from_containers(&lookup, actions.as_deref())?;
+        match find_container(dec, VEHICLE_LOOKUP) {
+            Some(v) => sel.with_vehicle_lookup(&v).map(Some),
+            None => Ok(Some(sel)),
+        }
+    }
+
+    /// Attach the VehicleAnimationLookup container (`0x182624E1`). An error when its columns are not
+    /// the shipped ones or it carries an `ASTO` pool (its `Animation` cell would then be a list
+    /// index, which nothing here reads).
+    pub fn with_vehicle_lookup(mut self, cont: &[u8]) -> Result<AnimSelector, String> {
+        let t = AnimTable::parse(cont).map_err(|e| format!("VehicleAnimationLookup: {e}"))?;
+        if t.cols().iter().map(String::as_str).ne(VEHICLE_LOOKUP_COLUMNS) {
+            return Err(format!("VehicleAnimationLookup: columns {:?}, shipped {VEHICLE_LOOKUP_COLUMNS:?}", t.cols()));
+        }
+        if !t.pool().is_empty() {
+            return Err(format!(
+                "VehicleAnimationLookup: an ASTO pool of {} words; its Animation cell is read as a clip hash",
+                t.pool().len()
+            ));
+        }
+        self.vehicle = Some(t);
+        Ok(self)
     }
 
     /// Build from the two `animationtable` containers themselves — the AnimationLookup
@@ -295,7 +405,7 @@ impl AnimSelector {
                 Some((t, cols))
             }
         };
-        Ok(AnimSelector { lookup, actions })
+        Ok(AnimSelector { lookup, actions, vehicle: None })
     }
 
     /// `CharacterName` hash for a merc — `pandemic_hash_m2(name)` ("mattias"/"chris"/"jennifer").
@@ -349,6 +459,48 @@ impl AnimSelector {
             .filter(|r| r[COL_CHARACTER] == character)
             .flat_map(|r| self.clips_of(r).iter().map(move |&clip| CharacterClip { handle: r[0], clip }))
             .collect()
+    }
+
+    /// The `CharacterName` of the lookup's shared rows: the defaults row's (`"*"`), which
+    /// [`Self::query`] accepts for any character.
+    pub fn shared_character(&self) -> u32 {
+        self.lookup.defaults()[COL_CHARACTER]
+    }
+
+    /// The shared rows' clips for every Handle `character` has no row of its own for, in table
+    /// order. Retail's query scores a row keyed to the character 2 on `CharacterName` and a shared
+    /// row 1, so a shared row stands in only where the character has none ([`Self::query`] rules
+    /// 3–5); its other key cells (gender, equipment) still decide which shared row plays.
+    pub fn shared_clips(&self, character: u32) -> Vec<CharacterClip> {
+        let shared = self.shared_character();
+        let own: std::collections::BTreeSet<u32> =
+            self.lookup.data_rows().filter(|r| r[COL_CHARACTER] == character).map(|r| r[0]).collect();
+        self.lookup
+            .data_rows()
+            .filter(|r| r[COL_CHARACTER] == shared && !own.contains(&r[0]))
+            .flat_map(|r| self.clips_of(r).iter().map(move |&clip| CharacterClip { handle: r[0], clip }))
+            .collect()
+    }
+
+    /// Every word of [`STANCE_LOCOMOTION_TABLES`] that is the Handle of an AnimationLookup data row:
+    /// the handles the stances' locomotion controllers play (walk, run, sprint, idles, …).
+    pub fn locomotion_handles(&self) -> std::collections::BTreeSet<u32> {
+        let handles: std::collections::BTreeSet<u32> = self.lookup.data_rows().map(|r| r[0]).collect();
+        STANCE_LOCOMOTION_TABLES
+            .iter()
+            .flat_map(|(_, _, words)| words.iter().copied())
+            .filter(|w| handles.contains(w))
+            .collect()
+    }
+
+    /// Every data row of the VehicleAnimationLookup, in table order; empty when none is attached.
+    pub fn vehicle_clips(&self) -> Vec<VehicleClip> {
+        self.vehicle.iter().flat_map(|t| t.data_rows().map(vehicle_clip)).collect()
+    }
+
+    /// The VehicleAnimationLookup rows keyed to `handle`, in table order.
+    pub fn vehicle_context(&self, handle: u32) -> Vec<VehicleClip> {
+        self.vehicle.iter().flat_map(|t| t.data_rows().filter(move |r| r[0] == handle).map(vehicle_clip)).collect()
     }
 
     /// All ActionTable rows whose `AnimationHandles` is `handle` — the game states (Stance/
@@ -446,6 +598,11 @@ impl AnimSelector {
     /// Every AnimationLookup row keyed to `handle`, all characters, in table order.
     pub fn lookup_rows(&self, handle: u32) -> Vec<LookupRow> {
         self.lookup.data_rows().filter(|r| r[0] == handle).map(|r| self.lookup_row(r)).collect()
+    }
+
+    /// Every AnimationLookup data row, all handles and characters, in table order.
+    pub fn all_lookup_rows(&self) -> Vec<LookupRow> {
+        self.lookup.data_rows().map(|r| self.lookup_row(r)).collect()
     }
 
     /// One entry per clip of every AnimationLookup row for (`handle`, `character`), with the row's
@@ -605,6 +762,35 @@ impl LookupRow {
     /// `0x00743D25`–`0x00743D5B`).
     pub fn clip_at(&self, draw: u32) -> u32 {
         self.clips[(draw % self.clips.len() as u32) as usize]
+    }
+}
+
+/// One VehicleAnimationLookup row: the Handle, every key cell verbatim ([`NONE_SENTINEL`] = any),
+/// the clip and its timescale range (`-1.0` = default).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct VehicleClip {
+    pub handle: u32,
+    pub vehicle_class: u32,
+    pub vehicle_name: u32,
+    pub seat_name: u32,
+    pub mounted_equipment_class: u32,
+    pub mounted_equipment_name: u32,
+    pub clip: u32,
+    pub min_time_scale: f32,
+    pub max_time_scale: f32,
+}
+
+fn vehicle_clip(r: &[u32]) -> VehicleClip {
+    VehicleClip {
+        handle: r[0],
+        vehicle_class: r[1],
+        vehicle_name: r[2],
+        seat_name: r[3],
+        mounted_equipment_class: r[4],
+        mounted_equipment_name: r[5],
+        clip: r[VCOL_ANIMATION],
+        min_time_scale: f32::from_bits(r[VCOL_MIN_TIME_SCALE]),
+        max_time_scale: f32::from_bits(r[VCOL_MAX_TIME_SCALE]),
     }
 }
 
@@ -899,6 +1085,67 @@ mod tests {
                 CharacterClip { handle: PRIMARY_IDLE_HANDLE, clip: 0xCCCC }
             ]
         );
+    }
+
+    /// A shared (`"*"`) row stands in for a Handle the character has no row of its own for, and
+    /// never for one it has.
+    #[test]
+    fn shared_rows_fill_only_the_handles_a_character_lacks() {
+        const OWN: u32 = 0x1000_0001;
+        const GAP: u32 = 0x1000_0002;
+        let pool = [1, N, 1, 0xA0, 1, 0xA1, 1, 0xA2];
+        let rows: [[u32; 10]; 4] = [
+            lk_row(N, N, N, N, 0),
+            lk_row(OWN, N, MATTIAS, N, 2), // mattias's own
+            lk_row(OWN, N, N, N, 4),       // shared, shadowed for mattias
+            lk_row(GAP, N, N, N, 6),       // shared, the only row for GAP
+        ];
+        let rows: Vec<&[u32]> = rows.iter().map(|r| &r[..]).collect();
+        let sel = AnimSelector::from_containers(&synth_table(&LOOKUP_COLUMNS, &rows, &pool), None).unwrap();
+        assert_eq!(sel.shared_character(), N);
+        assert_eq!(sel.shared_clips(MATTIAS), vec![CharacterClip { handle: GAP, clip: 0xA2 }]);
+        // a character with no rows of its own gets every shared row
+        assert_eq!(sel.shared_clips(0x2222_2222).len(), 2);
+    }
+
+    /// A locomotion-table word counts only when the lookup has a row for it as a Handle.
+    #[test]
+    fn locomotion_handles_are_table_words_the_lookup_keys() {
+        const WALK: u32 = 0x695F_945A; // Upright entry 10
+        const NOT_IN_A_TABLE: u32 = 0x1000_0003;
+        let pool = [1, N, 1, 0xA0, 1, 0xA1];
+        let rows: [[u32; 10]; 3] = [lk_row(N, N, N, N, 0), lk_row(WALK, N, MATTIAS, N, 2), lk_row(NOT_IN_A_TABLE, N, MATTIAS, N, 4)];
+        let rows: Vec<&[u32]> = rows.iter().map(|r| &r[..]).collect();
+        let sel = AnimSelector::from_containers(&synth_table(&LOOKUP_COLUMNS, &rows, &pool), None).unwrap();
+        assert_eq!(sel.locomotion_handles().into_iter().collect::<Vec<_>>(), vec![WALK]);
+        // every table ends before the 0x00BBCF80 pointer
+        assert!(STANCE_LOCOMOTION_TABLES.iter().all(|(_, _, w)| !w.contains(&0x00BB_CF80)));
+    }
+
+    /// The VehicleAnimationLookup's `Animation` cell is the clip hash; a foreign layout or an `ASTO`
+    /// pool is refused.
+    #[test]
+    fn vehicle_lookup_rows_name_their_clip() {
+        const H: u32 = 0x7BF7_8376;
+        const SEAT: u32 = 0x3333_0001;
+        let lk = synth_table(&LOOKUP_COLUMNS, &[&lk_row(N, N, N, N, 0)], &[1, N]);
+        let defaults: [u32; 9] = [N, N, N, N, N, N, 0x9D88_6544, TS, TS];
+        let row: [u32; 9] = [H, N, N, SEAT, N, N, 0x52E0_EC98, TS, TS];
+        let vl = synth_table(&VEHICLE_LOOKUP_COLUMNS, &[&defaults, &row], &[]);
+        let block = synth_resident(&[(ANIMLOOKUP, &lk), (VEHICLE_LOOKUP, &vl)]);
+        let sel = AnimSelector::from_resident_block(&block).unwrap().expect("block holds the lookup");
+        let all = sel.vehicle_clips();
+        assert_eq!(all.len(), 1, "the defaults row is not a data row");
+        assert_eq!((all[0].handle, all[0].seat_name, all[0].clip), (H, SEAT, 0x52E0_EC98));
+        assert_eq!(all[0].min_time_scale, -1.0);
+        assert_eq!(sel.vehicle_context(H), all);
+        assert!(sel.vehicle_context(0x5555_5555).is_empty());
+
+        let with_pool = synth_table(&VEHICLE_LOOKUP_COLUMNS, &[&defaults, &row], &[1, N]);
+        let base = || AnimSelector::from_containers(&lk, None).unwrap();
+        assert!(base().with_vehicle_lookup(&with_pool).unwrap_err().contains("ASTO pool"));
+        let foreign = synth_table(&["Handle", "SeatName", "Animation"], &[&[N, N, N]], &[]);
+        assert!(base().with_vehicle_lookup(&foreign).unwrap_err().contains("columns"));
     }
 
     /// The lookup is read by position: a table whose columns are not retail's is refused.

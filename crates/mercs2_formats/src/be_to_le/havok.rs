@@ -132,13 +132,18 @@ const HKA_ANIMATION_BINDING_ARRAYS: &[(&str, ArrayInfo)] = &[
 const HKP_MOPP_CODE_ARRAYS: &[(&str, ArrayInfo)] = &[
     ("m_data", ArrayInfo { ptr_off: Some(32), count_off: Some(36), elem_size: 1, elem_swap: U8W }),
 ];
-
-// WpMeshShape16 (physics): Pandemic custom 16-bit-indexed collision mesh.
-// Two u16 index arrays (a blind u32 sweep transposes each pair → wrong triangles).
-const WP_MESH_SHAPE16_ARRAYS: &[(&str, ArrayInfo)] = &[
-    ("indices_b", ArrayInfo { ptr_off: Some(80), count_off: Some(84), elem_size: 2, elem_swap: U16 }),
-    ("indices_c", ArrayInfo { ptr_off: Some(88), count_off: Some(92), elem_size: 2, elem_swap: U16 }),
+// m_buildType at +44 is one byte.
+const HKP_MOPP_CODE_SWAP: &[(usize, u8)] = &[
+    (0, U32), (4, U32), (8, U32), (12, U32), (16, U32), (20, U32),
+    (24, U32), (28, U32), (32, U32), (36, U32), (40, U32), (44, U8W),
 ];
+
+// WpMeshShape16 (physics): Pandemic custom 16-bit-indexed collision mesh. `nsub` at +32 subparts of
+// 48 bytes from +48, each with a triangle array of `{u16 a, b, c, pad}` (ptr +32, count +36) and a u16
+// vertex index array (ptr +40, count +44). A blind u32 sweep transposes each pair → wrong triangles.
+const WP_MESH_SUBPARTS: usize = 48;
+const WP_MESH_SUBPART: usize = 48;
+const WP_MESH_ARRAYS: [(usize, usize, usize); 2] = [(32, 36, 8), (40, 44, 2)];
 
 fn lookup_class(name: &str) -> Option<ClassLayout> {
     let layout = match name {
@@ -156,8 +161,8 @@ fn lookup_class(name: &str) -> Option<ClassLayout> {
         "hkaAnnotation" => ClassLayout { size: 8, swap: SwapSpec::Fields(HKA_ANNOTATION_SWAP), arrays: &[] },
         "hkaBone" => ClassLayout { size: 8, swap: SwapSpec::Fields(HKA_BONE_SWAP), arrays: &[] },
         // physics (PHY2 collision packfiles)
-        "hkpMoppCode" => ClassLayout { size: 48, swap: SwapSpec::AllU32, arrays: HKP_MOPP_CODE_ARRAYS },
-        "WpMeshShape16" => ClassLayout { size: 8, swap: SwapSpec::AllU32, arrays: WP_MESH_SHAPE16_ARRAYS },
+        "hkpMoppCode" => ClassLayout { size: 48, swap: SwapSpec::Fields(HKP_MOPP_CODE_SWAP), arrays: HKP_MOPP_CODE_ARRAYS },
+        "WpMeshShape16" => ClassLayout { size: 8, swap: SwapSpec::AllU32, arrays: &[] },
         _ => return None,
     };
     Some(layout)
@@ -406,6 +411,23 @@ fn swap_data_class_aware(
                 _ => {}
             }
         }
+
+        if class_name == "WpMeshShape16" {
+            let nsub_abs = da_abs + obj_off + 32;
+            let nsub = if nsub_abs + 4 <= be.len() { read_u32_be(be, nsub_abs) as usize } else { 0 };
+            for s in 0..nsub {
+                let subpart = obj_off + WP_MESH_SUBPARTS + s * WP_MESH_SUBPART;
+                for (ptr_off, count_off, bytes) in WP_MESH_ARRAYS {
+                    let Some(&buf_dst) = lf_map.get(&((subpart + ptr_off) as u32)) else { continue };
+                    let count = read_u32_be(be, da_abs + subpart + count_off) as usize;
+                    for i in (0..count * bytes).step_by(2) {
+                        if buf_dst as usize + i < da_end {
+                            swap_width[buf_dst as usize + i] = U16;
+                        }
+                    }
+                }
+            }
+        }
     }
 
     // default-fill: u32 over fixup-free body (skip no-swap buffers), then u32
@@ -449,6 +471,19 @@ fn swap_data_class_aware(
     }
 }
 
+/// `layoutRules` of a PS3 packfile, `reusePaddingOptimization` set: pointer size, little endian, reuse
+/// padding, empty base class.
+const PS3_LAYOUT: [u8; 4] = [4, 0, 1, 1];
+/// PC's `layoutRules`.
+const PC_LAYOUT: [u8; 4] = [4, 1, 0, 1];
+
+/// Give a PS3 packfile PC's `layoutRules`. Its collider objects lay out as Xbox's, so only the rule moves.
+fn set_pc_layout(be: &[u8], out: &mut [u8]) {
+    if be == PS3_LAYOUT {
+        out.copy_from_slice(&PC_LAYOUT);
+    }
+}
+
 /// Repair embedded packfile `layoutRules` (4 × u8 at magic+16) that the data
 /// sweep reversed; copy verbatim from BE and set littleEndian = 1.
 fn fix_embedded_layoutrules(be: &[u8], out: &mut [u8], start: usize, end: usize) {
@@ -462,6 +497,7 @@ fn fix_embedded_layoutrules(be: &[u8], out: &mut [u8], start: usize, end: usize)
         if m + 20 <= be.len() {
             out[m + 16..m + 20].copy_from_slice(&be[m + 16..m + 20]);
             out[m + 17] = 1;
+            set_pc_layout(&be[m + 16..m + 20], &mut out[m + 16..m + 20]);
         }
         pos = m + 8;
     }
@@ -549,6 +585,7 @@ pub fn convert_havok_be_to_le(be: &[u8]) -> Result<Vec<u8>, String> {
     // 3. byte fields [16,20): copy, set littleEndian=1
     out[16..20].copy_from_slice(&be[16..20]);
     out[17] = 1;
+    set_pc_layout(&be[16..20], &mut out[16..20]);
     // 4. header i32 fields [20, ver_off) as u32
     let mut off = 20;
     while off < ver_off {
@@ -643,6 +680,59 @@ pub fn convert_havok_be_to_le(be: &[u8]) -> Result<Vec<u8>, String> {
     Ok(out)
 }
 
+/// Put the vertex pools of a swept wrapper back in u16 order: the wrapper at body offset `start` was
+/// u32-swapped, and a pool is `u16×3` vertices, so each pair of u16s came out exchanged. Each
+/// `0xEEEEEEEE` block names its pool: vertex count at +68, body offset at +76. Blocks can share a pool.
+fn swap_wrapper_pools(body: &mut [u8], start: usize) -> Result<(), String> {
+    let word = |b: &[u8], o: usize| u32::from_le_bytes([b[o], b[o + 1], b[o + 2], b[o + 3]]) as usize;
+    let mut pools: HashMap<usize, usize> = HashMap::new();
+    let mut o = start;
+    while o + 80 <= body.len() {
+        if let Some(end) = pools.get(&o) {
+            o = *end;
+            continue;
+        }
+        if word(body, o) == 0xEEEE_EEEE {
+            let (count, pool) = (word(body, o + 68), word(body, o + 76));
+            let end = (pool + count * 6).next_multiple_of(4);
+            // A convex shape's block counts its vertices and has no pool: they are in the packfile.
+            let holds_pool = pool != 0 && count != 0;
+            if holds_pool && (pool < start || (pool - start) % 4 != 0 || end > body.len()) {
+                return Err(format!("the wrapper block at {o} names a pool of {count} at {pool}, in a body of {}", body.len()));
+            }
+            if holds_pool && pools.insert(pool, end).is_none() {
+                for w in body[pool..end].chunks_exact_mut(4) {
+                    w.rotate_left(2);
+                }
+            }
+        }
+        o += 4;
+    }
+    Ok(())
+}
+
+/// The offsets of a little-endian `PHY2` body's padding: the 2 bytes after each pool of an odd vertex
+/// count, which each platform's bake left as they lay.
+pub fn phy2_pool_padding(body: &[u8]) -> Vec<usize> {
+    let word = |o: usize| u32::from_le_bytes([body[o], body[o + 1], body[o + 2], body[o + 3]]) as usize;
+    if find_sub(body, &HAVOK_MAGIC) != Some(48) {
+        return Vec::new();
+    }
+    let mut pads: Vec<usize> = (0..)
+        .map(|i| 48 + word(32) + i * 4)
+        .take_while(|o| o + 80 <= body.len())
+        .filter(|&o| word(o) == 0xEEEE_EEEE && word(o + 68) % 2 == 1 && word(o + 76) != 0)
+        .flat_map(|o| {
+            let end = word(o + 76) + word(o + 68) * 6;
+            [end, end + 1]
+        })
+        .filter(|&o| o < body.len())
+        .collect();
+    pads.sort_unstable();
+    pads.dedup();
+    pads
+}
+
 /// Convert a `PHY2` mesh chunk: a u32 header prefix followed by an embedded
 /// Havok packfile. Swap the prefix as u32, class-aware-convert the packfile.
 /// If no packfile magic is present, fall back to a plain u32 sweep.
@@ -676,6 +766,11 @@ pub fn convert_phy2_be_to_le(be: &[u8]) -> Result<Vec<u8>, String> {
             }
             if t < rest.len() {
                 out.extend_from_slice(&rest[t..]); // ragged tail
+            }
+            swap_wrapper_pools(&mut out, magic_off + pf_size)?;
+            // PS3's MOPP codes are chunked for the SPUs, with an opcode the PC VM does not have.
+            if rest[16..20] == PS3_LAYOUT {
+                return crate::phy2_moppswap::rebake_phy2_mopps(&out);
             }
             Ok(out)
         }
@@ -745,6 +840,56 @@ mod tests {
         want.extend_from_slice(&[0x00, 0x00, 0x04, 0xD8, 0xAA, 0xAA, 0xAA, 0xAA]); // trailing swapped
 
         assert_eq!(convert_phy2_be_to_le(&be).unwrap(), want);
+    }
+
+    /// A pool holds `u16×3` vertices, so the wrapper's u32 sweep exchanged each pair of u16s. Two blocks
+    /// sharing a pool swap it once, and the 2 bytes of padding after an odd vertex count go with it.
+    #[test]
+    fn a_swept_wrapper_pool_goes_back_to_u16_order() {
+        let be_pool: [u16; 3] = [0x0102, 0x0304, 0x0506];
+        let start = 16;
+        let block = |pool: u32| {
+            let mut b = vec![0u8; 108];
+            b[..4].copy_from_slice(&0xEEEE_EEEEu32.to_le_bytes());
+            b[68..72].copy_from_slice(&1u32.to_le_bytes());
+            b[76..80].copy_from_slice(&pool.to_le_bytes());
+            b
+        };
+        let pool_at = start + 108 * 2;
+        let mut body = vec![0u8; start];
+        body.extend(block(pool_at as u32));
+        body.extend(block(pool_at as u32));
+        // As swept: each big-endian word reversed.
+        let be: Vec<u8> = be_pool.iter().flat_map(|v| v.to_be_bytes()).chain([0xAA, 0xBB]).collect();
+        for w in be.chunks_exact(4) {
+            body.extend(w.iter().rev());
+        }
+        body.extend(4u32.to_le_bytes());
+        swap_wrapper_pools(&mut body, start).unwrap();
+        let got: Vec<u16> = body[pool_at..pool_at + 6].chunks_exact(2).map(|b| u16::from_le_bytes([b[0], b[1]])).collect();
+        assert_eq!(got, be_pool);
+        assert_eq!(&body[pool_at + 8..pool_at + 12], &4u32.to_le_bytes(), "what follows the pool stays");
+    }
+
+    /// A block of no vertices names no pool, wherever its pointer lands: the scan moves past it.
+    #[test]
+    fn a_wrapper_block_of_no_vertices_ends_the_scan() {
+        let mut body = vec![0u8; 216];
+        body[..4].copy_from_slice(&0xEEEE_EEEEu32.to_le_bytes());
+        body[76..80].copy_from_slice(&108u32.to_le_bytes());
+        let before = body.clone();
+        swap_wrapper_pools(&mut body, 0).unwrap();
+        assert_eq!(body, before);
+    }
+
+    /// A block naming a pool past the body is refused.
+    #[test]
+    fn a_wrapper_pool_past_the_body_is_refused() {
+        let mut body = vec![0u8; 108];
+        body[..4].copy_from_slice(&0xEEEE_EEEEu32.to_le_bytes());
+        body[68..72].copy_from_slice(&100u32.to_le_bytes());
+        body[76..80].copy_from_slice(&100u32.to_le_bytes());
+        assert!(swap_wrapper_pools(&mut body, 0).is_err());
     }
 
     /// A PHY2 body with no embedded packfile falls back to a plain u32 sweep.

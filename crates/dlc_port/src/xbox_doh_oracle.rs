@@ -24,16 +24,16 @@
 //! CSUM / ASET layout is rebuilt by `build_patch_wad_multi` regardless of
 //! which input the LE body came from.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 
-use mercs2_formats::dlc_input::{
-    decompress_be_sges, parse_be_ffcs, parse_be_indx, parse_be_pths, PAGE_SIZE,
-};
+use mercs2_formats::be_to_le::texture::{rung_of_path, BlockTables, TextureTable};
+use mercs2_formats::dlc_input::{parse_be_ffcs, parse_be_indx, parse_be_pths, read_be_block};
 use mercs2_formats::dlc_stfs::load_stfs_or_doh;
 use mercs2_formats::ucfx::parse_block_entry_table;
 use ucfx_byteswap::convert::{convert_block, QUIET};
+use ucfx_byteswap::ecs::ComponentSchemas;
 use ucfx_byteswap::lua::LuaTools;
 
 /// Marker substring produced by `mercs2_formats::be_to_le::convert::convert_decl_ps3_compact`.
@@ -88,7 +88,7 @@ impl XboxDohOracle {
     /// contract is on the caller — if the PS3 side later asks for a hash the
     /// oracle does not hold, [`XboxDohOracle::lookup`] returns `None` and the
     /// caller must fail the run.
-    pub fn load(path: &Path, lua_tools: &LuaTools) -> Result<Self, String> {
+    pub fn load(path: &Path, lua_tools: &LuaTools, schemas: &ComponentSchemas, base_textures: &HashSet<u32>) -> Result<Self, String> {
         let (doh, src) = load_stfs_or_doh(path)
             .map_err(|e| format!("xbox-doh-oracle: open {}: {e}", path.display()))?;
         println!(
@@ -108,6 +108,8 @@ impl XboxDohOracle {
         let pths = chunk("PTHS")
             .map(|r| parse_be_pths(&doh, r.offset as usize, r.meta as usize))
             .unwrap_or_default();
+        let textures = TextureTable::from_doh(&doh, &indx, &pths, base_textures)
+            .map_err(|e| format!("xbox-doh-oracle: textures of {}: {e}", path.display()))?;
 
         // The main loop toggles QUIET to silence per-block logging; mirror that
         // here. Harmless to leave set — the caller sets it unconditionally.
@@ -125,49 +127,17 @@ impl XboxDohOracle {
                 .get(blk_idx)
                 .cloned()
                 .unwrap_or_else(|| format!("xbox_block_{blk_idx:05}"));
-            let block_offset = e.file_offset();
-            let block_size = e.page_count as usize * PAGE_SIZE;
-            if block_offset + 4 > doh.len() {
-                decompress_fail += 1;
-                continue;
-            }
-            let slice = &doh[block_offset..(block_offset + block_size).min(doh.len())];
-
-            // Mirror main.rs's two-path decompressor: BE segs with the "segs"
-            // magic, or an XFCU-headed raw block. Anything else is left out.
-            let decompressed: Vec<u8> = if slice.len() >= 4 && &slice[..4] == b"segs" {
-                match decompress_be_sges(slice, 0, slice.len()) {
-                    Ok(d) => d,
-                    Err(err) => {
-                        eprintln!("  xbox-doh-oracle: segs-decompress {path_s}: {err}");
-                        decompress_fail += 1;
-                        continue;
-                    }
-                }
-            } else if slice.len() >= 8 {
-                let rec =
-                    u32::from_be_bytes([slice[0], slice[1], slice[2], slice[3]]) as usize;
-                let header_end = 4 + rec * 16;
-                let first_tag = slice.get(header_end..header_end + 4);
-                if rec > 0 && rec < 5000 && first_tag == Some(b"XFCU") {
-                    let mut d = slice.to_vec();
-                    let mut z = d.len();
-                    while z > 4 && d[z - 1] == 0 {
-                        z -= 1;
-                    }
-                    z = (z + 3) & !3;
-                    d.truncate(z);
-                    d
-                } else {
+            let decompressed: Vec<u8> = match read_be_block(&doh, e) {
+                Ok(d) => d,
+                Err(err) => {
+                    eprintln!("  xbox-doh-oracle: read {path_s}: {err}");
                     decompress_fail += 1;
                     continue;
                 }
-            } else {
-                decompress_fail += 1;
-                continue;
             };
 
-            let swapped = match convert_block(&decompressed, false, None, Some(lua_tools)) {
+            let block_textures = BlockTables { textures: &textures, rung: rung_of_path(&path_s), streams: None };
+            let swapped = match convert_block(&decompressed, false, None, Some(lua_tools), Some(schemas), Some(block_textures)) {
                 Ok(s) => s,
                 Err(err) => {
                     eprintln!("  xbox-doh-oracle: convert_block {path_s}: {err}");

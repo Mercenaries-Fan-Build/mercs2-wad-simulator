@@ -11,7 +11,9 @@ use mercs2_formats::model_cubeize::{read_model_meshes, read_model_positions};
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct Vertex {
     pub pos: [f32; 3],
-    pub color: [f32; 3],
+    /// The vertex COLOR, RGBA. `PgMeshVP` passes it to COLOR0 unchanged; the `*AmbOcc*` pixel shaders
+    /// multiply their output alpha by its alpha.
+    pub color: [f32; 4],
     pub uv: [f32; 2],
     pub normal: [f32; 3],
     pub tangent: [f32; 4],
@@ -32,16 +34,12 @@ pub struct ModelStats {
     /// camera MVP (NOT baked into vertex positions) so skinning runs in model space.
     pub fit_center: [f32; 3],
     pub fit_scale: f32,
-    /// Per-bone skinning palette `Skin[b] = InvBind[b] · Pose[b]` (row-vector). At bind pose
-    /// (Pose = world-rest) every entry is identity — the LBS gate. Empty when no skeleton.
+    /// Per-bone REST palette `Skin[b] = InvBind[b] · Pose[b]` (row-vector) with Pose = the `+16`
+    /// reference pose retail holds for a node no clip drives. It is identity only where `+16` and
+    /// `+80` agree. Empty when no skeleton.
     pub bones: Vec<[[f32; 4]; 4]>,
     /// Per-bone rig (parent/inv-bind/local-bind) for re-posing under animation. Empty when no skeleton.
     pub rig: Vec<BoneRig>,
-    /// PRELIT: the mesh bakes monochrome lighting into per-vertex COLOR (interior/building shells).
-    /// The renderer then uses that baked term as the lighting and skips the fixed exterior sun. Detected
-    /// data-driven (non-white, near-grayscale colors) so terrain SPLAT weights — colored, also in COLOR —
-    /// don't trip it. False for characters/props (white vertex color) and terrain.
-    pub prelit: bool,
 }
 
 /// One bone's rig data — enough to recompose an animated pose. All matrices are row-major,
@@ -50,25 +48,26 @@ pub struct ModelStats {
 pub struct BoneRig {
     pub parent: i32, // -1 = root
     pub name_hash: u32,
-    /// Bind-pose world-rest transform.
+    /// SKIN bind world transform: the inverse of the HIER record's `+80` inverse-bind — the pose the
+    /// geometry was authored against (see `build_indexed_source`).
     pub world_bind: [[f32; 4]; 4],
     /// Inverse of `world_bind` (the InvBind used in `Skin[b] = InvBind[b] · Pose[b]`).
     pub inv_bind: [[f32; 4]; 4],
-    /// Bind-pose LOCAL transform (relative to parent). Animation replaces this per bone; bones
-    /// with no track keep it, so an un-animated skeleton recomposes to the exact bind pose.
+    /// REFERENCE-pose LOCAL transform (relative to parent): the HIER `+16` local, which is what
+    /// retail's `hkaSkeleton` reference pose holds. Animation replaces it per bone; bones with no
+    /// track keep it. It recomposes to `world_bind` only where `+16` and `+80` agree — on most models
+    /// everywhere, on `pmc_hum_chris` not on the arm chain.
     pub local_bind: [[f32; 4]; 4],
 }
 
-/// Everything the renderer needs to skin + place a model: the fit transform, the bind-pose bone
-/// palette (identity at bind), and the per-bone rig for re-posing under animation.
+/// Everything the renderer needs to skin + place a model: the fit transform, the rest palette
+/// ([`ModelStats::bones`]), and the per-bone rig for re-posing under animation.
 #[derive(Debug, Clone)]
 pub struct SkinData {
     pub center: [f32; 3],
     pub scale: f32,
     pub bones: Vec<[[f32; 4]; 4]>,
     pub rig: Vec<BoneRig>,
-    /// Baked-lighting flag (see [`ModelStats::prelit`]) — the renderer skips the exterior sun for it.
-    pub prelit: bool,
 }
 
 impl SkinData {
@@ -84,15 +83,38 @@ impl SkinData {
                 [0.0, 0.0, 0.0, 1.0],
             ]],
             rig: Vec::new(),
-            prelit: false,
         }
+    }
+
+    /// The palette an instance of a model with these `verts` rests at when no clip drives it. It
+    /// covers every joint the verts reference, not just the entries the skin ships: an unrigged mesh
+    /// carrying the 1-entry identity skin can still index a full palette, and a short palette makes
+    /// those verts read a zero matrix and collapse onto the origin. A rigged skin rests at
+    /// [`Self::bones`], which must already cover every joint; an unrigged one (terrain, cells) at
+    /// identity.
+    pub fn rest_palette(&self, verts: &[Vertex]) -> Result<Vec<[[f32; 4]; 4]>, String> {
+        const IDENT: [[f32; 4]; 4] =
+            [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0]];
+        let max_joint = verts.iter().flat_map(|v| v.joints).map(|j| j as usize).max().unwrap_or(0);
+        let joints = self.bones.len().max(max_joint + 1);
+        if self.rig.is_empty() {
+            return Ok(vec![IDENT; joints]);
+        }
+        if self.bones.len() != joints {
+            return Err(format!(
+                "a {}-bone rig ships a {}-entry rest palette for {joints} referenced joints",
+                self.rig.len(),
+                self.bones.len()
+            ));
+        }
+        Ok(self.bones.clone())
     }
 }
 
 impl ModelStats {
     /// Fold another LOD rung's stats in. A model's geometry spans several blocks (see
     /// [`crate::model::Model`]); each rung is built separately but they are one object, so counts and
-    /// bounds accumulate. The rig/bones/prelit flags come from the RESIDENT rung — the only block
+    /// bounds accumulate. The rig and bones come from the RESIDENT rung — the only block
     /// that ships a skeleton — so they are left alone here.
     pub fn absorb(&mut self, other: &ModelStats) {
         self.meshes += other.meshes;
@@ -110,7 +132,6 @@ impl ModelStats {
             scale: self.fit_scale,
             bones: self.bones.clone(),
             rig: self.rig.clone(),
-            prelit: self.prelit,
         }
     }
 }
@@ -146,6 +167,17 @@ pub struct DrawGroup {
     /// texture X" and consults only those three gets the wrong answer for every texture bound
     /// in a later slot.
     pub textures: Vec<u32>,
+    /// The material's on-disk `flags@104` word: blend mode, alpha test, two-sided and the
+    /// refraction bit (`mercs2_formats::texture::runtime_material_flags` decodes it). 0 = an opaque,
+    /// untested, culled material, which is also what a draw with no material gets.
+    pub material_flags: u16,
+    /// The material's pixel-shader key (`pandemic_hash_m2` of a registered pixel shader name, e.g.
+    /// `PgDiffEmisFP`), which decides what the texture slots mean. 0 = no material.
+    pub shader_key: u32,
+    /// The material's pixel constants `materialData` c93..c98 (diffuse, specular, ambient, emissive,
+    /// subsurface, constant0; `MtrlMaterial::material_data`): c98.w is the alpha multiplier (pixel
+    /// alpha = `diffuse.a × c98.w`). [`NO_MATERIAL_DATA`] for a draw with no material.
+    pub material_data: [[f32; 4]; 6],
     /// The container's drawing-group (PRMG) index this draw came from — the MESH-order index that
     /// `INDX`/destruction (`orchestrator::Destruction::state_of_mesh`) keys on. Lets a caller hide a
     /// group by destruction state (e.g. drop the `break_piece` rubble to show the pristine building).
@@ -161,6 +193,11 @@ pub struct DrawGroup {
     pub sub_object: usize,
     /// `INDX[group]` — this group's index into the SEGM record array.
     pub seg_id: usize,
+    /// The `SEGM` row this draw serves. Retail's draw loop (`FUN_00472a50`) walks SEGM rows, not
+    /// geometry: row `r` draws `renderable[SEGM[r].seg_id]` at `SEGM[r].node` under
+    /// `SEGM[r].state_mask`. Equal to `seg_id` on the row that owns the geometry; different on an
+    /// INSTANCE row, which draws another row's geometry again at its own node.
+    pub segm_row: usize,
     /// The LOD-block rung this geometry came from: `0` = the resident (coarsest) block, higher = a
     /// finer `_P00N_` block. Stamped by [`crate::model::Model::load`]; a single-block model (every
     /// character) is all rung 0. The renderer ignores it — `lod_mask` already carries the supersede
@@ -176,7 +213,42 @@ pub struct DrawGroup {
     /// wants), but a skinned group must NOT be — its vertices are shared across many bones and only
     /// a real skin + inverse-bind matrices can reproduce them.
     pub skinned: bool,
+    /// A terrain ground draw: its material is a `PgTerrainMeshFP*` shader, whose texture slots and
+    /// constants are not a model material's.
+    pub ground: Option<TerrainGround>,
+    /// A ground cover draw ([`build_scrub`]): the depths it fades and culls at.
+    pub scrub: Option<ScrubDepths>,
 }
+
+/// What a terrain ground draw's `PgTerrainMeshVP*`/`PgTerrainMeshFP*` pair reads. The material's slots
+/// are the shader's sampler stages: 0 `GlobalMap`, 1 `DetailMap`, then `Layer1..4Map_Diff` at 2, 4, 6
+/// and 8, with the unused odd stages holding `texture::TERRAIN_LAYER_MARKER`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TerrainGround {
+    /// The cell's own map, stretched over the whole 400 m cell.
+    pub global: u32,
+    pub detail: Option<u32>,
+    pub layers: [Option<u32>; 4],
+    /// Each layer's planar projection of the world position ([`mercs2_formats::terrainmesh::Mtrl::layer_uv`]).
+    pub layer_uv: [[[f32; 4]; 2]; 4],
+    pub uv_scale: [f32; 2],
+    /// The cell's centre, world x and z.
+    pub centre: [f32; 2],
+    pub fade: mercs2_formats::terrainmesh::TerrainFade,
+}
+
+/// The `materialData` of a draw with no material (terrain tiles, imports, debug draws): no retail value
+/// exists for it, so it is the block that leaves the renderer's lighting unchanged — diffuse and ambient
+/// 1, no emissive, alpha multiplier 1.
+pub const NO_MATERIAL_DATA: [[f32; 4]; 6] = [
+    [1.0, 1.0, 1.0, 1.0],
+    [1.0, 1.0, 1.0, 1.0],
+    [1.0, 1.0, 1.0, 0.0],
+    [0.0, 0.0, 0.0, 1.0],
+    [0.0, 0.0, 0.0, 0.0],
+    [0.0, 1.0, 0.0, 1.0],
+];
+
 impl Default for DrawGroup {
     /// An unconditionally-visible group: present at every LOD rung, bound to no HIER node. This is
     /// the right shape for geometry that has no `SEGM` record at all — terrain tiles, imported
@@ -189,15 +261,189 @@ impl Default for DrawGroup {
             specular: None,
             normal: None,
             textures: Vec::new(),
+            material_flags: 0,
+            shader_key: 0,
+            material_data: NO_MATERIAL_DATA,
             group_index: 0,
             lod_mask: 0xFF,
             node: -1,
             sub_object: 0,
             seg_id: 0,
+            segm_row: 0,
             rung: 0,
             skinned: false,
+            ground: None,
+            scrub: None,
         }
     }
+}
+
+/// One ground cover instance as the GPU reads it: the matrix rows, cell-local, then
+/// [`Instance::vertical_shear`](mercs2_formats::scrub::Instance::vertical_shear) for a shearing mesh
+/// and 0 otherwise.
+#[repr(C)]
+#[derive(Copy, Clone, Debug, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct ScrubInstance {
+    pub rows: [[f32; 4]; 3],
+    pub shear: [f32; 4],
+}
+
+/// The depths one mesh of a pack draws at ([`mercs2_formats::scrub::ScrubMesh`]).
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub struct ScrubDepths {
+    pub alpha_zero: f32,
+    pub cull: f32,
+    /// Alpha-tested: drawn solid at every depth. Otherwise blended once a patch crosses `alpha_zero`.
+    pub cutout: bool,
+}
+
+/// A run of one mesh's instances.
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub struct ScrubRange {
+    /// Into the pack's draws.
+    pub mesh: u32,
+    pub first_instance: u32,
+    pub instance_count: u32,
+}
+
+/// One patch: what the renderer culls. Cell-local.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ScrubPatch {
+    /// What the retail draw measures depth from.
+    pub origin: [f32; 3],
+    pub centre: [f32; 3],
+    pub radius: f32,
+    pub ranges: Vec<ScrubRange>,
+}
+
+/// A ground cover pack, ready to upload: each mesh's one tuft in `verts` and `indices`, instanced.
+#[derive(Clone, Default)]
+pub struct ScrubGeometry {
+    pub verts: Vec<Vertex>,
+    pub indices: Vec<u32>,
+    /// One per mesh.
+    pub draws: Vec<DrawGroup>,
+    pub instances: Vec<ScrubInstance>,
+    pub patches: Vec<ScrubPatch>,
+}
+
+/// One billboard tree as the GPU reads it: `PgBillboardTreeVP`'s `POSITION`, less the corner index its
+/// `w` also carries.
+#[repr(C)]
+#[derive(Copy, Clone, Debug, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct TreeInstance {
+    pub position: [f32; 3],
+    /// A fraction of a turn ([`mercs2_formats::foliage::Leaf::yaw`]).
+    pub yaw: f32,
+}
+
+/// A species' billboard, ready to upload: its quads, each corner's `pos` the offset (across, up, 0) and
+/// `color` the atlas tiles (across, down, 0, 0), and one draw over them all.
+#[derive(Clone)]
+pub struct TreeGeometry {
+    pub verts: Vec<Vertex>,
+    pub indices: Vec<u32>,
+    pub draw: DrawGroup,
+}
+
+/// Build a tree species' billboard.
+pub fn build_billboard(species: &mercs2_formats::foliage::Species) -> TreeGeometry {
+    let m = species.billboard_material();
+    let (mut verts, mut indices) = (Vec::new(), Vec::new());
+    for view in species.views() {
+        let base = verts.len() as u32;
+        verts.extend(view.corners.iter().zip(&view.uvs).map(|(c, uv)| Vertex {
+            pos: [c[0], c[1], 0.0],
+            color: [species.atlas[0] as f32, species.atlas[1] as f32, 0.0, 0.0],
+            uv: *uv,
+            normal: [0.0; 3],
+            tangent: [0.0; 4],
+            joints: [0; 4],
+            weights: [255, 0, 0, 0],
+        }));
+        indices.extend([0, 1, 2, 0, 2, 3].map(|i| base + i));
+    }
+    let draw = DrawGroup {
+        index_count: indices.len() as u32,
+        diffuse: m.diffuse(),
+        normal: m.slot(2),
+        textures: m.textures.clone(),
+        material_flags: m.flags,
+        material_data: m.material_data(),
+        ..Default::default()
+    };
+    TreeGeometry { verts, indices, draw }
+}
+
+/// Build a ground cover container's geometry. An empty container builds none.
+pub fn build_scrub(container: &[u8]) -> Result<ScrubGeometry, String> {
+    use mercs2_formats::scrub::{ScrubPack, Tuft};
+    use mercs2_formats::shader_registrations::retail_name;
+
+    let ScrubPack::Pack(pack) = ScrubPack::decode(container)? else {
+        return Ok(ScrubGeometry::default());
+    };
+    let materials = mercs2_formats::texture::parse_mtrl(container, mercs2_formats::texture::MtrlSource::Scrub)
+        .map_err(|e| format!("MTRL: {e}"))?;
+    if materials.len() != pack.meshes.len() {
+        return Err(format!("{} materials for {} meshes", materials.len(), pack.meshes.len()));
+    }
+    let mut g = ScrubGeometry::default();
+    let mut shears = Vec::new();
+    for (i, (mesh, m)) in pack.meshes.iter().zip(&materials).enumerate() {
+        let Tuft { vertices, triangles } = mesh.tuft().map_err(|e| format!("mesh {i}: {e}"))?;
+        let name = retail_name(mesh.info[1]).ok_or_else(|| format!("mesh {i}: vertex shader 0x{:08X} is not registered", mesh.info[1]))?;
+        shears.push(name.ends_with("_ShearVertically"));
+        let base = g.verts.len() as u32;
+        g.verts.extend(vertices.iter().map(|v| Vertex {
+            pos: v.position,
+            color: [1.0; 4],
+            uv: v.uv,
+            normal: v.normal,
+            tangent: v.tangent.unwrap_or([0.0; 4]),
+            joints: [0; 4],
+            weights: [255, 0, 0, 0],
+        }));
+        let index_start = g.indices.len() as u32;
+        g.indices.extend(triangles.iter().flatten().map(|&v| base + v as u32));
+        g.draws.push(DrawGroup {
+            index_start,
+            index_count: g.indices.len() as u32 - index_start,
+            diffuse: m.diffuse(),
+            specular: m.specular(),
+            normal: m.slot(2),
+            textures: m.textures.clone(),
+            material_flags: m.flags,
+            shader_key: m.shader_key,
+            material_data: m.material_data(),
+            scrub: Some(ScrubDepths { alpha_zero: mesh.alpha_zero_depth(), cull: mesh.cull_depth(), cutout: m.alpha_tested() }),
+            ..Default::default()
+        });
+    }
+    for patch in &pack.patches {
+        let first = patch.first_range as usize;
+        let mut ranges = Vec::with_capacity(patch.range_count as usize);
+        for r in &pack.ranges[first..first + patch.range_count as usize] {
+            let first_instance = g.instances.len() as u32;
+            let at = r.first_instance as usize;
+            g.instances.extend(pack.instances[at..at + r.instance_count as usize].iter().map(|inst| {
+                let mut rows = inst.matrix();
+                for (row, origin) in rows.iter_mut().zip(patch.origin) {
+                    row[3] += origin;
+                }
+                let [x, y, z] = if shears[r.mesh as usize] { inst.vertical_shear() } else { [0.0; 3] };
+                ScrubInstance { rows, shear: [x, y, z, 0.0] }
+            }));
+            ranges.push(ScrubRange { mesh: r.mesh as u32, first_instance, instance_count: r.instance_count as u32 });
+        }
+        g.patches.push(ScrubPatch {
+            origin: patch.origin,
+            centre: [0, 1, 2].map(|k| patch.origin[k] + patch.sphere_centre[k]),
+            radius: patch.sphere_radius,
+            ranges,
+        });
+    }
+    Ok(g)
 }
 
 /// Build INDEXED triangle geometry, selecting the render/destruction tier bit `0x01` (the default
@@ -284,13 +530,104 @@ pub fn build_indexed_rung(
     build_indexed_source(container, resident, lod_filter, mercs2_formats::texture::MtrlSource::Model)
 }
 
-/// Build a hi-res terrain cell (`terrainmesh`, `0x7C569307`) the way
-/// [`build_indexed_from_container`] builds a model: tier bit `0x01`, with the cell's `MTRL` read by
-/// the terrainmesh loader's count.
-pub fn build_indexed_from_terrainmesh(
+/// The registered pixel shaders of terrain ground, by the detail layers they blend.
+const TERRAIN_PIXEL_SHADERS: [&str; 5] =
+    ["PgTerrainMeshFP", "PgTerrainMeshFP1D", "PgTerrainMeshFP2D", "PgTerrainMeshFP3D", "PgTerrainMeshFP4D"];
+
+/// Build a hi-res terrain cell (`terrainmesh`, `0x7C569307`) at its world position `pos`, the way
+/// `FUN_004AAAB0` draws it near the camera: every patch's draw groups at tier 0, with the material each
+/// `PRMT` record names, one [`DrawGroup`] per material.
+///
+/// A cell is more than its ground. Each patch has one ground group, whose vertices have no texture
+/// coordinate and whose materials are `PgTerrainMeshFP*` ([`TerrainGround`]), and overlay groups (the
+/// roads, paving and decals, on `PgMeshVP`/`PgDiffSpecNorm*` materials) with authored coordinates and
+/// tangents, which are ordinary material draws.
+pub fn build_terrain_cell(
     container: &[u8],
-) -> Result<(Vec<Vertex>, Vec<u32>, Vec<DrawGroup>, ModelStats), String> {
-    build_indexed_source(container, None, Some(0x01), mercs2_formats::texture::MtrlSource::TerrainMesh)
+    pos: [f32; 3],
+    fade: mercs2_formats::terrainmesh::TerrainFade,
+) -> Result<(Vec<Vertex>, Vec<u32>, Vec<DrawGroup>), String> {
+    use mercs2_formats::hash::pandemic_hash_m2;
+    use mercs2_formats::terrainmesh::{destrip, TerrainCell};
+
+    let cell = TerrainCell::decode(container)?;
+    let materials = mercs2_formats::texture::parse_mtrl(container, mercs2_formats::texture::MtrlSource::TerrainMesh)
+        .map_err(|e| format!("MTRL: {e}"))?;
+    if materials.len() != cell.mtrl.materials.len() {
+        return Err(format!("MTRL: {} materials parsed, {} decoded", materials.len(), cell.mtrl.materials.len()));
+    }
+    let ground_shaders = TERRAIN_PIXEL_SHADERS.map(pandemic_hash_m2);
+    let mut verts = Vec::new();
+    // One material's triangles across the cell's patches, in the order the materials first draw: a
+    // retail draw per patch exists to cull the patch, which the renderer does not do.
+    let mut by_material: Vec<(u32, Vec<u32>)> = Vec::new();
+    for geom in &cell.geoms {
+        for p in &geom.prmgs {
+            let base = verts.len() as u32;
+            for i in 0..p.vertex_count() {
+                let at = p.position(i);
+                verts.push(Vertex {
+                    pos: [0, 1, 2].map(|k| at[k] + geom.poff[k] + pos[k]),
+                    color: p.color(i)?.unwrap_or([1.0; 4]),
+                    uv: p.texcoord(i)?.unwrap_or([0.0; 2]),
+                    normal: p.normal(i),
+                    tangent: p.tangent(i)?.unwrap_or([1.0, 0.0, 0.0, 1.0]),
+                    joints: [0; 4],
+                    weights: [255, 0, 0, 0],
+                });
+            }
+            let pass = &p.pass_groups[0];
+            let first = pass.first_draw as usize;
+            for d in &p.draws[first..first + pass.draw_count as usize] {
+                if d.material as usize >= materials.len() {
+                    return Err(format!("a draw names material {} of {}", d.material, materials.len()));
+                }
+                let at = match by_material.iter().position(|(m, _)| *m == d.material) {
+                    Some(at) => at,
+                    None => {
+                        by_material.push((d.material, Vec::new()));
+                        by_material.len() - 1
+                    }
+                };
+                for t in destrip(&p.indices[p.draw_range(d)?]) {
+                    by_material[at].1.extend(t.map(|i| base + i as u32));
+                }
+            }
+        }
+    }
+    let (mut indices, mut draws) = (Vec::new(), Vec::new());
+    for (material, tris) in by_material {
+        let m = &materials[material as usize];
+        let ground = if ground_shaders.contains(&m.shader_key) {
+            Some(TerrainGround {
+                global: m.slot(0).ok_or_else(|| format!("ground material {material} has no global map"))?,
+                detail: m.slot(1),
+                layers: [0, 1, 2, 3].map(|n| m.slot(2 + 2 * n)),
+                layer_uv: [0, 1, 2, 3].map(|n| cell.mtrl.layer_uv(material as usize, n)),
+                uv_scale: cell.mtrl.materials[material as usize].uv_scale(),
+                centre: [pos[0], pos[2]],
+                fade,
+            })
+        } else {
+            None
+        };
+        let index_start = indices.len() as u32;
+        indices.extend(tris);
+        draws.push(DrawGroup {
+            index_start,
+            index_count: indices.len() as u32 - index_start,
+            diffuse: m.diffuse(),
+            specular: m.specular(),
+            normal: m.slot(2),
+            textures: m.textures.clone(),
+            material_flags: m.flags,
+            shader_key: m.shader_key,
+            material_data: m.material_data(),
+            ground,
+            ..Default::default()
+        });
+    }
+    Ok((verts, indices, draws))
 }
 
 fn build_indexed_source(
@@ -320,25 +657,54 @@ fn build_indexed_source(
     block.extend_from_slice(skel_src);
     let skel = Skeleton::from_block(&block).ok();
 
-    // Skinning palette: Skin[b] = InvBind[b] · Pose[b] (row-vector). Phase A is the bind-pose gate:
-    // Pose = world-rest, so Skin[b] = InvBind[b] · WorldBind[b] = identity (up to fp). Rebuilding it
-    // from the real matrices (rather than emitting literal identities) exercises the matmul/inverse
-    // so a convention bug detonates the model instead of hiding. Phase B swaps Pose per animation frame.
-    let bones: Vec<[[f32; 4]; 4]> = match &skel {
-        Some(s) => (0..s.bones.len())
-            .map(|b| mat4_mul(&s.inv_world_bind(b), &s.world_bind(b)))
-            .collect(),
+    // The SKIN bind of each bone: the inverse of the HIER record's `+80` inverse-bind matrix, taken
+    // RAW (`Bone::bind_world_raw`) — read off retail's live skin palette: in the
+    // `23fe7f38_cracked-cruise/pmc` capture, solving `palette · pose⁻¹` for `pmc_hum_mattias` gives
+    // the raw `+80` on every bone where `+80` and the `+16` chain differ (#3, #5–#8, #22–#24, #61,
+    // #83), including the records `Skeleton` calls stale (an ancestor's matrix copied onto a child).
+    // Those are rigid accessory pieces retail places offset from their authored spot on purpose —
+    // its live pose keeps their `+16` local (bone #5 sits 158 mm from #4) while skinning them with
+    // the parent's inverse-bind. `Skeleton`'s staleness rejection is an AUTHORING judgement and is
+    // not applied here. Test: `mercs2_probe` `retail_skin_matches_the_live_palette`.
+    //
+    // It is NOT the `+16` local chain (`Bone::world`). The two agree on most models but not all:
+    // `pmc_hum_chris`'s `+16` locals hold a weapon-carry pose that puts his forearm-roll bones at
+    // local T (0.0805, -0.0859, -0.0685), while his `+80` binds — and every clip — put them at
+    // (0.1721, 0, 0). Skinning against the `+16` chain tore his arms by 143 mm under animation;
+    // retail renders him intact. `+16` remains the Havok REFERENCE pose (`local_bind` below; read
+    // live from retail's `hkaSkeleton`), which drives bones a clip does not animate.
+    //
+    // A node whose `+80` is absent/singular has no authored bind at all. That is only legal on a
+    // node no skinned vertex depends on: a node-placed or rigid group is positioned by
+    // `skin_bind[b]` and skinned by its inverse, so whichever bind it carries cancels exactly. A
+    // skinned vertex that weights such a node is a load error (checked below, once the meshes are
+    // read).
+    let skin_bind: Vec<[[f32; 4]; 4]> = match &skel {
+        Some(s) => s.bones.iter().map(|b| b.bind_world_raw.unwrap_or(b.world)).collect(),
         None => Vec::new(),
     };
 
-    // Per-bone rig for animation: parent, inv-bind, and the bind-pose LOCAL transform
-    // (local_b = world_b · inv(world_parent); root's local = its world).
+    // The REST palette: Skin[b] = InvBind[b] · Pose[b] (row-vector) with Pose = the REFERENCE pose,
+    // the `+16` local chain — what retail holds for a node no clip drives. Read off retail's live
+    // per-node matrices (`23fe7f38_cracked-cruise/pmc`, model `0x1FBFBB4B`, the array at OBJ+0x2B8):
+    // all 73 equal the `+16` chain, while `+80` matches only the 8 nodes that own geometry. It is NOT
+    // the `+80` bind (Skin = identity): a vehicle's part nodes carry their PARENT's `+80` (the M1A2
+    // turret's is the hull origin, 1.63 m below its `+16` mount), and an instance node carries a copy
+    // of its source's, so an identity rest sank every turret and stacked every instanced wheel.
+    // Animation swaps Pose per frame.
+    let bones: Vec<[[f32; 4]; 4]> = match &skel {
+        Some(s) => s.bones.iter().zip(&skin_bind).map(|(b, sb)| mat4_mul(&affine_inverse(sb), &b.world)).collect(),
+        None => Vec::new(),
+    };
+
+    // Per-bone rig for animation: parent, the skin bind + its inverse, and the REFERENCE-pose LOCAL
+    // transform (`+16`: local_b = world_b · inv(world_parent); root's local = its world).
     let rig: Vec<BoneRig> = match &skel {
         Some(s) => s
             .bones
             .iter()
-            .map(|b| {
-                let inv_bind = affine_inverse(&b.world);
+            .zip(&skin_bind)
+            .map(|(b, sb)| {
                 let local_bind = if b.parent < 0 {
                     b.world
                 } else {
@@ -347,8 +713,8 @@ fn build_indexed_source(
                 BoneRig {
                     parent: b.parent,
                     name_hash: b.name_hash,
-                    world_bind: b.world,
-                    inv_bind,
+                    world_bind: *sb,
+                    inv_bind: affine_inverse(sb),
                     local_bind,
                 }
             })
@@ -367,6 +733,11 @@ fn build_indexed_source(
         /// The bone this group was placed by (SEGM bone for MESH accessories, INDX node for
         /// blend-less PRMG groups) — the whole group binds 100% to it.
         placed_bone: Option<usize>,
+        /// The SEGM row this placement serves, and that row's node + LOD mask — the source's own
+        /// row for geometry reached through INDX, another row for an instance.
+        row: usize,
+        node: i16,
+        lod_mask: u8,
         positions: Vec<[f32; 3]>,
         normals: Vec<[f32; 3]>,
         tangents: Vec<[f32; 4]>,
@@ -375,6 +746,38 @@ fn build_indexed_source(
     // Per-PRMG-group POFF (parent GEOM position offset). Needed so multi-GEOM meshes (the terrainmesh:
     // 16 sub-tiles at ±150/±50) don't collapse onto each other; single-GEOM models get [0,0,0].
     let poffs = mercs2_formats::model_cubeize::prmg_geom_offsets(container);
+
+    // A group's geometry in model space: bone-local vertices through the placing bone's bind (none =
+    // already model-space), then the group's POFF (parent-GEOM translation; non-zero only for
+    // multi-GEOM meshes).
+    let place = |m: &ModelMesh, bonemat: Option<[[f32; 4]; 4]>| {
+        let (mut positions, normals, tangents): (Vec<[f32; 3]>, Vec<[f32; 3]>, Vec<[f32; 4]>) =
+            if let Some(w) = bonemat {
+                (
+                    m.positions.iter().map(|&p| transform_point(&w, p)).collect(),
+                    m.normals.iter().map(|&n| transform_dir(&w, n)).collect(),
+                    m.tangents
+                        .iter()
+                        .map(|&t| {
+                            let d = transform_dir(&w, [t[0], t[1], t[2]]);
+                            [d[0], d[1], d[2], t[3]]
+                        })
+                        .collect(),
+                )
+            } else {
+                (m.positions.clone(), m.normals.clone(), m.tangents.clone())
+            };
+        if let Some(off) = poffs.get(m.group_index) {
+            if *off != [0.0, 0.0, 0.0] {
+                for p in positions.iter_mut() {
+                    p[0] += off[0];
+                    p[1] += off[1];
+                    p[2] += off[2];
+                }
+            }
+        }
+        (positions, normals, tangents)
+    };
 
     // INDX: mesh-group → HIER node. Groups with NO blend data (no BLENDINDICES/WEIGHT elements
     // in their decl — game data, not inference) are NODE-RIGID: authored node-local and placed
@@ -414,36 +817,87 @@ fn build_indexed_source(
         } else {
             None
         };
-        let bonemat = placed_bone
-            .and_then(|b| skel.as_ref().and_then(|s| s.bones.get(b)))
-            .map(|b| b.world);
-        let (mut positions, normals, tangents) = if let Some(w) = bonemat {
-            (
-                m.positions.iter().map(|&p| transform_point(&w, p)).collect(),
-                m.normals.iter().map(|&n| transform_dir(&w, n)).collect(),
-                m.tangents
-                    .iter()
-                    .map(|&t| {
-                        let d = transform_dir(&w, [t[0], t[1], t[2]]);
-                        [d[0], d[1], d[2], t[3]]
-                    })
-                    .collect(),
-            )
-        } else {
-            (m.positions.clone(), m.normals.clone(), m.tangents.clone())
-        };
-        // Apply the group's POFF (parent-GEOM translation). Non-zero only for multi-GEOM meshes.
-        if let Some(off) = poffs.get(m.group_index) {
-            if *off != [0.0, 0.0, 0.0] {
-                for p in positions.iter_mut() {
-                    p[0] += off[0];
-                    p[1] += off[1];
-                    p[2] += off[2];
+        // Placed by the SAME bind the palette inverts (see `skin_bind`), so pose·local is exact.
+        let bonemat = placed_bone.and_then(|b| skin_bind.get(b)).copied();
+        // A skinned vertex must weight only nodes that carry an authored `+80` bind.
+        if placed_bone.is_none() {
+            if let Some(s) = &skel {
+                for (j, w) in m.joints.iter().zip(&m.weights) {
+                    for k in 0..4 {
+                        let b = j[k] as usize;
+                        if w[k] > 0 && s.bones.get(b).is_some_and(|bone| bone.bind_world_raw.is_none()) {
+                            return Err(format!(
+                                "group {}: skinned vertex weights HIER node {b} (0x{:08X}), which has no invertible +80 inverse-bind",
+                                m.group_index,
+                                s.bones[b].name_hash
+                            ));
+                        }
+                    }
                 }
             }
         }
-        kept.push(Placed { m, placed_bone, positions, normals, tangents });
+        let (positions, normals, tangents) = place(m, bonemat);
+        kept.push(Placed {
+            m,
+            placed_bone,
+            row: m.seg_id,
+            node: m.bone as i16,
+            lod_mask: m.state_mask,
+            positions,
+            normals,
+            tangents,
+        });
     }
+
+    // INSTANCE rows. Retail draws per SEGM ROW (`FUN_00472a50`): row r draws `renderable[seg_id]`,
+    // and the matrix slot comes from the row's own node alone (`FUN_004778b0` reads rec+0, never the
+    // seg_id). So a row whose `seg_id` names ANOTHER row's geometry draws that geometry again, at its
+    // own node, under its own LOD mask. Reaching SEGM only through INDX (above) never finds these:
+    // `SEGM[i].seg_id == i` is NOT an invariant. 251 retail models carry 3,739 such rows — the M1A2's
+    // rows 74..99 put its one road-wheel mesh (segs 72/73) on the other 13 hubs; cars re-draw three
+    // wheels. A source lives in exactly one rung's geometry, so a rung that lacks it draws none here.
+    let segm_rows = match &res_segm {
+        Some(s) => s.clone(),
+        None => mercs2_formats::model_cubeize::parse_segm(container),
+    };
+    let mut instances: Vec<Placed> = Vec::new();
+    for (row, rec) in segm_rows.iter().enumerate() {
+        let src = rec.seg_id as usize;
+        if src == row {
+            continue;
+        }
+        if let Some(bit) = lod_filter {
+            if rec.state_mask != 0 && (rec.state_mask & bit) == 0 {
+                continue;
+            }
+        }
+        for pl in kept.iter().filter(|pl| pl.row == src) {
+            // Every instance measured has a node-placed source. A deforming skin carries its own
+            // per-vertex bones, and what re-drawing it at another node means is not known.
+            if pl.placed_bone.is_none() {
+                return Err(format!(
+                    "SEGM row {row} instances seg {src} (group {}), a deforming skin — instancing a skin is not modelled",
+                    pl.m.group_index
+                ));
+            }
+            let node = rec.bone as i16;
+            let bonemat = usize::try_from(node).ok().and_then(|b| skin_bind.get(b)).copied().ok_or_else(|| {
+                format!("SEGM row {row} instances seg {src} at node {node}, which has no bind ({} HIER nodes)", skin_bind.len())
+            })?;
+            let (positions, normals, tangents) = place(pl.m, Some(bonemat));
+            instances.push(Placed {
+                m: pl.m,
+                placed_bone: Some(node as usize),
+                row,
+                node,
+                lod_mask: rec.state_mask,
+                positions,
+                normals,
+                tangents,
+            });
+        }
+    }
+    kept.extend(instances);
     if kept.is_empty() {
         return Err("model container had no placed drawing groups".into());
     }
@@ -489,15 +943,15 @@ fn build_indexed_source(
             };
             verts.push(Vertex {
                 pos: [p[0], p[1], p[2]],
-                // Per-vertex COLOR (D3DCOLOR, stored B,G,R,A) → RGB. For static interior/building meshes
+                // Per-vertex COLOR (D3DCOLOR, stored B,G,R,A) → RGBA. For static interior/building meshes
                 // this is BAKED vertex lighting (the Pandemic-era interior light); the shader multiplies
                 // it into albedo. Default WHITE (no-op) for meshes with no COLOR element — NOT 0.5, which
                 // was silently halving every texture.
                 color: m
                     .colors
                     .get(vi)
-                    .map(|c| [c[2] as f32 / 255.0, c[1] as f32 / 255.0, c[0] as f32 / 255.0])
-                    .unwrap_or([1.0, 1.0, 1.0]),
+                    .map(|c| [c[2] as f32 / 255.0, c[1] as f32 / 255.0, c[0] as f32 / 255.0, c[3] as f32 / 255.0])
+                    .unwrap_or([1.0, 1.0, 1.0, 1.0]),
                 uv: m.uvs.get(vi).copied().unwrap_or([0.0, 0.0]),
                 normal: pl.normals.get(vi).copied().unwrap_or([0.0, 1.0, 0.0]),
                 tangent: pl.tangents.get(vi).copied().unwrap_or([1.0, 0.0, 0.0, 1.0]),
@@ -522,23 +976,29 @@ fn build_indexed_source(
                 index_count,
                 diffuse: mat.and_then(|m| m.diffuse()),
                 specular: mat.and_then(|m| m.specular()),
-                normal: mat.and_then(|m| m.textures.get(2).copied()),
+                normal: mat.and_then(|m| m.slot(2)),
                 // Every slot, not just the first three. A material can bind up to 10 textures,
                 // and a tool asking "which parts use texture X" gets the wrong answer if it can
                 // only see slots 0-2 — on retail that alone is the difference between 40% and
                 // 89% of textures being attributable to a surface.
                 textures: mat.map(|m| m.textures.clone()).unwrap_or_default(),
+                material_flags: mat.map_or(0, |m| m.flags),
+                shader_key: mat.map_or(0, |m| m.shader_key),
+                material_data: mat.map_or(NO_MATERIAL_DATA, |m| m.material_data()),
                 group_index: m.group_index,
-                lod_mask: m.state_mask,
+                lod_mask: pl.lod_mask,
                 // SEGM +0 is a SIGNED i16: 0xFFFF is node -1 ("no node"), not node 65535.
-                node: m.bone as i16,
+                node: pl.node,
                 sub_object: m.sub_object,
                 seg_id: m.seg_id,
+                segm_row: pl.row,
                 // This builder reads ONE container and can't know where it sits in the chain;
                 // `Model::load` stamps the real rung once it has walked the LOD blocks.
                 rung: 0,
                 // No placement bone = the group kept its own blend data = a real deforming skin.
                 skinned: pl.placed_bone.is_none(),
+                ground: None,
+                scrub: None,
             });
         };
         if m.submeshes.is_empty() {
@@ -563,24 +1023,6 @@ fn build_indexed_source(
         }
     }
 
-    // PRELIT detection: a vertex COLOR that is non-white AND near-grayscale = baked monochrome interior
-    // lighting (the shells), distinct from colored terrain SPLAT weights (also in COLOR). Gate on
-    // RIGID (non-skinned) geometry: SKINNED characters carry baked ambient-occlusion in COLOR too
-    // (Mattias mean ~0.72, blended across bones) but must keep their dynamic sun/point lighting — only
-    // the static building shells (each vertex rigidly bound to ONE bone) bake their FULL lighting and
-    // should drop the sun. Skinned = any vertex weights across >1 bone.
-    let skinned = meshes
-        .iter()
-        .any(|m| m.weights.iter().any(|w| w[1] != 0 || w[2] != 0 || w[3] != 0));
-    let prelit = !skinned
-        && meshes.iter().any(|m| {
-            m.colors.iter().any(|c| {
-                let (r, g, b) = (c[2] as i32, c[1] as i32, c[0] as i32); // D3DCOLOR stored B,G,R,A
-                let mx = r.max(g).max(b);
-                let mn = r.min(g).min(b);
-                mx < 242 && (mx - mn) < 20
-            })
-        });
     let stats = ModelStats {
         meshes: kept.len(),
         vertices: verts.len(),
@@ -591,7 +1033,6 @@ fn build_indexed_source(
         fit_scale: scale,
         bones,
         rig,
-        prelit,
     };
     Ok((verts, indices, draws, stats))
 }
@@ -668,6 +1109,7 @@ pub fn build_from_container(container: &[u8]) -> Result<(Vec<Vertex>, ModelStats
                     (x * 0.5 + 0.5).clamp(0.0, 1.0),
                     (y * 0.5 + 0.5).clamp(0.0, 1.0),
                     (z * 0.5 + 0.5).clamp(0.0, 1.0),
+                    1.0,
                 ],
                 uv: [0.0, 0.0],
                 normal: [0.0, 1.0, 0.0],
@@ -689,7 +1131,51 @@ pub fn build_from_container(container: &[u8]) -> Result<(Vec<Vertex>, ModelStats
         fit_scale: 1.0,
         bones: Vec::new(),
         rig: Vec::new(),
-        prelit: false, // position-only path carries no vertex colors
     };
     Ok((verts, stats))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const IDENT: [[f32; 4]; 4] =
+        [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0]];
+
+    fn vert(joint: u8) -> Vertex {
+        Vertex {
+            pos: [0.0; 3],
+            color: [1.0; 4],
+            uv: [0.0; 2],
+            normal: [0.0, 1.0, 0.0],
+            tangent: [1.0, 0.0, 0.0, 1.0],
+            joints: [joint, 0, 0, 0],
+            weights: [255, 0, 0, 0],
+        }
+    }
+
+    fn bone(parent: i32) -> BoneRig {
+        BoneRig { parent, name_hash: 0, world_bind: IDENT, inv_bind: IDENT, local_bind: IDENT }
+    }
+
+    #[test]
+    fn an_unrigged_skin_rests_at_identity_over_every_referenced_joint() {
+        let rest = SkinData::identity().rest_palette(&[vert(0), vert(3)]).unwrap();
+        assert_eq!(rest, vec![IDENT; 4]);
+    }
+
+    #[test]
+    fn a_rigged_skin_rests_at_its_bones() {
+        let mut lifted = IDENT;
+        lifted[3][1] = 1.63;
+        let skin = SkinData { bones: vec![IDENT, lifted], rig: vec![bone(-1), bone(0)], ..SkinData::identity() };
+        assert_eq!(skin.rest_palette(&[vert(1)]).unwrap(), vec![IDENT, lifted]);
+    }
+
+    #[test]
+    fn a_rigged_skin_whose_verts_outrun_its_palette_is_an_error() {
+        let skin = SkinData { bones: vec![IDENT; 2], rig: vec![bone(-1), bone(0)], ..SkinData::identity() };
+        let e = skin.rest_palette(&[vert(4)]).unwrap_err();
+        assert!(e.contains("2-entry rest palette for 5 referenced joints"), "{e}");
+    }
 }

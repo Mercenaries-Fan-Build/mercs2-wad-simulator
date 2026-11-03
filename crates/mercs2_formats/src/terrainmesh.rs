@@ -80,7 +80,9 @@ const USAGE_POSITION: u8 = 0;
 const USAGE_NORMAL: u8 = 3;
 const USAGE_TEXCOORD: u8 = 5;
 const USAGE_TANGENT: u8 = 6;
+const USAGE_COLOR: u8 = 10;
 const DECLTYPE_FLOAT16_2: u8 = 15;
+const DECLTYPE_D3DCOLOR: u8 = 4;
 
 const ROOT_INFO_LEN: usize = 32;
 const GEOM_INFO_LEN: usize = 44;
@@ -118,9 +120,44 @@ pub struct Aabb {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Mtrl {
     pub materials: Vec<Material>,
-    /// The 256-byte blocks after the records, as 64 little-endian words. Their count equals the material
-    /// count in every retail cell; their contents are not decoded.
+    /// The 256-byte blocks after the records, as 64 little-endian words: a material's `User` vertex
+    /// constants, 16 float4 registers (`FUN_004A8F30` hands them to the material as a count of 16). In
+    /// the `PgTerrainMeshVP*D` shaders detail layer `n` (0..4) is the matrix at register `4n`.
     pub blocks: Vec<[u32; MATERIAL_BLOCK_WORDS]>,
+}
+
+impl Mtrl {
+    /// The planar projection of detail layer `layer` (0..4) of material `material`: its `User` registers
+    /// `4·layer` and `4·layer + 1`. A world position `p` samples the layer at
+    /// `(row0 · (p, 1), row1 · (p, 1))`.
+    pub fn layer_uv(&self, material: usize, layer: usize) -> [[f32; 4]; 2] {
+        let word = |i: usize| f32::from_bits(self.blocks[material][i]);
+        [0, 1].map(|row| [0, 1, 2, 3].map(|col| word((4 * layer + row) * 4 + col)))
+    }
+}
+
+/// A terrain entity's `TerrainFade` record (20 bytes), which `FUN_0066CA40` passes to each patch it
+/// spawns. A hi-res patch's `FadeDistances` are `(global_start, global_end, 1 / (global_end −
+/// global_start), _)` and `(detail_start, detail_end, 1 / (detail_end − detail_start), 1 / detail_size)`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TerrainFade {
+    /// Metres from the camera where the layers start to fade into the global map, and where they are
+    /// gone; `global_end` is also the distance of a patch's tier.
+    pub global_start: f32,
+    pub global_end: f32,
+    /// Metres from the camera where the shared detail map starts to fade, and where it is gone.
+    pub detail_start: f32,
+    pub detail_end: f32,
+    /// Metres one tile of the shared detail map covers.
+    pub detail_size: f32,
+}
+
+impl Default for TerrainFade {
+    /// `FUN_0066CA40`'s values for an entity with no record (`.rdata` `0xB92870`, `0xBCDB5C`,
+    /// `0xB977CC`, `0xB9B980`, `0xB92874`).
+    fn default() -> TerrainFade {
+        TerrainFade { global_start: 100.0, global_end: 150.0, detail_start: 15.0, detail_end: 20.0, detail_size: 2.0 }
+    }
 }
 
 /// One `MTRL` record (layout per `texture::parse_mtrl`: record stride `116 + 4·tex_count`).
@@ -133,8 +170,17 @@ pub struct Material {
     pub flags: u16,
     /// Texture hashes; `texture::TERRAIN_LAYER_MARKER` delimits detail layers.
     pub textures: Vec<u32>,
-    /// The two words closing the record (not decoded).
+    /// The two words closing the record: `tail[0]` is `pandemic_hash_m2` of the pixel shader's registered
+    /// name, `tail[1]` is not decoded.
     pub tail: [u32; 2],
+}
+
+impl Material {
+    /// The UV scale, record bytes 92..100 (`formats::model`'s `uv_scale`). A ground material's `-0.0025`
+    /// maps the 400 m cell onto its global map: `u = 0.5 + scale·x`, `x` cell-local.
+    pub fn uv_scale(&self) -> [f32; 2] {
+        [self.params[22], self.params[23]]
+    }
 }
 
 /// One 100 m patch.
@@ -167,24 +213,30 @@ pub struct Prmg {
     pub indices: Vec<u16>,
 }
 
-/// A 12-byte `PRMG INFO` pass group. Across the 26,577 retail groups the `draw_count`s sum to the
-/// primary draw count and the `alt_draw_count`s (always 1) to the alternate draw count, and `index` is
-/// the group's position (0, 1, 2); `field_4`/`field_6` are not decoded.
+/// A 12-byte `PRMG INFO` pass group: the draws of one distance tier. Across the 26,577 retail groups
+/// the `draw_count`s sum to the primary draw count and the `alt_draw_count`s (always 1) to the
+/// alternate draw count, and `index` is the group's position (0, 1, 2). `FUN_004AAAB0` picks the
+/// tier from `(distance to the patch's sphere − radius) / TerrainFade.global_end`, clamped to 0..1,
+/// and draws `[first_draw, first_draw + draw_count)`, the patch's fade constants set for
+/// `[first_draw, terrain_end)` and cleared for the rest.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PassGroup {
     pub draw_count: u32,
-    pub field_4: u16,
-    pub field_6: u16,
+    pub first_draw: u16,
+    pub terrain_end: u16,
     pub alt_draw_count: u16,
     pub index: u16,
 }
 
 /// One 20-byte `PRMT` draw record. `min_index`/`max_index` are the smallest/largest index in the draw's
-/// range in 130,049 of the 130,224 retail draws; `hash`, `field_4` and `field_18` are not decoded.
+/// range in 130,049 of the 130,224 retail draws; `field_18` is not decoded.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Draw {
-    pub hash: u32,
-    pub field_4: u32,
+    /// `pandemic_hash_m2` of the vertex shader's registered name (`PgTerrainMeshVP2D`, `PgMeshVP`, …).
+    pub vertex_shader: u32,
+    /// Index into [`Mtrl::materials`]. `FUN_004AAAB0` binds this record's material; the `PRMG INFO`
+    /// words are pass counts and say nothing about it.
+    pub material: u32,
     pub start_index: u32,
     pub prim_count: u16,
     pub min_index: u16,
@@ -485,7 +537,7 @@ pub(crate) fn exact_len(b: &[u8], want: usize, ctx: &str) -> Result<(), String> 
 }
 
 /// Byte size of a `D3DDECLTYPE`.
-fn decl_type_size(ty: u8) -> Result<usize, String> {
+pub(crate) fn decl_type_size(ty: u8) -> Result<usize, String> {
     Ok(match ty {
         0 => 4,                      // FLOAT1
         1 => 8,                      // FLOAT2
@@ -577,8 +629,8 @@ fn decode_mtrl(b: &[u8], material_count: usize) -> Result<Mtrl, String> {
 
 fn decode_draw(b: &[u8], o: usize) -> Draw {
     Draw {
-        hash: u32_at(b, o),
-        field_4: u32_at(b, o + 4),
+        vertex_shader: u32_at(b, o),
+        material: u32_at(b, o + 4),
         start_index: u32_at(b, o + 8),
         prim_count: u16_at(b, o + 12),
         min_index: u16_at(b, o + 14),
@@ -595,8 +647,8 @@ fn decode_prmg(children: &[Node], ctx: &str) -> Result<Prmg, String> {
     let alt_count = u32_at(info, 4) as usize;
     let mut pass_groups = [PassGroup {
         draw_count: 0,
-        field_4: 0,
-        field_6: 0,
+        first_draw: 0,
+        terrain_end: 0,
         alt_draw_count: 0,
         index: 0,
     }; 3];
@@ -604,8 +656,8 @@ fn decode_prmg(children: &[Node], ctx: &str) -> Result<Prmg, String> {
         let o = 8 + 12 * g;
         *pg = PassGroup {
             draw_count: u32_at(info, o),
-            field_4: u16_at(info, o + 4),
-            field_6: u16_at(info, o + 6),
+            first_draw: u16_at(info, o + 4),
+            terrain_end: u16_at(info, o + 6),
             alt_draw_count: u16_at(info, o + 8),
             index: u16_at(info, o + 10),
         };
@@ -969,15 +1021,15 @@ impl Prmg {
         info.extend_from_slice(&(self.alt_draws.len() as u32).to_le_bytes());
         for g in &self.pass_groups {
             info.extend_from_slice(&g.draw_count.to_le_bytes());
-            info.extend_from_slice(&g.field_4.to_le_bytes());
-            info.extend_from_slice(&g.field_6.to_le_bytes());
+            info.extend_from_slice(&g.first_draw.to_le_bytes());
+            info.extend_from_slice(&g.terrain_end.to_le_bytes());
             info.extend_from_slice(&g.alt_draw_count.to_le_bytes());
             info.extend_from_slice(&g.index.to_le_bytes());
         }
         let mut prmt = Vec::with_capacity((self.draws.len() + self.alt_draws.len()) * DRAW_LEN);
         for d in self.draws.iter().chain(&self.alt_draws) {
-            prmt.extend_from_slice(&d.hash.to_le_bytes());
-            prmt.extend_from_slice(&d.field_4.to_le_bytes());
+            prmt.extend_from_slice(&d.vertex_shader.to_le_bytes());
+            prmt.extend_from_slice(&d.material.to_le_bytes());
             prmt.extend_from_slice(&d.start_index.to_le_bytes());
             prmt.extend_from_slice(&d.prim_count.to_le_bytes());
             prmt.extend_from_slice(&d.min_index.to_le_bytes());
@@ -1034,6 +1086,17 @@ impl Prmg {
             .map(|off| {
                 let o = i * self.stride as usize + off;
                 [0, 1, 2, 3].map(|k| read_f16_le(&self.vertices, o + 2 * k))
+            }))
+    }
+
+    /// Vertex COLOR of vertex `i` as RGBA in 0..1, `None` when the decl has no COLOR. A `D3DCOLOR`
+    /// stores B, G, R, A; the terrain vertex shaders read it as `v2.xyzw` = R, G, B, A.
+    pub fn color(&self, i: usize) -> Result<Option<[f32; 4]>, String> {
+        Ok(self
+            .optional_offset(USAGE_COLOR, DECLTYPE_D3DCOLOR)?
+            .map(|off| {
+                let o = i * self.stride as usize + off;
+                [2, 1, 0, 3].map(|k| self.vertices[o + k] as f32 / 255.0)
             }))
     }
 
@@ -1726,8 +1789,8 @@ pub(crate) mod tests {
         let indices = stripify(&tris).unwrap();
         let prim_count = (indices.len() - 2) as u16;
         let draw = Draw {
-            hash: 0x16E4_944B,
-            field_4: 0,
+            vertex_shader: 0x16E4_944B,
+            material: 0,
             start_index: 0,
             prim_count,
             min_index: 0,
@@ -1736,8 +1799,8 @@ pub(crate) mod tests {
         };
         let group = |i: u16, c: u32| PassGroup {
             draw_count: c,
-            field_4: 0,
-            field_6: 1,
+            first_draw: 0,
+            terrain_end: 1,
             alt_draw_count: 1,
             index: i,
         };

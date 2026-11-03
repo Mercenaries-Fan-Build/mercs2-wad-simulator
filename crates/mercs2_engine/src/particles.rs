@@ -1,22 +1,20 @@
 //! CPU billboard particle system — the FX runtime (registry §7 / `docs/rendering_fx_lighting_gap.md`
 //! subsystem E).
 //!
-//! Mirrors the game's emitter model closely enough to drive the same content: an emitter template
-//! ([`EmitterDesc`], populated from a parsed effect — `mercs2_formats::fxdict::EffectContainer`) is
-//! *started* at a world position — the analogue of Lua's
-//! `ObjectState.StartEmitter` — and spawns billboard particles that live for a lifetime, integrate
-//! velocity + gravity + drag (from `FRCE`), fade colour/alpha over life (from the `COLR` gradient),
-//! and scale along a size curve. Rendering is camera-facing quads with additive or alpha blending in
-//! a separate pass drawn *after* the opaque forward pass (particles read depth, don't write it).
+//! Draws two things in a pass *after* the opaque forward pass (particles read depth, don't write
+//! it): an authored effect, run by the port of the retail sim ([`crate::fx_sim`]) and textured from
+//! the `vfx` atlas; and an engine-authored [`EmitterDesc`] with no asset behind it (impact puffs, the
+//! stand-ins for an effect that does not resolve), simulated simply and drawn as soft round sprites.
 //!
-//! This is a faithful CPU simulation, not the engine's job-parallel particle pass; the visual model
-//! (billboards, additive/alpha, colour-over-life, gravity/drag) matches what the reversed chunks
-//! describe. Soft/depth-buffered particles, ribbons/tracers (`Ribbon` 0x059b95b9) and GPU sim are
-//! out of scope here (see the gap doc).
+//! Soft/depth-buffered particles, ribbons/tracers (`Ribbon` 0x059b95b9) and GPU sim are out of scope
+//! here (see the gap doc).
 
 use std::collections::HashMap;
 
-use glam::{Mat4, Vec3, Vec4};
+use glam::{Mat4, Quat, Vec3, Vec4};
+
+use crate::fx_sim::{EffectSim, Starter};
+use mercs2_formats::fxdict::{EffectContainer, FxRect};
 
 pub use mercs2_formats::fxdict::Colr;
 
@@ -27,6 +25,31 @@ struct InstanceRaw {
     center: [f32; 3],
     size: f32,
     color: [f32; 4],
+}
+
+/// One GPU sprite of an effect (matches `fx.wgsl`).
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct SpriteRaw {
+    center: [f32; 3],
+    size: f32,
+    color: [f32; 4],
+    rect: [f32; 4],
+    sin_cos: [f32; 2],
+    intensity: f32,
+    pad: f32,
+}
+
+/// A started effect.
+#[derive(Debug, Clone)]
+pub struct ActiveEffect {
+    pub id: EmitterId,
+    pub sim: EffectSim,
+    /// Start over when it ends, rather than go.
+    pub repeat: bool,
+    pub paused: bool,
+    /// Sim seconds per real second.
+    pub speed: f32,
 }
 
 /// Blend mode for an emitter's particles.
@@ -187,50 +210,6 @@ impl EmitterDesc {
             ..Self::demo_fire()
         }
     }
-
-    /// Build one [`EmitterDesc`] per emitter of a parsed effect — the authored-effect → runtime
-    /// wire that replaces the name-heuristic `demo_*` presets. Each starts from `base` and takes only
-    /// what the sim can use:
-    ///
-    /// - the emitter's `COLR` → colour/alpha over life;
-    /// - the effect's `FRCE` forces (shared by every emitter): `gravity`/`wind` add
-    ///   `magnitude × direction` to the constant acceleration, `drag` sets the linear damping
-    ///   (both readings INFERRED from the field names and retail values); `attractor`/`vortex` have
-    ///   no operator in the billboard sim;
-    /// - `PTYP` bit 0 → additive vs alpha blend (hypothesis carried from the earlier decode).
-    ///
-    /// Spawn rate, life, speed and size stay at `base`'s values: the attribute names are recovered
-    /// but their units are not pinned against the running game.
-    pub fn from_effect(effect: &mercs2_formats::fxdict::EffectContainer, base: &EmitterDesc) -> Vec<Self> {
-        use mercs2_formats::fxdict::ForceKind;
-        let mut accel = Vec3::ZERO;
-        let mut drag = None;
-        for f in &effect.forces {
-            match f.kind {
-                ForceKind::Gravity { magnitude, direction } | ForceKind::Wind { magnitude, direction } => {
-                    accel += Vec3::from(direction) * magnitude;
-                }
-                ForceKind::Drag { magnitude } => drag = Some(magnitude.max(0.0)),
-                ForceKind::Attractor { .. } | ForceKind::Vortex { .. } => {}
-            }
-        }
-        effect
-            .emitters
-            .iter()
-            .map(|e| {
-                let mut d = base.clone();
-                d.gradient = e.particle.colr.clone();
-                if accel != Vec3::ZERO {
-                    d.gravity = accel;
-                }
-                if let Some(k) = drag {
-                    d.drag = k;
-                }
-                d.blend = if e.particle.flags & 1 != 0 { BlendMode::Additive } else { BlendMode::Alpha };
-                d
-            })
-            .collect()
-    }
 }
 
 /// A static, persistent additive glow billboard — the faithful cheap rendering of an authored
@@ -386,17 +365,38 @@ pub struct ParticleSystem {
     /// Static additive glow cards (e.g. the PMC hall god-ray light shafts). Persistent; drawn every
     /// frame into the additive bucket, no simulation.
     glow_cards: Vec<GlowCard>,
+    effects: Vec<ActiveEffect>,
+    /// The `fxdict`, by frame key, set with the atlas.
+    rects: HashMap<u32, FxRect>,
+    /// Last frame's `dt`: retail steps by the mean of the last two (`FUN_0048e550`).
+    last_dt: f32,
+    fx_pipeline: wgpu::RenderPipeline,
+    fx_layout: wgpu::BindGroupLayout,
+    fx_sampler: wgpu::Sampler,
+    fx_bind: Option<wgpu::BindGroup>,
+    fx_buf: wgpu::Buffer,
+    fx_cap: usize,
+    fx_count: u32,
+    /// The colour target encodes sRGB: the sprite's values are gamma, as retail's are.
+    srgb_target: bool,
 }
 
 const INSTANCE_SIZE: usize = std::mem::size_of::<InstanceRaw>();
+const SPRITE_SIZE: usize = std::mem::size_of::<SpriteRaw>();
+/// mat4 view_proj + vec4 right + vec4 up + vec4 forward.
+const CAMERA_BYTES: u64 = 112;
 
-fn make_instance_buffer(device: &wgpu::Device, cap: usize) -> wgpu::Buffer {
+fn make_vertex_buffer(device: &wgpu::Device, bytes: usize) -> wgpu::Buffer {
     device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("particle instances"),
-        size: (cap.max(1) * INSTANCE_SIZE) as wgpu::BufferAddress,
+        size: bytes.max(1) as wgpu::BufferAddress,
         usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,
     })
+}
+
+fn make_instance_buffer(device: &wgpu::Device, cap: usize) -> wgpu::Buffer {
+    make_vertex_buffer(device, cap * INSTANCE_SIZE)
 }
 
 impl ParticleSystem {
@@ -423,10 +423,9 @@ impl ParticleSystem {
                 count: None,
             }],
         });
-        // mat4 view_proj (64) + vec4 cam_right (16) + vec4 cam_up (16) = 96 B.
         let uniform_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("particle camera uniform"),
-            size: 96,
+            size: CAMERA_BYTES,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -438,8 +437,8 @@ impl ParticleSystem {
 
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("particle pipeline layout"),
-            bind_group_layouts: &[&bgl],
-            push_constant_ranges: &[],
+            bind_group_layouts: &[Some(&bgl)],
+            immediate_size: 0,
         });
 
         let vbuf_layout = wgpu::VertexBufferLayout {
@@ -454,13 +453,13 @@ impl ParticleSystem {
                 layout: Some(&layout),
                 vertex: wgpu::VertexState {
                     module: &shader,
-                    entry_point: "vs_main",
-                    buffers: &[vbuf_layout.clone()],
+                    entry_point: Some("vs_main"),
+                    buffers: &[Some(vbuf_layout.clone())],
                     compilation_options: Default::default(),
                 },
                 fragment: Some(wgpu::FragmentState {
                     module: &shader,
-                    entry_point: "fs_main",
+                    entry_point: Some("fs_main"),
                     targets: &[Some(wgpu::ColorTargetState {
                         format: color_format,
                         blend: Some(blend),
@@ -475,13 +474,14 @@ impl ParticleSystem {
                 },
                 depth_stencil: Some(wgpu::DepthStencilState {
                     format: depth_format,
-                    depth_write_enabled: false,
-                    depth_compare: wgpu::CompareFunction::Less,
+                    depth_write_enabled: Some(false),
+                    depth_compare: Some(wgpu::CompareFunction::Less),
                     stencil: wgpu::StencilState::default(),
                     bias: wgpu::DepthBiasState::default(),
                 }),
                 multisample: wgpu::MultisampleState::default(),
-                multiview: None,
+                multiview_mask: None,
+                cache: None,
             })
         };
 
@@ -504,6 +504,97 @@ impl ParticleSystem {
         let pipeline_add = make_pipeline(additive, "particle additive pipeline");
         let pipeline_alpha = make_pipeline(alpha, "particle alpha pipeline");
 
+        let fx_shader = device.create_shader_module(wgpu::include_wgsl!("fx.wgsl"));
+        let fx_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("effect sprite bgl"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
+        let fx_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("effect sprite pipeline layout"),
+            bind_group_layouts: &[Some(&fx_layout)],
+            immediate_size: 0,
+        });
+        let premultiplied = wgpu::BlendComponent {
+            src_factor: wgpu::BlendFactor::One,
+            dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+            operation: wgpu::BlendOperation::Add,
+        };
+        let fx_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("effect sprite pipeline"),
+            layout: Some(&fx_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &fx_shader,
+                entry_point: Some("vs_main"),
+                buffers: &[Some(wgpu::VertexBufferLayout {
+                    array_stride: SPRITE_SIZE as wgpu::BufferAddress,
+                    step_mode: wgpu::VertexStepMode::Instance,
+                    attributes: &wgpu::vertex_attr_array![
+                        0 => Float32x3, 1 => Float32, 2 => Float32x4, 3 => Float32x4, 4 => Float32x2, 5 => Float32
+                    ],
+                })],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &fx_shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: color_format,
+                    blend: Some(wgpu::BlendState { color: premultiplied, alpha: premultiplied }),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                cull_mode: None,
+                ..Default::default()
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: depth_format,
+                depth_write_enabled: Some(false),
+                depth_compare: Some(wgpu::CompareFunction::Less),
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+        let fx_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("effect atlas sampler"),
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::MipmapFilterMode::Linear,
+            ..Default::default()
+        });
+
         ParticleSystem {
             pipeline_add,
             pipeline_alpha,
@@ -519,7 +610,59 @@ impl ParticleSystem {
             emitters: Vec::new(),
             next_id: 1,
             glow_cards: Vec::new(),
+            effects: Vec::new(),
+            rects: HashMap::new(),
+            last_dt: 0.0,
+            fx_pipeline,
+            fx_layout,
+            fx_sampler,
+            fx_bind: None,
+            fx_buf: make_vertex_buffer(device, 256 * SPRITE_SIZE),
+            fx_cap: 256,
+            fx_count: 0,
+            srgb_target: color_format.is_srgb(),
         }
+    }
+
+    /// Set what effects draw from: the `vfx` atlas and the `fxdict`'s rectangles.
+    pub fn set_atlas(&mut self, device: &wgpu::Device, view: &wgpu::TextureView, rects: &[FxRect]) {
+        self.rects = rects.iter().map(|r| (r.key, *r)).collect();
+        self.fx_bind = Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("effect sprite bind"),
+            layout: &self.fx_layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: self.uniform_buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(view) },
+                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&self.fx_sampler) },
+            ],
+        }));
+    }
+
+    /// Whether [`Self::set_atlas`] has run.
+    pub fn has_atlas(&self) -> bool {
+        self.fx_bind.is_some()
+    }
+
+    /// Start `effect` at a world position and rotation. An error when the atlas is not set or the
+    /// effect cannot run.
+    pub fn start_effect(&mut self, effect: &EffectContainer, starter: Starter, pos: Vec3, rot: Quat, repeat: bool) -> Result<EmitterId, String> {
+        if !self.has_atlas() {
+            return Err("an effect started before the vfx atlas was set".to_string());
+        }
+        let id = EmitterId(self.next_id);
+        self.next_id += 1;
+        let sim = EffectSim::new(effect, &self.rects, starter, pos, rot, (id.0 as u32).wrapping_mul(2654435761))?;
+        self.effects.push(ActiveEffect { id, sim, repeat, paused: false, speed: 1.0 });
+        Ok(id)
+    }
+
+    pub fn effect_mut(&mut self, id: EmitterId) -> Option<&mut ActiveEffect> {
+        self.effects.iter_mut().find(|e| e.id == id)
+    }
+
+    /// Take a started effect away at once, particles and all.
+    pub fn remove_effect(&mut self, id: EmitterId) {
+        self.effects.retain(|e| e.id != id);
     }
 
     /// Replace the set of static additive glow cards (persistent environmental FX like the PMC hall
@@ -576,12 +719,12 @@ impl ParticleSystem {
 
     /// Number of currently-live emitters (started, not yet reaped).
     pub fn active_emitter_count(&self) -> usize {
-        self.emitters.len()
+        self.emitters.len() + self.effects.len()
     }
 
     /// Total live particle count across all emitters (test/diagnostic).
     pub fn live_particle_count(&self) -> usize {
-        self.emitters.iter().map(|e| e.particles.len()).sum()
+        self.emitters.iter().map(|e| e.particles.len()).sum::<usize>() + self.effects.iter().map(|e| e.sim.live_particles()).sum::<usize>()
     }
 
     /// Advance the simulation by `dt` seconds and reap finished emitters.
@@ -593,6 +736,15 @@ impl ParticleSystem {
             e.update(dt);
         }
         self.emitters.retain(|e| !e.is_dead());
+        let step = (self.last_dt + dt) * 0.5;
+        self.last_dt = dt;
+        for e in self.effects.iter_mut().filter(|e| !e.paused) {
+            e.sim.step(step * e.speed);
+            if e.repeat && e.sim.is_finished() {
+                e.sim.restart();
+            }
+        }
+        self.effects.retain(|e| !e.sim.is_finished());
     }
 
     /// Upload the camera uniform + rebuild/upload the instance buffers. Call once per frame BEFORE
@@ -606,13 +758,39 @@ impl ParticleSystem {
         view_proj: Mat4,
         cam_right: Vec3,
         cam_up: Vec3,
+        cam_forward: Vec3,
         eye: Vec3,
     ) {
-        let mut uni = [0f32; 24];
+        let mut uni = [0f32; 28];
         uni[..16].copy_from_slice(&view_proj.to_cols_array());
         uni[16..19].copy_from_slice(&cam_right.to_array());
         uni[20..23].copy_from_slice(&cam_up.to_array());
+        uni[24..27].copy_from_slice(&cam_forward.to_array());
+        uni[27] = if self.srgb_target { 1.0 } else { 0.0 };
         queue.write_buffer(&self.uniform_buf, 0, bytemuck::cast_slice(&uni));
+
+        let mut sprites: Vec<SpriteRaw> = Vec::new();
+        for e in &self.effects {
+            e.sim.sprites(cam_right, cam_up, cam_forward, |s| {
+                sprites.push(SpriteRaw {
+                    center: s.pos,
+                    size: s.size,
+                    color: s.color,
+                    rect: s.rect,
+                    sin_cos: [s.sin, s.cos],
+                    intensity: s.intensity,
+                    pad: 0.0,
+                })
+            });
+        }
+        if sprites.len() > self.fx_cap {
+            self.fx_cap = sprites.len().next_power_of_two();
+            self.fx_buf = make_vertex_buffer(device, self.fx_cap * SPRITE_SIZE);
+        }
+        if !sprites.is_empty() {
+            queue.write_buffer(&self.fx_buf, 0, bytemuck::cast_slice(&sprites));
+        }
+        self.fx_count = sprites.len() as u32;
 
         let mut add_inst: Vec<InstanceRaw> = Vec::new();
         let mut alpha_inst: Vec<InstanceRaw> = Vec::new();
@@ -669,6 +847,12 @@ impl ParticleSystem {
             pass.set_pipeline(&self.pipeline_add);
             pass.set_vertex_buffer(0, self.add_buf.slice(..));
             pass.draw(0..6, 0..self.add_count);
+        }
+        if let (Some(bind), true) = (&self.fx_bind, self.fx_count > 0) {
+            pass.set_bind_group(0, bind, &[]);
+            pass.set_pipeline(&self.fx_pipeline);
+            pass.set_vertex_buffer(0, self.fx_buf.slice(..));
+            pass.draw(0..6, 0..self.fx_count);
         }
     }
 }
@@ -817,56 +1001,5 @@ mod tests {
         assert_eq!(s.blend, BlendMode::Alpha);
         let f = EmitterDesc::demo_fire();
         assert_eq!(f.blend, BlendMode::Additive);
-    }
-
-    #[test]
-    fn a_parsed_effect_overrides_base_with_authored_data() {
-        use mercs2_formats::fxdict::{
-            AttrDef, Atrb, Colr, EffectContainer, Emitter, EmitterShape, Force, ForceKind, ParticleType, Text,
-            ValueKind, FRCE_COMMON_ATTRIBUTES, FRCE_DRAG_ATTRIBUTES, PTYP_ATTRIBUTES_AFTER_COLR,
-            PTYP_ATTRIBUTES_BEFORE_COLR, TRFM_CHANNELS,
-        };
-        let atrb = |d: &AttrDef| match d.kind {
-            ValueKind::F32 => Atrb::f32(d.hash, 0.0),
-            ValueKind::U32 => Atrb::u32(d.hash, 0),
-        };
-        let emitter = |flags: u32, colour: [u8; 4]| Emitter {
-            transform: [[0.0; 4]; 4],
-            channels: TRFM_CHANNELS.iter().map(atrb).collect(),
-            geom: None,
-            particle: ParticleType {
-                flags,
-                attributes: PTYP_ATTRIBUTES_BEFORE_COLR.iter().chain(PTYP_ATTRIBUTES_AFTER_COLR.iter()).map(atrb).collect(),
-                colr: Colr::uniform(colour, 0x3C00),
-                text: Text { frames: vec![1] },
-            },
-        };
-        let force = |kind: ForceKind, extra: &[AttrDef]| Force {
-            kind,
-            attributes: FRCE_COMMON_ATTRIBUTES.iter().chain(extra.iter()).map(atrb).collect(),
-        };
-        let fx = EffectContainer {
-            shapes: vec![EmitterShape { records: vec![] }],
-            emitters: vec![emitter(1, [255, 0, 0, 255]), emitter(0, [0, 0, 255, 255])],
-            forces: vec![
-                force(ForceKind::Gravity { magnitude: 9.8, direction: [0.0, -1.0, 0.0] }, &[]),
-                force(ForceKind::Drag { magnitude: 0.5 }, &FRCE_DRAG_ATTRIBUTES),
-            ],
-        };
-        // Base = smoke (alpha, grey). Each emitter must take the authored values.
-        let ds = EmitterDesc::from_effect(&fx, &EmitterDesc::demo_smoke());
-        assert_eq!(ds.len(), 2, "one desc per emitter");
-        assert_eq!(ds[0].gravity, Vec3::new(0.0, -9.8, 0.0), "FRCE gravity → accel");
-        assert!((ds[0].drag - 0.5).abs() < 1e-6, "FRCE drag → damping");
-        assert_eq!(ds[0].blend, BlendMode::Additive, "PTYP bit0 → additive");
-        assert_eq!(ds[1].blend, BlendMode::Alpha);
-        assert_eq!(ds[0].gradient.sample(0.0), [1.0, 0.0, 0.0, 1.0], "COLR red overrode the smoke grey");
-        assert_eq!(ds[1].gradient.sample(0.5), [0.0, 0.0, 1.0, 1.0]);
-        // No forces: the base's gravity and drag stand.
-        let calm = EffectContainer { forces: vec![], ..fx };
-        let base = EmitterDesc::demo_fire();
-        let d = &EmitterDesc::from_effect(&calm, &base)[0];
-        assert_eq!(d.gravity, base.gravity);
-        assert_eq!(d.drag, base.drag);
     }
 }

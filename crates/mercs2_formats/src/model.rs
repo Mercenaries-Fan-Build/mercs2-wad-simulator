@@ -1366,7 +1366,18 @@ fn decode_mesh_group(n: &UcfxNode, at: &str) -> Result<MeshGroup, String> {
     })
 }
 
-fn encode_mesh_group(g: &MeshGroup, at: &str) -> Result<UcfxNode, String> {
+pub(crate) fn encode_mesh_group(g: &MeshGroup, at: &str) -> Result<UcfxNode, String> {
+    let (info, stream, prims) = mesh_group_rows(g, at)?;
+    Ok(UcfxNode::marker(*b"PRMG", vec![info, stream, counted_u16s_node(*b"AREA", &g.area), counted_u16s_node(*b"IBUF", &g.strip), prims]))
+}
+
+/// A `TINY` sub-object's group: a [`MeshGroup`]'s rows less `AREA`.
+pub(crate) fn encode_tiny_group(g: &MeshGroup, at: &str) -> Result<UcfxNode, String> {
+    let (info, stream, prims) = mesh_group_rows(g, at)?;
+    Ok(UcfxNode::marker(*b"PRMG", vec![info, stream, counted_u16s_node(*b"IBUF", &g.strip), prims]))
+}
+
+fn mesh_group_rows(g: &MeshGroup, at: &str) -> Result<(UcfxNode, UcfxNode, UcfxNode), String> {
     let mut info = Vec::with_capacity(MESH_GROUP_INFO_BYTES);
     for w in [g.list_a.len() as u32, g.list_b.len() as u32, 0, g.vertex_shader, g.second_vertex_shader] {
         put_u32(&mut info, w);
@@ -1375,16 +1386,7 @@ fn encode_mesh_group(g: &MeshGroup, at: &str) -> Result<UcfxNode, String> {
     put_f32s(&mut info, &[g.radius]);
     put_f32s(&mut info, &g.bbox_min);
     put_f32s(&mut info, &g.bbox_max);
-    Ok(UcfxNode::marker(
-        *b"PRMG",
-        vec![
-            UcfxNode::leaf(*b"INFO", info),
-            encode_stream(&g.stream, at)?,
-            counted_u16s_node(*b"AREA", &g.area),
-            counted_u16s_node(*b"IBUF", &g.strip),
-            UcfxNode::leaf(*b"PRMT", encode_prims(&g.list_a, &g.list_b)),
-        ],
-    ))
+    Ok((UcfxNode::leaf(*b"INFO", info), encode_stream(&g.stream, at)?, UcfxNode::leaf(*b"PRMT", encode_prims(&g.list_a, &g.list_b))))
 }
 
 fn decode_morph_stream(n: &UcfxNode, at: &str) -> Result<Vec<[u16; 4]>, String> {
@@ -1479,7 +1481,7 @@ fn decode_skin_group(n: &UcfxNode, at: &str) -> Result<SkinGroup, String> {
     })
 }
 
-fn encode_skin_group(g: &SkinGroup, at: &str) -> Result<UcfxNode, String> {
+pub(crate) fn encode_skin_group(g: &SkinGroup, at: &str) -> Result<UcfxNode, String> {
     if g.bone_ranges.len() + g.unread_range_slots.len() != SKIN_RANGE_SLOTS {
         return Err(format!(
             "{at} has {} bone ranges and {} unread range slots; the INFO holds {SKIN_RANGE_SLOTS} slots",

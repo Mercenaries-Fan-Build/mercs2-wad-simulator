@@ -8,7 +8,7 @@ struct Camera {
     model: mat4x4<f32>,          // model -> WORLD (for world-space position + normals; lights live here)
     cam_pos: vec4<f32>,          // xyz = camera world position (for specular view vector)
     fog_color_density: vec4<f32>, // rgb = fog color, w = density
-    fog_misc: vec4<f32>,          // x = fog enable 0/1, y = fog start distance, z = prelit, w = sun intensity
+    fog_misc: vec4<f32>,          // x = fog enable 0/1, y = fog start distance, w = sun intensity
     overlay: vec4<f32>,           // x = model alpha (1 = opaque), yzw reserved
 };
 @group(0) @binding(0) var<uniform> cam: Camera;
@@ -17,6 +17,24 @@ struct Camera {
 @group(1) @binding(1) var t_normal:   texture_2d<f32>;
 @group(1) @binding(2) var s_linear:   sampler;
 @group(1) @binding(3) var t_specular: texture_2d<f32>; // MTRL slot 1 (`_sm`); black = matte
+// The material (`render::material_params`): alpha.x = the alpha a pixel must exceed (retail ALPHAREF
+// 77/255, ALPHAFUNC GREATER), or -1 when the material is not alpha-tested; alpha.y = a blended
+// material's output alpha (`OutputAlpha::code`: 0 c98.w, 1 diffuse.a·c98.w, 2 that ·COLOR0.a, 3 and 4
+// those maxed with the specular luminance), or -1 for an opaque draw; alpha.z = what binding 3
+// (material slot 1) is: 0 nothing, 1 the specular mask, 2 the emissive map. data = materialData
+// c93..c98 (diffuse, specular, ambient, emissive, subsurface, constant0), uploaded raw. alpha.w = 1 on
+// a terrain ground draw, whose constants are in `ground` (`render::ground_params`).
+struct MaterialParams {
+    alpha: vec4<f32>,
+    data: array<vec4<f32>, 6>,
+    ground: array<vec4<f32>, 11>,
+};
+@group(1) @binding(4) var<uniform> material: MaterialParams;
+// A terrain ground draw's further stages. With binding 0 = GlobalMap, 1 = Layer1Map_Diff and 3 =
+// Layer2Map_Diff: binding 5 = Layer3Map_Diff, 6 = Layer4Map_Diff, 7 = DetailMap.
+@group(1) @binding(5) var t_layer3: texture_2d<f32>;
+@group(1) @binding(6) var t_layer4: texture_2d<f32>;
+@group(1) @binding(7) var t_detail: texture_2d<f32>;
 
 // Skinning palette: Skin[b] = InvBind[b]·Pose[b], row-vector, uploaded row-major so WGSL's
 // column-major read yields the transpose — i.e. `bones[b] * v` computes the row-vector product
@@ -109,14 +127,14 @@ struct VSOut {
     @location(2) t: vec3<f32>,       // WORLD-space tangent
     @location(3) b: vec3<f32>,       // WORLD-space bitangent
     @location(4) view_depth: f32,    // clip.w = view-space depth (LH perspective proj)
-    @location(5) color: vec3<f32>,   // vertex color (albedo modulation; markers category-tint)
+    @location(5) color: vec4<f32>,   // vertex color (albedo modulation; markers category-tint), alpha
     @location(6) wpos: vec3<f32>,    // WORLD-space fragment position (point-light attenuation)
 };
 
 @vertex
 fn vs_main(
     @location(0) pos: vec3<f32>,
-    @location(1) color: vec3<f32>,
+    @location(1) color: vec4<f32>,
     @location(2) uv: vec2<f32>,
     @location(3) normal: vec3<f32>,
     @location(4) tangent: vec4<f32>,
@@ -160,46 +178,176 @@ fn vs_main(
     return out;
 }
 
+// Ground cover, `PgScrub*VP`. Retail repeats a tuft 16 times in one buffer and picks each copy's matrix
+// out of `BoneMatrixArray` by `TEXCOORD.z`; here each instance brings its own. `shear` is 0 except for a
+// `*_ShearVertically` shader, which stands the tuft straight up from its base on a slope: a point moves
+// by `shear` times its height along the instance's up axis. Normals keep the instance's own rows. The
+// fade is a pixel's view depth (`material.ground[0]`). Wind is not applied.
+@vertex
+fn vs_scrub(
+    @location(0) pos: vec3<f32>,
+    @location(2) uv: vec2<f32>,
+    @location(3) normal: vec3<f32>,
+    @location(4) tangent: vec4<f32>,
+    @location(7) r0: vec4<f32>,
+    @location(8) r1: vec4<f32>,
+    @location(9) r2: vec4<f32>,
+    @location(10) shear: vec4<f32>,
+) -> VSOut {
+    var out: VSOut;
+    let rows = mat3x3<f32>(r0.xyz, r1.xyz, r2.xyz); // Rows as columns: `v * rows` is the matrix times v.
+    let offset = pos * rows;
+    let up = normalize(vec3<f32>(r0.y, r1.y, r2.y));
+    let local = offset + vec3<f32>(r0.w, r1.w, r2.w) + shear.xyz * dot(up, offset);
+
+    out.clip_pos = cam.mvp * vec4<f32>(local, 1.0);
+    out.view_depth = out.clip_pos.w;
+    out.color = vec4<f32>(1.0);
+    out.uv = uv;
+    let mw = mat3x3<f32>(cam.model[0].xyz, cam.model[1].xyz, cam.model[2].xyz);
+    out.n = mw * (normal * rows);
+    out.t = mw * (tangent.xyz * rows);
+    out.b = cross(out.n, out.t) * tangent.w;
+    out.wpos = (cam.model * vec4<f32>(local, 1.0)).xyz;
+    return out;
+}
+
+struct BillboardOut {
+    @builtin(position) clip_pos: vec4<f32>,
+    @location(0) uvs: vec4<f32>,      // the two atlas tiles' coordinates
+    @location(1) tile_a: vec4<f32>,   // the first tile's facing, and in w the blend to the second
+    @location(2) tile_b: vec3<f32>,   // the second tile's facing
+    @location(3) view_depth: f32,
+    @location(4) wpos: vec3<f32>,
+};
+
+// Which way a tile of a billboard atlas faces, for a tile `at` of the way round the tree.
+fn tile_facing(at: f32, yaw: f32) -> vec3<f32> {
+    let angle = fract(fract(at + yaw) + 0.5) * 6.2831855 - 3.1415927;
+    return vec3<f32>(sin(angle), 0.0, cos(angle));
+}
+
+// A far tree, `PgBillboardTreeVP`. Each quad of the species turns about +Y to face the camera. The view
+// angle round the tree, less the tree's yaw, falls between two of the atlas's tiles, read left to right
+// and top to bottom. Corner offsets are `pos`, the atlas's tiles across and down are `color`, and `uv`
+// is a corner's place in a tile.
+@vertex
+fn vs_billboard(
+    @location(0) pos: vec3<f32>,
+    @location(1) atlas: vec4<f32>,
+    @location(2) uv: vec2<f32>,
+    @location(7) tree: vec4<f32>,
+) -> BillboardOut {
+    var out: BillboardOut;
+    let to_camera = cam.cam_pos.xyz - tree.xyz;
+    let round = fract(atan2(to_camera.x, to_camera.z) * 0.15915494 - tree.w);
+    let tiles = atlas.x * atlas.y;
+    let tile = floor(round * tiles);
+    out.tile_a = vec4<f32>(tile_facing(tile / tiles, tree.w), round * tiles - tile);
+    out.tile_b = tile_facing(fract((tile + 1.0) / tiles), tree.w);
+    let scale = vec2<f32>(1.0 / atlas.x, 1.0 / atlas.y);
+    let next = (tile + 1.0) % tiles;
+    let cell_a = vec2<f32>(tile % atlas.x, floor(tile / atlas.x));
+    let cell_b = vec2<f32>(next % atlas.x, floor(next / atlas.x));
+    out.uvs = vec4<f32>(cell_a * scale + uv, cell_b * scale + uv);
+
+    let view = normalize(-to_camera);
+    let across = normalize(vec3<f32>(view.z, 0.0, -view.x));
+    out.wpos = tree.xyz + across * pos.x + vec3<f32>(0.0, pos.y, 0.0);
+    out.clip_pos = cam.mvp * vec4<f32>(out.wpos, 1.0);
+    out.view_depth = out.clip_pos.w;
+    return out;
+}
+
+// A normal-map texel in the world, for a tile facing `facing`: `PgBillboardTreeFP` rotates x and z about
+// +Y with the tile.
+fn tile_normal(texel: vec3<f32>, facing: vec3<f32>) -> vec3<f32> {
+    let n = texel * 2.0 - 1.0;
+    return vec3<f32>(n.x * facing.z + n.z * facing.x, n.y, n.z * facing.z - n.x * facing.x);
+}
+
+// `PgBillboardTreeFP`: the two tiles blended, lit like every other draw, gone by the far plane. The
+// retail far plane is 2,400 m (the captures' projection), and `gBillboardData.vFarPlane` · position ×
+// 0.004 starts the fade 250 m before it.
+@fragment
+fn fs_billboard(in: BillboardOut) -> @location(0) vec4<f32> {
+    let blend = in.tile_a.w;
+    let tex = mix(textureSample(t_diffuse, s_linear, in.uvs.xy), textureSample(t_diffuse, s_linear, in.uvs.zw), blend);
+    let fade = saturate((2400.0 - in.view_depth) * 0.004);
+    if (material.alpha.x >= 0.0 && !(tex.a * fade > material.alpha.x)) { discard; }
+    let N = normalize(mix(
+        tile_normal(textureSample(t_normal, s_linear, in.uvs.xy).rgb, in.tile_a.xyz),
+        tile_normal(textureSample(t_normal, s_linear, in.uvs.zw).rgb, in.tile_b),
+        blend,
+    ));
+    let sun_i = cam.fog_misc.w;
+    let sun_dir = normalize(vec3<f32>(0.4, 0.7, -0.5));
+    var shadow = 1.0;
+    if (sun_i > 0.0) {
+        shadow = max(shadow_factor(in.wpos), shadowp.params.x);
+    }
+    var rgb = (tex.rgb * material.data[2].rgb * cam.cam_pos.w
+        + tex.rgb * material.data[0].rgb * sun_i * max(dot(N, sun_dir), 0.0)) * shadow;
+    if (cam.fog_misc.x > 0.5) {
+        let f = clamp(
+            1.0 - exp(-cam.fog_color_density.w * max(in.view_depth - cam.fog_misc.y, 0.0)),
+            0.0, 1.0,
+        );
+        rgb = mix(rgb, cam.fog_color_density.rgb, f);
+    }
+    return vec4<f32>(rgb, tex.a * fade);
+}
+
 @fragment
 fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     var albedo: vec3<f32>;
     var N: vec3<f32>;
     var spec_mask: vec3<f32>;
+    var emissive = vec3<f32>(0.0);
+    var diffuse_a = 1.0;
     let spec_power = 48.0; // fixed Blinn-Phong gloss exponent (per-material gloss is a later refinement)
+    // Ground cover's `COLOR0.w`: `dp4_sat(world, AlphaVec)`, a plane on view depth. It joins the alpha
+    // the test and the blend read.
+    var fade = 1.0;
+    let scrub = material.alpha.w > 1.5;
+    if (scrub) { fade = saturate((material.ground[0].x - in.view_depth) * material.ground[0].y); }
 
-    // TERRAIN SPLAT BLEND (`overlay.y` = 1). The hi-res terrainmesh carries per-vertex D3DCOLOR SPLAT
-    // WEIGHTS in `in.color` (R,G,B; the authored 4th/alpha channel is empirically always 0), and its
-    // draw binds up to THREE terraintextures DIFFUSE detail layers into the material's diffuse/normal/
-    // specular texture slots (the loader repurposes the two extra slots — terrain has no tangent normal
-    // map or spec here). Blend the layers by the normalized weights: layer0 (representative) weighted by
-    // R, layer1 by G, layer2 by B. Absent layers are ALIASED to layer0 by the loader, so a missing
-    // detail blends the base again — never white/flat. Degenerate (all-zero) weights fall back to the
-    // representative layer at full albedo. Terrain uses its geometric normal, is matte, and is opaque
-    // (no alpha cutout), so it stays bright and sun-lit exactly like the pre-blend representative bind.
-    if (cam.overlay.y > 0.5) {
-        let l0 = textureSample(t_diffuse,  s_linear, in.uv).rgb;
-        let l1 = textureSample(t_normal,   s_linear, in.uv).rgb;
-        let l2 = textureSample(t_specular, s_linear, in.uv).rgb;
-        let w = in.color; // R,G,B splat weights in [0,1]
-        let wsum = w.x + w.y + w.z;
-        if (wsum < 0.001) {
-            albedo = l0; // degenerate weights -> representative layer (graceful fallback, never black)
-        } else {
-            albedo = (l0 * w.x + l1 * w.y + l2 * w.z) / wsum;
-        }
-        N = normalize(in.n);        // geometric terrain relief normal (no tangent-space normal map)
-        spec_mask = vec3<f32>(0.0); // matte ground
+    // Terrain ground, `PgTerrainMeshVP*D` + `PgTerrainMeshFP*D`. The vertex COLOR is the layers' weights,
+    // R to A for layers 1 to 4, and a layer a shader does not declare binds black. Near the camera the
+    // layers share what the weights claim and the global map takes the rest; with distance everything
+    // fades into the global map. The shared detail map is a signed term, neutral at 0.5, and is gone
+    // past its own much nearer range. Matte, on the geometric normal: the shaders have no specular and
+    // no normal map.
+    if (material.alpha.w > 0.5 && !scrub) {
+        let g = material.ground;
+        let p = vec4<f32>(in.wpos, 1.0);
+        let d = distance(in.wpos, cam.cam_pos.xyz);
+        let global_uv = 0.5 + (in.wpos.xz - g[8].xy) * g[8].zw;
+        let sum = in.color.x + in.color.y + in.color.z + in.color.w;
+        let global_w = saturate(max((d - g[9].x) * g[9].y, 1.0 - sum));
+        let k = saturate((1.0 - global_w) / (sum + 0.00001));
+        let detail_fade = saturate(1.0 - (d - g[9].z) * g[9].w) * g[10].y;
+        let detail = textureSample(t_detail, s_linear, in.wpos.xz * g[10].x).rgb;
+        albedo = textureSample(t_diffuse, s_linear, global_uv).rgb * global_w
+            + 2.0 * (detail - 0.5) * detail_fade
+            + textureSample(t_normal, s_linear, vec2<f32>(dot(g[0], p), dot(g[1], p))).rgb * k * in.color.x
+            + textureSample(t_specular, s_linear, vec2<f32>(dot(g[2], p), dot(g[3], p))).rgb * k * in.color.y
+            + textureSample(t_layer3, s_linear, vec2<f32>(dot(g[4], p), dot(g[5], p))).rgb * k * in.color.z
+            + textureSample(t_layer4, s_linear, vec2<f32>(dot(g[6], p), dot(g[7], p))).rgb * k * in.color.w;
+        albedo = max(albedo, vec3<f32>(0.0));
+        N = normalize(in.n);
+        spec_mask = vec3<f32>(0.0);
     } else {
         // Vertex color modulates the sampled albedo. Textured geometry (player/props) authors
         // color = (1,1,1) so this is a no-op there; the untextured placement markers use it (white
         // fallback texture) to category-tint via vertex color.
         let tex = textureSample(t_diffuse, s_linear, in.uv);
-        // Alpha-tested cutout. Opaque diffuse (DXT1 / authored a=1, and the white fallback a=1) reads
-        // alpha ≈ 1 and never discards; DXT5 / 1-bit-alpha diffuse carries the cutout mask, so foliage,
-        // railings, fences and window/arch openings in the building shells render see-through instead of
-        // as solid quads. (True alpha-BLEND — glass — is a later, sort-order pass.)
-        if (tex.a < 0.5) { discard; }
-        albedo = tex.rgb * in.color;
+        // Alpha-tested cutout, only for a material whose flags carry the alpha-test bit (foliage,
+        // railings, fences, window/arch openings): a pixel survives when diffuse.a × c98.w exceeds the
+        // reference. Every other material ignores its diffuse alpha here.
+        if (material.alpha.x >= 0.0 && !(tex.a * material.data[5].w * fade > material.alpha.x)) { discard; }
+        diffuse_a = tex.a;
+        albedo = tex.rgb * in.color.rgb;
 
         // Normal maps are DXT5nm/swizzled: X in ALPHA (DXT5's 8-bit alpha), Y in GREEN, Z reconstructed.
         let nsamp = textureSample(t_normal, s_linear, in.uv);
@@ -207,23 +355,33 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
         let ny = nsamp.g * 2.0 - 1.0;
         let nz = sqrt(max(1.0 - nx * nx - ny * ny, 0.0));
         let n_tan = vec3<f32>(nx, ny, nz);
-        let tbn = mat3x3<f32>(normalize(in.t), normalize(in.b), normalize(in.n));
-        N = normalize(tbn * n_tan);
+        if (scrub && dot(in.t, in.t) == 0.0) {
+            N = normalize(in.n); // Ground cover with no TANGENT has no normal map.
+        } else {
+            let tbn = mat3x3<f32>(normalize(in.t), normalize(in.b), normalize(in.n));
+            N = normalize(tbn * n_tan);
+        }
 
-        // Specular mask from the `_sm` map (slot 1). Black fallback -> no highlight (matte).
-        spec_mask = textureSample(t_specular, s_linear, in.uv).rgb;
+        // Material slot 1: the specular mask (`specularMap`), or the emissive map (`emissiveMap`, the
+        // `PgDiffEmis*` shaders, which have no specular term): `PgDiffEmisFP` adds
+        // `emissiveMap.rgb × c96.rgb` after the lit diffuse, untouched by shadow or N·L.
+        let slot1 = textureSample(t_specular, s_linear, in.uv).rgb;
+        if (material.alpha.z > 1.5) {
+            emissive = slot1 * material.data[3].rgb;
+            spec_mask = vec3<f32>(0.0);
+        } else if (material.alpha.z > 0.5) {
+            spec_mask = slot1;
+        } else {
+            spec_mask = vec3<f32>(0.0);
+        }
     }
 
     // View vector (world space) for Blinn-Phong.
     let V = normalize(cam.cam_pos.xyz - in.wpos);
 
-    // Fixed world-space key light (upper-front-right) + ambient fill — the sun term. PRELIT static
-    // geometry (interiors/buildings) bakes its lighting into the vertex COLOR, so the exterior sun
-    // must NOT be stamped over it — the baked term IS the lighting. `fog_misc.z` (prelit flag,
-    // 1 = baked) selects: baked geometry uses `albedo` (baked light) alone; dynamic geometry
-    // (characters/props, white vertex color) keeps the sun+ambient key light unchanged. Dynamic point
-    // lights (below) add to both.
-    let prelit = cam.fog_misc.z;
+    // Fixed world-space key light (upper-front-right) + ambient fill — the sun term. Every retail pixel
+    // shader applies dirLightColor unconditionally; a vertex COLOR scales the result (`*AmbOcc*`) or the
+    // ambient, and never stands in for the sun. Dynamic point lights (below) add to it.
     let sun_dir = normalize(vec3<f32>(0.4, 0.7, -0.5));
     // Sun intensity (`fog_misc.w`) and ambient (`cam_pos.w`) are SCENE-controlled: the exterior sets a
     // bright sun; the INTERIOR sets sun = 0 (no sun indoors) and a higher ambient fill, so the room is
@@ -231,19 +389,20 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     let sun_i = cam.fog_misc.w;
     let ambient = cam.cam_pos.w;
     let sun_ndl = max(dot(N, sun_dir), 0.0);
-    // Split lighting into an unshadowed FLOOR (ambient / baked) and the shadowable DIRECT term, so the
-    // shadow map darkens only direct light — shadowed areas keep the floor and never go pure black.
-    // Prelit static geometry bakes its lighting into vertex COLOR, so its baked albedo IS the floor and
-    // it takes no sun key light; dynamic geometry (characters/props) uses ambient*albedo as the floor
-    // plus the sun key light (when the scene enables it) as its direct term.
-    // Baked vertex lighting reads bright (hall mean ~0.79); scale the prelit baked term down so
-    // interiors aren't washed out. (0.7 = baked-lighting brightness knob.)
-    let baked_scale = 0.21;
-    let ambient_floor = mix(albedo * ambient, albedo * baked_scale, prelit);
-    var direct = albedo * (sun_i * sun_ndl) * (1.0 - prelit);
-    if (sun_ndl > 0.0 && prelit < 0.5 && sun_i > 0.0) {
+    // Split lighting into an unshadowed FLOOR (ambient) and the shadowable DIRECT term, so the shadow map
+    // darkens only direct light — shadowed areas keep the floor and never go pure black.
+    // The retail pixel shaders scale the direct light by materialData c93 (`diffuse`) and the ambient by
+    // c95 (`ambient`) before multiplying by the diffuse texture: 1 on ordinary materials, 0 on the
+    // bullet trail's, whose only light is its emissive term.
+    let kd = albedo * material.data[0].rgb;
+    let ambient_floor = albedo * material.data[2].rgb * ambient;
+    var direct = kd * (sun_i * sun_ndl);
+    // The direct specular light on its own as well: the `*Spec*` shaders' output alpha is its luminance
+    // when that exceeds the diffuse alpha.
+    var spec_light = vec3<f32>(0.0);
+    if (sun_ndl > 0.0 && sun_i > 0.0) {
         let sun_h = normalize(sun_dir + V);
-        direct += spec_mask * pow(max(dot(N, sun_h), 0.0), spec_power);
+        spec_light += spec_mask * pow(max(dot(N, sun_h), 0.0), spec_power);
     }
 
     // Per-pixel dynamic lights, gated by the ShaderLevel light-class permutation (the `DAT_00dfc345`
@@ -277,11 +436,11 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
             let atten = (1.0 - x * x);
             let att = atten * atten;
             let ndl = max(dot(N, Ld), 0.0);
-            direct += albedo * lcol * (linten * ndl * att);
+            direct += kd * lcol * (linten * ndl * att);
             if (ndl > 0.0) {
                 let H = normalize(Ld + V);
                 let ndh = max(dot(N, H), 0.0);
-                direct += spec_mask * lcol * (linten * att * pow(ndh, spec_power));
+                spec_light += spec_mask * lcol * (linten * att * pow(ndh, spec_power));
             }
         }
     }
@@ -311,11 +470,11 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
             let atten = (1.0 - x * x);
             let att = atten * atten * cone;
             let ndl = max(dot(N, Ld), 0.0);
-            direct += albedo * scol * (sinten * ndl * att);
+            direct += kd * scol * (sinten * ndl * att);
             if (ndl > 0.0) {
                 let H = normalize(Ld + V);
                 let ndh = max(dot(N, H), 0.0);
-                direct += spec_mask * scol * (sinten * att * pow(ndh, spec_power));
+                spec_light += spec_mask * scol * (sinten * att * pow(ndh, spec_power));
             }
         }
     }
@@ -328,7 +487,7 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     if (sun_i > 0.0) {
         shadow = max(shadow_factor(in.wpos), shadowp.params.x);
     }
-    var lit = (ambient_floor + direct) * shadow;
+    var lit = (ambient_floor + direct + spec_light) * shadow + emissive;
 
     // Distance fog (PLACEHOLDER for PgSky/PgSun/PgCloud): exponential falloff past the start distance.
     var rgb = lit;
@@ -339,5 +498,16 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
         );
         rgb = mix(rgb, cam.fog_color_density.rgb, f);
     }
-    return vec4<f32>(rgb, cam.overlay.x);
+    // A blended material's output alpha, as its retail pixel shader writes oC0.w (`OutputAlpha`).
+    var alpha = 1.0;
+    if (material.alpha.y >= 0.0) {
+        let code = u32(material.alpha.y + 0.5);
+        alpha = material.data[5].w;
+        if (code >= 1u) { alpha = alpha * diffuse_a; }
+        if (code == 2u || code == 4u) { alpha = alpha * in.color.a * fade; }
+        if (code >= 3u) {
+            alpha = clamp(max(alpha, dot(spec_light * shadow, vec3<f32>(0.299, 0.587, 0.114))), 0.0, 1.0);
+        }
+    }
+    return vec4<f32>(rgb, alpha * cam.overlay.x);
 }

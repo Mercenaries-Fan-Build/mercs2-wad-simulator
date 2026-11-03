@@ -19,10 +19,10 @@ use core::cell::Cell;
 use core::ffi::{CStr, c_char, c_int, c_void};
 use core::sync::atomic::{AtomicBool, AtomicI32, AtomicPtr, AtomicU32, AtomicUsize, Ordering};
 use mercs2_formats::lua_exec::{self, MAX_CHUNK, MAX_RESULTS};
-use mercs2_formats::lua_sites::{HOST_LUA_STATE, LuaSites, Site};
+use mercs2_formats::lua_sites::{HOST_INITIALISED, HOST_LUA_STATE, LuaSites, Site};
 use mercs2_formats::lua_stack::{
-    LUA_TBOOLEAN, LUA_TFUNCTION, LUA_TNIL, LUA_TNUMBER, LUA_TSTRING, LUA_TTABLE, LUA_TTHREAD, Mem, OFF_BASE, OFF_GLOBAL,
-    OFF_STACK, OFF_TOP, TVALUE_SIZE, TVALUE_TT,
+    LUA_TBOOLEAN, LUA_TFUNCTION, LUA_TNIL, LUA_TNUMBER, LUA_TSTRING, LUA_TTABLE, LUA_TTHREAD, Mem, OFF_BASE, OFF_BASE_CI,
+    OFF_CI, OFF_GLOBAL, OFF_STACK, OFF_TOP, TVALUE_SIZE, TVALUE_TT,
 };
 use std::ffi::CString;
 use std::sync::Mutex;
@@ -90,6 +90,7 @@ static LAST_ERROR: Mutex<Option<CString>> = Mutex::new(None);
 static ORIG_WALKER: AtomicUsize = AtomicUsize::new(0);
 static ORIG_TYPE: AtomicUsize = AtomicUsize::new(0);
 static ORIG_WIDGET: AtomicUsize = AtomicUsize::new(0);
+static ORIG_FRAME: AtomicUsize = AtomicUsize::new(0);
 
 thread_local! {
     static EXEC_DEPTH: Cell<u32> = const { Cell::new(0) };
@@ -232,7 +233,12 @@ fn register_from(l: u32, from: usize) -> usize {
     list.len()
 }
 
+/// `l`'s slot. An empty slot holds 0, and the log stub's non-Lua callers pass 0, so 0 is never a state:
+/// matching it would tick the pump with no state to run on.
 fn slot_of(l: u32) -> Option<usize> {
+    if l == 0 {
+        return None;
+    }
     SEEN.iter().position(|s| s.load(Ordering::Relaxed) == l)
 }
 
@@ -293,8 +299,19 @@ fn capture(l: u32) {
     });
 }
 
+/// Ticks that carried a state, ticks with none, and ticks from the frame detour: what tells a quiet Lua
+/// from a stalled pump. `M2Live.Ticks` reads them.
+pub(crate) static TICKS_STATE: AtomicU32 = AtomicU32::new(0);
+pub(crate) static TICKS_NULL: AtomicU32 = AtomicU32::new(0);
+pub(crate) static TICKS_FRAME: AtomicU32 = AtomicU32::new(0);
+
 /// One game-thread call on `l` from a detour.
 pub(crate) fn tick(l: u32) {
+    if l == 0 {
+        TICKS_NULL.fetch_add(1, Ordering::Relaxed);
+        return;
+    }
+    TICKS_STATE.fetch_add(1, Ordering::Relaxed);
     let ticking = TICK_N.load(Ordering::Relaxed) > 0;
     if !ticking && !REG_PENDING.load(Ordering::Relaxed) {
         return;
@@ -343,6 +360,22 @@ unsafe extern "C" fn widget_detour(l: *mut c_void) -> c_int {
     unsafe { orig(l) }
 }
 
+/// Once a frame, from RunFrame: a tick that does not depend on the game's Lua reaching a detour. The
+/// script host's state, and only while no Lua runs on it: a frame's start has none on the stack, and a
+/// frame entered from inside Lua would be a chunk's stack under a running function.
+unsafe extern "C" fn frame_detour() {
+    TICKS_FRAME.fetch_add(1, Ordering::Relaxed);
+    let host = sites_ready().host();
+    if luastack::Process.read_u8(host + HOST_INITIALISED) != 0 {
+        let l = read_u32(host + HOST_LUA_STATE);
+        if looks_like_state(l) && read_u32(l + OFF_CI) == read_u32(l + OFF_BASE_CI) {
+            tick(l);
+        }
+    }
+    let orig: unsafe extern "C" fn() = unsafe { core::mem::transmute(ORIG_FRAME.load(Ordering::Acquire)) };
+    unsafe { orig() }
+}
+
 fn attach(s: &LuaSites, site: Site, detour: *mut c_void, orig: &AtomicUsize) -> Result<(), String> {
     let at = s.va(site);
     let first = luastack::Process.read_u8(at);
@@ -365,10 +398,12 @@ fn install() -> Result<(), String> {
     attach(s, Site::RegisterNamespaces, walker as *mut c_void, &ORIG_WALKER)?;
     attach(s, Site::LuaBType, type_detour as *mut c_void, &ORIG_TYPE)?;
     attach(s, Site::CreateTextWidget, widget_detour as *mut c_void, &ORIG_WIDGET)?;
+    attach(s, Site::FrameStep, frame_detour as *mut c_void, &ORIG_FRAME)?;
     stub::TICK_ON.store(true, Ordering::Release);
     stub::attach(s)?;
     *installed = true;
     rt_log::line("Lua host installed");
+    crate::live::register();
     Ok(())
 }
 
@@ -479,7 +514,25 @@ pub extern "C" fn m2_lua_on_tick(cb: Option<TickCb>, ud: *mut c_void) -> c_int {
 /// A tick's `L` can be a state that has since ended: check before taking work off a queue for it.
 #[unsafe(no_mangle)]
 pub extern "C" fn m2_lua_state_ok(l: *mut c_void) -> c_int {
-    c_int::from(looks_like_state(l as u32))
+    match state_problem(l as u32) {
+        None => 1,
+        Some(problem) => {
+            note_rejected(l as u32, &problem);
+            0
+        }
+    }
+}
+
+/// Log each kind of rejection once: a caller that gets 0 only skips the state, so the reason would
+/// otherwise be lost, and a stalled bridge cannot say why.
+fn note_rejected(l: u32, problem: &str) {
+    static SEEN: Mutex<Vec<String>> = Mutex::new(Vec::new());
+    let kind = problem.split(" (").next().unwrap_or(problem);
+    let mut seen = SEEN.lock().expect("rejection list lock");
+    if !seen.iter().any(|k| k == kind) {
+        seen.push(kind.to_string());
+        rt_log::line(&format!("lua_State {l:#x} rejected: {problem}"));
+    }
 }
 
 /// 1 while [`m2_lua_exec`] runs on this thread.

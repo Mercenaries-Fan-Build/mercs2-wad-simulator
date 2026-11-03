@@ -14,6 +14,7 @@
 
 use crate::registry::{AssetRegistry, RegistryStats};
 use crate::wad::{self, Wad};
+use mercs2_formats::be_to_le::ecs::{is_compact, ComponentSchemas};
 use mercs2_formats::texture::TextureData;
 
 /// One canonical mount slot. The retail WAD manager (`FUN_004BE0A0`, `0x0149FDA0`) constructs
@@ -78,6 +79,8 @@ pub struct AssetSource {
     level: usize,
     /// The level WAD path — used to resolve sibling archives without a second ad-hoc open.
     base_path: String,
+    /// The layouts compact containers inflate through, read from `vz.wad` at the first one.
+    schemas: Option<ComponentSchemas>,
     /// Block residency + the global hash-keyed chunk registry — the retail asset layer. See
     /// `registry.rs`: the WAD stack above is last-wins *file* resolution; registry insert is
     /// first-wins. Both rules are live at once, exactly as retail composes them.
@@ -112,6 +115,7 @@ impl AssetSource {
             slots,
             level: 0,
             base_path: base.to_string(),
+            schemas: None,
             registry: AssetRegistry::default(),
         })
     }
@@ -180,7 +184,7 @@ impl AssetSource {
             wads.len(),
             slots.last()
         );
-        Ok(AssetSource { wads, labels, slots, level, base_path: base.to_string(), registry: AssetRegistry::default() })
+        Ok(AssetSource { wads, labels, slots, level, base_path: base.to_string(), schemas: None, registry: AssetRegistry::default() })
     }
 
     /// The canonical slot each mounted archive occupies, in mount order.
@@ -191,6 +195,11 @@ impl AssetSource {
     /// Index of the archive mounted in `slot`, if any.
     pub fn index_of(&self, slot: MountSlot) -> Option<usize> {
         self.slots.iter().position(|s| *s == slot)
+    }
+
+    /// The mounted archives' paths, in mount order.
+    pub fn paths(&self) -> &[String] {
+        &self.labels
     }
 
     /// The base WAD path (for sibling-archive resolution).
@@ -244,6 +253,22 @@ impl AssetSource {
         let AssetSource { wads, registry, .. } = self;
         let c = registry.resolve(wads, type_hash, name_hash)?;
         registry.slice(c).map(<[u8]>::to_vec)
+    }
+
+    /// An ECS container (`worldentity`, a layer) in the named form its readers take. A compact one,
+    /// as a console bake or the DLC stores it, inflates through the layouts of the game's `vz.wad`
+    /// beside the level, whichever level is open.
+    pub fn ecs_container(&mut self, type_hash: u32, name_hash: u32) -> Result<Option<Vec<u8>>, String> {
+        let Some(c) = self.resolve(type_hash, name_hash) else { return Ok(None) };
+        if !is_compact(&c) {
+            return Ok(Some(c));
+        }
+        if self.schemas.is_none() {
+            let vz = sibling_ci(&self.base_path, "vz.wad")
+                .ok_or_else(|| format!("no vz.wad beside {} to lay out its compact containers", self.base_path))?;
+            self.schemas = Some(ComponentSchemas::from_vz_wad(std::path::Path::new(&vz))?);
+        }
+        self.schemas.as_ref().expect("set above").inflate(&c).map(Some)
     }
 
     /// Residency + registry counters (resident blocks, registered chunks, first-wins shadowed, evicted).
@@ -485,6 +510,7 @@ mod tests {
             level: 0,
             labels: labels.iter().map(|s| s.to_string()).collect(),
             base_path: labels.first().copied().unwrap_or_default().to_string(),
+            schemas: None,
             registry: AssetRegistry::default(),
         }
     }

@@ -246,6 +246,157 @@ struct DrawCall {
     bind: usize,
     lod_mask: u8,
     node: i16,
+    /// A blended material's blend state and cull mode; `None` draws in the opaque pass.
+    blend: Option<BlendKey>,
+}
+
+/// What a blended draw's pipeline is built from: the material's D3D blend state and its cull mode
+/// (`render::material_cull`).
+type BlendKey = (mercs2_formats::texture::MaterialBlend, Option<wgpu::Face>);
+
+/// A ground cover pipeline: a blended draw's blend (`None` writes solid), and its cull.
+type ScrubPipelineKey = (Option<mercs2_formats::texture::MaterialBlend>, Option<wgpu::Face>);
+
+/// One mesh of an uploaded ground cover pack.
+struct ScrubMeshGpu {
+    depths: mesh::ScrubDepths,
+    /// Into its model's `tex_binds`.
+    bind: usize,
+    indices: std::ops::Range<u32>,
+    cull: Option<wgpu::Face>,
+    /// How it blends past its fade start; `None` for a cutout.
+    blend: Option<mercs2_formats::texture::MaterialBlend>,
+}
+
+/// An uploaded ground cover pack. Its geometry and bind groups are the model of the same hash.
+struct ScrubPack {
+    /// `None` for a pack with nothing in it.
+    instances: Option<wgpu::Buffer>,
+    meshes: Vec<ScrubMeshGpu>,
+    patches: Vec<mesh::ScrubPatch>,
+    /// Entities placing it.
+    placed: u32,
+}
+
+/// A pack placed by a `ScrubObject` entity at its cell's position.
+struct PlacedScrub {
+    hash: u32,
+    pos: glam::Vec3,
+    buffer: wgpu::Buffer,
+    bind: wgpu::BindGroup,
+}
+
+/// One range of instances the frame draws.
+struct ScrubFrameDraw {
+    key: u32,
+    range: mesh::ScrubRange,
+    blended: bool,
+}
+
+/// How `FUN_004a5830` draws a mesh in a patch of `radius` whose origin is at view depth `depth`: `None`
+/// when the patch's near side is past the mesh's cull depth, else whether it blends. A cutout never
+/// does. Any other mesh draws solid until the patch's far side passes the depth its alpha reaches 0.
+fn scrub_blended(d: mesh::ScrubDepths, depth: f32, radius: f32) -> Option<bool> {
+    (depth - radius <= d.cull).then_some(!d.cutout && depth + radius > d.alpha_zero)
+}
+
+/// What a geometry pipeline draws into: a `format` target, with `blend`, Z write `depth_write` (the
+/// depth test is always on: `FUN_00858320` sets `ZENABLE` from a runtime bit no material carries) and
+/// `cull`.
+#[derive(Clone, Copy)]
+struct GeomTarget {
+    format: wgpu::TextureFormat,
+    blend: wgpu::BlendState,
+    depth_write: bool,
+    cull: Option<wgpu::Face>,
+}
+
+/// What a geometry pipeline's vertex stage reads.
+#[derive(Clone, Copy, PartialEq)]
+enum GeomKind {
+    /// `vs_main` over the model vertex layout.
+    Model,
+    /// `vs_scrub`, with a [`mesh::ScrubInstance`] stream beside it.
+    Scrub,
+    /// `vs_billboard` and `fs_billboard`, with a [`mesh::TreeInstance`] stream beside it.
+    Billboard,
+}
+
+/// One tree species' billboards.
+struct TreeBatch {
+    /// The model its quads are uploaded under.
+    key: u32,
+    instances: wgpu::Buffer,
+    count: u32,
+}
+
+/// The geometry pipeline: `shader.wgsl` over the model vertex layout, of `kind`.
+fn geom_pipeline(
+    device: &wgpu::Device,
+    layout: &wgpu::PipelineLayout,
+    shader: &wgpu::ShaderModule,
+    kind: GeomKind,
+    target: GeomTarget,
+) -> wgpu::RenderPipeline {
+    let GeomTarget { format, blend, depth_write, cull } = target;
+    let vbuf_layout = wgpu::VertexBufferLayout {
+        array_stride: std::mem::size_of::<Vertex>() as wgpu::BufferAddress,
+        step_mode: wgpu::VertexStepMode::Vertex,
+        attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x4, 2 => Float32x2, 3 => Float32x3, 4 => Float32x4, 5 => Uint8x4, 6 => Unorm8x4],
+    };
+    let instance_layout = match kind {
+        GeomKind::Billboard => wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<mesh::TreeInstance>() as wgpu::BufferAddress,
+            step_mode: wgpu::VertexStepMode::Instance,
+            attributes: &wgpu::vertex_attr_array![7 => Float32x4],
+        },
+        _ => wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<mesh::ScrubInstance>() as wgpu::BufferAddress,
+            step_mode: wgpu::VertexStepMode::Instance,
+            attributes: &wgpu::vertex_attr_array![7 => Float32x4, 8 => Float32x4, 9 => Float32x4, 10 => Float32x4],
+        },
+    };
+    let buffers = [Some(vbuf_layout), Some(instance_layout)];
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("scene geometry pipeline"),
+        layout: Some(layout),
+        vertex: wgpu::VertexState {
+            module: shader,
+            entry_point: Some(match kind {
+                GeomKind::Model => "vs_main",
+                GeomKind::Scrub => "vs_scrub",
+                GeomKind::Billboard => "vs_billboard",
+            }),
+            buffers: if kind == GeomKind::Model { &buffers[..1] } else { &buffers },
+            compilation_options: Default::default(),
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: shader,
+            entry_point: Some(if kind == GeomKind::Billboard { "fs_billboard" } else { "fs_main" }),
+            targets: &[Some(wgpu::ColorTargetState { format, blend: Some(blend), write_mask: wgpu::ColorWrites::ALL })],
+            compilation_options: Default::default(),
+        }),
+        // A model's outward faces are counter-clockwise on screen under this view (`look_at_lh` ·
+        // `perspective_lh`, X mirrored): culling `Back` with `Ccw` front faces draws a closed model
+        // whole from outside, culling `Front` shows its inside (checked on `al_veh_tank_m1a2` through
+        // `--ui-state` captures).
+        primitive: wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::TriangleList,
+            front_face: wgpu::FrontFace::Ccw,
+            cull_mode: cull,
+            ..Default::default()
+        },
+        depth_stencil: Some(wgpu::DepthStencilState {
+            format: DEPTH_FORMAT,
+            depth_write_enabled: Some(depth_write),
+            depth_compare: Some(wgpu::CompareFunction::Less),
+            stencil: wgpu::StencilState::default(),
+            bias: wgpu::DepthBiasState::default(),
+        }),
+        multisample: wgpu::MultisampleState::default(),
+        multiview_mask: None,
+        cache: None,
+    })
 }
 
 struct ModelGpu {
@@ -257,16 +408,15 @@ struct ModelGpu {
     tex_binds: Vec<wgpu::BindGroup>,
     /// Number of bones in this model's palette (>=1; 1 = unskinned identity).
     bone_count: usize,
+    /// The palette an instance no clip drives rests at, `bone_count` long
+    /// ([`mesh::SkinData::rest_palette`]).
+    rest: Vec<[[f32; 4]; 4]>,
     /// Model-fit (centre + uniform scale) so each model is normalised for viewing.
     fit: glam::Mat4,
-    /// Baked-lighting flag: this model bakes its lighting into vertex color, so the shader must NOT
-    /// stamp the fixed exterior sun over it (fed to the per-entity uniform `fog_misc.z`).
-    prelit: bool,
-    /// Terrain SPLAT-BLEND flag: this model is a hi-res terrainmesh tile whose per-vertex COLOR is
-    /// SPLAT WEIGHTS (not albedo modulation) and whose draws bind up to 3 diffuse detail layers into
-    /// the diffuse/normal/specular slots. Fed to the per-entity uniform `overlay.y` so the fragment
-    /// shader blends the layers by the weights instead of the normal-map/specular material path.
+    /// This model is a hi-res terrainmesh tile, which [`Scene::set_terrain_hidden`] hides.
     terrain_blend: bool,
+    /// The model-space sphere the colour pass culls by ([`rest_bounds`]).
+    bounds: (glam::Vec3, f32),
 }
 
 /// Per-entity GPU resources: its own MVP uniform (group 0) and skinning palette (group 2).
@@ -276,6 +426,46 @@ struct EntityGpu {
     bone_buf: wgpu::Buffer,
     bone_bind: wgpu::BindGroup,
     bone_count: usize,
+    /// What `mvp_buf` holds as the model matrix, and `bone_buf` as the palette: a write that would not
+    /// change them is skipped, and each costs a staging allocation.
+    written_model: Option<glam::Mat4>,
+    written_palette: Vec<[[f32; 4]; 4]>,
+}
+
+/// How far a rigged model's sphere is grown past its rest pose, for the reach of a clip or a destruction
+/// state. An unrigged model only ever draws where it rests.
+const RIGGED_BOUNDS_PAD: f32 = 1.5;
+
+/// The sphere around a model's vertices at rest, in model space: each vertex through its first
+/// weighted joint of the rest palette, as the vertex shader places it with no clip.
+fn rest_bounds(verts: &[Vertex], rest: &[[[f32; 4]; 4]], rigged: bool) -> (glam::Vec3, f32) {
+    let at = |v: &Vertex| {
+        let joint = v.weights.iter().position(|&w| w != 0).map_or(0, |k| v.joints[k] as usize);
+        glam::Mat4::from_cols_array_2d(&rest[joint]).transform_point3(glam::Vec3::from(v.pos))
+    };
+    let (mut lo, mut hi) = (glam::Vec3::splat(f32::MAX), glam::Vec3::splat(f32::MIN));
+    for v in verts {
+        let p = at(v);
+        lo = lo.min(p);
+        hi = hi.max(p);
+    }
+    if verts.is_empty() {
+        return (glam::Vec3::ZERO, 0.0);
+    }
+    let centre = (lo + hi) * 0.5;
+    let radius = verts.iter().map(|v| at(v).distance(centre)).fold(0.0, f32::max);
+    (centre, if rigged { radius * RIGGED_BOUNDS_PAD } else { radius })
+}
+
+/// The six planes of a world-to-clip matrix (clip z 0..1), each with its inside positive and unit normal.
+fn frustum_planes(view_proj: glam::Mat4) -> [glam::Vec4; 6] {
+    let [r0, r1, r2, r3] = [0, 1, 2, 3].map(|i| view_proj.row(i));
+    [r3 + r0, r3 - r0, r3 + r1, r3 - r1, r2, r3 - r2].map(|p| p / p.truncate().length())
+}
+
+/// Whether a sphere reaches inside the planes.
+fn sphere_in_view(planes: &[glam::Vec4; 6], centre: glam::Vec3, radius: f32) -> bool {
+    planes.iter().all(|p| p.truncate().dot(centre) + p.w >= -radius)
 }
 
 /// One presented frame read back to the CPU: tightly packed RGBA8, top row first.
@@ -300,6 +490,9 @@ pub struct Scene {
     config: wgpu::SurfaceConfiguration,
     /// The usages the surface supports, from its capabilities: a frame capture needs `COPY_SRC`.
     surface_usages: wgpu::TextureUsages,
+    /// The adapter as the option pages read it: its PCI vendor and device, the multisample counts the
+    /// surface format takes, and the present modes the surface has.
+    pub gpu: GpuInfo,
     /// A requested read-back of the next presented frame ([`Scene::request_capture`]).
     capture: Capture,
     pub size: winit::dpi::PhysicalSize<u32>,
@@ -312,6 +505,13 @@ pub struct Scene {
     camera_bgl: wgpu::BindGroupLayout,
     bone_bgl: wgpu::BindGroupLayout,
     tex_bgl: wgpu::BindGroupLayout,
+    /// The textures terrain cells share, by hash ([`Self::load_terrain_model`]).
+    terrain_views: HashMap<u32, wgpu::TextureView>,
+    /// The material parameters (binding 4) of a bind with no material: not alpha-tested.
+    no_material_params: wgpu::Buffer,
+    /// Every retail pixel shader's samplers, which decide what each material slot binds
+    /// ([`Scene::set_pixel_samplers`]). Required before a model with materials is loaded.
+    pixel_samplers: Option<mercs2_formats::shader_registrations::PixelSamplers>,
     sampler: wgpu::Sampler,
     white: wgpu::TextureView,
     flat_normal: wgpu::TextureView,
@@ -378,6 +578,10 @@ pub struct Scene {
     /// Explicit view matrix + (near, far) supplied per frame by a caller-driven camera
     /// (the fly / third-person camera). `None` = default close orbit around the origin (`--ecs`).
     view_cam: Option<(glam::Mat4, f32, f32)>,
+    /// The image centre's move in clip units ([`set_view_shift`](Self::set_view_shift)).
+    view_shift: glam::Vec2,
+    /// Terrain is not drawn: the base mesh's model ([`set_terrain_hidden`](Self::set_terrain_hidden)).
+    terrain_hidden: Option<u32>,
     /// Distance-fog params (color, density, start). `None` = fog + sky pass disabled, so the
     /// `--ecs` / `--animate` visuals are unchanged. PLACEHOLDER for PgSky/PgSun/PgCloud.
     fog: Option<([f32; 3], f32, f32)>,
@@ -398,6 +602,24 @@ pub struct Scene {
     /// Geometry pipeline targeting the HDR format (world path). `None` if the post chain is unavailable.
     world_pipeline: Option<wgpu::RenderPipeline>,
     world_pipeline_t: Option<wgpu::RenderPipeline>,
+    /// The geometry shader and its layout, kept to build a blended material's pipeline when a model
+    /// that needs it loads.
+    geom_shader: wgpu::ShaderModule,
+    geom_layout: wgpu::PipelineLayout,
+    /// The blended pipelines (`render::wgpu_blend`, Z write off), one per target format, blend state
+    /// and cull mode a loaded material draws with.
+    blend_pipelines: HashMap<(wgpu::TextureFormat, BlendKey), wgpu::RenderPipeline>,
+    scrub_pipelines: HashMap<(wgpu::TextureFormat, ScrubPipelineKey), wgpu::RenderPipeline>,
+    scrub_packs: HashMap<u32, ScrubPack>,
+    /// By entity key.
+    scrub_placed: HashMap<u32, PlacedScrub>,
+    scrub_frame: Vec<ScrubFrameDraw>,
+    /// Group 2 of a ground cover or billboard draw, whose matrices are per instance.
+    scrub_bones: wgpu::BindGroup,
+    tree_pipelines: HashMap<wgpu::TextureFormat, wgpu::RenderPipeline>,
+    trees: Vec<TreeBatch>,
+    tree_camera: wgpu::Buffer,
+    tree_camera_bind: wgpu::BindGroup,
     /// HDR + bloom post chain. `None` = fall back to direct swapchain present.
     post: Option<crate::post::Post>,
     sky_buf: wgpu::Buffer,
@@ -412,6 +634,10 @@ pub struct Scene {
     /// 2D UI overlay (quads + bitmap text, `crate::ui`). Staged via `ui_rect`/`ui_text`, drawn on
     /// top of the shell/loading pass each frame (`render_loading`/`render_menu`). Empty = zero cost.
     ui: crate::ui::UiPass,
+    /// The Flash pass, made when a movie first needs it, and its stencil at the surface's size.
+    gfx: Option<crate::gfx_pass::GfxPass>,
+    gfx_stencil: Option<([u32; 2], wgpu::TextureView)>,
+    movie_pass: Option<crate::movie_pass::MoviePass>,
     /// Billboard particle / FX runtime (registry §7). Drawn AFTER the opaque forward pass.
     /// Empty by default (zero cost) until an effect is started via `fx_start*`.
     particles: crate::particles::ParticleSystem,
@@ -429,31 +655,91 @@ pub struct Scene {
     decal_feed: Option<Rc<RefCell<Vec<DecalVertex>>>>,
 }
 
+/// Why a frame found no surface texture to draw into; see [`wgpu::CurrentSurfaceTexture`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SurfaceError {
+    Timeout,
+    Occluded,
+    Outdated,
+    Lost,
+    Validation,
+}
+
+/// What a frame draws into.
+enum FrameTarget {
+    Surface(wgpu::SurfaceTexture),
+    /// A texture shaped like the surface, for a capture asked of a hidden window.
+    Offscreen(wgpu::Texture),
+}
+
+impl FrameTarget {
+    fn texture(&self) -> &wgpu::Texture {
+        match self {
+            FrameTarget::Surface(surface) => &surface.texture,
+            FrameTarget::Offscreen(texture) => texture,
+        }
+    }
+}
+
 impl Scene {
+    /// The target of this frame. wgpu gives a fully covered macOS window no surface texture, and a
+    /// capture still needs its frame, so that one frame draws offscreen.
+    fn acquire(&mut self) -> Result<FrameTarget, SurfaceError> {
+        use wgpu::CurrentSurfaceTexture as Current;
+        let skipped = match self.surface.get_current_texture() {
+            Current::Success(texture) | Current::Suboptimal(texture) => return Ok(FrameTarget::Surface(texture)),
+            Current::Occluded if matches!(self.capture, Capture::Pending) => {
+                return Ok(FrameTarget::Offscreen(self.device.create_texture(&wgpu::TextureDescriptor {
+                    label: Some("hidden window frame"),
+                    size: wgpu::Extent3d {
+                        width: self.config.width,
+                        height: self.config.height,
+                        depth_or_array_layers: 1,
+                    },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: self.config.format,
+                    usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+                    view_formats: &self.config.view_formats,
+                })));
+            }
+            Current::Timeout => SurfaceError::Timeout,
+            Current::Occluded => {
+                // A hidden window has no present to pace its frames.
+                std::thread::sleep(std::time::Duration::from_millis(16));
+                SurfaceError::Occluded
+            }
+            Current::Outdated => SurfaceError::Outdated,
+            Current::Lost => SurfaceError::Lost,
+            Current::Validation => SurfaceError::Validation,
+        };
+        // Nothing draws this frame, so nothing else consumes what it staged.
+        self.ui.discard();
+        Err(skipped)
+    }
+
     pub async fn new(window: Arc<Window>) -> Scene {
         let size = window.inner_size();
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::PRIMARY,
-            ..Default::default()
-        });
+        let mut instance_desc = wgpu::InstanceDescriptor::new_with_display_handle(Box::new(window.clone()));
+        instance_desc.backends = wgpu::Backends::PRIMARY;
+        let instance = wgpu::Instance::new(instance_desc);
         let surface = instance.create_surface(window.clone()).expect("create_surface");
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions {
                 power_preference: wgpu::PowerPreference::HighPerformance,
                 compatible_surface: Some(&surface),
                 force_fallback_adapter: false,
+                apply_limit_buckets: false,
             })
             .await
             .expect("no suitable GPU adapter");
         let (device, queue) = adapter
-            .request_device(
-                &wgpu::DeviceDescriptor {
-                    label: Some("mercs2_engine scene device"),
-                    required_features: wgpu::Features::TEXTURE_COMPRESSION_BC,
-                    ..Default::default()
-                },
-                None,
-            )
+            .request_device(&wgpu::DeviceDescriptor {
+                label: Some("mercs2_engine scene device"),
+                required_features: wgpu::Features::TEXTURE_COMPRESSION_BC,
+                ..Default::default()
+            })
             .await
             .expect("request_device");
 
@@ -461,8 +747,18 @@ impl Scene {
             .get_default_config(&adapter, size.width.max(1), size.height.max(1))
             .expect("surface unsupported by adapter");
         config.usage = wgpu::TextureUsages::RENDER_ATTACHMENT;
+        // Flash blends in the space its colours were authored in, so it draws through a plain view.
+        config.view_formats.push(config.format.remove_srgb_suffix());
         surface.configure(&device, &config);
-        let surface_usages = surface.get_capabilities(&adapter).usages;
+        let capabilities = surface.get_capabilities(&adapter);
+        let surface_usages = capabilities.usages;
+        let info = adapter.get_info();
+        let gpu = GpuInfo {
+            vendor: info.vendor,
+            device: info.device,
+            sample_counts: adapter.get_texture_format_features(config.format).flags.supported_sample_counts(),
+            present_modes: capabilities.present_modes,
+        };
 
         // group 0: per-entity MVP uniform (+ fog params, read by the fragment stage).
         let camera_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -515,8 +811,26 @@ impl Scene {
                     count: None,
                 },
                 tex_entry(3), // specular / gloss (`_sm`)
+                // the material's alpha-test parameters (`render::material_params`)
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                // a terrain ground draw's further stages (`shader.wgsl`)
+                tex_entry(5),
+                tex_entry(6),
+                tex_entry(7),
             ],
         });
+        // The parameters of a bind with no material: not alpha-tested, neutral materialData.
+        let no_material_params =
+            crate::render::material_params(&device, 0, &mesh::NO_MATERIAL_DATA, crate::render::Slot1Role::None, None);
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("material sampler"),
             address_mode_u: wgpu::AddressMode::Repeat,
@@ -524,7 +838,7 @@ impl Scene {
             address_mode_w: wgpu::AddressMode::Repeat,
             mag_filter: wgpu::FilterMode::Linear,
             min_filter: wgpu::FilterMode::Linear,
-            mipmap_filter: wgpu::FilterMode::Linear, // trilinear: blend across the uploaded mip chain
+            mipmap_filter: wgpu::MipmapFilterMode::Linear, // trilinear: blend across the uploaded mip chain
             ..Default::default()
         });
         let white = make_white_view(&device, &queue);
@@ -681,11 +995,34 @@ impl Scene {
             ],
         });
 
+        let scrub_bones_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("scrub bones"),
+            size: 64,
+            usage: wgpu::BufferUsages::STORAGE,
+            mapped_at_creation: false,
+        });
+        let scrub_bones = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("scrub bones bind"),
+            layout: &bone_bgl,
+            entries: &[wgpu::BindGroupEntry { binding: 0, resource: scrub_bones_buf.as_entire_binding() }],
+        });
+        let tree_camera = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("tree camera"),
+            size: 192,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let tree_camera_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("tree camera bind"),
+            layout: &camera_bgl,
+            entries: &[wgpu::BindGroupEntry { binding: 0, resource: tree_camera.as_entire_binding() }],
+        });
+
         let shader = device.create_shader_module(wgpu::include_wgsl!("shader.wgsl"));
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("scene pipeline layout"),
-            bind_group_layouts: &[&camera_bgl, &tex_bgl, &bone_bgl, &lights_bgl],
-            push_constant_ranges: &[],
+            bind_group_layouts: &[Some(&camera_bgl), Some(&tex_bgl), Some(&bone_bgl), Some(&lights_bgl)],
+            immediate_size: 0,
         });
         // Geometry pipeline builder, parameterised by color-target format so the SAME shader/layout
         // (incl. the group-3 lights) serve BOTH the direct-to-swapchain path (default `--ecs`/
@@ -693,54 +1030,12 @@ impl Scene {
         // `transparent` builds the see-through variant (workshop model-alpha inspection): alpha-blend
         // and DON'T write depth, so a semi-transparent mesh neither self-occludes nor hides the bone
         // markers behind it. Opaque path is unchanged (REPLACE + depth write).
+        // Opaque draws are double-sided — the building shells are wound outward-facing, so back-face
+        // culling would hide their floor+walls when viewed from inside. (Interim: per-material two-sided
+        // flag from MTRL; negligible perf cost at this scale.)
         let build_geom_pipeline = |format: wgpu::TextureFormat, transparent: bool| {
-            let vbuf_layout = wgpu::VertexBufferLayout {
-                array_stride: std::mem::size_of::<Vertex>() as wgpu::BufferAddress,
-                step_mode: wgpu::VertexStepMode::Vertex,
-                attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x2, 3 => Float32x3, 4 => Float32x4, 5 => Uint8x4, 6 => Unorm8x4],
-            };
-            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some("scene geometry pipeline"),
-                layout: Some(&layout),
-                vertex: wgpu::VertexState {
-                    module: &shader,
-                    entry_point: "vs_main",
-                    buffers: &[vbuf_layout],
-                    compilation_options: Default::default(),
-                },
-                fragment: Some(wgpu::FragmentState {
-                    module: &shader,
-                    entry_point: "fs_main",
-                    targets: &[Some(wgpu::ColorTargetState {
-                        format,
-                        blend: Some(if transparent {
-                            wgpu::BlendState::ALPHA_BLENDING
-                        } else {
-                            wgpu::BlendState::REPLACE
-                        }),
-                        write_mask: wgpu::ColorWrites::ALL,
-                    })],
-                    compilation_options: Default::default(),
-                }),
-                primitive: wgpu::PrimitiveState {
-                    topology: wgpu::PrimitiveTopology::TriangleList,
-                    front_face: wgpu::FrontFace::Cw,
-                    // Double-sided — the building shells are wound outward-facing, so back-face culling
-                    // would hide their floor+walls when viewed from inside. (Interim: per-material
-                    // two-sided flag from MTRL; negligible perf cost at this scale.)
-                    cull_mode: None,
-                    ..Default::default()
-                },
-                depth_stencil: Some(wgpu::DepthStencilState {
-                    format: DEPTH_FORMAT,
-                    depth_write_enabled: !transparent,
-                    depth_compare: wgpu::CompareFunction::Less,
-                    stencil: wgpu::StencilState::default(),
-                    bias: wgpu::DepthBiasState::default(),
-                }),
-                multisample: wgpu::MultisampleState::default(),
-                multiview: None,
-            })
+            let blend = if transparent { wgpu::BlendState::ALPHA_BLENDING } else { wgpu::BlendState::REPLACE };
+            geom_pipeline(&device, &layout, &shader, GeomKind::Model, GeomTarget { format, blend, depth_write: !transparent, cull: None })
         };
         let pipeline = build_geom_pipeline(config.format, false);
         let pipeline_t = build_geom_pipeline(config.format, true);
@@ -779,20 +1074,20 @@ impl Scene {
         let shadow_shader = device.create_shader_module(wgpu::include_wgsl!("shadow.wgsl"));
         let shadow_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("shadow pipeline layout"),
-            bind_group_layouts: &[&camera_bgl, &shadow_vp_bgl, &bone_bgl],
-            push_constant_ranges: &[],
+            bind_group_layouts: &[Some(&camera_bgl), Some(&shadow_vp_bgl), Some(&bone_bgl)],
+            immediate_size: 0,
         });
         let shadow_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("shadow pipeline"),
             layout: Some(&shadow_pipeline_layout),
             vertex: wgpu::VertexState {
                 module: &shadow_shader,
-                entry_point: "vs_shadow",
-                buffers: &[wgpu::VertexBufferLayout {
+                entry_point: Some("vs_shadow"),
+                buffers: &[Some(wgpu::VertexBufferLayout {
                     array_stride: std::mem::size_of::<Vertex>() as wgpu::BufferAddress,
                     step_mode: wgpu::VertexStepMode::Vertex,
-                    attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x2, 3 => Float32x3, 4 => Float32x4, 5 => Uint8x4, 6 => Unorm8x4],
-                }],
+                    attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x4, 2 => Float32x2, 3 => Float32x3, 4 => Float32x4, 5 => Uint8x4, 6 => Unorm8x4],
+                })],
                 compilation_options: Default::default(),
             },
             fragment: None,
@@ -804,13 +1099,14 @@ impl Scene {
             },
             depth_stencil: Some(wgpu::DepthStencilState {
                 format: DEPTH_FORMAT,
-                depth_write_enabled: true,
-                depth_compare: wgpu::CompareFunction::Less,
+                depth_write_enabled: Some(true),
+                depth_compare: Some(wgpu::CompareFunction::Less),
                 stencil: wgpu::StencilState::default(),
                 bias: wgpu::DepthBiasState { constant: 2, slope_scale: 2.0, clamp: 0.0 },
             }),
             multisample: wgpu::MultisampleState::default(),
-            multiview: None,
+            multiview_mask: None,
+            cache: None,
         });
 
         // Blob / contact-shadow fallback pass (`FUN_00853710`, shadow_code_map.md §5). A darken-blend
@@ -851,25 +1147,25 @@ impl Scene {
         });
         let blob_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("blob pipeline layout"),
-            bind_group_layouts: &[&blob_bgl],
-            push_constant_ranges: &[],
+            bind_group_layouts: &[Some(&blob_bgl)],
+            immediate_size: 0,
         });
         let blob_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("blob pipeline"),
             layout: Some(&blob_layout),
             vertex: wgpu::VertexState {
                 module: &blob_shader,
-                entry_point: "vs_blob",
-                buffers: &[wgpu::VertexBufferLayout {
+                entry_point: Some("vs_blob"),
+                buffers: &[Some(wgpu::VertexBufferLayout {
                     array_stride: std::mem::size_of::<BlobVertex>() as wgpu::BufferAddress,
                     step_mode: wgpu::VertexStepMode::Vertex,
                     attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x2, 2 => Float32],
-                }],
+                })],
                 compilation_options: Default::default(),
             },
             fragment: Some(wgpu::FragmentState {
                 module: &blob_shader,
-                entry_point: "fs_blob",
+                entry_point: Some("fs_blob"),
                 targets: &[Some(wgpu::ColorTargetState {
                     format: config.format,
                     // Darken blend: out = dst*(1 - a). Blob outputs a = darkness*radial-falloff.
@@ -892,13 +1188,14 @@ impl Scene {
             },
             depth_stencil: Some(wgpu::DepthStencilState {
                 format: DEPTH_FORMAT,
-                depth_write_enabled: false, // a shadow decal, not occluding geometry
-                depth_compare: wgpu::CompareFunction::LessEqual,
+                depth_write_enabled: Some(false), // a shadow decal, not occluding geometry
+                depth_compare: Some(wgpu::CompareFunction::LessEqual),
                 stencil: wgpu::StencilState::default(),
                 bias: wgpu::DepthBiasState::default(),
             }),
             multisample: wgpu::MultisampleState::default(),
-            multiview: None,
+            multiview_mask: None,
+            cache: None,
         });
 
         // Sky pass (PLACEHOLDER for the game's PgSky/PgSun/PgCloud shader stack): a fullscreen
@@ -932,8 +1229,8 @@ impl Scene {
         });
         let sky_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("sky pipeline layout"),
-            bind_group_layouts: &[&sky_bgl],
-            push_constant_ranges: &[],
+            bind_group_layouts: &[Some(&sky_bgl)],
+            immediate_size: 0,
         });
         // Sky pipeline builder, parameterised by color-target format (swapchain for the fallback
         // path, HDR for the tone-mapped world path).
@@ -943,13 +1240,13 @@ impl Scene {
                 layout: Some(&sky_layout),
                 vertex: wgpu::VertexState {
                     module: &sky_shader,
-                    entry_point: "vs_main",
+                    entry_point: Some("vs_main"),
                     buffers: &[],
                     compilation_options: Default::default(),
                 },
                 fragment: Some(wgpu::FragmentState {
                     module: &sky_shader,
-                    entry_point: "fs_main",
+                    entry_point: Some("fs_main"),
                     targets: &[Some(wgpu::ColorTargetState {
                         format,
                         blend: Some(wgpu::BlendState::REPLACE),
@@ -964,13 +1261,14 @@ impl Scene {
                 },
                 depth_stencil: Some(wgpu::DepthStencilState {
                     format: DEPTH_FORMAT,
-                    depth_write_enabled: false,
-                    depth_compare: wgpu::CompareFunction::LessEqual,
+                    depth_write_enabled: Some(false),
+                    depth_compare: Some(wgpu::CompareFunction::LessEqual),
                     stencil: wgpu::StencilState::default(),
                     bias: wgpu::DepthBiasState::default(),
                 }),
                 multisample: wgpu::MultisampleState::default(),
-                multiview: None,
+                multiview_mask: None,
+                cache: None,
             })
         };
         let sky_pipeline = build_sky_pipeline(config.format);
@@ -1019,24 +1317,24 @@ impl Scene {
             entries: &[wgpu::BindGroupEntry { binding: 0, resource: loading_buf.as_entire_binding() }],
         });
         let loading_art_bind =
-            make_tex_bind(&device, &tex_bgl, &sampler, &white, &flat_normal, &black);
+            make_tex_bind(&device, &tex_bgl, &sampler, [&white, &flat_normal, &black, &black, &black, &black], &no_material_params);
         let loading_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("loading pipeline layout"),
-            bind_group_layouts: &[&loading_bgl, &tex_bgl],
-            push_constant_ranges: &[],
+            bind_group_layouts: &[Some(&loading_bgl), Some(&tex_bgl)],
+            immediate_size: 0,
         });
         let loading_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("loading pipeline"),
             layout: Some(&loading_layout),
             vertex: wgpu::VertexState {
                 module: &loading_shader,
-                entry_point: "vs_main",
+                entry_point: Some("vs_main"),
                 buffers: &[],
                 compilation_options: Default::default(),
             },
             fragment: Some(wgpu::FragmentState {
                 module: &loading_shader,
-                entry_point: "fs_main",
+                entry_point: Some("fs_main"),
                 targets: &[Some(wgpu::ColorTargetState {
                     format: config.format,
                     blend: Some(wgpu::BlendState::REPLACE),
@@ -1051,13 +1349,14 @@ impl Scene {
             },
             depth_stencil: Some(wgpu::DepthStencilState {
                 format: DEPTH_FORMAT,
-                depth_write_enabled: false,
-                depth_compare: wgpu::CompareFunction::LessEqual,
+                depth_write_enabled: Some(false),
+                depth_compare: Some(wgpu::CompareFunction::LessEqual),
                 stencil: wgpu::StencilState::default(),
                 bias: wgpu::DepthBiasState::default(),
             }),
             multisample: wgpu::MultisampleState::default(),
-            multiview: None,
+            multiview_mask: None,
+            cache: None,
         });
 
         let ui = crate::ui::UiPass::new(&device, &queue, config.format);
@@ -1080,7 +1379,11 @@ impl Scene {
             queue,
             config,
             surface_usages,
+            gpu,
             capture: Capture::Idle,
+            gfx: None,
+            gfx_stencil: None,
+            movie_pass: None,
             size,
             pipeline,
             pipeline_t,
@@ -1088,6 +1391,9 @@ impl Scene {
             camera_bgl,
             bone_bgl,
             tex_bgl,
+            terrain_views: HashMap::new(),
+            no_material_params,
+            pixel_samplers: None,
             sampler,
             white,
             flat_normal,
@@ -1119,6 +1425,8 @@ impl Scene {
             entities: HashMap::new(),
             start: std::time::Instant::now(),
             view_cam: None,
+            view_shift: glam::Vec2::ZERO,
+            terrain_hidden: None,
             fog: None,
             sun_intensity: 0.9, // exterior default (matches the previous hardcoded key light)
             ambient: 0.35,
@@ -1128,6 +1436,18 @@ impl Scene {
             sky_pipeline_hdr,
             world_pipeline,
             world_pipeline_t,
+            geom_shader: shader,
+            geom_layout: layout,
+            blend_pipelines: HashMap::new(),
+            scrub_pipelines: HashMap::new(),
+            scrub_packs: HashMap::new(),
+            scrub_placed: HashMap::new(),
+            scrub_frame: Vec::new(),
+            scrub_bones,
+            tree_pipelines: HashMap::new(),
+            trees: Vec::new(),
+            tree_camera,
+            tree_camera_bind,
             post,
             sky_buf,
             sky_bind,
@@ -1193,8 +1513,10 @@ impl Scene {
     /// record its aspect; `render_loading` letterboxes it behind the spinner from then on.
     pub fn set_loading_art(&mut self, td: &mercs2_formats::texture::TextureData) {
         if let Some(v) = make_bc_view(&self.device, &self.queue, td, true) {
+            let black = &self.black;
             self.loading_art_bind = make_tex_bind(
-                &self.device, &self.tex_bgl, &self.sampler, &v, &self.flat_normal, &self.black,
+                &self.device, &self.tex_bgl, &self.sampler, [&v, &self.flat_normal, black, black, black, black],
+                &self.no_material_params,
             );
             self.loading_art_aspect = td.width as f32 / td.height.max(1) as f32;
         }
@@ -1210,9 +1532,94 @@ impl Scene {
         self.ui.text(x, y, scale, color, s)
     }
 
+    /// Build this frame's Flash movies and Bink movies for [`Self::render_front_end`].
+    pub fn prepare_front_end(
+        &mut self,
+        flash: &[crate::flash::FlashDraw],
+        images: &mut dyn crate::gfx_pass::GfxImages,
+        movies: &[crate::movie::MovieDraw],
+    ) -> Result<(), String> {
+        let format = self.config.format.remove_srgb_suffix();
+        let gfx = self.gfx.get_or_insert_with(|| crate::gfx_pass::GfxPass::new(&self.device, &self.queue, format));
+        gfx.begin();
+        for draw in flash {
+            gfx.prepare(&self.device, &self.queue, &draw.def, &draw.items, images)?;
+        }
+        let pass = self
+            .movie_pass
+            .get_or_insert_with(|| crate::movie_pass::MoviePass::new(&self.device, format, crate::gfx_pass::GfxPass::depth_format()));
+        pass.prepare(&self.device, &self.queue, movies, [self.config.width, self.config.height]);
+        Ok(())
+    }
+
+    /// Draw the prepared layers on black, back to front, with nothing else on screen.
+    pub fn render_front_end(&mut self, layers: &[FrontLayer]) -> Result<(), SurfaceError> {
+        let size = [self.config.width, self.config.height];
+        if self.gfx_stencil.as_ref().is_none_or(|(at, _)| *at != size) {
+            let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("flash stencil"),
+                size: wgpu::Extent3d { width: size[0], height: size[1], depth_or_array_layers: 1 },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: crate::gfx_pass::GfxPass::depth_format(),
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                view_formats: &[],
+            });
+            self.gfx_stencil = Some((size, texture.create_view(&wgpu::TextureViewDescriptor::default())));
+        }
+        let output = self.acquire()?;
+        let view = output.texture().create_view(&wgpu::TextureViewDescriptor {
+            format: Some(self.config.format.remove_srgb_suffix()),
+            ..Default::default()
+        });
+        let ui_count = self.ui.prepare(&self.device, &self.queue, self.config.width, self.config.height);
+        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("flash frame") });
+        {
+            let stencil = &self.gfx_stencil.as_ref().expect("made above").1;
+            let mut pass = encoder
+                .begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("flash pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &view,
+                        depth_slice: None,
+                        resolve_target: None,
+                        ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::BLACK), store: wgpu::StoreOp::Store },
+                    })],
+                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                        view: stencil,
+                        depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(1.0), store: wgpu::StoreOp::Discard }),
+                        stencil_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(0), store: wgpu::StoreOp::Discard }),
+                    }),
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                    multiview_mask: None,
+                })
+                .forget_lifetime();
+            for layer in layers {
+                match *layer {
+                    FrontLayer::Flash(i) => self.gfx.as_ref().expect("prepare_front_end makes the Flash pass").record_frame(&mut pass, i),
+                    FrontLayer::Movie(i) => self.movie_pass.as_ref().expect("prepare_front_end makes the movie pass").record(&mut pass, i),
+                }
+            }
+        }
+        if ui_count > 0 {
+            // The overlay's pipeline targets the surface's own format.
+            let surface_view = output.texture().create_view(&wgpu::TextureViewDescriptor::default());
+            self.record_ui(&mut encoder, &surface_view, ui_count);
+        }
+        let readback = self.encode_capture(&mut encoder, output.texture());
+        self.queue.submit(std::iter::once(encoder.finish()));
+        self.finish_capture(readback);
+        if let FrameTarget::Surface(surface) = output {
+            self.queue.present(surface);
+        }
+        Ok(())
+    }
+
     /// Render the shell MENU frame: the letterboxed plate dimmed (no spinner/bar — the WGSL menu
     /// mode, progress = -1) + this frame's staged UI overlay (`ui_rect`/`ui_text`).
-    pub fn render_menu(&mut self, t: f32) -> Result<(), wgpu::SurfaceError> {
+    pub fn render_menu(&mut self, t: f32) -> Result<(), SurfaceError> {
         self.render_loading(t, -1.0)
     }
 
@@ -1221,13 +1628,13 @@ impl Scene {
     /// `t` = seconds since the loading screen appeared (drives the rotation);
     /// `progress` = 0..1 staged-load fraction (fills the plate's bar frame); any staged UI
     /// overlay (`ui_rect`/`ui_text`) is drawn on top (that is how `render_menu` draws the menu).
-    pub fn render_loading(&mut self, t: f32, progress: f32) -> Result<(), wgpu::SurfaceError> {
+    pub fn render_loading(&mut self, t: f32, progress: f32) -> Result<(), SurfaceError> {
         self.render_loading_mode(t, progress, 0.0, None)
     }
 
     /// [`Self::render_menu`] with the external overlay hook (see [`Self::render_with`]) — the
     /// workshop's browse screen draws its GUI over the shell plate through this.
-    pub fn render_menu_with(&mut self, t: f32, overlay: Option<Overlay<'_>>) -> Result<(), wgpu::SurfaceError> {
+    pub fn render_menu_with(&mut self, t: f32, overlay: Option<Overlay<'_>>) -> Result<(), SurfaceError> {
         self.render_loading_mode(t, -1.0, 0.0, overlay)
     }
 
@@ -1235,7 +1642,7 @@ impl Scene {
     /// pulsing icon (bind the Loading.wad `global_loading_skull`) under an animated gold→green
     /// sheen, arc spinner + gold progress bar (see `loading.wgsl` mode 1). Staged UI overlay
     /// draws on top exactly like `render_loading`.
-    pub fn render_boot(&mut self, t: f32, progress: f32) -> Result<(), wgpu::SurfaceError> {
+    pub fn render_boot(&mut self, t: f32, progress: f32) -> Result<(), SurfaceError> {
         self.render_loading_mode(t, progress, 1.0, None)
     }
 
@@ -1245,7 +1652,7 @@ impl Scene {
         progress: f32,
         mode: f32,
         overlay: Option<Overlay<'_>>,
-    ) -> Result<(), wgpu::SurfaceError> {
+    ) -> Result<(), SurfaceError> {
         let aspect = self.config.width as f32 / self.config.height.max(1) as f32;
         self.queue.write_buffer(
             &self.loading_buf,
@@ -1255,8 +1662,8 @@ impl Scene {
                 mode, 0.0, 0.0, 0.0,
             ]),
         );
-        let output = self.surface.get_current_texture()?;
-        let view_tex = output.texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let output = self.acquire()?;
+        let view_tex = output.texture().create_view(&wgpu::TextureViewDescriptor::default());
         // Upload this frame's staged UI overlay (menu text etc.) before the pass opens.
         let ui_count = self.ui.prepare(&self.device, &self.queue, self.config.width, self.config.height);
         let mut encoder = self
@@ -1267,6 +1674,7 @@ impl Scene {
                 label: Some("loading pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: &view_tex,
+                    depth_slice: None,
                     resolve_target: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color { r: 0.02, g: 0.02, b: 0.04, a: 1.0 }),
@@ -1283,6 +1691,7 @@ impl Scene {
                 }),
                 timestamp_writes: None,
                 occlusion_query_set: None,
+                multiview_mask: None,
             });
             pass.set_pipeline(&self.loading_pipeline);
             pass.set_bind_group(0, &self.loading_bind, &[]);
@@ -1293,10 +1702,12 @@ impl Scene {
         if let Some(f) = overlay {
             f(&self.device, &self.queue, &mut encoder, &view_tex, [self.config.width, self.config.height]);
         }
-        let readback = self.encode_capture(&mut encoder, &output.texture);
+        let readback = self.encode_capture(&mut encoder, output.texture());
         self.queue.submit(std::iter::once(encoder.finish()));
         self.finish_capture(readback);
-        output.present();
+        if let FrameTarget::Surface(surface) = output {
+            self.queue.present(surface);
+        }
         Ok(())
     }
 
@@ -1305,6 +1716,20 @@ impl Scene {
     /// the current aspect ratio.
     pub fn set_view(&mut self, view: glam::Mat4, near: f32, far: f32) {
         self.view_cam = Some((view, near, far));
+        self.view_shift = glam::Vec2::ZERO;
+    }
+
+    /// Move this frame's image centre by `shift` in clip units, so what the camera looks at lands at the
+    /// middle of the area side panels leave rather than of the window. Follows [`set_view`](Self::set_view),
+    /// which clears it.
+    pub fn set_view_shift(&mut self, shift: glam::Vec2) {
+        self.view_shift = shift;
+    }
+
+    /// Stop drawing terrain, `base` being the base mesh's model, the only terrain not loaded through
+    /// [`load_terrain_model`](Self::load_terrain_model); `None` draws it again.
+    pub fn set_terrain_hidden(&mut self, base: Option<u32>) {
+        self.terrain_hidden = base;
     }
 
     /// Enable distance fog + the sky pass (PLACEHOLDER for PgSky/PgSun/PgCloud).
@@ -1312,6 +1737,12 @@ impl Scene {
     pub fn set_fog(&mut self, color: [f32; 3], density: f32, start: f32) {
         self.fog = Some((color, density, start));
         self.sky_enabled = true;
+    }
+
+    /// Undo [`set_fog`](Self::set_fog): no fog, no sky.
+    pub fn clear_fog(&mut self) {
+        self.fog = None;
+        self.sky_enabled = false;
     }
 
     /// Directional-sun intensity + ambient fill. `intensity = 0` disables the sun entirely (interiors:
@@ -1330,8 +1761,43 @@ impl Scene {
         self.sky_enabled = true;
     }
 
+    /// Set what effects draw from: the `vfx` atlas and the `fxdict`'s rectangles. An error when the
+    /// atlas will not upload.
+    pub fn fx_set_atlas(&mut self, atlas: &mercs2_formats::texture::TextureData, rects: &[mercs2_formats::fxdict::FxRect]) -> Result<(), String> {
+        let view = make_bc_view(&self.device, &self.queue, atlas, false)
+            .ok_or_else(|| format!("the vfx atlas ({}x{}) will not upload", atlas.width, atlas.height))?;
+        self.particles.set_atlas(&self.device, &view, rects);
+        Ok(())
+    }
+
+    /// Whether [`Self::fx_set_atlas`] has run.
+    pub fn fx_has_atlas(&self) -> bool {
+        self.particles.has_atlas()
+    }
+
+    /// Start an authored effect ([`crate::fx_sim`]) at `pos`.
+    pub fn fx_start_effect(
+        &mut self,
+        effect: &mercs2_formats::fxdict::EffectContainer,
+        starter: crate::fx_sim::Starter,
+        pos: [f32; 3],
+        repeat: bool,
+    ) -> Result<crate::particles::EmitterId, String> {
+        self.particles.start_effect(effect, starter, glam::Vec3::from(pos), glam::Quat::IDENTITY, repeat)
+    }
+
+    /// A started effect, for its transport.
+    pub fn fx_effect_mut(&mut self, id: crate::particles::EmitterId) -> Option<&mut crate::particles::ActiveEffect> {
+        self.particles.effect_mut(id)
+    }
+
+    /// Take a started effect away at once.
+    pub fn fx_remove_effect(&mut self, id: crate::particles::EmitterId) {
+        self.particles.remove_effect(id);
+    }
+
     /// Register a named particle-effect template (key = effect name hash, as Lua's `StartEmitter`
-    /// names them). Populate `desc` from a parsed effect (`particles::EmitterDesc::from_effect`).
+    /// names them).
     pub fn fx_register(&mut self, name_hash: u32, desc: crate::particles::EmitterDesc) {
         self.particles.register_template(name_hash, desc);
     }
@@ -1466,10 +1932,14 @@ impl Scene {
         self.load_model_inner(hash, verts, indices, draws, textures, skin, false);
     }
 
-    /// Upload a hi-res terrainmesh TILE — same as [`Self::load_model`] but flags the model for the
-    /// terrain SPLAT-BLEND path: its draws carry up to 3 diffuse detail layers (in the diffuse/normal/
-    /// specular slots, all decoded sRGB — terrain has no linear normal/spec map) and the per-vertex
-    /// COLOR is SPLAT WEIGHTS the fragment shader blends by (see `shader.wgsl` `overlay.y`).
+    /// Whether a terrain cell's texture `hash` is already uploaded, so a later cell need not read it.
+    pub fn has_terrain_view(&self, hash: u32) -> bool {
+        self.terrain_views.contains_key(&hash)
+    }
+
+    /// Upload a hi-res terrainmesh TILE — same as [`Self::load_model`], and hidden with the terrain by
+    /// [`Self::set_terrain_hidden`]. Its ground draws ([`mesh::DrawGroup::ground`]) bind their
+    /// `PgTerrainMesh*` textures and constants; its overlays are ordinary material draws.
     pub fn load_terrain_model(
         &mut self,
         hash: u32,
@@ -1500,17 +1970,51 @@ impl Scene {
         // (~0.17 authored luma) that must NOT go through sRGB→linear, or its albedo collapses to ~0.014
         // and the ground renders near-black — so force its diffuse LINEAR. See BASE_TERRAIN_MODEL_HASH.
         let terrain_atlas = hash == BASE_TERRAIN_MODEL_HASH;
-        // Terrain-blend tiles repurpose the normal/specular slots as extra DIFFUSE detail layers, so
-        // they must decode sRGB like any albedo — never through the linear normal/spec path.
-        let normal_hashes: HashSet<u32> =
-            if terrain_blend { HashSet::new() } else { draws.iter().filter_map(|d| d.normal).collect() };
-        let spec_hashes: HashSet<u32> =
-            if terrain_blend { HashSet::new() } else { draws.iter().filter_map(|d| d.specular).collect() };
+        // What each draw binds, by its pixel shader's samplers (`render::material_slots`). A terrain
+        // ground draw's stages are not a model material's: it binds its global map and layers in the
+        // diffuse, normal and specular slots.
+        let slots: Vec<crate::render::MaterialSlots> = draws
+            .iter()
+            .map(|d| {
+                if let Some(g) = &d.ground {
+                    return crate::render::MaterialSlots {
+                        diffuse: Some(g.global),
+                        normal: g.layers[0],
+                        slot1: g.layers[1],
+                        slot1_role: crate::render::Slot1Role::None,
+                        output_alpha: None,
+                    };
+                }
+                let samplers = self.pixel_samplers.as_ref().unwrap_or_else(|| {
+                    panic!("model 0x{hash:08X}: Scene::set_pixel_samplers was not called before loading a model")
+                });
+                crate::render::material_slots(d, samplers).unwrap_or_else(|e| panic!("model 0x{hash:08X}: {e}"))
+            })
+            .collect();
+        // Normal and specular maps decode linear; diffuse and emissive maps sRGB. So does terrain's
+        // shared detail map, whose texels are signed about 0.5 (`PgTerrainMeshFP*`); its layers are
+        // albedo.
+        let linear: HashSet<u32> = draws
+            .iter()
+            .zip(&slots)
+            .flat_map(|(d, s)| match &d.ground {
+                Some(g) => [g.detail, None],
+                None => [s.normal, Some(s.slot1).filter(|_| s.slot1_role == crate::render::Slot1Role::Specular).flatten()],
+            })
+            .flatten()
+            .collect();
+        // Cells share their layers, detail map and overlay textures, and hold them for the scene's life.
+        // A cell's global map is its own.
+        let own: HashSet<u32> = draws.iter().filter_map(|d| Some(d.ground.as_ref()?.global)).collect();
         let mut views: HashMap<u32, wgpu::TextureView> = HashMap::new();
         for (h, td) in textures {
-            let srgb = !terrain_atlas && !normal_hashes.contains(h) && !spec_hashes.contains(h);
+            let srgb = !terrain_atlas && !linear.contains(h);
             if let Some(v) = make_bc_view(&self.device, &self.queue, td, srgb) {
-                views.insert(*h, v);
+                if terrain_blend && !own.contains(h) {
+                    self.terrain_views.insert(*h, v);
+                } else {
+                    views.insert(*h, v);
+                }
             } else if std::env::var("MERCS2_TEXDBG").is_ok() {
                 eprintln!(
                     "[texdbg] make_bc_view FAILED for 0x{h:08X}: {}x{} fmt={:?} {}mips {}B",
@@ -1518,22 +2022,62 @@ impl Scene {
                 );
             }
         }
-        let mut tex_binds = vec![make_tex_bind(
-            &self.device, &self.tex_bgl, &self.sampler, &self.white, &self.flat_normal, &self.black,
-        )];
+        let mut tex_binds = vec![{
+            let black = &self.black;
+            make_tex_bind(
+                &self.device, &self.tex_bgl, &self.sampler, [&self.white, &self.flat_normal, black, black, black, black],
+                &self.no_material_params,
+            )
+        }];
         let mut draw_calls: Vec<DrawCall> = Vec::new();
-        for d in draws {
-            let diff = d.diffuse.and_then(|h| views.get(&h)).unwrap_or(&self.white);
-            let norm = d.normal.and_then(|h| views.get(&h)).unwrap_or(&self.flat_normal);
-            let spec = d.specular.and_then(|h| views.get(&h)).unwrap_or(&self.black);
+        for (d, s) in draws.iter().zip(&slots) {
             let idx = tex_binds.len();
-            tex_binds.push(make_tex_bind(&self.device, &self.tex_bgl, &self.sampler, diff, norm, spec));
+            {
+                let view = |h: Option<u32>| h.and_then(|h| views.get(&h).or_else(|| self.terrain_views.get(&h)));
+                let black = &self.black;
+                let (bound, params) = match &d.ground {
+                    Some(g) => (
+                        [
+                            view(s.diffuse).unwrap_or(&self.white),
+                            view(s.normal).unwrap_or(black),
+                            view(s.slot1).unwrap_or(black),
+                            view(g.layers[2]).unwrap_or(black),
+                            view(g.layers[3]).unwrap_or(black),
+                            view(g.detail).unwrap_or(black),
+                        ],
+                        crate::render::ground_params(&self.device, &d.material_data, g),
+                    ),
+                    None => (
+                        [
+                            view(s.diffuse).unwrap_or(&self.white),
+                            view(s.normal).unwrap_or(&self.flat_normal),
+                            view(s.slot1).unwrap_or(black),
+                            black,
+                            black,
+                            black,
+                        ],
+                        match d.scrub {
+                            Some(depths) => crate::render::scrub_params(&self.device, d, depths, s.slot1_role, s.output_alpha),
+                            None => crate::render::material_params(&self.device, d.material_flags, &d.material_data, s.slot1_role, s.output_alpha),
+                        },
+                    ),
+                };
+                tex_binds.push(make_tex_bind(&self.device, &self.tex_bgl, &self.sampler, bound, &params));
+            }
+            let blend = s.output_alpha.map(|_| {
+                let rt = mercs2_formats::texture::runtime_material_flags(d.material_flags);
+                (mercs2_formats::texture::material_blend_state(rt), crate::render::material_cull(d.material_flags))
+            });
+            if let Some(key) = blend.filter(|_| d.scrub.is_none()) {
+                self.ensure_blend_pipelines(key).unwrap_or_else(|e| panic!("model 0x{hash:08X}: {e}"));
+            }
             draw_calls.push(DrawCall {
                 index_start: d.index_start,
                 index_count: d.index_count,
                 bind: idx,
                 lod_mask: d.lod_mask,
                 node: d.node,
+                blend,
             });
         }
 
@@ -1544,7 +2088,7 @@ impl Scene {
             usage: wgpu::BufferUsages::VERTEX,
             mapped_at_creation: true,
         });
-        vbuf.slice(..).get_mapped_range_mut().copy_from_slice(vbytes);
+        vbuf.slice(..).get_mapped_range_mut().expect("the vertex buffer is mapped at creation").copy_from_slice(vbytes);
         vbuf.unmap();
 
         let (ibuf, nindices) = if indices.is_empty() {
@@ -1557,19 +2101,18 @@ impl Scene {
                 usage: wgpu::BufferUsages::INDEX,
                 mapped_at_creation: true,
             });
-            b.slice(..).get_mapped_range_mut().copy_from_slice(ibytes);
+            b.slice(..).get_mapped_range_mut().expect("the index buffer is mapped at creation").copy_from_slice(ibytes);
             b.unmap();
             (Some(b), indices.len() as u32)
         };
 
         let fit = glam::Mat4::from_scale(glam::Vec3::splat(skin.scale))
             * glam::Mat4::from_translation(-glam::Vec3::from(skin.center));
-        // Size the palette to cover every joint the VERTS actually reference, not just the entries
-        // the skin ships. Imported rigged meshes carry a 1-entry identity skin but their verts index
-        // a full source/target palette; clamping the per-entity palette to 1 makes those verts read
-        // a zero matrix on the GPU and collapse onto the origin (the "smooshed spike").
-        let max_joint = verts.iter().flat_map(|v| v.joints).map(|j| j as usize).max().unwrap_or(0);
-        let bone_count = skin.bones.len().max(max_joint + 1).max(1);
+        // The palette covers every joint the VERTS reference (see `rest_palette`): a short one makes
+        // those verts read a zero matrix on the GPU and collapse onto the origin (the "smooshed spike").
+        let rest = skin.rest_palette(verts).unwrap_or_else(|e| panic!("model 0x{hash:08X}: {e}"));
+        let bone_count = rest.len();
+        let bounds = rest_bounds(verts, &rest, !skin.rig.is_empty());
 
         self.models.insert(
             hash,
@@ -1581,11 +2124,262 @@ impl Scene {
                 draw_calls,
                 tex_binds,
                 bone_count,
+                rest,
                 fit,
-                prelit: skin.prelit,
                 terrain_blend,
+                bounds,
             },
         );
+    }
+
+    /// Build the blended pipelines for `key` in every target format the colour pass draws into (the
+    /// swapchain, and the HDR target when the post chain is up), once.
+    fn ensure_blend_pipelines(&mut self, key: BlendKey) -> Result<(), String> {
+        let blend = crate::render::wgpu_blend(key.0)?;
+        let formats: Vec<wgpu::TextureFormat> =
+            std::iter::once(self.config.format).chain(self.post.as_ref().map(|_| crate::post::HDR_FORMAT)).collect();
+        for format in formats {
+            if !self.blend_pipelines.contains_key(&(format, key)) {
+                let target = GeomTarget { format, blend, depth_write: false, cull: key.1 };
+                let p = geom_pipeline(&self.device, &self.geom_layout, &self.geom_shader, GeomKind::Model, target);
+                self.blend_pipelines.insert((format, key), p);
+            }
+        }
+        Ok(())
+    }
+
+    /// Whether a ground cover pack is uploaded.
+    pub fn has_scrub(&self, hash: u32) -> bool {
+        self.scrub_packs.contains_key(&hash)
+    }
+
+    /// Upload a ground cover pack. Its textures join the ones terrain cells share, for the scene's
+    /// life; `textures` holds those no earlier cell or pack brought.
+    pub fn load_scrub(&mut self, hash: u32, geometry: mesh::ScrubGeometry, textures: &TexMap) {
+        if self.scrub_packs.contains_key(&hash) {
+            return;
+        }
+        let mesh::ScrubGeometry { verts, indices, draws, instances, patches } = geometry;
+        if instances.is_empty() {
+            self.scrub_packs.insert(hash, ScrubPack { instances: None, meshes: Vec::new(), patches, placed: 0 });
+            return;
+        }
+        self.load_model_inner(hash, &verts, &indices, &draws, textures, &mesh::SkinData::identity(), true);
+        let bytes: &[u8] = bytemuck::cast_slice(&instances);
+        let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("scrub instances"),
+            size: bytes.len() as wgpu::BufferAddress,
+            usage: wgpu::BufferUsages::VERTEX,
+            mapped_at_creation: true,
+        });
+        buffer.slice(..).get_mapped_range_mut().expect("the buffer is mapped at creation").copy_from_slice(bytes);
+        buffer.unmap();
+        let meshes: Vec<ScrubMeshGpu> = draws
+            .iter()
+            .zip(&self.models[&hash].draw_calls)
+            .map(|(d, dc)| ScrubMeshGpu {
+                depths: d.scrub.expect("build_scrub marks every draw"),
+                bind: dc.bind,
+                indices: dc.index_start..dc.index_start + dc.index_count,
+                cull: crate::render::material_cull(d.material_flags),
+                blend: dc.blend.map(|(blend, _)| blend),
+            })
+            .collect();
+        for m in &meshes {
+            self.ensure_scrub_pipelines(hash, (None, m.cull));
+            if m.blend.is_some() {
+                self.ensure_scrub_pipelines(hash, (m.blend, m.cull));
+            }
+        }
+        self.scrub_packs.insert(hash, ScrubPack { instances: Some(buffer), meshes, patches, placed: 0 });
+    }
+
+    /// Build the ground cover pipelines for `key` in every target format the colour pass draws into, once.
+    fn ensure_scrub_pipelines(&mut self, hash: u32, key: ScrubPipelineKey) {
+        let formats: Vec<wgpu::TextureFormat> =
+            std::iter::once(self.config.format).chain(self.post.as_ref().map(|_| crate::post::HDR_FORMAT)).collect();
+        for format in formats {
+            if self.scrub_pipelines.contains_key(&(format, key)) {
+                continue;
+            }
+            let (blend, cull) = key;
+            // A mesh that can blend carries its fade in its output alpha on solid draws too, where it
+            // means nothing: those keep the target's alpha, as a blended draw does (`render::wgpu_blend`).
+            let state = match blend {
+                Some(b) => crate::render::wgpu_blend(b).unwrap_or_else(|e| panic!("scrub 0x{hash:08X}: {e}")),
+                None => wgpu::BlendState {
+                    color: wgpu::BlendComponent::REPLACE,
+                    alpha: wgpu::BlendComponent {
+                        src_factor: wgpu::BlendFactor::Zero,
+                        dst_factor: wgpu::BlendFactor::One,
+                        operation: wgpu::BlendOperation::Add,
+                    },
+                },
+            };
+            let target = GeomTarget { format, blend: state, depth_write: blend.is_none(), cull };
+            let p = geom_pipeline(&self.device, &self.geom_layout, &self.geom_shader, GeomKind::Scrub, target);
+            self.scrub_pipelines.insert((format, key), p);
+        }
+    }
+
+    /// Upload a tree species' billboard, as model `key`, with room for `capacity` trees. Billboards are
+    /// alpha-tested and keep the target's alpha, as solid ground cover does.
+    pub fn load_trees(&mut self, key: u32, geometry: &mesh::TreeGeometry, textures: &TexMap, capacity: usize) {
+        assert!(!self.models.contains_key(&key), "tree species 0x{key:08X} collides with a loaded model");
+        let draws = std::slice::from_ref(&geometry.draw);
+        self.load_model(key, &geometry.verts, &geometry.indices, draws, textures, &mesh::SkinData::identity());
+        let formats: Vec<wgpu::TextureFormat> =
+            std::iter::once(self.config.format).chain(self.post.as_ref().map(|_| crate::post::HDR_FORMAT)).collect();
+        for format in formats {
+            if self.tree_pipelines.contains_key(&format) {
+                continue;
+            }
+            let blend = wgpu::BlendState {
+                color: wgpu::BlendComponent::REPLACE,
+                alpha: wgpu::BlendComponent {
+                    src_factor: wgpu::BlendFactor::Zero,
+                    dst_factor: wgpu::BlendFactor::One,
+                    operation: wgpu::BlendOperation::Add,
+                },
+            };
+            let target = GeomTarget { format, blend, depth_write: true, cull: None };
+            let p = geom_pipeline(&self.device, &self.geom_layout, &self.geom_shader, GeomKind::Billboard, target);
+            self.tree_pipelines.insert(format, p);
+        }
+        let instances = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("tree instances"),
+            size: (capacity * std::mem::size_of::<mesh::TreeInstance>()) as wgpu::BufferAddress,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        self.trees.push(TreeBatch { key, instances, count: 0 });
+    }
+
+    /// The trees of species `key` that draw as billboards.
+    pub fn set_trees(&mut self, key: u32, trees: &[mesh::TreeInstance]) {
+        let batch = self.trees.iter_mut().find(|t| t.key == key).unwrap_or_else(|| panic!("tree species 0x{key:08X} set before it loaded"));
+        batch.count = trees.len() as u32;
+        self.queue.write_buffer(&batch.instances, 0, bytemuck::cast_slice(trees));
+    }
+
+    /// Record the billboards into `pass`.
+    fn draw_trees<'a>(&'a self, pass: &mut wgpu::RenderPass<'a>, format: wgpu::TextureFormat) {
+        for t in self.trees.iter().filter(|t| t.count > 0) {
+            let Some(p) = self.tree_pipelines.get(&format) else {
+                panic!("no billboard pipeline into {format:?}")
+            };
+            let model = &self.models[&t.key];
+            let dc = &model.draw_calls[0];
+            pass.set_pipeline(p);
+            pass.set_bind_group(0, &self.tree_camera_bind, &[]);
+            pass.set_bind_group(1, &model.tex_binds[dc.bind], &[]);
+            pass.set_bind_group(2, &self.scrub_bones, &[]);
+            pass.set_vertex_buffer(0, model.vbuf.slice(..));
+            pass.set_vertex_buffer(1, t.instances.slice(..));
+            pass.set_index_buffer(model.ibuf.as_ref().expect("a billboard has indices").slice(..), wgpu::IndexFormat::Uint32);
+            pass.draw_indexed(dc.index_start..dc.index_start + dc.index_count, 0, 0..t.count);
+        }
+    }
+
+    /// Place a loaded ground cover pack as entity `key`, at its cell's position.
+    pub fn place_scrub(&mut self, key: u32, hash: u32, pos: [f32; 3]) {
+        let pack = self.scrub_packs.get_mut(&hash).unwrap_or_else(|| panic!("ground cover 0x{hash:08X} placed before it loaded"));
+        pack.placed += 1;
+        let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("scrub camera"),
+            size: 192,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let bind = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("scrub camera bind"),
+            layout: &self.camera_bgl,
+            entries: &[wgpu::BindGroupEntry { binding: 0, resource: buffer.as_entire_binding() }],
+        });
+        self.scrub_placed.insert(key, PlacedScrub { hash, pos: glam::Vec3::from(pos), buffer, bind });
+    }
+
+    /// Take entity `key`'s ground cover away, and its pack with the last placement of it.
+    pub fn remove_scrub(&mut self, key: u32) {
+        let Some(placed) = self.scrub_placed.remove(&key) else { return };
+        let Some(pack) = self.scrub_packs.get_mut(&placed.hash) else { return };
+        pack.placed -= 1;
+        if pack.placed == 0 {
+            self.scrub_packs.remove(&placed.hash);
+            self.unload_model(placed.hash);
+        }
+    }
+
+    /// The ground cover draws of this frame ([`scrub_blended`]), and their camera uniforms.
+    fn prepare_scrub(&mut self, view: glam::Mat4, view_proj: glam::Mat4, cam_world: glam::Vec3, planes: &[glam::Vec4; 6]) {
+        let mut draws = std::mem::take(&mut self.scrub_frame);
+        draws.clear();
+        for (key, placed) in &self.scrub_placed {
+            let Some(pack) = self.scrub_packs.get(&placed.hash) else { continue };
+            let first = draws.len();
+            for patch in &pack.patches {
+                if !sphere_in_view(planes, placed.pos + glam::Vec3::from(patch.centre), patch.radius) {
+                    continue;
+                }
+                let depth = view.transform_point3(placed.pos + glam::Vec3::from(patch.origin)).z;
+                for range in &patch.ranges {
+                    if let Some(blended) = scrub_blended(pack.meshes[range.mesh as usize].depths, depth, patch.radius) {
+                        draws.push(ScrubFrameDraw { key: *key, range: *range, blended });
+                    }
+                }
+            }
+            if draws.len() > first {
+                let model = glam::Mat4::from_translation(placed.pos);
+                self.queue.write_buffer(&placed.buffer, 0, bytemuck::cast_slice(&self.camera_uniform(view_proj * model, model, cam_world)));
+            }
+        }
+        self.scrub_frame = draws;
+    }
+
+    /// Record this frame's ground cover into `pass`: the solid draws, or the blended ones.
+    fn draw_scrub<'a>(&'a self, pass: &mut wgpu::RenderPass<'a>, format: wgpu::TextureFormat, blended: bool) {
+        for d in self.scrub_frame.iter().filter(|d| d.blended == blended) {
+            let placed = &self.scrub_placed[&d.key];
+            let pack = &self.scrub_packs[&placed.hash];
+            let (Some(model), Some(instances)) = (self.models.get(&placed.hash), &pack.instances) else { continue };
+            let m = &pack.meshes[d.range.mesh as usize];
+            let key = (if blended { m.blend } else { None }, m.cull);
+            let Some(p) = self.scrub_pipelines.get(&(format, key)) else {
+                panic!("ground cover 0x{:08X}: no pipeline for {key:?} into {format:?}", placed.hash)
+            };
+            pass.set_pipeline(p);
+            pass.set_bind_group(0, &placed.bind, &[]);
+            pass.set_bind_group(1, &model.tex_binds[m.bind], &[]);
+            pass.set_bind_group(2, &self.scrub_bones, &[]);
+            pass.set_vertex_buffer(0, model.vbuf.slice(..));
+            pass.set_vertex_buffer(1, instances.slice(..));
+            pass.set_index_buffer(model.ibuf.as_ref().expect("a pack has indices").slice(..), wgpu::IndexFormat::Uint32);
+            pass.draw_indexed(m.indices.clone(), 0, d.range.first_instance..d.range.first_instance + d.range.instance_count);
+        }
+    }
+
+    /// A drawn thing's camera uniform (192 B, the shader's `Camera`): mvp(16) + model(16) + cam_pos(4)
+    /// + fog_color_density(4) + fog_misc(4) + overlay(4). Fog stays disabled unless set_fog was called.
+    fn camera_uniform(&self, mvp: glam::Mat4, model: glam::Mat4, cam_world: glam::Vec3) -> [f32; 48] {
+        let mut uni = [0f32; 48];
+        uni[..16].copy_from_slice(&mvp.to_cols_array());
+        uni[16..32].copy_from_slice(&model.to_cols_array());
+        uni[32..35].copy_from_slice(&[cam_world.x, cam_world.y, cam_world.z]);
+        uni[35] = self.ambient; // cam_pos.w = ambient fill (scene-controlled)
+        if let Some((color, density, fog_start)) = self.fog {
+            uni[36..40].copy_from_slice(&[color[0], color[1], color[2], density]);
+            uni[40] = 1.0; // fog enable
+            uni[41] = fog_start;
+        }
+        uni[43] = self.sun_intensity; // fog_misc.w = sun intensity (0 indoors)
+        uni[44] = self.model_alpha; // overlay.x = model opacity (1 = opaque)
+        uni
+    }
+
+    /// Give the scene the retail pixel shaders' samplers ([`crate::render::pixel_samplers`]), which decide
+    /// what each material texture slot binds. Must be called before loading a model with materials.
+    pub fn set_pixel_samplers(&mut self, samplers: mercs2_formats::shader_registrations::PixelSamplers) {
+        self.pixel_samplers = Some(samplers);
     }
 
     /// Whether a model is currently uploaded (keyed by hash).
@@ -1620,11 +2414,15 @@ impl Scene {
         self.entity_state.remove(&e);
     }
 
-    /// Bone count of a loaded model (>=1; 1 = unskinned identity). 0 if the model isn't loaded.
-    /// The streaming executor sizes a woken prop's identity `SkinPalette` to this so a rigged prop's
-    /// verts (weighted to bone >= 1) don't collapse to the origin under a 1-bone palette.
-    pub fn model_bone_count(&self, hash: u32) -> usize {
-        self.models.get(&hash).map(|m| m.bone_count).unwrap_or(0)
+    /// The `SkinPalette` an instance of a loaded model starts at: its rest palette, one entry per bone
+    /// the verts reference (identity for an unrigged model). A rigged prop or vehicle no clip drives
+    /// keeps it — retail holds such a node at its `+16` reference pose, which an identity palette (the
+    /// `+80` bind) is not. Panics if the model isn't loaded: an entity is spawned after its model.
+    pub fn model_rest_palette(&self, hash: u32) -> Vec<[[f32; 4]; 4]> {
+        match self.models.get(&hash) {
+            Some(m) => m.rest.clone(),
+            None => panic!("model 0x{hash:08X}: an instance is spawned before the model is loaded"),
+        }
     }
 
     /// Free a model's GPU resources (geometry + material bind groups), if loaded. The streaming
@@ -1672,8 +2470,10 @@ impl Scene {
             layout: &self.bone_bgl,
             entries: &[wgpu::BindGroupEntry { binding: 0, resource: bone_buf.as_entire_binding() }],
         });
-        self.entities
-            .insert(e, EntityGpu { mvp_buf, mvp_bind, bone_buf, bone_bind, bone_count });
+        self.entities.insert(
+            e,
+            EntityGpu { mvp_buf, mvp_bind, bone_buf, bone_bind, bone_count, written_model: None, written_palette: Vec::new() },
+        );
     }
 
     /// Read back the next presented frame: everything drawn, overlays included. Collect it with
@@ -1722,10 +2522,10 @@ impl Scene {
             mapped_at_creation: false,
         });
         encoder.copy_texture_to_buffer(
-            wgpu::ImageCopyTexture { texture, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
-            wgpu::ImageCopyBuffer {
+            wgpu::TexelCopyTextureInfo { texture, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+            wgpu::TexelCopyBufferInfo {
                 buffer: &buffer,
-                layout: wgpu::ImageDataLayout { offset: 0, bytes_per_row: Some(padded), rows_per_image: Some(h) },
+                layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(padded), rows_per_image: Some(h) },
             },
             wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
         );
@@ -1741,12 +2541,16 @@ impl Scene {
         slice.map_async(wgpu::MapMode::Read, move |r| {
             let _ = tx.send(r);
         });
-        self.device.poll(wgpu::Maintain::Wait);
+        if let Err(e) = self.device.poll(wgpu::PollType::wait_indefinitely()) {
+            self.capture = Capture::Done(Err(format!("waiting for the frame capture failed: {e}")));
+            return;
+        }
         let result = match rx.recv() {
             Ok(Ok(())) => {
-                let data = slice.get_mapped_range();
-                let rgba = unpad_to_rgba(&data, w, h, padded, self.config.format);
-                drop(data);
+                let rgba = slice
+                    .get_mapped_range()
+                    .map_err(|e| format!("reading the frame capture failed: {e}"))
+                    .and_then(|data| unpad_to_rgba(&data, w, h, padded, self.config.format));
                 buffer.unmap();
                 rgba.map(|rgba| CapturedFrame { width: w, height: h, rgba })
             }
@@ -1754,6 +2558,19 @@ impl Scene {
             Err(_) => Err("the frame capture's map callback never ran".into()),
         };
         self.capture = Capture::Done(result);
+    }
+
+    /// Present at once (`[Render] PresentImmediate`, vsync off) or on the vertical blank, as retail's
+    /// present interval `D3DPRESENT_INTERVAL_IMMEDIATE`/`DEFAULT` (`FUN_00755380`). A surface without
+    /// immediate presentation refuses vsync off.
+    pub fn set_present_immediate(&mut self, immediate: bool) -> Result<(), String> {
+        let mode = if immediate { wgpu::PresentMode::Immediate } else { wgpu::PresentMode::Fifo };
+        if !self.gpu.present_modes.contains(&mode) {
+            return Err(format!("the surface cannot present {mode:?}; it has {:?}", self.gpu.present_modes));
+        }
+        self.config.present_mode = mode;
+        self.surface.configure(&self.device, &self.config);
+        Ok(())
     }
 
     pub fn resize(&mut self, new: winit::dpi::PhysicalSize<u32>) {
@@ -1769,48 +2586,71 @@ impl Scene {
         }
     }
 
-    /// Record the entity draws into an already-begun render pass with the given geometry pipeline.
-    /// Shared by the direct-swapchain path and the HDR world path (they differ only in target
-    /// format, hence pipeline). Per-entity uniforms/palettes must already be uploaded.
+    /// Record the entity draws into an already-begun render pass: every opaque draw with the given
+    /// geometry pipeline, then every blended material's draw with its own (`blend_pipelines` for
+    /// `format`). Retail sorts a blended material's colour packet into class 8, after the opaque
+    /// classes 5 and 6 of the same phase, with blending on and Z write off (render_core_code_map.md
+    /// §6a). Blended draws keep item order, and within an object draw order: the retail key's
+    /// cross-object term is not decoded yet. Shared by the direct-swapchain path and the HDR world
+    /// path. Per-entity uniforms/palettes must already be uploaded.
     fn draw_geometry<'a>(
         &'a self,
         pass: &mut wgpu::RenderPass<'a>,
         items: &[DrawItem],
         pipeline: &'a wgpu::RenderPipeline,
+        format: wgpu::TextureFormat,
     ) {
-        pass.set_pipeline(pipeline);
         // Group 3 = the per-frame dynamic light array (uploaded before the pass). Set once for all draws.
+        pass.set_pipeline(pipeline);
         pass.set_bind_group(3, &self.lights_bind, &[]);
-        for (e, _m, model_hash, _p) in items {
-            let Some(mg) = self.models.get(model_hash) else { continue };
-            let Some(eg) = self.entities.get(e) else { continue };
-            pass.set_bind_group(0, &eg.mvp_bind, &[]);
-            pass.set_bind_group(2, &eg.bone_bind, &[]);
-            pass.set_vertex_buffer(0, mg.vbuf.slice(..));
-            if let Some(ib) = &mg.ibuf {
-                pass.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint32);
-                let hidden = self.hidden_draws.get(model_hash);
-                // The engine's per-segment draw gate, evaluated against THIS ENTITY's render state:
-                // clause 2 (LOD-rung overlap) and clause 3 (destruction node-enable). An entity with
-                // no state draws everything, which is what unskinned/synthetic geometry wants.
-                let rs = self.entity_state.get(e);
-                for (di, dc) in mg.draw_calls.iter().enumerate() {
-                    if hidden.is_some_and(|h| h.contains(&di)) {
-                        continue; // low-res terrain tile hidden under resident hi-res; workshop isolate
-                    }
-                    if rs.is_some_and(|rs| !rs.segment_visible(dc.lod_mask, dc.node)) {
-                        continue;
-                    }
-                    pass.set_bind_group(1, &mg.tex_binds[dc.bind], &[]);
-                    pass.draw_indexed(dc.index_start..dc.index_start + dc.index_count, 0, 0..1);
+        for blended in [false, true] {
+            for (e, _m, model_hash, _p) in items {
+                let Some(mg) = self.models.get(model_hash) else { continue };
+                let Some(eg) = self.entities.get(e) else { continue };
+                if blended && !mg.draw_calls.iter().any(|dc| dc.blend.is_some()) {
+                    continue;
                 }
-                if mg.draw_calls.is_empty() {
+                pass.set_bind_group(0, &eg.mvp_bind, &[]);
+                pass.set_bind_group(2, &eg.bone_bind, &[]);
+                pass.set_vertex_buffer(0, mg.vbuf.slice(..));
+                if let Some(ib) = &mg.ibuf {
+                    pass.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint32);
+                    let hidden = self.hidden_draws.get(model_hash);
+                    // The engine's per-segment draw gate, evaluated against THIS ENTITY's render state:
+                    // clause 2 (LOD-rung overlap) and clause 3 (destruction node-enable). An entity with
+                    // no state draws everything, which is what unskinned/synthetic geometry wants.
+                    let rs = self.entity_state.get(e);
+                    for (di, dc) in mg.draw_calls.iter().enumerate() {
+                        if dc.blend.is_some() != blended {
+                            continue;
+                        }
+                        if hidden.is_some_and(|h| h.contains(&di)) {
+                            continue; // low-res terrain tile hidden under resident hi-res; workshop isolate
+                        }
+                        if rs.is_some_and(|rs| !rs.segment_visible(dc.lod_mask, dc.node)) {
+                            continue;
+                        }
+                        if let Some(key) = dc.blend {
+                            let Some(p) = self.blend_pipelines.get(&(format, key)) else {
+                                panic!("model 0x{model_hash:08X}: no blended pipeline for {key:?} into {format:?}")
+                            };
+                            pass.set_pipeline(p);
+                        }
+                        pass.set_bind_group(1, &mg.tex_binds[dc.bind], &[]);
+                        pass.draw_indexed(dc.index_start..dc.index_start + dc.index_count, 0, 0..1);
+                    }
+                    if mg.draw_calls.is_empty() && !blended {
+                        pass.set_bind_group(1, &mg.tex_binds[0], &[]);
+                        pass.draw_indexed(0..mg.nindices, 0, 0..1);
+                    }
+                } else if !blended {
                     pass.set_bind_group(1, &mg.tex_binds[0], &[]);
-                    pass.draw_indexed(0..mg.nindices, 0, 0..1);
+                    pass.draw(0..mg.nverts, 0..1);
                 }
-            } else {
-                pass.set_bind_group(1, &mg.tex_binds[0], &[]);
-                pass.draw(0..mg.nverts, 0..1);
+            }
+            self.draw_scrub(pass, format, blended);
+            if !blended {
+                self.draw_trees(pass, format);
             }
         }
     }
@@ -1826,8 +2666,7 @@ impl Scene {
     /// One depth-only render of the DYNAMIC scene per cascade, into that cascade's 1024² tile of the
     /// atlas (via a per-tile viewport + the cascade's light-VP dynamic offset); the color pass selects
     /// + PCF-samples the tightest cascade per fragment. SKIPPED when the sun is off (interiors) — the
-    /// shader gates on the same condition. Only non-prelit geometry casts (the building shell bakes its
-    /// own shadow into vertex colour), and each caster is gated into ONLY the cascades whose box
+    /// shader gates on the same condition. Each caster is gated into ONLY the cascades whose box
     /// contains it (the distance-LOD caster gate, `FUN_00858150` analog) — near casters land in the
     /// tight cascades, far ones only in the wide ones, mirroring the per-cascade caster list.
     fn record_shadow_cascade(&self, encoder: &mut wgpu::CommandEncoder, items: &[DrawItem]) {
@@ -1849,6 +2688,7 @@ impl Scene {
             }),
             timestamp_writes: None,
             occlusion_query_set: None,
+            multiview_mask: None,
         });
         spass.set_pipeline(&self.shadow_pipeline);
         let tile = SHADOW_TILE as f32;
@@ -1859,12 +2699,6 @@ impl Scene {
             spass.set_bind_group(1, &self.shadow_vp_bind, &[offset]);
             for (e, entity_model, model_hash, _p) in items {
                 let Some(mg) = self.models.get(model_hash) else { continue };
-                // Only DYNAMIC geometry casts: the prelit building shell already bakes its own light +
-                // shadow into vertex colour, so casting it into the map would double-darken the baked
-                // walls. Casting only characters/props gives clean contact shadows on the baked floor.
-                if mg.prelit {
-                    continue;
-                }
                 // Distance-LOD caster gate: skip this caster in cascade `c` unless its ground point is
                 // inside cascade `c`'s box (near casters → tight cascades, far → wide only). `shadow_configured`
                 // guarantees `cascade_vps` are real (not identity) here.
@@ -1908,6 +2742,7 @@ impl Scene {
             label: Some("blob shadow pass"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                 view: view_tex,
+                depth_slice: None,
                 resolve_target: None,
                 ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
             })],
@@ -1918,6 +2753,7 @@ impl Scene {
             }),
             timestamp_writes: None,
             occlusion_query_set: None,
+            multiview_mask: None,
         });
         pass.set_pipeline(&self.blob_pipeline);
         pass.set_bind_group(0, &self.blob_bind, &[]);
@@ -1958,6 +2794,7 @@ impl Scene {
                     label: Some("scene hdr pass"),
                     color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                         view: post.hdr_view(),
+                        depth_slice: None,
                         resolve_target: None,
                         ops: wgpu::Operations {
                             load: wgpu::LoadOp::Clear(wgpu::Color { r: 0.02, g: 0.02, b: 0.04, a: 1.0 }),
@@ -1971,6 +2808,7 @@ impl Scene {
                     }),
                     timestamp_writes: None,
                     occlusion_query_set: None,
+                    multiview_mask: None,
                 });
                 pass.set_pipeline(self.sky_pipeline_hdr.as_ref().unwrap());
                 pass.set_bind_group(0, &self.sky_bind, &[]);
@@ -1980,7 +2818,7 @@ impl Scene {
                 } else {
                     self.world_pipeline.as_ref().unwrap()
                 };
-                self.draw_geometry(&mut pass, items, pl);
+                self.draw_geometry(&mut pass, items, pl, crate::post::HDR_FORMAT);
             }
             post.run(encoder, view_tex); // bright-pass → blur → composite + tone-map → swapchain
         } else {
@@ -1988,6 +2826,7 @@ impl Scene {
                 label: Some("scene pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: view_tex,
+                    depth_slice: None,
                     resolve_target: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color { r: 0.02, g: 0.02, b: 0.04, a: 1.0 }),
@@ -2001,6 +2840,7 @@ impl Scene {
                 }),
                 timestamp_writes: None,
                 occlusion_query_set: None,
+                multiview_mask: None,
             });
             if self.sky_enabled {
                 pass.set_pipeline(&self.sky_pipeline);
@@ -2008,7 +2848,7 @@ impl Scene {
                 pass.draw(0..3, 0..1);
             }
             let pl = if self.model_alpha < 0.999 { &self.pipeline_t } else { &self.pipeline };
-            self.draw_geometry(&mut pass, items, pl);
+            self.draw_geometry(&mut pass, items, pl, self.config.format);
         }
     }
 
@@ -2025,6 +2865,7 @@ impl Scene {
                 label: Some("transparent fx pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: view_tex,
+                    depth_slice: None,
                     resolve_target: None,
                     ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
                 })],
@@ -2035,6 +2876,7 @@ impl Scene {
                 }),
                 timestamp_writes: None,
                 occlusion_query_set: None,
+                multiview_mask: None,
             });
             self.particles.draw(&mut ppass);
         }
@@ -2049,6 +2891,7 @@ impl Scene {
             label: Some("ui overlay pass"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                 view: view_tex,
+                depth_slice: None,
                 resolve_target: None,
                 ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
             })],
@@ -2059,6 +2902,7 @@ impl Scene {
             }),
             timestamp_writes: None,
             occlusion_query_set: None,
+            multiview_mask: None,
         });
         self.ui.draw(&mut upass, ui_count);
     }
@@ -2104,7 +2948,7 @@ impl Scene {
     }
 
     /// Draw every drawable entity in the world. Auto-orbit camera framing the origin.
-    pub fn render(&mut self, world: &World) -> Result<(), wgpu::SurfaceError> {
+    pub fn render(&mut self, world: &World) -> Result<(), SurfaceError> {
         self.render_with(world, None)
     }
 
@@ -2116,7 +2960,7 @@ impl Scene {
         &mut self,
         world: &World,
         mut overlay: Option<Overlay<'_>>,
-    ) -> Result<(), wgpu::SurfaceError> {
+    ) -> Result<(), SurfaceError> {
         let t = self.start.elapsed().as_secs_f32();
         // Advance the particle sim by the real inter-frame dt (clamped so a stall doesn't teleport
         // particles), then reap finished emitters. No-op when no effect is active.
@@ -2128,7 +2972,9 @@ impl Scene {
             // Caller-driven fly / third-person camera: explicit view, projection from aspect.
             // Vertical FOV tuned to the retail over-the-shoulder framing (60° and 55° both read too
             // wide-angle vs vanilla). 45° gives the tighter, more zoomed retail look.
-            let proj = glam::Mat4::perspective_lh(45f32.to_radians(), aspect, near, far);
+            let mut proj = glam::Mat4::perspective_lh(45f32.to_radians(), aspect, near, far);
+            proj.z_axis.x = self.view_shift.x;
+            proj.z_axis.y = self.view_shift.y;
             (proj * view, view)
         } else {
             let angle = t * 0.5;
@@ -2146,47 +2992,66 @@ impl Scene {
         // negating clip-space X. VERIFIED against retail: interior prop sides (light heads left, coolers
         // right, wardrobe placement) match only with this applied — without it the whole game renders
         // horizontally MIRRORED. cull_mode is None everywhere, so the winding this flips is a no-op; if
-        // backface culling is enabled later, flip front_face to compensate. (Movement strafe is likewise
-        // built in the LH frame and negates its right vector to match — see world.rs.)
-        let view_proj = glam::Mat4::from_scale(glam::Vec3::new(-1.0, 1.0, 1.0)) * raw_vp;
+        // backface culling is enabled later, flip front_face to compensate. (Movement strafe and look are
+        // likewise built in the LH frame and match through `camera::screen_right` and `camera::turn_right`.)
+        let view_proj = crate::camera::clip_mirror() * raw_vp;
 
         // Snapshot the drawable entities (copy out to release the world borrow before touching self).
         let mut items: Vec<DrawItem> = Vec::new();
         for (e, (xform, mref, pal)) in world.query::<(&Transform, &ModelRef, &SkinPalette)>().iter() {
+            if let Some(base) = self.terrain_hidden {
+                if mref.model == base || self.models.get(&mref.model).is_some_and(|m| m.terrain_blend) {
+                    continue;
+                }
+            }
             items.push((e, xform.matrix(), mref.model, pal.mats.clone()));
         }
 
+        // The colour pass draws what the camera can see, `items[..in_view]`, in the order they were
+        // collected; the shadow, blob and node passes see every item, as a caster behind the camera
+        // still shadows what is in front of it.
+        let planes = frustum_planes(view_proj);
+        let (mut seen, unseen): (Vec<DrawItem>, Vec<DrawItem>) = items.into_iter().partition(|(_, entity_model, model_hash, _)| {
+            self.models.get(model_hash).is_none_or(|mg| {
+                let world = *entity_model * mg.fit;
+                let scale = world.x_axis.truncate().length().max(world.y_axis.truncate().length()).max(world.z_axis.truncate().length());
+                sphere_in_view(&planes, world.transform_point3(mg.bounds.0), mg.bounds.1 * scale)
+            })
+        });
+        let in_view = seen.len();
+        seen.extend(unseen);
+        let items = seen;
+
         // Phase 1: ensure per-entity resources and upload their MVP + palette.
-        for (e, entity_model, model_hash, palette) in &items {
+        for (i, (e, entity_model, model_hash, palette)) in items.iter().enumerate() {
             let Some(mg) = self.models.get(model_hash) else { continue };
-            let (bone_count, fit, prelit, terrain_blend) = (mg.bone_count, mg.fit, mg.prelit, mg.terrain_blend);
+            let (bone_count, fit) = (mg.bone_count, mg.fit);
             self.ensure_entity(*e, bone_count);
             let model = *entity_model * fit; // model -> world (fit=identity in the streaming/world path)
-            let mvp = view_proj * model; // entity transform placed in fitted world space, + handedness flip
-            let eg = &self.entities[e];
-            // Camera uniform (176 B = 44 f32): mvp(16) + model(16) + cam_pos(4) + fog_color_density(4)
-            // + fog_misc(4). Fog stays disabled unless set_fog was called.
-            let mut uni = [0f32; 48];
-            uni[..16].copy_from_slice(&mvp.to_cols_array());
-            uni[16..32].copy_from_slice(&model.to_cols_array());
-            uni[32..35].copy_from_slice(&[cam_world.x, cam_world.y, cam_world.z]);
-            uni[35] = self.ambient; // cam_pos.w = ambient fill (scene-controlled)
-            if let Some((color, density, fog_start)) = self.fog {
-                uni[36..40].copy_from_slice(&[color[0], color[1], color[2], density]);
-                uni[40] = 1.0; // fog enable
-                uni[41] = fog_start;
+            // Entity transform placed in fitted world space, + handedness flip.
+            let uni = self.camera_uniform(view_proj * model, model, cam_world);
+            let eg = self.entities.get_mut(e).expect("ensure_entity made it");
+            // Out of view only the shadow pass reads this entity, and it reads the model matrix alone.
+            if i < in_view || eg.written_model != Some(model) {
+                eg.written_model = Some(model);
+                self.queue.write_buffer(&eg.mvp_buf, 0, bytemuck::cast_slice(&uni));
             }
-            uni[42] = if prelit { 1.0 } else { 0.0 }; // fog_misc.z = prelit (skip exterior sun)
-            uni[43] = self.sun_intensity; // fog_misc.w = sun intensity (0 indoors)
-            uni[44] = self.model_alpha; // overlay.x = model opacity (1 = opaque)
-            uni[45] = if terrain_blend { 1.0 } else { 0.0 }; // overlay.y = terrain splat-blend path
-            self.queue.write_buffer(&eg.mvp_buf, 0, bytemuck::cast_slice(&uni));
             if !palette.is_empty() {
                 // Clamp to the entity's allocated bone count so a mismatched palette can't overflow.
                 let n = palette.len().min(eg.bone_count);
-                self.queue
-                    .write_buffer(&eg.bone_buf, 0, bytemuck::cast_slice(&pose::flatten(&palette[..n])));
+                if eg.written_palette[..] != palette[..n] {
+                    self.queue
+                        .write_buffer(&eg.bone_buf, 0, bytemuck::cast_slice(&pose::flatten(&palette[..n])));
+                    eg.written_palette.clear();
+                    eg.written_palette.extend_from_slice(&palette[..n]);
+                }
             }
+        }
+
+        self.prepare_scrub(view, view_proj, cam_world, &planes);
+        if !self.trees.is_empty() {
+            let uniform = self.camera_uniform(view_proj, glam::Mat4::IDENTITY, cam_world);
+            self.queue.write_buffer(&self.tree_camera, 0, bytemuck::cast_slice(&uniform));
         }
 
         // Sky uniform (128 B): inverse view-proj (per-pixel ray reconstruction) + sun direction +
@@ -2282,7 +3147,7 @@ impl Scene {
             .write_buffer(&self.blob_params_buf, 0, bytemuck::cast_slice(&view_proj.to_cols_array()));
 
         // Blob / contact-shadow collection (the exe's cheap fallback for casters the depth atlas can't
-        // cover — `FUN_00853710`, shadow_code_map.md §5). A dynamic (non-prelit) caster whose ground
+        // cover — `FUN_00853710`, shadow_code_map.md §5). A caster whose ground
         // point falls OUTSIDE every cascade box (beyond shadow distance) gets a projected dark disc
         // instead of a real cascade shadow. Only active when the cascades are configured AND the sun is
         // on (outdoors) — interiors/default paths keep their prior no-blob behaviour (graceful degrade).
@@ -2290,9 +3155,6 @@ impl Scene {
         if self.shadow_configured && self.sun_intensity > 0.0 {
             for (_e, entity_model, model_hash, _pal) in &items {
                 let Some(mg) = self.models.get(model_hash) else { continue };
-                if mg.prelit {
-                    continue; // baked geometry is not a dynamic caster
-                }
                 let world = *entity_model * mg.fit;
                 let wpos = world.w_axis.truncate();
                 if select_cascade(&self.cascade_vps, wpos).is_none() {
@@ -2342,9 +3204,10 @@ impl Scene {
         let view_inv = view.inverse();
         let cam_right = view_inv.transform_vector3(glam::Vec3::X);
         let cam_up = view_inv.transform_vector3(glam::Vec3::Y);
+        let cam_forward = view_inv.transform_vector3(glam::Vec3::Z);
         let eye = view_inv.transform_point3(glam::Vec3::ZERO);
         self.particles
-            .prepare(&self.device, &self.queue, view_proj, cam_right, cam_up, eye);
+            .prepare(&self.device, &self.queue, view_proj, cam_right, cam_up, cam_forward, eye);
 
         // Phase 2: record the frame's passes by walking the canonical per-viewport scene order
         // (`render_graph::SCENE_ORDER`, the recovered `FUN_00466d40` body sequence — render_core §5).
@@ -2353,8 +3216,8 @@ impl Scene {
         // NOTHING today, so this loop reduces to the engine's prior command sequence (shadow-depth →
         // color → transparent-fx → ui → overlay) — a behaviour-preserving carve. Each node's Xbox↔PC
         // anchor lives on `render_graph::PassId::anchor`.
-        let output = self.surface.get_current_texture()?;
-        let view_tex = output.texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let output = self.acquire()?;
+        let view_tex = output.texture().create_view(&wgpu::TextureViewDescriptor::default());
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("scene frame") });
@@ -2376,7 +3239,7 @@ impl Scene {
             match node {
                 // --- realized world passes ---
                 PassId::ShadowCascade => self.record_shadow_cascade(&mut encoder, &items),
-                PassId::Color => self.record_color(&mut encoder, &view_tex, &items, hdr_world),
+                PassId::Color => self.record_color(&mut encoder, &view_tex, &items[..in_view], hdr_world),
                 // --- engine composite tail ---
                 PassId::TransparentFx => self.record_transparent_fx(&mut encoder, &view_tex),
                 PassId::Ui => {
@@ -2419,10 +3282,12 @@ impl Scene {
             self.dispatch_nodes(node, &mut encoder, &view_tex, &items, view_proj, view, cam_world, t);
         }
 
-        let readback = self.encode_capture(&mut encoder, &output.texture);
+        let readback = self.encode_capture(&mut encoder, output.texture());
         self.queue.submit(std::iter::once(encoder.finish()));
         self.finish_capture(readback);
-        output.present();
+        if let FrameTarget::Surface(surface) = output {
+            self.queue.present(surface);
+        }
         Ok(())
     }
 }
@@ -2585,25 +3450,25 @@ impl DecalNode {
         });
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("decal pipeline layout"),
-            bind_group_layouts: &[&cam_bgl],
-            push_constant_ranges: &[],
+            bind_group_layouts: &[Some(&cam_bgl)],
+            immediate_size: 0,
         });
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("decal pipeline"),
             layout: Some(&layout),
             vertex: wgpu::VertexState {
                 module: &shader,
-                entry_point: "vs_decal",
-                buffers: &[wgpu::VertexBufferLayout {
+                entry_point: Some("vs_decal"),
+                buffers: &[Some(wgpu::VertexBufferLayout {
                     array_stride: std::mem::size_of::<DecalVertex>() as wgpu::BufferAddress,
                     step_mode: wgpu::VertexStepMode::Vertex,
                     attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x2, 2 => Float32, 3 => Float32],
-                }],
+                })],
                 compilation_options: Default::default(),
             },
             fragment: Some(wgpu::FragmentState {
                 module: &shader,
-                entry_point: "fs_decal",
+                entry_point: Some("fs_decal"),
                 targets: &[Some(wgpu::ColorTargetState {
                     format,
                     blend: Some(wgpu::BlendState::ALPHA_BLENDING),
@@ -2618,13 +3483,14 @@ impl DecalNode {
             },
             depth_stencil: Some(wgpu::DepthStencilState {
                 format: DEPTH_FORMAT,
-                depth_write_enabled: false, // a surface overlay, not occluding geometry
-                depth_compare: wgpu::CompareFunction::LessEqual,
+                depth_write_enabled: Some(false), // a surface overlay, not occluding geometry
+                depth_compare: Some(wgpu::CompareFunction::LessEqual),
                 stencil: wgpu::StencilState::default(),
                 bias: wgpu::DepthBiasState::default(),
             }),
             multisample: wgpu::MultisampleState::default(),
-            multiview: None,
+            multiview_mask: None,
+            cache: None,
         });
         let cap = 6 * 64; // 64 decals worth of verts to start
         let vbuf = device.create_buffer(&wgpu::BufferDescriptor {
@@ -2673,6 +3539,7 @@ impl crate::render_graph::RenderNode for DecalNode {
             label: Some("decal pass"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                 view: ctx.color,
+                depth_slice: None,
                 resolve_target: None,
                 ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
             })],
@@ -2683,12 +3550,30 @@ impl crate::render_graph::RenderNode for DecalNode {
             }),
             timestamp_writes: None,
             occlusion_query_set: None,
+            multiview_mask: None,
         });
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, &self.cam_bind, &[]);
         pass.set_vertex_buffer(0, vb.slice(..));
         pass.draw(0..verts.len() as u32, 0..1);
     }
+}
+
+/// The adapter, as the option pages read it ([`Scene::gpu`]).
+#[derive(Clone, Debug)]
+pub struct GpuInfo {
+    pub vendor: u32,
+    pub device: u32,
+    pub sample_counts: Vec<u32>,
+    pub present_modes: Vec<wgpu::PresentMode>,
+}
+
+/// One layer of the front end, back to front: a prepared Flash movie or Bink movie, by its index in
+/// what [`Scene::prepare_front_end`] was given.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FrontLayer {
+    Flash(usize),
+    Movie(usize),
 }
 
 /// External overlay draw hook (see [`Scene::render_with`]): device, queue, frame encoder,
@@ -2732,6 +3617,49 @@ fn light_anim_factor(a: &LightAnim, t: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A sphere is in view when any of it is: in front of the camera it passes, behind or wholly off to
+    /// the side it does not, and a sphere whose edge crosses the side plane still passes.
+    #[test]
+    fn spheres_cull_against_the_frustum() {
+        let view = glam::Mat4::look_at_lh(glam::Vec3::ZERO, glam::Vec3::Z, glam::Vec3::Y);
+        let proj = glam::Mat4::perspective_lh(45f32.to_radians(), 1.0, 0.5, 1000.0);
+        let planes = frustum_planes(proj * view);
+        let at = |x: f32, z: f32| glam::Vec3::new(x, 0.0, z);
+        assert!(sphere_in_view(&planes, at(0.0, 100.0), 1.0), "straight ahead");
+        assert!(!sphere_in_view(&planes, at(0.0, -100.0), 1.0), "behind");
+        assert!(!sphere_in_view(&planes, at(0.0, 2000.0), 1.0), "past the far plane");
+        // tan 22.5° × 100 = 41.4 m is the edge of the view at 100 m.
+        assert!(!sphere_in_view(&planes, at(60.0, 100.0), 5.0), "off to the side");
+        assert!(sphere_in_view(&planes, at(60.0, 100.0), 30.0), "reaches into view");
+    }
+
+    #[test]
+    fn ground_cover_culls_at_its_near_side_and_blends_at_its_far_side() {
+        let rock = mesh::ScrubDepths { alpha_zero: 50.0, cull: 70.0, cutout: false };
+        assert_eq!(scrub_blended(rock, 30.0, 10.0), Some(false), "wholly nearer than alpha 0");
+        assert_eq!(scrub_blended(rock, 45.0, 10.0), Some(true), "its far side crosses");
+        assert_eq!(scrub_blended(rock, 79.0, 10.0), Some(true), "its near side is still in range");
+        assert_eq!(scrub_blended(rock, 81.0, 10.0), None, "its near side is past the cull depth");
+        let grass = mesh::ScrubDepths { cutout: true, ..rock };
+        assert_eq!(scrub_blended(grass, 45.0, 10.0), Some(false), "a cutout never blends");
+        assert_eq!(scrub_blended(grass, 81.0, 10.0), None);
+    }
+
+    /// Bounds follow the rest palette, not the bind pose, and a rigged model's sphere is grown.
+    #[test]
+    fn rest_bounds_follow_the_palette() {
+        let vert = |x: f32| Vertex { pos: [x, 0.0, 0.0], color: [1.0; 4], uv: [0.0; 2], normal: [0.0, 1.0, 0.0], tangent: [1.0, 0.0, 0.0, 1.0], joints: [0; 4], weights: [255, 0, 0, 0] };
+        let identity = [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0]];
+        let verts = [vert(-1.0), vert(1.0)];
+        assert_eq!(rest_bounds(&verts, &[identity], false), (glam::Vec3::ZERO, 1.0));
+        let (_, rigged) = rest_bounds(&verts, &[identity], true);
+        assert_eq!(rigged, RIGGED_BOUNDS_PAD);
+        let mut moved = identity;
+        moved[3] = [10.0, 0.0, 0.0, 1.0]; // row-vector translation
+        assert_eq!(rest_bounds(&verts, &[moved], false).0, glam::Vec3::new(10.0, 0.0, 0.0));
+        assert_eq!(rest_bounds(&[], &[identity], false), (glam::Vec3::ZERO, 0.0));
+    }
 
     /// A row is padded to the next 256-byte boundary, and an exact multiple is left as it is.
     #[test]

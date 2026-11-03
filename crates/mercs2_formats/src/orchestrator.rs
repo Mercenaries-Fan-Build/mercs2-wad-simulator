@@ -624,9 +624,18 @@ pub fn decode_script(list: &[u32], resolve: impl Fn(u32) -> String) -> String {
 }
 
 /// The default state of a switch node, resolved from the GAME DATA: every observed machine's
-/// first state is an init stub whose enter script is `SetState(<target>, self)` — follow it.
-/// Falls back to state 0 when the pattern is absent.
+/// first state is an init stub whose enter script is `SetState(<target>, self)` — follow it. A
+/// [`STATE_FROM_TEMPLATE`] target is `PristineState` (no template records; see
+/// [`default_state_index_in`]). Falls back to state 0 when the pattern is absent.
 pub fn default_state_index(node: &SwitchNodeDef) -> usize {
+    default_state_index_in(node, &TemplateStates::new())
+}
+
+/// [`default_state_index`] for an entity whose template records are `template`. A template state the
+/// node does not list (`al_veh_truck_hmmwv_armored`'s weapon mounts, sent to a state hashed as the
+/// switch node itself) has no index: the node stays at state 0, `InitState`, whose enter script
+/// resolves to that state again, which the machine enters with no script as `0x004D4010` does.
+pub fn default_state_index_in(node: &SwitchNodeDef, template: &TemplateStates) -> usize {
     let setstate = crate::hash::pandemic_hash_m2("setstate");
     let Some(first) = node.states.first() else {
         return 0;
@@ -643,6 +652,10 @@ pub fn default_state_index(node: &SwitchNodeDef) -> usize {
             2 if i + 1 < l.len() => {
                 if l[i + 1] == setstate {
                     if let Some(&target) = args.first() {
+                        let target = match target {
+                            STATE_FROM_TEMPLATE => template.get(&node.name_hash).copied().unwrap_or(STATE_PRISTINE),
+                            t => t,
+                        };
                         if let Some(pos) = node.states.iter().position(|s| s.name_hash == target) {
                             return pos;
                         }
@@ -703,11 +716,15 @@ fn is_terminal(target: u32) -> bool {
 /// node's pristine state and follows transitions until stable, with engine-plausible priority:
 /// a delivered terminal transition (→ wreck) wins over an unconditional passthrough `SetState`,
 /// which wins over a delivered non-terminal transition (→ on-fire/damaged).
-fn simulate_node_state(node: &SwitchNodeDef, delivered: &std::collections::HashSet<u32>) -> usize {
+fn simulate_node_state(
+    node: &SwitchNodeDef,
+    delivered: &std::collections::HashSet<u32>,
+    template: &TemplateStates,
+) -> usize {
     let setstate = crate::hash::pandemic_hash_m2("setstate");
     let setstateonmsg = crate::hash::pandemic_hash_m2("setstateonmsg");
     let find = |t: u32| node.states.iter().position(|s| s.name_hash == t);
-    let mut cur = default_state_index(node);
+    let mut cur = default_state_index_in(node, template);
     for _ in 0..node.states.len() * 2 + 4 {
         let Some(state) = node.states.get(cur) else {
             break;
@@ -803,9 +820,19 @@ pub fn node_states_for_delivered(
     sm: &StateMachine,
     delivered: &std::collections::HashSet<u32>,
 ) -> Vec<usize> {
+    node_states_for_delivered_in(sm, delivered, &TemplateStates::new())
+}
+
+/// [`node_states_for_delivered`] for an entity whose template records are `template`: each node
+/// starts from the state its template picks.
+pub fn node_states_for_delivered_in(
+    sm: &StateMachine,
+    delivered: &std::collections::HashSet<u32>,
+    template: &TemplateStates,
+) -> Vec<usize> {
     sm.nodes
         .iter()
-        .map(|n| simulate_node_state(n, delivered))
+        .map(|n| simulate_node_state(n, delivered, template))
         .collect()
 }
 
@@ -820,8 +847,35 @@ pub fn enter_commands(state: &StateDef) -> Vec<(u32, Vec<u32>)> {
 
 /// `InitState`: the state every switch node enters when its machine is built at activation.
 pub const STATE_INIT: u32 = 0x0ACE_072A;
-/// The `SetState` target that loads the node's saved state (pool `0xDF8B90`), else `PristineState`.
-pub const STATE_SAVED: u32 = 0xCDE0_B80F;
+/// The `SetState` target the handler `0x004D1C70` resolves to the state the entity's
+/// `OSMStateParameter` records (pool `0xDF8B90`) name for the switch node — the entity's own records,
+/// then its template's — else `PristineState`. See [`TemplateStates`].
+pub const STATE_FROM_TEMPLATE: u32 = 0xCDE0_B80F;
+
+/// An entity's `OSMStateParameter` records as switch-node hash → state hash: what
+/// [`STATE_FROM_TEMPLATE`] resolves to. A variant template picks its loadout on a shared model this way
+/// (`UH1 Transport (GR)` sends all 14 of the Huey's kit switches to `0x46F79D30`, which shows nothing).
+/// An empty map is the handler's no-record rule: every node goes to `PristineState`.
+pub type TemplateStates = std::collections::BTreeMap<u32, u32>;
+
+/// The [`TemplateStates`] of an entity whose keys, in lookup order, are `keys` (its own key, then its
+/// template's — `SceneObject+0x14`): the first `OSMStateParameter` record naming a node wins.
+pub fn template_states(we: &crate::worldentity::WorldEntity, keys: &[u32]) -> Result<TemplateStates, String> {
+    let mut out = TemplateStates::new();
+    for &key in keys {
+        for c in we.groups_of("OSMStateParameter") {
+            for r in c.records.iter().filter(|r| r.keys.contains(&key)) {
+                let b = match &r.payload {
+                    crate::worldentity::Payload::Fixed(b) if b.len() == 8 => b,
+                    p => return Err(format!("OSMStateParameter: payload {p:?} is not 8 bytes")),
+                };
+                let node = u32_le(b, 0);
+                out.entry(node).or_insert(u32_le(b, 4));
+            }
+        }
+    }
+    Ok(out)
+}
 
 /// The per-**HIER-node** enable table — the render node's `+0x2A0` / `+0x2A8`, which SEGM records
 /// index by their signed `node` field (clause 3 of the draw gate; see `mercs2_engine::render_state`) —
@@ -841,10 +895,37 @@ pub const STATE_SAVED: u32 = 0xCDE0_B80F;
 ///
 /// With the default states (`InitState`'s targets) this is the activation table; it reproduces every
 /// live table of the two fresh captures (`mercs2_probe` `live_node_enables_follow_the_activation_rule`).
-/// "Shown" starting empty rests on a SecuROM-decrypted bind flag read as 0 (INFERRED). A saved state
-/// takes `PristineState`. `SetState` nested past 64 levels is an error (a cycle in the data).
+/// "Shown" starting empty rests on a SecuROM-decrypted bind flag read as 0 (INFERRED).
+/// [`STATE_FROM_TEMPLATE`] takes `PristineState` here (no template records; [`machine_run_in`] takes
+/// them). `SetState` nested past 64 levels is an error (a cycle in the data).
 pub fn machine_node_enable(sm: &StateMachine, hier: &[HierNode], chosen: &[usize]) -> Result<Vec<bool>, String> {
-    let mut m = Machine::new(sm, hier);
+    machine_run(sm, hier, chosen)?.records.table(hier)
+}
+
+/// What running the machine into `chosen` leaves behind: the node-enable records
+/// ([`machine_node_enable`] is their table) and every [`CMD_CONTROLLER_EVENT`] the entered states
+/// issued, as `(event, node hash)` in issue order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MachineRun {
+    pub records: NodeEnableRecords,
+    pub controller_events: Vec<(u32, u32)>,
+}
+
+/// Run the machine as [`machine_node_enable`] does, keeping its records and controller events.
+pub fn machine_run(sm: &StateMachine, hier: &[HierNode], chosen: &[usize]) -> Result<MachineRun, String> {
+    machine_run_in(sm, hier, chosen, &TemplateStates::new())
+}
+
+/// [`machine_run`] for an entity whose template records are `template`: [`STATE_FROM_TEMPLATE`]
+/// resolves through them. `chosen` should start from [`default_state_index_in`] with the same records,
+/// or entering a node's chosen state undoes what its template picked.
+pub fn machine_run_in(
+    sm: &StateMachine,
+    hier: &[HierNode],
+    chosen: &[usize],
+    template: &TemplateStates,
+) -> Result<MachineRun, String> {
+    let mut m = Machine::new(sm, hier, template);
     for i in (0..sm.nodes.len()).rev() {
         m.enter(i, STATE_INIT)?;
     }
@@ -853,7 +934,7 @@ pub fn machine_node_enable(sm: &StateMachine, hier: &[HierNode], chosen: &[usize
             m.enter(i, st.name_hash)?;
         }
     }
-    Ok(m.enable_table())
+    Ok(MachineRun { records: m.records(), controller_events: m.events })
 }
 
 /// The table at activation: every switch node in the state `InitState` takes it to.
@@ -873,10 +954,14 @@ struct Machine<'a> {
     ctl: Vec<bool>,
     shown: Vec<bool>,
     depth: usize,
+    /// [`CMD_CONTROLLER_EVENT`]s issued, `(event, node hash)`.
+    events: Vec<(u32, u32)>,
+    /// What [`STATE_FROM_TEMPLATE`] resolves to.
+    template: &'a TemplateStates,
 }
 
 impl<'a> Machine<'a> {
-    fn new(sm: &'a StateMachine, hier: &'a [HierNode]) -> Machine<'a> {
+    fn new(sm: &'a StateMachine, hier: &'a [HierNode], template: &'a TemplateStates) -> Machine<'a> {
         let index: std::collections::HashMap<u32, usize> = hier.iter().map(|h| (h.hash, h.index)).collect();
         let mut ctl = vec![false; hier.len()];
         for i in sm.switch_slots.iter().filter_map(|h| index.get(h)) {
@@ -891,6 +976,8 @@ impl<'a> Machine<'a> {
             ctl,
             shown: vec![false; hier.len()],
             depth: 0,
+            events: Vec::new(),
+            template,
         }
     }
 
@@ -943,10 +1030,21 @@ impl<'a> Machine<'a> {
                         }
                     } else if c == setstate {
                         let node = stack.pop();
-                        let state = stack.pop().map(|s| if s == STATE_SAVED { STATE_PRISTINE } else { s });
+                        let state = stack.pop().map(|s| match (s, node) {
+                            (STATE_FROM_TEMPLATE, Some(n)) => self.template.get(&n).copied().unwrap_or(STATE_PRISTINE),
+                            (STATE_FROM_TEMPLATE, None) => STATE_PRISTINE,
+                            _ => s,
+                        });
                         if let (Some(&ni), Some(st)) = (node.and_then(|n| self.nodes.get(&n)), state) {
                             self.enter(ni, st)?;
                         }
+                    } else if c == CMD_CONTROLLER_EVENT {
+                        let node = stack.pop();
+                        let event = stack.pop();
+                        if let (Some(event), Some(node)) = (event, node) {
+                            self.events.push((event, node));
+                        }
+                        stack.clear();
                     } else {
                         stack.clear();
                     }
@@ -963,8 +1061,9 @@ impl<'a> Machine<'a> {
         Ok(())
     }
 
-    /// The table `FUN_00476BB0` + `FUN_004727B0` build from the current visibility.
-    fn enable_table(&self) -> Vec<bool> {
+    /// The records `FUN_00476BB0` lists from the current visibility: `[+0x29C]` = vis(node 0), and a
+    /// record for every node whose visibility differs from its parent's.
+    fn records(&self) -> NodeEnableRecords {
         let hier = self.hier;
         let n = hier.len();
         let mut vis: Vec<Option<bool>> = vec![None; n];
@@ -978,26 +1077,67 @@ impl<'a> Machine<'a> {
             v
         }
         let vis: Vec<bool> = (0..n).map(|i| visible(i, hier, &self.ctl, &self.shown, &mut vis)).collect();
-        let base = vis.first().copied().unwrap_or(true);
-        let (mut en, mut inherit, mut listed) = (vec![base; n], vec![false; n], vec![false; n]);
+        let mut records = vec![None; n];
         for i in 0..n {
             if let Some(p) = hier[i].parent {
                 if vis[i] != vis[p] {
-                    en[i] = vis[i];
-                    inherit[i] = true;
-                    listed[i] = true;
+                    records[i] = Some(vis[i]);
                 }
+            }
+        }
+        NodeEnableRecords { base: vis.first().copied().unwrap_or(true), records }
+    }
+}
+
+/// The state machine's `0xBA20F82C` command, `(event, node)`: an event for the bone controllers on
+/// `node`. Its handler `FUN_004B16B0` latches the rotor controllers on events `0xB4A26AA7` and
+/// `0x6CCBB80A` (`PgRotorBoneController`, see `docs/modernization/vehicle_model_spec.md`).
+pub const CMD_CONTROLLER_EVENT: u32 = 0xBA20_F82C;
+
+/// A render object's node-enable records (the list at `OBJ+0x28C`) and its default byte (`OBJ+0x29C`),
+/// from which [`NodeEnableRecords::table`] builds the per-node enable table at `OBJ+0x2A0`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NodeEnableRecords {
+    /// `[+0x29C]`: the value of every node with no record and no recorded ancestor.
+    pub base: bool,
+    /// One per HIER node: the node's record, if it has one.
+    pub records: Vec<Option<bool>>,
+}
+
+impl NodeEnableRecords {
+    /// `0x00472960` (body `0x024853D0`, then `0x004B7630`): drop `node`'s record and record `enabled`
+    /// for it. The rotor controllers write their blur nodes through it.
+    pub fn set(&mut self, node: usize, enabled: bool) -> Result<(), String> {
+        let n = self.records.len();
+        let r = self.records.get_mut(node).ok_or_else(|| format!("node {node} is past the {n}-node table"))?;
+        *r = Some(enabled);
+        Ok(())
+    }
+
+    /// `FUN_004727B0`: every node takes `base`, a recorded node its record, and a node with no record
+    /// under a recorded (or inheriting) parent copies its parent.
+    pub fn table(&self, hier: &[HierNode]) -> Result<Vec<bool>, String> {
+        let n = hier.len();
+        if self.records.len() != n {
+            return Err(format!("{} node-enable records for {n} HIER nodes", self.records.len()));
+        }
+        let mut en = vec![self.base; n];
+        let mut inherit = vec![false; n];
+        for i in 0..n {
+            if let Some(v) = self.records[i] {
+                en[i] = v;
+                inherit[i] = true;
             }
         }
         for i in 0..n {
             if let Some(p) = hier[i].parent {
-                if inherit[p] && !listed[i] {
+                if inherit[p] && self.records[i].is_none() {
                     en[i] = en[p];
                     inherit[i] = true;
                 }
             }
         }
-        en
+        Ok(en)
     }
 }
 

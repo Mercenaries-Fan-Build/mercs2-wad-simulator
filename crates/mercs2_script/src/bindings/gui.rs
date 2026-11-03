@@ -149,9 +149,17 @@ pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
         "SetFactionMarkerVisibleDistance", "EnableFactionMarkers", "SetFactionMarkerSize",
         "SetVehicleEntranceMarkerVisibleDistance", "EnableVehicleEntranceMarkers",
         "SetVehicleEntranceMarkerSize", "EnablePickupMarkers", "SetPickupMarkerSize",
-        "SetPickupMarkerVisibleDistance", "EnablePlayerMarkers", "GetLanguageNum", "DoSigninCheck",
+        "SetPickupMarkerVisibleDistance", "EnablePlayerMarkers", "GetLanguageNum",
         "OnShellLoaded", "OnGlobalExit", "ShowLoadingHints", "OutputToPIX",
     ])?;
+    // `0x5B4C00`: the press-start branch of `MrxGuiShell.HandleInput`; the engine runs the profile setup.
+    let h = host.clone();
+    b.real("DoSigninCheck", lua.create_function(move |_, _: mercs2_luac::rt::MultiValue| {
+        if let Some(tree) = h.borrow_mut().hud() {
+            tree.request_signin();
+        }
+        Ok(())
+    })?)?;
 
     // Input-mode queries gate KB/M-vs-controller branches — PC default = keyboard/mouse.
     b.real(

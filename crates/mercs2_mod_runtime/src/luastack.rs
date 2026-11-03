@@ -91,6 +91,17 @@ pub unsafe extern "C" fn m2_lua_arg_bool(l: *mut c_void, idx0: c_int, out: *mut 
 }
 
 /// # Safety
+/// `out` is null or writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn m2_lua_arg_object(l: *mut c_void, idx0: c_int, out: *mut u32) -> c_int {
+    let Some(v) = lua_stack::arg_object(&Process, l as u32, idx0) else { return 0 };
+    if !out.is_null() {
+        unsafe { out.write(v) };
+    }
+    1
+}
+
+/// # Safety
 /// `out` is null or writable for `out_max` bytes.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn m2_lua_arg_string(l: *mut c_void, idx0: c_int, out: *mut c_char, out_max: c_int) -> c_int {

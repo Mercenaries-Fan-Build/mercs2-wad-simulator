@@ -22,7 +22,7 @@ use mercs2_core::{AnimState, Entity, ModelRef, SkinPalette, Transform, World};
 use mercs2_engine::mesh::{self, BoneRig, DrawGroup};
 use mercs2_formats::anim_select::AnimSelector;
 use mercs2_engine::render::{ClipAnim, TexMap};
-use mercs2_engine::scene::Scene;
+use mercs2_engine::scene::{Scene, SurfaceError};
 use mercs2_engine::{game_world, pose, wad};
 use winit::event::{ElementState, Event, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::EventLoop;
@@ -51,6 +51,8 @@ pub struct Options {
     pub auto_patch: bool,
     /// Every `--overlay`, in argument order. See [`overlays_for`].
     pub extra_overlays: Vec<String>,
+    /// `--level`: the level to open, ahead of the saved one.
+    pub level: Option<String>,
     /// A Shipment folder to open in the Quartermaster dock at startup.
     ///
     /// The dock is otherwise only reachable by clicking, which makes it unverifiable from a script —
@@ -85,6 +87,8 @@ pub(crate) struct WadStack {
     pub side_labels: Vec<String>,
     /// Every side WAD looked for and what became of it — what Settings' "What it opened" lists.
     pub side_report: Vec<(String, SideWad)>,
+    /// The layouts compact containers inflate through, read from the base WAD at the first one.
+    schemas: Option<mercs2_formats::be_to_le::ecs::ComponentSchemas>,
 }
 
 /// What became of one side WAD ([`mercs2_quartermaster::game::side_wad_files`]).
@@ -133,7 +137,7 @@ impl WadStack {
                 Err(e) => side_report.push((file, SideWad::Unreadable(format!("{path}: {e}")))),
             }
         }
-        Ok(WadStack { wads, labels, registry: Default::default(), tex_cache: HashMap::new(), side, side_labels, side_report })
+        Ok(WadStack { wads, labels, registry: Default::default(), tex_cache: HashMap::new(), side, side_labels, side_report, schemas: None })
     }
 
     /// No archive open: the window's state before a boot brings one in.
@@ -146,6 +150,7 @@ impl WadStack {
             side: Vec::new(),
             side_labels: Vec::new(),
             side_report: Vec::new(),
+            schemas: None,
         }
     }
 
@@ -195,6 +200,41 @@ impl WadStack {
             .ok_or_else(|| format!("0x{hash:08X}: no model chunk in any open wad"))
     }
 
+    /// The container of type `type_hash` named `hash`, resolved through the residency registry like
+    /// every other asset (overlays first).
+    pub fn typed_container(&mut self, type_hash: u32, hash: u32) -> Result<Vec<u8>, String> {
+        let WadStack { wads, registry, .. } = self;
+        let c = registry
+            .resolve(wads, type_hash, hash)
+            .and_then(|c| registry.slice(c).map(<[u8]>::to_vec))
+            .ok_or_else(|| format!("0x{hash:08X}: no chunk of type 0x{type_hash:08X} in any open wad"))?;
+        if type_hash == mercs2_formats::types::TYPE_HASH_LAYER {
+            return self.named_ecs(c);
+        }
+        Ok(c)
+    }
+
+    /// An ECS container in the named form its readers take. A compact one, as the DLC stores it,
+    /// inflates through the layouts of the game's `vz.wad` beside the base, whichever level is open,
+    /// with the names boot resolves: the bundle's, then the checkout's name homes where there is one.
+    fn named_ecs(&mut self, container: Vec<u8>) -> Result<Vec<u8>, String> {
+        use mercs2_formats::be_to_le::ecs::{is_compact, ComponentSchemas};
+        if !is_compact(&container) {
+            return Ok(container);
+        }
+        if self.schemas.is_none() {
+            let base = self.labels.first().ok_or("no base WAD is open")?;
+            let vz = mercs2_quartermaster::sound::sibling_wad(std::path::Path::new(base), "vz.wad")?;
+            let mut schemas = ComponentSchemas::from_vz_wad(&vz)?;
+            schemas.add_names(crate::index::load_all_names()?.into_values());
+            if let Ok((_, held)) = crate::statenamer::StateNamer::open() {
+                schemas.add_names(held.into_values());
+            }
+            self.schemas = Some(schemas);
+        }
+        self.schemas.as_ref().expect("set above").inflate(&container)
+    }
+
     /// A string table by asset name (`english`, `french`, …) as `key_hash -> text`, resolved through
     /// the residency registry like every other asset (overlays first). Keys are hashed by their bare
     /// name — look one up with `mercs2_formats::stringdb::key_hash`.
@@ -212,6 +252,20 @@ impl WadStack {
         let db = mercs2_formats::stringdb::parse(&keys, &strs)
             .map_err(|e| format!("string table `{name}`: {e}"))?;
         Ok(db.entries.into_iter().map(|e| (e.key_hash, e.text)).collect())
+    }
+
+    /// Who speaks each FaceFX anim set ([`mercs2_engine::facecast`]).
+    pub fn face_cast(&mut self, templates: &[mercs2_formats::mixr::KitTemplate]) -> Result<mercs2_engine::facecast::Cast, String> {
+        use mercs2_engine::facecast;
+        let mut scripts = HashMap::new();
+        for m in facecast::MODULES {
+            let name = m.to_ascii_lowercase();
+            let code = self.script_bytecode(&name)?;
+            scripts.insert(name, code);
+        }
+        let fetch = move |name: &str| scripts.get(name).cloned().ok_or_else(|| format!("`{name}` is not one of facecast::MODULES"));
+        let wads = &mut self.wads;
+        facecast::Cast::read(fetch, |layer| facecast::layer_block(wads, layer), templates)
     }
 
     /// A shipped script's LuaQ bytecode by module name (`wifmissiondata`, `mrxrewarddata`, …),
@@ -240,6 +294,7 @@ impl WadStack {
             .resolve(wads, WORLDENTITY_TYPE_HASH, RETAIL_WORLDENTITY_NAME_HASH)
             .and_then(|c| registry.slice(c).map(<[u8]>::to_vec))
             .ok_or("worldentity: not in any open wad")?;
+        let container = self.named_ecs(container)?;
         let we = WorldEntity::parse(&container).map_err(|e| format!("worldentity: {e}"))?;
         let mut out = HashMap::new();
         for (name, keys) in we.names().map_err(|e| format!("worldentity: {e}"))? {
@@ -254,10 +309,11 @@ impl WadStack {
     /// through the same residency registry.
     pub fn worldentity(&mut self) -> Result<Vec<u8>, String> {
         let WadStack { wads, registry, .. } = self;
-        registry
+        let c = registry
             .resolve_singleton(wads, mercs2_formats::worldentity::WORLDENTITY_TYPE_HASH)
             .and_then(|(_, c)| registry.slice(c).map(<[u8]>::to_vec))
-            .ok_or_else(|| "no worldentity chunk in any open wad".to_string())
+            .ok_or_else(|| "no worldentity chunk in any open wad".to_string())?;
+        self.named_ecs(c)
     }
 
     /// Every source in resolution order: the stack last-opened first, then the side WADs.
@@ -273,6 +329,9 @@ impl WadStack {
         let mut last = format!("0x{hash:08X}: no model chunk in any open wad");
         for src in self.resolution_order() {
             let Some(w) = self.source_mut(src) else { continue };
+            if !wad::has_model(w, hash) {
+                continue;
+            }
             match wad::extract_model_lods(w, hash) {
                 Ok(l) => return Ok(l),
                 Err(e) => last = e,
@@ -287,6 +346,9 @@ impl WadStack {
         let mut last = format!("0x{hash:08X}: no model chunk in any open wad");
         for src in self.resolution_order() {
             let Some(w) = self.source_mut(src) else { continue };
+            if !wad::has_model(w, hash) {
+                continue;
+            }
             match mercs2_engine::model::Model::load(w, hash) {
                 Ok(m) => return Ok(m),
                 Err(e) => last = e,
@@ -297,14 +359,14 @@ impl WadStack {
 
     /// Resident-mip texture (fast path — model loads).
     pub fn texture_resident(&mut self, hash: u32) -> Result<mercs2_formats::texture::TextureData, String> {
-        let mut last = format!("0x{hash:08X}: not in any open wad");
         for i in (0..self.wads.len()).rev() {
             match wad::extract_texture(&mut self.wads[i], hash) {
                 Ok(t) => return Ok(t),
-                Err(e) => last = e,
+                Err(e) if i == 0 => return Err(e),
+                Err(_) => {}
             }
         }
-        Err(last)
+        Err(format!("0x{hash:08X}: not in any open wad"))
     }
 
     /// Full streamed resolution — the texture's higher mips assembled from the finer LOD blocks of
@@ -428,6 +490,115 @@ impl ClipLoader {
     }
 }
 
+/// FaceFX on the preview: the actor of model `model`, the anim set the FaceFX tab opened for it,
+/// and the anim playing or the pose held. Applied only while `model` is the model shown.
+struct FacePlay {
+    model: u32,
+    actor: String,
+    rig: mercs2_engine::anim::facefx::FaceRig,
+    /// The set's label and the set; `None` when an actor row opened it.
+    set: Option<(String, mercs2_formats::facefx::AnimSet)>,
+    anim: Option<usize>,
+    hold: Option<String>,
+    time: f32,
+    /// Whether the camera has been put on the face since the FaceFX row opened.
+    framed: bool,
+    /// Whether a set starts playing on the first frame its model is shown (false once a time is
+    /// set to hold at).
+    play_on_open: bool,
+    /// Whether the playing anim's voice line is still to be read; the face holds at the anim's
+    /// start until it is (or cannot be).
+    voice_due: bool,
+    /// The playing anim's voice line, once read; `None` for a take with none. The player follows
+    /// the anim's time through [`crate::audioplay::follow`].
+    line: Option<VoiceLine>,
+    /// The `english` text of each anim of the set, by the anim's name; or why there is none.
+    texts: Result<Vec<Option<String>>, String>,
+    /// Whether the inspector has been scrolled to the card since the FaceFX row opened.
+    card_shown: bool,
+    /// The take has ended or been stopped: the face is at its reference pose and the line is off,
+    /// as past an anim's end in the game. Play starts it from the top.
+    stopped: bool,
+}
+
+/// A take's voice line: its samples, and where they came from for the status bar.
+struct VoiceLine {
+    clip: u32,
+    samples: Vec<i16>,
+    rate: u32,
+    channels: u8,
+    from: String,
+}
+
+impl VoiceLine {
+    fn length_s(&self) -> f32 {
+        self.samples.len() as f32 / self.channels.max(1) as f32 / self.rate.max(1) as f32
+    }
+}
+
+/// One frame of a take's time: the time after `dt`, or `None` when the take ended. A repeating take
+/// goes back to its start instead.
+fn take_step(time: f32, dt: f32, length: f32, repeat: bool) -> Option<f32> {
+    let t = time + dt;
+    match (t > length, repeat) {
+        (false, _) => Some(t),
+        (true, true) => Some(0.0),
+        (true, false) => None,
+    }
+}
+
+impl FacePlay {
+    /// The playing take's length: its anim's end, or its line's when the voice runs on past the
+    /// face. 0 with no take.
+    fn length(&self) -> f32 {
+        let end = match (&self.set, self.anim) {
+            (Some((_, s)), Some(i)) => s.group.anims[i].bounds().1,
+            _ => 0.0,
+        };
+        end.max(self.line.as_ref().map_or(0.0, VoiceLine::length_s))
+    }
+
+    /// The camera that frames the face: target, distance and yaw. The target is the face bones' bind
+    /// positions' centre, the distance six times their spread (at least 0.5 m), and the camera
+    /// stands where the face looks: from the first face bone's parent (the head) out through that
+    /// centre, level.
+    fn framing(&self, rig: &[BoneRig]) -> Option<(Vec3, f32, f32)> {
+        let pos = |r: &BoneRig| Vec3::new(r.world_bind[3][0], r.world_bind[3][1], r.world_bind[3][2]);
+        let bones: Vec<&BoneRig> = self
+            .rig
+            .bone_names()
+            .filter_map(|n| {
+                let h = mercs2_formats::hash::pandemic_hash_m2(n);
+                rig.iter().find(|r| r.name_hash == h)
+            })
+            .collect();
+        let first = bones.first()?;
+        let c = bones.iter().map(|r| pos(r)).sum::<Vec3>() / bones.len() as f32;
+        let spread = bones.iter().map(|r| (pos(r) - c).length()).fold(0.0, f32::max);
+        let head = rig.get(usize::try_from(first.parent).ok()?).map(pos)?;
+        let out = c - head;
+        Some((c, (spread * 6.0).max(0.5), (-out.x).atan2(-out.z)))
+    }
+
+    /// The face bones' local transforms now, each with the preview bone it replaces; a face bone
+    /// the model's skeleton lacks is an error naming it.
+    fn locals(&self, rig: &[BoneRig]) -> Result<Vec<(usize, mercs2_formats::anim::QsTransform)>, String> {
+        let poses = match (&self.set, self.anim, &self.hold) {
+            (Some((_, s)), Some(i), _) if !self.stopped => self.rig.solve(&self.rig.bind(&s.group.anims[i]), self.time)?,
+            (_, _, Some(n)) => self.rig.hold(n)?,
+            _ => self.rig.reference_pose(),
+        };
+        poses
+            .into_iter()
+            .map(|p| {
+                let h = mercs2_formats::hash::pandemic_hash_m2(&p.name);
+                let b = rig.iter().position(|r| r.name_hash == h).ok_or_else(|| format!("face bone {} is not in the model's skeleton", p.name))?;
+                Ok((b, p.local))
+            })
+            .collect()
+    }
+}
+
 /// Everything loaded for the model currently on the preview pedestal.
 struct Preview {
     hash: u32,
@@ -471,6 +642,10 @@ struct Preview {
     /// shown, as (template name, outfit number). `None` for a model that is not a kit. A kit shows
     /// no part until an outfit is chosen — every part's switch starts hidden, as in the game.
     kit: Option<(KitOutfits, Option<(String, usize)>)>,
+    /// The kit's parts, named by what each shows (`kit_part_names`), or why they could not be;
+    /// empty for a model that is not a kit. The Character kit section shows the error in place
+    /// of its pickers.
+    kit_parts: Result<Vec<PartName>, String>,
     /// The object's HEALTH fraction (1.0 = full, 0.0 = destroyed). Drives the destruction machine:
     /// `node_states_for_health` picks each node's state, so the inspector shows the real pristine →
     /// damaged → wreck progression instead of hand-picked states.
@@ -480,6 +655,14 @@ struct Preview {
     /// The live node-enable table (clause 3) the gate is using — so the inspector can say WHY a mesh
     /// is hidden (LOD-mask miss vs its HIER node switched off by the destruction state).
     node_enable: Vec<bool>,
+    /// The model's rotors: a `PgRotorBoneController` per `Rotor` record of its templates whose hub it
+    /// has (`mercs2_formats::rotor::model_rotors_in`), each with its hub's subtree, hub first.
+    rotors: Vec<(mercs2_engine::vehicle::rotor::RotorController, Vec<usize>)>,
+    /// The rotor speed the rotors read, for a model a `_HelicopterPhysics` template names. `None`
+    /// otherwise: a boat's propellers read another physics, not decoded, and stand at speed 0.
+    heli: Option<mercs2_engine::vehicle::rotor::HeliRotor>,
+    /// The vertical control the rotor speed steps with: 1.0 spins up, 0.0 runs down.
+    rotor_input: f32,
     /// The model's authored header (AABB / node count / LOD-level count / LOD distance), for the
     /// LOD panel + camera framing. `None` for imports.
     header: Option<mercs2_formats::model_cubeize::ModelHeader>,
@@ -498,6 +681,80 @@ struct Preview {
     radius: f32,
 }
 
+impl Preview {
+    /// The rotor speed the rotors read: the helicopter's, else 0.
+    fn rotor_speed(&self) -> f32 {
+        self.heli.map_or(0.0, |h| h.speed)
+    }
+
+    /// Gate the preview at its rung: the destruction machine run into `node_state`, its controller
+    /// events latching the rotors (and losing the helicopter's main rotor), and each rotor's blur and
+    /// blade records laid over it, rebuilt as `FUN_004727B0` does. The machine is re-run from the
+    /// chosen states each time, so restoring health clears the latches retail never clears. A model
+    /// with neither a machine nor rotors gets no table, which passes clause 3 for every segment.
+    fn regate(&mut self, scene: &mut Scene) -> Result<(), String> {
+        let speed = self.rotor_speed();
+        let mut rotors: Vec<_> = self.rotors.iter().map(|(c, _)| *c).collect();
+        let (node_enable, events) =
+            node_enable_with_rotors(self.machine.as_ref(), &self.hier_nodes, &self.node_state, &mut rotors, speed, &Default::default())?;
+        for ((c, _), r) in self.rotors.iter_mut().zip(rotors) {
+            c.killed = r.killed;
+        }
+        if let Some(h) = &mut self.heli {
+            h.rotor_lost = false;
+            if h.mode == 2 {
+                h.mode = 0;
+            }
+            for &(e, _) in &events {
+                h.on_controller_event(e);
+            }
+        }
+        let rs = mercs2_engine::render_state::RenderState { lod: self.tier.trailing_zeros() as u8, view_state: self.tier, node_enable };
+        for (gi, d) in self.draws.iter().enumerate() {
+            if rs.segment_visible(d.lod_mask, d.node) {
+                self.hidden.remove(&gi);
+            } else {
+                self.hidden.insert(gi);
+            }
+        }
+        self.node_enable = rs.node_enable.clone();
+        scene.set_entity_render_state(self.entity, rs);
+        Ok(())
+    }
+}
+
+/// The node-enable table of a model whose destruction machine stands in `node_state`, with `rotors`
+/// at rotor `speed` over it: the machine's records, each rotor latched by the machine's controller
+/// events and recording its blur and blade nodes, rebuilt as `FUN_004727B0` does; and those events.
+/// `template` is the entity's `OSMStateParameter` records, empty for a model shown on its own.
+/// A model with neither a machine nor rotors gets no table, which passes clause 3 for every segment.
+pub(crate) fn node_enable_with_rotors(
+    machine: Option<&mercs2_formats::orchestrator::StateMachine>,
+    hier: &[mercs2_formats::orchestrator::HierNode],
+    node_state: &[usize],
+    rotors: &mut [mercs2_engine::vehicle::rotor::RotorController],
+    speed: f32,
+    template: &mercs2_formats::orchestrator::TemplateStates,
+) -> Result<(Vec<bool>, Vec<(u32, u32)>), String> {
+    use mercs2_formats::orchestrator as orch;
+    let (mut records, events) = match machine {
+        Some(sm) => {
+            let run = orch::machine_run_in(sm, hier, node_state, template)?;
+            (run.records, run.controller_events)
+        }
+        None if rotors.is_empty() => return Ok((Vec::new(), Vec::new())),
+        None => (orch::NodeEnableRecords { base: true, records: vec![None; hier.len()] }, Vec::new()),
+    };
+    for c in rotors.iter_mut() {
+        c.killed = false;
+        for &(e, n) in &events {
+            c.on_controller_event(e, n, hier);
+        }
+        c.record(c.shows(speed, false), hier, &mut records)?;
+    }
+    Ok((records.table(hier)?, events))
+}
+
 /// One row of the preview's clip catalog.
 struct ClipEntry {
     hash: u32,
@@ -510,6 +767,10 @@ struct ClipEntry {
     name: Option<String>,
     /// `name` or the hex hash — status messages and copy actions.
     label: String,
+    /// Every table value the clip is selected by — `(column, value)` of each ActionTable row's state
+    /// cells, then its lookup and vehicle key cells — without the none-sentinel and the small flag
+    /// values, first occurrence first (`clip_cells`). Empty for the generic fallback.
+    values: Vec<(&'static str, u32)>,
 }
 
 /// Full-screen texture plate view (rendered through the engine's loading-plate path).
@@ -620,8 +881,24 @@ enum Act {
     TierNext,
     ClipSel(usize),
     ClipNav(i32),
+    /// Write `.1` — a name that hashes to the table value `.0` — into both name homes
+    /// (`crate::statenamer`), then relabel the preview's clips.
+    NameValue(u32, String),
     /// Play this clip (hash, label) on the loaded model, adding it to the model's clip list.
     PlayClip(u32, String),
+    /// Play anim `.0` of the FaceFX set open on the preview, from its start.
+    FaceAnim(usize),
+    /// Hold this face pose (a bone-pose node of the preview's actor) at full weight; `None` lets go.
+    FaceHold(Option<String>),
+    /// Pause the FaceFX set's playing anim at this time (seconds).
+    FaceTime(f32),
+    FxTime(f32),
+    /// Select the entity of the open layer with this label (the `entity` capture key).
+    LayerEntity(String),
+    /// Frame the whole open layer.
+    LayerFrame,
+    /// Stop the FaceFX set's playing anim: the face goes to rest and its line ends.
+    FaceStop,
     /// Open the hero picker for the clip the Anims tab shows.
     HeroPick,
     /// Make this model (hash, row label) the hero, saved in the settings.
@@ -650,6 +927,9 @@ enum Act {
     /// at full, damaged/on-fire as it drops, wreck at 0. The systemic replacement for hand-picking
     /// per-node states.
     SetHealth(f32),
+    /// Set the vertical control a helicopter preview's rotor speed steps with: 1.0 spins it up,
+    /// 0.0 runs it down.
+    RotorInput(f32),
     /// Toggle hiding every draw group whose diffuse is a `*_ruin*` material (the eyeball test).
     ToggleRuin,
     TexOfPreview,
@@ -734,8 +1014,8 @@ enum Workbench {
     /// The running game (`crate::live`). Pinned to the rail's foot, above Log, with a dot saying
     /// whether the game answers.
     Live,
-    /// **A domain** (Plan 02 §C): one of seven curated lenses over the catalog. A single variant
-    /// rather than seven, so each dispatch site gains ONE arm, not seven. A domain page IS Inspect
+    /// **A domain** (Plan 02 §C): one of six curated lenses over the catalog. A single variant
+    /// rather than six, so each dispatch site gains ONE arm, not six. A domain page IS Inspect
     /// with a lens-filtered navigator — the viewport, inspector cards and verbs all read the same
     /// loaded preview, so browsing here is browsing there, narrowed to what the domain governs.
     Domain(crate::domain::Domain),
@@ -946,23 +1226,23 @@ fn asset_menu(
     if subject == Subject::Texture {
         if ui.add(egui::Button::new("View plate").shortcut_text("Enter")).clicked() {
             actions.push(Act::LoadTexture(hash, label.to_string()));
-            ui.close_menu();
+            ui.close();
         }
     } else if !matches!(subject, Subject::Model { .. }) {
         if let Some(p) = preview {
             if ui.add(egui::Button::new("Preview").shortcut_text("Enter")).clicked() {
                 actions.push(p);
-                ui.close_menu();
+                ui.close();
             }
         }
     } else {
         if ui.add(egui::Button::new("Load in viewport").shortcut_text("Enter")).clicked() {
             actions.push(Act::LoadModelHash(hash, label.to_string()));
-            ui.close_menu();
+            ui.close();
         }
         if ui.add(egui::Button::new("Export\u{2026}").shortcut_text("F10")).clicked() {
             actions.push(Act::OpenExport(hash, label.to_string()));
-            ui.close_menu();
+            ui.close();
         }
         ui.separator();
         // A bench borrows this model — its rig, materials and state machine — and writes a NEW
@@ -978,7 +1258,7 @@ fn asset_menu(
             job.append(&format!("\n{what}"), 0.0, egui::TextFormat::simple(theme::font(&egui::TextStyle::Small), theme::DIM));
             if ui.add(egui::Button::new(job)).clicked() {
                 actions.push(Act::Bench(bench, hash, label.to_string()));
-                ui.close_menu();
+                ui.close();
             }
         }
     }
@@ -992,29 +1272,29 @@ fn asset_menu(
             for (kind, what) in routes {
                 if ui.button(*what).clicked() {
                     actions.push(Act::AddToShipment(kind, hash, label.to_string()));
-                    ui.close_menu();
+                    ui.close();
                 }
             }
         });
         if ui.button("Start a Shipment from this\u{2026}").clicked() {
             actions.push(Act::StartShipment(label.to_string(), subject));
-            ui.close_menu();
+            ui.close();
         }
         ui.separator();
     }
     if ui.button("Copy name").clicked() {
         ui.ctx().copy_text(label.to_string());
-        ui.close_menu();
+        ui.close();
     }
     if ui.button(format!("Copy hash 0x{hash:08X}")).clicked() {
         ui.ctx().copy_text(format!("0x{hash:08X}"));
-        ui.close_menu();
+        ui.close();
     }
     // What you would paste into a manifest — a NAME where one is known, because a hash is one-way
     // and a manifest full of them cannot be reviewed (the M0130 preference, offered up front).
     if ui.button("Copy as manifest reference").clicked() {
         ui.ctx().copy_text(label.to_string());
-        ui.close_menu();
+        ui.close();
     }
 }
 
@@ -1138,26 +1418,31 @@ fn model_subject(index: &AssetIndex, hash: u32, label: &str) -> crate::quarterma
 /// only be switched on (`activate_layer`) or have its placements moved (`edit_world`). Both route the
 /// layer by NAME through the same `Act::AddToShipment` path assets use — `seeded` seeds the layer
 /// field from the label, so the resulting contribution names this exact layer.
-fn layer_menu(ui: &mut egui::Ui, hash: u32, label: &str, actions: &mut Vec<Act>) {
+///
+/// A layer known only by its hash has no routes: neither the path search nor `MarkForAddition` can
+/// resolve a hash.
+fn layer_menu(ui: &mut egui::Ui, hash: u32, label: &str, named: bool, actions: &mut Vec<Act>) {
     use crate::gui::theme;
     ui.label(theme::disp_text(label.to_uppercase(), theme::style_eyebrow(), theme::BRASS));
     ui.separator();
-    ui.menu_button("Add to Shipment", |ui| {
-        for (kind, what) in crate::quartermaster::routes_for_layer() {
-            if ui.button(*what).clicked() {
-                actions.push(Act::AddToShipment(kind, hash, label.to_string()));
-                ui.close_menu();
+    if named {
+        ui.menu_button("Add to Shipment", |ui| {
+            for (kind, what) in crate::quartermaster::routes_for_layer() {
+                if ui.button(*what).clicked() {
+                    actions.push(Act::AddToShipment(kind, hash, label.to_string()));
+                    ui.close();
+                }
             }
-        }
-    });
-    ui.separator();
+        });
+        ui.separator();
+    }
     if ui.button("Copy name").clicked() {
         ui.ctx().copy_text(label.to_string());
-        ui.close_menu();
+        ui.close();
     }
     if ui.button(format!("Copy hash 0x{hash:08X}")).clicked() {
         ui.ctx().copy_text(format!("0x{hash:08X}"));
-        ui.close_menu();
+        ui.close();
     }
 }
 
@@ -1282,7 +1567,25 @@ fn filter_rows(
             }),
         }
     }
+    // ANIMS and FACEFX list by their naming conventions (`index::name_group`): header, then the
+    // rows with no sub-group, then each sub-group, then name.
+    if name_grouped(kind) {
+        let key = |i: usize| {
+            let g = crate::index::name_group(rows[i].name.as_deref());
+            let rank = crate::index::name_group_rank(&g.header).0;
+            (rank, g.header, g.sub.map(|s| s.to_ascii_lowercase()), rows[i].label().to_ascii_lowercase())
+        };
+        v.sort_by_cached_key(|&i| key(i));
+    }
     v
+}
+
+/// How far a sub-group's header and rows sit in from its group's.
+const SUB_INDENT: f32 = 12.0;
+
+/// Whether `kind`'s browser list groups by `index::name_group`.
+fn name_grouped(kind: Kind) -> bool {
+    matches!(kind, Kind::Animation | Kind::FaceFx)
 }
 
 /// The overlay WADs opened ON TOP of `base`, in load order — the game's own patch mechanism: the
@@ -1324,18 +1627,46 @@ struct Archive {
     shell_plate: Option<mercs2_formats::texture::TextureData>,
     /// The Loading.wad gold skull: the loading screen's art.
     boot_skull: Option<mercs2_formats::texture::TextureData>,
+    /// The retail pixel shaders' samplers (`shader3.bin` beside the archive): what each material
+    /// texture slot binds, for the scene and the offscreen renderer.
+    pixel_samplers: mercs2_formats::shader_registrations::PixelSamplers,
+    /// The levels found beside the base, the base's own first.
+    levels: Vec<crate::levels::Level>,
+    /// The level Inspect lists, when it is not the base's.
+    level: Option<crate::levels::Level>,
 }
 
-/// Open the game archive at `wadpath` with `overlays` and build its catalog.
-fn open_archive(wadpath: &str, overlays: &[String]) -> Result<Archive, String> {
+/// The source index of `level`'s WAD in the stack.
+fn level_source(w: &WadStack, level: &Option<crate::levels::Level>) -> Option<usize> {
+    let l = level.as_ref()?;
+    w.labels.iter().position(|p| std::path::Path::new(p) == l.wad)
+}
+
+/// Open the game archive at `wadpath` with `overlays` and `wanted`, a level to mount over them when
+/// it is not the base's, and build its catalog.
+fn open_archive(wadpath: &str, overlays: &[String], wanted: Option<&str>) -> Result<Archive, String> {
+    let levels = crate::levels::found(std::path::Path::new(wadpath), overlays)?;
+    let level = match wanted {
+        Some(name) => Some(crate::levels::pick(&levels, name)?.clone()).filter(|l| l.wad != std::path::Path::new(wadpath)),
+        None => None,
+    };
+    let mut overlays = overlays.to_vec();
+    if let Some(l) = &level {
+        let path = l.wad.to_string_lossy().into_owned();
+        // The stack reads last-opened first, so the level goes on top whichever way it got here.
+        overlays.retain(|o| *o != path);
+        overlays.push(path);
+    }
+    let overlays = &overlays;
     let mut w = WadStack::open(wadpath, overlays).map_err(|e| format!("cannot open {wadpath}: {e}"))?;
     // The catalog builds here (hashes only); names land later through `apply_names`.
     let mut index = AssetIndex::build(&w.wads, &w.side, HashMap::new());
+    index.level_src = level_source(&w, &level);
     // The world's templates: each spawn template that picks a character-kit outfit gets its own
     // catalog row ("Jungle Elite", "VZ Sniper", …). Required — the catalog is wrong without them.
     let kit_templates = load_kit_templates(&mut w)
         .map_err(|e| format!("cannot read the world's templates (worldentity): {e}"))?;
-    let kit_rows = index.add_kit_templates(&kit_templates.kits, &kit_templates.all);
+    let kit_rows = index.add_kit_templates(&kit_templates);
     eprintln!(
         "[workshop] catalog: {} models ({kit_rows} kit template rows), {} textures ({} wad(s))",
         index.models().len(),
@@ -1366,6 +1697,7 @@ fn open_archive(wadpath: &str, overlays: &[String]) -> Result<Archive, String> {
     if boot_skull.is_none() {
         eprintln!("[workshop] Loading.wad skull unavailable; boot screen without icon");
     }
+    let pixel_samplers = mercs2_engine::render::pixel_samplers(std::path::Path::new(wadpath))?;
     Ok(Archive {
         wadpath: wadpath.to_string(),
         overlays: overlays.to_vec(),
@@ -1374,6 +1706,9 @@ fn open_archive(wadpath: &str, overlays: &[String]) -> Result<Archive, String> {
         anim_sel,
         shell_plate,
         boot_skull,
+        pixel_samplers,
+        levels,
+        level,
     })
 }
 
@@ -1385,6 +1720,11 @@ struct BootData {
     lua: Vec<(String, String, String)>,
     missions: crate::missions::Reference,
     audio_idx: crate::audioidx::AudioIndex,
+    /// The bundle's Japanese face (`theme::read_cjk_font`).
+    cjk_font: Vec<u8>,
+    /// What the clip panel names unnamed table values with, or why it cannot (a released binary has
+    /// no checkout to write into). Its homes' names are already in `names`.
+    namer: Result<crate::statenamer::StateNamer, String>,
     secs: f32,
 }
 
@@ -1400,15 +1740,15 @@ enum Boot {
     Failed(Which, String),
 }
 
-/// Start a boot: open `archive` (base and overlays) when given, then load the reference bundle
-/// when `data`. Messages arrive in that order; `Done` (or `Failed`) is the last.
-fn spawn_boot(archive: Option<(String, Vec<String>)>, data: bool) -> std::sync::mpsc::Receiver<Boot> {
+/// Start a boot: open `archive` (base and overlays) with level `level` when given, then load the
+/// reference bundle when `data`. Messages arrive in that order; `Done` (or `Failed`) is the last.
+fn spawn_boot(archive: Option<(String, Vec<String>)>, level: Option<String>, data: bool) -> std::sync::mpsc::Receiver<Boot> {
     let (tx, rx) = std::sync::mpsc::channel::<Boot>();
     std::thread::spawn(move || {
         let t0 = std::time::Instant::now();
         if let Some((wadpath, overlays)) = archive {
             let _ = tx.send(Boot::Prog(0.01, "asset catalog"));
-            match open_archive(&wadpath, &overlays) {
+            match open_archive(&wadpath, &overlays, level.as_deref()) {
                 Ok(a) => {
                     let _ = tx.send(Boot::Archive(Box::new(a)));
                 }
@@ -1426,9 +1766,17 @@ fn spawn_boot(archive: Option<(String, Vec<String>)>, data: bool) -> std::sync::
             let home = crate::index::require_data_home(&mut |f, stage| {
                 let _ = tx.send(Boot::Prog(f, stage));
             })?;
-            let names = crate::index::load_all_names_staged(|f, stage| {
+            let mut names = crate::index::load_all_names_staged(|f, stage| {
                 let _ = tx.send(Boot::Prog(f, stage));
             })?;
+            // Names cracked since the bundle was packed live in the checkout's name homes; a hash
+            // the bundle already names keeps its name.
+            let namer = crate::statenamer::StateNamer::open().map(|(n, held)| {
+                for (h, s) in held {
+                    names.entry(h).or_insert(s);
+                }
+                n
+            });
             let _ = tx.send(Boot::Prog(0.97, "Lua reference corpus"));
             let lua = crate::index::load_lua_corpus()?;
             // The Missions page's corpus index and palette: every script parsed and lifted
@@ -1439,10 +1787,12 @@ fn spawn_boot(archive: Option<(String, Vec<String>)>, data: bool) -> std::sync::
                 // The captioned audio inventory — the Audio domain browses this (banks → clips
                 // with captions).
                 audio_idx: crate::audioidx::AudioIndex::load(&home)?,
+                cjk_font: crate::gui::theme::read_cjk_font(&home)?,
                 home,
                 names,
                 lua,
                 missions,
+                namer,
                 secs: t0.elapsed().as_secs_f32(),
             })
         };
@@ -1523,12 +1873,19 @@ pub fn run(opts: Options) {
     // brings them in; a changed chain is compared against these to decide what to reload.
     let mut wadpath = String::new();
     let mut overlays: Vec<String> = Vec::new();
+    // The open archive's pixel-shader samplers (`Archive::pixel_samplers`), for the offscreen renderer.
+    let mut pixel_samplers: Option<mercs2_formats::shader_registrations::PixelSamplers> = None;
     let mut loaded_data: Option<PathBuf> = None;
     // The archive-bound state, empty until the archive is open (`Boot::Archive` fills it).
     let mut clip_loader = ClipLoader::spawn(String::new(), Vec::new());
     let mut w = WadStack::empty();
     let mut index = AssetIndex::build(&[], &[], HashMap::new());
     let mut anim_sel: Option<AnimSelector> = None;
+    // The clip panel's namer (`crate::statenamer`), its per-value name drafts, and whether the clip
+    // list shows only clips with an unnamed table value.
+    let mut state_namer: Result<crate::statenamer::StateNamer, String> = Err("the reference data is still loading".into());
+    let mut name_drafts: HashMap<u32, String> = HashMap::new();
+    let mut unnamed_only = false;
     // The game's own shell plate (shell.wad) as the workshop backdrop — the browse screen renders
     // through the engine's menu path over it until something is loaded into the 3D viewport.
     let mut shell_plate: Option<mercs2_formats::texture::TextureData> = None;
@@ -1538,18 +1895,24 @@ pub fn run(opts: Options) {
         let o = overlays_for(&s, auto_patch, extra);
         (s, o)
     };
+    // The level asked for, and those found beside the archive. Inspect lists `level` when it is set.
+    let mut level_want: Option<String> = opts.level.clone().or_else(|| crate::settings::load().level);
+    let mut levels: Vec<crate::levels::Level> = Vec::new();
+    let mut level: Option<crate::levels::Level> = None;
     // Where the window starts: loading both, or Settings on the chain with no answer.
     let first = next_step(None, None, &game_chain, &data_chain);
     let (mut phase, mut boot_rx) = match &first {
         Next::Boot { archive, data } => (
             Phase::Booting,
-            Some(spawn_boot(archive.as_deref().map(|p| stack_of(p, opts.auto_patch, &opts.extra_overlays)), *data)),
+            Some(spawn_boot(archive.as_deref().map(|p| stack_of(p, opts.auto_patch, &opts.extra_overlays)), level_want.clone(), *data)),
         ),
         Next::Setup(_) => (Phase::Setup, None),
         Next::Stay => unreachable!("nothing is loaded at startup"),
     };
     // Set when Settings changed a source: the chains are re-resolved at the top of the next frame.
     let mut chains_dirty = false;
+    // Set when the level picker chose: the same step reloads the archive with it.
+    let mut level_dirty = false;
     // Decompiled-Lua reference corpus (path, content, lowercased) — loaded on the boot thread.
     let mut lua_corpus: Vec<(String, String, String)> = Vec::new();
     let mut boot_target = 0.02f32; // stage-start fraction from the loader thread
@@ -1688,6 +2051,32 @@ pub fn run(opts: Options) {
     let mut skel_error: Option<String> = None;
     let mut hero_picker: Option<HeroPicker> = None;
     let mut anim_clip: Option<(u32, String)> = None;
+    // FaceFX on the preview, opened from the FaceFX tab, and the wavebank clips by hash its takes'
+    // voice lines are found by (read on a worker the first time a take plays).
+    let mut face: Option<FacePlay> = None;
+    // The layer open in the viewport, and the world's templates it reads, built the first time one
+    // opens.
+    let mut layer_view: Option<crate::layerview::LayerView> = None;
+    // The VFX tab's open effect, and the atlas and `fxdict` every effect draws from: read on the first
+    // open, and decoded once for the card's thumbnails.
+    let mut vfx_view: Option<crate::vfxview::VfxView> = None;
+    let mut vfx_rects: HashMap<u32, mercs2_formats::fxdict::FxRect> = HashMap::new();
+    let mut vfx_atlas: Option<mercs2_formats::texture::TextureData> = None;
+    let mut vfx_atlas_tex: Option<egui::TextureHandle> = None;
+    let mut vfx_acts: Vec<crate::vfxview::VfxAct> = Vec::new();
+    let mut layer_templates: Option<Result<crate::layerview::Templates, String>> = None;
+    // A click on the viewport that did not drag: where it was pressed, and the click to pick with.
+    let mut viewport_press: Option<(f64, f64)> = None;
+    let mut viewport_click: Option<(f64, f64)> = None;
+    // Whether a take goes back to its start at its end (the card's Repeat); kept across takes.
+    let mut face_repeat = false;
+    // Who speaks each set, read the first time a set opens.
+    let mut face_cast: Option<Result<mercs2_engine::facecast::Cast, String>> = None;
+    // The clip the face's voice line last asked the player for ([`crate::audioplay::follow`]).
+    let mut face_voice: Option<u32> = None;
+    let mut voices: Option<crate::voiceidx::Voices> = None;
+    let mut voice_rx: Option<std::sync::mpsc::Receiver<Result<crate::voiceidx::Voices, String>>> = None;
+    let mut voice_error: Option<String> = None;
     let mut clip_infos: HashMap<u32, Result<ClipInfo, String>> = HashMap::new();
     // The material animation card's playhead, in key-time units.
     let mut manm_t: f32 = 0.0;
@@ -1701,8 +2090,10 @@ pub fn run(opts: Options) {
     // edit land back on the RIGHT contribution instead of appending a new one — `Act::Craft` used to
     // carry no index at all, so a bench had no idea what it was editing and no way back.
     let mut craft_subject: Option<usize> = None;
-    // Whether the running game answers on its lua-bridge port: the Live rail cell's dot.
-    let live_probe = crate::live::Probe::spawn(mercs2_bridge::DEFAULT_ADDR.to_string());
+    // The Live page. Its link owns the lua-bridge connection, and the rail cell's dot reads it.
+    let mut live_page = crate::live::Page::new(std::env::temp_dir().join("mercs2_workshop_live"));
+    let mut live_was_open = false;
+    let mut live_acts: Vec<crate::live::Act> = Vec::new();
     // `--ui-state`: applied once the reference data is in; then frames to settle before the capture,
     // and whether the capture has been asked of the scene.
     let mut ui_state = opts.ui_state.clone();
@@ -1711,6 +2102,9 @@ pub fn run(opts: Options) {
     // A `--ui-state` that opened a string table: its capture (path, settle frames), taken once the
     // tables have read.
     let mut text_ui: Option<(PathBuf, u32)> = None;
+    // A `--ui-state` that opened a layer: its capture (path, settle frames), taken once its models
+    // have loaded.
+    let mut layer_ui: Option<(PathBuf, u32)> = None;
     // A `--ui-state` that opened a clip: (capture, settle frames, clip, on a hero, frames waited).
     let mut anim_ui: Option<(PathBuf, u32, u32, bool, u32)> = None;
     let mut capture_to: Option<(PathBuf, u32)> = None;
@@ -1723,12 +2117,17 @@ pub fn run(opts: Options) {
     // The Text tab's string tables: read on a worker the first time a table is opened.
     let mut text_page = crate::textpage::Panel::default();
     let mut text_acts: Vec<crate::textpage::Act> = Vec::new();
+    // The Layers tab's inspector acts, and the window's size in points the viewport is projected to.
+    let mut layer_acts: Vec<crate::layerview::LayerAct> = Vec::new();
+    let mut layer_screen = egui::vec2(1.0, 1.0);
     // Ctrl (or Cmd) held: the Audio tab's select-all.
     let mut ctrl = false;
     // VO playback, both opened LAZILY on the first ▶ (English.wad + the output device are heavy, and
     // most sessions never touch audio). `vo_stream` is the record index; `vo_player` the device.
     let mut vo_stream: Option<crate::vostream::VoStream> = None;
     let mut vo_player: Option<crate::audioplay::Player> = None;
+    // What the status bar says of the clip a FaceFX take gave the player, by clip.
+    let mut vo_from: Option<(u32, String)> = None;
     // Remembered so a failed open (missing English.wad / .pws / device) is reported once, not per click.
     let mut vo_error: Option<String> = None;
     // In-flight reference-data download from the Settings button (which replaces the downloaded
@@ -1736,9 +2135,8 @@ pub fn run(opts: Options) {
     // The automatic download when no bundle is found runs on the boot thread.
     let mut fetch_rx: Option<std::sync::mpsc::Receiver<crate::fetch::Event>> = None;
     let mut fetch_msg = String::new();
-    // Persist the user's dragged panel widths ourselves — feeding the remembered width back as
-    // `default_width` each frame keeps a drag sticky even when collapsing a card would otherwise let
-    // egui re-fit the panel to its (now shorter) content.
+    // The side panels' widths. Only a drag of a panel's edge changes them (`gui::held_side_panel`);
+    // a page's content never does, and a page without the panel keeps its width for the return.
     let mut navigator_width = 300.0f32;
     let mut inspector_width = 372.0f32;
     let mut vehicle_inventory: Vec<(&'static str, Vec<(u32, String)>)> = build_donor_inventory(&index, None);
@@ -1786,7 +2184,10 @@ pub fn run(opts: Options) {
     let mut last_frame = std::time::Instant::now();
 
     let refilter = |index: &AssetIndex, kind: Kind, filter: &str, lens: Option<crate::domain::Domain>| -> Vec<usize> {
-        filter_rows(index.rows(kind), kind, filter, lens, &index.faction_labels)
+        let rows = index.rows(kind);
+        let mut v = filter_rows(rows, kind, filter, lens, &index.faction_labels);
+        v.retain(|&i| index.in_level(&rows[i]));
+        v
     };
 
     event_loop
@@ -1830,6 +2231,11 @@ pub fn run(opts: Options) {
                 }
                 WindowEvent::MouseInput { state, button: MouseButton::Left, .. } => {
                     lmb = state == ElementState::Pressed;
+                    if lmb {
+                        viewport_press = last_cursor;
+                    } else if let Some(p) = viewport_press.take() {
+                        viewport_click = last_cursor.filter(|c| (c.0 - p.0).hypot(c.1 - p.1) < 4.0);
+                    }
                 }
                 WindowEvent::CursorMoved { position, .. } => {
                     // Absolute-position deltas (no cursor grab): works with normal mice AND
@@ -1837,7 +2243,10 @@ pub fn run(opts: Options) {
                     // `shadow-pc-absolute-mouse-input`).
                     if let Some((lx, ly)) = last_cursor {
                         let (dx, dy) = ((position.x - lx) as f32, (position.y - ly) as f32);
-                        if lmb && tex_view.is_none() {
+                        if lmb && wb == Workbench::Live {
+                            let from = live_page.frame.map_or(Vec3::ZERO, |f| f.view.target);
+                            live_page.drag(dx, dy, shift, from);
+                        } else if lmb && tex_view.is_none() {
                             if shift {
                                 // Pan the orbit target in the view plane.
                                 let fwd = dir_from(cam_yaw, cam_pitch);
@@ -1861,7 +2270,11 @@ pub fn run(opts: Options) {
                         MouseScrollDelta::LineDelta(_, y) => y,
                         MouseScrollDelta::PixelDelta(p) => p.y as f32 / 40.0,
                     };
-                    cam_dist = (cam_dist * 0.9f32.powf(lines)).clamp(0.3, 20000.0);
+                    if wb == Workbench::Live {
+                        live_page.cam.wheel(lines);
+                    } else {
+                        cam_dist = (cam_dist * 0.9f32.powf(lines)).clamp(0.3, 20000.0);
+                    }
                 }
                 WindowEvent::KeyboardInput {
                     event: KeyEvent { physical_key: PhysicalKey::Code(code), state, text, .. },
@@ -2015,12 +2428,17 @@ pub fn run(opts: Options) {
                     // nothing, unload into Settings, or reload in place. Anything tied to what is
                     // being replaced is dropped first, so no page keeps state from the old archive
                     // or bundle. ──
-                    if chains_dirty && phase != Phase::Booting {
+                    if (chains_dirty || level_dirty) && phase != Phase::Booting {
                         chains_dirty = false;
                         game_chain = crate::chains::game(opts.wad_flag.as_deref());
                         data_chain = crate::chains::data();
                         let loaded_wad = (!wadpath.is_empty()).then(|| PathBuf::from(&wadpath));
-                        let next = next_step(loaded_wad.as_deref(), loaded_data.as_deref(), &game_chain, &data_chain);
+                        let mut next = next_step(loaded_wad.as_deref(), loaded_data.as_deref(), &game_chain, &data_chain);
+                        // A level is a different stack over the same base, so it reloads as a new
+                        // archive does.
+                        if std::mem::take(&mut level_dirty) && next == Next::Stay {
+                            next = Next::Boot { archive: loaded_wad.clone(), data: true };
+                        }
                         if reload_capture.is_some() && !matches!(next, Next::Boot { .. }) {
                             eprintln!("--ui-state: run_wad / run_data started no reload ({next:?}): it names what is already loaded, or leaves a chain with no answer");
                             std::process::exit(2);
@@ -2052,6 +2470,20 @@ pub fn run(opts: Options) {
                             vo_stream = None;
                             vo_player = None;
                             vo_error = None;
+                            face = None;
+                            face_cast = None;
+                            voices = None;
+                            voice_error = None;
+                            if let Some(v) = layer_view.take() {
+                                v.teardown(&mut scene, &mut world, &[]);
+                            }
+                            layer_templates = None;
+                            if let Some(v) = vfx_view.take() {
+                                v.close(&mut scene);
+                            }
+                            vfx_atlas = None;
+                            vfx_atlas_tex = None;
+                            vfx_rects.clear();
                             w = WadStack::empty();
                             index = AssetIndex::build(&[], &[], HashMap::new());
                             anim_sel = None;
@@ -2097,6 +2529,7 @@ pub fn run(opts: Options) {
                                 boot_stage = if archive.is_some() { "asset catalog" } else { "reference data" };
                                 boot_rx = Some(spawn_boot(
                                     archive.as_deref().map(|p| stack_of(p, opts.auto_patch, &opts.extra_overlays)),
+                                    level_want.clone(),
                                     data,
                                 ));
                                 phase = Phase::Booting;
@@ -2117,7 +2550,11 @@ pub fn run(opts: Options) {
                                         boot_stage = stage;
                                     }
                                     Ok(Boot::Archive(a)) => {
-                                        let Archive { wadpath: p, overlays: o, w: nw, index: ni, anim_sel: asel, shell_plate: sp, boot_skull } = *a;
+                                        let Archive { wadpath: p, overlays: o, w: nw, index: ni, anim_sel: asel, shell_plate: sp, boot_skull, pixel_samplers: ps, levels: found, level: open } = *a;
+                                        levels = found;
+                                        level = open;
+                                        scene.set_pixel_samplers(ps.clone());
+                                        pixel_samplers = Some(ps);
                                         clip_loader = ClipLoader::spawn(p.clone(), o.clone());
                                         mod_out = mod_out_beside(&p);
                                         qm_stack = std::iter::once(p.clone()).chain(o.iter().cloned()).collect();
@@ -2140,13 +2577,16 @@ pub fn run(opts: Options) {
                                     }
                                     Ok(Boot::Done(data)) => {
                                         if let Some(data) = data {
-                                            let BootData { home, names, lua, missions, audio_idx: audio, secs } = *data;
+                                            let BootData { home, names, lua, missions, audio_idx: audio, cjk_font, namer, secs } = *data;
+                                            theme::add_cjk_font(&gui.ctx, cjk_font);
                                             index.apply_names(names);
+                                            state_namer = namer;
                                             lua_corpus = lua;
                                             // The Missions blueprint editor's script list and palette
                                             // come from the corpus the boot thread indexed.
                                             missions_panel.set_reference(missions, &lua_corpus);
                                             audio_page.set_index(audio);
+                                            audio_page.set_level(level.as_ref().map(|l| l.wad.clone()), index.names.clone());
                                             loaded_data = Some(home);
                                             qm_corpus = crate::quartermaster::corpus_root();
                                             status = format!(
@@ -2251,8 +2691,7 @@ pub fn run(opts: Options) {
                             text_sh(&mut scene, wpx - lw - 56.0, hpx * 0.84, ls, oc, "Loading");
                             match scene.render_boot(t, boot_shown.min(0.98)) {
                                 Ok(())
-                                | Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {}
-                                Err(wgpu::SurfaceError::OutOfMemory) => elwt.exit(),
+                                | Err(SurfaceError::Lost | SurfaceError::Outdated | SurfaceError::Occluded) => {}
                                 Err(e) => eprintln!("surface error: {e:?}"),
                             }
                             return;
@@ -2337,6 +2776,7 @@ pub fn run(opts: Options) {
                                         w.labels.push(path_str);
                                         let names = std::mem::take(&mut index.names);
                                         index = AssetIndex::build(&w.wads, &w.side, names);
+                                        index.level_src = level_source(&w, &level);
                                         // The new overlay may carry its own worldentity.
                                         let kit_templates = match load_kit_templates(&mut w) {
                                             Ok(t) => t,
@@ -2345,7 +2785,7 @@ pub fn run(opts: Options) {
                                                 KitTemplates::default()
                                             }
                                         };
-                                        index.add_kit_templates(&kit_templates.kits, &kit_templates.all);
+                                        index.add_kit_templates(&kit_templates);
                                         filtered = refilter(&index, kind, &filter, lens);
                                         inventory_dirty = true;
                                         sel = sel.min(filtered.len().saturating_sub(1));
@@ -2399,7 +2839,160 @@ pub fn run(opts: Options) {
 
                     // ── Animation: sample the preview's active clip into its palette (paused =
                     // resample the held time, so scrubbing/pausing still shows the exact pose). ──
+                    // FaceFX on the shown model writes its face bones over the clip's (or over
+                    // the bind pose with no clip); its anim time runs with the clip's play
+                    // state and starts over past the anim's end.
+                    let mut face_bones: Vec<(usize, mercs2_formats::anim::QsTransform)> = Vec::new();
                     if let Some(p) = &mut preview {
+                        if let Some(f) = face.as_mut().filter(|f| f.model == p.hash) {
+                            // First frame on its model: frame the face, and a set starts playing
+                            // (the model it opened may have just loaded, paused).
+                            if !f.framed {
+                                f.framed = true;
+                                if let Some((c, d, yaw)) = f.framing(&p.rig) {
+                                    cam_target = c;
+                                    cam_dist = d;
+                                    cam_yaw = yaw;
+                                    cam_pitch = 0.0;
+                                }
+                                if f.anim.is_some() {
+                                    p.playing = f.play_on_open;
+                                }
+                            }
+                            if let Some(rx) = &voice_rx {
+                                match rx.try_recv() {
+                                    Ok(Ok(v)) => {
+                                        voices = Some(v);
+                                        voice_rx = None;
+                                    }
+                                    Ok(Err(e)) => {
+                                        voice_error = Some(e);
+                                        voice_rx = None;
+                                    }
+                                    Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                                        voice_error = Some("the voice index reader stopped".into());
+                                        voice_rx = None;
+                                    }
+                                }
+                            }
+                            if f.set.is_some() && voices.is_none() && voice_rx.is_none() && voice_error.is_none() {
+                                voice_rx = Some(crate::voiceidx::spawn(w.labels.clone(), w.side_labels.clone()));
+                            }
+                            // The take's voice line (the wavebank clip its name hashes to); until the
+                            // clip index is read the face holds at the start. A line that cannot play
+                            // says why and the face plays on silent.
+                            if f.voice_due && p.playing {
+                                let take = match (&f.set, f.anim) {
+                                    (Some((_, s)), Some(i)) => Some(s.group.anims[i].name.clone()),
+                                    _ => None,
+                                };
+                                match (take, &voices, &voice_error) {
+                                    (None, _, _) => f.voice_due = false,
+                                    (Some(take), _, Some(e)) => {
+                                        f.voice_due = false;
+                                        status = format!("{take}: no voice — {e}");
+                                    }
+                                    (Some(take), Some(vs), None) => {
+                                        f.voice_due = false;
+                                        let clip = mercs2_formats::hash::pandemic_hash_m2(&take);
+                                        let pcm = match vs.by_clip.get(&clip) {
+                                            None => Err(format!("no wavebank holds clip 0x{clip:08X}")),
+                                            Some(crate::voiceidx::Voice::Embedded { path, bank }) => {
+                                                let from = format!("wavebank 0x{bank:08X}");
+                                                crate::voiceidx::pcm(path, *bank, clip).map(|(s, r, c)| (s, r, c, from))
+                                            }
+                                            Some(crate::voiceidx::Voice::OtherStream { bank }) => {
+                                                Err(format!("clip 0x{clip:08X} streams from bank 0x{bank:08X}, whose .pws is not read"))
+                                            }
+                                            Some(crate::voiceidx::Voice::Stream { wave }) => {
+                                                if vo_stream.is_none() {
+                                                    let data_dir = std::path::Path::new(&wadpath).parent().map(|p| p.to_path_buf()).unwrap_or_default();
+                                                    vo_stream = crate::vostream::VoStream::open(&data_dir).map_err(|e| vo_error = Some(e)).ok();
+                                                }
+                                                match &vo_stream {
+                                                    Some(vo) => vo.clip_pcm(*wave).map(|c| (c.samples, c.rate, c.channels, "vo_stream.english.pws".to_string())),
+                                                    None => Err(vo_error.clone().unwrap_or_default()),
+                                                }
+                                            }
+                                        };
+                                        if vo_player.is_none() {
+                                            vo_player = crate::audioplay::Player::start();
+                                        }
+                                        match (pcm, &vo_player) {
+                                            (Ok((samples, rate, channels, from)), Some(_)) => {
+                                                f.line = Some(VoiceLine { clip, samples, rate, channels, from: format!("{take} from {from}") });
+                                            }
+                                            (Ok(_), None) => status = format!("{take}: no voice — no audio output device"),
+                                            (Err(e), _) => status = format!("{take}: no voice — {e}"),
+                                        }
+                                    }
+                                    (Some(_), None, None) => {}
+                                }
+                            }
+                            if p.playing && !f.voice_due && !f.stopped && f.anim.is_some() {
+                                match take_step(f.time, dt, f.length(), face_repeat) {
+                                    Some(t) => f.time = t,
+                                    // The device runs a lead behind this clock: the take waits at its
+                                    // end for its line to finish.
+                                    None if f.line.as_ref().is_some_and(|l| {
+                                        vo_player.as_ref().and_then(|v| v.status()).is_some_and(|s| s.clip == l.clip)
+                                    }) =>
+                                    {
+                                        f.time = f.length();
+                                    }
+                                    None => {
+                                        f.time = 0.0;
+                                        f.stopped = true;
+                                        p.playing = p.cur_clip.is_some();
+                                    }
+                                }
+                            }
+                            let solved = if p.retarget_source.is_some() {
+                                Err("a retargeted import's skeleton is not the one its actor was authored for".to_string())
+                            } else {
+                                f.locals(&p.rig)
+                            };
+                            match solved {
+                                Ok(b) => face_bones = b,
+                                Err(e) => {
+                                    status = format!("FaceFX on {} stopped: {e}", f.actor);
+                                    face = None;
+                                }
+                            }
+                        }
+                    }
+                    // The voice line follows the take, whatever moved it: a pause, a scrub, another
+                    // take, or the set going away.
+                    let shown = preview.as_ref().map(|p| (p.hash, p.playing));
+                    let line = face.as_ref().filter(|f| !f.stopped).and_then(|f| {
+                        let (_, playing) = shown.filter(|(hash, _)| *hash == f.model)?;
+                        let l = f.line.as_ref()?;
+                        Some((crate::audioplay::Want { clip: l.clip, playing, at_s: f.time, length_s: l.length_s() }, l))
+                    });
+                    if let Some(player) = &vo_player {
+                        let want = line.as_ref().map(|(w, _)| *w);
+                        for cmd in crate::audioplay::follow(want.as_ref(), face_voice, player.status()) {
+                            match cmd {
+                                crate::audioplay::Cmd::Start { at_s, paused } => {
+                                    if let Some((_, l)) = &line {
+                                        player.play_from(l.clip, l.samples.clone(), l.rate, l.channels, at_s, paused);
+                                        vo_from = Some((l.clip, l.from.clone()));
+                                    }
+                                }
+                                crate::audioplay::Cmd::Pause => player.pause(),
+                                crate::audioplay::Cmd::Resume => player.resume(),
+                                crate::audioplay::Cmd::Seek(at_s) => player.seek(at_s),
+                                crate::audioplay::Cmd::Stop => player.stop(),
+                            }
+                        }
+                        face_voice = want.map(|w| w.clip);
+                    }
+                    if let Some(p) = &mut preview {
+                        if p.cur_clip.is_none() && !face_bones.is_empty() {
+                            let mats = pose::havok_palette_in_place_replacing(&p.rig, &[], &[], 0, &face_bones);
+                            let _ = world.insert_one(p.entity, SkinPalette { mats });
+                        }
                         if let Some(ci) = p.cur_clip {
                             let hash = p.clip_catalog[ci].hash;
                             if let Some(Some(ca)) = p.clip_cache.get(&hash) {
@@ -2421,15 +3014,57 @@ pub fn run(opts: Options) {
                                             ca.num_transform_tracks,
                                         )
                                     }
-                                    None => pose::havok_palette_in_place(
+                                    None => pose::havok_palette_in_place_replacing(
                                         &p.rig,
                                         &sample,
                                         &ca.track_to_hier,
                                         ca.num_transform_tracks,
+                                        &face_bones,
                                     ),
                                 };
                                 let _ = world.insert_one(p.entity, SkinPalette { mats });
                             }
+                        }
+                    }
+
+                    // ── Rotors: step the helicopter's rotor speed (the preview stands on the ground, so
+                    // its contact listener is never empty), run each `PgRotorBoneController`, re-gate when
+                    // a rotor's blades/blur change, and turn each hub over this frame's palette. ──
+                    if let Some(p) = &mut preview {
+                        if !p.rotors.is_empty() {
+                            let shown = |p: &Preview| -> Vec<_> {
+                                let s = p.rotor_speed();
+                                p.rotors.iter().map(|(c, _)| c.shows(s, false)).collect()
+                            };
+                            let before = shown(p);
+                            let input = p.rotor_input;
+                            if let Some(h) = &mut p.heli {
+                                h.step(dt, input, 1, false);
+                            }
+                            let speed = p.rotor_speed();
+                            for (c, _) in &mut p.rotors {
+                                c.update(speed, dt, false);
+                            }
+                            if shown(p) != before {
+                                p.regate(&mut scene).unwrap_or_else(|e| panic!("{}: {e}", p.label));
+                            }
+                            // The animation block above wrote a fresh palette this frame only when a
+                            // decoded clip is current; otherwise the rotors turn the rest palette.
+                            let sampled = p.cur_clip.is_some_and(|ci| {
+                                matches!(p.clip_cache.get(&p.clip_catalog[ci].hash), Some(Some(_)))
+                            });
+                            let mut mats = match sampled {
+                                true => world
+                                    .get::<&SkinPalette>(p.entity)
+                                    .map(|s| s.mats.clone())
+                                    .unwrap_or_else(|e| panic!("{}: no palette: {e}", p.label)),
+                                false => p.bind.clone(),
+                            };
+                            for (c, subtree) in &p.rotors {
+                                mercs2_engine::vehicle::rotor::spin_subtree(&mut mats, &p.rig[subtree[0]].world_bind, subtree, c.angle)
+                                    .unwrap_or_else(|e| panic!("{}: {e}", p.label));
+                            }
+                            let _ = world.insert_one(p.entity, SkinPalette { mats });
                         }
                     }
 
@@ -2441,6 +3076,7 @@ pub fn run(opts: Options) {
                     if let Some(st) = ui_state.take() {
                         // The state opens a string table, which reads on a worker before the capture.
                         let mut waits_on_text = false;
+                        let mut waits_on_layer = false;
                         // The state opens a clip: (its hash, whether a hero plays it) — the capture waits
                         // for the clip's load on the hero, or for the picker's skeletons.
                         let mut waits_on_clip: Option<(u32, bool)> = None;
@@ -2459,6 +3095,14 @@ pub fn run(opts: Options) {
                                     Workbench::ALL.iter().map(|w| (w.label(), *w)).collect();
                                 pages.push((Workbench::Live.label(), Workbench::Live));
                                 wb = pick("page", p, &pages)?;
+                            }
+                            if let Some(r) = &st.live_replay {
+                                live_page.link.replay(r.clone());
+                            }
+                            if let Some([yaw, pitch, zoom]) = st.live_camera {
+                                live_page.cam.yaw = yaw;
+                                live_page.cam.pitch = pitch;
+                                live_page.cam.zoom = zoom;
                             }
                             if let Some(s) = &st.settings_section {
                                 let sections: Vec<(&str, SettingsSection)> =
@@ -2497,10 +3141,23 @@ pub fn run(opts: Options) {
                                     sel = vi;
                                     actions.push(Act::LoadRow(vi));
                                     waits_on_text = rows[filtered[vi]].type_id == mercs2_formats::types::TYPE_ID_STRINGDB;
+                                    waits_on_layer = kind == Kind::Layer;
                                     if kind == Kind::Animation {
                                         waits_on_clip = Some((rows[filtered[vi]].hash, hero.is_some()));
                                     }
                                 }
+                            }
+                            if let Some(n) = &st.face_pose {
+                                actions.push(Act::FaceHold(Some(n.clone())));
+                            }
+                            if let Some(t) = st.face_time {
+                                actions.push(Act::FaceTime(t));
+                            }
+                            if let Some(t) = st.fx_time {
+                                actions.push(Act::FxTime(t));
+                            }
+                            if let Some(n) = &st.entity {
+                                actions.push(Act::LayerEntity(n.clone()));
                             }
                             if let Some(dir) = &st.shipment {
                                 qm.open_shipment(dir, qm_names.as_ref());
@@ -2544,12 +3201,19 @@ pub fn run(opts: Options) {
                             }
                             chains_dirty = true;
                             reload_capture = Some((st.capture.clone(), st.settle_frames, boots_done));
+                        } else if st.pick_level.is_some() {
+                            level_want = st.pick_level.clone();
+                            level_dirty = true;
+                            reload_capture = Some((st.capture.clone(), st.settle_frames, boots_done));
                         } else if st.audio() {
                             audio_page.ensure_routes(std::path::Path::new(&wadpath));
                             audio_ui = Some(st);
                         } else if waits_on_text {
                             // A string table reads on a worker; the capture waits for it.
                             text_ui = Some((st.capture.clone(), st.settle_frames));
+                        } else if waits_on_layer {
+                            // A layer's models load over frames; the capture waits for them.
+                            layer_ui = Some((st.capture.clone(), st.settle_frames));
                         } else if let Some((clip, on_hero)) = waits_on_clip {
                             anim_ui = Some((st.capture.clone(), st.settle_frames, clip, on_hero, 0));
                         } else {
@@ -2585,6 +3249,12 @@ pub fn run(opts: Options) {
                         if text_page.tables().is_some() {
                             capture_to = Some((to.clone(), *settle));
                             text_ui = None;
+                        }
+                    }
+                    if let Some((to, settle)) = &layer_ui {
+                        if layer_view.as_ref().is_some_and(|v| !v.is_loading()) {
+                            capture_to = Some((to.clone(), *settle));
+                            layer_ui = None;
                         }
                     }
                     if let Some((to, settle, at)) = &reload_capture {
@@ -2628,16 +3298,30 @@ pub fn run(opts: Options) {
                     let eff = wb;
                     let rail_lit = wb.rail_entry();
                     use crate::gui::theme;
-                    gui.run(|ctx| {
+                    if !wadpath.is_empty() {
+                        live_page.set_wad(&wadpath);
+                    }
+                    if (eff == Workbench::Live) != live_was_open {
+                        live_was_open = eff == Workbench::Live;
+                        live_page.set_open(live_was_open);
+                        if live_was_open {
+                            live_page.mirror.enter(&mut scene);
+                        } else {
+                            live_page.mirror.leave(&mut scene);
+                        }
+                    }
+                    gui.run(|root| {
+                        let ctx = &root.ctx().clone();
                         // ── COMMAND BAR: identity + breadcrumb (left) · scene I/O (right). Only
                         // GLOBAL actions live here; contextual verbs are on the viewport verb-bar. ──
-                        egui::TopBottomPanel::top("cmdbar")
-                            .exact_height(48.0)
-                            .frame(
-                                egui::Frame::side_top_panel(&ctx.style())
-                                    .inner_margin(egui::Margin { left: 14.0, right: 14.0, top: 0.0, bottom: 0.0 }),
-                            )
-                            .show(ctx, |ui| {
+                        egui::Panel::top("cmdbar")
+                            .exact_size(48.0)
+                            .frame(crate::gui::panel_frame(
+                                egui::Frame::side_top_panel(&ctx.global_style())
+                                    .inner_margin(egui::Margin { left: 14, right: 14, top: 0, bottom: 0 }),
+                                crate::gui::SeparatorEdge::Bottom,
+                            ))
+                            .show(root, |ui| {
                             ui.horizontal_centered(|ui| {
                                 theme::brand_mark(ui);
                                 ui.add_space(6.0);
@@ -2727,9 +3411,10 @@ pub fn run(opts: Options) {
                         if let Some(d) = export_dialog.as_mut() {
                             let mut open = true;
                             egui::Window::new("Export")
-                                .id(egui::Id::new("export_dialog"))
+                                .id(egui::Id::unique("export_dialog"))
                                 .collapsible(false)
-                                .resizable(false)
+                                .auto_sized()
+                                .max_width(theme::FIT_WINDOW_W)
                                 .open(&mut open)
                                 .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
                                 .show(ctx, |ui| {
@@ -2789,7 +3474,8 @@ pub fn run(opts: Options) {
                             ctx.request_repaint();
                             egui::Window::new("Exporting")
                                 .collapsible(false)
-                                .resizable(false)
+                                .auto_sized()
+                                .max_width(theme::FIT_WINDOW_W)
                                 .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
                                 .show(ctx, |ui| {
                                     ui.horizontal(|ui| {
@@ -2808,11 +3494,14 @@ pub fn run(opts: Options) {
                         // this changes — only the navigator + inspector reconfigure. ──
                         // As the Rail design draws it: the numbered workbenches from the top, Live
                         // and Log pinned to the foot.
-                        egui::SidePanel::left("rail")
-                            .exact_width(theme::RAIL_W)
+                        egui::Panel::left("rail")
+                            .exact_size(theme::RAIL_W)
                             .resizable(false)
-                            .frame(egui::Frame::none().fill(theme::G0).inner_margin(egui::Margin::symmetric(0.0, 6.0)))
-                            .show(ctx, |ui| {
+                            .frame(crate::gui::panel_frame(
+                                egui::Frame::NONE.fill(theme::G0).inner_margin(egui::Margin::symmetric(0, 6)),
+                                crate::gui::SeparatorEdge::Right,
+                            ))
+                            .show(root, |ui| {
                                 ui.spacing_mut().item_spacing.y = 1.0;
                                 // The foot is laid out first so it keeps its place however tall the
                                 // window is.
@@ -2844,14 +3533,14 @@ pub fn run(opts: Options) {
                                         icon: Workbench::Live.icon(),
                                         on: wb == Workbench::Live,
                                         badge: None,
-                                        dot: Some(if live_probe.reachable() { theme::GOOD } else { theme::LINE2 }),
+                                        dot: Some(if live_page.link.up() { theme::GOOD } else { theme::LINE2 }),
                                         locked: lock,
                                     };
                                     if theme::rail_item(ui, &live_item) {
                                         wb = Workbench::Live;
                                     }
                                     ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
-                                        egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+                                        theme::scroll_vertical().auto_shrink([false, false]).show(ui, |ui| {
                                             ui.spacing_mut().item_spacing.y = 1.0;
                                             for (i, w) in Workbench::ALL.iter().enumerate() {
                                                 let item = theme::RailItem {
@@ -2873,12 +3562,13 @@ pub fn run(opts: Options) {
                                     });
                                 });
                             });
-                        egui::TopBottomPanel::bottom("status")
-                            .frame(
-                                egui::Frame::side_top_panel(&ctx.style())
-                                    .inner_margin(egui::Margin::symmetric(14.0, 4.0)),
-                            )
-                            .show(ctx, |ui| {
+                        egui::Panel::bottom("status")
+                            .frame(crate::gui::panel_frame(
+                                egui::Frame::side_top_panel(&ctx.global_style())
+                                    .inner_margin(egui::Margin::symmetric(14, 4)),
+                                crate::gui::SeparatorEdge::Top,
+                            ))
+                            .show(root, |ui| {
                             ui.horizontal(|ui| {
                                 // On the Saves workbench with a selection, the status bar
                                 // speaks about the loaded `.profile` instead of the workshop's
@@ -2889,7 +3579,9 @@ pub fn run(opts: Options) {
                                 let saves_banner = (wb == Workbench::Saves)
                                     .then(|| crate::saves::saves_status_banner(&saves))
                                     .flatten();
-                                if let Some((dot_color, dot_text, detail)) = saves_banner {
+                                if wb == Workbench::Live {
+                                    crate::live::status(ui, &live_page);
+                                } else if let Some((dot_color, dot_text, detail)) = saves_banner {
                                     theme::status_dot(ui, dot_text, dot_color);
                                     ui.separator();
                                     ui.label(egui::RichText::new(detail).color(theme::DIM).small());
@@ -2918,11 +3610,11 @@ pub fn run(opts: Options) {
                                     match vo_player.as_ref().and_then(|p| p.status()) {
                                         Some(s) => {
                                             let verb = if s.paused { "paused" } else { "playing" };
-                                            ui.label(
-                                                egui::RichText::new(format!("{verb} {:05} from vo_stream.english.pws", s.clip))
-                                                    .color(theme::DIM)
-                                                    .small(),
-                                            );
+                                            let from = match &vo_from {
+                                                Some((clip, from)) if *clip == s.clip => from.clone(),
+                                                _ => format!("{:05} from vo_stream.english.pws", s.clip),
+                                            };
+                                            ui.label(egui::RichText::new(format!("{verb} {from}")).color(theme::DIM).small());
                                         }
                                         None => {
                                             ui.label(egui::RichText::new(status.as_str()).color(theme::DIM).small());
@@ -2955,21 +3647,21 @@ pub fn run(opts: Options) {
                         });
                         // ── NAVIGATOR (left): the current workbench's list. The viewport keeps its
                         // camera when the workbench changes; only this + the inspector reconfigure. ──
-                        // Not on Live: that page is blank until it is built to its design.
-                        let navigator_resp = (eff != Workbench::Live).then(|| egui::SidePanel::left("navigator")
-                            .resizable(true)
-                            .default_width(navigator_width)
-                            // Finite max: egui 0.28's SidePanel never clamps content to the panel
-                            // width, and stores the CONTENT rect back as the width (panel.rs:279,328).
-                            // With the default INFINITY max, one long asset name or hash grows the
-                            // panel permanently. A bounded range caps that and gives egui a real wrap
-                            // width, so content wraps to the panel instead of forcing it wider.
-                            .width_range(egui::Rangef::new(220.0, 360.0))
-                            .frame(
-                                egui::Frame::side_top_panel(&ctx.style())
-                                    .inner_margin(egui::Margin { left: 13.0, right: 10.0, top: 12.0, bottom: 0.0 }),
-                            )
-                            .show(ctx, |ui| {
+                        // Live has its own header and panels, and its own camera.
+                        // Held at the width the user dragged it to: content never resizes it.
+                        if eff == Workbench::Live {
+                            crate::live::header(root, &mut live_page);
+                            crate::live::left(root, &mut live_page);
+                        } else {
+                          crate::gui::held_side_panel(
+                            root,
+                            crate::gui::Side::Left,
+                            "navigator",
+                            egui::Rangef::new(220.0, 360.0),
+                            &mut navigator_width,
+                            egui::Frame::side_top_panel(&ctx.global_style())
+                                .inner_margin(egui::Margin { left: 13, right: 10, top: 12, bottom: 0 }),
+                            |ui| {
                           match eff {
                             Workbench::Live => unreachable!("Live has no navigator"),
                             Workbench::Quartermaster => {
@@ -2980,7 +3672,30 @@ pub fn run(opts: Options) {
                             }
                             Workbench::Inspect => {
                             let before = (kind, filter.clone(), lens);
-                            ui.label(theme::disp_text("ASSETS", theme::style_title(), theme::TX));
+                            ui.horizontal(|ui| {
+                                ui.label(theme::disp_text("ASSETS", theme::style_title(), theme::TX));
+                                if levels.len() > 1 {
+                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                        let open = level.as_ref().map_or(levels[0].name.as_str(), |l| l.name.as_str());
+                                        let mut chosen = None;
+                                        egui::ComboBox::from_id_salt("level-picker").selected_text(open).show_ui(ui, |ui| {
+                                            for l in &levels {
+                                                if ui.selectable_label(l.name == open, &l.name).clicked() && l.name != open {
+                                                    chosen = Some(l.name.clone());
+                                                }
+                                            }
+                                        });
+                                        if let Some(name) = chosen {
+                                            cfg.level = Some(name.clone());
+                                            if let Err(e) = cfg.save() {
+                                                status = format!("the level is not saved: {e}");
+                                            }
+                                            level_want = Some(name);
+                                            level_dirty = true;
+                                        }
+                                    });
+                                }
+                            });
                             ui.add_space(8.0);
                             // Segmented Models / Textures toggle — two EQUAL-width segments, each a
                             // centred "LABEL  count" unit, the active one filled. Custom-drawn so the
@@ -2989,11 +3704,11 @@ pub fn run(opts: Options) {
                             // fit: they WRAP, and an empty category is dimmed but still listed —
                             // "this game has no X" is information, and hiding it would make the
                             // catalog look like it only knows about the types it happens to have.
-                            egui::Frame::none()
+                            egui::Frame::NONE
                                 .fill(theme::G0)
-                                .stroke(egui::Stroke::new(1.0, theme::LINE))
-                                .rounding(egui::Rounding::same(7.0))
-                                .inner_margin(egui::Margin::same(4.0))
+                                .corner_radius(egui::CornerRadius::same(7))
+                                .inner_margin(egui::Margin::same(4))
+                                .apply_stroke_and_expansion_without_layout_shift(egui::Stroke::new(1.0, theme::LINE), 0.0)
                                 .show(ui, |ui| {
                                     ui.spacing_mut().item_spacing = egui::vec2(3.0, 3.0);
                                     ui.horizontal_wrapped(|ui| {
@@ -3027,7 +3742,7 @@ pub fn run(opts: Options) {
                                             } else {
                                                 egui::Color32::TRANSPARENT
                                             };
-                                            p.rect_filled(rect, egui::Rounding::same(5.0), fill);
+                                            p.rect_filled(rect, egui::CornerRadius::same(5), fill);
                                             let name_col = if on {
                                                 theme::TX
                                             } else if empty {
@@ -3074,7 +3789,7 @@ pub fn run(opts: Options) {
                                     ui.add_space(4.0);
                                     let models = index.models();
                                     for d in std::iter::once(None).chain(Workbench::lenses().into_iter().map(Some)) {
-                                        let n = models.iter().filter(|r| in_lens(d, r)).count();
+                                        let n = models.iter().filter(|r| index.in_level(r) && in_lens(d, r)).count();
                                         let name = d.map_or("All", |d| d.label());
                                         if theme::lens_pill(ui, name, &commafy(n), lens == d).clicked() {
                                             lens = d;
@@ -3085,11 +3800,11 @@ pub fn run(opts: Options) {
                             ui.add_space(7.0);
                             // Filter with a search glyph. The Audio tab searches its clips instead.
                             if kind != Kind::Audio {
-                            egui::Frame::none()
+                            egui::Frame::NONE
                                 .fill(theme::G0)
-                                .stroke(egui::Stroke::new(1.0, theme::LINE))
-                                .rounding(egui::Rounding::same(6.0))
-                                .inner_margin(egui::Margin::symmetric(8.0, 4.0))
+                                .corner_radius(egui::CornerRadius::same(6))
+                                .inner_margin(egui::Margin::symmetric(8, 4))
+                                .apply_stroke_and_expansion_without_layout_shift(egui::Stroke::new(1.0, theme::LINE), 0.0)
                                 .show(ui, |ui| {
                                     ui.horizontal(|ui| {
                                         let (r, _) = ui.allocate_exact_size(
@@ -3109,7 +3824,7 @@ pub fn run(opts: Options) {
                                         ui.add(
                                             egui::TextEdit::singleline(&mut filter)
                                                 .hint_text("filter…")
-                                                .frame(false)
+                                                .frame(egui::Frame::NONE.inner_margin(theme::TEXT_EDIT_MARGIN))
                                                 .desired_width(f32::INFINITY),
                                         );
                                     });
@@ -3130,11 +3845,15 @@ pub fn run(opts: Options) {
                             // high so `show_rows` still virtualizes the (3000+ row) models list.
                             // `filtered` is category-sorted; a header opens each new run. `Disp::Row`
                             // carries the position in `filtered` so selection/keyboard stay unchanged.
+                            // A header is (fold key, text, row count, depth): depth 1 is a sub-group.
                             enum Disp {
-                                Header(String, usize),
+                                Header(String, String, usize, u8),
                                 Row(usize),
                             }
                             let mut display: Vec<Disp> = Vec::with_capacity(filtered.len() + 32);
+                            // The row text of a name-grouped row (what its groups leave of the name)
+                            // and whether it sits in a sub-group, by position in `filtered`.
+                            let mut grouped_rows: Vec<(String, bool)> = Vec::new();
                             if kind == Kind::Model {
                                 let rows = index.rows(kind);
                                 let groups: Vec<String> = filtered
@@ -3148,13 +3867,55 @@ pub fn run(opts: Options) {
                                 let mut last: Option<&str> = None;
                                 for (vi, g) in groups.iter().enumerate() {
                                     if last != Some(g.as_str()) {
-                                        display.push(Disp::Header(g.clone(), counts[g.as_str()]));
+                                        display.push(Disp::Header(g.clone(), g.clone(), counts[g.as_str()], 0));
                                         last = Some(g.as_str());
                                     }
                                     // A collapsed group keeps its header but drops its rows.
                                     if !collapsed_cats.contains(g) {
                                         display.push(Disp::Row(vi));
                                     }
+                                }
+                            } else if name_grouped(kind) {
+                                let rows = index.rows(kind);
+                                // Fold keys carry the tab, so folding PMC here leaves the models' PMC open.
+                                let keys: Vec<(String, Option<(String, String)>, crate::index::NameGroup)> = filtered
+                                    .iter()
+                                    .map(|&ri| {
+                                        let g = crate::index::name_group(rows[ri].name.as_deref());
+                                        let head = format!("{}:{}", kind.label(), g.header);
+                                        let sub = g.sub.as_ref().map(|s| (format!("{head} › {s}"), s.clone()));
+                                        (head, sub, g)
+                                    })
+                                    .collect();
+                                let mut counts: HashMap<&str, usize> = HashMap::new();
+                                for (head, sub, _) in &keys {
+                                    *counts.entry(head.as_str()).or_default() += 1;
+                                    if let Some((k, _)) = sub {
+                                        *counts.entry(k.as_str()).or_default() += 1;
+                                    }
+                                }
+                                let (mut last_head, mut last_sub): (Option<&str>, Option<&str>) = (None, None);
+                                for (vi, (head, sub, g)) in keys.iter().enumerate() {
+                                    let short = if g.short.is_empty() { rows[filtered[vi]].label() } else { g.short.clone() };
+                                    grouped_rows.push((short, sub.is_some()));
+                                    if last_head != Some(head.as_str()) {
+                                        display.push(Disp::Header(head.clone(), g.header.clone(), counts[head.as_str()], 0));
+                                        last_head = Some(head.as_str());
+                                        last_sub = None;
+                                    }
+                                    if collapsed_cats.contains(head) {
+                                        continue;
+                                    }
+                                    if let Some((k, s)) = sub {
+                                        if last_sub != Some(k.as_str()) {
+                                            display.push(Disp::Header(k.clone(), s.clone(), counts[k.as_str()], 1));
+                                            last_sub = Some(k.as_str());
+                                        }
+                                        if collapsed_cats.contains(k) {
+                                            continue;
+                                        }
+                                    }
+                                    display.push(Disp::Row(vi));
                                 }
                             } else {
                                 for vi in 0..filtered.len() {
@@ -3164,14 +3925,19 @@ pub fn run(opts: Options) {
                             let row_h = 19.0_f32.max(ui.text_style_height(&egui::TextStyle::Body));
                             // A selection that moved since the last frame (keys, F4, a state file)
                             // is scrolled just into view; a click lands on a row already in view.
-                            let mut list_area = egui::ScrollArea::vertical().auto_shrink([false, false]);
+                            let mut list_area = theme::scroll_vertical().auto_shrink([false, false]);
                             if list_follow.0 != Some(sel) {
                                 if let Some(di) = display.iter().position(|d| matches!(d, Disp::Row(v) if *v == sel)) {
                                     let step = row_h + ui.spacing().item_spacing.y;
                                     let (top, (off, view_h)) = (di as f32 * step, list_follow.1);
+                                    // A row put on top brings the headers right above it along.
+                                    let mut first = di;
+                                    while first > 0 && matches!(display[first - 1], Disp::Header(..)) {
+                                        first -= 1;
+                                    }
                                     // No viewport measured yet (the first frame): put the row on top.
                                     if view_h <= 0.0 || top < off {
-                                        list_area = list_area.vertical_scroll_offset(top);
+                                        list_area = list_area.vertical_scroll_offset(first as f32 * step);
                                     } else if top + step > off + view_h {
                                         list_area = list_area.vertical_scroll_offset(top + step - view_h);
                                     }
@@ -3184,12 +3950,13 @@ pub fn run(opts: Options) {
                                 |ui, range| {
                                     for di in range {
                                         let vi = match &display[di] {
-                                            Disp::Header(cat, n) => {
+                                            Disp::Header(cat, text, n, depth) => {
                                                 let is_collapsed = collapsed_cats.contains(cat);
                                                 // Lay the header out, filling the row so the WHOLE
                                                 // line is the click target, then sense a click on its
                                                 // rect to toggle the fold.
                                                 let ir = ui.horizontal(|ui| {
+                                                    ui.add_space(SUB_INDENT * f32::from(*depth));
                                                     let (r, _) = ui.allocate_exact_size(
                                                         egui::vec2(7.0, 7.0),
                                                         egui::Sense::hover(),
@@ -3215,7 +3982,7 @@ pub fn run(opts: Options) {
                                                         egui::Stroke::NONE,
                                                     ));
                                                     ui.label(theme::disp_text(
-                                                        cat.clone(),
+                                                        text.clone(),
                                                         theme::style_eyebrow(),
                                                         theme::FAINT,
                                                     ));
@@ -3234,7 +4001,7 @@ pub fn run(opts: Options) {
                                                 let resp = ui
                                                     .interact(
                                                         ir.response.rect,
-                                                        egui::Id::new(("asset_cat_hdr", cat)),
+                                                        egui::Id::unique(("asset_cat_hdr", cat)),
                                                         egui::Sense::click(),
                                                     )
                                                     .on_hover_cursor(
@@ -3257,6 +4024,11 @@ pub fn run(opts: Options) {
                                         // `+ ` marks an overlay's row; a side WAD's names its WAD after.
                                         let side = r.src >= w.wads.len();
                                         let mark = if r.src > 0 && !side { "+ " } else { "" };
+                                        // A name-grouped row reads what its groups leave of the name.
+                                        let (shown, in_sub) = match grouped_rows.get(vi) {
+                                            Some((short, in_sub)) => (short.as_str(), *in_sub),
+                                            None => (label.as_str(), false),
+                                        };
                                         let row = ui
                                             .horizontal(|ui| {
                                                 if kind == Kind::Model {
@@ -3264,28 +4036,46 @@ pub fn run(opts: Options) {
                                                     row_icon(ui, cat, 15.0);
                                                     ui.add_space(5.0);
                                                 }
+                                                if in_sub {
+                                                    ui.add_space(SUB_INDENT);
+                                                }
                                                 let mut text = egui::text::LayoutJob::default();
                                                 let body = egui::TextFormat {
                                                     font_id: egui::TextStyle::Body.resolve(ui.style()),
                                                     color: ui.visuals().text_color(),
                                                     ..Default::default()
                                                 };
-                                                text.append(&format!("{mark}{label}"), 0.0, body.clone());
+                                                text.append(&format!("{mark}{shown}"), 0.0, body.clone());
                                                 if side {
                                                     text.append(&w.tag(r.src), 0.0, egui::TextFormat { color: theme::FAINT, ..body });
                                                 }
-                                                ui.selectable_label(vi == sel, text)
+                                                // A row is never wider than the list: a long name is cut
+                                                // at the edge, and its hover shows it whole.
+                                                let full = text.text.clone();
+                                                let needed = ui.fonts_mut(|f| f.layout_job(text.clone())).size().x
+                                                    + 2.0 * ui.spacing().button_padding.x;
+                                                let cut = needed > ui.available_width();
+                                                ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Truncate);
+                                                let resp = ui.selectable_label(vi == sel, text);
+                                                // A shortened (name-grouped) row always offers its whole name.
+                                                if cut {
+                                                    resp.on_hover_text(full)
+                                                } else if shown != label {
+                                                    resp.on_hover_text(&label)
+                                                } else {
+                                                    resp
+                                                }
                                             })
                                             .inner;
                                         if row.clicked() {
                                             sel = vi;
                                             actions.push(Act::LoadRow(vi));
                                         }
-                                        row.context_menu(|ui| {
+                                        theme::context_menu(&row, |ui| {
                                             // A layer is a set of placements you switch on or move,
                                             // not an asset you preview or donate.
                                             if kind == Kind::Layer {
-                                                layer_menu(ui, hash, &label, &mut actions);
+                                                layer_menu(ui, hash, &label, r.name.is_some(), &mut actions);
                                                 return;
                                             }
                                             // ONE menu, shared with the inspector heading — the
@@ -3302,7 +4092,7 @@ pub fn run(opts: Options) {
                                     }
                                 },
                             );
-                            list_follow = (Some(sel), (list_out.state.offset.y, list_out.inner_rect.height()));
+                            list_follow = (Some(sel), (list_out.state.clamped_offset().y, list_out.inner_rect.height()));
                             }
                             } // ── end Inspect navigator (asset browser) ──
                             Workbench::Mods => {
@@ -3311,7 +4101,7 @@ pub fn run(opts: Options) {
                                          — it becomes the conform donor whose container hosts the \
                                          injected geometry.");
                                 ui.separator();
-                                egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+                                theme::scroll_vertical().auto_shrink([false, false]).show(ui, |ui| {
                                     if vehicle_inventory.is_empty() {
                                         ui.weak("(loading catalog…)");
                                     }
@@ -3364,14 +4154,14 @@ pub fn run(opts: Options) {
                                         // Split the height between the two trees.
                                         let half = (ui.available_height() - 30.0) * 0.5;
                                         theme::eyebrow(ui, &format!("Donor \u{2014} {tl}"));
-                                        egui::ScrollArea::vertical().id_source("donor_tree").max_height(half).auto_shrink([false, false]).show(ui, |ui| {
+                                        theme::scroll_vertical().id_salt("donor_tree").max_height(half).auto_shrink([false, false]).show(ui, |ui| {
                                             if let Some(h) = bone_tree(ui, &r.target_bones, &r.target_parents, "donor") {
                                                 hover_skel = Some((h, false)); // false = donor/target tree
                                             }
                                         });
                                         ui.separator();
                                         theme::eyebrow(ui, &format!("Imported \u{2014} {}", r.convention.label()));
-                                        egui::ScrollArea::vertical().id_source("import_tree").auto_shrink([false, false]).show(ui, |ui| {
+                                        theme::scroll_vertical().id_salt("import_tree").auto_shrink([false, false]).show(ui, |ui| {
                                             if let Some(h) = bone_tree(ui, &r.source_bones, &r.source_parents, "imported") {
                                                 hover_skel = Some((h, true)); // true = imported/source tree
                                             }
@@ -3397,10 +4187,11 @@ pub fn run(opts: Options) {
                                     ui.add(
                                         egui::TextEdit::singleline(&mut filter)
                                             .hint_text("filter characters…")
+                                            .margin(theme::TEXT_EDIT_MARGIN)
                                             .desired_width(f32::INFINITY),
                                     );
                                     let f = filter.to_ascii_lowercase();
-                                    egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+                                    theme::scroll_vertical().auto_shrink([false, false]).show(ui, |ui| {
                                         for r in index.models().iter() {
                                             let label = r.label();
                                             let ll = label.to_ascii_lowercase();
@@ -3448,7 +4239,7 @@ pub fn run(opts: Options) {
                                         theme::FAINT,
                                     ));
                                     ui.add_space(4.0);
-                                    egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+                                    theme::scroll_vertical().auto_shrink([false, false]).show(ui, |ui| {
                                         let mut last_cat = "";
                                         for r in rows {
                                             let cat = r.category();
@@ -3475,7 +4266,7 @@ pub fn run(opts: Options) {
                                             }
                                             // Route an asset into a Shipment or a bench — the same menu
                                             // the Library uses, so the two cannot drift.
-                                            resp.context_menu(|ui| {
+                                            theme::context_menu(&resp, |ui| {
                                                 asset_menu(ui, r.hash, &r.label(), subject_of(Kind::Model, r), None, &mut actions);
                                             });
                                         }
@@ -3494,7 +4285,7 @@ pub fn run(opts: Options) {
                                         hits.sort_by(|a, b| a.0.cmp(&b.0));
                                         ui.label(theme::disp_text(format!("{} script(s)", hits.len()), theme::style_eyebrow(), theme::FAINT));
                                         ui.add_space(3.0);
-                                        egui::ScrollArea::vertical().max_height(list_h).auto_shrink([false, false]).show(ui, |ui| {
+                                        theme::scroll_vertical().max_height(list_h).auto_shrink([false, false]).show(ui, |ui| {
                                             for (path, _, _) in hits {
                                                 let stem = path.rsplit(['/', '\\']).next().unwrap_or(path).trim_end_matches(".lua").to_string();
                                                 let resp = theme::row_chip(ui, egui::Color32::TRANSPARENT, theme::LINE, |ui| {
@@ -3505,18 +4296,18 @@ pub fn run(opts: Options) {
                                                 }
                                                 let stem2 = stem.clone();
                                                 let kinds = d.kinds();
-                                                resp.context_menu(|ui| {
+                                                theme::context_menu(&resp, |ui| {
                                                     ui.label(theme::disp_text(stem2.to_uppercase(), theme::style_eyebrow(), theme::BRASS));
                                                     ui.separator();
                                                     if ui.button("Open in Lua viewer").clicked() {
                                                         actions.push(Act::LuaOpen(path.clone()));
-                                                        ui.close_menu();
+                                                        ui.close();
                                                     }
                                                     ui.menu_button("Add to Shipment", |ui| {
                                                         for kind in kinds {
                                                             if ui.button(*kind).clicked() {
                                                                 actions.push(Act::AddToShipment(kind, 0, stem2.clone()));
-                                                                ui.close_menu();
+                                                                ui.close();
                                                             }
                                                         }
                                                     });
@@ -3557,27 +4348,26 @@ pub fn run(opts: Options) {
                                 }
                             }
                           } // ── end match wb (navigator) ──
-                        }));
-                        if let Some(r) = navigator_resp {
-                            navigator_width = r.response.rect.width();
+                        });
                         }
                         // ── INSPECTOR (right): the current workbench's detail cards. ──
                         // ── INSPECTOR (right). NOT registered on Settings: that page has a
                         // navigator and a centre and nothing a detail panel would hold, and an
                         // empty registered panel reads as something that failed to load rather
                         // than something that was never meant to be there.
-                        let inspector_resp = (eff != Workbench::Settings && eff != Workbench::Live).then(|| egui::SidePanel::right("inspector")
-                            .resizable(true)
-                            .default_width(inspector_width)
-                            // See the navigator's note: bound the width so content wraps to the panel
-                            // rather than growing it (egui 0.28 stores the content rect as the width).
-                            .width_range(egui::Rangef::new(300.0, 480.0))
-                            .frame(
-                                egui::Frame::side_top_panel(&ctx.style())
-                                    .inner_margin(egui::Margin { left: 13.0, right: 12.0, top: 12.0, bottom: 0.0 }),
-                            )
-                            .show(ctx, |ui| {
-                            egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+                        if eff == Workbench::Live {
+                            live_acts.extend(crate::live::right(root, &mut live_page, &index.names));
+                        } else if eff != Workbench::Settings {
+                          crate::gui::held_side_panel(
+                            root,
+                            crate::gui::Side::Right,
+                            "inspector",
+                            egui::Rangef::new(300.0, 480.0),
+                            &mut inspector_width,
+                            egui::Frame::side_top_panel(&ctx.global_style())
+                                .inner_margin(egui::Margin { left: 13, right: 12, top: 12, bottom: 0 }),
+                            |ui| {
+                            theme::scroll_vertical().auto_shrink([false, false]).show(ui, |ui| {
                               if eff == Workbench::Quartermaster {
                                   qm_acts.extend(crate::quartermaster::inspector(ui, &qm, &qm_stack, true));
                               }
@@ -3698,7 +4488,26 @@ pub fn run(opts: Options) {
                                       text_acts.extend(crate::textpage::inspector(ui, &text_page));
                                   }
                               }
-                              if eff.inspect_like() && !is_missions_bench && !audio_tab && !text_tab {
+                              // The Layers tab with a layer open.
+                              let layer_tab = eff == Workbench::Inspect && kind == Kind::Layer && layer_view.is_some();
+                              if layer_tab {
+                                  if let Some(v) = &mut layer_view {
+                                      layer_acts.extend(crate::layerview::inspector(ui, v, &index));
+                                  }
+                              }
+                              // The VFX tab with an effect open.
+                              let vfx_tab = eff == Workbench::Inspect && kind == Kind::Effect && vfx_view.is_some();
+                              if vfx_tab {
+                                  if let Some(v) = &vfx_view {
+                                      if let (None, Some(a)) = (&vfx_atlas_tex, &vfx_atlas) {
+                                          let (tw, th, rgba) = crate::texpng::decode_bc(a);
+                                          let img = egui::ColorImage::from_rgba_unmultiplied([tw as usize, th as usize], &rgba);
+                                          vfx_atlas_tex = Some(ui.ctx().load_texture("vfx_atlas", img, egui::TextureOptions::LINEAR));
+                                      }
+                                      vfx_acts.extend(crate::vfxview::inspector(ui, v, &vfx_rects, vfx_atlas_tex.as_ref()));
+                                  }
+                              }
+                              if eff.inspect_like() && !is_missions_bench && !audio_tab && !text_tab && !layer_tab && !vfx_tab {
                                 match &mut preview {
                                     None => {
                                         ui.weak("No model loaded — pick one in the browser at left.");
@@ -3706,7 +4515,7 @@ pub fn run(opts: Options) {
                                         // starts.
                                         if let (Workbench::Inspect, Kind::Model, Some(d)) = (eff, kind, lens) {
                                             ui.add_space(10.0);
-                                            let n = index.models().iter().filter(|r| in_lens(Some(d), r)).count();
+                                            let n = index.models().iter().filter(|r| index.in_level(r) && in_lens(Some(d), r)).count();
                                             theme::section(ui, &format!("{} lens", d.label()), Some(&format!("{n} models")), true, |ui| {
                                                 ui.label(egui::RichText::new(d.blurb()).small().color(theme::DIM));
                                                 ui.add_space(8.0);
@@ -3723,6 +4532,109 @@ pub fn run(opts: Options) {
                                         }
                                     }
                                     Some(p) => {
+                                        // FaceFX opened from the FaceFX tab on this model comes first:
+                                        // the take's transport and text, the set's anims (click plays
+                                        // one from its start; a mark says which have a voice line) with
+                                        // the curves that drive nothing, then the actor's poses (click
+                                        // holds one).
+                                        if let Some(f) = face.as_mut().filter(|f| f.model == p.hash) {
+                                            if !f.card_shown {
+                                                f.card_shown = true;
+                                                ui.scroll_to_cursor(Some(egui::Align::TOP));
+                                            }
+                                            let badge = match &f.set {
+                                                Some((l, s)) => format!("{l} · {} anims", s.group.anims.len()),
+                                                None => format!("{} poses", f.rig.pose_names().count()),
+                                            };
+                                            let voiced = |take: &str| {
+                                                voices.as_ref().map(|v| v.by_clip.contains_key(&mercs2_formats::hash::pandemic_hash_m2(take)))
+                                            };
+                                            theme::section(ui, "FaceFX", Some(&badge), true, |ui| {
+                                                let end = f.length();
+                                                if let (Some((_, s)), Some(i)) = (&f.set, f.anim) {
+                                                    let a = &s.group.anims[i];
+                                                    ui.horizontal(|ui| {
+                                                        if ui.button(if p.playing && !f.stopped { "⏸" } else { "▶" }).clicked() {
+                                                            actions.push(Act::PlayPause);
+                                                        }
+                                                        if ui.button("⏹").clicked() {
+                                                            actions.push(Act::FaceStop);
+                                                        }
+                                                        if ui.selectable_label(face_repeat, "Repeat").clicked() {
+                                                            face_repeat = !face_repeat;
+                                                        }
+                                                        ui.monospace(format!("{:>5.2} / {end:.2}s", f.time));
+                                                    });
+                                                    let scrub = theme::scrub(
+                                                        ui,
+                                                        ui.available_width(),
+                                                        egui::Slider::new(&mut f.time, 0.0..=end).show_value(false),
+                                                    );
+                                                    // Scrubbing a stopped take holds the face there.
+                                                    f.stopped &= !scrub.changed();
+                                                    match &f.texts {
+                                                        Ok(t) => match t.get(i).and_then(|t| t.as_deref()) {
+                                                            Some(text) => {
+                                                                ui.label(egui::RichText::new(text).color(theme::TX));
+                                                            }
+                                                            None => {
+                                                                ui.label(egui::RichText::new(format!("{} has no text", a.name)).small().color(theme::FAINT));
+                                                            }
+                                                        },
+                                                        Err(e) => {
+                                                            ui.label(egui::RichText::new(e.as_str()).small().color(theme::BAD));
+                                                        }
+                                                    }
+                                                    let (bound, unbound) = f.rig.bind(a).bound_and_unbound();
+                                                    ui.add(
+                                                        egui::Label::new(
+                                                            egui::RichText::new(format!("{} curves drive the face", bound.len())).small().color(theme::TX),
+                                                        )
+                                                        .truncate(),
+                                                    );
+                                                    if !unbound.is_empty() {
+                                                        ui.add(
+                                                            egui::Label::new(
+                                                                egui::RichText::new(format!("no node, drive nothing: {}", unbound.join(", ")))
+                                                                    .small()
+                                                                    .color(theme::FAINT),
+                                                            )
+                                                            .truncate(),
+                                                        );
+                                                    }
+                                                }
+                                                if let Some((_, s)) = &f.set {
+                                                    theme::scroll_vertical().max_height(260.0).id_salt("facefx_anims").show(ui, |ui| {
+                                                        for (i, a) in s.group.anims.iter().enumerate() {
+                                                            let mark = match voiced(&a.name) {
+                                                                Some(true) => "♪ ",
+                                                                Some(false) => "silent · ",
+                                                                None => "",
+                                                            };
+                                                            let row = format!("{mark}{}  {:.2}s", a.name, a.bounds().1);
+                                                            let text = f.texts.as_ref().ok().and_then(|t| t.get(i)).and_then(|t| t.as_deref());
+                                                            let mut r = ui.add(egui::Button::selectable(f.anim == Some(i), row));
+                                                            if let Some(text) = text {
+                                                                ui.add(egui::Label::new(egui::RichText::new(text).small().color(theme::FAINT)).truncate());
+                                                                r = r.on_hover_text(text);
+                                                            }
+                                                            if r.clicked() {
+                                                                actions.push(Act::FaceAnim(i));
+                                                            }
+                                                        }
+                                                    });
+                                                }
+                                                ui.label(egui::RichText::new("Poses").small().color(theme::TX));
+                                                theme::scroll_vertical().max_height(200.0).id_salt("facefx_poses").show(ui, |ui| {
+                                                    for n in f.rig.pose_names() {
+                                                        let held = f.hold.as_deref() == Some(n);
+                                                        if ui.add(egui::Button::selectable(held, n)).clicked() {
+                                                            actions.push(Act::FaceHold((!held).then(|| n.to_string())));
+                                                        }
+                                                    }
+                                                });
+                                            });
+                                        }
                                         let (phash, plabel) = (p.hash, p.label.clone());
                                         let head = ui.add(
                                             egui::Label::new(theme::disp_text(
@@ -3738,7 +4650,7 @@ pub fn run(opts: Options) {
                                                 .color(theme::DIM),
                                         );
                                         ui.add_space(8.0);
-                                        head.context_menu(|ui| {
+                                        theme::context_menu(&head, |ui| {
                                             // The SAME menu as the browser row. These were two
                                             // copies: this one offered only OBJ export, and neither
                                             // had been revisited since before Shipments existed.
@@ -3925,12 +4837,12 @@ pub fn run(opts: Options) {
                                                     } else {
                                                         (theme::G0, theme::LINE)
                                                     };
-                                                    let r = egui::Frame::none()
+                                                    let r = egui::Frame::NONE
                                                         .fill(fill)
-                                                        .stroke(egui::Stroke::new(1.0, border))
-                                                        .rounding(egui::Rounding::same(5.0))
-                                                        .inner_margin(egui::Margin::symmetric(9.0, 5.0))
-                                                        .outer_margin(egui::Margin { bottom: 5.0, ..Default::default() })
+                                                        .corner_radius(egui::CornerRadius::same(5))
+                                                        .inner_margin(egui::Margin::symmetric(9, 5))
+                                                        .apply_stroke_and_expansion_without_layout_shift(egui::Stroke::new(1.0, border), 0.0)
+                                                        .outer_margin(egui::Margin { bottom: 5, ..Default::default() })
                                                         .show(ui, |ui| {
                                                             ui.horizontal(|ui| {
                                                                 ui.set_width(ui.available_width());
@@ -3982,7 +4894,11 @@ pub fn run(opts: Options) {
                                         // Character kit — every outfit the game can give each world
                                         // template that wears this kit (`mercs2_formats::mixr`: the
                                         // exe's per-profile enumeration). Which one a spawn shows is
-                                        // the game's pick; each pill shows one of them.
+                                        // the game's pick. An outfit is one pick per slot (the
+                                        // exclusion classes the enumerator branches on, by pivot), so
+                                        // each slot is a dropdown of its parts, named by what they show; a
+                                        // pick moves to the listed outfit that keeps the most of the
+                                        // other slots. The arrows step through the exe's list.
                                         if let Some((kit, shown)) = &p.kit {
                                             let k_badge = format!(
                                                 "{} templates · {} parts",
@@ -3990,28 +4906,139 @@ pub fn run(opts: Options) {
                                                 kit.mixr.parts.len()
                                             );
                                             theme::section(ui, "Character kit", Some(&k_badge), true, |ui| {
+                                                let parts = match &p.kit_parts {
+                                                    Ok(parts) => parts,
+                                                    Err(e) => {
+                                                        ui.colored_label(theme::BAD, format!("parts unreadable: {e}"));
+                                                        return;
+                                                    }
+                                                };
                                                 for t in &kit.templates {
                                                     let name = t.label();
-                                                    theme::eyebrow(ui, &name);
-                                                    ui.add_space(3.0);
-                                                    match kit.mixr.template_outfits(t) {
-                                                        Ok((_, outfits)) => {
-                                                            ui.horizontal_wrapped(|ui| {
-                                                                for k in 0..outfits.len() {
-                                                                    let on = shown
-                                                                        .as_ref()
-                                                                        .is_some_and(|(s, i)| *s == name && *i == k);
-                                                                    if theme::pill(ui, &(k + 1).to_string(), on).clicked() {
-                                                                        actions.push(Act::Outfit(name.clone(), k));
-                                                                    }
-                                                                }
-                                                            });
+                                                    let picks = match kit.mixr.template_picks(t) {
+                                                        Ok((_, picks)) if !picks.is_empty() => picks,
+                                                        Ok(_) => {
+                                                            theme::eyebrow(ui, &name);
+                                                            ui.weak("no outfits: its profile allows no part");
+                                                            ui.add_space(6.0);
+                                                            continue;
                                                         }
                                                         Err(e) => {
+                                                            theme::eyebrow(ui, &name);
                                                             ui.weak(e);
+                                                            ui.add_space(6.0);
+                                                            continue;
                                                         }
+                                                    };
+                                                    let n = picks.len();
+                                                    let cur = shown.as_ref().filter(|(s, _)| *s == name).map(|(_, k)| *k);
+                                                    // Template name, then (right) the outfit number and the arrows.
+                                                    ui.horizontal(|ui| ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                                        if ui.small_button("⏵").on_hover_text("next outfit").clicked() {
+                                                            actions.push(Act::Outfit(name.clone(), cur.map_or(0, |k| (k + 1) % n)));
+                                                        }
+                                                        let at = cur.map_or_else(|| "—".to_string(), |k| (k + 1).to_string());
+                                                        ui.label(theme::disp_text(&format!("{at} / {n}"), theme::style_mono_body(), theme::DIM));
+                                                        if ui.small_button("⏴").on_hover_text("previous outfit").clicked() {
+                                                            actions.push(Act::Outfit(name.clone(), cur.map_or(n - 1, |k| (k + n - 1) % n)));
+                                                        }
+                                                        ui.allocate_ui_with_layout(
+                                                            egui::vec2(ui.available_width(), ui.spacing().interact_size.y),
+                                                            egui::Layout::left_to_right(egui::Align::Center),
+                                                            |ui| {
+                                                                ui.set_min_width(ui.available_width());
+                                                                ui.add(egui::Label::new(theme::disp_text(&name, theme::style_eyebrow(), theme::TX)).truncate());
+                                                            },
+                                                        );
+                                                    }));
+                                                    use mercs2_formats::mixr::{pick_in, Pick};
+                                                    let from: &[Pick] = cur.map_or(&[], |k| &picks[k]);
+                                                    let slots = mercs2_formats::mixr::slots(&picks);
+                                                    for (n_slot, s) in slots.iter().enumerate() {
+                                                        let options = s;
+                                                        // An outfit whose branch never reached this class picks nothing from it.
+                                                        let can_skip = picks.iter().any(|o| pick_in(o, s).is_none());
+                                                        let label = |part: Option<usize>| match part {
+                                                            Some(i) => parts[i].short.clone(),
+                                                            None => "none".to_string(),
+                                                        };
+                                                        let picked: Option<Option<usize>> = cur.map(|k| pick_in(&picks[k], s));
+                                                        ui.horizontal(|ui| ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                                            let combo_w = (ui.available_width() * 0.75).floor().max(110.0);
+                                                            let shown_text = picked.map_or_else(|| "—".to_string(), label);
+                                                            // `truncate` fits the combo to the width it is given, so give it only its column.
+                                                            let column = egui::vec2(combo_w, ui.spacing().interact_size.y);
+                                                            let combo = ui
+                                                                .allocate_ui_with_layout(column, egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                                                    egui::ComboBox::from_id_salt(("kit_slot", &name, n_slot))
+                                                                        .selected_text(egui::RichText::new(shown_text).monospace().color(theme::TX))
+                                                                        .width(combo_w)
+                                                                        .truncate()
+                                                                        .show_ui(ui, |ui| {
+                                                                            let choices = options.iter().map(|&i| Some(i)).chain(can_skip.then_some(None));
+                                                                            for part in choices {
+                                                                                let on = picked == Some(part);
+                                                                                let item = ui.selectable_label(on, egui::RichText::new(label(part)).monospace());
+                                                                                let item = match part {
+                                                                                    Some(i) => item.on_hover_text(&parts[i].full),
+                                                                                    None => item,
+                                                                                };
+                                                                                if item.clicked() {
+                                                                                    let k = mercs2_formats::mixr::nearest_pick(&picks, &slots, from, s, part)
+                                                                                        .expect("every choice is a slot pick of some outfit");
+                                                                                    actions.push(Act::Outfit(name.clone(), k));
+                                                                                }
+                                                                            }
+                                                                        })
+                                                                })
+                                                                .inner;
+                                                            if let Some(Some(i)) = picked {
+                                                                combo.response.on_hover_text(&parts[i].full);
+                                                            }
+                                                            ui.allocate_ui_with_layout(
+                                                                egui::vec2(ui.available_width(), ui.spacing().interact_size.y),
+                                                                egui::Layout::left_to_right(egui::Align::Center),
+                                                                |ui| {
+                                                                    ui.set_min_width(ui.available_width());
+                                                                    ui.add(egui::Label::new(theme::disp_text(&format!("slot {}", n_slot + 1), theme::style_eyebrow(), theme::DIM)).truncate());
+                                                                },
+                                                            );
+                                                        }));
                                                     }
                                                     ui.add_space(6.0);
+                                                }
+                                            });
+                                        }
+                                        // Rotors — each `PgRotorBoneController` of the model's
+                                        // templates, at the helicopter's rotor speed.
+                                        if !p.rotors.is_empty() {
+                                            let r_badge = format!("{} · speed {:.2}", p.rotors.len(), p.rotor_speed());
+                                            theme::section(ui, "Rotors", Some(&r_badge), true, |ui| {
+                                                if p.heli.is_some() {
+                                                    ui.horizontal(|ui| {
+                                                        if theme::pill(ui, "spin up", p.rotor_input > 0.0).clicked() {
+                                                            actions.push(Act::RotorInput(1.0));
+                                                        }
+                                                        if theme::pill(ui, "spin down", p.rotor_input <= 0.0).clicked() {
+                                                            actions.push(Act::RotorInput(0.0));
+                                                        }
+                                                    });
+                                                    ui.add_space(4.0);
+                                                }
+                                                let speed = p.rotor_speed();
+                                                for (c, _) in &p.rotors {
+                                                    let s = c.shows(speed, false);
+                                                    let what = match (s.blades, s.blur) {
+                                                        (true, true) => "blades + blur",
+                                                        (true, false) => "blades",
+                                                        (false, true) => "blur",
+                                                        (false, false) => "none",
+                                                    };
+                                                    theme::kv(
+                                                        ui,
+                                                        &name_or_hash(&index, c.hub),
+                                                        theme::disp_text(what, theme::style_mono_body(), theme::TX),
+                                                    );
                                                 }
                                             });
                                         }
@@ -4027,27 +5054,44 @@ pub fn run(opts: Options) {
                                             theme::section(ui, "Destruction", Some(&d_badge), false, |ui| {
                                                 // HEALTH drives the machine — full = pristine, dropping
                                                 // = damaged/on-fire, 0 = wreck.
-                                                theme::eyebrow(ui, "Health");
+                                                ui.horizontal(|ui| {
+                                                    theme::eyebrow(ui, "Health");
+                                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                                        if ui.small_button("wreck").clicked() {
+                                                            actions.push(Act::SetHealth(0.0));
+                                                        }
+                                                        if ui.small_button("full").clicked() {
+                                                            actions.push(Act::SetHealth(1.0));
+                                                        }
+                                                    });
+                                                });
                                                 ui.add_space(4.0);
                                                 let mut hp = p.health * 100.0;
-                                                ui.horizontal(|ui| {
-                                                    let rail = ui.spacing().slider_width;
-                                                    if theme::scrub(
-                                                        ui,
-                                                        rail,
-                                                        egui::Slider::new(&mut hp, 0.0..=100.0).suffix("%").fixed_decimals(0),
-                                                    )
-                                                    .changed()
-                                                    {
-                                                        actions.push(Act::SetHealth(hp / 100.0));
-                                                    }
-                                                    if ui.small_button("full").clicked() {
-                                                        actions.push(Act::SetHealth(1.0));
-                                                    }
-                                                    if ui.small_button("wreck").clicked() {
-                                                        actions.push(Act::SetHealth(0.0));
-                                                    }
-                                                });
+                                                // The rail takes the row less the value box, sized
+                                                // for its widest reading ("100%").
+                                                let value_w = {
+                                                    let s = ui.spacing();
+                                                    let text = ui.fonts_mut(|f| {
+                                                        f.layout_no_wrap(
+                                                            "100%".into(),
+                                                            egui::TextStyle::Button.resolve(ui.style()),
+                                                            theme::TX,
+                                                        )
+                                                        .size()
+                                                        .x
+                                                    });
+                                                    (text + 2.0 * s.button_padding.x).max(s.interact_size.x)
+                                                };
+                                                let rail = (ui.available_width() - value_w - ui.spacing().item_spacing.x).max(60.0);
+                                                if theme::scrub(
+                                                    ui,
+                                                    rail,
+                                                    egui::Slider::new(&mut hp, 0.0..=100.0).suffix("%").fixed_decimals(0),
+                                                )
+                                                .changed()
+                                                {
+                                                    actions.push(Act::SetHealth(hp / 100.0));
+                                                }
                                                 ui.weak("drives the state machine from damage — the states are the engine's");
                                                 ui.add_space(8.0);
                                                 theme::eyebrow(ui, "State machine — pick a node's state");
@@ -4074,47 +5118,67 @@ pub fn run(opts: Options) {
                                                     },
                                                 );
                                                 ui.add_space(3.0);
-                                                egui::ScrollArea::vertical()
-                                                    .max_height(620.0)
-                                                    .id_source("machine_scroll")
-                                                    .show(ui, |ui| {
-                                                        for (ni, node) in sm.nodes.iter().enumerate() {
-                                                            let cur = p.node_state.get(ni).copied().unwrap_or(0);
-                                                            ui.label(theme::disp_text(
-                                                                name_or_hash(&index, node.name_hash),
-                                                                theme::style_eyebrow(),
-                                                                theme::TX,
-                                                            ));
-                                                            ui.add_space(3.0);
-                                                            ui.horizontal_wrapped(|ui| {
-                                                                for (si, st) in node.states.iter().enumerate() {
-                                                                    if theme::pill(
-                                                                        ui,
-                                                                        &name_or_hash(&index, st.name_hash),
-                                                                        cur == si,
-                                                                    )
-                                                                    .clicked()
-                                                                    {
-                                                                        actions.push(Act::NodeState(ni, si));
+                                                // One row per node: its name, then its current state
+                                                // as a dropdown over the node's own states.
+                                                for (ni, node) in sm.nodes.iter().enumerate() {
+                                                    let cur = p.node_state.get(ni).copied().unwrap_or(0);
+                                                    // Right to left: the dropdown takes its width first
+                                                    // and the name is cut to what is left. Inside a row,
+                                                    // so the layout takes one line, not the column.
+                                                    ui.horizontal(|ui| ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                                        let combo_w = (ui.available_width() * 0.55).floor().max(110.0);
+                                                        let shown = node
+                                                            .states
+                                                            .get(cur)
+                                                            .map(|st| name_or_hash(&index, st.name_hash))
+                                                            .unwrap_or_else(|| "no states".into());
+                                                        // `truncate` fits the combo to the width it is given, so give it only its column.
+                                                        let column = egui::vec2(combo_w, ui.spacing().interact_size.y);
+                                                        ui.allocate_ui_with_layout(column, egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                                            egui::ComboBox::from_id_salt(("machine_state", ni))
+                                                                .selected_text(egui::RichText::new(shown).monospace().color(theme::TX))
+                                                                .width(combo_w)
+                                                                .truncate()
+                                                                .show_ui(ui, |ui| {
+                                                                    for (si, st) in node.states.iter().enumerate() {
+                                                                        if ui
+                                                                            .selectable_label(cur == si, egui::RichText::new(name_or_hash(&index, st.name_hash)).monospace())
+                                                                            .clicked()
+                                                                        {
+                                                                            actions.push(Act::NodeState(ni, si));
+                                                                        }
                                                                     }
-                                                                }
-                                                            });
-                                                            if show_scripts {
-                                                                if let Some(st) = node.states.get(cur) {
-                                                                    let enter = mercs2_formats::orchestrator::decode_script(&st.enter, resolve);
-                                                                    if !enter.is_empty() {
-                                                                        ui.label(egui::RichText::new(format!("→ {enter}")).monospace().color(theme::FAINT));
-                                                                    }
-                                                                    let exit = mercs2_formats::orchestrator::decode_script(&st.exit, resolve);
-                                                                    if !exit.is_empty() {
-                                                                        ui.label(egui::RichText::new(format!("← {exit}")).monospace().color(theme::FAINT));
-                                                                    }
-                                                                }
+                                                                });
+                                                        });
+                                                        ui.allocate_ui_with_layout(
+                                                            egui::vec2(ui.available_width(), ui.spacing().interact_size.y),
+                                                            egui::Layout::left_to_right(egui::Align::Center),
+                                                            |ui| {
+                                                                ui.set_min_width(ui.available_width());
+                                                                ui.add(egui::Label::new(theme::disp_text(
+                                                                    name_or_hash(&index, node.name_hash),
+                                                                    theme::style_eyebrow(),
+                                                                    theme::TX,
+                                                                )).truncate());
+                                                            },
+                                                        );
+                                                    }));
+                                                    if show_scripts {
+                                                        if let Some(st) = node.states.get(cur) {
+                                                            let enter = mercs2_formats::orchestrator::decode_script(&st.enter, resolve);
+                                                            if !enter.is_empty() {
+                                                                ui.label(egui::RichText::new(format!("→ {enter}")).monospace().color(theme::FAINT));
                                                             }
-                                                            ui.add_space(9.0);
+                                                            let exit = mercs2_formats::orchestrator::decode_script(&st.exit, resolve);
+                                                            if !exit.is_empty() {
+                                                                ui.label(egui::RichText::new(format!("← {exit}")).monospace().color(theme::FAINT));
+                                                            }
                                                         }
-                                                        ui.weak("@name = a HIER node of this model");
-                                                    });
+                                                        ui.add_space(6.0);
+                                                    }
+                                                    ui.add_space(2.0);
+                                                }
+                                                ui.weak("@name = a HIER node of this model");
                                             });
                                         }
                                         let seg_badge = format!(
@@ -4127,6 +5191,38 @@ pub fn run(opts: Options) {
                                             // its real mount NODE (from SEGM[INDX[group]]), its LOD mask,
                                             // its material \u{2014} and when it is NOT drawn, WHICH CLAUSE
                                             // gated it. This is what makes the panel map to the picture.
+                                            // Does the engine's gate draw this mesh: its LOD mask meets
+                                            // the view tier and its mount node is switched on.
+                                            let gate = |d: &DrawGroup| {
+                                                let lod_ok = (p.tier & d.lod_mask) != 0;
+                                                let node_ok = d.node < 0
+                                                    || p.node_enable
+                                                        .get(d.node as usize)
+                                                        .copied()
+                                                        .unwrap_or(true);
+                                                (lod_ok, node_ok)
+                                            };
+                                            let passing = p
+                                                .draws
+                                                .iter()
+                                                .filter(|d| {
+                                                    let (l, n) = gate(d);
+                                                    l && n
+                                                })
+                                                .count();
+                                            // Drawn = the meshes the gate passes, including any hidden
+                                            // by hand so they can be turned back on; All = every mesh.
+                                            let scope_id = ui.make_persistent_id("segments_all");
+                                            let mut all = ui.data_mut(|d| d.get_temp::<bool>(scope_id).unwrap_or(false));
+                                            ui.horizontal_wrapped(|ui| {
+                                                if theme::pill(ui, &format!("Drawn {passing}"), !all).clicked() {
+                                                    all = false;
+                                                }
+                                                if theme::pill(ui, &format!("All {}", p.draws.len()), all).clicked() {
+                                                    all = true;
+                                                }
+                                            });
+                                            ui.data_mut(|d| d.insert_temp(scope_id, all));
                                             let mut hr = p.hide_ruin;
                                             if ui
                                                 .checkbox(&mut hr, "Hide *_ruin* sub-strips")
@@ -4134,135 +5230,142 @@ pub fn run(opts: Options) {
                                             {
                                                 actions.push(Act::ToggleRuin);
                                             }
-                                            egui::ScrollArea::vertical()
-                                                .max_height(620.0)
-                                                .id_source("mtrl_scroll")
-                                                .show(ui, |ui| {
-                                                    for gi in 0..p.draws.len() {
-                                                        let d = p.draws[gi].clone();
-                                                        let tris = d.index_count / 3;
-                                                        let (diff, norm, spec) =
-                                                            (d.diffuse, d.normal, d.specular);
-                                                        let tex = diff
-                                                            .map(|h| name_or_hash(&index, h))
-                                                            .unwrap_or_else(|| "-".into());
-                                                        // Why is this mesh not drawn? Ask the gate.
-                                                        let lod_ok = (p.tier & d.lod_mask) != 0;
-                                                        let node_ok = d.node < 0
-                                                            || p.node_enable
-                                                                .get(d.node as usize)
-                                                                .copied()
-                                                                .unwrap_or(true);
-                                                        let hidden = p.hidden.contains(&gi);
-                                                        let (mark, why) = if lod_ok && node_ok && hidden {
-                                                            ("x", "hidden by hand".to_string())
-                                                        } else if !lod_ok {
-                                                            ("x", format!(
-                                                                "LOD: mask 0x{:02X} shares no bit with view_state 0x{:02X}",
-                                                                d.lod_mask, p.tier))
-                                                        } else if !node_ok {
-                                                            ("x", format!(
-                                                                "DESTRUCTION: node {} is switched off in this state",
-                                                                d.node))
-                                                        } else {
-                                                            ("*", "drawn".to_string())
-                                                        };
-                                                        let node_lbl = if d.node < 0 {
-                                                            "-".to_string()
-                                                        } else {
-                                                            p.hier_nodes
-                                                                .get(d.node as usize)
-                                                                .map(|h| name_or_hash(&index, h.hash))
-                                                                .unwrap_or_else(|| d.node.to_string())
-                                                        };
-                                                        let _ = mark;
-                                                        // Framed chip, coloured by draw state: green =
-                                                        // drawn, neutral+faint = filtered/hidden, brass
-                                                        // border when selected. Columns: material · LOD
-                                                        // tier · status + tri count (right). seg/node/
-                                                        // mask are in the hover.
-                                                        let drawn = lod_ok && node_ok && !hidden;
-                                                        let (fill, border, statusc, statustxt) =
-                                                            if !lod_ok || !node_ok {
-                                                                (theme::G0, theme::LINE, theme::FAINT, "✖ filtered")
-                                                            } else if hidden {
-                                                                (theme::G0, theme::LINE, theme::DIM, "· hidden")
-                                                            } else {
-                                                                (theme::GOOD_SOFT, theme::GOOD_DK, theme::GOOD, "✔ drawn")
-                                                            };
-                                                        let border = if p.sel_group == gi { theme::BRASS } else { border };
-                                                        let why = format!(
-                                                            "{why}\nseg {} · node {} ({node_lbl}) · mask 0x{:02X} · {tex}",
-                                                            d.seg_id, d.node, d.lod_mask
-                                                        );
-                                                        let tex_short: String = tex.chars().take(22).collect();
-                                                        let resp = theme::row_chip(ui, fill, border, |ui| {
-                                                            let mut vis = !hidden;
-                                                            if ui.checkbox(&mut vis, "").changed() {
-                                                                actions.push(Act::GroupToggle(gi));
-                                                            }
-                                                            ui.label(
-                                                                egui::RichText::new(tex_short).small()
-                                                                    .color(if drawn { theme::TX } else { theme::DIM }),
-                                                            );
+                                            ui.add_space(3.0);
+                                            for gi in 0..p.draws.len() {
+                                                let d = p.draws[gi].clone();
+                                                // Why is this mesh not drawn? Ask the gate.
+                                                let (lod_ok, node_ok) = gate(&d);
+                                                if !all && !(lod_ok && node_ok) {
+                                                    continue;
+                                                }
+                                                let tris = d.index_count / 3;
+                                                let (diff, norm, spec) =
+                                                    (d.diffuse, d.normal, d.specular);
+                                                let tex = diff
+                                                    .map(|h| name_or_hash(&index, h))
+                                                    .unwrap_or_else(|| "-".into());
+                                                let hidden = p.hidden.contains(&gi);
+                                                let (mark, why) = if lod_ok && node_ok && hidden {
+                                                    ("x", "hidden by hand".to_string())
+                                                } else if !lod_ok {
+                                                    ("x", format!(
+                                                        "LOD: mask 0x{:02X} shares no bit with view_state 0x{:02X}",
+                                                        d.lod_mask, p.tier))
+                                                } else if !node_ok {
+                                                    ("x", format!(
+                                                        "DESTRUCTION: node {} is switched off in this state",
+                                                        d.node))
+                                                } else {
+                                                    ("*", "drawn".to_string())
+                                                };
+                                                let node_lbl = if d.node < 0 {
+                                                    "-".to_string()
+                                                } else {
+                                                    p.hier_nodes
+                                                        .get(d.node as usize)
+                                                        .map(|h| name_or_hash(&index, h.hash))
+                                                        .unwrap_or_else(|| d.node.to_string())
+                                                };
+                                                let _ = mark;
+                                                // Framed chip, coloured by draw state: green =
+                                                // drawn, neutral+faint = filtered/hidden, brass
+                                                // border when selected. Columns: material (cut to
+                                                // fit), then LOD tier · tri count · status on the
+                                                // right. seg/node/mask are in the hover.
+                                                let drawn = lod_ok && node_ok && !hidden;
+                                                let (fill, border, statusc, statustxt) =
+                                                    if !lod_ok || !node_ok {
+                                                        (theme::G0, theme::LINE, theme::FAINT, "✖ filtered")
+                                                    } else if hidden {
+                                                        (theme::G0, theme::LINE, theme::DIM, "· hidden")
+                                                    } else {
+                                                        (theme::GOOD_SOFT, theme::GOOD_DK, theme::GOOD, "✔ drawn")
+                                                    };
+                                                let border = if p.sel_group == gi { theme::BRASS } else { border };
+                                                let why = format!(
+                                                    "{why}\nseg {} · node {} ({node_lbl}) · mask 0x{:02X} · {tex}",
+                                                    d.seg_id, d.node, d.lod_mask
+                                                );
+                                                let resp = theme::row_chip(ui, fill, border, |ui| {
+                                                    let mut vis = !hidden;
+                                                    if ui.checkbox(&mut vis, "").changed() {
+                                                        actions.push(Act::GroupToggle(gi));
+                                                    }
+                                                    // Right columns first, so the name gets
+                                                    // exactly the width left and is cut there.
+                                                    ui.with_layout(
+                                                        egui::Layout::right_to_left(egui::Align::Center),
+                                                        |ui| {
+                                                            ui.label(egui::RichText::new(statustxt).small().color(statusc));
+                                                            ui.add_space(6.0);
+                                                            ui.label(egui::RichText::new(format!("{tris} tri")).monospace().color(theme::DIM));
+                                                            ui.add_space(6.0);
                                                             ui.label(
                                                                 egui::RichText::new(lod_levels(d.lod_mask))
                                                                     .monospace()
                                                                     .color(theme::FAINT),
                                                             );
-                                                            ui.with_layout(
-                                                                egui::Layout::right_to_left(egui::Align::Center),
+                                                            ui.allocate_ui_with_layout(
+                                                                egui::vec2(ui.available_width(), ui.spacing().interact_size.y),
+                                                                egui::Layout::left_to_right(egui::Align::Center),
                                                                 |ui| {
-                                                                    ui.label(egui::RichText::new(statustxt).small().color(statusc));
-                                                                    ui.add_space(6.0);
-                                                                    ui.label(egui::RichText::new(format!("{tris} tri")).monospace().color(theme::DIM));
+                                                                    ui.set_min_width(ui.available_width());
+                                                                    ui.add(
+                                                                        egui::Label::new(
+                                                                            egui::RichText::new(&tex).small()
+                                                                                .color(if drawn { theme::TX } else { theme::DIM }),
+                                                                        )
+                                                                        .truncate()
+                                                                        .selectable(false),
+                                                                    );
                                                                 },
                                                             );
-                                                        });
-                                                        let resp = resp.on_hover_text(&why);
-                                                        if resp.clicked() {
-                                                            p.sel_group = gi;
-                                                        }
-                                                        resp.context_menu(|ui| {
-                                                                if ui.button("Isolate (hide others)").clicked() {
-                                                                    actions.push(Act::IsolateGroup(gi));
-                                                                    ui.close_menu();
-                                                                }
-                                                                if ui.button("Show all groups").clicked() {
-                                                                    actions.push(Act::ShowAllGroups);
-                                                                    ui.close_menu();
-                                                                }
-                                                                if ui.button("Toggle visibility").clicked() {
-                                                                    actions.push(Act::GroupToggle(gi));
-                                                                    ui.close_menu();
-                                                                }
-                                                                ui.separator();
-                                                                for (slot, h) in [
-                                                                    ("diffuse", diff),
-                                                                    ("normal", norm),
-                                                                    ("specular", spec),
-                                                                ] {
-                                                                    if let Some(h) = h {
-                                                                        if ui
-                                                                            .button(format!(
-                                                                                "Copy {slot} hash 0x{h:08X}"
-                                                                            ))
-                                                                            .clicked()
-                                                                        {
-                                                                            ui.ctx().copy_text(format!("0x{h:08X}"));
-                                                                            ui.close_menu();
-                                                                        }
-                                                                    }
-                                                                }
-                                                                if let Some(h) = diff {
-                                                                    if ui.button("Copy diffuse name").clicked() {
-                                                                        ui.ctx().copy_text(name_or_hash(&index, h));
-                                                                        ui.close_menu();
-                                                                    }
-                                                                }
-                                                            });
-                                                    }
+                                                        },
+                                                    );
                                                 });
+                                                let resp = resp.on_hover_text(&why);
+                                                if resp.clicked() {
+                                                    p.sel_group = gi;
+                                                }
+                                                theme::context_menu(&resp, |ui| {
+                                                        if ui.button("Isolate (hide others)").clicked() {
+                                                            actions.push(Act::IsolateGroup(gi));
+                                                            ui.close();
+                                                        }
+                                                        if ui.button("Show all groups").clicked() {
+                                                            actions.push(Act::ShowAllGroups);
+                                                            ui.close();
+                                                        }
+                                                        if ui.button("Toggle visibility").clicked() {
+                                                            actions.push(Act::GroupToggle(gi));
+                                                            ui.close();
+                                                        }
+                                                        ui.separator();
+                                                        for (slot, h) in [
+                                                            ("diffuse", diff),
+                                                            ("normal", norm),
+                                                            ("specular", spec),
+                                                        ] {
+                                                            if let Some(h) = h {
+                                                                if ui
+                                                                    .button(format!(
+                                                                        "Copy {slot} hash 0x{h:08X}"
+                                                                    ))
+                                                                    .clicked()
+                                                                {
+                                                                    ui.ctx().copy_text(format!("0x{h:08X}"));
+                                                                    ui.close();
+                                                                }
+                                                            }
+                                                        }
+                                                        if let Some(h) = diff {
+                                                            if ui.button("Copy diffuse name").clicked() {
+                                                                ui.ctx().copy_text(name_or_hash(&index, h));
+                                                                ui.close();
+                                                            }
+                                                        }
+                                                    });
+                                            }
                                         }); // ── end Segments section ──
                                         let src = p
                                             .character_set
@@ -4296,12 +5399,100 @@ pub fn run(opts: Options) {
                                                         egui::Slider::new(&mut p.anim_time, 0.0..=dur).show_value(false),
                                                     );
                                                 }
+                                                // The playing clip itself, when it has no name: the names
+                                                // its rows crack to (`mercs2_probe clip-names`), each with
+                                                // its evidence and Accept, then a field like a value's.
+                                                let clip_hash = p.clip_catalog[ci].hash;
+                                                if !index.names.contains_key(&clip_hash) {
+                                                    ui.add_space(4.0);
+                                                    ui.horizontal(|ui| {
+                                                        ui.label(egui::RichText::new("Clip").small().color(theme::TX));
+                                                        ui.label(egui::RichText::new(format!("0x{clip_hash:08X}")).monospace().color(theme::FAINT));
+                                                    });
+                                                    match &state_namer {
+                                                        Err(e) => {
+                                                            ui.label(egui::RichText::new(e.as_str()).small().color(theme::BAD));
+                                                        }
+                                                        Ok(n) => {
+                                                            match &n.proposals {
+                                                                Err(e) => {
+                                                                    ui.add(
+                                                                        egui::Label::new(egui::RichText::new(e.as_str()).small().color(theme::FAINT))
+                                                                            .truncate(),
+                                                                    );
+                                                                }
+                                                                Ok(ps) => {
+                                                                    for pr in ps.of(clip_hash) {
+                                                                        ui.horizontal(|ui| {
+                                                                            if ui.button("Accept").clicked() {
+                                                                                actions.push(Act::NameValue(clip_hash, pr.name.clone()));
+                                                                            }
+                                                                            ui.add(
+                                                                                egui::Label::new(
+                                                                                    egui::RichText::new(format!("proposed: {}", pr.name)).small().color(theme::BRASS),
+                                                                                )
+                                                                                .truncate(),
+                                                                            );
+                                                                        });
+                                                                        ui.add(
+                                                                            egui::Label::new(egui::RichText::new(pr.evidence.as_str()).small().color(theme::FAINT))
+                                                                                .truncate(),
+                                                                        );
+                                                                    }
+                                                                }
+                                                            }
+                                                            name_field(ui, name_drafts.entry(clip_hash).or_default(), clip_hash, &mut actions);
+                                                        }
+                                                    }
+                                                }
+                                                // The playing clip's unnamed table values: each with the
+                                                // consumers that hold it, a field, and the word orders of
+                                                // the field whose hash is the value (`crate::statenamer`).
+                                                let unnamed: Vec<(&'static str, u32)> = p.clip_catalog[ci]
+                                                    .values
+                                                    .iter()
+                                                    .copied()
+                                                    .filter(|(_, v)| !index.names.contains_key(v))
+                                                    .collect();
+                                                for (col, v) in unnamed {
+                                                    ui.add_space(4.0);
+                                                    ui.horizontal(|ui| {
+                                                        ui.label(egui::RichText::new(col).small().color(theme::TX));
+                                                        ui.label(egui::RichText::new(format!("0x{v:08X}")).monospace().color(theme::FAINT));
+                                                    });
+                                                    match &state_namer {
+                                                        Err(e) => {
+                                                            ui.label(egui::RichText::new(e.as_str()).small().color(theme::BAD));
+                                                        }
+                                                        Ok(n) => {
+                                                            for c in n.consumers.of(v) {
+                                                                ui.add(
+                                                                    egui::Label::new(egui::RichText::new(c.as_str()).small().color(theme::FAINT))
+                                                                        .truncate(),
+                                                                );
+                                                            }
+                                                            name_field(ui, name_drafts.entry(v).or_default(), v, &mut actions);
+                                                        }
+                                                    }
+                                                }
                                             }
-                                            egui::ScrollArea::vertical()
+                                            ui.checkbox(&mut unnamed_only, egui::RichText::new("unnamed only").small());
+                                            // Only the visible rows are laid out: a character's catalog
+                                            // holds every in-vehicle clip too, thousands of rows.
+                                            let shown: Vec<usize> = (0..p.clip_catalog.len())
+                                                .filter(|&i| {
+                                                    !unnamed_only
+                                                        || p.clip_catalog[i].values.iter().any(|(_, v)| !index.names.contains_key(v))
+                                                })
+                                                .collect();
+                                            // One clip chip: its content row, 5 px inner margin above and
+                                            // below, a 1 px border each side and its 4 px bottom margin.
+                                            let row_h = ui.spacing().interact_size.y + 16.0;
+                                            theme::scroll_vertical()
                                                 .max_height(580.0)
-                                                .id_source("clip_scroll")
-                                                .show(ui, |ui| {
-                                                    for i in 0..p.clip_catalog.len() {
+                                                .id_salt("clip_scroll")
+                                                .show_rows(ui, row_h, shown.len(), |ui, range| {
+                                                    for &i in &shown[range] {
                                                         let e = &p.clip_catalog[i];
                                                         let (chash, chandle, clabel) = (
                                                             e.hash,
@@ -4321,16 +5512,39 @@ pub fn run(opts: Options) {
                                                         };
                                                         // Name (corpus or procedural) prominent, hash
                                                         // dim, duration / bind-state right-aligned.
-                                                        let nm = e.name.clone().unwrap_or_else(|| format!("clip {}", i + 1));
+                                                        // A clip with no name shows the first name proposed for
+                                                        // it, marked as unreviewed until Accept writes it.
+                                                        let proposed = match (&state_namer, index.names.contains_key(&e.hash)) {
+                                                            (Ok(n), false) => n.proposals.as_ref().ok().and_then(|ps| ps.of(e.hash).first()),
+                                                            _ => None,
+                                                        };
+                                                        let nm = match proposed {
+                                                            Some(pr) => format!("{} (proposed)", pr.name),
+                                                            None => e.name.clone().unwrap_or_else(|| format!("clip {}", i + 1)),
+                                                        };
+                                                        // Right to left, so the name is cut to the width
+                                                        // the hash and duration leave rather than pushing
+                                                        // the row (and the panel) wider.
                                                         let mut resp = theme::row_chip(ui, fill, bord, |ui| {
-                                                            ui.label(egui::RichText::new(nm).small().color(if sel { theme::BRASS } else { theme::TX }));
-                                                            ui.label(egui::RichText::new(format!("0x{chash:08X}")).monospace().color(theme::FAINT));
                                                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                                                 if let Some(d) = dur {
                                                                     ui.label(egui::RichText::new(format!("{d:.2}s")).monospace().color(theme::GOOD));
                                                                 } else if unbound {
                                                                     ui.label(egui::RichText::new("unbound").small().color(theme::FAINT));
                                                                 }
+                                                                ui.label(egui::RichText::new(format!("0x{chash:08X}")).monospace().color(theme::FAINT));
+                                                                ui.allocate_ui_with_layout(
+                                                                    egui::vec2(ui.available_width(), ui.spacing().interact_size.y),
+                                                                    egui::Layout::left_to_right(egui::Align::Center),
+                                                                    |ui| {
+                                                                        ui.set_min_width(ui.available_width());
+                                                                        ui.add(
+                                                                            egui::Label::new(egui::RichText::new(nm).small().color(if sel { theme::BRASS } else { theme::TX }))
+                                                                                .truncate()
+                                                                                .selectable(false),
+                                                                        );
+                                                                    },
+                                                                );
                                                             });
                                                         });
                                                         if let Some(h) = chandle {
@@ -4339,22 +5553,22 @@ pub fn run(opts: Options) {
                                                         if resp.clicked() {
                                                             actions.push(Act::ClipSel(i));
                                                         }
-                                                        resp.context_menu(|ui| {
+                                                        theme::context_menu(&resp, |ui| {
                                                             if ui.button("Play").clicked() {
                                                                 actions.push(Act::ClipSel(i));
-                                                                ui.close_menu();
+                                                                ui.close();
                                                             }
                                                             ui.separator();
                                                             if ui.button("Copy clip name").clicked() {
                                                                 ui.ctx().copy_text(clabel.clone());
-                                                                ui.close_menu();
+                                                                ui.close();
                                                             }
                                                             if ui
                                                                 .button(format!("Copy clip hash 0x{chash:08X}"))
                                                                 .clicked()
                                                             {
                                                                 ui.ctx().copy_text(format!("0x{chash:08X}"));
-                                                                ui.close_menu();
+                                                                ui.close();
                                                             }
                                                             if let Some(h) = chandle {
                                                                 if ui
@@ -4362,7 +5576,7 @@ pub fn run(opts: Options) {
                                                                     .clicked()
                                                                 {
                                                                     ui.ctx().copy_text(format!("0x{h:08X}"));
-                                                                    ui.close_menu();
+                                                                    ui.close();
                                                                 }
                                                             }
                                                         });
@@ -4376,9 +5590,9 @@ pub fn run(opts: Options) {
                                             let lua_badge =
                                                 format!("\"{}\" · {}", p.lua_needle, p.lua_refs.len());
                                             theme::section(ui, "Game scripts", Some(&lua_badge), false, |ui| {
-                                                egui::ScrollArea::vertical()
+                                                theme::scroll_vertical()
                                                     .max_height(520.0)
-                                                    .id_source("lua_refs_scroll")
+                                                    .id_salt("lua_refs_scroll")
                                                     .show(ui, |ui| {
                                                         for (path, lines) in &p.lua_refs {
                                                             // Click = open the whole script in
@@ -4399,16 +5613,16 @@ pub fn run(opts: Options) {
                                                                     path.clone(),
                                                                 ));
                                                             }
-                                                            row.context_menu(|ui| {
+                                                            theme::context_menu(&row, |ui| {
                                                                 if ui.button("Open script").clicked() {
                                                                     actions.push(Act::LuaOpen(
                                                                         path.clone(),
                                                                     ));
-                                                                    ui.close_menu();
+                                                                    ui.close();
                                                                 }
                                                                 if ui.button("Copy script path").clicked() {
                                                                     ui.ctx().copy_text(path.clone());
-                                                                    ui.close_menu();
+                                                                    ui.close();
                                                                 }
                                                             });
                                                             for l in lines {
@@ -4421,9 +5635,9 @@ pub fn run(opts: Options) {
                                         let skel_badge = format!("{} bones", p.rig.len());
                                         theme::section(ui, "Skeleton", Some(&skel_badge), false, |ui| {
                                             ui.weak("hover = highlight in view, click = pin");
-                                            egui::ScrollArea::vertical()
+                                            theme::scroll_vertical()
                                                 .max_height(620.0)
-                                                .id_source("hier_scroll")
+                                                .id_salt("hier_scroll")
                                                 .show(ui, |ui| {
                                                     for (i, b) in p.rig.iter().enumerate() {
                                                         let mut depth = 0usize;
@@ -4458,17 +5672,17 @@ pub fn run(opts: Options) {
                                                                 Some(i)
                                                             };
                                                         }
-                                                        row.context_menu(|ui| {
+                                                        theme::context_menu(&row, |ui| {
                                                             if ui
                                                                 .button(format!("Copy hash 0x{bhash:08X}"))
                                                                 .clicked()
                                                             {
                                                                 ui.ctx().copy_text(format!("0x{bhash:08X}"));
-                                                                ui.close_menu();
+                                                                ui.close();
                                                             }
                                                             if ui.button("Copy bone name").clicked() {
                                                                 ui.ctx().copy_text(bname.clone());
-                                                                ui.close_menu();
+                                                                ui.close();
                                                             }
                                                             ui.separator();
                                                             if ui
@@ -4484,7 +5698,7 @@ pub fn run(opts: Options) {
                                                                 } else {
                                                                     Some(i)
                                                                 };
-                                                                ui.close_menu();
+                                                                ui.close();
                                                             }
                                                         });
                                                     }
@@ -4540,9 +5754,9 @@ pub fn run(opts: Options) {
                                                     } else {
                                                         theme::row_stripe(ri % 2 == 1)
                                                     };
-                                                    egui::Frame::none()
+                                                    egui::Frame::NONE
                                                         .fill(band)
-                                                        .inner_margin(egui::Margin { left: 0.0, right: 0.0, top: 2.0, bottom: 2.0 })
+                                                        .inner_margin(egui::Margin { left: 0, right: 0, top: 2, bottom: 2 })
                                                         .show(ui, |ui| {
                                                         ui.horizontal(|ui| {
                                                         ui.spacing_mut().item_spacing.x = 4.0;
@@ -4596,7 +5810,7 @@ pub fn run(opts: Options) {
                                                             .map(|(n, v)| format!("--node-at {n}:{:.3},{:.3},{:.3}", v[0], v[1], v[2]))
                                                             .collect();
                                                         let joined = args.join(" ");
-                                                        ui.output_mut(|o| o.copied_text = joined.clone());
+                                                        ui.ctx().copy_text(joined.clone());
                                                         status = if joined.is_empty() {
                                                             "no hardpoint edits to copy".to_string()
                                                         } else {
@@ -4683,7 +5897,7 @@ pub fn run(opts: Options) {
                                     ui.separator();
                                     ui.horizontal(|ui| {
                                         ui.label("name:");
-                                        ui.text_edit_singleline(&mut mod_name);
+                                        ui.add(egui::TextEdit::singleline(&mut mod_name).margin(theme::TEXT_EDIT_MARGIN));
                                     });
                                     if !mod_name.is_empty() {
                                         let h = mercs2_formats::hash::pandemic_hash_m2(&mod_name);
@@ -4735,7 +5949,7 @@ pub fn run(opts: Options) {
                                     }
                                     ui.horizontal(|ui| {
                                         ui.label("output:");
-                                        ui.text_edit_singleline(&mut mod_out);
+                                        ui.add(egui::TextEdit::singleline(&mut mod_out).margin(theme::TEXT_EDIT_MARGIN));
                                     });
                                     let busy = publisher.is_some();
                                     if ui
@@ -4793,9 +6007,9 @@ pub fn run(opts: Options) {
                                             r.mapped_count(),
                                             r.source_bones.len()
                                         ));
-                                        egui::ScrollArea::vertical()
+                                        theme::scroll_vertical()
                                             .max_height(340.0)
-                                            .id_source("retarget_map_scroll")
+                                            .id_salt("retarget_map_scroll")
                                             .show(ui, |ui| {
                                                 egui::Grid::new("retarget_map")
                                                     .num_columns(3)
@@ -4813,11 +6027,11 @@ pub fn run(opts: Options) {
                                                                 .target_name
                                                                 .clone()
                                                                 .unwrap_or_else(|| "— none —".into());
-                                                            egui::ComboBox::from_id_source(("tmap", m.source_index))
+                                                            egui::ComboBox::from_id_salt(("tmap", m.source_index))
                                                                 .selected_text(cur)
                                                                 .width(160.0)
                                                                 .show_ui(ui, |ui| {
-                                                                    egui::ScrollArea::vertical()
+                                                                    theme::scroll_vertical()
                                                                         .max_height(260.0)
                                                                         .show(ui, |ui| {
                                                                             if ui
@@ -4868,12 +6082,7 @@ pub fn run(opts: Options) {
                                 }
                               } // ── end Skeleton inspector ──
                             });
-                        }));
-                        // Remember the (possibly just-dragged) width so it survives a card collapse.
-                        // Absent on Settings, where the panel is not registered — keep the last
-                        // width so returning to another page restores the drag rather than resetting it.
-                        if let Some(r) = &inspector_resp {
-                            inspector_width = r.response.rect.width();
+                        });
                         }
 
                         // ── VERB-BAR: the current workbench's primary actions.
@@ -4885,14 +6094,15 @@ pub fn run(opts: Options) {
                         // whole app rather than verbs belonging to the page.
                         //
                         // brass = go, hazard = the irreversible. Every verb shows its shortcut.
-                        // Not on Live: that page is blank until it is built to its design. ──
+                        // Not on Live: its header holds its verbs. ──
                         if eff != Workbench::Live {
-                        egui::TopBottomPanel::top("verbs")
-                            .frame(
-                                egui::Frame::side_top_panel(&ctx.style())
-                                    .inner_margin(egui::Margin::symmetric(13.0, 5.0)),
-                            )
-                            .show(ctx, |ui| {
+                        egui::Panel::top("verbs")
+                            .frame(crate::gui::panel_frame(
+                                egui::Frame::side_top_panel(&ctx.global_style())
+                                    .inner_margin(egui::Margin::symmetric(13, 5)),
+                                crate::gui::SeparatorEdge::Bottom,
+                            ))
+                            .show(root, |ui| {
                             ui.horizontal(|ui| {
                                 let has_preview = preview.is_some();
                                 match eff {
@@ -4920,6 +6130,21 @@ pub fn run(opts: Options) {
                                     Workbench::Inspect if kind == Kind::Audio => {
                                         let playing = vo_player.as_ref().and_then(|p| p.status());
                                         audio_acts.extend(crate::audiopage::verbs(ui, &audio_page, playing));
+                                    }
+                                    Workbench::Inspect if kind == Kind::Layer => {
+                                        if ui.add_enabled(layer_view.is_some(), egui::Button::new("Frame layer")).clicked() {
+                                            actions.push(Act::LayerFrame);
+                                        }
+                                    }
+                                    Workbench::Inspect if kind == Kind::Effect => {
+                                        if ui.add_enabled(vfx_view.is_some(), egui::Button::new("Restart")).clicked() {
+                                            vfx_acts.push(crate::vfxview::VfxAct::Restart);
+                                        }
+                                        ui.separator();
+                                        let paused = vfx_view.as_ref().is_some_and(|v| v.paused);
+                                        if ui.add_enabled(vfx_view.is_some(), egui::Button::new(if paused { "Play  Space" } else { "Pause  Space" })).clicked() {
+                                            vfx_acts.push(crate::vfxview::VfxAct::Pause);
+                                        }
                                     }
                                     // A domain page shares Inspect's verbs — it is Inspect narrowed to
                                     // a lens, so Export / textures / clip act on the same loaded
@@ -5027,20 +6252,23 @@ pub fn run(opts: Options) {
                         // inspector registered and EMPTY -- two blank panels on the one page with nothing to put
                         // in them. Settings is now shaped like every other page, and the inspector is simply not
                         // registered here (see its `wb != Settings` guard) rather than being drawn blank.
+                        // No central panel on Live: the void between its panels is the 3D view, so the
+                        // camera keeps the pointer there.
                         if eff == Workbench::Live {
-                            crate::live::center(ctx);
+                            let fv = crate::live::frame_view(&mut live_page, ctx.content_rect().size(), root.available_rect_before_wrap());
+                            crate::live::floats(ctx, &mut live_page, &index.names, fv);
                         }
                         if wb == Workbench::Settings {
                             egui::CentralPanel::default()
                                 .frame(
-                                    egui::Frame::none()
+                                    egui::Frame::NONE
                                         .fill(theme::G0)
-                                        .inner_margin(egui::Margin::symmetric(22.0, 18.0)),
+                                        .inner_margin(egui::Margin::symmetric(22, 18)),
                                 )
-                                .show(ctx, |ui| {
+                                .show(root, |ui| {
                                     ui.label(theme::disp_text(settings_section.label().to_uppercase(), egui::TextStyle::Heading, theme::TX));
                                     ui.add_space(12.0);
-                                    egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+                                    theme::scroll_vertical().auto_shrink([false, false]).show(ui, |ui| {
 
                                     // Tail of a path — the part that identifies it. The full string is
                                     // always one hover away, so the chip never has to carry 80 characters.
@@ -5366,12 +6594,12 @@ pub fn run(opts: Options) {
                         // CentralPanel rather than the 3D viewport, because a Shipment is read, not
                         // orbited. Added last so the side panels have already claimed their space.
                         if wb == Workbench::Quartermaster {
-                            qm_acts.extend(crate::quartermaster::center(ctx, &qm, qm_names.as_ref()));
+                            qm_acts.extend(crate::quartermaster::center(root, &qm, qm_names.as_ref()));
                         }
                         // Saves owns its own centre too: a composed card (hero preview + at-a-glance
                         // HUD + progression grid), not the 3D viewport (see `has_viewport`).
                         if wb == Workbench::Saves {
-                            saves_acts.extend(crate::saves::center(ctx, &saves));
+                            saves_acts.extend(crate::saves::center(root, &saves));
                             // Floating windows: the Inspect view and the delete confirmation.
                             saves_acts.extend(crate::saves::windows(ctx, &saves));
                         }
@@ -5380,13 +6608,13 @@ pub fn run(opts: Options) {
                         // full centre, not a viewport pass, so the dot-grid and node cards sit
                         // where the 3D would.
                         if wb == Workbench::Domain(crate::domain::Domain::Missions) {
-                            missions_acts.extend(crate::missions::center(ctx, &missions_panel));
+                            missions_acts.extend(crate::missions::center(root, &missions_panel));
                         }
                         // ── AUDIO main content: the clip table, not the 3D viewport.
                         let audio_tab = wb == Workbench::Inspect && kind == Kind::Audio;
                         if audio_tab {
                             let playing = vo_player.as_ref().and_then(|p| p.status());
-                            audio_acts.extend(crate::audiopage::center(ctx, &audio_page, playing));
+                            audio_acts.extend(crate::audiopage::center(root, &audio_page, playing));
                         }
                         // ── TEXT main content: an open string table, every language side by side, or
                         // an open font's pages.
@@ -5395,14 +6623,14 @@ pub fn run(opts: Options) {
                             && (text_page.table.is_some() || text_page.font.is_some());
                         if text_tab {
                             if text_page.font.is_some() {
-                                text_acts.extend(crate::textpage::font_center(ctx, &mut text_page));
+                                text_acts.extend(crate::textpage::font_center(root, &mut text_page));
                             } else {
-                                text_acts.extend(crate::textpage::center(ctx, &text_page));
+                                text_acts.extend(crate::textpage::center(root, &text_page));
                             }
                         }
 
                         // ── VIEWPORT HUD: status chips over the 3D (the panels are all placed now, so
-                        // `available_rect` is the viewport region). Non-interactable so the camera drag
+                        // the root's `available_rect_before_wrap` is the viewport region). Non-interactable so the camera drag
                         // works underneath. ──
                         //
                         // Suppressed on every page that does NOT own the viewport — there is no 3D
@@ -5410,14 +6638,26 @@ pub fn run(opts: Options) {
                         // rather than over a scene. Asked as a question about the workbench rather
                         // than as `!= Quartermaster`, which silently stopped being the whole answer
                         // the moment Settings also took the centre.
-                        let vp = ctx.available_rect();
+                        let vp = root.available_rect_before_wrap();
+                        layer_screen = ctx.content_rect().size();
+                        if let (Some(v), None) = (&layer_view, &tex_view) {
+                            if eff.has_viewport() && wb != Workbench::Settings && !audio_tab && !text_tab {
+                                let eye = cam_target - dir_from(cam_yaw, cam_pitch) * cam_dist;
+                                let aspect = layer_screen.x / layer_screen.y.max(1.0);
+                                crate::layerview::overlay(ctx, v, crate::layerview::view_proj(eye, cam_target, aspect), vp);
+                            }
+                        }
                         if eff.has_viewport() && wb != Workbench::Settings && !audio_tab && !text_tab {
-                        egui::Area::new(egui::Id::new("vp_hud"))
+                        egui::Area::new(egui::Id::unique("vp_hud"))
                             .fixed_pos(vp.left_top() + egui::vec2(14.0, 12.0))
                             .interactable(false)
                             .show(ctx, |ui| {
                                 ui.horizontal(|ui| {
                                     theme::chip(ui, "Orbit", true, Some(theme::BRASS));
+                                    if let Some(v) = layer_view.as_ref().filter(|v| v.is_loading()) {
+                                        let (done, all) = v.progress();
+                                        theme::chip(ui, &format!("loading {done}/{all}"), false, None);
+                                    }
                                     if let Some(p) = &preview {
                                         // Clip position — name (or bind pose) + n/total + play state.
                                         let n = p.clip_catalog.len();
@@ -5448,15 +6688,15 @@ pub fn run(opts: Options) {
                         let hp_legend = eff == Workbench::Mods && show_hardpoints;
                         let node_legend = eff == Workbench::Mods && show_nodes;
                         if hp_legend || node_legend || sel_bone.is_some() {
-                            egui::Area::new(egui::Id::new("vp_legend"))
+                            egui::Area::new(egui::Id::unique("vp_legend"))
                                 .fixed_pos(vp.right_top() + egui::vec2(-166.0, 12.0))
                                 .interactable(false)
                                 .show(ctx, |ui| {
-                                    egui::Frame::none()
+                                    egui::Frame::NONE
                                         .fill(egui::Color32::from_rgba_unmultiplied(14, 16, 20, 205))
-                                        .stroke(egui::Stroke::new(1.0, theme::LINE))
-                                        .rounding(egui::Rounding::same(5.0))
-                                        .inner_margin(egui::Margin::symmetric(10.0, 8.0))
+                                        .corner_radius(egui::CornerRadius::same(5))
+                                        .inner_margin(egui::Margin::symmetric(10, 8))
+                                        .apply_stroke_and_expansion_without_layout_shift(egui::Stroke::new(1.0, theme::LINE), 0.0)
                                         .show(ui, |ui| {
                                             ui.spacing_mut().item_spacing.y = 5.0;
                                             let dot = |ui: &mut egui::Ui, c: egui::Color32, t: &str| {
@@ -5467,7 +6707,7 @@ pub fn run(opts: Options) {
                                                     );
                                                     ui.painter().rect_filled(
                                                         r,
-                                                        egui::Rounding::same(1.0),
+                                                        egui::CornerRadius::same(1),
                                                         c,
                                                     );
                                                     ui.label(
@@ -5496,9 +6736,9 @@ pub fn run(opts: Options) {
                         if let Some(hp) = &mut hero_picker {
                             let mut open = true;
                             egui::Window::new("Choose the hero")
-                                .id(egui::Id::new("hero_picker"))
+                                .id(egui::Id::unique("hero_picker"))
                                 .open(&mut open)
-                                .default_size([480.0, 540.0])
+                                .default_size(theme::window_size(480.0, 540.0))
                                 .resizable(true)
                                 .show(ctx, |ui| {
                                     ui.label(egui::RichText::new(format!("The model {} plays on, kept across tabs and launches.", hp.what)).color(theme::DIM));
@@ -5512,7 +6752,7 @@ pub fn run(opts: Options) {
                                             .color(theme::DIM),
                                         );
                                     }
-                                    ui.add(egui::TextEdit::singleline(&mut hp.filter).hint_text("filter models").desired_width(f32::INFINITY));
+                                    ui.add(egui::TextEdit::singleline(&mut hp.filter).hint_text("filter models").margin(theme::TEXT_EDIT_MARGIN).desired_width(f32::INFINITY));
                                     ui.add_space(4.0);
                                     if !hp.want.is_empty() && skeletons.is_none() {
                                         match &skel_error {
@@ -5549,7 +6789,7 @@ pub fn run(opts: Options) {
                                             .then_with(|| models[a.0].label().to_lowercase().cmp(&models[b.0].label().to_lowercase()))
                                     });
                                     let row_h = 20.0;
-                                    egui::ScrollArea::vertical().auto_shrink([false, false]).show_rows(ui, row_h, rows.len(), |ui, range| {
+                                    theme::scroll_vertical().auto_shrink([false, false]).show_rows(ui, row_h, rows.len(), |ui, range| {
                                         for &(mi, cov) in &rows[range] {
                                             let r = &models[mi];
                                             let fits = hp.want.is_empty() || cov.unwrap_or(0) > 0;
@@ -5572,7 +6812,8 @@ pub fn run(opts: Options) {
                         if let Some(tv) = &tex_view {
                             egui::Window::new("Texture")
                                 .anchor(egui::Align2::CENTER_BOTTOM, [0.0, -48.0])
-                                .resizable(false)
+                                .auto_sized()
+                                .max_width(theme::FIT_WINDOW_W)
                                 .collapsible(false)
                                 .show(ctx, |ui| {
                                     ui.label(format!(
@@ -5617,9 +6858,9 @@ pub fn run(opts: Options) {
                         if log_open {
                             let mut open = true;
                             egui::Window::new("Log")
-                                .id(egui::Id::new("log_view"))
+                                .id(egui::Id::unique("log_view"))
                                 .open(&mut open)
-                                .default_size([720.0, 420.0])
+                                .default_size(theme::window_size(720.0, 420.0))
                                 .resizable(true)
                                 .show(ctx, |ui| {
                                     let errs = log.iter().filter(|l| l.level == LogLevel::Error).count();
@@ -5677,7 +6918,7 @@ pub fn run(opts: Options) {
                                         return;
                                     }
                                     let h = ui.text_style_height(&egui::TextStyle::Monospace);
-                                    egui::ScrollArea::vertical()
+                                    theme::scroll_vertical()
                                         .auto_shrink([false, false])
                                         // Newest line is the interesting one, so open at the end.
                                         .stick_to_bottom(true)
@@ -5855,9 +7096,10 @@ pub fn run(opts: Options) {
                         skel_rx = None;
                     }
                     if let Some(wave) = audio_page.play.take() {
+                        let level_audio = audio_page.level_audio();
                         // Lazily open the record index (English.wad + .pws) and the device on the
                         // first play — both are heavy and most sessions never play audio.
-                        if vo_error.is_none() && vo_stream.is_none() {
+                        if level_audio.is_none() && vo_error.is_none() && vo_stream.is_none() {
                             let data_dir = std::path::Path::new(&wadpath)
                                 .parent()
                                 .map(|p| p.to_path_buf())
@@ -5873,16 +7115,26 @@ pub fn run(opts: Options) {
                                 None => vo_error = Some("no audio output device".into()),
                             }
                         }
-                        match (&vo_stream, &vo_player, &vo_error) {
-                            (_, _, Some(e)) => status = format!("AUDIO: {e}"),
-                            (Some(vo), Some(player), None) => match player.status() {
+                        match (&vo_player, &vo_error) {
+                            (_, Some(e)) => status = format!("AUDIO: {e}"),
+                            (Some(player), None) => match player.status() {
                                 // The clip already playing pauses, and a paused one resumes.
                                 Some(s) if s.clip == wave && !s.paused => player.pause(),
                                 Some(s) if s.clip == wave => player.resume(),
-                                _ => match vo.clip_pcm(wave) {
-                                    Ok(pcm) => player.play(wave, pcm.samples, pcm.rate, pcm.channels),
-                                    Err(e) => status = format!("AUDIO: {e}"),
-                                },
+                                _ => {
+                                    let pcm = match (&level_audio, &vo_stream) {
+                                        (Some(a), _) => a.clip_pcm(wave),
+                                        (None, Some(vo)) => vo.clip_pcm(wave),
+                                        (None, None) => Err("the voice-over stream is not open".to_string()),
+                                    };
+                                    match pcm {
+                                        Ok(pcm) => {
+                                            vo_from = level_audio.as_ref().map(|a| (wave, a.from_label(wave)));
+                                            player.play(wave, pcm.samples, pcm.rate, pcm.channels);
+                                        }
+                                        Err(e) => status = format!("AUDIO: {e}"),
+                                    }
+                                }
                             },
                             _ => {}
                         }
@@ -5977,6 +7229,11 @@ pub fn run(opts: Options) {
                     for act in std::mem::take(&mut saves_acts) {
                         crate::saves::apply(act, &mut saves);
                     }
+                    for act in live_acts.drain(..) {
+                        match act {
+                            crate::live::Act::OpenInShipment(label, subject) => actions.push(Act::StartShipment(label, subject)),
+                        }
+                    }
                     // ── Saves hero render: the Panel's own reducer only stamps a request slot;
                     // the real `load_model_data` + `shot::HeroRenderer::render_rgba` +
                     // `TextureHandle::set` runs via the egui-context stashed by `gui.run` on this
@@ -6006,8 +7263,12 @@ pub fn run(opts: Options) {
                             .get(&hash)
                             .copied()
                             .unwrap_or_default();
+                        let samplers = pixel_samplers
+                            .as_ref()
+                            .expect("the hero portrait renders only once the archive is open");
                         match ensure_hero_render(
                             &mut w,
+                            samplers,
                             hash,
                             &name,
                             &cam,
@@ -6180,6 +7441,7 @@ pub fn run(opts: Options) {
                                                         handles: Vec::new(),
                                                         label: (*name).into(),
                                                         name: Some((*name).into()),
+                                                        values: Vec::new(),
                                                     },
                                                 );
                                             }
@@ -6403,6 +7665,64 @@ pub fn run(opts: Options) {
                                         bind_tex_plate(&mut w, &mut scene, &mut tv);
                                         tex_view = Some(tv);
                                     }
+                                    // A FaceFX actor (ASET type 34): the model of a template that wears
+                                    // it loads with its face at the reference pose and its poses listed.
+                                    // An anim set opens on its speaker, the entity the shipped scripts
+                                    // bind it to (`facecast`).
+                                    Kind::FaceFx => {
+                                        use mercs2_formats::facefx::{parse_actor_container, parse_animset_container};
+                                        use mercs2_formats::types::{TYPE_HASH_FACEFX_ACTOR, TYPE_HASH_FACEFX_ANIMSET};
+                                        let (hash, label) = (row.hash, row.label());
+                                        tex_view = None;
+                                        if row.type_id != 34 && face_cast.is_none() {
+                                            face_cast = Some(w.face_cast(&index.world_templates));
+                                        }
+                                        let opened = (|| -> Result<(String, FacePlay), String> {
+                                            let (model, model_label, actor, set) = if row.type_id == 34 {
+                                                let t = mercs2_engine::facecast::wearer(&index.world_templates, hash)
+                                                    .ok_or_else(|| "no template wears this actor".to_string())?;
+                                                (t.model, t.label(), hash, None)
+                                            } else {
+                                                let cast = match &face_cast {
+                                                    Some(Ok(c)) => c,
+                                                    Some(Err(e)) => return Err(format!("who speaks it could not be read: {e}")),
+                                                    None => return Err("who speaks it was not read".into()),
+                                                };
+                                                let s = cast.sets.get(&hash).ok_or("no shipped script binds this set to anyone")?.as_ref().map_err(|e| e.clone())?;
+                                                let set = parse_animset_container(&w.typed_container(TYPE_HASH_FACEFX_ANIMSET, hash)?)?.root;
+                                                (s.model, s.template.clone(), s.actor, Some((label.clone(), set)))
+                                            };
+                                            let actor = parse_actor_container(&w.typed_container(TYPE_HASH_FACEFX_ACTOR, actor)?)?.root;
+                                            let rig = mercs2_engine::anim::facefx::FaceRig::new(&actor)?;
+                                            let anim = set.as_ref().and_then(|(_, s)| (!s.group.anims.is_empty()).then_some(0));
+                                            // A take's name is the key of its line's text, as the
+                                            // shipped subtitle tables write it.
+                                            let texts = match &set {
+                                                Some((_, s)) => w.string_table("english").map(|t| {
+                                                    s.group
+                                                        .anims
+                                                        .iter()
+                                                        .map(|a| t.get(&mercs2_formats::stringdb::key_hash(&a.name)).filter(|t| !t.trim().is_empty()).cloned())
+                                                        .collect()
+                                                }),
+                                                None => Ok(Vec::new()),
+                                            };
+                                            Ok((model_label.clone(), FacePlay { model, actor: model_label, rig, set, anim, hold: None, time: 0.0, framed: false, play_on_open: true, voice_due: anim.is_some(), line: None, texts, card_shown: false, stopped: false }))
+                                        })();
+                                        match opened {
+                                            Ok((model_label, f)) => {
+                                                status = match &f.set {
+                                                    Some((_, s)) => format!("{label}: {} anims on {model_label}'s face", s.group.anims.len()),
+                                                    None => format!("{label}: {} face bones, {} poses", f.rig.bone_names().count(), f.rig.pose_names().count()),
+                                                };
+                                                if preview.as_ref().map(|p| p.hash) != Some(f.model) {
+                                                    actions.push(Act::LoadModelHash(f.model, model_label));
+                                                }
+                                                face = Some(f);
+                                            }
+                                            Err(e) => status = format!("{label}: {e}"),
+                                        }
+                                    }
                                     // A clip: played on the hero, or the hero picker first when there is
                                     // none, ranked by the clip's bones.
                                     Kind::Animation => {
@@ -6461,7 +7781,7 @@ pub fn run(opts: Options) {
                                         }
                                         let lua: Vec<String> = lua_corpus.iter().map(|(_, c, _)| c.clone()).collect();
                                         text_page.ensure(sources, index.names.clone(), lua);
-                                        text_page.table = Some(row.hash);
+                                        text_page.open_table(row.hash);
                                         text_page.font = None;
                                         tex_view = None;
                                         status = format!("string table {}", row.label());
@@ -6494,6 +7814,85 @@ pub fn run(opts: Options) {
                                             Err(e) => status = format!("FONT FAILED: {label}: {e}"),
                                         }
                                     }
+                                    // A layer: every entity where the layer places it, its models loading
+                                    // over the next frames.
+                                    Kind::Layer => {
+                                        let (hash, label, src) = (row.hash, row.label(), row.src);
+                                        let block = w
+                                            .source_mut(src)
+                                            .and_then(|x| wad::aset_types(x, hash).into_iter().find(|(ty, _, _)| *ty == mercs2_formats::types::TYPE_ID_LAYER))
+                                            .map_or(0, |(_, _, b)| b);
+                                        let templates = layer_templates.get_or_insert_with(|| crate::layerview::Templates::read(&mut w));
+                                        let opened = match templates {
+                                            Ok(t) => w
+                                                .typed_container(mercs2_formats::types::TYPE_HASH_LAYER, hash)
+                                                .and_then(|c| crate::layerview::LayerView::read(hash, label.clone(), block, &c, t)),
+                                            Err(e) => Err(format!("the world's templates: {e}")),
+                                        };
+                                        match opened {
+                                            Ok(v) => {
+                                                if let Some(old) = layer_view.take() {
+                                                    old.teardown(&mut scene, &mut world, &[]);
+                                                }
+                                                if let Some(p) = preview.take() {
+                                                    world.despawn(p.entity).ok();
+                                                    scene.forget_entity(p.entity);
+                                                    if donor_ref.map(|(h, _)| h) != Some(p.hash) {
+                                                        scene.unload_model(p.hash);
+                                                    }
+                                                }
+                                                face = None;
+                                                tex_view = None;
+                                                (cam_target, cam_dist) = v.framing();
+                                                status = format!("layer {label}: {} entities, {} models", v.entities.len(), v.models.len());
+                                                layer_view = Some(v);
+                                            }
+                                            Err(e) => status = format!("LAYER FAILED: {label}: {e}"),
+                                        }
+                                    }
+                                    // An effect: it plays on the pedestal, in the retail sim.
+                                    Kind::Effect if row.type_id == mercs2_formats::types::TYPE_ID_EFFECT => {
+                                        let (hash, label, src) = (row.hash, row.label(), row.src);
+                                        let opened = (|| -> Result<crate::vfxview::VfxView, String> {
+                                            if !scene.fx_has_atlas() {
+                                                let base = w.wads.first_mut().ok_or("no archive open")?;
+                                                let (atlas, rects) = mercs2_engine::game_world::load_fx_atlas(base)?;
+                                                scene.fx_set_atlas(&atlas, &rects)?;
+                                                vfx_rects = rects.into_iter().map(|r| (r.key, r)).collect();
+                                                vfx_atlas = Some(atlas);
+                                            }
+                                            let started_by = index.effect_starters.get(&hash).cloned().unwrap_or_default();
+                                            let source = w.source_mut(src).ok_or("the row's archive is not open")?;
+                                            let effect = mercs2_engine::game_world::load_effect(source, hash)?
+                                                .ok_or_else(|| format!("0x{hash:08X} is no effect of its archive"))?;
+                                            if let Some(old) = vfx_view.take() {
+                                                old.close(&mut scene);
+                                            }
+                                            crate::vfxview::VfxView::open(hash, label.clone(), effect, started_by, &vfx_rects, &mut scene)
+                                        })();
+                                        match opened {
+                                            Ok(v) => {
+                                                if let Some(old) = layer_view.take() {
+                                                    old.teardown(&mut scene, &mut world, &[]);
+                                                }
+                                                if let Some(p) = preview.take() {
+                                                    world.despawn(p.entity).ok();
+                                                    scene.forget_entity(p.entity);
+                                                    if donor_ref.map(|(h, _)| h) != Some(p.hash) {
+                                                        scene.unload_model(p.hash);
+                                                    }
+                                                }
+                                                face = None;
+                                                tex_view = None;
+                                                (cam_target, cam_dist) = v.framing();
+                                                status = format!("effect {label}: {} emitters, {} forces", v.effect.emitters.len(), v.effect.forces.len());
+                                                vfx_view = Some(v);
+                                            }
+                                            Err(e) => status = format!("EFFECT FAILED: {label}: {e}"),
+                                        }
+                                    }
+                                    // The other row of the tab: the `fxdict`, which nothing plays.
+                                    Kind::Effect => status = format!("{}: the sprite rectangles of the vfx atlas", row.label()),
                                     // A category with no faithful preview SAYS so rather than silently doing
                                     // nothing. It is browsable, and that is the honest state of it — the
                                     // standing rule against affordances that look like they work.
@@ -6527,31 +7926,7 @@ pub fn run(opts: Options) {
                                 };
                                 if let Some(p) = &mut preview {
                                     p.tier = bit;
-                                    let node_enable = p
-                                        .machine
-                                        .as_ref()
-                                        .map(|sm| {
-                                            mercs2_formats::orchestrator::machine_node_enable(
-                                                sm,
-                                                &p.hier_nodes,
-                                                &p.node_state,
-                                            )
-                                        })
-                                        .unwrap_or_default();
-                                    let rs = mercs2_engine::render_state::RenderState {
-                                        lod: bit.trailing_zeros() as u8,
-                                        view_state: bit,
-                                        node_enable,
-                                    };
-                                    for (gi, d) in p.draws.iter().enumerate() {
-                                        if rs.segment_visible(d.lod_mask, d.node) {
-                                            p.hidden.remove(&gi);
-                                        } else {
-                                            p.hidden.insert(gi);
-                                        }
-                                    }
-                                    p.node_enable = rs.node_enable.clone();
-                                    scene.set_entity_render_state(p.entity, rs);
+                                    p.regate(&mut scene).unwrap_or_else(|e| panic!("{}: {e}", p.label));
                                     let ti = p.tiers.iter().position(|&b| b == bit).unwrap_or(0);
                                     status = format!(
                                         "LOD rung {} (0x{:02X}, {}/{}) — {} of {} groups drawn",
@@ -6585,11 +7960,81 @@ pub fn run(opts: Options) {
                                             handles: Vec::new(),
                                             label: label.clone(),
                                             name: index.names.get(&clip).cloned(),
+                                            values: Vec::new(),
                                         });
                                         p.clip_catalog.len() - 1
                                     }
                                 };
                                 actions.push(Act::ClipSel(ci));
+                            }
+                            Act::FaceAnim(i) => {
+                                if let Some(f) = &mut face {
+                                    f.anim = Some(i);
+                                    f.hold = None;
+                                    f.time = 0.0;
+                                    f.voice_due = true;
+                                    f.line = None;
+                                    f.stopped = false;
+                                    if let Some(p) = preview.as_mut().filter(|p| p.hash == f.model) {
+                                        p.playing = true;
+                                    }
+                                }
+                            }
+                            Act::FaceStop => {
+                                if let Some(f) = &mut face {
+                                    f.time = 0.0;
+                                    f.stopped = f.anim.is_some();
+                                    f.voice_due = false;
+                                    if let Some(p) = preview.as_mut().filter(|p| p.hash == f.model && p.cur_clip.is_none()) {
+                                        p.playing = false;
+                                    }
+                                }
+                            }
+                            Act::LayerEntity(name) => {
+                                let at = layer_view.as_ref().and_then(|v| v.entities.iter().position(|e| e.label() == name));
+                                match at {
+                                    Some(i) => layer_acts.push(crate::layerview::LayerAct::Select(i)),
+                                    None => {
+                                        eprintln!("--ui-state: no entity named {name:?} in the open layer");
+                                        std::process::exit(2);
+                                    }
+                                }
+                            }
+                            Act::LayerFrame => {
+                                if let Some(v) = &mut layer_view {
+                                    v.selected = None;
+                                    (cam_target, cam_dist) = v.framing();
+                                }
+                            }
+                            // Run the open effect to a time and pause (the `fx_time` capture key).
+                            Act::FxTime(t) => vfx_acts.push(crate::vfxview::VfxAct::Seek(t)),
+                            // Pause at a time of the playing anim (the `face_time` capture key).
+                            Act::FaceTime(t) => {
+                                if let Some(f) = &mut face {
+                                    f.time = t;
+                                    f.stopped = false;
+                                    f.play_on_open = false;
+                                    f.voice_due = false;
+                                    if let Some(p) = preview.as_mut().filter(|p| p.hash == f.model) {
+                                        p.playing = false;
+                                    }
+                                }
+                            }
+                            Act::FaceHold(n) => {
+                                if let Some(f) = &mut face {
+                                    match n {
+                                        Some(n) if !f.rig.pose_names().any(|p| p == n) => {
+                                            let names: Vec<&str> = f.rig.pose_names().collect();
+                                            status = format!("{}: no pose {n:?}; one of: {}", f.actor, names.join(", "));
+                                        }
+                                        n => {
+                                            f.anim = None;
+                                            f.hold = n;
+                                            f.voice_due = false;
+                                            f.line = None;
+                                        }
+                                    }
+                                }
                             }
                             Act::HeroPick => {
                                 let (what, want, then) = match &anim_clip {
@@ -6636,6 +8081,46 @@ pub fn run(opts: Options) {
                                     actions.push(Act::PlayClip(then.0, then.1));
                                 }
                             }
+                            Act::NameValue(value, name) => {
+                                let hashed = mercs2_formats::hash::pandemic_hash_m2_bytes(name.as_bytes());
+                                status = match (&state_namer, hashed == value) {
+                                    (Err(e), _) => format!("0x{value:08X} not named: {e}"),
+                                    (Ok(_), false) => {
+                                        format!("0x{value:08X} not named: {name:?} hashes to 0x{hashed:08X}")
+                                    }
+                                    (Ok(n), true) => match n.homes.append(&name) {
+                                        Err(e) => format!("0x{value:08X} not named: {e}"),
+                                        Ok(_) => {
+                                            let mut names = std::mem::take(&mut index.names);
+                                            names.insert(value, name.clone());
+                                            index.apply_names(names);
+                                            filtered = refilter(&index, kind, &filter, lens);
+                                            name_drafts.remove(&value);
+                                            // Relabel every catalog clip the tables name.
+                                            if let (Some(p), Some(sel)) = (&mut preview, anim_sel.as_ref()) {
+                                                if let Some(cs) = p.character_set.clone() {
+                                                    let fresh: HashMap<u32, ClipEntry> =
+                                                        character_catalog(&index, sel, AnimSelector::character_name(&cs))
+                                                            .into_iter()
+                                                            .map(|e| (e.hash, e))
+                                                            .collect();
+                                                    for e in p.clip_catalog.iter_mut() {
+                                                        if let Some(f) = fresh.get(&e.hash) {
+                                                            e.name = f.name.clone();
+                                                            e.label = f.label.clone();
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            format!(
+                                                "0x{value:08X} = {name} — written to {} and {}",
+                                                n.homes.docs.display(),
+                                                n.homes.krate.display()
+                                            )
+                                        }
+                                    },
+                                };
+                            }
                             a @ (Act::ClipSel(_) | Act::ClipNav(_)) => {
                                 clip_seek = 0; // user chose a clip — stop auto-seeking
                                 if let Some(p) = &mut preview {
@@ -6674,6 +8159,9 @@ pub fn run(opts: Options) {
                                 }
                             }
                             Act::ClipStop => {
+                                if preview.as_ref().is_some_and(|p| p.cur_clip.is_none()) {
+                                    actions.push(Act::FaceStop);
+                                }
                                 if let Some(p) = &mut preview {
                                     p.cur_clip = None;
                                     p.playing = false;
@@ -6682,9 +8170,21 @@ pub fn run(opts: Options) {
                                 }
                             }
                             Act::PlayPause => {
+                                if vfx_view.is_some() {
+                                    vfx_acts.push(crate::vfxview::VfxAct::Pause);
+                                }
                                 if let Some(p) = &mut preview {
-                                    if p.cur_clip.is_some() {
-                                        p.playing = !p.playing;
+                                    let on_face = face.as_mut().filter(|f| f.model == p.hash);
+                                    match on_face {
+                                        // A stopped take plays from the top.
+                                        Some(f) if f.stopped => {
+                                            f.stopped = false;
+                                            f.time = 0.0;
+                                            p.playing = true;
+                                        }
+                                        Some(_) => p.playing = !p.playing,
+                                        None if p.cur_clip.is_some() => p.playing = !p.playing,
+                                        None => {}
                                     }
                                 }
                             }
@@ -6867,6 +8367,11 @@ pub fn run(opts: Options) {
                                     p.hidden.clear();
                                 }
                             }
+                            Act::RotorInput(v) => {
+                                if let Some(p) = &mut preview {
+                                    p.rotor_input = v;
+                                }
+                            }
                             Act::SetHealth(h) => {
                                 if let Some(p) = &mut preview {
                                     p.health = h.clamp(0.0, 1.0);
@@ -6876,26 +8381,7 @@ pub fn run(opts: Options) {
                                         p.node_state = mercs2_formats::orchestrator::node_states_for_health(
                                             sm, p.health, 0.99,
                                         );
-                                        let node_enable =
-                                            mercs2_formats::orchestrator::machine_node_enable(
-                                                sm,
-                                                &p.hier_nodes,
-                                                &p.node_state,
-                                            );
-                                        let rs = mercs2_engine::render_state::RenderState {
-                                            lod: p.tier.trailing_zeros() as u8,
-                                            view_state: p.tier,
-                                            node_enable,
-                                        };
-                                        for (gi, d) in p.draws.iter().enumerate() {
-                                            if rs.segment_visible(d.lod_mask, d.node) {
-                                                p.hidden.remove(&gi);
-                                            } else {
-                                                p.hidden.insert(gi);
-                                            }
-                                        }
-                                        p.node_enable = rs.node_enable.clone();
-                                        scene.set_entity_render_state(p.entity, rs);
+                                        p.regate(&mut scene).unwrap_or_else(|e| panic!("{}: {e}", p.label));
                                         let drawn = p.draws.len() - p.hidden.len();
                                         status = format!(
                                             "health {:.0}% — {drawn}/{} groups drawn",
@@ -6937,34 +8423,15 @@ pub fn run(opts: Options) {
                                         if let Some(slot) = p.node_state.get_mut(ni) {
                                             *slot = si;
                                         }
-                                        // Re-execute the machine into a node-enable table and hand it
-                                        // to the entity's render state. Node-keyed, like the engine.
-                                        let node_enable =
-                                            mercs2_formats::orchestrator::machine_node_enable(
-                                                sm,
-                                                &p.hier_nodes,
-                                                &p.node_state,
-                                            );
-                                        let rs = mercs2_engine::render_state::RenderState {
-                                            lod: p.tier.trailing_zeros() as u8,
-                                            view_state: p.tier,
-                                            node_enable,
-                                        };
-                                        for (gi, d) in p.draws.iter().enumerate() {
-                                            if rs.segment_visible(d.lod_mask, d.node) {
-                                                p.hidden.remove(&gi);
-                                            } else {
-                                                p.hidden.insert(gi);
-                                            }
-                                        }
-                                        p.node_enable = rs.node_enable.clone();
-                                        scene.set_entity_render_state(p.entity, rs);
                                         let sname = sm
                                             .nodes
                                             .get(ni)
                                             .and_then(|n| n.states.get(si))
                                             .map(|s| name_or_hash(&index, s.name_hash))
                                             .unwrap_or_default();
+                                        // Re-execute the machine into a node-enable table and hand it
+                                        // to the entity's render state. Node-keyed, like the engine.
+                                        p.regate(&mut scene).unwrap_or_else(|e| panic!("{}: {e}", p.label));
                                         status = format!("node {ni} -> state {sname}");
                                     }
                                 }
@@ -7117,6 +8584,7 @@ pub fn run(opts: Options) {
                                     w.labels.remove(i);
                                     let names = std::mem::take(&mut index.names);
                                     index = AssetIndex::build(&w.wads, &w.side, names);
+                                    index.level_src = level_source(&w, &level);
                                     // The dropped overlay may have carried the worldentity in use.
                                     let kit_templates = match load_kit_templates(&mut w) {
                                         Ok(t) => t,
@@ -7125,7 +8593,7 @@ pub fn run(opts: Options) {
                                             KitTemplates::default()
                                         }
                                     };
-                                    index.add_kit_templates(&kit_templates.kits, &kit_templates.all);
+                                    index.add_kit_templates(&kit_templates);
                                     filtered = refilter(&index, kind, &filter, lens);
                                     inventory_dirty = true;
                                     sel = sel.min(filtered.len().saturating_sub(1));
@@ -7176,7 +8644,7 @@ pub fn run(opts: Options) {
                                         continue;
                                     }
                                 }
-                                let bones = scene.model_bone_count(dh).max(1);
+                                let rest = scene.model_rest_palette(dh);
                                 let e = world.spawn((
                                     Transform {
                                         translation: Vec3::ZERO,
@@ -7185,7 +8653,7 @@ pub fn run(opts: Options) {
                                     },
                                     ModelRef { model: dh },
                                     AnimState::default(),
-                                    SkinPalette { mats: vec![IDENTITY; bones] },
+                                    SkinPalette { mats: rest },
                                 ));
                                 let rs = default_render_state(&mut w, dh);
                                 scene.set_entity_render_state(e, rs);
@@ -7429,6 +8897,65 @@ pub fn run(opts: Options) {
                     // highlighted bone reads through it; fully opaque otherwise.
                     scene.set_model_alpha(if hover_skel.is_some() || hovered_bone.is_some() { 0.4 } else { 1.0 });
 
+                    // ── The open layer: a model opened since leaves it, its row's picks and framing
+                    // apply, and its models load a few a frame. ──
+                    if preview.is_some() {
+                        if let Some(v) = layer_view.take() {
+                            let keep: Vec<u32> = preview.iter().map(|p| p.hash).chain(donor_ref.map(|(h, _)| h)).collect();
+                            v.teardown(&mut scene, &mut world, &keep);
+                        }
+                    }
+                    // ── The open effect: anything else opened since, or leaving its tab, closes it;
+                    // its transport applies. ──
+                    if preview.is_some() || layer_view.is_some() || !(wb == Workbench::Inspect && kind == Kind::Effect) {
+                        if let Some(v) = vfx_view.take() {
+                            v.close(&mut scene);
+                        }
+                    }
+                    if let Some(v) = &mut vfx_view {
+                        for a in vfx_acts.drain(..) {
+                            if let Err(e) = v.act(a, &vfx_rects, &mut scene) {
+                                status = format!("EFFECT FAILED: {}: {e}", v.label);
+                            }
+                        }
+                        v.frame(dt, &mut scene);
+                    }
+                    vfx_acts.clear();
+                    let picked = viewport_click.take();
+                    if wb == Workbench::Live {
+                        if picked.is_some() {
+                            crate::live::click(&mut live_page);
+                        }
+                        live_page.step_mirror(&mut scene, &mut w, &wadpath);
+                    }
+                    if let Some(v) = &mut layer_view {
+                        let fwd = dir_from(cam_yaw, cam_pitch);
+                        let eye = cam_target - fwd * cam_dist;
+                        let aspect = scene.size.width as f32 / scene.size.height.max(1) as f32;
+                        let vp = crate::layerview::view_proj(eye, cam_target, aspect);
+                        if let Some((x, y)) = picked.filter(|_| tex_view.is_none()) {
+                            let ppp = scene.size.width as f32 / layer_screen.x.max(1.0);
+                            if let Some(i) = crate::layerview::pick(&v.entities, vp, layer_screen, egui::pos2(x as f32 / ppp, y as f32 / ppp)) {
+                                v.selected = Some(i);
+                                v.follow = true;
+                            }
+                        }
+                        for a in layer_acts.drain(..) {
+                            let crate::layerview::LayerAct::Select(i) = a;
+                            v.selected = Some(i);
+                            if let Some((c, d)) = v.frame_entity(i) {
+                                cam_target = c;
+                                cam_dist = d;
+                            }
+                        }
+                        if let Some(Ok(t)) = &layer_templates {
+                            v.step(&mut w, &mut scene, &mut world, t, &index);
+                        }
+                        if let Some((c, d)) = v.take_reframe() {
+                            cam_target = c;
+                            cam_dist = d;
+                        }
+                    }
                     // ── Session log: record `status` whenever it CHANGED this frame. Runs after the
                     // action processor, so a click and the outcome it produced land on one line.
                     if status != last_status {
@@ -7459,7 +8986,17 @@ pub fn run(opts: Options) {
                             capture_asked = true;
                         }
                     }
-                    let r = if tex_view.is_some() || (preview.is_none() && donor_ref.is_none()) {
+                    let r = if wb == Workbench::Live {
+                        match live_page.frame.filter(|_| live_page.mirror.ready()) {
+                            Some(f) => {
+                                scene.set_view(f.view.matrix(), crate::live_cam::NEAR, crate::live_cam::FAR);
+                                scene.set_view_shift(f.shift);
+                                scene.set_shadow(f.view.target.into(), [-0.45, -1.0, -0.35], (f.view.eye.distance(f.view.target) * 1.5).clamp(18.0, 400.0));
+                                scene.render_with(&live_page.mirror.world, Some(&mut overlay))
+                            }
+                            None => scene.render_menu_with(t, Some(&mut overlay)),
+                        }
+                    } else if tex_view.is_some() || (preview.is_none() && donor_ref.is_none() && layer_view.is_none() && vfx_view.is_none()) {
                         scene.render_menu_with(t, Some(&mut overlay))
                     } else {
                         let fwd = dir_from(cam_yaw, cam_pitch);
@@ -7475,10 +9012,10 @@ pub fn run(opts: Options) {
                     };
                     match r {
                         Ok(()) => {}
-                        Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
+                        Err(SurfaceError::Lost | SurfaceError::Outdated) => {
                             scene.resize(scene.size)
                         }
-                        Err(wgpu::SurfaceError::OutOfMemory) => elwt.exit(),
+                        Err(SurfaceError::Occluded) => {}
                         Err(e) => eprintln!("surface error: {e:?}"),
                     }
                     if let Some(frame) = scene.take_capture() {
@@ -7667,30 +9204,96 @@ fn anim_val(index: &AssetIndex, v: u32) -> String {
     name_or_hash(index, v)
 }
 
+/// One ActionTable row's state cells, in column order, with their column names.
+fn state_cells(a: &mercs2_formats::anim_select::ActionRow) -> [(&'static str, u32); 8] {
+    [
+        ("Stance", a.stance),
+        ("Action", a.action),
+        ("AimState", a.aim_state),
+        ("Tandem", a.tandem),
+        ("Seat", a.seat),
+        ("Target", a.target),
+        ("ActionDirection", a.action_direction),
+        ("DamageDirection", a.damage_direction),
+    ]
+}
+
+/// A lookup row's key cells (equipment before Gender), with their column names.
+fn lookup_cells(c: &mercs2_formats::anim_select::LookupContext) -> [(&'static str, u32); 5] {
+    [
+        ("PrimaryEquipmentClass", c.primary_equipment_class),
+        ("PrimaryEquipmentName", c.primary_equipment_name),
+        ("InUseEquipmentClass", c.in_use_equipment_class),
+        ("InUseEquipmentName", c.in_use_equipment_name),
+        ("Gender", c.gender),
+    ]
+}
+
+/// A VehicleAnimationLookup row's key cells, with their column names.
+fn vehicle_cells(v: &mercs2_formats::anim_select::VehicleClip) -> [(&'static str, u32); 5] {
+    [
+        ("VehicleClass", v.vehicle_class),
+        ("VehicleName", v.vehicle_name),
+        ("SeatName", v.seat_name),
+        ("MountedEquipmentClass", v.mounted_equipment_class),
+        ("MountedEquipmentName", v.mounted_equipment_name),
+    ]
+}
+
+/// Every table value a clip is selected by ([`ClipEntry::values`]): each action row's state cells,
+/// then the lookup and vehicle key cells, skipping the none-sentinel and values below `0x1000`
+/// (flags and enums, which `anim_val` prints as numbers), first occurrence first.
+fn clip_cells(
+    actions: &[(u32, mercs2_formats::anim_select::ActionRow)],
+    contexts: &[mercs2_formats::anim_select::LookupContext],
+    vehicles: &[mercs2_formats::anim_select::VehicleClip],
+) -> Vec<(&'static str, u32)> {
+    const NONE: u32 = mercs2_formats::anim_select::NONE_SENTINEL;
+    let mut out: Vec<(&'static str, u32)> = Vec::new();
+    let cells = actions
+        .iter()
+        .flat_map(|(_, a)| state_cells(a))
+        .chain(contexts.iter().flat_map(lookup_cells))
+        .chain(vehicles.iter().flat_map(vehicle_cells));
+    for (col, v) in cells {
+        if v != NONE && v >= 0x1000 && !out.iter().any(|(_, x)| *x == v) {
+            out.push((col, v));
+        }
+    }
+    out
+}
+
+/// The naming field of one value: the typed words, and an Accept for each word order whose hash is
+/// the value (`statenamer::matches`).
+fn name_field(ui: &mut egui::Ui, draft: &mut String, v: u32, actions: &mut Vec<Act>) {
+    ui.add(egui::TextEdit::singleline(draft).id_salt(("name_value", v)).margin(crate::gui::theme::TEXT_EDIT_MARGIN).desired_width(ui.available_width()));
+    for m in crate::statenamer::matches(draft, v) {
+        ui.horizontal(|ui| {
+            if ui.button("Accept").clicked() {
+                actions.push(Act::NameValue(v, m.clone()));
+            }
+            ui.add(egui::Label::new(egui::RichText::new(format!("✓ {m}")).small().color(crate::gui::theme::GOOD)).truncate());
+        });
+    }
+}
+
 /// Deterministic procedural clip name from the animation tables, for clips whose hash has no
 /// corpus name. Every component is a game-table value resolved through the name index:
 /// the FIRST ActionTable row's non-sentinel state fields (column order) joined with '.',
 /// "+N" when more state rows share the clip, then the distinct loadout keys (row order,
-/// equipment before Gender) in parentheses. Same table rows → same name.
+/// equipment before Gender) and vehicle keys (class, name, seat, mounted equipment) in
+/// parentheses. Same table rows → same name.
 fn procedural_clip_name(
     index: &AssetIndex,
     actions: &[(u32, mercs2_formats::anim_select::ActionRow)],
     contexts: &[mercs2_formats::anim_select::LookupContext],
+    vehicles: &[mercs2_formats::anim_select::VehicleClip],
 ) -> Option<String> {
     const NONE: u32 = mercs2_formats::anim_select::NONE_SENTINEL;
     let mut s = String::new();
     if let Some((_, a)) = actions.first() {
         let mut parts: Vec<String> = Vec::new();
-        for v in [
-            a.stance,
-            a.action,
-            a.aim_state,
-            a.tandem,
-            a.seat,
-            a.target,
-            a.action_direction,
-            a.damage_direction,
-        ] {
+        for (_, v) in state_cells(a) {
             if v != NONE {
                 parts.push(anim_val(index, v));
             }
@@ -7701,19 +9304,12 @@ fn procedural_clip_name(
         }
     }
     let mut keys: Vec<String> = Vec::new();
-    for c in contexts {
-        for v in [
-            c.primary_equipment_class,
-            c.primary_equipment_name,
-            c.in_use_equipment_class,
-            c.in_use_equipment_name,
-            c.gender,
-        ] {
-            if v != NONE {
-                let n = anim_val(index, v);
-                if !keys.contains(&n) {
-                    keys.push(n);
-                }
+    let key_cells = contexts.iter().flat_map(lookup_cells).chain(vehicles.iter().flat_map(vehicle_cells));
+    for (_, v) in key_cells {
+        if v != NONE {
+            let n = anim_val(index, v);
+            if !keys.contains(&n) {
+                keys.push(n);
             }
         }
     }
@@ -7724,6 +9320,63 @@ fn procedural_clip_name(
         s.push_str(&format!("({})", keys.join("/")));
     }
     if s.is_empty() { None } else { Some(s) }
+}
+
+/// The clips a character plays, as the preview lists them and the export ships them: every clip of
+/// the AnimationLookup rows keyed to `character`, then the shared rows' clips for the Handles it has
+/// none of (`AnimSelector::shared_clips`), then every VehicleAnimationLookup clip (no CharacterName:
+/// every human's in-vehicle states). One entry per clip, first occurrence first; a clip answering
+/// several Handles lists them all. Each is named by the corpus, else by the table rows that select
+/// it (`procedural_clip_name`). Empty when no row is keyed to `character`.
+fn character_catalog(index: &AssetIndex, sel: &AnimSelector, character: u32) -> Vec<ClipEntry> {
+    let own = sel.character_clips(character);
+    if own.is_empty() {
+        return Vec::new();
+    }
+    let own_handles: HashSet<u32> = own.iter().map(|r| r.handle).collect();
+    let mut order: Vec<u32> = Vec::new();
+    let mut handles: HashMap<u32, Vec<u32>> = HashMap::new();
+    let pairs = own
+        .iter()
+        .chain(sel.shared_clips(character).iter())
+        .map(|r| (r.clip, r.handle))
+        .chain(sel.vehicle_clips().iter().map(|v| (v.clip, v.handle)))
+        .collect::<Vec<_>>();
+    for (clip, handle) in pairs {
+        let hs = handles.entry(clip).or_default();
+        if hs.is_empty() {
+            order.push(clip);
+        }
+        if !hs.contains(&handle) {
+            hs.push(handle);
+        }
+    }
+    let shared = sel.shared_character();
+    order
+        .into_iter()
+        .map(|clip| {
+            let hs = &handles[&clip];
+            let mut actions = Vec::new();
+            let mut contexts = Vec::new();
+            let mut vehicles = Vec::new();
+            for &h in hs {
+                actions.extend(sel.handle_actions(h).into_iter().map(|a| (h, a)));
+                // A Handle the character has rows for plays them; one it lacks plays the shared rows.
+                let key = if own_handles.contains(&h) { character } else { shared };
+                contexts.extend(sel.lookup_context(h, key).into_iter().filter(|c| c.clip == clip));
+                vehicles.extend(sel.vehicle_context(h).into_iter().filter(|v| v.clip == clip));
+            }
+            let name =
+                index.names.get(&clip).cloned().or_else(|| procedural_clip_name(index, &actions, &contexts, &vehicles));
+            ClipEntry {
+                hash: clip,
+                handles: hs.clone(),
+                label: name.clone().unwrap_or_else(|| format!("0x{clip:08X}")),
+                name,
+                values: clip_cells(&actions, &contexts, &vehicles),
+            }
+        })
+        .collect()
 }
 
 /// Extract + decode a texture (full streamed resolution when available) and bind it as the
@@ -7761,14 +9414,14 @@ pub(crate) struct ModelData {
     /// docs/destruction_orchestrator_format.md. None = non-destructible. Together with
     /// `hier_nodes` + `indx` it drives GROUND-TRUTH group visibility (no heuristics): break
     /// pieces hide because the entered state's script says so.
-    machine: Option<mercs2_formats::orchestrator::StateMachine>,
-    hier_nodes: Vec<mercs2_formats::orchestrator::HierNode>,
+    pub(crate) machine: Option<mercs2_formats::orchestrator::StateMachine>,
+    pub(crate) hier_nodes: Vec<mercs2_formats::orchestrator::HierNode>,
     indx: Vec<usize>,
     /// The container's top-level model header (authored AABB, node count, LOD-level count, LOD
     /// distance) — the per-model data the engine's LOD selector reads. `None` for imports. This is
     /// what makes the workshop AWARE of the model instead of assuming one global rule; the authored
     /// AABB frames the camera correctly (break-piece anchors no longer inflate the radius).
-    header: Option<mercs2_formats::model_cubeize::ModelHeader>,
+    pub(crate) header: Option<mercs2_formats::model_cubeize::ModelHeader>,
 }
 
 impl From<crate::import::Imported> for ModelData {
@@ -7973,12 +9626,22 @@ pub(crate) fn default_render_state(w: &mut WadStack, hash: u32) -> mercs2_engine
         return mercs2_engine::render_state::RenderState::rung0(0);
     };
     let hier = orch::parse_hier(&c);
-    let node_enable = orch::parse_state_machine(&c)
-        .map(|sm| {
-            let chosen: Vec<usize> = sm.nodes.iter().map(orch::default_state_index).collect();
-            orch::machine_node_enable(&sm, &hier, &chosen)
-        })
-        .unwrap_or_default();
+    let sm = orch::parse_state_machine(&c);
+    let chosen: Vec<usize> = sm.iter().flat_map(|sm| sm.nodes.iter().map(orch::default_state_index)).collect();
+    // A placed vehicle runs its rotor controllers from its first frame: at rest (no crew aboard), the
+    // blades show and the blur discs do not.
+    let we = w
+        .worldentity()
+        .and_then(|c| mercs2_formats::worldentity::WorldEntity::parse(&c))
+        .unwrap_or_else(|e| panic!("model 0x{hash:08X}: the world's templates: {e}"));
+    let node_hashes: Vec<u32> = hier.iter().map(|n| n.hash).collect();
+    let mut rotors: Vec<_> = mercs2_formats::rotor::model_rotors(&we, hash, &node_hashes)
+        .unwrap_or_else(|e| panic!("model 0x{hash:08X}: {e}"))
+        .iter()
+        .map(mercs2_engine::vehicle::rotor::RotorController::new)
+        .collect();
+    let (node_enable, _) = node_enable_with_rotors(sm.as_ref(), &hier, &chosen, &mut rotors, 0.0, &Default::default())
+        .unwrap_or_else(|e| panic!("model 0x{hash:08X}: {e}"));
     mercs2_engine::render_state::RenderState { lod: 0, view_state: 0x01, node_enable }
 }
 
@@ -8053,15 +9716,28 @@ pub(crate) fn load_kit_templates(w: &mut WadStack) -> Result<KitTemplates, Strin
             out.push(t);
         }
     }
-    Ok(KitTemplates { kits: out, all })
+    Ok(KitTemplates {
+        kits: out,
+        all,
+        rotors: mercs2_formats::rotor::rotor_records(&we)?,
+        helicopters: mercs2_formats::rotor::helicopter_keys(&we),
+        effect_starters: {
+            let names: HashMap<u32, String> = mercs2_engine::worldutil::TemplateRecords::from_worldentity(&we)?.names.into_iter().collect();
+            crate::vfxview::starters(&we, &names)?
+        },
+    })
 }
 
 /// The world's templates that name a model: `all` of them, and the `kits` among them — those
-/// that pick an outfit of a character kit.
+/// that pick an outfit of a character kit — plus every template's `Rotor` records and the keys of
+/// the helicopter templates.
 #[derive(Default)]
 pub(crate) struct KitTemplates {
     pub kits: Vec<mercs2_formats::mixr::KitTemplate>,
     pub all: Vec<mercs2_formats::mixr::KitTemplate>,
+    pub rotors: Vec<(Vec<u32>, mercs2_formats::rotor::RotorRecord)>,
+    pub helicopters: std::collections::BTreeSet<u32>,
+    pub effect_starters: HashMap<u32, Vec<crate::vfxview::StartedBy>>,
 }
 
 /// The render state that shows exactly `outfit` of kit `hash` at rung 0: the spawn path's per-part
@@ -8081,35 +9757,102 @@ pub(crate) fn outfit_render_state(
     Ok(mercs2_engine::render_state::RenderState {
         lod: 0,
         view_state: 0x01,
-        node_enable: orch::machine_node_enable(&sm, &hier, &chosen),
+        node_enable: orch::machine_node_enable(&sm, &hier, &chosen).map_err(|e| format!("kit 0x{hash:08X}: {e}"))?,
     })
+}
+
+/// One kit part's name: `full` and `short`, which drops the `_`-ended prefix that every texture
+/// name of the kit shares (`civ_hum_casual_head_a` → `casual_head_a` beside `civ_hum_baseballcap`).
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct PartName {
+    pub(crate) full: String,
+    pub(crate) short: String,
+}
+
+/// Each part of a kit named by what it shows: the diffuse textures, in draw order, of the groups
+/// whose node the part's `visible` state switches on and the kit's no-part default leaves off.
+/// A part that switches on no textured group (retail's geometry-less `0x244DDF2E`) is named by
+/// its node.
+pub(crate) fn kit_part_names(
+    mixr: &mercs2_formats::mixr::Mixr,
+    sm: &mercs2_formats::orchestrator::StateMachine,
+    hier: &[mercs2_formats::orchestrator::HierNode],
+    draws: &[DrawGroup],
+    index: &AssetIndex,
+) -> Result<Vec<PartName>, String> {
+    use mercs2_formats::orchestrator as orch;
+    let shown = |outfit: u32| -> Result<mercs2_engine::render_state::RenderState, String> {
+        let chosen = mixr.outfit_node_states(sm, hier, outfit)?;
+        Ok(mercs2_engine::render_state::RenderState { lod: 0, view_state: 0x01, node_enable: orch::machine_node_enable(sm, hier, &chosen)? })
+    };
+    let none = shown(0)?;
+    let mut textures: Vec<Vec<String>> = Vec::new();
+    for p in 0..mixr.parts.len() {
+        let on = shown(1 << p)?;
+        let mut tex: Vec<String> = Vec::new();
+        for d in draws.iter().filter(|d| on.node_visible(d.node) && !none.node_visible(d.node)) {
+            if let Some(name) = d.diffuse.map(|h| name_or_hash(index, h)) {
+                if !tex.contains(&name) {
+                    tex.push(name);
+                }
+            }
+        }
+        textures.push(tex);
+    }
+    // The longest `_`-ended prefix every texture name of the kit shares, when there are two to compare.
+    let all: Vec<&String> = textures.iter().flatten().collect();
+    let mut cut = 0;
+    if let [first, _, ..] = &all[..] {
+        for (i, _) in first.match_indices('_') {
+            let pre = &first[..=i];
+            if !all.iter().all(|t| t.starts_with(pre) && t.len() > pre.len()) {
+                break;
+            }
+            cut = i + 1;
+        }
+    }
+    let mut names: Vec<PartName> = textures
+        .iter()
+        .zip(&mixr.parts)
+        .map(|(tex, &node)| match &tex[..] {
+            [] => PartName { full: name_or_hash(index, node), short: name_or_hash(index, node) },
+            _ => PartName {
+                full: tex.join(" + "),
+                short: tex.iter().map(|t| &t[cut..]).collect::<Vec<_>>().join(" + "),
+            },
+        })
+        .collect();
+    // Parts that show the same textures (retail kit 0x3C9A5987's parts 5 and 6) are told apart by
+    // their part number.
+    let shared: Vec<bool> = names.iter().map(|n| names.iter().filter(|m| m.short == n.short).count() > 1).collect();
+    for (i, n) in names.iter_mut().enumerate() {
+        if shared[i] {
+            n.short = format!("{} · part {i}", n.short);
+            n.full = format!("{} · part {i}", n.full);
+        }
+    }
+    Ok(names)
 }
 
 /// Show outfit `n` of `template` on a kit preview: its per-switch states (`Mixr::outfit_node_states`)
 /// re-executed through the preview's state machine into the entity's render state. Returns the
 /// status line, or why the outfit cannot be shown.
 fn show_outfit(p: &mut Preview, scene: &mut Scene, template: &str, n: usize) -> Result<String, String> {
-    let Some((kit, shown)) = &mut p.kit else { return Err(format!("{} is not a character kit", p.label)) };
+    let Some((kit, _)) = &p.kit else { return Err(format!("{} is not a character kit", p.label)) };
     let sm = p.machine.as_ref().ok_or_else(|| format!("kit {} has no state machine", p.label))?;
     let (pi, outfits) = kit.of_template(template)?;
-    let outfit = *outfits
-        .get(n)
-        .ok_or_else(|| format!("{template:?} has {} outfit(s); #{n} does not exist", outfits.len()))?;
-    p.node_state = kit.mixr.outfit_node_states(sm, &p.hier_nodes, outfit)?;
-    let node_enable = mercs2_formats::orchestrator::machine_node_enable(sm, &p.hier_nodes, &p.node_state);
-    let rs = mercs2_engine::render_state::RenderState { lod: p.tier.trailing_zeros() as u8, view_state: p.tier, node_enable };
-    for (gi, d) in p.draws.iter().enumerate() {
-        if rs.segment_visible(d.lod_mask, d.node) {
-            p.hidden.remove(&gi);
-        } else {
-            p.hidden.insert(gi);
-        }
+    let count = outfits.len();
+    let outfit = *outfits.get(n).ok_or_else(|| format!("{template:?} has {count} outfit(s); #{n} does not exist"))?;
+    let node_state = kit.mixr.outfit_node_states(sm, &p.hier_nodes, outfit)?;
+    let names = p.kit_parts.as_ref().map_err(|e| format!("kit {}: parts unreadable: {e}", p.label))?;
+    let parts: Vec<&str> = kit.mixr.parts_of(outfit).into_iter().map(|i| names[i].short.as_str()).collect();
+    let parts = parts.join(" · ");
+    p.node_state = node_state;
+    p.regate(scene)?;
+    if let Some((_, shown)) = &mut p.kit {
+        *shown = Some((template.to_string(), n));
     }
-    p.node_enable = rs.node_enable.clone();
-    scene.set_entity_render_state(p.entity, rs);
-    let parts = kit.mixr.parts_of(outfit);
-    *shown = Some((template.to_string(), n));
-    Ok(format!("{template} — outfit {} of {} (profile {pi}): parts {parts:?}", n + 1, outfits.len()))
+    Ok(format!("{template} — outfit {} of {count} (profile {pi}): {parts}", n + 1))
 }
 
 /// The 3-rung cross-fade `view_state` centred on rung `n`: `1<<(n-1) | 1<<n | 1<<(n+1)`, exactly
@@ -8117,22 +9860,6 @@ fn show_outfit(p: &mut Preview, scene: &mut Scene, template: &str, n: usize) -> 
 fn window_view_state(n: u8) -> u8 {
     let bit = |i: i32| -> u8 { if (0..8).contains(&i) { 1u8 << i } else { 0 } };
     bit(n as i32 - 1) | bit(n as i32) | bit(n as i32 + 1)
-}
-
-/// The engine render state a preview should have: `view_state` = the selected LOD-rung bit, and the
-/// destruction machine's node-enable table for the chosen per-node states. A model with no machine
-/// gets an empty table, which passes clause 3 for every segment.
-fn preview_render_state(md: &ModelData, node_state: &[usize]) -> mercs2_engine::render_state::RenderState {
-    let node_enable = md
-        .machine
-        .as_ref()
-        .map(|sm| mercs2_formats::orchestrator::machine_node_enable(sm, &md.hier_nodes, node_state))
-        .unwrap_or_default();
-    mercs2_engine::render_state::RenderState {
-        lod: md.tier.trailing_zeros() as u8,
-        view_state: md.tier,
-        node_enable,
-    }
 }
 
 /// Load a model at a specific SEGM state/LOD tier (`active_bit` of `build_indexed_state`) —
@@ -8198,10 +9925,14 @@ fn load_model_data_tier(w: &mut WadStack, hash: u32, want_bit: u8) -> Result<Mod
 }
 
 /// Parse the resident AnimationLookup once (base resident block 3185, else any resident-named
-/// block) — the same discovery order as the game's `resolve_player_idle`.
+/// block) — the same discovery order as the game's `resolve_player_idle`. A block that carries the
+/// lookup but does not parse is a hard error.
 pub(crate) fn load_anim_selector(w: &mut wad::Wad) -> Option<AnimSelector> {
+    let parse = |i: usize, dec: &[u8]| {
+        AnimSelector::from_resident_block(dec).unwrap_or_else(|e| panic!("block {i}: AnimationLookup: {e}"))
+    };
     if let Ok(dec) = wad::decompress_block_index(w, 3185) {
-        if let Some(s) = AnimSelector::from_resident_block(&dec) {
+        if let Some(s) = parse(3185, &dec) {
             return Some(s);
         }
     }
@@ -8216,7 +9947,7 @@ pub(crate) fn load_anim_selector(w: &mut wad::Wad) -> Option<AnimSelector> {
     };
     for i in resident {
         if let Ok(dec) = wad::decompress_block_index(w, i as u16) {
-            if let Some(s) = AnimSelector::from_resident_block(&dec) {
+            if let Some(s) = parse(i, &dec) {
                 return Some(s);
             }
         }
@@ -8286,52 +10017,30 @@ pub(crate) fn clips_for_export(
     let hier: Vec<u32> = rig.iter().map(|b| b.name_hash).collect();
 
     // Character-specific: walk the label's name candidates (pmc_hum_mattias_v3 -> mattias_v3 ->
-    // mattias) until one names rows in the table, exactly as the preview's catalog does.
+    // mattias) until one names rows in the table — the preview's own catalog (`character_catalog`),
+    // kept to its locomotion: the clips of the handles the stances' locomotion controllers play
+    // (`AnimSelector::locomotion_handles`). Clip names are stripped on disk, so most carry the
+    // PROCEDURAL name the preview shows, read straight out of the tables, not invented labels.
     let mut want: Vec<u32> = Vec::new();
+    let mut table_character = false;
     if let Some(sel) = w.anim_selector() {
+        let locomotion = sel.locomotion_handles();
         for cand in character_candidates(label) {
-            let character = AnimSelector::character_name(&cand);
-            let rows = sel.character_clips(character);
-            if rows.is_empty() {
+            let catalog = character_catalog(index, &sel, AnimSelector::character_name(&cand));
+            if catalog.is_empty() {
                 continue;
             }
-            // A clip answers SEVERAL handles (equipment variants share clips); gather them all, as
-            // the name is derived from the game states those handles play.
-            let mut handles: HashMap<u32, Vec<u32>> = HashMap::new();
-            for r in &rows {
-                let hs = handles.entry(r.clip).or_default();
-                if hs.is_empty() {
-                    want.push(r.clip);
-                }
-                if !hs.contains(&r.handle) {
-                    hs.push(r.handle);
-                }
-            }
-            // Clip names are stripped on disk, so most resolve to nothing in the catalog. Fall back
-            // to the PROCEDURAL name the preview shows — Stance.Action.AimState... read straight out
-            // of the ActionTable, i.e. game-table values, not invented labels.
-            for &clip in &want {
-                let hs = &handles[&clip];
-                let mut actions = Vec::new();
-                let mut contexts = Vec::new();
-                for &h in hs {
-                    actions.extend(sel.handle_actions(h).into_iter().map(|a| (h, a)));
-                    contexts
-                        .extend(sel.lookup_context(h, character).into_iter().filter(|c| c.clip == clip));
-                }
-                if let Some(n) = index
-                    .names
-                    .get(&clip)
-                    .cloned()
-                    .or_else(|| procedural_clip_name(index, &actions, &contexts))
-                {
-                    names.insert(clip, n);
+            table_character = true;
+            for e in catalog.into_iter().filter(|e| e.handles.iter().any(|h| locomotion.contains(h))) {
+                want.push(e.hash);
+                if let Some(n) = e.name {
+                    names.insert(e.hash, n);
                 }
             }
             break;
         }
     }
-    if want.is_empty() {
+    if !table_character {
         // Not a table-named character: the rig-matched animgroup set is all there is.
         let generic = w.clips_for_model(rig);
         for c in &generic {
@@ -8481,7 +10190,7 @@ fn bone_tree(ui: &mut egui::Ui, names: &[String], parents: &[i32], id: &str) -> 
             }
         } else {
             let r = egui::CollapsingHeader::new(egui::RichText::new(names[i].as_str()).monospace())
-                .id_source((id, i))
+                .id_salt((id, i))
                 .default_open(true)
                 .show(ui, |ui| {
                     for &c in &kids[i] {
@@ -8531,9 +10240,9 @@ fn clip_player_compact(ui: &mut egui::Ui, p: &Preview, actions: &mut Vec<Act>) {
             }
         }
     }
-    egui::ScrollArea::vertical()
+    crate::gui::theme::scroll_vertical()
         .max_height(340.0)
-        .id_source("skel_clip_scroll")
+        .id_salt("skel_clip_scroll")
         .show(ui, |ui| {
             for i in 0..p.clip_catalog.len() {
                 let sel = p.cur_clip == Some(i);
@@ -8653,16 +10362,35 @@ fn build_preview(
         .as_ref()
         .map(|sm| sm.nodes.iter().map(mercs2_formats::orchestrator::default_state_index).collect())
         .unwrap_or_default();
-    let rs = preview_render_state(&md, &node_state);
-    let rs_node_enable = rs.node_enable.clone();
-    let mut hidden: HashSet<usize> = HashSet::new();
-    for (gi, d) in md.draws.iter().enumerate() {
+    for gi in 0..md.draws.len() {
         // Clear any stale per-model override from a previous preview of this hash; the gate decides.
         scene.set_draw_hidden(hash, gi, false);
-        if !rs.segment_visible(d.lod_mask, d.node) {
-            hidden.insert(gi);
-        }
     }
+    // The rotors, from the templates that name the model; a helicopter's start at rest, as a parked
+    // one in the world does (`+0x68` unset: no crew aboard).
+    let node_hashes: Vec<u32> = md.hier_nodes.iter().map(|n| n.hash).collect();
+    let rotors = mercs2_formats::rotor::model_rotors_in(&index.world_templates, &index.rotor_records, hash, &node_hashes)
+        .unwrap_or_else(|e| panic!("{label} (0x{hash:08X}): {e}"))
+        .iter()
+        .map(|r| {
+            let hub = md.hier_nodes.iter().find(|n| n.hash == r.hub).map(|n| n.index).expect("model_rotors_in keeps hubs the model has");
+            let mut subtree = vec![hub];
+            for n in &md.hier_nodes {
+                if n.parent.is_some_and(|q| subtree.contains(&q)) {
+                    subtree.push(n.index);
+                }
+            }
+            (mercs2_engine::vehicle::rotor::RotorController::new(r), subtree)
+        })
+        .collect::<Vec<_>>();
+    if !rotors.is_empty() && md.skin.rig.len() != md.hier_nodes.len() {
+        panic!("{label} (0x{hash:08X}): a {}-bone rig for {} HIER nodes; rotors spin HIER nodes", md.skin.rig.len(), md.hier_nodes.len());
+    }
+    let heli = index
+        .world_templates
+        .iter()
+        .any(|t| t.model == hash && index.helicopter_keys.contains(&t.key))
+        .then(|| mercs2_engine::vehicle::rotor::HeliRotor::new(false));
     let mut bind: Vec<[[f32; 4]; 4]> =
         if md.skin.bones.is_empty() { vec![IDENTITY] } else { md.skin.bones.clone() };
     // Imported rigged meshes carry a single-entry identity skin, but their per-vertex joints index a
@@ -8680,7 +10408,6 @@ fn build_preview(
         AnimState::default(),
         SkinPalette { mats: bind.clone() },
     ));
-    scene.set_entity_render_state(entity, rs);
 
     // Frame the camera from the AUTHORED model AABB (the header the engine's LOD selector reads),
     // not the built-geometry bbox: the latter spans every break-piece anchor (ejected far from the
@@ -8707,44 +10434,9 @@ fn build_preview(
     let mut character_set = None;
     if let Some(sel) = anim_sel {
         for cand in character_candidates(&label) {
-            let character = AnimSelector::character_name(&cand);
-            let rows = sel.character_clips(character);
-            if !rows.is_empty() {
-                // One catalog row per clip; a clip can answer SEVERAL Handles (equipment
-                // variants share clips) — gather them all for the context panel.
-                let mut order: Vec<u32> = Vec::new();
-                let mut handles: HashMap<u32, Vec<u32>> = HashMap::new();
-                for r in &rows {
-                    let hs = handles.entry(r.clip).or_default();
-                    if hs.is_empty() {
-                        order.push(r.clip);
-                    }
-                    if !hs.contains(&r.handle) {
-                        hs.push(r.handle);
-                    }
-                }
-                for clip in order {
-                    let hs = &handles[&clip];
-                    let mut actions = Vec::new();
-                    let mut contexts = Vec::new();
-                    for &h in hs {
-                        actions.extend(sel.handle_actions(h).into_iter().map(|a| (h, a)));
-                        contexts.extend(
-                            sel.lookup_context(h, character).into_iter().filter(|c| c.clip == clip),
-                        );
-                    }
-                    let name = index
-                        .names
-                        .get(&clip)
-                        .cloned()
-                        .or_else(|| procedural_clip_name(index, &actions, &contexts));
-                    clip_catalog.push(ClipEntry {
-                        hash: clip,
-                        handles: hs.clone(),
-                        label: name.clone().unwrap_or_else(|| format!("0x{clip:08X}")),
-                        name,
-                    });
-                }
+            let catalog = character_catalog(index, sel, AnimSelector::character_name(&cand));
+            if !catalog.is_empty() {
+                clip_catalog = catalog;
                 character_set = Some(cand);
                 break;
             }
@@ -8760,6 +10452,7 @@ fn build_preview(
                 handles: Vec::new(),
                 label: name.clone().unwrap_or_else(|| format!("0x{:08X}", ca.name_hash)),
                 name,
+                values: Vec::new(),
             });
             clip_cache.insert(ca.name_hash, Some(ca));
         }
@@ -8777,6 +10470,11 @@ fn build_preview(
     let opens_outfit = kit
         .as_ref()
         .is_some_and(|(k, _)| k.templates.iter().any(|t| t.name.as_deref() == Some(label.as_str())));
+    let kit_parts = match (&kit, &md.machine) {
+        (Some((k, _)), Some(sm)) => kit_part_names(&k.mixr, sm, &md.hier_nodes, &md.draws, index),
+        (Some(_), None) => Err("the kit has no state machine".to_string()),
+        (None, _) => Ok(Vec::new()),
+    };
 
     let mut p = Preview {
         hash,
@@ -8798,9 +10496,13 @@ fn build_preview(
         indx: md.indx.clone(),
         node_state,
         kit,
+        kit_parts,
         health: 1.0,
         hide_ruin: false,
-        node_enable: rs_node_enable,
+        node_enable: Vec::new(),
+        rotors,
+        heli,
+        rotor_input: 0.0,
         header: md.header,
         lua_needle,
         lua_refs,
@@ -8808,12 +10510,13 @@ fn build_preview(
         anim_time: 0.0,
         playing: false,
         sel_group: 0,
-        hidden,
+        hidden: HashSet::new(),
         verts: md.verts.len(),
         tris,
         center,
         radius,
     };
+    p.regate(scene).unwrap_or_else(|e| panic!("{}: {e}", p.label));
     if opens_outfit {
         let template = p.label.clone();
         if let Err(e) = show_outfit(&mut p, scene, &template, 0) {
@@ -9101,6 +10804,7 @@ fn export_model_data(md: &ModelData, outroot: &std::path::Path, name: &str) -> R
 /// shader's flat sampler.
 fn ensure_hero_render(
     w: &mut WadStack,
+    samplers: &mercs2_formats::shader_registrations::PixelSamplers,
     hash: u32,
     name: &str,
     cam: &crate::shot::OrbitCam,
@@ -9124,9 +10828,9 @@ fn ensure_hero_render(
                 md.draws.len()
             ));
         }
-        // SV from the model's own BLENDINDICES/BLENDWEIGHT. An identity palette on a skinned
-        // model collapses to a bind pose, which is what a portrait wants — pose/animation is a
-        // non-goal for this round.
+        // SV from the model's own BLENDINDICES/BLENDWEIGHT, posed by the model's REST palette
+        // (`SkinData::bones`, the reference pose retail holds for undriven nodes) — what a portrait
+        // wants; pose/animation is a non-goal for this round.
         let sv: Vec<crate::shot::SV> = md
             .verts
             .iter()
@@ -9150,6 +10854,7 @@ fn ensure_hero_render(
                     v.weights[2] as f32 / 255.0,
                     v.weights[3] as f32 / 255.0,
                 ],
+                color: v.color,
             })
             .collect();
         const IDENT: [[f32; 4]; 4] = [
@@ -9158,28 +10863,27 @@ fn ensure_hero_render(
             [0.0, 0.0, 1.0, 0.0],
             [0.0, 0.0, 0.0, 1.0],
         ];
-        let palette: Vec<[[f32; 4]; 4]> = vec![IDENT; md.skin.rig.len().max(1)];
+        let palette: Vec<[[f32; 4]; 4]> = if md.skin.bones.is_empty() { vec![IDENT] } else { md.skin.bones.clone() };
         let draws: Vec<crate::shot::DrawTex> = md
             .draws
             .iter()
             .filter(|d| d.index_count > 0)
-            .map(|d| crate::shot::DrawTex {
-                index_start: d.index_start,
-                index_count: d.index_count,
-                diffuse: d
-                    .diffuse
-                    .and_then(|h| md.textures.get(&h))
-                    .map(crate::texpng::decode_bc),
-                normal: d
-                    .normal
-                    .and_then(|h| md.textures.get(&h))
-                    .map(crate::texpng::decode_bc),
-                specular: d
-                    .specular
-                    .and_then(|h| md.textures.get(&h))
-                    .map(crate::texpng::decode_bc),
+            .map(|d| {
+                let s = mercs2_engine::render::material_slots(d, samplers)
+                    .map_err(|e| format!("model `{name}` (0x{hash:08X}): {e}"))?;
+                Ok(crate::shot::DrawTex {
+                    index_start: d.index_start,
+                    index_count: d.index_count,
+                    diffuse: s.diffuse.and_then(|h| md.textures.get(&h)).map(crate::texpng::decode_bc),
+                    normal: s.normal.and_then(|h| md.textures.get(&h)).map(crate::texpng::decode_bc),
+                    slot1: s.slot1.and_then(|h| md.textures.get(&h)).map(crate::texpng::decode_bc),
+                    slot1_role: s.slot1_role,
+                    material_flags: d.material_flags,
+                    material_data: d.material_data,
+                    output_alpha: s.output_alpha,
+                })
             })
-            .collect();
+            .collect::<Result<_, String>>()?;
         if draws.is_empty() {
             return Err(format!(
                 "model `{name}` has {} draws but every one is empty — nothing to render",
@@ -9292,7 +10996,7 @@ mod rail_tests {
     }
 
     fn row(name: &str) -> AssetRow {
-        AssetRow { hash: 0, type_id: 0, block: 0, src: 0, others: Vec::new(), name: Some(name.to_string()), template: None, faction: None }
+        AssetRow { hash: 0, type_id: 0, block: 0, src: 0, others: Vec::new(), name: Some(name.to_string()), template: None, faction: None, started_by: None }
     }
 
     /// A Lens pill's count is the number of rows the list shows under it, and the Lenses never
@@ -9395,6 +11099,7 @@ mod inspect_tests {
             name: Some("x".into()),
             template: None,
             faction: None,
+            started_by: None,
         };
         assert_eq!(subject_of(Kind::Text, &row(TYPE_ID_STRINGDB)), Subject::StringTable);
         assert_eq!(subject_of(Kind::Text, &row(TYPE_ID_FONT)), Subject::Other);
@@ -9510,6 +11215,117 @@ mod side_wad_retail_tests {
         assert!(copies.len() >= 2, "{copies:?}");
         assert!(copies.iter().any(|&(s, _)| w.source_path(s).to_ascii_lowercase().ends_with("shell.wad")));
         assert!(copies.iter().all(|&(_, differs)| !differs), "{copies:?}");
+    }
+}
+
+#[cfg(all(test, feature = "retail"))]
+mod kit_parts_retail_tests {
+    use super::{kit_outfits_with, kit_part_names, load_kit_templates, load_model_data, AssetIndex, WadStack};
+
+    /// Every retail kit's parts are named and every template's outfits pick each part at most
+    /// once, so a slot never offers a part another slot of the same outfit holds. The casual kit's
+    /// names are its textures (`kit_templates 0xB0A0930E --profiles` lists its 21 parts).
+    #[test]
+    fn every_kit_names_its_parts() {
+        let mut w = WadStack::open(&super::retail_vz_wad(), &[]).expect("open retail vz.wad");
+        let names = crate::index::load_all_names().unwrap_or_else(|e| panic!("{e}"));
+        let index = AssetIndex::build(&w.wads, &w.side, names);
+        let templates = load_kit_templates(&mut w).unwrap_or_else(|e| panic!("{e}"));
+        let mut models: Vec<u32> = templates.kits.iter().map(|t| t.model).collect();
+        models.sort();
+        models.dedup();
+        assert!(models.len() >= 30, "only {} kit models", models.len());
+        for &m in &models {
+            let kit = kit_outfits_with(&mut w, m, &templates.kits).unwrap_or_else(|e| panic!("0x{m:08X}: {e}")).expect("a MIXR");
+            let md = load_model_data(&mut w, m).unwrap_or_else(|e| panic!("0x{m:08X}: {e}"));
+            let sm = md.machine.as_ref().unwrap_or_else(|| panic!("kit 0x{m:08X} has no state machine"));
+            let parts = kit_part_names(&kit.mixr, sm, &md.hier_nodes, &md.draws, &index).unwrap_or_else(|e| panic!("0x{m:08X}: {e}"));
+            assert_eq!(parts.len(), kit.mixr.parts.len(), "0x{m:08X}");
+            assert!(parts.iter().all(|p| !p.short.is_empty()), "0x{m:08X}: {parts:?}");
+            for (i, p) in parts.iter().enumerate() {
+                assert!(parts.iter().skip(i + 1).all(|q| q.short != p.short), "0x{m:08X}: two parts read {:?}", p.short);
+            }
+            // 0x3C9A5987: a business-suit kit; parts 5 and 6 both draw `civ_hum_business_ubb`.
+            if m == 0x3C9A_5987 {
+                assert_eq!((parts[5].short.as_str(), parts[6].short.as_str()), ("business_ubb · part 5", "business_ubb · part 6"));
+            }
+            for t in &kit.templates {
+                let Ok((_, picks)) = kit.mixr.template_picks(t) else { continue };
+                // A slot dropdown shows one part per outfit: no outfit picks twice from one slot.
+                let slots = mercs2_formats::mixr::slots(&picks);
+                for o in &picks {
+                    for s in &slots {
+                        let n = o.iter().filter(|p| s.contains(&p.part)).count();
+                        assert!(n <= 1, "0x{m:08X} {:?} picks {n} parts of slot {s:?}: {o:?}", t.label());
+                    }
+                }
+            }
+            if let Ok(dump) = std::env::var("KIT_PARTS_DUMP") {
+                use std::io::Write;
+                let mut f = std::fs::OpenOptions::new().create(true).append(true).open(&dump).unwrap_or_else(|e| panic!("{dump}: {e}"));
+                for (i, p) in parts.iter().enumerate() {
+                    writeln!(f, "0x{m:08X}\t{i}\t{}\t{}", p.short, p.full).unwrap();
+                }
+            }
+            if m == mercs2_formats::hash::pandemic_hash_m2("civ_hum_super_casual") {
+                let short: Vec<&str> = parts.iter().map(|p| p.short.as_str()).collect();
+                assert_eq!(&short[..4], ["casual_head_a + casual_hair_a", "casual_b_head", "casual_head_c", "casual_head_d + casual_mustache_d"]);
+                assert_eq!(short[19], "baseballcap");
+                assert_eq!(parts[0].full, "civ_hum_casual_head_a + civ_hum_casual_hair_a");
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod take_step_tests {
+    use super::take_step;
+
+    #[test]
+    fn a_take_plays_once_and_ends() {
+        assert_eq!(take_step(1.0, 0.5, 4.0, false), Some(1.5));
+        assert_eq!(take_step(3.9, 0.2, 4.0, false), None);
+    }
+
+    #[test]
+    fn a_repeating_take_goes_back_to_its_start() {
+        assert_eq!(take_step(3.9, 0.2, 4.0, true), Some(0.0));
+    }
+}
+
+#[cfg(all(test, feature = "retail"))]
+mod facefx_retail_tests {
+    use super::{load_kit_templates, AssetIndex, Kind, WadStack};
+    use mercs2_engine::anim::facefx::FaceRig;
+    use mercs2_formats::facefx::parse_actor_container;
+    use mercs2_formats::hash::pandemic_hash_m2 as m2;
+    use mercs2_formats::types::TYPE_HASH_FACEFX_ACTOR;
+
+    /// Every anim set in the WADs has a speaker, and that speaker's model carries every face bone
+    /// of its actor, so a set opens on its own character and never on anyone else.
+    #[test]
+    fn every_set_opens_on_a_model_with_its_face() {
+        let mut w = WadStack::open(&super::retail_vz_wad(), &[]).expect("open retail vz.wad");
+        let templates = load_kit_templates(&mut w).unwrap_or_else(|e| panic!("{e}"));
+        let cast = w.face_cast(&templates.all).unwrap_or_else(|e| panic!("{e}"));
+        let index = AssetIndex::build(&w.wads, &w.side, std::collections::HashMap::new());
+        let sets: Vec<u32> = index.rows(Kind::FaceFx).iter().filter(|r| r.type_id != 34).map(|r| r.hash).collect();
+        assert_eq!(sets.len(), 86, "retail's anim sets");
+        for set in sets {
+            let s = cast.sets.get(&set).unwrap_or_else(|| panic!("0x{set:08X}: no script binds it")).as_ref().unwrap_or_else(|e| panic!("{e}"));
+            let actor = w.typed_container(TYPE_HASH_FACEFX_ACTOR, s.actor).unwrap_or_else(|e| panic!("{e}"));
+            let actor = parse_actor_container(&actor).unwrap_or_else(|e| panic!("{e}")).root;
+            let rig = FaceRig::new(&actor).unwrap_or_else(|e| panic!("{e}"));
+            let c = w.extract_container(s.model).unwrap_or_else(|e| panic!("{}: {e}", s.template));
+            let hier = mercs2_formats::orchestrator::parse_hier(&c);
+            for b in rig.bone_names() {
+                assert!(hier.iter().any(|n| n.hash == m2(b)), "{} (0x{:08X}) has no {b}", s.template, s.model);
+            }
+        }
+        let jen = cast.sets[&m2("OIL02_Contract_Briefing_Jennifer")].as_ref().expect("Jennifer's set");
+        assert_eq!((jen.model, jen.actor), (m2("pmc_hum_jen"), m2("pmc_hum_jennifer")));
+        let fiona = cast.sets[&m2("Global_Job_Briefing_Fiona")].as_ref().expect("Fiona's set");
+        assert_eq!((fiona.template.as_str(), fiona.actor), ("Fiona Taylor", m2("pmc_hum_fiona")));
     }
 }
 

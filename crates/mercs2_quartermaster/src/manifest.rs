@@ -762,6 +762,17 @@ impl std::fmt::Display for FxTarget {
     }
 }
 
+/// One LOD rung of a [`Contribution::LevelAsset`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LevelRung {
+    /// The block it streams in, as a path stem: `c30457-c20204_P001_Q2`. Its `_P00N` is the rung, and
+    /// every asset naming one block ships in that block.
+    pub block: String,
+    /// The `src/`-relative chunk, in PC form.
+    pub file: PathBuf,
+}
+
 /// One ordered, internally-tagged list. Cross-kind apply order within a Shipment is preserved.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
@@ -1377,6 +1388,35 @@ pub enum Contribution {
         #[serde(default)]
         base: Option<String>,
     },
+    /// A level the game boots by name: the Shipment's `level_asset` rows compiled into
+    /// `.\Data\<name>-patch.wad`, above a copy of `vz.wad` made at deploy as `.\Data\<name>.wad`, and
+    /// its streams in the level's own folder `DLC\<name>\Data\Audios`. The names are builder-derived and
+    /// refused if they collide with a shipped WAD or stream, so it can only add ([`crate::level`]).
+    AddLevel {
+        /// The name the game boots it by: the master script and `<name>_base` layer among its
+        /// `level_asset` rows. A lowercase `[a-z0-9_]` token, never a name the game ships
+        /// (`build::wad_name_refusal`, M0311).
+        name: String,
+        /// The label a level selector shows. Metadata, not lowered into the WAD.
+        display: String,
+        /// `src/`-relative `.pws` files, one per streamed wavebank of the level, named for its entry.
+        #[serde(default)]
+        streams: Vec<PathBuf>,
+    },
+    /// Data. One asset of an `add_level` of this Shipment, in the PC container form of its type: every
+    /// byte the asset has, so any type the engine loads can be carried and nothing is re-encoded.
+    /// `rungs` is its LOD chain, coarsest first. It reaches only that level: a row may hold a name the
+    /// base game also uses, and Venezuela keeps its own.
+    LevelAsset {
+        /// The `add_level` it belongs to.
+        level: String,
+        /// The asset type, as the WAD's type table names it (`mercs2_formats::types::type_name`).
+        #[serde(rename = "type")]
+        asset_type: String,
+        /// The asset name, or a bare `0xHHHHHHHH` hash.
+        name: String,
+        rungs: Vec<LevelRung>,
+    },
     /// Code. Retail: a prebuilt ASI placed in `pmc_bb.dll`'s search path. To DEPEND on someone
     /// else's ASI, require the Shipment that ships it in `load.requires` — never vendor a
     /// third-party binary. `dest` is deliberately absent: the author cannot name a path, so the exe
@@ -1542,6 +1582,8 @@ impl Contribution {
         "add_stringdb_keys",
         "replace_stringdb_text",
         "add_language",
+        "add_level",
+        "level_asset",
         "native_hook",
         "place_file",
         "add_runtime_dll",
@@ -1602,6 +1644,8 @@ impl Contribution {
             Contribution::AddStringDbKeys { .. } => "add_stringdb_keys",
             Contribution::ReplaceStringDbText { .. } => "replace_stringdb_text",
             Contribution::AddLanguage { .. } => "add_language",
+            Contribution::AddLevel { .. } => "add_level",
+            Contribution::LevelAsset { .. } => "level_asset",
             Contribution::NativeHook { .. } => "native_hook",
             Contribution::PlaceFile { .. } => "place_file",
             Contribution::AddRuntimeDll { .. } => "add_runtime_dll",

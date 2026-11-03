@@ -43,11 +43,15 @@
 //! - [`input`] — data-driven action/binding layer read from the retail `Mercs2.ini`; KB/mouse/gamepad.
 //! - [`script_host`] / [`spawn`] / [`runtime`] / [`gameplay`] — the Lua host + simulation cluster (below).
 //! - [`diag`] — headless, render-agnostic diagnostics/exports consumed by `mercs2_probe`.
+//! - [`facecast`] — who speaks each FaceFX anim set, from the shipped briefing tables.
 pub mod app;
 pub mod asset;
 pub mod camera;
+pub mod controls;
 pub mod destruction;
 pub mod diag;
+pub mod facecast;
+pub mod fx_sim;
 // The Lua host + simulation cluster. Lua is a core engine pillar, not just WAD content: the VM binding
 // surface (`Pg.*`/`Object.*`/`Player.*`/`Ai.*`/…) marries the scripts to the live engine systems (World,
 // physics, audio, AI). `script_host` implements `mercs2_script`'s `EngineHost`; `runtime`/`gameplay`/
@@ -58,7 +62,11 @@ pub mod runtime;
 pub mod script_host;
 pub mod spawn;
 pub mod game_world;
+pub mod flash;
+pub mod gfx_pass;
+pub mod ini;
 pub mod input;
+pub mod keys;
 /// Model container → indexed triangle geometry.
 ///
 /// Carved out into its own crate (`mercs2_mesh`) because it is pure decode — no GPU, no
@@ -67,6 +75,9 @@ pub mod input;
 /// `crate::mesh::…` path keeps working unchanged.
 pub use mercs2_mesh as mesh;
 pub mod model;
+pub mod movie;
+pub mod movie_pass;
+pub mod options;
 pub mod particles;
 pub mod paths;
 pub mod pose;
@@ -76,6 +87,7 @@ pub mod render;
 pub mod render_graph;
 pub mod render_state;
 pub mod scene;
+pub mod shell;
 pub mod ui;
 pub mod wad;
 pub mod water;
@@ -92,6 +104,7 @@ pub use mercs2_audio as audio;
 pub use mercs2_combat as combat;
 pub use mercs2_decal as decal;
 pub use mercs2_faction as faction;
+pub use mercs2_gfx as gfx;
 pub use mercs2_physics as physics;
 pub use mercs2_player as player;
 pub use mercs2_population as population;

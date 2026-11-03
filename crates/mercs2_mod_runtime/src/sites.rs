@@ -6,6 +6,7 @@ use crate::rt_log;
 use mercs2_formats::exe_image::{Image, parse_headers};
 use mercs2_formats::lua_sites::{LuaSites, resolve};
 use mercs2_formats::shader_sites::{self, ShaderSites};
+use mercs2_formats::tree_sites::{self, TreeSites};
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleA;
@@ -18,8 +19,9 @@ const HEADER_BYTES: usize = 0x1000;
 
 static SITES: OnceLock<LuaSites> = OnceLock::new();
 static SHADERS: OnceLock<ShaderSites> = OnceLock::new();
+static TREES: OnceLock<TreeSites> = OnceLock::new();
 
-fn mapped() -> Result<Image<'static>, String> {
+pub(crate) fn mapped() -> Result<Image<'static>, String> {
     let base = unsafe { GetModuleHandleA(core::ptr::null()) } as *const u8;
     if base.is_null() {
         return Err("GetModuleHandleA(NULL) returned no module".into());
@@ -63,6 +65,31 @@ pub(crate) fn now() -> Result<&'static LuaSites, String> {
         return Ok(s);
     }
     resolve_mapped().map(publish)
+}
+
+/// The billboard-tree render sites (`mercs2_formats::tree_sites`), retrying until they resolve or [`WAIT`]
+/// runs out. Never call it under the loader lock.
+pub(crate) fn trees_wait() -> Result<&'static TreeSites, String> {
+    if let Some(t) = TREES.get() {
+        return Ok(t);
+    }
+    let deadline = Instant::now() + WAIT;
+    loop {
+        match mapped().and_then(|img| tree_sites::resolve(&img).map_err(|e| e.to_string())) {
+            Ok(t) => {
+                let t = TREES.get_or_init(|| t);
+                rt_log::line(&format!(
+                    "tree sites: Z-prepass loop {:#x}, shadow loop {:#x}, identity {:#x}, copy {:#x}, matrix index {:#x}, draw record {:#x}, batches {:#x}, counter {:#x}, parity {:#x}, table {:#x} x {:#x}",
+                    t.zpass_loop, t.shadow_loop, t.identity, t.matrix_copy, t.matrix_index, t.draw_record, t.batches, t.matrices, t.parity, t.matrix_table, t.matrix_cap
+                ));
+                return Ok(t);
+            }
+            Err(e) if Instant::now() >= deadline => {
+                return Err(format!("the game's tree sites did not resolve within {}s: {e}", WAIT.as_secs()));
+            }
+            Err(_) => std::thread::sleep(RETRY),
+        }
+    }
 }
 
 /// The sites, retrying until they resolve or [`WAIT`] runs out. Never call it under the loader lock.

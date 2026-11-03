@@ -128,9 +128,9 @@ pub fn navigator(ui: &mut egui::Ui, current: SettingsSection, game: Option<Badge
             SettingsSection::Data => data,
             _ => None,
         };
-        let r = egui::Frame::none()
+        let r = egui::Frame::NONE
             .fill(if on { theme::BRASS_SOFT } else { egui::Color32::TRANSPARENT })
-            .inner_margin(egui::Margin { left: 9.0, right: 8.0, top: 6.0, bottom: 7.0 })
+            .inner_margin(egui::Margin { left: 9, right: 8, top: 6, bottom: 7 })
             .show(ui, |ui| {
                 ui.set_width(ui.available_width());
                 ui.horizontal(|ui| {
@@ -149,10 +149,10 @@ pub fn navigator(ui: &mut egui::Ui, current: SettingsSection, game: Option<Badge
                                 Badge::Red => ("SET UP", theme::BAD),
                                 Badge::Check => ("CHECK", theme::BRASS),
                             };
-                            egui::Frame::none()
-                                .stroke(egui::Stroke::new(1.0, col))
-                                .rounding(egui::Rounding::same(3.0))
-                                .inner_margin(egui::Margin::symmetric(5.0, 1.0))
+                            egui::Frame::NONE
+                                .corner_radius(egui::CornerRadius::same(3))
+                                .inner_margin(egui::Margin::symmetric(5, 1))
+                                .apply_stroke_and_expansion_without_layout_shift(egui::Stroke::new(1.0, col), 0.0)
                                 .show(ui, |ui| {
                                     ui.label(theme::disp_text(text, theme::style_eyebrow(), col));
                                 });
@@ -206,12 +206,12 @@ pub fn section(ui: &mut egui::Ui, v: &View<'_>) -> Vec<Act> {
         Which::Data => ("reference folder", "Where the data came from"),
     };
     if let Some(b) = banner(v.chain, thing) {
-        egui::Frame::none()
+        egui::Frame::NONE
             .fill(theme::G2)
-            .stroke(egui::Stroke::new(1.0, theme::BRASS))
-            .rounding(egui::Rounding::same(6.0))
-            .inner_margin(egui::Margin::symmetric(11.0, 9.0))
-            .outer_margin(egui::Margin { bottom: 10.0, ..Default::default() })
+            .corner_radius(egui::CornerRadius::same(6))
+            .inner_margin(egui::Margin::symmetric(11, 9))
+            .apply_stroke_and_expansion_without_layout_shift(egui::Stroke::new(1.0, theme::BRASS), 0.0)
+            .outer_margin(egui::Margin { bottom: 10, ..Default::default() })
             .show(ui, |ui| {
                 ui.set_width(ui.available_width());
                 ui.horizontal(|ui| {
@@ -250,12 +250,12 @@ pub fn section(ui: &mut egui::Ui, v: &View<'_>) -> Vec<Act> {
                 Status::NotOnPlatform => Some("not on this platform"),
                 _ => None,
             };
-            let resp = egui::Frame::none()
+            let resp = egui::Frame::NONE
                 .fill(fill)
-                .stroke(egui::Stroke::new(1.0, border))
-                .rounding(egui::Rounding::same(4.0))
-                .inner_margin(egui::Margin::symmetric(8.0, 5.0))
-                .outer_margin(egui::Margin { bottom: 3.0, ..Default::default() })
+                .corner_radius(egui::CornerRadius::same(4))
+                .inner_margin(egui::Margin::symmetric(8, 5))
+                .apply_stroke_and_expansion_without_layout_shift(egui::Stroke::new(1.0, border), 0.0)
+                .outer_margin(egui::Margin { bottom: 3, ..Default::default() })
                 .show(ui, |ui| {
                     ui.set_width(ui.available_width());
                     ui.horizontal(|ui| {
@@ -435,7 +435,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("m2ws_settingspage_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let file = dir.join("settings.json");
-        let mut s = Settings { wad_path: Some(PathBuf::from("/old/vz.wad")), data_dir: None, hero: None };
+        let mut s = Settings { wad_path: Some(PathBuf::from("/old/vz.wad")), data_dir: None, hero: None, level: None };
         assert!(edit_saved(&mut s, Act::SaveRunPath(Which::Game), Some(Path::new("/g/vz.wad"))));
         s.save_to(&file).expect("save");
         assert_eq!(crate::settings::load_from(&file).wad_path, Some(PathBuf::from("/g/vz.wad")));

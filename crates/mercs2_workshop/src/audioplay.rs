@@ -27,15 +27,77 @@ pub struct Status {
 }
 
 enum Msg {
-    Play { clip: u32, samples: Vec<i16>, rate: u32, channels: u8 },
+    Play { clip: u32, samples: Vec<i16>, rate: u32, channels: u8, at_s: f32, paused: bool },
     Pause,
     Resume,
+    Seek(f32),
+    Stop,
 }
 
 /// Seconds of audio kept queued in the device ahead of what it plays.
 const LEAD_S: f32 = 0.1;
 /// Seconds submitted at a time.
 const CHUNK_S: f32 = 0.02;
+/// How far a line may sit from the timeline it follows before it is moved (the device's lead is
+/// [`LEAD_S`]; a scrub moves further than this).
+const DRIFT_S: f32 = 0.25;
+
+/// The line a timeline (a FaceFX take) wants this frame.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Want {
+    pub clip: u32,
+    /// Whether the timeline is running.
+    pub playing: bool,
+    /// The timeline's position in seconds.
+    pub at_s: f32,
+    /// The line's length in seconds.
+    pub length_s: f32,
+}
+
+/// What [`follow`] asks of the player.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Cmd {
+    Start { at_s: f32, paused: bool },
+    Pause,
+    Resume,
+    Seek(f32),
+    Stop,
+}
+
+/// What the player must do for the line to match the timeline this frame. `want` is the line wanted
+/// (`None`: no line), `owned` the line this follower last wanted, `have` the player's state. Only
+/// `owned`'s clip is ever stopped, and a clip the player was given by someone else is left to play:
+/// the line comes back when that clip ends.
+pub fn follow(want: Option<&Want>, owned: Option<u32>, have: Option<Status>) -> Vec<Cmd> {
+    let mine = have.filter(|s| Some(s.clip) == owned);
+    let Some(w) = want else {
+        return mine.map(|_| Cmd::Stop).into_iter().collect();
+    };
+    if owned != Some(w.clip) {
+        return if w.at_s < w.length_s {
+            vec![Cmd::Start { at_s: w.at_s, paused: !w.playing }]
+        } else {
+            mine.map(|_| Cmd::Stop).into_iter().collect()
+        };
+    }
+    match have {
+        Some(s) if s.clip == w.clip => {
+            let mut cmds = Vec::new();
+            if (s.position_s - w.at_s).abs() > DRIFT_S {
+                cmds.push(Cmd::Seek(w.at_s));
+            }
+            if s.paused && w.playing {
+                cmds.push(Cmd::Resume);
+            } else if !s.paused && !w.playing {
+                cmds.push(Cmd::Pause);
+            }
+            cmds
+        }
+        Some(_) => Vec::new(),
+        None if w.playing && w.at_s + DRIFT_S < w.length_s => vec![Cmd::Start { at_s: w.at_s, paused: false }],
+        None => Vec::new(),
+    }
+}
 
 /// One clip being fed to a sink, already at the sink's rate and channel count.
 struct Playback {
@@ -52,6 +114,13 @@ impl Playback {
     fn new(clip: u32, samples: &[i16], rate: u32, channels: u8, dev_ch: usize, dev_rate: u32) -> Playback {
         let out = resample_map(samples, channels.max(1) as usize, rate, dev_ch.max(1), dev_rate);
         Playback { clip, out, cursor: 0, ch: dev_ch.max(1), rate: dev_rate.max(1), paused: false }
+    }
+
+    /// Move to `at_s` seconds, dropping what `sink` has queued; a pause holds.
+    fn seek(&mut self, at_s: f32, sink: &mut dyn AudioSink) {
+        sink.clear();
+        let frame = (at_s.max(0.0) * self.rate as f32) as usize;
+        self.cursor = (frame * self.ch).min(self.out.len());
     }
 
     fn samples_for(&self, secs: f32) -> usize {
@@ -131,9 +200,12 @@ impl Player {
             let mut playing: Option<Playback> = None;
             loop {
                 match rx.recv_timeout(Duration::from_millis(10)) {
-                    Ok(Msg::Play { clip, samples, rate, channels }) => {
+                    Ok(Msg::Play { clip, samples, rate, channels, at_s, paused }) => {
                         sink.clear();
-                        playing = Some(Playback::new(clip, &samples, rate, channels, dev_ch, dev_rate));
+                        let mut p = Playback::new(clip, &samples, rate, channels, dev_ch, dev_rate);
+                        p.seek(at_s, &mut sink);
+                        p.paused = paused;
+                        playing = Some(p);
                     }
                     Ok(Msg::Pause) => {
                         if let Some(p) = &mut playing {
@@ -144,6 +216,15 @@ impl Player {
                         if let Some(p) = &mut playing {
                             p.resume();
                         }
+                    }
+                    Ok(Msg::Seek(at_s)) => {
+                        if let Some(p) = &mut playing {
+                            p.seek(at_s, &mut sink);
+                        }
+                    }
+                    Ok(Msg::Stop) => {
+                        sink.clear();
+                        playing = None;
                     }
                     Err(RecvTimeoutError::Timeout) => {}
                     Err(RecvTimeoutError::Disconnected) => return,
@@ -169,7 +250,22 @@ impl Player {
     /// Play a decoded clip now, interrupting whatever was playing. `clip` is the caller's id for
     /// it, reported back in [`Status`].
     pub fn play(&self, clip: u32, samples: Vec<i16>, rate: u32, channels: u8) {
-        let _ = self.tx.send(Msg::Play { clip, samples, rate, channels });
+        self.play_from(clip, samples, rate, channels, 0.0, false);
+    }
+
+    /// [`Player::play`] from `at_s` seconds in, held there when `paused`.
+    pub fn play_from(&self, clip: u32, samples: Vec<i16>, rate: u32, channels: u8, at_s: f32, paused: bool) {
+        let _ = self.tx.send(Msg::Play { clip, samples, rate, channels, at_s, paused });
+    }
+
+    /// Move to `at_s` seconds; a pause holds.
+    pub fn seek(&self, at_s: f32) {
+        let _ = self.tx.send(Msg::Seek(at_s));
+    }
+
+    /// Stop now; [`Player::status`] goes back to `None`.
+    pub fn stop(&self) {
+        let _ = self.tx.send(Msg::Stop);
     }
 
     /// Pause, holding the position.
@@ -322,5 +418,71 @@ mod tests {
             dev.play(37);
         }
         assert_eq!(dev.played, samples, "every sample plays once, in order, across the pause");
+    }
+
+    #[test]
+    fn a_seek_moves_the_cursor_and_a_pause_holds_through_it() {
+        let samples: Vec<i16> = (0..2000).map(|i| i as i16).collect();
+        let mut dev = Device { q: Default::default(), played: Vec::new() };
+        let mut p = Playback::new(7, &samples, 1000, 1, 1, 1000);
+        p.feed(&mut dev);
+        p.pause(&mut dev);
+        p.seek(1.5, &mut dev);
+        assert_eq!(dev.queued(), 0);
+        let held = p.status(0);
+        assert!(held.paused && (held.position_s - 1.5).abs() < 1e-6, "{held:?}");
+        p.resume();
+        p.feed(&mut dev);
+        assert_eq!(dev.q.front(), Some(&1500), "the next sample is the seek's");
+    }
+
+    fn at(clip: u32, position_s: f32, paused: bool) -> Option<Status> {
+        Some(Status { clip, position_s, length_s: 4.0, paused })
+    }
+
+    const LINE: Want = Want { clip: 7, playing: true, at_s: 1.0, length_s: 4.0 };
+
+    #[test]
+    fn a_new_line_starts_where_the_timeline_is() {
+        let want = Want { playing: false, ..LINE };
+        assert_eq!(follow(Some(&LINE), None, None), [Cmd::Start { at_s: 1.0, paused: false }]);
+        assert_eq!(follow(Some(&want), Some(9), at(9, 0.5, false)), [Cmd::Start { at_s: 1.0, paused: true }]);
+    }
+
+    #[test]
+    fn the_line_pauses_and_resumes_with_the_timeline() {
+        let paused = Want { playing: false, ..LINE };
+        assert_eq!(follow(Some(&paused), Some(7), at(7, 1.0, false)), [Cmd::Pause]);
+        assert_eq!(follow(Some(&LINE), Some(7), at(7, 1.0, true)), [Cmd::Resume]);
+        assert!(follow(Some(&LINE), Some(7), at(7, 1.1, false)).is_empty(), "in step within the drift");
+    }
+
+    #[test]
+    fn a_scrub_moves_the_line_even_while_paused() {
+        let scrubbed = Want { playing: false, at_s: 3.0, ..LINE };
+        assert_eq!(follow(Some(&scrubbed), Some(7), at(7, 1.0, true)), [Cmd::Seek(3.0)]);
+    }
+
+    #[test]
+    fn the_line_stops_when_the_take_goes_and_plays_out_at_the_timelines_end() {
+        assert_eq!(follow(None, Some(7), at(7, 1.0, false)), [Cmd::Stop]);
+        let end = Want { at_s: 4.0, ..LINE };
+        assert!(follow(Some(&end), Some(7), at(7, 3.9, false)).is_empty(), "the tail is not cut");
+    }
+
+    #[test]
+    fn a_line_that_played_out_starts_again_only_when_the_timeline_is_back_inside_it() {
+        assert_eq!(follow(Some(&LINE), Some(7), None), [Cmd::Start { at_s: 1.0, paused: false }]);
+        let tail = Want { at_s: 3.9, ..LINE };
+        assert!(follow(Some(&tail), Some(7), None).is_empty(), "the face runs out the end of its line");
+        let paused = Want { playing: false, ..LINE };
+        assert!(follow(Some(&paused), Some(7), None).is_empty(), "nothing starts while paused");
+    }
+
+    #[test]
+    fn a_clip_someone_else_gave_the_player_is_left_alone() {
+        assert!(follow(None, None, at(3, 1.0, false)).is_empty());
+        assert!(follow(None, Some(7), at(3, 1.0, false)).is_empty());
+        assert!(follow(Some(&LINE), Some(7), at(3, 1.0, false)).is_empty());
     }
 }

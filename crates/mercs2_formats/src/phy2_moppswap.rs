@@ -52,6 +52,9 @@ fn find_sub(hay: &[u8], needle: &[u8]) -> Option<usize> {
     hay.windows(needle.len()).position(|w| w == needle)
 }
 
+/// `m_buildType` of a code in one piece, as on every retail cell. PS3's chunked codes hold 0.
+const BUILT_WITHOUT_CHUNKS: u8 = 1;
+
 /// Which MOPP to write into the target `hkpMoppCode`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SwapMode {
@@ -66,9 +69,8 @@ pub enum SwapMode {
     /// RETURN opcode, count = 1); the co-located `WpMeshShape16` is untouched. Negative control for the
     /// in-game ladder: it isolates "our patched block drives this cell's collision".
     Empty,
-    /// `encode(tris, verts)` over the co-located `WpMeshShape16` (matched by triangle count == N). Also
-    /// rewrites `m_info`. Carries the known frame-fidelity caveat (our root shift = 8 vs the cell's
-    /// baked frame); the offline gate still proves a clean self-consistent round-trip.
+    /// `encode_keyed` over the `WpMeshShape16` of the `hkpMoppBvTreeShape` that holds this code. Also
+    /// rewrites `m_info` and `m_buildType`.
     Spatial,
 }
 
@@ -120,6 +122,11 @@ fn locate_mopps(body: &[u8]) -> Result<(usize, crate::havok::RawPackfile, Vec<us
 /// Decode the `m_data` bytecode of the `hkpMoppCode` at `mopp_index` → its shape keys. Reusable for
 /// both source inspection and post-swap verification.
 pub fn decode_phy2_mopp_keys(body: &[u8], mopp_index: usize) -> Result<mopp::Decoded, String> {
+    Ok(mopp::decode(mopp_bytes(body, mopp_index)?))
+}
+
+/// The `m_data` bytecode of the `hkpMoppCode` at `mopp_index`.
+fn mopp_bytes(body: &[u8], mopp_index: usize) -> Result<&[u8], String> {
     let (off, raw, mopps) = locate_mopps(body)?;
     let src = *mopps
         .get(mopp_index)
@@ -132,7 +139,60 @@ pub fn decode_phy2_mopp_keys(body: &[u8], mopp_index: usize) -> Result<mopp::Dec
     if ptr + count > pk.len() {
         return Err("hkpMoppCode m_data buffer runs past the packfile".into());
     }
-    Ok(mopp::decode(&pk[ptr..ptr + count]))
+    Ok(&pk[ptr..ptr + count])
+}
+
+/// The mesh under the `hkpMoppCode` at `code`, through the `hkpMoppBvTreeShape` that holds it, with each
+/// triangle's shape key: its subpart in the top byte, its place in that subpart below.
+fn mesh_of_mopp(
+    pk: &[u8],
+    raw: &crate::havok::RawPackfile,
+    code: usize,
+) -> Result<(crate::havok::MeshShape, Vec<u32>), String> {
+    let tree = raw
+        .vfixups
+        .iter()
+        .filter(|(_, c)| c == "hkpMoppBvTreeShape")
+        .map(|(s, _)| *s)
+        .find(|s| raw.gf.get(&(s + 16)) == Some(&(2, code)))
+        .ok_or_else(|| format!("no hkpMoppBvTreeShape holds the hkpMoppCode at 0x{code:x}"))?;
+    let shape = match raw.gf.get(&(tree + 52)) {
+        Some(&(2, shape)) => shape,
+        other => return Err(format!("the hkpMoppBvTreeShape at 0x{tree:x} has no child in __data__: {other:?}")),
+    };
+    let class = raw.vfixups.iter().find(|(s, _)| *s == shape).map(|(_, c)| c.as_str());
+    if class != Some("WpMeshShape16") {
+        return Err(format!("the hkpMoppBvTreeShape at 0x{tree:x} holds {class:?}, not a WpMeshShape16"));
+    }
+    let mesh = crate::havok::decode_mesh_shape16(pk, raw, shape)
+        .ok_or_else(|| format!("the WpMeshShape16 at 0x{shape:x} does not decode"))?;
+    let obj = raw.data_pk + shape;
+    let mut keys = Vec::with_capacity(mesh.indices.len());
+    for s in 0..u32_le(pk, obj + 32) {
+        for t in 0..u32_le(pk, obj + 48 + s as usize * 48 + 36) {
+            keys.push(s << 24 | t);
+        }
+    }
+    Ok((mesh, keys))
+}
+
+/// Recompute every `hkpMoppCode` of a little-endian PHY2 body from the mesh under it, for a body whose
+/// codes PC cannot run. Each recomputed code's keys are the source code's, or the body is refused. So is
+/// one longer than its source: that grows the packfile and moves the wrapper, whose pointers are
+/// body-absolute.
+pub fn rebake_phy2_mopps(body: &[u8]) -> Result<Vec<u8>, String> {
+    let mut out = body.to_vec();
+    for i in 0..count_phy2_mopps(body) {
+        let (next, report) = swap_phy2_mopp(&out, i, SwapMode::Spatial)?;
+        if report.grew {
+            return Err(format!(
+                "MOPP {i} recomputed to {} bytes, past the {} of its source",
+                report.new_buf_len, report.old_buf_len
+            ));
+        }
+        out = next;
+    }
+    Ok(out)
 }
 
 /// The count of `hkpMoppCode` objects in a PHY2 body (0 if none / not a packfile PHY2).
@@ -166,26 +226,21 @@ fn build_replacement(
         // Emit-nothing: a lone RETURN (`encode_return_all(0)` == `[0x00]`). No verts needed.
         SwapMode::Empty => Ok((mopp::encode_return_all(0), None)),
         SwapMode::Spatial => {
-            // Pair the MOPP with the co-located WpMeshShape16 whose triangle count == N (single-subpart
-            // cell). Decode the whole body's shapes and match by triangle count.
-            let pfile = crate::havok::parse_packfile(pk)?;
-            let mesh = pfile
-                .shapes
-                .iter()
-                .filter_map(|s| match s {
-                    crate::havok::Shape::Mesh(m) if !m.indices.is_empty() => Some(m),
-                    _ => None,
-                })
-                .find(|m| m.indices.len() == n)
-                .ok_or_else(|| {
-                    format!("spatial: no WpMeshShape16 with exactly {n} triangles to pair with this MOPP")
-                })?;
+            let (mesh, keys) = mesh_of_mopp(pk, raw, src)?;
+            let mut sorted = keys.clone();
+            sorted.sort_unstable();
+            if sorted != source_keys {
+                return Err(format!(
+                    "spatial: the mesh keys {} triangles and the MOPP holds {n} keys, not the same set",
+                    keys.len()
+                ));
+            }
             let tris: Vec<[u32; 3]> = mesh
                 .indices
                 .iter()
                 .map(|t| [t[0] as u32, t[1] as u32, t[2] as u32])
                 .collect();
-            let (code, info) = mopp::encode(&tris, &mesh.vertices);
+            let (code, info) = mopp::encode_keyed(&tris, &mesh.vertices, &keys);
             Ok((code, Some(info)))
         }
     }
@@ -205,13 +260,14 @@ pub fn swap_phy2_mopp(
         .ok_or_else(|| format!("mopp_index {mopp_index} out of range (body has {mopp_count})"))?;
 
     // Source decode → N + contiguity.
-    let src_dec = decode_phy2_mopp_keys(body, mopp_index)?;
+    let src_dec = mopp::decode_chunked(mopp_bytes(body, mopp_index)?);
     if src_dec.error.is_some() {
         return Err(format!("source MOPP does not decode clean: {:?}", src_dec.error));
     }
     let (src_keys, range, missing) = src_dec.key_summary();
     let source_key_count = src_keys.len();
-    let source_keys_contiguous = missing.is_empty() && range == Some((0, source_key_count as u32 - 1));
+    let source_keys_contiguous =
+        source_key_count > 0 && missing.is_empty() && range == Some((0, source_key_count as u32 - 1));
 
     let old_packfile_size = raw.size;
     let old_ptr_rel = raw.resolve_ptr(src, 32).ok_or("null m_data")?; // relative to pk (== data_pk + dst)
@@ -248,6 +304,7 @@ pub fn swap_phy2_mopp(
         }
         let lane3 = if info.scale.abs() > 0.0 { 1.0 / info.scale } else { 0.0f32 };
         new_pk[base + 12..base + 16].copy_from_slice(&lane3.to_le_bytes());
+        new_pk[raw.data_pk + src + 44] = BUILT_WITHOUT_CHUNKS;
         info_rewritten = true;
     }
 
@@ -439,6 +496,45 @@ pub fn validate_swapped_body(
         }
     };
     g
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn body() -> Vec<u8> {
+        let verts: Vec<[f32; 3]> = (0..40).map(|i| [(i % 8) as f32, (i % 3) as f32, (i / 8) as f32]).collect();
+        let tris: Vec<[u32; 3]> = (0..32).flat_map(|i| [[i, i + 8, i + 1], [i + 1, i + 8, i + 9]]).filter(|t| t[2] < 40).collect();
+        crate::phy2_build::build_phy2("rebake", &tris, &verts).unwrap()
+    }
+
+    fn keys(body: &[u8]) -> Vec<u32> {
+        decode_phy2_mopp_keys(body, 0).unwrap().key_summary().0
+    }
+
+    #[test]
+    fn a_rebake_keeps_the_keys_and_marks_the_code_unchunked() {
+        let source = body();
+        let (off, raw, mopps) = locate_mopps(&source).unwrap();
+        let build = off + raw.data_pk + mopps[0] + 44;
+        let mut chunked = source.clone();
+        chunked[build] = 0;
+        let out = rebake_phy2_mopps(&chunked).unwrap();
+        assert_eq!(out.len(), source.len());
+        assert_eq!(keys(&out), keys(&source));
+        assert_eq!(out[build], BUILT_WITHOUT_CHUNKS);
+    }
+
+    #[test]
+    fn a_mopp_of_other_keys_than_its_mesh_is_refused() {
+        let (other, _) = swap_phy2_mopp(&body(), 0, SwapMode::Empty).unwrap();
+        assert!(rebake_phy2_mopps(&other).unwrap_err().contains("not the same set"));
+    }
+
+    #[test]
+    fn a_body_with_no_mopp_stays_as_it_is() {
+        assert_eq!(rebake_phy2_mopps(&[1, 2, 3]).unwrap(), [1, 2, 3]);
+    }
 }
 
 /// Game-gated: built by the `retail` feature, reads the `vz.wad` named by the repo-root

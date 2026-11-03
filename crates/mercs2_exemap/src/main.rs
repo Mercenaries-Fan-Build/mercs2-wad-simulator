@@ -20,7 +20,14 @@
 //! exemap coverage --matches <dir> --out <tsv> --contradictions <tsv>
 //! exemap annotate <image_id> --functions <jsonl> --exports <dir> --matches <dir> --out <jsonl>
 //! exemap seeds <image_id> --functions <jsonl> --exports <dir> --out <starts> --names <tsv>
+//! exemap hash-sites <image_id> --functions <jsonl> --image <file> --names <json>... --out <jsonl>
+//! exemap hash-join <image_id>... --hashes <dir> --annotations <dir> --candidates <tsv> --cracks <tsv>
 //! ```
+//!
+//! `hash-sites` and `hash-join` build the reverse map of `pandemic_hash_m2` constants: every site of
+//! every constant with its role, the hash tables of the data sections, the consumers that take
+//! hashes, and the names the code around each unknown one proves (`mercs2_exemap::hashsites`,
+//! `mercs2_exemap::hashjoin`).
 //!
 //! `annotate` reads the image's Ghidra functions export (`<image_id>.functions.jsonl`), its rtti,
 //! luareg and (for an image whose chain unpacks a XEX or a PS3 SELF) imports exports, and the match
@@ -253,6 +260,42 @@ enum Command {
         /// The names TSV written: va, source, name, detail.
         #[arg(long)]
         names: PathBuf,
+    },
+    /// Write one JSON line per 32-bit constant of an image's decompiled code (with every site and
+    /// its role), per hash table in its data sections, and per function with a site or a table
+    /// reference (its strings, callers and callees); see `mercs2_exemap::hashsites`.
+    HashSites {
+        image_id: String,
+        /// The image's functions export (<image_id>.functions.jsonl).
+        #[arg(long)]
+        functions: PathBuf,
+        /// The image file itself (sha256 checked against images.tsv).
+        #[arg(long)]
+        image: PathBuf,
+        /// A rainbow-table JSON file; repeat for each.
+        #[arg(long = "names", required = true)]
+        names: Vec<PathBuf>,
+        #[arg(long)]
+        out: PathBuf,
+    },
+    /// Join hash-sites outputs of several images through their annotations: consumer groups,
+    /// hash candidates and the names their code context proves; see `mercs2_exemap::hashjoin`.
+    HashJoin {
+        /// The images joined; each needs <hashes>/<id>.hashes.jsonl and <annotations>/<id>.annotate.jsonl.
+        #[arg(required = true)]
+        image_ids: Vec<String>,
+        /// The directory of hash-sites outputs.
+        #[arg(long)]
+        hashes: PathBuf,
+        /// The directory of annotate outputs.
+        #[arg(long)]
+        annotations: PathBuf,
+        /// The candidates TSV written: one row per consumer group or table holding a candidate.
+        #[arg(long)]
+        candidates: PathBuf,
+        /// The cracks TSV written: one row per value a name from its code context hashes to.
+        #[arg(long)]
+        cracks: PathBuf,
     },
 }
 
@@ -928,6 +971,102 @@ fn run(cli: Cli) -> Result<(), ExitCode> {
             write(&names, s.names.as_bytes())?;
             println!("seeds      {} rtti/luareg targets that are no function of {} -> {}", s.count, functions.display(), out.display());
             println!("names      -> {}", names.display());
+        }
+        Command::HashSites { image_id, functions, image, names, out } => {
+            use mercs2_exemap::annotate::{checked_image, read_functions};
+            use mercs2_exemap::hashsites::{scan, ImageMemory, NamePool};
+            use mercs2_exemap::images::Platform;
+            let fail = |e: mercs2_exemap::Error| {
+                eprintln!("error: {e}");
+                ExitCode::from(1)
+            };
+            let images = mercs2_exemap::images::Images::embedded(&catalogue).map_err(fail)?;
+            let text = std::fs::read_to_string(&functions).map_err(|e| {
+                eprintln!("error: cannot read {}: {e}", functions.display());
+                ExitCode::from(2)
+            })?;
+            let file = read_functions(&text, &functions.display().to_string()).map_err(fail)?;
+            let map_image = checked_image(&images, &image_id, &file).map_err(fail)?;
+            let bytes = read(&image)?;
+            let sha = mercs2_exemap::sha256_hex(&bytes);
+            if sha != map_image.sha256 {
+                return Err(fail(mercs2_exemap::Error::new(format!(
+                    "{} has sha256 {sha}; images.tsv says image {image_id} is {}",
+                    image.display(),
+                    map_image.sha256
+                ))));
+            }
+            let mut pool = NamePool::default();
+            for p in &names {
+                let t = std::fs::read_to_string(p).map_err(|e| {
+                    eprintln!("error: cannot read {}: {e}", p.display());
+                    ExitCode::from(2)
+                })?;
+                let n = pool.add_file(&t, &p.display().to_string()).map_err(fail)?;
+                println!("names      {n} names from {}", p.display());
+            }
+            let mem = ImageMemory::of(&bytes).map_err(|e| fail(mercs2_exemap::Error::new(format!("{}: {e}", image.display()))))?;
+            let s = scan(&image_id, &sha, &text, &mem, map_image.platform != Platform::Pc, &pool).map_err(fail)?;
+            write(&out, s.to_jsonl(&pool).as_bytes())?;
+            let known = s.values.keys().filter(|v| pool.contains(**v)).count();
+            println!("pool       {} distinct hashes", pool.len());
+            println!(
+                "functions  {} ({} without decomp, listed in the image record)",
+                s.functions,
+                s.without_decomp.len()
+            );
+            println!("values     {} distinct constants >= 0x10000, {known} of them pool hashes", s.values.len());
+            println!("data       {} pool-hash words, {} tables", s.data_hits, s.tables.len());
+            println!("out        -> {}", out.display());
+        }
+        Command::HashJoin { image_ids, hashes, annotations, candidates, cracks } => {
+            use mercs2_exemap::hashjoin::{join, read_annotations, read_hashes};
+            let fail = |e: mercs2_exemap::Error| {
+                eprintln!("error: {e}");
+                ExitCode::from(1)
+            };
+            let images = mercs2_exemap::images::Images::embedded(&catalogue).map_err(fail)?;
+            let read_text = |p: PathBuf| {
+                std::fs::read_to_string(&p).map(|t| (t, p.display().to_string())).map_err(|e| {
+                    eprintln!("error: cannot read {}: {e}", p.display());
+                    ExitCode::from(2)
+                })
+            };
+            let mut hs = Vec::new();
+            let mut ann = std::collections::HashMap::new();
+            for id in &image_ids {
+                let (t, what) = read_text(hashes.join(format!("{id}.hashes.jsonl")))?;
+                let h = read_hashes(&t, &what).map_err(fail)?;
+                if &h.image_id != id {
+                    return Err(fail(mercs2_exemap::Error::new(format!("{what} is of image {}, not {id}", h.image_id))));
+                }
+                hs.push(h);
+                let (t, what) = read_text(annotations.join(format!("{id}.annotate.jsonl")))?;
+                ann.insert(id.clone(), read_annotations(&t, &what, id).map_err(fail)?);
+            }
+            let j = join(&images, &hs, &ann).map_err(fail)?;
+            write(&candidates, j.candidates_tsv.as_bytes())?;
+            write(&cracks, j.cracks_tsv.as_bytes())?;
+            let new = j.cracks.iter().filter(|c| !c.in_pool).count();
+            println!(
+                "consumers  {} of {} groups with two or more known values (chance tails sum to {:.2e}); {} hold an unknown value",
+                j.consumers, j.groups_tested, j.consumer_tail_sum, j.groups
+            );
+            println!(
+                "candidates {} in groups, {} in tables, {} only cross-platform invariant; {} uncracked",
+                j.candidates_g, j.candidates_t, j.candidates_i, j.uncracked
+            );
+            println!(
+                "cracks     {} values: {new} not in the pool, {} pool names corroborated by their code",
+                j.cracks.len(),
+                j.cracks.len() - new
+            );
+            println!(
+                "chance     {} name comparisons: {:.3} chance matches expected",
+                j.comparisons,
+                j.comparisons as f64 / 4294967296.0
+            );
+            println!("out        -> {} , {}", candidates.display(), cracks.display());
         }
     }
     Ok(())

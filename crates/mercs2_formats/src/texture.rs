@@ -72,10 +72,9 @@ impl TexFormat {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct MtrlMaterial {
     pub textures: Vec<u32>,
-    /// The `u16 flags@104` word. Encodes render mode (e.g. `0x0080` on 3-map materials, `0x0088`
-    /// adds a bit) — NOT a per-material intact/ruin gate (verified: the tank's ruin material and an
-    /// intact material share `0x0080`). Kept so material rendering can honour it instead of drawing
-    /// every submesh flat-opaque.
+    /// The on-disk `u16 flags@104` word — render state, decoded by [`runtime_material_flags`]. NOT a
+    /// per-material intact/ruin gate (verified: the tank's ruin material and an intact material share
+    /// `0x0080`).
     pub flags: u16,
     /// The 104-byte float preamble before the flags — material properties (tint / blend / alpha /
     /// specular params). 26 floats; not yet interpreted, but no longer discarded.
@@ -87,16 +86,128 @@ pub struct MtrlMaterial {
 }
 
 impl MtrlMaterial {
-    /// Diffuse (albedo) texture hash — slot 0, or `None` if the record has no textures.
-    pub fn diffuse(&self) -> Option<u32> {
-        self.textures.first().copied()
+    /// The texture bound at `slot`, or `None` when the record is shorter or the slot holds hash 0.
+    /// `Mtrl_Parse` binds no texture for a 0 hash (the slot loop skips it), which is how the
+    /// stealth suit's refraction materials leave slot 0 empty.
+    pub fn slot(&self, slot: usize) -> Option<u32> {
+        self.textures.get(slot).copied().filter(|&h| h != 0)
     }
 
-    /// Specular / gloss (`_sm`) texture hash — slot 1, or `None`. (Slot 0 = diffuse, slot 1 =
+    /// Diffuse (albedo) texture hash — slot 0 ([`Self::slot`]).
+    pub fn diffuse(&self) -> Option<u32> {
+        self.slot(0)
+    }
+
+    /// Specular / gloss (`_sm`) texture hash — slot 1 ([`Self::slot`]). (Slot 0 = diffuse, slot 1 =
     /// specular, slot 2 = normal — the authored MTRL slot order.)
     pub fn specular(&self) -> Option<u32> {
-        self.textures.get(1).copied()
+        self.slot(1)
     }
+
+    /// The runtime flags `Mtrl_Parse` stores at material `+0xA0` ([`runtime_material_flags`]).
+    pub fn runtime_flags(&self) -> u16 {
+        runtime_material_flags(self.flags)
+    }
+
+    /// Whether the material is alpha-tested ([`material_alpha_tested`]).
+    pub fn alpha_tested(&self) -> bool {
+        material_alpha_tested(self.flags)
+    }
+
+    /// The alpha multiplier: preamble word 13, which `Mtrl_Parse` stores at material `+0x5C` and the
+    /// draw uploads as `materialData` c98.w. The pixel shaders write `oC0.w = diffuse.a × c98.w`, so
+    /// the alpha test compares that product. Retail: 1.0 on 3,743 alpha-tested materials, 0.7 on 11.
+    pub fn alpha_multiplier(&self) -> f32 {
+        self.preamble[13]
+    }
+
+    /// The pixel-shader constant block `materialData` (c93..c98: diffuse, specular, ambient, emissive,
+    /// subsurface, constant0) as the draw uploads it raw (`0x855f4e`, the draw entry's `+0x3a` = 1
+    /// mode), from the on-disk preamble words `w` (`Mtrl_Parse`'s stores, material_shader_spec.md §1c
+    /// and §1e): c93 = (w1, w2, w3, 1), c94 = (w4, w5, w6, 1), c95 = (w7, w8, w9, F0) with
+    /// F0 = ((w16 − 1)/(w16 + 1))², c96 = (w10, w11, w12, 1), c97 = (w17, w18, w19, w20),
+    /// c98 = (w15, w16, max(w14, 9.99e-5), w13). The draw's other mode scales these by a per-instance
+    /// colour whose source is not decoded yet.
+    pub fn material_data(&self) -> [[f32; 4]; 6] {
+        let w = &self.preamble;
+        // DAT_00b977f8 = 0x38D1B717, the floor Mtrl_Parse clamps word 14 to.
+        let floor = f32::from_bits(0x38D1_B717);
+        let ior = w[16];
+        let f0 = ((ior - 1.0) / (ior + 1.0)).powf(2.0);
+        [
+            [w[1], w[2], w[3], 1.0],
+            [w[4], w[5], w[6], 1.0],
+            [w[7], w[8], w[9], f0],
+            [w[10], w[11], w[12], 1.0],
+            [w[17], w[18], w[19], w[20]],
+            [w[15], ior, w[14].max(floor), w[13]],
+        ]
+    }
+}
+
+/// The `ALPHAREF` retail sets for an alpha-tested material, with `ALPHAFUNC` 5 (GREATER): a pixel
+/// survives when its alpha, as a byte, exceeds 77 (`FUN_00858320` / `FUN_00858530`).
+pub const MATERIAL_ALPHA_REF: u8 = 0x4D;
+
+/// Whether a material with on-disk flags `disk` is alpha-tested in the colour pass: runtime bit
+/// `0x40` (on-disk `0x008`). `FUN_00858320`, which sets the state for opaque (class 6) and blended
+/// (class 8) packets, writes `ALPHATESTENABLE = (F >> 6) & 1`.
+pub fn material_alpha_tested(disk: u16) -> bool {
+    runtime_material_flags(disk) & 0x40 != 0
+}
+
+/// `FUN_0084ee70`: the on-disk `flags@104` word as `Mtrl_Parse` stores it at material `+0xA0`
+/// (instruction `0x858b97`). The low three bits are a blend-mode enum turned one-hot (1..4 → 1, 2,
+/// 4, 8; anything else → 0); the remaining bits move: `0x008→0x40`, `0x010→0x80`, `0x020→0x10`,
+/// `0x040→0x20`, `0x080→0x100`, `0x100→0x200`, `0x200→0x400`, `0x400→0x800`, `0x800→0x4000`, and
+/// `0x1000` and above are dropped.
+pub fn runtime_material_flags(disk: u16) -> u16 {
+    let d = disk as u32;
+    let mode = match d & 7 {
+        1 => 1,
+        2 => 2,
+        3 => 4,
+        4 => 8,
+        _ => 0,
+    };
+    ((((d & 0x818) * 4 | d & 0x780) * 2) | (d >> 1) & 0x30 | mode) as u16
+}
+
+/// Whether a material with on-disk flags `disk` draws blended: its blend nibble (runtime `F & 0xf`)
+/// is set. Every such colour packet in a retail frame is class 8 (render_core_code_map.md §6a), the
+/// one class `FUN_008565b0` turns `ALPHABLENDENABLE` on for, with Z write off; nibble 0 draws are the
+/// opaque classes 5 and 6, blending off.
+pub fn material_blended(disk: u16) -> bool {
+    runtime_material_flags(disk) & 0xF != 0
+}
+
+/// D3D9 blend state, in D3D's own numbers: `op` a `D3DBLENDOP` (1 ADD, 2 SUBTRACT, 3 REVSUBTRACT),
+/// `src`/`dest` a `D3DBLEND` (2 ONE, 5 SRCALPHA, 6 INVSRCALPHA, 7 DESTALPHA).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct MaterialBlend {
+    pub op: u32,
+    pub src: u32,
+    pub dest: u32,
+}
+
+/// `DAT_00ce8d28`, `DAT_00ce8d38`: SRCBLEND and DESTBLEND by `(F >> 4) & 3`.
+const BLEND_SRC: [u32; 4] = [2, 5, 7, 2];
+const BLEND_DEST: [u32; 4] = [2, 2, 2, 6];
+/// `DAT_00ce8d48`: BLENDOP by the blend nibble (indices 0..8).
+const BLEND_OP: [u32; 9] = [1, 1, 1, 1, 2, 1, 1, 1, 3];
+
+/// The blend state `FUN_00858320` sets for a material whose runtime flags are `runtime`
+/// ([`runtime_material_flags`]). A nibble of 0 reads as 1. With both `0x10` and `0x20` set the state
+/// is ADD, ONE, INVSRCALPHA; otherwise BLENDOP comes from the nibble and, when the nibble's bit 0 is
+/// set, SRCALPHA/INVSRCALPHA, else the `(F >> 4) & 3` tables. It only takes effect where blending is
+/// on ([`material_blended`]).
+pub fn material_blend_state(runtime: u16) -> MaterialBlend {
+    let u = if runtime & 0xF == 0 { 1 } else { (runtime & 0x3F) as usize };
+    if u & 0x30 == 0x30 {
+        return MaterialBlend { op: 1, src: 2, dest: 6 };
+    }
+    let (src, dest) = if u & 1 != 0 { (5, 6) } else { (BLEND_SRC[u >> 4], BLEND_DEST[u >> 4]) };
+    MaterialBlend { op: BLEND_OP[u & 0xF], src, dest }
 }
 
 /// A ready-to-upload texture: raw DXT/BC bytes plus dimensions and format.
@@ -484,63 +595,9 @@ pub fn group_prmt_material_indices(container: &[u8]) -> Vec<Vec<usize>> {
     out
 }
 
-/// The `A3CD72A7` (BE `a772cda3`) marker that delimits detail layers inside a terrainmesh MTRL record.
+/// The `A3CD72A7` (BE `a772cda3`) hash in a terrain ground material's odd sampler stages from 3 up, which
+/// its `PgTerrainMeshFP*D` shader does not declare.
 pub const TERRAIN_LAYER_MARKER: u32 = 0xA3CD_72A7;
-
-/// Per PRMG drawing group, the MTRL material-record INDEX bound to it. The terrainmesh binds the
-/// material via the group's `INFO` leaf (byte-verified: field @+8 = the material index, `< records`),
-/// NOT the PRMT (whose first word is geometry data on terrain). Order matches the draw order of
-/// [`super::model_cubeize::read_model_meshes`] / `build_indexed_from_container`.
-pub fn terrain_group_material_index(container: &[u8]) -> Vec<usize> {
-    let mut out = Vec::new();
-    let Some(v) = UcfxView::new(container) else {
-        return out;
-    };
-    let prmg: Vec<usize> = (0..v.n_desc)
-        .filter(|&i| v.tag(i) == b"PRMG" && v.is_marker(i))
-        .collect();
-    for (gi, &pr) in prmg.iter().enumerate() {
-        let nxt = prmg.get(gi + 1).copied().unwrap_or(v.n_desc);
-        let mut mi = 0usize;
-        for i in (pr + 1)..nxt {
-            let t = v.tag(i);
-            if (t == b"STRM" || t == b"IBUF") && v.is_marker(i) {
-                break;
-            }
-            if t == b"INFO" && !v.is_marker(i) {
-                if let Some((s, e)) = v.resolve(i) {
-                    if s + 12 <= e {
-                        mi = read_u32_le(container, s + 8) as usize;
-                    }
-                }
-                break;
-            }
-        }
-        out.push(mi);
-    }
-    out
-}
-
-/// Per PRMG drawing group, the ordered terrain DETAIL-LAYER texture hashes (≤~4) the group blends:
-/// its material (via [`terrain_group_material_index`]) minus the `A3CD72A7` layer markers. The
-/// per-vertex COLOR weights blend these layers. Empty vec = group has no valid material.
-pub fn terrain_group_layers(container: &[u8]) -> Result<Vec<Vec<u32>>, MtrlError> {
-    let mats = parse_mtrl(container, MtrlSource::TerrainMesh)?;
-    Ok(terrain_group_material_index(container)
-        .into_iter()
-        .map(|mi| {
-            mats.get(mi)
-                .map(|m| {
-                    m.textures
-                        .iter()
-                        .copied()
-                        .filter(|&h| h != TERRAIN_LAYER_MARKER)
-                        .collect()
-                })
-                .unwrap_or_default()
-        })
-        .collect())
-}
 
 // ---------------------------------------------------------------------------
 // Texture resolution
@@ -1406,5 +1463,93 @@ mod tests {
         assert_eq!(per, vec![vec![3], vec![6, 7]]);
         let first = group_material_indices(&c);
         assert_eq!(first, vec![3, 6]);
+    }
+
+    #[test]
+    fn runtime_flags_are_fun_0084ee70() {
+        // The blend-mode enum goes one-hot; 5..7 have no bit.
+        for (disk, rt) in [(0, 0), (1, 1), (2, 2), (3, 4), (4, 8), (5, 0), (6, 0), (7, 0)] {
+            assert_eq!(runtime_material_flags(disk), rt, "mode {disk}");
+        }
+        // Every other bit moves; 0x1000 and above drop.
+        for (disk, rt) in [
+            (0x008, 0x40),
+            (0x010, 0x80),
+            (0x020, 0x10),
+            (0x040, 0x20),
+            (0x080, 0x100),
+            (0x100, 0x200),
+            (0x200, 0x400),
+            (0x400, 0x800),
+            (0x800, 0x4000),
+            (0x1000, 0),
+            (0x8000, 0),
+        ] {
+            assert_eq!(runtime_material_flags(disk), rt, "disk 0x{disk:04X}");
+        }
+        // Bits combine: 0x0088 (2,787 retail materials) and the stealth suit's 0x0100.
+        assert_eq!(runtime_material_flags(0x0088), 0x0140);
+        assert_eq!(runtime_material_flags(0x0100), 0x0200);
+    }
+
+    #[test]
+    fn only_the_0x008_bit_alpha_tests_the_colour_pass() {
+        assert!(material_alpha_tested(0x0088));
+        assert!(material_alpha_tested(0x0008));
+        assert!(!material_alpha_tested(0x0080));
+        // A blend mode alone does not alpha-test in FUN_00858320.
+        assert!(!material_alpha_tested(0x0001));
+        assert!(!material_alpha_tested(0x0090));
+    }
+
+    #[test]
+    fn blend_state_is_fun_00858320() {
+        let state = |disk: u16| material_blend_state(runtime_material_flags(disk));
+        // Mode 1 (503 retail materials): alpha blend, whatever the 0x10/0x20 selector says.
+        assert_eq!(state(0x0001), MaterialBlend { op: 1, src: 5, dest: 6 });
+        assert_eq!(state(0x0091), MaterialBlend { op: 1, src: 5, dest: 6 });
+        assert_eq!(state(0x0021), MaterialBlend { op: 1, src: 5, dest: 6 });
+        // Mode 2 (72 materials, the additive PgDiffEmis* glows): ONE/ONE by selector 0.
+        assert_eq!(state(0x0002), MaterialBlend { op: 1, src: 2, dest: 2 });
+        // Modes 3 and 4 subtract and reverse-subtract; the selector picks the factors.
+        assert_eq!(state(0x0003), MaterialBlend { op: 2, src: 2, dest: 2 });
+        assert_eq!(state(0x0004), MaterialBlend { op: 3, src: 2, dest: 2 });
+        assert_eq!(state(0x0022), MaterialBlend { op: 1, src: 5, dest: 2 });
+        assert_eq!(state(0x0042), MaterialBlend { op: 1, src: 7, dest: 2 });
+        // Both selector bits: ADD, ONE, INVSRCALPHA whatever the nibble.
+        assert_eq!(state(0x0064), MaterialBlend { op: 1, src: 2, dest: 6 });
+        // Nibble 0 reads as 1 (an instance-alpha fade of an opaque material); the selector is masked off.
+        assert_eq!(state(0x0060), MaterialBlend { op: 1, src: 5, dest: 6 });
+        assert!(material_blended(0x0081) && material_blended(0x0002));
+        assert!(!material_blended(0x0080) && !material_blended(0x0100));
+    }
+
+    #[test]
+    fn material_data_is_mtrl_parse_s_register_map() {
+        let preamble: Vec<f32> = (0..26).map(|k| k as f32 * 0.5).collect();
+        let m = MtrlMaterial { preamble, ..Default::default() };
+        let d = m.material_data();
+        assert_eq!(d[0], [0.5, 1.0, 1.5, 1.0]);
+        assert_eq!(d[1], [2.0, 2.5, 3.0, 1.0]);
+        assert_eq!(&d[2][..3], &[3.5, 4.0, 4.5]);
+        // F0 from IOR = word 16 = 8.0: ((8 - 1) / (8 + 1))².
+        assert!((d[2][3] - (7.0f32 / 9.0).powi(2)).abs() < 1e-6);
+        assert_eq!(d[3], [5.0, 5.5, 6.0, 1.0]);
+        assert_eq!(d[4], [8.5, 9.0, 9.5, 10.0]);
+        assert_eq!(d[5], [7.5, 8.0, 7.0, 6.5]);
+        // Word 14 is clamped up to 9.99e-5.
+        let mut p = vec![0.0f32; 26];
+        p[16] = 1.5;
+        let m = MtrlMaterial { preamble: p, ..Default::default() };
+        assert_eq!(m.material_data()[5][2], f32::from_bits(0x38D1_B717));
+    }
+
+    #[test]
+    fn a_zero_hash_slot_binds_no_texture() {
+        let m = MtrlMaterial { textures: vec![0, 0x68C3_5B79, 0xC6F9_E110], ..Default::default() };
+        assert_eq!(m.diffuse(), None);
+        assert_eq!(m.specular(), Some(0x68C3_5B79));
+        assert_eq!(m.slot(2), Some(0xC6F9_E110));
+        assert_eq!(m.slot(3), None);
     }
 }

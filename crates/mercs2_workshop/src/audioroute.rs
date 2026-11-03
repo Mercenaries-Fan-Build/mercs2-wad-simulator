@@ -53,8 +53,11 @@ pub struct Bank {
 /// The routing of every line.
 #[derive(Debug, Clone)]
 pub struct Routes {
-    /// The wavebank: each record's clip hash and length.
-    pub wavebank: WavebankFile,
+    /// Each line's clip hash.
+    pub clip_hashes: Vec<u32>,
+    /// Each line's length in seconds, from its record: a streamed `+0x10` over the bytes a second
+    /// decodes to.
+    pub lengths_s: Vec<f32>,
     /// Every soundbank read, by entry hash.
     pub soundbanks: BTreeMap<u32, Soundbank>,
     /// The cues that play each record.
@@ -131,7 +134,9 @@ impl Routes {
         // The labelled banks first, by name; then the ones known only by hash.
         banks.sort_by_key(|b| (b.name.starts_with("0x"), b.name.to_lowercase()));
         let unplayed = (0..wavebank.records.len() as u32).filter(|i| !plays.contains_key(i)).collect();
-        Routes { wavebank, soundbanks: soundbanks.into_iter().collect(), plays, banks, unplayed }
+        let clip_hashes = wavebank.records.iter().map(|r| r.clip_hash).collect();
+        let lengths_s = wavebank.records.iter().map(|r| r.frames as f32 / (r.sample_rate.max(1) * 2 * u32::from(r.channels.max(1))) as f32).collect();
+        Routes { clip_hashes, lengths_s, soundbanks: soundbanks.into_iter().collect(), plays, banks, unplayed }
     }
 
     /// The name of the bank with entry `entry`.
@@ -141,7 +146,7 @@ impl Routes {
 
     /// The record's clip hash.
     pub fn clip_hash(&self, line: u32) -> Option<u32> {
-        self.wavebank.records.get(line as usize).map(|r| r.clip_hash)
+        self.clip_hashes.get(line as usize).copied()
     }
 
     /// `replace_sound_wave` of record `line`: the line as its `name` when the name's hash is the
@@ -359,6 +364,7 @@ mod tests {
         let names: Vec<(String, Vec<u32>)> = r.banks.iter().map(|b| (b.name.clone(), b.lines.clone())).collect();
         assert_eq!(names, vec![("vo_Chris".to_string(), vec![0, 1, 2]), (format!("0x{other:08X}"), vec![2])], "named banks first");
         assert_eq!(r.unplayed, vec![3, 4]);
+        assert_eq!(r.lengths_s.len(), 5);
         let two = &r.plays[&2];
         assert_eq!(two.len(), 2, "record 2 is played by a cue of each bank");
         let take = two.iter().find(|p| p.entry == chris).expect("vo_Chris plays it");
@@ -424,7 +430,7 @@ mod retail_tests {
     #[test]
     fn english_wad_routes_every_line() {
         let r = routes();
-        assert_eq!(r.wavebank.records.len(), 12_988);
+        assert_eq!(r.clip_hashes.len(), 12_988);
         assert_eq!(r.plays.len(), 12_954);
         assert_eq!(r.unplayed.len(), 34);
         let lines = |n: &str| r.banks.iter().find(|b| b.name == n).unwrap_or_else(|| panic!("no bank {n}")).lines.len();

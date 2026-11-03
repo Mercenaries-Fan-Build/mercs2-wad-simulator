@@ -24,6 +24,11 @@ row being true.
   exactly one single-track cue with a known name, 9,850 by exactly one single-track cue whose name is
   not known.
 - **Samples**: `vostream::VoStream` over `data/Audios/vo_stream.english.pws` (IMA ADPCM decoded to PCM16).
+  A clip's length is its record's `+0x10`; the inventory's were measured at 65 frames a block, 1.5 % long.
+- **With a level open**: `levelaudio::LevelAudio`. The banks are the level's wavebanks, a line is a record
+  of one, numbered across them, and streamed samples come from `Audios/<bank entry>.pws` beside the WAD.
+  A level has no inventory, so a line has no speaker or caption, and its cues are not read. Add to
+  Shipment and ADD TO THIS DOMAIN are not drawn: replacing a level's audio needs `add_level`.
 
 `English.wad` or the `.pws` missing is an error banner on the page naming the file; play, export and
 Add to Shipment are unavailable until it is found.

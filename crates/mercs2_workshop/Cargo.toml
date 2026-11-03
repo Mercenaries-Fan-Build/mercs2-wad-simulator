@@ -9,7 +9,7 @@ repository.workspace = true
 
 [dependencies]
 winit = "0.29"
-wgpu = "0.20"
+wgpu = "30.0.1"
 pollster = "0.3"
 glam = "0.27"
 serde = { version = "1", features = ["derive"] }
@@ -21,12 +21,12 @@ png = "0.17" # --tex-png headless dump (CPU BC1/BC3 decode -> PNG for visual ins
 # specular there instead of in metallicRoughness; without the feature those maps are invisible to us.
 gltf = { version = "1", features = ["KHR_materials_specular"] }
 # The inspector GUI (Unreal-style Details panel, mouse-driven): egui painted through the engine's
-# Scene overlay hook. egui 0.28 matches wgpu 0.20; the winit-0.29 event bridge is hand-rolled in
-# gui.rs (egui-winit 0.28 wants winit 0.30, which the engine is not on yet).
-egui = "0.28"
-egui-wgpu = "0.28"
+# Scene overlay hook. egui 0.37 matches wgpu 30; the winit-0.29 event bridge is hand-rolled in
+# gui.rs (egui-winit 0.37 wants winit 0.30, which the engine is not on yet).
+egui = { version = "0.37", features = ["default_fonts"] }
+egui-wgpu = "0.37"
 # OS clipboard for the context menus' copy actions — our hand-rolled bridge must handle egui's
-# PlatformOutput.copied_text itself (egui-winit would normally do this).
+# OutputCommand::CopyText itself (egui-winit would normally do this).
 arboard = "3"
 # Native file-open dialog for the "Import model…" button (same import path as drag-drop).
 rfd = "0.14"
@@ -57,6 +57,8 @@ mercs2_formats = { workspace = true }
 mercs2_quartermaster = { workspace = true }
 mercs2_bridge = { workspace = true }
 mercs2_destruction = { workspace = true }
+# The Live page reads pmc_blackbox.log with loadprobe's own parser and ladder.
+loadprobe = { workspace = true }
 # Saves page Delete: moves a .profile to the OS trash (recoverable) rather than removing it.
 trash = "5"
 

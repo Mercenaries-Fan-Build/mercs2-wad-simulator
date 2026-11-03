@@ -28,7 +28,7 @@ struct ShadowVp { mat: mat4x4<f32> };
 @vertex
 fn vs_shadow(
     @location(0) pos: vec3<f32>,
-    @location(1) color: vec3<f32>,
+    @location(1) color: vec4<f32>,
     @location(2) uv: vec2<f32>,
     @location(3) normal: vec3<f32>,
     @location(4) tangent: vec4<f32>,

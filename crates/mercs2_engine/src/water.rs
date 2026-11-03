@@ -109,25 +109,25 @@ impl WaterNode {
         });
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("water pipeline layout"),
-            bind_group_layouts: &[&bgl],
-            push_constant_ranges: &[],
+            bind_group_layouts: &[Some(&bgl)],
+            immediate_size: 0,
         });
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("water pipeline"),
             layout: Some(&layout),
             vertex: wgpu::VertexState {
                 module: &shader,
-                entry_point: "vs_water",
-                buffers: &[wgpu::VertexBufferLayout {
+                entry_point: Some("vs_water"),
+                buffers: &[Some(wgpu::VertexBufferLayout {
                     array_stride: (3 * std::mem::size_of::<f32>()) as wgpu::BufferAddress,
                     step_mode: wgpu::VertexStepMode::Vertex,
                     attributes: &wgpu::vertex_attr_array![0 => Float32x3],
-                }],
+                })],
                 compilation_options: Default::default(),
             },
             fragment: Some(wgpu::FragmentState {
                 module: &shader,
-                entry_point: "fs_water",
+                entry_point: Some("fs_water"),
                 targets: &[Some(wgpu::ColorTargetState {
                     format: surface_format,
                     // Straight alpha over the scene: out = src*a + dst*(1-a).
@@ -143,13 +143,14 @@ impl WaterNode {
             },
             depth_stencil: Some(wgpu::DepthStencilState {
                 format: DEPTH_FORMAT,
-                depth_write_enabled: false, // translucent: tested against the scene, but not occluding
-                depth_compare: wgpu::CompareFunction::LessEqual,
+                depth_write_enabled: Some(false), // translucent: tested against the scene, but not occluding
+                depth_compare: Some(wgpu::CompareFunction::LessEqual),
                 stencil: wgpu::StencilState::default(),
                 bias: wgpu::DepthBiasState::default(),
             }),
             multisample: wgpu::MultisampleState::default(),
-            multiview: None,
+            multiview_mask: None,
+            cache: None,
         });
         Some(WaterNode {
             pipeline,
@@ -183,6 +184,7 @@ impl RenderNode for WaterNode {
             label: Some("water surface pass"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                 view: ctx.color,
+                depth_slice: None,
                 resolve_target: None,
                 ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
             })],
@@ -193,6 +195,7 @@ impl RenderNode for WaterNode {
             }),
             timestamp_writes: None,
             occlusion_query_set: None,
+            multiview_mask: None,
         });
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, &self.bind_group, &[]);

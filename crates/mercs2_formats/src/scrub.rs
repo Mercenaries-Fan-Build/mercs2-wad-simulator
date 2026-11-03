@@ -10,7 +10,8 @@
 //! ```text
 //! INFO  16 B  {u32 mesh_count, u32 patch_count, u32 range_count, u32 instance_count}
 //! SCRB × mesh_count     one instanced mesh
-//!   INFO  20 B          not decoded
+//!   INFO  20 B          {u32 not decoded, u32 vertex shader hash, f32 alpha zero depth, f32 cull depth,
+//!                        f32 WindParams.x}
 //!   MTRL                one material record (terrainmesh `MTRL` record layout)
 //!   STRM → info · decl · data     vertex stream (`POSITION` is FLOAT16_4 at offset 0)
 //!   IBUF → info · data            u16 indices
@@ -43,7 +44,7 @@
 
 use crate::model_inject::{f16_le, read_f16_le};
 use crate::terrainmesh::{
-    children_of, decode_material, decode_stream, emit_tree, encode_material, exact_len,
+    children_of, decode_material, decode_stream, destrip, emit_tree, encode_material, exact_len,
     expect_children, f32_at, leaf, parse_tree, put_vec3, sphere_of, stream_nodes, u16_at, u32_at,
     vec3_at, Aabb, DeclElement, Material, Node, TerrainCell,
 };
@@ -58,6 +59,9 @@ const PTCH_LEN: usize = 56;
 const PTMS_LEN: usize = 8;
 const DECLTYPE_FLOAT16_4: u8 = 16;
 const USAGE_POSITION: u8 = 0;
+const USAGE_NORMAL: u8 = 3;
+const USAGE_TEXCOORD: u8 = 5;
+const USAGE_TANGENT: u8 = 6;
 
 /// One decoded ground-cover container.
 #[derive(Debug, Clone, PartialEq)]
@@ -79,7 +83,8 @@ pub struct Scrub {
 /// One `SCRB`: an instanced mesh.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ScrubMesh {
-    /// The 20-byte `INFO`, not decoded (two hash-like words, then `30.0` and `50.0` in the samples read).
+    /// The 20-byte `INFO` as `FUN_004a5230` reads it: word 1 is the vertex shader's hash, words 2 to 4
+    /// are floats ([`Self::alpha_zero_depth`], [`Self::cull_depth`], [`Self::wind`]), word 0 is not decoded.
     pub info: [u32; 5],
     pub material: Material,
     pub stride: u32,
@@ -130,9 +135,125 @@ impl Instance {
         let m = self.matrix();
         [m[0][3], m[1][3], m[2][3]]
     }
+
+    /// What `PgScrub*VP_ShearVertically` adds to a mesh-space point `p` after this instance's matrix,
+    /// per unit of `p`'s height along the instance's normalised up axis `n`: `tan θ · c`, with `c` the
+    /// unit vector in `n`'s plane toward world up. It sends `n` to `Y / n.y`, so a tuft on a slope keeps
+    /// its base and stands straight up (the shader's rows are `(I + tan θ · c nᵀ) · B`, with `θ` from
+    /// `acos(n.y)`). Normals are not sheared.
+    pub fn vertical_shear(&self) -> [f32; 3] {
+        let n = self.up();
+        [-n[0], 1.0 / n[1] - n[1], -n[2]]
+    }
+
+    /// The instance's up axis (the matrix's Y column), normalised.
+    pub fn up(&self) -> [f32; 3] {
+        let m = self.matrix();
+        let y = [m[0][1], m[1][1], m[2][1]];
+        let len = (y[0] * y[0] + y[1] * y[1] + y[2] * y[2]).sqrt();
+        y.map(|v| v / len)
+    }
+}
+
+/// How many copies of a tuft a mesh's buffers hold: a draw covers at most this many instances, each
+/// copy reading its own instance's matrix through `TEXCOORD.z` (`FUN_004a5830`).
+pub const TUFT_COPIES: usize = 16;
+
+/// One vertex of a [`Tuft`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TuftVertex {
+    pub position: [f32; 3],
+    pub uv: [f32; 2],
+    pub normal: [f32; 3],
+    /// `TANGENT`, on the meshes that carry one.
+    pub tangent: Option<[f32; 4]>,
+}
+
+/// The one piece of geometry a [`ScrubMesh`] repeats.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Tuft {
+    pub vertices: Vec<TuftVertex>,
+    pub triangles: Vec<[u16; 3]>,
 }
 
 impl ScrubMesh {
+    /// The view depth at which the mesh's alpha reaches 0. `AlphaVec` (`FUN_004a5480`) is the plane
+    /// `alpha = (this − depth) / (cull_depth − this)`, read back from the constant ring of a retail
+    /// capture, so alpha is 1 one range nearer than this. A mesh that is not alpha-tested draws solid,
+    /// ignoring alpha, until a patch's far side passes this depth, and blended from then on.
+    pub fn alpha_zero_depth(&self) -> f32 {
+        f32::from_bits(self.info[2])
+    }
+
+    /// The view depth past which a patch's near side draws nothing of this mesh.
+    pub fn cull_depth(&self) -> f32 {
+        f32::from_bits(self.info[3])
+    }
+
+    /// `WindParams.x`, which `FUN_004a5230` zeroes for a material that is not alpha-tested.
+    pub fn wind(&self) -> f32 {
+        if crate::texture::material_alpha_tested(self.material.flags) {
+            f32::from_bits(self.info[4])
+        } else {
+            0.0
+        }
+    }
+
+    /// The FLOAT16_4 element with `usage` on stream 0, as a byte offset.
+    fn element(&self, usage: u8) -> Result<Option<usize>, String> {
+        let found: Vec<&DeclElement> = self.decl.iter().filter(|e| e.usage == usage && e.usage_index == 0).collect();
+        match found.as_slice() {
+            [] => Ok(None),
+            [e] if e.ty == DECLTYPE_FLOAT16_4 && e.stream == 0 => Ok(Some(e.offset as usize)),
+            _ => Err(format!("mesh decl: usage {usage} is not a single FLOAT16_4 on stream 0")),
+        }
+    }
+
+    /// The tuft this mesh repeats, from its first copy: the strip's triangles over its vertices. An
+    /// error for buffers that are not [`TUFT_COPIES`] identical copies in order, which is what lets one
+    /// copy stand for the rest.
+    pub fn tuft(&self) -> Result<Tuft, String> {
+        let required = |usage, what| self.element(usage)?.ok_or_else(|| format!("mesh decl has no {what}"));
+        let texcoord = required(USAGE_TEXCOORD, "TEXCOORD")?;
+        let normal = required(USAGE_NORMAL, "NORMAL")?;
+        let tangent = self.element(USAGE_TANGENT)?;
+        let positions = self.positions()?;
+        let stride = self.stride as usize;
+        if positions.is_empty() || positions.len() % TUFT_COPIES != 0 {
+            return Err(format!("{} vertices are not {TUFT_COPIES} copies of a tuft", positions.len()));
+        }
+        let per_copy = positions.len() / TUFT_COPIES;
+        let read = |i: usize, at: usize, k: usize| read_f16_le(&self.vertices, i * stride + at + 2 * k);
+        // Bytes past the `TEXCOORD.xy` of a copy's vertex differ only in `TEXCOORD.zw`.
+        let copied = |i: usize| {
+            let (a, b) = (i * stride, (i % per_copy) * stride);
+            (0..stride).all(|k| (texcoord + 4..texcoord + 8).contains(&k) || self.vertices[a + k] == self.vertices[b + k])
+        };
+        for i in 0..positions.len() {
+            if read(i, texcoord, 2) != (i / per_copy) as f32 || !copied(i) {
+                return Err(format!("vertex {i} is not its tuft's copy {}", i / per_copy));
+            }
+        }
+        let copy = |t: &[u16; 3]| t.map(|v| v as usize / per_copy);
+        let triangles = destrip(&self.indices);
+        if let Some(t) = triangles.iter().find(|t| copy(t).iter().any(|c| *c != copy(t)[0])) {
+            return Err(format!("triangle {t:?} joins two copies of the tuft"));
+        }
+        let first: Vec<[u16; 3]> = triangles.iter().copied().filter(|t| t[0] as usize / per_copy == 0).collect();
+        if first.len() * TUFT_COPIES != triangles.len() {
+            return Err(format!("{} triangles in the first copy of {}", first.len(), triangles.len()));
+        }
+        let vertices = (0..per_copy)
+            .map(|i| TuftVertex {
+                position: positions[i],
+                uv: [read(i, texcoord, 0), read(i, texcoord, 1)],
+                normal: [0, 1, 2].map(|k| read(i, normal, k)),
+                tangent: tangent.map(|at| [0, 1, 2, 3].map(|k| read(i, at, k))),
+            })
+            .collect();
+        Ok(Tuft { vertices, triangles: first })
+    }
+
     /// Mesh-local `POSITION` of every vertex.
     pub fn positions(&self) -> Result<Vec<[f32; 3]>, String> {
         let pos: Vec<&DeclElement> = self
@@ -640,6 +761,78 @@ mod tests {
 
     fn half(v: f32) -> u16 {
         u16::from_le_bytes(f16_le(v))
+    }
+
+    /// A mesh of [`TUFT_COPIES`] copies of a two-triangle quad, stitched into one strip.
+    fn tufted() -> ScrubMesh {
+        let el = |offset: u16, usage: u8| DeclElement { stream: 0, offset, ty: 16, method: 0, usage, usage_index: 0 };
+        let mut vertices = Vec::new();
+        let mut indices = Vec::new();
+        for copy in 0..TUFT_COPIES {
+            for (x, y) in [(0.0, 0.0), (1.0, 0.0), (0.0, 1.0), (1.0, 1.0)] {
+                for c in [x, y, 0.0, 1.0, x, y, copy as f32, 2.0, 0.0, 0.0, 1.0, 0.0] {
+                    vertices.extend_from_slice(&f16_le(c));
+                }
+            }
+            let base = (copy * 4) as u16;
+            if copy > 0 {
+                indices.extend([base - 1, base]);
+            }
+            indices.extend([base, base + 1, base + 2, base + 3]);
+        }
+        let material = Material { word_0: 0, params: [0.0; 25], flags: 0x10, textures: Vec::new(), tail: [0; 2] };
+        ScrubMesh {
+            info: [0, 0, 30f32.to_bits(), 50f32.to_bits(), 0.1f32.to_bits()],
+            material,
+            stride: 24,
+            decl: vec![el(0, 0), el(8, 5), el(16, 3)],
+            vertices,
+            indices,
+        }
+    }
+
+    #[test]
+    fn a_tuft_is_its_first_copy() {
+        let t = tufted().tuft().unwrap();
+        assert_eq!(t.vertices.len(), 4);
+        assert_eq!(t.triangles, vec![[0, 1, 2], [1, 3, 2]]);
+        assert_eq!(t.vertices[3].uv, [1.0, 1.0]);
+        assert_eq!(t.vertices[3].normal, [0.0, 0.0, 1.0]);
+        assert_eq!(t.vertices[3].tangent, None);
+    }
+
+    #[test]
+    fn a_tuft_refuses_copies_that_differ() {
+        let mut m = tufted();
+        let at = 24 * 5;
+        m.vertices[at..at + 2].copy_from_slice(&f16_le(0.5));
+        assert!(m.tuft().unwrap_err().contains("vertex 5"));
+        let mut m = tufted();
+        m.vertices.truncate(24 * 60);
+        assert!(m.tuft().unwrap_err().contains("not 16 copies"));
+    }
+
+    /// The tuft's top stays straight above its base on a slope, wherever the instance tilts.
+    #[test]
+    fn the_shear_stands_an_instance_upright() {
+        let (s, c) = (0.5f32, 0.75f32.sqrt());
+        let i = Instance { rows: [[half(c), half(s), 0, 0], [half(-s), half(c), 0, 0], [0, 0, half(1.0), 0]] };
+        let up = i.up();
+        assert!((up[0] - s).abs() < 1e-3 && (up[1] - c).abs() < 1e-3);
+        let tc = i.vertical_shear();
+        let top = [0, 1, 2].map(|k| up[k] + tc[k]);
+        assert!(top[0].abs() < 1e-3 && top[2].abs() < 1e-3, "{top:?}");
+        assert!((top[1] - 1.0 / c).abs() < 1e-3, "{top:?}");
+        let level = Instance { rows: [[half(1.0), 0, 0, 0], [0, half(1.0), 0, 0], [0, 0, half(1.0), 0]] };
+        assert_eq!(level.vertical_shear().map(|v| v.abs()), [0.0; 3]);
+    }
+
+    #[test]
+    fn a_mesh_reads_its_fade_and_only_a_cutout_keeps_its_wind() {
+        let mut m = tufted();
+        assert_eq!((m.alpha_zero_depth(), m.cull_depth(), m.wind()), (30.0, 50.0, 0.0));
+        m.material.flags = 0x98;
+        assert_eq!(m.wind(), 0.1);
     }
 
     /// A one-mesh pack over the synthetic terrain: a 1 m quad mesh, one patch of 3 instances at

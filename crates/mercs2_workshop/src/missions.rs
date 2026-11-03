@@ -890,7 +890,7 @@ fn glyph(p: &egui::Painter, r: Rect, c: Category, col: Color32) {
             p.line_segment([at(0.3, 0.45), at(0.75, 0.7)], s);
         }
         Category::Variable => {
-            p.rect_stroke(Rect::from_min_max(at(0.22, 0.3), at(0.78, 0.7)), 1.0, s);
+            p.rect_stroke(Rect::from_min_max(at(0.22, 0.3), at(0.78, 0.7)), 1.0, s, egui::StrokeKind::Middle);
         }
         Category::Lua => {
             poly(&[at(0.35, 0.25), at(0.18, 0.5), at(0.35, 0.75)], false);
@@ -966,7 +966,7 @@ fn rows(n: &blueprint::Node) -> (usize, usize) {
 /// A node's size in canvas units, from its text measured in the type scale.
 fn measure(ui: &egui::Ui, n: &blueprint::Node) -> Vec2 {
     let w = |s: &str, style: &TextStyle| {
-        ui.fonts(|f| f.layout_no_wrap(s.to_string(), theme::font(style), Color32::WHITE).size().x)
+        ui.fonts_mut(|f| f.layout_no_wrap(s.to_string(), theme::font(style), Color32::WHITE).size().x)
     };
     let lk = look(n.category);
     let title = PAD_X
@@ -1186,7 +1186,7 @@ pub fn navigator(ui: &mut egui::Ui, p: &Panel) -> Vec<Act> {
         ui.label(egui::RichText::new("Loading the Lua corpus…").small().color(theme::FAINT));
         return acts;
     };
-    egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+    theme::scroll_vertical().auto_shrink([false, false]).show(ui, |ui| {
         scripts(ui, p, &mut acts);
         if let Some(o) = &p.open {
             in_this_script(ui, o, &mut acts);
@@ -1231,7 +1231,7 @@ fn nav_row(ui: &mut egui::Ui, colour: Color32, round: bool, label: &str, note: &
 fn scripts(ui: &mut egui::Ui, p: &Panel, acts: &mut Vec<Act>) {
     section_head(ui, "Script", &format!("{} mission scripts", p.catalog.len()));
     let needle = p.filter.to_ascii_lowercase();
-    egui::ScrollArea::vertical().id_source("mb-scripts").max_height(220.0).show(ui, |ui| {
+    theme::scroll_vertical().id_salt("mb-scripts").max_height(220.0).show(ui, |ui| {
         for (i, e) in p.catalog.iter().enumerate() {
             if !needle.is_empty()
                 && !e.name.to_ascii_lowercase().contains(&needle)
@@ -1326,14 +1326,14 @@ fn palette(ui: &mut egui::Ui, r: &Reference, open: Option<&Open>, acts: &mut Vec
     }
     let mut group = |ui: &mut egui::Ui, title: &str, note: String, entries: &[PaletteEntry]| {
         egui::CollapsingHeader::new(egui::RichText::new(title).text_style(theme::style_eyebrow()).color(theme::DIM))
-            .id_source(("mb-palette", title))
+            .id_salt(("mb-palette", title))
             .default_open(false)
             .show(ui, |ui| {
                 ui.label(egui::RichText::new(note).small().color(theme::FAINT));
                 for e in entries {
                     let lk = look(e.category);
                     let uses = if e.uses > 0 { e.uses.to_string() } else { String::new() };
-                    let resp = ui.dnd_drag_source(egui::Id::new(("mb-drag", title, &e.label)), e.clone(), |ui| {
+                    let resp = ui.dnd_drag_source(egui::Id::unique(("mb-drag", title, &e.label)), e.clone(), |ui| {
                         nav_row(ui, lk.icon, e.category != Category::Objective, &e.label, &uses, false)
                     });
                     let resp = resp.response.on_hover_text(&e.lua);
@@ -1382,9 +1382,9 @@ fn save_section(ui: &mut egui::Ui, p: &Panel, acts: &mut Vec<Act>) {
 
 // ───────────────────────────────────────────────────────────────────── canvas
 
-pub fn center(ctx: &egui::Context, p: &Panel) -> Vec<Act> {
+pub fn center(root: &mut egui::Ui, p: &Panel) -> Vec<Act> {
     let mut acts = Vec::new();
-    egui::CentralPanel::default().frame(egui::Frame::none().fill(CANVAS_BG)).show(ctx, |ui| {
+    egui::CentralPanel::default().frame(egui::Frame::NONE.fill(CANVAS_BG)).show(root, |ui| {
         let Some(o) = &p.open else {
             let r = ui.available_rect_before_wrap();
             let msg = if p.reference.is_some() { "Pick a mission script on the left." } else { "Loading the Lua corpus…" };
@@ -1411,13 +1411,13 @@ pub fn center(ctx: &egui::Context, p: &Panel) -> Vec<Act> {
 
 /// The id under which the canvas asks itself to fit to view on its next frame.
 fn fit_request() -> egui::Id {
-    egui::Id::new("mb-fit")
+    egui::Id::unique("mb-fit")
 }
 
 fn header(ui: &mut egui::Ui, o: &Open, acts: &mut Vec<Act>) {
-    egui::Frame::none()
+    egui::Frame::NONE
         .fill(Color32::from_rgb(0x14, 0x19, 0x21))
-        .inner_margin(egui::Margin::symmetric(12.0, 6.0))
+        .inner_margin(egui::Margin::symmetric(12, 6))
         .show(ui, |ui| {
             ui.horizontal(|ui| {
                 let file = o.entry.path.rsplit('/').next().unwrap_or(&o.entry.path);
@@ -1437,14 +1437,14 @@ fn header(ui: &mut egui::Ui, o: &Open, acts: &mut Vec<Act>) {
                     }
                 }
                 ui.add_space(12.0);
-                ui.menu_button("View", |ui| {
+                theme::menu_button(ui, "View", |ui| {
                     if ui.button("Fit to view   F").clicked() {
                         ui.memory_mut(|m| m.data.insert_temp(fit_request(), true));
-                        ui.close_menu();
+                        ui.close();
                     }
                     if ui.button("Actual size").clicked() {
                         acts.push(Act::SetView { pan: o.view().pan, zoom: 1.0 });
-                        ui.close_menu();
+                        ui.close();
                     }
                 });
                 if ui.button("Script").on_hover_text("Open this function in the Lua viewer").clicked() {
@@ -1524,9 +1524,9 @@ fn canvas(ui: &mut egui::Ui, rect: Rect, p: &Panel, o: &Open, g: &Graph, acts: &
     paint_grid(&painter, rect, pan, zoom);
 
     // Background: drag pans, shift-drag selects a rectangle, wheel or pinch zooms at the cursor.
-    let bg = ui.interact(rect, egui::Id::new("mb-canvas"), Sense::click_and_drag());
+    let bg = ui.interact(rect, egui::Id::unique("mb-canvas"), Sense::click_and_drag());
     let pointer = ui.input(|i| i.pointer.hover_pos());
-    let marquee_id = egui::Id::new("mb-marquee");
+    let marquee_id = egui::Id::unique("mb-marquee");
     if bg.drag_started() && ui.input(|i| i.modifiers.shift) {
         if let Some(at) = pointer {
             ui.memory_mut(|m| m.data.insert_temp(marquee_id, Marquee { start: at }));
@@ -1546,7 +1546,7 @@ fn canvas(ui: &mut egui::Ui, rect: Rect, p: &Panel, o: &Open, g: &Graph, acts: &
             acts.push(Act::ZoomAt { factor, at: at - rect.min });
         }
     }
-    bg.context_menu(|ui| {
+    theme::context_menu(&bg, |ui| {
         let at = ui.ctx().input(|i| i.pointer.interact_pos()).unwrap_or(rect.center());
         if ui.button("Add node…").clicked() {
             acts.push(Act::BeginAdd {
@@ -1554,15 +1554,15 @@ fn canvas(ui: &mut egui::Ui, rect: Rect, p: &Panel, o: &Open, g: &Graph, acts: &
                 screen: at,
                 from: None,
             });
-            ui.close_menu();
+            ui.close();
         }
         if ui.add_enabled(!o.clipboard.is_empty(), egui::Button::new("Paste")).clicked() {
             acts.push(Act::Paste(to_canvas(at)));
-            ui.close_menu();
+            ui.close();
         }
         if ui.button("Fit to view").clicked() {
             ui.memory_mut(|m| m.data.insert_temp(fit_request(), true));
-            ui.close_menu();
+            ui.close();
         }
     });
     if let (Some(payload), Some(at)) = (bg.dnd_release_payload::<PaletteEntry>(), pointer) {
@@ -1581,7 +1581,7 @@ fn canvas(ui: &mut egui::Ui, rect: Rect, p: &Panel, o: &Open, g: &Graph, acts: &
         if !visible(r) {
             continue;
         }
-        let resp = ui.interact(r, egui::Id::new(("mb-node", &o.path, id)), Sense::click_and_drag());
+        let resp = ui.interact(r, egui::Id::unique(("mb-node", &o.path, id)), Sense::click_and_drag());
         let selected = o.selection.contains(&id);
         if resp.clicked() {
             let add = ui.input(|i| i.modifiers.shift || i.modifiers.command);
@@ -1599,30 +1599,30 @@ fn canvas(ui: &mut egui::Ui, rect: Rect, p: &Panel, o: &Open, g: &Graph, acts: &
             let ids = if selected { o.selection.clone() } else { vec![id] };
             acts.push(Act::Move(ids, resp.drag_delta() / zoom));
         }
-        resp.context_menu(|ui| {
+        theme::context_menu(&resp, |ui| {
             let ids = if selected { o.selection.clone() } else { vec![id] };
             if n.sub.is_some() && ui.button("Open").clicked() {
                 let mut path = o.path.clone();
                 path.push(id);
                 acts.push(Act::OpenCanvas(path));
-                ui.close_menu();
+                ui.close();
             }
             if ui.add_enabled(n.line > 0 && !n.is_new(), egui::Button::new("Jump to source")).clicked() {
                 acts.push(Act::JumpToSource(Some(id)));
-                ui.close_menu();
+                ui.close();
             }
             if id != ENTRY {
                 if ui.button("Clone").clicked() {
                     acts.push(Act::Clone(ids.clone()));
-                    ui.close_menu();
+                    ui.close();
                 }
                 if ui.button("Copy").clicked() {
                     acts.push(Act::Copy(ids.clone()));
-                    ui.close_menu();
+                    ui.close();
                 }
                 if ui.button("Delete").clicked() {
                     acts.push(Act::Delete(ids));
-                    ui.close_menu();
+                    ui.close();
                 }
             }
         });
@@ -1631,20 +1631,20 @@ fn canvas(ui: &mut egui::Ui, rect: Rect, p: &Panel, o: &Open, g: &Graph, acts: &
             pin_hits.push((pin, Rect::from_center_size(c, Vec2::splat((PIN_R * 2.0 + 8.0) * zoom.max(0.6)))));
         }
     }
-    let dragging_id = egui::Id::new("mb-wire");
+    let dragging_id = egui::Id::unique("mb-wire");
     let alt = ui.input(|i| i.modifiers.alt);
     for &(pin, hit) in &pin_hits {
-        let resp = ui.interact(hit, egui::Id::new(("mb-pin", &o.path, pin_key(pin))), Sense::click_and_drag());
+        let resp = ui.interact(hit, egui::Id::unique(("mb-pin", &o.path, pin_key(pin))), Sense::click_and_drag());
         if resp.drag_started() {
             ui.memory_mut(|m| m.data.insert_temp(dragging_id, Dragging { from: pin }));
         }
         if resp.clicked() && alt {
             acts.extend(break_pin(g, pin));
         }
-        resp.context_menu(|ui| {
+        theme::context_menu(&resp, |ui| {
             if ui.button("Break wires").clicked() {
                 acts.extend(break_pin(g, pin));
-                ui.close_menu();
+                ui.close();
             }
         });
     }
@@ -1717,7 +1717,7 @@ fn canvas(ui: &mut egui::Ui, rect: Rect, p: &Panel, o: &Open, g: &Graph, acts: &
     // The selection rectangle.
     if let (Some(m), Some(now)) = (marquee, ui.input(|i| i.pointer.interact_pos())) {
         let r = Rect::from_two_pos(m.start, now);
-        painter.rect(r, 2.0, SELECT.gamma_multiply(0.12), Stroke::new(1.0, SELECT));
+        painter.rect(r, 2.0, SELECT.gamma_multiply(0.12), Stroke::new(1.0, SELECT), egui::StrokeKind::Middle);
         if ui.input(|i| i.pointer.any_released()) {
             ui.memory_mut(|mm| mm.data.remove::<Marquee>(marquee_id));
             let ids: Vec<NodeId> = (0..g.nodes.len()).filter(|&id| node_rect(id).intersects(r)).collect();
@@ -1781,7 +1781,7 @@ fn break_pin(g: &Graph, pin: PinRef) -> Vec<Act> {
 /// The canvas's keys, while the pointer is over it and no field has the keyboard.
 fn keys(ui: &egui::Ui, rect: Rect, o: &Open, pointer: Option<Pos2>, to_canvas: &dyn Fn(Pos2) -> Pos2, acts: &mut Vec<Act>) {
     let Some(at) = pointer.filter(|p| rect.contains(*p)) else { return };
-    if ui.ctx().wants_keyboard_input() || o.adding.is_some() {
+    if ui.ctx().egui_wants_keyboard_input() || o.adding.is_some() {
         return;
     }
     use egui::{Key, Modifiers};
@@ -1875,16 +1875,17 @@ fn paint_node(p: &egui::Painter, g: &Graph, id: NodeId, n: &blueprint::Node, r: 
     let round = ROUND * zoom;
     let lk = look(n.category);
     p.rect_filled(r.translate(Vec2::new(0.0, 8.0 * zoom)), round, Color32::from_black_alpha(90));
-    gradient(p, r, NODE_TOP, NODE_BOTTOM, egui::Rounding::same(round));
+    let rounding = egui::CornerRadius::from(round);
+    gradient(p, r, NODE_TOP, NODE_BOTTOM, rounding);
     let header = Rect::from_min_size(r.min, Vec2::new(r.width(), HEADER_H * zoom));
-    gradient(p, header, lk.top, lk.bottom, egui::Rounding { nw: round, ne: round, sw: 0.0, se: 0.0 });
+    gradient(p, header, lk.top, lk.bottom, egui::CornerRadius { sw: 0, se: 0, ..rounding });
     match state {
         Some(c) => {
-            p.rect_stroke(r, round, Stroke::new(1.5, c));
-            p.rect_stroke(r.expand(3.0), round + 3.0, Stroke::new(3.0, c.gamma_multiply(0.35)));
+            p.rect_stroke(r, round, Stroke::new(1.5, c), egui::StrokeKind::Middle);
+            p.rect_stroke(r.expand(3.0), round + 3.0, Stroke::new(3.0, c.gamma_multiply(0.35)), egui::StrokeKind::Middle);
         }
         None => {
-            p.rect_stroke(r, round, Stroke::new(1.0, NODE_BORDER));
+            p.rect_stroke(r, round, Stroke::new(1.0, NODE_BORDER), egui::StrokeKind::Middle);
         }
     }
     if n.is_new() {
@@ -1961,7 +1962,7 @@ fn pin_shape(p: &egui::Painter, c: Pos2, ty: PinTy, wired: bool, zoom: f32) {
     }
 }
 
-fn gradient(p: &egui::Painter, r: Rect, top: Color32, bottom: Color32, rounding: egui::Rounding) {
+fn gradient(p: &egui::Painter, r: Rect, top: Color32, bottom: Color32, rounding: egui::CornerRadius) {
     let bands = 8;
     for i in 0..bands {
         let t = i as f32 / (bands - 1) as f32;
@@ -1970,11 +1971,11 @@ fn gradient(p: &egui::Painter, r: Rect, top: Color32, bottom: Color32, rounding:
         let y0 = r.min.y + r.height() * i as f32 / bands as f32;
         let y1 = r.min.y + r.height() * (i + 1) as f32 / bands as f32;
         let band = Rect::from_min_max(Pos2::new(r.min.x, y0), Pos2::new(r.max.x, y1));
-        let rd = egui::Rounding {
-            nw: if i == 0 { rounding.nw } else { 0.0 },
-            ne: if i == 0 { rounding.ne } else { 0.0 },
-            sw: if i == bands - 1 { rounding.sw } else { 0.0 },
-            se: if i == bands - 1 { rounding.se } else { 0.0 },
+        let rd = egui::CornerRadius {
+            nw: if i == 0 { rounding.nw } else { 0 },
+            ne: if i == 0 { rounding.ne } else { 0 },
+            sw: if i == bands - 1 { rounding.sw } else { 0 },
+            se: if i == bands - 1 { rounding.se } else { 0 },
         };
         p.rect_filled(band, rd, c);
     }
@@ -1984,7 +1985,7 @@ fn paint_legend(p: &egui::Painter, canvas: Rect) {
     let items = [PinTy::Exec, PinTy::Str, PinTy::Num, PinTy::Bool, PinTy::Obj, PinTy::Arr, PinTy::Any];
     let small = theme::font(&TextStyle::Small);
     let r = Rect::from_min_size(Pos2::new(canvas.min.x + 14.0, canvas.max.y - 44.0), Vec2::new(430.0, 30.0));
-    p.rect(r, 10.0, OVERLAY_BG, Stroke::new(1.0, NODE_BORDER));
+    p.rect(r, 10.0, OVERLAY_BG, Stroke::new(1.0, NODE_BORDER), egui::StrokeKind::Middle);
     let lr = p.text(
         Pos2::new(r.min.x + 11.0, r.center().y),
         egui::Align2::LEFT_CENTER,
@@ -2004,7 +2005,7 @@ fn zoom_pill(ui: &mut egui::Ui, canvas: Rect, zoom: f32) -> Vec<Act> {
     let mut acts = Vec::new();
     let r = Rect::from_min_size(Pos2::new(canvas.max.x - 150.0, canvas.max.y - 44.0), Vec2::new(136.0, 30.0));
     let p = ui.painter();
-    p.rect(r, 9.0, OVERLAY_BG, Stroke::new(1.0, NODE_BORDER));
+    p.rect(r, 9.0, OVERLAY_BG, Stroke::new(1.0, NODE_BORDER), egui::StrokeKind::Middle);
     let minus = Rect::from_min_size(r.min + Vec2::new(3.0, 2.0), Vec2::new(28.0, 26.0));
     let plus = Rect::from_min_size(Pos2::new(r.max.x - 31.0, r.min.y + 2.0), Vec2::new(28.0, 26.0));
     let body = theme::font(&TextStyle::Body);
@@ -2013,10 +2014,10 @@ fn zoom_pill(ui: &mut egui::Ui, canvas: Rect, zoom: f32) -> Vec<Act> {
     let pct = format!("{}%", (zoom * 100.0).round() as i32);
     p.text(r.center(), egui::Align2::CENTER_CENTER, pct, theme::font(&TextStyle::Monospace), LABEL);
     let centre = canvas.size() * 0.5;
-    if ui.interact(minus, egui::Id::new("mb-zoom-out"), Sense::click()).clicked() {
+    if ui.interact(minus, egui::Id::unique("mb-zoom-out"), Sense::click()).clicked() {
         acts.push(Act::ZoomAt { factor: 1.0 / 1.2, at: centre });
     }
-    if ui.interact(plus, egui::Id::new("mb-zoom-in"), Sense::click()).clicked() {
+    if ui.interact(plus, egui::Id::unique("mb-zoom-in"), Sense::click()).clicked() {
         acts.push(Act::ZoomAt { factor: 1.2, at: centre });
     }
     acts
@@ -2035,7 +2036,7 @@ fn add_popup(ctx: &egui::Context, p: &Panel, o: &Open, a: &Adding) -> Vec<Act> {
         .filter(|e| needle.is_empty() || e.label.to_ascii_lowercase().contains(&needle))
         .take(150)
         .collect();
-    let area = egui::Area::new(egui::Id::new("mb-add"))
+    let area = egui::Area::new(egui::Id::unique("mb-add"))
         .fixed_pos(a.screen)
         .order(egui::Order::Foreground)
         .show(ctx, |ui| {
@@ -2043,7 +2044,7 @@ fn add_popup(ctx: &egui::Context, p: &Panel, o: &Open, a: &Adding) -> Vec<Act> {
                 ui.set_width(340.0);
                 ui.label(theme::disp_text("ADD NODE", theme::style_eyebrow(), theme::DIM));
                 let mut q = a.query.clone();
-                let field = ui.add(egui::TextEdit::singleline(&mut q).hint_text("Search calls, events, objectives, Lua…"));
+                let field = ui.add(egui::TextEdit::singleline(&mut q).hint_text("Search calls, events, objectives, Lua…").margin(theme::TEXT_EDIT_MARGIN));
                 if !field.has_focus() && q.is_empty() {
                     field.request_focus();
                 }
@@ -2055,7 +2056,7 @@ fn add_popup(ctx: &egui::Context, p: &Panel, o: &Open, a: &Adding) -> Vec<Act> {
                         acts.push(Act::Add((*first).clone()));
                     }
                 }
-                egui::ScrollArea::vertical().max_height(360.0).show(ui, |ui| {
+                theme::scroll_vertical().max_height(360.0).show(ui, |ui| {
                     for e in &matches {
                         let uses = if e.uses > 0 { e.uses.to_string() } else { String::new() };
                         let row = nav_row(ui, look(e.category).icon, e.category != Category::Objective, &e.label, &uses, false);
@@ -2127,7 +2128,7 @@ fn heading(ui: &mut egui::Ui, n: &blueprint::Node, pills: &[String]) {
     let lk = look(n.category);
     ui.horizontal(|ui| {
         let (r, _) = ui.allocate_exact_size(Vec2::splat(34.0), Sense::hover());
-        gradient(ui.painter(), r, lk.top, lk.bottom, egui::Rounding::same(8.0));
+        gradient(ui.painter(), r, lk.top, lk.bottom, egui::CornerRadius::same(8));
         glyph(ui.painter(), r.shrink(9.0), n.category, lk.icon);
         ui.vertical(|ui| {
             ui.label(theme::disp_text(&n.title, theme::style_title(), theme::TX));
@@ -2274,7 +2275,7 @@ fn exec_row(ui: &mut egui::Ui, label: &str, other: Option<NodeId>, g: &Graph, ac
                 ui.painter().rect_filled(r, 2.0, pin_colour(PinTy::Exec));
             }
             None => {
-                ui.painter().rect_stroke(r, 2.0, Stroke::new(1.5, ANNOT));
+                ui.painter().rect_stroke(r, 2.0, Stroke::new(1.5, ANNOT), egui::StrokeKind::Middle);
             }
         }
         ui.label(egui::RichText::new(label).color(theme::TX));
@@ -2298,7 +2299,7 @@ fn parameter(ui: &mut egui::Ui, o: &Open, g: &Graph, id: NodeId, i: usize, input
         ui.label(egui::RichText::new(&input.label).color(theme::TX));
         ui.label(egui::RichText::new(input.ty.name()).monospace().color(theme::FAINT));
     });
-    let key = egui::Id::new(("mb-param", &o.entry.path, &o.path, id, i));
+    let key = egui::Id::unique(("mb-param", &o.entry.path, &o.path, id, i));
     match g.feeder(id, i) {
         Some((from, out)) => {
             let producer = &g.nodes[from];
@@ -2342,7 +2343,7 @@ fn literal_editor(ui: &mut egui::Ui, key: egui::Id, node: NodeId, pin: usize, e:
                 (Some(q), Some(text)) => {
                     let current = unescape(&text);
                     let mut buf = ui.data_mut(|d| d.get_temp::<String>(key)).unwrap_or_else(|| current.clone());
-                    let resp = ui.add(egui::TextEdit::singleline(&mut buf).font(TextStyle::Monospace).desired_width(f32::INFINITY));
+                    let resp = ui.add(egui::TextEdit::singleline(&mut buf).font(TextStyle::Monospace).margin(theme::TEXT_EDIT_MARGIN).desired_width(f32::INFINITY));
                     commit(ui, Draft { key, resp, buf: &buf, current: &current }, |b| encode_lua_string(b, q), node, pin, acts);
                 }
                 _ => lua_editor(ui, key, node, pin, &lua, true, acts),
@@ -2370,7 +2371,7 @@ fn literal_editor(ui: &mut egui::Ui, key: egui::Id, node: NodeId, pin: usize, e:
                     }
                 }
                 let mut buf = ui.data_mut(|d| d.get_temp::<String>(key)).unwrap_or_else(|| lua.clone());
-                let resp = ui.add(egui::TextEdit::singleline(&mut buf).font(TextStyle::Monospace).desired_width(90.0));
+                let resp = ui.add(egui::TextEdit::singleline(&mut buf).font(TextStyle::Monospace).margin(theme::TEXT_EDIT_MARGIN).desired_width(90.0 + theme::TEXT_EDIT_MARGIN.sum().x));
                 commit(ui, Draft { key, resp, buf: &buf, current: &lua }, |b| b.to_string(), node, pin, acts);
                 if ui.button("+").clicked() {
                     if let Some(v) = step(1.0) {
@@ -2387,7 +2388,7 @@ fn literal_editor(ui: &mut egui::Ui, key: egui::Id, node: NodeId, pin: usize, e:
 fn lua_editor(ui: &mut egui::Ui, key: egui::Id, node: NodeId, pin: usize, current: &str, multi: bool, acts: &mut Vec<Act>) {
     let mut buf = ui.data_mut(|d| d.get_temp::<String>(key)).unwrap_or_else(|| current.to_string());
     let edit = if multi { egui::TextEdit::multiline(&mut buf).desired_rows(3) } else { egui::TextEdit::singleline(&mut buf) };
-    let resp = ui.add(edit.code_editor().font(TextStyle::Monospace).desired_width(f32::INFINITY));
+    let resp = ui.add(edit.code_editor().font(TextStyle::Monospace).margin(theme::TEXT_EDIT_MARGIN).desired_width(f32::INFINITY));
     commit(ui, Draft { key, resp, buf: &buf, current }, |b| b.to_string(), node, pin, acts);
 }
 
@@ -2555,11 +2556,11 @@ mod tests {
             ..Default::default()
         };
         let mut acts = Vec::new();
-        let _ = ctx.run(input, |ctx| {
-            egui::SidePanel::left("nav").show(ctx, |ui| acts.extend(navigator(ui, p)));
-            egui::SidePanel::right("inspector").show(ctx, |ui| acts.extend(inspector(ui, p)));
-            egui::TopBottomPanel::bottom("verbs").show(ctx, |ui| ui.horizontal(|ui| acts.extend(verbs(ui, p))));
-            acts.extend(center(ctx, p));
+        crate::gui::run_headless(ctx, input, |root| {
+            egui::Panel::left("nav").show(root, |ui| acts.extend(navigator(ui, p)));
+            egui::Panel::right("inspector").show(root, |ui| acts.extend(inspector(ui, p)));
+            egui::Panel::bottom("verbs").show(root, |ui| ui.horizontal(|ui| acts.extend(verbs(ui, p))));
+            acts.extend(center(root, p));
         });
         for a in acts {
             apply(a, p, corpus);

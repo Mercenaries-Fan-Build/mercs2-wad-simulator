@@ -91,12 +91,8 @@ pub fn consume_texture(container: &[u8], _data_body: Option<&[u8]>, label: &str)
 /// Core buffer-too-small test for one texture's INFO + BODY length.
 ///
 /// A fully-resident texture must carry, inline in BODY, the mip chain implied by
-/// its CLAIMED mip count (INFO[6]). A shorter BODY makes the engine over-read its
-/// surface array → `STATUS_BUFFER_TOO_SMALL` (0xC0000023) → the page never reaches
-/// ready state 4 → world-load livelock (the dlc01_dlccon002 roads case: a converter
-/// stub whose claimed chain exceeded the bytes present). The converter sizes BODY to
-/// exactly this chain (`convert.rs::apply_texture_untile`, same `texsize` helpers),
-/// so a shorter BODY is a converter coverage gap.
+/// its CLAIMED mip count (INFO[6]). The engine's reader does not check BODY's size,
+/// so a shorter one over-reads the block buffer into whatever follows.
 ///
 /// Two gates keep this engine-accurate (verified against retail vz.wad, which loads
 /// in-game): (1) STREAMED textures — partial-residency descriptor, `info_is_fully_resident`

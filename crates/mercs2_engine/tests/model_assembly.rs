@@ -35,7 +35,7 @@ fn tris_at(m: &Model, rung: u8, health: f32) -> u32 {
     let node_enable = match &m.machine {
         Some(sm) => {
             let chosen = orch::node_states_for_health(sm, health, 0.99);
-            orch::machine_node_enable(sm, &m.hier, &chosen)
+            orch::machine_node_enable(sm, &m.hier, &chosen).unwrap_or_else(|e| panic!("{e}"))
         }
         None => Vec::new(),
     };
@@ -83,7 +83,7 @@ fn wrecking_a_vehicle_swaps_geometry_rather_than_adding_it() {
             let node_enable = match &m.machine {
                 Some(sm) => {
                     let chosen = orch::node_states_for_health(sm, health, 0.99);
-                    orch::machine_node_enable(sm, &m.hier, &chosen)
+                    orch::machine_node_enable(sm, &m.hier, &chosen).unwrap_or_else(|e| panic!("{e}"))
                 }
                 None => Vec::new(),
             };
@@ -109,28 +109,44 @@ fn rungs_refine_each_other_instead_of_double_drawing() {
     let mut w = open_vz_wad();
     // The resident block is a COMPLETE low-detail model spanning every tier; the finer blocks
     // re-author some of its nodes. Pooling them draws the same part twice at two detail levels — on
-    // the car van that was 11,604 of 19,107 triangles. `apply_supersede` clears the coarser block's
-    // bit for any (node, tier) a finer block covers, so no node may be drawn by two rungs at once.
+    // the car van that was 11,604 of 19,107 triangles. A finer block can also ADD a part to a node
+    // (the PMC hall's trim on its walls; the ztz98's node 19 below), so two rungs on one node at one
+    // tier is not by itself a double draw. One part at two detail levels is: the same material on the
+    // same node from two rungs at once.
     for name in ["civ_veh_car_van_crappy", "ch_veh_tank_ztz98", "vz_veh_tank_scorpion90"] {
         let hash = mercs2_formats::hash::pandemic_hash_m2(name);
         let m = Model::load(&mut w, hash).expect("assembles");
         for tier in 0..8u8 {
             let bit = 1u8 << tier;
-            let mut owner: std::collections::HashMap<i16, u8> = Default::default();
+            let mut owner: std::collections::HashMap<(i16, Option<u32>), u8> = Default::default();
             for r in &m.rungs {
                 for d in r.draws.iter().filter(|d| d.node >= 0 && d.lod_mask & bit != 0) {
-                    if let Some(&prev) = owner.get(&d.node) {
+                    if let Some(&prev) = owner.get(&(d.node, d.diffuse)) {
                         assert_eq!(
                             prev, r.level,
-                            "{name}: node {} at tier {tier} is drawn by rung {prev} AND rung {} \
+                            "{name}: node {} at tier {tier} draws diffuse {:08X?} from rung {prev} AND rung {} \
                              — two detail levels of one part in the same space",
-                            d.node, r.level
+                            d.node, d.diffuse, r.level
                         );
                     }
-                    owner.insert(d.node, r.level);
+                    owner.insert((d.node, d.diffuse), r.level);
                 }
             }
         }
+    }
+
+    // The ztz98's node 19 carries P001's two tracks (segs 11/12, diffuse 0xAC8E8446, |x| 1.22..1.77)
+    // and P002's part between them (segs 52/53, diffuse 0x8C4A7D9D, |x| <= 1.29). P002 ships no tracks
+    // of its own on that node, so clearing node 19 from P001 at the near tiers takes the tracks off the
+    // tank up close.
+    let m = Model::load(&mut w, mercs2_formats::hash::pandemic_hash_m2("ch_veh_tank_ztz98")).expect("tank assembles");
+    for tier in [0u8, 1] {
+        let segs = |level: u8| -> std::collections::BTreeSet<usize> {
+            let r = m.rungs.iter().find(|r| r.level == level).expect("rung");
+            r.draws.iter().filter(|d| d.node == 19 && d.lod_mask & (1 << tier) != 0).map(|d| d.seg_id).collect()
+        };
+        assert_eq!(segs(1), [11, 12].into(), "tier {tier}: P001 draws both tracks");
+        assert_eq!(segs(2), [52 + tier as usize].into(), "tier {tier}: P002 draws its own part beside them");
     }
 }
 
@@ -201,4 +217,95 @@ fn lod_masks_partition_the_tiers_across_the_chain() {
     assert_eq!(by_level(0) & 0x70, 0x70, "resident block serves the far tiers");
     assert!(by_level(2) & 0x03 != 0, "the finest block serves the near tiers");
     assert!(m.rungs.iter().all(|r| r.lod_bits() != 0), "no rung resolves to a zero mask");
+}
+
+/// Bounding-box centre of one draw's triangles, posed by its rung's REST palette (`stats.bones`).
+fn rest_center(r: &mercs2_engine::model::Rung, d: &mercs2_engine::mesh::DrawGroup) -> [f32; 3] {
+    posed_center(&r.vertices, &r.indices, &r.stats.bones, d)
+}
+
+/// The bbox centre of one draw's vertices skinned by `palette`.
+fn posed_center(
+    vertices: &[mercs2_engine::mesh::Vertex],
+    indices: &[u32],
+    palette: &[[[f32; 4]; 4]],
+    d: &mercs2_engine::mesh::DrawGroup,
+) -> [f32; 3] {
+    let (mut lo, mut hi) = ([f32::MAX; 3], [f32::MIN; 3]);
+    for k in d.index_start..d.index_start + d.index_count {
+        let v = &vertices[indices[k as usize] as usize];
+        let mut p = [0f32; 3];
+        for j in 0..4 {
+            let w = v.weights[j] as f32 / 255.0;
+            if w == 0.0 {
+                continue;
+            }
+            let s = &palette[v.joints[j] as usize];
+            for a in 0..3 {
+                p[a] += w * (v.pos[0] * s[0][a] + v.pos[1] * s[1][a] + v.pos[2] * s[2][a] + s[3][a]);
+            }
+        }
+        for a in 0..3 {
+            lo[a] = lo[a].min(p[a]);
+            hi[a] = hi[a].max(p[a]);
+        }
+    }
+    [(lo[0] + hi[0]) * 0.5, (lo[1] + hi[1]) * 0.5, (lo[2] + hi[2]) * 0.5]
+}
+
+#[test]
+fn every_segm_row_draws_including_instance_rows() {
+    // Retail's draw loop (`FUN_00472a50`) walks SEGM ROWS: row r draws `renderable[seg_id]` at its own
+    // node. The M1A2's rows 74..99 re-draw its one road-wheel mesh (segs 72/73) on the other 13 hubs;
+    // reaching SEGM only through INDX drew 74 of its 100 rows and left 13 wheels off.
+    let mut w = open_vz_wad();
+    let m = Model::load(&mut w, 0xCE77_D4CB).expect("al_veh_tank_m1a2 assembles");
+    assert_eq!(m.segm.len(), 100);
+    let drawn: std::collections::BTreeSet<usize> = m.rungs.iter().flat_map(|r| r.draws.iter().map(|d| d.segm_row)).collect();
+    let missing: Vec<usize> = (0..m.segm.len()).filter(|i| !drawn.contains(i)).collect();
+    assert!(missing.is_empty(), "SEGM rows with no draw: {missing:?}");
+    let instances = m.rungs.iter().flat_map(|r| &r.draws).filter(|d| d.segm_row != d.seg_id).count();
+    assert_eq!(instances, 26, "13 instanced road wheels x 2 LOD tiers");
+}
+
+#[test]
+fn instanced_road_wheels_rest_on_their_own_hubs() {
+    // Retail's live per-node matrices are the `+16` chain (see `mercs2_probe`
+    // `retail_node_matrices_are_the_plus16_chain`); an instance node's `+80` is a COPY of its source's,
+    // so an identity rest palette stacked all 14 near-tier wheels on one hub. Under the rest palette
+    // each sits on its own: seven per side at x = +-1.45.
+    let mut w = open_vz_wad();
+    let m = Model::load(&mut w, 0xCE77_D4CB).expect("al_veh_tank_m1a2 assembles");
+    let mut hubs: Vec<[i32; 3]> = Vec::new();
+    for r in &m.rungs {
+        for d in r.draws.iter().filter(|d| d.seg_id == 72) {
+            let c = rest_center(r, d);
+            assert!((c[0].abs() - 1.45).abs() < 0.01, "wheel row {} off the track line: {c:?}", d.segm_row);
+            hubs.push([(c[0] * 100.0).round() as i32, (c[1] * 100.0).round() as i32, (c[2] * 100.0).round() as i32]);
+        }
+    }
+    hubs.sort_unstable();
+    hubs.dedup();
+    assert_eq!(hubs.len(), 14, "14 road wheels on 14 distinct hubs: {hubs:?}");
+}
+
+#[test]
+fn an_undriven_vehicle_spawns_at_its_rest_palette() {
+    // The game world loads a placed model through `load_model_by_hash` and spawns it with the scene's
+    // `SkinData::rest_palette`. An identity palette there sank the M1A2's turret and stacked its
+    // instanced wheels in game exactly as it did in the Workshop; the rest palette puts every
+    // near-tier wheel on its own hub.
+    let mut w = open_vz_wad();
+    let (m, _, _) = mercs2_engine::game_world::load_model_by_hash(&mut w, 0xCE77_D4CB).expect("al_veh_tank_m1a2 loads");
+    let rest = m.skin.rest_palette(&m.verts).unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(rest, m.skin.bones, "a rigged model rests at its skin's rest palette");
+    let mut hubs: Vec<[i32; 3]> = Vec::new();
+    for d in m.draws.iter().filter(|d| d.seg_id == 72) {
+        let c = posed_center(&m.verts, &m.indices, &rest, d);
+        assert!((c[0].abs() - 1.45).abs() < 0.01, "wheel row {} off the track line: {c:?}", d.segm_row);
+        hubs.push([(c[0] * 100.0).round() as i32, (c[1] * 100.0).round() as i32, (c[2] * 100.0).round() as i32]);
+    }
+    hubs.sort_unstable();
+    hubs.dedup();
+    assert_eq!(hubs.len(), 14, "14 road wheels on 14 distinct hubs: {hubs:?}");
 }

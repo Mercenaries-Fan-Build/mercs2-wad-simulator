@@ -1172,6 +1172,7 @@ fn a_plugin_and_its_companion_build_together() {
         .map(|p| match &p.destination {
             Destination::GameFolder { relative }
             | Destination::DataWad { relative, .. }
+            | Destination::LevelPatch { relative, .. }
             | Destination::LanguagePatch { relative, .. } => relative.clone(),
             Destination::StreamCopy { to, .. } => to.clone(),
             Destination::DataFile { relative, .. } => relative.relative().to_string(),

@@ -12,6 +12,7 @@ use mercs2_formats::ffcs::load_ffcs_archive;
 use mercs2_formats::placement::{load_scrub_placements, load_terrain_tiles, ScrubPlacement};
 use mercs2_formats::scrub::{ScrubPack, TYPE_HASH};
 use mercs2_formats::sges::decompress_block;
+use mercs2_formats::shader_registrations::retail_name;
 use mercs2_formats::terrainmesh::{self, sphere_of, TerrainCell};
 use mercs2_formats::types::TYPE_ID_TERRAIN_MESH;
 use mercs2_formats::ucfx::walk_decompressed_block;
@@ -111,6 +112,41 @@ fn retail() -> &'static Retail {
 /// The terrain cell a scrub placement covers: the tile at the very same world position.
 fn cell_at(r: &Retail, pos: [f32; 3]) -> Option<u32> {
     r.tiles.iter().find(|(_, p)| **p == pos).map(|(h, _)| *h)
+}
+
+/// What the renderer stands on: every retail mesh is copies of one tuft, its fade
+/// range is a range, and every instance of a shearing mesh is the right way up, the shear's only
+/// singularity.
+#[test]
+fn every_retail_mesh_repeats_one_tuft_and_shears_upright() {
+    let r = retail();
+    let (mut meshes, mut instances, mut lowest_up) = (0, 0usize, f32::MAX);
+    let mut uv_scales: BTreeMap<String, usize> = BTreeMap::new();
+    for (hash, (path, bytes)) in &r.scrubs {
+        let ScrubPack::Pack(s) = ScrubPack::decode(bytes).unwrap() else {
+            continue;
+        };
+        for m in &s.meshes {
+            m.tuft().unwrap_or_else(|e| panic!("{hash:#010X} ({path}): {e}"));
+            assert!(m.cull_depth() > m.alpha_zero_depth(), "{hash:#010X}: empty fade range");
+            *uv_scales.entry(format!("{:?}", m.material.uv_scale())).or_default() += 1;
+            meshes += 1;
+        }
+        for x in &s.ranges {
+            let vs = s.meshes[x.mesh as usize].info[1];
+            let shears = retail_name(vs).is_some_and(|n| n.ends_with("_ShearVertically"));
+            let first = x.first_instance as usize;
+            for i in &s.instances[first..first + x.instance_count as usize] {
+                instances += 1;
+                if shears {
+                    lowest_up = lowest_up.min(i.up()[1]);
+                }
+            }
+        }
+    }
+    eprintln!("{meshes} meshes, {instances} ranged instances; lowest shearing up.y {lowest_up}; uv scales {uv_scales:?}");
+    assert_eq!(meshes, 4000);
+    assert!(lowest_up > 0.0, "an instance of a shearing mesh lies flat or upside down");
 }
 
 #[test]

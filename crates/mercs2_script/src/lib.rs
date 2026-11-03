@@ -862,6 +862,16 @@ pub trait EngineHost {
         let _ = name;
         false
     }
+    /// `Sound.LoadBankWithCallback(name, sType, fCallback, tData)` / `UnloadBankWithCallback`: the same
+    /// request, with a completion the binding keeps under `callback`. `wave` is `sType == "wavebank"`.
+    fn sound_bank_op_with_callback(&mut self, name: &str, wave: bool, load: bool, callback: u32) -> bool {
+        let _ = (name, wave, load, callback);
+        false
+    }
+    /// The bank callbacks whose operation finished since the last call.
+    fn sound_take_bank_callbacks(&mut self) -> Vec<u32> {
+        Vec::new()
+    }
     /// `Sound.RequestAmbienceBank(name)` — load a bank as an ambience bank.
     fn sound_request_ambience_bank(&mut self, name: &str) -> bool {
         let _ = name;
@@ -1320,6 +1330,18 @@ pub trait EngineHost {
     /// is namespaced (`"Ns.Verb"`) so one log serves every remaining action surface.
     fn script_cmd(&mut self, verb: &str, args: Vec<String>) {
         let _ = (verb, args);
+    }
+
+    /// `LTILibName.LTIPauseItemChanged(item)`: the option pages' `key=value` dispatcher
+    /// (`FUN_005C37E0`). A host without option pages refuses it.
+    fn options_item_changed(&mut self, item: &str) -> Result<(), String> {
+        Err(format!("PauseItemChanged {item:?}: this host has no option pages"))
+    }
+
+    /// An option page's `LTILibName` call (`LTIVideoEnter`, `LTIVideoSwitchOpt1(n)`, …) with its one
+    /// argument as text when it takes one. A host without option pages refuses it.
+    fn options_call(&mut self, name: &str, arg: Option<String>) -> Result<(), String> {
+        Err(format!("LTILibName.{name}({arg:?}): this host has no option pages"))
     }
 }
 
@@ -1786,6 +1808,16 @@ impl ScriptHost {
         crate::bindings::event::fire_game_state_change(&self.lua, state, phase)
     }
 
+    /// Tell the widgets a game state changed (`GuiGameStateChange`); `action` is `"Enter"` or `"Exit"`.
+    pub fn fire_gui_state_change(&self, state: &str, action: &str) -> LuaResult<()> {
+        crate::bindings::event::fire_gui_game_state_change(&self.lua, state, action)
+    }
+
+    /// Run every awake widget's update callback.
+    pub fn pump_widget_updates(&self, host: &SharedHost, dt: f32) -> LuaResult<()> {
+        crate::bindings::hud::pump_widget_updates(&self.lua, host, dt)
+    }
+
     /// Dispatch every engine-side callback the host has queued this tick — the counterpart to the
     /// `fire_*` entry points above, for callbacks the *engine* completes rather than the script.
     ///
@@ -1798,7 +1830,14 @@ impl ScriptHost {
     /// were destroyed at registration and pushed into a Vec nothing drained.
     pub fn pump_callbacks(&self, host: &SharedHost, dt: f32) -> LuaResult<()> {
         crate::bindings::hud::pump_hud_callbacks(&self.lua, host, dt)?;
+        crate::bindings::sound::pump_bank_callbacks(&self.lua, host)?;
         crate::bindings::player::pump_player_callbacks(&self.lua, host)
+    }
+
+    /// Run the Flash event handler `callback` now, as a movie's FSCommand does inside the action that
+    /// sends it.
+    pub fn fire_flash_now(&self, callback: u32, param: Option<String>) -> LuaResult<()> {
+        crate::bindings::hud::fire_flash(&self.lua, callback, param)
     }
 
     /// Fire the `ObjectDeath` handlers registered for `guid`.
@@ -2024,6 +2063,45 @@ mod tests {
         assert_eq!(greet, "base");
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `0x5D3220` reads a handle as the key of the `Name` hash index, the same probe a name's hash
+    /// makes, so a handle resolves only if its value is a registered name hash; it is neither an
+    /// error nor an identity. Anything neither reader takes pushes nil.
+    #[test]
+    fn get_guid_by_name_probes_the_name_index_with_a_handle() {
+        const KEY: u64 = 0x8000_9AD2;
+        let name_hash = mercs2_formats::hash::pandemic_hash_m2("Support Vehicle (Mig27)");
+
+        let host = Rc::new(RefCell::new(RecordingHost::default()));
+        host.borrow().guids.borrow_mut().register_name(name_hash, KEY as u32);
+        let h = ScriptHost::bare().unwrap();
+        h.register_engine(host.clone()).unwrap();
+
+        let name_hash_handle = h.lua.create_function(move |_, ()| Ok(Guid(u64::from(name_hash)))).unwrap();
+        let key_handle = h.lua.create_function(|_, ()| Ok(Guid(KEY))).unwrap();
+        h.lua.globals().set("NameHashHandle", name_hash_handle).unwrap();
+        h.lua.globals().set("KeyHandle", key_handle).unwrap();
+
+        // The value is a registered name hash: the probe finds its owner.
+        let found: Guid = h.eval("return Pg.GetGuidByName(NameHashHandle())").unwrap();
+        assert_eq!(found, Guid(KEY));
+
+        // The shipped case: a template's own key is not a name hash, so the probe misses.
+        let missed: bool = h.eval("return Pg.GetGuidByName(KeyHandle()) == nil").unwrap();
+        assert!(missed, "a handle no name hashes to must push nil, not itself");
+
+        for arg in ["", "nil", "true", "false", "{}", "print"] {
+            let src = format!("return Pg.GetGuidByName({arg}) == nil");
+            let is_nil: bool = h.eval(&src).unwrap_or_else(|e| panic!("{src}: {e}"));
+            assert!(is_nil, "{src}");
+        }
+        let empty: bool = h.eval("return Pg.GetGuidByName('') == nil").unwrap();
+        assert!(empty, "\"\" hashes to 0, which fails the string read");
+
+        // Retail keys a full userdata by its payload address, which this host has no equivalent of.
+        let err = h.eval::<bool>("return Pg.GetGuidByName(newproxy()) == nil").unwrap_err();
+        assert!(err.to_string().contains("full-userdata"), "{err}");
     }
 
     #[test]

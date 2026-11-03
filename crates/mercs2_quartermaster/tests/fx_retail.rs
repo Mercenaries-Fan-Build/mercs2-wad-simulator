@@ -490,7 +490,7 @@ fn the_fixture_effects_take_retails_commonest_value_where_nothing_names_one() {
     let (half, n) = halves.iter().max_by_key(|(_, n)| **n).map(|(h, n)| (*h, *n)).unwrap();
     assert_eq!((half, n), (0x3C00, 46_104));
     let unresolved: Vec<usize> = (0..defs.len()).filter(|&i| defs[i].name.is_none()).collect();
-    assert_eq!(unresolved.len(), 15);
+    assert_eq!(unresolved.len(), 9);
     for f in ["qm-fx-a/src/qm_fx_cyan_burst.yaml", "qm-fx-b/src/qm_fx_green_burst.yaml"] {
         let fx = effect::read(&fixture(f)).unwrap().lower().unwrap();
         let p = &fx.emitters[0].particle;

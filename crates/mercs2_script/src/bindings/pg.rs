@@ -9,7 +9,7 @@
 //! `b.stub(..)` for a deliberate faithful no-op), then `b.install_global("Pg")`. Nothing else in
 //! the crate changes — the coverage harness (see `super`) picks up the delta automatically.
 
-use mercs2_luac::rt::{Lua, MultiValue, Result as LuaResult, Table, Value};
+use mercs2_luac::rt::{FromLua, Lua, MultiValue, Result as LuaResult, Table, Value};
 
 use super::{Installed, NsBuilder, Required};
 use crate::attribution::LuaFnExt;
@@ -29,7 +29,7 @@ fn guid_arg(v: Option<&Value>) -> LuaResult<Option<u64>> {
     match v {
         Some(Value::LightUserData(_)) => Ok(Some(Guid::from_value(v.expect("matched")).raw())),
         Some(Value::Other(_, "userdata")) => {
-            Err(mercs2_luac::rt::Error::RuntimeError("Pg.Spawn: a full-userdata guid is not modelled by this host".into()))
+            Err(mercs2_luac::rt::Error::RuntimeError("Pg: a full-userdata guid is not modelled by this host".into()))
         }
         _ => Ok(None),
     }
@@ -190,12 +190,34 @@ pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
     let h = host.clone();
     b.real(
         "GetGuidByName",
-        // Tolerant of a nil/absent name (the game calls this with an unresolved cargo/marker template,
-        // e.g. mrxsupportdelivery) → nil, matching the lenient engine rather than erroring on the arg.
-        lua.create_function(move |_, name: Option<String>| {
-            let guid = match name {
-                Some(n) if !n.is_empty() => h.borrow_mut().guid_by_name(&n),
-                _ => 0,
+        // `0x5D3220` (Xbox `0x82334398`, PS3 `0x54EFA0`) reads arg 1 twice into one key: its name hash
+        // (`FUN_0059FB00`; a string or a number, and 0 for "" and every other type, which fails the
+        // read), else its value as a guid (`FUN_0059FF50`). That key probes the `Name` hash index
+        // (`0xDF6BD8`), so a handle is looked up as if it were a name hash, not resolved to itself.
+        // A key the index does not hold, or an argument neither reader takes, pushes nil.
+        //
+        // The handle arm is reached by shipped code: `mrxbunkerbuster.lua:31` (`:21` in the decompile)
+        // passes its inherited `uDeliveryVehicle` where every sibling passes `sDeliveryVehicle`.
+        lua.create_function(move |lua, args: MultiValue| {
+            let args: Vec<Value> = args.into_iter().collect();
+            let guid = match args.first() {
+                Some(name @ (Value::String(_) | Value::Number(_))) => {
+                    let name = String::from_lua(name.clone(), lua)?;
+                    if name.is_empty() { 0 } else { h.borrow_mut().guid_by_name(&name) }
+                }
+                arg => match guid_arg(arg)? {
+                    Some(raw) => {
+                        let key = u32::try_from(raw).map_err(|_| {
+                            mercs2_luac::rt::Error::RuntimeError(format!(
+                                "Pg.GetGuidByName: handle {raw:#x} does not fit the 32-bit name index key"
+                            ))
+                        })?;
+                        let guids = h.borrow().guids();
+                        let owner = guids.borrow().key_by_name_hash(key);
+                        owner.map_or(0, u64::from)
+                    }
+                    None => 0,
+                },
             };
             // A handle crosses as lightuserdata (retail tag 2); 0 stays nil (`crate::guid`).
             Ok::<Guid, mercs2_luac::rt::Error>(Guid(guid))

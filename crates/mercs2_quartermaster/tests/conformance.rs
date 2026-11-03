@@ -166,6 +166,19 @@ contributions:
     display: Polski
     strings: src/text/polski.txt
 
+  - kind: add_level
+    name: arena
+    display: The Arena
+    streams:
+      - src/level/arena_streaming.pws
+
+  - kind: level_asset
+    level: arena
+    type: script
+    name: arena
+    rungs:
+      - { block: resident_P000_Q3, file: src/level/arena.ucfx }
+
   - kind: add_movie
     name: my_hud_widgets
     movie: src/ui/widgets.gfx
@@ -410,6 +423,19 @@ const JSON: &str = r#"
       "name": "polski",
       "display": "Polski",
       "strings": "src/text/polski.txt"
+    },
+    {
+      "kind": "add_level",
+      "name": "arena",
+      "display": "The Arena",
+      "streams": ["src/level/arena_streaming.pws"]
+    },
+    {
+      "kind": "level_asset",
+      "level": "arena",
+      "type": "script",
+      "name": "arena",
+      "rungs": [{ "block": "resident_P000_Q3", "file": "src/level/arena.ucfx" }]
     },
     {
       "kind": "add_movie",
@@ -685,6 +711,19 @@ display = "Polski"
 strings = "src/text/polski.txt"
 
 [[contributions]]
+kind = "add_level"
+name = "arena"
+display = "The Arena"
+streams = ["src/level/arena_streaming.pws"]
+
+[[contributions]]
+kind = "level_asset"
+level = "arena"
+type = "script"
+name = "arena"
+rungs = [{ block = "resident_P000_Q3", file = "src/level/arena.ucfx" }]
+
+[[contributions]]
 kind = "add_movie"
 name = "my_hud_widgets"
 movie = "src/ui/widgets.gfx"
@@ -868,6 +907,8 @@ fn toml_carries_the_kind_tag_for_every_v1_kind() {
             "activate_layer",
             "edit_stringdb",
             "add_language",
+            "add_level",
+            "level_asset",
             "add_movie",
             "add_ui",
             "patch_lua",

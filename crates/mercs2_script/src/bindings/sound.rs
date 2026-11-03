@@ -9,10 +9,32 @@
 //! `b.stub(..)` for a deliberate faithful no-op), then `b.install_global("Sound")`. Nothing else in
 //! the crate changes — the coverage harness (see `super`) picks up the delta automatically.
 
-use mercs2_luac::rt::{Lua, MultiValue, Result as LuaResult};
+use std::cell::RefCell;
+use std::collections::BTreeMap;
+use std::rc::Rc;
 
+use mercs2_luac::rt::{Function, Lua, MultiValue, Result as LuaResult, Value};
+
+use crate::attribution::LuaFnExt;
 use super::{Installed, NsBuilder, Required};
 use crate::{Guid, SharedHost};
+
+/// The bank-operation callbacks the scripts registered: the last id minted, and each id's function
+/// and context.
+type BankCallbacks = Rc<RefCell<(u32, BTreeMap<u32, (Function, Vec<Value>)>)>>;
+
+/// Run the callbacks of every bank operation the engine finished, as `fCallback(unpack(tData))`.
+pub fn pump_bank_callbacks(lua: &Lua, host: &SharedHost) -> LuaResult<()> {
+    let Some(cbs) = lua.app_data_ref::<BankCallbacks>().map(|c| c.clone()) else { return Ok(()) };
+    let done = host.borrow_mut().sound_take_bank_callbacks();
+    for id in done {
+        let entry = cbs.borrow_mut().1.remove(&id);
+        if let Some((f, args)) = entry {
+            f.call_attr::<()>(MultiValue::from_vec(args), "Sound.BankCallback")?;
+        }
+    }
+    Ok(())
+}
 
 /// A cue's voice id, `0` → nil.
 ///
@@ -252,20 +274,38 @@ pub fn install(lua: &Lua, host: &SharedHost) -> LuaResult<Installed> {
 
     // --- Bank residency → the real `BankManager` (`AudioEngine::load_*/unload_bank`). Returns whether
     // the request was accepted; the Lua completion callback is deferred (banks tick to complete). ---
-    for (verb, wave) in [
-        ("LoadBank", false), ("LoadSoundBank", false), ("LoadWaveBank", true),
-        ("LoadTempBank", false), ("LoadBankWithCallback", false),
-    ] {
+    for (verb, wave) in [("LoadBank", false), ("LoadSoundBank", false), ("LoadWaveBank", true), ("LoadTempBank", false)] {
         let h = host.clone();
         let is_wave = wave;
         b.real(verb, lua.create_function(move |_, name: String| {
             Ok(h.borrow_mut().sound_load_bank(&name, is_wave))
         })?)?;
     }
-    for verb in ["UnloadBank", "UnloadSoundBank", "UnloadWaveBank", "UnloadTempBank", "UnloadBankWithCallback"] {
+    for verb in ["UnloadBank", "UnloadSoundBank", "UnloadWaveBank", "UnloadTempBank"] {
         let h = host.clone();
         b.real(verb, lua.create_function(move |_, name: String| {
             Ok(h.borrow_mut().sound_unload_bank(&name))
+        })?)?;
+    }
+    // `MrxSoundBanks._SubmitAssetRequest` (`mrxsoundbanks.lua:58`) passes the bank, its type and
+    // `_FlagAssetOpComplete`, and counts its batch down only when that runs, so the callback is kept.
+    let callbacks: BankCallbacks = Rc::new(RefCell::new((0, BTreeMap::new())));
+    lua.set_app_data(callbacks.clone());
+    for (verb, load) in [("LoadBankWithCallback", true), ("UnloadBankWithCallback", false)] {
+        let h = host.clone();
+        let cbs = callbacks.clone();
+        b.real(verb, lua.create_function(move |_, (name, kind, f, ctx): (String, Option<String>, Option<Function>, Option<Value>)| {
+            let id = {
+                let mut c = cbs.borrow_mut();
+                c.0 += 1;
+                c.0
+            };
+            let wave = kind.as_deref() == Some("wavebank");
+            let accepted = h.borrow_mut().sound_bank_op_with_callback(&name, wave, load, id);
+            if let (true, Some(f)) = (accepted, f) {
+                cbs.borrow_mut().1.insert(id, (f, super::unpack_ctx(ctx)));
+            }
+            Ok(accepted)
         })?)?;
     }
     let h = host.clone();

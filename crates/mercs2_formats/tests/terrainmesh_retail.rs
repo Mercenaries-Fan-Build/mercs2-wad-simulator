@@ -160,6 +160,47 @@ fn every_terrain_and_scrub_object_has_a_transform() {
     assert_eq!(scrubs, raw_scrub);
 }
 
+/// `PRMT` word 0 is the vertex shader and word 1 the material: in every draw of every cell the material
+/// exists, and a ground draw's vertex shader writes at least the layers its material's pixel shader
+/// reads, and each pass group lies inside the draw list.
+#[test]
+fn every_draw_names_its_material_and_its_shaders_pair() {
+    use mercs2_formats::hash::pandemic_hash_m2 as m2;
+    let layers_of = |stem: &str| -> HashMap<u32, usize> {
+        ["", "1D", "2D", "3D", "4D"].iter().enumerate().map(|(n, d)| (m2(&format!("{stem}{d}")), n)).collect()
+    };
+    let (pixel, vertex) = (layers_of("PgTerrainMeshFP"), layers_of("PgTerrainMeshVP"));
+    let r = retail();
+    let (mut draws, mut ground, mut wider) = (0usize, 0usize, 0usize);
+    for (hash, _, bytes) in &r.cells {
+        let cell = TerrainCell::decode(bytes).unwrap_or_else(|e| panic!("{hash:#010X}: {e}"));
+        let materials = &cell.mtrl.materials;
+        for p in cell.geoms.iter().flat_map(|g| &g.prmgs) {
+            for pg in &p.pass_groups {
+                let end = pg.first_draw as usize + pg.draw_count as usize;
+                assert!(end <= p.draws.len(), "{hash:#010X}: a pass past the draws");
+                assert!((pg.terrain_end as usize) <= end, "{hash:#010X}: a pass's fade range");
+            }
+            for d in &p.draws {
+                draws += 1;
+                let m = materials.get(d.material as usize).unwrap_or_else(|| {
+                    panic!("{hash:#010X}: material {} of {}", d.material, materials.len())
+                });
+                if let Some(&reads) = pixel.get(&m.tail[0]) {
+                    ground += 1;
+                    let writes = *vertex.get(&d.vertex_shader).unwrap_or_else(|| {
+                        panic!("{hash:#010X}: material {} on vertex shader {:#010X}", d.material, d.vertex_shader)
+                    });
+                    assert!(writes >= reads, "{hash:#010X}: material {} reads {reads} layers of {writes}", d.material);
+                    wider += usize::from(writes > reads);
+                }
+            }
+        }
+    }
+    eprintln!("{draws} draws, {ground} on ground materials, {wider} with a wider vertex shader");
+    assert!(ground > 0, "no ground draw");
+}
+
 #[test]
 fn every_retail_cell_decodes_and_re_encodes_byte_identically() {
     let r = retail();

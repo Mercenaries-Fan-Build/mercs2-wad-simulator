@@ -31,6 +31,8 @@ cmac = "0.7"
 gltf ={ version = "1", default-features = false, features = ["utils", "names", "extras"] }
 # `load_ladder`: m2-sdk.dll's load triggers match the game log against loadprobe's own phase ladder.
 loadprobe = { workspace = true }
+# `shader_registry::Stage` is (de)serialized by mercs2_quartermaster's Shipment manifest.
+serde = { version = "1", features = ["derive"] }
 
 [target.'cfg(windows)'.dependencies]
 # `keys`: every virtual-key code in the name table is checked at compile time against the SDK's.
@@ -54,7 +56,23 @@ name = "char_lowering"
 required-features = ["retail"]
 
 [[test]]
+name = "texture_console_retail"
+required-features = ["retail"]
+
+[[test]]
+name = "ecs_console_retail"
+required-features = ["retail"]
+
+[[test]]
+name = "sound_console_retail"
+required-features = ["retail"]
+
+[[test]]
 name = "effect_retail_roundtrip"
+required-features = ["retail"]
+
+[[test]]
+name = "foliage_retail"
 required-features = ["retail"]
 
 [[test]]
@@ -127,4 +145,8 @@ required-features = ["retail"]
 
 [[test]]
 name = "worldentity_retail"
+required-features = ["retail"]
+
+[[test]]
+name = "facefx_retail"
 required-features = ["retail"]

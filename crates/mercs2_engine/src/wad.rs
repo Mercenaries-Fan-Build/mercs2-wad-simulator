@@ -12,6 +12,8 @@ use std::fs::File;
 
 pub const MODEL_TYPE_HASH: u32 = 0x5B72_4250; // pandemic_hash_m2("model")
 pub const MODEL_ASET_TYPE_ID: u32 = 19;
+/// ASET `type_id` of a ground cover pack (`scrub`).
+pub const SCRUB_ASET_TYPE_ID: u32 = 12;
 
 pub struct Wad {
     file: File,
@@ -24,6 +26,18 @@ pub struct Wad {
     /// assembler re-reads the same c3 finer-LOD blocks for every texture of a model that shares a
     /// cell subtree; caching the (often multi-MB) decompressed blocks avoids re-inflating them.
     block_cache: Vec<(u16, std::sync::Arc<Vec<u8>>)>,
+}
+
+impl Wad {
+    /// How many blocks the archive holds.
+    pub fn block_count(&self) -> u16 {
+        self.archive.paths.len() as u16
+    }
+
+    /// The archive path of a block.
+    pub fn block_path(&self, block: u16) -> &str {
+        self.archive.paths.get(block as usize).map_or("", String::as_str)
+    }
 }
 
 /// Discover `vz.wad` from the game's EA Games registry key
@@ -110,6 +124,11 @@ pub fn wad_path(wad: &Wad) -> &str {
     &wad.path
 }
 
+/// Every row of the archive's asset table.
+pub fn aset_entries(wad: &Wad) -> &[mercs2_formats::ffcs::AsetEntry] {
+    &wad.archive.aset
+}
+
 /// Every ASET `(type_id, is_primary, block_index)` a hash appears under (any type). For diagnosing
 /// what asset type a name-hash resolves to (e.g. model=19 vs a foliage/other type).
 pub fn aset_types(wad: &Wad, name_hash: u32) -> Vec<(u32, bool, u16)> {
@@ -135,6 +154,21 @@ pub fn aset_blocks_for_type_id(wad: &Wad, type_id: u32) -> Vec<u16> {
     let mut seen = std::collections::HashSet::new();
     v.retain(|b| seen.insert(*b));
     v
+}
+
+/// The chunk of a singleton class, found as [`aset_blocks_for_type_id`] says the engine finds one. `None`
+/// when no block of this archive carries the class, as a level with no trees has no `foliage`.
+pub fn singleton_chunk(wad: &mut Wad, type_hash: u32) -> Result<Option<Vec<u8>>, String> {
+    let type_id = mercs2_formats::types::type_id_for_type_hash(type_hash)
+        .ok_or_else(|| format!("0x{type_hash:08X} is not an asset class"))?;
+    for block in aset_blocks_for_type_id(wad, type_id) {
+        let dec = cached_block(wad, block)?;
+        let spans = mercs2_formats::ucfx::block_chunk_spans(&dec).map_err(|e| format!("block {block}: {e}"))?;
+        if let Some((_, range)) = spans.iter().find(|(e, _)| e.type_hash == type_hash) {
+            return Ok(Some(dec[range.clone()].to_vec()));
+        }
+    }
+    Ok(None)
 }
 
 /// Every distinct ASET `(name_hash, type_id, is_primary)` in the archive — for reverse-name hunts over
@@ -393,15 +427,39 @@ fn crop_loading_plate(td: mercs2_formats::texture::TextureData) -> mercs2_format
 /// Decompress a raw block by index (for animgroup blocks, which `animgroup::parse_animgroup`
 /// consumes whole — they are not `type_hash=="model"` containers).
 pub fn decompress_block_index(wad: &mut Wad, block: u16) -> Result<Vec<u8>, String> {
-    if let Some((_, data)) = wad.block_cache.iter().find(|(b, _)| *b == block) {
-        return Ok((**data).clone());
+    Ok((*cached_block(wad, block)?).clone())
+}
+
+/// Decompressed blocks a [`Wad`] keeps, in bytes. A size, not a count: texture assembly walks a whole
+/// cell subtree in order for each texture, so a cache shorter than the walk never hits.
+const BLOCK_CACHE_BYTES: usize = 256 << 20;
+
+/// The decompressed `block`, from the cache when it is there.
+fn cached_block(wad: &mut Wad, block: u16) -> Result<std::sync::Arc<Vec<u8>>, String> {
+    if let Some(at) = wad.block_cache.iter().position(|(b, _)| *b == block) {
+        let hit = wad.block_cache.remove(at);
+        let data = hit.1.clone();
+        wad.block_cache.push(hit);
+        return Ok(data);
     }
-    let data = decompress_block(&mut wad.file, &wad.archive.indx, block)?;
-    wad.block_cache.push((block, std::sync::Arc::new(data.clone())));
-    if wad.block_cache.len() > 6 {
-        wad.block_cache.remove(0);
-    }
+    let data = std::sync::Arc::new(decompress_block(&mut wad.file, &wad.archive.indx, block)?);
+    remember_block(&mut wad.block_cache, block, data.clone(), BLOCK_CACHE_BYTES);
     Ok(data)
+}
+
+/// Add a block as the most recent, dropping the least recent until the cache fits in `limit` bytes. The
+/// newest stays whatever its size.
+fn remember_block(cache: &mut Vec<(u16, std::sync::Arc<Vec<u8>>)>, block: u16, data: std::sync::Arc<Vec<u8>>, limit: usize) {
+    cache.push((block, data));
+    let mut held: usize = cache.iter().map(|(_, d)| d.len()).sum();
+    while held > limit && cache.len() > 1 {
+        held -= cache.remove(0).1.len();
+    }
+}
+
+/// The path this archive was opened from.
+pub fn path(wad: &Wad) -> &str {
+    &wad.path
 }
 
 /// Block path strings (PTHS), indexed by block index (e.g. `…\c30123\…` names cell blocks).
@@ -479,6 +537,11 @@ pub fn has_model(wad: &Wad, name_hash: u32) -> bool {
     wad.archive.aset.iter().any(|e| e.asset_hash == name_hash && e.type_id == MODEL_ASET_TYPE_ID)
 }
 
+/// Whether the archive carries ground cover pack `name_hash`.
+pub fn has_scrub(wad: &Wad, name_hash: u32) -> bool {
+    wad.archive.aset.iter().any(|e| e.asset_hash == name_hash && e.type_id == SCRUB_ASET_TYPE_ID)
+}
+
 /// Extract the UCFX model container for `name_hash` via its ASET block. Prefers the PRIMARY model
 /// entry, but falls back to a SUB-ENTRY (`is_primary == false`) — the instanced world content
 /// (trees/rocks/bushes/lamps like `jungle_env_plantlarge04`) is a shared model carried as a sub-entry
@@ -497,7 +560,7 @@ pub fn extract_container(wad: &mut Wad, name_hash: u32) -> Result<Vec<u8>, Strin
         })
         .map(|e| e.block_index())
         .ok_or_else(|| format!("no model ASET for 0x{name_hash:08X}"))?;
-    let dec = decompress_block(&mut wad.file, &wad.archive.indx, block)?;
+    let dec = cached_block(wad, block)?;
     let (s, e) = find_model_span(&dec, Some(name_hash))
         .ok_or_else(|| format!("model 0x{name_hash:08X} not found in block {block}"))?;
     Ok(dec[s..e].to_vec())
@@ -604,7 +667,7 @@ pub fn extract_container_typed(
         return Err(format!("no ASET for 0x{name_hash:08X}"));
     }
     for &block in &blocks {
-        let dec = decompress_block(&mut wad.file, &wad.archive.indx, block)?;
+        let dec = cached_block(wad, block)?;
         let (count, entries) = mercs2_formats::ucfx::parse_block_entry_table(&dec);
         let mut pos = 4 + count as usize * 16;
         for e in &entries {
@@ -672,5 +735,22 @@ mod resolve_tests {
         assert_eq!(resolve_vz_wad(Some(&tmp.to_string_lossy())).as_deref(), Some(want.as_str()));
 
         std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    /// The cache is bounded by bytes, drops the least recent first, and keeps a block larger than the
+    /// whole limit: the caller is about to read it.
+    #[test]
+    fn the_block_cache_keeps_the_most_recent_within_its_bytes() {
+        let block = |n: usize| std::sync::Arc::new(vec![0u8; n]);
+        let held = |c: &Vec<(u16, std::sync::Arc<Vec<u8>>)>| c.iter().map(|(b, _)| *b).collect::<Vec<_>>();
+        let mut cache = Vec::new();
+        for b in 0..4 {
+            remember_block(&mut cache, b, block(10), 30);
+        }
+        assert_eq!(held(&cache), [1, 2, 3]);
+        remember_block(&mut cache, 4, block(15), 30);
+        assert_eq!(held(&cache), [3, 4]);
+        remember_block(&mut cache, 5, block(100), 30);
+        assert_eq!(held(&cache), [5]);
     }
 }

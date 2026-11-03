@@ -144,14 +144,14 @@ fn main() {
             0
         };
 
-        let p3_out = match convert_block(&p3.raw, false, None, Some(&lua_tools)) {
+        let p3_out = match convert_block(&p3.raw, false, None, Some(&lua_tools), None, None) {
             Ok(b) => b,
             Err(_) => {
                 ps3_fail += 1;
                 continue;
             }
         };
-        let xb_out = match convert_block(&xb.raw, false, None, Some(&lua_tools)) {
+        let xb_out = match convert_block(&xb.raw, false, None, Some(&lua_tools), None, None) {
             Ok(b) => b,
             Err(_) => {
                 xbox_fail += 1;

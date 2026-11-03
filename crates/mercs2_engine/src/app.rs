@@ -24,13 +24,13 @@ use mercs2_core::glam::Mat4;
 use mercs2_core::glam::Vec3;
 use mercs2_core::{Time, World};
 use winit::event::{DeviceEvent, ElementState, Event, KeyEvent, MouseButton, WindowEvent};
-use winit::event_loop::EventLoop;
+use winit::event_loop::{ControlFlow, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{CursorGrabMode, Window, WindowBuilder};
 
 use crate::input::{Bindings, Gamepad, Input};
 use crate::render::LoadProgress;
-use crate::scene::Scene;
+use crate::scene::{Scene, SurfaceError};
 
 /// The loading layer sits one below the game layer (the recovered 0→4 climb, `FUN_004c15e0`): the
 /// background loader runs while it is active, then loader-completion raises the target to `LAYER_GAME`.
@@ -66,9 +66,10 @@ pub struct GameConfig {
     /// Sky/atmosphere tunables (game content; engine renders them). `None` leaves the scene's default
     /// atmosphere untouched (the TPS boot relies on fog-only, no explicit atmosphere).
     pub atmosphere: Option<mercs2_formats::atmosphere::Atmosphere>,
-    /// Path to the base `vz.wad`; the engine resolves the `shell.wad` loading plate as a sibling. `None`
-    /// = spinner only.
-    pub loading_plate_wad: Option<String>,
+    /// Path to the base `vz.wad`. The engine reads its siblings in the game's data folder: the
+    /// `shell.wad` loading plate and `shader3.bin`, whose pixel shaders decide what each material
+    /// texture slot binds ([`crate::render::pixel_samplers`]).
+    pub vz_wad: String,
     /// Number of load stages for the progress bar.
     pub load_stages: u32,
     /// The action→key/pad binding table (data-driven from `Mercs2.ini`). `Bindings::default()` is fine
@@ -98,6 +99,13 @@ pub struct Ctx<'a> {
     pub input: &'a Input<'a>,
     /// Keys that transitioned to pressed THIS frame (rising edges) — for menu nav + the Tab cam toggle.
     pub pressed: &'a std::collections::HashSet<KeyCode>,
+    /// Keys that went back up THIS frame.
+    pub released: &'a std::collections::HashSet<KeyCode>,
+    /// The free cursor on the menu layer, in window pixels.
+    pub cursor: [f32; 2],
+    /// Whether the mouse wheel turned away from the user (up) and toward them (down) THIS frame.
+    pub wheel_up: bool,
+    pub wheel_down: bool,
     /// This frame's selected-source mouse delta in pixels (dual-source raw/absolute already resolved).
     /// The game applies its own sensitivity/inversion.
     pub mouse_delta: (f32, f32),
@@ -154,6 +162,50 @@ pub trait Game {
 
     /// The 2D pass over the engine `ui` overlay (shell menu + HUD). Default no-op.
     fn ui(&mut self, _ctx: &mut Ctx) {}
+
+    /// Binds the game read again since the last frame (the options' remap page saved new ones), for
+    /// the engine's [`Input`] from now on.
+    fn take_bindings(&mut self) -> Option<Bindings> {
+        None
+    }
+}
+
+/// The frame-rate meter in the window's top-left corner, on every layer: frames a second, the mean
+/// frame time and the longest frame, over each half second.
+struct FpsMeter {
+    since: std::time::Instant,
+    frames: u32,
+    worst: f32,
+    text: String,
+}
+
+impl FpsMeter {
+    const WINDOW_SECONDS: f32 = 0.5;
+
+    fn new(now: std::time::Instant) -> FpsMeter {
+        FpsMeter { since: now, frames: 0, worst: 0.0, text: "-- fps".into() }
+    }
+
+    /// Count a frame that came `interval` seconds after the last.
+    fn frame(&mut self, now: std::time::Instant, interval: f32) {
+        self.frames += 1;
+        self.worst = self.worst.max(interval);
+        let elapsed = (now - self.since).as_secs_f32();
+        if elapsed >= Self::WINDOW_SECONDS {
+            let frames = self.frames as f32;
+            self.text = format!("{:.0} fps  {:.1} ms  worst {:.1} ms", frames / elapsed, elapsed * 1000.0 / frames, self.worst * 1000.0);
+            *self = FpsMeter { since: now, frames: 0, worst: 0.0, text: std::mem::take(&mut self.text) };
+        }
+    }
+
+    /// Stage the meter on this frame's overlay, which every layer's render draws.
+    fn stage(&self, scene: &mut Scene) {
+        let scale = 2.0 * scene.window.scale_factor() as f32;
+        let pad = 3.0 * scale;
+        let width = crate::ui::UiPass::text_width(&self.text, scale);
+        scene.ui_rect(0.0, 0.0, width + 2.0 * pad, 8.0 * scale + 2.0 * pad, [0.0, 0.0, 0.0, 0.6]);
+        scene.ui_text(pad, pad, scale, [1.0, 1.0, 1.0, 1.0], &self.text);
+    }
 }
 
 /// The single engine-owned event loop. Opens the window from `game.config()`, drives the background
@@ -195,12 +247,13 @@ pub async fn run<G: Game + 'static>(mut game: G) {
     if let Some(atmos) = cfg.atmosphere.clone() {
         scene.set_atmosphere(atmos);
     }
-    if let Some(wadpath) = &cfg.loading_plate_wad {
-        match crate::wad::shell_loading_plate(wadpath) {
-            Ok(td) => scene.set_loading_art(&td),
-            Err(e) => eprintln!("[app] loading art unavailable ({e}); spinner only"),
-        }
+    match crate::wad::shell_loading_plate(&cfg.vz_wad) {
+        Ok(td) => scene.set_loading_art(&td),
+        Err(e) => eprintln!("[app] loading art unavailable ({e}); spinner only"),
     }
+    scene.set_pixel_samplers(
+        crate::render::pixel_samplers(std::path::Path::new(&cfg.vz_wad)).unwrap_or_else(|e| panic!("[app] {e}")),
+    );
 
     let progress = Arc::new(LoadProgress::new(cfg.load_stages));
     // A menu boot defers the loader until the player picks a save (`StartLoad`); a direct boot starts it
@@ -212,7 +265,7 @@ pub async fn run<G: Game + 'static>(mut game: G) {
     // host can hold its own clone (see `Ctx`).
     let world = Rc::new(RefCell::new(World::new()));
 
-    let bindings = cfg.bindings;
+    let mut bindings = cfg.bindings;
     let grab_on_load = cfg.grab_cursor;
     let mut gamepad = Gamepad::new();
     let mut held: std::collections::HashSet<KeyCode> = std::collections::HashSet::new();
@@ -227,12 +280,23 @@ pub async fn run<G: Game + 'static>(mut game: G) {
     let mut bar_shown = 0.0f32;
     let mut bar_last_t = 0.0f32;
     let mut last = std::time::Instant::now();
+    let mut fps = FpsMeter::new(last);
+    // Frames come no faster than `[Render] RefreshRate` a second, the rate retail presents at.
+    let refresh_rate = crate::ini::refresh_rate(&cfg.vz_wad).unwrap_or_else(|e| {
+        eprintln!("[app] {e}");
+        std::process::exit(1);
+    });
+    let frame_period = std::time::Duration::from_secs_f64(1.0 / refresh_rate as f64);
     // Dual-source mouse accumulators: CursorMoved (absolute, recentred) vs DeviceEvent raw delta. A
     // Shadow-PC-style absolute raw stream is detected and ignored in favour of the recentre path.
     let mut mouse_acc: (f32, f32) = (0.0, 0.0);
     let mut mouse_raw_acc: (f32, f32) = (0.0, 0.0);
     let mut mouse_src: u8 = 0;
     let mut mouse_sane_events: u32 = 0;
+    // Where the free cursor is on the menu layer, in window pixels.
+    let mut cursor = [0.0f32; 2];
+    // The wheel's turns since the last frame: (up, down).
+    let mut wheel = (false, false);
 
     event_loop
         .run(move |event, elwt| match event {
@@ -260,10 +324,19 @@ pub async fn run<G: Game + 'static>(mut game: G) {
                         mouse_btns.remove(&button);
                     }
                 },
+                WindowEvent::MouseWheel { delta, .. } => {
+                    let y = match delta {
+                        winit::event::MouseScrollDelta::LineDelta(_, y) => y as f64,
+                        winit::event::MouseScrollDelta::PixelDelta(p) => p.y,
+                    };
+                    wheel.0 |= y > 0.0;
+                    wheel.1 |= y < 0.0;
+                }
                 WindowEvent::Resized(size) => scene.resize(size),
                 WindowEvent::CursorMoved { position, .. } => {
                     // On the menu layer the cursor stays free/visible — no look-accumulate, no recentre.
                     if layers.active() == LAYER_MENU {
+                        cursor = [position.x as f32, position.y as f32];
                         return;
                     }
                     let (cx, cy) = (scene.size.width as f64 / 2.0, scene.size.height as f64 / 2.0);
@@ -273,21 +346,32 @@ pub async fn run<G: Game + 'static>(mut game: G) {
                 }
                 WindowEvent::RedrawRequested => {
                     let now = std::time::Instant::now();
-                    let real_dt = (now - last).as_secs_f32().min(0.1);
+                    let interval = (now - last).as_secs_f32();
+                    let real_dt = interval.min(0.1);
                     last = now;
+                    fps.frame(now, interval);
+                    fps.stage(&mut scene);
                     // Rising key edges this frame (menu nav + Tab toggle) + poll the gamepad up front so
                     // both the menu and the game layers see fresh input.
                     let pressed: std::collections::HashSet<KeyCode> = held.difference(&prev_held).copied().collect();
+                    let released: std::collections::HashSet<KeyCode> = prev_held.difference(&held).copied().collect();
                     prev_held = held.clone();
+                    let (wheel_up, wheel_down) = std::mem::take(&mut wheel);
                     gamepad.update();
 
                     // MENU layer: the shell owns the frame — nav + draw + render live in the game. On
                     // StartLoad, spawn the loader (reading the game's stored selection), grab the cursor,
                     // reset the loading clock, and climb.
                     if layers.active() == LAYER_MENU {
-                        let input = Input { bindings: &bindings, keys: &held, mouse: &mouse_btns, gamepad: &gamepad };
-                        let mut ctx = Ctx { world: &world, scene: &mut scene, input: &input, pressed: &pressed, mouse_delta: (0.0, 0.0), time: &time, window: &window, dt: real_dt };
-                        match game.menu(&mut ctx) {
+                        let outcome = {
+                            let input = Input { bindings: &bindings, keys: &held, mouse: &mouse_btns, gamepad: &gamepad };
+                            let mut ctx = Ctx { world: &world, scene: &mut scene, input: &input, pressed: &pressed, released: &released, cursor, wheel_up, wheel_down, mouse_delta: (0.0, 0.0), time: &time, window: &window, dt: real_dt };
+                            game.menu(&mut ctx)
+                        };
+                        if let Some(read) = game.take_bindings() {
+                            bindings = read;
+                        }
+                        match outcome {
                             MenuOutcome::Stay => return,
                             MenuOutcome::Exit => {
                                 elwt.exit();
@@ -340,7 +424,7 @@ pub async fn run<G: Game + 'static>(mut game: G) {
                         if let Some(LayerTransition::Ascending(LAYER_GAME)) = layers.advance() {
                             let Some(data) = pending.take() else { continue };
                             let input = Input { bindings: &bindings, keys: &held, mouse: &mouse_btns, gamepad: &gamepad };
-                            let mut ctx = Ctx { world: &world, scene: &mut scene, input: &input, pressed: &pressed, mouse_delta: (0.0, 0.0), time: &time, window: &window, dt: real_dt };
+                            let mut ctx = Ctx { world: &world, scene: &mut scene, input: &input, pressed: &pressed, released: &released, cursor, wheel_up, wheel_down, mouse_delta: (0.0, 0.0), time: &time, window: &window, dt: real_dt };
                             game.setup(&mut ctx, data);
                         }
                     }
@@ -353,8 +437,8 @@ pub async fn run<G: Game + 'static>(mut game: G) {
                         bar_shown += (progress.fraction() - bar_shown) * (1.0 - (-6.0 * dt).exp());
                         match scene.render_loading(t, bar_shown) {
                             Ok(()) => {}
-                            Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => scene.resize(scene.size),
-                            Err(wgpu::SurfaceError::OutOfMemory) => elwt.exit(),
+                            Err(SurfaceError::Lost | SurfaceError::Outdated) => scene.resize(scene.size),
+                            Err(SurfaceError::Occluded) => {}
                             Err(e) => eprintln!("surface error: {e:?}"),
                         }
                         return;
@@ -368,7 +452,7 @@ pub async fn run<G: Game + 'static>(mut game: G) {
                     mouse_raw_acc = (0.0, 0.0);
 
                     let input = Input { bindings: &bindings, keys: &held, mouse: &mouse_btns, gamepad: &gamepad };
-                    let mut ctx = Ctx { world: &world, scene: &mut scene, input: &input, pressed: &pressed, mouse_delta, time: &time, window: &window, dt: real_dt };
+                    let mut ctx = Ctx { world: &world, scene: &mut scene, input: &input, pressed: &pressed, released: &released, cursor, wheel_up, wheel_down, mouse_delta, time: &time, window: &window, dt: real_dt };
                     let cam = game.update(&mut ctx);
                     for _ in 0..steps {
                         game.fixed_update(&mut ctx);
@@ -379,8 +463,8 @@ pub async fn run<G: Game + 'static>(mut game: G) {
                     scene.set_view(cam.view, cam.near, cam.far);
                     match scene.render(&world.borrow()) {
                         Ok(()) => {}
-                        Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => scene.resize(scene.size),
-                        Err(wgpu::SurfaceError::OutOfMemory) => elwt.exit(),
+                        Err(SurfaceError::Lost | SurfaceError::Outdated) => scene.resize(scene.size),
+                        Err(SurfaceError::Occluded) => {}
                         Err(e) => eprintln!("surface error: {e:?}"),
                     }
                 }
@@ -404,7 +488,14 @@ pub async fn run<G: Game + 'static>(mut game: G) {
                     }
                 }
             }
-            Event::AboutToWait => scene.window.request_redraw(),
+            Event::AboutToWait => {
+                let next = last + frame_period;
+                if std::time::Instant::now() >= next {
+                    scene.window.request_redraw();
+                } else {
+                    elwt.set_control_flow(ControlFlow::WaitUntil(next));
+                }
+            }
             _ => {}
         })
         .expect("event loop run");

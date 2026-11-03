@@ -5,7 +5,6 @@ edition = "2021"
 description = "Mercenaries 2 modernization — cross-build exe map: the catalogue of known Mercenaries2.exe builds, their code layouts, and a per-section layout-membership checker."
 license.workspace = true
 repository.workspace = true
-publish = false
 
 [lib]
 name = "mercs2_exemap"
@@ -20,7 +19,7 @@ clap = { version = "4", features = ["derive"] }
 sha2 = "0.10"
 md-5 = "0.10"
 sha1 = "0.10"
-securom_unwrap = { path = "../securom_unwrap" }
+securom_unwrap = { workspace = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 zip = { version = "2", default-features = false, features = ["deflate"] }
