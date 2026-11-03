@@ -235,8 +235,8 @@ pub fn animation_system(
     // Collect palettes during the query, then insert after it releases the component borrows.
     let mut palettes: Vec<(Entity, Vec<[[f32; 4]; 4]>)> = Vec::new();
 
-    for (entity, (model, set, ctrl)) in world
-        .query::<(&ModelRef, &mut HumanAnimationSet, &mut AnimController)>()
+    for (entity, model, set, ctrl) in world
+        .query::<(Entity, &ModelRef, &mut HumanAnimationSet, &mut AnimController)>()
         .iter()
     {
         // 1. Selection → crossfade.
