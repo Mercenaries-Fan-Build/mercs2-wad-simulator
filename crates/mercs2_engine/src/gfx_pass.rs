@@ -37,7 +37,13 @@ pub struct WadImages {
     index: HashMap<u32, (usize, u16)>,
     movies: HashMap<u32, (usize, u16)>,
     scripts: HashMap<u32, Vec<u8>>,
+    /// Sound banks and their cue tables, by `(type, name)`.
+    sound: HashMap<(u32, u32), (usize, u16)>,
 }
+
+/// The asset types [`WadImages::sound_data`] reads.
+const SOUND_TYPES: [u32; 3] =
+    [mercs2_formats::types::TYPE_HASH_WAVEBANK, mercs2_formats::types::TYPE_HASH_SOUNDBANK, crate::audio::sounddb::ASSET_TYPE_SOUNDDB];
 
 impl WadImages {
     pub fn open(paths: &[String]) -> Result<WadImages, String> {
@@ -45,6 +51,7 @@ impl WadImages {
         let mut index = HashMap::new();
         let mut movies = HashMap::new();
         let mut scripts = HashMap::new();
+        let mut sound = HashMap::new();
         for (w, path) in paths.iter().enumerate() {
             let mut wad = crate::wad::open(path)?;
             for block in 0..wad.block_count() {
@@ -57,6 +64,8 @@ impl WadImages {
                         index.entry(e.name_hash).or_insert((w, block));
                     } else if e.type_hash == mercs2_formats::types::TYPE_HASH_CFX_PACK {
                         movies.entry(e.name_hash).or_insert((w, block));
+                    } else if SOUND_TYPES.contains(&e.type_hash) {
+                        sound.entry((e.type_hash, e.name_hash)).or_insert((w, block));
                     } else if e.type_hash == mercs2_formats::types::TYPE_HASH_SCRIPT && !scripts.contains_key(&e.name_hash) {
                         let container = bytes.get(at..end).ok_or_else(|| format!("a script overruns block {block} of {path}"))?;
                         let lay = mercs2_formats::scripts_block::parse_container(container).map_err(|e| format!("a script in {path}: {e}"))?;
@@ -67,7 +76,26 @@ impl WadImages {
             }
             wads.push(wad);
         }
-        Ok(WadImages { wads, index, movies, scripts })
+        Ok(WadImages { wads, index, movies, scripts, sound })
+    }
+
+    /// The `data` body of a sound bank or cue table, by type and name; `None` when no WAD has it.
+    pub fn sound_data(&mut self, type_hash: u32, name: &str) -> Result<Option<Vec<u8>>, String> {
+        let hash = mercs2_formats::hash::pandemic_hash_m2(name);
+        let Some(&(w, block)) = self.sound.get(&(type_hash, hash)) else { return Ok(None) };
+        let bytes = crate::wad::decompress_block_index(&mut self.wads[w], block)?;
+        let (count, entries) = mercs2_formats::ucfx::parse_block_entry_table(&bytes);
+        let mut at = 4 + count as usize * 16;
+        for e in &entries {
+            let end = at + e.chunk_size as usize;
+            if e.type_hash == type_hash && e.name_hash == hash {
+                let chunk = bytes.get(at..end).ok_or_else(|| format!("{name} overruns its block"))?;
+                let body = mercs2_formats::ucfx::extract_chunk_body(chunk, b"data").ok_or_else(|| format!("{name} has no data chunk"))?;
+                return Ok(Some(body));
+            }
+            at = end;
+        }
+        Err(format!("block {block} lost {name}"))
     }
 
     /// Hand over the scripts these WADs hold: each module's LuaQ chunk, by its name hash.
@@ -200,19 +228,32 @@ pub struct GfxPass {
     frames: Vec<Frame>,
 }
 
-/// The wgpu blend of a SWF blend mode.
-fn blend_state(mode: u8) -> Result<wgpu::BlendState, String> {
+/// The wgpu blend of a SWF blend mode: retail's `{BLENDOP, SRCBLEND, DESTBLEND}` table at
+/// `0x00DFDBA8`, applied by `FUN_004AF660`, which takes a mode of 15 or more as 0. Screen,
+/// difference, invert, overlay and hardlight draw as normal there; alpha and erase leave the colour
+/// alone. Lighten and darken are `MAX`/`MIN`, which take no factors.
+fn blend_state(mode: u8) -> wgpu::BlendState {
     use wgpu::{BlendComponent as C, BlendFactor as F, BlendOperation as O};
     let over = C { src_factor: F::One, dst_factor: F::OneMinusSrcAlpha, operation: O::Add };
     let color = match mode {
-        0 | 1 => C { src_factor: F::SrcAlpha, dst_factor: F::OneMinusSrcAlpha, operation: O::Add },
-        3 => C { src_factor: F::Dst, dst_factor: F::OneMinusSrcAlpha, operation: O::Add },
-        4 => C { src_factor: F::One, dst_factor: F::OneMinusSrc, operation: O::Add },
+        3 => C { src_factor: F::Dst, dst_factor: F::Zero, operation: O::Add },
+        5 => C { src_factor: F::One, dst_factor: F::One, operation: O::Max },
+        6 => C { src_factor: F::One, dst_factor: F::One, operation: O::Min },
         8 => C { src_factor: F::SrcAlpha, dst_factor: F::One, operation: O::Add },
         9 => C { src_factor: F::SrcAlpha, dst_factor: F::One, operation: O::ReverseSubtract },
-        other => return Err(format!("blend mode {other} has no pipeline")),
+        11 | 12 => C { src_factor: F::Zero, dst_factor: F::One, operation: O::Add },
+        _ => C { src_factor: F::SrcAlpha, dst_factor: F::OneMinusSrcAlpha, operation: O::Add },
     };
-    Ok(wgpu::BlendState { color, alpha: over })
+    wgpu::BlendState { color, alpha: over }
+}
+
+/// The fragment entry for a blend mode: multiply and darken take their colour pulled toward white by
+/// its alpha, `(rgb − 1)·a + 1` (`FUN_004AF950` for solid fills, `CxformTexMultiplyFP` for the rest).
+fn fragment_entry(mode: u8) -> &'static str {
+    match mode {
+        3 | 6 => "fs_toward_white",
+        _ => "fs_main",
+    }
 }
 
 fn upload_rgba(device: &wgpu::Device, queue: &wgpu::Queue, width: u32, height: u32, rgba: &[u8]) -> wgpu::TextureView {
@@ -313,8 +354,8 @@ impl GfxPass {
             },
             fragment: Some(wgpu::FragmentState {
                 module: &self.shader,
-                entry_point: Some("fs_main"),
-                targets: &[Some(wgpu::ColorTargetState { format: self.format, blend: Some(blend_state(blend)?), write_mask })],
+                entry_point: Some(fragment_entry(blend)),
+                targets: &[Some(wgpu::ColorTargetState { format: self.format, blend: Some(blend_state(blend)), write_mask })],
                 compilation_options: Default::default(),
             }),
             primitive: wgpu::PrimitiveState { topology: wgpu::PrimitiveTopology::TriangleList, cull_mode: None, ..Default::default() },
@@ -538,20 +579,20 @@ impl GfxPass {
         Ok(())
     }
 
-    /// Record the prepared frames. The pass needs a stencil attachment of [`Self::depth_format`].
-    pub fn record<'p>(&'p self, pass: &mut wgpu::RenderPass<'p>) {
-        for frame in &self.frames {
-            if frame.batches.is_empty() {
-                continue;
-            }
-            pass.set_vertex_buffer(0, frame.vertices.slice(..));
-            pass.set_index_buffer(frame.indices.slice(..), wgpu::IndexFormat::Uint32);
-            for batch in &frame.batches {
-                pass.set_pipeline(&self.pipelines[&(batch.blend, batch.stencil)]);
-                pass.set_bind_group(0, &self.bindings[&batch.source], &[]);
-                pass.set_stencil_reference(batch.level);
-                pass.draw_indexed(batch.indices.clone(), 0, 0..1);
-            }
+    /// Record one movie's frame, the `index`th prepared since [`Self::begin`]. The pass needs a
+    /// stencil attachment of [`Self::depth_format`].
+    pub fn record_frame<'p>(&'p self, pass: &mut wgpu::RenderPass<'p>, index: usize) {
+        let frame = &self.frames[index];
+        if frame.batches.is_empty() {
+            return;
+        }
+        pass.set_vertex_buffer(0, frame.vertices.slice(..));
+        pass.set_index_buffer(frame.indices.slice(..), wgpu::IndexFormat::Uint32);
+        for batch in &frame.batches {
+            pass.set_pipeline(&self.pipelines[&(batch.blend, batch.stencil)]);
+            pass.set_bind_group(0, &self.bindings[&batch.source], &[]);
+            pass.set_stencil_reference(batch.level);
+            pass.draw_indexed(batch.indices.clone(), 0, 0..1);
         }
     }
 
@@ -560,8 +601,15 @@ impl GfxPass {
     }
 }
 
-/// Render one draw list off screen to RGBA, on a device of its own.
-pub fn render_to_rgba(draws: &[crate::flash::FlashDraw], images: &mut dyn GfxImages, size: [u32; 2], clear: [f64; 4]) -> Result<Vec<u8>, String> {
+/// Render Flash and Bink movies off screen to RGBA, on a device of its own, in `layers` order.
+pub fn render_to_rgba(
+    draws: &[crate::flash::FlashDraw],
+    images: &mut dyn GfxImages,
+    movies: &[crate::movie::MovieDraw],
+    layers: &[crate::scene::FrontLayer],
+    size: [u32; 2],
+    clear: [f64; 4],
+) -> Result<Vec<u8>, String> {
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
     let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
         power_preference: wgpu::PowerPreference::HighPerformance,
@@ -605,6 +653,8 @@ pub fn render_to_rgba(draws: &[crate::flash::FlashDraw], images: &mut dyn GfxIma
     for draw in draws {
         gfx.prepare(&device, &queue, &draw.def, &draw.items, images)?;
     }
+    let mut movie_pass = crate::movie_pass::MoviePass::new(&device, format, DEPTH_STENCIL);
+    movie_pass.prepare(&device, &queue, movies, size);
     let row = (size[0] * 4).next_multiple_of(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT);
     let readback = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("gfx readback"),
@@ -636,7 +686,12 @@ pub fn render_to_rgba(draws: &[crate::flash::FlashDraw], images: &mut dyn GfxIma
                 multiview_mask: None,
             })
             .forget_lifetime();
-        gfx.record(&mut pass);
+        for layer in layers {
+            match *layer {
+                crate::scene::FrontLayer::Flash(i) => gfx.record_frame(&mut pass, i),
+                crate::scene::FrontLayer::Movie(i) => movie_pass.record(&mut pass, i),
+            }
+        }
     }
     encoder.copy_texture_to_buffer(
         wgpu::TexelCopyTextureInfo { texture: &target, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
@@ -657,4 +712,24 @@ pub fn render_to_rgba(draws: &[crate::flash::FlashDraw], images: &mut dyn GfxIma
         out.extend_from_slice(&data[start..start + size[0] as usize * 4]);
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use wgpu::{BlendComponent as C, BlendFactor as F, BlendOperation as O};
+
+    /// Rows of retail's table at `0x00DFDBA8`: screen draws as normal; multiply is the destination
+    /// times the source and nothing else; a mode past the table is normal.
+    #[test]
+    fn blend_modes_follow_the_retail_table() {
+        let normal = C { src_factor: F::SrcAlpha, dst_factor: F::OneMinusSrcAlpha, operation: O::Add };
+        for mode in [0, 1, 2, 4, 7, 10, 13, 14, 15] {
+            assert_eq!(blend_state(mode).color, normal, "mode {mode}");
+        }
+        assert_eq!(blend_state(3).color, C { src_factor: F::Dst, dst_factor: F::Zero, operation: O::Add });
+        assert_eq!(blend_state(9).color.operation, O::ReverseSubtract);
+        assert_eq!(blend_state(12).color, C { src_factor: F::Zero, dst_factor: F::One, operation: O::Add });
+        assert_eq!((fragment_entry(3), fragment_entry(6), fragment_entry(4)), ("fs_toward_white", "fs_toward_white", "fs_main"));
+    }
 }
