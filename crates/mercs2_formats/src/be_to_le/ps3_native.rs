@@ -9,10 +9,29 @@
 //!
 //! The ambiguous mesh/foliage patterns (`03000802...`) are not in scope and fall
 //! through to the existing `convert_decl_ps3_compact` loud-fail arm.
+//!
+//! PS3 terrain draws triangle lists where PC draws strips, and draws its mesh-family passes with vertex
+//! shaders of its own. Its vertex `decl` is 4-byte `(type, offset, usage, components)` rows: type 3 half
+//! float, 4 unsigned byte, 6 DEC3N; usage 0 position, 2 normal, 3 colour, 8 texcoord.
 
 use crate::ffcs::read_u32_be;
 use crate::tags::ChunkTag;
 use crate::types;
+
+/// PS3 vertex shader keys PC registers nothing for, each with the PC key the same draw names: all 20,230
+/// draws of the DLC's terrain pair this way with Xbox's, one to one. The terrain family's keys are PC's.
+const PS3_VERTEX_SHADERS: [(u32, u32); 5] = [
+    (0xE7E2_E853, 0xA9EA_4CF7), // PgMeshShadowVP
+    (0x8FF5_8A1F, 0xDC35_1FCB), // PgMeshVP
+    (0x11AE_8097, 0x79F4_CCB3), // PgMeshNoColorVP
+    (0x5E14_78A1, 0x7B15_3245), // PgMeshNoTangentVP
+    (0x725D_E2FD, 0x3595_7B11), // PgMeshNoTangentNoColorVP
+];
+
+/// The PC key of a PS3 draw's vertex shader.
+fn pc_vertex_shader(key: u32) -> u32 {
+    PS3_VERTEX_SHADERS.iter().find(|(ps3, _)| *ps3 == key).map_or(key, |(_, pc)| *pc)
+}
 
 /// A 1-to-1 PS3 compact-decl pattern + its Xbox-DOH oracle decl + the per-stream
 /// element layout on the PS3 side.
@@ -37,11 +56,10 @@ pub(super) struct Ps3Element {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Ps3ElemKind {
     PositionF16x3,
-    PositionF16x4,
     D3dColor,
     UvF16x2,
     Dec3nNormal,
-    Dec3nTangent,
+    TangentF16x4,
 }
 
 pub(super) static PATTERNS: &[Ps3Pattern] = &[
@@ -120,10 +138,10 @@ pub(super) static PATTERNS: &[Ps3Pattern] = &[
             0x00, 0xff, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff, 0x00, 0x00, 0x00, 0x00,
         ],
         ps3_elements: &[
-            Ps3Element { kind: Ps3ElemKind::PositionF16x4, ps3_offset: 0, pc_offset: 0, usage: 0 },
-            Ps3Element { kind: Ps3ElemKind::UvF16x2, ps3_offset: 8, pc_offset: 8, usage: 5 },
-            Ps3Element { kind: Ps3ElemKind::Dec3nNormal, ps3_offset: 12, pc_offset: 12, usage: 3 },
-            Ps3Element { kind: Ps3ElemKind::Dec3nTangent, ps3_offset: 16, pc_offset: 20, usage: 6 },
+            Ps3Element { kind: Ps3ElemKind::PositionF16x3, ps3_offset: 0, pc_offset: 0, usage: 0 },
+            Ps3Element { kind: Ps3ElemKind::UvF16x2, ps3_offset: 6, pc_offset: 8, usage: 5 },
+            Ps3Element { kind: Ps3ElemKind::Dec3nNormal, ps3_offset: 10, pc_offset: 12, usage: 3 },
+            Ps3Element { kind: Ps3ElemKind::TangentF16x4, ps3_offset: 14, pc_offset: 20, usage: 6 },
         ],
         type_hash: types::TYPE_HASH_TERRAIN_MESH,
     },
@@ -139,11 +157,11 @@ pub(super) static PATTERNS: &[Ps3Pattern] = &[
             0x00, 0xff, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff, 0x00, 0x00, 0x00, 0x00,
         ],
         ps3_elements: &[
-            Ps3Element { kind: Ps3ElemKind::PositionF16x4, ps3_offset: 0, pc_offset: 0, usage: 0 },
-            Ps3Element { kind: Ps3ElemKind::UvF16x2, ps3_offset: 8, pc_offset: 8, usage: 5 },
-            Ps3Element { kind: Ps3ElemKind::D3dColor, ps3_offset: 12, pc_offset: 12, usage: 10 },
-            Ps3Element { kind: Ps3ElemKind::Dec3nNormal, ps3_offset: 16, pc_offset: 16, usage: 3 },
-            Ps3Element { kind: Ps3ElemKind::Dec3nTangent, ps3_offset: 20, pc_offset: 20, usage: 6 },
+            Ps3Element { kind: Ps3ElemKind::PositionF16x3, ps3_offset: 0, pc_offset: 0, usage: 0 },
+            Ps3Element { kind: Ps3ElemKind::UvF16x2, ps3_offset: 6, pc_offset: 8, usage: 5 },
+            Ps3Element { kind: Ps3ElemKind::D3dColor, ps3_offset: 10, pc_offset: 12, usage: 10 },
+            Ps3Element { kind: Ps3ElemKind::Dec3nNormal, ps3_offset: 14, pc_offset: 16, usage: 3 },
+            Ps3Element { kind: Ps3ElemKind::TangentF16x4, ps3_offset: 18, pc_offset: 24, usage: 6 },
         ],
         type_hash: types::TYPE_HASH_TERRAIN_MESH,
     },
@@ -161,10 +179,10 @@ pub(super) fn pc_stride(pattern: &Ps3Pattern) -> usize {
     let mut m: usize = 8;
     for e in pattern.ps3_elements {
         let w = match e.kind {
-            Ps3ElemKind::PositionF16x3 | Ps3ElemKind::PositionF16x4 => 0,
+            Ps3ElemKind::PositionF16x3 => 0,
             Ps3ElemKind::D3dColor => 4,
             Ps3ElemKind::UvF16x2 => 4,
-            Ps3ElemKind::Dec3nNormal | Ps3ElemKind::Dec3nTangent => 8,
+            Ps3ElemKind::Dec3nNormal | Ps3ElemKind::TangentF16x4 => 8,
         };
         if w > 0 {
             let end = e.pc_offset as usize + w;
@@ -207,30 +225,31 @@ pub(super) fn transcode_strm_data(
                     out[d + 6] = 0x00;
                     out[d + 7] = 0x3c;
                 }
-                Ps3ElemKind::PositionF16x4 => {
-                    for i in 0..4 {
-                        out[d + i * 2] = ps3_src[s + i * 2 + 1];
-                        out[d + i * 2 + 1] = ps3_src[s + i * 2];
-                    }
-                }
                 Ps3ElemKind::UvF16x2 => {
                     for i in 0..2 {
                         out[d + i * 2] = ps3_src[s + i * 2 + 1];
                         out[d + i * 2 + 1] = ps3_src[s + i * 2];
                     }
                 }
-                Ps3ElemKind::D3dColor => {
-                    out[d] = ps3_src[s + 3];
-                    out[d + 1] = ps3_src[s + 2];
-                    out[d + 2] = ps3_src[s + 1];
-                    out[d + 3] = ps3_src[s];
+                Ps3ElemKind::TangentF16x4 => {
+                    for i in 0..4 {
+                        out[d + i * 2] = ps3_src[s + i * 2 + 1];
+                        out[d + i * 2 + 1] = ps3_src[s + i * 2];
+                    }
                 }
-                Ps3ElemKind::Dec3nNormal | Ps3ElemKind::Dec3nTangent => {
+                // PS3 stores the colour's bytes as R, G, B, A; a PC D3DCOLOR is B, G, R, A in memory. The Xbox copy
+                // of the same vertices, converted, holds these channels in this order.
+                Ps3ElemKind::D3dColor => {
+                    out[d] = ps3_src[s + 2];
+                    out[d + 1] = ps3_src[s + 1];
+                    out[d + 2] = ps3_src[s];
+                    out[d + 3] = ps3_src[s + 3];
+                }
+                Ps3ElemKind::Dec3nNormal => {
                     let u = u32::from_be_bytes([
                         ps3_src[s], ps3_src[s + 1], ps3_src[s + 2], ps3_src[s + 3],
                     ]);
-                    let ten_ten_ten = matches!(e.kind, Ps3ElemKind::Dec3nTangent);
-                    let half4 = super::convert::ps3_native_dec3n_to_half4_le(u, ten_ten_ten);
+                    let half4 = super::convert::ps3_native_dec3n_to_half4_le(u, false);
                     out[d..d + 8].copy_from_slice(&half4);
                 }
             }
@@ -289,7 +308,7 @@ pub(super) fn classify_container(container: &[u8], type_hash: u32) -> Option<()>
 
 pub(super) fn convert_container_ps3(
     container: &[u8],
-    _entry_idx: usize,
+    entry_idx: usize,
     type_hash: u32,
 ) -> Result<Vec<u8>, String> {
     let data_area_off = read_u32_be(container, 4) as usize;
@@ -406,6 +425,28 @@ pub(super) fn convert_container_ps3(
             pc_info[8..12].copy_from_slice(&(vcount as u32).to_le_bytes());
         }
         new_body.insert(ii, pc_info);
+    }
+
+    // Each group's PRMT comes before its IBUF, whose `info` and `data` follow it in row order.
+    let body = |d: usize| {
+        let at = data_start + descs[d].row_u0 as usize;
+        container.get(at..at + descs[d].body_size as usize).ok_or("ps3_native: a draw body is out of range")
+    };
+    for p in 0..n_desc {
+        if descs[p].tag != ChunkTag::Prmt || descs[p].row_u0 == 0xFFFF_FFFF {
+            continue;
+        }
+        let ib = (p + 1..n_desc)
+            .find(|&j| descs[j].tag == ChunkTag::Ibuf)
+            .ok_or_else(|| format!("ps3_native: entry {entry_idx}: a PRMT has no IBUF after it"))?;
+        let (info, data) = (ib + 1, ib + 2);
+        if descs.get(info).map(|d| d.tag) != Some(ChunkTag::Info) || descs.get(data).map(|d| d.tag) != Some(ChunkTag::Data) {
+            return Err(format!("ps3_native: entry {entry_idx}: an IBUF is not info then data"));
+        }
+        let (strip, draws) = super::convert::terrain_strips_of_lists(body(data)?, body(p)?, pc_vertex_shader)?;
+        new_body.insert(info, ((strip.len() / 2) as u32).to_le_bytes().to_vec());
+        new_body.insert(data, strip);
+        new_body.insert(p, draws);
     }
 
     for di in 0..n_desc {
@@ -531,6 +572,79 @@ mod tests {
         bytes.iter().map(|b| format!("{:02x}", b)).collect()
     }
 
+    /// Every pattern reads each element where its own PS3 decl puts it, as the decl's type and component count,
+    /// covers every row of the decl, and its PS3 stride is the decl's vertex size. A PS3 decl row is
+    /// `(type, offset, usage, components)`: type 3 half float, 4 unsigned byte, 6 DEC3N.
+    #[test]
+    fn pattern_elements_follow_the_ps3_decl() {
+        for (k, p) in PATTERNS.iter().enumerate() {
+            let rows: Vec<(u8, usize, u8)> = p.ps3_decl.chunks_exact(4).map(|r| (r[0], r[1] as usize, r[3])).collect();
+            assert_eq!(rows.len(), p.ps3_elements.len(), "pattern {k}: decl rows against elements");
+            let size = |ty: u8, n: u8| match ty {
+                3 => 2 * n as usize,
+                4 => n as usize,
+                6 => 4,
+                _ => panic!("pattern {k}: PS3 decl type {ty}"),
+            };
+            for e in p.ps3_elements {
+                let want = match e.kind {
+                    Ps3ElemKind::PositionF16x3 => (3, 3),
+                    Ps3ElemKind::UvF16x2 => (3, 2),
+                    Ps3ElemKind::D3dColor => (4, 4),
+                    Ps3ElemKind::Dec3nNormal => (6, 1),
+                    Ps3ElemKind::TangentF16x4 => (3, 4),
+                };
+                let row = rows
+                    .iter()
+                    .find(|r| r.1 == e.ps3_offset as usize)
+                    .unwrap_or_else(|| panic!("pattern {k}: no decl row at PS3 offset {}", e.ps3_offset));
+                assert_eq!((row.0, row.2), want, "pattern {k}: {:?} at {} as (type, components)", e.kind, e.ps3_offset);
+            }
+            let end = rows.iter().map(|&(ty, off, n)| off + size(ty, n)).max().unwrap_or(0);
+            assert_eq!(end, p.ps3_stride as usize, "pattern {k}: PS3 stride against the decl's vertex size");
+        }
+    }
+
+    /// PS3's colour bytes are R, G, B, A; the PC vertex gets them as a D3DCOLOR, B, G, R, A in memory.
+    #[test]
+    fn a_colour_becomes_a_pc_d3dcolor() {
+        let p = PATTERNS.iter().find(|p| p.ps3_stride == 18).expect("the stride-18 pattern");
+        let mut v = vec![0u8; 18];
+        v[10..14].copy_from_slice(&[0x11, 0x22, 0x33, 0x44]);
+        let out = transcode_strm_data(&v, p, 1).expect("one vertex transcodes");
+        assert_eq!(&out[12..16], &[0x33, 0x22, 0x11, 0x44]);
+    }
+
+    /// Every pattern writes each element where its own PC decl says the element is, and its PC stride is the
+    /// decl's vertex size: a table offset that drifts from the decl writes one element over another and gives
+    /// the vertex a stride the decl does not describe.
+    #[test]
+    fn pattern_elements_and_stride_follow_the_pc_decl() {
+        for (k, p) in PATTERNS.iter().enumerate() {
+            let decl = pc_decl_for(p);
+            // D3DVERTEXELEMENT9: stream u16, offset u16, type u8, method u8, usage u8, usage index u8; ends at
+            // stream 0xff.
+            let elements: Vec<(usize, u8, u8)> = decl
+                .chunks_exact(8)
+                .take_while(|e| e[0] != 0xff)
+                .map(|e| (u16::from_le_bytes([e[2], e[3]]) as usize, e[4], e[6]))
+                .collect();
+            let size = elements
+                .iter()
+                .map(|&(off, ty, _)| off + crate::terrainmesh::decl_type_size(ty).unwrap_or_else(|e| panic!("pattern {k}: {e}")))
+                .max()
+                .unwrap_or_else(|| panic!("pattern {k}: an empty PC decl"));
+            assert_eq!(pc_stride(p), size, "pattern {k} (PS3 stride {}): PC stride against the PC decl's vertex size", p.ps3_stride);
+            for e in p.ps3_elements {
+                let (off, _, _) = elements
+                    .iter()
+                    .find(|&&(_, _, usage)| usage == e.usage)
+                    .unwrap_or_else(|| panic!("pattern {k}: usage {} is not in its PC decl", e.usage));
+                assert_eq!(e.pc_offset as usize, *off, "pattern {k} (PS3 stride {}): usage {} PC offset", p.ps3_stride, e.usage);
+            }
+        }
+    }
+
     #[test]
     fn pattern_catalogue_pc_decls_match_oracle() {
         let expected: &[(&[u8], &[u8])] = &[
@@ -578,8 +692,8 @@ mod tests {
         assert_eq!(&out[2..4], &[0xd6, 0xd0]);
         assert_eq!(&out[4..6], &[0x40, 0xd2]);
         assert_eq!(&out[6..8], &[0x00, 0x3c]);
-        // COLOR = PS3 BE reversed to PC order.
-        assert_eq!(&out[8..12], &[0x00, 0x00, 0x00, 0xfe]);
+        // COLOR: PS3 R, G, B, A to PC B, G, R, A.
+        assert_eq!(&out[8..12], &[0x00, 0x00, 0xfe, 0x00]);
         // NORMAL = DEC3N 0x001ff000 decoded as HEND3N (11-11-10). The decoded
         // vector is close to +Y up (~0, 1, 0); after f32->f16 the W component
         // is exactly 1.0 (0x3c00 LE).
