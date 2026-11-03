@@ -2123,7 +2123,7 @@ impl mercs2_engine::app::Game for Mercs2Game {
                     if let Some(player_ent) = self.player.entity {
                         let mut w = ctx.world.borrow_mut();
                         let mut best: Option<(Entity, f32)> = None;
-                        for (e, (_v, xf)) in w.query::<(&Vehicle, &Transform)>().iter() {
+                        for (e, _v, xf) in w.query::<(Entity, &Vehicle, &Transform)>().iter() {
                             let d = xf.translation.distance_squared(self.player.pos);
                             if d < 16.0 && best.map_or(true, |(_, bd)| d < bd) {
                                 best = Some((e, d));
@@ -2370,8 +2370,9 @@ impl mercs2_engine::app::Game for Mercs2Game {
             // Phase A — collect newly-dead rigged `Ragdollable`s (release the query borrow before we
             // reach into the asset store / mutate the World). `Option<&Ragdoll>` carries the blast seed.
             let mut newly_dead: Vec<(Entity, u32, Vec3, Vec<[[f32; 4]; 4]>)> = Vec::new();
-            for (e, (health, _r, mref, skin, seed)) in w
+            for (e, health, _r, mref, skin, seed) in w
                 .query::<(
+                    Entity,
                     &mercs2_core::Health,
                     &mercs2_engine::combat::Ragdollable,
                     &ModelRef,
