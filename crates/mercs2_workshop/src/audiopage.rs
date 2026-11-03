@@ -1023,7 +1023,7 @@ mod tests {
         let mut acts = Vec::new();
         for events in [vec![], vec![egui::Event::PointerMoved(pos)], vec![button(true)], vec![button(false)]] {
             let input = egui::RawInput { screen_rect: Some(screen), events, ..Default::default() };
-            let _ = ctx.run_ui(input, |root| acts.extend(center(root, p, None)));
+            crate::gui::run_headless(&ctx, input, |root| acts.extend(center(root, p, None)));
         }
         acts
     }
