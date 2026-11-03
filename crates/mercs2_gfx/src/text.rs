@@ -10,7 +10,7 @@ use crate::tess::{Paint, Part};
 /// Font units to the em in a `DefineFont3`.
 const EM: f32 = 20480.0;
 /// Flash's gutter between a field's edge and its text: 2 pixels.
-const GUTTER: f32 = 40.0;
+pub(crate) const GUTTER: f32 = 40.0;
 
 /// One font with the atlas that holds its glyphs.
 #[derive(Clone, Debug)]
@@ -197,10 +197,53 @@ pub fn translate(text: &str, lookup: &dyn Fn(u32) -> Option<String>) -> String {
         let inner = &tail[3..close];
         let (key, argument) = inner.split_once(':').unwrap_or((inner, ""));
         match u32::from_str_radix(key, 16).ok().and_then(lookup) {
-            Some(found) => out.push_str(&found.replace("%s", &translate(argument, lookup))),
+            Some(found) => out.push_str(&fill(&found, &arguments(argument), lookup)),
             None => out.push_str(&tail[..=close]),
         }
         rest = &tail[close + 1..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// A key's arguments: split at each `:` outside a nested key, as the joystick page's
+/// `[0x603e1c7d:%s:%s:%s]` carries three.
+fn arguments(argument: &str) -> Vec<&str> {
+    if argument.is_empty() {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    let (mut depth, mut start) = (0, 0);
+    for (at, c) in argument.char_indices() {
+        match c {
+            '[' => depth += 1,
+            ']' => depth -= 1,
+            ':' if depth == 0 => {
+                out.push(&argument[start..at]);
+                start = at + 1;
+            }
+            _ => {}
+        }
+    }
+    out.push(&argument[start..]);
+    out
+}
+
+/// `format` with each `%s` in turn taking the next argument, translated; one argument fills every `%s`.
+fn fill(format: &str, args: &[&str], lookup: &dyn Fn(u32) -> Option<String>) -> String {
+    if args.len() <= 1 {
+        return format.replace("%s", &translate(args.first().copied().unwrap_or(""), lookup));
+    }
+    let mut out = String::new();
+    let mut args = args.iter();
+    let mut rest = format;
+    while let Some(at) = rest.find("%s") {
+        out.push_str(&rest[..at]);
+        match args.next() {
+            Some(arg) => out.push_str(&translate(arg, lookup)),
+            None => out.push_str("%s"),
+        }
+        rest = &rest[at + 2..];
     }
     out.push_str(rest);
     out
@@ -250,6 +293,21 @@ mod tests {
             _ => None,
         };
         assert_eq!(translate("[0xA:[0xB]]", &lookup), "Press ENTER to start");
+    }
+
+    #[test]
+    fn a_key_takes_its_arguments_in_turn() {
+        let lookup = |k: u32| match k {
+            0xA => Some("The key %s is currently bound to %s, would you like to bind it to %s instead?".to_string()),
+            0xB => Some("Button 1".to_string()),
+            0xC => Some("Jump".to_string()),
+            0xD => Some("Walk".to_string()),
+            _ => None,
+        };
+        assert_eq!(
+            translate("[0xA:[0xB]:[0xC]:[0xD]]", &lookup),
+            "The key Button 1 is currently bound to Jump, would you like to bind it to Walk instead?"
+        );
     }
 
     #[test]
