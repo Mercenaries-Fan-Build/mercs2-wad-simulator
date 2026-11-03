@@ -19,6 +19,8 @@ flate2 = "1"
 # The diagnostics + shared world helpers live in the engine library.
 mercs2_engine = { workspace = true }
 mercs2_formats = { workspace = true }
+# bink-audio: decode a movie's audio track to compare it with a black-box decode.
+mercs2_bink = { workspace = true }
 glam = "0.27"
 # `ess-menu-check` runs Ess and a menu script on the game's exact Lua 5.1 (float lua_Number).
 mercs2_luac = { workspace = true }
@@ -40,6 +42,8 @@ sha2 = "0.10"
 mercs2_exemap = { workspace = true }
 # `dump-*` reads the retail game's memory out of the x32dbg captures in game-files/memory-dumps.
 minidump = "0.27"
+# `splice-emulate` runs a SecuROM splice through the decrypted dump to see what its stolen code does.
+unicorn-engine = "2.1.5"
 
 [features]
 # Builds the game-gated tests, which read the retail vz.wad named by the repo-root .mercs2-local.toml;
