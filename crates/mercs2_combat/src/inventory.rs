@@ -60,7 +60,7 @@ pub fn gate(inv: &RuntimeInventory) -> bool {
 /// flat `Vec` has nowhere to store.
 pub fn carried(world: &World, holder: Entity) -> Vec<(Entity, CarriedBy)> {
     let mut v: Vec<(Entity, CarriedBy)> = world
-        .query::<&CarriedBy>()
+        .query::<(Entity, &CarriedBy)>()
         .iter()
         .filter(|(_, e)| e.holder == holder)
         .map(|(w, e)| (w, *e))
@@ -409,7 +409,7 @@ pub fn destroy_all_weapons(world: &mut World, holder: Entity) {
 /// Returns the despawned entities. A weapon that was re-attached in the meantime is **cancelled**, not
 /// reaped — that is the snapshot-restore path.
 pub fn drain_pending_destroy(world: &mut World) -> Vec<Entity> {
-    let queued: Vec<Entity> = world.query::<&PendingDestroy>().iter().map(|(e, _)| e).collect();
+    let queued: Vec<Entity> = world.query::<(Entity, &PendingDestroy)>().iter().map(|(e, _)| e).collect();
     let mut reaped = Vec::new();
     for e in queued {
         if world.get::<&CarriedBy>(e).is_ok() {
