@@ -195,6 +195,15 @@ pub static KNOWN_EIPS: &[KnownEip] = &[
     // check, so `import("x")` of a script no loaded WAD holds faults with AV READ 0x00000040.
     // Seen live 2026-10-19 when lua-bridge's `preimport = ess` ran against an overlay without `ess`.
     KnownEip { eip: 0x005AE372, label: "_SYS._IMPORT (v1.0) of a script no loaded WAD holds — import() of a missing module (NULL resource +0x40)", teardown: false },
+    // 0x00859028: Mtrl_Parse (FUN_00858790) called by the foliage species reader FUN_004A0C40 on a
+    // material whose u16 flags/texture-count pair was transposed by a u32 sweep of a console `foliage`
+    // `tree` body. Seen 2026-11-02 booting dlc01 before `be_to_le::foliage` existed.
+    KnownEip { eip: 0x00859028, label: "Mtrl_Parse (FUN_00858790) from the foliage species reader FUN_004A0C40 — a foliage material's u16 pair transposed (console tree body swapped as u32)", teardown: false },
+    // 0x004AADBA: TerrainMeshRenderable::Render's draw loop (FUN_004AAAB0) reads a draw's vertex-shader
+    // entry at +8 for draws [terrain_end, first_draw + draw_count) without a check; a draw-group INFO whose
+    // pass-group u16s were transposed sends it past the group's records to a null entry.
+    // Seen 2026-11-02 on dlc01's first rendered frame (docs/terrain_cell_format.md §4.4).
+    KnownEip { eip: 0x004AADBA, label: "terrain draw loop (FUN_004AAAB0) — a draw-group INFO's pass-group u16s transposed, so it draws past the group's PRMT records (null shader entry +8)", teardown: false },
 ];
 
 pub fn eip_label(eip: u32) -> Option<&'static str> {
