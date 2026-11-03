@@ -490,6 +490,9 @@ pub struct Scene {
     config: wgpu::SurfaceConfiguration,
     /// The usages the surface supports, from its capabilities: a frame capture needs `COPY_SRC`.
     surface_usages: wgpu::TextureUsages,
+    /// The adapter as the option pages read it: its PCI vendor and device, the multisample counts the
+    /// surface format takes, and the present modes the surface has.
+    pub gpu: GpuInfo,
     /// A requested read-back of the next presented frame ([`Scene::request_capture`]).
     capture: Capture,
     pub size: winit::dpi::PhysicalSize<u32>,
@@ -634,6 +637,7 @@ pub struct Scene {
     /// The Flash pass, made when a movie first needs it, and its stencil at the surface's size.
     gfx: Option<crate::gfx_pass::GfxPass>,
     gfx_stencil: Option<([u32; 2], wgpu::TextureView)>,
+    movie_pass: Option<crate::movie_pass::MoviePass>,
     /// Billboard particle / FX runtime (registry §7). Drawn AFTER the opaque forward pass.
     /// Empty by default (zero cost) until an effect is started via `fx_start*`.
     particles: crate::particles::ParticleSystem,
@@ -746,7 +750,15 @@ impl Scene {
         // Flash blends in the space its colours were authored in, so it draws through a plain view.
         config.view_formats.push(config.format.remove_srgb_suffix());
         surface.configure(&device, &config);
-        let surface_usages = surface.get_capabilities(&adapter).usages;
+        let capabilities = surface.get_capabilities(&adapter);
+        let surface_usages = capabilities.usages;
+        let info = adapter.get_info();
+        let gpu = GpuInfo {
+            vendor: info.vendor,
+            device: info.device,
+            sample_counts: adapter.get_texture_format_features(config.format).flags.supported_sample_counts(),
+            present_modes: capabilities.present_modes,
+        };
 
         // group 0: per-entity MVP uniform (+ fog params, read by the fragment stage).
         let camera_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -1367,9 +1379,11 @@ impl Scene {
             queue,
             config,
             surface_usages,
+            gpu,
             capture: Capture::Idle,
             gfx: None,
             gfx_stencil: None,
+            movie_pass: None,
             size,
             pipeline,
             pipeline_t,
@@ -1518,19 +1532,28 @@ impl Scene {
         self.ui.text(x, y, scale, color, s)
     }
 
-    /// Build this frame's movies, back to front, for [`Self::render_flash`].
-    pub fn prepare_flash(&mut self, draws: &[crate::flash::FlashDraw], images: &mut dyn crate::gfx_pass::GfxImages) -> Result<(), String> {
+    /// Build this frame's Flash movies and Bink movies for [`Self::render_front_end`].
+    pub fn prepare_front_end(
+        &mut self,
+        flash: &[crate::flash::FlashDraw],
+        images: &mut dyn crate::gfx_pass::GfxImages,
+        movies: &[crate::movie::MovieDraw],
+    ) -> Result<(), String> {
         let format = self.config.format.remove_srgb_suffix();
         let gfx = self.gfx.get_or_insert_with(|| crate::gfx_pass::GfxPass::new(&self.device, &self.queue, format));
         gfx.begin();
-        for draw in draws {
+        for draw in flash {
             gfx.prepare(&self.device, &self.queue, &draw.def, &draw.items, images)?;
         }
+        let pass = self
+            .movie_pass
+            .get_or_insert_with(|| crate::movie_pass::MoviePass::new(&self.device, format, crate::gfx_pass::GfxPass::depth_format()));
+        pass.prepare(&self.device, &self.queue, movies, [self.config.width, self.config.height]);
         Ok(())
     }
 
-    /// Draw the prepared movies on black, with nothing else on screen.
-    pub fn render_flash(&mut self) -> Result<(), SurfaceError> {
+    /// Draw the prepared layers on black, back to front, with nothing else on screen.
+    pub fn render_front_end(&mut self, layers: &[FrontLayer]) -> Result<(), SurfaceError> {
         let size = [self.config.width, self.config.height];
         if self.gfx_stencil.as_ref().is_none_or(|(at, _)| *at != size) {
             let texture = self.device.create_texture(&wgpu::TextureDescriptor {
@@ -1550,6 +1573,7 @@ impl Scene {
             format: Some(self.config.format.remove_srgb_suffix()),
             ..Default::default()
         });
+        let ui_count = self.ui.prepare(&self.device, &self.queue, self.config.width, self.config.height);
         let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("flash frame") });
         {
             let stencil = &self.gfx_stencil.as_ref().expect("made above").1;
@@ -1572,9 +1596,17 @@ impl Scene {
                     multiview_mask: None,
                 })
                 .forget_lifetime();
-            if let Some(gfx) = &self.gfx {
-                gfx.record(&mut pass);
+            for layer in layers {
+                match *layer {
+                    FrontLayer::Flash(i) => self.gfx.as_ref().expect("prepare_front_end makes the Flash pass").record_frame(&mut pass, i),
+                    FrontLayer::Movie(i) => self.movie_pass.as_ref().expect("prepare_front_end makes the movie pass").record(&mut pass, i),
+                }
             }
+        }
+        if ui_count > 0 {
+            // The overlay's pipeline targets the surface's own format.
+            let surface_view = output.texture().create_view(&wgpu::TextureViewDescriptor::default());
+            self.record_ui(&mut encoder, &surface_view, ui_count);
         }
         let readback = self.encode_capture(&mut encoder, output.texture());
         self.queue.submit(std::iter::once(encoder.finish()));
@@ -2526,6 +2558,19 @@ impl Scene {
             Err(_) => Err("the frame capture's map callback never ran".into()),
         };
         self.capture = Capture::Done(result);
+    }
+
+    /// Present at once (`[Render] PresentImmediate`, vsync off) or on the vertical blank, as retail's
+    /// present interval `D3DPRESENT_INTERVAL_IMMEDIATE`/`DEFAULT` (`FUN_00755380`). A surface without
+    /// immediate presentation refuses vsync off.
+    pub fn set_present_immediate(&mut self, immediate: bool) -> Result<(), String> {
+        let mode = if immediate { wgpu::PresentMode::Immediate } else { wgpu::PresentMode::Fifo };
+        if !self.gpu.present_modes.contains(&mode) {
+            return Err(format!("the surface cannot present {mode:?}; it has {:?}", self.gpu.present_modes));
+        }
+        self.config.present_mode = mode;
+        self.surface.configure(&self.device, &self.config);
+        Ok(())
     }
 
     pub fn resize(&mut self, new: winit::dpi::PhysicalSize<u32>) {
@@ -3512,6 +3557,23 @@ impl crate::render_graph::RenderNode for DecalNode {
         pass.set_vertex_buffer(0, vb.slice(..));
         pass.draw(0..verts.len() as u32, 0..1);
     }
+}
+
+/// The adapter, as the option pages read it ([`Scene::gpu`]).
+#[derive(Clone, Debug)]
+pub struct GpuInfo {
+    pub vendor: u32,
+    pub device: u32,
+    pub sample_counts: Vec<u32>,
+    pub present_modes: Vec<wgpu::PresentMode>,
+}
+
+/// One layer of the front end, back to front: a prepared Flash movie or Bink movie, by its index in
+/// what [`Scene::prepare_front_end`] was given.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FrontLayer {
+    Flash(usize),
+    Movie(usize),
 }
 
 /// External overlay draw hook (see [`Scene::render_with`]): device, queue, frame encoder,
