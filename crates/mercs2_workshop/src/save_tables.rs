@@ -1265,7 +1265,7 @@ mod tests {
             let root = tree_of(name);
             let root = root.as_table().unwrap();
             let profile = save::parse(&std::fs::read(game_paths::save_fixtures().join(name)).unwrap()).unwrap();
-            let _ = ctx_egui.run_ui(egui::RawInput::default(), |c| {
+            crate::gui::run_headless(&ctx_egui, egui::RawInput::default(), |c| {
                 egui::CentralPanel::default().show(c, |ui| {
                     let ctx = Ctx { root, profile: Some(&profile), lk: Lookups::default() };
                     for t in TOPICS {
