@@ -130,7 +130,13 @@ jobs:
           # cpal output and links libasound into qm. `qm` is mercs2_quartermaster's only bin.
           exclude=""
           case " ${{ matrix.bins }} " in *" qm "*) exclude="--exclude mercs2_quartermaster";; esac
-          cargo build --release --target ${{ matrix.target }} ${{ matrix.build }} $exclude \
+          # Development tooling that publishes nothing, left out because it cannot build for every
+          # target: mercs2_probe's splice-emulate links unicorn-engine, whose MSVC build supports x86
+          # only (aarch64-pc-windows-msvc); mercs2_profd stops tracy-capture with libc::kill/SIGINT,
+          # which Windows does not have.
+          dev=""
+          case " ${{ matrix.build }} " in *" --workspace "*) dev="--exclude mercs2_probe --exclude mercs2_profd";; esac
+          cargo build --release --target ${{ matrix.target }} ${{ matrix.build }} $dev $exclude \
             --message-format=json > cargo-build.json
           if [ -n "$exclude" ]; then
             cargo build --release --target ${{ matrix.target }} -p mercs2_quartermaster --bin qm \
