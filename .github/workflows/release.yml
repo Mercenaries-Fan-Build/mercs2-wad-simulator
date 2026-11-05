@@ -117,7 +117,7 @@ jobs:
         if: matrix.target == 'x86_64-unknown-linux-gnu' || matrix.target == 'aarch64-unknown-linux-gnu'
         run: sudo apt-get update && sudo apt-get install -y pkg-config libudev-dev libasound2-dev
 
-      # `--message-format=json` makes cargo report the path of every executable it produced, which is
+      # `--message-format=json-render-diagnostics` makes cargo report the path of every executable it produced, which is
       # the only honest answer to "what did this build actually make". We publish a CURATED subset
       # (the workspace builds ~78 binaries, but most are one-off research probes that stay dev-only),
       # and the two guardrails below exist because the previous hand-written list rotted silently:
@@ -136,14 +136,15 @@ jobs:
           # which Windows does not have.
           dev=""
           case " ${{ matrix.build }} " in *" --workspace "*) dev="--exclude mercs2_probe --exclude mercs2_profd";; esac
+          # `json-render-diagnostics`: the JSON on stdout keeps the artifact messages, and cargo renders
+          # every compiler diagnostic to stderr — into the log, including when the build fails. Plain
+          # `json` put them only in the file, and the step exits on the failed build before reading it.
           cargo build --release --target ${{ matrix.target }} ${{ matrix.build }} $dev $exclude \
-            --message-format=json > cargo-build.json
+            --message-format=json-render-diagnostics > cargo-build.json
           if [ -n "$exclude" ]; then
             cargo build --release --target ${{ matrix.target }} -p mercs2_quartermaster --bin qm \
-              --message-format=json >> cargo-build.json
+              --message-format=json-render-diagnostics >> cargo-build.json
           fi
-          # `--message-format=json` swallows human-readable diagnostics; put them back in the log.
-          grep -o '"rendered":"[^"]*"' cargo-build.json | sed 's/"rendered":"//; s/"$//' | head -50 || true
           # Every executable this build produced (JSON-escapes \\ on Windows paths).
           grep -o '"executable":"[^"]*"' cargo-build.json \
             | sed 's/"executable":"//; s/"$//; s#\\\\#/#g' | sort -u > built.txt
