@@ -1,0 +1,9 @@
+# Text files check out with LF on every host. Crates read data files at compile time
+# (`include_str!` of .tsv / .wgsl / .env / .md), and some of those reads are exact: the workshop's
+# `fetch::PINNED` rejects a `\r` in `data/workshop_data_pin.env`, so a CRLF checkout on a Windows
+# runner (core.autocrlf=true) stopped the build there and nowhere else.
+* text=auto eol=lf
+
+# Test fixtures are captured bytes and stay exactly as committed — the loadprobe logs are the
+# game's own CRLF output.
+**/fixtures/** -text
