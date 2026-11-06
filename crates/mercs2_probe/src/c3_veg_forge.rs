@@ -15,7 +15,7 @@
 //! cell blocks in place (last-wins); base vz.wad stays PRISTINE.
 //!
 //! Usage:
-//!   c3_veg_forge --base-wad <vz.wad> --out <overlay.wad>
+//!   mercs2_probe c3-veg-forge --base-wad <vz.wad> --out <overlay.wad>
 //!       [--x <world_x> --z <world_z> --radius <m>]   (target area; default PMC 2560,-926 r=200)
 //!       [--donor-cell <id>] [--model <0xHASH>]       (default 30470 / largecanopy01)
 //!       [--max-cells <n>] [--advertise]              (--advertise also adds a model ASET row)
@@ -52,20 +52,13 @@ fn append_model_to_block(block: &[u8], name: u32, type_hash: u32, field_c: u32, 
     out
 }
 
-fn main() {
-    if let Err(e) = run() {
-        eprintln!("c3_veg_forge: error: {e}");
-        std::process::exit(1);
-    }
-}
-
-fn run() -> Result<(), String> {
+pub fn run(args: &[String]) -> Result<(), String> {
     let (mut base, mut out) = (None, None);
     let (mut px, mut pz, mut radius) = (2560.0_f32, -926.0_f32, 200.0_f32);
     let (mut donor_cell, mut model) = (30470_u32, 0xFF7A_BB3B_u32);
     let mut max_cells = 64_usize;
     let mut advertise = false;
-    let mut it = std::env::args().skip(1);
+    let mut it = args.iter().cloned();
     while let Some(a) = it.next() {
         let mut next = || it.next().ok_or_else(|| format!("{a} needs a value"));
         match a.as_str() {

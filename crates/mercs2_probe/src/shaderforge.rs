@@ -1,6 +1,6 @@
 //! `shaderforge` — inspect `shader3.bin` and perform the M4 instancing splice.
 //!
-//! Subcommands:
+//! Subcommands (`mercs2_probe shaderforge <subcommand> ...`):
 //!   list       <shader3.bin>              inventory (id / offset / size / kind)
 //!   static-vs  <shader3.bin>              the non-skinned `objectData` VS = splice targets
 //!   consts     <shader3.bin> <rec>        CTAB constants of one record
@@ -26,32 +26,30 @@ use mercs2_formats::shader3::{
     ShaderKind, ShaderRole, Store,
 };
 use mercs2_formats::sm3asm;
-use std::process::ExitCode;
 
-fn main() -> ExitCode {
-    let args: Vec<String> = std::env::args().collect();
-    let r = match args.get(1).map(String::as_str) {
-        Some("list") => cmd_list(&args),
-        Some("static-vs") => cmd_static_vs(&args),
-        Some("consts") => cmd_consts(&args),
-        Some("splice") => cmd_splice(&args),
-        Some("bundle") => cmd_bundle(&args),
-        Some("disasm") => cmd_disasm(&args),
-        Some("roles") => cmd_roles(&args),
-        Some("asm") => cmd_asm(&args),
-        Some("store-id") => cmd_store_id(&args),
+pub fn run(args: &[String]) -> i32 {
+    let r = match args.first().map(String::as_str) {
+        Some("list") => cmd_list(args),
+        Some("static-vs") => cmd_static_vs(args),
+        Some("consts") => cmd_consts(args),
+        Some("splice") => cmd_splice(args),
+        Some("bundle") => cmd_bundle(args),
+        Some("disasm") => cmd_disasm(args),
+        Some("roles") => cmd_roles(args),
+        Some("asm") => cmd_asm(args),
+        Some("store-id") => cmd_store_id(args),
         _ => {
             eprintln!(
-                "usage: shaderforge <list|static-vs|consts|splice|bundle|disasm|roles> <shader3.bin> [rec|role|out] [out]\n       shaderforge asm <in.asm> <out.sho> [--target vs_3_0|ps_3_0]\n       shaderforge store-id <stem> [--low]"
+                "usage: mercs2_probe shaderforge <list|static-vs|consts|splice|bundle|disasm|roles> <shader3.bin> [rec|role|out] [out]\n       mercs2_probe shaderforge asm <in.asm> <out.sho> [--target vs_3_0|ps_3_0]\n       mercs2_probe shaderforge store-id <stem> [--low]"
             );
-            return ExitCode::from(2);
+            return 2;
         }
     };
     match r {
-        Ok(()) => ExitCode::SUCCESS,
+        Ok(()) => 0,
         Err(e) => {
             eprintln!("error: {e}");
-            ExitCode::FAILURE
+            1
         }
     }
 }
@@ -59,7 +57,7 @@ fn main() -> ExitCode {
 type R = Result<(), Box<dyn std::error::Error>>;
 
 fn load(args: &[String]) -> Result<Store, Box<dyn std::error::Error>> {
-    let path = args.get(2).ok_or("missing shader3.bin path")?;
+    let path = args.get(1).ok_or("missing shader3.bin path")?;
     Ok(Store::parse(std::fs::read(path)?)?)
 }
 
@@ -135,7 +133,7 @@ fn cmd_static_vs(args: &[String]) -> R {
 
 fn cmd_consts(args: &[String]) -> R {
     let store = load(args)?;
-    let idx: usize = args.get(3).ok_or("missing rec index")?.parse()?;
+    let idx: usize = args.get(2).ok_or("missing rec index")?.parse()?;
     let r = store.records.get(idx).ok_or("rec index out of range")?;
     let (creator, consts) = parse_ctab(store.blob(r))?;
     println!("rec{idx} id=0x{:08x} {} size={}", r.id, kind_str(&r.kind), r.blob_size);
@@ -152,7 +150,7 @@ fn cmd_consts(args: &[String]) -> R {
 /// The probe ASI feeds `orig` (control) and `spliced` to `CreateVertexShader`.
 fn cmd_bundle(args: &[String]) -> R {
     let store = load(args)?;
-    let out = args.get(3).ok_or("missing output path")?;
+    let out = args.get(2).ok_or("missing output path")?;
     let mut buf = Vec::new();
     buf.extend_from_slice(b"R0SB");
     buf.extend_from_slice(&1u32.to_le_bytes());
@@ -216,7 +214,7 @@ fn role_str(r: ShaderRole) -> &'static str {
 /// Disassemble one record's SM3.0 body — the recovery surface a WGSL translation reads off.
 fn cmd_disasm(args: &[String]) -> R {
     let store = load(args)?;
-    let idx: usize = args.get(3).ok_or("missing rec index")?.parse()?;
+    let idx: usize = args.get(2).ok_or("missing rec index")?.parse()?;
     let r = store.records.get(idx).ok_or("rec index out of range")?;
     let blob = store.blob(r);
     let (creator, consts) = parse_ctab(blob)?;
@@ -242,7 +240,7 @@ fn cmd_disasm(args: &[String]) -> R {
 /// candidate classes, not `Pg*` names — a record's name comes from its id (see `store-id`).
 fn cmd_roles(args: &[String]) -> R {
     let store = load(args)?;
-    let filter = args.get(3).map(|s| s.to_ascii_lowercase());
+    let filter = args.get(2).map(|s| s.to_ascii_lowercase());
     let mut hist: std::collections::BTreeMap<&'static str, u32> = Default::default();
     let mut listed = 0u32;
     for (i, r) in store.records.iter().enumerate() {
@@ -273,7 +271,7 @@ fn cmd_roles(args: &[String]) -> R {
 
 fn cmd_splice(args: &[String]) -> R {
     let store = load(args)?;
-    let idx: usize = args.get(3).ok_or("missing rec index")?.parse()?;
+    let idx: usize = args.get(2).ok_or("missing rec index")?.parse()?;
     let r = store.records.get(idx).ok_or("rec index out of range")?;
     if !matches!(r.kind, ShaderKind::Vertex) {
         return Err("record is not a vertex shader".into());
@@ -299,7 +297,7 @@ fn cmd_splice(args: &[String]) -> R {
         report.input_copies
     );
     println!("  size {} -> {} bytes (+{} for 4 input dcls)", blob.len(), spliced.len(), spliced.len() - blob.len());
-    if let Some(out) = args.get(4) {
+    if let Some(out) = args.get(3) {
         std::fs::write(out, &spliced)?;
         println!("  wrote {out}");
     } else {
@@ -312,7 +310,7 @@ fn cmd_splice(args: &[String]) -> R {
 fn cmd_asm(args: &[String]) -> R {
     let mut positional = Vec::new();
     let mut target: Option<String> = None;
-    let mut rest = args.iter().skip(2);
+    let mut rest = args.iter().skip(1);
     while let Some(a) = rest.next() {
         if a == "--target" {
             target = Some(rest.next().ok_or("--target needs vs_3_0 or ps_3_0")?.clone());
@@ -323,7 +321,7 @@ fn cmd_asm(args: &[String]) -> R {
         }
     }
     let [input, output] = positional[..] else {
-        return Err("usage: shaderforge asm <in.asm> <out.sho> [--target vs_3_0|ps_3_0]".into());
+        return Err("usage: mercs2_probe shaderforge asm <in.asm> <out.sho> [--target vs_3_0|ps_3_0]".into());
     };
     let text = std::fs::read_to_string(input)?;
     let blob = sm3asm::assemble(&text).map_err(|e| format!("{input}: {e}"))?;
@@ -346,7 +344,7 @@ fn cmd_asm(args: &[String]) -> R {
 fn cmd_store_id(args: &[String]) -> R {
     let mut stem: Option<&String> = None;
     let mut low = false;
-    for a in &args[2..] {
+    for a in &args[1..] {
         match a.as_str() {
             "--low" => low = true,
             o if o.starts_with("--") => return Err(format!("unknown option {o}").into()),
@@ -354,7 +352,7 @@ fn cmd_store_id(args: &[String]) -> R {
             _ => stem = Some(a),
         }
     }
-    let stem = stem.ok_or("usage: shaderforge store-id <stem> [--low]")?;
+    let stem = stem.ok_or("usage: mercs2_probe shaderforge store-id <stem> [--low]")?;
     let id = store_id(stem, low)?;
     let suffix = if low { "_3l.sho" } else { "_3.sho" };
     println!("0x{id:08x}  {stem}{suffix}  ({})", if low { "shader3Low.bin" } else { "shader3.bin" });

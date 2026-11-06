@@ -5,7 +5,7 @@
 //! vehicle-template-relevant components dumps sample records + entity_keys so we can see
 //! whether spawn templates (0x8000_xxxx handles) live here alongside placed instances.
 //!
-//! Usage: worldentity_probe [vz.wad path]
+//! Usage: mercs2_probe worldentity-probe [vz.wad path]
 
 use std::fs::File;
 
@@ -17,9 +17,9 @@ use mercs2_formats::sges::decompress_block;
 const WORLDENTITY_TYPE: u32 = 0x5647_C35D;
 const GUIDMAP_TYPE: u32 = 0x140E_8728;
 
-fn main() {
-    let path = std::env::args()
-        .nth(1)
+pub fn run(args: &[String]) {
+    let path = args
+        .first()
         .map(std::path::PathBuf::from)
         .or_else(mercs2_formats::game_paths::vz_wad_from_env)
         .map(|p| p.to_string_lossy().into_owned())
@@ -306,8 +306,9 @@ fn main() {
     // === RECIPE: enumerate the COMPLETE component set for target car-template handles ===
     // Every COMP whose data (header-aware) contains a record keyed by the handle = the template's
     // component recipe. This is exactly what a novel template must replicate.
-    let targets: Vec<u32> = std::env::args()
-        .skip(2)
+    let targets: Vec<u32> = args
+        .iter()
+        .skip(1)
         .filter_map(|s| u32::from_str_radix(s.trim_start_matches("0x"), 16).ok())
         .collect();
     let targets = if targets.is_empty() {

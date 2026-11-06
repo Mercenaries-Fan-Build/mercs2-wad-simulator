@@ -3,9 +3,9 @@
 use mercs2_formats::ffcs::{load_ffcs_archive, read_u32_le};
 use mercs2_formats::sges::decompress_block;
 use std::fs::File;
-fn main() {
-    let path = std::env::args()
-        .nth(1)
+pub fn run(args: &[String]) {
+    let path = args
+        .first()
         .map(std::path::PathBuf::from)
         .or_else(mercs2_formats::game_paths::vz_wad_from_env)
         .map(|p| p.to_string_lossy().into_owned())

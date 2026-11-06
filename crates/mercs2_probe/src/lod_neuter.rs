@@ -9,18 +9,13 @@
 //! This strips the geometry out of a finer rung so the resident rung is the only thing drawn at any
 //! distance. Everything we don't touch is preserved byte-for-byte and the CSUM is recomputed.
 //!
-//! Usage:  lod_neuter <rung.ucfx> <out.ucfx> --name-hash 0xH
+//! Usage:  mercs2_probe lod-neuter <rung.ucfx> <out.ucfx> --name-hash 0xH
 //!
 //! See docs/modernization/vehicle_model_spec.md §1 (the LOD chain).
 
 use mercs2_formats::model_inject::neutralise_lod_rung;
 
-fn main() {
-    std::process::exit(run());
-}
-
-fn run() -> i32 {
-    let a: Vec<String> = std::env::args().skip(1).collect();
+pub fn run(a: &[String]) -> i32 {
     let mut pos: Vec<&str> = Vec::new();
     let mut name_hash = 0u32;
     let mut it = a.iter();
@@ -39,7 +34,7 @@ fn run() -> i32 {
         }
     }
     if pos.len() != 2 || name_hash == 0 {
-        eprintln!("usage: lod_neuter <rung.ucfx> <out.ucfx> --name-hash 0xH");
+        eprintln!("usage: mercs2_probe lod-neuter <rung.ucfx> <out.ucfx> --name-hash 0xH");
         return 2;
     }
     let ucfx = match std::fs::read(pos[0]) {
@@ -63,7 +58,7 @@ fn run() -> i32 {
             0
         }
         Err(e) => {
-            eprintln!("lod_neuter: {e}");
+            eprintln!("lod-neuter: {e}");
             1
         }
     }
