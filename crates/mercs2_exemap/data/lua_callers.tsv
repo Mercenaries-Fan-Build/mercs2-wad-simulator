@@ -1,0 +1,27 @@
+# The functions through which each image's code calls a Lua script function by name: read by
+# `exemap lua-calls` (mercs2_exemap::luacalls). `name` and `module` say where a call passes the
+# function-name string and the module's pandemic_hash_m2: an x86 register loaded before the call, or
+# the 0-based argument of the call as the image's Ghidra decomp writes it. `stackN` is the x86 stack
+# argument pushed N-th last before the call; module `object` is a call that passes a world object, whose
+# own script the function runs in (the module is that object's, chosen at run time).
+image_id	va	name	module	evidence
+pc-v10	0x005a0cc0	ecx	eax	FUN_006f5c30 sets ecx=0xbd1738 "NetSafePlayCheapCinematic", eax=0x51ee8f14 (MrxBriefing) at 0x6f5c8b, call 0x6f5c95; the decomp drops both registers
+pc-v10	0x005a0f10	stack0	object	OnActivate 0x66c330 push 0xbcc44c last, edi = the object, call 0x66c33b; receives OnActivate, OnDeactivate, OnStateChange, QueryActiveUse, Use, OnUse, UnUse; it jumps into the SecuROM VM; the moved code at 0x6c6f00 tests edi, pushes [edi+4], loads eax = [edi] and ecx = ebp and calls 0x005a0cc0 (push 0x6c6f5d; push 0x5a0cc0; ret at 0x6c6f46), the forward x360-retail 0x82309690 and ps3-v100 0x00503f78 make
+pc-v10-drmfree	0x005a0cc0	ecx	eax	pc-v10 0x005a0cc0 translates here (direct, match graph)
+pc-v10-drmfree	0x005a0f10	stack0	object	the same layout as pc-v10 (layout U); its call sites pass the same names as pc-v10's
+pc-v11	0x005a0cb0	ecx	eax	pc-v10 0x005a0cc0 translates here (direct, match graph)
+pc-v11	0x005a0f00	stack0	object	0x10 below pc-v10's 0x005a0f10, as 0x005a0cb0 is below 0x005a0cc0; its call sites pass the same names as pc-v10's
+ps3-v100	0x005035c0	arg2	arg1	PgEventStateBriefingStarter FUN_00016af0 calls FUN_005035c0(state, 0x51ee8f14, *(TOC table - 0x7f34), 3, 0, 1, 0); each of the 24 functions whose strings hold one of 12 pc-v10 by-name names calls it
+ps3-v100	0x00503f78	arg2	object	FUN_00503f78(state, obj, name, n) calls FUN_005035c0(state, *obj, name, n + 1) with obj[1] pushed first: the function runs in the object's script; FUN_0038fab8 passes it OnStateChange
+ps3-v100-jp	0x00503558	arg2	arg1	ps3-v100 0x005035c0 translates here (direct, match graph)
+ps3-v100-jp	0x00503f10	arg2	object	ps3-v100 0x00503f78 translates here (direct, match graph)
+ps3-v101-eu	0x00503548	arg2	arg1	ps3-v100 0x005035c0 translates here (direct, match graph)
+ps3-v101-eu	0x00503f00	arg2	object	ps3-v100 0x00503f78 translates here (direct, match graph)
+ps3-v103-na	0x005068d0	arg2	arg1	ps3-v100 0x005035c0 translates here (direct, match graph)
+ps3-v103-na	0x00507260	arg2	object	ps3-v100 0x00503f78 translates here (direct, match graph)
+x360-preview-final	0x82308638	arg2	arg1	x360-retail 0x823094f0 translates here (direct, match graph)
+x360-preview-final	0x823087d8	arg2	object	x360-retail 0x82309690 translates here (direct, match graph)
+x360-preview-profile	0x82420690	arg2	arg1	x360-retail 0x823094f0 translates here (direct, match graph)
+x360-preview-profile	0x824209d0	arg2	object	x360-retail 0x82309690 translates here (direct, match graph)
+x360-retail	0x823094f0	arg2	arg1	NetEventCallback 0x824a8e00 calls FUN_823094f0(state, module, 0x820eff00 "NetEventCallback", 2, 0, 1, 0); each of the 27 functions whose strings hold one of 12 pc-v10 by-name names calls it
+x360-retail	0x82309690	arg2	object	FUN_82309690(state, obj, name, n) calls FUN_823094f0(state, *obj, name, n + 1) with obj[1] pushed first: the function runs in the object's script; OnActivate 0x82401528 passes it 0x820ea83c
