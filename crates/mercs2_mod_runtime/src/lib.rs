@@ -9,6 +9,7 @@
 #[cfg(not(all(windows, target_arch = "x86")))]
 compile_error!("m2-sdk.dll is a 32-bit Windows DLL: build it with --target i686-pc-windows-gnu");
 
+mod debug;
 mod hook;
 mod ini;
 mod live;
