@@ -22,7 +22,17 @@
 //! exemap seeds <image_id> --functions <jsonl> --exports <dir> --out <starts> --names <tsv>
 //! exemap hash-sites <image_id> --functions <jsonl> --image <file> --names <json>... --out <jsonl>
 //! exemap hash-join <image_id>... --hashes <dir> --annotations <dir> --candidates <tsv> --cracks <tsv>
+//! exemap lua-calls --functions <dir> --image <image_id>=<file>... --out <tsv>
+//! exemap binding-args <image_id> --functions <jsonl> --luareg <tsv> --out <tsv>
 //! ```
+//!
+//! `binding-args` lists the arguments each Lua binding of an image reads: its stack position in the call
+//! that gives every argument, and what it takes, through the argument readers of `data/lua_readers.tsv`
+//! (`mercs2_exemap::bindingargs`).
+//!
+//! `lua-calls` lists every call each image's code makes to a Lua script function by name, with the
+//! module hash and the name it passes (`mercs2_exemap::luacalls`); every image of
+//! `data/lua_callers.tsv` must be given.
 //!
 //! `hash-sites` and `hash-join` build the reverse map of `pandemic_hash_m2` constants: every site of
 //! every constant with its role, the hash tables of the data sections, the consumers that take
@@ -296,6 +306,32 @@ enum Command {
         /// The cracks TSV written: one row per value a name from its code context hashes to.
         #[arg(long)]
         cracks: PathBuf,
+    },
+    /// Write one row per call each image's code makes to a Lua script function by name (module hash
+    /// and name), through the by-name callers of data/lua_callers.tsv; see `mercs2_exemap::luacalls`.
+    LuaCalls {
+        /// The directory of functions exports (<image_id>.functions.jsonl).
+        #[arg(long)]
+        functions: PathBuf,
+        /// <image_id>=<file>: an image file (sha256 checked against images.tsv); repeat for every
+        /// image of lua_callers.tsv.
+        #[arg(long = "image", required = true)]
+        images: Vec<String>,
+        #[arg(long)]
+        out: PathBuf,
+    },
+    /// Write one row per argument each Lua binding of an image reads (position, what it takes, reader),
+    /// through the argument readers of data/lua_readers.tsv; see `mercs2_exemap::bindingargs`.
+    BindingArgs {
+        image_id: String,
+        /// The image's functions export (<image_id>.functions.jsonl).
+        #[arg(long)]
+        functions: PathBuf,
+        /// The image's luareg export.
+        #[arg(long)]
+        luareg: PathBuf,
+        #[arg(long)]
+        out: PathBuf,
     },
 }
 
@@ -1067,6 +1103,92 @@ fn run(cli: Cli) -> Result<(), ExitCode> {
                 j.comparisons as f64 / 4294967296.0
             );
             println!("out        -> {} , {}", candidates.display(), cracks.display());
+        }
+        Command::LuaCalls { functions, images: given, out } => {
+            use mercs2_exemap::images::Platform;
+            use mercs2_exemap::luacalls::{ppc_calls, to_tsv, x86_calls, Callers, Functions, ImageCalls};
+            let fail = |e: mercs2_exemap::Error| {
+                eprintln!("error: {e}");
+                ExitCode::from(1)
+            };
+            let images = mercs2_exemap::images::Images::embedded(&catalogue).map_err(fail)?;
+            let callers = Callers::embedded(&images).map_err(fail)?;
+            let mut files = std::collections::BTreeMap::new();
+            for g in &given {
+                let (id, path) = g
+                    .split_once('=')
+                    .ok_or_else(|| fail(mercs2_exemap::Error::new(format!("--image {g:?} is not <image_id>=<file>"))))?;
+                if callers.of(id).next().is_none() {
+                    return Err(fail(mercs2_exemap::Error::new(format!("--image {id}: lua_callers.tsv has no caller for it"))));
+                }
+                files.insert(id.to_string(), PathBuf::from(path));
+            }
+            let missing: Vec<&str> = callers.rows.iter().map(|c| c.image_id.as_str()).filter(|id| !files.contains_key(*id)).collect();
+            if !missing.is_empty() {
+                return Err(fail(mercs2_exemap::Error::new(format!("no --image for {} (every image of lua_callers.tsv is required)", missing.join(", ")))));
+            }
+            let mut all = Vec::new();
+            for c in &callers.rows {
+                let path = &files[&c.image_id];
+                let bytes = read(path)?;
+                let image = images.image(&c.image_id).expect("lua_callers.tsv rows name images.tsv images");
+                let sha = mercs2_exemap::sha256_hex(&bytes);
+                if sha != image.sha256 {
+                    return Err(fail(mercs2_exemap::Error::new(format!(
+                        "{} has sha256 {sha}; images.tsv says image {} is {}",
+                        path.display(),
+                        c.image_id,
+                        image.sha256
+                    ))));
+                }
+                let fpath = functions.join(format!("{}.functions.jsonl", c.image_id));
+                let text = std::fs::read_to_string(&fpath).map_err(|e| {
+                    eprintln!("error: cannot read {}: {e}", fpath.display());
+                    ExitCode::from(2)
+                })?;
+                let fns = Functions::parse(&text, &fpath.display().to_string()).map_err(fail)?;
+                let (sites, calls) = match image.platform {
+                    Platform::Pc => x86_calls(&bytes, &fns, c),
+                    Platform::X360 | Platform::Ps3 => ppc_calls(&bytes, &fns, c),
+                }
+                .map_err(fail)?;
+                let unread = calls.iter().filter(|k| k.name == mercs2_exemap::luacalls::Val::Unread).count();
+                println!("{:<22} caller 0x{:08x}: {sites} call sites, {} rows, {unread} unread", c.image_id, c.va, calls.len());
+                all.push(ImageCalls { image_id: c.image_id.clone(), sha256: sha, caller: c.va, sites, calls });
+            }
+            write(&out, to_tsv(&all).as_bytes())?;
+            println!("out        -> {}", out.display());
+        }
+        Command::BindingArgs { image_id, functions, luareg, out } => {
+            use mercs2_exemap::bindingargs::{image_reads, to_tsv, Readers};
+            let fail = |e: mercs2_exemap::Error| {
+                eprintln!("error: {e}");
+                ExitCode::from(1)
+            };
+            let readers = Readers::embedded().map_err(fail)?;
+            let mine: Vec<_> = readers.of(&image_id).collect();
+            if mine.is_empty() {
+                return Err(fail(mercs2_exemap::Error::new(format!("lua_readers.tsv has no reader of {image_id}"))));
+            }
+            let read_text = |p: &PathBuf| {
+                std::fs::read_to_string(p).map_err(|e| {
+                    eprintln!("error: cannot read {}: {e}", p.display());
+                    ExitCode::from(2)
+                })
+            };
+            let text = read_text(&functions)?;
+            let fns = mercs2_exemap::luacalls::Functions::parse(&text, &functions.display().to_string()).map_err(fail)?;
+            let file = mercs2_exemap::annotate::read_functions(&text, &functions.display().to_string()).map_err(fail)?;
+            if file.image_id != image_id {
+                return Err(fail(mercs2_exemap::Error::new(format!("{} is of image {}, not {image_id}", functions.display(), file.image_id))));
+            }
+            let reg = mercs2_exemap::lualink::parse_luareg(&read_text(&luareg)?).map_err(fail)?;
+            let bindings = image_reads(&reg, &fns, &mine).map_err(fail)?;
+            let read = bindings.iter().filter(|(_, _, r)| !r.is_empty()).count();
+            let computed = bindings.iter().filter(|(_, _, r)| r.iter().any(|x| x.position.is_none())).count();
+            write(&out, to_tsv(&image_id, &file.program_sha256, &mine, &bindings).as_bytes())?;
+            println!("bindings   {} ({read} read arguments, {computed} with a computed position)", bindings.len());
+            println!("out        -> {}", out.display());
         }
     }
     Ok(())
