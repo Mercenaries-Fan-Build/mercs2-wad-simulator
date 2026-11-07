@@ -62,6 +62,11 @@ loadprobe = { workspace = true }
 # Saves page Delete: moves a .profile to the OS trash (recoverable) rather than removing it.
 trash = "5"
 
+[dev-dependencies]
+# A yardstick for the Missions canvas layout: the corpus's canvases laid out by ELK Layered (a pure Rust
+# port of the Eclipse Layout Kernel) and scored beside ours. Tests only; nothing ships it.
+elk-layout = "0.12.2"
+
 [features]
 # Builds the game-gated tests, which read the retail vz.wad named by the repo-root
 # .mercs2-local.toml; run them with `cargo xtask retail-test`.
