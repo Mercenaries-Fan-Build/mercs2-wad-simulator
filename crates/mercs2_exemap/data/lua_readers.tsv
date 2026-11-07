@@ -1,0 +1,38 @@
+# The functions through which an image's Lua bindings read their arguments: read by `exemap binding-args`
+# (mercs2_exemap::bindingargs). `index` is the 0-based argument of the call that holds the Lua stack
+# position, or `@N` for a reader that always reads position N whatever it is passed; `slots` is how many consecutive positions it reads (`1..2`: one, and the next when it is a
+# table); `reads` is what it takes. Each row's evidence is the reader's own body in the image's decomp.
+# Lua 5.1 API of x360-retail, from their bodies: 0x827df138 lua_type, 0x827df1f0 lua_isnumber,
+# 0x827df3c0 lua_tonumber, 0x827df418 lua_tointeger, 0x827df478 lua_toboolean, 0x827df4d0 lua_tolstring,
+# 0x827df650 lua_touserdata; 0x827e16b8 raises the argument type error (its third argument the expected type).
+image_id	va	index	slots	reads	evidence
+x360-retail	0x823082b8	1	1	number	isnumber then tonumber at the index, stored as a float; returns 1
+x360-retail	0x82308320	1	1	integer	isnumber then tonumber at the index, stored as an int; returns 1
+x360-retail	0x82308230	1	1	boolean	lua_type 1 (boolean) or 0 (nil), then toboolean; returns 1
+x360-retail	0x823084a8	1	1	string	isstring (type 4 or 3) then tolstring; returns 1
+x360-retail	0x82308518	1	1	name	reads a string (0x82308430) and hashes it with 0x82855718 (pandemic_hash_m2); returns the hash
+x360-retail	0x823089b8	1	1	lightuserdata	lua_type 2 (light userdata) then touserdata; returns 1
+x360-retail	0x82316310	1	1	lightuserdata	calls 0x823089b8 at the same index
+x360-retail	0x82308938	1	1	userdata	lua_type 2 or full userdata (0x827df298), then touserdata; returns 1
+x360-retail	0x82308a80	1	1	handle	a userdata (0x82308938), or with its fourth argument set the number DAT_820baf14 for none; returns 1
+x360-retail	0x82308b38	1	1	handle	0 when the position is past the stack top (0x82251f58), else 0x82308a80 at the index with its fourth argument 1
+x360-retail	0x82308578	1	2	vector2	isnumber at the index and the next, tonumber of both into float[2]; returns 2
+x360-retail	0x82308620	1	3	vector3	isnumber at the index and the next two, tonumber of all three into float[3]; returns 3
+x360-retail	0x82308700	1	4	vector4	isnumber at the index and the next three, tonumber of all four into float[4]; returns 4
+x360-retail	0x82308818	1	3	color	isnumber at the index and the next two, each tonumber times DAT_820f8c28 packed as one byte of a 32-bit colour with the top byte 0xff; returns 3
+x360-retail	0x82308390	@1	1	string	isstring then tolstring at position 1 (its index argument is unused), copied to at most 64 bytes
+x360-retail	0x82308b90	1	1	table	lua_type 5 (table), kept as a reference; returns 1
+x360-retail	0x82308d58	1	1..2	callback	lua_type 6 (function) at the index, then a table at the next position when there is one, both kept as references
+x360-retail	0x82308e90	2	1..2	callback	lua_type 6 (function) at the index, then a table at the next position when there is one, both kept as references
+x360-retail	0x82308a20	1	1	filter	0x823590b0: an object filter userdata, a handle, a name string, a number, or a table of filter fields
+x360-retail	0x827df3c0	1	1	number	lua_tonumber called by the binding itself
+x360-retail	0x827df4d0	1	1	string	lua_tolstring called by the binding itself
+x360-retail	0x827df478	1	1	boolean	lua_toboolean called by the binding itself
+x360-retail	0x827df650	1	1	userdata	lua_touserdata called by the binding itself
+x360-retail	0x827e19e8	1	1	integer	luaL_optinteger (lua_type above 0, then tointeger 0x827df418, the number type error when it is 0 and not a number; else its third argument) called by the binding itself
+x360-retail	0x827e18b0	1	1	number	luaL_checknumber (tonumber, the number type error when it is 0 and not a number) called by the binding itself
+x360-retail	0x827e1930	2	1	number	luaL_optnumber (lua_type above 0, then 0x827e18b0 at the index, else the default) called by the binding itself; the default is a float register, which the decomp lists first, so the index is the third argument
+x360-retail	0x827e17f8	1	1	string	luaL_optlstring (lua_type above 0, then tolstring, the string type error when it fails; else its third argument) called by the binding itself
+x360-retail	0x827dfc70	1	1	table	lua_getfield (a field of the value at the index, pushed) called by the binding itself
+x360-retail	0x827df138	1	1	any	lua_type called by the binding itself: the position is read, its type tested
+x360-retail	0x827df0f0	1	1	any	lua_pushvalue called by the binding itself: the value at the position is passed on
