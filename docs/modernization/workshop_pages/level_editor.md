@@ -7,7 +7,7 @@ viewport, world states, comparison, checks and budgets.
 
 Every row is an element: what the user does, what happens, where the data comes from, what it writes,
 what is missing, and what proves it. Nothing is drawn without its row being true. Inspect stays
-read-only base game; edits live in a Depot item; a Shipment packages Ready items; the workshop
+read-only base game; edits live in a Depot item; a Shipment packages copies of Depot items, Draft or Ready; the workshop
 validates and hands to Modkit, and never installs. Novel content is additive through `vz-patch.wad`.
 
 Grades: PROVEN (measured this pass or cited to code), INFERRED, UNPROVEN. Numbers come from
