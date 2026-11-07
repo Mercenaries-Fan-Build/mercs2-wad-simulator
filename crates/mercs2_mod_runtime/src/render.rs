@@ -2,9 +2,10 @@
 //! (`mercs2_formats::tree_sites`) so the fix arms on every build the signatures match.
 
 use crate::{rt_log, sites};
+use core::cell::RefCell;
 use core::ffi::{c_char, c_int};
+use mercs2_formats::mod_runtime::LastError;
 use std::ffi::CString;
-use std::sync::Mutex;
 
 /// `m2_tree_sites`: every address is the running image's.
 #[repr(C)]
@@ -28,12 +29,15 @@ pub struct M2TreeSites {
 /// The struct's size when it was introduced (0.5.0): the least a caller may ask for.
 const FIRST_SIZE: usize = core::mem::size_of::<M2TreeSites>();
 
-static LAST_ERROR: Mutex<Option<CString>> = Mutex::new(None);
+thread_local! {
+    static LAST_ERROR_SLOT: RefCell<Option<CString>> = const { RefCell::new(None) };
+}
+/// [`m2_render_last_error`]'s message, one per thread.
+static LAST_ERROR: LastError = LastError::new(&LAST_ERROR_SLOT);
 
 fn fail(msg: String) {
     rt_log::line(&format!("ERROR {msg}"));
-    let c = CString::new(msg.replace('\0', " ")).expect("NULs replaced");
-    *LAST_ERROR.lock().expect("last error lock") = Some(c);
+    LAST_ERROR.set(&msg);
 }
 
 fn tree_sites(out: *mut M2TreeSites) -> Result<(), String> {
@@ -77,8 +81,9 @@ pub extern "C" fn m2_render_tree_sites(out: *mut M2TreeSites) -> c_int {
     }
 }
 
-/// The message of the last failure a render call recorded, or NULL. Valid until the next failure.
+/// The message of the last failure a render call recorded on the calling thread, or NULL. Valid until that
+/// thread's next failure; another thread's failure never touches it.
 #[unsafe(no_mangle)]
 pub extern "C" fn m2_render_last_error() -> *const c_char {
-    LAST_ERROR.lock().expect("last error lock").as_ref().map_or(core::ptr::null(), |c| c.as_ptr())
+    LAST_ERROR.get()
 }
