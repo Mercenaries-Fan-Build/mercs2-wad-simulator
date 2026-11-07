@@ -2005,6 +2005,9 @@ pub fn run(opts: Options) {
     // The Missions blueprint editor's panel. One per app session — pan/zoom/selection survive the
     // navigator tab switching away and back, which the real workflow does constantly.
     let mut missions_panel = crate::missions::Panel::default();
+    // The one debug session (the host takes one debug client): the Missions page drives it, the rail shows a
+    // pause on every page. Owned here, so a page reset never drops the link and resumes the game.
+    let mut debugger = crate::missions_debug::Debug::default();
     // Host-provided, like the game stack: the crate never reaches into the filesystem for it.
     let qm_names = mercs2_quartermaster::names::NameTable::find_from(
         &std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
@@ -2107,6 +2110,9 @@ pub fn run(opts: Options) {
     let mut layer_ui: Option<(PathBuf, u32)> = None;
     // A `--ui-state` that opened a clip: (capture, settle frames, clip, on a hero, frames waited).
     let mut anim_ui: Option<(PathBuf, u32, u32, bool, u32)> = None;
+    // A `--ui-state` that opens a Missions script: (script, capture, settle frames, frames waited), opened
+    // once the page's corpus reference is in.
+    let mut script_ui: Option<(String, Option<String>, PathBuf, u32, u32)> = None;
     let mut capture_to: Option<(PathBuf, u32)> = None;
     let mut capture_asked = false;
     // The Audio page (Inspect's AUDIO tab): the captioned inventory, set from the boot thread's
@@ -3216,6 +3222,8 @@ pub fn run(opts: Options) {
                             layer_ui = Some((st.capture.clone(), st.settle_frames));
                         } else if let Some((clip, on_hero)) = waits_on_clip {
                             anim_ui = Some((st.capture.clone(), st.settle_frames, clip, on_hero, 0));
+                        } else if let Some(name) = &st.script {
+                            script_ui = Some((name.clone(), st.function.clone(), st.capture.clone(), st.settle_frames, 0));
                         } else {
                             capture_to = Some((st.capture.clone(), st.settle_frames));
                         }
@@ -3249,6 +3257,20 @@ pub fn run(opts: Options) {
                         if text_page.tables().is_some() {
                             capture_to = Some((to.clone(), *settle));
                             text_ui = None;
+                        }
+                    }
+                    if let Some((name, function, to, settle, frames)) = &mut script_ui {
+                        *frames += 1;
+                        if missions_panel.has_reference() {
+                            if let Err(e) = missions_panel.open_named(name, function.as_deref(), &lua_corpus) {
+                                eprintln!("--ui-state: {e}");
+                                std::process::exit(2);
+                            }
+                            capture_to = Some((to.clone(), *settle));
+                            script_ui = None;
+                        } else if *frames > 60 * 120 {
+                            eprintln!("--ui-state: the Missions page's corpus did not load within 120 s of frames");
+                            std::process::exit(2);
                         }
                     }
                     if let Some((to, settle)) = &layer_ui {
@@ -3527,13 +3549,22 @@ pub fn run(opts: Options) {
                                             "Set the reference data first"
                                         }
                                     });
+                                    // A paused game shows here on every page: the debugger holds it until
+                                    // someone resumes it, and only this cell is always on screen.
+                                    let paused = debugger.paused();
                                     let live_item = theme::RailItem {
                                         index: None,
-                                        label: Workbench::Live.label(),
+                                        label: if paused { "Paused" } else { Workbench::Live.label() },
                                         icon: Workbench::Live.icon(),
                                         on: wb == Workbench::Live,
                                         badge: None,
-                                        dot: Some(if live_page.link.up() { theme::GOOD } else { theme::LINE2 }),
+                                        dot: Some(if paused {
+                                            theme::live::AMBER
+                                        } else if live_page.link.up() {
+                                            theme::GOOD
+                                        } else {
+                                            theme::LINE2
+                                        }),
                                         locked: lock,
                                     };
                                     if theme::rail_item(ui, &live_item) {
@@ -4216,7 +4247,7 @@ pub fn run(opts: Options) {
                                 // The Missions rail opens the Blueprint-style node editor rather
                                 // than the generic script-list lens — the follow-up to this file
                                 // keeps that lens one click away in the picker inside the editor.
-                                missions_acts.extend(crate::missions::navigator(ui, &missions_panel));
+                                missions_acts.extend(crate::missions::navigator(ui, &missions_panel, &debugger));
                             }
                             Workbench::Domain(d) => {
                                 ui.label(theme::disp_text(d.label().to_uppercase(), theme::style_title(), theme::TX));
@@ -6608,7 +6639,7 @@ pub fn run(opts: Options) {
                         // full centre, not a viewport pass, so the dot-grid and node cards sit
                         // where the 3D would.
                         if wb == Workbench::Domain(crate::domain::Domain::Missions) {
-                            missions_acts.extend(crate::missions::center(root, &missions_panel));
+                            missions_acts.extend(crate::missions::center(root, &missions_panel, &debugger));
                         }
                         // ── AUDIO main content: the clip table, not the 3D viewport.
                         let audio_tab = wb == Workbench::Inspect && kind == Kind::Audio;
@@ -7050,9 +7081,11 @@ pub fn run(opts: Options) {
                     // Fold the Missions editor's queued actions back into its panel. The panel
                     // needs the lua corpus so Act::PickMission can parse the picked script in
                     // place; we pass the same slice the rest of the app reads.
+                    debugger.set_base_wad(w.labels.first().map(String::as_str));
                     for act in missions_acts.drain(..) {
-                        crate::missions::apply(act, &mut missions_panel, &lua_corpus);
+                        crate::missions::apply(act, &mut missions_panel, &mut debugger, &lua_corpus);
                     }
+                    missions_panel.poll(&mut debugger, &lua_corpus);
                     // The Audio page: its acts, its workers, and what it asks of the host.
                     for act in audio_acts.drain(..) {
                         crate::audiopage::apply(act, &mut audio_page);
