@@ -15,11 +15,12 @@
 //! Every detoured function is a cdecl `lua_CFunction` except the walker (`__stdcall (host)`).
 
 use crate::{hook, luastack, rt_log, sites, stub};
-use core::cell::Cell;
+use core::cell::{Cell, RefCell};
 use core::ffi::{CStr, c_char, c_int, c_void};
 use core::sync::atomic::{AtomicBool, AtomicI32, AtomicPtr, AtomicU32, AtomicUsize, Ordering};
 use mercs2_formats::lua_exec::{self, MAX_CHUNK, MAX_RESULTS};
 use mercs2_formats::lua_sites::{HOST_INITIALISED, HOST_LUA_STATE, LuaSites, Site};
+use mercs2_formats::mod_runtime::LastError;
 use mercs2_formats::lua_stack::{
     LUA_TBOOLEAN, LUA_TFUNCTION, LUA_TNIL, LUA_TNUMBER, LUA_TSTRING, LUA_TTABLE, LUA_TTHREAD, Mem, OFF_BASE, OFF_BASE_CI,
     OFF_CI, OFF_GLOBAL, OFF_STACK, OFF_TOP, TVALUE_SIZE, TVALUE_TT,
@@ -86,7 +87,8 @@ static EVER: [AtomicU32; EVER_SLOTS] = [const { AtomicU32::new(0) }; EVER_SLOTS]
 static EVER_N: AtomicUsize = AtomicUsize::new(0);
 
 static INSTALLED: Mutex<bool> = Mutex::new(false);
-static LAST_ERROR: Mutex<Option<CString>> = Mutex::new(None);
+/// [`m2_lua_last_error`]'s message, one per thread.
+static LAST_ERROR: LastError = LastError::new(&LAST_ERROR_SLOT);
 static ORIG_WALKER: AtomicUsize = AtomicUsize::new(0);
 static ORIG_TYPE: AtomicUsize = AtomicUsize::new(0);
 static ORIG_WIDGET: AtomicUsize = AtomicUsize::new(0);
@@ -94,12 +96,31 @@ static ORIG_FRAME: AtomicUsize = AtomicUsize::new(0);
 
 thread_local! {
     static EXEC_DEPTH: Cell<u32> = const { Cell::new(0) };
+    static LAST_ERROR_SLOT: RefCell<Option<CString>> = const { RefCell::new(None) };
 }
 
 fn fail(msg: String) {
     rt_log::line(&format!("ERROR {msg}"));
-    let c = CString::new(msg.replace('\0', " ")).expect("NULs replaced");
-    *LAST_ERROR.lock().expect("last error lock") = Some(c);
+    LAST_ERROR.set(&msg);
+}
+
+/// Record a failure for [`m2_lua_last_error`] (and the log) from another part of the runtime.
+pub(crate) fn record_error(msg: String) {
+    fail(msg);
+}
+
+/// Every captured state that is usable now.
+pub(crate) fn captured_states() -> Vec<u32> {
+    SEEN.iter().map(|s| s.load(Ordering::Relaxed)).filter(|&l| l != 0 && looks_like_state(l)).collect()
+}
+
+pub(crate) fn state_usable(l: u32) -> bool {
+    looks_like_state(l)
+}
+
+/// A chunk of [`m2_lua_exec`] is running on this thread.
+pub(crate) fn in_exec() -> bool {
+    EXEC_DEPTH.with(Cell::get) > 0
 }
 
 fn sites_ready() -> &'static LuaSites {
@@ -293,6 +314,7 @@ fn capture(l: u32) {
     let is_new = !ever_seen(l);
     rt_log::line(&format!("Lua VM captured via type(): L={l:#x}{}", if is_new { " (new)" } else { "" }));
     catch_up(slot, l);
+    crate::debug::state_captured(l);
     fire(&STATE_CBS, &STATE_N, |cb, ud| {
         let cb: StateCb = unsafe { core::mem::transmute(cb) };
         unsafe { cb(l as *mut c_void, c_int::from(is_new), ud) };
@@ -312,6 +334,9 @@ pub(crate) fn tick(l: u32) {
         return;
     }
     TICKS_STATE.fetch_add(1, Ordering::Relaxed);
+    if EXEC_DEPTH.with(Cell::get) == 0 && slot_of(l).is_some() {
+        crate::debug::tick(l);
+    }
     let ticking = TICK_N.load(Ordering::Relaxed) > 0;
     if !ticking && !REG_PENDING.load(Ordering::Relaxed) {
         return;
@@ -401,6 +426,7 @@ fn install() -> Result<(), String> {
     attach(s, Site::FrameStep, frame_detour as *mut c_void, &ORIG_FRAME)?;
     stub::TICK_ON.store(true, Ordering::Release);
     stub::attach(s)?;
+    crate::debug::install_detours();
     *installed = true;
     rt_log::line("Lua host installed");
     crate::live::register();
@@ -420,10 +446,11 @@ pub extern "C" fn m2_lua_install() -> c_int {
     }
 }
 
-/// The message of the last failure the Lua host recorded, or NULL. Valid until the next failure.
+/// The message of the last failure the Lua host recorded on the calling thread, or NULL. Valid until that
+/// thread's next failure; another thread's failure never touches it.
 #[unsafe(no_mangle)]
 pub extern "C" fn m2_lua_last_error() -> *const c_char {
-    LAST_ERROR.lock().expect("last error lock").as_ref().map_or(core::ptr::null(), |c| c.as_ptr())
+    LAST_ERROR.get()
 }
 
 /// Add a global table `name` of functions to every Lua state the game creates or a script runs on.
