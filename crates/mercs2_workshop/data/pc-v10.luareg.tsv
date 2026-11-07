@@ -1,0 +1,1376 @@
+table	namespace	index	name	function
+0x00b923a8		0	byte	0x008636a0
+0x00b923a8		1	char	0x00863860
+0x00b923a8		2	dump	0x00863940
+0x00b923a8		3	find	0x008646f0
+0x00b923a8		4	format	0x00865150
+0x00b923a8		5	gfind	0x008649e0
+0x00b923a8		6	gmatch	0x008648b0
+0x00b923a8		7	gsub	0x00864c60
+0x00b923a8		8	len	0x00863220
+0x00b923a8		9	lower	0x00863450
+0x00b923a8		10	match	0x00864710
+0x00b923a8		11	rep	0x008635f0
+0x00b923a8		12	reverse	0x00863390
+0x00b923a8		13	sub	0x00863270
+0x00b923a8		14	upper	0x00863520
+0x00b92428		0	concat	0x00862790
+0x00b92428		1	foreach	0x00862260
+0x00b92428		2	foreachi	0x00862130
+0x00b92428		3	getn	0x00862480
+0x00b92428		4	maxn	0x00862380
+0x00b92428		5	insert	0x00862550
+0x00b92428		6	remove	0x00862660
+0x00b92428		7	setn	0x008624e0
+0x00b92428		8	sort	0x00863110
+0x00b924b8		0	assert	0x00861350
+0x00b924b8		1	collectgarbage	0x00860b80
+0x00b924b8		2	dofile	0x008612b0
+0x00b924b8		3	error	0x00860480
+0x00b924b8		4	gcinfo	0x00860b40
+0x00b924b8		5	getfenv	0x00860790
+0x00b924b8		6	getmetatable	0x00860570
+0x00b924b8		7	loadfile	0x00861070
+0x00b924b8		8	load	0x008611b0
+0x00b924b8		9	loadstring	0x00860fc0
+0x00b924b8		10	next	0x00860ce0
+0x00b924b8		11	pcall	0x008615f0
+0x00b924b8		12	print	0x006d5640
+0x00b924b8		13	rawequal	0x00860900
+0x00b924b8		14	rawget	0x008609b0
+0x00b924b8		15	rawset	0x00860a70
+0x00b924b8		16	select	0x00861520
+0x00b924b8		17	setfenv	0x008607e0
+0x00b924b8		18	setmetatable	0x008605e0
+0x00b924b8		19	tonumber	0x008602a0
+0x00b924b8		20	tostring	0x008617f0
+0x00b924b8		21	type	0x00860c70
+0x00b924b8		22	unpack	0x00861410
+0x00b924b8		23	xpcall	0x008616c0
+0x00b92580		0	create	0x00861d00
+0x00b92580		1	resume	0x00861ba0
+0x00b92580		2	running	0x00861f30
+0x00b92580		3	status	0x00861e30
+0x00b92580		4	wrap	0x00861dc0
+0x00b92580		5	yield	0x00861df0
+0x00b932c8		0	add	0x007d2d90
+0x00b932c8		1	clone	0x007d2ea0
+0x00b932c8		2	equals	0x007d2f80
+0x00b932c8		3	normalize	0x007d3050
+0x00b932c8		4	offset	0x007d3120
+0x00b932c8		5	subtract	0x007d31f0
+0x00b932c8		6	toString	0x007d3310
+0x00b93308		0	interpolate	0x007d3820
+0x00b93308		1	distance	0x007d3600
+0x00b93308		2	polar	0x007d39b0
+0x00b93328		0	addRequestHeader	0x007d1610
+0x00b93328		1	decode	0x007d1640
+0x00b93328		2	getBytesLoaded	0x007d1760
+0x00b93328		3	getBytesTotal	0x007d17c0
+0x00b93328		4	load	0x007d1820
+0x00b93328		5	send	0x007d18e0
+0x00b93328		6	sendAndLoad	0x007d1910
+0x00b93328		7	toString	0x007d1940
+0x00b93378		0	addCallback	0x007be9d0
+0x00b93378		1	call	0x007bea00
+0x00b93400		0	getDate	0x007b8d00
+0x00b93400		1	getDay	0x007b8e30
+0x00b93400		2	getFullYear	0x007b90e0
+0x00b93400		3	getHours	0x007b8ef0
+0x00b93400		4	getMilliseconds	0x007b9030
+0x00b93400		5	getMinutes	0x007b8f50
+0x00b93400		6	getMonth	0x007b8c20
+0x00b93400		7	getSeconds	0x007b8fc0
+0x00b93400		8	getTime	0x007b8ea0
+0x00b93400		9	getTimezoneOffset	0x007b8bc0
+0x00b93400		10	getYear	0x007b9090
+0x00b93400		11	getUTCDate	0x007b9760
+0x00b93400		12	getUTCDay	0x007b9890
+0x00b93400		13	getUTCFullYear	0x007b9af0
+0x00b93400		14	getUTCHours	0x007b9900
+0x00b93400		15	getUTCMilliseconds	0x007b9a40
+0x00b93400		16	getUTCMinutes	0x007b9960
+0x00b93400		17	getUTCMonth	0x007b9680
+0x00b93400		18	getUTCSeconds	0x007b99d0
+0x00b93400		19	getUTCYear	0x007b9aa0
+0x00b93400		20	setDate	0x007b9360
+0x00b93400		21	setFullYear	0x007b91d0
+0x00b93400		22	setHours	0x007b94b0
+0x00b93400		23	setMilliseconds	0x007b9620
+0x00b93400		24	setMinutes	0x007b9520
+0x00b93400		25	setMonth	0x007b9260
+0x00b93400		26	setSeconds	0x007b95a0
+0x00b93400		27	setTime	0x007b9460
+0x00b93400		28	setYear	0x007b9130
+0x00b93400		29	setUTCDate	0x007b9d70
+0x00b93400		30	setUTCFullYear	0x007b9be0
+0x00b93400		31	setUTCHours	0x007b9e70
+0x00b93400		32	setUTCMilliseconds	0x007b9fe0
+0x00b93400		33	setUTCMinutes	0x007b9ee0
+0x00b93400		34	setUTCSeconds	0x007b9f60
+0x00b93400		35	setUTCMonth	0x007b9c70
+0x00b93400		36	setUTCYear	0x007b9b40
+0x00b93400		37	toString	0x007ba040
+0x00b93400		38	valueOf	0x007b8ea0
+0x00b93550		0	concat	0x007b7a90
+0x00b93550		1	toString	0x007b7d00
+0x00b93590		0	getProgress	0x007b2630
+0x00b93590		1	loadClip	0x007b27c0
+0x00b93590		2	unloadClip	0x007b2900
+0x00b935b0		0	addListener	0x007b5bd0
+0x00b935b0		1	broadcastMessage	0x007b5bd0
+0x00b935b0		2	getBeginIndex	0x007b5bd0
+0x00b935b0		3	getCaretIndex	0x007b5bd0
+0x00b935b0		4	getEndIndex	0x007b5bd0
+0x00b935b0		5	getFocus	0x007b5bd0
+0x00b935b0		6	setFocus	0x007b5bd0
+0x00b935b0		7	setSelection	0x007b5bd0
+0x00b935b0		8	removeListener	0x007b5bd0
+0x00b93600		0	getCaretIndex	0x007b14f0
+0x00b93600		1	getFocus	0x007b12f0
+0x00b93600		2	setFocus	0x007b1370
+0x00b93600		3	setSelection	0x007b15a0
+0x00b93638		0	addListener	0x007b5bd0
+0x00b93638		1	removeListener	0x007b5bd0
+0x00b93638		2	show	0x007b5bd0
+0x00b93638		3	hide	0x007b5bd0
+0x00b93660		0	addListener	0x007ae3b0
+0x00b93660		1	removeListener	0x007ae570
+0x00b93660		2	show	0x007ae680
+0x00b93660		3	hide	0x007ae6e0
+0x00b93688		0	clone	0x007ac110
+0x00b93688		1	contains	0x007ac1d0
+0x00b93688		2	containsPoint	0x007ac300
+0x00b93688		3	containsRectangle	0x007ac450
+0x00b93688		4	equals	0x007ac5f0
+0x00b93688		5	inflate	0x007ac700
+0x00b93688		6	inflatePoint	0x007ac7e0
+0x00b93688		7	intersection	0x007ac8d0
+0x00b93688		8	intersects	0x007acb50
+0x00b93688		9	isEmpty	0x007acd50
+0x00b93688		10	offset	0x007ace90
+0x00b93688		11	offsetPoint	0x007acfd0
+0x00b93688		12	setEmpty	0x007ad260
+0x00b93688		13	toString	0x007ad2b0
+0x00b93688		14	union	0x007ad4c0
+0x00b93708		0	attachSound	0x006c8210
+0x00b93708		1	getBytesLoaded	0x007aa690
+0x00b93708		2	getBytesTotal	0x007aa690
+0x00b93708		3	getPan	0x007aa690
+0x00b93708		4	getTransform	0x007b5bd0
+0x00b93708		5	getVolume	0x007aa690
+0x00b93708		6	loadSound	0x006c8210
+0x00b93708		7	setPan	0x006c8210
+0x00b93708		8	setTransform	0x006c8210
+0x00b93708		9	setVolume	0x006c8210
+0x00b93708		10	start	0x006c8210
+0x00b93708		11	stop	0x006c8210
+0x00b93770		0	getDepth	0x0077db80
+0x00b93770		1	getTextFormat	0x007a7000
+0x00b93770		2	getNewTextFormat	0x007a71b0
+0x00b93770		3	setTextFormat	0x007a6d20
+0x00b93770		4	setNewTextFormat	0x007a7290
+0x00b93770		5	replaceText	0x007a7380
+0x00b93770		6	removeTextField	0x007a7690
+0x00b937b0		0	appendText	0x007a7590
+0x00b937b0		1	appendHtml	0x007a7610
+0x00b937b0		2	getCharBoundaries	0x007a76f0
+0x00b937b0		3	getCharIndexAtPoint	0x007a79b0
+0x00b937b0		4	getExactCharBoundaries	0x007a7850
+0x00b937b0		5	getFirstCharInParagraph	0x007a8060
+0x00b937b0		6	getLineIndexAtPoint	0x007a7aa0
+0x00b937b0		7	getLineIndexOfChar	0x007a8120
+0x00b937b0		8	getLineOffset	0x007a7b80
+0x00b937b0		9	getLineMetrics	0x007a7d00
+0x00b937b0		10	getLineText	0x007a7f50
+0x00b937b0		11	getLineLength	0x007a7c40
+0x00b937b0		12	setImageSubstitutions	0x007a87f0
+0x00b937b0		13	updateImageSubstitution	0x007a8920
+0x00b93830		0	toString	0x0079f710
+0x00b93830		1	valueOf	0x0079f710
+0x00b93830		2	clone	0x0079fa60
+0x00b93830		3	concat	0x0079fb00
+0x00b93830		4	createBox	0x0079fc80
+0x00b93830		5	createGradientBox	0x0079fe40
+0x00b93830		6	deltaTransformPoint	0x007a0790
+0x00b93830		7	identity	0x007a0040
+0x00b93830		8	invert	0x007a00a0
+0x00b93830		9	rotate	0x007a01f0
+0x00b93830		10	scale	0x007a0360
+0x00b93830		11	transformPoint	0x007a04c0
+0x00b93830		12	translate	0x007a0430
+0x00b938a0		0	setTransform	0x0079e210
+0x00b938a0		1	getTransform	0x0079e480
+0x00b938a0		2	setRGB	0x0079e780
+0x00b938a0		3	getRGB	0x0079e8f0
+0x00b938d8		0	play	0x00794790
+0x00b938d8		1	stop	0x007947d0
+0x00b938d8		2	gotoAndStop	0x00794930
+0x00b938d8		3	gotoAndPlay	0x00794810
+0x00b938d8		4	nextFrame	0x00794a50
+0x00b938d8		5	prevFrame	0x00794ae0
+0x00b938d8		6	getBytesLoaded	0x00794b40
+0x00b938d8		7	getBytesTotal	0x00794ba0
+0x00b938d8		8	getBounds	0x007957d0
+0x00b938d8		9	localToGlobal	0x00795c30
+0x00b938d8		10	globalToLocal	0x00795e60
+0x00b938d8		11	hitTest	0x00796060
+0x00b938d8		12	attachBitmap	0x00794f80
+0x00b938d8		13	attachMovie	0x00794d20
+0x00b938d8		14	duplicateMovieClip	0x00794c10
+0x00b938d8		15	removeMovieClip	0x00795680
+0x00b938d8		16	createEmptyMovieClip	0x007952d0
+0x00b938d8		17	createTextField	0x00795470
+0x00b938d8		18	getDepth	0x0077db80
+0x00b938d8		19	swapDepths	0x00796400
+0x00b938d8		20	getNextHighestDepth	0x00796540
+0x00b938d8		21	getInstanceAtDepth	0x007965d0
+0x00b938d8		22	getSWFVersion	0x007966a0
+0x00b938d8		23	startDrag	0x00796710
+0x00b938d8		24	stopDrag	0x007968c0
+0x00b938d8		25	setMask	0x007956e0
+0x00b938d8		26	loadMovie	0x00796910
+0x00b938d8		27	unloadMovie	0x00796a50
+0x00b938d8		28	loadVariables	0x00796aa0
+0x00b938d8		29	clear	0x00796de0
+0x00b938d8		30	beginFill	0x00796e30
+0x00b938d8		31	beginGradientFill	0x007977b0
+0x00b938d8		32	beginBitmapFill	0x00797870
+0x00b938d8		33	lineGradientStyle	0x00797810
+0x00b938d8		34	endFill	0x00797a80
+0x00b938d8		35	lineStyle	0x00797ad0
+0x00b938d8		36	moveTo	0x00797e70
+0x00b938d8		37	lineTo	0x00797f20
+0x00b938d8		38	curveTo	0x00797fb0
+0x00b93a48		0	concat	0x0078c4c0
+0x00b93a48		1	join	0x0078c5d0
+0x00b93a48		2	pop	0x0078c6f0
+0x00b93a48		3	push	0x0078c750
+0x00b93a48		4	reverse	0x0078c850
+0x00b93a48		5	shift	0x0078c8a0
+0x00b93a48		6	slice	0x0078c900
+0x00b93a48		7	sort	0x0078caa0
+0x00b93a48		8	sortOn	0x0078cde0
+0x00b93a48		9	splice	0x0078d550
+0x00b93a48		10	toString	0x0078d830
+0x00b93a48		11	unshift	0x0078d930
+0x00b93a48		12	valueOf	0x0078da30
+0x00b93ab8		0	toString	0x0078afd0
+0x00b93ab8		1	valueOf	0x0078b070
+0x00b93ad0		0	addListener	0x00789c20
+0x00b93ad0		1	broadcastMessage	0x00789c60
+0x00b93ad0		2	removeListener	0x00789d20
+0x00b93b00		0	addListener	0x007b5bd0
+0x00b93b00		1	removeListener	0x007b5bd0
+0x00b93b00		2	broadcastMessage	0x007b5bd0
+0x00b93b20		0	addProperty	0x00786b40
+0x00b93b20		1	hasOwnProperty	0x00786cf0
+0x00b93b20		2	watch	0x00786db0
+0x00b93b20		3	unwatch	0x00786f00
+0x00b93b20		4	isPropertyEnumerable	0x00786fc0
+0x00b93b20		5	isPrototypeOf	0x007870c0
+0x00b93b20		6	toString	0x00787140
+0x00b93b20		7	valueOf	0x007871f0
+0x00b93bb0		0	toString	0x00784da0
+0x00b93bb0		1	valueOf	0x00784ed0
+0x00b93bc8		0	MAX_VALUE	0x007849f0
+0x00b93bc8		1	MIN_VALUE	0x007849e0
+0x00b93bc8		2	NaN	0x007849b0
+0x00b93bc8		3	NEGATIVE_INFINITY	0x007849d0
+0x00b93bc8		4	POSITIVE_INFINITY	0x007849c0
+0x00b93bf8		0	apply	0x00783c50
+0x00b93bf8		1	call	0x00783f20
+0x00b98770	ObjectFilter	0	Create	0x005f6cf0
+0x00b98770	ObjectFilter	1	Copy	0x005f6d10
+0x00b98770	ObjectFilter	2	SetFilter	0x005f6d70
+0x00b98770	ObjectFilter	3	ClearFilter	0x005f6e30
+0x00b98770	ObjectFilter	4	AddObject	0x005f6ef0
+0x00b98770	ObjectFilter	5	RemoveObject	0x005f7020
+0x00b98770	ObjectFilter	6	GetObjects	0x005f7130
+0x00b98770	ObjectFilter	7	ClearObjects	0x005f7250
+0x00b98770	ObjectFilter	8	UsePlayers	0x005f72e0
+0x00b98770	ObjectFilter	9	SetAssociation	0x005f7390
+0x00b98770	ObjectFilter	10	ClearAssociation	0x005f7460
+0x00b98770	ObjectFilter	11	SetRelation	0x005f74e0
+0x00b98770	ObjectFilter	12	ClearRelation	0x005f7650
+0x00b98770	ObjectFilter	13	Eval	0x005f76e0
+0x00b98770	ObjectFilter	14	GetCoopPlayerGuid	0x005f77d0
+0x00b98770	ObjectFilter	15	_GC	0x005f6c90
+0x00b987f8	Event	0	Create	0x005f69f0
+0x00b987f8	Event	1	CreatePersistent	0x005f6a00
+0x00b987f8	Event	2	Delete	0x005f6a10
+0x00b987f8	Event	3	Post	0x005f6a90
+0x00b98828	Debug	0	Printf	0x006d5640
+0x00b98828	Debug	1	LogError	0x006d5640
+0x00b98828	Debug	2	LogWarning	0x006d5640
+0x00b98828	Debug	3	LogInfo	0x006d5640
+0x00b98828	Debug	4	Assert	0x006d5640
+0x00b98828	Debug	5	GetCallstack	0x006d5640
+0x00b98860	Weapon	0	SetClipAmmo	0x005ea520
+0x00b98860	Weapon	1	GetClipAmmo	0x005ea5f0
+0x00b98860	Weapon	2	GetMaxClipAmmo	0x005ea6b0
+0x00b98860	Weapon	3	SetReserveAmmo	0x005ea790
+0x00b98860	Weapon	4	GetReserveAmmo	0x005ea860
+0x00b98860	Weapon	5	GetMaxReserveAmmo	0x005ea930
+0x00b98860	Weapon	6	Reload	0x005eaa80
+0x00b98860	Weapon	7	IsDesignator	0x005eab70
+0x00b98860	Weapon	8	IsPrimary	0x005eac60
+0x00b988b0	VO	0	Cue	0x005e9de0
+0x00b988b0	VO	1	CueWithoutSubtitles	0x005e9f40
+0x00b988b0	VO	2	Cancel	0x005ea0a0
+0x00b988b0	VO	3	CancelAll	0x005ea1c0
+0x00b988b0	VO	4	Pause	0x005ea210
+0x00b988b0	VO	5	PauseAll	0x005ea2c0
+0x00b988b0	VO	6	Unpause	0x005ea210
+0x00b988b0	VO	7	UnpauseAll	0x005ea2c0
+0x00b988b0	VO	8	SetCinematicMode	0x005ea310
+0x00b988b0	VO	9	AddSequence	0x005ea3c0
+0x00b988b0	VO	10	RemoveSequence	0x005ea470
+0x00b98918	Vehicle	0	GetRiders	0x005e6c80
+0x00b98918	Vehicle	1	GetDriver	0x005e7030
+0x00b98918	Vehicle	2	GetFromSeat	0x005e70f0
+0x00b98918	Vehicle	3	GetFromRider	0x005e70f0
+0x00b98918	Vehicle	4	GetSeatFromRider	0x005cd9f0
+0x00b98918	Vehicle	5	GetRiderFromSeat	0x005e71f0
+0x00b98918	Vehicle	6	GetSeatByType	0x005e72d0
+0x00b98918	Vehicle	7	GetSeatParams	0x005e7470
+0x00b98918	Vehicle	8	SetCanPlayerUse	0x005e7650
+0x00b98918	Vehicle	9	GetSeatToSeat	0x005e7840
+0x00b98918	Vehicle	10	IsSeatBlocked	0x005e7ba0
+0x00b98918	Vehicle	11	IsSeatALadder	0x005e7ed0
+0x00b98918	Vehicle	12	TransferToSeat	0x005e7f70
+0x00b98918	Vehicle	13	Enter	0x005e8060
+0x00b98918	Vehicle	14	EnterBySeatGuid	0x005e8250
+0x00b98918	Vehicle	15	Exit	0x005e8450
+0x00b98918	Vehicle	16	HijackComplete	0x005e86d0
+0x00b98918	Vehicle	17	HijackAbort	0x005e8570
+0x00b98918	Vehicle	18	HijackAbortDone	0x005e8600
+0x00b98918	Vehicle	19	EnableTurret	0x005e87a0
+0x00b98918	Vehicle	20	SetTurretPitch	0x005e8970
+0x00b98918	Vehicle	21	SetTurretYaw	0x005e8ac0
+0x00b98918	Vehicle	22	OpenDoor	0x005e8c10
+0x00b98918	Vehicle	23	CloseDoor	0x005e8cf0
+0x00b98918	Vehicle	24	IsFlying	0x005e9090
+0x00b98918	Vehicle	25	IsFlipped	0x005e9190
+0x00b98918	Vehicle	26	SpinHeli	0x005e8f70
+0x00b98918	Vehicle	27	StartTankHijackMotion	0x005e8dd0
+0x00b98918	Vehicle	28	StopTankHijackMotion	0x005e8ea0
+0x00b98918	Vehicle	29	IsHijackRemote	0x005e9250
+0x00b98918	Vehicle	30	HijackStart	0x005e9350
+0x00b98918	Vehicle	31	SetHijackState	0x005e9460
+0x00b98918	Vehicle	32	SetHijackSuccess	0x005e9500
+0x00b98918	Vehicle	33	CancelHijack	0x005e95d0
+0x00b98918	Vehicle	34	Usable	0x005e96c0
+0x00b98918	Vehicle	35	IsHijackBad	0x005e97e0
+0x00b98918	Vehicle	36	RestoreHealth	0x005e99a0
+0x00b98918	Vehicle	37	RestoreAmmo	0x005e9a20
+0x00b98918	Vehicle	38	SetParts	0x005e9aa0
+0x00b98918	Vehicle	39	ClearControls	0x005e9c40
+0x00b98a60	Table	0	Create	0x005e6ac0
+0x00b98a60	Table	1	InsertI	0x005e6b40
+0x00b98a78	Sys	0	WriteToConsole	0x006d5640
+0x00b98a78	Sys	1	ToStringL	0x005e4460
+0x00b98a78	Sys	2	MemUsage	0x005e4830
+0x00b98a78	Sys	3	StringToGuid	0x005e4910
+0x00b98a78	Sys	4	GuidToString	0x005e4a40
+0x00b98a78	Sys	5	RequestGameState	0x005e4af0
+0x00b98a78	Sys	6	IsLoadingOrStreaming	0x005e4d40
+0x00b98a78	Sys	7	SetNumberOfViewports	0x005e4da0
+0x00b98a78	Sys	8	SetTimeScale	0x005e4e70
+0x00b98a78	Sys	9	LTIGetPrecacheBypass	0x005e4f70
+0x00b98a78	Sys	10	GetLevelName	0x005e4ff0
+0x00b98a78	Sys	11	SetLevelName	0x005e50b0
+0x00b98a78	Sys	12	GetMasterScriptName	0x005e5050
+0x00b98a78	Sys	13	SetMasterScriptName	0x005e5120
+0x00b98a78	Sys	14	GetCharacterTemplate	0x005e5190
+0x00b98a78	Sys	15	RequiredAsset	0x005e51f0
+0x00b98a78	Sys	16	SetAssetRequestMax	0x005e5310
+0x00b98a78	Sys	17	GetAssetRequestMax	0x005e53b0
+0x00b98a78	Sys	18	Callback	0x005e5400
+0x00b98a78	Sys	19	FinishedShell	0x005e54c0
+0x00b98a78	Sys	20	AutoLoad	0x005e5490
+0x00b98a78	Sys	21	GetSkipMission	0x005e54f0
+0x00b98a78	Sys	22	GetINIBriefing	0x005e55a0
+0x00b98a78	Sys	23	SetSkipMission	0x005e5510
+0x00b98a78	Sys	24	SetINIBriefing	0x005e55d0
+0x00b98a78	Sys	25	GetINILoadLastSave	0x005e5640
+0x00b98a78	Sys	26	NoHud	0x005c0340
+0x00b98a78	Sys	27	IsDemoMode	0x005e5670
+0x00b98a78	Sys	28	DisableAssetPreload	0x005e56a0
+0x00b98a78	Sys	29	FlushAssets	0x005e56d0
+0x00b98a78	Sys	30	Clock	0x005e58b0
+0x00b98a78	Sys	31	Date	0x005e59c0
+0x00b98a78	Sys	32	Time	0x005e5cd0
+0x00b98a78	Sys	33	DiffTime	0x005e5ef0
+0x00b98a78	Sys	34	MainTime	0x005e5700
+0x00b98a78	Sys	35	RealTime	0x005e5740
+0x00b98a78	Sys	36	MainTimeStamp	0x005e5780
+0x00b98a78	Sys	37	RealTimeStamp	0x005e57b0
+0x00b98a78	Sys	38	TimeStampMark	0x005e57e0
+0x00b98a78	Sys	39	TimeStampGetElapsed	0x005e5830
+0x00b98a78	Sys	40	PlayIntroMovies	0x005e5f80
+0x00b98a78	Sys	41	StartWithResources	0x005e5fb0
+0x00b98a78	Sys	42	SubtitlesEnabled	0x005e5fe0
+0x00b98a78	Sys	43	RumbleEnabled	0x005e6010
+0x00b98a78	Sys	44	TutorialsEnabled	0x005e6040
+0x00b98a78	Sys	45	SetTutorialsEnabled	0x005e6070
+0x00b98a78	Sys	46	YAxisInverted	0x005e60f0
+0x00b98a78	Sys	47	SetLuaSaveVersion	0x005e6120
+0x00b98a78	Sys	48	AddStringDb	0x005e6180
+0x00b98a78	Sys	49	ClearStringDb	0x005e61e0
+0x00b98a78	Sys	50	StartSingleplayer	0x005e4c50
+0x00b98a78	Sys	51	RequestAutosave	0x005e61f0
+0x00b98a78	Sys	52	IsFinalConfig	0x005e65c0
+0x00b98a78	Sys	53	IsConfirmOnCircle	0x005e6350
+0x00b98a78	Sys	54	GetPlatform	0x005e6390
+0x00b98a78	Sys	55	GetLanguage	0x005e6420
+0x00b98a78	Sys	56	IsGermanSKU	0x005e63d0
+0x00b98a78	Sys	57	HaveActiveProfile	0x005e6590
+0x00b98a78	Sys	58	IsAutosaveEnabled	0x005e65e0
+0x00b98a78	Sys	59	SetAutosaveEnabled	0x005e6610
+0x00b98a78	Sys	60	ForceNextAutosave	0x005e6670
+0x00b98a78	Sys	61	GetVersion	0x005e6680
+0x00b98a78	Sys	62	GetShellCode	0x005e6720
+0x00b98a78	Sys	63	GetForceNewGame	0x005e67e0
+0x00b98c88	String	0	GetHash	0x005e4340
+0x00b98c98	Sound	0	TestCueSound	0x005e0db0
+0x00b98c98	Sound	1	TestStopSound	0x005e0e70
+0x00b98c98	Sound	2	TestPauseSound	0x005e0f30
+0x00b98c98	Sound	3	CueSound	0x005e0ff0
+0x00b98c98	Sound	4	StopSound	0x005e10f0
+0x00b98c98	Sound	5	PauseSound	0x005e11f0
+0x00b98c98	Sound	6	SetCategoryVolume	0x005e12f0
+0x00b98c98	Sound	7	SetCategoryPitch	0x005e1390
+0x00b98c98	Sound	8	LockListenerPosition	0x005e1430
+0x00b98c98	Sound	9	BindMusicCue	0x005e14a0
+0x00b98c98	Sound	10	ClearMusicCues	0x005e1580
+0x00b98c98	Sound	11	TransitionMusic	0x005e1600
+0x00b98c98	Sound	12	SetDynamicMusic	0x005e16e0
+0x00b98c98	Sound	13	IsDynamicMusic	0x005e1740
+0x00b98c98	Sound	14	SetTimerUpdateMusic	0x005e17a0
+0x00b98c98	Sound	15	AddFactionMusic	0x005e1800
+0x00b98c98	Sound	16	SetFactionMusic	0x005e1880
+0x00b98c98	Sound	17	LockFactionMusic	0x005e18f0
+0x00b98c98	Sound	18	IsFactionLockedMusic	0x005e1960
+0x00b98c98	Sound	19	SetActionLevelsMusic	0x005e19c0
+0x00b98c98	Sound	20	LockActionLevelMusic	0x005e1b00
+0x00b98c98	Sound	21	IsActionLevelLockedMusic	0x005e1b70
+0x00b98c98	Sound	22	SetHostilityDecayRateMusic	0x005e1bd0
+0x00b98c98	Sound	23	SetSourceMusic	0x005e1cf0
+0x00b98c98	Sound	24	SetSourceEnterMusic	0x006d5640
+0x00b98c98	Sound	25	SetSourceExitMusic	0x006d5640
+0x00b98c98	Sound	26	SetSourceMusicTransition	0x006d5640
+0x00b98c98	Sound	27	ClearSourceMusicTransitions	0x006d5640
+0x00b98c98	Sound	28	AddSourceMusicEntryState	0x005e1d60
+0x00b98c98	Sound	29	ClearSourceMusicEntryStates	0x005e1df0
+0x00b98c98	Sound	30	SetActionThresholdsMusic	0x005e1e10
+0x00b98c98	Sound	31	SetRootFactionRegionMusic	0x005e1c40
+0x00b98c98	Sound	32	SetHijackMusic	0x005e1ed0
+0x00b98c98	Sound	33	ActivateFactionRegionMusic	0x005e1cc0
+0x00b98c98	Sound	34	AddMusicState	0x005e1fa0
+0x00b98c98	Sound	35	AddMusicTransition	0x005e2110
+0x00b98c98	Sound	36	AddMusicSourcePlaylist	0x005e2230
+0x00b98c98	Sound	37	ClearMusicSourcePlaylist	0x005e22d0
+0x00b98c98	Sound	38	RemoveMusicSourcePlaylist	0x005e2340
+0x00b98c98	Sound	39	AddCueToMusicSourcePlaylist	0x005e23c0
+0x00b98c98	Sound	40	LoadBank	0x005e2480
+0x00b98c98	Sound	41	UnloadBank	0x005e2570
+0x00b98c98	Sound	42	LoadSoundBank	0x005e2630
+0x00b98c98	Sound	43	LoadWaveBank	0x005e26b0
+0x00b98c98	Sound	44	UnloadSoundBank	0x005e2730
+0x00b98c98	Sound	45	UnloadWaveBank	0x005e27b0
+0x00b98c98	Sound	46	LoadTempBank	0x005e2830
+0x00b98c98	Sound	47	UnloadTempBank	0x005e2a10
+0x00b98c98	Sound	48	LoadBankWithCallback	0x005e2bf0
+0x00b98c98	Sound	49	UnloadBankWithCallback	0x005e2dd0
+0x00b98c98	Sound	50	RequestAmbienceBank	0x005e2fb0
+0x00b98c98	Sound	51	SetStreamBlockDumping	0x005e3010
+0x00b98c98	Sound	52	SilenceAmbience	0x005e3080
+0x00b98c98	Sound	53	CueAmbience	0x005e30f0
+0x00b98c98	Sound	54	StopAmbience	0x005e3170
+0x00b98c98	Sound	55	SetMessageFiltering	0x005e31e0
+0x00b98c98	Sound	56	DefineReverbPreset	0x005e3290
+0x00b98c98	Sound	57	SetReverbPreset	0x005e34c0
+0x00b98c98	Sound	58	SetReverb	0x005e3540
+0x00b98c98	Sound	59	SetLowPassFilterSettings	0x005e35b0
+0x00b98c98	Sound	60	SetLowPassFilter	0x005e3670
+0x00b98c98	Sound	61	SetSurvivalMode	0x005e36e0
+0x00b98c98	Sound	62	SetVehicleEngineBoost	0x005e3770
+0x00b98c98	Sound	63	SetCinematicMode	0x006d5640
+0x00b98c98	Sound	64	ForceActionTransition	0x005e3830
+0x00b98c98	Sound	65	GetMaxDuration	0x005e3860
+0x00b98c98	Sound	66	ClearFadeCategories	0x005e3900
+0x00b98c98	Sound	67	AddFadeCategory	0x006d5640
+0x00b98c98	Sound	68	FadeCategoryDown	0x005e3910
+0x00b98c98	Sound	69	FadeCategoryUp	0x005e3a20
+0x00b98c98	Sound	70	GetCategoryVolume	0x005e3ad0
+0x00b98c98	Sound	71	ClearPitchCategories	0x006d5640
+0x00b98c98	Sound	72	AddPitchCategory	0x006d5640
+0x00b98c98	Sound	73	PitchCategoryActivate	0x005e3b80
+0x00b98c98	Sound	74	PitchCategoryDeactivate	0x005e3c90
+0x00b98c98	Sound	75	GetCategoryPitch	0x005e3d40
+0x00b98c98	Sound	76	SetSystemPause	0x005e3df0
+0x00b98c98	Sound	77	SetPauseFilter	0x005e3e70
+0x00b98c98	Sound	78	RegisterReadyCallback	0x005e3ee0
+0x00b98c98	Sound	79	OpenStreamFile	0x005e4020
+0x00b98c98	Sound	80	CloseStreamFile	0x005e40d0
+0x00b98c98	Sound	81	GetAudioDir	0x005e4140
+0x00b98c98	Sound	82	OverrideUserMusic	0x005e4180
+0x00b98c98	Sound	83	RestoreUserMusic	0x005e41c0
+0x00b98c98	Sound	84	StopAndFlushAllSounds	0x005e4200
+0x00b98c98	Sound	85	SetMasterVolume	0x005e4240
+0x00b98c98	Sound	86	_SummonEd	0x006d5640
+0x00b98c98	Sound	87	_GetLibVersion	0x005e4300
+0x00b98f64	Report	0	Init	0x005e05d0
+0x00b98f64	Report	1	GetInfractions	0x005e0720
+0x00b98f64	Report	2	Completed	0x005e0a10
+0x00b98f64	Report	3	Failed	0x005e0ab0
+0x00b98f64	Report	4	SetDelay	0x005e0920
+0x00b98f94	Disguise	0	Init	0x005e0b50
+0x00b98fa4	FactionZone	0	Init	0x005e0c80
+0x00b98fc0	Player	0	GetCharacter	0x005da870
+0x00b98fc0	Player	1	GetControlledObject	0x005daa20
+0x00b98fc0	Player	2	GetSeat	0x005da940
+0x00b98fc0	Player	3	GetName	0x005da7a0
+0x00b98fc0	Player	4	GetCameraXZHeading	0x005dab50
+0x00b98fc0	Player	5	GetViewport	0x005dacc0
+0x00b98fc0	Player	6	GetViewportId	0x005daf10
+0x00b98fc0	Player	7	GetCamera	0x005daff0
+0x00b98fc0	Player	8	TeleportCamera	0x005db0d0
+0x00b98fc0	Player	9	CheckSpawnPos	0x005db6a0
+0x00b98fc0	Player	10	SetPDAMapMode	0x005db780
+0x00b98fc0	Player	11	SetPDAMapModeCallback	0x005db1e0
+0x00b98fc0	Player	12	SetPDAMapModeCancelCallback	0x005db340
+0x00b98fc0	Player	13	RequestPDAMapModeExit	0x005db470
+0x00b98fc0	Player	14	RequestPDAMapModeCancel	0x005db5a0
+0x00b98fc0	Player	15	GetTargetUnderReticle	0x005dd6b0
+0x00b98fc0	Player	16	SetSatelliteScanMode	0x005db980
+0x00b98fc0	Player	17	SetupSatelliteScan	0x005dba80
+0x00b98fc0	Player	18	SetSatelliteScanCallbacks	0x005dbbe0
+0x00b98fc0	Player	19	AddSatelliteScanTarget	0x005dbcf0
+0x00b98fc0	Player	20	SetSatelliteScanPaused	0x005dbde0
+0x00b98fc0	Player	21	SetCinematicMode	0x005dbee0
+0x00b98fc0	Player	22	InCinematicMode	0x005dc090
+0x00b98fc0	Player	23	SetOutBoundary	0x005dc160
+0x00b98fc0	Player	24	GetOutBoundary	0x005dc720
+0x00b98fc0	Player	25	IsInWarningZone	0x005dc810
+0x00b98fc0	Player	26	AddBoundary	0x005dc900
+0x00b98fc0	Player	27	RemoveBoundary	0x005dca30
+0x00b98fc0	Player	28	RemoveAllBoundary	0x005dcb30
+0x00b98fc0	Player	29	GetAllBoundaryGuid	0x005dcc20
+0x00b98fc0	Player	30	SetBoundaryCallback	0x005dcd60
+0x00b98fc0	Player	31	IsPositionOutBoundary	0x005dce90
+0x00b98fc0	Player	32	IsBoundaryDeath	0x005dd040
+0x00b98fc0	Player	33	SetInputEnabled	0x005dc270
+0x00b98fc0	Player	34	SetSurvivalMode	0x005dc3b0
+0x00b98fc0	Player	35	SetHealthClamp	0x005dc4f0
+0x00b98fc0	Player	36	SetSurvivalModeCallback	0x005dc600
+0x00b98fc0	Player	37	IsCoopMultiplayer	0x005dd830
+0x00b98fc0	Player	38	GetPrimaryPlayer	0x005dd8a0
+0x00b98fc0	Player	39	GetSecondaryPlayer	0x005dd900
+0x00b98fc0	Player	40	GetPrimaryCharacter	0x005dd960
+0x00b98fc0	Player	41	GetSecondaryCharacter	0x005dd9e0
+0x00b98fc0	Player	42	GetMaximumPlayers	0x005dda60
+0x00b98fc0	Player	43	GetCurrentPlayers	0x005ddaa0
+0x00b98fc0	Player	44	GetPlayer	0x005ddae0
+0x00b98fc0	Player	45	GetAllPlayers	0x005ddb90
+0x00b98fc0	Player	46	GetPlayerId	0x005ddc30
+0x00b98fc0	Player	47	IsJoined	0x005ddd40
+0x00b98fc0	Player	48	IsLocal	0x005ddde0
+0x00b98fc0	Player	49	IsRemote	0x005ddee0
+0x00b98fc0	Player	50	GetLocalId	0x005de010
+0x00b98fc0	Player	51	GetMaximumLocalPlayers	0x005ddf90
+0x00b98fc0	Player	52	GetCurrentLocalPlayers	0x005ddfd0
+0x00b98fc0	Player	53	GetLocalPlayer	0x005de0b0
+0x00b98fc0	Player	54	GetLocalPlayerId	0x005de150
+0x00b98fc0	Player	55	GetLocalCharacter	0x005de1d0
+0x00b98fc0	Player	56	GetAnyCharacter	0x005de260
+0x00b98fc0	Player	57	GetAllCharacters	0x005de2a0
+0x00b98fc0	Player	58	CreatePlayer	0x005de2e0
+0x00b98fc0	Player	59	DestroyPlayer	0x005de440
+0x00b98fc0	Player	60	ClearPlayerDB	0x005de3c0
+0x00b98fc0	Player	61	AttachToCharacter	0x005de4e0
+0x00b98fc0	Player	62	DetachFromCharacter	0x005de5d0
+0x00b98fc0	Player	63	BindToLocal	0x005de690
+0x00b98fc0	Player	64	BindToRemote	0x005de740
+0x00b98fc0	Player	65	Unbind	0x005de7d0
+0x00b98fc0	Player	66	SetPlayerJoinedCallback	0x005de860
+0x00b98fc0	Player	67	SetPlayerLeftCallback	0x005dea10
+0x00b98fc0	Player	68	RemovePlayerJoinedCallback	0x005debc0
+0x00b98fc0	Player	69	RemovePlayerLeftCallback	0x005dec10
+0x00b98fc0	Player	70	GetPlayerStart	0x005dec60
+0x00b98fc0	Player	71	SetPlayerStart	0x005dec90
+0x00b98fc0	Player	72	ClaimSeat	0x005ded20
+0x00b98fc0	Player	73	UnClaimSeat	0x005def80
+0x00b98fc0	Player	74	GetRetryPosition	0x005df200
+0x00b98fc0	Player	75	SetWaitForInGame	0x005df150
+0x00b98fc0	Player	76	GetAllTargetMarkerPos	0x005df2d0
+0x00b98fc0	Player	77	SetSeatMovementLocks	0x005dd140
+0x00b98fc0	Player	78	SetVehicleControlsLock	0x005dd2e0
+0x00b98fc0	Player	79	GetControlBindingType	0x005dd430
+0x00b98fc0	Player	80	ClearGPS	0x005dfee0
+0x00b98fc0	Player	81	SetScopeEnabled	0x005dffa0
+0x00b98fc0	Player	82	GetCash	0x005df440
+0x00b98fc0	Player	83	SetCash	0x005df480
+0x00b98fc0	Player	84	AddCash	0x005df510
+0x00b98fc0	Player	85	GetFuel	0x005df590
+0x00b98fc0	Player	86	SetFuel	0x005df5d0
+0x00b98fc0	Player	87	AddFuel	0x005df670
+0x00b98fc0	Player	88	GetFuelCapacity	0x005df6e0
+0x00b98fc0	Player	89	SetFuelCapacity	0x005df720
+0x00b98fc0	Player	90	GetProfileCharacter	0x005df790
+0x00b98fc0	Player	91	SetProfileCharacter	0x005df7d0
+0x00b98fc0	Player	92	GetProfileUpgrade	0x005df830
+0x00b98fc0	Player	93	SetProfileUpgrade	0x005df870
+0x00b98fc0	Player	94	GetProfileCostume	0x005df8e0
+0x00b98fc0	Player	95	SetProfileCostume	0x005df920
+0x00b98fc0	Player	96	GetAvailableCostumes	0x005dfb00
+0x00b98fc0	Player	97	SetAvailableCostumes	0x005dfb40
+0x00b98fc0	Player	98	SetOutfit	0x005df980
+0x00b98fc0	Player	99	SetGrappleEnabled	0x005dfbb0
+0x00b98fc0	Player	100	SetInPmc	0x005dfcc0
+0x00b98fc0	Player	101	SetAimMode	0x005dfdd0
+0x00b98fc0	Player	102	SetVehicleDisguise	0x005e00b0
+0x00b98fc0	Player	103	GetVehicleDisguise	0x005e0130
+0x00b98fc0	Player	104	VehicleDisguise	0x005e02a0
+0x00b98fc0	Player	105	GetVehicleDisguiseState	0x005e0470
+0x00b98fc0	Player	106	SetSwimmingSearchRadius	0x005e0170
+0x00b99328	Pg	0	LoadingStaticLayers	0x006d5640
+0x00b99328	Pg	1	GetLoadingStaticLayers	0x006d5640
+0x00b99328	Pg	2	IsStaticLayer	0x005d4bf0
+0x00b99328	Pg	3	UnloadingStaticLayers	0x005d4b50
+0x00b99328	Pg	4	GetUnloadingStaticLayers	0x005d4ba0
+0x00b99328	Pg	5	ResetSingletonDone	0x005d4be0
+0x00b99328	Pg	6	LoadLayer	0x005d4c80
+0x00b99328	Pg	7	UnloadLayer	0x005d4e40
+0x00b99328	Pg	8	ReloadLayer	0x005d4f90
+0x00b99328	Pg	9	AssetExists	0x005d53e0
+0x00b99328	Pg	10	LoadAsset	0x005d54c0
+0x00b99328	Pg	11	UnloadAsset	0x005d5500
+0x00b99328	Pg	12	ReloadAsset	0x005d5540
+0x00b99328	Pg	13	Spawn	0x005d5d20
+0x00b99328	Pg	14	SpawnRelative	0x005d58d0
+0x00b99328	Pg	15	SpawnFromCamera	0x005d6010
+0x00b99328	Pg	16	GetGuidByName	0x005d3220
+0x00b99328	Pg	17	GetAllGuidsByName	0x005d3350
+0x00b99328	Pg	18	GetObjectsInArea	0x005d4910
+0x00b99328	Pg	19	GetAwakeObjects	0x005d46c0
+0x00b99328	Pg	20	GetAllLandingZones	0x005d34c0
+0x00b99328	Pg	21	FastCollectHelicopters	0x005d3a60
+0x00b99328	Pg	22	FastCollectJets	0x005d3b80
+0x00b99328	Pg	23	FastCollectFlying	0x005d3ca0
+0x00b99328	Pg	24	FastCollectTanks	0x005d3df0
+0x00b99328	Pg	25	FastCollectCars	0x005d3f10
+0x00b99328	Pg	26	FastCollectGroundVehicles	0x005d4030
+0x00b99328	Pg	27	FastCollectGroundVehiclesExceptTanks	0x005d3f10
+0x00b99328	Pg	28	FastCollectHumans	0x005d4180
+0x00b99328	Pg	29	FastCollectBoats	0x005d42a0
+0x00b99328	Pg	30	FastCollectUsables	0x005d44e0
+0x00b99328	Pg	31	FastCollectProps	0x005d43c0
+0x00b99328	Pg	32	FastCollectBuildings	0x005d45a0
+0x00b99328	Pg	33	SpawnPlayer	0x005d6740
+0x00b99328	Pg	34	SpawnPlayerAdvanced	0x005d6800
+0x00b99328	Pg	35	AddContextAction	0x005d7630
+0x00b99328	Pg	36	RemoveContextAction	0x005d7820
+0x00b99328	Pg	37	FindPointFromCamera	0x005d68e0
+0x00b99328	Pg	38	IsPointInBoundary	0x005d6d60
+0x00b99328	Pg	39	GetLineRegionPoints	0x005d7160
+0x00b99328	Pg	40	SetBoundaryRadius	0x005d78b0
+0x00b99328	Pg	41	GetBoundaryRadius	0x005d7920
+0x00b99328	Pg	42	SetWarningRadius	0x005d7970
+0x00b99328	Pg	43	GetWarningRadius	0x005d79e0
+0x00b99328	Pg	44	GetTetherDiameterStart	0x005d7a30
+0x00b99328	Pg	45	GetTetherDiameterEnd	0x005d7a80
+0x00b99328	Pg	46	Rumble	0x005d8240
+0x00b99328	Pg	47	EnableRoad	0x005d7ad0
+0x00b99328	Pg	48	EnableIntersection	0x005d7bd0
+0x00b99328	Pg	49	SaveGame	0x005d7cb0
+0x00b99328	Pg	50	LoadGame	0x005d7d30
+0x00b99328	Pg	51	ContractActivated	0x005d7db0
+0x00b99328	Pg	52	ContractCancelled	0x005d7e40
+0x00b99328	Pg	53	ContractCompleted	0x005d7e40
+0x00b99328	Pg	54	LoadIsRetry	0x005d7e70
+0x00b99328	Pg	55	GetDistantSpawnPointOnPath	0x005d7ea0
+0x00b99328	Pg	56	AchievementIsGranted	0x005d8330
+0x00b99328	Pg	57	AchievementAddCount	0x005d8410
+0x00b99328	Pg	58	LockPursuit	0x005d84f0
+0x00b99328	Pg	59	ClearPursuitLock	0x005d8620
+0x00b99328	Pg	60	SetPursuit	0x005d8690
+0x00b99328	Pg	61	SetPursuitSeconds	0x005d87d0
+0x00b99328	Pg	62	AdjustPursuitLevel	0x005d8910
+0x00b99328	Pg	63	AdjustPursuitTimer	0x005d8b50
+0x00b99328	Pg	64	GetPursuitState	0x005d8d40
+0x00b99328	Pg	65	RestrictAllPursuit	0x005d90f0
+0x00b99328	Pg	66	RestrictPursuitFaction	0x005d9150
+0x00b99328	Pg	67	RestrictPursuitType	0x005d9250
+0x00b99328	Pg	68	SetMaxPursuitLevel	0x005d93c0
+0x00b99328	Pg	69	SetMaxPursuitTime	0x005d9420
+0x00b99328	Pg	70	SetPursuitLevelTimes	0x005d94a0
+0x00b99328	Pg	71	ClearPursuitRestrictions	0x005d9020
+0x00b99328	Pg	72	TweakPursuitParam	0x005d92e0
+0x00b99328	Pg	73	SetCustomPursuit	0x005d9a30
+0x00b99328	Pg	74	ClearCustomPursuit	0x005d9c10
+0x00b99328	Pg	75	StartHeliWaveSpawner	0x005da4d0
+0x00b99328	Pg	76	StopHeliWaveSpawner	0x005da790
+0x00b99328	Pg	77	SetSkirmishTable	0x005d9cc0
+0x00b99328	Pg	78	AddSkirmishTemplate	0x005da010
+0x00b99328	Pg	79	SetGlobalSkirmishState	0x005da130
+0x00b995b0	ObjectState	0	SendMessage	0x005d2ae0
+0x00b995b0	ObjectState	1	SendDamage	0x005d2be0
+0x00b995b0	ObjectState	2	SetState	0x005d2ce0
+0x00b995b0	ObjectState	3	GetLinkGuid	0x005d2de0
+0x00b995b0	ObjectState	4	StartEmitter	0x005d2fa0
+0x00b995b0	ObjectState	5	StopEmitter	0x005d3090
+0x00b995b0	ObjectState	6	GetStringHash	0x005d3180
+0x00b995b0	ObjectState	7	PrintStateMachine	0x006d5640
+0x00b995b0	ObjectState	8	DebugStateMachine	0x006d5640
+0x00b99608	Object	0	GetParent	0x005cbc50
+0x00b99608	Object	1	IsTemplate	0x005cbd20
+0x00b99608	Object	2	GetPosition	0x005cc410
+0x00b99608	Object	3	SetPosition	0x005ccf10
+0x00b99608	Object	4	SetPositionToObject	0x005ccff0
+0x00b99608	Object	5	SetTransformToObject	0x005cd1f0
+0x00b99608	Object	6	GetDistanceFrom	0x005cd3f0
+0x00b99608	Object	7	GetYaw	0x005cc4e0
+0x00b99608	Object	8	SetYaw	0x005cd6a0
+0x00b99608	Object	9	GetName	0x005cca00
+0x00b99608	Object	10	SetName	0x005ccaf0
+0x00b99608	Object	11	GetModelName	0x005ccc20
+0x00b99608	Object	12	SetModelName	0x005ccd00
+0x00b99608	Object	13	GetVelocity	0x005cc700
+0x00b99608	Object	14	GetVelocitySquared	0x005cc5e0
+0x00b99608	Object	15	GetVelocityVector	0x005cc830
+0x00b99608	Object	16	GetHealth	0x005cbdb0
+0x00b99608	Object	17	SetHealth	0x005cbee0
+0x00b99608	Object	18	GetMaxHealth	0x005cc030
+0x00b99608	Object	19	GetNodeHealth	0x005cc120
+0x00b99608	Object	20	GetLocalizedName	0x005cc250
+0x00b99608	Object	21	GetCashValue	0x005cc360
+0x00b99608	Object	22	IsAlive	0x005cd8c0
+0x00b99608	Object	23	IsPlayerControlled	0x005cdff0
+0x00b99608	Object	24	InSeat	0x005cd9f0
+0x00b99608	Object	25	InVehicle	0x005cdad0
+0x00b99608	Object	26	InsideBoundary	0x005cf790
+0x00b99608	Object	27	OutsideBoundary	0x005cf880
+0x00b99608	Object	28	Remove	0x005cdc00
+0x00b99608	Object	29	FadeOut	0x005cdd40
+0x00b99608	Object	30	Kill	0x005cdec0
+0x00b99608	Object	31	IsValid	0x005cdf60
+0x00b99608	Object	32	Revive	0x005ce170
+0x00b99608	Object	33	AreEqual	0x005ce320
+0x00b99608	Object	34	GetInvincible	0x005ce4d0
+0x00b99608	Object	35	SetInvincible	0x005ce5e0
+0x00b99608	Object	36	SetUnkillable	0x005ce6e0
+0x00b99608	Object	37	SetInfiniteAmmo	0x005ce7e0
+0x00b99608	Object	38	AddLabel	0x005ce900
+0x00b99608	Object	39	RemoveLabel	0x005ceba0
+0x00b99608	Object	40	HasLabel	0x005cee40
+0x00b99608	Object	41	IsDisguised	0x005cef20
+0x00b99608	Object	42	GetMass	0x005cf030
+0x00b99608	Object	43	SetMass	0x005cf110
+0x00b99608	Object	44	IsAwake	0x005cf300
+0x00b99608	Object	45	IsHibernated	0x005cf240
+0x00b99608	Object	46	GetHibernationDistance	0x005cf420
+0x00b99608	Object	47	SetHibernationDistance	0x005cf4f0
+0x00b99608	Object	48	RevertHibernationDistance	0x005cf600
+0x00b99608	Object	49	TransformLocalToWorld	0x005cf980
+0x00b99608	Object	50	GetHardpointPosition	0x005cfa80
+0x00b99608	Object	51	GetHardpointYaw	0x005cfb70
+0x00b99608	Object	52	GetHardpointPitch	0x005cfcb0
+0x00b99608	Object	53	ApplyImpulse	0x005cfee0
+0x00b99608	Object	54	ApplyPointImpulse	0x005d0060
+0x00b99608	Object	55	ApplyAngularImpulse	0x005d0230
+0x00b99608	Object	56	SetVisible	0x005d03b0
+0x00b99608	Object	57	IsVisible	0x005d04c0
+0x00b99608	Object	58	EnablePhysics	0x005d0740
+0x00b99608	Object	59	DisablePhysics	0x005d0750
+0x00b99608	Object	60	GetPhysicsType	0x005d0760
+0x00b99608	Object	61	PlayAnimation	0x005d0bd0
+0x00b99608	Object	62	StopAnimation	0x005d0df0
+0x00b99608	Object	63	StopAnimationChannel	0x005d0ee0
+0x00b99608	Object	64	StopAllAnimation	0x005d0fd0
+0x00b99608	Object	65	Attach	0x005d1060
+0x00b99608	Object	66	Detach	0x005d1280
+0x00b99608	Object	67	IsAttached	0x005d13c0
+0x00b99608	Object	68	GetAttachedObjects	0x005d1520
+0x00b99608	Object	69	PlayMaterialAnimation	0x005d1660
+0x00b99608	Object	70	StopMaterialAnimation	0x005d17f0
+0x00b99608	Object	71	OpenGate	0x005d18e0
+0x00b99608	Object	72	CloseGate	0x005d19e0
+0x00b99608	Object	73	GetWinchState	0x005d2250
+0x00b99608	Object	74	SetWinchState	0x005d2350
+0x00b99608	Object	75	HasWinch	0x005d1d30
+0x00b99608	Object	76	IsWinching	0x005d1de0
+0x00b99608	Object	77	IsWinched	0x005d1ea0
+0x00b99608	Object	78	AttachCargoToWinch	0x005d1fe0
+0x00b99608	Object	79	DetachCargoFromWinch	0x005d21c0
+0x00b99608	Object	80	AddQualityRef	0x005d1b00
+0x00b99608	Object	81	RemoveQualityRef	0x005d1c70
+0x00b99608	Object	82	QueueAcceleration	0x005d2480
+0x00b99608	Object	83	BeginQueuedAcceleration	0x005d2700
+0x00b99608	Object	84	GetHeightAboveTerrain	0x005d27e0
+0x00b99608	Object	85	AddToDisposer	0x005d2900
+0x00b99608	Object	86	RemoveFromDisposer	0x005d29f0
+0x00b998d0	Net	0	IsPlatformConnected	0x005cad10
+0x00b998d0	Net	1	IsMultiplayer	0x005c66c0
+0x00b998d0	Net	2	IsConnectedToInternet	0x005cad10
+0x00b998d0	Net	3	IsEnabled	0x005c6710
+0x00b998d0	Net	4	IsActive	0x005c6750
+0x00b998d0	Net	5	IsLobby	0x005c6790
+0x00b998d0	Net	6	IsClient	0x005c67d0
+0x00b998d0	Net	7	IsServer	0x005c6810
+0x00b998d0	Net	8	IsDedicated	0x005c6850
+0x00b998d0	Net	9	AutoLobby	0x005c6850
+0x00b998d0	Net	10	AutoClient	0x005c6850
+0x00b998d0	Net	11	AutoServer	0x005c6890
+0x00b998d0	Net	12	GetHostName	0x005c68e0
+0x00b998d0	Net	13	IsMatchmakingInternet	0x005cacc0
+0x00b998d0	Net	14	IsOnlineConnected	0x005cad10
+0x00b998d0	Net	15	ShouldPlayOnline	0x005cad50
+0x00b998d0	Net	16	DialogBoxPlayOffline	0x005cad90
+0x00b998d0	Net	17	DialogBoxMustBeSignInToLive	0x005cae40
+0x00b998d0	Net	18	IsOnlineEnabled	0x005cacc0
+0x00b998d0	Net	19	DialogBoxPlayLocal	0x005cad90
+0x00b998d0	Net	20	EnterLobby	0x005c69e0
+0x00b998d0	Net	21	ResetServerList	0x005c6a40
+0x00b998d0	Net	22	ConnectToServer	0x005c6aa0
+0x00b998d0	Net	23	StartServer	0x005c6c40
+0x00b998d0	Net	24	Stop	0x005c6d30
+0x00b998d0	Net	25	QuitGame	0x005c6d90
+0x00b998d0	Net	26	EnterFriendsLobby	0x005c6910
+0x00b998d0	Net	27	ExitFriendsLobby	0x005c6980
+0x00b998d0	Net	28	SendEvent_ShowMessage	0x005c6df0
+0x00b998d0	Net	29	SendEvent_AddObjective	0x006d5640
+0x00b998d0	Net	30	SendEvent_RemoveObjective	0x006d5640
+0x00b998d0	Net	31	SendEvent_AddRadarObjective	0x005c7150
+0x00b998d0	Net	32	SendEvent_RemoveRadarObjective	0x005c79f0
+0x00b998d0	Net	33	SendEvent_AddMarkerObjective	0x005c74b0
+0x00b998d0	Net	34	SendEvent_RemoveMarkerObjective	0x005c7ba0
+0x00b998d0	Net	35	SendEvent_AddPdaObjective	0x005c77e0
+0x00b998d0	Net	36	SendEvent_RemovePdaObjective	0x005c7ac0
+0x00b998d0	Net	37	SetLastHeroTeleportLocation	0x005c8040
+0x00b998d0	Net	38	SendEvent_TeleportPlayer	0x005c7c70
+0x00b998d0	Net	39	SendEvent_TeleportPlayerToHardPoint	0x005c7e00
+0x00b998d0	Net	40	SendEvent_Fanfare	0x005c8180
+0x00b998d0	Net	41	SendEvent_CloseFanfare	0x005c84c0
+0x00b998d0	Net	42	SendEvent_ObjectiveMessage	0x005c8530
+0x00b998d0	Net	43	SendEvent_Support	0x005c8680
+0x00b998d0	Net	44	SendEvent_AddSupportItem	0x005c9250
+0x00b998d0	Net	45	SendEvent_RemoveSupportItem	0x005c9250
+0x00b998d0	Net	46	SendEvent_RecruitsUnlocked	0x005cb560
+0x00b998d0	Net	47	SendEvent_RevivePlayer	0x005c8900
+0x00b998d0	Net	48	SendEvent_RequestPosition	0x005c8a50
+0x00b998d0	Net	49	SendEvent_SetObjectiveTraySlotText	0x005c8a90
+0x00b998d0	Net	50	SendEvent_SetObjectiveTraySlotImage	0x005c8c20
+0x00b998d0	Net	51	SendEvent_ClearObjectiveTraySlot	0x005c8df0
+0x00b998d0	Net	52	SendEvent_ShowMovie	0x005c8f50
+0x00b998d0	Net	53	SendEvent_HideMovie	0x005c9080
+0x00b998d0	Net	54	BeginLayerEventGroup	0x005c90f0
+0x00b998d0	Net	55	EndLayerEventGroup	0x005c9130
+0x00b998d0	Net	56	GrantAchievement	0x005c9170
+0x00b998d0	Net	57	KickPlayer	0x005c91e0
+0x00b998d0	Net	58	ApplyCachedFactionRelations	0x005c9210
+0x00b998d0	Net	59	SendEvent_EnableHeroWeapons	0x005c9250
+0x00b998d0	Net	60	SendEvent_AddDangerousBuilding	0x005c9290
+0x00b998d0	Net	61	SendEvent_RemoveDangerousBuilding	0x005c93b0
+0x00b998d0	Net	62	SendEvent_SetOccupiedDangerousBuilding	0x005c94c0
+0x00b998d0	Net	63	SendEvent_AddRandomDangerousBuilding	0x005c9560
+0x00b998d0	Net	64	SendEvent_TextFanfare	0x005c9600
+0x00b998d0	Net	65	SendEvent_CardFanfare	0x005c97d0
+0x00b998d0	Net	66	SendEvent_HVTFanfare	0x005c9990
+0x00b998d0	Net	67	SendEvent_UnlockFanfare	0x005c9b20
+0x00b998d0	Net	68	SendEvent_BatchUnlockFanfare	0x005c9cd0
+0x00b998d0	Net	69	SendEvent_ForceClientTether	0x005c9e80
+0x00b998d0	Net	70	SendEvent_PursuitMessage	0x005c9ef0
+0x00b998d0	Net	71	SetPursuitReportingState	0x005ca020
+0x00b998d0	Net	72	SendEvent_AddHqPdaBlip	0x005ca490
+0x00b998d0	Net	73	SendEvent_RemoveHqPdaBlip	0x005ca6b0
+0x00b998d0	Net	74	SendEvent_AddPmcPdaBlip	0x005ca760
+0x00b998d0	Net	75	SendEvent_RemovePmcPdaBlip	0x005ca900
+0x00b998d0	Net	76	SendEvent_AddPDAMission	0x005ca130
+0x00b998d0	Net	77	SendEvent_RemovePDAMission	0x005ca3f0
+0x00b998d0	Net	78	LoadMissionSpiel	0x005cae80
+0x00b998d0	Net	79	UnloadMissionSpiel	0x005caff0
+0x00b998d0	Net	80	SetBriefingInterior	0x005cb080
+0x00b998d0	Net	81	SetBriefingStarters	0x005cb100
+0x00b998d0	Net	82	SetBriefingCheapCinematic	0x005cb370
+0x00b998d0	Net	83	SetLoadingScreen	0x005cb450
+0x00b998d0	Net	84	SetShootingGalleryBorder	0x005cb4d0
+0x00b998d0	Net	85	SetTutorialMessage	0x005cb880
+0x00b998d0	Net	86	SendEvent_JoinPOForceRequest	0x005cb800
+0x00b998d0	Net	87	SendCustomEvent	0x005ca990
+0x00b998d0	Net	88	DoneReloadingLayers	0x005cb900
+0x00b998d0	Net	89	IsReadyToTether	0x005cb950
+0x00b998d0	Net	90	HasPlayerUnlockedCode	0x005cb6b0
+0x00b998d0	Net	91	UpdatePresence	0x005cb710
+0x00b99bbc	Movie	0	Start	0x005c6510
+0x00b99bbc	Movie	1	Stop	0x005c6480
+0x00b99bbc	Movie	2	Pause	0x005c64b0
+0x00b99bbc	Movie	3	Resume	0x005c64e0
+0x00b99be8	math	0	abs	0x005c5970
+0x00b99be8	math	1	floor	0x005c59b0
+0x00b99be8	math	2	ceil	0x005c59f0
+0x00b99be8	math	3	round	0x005c5a40
+0x00b99be8	math	4	max	0x005c5a90
+0x00b99be8	math	5	min	0x005c5ae0
+0x00b99be8	math	6	exp	0x005c5bb0
+0x00b99be8	math	7	pow	0x005c5bf0
+0x00b99be8	math	8	deg	0x005c5b70
+0x00b99be8	math	9	rad	0x005c5b30
+0x00b99be8	math	10	randi	0x005c5c40
+0x00b99be8	math	11	randf	0x005c5d10
+0x00b99be8	math	12	GetXZHeading	0x005c5e10
+0x00b99be8	math	13	Normalize	0x005c5f90
+0x00b99be8	math	14	CrossProduct	0x005c6060
+0x00b99be8	math	15	Length	0x005c6160
+0x00b99be8	math	16	PolarToRect	0x005c6260
+0x00b99c78	LTILibName	0	LTIMovieStart	0x006d5640
+0x00b99c78	LTILibName	1	LTIMovieStop	0x005c05a0
+0x00b99c78	LTILibName	2	LTIMoviePause	0x005c0600
+0x00b99c78	LTILibName	3	LTIMovieResume	0x005c0660
+0x00b99c78	LTILibName	4	LTIVideoEnter	0x005c0a20
+0x00b99c78	LTILibName	5	LTIVideoSwitchMode	0x005c0af0
+0x00b99c78	LTILibName	6	LTIVideoNextRes	0x005c0ce0
+0x00b99c78	LTILibName	7	LTIVideoPrevRes	0x005c0e10
+0x00b99c78	LTILibName	8	LTIVideoNextRefresh	0x005c0f40
+0x00b99c78	LTILibName	9	LTIVideoPrevRefresh	0x005c1000
+0x00b99c78	LTILibName	10	LTIVideoSetGamma	0x005c10c0
+0x00b99c78	LTILibName	11	LTIVideoGetViewDistance	0x0063ef20
+0x00b99c78	LTILibName	12	LTIVideoApplyChanges	0x005c1140
+0x00b99c78	LTILibName	13	LTIVideoDefault	0x005c1160
+0x00b99c78	LTILibName	14	LTIVideoCancel	0x005c11d0
+0x00b99c78	LTILibName	15	LTIVideoAdvanceEnter	0x005c1210
+0x00b99c78	LTILibName	16	LTIVideoSwitchOpt1	0x005c1240
+0x00b99c78	LTILibName	17	LTIVideoAdvanceDefault	0x005c13a0
+0x00b99c78	LTILibName	18	LTIInputGeneralEnter	0x005c1470
+0x00b99c78	LTILibName	19	LTIInputGeneralOptions	0x005c1600
+0x00b99c78	LTILibName	20	LTIInputGeneralInvertMouse	0x005c17b0
+0x00b99c78	LTILibName	21	LTIInputGeneralMouseSense	0x005c17f0
+0x00b99c78	LTILibName	22	LTIInputGeneralJoySense	0x005c1860
+0x00b99c78	LTILibName	23	LTIInputGeneralRumble	0x005c18b0
+0x00b99c78	LTILibName	24	LTIInputKMEnter	0x005c1900
+0x00b99c78	LTILibName	25	LTIInputKMChangeInput	0x005c1cc0
+0x00b99c78	LTILibName	26	LTIInputKMApplyChanges	0x005c1d00
+0x00b99c78	LTILibName	27	LTIInputKMDefault	0x005c1ed0
+0x00b99c78	LTILibName	28	LTIOverBoundResponse	0x005c2730
+0x00b99c78	LTILibName	29	LTIInputKMCancelInput	0x005c2720
+0x00b99c78	LTILibName	30	LTIInputKMExit	0x005c2950
+0x00b99c78	LTILibName	31	LTIInputJoystickEnter	0x005c2970
+0x00b99c78	LTILibName	32	LTIInputJoystickChangePrimary	0x005c2cb0
+0x00b99c78	LTILibName	33	LTIInputJoystickChangeInput	0x005c2e50
+0x00b99c78	LTILibName	34	LTIInputJoystickCancel	0x005c2720
+0x00b99c78	LTILibName	35	LTIInputJoystickApplyChanges	0x005c33f0
+0x00b99c78	LTILibName	36	LTIInputJoystickDefault	0x005c3500
+0x00b99c78	LTILibName	37	LTIInputJoystickExit	0x005c3690
+0x00b99c78	LTILibName	38	LTIInputJoystickReEnter	0x005c36b0
+0x00b99c78	LTILibName	39	LTIJoystickOverBoundResponse	0x005c3200
+0x00b99c78	LTILibName	40	LTIGetStartButton	0x005c36d0
+0x00b99c78	LTILibName	41	ChangeShellState	0x005c3740
+0x00b99c78	LTILibName	42	LTIProfileEnter	0x005c3780
+0x00b99c78	LTILibName	43	LTIProfileExit	0x005c37a0
+0x00b99c78	LTILibName	44	LTIPauseItemChanged	0x005c37e0
+0x00b99c78	LTILibName	45	LTIPrecacheDone	0x005c37c0
+0x00b99c78	LTILibName	46	LTIPrecacheSmokeDone	0x005c37d0
+0x00b99c78	LTILibName	47	LTIChoseOnline	0x005c5800
+0x00b99c78	LTILibName	48	LTIGetDateFormat	0x005c5840
+0x00b99c78	LTILibName	49	LTICamera	0x005c58b0
+0x00b99c78	LTILibName	50	LTIupdateSupportQuickSlot	0x006d5640
+0x00b99c78	LTILibName	51	FirstRun	0x005c5900
+0x00b99e28	Junk	0	SpawnHomingProjectile	0x005bf860
+0x00b99e28	Junk	1	CreateRegion	0x005bfb00
+0x00b99e28	Junk	2	Subdue	0x005bfcc0
+0x00b99e28	Junk	3	GetModelBBoxExtents	0x005bff90
+0x00b99e28	Junk	4	SpawnWithModel	0x005bfdf0
+0x00b99e28	Junk	5	FormatTime	0x005c0120
+0x00b99e28	Junk	6	DrawPath	0x006d5640
+0x00b99e28	Junk	7	IsInstallable	0x005c0340
+0x00b99e28	Junk	8	InstallToHDD	0x006d5640
+0x00b99e28	Junk	9	UseExistingInstall	0x006d5640
+0x00b99e28	Junk	10	Search	0x006d5640
+0x00b99e28	Junk	11	DumpAssets	0x006d5640
+0x00b99e28	Junk	12	DumpAssetsDiff	0x006d5640
+0x00b99e28	Junk	13	DumpTextures	0x006d5640
+0x00b99e28	Junk	14	DumpAssetMemory	0x006d5640
+0x00b99e28	Junk	15	DumpMemory	0x006d5640
+0x00b99e28	Junk	16	LoadScript	0x006d5640
+0x00b99e28	Junk	17	LoadFunctions	0x006d5640
+0x00b99e28	Junk	18	LoadData	0x006d5640
+0x00b99e28	Junk	19	DescribeGuid	0x006d5640
+0x00b99e28	Junk	20	SetQGrey	0x006d5640
+0x00b99e28	Junk	21	ActivateAlarm	0x005c0360
+0x00b99e28	Junk	22	ToggleAlarm	0x005c0430
+0x00b99e28	Junk	23	DumpStats	0x006d5640
+0x00b99ef0	Human	0	DoAction	0x005bd260
+0x00b99ef0	Human	1	SetState	0x005bd760
+0x00b99ef0	Human	2	Knockdown	0x005bd860
+0x00b99ef0	Human	3	SetPreemptiveRagdoll	0x005bd9b0
+0x00b99ef0	Human	4	ForceExitSeatNoSnap	0x005bd1e0
+0x00b99ef0	Human	5	Emote	0x005bd740
+0x00b99ef0	Human	6	PlayRawAnimation	0x005bd750
+0x00b99ef0	Human	7	PersistTransform	0x005bda70
+0x00b99ef0	Human	8	IsSwimming	0x005bdc00
+0x00b99ef0	Human	9	IsCarrying	0x005bdd10
+0x00b99ef0	Human	10	Drop	0x005bddd0
+0x00b99ef0	Human	11	IsGrappling	0x005bdf00
+0x00b99ef0	Human	12	StopGrappling	0x005bdfc0
+0x00b99ef0	Human	13	EnableWeapons	0x005be220
+0x00b99ef0	Human	14	DisableWeapons	0x005be230
+0x00b99ef0	Human	15	SetFireLock	0x005be240
+0x00b99ef0	Human	16	EquipWeapon	0x005be340
+0x00b99ef0	Human	17	StowWeapon	0x005be4c0
+0x00b99ef0	Human	18	SetAllowCorpseCleanup	0x005be5f0
+0x00b99ef0	Human	19	Scrub	0x005be730
+0x00b99ef0	Human	20	SetJostleEnabled	0x005be890
+0x00b99ef0	Human	21	Inventory.GetPrimaryWeapon	0x005be9b0
+0x00b99ef0	Human	22	Inventory.GetSecondaryWeapon	0x005beb30
+0x00b99ef0	Human	23	Inventory.GetVehicleWeapon	0x005becb0
+0x00b99ef0	Human	24	Inventory.GetAllWeapons	0x005bed60
+0x00b99ef0	Human	25	Inventory.SetAllWeapons	0x005bf160
+0x00b99ef0	Human	26	Inventory.DropWeapon	0x005bf420
+0x00b99ef0	Human	27	Inventory.EquipWeapon	0x005bf4e0
+0x00b99ef0	Human	28	Inventory.ReloadAll	0x005bf6b0
+0x00b99ef0	Human	29	Inventory.DestroyAllWeapons	0x005bf630
+0x00b99ff8	_GuiInternal	0	CreateWidget	0x005b4e80
+0x00b99ff8	_GuiInternal	1	DeleteWidget	0x005b4f20
+0x00b99ff8	_GuiInternal	2	SetWidgetLocation	0x005b4fa0
+0x00b99ff8	_GuiInternal	3	GetWidgetLocation	0x005b51a0
+0x00b99ff8	_GuiInternal	4	GetWidgetHighlightable	0x005b5310
+0x00b99ff8	_GuiInternal	5	SetWidgetHighlightable	0x005b5250
+0x00b99ff8	_GuiInternal	6	SetWidgetCorrectedLocation	0x005b53c0
+0x00b99ff8	_GuiInternal	7	GetWidgetCorrectedLocation	0x005b54b0
+0x00b99ff8	_GuiInternal	8	SetWidgetColor	0x005b5560
+0x00b99ff8	_GuiInternal	9	GetWidgetColor	0x005b5750
+0x00b99ff8	_GuiInternal	10	SetWidgetVisible	0x005b5850
+0x00b99ff8	_GuiInternal	11	GetWidgetVisible	0x005b5920
+0x00b99ff8	_GuiInternal	12	SetWidgetIgnoresPause	0x005b59d0
+0x00b99ff8	_GuiInternal	13	GetWidgetIgnoresPause	0x005b5aa0
+0x00b99ff8	_GuiInternal	14	ActivateWidget	0x005b5b50
+0x00b99ff8	_GuiInternal	15	SetWidgetSleep	0x005b5c10
+0x00b99ff8	_GuiInternal	16	GetWidgetSleep	0x005b5ce0
+0x00b99ff8	_GuiInternal	17	PushWidgetToFront	0x005b5d90
+0x00b99ff8	_GuiInternal	18	PushWidgetToBack	0x005b5e00
+0x00b99ff8	_GuiInternal	19	SetWidgetAnchoring	0x005b5e70
+0x00b99ff8	_GuiInternal	20	GetWidgetAnchoring	0x005b5fe0
+0x00b99ff8	_GuiInternal	21	InterpolateWidget	0x005b60f0
+0x00b99ff8	_GuiInternal	22	SetWidgetUpdateCallback	0x005b6460
+0x00b99ff8	_GuiInternal	23	SetWidgetViewport	0x005b6550
+0x00b99ff8	_GuiInternal	24	GetWidgetViewport	0x005b6610
+0x00b99ff8	_GuiInternal	25	AddWidgetChild	0x005b66e0
+0x00b99ff8	_GuiInternal	26	SetWidgetChild	0x005b67f0
+0x00b99ff8	_GuiInternal	27	RemoveWidgetChild	0x005b6910
+0x00b99ff8	_GuiInternal	28	RemoveAllWidgetChildren	0x005b6a10
+0x00b99ff8	_GuiInternal	29	GetWidgetChildren	0x005b6ab0
+0x00b99ff8	_GuiInternal	30	SetWidgetFullscreen	0x005b6bc0
+0x00b99ff8	_GuiInternal	31	CorrectWidgetForResolution	0x005b6d70
+0x00b99ff8	_GuiInternal	32	SetWidgetUseResolutionCorrection	0x005b6e10
+0x00b99ff8	_GuiInternal	33	SetWidgetUseNewRescale	0x005b6ee0
+0x00b99ff8	_GuiInternal	34	GetWidgetHighlightId	0x005b6fb0
+0x00b99ff8	_GuiInternal	35	GetWidgetDownId	0x005b7010
+0x00b99ff8	_GuiInternal	36	CreateImageWidget	0x005b7070
+0x00b99ff8	_GuiInternal	37	SetImageTexture	0x005b7110
+0x00b99ff8	_GuiInternal	38	SetImageRotation	0x005b7210
+0x00b99ff8	_GuiInternal	39	GetImageRotation	0x005b7300
+0x00b99ff8	_GuiInternal	40	SetImageTextureCoordinates	0x005b7420
+0x00b99ff8	_GuiInternal	41	GetImageTextureCoordinates	0x005b75c0
+0x00b99ff8	_GuiInternal	42	SetImageTiling	0x005b7680
+0x00b99ff8	_GuiInternal	43	SetImageTextureTransience	0x005b7770
+0x00b99ff8	_GuiInternal	44	SetImageClockAnimation	0x005b7840
+0x00b99ff8	_GuiInternal	45	SetImageClockCallback	0x005b7990
+0x00b99ff8	_GuiInternal	46	GetImageClockElapsed	0x005b7aa0
+0x00b99ff8	_GuiInternal	47	SetImagePieSliceRender	0x005b7b60
+0x00b99ff8	_GuiInternal	48	DisableImagePieSliceRender	0x005b7c90
+0x00b99ff8	_GuiInternal	49	CreateTextWidget	0x005b7d40
+0x00b99ff8	_GuiInternal	50	SetTextText	0x005b7de0
+0x00b99ff8	_GuiInternal	51	GetTextText	0x005b7ec0
+0x00b99ff8	_GuiInternal	52	SetTextFont	0x005b7fc0
+0x00b99ff8	_GuiInternal	53	SetTextWrapping	0x005b80a0
+0x00b99ff8	_GuiInternal	54	GetTextWrapping	0x005b8170
+0x00b99ff8	_GuiInternal	55	GetTextWidth	0x005b8240
+0x00b99ff8	_GuiInternal	56	GetTextHeight	0x005b8310
+0x00b99ff8	_GuiInternal	57	SetTextJustification	0x005b83e0
+0x00b99ff8	_GuiInternal	58	GetTextJustification	0x005b84f0
+0x00b99ff8	_GuiInternal	59	SetTextScale	0x005b85f0
+0x00b99ff8	_GuiInternal	60	GetTextScale	0x005b86d0
+0x00b99ff8	_GuiInternal	61	SplitText	0x005b8790
+0x00b99ff8	_GuiInternal	62	AnimateText	0x005b8ac0
+0x00b99ff8	_GuiInternal	63	HaltTextAnimation	0x005b8be0
+0x00b99ff8	_GuiInternal	64	MinimapCreate	0x005b8cb0
+0x00b99ff8	_GuiInternal	65	MinimapUpdate	0x005b8ee0
+0x00b99ff8	_GuiInternal	66	MinimapSetPlayerLocation	0x005b90d0
+0x00b99ff8	_GuiInternal	67	MinimapSetFocusLocation	0x005b90e0
+0x00b99ff8	_GuiInternal	68	MinimapSetRotation	0x005b91e0
+0x00b99ff8	_GuiInternal	69	MinimapSetRange	0x005b92c0
+0x00b99ff8	_GuiInternal	70	SetMinimapOwner	0x005b93c0
+0x00b99ff8	_GuiInternal	71	SetMinimapBorder	0x005b94c0
+0x00b99ff8	_GuiInternal	72	SetMinimapRadius	0x005b9600
+0x00b99ff8	_GuiInternal	73	MinimapAddObjective	0x005b96e0
+0x00b99ff8	_GuiInternal	74	MinimapAnimateObjectiveSize	0x005b9a10
+0x00b99ff8	_GuiInternal	75	MinimapAnimateObjectiveAlpha	0x005b9c80
+0x00b99ff8	_GuiInternal	76	MinimapAnimateObjectiveSonar	0x005b9e90
+0x00b99ff8	_GuiInternal	77	MinimapUnanimateObjective	0x005ba1e0
+0x00b99ff8	_GuiInternal	78	MinimapRemoveObjective	0x005ba360
+0x00b99ff8	_GuiInternal	79	MinimapDelete	0x005ba430
+0x00b99ff8	_GuiInternal	80	SetPlayerPDAWidget	0x005ba500
+0x00b99ff8	_GuiInternal	81	CreateFlashWidget	0x005ba680
+0x00b99ff8	_GuiInternal	82	SetFlashSwfFile	0x005ba720
+0x00b99ff8	_GuiInternal	83	SetFlashPlaySpeed	0x005ba850
+0x00b99ff8	_GuiInternal	84	GetFlashPlaySpeed	0x005ba930
+0x00b99ff8	_GuiInternal	85	PauseFlash	0x005ba9f0
+0x00b99ff8	_GuiInternal	86	PlayFlash	0x005baab0
+0x00b99ff8	_GuiInternal	87	RestartFlash	0x005bab70
+0x00b99ff8	_GuiInternal	88	SendFlashInput	0x005bac20
+0x00b99ff8	_GuiInternal	89	SendFlashLeftAnalogInput	0x005bad50
+0x00b99ff8	_GuiInternal	90	SendFlashRightAnalogInput	0x005bae70
+0x00b99ff8	_GuiInternal	91	SetFlashCallback	0x005baf90
+0x00b99ff8	_GuiInternal	92	CallFlashScriptFunction	0x005bb170
+0x00b99ff8	_GuiInternal	93	SetFlashPauseMenu	0x005bb4e0
+0x00b99ff8	_GuiInternal	94	SetFlashTesselationAllowed	0x005bb0a0
+0x00b99ff8	_GuiInternal	95	RemoveFlashPauseMenu	0x005bb6f0
+0x00b99ff8	_GuiInternal	96	CreateSpriteWidget	0x005bb7b0
+0x00b99ff8	_GuiInternal	97	SetSpriteTexture	0x005bb850
+0x00b99ff8	_GuiInternal	98	SetSpriteTextureSize	0x005bbaf0
+0x00b99ff8	_GuiInternal	99	SetSpriteFrameSize	0x005bbc60
+0x00b99ff8	_GuiInternal	100	AnimateSprite	0x005bbec0
+0x00b99ff8	_GuiInternal	101	HaltSpriteAnimation	0x005bc000
+0x00b99ff8	_GuiInternal	102	SetSpriteFrame	0x005bc0c0
+0x00b99ff8	_GuiInternal	103	CreateMovieWidget	0x005bc1a0
+0x00b99ff8	_GuiInternal	104	SetMovieFile	0x005bc240
+0x00b99ff8	_GuiInternal	105	PlayMovie	0x005bc330
+0x00b99ff8	_GuiInternal	106	PauseMovie	0x005bc410
+0x00b99ff8	_GuiInternal	107	StopMovie	0x005bc4c0
+0x00b99ff8	_GuiInternal	108	GetMovieCurrentFrameNumber	0x005bc570
+0x00b99ff8	_GuiInternal	109	SetMovieEndCallback	0x005bc640
+0x00b99ff8	_GuiInternal	110	RegisterForPdaUpdate	0x005bc730
+0x00b99ff8	_GuiInternal	111	RemovePdaBlip	0x005bd0c0
+0x00b99ff8	_GuiInternal	112	UpdatePdaBlip	0x005bcf90
+0x00b99ff8	_GuiInternal	113	AddPdaMapBlips	0x005bce70
+0x00b9a398	Gui	0	AddObjective	0x006d5640
+0x00b9a398	Gui	1	LoadTexture	0x005b2d50
+0x00b9a398	Gui	2	GetReticlePosition	0x005b2e70
+0x00b9a398	Gui	3	LoadFont	0x005b2de0
+0x00b9a398	Gui	4	IsPdaOnSelect	0x005b2f10
+0x00b9a398	Gui	5	IsXboxController	0x005b2f50
+0x00b9a398	Gui	6	ControllerInUse	0x005b2fa0
+0x00b9a398	Gui	7	FindGuiLocation	0x005b3010
+0x00b9a398	Gui	8	_MarkerAdd	0x005b3300
+0x00b9a398	Gui	9	_MarkerAddTripwire	0x005b36c0
+0x00b9a398	Gui	10	_MarkerAddDisc	0x005b38d0
+0x00b9a398	Gui	11	_MarkerAdd3D	0x005b3ae0
+0x00b9a398	Gui	12	_MarkerSetBlipLimit	0x005b3d30
+0x00b9a398	Gui	13	_MarkerAddOld	0x005b3da0
+0x00b9a398	Gui	14	_MarkerRemove	0x005b4110
+0x00b9a398	Gui	15	_MarkerSetLocation	0x005b4330
+0x00b9a398	Gui	16	_MarkerSetColor	0x005b4400
+0x00b9a398	Gui	17	_MarkerSetFollowGuid	0x005b4550
+0x00b9a398	Gui	18	_MarkerSetScale	0x005b4610
+0x00b9a398	Gui	19	_MarkerPulse	0x005b4190
+0x00b9a398	Gui	20	_MarkerHaltPulse	0x005b42b0
+0x00b9a398	Gui	21	SetFactionMarkerVisibleDistance	0x005b46d0
+0x00b9a398	Gui	22	EnableFactionMarkers	0x005b4760
+0x00b9a398	Gui	23	SetFactionMarkerSize	0x005b48f0
+0x00b9a398	Gui	24	SetVehicleEntranceMarkerVisibleDistance	0x005b47e0
+0x00b9a398	Gui	25	EnableVehicleEntranceMarkers	0x005b4870
+0x00b9a398	Gui	26	SetVehicleEntranceMarkerSize	0x005b4950
+0x00b9a398	Gui	27	EnablePickupMarkers	0x005b49b0
+0x00b9a398	Gui	28	SetPickupMarkerSize	0x005b4a30
+0x00b9a398	Gui	29	SetPickupMarkerVisibleDistance	0x005b4a90
+0x00b9a398	Gui	30	EnablePlayerMarkers	0x005b4b20
+0x00b9a398	Gui	31	GetLanguageNum	0x005b4b80
+0x00b9a398	Gui	32	GetLanguageName	0x005b4bc0
+0x00b9a398	Gui	33	DoSigninCheck	0x005b4c00
+0x00b9a398	Gui	34	OnShellLoaded	0x005b4c10
+0x00b9a398	Gui	35	OnGlobalExit	0x005b4c20
+0x00b9a398	Gui	36	ShowLoadingHints	0x005b4c30
+0x00b9a398	Gui	37	OutputToPIX	0x005b4c90
+0x00b9a4d0	Graphics	0	ScreenShot	0x005b0060
+0x00b9a4d0	Graphics	1	SetNumFrameSync	0x005b00b0
+0x00b9a4d0	Graphics	2	SetScreenRatio	0x005b0110
+0x00b9a4d0	Graphics	3	GetScreenRatio	0x005b02d0
+0x00b9a4d0	Graphics	4	ReloadShaders	0x005b03a0
+0x00b9a4d0	Graphics	5	SetGamma	0x005b03b0
+0x00b9a4d0	Graphics	6	SetShadowBaseDistance	0x005b0470
+0x00b9a4d0	Graphics	7	GetShadowBaseDistance	0x005b04d0
+0x00b9a4d0	Graphics	8	InitTinyGeometry	0x005b0520
+0x00b9a4d0	Graphics	9	ShowTinyGeometryObject	0x005b0530
+0x00b9a4d0	Graphics	10	SetBoundaryEffect	0x005b2b20
+0x00b9a4d0	Graphics	11	Camera.SetNearFar	0x005b0600
+0x00b9a4d0	Graphics	12	Camera.RestoreNearFar	0x005b06f0
+0x00b9a4d0	Graphics	13	Camera.SetFovParams	0x005b07a0
+0x00b9a4d0	Graphics	14	Camera.RestoreFovParams	0x005b08a0
+0x00b9a4d0	Graphics	15	Camera.SetFocusParams	0x005b0950
+0x00b9a4d0	Graphics	16	Camera.RestoreFocusParams	0x005b0aa0
+0x00b9a4d0	Graphics	17	Camera.SetLodParams	0x005b0b50
+0x00b9a4d0	Graphics	18	Atmosphere.Begin	0x005b16d0
+0x00b9a4d0	Graphics	19	Atmosphere.End	0x005b16f0
+0x00b9a4d0	Graphics	20	Atmosphere.SetTime	0x005b1750
+0x00b9a4d0	Graphics	21	Atmosphere.SetTimeSpeed	0x005b17c0
+0x00b9a4d0	Graphics	22	Atmosphere.SetLightIntensity	0x005b1830
+0x00b9a4d0	Graphics	23	Atmosphere.SetLightModifier	0x005b18a0
+0x00b9a4d0	Graphics	24	Atmosphere.SetLightAngle	0x005b1970
+0x00b9a4d0	Graphics	25	Atmosphere.SetAmbientColor	0x005b19e0
+0x00b9a4d0	Graphics	26	Atmosphere.SetAmbientCube	0x005b1a80
+0x00b9a4d0	Graphics	27	Atmosphere.SetRimColor	0x005b1b20
+0x00b9a4d0	Graphics	28	Atmosphere.SetTurbinity	0x005b1b70
+0x00b9a4d0	Graphics	29	Atmosphere.SetInscatteringMultiplier	0x005b1be0
+0x00b9a4d0	Graphics	30	Atmosphere.SetExtinctionMultiplier	0x005b1c50
+0x00b9a4d0	Graphics	31	Atmosphere.SetBetaRayMultiplier	0x005b1cc0
+0x00b9a4d0	Graphics	32	Atmosphere.SetBetaMieMultiplier	0x005b1d30
+0x00b9a4d0	Graphics	33	Atmosphere.SetHenyeyGreensteinConst	0x005b1da0
+0x00b9a4d0	Graphics	34	Atmosphere.SetAtmosphere	0x005b1e10
+0x00b9a4d0	Graphics	35	Atmosphere.SetHaze	0x005b1ed0
+0x00b9a4d0	Graphics	36	Atmosphere.SetWindDirection	0x005b1f90
+0x00b9a4d0	Graphics	37	Atmosphere.SetParticlesPerSecond	0x005b25c0
+0x00b9a4d0	Graphics	38	Atmosphere.Change	0x005b0c50
+0x00b9a4d0	Graphics	39	Atmosphere.ChangeLineRegionSetting	0x005b0d20
+0x00b9a4d0	Graphics	40	Atmosphere.GetLineRegionSetting	0x005b0e10
+0x00b9a4d0	Graphics	41	Atmosphere.GetLineRegion	0x005b0ec0
+0x00b9a4d0	Graphics	42	Atmosphere.Restore	0x005b1020
+0x00b9a4d0	Graphics	43	Atmosphere.GetCurrentSetting	0x005b1090
+0x00b9a4d0	Graphics	44	Atmosphere.EnableImmediatelyChangeMode	0x005b1100
+0x00b9a4d0	Graphics	45	Atmosphere.SetRainSpeed	0x005b2610
+0x00b9a4d0	Graphics	46	Atmosphere.SetRainDensity	0x005b2660
+0x00b9a4d0	Graphics	47	Atmosphere.GetValue	0x005b1150
+0x00b9a4d0	Graphics	48	Atmosphere.SetValue	0x005b1200
+0x00b9a4d0	Graphics	49	Atmosphere.GetColorValue	0x005b12a0
+0x00b9a4d0	Graphics	50	Atmosphere.SetColorValue	0x005b1430
+0x00b9a4d0	Graphics	51	Atmosphere.GetIntValue	0x005b1540
+0x00b9a4d0	Graphics	52	Atmosphere.SetIntValue	0x005b15f0
+0x00b9a4d0	Graphics	53	Atmosphere.IsInterpolating	0x005b1690
+0x00b9a4d0	Graphics	54	Atmosphere.SetSky	0x006d5640
+0x00b9a4d0	Graphics	55	Bloom.SetBlurRadius	0x005b2090
+0x00b9a4d0	Graphics	56	Bloom.SetThreshold	0x005b20e0
+0x00b9a4d0	Graphics	57	Bloom.SetMultiplier	0x005b2130
+0x00b9a4d0	Graphics	58	Bloom.SetAmount	0x005b2180
+0x00b9a4d0	Graphics	59	Bloom.SetTargetLuminance	0x005b21f0
+0x00b9a4d0	Graphics	60	Bloom.SetAdaptiveLuminancePercent	0x005b2260
+0x00b9a4d0	Graphics	61	Bloom.SetAdaptiveLuminanceScale	0x005b22d0
+0x00b9a4d0	Graphics	62	MotionBlur.SetVelocityMultiplier	0x005b2340
+0x00b9a4d0	Graphics	63	Contrast.SetLimit	0x005b23b0
+0x00b9a4d0	Graphics	64	Contrast.SetMultiplier	0x005b2400
+0x00b9a4d0	Graphics	65	Monochrome.SetGradient	0x005b2450
+0x00b9a4d0	Graphics	66	Grainy.SetGrainOpacity	0x005b2520
+0x00b9a4d0	Graphics	67	AA.SetThreshold	0x005b2570
+0x00b9a4d0	Graphics	68	Effect.AmbientTop	0x005b2760
+0x00b9a4d0	Graphics	69	Effect.AmbientSides	0x005b2960
+0x00b9a4d0	Graphics	70	Effect.Terrain	0x005b2850
+0x00b9a4d0	Graphics	71	Effect.CameraFade	0x005b26b0
+0x00b9a4d0	Graphics	72	FuelTrail.Ignite	0x006d5640
+0x00b9a4d0	Graphics	73	FuelTrail.Extinguish	0x006d5640
+0x00b9a4d0	Graphics	74	FuelTrail.Put	0x005b2a50
+0x00b9a7d8	Camera	0	GetYaw	0x005aed70
+0x00b9a7d8	Camera	1	SetYaw	0x005aef10
+0x00b9a7d8	Camera	2	GetPitch	0x005aefb0
+0x00b9a7d8	Camera	3	SetPitch	0x005af190
+0x00b9a7d8	Camera	4	StopBlending	0x005af230
+0x00b9a7d8	Camera	5	Shake	0x005af2d0
+0x00b9a7d8	Camera	6	SetFOV	0x005af470
+0x00b9a7d8	Camera	7	GetFOV	0x005af510
+0x00b9a7d8	Camera	8	SetPosition	0x005af5e0
+0x00b9a7d8	Camera	9	SetLookAt	0x005af7d0
+0x00b9a7d8	Camera	10	Hold	0x005afa00
+0x00b9a7d8	Camera	11	Follow	0x005afb90
+0x00b9a7d8	Camera	12	Blend	0x005afd60
+0x00b9a7d8	Camera	13	SetShot	0x005afee0
+0x00b9a854	_SYS	0	_IMPORT	0x005ae2d0
+0x00b9a854	_SYS	1	_INHERIT	0x005ae3b0
+0x00b9a854	_SYS	2	_DYNAMIC_IMPORT	0x005ae580
+0x00b9a854	_SYS	3	_DYNAMIC_REMOVE	0x005aea50
+0x00b9a854	_SYS	4	_MODULEINDEX	0x005aeb90
+0x00b9a854	_SYS	5	_GETFENV	0x005ae160
+0x00b9a88c	Animation	0	BindFaceAnimSet	0x005ada90
+0x00b9a88c	Animation	1	UnbindFaceAnimSet	0x005adc10
+0x00b9a88c	Animation	2	PlayFaceAnim	0x005addb0
+0x00b9a88c	Animation	3	PlayFacialExpression	0x005ade80
+0x00b9a88c	Animation	4	GetTranslationForStanceAndAction	0x005adfd0
+0x00b9a88c	Animation	5	SetUseBriefingLOD	0x005ae0d0
+0x00b9a8c8	Airstrike	0	SpawnCarpetBombLine	0x005acb70
+0x00b9a8c8	Airstrike	1	SpawnPlaneNew	0x005ad240
+0x00b9a8c8	Airstrike	2	SpawnOrdnance	0x005ac550
+0x00b9a8c8	Airstrike	3	SpawnTargettedOrdnance	0x005ac7a0
+0x00b9a8c8	Airstrike	4	ConeSpawn	0x005aca50
+0x00b9a8c8	Airstrike	5	FindExitPoint	0x005ad110
+0x00b9a8c8	Airstrike	6	EquipDesignator	0x005ad3d0
+0x00b9a8c8	Airstrike	7	RemoveDesignator	0x005ad560
+0x00b9a8c8	Airstrike	8	RefillDesignator	0x005e9a20
+0x00b9a8c8	Airstrike	9	Flyby	0x005ad650
+0x00b9a8c8	Airstrike	10	SpawnDirectedObject	0x005ad860
+0x00b9a8c8	Airstrike	11	FindDesignatorOwner	0x005ad9e0
+0x00b9a938	Ai	0	Temp	0x006d5640
+0x00b9a938	Ai	1	Goal	0x005a70b0
+0x00b9a938	Ai	2	DefaultGoal	0x005a72a0
+0x00b9a938	Ai	3	RemoveGoal	0x005a7420
+0x00b9a938	Ai	4	Squad	0x005a7580
+0x00b9a938	Ai	5	Role	0x005a7e20
+0x00b9a938	Ai	6	Anchor	0x005a7fb0
+0x00b9a938	Ai	7	SetFacing	0x005a81c0
+0x00b9a938	Ai	8	LivingWorld	0x005a8380
+0x00b9a938	Ai	9	Water	0x006d5640
+0x00b9a938	Ai	10	Feed	0x006d5640
+0x00b9a938	Ai	11	Rest	0x005aaa40
+0x00b9a938	Ai	12	Talk	0x006d5640
+0x00b9a938	Ai	13	Admire	0x005aaa40
+0x00b9a938	Ai	14	Enable	0x005a8ae0
+0x00b9a938	Ai	15	Deliver	0x005a8ff0
+0x00b9a938	Ai	16	HeliLand	0x005a9250
+0x00b9a938	Ai	17	HeliTakeoff	0x005a9a40
+0x00b9a938	Ai	18	HeliDropZoneInfo	0x005a9e00
+0x00b9a938	Ai	19	GoIn	0x005aa240
+0x00b9a938	Ai	20	EveryoneOut	0x005a9830
+0x00b9a938	Ai	21	Deploy	0x005a93f0
+0x00b9a938	Ai	22	TestDropZone	0x005a9b90
+0x00b9a938	Ai	23	SetHaste	0x005a8c10
+0x00b9a938	Ai	24	GetPerceivability	0x005aa5f0
+0x00b9a938	Ai	25	SetPerceivability	0x005aa400
+0x00b9a938	Ai	26	PlanSetConditions	0x006d5640
+0x00b9a938	Ai	27	PlanSetGoal	0x006d5640
+0x00b9a938	Ai	28	Plan	0x006d5640
+0x00b9a938	Ai	29	PlanIterate	0x006d5640
+0x00b9a938	Ai	30	PlanClear	0x006d5640
+0x00b9a938	Ai	31	SetTrafficSpawning	0x006d5640
+0x00b9a938	Ai	32	SetSidewalkSpawning	0x006d5640
+0x00b9a938	Ai	33	SetRoadSpawning	0x006d5640
+0x00b9a938	Ai	34	SetLaneActive	0x006d5640
+0x00b9a938	Ai	35	TweakAttachedSpawners	0x005a4c40
+0x00b9a938	Ai	36	TweakAttachedSpawnersInGroup	0x005a4d10
+0x00b9a938	Ai	37	ShowObjectSpawners	0x006d5640
+0x00b9a938	Ai	38	GetSpawnList	0x005a4ea0
+0x00b9a938	Ai	39	GetSpawnListChangeInfo	0x005a5010
+0x00b9a938	Ai	40	SetSpawnList	0x005a5180
+0x00b9a938	Ai	41	ClearSpawnListChanges	0x005a56f0
+0x00b9a938	Ai	42	ResetAllSpawnLists	0x005a5860
+0x00b9a938	Ai	43	SetExclusionZone	0x006d5640
+0x00b9a938	Ai	44	AddRoadException	0x006d5640
+0x00b9a938	Ai	45	RemoveRoadException	0x006d5640
+0x00b9a938	Ai	46	RemoveExclusionZone	0x006d5640
+0x00b9a938	Ai	47	AddSubject	0x005aa750
+0x00b9a938	Ai	48	RemoveSubject	0x005aa810
+0x00b9a938	Ai	49	RemoveAllSubjects	0x005aa8d0
+0x00b9a938	Ai	50	GetSubjectData	0x005aa8f0
+0x00b9a938	Ai	51	ThreatPerception	0x005a8930
+0x00b9a938	Ai	52	GetAttrib	0x005a84d0
+0x00b9a938	Ai	53	GetState	0x005a87c0
+0x00b9a938	Ai	54	SetState	0x005a8630
+0x00b9a938	Ai	55	GetFeeling	0x005aaaf0
+0x00b9a938	Ai	56	SetFeeling	0x005aabe0
+0x00b9a938	Ai	57	GetRelation	0x005aace0
+0x00b9a938	Ai	58	SetRelation	0x005aadd0
+0x00b9a938	Ai	59	ChangeRelation	0x005aaef0
+0x00b9a938	Ai	60	GetFactionGuid	0x005ab010
+0x00b9a938	Ai	61	AddInfraction	0x005ab0f0
+0x00b9a938	Ai	62	SetInfractionMultiplier	0x005ab200
+0x00b9a938	Ai	63	SetAttitude	0x005ab2c0
+0x00b9a938	Ai	64	SetDriveThroughMassRatio	0x005a8d40
+0x00b9a938	Ai	65	SetPriorityTarget	0x005a8f00
+0x00dfda70		0	charAt	0x007af360
+0x00dfda70		1	charCodeAt	0x007af490
+0x00dfda70		2	concat	0x007af590
+0x00dfda70		3	indexOf	0x007af770
+0x00dfda70		4	lastIndexOf	0x007af9c0
+0x00dfda70		5	slice	0x007afc30
+0x00dfda70		6	split	0x007afd40
+0x00dfda70		7	substr	0x007b0310
+0x00dfda70		8	substring	0x007b0440
+0x00dfda70		9	toLowerCase	0x007b05a0
+0x00dfda70		10	toString	0x007b0630
+0x00dfda70		11	toUpperCase	0x007b0670
+0x00dfda70		12	valueOf	0x007b0630
