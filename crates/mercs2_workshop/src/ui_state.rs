@@ -67,6 +67,11 @@ pub struct UiState {
     /// Once the state is applied: choose this level, as the picker does, for this run, and capture
     /// after the reload it starts has landed.
     pub pick_level: Option<String>,
+    /// On the Missions page: the script to open, by the name the script list shows (its file stem); the
+    /// capture waits for the page's corpus to load.
+    pub script: Option<String>,
+    /// With `script`: the function whose canvas to open, by the name the members list shows.
+    pub function: Option<String>,
     /// Where to write the captured frame (PNG).
     pub capture: PathBuf,
     /// Frames to let the window settle after the state is applied, before the capture.
