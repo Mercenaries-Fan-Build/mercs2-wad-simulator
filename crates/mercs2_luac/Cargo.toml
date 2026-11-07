@@ -37,6 +37,10 @@ name = "parity_retail"
 required-features = ["retail"]
 
 [[test]]
+name = "line_map_retail"
+required-features = ["retail"]
+
+[[test]]
 name = "retail_bytecode_retail"
 required-features = ["retail"]
 
