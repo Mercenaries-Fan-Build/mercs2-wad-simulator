@@ -57,6 +57,7 @@ mod ess_live;
 mod ess_menu_check;
 mod facefx;
 mod layer;
+mod lua_debug_live;
 mod terrain_cell;
 mod gfx_golden;
 mod prof_samples;
@@ -97,6 +98,7 @@ fn usage() -> ! {
          \x20 gfx-run <movies_dir> <frames>                 (play every movie; report script failures and gaps)\n\
          \x20 ess-live [--addr host:port] [--menu <scripts-rel path>] [--spawn <template>] [--spawn-dist <m>]   (live game, no WAD)\n\
          \x20 ess-menu-check --ess <Ess.lua> <menu.lua> [<menu.lua> ...]   (exact Lua 5.1, engine stubbed, no WAD)\n\
+         \x20 lua-debug --module <name> [--bank resident|vz|shell] [--line <corpus line>]... [--then continue|wait|disconnect] [--repl] [--seconds S] [--addr host:port]   (the Missions debugger's protocol against the live game: line tables from the WAD and the corpus)\n\
          \x20 extract --model H [--type T] <out.bin>   dump-block <index> <out.bin>  find-placement <substring>\n\
          \x20 save-dump <profile> [needle]  overlays <profile>\n\
          \x20 anim-table <name|0xH> [--handle 0xH] [--list <column>]   (an animationtable's rows verbatim)\n\
@@ -1251,6 +1253,7 @@ fn main() {
     };
 
     match cmd.as_str() {
+        "lua-debug" => std::process::exit(lua_debug_live::cli(&wadpath, &args)),
         "c3-meta" => {
             let out = first_positional(&args).unwrap_or_else(|| "c3_meta.ndjson".to_string());
             run(diag::c3_meta(&wadpath, &out));
