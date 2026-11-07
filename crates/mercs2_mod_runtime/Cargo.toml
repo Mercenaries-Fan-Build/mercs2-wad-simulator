@@ -1,6 +1,6 @@
 [package]
 name = "mercs2_mod_runtime"
-version = "0.5.0"
+version = "0.6.0"
 description = "m2-sdk.dll: the one runtime every Mercenaries 2 mod shares in the game process"
 edition = "2024"
 license = "MIT"
@@ -17,8 +17,14 @@ crate-type = ["cdylib"]
 
 [dependencies]
 mercs2_formats = "5.0"
+# The Lua debugger names engine bindings from the game's own luaL_Reg registry (`luareg`) and labels the
+# running build from the catalogue.
+mercs2_exemap = "1.0"
+# The debugger's `debug.host` build: the running executable's sha256.
+sha2 = "0.10"
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
+    "Win32_Graphics_Gdi",
     "Win32_Security",
     "Win32_Storage_FileSystem",
     "Win32_System_IO",
@@ -26,6 +32,8 @@ windows-sys = { version = "0.61", features = [
     "Win32_System_Memory",
     "Win32_System_SystemServices",
     "Win32_System_Threading",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
 ] }
 
 [build-dependencies]
