@@ -23,7 +23,7 @@
 //!   - `tStarterData`: drop `AllStarter*` / `ChiStarter*` recruit entries
 //!   - `oVerifyData.tTargetListStatus["All"]` / `["Chi"]`: clear per-NPC state
 //!
-//! Preserved: hero + upgrade + costumes + cash + fuel + vEquippedSupport +
+//! Preserved: hero + costume + unlocked costumes + cash + fuel + vEquippedSupport +
 //! playtime + Oil/Gur/Pir/Pmc Act-1 progression + non-Act-2 flow keys.
 
 use mercs2_formats::save::{self, parse};
@@ -405,9 +405,9 @@ fn verify_output(p: &save::Profile) -> Result<(), String> {
 
 fn report_header(p: &save::Profile) {
     eprintln!(
-        "[save_rollback] header: hero={} upgrade={} costumes={} cash={} fuel={}/{} contract={} saveName={}",
+        "[save_rollback] header: hero={} costume={} unlocked costumes={} cash={} fuel={}/{} contract={} saveName={}",
         p.character_index,
-        p.upgrade_index,
+        p.costume_index,
         p.unlocked_costumes,
         p.cash,
         p.fuel,
@@ -575,7 +575,7 @@ mod tests {
 
         // Header fields preserved.
         assert_eq!(round.character_index, 1);
-        assert_eq!(round.upgrade_index, 3);
+        assert_eq!(round.costume_index, 3);
         assert_eq!(round.unlocked_costumes, 5);
     }
 
