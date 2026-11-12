@@ -684,7 +684,7 @@ fn m0310_warns_on_a_novel_shop_behaviour() {
     let d = lint::lint(&shipment_with(&novel_shop_item("my_strike", "mystrike", "src/strike.lua")), None, None);
     assert_eq!(codes(&d), vec!["M0310"], "{d:?}");
     assert_eq!(d[0].severity, Severity::Warning);
-    assert!(d[0].message.contains("PMC interior"), "{}", d[0].message);
+    assert!(d[0].message.contains("world.begin") && d[0].message.contains("during the world load"), "{}", d[0].message);
     assert!(!lint::blocks_build(&d));
 
     let shipped = shipment_with(
@@ -712,10 +712,33 @@ fn one_novel_module_from_two_scripts_is_a_self_conflict() {
     assert!(codes(&lint::lint(&two, None, None)).contains(&"M0120"));
 }
 
-/// M0197 and M0310 are hermetic rules, M0198 a game rule, each with its doc anchor.
+/// A library `load:` at a catalogue hook in a session the hook fires in is quiet; an unknown hook, an
+/// empty or repeated `in:`, or a session the hook does not fire in is M0312, an error.
+#[test]
+fn m0312_refuses_a_load_the_loader_cannot_honour() {
+    let lib = |load: &str| shipment_with(&format!("  - kind: add_script\n    name: my_lib\n    source: src/a.lua\n    load: {load}\n"));
+    assert!(lint::lint(&lib("{ when: world.scripts_loaded, in: [gameplay] }"), None, None).is_empty());
+    assert!(lint::lint(&lib("{ when: shell.boot, in: [front_end] }"), None, None).is_empty());
+    for (load, says) in [
+        ("{ when: world.started, in: [gameplay] }", "no hook"),
+        ("{ when: world.scripts_loaded, in: [] }", "empty `in:`"),
+        ("{ when: world.scripts_loaded, in: [gameplay, gameplay] }", "twice"),
+        ("{ when: world.scripts_loaded, in: [front_end] }", "fires only in gameplay"),
+    ] {
+        let d = lint::lint(&lib(load), None, None);
+        assert_eq!(codes(&d), vec!["M0312"], "{load}: {d:?}");
+        assert_eq!(d[0].severity, Severity::Error);
+        assert!(d[0].message.contains(says), "{load}: {}", d[0].message);
+    }
+    let unknown_field = "format: 2\nshipment: { name: s, version: 1.0.0, target: retail }\ncontributions:\n  - kind: add_script\n    \
+                         name: my_lib\n    source: src/a.lua\n    load: { when: shell.boot, in: [front_end], at: 1 }\n";
+    assert!(from_str(unknown_field, Format::Yaml).is_err(), "load: takes only when and in");
+}
+
+/// M0197, M0310 and M0312 are hermetic rules, M0198 a game rule, each with its doc anchor.
 #[test]
 fn the_minted_script_and_placement_rules_are_registered() {
-    for (code, table) in [("M0197", lint::RULES), ("M0310", lint::RULES), ("M0198", lint::GAME_RULES)] {
+    for (code, table) in [("M0197", lint::RULES), ("M0310", lint::RULES), ("M0312", lint::RULES), ("M0198", lint::GAME_RULES)] {
         let r = table.iter().find(|r| r.code == code).unwrap_or_else(|| panic!("{code}"));
         assert_eq!(r.doc, format!("docs/modding/manifest_format.md#{}", code.to_lowercase()));
     }
@@ -811,6 +834,43 @@ fn a_level_asset_that_cannot_compile_is_an_error() {
         assert!(lint::blocks_build(&bad));
     }
     assert!(!codes(&asset("dlc01", "model", good)).contains(&"M0311"));
+}
+
+/// A `level: vz` row needs no `add_level`. Its worldentity row names the templates to append and has
+/// one rung; `templates` belongs to no other row, and two names of one template are refused.
+#[test]
+fn a_level_vz_row_adds_assets_and_names_templates() {
+    let row = |ty: &str, rungs: &str, templates: &str| {
+        lint::lint(
+            &shipment_with(&format!(
+                "  - kind: level_asset
+    level: {ty}
+    rungs: {rungs}
+{templates}"
+            )),
+            None,
+            None,
+        )
+    };
+    let one = "[{ block: a_P000_Q3, file: src/a.ucfx }]";
+    let two = "[{ block: a_P000_Q3, file: src/a.ucfx }, { block: a_P001_Q2, file: src/b.ucfx }]";
+    let vz = |ty: &str, rungs: &str, templates: &str| row(&format!("vz\n    type: {ty}\n    name: a"), rungs, templates);
+    assert!(!codes(&vz("model", two, "")).contains(&"M0311"), "a level: vz asset needs no add_level");
+    assert!(!codes(&vz("world_entity_data", one, "    templates: [DLC_M1A3, \"Explosion (Super TOW) \"]\n")).contains(&"M0311"));
+    assert!(!codes(&vz("world_entity_data", one, "    templates: [DLC_M1A3]\n    edits: { DLC_M1A3: { Health: { \"0x1417F4DD\": 2.0 } } }\n"))
+        .contains(&"M0311"));
+    for bad in [
+        vz("world_entity_data", one, ""),
+        vz("world_entity_data", two, "    templates: [DLC_M1A3]\n"),
+        vz("model", one, "    templates: [DLC_M1A3]\n"),
+        vz("world_entity_data", one, "    templates: [DLC_M1A3, dlc_m1a3]\n"),
+        vz("world_entity_data", one, "    templates: [\"\"]\n"),
+        vz("world_entity_data", one, "    templates: [DLC_M1A3]\n    edits: { Other: { EntranceToSeat: { CanExit: true } } }\n"),
+        row("dlc02\n    type: world_entity_data\n    name: a", one, "    templates: [DLC_M1A3]\n"),
+    ] {
+        assert!(codes(&bad).contains(&"M0311"), "{bad:?}");
+        assert!(lint::blocks_build(&bad));
+    }
 }
 
 /// A name that is not a lowercase `[a-z0-9_]` token cannot be a filename / stringdb key — M0200.
@@ -1345,10 +1405,38 @@ local row = WifMissionData.tMissionData.BadNameX
     );
 }
 
+/// M0315: an import inside a `pcall` is a warning at its line and column, in every Lua kind, in
+/// both of Ess's forms; a plain import is not. It never blocks the build.
+#[test]
+fn m0315_warns_on_an_import_inside_pcall() {
+    let module = "\
+import(\"MrxMusic\")
+pcall(function() import(\"MrxVoSequence\") end)
+";
+    let append = "local ok = pcall(import, \"MrxGuiBase\")\n";
+    let root = scratch("m0315_pcall_import", &[("src/m.lua", module), ("src/append.lua", append)]);
+    let m = shipment_with(
+        "  - kind: add_script
+    name: qm_t_pcall
+    source: src/m.lua
+  - kind: patch_lua
+    target: wifpmcinterior
+    append: src/append.lua
+",
+    );
+    let diags = lint::lint(&m, Some(&root), None);
+    let found: Vec<_> = diags.iter().filter(|d| d.rule.code == "M0315").collect();
+    assert_eq!(found.len(), 2, "one per protected import: {diags:?}");
+    assert!(found.iter().all(|d| d.severity == Severity::Warning));
+    assert!(found[0].message.contains("src/m.lua:2:18") && found[0].at == Some(0), "{}", found[0].message);
+    assert!(found[1].message.contains("src/append.lua:1:18") && found[1].at == Some(1), "{}", found[1].message);
+    assert!(!lint::blocks_build(&found.into_iter().cloned().collect::<Vec<_>>()));
+}
+
 /// Every new rule is registered, so `qm rules` can list them.
 #[test]
 fn the_lua_source_rules_are_registered() {
-    for code in ["M0300", "M0301", "M0302"] {
+    for code in ["M0300", "M0301", "M0302", "M0315"] {
         assert!(lint::RULES.iter().any(|r| r.code == code), "{code}");
     }
 }
