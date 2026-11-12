@@ -107,6 +107,82 @@ fn an_unrelated_wearer_is_flagged_without_a_bogus_fix() {
     assert_eq!(diags[0].fix, None);
 }
 
+/// An outfit with extra fields after `wearer`.
+fn outfit_with(wearer: &str, extra: &str) -> Manifest {
+    shipment_with(&format!(
+        "  - kind: add_outfit
+    name: pmc_hum_obama
+    slug: Obama
+    display: Obama
+    wearer: {wearer}
+{extra}"
+    ))
+}
+
+// ---------------------------------------------------------------------------
+// M0141 — a wearer list
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_wearer_list_offers_each_hero_and_parses_as_a_list() {
+    let m = outfit("[chris, jen, mattias]");
+    assert!(lint::lint(&m, None, None).is_empty());
+    match &m.contributions[0] {
+        mercs2_quartermaster::Contribution::AddOutfit { wearer, .. } => {
+            assert_eq!(wearer.heroes(), ["chris", "jen", "mattias"]);
+            assert_eq!(wearer.to_string(), "[chris, jen, mattias]");
+        }
+        other => panic!("{other:?}"),
+    }
+    match &outfit("chris").contributions[0] {
+        mercs2_quartermaster::Contribution::AddOutfit { wearer, .. } => {
+            assert_eq!(*wearer, mercs2_quartermaster::manifest::Wearer::One("chris".into()))
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn an_empty_wearer_list_or_a_hero_twice_is_m0141() {
+    assert_eq!(codes(&lint::lint(&outfit("[]"), None, None)), vec!["M0141"]);
+    let diags = lint::lint(&outfit("[jen, mattias, jennifer]"), None, None);
+    assert_eq!(codes(&diags), vec!["M0141"]);
+    assert!(diags[0].message.contains("names jennifer twice"), "{}", diags[0].message);
+    assert_eq!(codes(&lint::lint(&outfit("[chris, mattius]"), None, None)), vec!["M0140"], "each listed hero is checked");
+}
+
+// ---------------------------------------------------------------------------
+// M0142 — the chatter set
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_chatter_set_qm_knows_is_accepted_in_any_case() {
+    for set in ["Obama_Obama01", "palin_palin01"] {
+        assert!(lint::lint(&outfit_with("mattias", &format!("    chatter: {set}\n")), None, None).is_empty(), "{set}");
+    }
+}
+
+#[test]
+fn an_unknown_chatter_set_is_m0142_with_a_suggestion() {
+    let diags = lint::lint(&outfit_with("mattias", "    chatter: Obama_Obama02\n"), None, None);
+    assert_eq!(codes(&diags), vec!["M0142"]);
+    assert_eq!(diags[0].severity, Severity::Error);
+    assert_eq!(diags[0].fix.as_deref(), Some("Obama_Obama01"));
+}
+
+// ---------------------------------------------------------------------------
+// M0143 — the levels list
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_levels_list_is_accepted_and_an_empty_or_repeating_one_is_m0143() {
+    assert!(lint::lint(&outfit_with("mattias", "    levels: [vz, dlc01]\n"), None, None).is_empty());
+    assert_eq!(codes(&lint::lint(&outfit_with("mattias", "    levels: []\n"), None, None)), vec!["M0143"]);
+    let diags = lint::lint(&outfit_with("mattias", "    levels: [vz, dlc01, vz]\n"), None, None);
+    assert_eq!(codes(&diags), vec!["M0143"]);
+    assert!(diags[0].message.contains("\"vz\" twice"), "{}", diags[0].message);
+}
+
 // ---------------------------------------------------------------------------
 // M0150 — raw must declare its radius
 // ---------------------------------------------------------------------------
