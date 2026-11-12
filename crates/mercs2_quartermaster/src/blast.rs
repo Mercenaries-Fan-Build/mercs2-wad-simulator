@@ -34,8 +34,8 @@ pub enum MergeClass {
     /// Many claimants, union by key. The key IS the claim identity, so two claimants on one claim
     /// means a genuine duplicate-key collision.
     KeyedSet,
-    /// Many claimants, append-only, with Quartermaster-computed companions (e.g. the wardrobe's
-    /// availability count derived from final list length).
+    /// Many claimants, append-only, with Quartermaster-computed companions (e.g. the wardrobe lists
+    /// and character map the link generates from every installed outfit).
     OrderedList,
     /// Many claimants; the later one wins and load order is the user's answer.
     LastWins,
