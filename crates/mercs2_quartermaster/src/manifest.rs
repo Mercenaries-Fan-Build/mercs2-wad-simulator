@@ -265,83 +265,10 @@ pub enum Layer {
     Runtime,
 }
 
-/// Where a `place_file` contribution puts its file — a **closed set of named destinations**, never
-/// a path.
-///
-/// This enum IS the design of [`Contribution::PlaceFile`]. `native_hook` has no destination field
-/// at all, which is what makes `Mercenaries2.exe` and `data\vz.wad` unreachable by CONSTRUCTION
-/// rather than by a lint somebody could suppress. A kind that places companion files had to keep
-/// that property while admitting more than one destination, and the only way to hold both is to let
-/// the author pick a NAME out of a fixed list instead of writing a path.
-///
-/// So there is no spelling of `dest:` that is a path. `..`, `/etc/passwd`, `C:\Windows`,
-/// `\\host\share` and a symlink are not *rejected* — they do not parse, and serde says which
-/// variants exist. The destination half of a placement carries no author bytes whatsoever; only the
-/// filename does, and that comes from the source file (see `build::game_folder_name_refusal`).
-///
-/// **The four ASI roots are measured, not assumed.** `pmc_bb.dll` v3.0.0 carries the format strings
-/// `%s*.asi`, `%sscripts\`, `%splugins\` and `%supdate\`, so the loader globs the game directory
-/// itself plus exactly those three subfolders. A destination outside that set would put a plugin's
-/// companion where nothing looks for it.
-///
-/// ⚠ **The three `scripts/On*` rungs rest on weaker evidence, and are recorded as weaker.** They
-/// come from Plan 03's write-up of Wally's Lua bridge — "script loader (`OnBoot/`/`OnLoad/`
-/// (world-load-triggered)/`OnKey/`)" — which is prose about a repo this workspace does not vendor.
-/// Nobody here has read the directory scan that consumes them, so the exact spelling and the parent
-/// directory are inferred. They sit under `scripts/` because that is where the bridge `.asi` itself
-/// goes, and because every companion path measured in this ecosystem so far resolves against the
-/// loading module's OWN directory rather than the game root.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PlaceIn {
-    /// The game directory itself — where `Mercenaries2.exe` lives. The loader globs `%s*.asi` here.
-    GameRoot,
-    /// `scripts\` — where the ecosystem already puts plugins and their companions.
-    Scripts,
-    /// `plugins\`.
-    Plugins,
-    /// `update\`.
-    Update,
-    /// The Lua bridge's boot-time script rung.
-    OnBoot,
-    /// The Lua bridge's world-load script rung.
-    OnLoad,
-    /// The Lua bridge's key-binding script rung.
-    OnKey,
-}
-
-impl PlaceIn {
-    /// The directory this destination names, relative to the game folder, with forward slashes.
-    ///
-    /// Forward slashes on purpose: the loader's own literals are backslashed (`%sscripts\`), but
-    /// this is a filesystem path a deploy tool joins, not an engine path like a backslashed `PTHS`
-    /// entry. The game root is the empty string, so joining is uniform.
-    ///
-    /// Every arm is a literal. Nothing an author writes reaches this string.
-    pub const fn relative_dir(self) -> &'static str {
-        match self {
-            PlaceIn::GameRoot => "",
-            PlaceIn::Scripts => "scripts",
-            PlaceIn::Plugins => "plugins",
-            PlaceIn::Update => "update",
-            PlaceIn::OnBoot => "scripts/OnBoot",
-            PlaceIn::OnLoad => "scripts/OnLoad",
-            PlaceIn::OnKey => "scripts/OnKey",
-        }
-    }
-
-    /// Every destination, so a test can assert a property of the whole set rather than of the
-    /// arms somebody remembered to list.
-    pub const ALL: [PlaceIn; 7] = [
-        PlaceIn::GameRoot,
-        PlaceIn::Scripts,
-        PlaceIn::Plugins,
-        PlaceIn::Update,
-        PlaceIn::OnBoot,
-        PlaceIn::OnLoad,
-        PlaceIn::OnKey,
-    ];
-}
+/// Where a `place_file` contribution ([`Contribution::PlaceFile`]) puts its file — a closed set of
+/// named destinations, never a path. Defined in `mercs2_formats::load_plan`, because a load plan
+/// carries it and the plan's readers parse that one definition.
+pub use mercs2_formats::load_plan::PlaceIn;
 
 /// Optional cross-rig retarget on an import that is not already hero-rigged. Inline rather than a
 /// standalone kind so v1 avoids inter-contribution reference machinery entirely (Plan 04 Q6).
@@ -443,36 +370,23 @@ impl Language {
     }
 }
 
-/// A session of the game that loads sound banks from Lua, and so a place a mod loader loads a bank.
-///
-/// Each session is one level WAD's Lua VM (the VM is closed and recreated on every level swap,
-/// `scripting_host_binding_code_map.md`):
-///
-/// * `gameplay` — the `vz` level. Retail loads its banks in `MrxSoundBootstrap.LoadBanks`
-///   (`resident/mrxsoundbootstrap.lua:192-246`) and unloads them in `ExitGame` (`:188-190`); the
-///   mod loader loads in `wifpmcinterior._OnEnter` and unloads after `ExitGame`. Its blocks ship in
-///   the Shipment overlay.
-/// * `front_end` — the `shell` level (the main menu). Retail loads its banks in
-///   `MrxSound.EnterShellState` (`shell/mrxsound.lua:5-15`) and unloads them in `ExitShellState`
-///   (`:17-27`); the front-end loader runs after each. Its blocks ship in the shell patch.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum LoadSession {
-    Gameplay,
-    FrontEnd,
-}
+/// A session of the game that loads sound banks and libraries from Lua: `gameplay` (the `vz` level)
+/// or `front_end` (the `shell` level). Defined in `mercs2_formats::load_plan`, because a load plan's
+/// library rows carry it.
+pub use mercs2_formats::load_plan::LoadSession;
 
-impl LoadSession {
-    /// Both sessions, in this order.
-    pub const ALL: [LoadSession; 2] = [LoadSession::Gameplay, LoadSession::FrontEnd];
-
-    /// The manifest spelling.
-    pub const fn token(self) -> &'static str {
-        match self {
-            LoadSession::Gameplay => "gameplay",
-            LoadSession::FrontEnd => "front_end",
-        }
-    }
+/// When qm's loader brings an `add_script` library up (`load:`). `import` only binds a module whose
+/// body has already run, so a library nothing else runs states here when it loads. At hook `when`
+/// (an id of `data/hooks.tsv`, [`crate::hooks`]), in each session of `in`, the loader
+/// `dynamic_import`s the module and records it ready when the engine's callback hands back its env.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LibraryLoad {
+    /// The hook at which the library loads.
+    pub when: String,
+    /// The sessions it loads in; each must be one the hook fires in.
+    #[serde(rename = "in")]
+    pub sessions: Vec<LoadSession>,
 }
 
 /// One cue of an authored sound bank: a PCM16 WAV played by one single-wave group through one
@@ -627,7 +541,7 @@ impl ShopEquipmentType {
 /// plus optional setters — the exact shape the DLC's own catalog uses
 /// (`mrxcratedelivery:Create()` → `SetCargo` / `SetDeliveryVehicle`). `module` must be an ALREADY
 /// resident, imported `MrxSupport` subclass; shipping a NOVEL subclass is a separate path (a new
-/// resident chunk hits the phase-8 world-load deadlock and needs the `qm_modloader` trampoline).
+/// resident chunk hits the phase-8 world-load deadlock and needs `qm_modloader`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ShopBehaviour {
@@ -638,15 +552,15 @@ pub struct ShopBehaviour {
     pub delivery_vehicle: Option<String>,
     /// A `src/`-relative Lua source for a NOVEL `MrxSupport` subclass (e.g. a new airstrike). When
     /// present, `module` is NOT assumed resident: the source is minted as a new `scripts_vz` script
-    /// and `import`-ed post-world-load through the `qm_modloader` trampoline, and the catalog row is
-    /// DEFERRED into that loader — because the ordinary eager append would run `module:Create()` at
+    /// and imported by `qm_modloader`, which qm's world entry loads, and the catalog row is DEFERRED
+    /// into that loader — because the ordinary eager append would run `module:Create()` at
     /// resident-load time, when the novel global is still `nil`, aborting a resident script (the
     /// phase-8 deadlock's cousin). Omit to reference a module the game already ships.
     ///
-    /// The loader inserts the rows from the trampoline on `wifpmcinterior`'s `_OnEnter`, so the item
-    /// is at no vendor until the host's first entry into the PMC interior in a session, and at every
-    /// vendor in `shops` from then (the loader clears `MrxRewardData.gtAllSupport`, the per-faction
-    /// list cache). A session that starts in the world reaches outpost vendors first. M0310 warns.
+    /// The loader inserts the rows at qm's `world.begin` hook, when player-visible gameplay first
+    /// starts in a world, with the item's saved unlock status and stock, and the item is at every vendor
+    /// in `shops` from then (the loader clears `MrxRewardData.gtAllSupport`, the per-faction list
+    /// cache). Lua that reads the rows during the world load does not see the item: M0310 warns.
     #[serde(default)]
     pub script: Option<PathBuf>,
 }
@@ -985,11 +899,10 @@ pub enum Contribution {
     /// exactly this way (`mrxgui.lua`): `w = FlashWidget:new(); w:SetSwfFile(<name>); w:Play()`. It
     /// is a PROVEN capability.
     ///
-    /// The show is hooked into `wifpmcinterior`'s `_OnEnter` — the moment the player enters the PMC
-    /// HQ, GUI fully up, every session — because that is the ONE resident script the linker is
-    /// proven to merge (`add_outfit` uses it too). A once-guard means the widget is created a single
-    /// time. Where the widget sits and when it hides are the author's to tune; the generated Lua is
-    /// a working default, not a finished HUD.
+    /// The show runs at qm's `world.begin` hook, when player-visible gameplay first starts in a world,
+    /// from `qm_modloader`. A once-guard means the widget is created a single time per VM. Where the
+    /// widget sits and when it hides are the author's to tune; the generated Lua is a working default,
+    /// not a finished HUD.
     AddUi {
         /// The movie asset name minted as a `cfx_pack` and passed to `SetSwfFile`.
         name: String,
@@ -1043,6 +956,10 @@ pub enum Contribution {
         /// or `_MODULES` stays an error.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         exports: Vec<String>,
+        /// A library: qm's loader brings the module up at a lifecycle hook. Without it, the module
+        /// runs only when an executed script lists it in its DEPS.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        load: Option<LibraryLoad>,
     },
     /// Script. Wholesale REPLACE the bytecode of an existing shipped script, keeping its name and
     /// asset hash. The append counterpart to [`PatchLua`] and the additive counterpart to
@@ -1273,9 +1190,10 @@ pub enum Contribution {
     /// (and `MarkForRemoval` for the layer it supersedes) — the exact calls a vanilla contract makes
     /// (`OilCon001.Activated`: add `_act1`, remove `_pristine`; `mrxtaskcontractoutpost`: add
     /// captured, remove defense). The registration is baked into the Quartermaster-owned
-    /// `qm_modloader` and reached by the same one-line trampoline `add_ui` uses, so N activations
-    /// merge cleanly and the resident script never grows with mod count. Each mark runs under `pcall`,
-    /// so a mistyped layer name cannot wedge the loader (it silently does nothing — M0194 warns).
+    /// `qm_modloader` and runs at qm's `world.begin` hook, as `add_ui`'s does, so N activations merge
+    /// cleanly. A mistyped layer name is not a runtime error: `MarkForAddition` records any name
+    /// (`mrxlayermanager.lua:57-70`), so it silently does nothing — M0194 warns. An error in a mark
+    /// stops the game naming the Shipment (qm's error policy).
     ActivateLayer {
         /// The layer to `MarkForAddition`, e.g. `vz_state_pmccon004_destroyed`. Case does not matter —
         /// `MrxLayerManager` lowercases the name and the name hash folds case — but the spelling must
@@ -1403,12 +1321,14 @@ pub enum Contribution {
         #[serde(default)]
         streams: Vec<PathBuf>,
     },
-    /// Data. One asset of an `add_level` of this Shipment, in the PC container form of its type: every
-    /// byte the asset has, so any type the engine loads can be carried and nothing is re-encoded.
-    /// `rungs` is its LOD chain, coarsest first. It reaches only that level: a row may hold a name the
-    /// base game also uses, and Venezuela keeps its own.
+    /// Data. One asset of an `add_level` of this Shipment, or of the main campaign (`level: vz`), in the
+    /// PC container form of its type: every byte the asset has, so any type the engine loads can be
+    /// carried and nothing is re-encoded. `rungs` is its LOD chain, coarsest first. A row of an
+    /// `add_level` reaches only that level: it may hold a name the base game also uses, and Venezuela
+    /// keeps its own. A `level: vz` row ships in the Shipment's overlay and may only add: a name and type
+    /// `vz.wad` holds is refused ([`crate::level::VZ`]).
     LevelAsset {
-        /// The `add_level` it belongs to.
+        /// The `add_level` it belongs to, or `vz`.
         level: String,
         /// The asset type, as the WAD's type table names it (`mercs2_formats::types::type_name`).
         #[serde(rename = "type")]
@@ -1416,6 +1336,15 @@ pub enum Contribution {
         /// The asset name, or a bare `0xHHHHHHHH` hash.
         name: String,
         rungs: Vec<LevelRung>,
+        /// `level: vz` and `type: world_entity_data` only, and required there: the templates of the
+        /// container to append to the game's worldentity, each under the key it has in the container.
+        /// The container itself is never shipped.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        templates: Vec<String>,
+        /// With `templates`: field values to set on listed templates before they are appended, by
+        /// template name, then class, then field (`crate::template::TemplateForm::edit`).
+        #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+        edits: std::collections::BTreeMap<String, crate::template::FieldEdits>,
     },
     /// Code. Retail: a prebuilt ASI placed in `pmc_bb.dll`'s search path. To DEPEND on someone
     /// else's ASI, require the Shipment that ships it in `load.requires` — never vendor a
