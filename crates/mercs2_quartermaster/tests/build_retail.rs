@@ -1008,6 +1008,38 @@ fn a_resident_patch_lua_builds_into_a_valid_overlay() {
     );
 }
 
+/// A universal outfit with a chatter set, wearing a model the game ships, through the deploy link:
+/// the heroes' own sets are read from the game's worldentity, the wardrobe chunk carries the outfit's
+/// set and the three it returns the heroes to, and the player chunk the outfit's set for the join.
+#[test]
+fn a_universal_chatter_outfit_links_with_the_heroes_own_sets() {
+    let mut game = retail_game();
+    let corpus = corpus_for_tests();
+    let root = scratch("deploy_chatter");
+    let s = shipment(
+        &root.join("s"),
+        "  - kind: add_outfit\n    name: pmc_hum_obama\n    slug: Obama\n    display: Obama\n\
+         \x20   wearer: [chris, jen, mattias]\n    chatter: Obama_Obama01\n",
+    );
+    let ids = arg_ids(1);
+    let report = build::link_installed(&request(&[&s], &ids), &mut game, &corpus, &root.join("out"), None).expect("links");
+    let bytes = std::fs::read(report.wad.expect("a link WAD")).unwrap();
+    let contents = mercs2_formats::patch_wad::read_patch_wad(&bytes).expect("re-read");
+    let chunk = |block: &str, script: &str| -> Vec<u8> {
+        let blk = contents.blocks.iter().find(|b| b.path_string.contains(block)).unwrap_or_else(|| panic!("a {block} block"));
+        let dec = mercs2_formats::sges::decompress_sges(&blk.compressed_data).expect("sges");
+        let parsed = mercs2_formats::scripts_block::ScriptsBlock::parse(&dec).expect("parse");
+        parsed.extract_lua(parsed.find_by_name(script).unwrap_or_else(|| panic!("{script}"))).unwrap()
+    };
+    let has = |luaq: &[u8], s: &str| luaq.windows(s.len()).any(|w| w == s.as_bytes());
+    let wardrobe = chunk("scripts_vz", "wifpmcinterior");
+    for set in ["Obama_Obama01", "Mattias_Peter01", "Chris_Phil01", "Jen_Jen01", "_CompleteChangeOutfit"] {
+        assert!(has(&wardrobe, set), "the wardrobe chunk carries {set}");
+    }
+    let player = chunk("resident", "mrxplayer");
+    assert!(has(&player, "Obama_Obama01") && has(&player, "[qm] outfit chatter: player "), "the join applies the set");
+}
+
 /// The request order is the tie-break: with no `requires` between two Shipments, reversing the
 /// request reverses the link order, and the same request always gives the same bytes.
 #[test]
