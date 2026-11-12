@@ -1194,6 +1194,7 @@ fn stub(kind: &str, n: usize) -> Option<Contribution> {
             name,
             source: PathBuf::from("src/module.lua"),
             exports: Vec::new(),
+            load: None,
         },
         "replace_lua" => Contribution::ReplaceLua {
             target: "wifpmcinterior".into(),
@@ -1291,6 +1292,8 @@ fn stub(kind: &str, n: usize) -> Option<Contribution> {
             asset_type: "model".into(),
             name,
             rungs: Vec::new(),
+            templates: Vec::new(),
+            edits: Default::default(),
         },
         "add_shop_item" => Contribution::AddShopItem {
             id: format!("my_item_{n}"),
@@ -2599,7 +2602,7 @@ fn contribution_form(
                 "forks `base` (default english) into a new `.\\Data\\<name>.wad` + overlay stringdb.",
             );
         }
-        Contribution::LevelAsset { level, asset_type, name, rungs } => {
+        Contribution::LevelAsset { level, asset_type, name, rungs, .. } => {
             commit |= theme::text_field(ui, "Level", level, "dlc01", theme::FieldState::Neutral).lost_focus();
             commit |= theme::text_field(ui, "Type", asset_type, "model", theme::FieldState::Neutral).lost_focus();
             commit |= theme::text_field(ui, "Name", name, "0x00000000", theme::FieldState::Neutral).lost_focus();
