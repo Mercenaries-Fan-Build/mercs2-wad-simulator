@@ -700,8 +700,9 @@ pub enum Contribution {
     ///   ("wear an existing character"). `donor`/`textures`/`retarget`/`single_group` are injection-only
     ///   and ignored here.
     ///
-    /// Either way the Script half is the SAME `_tOutfits` append on `wifpmcinterior`, which the linker
-    /// reconciles across the installed set — so outfits of both kinds compose instead of clobbering.
+    /// Either way the Script half is the same: the link generates each level's wardrobe lists and
+    /// character map from every installed outfit at once ([`crate::outfits`]) — so outfits of both
+    /// kinds compose instead of clobbering.
     AddOutfit {
         /// ASSET identity → `pandemic_hash_m2` → `_tOutfits.Model`; what `Player.SetOutfit` receives.
         /// With `model`, this is the minted new asset's name; without it, an existing model's name.
