@@ -150,9 +150,9 @@ fn print_report(r: &Report) {
     println!("size              : {} bytes", r.size);
     println!("sha256            : {}", r.sha256);
     println!(
-        "header            : hero={} upgrade={} costumes={} cash={} fuel={}/{} contract={} saveName={}",
+        "header            : hero={} costume={} unlocked costumes={} cash={} fuel={}/{} contract={} saveName={}",
         r.header.character_index,
-        r.header.upgrade_index,
+        r.header.costume_index,
         r.header.unlocked_costumes,
         r.header.cash,
         r.header.fuel,
