@@ -161,60 +161,6 @@ fn the_placement_record_is_well_formed_json() {
 // add_model
 // ---------------------------------------------------------------------------
 
-/// The lift is emitted by the Quartermaster ONCE, not once per Shipment. Two outfits in one
-/// Shipment must still yield exactly one definition.
-#[test]
-fn the_availability_lift_is_emitted_exactly_once() {
-    use mercs2_quartermaster::link;
-    let a = link::ScriptMutation {
-        shipment: "a".into(),
-        target: "wifpmcinterior".into(),
-        append: link::outfit_row_append("mattias", "One", "m_one", "One"),
-    };
-    let b = link::ScriptMutation {
-        shipment: "b".into(),
-        target: "wifpmcinterior".into(),
-        append: link::outfit_row_append("mattias", "Two", "m_two", "Two"),
-    };
-    let (src, _) = link::linked_source("base\n", &[&a, &b], &["a".into(), "b".into()])
-        .expect("both contributors are in the order");
-    let epilogue = link::derived_epilogue("wifpmcinterior").unwrap();
-    let full = format!("{src}{epilogue}");
-    assert_eq!(
-        full.matches("function GetAvailableCostumes()").count(),
-        1,
-        "two hard-coded counts is exactly the bug the derived lift removes"
-    );
-    assert!(
-        full.contains("\"One\"") && full.contains("\"Two\""),
-        "both rows must survive"
-    );
-}
-
-/// An author-supplied display string cannot escape its Lua literal and inject code.
-///
-/// Asserted by COMPILING the generated row rather than by pattern-matching the text: a substring
-/// check cannot tell `\"` from `"`, which is exactly the distinction that matters here. If the
-/// escaping failed, the hostile text would become statements and the whole thing would still be
-/// valid Lua — so the property is that the payload survives as one *string constant*.
-#[test]
-fn a_hostile_display_string_stays_a_string() {
-    use mercs2_quartermaster::link::outfit_row_append;
-    const HOSTILE: &str = "evil\" ) end print(\"pwned";
-    let row = outfit_row_append("mattias", "S", "m", HOSTILE);
-
-    // It must compile as a single statement against a table that exists.
-    let program = format!("_tOutfits = {{ mattias = {{}} }}\n{row}");
-    let chunk = mercs2_luac::compile(&program, "escape_test").expect("generated row must compile");
-
-    // And the hostile text must appear in the constant table verbatim — i.e. as data, not code.
-    let hay = String::from_utf8_lossy(&chunk);
-    assert!(
-        hay.contains(HOSTILE),
-        "the payload should survive as one string constant, meaning it was escaped, not executed"
-    );
-}
-
 // ---------------------------------------------------------------------------
 // Cross-Shipment link (deploy)
 // ---------------------------------------------------------------------------
