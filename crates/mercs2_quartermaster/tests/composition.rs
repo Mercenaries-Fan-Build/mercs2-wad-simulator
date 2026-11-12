@@ -867,18 +867,20 @@ fn script_claims(m: &Manifest) -> Vec<(String, Level, MergeClass)> {
         .collect()
 }
 
-/// A sound kind claims the scripts of each session's loader, `Additive`: gameplay's trampoline
-/// hosts in `vz.wad`, the front end's loader and host in `shell.wad`. An override claims the
-/// sessions retail loads its bank in: `ui_hud` both, `ui_shell` the front end, a `vo_*` bank
-/// gameplay.
+/// A sound kind claims the scripts of each session's loader, `Additive`: the loader qm mints and
+/// the hosts of the hooks it loads at and runs on, `vz.wad`'s in gameplay and `shell.wad`'s in the
+/// front end. An override claims the sessions retail loads its bank in: `ui_hud` both, `ui_shell`
+/// the front end, a `vo_*` bank gameplay.
 #[test]
 fn sound_kinds_claim_their_loaders_scripts() {
     let gameplay = vec![
-        ("wifpmcinterior".to_string(), Level::Vz, MergeClass::OrderedList),
+        ("qm_modloader".to_string(), Level::Vz, MergeClass::OrderedList),
+        ("vz".to_string(), Level::Vz, MergeClass::OrderedList),
         ("mrxsoundbootstrap".to_string(), Level::Vz, MergeClass::OrderedList),
     ];
     let front = vec![
         ("qm_shell_modloader".to_string(), Level::Shell, MergeClass::OrderedList),
+        ("shellbootstrap".to_string(), Level::Shell, MergeClass::OrderedList),
         ("mrxsound".to_string(), Level::Shell, MergeClass::OrderedList),
     ];
     let both: Vec<_> = gameplay.iter().chain(&front).cloned().collect();
@@ -899,25 +901,25 @@ fn sound_kinds_claim_their_loaders_scripts() {
     );
 }
 
-/// `replace_lua wifpmcinterior` beside a sound override that gameplay loads is a conflict: the
-/// replacement removes the trampoline host the loader is reached through. Beside a front-end-only
+/// `replace_lua mrxsoundbootstrap` beside a sound override that gameplay loads is a conflict: the
+/// replacement is the host of the hook the loader unloads its banks at. Beside a front-end-only
 /// override it is not.
 #[test]
 fn replace_lua_of_the_loader_host_conflicts_with_a_gameplay_sound_override() {
-    let replace = one("mod-a", "  - kind: replace_lua\n    target: wifpmcinterior\n    source: src/w.lua\n");
+    let replace = one("mod-a", "  - kind: replace_lua\n    target: mrxsoundbootstrap\n    source: src/w.lua\n");
     let found = exclusive_conflict(&replace, &replace_cue("mod-b", "ui_hud", None, "ui_PDA_Accept"));
-    assert_eq!(found.claim, Claim::Script { name: "wifpmcinterior".into(), level: Level::Vz });
+    assert_eq!(found.claim, Claim::Script { name: "mrxsoundbootstrap".into(), level: Level::Vz });
     assert!(blast::conflicts(&[("mod-a", &replace), ("mod-b", &replace_cue("mod-b", "ui_shell", None, "x"))]).is_empty());
     // One Shipment doing both is a self-conflict.
     let both = one(
         "mod-a",
         &format!(
-            "  - kind: replace_lua\n    target: wifpmcinterior\n    source: src/w.lua\n  - kind: replace_sound_cue\n    bank: ui_hud\n    category: ui\n    cue:\n{}",
+            "  - kind: replace_lua\n    target: mrxsoundbootstrap\n    source: src/w.lua\n  - kind: replace_sound_cue\n    bank: ui_hud\n    category: ui\n    cue:\n{}",
             cue_yaml("      ", "ui_PDA_Accept")
         ),
     );
     assert!(
-        blast::self_conflicts(&both).iter().any(|c| c.claim == Claim::Script { name: "wifpmcinterior".into(), level: Level::Vz }),
+        blast::self_conflicts(&both).iter().any(|c| c.claim == Claim::Script { name: "mrxsoundbootstrap".into(), level: Level::Vz }),
         "{:?}",
         blast::self_conflicts(&both)
     );
@@ -1228,7 +1230,7 @@ fn one_effect_replaced_twice_conflicts_by_name_and_through_a_template() {
     use mercs2_formats::texture_encode::{encode_bc3, mip_chain, ucfx_texture};
     let atlas = mercs2_quartermaster::sprite::Atlas::parse(&ucfx_texture("vfx", 4, 4, b"DXT5", &mip_chain(4, 4, 4, &[0.0; 64], encode_bc3)))
         .expect("the stand-in atlas parses");
-    let base = fx::FxBase { effects: &effects, worldentity: &we, fxdict: &[], atlas: &atlas, repainted: false };
+    let base = fx::FxBase { effects: &effects, worldentity: &we, fxdict: &[], atlas: &atlas, repainted: false, level_templates: fx::LevelTemplates::None };
     let root = std::path::Path::new("/nonexistent");
     let set = [fx::FxShipment { manifest: &direct, root }, fx::FxShipment { manifest: &via, root }];
     let found = fx::conflicts(&base, &set);
