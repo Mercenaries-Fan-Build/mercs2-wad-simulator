@@ -187,8 +187,9 @@ fn link_plan_not_ok_exits_1_writes_the_plan_and_links_nothing() {
     assert_eq!(listing(&out), ["load-plan.json"], "only the plan is written");
 }
 
-/// Exit 0: an ok plan. `m2-sdk` touches no script and no string table, so there is nothing to link:
-/// the plan and an empty placement record are written, and no link WAD.
+/// Exit 0: an ok plan. `m2-sdk` touches no script and no string table, yet the link still splices
+/// qm's hook dispatcher, loader entries and core hooks onto their hosts (W-a), needing no corpus: the
+/// plan, the link WAD, the shell patch with the front end's hooks and their placements are written.
 ///
 /// Needs a game stack for the same reason as the exit-1 case.
 #[test]
@@ -207,13 +208,28 @@ fn link_ok_plan_exits_0_and_writes_the_plan() {
         &out,
     );
     assert_eq!(code(&o), 0, "stderr: {}", String::from_utf8_lossy(&o.stderr));
-    assert!(String::from_utf8_lossy(&o.stdout).contains("nothing to link"));
+    let stdout = String::from_utf8_lossy(&o.stdout);
+    for host in ["vz", "mrxsoundbootstrap", "shellbootstrap", "mrxsound"] {
+        assert!(stdout.contains(&format!("linked {host} in")), "{host}: {stdout}");
+    }
+    assert!(stdout.contains("quartermaster-modloader"), "{stdout}");
     let plan = read_json(&out.join("load-plan.json"));
     assert_eq!(plan["ok"], true);
     assert_eq!(plan["producer"], "link");
     let placement = read_json(&out.join("placement.json"));
-    assert_eq!(placement["placements"], serde_json::json!([]));
-    assert_eq!(listing(&out), ["load-plan.json", "placement.json"], "no link WAD");
+    let placed = placement["placements"].as_array().expect("placements array");
+    assert_eq!(placed.len(), 3, "the link overlay, the shell patch and the load plan: {placed:?}");
+    assert_eq!(
+        listing(&out),
+        ["load-plan.json", "placement.json", "scripts", "zz-quartermaster-link.shell-patch.wad", "zz-quartermaster-link.wad"],
+        "the link WAD, the shell patch, and the plan's game-folder copy under scripts/"
+    );
+    assert_eq!(listing(&out.join("scripts")), ["load-plan.json"]);
+    assert_eq!(
+        std::fs::read(out.join("scripts/load-plan.json")).unwrap(),
+        std::fs::read(out.join("load-plan.json")).unwrap(),
+        "the game folder gets the plan qm wrote"
+    );
 }
 
 // ---------------------------------------------------------------------------
