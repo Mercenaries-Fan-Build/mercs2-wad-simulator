@@ -51,7 +51,8 @@ pub(crate) const OFF_SAVE_NAME: usize = 0x20A; // UTF-16LE NUL-terminated slot n
 pub(crate) const OFF_FUEL_CAP: usize = 0x2F8; // u16  fuel capacity? tracks fuel (INFERRED)
 pub(crate) const OFF_UNLOCKED_COSTUMES: usize = 0x24A; // u8  unlocked-costume count (1 fresh, 5 = all base outfits)
 pub(crate) const OFF_UNK_24B: usize = 0x24B; // u8  unknown (1 in every observed save)
-pub(crate) const OFF_UPGRADE: usize = 0x4F; // u8  hero upgrade tier 0..3 (drives the upgrade TEMPLATE = the look)
+pub(crate) const OFF_UPGRADE: usize = 0x4E; // u8  hero upgrade tier (Get/SetProfileUpgrade)
+pub(crate) const OFF_COSTUME: usize = 0x4F; // u8  costume: the worn outfit, as the wardrobe row index - 1
 
 /// Decoded Mercenaries 2 `.profile` save.
 ///
@@ -86,7 +87,8 @@ pub struct Profile {
     /// (`PmcCon001`, `OilCon003`, `PmcJob001`, ...). FACT.
     pub active_contract: String,
     /// `@0x4C` u32 — raw dword, kept for reference. NOT one bitfield: byte `@0x4D` is the hero
-    /// (exposed as `character_index`); byte `@0x4F` is a progression flag (3 on completed saves).
+    /// (exposed as `character_index`), `@0x4E` the upgrade tier (`upgrade_index`), `@0x4F` the costume
+    /// (`costume_index`).
     pub flags_0x4c: u32,
     /// `@0x4D` u8 — HERO (`Get/SetProfileCharacter` = runtime profile object byte `+0x61`,
     /// `FUN_005df790/7d0`). Values are engine-coded (`FUN_00634810` display-name switch):
@@ -96,17 +98,22 @@ pub struct Profile {
     pub character_index: u8,
     /// `@0x24A` u8 — UNLOCKED-costume count (feeds `Player.GetAvailableCostumes`, the wardrobe
     /// menu gate in `_SelectOutfit`): 1 on fresh/mid saves, 5 (= all five base outfits) on the
-    /// completed saves. NOT the selected costume (disproved by user ground truth: saves with
-    /// different looks share it via upgrade tier, wardrobe untouched).
+    /// completed saves. NOT the selected costume, which is `costume_index` (`@0x4F`).
     pub unlocked_costumes: u8,
     /// `@0x24B` u8 — unknown, `1` in every observed save. NOT the costume/character.
     pub unknown_0x24b: u8,
-    /// `@0x4F` u8 — hero UPGRADE tier 0..3 (`Get/SetProfileUpgrade` = runtime profile object
-    /// byte `+0x62`, `FUN_005df830/870`). Drives the spawn TEMPLATE via `_tCharacterMap.templates`
-    /// (`mrxplayer.lua:167-168`: `tTemplates[iUpgrade] or base`) — the hero's LOOK progresses with
-    /// tier, no wardrobe involvement. Observed: 0 on fresh/mid saves (default skin,
-    /// user-confirmed), 3 on both completed-save copies (Mattias endgame "MetalHead" look,
-    /// user-confirmed).
+    /// `@0x4F` u8 — COSTUME (`Get/SetProfileCostume` = runtime profile object byte `+0x63`,
+    /// `FUN_005df8e0/920`). The wardrobe stores row `i` as `i - 1` (`wifpmcinterior.lua:1472`), and the
+    /// join puts on `_tCharacterMap[hero].models[costume]` (`mrxplayer.lua:155-173`, `:179`); 0 leaves
+    /// the hero's base model. The end-game `Mattias Nilsson_6A0E523C` stores 3, the Jacket
+    /// (`pmc_hum_mattias_v4`): a memory capture of that save loaded holds `+0x63` = 3 and `+0x62` (the
+    /// upgrade tier) = 0 (`mercs2_probe` test `dump::tests::costume_is_singleton_0x63_and_header_0x4f`;
+    /// `save_serialize_code_map.md` §4). An earlier reading called this byte the upgrade tier.
+    pub costume_index: u8,
+    /// `@0x4E` u8 — UPGRADE tier (`Get/SetProfileUpgrade` = runtime profile object byte `+0x62`,
+    /// `FUN_005df830/870`): the join's `iUpgrade`, which picks `_tCharacterMap[hero].templates[iUpgrade]`
+    /// (`mrxplayer.lua:167-169`), the base template when 0. 0 in every vendored fixture, the end-game
+    /// saves included; the memory capture of `Mattias Nilsson_6A0E523C` holds `+0x62` = 0.
     pub upgrade_index: u8,
     /// `@0x2F8` u16 — fuel capacity (max fuel); tracks/exceeds `fuel`. INFERRED.
     pub fuel_capacity: u16,
@@ -176,6 +183,7 @@ pub fn parse(bytes: &[u8]) -> Result<Profile, String> {
         flags_0x4c: rd_u32(bytes, OFF_FLAGS_4C),
         unlocked_costumes: bytes[OFF_UNLOCKED_COSTUMES],
         unknown_0x24b: bytes[OFF_UNK_24B],
+        costume_index: bytes[OFF_COSTUME],
         upgrade_index: bytes[OFF_UPGRADE],
         character_index: bytes[OFF_CHARACTER],
         fuel_capacity: rd_u16(bytes, OFF_FUEL_CAP),
@@ -842,7 +850,7 @@ mod tests {
     /// They are committed (128 KiB total) and every test below runs unconditionally — see
     /// `fixtures/saves/README.md`.
     ///
-    /// The set is deliberately varied: three different heroes, upgrade tiers 0 and 3, flow chains from
+    /// The set is deliberately varied: three different heroes, costumes 0 and 3, flow chains from
     /// 2 to 63 entries, and one non-ASCII slot name that exercises the UTF-16LE `save_name` path.
     use crate::game_paths::SAVE_FIXTURES as ALL_SAVES;
 
@@ -861,6 +869,21 @@ mod tests {
 
     fn load_from(dir: &Path, name: &str) -> Vec<u8> {
         std::fs::read(dir.join(name)).unwrap_or_else(|e| panic!("read {name}: {e}"))
+    }
+
+    /// `@0x4F` reads as the costume: the two end-game copies wear the Jacket (costume 3, per the
+    /// memory capture of that save), every other fixture costume 0. The upgrade tier `@0x4E` is 0 in
+    /// every fixture.
+    #[test]
+    fn the_fixtures_costume_bytes() {
+        let dir = save_dir();
+        for name in ALL_SAVES {
+            let bytes = load_from(&dir, name);
+            let p = parse(&bytes).unwrap_or_else(|e| panic!("{name}: {e}"));
+            let jacket = name == "Mattias Nilsson_6A0E523C.profile" || name == "_______ ________48EFABFB.profile";
+            assert_eq!(p.costume_index, if jacket { 3 } else { 0 }, "{name}");
+            assert_eq!(p.upgrade_index, 0, "{name}: upgrade tier");
+        }
     }
 
     /// `tTransitData` decodes out of the REAL saves, and the three progression points disagree in
