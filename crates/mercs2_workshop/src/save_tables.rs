@@ -479,7 +479,7 @@ fn save_summary(ui: &mut egui::Ui, ctx: &Ctx) {
     if let Some(p) = ctx.profile {
         let rows = vec![
             vec!["Hero".to_string(), crate::saves::hero_name(p.character_index).to_string()],
-            vec!["Upgrade tier".to_string(), p.upgrade_index.to_string()],
+            vec!["Costume".to_string(), p.costume_index.to_string()],
             vec!["Cash".to_string(), money(p.cash as f64)],
             vec!["Fuel".to_string(), format!("{} / {}", fmt_num(p.fuel as f64), fmt_num(p.fuel_capacity as f64))],
             vec!["Contract".to_string(), p.active_contract.clone()],
