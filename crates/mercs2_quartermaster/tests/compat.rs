@@ -695,6 +695,41 @@ fn quartermaster_range_satisfied_passes() {
 }
 
 // ---------------------------------------------------------------------------
+// M0263 — an outfit's levels
+// ---------------------------------------------------------------------------
+
+fn outfit_in(dir: &Path, levels: &str) -> LoadedShipment {
+    shipment_at(
+        dir,
+        &format!(
+            "shipment: {{ name: skins, version: 1.0.0, target: retail }}\ncontributions:\n  - kind: add_outfit\n    \
+             name: pmc_hum_obama\n    slug: Obama\n    display: Obama\n    wearer: mattias\n    levels: {levels}\n"
+        ),
+    )
+}
+
+/// An outfit offered in a level no Shipment of the set adds would reach no wardrobe.
+#[test]
+fn an_outfit_in_a_level_the_set_does_not_have_is_m0263() {
+    let d = scratch("outfit-level");
+    let p = plan_of(&[&outfit_in(&d.join("s"), "[vz, dlc01]")], None);
+    assert_eq!(codes(&p), vec!["M0263"]);
+    assert!(p.findings[0].message.contains("level \"dlc01\""), "{}", p.findings[0].message);
+    assert!(plan_of(&[&outfit_in(&d.join("v"), "[vz]")], None).ok, "the main campaign is always there");
+}
+
+#[test]
+fn an_outfit_in_a_level_another_shipment_adds_passes() {
+    let d = scratch("outfit-level-ok");
+    let level = shipment_at(
+        &d.join("l"),
+        "shipment: { name: lvl, version: 1.0.0, target: retail }\ncontributions:\n  - kind: add_level\n    name: dlc01\n    display: DLC\n",
+    );
+    let p = plan_of(&[&level, &outfit_in(&d.join("s"), "[dlc01]")], None);
+    assert!(!codes(&p).contains(&"M0263"), "{:?}", codes(&p));
+}
+
+// ---------------------------------------------------------------------------
 // Plugins — M0162, M0178
 // ---------------------------------------------------------------------------
 
