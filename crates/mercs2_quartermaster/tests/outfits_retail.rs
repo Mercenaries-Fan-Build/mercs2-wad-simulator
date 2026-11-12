@@ -1,4 +1,5 @@
-//! The outfit-list generator against the retail vz wardrobe and player scripts.
+//! The outfit-list generator and the tails qm splices for it, against the retail vz wardrobe and
+//! player scripts.
 //!
 //! Game-gated: built by the `retail` feature (`cargo xtask retail-test`), reads the retail vz.wad
 //! and the Blow It Up Again Shipment (`biua_shipment_dir`, the dlc01 level's PC-form scripts) named by
@@ -9,16 +10,29 @@ use std::path::Path;
 use mercs2_formats::hash::pandemic_hash_m2 as m2;
 use mercs2_formats::types::TYPE_HASH_SCRIPT;
 use mercs2_quartermaster::outfits::{
-    generate, luaq_of, read_vz, AddedOutfit, Identity, Listing, Restore, RetailLevel, PLAYER_SCRIPT, WARDROBE_SCRIPT,
+    generate, hero_chatter, luaq_of, read_vz, tails, AddedOutfit, Identity, Listing, Restore, RetailLevel, PLAYER_SCRIPT,
+    WARDROBE_SCRIPT,
 };
 
 fn start() -> &'static Path {
     Path::new(env!("CARGO_MANIFEST_DIR"))
 }
 
+fn vz_wad() -> std::path::PathBuf {
+    mercs2_formats::game_paths::local_config_vz_wad(start()).unwrap_or_else(|e| panic!("{e}"))
+}
+
 fn vz() -> RetailLevel {
-    let wad = mercs2_formats::game_paths::local_config_vz_wad(start()).unwrap_or_else(|e| panic!("{e}"));
-    read_vz(&wad).unwrap_or_else(|e| panic!("{e}"))
+    read_vz(&vz_wad()).unwrap_or_else(|e| panic!("{e}"))
+}
+
+/// A script's LuaQ chunk as the retail vz.wad ships it.
+fn vz_chunk(name: &str) -> Vec<u8> {
+    let mut stack = mercs2_quartermaster::GameStack::open(&[vz_wad()]).unwrap_or_else(|e| panic!("{e}"));
+    let c = stack
+        .container_for_asset(m2(name), TYPE_HASH_SCRIPT, mercs2_formats::types::TYPE_ID_SCRIPT)
+        .unwrap_or_else(|| panic!("vz.wad ships no {name} script"));
+    luaq_of(&c).unwrap_or_else(|e| panic!("{name}: {e}"))
 }
 
 /// The dlc01 level's lists, from the wardrobe and player scripts the BIUA Shipment's dlc01 rows ship
@@ -188,4 +202,161 @@ fn added_outfits_follow_the_retail_vz_rows() {
 
     let again = generate("vz", &vz(), &set).unwrap_or_else(|e| panic!("{e}"));
     assert_eq!(format!("{l:?}"), format!("{again:?}"), "the same set gives the same lists");
+}
+
+/// vz's `_SelectOutfit` gates every row by the unlock count; dlc01's also lists a `bAlwaysVisible`
+/// row (`dlc01_pmcinterior.lua:2055-2068`). Read by running each shipped chunk.
+#[test]
+fn only_dlc01_s_wardrobe_lists_always_visible_rows() {
+    assert!(!vz().lists_always_visible);
+    assert!(dlc01().lists_always_visible);
+}
+
+/// Each hero's templates (base and upgrades) carry one chatter set, named by `data/chatter_sets.tsv`.
+#[test]
+fn the_heroes_chatter_sets_read_from_the_vz_worldentity() {
+    let mut stack = mercs2_quartermaster::GameStack::open(&[vz_wad()]).unwrap_or_else(|e| panic!("{e}"));
+    let we = mercs2_quartermaster::fx::GameFx::read(&mut stack).unwrap_or_else(|e| panic!("{e}")).worldentity;
+    let sets = hero_chatter(&we, &vz()).unwrap_or_else(|e| panic!("{e}"));
+    let got: Vec<(&str, &str)> = sets.iter().map(|(h, s)| (h.as_str(), s.as_str())).collect();
+    assert_eq!(got, [("chris", "Chris_Phil01"), ("jennifer", "Jen_Jen01"), ("mattias", "Mattias_Peter01")]);
+}
+
+/// Records every call `_SelectOutfit` makes, for one scenario at a time: the hero, the unlock count
+/// (also what the engine's `Player.GetAvailableCostumes` answers a co-op client), whether the unlock
+/// code is held, the costume byte, the network role and the character.
+const SELECT_HARNESS: &str = r##"
+local FnName = {}
+local function show(v)
+  if type(v) == "table" then
+    local t = {}
+    for i = 1, #v do
+      t[#t + 1] = show(v[i])
+    end
+    return "{" .. table.concat(t, ",") .. "}"
+  elseif type(v) == "function" then
+    return FnName[v] or "function"
+  end
+  return tostring(v)
+end
+local function rec(name, ret)
+  return function(...)
+    local t = { name }
+    for i = 1, select("#", ...) do
+      t[#t + 1] = show((select(i, ...)))
+    end
+    tLog[#tLog + 1] = table.concat(t, " ")
+    return ret
+  end
+end
+Player = {
+  GetPrimaryCharacter = function() return 101 end,
+  GetSecondaryCharacter = function() return 102 end,
+  GetProfileCostume = function() return nCostume end,
+  GetAvailableCostumes = function() return nAvail end,
+  GetLocalPlayer = function() return 1 end,
+}
+Net = {
+  IsServer = function() return sNet == "server" end,
+  IsClient = function() return sNet == "client" end,
+  HasPlayerUnlockedCode = function() return bUnlocked end,
+  SendCustomEvent = rec("SendCustomEvent"),
+}
+MrxUtil = { GetCharacterIdentity = function() return sHero end }
+LTILibName = { ChangeShellState = rec("ChangeShellState") }
+MrxGui = { DisplayDialogBox = rec("DisplayDialogBox", "box") }
+MrxMultiPageMenu = { Reset = rec("Reset"), AddOption = rec("AddOption"), Display = rec("Display") }
+function Setup()
+  _SetCustomOutfitMarker = rec("_SetCustomOutfitMarker")
+  FnName[_SetCustomOutfitMarker] = "_SetCustomOutfitMarker"
+  FnName[_ChangeOutfit] = "_ChangeOutfit"
+  FnName[_CloseCostumeDialog] = "_CloseCostumeDialog"
+  FnName[Net.SendCustomEvent] = "Net.SendCustomEvent"
+end
+function Scenario(sH, nCount, bUnlock, nCost, sNetRole, uGuid)
+  tLog = {}
+  sHero, nAvail, bUnlocked, nCostume, sNet = sH, nCount, bUnlock, nCost, sNetRole
+  _nAvailableCostumes = nCount
+  _WardrobeOpen = false
+  _CostumeDialogBox = nil
+  _SelectOutfit(uGuid)
+  tLog[#tLog + 1] = "open=" .. tostring(_WardrobeOpen) .. " box=" .. tostring(_CostumeDialogBox)
+  return table.concat(tLog, "\n")
+end
+"##;
+
+fn select_vm(chunk: &[u8]) -> mercs2_luac::rt::Lua {
+    let lua = mercs2_luac::rt::Lua::new().unwrap();
+    lua.load(SELECT_HARNESS).set_name("=harness").exec().unwrap();
+    lua.load("function import() end").exec().unwrap();
+    let f = lua.load(chunk).set_name("=wifpmcinterior").into_function().unwrap();
+    f.call::<()>(()).unwrap_or_else(|e| panic!("running wifpmcinterior: {e}"));
+    lua.load("Setup()").exec().unwrap();
+    lua
+}
+
+/// qm's vz `_SelectOutfit` is retail's for a hero with no added row: over every unlock count, unlock
+/// code, costume byte, network role and character, it makes the same calls in the same order as the
+/// shipped function. For Mattias, who has one, it offers what retail offers plus the added row, and
+/// opens the menu where retail shows the tutorial dialog.
+#[test]
+fn qm_s_select_outfit_is_retail_s_for_a_hero_without_an_added_row() {
+    let wardrobe = vz_chunk(WARDROBE_SCRIPT);
+    let r = vz();
+    let coat = AddedOutfit {
+        shipment: "skins".into(),
+        slug: "Coat".into(),
+        model: "coat".into(),
+        display: "[Coat]".into(),
+        wearers: vec!["mattias".into()],
+        levels: None,
+        chatter: None,
+    };
+    let t = tails(&generate("vz", &r, &[coat]).unwrap(), &r, None).unwrap().expect("a row was added");
+    assert!(t.wardrobe.wraps.iter().any(|(f, _)| f == "_SelectOutfit"), "vz's _SelectOutfit is replaced");
+    let appended = mercs2_luac::compile(&t.wardrobe.source, WARDROBE_SCRIPT).unwrap();
+    let spliced = mercs2_luac::splice::append_chunk(&wardrobe, &appended, WARDROBE_SCRIPT).unwrap();
+    let retail = select_vm(&wardrobe);
+    let qm = select_vm(&spliced);
+    let scenario = |lua: &mercs2_luac::rt::Lua, args: &str| -> String {
+        lua.load(&format!("return Scenario({args})")).eval::<String>().unwrap_or_else(|e| panic!("Scenario({args}): {e}"))
+    };
+    let (mut runs, mut dialogs, mut menus, mut unlock_rows) = (0, 0, 0, 0);
+    for hero in ["chris", "jennifer", "mattias"] {
+        for count in ["nil", "0", "1", "2", "3", "4", "5", "6", "9"] {
+            for unlock in ["false", "true"] {
+                for costume in ["nil", "0", "1", "2", "3", "4", "5", "6"] {
+                    for net in ["single", "server", "client"] {
+                        for guid in ["101", "102"] {
+                            let args = format!("{hero:?}, {count}, {unlock}, {costume}, {net:?}, {guid}");
+                            let (a, b) = (scenario(&retail, &args), scenario(&qm, &args));
+                            runs += 1;
+                            dialogs += usize::from(a.contains("DisplayDialogBox"));
+                            menus += usize::from(a.contains("Display [Generic.ChooseOutfit]:"));
+                            unlock_rows += usize::from(a.contains("_ChangeOutfit {101,2}"));
+                            if hero != "mattias" {
+                                assert_eq!(a, b, "Scenario({args})");
+                                continue;
+                            }
+                            // Mattias: the Coat is row 6, offered unless worn.
+                            let worn = costume == "5";
+                            let offers_coat = b.lines().any(|l| l == "AddOption [Coat] _ChangeOutfit {101,6}" || l == "AddOption [Coat] _ChangeOutfit {102,6}");
+                            let in_menu = b.lines().any(|l| l == "Display [Generic.ChooseOutfit]:");
+                            assert_eq!(offers_coat, in_menu && !worn, "Scenario({args}):\n{b}");
+                            let without_coat: Vec<&str> = b.lines().filter(|l| !l.starts_with("AddOption [Coat]")).collect();
+                            if a.contains("DisplayDialogBox") {
+                                assert!(!b.contains("DisplayDialogBox") && in_menu, "the dialog becomes the menu: Scenario({args}):\n{b}");
+                            } else {
+                                assert_eq!(a.lines().collect::<Vec<_>>(), without_coat, "Scenario({args})");
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    assert_eq!(runs, 3 * 9 * 2 * 8 * 3 * 2);
+    // The grid reaches every branch of retail's function: the tutorial dialog, the menu, and the
+    // unlock-code row.
+    assert!(dialogs > 0 && menus > 0 && unlock_rows > 0, "dialogs {dialogs}, menus {menus}, unlock rows {unlock_rows}");
 }
