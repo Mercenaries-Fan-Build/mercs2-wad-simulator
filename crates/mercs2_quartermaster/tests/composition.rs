@@ -57,18 +57,15 @@ fn two_outfit_mods_for_the_same_hero_coexist() {
     assert!(found.is_empty(), "outfit mods must compose, got: {found:?}");
 }
 
-/// ...but the same slug on the same hero is a genuine duplicate key.
+/// ...and so do two outfits of one slug for one hero from two Shipments: the wardrobe lists both, and
+/// a save tells them apart by Shipment (`outfits::Identity::Added`).
 #[test]
-fn the_same_outfit_slug_on_one_hero_collides() {
+fn the_same_outfit_slug_on_one_hero_from_two_shipments_composes() {
     let a = outfit("mod-a", "sean_a", "mattias", "Commando");
     let b = outfit("mod-b", "sean_b", "mattias", "Commando");
 
     let found = blast::conflicts(&[("mod-a", &a), ("mod-b", &b)]);
-    assert_eq!(found.len(), 1, "got {found:?}");
-    assert_eq!(found[0].class, MergeClass::KeyedSet);
-    assert!(
-        matches!(&found[0].claim, Claim::OutfitSlot { wearer, slug } if wearer == "mattias" && slug == "Commando")
-    );
+    assert!(found.is_empty(), "a shared slug composes, got: {found:?}");
 }
 
 /// The key is (wearer, slug), NOT slug alone — retail itself reuses `Original` and `ChickenSuit`
