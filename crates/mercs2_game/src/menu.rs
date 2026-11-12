@@ -30,8 +30,10 @@ pub struct SaveSlot {
     pub timestamp: u32,
     /// Hero index @0x4D (1 mattias / 2 chris / 3 jen) — see `crate::hero`.
     pub character_index: u8,
-    /// Hero upgrade tier @0x4F (0..3) — drives the look via the upgrade template.
+    /// Hero upgrade tier @0x4E — picks the spawn template.
     pub upgrade_index: u8,
+    /// Costume @0x4F — the worn outfit, `_tCharacterMap.models[costume]` (0 = none).
+    pub costume_index: u8,
 }
 
 /// Enumerate every readable `.profile` in `dir`, newest (header timestamp) first — the retail
@@ -60,6 +62,7 @@ pub fn scan_slots(dir: Option<PathBuf>) -> Vec<SaveSlot> {
                 timestamp: p.timestamp,
                 character_index: p.character_index,
                 upgrade_index: p.upgrade_index,
+                costume_index: p.costume_index,
                 path,
             }),
             Err(err) => eprintln!("[shell] skipping corrupt save {}: {err}", path.display()),
@@ -268,7 +271,7 @@ impl Menu {
                                 top.name,
                                 top.contract,
                                 crate::hero::hero(top.character_index).display,
-                                crate::hero::look_label(top.character_index, top.upgrade_index, 0)
+                                crate::hero::look_label(top.character_index, top.upgrade_index, top.costume_index)
                             );
                             center(scene, y + 2.6 * cell, 1.0 * s, GREY, &sub);
                         }
@@ -297,7 +300,7 @@ impl Menu {
                     let who = format!(
                         "{}/{}",
                         crate::hero::hero(slot.character_index).base,
-                        crate::hero::look_label(slot.character_index, slot.upgrade_index, 0)
+                        crate::hero::look_label(slot.character_index, slot.upgrade_index, slot.costume_index)
                     );
                     let line = format!(
                         "{:<16} {:<16} {:<12} {:>4}:{:02}  ${:<11} {}",
@@ -401,6 +404,7 @@ mod tests {
             timestamp: ts,
             character_index: 1,
             upgrade_index: 0,
+            costume_index: 0,
         };
         let mut m = Menu::new(vec![slot("a", 10), slot("b", 20)]);
         // slots arrive pre-sorted by scan_slots; Menu preserves order. Continue = slots[0].
