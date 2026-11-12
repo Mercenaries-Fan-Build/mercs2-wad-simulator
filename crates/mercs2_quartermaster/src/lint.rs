@@ -110,6 +110,21 @@ pub const M0140_UNKNOWN_WEARER: Rule = Rule {
     title: "outfit targets a hero the wardrobe has no list for",
     doc: "docs/modding/field_guide.md#trap-15--wardrobe--skins-it-is-pure-lua-and-only-named-models-work",
 };
+pub const M0141_WEARER_LIST: Rule = Rule {
+    code: "M0141",
+    title: "an outfit's wearer list is empty or names a hero twice",
+    doc: "docs/modding/manifest_format.md#m0141",
+};
+pub const M0142_UNKNOWN_CHATTER_SET: Rule = Rule {
+    code: "M0142",
+    title: "an outfit's chatter set is not one qm knows the game holds",
+    doc: "docs/modding/manifest_format.md#m0142",
+};
+pub const M0143_LEVEL_LIST: Rule = Rule {
+    code: "M0143",
+    title: "an outfit's levels list is empty or names a level twice",
+    doc: "docs/modding/manifest_format.md#m0143",
+};
 pub const M0150_RAW_NO_TOUCHES: Rule = Rule {
     code: "M0150",
     title: "a raw contribution declares no blast radius",
@@ -846,6 +861,9 @@ pub const RULES: &[Rule] = &[
     M0120_SELF_CONFLICT,
     M0130_BARE_HASH,
     M0140_UNKNOWN_WEARER,
+    M0141_WEARER_LIST,
+    M0142_UNKNOWN_CHATTER_SET,
+    M0143_LEVEL_LIST,
     M0150_RAW_NO_TOUCHES,
     M0160_ASI_ON_REIMPL,
     M0161_HOOK_DOES_NOTHING,
@@ -2591,23 +2609,88 @@ pub fn lint(
 
     for (index, c) in manifest.contributions.iter().enumerate() {
         match c {
-            Contribution::AddOutfit { wearer, .. } => {
+            Contribution::AddOutfit { wearer, chatter, levels, .. } => {
                 // Valid = resolves to a real `_tOutfits` key (either `jen` or `jennifer` does);
                 // the suggestion, when it does not, is the preferred spelling.
-                if crate::manifest::wearer_table_key(wearer).is_none() {
-                    let suggestion = closest(wearer, &WARDROBE_HEROES);
+                let heroes = wearer.heroes();
+                let mut keys: Vec<&str> = Vec::new();
+                for hero in &heroes {
+                    match crate::manifest::wearer_table_key(hero) {
+                        Some(k) if keys.contains(&k) => out.push(Diagnostic {
+                            rule: M0141_WEARER_LIST,
+                            severity: Severity::Error,
+                            message: format!("wearer {wearer} names {k} twice (`jen` and `jennifer` are one hero)"),
+                            at: Some(index),
+                            fix: None,
+                        }),
+                        Some(k) => keys.push(k),
+                        None => out.push(Diagnostic {
+                            rule: M0140_UNKNOWN_WEARER,
+                            severity: Severity::Error,
+                            message: format!(
+                                "wearer {hero:?} is not a wardrobe hero; `_tOutfits` has lists only \
+                                 for {}. The outfit would be offered to no hero, so it would never \
+                                 appear in the wardrobe and the game would report nothing.",
+                                WARDROBE_HEROES.join(", ")
+                            ),
+                            at: Some(index),
+                            fix: closest(hero, &WARDROBE_HEROES).map(|s| s.to_string()),
+                        }),
+                    }
+                }
+                if heroes.is_empty() {
                     out.push(Diagnostic {
-                        rule: M0140_UNKNOWN_WEARER,
+                        rule: M0141_WEARER_LIST,
                         severity: Severity::Error,
-                        message: format!(
-                            "wearer {wearer:?} is not a wardrobe hero; `_tOutfits` has lists only \
-                             for {}. The outfit would be appended to a table nothing reads, so it \
-                             would never appear in the wardrobe and the game would report nothing.",
-                            WARDROBE_HEROES.join(", ")
-                        ),
+                        message: "wearer is an empty list, so no hero is offered the outfit".into(),
                         at: Some(index),
-                        fix: suggestion.map(|s| s.to_string()),
+                        fix: None,
                     });
+                }
+                if let Some(set) = chatter {
+                    let known = crate::outfits::chatter_sets().unwrap_or_else(|e| panic!("qm's data/chatter_sets.tsv: {e}"));
+                    let h = mercs2_formats::hash::pandemic_hash_m2(set);
+                    if !known.iter().any(|k| mercs2_formats::hash::pandemic_hash_m2(k) == h) {
+                        out.push(Diagnostic {
+                            rule: M0142_UNKNOWN_CHATTER_SET,
+                            severity: Severity::Error,
+                            message: format!(
+                                "chatter {set:?} is not a chatter set qm knows the game holds ({}). \
+                                 Human.SetChatterSet takes any name and an unknown one does nothing, \
+                                 with no message. A set the game holds goes into qm's \
+                                 data/chatter_sets.tsv with its evidence.",
+                                known.join(", ")
+                            ),
+                            at: Some(index),
+                            fix: closest(set, &known.iter().map(String::as_str).collect::<Vec<_>>()).map(|s| s.to_string()),
+                        });
+                    }
+                }
+                if let Some(levels) = levels {
+                    let mut seen: Vec<&String> = Vec::new();
+                    for l in levels {
+                        if seen.contains(&l) {
+                            out.push(Diagnostic {
+                                rule: M0143_LEVEL_LIST,
+                                severity: Severity::Error,
+                                message: format!("levels names {l:?} twice"),
+                                at: Some(index),
+                                fix: None,
+                            });
+                        }
+                        seen.push(l);
+                    }
+                    if levels.is_empty() {
+                        out.push(Diagnostic {
+                            rule: M0143_LEVEL_LIST,
+                            severity: Severity::Error,
+                            message: "levels is an empty list, so no wardrobe offers the outfit; omit it \
+                                      for the main campaign"
+                                .into(),
+                            at: Some(index),
+                            fix: None,
+                        });
+                    }
                 }
             }
             // `add_ui` ships the same movie an `add_movie` does. A movie path that is already an
