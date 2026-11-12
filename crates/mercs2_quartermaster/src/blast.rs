@@ -339,23 +339,27 @@ pub struct ClaimRecord {
     pub name: Option<String>,
 }
 
-/// The scripts a sound loader lives in, for the `sessions` a bank loads in: gameplay's trampoline
-/// hosts `wifpmcinterior` (the loads) and `mrxsoundbootstrap` (the unloads after `ExitGame`) in
-/// `vz.wad`; the front end's loader `qm_shell_modloader` and its trampoline host `mrxsound` in
-/// `shell.wad`. A sound kind claims them `Additive`: N loaders fold into one, and a `replace_lua` of
-/// a host is a conflict.
+/// The scripts qm's loader lives in, for the `sessions` it runs in: the loader qm mints
+/// (`qm_modloader` in `vz.wad`, `qm_shell_modloader` in `shell.wad`) and the host of each hook it
+/// loads at or runs on ([`crate::loader::core_hooks`]: the `vz` master and `mrxsoundbootstrap` in
+/// gameplay, `shellbootstrap` and `mrxsound` in the front end). A kind whose registration the loader
+/// carries claims them `Additive`: N registrations fold into one loader, and a `replace_lua` of a
+/// host is a conflict.
 pub fn loader_scripts(sessions: &std::collections::BTreeSet<crate::manifest::LoadSession>) -> Vec<Claim> {
     use crate::link::Level;
     use crate::manifest::LoadSession;
     let mut out = Vec::new();
-    if sessions.contains(&LoadSession::Gameplay) {
-        for name in ["wifpmcinterior", "mrxsoundbootstrap"] {
-            out.push(Claim::Script { name: name.into(), level: Level::Vz });
+    for (session, loader) in [(LoadSession::Gameplay, crate::link::QM_MODLOADER_NAME), (LoadSession::FrontEnd, crate::link::QM_SHELL_MODLOADER_NAME)] {
+        if !sessions.contains(&session) {
+            continue;
         }
-    }
-    if sessions.contains(&LoadSession::FrontEnd) {
-        for name in [crate::link::QM_SHELL_MODLOADER_NAME, "mrxsound"] {
-            out.push(Claim::Script { name: name.into(), level: Level::Shell });
+        let level = Level::of(session);
+        out.push(Claim::Script { name: loader.into(), level });
+        for id in crate::loader::core_hooks(session) {
+            let host = &crate::hooks::hook(id).unwrap_or_else(|| panic!("data/hooks.tsv has no {id}")).host;
+            if !out.contains(&Claim::Script { name: host.clone(), level }) {
+                out.push(Claim::Script { name: host.clone(), level });
+            }
         }
     }
     out
@@ -474,20 +478,14 @@ pub fn claims(manifest: &Manifest) -> Vec<ClaimRecord> {
                 push(Access::Write, Claim::asset(name), Intent::Additive);
             }
             // add_ui is a movie (Additive write on its new hash, same first-writer-wins rule as
-            // AddMovie) PLUS a Script-layer touch: it appends the one-line mod-loader trampoline to
-            // `wifpmcinterior`. That claim is Additive, so two UI mods merge (both trampolines fold
-            // to one; both registrations bake into `qm_modloader`) rather than conflicting — the same
-            // shape as an outfit's wardrobe-row append.
+            // AddMovie) PLUS a Script-layer touch: its registration bakes into `qm_modloader`, which
+            // qm's hooks load and run ([`loader_scripts`]). Those claims are Additive, so two UI mods
+            // merge (both registrations bake into one loader) rather than conflicting.
             Contribution::AddUi { name, .. } => {
                 push(Access::Write, Claim::asset(name), Intent::Additive);
-                push(
-                    Access::Write,
-                    bare(Claim::Script {
-                        name: "wifpmcinterior".into(),
-                        level: crate::link::Level::Vz,
-                    }),
-                    Intent::Additive,
-                );
+                for script in loader_scripts(&[crate::manifest::LoadSession::Gameplay].into()) {
+                    push(Access::Write, bare(script), Intent::Additive);
+                }
             }
             Contribution::AddModel { name, donor, .. } => {
                 // The model's own hash. With `collision: follow_geometry` the regenerated PHY2 ships
@@ -724,18 +722,13 @@ pub fn claims(manifest: &Manifest) -> Vec<ClaimRecord> {
                     push(Access::Write, Claim::asset(layer), Intent::Additive);
                 }
             }
-            // No Data half — its whole effect is a registration baked into `qm_modloader`, reached by
-            // the same one-line trampoline `add_ui` appends to `wifpmcinterior`. Additive, so N layer
-            // mods (and UI mods) fold to one trampoline and one loader rather than conflicting.
+            // No Data half — its whole effect is a registration baked into `qm_modloader`, which qm's
+            // hooks load and run, as `add_ui`'s is. Additive, so N layer mods (and UI mods) fold to
+            // one loader rather than conflicting.
             Contribution::ActivateLayer { .. } => {
-                push(
-                    Access::Write,
-                    bare(Claim::Script {
-                        name: "wifpmcinterior".into(),
-                        level: crate::link::Level::Vz,
-                    }),
-                    Intent::Additive,
-                );
+                for script in loader_scripts(&[crate::manifest::LoadSession::Gameplay].into()) {
+                    push(Access::Write, bare(script), Intent::Additive);
+                }
             }
             // Key edits, key additions and text replacements on a shipped string table. `qm link`
             // merges every installed Shipment's writes to one table into ONE link-owned copy, in
@@ -757,6 +750,21 @@ pub fn claims(manifest: &Manifest) -> Vec<ClaimRecord> {
             // one level collide, the same shape as a language.
             Contribution::AddLevel { name, .. } => {
                 push(Access::Write, Claim::asset(name), Intent::Additive);
+            }
+            // Of the main campaign: an asset added to the overlay, or each template appended to the
+            // worldentity, by name (its key is in the container, which a hermetic lint does not read;
+            // the merge refuses a key taken twice).
+            Contribution::LevelAsset { level, name, templates, .. } if level == crate::level::VZ => {
+                if templates.is_empty() {
+                    push(Access::Write, Claim::asset(name), Intent::Additive);
+                }
+                for t in templates {
+                    push(
+                        Access::Write,
+                        (Claim::Template { name_hash: mercs2_formats::hash::pandemic_hash_m2(t) }, Some(t.clone())),
+                        Intent::Additive,
+                    );
+                }
             }
             // Inside its own level's patch: it can only meet another Shipment that adds that level,
             // which the `add_level` claim above already refuses.
