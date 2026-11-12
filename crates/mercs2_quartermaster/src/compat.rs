@@ -225,7 +225,7 @@ fn error(
     refs: Vec<FindingRef>,
 ) -> Finding {
     Finding {
-        code,
+        code: code.to_string(),
         severity: FindingSeverity::Error,
         message,
         items,
@@ -743,6 +743,8 @@ pub fn plan(
         } else {
             Vec::new()
         },
+        // Only `qm link` knows what it splices; it fills this from the list it loads.
+        libraries: None,
         findings,
     })
 }
