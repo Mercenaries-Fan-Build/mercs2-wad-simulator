@@ -235,6 +235,14 @@ impl WadStack {
         self.schemas.as_ref().expect("set above").inflate(&container)
     }
 
+    /// The vz wardrobe and character map, read from the game's `vz.wad` beside the base WAD alone: a
+    /// save's costume restores through vz's own scripts, whatever else the stack mounts.
+    pub fn vz_outfits(&self) -> Result<mercs2_quartermaster::outfits::RetailLevel, String> {
+        let base = self.labels.first().ok_or("no base WAD is open")?;
+        let vz = mercs2_quartermaster::sound::sibling_wad(std::path::Path::new(base), "vz.wad")?;
+        mercs2_quartermaster::outfits::read_vz(&vz)
+    }
+
     /// A string table by asset name (`english`, `french`, …) as `key_hash -> text`, resolved through
     /// the residency registry like every other asset (overlays first). Keys are hashed by their bare
     /// name — look one up with `mercs2_formats::stringdb::key_hash`.
@@ -7281,6 +7289,10 @@ pub fn run(opts: Options) {
                     // Template names for the save's carried weapons (worldentity `Name` records).
                     if saves.profiles.is_some() && saves.templates.is_none() {
                         saves.templates = Some(w.template_names());
+                    }
+                    // The vz wardrobe and character map: what each save's costume byte restores as.
+                    if saves.profiles.is_some() && saves.outfits.is_none() {
+                        saves.outfits = Some(w.vz_outfits());
                     }
                     // The mission, reward and flow scripts the contract menu runs.
                     if saves.profiles.is_some() && saves.rules.is_none() {
