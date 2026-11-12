@@ -22,9 +22,10 @@
 //!
 //! `add_outfit` is the composed case, and the reason [`Lowering`] has more than one outcome: a Data
 //! half (the model, injected into a hero-rigged donor) that lowers immediately, and a Script half
-//! that cannot, because Lua links across the installed set rather than per Shipment. Linking a
-//! Shipment's own mutations here keeps its overlay valid **standalone**; the cross-Shipment relink
-//! is deploy's job, and skipping it is what lets one script mod overwrite another's Lua.
+//! that cannot, because the link generates the wardrobe lists from the installed set's outfits at
+//! once ([`crate::outfits`]). Linking a Shipment's own outfits and mutations here keeps its overlay
+//! valid **standalone**; the cross-Shipment relink is deploy's job, and skipping it is what lets one
+//! script mod overwrite another's Lua.
 //!
 //! `add_movie` needs NO game stack: a Scaleform movie is self-contained, so unlike a texture
 //! replacement (whose dimensions come from the target) or a model (whose rig comes from a donor)
@@ -949,19 +950,9 @@ pub fn script_mutations(
     let mut out = Vec::new();
     for (index, c) in manifest.contributions.iter().enumerate() {
         match c {
-            Contribution::AddOutfit {
-                name,
-                slug,
-                display,
-                wearer,
-                ..
-            } => {
-                out.push(ScriptMutation {
-                    shipment: shipment.clone(),
-                    target: "wifpmcinterior".into(),
-                    append: link::outfit_row_append(wearer, slug, name, display),
-                });
-            }
+            // add_outfit's Script half is no append: the link generates each level's wardrobe lists
+            // and character map from every added outfit at once ([`added_outfits`], `crate::outfits`).
+            Contribution::AddOutfit { .. } => {}
             // add_ui's Script half is NOT a plain append. Its FlashWidget registration is baked into
             // the generated `qm_modloader` script and reached through a one-line trampoline the
             // linker synthesizes — so the resident never grows with mod count. Collected separately
@@ -1298,6 +1289,28 @@ pub fn script_replacements(
         }
     }
     Ok(out)
+}
+
+/// Every `add_outfit` of a Shipment, in manifest order, as the outfit generator takes it
+/// ([`crate::outfits::AddedOutfit`]): `name` is the model the wardrobe row puts on, `slug` its `Name`.
+/// Hermetic, like [`script_mutations`].
+pub fn added_outfits(manifest: &crate::manifest::Manifest) -> Vec<crate::outfits::AddedOutfit> {
+    manifest
+        .contributions
+        .iter()
+        .filter_map(|c| match c {
+            Contribution::AddOutfit { name, slug, display, wearer, .. } => Some(crate::outfits::AddedOutfit {
+                shipment: manifest.shipment.name.clone(),
+                slug: slug.clone(),
+                model: name.clone(),
+                display: display.clone(),
+                wearers: vec![wearer.clone()],
+                levels: None,
+                chatter: None,
+            }),
+            _ => None,
+        })
+        .collect()
 }
 
 /// Every `add_script`, ready for the linker to compile + mint as a fresh scripts_vz entry.
@@ -3118,12 +3131,11 @@ fn lower(
             Ok(Lowering::Blocks(out))
         }
 
-        // `add_outfit` is a FIXED composition of add_model + a patch_lua on `_tOutfits`. The Data
-        // half lowers here; the Script half is declared and linked later, because Lua is linked
-        // across the installed set rather than per Shipment.
-        // `slug`/`display` are the SCRIPT half's fields and are consumed by `script_mutations`;
-        // only the Data half is lowered here.
-        // `display` is the SCRIPT half's field and is consumed by `script_mutations`; only the Data
+        // `add_outfit` is a FIXED composition of add_model + a wardrobe row. The Data half lowers
+        // here; the Script half is linked later, because the link generates each level's wardrobe
+        // lists and character map from the installed set's outfits at once (`added_outfits`,
+        // `crate::outfits`).
+        // `display` is the SCRIPT half's field and is consumed by `added_outfits`; only the Data
         // half is lowered here. `slug` is kept for the log line, which is how an author confirms the
         // wardrobe row they expected is the one that was generated.
         Contribution::AddOutfit {
@@ -3138,7 +3150,7 @@ fn lower(
             ..
         } => {
             // No model FILE → wear a model the game already ships (named by `name`): nothing to
-            // inject here; the `_tOutfits` row is emitted by `script_mutations`. The injection-only
+            // inject here; the link generates the `_tOutfits` row (`added_outfits`). The injection-only
             // fields (donor / textures / retarget / single_group) do not apply.
             let Some(model) = model.as_ref() else {
                 return Ok(Lowering::Nothing);
@@ -4688,6 +4700,7 @@ pub fn build(
     let support_regs = support_registrations(manifest, &shipment.root)?;
     let additions = script_additions(manifest, &shipment.root)?;
     let replacements = script_replacements(manifest, &shipment.root)?;
+    let outfits = added_outfits(manifest);
 
     // ── Link the Script layer ──────────────────────────────────────────────────────────────────
     //
@@ -4703,7 +4716,8 @@ pub fn build(
     // `ui_regs` / `layer_regs` / `additions` count too: an add_ui / activate_layer / add_script with
     // no other script edit still needs the linker to run (respectively: mints `qm_modloader` and
     // splices the hooks that load it, the same, mints a fresh scripts_vz entry). So a non-empty of any
-    // of them must trigger the link even when `mutations` is empty. A bank or a library the front end
+    // of them must trigger the link even when `mutations` is empty. So must an add_outfit, whose
+    // wardrobe rows and character map the link generates. A bank or a library the front end
     // loads links into `shell.wad`'s scripts block (below).
     //
     // `add_fx_sprite`, `add_fx`, `replace_fx` and a `replace_texture` of the `vfx` atlas share the
@@ -4715,7 +4729,8 @@ pub fn build(
         || !support_regs.is_empty()
         || gameplay_sounds
         || !additions.is_empty()
-        || !replacements.is_empty();
+        || !replacements.is_empty()
+        || !outfits.is_empty();
     let fx_kind = manifest.contributions.iter().enumerate().find(|(_, c)| {
         matches!(c, Contribution::AddFx { .. } | Contribution::ReplaceFx { .. } | Contribution::AddFxSprite { .. })
             || crate::fx::repaints_atlas(c)
@@ -4766,6 +4781,8 @@ pub fn build(
                 &std::collections::BTreeSet::new(),
                 link::QmHooks::ForLibraries,
                 None,
+                crate::outfits::DEFAULT_LEVEL,
+                &outfits,
             )
             .map_err(|e| BuildError::Lower {
                 index: 0,
@@ -5582,6 +5599,7 @@ struct LinkSet<'a> {
     sound_regs: &'a [link::SoundBankRegistration],
     additions: &'a [link::ScriptAddition],
     replacements: &'a [link::ScriptReplacement],
+    outfits: &'a [crate::outfits::AddedOutfit],
     order: &'a [String],
     /// Whether a Shipment has a kind the fx merge applies in a custom level
     /// ([`crate::fx::merges_level_fx`]).
@@ -5671,6 +5689,8 @@ fn link_level(
             &spliced,
             link::QmHooks::Always,
             Some(&mut master),
+            level.name,
+            set.outfits,
         )
         .map_err(|e| fail(format!("level {}: {e}", level.name)))?;
         touched.extend(out.scripts.iter().map(|l| l.block));
@@ -6026,6 +6046,7 @@ pub fn link_installed(
     let mut support_regs: Vec<link::SupportRegistration> = Vec::new();
     let mut additions: Vec<link::ScriptAddition> = Vec::new();
     let mut replacements: Vec<link::ScriptReplacement> = Vec::new();
+    let mut outfits: Vec<crate::outfits::AddedOutfit> = Vec::new();
     let mut sound_regs: Vec<link::SoundBankRegistration> = Vec::new();
     // What each Shipment's own build ships for sound, by level: the loaders' self-check below reads
     // it. Lowered through the one function `qm build` ships with (`sound::lower_shipment_sound`).
@@ -6049,6 +6070,7 @@ pub fn link_installed(
         support_regs.extend(support_registrations(&s.manifest, &s.root)?);
         additions.extend(script_additions(&s.manifest, &s.root)?);
         replacements.extend(script_replacements(&s.manifest, &s.root)?);
+        outfits.extend(added_outfits(&s.manifest));
     }
     // The script link runs on every deploy, here and in each custom level: qm's hook dispatcher and
     // world loader entry are spliced onto the master whatever the set holds (W-a), so every installed
@@ -6093,7 +6115,7 @@ pub fn link_installed(
                     block: &mut lb.block,
                 })
                 .collect();
-            let linked_out = link::link_into_blocks(
+            let linked_out = link::link_into_level_blocks(
                 &mut targets,
                 corpus_root,
                 &mutations,
@@ -6104,6 +6126,11 @@ pub fn link_installed(
                 &additions,
                 &replacements,
                 &order,
+                &std::collections::BTreeSet::new(),
+                link::QmHooks::Always,
+                None,
+                crate::outfits::DEFAULT_LEVEL,
+                &outfits,
             )
             .map_err(|e| BuildError::Lower {
                 index: 0,
@@ -6246,6 +6273,7 @@ pub fn link_installed(
         sound_regs: &sound_regs,
         additions: &additions,
         replacements: &replacements,
+        outfits: &outfits,
         order: &order,
         level_fx: shipments.iter().any(|s| crate::fx::merges_level_fx(&s.manifest)),
     };
@@ -6551,10 +6579,10 @@ mod existing_model_outfit {
     use crate::manifest::Contribution;
 
     /// An `add_outfit` with no `model` file is the "wear an existing in-game model" form: it parses
-    /// with `model: None`, injects nothing, yet still emits the `_tOutfits` wardrobe row — the
-    /// residency-safe Script mutation the linker reconciles.
+    /// with `model: None`, injects nothing, yet is still an outfit the link adds to the wardrobe,
+    /// wearing the existing model, and no script append.
     #[test]
-    fn add_outfit_without_a_model_file_still_appends_the_wardrobe_row() {
+    fn add_outfit_without_a_model_file_is_still_a_wardrobe_outfit() {
         let yaml = r#"
 format: 2
 shipment:
@@ -6577,12 +6605,20 @@ contributions:
             other => panic!("wrong kind: {}", other.kind()),
         }
 
-        // The Script half is unchanged: a wardrobe row on wifpmcinterior for the existing model.
-        let muts = super::script_mutations(&m, std::path::Path::new(".")).unwrap();
-        assert_eq!(muts.len(), 1);
-        assert_eq!(muts[0].target, "wifpmcinterior");
-        assert!(muts[0].append.contains("_tOutfits.chris"));
-        assert!(muts[0].append.contains("vz_hum_solano"));
+        // The Script half: an outfit for the link's wardrobe lists, on the existing model.
+        assert!(super::script_mutations(&m, std::path::Path::new(".")).unwrap().is_empty());
+        assert_eq!(
+            super::added_outfits(&m),
+            vec![crate::outfits::AddedOutfit {
+                shipment: "wear-solano".into(),
+                slug: "Solano".into(),
+                model: "vz_hum_solano".into(),
+                display: "Solano".into(),
+                wearers: vec!["chris".into()],
+                levels: None,
+                chatter: None,
+            }]
+        );
     }
 }
 
