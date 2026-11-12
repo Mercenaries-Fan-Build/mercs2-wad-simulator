@@ -34,7 +34,7 @@ through `mercs2_engine::…`, which owns and re-exports them.
 
 ## Where it comes from
 
-* **Save format** — `mercs2_formats::save`: profile header (hero byte `@0x4D`, upgrade tier `@0x4F`,
+* **Save format** — `mercs2_formats::save`: profile header (hero byte `@0x4D`, upgrade tier `@0x4E`, costume `@0x4F`,
   timestamp `@0x24`, cash, fuel, playtime) + the zlib Lua `SaveSingleton` payload.
 * **Hero identity** (`hero.rs`) — the retail spawn path `mrxplayer.lua:155-179`
   (`GetTemplateAndModelName`): spawn template = `_tCharacterMap.templates[iUpgrade]`, wardrobe
@@ -104,11 +104,10 @@ Internal (binary crate — no public API surface):
   to the layer list would double-load the furniture — hence `INTERIOR_OVERLAYS` is empty.
 * **One World.** The ECS `World` is owned by the engine (`app::run`) and lent to the game via `Ctx`.
   The game must not keep its own — models spawned into a second World never render.
-* **Hero look follows the upgrade tier**, not a costume: tier 0 = the base model; Mattias tier 3 =
-  `pmc_hum_mattias_v3` ("MetalHead"). Tier 1/2 and the Chris/Jen tier models are not yet extracted
-  from their templates and fall back to the base model. Every observed save stores costume `0`
-  (wardrobe unused), so the costume byte's FILE offset is not located — the engine object offset
-  (`+0x63`) is proven, the file byte is not.
+* **Hero look follows the costume** (header `@0x4F`, `_tCharacterMap.models[costume]`), over the
+  hero's base model; the end-game Mattias save wears costume 3, the Jacket. The upgrade tier
+  (`@0x4E`, 0 in every vendored save) picks the spawn template, whose own models are not yet
+  extracted.
 * The interior boot still runs `mercs2_engine::script_host::run_interior_boot` (the authentic
   `MrxUtil.SpawnActor` path) through the engine's public API; only the geometry realization
   (`pmc::load_pmc_interior`) lives in this crate.
