@@ -1,0 +1,24 @@
+# The live gate for the engine's script loader in a DEPS cycle (plan ws5 Q8, M0314). qm refuses this set
+# (M0314: qm_cyc_b's body reads qm_cyc_a before qm_cyc_a's body runs), so it is built with `mercs2_probe --bin
+# qm_cycle_gate`, never qm. Every line it adds to the game's log starts "[qmcyc]".
+#
+# The library qm_cyc_root loads at the world entry; its DEPS hold qm_cyc_a, whose DEPS hold qm_cyc_b,
+# whose DEPS hold qm_cyc_a. Each module prints when its body starts and ends and when its Init runs,
+# with what it then sees of the module it imports: the env table, and whether that module's body has
+# run (`ran`).
+format: 2
+shipment:
+  name: qm-cycle-gate
+  version: 0.1.0
+  target: retail
+contributions:
+  - kind: add_script
+    name: qm_cyc_root
+    source: src/qm_cyc_root.lua
+    load: { when: world.scripts_loaded, in: [gameplay] }
+  - kind: add_script
+    name: qm_cyc_a
+    source: src/qm_cyc_a.lua
+  - kind: add_script
+    name: qm_cyc_b
+    source: src/qm_cyc_b.lua
