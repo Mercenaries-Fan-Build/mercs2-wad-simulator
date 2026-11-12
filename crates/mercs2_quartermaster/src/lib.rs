@@ -33,6 +33,7 @@ pub mod link;
 pub mod lint;
 pub mod manifest;
 pub mod names;
+pub mod outfits;
 pub mod pe;
 pub mod plan;
 pub mod shader;
