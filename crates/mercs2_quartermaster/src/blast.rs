@@ -67,9 +67,6 @@ pub enum Claim {
     /// claiming a script is claiming a share of that block. The front end's `mrxsound` (in
     /// `shell.wad`) and gameplay's (in `vz.wad`) are two scripts: each level runs its own copy.
     Script { name: String, level: crate::link::Level },
-    /// A row in the wardrobe. Key is `(wearer, slug)` — NOT slug alone: retail reuses `Original`
-    /// and `ChickenSuit` across all three heroes.
-    OutfitSlot { wearer: String, slug: String },
     /// A hooked native address or symbol.
     NativeHook { at: String },
     /// A file placed in the game folder, keyed on its PATH relative to that folder, LOWERCASED.
@@ -166,7 +163,6 @@ impl Claim {
                 crate::link::Level::Vz => format!("script {name}"),
                 crate::link::Level::Shell => format!("front-end script {name} (shell.wad)"),
             },
-            Claim::OutfitSlot { wearer, slug } => format!("outfit {wearer}/{slug}"),
             Claim::NativeHook { at } => format!("native hook at {at}"),
             Claim::FileArtifact { path } => format!("file artifact {path}"),
             Claim::SoundCue { guid, language } => match (name, language) {
@@ -270,7 +266,6 @@ pub fn merge_class(claim: &Claim, access: Access, intent: Intent) -> MergeClass 
         // the stricter class wins and an append beside a replacement is a conflict.
         Claim::Script { .. } if intent == Intent::Additive => MergeClass::OrderedList,
         Claim::Script { .. } => MergeClass::Exclusive,
-        Claim::OutfitSlot { .. } => MergeClass::KeyedSet,
         // No arbitration exists: ASI discovery is filesystem order across four directories, so
         // there is no load order that resolves two plugins hooking one address.
         Claim::NativeHook { .. } => MergeClass::Exclusive,
@@ -385,8 +380,6 @@ pub fn claims(manifest: &Manifest) -> Vec<ClaimRecord> {
         match c {
             Contribution::AddOutfit {
                 name,
-                slug,
-                wearer,
                 model,
                 donor,
                 ..
@@ -396,23 +389,17 @@ pub fn claims(manifest: &Manifest) -> Vec<ClaimRecord> {
                 if model.is_some() {
                     push(Access::Write, Claim::asset(name), Intent::Additive);
                 }
-                push(
-                    Access::Write,
-                    bare(Claim::OutfitSlot {
-                        wearer: wearer.clone(),
-                        slug: slug.clone(),
-                    }),
-                    Intent::Additive,
-                );
-                // The wardrobe table lives here, so the script is claimed too — both kinds append a row.
-                push(
-                    Access::Write,
-                    bare(Claim::Script {
-                        name: "wifpmcinterior".into(),
-                        level: crate::link::Level::Vz,
-                    }),
-                    Intent::Additive,
-                );
+                // No claim on the outfit's slug: two Shipments may each add one of a slug, and a save
+                // tells them apart by Shipment (`crate::outfits` refuses what cannot be told apart).
+                // The link splices the generated outfit code onto the wardrobe, the player script and
+                // the master, so those are claimed — both kinds of outfit get the code.
+                for script in [crate::outfits::WARDROBE_SCRIPT, crate::outfits::PLAYER_SCRIPT, crate::hooks::MASTER_HOST] {
+                    push(
+                        Access::Write,
+                        bare(Claim::Script { name: script.into(), level: crate::link::Level::Vz }),
+                        Intent::Additive,
+                    );
+                }
                 if let Some(d) = donor {
                     push(Access::Read, Claim::asset(d), Intent::Replace);
                 }
@@ -951,7 +938,7 @@ impl std::fmt::Display for Conflict {
 /// Conflicts across a set of installed Shipments.
 ///
 /// Note what is NOT a conflict, because it is the whole point: two Shipments each adding a wardrobe
-/// outfit claim different `OutfitSlot`s and share an `OrderedList` script, so they compose. Two
+/// outfit share the `OrderedList` scripts the link generates the wardrobe into, so they compose. Two
 /// Shipments replacing the same texture are `LastWins` — the user picks with load order.
 pub fn conflicts(shipments: &[(&str, &Manifest)]) -> Vec<Conflict> {
     let mut by_claim: BTreeMap<Claim, Vec<(ClaimRecord, String)>> = BTreeMap::new();
