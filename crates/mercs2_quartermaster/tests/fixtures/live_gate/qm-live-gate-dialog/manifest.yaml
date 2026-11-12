@@ -1,0 +1,13 @@
+# The live gate for qm's error policy where retail's dialog can show: a handler fails at world.begin,
+# when gameplay is visible and there is a local player. Expected: "[qm] FATAL qm-live-gate-dialog at
+# world.begin: ...", the system dialog, and dismissing it exits the game. Install alone.
+format: 2
+shipment:
+  name: qm-live-gate-dialog
+  version: 0.1.0
+  target: retail
+contributions:
+  - kind: add_script
+    name: qm_gate_fail_dialog
+    source: src/qm_gate_fail_dialog.lua
+    load: { when: world.scripts_loaded, in: [gameplay] }
