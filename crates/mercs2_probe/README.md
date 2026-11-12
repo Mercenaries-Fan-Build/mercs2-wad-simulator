@@ -142,7 +142,7 @@ Provenance the source itself records:
 * `swim_clip_probe` relies on state names being `pandemic_hash_m2(name)` — verified with
   `m2("Upright") = 0x12C07B18`, `m2("Fidget") = 0x0C0A7FA6`.
 * `save-dump` prints the `.profile` header fields this project pinned: character index `0x4D`,
-  upgrade index `0x4F`, unlocked costumes `0x24A`, `0x24B`, flags `0x4C`, plus the raw
+  costume `0x4F`, unlocked costumes `0x24A`, `0x24B`, flags `0x4C`, plus the raw
   `header[0x240..0x260]` window and the zlib-decompressed Lua payload.
 
 ## Usage
