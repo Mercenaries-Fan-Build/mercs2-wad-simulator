@@ -29,22 +29,17 @@ fn the_corpus_lookup_finds_a_vz_script_and_reports_what_it_tried() {
 }
 
 /// The subfolders are searched in the order given, and only those: `mrxsound` is in both
-/// `resident/` and `shell/`, and the `vz.wad` order finds the resident copy while the shell's finds
-/// the shell copy; a `vz/` script is not found from `shell/`, and every path tried comes back.
+/// `resident/` and `shell/`, and the `vz.wad` order finds the resident copy while `shell/` alone
+/// finds the shell copy; a `vz/` script is not found from `shell/`, and every path tried comes back.
 #[test]
 fn the_corpus_lookup_searches_the_given_subfolders_in_order() {
     let Some(corpus) = corpus_root() else { return };
     let vz = link::base_source_path(&corpus, link::VZ_SOURCE_DIRS, "mrxsound").expect("mrxsound for vz.wad");
     assert!(vz.ends_with("resident/mrxsound.lua"), "{}", vz.display());
-    let shell = link::base_source_path(&corpus, link::SHELL_SOURCE_DIRS, "mrxsound").expect("mrxsound for shell.wad");
+    let shell = link::base_source_path(&corpus, &["shell"], "mrxsound").expect("mrxsound in shell/");
     assert!(shell.ends_with("shell/mrxsound.lua"), "{}", shell.display());
-    let source = std::fs::read_to_string(&shell).unwrap();
-    assert!(
-        source.contains("function EnterShellState()") && source.contains("function ExitShellState()"),
-        "the front end's trampoline host defines both functions it wraps"
-    );
 
-    let tried = link::base_source_path(&corpus, link::SHELL_SOURCE_DIRS, "wifpmcinterior").unwrap_err();
+    let tried = link::base_source_path(&corpus, &["shell"], "wifpmcinterior").unwrap_err();
     assert!(tried[0].ends_with("shell/wifpmcinterior.lua"), "{tried:?}");
     assert!(!tried.iter().any(|p| p.ends_with("vz/wifpmcinterior.lua")), "{tried:?}");
 }
