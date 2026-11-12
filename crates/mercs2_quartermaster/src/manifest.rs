@@ -239,6 +239,41 @@ pub fn wearer_table_key(wearer: &str) -> Option<&'static str> {
     }
 }
 
+/// Who an `add_outfit` is offered to: one hero (`wearer: mattias`) or several
+/// (`wearer: [chris, jen, mattias]`). A list names each hero explicitly, so a hero added later is not
+/// offered the outfit by default.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum Wearer {
+    One(String),
+    Many(Vec<String>),
+}
+
+impl Wearer {
+    /// Every hero spelling as written, in order.
+    pub fn heroes(&self) -> Vec<&str> {
+        match self {
+            Wearer::One(h) => vec![h.as_str()],
+            Wearer::Many(hs) => hs.iter().map(String::as_str).collect(),
+        }
+    }
+}
+
+impl std::fmt::Display for Wearer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Wearer::One(h) => f.write_str(h),
+            Wearer::Many(hs) => write!(f, "[{}]", hs.join(", ")),
+        }
+    }
+}
+
+impl From<&str> for Wearer {
+    fn from(h: &str) -> Self {
+        Wearer::One(h.to_string())
+    }
+}
+
 /// A declared blast-radius entry. A name, or a bare hash where no name is known.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -707,13 +742,22 @@ pub enum Contribution {
         /// ASSET identity → `pandemic_hash_m2` → `_tOutfits.Model`; what `Player.SetOutfit` receives.
         /// With `model`, this is the minted new asset's name; without it, an existing model's name.
         name: String,
-        /// `_tOutfits.Name` — the unlock/tracking key. Merge key is `(wearer, slug)`, NOT `slug`
-        /// alone: retail reuses `Original` and `ChickenSuit` across all three heroes.
+        /// `_tOutfits.Name`: with the Shipment, the outfit's identity in a save. Unique among one
+        /// Shipment's outfits for a hero, and never a retail outfit's `Name` for a hero it is offered
+        /// to; two Shipments may share one (retail reuses `Original` and `ChickenSuit` across heroes).
         slug: String,
         /// `_tOutfits.PlayerVisibleName`. Localization is unresolved (Plan 04 Open-Q7).
         display: String,
-        /// `_tOutfits` key: `chris` | `jennifer` | `mattias`.
-        wearer: String,
+        /// The heroes whose wardrobe offers it ([`Wearer`]): `mattias` | `chris` | `jen`
+        /// (`jennifer` is the same hero), or a list of them.
+        wearer: Wearer,
+        /// The chatter set the hero speaks with while wearing it (`Human.SetChatterSet`), one of
+        /// `data/chatter_sets.tsv`. Changing to an outfit without one gives the hero its own back.
+        #[serde(default)]
+        chatter: Option<String>,
+        /// The levels whose wardrobes offer it. Omitted: the main campaign (`vz`) alone.
+        #[serde(default)]
+        levels: Option<Vec<String>>,
         /// The `src/`-relative model FILE to inject. Omit to wear a model the game already ships
         /// (named by `name`) — no injection, no new hash.
         #[serde(default)]
