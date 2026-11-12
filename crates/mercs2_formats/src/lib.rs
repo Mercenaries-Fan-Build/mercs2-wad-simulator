@@ -142,6 +142,7 @@ pub mod havok_write;
 pub mod ini;
 pub mod keys;
 pub mod load_ladder;
+pub mod load_plan;
 pub mod manm;
 pub mod lua_exec;
 pub mod live_reads;
