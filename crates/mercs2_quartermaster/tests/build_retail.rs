@@ -15,6 +15,7 @@ use common::build::{
 use mercs2_quartermaster::build::{self, BuildError, Destination};
 use mercs2_quartermaster::compat::PlanInput;
 use mercs2_quartermaster::discover;
+use mercs2_quartermaster::link;
 use std::path::{Path, PathBuf};
 
 // ---------------------------------------------------------------------------
@@ -851,7 +852,7 @@ fn two_installed_shipments_both_survive_the_deploy_link() {
             .expect("the link step writes a placement record too");
     assert_eq!(record["format"], build::PLACEMENT_FORMAT);
     let placed = record["placements"].as_array().expect("placements array");
-    assert_eq!(placed.len(), 1);
+    assert_eq!(placed.len(), 3, "the link overlay, the shell patch and the load plan: {placed:?}");
     assert_eq!(placed[0]["name"], build::LINK_WAD_NAME);
     assert_eq!(
         placed[0]["destination"]["kind"], "overlay",
@@ -859,17 +860,24 @@ fn two_installed_shipments_both_survive_the_deploy_link() {
          reader would have to know, not a contract it can read"
     );
     assert_eq!(placed[0]["sha256"], report.placements[0].sha256);
+    // The front end's hooks ship in the shell patch on every deploy link (W-a).
+    assert_eq!(placed[1]["name"], build::LINK_SHELL_PATCH_NAME);
+    assert_eq!(placed[1]["destination"]["kind"], "shell_patch");
+    // The load plan goes into the game folder, where the Lua bridge's startup check reads it.
+    assert_eq!(placed[2]["destination"], serde_json::json!({ "kind": "game_folder", "relative": "scripts/load-plan.json" }));
 
+    // The Shipments' one target, compiled once for both, beside qm's splices onto the hosts of its
+    // hooks (W-a: every deploy link carries them).
+    let qm_owned = |l: &&link::LinkedScript| l.contributors == [link::MODLOADER_CONTRIBUTOR.to_string()];
+    let shipments: Vec<&link::LinkedScript> = report.linked.iter().filter(|l| !qm_owned(l)).collect();
+    assert_eq!(shipments.len(), 1, "one target, compiled once for both Shipments: {:?}", report.linked);
     assert_eq!(
-        report.linked.len(),
-        1,
-        "one target, compiled once for both Shipments"
-    );
-    assert_eq!(
-        report.linked[0].contributors,
+        shipments[0].contributors,
         vec!["sean-devlin", "roze-skin"],
         "neither requires the other, so the request order is the load order"
     );
+    let qm: Vec<String> = report.linked.iter().filter(qm_owned).map(|l| l.target.clone()).collect();
+    assert_eq!(qm, qm_gameplay_hosts());
     // The plan the link followed is written beside the placement record.
     assert!(deploy.join("load-plan.json").is_file(), "the link writes its load plan");
 
@@ -1033,41 +1041,63 @@ fn the_deploy_link_follows_the_request_order() {
     );
 }
 
-/// M0209 reaches the plan: `qm link` appends a warning per unresolved literal import to the plan's
-/// findings, on the item whose source carries it, and the plan stays ok.
+/// M0209 reaches the plan: an import nothing provides refuses the set, as an error of the plan on the
+/// item whose source carries it, in the plan written to disk.
 #[test]
-fn an_unresolved_literal_import_is_a_warning_in_the_link_plan() {
+fn an_unresolved_import_is_an_error_that_refuses_the_link() {
     let mut game = retail_game();
     let corpus = corpus_for_tests();
     let root = scratch("deploy_m0209");
     std::fs::create_dir_all(root.join("mod/src")).unwrap();
-    std::fs::write(
-        root.join("mod/src/probe.lua"),
-        "local lib = import(\"qm_no_such_module\")\nreturn {}\n",
-    )
-    .unwrap();
-    let s = shipment(
-        &root.join("mod"),
-        "  - kind: add_script\n    name: qm_m0209_probe\n    source: src/probe.lua\n",
-    );
+    std::fs::write(root.join("mod/src/probe.lua"), "local lib = import \"qm_no_such_module\"\n").unwrap();
+    let s = shipment(&root.join("mod"), "  - kind: patch_lua\n    target: mrxtimer\n    append: src/probe.lua\n");
     let out = root.join("out");
     let ids = arg_ids(1);
-    let report = build::link_installed(&request(&[&s], &ids), &mut game, &corpus, &out, None)
-        .expect("an unresolved import is a warning, not a refusal");
-    assert!(report.plan.ok);
-    let m0209: Vec<_> = report.plan.findings.iter().filter(|f| f.code == "M0209").collect();
-    assert_eq!(m0209.len(), 1, "{:?}", report.plan.findings);
+    let plan = match build::link_installed(&request(&[&s], &ids), &mut game, &corpus, &out, None) {
+        Err(build::BuildError::Plan(plan)) => *plan,
+        Err(other) => panic!("expected a refused plan, got {other}"),
+        Ok(_) => panic!("an unresolved import refuses the set"),
+    };
+    assert!(!plan.ok);
+    let m0209: Vec<_> = plan.findings.iter().filter(|f| f.code == "M0209").collect();
+    assert_eq!(m0209.len(), 1, "{:?}", plan.findings);
+    assert_eq!(plan.findings.len(), 1, "{:?}", plan.findings);
     assert_eq!(m0209[0].items, vec!["arg:1".to_string()]);
     assert!(m0209[0].message.contains("qm_no_such_module"), "{}", m0209[0].message);
     let written: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(out.join("load-plan.json")).unwrap()).unwrap();
-    assert_eq!(written["ok"], true);
+    assert_eq!(written["ok"], false);
+    assert_eq!(written["libraries"], serde_json::Value::Null);
     assert_eq!(written["findings"][0]["code"], "M0209");
-    assert_eq!(written["findings"][0]["severity"], "warning");
+    assert_eq!(written["findings"][0]["severity"], "error");
     assert_eq!(
         written["findings"][0]["refs"],
         serde_json::json!([{ "section": "items", "index": 0 }])
     );
+}
+
+/// ★ An M0314 reorder is a warning: the link succeeds and writes its WAD, and the plan written to
+/// disk is ok and carries the warning on the item whose Lua made it.
+#[test]
+fn a_reorder_of_retail_loading_is_a_warning_and_the_link_succeeds() {
+    use mercs2_formats::load_plan::{FindingSeverity, LoadPlan, PLAN_FILE};
+    let mut game = retail_game();
+    let corpus = corpus_for_tests();
+    let root = scratch("deploy_m0314_reorder");
+    std::fs::create_dir_all(root.join("mod/src")).unwrap();
+    std::fs::write(root.join("mod/src/reorder.lua"), "local a = import(\"mrxartillery\")\n").unwrap();
+    let s = shipment(&root.join("mod"), "  - kind: patch_lua\n    target: antiair\n    append: src/reorder.lua\n");
+    let out = root.join("out");
+    let ids = arg_ids(1);
+    let report = build::link_installed(&request(&[&s], &ids), &mut game, &corpus, &out, None).expect("a warning refuses nothing");
+    assert!(report.plan.ok, "{:?}", report.plan.findings);
+    let codes: Vec<(&str, FindingSeverity, &[String])> =
+        report.plan.findings.iter().map(|f| (f.code.as_str(), f.severity, f.items.as_slice())).collect();
+    let item = ["arg:1".to_string()];
+    assert_eq!(codes, vec![("M0314", FindingSeverity::Warning, &item[..])]);
+    assert!(report.wad.is_some(), "the link writes its WAD");
+    let written: LoadPlan = serde_json::from_slice(&std::fs::read(out.join(PLAN_FILE)).unwrap()).unwrap();
+    assert_eq!(written, report.plan);
 }
 
 /// `(key hash, text)` for every entry of a stringdb container, read through the codec.
@@ -1353,10 +1383,12 @@ fn build_refuses_a_superseded_file() {
     }
 }
 
-/// Nothing to link means no overlay — an overlay that merely restates the base block is noise a
-/// user would have to reason about. It does NOT mean no placement record.
+/// A set with no script mod still links qm's hook dispatcher, world loader entry and core hooks onto
+/// their hosts (W-a), so every installed game prints each hook's entry line, mods or no mods: the link
+/// overlay carries the gameplay splices, the shell patch the front end's, and the placement record
+/// mounts both.
 #[test]
-fn a_set_with_no_script_mods_emits_no_link_wad() {
+fn a_set_with_no_script_mods_still_links_qm_s_hooks() {
     let mut game = retail_game();
     let corpus = corpus_for_tests();
     let root = scratch("deploy_none");
@@ -1369,21 +1401,207 @@ fn a_set_with_no_script_mods_emits_no_link_wad() {
     let out = root.join("out");
     let ids = arg_ids(1);
     let report = build::link_installed(&request(&[&s], &ids), &mut game, &corpus, &out, None).expect("link");
-    assert!(report.wad.is_none());
-    assert!(report.linked.is_empty());
-
-    // …but the RECORD is still written. "No overlay to mount" and "link never ran" are opposite
-    // facts a deploy step must act on differently, and an absent file cannot tell them apart. The
-    // empty array says which one it is.
-    let record: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(out.join("placement.json")).unwrap())
-            .expect("a placement record exists even with nothing to place");
-    assert_eq!(record["format"], build::PLACEMENT_FORMAT);
-    assert_eq!(
-        record["placements"].as_array().map(|a| a.len()),
-        Some(0),
-        "nothing to place, stated rather than implied"
+    assert!(report.wad.is_some(), "the link overlay carries qm's splices");
+    let targets: Vec<String> = report.linked.iter().map(|l| l.target.clone()).collect();
+    assert_eq!(targets, qm_gameplay_hosts(), "{:?}", report.linked);
+    for l in &report.linked {
+        assert_eq!(l.contributors, vec![link::MODLOADER_CONTRIBUTOR.to_string()]);
+    }
+    assert!(
+        report.log.iter().any(|l| l.starts_with("linked shellbootstrap in ")) && report.log.iter().any(|l| l.starts_with("linked mrxsound in ")),
+        "the front end's hooks are linked: {:?}",
+        report.log
     );
+
+    let record: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(out.join("placement.json")).unwrap()).expect("a placement record");
+    assert_eq!(record["format"], build::PLACEMENT_FORMAT);
+    let placed = record["placements"].as_array().expect("placements array");
+    assert_eq!(placed.len(), 3, "the link overlay, the shell patch and the load plan, placed: {placed:?}");
+    assert_eq!(placed[0]["name"], build::LINK_WAD_NAME);
+    assert_eq!(placed[1]["name"], build::LINK_SHELL_PATCH_NAME);
+    assert_eq!(placed[2]["destination"], serde_json::json!({ "kind": "game_folder", "relative": "scripts/load-plan.json" }));
+    // No library: the plan says so with an empty list, so the game folder never lacks the file.
+    assert_eq!(report.plan.libraries, Some(Vec::new()));
+}
+
+/// ★ The link places its load plan in the game folder (`scripts/load-plan.json`, where the Lua
+/// bridge's startup check reads it): the bytes of `--out/load-plan.json`, parsed by the shared
+/// definition (`mercs2_formats::load_plan`), hashed in the placement record. Its `libraries` are what
+/// the link's tails load: qm's own loader first when a registration needs it, then each library at its
+/// hook, its name in that hook's retail host, the settle check on exactly the entry's; a module only an
+/// import loads has no hook and is in no host.
+#[test]
+fn the_link_s_load_plan_lists_the_libraries_its_tails_load() {
+    use mercs2_formats::load_plan::{LibraryRow, LoadPlan, LoadSession, GAME_FOLDER_RELATIVE, PLAN_FILE};
+    let has = |lua: &[u8], needle: &str| lua.windows(needle.len()).any(|w| w == needle.as_bytes());
+    let mut game = retail_game();
+    let gate = discover::open(&Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/live_gate/qm-live-gate"))
+        .expect("open the gate Shipment");
+    let root = scratch("load_plan_libraries");
+    std::fs::create_dir_all(root.join("mod/src")).unwrap();
+    std::fs::write(root.join("mod/src/helper.lua"), "function Help() end\n").unwrap();
+    // The helper has no `load:`: an import from a retail script that runs (`mrxtimer`, no hook's host)
+    // is what runs it (M0313).
+    std::fs::write(root.join("mod/src/use.lua"), "local qm_plan_helper = import(\"qm_plan_helper\")\n").unwrap();
+    let helper = shipment(
+        &root.join("mod"),
+        "  - kind: activate_layer\n    layer: vz_state_pmccon004_destroyed\n\
+         \x20 - kind: add_script\n    name: qm_plan_helper\n    source: src/helper.lua\n\
+         \x20 - kind: patch_lua\n    target: mrxtimer\n    append: src/use.lua\n",
+    );
+    let out = root.join("out");
+    let ids = arg_ids(2);
+    let report = build::link_installed(&request(&[&gate, &helper], &ids), &mut game, &corpus_for_tests(), &out, None)
+        .expect("links");
+
+    let written = std::fs::read(out.join(PLAN_FILE)).unwrap();
+    let placed = std::fs::read(out.join(GAME_FOLDER_RELATIVE)).unwrap();
+    assert_eq!(placed, written, "the game folder gets the plan qm wrote");
+    let parsed: LoadPlan = serde_json::from_slice(&placed).expect("the plan parses with the shared definition");
+    parsed.check().expect("this reader's format");
+    assert_eq!(parsed, report.plan);
+    let entry = report
+        .placements
+        .iter()
+        .find(|p| p.destination == Destination::GameFolder { relative: GAME_FOLDER_RELATIVE.to_string() })
+        .expect("the plan is placed");
+    assert_eq!(entry.sha256, build::sha256_hex(&placed));
+
+    let row = |module: &str, item: Option<&str>, session, when: Option<&str>, settles| LibraryRow {
+        module: module.into(),
+        item: item.map(Into::into),
+        session,
+        when: when.map(Into::into),
+        settles,
+    };
+    let (g, f) = (LoadSession::Gameplay, LoadSession::FrontEnd);
+    let expected = vec![
+        row(link::QM_MODLOADER_NAME, None, g, Some("world.scripts_loaded"), true),
+        row("qm_gate_world", Some("arg:1"), g, Some("world.scripts_loaded"), true),
+        row("qm_gate_load", Some("arg:1"), g, Some("world.load"), false),
+        row("qm_gate_save", Some("arg:1"), g, Some("save.complete"), false),
+        row("qm_gate_hq", Some("arg:1"), g, Some("hq.enter"), false),
+        row("qm_gate_retry", Some("arg:1"), g, Some("world.retry"), false),
+        row("qm_gate_cash", Some("arg:1"), g, Some("cash.changed"), false),
+        row("qm_plan_helper", Some("arg:2"), g, None, false),
+        row("qm_gate_shell", Some("arg:1"), f, Some("shell.boot"), true),
+    ];
+    assert_eq!(parsed.libraries.as_deref(), Some(&expected[..]));
+
+    let wad = report.wad.expect("a link overlay");
+    let shell = out.join(build::LINK_SHELL_PATCH_NAME);
+    for r in &expected {
+        let in_wad = if r.session == g { &wad } else { &shell };
+        assert!(!script_in(in_wad, &r.module).is_empty(), "{} is minted", r.module);
+        match &r.when {
+            Some(when) => {
+                let host = &mercs2_quartermaster::hooks::hook(when).expect("a catalogue hook").host;
+                assert!(has(&script_in(in_wad, host), &r.module), "{host} loads {} at {when}", r.module);
+            }
+            None => {
+                for host in qm_gameplay_hosts() {
+                    assert!(!has(&script_in(&wad, &host), &r.module), "{host} loads {}, which only an import loads", r.module);
+                }
+            }
+        }
+    }
+}
+
+/// ★ An import finding refuses the set: a module nothing runs (M0313) and an import nothing provides
+/// (M0209) are errors of the plan, on the item whose Lua carries them; the plan is written, not ok,
+/// with `libraries: null`, and no WAD is written.
+#[test]
+fn an_import_finding_refuses_the_link_with_the_plan_written() {
+    use mercs2_formats::load_plan::{FindingSeverity, LoadPlan, PLAN_FILE};
+    let mut game = retail_game();
+    let root = scratch("import_finding_refuses");
+    std::fs::create_dir_all(root.join("mod/src")).unwrap();
+    std::fs::write(root.join("mod/src/orphan.lua"), "local m = import(\"qm_t_nowhere\")\n").unwrap();
+    let orphan = shipment(&root.join("mod"), "  - kind: add_script\n    name: qm_t_orphan\n    source: src/orphan.lua\n");
+    let out = root.join("out");
+    let ids = arg_ids(1);
+    let err = build::link_installed(&request(&[&orphan], &ids), &mut game, &corpus_for_tests(), &out, None)
+        .expect_err("the set is refused");
+    let plan = match err {
+        build::BuildError::Plan(plan) => *plan,
+        other => panic!("expected a refused plan, got {other}"),
+    };
+    assert!(!plan.ok);
+    assert_eq!(plan.libraries, None, "a refused link writes no libraries");
+    let codes: Vec<(&str, FindingSeverity, &[String])> =
+        plan.findings.iter().map(|f| (f.code.as_str(), f.severity, f.items.as_slice())).collect();
+    let item = ["arg:1".to_string()];
+    assert_eq!(codes, vec![("M0209", FindingSeverity::Error, &item[..]), ("M0313", FindingSeverity::Error, &item[..])]);
+    let written: LoadPlan = serde_json::from_slice(&std::fs::read(out.join(PLAN_FILE)).unwrap()).unwrap();
+    assert_eq!(written, plan);
+    let wads: Vec<_> = std::fs::read_dir(&out)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|n| n.ends_with(".wad"))
+        .collect();
+    assert_eq!(wads, Vec::<String>::new(), "nothing is written");
+}
+
+/// The gameplay hosts of the catalogue's hooks, in the order the link splices them (by name): every
+/// script a deploy link splices qm's code onto.
+fn qm_gameplay_hosts() -> Vec<String> {
+    let gameplay = mercs2_quartermaster::manifest::LoadSession::Gameplay;
+    let mut hosts: Vec<String> =
+        mercs2_quartermaster::hooks::hooks().iter().filter(|h| h.sessions.contains(&gameplay)).map(|h| h.host.clone()).collect();
+    hosts.sort();
+    hosts.dedup();
+    hosts
+}
+
+/// The script `name` of the patch WAD at `wad`, from whichever block carries it.
+fn script_in(wad: &Path, name: &str) -> Vec<u8> {
+    let contents = mercs2_formats::patch_wad::read_patch_wad(&std::fs::read(wad).unwrap()).expect("re-read");
+    for blk in &contents.blocks {
+        let dec = mercs2_formats::sges::decompress_sges(&blk.compressed_data).expect("sges");
+        let Ok(parsed) = mercs2_formats::scripts_block::ScriptsBlock::parse(&dec) else { continue };
+        if let Some(idx) = parsed.find_script_by_name(name) {
+            parsed.verify_csums().expect("CSUMs");
+            return parsed.extract_lua(idx).unwrap();
+        }
+    }
+    panic!("{} carries no script {name}", wad.display())
+}
+
+/// ★ The live gate's Shipments (`tests/fixtures/live_gate`, plan ws5 §9 step 2) link against retail, each
+/// alone, and the gate's libraries make the link generate each hook it tests on its retail host: the
+/// engine-called `world.load` and `save.complete`, `world.begin` and the filtered `world.retry` on the
+/// `vz` master, `hq.enter` inside `mrxhq`, the `CashAdded` subscription, and the front end's entry.
+#[test]
+fn the_live_gate_links_every_hook_it_tests() {
+    let gate = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/live_gate");
+    let has = |lua: &[u8], needle: &str| lua.windows(needle.len()).any(|w| w == needle.as_bytes());
+    for name in ["qm-live-gate", "qm-live-gate-dialog", "qm-live-gate-nodialog"] {
+        let mut game = retail_game();
+        let s = discover::open(&gate.join(name)).expect("open the gate Shipment");
+        let out = scratch(&format!("live_gate_{name}"));
+        let ids = arg_ids(1);
+        let report = build::link_installed(&request(&[&s], &ids), &mut game, &corpus_for_tests(), &out, None).expect("links");
+        let wad = report.wad.expect("a link overlay");
+        let vz = script_in(&wad, "vz");
+        for needle in ["world.scripts_loaded", "world.begin", "world.sound_exit"] {
+            assert!(has(&vz, needle) || has(&script_in(&wad, "mrxsoundbootstrap"), needle), "{name}: {needle}");
+        }
+        if name != "qm-live-gate" {
+            continue;
+        }
+        for needle in ["world.load", "world.retry", "save.complete", "CashAdded", "qm_gate_world", "qm_gate_load", "qm_gate_save", "qm_gate_retry", "qm_gate_cash"] {
+            assert!(has(&vz, needle), "the vz master carries {needle}");
+        }
+        let hq = script_in(&wad, "mrxhq");
+        assert!(has(&hq, "hq.enter") && has(&hq, "qm_gate_hq"), "mrxhq carries hq.enter and loads qm_gate_hq");
+        for lib in ["qm_gate_world", "qm_gate_load", "qm_gate_save", "qm_gate_hq", "qm_gate_retry", "qm_gate_cash"] {
+            assert!(has(&script_in(&wad, lib), "[gate] "), "{lib} is minted");
+        }
+        let shell = out.join(build::LINK_SHELL_PATCH_NAME);
+        assert!(has(&script_in(&shell, "shellbootstrap"), "qm_gate_shell"), "the front-end entry loads qm_gate_shell");
+        assert!(has(&script_in(&shell, "qm_gate_shell"), "shell.open"), "qm_gate_shell is minted into the shell block");
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1884,12 +2102,15 @@ fn activate_layer_builds_the_layer_marks_into_the_mod_loader() {
         ] {
             assert!(text.contains(needle), "qm_modloader bytecode missing {needle:?}");
         }
-        // The resident still gets the one-line trampoline that imports and runs it.
-        let ti = parsed
-            .find_script_by_name("wifpmcinterior")
-            .expect("wifpmcinterior present in the same block");
-        let tramp = String::from_utf8_lossy(&parsed.extract_lua(ti).unwrap()).to_string();
-        assert!(tramp.contains("qm_modloader"), "the trampoline must import qm_modloader");
+        // The vz master in the same block carries qm's world entry, which loads it by dynamic_import.
+        let vi = parsed.find_script_by_name("vz").expect("the vz master present in the same block");
+        let master = String::from_utf8_lossy(&parsed.extract_lua(vi).unwrap()).to_string();
+        for needle in ["world.scripts_loaded", "dynamic_import", "qm_modloader"] {
+            assert!(master.contains(needle), "the vz master's tail carries {needle:?}");
+        }
+        let ti = parsed.find_script_by_name("wifpmcinterior").expect("wifpmcinterior present in the same block");
+        let interior = String::from_utf8_lossy(&parsed.extract_lua(ti).unwrap()).to_string();
+        assert!(!interior.contains("qm_modloader"), "no trampoline in wifpmcinterior");
     }
     assert!(found, "the build must mint a qm_modloader script");
 }
@@ -2320,7 +2541,8 @@ mod sound {
         assert_eq!(tables_of(block_at(&shell_blocks, wavebank)), wb_tables, "the front end's copy of the wavebank");
         let scripts = shell_scripts(&shell_blocks);
         assert!(has(&chunk(&scripts, "qm_shell_modloader"), "qm_pda-sound_ui_hud"));
-        assert!(has(&chunk(&scripts, "mrxsound"), "_qm_prev_EnterShellState"));
+        assert!(has(&chunk(&scripts, "mrxsound"), "shell.open") && has(&chunk(&scripts, "mrxsound"), "shell.sound_exit"));
+        assert!(has(&chunk(&scripts, "shellbootstrap"), "shell.boot") && has(&chunk(&scripts, "shellbootstrap"), "qm_shell_modloader"));
         let shell_path = mercs2_quartermaster::sound::sibling_wad(&vz_wad(), "shell.wad").unwrap();
         let shell_file = out.join(&report.placements.iter().find(|p| p.destination == Destination::ShellPatch).unwrap().name);
         assert_eq!(
@@ -2670,7 +2892,9 @@ mod sound {
         let report = build::link_installed(&inputs, &mut game, &corpus(), &out, None).expect("links");
         eprintln!("{}", report.log.join("\n"));
         assert!(report.plan.link_block_paths.contains(&path), "the plan promises the merged bank");
-        assert!(!report.placements.iter().any(|p| p.destination == Destination::ShellPatch));
+        // The shell patch carries the front end's hooks (W-a), and no copy of a bank shell.wad lacks.
+        let shell = report.placements.iter().find(|p| p.destination == Destination::ShellPatch).expect("the shell patch");
+        assert!(!blocks_of(&out, shell).iter().any(|b| b.path_string == path), "the merged bank is vz.wad's only");
         let overlay = report.placements.iter().find(|p| p.destination == Destination::Overlay).expect("link overlay");
         let tables = tables_of(block_at(&blocks_of(&out, overlay), bank));
         let types: Vec<(u32, u32)> = tables.iter().map(|t| (t.0, t.1)).collect();
@@ -3119,8 +3343,17 @@ mod sound {
         }
     }
 
-    /// A level WAD holding script `name`, importing `dep`, and the layer `<name>_base`.
-    fn level_wad(path: &Path, name: &str, base_layer: bool, dep: &str) {
+    /// The functions of a master the catalogue's master hooks wrap, which both retail masters define
+    /// (`vz/xQ!L.lua`, `dlc01.lua`): the engine calls the first four by name.
+    const MASTER_SEAMS: &str = "function LoadSingleton()\nend\nfunction SaveSingleton()\nend\nfunction SaveComplete()\nend\nfunction ResetSingleton()\nend\n";
+
+    /// A level master's source: [`MASTER_SEAMS`] and `_StartPlayerVisibleGameplay` (`vz/xQ!L.lua:858`,
+    /// `dlc01.lua:680`), and no top-level `return`.
+    const LEVEL_MASTER: &str = "function LoadSingleton()\nend\nfunction SaveSingleton()\nend\nfunction SaveComplete()\nend\nfunction ResetSingleton()\nend\nfunction _StartPlayerVisibleGameplay()\nend\n";
+
+    /// A level WAD holding script `name` compiled from `master`, importing `dep`, and the layer
+    /// `<name>_base`.
+    fn level_wad(path: &Path, name: &str, base_layer: bool, dep: &str, master: &str) {
         use mercs2_formats::script_meta::{Dep, ScriptMeta};
         use mercs2_formats::types::{TYPE_HASH_LAYER, TYPE_HASH_SCRIPT, TYPE_ID_LAYER, TYPE_ID_SCRIPT};
         use mercs2_formats::ucfx::{write_ucfx_tree, UcfxNode};
@@ -3131,7 +3364,7 @@ mod sound {
             inherits: 0,
             deps: vec![Dep { name: dep.to_string(), hash: m2(dep), inherit: false }],
         };
-        let luaq = mercs2_luac::compile("return 1", name).expect("compiles");
+        let luaq = mercs2_luac::compile(master, name).expect("compiles");
         let script = mercs2_formats::scripts_block::build_container(&meta, &luaq);
         let mut assets = vec![Asset { name_hash: m2(name), type_hash: TYPE_HASH_SCRIPT, type_id: TYPE_ID_SCRIPT, container: script }];
         if base_layer {
@@ -3154,9 +3387,14 @@ mod sound {
 
     /// [`level_shipment`] with more rows after the chunks'.
     fn level_shipment_with(dir: &Path, imports: &str, with_base: bool, more: &str) -> LoadedShipment {
+        level_shipment_of(dir, imports, with_base, more, LEVEL_MASTER)
+    }
+
+    /// [`level_shipment_with`] whose master is compiled from `master`.
+    fn level_shipment_of(dir: &Path, imports: &str, with_base: bool, more: &str, master: &str) -> LoadedShipment {
         std::fs::create_dir_all(dir.join("src")).unwrap();
         let wad = dir.join("src/level.wad");
-        level_wad(&wad, "qmlevel", with_base, imports);
+        level_wad(&wad, "qmlevel", with_base, imports, master);
         let block = read_patch_wad(&std::fs::read(&wad).unwrap()).unwrap().blocks.remove(0);
         let raw = mercs2_formats::sges::decompress_sges(&block.compressed_data).unwrap();
         let mut rows = String::from("  - kind: add_level\n    name: qmlevel\n    display: A Level\n");
@@ -3221,7 +3459,9 @@ mod sound {
         // The level's own `mrxtask`, in another name, importing what a retail scan would not read.
         let name = "qmlevel_task";
         let meta = ScriptMeta { name: name.to_string(), globals: 3, inherits: 0, deps: vec![Dep { name: "mrxutil".into(), hash: m2("mrxutil"), inherit: false }] };
-        let own = mercs2_luac::compile("qm_level_own = 1", name).unwrap();
+        // It keeps the functions qm's hooks wrap on mrxtask (job.completed, job.cancelled), as a level's
+        // override of a hook host must: Blow It Up Again's 12 overrides all do.
+        let own = mercs2_luac::compile("qm_level_own = 1\nfunction Complete(self)\nend\nfunction Cancel(self)\nend\n", name).unwrap();
         std::fs::write(lvl.join("src/task.ucfx"), build_container(&meta, &own)).unwrap();
         let s = level_shipment_with(
             &lvl,
@@ -3259,7 +3499,18 @@ mod sound {
         assert!(lua.windows(14).any(|w| w == b"qm_level_probe"), "and the Shipment's");
         mercs2_luac::check_loads(&lua).unwrap();
         let own_block = wad.blocks.iter().find(|b| b.path_string == r"blocks\qmlevel\resident_P000_Q3.block").expect("the level's block");
-        assert!(raw(own_block).find_script_by_name("qmlevel").is_some(), "the level's other assets stay in its block");
+        let own = raw(own_block);
+        let at = own.find_script_by_name("qmlevel").expect("the level's other assets stay in its block");
+        // The level runs its own master, so qm's world entry and world.begin are spliced onto it.
+        let master = own.extract_lua(at).unwrap();
+        for needle in ["world.scripts_loaded", "world.begin", "_StartPlayerVisibleGameplay"] {
+            assert!(master.windows(needle.len()).any(|w| w == needle.as_bytes()), "the level's master carries {needle}");
+        }
+        mercs2_luac::check_loads(&master).unwrap();
+        // world.sound_exit's host, mrxsoundbootstrap, is vz.wad's resident script, linked into the
+        // level's copy of that block.
+        let sound = linked.extract_lua(linked.find_script_by_name("mrxsoundbootstrap").unwrap()).unwrap();
+        assert!(sound.windows(16).any(|w| w == b"world.sound_exit"), "the level's mrxsoundbootstrap carries world.sound_exit");
 
         let vz = report.wad.as_ref().expect("the vz link overlay");
         let vz_blocks = read_patch_wad(&std::fs::read(vz).unwrap()).unwrap().blocks;
@@ -3267,6 +3518,27 @@ mod sound {
         let block = raw(resident);
         let at = block.find_script_by_name("mrxtask").unwrap();
         assert_eq!(container_info(&block.entries[at].bytes).unwrap().name, "mrxtask", "retail's stays retail's in vz");
+    }
+
+    /// A level whose master cannot carry qm's hooks fails the link naming why: a master defining no
+    /// function a master hook wraps, and a master returning from its top level, which would skip the
+    /// spliced tail.
+    #[test]
+    fn a_level_master_qm_cannot_hook_fails_the_link() {
+        let no_seam = format!("{MASTER_SEAMS}qm_level_flag = 1\n");
+        let returns = format!("{LEVEL_MASTER}return 1\n");
+        for (tag, master, why) in [
+            ("no_seam", no_seam.as_str(), "hook world.begin, world.retry wraps qmlevel._StartPlayerVisibleGameplay, and qmlevel's main chunk defines no function _StartPlayerVisibleGameplay"),
+            ("returns", returns.as_str(), "qmlevel's main chunk can return at instruction"),
+        ] {
+            let dir = scratch(&format!("level_master_{tag}"));
+            let s = level_shipment_of(&dir, "mrxtask", true, "", master);
+            let mut game = stack_for(&[&s]);
+            let ids = super::arg_ids(1);
+            let e = build::link_installed(&super::request(&[&s], &ids), &mut game, &corpus(), &dir.join("_link"), None).unwrap_err();
+            let text = e.to_string();
+            assert!(text.contains("level qmlevel: ") && text.contains(why), "{tag}: {text}");
+        }
     }
 
     /// An import neither the level nor the game holds fails the build, naming it and its importer.
