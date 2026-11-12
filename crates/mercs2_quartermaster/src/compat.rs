@@ -304,6 +304,37 @@ pub fn plan(
         });
     }
 
+    // M0263: an outfit offered in a level the set does not have. The main campaign is always there;
+    // a custom level is one a Shipment of the set adds.
+    let set_levels: Vec<&str> = (0..inputs.len())
+        .flat_map(|i| manifest(i).contributions.iter())
+        .filter_map(|c| match c {
+            crate::manifest::Contribution::AddLevel { name, .. } => Some(name.as_str()),
+            _ => None,
+        })
+        .collect();
+    for i in 0..inputs.len() {
+        for (index, c) in manifest(i).contributions.iter().enumerate() {
+            let crate::manifest::Contribution::AddOutfit { slug, levels: Some(levels), .. } = c else { continue };
+            for l in levels {
+                if l != crate::level::VZ && !set_levels.contains(&l.as_str()) {
+                    findings.push(error(
+                        "M0263",
+                        format!(
+                            "{} contributions[{index}] add_outfit {slug} is offered in level {l:?}, which is \
+                             neither {} nor a level a Shipment of the set adds{}",
+                            manifest(i).shipment.name,
+                            crate::level::VZ,
+                            if set_levels.is_empty() { String::new() } else { format!(" ({})", set_levels.join(", ")) }
+                        ),
+                        vec![id(i)],
+                        vec![at(Section::Items, i)],
+                    ));
+                }
+            }
+        }
+    }
+
     // M0203: exactly one copy per name.
     let mut by_name: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
     for i in 0..inputs.len() {
