@@ -190,41 +190,9 @@ pub fn families() -> &'static [FamilyInfo] {
 
 // ── data files ─────────────────────────────────────────────────────────────────────────────────
 
-/// A game data file a Shipment edits, relative to the game folder. A closed set.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-pub enum DataFile {
-    #[serde(rename = "data/shader3.bin")]
-    Shader3,
-    #[serde(rename = "data/shader3Low.bin")]
-    Shader3Low,
-}
-
-impl DataFile {
-    pub const ALL: [DataFile; 2] = [DataFile::Shader3, DataFile::Shader3Low];
-
-    pub fn relative(self) -> &'static str {
-        match self {
-            DataFile::Shader3 => "data/shader3.bin",
-            DataFile::Shader3Low => "data/shader3Low.bin",
-        }
-    }
-
-    pub fn file_name(self) -> &'static str {
-        match self {
-            DataFile::Shader3 => "shader3.bin",
-            DataFile::Shader3Low => "shader3Low.bin",
-        }
-    }
-
-    /// Whether this is the store the engine reads with ShaderLevel off (`_3l.sho` ids).
-    pub fn is_low(self) -> bool {
-        self == DataFile::Shader3Low
-    }
-
-    pub fn parse(relative: &str) -> Option<DataFile> {
-        DataFile::ALL.into_iter().find(|d| d.relative() == relative)
-    }
-}
+/// A game data file a Shipment edits, relative to the game folder. A closed set. Defined in
+/// `mercs2_formats::load_plan`, because a load plan carries it.
+pub use mercs2_formats::load_plan::DataFile;
 
 /// Whether a manifest has any shader kind: then its build, link and game-gated lint read the
 /// stores from `--original-data`, and it edits both [`DataFile`]s.
