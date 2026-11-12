@@ -62,6 +62,7 @@ mod terrain_cell;
 mod gfx_golden;
 mod prof_samples;
 mod splice_emu;
+mod stockpile_restore;
 mod we_template;
 
 use mercs2_engine::diag;
@@ -101,6 +102,7 @@ fn usage() -> ! {
          \x20 lua-debug --module <name> [--bank resident|vz|shell] [--line <corpus line>]... [--then continue|wait|disconnect] [--repl] [--seconds S] [--addr host:port]   (the Missions debugger's protocol against the live game: line tables from the WAD and the corpus)\n\
          \x20 extract --model H [--type T] <out.bin>   dump-block <index> <out.bin>  find-placement <substring>\n\
          \x20 save-dump <profile> [needle]  overlays <profile>\n\
+         \x20 stockpile-restore <profile> --expect restored|dropped   (run --wad's wifpmcinterior on the save's HQ stockpile mark: BUG-015)\n\
          \x20 anim-table <name|0xH> [--handle 0xH] [--list <column>]   (an animationtable's rows verbatim)\n\
          \x20 clip-names <review.tsv>       (name AnimationLookup clips from their rows; a review file, merges nothing)\n\
          \x20 facefx <name|0xH> | --all     (a FaceFX actor / anim set by name; --all reads every one and prints the census)\n\
@@ -1475,6 +1477,7 @@ fn main() {
             };
             run(save_dump(&prof, needle.as_deref()));
         }
+        "stockpile-restore" => std::process::exit(stockpile_restore::main(&wadpath, &args)),
         "anim-table" => {
             let name = first_positional(&args).unwrap_or_else(|| {
                 eprintln!("anim-table: usage: mercs2_probe anim-table <name|0xH> [--handle 0xH] [--list <column>]");
