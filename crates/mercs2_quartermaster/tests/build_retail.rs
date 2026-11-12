@@ -692,8 +692,9 @@ fn add_model_without_a_donor_asks_rather_than_guessing() {
 /// ★ `add_outfit` end to end — the recipe from the mod-model plan (`workshop-mods-rebuild-01-mod-model.md`).
 ///
 /// It is the composed case: a Data half (the model, injected into a hero-rigged donor) and a Script
-/// half (the `_tOutfits` row), and the Script half only works because it goes through the linker
-/// rather than shipping its own block.
+/// half (the `_tOutfits` row and the character map entry that restores it, which the link generates
+/// and splices onto `wifpmcinterior`, `mrxplayer` and the `vz` master), and the Script half only works
+/// because it goes through the linker rather than shipping its own block.
 #[test]
 fn add_outfit_builds_model_and_wardrobe_row_together() {
     let mut game = retail_game();
@@ -721,47 +722,39 @@ fn add_outfit_builds_model_and_wardrobe_row_together() {
         "the Script half must go through the linker: {log}"
     );
 
-    // The overlay carries BOTH blocks — the model and the relinked scripts_vz.
+    assert!(log.contains("linked mrxplayer") && log.contains("linked vz"), "the map and the load go on too: {log}");
+
+    // The overlay carries the model block and the two relinked scripts blocks: scripts_vz (the
+    // wardrobe and the master) and the resident block (the player script).
     let on_disk = std::fs::read(report.wad.expect("a WAD")).unwrap();
     let contents = mercs2_formats::patch_wad::read_patch_wad(&on_disk).expect("re-read");
     assert_eq!(
         contents.blocks.len(),
-        2,
-        "expected a model block and a scripts_vz block"
+        3,
+        "expected a model block, a scripts_vz block and the resident block"
     );
+    let chunk = |block: &str, script: &str| -> Vec<u8> {
+        let blk = contents
+            .blocks
+            .iter()
+            .find(|b| b.path_string.to_lowercase().contains(block))
+            .unwrap_or_else(|| panic!("a {block} block"));
+        let dec = mercs2_formats::sges::decompress_sges(&blk.compressed_data).expect("sges");
+        let parsed = mercs2_formats::scripts_block::ScriptsBlock::parse(&dec).expect("parse");
+        parsed.verify_csums().expect("CSUMs must verify");
+        let luaq = parsed.extract_lua(parsed.find_by_name(script).unwrap_or_else(|| panic!("{script} present"))).expect("extract");
+        assert!(luaq.starts_with(&mercs2_luac::MERCS2_LUAQ_HEADER), "game dialect");
+        luaq
+    };
+    let has = |luaq: &[u8], s: &str| luaq.windows(s.len()).any(|w| w == s.as_bytes());
 
-    // And the linked script really contains our row plus the derived availability lift.
-    let script_blk = contents
-        .blocks
-        .iter()
-        .find(|b| b.path_string.to_lowercase().contains("scripts_vz"))
-        .expect("a scripts_vz block");
-    let dec = mercs2_formats::sges::decompress_sges(&script_blk.compressed_data).expect("sges");
-    let parsed = mercs2_formats::scripts_block::ScriptsBlock::parse(&dec).expect("parse");
-    parsed.verify_csums().expect("CSUMs must verify");
-    let idx = parsed
-        .find_by_name("wifpmcinterior")
-        .expect("wifpmcinterior present");
-    let luaq = parsed.extract_lua(idx).expect("extract");
-    assert!(
-        luaq.starts_with(&mercs2_luac::MERCS2_LUAQ_HEADER),
-        "game dialect"
-    );
-
-    // The strings we appended survive into the compiled chunk's constant table.
-    let hay = String::from_utf8_lossy(&luaq);
-    assert!(
-        hay.contains("SeanDevlin"),
-        "the outfit Name must be in the constants"
-    );
-    assert!(
-        hay.contains("qm_sean_devlin"),
-        "the Model name must be in the constants"
-    );
-    assert!(
-        hay.contains("GetAvailableCostumes"),
-        "the derived availability lift must be present, or the outfit is unreachable"
-    );
+    // The row's strings are in the wardrobe's constants, always listed; the map restores its model.
+    let wardrobe = chunk("scripts_vz", "wifpmcinterior");
+    for s in ["SeanDevlin", "qm_sean_devlin", "bAlwaysVisible"] {
+        assert!(has(&wardrobe, s), "the wardrobe chunk carries {s}");
+    }
+    let player = chunk("resident", "mrxplayer");
+    assert!(has(&player, "qm_sean_devlin") && has(&player, "SetCharacterMap"), "the player chunk installs the map");
 }
 
 /// The vendored Lua corpus. Panics when the corpus is missing.
@@ -825,15 +818,11 @@ fn two_installed_shipments_both_survive_the_deploy_link() {
     let a = outfit_shipment(&root.join("sean"), "sean-devlin", "qm_sean", "SeanDevlin");
     let b = outfit_shipment(&root.join("roze"), "roze-skin", "qm_roze", "Roze");
 
-    // Each on its own links only its own row — the standalone-valid case, and the trap.
-    for (s, mine, theirs) in [(&a, "SeanDevlin", "Roze"), (&b, "Roze", "SeanDevlin")] {
-        let muts = build::script_mutations(&s.manifest, &s.root).expect("mutations");
-        assert_eq!(muts.len(), 1);
-        assert!(muts[0].append.contains(mine));
-        assert!(
-            !muts[0].append.contains(theirs),
-            "a Shipment must not know about the other"
-        );
+    // Each on its own declares only its own outfit — the standalone-valid case, and the trap.
+    for (s, mine) in [(&a, "SeanDevlin"), (&b, "Roze")] {
+        assert!(build::script_mutations(&s.manifest, &s.root).expect("mutations").is_empty());
+        let outfits = build::added_outfits(&s.manifest);
+        assert_eq!(outfits.iter().map(|o| o.slug.as_str()).collect::<Vec<_>>(), [mine], "a Shipment must not know about the other");
     }
 
     let deploy = root.join("deploy");
@@ -866,16 +855,23 @@ fn two_installed_shipments_both_survive_the_deploy_link() {
     // The load plan goes into the game folder, where the Lua bridge's startup check reads it.
     assert_eq!(placed[2]["destination"], serde_json::json!({ "kind": "game_folder", "relative": "scripts/load-plan.json" }));
 
-    // The Shipments' one target, compiled once for both, beside qm's splices onto the hosts of its
-    // hooks (W-a: every deploy link carries them).
+    // The Shipments' outfits, generated once for both onto the wardrobe, the player script and the
+    // master, beside qm's splices onto the hosts of its hooks (W-a: every deploy link carries them).
     let qm_owned = |l: &&link::LinkedScript| l.contributors == [link::MODLOADER_CONTRIBUTOR.to_string()];
     let shipments: Vec<&link::LinkedScript> = report.linked.iter().filter(|l| !qm_owned(l)).collect();
-    assert_eq!(shipments.len(), 1, "one target, compiled once for both Shipments: {:?}", report.linked);
     assert_eq!(
-        shipments[0].contributors,
-        vec!["sean-devlin", "roze-skin"],
-        "neither requires the other, so the request order is the load order"
+        shipments.iter().map(|l| l.target.as_str()).collect::<Vec<_>>(),
+        ["wifpmcinterior", "mrxplayer", "vz"],
+        "one generated set for both Shipments: {:?}",
+        report.linked
     );
+    for l in &shipments {
+        assert_eq!(
+            l.contributors,
+            vec!["sean-devlin", "roze-skin"],
+            "neither requires the other, so the request order is the load order"
+        );
+    }
     let qm: Vec<String> = report.linked.iter().filter(qm_owned).map(|l| l.target.clone()).collect();
     assert_eq!(qm, qm_gameplay_hosts());
     // The plan the link followed is written beside the placement record.
@@ -1033,12 +1029,16 @@ fn the_deploy_link_follows_the_request_order() {
         one.placements[0].sha256, again.placements[0].sha256,
         "one request must always link to the same bytes"
     );
-    assert_eq!(one.linked[0].contributors, vec!["aaa-mod", "zzz-mod"]);
-    assert_eq!(
-        two.linked[0].contributors,
-        vec!["zzz-mod", "aaa-mod"],
-        "reversing the request reverses the order"
-    );
+    let wardrobe = |r: &build::LinkReport| -> Vec<String> {
+        r.linked
+            .iter()
+            .find(|l| l.target == "wifpmcinterior" && l.contributors != [link::MODLOADER_CONTRIBUTOR.to_string()])
+            .expect("the outfits' wardrobe splice")
+            .contributors
+            .clone()
+    };
+    assert_eq!(wardrobe(&one), vec!["aaa-mod", "zzz-mod"]);
+    assert_eq!(wardrobe(&two), vec!["zzz-mod", "aaa-mod"], "reversing the request reverses the order");
 }
 
 /// M0209 reaches the plan: an import nothing provides refuses the set, as an error of the plan on the
