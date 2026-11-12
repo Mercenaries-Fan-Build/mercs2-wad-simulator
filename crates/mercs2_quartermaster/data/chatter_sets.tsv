@@ -1,0 +1,10 @@
+# Chatter set names the game holds: the names Human.SetChatterSet takes. A template's ChatterSet component (0x949A1E44)
+# stores the set as pandemic_hash_m2(name); qm names a template's set by finding the row whose name hashes to it.
+# Hashes checked with tools/pandemic_hash.py --m2; template values read with mercs2_probe's template_form on the retail
+# vz.wad (2026-11-12). Columns (tab-separated): name, evidence.
+name	evidence
+Mattias_Peter01	ChatterSet 0x7EB17B9E of templates mattias, mattiasupgrade1-3 (vz.wad worldentity); docs/mercs2-dlc-luacd/src/dlc01/dlc01_pmcinterior.lua:2151
+Chris_Phil01	ChatterSet 0x9C417637 of templates Chris, chrisupgrade1-3 (vz.wad worldentity); docs/mercs2-dlc-luacd/src/dlc01/dlc01_pmcinterior.lua:2155
+Jen_Jen01	ChatterSet 0x741CA6B3 of templates Jen, jenupgrade1-3 (vz.wad worldentity); docs/mercs2-dlc-luacd/src/dlc01/dlc01_pmcinterior.lua:2153
+Obama_Obama01	docs/mercs2-dlc-luacd/src/dlc01/dlc01_player.lua:263, docs/mercs2-dlc-luacd/src/dlc01/dlc01_pmcinterior.lua:2149
+Palin_Palin01	docs/mercs2-dlc-luacd/src/dlc01/dlc01_player.lua:261, docs/mercs2-dlc-luacd/src/dlc01/dlc01_pmcinterior.lua:2145
