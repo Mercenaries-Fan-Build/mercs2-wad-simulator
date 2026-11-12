@@ -70,8 +70,8 @@ fn ids_of(shipments: &[&LoadedShipment]) -> Vec<String> {
         .collect()
 }
 
-fn codes(p: &LoadPlan) -> Vec<&'static str> {
-    p.findings.iter().map(|f| f.code).collect()
+fn codes(p: &LoadPlan) -> Vec<&str> {
+    p.findings.iter().map(|f| f.code.as_str()).collect()
 }
 
 /// The header-only i386 DLL committed as the fixtures' plugin: `MZ`, `e_lfanew`, `PE\0\0` and the
