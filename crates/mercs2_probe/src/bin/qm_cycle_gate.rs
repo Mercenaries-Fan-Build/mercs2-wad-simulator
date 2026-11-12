@@ -77,6 +77,8 @@ fn run(game_wad: &Path, out_dir: &Path, mark: Option<&Path>, shipments: &[PathBu
             &spliced,
             link::QmHooks::Always,
             None,
+            mercs2_quartermaster::outfits::DEFAULT_LEVEL,
+            &[],
         )
         .map_err(|e| e.to_string())?
     };
