@@ -326,7 +326,7 @@ fn save_dump(profile_path: &str, needle: Option<&str>) -> Result<(), String> {
     let bytes = std::fs::read(profile_path).map_err(|e| format!("read {profile_path}: {e}"))?;
     let p = mercs2_formats::save::parse(&bytes)?;
     println!(
-        "[save-dump] '{}' | contract {} | playtime {}s | cash {} | fuel {}/{} | character(0x4D) {} | upgrade(0x4F) {} | unlocked_costumes(0x24A) {} | unk(0x24B) {} | flags4C {:#x} | ts {}",
+        "[save-dump] '{}' | contract {} | playtime {}s | cash {} | fuel {}/{} | character(0x4D) {} | costume(0x4F) {} | unlocked_costumes(0x24A) {} | unk(0x24B) {} | flags4C {:#x} | ts {}",
         p.save_name(),
         p.active_contract(),
         p.play_time_seconds,
@@ -334,7 +334,7 @@ fn save_dump(profile_path: &str, needle: Option<&str>) -> Result<(), String> {
         p.fuel,
         p.fuel_capacity,
         p.character_index,
-        p.upgrade_index,
+        p.costume_index,
         p.unlocked_costumes,
         p.unknown_0x24b,
         p.flags_0x4c,
