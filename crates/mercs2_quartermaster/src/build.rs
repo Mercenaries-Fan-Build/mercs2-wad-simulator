@@ -1299,15 +1299,17 @@ pub fn added_outfits(manifest: &crate::manifest::Manifest) -> Vec<crate::outfits
         .contributions
         .iter()
         .filter_map(|c| match c {
-            Contribution::AddOutfit { name, slug, display, wearer, .. } => Some(crate::outfits::AddedOutfit {
-                shipment: manifest.shipment.name.clone(),
-                slug: slug.clone(),
-                model: name.clone(),
-                display: display.clone(),
-                wearers: vec![wearer.clone()],
-                levels: None,
-                chatter: None,
-            }),
+            Contribution::AddOutfit { name, slug, display, wearer, chatter, levels, .. } => {
+                Some(crate::outfits::AddedOutfit {
+                    shipment: manifest.shipment.name.clone(),
+                    slug: slug.clone(),
+                    model: name.clone(),
+                    display: display.clone(),
+                    wearers: wearer.heroes().into_iter().map(str::to_string).collect(),
+                    levels: levels.clone(),
+                    chatter: chatter.clone(),
+                })
+            }
             _ => None,
         })
         .collect()
@@ -3181,12 +3183,16 @@ fn lower(
             // hero whose wardrobe it joins and whose rig it must animate on. `pmc_hum_<wearer>` is
             // that hero's base model, and it is validated against the stack so a wrong pick fails
             // loudly here rather than silently producing an outfit rigged to nothing. `donor:` is
-            // still an optional override for a variant host (`pmc_hum_mattias_v3`, …).
+            // still an optional override for a variant host (`pmc_hum_mattias_v3`, …). For a list of
+            // wearers it is the first listed hero's: the game ships one human skeleton, identical to
+            // the millimetre across its humanoid models (bone census 2026-07-27), so any hero's rig
+            // animates on every hero, and the hosts differ only in bone count and materials.
             let picked;
             let donor_name = match donor {
                 Some(d) => d.as_str(),
                 None => {
-                    let host = auto_donor_for_wearer(wearer).ok_or_else(|| BuildError::Unsupported {
+                    let first = wearer.heroes().first().copied().unwrap_or_default();
+                    let host = auto_donor_for_wearer(first).ok_or_else(|| BuildError::Unsupported {
                         index,
                         kind,
                         reason: format!(
