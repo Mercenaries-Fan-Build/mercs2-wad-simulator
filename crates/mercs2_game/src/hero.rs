@@ -2,22 +2,18 @@
 //!
 //! Ground truth is the retail SPAWN path (`mrxplayer.lua:155-179`, `GetTemplateAndModelName`):
 //! * the spawn TEMPLATE is `_tCharacterMap.templates[iUpgrade]` (`<hero>upgrade1..3`), or the
-//!   base template at tier 0 — **the hero's look progresses with the upgrade tier**, because
-//!   each template carries its own model. `iUpgrade` = profile header `@0x4F`
-//!   (`Get/SetProfileUpgrade` = profile object `+0x62`).
-//! * a wardrobe costume (`iCostume` = profile object `+0x63`, wardrobe stores `_tOutfits`
-//!   index − 1) OVERRIDES the template model via `_tCharacterMap.models[iCostume]` (1-based);
-//!   `0` = no override. Every observed save stores costume 0 (wardrobe never used), and the
-//!   costume byte's FILE offset is therefore not yet locatable — the engine object offset is
-//!   proven, the file byte is not.
+//!   base template at tier 0. `iUpgrade` = profile header `@0x4E` (`Get/SetProfileUpgrade` =
+//!   profile object `+0x62`), 0 in every vendored save.
+//! * a wardrobe costume (`iCostume` = profile header `@0x4F` = object `+0x63`, wardrobe stores
+//!   `_tOutfits` index − 1) OVERRIDES the template model via `_tCharacterMap.models[iCostume]`
+//!   (1-based); `0` = no override. The end-game Mattias save stores 3, the Jacket
+//!   (`mercs2_formats::save::Profile::costume_index`).
 //! * the HERO byte is header `@0x4D` (`Get/SetProfileCharacter` = object `+0x61`), values
 //!   engine-coded 1 mattias / 2 chris / 3 jen (`FUN_00634810` → `SHELL.SelectCharacter.*`).
 //!
-//! Upgrade-template MODELS: tier 0 = the hero base model (verified in vz.wad). Mattias tier 3 =
-//! the `pmc_hum_mattias_v3` "MetalHead" look (user-verified against the retail endgame save).
-//! Tier 1/2 and Chris/Jen tier models are NOT yet extracted from their templates (registry
-//! handles 0x8000A1BE.., docs/data/live_registry_hashes.csv) — they fall back to the base model
-//! until that reflection walk is done.
+//! Upgrade-template MODELS: tier 0 = the hero base model (verified in vz.wad). The tier 1-3 template
+//! models are NOT yet extracted from their templates (registry handles 0x8000A1BE..,
+//! docs/data/live_registry_hashes.csv), so a save is drawn in its costume's model or the base model.
 
 pub struct Hero {
     /// `_tCharacterMap.base` id.
@@ -95,19 +91,8 @@ pub fn hero(character_index: u8) -> &'static Hero {
         .unwrap_or(&HEROES[0])
 }
 
-/// The model an upgrade TEMPLATE carries, where known. Tier 0 = the hero base model. Mattias
-/// tier 3 = `pmc_hum_mattias_v3` (user-verified against the retail endgame save — the
-/// "MetalHead" look). Other tiers/heroes fall back to the base model until their template
-/// reflection blocks are walked (registry handles in docs/data/live_registry_hashes.csv).
-fn upgrade_model(h: &'static Hero, upgrade: u8) -> &'static str {
-    match (h.base, upgrade) {
-        ("mattias", 3) => "pmc_hum_mattias_v3",
-        _ => h.base_model,
-    }
-}
-
 /// Look label for the save browser / boot banner: the wardrobe outfit when one is set, else the
-/// upgrade tier's look.
+/// upgrade tier.
 pub fn look_label(character_index: u8, upgrade: u8, costume_byte: u8) -> String {
     let h = hero(character_index);
     if costume_byte > 0 {
@@ -117,16 +102,16 @@ pub fn look_label(character_index: u8, upgrade: u8, costume_byte: u8) -> String 
     }
     match upgrade {
         0 => "default".to_string(),
-        3 if h.base == "mattias" => "upgrade 3 (MetalHead)".to_string(),
         n => format!("upgrade {n}"),
     }
 }
 
 /// Ordered player-model candidates for a save, following the retail spawn rule
 /// (`GetTemplateAndModelName`): wardrobe costume override first (`models[costume]`, 1-based,
-/// 0 = none), else the upgrade template's model; then the hero base model, then the proven-good
-/// render model (`pmc_hum_mattias_v3`) as the last resort — the loader tries each until one builds.
-pub fn player_model_candidates(character_index: u8, upgrade: u8, costume_byte: u8) -> Vec<String> {
+/// 0 = none), then the hero base model (the upgrade templates' own models are not extracted), then
+/// the proven-good render model (`pmc_hum_mattias_v3`) as the last resort — the loader tries each
+/// until one builds.
+pub fn player_model_candidates(character_index: u8, costume_byte: u8) -> Vec<String> {
     let h = hero(character_index);
     let mut out: Vec<String> = Vec::new();
     let mut push = |m: &str| {
@@ -139,7 +124,6 @@ pub fn player_model_candidates(character_index: u8, upgrade: u8, costume_byte: u
             push(model);
         }
     }
-    push(upgrade_model(h, upgrade));
     push(h.base_model);
     push("pmc_hum_mattias_v3");
     out
@@ -150,32 +134,33 @@ mod tests {
     use super::*;
 
     #[test]
-    fn upgrade_tier_drives_the_look() {
-        // User ground truth: 2.5M-cash mid save (upgrade 0) = DEFAULT skin;
-        // completed endgame save (upgrade 3) = the MetalHead v3 look. Wardrobe untouched (0).
-        assert_eq!(player_model_candidates(1, 0, 0)[0], "pmc_hum_mattias");
-        assert_eq!(player_model_candidates(1, 3, 0)[0], "pmc_hum_mattias_v3");
+    fn the_costume_byte_drives_the_look() {
+        // The end-game Mattias save (`Mattias Nilsson_6A0E523C`) stores costume 3 and upgrade 0; the
+        // memory capture of it loaded wears the Jacket (`mercs2_formats::save::Profile::costume_index`).
+        assert_eq!(player_model_candidates(1, 3)[0], "pmc_hum_mattias_v4");
+        assert_eq!(look_label(1, 0, 3), "Jacket");
+        assert_eq!(player_model_candidates(1, 0)[0], "pmc_hum_mattias");
         assert_eq!(look_label(1, 0, 0), "default");
-        assert_eq!(look_label(1, 3, 0), "upgrade 3 (MetalHead)");
-        // Jen fresh save (hero 3, upgrade 0) = her base model.
+        assert_eq!(look_label(1, 2, 0), "upgrade 2");
+        // Jen fresh save (hero 3, costume 0) = her base model.
         assert_eq!(hero(3).base, "jen");
-        assert_eq!(player_model_candidates(3, 0, 0)[0], "pmc_hum_jen");
+        assert_eq!(player_model_candidates(3, 0)[0], "pmc_hum_jen");
     }
 
     #[test]
     fn wardrobe_costume_overrides_the_template() {
         // Retail rule: costume byte k (1-based into _tCharacterMap.models) overrides the
         // upgrade template's model; 0 = no override.
-        assert_eq!(player_model_candidates(1, 3, 5)[0], "pmc_hum_helipilot_unlockable"); // "Ewan"
+        assert_eq!(player_model_candidates(1, 5)[0], "pmc_hum_helipilot_unlockable"); // "Ewan"
         assert_eq!(look_label(1, 3, 5), "Ewan");
-        assert_eq!(player_model_candidates(3, 0, 1)[0], "pmc_hum_jen_v3"); // jen "Rebel"
+        assert_eq!(player_model_candidates(3, 1)[0], "pmc_hum_jen_v3"); // jen "Rebel"
     }
 
     #[test]
     fn out_of_range_falls_back() {
         assert_eq!(hero(0).base, "mattias");
         assert_eq!(hero(9).base, "mattias");
-        let c = player_model_candidates(3, 0, 200); // jen, garbage costume → base then proven
+        let c = player_model_candidates(3, 200); // jen, garbage costume → base then proven
         assert_eq!(c[0], "pmc_hum_jen");
         assert!(c.contains(&"pmc_hum_mattias_v3".to_string()));
     }
