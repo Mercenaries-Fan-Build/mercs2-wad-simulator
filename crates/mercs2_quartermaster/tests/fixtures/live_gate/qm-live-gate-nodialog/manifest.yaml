@@ -1,0 +1,14 @@
+# The live gate for qm's error policy where retail's dialog cannot show: a library's body fails while
+# the world loads. The engine calls the library's dynamic_import callback with nil for a body that errors
+# (live 2026-11-10: "[qm] FATAL-NODIALOG qm-live-gate-nodialog at load qm_gate_fail_load: the engine
+# could not load module qm_gate_fail_load", on the loading screen). Install alone.
+format: 2
+shipment:
+  name: qm-live-gate-nodialog
+  version: 0.1.0
+  target: retail
+contributions:
+  - kind: add_script
+    name: qm_gate_fail_load
+    source: src/qm_gate_fail_load.lua
+    load: { when: world.scripts_loaded, in: [gameplay] }
