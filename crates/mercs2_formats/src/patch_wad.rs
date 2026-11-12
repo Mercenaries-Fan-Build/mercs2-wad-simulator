@@ -693,6 +693,48 @@ pub fn read_patch_wad(raw: &[u8]) -> Result<PatchWadContents, String> {
     })
 }
 
+/// Renumber `blocks`, whose source indices and rows' rungs number the blocks of one archive, past every
+/// source index `others` carry and every rung their rows name, so that [`build_patch_wad_multi`]'s
+/// source → patch map stays one-to-one when they are written together. A block without a source index
+/// is left as it is. Refused when an index would pass `0xFFFE`, the last block index a rung holds.
+pub fn rebase_after(blocks: &mut [PatchBlock], others: &[PatchBlock]) -> Result<(), String> {
+    let mut top: Option<u32> = None;
+    let mut see = |v: u32| {
+        if v != 0xFFFF {
+            top = Some(top.map_or(v, |t: u32| t.max(v)));
+        }
+    };
+    for b in others {
+        if let Some(i) = b.source_block_index {
+            see(i);
+        }
+        for e in &b.aset_entries {
+            see(e.u32_2 & 0xFFFF);
+            see(e.u32_1 >> 16);
+            see(e.u32_1 & 0xFFFF);
+        }
+    }
+    let n = top.map_or(0, |t| t + 1);
+    let over = || format!("renumbering blocks after index {n} runs past 0xFFFE, the last block index a rung holds");
+    let shift = |v: u32| -> Result<u32, String> {
+        if v == 0xFFFF {
+            return Ok(v);
+        }
+        v.checked_add(n).filter(|s| *s < 0xFFFF).ok_or_else(over)
+    };
+    for b in blocks.iter_mut() {
+        let Some(local) = b.source_block_index else { continue };
+        b.source_block_index = Some(shift(local)?);
+        for e in &mut b.aset_entries {
+            let lo2 = shift(e.u32_2 & 0xFFFF)?;
+            let (hi1, lo1) = (shift(e.u32_1 >> 16)?, shift(e.u32_1 & 0xFFFF)?);
+            e.u32_2 = (e.u32_2 & 0xFFFF_0000) | lo2;
+            e.u32_1 = (hi1 << 16) | lo1;
+        }
+    }
+    Ok(())
+}
+
 /// Read an existing patch WAD and append (or replace) blocks, returning new WAD bytes.
 ///
 /// Blocks are matched by `path_string`. With `replace = false` a new block whose asset
@@ -700,13 +742,18 @@ pub fn read_patch_wad(raw: &[u8]) -> Result<PatchWadContents, String> {
 /// rejects the result rather than emitting a WAD with two primary ASET rows for one hash.
 /// If you are resolving overlapping mods, decide the winner *before* calling this and pass
 /// a fully-resolved block list to [`build_patch_wad_multi`] instead.
+///
+/// The new blocks' source indices and rungs are renumbered after the existing WAD's
+/// ([`rebase_after`]): [`read_patch_wad`] numbers both WADs' blocks from 0, and one source
+/// number for two blocks would point a copied row's rungs at the existing WAD's block.
 pub fn merge_patch_wads(
     existing: &[u8],
-    new_blocks: Vec<PatchBlock>,
+    mut new_blocks: Vec<PatchBlock>,
     replace: bool,
 ) -> Result<Vec<u8>, String> {
     let contents = read_patch_wad(existing)?;
     let mut merged = contents.blocks;
+    rebase_after(&mut new_blocks, &merged)?;
 
     for new_blk in new_blocks {
         if replace {
@@ -811,6 +858,53 @@ mod tests {
         )
         .unwrap();
         validate_blocks(&[a]).expect("same-block duplicate resolves to that block either way");
+    }
+
+    /// A two-rung asset: its row in `{stem}_P000` naming `{stem}_P001` as rung 1, both blocks numbered
+    /// `first`, `first + 1` in their source archive.
+    fn chain(stem: &str, hash: u32, first: u32) -> Vec<PatchBlock> {
+        let mut coarse =
+            PatchBlock::from_decompressed(b"coarse", format!("blocks\\VZ\\{stem}_P000_Q3.block"), vec![AsetEntry::new(hash, 0xFFFF_FFFF, first + 1, 27)], None)
+                .unwrap();
+        coarse.source_block_index = Some(first);
+        let mut fine = PatchBlock::from_decompressed(b"fine", format!("blocks\\VZ\\{stem}_P001_Q2.block"), vec![], None).unwrap();
+        fine.source_block_index = Some(first + 1);
+        vec![coarse, fine]
+    }
+
+    /// The rung-1 block path of `hash`'s row in a written WAD.
+    fn rung1_of(wad: &[u8], hash: u32) -> String {
+        let read = read_patch_wad(wad).unwrap();
+        let row = read.blocks.iter().flat_map(|b| &b.aset_entries).find(|e| e.asset_hash == hash).unwrap();
+        read.blocks[(row.u32_2 & 0xFFFF) as usize].path_string.clone()
+    }
+
+    /// Blocks merged from another WAD keep their LOD chains: both WADs number their blocks from 0, and
+    /// each copied row's rungs still name the copied blocks, not the target's blocks of those numbers.
+    #[test]
+    fn merged_blocks_keep_their_rungs() {
+        let target = build_patch_wad_multi(&chain("a", 0xA, 0), 0, None, &FFCS_CERT_BLOB).unwrap();
+        assert_eq!(rung1_of(&target, 0xA), "blocks\\VZ\\a_P001_Q2.block");
+        let source = build_patch_wad_multi(&chain("b", 0xB, 0), 0, None, &FFCS_CERT_BLOB).unwrap();
+        let merged = merge_patch_wads(&target, read_patch_wad(&source).unwrap().blocks, true).unwrap();
+        assert_eq!(rung1_of(&merged, 0xA), "blocks\\VZ\\a_P001_Q2.block");
+        assert_eq!(rung1_of(&merged, 0xB), "blocks\\VZ\\b_P001_Q2.block");
+    }
+
+    /// [`rebase_after`] numbers blocks past every source index and every rung the others use; a
+    /// sentinel stays a sentinel, and an index a rung cannot hold is refused.
+    #[test]
+    fn rebase_after_numbers_past_every_index_the_others_use() {
+        let mut blocks = chain("x", 1, 0);
+        blocks[0].aset_entries[0] = AsetEntry::new(1, 0x0002_FFFF, 1, 27);
+        let mut other = chain("o", 2, 40).remove(0);
+        other.aset_entries = vec![AsetEntry::new(2, 0x0064_FFFF, 0x0000_0029, 0)];
+        rebase_after(&mut blocks, &[other.clone()]).unwrap();
+        assert_eq!(blocks.iter().map(|b| b.source_block_index).collect::<Vec<_>>(), [Some(101), Some(102)]);
+        let row = &blocks[0].aset_entries[0];
+        assert_eq!((row.u32_1, row.u32_2), (0x0067_FFFF, 102));
+        other.source_block_index = Some(0xFFFE);
+        assert!(rebase_after(&mut chain("y", 3, 0), &[other]).unwrap_err().contains("0xFFFE"));
     }
 
     /// Sub-entry rows (low16 != 0xFFFF) legitimately repeat and must NOT trip the check.
