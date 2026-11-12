@@ -100,6 +100,10 @@ required-features = ["retail"]
 name = "fx_retail"
 required-features = ["retail"]
 
+[[test]]
+name = "outfits_retail"
+required-features = ["retail"]
+
 # Not the game: the notes repo this workspace is checked out inside, which CI does not have.
 [[test]]
 name = "doc_links_retail"
