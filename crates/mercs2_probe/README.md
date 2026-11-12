@@ -40,6 +40,7 @@ set, exactly as matched in `main()`:
 | `hier --model 0xHASH [names.txt] [--csv path]` | HIER bone tree with name resolution (see below) |
 | `overlays <profile-path>` | resolves a save's active `vz_state` layers and folds them through the real streaming catalog |
 | `save-dump <profile-path> [grep-needle]` | parsed `.profile` header + the decompressed SaveSingleton Lua payload |
+| `stockpile-restore <profile-path> --expect restored\|dropped` | runs `--wad`'s `wifpmcinterior` script in the exact Lua 5.1.5 VM: `LoadSingleton` with the save's `tPmcInteriorData.tStockpileQty`, then `_UpdateStockpile(false)` with the player holding nothing, and reports whether the HQ shows the saved mark (`restored`) or the live 0 (`dropped`). Exit 0 the outcome is `--expect`, 1 it is not, 2 could not run (also when every saved mark is 0, which cannot tell the two apart). BUG-015 of the fix-pack |
 | `anim-table <name\|0xH> [--handle 0xH] [--list <column>]` | an `animationtable` as the loader holds it: columns, defaults row, data rows, and each row's `ASTO` list |
 | `layer <name\|0xH> [--overlay <wad>]` / `layer --all` / `layer --frames <capture>` / `layer --catalog <out.tsv> [--also <archives>]` | every entity of a placement layer with its template, model and component classes, and the `lineregion` hash a `LineRegion` names; `--overlay` mounts a WAD over the stack, e.g. a level's patch over `vz.wad`; `--all` reads every layer of the stack, prints how many entities draw a model, how placed `PhysicalLink` records resolve and which classes the rest carry, and exits 1 if a layer does not read; `--frames` compares every placed entity a v1.0 capture holds with its live SceneObject position: a link child against its chain of links, the rest against their `Transform`; `--catalog` writes one TSV row per layer of the stack with its archive, block path, entity, model and link counts and class counts, plus a bare row per layer of each `--also` archive, of any platform |
 | `clip-names <review.tsv>` | names the AnimationLookup's clips from the rows that list them (`player_mattias_rifle_upright_run_forward_fb`): the row's character and equipment, then a stance and action from words the data supplies. Writes a review file, each name with its expected chance matches, whether its stance agrees with the stance tables, and how many clips share its stance and action; merges nothing. Reads `rainbow_table`, `jul08_strings` and `notes_docs_dir` from `.mercs2-local.toml` |
@@ -174,6 +175,7 @@ cargo run -p mercs2_probe -- find-placement villa
 # save files
 cargo run -p mercs2_probe -- save-dump "C:/.../save0.profile" cash
 cargo run -p mercs2_probe -- overlays "C:/.../save0.profile"
+cargo run -p mercs2_probe -- stockpile-restore "crates/mercs2_formats/fixtures/saves/Mattias Nilsson_6A0E523C.profile" --expect restored --wad mercs2-unofficial-patch.wad
 
 # Scaleform movies out of the WADs, laid out as the golden set expects (vz at the root)
 cargo run -p mercs2_probe -- gfx-extract output/gfx_movies         --wad <game>/data/vz.wad
