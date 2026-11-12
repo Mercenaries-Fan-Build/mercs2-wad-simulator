@@ -65,12 +65,12 @@ use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 
 /// One scripts block read out of the game stack, with the ASET rows it publishes.
-struct LoadedScriptBlock {
+pub struct LoadedScriptBlock {
     /// The block's own PTHS path, carried through to the emitted `PatchBlock`.
-    path: String,
-    block: ScriptsBlock,
+    pub path: String,
+    pub block: ScriptsBlock,
     /// `asset_hash -> (packed_block_ref, secondary_ref, type_id)`, as the base WAD had them.
-    rows: std::collections::HashMap<u32, (u32, u32, u32)>,
+    pub rows: std::collections::HashMap<u32, (u32, u32, u32)>,
 }
 
 /// Load each of `blocks` (`(PTHS needle, PTHS path)`, [`link::SCRIPT_BLOCKS`] or
@@ -80,7 +80,7 @@ struct LoadedScriptBlock {
 /// carry `scripts_vz` and nothing else, and if a mutation actually needed the absent block the
 /// linker already reports `UnknownScript` naming the target — which tells the author what to fix,
 /// where "no resident block in the game stack" would not. A stack with none of them is an error.
-fn load_script_blocks(
+pub fn load_script_blocks(
     stack: &mut GameStack,
     blocks: &[(&str, &str)],
     kind: &'static str,
@@ -138,7 +138,7 @@ fn load_script_blocks(
 /// A hash with no row in the base falls back to a sentinel script row. That should not happen for a
 /// block read out of the stack — retail gives every carried asset a row — and a row that exists
 /// beats the M0004 hang of no row at all.
-fn script_patch_blocks(
+pub fn script_patch_blocks(
     loaded: &[LoadedScriptBlock],
     touched: &std::collections::BTreeSet<usize>,
     kind: &'static str,
@@ -169,20 +169,29 @@ fn script_patch_blocks(
     Ok(out)
 }
 
-/// Link the front end's sound loader ([`link::link_front_end`]) into `shell.wad`'s scripts block,
-/// read from the `shell.wad` beside `game`'s base WAD ([`GameStack::open_sibling`]), and return the
-/// block to ship in the shell patch — every row copied from `shell.wad` ([`script_patch_blocks`]).
-/// Empty when no registration loads a bank in the front end. A missing `shell.wad` is an error.
+/// Whether a Shipment set has front-end work for qm's front-end link: a sound bank or an `add_script`
+/// library that loads in the front end.
+fn has_front_end(sound_regs: &[link::SoundBankRegistration], additions: &[link::ScriptAddition]) -> bool {
+    let fe = crate::manifest::LoadSession::FrontEnd;
+    sound_regs.iter().any(|r| r.sessions.contains(&fe)) || additions.iter().any(|a| a.load.as_ref().is_some_and(|l| l.sessions.contains(&fe)))
+}
+
+/// Link qm's front-end hooks and loader ([`link::link_front_end`]) into `shell.wad`'s scripts block,
+/// as `hooks` says, read from the `shell.wad` beside `game`'s base WAD ([`GameStack::open_sibling`]),
+/// and return the block to ship in the shell patch — every row copied from `shell.wad`
+/// ([`script_patch_blocks`]), with the modules the link added ([`link::LinkOutput::modules`]). Empty
+/// when `hooks` asks for nothing. A missing `shell.wad` is an error.
 fn link_shell_loader(
     game: &GameStack,
-    corpus: &Path,
     sound_regs: &[link::SoundBankRegistration],
+    additions: &[link::ScriptAddition],
     order: &[String],
+    hooks: link::QmHooks,
     kind: &'static str,
     log: &mut Vec<String>,
-) -> Result<Vec<PatchBlock>, BuildError> {
-    if !sound_regs.iter().any(|r| r.sessions.contains(&crate::manifest::LoadSession::FrontEnd)) {
-        return Ok(Vec::new());
+) -> Result<(Vec<PatchBlock>, Vec<link::LinkedModule>, Vec<crate::imports::ImportFinding>), BuildError> {
+    if hooks == link::QmHooks::ForLibraries && !has_front_end(sound_regs, additions) {
+        return Ok((Vec::new(), Vec::new(), Vec::new()));
     }
     let fail = |message: String| BuildError::Lower { index: 0, kind, message };
     let mut shell = game.open_sibling("shell.wad").map_err(fail)?;
@@ -191,7 +200,7 @@ fn link_shell_loader(
         .iter_mut()
         .map(|lb| link::TargetBlock { path: lb.path.clone(), block: &mut lb.block })
         .collect();
-    let linked = link::link_front_end(&mut targets, corpus, sound_regs, order).map_err(|e| fail(e.to_string()))?;
+    let linked = link::link_front_end(&mut targets, sound_regs, additions, order, hooks).map_err(|e| fail(e.to_string()))?;
     drop(targets);
     for l in &linked.scripts {
         log.push(format!(
@@ -199,7 +208,54 @@ fn link_shell_loader(
             l.target, loaded[l.block].path, l.base_source_bytes, l.linked_source_bytes, l.bytecode_bytes, l.contributors
         ));
     }
-    script_patch_blocks(&loaded, &linked.scripts.iter().map(|l| l.block).collect(), kind)
+    let blocks = script_patch_blocks(&loaded, &linked.scripts.iter().map(|l| l.block).collect(), kind)?;
+    Ok((blocks, linked.modules, linked.findings))
+}
+
+/// A standalone build's import findings ([`crate::imports::check`]). A top-level use of a module
+/// whose body has not run yet (M0314, [`crate::imports::ImportRule::LoadOrder`]) is in every set this
+/// Shipment is part of, so it fails the build, and so does an unresolved name (M0209) that is one of
+/// the Shipment's own `add_script` modules, which no other Shipment may mint: it is minted only in
+/// another session. A reorder of retail's loading (M0314, [`crate::imports::ImportRule::Reorder`]) is
+/// a warning everywhere. Any other M0209 or M0313 may be answered by another Shipment of the set, so
+/// it is a warning in the build log; `qm link` checks it against the installed set and refuses the
+/// set on it.
+fn solo_import_findings(
+    findings: &[crate::imports::ImportFinding],
+    manifest: &crate::manifest::Manifest,
+    kind: &'static str,
+    log: &mut Vec<String>,
+) -> Result<(), BuildError> {
+    use crate::imports::ImportRule;
+    use mercs2_formats::hash::pandemic_hash_m2;
+    let own = |module: &str| {
+        let h = pandemic_hash_m2(module);
+        manifest.contributions.iter().any(|c| match c {
+            Contribution::AddScript { name, .. } => pandemic_hash_m2(name.as_str()) == h,
+            _ => false,
+        })
+    };
+    for f in findings {
+        if f.rule.is_warning() {
+            log.push(format!("warning {f}"));
+            continue;
+        }
+        let certain = f.rule == ImportRule::LoadOrder || (f.rule == ImportRule::Unresolved && own(&f.module));
+        if certain {
+            return Err(BuildError::Lower { index: 0, kind, message: f.to_string() });
+        }
+        log.push(format!("warning {f} (`qm link` checks this against the installed set, and refuses the set on it)"));
+    }
+    Ok(())
+}
+
+/// Which level a [`lower_fx`] merges for.
+#[derive(Clone, Copy)]
+enum FxLevel {
+    /// The main campaign, `vz`.
+    Main,
+    /// A custom level's link ([`link_level`]).
+    Custom,
 }
 
 /// `add_fx_sprite`, `add_fx` and `replace_fx` of `shipments`, in order, and the set's
@@ -208,6 +264,9 @@ fn link_shell_loader(
 /// into the resident block of `loaded`, the game's worldentity with every added template when the
 /// set adds one, the `fxdict` with every sprite's record when the set adds a sprite, and the atlas
 /// with every sprite drawn on the base when the set adds a sprite or repaints it.
+///
+/// In the main campaign (`level`), the worldentity also takes the templates of every `level: vz` row;
+/// a custom level runs its own worldentity, which those rows do not reach.
 ///
 /// Returns the effects block and the index into `loaded` of the resident block when any of its
 /// entries was rewritten. The effects block carries every row the game gives its entries, copied,
@@ -218,6 +277,7 @@ fn lower_fx(
     game: &mut GameStack,
     loaded: &mut [LoadedScriptBlock],
     scope: crate::fx::Scope,
+    level: FxLevel,
     kind: &'static str,
     log: &mut Vec<String>,
 ) -> Result<(Option<PatchBlock>, Option<usize>), BuildError> {
@@ -245,7 +305,21 @@ fn lower_fx(
     if repainted {
         log.push(format!("{resident_path}: the vfx atlas 0x{:08X} is repainted", crate::sprite::VFX_ATLAS));
     }
-    let base = crate::fx::FxBase { effects: &effects.entries, worldentity: &we, fxdict: &records, atlas: &atlas, repainted };
+    let schemas = match level {
+        FxLevel::Main => crate::fx::level_schemas(game, shipments.iter().map(|s| &s.manifest)).map_err(|m| fail(0, m))?,
+        FxLevel::Custom => None,
+    };
+    let base = crate::fx::FxBase {
+        effects: &effects.entries,
+        worldentity: &we,
+        fxdict: &records,
+        atlas: &atlas,
+        repainted,
+        level_templates: match level {
+            FxLevel::Main => crate::fx::LevelTemplates::main(schemas.as_ref()),
+            FxLevel::Custom => crate::fx::LevelTemplates::Skip,
+        },
+    };
     let merged = crate::fx::merge(&base, &set, scope).map_err(|f| {
         let index = f.problems.first().map(|p| p.index).or_else(|| f.conflicts.first().map(|c| c.claimants[0].index));
         fail(index.unwrap_or(0), f.to_string())
@@ -684,7 +758,7 @@ enum Lowering {
 ///
 /// Fails the build on any blocking finding. That is the whole value: both structural bugs this
 /// crate has shipped were invisible in the manifest and plain in the bytes.
-fn verify_emitted(wad: &[u8], keys: &crate::shader::ShaderKeys) -> Result<Vec<crate::lint::Diagnostic>, BuildError> {
+pub fn verify_emitted(wad: &[u8], keys: &crate::shader::ShaderKeys) -> Result<Vec<crate::lint::Diagnostic>, BuildError> {
     let contents =
         mercs2_formats::patch_wad::read_patch_wad(wad).map_err(|m| BuildError::Lower {
             index: 0,
@@ -1237,7 +1311,13 @@ pub fn script_additions(
     let shipment = manifest.shipment.name.clone();
     let mut out = Vec::new();
     for (index, c) in manifest.contributions.iter().enumerate() {
-        if let Contribution::AddScript { name, source, .. } = c {
+        if let Contribution::AddScript { name, source, load, .. } = c {
+            if let Some(l) = load {
+                let refusals = crate::lint::library_load_refusals(name, l);
+                if !refusals.is_empty() {
+                    return Err(BuildError::Lower { index, kind: "add_script", message: refusals.join(" ") });
+                }
+            }
             let path = root.join(source);
             let src = std::fs::read_to_string(&path).map_err(|e| BuildError::Lower {
                 index,
@@ -1248,6 +1328,7 @@ pub fn script_additions(
                 shipment: shipment.clone(),
                 name: name.clone(),
                 source: src,
+                load: load.clone(),
             });
         }
     }
@@ -1257,8 +1338,8 @@ pub fn script_additions(
 /// Every `add_ui`'s FlashWidget registration, for the linker to bake into `qm_modloader`.
 ///
 /// Kept separate from [`script_mutations`] because a UI mod does NOT append to a base script — its
-/// registration lives in the Quartermaster-owned load space, reached by a trampoline the linker
-/// synthesizes once. Returning an empty vec (no `add_ui`) means no loader is minted at all.
+/// registration lives in the Quartermaster-owned load space, which qm's hooks load and run. Returning
+/// an empty vec (no `add_ui`) means no loader is minted at all.
 pub fn ui_registrations(manifest: &crate::manifest::Manifest) -> Vec<link::UiRegistration> {
     let shipment = manifest.shipment.name.clone();
     manifest
@@ -1280,9 +1361,8 @@ pub fn ui_registrations(manifest: &crate::manifest::Manifest) -> Vec<link::UiReg
 /// Every `activate_layer`'s `MrxLayerManager` marks, for the linker to bake into `qm_modloader`.
 ///
 /// Kept separate from [`script_mutations`] for the same reason as [`ui_registrations`]: it does not
-/// append to a base script but lives in the Quartermaster-owned load space, reached by the one
-/// synthesized trampoline. A UI mod and a layer mod both feed this loader, so either alone is enough
-/// to mint it.
+/// append to a base script but lives in the Quartermaster-owned load space, which qm's hooks load and
+/// run. A UI mod and a layer mod both feed this loader, so either alone is enough to mint it.
 pub fn layer_registrations(manifest: &crate::manifest::Manifest) -> Vec<link::LayerRegistration> {
     let shipment = manifest.shipment.name.clone();
     manifest
@@ -4621,10 +4701,10 @@ pub fn build(
     // its single-Shipment case.
     //
     // `ui_regs` / `layer_regs` / `additions` count too: an add_ui / activate_layer / add_script with
-    // no other script edit still needs the linker to run (respectively: mints the loader trampoline,
-    // mints the loader trampoline, mints a fresh scripts_vz entry). So a non-empty of any of them
-    // must trigger the link even when `mutations` is empty. A bank the front end loads links into
-    // `shell.wad`'s scripts block (below).
+    // no other script edit still needs the linker to run (respectively: mints `qm_modloader` and
+    // splices the hooks that load it, the same, mints a fresh scripts_vz entry). So a non-empty of any
+    // of them must trigger the link even when `mutations` is empty. A bank or a library the front end
+    // loads links into `shell.wad`'s scripts block (below).
     //
     // `add_fx_sprite`, `add_fx`, `replace_fx` and a `replace_texture` of the `vfx` atlas share the
     // load: a template, a sprite's record and the atlas go into the resident block, and the block is
@@ -4639,6 +4719,7 @@ pub fn build(
     let fx_kind = manifest.contributions.iter().enumerate().find(|(_, c)| {
         matches!(c, Contribution::AddFx { .. } | Contribution::ReplaceFx { .. } | Contribution::AddFxSprite { .. })
             || crate::fx::repaints_atlas(c)
+            || matches!(c, Contribution::LevelAsset { level, templates, .. } if level == crate::level::VZ && !templates.is_empty())
     });
     if touches_scripts || fx_kind.is_some() {
         let Some(game) = game.as_deref_mut() else {
@@ -4671,7 +4752,7 @@ pub fn build(
             // A single Shipment has nothing to order against, so the resolved order is itself.
             // Cross-Shipment order is `link_installed`'s job.
             let solo_order = [manifest.shipment.name.clone()];
-            let linked = link::link_into_blocks(
+            let linked = link::link_into_level_blocks(
                 &mut targets,
                 corpus,
                 &mutations,
@@ -4682,6 +4763,9 @@ pub fn build(
                 &additions,
                 &replacements,
                 &solo_order,
+                &std::collections::BTreeSet::new(),
+                link::QmHooks::ForLibraries,
+                None,
             )
             .map_err(|e| BuildError::Lower {
                 index: 0,
@@ -4689,12 +4773,7 @@ pub fn build(
                 message: e.to_string(),
             })?;
             drop(targets);
-            // M0209 is a load-plan finding, and a single-Shipment build writes no plan; the warning
-            // goes to the build log, where `qm link` over the installed set reports it again as a
-            // finding.
-            for u in &linked.unresolved_imports {
-                log.push(format!("warning [M0209]: {u}"));
-            }
+            solo_import_findings(&linked.findings, manifest, "patch_lua", &mut log)?;
             for l in &linked.scripts {
                 log.push(format!(
                     "linked {} in {}: {} → {} B source, {} B bytecode, from {:?}",
@@ -4710,7 +4789,7 @@ pub fn build(
         }
         if let Some((index, c)) = fx_kind {
             let (effects, resident) =
-                lower_fx(&[shipment], game, &mut loaded, crate::fx::Scope::Build, c.kind(), &mut log)
+                lower_fx(&[shipment], game, &mut loaded, crate::fx::Scope::Build, FxLevel::Main, c.kind(), &mut log)
                     .map_err(|e| match e {
                         BuildError::Lower { index: 0, kind, message } => BuildError::Lower { index, kind, message },
                         other => other,
@@ -4738,22 +4817,25 @@ pub fn build(
         blocks.extend(script_blocks);
     }
 
-    // The front end's loader, linked into `shell.wad`'s scripts block and shipped in the shell patch.
-    if sound_regs.iter().any(|r| r.sessions.contains(&crate::manifest::LoadSession::FrontEnd)) {
+    // The front end's hooks and loader, linked into `shell.wad`'s scripts block and shipped in the shell
+    // patch. Nothing is recompiled from the corpus: qm's code is spliced onto the retail bytecode.
+    if has_front_end(&sound_regs, &additions) {
         let Some(game) = game.as_deref() else {
             return Err(BuildError::GameRequired { index: 0, kind: "front-end loader" });
         };
-        let Some(corpus) = corpus_root else {
-            return Err(BuildError::Lower {
-                index: 0,
-                kind: "front-end loader",
-                message: "linking the front end's sound loader needs the decompiled corpus (the base \
-                          source of `mrxsound`); for `qm`, pass --corpus <dir> or --workshop-data <dir>"
-                    .into(),
-            });
-        };
         let solo_order = [manifest.shipment.name.clone()];
-        shell_blocks.extend(link_shell_loader(game, corpus, &sound_regs, &solo_order, "front-end loader", &mut log)?);
+        // A standalone build writes no load plan: the deploy link records the set's libraries.
+        let (front_end, _modules, findings) = link_shell_loader(
+            game,
+            &sound_regs,
+            &additions,
+            &solo_order,
+            link::QmHooks::ForLibraries,
+            "front-end loader",
+            &mut log,
+        )?;
+        solo_import_findings(&findings, manifest, "front-end loader", &mut log)?;
+        shell_blocks.extend(front_end);
     }
     check_sound_loaders(
         &sound_regs,
@@ -4764,6 +4846,30 @@ pub fn build(
     // Every bank the engine loads ships its three tables in one block of the overlay.
     crate::sound::check_engine_banks(&engine_banks, &blocks.iter().collect::<Vec<_>>())
         .map_err(|message| BuildError::Lower { index: 0, kind: "sound", message })?;
+
+    // `level_asset` rows of the main campaign: their blocks, numbered after every other block of the
+    // overlay (`patch_wad::rebase_after`).
+    let vz_assets = crate::level::assets_of(manifest, crate::level::VZ);
+    if !vz_assets.is_empty() {
+        let index = manifest
+            .contributions
+            .iter()
+            .position(|c| matches!(c, Contribution::LevelAsset { level, templates, .. } if level == crate::level::VZ && templates.is_empty()))
+            .expect("assets_of found a level: vz row");
+        let fail = |message: String| BuildError::Lower { index, kind: "level_asset", message };
+        let Some(g) = game.as_deref() else {
+            return Err(BuildError::GameRequired { index, kind: "level_asset" });
+        };
+        let mut vz_blocks = crate::level::compile_vz(&shipment.root, &vz_assets, g).map_err(fail)?;
+        mercs2_formats::patch_wad::rebase_after(&mut vz_blocks, &blocks).map_err(fail)?;
+        log.push(format!(
+            "level: vz: {} asset(s) in {} block(s), after the overlay's {} other block(s)",
+            vz_assets.len(),
+            vz_blocks.len(),
+            blocks.len()
+        ));
+        blocks.extend(vz_blocks);
+    }
 
     // Mirror the base WAD's CSUM value/meta into the overlay, as the proven publish path does. I
     // previously passed 0/None here, which is a gratuitous divergence from output shapes that are
@@ -5477,8 +5583,9 @@ struct LinkSet<'a> {
     additions: &'a [link::ScriptAddition],
     replacements: &'a [link::ScriptReplacement],
     order: &'a [String],
-    touches_scripts: bool,
-    fx: bool,
+    /// Whether a Shipment has a kind the fx merge applies in a custom level
+    /// ([`crate::fx::merges_level_fx`]).
+    level_fx: bool,
 }
 
 /// The blocks of one level's whole patch.
@@ -5489,13 +5596,15 @@ struct LinkSet<'a> {
 /// the level overrides takes its appends by splicing ([`link::link_into_level_blocks`]). A block the
 /// link touched ships whole, under its own path, so an asset of the level in it leaves the level's
 /// own blocks: one WAD holds one row of a key. The link's other blocks, `linked`, ship as they are.
+/// Also returns the modules the level's link added ([`link::LinkOutput::modules`]) and its import
+/// findings ([`link::LinkOutput::findings`]).
 fn link_level(
     level: &crate::level::LevelOf<'_>,
     set: &LinkSet<'_>,
     linked: &[PatchBlock],
     game: &mut GameStack,
     log: &mut Vec<String>,
-) -> Result<Vec<PatchBlock>, BuildError> {
+) -> Result<(Vec<PatchBlock>, Vec<link::LinkedModule>, Vec<crate::imports::ImportFinding>), BuildError> {
     let fail = |message: String| BuildError::Lower { index: 0, kind: "link", message };
     let assets = crate::level::assets_of(level.manifest, level.name);
     let mut own = std::collections::BTreeMap::new();
@@ -5521,8 +5630,31 @@ fn link_level(
             placed.push((bi, key));
         }
     }
+    // The level runs its own master `L` (`LoadLevel(L, L)`), never `vz`'s chunk, so the master's hooks
+    // go onto `L`: a level asset, not a twin of a `vz.wad` script, which ships from the level's own
+    // blocks with the link's bytes in place of its file.
+    let master_key = (crate::manifest::asset_hash(level.name), mercs2_formats::types::TYPE_HASH_SCRIPT);
+    let master_asset = assets
+        .iter()
+        .find(|a| a.key().is_ok_and(|k| k == master_key))
+        .ok_or_else(|| fail(format!("level {}: its level_asset rows hold no master script {:?}", level.name, level.name)))?;
+    let [master_rung] = master_asset.rungs else {
+        return Err(fail(format!("level {}: its master script has {} rungs, and a script has one", level.name, master_asset.rungs.len())));
+    };
+    let master_file = level.root.join(&master_rung.file);
+    let mut master = mercs2_formats::scripts_block::ScriptsBlock {
+        entries: vec![mercs2_formats::scripts_block::Entry {
+            name_hash: master_key.0,
+            type_hash: master_key.1,
+            field_c: mercs2_formats::scripts_block::SCRIPT_FIELD_C,
+            bytes: std::fs::read(&master_file).map_err(|e| fail(format!("{}: {e}", master_file.display())))?,
+        }],
+    };
+    // Linked on every deploy (W-a): the level's hooks print their entry lines, mods or no mods.
     let mut touched = std::collections::BTreeSet::new();
-    if set.touches_scripts {
+    let modules;
+    let findings;
+    {
         let mut targets: Vec<link::TargetBlock<'_>> =
             loaded.iter_mut().map(|lb| link::TargetBlock { path: lb.path.clone(), block: &mut lb.block }).collect();
         let out = link::link_into_level_blocks(
@@ -5537,13 +5669,20 @@ fn link_level(
             set.replacements,
             set.order,
             &spliced,
+            link::QmHooks::Always,
+            Some(&mut master),
         )
         .map_err(|e| fail(format!("level {}: {e}", level.name)))?;
         touched.extend(out.scripts.iter().map(|l| l.block));
+        modules = out.modules;
+        findings = out.findings;
     }
+    let master_bytes = master.entries.remove(0).bytes;
+    log.push(format!("level {}: qm's world entry spliced onto its master {}, {} B", level.name, level.name, master_bytes.len()));
+    let linked_assets = std::collections::BTreeMap::from([(master_key, master_bytes)]);
     let mut effects = None;
-    if set.fx {
-        let (block, resident) = lower_fx(set.shipments, game, &mut loaded, crate::fx::Scope::Link, "link", log)?;
+    if set.level_fx {
+        let (block, resident) = lower_fx(set.shipments, game, &mut loaded, crate::fx::Scope::Link, FxLevel::Custom, "link", log)?;
         effects = block;
         touched.extend(resident);
     }
@@ -5563,7 +5702,7 @@ fn link_level(
             .filter(|b| b.path_string != crate::fx::EFFECTS_BLOCK.1 && !link::SCRIPT_BLOCKS.iter().any(|(_, p)| *p == b.path_string))
             .cloned(),
     );
-    blocks.extend(crate::level::compile(level.root, level.name, &kept).map_err(fail)?);
+    blocks.extend(crate::level::compile(level.root, level.name, &kept, &linked_assets).map_err(fail)?);
     log.push(format!(
         "level {}: {} block(s), {} of its assets moved into the {} linked block(s), {} script(s) of its own open to appends",
         level.name,
@@ -5572,7 +5711,53 @@ fn link_level(
         touched.len(),
         spliced.len()
     ));
-    Ok(blocks)
+    Ok((blocks, modules, findings))
+}
+
+/// Write `plan` at [`crate::plan::GAME_FOLDER_RELATIVE`] under `out_dir`, the path it takes under the
+/// game folder, and return its `game_folder` placement, hashed from the bytes written.
+fn place_plan(out_dir: &Path, plan: &crate::plan::LoadPlan) -> Result<Placement, BuildError> {
+    let relative = crate::plan::GAME_FOLDER_RELATIVE;
+    let path = out_dir.join(relative);
+    let io = |message: String| BuildError::Io { path: path.clone(), message };
+    let dir = path.parent().ok_or_else(|| io("has no parent directory".into()))?;
+    std::fs::create_dir_all(dir).map_err(|e| io(e.to_string()))?;
+    crate::plan::write_json(&path, plan, "the load plan").map_err(io)?;
+    let bytes = std::fs::read(&path).map_err(|e| io(e.to_string()))?;
+    Ok(Placement {
+        name: crate::plan::PLAN_FILE.to_string(),
+        bytes: bytes.len(),
+        sha256: sha256_hex(&bytes),
+        destination: Destination::GameFolder { relative: relative.to_string() },
+    })
+}
+
+/// The load plan's `libraries` rows of `modules`, each Shipment named by its request id. An ok plan has
+/// one item per name (no M0203), so the name finds exactly one.
+fn library_rows(
+    modules: &[link::LinkedModule],
+    inputs: &[crate::compat::PlanInput<'_>],
+) -> Result<Vec<crate::plan::LibraryRow>, BuildError> {
+    modules
+        .iter()
+        .map(|m| {
+            let item = match &m.shipment {
+                None => None,
+                Some(name) => Some(
+                    inputs
+                        .iter()
+                        .find(|i| i.shipment.manifest.shipment.name == *name)
+                        .map(|i| i.id.to_string())
+                        .ok_or_else(|| BuildError::Lower {
+                            index: 0,
+                            kind: "link",
+                            message: format!("internal error: {name} adds the module {} but is not in the request", m.module),
+                        })?,
+                ),
+            };
+            Ok(crate::plan::LibraryRow { module: m.module.clone(), item, session: m.session, when: m.when.clone(), settles: m.settles })
+        })
+        .collect()
 }
 
 /// The filename of the deploy-time link overlay. Named to sort and read as "last".
@@ -5589,7 +5774,8 @@ pub struct LinkReport {
     pub placements: Vec<Placement>,
     pub linked: Vec<crate::link::LinkedScript>,
     /// The load plan the link followed — always `ok`, since a plan that is not ok refuses the link
-    /// ([`BuildError::Plan`]). Also written to `load-plan.json` beside `placement.json`.
+    /// ([`BuildError::Plan`]) — with the `libraries` the link loads. Written to `load-plan.json` beside
+    /// `placement.json`, and placed in the game folder at [`crate::plan::GAME_FOLDER_RELATIVE`].
     pub plan: crate::plan::LoadPlan,
     pub log: Vec<String>,
 }
@@ -5693,6 +5879,8 @@ pub fn link_installed(
             fxdict: &base.fxdict,
             atlas: &base.atlas,
             repainted: false,
+            // `conflicts` resolves `replace_fx` targets only; level templates are the merge's.
+            level_templates: crate::fx::LevelTemplates::None,
         };
         let set: Vec<crate::fx::FxShipment<'_>> =
             shipments.iter().map(|s| crate::fx::FxShipment { manifest: &s.manifest, root: &s.root }).collect();
@@ -5722,7 +5910,7 @@ pub fn link_installed(
                 who.sort_unstable();
                 let row = plan.conflicts.len();
                 plan.findings.push(Finding {
-                    code: "M0207",
+                    code: "M0207".into(),
                     severity: FindingSeverity::Error,
                     message: c.to_string(),
                     items: who.iter().map(|&i| inputs[i].id.to_string()).collect(),
@@ -5862,19 +6050,10 @@ pub fn link_installed(
         additions.extend(script_additions(&s.manifest, &s.root)?);
         replacements.extend(script_replacements(&s.manifest, &s.root)?);
     }
-    // A UI, layer, sound-bank, add_script, or replace_lua mod touches the Script layer too — UI,
-    // layer and sound-bank registrations mint `qm_modloader` and the trampoline; add_script mints
-    // its own fresh scripts_vz entry; replace_lua swaps a shipped script's bytecode. Any of them
-    // needs the script link to run.
-    let gameplay_sounds = sound_regs.iter().any(|r| r.sessions.contains(&crate::manifest::LoadSession::Gameplay));
-    let front_end_sounds = sound_regs.iter().any(|r| r.sessions.contains(&crate::manifest::LoadSession::FrontEnd));
-    let touches_scripts = !(mutations.is_empty()
-        && ui_regs.is_empty()
-        && layer_regs.is_empty()
-        && support_regs.is_empty()
-        && !gameplay_sounds
-        && additions.is_empty()
-        && replacements.is_empty());
+    // The script link runs on every deploy, here and in each custom level: qm's hook dispatcher and
+    // world loader entry are spliced onto the master whatever the set holds (W-a), so every installed
+    // game prints each hook's entry line, mods or no mods. A Shipment's own script work links in the
+    // same pass.
     // Every string table any Shipment edits or adds keys to is merged into one link-owned copy.
     let tables = merged_string_tables(shipments.iter().map(|s| &s.manifest));
     // Every sound bank any Shipment's replace_sound_cue targets or replace_sound_wave reaches, likewise.
@@ -5884,31 +6063,6 @@ pub fn link_installed(
     // one atlas.
     let fx = shipments.iter().any(|s| crate::fx::merges_fx(&s.manifest));
     let levels = crate::level::levels_of(&shipments);
-    if !touches_scripts && !front_end_sounds && tables.is_empty() && sound_entries.is_empty() && !fx && levels.is_empty() {
-        log.push(
-            "no installed Shipment touches a script, a string table, a sound bank, an effect, a \
-             sprite or the vfx atlas — nothing to link"
-                .into(),
-        );
-        // Still write the (empty) placement record. Emitting no link WAD is the right call — an
-        // overlay that merely restates the base block is a file deploy has to reason about for
-        // nothing — but emitting no RECORD makes that indistinguishable from "link was never run",
-        // and deploy has to tell those apart. An empty `placements` array says which one it is.
-        write_plan(&plan)?;
-        write_placement_record(out_dir, &store_placements)?;
-        log.push(format!(
-            "wrote {}, {PLACEMENT_RECORD}: {} placement(s), no link overlay",
-            crate::plan::PLAN_FILE,
-            store_placements.len()
-        ));
-        return Ok(LinkReport {
-            wad: None,
-            placements: store_placements,
-            linked: Vec::new(),
-            plan,
-            log,
-        });
-    }
     log.push(format!(
         "linking {} mutation(s), {} UI, {} layer and {} sound-bank registration(s), {} string \
          table(s), {} sound bank(s) and {} effects from {} Shipment(s)",
@@ -5923,12 +6077,15 @@ pub fn link_installed(
     ));
 
     let mut patches: Vec<PatchBlock> = Vec::new();
-    let mut linked: Vec<link::LinkedScript> = Vec::new();
+    let linked: Vec<link::LinkedScript>;
+    let gameplay_modules: Vec<link::LinkedModule>;
+    // The import findings of every link of the set: `vz`, the front end and each custom level.
+    let mut import_found: Vec<crate::imports::ImportFinding> = Vec::new();
     let mut effects_block = None;
-    if touches_scripts || fx {
+    {
         let mut loaded = load_script_blocks(game, link::SCRIPT_BLOCKS, "link")?;
         let mut touched = std::collections::BTreeSet::new();
-        if touches_scripts {
+        {
             let mut targets: Vec<link::TargetBlock<'_>> = loaded
                 .iter_mut()
                 .map(|lb| link::TargetBlock {
@@ -5954,38 +6111,9 @@ pub fn link_installed(
                 message: e.to_string(),
             })?;
             drop(targets);
-            // M0209: literal imports nothing in the link provides. Warnings — `ok` does not change —
-            // placed on the item whose source carries them. An ok plan has one item per name (no
-            // M0203).
-            for u in &linked_out.unresolved_imports {
-                let requested = inputs
-                    .iter()
-                    .position(|i| i.shipment.manifest.shipment.name == u.shipment)
-                    .ok_or_else(|| BuildError::Lower {
-                        index: 0,
-                        kind: "link",
-                        message: format!(
-                            "internal error: {} carries an import but is not in the request",
-                            u.shipment
-                        ),
-                    })?;
-                plan.findings.push(crate::plan::Finding {
-                    code: "M0209",
-                    severity: crate::plan::FindingSeverity::Warning,
-                    message: u.to_string(),
-                    items: vec![inputs[requested].id.to_string()],
-                    refs: vec![crate::plan::FindingRef {
-                        section: crate::plan::Section::Items,
-                        index: requested,
-                    }],
-                    fix: None,
-                });
-                log.push(format!("warning [M0209]: {u}"));
-            }
-            crate::plan::sort_findings(&mut plan.findings, |item| {
-                inputs.iter().position(|p| p.id == item)
-            });
+            import_found.extend(linked_out.findings);
             linked = linked_out.scripts;
+            gameplay_modules = linked_out.modules;
             for l in &linked {
                 log.push(format!(
                     "linked {} in {}: {} → {} B source, {} B bytecode, from {:?}",
@@ -6003,7 +6131,7 @@ pub fn link_installed(
         // the templates, the fxdict and the atlas in the same resident block the scripts above were
         // linked into.
         if fx {
-            let (effects, resident) = lower_fx(&shipments, game, &mut loaded, crate::fx::Scope::Link, "link", &mut log)?;
+            let (effects, resident) = lower_fx(&shipments, game, &mut loaded, crate::fx::Scope::Link, FxLevel::Main, "link", &mut log)?;
             effects_block = effects;
             touched.extend(resident);
         }
@@ -6091,9 +6219,13 @@ pub fn link_installed(
         language_blocks = lowered.language;
     }
 
-    // The front end's loader: every Shipment's front-end banks in one `qm_shell_modloader`, linked
-    // into `shell.wad`'s scripts block and shipped in the link's shell patch.
-    shell_blocks.extend(link_shell_loader(game, corpus_root, &sound_regs, &order, "link", &mut log)?);
+    // The front end's hooks and loader, on every deploy (W-a): every Shipment's front-end banks in one
+    // `qm_shell_modloader` and every front-end library, linked into `shell.wad`'s scripts block and
+    // shipped in the link's shell patch.
+    let (front_end, front_end_modules, front_end_found) =
+        link_shell_loader(game, &sound_regs, &additions, &order, link::QmHooks::Always, "link", &mut log)?;
+    import_found.extend(front_end_found);
+    shell_blocks.extend(front_end);
     // The loaders load only what the set's builds ship, level by level.
     check_sound_loaders(
         &sound_regs,
@@ -6101,6 +6233,81 @@ pub fn link_installed(
         &shipped_shell.iter().collect::<Vec<_>>(),
         "link",
     )?;
+
+    // Each level's whole patch: the WAD a Shipment's `vz.wad` overlay cannot reach by mounting. Linked
+    // here, before anything is written, so its import findings refuse the set with the others.
+    let set = LinkSet {
+        shipments: &shipments,
+        corpus_root,
+        mutations: &mutations,
+        ui_regs: &ui_regs,
+        layer_regs: &layer_regs,
+        support_regs: &support_regs,
+        sound_regs: &sound_regs,
+        additions: &additions,
+        replacements: &replacements,
+        order: &order,
+        level_fx: shipments.iter().any(|s| crate::fx::merges_level_fx(&s.manifest)),
+    };
+    let mut level_blocks = Vec::with_capacity(levels.len());
+    for level in &levels {
+        let (blocks, level_modules, level_found) = link_level(level, &set, &patches, game, &mut log)?;
+        // A level links the same set, so it loads what `vz` loads, and the one plan describes both.
+        if level_modules != gameplay_modules {
+            return Err(BuildError::Lower {
+                index: 0,
+                kind: "link",
+                message: format!(
+                    "internal error: level {} adds the modules {:?}, and vz adds {:?}; the load plan has one list for both",
+                    level.name,
+                    level_modules.iter().map(|m| &m.module).collect::<Vec<_>>(),
+                    gameplay_modules.iter().map(|m| &m.module).collect::<Vec<_>>()
+                ),
+            });
+        }
+        import_found.extend(level_found);
+        level_blocks.push((level, blocks));
+    }
+
+    // M0209, M0313 and the M0314 error refuse the set; the M0314 reorder is a warning in the plan. A
+    // level links what `vz` links, so its findings mostly repeat `vz`'s; each is reported once.
+    import_found.sort();
+    import_found.dedup();
+    if !import_found.is_empty() {
+        for f in &import_found {
+            let mut refs = Vec::new();
+            for s in &f.shipments {
+                let at = inputs.iter().position(|i| i.shipment.manifest.shipment.name == *s).ok_or_else(|| BuildError::Lower {
+                    index: 0,
+                    kind: "link",
+                    message: format!("internal error: {s} carries Lua the link checked but is not in the request"),
+                })?;
+                refs.push(at);
+            }
+            refs.sort_unstable();
+            refs.dedup();
+            let (severity, word) = if f.rule.is_warning() {
+                (crate::plan::FindingSeverity::Warning, "warning")
+            } else {
+                (crate::plan::FindingSeverity::Error, "error")
+            };
+            plan.findings.push(crate::plan::Finding {
+                code: f.rule.code().into(),
+                severity,
+                message: f.message.clone(),
+                items: refs.iter().map(|&i| inputs[i].id.to_string()).collect(),
+                refs: refs.iter().map(|&index| crate::plan::FindingRef { section: crate::plan::Section::Items, index }).collect(),
+                fix: None,
+            });
+            log.push(format!("{word} {f}"));
+        }
+        crate::plan::sort_findings(&mut plan.findings, |item| inputs.iter().position(|p| p.id == item));
+    }
+    if import_found.iter().any(|f| !f.rule.is_warning()) {
+        plan.ok = false;
+        write_plan(&plan)?;
+        return Err(BuildError::Plan(Box::new(plan)));
+    }
 
     let csum =
         mercs2_formats::donor::base_csum(game.paths()[0]).map_err(|m| BuildError::Lower {
@@ -6142,23 +6349,7 @@ pub fn link_installed(
             &mut diagnostics,
         )?);
     }
-    // Each level's whole patch: the WAD a Shipment's `vz.wad` overlay cannot reach by mounting.
-    let set = LinkSet {
-        shipments: &shipments,
-        corpus_root,
-        mutations: &mutations,
-        ui_regs: &ui_regs,
-        layer_regs: &layer_regs,
-        support_regs: &support_regs,
-        sound_regs: &sound_regs,
-        additions: &additions,
-        replacements: &replacements,
-        order: &order,
-        touches_scripts,
-        fx,
-    };
-    for level in &levels {
-        let blocks = link_level(level, &set, &patches, game, &mut log)?;
+    for (level, blocks) in level_blocks {
         let relative = crate::level::patch_relative(level.name);
         placements.push(write_patch_wad(
             out_dir,
@@ -6175,6 +6366,12 @@ pub fn link_installed(
             &mut diagnostics,
         )?);
     }
+    plan.libraries = Some(library_rows(
+        &gameplay_modules.iter().chain(&front_end_modules).cloned().collect::<Vec<_>>(),
+        inputs,
+    )?);
+    // The plan goes into the game folder too, where the Lua bridge's startup check reads it.
+    placements.push(place_plan(out_dir, &plan)?);
     if patches.is_empty() {
         write_plan(&plan)?;
         write_placement_record(out_dir, &placements)?;
