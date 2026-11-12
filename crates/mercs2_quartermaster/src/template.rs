@@ -214,7 +214,35 @@ fn text_fields(c: &Component) -> Vec<bool> {
     }
 }
 
+/// Field values to set on one template's form: class → field (a name or `0xHHHHHHHH`) → value.
+pub type FieldEdits = BTreeMap<String, BTreeMap<String, FieldInput>>;
+
 impl TemplateForm {
+    /// Set fields of the form's records ([`FieldEdits`]). Refused: a class the form has no record of, a
+    /// class it holds more than one record of (an edit names one record), and a field that record lacks.
+    /// The values are typed when the form is lowered ([`Self::lower`]).
+    pub fn edit(&mut self, edits: &FieldEdits) -> Result<(), String> {
+        for (class, fields) in edits {
+            let record = match self.components.get_mut(class) {
+                None => return Err(format!("{class}: the template has no record of this class")),
+                Some(Records::Many(v)) => {
+                    return Err(format!("{class}: the template holds {} records of this class, and an edit names one", v.len()))
+                }
+                Some(Records::One(m)) => m,
+            };
+            for (field, value) in fields {
+                let h = field_hash(field);
+                let slot = record
+                    .iter_mut()
+                    .find(|(k, _)| field_hash(k) == h)
+                    .map(|(_, v)| v)
+                    .ok_or_else(|| format!("{class}: no field {field} ({})", hex(h)))?;
+                *slot = value.clone();
+            }
+        }
+        Ok(())
+    }
+
     /// Check every component, field and value against the container's schemas and type them,
     /// for `key`. Errors name the class, the field and what it takes.
     pub fn lower(&self, we: &WorldEntity, key: u32) -> Result<TemplateDecl, String> {
