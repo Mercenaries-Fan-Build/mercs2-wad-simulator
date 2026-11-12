@@ -160,7 +160,9 @@ pub fn outfit_contribution(
         name: asset_name.to_string(),
         slug: wardrobe_slug(asset_name),
         display: asset_name.to_string(),
-        wearer: wearer.to_string(),
+        wearer: wearer.into(),
+        chatter: None,
+        levels: None,
         // This scaffolds an INJECTED outfit from a craft bench, so it always carries a model file.
         model: Some(model),
         donor: Some(donor_name.to_string()),
