@@ -229,6 +229,10 @@ pub enum LinkError {
     /// qm's hook and library code could not be generated for this set ([`crate::loader::host_tails`]):
     /// a library at a hook qm does not generate, or in a session that hook does not fire in.
     Hooks(String),
+    /// The set's outfits could not be linked into a level ([`crate::outfits`]): its wardrobe or player
+    /// script could not be read, an outfit was refused, or the heroes' own chatter sets could not be
+    /// named.
+    Outfits(String),
     Block(String),
 }
 
@@ -270,6 +274,7 @@ impl std::fmt::Display for LinkError {
                  {second}; one module name has one source — rename one"
             ),
             LinkError::Hooks(m) => write!(f, "qm's hooks and library loader: {m}"),
+            LinkError::Outfits(m) => write!(f, "the set's outfits: {m}"),
             LinkError::Block(m) => write!(f, "{m}"),
         }
     }
@@ -567,28 +572,6 @@ pub fn linked_source(
         contributors.push(m.shipment.clone());
     }
     Ok((out, contributors))
-}
-
-/// The `_tOutfits` row for one outfit, as source.
-///
-/// `_tOutfits` is a GLOBAL declared without `local`, so a mod never needs an AST edit — appending a
-/// `table.insert` after the base source is enough, and N of them union by plain concatenation. The
-/// row's three fields are three distinct strings: `Model` is the asset name `Player.SetOutfit`
-/// receives, `Name` is the unlock/tracking key, and `PlayerVisibleName` is what the wardrobe shows.
-///
-/// **Append only, never insert.** Index 2 is reserved for the unlock-code outfit, and a saved
-/// costume is a POSITION into this list — inserting would silently re-dress every existing player.
-pub fn outfit_row_append(wearer: &str, slug: &str, model: &str, display: &str) -> String {
-    // Normalize to the RUNTIME `_tOutfits` key — the game's third key is `jennifer`, so an outfit
-    // authored with the preferred `jen` must land there, not in an empty `_tOutfits.jen` the game
-    // never reads. An unknown wearer falls through as-written; M0140 already flags it.
-    let key = crate::manifest::wearer_table_key(wearer).unwrap_or(wearer);
-    format!(
-        "table.insert(_tOutfits.{key}, {{ Name = {}, Model = {}, PlayerVisibleName = {} }})\n",
-        lua_string(slug),
-        lua_string(model),
-        lua_string(display),
-    )
 }
 
 /// The `tUnlockStatus` table literal for a shop item: `{ <Fac> = 1, … }` when unlocked in every
@@ -1055,37 +1038,6 @@ fn lua_string(s: &str) -> String {
     out
 }
 
-/// Source the Quartermaster appends ONCE per target, after every Shipment's contribution.
-///
-/// For the wardrobe this is the availability lift. `GetAvailableCostumes()` returns
-/// `_nAvailableCostumes or 1`, and the menu only offers entry `i` when the count is `>= i` — so an
-/// appended outfit is in the WAD, in the table, and **unreachable** unless the count grows too.
-///
-/// It is emitted here rather than by each Shipment precisely because "exactly once" is the
-/// property: two Shipments each hard-coding `shipped + 1` produce the same number, the later
-/// definition wins, and one outfit stays invisible. Deriving it from the final list length is the
-/// only form that survives N contributors.
-///
-/// Curated per target and empty by default, in the same fail-closed spirit as the merge classes.
-pub fn derived_epilogue(target: &str) -> Option<String> {
-    match target {
-        "wifpmcinterior" => Some(
-            "\n-- [Quartermaster] derived: the wardrobe gate is a COUNT, and the menu only offers\n\
-             -- entry i when it is >= i. Derived from the final list length so it is correct for\n\
-             -- any number of appended outfits.\n\
-             function GetAvailableCostumes()\n\
-             \x20 local n = 1\n\
-             \x20 for _, list in pairs(_tOutfits) do\n\
-             \x20   if #list > n then n = #list end\n\
-             \x20 end\n\
-             \x20 return n\n\
-             end\n"
-                .to_string(),
-        ),
-        _ => None,
-    }
-}
-
 /// Compile each target of `mutations` once, its base source (found under `subfolders`,
 /// [`base_source_path`]) followed by every append in load `order`, and splice it into whichever of
 /// `blocks` carries the target first.
@@ -1122,10 +1074,7 @@ fn link_appends(
             })?;
         let block = &mut *blocks[bi].block;
         if spliced.contains(&crate::manifest::asset_hash(target)) {
-            let (mut source, contributors) = linked_source("", &group, order)?;
-            if let Some(epilogue) = derived_epilogue(target) {
-                source.push_str(&epilogue);
-            }
+            let (source, contributors) = linked_source("", &group, order)?;
             let fail = |message: String| LinkError::Compile { target: target.to_string(), message };
             // A level's script can keep a name of its own under a retail asset: `mrxplayer` is
             // `dlc01_player` in the DLC.
@@ -1156,12 +1105,7 @@ fn link_appends(
             message: format!("reading base source {}: {e}", source_path.display()),
         })?;
 
-        let (mut source, contributors) = linked_source(&base, &group, order)?;
-        // Emitted once, AFTER every Shipment's append — see `derived_epilogue`. Putting it here
-        // rather than in each Shipment is what makes "exactly once" structural.
-        if let Some(epilogue) = derived_epilogue(target) {
-            source.push_str(&epilogue);
-        }
+        let (source, contributors) = linked_source(&base, &group, order)?;
         // BARE chunk name — see the module note. `@name.lua` produces a chunk 5 bytes off retail.
         let bytecode = mercs2_luac::compile(&source, target).map_err(|e| LinkError::Compile {
             target: target.to_string(),
@@ -1242,6 +1186,85 @@ pub fn splice_tails(blocks: &mut [TargetBlock<'_>], tails: &[(String, crate::loa
             bytecode_bytes,
             block: bi,
         });
+    }
+    Ok(linked)
+}
+
+/// The block index and entry index of the first script named `name` among `blocks`.
+fn find_script(blocks: &[TargetBlock<'_>], name: &str) -> Option<(usize, usize)> {
+    blocks.iter().enumerate().find_map(|(bi, tb)| tb.block.find_script_by_name(name).map(|idx| (bi, idx)))
+}
+
+/// Link the set's `outfits` into `level` ([`crate::outfits`]): read the level's retail lists from its
+/// wardrobe and player scripts as the link has them so far (every append and replacement applied),
+/// generate each hero's list in load `order`, and splice the tails onto the wardrobe, the player script
+/// and the master (a custom level's `master` block, else [`crate::hooks::MASTER_HOST`] in `blocks`).
+/// The heroes' own chatter sets are read from the worldentity of the resident block in `blocks` only when
+/// a row has one. A level the set adds no outfit to is left as it ships.
+fn link_outfits(
+    blocks: &mut [TargetBlock<'_>],
+    master: Option<&mut ScriptsBlock>,
+    level: &str,
+    outfits: &[crate::outfits::AddedOutfit],
+    order: &[String],
+) -> Result<Vec<LinkedScript>, LinkError> {
+    use crate::outfits::{WARDROBE_SCRIPT, PLAYER_SCRIPT};
+    if outfits.is_empty() {
+        return Ok(Vec::new());
+    }
+    let fail = |m: String| LinkError::Outfits(format!("{level}: {m}"));
+    let mut added: Vec<&crate::outfits::AddedOutfit> = outfits.iter().collect();
+    sort_by_order(&mut added, order, |a| a.shipment.as_str(), |_| ())?;
+    let added: Vec<crate::outfits::AddedOutfit> = added.into_iter().cloned().collect();
+    let chunk = |blocks: &[TargetBlock<'_>], name: &str| -> Result<Vec<u8>, LinkError> {
+        let (bi, idx) = find_script(blocks, name).ok_or_else(|| fail(format!("no {name} script in the blocks linked")))?;
+        blocks[bi].block.extract_lua(idx).map_err(|m| fail(format!("{name}: {m}")))
+    };
+    let retail = crate::outfits::RetailLevel::read(&chunk(blocks, WARDROBE_SCRIPT)?, &chunk(blocks, PLAYER_SCRIPT)?).map_err(&fail)?;
+    let lists = crate::outfits::generate(level, &retail, &added).map_err(&fail)?;
+    let hero_chatter = if lists.heroes.iter().any(|h| h.rows.iter().any(|r| r.chatter.is_some())) {
+        let (bi, idx) = blocks
+            .iter()
+            .enumerate()
+            .find_map(|(bi, tb)| crate::fx::worldentity_entry(tb.block).ok().map(|idx| (bi, idx)))
+            .ok_or_else(|| fail("no block linked holds the worldentity, which names the heroes' chatter sets".into()))?;
+        let we = mercs2_formats::worldentity::WorldEntity::parse(&blocks[bi].block.entries[idx].bytes)
+            .map_err(|m| fail(format!("the worldentity in {}: {m}", blocks[bi].path)))?;
+        Some(crate::outfits::hero_chatter(&we, &retail).map_err(&fail)?)
+    } else {
+        None
+    };
+    let Some(tails) = crate::outfits::tails(&lists, &retail, hero_chatter.as_ref()).map_err(&fail)? else {
+        return Ok(Vec::new());
+    };
+    let mut contributors: Vec<String> = Vec::new();
+    for a in &added {
+        if !contributors.contains(&a.shipment) {
+            contributors.push(a.shipment.clone());
+        }
+    }
+    let mut linked = Vec::new();
+    let mut on_block = |blocks: &mut [TargetBlock<'_>], host: &str, tail: &crate::loader::Tail| -> Result<(), LinkError> {
+        let (bi, idx) = find_script(blocks, host).ok_or_else(|| fail(format!("no {host} script in the blocks linked")))?;
+        let bytecode_bytes = splice_tail(blocks[bi].block, idx, tail)?;
+        linked.push(LinkedScript {
+            target: host.to_string(),
+            contributors: contributors.clone(),
+            base_source_bytes: 0,
+            linked_source_bytes: tail.source.len(),
+            bytecode_bytes,
+            block: bi,
+        });
+        Ok(())
+    };
+    on_block(blocks, WARDROBE_SCRIPT, &tails.wardrobe)?;
+    on_block(blocks, PLAYER_SCRIPT, &tails.player)?;
+    match master {
+        Some(master) => {
+            splice_tail(master, 0, &tails.master)?;
+            master.verify_csums().map_err(|e| LinkError::Block(format!("CSUMs after splicing the level's master: {e}")))?;
+        }
+        None => on_block(blocks, crate::hooks::MASTER_HOST, &tails.master)?,
     }
     Ok(linked)
 }
@@ -1490,6 +1513,8 @@ pub fn link_into_blocks(
         &BTreeSet::new(),
         QmHooks::Always,
         None,
+        crate::outfits::DEFAULT_LEVEL,
+        &[],
     )
 }
 
@@ -1508,6 +1533,8 @@ pub enum QmHooks {
 /// [`link_into_blocks`] over a level's blocks, in which the scripts of `spliced` are the level's own,
 /// splicing qm's hooks as `hooks` says. In a custom level, `master` is the level's own master script,
 /// a block of that one entry, which takes the master's hooks ([`crate::hooks::MASTER_HOST`]).
+/// `level` names the level, and `outfits` are the set's added outfits, linked after the hooks
+/// ([`link_outfits`]); the ones that do not join `level` are left out by the generator.
 pub fn link_into_level_blocks(
     blocks: &mut [TargetBlock<'_>],
     corpus_root: &Path,
@@ -1522,6 +1549,8 @@ pub fn link_into_level_blocks(
     spliced: &BTreeSet<u32>,
     hooks: QmHooks,
     mut master: Option<&mut ScriptsBlock>,
+    level: &str,
+    outfits: &[crate::outfits::AddedOutfit],
 ) -> Result<LinkOutput, LinkError> {
     let session = crate::manifest::LoadSession::Gameplay;
     let root = level_master(master.as_deref())?;
@@ -1727,6 +1756,8 @@ pub fn link_into_level_blocks(
     if splice {
         linked.extend(link_session_hooks(blocks, &libraries, session, master.as_deref_mut())?);
     }
+    // The outfits after the hooks: their wrappers go around whatever the hooks wrapped.
+    linked.extend(link_outfits(blocks, master.as_deref_mut(), level, outfits, order)?);
     // With no splice, `libraries` is empty: nothing is loaded at a hook.
     let mut modules = library_modules(session, qm.as_ref(), &shipment_libraries)?;
     modules.extend(imported);
@@ -1777,19 +1808,6 @@ mod tests {
             target: target.into(),
             append: append.into(),
         }
-    }
-
-    /// ★ The preferred spelling `jen` must reach the RUNTIME key `jennifer`, or the outfit appends
-    /// to a `_tOutfits.jen` the game never reads. This is the whole reason the split exists.
-    #[test]
-    fn jen_appends_to_the_jennifer_table() {
-        let row = outfit_row_append("jen", "MyFit", "pmc_hum_jen", "[X]");
-        assert!(row.contains("_tOutfits.jennifer"), "jen must normalize to jennifer: {row}");
-        assert!(!row.contains("_tOutfits.jen,"), "must not emit the empty jen table: {row}");
-        // The literal runtime key still works, and mattias/chris pass straight through.
-        assert!(outfit_row_append("jennifer", "F", "m", "d").contains("_tOutfits.jennifer"));
-        assert!(outfit_row_append("mattias", "F", "m", "d").contains("_tOutfits.mattias"));
-        assert!(outfit_row_append("chris", "F", "m", "d").contains("_tOutfits.chris"));
     }
 
     fn names(list: &[&str]) -> Vec<String> {
