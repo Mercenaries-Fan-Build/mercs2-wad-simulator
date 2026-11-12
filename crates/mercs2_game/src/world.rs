@@ -764,7 +764,7 @@ fn boot_config_from(sel: Option<&std::path::Path>) -> Result<BootConfig, String>
     let new_game = |label: &str| BootConfig {
         recruits: Default::default(),
         stockpile: Default::default(),
-        models: crate::hero::player_model_candidates(1, 0, 0),
+        models: crate::hero::player_model_candidates(1, 0),
         label: label.into(),
         contract: "VzaCon001".into(),
         hero_character: "mattias".into(),
@@ -783,9 +783,8 @@ fn boot_config_from(sel: Option<&std::path::Path>) -> Result<BootConfig, String>
                 .unwrap_or_default();
             let stockpile = crate::pmc::Stockpile { cash: prof.cash as i64, ..Default::default() };
             let hero_idx = prof.character_index; // header @0x4D, 1-based
-            // Costume file byte not yet located (0 in every observed save — wardrobe unused);
-            // the look is the upgrade tier's template model until then.
-            let models = crate::hero::player_model_candidates(hero_idx, prof.upgrade_index, 0);
+            // The look is the save's costume (header @0x4F) over the hero's base model.
+            let models = crate::hero::player_model_candidates(hero_idx, prof.costume_index);
             let label = format!(
                 "{} ({}, ${}, {}s played) as {} [{}]",
                 prof.save_name(),
@@ -793,7 +792,7 @@ fn boot_config_from(sel: Option<&std::path::Path>) -> Result<BootConfig, String>
                 prof.cash,
                 prof.play_time_seconds,
                 crate::hero::hero(hero_idx).display,
-                crate::hero::look_label(hero_idx, prof.upgrade_index, 0),
+                crate::hero::look_label(hero_idx, prof.upgrade_index, prof.costume_index),
             );
             // The master script loads the save's own payload; one that won't decode cannot be resumed.
             let save = mercs2_engine::script_host::BootSaveState::from_profile(&prof)
@@ -1390,7 +1389,7 @@ impl Mercs2Game {
                 self.shell = None;
                 self.apply_boot(None);
                 let hero = hero_index(character.as_deref());
-                self.player_models = crate::hero::player_model_candidates(hero, 0, 0);
+                self.player_models = crate::hero::player_model_candidates(hero, 0);
                 self.hero_character = hero_character_name(hero).to_string();
                 MenuOutcome::StartLoad
             }
