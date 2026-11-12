@@ -641,7 +641,7 @@ fn cmd_check_range(report_file: &Path, ranges: &[String]) -> ExitCode {
             mercs2_quartermaster::manifest::parse_range(range)
                 .err()
                 .map(|message| plan::Finding {
-                    code: lint::M0172_BAD_VERSION_REQ.code,
+                    code: lint::M0172_BAD_VERSION_REQ.code.to_string(),
                     severity: FindingSeverity::Error,
                     message,
                     items: Vec::new(),
