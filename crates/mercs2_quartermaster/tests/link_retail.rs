@@ -447,6 +447,107 @@ fn two_script_mods_both_survive_the_link() {
     }
 }
 
+fn obama() -> mercs2_quartermaster::outfits::AddedOutfit {
+    mercs2_quartermaster::outfits::AddedOutfit {
+        shipment: "skins".into(),
+        slug: "Obama".into(),
+        model: "pmc_hum_obama".into(),
+        display: "[Obama]".into(),
+        wearers: vec!["mattias".into(), "chris".into(), "jen".into()],
+        levels: None,
+        chatter: None,
+    }
+}
+
+fn link_outfits(
+    muts: &[ScriptMutation],
+    outfits: &[mercs2_quartermaster::outfits::AddedOutfit],
+    names: &[&str],
+) -> (Vec<(String, ScriptsBlock)>, Result<link::LinkOutput, link::LinkError>) {
+    let mut loaded = retail_blocks();
+    let corpus = corpus();
+    let out = {
+        let mut targets: Vec<link::TargetBlock<'_>> =
+            loaded.iter_mut().map(|(path, block)| link::TargetBlock { path: path.clone(), block }).collect();
+        link::link_into_level_blocks(
+            &mut targets,
+            &corpus,
+            muts,
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+            &order(names),
+            &std::collections::BTreeSet::new(),
+            link::QmHooks::Always,
+            None,
+            "vz",
+            outfits,
+        )
+    };
+    (loaded, out)
+}
+
+/// The set's outfits go onto the wardrobe, the player script and the master, after a fix pack's
+/// `patch_lua` on the first two (the unofficial patch appends to both, BUG-015 and BUG-006): the linked
+/// wardrobe lists the added row after the retail ones, and the linked player script restores it.
+#[test]
+fn outfits_link_after_appends_to_the_wardrobe_and_the_player_script() {
+    let muts = vec![
+        ScriptMutation {
+            shipment: "fix".into(),
+            target: "wifpmcinterior".into(),
+            append: "function LoadSingleton(tSaveData)\n  _tFixLoaded = tSaveData\nend\n".into(),
+        },
+        ScriptMutation {
+            shipment: "fix".into(),
+            target: "mrxplayer".into(),
+            append: "function SaveSingleton()\n  return {}\nend\n".into(),
+        },
+    ];
+    let (loaded, out) = link_outfits(&muts, &[obama()], &["fix", "skins"]);
+    let scripts = out.unwrap_or_else(|e| panic!("{e}")).scripts;
+    let by = |who: &str| -> Vec<&str> {
+        scripts.iter().filter(|l| l.contributors == [who.to_string()]).map(|l| l.target.as_str()).collect()
+    };
+    assert_eq!(by("fix"), ["mrxplayer", "wifpmcinterior"]);
+    assert_eq!(by("skins"), ["wifpmcinterior", "mrxplayer", "vz"]);
+    let chunk = |name: &str| -> Vec<u8> {
+        let (_, b) = loaded.iter().find(|(_, b)| b.find_script_by_name(name).is_some()).unwrap();
+        b.extract_lua(b.find_script_by_name(name).unwrap()).unwrap()
+    };
+    let lua = mercs2_luac::rt::Lua::new().unwrap();
+    lua.load("function import() end").exec().unwrap();
+    for name in ["wifpmcinterior", "mrxplayer"] {
+        let f = lua.load(&chunk(name)).set_name(format!("={name}")).into_function().unwrap();
+        f.call::<()>(()).unwrap_or_else(|e| panic!("running the linked {name}: {e}"));
+    }
+    let eval = |code: &str| lua.load(code).eval::<String>().unwrap_or_else(|e| panic!("{code}: {e}"));
+    assert_eq!(eval("return #_tOutfits.mattias .. ' ' .. _tOutfits.mattias[6].Name .. ' ' .. tostring(_tOutfits.mattias[6].bAlwaysVisible)"), "6 Obama true");
+    assert_eq!(eval("return #_tOutfits.jennifer .. ' ' .. _tOutfits.jennifer[7].Model"), "7 pmc_hum_obama");
+    assert_eq!(eval("local _, m = GetTemplateAndModelName({ iIndex = 1, iCostume = 5 }) return m"), "pmc_hum_obama");
+    assert_eq!(eval("local _, m = GetTemplateAndModelName({ iIndex = 1, iCostume = 6 }) return m"), "gr_hum_starter_1");
+    assert_eq!(eval("local _, m = GetTemplateAndModelName({ iIndex = 3, iCostume = 6 }) return m"), "pmc_hum_obama");
+    assert_eq!(eval("return type(_tFixLoaded) .. ' ' .. type(LoadSingleton)"), "nil function", "the fix's append ran");
+    let master = chunk("vz");
+    assert!(master.windows(b"[qm] outfit restore: ".len()).any(|w| w == b"[qm] outfit restore: "), "the master carries the load");
+}
+
+/// A `patch_lua` that adds its own `_tOutfits` row leaves a wardrobe the character map does not
+/// restore, and the link refuses it rather than generating lists on top of it.
+#[test]
+fn a_hand_appended_wardrobe_row_is_refused_with_qm_s_outfits() {
+    let muts = vec![ScriptMutation {
+        shipment: "hand".into(),
+        target: "wifpmcinterior".into(),
+        append: outfit_append("Hand", "hand_model"),
+    }];
+    let e = link_outfits(&muts, &[obama()], &["hand", "skins"]).1.unwrap_err().to_string();
+    assert!(e.contains("the set's outfits: vz:") && e.contains("would restore the wrong outfit"), "{e}");
+}
+
 /// Two mods touching DIFFERENT scripts are independent — each compiled once, both spliced.
 #[test]
 fn mutations_on_different_scripts_are_independent() {
