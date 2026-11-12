@@ -34,7 +34,8 @@ qm build [DIR] [--out DIR]               lower it into an overlay WAD (default o
 qm preflight DIR... --out DIR            check a set before building: requirements, versions,
                                          conflicts, superseded files, load order → load-plan.json
 qm link  DIR... --out DIR                link the set's Lua, string tables, effects and templates into
-                                         one WAD, mounted last
+                                         one WAD, mounted last; its load-plan.json adds the libraries
+                                         it loads and is placed at scripts/load-plan.json
 qm check-range --report FILE -- RANGE... check version ranges with qm's semver grammar (M0172)
 qm compile-lua FILE... [--out-dir DIR]   compile Lua with the game's compiler and check the header
 qm manifest-info FILE                    print a manifest's name and version as JSON
