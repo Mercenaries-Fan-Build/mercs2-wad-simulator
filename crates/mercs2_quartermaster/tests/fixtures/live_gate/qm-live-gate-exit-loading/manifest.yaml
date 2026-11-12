@@ -1,0 +1,15 @@
+# The live gate for what `Sys.RequestGameState("Exiting")` does on the loading screen: qm's error policy
+# makes that call after "[qm] FATAL-NODIALOG ..." for the setups where pmc_bb does not watch the print
+# (its quiet variants), and a quiet-variant run of qm-live-gate-nodialog ended in a crash prompt
+# (2026-11-10). This library makes the call alone, so a log variant with PMC_VERBOSE_LOG records what
+# follows it. Install alone.
+format: 2
+shipment:
+  name: qm-live-gate-exit-loading
+  version: 0.1.0
+  target: retail
+contributions:
+  - kind: add_script
+    name: qm_gate_exit_loading
+    source: src/qm_gate_exit_loading.lua
+    load: { when: world.scripts_loaded, in: [gameplay] }
