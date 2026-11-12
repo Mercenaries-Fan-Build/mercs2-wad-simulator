@@ -41,6 +41,13 @@ cc = "1.2"
 # The C header of the load ladder the DLL matches against (`load_ladder::c_header`).
 mercs2_formats = "5.0"
 
+# TEMPORARY, for proving the debug protocol (`mercs2_formats::lua_debug`) before it is published: build
+# against this tree's mercs2_formats instead of crates.io (both the dependency and the build-dependency).
+# Remove once the release that carries it is out and the pins above are raised to it.
+[patch.crates-io]
+mercs2_formats = { path = "../mercs2_formats" }
+mercs2_exemap = { path = "../mercs2_exemap" }
+
 [profile.release]
 panic = "abort"
 lto = true
