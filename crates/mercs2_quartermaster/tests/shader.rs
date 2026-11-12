@@ -801,7 +801,8 @@ fn the_plan_lists_each_items_data_files_and_links_both_stores() {
     let b = discover::open(&plain_dir).unwrap();
     let p = plan(&[PlanInput { id: "a", shipment: &a }, PlanInput { id: "b", shipment: &b }], Producer::Preflight, None)
         .expect("plan");
-    assert_eq!(p.format, 2);
+    assert_eq!(p.format, mercs2_quartermaster::plan::PLAN_FORMAT);
+    assert_eq!(p.libraries, None, "preflight links nothing, so it records no libraries");
     assert_eq!(p.items[0].data_files, vec![DataFile::Shader3, DataFile::Shader3Low]);
     assert!(p.items[1].data_files.is_empty());
     assert_eq!(p.link_file_paths, vec![DataFile::Shader3, DataFile::Shader3Low]);
