@@ -268,12 +268,23 @@ pub fn vz_templates(manifest: &Manifest) -> Vec<VzTemplates<'_>> {
         .collect()
 }
 
+/// The path of a block `vz.wad` already has that a `level: vz` asset names, or `None` when its blocks are
+/// new. Such an asset cannot ship in a block of its own path (the overlay's block would replace vz.wad's
+/// whole), so the deploy link adds it to its own copy of that block (`build::link_installed`), and a
+/// standalone build leaves it out ([`compile_vz`]).
+pub fn joins_link(a: &Asset, game: &GameStack) -> Option<String> {
+    a.rungs.iter().map(|r| format!("blocks\\VZ\\{}.block", r.block)).find(|p| game.base_has_path(p))
+}
+
 /// Compile the `level: vz` `assets` under `root` into overlay blocks `blocks\VZ\<block>.block`, checked
-/// against `game`: refused, each listed, an asset whose name and type `vz.wad` holds, a block whose path
-/// `vz.wad` has, and a reference neither the rows nor the game resolve ([`reach`]). The blocks number
-/// their rungs from 0 ([`compile`]); `mercs2_formats::patch_wad::rebase_after` renumbers them after the
-/// overlay's other blocks.
-pub fn compile_vz(root: &Path, assets: &[Asset], game: &GameStack) -> Result<Vec<PatchBlock>, String> {
+/// against `game`: refused, each listed, an asset whose name and type `vz.wad` holds, and a reference
+/// neither the rows nor the game resolve ([`reach`]). An asset in a block `vz.wad` already has is left
+/// to the deploy link ([`joins_link`]) and comes back in the second list, as `name (type) in path`. A
+/// streamed wavebank plays only from its stream, and the main campaign opens no stream of a Shipment's
+/// on its own, so each must be one of `opened` (the entry names the Shipment's `load_sound` streams
+/// open, `crate::sound::opened_streams`). The blocks number their rungs from 0 ([`compile`]);
+/// `mercs2_formats::patch_wad::rebase_after` renumbers them after the overlay's other blocks.
+pub fn compile_vz(root: &Path, assets: &[Asset], game: &GameStack, opened: &[String]) -> Result<(Vec<PatchBlock>, Vec<String>), String> {
     let mut bad = Vec::new();
     for a in assets {
         let (_, type_id) = type_by_name(a.asset_type).ok_or_else(|| format!("{}: no asset type is named {:?}", a.name, a.asset_type))?;
@@ -281,18 +292,30 @@ pub fn compile_vz(root: &Path, assets: &[Asset], game: &GameStack) -> Result<Vec
             bad.push(format!("{} ({}): vz.wad holds it, and a level: vz row only adds", a.name, a.asset_type));
         }
     }
-    let blocks = compile(root, "VZ", assets, &BTreeMap::new())?;
-    for b in &blocks {
-        if game.base_has_path(&b.path_string) {
-            bad.push(format!("{}: vz.wad has a block at this path", b.path_string));
+    let mut own = Vec::new();
+    let mut joined = Vec::new();
+    for a in assets {
+        match joins_link(a, game) {
+            Some(path) => joined.push(format!("{} ({}) in {path}", a.name, a.asset_type)),
+            None => own.push(*a),
         }
     }
+    let assets = own.as_slice();
+    let blocks = compile(root, "VZ", assets, &BTreeMap::new())?;
     let held: BTreeSet<(u32, u32)> = blocks.iter().flat_map(|b| b.aset_entries.iter().map(|e| (e.asset_hash, e.u32_3))).collect();
-    bad.extend(unresolved(&reach(&blocks)?, &held, game));
+    let refs = reach(&blocks)?;
+    bad.extend(unresolved(&refs, &held, game));
+    let opened: BTreeSet<u32> = opened.iter().map(|s| m2(s)).collect();
+    bad.extend(
+        refs.streamed
+            .iter()
+            .filter(|h| !opened.contains(h))
+            .map(|h| format!("streamed wavebank 0x{h:08X} plays from a stream, and no load_sound of the Shipment opens one for it")),
+    );
     if !bad.is_empty() {
         return Err(format!("the level: vz rows have {} problem(s):\n  {}", bad.len(), bad.join("\n  ")));
     }
-    Ok(blocks)
+    Ok((blocks, joined))
 }
 
 /// Each reference of `refs` that neither `held` nor `game` resolves, and each shader retail does not
