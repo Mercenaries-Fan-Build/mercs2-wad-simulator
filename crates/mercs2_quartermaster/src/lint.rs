@@ -462,6 +462,17 @@ pub const M0221_SOUND_LOAD_IN: Rule = Rule {
 /// version token other than its stage's, no end token), no `CTAB` (the engine reads constants by
 /// name through `D3DXGetShaderConstantTable`), a stage that disagrees with the family or the
 /// replaced record, or `add_shader` classes sharing a stem with different bytes.
+pub const M0222_LOAD_SOUND_SHAPE: Rule = Rule {
+    code: "M0222",
+    title: "a load_sound names nothing, a name it cannot load, no session, or a stream no add_level of the Shipment installs",
+    doc: "docs/modding/manifest_format.md#m0222",
+};
+/// Needs the game stack.
+pub const M0223_LOAD_SOUND_TARGET: Rule = Rule {
+    code: "M0223",
+    title: "a load_sound soundbank or wavebank is in neither the game nor the Shipment's level: vz rows",
+    doc: "docs/modding/manifest_format.md#m0223",
+};
 pub const M0230_SHADER_SOURCE: Rule = Rule {
     code: "M0230",
     title: "a shader source does not load, or its stage is not the one it replaces or registers",
@@ -889,6 +900,7 @@ pub const RULES: &[Rule] = &[
     M0216_SOUND_CATEGORY_UNKNOWN,
     M0217_SOUND_LANGUAGE,
     M0221_SOUND_LOAD_IN,
+    M0222_LOAD_SOUND_SHAPE,
     M0230_SHADER_SOURCE,
     M0231_SHADER_CAPABILITY,
     M0234_SHADER_CLASSES,
@@ -923,6 +935,7 @@ pub const GAME_RULES: &[Rule] = &[
     M0194_LAYER_UNKNOWN,
     M0198_ENTITY_KEY_TAKEN,
     M0218_SOUND_TARGET_MISSING,
+    M0223_LOAD_SOUND_TARGET,
     M0219_LANGUAGE_BASE_INCOMPLETE,
     M0220_SOUND_CUE_SHADOWED,
     M0232_SHADER_TARGET,
@@ -1060,6 +1073,10 @@ pub fn game_checks(manifest: &Manifest, game: &mut GameStack) -> Vec<Diagnostic>
             at: Some(index),
             fix: None,
         });
+    }
+    // M0223: a load_sound bank nothing holds.
+    for (index, message) in crate::sound::load_sound_target_problems(manifest, game) {
+        out.push(Diagnostic { rule: M0223_LOAD_SOUND_TARGET, severity: Severity::Error, message, at: Some(index), fix: None });
     }
     // M0219: an add_language base with no fonts or atlases to fork.
     for (index, c) in manifest.contributions.iter().enumerate() {
@@ -2881,6 +2898,11 @@ pub fn lint(
                         at: Some(index),
                         fix: None,
                     });
+                }
+            }
+            Contribution::LoadSound { .. } => {
+                for (at, message) in crate::sound::load_sound_shape_problems(manifest).into_iter().filter(|(i, _)| *i == index) {
+                    out.push(Diagnostic { rule: M0222_LOAD_SOUND_SHAPE, severity: Severity::Error, message, at: Some(at), fix: None });
                 }
             }
             Contribution::ReplaceSoundBank { bank, language, category, cues } => {
