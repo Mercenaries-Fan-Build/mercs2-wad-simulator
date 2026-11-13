@@ -96,6 +96,7 @@ fn vz_scoped_outfits_leave_the_dlc01_lists_alone() {
         wearers: vec!["chris".into(), "jen".into(), "mattias".into()],
         levels: Some(vec!["vz".into()]),
         chatter: Some("Obama_Obama01".into()),
+        briefing_safe: false,
     };
     for levels in [Some(vec!["vz".to_string()]), None] {
         obama.levels = levels;
@@ -170,6 +171,7 @@ fn added_outfits_follow_the_retail_vz_rows() {
         wearers: wearers.iter().map(|w| w.to_string()).collect(),
         levels: Some(vec!["vz".into()]),
         chatter: None,
+        briefing_safe: true,
     };
     let all = ["chris", "jen", "mattias"];
     let set = [
@@ -210,6 +212,9 @@ fn added_outfits_follow_the_retail_vz_rows() {
 fn only_dlc01_s_wardrobe_lists_always_visible_rows() {
     assert!(!vz().lists_always_visible);
     assert!(dlc01().lists_always_visible);
+    // Likewise only dlc01's wardrobe has the briefing guard for its `bNoBriefing` rows.
+    assert!(!vz().honors_no_briefing);
+    assert!(dlc01().honors_no_briefing);
 }
 
 /// Each hero's templates (base and upgrades) carry one chatter set, named by `data/chatter_sets.tsv`.
@@ -311,6 +316,7 @@ fn qm_s_select_outfit_is_retail_s_for_a_hero_without_an_added_row() {
         wearers: vec!["mattias".into()],
         levels: None,
         chatter: None,
+        briefing_safe: true,
     };
     let t = tails(&generate("vz", &r, &[coat]).unwrap(), &r, None).unwrap().expect("a row was added");
     assert!(t.wardrobe.wraps.iter().any(|(f, _)| f == "_SelectOutfit"), "vz's _SelectOutfit is replaced");
