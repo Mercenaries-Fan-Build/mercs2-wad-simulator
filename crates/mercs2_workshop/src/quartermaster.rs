@@ -1080,6 +1080,7 @@ fn stub(kind: &str, n: usize) -> Option<Contribution> {
             wearer: "mattias".into(),
             chatter: None,
             levels: None,
+            briefing_safe: true,
             model: Some(PathBuf::from("src/model.glb")),
             donor: Some("pmc_hum_mattias".into()),
             textures: Textures::default(),
@@ -2228,7 +2229,7 @@ fn contribution_form(
 
     match c {
         Contribution::AddOutfit {
-            name, slug, display, wearer, chatter, levels, model, donor, textures, retarget, single_group,
+            name, slug, display, wearer, chatter, levels, briefing_safe, model, donor, textures, retarget, single_group,
         } => {
             commit |= text_row(ui, "Asset name", name, "pmc_hum_my_outfit", true);
             theme::field_note(
@@ -2254,6 +2255,14 @@ fn contribution_form(
                         *chatter = Some(set);
                         commit = true;
                     }
+                }
+            });
+            ui.horizontal(|ui| {
+                theme::field_label(ui, "Briefing");
+                let label = if *briefing_safe { "shown" } else { "hero's own model" };
+                if theme::pill(ui, label, !*briefing_safe).clicked() {
+                    *briefing_safe = !*briefing_safe;
+                    commit = true;
                 }
             });
             // Levels as written, comma-separated; empty is the main campaign alone.
@@ -4078,6 +4087,7 @@ mod tests {
             wearer: "mattias".into(),
             chatter: None,
             levels: None,
+            briefing_safe: true,
             model: Some(PathBuf::from(model)),
             donor: Some("pmc_hum_mattias".into()),
             textures: Textures::default(),
