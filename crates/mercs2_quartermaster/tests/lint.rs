@@ -151,6 +151,24 @@ fn an_empty_wearer_list_or_a_hero_twice_is_m0141() {
     assert_eq!(codes(&lint::lint(&outfit("[chris, mattius]"), None, None)), vec!["M0140"], "each listed hero is checked");
 }
 
+/// A `level: vz` bank row of one table.
+fn bank_row(table: &str, block: &str) -> String {
+    format!(
+        "  - kind: level_asset\n    level: vz\n    type: {table}\n    name: vo_resident_DLCTest.english\n    rungs:\n\
+         \x20     - {{ block: {block}_P000_Q3, file: src/{table}.ucfx }}\n"
+    )
+}
+
+/// A bank's soundbank and sounddb share its name hash, as every retail bank's do: one asset, not two
+/// contributions claiming one. The same table twice is still M0120.
+#[test]
+fn a_bank_s_tables_of_one_name_are_one_claim_and_one_table_twice_is_m0120() {
+    let pair = shipment_with(&format!("{}{}", bank_row("soundbank", "vo_a"), bank_row("sounddb", "vo_a")));
+    assert!(!codes(&lint::lint(&pair, None, None)).contains(&"M0120"), "{:?}", lint::lint(&pair, None, None));
+    let twice = shipment_with(&format!("{}{}", bank_row("soundbank", "vo_a"), bank_row("soundbank", "vo_b")));
+    assert!(codes(&lint::lint(&twice, None, None)).contains(&"M0120"));
+}
+
 // ---------------------------------------------------------------------------
 // M0142 — the chatter set
 // ---------------------------------------------------------------------------
