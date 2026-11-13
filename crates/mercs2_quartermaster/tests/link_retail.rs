@@ -456,6 +456,7 @@ fn obama() -> mercs2_quartermaster::outfits::AddedOutfit {
         wearers: vec!["mattias".into(), "chris".into(), "jen".into()],
         levels: None,
         chatter: None,
+        briefing_safe: true,
     }
 }
 
@@ -533,6 +534,18 @@ fn outfits_link_after_appends_to_the_wardrobe_and_the_player_script() {
     assert_eq!(eval("return type(_tFixLoaded) .. ' ' .. type(LoadSingleton)"), "nil function", "the fix's append ran");
     let master = chunk("vz");
     assert!(master.windows(b"[qm] outfit restore: ".len()).any(|w| w == b"[qm] outfit restore: "), "the master carries the load");
+}
+
+/// An outfit that is not briefing-safe puts the briefing guard onto retail's `mrxbriefing`, whose
+/// main chunk defines `Start` and `_EndBegin` (the link checks the wrapped functions are there).
+#[test]
+fn an_unsafe_outfit_links_the_briefing_guard_onto_retail_s_briefing() {
+    let mut o = obama();
+    o.briefing_safe = false;
+    let (_, out) = link_outfits(&[], &[o], &["skins"]);
+    let scripts = out.unwrap_or_else(|e| panic!("{e}")).scripts;
+    let skins: Vec<&str> = scripts.iter().filter(|l| l.contributors == ["skins".to_string()]).map(|l| l.target.as_str()).collect();
+    assert_eq!(skins, ["wifpmcinterior", "mrxplayer", "mrxbriefing", "vz"]);
 }
 
 /// A `patch_lua` that adds its own `_tOutfits` row leaves a wardrobe the character map does not
@@ -1152,13 +1165,13 @@ fn the_front_end_loader_links_into_the_shell_block() {
         link::SoundBankRegistration {
             shipment: "pda-sound".into(),
             bank: "qm_pda-sound_ui_hud".into(),
-            soundbank: false,
+            load: link::SoundLoad::Shipped { soundbank: false },
             sessions: [LoadSession::FrontEnd, LoadSession::Gameplay].into(),
         },
         link::SoundBankRegistration {
             shipment: "pda-sound".into(),
             bank: "gameplay_only_bank".into(),
-            soundbank: true,
+            load: link::SoundLoad::Shipped { soundbank: true },
             sessions: [LoadSession::Gameplay].into(),
         },
     ];
