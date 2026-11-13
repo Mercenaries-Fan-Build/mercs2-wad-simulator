@@ -163,6 +163,7 @@ pub fn outfit_contribution(
         wearer: wearer.into(),
         chatter: None,
         levels: None,
+        briefing_safe: true,
         // This scaffolds an INJECTED outfit from a craft bench, so it always carries a model file.
         model: Some(model),
         donor: Some(donor_name.to_string()),
