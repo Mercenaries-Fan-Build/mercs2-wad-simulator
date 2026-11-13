@@ -16,10 +16,10 @@ build = "build.rs"
 crate-type = ["cdylib"]
 
 [dependencies]
-mercs2_formats = "5.0"
+mercs2_formats = "6.0"
 # The Lua debugger names engine bindings from the game's own luaL_Reg registry (`luareg`) and labels the
 # running build from the catalogue.
-mercs2_exemap = "1.0"
+mercs2_exemap = "1.1"
 # The debugger's `debug.host` build: the running executable's sha256.
 sha2 = "0.10"
 windows-sys = { version = "0.61", features = [
@@ -39,14 +39,7 @@ windows-sys = { version = "0.61", features = [
 [build-dependencies]
 cc = "1.2"
 # The C header of the load ladder the DLL matches against (`load_ladder::c_header`).
-mercs2_formats = "5.0"
-
-# TEMPORARY, for proving the debug protocol (`mercs2_formats::lua_debug`) before it is published: build
-# against this tree's mercs2_formats instead of crates.io (both the dependency and the build-dependency).
-# Remove once the release that carries it is out and the pins above are raised to it.
-[patch.crates-io]
-mercs2_formats = { path = "../mercs2_formats" }
-mercs2_exemap = { path = "../mercs2_exemap" }
+mercs2_formats = "6.0"
 
 [profile.release]
 panic = "abort"
