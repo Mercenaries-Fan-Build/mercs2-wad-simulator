@@ -274,6 +274,15 @@ impl From<&str> for Wearer {
     }
 }
 
+/// `add_outfit`'s `briefing_safe` when omitted: retail's outfits all show in briefings.
+fn briefing_safe_default() -> bool {
+    true
+}
+
+fn is_true(b: &bool) -> bool {
+    *b
+}
+
 /// A declared blast-radius entry. A name, or a bare hash where no name is known.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -758,6 +767,11 @@ pub enum Contribution {
         /// The levels whose wardrobes offer it. Omitted: the main campaign (`vz`) alone.
         #[serde(default)]
         levels: Option<Vec<String>>,
+        /// Whether a briefing cutscene can show the hero in it. `false`: before a briefing the hero is
+        /// put back in its own model, and the outfit again after, as the DLC does for its costumes
+        /// (`bNoBriefing`, `dlc01_briefing.lua:840-861`, `:2040-2049`).
+        #[serde(default = "briefing_safe_default", skip_serializing_if = "is_true")]
+        briefing_safe: bool,
         /// The `src/`-relative model FILE to inject. Omit to wear a model the game already ships
         /// (named by `name`) — no injection, no new hash.
         #[serde(default)]
@@ -860,6 +874,26 @@ pub enum Contribution {
         /// The sessions whose loader loads the bank: at least one, each at most once
         /// ([`LoadSession`]). The bank's block ships to each listed session's WAD.
         load_in: Vec<LoadSession>,
+    },
+    /// Script. Have qm's loader load sound the game or this Shipment already ships, in sessions that
+    /// do not load it: a soundbank, a wavebank and a stream, by the names `MrxSoundBanks` takes (a
+    /// `vo_` name is localized as retail localizes it, `<name>.<language>`). The stream is opened first,
+    /// from where this Shipment's `add_level` installs it, and closed after the banks unload. Each is
+    /// loaded at the session's settle hook and unloaded at its sound exit, as an `add_sound` bank is.
+    LoadSound {
+        /// A soundbank, by name.
+        #[serde(default)]
+        soundbank: Option<String>,
+        /// A wavebank, by name.
+        #[serde(default)]
+        wavebank: Option<String>,
+        /// A stream: the name of one of this Shipment's `add_level` streams without `.pws` (for a
+        /// `vo_` stream, without `.<language>.pws`).
+        #[serde(default)]
+        stream: Option<String>,
+        /// The sessions whose loader loads them: at least one, each at most once.
+        #[serde(rename = "in")]
+        sessions: Vec<LoadSession>,
     },
     /// Data, SAME-HASH. Replace a bank the game ships: its soundbank and sounddb are encoded from
     /// the authored cues and shipped under the bank's own entry name, which the game's own load of
@@ -1590,6 +1624,7 @@ impl Contribution {
             Contribution::AddModel { .. } => "add_model",
             Contribution::AddTexture { .. } => "add_texture",
             Contribution::AddSound { .. } => "add_sound",
+            Contribution::LoadSound { .. } => "load_sound",
             Contribution::ReplaceSoundBank { .. } => "replace_sound_bank",
             Contribution::ReplaceSoundCue { .. } => "replace_sound_cue",
             Contribution::ReplaceSoundWave { .. } => "replace_sound_wave",
