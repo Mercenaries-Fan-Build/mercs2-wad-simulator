@@ -88,6 +88,10 @@ pub struct RetailLevel {
     /// count (dlc01's does, `dlc01_pmcinterior.lua:2055-2068`; vz's does not), found by running it
     /// ([`read_lists_always_visible`]).
     pub lists_always_visible: bool,
+    /// Whether the wardrobe defines `IsCostumeBriefingSafe`, through which the level's own briefing
+    /// puts a `bNoBriefing` row's hero back in its own model (dlc01's, `dlc01_briefing.lua:307`, `:840`;
+    /// vz has none).
+    pub honors_no_briefing: bool,
 }
 
 /// An outfit a Shipment adds, as the generator takes it.
@@ -105,6 +109,8 @@ pub struct AddedOutfit {
     pub levels: Option<Vec<String>>,
     /// The chatter set the join applies when this outfit is restored.
     pub chatter: Option<String>,
+    /// Whether a briefing can show the hero in it; `false` puts the hero back in its own model for one.
+    pub briefing_safe: bool,
 }
 
 /// Which outfit a row is, independent of where it sits.
@@ -133,6 +139,8 @@ pub struct Row {
     pub display: String,
     pub listing: Listing,
     pub chatter: Option<String>,
+    /// `false`: the row carries `bNoBriefing`, as the DLC's own costumes do.
+    pub briefing_safe: bool,
 }
 
 /// One hero's generated list and the map entry that restores it.
@@ -404,7 +412,11 @@ impl RetailLevel {
             }
         }
         let lists_always_visible = read_lists_always_visible(wardrobe_luaq)?;
-        Ok(RetailLevel { wardrobe, map, lists_always_visible })
+        let honors_no_briefing = matches!(
+            run_module(wardrobe_luaq, WARDROBE_SCRIPT)?.globals().raw_get::<Value>("IsCostumeBriefingSafe").map_err(lua_err("IsCostumeBriefingSafe"))?,
+            Value::Function(_)
+        );
+        Ok(RetailLevel { wardrobe, map, lists_always_visible, honors_no_briefing })
     }
 
     /// The models of `hero`'s map that no wardrobe row offers, in map order.
@@ -470,6 +482,7 @@ pub fn generate(level: &str, retail: &RetailLevel, added: &[AddedOutfit]) -> Res
                 display: r.display.clone(),
                 listing: Listing::Retail,
                 chatter: None,
+                briefing_safe: true,
             })
             .collect();
         let mut seen: BTreeSet<(String, String)> = BTreeSet::new();
@@ -490,6 +503,7 @@ pub fn generate(level: &str, retail: &RetailLevel, added: &[AddedOutfit]) -> Res
                 display: a.display.clone(),
                 listing: Listing::Always,
                 chatter: a.chatter.clone(),
+                briefing_safe: a.briefing_safe,
             });
         }
         let mut models: Vec<String> = rows[1..].iter().map(|r| r.model.clone()).collect();
@@ -642,7 +656,82 @@ pub struct OutfitTails {
     /// `LoadSingleton` runs, sets the costume byte to the saved `tQmOutfit`'s position in the generated
     /// list, or 0 (the hero's own model) when that outfit is gone.
     pub master: crate::loader::Tail,
+    /// Onto [`BRIEFING_SCRIPT`], when a row is not briefing-safe and the level's own briefing does not
+    /// honour `bNoBriefing` ([`RetailLevel::honors_no_briefing`]): the DLC's guard, for the host.
+    pub briefing: Option<crate::loader::Tail>,
 }
+
+/// The script asset of the briefing, in every level.
+pub const BRIEFING_SCRIPT: &str = "mrxbriefing";
+
+/// The DLC's briefing guard (`dlc01_briefing.lua:840-861`, `:2040-2049`), for a level whose briefing
+/// has none: on the host, before a briefing starts, a hero wearing a `bNoBriefing` row is put back in
+/// its own model (wardrobe row 1, costume byte 0) and the briefing starts once the model is ready; when
+/// it ends (`_EndBegin`), the row is put back on, and the co-op partner is told both times
+/// (`NETEVENT_NOTIFYOUTFITCHANGE`, whose receiver puts the row's model on).
+const BRIEFING_GUARD: &str = r#"local function WornRow()
+  local uChar = Player.GetPrimaryCharacter()
+  local tRows = WifPmcInterior._tOutfits[MrxUtil.GetCharacterIdentity(uChar)]
+  local nCostume = Player.GetProfileCostume() or 0
+  return uChar, tRows, nCostume
+end
+do
+  local original = Start
+  if type(original) ~= "function" then
+    QM.fail("Quartermaster", "outfits", "mrxbriefing.Start is not a function when qm's outfits are spliced")
+    return
+  end
+  Start = function(...)
+    local n, r = QM.pack(...)
+    local uSwap = nil
+    guard(function()
+      if Net.IsClient() then
+        return
+      end
+      local uChar, tRows, nCostume = WornRow()
+      local tRow = tRows ~= nil and tRows[nCostume + 1] or nil
+      if tRow ~= nil and tRow.bNoBriefing then
+        QM.briefing_costume = nCostume
+        Player.SetProfileCostume(0)
+        Player.SetOutfit(uChar, tRows[1].Model)
+        if Net.IsServer() then
+          Net.SendCustomEvent("WifPmcInterior", WifPmcInterior.NETEVENT_NOTIFYOUTFITCHANGE, {1, 1})
+        end
+        uSwap = uChar
+      end
+    end)
+    if uSwap == nil then
+      return original(unpack(r, 1, n))
+    end
+    Event.Create(Event.ObjectIsReady, {uSwap, "awake", 0}, function()
+      original(unpack(r, 1, n))
+    end)
+  end
+end
+do
+  local original = _EndBegin
+  if type(original) ~= "function" then
+    QM.fail("Quartermaster", "outfits", "mrxbriefing._EndBegin is not a function when qm's outfits are spliced")
+    return
+  end
+  _EndBegin = function(...)
+    guard(function()
+      local nOld = QM.briefing_costume
+      if nOld == nil or Net.IsClient() then
+        return
+      end
+      QM.briefing_costume = nil
+      local uChar, tRows = WornRow()
+      Player.SetProfileCostume(nOld)
+      Player.SetOutfit(uChar, tRows[nOld + 1].Model)
+      if Net.IsServer() then
+        Net.SendCustomEvent("WifPmcInterior", WifPmcInterior.NETEVENT_NOTIFYOUTFITCHANGE, {1, nOld + 1})
+      end
+    end)
+    return original(...)
+  end
+end
+"#;
 
 fn s(text: &str) -> String {
     crate::loader::lua_string(text)
@@ -933,12 +1022,13 @@ pub fn tails(
                 return Err(format!("{}: an always-listed row of {} is a retail row", lists.level, h.hero));
             };
             w.push_str(&format!(
-                "    {{ Name = {}, Model = {}, PlayerVisibleName = {}, bAlwaysVisible = true, sQmShipment = {}{} }},\n",
+                "    {{ Name = {}, Model = {}, PlayerVisibleName = {}, bAlwaysVisible = true, sQmShipment = {}{}{} }},\n",
                 s(slug),
                 s(&r.model),
                 s(&r.display),
                 s(shipment),
-                r.chatter.as_deref().map(|c| format!(", sQmChatter = {}", s(c))).unwrap_or_default()
+                r.chatter.as_deref().map(|c| format!(", sQmChatter = {}", s(c))).unwrap_or_default(),
+                if r.briefing_safe { "" } else { ", bNoBriefing = true" }
             ));
         }
         w.push_str("  },\n");
@@ -1016,10 +1106,14 @@ pub fn tails(
     m.push_str("}\n");
     m.push_str(MASTER_LOAD);
 
+    let unsafe_row = lists.heroes.iter().any(|h| h.rows.iter().any(|r| !r.briefing_safe));
+    let briefing = (unsafe_row && !retail.honors_no_briefing).then(|| wrap_tail(BRIEFING_GUARD.to_string(), &["Start", "_EndBegin"]));
+
     Ok(Some(OutfitTails {
         wardrobe: wrap_tail(w, &wardrobe_wraps),
         player: wrap_tail(p, &player_wraps),
         master: wrap_tail(m, &["LoadSingleton"]),
+        briefing,
     }))
 }
 
@@ -1032,6 +1126,7 @@ mod tests {
     /// also dlc01's `bAlwaysVisible` rule.
     fn wardrobe_of(dlc: bool) -> Vec<u8> {
         let always = if dlc { "t.bAlwaysVisible or " } else { "" };
+        let briefing = if dlc { "function IsCostumeBriefingSafe(i) return true end" } else { "" };
         mercs2_luac::compile(
             &format!(
                 r#"
@@ -1069,6 +1164,7 @@ end
 function SaveSingleton()
   return {{ bUnlocked = true }}
 end
+{briefing}
 "#
             ),
             "wifpmcinterior",
@@ -1135,6 +1231,7 @@ end
             wearers: wearers.iter().map(|w| w.to_string()).collect(),
             levels: None,
             chatter: None,
+            briefing_safe: true,
         }
     }
 
@@ -1529,6 +1626,48 @@ MrxMultiPageMenu = {
         let t = tails(&generate("vz", &r, &[o]).unwrap(), &r, None).unwrap().unwrap();
         let lua = run(&[(spliced(&wardrobe(), &t.wardrobe, "wifpmcinterior"), "wifpmcinterior")]);
         assert_eq!(eval::<String>(&lua, "return _tOutfits.mattias[4].PlayerVisibleName"), HOSTILE);
+    }
+
+    /// A briefing on the host: a hero in a `bNoBriefing` row is put in its own model, and the briefing
+    /// starts once that model is ready; when it ends the row is put back on, and a co-op partner is told
+    /// both times. A briefing-safe row starts the briefing at once. A level whose wardrobe defines
+    /// `IsCostumeBriefingSafe` (dlc01) gets no guard.
+    #[test]
+    fn an_unsafe_outfit_is_swapped_out_for_a_briefing_and_back_after() {
+        let mut set = the_set();
+        set[0].briefing_safe = false;
+        let w = wardrobe();
+        let r = RetailLevel::read(&w, &player(MAP)).unwrap();
+        let t = tails(&generate("vz", &r, &set).unwrap(), &r, Some(&sets())).unwrap().unwrap();
+        let guard = t.briefing.as_ref().expect("vz's briefing has no guard of its own");
+        assert_eq!(guard.wraps.iter().map(|(f, _)| f.as_str()).collect::<Vec<_>>(), ["Start", "_EndBegin"]);
+        assert!(t.wardrobe.source.contains("bNoBriefing = true"));
+        let briefing = mercs2_luac::compile("function Start() tStarted = true end\nfunction _EndBegin() tEnded = true end\n", "mrxbriefing").unwrap();
+        let lua = run(&[
+            (spliced(&w, &t.wardrobe, "wifpmcinterior"), "wifpmcinterior"),
+            (spliced(&briefing, guard, "mrxbriefing"), "mrxbriefing"),
+        ]);
+        eval::<()>(&lua, "WifPmcInterior = _G Event = { ObjectIsReady = 1, Create = function(k, a, f) fReady = f end }");
+        eval::<()>(&lua, "nCostume = 3 tCalls = {} Start()");
+        assert_eq!(calls(&lua), ["SetOutfit 101 m0"]);
+        assert!(eval::<bool>(&lua, "return tStarted == nil and nCostume == 0"), "the briefing waits for the hero's own model");
+        eval::<()>(&lua, "fReady()");
+        assert!(eval::<bool>(&lua, "return tStarted == true"));
+        eval::<()>(&lua, "tCalls = {} _EndBegin()");
+        assert_eq!(calls(&lua), ["SetOutfit 101 pmc_hum_obama"]);
+        assert!(eval::<bool>(&lua, "return tEnded == true and nCostume == 3"));
+        eval::<()>(&lua, "tCalls = {} tStarted = nil nCostume = 1 Start()");
+        assert!(eval::<bool>(&lua, "return tStarted == true"), "a briefing-safe row starts at once");
+        assert!(calls(&lua).is_empty(), "{:?}", calls(&lua));
+        eval::<()>(&lua, "Net.IsServer = function() return true end tCalls = {} nCostume = 3 Start() fReady() _EndBegin()");
+        let sent: Vec<String> = calls(&lua).into_iter().filter(|c| c.starts_with("SendCustomEvent")).collect();
+        assert_eq!(sent.len(), 2, "the partner is told of the swap and of the restore: {sent:?}");
+        assert!(sent.iter().all(|c| c.starts_with("SendCustomEvent WifPmcInterior 2 ")), "{sent:?}");
+
+        assert!(!r.honors_no_briefing);
+        let dlc = RetailLevel::read(&wardrobe_of(true), &player(MAP)).unwrap();
+        assert!(dlc.honors_no_briefing, "the dlc-style wardrobe defines IsCostumeBriefingSafe");
+        assert!(tails(&generate("vz", &dlc, &set).unwrap(), &dlc, Some(&sets())).unwrap().unwrap().briefing.is_none());
     }
 
     #[test]
