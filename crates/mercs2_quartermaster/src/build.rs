@@ -170,6 +170,63 @@ pub fn script_patch_blocks(
     Ok(out)
 }
 
+/// The `level: vz` rows whose block `vz.wad` already has ([`crate::level::joins_link`]): they cannot ship
+/// in a block of their own, so each is added to the deploy link's copy of that block, one of `loaded`
+/// ([`link::SCRIPT_BLOCKS`]), and those blocks' indices come back. Each such asset has one rung and is
+/// new to the game (a `level: vz` row only adds). Its ASET row has the shape of the block's own rows for
+/// an asset of its type, copied from one of them with the asset's hash: the base WAD's rows are the only
+/// truth for a type's row, and a block with no asset of the type is refused rather than given a guess.
+fn join_vz_rows(
+    shipments: &[&LoadedShipment],
+    loaded: &mut [LoadedScriptBlock],
+    game: &GameStack,
+    log: &mut Vec<String>,
+) -> Result<std::collections::BTreeSet<usize>, BuildError> {
+    let fail = |message: String| BuildError::Lower { index: 0, kind: "link", message };
+    let mut touched = std::collections::BTreeSet::new();
+    for s in shipments {
+        for a in crate::level::assets_of(&s.manifest, crate::level::VZ) {
+            let Some(path) = crate::level::joins_link(&a, game) else { continue };
+            let who = format!("{} level: vz {} ({})", s.manifest.shipment.name, a.name, a.asset_type);
+            let [rung] = a.rungs else {
+                return Err(fail(format!("{who}: its block {path} is vz.wad's, which the link re-emits whole, and it has {} rungs, not 1", a.rungs.len())));
+            };
+            let bi = loaded.iter().position(|lb| lb.path.eq_ignore_ascii_case(&path)).ok_or_else(|| {
+                fail(format!(
+                    "{who}: vz.wad has its block {path}, and the link re-emits only {:?}, so it has no copy of that block to join",
+                    loaded.iter().map(|lb| lb.path.as_str()).collect::<Vec<_>>()
+                ))
+            })?;
+            let (type_hash, _) = mercs2_formats::types::type_by_name(a.asset_type).ok_or_else(|| fail(format!("{who}: no asset type is named {:?}", a.asset_type)))?;
+            let name = crate::manifest::asset_hash(a.name);
+            let lb = &mut loaded[bi];
+            if lb.block.entries.iter().any(|e| e.name_hash == name && e.type_hash == type_hash) {
+                return Err(fail(format!("{who}: {path} already holds it, and a level: vz row only adds")));
+            }
+            // A single-block sibling: `_P001`..`_P003` all sentinel (`AsetEntry::is_single_block`), as a
+            // one-rung asset's row must be.
+            let single = |&(packed, secondary, _): &(u32, u32, u32)| packed & 0xFFFF == 0xFFFF && secondary == 0xFFFF_FFFF;
+            let sibling = lb
+                .block
+                .entries
+                .iter()
+                .filter(|e| e.type_hash == type_hash)
+                .find_map(|e| lb.rows.get(&e.name_hash).filter(|r| single(r)).map(|r| (e.field_c, *r)))
+                .ok_or_else(|| fail(format!("{who}: {path} holds no single-block asset of its type with a row to copy the row's shape from")))?;
+            if lb.rows.contains_key(&name) {
+                return Err(fail(format!("{who}: {path} already has a row for its hash 0x{name:08X}")));
+            }
+            let file = s.root.join(&rung.file);
+            let bytes = std::fs::read(&file).map_err(|e| fail(format!("{who}: {}: {e}", file.display())))?;
+            log.push(format!("{who}: joined to the link's {path}, {} B", bytes.len()));
+            lb.block.entries.push(mercs2_formats::scripts_block::Entry { name_hash: name, type_hash, field_c: sibling.0, bytes });
+            lb.rows.insert(name, sibling.1);
+            touched.insert(bi);
+        }
+    }
+    Ok(touched)
+}
+
 /// Whether a Shipment set has front-end work for qm's front-end link: a sound bank or an `add_script`
 /// library that loads in the front end.
 fn has_front_end(sound_regs: &[link::SoundBankRegistration], additions: &[link::ScriptAddition]) -> bool {
@@ -390,9 +447,10 @@ fn lower_fx(
     Ok((effects_block, rewritten.then_some(resident)))
 }
 
-/// The loader self-check ([`crate::sound::check_loader_banks`]): every bank the gameplay loader
-/// loads has its wavebank in `overlay`, and every bank the front-end loader loads has its wavebank
-/// in `shell`.
+/// The loader self-check ([`crate::sound::check_loader_banks`]): every bank qm ships that the gameplay
+/// loader loads has its wavebank in `overlay`, and every one the front-end loader loads has its
+/// wavebank in `shell`. A `load_sound` bank or stream is not qm's: `lint::game_checks` (M0223) checks it
+/// against the game and the Shipment's own rows.
 fn check_sound_loaders(
     sound_regs: &[link::SoundBankRegistration],
     overlay: &[&PatchBlock],
@@ -401,7 +459,11 @@ fn check_sound_loaders(
 ) -> Result<(), BuildError> {
     use crate::manifest::LoadSession;
     for (session, blocks) in [(LoadSession::Gameplay, overlay), (LoadSession::FrontEnd, shell)] {
-        let banks: Vec<&str> = sound_regs.iter().filter(|r| r.sessions.contains(&session)).map(|r| r.bank.as_str()).collect();
+        let banks: Vec<&str> = sound_regs
+            .iter()
+            .filter(|r| r.sessions.contains(&session) && matches!(r.load, link::SoundLoad::Shipped { .. }))
+            .map(|r| r.bank.as_str())
+            .collect();
         crate::sound::check_loader_banks(link::Level::of(session), &banks, blocks)
             .map_err(|message| BuildError::Lower { index: 0, kind, message })?;
     }
@@ -1299,7 +1361,7 @@ pub fn added_outfits(manifest: &crate::manifest::Manifest) -> Vec<crate::outfits
         .contributions
         .iter()
         .filter_map(|c| match c {
-            Contribution::AddOutfit { name, slug, display, wearer, chatter, levels, .. } => {
+            Contribution::AddOutfit { name, slug, display, wearer, chatter, levels, briefing_safe, .. } => {
                 Some(crate::outfits::AddedOutfit {
                     shipment: manifest.shipment.name.clone(),
                     slug: slug.clone(),
@@ -1308,6 +1370,7 @@ pub fn added_outfits(manifest: &crate::manifest::Manifest) -> Vec<crate::outfits
                     wearers: wearer.heroes().into_iter().map(str::to_string).collect(),
                     levels: levels.clone(),
                     chatter: chatter.clone(),
+                    briefing_safe: *briefing_safe,
                 })
             }
             _ => None,
@@ -3346,6 +3409,8 @@ fn lower(
         // (`sound::lower_shipment_sound`): the block ships to each `load_in` session's WAD, and that
         // session's loader loads it.
         Contribution::AddSound { .. } => Ok(Lowering::Nothing),
+        // Ships nothing: its registrations (`sound::sound_registrations`) are loaded by qm's loader.
+        Contribution::LoadSound { .. } => Ok(Lowering::Nothing),
         // Lowered together, per bank, after every contribution (`sound::lower_overrides`): several
         // overrides of one bank share one forked soundbank and one override wavebank; a replaced line
         // is an override of every bank whose groups play it.
@@ -4883,7 +4948,11 @@ pub fn build(
         let Some(g) = game.as_deref() else {
             return Err(BuildError::GameRequired { index, kind: "level_asset" });
         };
-        let mut vz_blocks = crate::level::compile_vz(&shipment.root, &vz_assets, g).map_err(fail)?;
+        let opened = crate::sound::opened_streams(manifest);
+        let (mut vz_blocks, joined) = crate::level::compile_vz(&shipment.root, &vz_assets, g, &opened).map_err(fail)?;
+        for j in &joined {
+            log.push(format!("level: vz: {j} is vz.wad's block, so it ships only through `qm link`, in the link's copy of it"));
+        }
         mercs2_formats::patch_wad::rebase_after(&mut vz_blocks, &blocks).map_err(fail)?;
         log.push(format!(
             "level: vz: {} asset(s) in {} block(s), after the overlay's {} other block(s)",
@@ -6168,6 +6237,7 @@ pub fn link_installed(
             effects_block = effects;
             touched.extend(resident);
         }
+        touched.extend(join_vz_rows(&shipments, &mut loaded, game, &mut log)?);
         patches.extend(script_patch_blocks(&loaded, &touched, "link")?);
     }
     // The plan promised the effects block exactly when a Shipment has an fx kind.
@@ -6623,6 +6693,7 @@ contributions:
                 wearers: vec!["chris".into()],
                 levels: None,
                 chatter: None,
+                briefing_safe: true,
             }]
         );
     }
