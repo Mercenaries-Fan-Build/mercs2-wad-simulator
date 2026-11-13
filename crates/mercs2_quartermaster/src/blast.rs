@@ -423,6 +423,13 @@ pub fn claims(manifest: &Manifest) -> Vec<ClaimRecord> {
                     push(Access::Write, bare(script), Intent::Additive);
                 }
             }
+            // Loads sound something else ships, so it claims only the scripts of its sessions' loaders.
+            Contribution::LoadSound { sessions, .. } => {
+                let sessions: std::collections::BTreeSet<_> = sessions.iter().copied().collect();
+                for script in loader_scripts(&sessions) {
+                    push(Access::Write, bare(script), Intent::Additive);
+                }
+            }
             // The bank's entry (`<bank>` or `<bank>.<language>`) and every cue the replacement
             // declares: each has one winner in the table the game loads. The override wavebank of a
             // bank retail Lua loads loads in each session retail loads the bank in; the engine loads
@@ -741,8 +748,18 @@ pub fn claims(manifest: &Manifest) -> Vec<ClaimRecord> {
             // Of the main campaign: an asset added to the overlay, or each template appended to the
             // worldentity, by name (its key is in the container, which a hermetic lint does not read;
             // the merge refuses a key taken twice).
-            Contribution::LevelAsset { level, name, templates, .. } if level == crate::level::VZ => {
-                if templates.is_empty() {
+            Contribution::LevelAsset { level, asset_type, name, templates, .. } if level == crate::level::VZ => {
+                // A bank's tables share its name hash (a soundbank and its sounddb, retail's shape,
+                // `docs/type_hash_registry.md`): one bank, so the first of its tables claims it. The same
+                // table twice is still two claims of one asset.
+                let bank_table = |t: &str| matches!(t, "soundbank" | "sounddb" | "wavebank");
+                let claimed_before = bank_table(asset_type)
+                    && manifest.contributions[..index].iter().any(|p| {
+                        matches!(p, Contribution::LevelAsset { level: l, asset_type: t, name: n, templates: ts, .. }
+                            if l == level && ts.is_empty() && bank_table(t) && t != asset_type
+                                && crate::manifest::asset_hash(n) == crate::manifest::asset_hash(name))
+                    });
+                if templates.is_empty() && !claimed_before {
                     push(Access::Write, Claim::asset(name), Intent::Additive);
                 }
                 for t in templates {
