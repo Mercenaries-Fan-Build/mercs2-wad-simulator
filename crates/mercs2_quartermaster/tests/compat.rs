@@ -730,6 +730,33 @@ fn an_outfit_in_a_level_another_shipment_adds_passes() {
 }
 
 // ---------------------------------------------------------------------------
+// M0264 — the chatter binding
+// ---------------------------------------------------------------------------
+
+fn chatter_outfit(dir: &Path) -> LoadedShipment {
+    shipment_at(
+        dir,
+        "shipment: { name: skins, version: 1.0.0, target: retail }\ncontributions:\n  - kind: add_outfit\n    \
+         name: pmc_hum_obama\n    slug: Obama\n    display: Obama\n    wearer: mattias\n    chatter: Obama_Obama01\n",
+    )
+}
+
+/// The game does not register `Human.SetChatterSet`, so a chatter outfit needs a Shipment that adds it.
+#[test]
+fn a_chatter_outfit_with_no_shipment_adding_the_binding_is_m0264() {
+    let d = scratch("chatter-binding");
+    let p = plan_of(&[&chatter_outfit(&d.join("s"))], None);
+    assert_eq!(codes(&p), vec!["M0264"]);
+    assert!(p.findings[0].message.contains("Human.SetChatterSet"), "{}", p.findings[0].message);
+    let binding = shipment_at(
+        &d.join("b"),
+        "shipment: { name: binding, version: 1.0.0, target: retail }\ncontributions:\n  - kind: native_hook\n    \
+         target: retail\n    symbol: chatter\n    touches: [\"Human.SetChatterSet\"]\n",
+    );
+    assert!(!codes(&plan_of(&[&binding, &chatter_outfit(&d.join("s2"))], None)).contains(&"M0264"));
+}
+
+// ---------------------------------------------------------------------------
 // Plugins — M0162, M0178
 // ---------------------------------------------------------------------------
 
