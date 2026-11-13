@@ -697,6 +697,7 @@ do
         if Net.IsServer() then
           Net.SendCustomEvent("WifPmcInterior", WifPmcInterior.NETEVENT_NOTIFYOUTFITCHANGE, {1, 1})
         end
+        print("[qm] outfit briefing: costume " .. nCostume .. " is not briefing-safe, the hero's own model until it ends")
         uSwap = uChar
       end
     end)
@@ -724,6 +725,7 @@ do
       local uChar, tRows = WornRow()
       Player.SetProfileCostume(nOld)
       Player.SetOutfit(uChar, tRows[nOld + 1].Model)
+      print("[qm] outfit briefing: costume " .. nOld .. " back on")
       if Net.IsServer() then
         Net.SendCustomEvent("WifPmcInterior", WifPmcInterior.NETEVENT_NOTIFYOUTFITCHANGE, {1, nOld + 1})
       end
@@ -826,6 +828,7 @@ const WARDROBE_CHATTER: &str = r#"local function ChatterBefore(uGuid)
     end
     QM.outfit_chatter[uGuid] = nil
     Human.SetChatterSet(uGuid, sSet)
+    print("[qm] outfit chatter: " .. tostring(uGuid) .. " back to " .. sSet)
   end
 end
 local function ChatterAfter(uGuid, iRow)
@@ -837,6 +840,7 @@ local function ChatterAfter(uGuid, iRow)
   if tRow ~= nil and tRow.sQmChatter ~= nil then
     Human.SetChatterSet(uGuid, tRow.sQmChatter)
     QM.outfit_chatter[uGuid] = true
+    print("[qm] outfit chatter: " .. tostring(uGuid) .. " " .. tRow.sQmChatter)
   end
 end
 do
@@ -902,6 +906,7 @@ const WARDROBE_SAVE: &str = r#"do
       local tRow = tRows[(Player.GetProfileCostume() or 0) + 1]
       if tRow ~= nil then
         tSave.tQmOutfit = { sHero = sHero, sShipment = tRow.sQmShipment, sName = tRow.Name }
+        print("[qm] outfit save: " .. sHero .. " " .. tostring(tRow.sQmShipment) .. "/" .. tRow.Name)
       end
     end)
     return unpack(r, 1, n)
@@ -1069,8 +1074,10 @@ pub fn tails(
         ));
     }
     p.push_str(&format!(
-        "}}\nif SetCharacterMap(tMap) ~= true then\n  QM.fail(\"Quartermaster\", \"outfits\", {} .. \".SetCharacterMap refused the generated map\")\n  return\nend\n",
-        s(PLAYER_SCRIPT)
+        "}}\nif SetCharacterMap(tMap) ~= true then\n  QM.fail(\"Quartermaster\", \"outfits\", {} .. \".SetCharacterMap refused the generated map\")\n  return\nend\n\
+         print(\"[qm] outfit map: {} installed, \" .. #tMap[1].models .. \"/\" .. #tMap[2].models .. \"/\" .. #tMap[3].models .. \" models\")\n",
+        s(PLAYER_SCRIPT),
+        lists.level
     ));
     let mut player_wraps = vec!["SetCharacterMap"];
     if hero_sets.is_some() {
